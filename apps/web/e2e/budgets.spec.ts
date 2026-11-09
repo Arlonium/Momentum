@@ -5,17 +5,20 @@
 //
 // Ce qui est mesuré : l'application est déjà chargée, sur une autre page, dans un onglet
 // neuf ; le chronomètre part au clic sur la page dans l'arbre (navigation interne) et
-// s'arrête à la première image où le premier bloc de la page est affiché dans l'éditeur,
-// synchronisé avec le serveur (`provider.synced`) et modifiable. Chaque ouverture vise une
-// page que l'onglet n'a jamais ouverte, et que le serveur n'a plus en mémoire : il la relit
-// dans SQLite, comme une page que personne n'a ouverte depuis un moment.
+// s'arrête quand la première image où le premier bloc de la page est dans l'éditeur,
+// synchronisé avec le serveur (`provider.synced`) et modifiable, a fini son rendu (styles,
+// mise en page et peinture compris). Chaque ouverture vise une page que l'onglet n'a
+// jamais ouverte, et que le serveur n'a plus en mémoire : il la relit dans SQLite, comme
+// une page que personne n'a ouverte depuis un moment.
 import { expect, test, type APIRequestContext, type Browser } from "@playwright/test";
 import { closeContexts, createPage, newUser, percentile, putMmd, unique, waitSynced } from "./helpers";
 
 /**
  * L'acteur d'une page s'arrête après 30 s sans connexion ni demande (`idle_close` de
- * `SyncConfig`, crate `mementum-sync`) : après ce délai, le serveur relit la page dans
- * SQLite à la prochaine ouverture.
+ * `SyncConfig`, crate `mementum-sync`, que `mementum serve` prend par défaut) : après ce
+ * délai, le serveur relit la page dans SQLite à la prochaine ouverture. Le test Rust
+ * `e2e_wait_follows_idle_close` (`crates/mementum-sync/tests/budgets.rs`) lit cette
+ * constante et échoue si elle ne vaut plus `idle_close`.
  */
 const SERVER_IDLE_CLOSE_MS = 30_000;
 
@@ -61,9 +64,15 @@ async function bigPage(request: APIRequestContext, blocks: number): Promise<Targ
 }
 
 type Opening = {
-  /** Du clic dans l'arbre à la première image où la page est ouverte (ms). */
+  /**
+   * Du clic dans l'arbre à la fin du rendu de la première image où la page est ouverte
+   * (ms).
+   */
   total: number;
-  /** Plus long intervalle entre deux images pendant l'ouverture (ms). */
+  /**
+   * Plus long intervalle pendant l'ouverture entre deux images, ou entre la dernière et la
+   * fin de son rendu (ms) : combien de temps l'onglet reste figé.
+   */
   longestFrame: number;
 };
 
@@ -98,13 +107,25 @@ async function openFromTree(browser: Browser, target: Target): Promise<Opening> 
         };
         let last = 0;
         let longestFrame = 0;
-        // Vérifié à chaque image : l'arrêt du chronomètre est la première image où la
-        // page est affichée, après la mise à jour du DOM.
-        const frame = () => {
-          const now = performance.now();
+        const gap = (now: number) => {
           longestFrame = Math.max(longestFrame, now - last);
           last = now;
-          if (opened()) resolve({ total: now - t0, longestFrame });
+        };
+        // Vérifié au début de chaque image. Les rappels `requestAnimationFrame` passent
+        // avant le calcul des styles, la mise en page et la peinture de l'image : le
+        // chronomètre s'arrête donc dans une tâche postée depuis ce rappel, qui ne s'exécute
+        // qu'une fois l'image rendue (mise en page comprise).
+        const rendered = new MessageChannel();
+        rendered.port1.onmessage = () => {
+          const end = performance.now();
+          gap(end);
+          rendered.port1.close();
+          resolve({ total: end - t0, longestFrame });
+        };
+        const frame = () => {
+          const now = performance.now();
+          gap(now);
+          if (opened()) rendered.port2.postMessage(null);
           else if (now - t0 > timeout) reject(new Error(`page ${id} pas ouverte après ${timeout} ms`));
           else requestAnimationFrame(frame);
         };

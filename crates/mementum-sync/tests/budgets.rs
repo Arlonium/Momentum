@@ -5,10 +5,15 @@
 //!
 //! Ignoré par défaut, car la mesure n'a de sens qu'en `--release` :
 //! `cargo test --release -p mementum-sync -- --ignored` (job `budgets` de la
-//! CI). C'est le seul test ignoré de la crate.
+//! CI).
+//!
+//! S'y ajoute un garde-fou, lancé avec les autres tests : l'attente de l'e2e
+//! `budgets.spec.ts`, qui laisse le serveur fermer l'acteur des pages avant
+//! de les ouvrir, suit `idle_close`.
 
 mod common;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -34,6 +39,12 @@ fn percentile(values: &[Duration], q: f64) -> Duration {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 async fn load_10000_block_page_from_store_under_300ms() {
+    // Un `assert!` sur `cfg!` est refusé par clippy (`assertions_on_constants`).
+    if cfg!(debug_assertions) {
+        panic!(
+            "mesure sans valeur en debug : lancer `cargo test --release -p mementum-sync -- --ignored`"
+        );
+    }
     let cfg = SyncConfig::default();
     let f = Fixture::new(cfg).await;
     let mmd = (1..=BLOCKS)
@@ -93,5 +104,34 @@ async fn load_10000_block_page_from_store_under_300ms() {
     assert!(
         p95 < BUDGET,
         "chargement de la page de {BLOCKS} blocs : p95 {p95:?} (budget {BUDGET:?}), mesures {times:?}"
+    );
+}
+
+/// L'e2e `apps/web/e2e/budgets.spec.ts` attend `SERVER_IDLE_CLOSE_MS` (plus une
+/// marge) pour que le serveur ferme l'acteur des pages qu'il vient d'écrire, et
+/// les relise dans SQLite à leur ouverture. `mementum serve` prend
+/// `SyncConfig::default()` : si `idle_close` change, ce test échoue, au lieu que
+/// l'e2e mesure sans bruit des pages encore en mémoire.
+#[test]
+fn e2e_wait_follows_idle_close() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/web/e2e/budgets.spec.ts");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} illisible : {e}", path.display()));
+    let value = source
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("const SERVER_IDLE_CLOSE_MS = ")?
+                .strip_suffix(';')
+        })
+        .expect("constante `SERVER_IDLE_CLOSE_MS` absente de budgets.spec.ts");
+    let wait: u128 = value
+        .replace('_', "")
+        .parse()
+        .expect("`SERVER_IDLE_CLOSE_MS` n'est pas un entier");
+    assert_eq!(
+        wait,
+        SyncConfig::default().idle_close.as_millis(),
+        "`SERVER_IDLE_CLOSE_MS` (budgets.spec.ts) doit valoir `idle_close` de `SyncConfig`"
     );
 }
