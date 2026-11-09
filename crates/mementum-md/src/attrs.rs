@@ -111,19 +111,30 @@ pub(crate) fn typed(key: &str, raw: Raw, ty: Option<PropType>) -> Result<PropVal
     match (raw, ty) {
         (Raw::Str(s), None | Some(PropType::String)) => Ok(PropValue::Str(s)),
         (Raw::Bool(b), None | Some(PropType::Bool)) => Ok(PropValue::Bool(b)),
-        (Raw::Number(n), Some(PropType::Float)) => n
-            .parse()
-            .map(PropValue::Float)
-            .map_err(|_| format!("« {key} » attend un nombre")),
-        (Raw::Number(n), None) if n.contains('.') => n
-            .parse()
-            .map(PropValue::Float)
-            .map_err(|_| format!("« {key} » : nombre illisible")),
+        (Raw::Number(n), Some(PropType::Float)) => {
+            float(key, &n, || format!("« {key} » attend un nombre"))
+        }
+        (Raw::Number(n), None) if n.contains('.') => {
+            float(key, &n, || format!("« {key} » : nombre illisible"))
+        }
         (Raw::Number(n), None | Some(PropType::Int)) => n
             .parse()
             .map(PropValue::Int)
             .map_err(|_| format!("« {key} » attend un entier")),
         (_, Some(ty)) => Err(format!("« {key} » attend {}", expected(ty))),
+    }
+}
+
+/// Lit un flottant fini. Un nombre de plusieurs centaines de chiffres se lit
+/// infini, et l'infini n'a pas de forme MMD : le dire ici, plutôt que de
+/// laisser la vérification de forme canonique proposer d'écrire `inf`.
+fn float(key: &str, n: &str, unreadable: impl Fn() -> String) -> Result<PropValue, String> {
+    match n.parse::<f64>() {
+        Ok(f) if f.is_finite() => Ok(PropValue::Float(f)),
+        Ok(_) => Err(format!(
+            "« {key} » : nombre trop grand pour un flottant (au plus 1.8e308 environ)"
+        )),
+        Err(_) => Err(unreadable()),
     }
 }
 

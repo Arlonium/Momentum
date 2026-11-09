@@ -197,3 +197,21 @@ fn table_merges_form_a_bounded_grid() {
         assert!(parse(ok).is_ok(), "{ok:?} refusé : {:?}", parse(ok));
     }
 }
+
+#[test]
+fn a_number_too_large_for_a_float_says_so() {
+    // Un nombre de plusieurs centaines de chiffres se lit `inf`, qui n'a pas
+    // de forme MMD : le message parle du nombre, pas de forme non canonique.
+    let huge = "9".repeat(400);
+    // Prop inconnue écrite en flottant, puis prop flottante du registre.
+    rejected(
+        &format!("Texte {{foo={huge}.5}}\n"),
+        1,
+        "« foo » : nombre trop grand",
+    );
+    rejected(
+        &format!("![Logo](https://ex.com/i.png) {{width={huge}}}\n"),
+        1,
+        "« width » : nombre trop grand",
+    );
+}
