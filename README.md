@@ -77,6 +77,33 @@ spike/                      phase 0 : prototype JETABLE
 
 La structure cible du vrai projet (crates `mementum-*`, `apps/web`, etc.) est décrite dans la conception, §8.
 
+## Lancer Mementum
+
+Prérequis : Rust 1.96+, Node 24+ et pnpm 11+ (`corepack pnpm` si pnpm n'est pas dans le PATH).
+
+```bash
+corepack pnpm install                     # une fois, à la racine
+cargo run -p mementum-cli -- serve        # serveur sur 127.0.0.1:8080, données dans ./data
+corepack pnpm -C apps/web dev             # dans un autre terminal : Vite sur le port 5173
+```
+
+Puis ouvrir `http://localhost:5173`. Vite relaie `/api` et `/sync` (WebSocket comprise) vers le serveur. Le lot 1 n'a pas de comptes : chaque navigateur écrit sous un nom d'invité (« Invité » et 4 chiffres).
+
+Autres ports : `MEMENTUM_E2E_WEB_PORT` (Vite) et `MEMENTUM_E2E_API_PORT` (le serveur que vise le mandataire), à donner aussi à `serve --bind 127.0.0.1:<port>`.
+
+Tests :
+
+```bash
+cargo test --workspace                                  # Rust
+corepack pnpm -C apps/web test                          # Vitest (schéma BlockNote ⇄ registre)
+corepack pnpm -C apps/web typecheck                     # TypeScript
+node tools/check-npm-licenses.mjs                       # licences npm de production
+corepack pnpm -C apps/web exec playwright install chromium
+corepack pnpm e2e                                       # Playwright : lance le serveur et Vite
+```
+
+Les tests e2e ne réutilisent jamais un serveur déjà lancé : si le port 5173 ou 8080 est pris, ils s'arrêtent en le nommant. Choisir alors d'autres ports, par exemple `MEMENTUM_E2E_WEB_PORT=5174 corepack pnpm e2e`.
+
 ## Lancer le prototype de la phase 0
 
 Prérequis : Rust 1.96+, Node 24+, pnpm 11+.

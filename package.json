@@ -1,0 +1,16 @@
+{
+  "name": "mementum",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "corepack pnpm -C apps/web dev",
+    "test": "corepack pnpm -C apps/web test",
+    "e2e": "corepack pnpm -C apps/web e2e",
+    "licenses": "node tools/check-npm-licenses.mjs"
+  }
+}

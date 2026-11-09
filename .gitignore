@@ -2,3 +2,10 @@
 /target/
 # Données de `mementum serve` lancé à la racine (dossier par défaut : ./data).
 /data/
+# Dépendances et sorties JavaScript (workspace pnpm).
+node_modules/
+/apps/web/dist/
+/apps/web/test-results/
+/apps/web/playwright-report/
+/apps/web/blob-report/
+/apps/web/playwright/.cache/

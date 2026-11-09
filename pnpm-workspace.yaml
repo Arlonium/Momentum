@@ -1,0 +1,5 @@
+# Paquets JavaScript du dépôt. Le prototype `spike/web` a son propre lockfile
+# et reste hors du workspace.
+packages:
+  - apps/*
+  - packages/*

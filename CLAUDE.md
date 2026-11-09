@@ -38,14 +38,32 @@ Tu reprends **Mementum**, un espace de travail open source façon Notion, auto-h
 - **sqlx 0.9** : le SQL construit dynamiquement doit être marqué `sqlx::AssertSqlSafe(...)`. Valide les noms de colonnes et lie toujours les valeurs en paramètres.
 - **SQLite + JSON** : une requête doit reprendre **l'expression exacte** de l'index d'expression (un `CAST` le rend inutilisable : 13 ms → 707 ms). Rollups et formules toujours matérialisés.
 - **Révision pour les agents** : hash de l'instantané Yjs (vecteur d'état **et** suppressions), pas du seul vecteur d'état.
+- **Lecture seule côté client** : `editable = false` ne suffit pas. y-prosemirror supprime un nœud inconnu dès l'affichage, même sans frappe, et la suppression part au serveur. Un onglet d'un autre schéma lie donc son éditeur à une copie locale du document, qui reçoit tout et ne renvoie rien (`apps/web/src/editor/collab.ts`, e2e `stale_schema_is_read_only`).
+- **`@blocknote/code-block`** : ses `codeBlockOptions` mettent `javascript` en langue par défaut ; le registre (et BlockNote) disent `text`. `schema.tsx` la remet à `text`, et `registry_matches_blocknote` le vérifie.
 - **Shell (Git Bash sous Windows)** : pas de backticks dans un heredoc non protégé (`<<EOF`), ils sont exécutés. Utilise `<<'EOF'`, ou écris les fichiers avec l'outil d'écriture.
 - **Fins de ligne** : `.gitattributes` impose LF. Les fixtures MMD sont comparées octet pour octet au rendu, et une extraction en CRLF (Git pour Windows règle `core.autocrlf=true` par défaut) fait échouer `fixture_is_canonical`.
 
 ## Tester
 
-Voir la section « Lancer le prototype de la phase 0 » du README. Les tests e2e Playwright démarrent eux-mêmes le serveur Rust (port 8080) et Vite (port 5173).
+Structure du dépôt (conception, §8) :
+- `crates/mementum-*` : le serveur Rust (workspace Cargo à la racine) ;
+- `apps/web` : le client React + Vite + BlockNote (`src/editor`, `src/sidebar`, `src/page`, tests e2e dans `e2e/`) ;
+- `packages/protocol` : types TypeScript générés depuis Rust (ts-rs), à ne pas modifier à la main ;
+- `spec/schema/blocks.json` (registre des blocs, généré) et `spec/mmd/fixtures/` ;
+- `tools/check-npm-licenses.mjs` : licences npm ;
+- `spike/` : prototype jetable de la phase 0, hors des deux workspaces.
 
-- **Ports** : Playwright réutilise tout serveur déjà présent sur 5173 ou 8080 (`reuseExistingServer`). Si un autre projet occupe 5173, les tests visent une autre application et échouent sur des délais dépassés : vérifie que les ports sont libres.
+Commandes (à la racine ; workspace pnpm `apps/*` et `packages/*`) :
+- Rust : `cargo test --workspace` ;
+- web : `corepack pnpm install`, puis `corepack pnpm -C apps/web test` (Vitest : `registry_matches_blocknote` compare le schéma BlockNote au registre), `corepack pnpm -C apps/web typecheck`, `node tools/check-npm-licenses.mjs` ;
+- e2e : `corepack pnpm -C apps/web exec playwright install chromium` une fois, puis `corepack pnpm e2e`. Playwright compile et lance `mementum serve` sur un dossier de données temporaire, puis Vite.
+
+- **Ports** : `MEMENTUM_E2E_WEB_PORT` (défaut 5173) et `MEMENTUM_E2E_API_PORT` (défaut 8080), lus par Vite et Playwright. Les e2e ne réutilisent jamais un serveur (`reuseExistingServer: false`) et s'arrêtent si un port est pris, en le nommant. Sur le poste de développement, un autre projet occupe souvent 5173 : `MEMENTUM_E2E_WEB_PORT=5174`. Ne jamais arrêter un processus qu'on n'a pas lancé.
+- **Mandataire Vite** : pas de `changeOrigin` vers le serveur, qui refuse un `Host` hors de la boucle locale (`421 bad_host`, R31).
+- **`window.__mementum`** (`editor`, `provider`, `doc`, `synced`, `readOnly`) n'existe qu'en développement : les e2e s'en servent.
+- **pnpm** absent du PATH : `corepack pnpm …` (les scripts de la racine passent déjà par corepack).
+
+Prototype de la phase 0 (`spike/`, voir le README) :
+- Playwright y réutilise tout serveur déjà présent sur 5173 ou 8080 (`reuseExistingServer`) : vérifie que les ports sont libres.
 - **`measure`** lance le binaire `spike-server` posé à côté de lui : `cargo build --release -p spike-server` d'abord. Il crée aussi la page `bench-10k` dont l'e2e `open_10k_block_page` a besoin (sinon le test est ignoré).
 - **Fixtures** : l'e2e `export_all_blocks_fixture` ne les régénère que sur demande (`EXPORT_FIXTURES=1`), car il réécrit des fichiers commités avec des ids neufs.
-- **pnpm** absent du PATH : `corepack pnpm …`.

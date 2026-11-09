@@ -28,6 +28,27 @@ jobs:
       # Les fichiers générés (types TypeScript, registre des blocs) sont commités à jour.
       - run: git diff --exit-code packages/protocol spec/schema
 
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    env:
+      # Corepack télécharge la version de pnpm de `packageManager` sans rien demander.
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Les tests e2e lancent le vrai serveur (`cargo run -p mementum-cli -- serve`).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm -C apps/web typecheck
+      - run: corepack pnpm -C apps/web test
+      - run: node tools/check-npm-licenses.mjs
+      - run: corepack pnpm -C apps/web exec playwright install --with-deps chromium
+      - run: corepack pnpm -C apps/web exec playwright test
+
   deny:
     name: deny
     runs-on: ubuntu-latest
