@@ -27,7 +27,7 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 
 Le lot 1 livre le vrai code (`crates/mementum-*`, `apps/web`, `packages/protocol`, `spec/`) : un arbre de pages, l'édition à plusieurs en direct dans BlockNote et le format MMD de la phase 1, sans comptes ni droits (lot 2). Il laisse trois limites connues, décrites dans la conception (§9) :
 - une édition faite sur un bloc pendant qu'un autre client le déplace est perdue (Ruling R39, à traiter au lot 3) ;
-- la réécriture complète d'une page de 10 000 blocs par `PUT /mmd` bloque cette page environ 2,5 s (Ruling R40, remède prévu au lot 5) ;
+- la réécriture complète d'une page de 10 000 blocs par `PUT /mmd` bloque cette page 2,5 à 4 s selon la machine et sa charge (Ruling R40, remède prévu au lot 5) ;
 - `PUT /mmd` refuse une prop hors du registre des blocs, parce qu'un navigateur l'effacerait ensuite sans bruit (Ruling R41).
 
 Le dossier `spike/` est le **prototype jetable** de la phase 0 : on en garde les leçons, les fixtures et les tests d'aller-retour, pas le code.
