@@ -1,2 +1,4 @@
 .superpowers/
 /target/
+# Données de `mementum serve` lancé à la racine (dossier par défaut : ./data).
+/data/

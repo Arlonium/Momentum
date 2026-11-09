@@ -25,6 +25,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Les fichiers générés (types TypeScript, registre des blocs) sont commités à jour.
+      - run: git diff --exit-code packages/protocol spec/schema
 
   deny:
     name: deny

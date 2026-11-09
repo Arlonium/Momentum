@@ -1,0 +1,28 @@
+[package]
+name = "mementum-cli"
+description = "Le binaire mementum : lance le serveur de Mementum"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "mementum"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+mementum-server.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+mementum-md.workspace = true
+# Client Yjs de test (Ruling R6) : `killed.rs` le connecte au binaire lancé en sous-processus.
+mementum-sync = { workspace = true, features = ["testkit"] }
+serde_json.workspace = true
+sysinfo.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "mementum-server"
+description = "Serveur HTTP de Mementum : API des pages, MMD et WebSocket de synchronisation"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["http1", "json", "query", "tokio", "ws"] }
+mementum-crdt.workspace = true
+mementum-md.workspace = true
+mementum-schema.workspace = true
+mementum-store.workspace = true
+# `ws::WsBytes` : la WebSocket d'axum vue comme le flux qu'attend `Hub::serve_connection`.
+mementum-sync = { workspace = true, features = ["axum"] }
+serde.workspace = true
+tokio = { workspace = true, features = ["net", "signal"] }
+tracing.workspace = true
+ts-rs.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+# Client Yjs de test (Ruling R6) pour la route `/sync/{id}`.
+mementum-sync = { workspace = true, features = ["testkit"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tower = { workspace = true, features = ["util"] }

@@ -1,0 +1,12 @@
+{
+  "name": "@mementum/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Types de l'API de Mementum, générés depuis Rust par ts-rs (src/generated/, ne pas modifier à la main)",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "types": "./src/generated/index.ts",
+  "exports": {
+    ".": "./src/generated/index.ts"
+  }
+}
