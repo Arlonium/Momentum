@@ -1,5 +1,6 @@
 // Arbre de pages et persistance, depuis l'interface.
 import { expect, test } from "@playwright/test";
+import type { ErrorBody } from "@mementum/protocol";
 import { createPage, getMmd, getTree, pageIdOf, putMmd, unique, waitSynced } from "./helpers";
 
 const UUID = /\/p\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -90,4 +91,40 @@ test("foreign_mmd_block_survives_browser", async ({ page, request }) => {
   await expect(page.locator(".bn-editor")).toContainText("Bloc non pris en charge (futureWidget)");
   await expect(page.locator(".bn-editor")).toContainText("Après");
   expect(await getMmd(request, id)).toBe(expected);
+});
+
+test("unregistered_mmd_prop_is_refused", async ({ page, request }) => {
+  // R41 : `PUT /mmd` refuse une prop hors registre, sur un bloc comme sur une cellule de
+  // tableau. Écrite, y-prosemirror la retirerait du document partagé dès qu'un navigateur
+  // modifie le bloc, sans bruit : le serveur répond 422 et la page ne change pas.
+  const { id } = await createPage(request, { title: `Prop inconnue ${unique()}` });
+  await putMmd(request, id, "Avant\n");
+  await page.goto(`/p/${id}`);
+  await waitSynced(page);
+  const editor = page.locator(".bn-editor");
+  await expect(editor).toContainText("Avant");
+
+  for (const [mmd, where] of [
+    ["Texte {foo=1}\n", "un bloc « paragraph »"],
+    ["| a | Texte {foo=1} |\n| --- | --- |\n", "une cellule d'un bloc « table »"],
+  ]) {
+    const res = await request.put(`/api/v1/pages/${id}/mmd`, {
+      data: mmd,
+      headers: { "content-type": "text/markdown" },
+    });
+    expect(res.status(), await res.text()).toBe(422);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error).toBe("invalid_blocks");
+    expect(body.message).toContain("« foo »");
+    expect(body.message).toContain(where);
+    expect(await getMmd(request, id)).toBe("Avant\n");
+  }
+
+  // La page ouverte n'a rien reçu, et elle s'édite toujours.
+  await page.locator('[data-content-type="paragraph"] .bn-inline-content').first().click();
+  await page.keyboard.press("End");
+  await page.keyboard.type("!");
+  await expect.poll(() => getMmd(request, id)).toBe("Avant!\n");
+  await expect(editor).toContainText("Avant!");
+  await expect(editor).not.toContainText("Texte");
 });

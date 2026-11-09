@@ -9,7 +9,7 @@
 //! | `POST /api/v1/pages` | `201`, [`PageNode`] : le nœud **et** son document |
 //! | `PATCH /api/v1/pages/{id}` | [`PageNode`] ; `409 cycle` ; `404` |
 //! | `GET /api/v1/pages/{id}/mmd` | `text/markdown; charset=utf-8` ; `404` sans rien créer |
-//! | `PUT /api/v1/pages/{id}/mmd` | `204` ; `422 invalid_mmd` (avec `line`), `422 invalid_blocks` |
+//! | `PUT /api/v1/pages/{id}/mmd` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait |
 //! | `GET /sync/{id}?schema=N` | WebSocket y-websocket ; `404` si la page n'existe pas |
 //!
 //! Toute erreur est en JSON : `{ "error": <code>, "message": <texte> }`

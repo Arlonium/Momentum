@@ -568,10 +568,12 @@ async fn foreign_mmd_block_is_written_as_unknown() {
 
 /// Avant R33, ce bloc étranger de 60 niveaux sous 78 blocs imbriqués dépassait
 /// `MAX_YJS_DEPTH` (`422 invalid_blocks`). Devenu un bloc `unknown`, son `data`
-/// reste opaque : il est écrit tel quel. `PUT /mmd` ne peut plus produire
-/// `invalid_blocks` (la lecture MMD borne l'imbrication et refuse les colonnes
-/// invalides) ; la traduction de `TooDeep` et de `Structure` en
-/// `invalid_blocks` reste testée dans `error.rs`.
+/// reste opaque : il est écrit tel quel. `PUT /mmd` ne produit plus
+/// `invalid_blocks` pour une structure que BlockNote refuserait (la lecture
+/// MMD borne l'imbrication et refuse les colonnes invalides) ; la traduction
+/// de `TooDeep` et de `Structure` en `invalid_blocks` reste testée dans
+/// `error.rs`. Ce code sert aussi au refus d'une prop hors registre (R41,
+/// `unregistered_prop_is_422`).
 #[tokio::test]
 async fn deep_foreign_mmd_block_stays_opaque() {
     use base64::Engine;
@@ -603,6 +605,162 @@ async fn deep_foreign_mmd_block_stays_opaque() {
         t.get_mmd(&page.id).await.text(),
         mmd.replace(" foreign=true", "")
     );
+}
+
+/// Ruling R41 : `PUT /mmd` refuse une prop hors registre, sur un bloc comme
+/// sur une cellule de tableau. Écrite en attribut Yjs, y-prosemirror la
+/// retirerait du document partagé dès qu'un navigateur modifie le bloc, sans
+/// bruit. Le message nomme la prop et le type du bloc.
+#[tokio::test]
+async fn unregistered_prop_is_422() {
+    let t = TestApp::new().await;
+    let page = t.create(json!({})).await;
+    assert_eq!(
+        t.put_mmd(&page.id, "Avant\n").await.status,
+        StatusCode::NO_CONTENT
+    );
+    let refused = async |mmd: &str, expected: &[&str]| {
+        assert!(mementum_md::parse(mmd).is_ok(), "MMD lisible : {mmd:?}");
+        let body = t
+            .put_mmd(&page.id, mmd.to_string())
+            .await
+            .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_blocks");
+        assert_french(&body, expected);
+        assert!(body.get("line").is_none(), "{body}");
+    };
+
+    // Sur un bloc, au premier niveau comme en enfant.
+    refused("Texte {foo=1}\n", &["« foo »", "« paragraph »", "registre"]).await;
+    refused(
+        "Parent\n  - Enfant {bar=\"x\"}\n",
+        &["« bar »", "« bulletListItem »"],
+    )
+    .await;
+    // Une prop du registre, mais d'un autre type de bloc.
+    refused("Texte {toggle=true}\n", &["« toggle »", "« paragraph »"]).await;
+    // Sur une balise et sur un bloc `unknown`.
+    refused("<toc foo=1/>\n", &["« foo »", "« toc »"]).await;
+    refused(
+        "<block type=\"futureWidget\" id=\"b1\" data=\"e30=\" foo=1/>\n",
+        &["« foo »", "« unknown »"],
+    )
+    .await;
+    // Sur une cellule de tableau, et dans la liste `{…}` du tableau.
+    refused(
+        "| a | B {foo=1} |\n| --- | --- |\n| c | d |\n",
+        &["« foo »", "cellule", "« table »"],
+    )
+    .await;
+    refused(
+        "| a | b |\n| --- | --- |\n| c | d |\n{foo=1}\n",
+        &["« foo »", "« table »"],
+    )
+    .await;
+    // Dans un tableau enfant d'un autre bloc.
+    refused(
+        "Parent\n  | a {bar=true} |\n  | --- |\n",
+        &["« bar »", "cellule"],
+    )
+    .await;
+
+    // Rien n'a été écrit.
+    assert_eq!(t.get_mmd(&page.id).await.text(), "Avant\n");
+
+    // Les props du registre passent toujours, bloc et cellule.
+    let valid = concat!(
+        "Texte {align=\"center\" bg=\"yellow\"}\n\n",
+        "## Titre {toggle=true}\n\n",
+        "| A {bg=\"yellow\" colspan=2} |\n| --- |\n| c {align=\"right\"} | d |\n",
+        "{color=\"blue\" header-rows=0 widths=\"120,\"}\n",
+    );
+    let put = t.put_mmd(&page.id, valid).await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.text());
+    assert_eq!(t.get_mmd(&page.id).await.text(), valid);
+}
+
+/// Ruling R41 : aucun MMD légitime n'est refusé. Toutes les fixtures passent,
+/// sauf `p1-edge-cases.mmd`, refusée pour sa seule ligne qui porte exprès
+/// deux props inconnues (le format MMD, lui, les lit et les rend toujours).
+#[tokio::test]
+async fn fixtures_pass_except_the_unregistered_prop_line() {
+    let t = TestApp::new().await;
+    let page = t.create(json!({})).await;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/mmd/fixtures");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".mmd"))
+        .collect();
+    names.sort();
+    assert!(names.len() >= 4, "fixtures MMD attendues : {names:?}");
+    let bag = "Texte {bar=\"x\" foo=1}\n\n";
+    for name in &names {
+        let mmd = fixture(name);
+        let put = t.put_mmd(&page.id, mmd.clone()).await;
+        if name != "p1-edge-cases.mmd" {
+            assert!(!mmd.contains(bag), "{name}");
+            assert_eq!(
+                put.status,
+                StatusCode::NO_CONTENT,
+                "{name} : {}",
+                put.text()
+            );
+            // Relue telle quelle, sauf `foreign` (R33).
+            assert_eq!(
+                t.get_mmd(&page.id).await.text(),
+                mmd.replace(" foreign=true/>", "/>"),
+                "{name}"
+            );
+            continue;
+        }
+        let body = put.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_blocks");
+        assert_french(&body, &["« bar »", "« paragraph »"]);
+        // Sans cette ligne, la fixture passe.
+        assert_eq!(mmd.matches(bag).count(), 1, "{name}");
+        let rest = mmd.replace(bag, "");
+        let put = t.put_mmd(&page.id, rest.clone()).await;
+        assert_eq!(
+            put.status,
+            StatusCode::NO_CONTENT,
+            "{name} : {}",
+            put.text()
+        );
+        assert_eq!(
+            t.get_mmd(&page.id).await.text(),
+            rest.replace(" foreign=true/>", "/>"),
+            "{name}"
+        );
+    }
+}
+
+/// Ruling R41 : le format MMD ne change pas. Une prop inconnue déjà présente
+/// dans Yjs (écrite par un client) est rendue telle quelle par `GET /mmd` ;
+/// seule l'écriture par `PUT /mmd` la refuse, même pour ce texte relu.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_prop_in_yjs_is_still_read() {
+    let t = TestApp::new().await;
+    let addr = t.listen().await;
+    let page = t.create(json!({})).await;
+    let url = format!("ws://{addr}/sync/{}?schema={SCHEMA_VERSION}", page.id);
+    let client = Client::connect_synced(&url).await;
+
+    let mmd = "Texte {bar=\"x\" foo=1}\n\n| a | B {baz=true} |\n| --- | --- |\n";
+    let blocks = mementum_md::parse(mmd).expect("MMD lisible");
+    let update = client
+        .page()
+        .expect("document local lisible")
+        .write_blocks(&blocks)
+        .expect("écriture locale");
+    let start = client.step2_count();
+    client.apply_local(&update);
+    client.resync();
+    assert!(client.wait_until(WAIT, |c| c.step2_count() > start).await);
+
+    assert_eq!(t.get_mmd(&page.id).await.text(), mmd);
+    t.put_mmd(&page.id, mmd)
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_blocks");
+    assert_eq!(t.get_mmd(&page.id).await.text(), mmd);
 }
 
 #[tokio::test]

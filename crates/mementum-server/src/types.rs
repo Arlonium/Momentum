@@ -99,7 +99,8 @@ pub enum ErrorCode {
     Cycle,
     /// MMD illisible (`line` donne la ligne).
     InvalidMmd,
-    /// Blocs que BlockNote refuse (structure, profondeur).
+    /// Blocs que le serveur n'écrit pas : structure ou profondeur que
+    /// BlockNote refuse, prop hors registre écrite par MMD (Ruling R41).
     InvalidBlocks,
     /// `afterId` ne désigne pas un frère à l'endroit visé.
     InvalidAfter,

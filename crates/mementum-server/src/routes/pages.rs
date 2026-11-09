@@ -16,7 +16,8 @@ use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use mementum_md::{Block, RenderOpts, parse, render};
+use mementum_md::{Block, Content, Props, RenderOpts, parse, render};
+use mementum_schema::PropSpec;
 use mementum_store::{NewNode, Node, NodeKind, StoreError};
 use uuid::Uuid;
 
@@ -132,7 +133,8 @@ pub(crate) async fn get_mmd(
 }
 
 /// `PUT /api/v1/pages/{id}/mmd` : remplace le contenu de la page. L'écriture
-/// est persistée, puis diffusée aux connexions ouvertes.
+/// est persistée, puis diffusée aux connexions ouvertes. Une prop hors
+/// registre est refusée (`422 invalid_blocks`, Ruling R41).
 pub(crate) async fn put_mmd(
     State(state): State<AppState>,
     path: Result<Path<String>, PathRejection>,
@@ -153,9 +155,86 @@ pub(crate) async fn put_mmd(
         })
     })?;
     let mut blocks = parse(text)?;
+    registered_props_only(&blocks)?;
     unknown_not_foreign(&mut blocks);
     state.hub.write_blocks(id, blocks).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ruling R41 : au lot 1, `PUT /mmd` n'écrit que les props du registre
+/// (`mementum-schema`), sur un bloc comme sur une cellule de tableau. Le format
+/// MMD, lui, lit et rend toujours le sac de props (`GET /mmd` rend telle
+/// quelle une prop inconnue déjà présente dans Yjs). Mais écrite en attribut
+/// Yjs, une prop que le schéma du client ne déclare pas est retirée du
+/// document partagé par y-prosemirror dès qu'un navigateur modifie le bloc,
+/// chez tout le monde et sans trace : mieux vaut un refus qu'un `204` suivi
+/// d'une perte. À lever quand un porteur durable existera (un attribut
+/// déclaré au schéma du client).
+///
+/// Les blocs sont parcourus dans l'ordre du document : l'erreur nomme la
+/// première prop refusée. Pas de numéro de ligne, que l'arbre lu ne garde pas.
+fn registered_props_only(blocks: &[Block]) -> Result<(), ApiError> {
+    let mut stack = vec![blocks.iter()];
+    while let Some(level) = stack.last_mut() {
+        let Some(block) = level.next() else {
+            stack.pop();
+            continue;
+        };
+        // `parse` ne rend que des types du registre (`unknown` compris).
+        let known = mementum_schema::block(&block.kind).map_or(&[][..], |spec| spec.props);
+        if let Some(name) = unregistered(&block.props, known) {
+            return Err(unregistered_prop(
+                name,
+                format!("un bloc « {} »", block.kind),
+                "ce type de bloc",
+                known,
+            ));
+        }
+        if let Content::Table(table) = &block.content {
+            let known = mementum_schema::cell_props();
+            for cell in table.rows.iter().flatten() {
+                if let Some(name) = unregistered(&cell.props, known) {
+                    return Err(unregistered_prop(
+                        name,
+                        format!("une cellule d'un bloc « {} »", block.kind),
+                        "une cellule",
+                        known,
+                    ));
+                }
+            }
+        }
+        stack.push(block.children.iter());
+    }
+    Ok(())
+}
+
+/// La première prop de `props` (par nom) que le registre ne déclare pas.
+/// Après `parse`, une prop du registre porte son nom BlockNote, et une prop
+/// inconnue le nom écrit dans le MMD.
+fn unregistered<'a>(props: &'a Props, known: &[PropSpec]) -> Option<&'a str> {
+    props
+        .keys()
+        .map(String::as_str)
+        .find(|name| !known.iter().any(|p| p.name == *name))
+}
+
+/// `422 invalid_blocks` : la prop, où elle est, et ce qu'on peut écrire à la
+/// place (les props du registre, sous leur nom MMD).
+fn unregistered_prop(name: &str, place: String, target: &str, known: &[PropSpec]) -> ApiError {
+    let allowed = if known.is_empty() {
+        format!("{target} n'a aucune prop au registre")
+    } else {
+        let names: Vec<String> = known.iter().map(|p| format!("« {} »", p.mmd)).collect();
+        format!("props du registre pour {target} : {}", names.join(", "))
+    };
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorCode::InvalidBlocks,
+        format!(
+            "prop « {name} » hors registre sur {place} : la retirer ({allowed}). PUT /mmd ne \
+             l'écrit pas, car un navigateur l'effacerait du document dès qu'il modifie le bloc"
+        ),
+    )
 }
 
 /// Ruling R33 : un bloc `unknown` écrit par MMD n'est jamais recréé en élément
