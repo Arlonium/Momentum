@@ -1,0 +1,23 @@
+[package]
+name = "mementum-crdt"
+description = "Document de page de Mementum : Yjs au format BlockNote, éditions, dédoublonnage et révision"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+mementum-md.workspace = true
+mementum-schema.workspace = true
+# JSON du sous-arbre d'un nœud étranger (prop `data` d'un bloc `unknown`).
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+yrs.workspace = true
+
+[dev-dependencies]
+# Le proptest d'aller-retour utilise le générateur de la feature `arbitrary`.
+mementum-md = { workspace = true, features = ["arbitrary"] }
+proptest.workspace = true
