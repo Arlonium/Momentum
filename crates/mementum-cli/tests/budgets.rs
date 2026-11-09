@@ -4,6 +4,12 @@
 //! Chaque mesure garde le meilleur de 3 lancements : l'antivirus analyse un
 //! exécutable neuf au premier lancement. Les deux tests ne tournent pas en
 //! même temps, pour ne pas fausser les mesures.
+//!
+//! Le démarrage mesuré est donc **à chaud** : un processus neuf sur un
+//! dossier de données neuf (base créée et migrée), mais un exécutable que le
+//! système a déjà en cache. La mesure est prudente sur le profil (binaire
+//! debug) et optimiste sur le cache ; un vrai démarrage à froid, après un
+//! redémarrage de la machine, n'est pas mesuré.
 
 mod common;
 
@@ -17,7 +23,8 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 /// Lancements par mesure.
 const LAUNCHES: usize = 3;
 
-/// « Démarrage à froid du binaire < 1 s ».
+/// « Démarrage à froid du binaire < 1 s » : le budget du §5.10. Le test le
+/// compare à un démarrage à chaud (voir l'en-tête).
 const COLD_START: Duration = Duration::from_secs(1);
 
 /// « Mémoire du serveur au repos < 150 Mo » (mégaoctets : 10⁶ octets).
@@ -41,10 +48,10 @@ fn cold_start_under_1s() {
         times.push(elapsed);
     }
     let best = *times.iter().min().unwrap();
-    println!("démarrage à froid jusqu'à /health : {times:?}, meilleur {best:?}");
+    println!("démarrage à chaud jusqu'à /health : {times:?}, meilleur {best:?}");
     assert!(
         best < COLD_START,
-        "démarrage à froid : {best:?} au mieux (budget {COLD_START:?}), mesures {times:?}"
+        "démarrage à chaud : {best:?} au mieux (budget {COLD_START:?}), mesures {times:?}"
     );
 }
 

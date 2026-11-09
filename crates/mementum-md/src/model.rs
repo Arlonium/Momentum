@@ -64,9 +64,11 @@ pub struct Cell {
 
 /// Colonnes de la grille d'un tableau qui portent une largeur ; au-delà,
 /// les largeurs ne sont pas gardées. Une cellule fusionnée porte une largeur
-/// par colonne qu'elle couvre (`colwidth` de prosemirror-tables), et
-/// `colspan` n'est pas borné : sans limite, une seule cellule ferait écrire
-/// des millions de largeurs.
+/// par colonne qu'elle couvre (`colwidth` de prosemirror-tables). Le MMD
+/// borne `colspan` à cette même valeur (Ruling R37, `parse`), mais pas un
+/// client Yjs, qui écrit le `colspan` qu'il veut : [`cell_span`] le ramène
+/// sous la borne, sans quoi une seule cellule ferait écrire des millions de
+/// largeurs.
 pub const MAX_WIDTH_COLUMNS: usize = 100;
 
 /// Colonnes de la grille couvertes par une cellule : son `colspan`, ramené

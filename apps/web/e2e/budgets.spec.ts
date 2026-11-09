@@ -10,6 +10,11 @@
 // mise en page et peinture compris). Chaque ouverture vise une page que l'onglet n'a
 // jamais ouverte, et que le serveur n'a plus en mémoire : il la relit dans SQLite, comme
 // une page que personne n'a ouverte depuis un moment.
+//
+// Seule la durée totale est affirmée. L'image la plus longue (`longestFrame`) est mesurée
+// et affichée, jamais affirmée : la conception définit « sans geler l'onglet » par « moins
+// de 3 s » (§5.10), pas par une durée d'image. Ces tests ne garantissent donc aucune
+// fluidité pendant l'ouverture.
 import { expect, test, type APIRequestContext, type Browser } from "@playwright/test";
 import { closeContexts, createPage, newUser, percentile, putMmd, unique, waitSynced } from "./helpers";
 
