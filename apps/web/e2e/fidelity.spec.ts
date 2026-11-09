@@ -3,7 +3,8 @@
 //   sur le serveur en MMD exact ;
 // - le même MMD écrit au serveur s'ouvre dans le navigateur en exactement le même document ;
 // - une frappe dans le navigateur, et des caractères spéciaux tapés (Review Focus 3), font
-//   l'aller-retour sans rien changer.
+//   l'aller-retour sans rien changer ;
+// - les tableaux fusionnés que le format admet ne sont pas réécrits par le navigateur.
 //
 // Fixtures : `apps/web/src/editor/fixtures/<nom>.input.json` (l'entrée, chargée par
 // `/p/<id>?fixture=<nom>` en développement), puis dans `spec/mmd/fixtures/` le MMD attendu
@@ -121,6 +122,42 @@ for (const name of FIXTURES) {
     await expect.poll(() => getMmd(request, id)).toBe(mmd.replace(paragraph, `${paragraph}!`));
   });
 }
+
+/**
+ * Tableaux limites que le format admet (Ruling R37) : fusion au bord droit, sur toute la
+ * ligne, plus bas que la première ligne ; `rowspan` jusqu'à la dernière ligne ; `colspan`
+ * et `rowspan` sur une même cellule ; fusions en cascade ; avec largeurs ou en-têtes.
+ */
+const EDGE_TABLES =
+  [
+    "Tableaux limites",
+    "| a | B {colspan=2} |\n| --- | --- |\n| c | d | e |",
+    "| T {colspan=3} |\n| --- |\n| a | b | c |",
+    "| a | B {rowspan=3} |\n| --- | --- |\n| c |\n| d |",
+    "| A {colspan=2 rowspan=2} | b |\n| --- | --- |\n| c |\n| d | e | f |",
+    "| a | b | c |\n| --- | --- | --- |\n| D {colspan=2} | e |",
+    '| A {rowspan=2} | b | c |\n| --- | --- | --- |\n| d | e |\n{widths="120,,80"}',
+    "| A {colspan=2} |\n| --- |",
+    "| A {colspan=2} | b |\n| --- | --- |\n| C {rowspan=2} | d | e |\n| f | g |\n{header-rows=0}",
+    "| A {rowspan=2} | b |\n| --- | --- |\n| c |\n{header-rows=2}",
+    "| A {rowspan=2} | B {colspan=2} |\n| --- | --- |\n| C {rowspan=2} | d |\n| e | f |",
+  ].join("\n\n") + "\n";
+
+test("edge_tables_survive_an_edit", async ({ browser, request }) => {
+  // Une correction de prosemirror-tables (`fixTables`) faite pendant la synchro ne part
+  // qu'avec la première édition locale (y-prosemirror) : on tape, puis on relit.
+  const { id } = await createPage(request, { title: `Tableaux ${unique()}` });
+  await putMmd(request, id, EDGE_TABLES);
+  expect(await getMmd(request, id)).toBe(EDGE_TABLES);
+  const p = await openPage(browser, id);
+  await p.locator('[data-content-type="paragraph"] .bn-inline-content').first().click();
+  await p.keyboard.press("End");
+  await p.keyboard.type("!");
+  const expected = EDGE_TABLES.replace("Tableaux limites\n", "Tableaux limites!\n");
+  await expect.poll(() => getMmd(request, id)).toBe(expected);
+  await p.waitForTimeout(500);
+  expect(await getMmd(request, id)).toBe(expected);
+});
 
 /** Caractères qui piègent le Markdown, emoji et texte de droite à gauche (Review Focus 3). */
 const SPECIAL = "a*b_c \\ <d> & {e} $f$ | ^g [h] ~i~ 🚀 שלום";

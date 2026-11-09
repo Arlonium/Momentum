@@ -3,10 +3,11 @@
 // ligne. Un écart veut dire qu'un client écrirait des nœuds que le serveur lit mal, ou
 // l'inverse : y-prosemirror supprimerait alors chez tout le monde ce qu'il ne sait pas
 // construire.
+import { codeBlockOptions } from "@blocknote/code-block";
 import { BlockNoteEditor } from "@blocknote/core";
 import { describe, expect, test } from "vitest";
 import registry from "../../../../spec/schema/blocks.json";
-import { CLIENT_SCHEMA_VERSION, schema } from "./schema";
+import { CLIENT_SCHEMA_VERSION, schema, supportedLanguages } from "./schema";
 
 type RegistryProp = { name: string; type: string; default: unknown };
 
@@ -127,5 +128,24 @@ describe("registry_matches_blocknote", () => {
     >;
     expect(Object.keys(specs.mention.propSchema).sort()).toEqual(["id", "kind", "label"]);
     expect(Object.keys(specs.math.propSchema)).toEqual(["latex"]);
+  });
+});
+
+// BlockNote refuse d'afficher un bloc de code dont la langue n'est pas dans le menu
+// (`language in supportedLanguages`) : toute langue écrite par MMD ou par un autre client
+// doit y passer, et le menu lui-même (`Object.keys`, `Object.entries`) ne change pas.
+describe("supported_languages_admit_any_language", () => {
+  test("toute chaîne est une langue admise", () => {
+    for (const language of ["rust", "text", "mon langage", "", "x".repeat(100_000), "__proto__"]) {
+      expect(language in supportedLanguages, JSON.stringify(language.slice(0, 20))).toBe(true);
+    }
+  });
+
+  test("le menu propose les langues de @blocknote/code-block, sans plus", () => {
+    expect(Object.keys(supportedLanguages)).toEqual(Object.keys(codeBlockOptions.supportedLanguages));
+    expect(Object.entries(supportedLanguages)).toEqual(
+      Object.entries(codeBlockOptions.supportedLanguages),
+    );
+    expect(Object.prototype.hasOwnProperty.call(supportedLanguages, "mon langage")).toBe(false);
   });
 });

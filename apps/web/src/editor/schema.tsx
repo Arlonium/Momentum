@@ -55,7 +55,7 @@ const CALLOUT_BACKGROUNDS: Record<string, string> = {
  * langue est donc admise : le menu n'en montre aucune de choisie, Shiki ne la colore pas,
  * et le document la garde telle quelle.
  */
-const supportedLanguages = new Proxy({ ...codeBlockOptions.supportedLanguages }, {
+export const supportedLanguages = new Proxy({ ...codeBlockOptions.supportedLanguages }, {
   has: (languages, key) => typeof key === "string" || key in languages,
 });
 
