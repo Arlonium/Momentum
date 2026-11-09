@@ -3,12 +3,13 @@
 > **Statut** : proposition. Nom (**Mementum**) et direction visuelle (**A « Papier »**) choisis par Lenny ; le reste est à valider
 > **Date** : 2026-11-09 (d'abord « Vivace », puis « Memento », écarté parce que Memento Database existe déjà ; finalement « Mementum »)
 > **Rédigé par** : Claude Code, à partir de 4 recherches (fonctionnalités Notion 2026, alternatives open source, architecture temps réel, accès des agents IA). La synthèse est dans [`docs/research/2026-11-09-etat-de-l-art.md`](../research/2026-11-09-etat-de-l-art.md) et les notes sourcées dans [`docs/research/notes/`](../research/notes/).
+> **Amendement du 2026-11-10** : à la demande d'Alex (2026-11-09), des **espaces façon Notion** remplacent les organisations et les coffres façon Obsidian (§4.1, §4.4, §12). À confirmer avec Lenny (§13).
 
 ---
 
 ## 0. En une minute
 
-**Mementum** est un espace de travail open source et auto-hébergeable, au niveau de Notion : pages en blocs, bases de données relationnelles, vues, équipes et permissions, édition à plusieurs en direct. Le contenu est rangé dans des **coffres** à la manière d'Obsidian, chacun privé ou partagé. Mementum est **conçu dès le départ pour que les agents IA lisent et écrivent les pages aussi proprement que les humains**.
+**Mementum** est un espace de travail open source et auto-hébergeable, au niveau de Notion : pages en blocs, bases de données relationnelles, vues, équipes et permissions, édition à plusieurs en direct. Le contenu est rangé dans des **espaces** à la manière de Notion : chacun crée les siens (« Perso », « Pro »…), y invite qui il veut, et y garde des pages privées ou partagées. Mementum est **conçu dès le départ pour que les agents IA lisent et écrivent les pages aussi proprement que les humains**.
 
 > *Mementum* = *memento* (du latin « souviens-toi ») + *momentum* (l'élan). C'est la mémoire de l'équipe et de ses agents, toujours en mouvement : en direct, chez soi.
 > Slogan : **« Écrivez ensemble, en direct, chez vous. »**
@@ -32,7 +33,7 @@ Les 5 promesses :
 - **API bridée** : environ 3 requêtes/s (Free/Plus), 1 000 blocs par requête, limite de blocs du plan gratuit appliquée à l'API depuis le 8 sept. 2026.
 
 ### 1.2 Le trou du marché open source
-Aucune alternative ne réunit les quatre critères suivants : **vraie base relationnelle dans les pages**, **temps réel**, **organisations et permissions**, **auto-hébergement léger sous licence libre sans plafond**.
+Aucune alternative ne réunit les quatre critères suivants : **vraie base relationnelle dans les pages**, **temps réel**, **équipes et permissions**, **auto-hébergement léger sous licence libre sans plafond**.
 
 | | Bases (relations + rollups + formules) | Temps réel | Équipes / permissions | Auto-hébergement simple | Licence vraiment libre pour les équipes |
 |---|---|---|---|---|---|
@@ -54,10 +55,10 @@ Notion a dû refaire son interface IA : le JSON de blocs coûtait trop de tokens
 ## 2. Objectifs, non-objectifs, anti-objectifs
 
 ### Objectifs
-- Parité avec le **cœur** de Notion : pages et blocs, bases avec les 24 types de propriétés, vues, relations, rollups et formules, coffres partagés (équivalent des teamspaces), commentaires, historique, suggestions.
+- Parité avec le **cœur** de Notion : pages et blocs, bases avec les 24 types de propriétés, vues, relations, rollups et formules, espaces partagés (membres, invités, partage par page), commentaires, historique, suggestions.
 - **Temps réel** partout : contenu des pages, arborescence, lignes de base, présence.
 - **Performance mesurée** contre des budgets chiffrés (§5.10), vérifiés en CI, y compris sur machine ARM type Raspberry Pi.
-- **Plusieurs organisations sur un même serveur** : n'importe qui monte son instance et y héberge sa famille, son asso ou son entreprise.
+- **Plusieurs espaces sur un même serveur** : n'importe qui monte son instance et y héberge sa famille, son asso ou son entreprise, chacune dans son espace. Une même personne a aussi les siens (« Perso », « Pro »).
 - **Agents IA de première classe** : format canonique, MCP intégré, identité, permissions, journal, mode suggestion, annulation par exécution.
 - **IA indépendante du fournisseur** : Claude, GPT, Mistral… ou 100 % local via Ollama. Rien n'est obligatoire.
 - **Autonomie et portabilité** : **import complet depuis Notion et depuis un vault Obsidian dès la P1** (§4.6), plus Markdown et CSV. Export complet sans perte et réimportable (format `.mementum`). Mementum se suffit à lui-même : on y entre par l'import, on en sort par l'export.
@@ -66,7 +67,7 @@ Notion a dû refaire son interface IA : le JSON de blocs coûtait trop de tokens
 - Notion Mail et un vrai Calendar (Notion a d'ailleurs fermé Mail le 22/09/2026).
 - Apps mobiles natives : PWA d'abord.
 - Fédération entre serveurs : chaque instance est indépendante en v1 (§7.5).
-- Miroir des coffres en fichiers `.md` synchronisés en continu avec Obsidian ou git. **Décision de Lenny** : Mementum est autonome, on passe d'un outil à l'autre par l'import et l'export, pas par une synchro permanente.
+- Miroir des espaces en fichiers `.md` synchronisés en continu avec Obsidian ou git. **Décision de Lenny** : Mementum est autonome, on passe d'un outil à l'autre par l'import et l'export, pas par une synchro permanente.
 - Agents qui pilotent un ordinateur ou un navigateur, marketplace de templates, sites avec domaine personnalisé avancé, tableau blanc.
 
 ### Anti-objectifs (échec même si « ça marche »)
@@ -109,32 +110,31 @@ Notion a dû refaire son interface IA : le JSON de blocs coûtait trop de tokens
 
 ```
 Instance (ton serveur)
-└── Organisation (ex. « Famille », « Asso », « Entreprise »)  ← plusieurs par instance
-    ├── Membres, groupes, invités, agents
-    └── Coffres (§4.4) : « Mon coffre » privé de chaque membre + coffres partagés
-        └── Dossiers et pages (arbre)
-            ├── Blocs (texte, titres, listes, toggles, callouts, code…)
-            ├── Sous-pages
-            └── Bases de données (pleine page ou en ligne)
-                ├── Sources de données (schéma + lignes ; une base peut en avoir plusieurs)
-                ├── Vues (tableau, kanban, calendrier…)
-                └── Lignes = pages (propriétés + contenu)
+└── Espace (ex. « Perso », « Pro », « Famille », « Asso »)  ← plusieurs par instance, plusieurs par compte
+    ├── Membres, groupes, invités, agents, jetons d'API
+    └── Dossiers et pages (arbre), en trois sections : « Espace », « Partagé », « Privé » (§4.4)
+        ├── Blocs (texte, titres, listes, toggles, callouts, code…)
+        ├── Sous-pages
+        └── Bases de données (pleine page ou en ligne)
+            ├── Sources de données (schéma + lignes ; une base peut en avoir plusieurs)
+            ├── Vues (tableau, kanban, calendrier…)
+            └── Lignes = pages (propriétés + contenu)
 ```
-Le **coffre** remplace à la fois l'espace d'équipe (teamspace) et l'espace privé de Notion : c'est l'unité de rangement et de partage.
+L'**espace** est le « workspace » de Notion : c'est l'unité de rangement, de partage et d'accès par API (§4.4). Il remplace l'organisation et les coffres des premières versions de ce document.
 
-- **Admin d'instance** : gère les inscriptions (ouvertes, sur invitation, par domaine e-mail), les quotas, les fournisseurs IA autorisés, les sauvegardes et le SMTP.
-- **Rôles d'organisation** : Propriétaire, Admin, Membre, Membre restreint, Invité. Les agents forment une catégorie à part (§6.7).
+- **Admin d'instance** : gère les inscriptions (ouvertes, sur invitation, par domaine e-mail), la création d'espaces (ouverte à tous les comptes ou réservée), les quotas, les fournisseurs IA autorisés, les sauvegardes et le SMTP.
+- **Rôles d'espace** : Propriétaire, Admin, Membre, Membre restreint, Invité. Les agents forment une catégorie à part (§6.7).
 - **Niveaux de permission sur une page** : Accès complet · Peut modifier · Peut modifier le contenu (bases) · Peut créer (bases) · Peut commenter · Peut lire.
-- **Accès général** : seulement les invités · toute l'organisation · toute personne ayant le lien (avec expiration et mot de passe en option) · publié sur le web.
+- **Accès général** : seulement les invités · tous les membres de l'espace · toute personne ayant le lien (avec expiration et mot de passe en option) · publié sur le web.
 
 ### 4.2 Écrans principaux
-- **Barre latérale** : sélecteur d'organisation, recherche, Accueil, Boîte de réception, **Agents** (exécutions en cours, suggestions en attente), **Vue graphe**, Favoris, puis la section **Coffres** (chaque coffre avec son niveau de partage : Privé, Organisation, ou nombre de membres) et son arbre de pages, Modèles, Corbeille, Réglages.
+- **Barre latérale** : sélecteur d'espace (ses espaces, ceux où on l'a invité, « Créer un espace »), recherche, Accueil, Boîte de réception, **Agents** (exécutions en cours, suggestions en attente), **Vue graphe**, Favoris, puis les trois sections de l'espace, **Espace**, **Partagé** et **Privé**, chacune avec son arbre de pages, Modèles, Corbeille, Réglages.
 - **Page** : couverture, icône, titre, propriétés si c'est une ligne de base, éditeur en blocs, rétroliens, commentaires dans la marge, avatars des présents (agents compris, avec un badge 🤖).
 - **Base de données** : onglets de vues, filtres, tris et groupes, recherche interne, ouverture des lignes en panneau latéral, au centre ou en pleine page.
 - **Palette de commandes** (Ctrl+K) : navigation, actions, et questions à l'IA avec citations.
 - **Revue des suggestions** : comparaison par exécution d'agent, avec accepter ou refuser bloc par bloc ou en bloc.
 - **Historique** : frise des versions avec attribution humain ou agent, et restauration en un clic.
-- **Réglages** : organisation (membres, groupes, sécurité, IA, agents, journal d'audit) et instance (admin).
+- **Réglages** : espace (membres, groupes, sécurité, IA, agents, jetons d'API, journal d'audit), compte (profil, jetons personnels) et instance (admin).
 
 ### 4.3 Direction visuelle retenue : A « Papier » *(choix de Lenny)*
 Maquettes : canvas interactif https://claude.ai/artifact/5VPJk8gPwX1cMdwufLHTXw (artboard « A · Papier »). Le principe est de **ne pas dépayser quelqu'un qui vient de Notion** : mêmes emplacements, mêmes gestes, identité propre.
@@ -145,41 +145,59 @@ Maquettes : canvas interactif https://claude.ai/artifact/5VPJk8gPwX1cMdwufLHTXw 
 - **Typographie et couleurs** :
   - **Inter** partout ;
   - texte `#2F2E2B`, texte secondaire `#66655F` (contraste ≥ 4,5:1) ;
-  - **accent vert `#23704F`**, réglable par organisation ;
+  - **accent vert `#23704F`**, réglable par espace ;
   - pastilles de statut en couleurs douces.
 - **Barre du haut** : fil d'Ariane, « Modifié il y a… », avatars des présents (l'agent a une pastille ✦ à la couleur d'accent), bouton **Partager**, menu « … ».
 - **Menu Partager** (déroulant en haut à droite, comme Notion), de haut en bas :
   1. onglets Partager / Publier ;
-  2. bascule **« Tout le coffre » / « Cette page seulement »** ;
-  3. champ d'invitation (personnes, groupes, agents) ;
-  4. liste des accès avec leur niveau (l'agent porte un badge « Agent » et le nom de son parrain) ;
-  5. **Accès général** en 3 choix : seulement les invités / toute l'organisation / toute personne ayant le lien ;
-  6. « Copier le lien ».
+  2. champ d'invitation (personnes, groupes, agents) ;
+  3. liste des accès avec leur niveau (l'agent porte un badge « Agent » et le nom de son parrain) ;
+  4. **Accès général** en 3 choix : seulement les invités / tous les membres de l'espace / toute personne ayant le lien ;
+  5. « Copier le lien ».
+
+  Le partage porte toujours sur la page ouverte et ses sous-pages. Les maquettes montrent encore la bascule « Tout le coffre / Cette page seulement » de la première version : elle disparaît avec les coffres (§4.4).
 - **Collaboration visible** : curseur nommé de chaque personne. Une suggestion d'agent apparaît surlignée dans le texte, avec une petite barre « Scribe (agent) propose un ajout · Accepter · Refuser ». Après décision : « Suggestion acceptée · Annuler ».
 - **Bases** : en-tête avec onglets de vues (Tableau, Kanban, Calendrier) et bouton « Nouveau » à la couleur d'accent ; tableau sobre à lignes fines.
 - **Thème sombre** : dérivé du même système, sans changer la mise en page. Les directions B (« Atelier ») et C (« Nuit ») restent des sources d'idées : panneau d'activité des agents, barre IA flottante Ctrl+K.
 
-### 4.4 Coffres façon Obsidian *(idée de Lenny)*
-- **Chaque membre a « Mon coffre »**, privé par défaut. Une organisation crée autant de coffres partagés qu'elle veut (« Wiki interne », « Projet X », « Direction »…).
-- **Partage d'un coffre** :
-  - avec **toute l'organisation**, avec des **groupes** ou avec **certaines personnes** (et des agents) ;
-  - niveaux : Accès complet · Peut modifier · Peut commenter · Peut lire, et pour les agents `suggérer` ;
-  - toutes les pages du coffre héritent de ces accès ;
-  - une page peut avoir une **exception** (plus ouverte ou plus fermée) via « Cette page seulement ».
-- **L'expérience Obsidian** :
-  - liens `[[Page]]` et `[[Page#Titre]]`, **rétroliens**, **vue graphe** du coffre ;
+### 4.4 Espaces façon Notion *(demande d'Alex du 2026-11-09 ; remplace les « coffres façon Obsidian »)*
+La première version de ce document rangeait le contenu dans des coffres à la manière d'Obsidian, à l'intérieur d'une organisation (idée de Lenny). Alex a demandé le fonctionnement de Notion : « on se fait des spaces », par exemple un espace « Perso » et un espace « Pro » ; on demande à Claude Code de verser tel contenu dans son espace « Pro » ; on invite des gens dans un espace ou sur une page de l'espace ; on ouvre des accès d'API sur un espace ou sur des pages. Ce qui suit traduit cette demande. Les points marqués *(choix de rédaction)* ne viennent pas de lui : ils sont à relire (§12).
+
+- **Un compte, plusieurs espaces.**
+  - Chacun crée autant d'espaces qu'il veut (« Perso », « Pro », « Asso »…). Le sélecteur de la barre latérale montre ceux qu'il a créés et ceux où on l'a invité.
+  - Un espace est cloisonné : ses pages, ses membres, ses agents, ses jetons d'API et ses réglages ne se voient pas depuis un autre espace.
+  - Le premier espace est créé à l'inscription, sauf quand on arrive par une invitation *(choix de rédaction)*. L'admin d'instance peut réserver la création d'espaces à certains comptes *(choix de rédaction)*.
+- **Trois sections dans un espace**, comme dans la barre latérale de Notion :
+  - **Espace** : les pages que voient tous les membres de l'espace ;
+  - **Partagé** : les pages partagées avec des personnes précises ;
+  - **Privé** : les pages que seul leur auteur voit.
+
+  La section d'une page se déduit de ses accès : il n'y a rien à ranger à la main.
+- **Inviter dans l'espace** : la personne devient **membre**. Elle voit la section « Espace », y crée des pages et a ses propres pages privées. Rôles : Propriétaire, Admin, Membre, Membre restreint (§4.1).
+- **Inviter sur une page** : la personne devient **invitée** de l'espace. Elle ne voit que les pages partagées avec elle, sous-pages comprises, au niveau qu'on lui donne.
+- **Partage d'une page** (menu Partager, §4.3) :
+  - avec des **personnes**, des **groupes** ou des **agents** ; niveaux : Accès complet · Peut modifier · Peut commenter · Peut lire, et pour les agents `suggérer` ;
+  - les sous-pages héritent de ces accès ; une sous-page peut être plus ouverte que son parent et, à partir de la P3, plus fermée ;
+  - **accès général** : seulement les invités · tous les membres de l'espace · toute personne ayant le lien · publié sur le web.
+- **API et agents, sur un espace ou sur des pages** (§6.5, §6.7) :
+  - un **jeton personnel** se crée dans le compte. Il agit au nom de son propriétaire, avec ses droits, et on le limite si on veut : tous ses espaces, un seul espace, ou des pages choisies avec leurs sous-pages ;
+  - un **jeton d'intégration** se crée dans les réglages d'un espace. Il appartient à un agent de cet espace et n'ouvre que ce qu'on partage avec cet agent : l'espace entier, ou des pages choisies avec leurs sous-pages ;
+  - un agent comme Claude Code désigne l'espace par son nom : « verse ce compte rendu dans mon espace Pro ».
+- **Ce qui reste de l'idée de Lenny** : les conventions d'Obsidian, sans les coffres :
+  - liens `[[Page]]` et `[[Page#Titre]]`, **rétroliens**, **vue graphe** de l'espace ;
   - dossiers ;
   - frontmatter YAML = propriétés de la page ;
   - callouts `> [!tip]`, références de bloc `^b4`, tags `#tag`.
 
   Le format MMD (§6.2) est déjà du Markdown compatible avec ces conventions.
-- **Modèle de coffre « LLM wiki »**, prêt à l'emploi, inspiré du vault de Lenny :
+- **Modèle d'espace « LLM wiki »**, prêt à l'emploi, inspiré du vault de Lenny :
   - `raw/` pour les sources jamais modifiées ;
   - pages tenues par l'IA ;
   - `index`, `log` (journal) et page de schéma (`CLAUDE.md`).
 
   Un agent d'espace s'en occupe : ingestion, réponses aux questions, vérification. Il est en mode suggestion par défaut.
-- **Pas de miroir en fichiers** (décision de Lenny) : un coffre vit dans Mementum. On arrive avec l'import d'un vault Obsidian (§4.6) et on repart avec l'export. Les agents comme Claude Code passent par le MCP (§6.5) ou la CLI, pas par les fichiers.
+- **Pas de miroir en fichiers** (décision de Lenny) : un espace vit dans Mementum. On arrive avec l'import d'un vault Obsidian (§4.6) et on repart avec l'export. Les agents comme Claude Code passent par le MCP (§6.5) ou la CLI, pas par les fichiers.
+- **Plus tard (P3)** : des **espaces d'équipe** (les « teamspaces » de Notion) à l'intérieur d'un espace, pour qu'un groupe de membres ait sa propre section *(choix de rédaction)*.
 
 ### 4.5 Inventaire fonctionnel et parité Notion
 Phases : **P1** à **P5** (§9) ; **+** = après la 1.0 ; **✘** = hors périmètre.
@@ -223,8 +241,8 @@ Phases : **P1** à **P5** (§9) ; **+** = après la 1.0 ; **✘** = hors périm�
 | Commentaires de page et ancrés sur un bloc, réactions, résolution | P1 |
 | Corbeille, restauration, duplication, déplacement, favoris, récents | P1 |
 | Historique de versions (instantanés + attribution + restauration) | P1 (simple) → P3 (frise complète) |
-| Organisations, coffres privés et partagés (organisation entière ou personnes), `[[liens]]` et rétroliens, comptes locaux | P1 |
-| Partage de coffre par groupe, exceptions par page, invités, membres restreints, vue graphe | P3 |
+| Espaces (plusieurs par compte), membres invités dans l'espace, pages privées et pages d'espace, partage d'une page avec des personnes (invités compris), `[[liens]]` et rétroliens, comptes locaux | P1 |
+| Groupes, espaces d'équipe à l'intérieur d'un espace, sous-page plus fermée que son parent, membres restreints, vue graphe | P3 |
 | Partage fin, liens publics (expiration, mot de passe), demandes d'accès | P3 |
 | **Suggestions de modification** (suivi des changements) pour humains et agents | P3 |
 | Boîte de réception, notifications groupées, mentions, mise en sourdine | P3 |
@@ -244,12 +262,13 @@ Phases : **P1** à **P5** (§9) ; **+** = après la 1.0 ; **✘** = hors périm�
 | Import Confluence | + |
 | API REST + OpenAPI, webhooks signés HMAC, flux d'événements SSE | P2–P5 |
 | MCP intégré (§6.5), **dès la première version** (décision de Lenny) | P1 (base) → P4 (complet) |
+| Jetons d'API (§4.4) : jetons personnels, limitables à un espace ou à des pages ; jetons d'intégration portés par un agent d'espace | P1 (personnels) → P4 (intégration) |
 
 ### 4.6 Importer depuis Notion et Obsidian *(exigence de Lenny)*
 Mementum est autonome : il n'y a **pas de synchro permanente** avec un autre outil. On importe une fois, proprement, puis on travaille dans Mementum.
 
 **Chaque import :**
-- crée un **nouveau coffre** (ou remplit un coffre choisi) ;
+- crée un **nouvel espace** (ou remplit un espace choisi) ;
 - produit un **rapport d'import** qui liste ce qui a été converti, approximé ou ignoré, avec un lien vers chaque page concernée ;
 - est **rejouable** : réimporter met à jour les pages déjà importées (l'identifiant d'origine est gardé) au lieu de créer des doublons, ce qui permet une bascule progressive ;
 - tourne en tâche de fond avec une barre de progression. On le lance depuis l'interface (glisser-déposer d'un zip ou d'un dossier) ou depuis la CLI : `mementum import obsidian <dossier>`, `mementum import notion <zip>` ou `mementum import notion --token`.
@@ -258,7 +277,7 @@ Mementum est autonome : il n'y a **pas de synchro permanente** avec un autre out
 
 | Dans Obsidian | Dans Mementum |
 |---|---|
-| Dossiers | Dossiers du coffre |
+| Dossiers | Dossiers de l'espace |
 | Notes `.md` | Pages (converties en MMD) |
 | Frontmatter YAML | Propriétés de la page (type deviné : date, nombre, liste, case à cocher, texte) |
 | `[[Note]]`, `[[Note\|alias]]`, `[[Note#Titre]]`, `[[Note#^bloc]]` | Liens vers la page, le titre ou le bloc, résolus comme Obsidian : par nom unique, sinon par chemin |
@@ -266,7 +285,7 @@ Mementum est autonome : il n'y a **pas de synchro permanente** avec un autre out
 | Callouts `> [!tip]`, `> [!warning]`… | Callouts (le type donne l'icône et la couleur) |
 | `#tags` (dans le texte ou le frontmatter) | Propriété « Tags » en multi-sélection, plus la recherche |
 | Références de bloc `^id` | Ancres de bloc conservées |
-| Pièces jointes | Fichiers du coffre (dédoublonnés) |
+| Pièces jointes | Fichiers de l'espace (dédoublonnés) |
 | Liens vers des notes inexistantes | Liens « page à créer », comme dans Obsidian |
 | `.obsidian/` (réglages, plugins), requêtes Dataview, fichiers Canvas | Non convertis, mais listés dans le rapport (une requête Dataview peut devenir une vue de base plus tard) |
 
@@ -280,8 +299,8 @@ Mementum est autonome : il n'y a **pas de synchro permanente** avec un autre out
 2. **Par le zip d'export** (« Markdown & CSV » ou « HTML ») : sans jeton, mais moins fidèle. Notion reconnaît lui-même que son export ne recrée pas tout. On récupère les pages, l'arborescence et les images. Les bases arrivent en CSV : types devinés, relations reconstruites par titre.
 
 **Correspondances Notion → Mementum** :
-- teamspaces → coffres partagés. Les accès sont recopiés quand les personnes existent dans l'organisation ; sinon, des invitations sont proposées ;
-- pages privées → « Mon coffre » de la personne qui importe ;
+- un workspace Notion → un espace ; ses teamspaces → des dossiers de la section « Espace » (des espaces d'équipe à partir de la P3). Les accès sont recopiés quand les personnes ont un compte sur l'instance ; sinon, des invitations sont proposées ;
+- pages privées → section « Privé » de la personne qui importe ;
 - blocs synchronisés → blocs synchronisés ;
 - boutons, automatisations et intégrations → listés dans le rapport, à refaire.
 
@@ -304,7 +323,7 @@ Mementum est autonome : il n'y a **pas de synchro permanente** avec un autre out
                                │ 1 WebSocket multiplexé (MessagePack)
 ┌──────────────────────────────▼─────────── binaire `mementum` (Rust) ─────────┐
 │ Axum + tokio : HTTP, WebSocket, fichiers statiques de l'app embarqués      │
-│ ├─ Sync : docs Yjs (yrs) par page + journal d'opérations par organisation  │
+│ ├─ Sync : docs Yjs (yrs) par page + journal d'opérations par espace        │
 │ ├─ Domaine : pages, bases, vues, membres, commentaires, notifications      │
 │ ├─ Permissions : tuples façon Zanzibar + héritage de l'arbre, cache        │
 │ ├─ Moteur de requêtes des bases : filtres → SQL, formules, rollups         │
@@ -324,7 +343,7 @@ Mementum est autonome : il n'y a **pas de synchro permanente** avec un autre out
 |---|---|---|---|
 | Serveur | **Rust** : Axum, tokio, sqlx | Binaire unique, faible mémoire (Pi), CRDT Rust mûr (yrs, utilisé par AppFlowy ; Zed et AFFiNE ont aussi des serveurs CRDT en Rust). Lenny connaît déjà Rust (Avero, Snoopr) | TypeScript + Hocuspocus (impose Postgres et un runtime plus lourd), Go (pas d'implémentation Yjs/Loro de premier plan), Elixir (distribution en binaire unique difficile) |
 | Contenu des pages | **Yjs** (client) + **yrs** (serveur, feature `sync`), derrière une façade `mementum-crdt`. **Confirmé par la P0** (`spike/RESULTS.md`). Côté BlockNote, on passe par le chemin Yjs 13 (`@blocknote/core/yjs`). Le serveur écrit la racine d'une page neuve (sinon deux clients sur une page vide créent deux racines et l'une est perdue) ; cela ne protège que les éditions faites après la première synchro (§11) | Standard de fait (Outline, Docmost, Plane, La Suite Docs, AFFiNE…), liaison éditeur mûre. P0 : Yjs 3 à 16 fois plus rapide que Loro dès qu'on lit toute la page. Passer à Yjs 14 quand yrs le comprendra (yrs 0.28 ne lit pas le texte des nœuds Yjs 14) | Loro (arbre déplaçable sans doublons ni éditions perdues, chargement paresseux plus de 20 fois plus économe, mais 3 à 16 fois plus lent dès qu'on lit toute la page ; plan B via la façade), Automerge |
-| Structure et bases | **Journal d'opérations dont le serveur fait autorité** (façon Linear/Figma) : version monotone par organisation, application optimiste côté client puis rebase, dernier écrivain gagnant par propriété | Permissions, requêtes serveur sur 100 000 lignes, formules : impossible proprement en tout-CRDT. Aucun moteur existant n'accepte SQLite par défaut (Zero, Electric : Postgres uniquement ; PowerSync : FSL) | Zero, ElectricSQL, PowerSync, Triplit (à l'arrêt), tout-CRDT façon Anytype |
+| Structure et bases | **Journal d'opérations dont le serveur fait autorité** (façon Linear/Figma) : version monotone par espace, application optimiste côté client puis rebase, dernier écrivain gagnant par propriété | Permissions, requêtes serveur sur 100 000 lignes, formules : impossible proprement en tout-CRDT. Aucun moteur existant n'accepte SQLite par défaut (Zero, Electric : Postgres uniquement ; PowerSync : FSL) | Zero, ElectricSQL, PowerSync, Triplit (à l'arrêt), tout-CRDT façon Anytype |
 | Éditeur | **BlockNote** (cœur MPL-2.0) sur ProseMirror/Tiptap | Expérience Notion prête (menu `/`, poignées, imbrication) ; choisi par La Suite Docs (État français). Adaptations P0 : types custom (callout, equation, bookmark, pageLink, databaseRef, syncedBlock, toc, unknown, contenus en ligne mention et math), multi-colonnes via `@blocknote/xl-multi-column` (GPL-3.0). y-prosemirror supprime du document partagé les nœuds qu'il ne connaît pas : versionnage de schéma obligatoire (§11) | Tiptap nu (tout à construire), Lexical, BlockSuite (trop couplé à AFFiNE) |
 | Base serveur | **SQLite en WAL** par défaut, **PostgreSQL** en option, même schéma via sqlx | Zéro service à installer, sauvegarde continue avec Litestream (v0.5). Postgres pour les grosses instances | Postgres obligatoire |
 | Cache client | **SQLite WASM sur OPFS** dans un worker partagé (un seul écrivain) | Technique de Notion : navigation 20 % plus rapide, hors ligne | IndexedDB brut |
@@ -339,13 +358,14 @@ Mementum est autonome : il n'y a **pas de synchro permanente** avec un autre out
 instance_settings(key, value)
 users(id, email, name, avatar, password_hash?, created_at)            -- comptes de l'instance
 passkeys / totp / sessions / oauth_identities
-orgs(id, slug, name, icon, settings_json)
-members(org_id, user_id, role, status)                               -- owner|admin|member|restricted|guest
-groups(id, org_id, name) · group_members(group_id, user_id)
-agents(id, org_id, name, avatar, sponsor_user_id, policy_json)       -- §6.7
-vaults(id, org_id, name, icon, color, owner_id, kind, settings_json)   -- personal|shared (§4.4)
+spaces(id, slug, name, icon, settings_json, created_by, created_at)   -- l'espace (§4.4)
+members(space_id, user_id, role, status)                             -- owner|admin|member|restricted|guest
+groups(id, space_id, name) · group_members(group_id, user_id)
+agents(id, space_id, name, avatar, sponsor_user_id, policy_json)     -- §6.7
+invitations(id, space_id, node_id?, email, grant, token_hash,
+            expires_at)                                               -- dans l'espace, ou sur une page (§4.4)
 
-nodes(id, org_id, vault_id, parent_id, kind, title, icon, cover,
+nodes(id, space_id, parent_id, kind, title, icon, cover,
       position, created_by, created_at, updated_by, updated_at,
       archived_at, trashed_at, locked)                               -- kind: folder|page|database|row
       -- position = index fractionnaire ; déplacement vérifié contre les cycles
@@ -366,12 +386,12 @@ share_links(id, node_id, level, expires_at, password_hash?)
 comments(id, node_id, block_id?, thread_id, author_id, body_mmd, resolved_at)
 suggestions(id, node_id, run_id?, author_id, status)                  -- §6.4
 notifications(id, user_id, kind, payload_json, read_at)
-ops_log(org_id, lsn, actor_id, run_id?, op_json, created_at)          -- tout changement structurel
+ops_log(space_id, lsn, actor_id, run_id?, op_json, created_at)        -- tout changement structurel
 agent_runs(id, agent_id, on_behalf_of?, trigger, model, status, cost, started_at, ended_at)
-audit_log(id, org_id, actor_id, action, object, details_json, created_at)
+audit_log(id, space_id, actor_id, action, object, details_json, created_at)
 files(hash, size, mime, storage_key) · attachments(node_id, file_hash)
-api_tokens(id, user_or_agent_id, scopes, expires_at, hash)
-automations(id, database_id, trigger_json, actions_json) · webhooks(id, org_id, url, events, secret_hash)
+api_tokens(id, user_or_agent_id, space_id?, scopes, expires_at, hash) -- portée : un espace (ou tous), ou des pages (acl)
+automations(id, database_id, trigger_json, actions_json) · webhooks(id, space_id, url, events, secret_hash)
 jobs(id, kind, payload_json, status, run_at, attempts)                -- file de tâches intégrée
 ```
 
@@ -383,7 +403,7 @@ Le client ouvre **une seule WebSocket**, multiplexée, encodée en MessagePack :
 | Canal | Contenu | Mécanisme |
 |---|---|---|
 | `doc:<page>` | Contenu riche de la page | Synchro Yjs (étapes 1 et 2), puis mises à jour incrémentales. *Awareness* pour les curseurs et la sélection |
-| `org:<id>` | Arbre des pages, métadonnées, lignes de base, commentaires, notifications | **Pull** : « donne-moi tout depuis la version N », filtré par permissions. **Push** : diffusion en direct des nouvelles opérations |
+| `space:<id>` | Arbre des pages, métadonnées, lignes de base, commentaires, notifications | **Pull** : « donne-moi tout depuis la version N », filtré par permissions. **Push** : diffusion en direct des nouvelles opérations |
 | `mutate` | Écritures structurelles | Le client envoie `{client_mutation_id, name, args}`. Le serveur valide (permissions, schéma), applique, attribue un numéro de version et répond. L'opération est idempotente |
 | `query:<view>` | Fenêtre d'une vue de base (lignes 0 à 200…) | Requête serveur, abonnement aux changements de la fenêtre |
 
@@ -403,11 +423,12 @@ Le client ouvre **une seule WebSocket**, multiplexée, encodée en MessagePack :
 - **SQL en lecture seule pour les agents** : chaque source de données est exposée comme une table virtuelle (`SELECT … FROM "Tâches"`), avec les permissions appliquées (lignes et colonnes filtrées). Notion propose la même chose avec du SQLite en lecture seule.
 
 ### 5.6 Permissions
-- **Sujets** : utilisateur, groupe, invité, agent, lien public, « toute l'organisation ».
-- **Objets** : organisation → coffre → dossier/page/base → source → ligne (→ colonne, plus tard).
+- **Sujets** : utilisateur, groupe, invité, agent, jeton d'API, lien public, « tous les membres de l'espace ».
+- **Objets** : espace → dossier/page/base → source → ligne (→ colonne, plus tard).
 - **Héritage** : une sous-page hérite de son parent, sauf surcharge. Le droit le plus large l'emporte. Les règles par ligne sont évaluées dans la requête SQL (clause ajoutée).
 - **Vérification** : `check(sujet, action, objet)` en Rust, avec un cache invalidé par les opérations ACL. Toute diffusion WebSocket est filtrée : personne ne reçoit une opération sur un objet qu'il ne peut pas lire.
 - **Agents** : droits effectifs = leurs droits ∩ droits de l'humain pour qui ils agissent (s'il y en a un) ∩ portée du jeton (§6.7).
+- **Cloisonnement des espaces** : un sujet n'a aucun droit dans un espace dont il n'est ni membre ni invité. L'admin d'instance gère le serveur (comptes, quotas, liste et suppression des espaces) ; par l'application, il ne lit pas les pages d'un espace dont il n'est pas membre *(choix de rédaction, §12)*.
 
 ### 5.7 Recherche
 - Tantivy indexe les titres et les blocs (`blocks_index`), avec le fil d'Ariane de chaque page. Les résultats sont filtrés par permissions au moment de la requête.
@@ -416,7 +437,7 @@ Le client ouvre **une seule WebSocket**, multiplexée, encodée en MessagePack :
 
 ### 5.8 Fichiers
 - Stockage adressé par contenu (hash SHA-256), donc dédoublonné. Miniatures générées en tâche de fond.
-- URL signées à durée limitée. Quotas par organisation. Antivirus ClamAV en option.
+- URL signées à durée limitée. Quotas par espace. Antivirus ClamAV en option.
 
 ### 5.9 Client : vitesse et hors ligne
 - **Rendu d'abord depuis le local**, synchronisation ensuite. Un seul onglet écrit dans SQLite (worker partagé), les autres lisent.
@@ -607,14 +628,14 @@ Un seul outil `update_page` accepte une liste d'opérations, **atomique** (jusqu
 
 ### 6.5 Serveur MCP intégré
 - **Transport** : Streamable HTTP sur `/mcp`, sans état, cible spec MCP **2026-07-28** et rétrocompatible avec la 2025-11-25. `/mcp/readonly` expose seulement la lecture.
-- **Auth** : OAuth 2.1 (métadonnées RFC 9728, enregistrement des clients par CIMD, audience RFC 8707, portées progressives). **Jetons personnels** pour les modèles locaux et la CLI. Pont stdio pour les clients qui ne savent pas faire de HTTP.
+- **Auth** : OAuth 2.1 (métadonnées RFC 9728, enregistrement des clients par CIMD, audience RFC 8707, portées progressives). **Jetons personnels** pour les modèles locaux et la CLI. Tout jeton a une **portée** : tous les espaces de son propriétaire, un seul espace, ou des pages choisies avec leurs sous-pages (§4.4). Pont stdio pour les clients qui ne savent pas faire de HTTP.
 - **14 outils** :
 
 | # | Outil | Rôle |
 |---|---|---|
-| 1 | `search` | Recherche hybride. Filtres : coffre, type, date, auteur. Renvoie titres, fils d'Ariane, extraits ancrés |
+| 1 | `search` | Recherche hybride. Filtres : espace, type, date, auteur. Renvoie titres, fils d'Ariane, extraits ancrés |
 | 2 | `fetch` | Page, base, ligne ou bloc par ID ou URL → MMD + propriétés + `revision` (ancres en option, pagination) |
-| 3 | `create_pages` | Création en lot sous un parent, contenu MMD, propriétés |
+| 3 | `create_pages` | Création en lot sous un parent, ou à la racine d'un espace désigné par son nom ou son ID (implicite si le jeton n'en ouvre qu'un), contenu MMD, propriétés |
 | 4 | `update_page` | Opérations du §6.3, `mode: suggest \| direct \| branch` |
 | 5 | `manage_pages` | Déplacer, dupliquer, mettre à la corbeille, restaurer. La corbeille demande une confirmation humaine |
 | 6 | `query_database` | Lignes via filtre JSON, via une vue enregistrée ou via **SQL en lecture seule** ; curseur, `limit` ≤ 100 |
@@ -624,7 +645,7 @@ Un seul outil `update_page` accepte une liste d'opérations, **atomique** (jusqu
 | 10 | `manage_views` | Créer et modifier des vues (filtres, tris, groupes) |
 | 11 | `comments` | Lister, créer, résoudre ; ancrés sur un bloc |
 | 12 | `suggestions` | Lister, accepter ou refuser (par défaut, seul un humain accepte) |
-| 13 | `workspace_info` | Qui suis-je, membres, coffres ; correspondance nom ↔ ID |
+| 13 | `workspace_info` | Qui suis-je, espaces accessibles et leurs membres ; correspondance nom ↔ ID |
 | 14 | `get_changes` | Ce qui a changé depuis une `revision` ou une date, pour qu'un agent se remette à jour sans tout relire |
 
 - **Ressources** : `mementum://spec/mmd`, `mementum://spec/filters`, `mementum://spec/sql` (tables virtuelles disponibles), `mementum://spec/formulas`.
@@ -644,7 +665,8 @@ Un seul outil `update_page` accepte une liste d'opérations, **atomique** (jusqu
   1. les humains ;
   2. les **agents d'espace** : membres « robots », gratuits, créés par un admin ou un membre autorisé, **sans aucun accès par défaut**, avec un humain **parrain** responsable ;
   3. les **clients MCP externes**, qui agissent au nom d'un humain (portée du jeton ∩ droits de cet humain).
-- **Niveaux d'accès des agents** : `lire < suggérer < modifier < complet`, accordés sur un coffre, un sous-arbre de pages ou une base.
+- **Niveaux d'accès des agents** : `lire < suggérer < modifier < complet`, accordés sur un espace entier, un sous-arbre de pages ou une base.
+- **Jetons d'API** (§4.4) : un **jeton personnel** agit au nom de son propriétaire (droits de cet humain ∩ portée du jeton) ; un **jeton d'intégration** appartient à un agent d'espace et ne sort jamais de cet espace. Les deux sont stockés hachés, montrés une seule fois à leur création, révocables, avec une expiration en option.
 - **Délégation façon Linear** : une page ou une ligne peut avoir un **responsable humain** et un **délégué IA**. L'humain reste redevable.
 - **Politique par agent** : modèles autorisés, mode d'écriture, canaux sortants (web, e-mail, webhook), maximum d'appels, de tokens et de durée par exécution, débit, budget mensuel.
 - **Approbations obligatoires** : corbeille, suppression de propriété, changement de permissions, éditions de plus de N blocs ou lignes, tout envoi vers l'extérieur.
@@ -657,7 +679,7 @@ Un seul outil `update_page` accepte une liste d'opérations, **atomique** (jusqu
 - Les outils web des agents intégrés sont **désactivés par défaut**.
 
 ### 6.9 IA intégrée (optionnelle, P4)
-- **Passerelle multi-fournisseurs** : API compatibles OpenAI (Ollama, vLLM, LM Studio, OpenRouter…), Anthropic natif, Mistral. Chaque organisation apporte sa clé ; l'admin d'instance choisit les fournisseurs autorisés. **Mode 100 % local** possible.
+- **Passerelle multi-fournisseurs** : API compatibles OpenAI (Ollama, vLLM, LM Studio, OpenRouter…), Anthropic natif, Mistral. Chaque espace apporte sa clé ; l'admin d'instance choisit les fournisseurs autorisés. **Mode 100 % local** possible.
 - **Dans l'éditeur** : `/ia` pour écrire, résumer, traduire ou continuer, toujours en suggestion.
 - **Questions-réponses sur l'espace** avec citations au niveau du bloc. Pour un petit périmètre (une page, une base), mode « contexte complet ».
 - **Propriétés IA** (remplissage automatique : résumé, étiquettes, extraction), exécutées en tâche de fond par un agent d'espace.
@@ -706,7 +728,7 @@ Les secrets passent par des variables d'environnement ou des fichiers (`*_FILE`)
 ### 7.3 Montée en charge
 1. **Un nœud + SQLite** : jusqu'à quelques centaines d'utilisateurs actifs.
 2. **Un nœud + Postgres + S3** : plusieurs milliers. On monte en puissance la machine.
-3. **Plusieurs nœuds** *(plus tard)* : chaque page ou organisation est routée vers un nœud (« un processus par document », comme Figma), avec diffusion inter-nœuds via Postgres LISTEN/NOTIFY ou NATS.
+3. **Plusieurs nœuds** *(plus tard)* : chaque page ou espace est routé vers un nœud (« un processus par document », comme Figma), avec diffusion inter-nœuds via Postgres LISTEN/NOTIFY ou NATS.
 
 ### 7.4 Sauvegardes, mises à jour, migrations
 - `mementum backup` (à chaud, cohérent) vers un disque ou S3, planifiable dans l'admin. Compatible Litestream pour la réplication continue de SQLite.
@@ -780,15 +802,15 @@ mementum/
 | Phase | Nom | Contenu | Critère de fin |
 |---|---|---|---|
 | **P0** | Spike de validation (2–3 semaines, jetable) | BlockNote + Yjs ⇄ serveur yrs ⇄ SQLite. Aller-retour MMD sur 20 types de blocs. Édition d'un agent (`str_replace`) en pair CRDT pendant qu'un humain tape. Base de 100 000 lignes JSON + index sur un Pi 4. Re-benchmark Yjs / Loro sur une page de 10 000 blocs | Les 4 mesures sont chiffrées et les choix du §5.2 confirmés ou corrigés |
-| **P1** | « Écrire ensemble » (MVP) | Instance, organisations, coffres privés et partagés, comptes locaux + passkeys. Arbre de pages, éditeur avec les blocs de base, temps réel et présence, commentaires, historique simple, corbeille, recherche plein texte. **Import d'un vault Obsidian et des pages Notion** (§4.6), export `.mementum`. **MCP v1** (search, fetch, create_pages, update_page, manage_pages, workspace_info) avec jetons personnels. Image Docker | Lenny et 3 personnes l'utilisent une semaine à la place de Notion, et Claude Code édite une page pendant qu'un humain tape, sans perte |
+| **P1** | « Écrire ensemble » (MVP) | Instance, espaces (plusieurs par compte, membres et invités, pages privées et partagées), comptes locaux + passkeys. Arbre de pages, éditeur avec les blocs de base, temps réel et présence, commentaires, historique simple, corbeille, recherche plein texte. **Import d'un vault Obsidian et des pages Notion** (§4.6), export `.mementum`. **MCP v1** (search, fetch, create_pages, update_page, manage_pages, workspace_info) avec jetons personnels, limitables à un espace ou à des pages. Image Docker | Lenny et 3 personnes l'utilisent une semaine à la place de Notion, et Claude Code édite une page pendant qu'un humain tape, sans perte |
 | **P2** | « Bases de données » | Bases et sources, propriétés (relations, rollups, sous-ensemble des formules), vues tableau, kanban, liste, galerie, calendrier, filtres, tris et groupes, vues liées, templates, import CSV, **import des bases Notion**. Outils MCP des bases (query SQL compris), API REST | Une base de 100 000 lignes respecte les budgets du §5.10 sur un VPS à 2 vCPU |
-| **P3** | « Organisations » | Permissions fines, groupes, invités, exceptions de partage par page, liens publics, publication web. **Suggestions**, boîte de réception, frise d'historique. OIDC + SAML, journal d'audit, panneau d'admin | Une organisation de 50 personnes avec des invités, migrée depuis Notion |
-| **P4** | « Agents » | Passerelle IA, agents d'espace (identité, parrain, politiques), mode suggestion par défaut, annulation par exécution, Q&R avec citations, propriétés IA, déclencheurs. OAuth MCP + CIMD, recherche hybride, contrôle de la règle des deux | La suite d'évals (§10) atteint ≥ 90 % de réussite avec Claude et ≥ 70 % avec un modèle local via Ollama |
+| **P3** | « Organisations » | Permissions fines, groupes, espaces d'équipe, membres restreints, sous-pages plus fermées que leur parent, liens publics, publication web. **Suggestions**, boîte de réception, frise d'historique. OIDC + SAML, journal d'audit, panneau d'admin | Une organisation de 50 personnes avec des invités, migrée depuis Notion |
+| **P4** | « Agents » | Passerelle IA, agents d'espace (identité, parrain, politiques, jetons d'intégration), mode suggestion par défaut, annulation par exécution, Q&R avec citations, propriétés IA, déclencheurs. OAuth MCP + CIMD, recherche hybride, contrôle de la règle des deux | La suite d'évals (§10) atteint ≥ 90 % de réussite avec Claude et ≥ 70 % avec un modèle local via Ollama |
 | **P5** | « Mementum 1.0 » | Vues frise, graphique, carte, formulaire, fil et tableau de bord. Formules complètes, boutons, automatisations, webhooks, permissions par ligne. Hors ligne complet, appli Tauri, PWA mobile soignée. Passe de performance, Postgres + S3 | Parité avec le cœur de Notion (§4.5) et budgets tenus |
 | **Cloud** | « Mementum Cloud » (en parallèle de la P4) | Service `mementum-cloud` : inscription, Stripe, création et mise en veille des instances, sauvegardes S3, domaines personnalisés, tableau de bord, bouton « Passer en auto-hébergement ». Pages légales (CGU, confidentialité, DPA). Bêta fermée dès que la P3 est stable | 10 organisations bêta hébergées pendant un mois sans incident, et une migration cloud → auto-hébergé réussie de bout en bout |
 | **+** | Après la 1.0 | Mobile natif, fédération (Mementum Link), bases synchronisées depuis des API externes, notes de réunion (Whisper local), mode présentation, permissions par colonne, SCIM, tableau blanc | — |
 
-**Avancement de la P1** (9 novembre 2026). La phase est découpée en 7 lots : socle et édition en direct ; comptes, organisations, coffres, droits et corbeille ; collaboration et blocs riches ; recherche ; agents ; imports et export ; livraison. Le lot 1 ([plan](../superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](../superpowers/logs/2026-11-09-p1-lot1-ledger.md)) est fait : ses 10 tâches sont closes, et la relecture finale de toute la branche est faite, corrections comprises. Il livre 7 crates (`mementum-schema`, `-md`, `-crdt`, `-store`, `-sync`, `-server`, `-cli`) et le client `apps/web` : l'arbre de pages, l'édition à plusieurs en direct et le format MMD de la P1 (§6.2), sans comptes ni droits. Limites connues laissées par ce lot :
+**Avancement de la P1** (9 novembre 2026). La phase est découpée en 7 lots : socle et édition en direct ; comptes, espaces, droits et corbeille ; collaboration et blocs riches ; recherche ; agents ; imports et export ; livraison. Le lot 1 ([plan](../superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](../superpowers/logs/2026-11-09-p1-lot1-ledger.md)) est fait : ses 10 tâches sont closes, et la relecture finale de toute la branche est faite, corrections comprises. Il livre 7 crates (`mementum-schema`, `-md`, `-crdt`, `-store`, `-sync`, `-server`, `-cli`) et le client `apps/web` : l'arbre de pages, l'édition à plusieurs en direct et le format MMD de la P1 (§6.2), sans comptes ni droits. Limites connues laissées par ce lot :
 - **R39** : une édition faite sur un bloc pendant qu'un autre client le déplace est perdue (§11) ; à traiter au lot 3 ;
 - **R40** : la réécriture complète d'une page de 10 000 blocs bloque l'acteur de la page 2,5 à 4 s selon la machine et sa charge (§5.10) ; remède prévu au lot 5, une écriture MMD par différence ;
 - **R41** : `PUT /mmd` refuse une prop hors registre (§6.2, « Limites connues ») ; à lever quand le schéma du client saura la porter ;
@@ -843,11 +865,21 @@ mementum/
   - **Déjà pris** : `mementum.com`, `mementum.org` et le compte GitHub `mementum`.
   - **Homonymes, hors de notre catégorie** : un mémo vocal pour Mac (2013) et un programme santé iOS d'entraînement de la mémoire (Cogniss, 2025). Risque faible.
 - **Direction visuelle : A « Papier »** (§4.3).
-- **Coffres façon Obsidian**, partageables avec l'organisation, des groupes ou des personnes (§4.4). Idée de Lenny, validée sur le principe.
 - **Mementum autonome, sans miroir en fichiers** : on entre par l'**import Notion et Obsidian** dès la P1 (§4.6), on sort par l'export.
 - **Serveur MCP dès la première version** (P1), complété jusqu'en P4.
 - **Licence AGPL-3.0** pour le serveur et l'application web, avec **Apache-2.0** pour le SDK et la spec MMD, **DCO sans CLA**, aucune fonction payante (§3.1).
 - **Modèle économique** : auto-hébergement gratuit avec toutes les fonctionnalités, et **Mementum Cloud**, une offre hébergée payante pour ceux qui ne veulent pas gérer de serveur (§7.6).
+
+### Demande d'Alex (2026-11-09)
+- **Espaces façon Notion**, à la place des organisations et des coffres (§4.1, §4.4). Sa demande : se faire plusieurs espaces (« Perso », « Pro »), demander à Claude Code de verser du contenu dans l'un d'eux, inviter des gens dans un espace ou sur une page de l'espace, ouvrir des accès d'API sur un espace ou sur des pages, « vraiment comme Notion ».
+  - Les **coffres façon Obsidian** étaient une idée de Lenny, validée sur le principe. Il en reste les conventions d'Obsidian (liens `[[…]]`, rétroliens, vue graphe, dossiers, frontmatter, callouts, tags), le modèle d'espace « LLM wiki » et l'absence de miroir en fichiers.
+  - **À confirmer avec Lenny** (§13).
+  - **Choix de rédaction** faits pour traduire la demande, à relire :
+    - l'espace remplace aussi l'organisation, pas seulement le coffre ;
+    - les trois sections « Espace », « Partagé », « Privé », déduites des accès ;
+    - le premier espace créé à l'inscription, et la création d'espaces que l'admin d'instance peut réserver ;
+    - l'admin d'instance ne lit pas, par l'application, les pages d'un espace dont il n'est pas membre (§5.6) ;
+    - la répartition par phases (§4.5) : invités sur une page et jetons personnels limités à un espace ou à des pages dès la P1 ; groupes, espaces d'équipe et sous-pages plus fermées en P3 ; jetons d'intégration en P4.
 
 ### Mes choix (à relire)
 1. **Serveur Rust en binaire unique**, SQLite par défaut et Postgres en option.
@@ -868,4 +900,6 @@ mementum/
 ---
 
 ## 13. Questions ouvertes pour Lenny
-Aucune question bloquante pour commencer. À trancher avant d'ouvrir Mementum Cloud (§7.6) : les prix, une éventuelle offre gratuite, l'hébergeur et la structure juridique pour facturer.
+- **Espaces façon Notion à la place des coffres façon Obsidian** (demande d'Alex du 2026-11-09, §4.4 et §12) : à confirmer. Le lot 2 de la P1 est planifié sur ce modèle.
+
+Aucune autre question bloquante pour commencer. À trancher avant d'ouvrir Mementum Cloud (§7.6) : les prix, une éventuelle offre gratuite, l'hébergeur et la structure juridique pour facturer.

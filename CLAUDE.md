@@ -17,10 +17,10 @@ Tu reprends **Mementum**, un espace de travail open source façon Notion, auto-h
 - **Décisions de Lenny** (propriétaire du projet), à ne pas remettre en cause sans lui :
   - licence AGPL-3.0 ;
   - auto-hébergement gratuit avec toutes les fonctionnalités, et Mementum Cloud payant (le cloud ne vend jamais de fonctions) ;
-  - coffres façon Obsidian ;
   - pas de miroir en fichiers, mais import Notion et Obsidian ;
   - MCP dès la phase 1 ;
   - design A « Papier ».
+- **Demande d'Alex (2026-11-09), à confirmer avec Lenny** : des **espaces façon Notion** à la place des organisations et des coffres façon Obsidian (conception, §4.4 et §12). Les coffres étaient une idée de Lenny. Dans le code du lot 1, `vaults` et `vault_id` datent d'avant ce changement : le lot 2 les renomme.
 - **Commits** : petits, un sujet chacun, **sans aucune ligne d'attribution d'outil** (ni `Co-Authored-By: Claude…`, ni `Claude-Session:`, ni « Generated with Claude Code »), dans les commits comme dans les PR. Ne jamais pousser de secrets (clés, jetons, mots de passe).
 
 ## Pièges déjà rencontrés en phase 0

@@ -8,13 +8,15 @@ Trois directions, toutes calquées sur la logique de Notion pour ne pas dépayse
 
 Elles montrent toutes la même scène : le coffre « Projet Mementum », une page avec la présence en direct (curseur de Marie), une suggestion de l'agent Scribe, la base « Tâches » et le menu de partage ouvert.
 
+> Les maquettes datent d'avant l'amendement « espaces façon Notion » (conception, §4.4) : là où elles disent « coffre », lire « espace », et la bascule « Tout le coffre / Cette page seulement » du menu Partager disparaît.
+
 | Fichier | Direction | En bref |
 |---|---|---|
 | [`maquettes/Main.dc.html`](maquettes/Main.dc.html) | **A · Papier : RETENUE** | La plus proche de Notion. Barre latérale claire `#F6F5F1`, page blanche, police Inter, accent vert `#23704F`, base en tableau |
 | [`maquettes/Atelier.dc.html`](maquettes/Atelier.dc.html) | B · Atelier | Coffres mis en avant (couleur, membres, partage), panneau d'activité des agents à droite, base en kanban |
 | [`maquettes/Nuit.dc.html`](maquettes/Nuit.dc.html) | C · Nuit | Sombre par défaut, page centrée, barre IA flottante (Ctrl+K), base en liste |
 
-La direction A est décrite en détail dans la conception, §4.3 : couleurs, typographie, menu Partager avec la bascule « Tout le coffre / Cette page seulement », suggestions d'agent.
+La direction A est décrite en détail dans la conception, §4.3 : couleurs, typographie, menu Partager, suggestions d'agent.
 
 ## Format des fichiers
 

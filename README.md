@@ -5,9 +5,9 @@
 Mementum est un espace de travail **open source et auto-hébergeable** de la famille de Notion :
 - pages en blocs ;
 - bases de données relationnelles (relations, rollups, formules, vues) ;
-- organisations et équipes ;
+- équipes et permissions ;
 - édition à plusieurs en direct ;
-- contenu rangé dans des **coffres** à la manière d'Obsidian, privés ou partagés.
+- contenu rangé dans des **espaces** à la manière de Notion : chacun crée les siens (« Perso », « Pro »…) et y invite qui il veut, dans tout l'espace ou sur une page.
 
 Il est **conçu dès le départ pour que les agents IA lisent et écrivent les pages proprement** : format Markdown canonique (MMD), serveur MCP intégré, agents membres de l'espace avec des droits, un journal et un mode suggestion.
 
@@ -43,7 +43,7 @@ Le dossier `spike/` est le **prototype jetable** de la phase 0 : on en garde les
 | Modèle économique | Auto-hébergement **entièrement gratuit, avec toutes les fonctionnalités** ; offre hébergée payante **Mementum Cloud** pour ceux qui ne veulent pas gérer de serveur (le cloud vend l'hébergement, jamais des fonctions) |
 | Pile | Serveur **Rust** en binaire unique (Axum, tokio, yrs, sqlx), **SQLite** par défaut, Postgres et S3 en option ; client React + Vite + **BlockNote** ; cache SQLite WASM |
 | Temps réel | **Yjs** (CRDT) pour le texte des pages, confirmé par la phase 0 face à Loro ; journal d'opérations dont le serveur fait autorité pour l'arbre, les bases et les permissions |
-| Organisation du contenu | **Coffres** façon Obsidian, à la place des espaces d'équipe : « Mon coffre » privé, coffres partagés à toute l'organisation, à des groupes ou à des personnes, exceptions par page |
+| Organisation du contenu | **Espaces** façon Notion (demande d'Alex du 2026-11-09, à confirmer avec Lenny ; ils remplacent les organisations et les coffres façon Obsidian) : un compte a plusieurs espaces (« Perso », « Pro »), on invite quelqu'un dans l'espace ou sur une page, et les jetons d'API portent sur un espace ou sur des pages |
 | Autonomie | Pas de miroir en fichiers ; **import Notion et vault Obsidian dès la phase 1**, export complet sans perte |
 | IA | **Serveur MCP dès la phase 1** ; agents en mode suggestion par défaut ; IA indépendante du fournisseur (Claude, GPT, Mistral ou 100 % local via Ollama) |
 | Design | Direction **A « Papier »**, la plus proche de Notion pour ne pas dépayser |
@@ -155,7 +155,7 @@ L'éditeur de démo s'ouvre avec `cargo run --release -p spike-server --bin spik
 ## Prochaines étapes
 
 1. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11), à faire **avant la phase 2**, et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
-2. **Lot 2 de la phase 1** : comptes, organisations, coffres, droits et corbeille. Écrire son plan dans `docs/superpowers/plans/`, à partir de la conception et de ce que le [registre du lot 1](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md) lui reporte : écritures du store en transactions, version de schéma qu'un client ne doit pas pouvoir écraser, fusions de tableau écrites par un client Yjs.
+2. **Lot 2 de la phase 1** : comptes, espaces, droits et corbeille. Écrire son plan dans `docs/superpowers/plans/`, à partir de la conception et de ce que le [registre du lot 1](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md) lui reporte : écritures du store en transactions, version de schéma qu'un client ne doit pas pouvoir écraser, fusions de tableau écrites par un client Yjs.
 3. **Lots 3 à 7**, dans cet ordre : collaboration et blocs riches ; recherche ; agents (REST complet, MCP v1, jetons) ; imports et export ; livraison. Ils reprennent les limites connues du lot 1 :
    - lot 3 : déplacements de blocs sans perte d'édition (pistes (a) et (b) du Ruling R39, conception §11), et, là ou au lot 5, un porteur durable pour les props hors registre (Ruling R41) ;
    - lot 5 : écriture MMD par différence, pour ne plus bloquer une page pendant sa réécriture (Ruling R40).
