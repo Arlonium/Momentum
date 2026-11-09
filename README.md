@@ -22,7 +22,7 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 | Recherche (Notion 2026, alternatives open source, architecture temps réel, accès des agents IA) | ✅ faite : [`docs/research/`](docs/research/) |
 | Conception complète | ✅ validée : [`docs/specs/2026-11-09-mementum-design.md`](docs/specs/2026-11-09-mementum-design.md) |
 | Maquettes (3 directions, **A « Papier » retenue**) | ✅ faites : [`docs/design/`](docs/design/) |
-| Phase 0 : prototype jetable qui valide les choix techniques | ✅ faite sur PC : [`spike/RESULTS.md`](spike/RESULTS.md) ; ⏳ **mesures ARM à faire** |
+| Phase 0 : prototype jetable qui valide les choix techniques | ✅ faite sur PC et relue (relecture finale du 9 novembre, voir [`spike/RESULTS.md`](spike/RESULTS.md)) ; ⏳ **mesures ARM à faire** |
 | Phase 1 « Écrire ensemble » (MVP) | ⏭️ prochaine étape : écrire son plan |
 
 Aucun code de production n'existe encore. Le dossier `spike/` est un **prototype jetable** : on en garde les leçons, les fixtures et les tests d'aller-retour, pas le code.
@@ -96,10 +96,13 @@ pnpm exec playwright install chromium
 pnpm exec playwright test
 ```
 
+Les ports 5173 et 8080 doivent être libres : Playwright réutilise un serveur déjà lancé, même s'il appartient à un autre projet. Pour régénérer les fixtures BlockNote et Yjs : `EXPORT_FIXTURES=1 pnpm exec playwright test e2e/export-fixture.spec.ts`. Le test de la page de 10 000 blocs est ignoré tant que `measure` n'a pas créé la page `bench-10k`.
+
 Mesures (à refaire sur un Raspberry Pi 4 ou un VPS ARM, voir la fin de `spike/RESULTS.md`) :
 
 ```bash
 cd spike
+cargo build --release -p spike-server   # measure lance ce binaire
 cargo run --release -p spike-server --bin measure
 cargo test --release -p spike-db -- --ignored budgets_100k --nocapture
 cargo run --release -p spike-db -- bench --rows 100000
@@ -111,9 +114,11 @@ L'éditeur de démo s'ouvre avec `cargo run --release -p spike-server --bin spik
 ## Prochaines étapes
 
 1. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11) et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
-2. **Écrire le plan de la phase 1** « Écrire ensemble » à partir de la conception (§9, ligne P1) et de la section « Ce qui change pour la P1 » de `spike/RESULTS.md` :
-   - cache local et chargement paresseux des blocs ;
-   - déduplication des blocs côté serveur ;
+2. **Écrire le plan de la phase 1** « Écrire ensemble » à partir de la conception (§9, ligne P1) et de la section « Ce qui change pour la P1 » de `spike/RESULTS.md`, corrigée par la relecture finale. Points clés :
+   - fidélité du schéma : toutes les props, enfants pour tout bloc, saut de ligne, nœuds inconnus transportés tels quels, versionnage de schéma ;
+   - déplacements de blocs faits par le serveur (un déplacement concurrent perd des éditions) ;
+   - pages géantes : virtualisation ou découpage (le coût est la liaison avec l'éditeur, pas Yjs) ;
+   - un acteur par page pour les écritures, et une racine de page sûre avant la première synchro ;
    - rollups matérialisés (pour la P2).
 3. **Implémenter la phase 1** dans la structure cible (§8 de la conception), en repartant de zéro mais en reprenant les fixtures et les tests d'aller-retour MMD du prototype.
 

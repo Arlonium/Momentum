@@ -323,9 +323,9 @@ Mementum est autonome : il n'y a **pas de synchro permanente** avec un autre out
 | Couche | Choix | Pourquoi | Écarté |
 |---|---|---|---|
 | Serveur | **Rust** : Axum, tokio, sqlx | Binaire unique, faible mémoire (Pi), CRDT Rust mûr (yrs, utilisé par AppFlowy ; Zed et AFFiNE ont aussi des serveurs CRDT en Rust). Lenny connaît déjà Rust (Avero, Snoopr) | TypeScript + Hocuspocus (impose Postgres et un runtime plus lourd), Go (pas d'implémentation Yjs/Loro de premier plan), Elixir (distribution en binaire unique difficile) |
-| Contenu des pages | **Yjs** (client) + **yrs** (serveur, feature `sync`), derrière une façade `mementum-crdt`. **Confirmé par la P0** (`spike/RESULTS.md`). Côté BlockNote, on passe par le chemin Yjs 13 (`@blocknote/core/yjs`). Le serveur écrit la racine d'une page neuve (sinon deux clients sur une page vide créent deux racines et l'une est perdue) | Standard de fait (Outline, Docmost, Plane, La Suite Docs, AFFiNE…), liaison éditeur mûre. P0 : Yjs 3 à 16 fois plus rapide que Loro dès qu'on lit toute la page. Passer à Yjs 14 quand yrs le comprendra (yrs 0.28 ne lit pas le texte des nœuds Yjs 14) | Loro (arbre déplaçable sans doublons, mais plus lent en lecture complète et en fusion ; plan B via la façade), Automerge |
+| Contenu des pages | **Yjs** (client) + **yrs** (serveur, feature `sync`), derrière une façade `mementum-crdt`. **Confirmé par la P0** (`spike/RESULTS.md`). Côté BlockNote, on passe par le chemin Yjs 13 (`@blocknote/core/yjs`). Le serveur écrit la racine d'une page neuve (sinon deux clients sur une page vide créent deux racines et l'une est perdue) ; cela ne protège que les éditions faites après la première synchro (§11) | Standard de fait (Outline, Docmost, Plane, La Suite Docs, AFFiNE…), liaison éditeur mûre. P0 : Yjs 3 à 16 fois plus rapide que Loro dès qu'on lit toute la page. Passer à Yjs 14 quand yrs le comprendra (yrs 0.28 ne lit pas le texte des nœuds Yjs 14) | Loro (arbre déplaçable sans doublons ni éditions perdues, chargement paresseux plus de 20 fois plus économe, mais 3 à 16 fois plus lent dès qu'on lit toute la page ; plan B via la façade), Automerge |
 | Structure et bases | **Journal d'opérations dont le serveur fait autorité** (façon Linear/Figma) : version monotone par organisation, application optimiste côté client puis rebase, dernier écrivain gagnant par propriété | Permissions, requêtes serveur sur 100 000 lignes, formules : impossible proprement en tout-CRDT. Aucun moteur existant n'accepte SQLite par défaut (Zero, Electric : Postgres uniquement ; PowerSync : FSL) | Zero, ElectricSQL, PowerSync, Triplit (à l'arrêt), tout-CRDT façon Anytype |
-| Éditeur | **BlockNote** (cœur MPL-2.0) sur ProseMirror/Tiptap | Expérience Notion prête (menu `/`, poignées, imbrication) ; choisi par La Suite Docs (État français) | Tiptap nu (tout à construire), Lexical, BlockSuite (trop couplé à AFFiNE) |
+| Éditeur | **BlockNote** (cœur MPL-2.0) sur ProseMirror/Tiptap | Expérience Notion prête (menu `/`, poignées, imbrication) ; choisi par La Suite Docs (État français). Adaptations P0 : types custom (callout, equation, bookmark, pageLink, databaseRef, syncedBlock, toc, unknown, contenus en ligne mention et math), multi-colonnes via `@blocknote/xl-multi-column` (GPL-3.0). y-prosemirror supprime du document partagé les nœuds qu'il ne connaît pas : versionnage de schéma obligatoire (§11) | Tiptap nu (tout à construire), Lexical, BlockSuite (trop couplé à AFFiNE) |
 | Base serveur | **SQLite en WAL** par défaut, **PostgreSQL** en option, même schéma via sqlx | Zéro service à installer, sauvegarde continue avec Litestream (v0.5). Postgres pour les grosses instances | Postgres obligatoire |
 | Cache client | **SQLite WASM sur OPFS** dans un worker partagé (un seul écrivain) | Technique de Notion : navigation 20 % plus rapide, hors ligne | IndexedDB brut |
 | Permissions | **Tuples façon Zanzibar intégrés** à la base + héritage de l'arbre | Pas de service externe ; OpenFGA possible plus tard pour les très grosses organisations | SpiceDB (mode embarqué limité aux vérifications) |
@@ -395,9 +395,9 @@ Le client ouvre **une seule WebSocket**, multiplexée, encodée en MessagePack :
 - **Stockage** *(mon choix, confirmé par la P0 sur PC)* : `rows.props_json` (JSON typé selon le schéma), avec des **index d'expression** créés automatiquement sur les propriétés filtrées ou triées le plus souvent (SQLite JSON1 / Postgres JSONB + GIN). Les relations vont dans une table d'arêtes.
   - Mesures P0 sur 100 000 lignes (PC) : fenêtre triée 2,5 ms, filtre ET/OU + tri 127 ms, groupes 13 ms.
   - Les requêtes doivent reprendre **l'expression exacte de l'index** (un `CAST` faisait passer les groupes de 13 à 707 ms).
-  - La table SQL typée par source ne gagne qu'environ 20 % : alternative abandonnée.
+  - La table SQL typée par source gagne environ 20 % sur les filtres, 2 fois sur les groupes et 3 fois sur les rollups à la volée : elle reste le **repli** si les mesures ARM échouent.
   - **Mesures ARM encore à faire.**
-- **Rollups et formules : toujours matérialisés** (obligatoire depuis la P0). Un rollup calculé à la lecture prend 1,9 s sur 100 000 lignes en JSON et 0,6 s en table typée. Les valeurs vivent dans `computed_json` et sont recalculées par le graphe de dépendances décrit plus bas.
+- **Rollups et formules : toujours matérialisés** (obligatoire depuis la P0 pour les rollups ; les formules, non mesurées, suivent par prudence). Un rollup calculé à la lecture prend 1,9 s sur 100 000 lignes en JSON et 0,6 s en table typée. Les valeurs vivent dans `computed_json` et sont recalculées par le graphe de dépendances décrit plus bas.
 - **Moteur de requêtes** (`mementum-query`) : filtre (même JSON que l'interface) → SQL paramétré. Tris, groupes et pagination par curseur côté serveur. Pour une base petite et en cache, le même moteur tourne en WASM dans le client et répond hors ligne.
 - **Formules** (`mementum-formula`) : analyseur, typage, puis évaluation compilée en bytecode. Le même code Rust tourne sur le serveur et en WASM dans le client, pour des résultats identiques partout. Les valeurs calculées sont stockées dans `computed_json` et invalidées par graphe de dépendances (propriété → formule → rollup → ligne liée).
 - **SQL en lecture seule pour les agents** : chaque source de données est exposée comme une table virtuelle (`SELECT … FROM "Tâches"`), avec les permissions appliquées (lignes et colonnes filtrées). Notion propose la même chose avec du SQLite en lecture seule.
@@ -483,23 +483,42 @@ Penser à la migration des données.
 Le serveur tourne sur un Raspberry Pi 4.
 </toggle>
 
-<database id="db_Taches" view="Tableau" />
+<database id="db_Taches" view="Tableau" anchor="b7" />
 
 Voir <mention type="page" id="pg_Spec01">Spécification</mention>. ^b8
 ```
 
-- **Balises** : `<callout>`, `<toggle>`, `<columns>/<column ratio>`, `<tabs>/<tab>`, `<page>`, `<database>`, `<mention>`, `<embed>`, `<synced ref>`, `<file>`, `<span color>`, `<comment>` (fils ancrés, sur demande).
+- **Balises** : `<callout>`, `<toggle>`, `<columns>/<column width>`, `<tabs>/<tab>`, `<page>`, `<database>`, `<mention>`, `<embed>`, `<synced ref>`, `<file>`, `<span color>`, `<comment>` (fils ancrés, sur demande).
 - **Échappatoire sans perte** : `<block type="x" id="…" data="…"/>` pour tout bloc sans équivalent (bloc d'une extension, par exemple). L'agent doit le laisser tel quel ; le supprimer exige `allow_deleting_content`.
 - **Ancres optionnelles** : à la lecture, avec `anchors: "block"`, chaque bloc reçoit un alias court local à la page (`^b4`, la syntaxe des références de bloc d'Obsidian). Sans ancres, le Markdown reste propre et économe en tokens.
-- **`revision`** : une poignée opaque, dérivée du vecteur d'état Yjs, renvoyée à chaque lecture. Les pages très longues sont paginées (`truncated: true`, `<unloaded id="…"/>`).
+- **`revision`** : une poignée opaque, hash de l'instantané Yjs (vecteur d'état **et** suppressions, §6.3), renvoyée à chaque lecture. Les pages très longues sont paginées (`truncated: true`, `<unloaded id="…"/>`).
 - La **spécification MMD** est publiée sous Apache-2.0 et exposée aux agents comme ressource MCP (`mementum://spec/mmd`), pas dans les descriptions d'outils.
-- **Règles de format établies en P0** (convertisseur `spike/mmd`, aller-retour validé sur 12 800+ cas aléatoires) :
+- **Règles de format établies en P0** (convertisseur `spike/mmd`, aller-retour MMD ⇄ arbre validé sur 12 800+ cas aléatoires ; la couche Yjs n'est couverte que par la fixture, et le frontmatter n'est pas encore géré) :
   - **Marques** : en Markdown (`**`, `*`, `~~`, `` ` ``) quand le texte marqué commence et finit par une lettre ou un chiffre et qu'il est entouré de texte sans marque ; sinon en balises (`<strong>`, `<em>`, `<s>`, `<code>`). `<u>` et `<span color>` sont toujours en balises.
   - **Espaces en début et fin de contenu** écrites `&#32;` (Markdown les supprimerait). Un paragraphe vide s'écrit `<p/>`.
   - **Ancres** : ` ^bN` en fin de ligne pour les blocs de texte, `^bN` sur la ligne suivante pour le code, les équations, les séparateurs, les images et les tableaux, attribut `id="bN"` pour les balises, attribut `anchor="bN"` pour `<page>` et `<database>` (leur `id` est déjà pris).
   - **Indentation** : les enfants d'un élément numéroté sont indentés de la largeur du marqueur (« 1. » = 3 espaces).
   - **Maths en ligne** `$…$` : LaTeX à accolades équilibrées.
   - **Échappement** : un « ! » juste avant un lien est échappé (sinon il serait relu comme une image).
+  - **Texte littéral** : `` \ * _ ` [ ] ~ $ | ^ `` sont précédés de `\` ; `<` s'écrit `&lt;` et `&` s'écrit `&amp;`. Dans un attribut, `&`, `"` et `<` s'écrivent `&amp;`, `&quot;` et `&lt;`.
+  - **Début de ligne** : un contenu qui commence par `#`, `>`, `-`, `+`, `N.` ou `N)` est échappé (`\#`, `1\.`) pour ne pas être lu comme un bloc.
+  - **Blocs de code** : clôture de backticks plus longue d'un cran que la plus longue suite de backticks du code (3 au minimum).
+  - **Listes** : les éléments consécutifs d'un même type forment une seule liste, sans ligne vide entre eux.
+  - **Toggle** : le titre est du MMD en ligne écrit dans l'attribut `title`. **Callout** : le premier paragraphe est le contenu du callout, les suivants sont ses enfants.
+  - **Enfants** : seuls les listes, toggle, synced, columns, column et callout ont des enfants.
+  - **Tableaux** : la première ligne est toujours l'en-tête. **Colonnes** : `width` est omis quand il vaut 1.
+  - **Texte brut** (sans marques) : titre d'un `<page>` et texte alternatif d'une image.
+- **Limites connues du convertisseur P0, à lever en P1** (relecture finale) :
+  - **Pertes silencieuses** :
+    - enfants d'un bloc non conteneur (paragraphe, titre, citation, code, image, tableau, bloc inconnu), alors que BlockNote permet d'imbriquer sous tout bloc ;
+    - props BlockNote hors modèle (couleurs et alignement par bloc, titre repliable, `headerRows` et largeurs de colonnes, `caption` et `name` des images, surlignage) ;
+    - saut de ligne `hardBreak` ;
+    - H5 et H6, ramenés à H4 ;
+    - `href` contenant des espaces, des `)` non appariées, des entités ou des `\` ;
+    - deux liens voisins de même `href`, fusionnés.
+  - **Bloc inconnu** : seul notre bloc `unknown` (`<block … data=…/>`) survit. Un nœud BlockNote d'un type inconnu du serveur perd ses attributs et son contenu, et y-prosemirror supprime du document partagé tout nœud inconnu du client.
+  - **Ambiguïté** : un callout vide dont le premier enfant est un paragraphe s'écrit comme un callout avec contenu. Correction prévue : `<p/>` en tête du callout vide.
+  - **Entrée non canonique** : une entrée d'agent hors de la forme canonique est déformée sans erreur (`* item` devient `item`). En P1, elle doit être refusée (422) ou normalisée de façon documentée.
 
 ### 6.3 Opérations d'édition
 Un seul outil `update_page` accepte une liste d'opérations, **atomique** (jusqu'à 100 opérations par appel) :
@@ -528,8 +547,9 @@ Un seul outil `update_page` accepte une liste d'opérations, **atomique** (jusqu
 - **Concurrence** : `on_conflict: "rebase"` (par défaut). Si les blocs touchés n'ont pas changé depuis `base_revision`, le serveur applique ; sinon il renvoie un conflit avec les extraits à jour. `"fail"` rejette dès que le document a changé (sémantique de Google Docs).
   - *Validé en P0* : la `revision` est le hash de l'instantané Yjs complet (vecteur d'état **et** suppressions, sinon une suppression pure ne change pas la révision).
   - L'appel est atomique (répétition à blanc avant application).
-  - Les remplacements se font aux positions UTF-16.
-  - Un agent qui édite pendant qu'un humain tape : 0 perte, visible en 7 à 15 ms.
+  - Les remplacements se font aux positions UTF-16, comptées sur le **texte brut** du bloc (le spike comptait sur `get_string()`, qui écrit les marques en balises, et corrompait le texte après du gras ou une mention : corrigé à la relecture).
+  - Un agent qui édite pendant qu'un humain tape : 0 perte, visible en 13 à 16 ms (p95, depuis l'envoi de l'appel).
+  - La répétition à blanc copie le document à chaque appel : c'est un raccourci de spike. En P1, valider sans copie, et calculer révision et instantané dans la même section critique que l'écriture. Les ids des blocs insérés par un agent sont régénérés par le serveur.
 - **Réponse** : le MMD des blocs touchés après l'édition (ou la page entière si elle est petite), la nouvelle `revision`, des `warnings[]` (`no_match`, `ambiguous_match`, `stale_anchor`) et les `suggestion_ids` créés.
 
 ### 6.4 Fusion avec l'édition humaine en direct
@@ -747,11 +767,14 @@ mementum/
 | Périmètre énorme (Notion = des centaines de personnes) | Phases livrables, P1 utile seule, IA et bases ensuite. On ne court pas après les fonctions annexes (Mail, Calendar) |
 | BlockNote encore en 0.x (API qui bouge) | `mementum-schema` comme couche d'isolation ; repli possible sur Tiptap nu |
 | **BlockNote passe à Yjs 14** (défaut en 0.57) alors que yrs 0.28 ne lit pas le texte des nœuds Yjs 14 *(trouvé en P0)* | Rester sur le chemin Yjs 13 (`@blocknote/core/yjs`) ; suivre le support Yjs 14 de yrs ; façade `mementum-crdt` |
-| **Déplacement concurrent d'un bloc = bloc dupliqué** avec Yjs *(confirmé en P0 : 25 sur 25)* | Passe serveur après fusion : un même id de `blockContainer` en double → une seule copie gardée (P1) ; déplacements de pages faits par le serveur |
-| Pages géantes lentes à ouvrir (10 000 blocs ≈ 1,3 s en P0, dont 0,9 s de synchro) | Cache local SQLite WASM (§5.9) et chargement paresseux des blocs, dès la P1 |
-| Bases JSON sur SQLite trop lentes à 100 000 lignes sur un Pi | Budgets tenus sur PC en P0 ; **mesure ARM à faire** (risque : filtre + tri) ; rollups matérialisés |
-| ~~Fidélité MMD ⇄ Yjs~~ | Levé en P0 : aller-retour sans perte sur 20 types, 12 800+ cas proptest |
-| ~~Choix CRDT~~ | Levé en P0 : Yjs |
+| **Déplacement concurrent d'un bloc = bloc dupliqué et éditions perdues** avec Yjs *(confirmé en P0 : 25 doublons sur 25 ; perte des éditions relevée à la relecture)* | Déplacements de blocs faits par le serveur (opération dédiée sur l'état fusionné) ; passe de déduplication en filet de sécurité ; test qui compte les éditions conservées ; déplacements de pages faits par le serveur |
+| Pages géantes lentes à ouvrir (10 000 blocs ≈ 1,3 s en P0 ; le coût est la liaison y-prosemirror, pas Yjs, qui charge en 34 ms) | Virtualisation de l'affichage ou découpage des pages géantes, sinon budget revu pour elles ; le cache local (§5.9) n'aide que pour une page déjà vue |
+| Bases JSON sur SQLite trop lentes à 100 000 lignes sur un Pi | Budgets tenus sur PC en P0 ; **mesure ARM à faire** (risque : filtre + tri) ; rollups matérialisés ; table typée par source en repli |
+| **Fidélité MMD ⇄ Yjs** *(rouvert à la relecture de la P0)* | Sans perte pour le sous-ensemble modélisé (20 types, 12 800+ cas proptest MMD ⇄ arbre). Pertes silencieuses hors modèle (§6.2, « Limites connues ») : `mementum-schema` modélise toutes les props ou porte un sac de props opaque, syntaxe d'enfants pour tout bloc, `<br/>`, nœuds inconnus transportés tels quels ; proptest qui traverse aussi la couche Yjs |
+| **Client plus ancien qui efface les blocs d'une version plus récente** (y-prosemirror supprime du document partagé tout nœud ou marque inconnus) *(relevé à la relecture de la P0)* | Versionnage du schéma ; un client dont le schéma est plus ancien que celui de la page passe en lecture seule |
+| **Racine de page créée par un client avant la première synchro** (rendu local d'abord, §5.9) | Racine déterministe (identifiant client et horloge fixes) ou édition bloquée jusqu'à la synchro ; e2e « taper avant la synchro » |
+| Erreur « RangeError » de y-prosemirror après une fusion distante, qui peut effacer un changement distant *(à confirmer)* | Reproduire en P1, suivre les versions de y-prosemirror, surveiller le message dans les e2e |
+| ~~Choix CRDT~~ | Levé en P0 : Yjs (règle de décision amendée à la relecture, `spike/RESULTS.md`, notes T7) |
 | Moteur de formules complexe | Sous-ensemble en P2, complet en P5, vecteurs de test |
 | Sécurité IA (injection, exfiltration) | Contenu en attente inerte, règle des deux, permissions côté serveur, agents sans accès par défaut |
 | Abandon (risque n°1 des projets open source) | Pile courte, une seule langue serveur, doc soignée, DCO, gouvernance ouverte dès que la communauté existe |

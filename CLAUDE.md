@@ -28,16 +28,24 @@ Tu reprends **Mementum**, un espace de travail open source façon Notion, auto-h
 - **yrs** : compiler avec la feature `sync` (sinon `Awareness` ne peut pas être partagé entre tâches tokio). Toujours créer les `Doc` avec `OffsetKind::Utf16`, pour compter les positions comme Yjs dans le navigateur.
 - **yrs, interblocage** : appeler `get_or_insert_xml_fragment` (et les autres `get_or_insert_*`) **avant** d'ouvrir une transaction. Avec la feature `sync`, l'appel attend le verrou que la transaction détient déjà.
 - **yrs** : l'ordre des attributs dans `get_string()` n'est pas stable, donc ne jamais comparer ces chaînes dans un test.
+- **yrs, positions** : `XmlTextRef::get_string()` écrit les marques en balises (`<bold>…</bold>`, `<link href=…>`). Ne jamais calculer une position dessus : compter sur le texte brut issu de `diff()`. Le spike corrompait ainsi le texte après du gras ou une mention, en répondant 200 (trouvé à la relecture finale).
 - **BlockNote 0.57** utilise Yjs 14 RC par défaut (`@blocknote/core/y`). On utilise le chemin **Yjs 13** : `withCollaboration` de `@blocknote/core/yjs`, avec `y-prosemirror` 1.x. yrs 0.28 ne lit pas le texte des nœuds Yjs 14.
-- **Page neuve** : c'est le serveur qui écrit la racine BlockNote (`blockGroup > blockContainer > paragraph`). Sinon deux clients créent chacun la leur et ProseMirror en supprime une, avec son texte.
-- **Déplacements concurrents** : avec Yjs, deux personnes qui déplacent le même bloc le dupliquent (suppression + réinsertion). Il faut une passe de déduplication côté serveur (prévue en P1).
+- **Page neuve** : c'est le serveur qui écrit la racine BlockNote (`blockGroup > blockContainer > paragraph`). Sinon deux clients créent chacun la leur et ProseMirror en supprime une, avec son texte. Cela ne protège que les éditions faites **après la première synchro** : avec le rendu local d'abord, il faut une racine déterministe ou une édition bloquée jusqu'à la synchro.
+- **Déplacements concurrents** : avec Yjs, un déplacement vaut copie + suppression. Deux personnes qui déplacent le même bloc le dupliquent, et **les éditions faites en même temps sur l'original sont perdues**. Une déduplication ne les récupère pas : les déplacements de blocs doivent passer par le serveur.
+- **y-prosemirror supprime du document partagé** tout nœud ou marque qu'il ne sait pas construire (`sync-plugin.js`, `catch` → `_item.delete`). Un client plus ancien efface donc chez tout le monde les blocs d'une version plus récente : versionnage de schéma obligatoire, client trop ancien en lecture seule.
 - **Format Yjs de BlockNote** : attributs typés (`level: 4`, `checked: true`). Marques simples = `{}`, couleur = `{"stringValue": …}`, lien = `{"href": …}`. `columnList` et `column` ne sont pas enveloppés dans un `blockContainer`. Détail dans `spike/mmd/src/ydoc.rs`.
 - **MMD** : règles de format (espaces de bord `&#32;`, `<p/>`, ancres, marques en Markdown ou en balises…) dans la conception, §6.2.
 - **sqlx 0.9** : le SQL construit dynamiquement doit être marqué `sqlx::AssertSqlSafe(...)`. Valide les noms de colonnes et lie toujours les valeurs en paramètres.
 - **SQLite + JSON** : une requête doit reprendre **l'expression exacte** de l'index d'expression (un `CAST` le rend inutilisable : 13 ms → 707 ms). Rollups et formules toujours matérialisés.
 - **Révision pour les agents** : hash de l'instantané Yjs (vecteur d'état **et** suppressions), pas du seul vecteur d'état.
 - **Shell (Git Bash sous Windows)** : pas de backticks dans un heredoc non protégé (`<<EOF`), ils sont exécutés. Utilise `<<'EOF'`, ou écris les fichiers avec l'outil d'écriture.
+- **Fins de ligne** : `.gitattributes` impose LF. Les fixtures MMD sont comparées octet pour octet au rendu, et une extraction en CRLF (Git pour Windows règle `core.autocrlf=true` par défaut) fait échouer `fixture_is_canonical`.
 
 ## Tester
 
 Voir la section « Lancer le prototype de la phase 0 » du README. Les tests e2e Playwright démarrent eux-mêmes le serveur Rust (port 8080) et Vite (port 5173).
+
+- **Ports** : Playwright réutilise tout serveur déjà présent sur 5173 ou 8080 (`reuseExistingServer`). Si un autre projet occupe 5173, les tests visent une autre application et échouent sur des délais dépassés : vérifie que les ports sont libres.
+- **`measure`** lance le binaire `spike-server` posé à côté de lui : `cargo build --release -p spike-server` d'abord. Il crée aussi la page `bench-10k` dont l'e2e `open_10k_block_page` a besoin (sinon le test est ignoré).
+- **Fixtures** : l'e2e `export_all_blocks_fixture` ne les régénère que sur demande (`EXPORT_FIXTURES=1`), car il réécrit des fichiers commités avec des ids neufs.
+- **pnpm** absent du PATH : `corepack pnpm …`.
