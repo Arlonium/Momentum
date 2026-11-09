@@ -108,30 +108,41 @@ impl Store {
         self.pool.close().await;
     }
 
-    /// Valeurs des pragmas de la connexion qui répond : `(journal_mode, synchronous,
-    /// foreign_keys, busy_timeout)`. Sert aux tests.
+    /// Valeurs des pragmas de `connections` connexions du pool, tenues toutes
+    /// à la fois (donc distinctes) : `(journal_mode, synchronous,
+    /// foreign_keys, busy_timeout)` pour chacune. Sert aux tests.
     #[doc(hidden)]
-    pub async fn pragmas(&self) -> Result<(String, i64, i64, i64), StoreError> {
+    pub async fn pragmas(
+        &self,
+        connections: usize,
+    ) -> Result<Vec<(String, i64, i64, i64)>, StoreError> {
         use sqlx::Row;
-        let mut conn = self.pool.acquire().await?;
-        let mut out = (String::new(), 0, 0, 0);
-        out.0 = sqlx::query("PRAGMA journal_mode")
-            .fetch_one(&mut *conn)
-            .await?
-            .get(0);
-        out.1 = sqlx::query("PRAGMA synchronous")
-            .fetch_one(&mut *conn)
-            .await?
-            .get(0);
-        out.2 = sqlx::query("PRAGMA foreign_keys")
-            .fetch_one(&mut *conn)
-            .await?
-            .get(0);
-        out.3 = sqlx::query("PRAGMA busy_timeout")
-            .fetch_one(&mut *conn)
-            .await?
-            .get(0);
-        Ok(out)
+        let mut held = Vec::with_capacity(connections);
+        for _ in 0..connections {
+            held.push(self.pool.acquire().await?);
+        }
+        let mut all = Vec::with_capacity(connections);
+        for conn in &mut held {
+            let mut out = (String::new(), 0, 0, 0);
+            out.0 = sqlx::query("PRAGMA journal_mode")
+                .fetch_one(&mut **conn)
+                .await?
+                .get(0);
+            out.1 = sqlx::query("PRAGMA synchronous")
+                .fetch_one(&mut **conn)
+                .await?
+                .get(0);
+            out.2 = sqlx::query("PRAGMA foreign_keys")
+                .fetch_one(&mut **conn)
+                .await?
+                .get(0);
+            out.3 = sqlx::query("PRAGMA busy_timeout")
+                .fetch_one(&mut **conn)
+                .await?
+                .get(0);
+            all.push(out);
+        }
+        Ok(all)
     }
 }
 

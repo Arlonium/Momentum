@@ -208,14 +208,11 @@ async fn reopen_keeps_everything() {
 #[tokio::test]
 async fn pragmas_apply_to_every_connection() {
     let (_d, store, _space) = fresh().await;
-    // Plusieurs connexions simultanées du pool : chacune doit avoir les pragmas.
-    let mut tasks = Vec::new();
-    for _ in 0..4 {
-        let s = store.clone();
-        tasks.push(tokio::spawn(async move { s.pragmas().await.unwrap() }));
-    }
-    for t in tasks {
-        let (journal, sync, fk, busy) = t.await.unwrap();
+    // Quatre connexions du pool tenues à la fois, donc distinctes : chacune
+    // doit avoir les pragmas.
+    let all = store.pragmas(4).await.unwrap();
+    assert_eq!(all.len(), 4);
+    for (journal, sync, fk, busy) in all {
         assert_eq!(journal, "wal");
         assert_eq!(sync, 2, "FULL");
         assert_eq!(fk, 1);
