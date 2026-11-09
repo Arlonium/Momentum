@@ -268,22 +268,36 @@ fn merged_cell_widths_follow_the_grid() {
     assert_eq!(back, mmd);
 }
 
-/// Un `colspan` démesuré (écrit par MMD) ou un `colwidth` démesuré (écrit
-/// par un client Yjs) ne fait écrire ni lire plus de `MAX_WIDTH_COLUMNS`
-/// largeurs.
+/// Fusions bornées (Ruling R37) : un `colspan` démesuré est refusé dès le
+/// MMD ; au plus haut admis (`MAX_WIDTH_COLUMNS`), la cellule porte une
+/// largeur par colonne couverte. Un `colwidth` démesuré écrit par un client
+/// Yjs ne fait pas lire plus de `MAX_WIDTH_COLUMNS` largeurs.
 #[test]
 fn merged_cell_widths_are_bounded() {
-    let widths = format!("120{}", ",".repeat(mementum_md::MAX_WIDTH_COLUMNS - 1));
-    let mmd = format!("| A {{colspan=1000000000}} |\n| --- |\n| B |\n{{widths=\"{widths}\"}}\n");
+    let max = mementum_md::MAX_WIDTH_COLUMNS;
+    let table = |colspan: usize| {
+        let widths = format!("120{}", ",".repeat(max - 1));
+        format!(
+            "| A {{colspan={colspan}}} |\n| --- |\n| B {{colspan={colspan}}} |\n\
+             {{widths=\"{widths}\"}}\n"
+        )
+    };
+    for colspan in [max + 1, 1_000_000_000] {
+        let error = mementum_md::parse(&table(colspan)).unwrap_err();
+        assert!(error.message.contains("de 1 à 100"), "{error}");
+    }
+    let mmd = table(max);
     let (page, _) = PageDoc::new_page();
     page.write_blocks(&mementum_md::parse(&mmd).unwrap())
         .unwrap();
     let written = colwidths(&page);
-    assert_eq!(
-        written[0].as_ref().map(Vec::len),
-        Some(mementum_md::MAX_WIDTH_COLUMNS)
-    );
-    assert_eq!(written[1], Some(vec![Any::Number(Number::Int(120))]));
+    assert_eq!(written.len(), 2);
+    for cell in &written {
+        let values = cell.as_ref().expect("colwidth écrit");
+        assert_eq!(values.len(), max);
+        assert_eq!(values[0], Any::Number(Number::Int(120)));
+        assert!(values[1..].iter().all(|v| *v == Any::Undefined));
+    }
     let back = mementum_md::render(&page.read_blocks(), Default::default()).markdown;
     assert_eq!(back, mmd);
 
@@ -311,4 +325,30 @@ fn merged_cell_widths_are_bounded() {
         Content::Table(t) => assert_eq!(t.column_widths, [Some(0.0)]),
         other => panic!("tableau attendu, trouvé {other:?}"),
     }
+}
+
+/// Décision D4 de la Task 8 : une cellule fusionnée dont aucune colonne n'a
+/// de largeur ne reçoit pas d'attribut `colwidth` (BlockNote écrit
+/// `[undefined, undefined]`, que prosemirror-tables et BlockNote lisent de la
+/// même façon).
+#[test]
+fn merged_cell_without_width_has_no_colwidth() {
+    let (page, _) = PageDoc::new_page();
+    let mmd = "| A {colspan=2} | B |\n| --- | --- |\n| C | D | E |\n{widths=\",,80\"}\n";
+    page.write_blocks(&mementum_md::parse(mmd).unwrap())
+        .unwrap();
+    let int = |i: i64| Any::Number(Number::Int(i));
+    assert_eq!(
+        colwidths(&page),
+        [None, Some(vec![int(80)]), None, None, Some(vec![int(80)])]
+    );
+    let back = mementum_md::render(&page.read_blocks(), Default::default()).markdown;
+    assert_eq!(back, mmd);
+
+    // Sans aucune largeur : aucun `colwidth`.
+    let (page, _) = PageDoc::new_page();
+    let mmd = "| A {colspan=2} | B |\n| --- | --- |\n| C | D | E |\n";
+    page.write_blocks(&mementum_md::parse(mmd).unwrap())
+        .unwrap();
+    assert!(colwidths(&page).iter().all(Option::is_none));
 }

@@ -2,7 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use mementum_md::{Block, Cell, Content, Inline, PropValue, RenderOpts, Table, arb, parse, render};
+use mementum_md::{
+    Block, Cell, Content, Inline, MAX_WIDTH_COLUMNS, PropValue, RenderOpts, Table, arb, parse,
+    render,
+};
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 use proptest::test_runner::TestRunner;
@@ -203,7 +206,7 @@ fn features(blocks: &[Block], seen: &mut BTreeSet<String>) {
 /// aucun `rowspan` ne dépasse le tableau.
 fn blocknote_grid(t: &Table) -> bool {
     let span = |c: &Cell, name: &str| match c.props.get(name) {
-        Some(PropValue::Int(n)) if (1..=8).contains(n) => Some(*n as usize),
+        Some(PropValue::Int(n)) if (1..=MAX_WIDTH_COLUMNS as i64).contains(n) => Some(*n as usize),
         None => Some(1),
         _ => None,
     };
@@ -244,6 +247,16 @@ fn blocknote_grid(t: &Table) -> bool {
     true
 }
 
+/// Tout tableau de l'arbre forme une grille (Ruling R37).
+fn assert_tables_are_grids(blocks: &[Block]) {
+    for b in blocks {
+        if let Content::Table(t) = &b.content {
+            assert!(blocknote_grid(t), "tableau hors grille : {t:?}");
+        }
+        assert_tables_are_grids(&b.children);
+    }
+}
+
 /// Structure représentable par BlockNote : une colonne n'existe que dans un
 /// `columnList`, qui ne contient que 2 colonnes ou plus.
 fn assert_columns_placed(blocks: &[Block], in_list: bool) {
@@ -264,7 +277,8 @@ fn assert_columns_placed(blocks: &[Block], in_list: bool) {
 }
 
 /// Le générateur produit bien tout ce que le brief de la Task 2 demande, dans
-/// une structure que BlockNote sait représenter.
+/// une structure que BlockNote sait représenter (colonnes placées, tableaux
+/// en grille).
 #[test]
 fn generator_covers_brief() {
     let mut runner = TestRunner::deterministic();
@@ -273,6 +287,7 @@ fn generator_covers_brief() {
     for _ in 0..1000 {
         let tree = strategy.new_tree(&mut runner).unwrap().current();
         assert_columns_placed(&tree, false);
+        assert_tables_are_grids(&tree);
         features(&tree, &mut seen);
         if render(&tree, RenderOpts { anchors: false })
             .markdown

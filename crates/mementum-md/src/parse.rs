@@ -7,13 +7,17 @@
 //! redonner l'entrée octet pour octet. Sinon, la première ligne qui diffère
 //! est signalée avec la forme à écrire.
 
+use std::collections::BTreeMap;
+
 use mementum_schema::{BlockSpec, ContentKind, MmdForm, PropSpec, block, blocks, cell_props};
 
 use crate::attrs::{
     Attr, Raw, parse_list, parse_tag, split_cells, split_props, typed, unescape_attr,
 };
 use crate::inline::{parse_image, parse_inline};
-use crate::model::{Block, Cell, Content, Inline, MmdError, PropValue, Props, Table, normalize};
+use crate::model::{
+    Block, Cell, Content, Inline, MAX_WIDTH_COLUMNS, MmdError, PropValue, Props, Table, normalize,
+};
 use crate::render::{Family, anchor_key, family, render_ids};
 
 /// Profondeur d'imbrication maximale lue par [`parse`] : un bloc de premier
@@ -745,6 +749,14 @@ fn read_table(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usiz
     for l in &lines[i + 2..end] {
         rows.push(read_row(l)?);
     }
+    // La ligne `k` du tableau : la première, puis celles après la séparation.
+    check_grid(&rows, |k| {
+        if k == 0 {
+            lines[i].no
+        } else {
+            lines[i + 1 + k].no
+        }
+    })?;
     let mut table = Table {
         header_rows: 1,
         header_cols: 0,
@@ -788,6 +800,140 @@ fn read_table(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usiz
         new_block("table", props, Content::Table(table), children, id),
         next,
     ))
+}
+
+/// Ruling R37 : les fusions d'un tableau forment une grille que
+/// prosemirror-tables lit telle quelle. `colspan` vaut de 1 à
+/// [`MAX_WIDTH_COLUMNS`] (prosemirror-tables parcourt toute la grille et y
+/// crée une colonne par case : un `colspan` démesuré fige l'onglet), et
+/// `rowspan` de 1 au nombre de lignes restantes. Chaque ligne couvre autant
+/// de colonnes que la première, cases occupées par une cellule d'une ligne
+/// au-dessus comprises, sans chevauchement : sinon `fixTables` complète ou
+/// raccourcit les cellules, et réécrit le document à la première édition.
+///
+/// Une cellule prend la première colonne libre après la précédente, comme
+/// dans prosemirror-tables. Les colonnes occupées par un `rowspan` sont
+/// gardées en plages fusionnées quand elles se touchent : chaque cellule se
+/// place en temps logarithmique, quelle que soit la largeur de la grille.
+fn check_grid(rows: &[Vec<Cell>], line_of: impl Fn(usize) -> usize) -> Result<(), MmdError> {
+    // Plages de colonnes occupées par une ligne au-dessus (début → fin), leur
+    // nombre de colonnes, et les plages libérées à chaque ligne.
+    let mut taken: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut taken_width = 0;
+    let mut released: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
+    let mut width = None;
+    for (r, row) in rows.iter().enumerate() {
+        let line = line_of(r);
+        for (start, end) in released.remove(&r).unwrap_or_default() {
+            release(&mut taken, start, end);
+            taken_width -= end - start;
+        }
+        let remaining = rows.len() - r;
+        let (mut cursor, mut covered, mut down) = (0, taken_width, Vec::new());
+        for cell in row {
+            let colspan = span(cell, "colspan", MAX_WIDTH_COLUMNS).ok_or_else(|| {
+                err(
+                    line,
+                    format!(
+                        "« colspan » vaut de 1 à {MAX_WIDTH_COLUMNS} (colonnes couvertes par \
+                         la cellule)"
+                    ),
+                )
+            })?;
+            let rowspan = span(cell, "rowspan", remaining).ok_or_else(|| {
+                err(
+                    line,
+                    format!(
+                        "« rowspan » vaut de 1 à {remaining} : une cellule ne descend pas sous \
+                         la dernière ligne du tableau"
+                    ),
+                )
+            })?;
+            let start = first_free(&taken, cursor);
+            let end = start + colspan;
+            if taken
+                .range(start..)
+                .next()
+                .is_some_and(|(&next, _)| next < end)
+            {
+                return Err(err(
+                    line,
+                    "cellule fusionnée qui chevauche une cellule d'une ligne au-dessus \
+                     (« rowspan ») : réduire son « colspan »",
+                ));
+            }
+            cursor = end;
+            covered += colspan;
+            if rowspan > 1 {
+                down.push((start, end, r + rowspan));
+            }
+        }
+        let width = *width.get_or_insert(covered);
+        if covered != width {
+            let plural = |n: usize| if n > 1 { "s" } else { "" };
+            return Err(err(
+                line,
+                format!(
+                    "ligne de tableau : elle couvre {covered} colonne{}, la première {width} \
+                     (fusions et cellules des lignes au-dessus comptées)",
+                    plural(covered)
+                ),
+            ));
+        }
+        for (start, end, until) in down {
+            occupy(&mut taken, start, end);
+            taken_width += end - start;
+            released.entry(until).or_default().push((start, end));
+        }
+    }
+    Ok(())
+}
+
+/// `colspan` ou `rowspan` d'une cellule (1 sans la prop), s'il est entre 1
+/// et `max`.
+fn span(cell: &Cell, name: &str, max: usize) -> Option<usize> {
+    match cell.props.get(name) {
+        None => Some(1),
+        Some(PropValue::Int(n)) => usize::try_from(*n).ok().filter(|n| (1..=max).contains(n)),
+        Some(_) => None,
+    }
+}
+
+/// Première colonne libre à partir de `column`.
+fn first_free(taken: &BTreeMap<usize, usize>, column: usize) -> usize {
+    match taken.range(..=column).next_back() {
+        Some((_, &end)) if end > column => end,
+        _ => column,
+    }
+}
+
+/// Ajoute la plage libre `[start, end)` aux colonnes occupées, fusionnée à
+/// ses voisines.
+fn occupy(taken: &mut BTreeMap<usize, usize>, mut start: usize, mut end: usize) {
+    if let Some((&before, &stop)) = taken.range(..start).next_back()
+        && stop == start
+    {
+        taken.remove(&before);
+        start = before;
+    }
+    if let Some(after) = taken.remove(&end) {
+        end = after;
+    }
+    taken.insert(start, end);
+}
+
+/// Retire la plage `[start, end)` de la plage occupée qui la contient.
+fn release(taken: &mut BTreeMap<usize, usize>, start: usize, end: usize) {
+    let Some((&from, &to)) = taken.range(..=start).next_back() else {
+        return;
+    };
+    taken.remove(&from);
+    if from < start {
+        taken.insert(from, start);
+    }
+    if end < to {
+        taken.insert(end, to);
+    }
 }
 
 /// `"120,,80"` : une largeur par colonne de la grille, vide = automatique.

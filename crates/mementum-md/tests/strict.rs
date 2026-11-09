@@ -128,3 +128,72 @@ fn column_structure_follows_blocknote() {
     );
     assert!(parse(&nested).is_ok(), "{nested}");
 }
+
+/// Ruling R37 : fusions de cellules bornées, dans une grille rectangulaire.
+/// prosemirror-tables parcourt `largeur × hauteur` cases et crée une colonne
+/// par case de la grille : un `colspan` démesuré fige l'onglet, un négatif
+/// fait lever BlockNote, et une ligne trop courte ou un `rowspan` trop long
+/// sont « corrigés » par `fixTables`, qui réécrit le document.
+#[test]
+fn table_merges_form_a_bounded_grid() {
+    let one = |cell: &str| format!("| {cell} |\n| --- |\n| x |\n");
+    for value in ["0", "-3", "101", "1000000000"] {
+        rejected(
+            &one(&format!("A {{colspan={value}}}")),
+            1,
+            "« colspan » vaut de 1 à 100",
+        );
+    }
+    rejected(&one("A {rowspan=0}"), 1, "« rowspan » vaut de 1 à 2");
+    // `rowspan` jusqu'à la dernière ligne, pas au-delà.
+    rejected(&one("A {rowspan=3}"), 1, "« rowspan » vaut de 1 à 2");
+    rejected(
+        "| A | B |\n| --- | --- |\n| C {rowspan=2} | D |\n",
+        3,
+        "« rowspan » vaut de 1 à 1",
+    );
+    // Lignes inégales, sans fusion.
+    rejected(
+        "| a | b |\n| --- | --- |\n| c |\n",
+        3,
+        "couvre 1 colonne, la première 2",
+    );
+    rejected(
+        "| a | b |\n| --- | --- |\n| c | d | e |\n",
+        3,
+        "couvre 3 colonnes, la première 2",
+    );
+    assert_eq!(
+        parse("| a | b |\n| --- | --- |\n| c |\n")
+            .unwrap_err()
+            .message,
+        "ligne de tableau : elle couvre 1 colonne, la première 2 (fusions et cellules des \
+         lignes au-dessus comptées)"
+    );
+    assert_eq!(
+        parse("| A {colspan=0} |\n| --- |\n").unwrap_err().message,
+        "« colspan » vaut de 1 à 100 (colonnes couvertes par la cellule)"
+    );
+    // Fusions comptées : une ligne trop longue sous un `rowspan`…
+    rejected(
+        "| A {rowspan=2} | B |\n| --- | --- |\n| C | D |\n",
+        3,
+        "couvre 3 colonnes, la première 2",
+    );
+    // … ou une cellule fusionnée qui chevauche celle d'une ligne au-dessus.
+    rejected(
+        "| A | B {rowspan=2} | C |\n| --- | --- | --- |\n| D {colspan=2} | E |\n",
+        3,
+        "chevauche",
+    );
+    // Les fusions qui forment une grille sont admises.
+    for ok in [
+        "| A {colspan=100} |\n| --- |\n",
+        "| a | B {colspan=2} |\n| --- | --- |\n| c | d | e |\n",
+        "| a | B {rowspan=3} |\n| --- | --- |\n| c |\n| d |\n",
+        "| A {colspan=2 rowspan=2} | b |\n| --- | --- |\n| c |\n| d | e | f |\n",
+        "| a | b | c |\n| --- | --- | --- |\n| D {colspan=2} | e |\n",
+    ] {
+        assert!(parse(ok).is_ok(), "{ok:?} refusé : {:?}", parse(ok));
+    }
+}

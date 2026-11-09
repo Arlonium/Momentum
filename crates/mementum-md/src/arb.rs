@@ -23,8 +23,8 @@
 //! que dans un `columnList` (de 2 ou 3 colonnes, chacune avec au moins un
 //! bloc et sans `columnList` directement dedans) ; un tableau a le même
 //! nombre de cellules par ligne et une largeur par colonne, ou forme une
-//! grille de cellules fusionnées. Les props de cellule tirées au hasard
-//! (`colspan`, `rowspan` compris) éprouvent le format, pas BlockNote. Le reste
+//! grille de cellules fusionnées (Ruling R37 : `parse` refuse toute autre
+//! fusion). Le reste
 //! (liens voisins de même `href`, en-têtes hors de la grille, marques dans
 //! un bloc de code) est ramené à sa forme canonique par [`normalize`].
 
@@ -516,11 +516,7 @@ fn merged_table() -> impl Strategy<Value = Content> {
                 header_cols,
                 widths,
             )| {
-                let mut cells = cells.into_iter().map(|mut c| {
-                    c.props.remove("colspan");
-                    c.props.remove("rowspan");
-                    c
-                });
+                let mut cells = cells.into_iter();
                 let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(nrows);
                 let tall = nrows >= 3;
                 for r in 0..nrows {
@@ -562,10 +558,16 @@ fn width() -> impl Strategy<Value = Option<f64>> {
     prop::sample::select(vec![None, Some(120.0), Some(80.5)])
 }
 
+/// Une cellule sans fusion : `colspan` et `rowspan` ne sont posés que par
+/// [`merged_table`], dans une grille.
 fn cell() -> impl Strategy<Value = Cell> {
     (
         prop::collection::vec(inline(), 0..3),
         props_from(cell_props()),
     )
-        .prop_map(|(content, props)| Cell { content, props })
+        .prop_map(|(content, mut props)| {
+            props.remove("colspan");
+            props.remove("rowspan");
+            Cell { content, props }
+        })
 }
