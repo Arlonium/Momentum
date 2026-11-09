@@ -25,10 +25,12 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 | Phase 0 : prototype jetable qui valide les choix techniques | ✅ faite sur PC et relue (relecture finale du 9 novembre, voir [`spike/RESULTS.md`](spike/RESULTS.md)) ; ⏳ **mesures ARM repoussées avant la phase 2** (bases de données) |
 | Phase 1 « Écrire ensemble » (MVP) | 🚧 en cours, découpée en 7 lots. Lot 1 « Socle et édition en direct » **fait** : 10 tâches closes, relecture finale faite, corrections comprises ([plan](docs/superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md)). Lots 2 à 7 à venir |
 
-Le lot 1 livre le vrai code (`crates/mementum-*`, `apps/web`, `packages/protocol`, `spec/`) : un arbre de pages, l'édition à plusieurs en direct dans BlockNote et le format MMD de la phase 1, sans comptes ni droits (lot 2). Il laisse trois limites connues, décrites dans la conception (§9) :
+Le lot 1 livre le vrai code (`crates/mementum-*`, `apps/web`, `packages/protocol`, `spec/`) : un arbre de pages, l'édition à plusieurs en direct dans BlockNote et le format MMD de la phase 1, sans comptes ni droits (lot 2). Il laisse cinq limites connues, décrites dans la conception (§9) :
 - une édition faite sur un bloc pendant qu'un autre client le déplace est perdue (Ruling R39, à traiter au lot 3) ;
 - la réécriture complète d'une page de 10 000 blocs par `PUT /mmd` bloque cette page 2,5 à 4 s selon la machine et sa charge (Ruling R40, remède prévu au lot 5) ;
-- `PUT /mmd` refuse une prop hors du registre des blocs, parce qu'un navigateur l'effacerait ensuite sans bruit (Ruling R41).
+- `PUT /mmd` refuse une prop hors du registre des blocs, parce qu'un navigateur l'effacerait ensuite sans bruit (Ruling R41) ;
+- l'ouverture d'une page ralentit avec le nombre de pages affichées dans l'arbre, et dépasse le budget de 300 ms vers 350 à 400 pages (Ruling R43, correctif prévu au lot 2) ;
+- deux avis de sécurité RustSec sont ouverts sans mise à jour possible, sur `libsqlite3-sys` et `smallstr` ; le premier ne touche qu'un serveur qui ouvrirait une base écrite par un tiers, ce que Mementum ne fait pas (Ruling R44).
 
 Le dossier `spike/` est le **prototype jetable** de la phase 0 : on en garde les leçons, les fixtures et les tests d'aller-retour, pas le code.
 
