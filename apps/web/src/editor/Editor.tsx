@@ -70,6 +70,17 @@ export function Editor({ session, fixture = null }: Props) {
   useLayoutEffect(() => {
     editor.isEditable = editable;
   }, [editor, editable]);
+  // Déverrouillé juste avant que l'état du serveur ne soit appliqué, dans la même tâche (la
+  // racine est donc bien celle du serveur) : la page arrive dans une vue déjà modifiable.
+  // Verrouillée, ProseMirror lit la sélection du DOM après l'avoir rempli (mise en page
+  // forcée), puis le déverrouillage remet en page la page entière : 2 mises en page de
+  // toute la page au lieu d'une (0,3 s chacune sur 10 000 blocs).
+  useEffect(() => {
+    if (session.readOnly) return;
+    return session.onServerState(() => {
+      editor.isEditable = true;
+    });
+  }, [editor, session]);
 
   const debug = useRef<MementumDebug | null>(null);
   useEffect(() => {

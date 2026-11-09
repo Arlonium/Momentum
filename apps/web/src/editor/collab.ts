@@ -65,6 +65,7 @@ export class CollabSession {
   synced = false;
   status: SyncStatus = "connecting";
   private readonly listeners = new Set<() => void>();
+  private readonly serverStateListeners = new Set<() => void>();
   private readonly cleanups: (() => void)[] = [];
 
   constructor(pageId: string, mode: SessionMode) {
@@ -75,7 +76,13 @@ export class CollabSession {
     // lecture seule (R30) : on la donne toujours.
     this.provider = new WebsocketProvider(syncUrl(), pageId, shared, {
       params: { schema: String(CLIENT_SCHEMA_VERSION) },
-      ...(mode.readOnly ? {} : { WebSocketPolyfill: schemaGatedWebSocket(mode.check) }),
+      ...(mode.readOnly
+        ? {}
+        : {
+            WebSocketPolyfill: schemaGatedWebSocket(mode.check, (data) =>
+              this.beforeMessage(data),
+            ),
+          }),
     });
     if (mode.readOnly) {
       // Ni curseur ni présence : rien de cet onglet n'est annoncé.
@@ -117,13 +124,38 @@ export class CollabSession {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * Appelle `listener` une fois, quand l'état du serveur arrive (première étape 2 de la
+   * synchro) : dans la tâche même où y-websocket va l'appliquer, juste avant, si bien
+   * qu'aucune frappe ne peut se glisser entre les deux. Session modifiable seulement.
+   */
+  onServerState(listener: () => void): () => void {
+    if (this.synced) return () => {};
+    this.serverStateListeners.add(listener);
+    return () => this.serverStateListeners.delete(listener);
+  }
+
   destroy(): void {
     this.listeners.clear();
+    this.serverStateListeners.clear();
     for (const cleanup of this.cleanups.splice(0).reverse()) cleanup();
   }
 
   private emit(): void {
     for (const listener of [...this.listeners]) listener();
+  }
+
+  /** Message de la WebSocket, avant y-websocket : repère la première étape 2. */
+  private beforeMessage(data: unknown): void {
+    if (this.synced || this.serverStateListeners.size === 0 || !(data instanceof ArrayBuffer)) {
+      return;
+    }
+    // Message « sync » (0), étape 2 (1) : deux entiers variables d'un octet chacun.
+    const head = new Uint8Array(data, 0, Math.min(2, data.byteLength));
+    if (head[0] !== 0 || head[1] !== 1) return;
+    const listeners = [...this.serverStateListeners];
+    this.serverStateListeners.clear();
+    for (const listener of listeners) listener();
   }
 }
 
