@@ -187,9 +187,14 @@ async fn compacts_after_500_updates() {
     for i in 0..501 {
         write_text(&a.doc, &format!("{} ", i % 10));
     }
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-
+    // Attendre que le serveur ait persisté les 501 mises à jour (sans délai fixe).
     let store = spike_server::store::Store::open(&db).await.unwrap();
+    let start = Instant::now();
+    while read_text(&store.load_doc("p4").await.unwrap()).matches(' ').count() < 501 {
+        assert!(start.elapsed() < Duration::from_secs(10), "le serveur n'a pas tout persisté en 10 s");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     let (snapshots, updates) = store.counts("p4").await.unwrap();
     assert_eq!(snapshots, 1, "pas d'instantané après 501 mises à jour");
     assert!(updates <= 1, "{updates} mises à jour restantes après compaction");
