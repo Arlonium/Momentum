@@ -283,6 +283,59 @@ fn beyond_the_bound_writes_are_refused() {
 }
 
 #[test]
+fn twice_the_bound_in_one_update_is_refused() {
+    // Ce que la garde promet pendant l'application (`guard.rs`) : la
+    // récursion de yrs reste sous deux fois la borne. Le pire cas : une page
+    // à la borne, et une seule mise à jour qui accroche sous son élément le
+    // plus profond une chaîne que la lecture admet tout juste
+    // (`MAX_YJS_DEPTH` types imbriqués : un `blockGroup`, puis `AT_BOUND`
+    // niveaux), et qui supprime la racine. yrs supprime alors un arbre de
+    // presque deux fois la borne, avant que la mesure ne refuse la mise à
+    // jour. Marge mesurée en debug : ce test passe sur 512 Kio et déborde sur
+    // 256 Kio (la relecture finale, sur son propre montage, passait sur 1 Mio
+    // et débordait sur 512 Kio).
+    on_small_stack(|| {
+        let (page, _) = PageDoc::new_page();
+        page.write_blocks(&nested(AT_BOUND)).expect("à la borne");
+        let state = page.encode_state();
+        let update = on_big_stack(move || {
+            // Sans ramasse-miettes, la mise à jour garde la chaîne et sa
+            // suppression.
+            let doc = raw_doc(true);
+            let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+            doc.transact_mut()
+                .apply_update(Update::decode_v1(&state).unwrap())
+                .unwrap();
+            let before = doc.transact().state_vector();
+            {
+                let mut txn = doc.transact_mut();
+                let Some(XmlOut::Element(mut group)) = fragment.get(&txn, 0) else {
+                    panic!("racine attendue")
+                };
+                // Le `blockContainer` le plus profond n'a pas de `blockGroup`.
+                let deepest = loop {
+                    let Some(XmlOut::Element(container)) = group.get(&txn, 0) else {
+                        panic!("blockContainer attendu")
+                    };
+                    match container.get(&txn, 1) {
+                        Some(XmlOut::Element(next)) => group = next,
+                        _ => break container,
+                    }
+                };
+                let chain = deepest.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
+                nest(&mut txn, &chain, AT_BOUND, "z");
+                fragment.remove_range(&mut txn, 0, 1);
+            }
+            let update = doc.transact().encode_diff_v1(&before);
+            // Le document du client se libère sur la grosse pile.
+            drop(doc);
+            update
+        });
+        assert_eq!(page.apply_update(&update), Err(CrdtError::TooDeep));
+    });
+}
+
+#[test]
 fn the_page_never_holds_a_deep_tree() {
     // Ce que la garde mesure : un élément au-delà de la borne n'existe pas.
     on_small_stack(|| {

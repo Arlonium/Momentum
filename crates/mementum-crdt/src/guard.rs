@@ -30,7 +30,8 @@
 //!   d'eux jusqu'à la racine. La page n'ayant jamais d'arbre trop profond, la
 //!   nouvelle profondeur maximale est celle d'un élément inséré.
 //!
-//! Pendant l'application, la récursion reste sous deux fois la borne.
+//! Pendant l'application, la récursion reste sous deux fois la borne (test
+//! `twice_the_bound_in_one_update_is_refused` de `tests/depth.rs`).
 
 use std::collections::HashMap;
 
