@@ -47,6 +47,18 @@ const CALLOUT_BACKGROUNDS: Record<string, string> = {
   pink: "#FAF1F5",
 };
 
+/**
+ * Langues du menu des blocs de code (celles de `@blocknote/code-block`). BlockNote refuse
+ * d'afficher un bloc dont la langue n'est pas dans cette liste (« Language … is not
+ * supported ») : l'erreur interrompt la synchro, et la page ne s'ouvre plus chez personne.
+ * Or une langue quelconque arrive par MMD (`` ```ma-langue ``) ou d'un autre client. Toute
+ * langue est donc admise : le menu n'en montre aucune de choisie, Shiki ne la colore pas,
+ * et le document la garde telle quelle.
+ */
+const supportedLanguages = new Proxy({ ...codeBlockOptions.supportedLanguages }, {
+  has: (languages, key) => typeof key === "string" || key in languages,
+});
+
 /** Formule LaTeX rendue par KaTeX ; une formule invalide s'affiche en rouge, sans erreur. */
 function Tex({ latex, display }: { latex: string; display: boolean }) {
   const html = katex.renderToString(latex, { displayMode: display, throwOnError: false });
@@ -242,7 +254,11 @@ export const schema = withMultiColumn(
       // Coloration par `@blocknote/code-block` (Shiki) ; le contenu reste du texte brut.
       // Ses options choisissent `javascript` par défaut : on garde celle du registre et de
       // BlockNote (`text`), sinon un bloc sans langue changerait de langue au rendu MMD.
-      codeBlock: createCodeBlockSpec({ ...codeBlockOptions, defaultLanguage: "text" }),
+      codeBlock: createCodeBlockSpec({
+        ...codeBlockOptions,
+        defaultLanguage: "text",
+        supportedLanguages,
+      }),
       callout: Callout(),
       equation: Equation(),
       bookmark: Bookmark(),

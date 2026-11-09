@@ -520,7 +520,7 @@ Voir <mention type="page" id="pg_Spec01">Spécification</mention>. ^b8
   | `toggleListItem` | `<toggle title="…">` … `</toggle>` | contenu en ligne = `title` | `bg`, `color`, `align` (attributs) |
   | `quote` | `> ` | — | `bg`, `color` |
   | `codeBlock` | clôture de backticks + langue ; contenu en texte brut (BlockNote : `content: "plain"`) : ni marque, ni lien, ni mention, ni formule, un saut de ligne est un `
-` | `language` | — |
+` ; toute langue est gardée, même hors de celles que colore le client | `language` | — |
   | `divider` | `---` | — | — |
   | `image` | `![légende](url)` | `url`, `caption` | `name`, `preview` (`showPreview`), `width` (`previewWidth`), `align`, `bg` |
   | `video` | `<video src="…"/>` | `url` (`src`) | `caption`, `name`, `preview`, `width`, `align`, `bg` |
