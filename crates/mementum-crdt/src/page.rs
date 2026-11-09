@@ -230,7 +230,8 @@ impl PageDoc {
         }
     }
 
-    /// Pour `mementum-sync` seulement (`Awareness`) ; jamais pour lire le contenu.
+    /// Pour `mementum-sync` seulement, qui y pose son observateur des
+    /// suppressions (Ruling R40) ; jamais pour lire le contenu.
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
     }

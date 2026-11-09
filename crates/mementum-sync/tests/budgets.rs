@@ -3,9 +3,9 @@
 //! d'une page de 10 000 blocs, comme le fait l'acteur d'une page qui démarre,
 //! prend moins de 300 ms au p95 sur 20 chargements :
 //! - avec le pire journal de frappes (`snapshot_every - 1` mises à jour) ;
-//! - après une grosse suppression, réécriture complète par le serveur ou page
-//!   vidée par un client (Ruling R40 : le ramasse-miettes de yrs se paie à
-//!   l'écriture, jamais à chaque chargement).
+//! - après une grosse suppression, réécriture complète par le serveur ou
+//!   contenu remplacé par un client (Ruling R40 : le ramasse-miettes de yrs
+//!   se paie à l'écriture, jamais à chaque chargement).
 //!
 //! Ignorés par défaut, car la mesure n'a de sens qu'en `--release` :
 //! `cargo test --release -p mementum-sync -- --ignored` (job `budgets` de la
@@ -76,10 +76,13 @@ async fn processed(client: &Client) {
 
 /// `LOADS` chargements de la page depuis SQLite, chacun sur une connexion
 /// neuve (cache de pages SQLite vide, comme pour l'acteur d'une page que
-/// personne n'a ouverte), chronomètre autour de ce que fait l'acteur à son
-/// démarrage (`actor::load`) : l'instantané et le journal relus, puis
-/// appliqués dans l'ordre des `seq`. Le nombre de blocs est contrôlé hors
-/// chronomètre. Renvoie le dépassement du budget au p95, s'il y en a un.
+/// personne n'a ouverte), chronomètre autour de `stored_page` : l'instantané
+/// et le journal relus, puis appliqués dans l'ordre des `seq`. C'est le gros
+/// du démarrage d'un acteur, pas `actor::load` lui-même, qui n'est pas
+/// public : l'observateur des suppressions que l'acteur pose entre
+/// l'instantané et le journal (Ruling R40) n'est pas mesuré. Le nombre de
+/// blocs est contrôlé hors chronomètre. Renvoie le dépassement du budget au
+/// p95, s'il y en a un.
 async fn loads_over_budget(f: &Fixture, blocks: usize, what: &str) -> Option<String> {
     let state = f.store.load_doc(f.page).await.unwrap();
     let journal = state.updates.len();
