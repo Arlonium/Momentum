@@ -596,3 +596,57 @@ fn code_block_is_plain_text() {
         Content::Inline(vec![])
     );
 }
+
+/// Ordre d'imbrication des marques, documenté au §6.2 : `<code>`, `<em>`,
+/// `<strong>`, `<s>`, `<u>`, puis `<span>`, de l'intérieur vers l'extérieur ;
+/// un délimiteur Markdown prend la place de sa balise ; un lien entoure ses
+/// textes marqués.
+#[test]
+fn tag_mark_order() {
+    let styled = |t: &str, styles: Styles| Inline::Text {
+        text: t.into(),
+        styles,
+    };
+    let all = Styles {
+        bold: true,
+        italic: true,
+        underline: true,
+        strike: true,
+        code: true,
+        text_color: Some("blue".into()),
+        background_color: Some("yellow".into()),
+    };
+    same(
+        vec![para(vec![text("x "), styled("a", all), text(" y")])],
+        "x <span bg=\"yellow\" color=\"blue\"><u><s><strong><em><code>a</code></em></strong></s></u></span> y\n",
+    );
+    let underline_color = Styles {
+        underline: true,
+        text_color: Some("blue".into()),
+        ..Styles::default()
+    };
+    same(
+        vec![para(vec![styled("souligné coloré", underline_color)])],
+        "<span color=\"blue\"><u>souligné coloré</u></span>\n",
+    );
+    let bold_underline = Styles {
+        bold: true,
+        underline: true,
+        ..Styles::default()
+    };
+    same(
+        vec![para(vec![styled("gras souligné", bold_underline)])],
+        "<u>**gras souligné**</u>\n",
+    );
+    let bold = Styles {
+        bold: true,
+        ..Styles::default()
+    };
+    same(
+        vec![para(vec![Inline::Link {
+            href: "x".into(),
+            children: vec![styled("a", bold)],
+        }])],
+        "[**a**](x)\n",
+    );
+}
