@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 777b3b94f8c0650bfbfa2af83ba7d6d3223dfd5a11902f5903a836904f1d5938 # shrinks to tree = [Block { id: "id_aaa000", kind: NumberedItem, content: [], children: [Block { id: "id_a00a00", kind: Table { rows: [[[], [Math { latex: "0 }" }]]] }, content: [], children: [] }] }], anchors = false
+cc f331ea68d588c7941e3cdb2f13ad173e580d20a49ef988b52a62fab86b80d0fd # shrinks to tree = [Block { id: "id_a000aa", kind: Todo { checked: false }, content: [], children: [Block { id: "id_aaa0aa", kind: Paragraph, content: [Text { text: "!", marks: Marks { bold: false, italic: false, strike: false, code: false, underline: false, color: None } }, Link { href: "https://ex.dev/a", children: [Text { text: "A", marks: Marks { bold: false, italic: false, strike: false, code: false, underline: false, color: None } }] }], children: [] }] }], anchors = false
