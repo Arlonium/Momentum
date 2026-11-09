@@ -15,7 +15,14 @@ import {
   locales as multiColumnLocales,
   multiColumnDropCursor,
 } from "@blocknote/xl-multi-column";
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import * as Y from "yjs";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug } from "./debug";
@@ -53,6 +60,16 @@ export function Editor({ session, fixture = null }: Props) {
   // avec son texte). Une coupure réseau ensuite ne verrouille pas : les éditions faites
   // hors ligne fusionnent au retour.
   const editable = synced && !session.readOnly;
+  // BlockNote 0.57 démonte puis remonte toute la vue ProseMirror quand la prop `editable`
+  // de `BlockNoteView` change : la page entière était reconstruite juste après la première
+  // synchro (1 s sur 10 000 blocs). La prop ne sert donc qu'au montage de la vue de chaque
+  // éditeur (sa valeur est figée par éditeur), et l'état suit ensuite par `isEditable`,
+  // sans remonter la vue. Monter la vue avec le bon état garde aussi `tabindex="0"`, que
+  // TipTap retire quand l'éditeur repasse en lecture seule.
+  const mountEditable = useMemo(() => editable, [editor]);
+  useLayoutEffect(() => {
+    editor.isEditable = editable;
+  }, [editor, editable]);
 
   const debug = useRef<MementumDebug | null>(null);
   useEffect(() => {
@@ -102,7 +119,7 @@ export function Editor({ session, fixture = null }: Props) {
   return (
     <BlockNoteView
       editor={editor}
-      editable={editable}
+      editable={mountEditable}
       theme="light"
       slashMenu={false}
       className="mm-editor"
