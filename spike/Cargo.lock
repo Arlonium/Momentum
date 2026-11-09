@@ -1498,6 +1498,7 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "uuid",
+ "yrs",
 ]
 
 [[package]]
@@ -1507,6 +1508,7 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-util",
+ "spike-mmd",
  "sqlx",
  "sysinfo",
  "tempfile",

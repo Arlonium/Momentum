@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 pulldown-cmark = { version = "0.13.6", default-features = false }
 uuid = { version = "1.29.2", features = ["v7"] }
+yrs = { version = "0.28.1", features = ["sync"] }
 
 [dev-dependencies]
 proptest = "1.12.0"

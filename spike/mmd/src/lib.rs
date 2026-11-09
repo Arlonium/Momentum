@@ -4,6 +4,7 @@ mod inline;
 mod model;
 mod parse;
 mod render;
+pub mod ydoc;
 
 pub use inline::{parse_inline, render_inline};
 pub use model::{normalize, normalize_inline, Block, BlockKind, Inline, Marks, MmdError};

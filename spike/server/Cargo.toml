@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3.34"
+spike-mmd = { version = "0.1.0", path = "../mmd" }
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 sysinfo = "0.40.1"
 tokio = { version = "1.54.1", features = ["full"] }
