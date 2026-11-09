@@ -1,5 +1,7 @@
 //! Serveur du spike Mementum (phase 0) : synchro Yjs + persistance SQLite.
 
+pub mod agent;
+pub mod revisions;
 pub mod rooms;
 pub mod store;
 pub mod ws;
@@ -18,7 +20,44 @@ pub fn app(rooms: Rooms) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/sync/{page}", get(ws::sync_handler))
         .route("/pages/{page}/mmd", axum::routing::put(put_mmd))
+        .route("/pages/{page}", get(get_page))
+        .route("/pages/{page}/update", axum::routing::post(post_update))
         .with_state(rooms)
+}
+
+/// Vue d'une page pour un agent : `{markdown, revision, anchors}` (`?anchors=block` pour les ancres).
+async fn get_page(
+    axum::extract::State(rooms): axum::extract::State<Rooms>,
+    axum::extract::Path(page): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let anchors = q.get("anchors").map(|v| v == "block").unwrap_or(false);
+    match rooms.get_or_load(&page).await {
+        Ok(room) => {
+            let (body, revision, snapshot) = room.read(|txn, frag| agent::view(txn, frag, anchors)).await;
+            room.revisions.record(revision, snapshot);
+            axum::Json(body).into_response()
+        }
+        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Édition par un agent (opérations du §6.3 de la spec).
+async fn post_update(
+    axum::extract::State(rooms): axum::extract::State<Rooms>,
+    axum::extract::Path(page): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<agent::UpdateRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let room = match rooms.get_or_load(&page).await {
+        Ok(r) => r,
+        Err(e) => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match agent::handle_update(&room, req).await {
+        Ok(body) => axum::Json(body).into_response(),
+        Err(e) => e.into_response(),
+    }
 }
 
 /// Remplace le contenu d'une page par un document MMD (import, tests).

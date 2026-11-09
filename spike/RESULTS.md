@@ -11,6 +11,10 @@ Mesures du spike. PC = poste Windows de Lenny (i9-14900K), ARM = Raspberry Pi 4 
 | T2 · Frappe → visible chez l'autre (navigateurs, p95 sur 49 frappes, 3 passes) | < 150 ms | 8–11 ms (p50 5–6) | — | ✅ |
 | T2 · Ouverture d'une page de 10 000 blocs dans BlockNote (connexion → premier bloc) | page jamais vue < 300 ms | 1 270–1 346 ms (dont synchro 920–948 ms) | à faire | ❌ corrigé : voir notes |
 | T3 · Aller-retour MMD ⇄ arbre sur 20 types de blocs (fixture canonique + proptest) | sans perte | fixture relue octet pour octet ; 512 cas + 3 × 4 096 cas sans échec | — | ✅ |
+| T5 · Agent qui édite pendant qu'un humain tape (20 appels `str_replace` + `insert`, 200 caractères tapés) | aucune perte, aucun conflit | texte humain complet et ordonné, 20 éditions présentes, 0 conflit, même nombre de blocs navigateur/serveur | — | ✅ |
+| T5 · Réponse de l'agent → visible dans le navigateur (p95, 3 passes) | < 150 ms | 7–15 ms (p50 3–6) | — | ✅ |
+| T5 · Agent et humain dans le même bloc | 409 propre, document intact | 409 + extrait à jour (test `conflict_when_block_changed`) | — | ✅ |
+| T5 · Édition d'agent sur « Café 🚀 déjà » (positions UTF-16) | aucun caractère coupé | « Café 🚀 prêt » côté serveur et côté client Yjs | — | ✅ |
 | T4 · MMD ⇄ Yjs au format BlockNote, côté serveur (yrs) | sans perte | la fixture écrite par BlockNote se relit en MMD canonique exact ; une page écrite par le serveur s'ouvre dans BlockNote identique (28 blocs) | — | ✅ |
 
 Notes T1 :

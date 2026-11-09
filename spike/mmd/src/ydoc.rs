@@ -295,9 +295,23 @@ fn s(v: &str) -> Any {
     Any::from(v)
 }
 
+/// Élément de premier niveau d'un bloc : à l'index `at` s'il est donné, sinon en fin de parent.
+fn top(parent: &XmlElementRef, txn: &mut TransactionMut, at: Option<u32>, tag: &str, id: &str) -> XmlElementRef {
+    let el = match at {
+        Some(i) => parent.insert(txn, i, XmlElementPrelim::empty(tag)),
+        None => parent.push_back(txn, XmlElementPrelim::empty(tag)),
+    };
+    el.insert_attribute(txn, "id", id);
+    el
+}
+
 fn write_block(parent: &XmlElementRef, txn: &mut TransactionMut, b: &Block) {
+    write_block_at(parent, txn, None, b)
+}
+
+fn write_block_at(parent: &XmlElementRef, txn: &mut TransactionMut, at: Option<u32>, b: &Block) {
     if let BlockKind::Columns = b.kind {
-        let list = node(parent, txn, "columnList", &[("id", s(&b.id))]);
+        let list = top(parent, txn, at, "columnList", &b.id);
         for col in &b.children {
             let width = match col.kind {
                 BlockKind::Column { width: Some(w) } => w as f64,
@@ -310,7 +324,7 @@ fn write_block(parent: &XmlElementRef, txn: &mut TransactionMut, b: &Block) {
         }
         return;
     }
-    let bc = node(parent, txn, "blockContainer", &[("id", s(&b.id))]);
+    let bc = top(parent, txn, at, "blockContainer", &b.id);
     match &b.kind {
         BlockKind::Paragraph => write_inline(&node(&bc, txn, "paragraph", &[]), txn, &b.content),
         BlockKind::Heading { level } => write_inline(&node(&bc, txn, "heading", &[("level", num(*level as f64))]), txn, &b.content),
@@ -385,6 +399,43 @@ pub fn write_blocks(txn: &mut TransactionMut, frag: &XmlFragmentRef, blocks: &[B
     for b in blocks {
         write_block(&group, txn, b);
     }
+}
+
+// ---------------------------------------------------------------- recherche et insertion
+
+/// Élément de premier niveau (`blockContainer`, `columnList` ou `column`) portant cet id.
+pub fn find_container<T: ReadTxn>(txn: &T, frag: &XmlFragmentRef, id: &str) -> Option<XmlElementRef> {
+    frag.successors(txn).find_map(|n| match n {
+        XmlOut::Element(e)
+            if matches!(e.tag().as_ref(), "blockContainer" | "columnList" | "column") && attr_str(&e, txn, "id") == id =>
+        {
+            Some(e)
+        }
+        _ => None,
+    })
+}
+
+/// Nœud de contenu d'un bloc (paragraphe, titre…), là où vit son texte.
+pub fn find_block_xml<T: ReadTxn>(txn: &T, frag: &XmlFragmentRef, id: &str) -> Option<XmlElementRef> {
+    let container = find_container(txn, frag, id)?;
+    if container.tag().as_ref() != "blockContainer" {
+        return None;
+    }
+    elements(&container, txn).into_iter().next()
+}
+
+/// Insère `blocks` juste après le bloc `after_id`, au même niveau. Renvoie `false` si le bloc n'existe plus.
+pub fn insert_blocks_after(txn: &mut TransactionMut, frag: &XmlFragmentRef, after_id: &str, blocks: &[Block]) -> bool {
+    let Some(container) = find_container(txn, frag, after_id) else { return false };
+    let Some(XmlOut::Element(parent)) = container.parent() else { return false };
+    let index = parent
+        .children(txn)
+        .position(|c| matches!(&c, XmlOut::Element(e) if e.tag() == container.tag() && attr_str(e, txn, "id") == after_id));
+    let Some(index) = index else { return false };
+    for (k, b) in blocks.iter().enumerate() {
+        write_block_at(&parent, txn, Some(index as u32 + 1 + k as u32), b);
+    }
+    true
 }
 
 /// Texte brut du contenu en ligne ; mentions et maths valent chacune [`OBJECT`].

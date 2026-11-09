@@ -24,6 +24,8 @@ pub struct Room {
     pub page: String,
     pub awareness: Mutex<Awareness>,
     pub tx: broadcast::Sender<Broadcast>,
+    /// Révisions lues par les agents (Task 5).
+    pub revisions: crate::revisions::RevisionLog,
     store: Store,
     clients: AtomicUsize,
 }
@@ -66,6 +68,15 @@ impl Room {
             self.commit_update(0, update, origin).await?;
         }
         Ok(result)
+    }
+
+    /// Lecture cohérente du document (sous le même verrou que les écritures).
+    pub async fn read<R>(&self, f: impl FnOnce(&yrs::Transaction<'_>, &XmlFragmentRef) -> R) -> R {
+        let aw = self.awareness.lock().await;
+        let doc = aw.doc();
+        let frag = doc.get_or_insert_xml_fragment(FRAGMENT);
+        let txn = doc.transact();
+        f(&txn, &frag)
     }
 
     pub fn client_joined(&self) {
@@ -133,6 +144,7 @@ impl Rooms {
             page: page.to_string(),
             awareness: Mutex::new(Awareness::new(doc)),
             tx,
+            revisions: Default::default(),
             store: self.store.clone(),
             clients: AtomicUsize::new(0),
         });
