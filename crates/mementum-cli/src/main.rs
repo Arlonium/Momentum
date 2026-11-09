@@ -58,13 +58,8 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Serve { bind, data_dir } => {
-            let mut cfg = Config::from_env()?;
-            if let Some(bind) = bind {
-                cfg.bind = bind;
-            }
-            if let Some(data_dir) = data_dir {
-                cfg.data_dir = data_dir;
-            }
+            // Les options d'abord : une variable n'est lue que si l'option manque.
+            let cfg = Config::from_args(bind, data_dir)?;
             mementum_server::serve(cfg).await
         }
     }

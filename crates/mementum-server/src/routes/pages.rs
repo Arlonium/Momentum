@@ -70,10 +70,16 @@ pub(crate) async fn create(
         })
         .await
         .map_err(placement_error)?;
-    // Une erreur ici est renvoyée au client, mais le nœud existe déjà : son
-    // acteur lui écrira son document au premier chargement (Ruling R28), si
-    // bien que la page reste utilisable.
-    state.hub.create_page_doc(node.id).await?;
+    // Ruling R32 : le nœud existe déjà, et son acteur lui écrira son document
+    // au premier chargement (R28). Une erreur ici n'est que journalisée : un
+    // 5xx pousserait le client à réessayer, et à créer un doublon.
+    if let Err(error) = state.hub.create_page_doc(node.id).await {
+        tracing::warn!(
+            node_id = %node.id,
+            %error,
+            "document de la page neuve non écrit ; il le sera à sa première ouverture"
+        );
+    }
     Ok((StatusCode::CREATED, Json(page_node(&node))))
 }
 

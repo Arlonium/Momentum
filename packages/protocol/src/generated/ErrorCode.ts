@@ -3,4 +3,4 @@
 /**
  * Code d'une erreur de l'API.
  */
-export type ErrorCode = "not_found" | "method_not_allowed" | "cycle" | "invalid_mmd" | "invalid_blocks" | "invalid_after" | "invalid_parent" | "title_too_long" | "invalid_json" | "invalid_request" | "payload_too_large" | "unavailable" | "internal";
+export type ErrorCode = "not_found" | "method_not_allowed" | "cycle" | "invalid_mmd" | "invalid_blocks" | "invalid_after" | "invalid_parent" | "title_too_long" | "invalid_json" | "invalid_request" | "payload_too_large" | "unavailable" | "internal" | "bad_host" | "bad_origin";

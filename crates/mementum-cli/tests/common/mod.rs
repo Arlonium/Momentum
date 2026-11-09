@@ -32,9 +32,15 @@ impl Server {
     /// Lance `mementum serve --bind 127.0.0.1:0 --data-dir <data_dir>` et
     /// attend la ligne qui donne l'adresse liée.
     pub fn start(data_dir: &Path) -> Server {
+        Server::start_with_env(data_dir, &[])
+    }
+
+    /// Comme [`Server::start`], avec des variables d'environnement en plus.
+    pub fn start_with_env(data_dir: &Path, vars: &[(&str, &str)]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_mementum"))
             .args(["serve", "--bind", "127.0.0.1:0", "--data-dir"])
             .arg(data_dir)
+            .envs(vars.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

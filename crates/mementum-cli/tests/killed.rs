@@ -1,5 +1,11 @@
 //! Serveur tué en pleine frappe (Review Focus 1) : tout ce qu'un autre client
 //! a reçu est encore là après le redémarrage.
+//!
+//! Ce test voit le résultat, pas l'ordre « persister, puis diffuser » : après
+//! un `kill -9`, une écriture SQLite survit dès son `write()`, même si la
+//! diffusion l'a précédée. Cet ordre est gardé par
+//! `crates/mementum-sync/tests/durability.rs`
+//! (`update_is_persisted_before_broadcast`).
 
 mod common;
 
@@ -69,6 +75,11 @@ async fn killed_server_loses_nothing_broadcast() {
         "B voit encore le serveur"
     );
     let received = text(&b);
+    // Sans ce contrôle, `starts_with("")` serait vrai d'office.
+    assert!(
+        received.len() >= KILL_AFTER,
+        "B a perdu ce qu'il avait reçu : {received:?}"
+    );
     assert!(
         typed.starts_with(&received),
         "B a reçu un texte qui n'est pas un préfixe de la frappe : {received:?}"

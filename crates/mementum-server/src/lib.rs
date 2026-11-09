@@ -17,10 +17,12 @@
 //! [`config::DB_FILE`] du dossier des données.
 //!
 //! Le lot 1 n'a pas d'authentification : par défaut, le serveur n'écoute que
-//! sur `127.0.0.1:8080`.
+//! sur `127.0.0.1:8080`, et il refuse le DNS rebinding et le détournement de
+//! WebSocket (`guard.rs`, Ruling R31).
 
 pub mod config;
 mod error;
+mod guard;
 pub mod types;
 
 mod routes {
@@ -36,6 +38,7 @@ use anyhow::Context;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::routing::{get, patch, post};
 use mementum_store::{Node, Store};
 use mementum_sync::{Hub, SyncConfig};
@@ -65,6 +68,9 @@ pub(crate) struct AppState {
     hub: Arc<Hub>,
     /// Le coffre par défaut, seul coffre du lot 1.
     vault_id: Uuid,
+    /// L'en-tête `Host` doit nommer la boucle locale : vrai quand le serveur
+    /// n'écoute que sur elle (Ruling R31).
+    check_host: bool,
 }
 
 impl AppState {
@@ -92,10 +98,15 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("impossible d'écouter sur {}", cfg.bind))?;
     let addr = listener.local_addr()?;
-    let mut stdout = std::io::stdout().lock();
-    writeln!(stdout, "{LISTENING}{addr}")?;
-    stdout.flush()?;
-    drop(stdout);
+    // Une sortie standard fermée n'arrête pas le serveur : l'adresse est
+    // aussi dans le journal « serveur prêt ».
+    let announced = {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{LISTENING}{addr}").and_then(|()| stdout.flush())
+    };
+    if let Err(error) = announced {
+        tracing::warn!(%error, "ligne d'écoute impossible à écrire sur la sortie standard ; le serveur continue");
+    }
     tracing::info!(%addr, data_dir = %cfg.data_dir.display(), "serveur prêt");
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -118,10 +129,18 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
         .with_context(|| format!("impossible d'ouvrir la base {}", db.display()))?;
     let space = store.default_space().await.context("coffre par défaut")?;
     let hub = Hub::new(store.clone(), SyncConfig::default());
+    let check_host = cfg.bind.ip().is_loopback();
+    if !check_host {
+        tracing::warn!(
+            bind = %cfg.bind,
+            "écoute hors de la boucle locale : sans authentification au lot 1, quiconque atteint              cette adresse lit et modifie les pages ; contrôle de l'en-tête Host désactivé"
+        );
+    }
     let state = AppState {
         store: store.clone(),
         hub,
         vault_id: space.vault_id,
+        check_host,
     };
     Ok((router(state), store))
 }
@@ -149,6 +168,11 @@ fn router(state: AppState) -> Router {
             )
         })
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Avant toute route, fallbacks compris (Ruling R31).
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            guard::check_host,
+        ))
         .with_state(state)
 }
 

@@ -65,6 +65,7 @@ fn idle_rss_under_150mb() {
             .process(pid)
             .expect("le processus du serveur")
             .memory();
+        assert!(rss > 0, "RSS illisible pour le processus {pid}");
         samples.push(rss);
     }
     let best = *samples.iter().min().unwrap();

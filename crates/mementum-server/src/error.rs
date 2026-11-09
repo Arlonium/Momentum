@@ -129,11 +129,10 @@ impl From<JsonRejection> for ApiError {
     fn from(e: JsonRejection) -> ApiError {
         let message = match &e {
             JsonRejection::MissingJsonContentType(_) => {
-                "le corps doit être du JSON (Content-Type: application/json)".to_string()
+                "le corps doit être du JSON (en-tête Content-Type: application/json)".to_string()
             }
-            JsonRejection::JsonSyntaxError(_) => format!("JSON illisible ({})", detail(&e)),
-            JsonRejection::JsonDataError(_) => format!("corps inattendu ({})", detail(&e)),
-            _ => format!("corps illisible ({})", detail(&e)),
+            JsonRejection::BytesRejection(_) => "corps de requête illisible".to_string(),
+            _ => json_message(&e),
         };
         rejection(e.status(), ErrorCode::InvalidJson, message)
     }
@@ -141,19 +140,70 @@ impl From<JsonRejection> for ApiError {
 
 impl From<BytesRejection> for ApiError {
     fn from(e: BytesRejection) -> ApiError {
-        let message = format!("corps illisible ({})", detail(&e));
-        rejection(e.status(), ErrorCode::InvalidRequest, message)
+        rejection(
+            e.status(),
+            ErrorCode::InvalidRequest,
+            "corps de requête illisible".to_string(),
+        )
     }
 }
 
-/// Le message de la cause la plus profonde (celui de serde, par exemple) :
-/// les enveloppes d'axum n'ajoutent qu'un préambule en anglais.
-fn detail(e: &(dyn std::error::Error + 'static)) -> String {
-    let mut deepest = e;
-    while let Some(source) = deepest.source() {
-        deepest = source;
+/// Erreur de serde telle qu'axum la garde (le chemin du champ en plus).
+type PathError = serde_path_to_error::Error<serde_json::Error>;
+
+/// Message en français d'un JSON refusé, d'après l'erreur de serde trouvée
+/// dans la chaîne des causes (le texte anglais de serde n'est pas recopié).
+fn json_message(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut cause = Some(e);
+    while let Some(error) = cause {
+        if let Some(error) = error.downcast_ref::<PathError>() {
+            return describe_json(error.inner(), Some(error.path().to_string()));
+        }
+        if let Some(error) = error.downcast_ref::<serde_json::Error>() {
+            return describe_json(error, None);
+        }
+        cause = error.source();
     }
-    deepest.to_string()
+    "corps JSON illisible".to_string()
+}
+
+fn describe_json(error: &serde_json::Error, path: Option<String>) -> String {
+    use serde_json::error::Category;
+    if !matches!(error.classify(), Category::Data) {
+        return format!(
+            "JSON illisible (ligne {}, colonne {})",
+            error.line(),
+            error.column()
+        );
+    }
+    // Les tournures de serde sont stables (`serde::de::Error`) : on en tire
+    // le nom du champ en cause.
+    let text = error.to_string();
+    let named = |prefix: &str| {
+        text.strip_prefix(prefix)
+            .and_then(|rest| rest.split_once('`'))
+            .map(|(name, _)| name.to_string())
+    };
+    let field = path.filter(|p| !p.is_empty() && p != ".");
+    if let Some(name) = named("unknown field `") {
+        format!("champ inconnu : « {name} »")
+    } else if let Some(name) = named("duplicate field `") {
+        format!("champ en double : « {name} »")
+    } else if let Some(name) = named("missing field `") {
+        format!("champ manquant : « {name} »")
+    } else if text.starts_with("invalid type") {
+        match field {
+            Some(field) => format!("type invalide pour « {field} »"),
+            None => "le corps doit être un objet JSON".to_string(),
+        }
+    } else if text.starts_with("invalid value") {
+        match field {
+            Some(field) => format!("valeur invalide pour « {field} »"),
+            None => "valeur invalide".to_string(),
+        }
+    } else {
+        "corps JSON inattendu".to_string()
+    }
 }
 
 /// Erreur d'un extracteur d'axum ; un corps trop gros garde son statut 413.
@@ -169,4 +219,36 @@ fn rejection(status: StatusCode, code: ErrorCode, message: String) -> ApiError {
         );
     }
     ApiError::new(status, code, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `SyncError::Closed` ne s'obtient pas de bout en bout sans tricher :
+    /// un acteur qui ne peut pas charger sa page répond l'erreur réelle au
+    /// premier demandeur, et `Closed` ne vient qu'après 8 demandes lâchées de
+    /// suite (course entre demandes simultanées, ou panique de l'acteur). On
+    /// vérifie donc sa traduction (Ruling R26).
+    #[test]
+    fn closed_is_503_unavailable() {
+        let error = ApiError::from(SyncError::Closed);
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.error, ErrorCode::Unavailable);
+        assert!(error.body.message.contains("réessayer"));
+        assert_eq!(error.body.line, None);
+    }
+
+    #[test]
+    fn crdt_refusals_are_422_invalid_blocks() {
+        let error = ApiError::from(SyncError::Crdt(CrdtError::TooDeep));
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.body.error, ErrorCode::InvalidBlocks);
+        let error = ApiError::from(SyncError::Crdt(CrdtError::Structure("x".into())));
+        assert_eq!(error.body.error, ErrorCode::InvalidBlocks);
+        // Les autres erreurs du document sont internes.
+        let error = ApiError::from(SyncError::Crdt(CrdtError::Decode("x".into())));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.body.message, "erreur interne du serveur");
+    }
 }

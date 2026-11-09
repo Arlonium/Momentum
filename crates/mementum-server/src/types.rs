@@ -109,7 +109,8 @@ pub enum ErrorCode {
     TitleTooLong,
     /// Corps JSON illisible ou inattendu.
     InvalidJson,
-    /// Requête WebSocket attendue.
+    /// Requête mal formée : poignée de main WebSocket attendue sur `/sync`,
+    /// ou corps de requête illisible.
     InvalidRequest,
     /// Corps de requête trop gros.
     PayloadTooLarge,
@@ -117,6 +118,12 @@ pub enum ErrorCode {
     Unavailable,
     /// Erreur interne du serveur (détails dans ses journaux).
     Internal,
+    /// En-tête `Host` qui ne nomme pas la boucle locale, alors que le serveur
+    /// n'écoute que sur elle (DNS rebinding, Ruling R31). Statut 421.
+    BadHost,
+    /// En-tête `Origin` d'une autre page que celles de la boucle locale ou du
+    /// serveur, à `/sync` (Ruling R31). Statut 403.
+    BadOrigin,
 }
 
 /// Corps de toute réponse d'erreur.
