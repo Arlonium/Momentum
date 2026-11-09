@@ -23,9 +23,14 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 | Conception complète | ✅ validée : [`docs/specs/2026-11-09-mementum-design.md`](docs/specs/2026-11-09-mementum-design.md) |
 | Maquettes (3 directions, **A « Papier » retenue**) | ✅ faites : [`docs/design/`](docs/design/) |
 | Phase 0 : prototype jetable qui valide les choix techniques | ✅ faite sur PC et relue (relecture finale du 9 novembre, voir [`spike/RESULTS.md`](spike/RESULTS.md)) ; ⏳ **mesures ARM repoussées avant la phase 2** (bases de données) |
-| Phase 1 « Écrire ensemble » (MVP) | 🚧 en cours, découpée en 7 lots ; lot 1 « Socle et édition en direct » : [plan](docs/superpowers/plans/2026-11-09-p1-lot1-socle-edition.md) |
+| Phase 1 « Écrire ensemble » (MVP) | 🚧 en cours, découpée en 7 lots. Lot 1 « Socle et édition en direct » **fait** : 10 tâches closes, relecture finale faite, corrections comprises ([plan](docs/superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md)). Lots 2 à 7 à venir |
 
-Aucun code de production n'existe encore. Le dossier `spike/` est un **prototype jetable** : on en garde les leçons, les fixtures et les tests d'aller-retour, pas le code.
+Le lot 1 livre le vrai code (`crates/mementum-*`, `apps/web`, `packages/protocol`, `spec/`) : un arbre de pages, l'édition à plusieurs en direct dans BlockNote et le format MMD de la phase 1, sans comptes ni droits (lot 2). Il laisse trois limites connues, décrites dans la conception (§9) :
+- une édition faite sur un bloc pendant qu'un autre client le déplace est perdue (Ruling R39, à traiter au lot 3) ;
+- la réécriture complète d'une page de 10 000 blocs par `PUT /mmd` bloque cette page environ 2,5 s (Ruling R40, remède prévu au lot 5) ;
+- `PUT /mmd` refuse une prop hors du registre des blocs, parce qu'un navigateur l'effacerait ensuite sans bruit (Ruling R41).
+
+Le dossier `spike/` est le **prototype jetable** de la phase 0 : on en garde les leçons, les fixtures et les tests d'aller-retour, pas le code.
 
 ## Décisions déjà prises
 
@@ -63,8 +68,13 @@ docs/
   research/                 état de l'art + notes sourcées
   design/                   maquettes des 3 directions (A retenue)
   superpowers/
-    plans/                  plans d'implémentation (phase 0)
+    plans/                  plans d'implémentation (phase 0, lot 1 de la phase 1)
     logs/                   registres d'exécution (décisions prises en cours de route)
+crates/mementum-*/          serveur Rust : schema, md, crdt, store, sync, server, cli
+apps/web/                   client React + Vite + BlockNote, tests e2e Playwright
+packages/protocol/          types TypeScript de l'API, générés depuis Rust
+spec/                       registre des blocs (schema/) et fixtures MMD (mmd/fixtures/)
+tools/                      contrôle des licences npm
 spike/                      phase 0 : prototype JETABLE
   RESULTS.md                mesures et verdict
   server/                   serveur de synchro Yjs (axum + yrs + SQLite) + agent pair CRDT
@@ -88,6 +98,8 @@ corepack pnpm -C apps/web dev             # dans un autre terminal : Vite sur le
 ```
 
 Puis ouvrir `http://localhost:5173`. Vite relaie `/api` et `/sync` (WebSocket comprise) vers le serveur. Le lot 1 n'a pas de comptes : chaque navigateur écrit sous un nom d'invité (« Invité » et 4 chiffres).
+
+> **Ne pas écouter hors de la boucle locale** (`serve --bind 0.0.0.0:8080`, ou une adresse du réseau). Le lot 1 n'a aucune authentification : toute personne qui atteint l'adresse lit et modifie toutes les pages. Les protections contre le DNS rebinding ne valent, elles aussi, que sur la boucle locale. Le serveur l'écrit dans son journal au démarrage.
 
 Autres ports : `MEMENTUM_E2E_WEB_PORT` (Vite) et `MEMENTUM_E2E_API_PORT` (le serveur que vise le mandataire), à donner aussi à `serve --bind 127.0.0.1:<port>`.
 
@@ -141,13 +153,10 @@ L'éditeur de démo s'ouvre avec `cargo run --release -p spike-server --bin spik
 ## Prochaines étapes
 
 1. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11), à faire **avant la phase 2**, et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
-2. **Écrire le plan de la phase 1** « Écrire ensemble » à partir de la conception (§9, ligne P1) et de la section « Ce qui change pour la P1 » de `spike/RESULTS.md`, corrigée par la relecture finale. Points clés :
-   - fidélité du schéma : toutes les props, enfants pour tout bloc, saut de ligne, nœuds inconnus transportés tels quels, versionnage de schéma ;
-   - déplacements de blocs faits par le serveur (un déplacement concurrent perd des éditions) ;
-   - pages géantes : virtualisation ou découpage (le coût est la liaison avec l'éditeur, pas Yjs) ;
-   - un acteur par page pour les écritures, et une racine de page sûre avant la première synchro ;
-   - rollups matérialisés (pour la P2).
-3. **Implémenter la phase 1** dans la structure cible (§8 de la conception), en repartant de zéro mais en reprenant les fixtures et les tests d'aller-retour MMD du prototype.
+2. **Lot 2 de la phase 1** : comptes, organisations, coffres, droits et corbeille. Écrire son plan dans `docs/superpowers/plans/`, à partir de la conception et de ce que le [registre du lot 1](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md) lui reporte : écritures du store en transactions, version de schéma qu'un client ne doit pas pouvoir écraser, fusions de tableau écrites par un client Yjs.
+3. **Lots 3 à 7**, dans cet ordre : collaboration et blocs riches ; recherche ; agents (REST complet, MCP v1, jetons) ; imports et export ; livraison. Ils reprennent les limites connues du lot 1 :
+   - lot 3 : déplacements de blocs sans perte d'édition (pistes (a) et (b) du Ruling R39, conception §11), et, là ou au lot 5, un porteur durable pour les props hors registre (Ruling R41) ;
+   - lot 5 : écriture MMD par différence, pour ne plus bloquer une page pendant sa réécriture (Ruling R40).
 
 ## Méthode de travail
 
