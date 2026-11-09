@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["dbbench","mmd","server"]
+members = ["crdtbench","dbbench","mmd","server"]
 
 [profile.release]
 debug = false

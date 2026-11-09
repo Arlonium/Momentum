@@ -50,3 +50,19 @@ Notes T6 (bench `cargo run --release -p spike-db -- bench --rows 100000`, PC, p9
 - **Le stockage JSON tient** : la table typée ne gagne qu'environ 20 % sur les filtres. Le choix d'index et de requête compte bien plus. Exemple : `GROUP BY CAST(json_extract…)` ignorait l'index et prenait 707 ms ; avec l'expression exacte de l'index, 12 ms.
 - **Les rollups (et les formules) ne peuvent pas être calculés à la lecture** sur 100 000 lignes, quel que soit le stockage : il faut les matérialiser et les invalider par dépendances (§5.5 de la spec). C'est confirmé.
 - Filtres sans tri indexé : ~100 ms sur le PC, donc probablement 0,5 à 1 s sur un Pi 4. Pistes : clé primaire entière (rowid) pour arrêter le parcours tôt, index couvrants sur les propriétés filtrées, fenêtre servie depuis le cache client. **À mesurer sur ARM avant de trancher.**
+
+Notes T7 (page de 10 000 blocs, PC ; `cargo run --release -p spike-crdt-bench` et `node --expose-gc crdtbench-js/bench.mjs`) :
+
+| Charge | yrs 0.28 (serveur) | Loro 1.17 (serveur) | yjs 13.6 (client) | loro-crdt 1.17 (client) |
+|---|---|---|---|---|
+| W1 construire 10 000 blocs | 439 ms | 76 ms | 57 ms | 519 ms |
+| W2 instantané | 1 453 Ko | 1 033 Ko | 1 648 Ko | 1 017 Ko |
+| W3 charger l'instantané | 18 ms | 0,8 ms (paresseux) | 34 ms | 2,8 ms (paresseux) |
+| W3b charger puis lire tous les blocs | 28 ms | 83 ms | 35 ms | 580 ms |
+| W4 mémoire après chargement | 20,5 Mo | 1,1 Mo (paresseux) | 25 Mo de tas JS | 2,5 Mo de tas JS (+ mémoire WASM non comptée) |
+| W5 fusion 2 × 1 000 éditions + 50 déplacements | 37 ms, **25 blocs en double** | 83 ms, 0 doublon | — | — |
+| W6 état après 10 000 éditions | 1 613 Ko | 1 350 Ko | — | — |
+
+- **Verdict CRDT : on garde Yjs** (règle du plan : Loro devait être au moins 2 fois meilleur sur W3, W4 ou W5). Loro ne gagne que grâce au chargement paresseux (W3, W4) ; dès qu'on lit toute la page, il est 3 fois plus lent côté serveur et 16 fois plus lent côté client (appels JS ⇄ WASM), et sa fusion est 2 fois plus lente. La liaison loro-prosemirror n'a donc pas eu besoin d'être évaluée.
+- **Point faible de Yjs confirmé** (`yrs_concurrent_moves_duplicate_blocks`) : un déplacement de bloc vaut suppression + réinsertion, donc deux personnes qui déplacent le même bloc en même temps le dupliquent (25 sur 25 ici). Loro, avec son arbre déplaçable, n'a aucun doublon. **Action P1** : passe de nettoyage côté serveur après fusion (un même id de `blockContainer` en double → garder une seule copie), et déplacements de pages dans l'arbre faits par le serveur (déjà prévu en §5.4).
+- Les benchmarks publics comparant ces bibliothèques étaient périmés ; ces chiffres les remplacent pour notre usage.

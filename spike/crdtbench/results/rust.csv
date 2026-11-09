@@ -1,0 +1,8 @@
+charge;yrs;loro
+W1 construire 10 000 blocs (ms);439.0;76.0
+W2 instantané (Ko);1453;1033
+W3 charger l'instantané (ms);18.0;0.8
+W3b charger puis lire tous les blocs (ms);28.2;83.4
+W4 mémoire après chargement (Mo, écart RSS);20.5;1.1
+W5 fusion de 2 × 1 000 éditions + 50 déplacements (ms);37.1 (convergé : true, blocs en double : 25);83.2 (convergé : true, blocs en double : 0)
+W6 état après 10 000 éditions (Ko);1613;1350

@@ -1,0 +1,9 @@
+{
+  "name": "spike-crdtbench-js",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "loro-crdt": "^1.17.1",
+    "yjs": "13.6.33"
+  }
+}

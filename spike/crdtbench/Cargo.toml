@@ -1,0 +1,9 @@
+[package]
+name = "spike-crdt-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+loro = "1.17.1"
+sysinfo = "0.40.1"
+yrs = { version = "0.28.1", features = ["sync"] }

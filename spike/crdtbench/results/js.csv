@@ -1,0 +1,6 @@
+charge;yjs;loro
+W1 construire 10 000 blocs (ms);56.8;519.1
+W2 instantané (Ko);1648;1017
+W3 charger l'instantané (ms);33.7;2.8
+W3b charger puis lire tous les blocs (ms);35.4;580.2
+W4 mémoire après chargement et lecture (Mo de tas JS ; Loro vit surtout en WASM);25.4;2.5
