@@ -1,6 +1,8 @@
 //! Listes de props `{…}` et attributs de balises : écriture, lecture, et
 //! repérage d'une liste ou des cellules dans une ligne.
 
+use std::collections::HashSet;
+
 use mementum_schema::PropType;
 
 use crate::model::PropValue;
@@ -176,12 +178,11 @@ fn parse_pair(s: &str) -> Result<(Attr, &str), String> {
 }
 
 fn check_unique(items: &[Attr]) -> Result<(), String> {
-    for (i, (k, _)) in items.iter().enumerate() {
-        if items[..i].iter().any(|(other, _)| other == k) {
-            return Err(format!("« {k} » écrit deux fois"));
-        }
+    let mut seen = HashSet::with_capacity(items.len());
+    match items.iter().find(|(k, _)| !seen.insert(k.as_str())) {
+        Some((k, _)) => Err(format!("« {k} » écrit deux fois")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Lit une liste `{clé=valeur …}` qui occupe tout `s`.
@@ -299,10 +300,19 @@ fn marks(s: &str) -> Vec<(usize, u8)> {
             b'<' if next_is(i, |c| c.is_ascii_alphabetic() || c == b'/') => {
                 find_unquoted(b, i + 1, b'>').map_or(n, |e| e + 1)
             }
-            b'$' => b[i + 1..]
-                .iter()
-                .position(|&c| c == b'$')
-                .map_or(i + 1, |p| i + 1 + p + 1),
+            // Formule : jusqu'au `$` suivant non échappé (`\$` y reste un
+            // caractère, comme pour pulldown-cmark).
+            b'$' => {
+                let mut j = i + 1;
+                loop {
+                    match b.get(j) {
+                        None => break i + 1,
+                        Some(b'\\') => j += 2,
+                        Some(b'$') => break j + 1,
+                        Some(_) => j += 1,
+                    }
+                }
+            }
             b']' if next_is(i, |c| c == b'(') => b[i + 2..]
                 .iter()
                 .position(|&c| c == b')')

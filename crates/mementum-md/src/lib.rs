@@ -19,5 +19,5 @@ pub use model::{
     Block, Cell, Content, Inline, MmdError, PropValue, Props, RenderOpts, Rendered, Styles, Table,
     block_text, normalize,
 };
-pub use parse::parse;
+pub use parse::{MAX_DEPTH, parse};
 pub use render::render;

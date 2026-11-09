@@ -4,5 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc c27d742c219258335535b3b4c853c9800e77e0883c5519356db7c8e9d10be10e # shrinks to t = []
 cc dd76a3310241d362d9543cde998f5cbd297fb92e289052ca3e522b32c2e9caed # shrinks to t = [Block { id: "", kind: "paragraph", props: {}, content: Inline([]), children: [Block { id: "", kind: "bulletListItem", props: {}, content: Inline([Text { text: "a", styles: Styles { bold: false, italic: false, underline: false, strike: true, code: true, text_color: None, background_color: None } }, Text { text: "A", styles: Styles { bold: false, italic: false, underline: false, strike: false, code: false, text_color: None, background_color: None } }]), children: [Block { id: "", kind: "paragraph", props: {}, content: Inline([]), children: [] }] }] }]

@@ -198,12 +198,46 @@ fn p1_forms() {
             Props::new(),
             Content::Table(Table {
                 header_rows: 0,
+                header_cols: 0,
                 column_widths: vec![Some(120.0)],
                 rows: vec![vec![cell("A")], vec![cell("1")]],
             }),
             vec![],
         )],
         "| A |\n| --- |\n| 1 |\n{header-rows=0 widths=\"120\"}\n",
+    );
+
+    // Colonne d'en-tête (R11) : `header-cols`, omis à 0, trié avec les autres clés.
+    same(
+        vec![blk(
+            "table",
+            Props::new(),
+            Content::Table(Table {
+                header_rows: 1,
+                header_cols: 1,
+                column_widths: vec![None, None],
+                rows: vec![vec![cell("A"), cell("B")]],
+            }),
+            vec![],
+        )],
+        "| A | B |\n| --- | --- |\n{header-cols=1}\n",
+    );
+
+    // Formule en ligne sans forme `$…$` (R8) : `<math latex="…"/>`.
+    let math = |latex: &str| Inline::Math {
+        latex: latex.into(),
+    };
+    same(
+        vec![para(vec![
+            math("x^2"),
+            text(" puis "),
+            math(""),
+            text(", "),
+            math(" x"),
+            text(" et "),
+            math("a$$b"),
+        ])],
+        "$x^2$ puis <math latex=\"\"/>, <math latex=\" x\"/> et <math latex=\"a$$b\"/>\n",
     );
 
     // Surlignage.

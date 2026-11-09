@@ -13,6 +13,21 @@ use crate::model::{
 };
 
 /// Écrit la forme canonique de `blocks` (normalisés au passage).
+///
+/// L'appelant garantit (`mementum-crdt` le fait en lisant la page, Ruling
+/// R10 du lot 1) :
+/// - les props connues du registre sont du type qu'il déclare ;
+/// - les flottants sont finis ;
+/// - un tableau a au moins une ligne ;
+/// - l'imbrication ne dépasse pas [`crate::MAX_DEPTH`] niveaux.
+///
+/// Sinon, `render` ne panique pas mais écrit un MMD que [`crate::parse`]
+/// refuse : une prop mal typée s'écrit selon le type de sa valeur ; un
+/// flottant non fini s'écrit `NaN` ou `inf` ; un tableau sans ligne n'écrit
+/// aucune ligne de tableau ; un arbre trop profond s'écrit en entier (le
+/// rendu est récursif : des milliers de niveaux peuvent épuiser la pile).
+/// Un type hors registre s'écrit `<block type="…"/>` et se relit en
+/// `unknown`.
 pub fn render(blocks: &[Block], opts: RenderOpts) -> Rendered {
     let mut r = Renderer {
         ids: if opts.anchors {
@@ -146,8 +161,9 @@ fn language_fits(lang: &str) -> bool {
             .any(|c| c.is_whitespace() || c.is_control() || c == '`')
 }
 
-/// Attribut d'ancre d'une balise : `anchor` si une prop s'écrit déjà `id`.
-fn anchor_key(spec: &BlockSpec) -> &'static str {
+/// Attribut d'ancre d'une balise : `anchor` si une prop s'écrit déjà `id`
+/// (`<page>`, `<database>`), sinon `id`. Partagé par le rendu et la lecture.
+pub(crate) fn anchor_key(spec: &BlockSpec) -> &'static str {
     if spec.props.iter().any(|p| p.mmd == "id") {
         "anchor"
     } else {
@@ -442,6 +458,9 @@ impl Renderer {
             }
             if t.header_rows != 1 {
                 list.push(("header-rows".into(), t.header_rows.to_string()));
+            }
+            if t.header_cols != 0 {
+                list.push(("header-cols".into(), t.header_cols.to_string()));
             }
             if t.column_widths != vec![None; ncols] {
                 let widths: Vec<String> = t

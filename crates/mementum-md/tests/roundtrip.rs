@@ -164,6 +164,9 @@ fn features(blocks: &[Block], seen: &mut BTreeSet<String>) {
                 if t.header_rows != 1 {
                     seen.insert("header-rows".into());
                 }
+                if t.header_cols != 0 {
+                    seen.insert("header-cols".into());
+                }
                 if t.column_widths.iter().any(Option::is_some) {
                     seen.insert("widths".into());
                 }
@@ -210,6 +213,12 @@ fn generator_covers_brief() {
         let tree = strategy.new_tree(&mut runner).unwrap().current();
         assert_columns_placed(&tree, false);
         features(&tree, &mut seen);
+        if render(&tree, RenderOpts { anchors: false })
+            .markdown
+            .contains("<math latex=")
+        {
+            seen.insert("formule en <math>".into());
+        }
     }
     let mut expected: Vec<String> = Vec::new();
     for spec in mementum_schema::blocks() {
@@ -241,7 +250,9 @@ fn generator_covers_brief() {
         "équation avec une ligne $$",
         "nœud étranger",
         "header-rows",
+        "header-cols",
         "widths",
+        "formule en <math>",
         "props de cellule",
         "largeur d'aperçu entière",
     ] {

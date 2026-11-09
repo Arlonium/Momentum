@@ -42,7 +42,10 @@ pub enum Content {
 /// Contenu d'un tableau.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Table {
+    /// Lignes d'en-tête (1 par défaut, comme BlockNote).
     pub header_rows: u32,
+    /// Colonnes d'en-tête (`headerCols` de BlockNote, 0 par défaut).
+    pub header_cols: u32,
     /// Une largeur par colonne, `None` = automatique.
     pub column_widths: Vec<Option<f64>>,
     pub rows: Vec<Vec<Cell>>,

@@ -97,12 +97,28 @@ fn wrapped_is_false_only_for_columns() {
     }
 }
 
+/// Clés de la liste `{…}` d'un tableau qui ne sont pas des props.
+const TABLE_KEYS: [&str; 3] = ["header-rows", "header-cols", "widths"];
+
 #[test]
 fn mmd_names_unique_per_block() {
+    for p in cell_props() {
+        assert!(
+            !TABLE_KEYS.contains(&p.mmd),
+            "nom MMD {} réservé au tableau",
+            p.mmd
+        );
+    }
     for b in blocks() {
         let mut seen = HashSet::new();
         let mut seen_bn = HashSet::new();
         for p in b.props {
+            assert!(
+                !TABLE_KEYS.contains(&p.mmd),
+                "nom MMD {} de {} réservé au tableau",
+                p.mmd,
+                b.name
+            );
             assert!(
                 seen.insert(p.mmd),
                 "nom MMD {} en double dans {}",

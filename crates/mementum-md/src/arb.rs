@@ -10,7 +10,8 @@
 //!   des props inconnues du registre ;
 //! - des sauts de ligne, des liens dont le `href` contient une espace, `)`,
 //!   `&` ou `\`, du code avec des suites de backticks, des mentions et des
-//!   formules collées à du texte stylé, un callout vide suivi d'un paragraphe
+//!   formules collées à du texte stylé, des formules qui n'ont pas de forme
+//!   `$…$` (`<math latex="…"/>`), un callout vide suivi d'un paragraphe
 //!   enfant ;
 //! - les caractères `* _ \ < > & { } $ | ^ [ ] ~`, des emoji, des accents et
 //!   du texte de droite à gauche.
@@ -18,7 +19,8 @@
 //! Ils restent dans ce que BlockNote sait représenter : une colonne n'existe
 //! que dans un `columnList` (de 2 ou 3 colonnes, chacune avec au moins un
 //! bloc) ; un tableau a le même nombre de cellules par ligne, une largeur par
-//! colonne et au plus autant de lignes d'en-tête que de lignes.
+//! colonne, au plus autant de lignes d'en-tête que de lignes et de colonnes
+//! d'en-tête que de colonnes.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -417,24 +419,34 @@ fn href() -> BoxedStrategy<String> {
     .boxed()
 }
 
-/// LaTeX en ligne : accolades équilibrées, ni `$` ni blanc en bord.
-fn latex() -> impl Strategy<Value = String> {
-    prop::collection::vec(
-        prop::sample::select(vec![
-            "x",
-            "y^2",
-            "\\frac{a}{b}",
-            "a_{i}",
-            "\\{x\\}",
-            "|x|",
-            "a<b",
-            "\\alpha",
-            "{x}",
-            "E = mc^2",
+/// LaTeX en ligne : surtout des formules sûres en `$…$`, et des formules qui
+/// imposent `<math latex="…"/>` (vide, blanc en bord, accolade seule, saut
+/// de ligne, `$`, `$$`, backtick, barre oblique finale).
+fn latex() -> BoxedStrategy<String> {
+    prop_oneof![
+        3 => prop::collection::vec(
+            prop::sample::select(vec![
+                "x",
+                "y^2",
+                "\\frac{a}{b}",
+                "a_{i}",
+                "\\{x\\}",
+                "|x|",
+                "a<b",
+                "\\alpha",
+                "{x}",
+                "E = mc^2",
+                "\\$5",
+                "a`b",
+            ]),
+            1..3,
+        )
+        .prop_map(|parts| parts.join(" ")),
+        1 => select(&[
+            "", " x", "x ", "{", "}", "x\ny", "$", "$$", "a$$b", "a$b", "`", "a\\", "x}{",
         ]),
-        1..3,
-    )
-    .prop_map(|parts| parts.join(" "))
+    ]
+    .boxed()
 }
 
 fn table() -> impl Strategy<Value = Content> {
@@ -447,12 +459,14 @@ fn table() -> impl Strategy<Value = Content> {
             (
                 prop::collection::vec(prop::collection::vec(cell(), ncols), nrows),
                 0..=nrows as u32,
+                0..=ncols as u32,
                 widths,
             )
         })
-        .prop_map(|(rows, header_rows, column_widths)| {
+        .prop_map(|(rows, header_rows, header_cols, column_widths)| {
             Content::Table(Table {
                 header_rows,
+                header_cols,
                 column_widths,
                 rows,
             })

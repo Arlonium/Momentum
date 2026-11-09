@@ -14,13 +14,17 @@ use crate::attrs::{
 };
 use crate::inline::{parse_image, parse_inline};
 use crate::model::{Block, Cell, Content, Inline, MmdError, PropValue, Props, Table, normalize};
-use crate::render::{Family, family, render_ids};
+use crate::render::{Family, anchor_key, family, render_ids};
+
+/// Profondeur d'imbrication maximale lue par [`parse`] : un bloc de premier
+/// niveau est au niveau 1. Au-delà, la lecture s'arrête sur une erreur.
+pub const MAX_DEPTH: usize = 100;
 
 /// Lit un MMD canonique. Un bloc sans ancre ni attribut `id` est lu avec
-/// `id = ""`.
+/// `id = ""`. L'imbrication est bornée à [`MAX_DEPTH`] niveaux.
 pub fn parse(mmd: &str) -> Result<Vec<Block>, MmdError> {
     let lines = split_lines(mmd)?;
-    let (blocks, _) = read_blocks(&lines, None)?;
+    let (blocks, _) = read_blocks(&lines, None, 1)?;
     let blocks = normalize(blocks);
     verify(mmd, &blocks)?;
     Ok(blocks)
@@ -31,6 +35,25 @@ struct Line<'a> {
     /// Numéro dans le document, à partir de 1.
     no: usize,
     text: &'a str,
+    /// Espaces en tête de `text`, comptées une seule fois : chaque niveau
+    /// d'enfants indentés les relit sans reparcourir la ligne.
+    indent: usize,
+}
+
+impl<'a> Line<'a> {
+    fn new(no: usize, text: &'a str) -> Self {
+        let indent = text.bytes().take_while(|&b| b == b' ').count();
+        Line { no, text, indent }
+    }
+
+    /// La même ligne, privée de ses `width` premières espaces.
+    fn dedent(self, width: usize) -> Self {
+        Line {
+            no: self.no,
+            text: &self.text[width..],
+            indent: self.indent - width,
+        }
+    }
 }
 
 fn err(line: usize, message: impl Into<String>) -> MmdError {
@@ -53,7 +76,7 @@ fn split_lines(mmd: &str) -> Result<Vec<Line<'_>>, MmdError> {
     Ok(body
         .split('\n')
         .enumerate()
-        .map(|(i, text)| Line { no: i + 1, text })
+        .map(|(i, text)| Line::new(i + 1, text))
         .collect())
 }
 
@@ -287,9 +310,14 @@ struct Prev {
     paragraph_line: bool,
 }
 
-/// Lit des blocs frères jusqu'à la ligne `term` (exclue) ou la fin. Renvoie
-/// les blocs et l'indice où la lecture s'est arrêtée.
-fn read_blocks(lines: &[Line<'_>], term: Option<&str>) -> Result<(Vec<Block>, usize), MmdError> {
+/// Lit des blocs frères, de niveau `depth` (1 au premier niveau), jusqu'à la
+/// ligne `term` (exclue) ou la fin. Renvoie les blocs et l'indice où la
+/// lecture s'est arrêtée.
+fn read_blocks(
+    lines: &[Line<'_>],
+    term: Option<&str>,
+    depth: usize,
+) -> Result<(Vec<Block>, usize), MmdError> {
     let mut out = Vec::new();
     let mut prev: Option<Prev> = None;
     let mut blanks = 0;
@@ -307,6 +335,14 @@ fn read_blocks(lines: &[Line<'_>], term: Option<&str>) -> Result<(Vec<Block>, us
             blanks += 1;
             i += 1;
             continue;
+        }
+        // Borne de la récursion : une entrée d'agent ne doit pas faire
+        // déborder la pile.
+        if depth > MAX_DEPTH {
+            return Err(err(
+                line.no,
+                format!("imbrication trop profonde : {MAX_DEPTH} niveaux au plus"),
+            ));
         }
         let form = classify(line)?;
         let fam = form.family();
@@ -340,7 +376,7 @@ fn read_blocks(lines: &[Line<'_>], term: Option<&str>) -> Result<(Vec<Block>, us
         }
         blanks = 0;
         let prev_number = prev.as_ref().and_then(|p| p.number);
-        let (b, next, number) = read_block(lines, i, form, prev_number)?;
+        let (b, next, number) = read_block(lines, i, form, prev_number, depth)?;
         prev = Some(Prev {
             family: family(&b.kind),
             number,
@@ -355,19 +391,17 @@ fn read_blocks(lines: &[Line<'_>], term: Option<&str>) -> Result<(Vec<Block>, us
     Ok((out, i))
 }
 
-fn indent_of(t: &str) -> usize {
-    t.bytes().take_while(|&b| b == b' ').count()
-}
-
-/// Enfants d'un bloc à forme en ligne, à clôture ou autofermante : les lignes
-/// qui suivent, indentées d'au moins `width` espaces.
+/// Enfants (de niveau `depth`) d'un bloc à forme en ligne, à clôture ou
+/// autofermante : les lignes qui suivent, indentées d'au moins `width`
+/// espaces.
 fn read_children(
     lines: &[Line<'_>],
     next: usize,
     width: usize,
+    depth: usize,
 ) -> Result<(Vec<Block>, usize), MmdError> {
     match lines.get(next) {
-        Some(l) if !l.text.is_empty() && indent_of(l.text) >= width => {}
+        Some(l) if !l.text.is_empty() && l.indent >= width => {}
         _ => return Ok((Vec::new(), next)),
     }
     let mut region = Vec::new();
@@ -380,23 +414,20 @@ fn read_children(
                 .iter()
                 .position(|l| !l.text.is_empty())
                 .map_or(lines.len(), |p| j + p);
-            if !lines.get(end).is_some_and(|l| indent_of(l.text) >= width) {
+            if !lines.get(end).is_some_and(|l| l.indent >= width) {
                 break;
             }
             region.extend_from_slice(&lines[j..end]);
             j = end;
             continue;
-        } else if indent_of(l.text) >= width {
-            region.push(Line {
-                no: l.no,
-                text: &l.text[width..],
-            });
+        } else if l.indent >= width {
+            region.push(l.dedent(width));
         } else {
             break;
         }
         j += 1;
     }
-    let (children, _) = read_blocks(&region, None)?;
+    let (children, _) = read_blocks(&region, None, depth)?;
     Ok((children, j))
 }
 
@@ -454,13 +485,14 @@ fn new_block(kind: &str, props: Props, content: Content, children: Vec<Block>, i
     }
 }
 
-/// Lit le bloc qui commence à la ligne `i` : le bloc, l'indice de la ligne
-/// qui le suit et, pour un élément numéroté, son numéro.
+/// Lit le bloc de niveau `depth` qui commence à la ligne `i` : le bloc,
+/// l'indice de la ligne qui le suit et, pour un élément numéroté, son numéro.
 fn read_block(
     lines: &[Line<'_>],
     i: usize,
     form: Form<'_>,
     prev_number: Option<i64>,
+    depth: usize,
 ) -> Result<(Block, usize, Option<i64>), MmdError> {
     let line = lines[i];
     let (kind, rest, width, number) = match form {
@@ -470,12 +502,12 @@ fn read_block(
         Form::Check(_, rest) => ("checkListItem", rest, 2, None),
         Form::Numbered { n, width, rest } => ("numberedListItem", rest, width, Some(n)),
         Form::Quote(rest) => ("quote", rest, 2, None),
-        Form::Code => return read_code(lines, i).map(|(b, next)| (b, next, None)),
-        Form::Equation => return read_equation(lines, i).map(|(b, next)| (b, next, None)),
-        Form::Divider => return read_divider(lines, i).map(|(b, next)| (b, next, None)),
-        Form::Image => return read_image(lines, i).map(|(b, next)| (b, next, None)),
-        Form::Table => return read_table(lines, i).map(|(b, next)| (b, next, None)),
-        Form::Tag(name) => return read_tag(lines, i, name).map(|(b, next)| (b, next, None)),
+        Form::Code => return read_code(lines, i, depth).map(|(b, next)| (b, next, None)),
+        Form::Equation => return read_equation(lines, i, depth).map(|(b, next)| (b, next, None)),
+        Form::Divider => return read_divider(lines, i, depth).map(|(b, next)| (b, next, None)),
+        Form::Image => return read_image(lines, i, depth).map(|(b, next)| (b, next, None)),
+        Form::Table => return read_table(lines, i, depth).map(|(b, next)| (b, next, None)),
+        Form::Tag(name) => return read_tag(lines, i, name, depth).map(|(b, next)| (b, next, None)),
     };
     let spec = block(kind).expect("type du registre");
     let mut props = Props::new();
@@ -506,7 +538,7 @@ fn read_block(
         apply(&mut props, spec.props, list, line.no)?;
     }
     let content = Content::Inline(parse_inline(src));
-    let (children, next) = read_children(lines, i + 1, width)?;
+    let (children, next) = read_children(lines, i + 1, width, depth + 1)?;
     Ok((new_block(kind, props, content, children, id), next, number))
 }
 
@@ -524,7 +556,7 @@ fn fence_list(
     }
 }
 
-fn read_code(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> {
+fn read_code(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usize), MmdError> {
     let line = lines[i];
     let spec = block("codeBlock").expect("codeBlock");
     let n = line.text.bytes().take_while(|&b| b == b'`').count();
@@ -563,14 +595,14 @@ fn read_code(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> {
         }]
     };
     let (id, next) = own_anchor(lines, close + 1);
-    let (children, next) = read_children(lines, next, 2)?;
+    let (children, next) = read_children(lines, next, 2, depth + 1)?;
     Ok((
         new_block("codeBlock", props, Content::Inline(content), children, id),
         next,
     ))
 }
 
-fn read_equation(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> {
+fn read_equation(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usize), MmdError> {
     let line = lines[i];
     let spec = block("equation").expect("equation");
     let close = lines[i + 1..]
@@ -589,27 +621,27 @@ fn read_equation(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdErro
     }
     fence_list(&line.text[2..], &mut props, spec, line.no)?;
     let (id, next) = own_anchor(lines, close + 1);
-    let (children, next) = read_children(lines, next, 2)?;
+    let (children, next) = read_children(lines, next, 2, depth + 1)?;
     Ok((
         new_block("equation", props, Content::None, children, id),
         next,
     ))
 }
 
-fn read_divider(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> {
+fn read_divider(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usize), MmdError> {
     let line = lines[i];
     let spec = block("divider").expect("divider");
     let mut props = Props::new();
     fence_list(&line.text[3..], &mut props, spec, line.no)?;
     let (id, next) = own_anchor(lines, i + 1);
-    let (children, next) = read_children(lines, next, 2)?;
+    let (children, next) = read_children(lines, next, 2, depth + 1)?;
     Ok((
         new_block("divider", props, Content::None, children, id),
         next,
     ))
 }
 
-fn read_image(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> {
+fn read_image(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usize), MmdError> {
     let line = lines[i];
     let spec = block("image").expect("image");
     let (src, list) = split_props(line.text).map_err(|m| err(line.no, m))?;
@@ -625,7 +657,7 @@ fn read_image(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> 
         apply(&mut props, spec.props, list, line.no)?;
     }
     let (id, next) = own_anchor(lines, i + 1);
-    let (children, next) = read_children(lines, next, 2)?;
+    let (children, next) = read_children(lines, next, 2, depth + 1)?;
     Ok((new_block("image", props, Content::None, children, id), next))
 }
 
@@ -658,7 +690,7 @@ fn read_row(line: &Line<'_>) -> Result<Vec<Cell>, MmdError> {
         .collect()
 }
 
-fn read_table(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> {
+fn read_table(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usize), MmdError> {
     let spec = block("table").expect("table");
     let end = lines[i..]
         .iter()
@@ -688,6 +720,7 @@ fn read_table(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> 
     }
     let mut table = Table {
         header_rows: 1,
+        header_cols: 0,
         column_widths: vec![None; ncols],
         rows,
     };
@@ -702,11 +735,17 @@ fn read_table(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> 
                         .parse()
                         .map_err(|_| err(l.no, "« header-rows » attend un entier positif"))?;
                 }
+                ("header-cols", Raw::Number(n)) => {
+                    table.header_cols = n
+                        .parse()
+                        .map_err(|_| err(l.no, "« header-cols » attend un entier positif"))?;
+                }
                 ("widths", Raw::Str(w)) => table.column_widths = parse_widths(&w, l.no)?,
-                ("header-rows" | "widths", _) => {
+                ("header-rows" | "header-cols" | "widths", _) => {
                     return Err(err(
                         l.no,
-                        "« header-rows » attend un entier, « widths » une chaîne (« \"120,,80\" »)",
+                        "« header-rows » et « header-cols » attendent un entier, « widths » \
+                         une chaîne (« \"120,,80\" »)",
                     ));
                 }
                 (_, raw) => items.push((key, raw)),
@@ -716,7 +755,7 @@ fn read_table(lines: &[Line<'_>], i: usize) -> Result<(Block, usize), MmdError> 
         next += 1;
     }
     let (id, next) = own_anchor(lines, next);
-    let (children, next) = read_children(lines, next, 2)?;
+    let (children, next) = read_children(lines, next, 2, depth + 1)?;
     Ok((
         new_block("table", props, Content::Table(table), children, id),
         next,
@@ -747,11 +786,7 @@ fn tag_props(
     line: usize,
     with_title: bool,
 ) -> Result<(String, Props, String), MmdError> {
-    let anchor_key = if spec.props.iter().any(|p| p.mmd == "id") {
-        "anchor"
-    } else {
-        "id"
-    };
+    let anchor_key = anchor_key(spec);
     let mut id = String::new();
     let mut title = String::new();
     let mut items = Vec::new();
@@ -775,7 +810,12 @@ fn tag_props(
     Ok((id, props, title))
 }
 
-fn read_tag(lines: &[Line<'_>], i: usize, name: &str) -> Result<(Block, usize), MmdError> {
+fn read_tag(
+    lines: &[Line<'_>],
+    i: usize,
+    name: &str,
+    depth: usize,
+) -> Result<(Block, usize), MmdError> {
     let line = lines[i];
     let tag = parse_tag(line.text).map_err(|m| err(line.no, m))?;
     let alone = tag.rest.is_empty();
@@ -789,7 +829,7 @@ fn read_tag(lines: &[Line<'_>], i: usize, name: &str) -> Result<(Block, usize), 
         }
         let spec = block("paragraph").expect("paragraph");
         let (id, props, _) = tag_props(spec, tag.attrs, line.no, false)?;
-        let (children, next) = read_children(lines, i + 1, 2)?;
+        let (children, next) = read_children(lines, i + 1, 2, depth + 1)?;
         let content = Content::Inline(vec![]);
         return Ok((new_block("paragraph", props, content, children, &id), next));
     };
@@ -813,7 +853,7 @@ fn read_tag(lines: &[Line<'_>], i: usize, name: &str) -> Result<(Block, usize), 
             } else {
                 (vec![], 0)
             };
-            let (children, stop) = read_blocks(&inner[skip..], Some(&term))?;
+            let (children, stop) = read_blocks(&inner[skip..], Some(&term), depth + 1)?;
             if skip + stop >= inner.len() {
                 return Err(err(
                     line.no,
@@ -838,7 +878,7 @@ fn read_tag(lines: &[Line<'_>], i: usize, name: &str) -> Result<(Block, usize), 
             if !text.is_empty() {
                 props.insert(prop.into(), PropValue::Str(unescape_attr(text)));
             }
-            let (children, next) = read_children(lines, i + 1, 2)?;
+            let (children, next) = read_children(lines, i + 1, 2, depth + 1)?;
             Ok((
                 new_block(spec.name, props, Content::None, children, &id),
                 next,
@@ -852,7 +892,7 @@ fn read_tag(lines: &[Line<'_>], i: usize, name: &str) -> Result<(Block, usize), 
                 ));
             }
             let (id, props, _) = tag_props(spec, tag.attrs, line.no, false)?;
-            let (children, next) = read_children(lines, i + 1, 2)?;
+            let (children, next) = read_children(lines, i + 1, 2, depth + 1)?;
             Ok((
                 new_block(spec.name, props, Content::None, children, &id),
                 next,
