@@ -748,7 +748,8 @@ fn read_table(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usiz
     let mut table = Table {
         header_rows: 1,
         header_cols: 0,
-        column_widths: vec![None; ncols],
+        // Sans `widths` : automatiques, une par colonne de la grille (`normalize`).
+        column_widths: Vec::new(),
         rows,
     };
     let mut props = Props::new();
@@ -789,7 +790,7 @@ fn read_table(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usiz
     ))
 }
 
-/// `"120,,80"` : une largeur par colonne, vide = automatique.
+/// `"120,,80"` : une largeur par colonne de la grille, vide = automatique.
 fn parse_widths(w: &str, line: usize) -> Result<Vec<Option<f64>>, MmdError> {
     w.split(',')
         .map(|part| {

@@ -214,3 +214,101 @@ fn hard_break_is_a_yjs_element() {
     }
     assert_eq!(plain(&children[2]), "b");
 }
+
+/// `colwidth` de chaque cellule de la page, dans l'ordre du document.
+fn colwidths(page: &PageDoc) -> Vec<Option<Vec<Any>>> {
+    let doc = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(&page.encode_state()).unwrap())
+        .unwrap();
+    let txn = doc.transact();
+    fragment
+        .successors(&txn)
+        .filter_map(|n| match n {
+            XmlOut::Element(e) if matches!(e.tag().as_ref(), "tableCell" | "tableHeader") => {
+                Some(match e.get_attribute(&txn, "colwidth") {
+                    Some(Out::Any(Any::Array(values))) => Some(values.to_vec()),
+                    None => None,
+                    other => panic!("colwidth inattendu : {other:?}"),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Largeurs d'un tableau à cellules fusionnées (relecture de la Task 3, M7) :
+/// `colwidth` porte une valeur par colonne de la grille que couvre la
+/// cellule, colonnes décalées par un `rowspan` comprises, comme BlockNote.
+#[test]
+fn merged_cell_widths_follow_the_grid() {
+    let mmd = "| A {colspan=2} | B |\n| --- | --- |\n| C {rowspan=2} | D | E |\n| F | G |\n\
+               {widths=\"120,,80\"}\n";
+    let (page, _) = PageDoc::new_page();
+    page.write_blocks(&mementum_md::parse(mmd).unwrap())
+        .unwrap();
+    let int = |i: i64| Any::Number(Number::Int(i));
+    assert_eq!(
+        colwidths(&page),
+        [
+            Some(vec![int(120), Any::Undefined]), // A : colonnes 0 et 1
+            Some(vec![int(80)]),                  // B : colonne 2
+            Some(vec![int(120)]),                 // C : colonne 0, sur deux lignes
+            None,                                 // D : colonne 1
+            Some(vec![int(80)]),                  // E : colonne 2
+            None,                                 // F : colonne 1, sous C
+            Some(vec![int(80)]),                  // G : colonne 2
+        ]
+    );
+    let back = mementum_md::render(&page.read_blocks(), Default::default()).markdown;
+    assert_eq!(back, mmd);
+}
+
+/// Un `colspan` démesuré (écrit par MMD) ou un `colwidth` démesuré (écrit
+/// par un client Yjs) ne fait écrire ni lire plus de `MAX_WIDTH_COLUMNS`
+/// largeurs.
+#[test]
+fn merged_cell_widths_are_bounded() {
+    let widths = format!("120{}", ",".repeat(mementum_md::MAX_WIDTH_COLUMNS - 1));
+    let mmd = format!("| A {{colspan=1000000000}} |\n| --- |\n| B |\n{{widths=\"{widths}\"}}\n");
+    let (page, _) = PageDoc::new_page();
+    page.write_blocks(&mementum_md::parse(&mmd).unwrap())
+        .unwrap();
+    let written = colwidths(&page);
+    assert_eq!(
+        written[0].as_ref().map(Vec::len),
+        Some(mementum_md::MAX_WIDTH_COLUMNS)
+    );
+    assert_eq!(written[1], Some(vec![Any::Number(Number::Int(120))]));
+    let back = mementum_md::render(&page.read_blocks(), Default::default()).markdown;
+    assert_eq!(back, mmd);
+
+    // Un client écrit 100 000 largeurs sur une cellule seule.
+    let doc = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let update = {
+        let mut txn = doc.transact_mut();
+        let root = fragment.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
+        let container = root.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(&mut txn, "id", "t");
+        let table = container.push_back(&mut txn, XmlElementPrelim::empty("table"));
+        let row = table.push_back(&mut txn, XmlElementPrelim::empty("tableRow"));
+        let cell = row.push_back(&mut txn, XmlElementPrelim::empty("tableCell"));
+        let many: Vec<Any> = (0..100_000).map(|i| Any::Number(Number::Int(i))).collect();
+        cell.insert_attribute(&mut txn, "colwidth", Any::Array(many.into()));
+        cell.push_back(&mut txn, XmlElementPrelim::empty("tableParagraph"));
+        txn.encode_update_v1()
+    };
+    let page = PageDoc::from_updates([update.as_slice()]).unwrap();
+    match &page.read_blocks()[0].content {
+        Content::Table(t) => assert_eq!(t.column_widths, [Some(0.0)]),
+        other => panic!("tableau attendu, trouvé {other:?}"),
+    }
+}

@@ -46,7 +46,11 @@ pub struct Table {
     pub header_rows: u32,
     /// Colonnes d'en-tête (`headerCols` de BlockNote, 0 par défaut).
     pub header_cols: u32,
-    /// Une largeur par colonne, `None` = automatique.
+    /// Une largeur par colonne de la grille, `None` = automatique, comme
+    /// `columnWidths` de BlockNote : une cellule fusionnée de la première
+    /// ligne en couvre `colspan`. Après [`normalize`], il y en a autant que
+    /// de colonnes couvertes par la première ligne, au plus
+    /// [`MAX_WIDTH_COLUMNS`].
     pub column_widths: Vec<Option<f64>>,
     pub rows: Vec<Vec<Cell>>,
 }
@@ -56,6 +60,40 @@ pub struct Table {
 pub struct Cell {
     pub content: Vec<Inline>,
     pub props: Props,
+}
+
+/// Colonnes de la grille d'un tableau qui portent une largeur ; au-delà,
+/// les largeurs ne sont pas gardées. Une cellule fusionnée porte une largeur
+/// par colonne qu'elle couvre (`colwidth` de prosemirror-tables), et
+/// `colspan` n'est pas borné : sans limite, une seule cellule ferait écrire
+/// des millions de largeurs.
+pub const MAX_WIDTH_COLUMNS: usize = 100;
+
+/// Colonnes de la grille couvertes par une cellule : son `colspan`, ramené
+/// entre 1 et [`MAX_WIDTH_COLUMNS`].
+pub fn cell_span(cell: &Cell) -> usize {
+    match cell.props.get("colspan") {
+        Some(PropValue::Int(n)) => (*n).clamp(1, MAX_WIDTH_COLUMNS as i64) as usize,
+        _ => 1,
+    }
+}
+
+/// Lignes de la grille couvertes par une cellule : son `rowspan`, au moins 1.
+pub fn cell_rowspan(cell: &Cell) -> usize {
+    match cell.props.get("rowspan") {
+        Some(PropValue::Int(n)) => usize::try_from(*n).unwrap_or(1).max(1),
+        _ => 1,
+    }
+}
+
+/// Nombre de largeurs d'un tableau dont la première ligne est `first` : les
+/// colonnes de la grille qu'elle couvre, au plus [`MAX_WIDTH_COLUMNS`].
+pub(crate) fn width_columns(first: &[Cell]) -> usize {
+    first
+        .iter()
+        .map(cell_span)
+        .fold(0, usize::saturating_add)
+        .min(MAX_WIDTH_COLUMNS)
 }
 
 /// Contenu en ligne.
@@ -175,6 +213,8 @@ fn strip_defaults(props: &mut Props, specs: &[PropSpec]) {
 ///   grille, sous la seule forme que les cellules `tableHeader` de BlockNote
 ///   distinguent : un tableau tout en en-têtes vaut `(lignes, 0)` (Ruling
 ///   R19).
+/// - Un tableau a une largeur par colonne de la grille de sa première ligne
+///   (voir [`Table::column_widths`]).
 pub fn normalize(blocks: Vec<Block>) -> Vec<Block> {
     blocks.into_iter().map(normalize_block).collect()
 }
@@ -224,12 +264,10 @@ fn normalize_table(mut t: Table) -> Table {
         cell.content = normalize_inline(std::mem::take(&mut cell.content));
         strip_defaults(&mut cell.props, cell_props());
     }
-    // Sans largeurs : une largeur automatique par colonne de la première ligne.
-    if t.column_widths.is_empty()
-        && let Some(first) = t.rows.first()
-    {
-        t.column_widths = vec![None; first.len()];
-    }
+    // Une largeur par colonne de la grille de la première ligne, comme BlockNote
+    // les relit (`columnWidths`) : automatiques si absentes, celles de trop retirées.
+    let columns = t.rows.first().map_or(0, |first| width_columns(first));
+    t.column_widths.resize(columns, None);
     let (rows, cols) = canonical_headers(&t);
     t.header_rows = rows;
     t.header_cols = cols;

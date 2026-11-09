@@ -14,12 +14,17 @@
 //!   `$…$` (`<math latex="…"/>`), un callout vide suivi d'un paragraphe
 //!   enfant ;
 //! - les caractères `* _ \ < > & { } $ | ^ [ ] ~`, des emoji, des accents et
-//!   du texte de droite à gauche.
+//!   du texte de droite à gauche ;
+//! - des tableaux à cellules fusionnées (`colspan` sur la première ligne,
+//!   `rowspan` sur la deuxième) dans une grille que BlockNote sait écrire,
+//!   avec une largeur par colonne de la grille (relecture de la Task 3, M7).
 //!
 //! Ils restent dans ce que BlockNote sait représenter : une colonne n'existe
 //! que dans un `columnList` (de 2 ou 3 colonnes, chacune avec au moins un
 //! bloc et sans `columnList` directement dedans) ; un tableau a le même
-//! nombre de cellules par ligne et une largeur par colonne. Le reste
+//! nombre de cellules par ligne et une largeur par colonne, ou forme une
+//! grille de cellules fusionnées. Les props de cellule tirées au hasard
+//! (`colspan`, `rowspan` compris) éprouvent le format, pas BlockNote. Le reste
 //! (liens voisins de même `href`, en-têtes hors de la grille, marques dans
 //! un bloc de code) est ramené à sa forme canonique par [`normalize`].
 
@@ -292,7 +297,7 @@ fn float_value() -> impl Strategy<Value = f64> {
 fn content_of(spec: &'static BlockSpec) -> BoxedStrategy<Content> {
     match spec.content {
         ContentKind::None => Just(Content::None).boxed(),
-        ContentKind::Table => table().boxed(),
+        ContentKind::Table => prop_oneof![3 => table(), 1 => merged_table()].boxed(),
         ContentKind::Inline if spec.name == "codeBlock" => code_text()
             .prop_map(|text| {
                 Content::Inline(if text.is_empty() {
@@ -476,6 +481,81 @@ fn table() -> impl Strategy<Value = Content> {
                 rows,
             })
         })
+}
+
+/// Tableau de `ncols` colonnes et `nrows` lignes dans une grille que
+/// BlockNote sait écrire : sur la première ligne, une cellule couvre `span`
+/// colonnes à partir de la colonne `at` ; sur la deuxième (s'il y a au moins
+/// trois lignes), la cellule de la colonne `down` couvre `rows_down` lignes,
+/// dont les suivantes ont une cellule de moins. Une largeur par colonne de la
+/// grille.
+fn merged_table() -> impl Strategy<Value = Content> {
+    (2usize..5, 2usize..5)
+        .prop_flat_map(|(ncols, nrows)| {
+            (
+                Just(ncols),
+                Just(nrows),
+                (2..=ncols).prop_flat_map(move |span| (Just(span), 0..=ncols - span)),
+                0..ncols,
+                2..=nrows.max(3) - 1,
+                prop::collection::vec(cell(), ncols * nrows),
+                0..=nrows as u32,
+                0..=1u32,
+                prop::collection::vec(width(), ncols),
+            )
+        })
+        .prop_map(
+            |(
+                ncols,
+                nrows,
+                (span, at),
+                down,
+                rows_down,
+                cells,
+                header_rows,
+                header_cols,
+                widths,
+            )| {
+                let mut cells = cells.into_iter().map(|mut c| {
+                    c.props.remove("colspan");
+                    c.props.remove("rowspan");
+                    c
+                });
+                let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(nrows);
+                let tall = nrows >= 3;
+                for r in 0..nrows {
+                    let mut row = Vec::new();
+                    let mut col = 0;
+                    while col < ncols {
+                        // Colonne occupée par la cellule haute de la ligne 1.
+                        if tall && (2..1 + rows_down).contains(&r) && col == down {
+                            col += 1;
+                            continue;
+                        }
+                        let mut c = cells.next().expect("une cellule par case de la grille");
+                        if r == 0 && col == at {
+                            c.props
+                                .insert("colspan".into(), PropValue::Int(span as i64));
+                            col += span;
+                        } else {
+                            if tall && r == 1 && col == down {
+                                c.props
+                                    .insert("rowspan".into(), PropValue::Int(rows_down as i64));
+                            }
+                            col += 1;
+                        }
+                        row.push(c);
+                    }
+                    rows.push(row);
+                }
+                Content::Table(Table {
+                    header_rows,
+                    header_cols,
+                    column_widths: widths,
+                    rows,
+                })
+            },
+        )
 }
 
 fn width() -> impl Strategy<Value = Option<f64>> {

@@ -16,8 +16,8 @@ mod render;
 pub mod arb;
 
 pub use model::{
-    Block, Cell, Content, Inline, MmdError, PropValue, Props, RenderOpts, Rendered, Styles, Table,
-    block_text, normalize,
+    Block, Cell, Content, Inline, MAX_WIDTH_COLUMNS, MmdError, PropValue, Props, RenderOpts,
+    Rendered, Styles, Table, block_text, cell_rowspan, cell_span, normalize,
 };
 pub use parse::{MAX_DEPTH, parse};
 pub use render::render;

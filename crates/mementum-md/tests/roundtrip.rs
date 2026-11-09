@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use mementum_md::{Block, Content, Inline, PropValue, RenderOpts, arb, parse, render};
+use mementum_md::{Block, Cell, Content, Inline, PropValue, RenderOpts, Table, arb, parse, render};
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 use proptest::test_runner::TestRunner;
@@ -169,6 +169,14 @@ fn features(blocks: &[Block], seen: &mut BTreeSet<String>) {
                 }
                 if t.column_widths.iter().any(Option::is_some) {
                     seen.insert("widths".into());
+                    for (span, name) in [("colspan", "colspan"), ("rowspan", "rowspan")] {
+                        let merged = t.rows.iter().flatten().any(
+                            |c| matches!(c.props.get(span), Some(PropValue::Int(n)) if *n > 1),
+                        );
+                        if merged && blocknote_grid(t) {
+                            seen.insert(format!("{name} dans une grille, avec largeurs"));
+                        }
+                    }
                 }
                 for cell in t.rows.iter().flatten() {
                     if !cell.props.is_empty() {
@@ -188,6 +196,52 @@ fn features(blocks: &[Block], seen: &mut BTreeSet<String>) {
         features(&b.children, seen);
         prev_numbered = b.kind == "numberedListItem";
     }
+}
+
+/// Fusions qui forment une grille, comme BlockNote les écrit : chaque ligne
+/// couvre exactement les colonnes de la première, sans chevauchement, et
+/// aucun `rowspan` ne dépasse le tableau.
+fn blocknote_grid(t: &Table) -> bool {
+    let span = |c: &Cell, name: &str| match c.props.get(name) {
+        Some(PropValue::Int(n)) if (1..=8).contains(n) => Some(*n as usize),
+        None => Some(1),
+        _ => None,
+    };
+    let Some(width) = t.rows[0]
+        .iter()
+        .map(|c| span(c, "colspan"))
+        .sum::<Option<usize>>()
+    else {
+        return false;
+    };
+    let mut taken = vec![vec![false; width]; t.rows.len()];
+    for (r, row) in t.rows.iter().enumerate() {
+        let mut col = 0;
+        for cell in row {
+            while col < width && taken[r][col] {
+                col += 1;
+            }
+            let (Some(cs), Some(rs)) = (span(cell, "colspan"), span(cell, "rowspan")) else {
+                return false;
+            };
+            if col + cs > width || r + rs > t.rows.len() {
+                return false;
+            }
+            for line in &mut taken[r..r + rs] {
+                for slot in &mut line[col..col + cs] {
+                    if *slot {
+                        return false;
+                    }
+                    *slot = true;
+                }
+            }
+            col += cs;
+        }
+        if taken[r].iter().any(|slot| !slot) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Structure représentable par BlockNote : une colonne n'existe que dans un
@@ -261,6 +315,8 @@ fn generator_covers_brief() {
         "widths",
         "formule en <math>",
         "props de cellule",
+        "colspan dans une grille, avec largeurs",
+        "rowspan dans une grille, avec largeurs",
         "largeur d'aperçu entière",
     ] {
         expected.push(name.into());

@@ -462,7 +462,8 @@ impl Renderer {
             if t.header_cols != 0 {
                 list.push(("header-cols".into(), t.header_cols.to_string()));
             }
-            if t.column_widths != vec![None; ncols] {
+            // `normalize` a donné une largeur par colonne de la grille.
+            if t.column_widths.iter().any(Option::is_some) {
                 let widths: Vec<String> = t
                     .column_widths
                     .iter()

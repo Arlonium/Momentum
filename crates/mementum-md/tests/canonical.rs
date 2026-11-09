@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use mementum_md::{
-    Block, Cell, Content, Inline, PropValue, Props, RenderOpts, Styles, Table, block_text,
-    normalize, parse, render,
+    Block, Cell, Content, Inline, MAX_WIDTH_COLUMNS, PropValue, Props, RenderOpts, Styles, Table,
+    block_text, normalize, parse, render,
 };
 
 fn plain() -> RenderOpts {
@@ -463,6 +463,89 @@ fn table_headers_fit_the_grid() {
     let error = parse("| A |\n| --- |\n| 1 |\n{header-rows=5}\n").unwrap_err();
     assert_eq!(error.line, 4);
     assert!(error.message.contains("header-rows=2"), "{error}");
+}
+
+fn cell_with(t: &str, items: &[(&str, PropValue)]) -> Cell {
+    Cell {
+        content: vec![text(t)],
+        props: props(items),
+    }
+}
+
+fn widths_of(b: &Block) -> Vec<Option<f64>> {
+    match &b.content {
+        Content::Table(t) => t.column_widths.clone(),
+        other => panic!("tableau attendu, trouvé {other:?}"),
+    }
+}
+
+/// Une largeur par colonne de la grille, comme `columnWidths` de BlockNote :
+/// une cellule fusionnée de la première ligne couvre `colspan` colonnes
+/// (relecture de la Task 3, M7).
+#[test]
+fn widths_follow_the_grid() {
+    let table = |rows: Vec<Vec<Cell>>, widths: Vec<Option<f64>>| {
+        blk(
+            "table",
+            Props::new(),
+            Content::Table(Table {
+                header_rows: 1,
+                header_cols: 0,
+                column_widths: widths,
+                rows,
+            }),
+            vec![],
+        )
+    };
+    let merged = || {
+        vec![
+            vec![
+                cell_with("A", &[("colspan", PropValue::Int(2))]),
+                cell_with("B", &[]),
+            ],
+            vec![
+                cell_with("C", &[("rowspan", PropValue::Int(2))]),
+                cell_with("D", &[]),
+                cell_with("E", &[]),
+            ],
+            vec![cell_with("F", &[]), cell_with("G", &[])],
+        ]
+    };
+    same(
+        vec![table(merged(), vec![Some(120.0), None, Some(80.0)])],
+        "| A {colspan=2} | B |\n| --- | --- |\n| C {rowspan=2} | D | E |\n| F | G |\n\
+         {widths=\"120,,80\"}\n",
+    );
+
+    // Largeurs absentes : une automatique par colonne de la grille ; celles de
+    // trop sont retirées, celles qui manquent sont automatiques.
+    let canonical = |rows, widths| widths_of(&normalize(vec![table(rows, widths)])[0]);
+    assert_eq!(canonical(merged(), vec![]), [None, None, None]);
+    assert_eq!(
+        canonical(merged(), vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)]),
+        [Some(1.0), Some(2.0), Some(3.0)]
+    );
+    assert_eq!(
+        canonical(merged(), vec![Some(1.0)]),
+        [Some(1.0), None, None]
+    );
+    // Un `colspan` hors de toute mesure ne fait pas écrire des millions de
+    // largeurs : au plus `MAX_WIDTH_COLUMNS`.
+    let huge = vec![vec![cell_with(
+        "A",
+        &[("colspan", PropValue::Int(i64::MAX))],
+    )]];
+    assert_eq!(canonical(huge, vec![Some(1.0)]).len(), MAX_WIDTH_COLUMNS);
+    let negative = vec![vec![cell_with("A", &[("colspan", PropValue::Int(-3))])]];
+    assert_eq!(canonical(negative, vec![]), [None]);
+
+    // La lecture demande la forme canonique : une largeur par colonne de la grille.
+    let error = parse("| A | B |\n| --- | --- |\n| 1 | 2 |\n{widths=\"1,2,3\"}\n").unwrap_err();
+    assert_eq!(error.line, 4);
+    assert!(error.message.contains("{widths=\"1,2\"}"), "{error}");
+    let error = parse("| A {colspan=2} |\n| --- |\n| 1 | 2 |\n{widths=\"120\"}\n").unwrap_err();
+    assert_eq!(error.line, 4);
+    assert!(error.message.contains("{widths=\"120,\"}"), "{error}");
 }
 
 /// Ruling R19 (b) : le contenu d'un bloc de code est du texte brut.
