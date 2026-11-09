@@ -11,7 +11,9 @@
 //!   n'est donc jamais perdu ;
 //! - **compaction sûre** : l'instantané est pris dans l'acteur, entre deux
 //!   commandes, si bien qu'il couvre exactement les mises à jour écrites
-//!   jusqu'à son `seq` ;
+//!   jusqu'à son `seq` ; elle a lieu toutes les `snapshot_every` mises à jour,
+//!   et dès qu'une grosse suppression est écrite (Ruling R40), pour que le
+//!   ramasse-miettes de yrs ne soit pas rejoué à chaque chargement ;
 //! - **dédoublonnage** après chaque mise à jour d'un client (déplacements
 //!   concurrents), écrit puis diffusé à toutes les connexions ;
 //! - **lecture seule** d'un client dont le schéma diffère de
@@ -58,6 +60,17 @@ pub struct SyncConfig {
     /// Une compaction (instantané, puis purge du journal) toutes les
     /// `snapshot_every` mises à jour écrites. Au moins 1.
     pub snapshot_every: u64,
+    /// Une compaction aussi dès que les mises à jour écrites depuis la
+    /// dernière ont supprimé au moins autant d'unités d'horloge Yjs (un
+    /// caractère, un élément ou un attribut chacune). Au moins 1.
+    ///
+    /// Ruling R40 : le ramasse-miettes de yrs est rejoué à chaque chargement
+    /// tant qu'une suppression est au journal, et une grosse suppression coûte
+    /// cher (2 s pour une page de 10 000 blocs réécrite) ; l'instantané garde
+    /// l'état déjà nettoyé. Son coût dépend du nombre d'éléments supprimés, que
+    /// les unités majorent : 2 000 unités coûtent au plus quelques dizaines de
+    /// millisecondes au chargement d'une page de 10 000 blocs.
+    pub compact_after_deletions: u64,
     /// L'acteur d'une page s'arrête après ce délai sans connexion ni demande.
     pub idle_close: Duration,
     /// Taille maximale d'un message reçu d'un client, contrôlée avant tout
@@ -73,6 +86,7 @@ impl Default for SyncConfig {
         SyncConfig {
             broadcast_capacity: 1024,
             snapshot_every: 500,
+            compact_after_deletions: 2_000,
             idle_close: Duration::from_secs(30),
             max_message_bytes: 16 << 20,
             max_queue_bytes: 64 << 20,

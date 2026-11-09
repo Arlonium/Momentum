@@ -13,6 +13,7 @@
 //! journalisée par `tracing`.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use mementum_crdt::PageDoc;
@@ -231,7 +232,14 @@ impl Identity {
 
 async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedReceiver<Command>) {
     match load(&store, id.node_id).await {
-        Ok(loaded) => Actor::new(id, store, cfg, loaded).serve(rx).await,
+        Ok(loaded) => {
+            let mut actor = Actor::new(id, store, cfg, loaded);
+            // Un journal qui porte une grosse suppression (écrite avant une
+            // panne, ou avant ce réglage) est compacté dès le chargement : il
+            // ne coûte qu'une fois.
+            actor.compact_if_due().await;
+            actor.serve(rx).await;
+        }
         Err(error) => {
             tracing::error!(node_id = %id.node_id, %error, "document de la page impossible à charger");
             // Le premier demandeur reçoit l'erreur, les autres réessaient.
@@ -250,6 +258,52 @@ struct Loaded {
     last_seq: i64,
     /// Mises à jour du journal depuis l'instantané.
     since_snapshot: u64,
+    /// Suppressions faites dans le document depuis l'instantané (journal compris).
+    deletions: Deletions,
+}
+
+/// Compte les suppressions faites dans un document, en unités d'horloge Yjs
+/// (un caractère, un élément ou un attribut chacun), d'après le jeu de
+/// suppressions de chaque transaction validée. Sert au déclenchement de la
+/// compaction (Ruling R40) : le ramasse-miettes de yrs, qui nettoie ce qui est
+/// supprimé, est rejoué à chaque chargement tant que la suppression est au
+/// journal ; une grosse suppression coûte alors plusieurs secondes à chaque
+/// ouverture de la page.
+#[derive(Default)]
+struct Deletions(Arc<AtomicU64>);
+
+impl Deletions {
+    /// Compte les suppressions des transactions de `page` validées désormais.
+    fn watch(page: &PageDoc) -> Deletions {
+        let deletions = Deletions::default();
+        let count = deletions.0.clone();
+        let watched = page.yrs_doc().observe_transaction_cleanup(
+            "mementum-sync/deletions",
+            move |_, event| {
+                let units: u64 = event
+                    .delete_set
+                    .iter()
+                    .flat_map(|(_, ranges)| ranges.iter())
+                    .map(|range| u64::from(range.end - range.start))
+                    .sum();
+                count.fetch_add(units, Ordering::Relaxed);
+            },
+        );
+        if let Err(error) = watched {
+            // Sans compteur, la compaction n'a plus lieu que toutes les
+            // `snapshot_every` mises à jour : plus lent au chargement, sans perte.
+            tracing::warn!(%error, "suppressions non comptées : compaction au rythme ordinaire");
+        }
+        deletions
+    }
+
+    fn count(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn reset(&self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Relit l'instantané, puis les mises à jour dans l'ordre des `seq`.
@@ -263,26 +317,30 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     if snapshot.is_none() && updates.is_empty() {
         let (page, _) = PageDoc::new_page();
         store.put_snapshot(node_id, 0, &page.encode_state()).await?;
+        let deletions = Deletions::watch(&page);
         return Ok(Loaded {
             page,
             last_seq: 0,
             since_snapshot: 0,
+            deletions,
         });
     }
     let last_seq = updates
         .last()
         .or(snapshot.as_ref())
         .map_or(0, |(seq, _)| *seq);
-    let page = PageDoc::from_updates(
-        snapshot
-            .iter()
-            .chain(updates.iter())
-            .map(|(_, bytes)| bytes.as_slice()),
-    )?;
+    // Les suppressions sont comptées à partir du journal : celles de
+    // l'instantané sont déjà nettoyées par le ramasse-miettes.
+    let page = PageDoc::from_updates(snapshot.iter().map(|(_, bytes)| bytes.as_slice()))?;
+    let deletions = Deletions::watch(&page);
+    for (_, update) in &updates {
+        page.apply_update(update)?;
+    }
     Ok(Loaded {
         page,
         last_seq,
         since_snapshot: updates.len() as u64,
+        deletions,
     })
 }
 
@@ -303,6 +361,8 @@ struct Actor {
     last_seq: i64,
     /// Mises à jour écrites depuis la dernière compaction (ou tentative).
     since_snapshot: u64,
+    /// Suppressions faites depuis la dernière compaction (ou tentative).
+    deletions: Deletions,
     /// Awareness des clients, sur un document à part : elle ne touche jamais
     /// au contenu, et survit au rechargement du document.
     awareness: Awareness,
@@ -322,6 +382,7 @@ impl Actor {
             page: loaded.page,
             last_seq: loaded.last_seq,
             since_snapshot: loaded.since_snapshot,
+            deletions: loaded.deletions,
             awareness,
             events,
             conns: HashMap::new(),
@@ -333,6 +394,7 @@ impl Actor {
         self.page = loaded.page;
         self.last_seq = loaded.last_seq;
         self.since_snapshot = loaded.since_snapshot;
+        self.deletions = loaded.deletions;
     }
 
     async fn serve(mut self, mut rx: UnboundedReceiver<Command>) {
@@ -584,16 +646,22 @@ impl Actor {
         Ok(())
     }
 
-    /// Compaction toutes les `snapshot_every` mises à jour écrites. Prise
-    /// entre deux commandes, elle couvre exactement le journal jusqu'à
-    /// `last_seq`. Un échec ne perd rien (le journal reste) : il est
-    /// journalisé, et la compaction se réessaie `snapshot_every` mises à jour
-    /// plus tard, pas à chacune.
+    /// Compaction toutes les `snapshot_every` mises à jour écrites, ou dès que
+    /// les mises à jour écrites depuis la dernière ont supprimé au moins
+    /// `compact_after_deletions` unités (Ruling R40) : l'instantané garde
+    /// l'état déjà nettoyé par le ramasse-miettes, que le chargement ne refait
+    /// pas. Prise entre deux commandes, elle couvre exactement le journal
+    /// jusqu'à `last_seq`. Un échec ne perd rien (le journal reste) : il est
+    /// journalisé, et la compaction se réessaie plus tard (après
+    /// `snapshot_every` mises à jour ou autant de suppressions), pas à chacune.
     async fn compact_if_due(&mut self) {
-        if self.since_snapshot < self.cfg.snapshot_every.max(1) {
+        let many_updates = self.since_snapshot >= self.cfg.snapshot_every.max(1);
+        let many_deletions = self.deletions.count() >= self.cfg.compact_after_deletions.max(1);
+        if !many_updates && !many_deletions {
             return;
         }
         self.since_snapshot = 0;
+        self.deletions.reset();
         let state = self.page.encode_state();
         if let Err(error) = self
             .store

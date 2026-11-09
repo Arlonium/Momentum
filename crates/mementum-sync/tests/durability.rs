@@ -1,15 +1,18 @@
-//! Durabilité : persister avant de diffuser, compacter sans rien perdre,
-//! redémarrer sans rien perdre, survivre à une panne du store, donner son
-//! document à une page qui n'en a pas.
+//! Durabilité : persister avant de diffuser, compacter sans rien perdre (et
+//! aussitôt après une grosse suppression, Ruling R40), redémarrer sans rien
+//! perdre, survivre à une panne du store, donner son document à une page qui
+//! n'en a pas.
 
 mod common;
 
 use std::time::Duration;
 
 use common::*;
+use mementum_md::parse;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_store::Store;
 use mementum_sync::{Hub, SyncConfig};
+use yrs::{ReadTxn, Text, Transact, XmlFragment, XmlOut};
 
 #[tokio::test]
 async fn update_is_persisted_before_broadcast() {
@@ -195,4 +198,148 @@ async fn page_without_document_gets_one_on_first_load() {
     a.type_text(&id, "x");
     assert!(b.wait_until(WAIT, |c| text(&c.blocks()) == "x").await);
     assert_eq!(stored_page(&store, page).await.read_blocks(), b.blocks());
+}
+
+/// `n` paragraphes en MMD, sans ancres : chaque écriture crée des blocs neufs.
+fn paragraphs(n: usize, word: &str) -> String {
+    (1..=n)
+        .map(|i| format!("{word} {i}, un paragraphe ordinaire."))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        + "\n"
+}
+
+/// Attend que le serveur ait traité tout ce que `client` a envoyé (il traite
+/// les messages d'une connexion dans l'ordre, et répond ensuite par une étape 2).
+async fn processed(client: &Client) {
+    let before = client.step2_count();
+    client.resync();
+    assert!(
+        client.wait_until(WAIT, |c| c.step2_count() > before).await,
+        "le serveur n'a pas traité les mises à jour du client"
+    );
+}
+
+/// La page est compactée (journal vide), et relue depuis SQLite, c'est le même
+/// document que le document vivant et que celui de `client`, à la même révision.
+async fn assert_compacted_and_identical(f: &Fixture, client: &Client) {
+    let live = f.hub.read_blocks(f.page).await.unwrap();
+    assert!(client.wait_until(WAIT, |c| c.blocks() == live).await);
+    let state = f.store.load_doc(f.page).await.unwrap();
+    assert!(
+        state.updates.is_empty(),
+        "journal compacté, il reste {} mises à jour",
+        state.updates.len()
+    );
+    let stored = stored_page(&f.store, f.page).await;
+    assert_eq!(stored.read_blocks(), live);
+    assert_eq!(stored.revision(), client.page().unwrap().revision());
+}
+
+/// Ruling R40 : une grosse suppression est compactée aussitôt écrite, qu'elle
+/// vienne du serveur (`PUT /mmd`) ou d'un client ; le chargement ne rejoue
+/// donc plus le ramasse-miettes de yrs. La page relue depuis SQLite est la même,
+/// à la même révision.
+#[tokio::test]
+async fn big_deletion_is_compacted_at_once() {
+    // (a) Réécriture complète par le serveur.
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd(&paragraphs(200, "Avant")).await;
+    let reader = f.client().await;
+    // Écrire une page neuve ne supprime que son paragraphe vide : pas de compaction.
+    assert_eq!(f.store.load_doc(f.page).await.unwrap().updates.len(), 1);
+    f.write_mmd(&paragraphs(200, "Après")).await;
+    assert_compacted_and_identical(&f, &reader).await;
+
+    // (b) Un client remplace tout le contenu, en une mise à jour.
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd(&paragraphs(200, "Avant")).await;
+    let writer = f.client().await;
+    let update = writer
+        .page()
+        .unwrap()
+        .write_blocks(&parse(&paragraphs(200, "Collé")).unwrap())
+        .unwrap();
+    writer.apply_local(&update);
+    processed(&writer).await;
+    assert_compacted_and_identical(&f, &writer).await;
+}
+
+/// Efface les `n` premiers caractères du premier bloc, côté `client`.
+fn erase_start(client: &Client, n: u32) {
+    let doc = detached(client);
+    let paragraph = first_content(&doc);
+    let before = doc.transact().state_vector();
+    {
+        let mut txn = doc.transact_mut();
+        let Some(XmlOut::Text(text)) = paragraph.get(&txn, 0) else {
+            panic!("le premier bloc n'a pas de texte");
+        };
+        text.remove_range(&mut txn, 0, n);
+    }
+    let update = doc.transact().encode_state_as_update_v1(&before);
+    client.apply_local(&update);
+}
+
+/// Les petites suppressions restent au journal ; leur cumul déclenche la
+/// compaction quand il atteint `compact_after_deletions`.
+#[tokio::test]
+async fn small_deletions_compact_once_their_sum_is_large() {
+    let f = Fixture::new(SyncConfig {
+        compact_after_deletions: 50,
+        ..SyncConfig::default()
+    })
+    .await;
+    // 80 caractères ; l'écriture ne supprime que le paragraphe vide de la page neuve.
+    f.write_mmd(&format!("{}\n", "abcdefghij".repeat(8))).await;
+    let client = f.client().await;
+    let journal = || async { f.store.load_doc(f.page).await.unwrap().updates.len() };
+    assert_eq!(journal().await, 1);
+
+    erase_start(&client, 30);
+    processed(&client).await;
+    assert_eq!(journal().await, 2, "30 caractères effacés : sous le seuil");
+
+    erase_start(&client, 30);
+    processed(&client).await;
+    assert_eq!(
+        journal().await,
+        0,
+        "60 caractères effacés en tout : compaction"
+    );
+    assert_compacted_and_identical(&f, &client).await;
+    assert_eq!(text(&client.blocks()), "abcdefghij".repeat(2));
+}
+
+/// Une grosse suppression restée au journal (panne entre l'écriture et la
+/// compaction, ou base écrite avant R40) est compactée au chargement suivant :
+/// elle ne coûte qu'une fois.
+#[tokio::test]
+async fn journal_with_big_deletion_is_compacted_on_load() {
+    let f = Fixture::new(SyncConfig {
+        compact_after_deletions: u64::MAX,
+        ..SyncConfig::default()
+    })
+    .await;
+    f.write_mmd(&paragraphs(200, "Avant")).await;
+    f.write_mmd(&paragraphs(200, "Après")).await;
+    assert_eq!(f.store.load_doc(f.page).await.unwrap().updates.len(), 2);
+    let expected = f.hub.read_blocks(f.page).await.unwrap();
+
+    // Le hub s'arrête, puis un autre, au réglage par défaut, rouvre la page.
+    let Fixture {
+        dir,
+        store,
+        hub,
+        server,
+        page,
+        ..
+    } = f;
+    server.stop().await;
+    drop(hub);
+    let hub = Hub::new(store.clone(), SyncConfig::default());
+    assert_eq!(hub.read_blocks(page).await.unwrap(), expected);
+    assert!(store.load_doc(page).await.unwrap().updates.is_empty());
+    assert_eq!(stored_page(&store, page).await.read_blocks(), expected);
+    drop(dir);
 }
