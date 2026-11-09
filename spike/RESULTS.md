@@ -2,6 +2,27 @@
 
 Mesures du spike. PC = poste Windows de Lenny (i9-14900K), ARM = Raspberry Pi 4 (4 Go) ou VPS ARM64 2 vCPU / 4 Go.
 
+## Verdict (9 novembre 2026)
+
+Les quatre questions de la phase 0 ont une réponse chiffrée. Toutes les mesures ont été faites **sur le PC**. **Les mesures ARM restent à faire** (commandes en fin de fichier) ; les verdicts de budget sont donc provisoires.
+
+| Question P0 | Réponse | Choix de la spec (§5.2) |
+|---|---|---|
+| 1. BlockNote + Yjs ⇄ serveur Rust yrs ⇄ SQLite, en temps réel | **Oui** : frappe visible chez l'autre en 8–11 ms (p95), redémarrage du serveur sans perte, reconnexion hors ligne qui fusionne. Une perte de données sur page vide a été trouvée et corrigée (le serveur crée la racine de la page). | **Confirmé**, avec 2 précisions : chemin Yjs 13 de BlockNote (`@blocknote/core/yjs`) ; yrs compilé avec la feature `sync` |
+| 2. Aller-retour MMD sans perte sur 20 types de blocs | **Oui** : fixture relue octet pour octet, 12 800+ cas proptest sans échec ; une page écrite par le serveur s'ouvre dans BlockNote identique, et la page écrite par BlockNote se relit en MMD exact | **Confirmé** (règles de format à ajouter à la spec §6.2) |
+| 3. Un agent qui édite pendant qu'un humain tape | **Oui** : 20 appels pendant 200 frappes, 0 perte, 0 conflit, visible en 7–15 ms ; conflit propre (409) si même bloc ; positions UTF-16 exactes (« Café 🚀 prêt ») | **Confirmé** (révision = instantané Yjs, appel atomique) |
+| 4. Base de 100 000 lignes JSON + index sur ARM | **Sur PC oui** pour les budgets (fenêtre 2,5 ms, filtre + tri 127 ms, groupes 13 ms) ; **rollups à la volée trop lents** (1,9 s) quel que soit le stockage | **Confirmé** pour le stockage JSON ; **corrigé** : rollups et formules matérialisés (déjà prévu §5.5, désormais obligatoire). **ARM à mesurer** |
+| Benchmark Yjs / Loro | **On garde Yjs** : Loro plus lent dès qu'on lit toute la page (×3 serveur, ×16 client) et à la fusion (×2). Mais **Yjs duplique un bloc déplacé en même temps par deux personnes** | **Confirmé**, plus une action P1 : nettoyage des doublons de blocs côté serveur |
+
+**Ce qui change pour la P1 :**
+1. Une page de 10 000 blocs s'ouvre en ~1,3 s, budget non tenu. Il faut le cache local (SQLite WASM, §5.9) **et** le chargement paresseux des blocs.
+2. Rollups et formules matérialisés et invalidés par dépendances : obligatoire.
+3. Passe serveur de déduplication des blocs après fusion (déplacements concurrents).
+4. Risque à suivre : BlockNote est passé à Yjs 14 RC par défaut, et yrs 0.28 ne lit pas le texte des nœuds Yjs 14.
+5. Toujours obtenir les types Yjs (`get_or_insert_*`) avant d'ouvrir une transaction : avec la feature `sync`, sinon interblocage.
+
+## Mesures détaillées
+
 | Mesure | Budget | PC | ARM | Verdict |
 |---|---|---|---|---|
 | T1 · Chargement serveur d'une page de 10 000 blocs depuis SQLite (p95, 20 essais) | page jamais vue < 300 ms | 31,2 ms (p50 28,6) | à faire | ✅ provisoire |
@@ -66,3 +87,16 @@ Notes T7 (page de 10 000 blocs, PC ; `cargo run --release -p spike-crdt-bench` e
 - **Verdict CRDT : on garde Yjs** (règle du plan : Loro devait être au moins 2 fois meilleur sur W3, W4 ou W5). Loro ne gagne que grâce au chargement paresseux (W3, W4) ; dès qu'on lit toute la page, il est 3 fois plus lent côté serveur et 16 fois plus lent côté client (appels JS ⇄ WASM), et sa fusion est 2 fois plus lente. La liaison loro-prosemirror n'a donc pas eu besoin d'être évaluée.
 - **Point faible de Yjs confirmé** (`yrs_concurrent_moves_duplicate_blocks`) : un déplacement de bloc vaut suppression + réinsertion, donc deux personnes qui déplacent le même bloc en même temps le dupliquent (25 sur 25 ici). Loro, avec son arbre déplaçable, n'a aucun doublon. **Action P1** : passe de nettoyage côté serveur après fusion (un même id de `blockContainer` en double → garder une seule copie), et déplacements de pages dans l'arbre faits par le serveur (déjà prévu en §5.4).
 - Les benchmarks publics comparant ces bibliothèques étaient périmés ; ces chiffres les remplacent pour notre usage.
+
+## Mesures ARM à faire (Raspberry Pi 4 ou Hetzner CAX11)
+
+Depuis `spike/`, avec Rust installé sur la machine :
+
+```bash
+cargo run --release -p spike-server --bin measure
+cargo test --release -p spike-db -- --ignored budgets_100k --nocapture
+cargo run --release -p spike-db -- bench --rows 100000
+cargo run --release -p spike-crdt-bench
+```
+
+Reporter les valeurs dans la colonne ARM ci-dessus. Le budget le plus à risque est « filtre ET/OU + tri < 300 ms » (127 ms sur PC).
