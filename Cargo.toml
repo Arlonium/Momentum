@@ -1,0 +1,14 @@
+[workspace]
+members = ["crates/*"]
+# Le prototype jetable de la phase 0 a son propre workspace.
+exclude = ["spike"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.96"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }

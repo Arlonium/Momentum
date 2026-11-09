@@ -1,0 +1,750 @@
+[
+  {
+    "id": "4dcfe0c8-39d6-4042-8b82-fc16df6121af",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 1,
+      "isToggleable": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Spécification v1",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "d9c59fd1-e3fd-4610-99f6-205f2bef3a21",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Livrer un espace de travail ",
+        "styles": {}
+      },
+      {
+        "type": "text",
+        "text": "rapide",
+        "styles": {
+          "bold": true
+        }
+      },
+      {
+        "type": "text",
+        "text": " où l’équipe et ses ",
+        "styles": {}
+      },
+      {
+        "type": "text",
+        "text": "agents",
+        "styles": {
+          "italic": true
+        }
+      },
+      {
+        "type": "text",
+        "text": " écrivent ensemble, en ",
+        "styles": {}
+      },
+      {
+        "type": "text",
+        "text": "différé",
+        "styles": {
+          "strike": true
+        }
+      },
+      {
+        "type": "text",
+        "text": " direct, avec du ",
+        "styles": {}
+      },
+      {
+        "type": "text",
+        "text": "code",
+        "styles": {
+          "code": true
+        }
+      },
+      {
+        "type": "text",
+        "text": ", du ",
+        "styles": {}
+      },
+      {
+        "type": "text",
+        "text": "souligné",
+        "styles": {
+          "underline": true
+        }
+      },
+      {
+        "type": "text",
+        "text": ", de la ",
+        "styles": {}
+      },
+      {
+        "type": "text",
+        "text": "couleur",
+        "styles": {
+          "textColor": "red"
+        }
+      },
+      {
+        "type": "text",
+        "text": ", un ",
+        "styles": {}
+      },
+      {
+        "type": "link",
+        "href": "https://mementum.dev",
+        "content": [
+          {
+            "type": "text",
+            "text": "lien",
+            "styles": {}
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": " et ",
+        "styles": {}
+      },
+      {
+        "type": "math",
+        "props": {
+          "latex": "E = mc^2"
+        }
+      },
+      {
+        "type": "text",
+        "text": ".",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "6ee0a7a5-2b6a-45e2-82cf-09a773130d2a",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 2,
+      "isToggleable": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Mentions",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "8a95e014-a387-4ef0-9f70-9e1e413aa577",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Voir ",
+        "styles": {}
+      },
+      {
+        "type": "mention",
+        "props": {
+          "kind": "page",
+          "id": "pg_spec01",
+          "label": "Spécification"
+        }
+      },
+      {
+        "type": "text",
+        "text": ", demander à ",
+        "styles": {}
+      },
+      {
+        "type": "mention",
+        "props": {
+          "kind": "user",
+          "id": "us_lenny",
+          "label": "Lenny"
+        }
+      },
+      {
+        "type": "text",
+        "text": " avant le ",
+        "styles": {}
+      },
+      {
+        "type": "mention",
+        "props": {
+          "kind": "date",
+          "id": "2026-12-01",
+          "label": "1 déc. 2026"
+        }
+      },
+      {
+        "type": "text",
+        "text": ".",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "5eacbd07-a736-4370-88db-5e96918641fb",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 3,
+      "isToggleable": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Listes",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "16fa76a9-a306-4d80-9e78-3b09f01c9420",
+    "type": "bulletListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Premier point",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "4ded9fa4-ad02-459f-a416-f15579bd1786",
+        "type": "bulletListItem",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Point imbriqué",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "6db7ab1b-9ccd-46f2-8f21-b276099309ec",
+    "type": "bulletListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Second point",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "502951d6-bd9f-4cdb-b780-8a714ce65a66",
+    "type": "numberedListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Étape un",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "41ded8b9-803c-4708-afc2-972e02435cbf",
+    "type": "numberedListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Étape deux",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "bd5f1785-367f-4159-b864-ed9e7d6667df",
+    "type": "checkListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "checked": true
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Éditeur en blocs",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "0835d89e-2c2b-425e-b780-451b706bf679",
+    "type": "checkListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "checked": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Partage des coffres",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "9b0dac1d-62af-4374-a696-a482e0c40ff0",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 4,
+      "isToggleable": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Blocs riches",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "e922ae8a-d963-4025-9970-814ab960e78d",
+    "type": "toggleListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Détails techniques",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "d8cfb322-b3f7-4be8-885b-ee4065205823",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Le serveur tourne sur un Raspberry Pi 4.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "5530f5f5-4310-4fb6-877d-208c11617cd9",
+    "type": "quote",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Une citation courte.",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "8aa22cec-cefe-41c5-8049-ef08620f1a6b",
+    "type": "callout",
+    "props": {
+      "icon": "⚠️",
+      "color": "yellow"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Penser à la migration des données.",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "7d33e549-3098-4879-9ffd-af81f8f18f31",
+    "type": "codeBlock",
+    "props": {
+      "language": "rust"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "fn main() {\n    println!(\"Café 🚀 déjà\");\n}",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "5fd998ee-4ce9-42dc-8354-4282685c6c00",
+    "type": "equation",
+    "props": {
+      "latex": "\\int_0^1 x^2 \\, dx = \\frac{1}{3}"
+    },
+    "children": []
+  },
+  {
+    "id": "a3d10ead-7cbc-44ac-8b8d-4c6ecb5201f0",
+    "type": "divider",
+    "props": {},
+    "children": []
+  },
+  {
+    "id": "aded14a3-7468-4be2-a663-1be6feaec5de",
+    "type": "image",
+    "props": {
+      "textAlignment": "left",
+      "backgroundColor": "default",
+      "name": "",
+      "url": "https://mementum.dev/logo.png",
+      "caption": "Logo Mementum",
+      "showPreview": true
+    },
+    "children": []
+  },
+  {
+    "id": "32be4186-9a86-48a7-8da5-f86559916067",
+    "type": "file",
+    "props": {
+      "backgroundColor": "default",
+      "name": "spec.pdf",
+      "url": "https://mementum.dev/spec.pdf",
+      "caption": ""
+    },
+    "children": []
+  },
+  {
+    "id": "cfd82bff-1046-44a5-8a9d-1c1bf69e655a",
+    "type": "bookmark",
+    "props": {
+      "url": "https://mementum.dev"
+    },
+    "children": []
+  },
+  {
+    "id": "6e363de1-660f-41e1-ad90-49615d89fec8",
+    "type": "table",
+    "props": {
+      "textColor": "default"
+    },
+    "content": {
+      "type": "tableContent",
+      "columnWidths": [
+        null,
+        null
+      ],
+      "headerRows": 1,
+      "rows": [
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Nom",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Statut",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Prototype",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "En cours",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Benchmark",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Terminé",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "children": []
+  },
+  {
+    "id": "1248a7ab-49a9-4d44-855c-dafef1e061cc",
+    "type": "columnList",
+    "props": {},
+    "children": [
+      {
+        "id": "33dba13b-0854-44f1-83bd-c4ab593089f3",
+        "type": "column",
+        "props": {
+          "width": 1
+        },
+        "children": [
+          {
+            "id": "2ac7ebee-2435-437a-a323-3983b3ab76bb",
+            "type": "paragraph",
+            "props": {
+              "backgroundColor": "default",
+              "textColor": "default",
+              "textAlignment": "left"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Colonne de gauche.",
+                "styles": {}
+              }
+            ],
+            "children": []
+          }
+        ]
+      },
+      {
+        "id": "d761eb03-fae3-41a0-8771-5ca64d7488a5",
+        "type": "column",
+        "props": {
+          "width": 1
+        },
+        "children": [
+          {
+            "id": "4d705eee-c4c2-4446-962a-2119d0636006",
+            "type": "paragraph",
+            "props": {
+              "backgroundColor": "default",
+              "textColor": "default",
+              "textAlignment": "left"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Colonne de droite.",
+                "styles": {}
+              }
+            ],
+            "children": []
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "27a5654e-18c4-4e27-9641-08ab0ae79f00",
+    "type": "pageLink",
+    "props": {
+      "pageId": "pg_child01",
+      "title": "Sous-page"
+    },
+    "children": []
+  },
+  {
+    "id": "e1ed9fb7-1d2d-4707-b913-49c72299ab4d",
+    "type": "databaseRef",
+    "props": {
+      "databaseId": "db_tasks",
+      "view": "Tableau"
+    },
+    "children": []
+  },
+  {
+    "id": "23b1eb7b-18c4-4596-80f4-84a1dc492ae3",
+    "type": "syncedBlock",
+    "props": {
+      "ref": "b_origin01"
+    },
+    "children": [
+      {
+        "id": "261792c6-0e38-49b1-aa0c-5b8e367564a0",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Contenu synchronisé.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "21fd0a57-4d51-474c-9f26-63b965dd8549",
+    "type": "toc",
+    "props": {},
+    "children": []
+  },
+  {
+    "id": "b_unknown01",
+    "type": "unknown",
+    "props": {
+      "originalType": "future_widget",
+      "data": "eyJ4IjoxfQ=="
+    },
+    "children": []
+  }
+]

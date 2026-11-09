@@ -1,0 +1,11 @@
+[package]
+name = "mementum-schema"
+description = "Registre unique des types de blocs de Mementum"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true

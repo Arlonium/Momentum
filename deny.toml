@@ -1,0 +1,29 @@
+# Licence du projet : AGPL-3.0. Seules des dépendances compatibles sont permises.
+# GPL-3.0 est tolérée uniquement pour @blocknote/xl-multi-column (côté web, hors Cargo).
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "MPL-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "0BSD",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+# Les licences autorisées mais pas encore rencontrées ne sont pas une alerte.
+unused-allowed-license = "allow"
+
+# Les crates du workspace (publish = false) sont sous AGPL-3.0 : on ne les juge pas.
+[licenses.private]
+ignore = true
+
+[bans]
+# Les doublons majeurs sont signalés sans bloquer.
+multiple-versions = "warn"
+wildcards = "allow"

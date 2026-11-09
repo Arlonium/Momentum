@@ -1,0 +1,471 @@
+{
+  "version": 1,
+  "blocks": [
+    {
+      "name": "paragraph",
+      "content": "inline",
+      "props": [
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textAlignment",
+          "type": "string",
+          "default": "left"
+        }
+      ]
+    },
+    {
+      "name": "heading",
+      "content": "inline",
+      "props": [
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textAlignment",
+          "type": "string",
+          "default": "left"
+        },
+        {
+          "name": "level",
+          "type": "int",
+          "default": 1
+        },
+        {
+          "name": "isToggleable",
+          "type": "bool",
+          "default": false
+        }
+      ]
+    },
+    {
+      "name": "bulletListItem",
+      "content": "inline",
+      "props": [
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textAlignment",
+          "type": "string",
+          "default": "left"
+        }
+      ]
+    },
+    {
+      "name": "numberedListItem",
+      "content": "inline",
+      "props": [
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textAlignment",
+          "type": "string",
+          "default": "left"
+        },
+        {
+          "name": "start",
+          "type": "int",
+          "default": null
+        }
+      ]
+    },
+    {
+      "name": "checkListItem",
+      "content": "inline",
+      "props": [
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textAlignment",
+          "type": "string",
+          "default": "left"
+        },
+        {
+          "name": "checked",
+          "type": "bool",
+          "default": false
+        }
+      ]
+    },
+    {
+      "name": "toggleListItem",
+      "content": "inline",
+      "props": [
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textAlignment",
+          "type": "string",
+          "default": "left"
+        }
+      ]
+    },
+    {
+      "name": "quote",
+      "content": "inline",
+      "props": [
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        },
+        {
+          "name": "textColor",
+          "type": "string",
+          "default": "default"
+        }
+      ]
+    },
+    {
+      "name": "codeBlock",
+      "content": "inline",
+      "props": [
+        {
+          "name": "language",
+          "type": "string",
+          "default": "text"
+        }
+      ]
+    },
+    {
+      "name": "divider",
+      "content": "none",
+      "props": []
+    },
+    {
+      "name": "image",
+      "content": "none",
+      "props": [
+        {
+          "name": "url",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "caption",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "showPreview",
+          "type": "bool",
+          "default": true
+        },
+        {
+          "name": "previewWidth",
+          "type": "float",
+          "default": null
+        },
+        {
+          "name": "textAlignment",
+          "type": "string",
+          "default": "left"
+        },
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        }
+      ]
+    },
+    {
+      "name": "video",
+      "content": "none",
+      "props": [
+        {
+          "name": "url",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "caption",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "showPreview",
+          "type": "bool",
+          "default": true
+        },
+        {
+          "name": "previewWidth",
+          "type": "float",
+          "default": null
+        },
+        {
+          "name": "textAlignment",
+          "type": "string",
+          "default": "left"
+        },
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        }
+      ]
+    },
+    {
+      "name": "audio",
+      "content": "none",
+      "props": [
+        {
+          "name": "url",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "caption",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "showPreview",
+          "type": "bool",
+          "default": true
+        },
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        }
+      ]
+    },
+    {
+      "name": "file",
+      "content": "none",
+      "props": [
+        {
+          "name": "url",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "caption",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "backgroundColor",
+          "type": "string",
+          "default": "default"
+        }
+      ]
+    },
+    {
+      "name": "table",
+      "content": "table",
+      "props": [
+        {
+          "name": "textColor",
+          "type": "string",
+          "default": "default"
+        }
+      ]
+    },
+    {
+      "name": "callout",
+      "content": "inline",
+      "props": [
+        {
+          "name": "icon",
+          "type": "string",
+          "default": "💡"
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "default": "default"
+        }
+      ]
+    },
+    {
+      "name": "equation",
+      "content": "none",
+      "props": [
+        {
+          "name": "latex",
+          "type": "string",
+          "default": ""
+        }
+      ]
+    },
+    {
+      "name": "bookmark",
+      "content": "none",
+      "props": [
+        {
+          "name": "url",
+          "type": "string",
+          "default": ""
+        }
+      ]
+    },
+    {
+      "name": "columnList",
+      "content": "none",
+      "props": []
+    },
+    {
+      "name": "column",
+      "content": "none",
+      "props": [
+        {
+          "name": "width",
+          "type": "float",
+          "default": 1.0
+        }
+      ]
+    },
+    {
+      "name": "pageLink",
+      "content": "none",
+      "props": [
+        {
+          "name": "pageId",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "default": ""
+        }
+      ]
+    },
+    {
+      "name": "databaseRef",
+      "content": "none",
+      "props": [
+        {
+          "name": "databaseId",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "view",
+          "type": "string",
+          "default": ""
+        }
+      ]
+    },
+    {
+      "name": "syncedBlock",
+      "content": "none",
+      "props": [
+        {
+          "name": "ref",
+          "type": "string",
+          "default": ""
+        }
+      ]
+    },
+    {
+      "name": "toc",
+      "content": "none",
+      "props": []
+    },
+    {
+      "name": "unknown",
+      "content": "none",
+      "props": [
+        {
+          "name": "originalType",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "data",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "foreign",
+          "type": "bool",
+          "default": false
+        }
+      ]
+    }
+  ],
+  "styles": [
+    "bold",
+    "italic",
+    "underline",
+    "strike",
+    "code",
+    "textColor",
+    "backgroundColor"
+  ],
+  "inline": [
+    "link",
+    "mention",
+    "math",
+    "hardBreak"
+  ]
+}
