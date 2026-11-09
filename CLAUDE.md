@@ -21,7 +21,7 @@ Tu reprends **Mementum**, un espace de travail open source façon Notion, auto-h
   - pas de miroir en fichiers, mais import Notion et Obsidian ;
   - MCP dès la phase 1 ;
   - design A « Papier ».
-- **Commits** : petits, un sujet chacun, terminés par la ligne d'attribution de l'outil utilisé. Ne jamais pousser de secrets (clés, jetons, mots de passe).
+- **Commits** : petits, un sujet chacun, **sans aucune ligne d'attribution d'outil** (ni `Co-Authored-By: Claude…`, ni `Claude-Session:`, ni « Generated with Claude Code »), dans les commits comme dans les PR. Ne jamais pousser de secrets (clés, jetons, mots de passe).
 
 ## Pièges déjà rencontrés en phase 0
 
