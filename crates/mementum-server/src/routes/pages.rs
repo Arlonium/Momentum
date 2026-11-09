@@ -16,7 +16,7 @@ use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use mementum_md::{RenderOpts, parse, render};
+use mementum_md::{Block, RenderOpts, parse, render};
 use mementum_store::{NewNode, Node, NodeKind, StoreError};
 use uuid::Uuid;
 
@@ -152,9 +152,28 @@ pub(crate) async fn put_mmd(
             message: "le texte n'est pas de l'UTF-8 valide".to_string(),
         })
     })?;
-    let blocks = parse(text)?;
+    let mut blocks = parse(text)?;
+    unknown_not_foreign(&mut blocks);
     state.hub.write_blocks(id, blocks).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ruling R33 : un bloc `unknown` écrit par MMD n'est jamais recréé en élément
+/// étranger (`foreign = true`), que y-prosemirror supprimerait chez tous dès
+/// qu'un navigateur ouvre la page. Il devient le bloc custom `unknown` de
+/// BlockNote, affiché et conservé, `originalType` et `data` gardés. Au lot 1,
+/// un élément étranger ne vient que du MMD : un client d'un schéma plus récent
+/// est en lecture seule.
+fn unknown_not_foreign(blocks: &mut [Block]) {
+    let mut stack = vec![blocks];
+    while let Some(level) = stack.pop() {
+        for block in level.iter_mut() {
+            if block.kind == "unknown" {
+                block.props.remove("foreign");
+            }
+            stack.push(&mut block.children);
+        }
+    }
 }
 
 /// L'id d'une page dans le chemin : illisible, la page n'existe pas.

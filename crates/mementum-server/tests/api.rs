@@ -532,15 +532,51 @@ async fn invalid_mmd_is_422() {
     assert_eq!(t.get_mmd(&page.id).await.text(), "Avant\n");
 }
 
+/// Ruling R33 : un bloc étranger écrit par MMD (`foreign=true`) devient le bloc
+/// custom `unknown` de BlockNote, `originalType` et `data` gardés. Recréé en
+/// élément étranger, y-prosemirror le supprimerait chez tous dès qu'un
+/// navigateur ouvre la page.
 #[tokio::test]
-async fn invalid_blocks_is_422() {
+async fn foreign_mmd_block_is_written_as_unknown() {
+    let t = TestApp::new().await;
+    let page = t.create(json!({})).await;
+    let data = "eyJhdHRycyI6eyJhIjoiMSJ9LCJjb250ZW50IjpbXSwiY2hpbGRyZW4iOltdfQ==";
+    let block = |id: &str, foreign: &str| {
+        format!("<block type=\"futureWidget\" id=\"{id}\" data=\"{data}\"{foreign}/>")
+    };
+    let put = t
+        .put_mmd(
+            &page.id,
+            format!(
+                "Avant\n\nParent\n  {}\n\n{}\n\nAprès\n",
+                block("b_future02", " foreign=true"),
+                block("b_future01", " foreign=true"),
+            ),
+        )
+        .await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.text());
+    // Relu sans `foreign`, au premier niveau comme en enfant.
+    assert_eq!(
+        t.get_mmd(&page.id).await.text(),
+        format!(
+            "Avant\n\nParent\n  {}\n\n{}\n\nAprès\n",
+            block("b_future02", ""),
+            block("b_future01", ""),
+        )
+    );
+}
+
+/// Avant R33, ce bloc étranger de 60 niveaux sous 78 blocs imbriqués dépassait
+/// `MAX_YJS_DEPTH` (`422 invalid_blocks`). Devenu un bloc `unknown`, son `data`
+/// reste opaque : il est écrit tel quel. `PUT /mmd` ne peut plus produire
+/// `invalid_blocks` (la lecture MMD borne l'imbrication et refuse les colonnes
+/// invalides) ; la traduction de `TooDeep` et de `Structure` en
+/// `invalid_blocks` reste testée dans `error.rs`.
+#[tokio::test]
+async fn deep_foreign_mmd_block_stays_opaque() {
     use base64::Engine;
     let t = TestApp::new().await;
     let page = t.create(json!({})).await;
-    let before = t.get_mmd(&page.id).await.text();
-    // Lisible en MMD (moins de `MAX_DEPTH` niveaux), mais trop profond pour le
-    // document : un nœud étranger de 60 niveaux sous 78 blocs imbriqués
-    // dépasse `MAX_YJS_DEPTH` (`CrdtError::TooDeep`).
     let mut node = json!({ "tag": "inner" });
     for _ in 1..60 {
         node = json!({ "tag": "inner", "content": [node] });
@@ -561,17 +597,12 @@ async fn invalid_blocks_is_422() {
         "  ".repeat(78)
     ));
     mementum_md::parse(&mmd).expect("MMD lisible");
-    let body = t
-        .put_mmd(&page.id, mmd)
-        .await
-        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_blocks");
-    assert!(body.get("line").is_none());
-    assert!(
-        body["message"].as_str().unwrap().contains("profond"),
-        "{body}"
+    let put = t.put_mmd(&page.id, mmd.clone()).await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.text());
+    assert_eq!(
+        t.get_mmd(&page.id).await.text(),
+        mmd.replace(" foreign=true", "")
     );
-    // Rien n'a été écrit.
-    assert_eq!(t.get_mmd(&page.id).await.text(), before);
 }
 
 #[tokio::test]
