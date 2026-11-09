@@ -72,7 +72,7 @@ Les décisions sont consignées dans le registre (`docs/superpowers/logs/2026-11
 | Base de 100 000 lignes : fenêtre / filtre + tri / groupes (p95) | 2,5 / 127–130 / 12–13 ms | 2,7 / 133 / 13 ms |
 
 **Reste ouvert :**
-- **Q4 sur ARM** : la phase 0 n'est close que pour les questions 1 à 3.
+- **Q4 sur ARM** : la phase 0 n'est close que pour les questions 1 à 3. Le 9 novembre, Alex a choisi de démarrer la phase 1 sans attendre : la mesure ARM est **repoussée avant la phase 2**, qui apporte les bases de données (la phase 1 n'en a pas).
 - **Erreur « RangeError » de y-prosemirror** : elle peut faire sauter la mise à jour de la vue après une fusion distante, et la frappe locale suivante peut alors effacer le changement distant. Risque à confirmer en P1, et à surveiller dans les e2e.
 
 ## Mesures détaillées

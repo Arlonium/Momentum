@@ -22,8 +22,8 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 | Recherche (Notion 2026, alternatives open source, architecture temps réel, accès des agents IA) | ✅ faite : [`docs/research/`](docs/research/) |
 | Conception complète | ✅ validée : [`docs/specs/2026-11-09-mementum-design.md`](docs/specs/2026-11-09-mementum-design.md) |
 | Maquettes (3 directions, **A « Papier » retenue**) | ✅ faites : [`docs/design/`](docs/design/) |
-| Phase 0 : prototype jetable qui valide les choix techniques | ✅ faite sur PC et relue (relecture finale du 9 novembre, voir [`spike/RESULTS.md`](spike/RESULTS.md)) ; ⏳ **mesures ARM à faire** |
-| Phase 1 « Écrire ensemble » (MVP) | ⏭️ prochaine étape : écrire son plan |
+| Phase 0 : prototype jetable qui valide les choix techniques | ✅ faite sur PC et relue (relecture finale du 9 novembre, voir [`spike/RESULTS.md`](spike/RESULTS.md)) ; ⏳ **mesures ARM repoussées avant la phase 2** (bases de données) |
+| Phase 1 « Écrire ensemble » (MVP) | 🚧 en cours, découpée en 7 lots ; lot 1 « Socle et édition en direct » : [plan](docs/superpowers/plans/2026-11-09-p1-lot1-socle-edition.md) |
 
 Aucun code de production n'existe encore. Le dossier `spike/` est un **prototype jetable** : on en garde les leçons, les fixtures et les tests d'aller-retour, pas le code.
 
@@ -113,7 +113,7 @@ L'éditeur de démo s'ouvre avec `cargo run --release -p spike-server --bin spik
 
 ## Prochaines étapes
 
-1. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11) et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
+1. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11), à faire **avant la phase 2**, et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
 2. **Écrire le plan de la phase 1** « Écrire ensemble » à partir de la conception (§9, ligne P1) et de la section « Ce qui change pour la P1 » de `spike/RESULTS.md`, corrigée par la relecture finale. Points clés :
    - fidélité du schéma : toutes les props, enfants pour tout bloc, saut de ligne, nœuds inconnus transportés tels quels, versionnage de schéma ;
    - déplacements de blocs faits par le serveur (un déplacement concurrent perd des éditions) ;
