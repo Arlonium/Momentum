@@ -17,8 +17,11 @@
 //! [`config::DB_FILE`] du dossier des données.
 //!
 //! Le lot 1 n'a pas d'authentification : par défaut, le serveur n'écoute que
-//! sur `127.0.0.1:8080`, et il refuse le DNS rebinding et le détournement de
-//! WebSocket (`guard.rs`, Ruling R31).
+//! sur `127.0.0.1:8080`. Sur la boucle locale, il refuse le DNS rebinding et
+//! le détournement de WebSocket (`guard.rs`, Ruling R31). Ces protections ne
+//! valent que là : hors de la boucle locale, l'en-tête `Host` n'est plus
+//! contrôlée, le DNS rebinding n'est donc pas refusé, et quiconque atteint
+//! l'adresse lit et modifie les pages (le démarrage le journalise).
 
 pub mod config;
 mod error;

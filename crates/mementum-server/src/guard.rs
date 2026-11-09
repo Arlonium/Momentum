@@ -12,8 +12,14 @@
 //!   `Host`) ; sinon `403 bad_origin`. Sans `Origin` (client hors navigateur),
 //!   la connexion passe.
 //!
-//! Hors de la boucle locale, le contrôle de `Host` est désactivé (le
-//! démarrage le journalise) ; celui de l'`Origin` reste.
+//! Ces deux protections ne valent que sur la boucle locale. Hors d'elle, le
+//! contrôle de `Host` est désactivé (le démarrage le journalise) : le DNS
+//! rebinding n'est plus refusé. Celui de l'`Origin` reste, mais il ne protège
+//! plus du DNS rebinding : il compare l'`Origin` à une en-tête `Host` que
+//! personne n'a vérifiée, et une page servie sous un nom qui pointe vers le
+//! serveur a une `Origin` égale à son `Host`. Il n'arrête alors que le site
+//! tiers ordinaire, dont l'`Origin` diffère du `Host`. Sans authentification
+//! au lot 1, n'écouter que sur la boucle locale.
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
