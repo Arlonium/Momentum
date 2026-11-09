@@ -149,3 +149,31 @@ describe("supported_languages_admit_any_language", () => {
     expect(Object.prototype.hasOwnProperty.call(supportedLanguages, "mon langage")).toBe(false);
   });
 });
+
+// La coloration lit la langue par `meta.highlight` du bloc, dans le schéma de l'éditeur.
+// Une langue hors du menu n'est pas confiée à Shiki, dont le chargeur lève alors une erreur
+// que BlockNote laisse partir dans la console : le bloc s'affiche sans coloration.
+describe("code_block_highlights_menu_languages_only", () => {
+  const highlight = (language: string) => {
+    const specs = editor.schema.blockSpecs as unknown as Record<
+      string,
+      { implementation: { meta?: { highlight?: (block: unknown) => string | undefined } } }
+    >;
+    return specs.codeBlock.implementation.meta?.highlight?.({
+      type: "codeBlock",
+      props: { language },
+    });
+  };
+
+  test("une langue du menu, par son nom ou un alias, est colorée", () => {
+    for (const language of ["rust", "javascript", "js", "c++", "text"]) {
+      expect(highlight(language)).toBe(language);
+    }
+  });
+
+  test("une autre langue ne l'est pas", () => {
+    for (const language of ["mon langage", "", "__proto__", "Rust"]) {
+      expect(highlight(language), JSON.stringify(language)).toBeUndefined();
+    }
+  });
+});

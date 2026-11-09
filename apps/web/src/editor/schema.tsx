@@ -55,6 +55,42 @@ export const supportedLanguages = new Proxy({ ...codeBlockOptions.supportedLangu
   has: (languages, key) => typeof key === "string" || key in languages,
 });
 
+/** Les langues que Shiki sait colorer : celles du menu, par leur nom ou un alias. */
+const HIGHLIGHTED_LANGUAGES: ReadonlySet<string> = new Set(
+  Object.entries(codeBlockOptions.supportedLanguages).flatMap(([name, { aliases }]) => [
+    name,
+    ...(aliases ?? []),
+  ]),
+);
+
+/**
+ * Bloc de code, dont seule une langue du menu est confiée à Shiki. Pour une autre langue,
+ * le chargeur de `@blocknote/code-block` lève une erreur synchrone (« Language … is not
+ * included in this bundle ») que BlockNote n'attrape pas : elle partait dans la console à
+ * chaque rendu. Le bloc s'affiche alors sans coloration, et sa langue reste dans le document.
+ */
+function codeBlockSpec() {
+  const spec = createCodeBlockSpec({
+    ...codeBlockOptions,
+    defaultLanguage: "text",
+    supportedLanguages,
+  });
+  const highlight = spec.implementation.meta?.highlight;
+  return {
+    ...spec,
+    implementation: {
+      ...spec.implementation,
+      meta: {
+        ...spec.implementation.meta,
+        highlight: (block: Parameters<NonNullable<typeof highlight>>[0]) => {
+          const language = highlight?.(block);
+          return language !== undefined && HIGHLIGHTED_LANGUAGES.has(language) ? language : undefined;
+        },
+      },
+    },
+  };
+}
+
 /** Formule LaTeX rendue par KaTeX ; une formule invalide s'affiche en rouge, sans erreur. */
 function Tex({ latex, display }: { latex: string; display: boolean }) {
   const html = katex.renderToString(latex, { displayMode: display, throwOnError: false });
@@ -250,11 +286,7 @@ export const schema = withMultiColumn(
       // Coloration par `@blocknote/code-block` (Shiki) ; le contenu reste du texte brut.
       // Ses options choisissent `javascript` par défaut : on garde celle du registre et de
       // BlockNote (`text`), sinon un bloc sans langue changerait de langue au rendu MMD.
-      codeBlock: createCodeBlockSpec({
-        ...codeBlockOptions,
-        defaultLanguage: "text",
-        supportedLanguages,
-      }),
+      codeBlock: codeBlockSpec(),
       callout: Callout(),
       equation: Equation(),
       bookmark: Bookmark(),
