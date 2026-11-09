@@ -7,6 +7,8 @@ import { openPage, uniquePage } from "./helpers";
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "fixtures");
 
 test("export_all_blocks_fixture", async ({ browser }) => {
+  // Réécrit des fixtures commitées (avec des ids neufs à chaque fois) : seulement sur demande.
+  test.skip(process.env.EXPORT_FIXTURES !== "1", "régénération des fixtures : relancer avec EXPORT_FIXTURES=1");
   const p = await openPage(browser, uniquePage("fixture"), "Fixture", "&fixture=all-blocks");
   await p.waitForFunction(() => (window as any).__mementum?.fixtureReady === true, null, { timeout: 30_000 });
 

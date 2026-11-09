@@ -27,6 +27,8 @@ test("agent_edits_while_human_types", async ({ browser, request }) => {
   const agent = (async () => {
     for (let i = 0; i < 20; i++) {
       const page = await (await request.get(`${API}/pages/${id}?anchors=block`)).json();
+      // Le serveur diffuse avant de répondre : chronométrer depuis l'envoi de l'appel, pas depuis la réponse.
+      const t0 = Date.now();
       const res = await request.post(`${API}/pages/${id}/update`, {
         data: {
           base_revision: page.revision,
@@ -37,7 +39,6 @@ test("agent_edits_while_human_types", async ({ browser, request }) => {
           ],
         },
       });
-      const t0 = Date.now();
       if (res.status() === 409) conflicts++;
       expect(res.status(), await res.text()).toBe(200);
       await p.waitForFunction((s) => document.body.innerText.includes(s), `Compteur agent : ${i + 1}`, { polling: 5 });

@@ -64,7 +64,11 @@ test("offline_edits_merge_on_reconnect", async ({ browser }) => {
   expect(xml).toContain("en ligne");
 });
 
-test("open_10k_block_page", async ({ browser }) => {
+test("open_10k_block_page", async ({ browser, request }) => {
+  // Sans la page `bench-10k`, le délai dépassé serait compté comme l'échec attendu : faux vert.
+  const pre = await (await request.get("http://localhost:8080/pages/bench-10k")).json();
+  const blocks = String(pre.markdown ?? "").split("\n\n").length;
+  test.skip(blocks < 10_000, "page bench-10k absente : lancer d'abord `cargo run --release -p spike-server --bin measure`");
   // Budget non tenu par BlockNote sans affichage paresseux (mesure consignée dans RESULTS.md).
   test.fail(true, "BlockNote rend les 10 000 blocs d'un coup : ~1,3 s sur PC");
   const p = await openPage(browser, uniquePage("t2-warmup"), "Alice"); // application déjà chargée
