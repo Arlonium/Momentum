@@ -1,0 +1,11 @@
+# Fins de ligne : LF partout, y compris sous Windows avec core.autocrlf=true.
+# Les fixtures MMD sont comparées octet pour octet au rendu : un CRLF à
+# l'extraction fait échouer les tests d'aller-retour.
+* text=auto eol=lf
+
+# Fichiers binaires, jamais convertis.
+*.bin binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary
