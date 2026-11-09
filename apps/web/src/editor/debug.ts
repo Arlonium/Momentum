@@ -23,6 +23,14 @@ export type MementumDebug = {
   synced: boolean;
   /** Schéma du serveur différent : rien n'est jamais écrit. */
   readOnly: boolean;
+  /** L'état Yjs complet du document lié à l'éditeur (export des fixtures). */
+  encodeState: () => Uint8Array;
+  /**
+   * Fixture demandée par `?fixture=<nom>` (`fixtures.ts`) : `loaded` une fois chargée,
+   * `refused` si la page n'est pas neuve, si la fixture n'existe pas ou si BlockNote la
+   * refuse.
+   */
+  fixture?: "loaded" | "refused";
 };
 
 declare global {

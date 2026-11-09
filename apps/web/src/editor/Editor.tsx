@@ -16,11 +16,19 @@ import {
   multiColumnDropCursor,
 } from "@blocknote/xl-multi-column";
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import * as Y from "yjs";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug } from "./debug";
+import { fixtureInput, replaceNewPage } from "./fixtures";
 import { schema } from "./schema";
 
-export function Editor({ session }: { session: CollabSession }) {
+type Props = {
+  session: CollabSession;
+  /** Fixture à charger dans la page neuve (`?fixture=<nom>`), en développement seulement. */
+  fixture?: string | null;
+};
+
+export function Editor({ session, fixture = null }: Props) {
   const editor = useCreateBlockNote(
     withCollaboration({
       schema,
@@ -55,6 +63,7 @@ export function Editor({ session }: { session: CollabSession }) {
       doc: session.doc,
       synced: false,
       readOnly: session.readOnly,
+      encodeState: () => Y.encodeStateAsUpdate(session.doc),
     };
     debug.current = exposed;
     window.__mementum = exposed;
@@ -67,6 +76,23 @@ export function Editor({ session }: { session: CollabSession }) {
   useEffect(() => {
     if (debug.current) debug.current.synced = synced;
   }, [synced, editor, session]);
+  // Après la première synchro, comme une frappe : la racine de la page est celle du serveur.
+  useEffect(() => {
+    if (!import.meta.env.DEV || !fixture || !synced || session.readOnly) return;
+    let cancelled = false;
+    const settle = (loaded: boolean) => {
+      if (!cancelled && debug.current) debug.current.fixture = loaded ? "loaded" : "refused";
+    };
+    fixtureInput(fixture)
+      .then((blocks) => settle(!cancelled && blocks !== null && replaceNewPage(editor, blocks)))
+      .catch((error: unknown) => {
+        console.error(`Fixture ${fixture} refusée par BlockNote :`, error);
+        settle(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fixture, synced, editor, session]);
 
   const slashItems = useMemo(
     () => combineByGroup(getDefaultReactSlashMenuItems(editor), getMultiColumnSlashMenuItems(editor)),

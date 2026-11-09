@@ -1,0 +1,126 @@
+[
+  {
+    "type": "paragraph",
+    "props": { "textColor": "red", "backgroundColor": "yellow", "textAlignment": "center" },
+    "content": "Paragraphe coloré et centré"
+  },
+  {
+    "type": "heading",
+    "props": { "level": 2, "isToggleable": true },
+    "content": "Titre repliable",
+    "children": [{ "type": "paragraph", "content": "Contenu du titre." }]
+  },
+  {
+    "type": "table",
+    "content": {
+      "type": "tableContent",
+      "headerRows": 0,
+      "columnWidths": [120, null],
+      "rows": [
+        { "cells": ["Nom", "Statut"] },
+        { "cells": ["Prototype", "En cours"] }
+      ]
+    }
+  },
+  {
+    "type": "table",
+    "content": {
+      "type": "tableContent",
+      "headerRows": 1,
+      "columnWidths": [120, null, 80],
+      "rows": [
+        {
+          "cells": [
+            { "type": "tableCell", "props": { "colspan": 2 }, "content": "Fusionnée" },
+            "Seule"
+          ]
+        },
+        {
+          "cells": [
+            { "type": "tableCell", "props": { "rowspan": 2 }, "content": "Haute" },
+            "Milieu",
+            "Droite"
+          ]
+        },
+        { "cells": ["Bas", "Coin"] }
+      ]
+    }
+  },
+  {
+    "type": "image",
+    "props": {
+      "url": "https://mementum.dev/logo.png",
+      "caption": "Logo sans aperçu",
+      "name": "logo.png",
+      "showPreview": false,
+      "previewWidth": 320
+    }
+  },
+  { "type": "paragraph", "content": "Avant le saut\naprès le saut" },
+  {
+    "type": "paragraph",
+    "content": "Paragraphe parent",
+    "children": [{ "type": "paragraph", "content": "Paragraphe enfant" }]
+  },
+  {
+    "type": "quote",
+    "content": "Citation parente",
+    "children": [{ "type": "paragraph", "content": "Enfant de la citation" }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "⚠️", "color": "blue" },
+    "children": [{ "type": "paragraph", "content": "Premier enfant du callout vide" }]
+  },
+  { "type": "numberedListItem", "props": { "start": 3 }, "content": "Trois" },
+  { "type": "numberedListItem", "content": "Quatre" },
+  {
+    "type": "paragraph",
+    "content": [
+      { "type": "text", "text": "Du texte ", "styles": {} },
+      { "type": "text", "text": "surligné", "styles": { "backgroundColor": "yellow" } },
+      { "type": "text", "text": ", un ", "styles": {} },
+      { "type": "link", "href": "https://ex.com/a%20b", "content": "lien encodé" },
+      { "type": "text", "text": " et du ", "styles": {} },
+      { "type": "text", "text": "souligné coloré", "styles": { "underline": true, "textColor": "blue" } },
+      { "type": "text", "text": ".", "styles": {} }
+    ]
+  },
+  { "type": "checkListItem", "props": { "checked": true }, "content": "Tâche faite" },
+  { "type": "codeBlock", "props": { "language": "rust" }, "content": "let x = 1;" },
+  { "type": "codeBlock", "props": { "language": "mon langage" }, "content": "inconnu de la coloration" },
+  {
+    "type": "columnList",
+    "children": [
+      {
+        "type": "column",
+        "props": { "width": 0.6 },
+        "children": [{ "type": "paragraph", "content": "Étroite." }]
+      },
+      {
+        "type": "column",
+        "props": { "width": 1.4 },
+        "children": [{ "type": "paragraph", "content": "Large." }]
+      }
+    ]
+  },
+  {
+    "type": "video",
+    "props": {
+      "url": "https://mementum.dev/demo.mp4",
+      "caption": "Démo",
+      "previewWidth": 640,
+      "textAlignment": "center"
+    }
+  },
+  { "type": "audio", "props": { "url": "https://mementum.dev/podcast.mp3", "showPreview": false } },
+  {
+    "type": "file",
+    "props": {
+      "url": "https://mementum.dev/spec.pdf",
+      "name": "spec.pdf",
+      "caption": "Le fichier",
+      "backgroundColor": "gray"
+    }
+  }
+]

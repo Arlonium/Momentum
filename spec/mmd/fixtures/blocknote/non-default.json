@@ -1,0 +1,664 @@
+[
+  {
+    "id": "838ebbc5-ef0c-4b5e-afed-c0980f634d23",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "yellow",
+      "textColor": "red",
+      "textAlignment": "center"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Paragraphe coloré et centré",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "06467a45-4aa7-4e07-83f6-138760805982",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 2,
+      "isToggleable": true
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Titre repliable",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "4925de2f-8e8c-4236-885b-6b620cbd0fbb",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Contenu du titre.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "77dae794-8c41-4173-b680-25038fe0d3f2",
+    "type": "table",
+    "props": {
+      "textColor": "default"
+    },
+    "content": {
+      "type": "tableContent",
+      "columnWidths": [
+        120,
+        null
+      ],
+      "rows": [
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Nom",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Statut",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Prototype",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "En cours",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "children": []
+  },
+  {
+    "id": "f248b5ab-a12e-485d-ae3f-84a70baa854b",
+    "type": "table",
+    "props": {
+      "textColor": "default"
+    },
+    "content": {
+      "type": "tableContent",
+      "columnWidths": [
+        120,
+        null,
+        80
+      ],
+      "headerRows": 1,
+      "rows": [
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Fusionnée",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 2,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Seule",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Haute",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 2,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Milieu",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Droite",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            }
+          ]
+        },
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Bas",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Coin",
+                  "styles": {}
+                }
+              ],
+              "props": {
+                "colspan": 1,
+                "rowspan": 1,
+                "backgroundColor": "default",
+                "textColor": "default",
+                "textAlignment": "left"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "children": []
+  },
+  {
+    "id": "54c9c4e0-053b-45e4-b0bc-6cdb54b1a940",
+    "type": "image",
+    "props": {
+      "textAlignment": "left",
+      "backgroundColor": "default",
+      "name": "logo.png",
+      "url": "https://mementum.dev/logo.png",
+      "caption": "Logo sans aperçu",
+      "showPreview": false,
+      "previewWidth": 320
+    },
+    "children": []
+  },
+  {
+    "id": "480d7d49-1671-4d09-8704-7f1f4cb23dfa",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Avant le saut\naprès le saut",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "4d542e3b-475e-4c0f-a50a-a13781d546ad",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Paragraphe parent",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "8b70cff1-9387-4304-b576-a5c63e1c0f2a",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Paragraphe enfant",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "d204f775-8414-41a0-9ed4-7166c5bf544b",
+    "type": "quote",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Citation parente",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "a71e2b15-332e-483c-9897-625af5b4fd89",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant de la citation",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "a888317d-e686-4ab9-8e85-0e2b3ef2a9d3",
+    "type": "callout",
+    "props": {
+      "icon": "⚠️",
+      "color": "blue"
+    },
+    "content": [],
+    "children": [
+      {
+        "id": "658f893e-a6d4-4b3c-8296-67457661053c",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Premier enfant du callout vide",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "9b0ba35f-8f48-4bdf-a1c2-80a8917edd6c",
+    "type": "numberedListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "start": 3
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Trois",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "70475028-e0a8-4d30-86fe-c3b3b5914a2b",
+    "type": "numberedListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Quatre",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "ed27371d-9e95-4bff-bdb8-7cf80068deff",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Du texte ",
+        "styles": {}
+      },
+      {
+        "type": "text",
+        "text": "surligné",
+        "styles": {
+          "backgroundColor": "yellow"
+        }
+      },
+      {
+        "type": "text",
+        "text": ", un ",
+        "styles": {}
+      },
+      {
+        "type": "link",
+        "href": "https://ex.com/a%20b",
+        "content": [
+          {
+            "type": "text",
+            "text": "lien encodé",
+            "styles": {}
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": " et du ",
+        "styles": {}
+      },
+      {
+        "type": "text",
+        "text": "souligné coloré",
+        "styles": {
+          "underline": true,
+          "textColor": "blue"
+        }
+      },
+      {
+        "type": "text",
+        "text": ".",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "1dc9fbb4-6df1-4c94-91c9-da3221a87035",
+    "type": "checkListItem",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "checked": true
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Tâche faite",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "e7a78003-83d5-4925-8016-59120022c37b",
+    "type": "codeBlock",
+    "props": {
+      "language": "rust"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "let x = 1;",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "cd4ab369-ac05-4ecb-82ad-4f38f35ff898",
+    "type": "codeBlock",
+    "props": {
+      "language": "mon langage"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "inconnu de la coloration",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "f11af5a4-83e5-484e-9ef9-4455c3725236",
+    "type": "columnList",
+    "props": {},
+    "children": [
+      {
+        "id": "cfbdb81e-e1f1-4401-96f3-a42dd34f9761",
+        "type": "column",
+        "props": {
+          "width": 0.6
+        },
+        "children": [
+          {
+            "id": "592f47a5-9520-4313-8981-a2fe5cffc160",
+            "type": "paragraph",
+            "props": {
+              "backgroundColor": "default",
+              "textColor": "default",
+              "textAlignment": "left"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Étroite.",
+                "styles": {}
+              }
+            ],
+            "children": []
+          }
+        ]
+      },
+      {
+        "id": "a858cab6-ccf7-48b0-af87-14eacc686df1",
+        "type": "column",
+        "props": {
+          "width": 1.4
+        },
+        "children": [
+          {
+            "id": "fe836cd6-7bf0-4823-9f00-6aecd0f632f3",
+            "type": "paragraph",
+            "props": {
+              "backgroundColor": "default",
+              "textColor": "default",
+              "textAlignment": "left"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Large.",
+                "styles": {}
+              }
+            ],
+            "children": []
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "28fa1c2d-641f-4c6d-811d-dfba528431a4",
+    "type": "video",
+    "props": {
+      "textAlignment": "center",
+      "backgroundColor": "default",
+      "name": "",
+      "url": "https://mementum.dev/demo.mp4",
+      "caption": "Démo",
+      "showPreview": true,
+      "previewWidth": 640
+    },
+    "children": []
+  },
+  {
+    "id": "2db9cb79-3c83-434b-96b8-4bacdb1f6f7d",
+    "type": "audio",
+    "props": {
+      "backgroundColor": "default",
+      "name": "",
+      "url": "https://mementum.dev/podcast.mp3",
+      "caption": "",
+      "showPreview": false
+    },
+    "children": []
+  },
+  {
+    "id": "15572b23-d2cb-4bf6-81fb-37e847daf16c",
+    "type": "file",
+    "props": {
+      "backgroundColor": "gray",
+      "name": "spec.pdf",
+      "url": "https://mementum.dev/spec.pdf",
+      "caption": "Le fichier"
+    },
+    "children": []
+  }
+]

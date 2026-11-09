@@ -101,12 +101,21 @@ fn assert_accepted(page: &PageDoc, update: &[u8]) {
         .expect("acceptée par apply_update");
 }
 
+/// Mises à jour d'un vrai client BlockNote 0.57 : la fixture de la P0, et
+/// celles de la Task 8 (tous les types de blocs, props hors défaut, cellules
+/// fusionnées dont `colwidth` porte `undefined`). Chacune est l'état complet
+/// d'un navigateur, racine écrite par le serveur comprise.
 #[test]
-fn p0_fixture_reads_like_yrs() {
-    let update = include_bytes!("../../../../spec/mmd/fixtures/yjs/p0-all-blocks.bin");
-    assert_same_blocks(update);
-    let (page, _) = PageDoc::new_page();
-    assert_accepted(&page, update);
+fn blocknote_fixtures_read_like_yrs() {
+    for update in [
+        &include_bytes!("../../../../spec/mmd/fixtures/yjs/p0-all-blocks.bin")[..],
+        &include_bytes!("../../../../spec/mmd/fixtures/yjs/all-blocks.bin")[..],
+        &include_bytes!("../../../../spec/mmd/fixtures/yjs/non-default.bin")[..],
+    ] {
+        assert_same_blocks(update);
+        let (page, _) = PageDoc::new_page();
+        assert_accepted(&page, update);
+    }
 }
 
 fn raw_doc() -> Doc {
