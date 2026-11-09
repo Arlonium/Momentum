@@ -177,6 +177,47 @@ async fn reconnect_after_restart_keeps_unsent_edits() {
     assert!(wait_for(&c.doc, "avant pendant", Duration::from_secs(2)).await.is_some(), "édition hors ligne perdue : {:?}", read_text(&c.doc));
 }
 
+/// Une page neuve reçoit sa racine BlockNote du serveur : deux clients qui écrivent sur une page
+/// vide (dont un hors ligne) ne créent plus deux racines concurrentes (perte de texte observée en Task 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_page_is_seeded_with_blocknote_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    let (port, server) = start_server(&db).await;
+    let a = connect(port, "neuve", new_doc()).await;
+    let b = connect(port, "neuve", new_doc()).await;
+    assert!(wait_for(&a.doc, "<blockGroup><blockContainer id=", Duration::from_secs(2)).await.is_some(), "racine absente : {}", read_text(&a.doc));
+    assert!(wait_for(&b.doc, "<blockGroup><blockContainer id=", Duration::from_secs(2)).await.is_some());
+    let seeded = root_id(&a.doc);
+    assert_eq!(seeded, root_id(&b.doc), "les deux clients doivent recevoir la même racine");
+    drop((a, b));
+    server.abort();
+    let _ = server.await;
+    // La racine est persistée : après redémarrage, même racine (pas une nouvelle).
+    let (port2, _s2) = start_server(&db).await;
+    let c = connect(port2, "neuve", new_doc()).await;
+    assert!(wait_for(&c.doc, &seeded, Duration::from_secs(2)).await.is_some(), "racine régénérée au redémarrage : {}", read_text(&c.doc));
+}
+
+/// Id du premier `blockContainer` (l'ordre des attributs dans `get_string` n'est pas stable).
+fn root_id(doc: &Doc) -> String {
+    let xml = read_text(doc);
+    let start = xml.find("id=\"").expect("pas de blockContainer") + 4;
+    xml[start..start + xml[start..].find('"').unwrap()].to_string()
+}
+
+/// Texte des nœuds `XmlText` seulement (sans balises ni attributs).
+fn text_content(doc: &Doc) -> String {
+    let frag = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let txn = doc.transact();
+    frag.successors(&txn)
+        .filter_map(|n| match n {
+            yrs::XmlOut::Text(t) => Some(t.get_string(&txn)),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn compacts_after_500_updates() {
     let dir = tempfile::tempdir().unwrap();
@@ -190,7 +231,7 @@ async fn compacts_after_500_updates() {
     // Attendre que le serveur ait persisté les 501 mises à jour (sans délai fixe).
     let store = spike_server::store::Store::open(&db).await.unwrap();
     let start = Instant::now();
-    while read_text(&store.load_doc("p4").await.unwrap()).matches(' ').count() < 501 {
+    while text_content(&store.load_doc("p4").await.unwrap()).matches(' ').count() < 501 {
         assert!(start.elapsed() < Duration::from_secs(10), "le serveur n'a pas tout persisté en 10 s");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -200,5 +241,5 @@ async fn compacts_after_500_updates() {
     assert!(updates <= 1, "{updates} mises à jour restantes après compaction");
     // Et le contenu complet se recharge depuis l'instantané.
     let doc = store.load_doc("p4").await.unwrap();
-    assert_eq!(read_text(&doc).matches(' ').count(), 501);
+    assert_eq!(text_content(&doc).matches(' ').count(), 501);
 }

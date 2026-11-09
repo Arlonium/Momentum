@@ -8,8 +8,17 @@ Mesures du spike. PC = poste Windows de Lenny (i9-14900K), ARM = Raspberry Pi 4 
 | T1 · Démarrage à froid du binaire jusqu'à `/health` | < 1 s | 72 ms | à faire | ✅ provisoire |
 | T1 · Mémoire du serveur au repos (RSS) | < 150 Mo | 8,6 Mo | à faire | ✅ provisoire |
 | T1 · Propagation A → B via le serveur (test `two_clients_converge`) | < 150 ms | < 150 ms (assertion) | — | ✅ |
+| T2 · Frappe → visible chez l'autre (navigateurs, p95 sur 49 frappes, 3 passes) | < 150 ms | 8–11 ms (p50 5–6) | — | ✅ |
+| T2 · Ouverture d'une page de 10 000 blocs dans BlockNote (connexion → premier bloc) | page jamais vue < 300 ms | 1 270–1 346 ms (dont synchro 920–948 ms) | à faire | ❌ corrigé : voir notes |
 
 Notes T1 :
 - L'instantané d'une page de 10 000 blocs pèse ~2,1 Mo.
 - Les poignées de main d'un document vide (mise à jour sans effet) ne sont ni stockées ni diffusées.
 - yrs doit être compilé avec la feature `sync` pour partager `Awareness` entre tâches tokio.
+
+Notes T2 :
+- **BlockNote 0.57 est passé à Yjs 14 RC** (`@blocknote/core/y`, paquet `@y/y`) et garde un chemin Yjs 13 (`@blocknote/core/yjs` + y-prosemirror 1.x), utilisé par le spike. Essai de compatibilité : le format binaire v1 passe entre Yjs 13, Yjs 14 et yrs (structure, attributs), **mais yrs ne voit pas le texte d'un nœud Yjs 14**, rangé directement dans le nœud au lieu d'un `XmlText`. Risque à suivre : le jour où BlockNote abandonne le chemin Yjs 13, le serveur Rust devra comprendre le modèle Yjs 14 (yrs ne le fait pas en 0.28).
+- **Perte de données trouvée puis corrigée** : deux clients qui écrivent sur une page vide (l'un hors ligne) créaient chacun la racine BlockNote ; à la fusion, ProseMirror en supprimait une avec son texte. Correction : le serveur écrit la racine (`blockGroup > blockContainer > paragraph`) à la création de la page et la persiste. Test `new_page_is_seeded_with_blocknote_root` + e2e `offline_edits_merge_on_reconnect` stables.
+- Ouverture de 10 000 blocs : ~75 % du temps est la synchro initiale (instantané Yjs de 2,1 Mo appliqué en JS), le reste le rendu ProseMirror. Pistes pour la P1 : cache local (SQLite WASM, prévu §5.9), chargement paresseux des blocs hors écran, pages géantes découpées.
+- y-prosemirror 1.x journalise parfois « Caught error while handling a Yjs update RangeError » (restauration de la sélection après une fusion distante) : rattrapé par la bibliothèque, sans effet sur la convergence.
+- Types custom nécessaires : callout, equation, bookmark, pageLink, databaseRef, syncedBlock, toc, unknown, plus les contenus en ligne mention et math. Le H4 et le divider existent en natif dans BlockNote 0.57. Multi-colonnes via `@blocknote/xl-multi-column` (GPL-3.0).

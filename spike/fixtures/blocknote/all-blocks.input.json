@@ -1,0 +1,91 @@
+[
+  { "type": "heading", "props": { "level": 1 }, "content": "Spécification v1" },
+  {
+    "type": "paragraph",
+    "content": [
+      { "type": "text", "text": "Livrer un espace de travail ", "styles": {} },
+      { "type": "text", "text": "rapide", "styles": { "bold": true } },
+      { "type": "text", "text": " où l’équipe et ses ", "styles": {} },
+      { "type": "text", "text": "agents", "styles": { "italic": true } },
+      { "type": "text", "text": " écrivent ensemble, en ", "styles": {} },
+      { "type": "text", "text": "différé", "styles": { "strike": true } },
+      { "type": "text", "text": " direct, avec du ", "styles": {} },
+      { "type": "text", "text": "code", "styles": { "code": true } },
+      { "type": "text", "text": ", du ", "styles": {} },
+      { "type": "text", "text": "souligné", "styles": { "underline": true } },
+      { "type": "text", "text": ", de la ", "styles": {} },
+      { "type": "text", "text": "couleur", "styles": { "textColor": "red" } },
+      { "type": "text", "text": ", un ", "styles": {} },
+      { "type": "link", "href": "https://mementum.dev", "content": [{ "type": "text", "text": "lien", "styles": {} }] },
+      { "type": "text", "text": " et ", "styles": {} },
+      { "type": "math", "props": { "latex": "E = mc^2" } },
+      { "type": "text", "text": ".", "styles": {} }
+    ]
+  },
+  { "type": "heading", "props": { "level": 2 }, "content": "Mentions" },
+  {
+    "type": "paragraph",
+    "content": [
+      { "type": "text", "text": "Voir ", "styles": {} },
+      { "type": "mention", "props": { "kind": "page", "id": "pg_spec01", "label": "Spécification" } },
+      { "type": "text", "text": ", demander à ", "styles": {} },
+      { "type": "mention", "props": { "kind": "user", "id": "us_lenny", "label": "Lenny" } },
+      { "type": "text", "text": " avant le ", "styles": {} },
+      { "type": "mention", "props": { "kind": "date", "id": "2026-12-01", "label": "1 déc. 2026" } },
+      { "type": "text", "text": ".", "styles": {} }
+    ]
+  },
+  { "type": "heading", "props": { "level": 3 }, "content": "Listes" },
+  {
+    "type": "bulletListItem",
+    "content": "Premier point",
+    "children": [{ "type": "bulletListItem", "content": "Point imbriqué" }]
+  },
+  { "type": "bulletListItem", "content": "Second point" },
+  { "type": "numberedListItem", "content": "Étape un" },
+  { "type": "numberedListItem", "content": "Étape deux" },
+  { "type": "checkListItem", "props": { "checked": true }, "content": "Éditeur en blocs" },
+  { "type": "checkListItem", "props": { "checked": false }, "content": "Partage des coffres" },
+  { "type": "heading", "props": { "level": 4 }, "content": "Blocs riches" },
+  {
+    "type": "toggleListItem",
+    "content": "Détails techniques",
+    "children": [{ "type": "paragraph", "content": "Le serveur tourne sur un Raspberry Pi 4." }]
+  },
+  { "type": "quote", "content": "Une citation courte." },
+  { "type": "callout", "props": { "icon": "⚠️", "color": "yellow" }, "content": "Penser à la migration des données." },
+  { "type": "codeBlock", "props": { "language": "rust" }, "content": "fn main() {\n    println!(\"Café 🚀 déjà\");\n}" },
+  { "type": "equation", "props": { "latex": "\\int_0^1 x^2 \\, dx = \\frac{1}{3}" } },
+  { "type": "divider" },
+  { "type": "image", "props": { "url": "https://mementum.dev/logo.png", "caption": "Logo Mementum" } },
+  { "type": "file", "props": { "url": "https://mementum.dev/spec.pdf", "name": "spec.pdf" } },
+  { "type": "bookmark", "props": { "url": "https://mementum.dev" } },
+  {
+    "type": "table",
+    "content": {
+      "type": "tableContent",
+      "headerRows": 1,
+      "rows": [
+        { "cells": ["Nom", "Statut"] },
+        { "cells": ["Prototype", "En cours"] },
+        { "cells": ["Benchmark", "Terminé"] }
+      ]
+    }
+  },
+  {
+    "type": "columnList",
+    "children": [
+      { "type": "column", "props": { "width": 1 }, "children": [{ "type": "paragraph", "content": "Colonne de gauche." }] },
+      { "type": "column", "props": { "width": 1 }, "children": [{ "type": "paragraph", "content": "Colonne de droite." }] }
+    ]
+  },
+  { "type": "pageLink", "props": { "pageId": "pg_child01", "title": "Sous-page" } },
+  { "type": "databaseRef", "props": { "databaseId": "db_tasks", "view": "Tableau" } },
+  {
+    "type": "syncedBlock",
+    "props": { "ref": "b_origin01" },
+    "children": [{ "type": "paragraph", "content": "Contenu synchronisé." }]
+  },
+  { "type": "toc" },
+  { "id": "b_unknown01", "type": "unknown", "props": { "originalType": "future_widget", "data": "eyJ4IjoxfQ==" } }
+]

@@ -82,6 +82,28 @@ impl Room {
     }
 }
 
+/// Écrit la racine BlockNote (`blockGroup > blockContainer > paragraph`) dans une page vide et
+/// renvoie l'état complet à persister. C'est le serveur qui crée les pages : deux clients ne doivent
+/// jamais créer chacun leur racine (ProseMirror en supprimerait une, avec son texte).
+fn seed_if_empty(doc: &yrs::Doc) -> Option<Vec<u8>> {
+    use yrs::{Xml, XmlElementPrelim, XmlFragment};
+    let frag = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let mut txn = doc.transact_mut_with("seed");
+    if frag.len(&txn) > 0 {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let group = frag.insert(&mut txn, 0, XmlElementPrelim::empty("blockGroup"));
+    let container = group.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+    container.insert_attribute(&mut txn, "id", format!("seed-{nanos:x}"));
+    let para = container.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+    para.insert_attribute(&mut txn, "backgroundColor", "default");
+    para.insert_attribute(&mut txn, "textAlignment", "left");
+    para.insert_attribute(&mut txn, "textColor", "default");
+    drop(txn);
+    Some(doc.transact().encode_state_as_update_v1(&StateVector::default()))
+}
+
 #[derive(Clone)]
 pub struct Rooms {
     store: Store,
@@ -103,6 +125,9 @@ impl Rooms {
             return Ok(room.clone());
         }
         let doc = self.store.load_doc(page).await?;
+        if let Some(state) = seed_if_empty(&doc) {
+            self.store.put_snapshot(page, &state).await?;
+        }
         let (tx, _) = broadcast::channel(1024);
         let room = Arc::new(Room {
             page: page.to_string(),
