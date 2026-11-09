@@ -9,6 +9,10 @@ import {
 } from "@playwright/test";
 import type { CreatePage, PageNode, Tree } from "@mementum/protocol";
 import { readFileSync } from "node:fs";
+import { WebsocketProvider } from "y-websocket";
+import * as Y from "yjs";
+// Déclare `window.__mementum` pour les fonctions passées à `page.evaluate`.
+import type {} from "../src/editor/debug";
 
 /** Version du registre des blocs (`spec/schema/blocks.json`), celle du client et du serveur. */
 export const REGISTRY_VERSION: number = JSON.parse(
@@ -70,6 +74,79 @@ export async function openPage(browser: Browser, id: string): Promise<Page> {
   await p.goto(`/p/${id}`);
   await waitSynced(p);
   return p;
+}
+
+/** Lit un entier variable de lib0 (7 bits par octet, poids faibles d'abord). */
+function readVarUint(bytes: number[], at: number): [value: number, next: number] {
+  let value = 0;
+  let shift = 0;
+  for (;;) {
+    const byte = bytes[at++];
+    value += (byte & 0x7f) * 2 ** shift;
+    if (byte < 0x80) return [value, at];
+    shift += 7;
+  }
+}
+
+/**
+ * Une trame y-websocket écrit-elle dans le document ? Messages « sync » (0) seulement :
+ * une mise à jour (sous-type 2), ou une étape 2 (sous-type 1) dont la mise à jour n'est pas
+ * vide (`[0, 0]` : ni structures ni suppressions). L'étape 1 et la présence n'écrivent rien.
+ */
+export function isWrite(bytes: number[]): boolean {
+  if (bytes[0] !== 0) return false;
+  if (bytes[1] === 2) return true;
+  if (bytes[1] !== 1) return false;
+  const [length, at] = readVarUint(bytes, 2);
+  return !(length === 2 && bytes[at] === 0 && bytes[at + 1] === 0);
+}
+
+/**
+ * Les trames d'écriture envoyées par les WebSocket de synchro que la page ouvre après cet
+ * appel. Le serveur envoie son étape 1 dès la connexion : un document neuf y répond par une
+ * étape 2 vide, qui n'est pas comptée.
+ */
+export function watchWrites(p: Page): number[][] {
+  const writes: number[][] = [];
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/sync/")) return;
+    ws.on("framesent", ({ payload }) => {
+      const bytes = [...(typeof payload === "string" ? Buffer.from(payload) : payload)];
+      if (isWrite(bytes)) writes.push(bytes);
+    });
+  });
+  return writes;
+}
+
+/**
+ * Ajoute à la page, par un client Yjs nu (sans éditeur, au schéma courant), un bloc d'un
+ * type que BlockNote ne connaît pas : `blockContainer > futureWidget`. C'est la forme d'un
+ * bloc d'une version plus récente ; le serveur le relit `<block … foreign=true/>`.
+ */
+export async function injectForeignBlock(
+  request: APIRequestContext,
+  baseURL: string,
+  id: string,
+): Promise<void> {
+  const doc = new Y.Doc();
+  const provider = new WebsocketProvider(`${baseURL.replace(/^http/, "ws")}/sync`, id, doc, {
+    params: { schema: String(REGISTRY_VERSION) },
+    disableBc: true,
+  });
+  try {
+    await expect.poll(() => provider.synced, { timeout: 10_000 }).toBe(true);
+    const group = doc.getXmlFragment("document-store").get(0) as Y.XmlElement;
+    const container = new Y.XmlElement("blockContainer");
+    container.setAttribute("id", "b_future01");
+    const widget = new Y.XmlElement("futureWidget");
+    widget.setAttribute("a", "1");
+    container.insert(0, [widget]);
+    group.insert(group.length, [container]);
+    await expect.poll(() => getMmd(request, id)).toContain('type="futureWidget"');
+  } finally {
+    provider.destroy();
+    doc.destroy();
+  }
 }
 
 /** Le fragment partagé, vu par Yjs (indépendant du rendu). */

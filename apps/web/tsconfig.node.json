@@ -1,0 +1,10 @@
+{
+  // Ce qui tourne sous Node : tests e2e (Playwright) et fichiers de configuration. Le DOM
+  // reste visible pour les fonctions passées à `page.evaluate`, et `vite/client` pour les
+  // types de l'application que les tests importent (`src/editor/debug.ts`).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "vite/client"]
+  },
+  "include": ["e2e", "vite.config.ts", "vitest.config.ts", "playwright.config.ts"]
+}

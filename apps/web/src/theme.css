@@ -131,8 +131,13 @@ a:hover {
   cursor: pointer;
 }
 
-.mm-side-action:hover {
+.mm-side-action:hover:not(:disabled) {
   background: var(--mm-sidebar-hover);
+}
+
+.mm-side-action:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .mm-side-section {
@@ -369,6 +374,10 @@ button.tree-toggle:hover {
   max-width: var(--mm-page-width);
   margin: 0 auto;
   padding: 120px var(--mm-page-inset) 64px;
+}
+
+.mm-message .mm-banner {
+  margin: 0 0 24px;
 }
 
 .mm-message h1 {

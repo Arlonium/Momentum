@@ -1,11 +1,13 @@
 // Édition à plusieurs : latence, verrou avant la synchro, lecture seule d'un client d'un
-// autre schéma (Review Focus 2) et fusion après une coupure réseau (Review Focus 4).
-import { expect, test } from "@playwright/test";
+// autre schéma, au chargement ou à une reconnexion (Review Focus 2, R35), et fusion après
+// une coupure réseau (Review Focus 4).
+import { expect, test, type Page } from "@playwright/test";
 import {
   closeContexts,
   createPage,
   fragmentXml,
   getMmd,
+  injectForeignBlock,
   newUser,
   openPage,
   percentile,
@@ -13,6 +15,7 @@ import {
   REGISTRY_VERSION,
   unique,
   waitSynced,
+  watchWrites,
 } from "./helpers";
 
 test.afterEach(closeContexts);
@@ -77,6 +80,7 @@ test("two_browsers_converge", async ({ browser, request }) => {
 test("editing_locked_until_synced", async ({ browser, request }) => {
   const { id } = await createPage(request, { title: `Verrou ${unique()}` });
   const p = await newUser(browser);
+  const writes = watchWrites(p);
 
   // Les messages du serveur sont retenus jusqu'au relâchement ; ceux du client passent.
   let release = () => {};
@@ -96,12 +100,14 @@ test("editing_locked_until_synced", async ({ browser, request }) => {
   const editor = p.locator(".bn-editor");
   await expect(editor).toHaveAttribute("contenteditable", "false");
   // Rien ne déverrouille l'éditeur tant que le serveur n'a pas répondu, et une frappe
-  // ne passe pas.
+  // ne passe pas : aucune trame d'écriture ne part.
   await p.waitForTimeout(1_000);
   await expect(editor).toHaveAttribute("contenteditable", "false");
   expect(await p.evaluate(() => window.__mementum?.synced)).toBe(false);
   await editor.click({ force: true });
   await p.keyboard.type("trop tôt");
+  await p.waitForTimeout(500);
+  expect(writes).toEqual([]);
 
   release();
   await expect(editor).toHaveAttribute("contenteditable", "true");
@@ -110,43 +116,37 @@ test("editing_locked_until_synced", async ({ browser, request }) => {
   expect(await getMmd(request, id)).not.toContain("trop tôt");
 });
 
-/** Nœud Yjs d'un type que BlockNote ne connaît pas (bloc d'une version plus récente, R4). */
-const FOREIGN_BLOCK =
-  '<block type="futureWidget" id="b_future01" ' +
-  'data="eyJhdHRycyI6eyJhIjoiMSJ9LCJjb250ZW50IjpbXSwiY2hpbGRyZW4iOltdfQ==" foreign=true/>';
+const BANNER =
+  "Une nouvelle version de Mementum est disponible. Recharge la page pour continuer à écrire.";
 
-test("stale_schema_is_read_only", async ({ browser, request }) => {
-  const { id } = await createPage(request, { title: `Schéma ${unique()}` });
-  await putMmd(request, id, `Écrit par le serveur\n\n${FOREIGN_BLOCK}\n`);
-  const before = await getMmd(request, id);
-  expect(before).toContain('type="futureWidget"');
-  const p = await newUser(browser);
-
-  // Le serveur annonce un schéma plus récent que celui du client.
+/** `/api/v1/info` annonce désormais un schéma plus récent que celui du client. */
+async function serverSchemaBumped(p: Page): Promise<void> {
   await p.route("**/api/v1/info", async (route) => {
     const response = await route.fetch();
     const info = (await response.json()) as { schemaVersion: number };
     await route.fulfill({ response, json: { ...info, schemaVersion: info.schemaVersion + 1 } });
   });
-  // Toute mise à jour envoyée par le client (message y-websocket « sync », sous-type
-  // « update ») serait une écriture.
-  const writes: number[][] = [];
+}
+
+test("stale_schema_is_read_only", async ({ browser, request, baseURL }) => {
+  const { id } = await createPage(request, { title: `Schéma ${unique()}` });
+  await putMmd(request, id, "Écrit par le serveur\n");
+  // Un bloc d'une version plus récente, écrit par un client Yjs (le MMD ne crée plus de
+  // nœud étranger, R33).
+  await injectForeignBlock(request, baseURL!, id);
+  const before = await getMmd(request, id);
+  expect(before).toContain('type="futureWidget"');
+  expect(before).toContain("foreign=true");
+  const p = await newUser(browser);
+  await serverSchemaBumped(p);
+  const writes = watchWrites(p);
   const sockets: URL[] = [];
   p.on("websocket", (ws) => {
-    if (!ws.url().includes("/sync/")) return;
-    sockets.push(new URL(ws.url()));
-    ws.on("framesent", ({ payload }) => {
-      const bytes = [...(typeof payload === "string" ? Buffer.from(payload) : payload)];
-      if (bytes[0] === 0 && bytes[1] === 2) writes.push(bytes);
-    });
+    if (ws.url().includes("/sync/")) sockets.push(new URL(ws.url()));
   });
 
   await p.goto(`/p/${id}`);
-  await expect(
-    p.getByText(
-      "Une nouvelle version de Mementum est disponible. Recharge la page pour continuer à écrire.",
-    ),
-  ).toBeVisible();
+  await expect(p.getByText(BANNER)).toBeVisible();
   await waitSynced(p);
   // Le client annonce toujours sa propre version de schéma (sans elle, schéma 0).
   expect(sockets.map((url) => url.searchParams.get("schema"))).toEqual([String(REGISTRY_VERSION)]);
@@ -154,6 +154,9 @@ test("stale_schema_is_read_only", async ({ browser, request }) => {
   await expect(editor).toContainText("Écrit par le serveur");
   await expect(editor).toHaveAttribute("contenteditable", "false");
   expect(await p.evaluate(() => window.__mementum!.readOnly)).toBe(true);
+  await expect(p.getByRole("textbox", { name: "Titre de la page" })).toHaveAttribute("readonly", "");
+  const sidebar = p.getByRole("navigation", { name: "Barre latérale" });
+  await expect(sidebar.getByRole("button", { name: "Nouvelle page" })).toBeDisabled();
   // Précondition (sinon ce test ne prouverait rien) : y-prosemirror a bien supprimé le nœud
   // qu'il ne sait pas construire, dans la copie locale de l'onglet.
   await expect.poll(() => fragmentXml(p)).not.toContain("futureWidget");
@@ -163,6 +166,46 @@ test("stale_schema_is_read_only", async ({ browser, request }) => {
   await p.waitForTimeout(1_000);
   // Ni la suppression ni la frappe n'ont quitté l'onglet.
   expect(await getMmd(request, id)).toBe(before);
+  expect(writes).toEqual([]);
+
+  // L'onglet reçoit tout, en direct : une écriture faite après son ouverture s'affiche.
+  await putMmd(request, id, "Écrit par le serveur\n\nAjout en direct\n");
+  await expect(editor).toContainText("Ajout en direct");
+  expect(writes).toEqual([]);
+});
+
+test("stale_schema_after_reconnect_is_read_only", async ({ browser, request }) => {
+  const { id } = await createPage(request, { title: `Mise à jour ${unique()}` });
+  const p = await openPage(browser, id);
+  const editor = p.locator(".bn-editor");
+  await editor.click();
+  await p.keyboard.type("Avant la mise à jour");
+  await expect.poll(() => getMmd(request, id)).toBe("Avant la mise à jour\n");
+  expect(await p.evaluate(() => window.__mementum!.readOnly)).toBe(false);
+
+  // Le serveur est mis à jour pendant que l'onglet est ouvert, puis la WebSocket se
+  // reconnecte.
+  await serverSchemaBumped(p);
+  const writes = watchWrites(p);
+  await p.evaluate(() => {
+    const { provider } = window.__mementum!;
+    provider.disconnect();
+    provider.connect();
+  });
+
+  await expect(p.getByText(BANNER)).toBeVisible();
+  await expect.poll(() => p.evaluate(() => window.__mementum?.readOnly)).toBe(true);
+  await waitSynced(p);
+  await expect(editor).toHaveAttribute("contenteditable", "false");
+  await expect(editor).toContainText("Avant la mise à jour");
+  await expect(p.getByRole("textbox", { name: "Titre de la page" })).toHaveAttribute("readonly", "");
+  const sidebar = p.getByRole("navigation", { name: "Barre latérale" });
+  await expect(sidebar.getByRole("button", { name: "Nouvelle page" })).toBeDisabled();
+
+  await editor.click({ force: true });
+  await p.keyboard.type("perdu en silence");
+  await p.waitForTimeout(1_000);
+  expect(await getMmd(request, id)).toBe("Avant la mise à jour\n");
   expect(writes).toEqual([]);
 });
 

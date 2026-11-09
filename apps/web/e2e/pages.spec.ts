@@ -1,6 +1,6 @@
 // Arbre de pages et persistance, depuis l'interface.
 import { expect, test } from "@playwright/test";
-import { createPage, getMmd, getTree, pageIdOf, unique, waitSynced } from "./helpers";
+import { createPage, getMmd, getTree, pageIdOf, putMmd, unique, waitSynced } from "./helpers";
 
 const UUID = /\/p\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -71,4 +71,23 @@ test("subpage_appears_in_tree", async ({ page, request }) => {
   await expect(page).toHaveURL(new RegExp(`/p/${parent.id}$`));
   await expect(title).toHaveValue(parentTitle);
   expect(await page.evaluate(() => (window as unknown as { __loaded?: boolean }).__loaded)).toBe(true);
+});
+
+test("foreign_mmd_block_survives_browser", async ({ page, request }) => {
+  // R33 : un bloc étranger écrit par MMD devient un bloc `unknown` de BlockNote, que le
+  // navigateur affiche et garde. En élément étranger, y-prosemirror le supprimait chez tous
+  // dès l'ouverture de la page.
+  const { id } = await createPage(request, { title: `Bloc inconnu ${unique()}` });
+  const block =
+    '<block type="futureWidget" id="b_future01" ' +
+    'data="eyJhdHRycyI6eyJhIjoiMSJ9LCJjb250ZW50IjpbXSwiY2hpbGRyZW4iOltdfQ=="';
+  await putMmd(request, id, `Avant\n\n${block} foreign=true/>\n\nAprès\n`);
+  const expected = `Avant\n\n${block}/>\n\nAprès\n`;
+  expect(await getMmd(request, id)).toBe(expected);
+
+  await page.goto(`/p/${id}`);
+  await waitSynced(page);
+  await expect(page.locator(".bn-editor")).toContainText("Bloc non pris en charge (futureWidget)");
+  await expect(page.locator(".bn-editor")).toContainText("Après");
+  expect(await getMmd(request, id)).toBe(expected);
 });

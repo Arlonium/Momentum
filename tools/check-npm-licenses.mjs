@@ -95,10 +95,25 @@ function satisfies(expression, ok) {
   return value;
 }
 
+/** Arrêt clair si la sortie de pnpm n'a plus la forme attendue. */
+function unexpected(detail) {
+  console.error(
+    "Licences npm : sortie de `pnpm licenses list --json` inattendue " +
+      `(${detail}). Attendu : un objet { licence: [{ name, versions | version, license }] }. ` +
+      "Le format de pnpm a peut-être changé : adapter tools/check-npm-licenses.mjs.",
+  );
+  process.exit(1);
+}
+
+const data = listing();
+if (data === null || typeof data !== "object" || Array.isArray(data)) unexpected("pas un objet");
+
 const refused = [];
 let count = 0;
-for (const [expression, packages] of Object.entries(listing())) {
+for (const [expression, packages] of Object.entries(data)) {
+  if (!Array.isArray(packages)) unexpected(`« ${expression} » n'est pas une liste`);
   for (const pkg of packages) {
+    if (typeof pkg?.name !== "string") unexpected(`paquet sans nom sous « ${expression} »`);
     count += 1;
     const extra = EXCEPTIONS.get(pkg.name);
     const ok = extra ? new Set([...ALLOWED, ...extra]) : ALLOWED;
@@ -108,7 +123,10 @@ for (const [expression, packages] of Object.entries(listing())) {
     } catch {
       accepted = false;
     }
-    if (!accepted) refused.push(`${pkg.name}@${pkg.versions.join(", ")} : ${pkg.license ?? expression}`);
+    if (!accepted) {
+      const versions = pkg.versions?.join(", ") ?? pkg.version ?? "?";
+      refused.push(`${pkg.name}@${versions} : ${pkg.license ?? expression}`);
+    }
   }
 }
 

@@ -39,6 +39,9 @@ Tu reprends **Mementum**, un espace de travail open source façon Notion, auto-h
 - **SQLite + JSON** : une requête doit reprendre **l'expression exacte** de l'index d'expression (un `CAST` le rend inutilisable : 13 ms → 707 ms). Rollups et formules toujours matérialisés.
 - **Révision pour les agents** : hash de l'instantané Yjs (vecteur d'état **et** suppressions), pas du seul vecteur d'état.
 - **Lecture seule côté client** : `editable = false` ne suffit pas. y-prosemirror supprime un nœud inconnu dès l'affichage, même sans frappe, et la suppression part au serveur. Un onglet d'un autre schéma lie donc son éditeur à une copie locale du document, qui reçoit tout et ne renvoie rien (`apps/web/src/editor/collab.ts`, e2e `stale_schema_is_read_only`).
+- **Serveur mis à jour pendant qu'un onglet est ouvert** (R35) : la version de schéma n'est pas lue qu'au chargement. Chaque WebSocket de synchro d'une session modifiable relit `/api/v1/info` **avant** de s'ouvrir (`editor/schemaGate.ts`) ; si elle diffère, rien ne part, et l'application passe en lecture seule pour de bon, sur des `Y.Doc` neufs (jamais l'ancien document, qui porte des éditions locales), sans titre, création de page ni présence (e2e `stale_schema_after_reconnect_is_read_only`). Sans cela, le serveur ignore en silence tout ce que tape l'onglet.
+- **Verrou de l'éditeur** (R34) : jusqu'à la première synchro seulement, pas à chaque coupure, pour qu'on puisse écrire hors ligne.
+- **Élément étranger écrit par MMD** (R33) : `PUT /mmd` écrit un `<block … foreign=true/>` en bloc custom `unknown` de BlockNote ; recréé en élément étranger, y-prosemirror le supprimait chez tous dès l'ouverture de la page.
 - **`@blocknote/code-block`** : ses `codeBlockOptions` mettent `javascript` en langue par défaut ; le registre (et BlockNote) disent `text`. `schema.tsx` la remet à `text`, et `registry_matches_blocknote` le vérifie.
 - **Shell (Git Bash sous Windows)** : pas de backticks dans un heredoc non protégé (`<<EOF`), ils sont exécutés. Utilise `<<'EOF'`, ou écris les fichiers avec l'outil d'écriture.
 - **Fins de ligne** : `.gitattributes` impose LF. Les fixtures MMD sont comparées octet pour octet au rendu, et une extraction en CRLF (Git pour Windows règle `core.autocrlf=true` par défaut) fait échouer `fixture_is_canonical`.
@@ -55,12 +58,12 @@ Structure du dépôt (conception, §8) :
 
 Commandes (à la racine ; workspace pnpm `apps/*` et `packages/*`) :
 - Rust : `cargo test --workspace` ;
-- web : `corepack pnpm install`, puis `corepack pnpm -C apps/web test` (Vitest : `registry_matches_blocknote` compare le schéma BlockNote au registre), `corepack pnpm -C apps/web typecheck`, `node tools/check-npm-licenses.mjs` ;
-- e2e : `corepack pnpm -C apps/web exec playwright install chromium` une fois, puis `corepack pnpm e2e`. Playwright compile et lance `mementum serve` sur un dossier de données temporaire, puis Vite.
+- web : `corepack pnpm install`, puis `corepack pnpm -C apps/web test` (Vitest : `registry_matches_blocknote` compare le schéma BlockNote au registre), `corepack pnpm -C apps/web typecheck` (`tsconfig.json` pour `src`, sans les types de Node ; `tsconfig.node.json` pour `e2e/` et les fichiers de configuration), `node tools/check-npm-licenses.mjs` ;
+- e2e : `corepack pnpm -C apps/web exec playwright install chromium` une fois, puis `corepack pnpm e2e`. Playwright compile et lance `mementum serve` sur un dossier de données temporaire, puis Vite. Sous Windows, un `mementum` déjà lancé depuis `target/debug` empêche la recompilation (« Accès refusé ») : sans l'arrêter, compiler ailleurs avec `CARGO_TARGET_DIR=target/e2e`.
 
 - **Ports** : `MEMENTUM_E2E_WEB_PORT` (défaut 5173) et `MEMENTUM_E2E_API_PORT` (défaut 8080), lus par Vite et Playwright. Les e2e ne réutilisent jamais un serveur (`reuseExistingServer: false`) et s'arrêtent si un port est pris, en le nommant. Sur le poste de développement, un autre projet occupe souvent 5173 : `MEMENTUM_E2E_WEB_PORT=5174`. Ne jamais arrêter un processus qu'on n'a pas lancé.
 - **Mandataire Vite** : pas de `changeOrigin` vers le serveur, qui refuse un `Host` hors de la boucle locale (`421 bad_host`, R31).
-- **`window.__mementum`** (`editor`, `provider`, `doc`, `synced`, `readOnly`) n'existe qu'en développement : les e2e s'en servent.
+- **`window.__mementum`** (`editor`, `provider`, `doc`, `synced`, `readOnly` ; type dans `src/editor/debug.ts`) n'existe qu'en développement : les e2e s'en servent. `synced` dit que la première synchro est faite et reste vrai après une coupure : un test qui attend une resynchro lit `provider.synced`. Une session recréée (passage en lecture seule) pose un nouvel objet.
 - **pnpm** absent du PATH : `corepack pnpm …` (les scripts de la racine passent déjà par corepack).
 
 Prototype de la phase 0 (`spike/`, voir le README) :

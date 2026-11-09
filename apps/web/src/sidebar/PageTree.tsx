@@ -9,6 +9,8 @@ type Props = {
   /** `null` : l'arbre n'est pas encore chargé. */
   nodes: PageNode[] | null;
   activeId: string | null;
+  /** Schéma du serveur différent (R35) : aucune création de page. */
+  readOnly: boolean;
   onCreate: (parentId: string | null) => void;
   /** Erreur de la dernière action (création), en français. */
   notice: string | null;
@@ -32,7 +34,7 @@ function childrenByParent(nodes: PageNode[]): Map<string | null, PageNode[]> {
   return map;
 }
 
-export function PageTree({ nodes, activeId, onCreate, notice }: Props) {
+export function PageTree({ nodes, activeId, readOnly, onCreate, notice }: Props) {
   const children = useMemo(() => childrenByParent(nodes ?? []), [nodes]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
@@ -78,15 +80,17 @@ export function PageTree({ nodes, activeId, onCreate, notice }: Props) {
             <PageIcon />
             <span className="tree-title">{node.title}</span>
           </a>
-          <button
-            type="button"
-            className="tree-add"
-            aria-label={`Ajouter une sous-page à « ${node.title} »`}
-            title="Ajouter une sous-page"
-            onClick={() => create(node.id)}
-          >
-            <PlusIcon />
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              className="tree-add"
+              aria-label={`Ajouter une sous-page à « ${node.title} »`}
+              title="Ajouter une sous-page"
+              onClick={() => create(node.id)}
+            >
+              <PlusIcon />
+            </button>
+          )}
         </div>
         {kids.length > 0 && open && <ul className="tree-children">{kids.map(renderItem)}</ul>}
       </li>
@@ -102,7 +106,13 @@ export function PageTree({ nodes, activeId, onCreate, notice }: Props) {
         </span>
         <span>Mementum</span>
       </div>
-      <button type="button" className="mm-side-action" onClick={() => create(null)}>
+      <button
+        type="button"
+        className="mm-side-action"
+        disabled={readOnly}
+        title={readOnly ? "Lecture seule : recharge la page pour écrire" : undefined}
+        onClick={() => create(null)}
+      >
         <PlusIcon size={16} />
         <span>Nouvelle page</span>
       </button>

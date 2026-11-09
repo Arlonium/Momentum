@@ -2,6 +2,7 @@
 // `/sync/{id}` (protocole y-websocket), et l'identité d'invité affichée près du curseur.
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
+import { schemaGatedWebSocket, type SchemaCheck } from "./schemaGate";
 import { CLIENT_SCHEMA_VERSION } from "./schema";
 
 /** Nom du fragment partagé, celui que le serveur lit et écrit (`mementum-crdt`). */
@@ -39,12 +40,20 @@ export function guest(): Guest {
 export type SyncStatus = "connecting" | "connected" | "disconnected";
 
 /**
+ * Mode d'une session : en écriture, chaque connexion n'ouvre sa WebSocket qu'après `check`
+ * (version de schéma relue, R35) ; en lecture seule, l'onglet ne fait que recevoir.
+ */
+export type SessionMode = { readOnly: false; check: SchemaCheck } | { readOnly: true };
+
+/**
  * Une page ouverte. `doc` est le document lié à l'éditeur ; `provider` le synchronise.
  *
  * En lecture seule (schéma différent de celui du serveur), l'éditeur est lié à une copie
  * locale qui reçoit tout du serveur et ne lui renvoie rien : y-prosemirror supprime les
  * nœuds qu'il ne sait pas construire, et ces suppressions ne doivent jamais quitter
- * l'onglet (Review Focus 2). Le document du serveur reste `provider.doc`.
+ * l'onglet (Review Focus 2). Le document du serveur reste `provider.doc`. Les deux
+ * `Y.Doc` sont neufs : une session qui passe en lecture seule n'en réutilise aucun, car
+ * l'ancien document porte déjà des éditions et des suppressions locales.
  */
 export class CollabSession {
   readonly pageId: string;
@@ -58,16 +67,19 @@ export class CollabSession {
   private readonly listeners = new Set<() => void>();
   private readonly cleanups: (() => void)[] = [];
 
-  constructor(pageId: string, readOnly: boolean) {
+  constructor(pageId: string, mode: SessionMode) {
     this.pageId = pageId;
-    this.readOnly = readOnly;
+    this.readOnly = mode.readOnly;
     const shared = new Y.Doc();
     // Sans `schema`, le serveur traiterait la connexion comme celle du schéma 0, en
     // lecture seule (R30) : on la donne toujours.
     this.provider = new WebsocketProvider(syncUrl(), pageId, shared, {
       params: { schema: String(CLIENT_SCHEMA_VERSION) },
+      ...(mode.readOnly ? {} : { WebSocketPolyfill: schemaGatedWebSocket(mode.check) }),
     });
-    if (readOnly) {
+    if (mode.readOnly) {
+      // Ni curseur ni présence : rien de cet onglet n'est annoncé.
+      this.provider.awareness.setLocalState(null);
       const local = new Y.Doc();
       const mirror = (update: Uint8Array) => Y.applyUpdate(local, update, this.provider);
       shared.on("update", mirror);

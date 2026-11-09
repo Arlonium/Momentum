@@ -54,6 +54,9 @@ export function useLinkInterception(): void {
       if (!(anchor instanceof HTMLAnchorElement) || anchor.target || anchor.hasAttribute("download")) {
         return;
       }
+      // Un lien dans du texte modifiable appartient à l'éditeur (curseur, barre de lien) ;
+      // seul un îlot non modifiable, comme le cadre d'un `pageLink`, navigue.
+      if (anchor.closest("[contenteditable]")?.getAttribute("contenteditable") === "true") return;
       const url = new URL(anchor.href);
       if (url.origin !== location.origin || parseRoute(url.pathname).name === "notFound") return;
       event.preventDefault();
