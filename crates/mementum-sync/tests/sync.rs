@@ -585,3 +585,120 @@ async fn oversized_awareness_is_ignored() {
         "non gardé"
     );
 }
+
+/// Genre d'un message y-websocket du serveur (un seul par message WebSocket).
+fn kind(message: &[u8]) -> &'static str {
+    use yrs::sync::MessageReader;
+    use yrs::updates::decoder::DecoderV1;
+    let mut decoder = DecoderV1::from(message);
+    let read: Vec<_> = MessageReader::new(&mut decoder)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        read.len(),
+        1,
+        "un message y-websocket par message WebSocket"
+    );
+    match &read[0] {
+        Message::Sync(SyncMessage::SyncStep1(_)) => "étape 1",
+        Message::Sync(SyncMessage::SyncStep2(_)) => "étape 2",
+        Message::Sync(SyncMessage::Update(_)) => "mise à jour",
+        Message::Awareness(_) => "awareness",
+        _ => "autre",
+    }
+}
+
+/// Une connexion en mémoire sur la page, avec un état d'awareness connu :
+/// son accueil (étape 1, awareness) est lu, plus rien ne doit arriver.
+async fn quiet_connection(
+    f: &Fixture,
+    what: &str,
+) -> (
+    Client,
+    tokio::task::JoinHandle<Result<(), SyncError>>,
+    MemorySocket,
+) {
+    let other = f.client().await;
+    other.set_awareness(r#"{"user":"autre"}"#);
+    other.resync();
+    assert!(other.wait_until(WAIT, |c| c.step2_count() >= 2).await);
+    let (server_end, mut client_end) = memory_socket(64);
+    let serving = tokio::spawn(
+        f.hub
+            .clone()
+            .serve_connection(f.page, SCHEMA_VERSION, server_end),
+    );
+    for expected in ["étape 1", "awareness"] {
+        let hello = tokio::time::timeout(WAIT, client_end.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kind(&hello), expected, "accueil ({what})");
+    }
+    (other, serving, client_end)
+}
+
+async fn next_kind(socket: &mut MemorySocket) -> &'static str {
+    let message = tokio::time::timeout(WAIT, socket.next())
+        .await
+        .expect("une réponse")
+        .expect("connexion ouverte");
+    kind(&message)
+}
+
+#[tokio::test]
+async fn many_sync_steps_in_one_message_get_one_answer() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let (_other, _serving, mut socket) = quiet_connection(&f, "étapes 1").await;
+
+    // 10 000 étapes 1 (vecteur d'état vide) dans un seul message, puis une
+    // demande d'awareness seule, qui sert de barrière.
+    let step1 = [0u8, 0, 1, 0];
+    let batch: Vec<u8> = step1.iter().copied().cycle().take(4 * 10_000).collect();
+    futures::SinkExt::send(&mut socket, batch).await.unwrap();
+    futures::SinkExt::send(&mut socket, vec![3]).await.unwrap();
+
+    // Une seule étape 2, puis la réponse à la barrière : rien d'autre.
+    assert_eq!(next_kind(&mut socket).await, "étape 2");
+    assert_eq!(next_kind(&mut socket).await, "awareness");
+}
+
+#[tokio::test]
+async fn many_awareness_queries_in_one_message_get_one_answer() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let (_other, _serving, mut socket) = quiet_connection(&f, "awareness").await;
+
+    // 10 000 demandes d'awareness dans un seul message, puis une étape 1
+    // seule, qui sert de barrière.
+    futures::SinkExt::send(&mut socket, vec![3; 10_000])
+        .await
+        .unwrap();
+    futures::SinkExt::send(&mut socket, vec![0, 0, 1, 0])
+        .await
+        .unwrap();
+
+    assert_eq!(next_kind(&mut socket).await, "awareness");
+    assert_eq!(next_kind(&mut socket).await, "étape 2");
+}
+
+#[tokio::test]
+async fn replies_beyond_max_queue_bytes_close_the_connection() {
+    // L'état de la page dépasse à lui seul la borne : l'étape 2 passe seule,
+    // la réponse d'awareness qui la suit dans le même lot ferme la connexion.
+    let f = Fixture::new(SyncConfig {
+        max_queue_bytes: 256,
+        ..SyncConfig::default()
+    })
+    .await;
+    f.write_mmd(&format!("{}\n", "x".repeat(1024))).await;
+    let (_other, serving, mut socket) = quiet_connection(&f, "borne").await;
+
+    let mut batch = vec![0u8, 0, 1, 0];
+    batch.push(3);
+    futures::SinkExt::send(&mut socket, batch).await.unwrap();
+    let served = tokio::time::timeout(WAIT, serving)
+        .await
+        .expect("la connexion est fermée")
+        .unwrap();
+    assert!(served.is_ok(), "{served:?}");
+}

@@ -143,6 +143,39 @@ pub(crate) enum Outcome {
     Close,
 }
 
+/// Réponses à un même message, bornées en octets comme la file de la
+/// connexion : `max_bytes` plus une réponse (une étape 2 plus grosse que la
+/// borne, l'état complet d'une page, passe donc seule). Ruling R29.
+struct Replies {
+    messages: Vec<Vec<u8>>,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+impl Replies {
+    fn new(max_bytes: usize) -> Replies {
+        Replies {
+            messages: Vec::new(),
+            bytes: 0,
+            max_bytes,
+        }
+    }
+
+    /// `false` : la borne est déjà atteinte, la connexion est à fermer.
+    fn take(&mut self, reply: Vec<u8>) -> bool {
+        if self.bytes >= self.max_bytes {
+            return false;
+        }
+        self.bytes += reply.len();
+        self.messages.push(reply);
+        true
+    }
+
+    fn into_inner(self) -> Vec<Vec<u8>> {
+        self.messages
+    }
+}
+
 /// Le document n'a pas pu être rechargé : l'acteur s'arrête.
 struct Broken;
 
@@ -407,12 +440,24 @@ impl Actor {
             Some(c) if !c.closing => c.writable,
             _ => return Ok(Outcome::Close),
         };
-        let mut replies = Vec::new();
+        // Ruling R29 : les réponses d'un même message sont bornées avant
+        // d'atteindre la file de la connexion. Une seule étape 2 et une seule
+        // réponse d'awareness complète par message (un client légitime n'envoie
+        // jamais deux étapes 1 dans un message), et un cumul en octets.
+        let mut replies = Replies::new(self.cfg.max_queue_bytes);
+        let mut answered_sync = false;
+        let mut answered_awareness = false;
         for message in messages {
             match message {
+                ClientMessage::SyncStep1(_) if answered_sync => {}
                 ClientMessage::SyncStep1(state_vector) => {
+                    answered_sync = true;
                     match self.page.encode_diff(&state_vector) {
-                        Ok(diff) => replies.push(protocol::sync_step2(&diff)),
+                        Ok(diff) => {
+                            if !replies.take(protocol::sync_step2(&diff)) {
+                                return Ok(self.too_many_replies(conn));
+                            }
+                        }
                         Err(error) => {
                             tracing::warn!(node_id = %self.id.node_id, conn, %error, "étape 1 illisible : connexion fermée");
                             return Ok(Outcome::Close);
@@ -432,10 +477,23 @@ impl Actor {
                         return Ok(Outcome::Close);
                     }
                 }
-                ClientMessage::AwarenessQuery => replies.extend(self.awareness_state()),
+                ClientMessage::AwarenessQuery if answered_awareness => {}
+                ClientMessage::AwarenessQuery => {
+                    answered_awareness = true;
+                    if let Some(state) = self.awareness_state()
+                        && !replies.take(state)
+                    {
+                        return Ok(self.too_many_replies(conn));
+                    }
+                }
             }
         }
-        Ok(Outcome::Reply(replies))
+        Ok(Outcome::Reply(replies.into_inner()))
+    }
+
+    fn too_many_replies(&self, conn: ConnId) -> Outcome {
+        tracing::warn!(node_id = %self.id.node_id, conn, "réponses d'un message au-delà de max_queue_bytes : connexion fermée");
+        Outcome::Close
     }
 
     /// Mise à jour d'un client : appliquer, dédoublonner, écrire, puis

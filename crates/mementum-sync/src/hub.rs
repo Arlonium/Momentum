@@ -275,8 +275,14 @@ impl Outbox {
         if self.bytes.load(Ordering::Relaxed) >= self.max_bytes {
             return false;
         }
-        self.bytes.fetch_add(message.len(), Ordering::Relaxed);
-        self.tx.try_send(message).is_ok()
+        let len = message.len();
+        self.bytes.fetch_add(len, Ordering::Relaxed);
+        if self.tx.try_send(message).is_err() {
+            // Le message n'est pas en file : le compte reste celui de la file.
+            self.bytes.fetch_sub(len, Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 
     fn sent(&self, len: usize) {
