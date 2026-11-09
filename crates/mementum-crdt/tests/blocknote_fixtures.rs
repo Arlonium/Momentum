@@ -25,13 +25,16 @@ fn mmd_of(state: &[u8]) -> String {
 }
 
 /// Le MMD attendu, écrit par le serveur dans une page neuve, donne l'arbre
-/// Yjs de BlockNote. Les ids diffèrent (le MMD n'en porte pas, sauf celui du
-/// bloc `unknown`) : ils sont omis des deux côtés.
+/// Yjs de BlockNote. Les ids des blocs diffèrent (le MMD n'en porte pas,
+/// sauf celui du bloc `unknown`) : ils sont omis des deux côtés. Les autres
+/// `id` (celui d'une mention) sont comparés.
 fn assert_writes_like_blocknote(mmd: &str, blocknote: &[u8]) {
     let (page, _) = PageDoc::new_page();
     page.write_blocks(&parse(mmd).expect("MMD attendu lisible"))
         .expect("écriture");
-    let no_ids = |_: &str, key: &str, _: &yrs::Any| key == "id";
+    let no_ids = |tag: &str, key: &str, _: &yrs::Any| {
+        key == "id" && matches!(tag, "blockContainer" | "columnList" | "column")
+    };
     let theirs = dump(blocknote, &no_ids);
     assert!(theirs.len() > 50, "fixture lue en entier");
     assert_eq!(dump(&page.encode_state(), &no_ids), theirs);
