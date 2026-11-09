@@ -8,9 +8,12 @@ license.workspace = true
 publish = false
 
 [features]
+# `ws::WsBytes` : la WebSocket d'axum vue comme le flux de messages binaires qu'attend
+# `Hub::serve_connection` (serveur de la Task 6 et testkit).
+axum = ["dep:axum"]
 # Outils de test partagés avec les autres crates (Ruling R6) : client Yjs en yrs, petit serveur
 # axum qui monte `Hub::serve_connection`, socket en mémoire.
-testkit = ["dep:axum", "dep:tokio-tungstenite", "tokio/net"]
+testkit = ["axum", "axum/http1", "axum/query", "dep:tokio-tungstenite", "tokio/net"]
 
 [dependencies]
 futures.workspace = true
@@ -20,10 +23,12 @@ mementum-schema.workspace = true
 mementum-store.workspace = true
 # États d'awareness vérifiés avant d'être relayés (les navigateurs les relisent en JSON).
 serde_json.workspace = true
-tokio ={ workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+# Fins anormales des connexions et de l'acteur (niveau `warn` ou `error`).
+tracing.workspace = true
 uuid.workspace = true
 yrs.workspace = true
-axum = { workspace = true, optional = true, features = ["http1", "query", "tokio", "ws"] }
+axum = { workspace = true, optional = true, features = ["ws"] }
 tokio-tungstenite = { workspace = true, optional = true }
 
 [dev-dependencies]

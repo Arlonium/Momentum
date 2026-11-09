@@ -29,6 +29,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Même version que celle d'axum 0.8 (une seule version de tungstenite dans l'arbre).
 tokio-tungstenite = "0.29.0"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 uuid = { version = "1.29", features = ["v7"] }
 # `sync` : `Awareness` et les observateurs doivent pouvoir passer d'une tâche tokio à l'autre.
 # Version épinglée : `crates/mementum-crdt/src/guard.rs` relit le format des mises à jour de

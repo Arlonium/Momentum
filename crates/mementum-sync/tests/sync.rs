@@ -1,6 +1,6 @@
 //! Synchronisation entre clients : convergence, page inconnue, déplacements
-//! concurrents, client en retard, mises à jour refusées, awareness, acteurs
-//! qui s'arrêtent et repartent.
+//! concurrents, client en retard, mises à jour refusées, bornes mémoire,
+//! awareness, acteurs qui s'arrêtent et repartent.
 
 mod common;
 
@@ -14,7 +14,9 @@ use mementum_schema::SCHEMA_VERSION;
 use mementum_sync::{SyncConfig, SyncError};
 use tokio::task::JoinSet;
 use uuid::Uuid;
-use yrs::{Doc, OffsetKind, Options, Transact, Xml, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+use yrs::sync::{Message, SyncMessage};
+use yrs::updates::encoder::Encode;
+use yrs::{Text, Transact, Xml, XmlElementPrelim, XmlFragment, XmlTextPrelim};
 
 #[tokio::test]
 async fn two_clients_converge() {
@@ -174,10 +176,7 @@ fn deep_update() -> Vec<u8> {
     std::thread::Builder::new()
         .stack_size(256 << 20)
         .spawn(|| {
-            let doc = Doc::with_options(Options {
-                offset_kind: OffsetKind::Utf16,
-                ..Options::default()
-            });
+            let doc = new_doc();
             let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
             let mut txn = doc.transact_mut();
             let mut group = fragment.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
@@ -373,4 +372,216 @@ async fn churning_actors_never_diverge() {
     assert_eq!(live.len(), 1);
     assert!(text(&live).ends_with("++++++++++"), "{:?}", text(&live));
     assert_eq!(stored_page(&f.store, f.page).await.read_blocks(), live);
+}
+
+#[tokio::test]
+async fn refused_update_is_never_served() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let writer = f.client().await;
+
+    // u1 tape « a », u2 tape « b » après : u2 dépend de u1.
+    let doc = detached(&writer);
+    let paragraph = first_content(&doc);
+    let (u1, typed) = {
+        let mut txn = doc.transact_mut();
+        let typed = paragraph.insert(&mut txn, 0, XmlTextPrelim::new("a"));
+        (txn.encode_update_v1(), typed)
+    };
+    let u2 = {
+        let mut txn = doc.transact_mut();
+        typed.insert(&mut txn, 1, "b");
+        txn.encode_update_v1()
+    };
+
+    // u2 seule : refusée après application (yrs l'a gardée en attente), le
+    // client fautif est fermé et le document rechargé (Ruling R22).
+    let hostile = f.client().await;
+    hostile.send_update(&u2);
+    assert!(hostile.wait_until(WAIT, |c| c.is_closed()).await);
+
+    // Un nouveau venu ne reçoit pas u2, même en attente.
+    let newcomer = f.client().await;
+    assert!(
+        newcomer.page().is_ok(),
+        "rien en attente chez le nouveau venu"
+    );
+    assert!(!text(&newcomer.blocks()).contains('b'));
+
+    // u1 arrive : u2, oubliée, ne s'intègre pas avec elle.
+    writer.send_update(&u1);
+    writer.resync();
+    assert!(writer.wait_until(WAIT, |c| c.step2_count() >= 2).await);
+    let live = f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(text(&live), "a");
+    assert_eq!(stored_page(&f.store, f.page).await.read_blocks(), live);
+    assert!(
+        newcomer
+            .wait_until(WAIT, |c| text(&c.blocks()) == "a")
+            .await
+    );
+}
+
+#[tokio::test]
+async fn lagging_behind_the_broadcast_closes_the_connection() {
+    let f = Fixture::new(SyncConfig {
+        broadcast_capacity: 4,
+        ..SyncConfig::default()
+    })
+    .await;
+    let batcher = f.client().await;
+
+    // Six frappes envoyées en un seul message WebSocket : l'acteur les écrit
+    // et les diffuse pendant que la connexion attend sa réponse. Ses propres
+    // échos débordent sa diffusion (capacité 4) : `RecvError::Lagged`.
+    let doc = detached(&batcher);
+    let paragraph = first_content(&doc);
+    let (first, typed) = {
+        let mut txn = doc.transact_mut();
+        let typed = paragraph.insert(&mut txn, 0, XmlTextPrelim::new("1"));
+        (txn.encode_update_v1(), typed)
+    };
+    let mut batch = Message::Sync(SyncMessage::Update(first)).encode_v1();
+    for (i, c) in "23456".chars().enumerate() {
+        let mut txn = doc.transact_mut();
+        typed.insert(&mut txn, i as u32 + 1, &c.to_string());
+        let update = txn.encode_update_v1();
+        batch.extend(Message::Sync(SyncMessage::Update(update)).encode_v1());
+    }
+    batcher.send_raw(batch);
+    assert!(
+        batcher.wait_until(WAIT, |c| c.is_closed()).await,
+        "la connexion en retard est fermée"
+    );
+
+    // Ce qu'elle a envoyé est écrit, et un nouveau venu le reçoit.
+    let newcomer = f.client().await;
+    assert_eq!(text(&newcomer.blocks()), "123456");
+    assert_eq!(
+        text(&stored_page(&f.store, f.page).await.read_blocks()),
+        "123456"
+    );
+}
+
+#[tokio::test]
+async fn oversized_message_closes_its_author() {
+    let f = Fixture::new(SyncConfig {
+        max_message_bytes: 4096,
+        ..SyncConfig::default()
+    })
+    .await;
+    let id = f.ids().await[0].clone();
+    let a = f.client().await;
+    let b = f.client().await;
+
+    // Un message valide (4 097 demandes d'awareness), mais trop gros : la
+    // taille est contrôlée avant tout décodage.
+    let (server_end, mut author) = memory_socket(8);
+    let serving = tokio::spawn(
+        f.hub
+            .clone()
+            .serve_connection(f.page, SCHEMA_VERSION, server_end),
+    );
+    assert!(
+        tokio::time::timeout(WAIT, author.next())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    futures::SinkExt::send(&mut author, vec![3; 4097])
+        .await
+        .unwrap();
+    let served = tokio::time::timeout(WAIT, serving)
+        .await
+        .expect("l'auteur du message trop gros est fermé")
+        .unwrap();
+    assert!(served.is_ok(), "{served:?}");
+
+    // Par le réseau aussi.
+    let big = f.client().await;
+    big.send_raw(vec![3; 5000]);
+    assert!(big.wait_until(WAIT, |c| c.is_closed()).await);
+
+    // Les autres continuent.
+    a.type_text(&id, "ok");
+    assert!(b.wait_until(WAIT, |c| text(&c.blocks()) == "ok").await);
+    assert!(!a.is_closed() && !b.is_closed());
+}
+
+#[tokio::test]
+async fn queue_over_max_bytes_closes_the_connection() {
+    // Le nombre de messages en retard n'est pas en cause (1024) : les octets.
+    let f = Fixture::new(SyncConfig {
+        max_queue_bytes: 8 * 1024,
+        ..SyncConfig::default()
+    })
+    .await;
+    let id = f.ids().await[0].clone();
+    let writer = f.client().await;
+
+    let (server_end, mut stalled) = memory_socket(0);
+    let serving = tokio::spawn(
+        f.hub
+            .clone()
+            .serve_connection(f.page, SCHEMA_VERSION, server_end),
+    );
+    assert!(
+        tokio::time::timeout(WAIT, stalled.next())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let chunk = "x".repeat(1024);
+    for _ in 0..20 {
+        writer.type_text(&id, &chunk);
+    }
+    let served = tokio::time::timeout(WAIT, serving)
+        .await
+        .expect("le client dont la file dépasse max_queue_bytes est fermé")
+        .unwrap();
+    assert!(served.is_ok(), "{served:?}");
+    assert!(!writer.is_closed());
+    // Tout est écrit. (Un nouveau venu ne tiendrait pas dans une file de
+    // 8 Kio : l'état complet de la page en fait 20.)
+    writer.resync();
+    assert!(writer.wait_until(WAIT, |c| c.step2_count() >= 2).await);
+    assert_eq!(
+        text(&stored_page(&f.store, f.page).await.read_blocks()),
+        chunk.repeat(20)
+    );
+}
+
+#[tokio::test]
+async fn oversized_awareness_is_ignored() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let a = f.client().await;
+    let b = f.client().await;
+    let w = f.client().await;
+    let a_id = a.client_id();
+
+    // Un état de plus de 64 Kio : ni gardé, ni relayé, sans fermer la connexion.
+    a.set_awareness(&format!(r#"{{"pad":"{}"}}"#, "x".repeat(70 * 1024)));
+    a.resync();
+    assert!(a.wait_until(WAIT, |c| c.step2_count() >= 2).await);
+    assert!(!a.is_closed());
+
+    // Les diffusions arrivent dans l'ordre : l'état de W arrive après celui
+    // de A, s'il avait été relayé.
+    w.set_awareness(r#"{"user":"W"}"#);
+    let w_id = w.client_id();
+    assert!(
+        b.wait_until(WAIT, |c| c.awareness_states().contains_key(&w_id))
+            .await
+    );
+    assert!(!b.awareness_states().contains_key(&a_id), "non relayé");
+    let newcomer = f.client().await;
+    assert!(
+        newcomer
+            .wait_until(WAIT, |c| c.awareness_states().contains_key(&w_id))
+            .await
+    );
+    assert!(
+        !newcomer.awareness_states().contains_key(&a_id),
+        "non gardé"
+    );
 }

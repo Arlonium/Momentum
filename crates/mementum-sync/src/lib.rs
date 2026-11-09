@@ -20,19 +20,31 @@
 //! - une mise à jour refusée par le document n'est ni gardée ni diffusée :
 //!   l'acteur recharge son document depuis le store et ferme la connexion
 //!   fautive (Rulings R17, R22) ; si c'est le store qui n'a pas pu l'écrire, il
-//!   recharge de même et ferme toutes les connexions (Ruling R21).
+//!   recharge de même et ferme toutes les connexions (Ruling R21) ;
+//! - **bornes mémoire** (Ruling R27) : un message reçu ne dépasse pas
+//!   `max_message_bytes`, la file d'une connexion ni `max_queue_bytes` ni
+//!   `broadcast_capacity` messages, les diffusions sont partagées entre les
+//!   files, un état d'awareness ne dépasse pas 64 Kio ;
+//! - une page **sans document** reçoit le sien au premier chargement de son
+//!   acteur (Ruling R28).
+//!
+//! La feature `axum` expose `ws::WsBytes`, qui ramène la WebSocket d'axum
+//! au flux attendu par [`Hub::serve_connection`].
 
 mod actor;
 mod hub;
 mod protocol;
 #[cfg(feature = "testkit")]
 pub mod testkit;
+#[cfg(feature = "axum")]
+pub mod ws;
 
 use std::fmt;
 use std::time::Duration;
 
 use mementum_crdt::CrdtError;
 use mementum_store::StoreError;
+use yrs::{Doc, OffsetKind, Options};
 
 pub use hub::Hub;
 
@@ -48,6 +60,12 @@ pub struct SyncConfig {
     pub snapshot_every: u64,
     /// L'acteur d'une page s'arrête après ce délai sans connexion ni demande.
     pub idle_close: Duration,
+    /// Taille maximale d'un message reçu d'un client, contrôlée avant tout
+    /// décodage : au-delà, la connexion est fermée (Ruling R27).
+    pub max_message_bytes: usize,
+    /// Octets qu'une connexion peut avoir en attente vers sa socket : au-delà,
+    /// elle est fermée comme un client en retard (Ruling R27).
+    pub max_queue_bytes: usize,
 }
 
 impl Default for SyncConfig {
@@ -56,6 +74,8 @@ impl Default for SyncConfig {
             broadcast_capacity: 1024,
             snapshot_every: 500,
             idle_close: Duration::from_secs(30),
+            max_message_bytes: 16 << 20,
+            max_queue_bytes: 64 << 20,
         }
     }
 }
@@ -108,4 +128,13 @@ impl From<CrdtError> for SyncError {
     fn from(e: CrdtError) -> Self {
         SyncError::Crdt(e)
     }
+}
+
+/// Un document yrs dont les positions comptent en UTF-16, comme Yjs dans le
+/// navigateur.
+pub(crate) fn utf16_doc() -> Doc {
+    Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    })
 }

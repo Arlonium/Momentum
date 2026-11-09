@@ -7,6 +7,10 @@
 //! diffusée ; une mise à jour refusée ou non écrite fait recharger le document
 //! depuis le store. D'où une compaction sûre : l'instantané pris entre deux
 //! commandes couvre exactement les mises à jour écrites jusqu'à son `seq`.
+//!
+//! Chaque fin anormale (mise à jour refusée, panne du store, document
+//! impossible à charger, compaction en échec, awareness refusée) est
+//! journalisée par `tracing`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
@@ -17,9 +21,9 @@ use mementum_store::{DocState, Store, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
+use yrs::ClientID;
 use yrs::sync::{Awareness, AwarenessUpdate};
 use yrs::updates::encoder::Encode;
-use yrs::{ClientID, Doc, OffsetKind, Options};
 
 use crate::hub::Hub;
 use crate::protocol::{self, ClientMessage, EMPTY_UPDATE};
@@ -34,6 +38,10 @@ pub(crate) type Commands = UnboundedSender<Command>;
 /// États d'awareness qu'une connexion peut tenir (un onglet n'en a qu'un) :
 /// au-delà, son message d'awareness est refusé et la connexion fermée.
 const MAX_AWARENESS_CLIENTS: usize = 8;
+
+/// Taille maximale d'un état d'awareness (JSON) : un message qui en porte un
+/// plus gros est ignoré, ni gardé ni relayé (Ruling R27).
+const MAX_AWARENESS_STATE: usize = 64 * 1024;
 
 /// Message diffusé aux connexions de la page.
 pub(crate) struct Broadcast {
@@ -58,7 +66,8 @@ pub(crate) enum Command {
         messages: Vec<ClientMessage>,
         reply: oneshot::Sender<Outcome>,
     },
-    /// Créer le document d'une page neuve.
+    /// Créer le document d'une page neuve : fait au chargement de l'acteur
+    /// s'il manque (Ruling R28), la commande le confirme.
     Create {
         reply: oneshot::Sender<Result<(), SyncError>>,
     },
@@ -191,6 +200,7 @@ async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedRecei
     match load(&store, id.node_id).await {
         Ok(loaded) => Actor::new(id, store, cfg, loaded).serve(rx).await,
         Err(error) => {
+            tracing::error!(node_id = %id.node_id, %error, "document de la page impossible à charger");
             // Le premier demandeur reçoit l'erreur, les autres réessaient.
             let mut pending = id.retire(&mut rx).into_iter();
             if let Some(first) = pending.next() {
@@ -203,8 +213,6 @@ async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedRecei
 /// Document relu depuis le store.
 struct Loaded {
     page: PageDoc,
-    /// La page a un document (instantané ou mises à jour).
-    created: bool,
     /// Plus grand `seq` écrit (instantané ou journal).
     last_seq: i64,
     /// Mises à jour du journal depuis l'instantané.
@@ -212,9 +220,22 @@ struct Loaded {
 }
 
 /// Relit l'instantané, puis les mises à jour dans l'ordre des `seq`.
+///
+/// Une page sans document (création interrompue après `create_node`) reçoit
+/// le sien ici, avant toute mise à jour d'un client : `new_page`, puis
+/// instantané de `seq` 0 (Ruling R28). Sinon, la première mise à jour d'un
+/// client poserait la racine, avec le piège « Page neuve » du `CLAUDE.md`.
 async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     let DocState { snapshot, updates } = store.load_doc(node_id).await?;
-    let created = snapshot.is_some() || !updates.is_empty();
+    if snapshot.is_none() && updates.is_empty() {
+        let (page, _) = PageDoc::new_page();
+        store.put_snapshot(node_id, 0, &page.encode_state()).await?;
+        return Ok(Loaded {
+            page,
+            last_seq: 0,
+            since_snapshot: 0,
+        });
+    }
     let last_seq = updates
         .last()
         .or(snapshot.as_ref())
@@ -227,7 +248,6 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     )?;
     Ok(Loaded {
         page,
-        created,
         last_seq,
         since_snapshot: updates.len() as u64,
     })
@@ -247,8 +267,8 @@ struct Actor {
     store: Store,
     cfg: SyncConfig,
     page: PageDoc,
-    created: bool,
     last_seq: i64,
+    /// Mises à jour écrites depuis la dernière compaction (ou tentative).
     since_snapshot: u64,
     /// Awareness des clients, sur un document à part : elle ne touche jamais
     /// au contenu, et survit au rechargement du document.
@@ -260,17 +280,13 @@ struct Actor {
 
 impl Actor {
     fn new(id: Identity, store: Store, cfg: SyncConfig, loaded: Loaded) -> Actor {
-        let awareness = Awareness::new(Doc::with_options(Options {
-            offset_kind: OffsetKind::Utf16,
-            ..Options::default()
-        }));
+        let awareness = Awareness::new(crate::utf16_doc());
         let (events, _) = broadcast::channel(cfg.broadcast_capacity.max(1));
         Actor {
             id,
             store,
             cfg,
             page: loaded.page,
-            created: loaded.created,
             last_seq: loaded.last_seq,
             since_snapshot: loaded.since_snapshot,
             awareness,
@@ -282,7 +298,6 @@ impl Actor {
 
     fn install(&mut self, loaded: Loaded) {
         self.page = loaded.page;
-        self.created = loaded.created;
         self.last_seq = loaded.last_seq;
         self.since_snapshot = loaded.since_snapshot;
     }
@@ -322,7 +337,8 @@ impl Actor {
                 let _ = reply.send(outcome);
             }
             Command::Create { reply } => {
-                let _ = reply.send(self.create().await);
+                // Le document existe depuis le chargement (Ruling R28).
+                let _ = reply.send(Ok(()));
             }
             Command::Read { reply } => {
                 let _ = reply.send(Ok(self.page.read_blocks()));
@@ -397,7 +413,10 @@ impl Actor {
                 ClientMessage::SyncStep1(state_vector) => {
                     match self.page.encode_diff(&state_vector) {
                         Ok(diff) => replies.push(protocol::sync_step2(&diff)),
-                        Err(_) => return Ok(Outcome::Close),
+                        Err(error) => {
+                            tracing::warn!(node_id = %self.id.node_id, conn, %error, "étape 1 illisible : connexion fermée");
+                            return Ok(Outcome::Close);
+                        }
                     }
                 }
                 // Lecture seule : ni appliquée, ni écrite, ni diffusée.
@@ -422,18 +441,21 @@ impl Actor {
     /// Mise à jour d'un client : appliquer, dédoublonner, écrire, puis
     /// diffuser. `false` : la connexion est à fermer.
     async fn client_update(&mut self, conn: ConnId, update: &[u8]) -> Result<bool, Broken> {
-        if self.page.apply_update(update).is_err() {
+        if let Err(error) = self.page.apply_update(update) {
             // Rulings R17 et R22 : ni écrite ni diffusée ; le document, peut-être
-            // entamé, est rechargé depuis le store ; le client fautif est fermé.
-            // Il se reconnecte, et sa synchro complète apporte ce qui manquait.
+            // entamé (yrs garde en attente une mise à jour à dépendance
+            // manquante), est rechargé depuis le store ; le client fautif est
+            // fermé. Il se reconnecte, et sa synchro complète apporte ce qui
+            // manquait.
+            tracing::warn!(node_id = %self.id.node_id, conn, %error, "mise à jour refusée : document rechargé, connexion fermée");
             self.reload().await?;
             return Ok(false);
         }
         // Après des déplacements concurrents, un bloc peut exister en double.
         let fix = self.page.dedupe_blocks();
         for written in std::iter::once(update).chain(fix.as_deref()) {
-            if self.persist(written).await.is_err() {
-                self.store_failed().await?;
+            if let Err(error) = self.persist(written).await {
+                self.store_failed(&error).await?;
                 return Ok(false);
             }
         }
@@ -447,6 +469,14 @@ impl Actor {
     }
 
     fn awareness_update(&mut self, conn: ConnId, update: AwarenessUpdate, raw: &[u8]) -> bool {
+        if update
+            .clients
+            .values()
+            .any(|entry| entry.json.len() > MAX_AWARENESS_STATE)
+        {
+            tracing::warn!(node_id = %self.id.node_id, conn, "état d'awareness de plus de 64 Kio : ignoré");
+            return true;
+        }
         let Some(c) = self.conns.get_mut(&conn) else {
             return false;
         };
@@ -456,10 +486,12 @@ impl Actor {
             .filter(|id| !c.clients.contains(id))
             .count();
         if c.clients.len() + new > MAX_AWARENESS_CLIENTS {
+            tracing::warn!(node_id = %self.id.node_id, conn, "trop de clients d'awareness : connexion fermée");
             return false;
         }
         c.clients.extend(update.clients.keys().copied());
-        if self.awareness.apply_update(update).is_err() {
+        if let Err(error) = self.awareness.apply_update(update) {
+            tracing::warn!(node_id = %self.id.node_id, conn, %error, "awareness refusée : connexion fermée");
             return false;
         }
         // Relayée même pour un client en lecture seule : ce n'est pas du contenu.
@@ -473,34 +505,15 @@ impl Actor {
         (!update.clients.is_empty()).then(|| protocol::awareness(&update.encode_v1()))
     }
 
-    async fn create(&mut self) -> Result<(), SyncError> {
-        if self.created {
-            return Ok(());
-        }
-        // Sans document, rien n'a pu être appliqué : remplacer le document
-        // vivant, vide, ne perd rien.
-        let (page, update) = PageDoc::new_page();
-        self.store
-            .put_snapshot(self.id.node_id, 0, &page.encode_state())
-            .await?;
-        self.page = page;
-        self.created = true;
-        self.last_seq = 0;
-        self.since_snapshot = 0;
-        // Écrite, puis diffusée aux clients déjà ouverts sur la page vide.
-        self.broadcast(None, protocol::update(&update));
-        Ok(())
-    }
-
     async fn write(&mut self, blocks: Vec<Block>) -> Result<Result<(), SyncError>, Broken> {
         // Refusée sans rien écrire : le document reste intact.
         let update = match self.page.write_blocks(&blocks) {
             Ok(update) => update,
             Err(e) => return Ok(Err(e.into())),
         };
-        if let Err(e) = self.persist(&update).await {
-            self.store_failed().await?;
-            return Ok(Err(e.into()));
+        if let Err(error) = self.persist(&update).await {
+            self.store_failed(&error).await?;
+            return Ok(Err(error.into()));
         }
         self.broadcast(None, protocol::update(&update));
         self.compact_if_due().await;
@@ -510,26 +523,26 @@ impl Actor {
     async fn persist(&mut self, update: &[u8]) -> Result<(), StoreError> {
         self.last_seq = self.store.append_update(self.id.node_id, update).await?;
         self.since_snapshot += 1;
-        self.created = true;
         Ok(())
     }
 
     /// Compaction toutes les `snapshot_every` mises à jour écrites. Prise
     /// entre deux commandes, elle couvre exactement le journal jusqu'à
-    /// `last_seq`. Un échec ne perd rien (le journal reste) : on réessaiera à
-    /// la prochaine mise à jour.
+    /// `last_seq`. Un échec ne perd rien (le journal reste) : il est
+    /// journalisé, et la compaction se réessaie `snapshot_every` mises à jour
+    /// plus tard, pas à chacune.
     async fn compact_if_due(&mut self) {
         if self.since_snapshot < self.cfg.snapshot_every.max(1) {
             return;
         }
+        self.since_snapshot = 0;
         let state = self.page.encode_state();
-        if self
+        if let Err(error) = self
             .store
             .put_snapshot(self.id.node_id, self.last_seq, &state)
             .await
-            .is_ok()
         {
-            self.since_snapshot = 0;
+            tracing::warn!(node_id = %self.id.node_id, seq = self.last_seq, %error, "compaction impossible : réessai plus tard");
         }
     }
 
@@ -537,7 +550,8 @@ impl Actor {
     /// n'a pas écrite, et que personne n'a reçue. On recharge depuis le store
     /// et on ferme toutes les connexions : elles se resynchronisent en
     /// revenant, sans dépendre d'un état jamais écrit.
-    async fn store_failed(&mut self) -> Result<(), Broken> {
+    async fn store_failed(&mut self, error: &StoreError) -> Result<(), Broken> {
+        tracing::error!(node_id = %self.id.node_id, %error, "écriture impossible : document rechargé, connexions fermées");
         self.reload().await?;
         for c in self.conns.values_mut() {
             c.closing = true;
@@ -549,11 +563,16 @@ impl Actor {
     }
 
     async fn reload(&mut self) -> Result<(), Broken> {
-        let loaded = load(&self.store, self.id.node_id)
-            .await
-            .map_err(|_| Broken)?;
-        self.install(loaded);
-        Ok(())
+        match load(&self.store, self.id.node_id).await {
+            Ok(loaded) => {
+                self.install(loaded);
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(node_id = %self.id.node_id, %error, "document impossible à recharger : l'acteur s'arrête");
+                Err(Broken)
+            }
+        }
     }
 
     fn broadcast(&self, from: Option<ConnId>, message: Vec<u8>) {

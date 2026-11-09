@@ -5,12 +5,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mementum_crdt::PageDoc;
+use mementum_crdt::{FRAGMENT, PageDoc};
 use mementum_md::{Block, block_text, parse};
 use mementum_store::{NewNode, NodeKind, Store};
 use mementum_sync::{Hub, SyncConfig};
 use tempfile::TempDir;
 use uuid::Uuid;
+use yrs::updates::decoder::Decode;
+use yrs::{Doc, Transact, Update, XmlElementRef, XmlFragment, XmlOut};
 
 pub use mementum_sync::testkit::*;
 
@@ -138,4 +140,41 @@ pub async fn row_counts(db: &std::path::Path) -> Vec<(String, i64)> {
     }
     pool.close().await;
     counts
+}
+
+/// Exécute `sql` sur la base par une connexion annexe (trigger de test…).
+pub async fn exec_sql(db: &std::path::Path, sql: &str) {
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db.display()))
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(sql.to_string()))
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+}
+
+/// Un document yrs à part, à l'état du client : pour préparer des mises à
+/// jour sans les envoyer.
+pub fn detached(client: &Client) -> Doc {
+    let doc = new_doc();
+    let state = client.page().unwrap().encode_state();
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(&state).unwrap())
+        .unwrap();
+    doc
+}
+
+/// Le nœud de contenu (le paragraphe) du premier bloc.
+pub fn first_content(doc: &Doc) -> XmlElementRef {
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let txn = doc.transact();
+    let child = |e: &XmlElementRef| match e.get(&txn, 0) {
+        Some(XmlOut::Element(e)) => e,
+        _ => panic!("élément attendu"),
+    };
+    let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+        panic!("pas de racine blockGroup");
+    };
+    child(&child(&group))
 }

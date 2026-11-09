@@ -19,7 +19,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use axum::routing::get;
@@ -36,11 +36,11 @@ use yrs::sync::{Awareness, Message, MessageReader, SyncMessage};
 use yrs::updates::decoder::{Decode, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Doc, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update, Xml, XmlFragment,
-    XmlOut, XmlTextPrelim,
+    Doc, ReadTxn, StateVector, Text, Transact, Update, Xml, XmlFragment, XmlOut, XmlTextPrelim,
 };
 
 use crate::Hub;
+use crate::ws::WsBytes;
 
 /// Origine des transactions qui appliquent ce que le serveur envoie : elles
 /// ne repartent pas vers le serveur.
@@ -133,61 +133,21 @@ async fn sync_route(
         .get("schema")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    ws.on_upgrade(move |socket| async move {
-        let AppState {
-            hub,
-            mut shutdown,
-            alive,
-        } = state;
-        tokio::select! {
-            _ = hub.serve_connection(node_id, schema, WsBytes(socket)) => {}
-            _ = shutdown.wait_for(|stop| *stop) => {}
-        }
-        drop(alive);
-    })
-}
-
-/// La WebSocket d'axum vue comme un flux de messages binaires.
-struct WsBytes(WebSocket);
-
-impl Stream for WsBytes {
-    type Item = Vec<u8>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Vec<u8>>> {
-        loop {
-            match self.0.poll_next_unpin(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Ok(WsMessage::Binary(bytes)))) => {
-                    return Poll::Ready(Some(bytes.to_vec()));
-                }
-                Poll::Ready(Some(Ok(WsMessage::Close(_)) | Err(_)) | None) => {
-                    return Poll::Ready(None);
-                }
-                // Texte, ping, pong : rien pour y-websocket.
-                Poll::Ready(Some(Ok(_))) => {}
+    // Comme le serveur de la Task 6 : axum refuse un message trop gros (R27).
+    let max = state.hub.config().max_message_bytes;
+    ws.max_message_size(max)
+        .on_upgrade(move |socket| async move {
+            let AppState {
+                hub,
+                mut shutdown,
+                alive,
+            } = state;
+            tokio::select! {
+                _ = hub.serve_connection(node_id, schema, WsBytes(socket)) => {}
+                _ = shutdown.wait_for(|stop| *stop) => {}
             }
-        }
-    }
-}
-
-impl Sink<Vec<u8>> for WsBytes {
-    type Error = axum::Error;
-
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0.poll_ready_unpin(cx)
-    }
-
-    fn start_send(mut self: Pin<&mut Self>, item: Vec<u8>) -> Result<(), Self::Error> {
-        self.0.start_send_unpin(WsMessage::Binary(item.into()))
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0.poll_flush_unpin(cx)
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0.poll_close_unpin(cx)
-    }
+            drop(alive);
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -299,10 +259,7 @@ impl Client {
             .await
             .map_err(|e| e.to_string())?;
         let (mut sink, mut stream) = ws.split();
-        let doc = Doc::with_options(Options {
-            offset_kind: OffsetKind::Utf16,
-            ..Options::default()
-        });
+        let doc = new_doc();
         let (changes_tx, changes) = watch::channel(0);
         let shared = Arc::new(Shared {
             step2: AtomicU64::new(0),
@@ -517,6 +474,11 @@ impl Client {
             .filter_map(|(id, state)| Some((id.get(), state.data?.to_string())))
             .collect()
     }
+}
+
+/// Un document yrs comme ceux des navigateurs (`OffsetKind::Utf16`).
+pub fn new_doc() -> Doc {
+    crate::utf16_doc()
 }
 
 fn sync_step1(doc: &Doc) -> Vec<u8> {

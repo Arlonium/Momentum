@@ -6,7 +6,7 @@
 //! une page, et jamais un acteur neuf retiré par l'ancien.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
@@ -14,7 +14,8 @@ use futures::{Sink, SinkExt, Stream, StreamExt};
 use mementum_md::Block;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_store::Store;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::actor::{self, Broadcast, Command, Commands, Joined, Membership, Outcome};
@@ -55,8 +56,15 @@ impl Hub {
         })
     }
 
+    /// Les réglages du hub (la route WebSocket de la Task 6 y lit
+    /// `max_message_bytes`).
+    pub fn config(&self) -> &SyncConfig {
+        &self.cfg
+    }
+
     /// Crée le document d'une page neuve (`PageDoc::new_page`) et l'écrit en
-    /// instantané de `seq` 0. Sans effet si la page a déjà un document.
+    /// instantané de `seq` 0. Idempotent : l'acteur de la page le fait à son
+    /// premier chargement si la page n'a pas encore de document (Ruling R28).
     pub async fn create_page_doc(&self, node_id: Uuid) -> Result<(), SyncError> {
         self.call(node_id, |reply| Command::Create { reply })
             .await?
@@ -84,9 +92,11 @@ impl Hub {
     /// lecture seule : elle reçoit tout, ses mises à jour sont ignorées.
     ///
     /// La connexion est fermée (et la fonction rend `Ok`) quand le client
-    /// part, envoie un message illisible ou une mise à jour refusée, ou prend
-    /// plus de `broadcast_capacity` messages de retard : il se reconnecte et
-    /// se resynchronise.
+    /// part, envoie un message illisible, trop gros ou une mise à jour
+    /// refusée, ou prend trop de retard (`broadcast_capacity` messages ou
+    /// `max_queue_bytes` octets) : il se reconnecte et se resynchronise.
+    /// Toute fin anormale est journalisée par `tracing` (`warn`), avec la page,
+    /// la connexion et sa raison.
     pub async fn serve_connection<S>(
         self: Arc<Self>,
         node_id: Uuid,
@@ -100,7 +110,16 @@ impl Hub {
         let joined = self
             .call(node_id, |reply| Command::Join { writable, reply })
             .await??;
-        pump(socket, joined, self.cfg.broadcast_capacity.max(1)).await;
+        let conn = joined.membership.conn();
+        match pump(socket, joined, &self.cfg).await {
+            // Fin normale, ou fermeture dont l'acteur a journalisé la raison.
+            end @ (End::Left | End::Refused) => {
+                tracing::debug!(node_id = %node_id, conn, reason = end.describe(), "connexion fermée");
+            }
+            end => {
+                tracing::warn!(node_id = %node_id, conn, reason = end.describe(), "connexion fermée");
+            }
+        }
         Ok(())
     }
 
@@ -181,15 +200,99 @@ impl Hub {
     }
 }
 
+/// Pourquoi une connexion s'est fermée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// Le client est parti (fin du flux, socket en erreur).
+    Left,
+    /// Message plus gros que `max_message_bytes`.
+    TooBig,
+    /// Message illisible.
+    Illegible,
+    /// Fermée à la demande de l'acteur, qui en a journalisé la raison.
+    Refused,
+    /// File vers la socket pleine (en messages ou en octets) : le client ne
+    /// lit plus assez vite.
+    QueueFull,
+    /// Plus de `broadcast_capacity` diffusions arrivées pendant que la
+    /// connexion attendait l'acteur (ses propres échos comptent).
+    Lagged,
+    /// L'acteur s'est arrêté ou a fermé la diffusion (Ruling R21).
+    ActorGone,
+}
+
+impl End {
+    fn describe(self) -> &'static str {
+        match self {
+            End::Left => "client parti",
+            End::TooBig => "message trop gros",
+            End::Illegible => "message illisible",
+            End::Refused => "fermée par l'acteur",
+            End::QueueFull => "file vers le client pleine",
+            End::Lagged => "client en retard sur la diffusion",
+            End::ActorGone => "acteur arrêté ou diffusion close",
+        }
+    }
+}
+
+/// Message en file vers la socket : une diffusion partagée par toutes les
+/// files (jamais copiée dans chacune), ou une réponse propre à la connexion.
+enum Outgoing {
+    Shared(Arc<Broadcast>),
+    Own(Vec<u8>),
+}
+
+impl Outgoing {
+    fn len(&self) -> usize {
+        match self {
+            Outgoing::Shared(b) => b.message.len(),
+            Outgoing::Own(m) => m.len(),
+        }
+    }
+
+    /// Les octets à envoyer : la seule copie d'une diffusion, faite au moment
+    /// de l'écrire dans la socket.
+    fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Outgoing::Shared(b) => b.message.clone(),
+            Outgoing::Own(m) => m,
+        }
+    }
+}
+
+/// File bornée vers la socket : `broadcast_capacity` messages, et
+/// `max_queue_bytes` octets plus un message (une réponse plus grosse que la
+/// borne, l'état complet d'une page par exemple, passe donc seule).
+struct Outbox {
+    tx: mpsc::Sender<Outgoing>,
+    bytes: AtomicUsize,
+    max_bytes: usize,
+}
+
+impl Outbox {
+    /// `false` : la file est pleine, la connexion est à fermer.
+    fn push(&self, message: Outgoing) -> bool {
+        if self.bytes.load(Ordering::Relaxed) >= self.max_bytes {
+            return false;
+        }
+        self.bytes.fetch_add(message.len(), Ordering::Relaxed);
+        self.tx.try_send(message).is_ok()
+    }
+
+    fn sent(&self, len: usize) {
+        self.bytes.fetch_sub(len, Ordering::Relaxed);
+    }
+}
+
 /// Fait passer les messages entre la socket et l'acteur jusqu'à la fin de la
-/// connexion.
+/// connexion, et en rend la raison.
 ///
 /// Un écrivain vide une file bornée vers la socket ; le lecteur traite les
-/// messages du client (par l'acteur, un à la fois, dans l'ordre) et remplit la
-/// file avec les réponses et la diffusion de la page. Un client qui ne lit
-/// plus remplit sa file : il est fermé, au lieu de faire grossir la mémoire
-/// du serveur ou de passer à côté du retard sur la diffusion.
-async fn pump<S>(socket: S, joined: Joined, capacity: usize)
+/// messages du client (par l'acteur, un lot à la fois, dans l'ordre) et
+/// remplit la file avec les réponses et la diffusion de la page. Un client qui
+/// ne lit plus remplit sa file : il est fermé, au lieu de faire grossir la
+/// mémoire du serveur ou de passer à côté du retard sur la diffusion.
+async fn pump<S>(socket: S, joined: Joined, cfg: &SyncConfig) -> End
 where
     S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
 {
@@ -201,17 +304,26 @@ where
     let conn = membership.conn();
     let commands = membership.commands().clone();
     let (mut sink, mut stream) = socket.split();
-    let (out, mut queue) = mpsc::channel::<Vec<u8>>(capacity + hello.len());
+    let (tx, mut queue) = mpsc::channel(cfg.broadcast_capacity.max(1) + hello.len());
+    let outbox = Outbox {
+        tx,
+        bytes: AtomicUsize::new(0),
+        max_bytes: cfg.max_queue_bytes,
+    };
     for message in hello {
-        let _ = out.try_send(message);
+        outbox.push(Outgoing::Own(message));
     }
 
     let writer = async {
         while let Some(message) = queue.recv().await {
-            if sink.send(message).await.is_err() {
+            let len = message.len();
+            let sent = sink.send(message.into_bytes()).await;
+            outbox.sent(len);
+            if sent.is_err() {
                 break;
             }
         }
+        End::Left
     };
     let reader = async {
         loop {
@@ -223,57 +335,68 @@ where
                 event = events.recv() => match event {
                     Ok(event) if event.from == Some(conn) => {}
                     Ok(event) => {
-                        // File pleine : le client ne lit plus assez vite.
-                        if out.try_send(event.message.clone()).is_err() {
-                            break;
+                        if !outbox.push(Outgoing::Shared(event)) {
+                            return End::QueueFull;
                         }
                     }
-                    // En retard sur la diffusion, ou diffusion close par l'acteur.
-                    Err(broadcast::error::RecvError::Lagged(_) | broadcast::error::RecvError::Closed) => break,
+                    Err(RecvError::Lagged(_)) => return End::Lagged,
+                    Err(RecvError::Closed) => return End::ActorGone,
                 },
                 incoming = stream.next() => {
-                    let Some(data) = incoming else { break };
-                    let Ok(messages) = protocol::decode(&data) else { break };
+                    let Some(data) = incoming else { return End::Left };
+                    // Avant tout décodage (Ruling R27).
+                    if data.len() > cfg.max_message_bytes {
+                        return End::TooBig;
+                    }
+                    let Ok(messages) = protocol::decode(&data) else {
+                        return End::Illegible;
+                    };
                     if messages.is_empty() {
                         continue;
                     }
-                    if !exchange(&commands, conn, messages, &out).await {
-                        break;
+                    if let Some(end) = exchange(&commands, conn, messages, &outbox).await {
+                        return end;
                     }
                 }
             }
         }
     };
-    tokio::select! {
-        () = writer => {}
-        () = reader => {}
-    }
+    let end = tokio::select! {
+        end = writer => end,
+        end = reader => end,
+    };
     drop(membership);
     let _ = tokio::time::timeout(CLOSE_GRACE, sink.close()).await;
+    end
 }
 
 /// Confie des messages du client à l'acteur et met ses réponses en file.
-/// `false` : la connexion est à fermer.
+/// `Some` : la connexion est à fermer, pour cette raison.
 async fn exchange(
     commands: &Commands,
     conn: actor::ConnId,
     messages: Vec<protocol::ClientMessage>,
-    out: &mpsc::Sender<Vec<u8>>,
-) -> bool {
+    outbox: &Outbox,
+) -> Option<End> {
     let (reply, answer) = oneshot::channel();
-    if commands
-        .send(Command::Messages {
-            conn,
-            messages,
-            reply,
-        })
-        .is_err()
-    {
-        return false;
+    let command = Command::Messages {
+        conn,
+        messages,
+        reply,
+    };
+    if commands.send(command).is_err() {
+        return Some(End::ActorGone);
     }
     match answer.await {
-        Ok(Outcome::Reply(replies)) => replies.into_iter().all(|m| out.try_send(m).is_ok()),
-        Ok(Outcome::Close) | Err(_) => false,
+        Ok(Outcome::Reply(replies)) => {
+            if replies.into_iter().all(|m| outbox.push(Outgoing::Own(m))) {
+                None
+            } else {
+                Some(End::QueueFull)
+            }
+        }
+        Ok(Outcome::Close) => Some(End::Refused),
+        Err(_) => Some(End::ActorGone),
     }
 }
 
