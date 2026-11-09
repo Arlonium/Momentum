@@ -1,6 +1,8 @@
 //! Le document de page : création, mises à jour Yjs, lecture et écriture de
 //! l'arbre de blocs.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use mementum_md::{Block, normalize};
 use mementum_schema::SCHEMA_VERSION;
 use yrs::any::Number;
@@ -27,6 +29,11 @@ pub struct PageDoc {
     pub(crate) doc: Doc,
     pub(crate) fragment: XmlFragmentRef,
     pub(crate) meta: MapRef,
+    /// Une mise à jour appliquée depuis le dernier dédoublonnage a inséré des
+    /// éléments : seule une telle mise à jour peut dupliquer un bloc (Ruling R25).
+    pub(crate) inserted_elements: AtomicBool,
+    /// Parcours de la page faits par le dédoublonnage (pour les tests).
+    pub(crate) dedupe_scans: AtomicU64,
 }
 
 // L'acteur de synchronisation garde le document d'une tâche tokio à l'autre.
@@ -49,6 +56,8 @@ impl PageDoc {
             doc,
             fragment,
             meta,
+            inserted_elements: AtomicBool::new(false),
+            dedupe_scans: AtomicU64::new(0),
         }
     }
 
@@ -110,6 +119,9 @@ impl PageDoc {
         }
         if shape.deeper_than_bound(&txn) {
             return Err(CrdtError::TooDeep);
+        }
+        if shape.inserts_elements() {
+            self.inserted_elements.store(true, Ordering::SeqCst);
         }
         Ok(())
     }

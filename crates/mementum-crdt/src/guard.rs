@@ -17,7 +17,10 @@
 //!
 //! [`Shape`] lit donc la mise à jour avant yrs, sans récursion, et refuse
 //! une chaîne d'éléments imbriqués plus profonde que la borne à elle seule,
-//! ou un type ou une racine hors du schéma de la page. Après l'application :
+//! ou un type ou une racine hors du schéma de la page. Elle lit aussi le jeu
+//! de suppressions, dont elle refuse les identifiants de client hors de
+//! 53 bits et les plages qui débordent (yrs paniquerait en debug, Ruling
+//! R25). Après l'application :
 //! - des blocs laissés en attente (une dépendance absente) sont un refus, et
 //!   le document est jeté : rien ne s'intègre plus tard en bloc. Comme yrs,
 //!   on accepte en revanche un bloc arrivé avant ses prédécesseurs du même
@@ -138,7 +141,15 @@ impl Shape {
             }
             clients.push((client, structs));
         }
+        read_delete_set(&mut c)?;
         Ok(Shape { clients })
+    }
+
+    /// Vrai si la mise à jour insère des éléments XML (un bloc, un nœud de
+    /// contenu…) : seule une telle mise à jour peut dupliquer un bloc.
+    pub(crate) fn inserts_elements(&self) -> bool {
+        self.inserts()
+            .any(|(_, i)| i.type_ref == Some(TYPE_REFS_XML_ELEMENT))
     }
 
     fn inserts(&self) -> impl Iterator<Item = (&Struct, &Insert)> {
@@ -326,6 +337,32 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
             }))
         }
     }
+}
+
+/// Jeu de suppressions, lu comme `IdSet::decode` de yrs (v1) : `varUint(n)`,
+/// puis `n` fois `varUint(client) varUint(plages)` et, par plage,
+/// `varUint(horloge) varUint(longueur)`. yrs ne refuse un client hors de
+/// 53 bits que par un `debug_assert!`, et calcule `horloge + longueur` par une
+/// addition qui déborde en debug : les deux paniquent en debug (Ruling R25).
+fn read_delete_set(c: &mut Cursor) -> Result<(), CrdtError> {
+    let n_clients: u32 = c.read_var().map_err(decode_error)?;
+    for _ in 0..n_clients {
+        let client: u64 = c.read_var().map_err(decode_error)?;
+        if client > MAX_CLIENT {
+            return Err(decode_error(
+                "identifiant de client hors de 53 bits dans les suppressions",
+            ));
+        }
+        let n_ranges: u32 = c.read_var().map_err(decode_error)?;
+        for _ in 0..n_ranges {
+            let clock: u32 = c.read_var().map_err(decode_error)?;
+            let len: u32 = c.read_var().map_err(decode_error)?;
+            if clock.checked_add(len).is_none() {
+                return Err(decode_error("plage de suppressions hors limites"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_id(c: &mut Cursor) -> Result<Id, yrs::encoding::read::Error> {

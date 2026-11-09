@@ -11,6 +11,7 @@
 //! les éditions concurrentes.
 
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 
 use yrs::{
     ReadTxn, Transact, TransactionMut, Xml, XmlElementRef, XmlFragment, XmlFragmentRef, XmlOut,
@@ -40,7 +41,17 @@ impl PageDoc {
     /// colonnes reçoit un nouvel id (UUIDv7) ; une colonne vidée reçoit un
     /// paragraphe vide ; un `blockGroup` d'enfants vidé est retiré. Renvoie
     /// `None` s'il n'y a rien à faire.
+    ///
+    /// La page n'est parcourue que si une mise à jour appliquée par
+    /// [`PageDoc::apply_update`] depuis le dernier appel a inséré des éléments
+    /// (Ruling R25) : une frappe seule ne duplique rien. Les écritures du
+    /// serveur (`write_blocks`, `insert_blocks_after`, `move_block`) ne créent
+    /// pas de doublon.
     pub fn dedupe_blocks(&self) -> Option<Vec<u8>> {
+        if !self.inserted_elements.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        self.dedupe_scans.fetch_add(1, Ordering::SeqCst);
         if plan(&self.doc.transact(), &self.fragment).is_empty() {
             return None;
         }
@@ -69,6 +80,13 @@ impl PageDoc {
             repair(&mut txn, &parent, &mut ids);
         }
         Some(txn.encode_update_v1())
+    }
+
+    /// Nombre de parcours de la page faits par [`PageDoc::dedupe_blocks`].
+    /// Sert aux tests.
+    #[doc(hidden)]
+    pub fn dedupe_scans(&self) -> u64 {
+        self.dedupe_scans.load(Ordering::SeqCst)
     }
 }
 

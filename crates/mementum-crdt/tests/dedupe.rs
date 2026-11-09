@@ -46,3 +46,36 @@ fn dedupe_without_duplicate_is_none() {
         .unwrap();
     assert_eq!(page.dedupe_blocks(), None);
 }
+
+#[test]
+fn only_inserted_elements_trigger_a_scan() {
+    let (base, _) = PageDoc::new_page();
+    base.write_blocks(&parse("A\n\nB\n").unwrap()).unwrap();
+    let page = PageDoc::from_updates([base.encode_state().as_slice()]).unwrap();
+    let id = page.read_blocks()[0].id.clone();
+
+    // Le chargement a inséré des éléments : un parcours, rien à faire.
+    assert_eq!(page.dedupe_blocks(), None);
+    assert_eq!(page.dedupe_scans(), 1);
+    assert_eq!(page.dedupe_blocks(), None);
+    assert_eq!(
+        page.dedupe_scans(),
+        1,
+        "rien d'appliqué depuis : pas de parcours"
+    );
+
+    // Une frappe seule : pas de parcours.
+    let typing = base.replace_text(&id, 1, 0, "x").unwrap();
+    page.apply_update(&typing).unwrap();
+    assert_eq!(page.dedupe_blocks(), None);
+    assert_eq!(page.dedupe_scans(), 1);
+
+    // Un bloc inséré : un parcours.
+    let insert = base
+        .insert_blocks_after(Some(&id), &parse("C\n").unwrap())
+        .unwrap();
+    page.apply_update(&insert).unwrap();
+    assert_eq!(page.dedupe_blocks(), None);
+    assert_eq!(page.dedupe_scans(), 2);
+    assert_eq!(mmd(&page), mmd(&base));
+}
