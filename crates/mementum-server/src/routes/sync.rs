@@ -62,7 +62,8 @@ pub(crate) async fn sync(
         None => {
             tracing::warn!(
                 node_id = %id,
-                "client sans version de schéma (paramètre schema absent ou illisible) :                  connexion en lecture seule"
+                "client sans version de schéma (paramètre schema absent ou illisible) : \
+                 connexion en lecture seule"
             );
             0
         }

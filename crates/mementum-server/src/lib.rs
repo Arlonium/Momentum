@@ -136,7 +136,8 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
     if !check_host {
         tracing::warn!(
             bind = %cfg.bind,
-            "écoute hors de la boucle locale : sans authentification au lot 1, quiconque atteint              cette adresse lit et modifie les pages ; contrôle de l'en-tête Host désactivé"
+            "écoute hors de la boucle locale : sans authentification au lot 1, quiconque atteint \
+             cette adresse lit et modifie les pages ; contrôle de l'en-tête Host désactivé"
         );
     }
     let state = AppState {
