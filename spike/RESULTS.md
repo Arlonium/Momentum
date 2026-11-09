@@ -16,6 +16,11 @@ Mesures du spike. PC = poste Windows de Lenny (i9-14900K), ARM = Raspberry Pi 4 
 | T5 · Agent et humain dans le même bloc | 409 propre, document intact | 409 + extrait à jour (test `conflict_when_block_changed`) | — | ✅ |
 | T5 · Édition d'agent sur « Café 🚀 déjà » (positions UTF-16) | aucun caractère coupé | « Café 🚀 prêt » côté serveur et côté client Yjs | — | ✅ |
 | T4 · MMD ⇄ Yjs au format BlockNote, côté serveur (yrs) | sans perte | la fixture écrite par BlockNote se relit en MMD canonique exact ; une page écrite par le serveur s'ouvre dans BlockNote identique (28 blocs) | — | ✅ |
+| T6 · Base de 100 000 lignes : première fenêtre de 200 lignes triée (JSON + index) | < 500 ms | 2,0–2,5 ms | à faire | ✅ provisoire |
+| T6 · Filtre ET/OU à 2 niveaux + tri (JSON + index) | < 300 ms | 127–130 ms | à faire (risque : ×5 à ×10 sur Pi) | ⚠️ provisoire |
+| T6 · Vue groupée par statut (JSON + index) | < 300 ms | 12–13 ms | à faire | ✅ provisoire |
+| T6 · Rollup calculé à la volée sur 100 000 lignes | (pas de budget) | 1,9 s en JSON, 0,6 s en table typée | à faire | ❌ corrigé : rollups matérialisés |
+| T6 · Différentiel SQL ⇄ référence Rust (200 filtres aléatoires à 3 niveaux, 2 000 lignes) | identique | identique | — | ✅ |
 
 Notes T1 :
 - L'instantané d'une page de 10 000 blocs pèse ~2,1 Mo.
@@ -28,3 +33,20 @@ Notes T2 :
 - Ouverture de 10 000 blocs : ~75 % du temps est la synchro initiale (instantané Yjs de 2,1 Mo appliqué en JS), le reste le rendu ProseMirror. Pistes pour la P1 : cache local (SQLite WASM, prévu §5.9), chargement paresseux des blocs hors écran, pages géantes découpées.
 - y-prosemirror 1.x journalise parfois « Caught error while handling a Yjs update RangeError » (restauration de la sélection après une fusion distante) : rattrapé par la bibliothèque, sans effet sur la convergence.
 - Types custom nécessaires : callout, equation, bookmark, pageLink, databaseRef, syncedBlock, toc, unknown, plus les contenus en ligne mention et math. Le H4 et le divider existent en natif dans BlockNote 0.57. Multi-colonnes via `@blocknote/xl-multi-column` (GPL-3.0).
+
+Notes T6 (bench `cargo run --release -p spike-db -- bench --rows 100000`, PC, p95 sur 20 essais) :
+
+| Opération | JSON + index d'expression | Table typée par source |
+|---|---|---|
+| Première fenêtre (200 lignes triées par échéance) | 2,0 ms | 2,0 ms |
+| Filtre statut = En cours | 95,5 ms | 78,8 ms |
+| Filtre ET/OU + tri par priorité | 130,3 ms | 98,3 ms |
+| Groupes par statut | 12,1 ms | 5,9 ms |
+| Rollup : somme des estimations par projet | 1 856 ms | 600 ms |
+| Insertion d'une ligne | 0,2 ms | — |
+| Modification d'une cellule | 0,2 ms | — |
+
+- Jeu de données de 100 000 lignes construit en 3,3 s.
+- **Le stockage JSON tient** : la table typée ne gagne qu'environ 20 % sur les filtres. Le choix d'index et de requête compte bien plus. Exemple : `GROUP BY CAST(json_extract…)` ignorait l'index et prenait 707 ms ; avec l'expression exacte de l'index, 12 ms.
+- **Les rollups (et les formules) ne peuvent pas être calculés à la lecture** sur 100 000 lignes, quel que soit le stockage : il faut les matérialiser et les invalider par dépendances (§5.5 de la spec). C'est confirmé.
+- Filtres sans tri indexé : ~100 ms sur le PC, donc probablement 0,5 à 1 s sur un Pi 4. Pistes : clé primaire entière (rowid) pour arrêter le parcours tôt, index couvrants sur les propriétés filtrées, fenêtre servie depuis le cache client. **À mesurer sur ARM avant de trancher.**
