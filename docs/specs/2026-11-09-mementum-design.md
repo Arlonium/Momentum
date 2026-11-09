@@ -483,7 +483,7 @@ Penser à la migration des données.
 Le serveur tourne sur un Raspberry Pi 4.
 </toggle>
 
-<database id="db_Taches" view="Tableau" anchor="b7" />
+<database id="db_Taches" view="Tableau" anchor="b7"/>
 
 Voir <mention type="page" id="pg_Spec01">Spécification</mention>. ^b8
 ```
@@ -508,17 +508,51 @@ Voir <mention type="page" id="pg_Spec01">Spécification</mention>. ^b8
   - **Enfants** : seuls les listes, toggle, synced, columns, column et callout ont des enfants.
   - **Tableaux** : la première ligne est toujours l'en-tête. **Colonnes** : `width` est omis quand il vaut 1.
   - **Texte brut** (sans marques) : titre d'un `<page>` et texte alternatif d'une image.
-- **Limites connues du convertisseur P0, à lever en P1** (relecture finale) :
-  - **Pertes silencieuses** :
-    - enfants d'un bloc non conteneur (paragraphe, titre, citation, code, image, tableau, bloc inconnu), alors que BlockNote permet d'imbriquer sous tout bloc ;
-    - props BlockNote hors modèle (couleurs et alignement par bloc, titre repliable, `headerRows` et largeurs de colonnes, `caption` et `name` des images, surlignage) ;
-    - saut de ligne `hardBreak` ;
-    - H5 et H6, ramenés à H4 ;
-    - `href` contenant des espaces, des `)` non appariées, des entités ou des `\` ;
-    - deux liens voisins de même `href`, fusionnés.
-  - **Bloc inconnu** : seul notre bloc `unknown` (`<block … data=…/>`) survit. Un nœud BlockNote d'un type inconnu du serveur perd ses attributs et son contenu, et y-prosemirror supprime du document partagé tout nœud inconnu du client.
-  - **Ambiguïté** : un callout vide dont le premier enfant est un paragraphe s'écrit comme un callout avec contenu. Correction prévue : `<p/>` en tête du callout vide.
-  - **Entrée non canonique** : une entrée d'agent hors de la forme canonique est déformée sans erreur (`* item` devient `item`). En P1, elle doit être refusée (422) ou normalisée de façon documentée.
+- **Format MMD de la P1** (crate `mementum-md`, lot 1). Ces règles complètent celles de la P0 ; là où elles diffèrent (enfants, tableaux, échappements, marques), elles les remplacent. Le principe : **tout ce que BlockNote sait représenter a une forme MMD, et la relecture est exacte** (aller-retour vérifié par proptest sur tous les types du registre). Les types, props, défauts et formes viennent du registre `mementum-schema` (`spec/schema/blocks.json`). Une prop égale à son défaut ne s'écrit pas.
+
+  | Type BlockNote | Forme MMD | Props portées par la forme | Autres props (nom MMD) |
+  |---|---|---|---|
+  | `paragraph` | une ligne ; vide : `<p/>` (props en attributs) | — | `bg`, `color`, `align` |
+  | `heading` | `#` × niveau, puis une espace (niveaux 1 à 4) | `level` | `bg`, `color`, `align`, `toggle` (`isToggleable`) |
+  | `bulletListItem` | `- ` | — | `bg`, `color`, `align` |
+  | `numberedListItem` | `N. ` (N = `start` sur le premier élément de la liste, s'il vaut autre chose que 1) | `start` | `bg`, `color`, `align` |
+  | `checkListItem` | `- [ ] ` ou `- [x] ` | `checked` | `bg`, `color`, `align` |
+  | `toggleListItem` | `<toggle title="…">` … `</toggle>` | contenu en ligne = `title` | `bg`, `color`, `align` (attributs) |
+  | `quote` | `> ` | — | `bg`, `color` |
+  | `codeBlock` | clôture de backticks + langue | `language` | — |
+  | `divider` | `---` | — | — |
+  | `image` | `![légende](url)` | `url`, `caption` | `name`, `preview` (`showPreview`), `width` (`previewWidth`), `align`, `bg` |
+  | `video` | `<video src="…"/>` | `url` (`src`) | `caption`, `name`, `preview`, `width`, `align`, `bg` |
+  | `audio` | `<audio src="…"/>` | `url` (`src`) | `caption`, `name`, `preview`, `bg` |
+  | `file` | `<file src="…" name="…"/>` | `url` (`src`), `name` | `caption`, `bg` |
+  | `table` | tableau GFM ; la ligne `{…}` qui suit porte `header-rows` (omis s'il vaut 1), `widths` (`"120,,80"`, vide = auto) et `color` | lignes | `header-rows`, `widths`, `color` |
+  | cellule de tableau | `\| texte {…} \|` | contenu | `bg`, `color`, `align`, `colspan`, `rowspan` |
+  | `callout` | `<callout icon="…" color="…">` : 1ᵉʳ paragraphe = contenu, puis enfants ; contenu vide et 1ᵉʳ enfant paragraphe : `<p/>` en tête | `icon`, `color` | — |
+  | `equation` | `$$`, le LaTeX, puis `$$` | `latex` | — |
+  | `bookmark` | `<bookmark url="…"/>` | `url` | — |
+  | `columnList` / `column` | `<columns>` / `<column>` | — | `width` (omis s'il vaut 1) |
+  | `pageLink` | `<page id="…">titre</page>` | `pageId`, `title` | — |
+  | `databaseRef` | `<database id="…" view="…"/>` | `databaseId`, `view` | — |
+  | `syncedBlock` | `<synced ref="…">` … `</synced>` | `ref` | — |
+  | `toc` | `<toc/>` | — | — |
+  | `unknown` et **tout type inconnu du serveur** | `<block type="…" id="…" data="…"/>`, `data` = base64 du JSON `{"attrs":{…},"content":[…],"children":[…]}` du nœud Yjs d'origine | `originalType` (`type`), `data` | `foreign` (`foreign=true` pour un nœud étranger à recréer tel quel) |
+
+  - **Props hors forme** : sur une forme en ligne ou à clôture, liste `{…}` en fin de première ligne, avant l'ancre (`Texte {align="center" color="red"} ^b3`, `` ```rust {foo=1} ``) ; pour un tableau, sur la ligne qui suit ses lignes ; sur une balise, en attributs. Clés triées par ordre alphabétique. Chaîne toujours entre guillemets (échappée comme un attribut), nombre et booléen sans guillemets, y compris dans les balises (`width=320`, `preview=false`, `<column width=0.5>`). Un flottant d'une prop du registre s'écrit sans « .0 » (`width=320`).
+  - **Sac de props** : une prop inconnue du registre garde son nom BlockNote et son type d'après son écriture (guillemets : chaîne ; nombre sans point : entier ; nombre avec point : flottant, `2.0` gardé tel quel ; `true`/`false`). Rien ne se perd.
+  - **Valeur que la forme ne peut pas porter** : elle passe dans la liste `{…}` sous son nom MMD. Titre de niveau 5 : `# Titre {level=5}` ; `start` sur un élément qui n'est pas le premier de sa liste, ou valant 1, ou hors de 0 à 999 999 999 : `{start=…}` ; langue avec une espace : `` ``` {language="mon langage"} `` ; adresse d'image avec une espace : `![légende]() {url="…"}` ; LaTeX qui contient une ligne `$$` : `$$ {latex="…"}`.
+  - **Balises** : attributs dans cet ordre : ancre `id`, `title` (toggle), attributs portés par la forme (toujours écrits, même à leur défaut : `<callout icon="💡" color="default">`), autres props triées, puis l'ancre `anchor` pour `<page>` et `<database>`. Pas d'espace avant `/>`. `<block>` écrit toujours le vrai id du bloc, même avec les ancres, et ne reçoit pas d'alias.
+  - **Enfants de tout bloc** : les enfants d'un bloc à forme en ligne, à clôture ou autofermante (`<video/>`, `<page>…</page>`, `<p/>`, `<block/>`…) suivent sa dernière ligne (ancre et ligne `{…}` comprises), sans ligne vide, indentés de 2 espaces (de la largeur du marqueur pour un élément numéroté : « 1. » = 3, « 10. » = 4). Entre deux enfants, la séparation est la même qu'au premier niveau ; une ligne vide n'a jamais d'espaces. Les balises `toggle`, `callout`, `columns`, `column` et `synced` contiennent leurs enfants entre leurs balises, sans ligne vide après l'ouvrante ni avant la fermante. Dans un callout, le premier enfant suit le contenu sans ligne vide.
+  - **Lignes vides** : une entre deux blocs frères, aucune entre deux éléments voisins d'une même liste (puces, numérotés, cases) ou entre deux `<column>`. Un marqueur sans contenu n'a pas d'espace finale (`##`, `-`, `- [ ]`, `1.`, `>`).
+  - **Contenu en ligne** : règles de la P0, avec deux précisions. Délimiteurs Markdown seulement pour un seul genre de marque (`**`, `*`, `***` pour gras et italique, `~~` ou `` ` ``) : deux genres imbriqués (`~~**a**~~`, `` **`a`** ``) ne se refermeraient pas devant une lettre, ils passent en balises. Surlignage : `<span bg="…">` ; couleur et surlignage : `<span bg="…" color="…">`. Saut de ligne (`hardBreak`) : `<br/>`. Lien : `[texte](href)` si le `href` ne contient ni blanc, ni caractère de contrôle, ni `(`, `)`, `<`, `>`, `\`, `&` ; sinon `<a href="…">texte</a>`. Deux liens voisins de même `href` restent deux liens.
+  - **Échappements** : le jeu de la P0, plus `{` et `}` (écrits `\{` et `\}`), puisqu'une liste `{…}` porte des props. Un caractère de contrôle du texte (tabulation, saut de ligne…) s'écrit en référence numérique (`&#9;`, `&#10;`) ; dans un attribut, saut de ligne et retour chariot s'écrivent `&#10;` et `&#13;`. Le titre d'un `<page>` échappe `&`, `<`, `\n` et `\r`.
+  - **Document** : chaque ligne finit par `\n` (LF) ; un document vide est le texte vide.
+  - **Identifiants** : `^xyz` en fin de ligne (ou seul sur la ligne qui suit un bloc à clôture) et `id="…"` (`anchor="…"` pour `<page>` et `<database>`) donnent l'id du bloc, tel quel ; la traduction des alias `bN` est faite par l'API des agents (lot 5). Un bloc sans id est lu avec `id = ""`, et `mementum-crdt` lui donne un UUIDv7 à l'écriture.
+  - **Lecture stricte** : `parse` n'accepte que la forme canonique. Tout le reste est une erreur `MmdError { line, message }`, avec un message en français qui dit quoi écrire : marqueurs `*` ou `+`, `N)`, titres soulignés (setext), `#####`, code indenté, clôture `~~~`, balise ou clôture non fermée, indentation incohérente, ligne vide manquante ou en trop, liste `{…}` mal formée, accolade non échappée, fins de ligne CRLF… Après la lecture, l'arbre est réécrit et doit redonner l'entrée octet pour octet ; sinon, la première ligne qui diffère est signalée avec la forme attendue (valeur par défaut écrite, échappement ou marque non canonique). L'import de Markdown quelconque (Obsidian, Notion) est un autre convertisseur, prévu au lot 6.
+- **Limites connues du format P1** :
+  - **Maths en ligne** : `$…$` exige un LaTeX non vide, sans `$`, backtick ni saut de ligne, sans blanc en bord et à accolades équilibrées. Une autre formule en ligne s'écrit, mais sa relecture est refusée.
+  - **Sac de props** : le nom d'une prop inconnue doit être un identifiant (`[A-Za-z][A-Za-z0-9_-]*`) qui ne recoupe aucun nom MMD du bloc ni `id`, `anchor`, `title`, `type`, `data`, `header-rows`, `widths`. Les props connues sont supposées typées selon le registre ; un flottant non fini (`NaN`, infini) n'a pas de forme.
+  - **Tableaux** : un tableau sans ligne ou une ligne sans cellule n'ont pas de forme (BlockNote n'en produit pas). `widths` s'écrit dès que les largeurs diffèrent d'une largeur automatique par cellule de la première ligne.
+  - **Type hors registre** : `render` l'écrit `<block type="…"/>`, relu en `unknown` ; `mementum-crdt` lit d'abord tout nœud étranger en `unknown` avec `foreign=true`.
 
 ### 6.3 Opérations d'édition
 Un seul outil `update_page` accepte une liste d'opérations, **atomique** (jusqu'à 100 opérations par appel) :

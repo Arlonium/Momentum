@@ -7,7 +7,9 @@
 mod blocks;
 mod inline;
 
-pub use blocks::{BlockSpec, ContentKind, MmdForm, PropDefault, PropSpec, PropType, block, blocks};
+pub use blocks::{
+    BlockSpec, ContentKind, MmdForm, PropDefault, PropSpec, PropType, block, blocks, cell_props,
+};
 pub use inline::{INLINE_TYPES, STYLES};
 
 use serde_json::{Value, json};
@@ -25,28 +27,29 @@ fn default_json(default: Option<PropDefault>) -> Value {
     }
 }
 
+fn props_json(props: &[PropSpec]) -> Vec<Value> {
+    props
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "type": p.ty.as_str(),
+                "default": default_json(p.default),
+            })
+        })
+        .collect()
+}
+
 /// Le registre au format JSON (`spec/schema/blocks.json`).
 pub fn schema_json() -> Value {
     let blocks: Vec<Value> = blocks()
         .iter()
-        .map(|b| {
-            let props: Vec<Value> = b
-                .props
-                .iter()
-                .map(|p| {
-                    json!({
-                        "name": p.name,
-                        "type": p.ty.as_str(),
-                        "default": default_json(p.default),
-                    })
-                })
-                .collect();
-            json!({ "name": b.name, "content": b.content.as_str(), "props": props })
-        })
+        .map(|b| json!({ "name": b.name, "content": b.content.as_str(), "props": props_json(b.props) }))
         .collect();
     json!({
         "version": SCHEMA_VERSION,
         "blocks": blocks,
+        "tableCell": { "props": props_json(cell_props()) },
         "styles": STYLES,
         "inline": INLINE_TYPES,
     })

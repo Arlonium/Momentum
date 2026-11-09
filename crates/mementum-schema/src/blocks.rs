@@ -44,6 +44,8 @@ pub struct PropSpec {
     pub ty: PropType,
     pub default: Option<PropDefault>,
     /// Vrai si la forme MMD elle-même porte la prop (`#` × niveau, `url`…).
+    /// Sur une forme à balise, un tel attribut s'écrit toujours, à sa place
+    /// dans la forme ; les autres props ne s'écrivent que hors de leur défaut.
     pub in_form: bool,
 }
 
@@ -80,8 +82,19 @@ pub enum MmdForm {
     Image,
     Table,
     Equation,
-    /// Balise ouvrante et fermante : `<nom …> … </nom>`.
+    /// Balise ouvrante et fermante : `<nom …> … </nom>`, enfants entre les
+    /// deux. Avec un contenu en ligne (callout), le premier paragraphe est le
+    /// contenu.
     Tag(&'static str),
+    /// Balise conteneur dont le contenu en ligne est écrit dans l'attribut
+    /// `title` : `<nom title="…"> … </nom>` (toggle).
+    TitleTag(&'static str),
+    /// Balise d'une seule ligne dont le texte brut est la prop `prop` :
+    /// `<nom …>texte</nom>` (lien de page).
+    TextTag {
+        tag: &'static str,
+        prop: &'static str,
+    },
     /// Balise autofermante : `<nom …/>`.
     SelfClosing(&'static str),
     /// Bloc inconnu : `<block type="…" id="…" data="…"/>`.
@@ -131,12 +144,36 @@ const BG: PropSpec = string("backgroundColor", "bg", "default");
 const COLOR: PropSpec = string("textColor", "color", "default");
 const ALIGN: PropSpec = string("textAlignment", "align", "left");
 const URL: PropSpec = in_form(string("url", "url", ""));
+/// Adresse d'un média écrit en balise : `<video src="…"/>`.
+const SRC: PropSpec = in_form(string("url", "src", ""));
+/// Légende d'une image, portée par `![légende](url)`.
 const CAPTION: PropSpec = in_form(string("caption", "caption", ""));
+/// Légende d'un média écrit en balise : attribut omis quand elle est vide.
+const TAG_CAPTION: PropSpec = string("caption", "caption", "");
 const NAME: PropSpec = string("name", "name", "");
 const PREVIEW: PropSpec = boolean("showPreview", "preview", true);
 const PREVIEW_WIDTH: PropSpec = prop("previewWidth", "width", PropType::Float, None);
 
 const TEXT_PROPS: &[PropSpec] = &[BG, COLOR, ALIGN];
+
+/// Props d'une cellule de tableau (`tableCell` de BlockNote).
+const CELL_PROPS: &[PropSpec] = &[
+    BG,
+    COLOR,
+    ALIGN,
+    prop(
+        "colspan",
+        "colspan",
+        PropType::Int,
+        Some(PropDefault::Int(1)),
+    ),
+    prop(
+        "rowspan",
+        "rowspan",
+        PropType::Int,
+        Some(PropDefault::Int(1)),
+    ),
+];
 
 const BLOCKS: &[BlockSpec] = &[
     BlockSpec {
@@ -198,7 +235,7 @@ const BLOCKS: &[BlockSpec] = &[
     BlockSpec {
         name: "toggleListItem",
         content: ContentKind::Inline,
-        form: MmdForm::Tag("toggle"),
+        form: MmdForm::TitleTag("toggle"),
         props: TEXT_PROPS,
         wrapped: true,
     },
@@ -234,21 +271,21 @@ const BLOCKS: &[BlockSpec] = &[
         name: "video",
         content: ContentKind::None,
         form: MmdForm::SelfClosing("video"),
-        props: &[URL, CAPTION, NAME, PREVIEW, PREVIEW_WIDTH, ALIGN, BG],
+        props: &[SRC, TAG_CAPTION, NAME, PREVIEW, PREVIEW_WIDTH, ALIGN, BG],
         wrapped: true,
     },
     BlockSpec {
         name: "audio",
         content: ContentKind::None,
         form: MmdForm::SelfClosing("audio"),
-        props: &[URL, CAPTION, NAME, PREVIEW, BG],
+        props: &[SRC, TAG_CAPTION, NAME, PREVIEW, BG],
         wrapped: true,
     },
     BlockSpec {
         name: "file",
         content: ContentKind::None,
         form: MmdForm::SelfClosing("file"),
-        props: &[URL, in_form(NAME), CAPTION, BG],
+        props: &[SRC, in_form(NAME), TAG_CAPTION, BG],
         wrapped: true,
     },
     BlockSpec {
@@ -293,18 +330,22 @@ const BLOCKS: &[BlockSpec] = &[
         name: "column",
         content: ContentKind::None,
         form: MmdForm::Tag("column"),
-        props: &[in_form(prop(
+        // Attribut omis quand il vaut 1, comme toute prop à son défaut.
+        props: &[prop(
             "width",
             "width",
             PropType::Float,
             Some(PropDefault::Float(1.0)),
-        ))],
+        )],
         wrapped: false,
     },
     BlockSpec {
         name: "pageLink",
         content: ContentKind::None,
-        form: MmdForm::Tag("page"),
+        form: MmdForm::TextTag {
+            tag: "page",
+            prop: "title",
+        },
         props: &[
             in_form(string("pageId", "id", "")),
             in_form(string("title", "title", "")),
@@ -340,8 +381,8 @@ const BLOCKS: &[BlockSpec] = &[
         content: ContentKind::None,
         form: MmdForm::Unknown,
         props: &[
-            string("originalType", "type", ""),
-            string("data", "data", ""),
+            in_form(string("originalType", "type", "")),
+            in_form(string("data", "data", "")),
             boolean("foreign", "foreign", false),
         ],
         wrapped: true,
@@ -351,6 +392,11 @@ const BLOCKS: &[BlockSpec] = &[
 /// Tous les types de blocs de la P1, dans l'ordre de la conception.
 pub fn blocks() -> &'static [BlockSpec] {
     BLOCKS
+}
+
+/// Props d'une cellule de tableau (`tableCell` de BlockNote).
+pub fn cell_props() -> &'static [PropSpec] {
+    CELL_PROPS
 }
 
 /// Le type de bloc de ce nom, s'il est connu.

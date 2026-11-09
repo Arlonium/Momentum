@@ -1,0 +1,97 @@
+# Cas limites de la P1
+
+Paragraphe centré en couleur. {align="center" bg="yellow" color="red"}
+
+Parent
+  Enfant
+
+  Second enfant {align="right"}
+
+Texte {bar="x" foo=1}
+
+Prix \{x\} et accolade \} seule,<br/>puis la suite après un saut de ligne.
+
+Un <a href="https://ex.com/a b">lien à espace</a>, deux [liens](https://ex.com)[voisins](https://ex.com), du <span bg="yellow">surligné</span> et <span bg="yellow" color="red">les deux</span>.
+
+&#32;Espaces de bord&#32;
+
+## Titre repliable {toggle=true}
+  Contenu du titre.
+
+# Titre de niveau 5 {level=5}
+
+- Puce colorée {color="blue"}
+  1. Enfant numéroté
+
+- [x] Tâche faite {bg="gray"}
+
+9. Neuf
+10. Dix
+    Enfant de dix
+11. Onze {start=1}
+
+> Citation sur fond gris {bg="gray"}
+  Enfant de la citation
+
+<toggle title="Plié **gras**" color="blue">
+Dans le toggle.
+</toggle>
+
+<callout icon="💡" color="blue">
+<p/>
+Suite du callout vide.
+</callout>
+
+<callout icon="⚠️" color="red">
+Contenu du callout.
+Premier enfant, sans ligne vide.
+</callout>
+
+``` {language="mon langage"}
+du code
+```
+  Enfant du bloc de code
+
+$$
+e^{i\pi} + 1 = 0
+$$
+  Enfant de l'équation
+
+---
+  Enfant du séparateur
+
+![Légende de l'image](https://ex.com/i.png) {align="center" name="i.png" preview=false width=320}
+  Enfant de l'image
+
+![Adresse à espace]() {url="https://ex.com/a b.png"}
+
+<video src="https://ex.com/v.mp4" caption="Démo" width=640/>
+
+<audio src="https://ex.com/a.mp3" caption="Podcast" preview=false/>
+
+<file src="https://ex.com/f.pdf" name="f.pdf" caption="Le fichier"/>
+  Enfant du fichier
+
+| Nom {bg="yellow"} | Statut |
+| --- | --- |
+| A | <br/> |
+{color="blue" header-rows=0 widths="120,"}
+  Enfant du tableau
+
+<columns>
+<column width=0.6>
+Large.
+</column>
+<column width=0.4>
+Étroite.
+</column>
+</columns>
+
+<page id="pg_child02">Page &lt;spéciale> &amp; co</page>
+
+<p align="center"/>
+
+<toc/>
+  Enfant de la table des matières
+
+<block type="futureWidget" id="b_foreign01" data="eyJhdHRycyI6eyJhIjoiMSJ9LCJjb250ZW50IjpbXSwiY2hpbGRyZW4iOltdfQ==" foreign=true/>

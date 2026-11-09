@@ -453,6 +453,35 @@
       ]
     }
   ],
+  "tableCell": {
+    "props": [
+      {
+        "name": "backgroundColor",
+        "type": "string",
+        "default": "default"
+      },
+      {
+        "name": "textColor",
+        "type": "string",
+        "default": "default"
+      },
+      {
+        "name": "textAlignment",
+        "type": "string",
+        "default": "left"
+      },
+      {
+        "name": "colspan",
+        "type": "int",
+        "default": 1
+      },
+      {
+        "name": "rowspan",
+        "type": "int",
+        "default": 1
+      }
+    ]
+  },
   "styles": [
     "bold",
     "italic",

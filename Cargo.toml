@@ -10,5 +10,9 @@ rust-version = "1.96"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+base64 = "0.22"
+mementum-schema = { path = "crates/mementum-schema" }
+proptest = "1.12"
+pulldown-cmark = { version = "0.13.6", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

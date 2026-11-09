@@ -1,4 +1,4 @@
-use mementum_schema::{PropDefault, PropType, block, blocks, schema_json};
+use mementum_schema::{PropDefault, PropType, block, blocks, cell_props, schema_json};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -116,6 +116,39 @@ fn mmd_names_unique_per_block() {
                 b.name
             );
         }
+    }
+}
+
+/// Les props de cellule du registre et leurs défauts sont ceux d'une cellule
+/// neuve de BlockNote (fixture de la P0).
+#[test]
+fn cell_props_match_blocknote() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../spec/mmd/fixtures/blocknote/p0-all-blocks.json");
+    let fixture: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let table = fixture
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["type"] == "table")
+        .expect("tableau dans la fixture");
+    let cell = &table["content"]["rows"][0]["cells"][0]["props"];
+    let names: HashSet<&str> = cell
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let registry: HashSet<&str> = cell_props().iter().map(|p| p.name).collect();
+    assert_eq!(names, registry);
+    for p in cell_props() {
+        let expected = match p.default {
+            Some(PropDefault::Str(s)) => serde_json::json!(s),
+            Some(PropDefault::Int(i)) => serde_json::json!(i),
+            other => panic!("défaut inattendu pour {} : {other:?}", p.name),
+        };
+        assert_eq!(cell[p.name], expected, "défaut de {}", p.name);
     }
 }
 
