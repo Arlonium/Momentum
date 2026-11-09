@@ -110,11 +110,26 @@ pub(crate) fn check_blocks(blocks: &[Block], slot: Slot, depth: usize) -> Result
 
 /// Profondeur d'un élément (la racine `blockGroup` est à 1).
 pub(crate) fn depth_of(element: &XmlElementRef) -> usize {
+    depth_in_page(&XmlOut::Element(element.clone()))
+}
+
+/// Profondeur d'un nœud XML : 1 sous le fragment (ou sous la map `META`),
+/// un de plus par élément ou texte parent. S'arrête dès qu'elle dépasse
+/// [`MAX_YJS_DEPTH`].
+pub(crate) fn depth_in_page(node: &XmlOut) -> usize {
+    let parent = |node: &XmlOut| match node {
+        XmlOut::Element(e) => e.parent(),
+        XmlOut::Text(t) => t.parent(),
+        XmlOut::Fragment(_) => None,
+    };
     let mut depth = 1;
-    let mut current = element.parent();
-    while let Some(XmlOut::Element(parent)) = current {
+    let mut current = parent(node);
+    while let Some(p) = current {
+        if matches!(p, XmlOut::Fragment(_)) || depth > MAX_YJS_DEPTH {
+            break;
+        }
         depth += 1;
-        current = parent.parent();
+        current = parent(&p);
     }
     depth
 }

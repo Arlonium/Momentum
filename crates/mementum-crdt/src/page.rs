@@ -11,7 +11,7 @@ use yrs::{
 };
 
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, read_page, write_nodes};
-use crate::guard::{Shape, too_deep};
+use crate::guard::{Shape, missing};
 use crate::structure::{Slot, check_blocks};
 use crate::{CrdtError, FRAGMENT, META};
 
@@ -85,12 +85,14 @@ impl PageDoc {
     /// Intègre une mise à jour (v1) reçue d'un client ou du stockage.
     ///
     /// La mise à jour est lue avant yrs (Ruling R17, voir [`crate::guard`]).
-    /// Elle est refusée sans être appliquée si elle est illisible, si elle
-    /// dépend de modifications absentes (rien ne reste en attente) ou si elle
-    /// sort du schéma de la page (`Decode`, `Structure`), ou si ses éléments
-    /// imbriqués dépassent à eux seuls [`MAX_YJS_DEPTH`](crate::MAX_YJS_DEPTH) (`TooDeep`). Après
-    /// l'application, quand elle insère des éléments, la profondeur de la
-    /// page est mesurée : au-delà de la borne, `TooDeep`.
+    /// Elle est refusée sans être appliquée si elle est illisible (`Decode`),
+    /// si elle sort du schéma de la page (`Structure`), ou si ses éléments
+    /// imbriqués dépassent à eux seuls
+    /// [`MAX_YJS_DEPTH`](crate::MAX_YJS_DEPTH) (`TooDeep`). Après
+    /// l'application, elle est refusée si elle a laissé des blocs en attente
+    /// d'une dépendance absente (`Decode`), ou si un élément qu'elle insère
+    /// dépasse la borne (`TooDeep`). Comme yrs, elle est acceptée quand elle
+    /// arrive avant des mises à jour du même client dont elle ne dépend pas.
     ///
     /// Après une erreur, la mise à jour n'est ni gardée ni diffusée, et le
     /// `PageDoc` est à jeter : l'appelant le recharge depuis ses mises à jour
@@ -103,7 +105,10 @@ impl PageDoc {
         shape.check(&txn.state_vector())?;
         txn.apply_update(decoded)
             .map_err(|e| CrdtError::Decode(e.to_string()))?;
-        if shape.inserts_types() && too_deep(&txn, &self.fragment, &self.meta) {
+        if txn.store().pending_update().is_some() {
+            return Err(missing());
+        }
+        if shape.deeper_than_bound(&txn) {
             return Err(CrdtError::TooDeep);
         }
         Ok(())
