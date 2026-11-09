@@ -5,8 +5,9 @@
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, createPage, getInfo, getTree } from "./api";
+import { loadEditor } from "./editor/LazyEditor";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
-import { CLIENT_SCHEMA_VERSION } from "./editor/schema";
+import { CLIENT_SCHEMA_VERSION } from "./editor/version";
 import { PageView } from "./page/PageView";
 import { navigate, pagePath, parseRoute, useLinkInterception, usePathname } from "./router";
 import { PageTree } from "./sidebar/PageTree";
@@ -50,6 +51,12 @@ export function App() {
     markStale();
     return false;
   }, [markStale]);
+
+  // Le code de l'éditeur, chargé à part, arrive pendant que l'arbre s'affiche. Un échec
+  // n'a pas d'effet ici : l'ouverture d'une page le redemande, et dit s'il manque encore.
+  useEffect(() => {
+    loadEditor().catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

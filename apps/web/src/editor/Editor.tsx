@@ -1,5 +1,8 @@
 // L'éditeur BlockNote d'une page, lié à son Y.Doc par `withCollaboration` (chemin Yjs 13
-// de BlockNote 0.57, y-prosemirror 1.x).
+// de BlockNote 0.57, y-prosemirror 1.x). Chargé à la demande (`LazyEditor.tsx`), avec ses
+// styles.
+import "@blocknote/mantine/style.css";
+import "katex/dist/katex.min.css";
 import { syntaxHighlighter } from "@blocknote/code-block";
 import { combineByGroup, filterSuggestionItems } from "@blocknote/core";
 import { fr } from "@blocknote/core/locales";

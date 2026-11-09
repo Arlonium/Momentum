@@ -2,8 +2,8 @@
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { CollabSession } from "../editor/collab";
-import { Editor } from "../editor/Editor";
 import { requestedFixture } from "../editor/fixtures";
+import { LazyEditor } from "../editor/LazyEditor";
 import { ReadOnlyBanner } from "../editor/ReadOnlyBanner";
 import type { SchemaCheck } from "../editor/schemaGate";
 import { TitleInput } from "./TitleInput";
@@ -62,7 +62,8 @@ export function PageView({
           readOnly={readOnly}
           onSaved={onSaved}
         />
-        {session && <Editor session={session} fixture={fixture} />}
+        {/* La session se connecte pendant que le code de l'éditeur se charge. */}
+        {session && <LazyEditor session={session} fixture={fixture} />}
       </article>
     </>
   );

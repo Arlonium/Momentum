@@ -23,12 +23,8 @@ import {
   WarningIcon,
 } from "../icons";
 
-/**
- * Version du schéma de blocs de ce client, celle de `blocks.json`. Le serveur et la
- * WebSocket la comparent à la leur : un client d'une autre version passe en lecture seule.
- * À changer avec le registre, quand le schéma change.
- */
-export const CLIENT_SCHEMA_VERSION = 1;
+/** Version du schéma de blocs de ce client (`version.ts`), celle de `blocks.json`. */
+export { CLIENT_SCHEMA_VERSION } from "./version";
 
 /** Icône par défaut d'un callout (défaut du registre), affichée en icône vectorielle. */
 const DEFAULT_CALLOUT_ICON = "💡";

@@ -3,7 +3,7 @@
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 import { schemaGatedWebSocket, type SchemaCheck } from "./schemaGate";
-import { CLIENT_SCHEMA_VERSION } from "./schema";
+import { CLIENT_SCHEMA_VERSION } from "./version";
 
 /** Nom du fragment partagé, celui que le serveur lit et écrit (`mementum-crdt`). */
 export const FRAGMENT = "document-store";
