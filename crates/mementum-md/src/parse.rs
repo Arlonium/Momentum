@@ -24,7 +24,7 @@ pub const MAX_DEPTH: usize = 100;
 /// `id = ""`. L'imbrication est bornée à [`MAX_DEPTH`] niveaux.
 pub fn parse(mmd: &str) -> Result<Vec<Block>, MmdError> {
     let lines = split_lines(mmd)?;
-    let (blocks, _) = read_blocks(&lines, None, 1)?;
+    let (blocks, _) = read_blocks(&lines, None, 1, Siblings::Blocks)?;
     let blocks = normalize(blocks);
     verify(mmd, &blocks)?;
     Ok(blocks)
@@ -310,6 +310,16 @@ struct Prev {
     paragraph_line: bool,
 }
 
+/// Où se trouvent des blocs frères : le schéma de `@blocknote/xl-multi-column`
+/// 0.57 n'admet une colonne que dans un `<columns>`, et un `<columns>`
+/// jamais directement dans une colonne (Ruling R16).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Siblings {
+    Blocks,
+    Columns,
+    Column,
+}
+
 /// Lit des blocs frères, de niveau `depth` (1 au premier niveau), jusqu'à la
 /// ligne `term` (exclue) ou la fin. Renvoie les blocs et l'indice où la
 /// lecture s'est arrêtée.
@@ -317,6 +327,7 @@ fn read_blocks(
     lines: &[Line<'_>],
     term: Option<&str>,
     depth: usize,
+    siblings: Siblings,
 ) -> Result<(Vec<Block>, usize), MmdError> {
     let mut out = Vec::new();
     let mut prev: Option<Prev> = None;
@@ -377,6 +388,7 @@ fn read_blocks(
         blanks = 0;
         let prev_number = prev.as_ref().and_then(|p| p.number);
         let (b, next, number) = read_block(lines, i, form, prev_number, depth)?;
+        check_place(&b, siblings, line.no)?;
         prev = Some(Prev {
             family: family(&b.kind),
             number,
@@ -389,6 +401,21 @@ fn read_blocks(
         return Err(err(first_blank, "ligne vide en trop"));
     }
     Ok((out, i))
+}
+
+/// Une colonne seulement dans un `<columns>`, qui ne contient que des
+/// colonnes ; un `<columns>` jamais directement dans une colonne.
+fn check_place(b: &Block, siblings: Siblings, line: usize) -> Result<(), MmdError> {
+    let message = match (siblings, b.kind.as_str()) {
+        (Siblings::Columns, "column") => return Ok(()),
+        (Siblings::Columns, _) => "dans « <columns> », seulement des « <column> »",
+        (_, "column") => "« <column> » hors de « <columns> » : l'entourer de « <columns> »",
+        (Siblings::Column, "columnList") => {
+            "« <columns> » directement dans une « <column> » : BlockNote ne l'admet pas"
+        }
+        _ => return Ok(()),
+    };
+    Err(err(line, message))
 }
 
 /// Enfants (de niveau `depth`) d'un bloc à forme en ligne, à clôture ou
@@ -427,7 +454,7 @@ fn read_children(
         }
         j += 1;
     }
-    let (children, _) = read_blocks(&region, None, depth)?;
+    let (children, _) = read_blocks(&region, None, depth, Siblings::Blocks)?;
     Ok((children, j))
 }
 
@@ -853,12 +880,32 @@ fn read_tag(
             } else {
                 (vec![], 0)
             };
-            let (children, stop) = read_blocks(&inner[skip..], Some(&term), depth + 1)?;
+            let siblings = match spec.name {
+                "columnList" => Siblings::Columns,
+                "column" => Siblings::Column,
+                _ => Siblings::Blocks,
+            };
+            let (children, stop) = read_blocks(&inner[skip..], Some(&term), depth + 1, siblings)?;
             if skip + stop >= inner.len() {
                 return Err(err(
                     line.no,
                     format!("balise « <{n}> » non fermée : ajouter « {term} »"),
                 ));
+            }
+            match siblings {
+                Siblings::Columns if children.len() < 2 => {
+                    return Err(err(
+                        line.no,
+                        "« <columns> » : deux « <column> » au moins (sinon, écrire les blocs sans colonnes)",
+                    ));
+                }
+                Siblings::Column if children.is_empty() => {
+                    return Err(err(
+                        line.no,
+                        "« <column> » vide : y mettre au moins un bloc",
+                    ));
+                }
+                _ => {}
             }
             let content = match spec.content {
                 ContentKind::Inline => Content::Inline(content),

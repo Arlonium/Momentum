@@ -150,8 +150,8 @@ fn headers(page: &PageDoc) -> (u32, u32) {
 
 #[test]
 fn table_headers_through_yjs() {
-    // Écrit par BlockNote : une ligne de `tableHeader` est aussi deux colonnes d'en-tête.
-    assert_eq!(headers(&one_row_table("tableHeader", &[])), (1, 2));
+    // Écrit par BlockNote : un tableau tout en en-têtes vaut (lignes, 0) (Ruling R19).
+    assert_eq!(headers(&one_row_table("tableHeader", &[])), (1, 0));
     // Indices `headerRows` / `headerCols` qui concordent avec les cellules : gardés.
     let hinted = [("headerRows", 1), ("headerCols", 0)];
     assert_eq!(headers(&one_row_table("tableHeader", &hinted)), (1, 0));

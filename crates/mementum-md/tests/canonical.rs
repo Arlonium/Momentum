@@ -216,11 +216,11 @@ fn p1_forms() {
                 header_rows: 1,
                 header_cols: 1,
                 column_widths: vec![None, None],
-                rows: vec![vec![cell("A"), cell("B")]],
+                rows: vec![vec![cell("A"), cell("B")], vec![cell("1"), cell("2")]],
             }),
             vec![],
         )],
-        "| A | B |\n| --- | --- |\n{header-cols=1}\n",
+        "| A | B |\n| --- | --- |\n| 1 | 2 |\n{header-cols=1}\n",
     );
 
     // Formule en ligne sans forme `$…$` (R8) : `<math latex="…"/>`.
@@ -388,4 +388,128 @@ fn normalize_and_block_text() {
         ])
     );
     assert_eq!(block_text(&normalized), "abc\u{FFFC}\nde\u{FFFC}");
+}
+
+/// Ruling R16 (a) : deux liens voisins de même `href` n'en font qu'un, comme
+/// dans Yjs ; la lecture refuse les deux liens écrits côte à côte.
+#[test]
+fn adjacent_links_merge() {
+    let link = |href: &str, children: Vec<Inline>| Inline::Link {
+        href: href.into(),
+        children,
+    };
+    let bold = Inline::Text {
+        text: "c".into(),
+        styles: Styles {
+            bold: true,
+            ..Styles::default()
+        },
+    };
+    let raw = para(vec![
+        link("x", vec![text("a")]),
+        link("x", vec![text("b"), bold.clone()]),
+        link("y", vec![text("d")]),
+    ]);
+    assert_eq!(
+        normalize(vec![raw]),
+        [para(vec![
+            link("x", vec![text("ab"), bold]),
+            link("y", vec![text("d")]),
+        ])]
+    );
+    let error = parse("[a](x)[b](x)\n").unwrap_err();
+    assert_eq!(error.line, 1);
+    assert!(error.message.contains("[ab](x)"), "{error}");
+}
+
+fn grid(rows: usize, cols: usize, header_rows: u32, header_cols: u32) -> Block {
+    let cell = Cell {
+        content: vec![text("c")],
+        props: Props::new(),
+    };
+    blk(
+        "table",
+        Props::new(),
+        Content::Table(Table {
+            header_rows,
+            header_cols,
+            column_widths: vec![],
+            rows: vec![vec![cell; cols]; rows],
+        }),
+        vec![],
+    )
+}
+
+fn headers(b: &Block) -> (u32, u32) {
+    match &b.content {
+        Content::Table(t) => (t.header_rows, t.header_cols),
+        other => panic!("tableau attendu, trouvé {other:?}"),
+    }
+}
+
+/// Ruling R19 (a) : en-têtes ramenés dans la grille ; un tableau tout en
+/// en-têtes vaut `(lignes, 0)`.
+#[test]
+fn table_headers_fit_the_grid() {
+    let canonical = |b: Block| headers(&normalize(vec![b])[0]);
+    assert_eq!(canonical(grid(2, 2, 5, 0)), (2, 0));
+    assert_eq!(canonical(grid(2, 2, 0, 9)), (2, 0));
+    assert_eq!(canonical(grid(1, 2, 1, 0)), (1, 0));
+    assert_eq!(canonical(grid(1, 2, 1, 1)), (1, 0));
+    assert_eq!(canonical(grid(3, 3, 1, 1)), (1, 1));
+    assert_eq!(canonical(grid(3, 3, 0, 2)), (0, 2));
+    assert_eq!(canonical(grid(2, 2, 0, 0)), (0, 0));
+    // `header-rows=5` sur deux lignes : la lecture demande la forme canonique.
+    let error = parse("| A |\n| --- |\n| 1 |\n{header-rows=5}\n").unwrap_err();
+    assert_eq!(error.line, 4);
+    assert!(error.message.contains("header-rows=2"), "{error}");
+}
+
+/// Ruling R19 (b) : le contenu d'un bloc de code est du texte brut.
+#[test]
+fn code_block_is_plain_text() {
+    let raw = blk(
+        "codeBlock",
+        Props::new(),
+        Content::Inline(vec![
+            Inline::Text {
+                text: "let a".into(),
+                styles: Styles {
+                    bold: true,
+                    ..Styles::default()
+                },
+            },
+            Inline::HardBreak,
+            Inline::Link {
+                href: "x".into(),
+                children: vec![text("b")],
+            },
+            Inline::Mention {
+                kind: "user".into(),
+                id: "u1".into(),
+                label: "L".into(),
+            },
+            Inline::Math { latex: "y".into() },
+        ]),
+        vec![],
+    );
+    assert_eq!(
+        normalize(vec![raw]),
+        [blk(
+            "codeBlock",
+            Props::new(),
+            Content::Inline(vec![text("let a\nb")]),
+            vec![],
+        )]
+    );
+    let only_mention = blk(
+        "codeBlock",
+        Props::new(),
+        Content::Inline(vec![Inline::Math { latex: "y".into() }]),
+        vec![],
+    );
+    assert_eq!(
+        normalize(vec![only_mention])[0].content,
+        Content::Inline(vec![])
+    );
 }

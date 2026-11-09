@@ -89,3 +89,42 @@ fn deep_nesting_does_not_overflow_the_stack() {
         assert!(result.is_err(), "imbrication très profonde acceptée");
     }
 }
+
+/// Ruling R16 (c) : le schéma de `@blocknote/xl-multi-column` 0.57.
+#[test]
+fn column_structure_follows_blocknote() {
+    const COLUMN: &str = "<column>\nA\n</column>\n";
+    // Une colonne hors d'un `<columns>`.
+    rejected(COLUMN, 1, "hors de « <columns> »");
+    // Un `<columns>` d'une seule colonne.
+    rejected(
+        &format!("<columns>\n{COLUMN}</columns>\n"),
+        1,
+        "deux « <column> »",
+    );
+    // Autre chose qu'une colonne dans un `<columns>`.
+    rejected(
+        &format!("<columns>\n{COLUMN}\nTexte\n</columns>\n"),
+        6,
+        "seulement des « <column> »",
+    );
+    // Une colonne vide.
+    rejected(
+        &format!("<columns>\n{COLUMN}<column>\n</column>\n</columns>\n"),
+        5,
+        "vide",
+    );
+    // Un `<columns>` directement dans une colonne.
+    let inner = format!("<columns>\n{COLUMN}{COLUMN}</columns>\n");
+    rejected(
+        &format!("<columns>\n<column>\n{inner}</column>\n{COLUMN}</columns>\n"),
+        3,
+        "directement dans une « <column> »",
+    );
+    // Plus bas dans l'arbre (enfant d'un bloc de la colonne), c'est permis.
+    let nested = format!(
+        "<columns>\n<column>\nA\n  {}\n</column>\n{COLUMN}</columns>\n",
+        "x"
+    );
+    assert!(parse(&nested).is_ok(), "{nested}");
+}

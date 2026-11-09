@@ -18,9 +18,10 @@
 //!
 //! Ils restent dans ce que BlockNote sait représenter : une colonne n'existe
 //! que dans un `columnList` (de 2 ou 3 colonnes, chacune avec au moins un
-//! bloc) ; un tableau a le même nombre de cellules par ligne, une largeur par
-//! colonne, au plus autant de lignes d'en-tête que de lignes et de colonnes
-//! d'en-tête que de colonnes.
+//! bloc et sans `columnList` directement dedans) ; un tableau a le même
+//! nombre de cellules par ligne et une largeur par colonne. Le reste
+//! (liens voisins de même `href`, en-têtes hors de la grille, marques dans
+//! un bloc de code) est ramené à sa forme canonique par [`normalize`].
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -57,9 +58,13 @@ fn spec(name: &str) -> &'static BlockSpec {
     block(name).expect("type du registre")
 }
 
-/// `columnList` de 2 ou 3 colonnes, chacune avec 1 ou 2 blocs.
+/// `columnList` de 2 ou 3 colonnes, chacune avec 1 ou 2 blocs, dont aucun
+/// `columnList` (BlockNote 0.57 l'exclut des enfants d'une colonne).
 fn column_list(inner: BoxedStrategy<Block>) -> BoxedStrategy<Block> {
-    let column = (block_of(spec("column")), prop::collection::vec(inner, 1..3)).prop_map(
+    let child = inner.prop_filter("pas de columnList dans une colonne", |b| {
+        b.kind != "columnList"
+    });
+    let column = (block_of(spec("column")), prop::collection::vec(child, 1..3)).prop_map(
         |(mut column, children)| {
             column.children = children;
             column

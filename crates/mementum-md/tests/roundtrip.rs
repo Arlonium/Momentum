@@ -198,6 +198,13 @@ fn assert_columns_placed(blocks: &[Block], in_list: bool) {
         if b.kind == "columnList" {
             assert!(b.children.len() >= 2, "columnList de moins de 2 colonnes");
         }
+        if b.kind == "column" {
+            assert!(!b.children.is_empty(), "colonne vide");
+            assert!(
+                b.children.iter().all(|c| c.kind != "columnList"),
+                "columnList directement dans une colonne"
+            );
+        }
         assert_columns_placed(&b.children, b.kind == "columnList");
     }
 }
