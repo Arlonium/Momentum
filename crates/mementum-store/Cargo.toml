@@ -1,0 +1,17 @@
+[package]
+name = "mementum-store"
+description = "Stockage SQLite de Mementum : arbre de pages, journal Yjs et instantanés"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sqlx.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

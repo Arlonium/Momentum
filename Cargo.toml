@@ -18,6 +18,10 @@ pulldown-cmark = { version = "0.13.6", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+# Sans fonctions par défaut (pas de TLS). `migrate` et `macros` pour `sqlx::migrate!`.
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "1.29", features = ["v7"] }
 # `sync` : `Awareness` et les observateurs doivent pouvoir passer d'une tâche tokio à l'autre.
 # Version épinglée : `crates/mementum-crdt/src/guard.rs` relit le format des mises à jour de
