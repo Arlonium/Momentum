@@ -24,6 +24,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
 } from "react";
 import * as Y from "yjs";
@@ -69,7 +70,12 @@ export function Editor({ session, fixture = null }: Props) {
   // éditeur (sa valeur est figée par éditeur), et l'état suit ensuite par `isEditable`,
   // sans remonter la vue. Monter la vue avec le bon état garde aussi `tabindex="0"`, que
   // TipTap retire quand l'éditeur repasse en lecture seule.
-  const mountEditable = useMemo(() => editable, [editor]);
+  // La valeur figée est un état React, remplacé pendant le rendu quand l'éditeur change
+  // (motif « ajuster un état quand une prop change » de React) : elle est déterministe, là
+  // où `useMemo` n'est garanti que comme une optimisation.
+  const [mounted, setMounted] = useState({ editor, editable });
+  if (mounted.editor !== editor) setMounted({ editor, editable });
+  const mountEditable = mounted.editor === editor ? mounted.editable : editable;
   useLayoutEffect(() => {
     editor.isEditable = editable;
   }, [editor, editable]);
