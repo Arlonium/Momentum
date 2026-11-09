@@ -1,0 +1,21 @@
+{
+  "v": 3,
+  "createdOnFiles": { "v": 1, "at": "2026-11-09T02:45:00Z" },
+  "title": "Mementum — 3 directions de design",
+  "launch": { "view": "canvas" },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": { "x": 0, "y": 0, "w": 1440, "h": 960, "title": "A · Papier — RETENUE (la plus proche de Notion)", "expand": "fill", "is_interactive": true },
+    "Atelier.dc.html": { "x": 1520, "y": 0, "w": 1440, "h": 960, "title": "B · Atelier — coffres en avant et panneau d’activité", "expand": "fill", "is_interactive": true },
+    "Nuit.dc.html": { "x": 3040, "y": 0, "w": 1440, "h": 960, "title": "C · Nuit — sombre, centré, IA au clavier", "expand": "fill", "is_interactive": true }
+  },
+  "order": ["Main.dc.html", "Atelier.dc.html", "Nuit.dc.html"],
+  "notes": {
+    "titre": { "x": 0, "y": -320, "text": "Mementum — 3 directions proches de Notion (A retenue)", "kind": "title1", "maxW": 4480 },
+    "noteA": { "x": 0, "y": 1060, "w": 460, "fill": "green", "text": "A · Papier — RETENUE le 09/11/2026\nReprend la logique de Notion presque à l’identique : barre latérale claire, page blanche, propriétés sous le titre, menu Partager en haut à droite. Les coffres prennent la place des espaces d’équipe. La moins déroutante pour quelqu’un qui vient de Notion." },
+    "noteB": { "x": 1520, "y": 1060, "w": 460, "fill": "blue", "text": "B · Atelier\nMême structure, mais les coffres sont mis en avant (couleur, membres, niveau de partage) et un panneau à droite montre qui est là et ce que font les agents. La base s’affiche en kanban. Plus « outil d’équipe »." },
+    "noteC": { "x": 3040, "y": 1060, "w": 460, "fill": "orange", "text": "C · Nuit\nSombre par défaut, page centrée, barre de commande flottante pour parler à l’IA (Ctrl+K, modèle local possible). Mêmes menus que Notion, ambiance plus concentrée. La base s’affiche en liste." },
+    "aide": { "x": 3560, "y": 1060, "w": 420, "fill": "gray", "text": "À essayer (bouton Play) :\n• « Partager » ouvre ou ferme le menu\n• choisir l’accès général du coffre\n• basculer Tout le coffre / Cette page\n• Accepter ou Refuser la suggestion de l’agent" }
+  },
+  "designSystems": []
+}

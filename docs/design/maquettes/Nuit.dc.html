@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Mementum — direction Nuit</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#17181B}
+a{color:#F0B45E}a:hover{color:#F7CB8A}
+button{font-family:inherit}
+input::placeholder{color:#8C8D95}
+</style>
+</helmet>
+<div style="min-height: 960px; display: flex; flex-wrap: wrap; font-family: Manrope, system-ui, sans-serif; font-size: 14px; line-height: 1.55; color: #E8E8EA; background: #17181B">
+
+  <nav aria-label="Barre latérale" style="flex: 0 1 248px; min-width: 216px; box-sizing: border-box; background: #1D1E22; border-right: 1px solid #2B2C31; padding: 12px 8px; display: flex; flex-direction: column; gap: 1px">
+    <button style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; margin-bottom: 8px; border: 0; background: transparent; border-radius: 7px; color: #F3F3F5; font-weight: 700; font-size: 14px; text-align: left; cursor: pointer">
+      <span style="width: 24px; height: 24px; border-radius: 7px; background: {{accent}}; color: #1A1408; font-size: 10px; font-weight: 800; display: flex; align-items: center; justify-content: center">AN</span>
+      <span style="flex: 1">Atelier Nova</span>
+      <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+    </button>
+    <button style="display: flex; align-items: center; gap: 9px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #C8C9CE; font-size: 14px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg><span style="flex: 1">Rechercher</span></button>
+    <button style="display: flex; align-items: center; gap: 9px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #C8C9CE; font-size: 14px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"></path><path d="M5 10v10h14V10"></path></svg><span>Accueil</span></button>
+    <button style="display: flex; align-items: center; gap: 9px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #C8C9CE; font-size: 14px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13l3-8h12l3 8"></path><path d="M3 13v6h18v-6h-5l-1.5 2h-5L8 13z"></path></svg><span style="flex: 1">Boîte de réception</span><span style="width: 7px; height: 7px; border-radius: 4px; background: #F07A62"></span></button>
+    <button style="display: flex; align-items: center; gap: 9px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #C8C9CE; font-size: 14px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"></path></svg><span style="flex: 1">Agents</span><span style="width: 7px; height: 7px; border-radius: 4px; background: {{accent}}"></span></button>
+    <button style="display: flex; align-items: center; gap: 9px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #C8C9CE; font-size: 14px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="6" cy="6" r="2.5"></circle><circle cx="18" cy="8" r="2.5"></circle><circle cx="10" cy="18" r="2.5"></circle><path d="M8.4 6.5l7.2 1.1M6.8 8.4l2.4 7.2M16.4 10l-4.8 6"></path></svg><span>Vue graphe</span></button>
+
+    <p style="margin: 0; padding: 16px 8px 6px; font-size: 12px; font-weight: 700; color: #A2A3AA">Coffres</p>
+    <button style="display: flex; align-items: center; gap: 10px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #C8C9CE; font-size: 14px; text-align: left; cursor: pointer"><span style="width: 9px; height: 9px; border-radius: 3px; background: #8C8D95; flex: none"></span><span style="flex: 1">Mon coffre</span><svg aria-label="Privé" role="img" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#A2A3AA" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg></button>
+    <button style="display: flex; align-items: center; gap: 10px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #C8C9CE; font-size: 14px; text-align: left; cursor: pointer"><span style="width: 9px; height: 9px; border-radius: 3px; background: #4FB89A; flex: none"></span><span style="flex: 1">Wiki interne</span><svg aria-label="Toute l’organisation" role="img" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#A2A3AA" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"></path></svg></button>
+    <button style="display: flex; align-items: center; gap: 10px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #F3F3F5; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer"><span style="width: 9px; height: 9px; border-radius: 3px; background: {{accent}}; flex: none"></span><span style="flex: 1">Projet Mementum</span><span style="font-size: 12px; color: #A2A3AA; font-weight: 500">5</span></button>
+    <div style="display: flex; flex-direction: column; gap: 1px; padding-left: 19px; border-left: 1px solid #2B2C31; margin-left: 12px">
+      <button style="padding: 4px 8px; min-height: 30px; border: 0; background: transparent; border-radius: 6px; color: #A2A3AA; font-size: 14px; text-align: left; cursor: pointer">Feuille de route</button>
+      <button aria-current="page" style="padding: 4px 8px; min-height: 30px; border: 0; background: #2A2B30; border-radius: 6px; color: #F3F3F5; font-size: 14px; font-weight: 600; text-align: left; cursor: pointer">Spécification v1</button>
+      <button style="padding: 4px 8px; min-height: 30px; border: 0; background: transparent; border-radius: 6px; color: #A2A3AA; font-size: 14px; text-align: left; cursor: pointer">Réunions</button>
+      <button style="padding: 4px 8px; min-height: 30px; border: 0; background: transparent; border-radius: 6px; color: #A2A3AA; font-size: 14px; text-align: left; cursor: pointer">Tâches</button>
+    </div>
+    <button style="display: flex; align-items: center; gap: 10px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #C8C9CE; font-size: 14px; text-align: left; cursor: pointer"><span style="width: 9px; height: 9px; border-radius: 3px; background: #D47AA6; flex: none"></span><span style="flex: 1">Direction</span><span style="font-size: 12px; color: #A2A3AA">2</span></button>
+    <button style="display: flex; align-items: center; gap: 10px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #A2A3AA; font-size: 14px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>Nouveau coffre</button>
+
+    <div style="flex: 1; min-height: 20px"></div>
+    <button style="display: flex; align-items: center; gap: 9px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #A2A3AA; font-size: 14px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16"></path><path d="M9 7V4h6v3"></path><path d="M6 7l1 13h10l1-13"></path></svg>Corbeille</button>
+    <button style="display: flex; align-items: center; gap: 9px; padding: 5px 8px; min-height: 32px; border: 0; background: transparent; border-radius: 7px; color: #A2A3AA; font-size: 14px; text-align: left; cursor: pointer"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9L7 7M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path></svg>Réglages</button>
+  </nav>
+
+  <main style="flex: 999 1 560px; min-width: 0; position: relative; display: flex; flex-direction: column">
+    <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 18px; min-height: 48px; box-sizing: border-box">
+      <div style="flex: 1; display: flex; align-items: center; gap: 6px; color: #A2A3AA; font-size: 14px; min-width: 0"><span>Projet Mementum</span><span aria-hidden="true">/</span><span style="color: #E8E8EA">Spécification v1</span></div>
+      <div style="display: flex; align-items: center">
+        <span title="Marie Dupont" style="width: 26px; height: 26px; border-radius: 13px; background: #F07A62; color: #1A0E0B; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 2px solid #17181B">MD</span>
+        <span title="Sam Leroy" style="width: 26px; height: 26px; border-radius: 13px; background: #7FA7F5; color: #0B1220; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; border: 2px solid #17181B; margin-left: -6px">SL</span>
+        <span title="Scribe, agent" style="width: 26px; height: 26px; border-radius: 13px; background: {{accent}}; color: #1A1408; display: flex; align-items: center; justify-content: center; border: 2px solid #17181B; margin-left: -6px"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"></path></svg></span>
+      </div>
+      <button onClick="{{toggleShare}}" aria-expanded="{{shareOpen}}" style="padding: 5px 14px; min-height: 32px; border: 1px solid {{accent}}; background: transparent; border-radius: 8px; color: {{accent}}; font-size: 14px; font-weight: 700; cursor: pointer">Partager</button>
+      <button aria-label="Plus d’options" style="width: 32px; height: 32px; border: 0; background: transparent; border-radius: 8px; color: #C8C9CE; display: flex; align-items: center; justify-content: center; cursor: pointer"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg></button>
+    </header>
+
+    <article style="max-width: 700px; width: 100%; margin: 0 auto; padding: 40px 40px 150px; box-sizing: border-box">
+      <span aria-hidden="true" style="width: 48px; height: 48px; border-radius: 12px; background: {{accentSoft}}; color: {{accent}}; display: flex; align-items: center; justify-content: center"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"></path><path d="M14 3v4h4"></path><path d="M9 12h6M9 16h4"></path></svg></span>
+      <h1 style="margin: 16px 0 10px; font-size: 42px; line-height: 1.12; font-weight: 800; letter-spacing: -0.025em; color: #F6F6F7">Spécification v1</h1>
+      <p style="margin: 0 0 28px; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: #A2A3AA">
+        <span><span style="color: #8C8D95">Statut</span> <span style="color: #9EC1FF; font-weight: 600">En cours</span></span>
+        <span><span style="color: #8C8D95">Responsable</span> <span style="color: #E8E8EA">Lenny</span></span>
+        <span><span style="color: #8C8D95">Coffre</span> <span style="color: #E8E8EA">Projet Mementum</span></span>
+        <span><span style="color: #8C8D95">Modifié</span> <span style="color: #E8E8EA">il y a 2 min</span></span>
+      </p>
+
+      <h2 style="margin: 0 0 6px; font-size: 22px; font-weight: 700; color: #F6F6F7">Objectif</h2>
+      <p style="margin: 0 0 14px; color: #D4D5D9">Livrer un espace de travail rapide où l’équipe et ses agents écrivent ensemble, en direct, sur notre propre serveur<span aria-hidden="true" style="position: relative; display: inline-block; width: 2px; height: 18px; background: #F07A62; vertical-align: text-bottom; margin-left: 1px"><span style="position: absolute; bottom: 100%; left: 0; background: #F07A62; color: #1A0E0B; font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 4px 4px 4px 0; white-space: nowrap; font-weight: 700">Marie</span></span>.</p>
+
+      <div style="display: flex; gap: 12px; align-items: flex-start; background: #202126; border: 1px solid #2E2F35; border-radius: 10px; padding: 14px 16px; margin: 0 0 20px">
+        <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="1.9" stroke-linecap="round" style="flex: none; margin-top: 3px"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5"></path><path d="M12 8h.01"></path></svg>
+        <p style="margin: 0; color: #D4D5D9">Les coffres remplacent les espaces d’équipe : chacun a son coffre privé, et peut le partager avec toute l’organisation ou seulement avec certaines personnes.</p>
+      </div>
+
+      <h2 style="margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #F6F6F7">Priorités du lancement</h2>
+      <ul style="list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 6px">
+        <li style="display: flex; gap: 10px; align-items: flex-start"><input type="checkbox" checked="{{ true }}" onChange="{{noop}}" aria-label="Terminé" style="margin-top: 5px; accent-color: {{accent}}"><span style="color: #8C8D95; text-decoration: line-through">Éditeur en blocs avec présence en direct</span></li>
+        <li style="display: flex; gap: 10px; align-items: flex-start"><input type="checkbox" aria-label="Terminé" style="margin-top: 5px; accent-color: {{accent}}"><span style="color: #D4D5D9">Partage d’un coffre par personne, par groupe ou à toute l’organisation</span></li>
+        <li style="display: flex; gap: 10px; align-items: flex-start"><input type="checkbox" aria-label="Terminé" style="margin-top: 5px; accent-color: {{accent}}"><span style="color: #D4D5D9">Serveur MCP pour les agents<sc-if value="{{suggPending}}" hint-placeholder-val="{{ true }}"><span style="color: {{accent}}; text-decoration: underline dotted; text-underline-offset: 4px"> : lecture et écriture en Markdown, mode suggestion par défaut</span><span aria-hidden="true" style="position: relative; display: inline-block; width: 2px; height: 18px; background: {{accent}}; vertical-align: text-bottom; margin-left: 1px"><span style="position: absolute; top: 100%; left: 0; background: {{accent}}; color: #1A1408; font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 0 4px 4px 4px; white-space: nowrap; font-weight: 700">Scribe · agent</span></span></sc-if><sc-if value="{{suggAccepted}}" hint-placeholder-val="{{ false }}"><span> : lecture et écriture en Markdown, mode suggestion par défaut</span></sc-if></span></li>
+      </ul>
+      <sc-if value="{{suggPending}}" hint-placeholder-val="{{ true }}">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 18px 0 0 26px">
+          <button onClick="{{accept}}" style="display: flex; align-items: center; gap: 6px; padding: 4px 12px; min-height: 30px; border: 0; background: {{accent}}; color: #1A1408; border-radius: 7px; font-size: 13px; font-weight: 700; cursor: pointer"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"></path></svg>Accepter</button>
+          <button onClick="{{reject}}" style="padding: 4px 12px; min-height: 30px; border: 1px solid #3A3B42; background: transparent; color: #E8E8EA; border-radius: 7px; font-size: 13px; cursor: pointer">Refuser</button>
+          <span style="font-size: 12px; color: #A2A3AA">Suggestion de Scribe · modèle local</span>
+        </div>
+      </sc-if>
+      <sc-if value="{{suggDone}}" hint-placeholder-val="{{ false }}">
+        <p style="margin: 10px 0 0 26px; font-size: 13px; color: #A2A3AA">{{suggDoneLabel}} · <button onClick="{{undo}}" style="border: 0; background: transparent; padding: 0; color: {{accent}}; font-size: 13px; text-decoration: underline; cursor: pointer">Annuler</button></p>
+      </sc-if>
+
+      <div style="margin-top: 32px">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px">
+          <h2 style="margin: 0; font-size: 18px; font-weight: 700; color: #F6F6F7; flex: 1">Tâches</h2>
+          <div role="tablist" aria-label="Vues de la base" style="display: flex; gap: 4px">
+            <button role="tab" aria-selected="true" style="padding: 3px 10px; min-height: 28px; border: 0; background: #2A2B30; border-radius: 6px; font-size: 13px; color: #F3F3F5; font-weight: 600; cursor: pointer">Liste</button>
+            <button role="tab" aria-selected="false" style="padding: 3px 10px; min-height: 28px; border: 0; background: transparent; border-radius: 6px; font-size: 13px; color: #A2A3AA; cursor: pointer">Tableau</button>
+            <button role="tab" aria-selected="false" style="padding: 3px 10px; min-height: 28px; border: 0; background: transparent; border-radius: 6px; font-size: 13px; color: #A2A3AA; cursor: pointer">Calendrier</button>
+          </div>
+        </div>
+        <ul style="list-style: none; margin: 0; padding: 0; border-top: 1px solid #2B2C31">
+          <sc-for list="{{tasks}}" as="t" hint-placeholder-count="4">
+            <li style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 4px; border-bottom: 1px solid #2B2C31">
+              <span style="{{t.dot}}"></span>
+              <span style="flex: 1; min-width: 200px; color: #E8E8EA; font-weight: 500">{{t.name}}</span>
+              <span style="font-size: 13px; color: #A2A3AA">{{t.who}}</span>
+              <span style="font-size: 13px; color: #A2A3AA; min-width: 52px; text-align: right">{{t.due}}</span>
+            </li>
+          </sc-for>
+        </ul>
+      </div>
+    </article>
+
+    <div style="position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); width: 640px; max-width: calc(100% - 32px); box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 14px; background: #24252A; border: 1px solid #36373E; border-radius: 14px; box-shadow: 0 16px 40px rgba(0,0,0,0.45)">
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="2" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"></path><path d="M19 16l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"></path></svg>
+      <label style="flex: 1; display: flex; min-width: 0"><span style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Demander à Mementum</span><input type="text" placeholder="Demander à Mementum, ou taper / pour une commande" style="flex: 1; min-width: 0; border: 0; background: transparent; color: #E8E8EA; font-size: 14px; font-family: inherit; padding: 6px 0; outline: none"></label>
+      <span style="font-size: 12px; color: #C8C9CE; background: #2F3036; border-radius: 6px; padding: 2px 8px; white-space: nowrap">Modèle local</span>
+      <span style="font-size: 12px; color: #A2A3AA; border: 1px solid #3A3B42; border-radius: 5px; padding: 1px 6px; white-space: nowrap">Ctrl K</span>
+    </div>
+
+    <sc-if value="{{shareOpen}}" hint-placeholder-val="{{ true }}">
+      <section aria-label="Partager" style="position: absolute; top: 50px; right: 16px; width: 420px; max-width: calc(100% - 32px); box-sizing: border-box; background: #222327; border: 1px solid #34353B; border-radius: 12px; box-shadow: 0 20px 50px rgba(0,0,0,0.5); z-index: 5">
+        <div style="padding: 14px 16px 0; display: flex; flex-direction: column; gap: 12px">
+          <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 10px">
+            <span style="font-size: 15px; font-weight: 700; color: #F6F6F7">Partager</span>
+            <span style="font-size: 12px; color: #A2A3AA">{{scopeHint}}</span>
+          </div>
+          <div role="group" aria-label="Portée du partage" style="display: flex; gap: 6px">
+            <button onClick="{{setScopeVault}}" aria-pressed="{{scopeVault}}" style="flex: 1; padding: 6px 8px; min-height: 32px; border-radius: 8px; font-size: 13px; cursor: pointer; {{scopeVaultStyle}}">Coffre « Projet Mementum »</button>
+            <button onClick="{{setScopePage}}" aria-pressed="{{scopePage}}" style="flex: 1; padding: 6px 8px; min-height: 32px; border-radius: 8px; font-size: 13px; cursor: pointer; {{scopePageStyle}}">Cette page</button>
+          </div>
+          <div style="display: flex; gap: 8px">
+            <label style="flex: 1; display: flex"><span style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Inviter</span><input type="text" placeholder="Personnes, groupes ou agents" style="flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid #3A3B42; background: #1B1C20; border-radius: 8px; font-size: 14px; font-family: inherit; color: #E8E8EA"></label>
+            <button style="padding: 6px 14px; min-height: 34px; border: 0; background: {{accent}}; color: #1A1408; border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer">Inviter</button>
+          </div>
+          <ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px">
+            <li style="display: flex; align-items: center; gap: 10px; padding: 5px 0"><span style="width: 28px; height: 28px; border-radius: 14px; background: #E8E8EA; color: #17181B; font-size: 12px; font-weight: 800; display: flex; align-items: center; justify-content: center; flex: none">L</span><span style="flex: 1"><span style="display: block; font-weight: 600; color: #F3F3F5">Lenny (toi)</span><span style="display: block; font-size: 12px; color: #A2A3AA">Propriétaire</span></span><span style="font-size: 13px; color: #A2A3AA">Accès complet</span></li>
+            <li style="display: flex; align-items: center; gap: 10px; padding: 5px 0"><span style="width: 28px; height: 28px; border-radius: 8px; background: #2F3036; color: #C8C9CE; display: flex; align-items: center; justify-content: center; flex: none"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="9" cy="8" r="3.5"></circle><path d="M2.5 20a6.5 6.5 0 0 1 13 0"></path><path d="M16 4.5a3.5 3.5 0 0 1 0 7"></path></svg></span><span style="flex: 1"><span style="display: block; font-weight: 600; color: #F3F3F5">Groupe Design</span><span style="display: block; font-size: 12px; color: #A2A3AA">4 personnes</span></span><button style="border: 0; background: transparent; font-size: 13px; color: #D4D5D9; padding: 4px 6px; border-radius: 6px; cursor: pointer">Peut modifier ▾</button></li>
+            <li style="display: flex; align-items: center; gap: 10px; padding: 5px 0"><span style="width: 28px; height: 28px; border-radius: 14px; background: #F07A62; color: #1A0E0B; font-size: 11px; font-weight: 800; display: flex; align-items: center; justify-content: center; flex: none">MD</span><span style="flex: 1"><span style="display: block; font-weight: 600; color: #F3F3F5">Marie Dupont</span><span style="display: block; font-size: 12px; color: #A2A3AA">Membre</span></span><button style="border: 0; background: transparent; font-size: 13px; color: #D4D5D9; padding: 4px 6px; border-radius: 6px; cursor: pointer">Peut modifier ▾</button></li>
+            <li style="display: flex; align-items: center; gap: 10px; padding: 5px 0"><span style="width: 28px; height: 28px; border-radius: 8px; background: {{accentSoft}}; color: {{accent}}; display: flex; align-items: center; justify-content: center; flex: none"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linejoin="round"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"></path></svg></span><span style="flex: 1"><span style="display: block; font-weight: 600; color: #F3F3F5">Scribe · agent</span><span style="display: block; font-size: 12px; color: #A2A3AA">Parrainé par Lenny</span></span><button style="border: 0; background: transparent; font-size: 13px; color: #D4D5D9; padding: 4px 6px; border-radius: 6px; cursor: pointer">Peut suggérer ▾</button></li>
+          </ul>
+          <div style="border-top: 1px solid #34353B; padding-top: 10px">
+            <p style="margin: 0 0 6px; font-size: 12px; font-weight: 700; color: #A2A3AA">Accès général</p>
+            <div style="display: flex; flex-direction: column; gap: 2px">
+              <sc-for list="{{opts}}" as="o" hint-placeholder-count="3">
+                <button onClick="{{o.pick}}" aria-pressed="{{o.selected}}" style="display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 7px 8px; border: 0; border-radius: 8px; text-align: left; cursor: pointer; {{o.rowStyle}}">
+                  <span aria-hidden="true" style="{{o.dotStyle}}"></span>
+                  <span style="flex: 1"><span style="display: block; font-size: 14px; font-weight: 600; color: #F3F3F5">{{o.label}}</span><span style="display: block; font-size: 12px; color: #A2A3AA">{{o.hint}}</span></span>
+                </button>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; margin-top: 12px; border-top: 1px solid #34353B">
+          <a href="#partage" style="font-size: 13px">En savoir plus</a>
+          <button style="padding: 5px 12px; min-height: 32px; border: 1px solid #3A3B42; background: transparent; border-radius: 8px; font-size: 13px; color: #E8E8EA; cursor: pointer">Copier le lien</button>
+        </div>
+      </section>
+    </sc-if>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#E9A23B","options":["#E9A23B","#4FB89A","#9C8CF2","#F07A62"]},"$preview":{"width":1440,"height":960}}'>
+class Component extends DCLogic {
+  renderVals() {
+    var s = this.state || {};
+    var self = this;
+    var accent = this.props.accent ?? '#E9A23B';
+    var accentSoft = accent + '26';
+    var shareOpen = s.shareOpen ?? true;
+    var access = s.access ?? 'invites';
+    var scope = s.scope ?? 'vault';
+    var sugg = s.suggestion ?? 'pending';
+    var opts = [
+      { id: 'invites', label: 'Seulement les personnes invitées', hint: 'Les membres ci-dessus et les agents autorisés' },
+      { id: 'org', label: 'Toute l’organisation Atelier Nova', hint: 'Tous les membres peuvent trouver et lire ce coffre' },
+      { id: 'link', label: 'Toute personne ayant le lien', hint: 'Lecture seule · expire dans 30 jours' }
+    ].map(function (o) {
+      var on = o.id === access;
+      return Object.assign({}, o, {
+        selected: on,
+        pick: function () { self.setState({ access: o.id }); },
+        rowStyle: on ? 'background: #2A2B30;' : 'background: transparent;',
+        dotStyle: 'flex: none; margin-top: 4px; width: 14px; height: 14px; border-radius: 7px; box-sizing: border-box; ' + (on ? 'border: 4px solid ' + accent + ';' : 'border: 1.5px solid #6E6F77;')
+      });
+    });
+    var on = 'border: 1px solid ' + accent + '; background: ' + accentSoft + '; color: #F6F6F7; font-weight: 700;';
+    var off = 'border: 1px solid #3A3B42; background: transparent; color: #A2A3AA;';
+    var dot = function (c) { return 'width: 10px; height: 10px; border-radius: 5px; flex: none; ' + c; };
+    return {
+      accent: accent,
+      accentSoft: accentSoft,
+      shareOpen: shareOpen,
+      toggleShare: function () { self.setState({ shareOpen: !shareOpen }); },
+      opts: opts,
+      scopeVault: scope === 'vault',
+      scopePage: scope === 'page',
+      scopeVaultStyle: scope === 'vault' ? on : off,
+      scopePageStyle: scope === 'page' ? on : off,
+      setScopeVault: function () { self.setState({ scope: 'vault' }); },
+      setScopePage: function () { self.setState({ scope: 'page' }); },
+      scopeHint: scope === 'vault' ? 'Toutes les pages du coffre' : 'Exception pour cette page',
+      suggPending: sugg === 'pending',
+      suggAccepted: sugg === 'accepted',
+      suggDone: sugg !== 'pending',
+      suggDoneLabel: sugg === 'accepted' ? 'Suggestion de Scribe acceptée' : 'Suggestion de Scribe refusée',
+      accept: function () { self.setState({ suggestion: 'accepted' }); },
+      reject: function () { self.setState({ suggestion: 'rejected' }); },
+      undo: function () { self.setState({ suggestion: 'pending' }); },
+      noop: function () {},
+      tasks: [
+        { name: 'Prototype de l’éditeur temps réel', who: 'Lenny', due: '22 nov.', dot: dot('background: #7FA7F5;') },
+        { name: 'Format VMD : tests d’aller-retour', who: 'Scribe · agent', due: '29 nov.', dot: dot('border: 2px solid #8C8D95; box-sizing: border-box;') },
+        { name: 'Partage des coffres', who: 'Marie Dupont', due: '4 déc.', dot: dot('background: #7FA7F5;') },
+        { name: 'Benchmark Yjs / Loro', who: 'Sam Leroy', due: '15 nov.', dot: dot('background: #4FB89A;') }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

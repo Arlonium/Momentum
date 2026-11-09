@@ -2,7 +2,7 @@
 
 > **Statut** : proposition. Nom (**Mementum**) et direction visuelle (**A « Papier »**) choisis par Lenny ; le reste est à valider
 > **Date** : 2026-11-09 (d'abord « Vivace », puis « Memento », écarté parce que Memento Database existe déjà ; finalement « Mementum »)
-> **Rédigé par** : Claude Code, à partir de 4 recherches (fonctionnalités Notion 2026, alternatives open source, architecture temps réel, accès des agents IA). La synthèse est dans [`reports/Conception alternative Notion open source.md`](../../../reports/Conception%20alternative%20Notion%20open%20source.md) et les notes sourcées dans [`research_notes/`](../../../research_notes/Conception%20alternative%20Notion%20open%20source/).
+> **Rédigé par** : Claude Code, à partir de 4 recherches (fonctionnalités Notion 2026, alternatives open source, architecture temps réel, accès des agents IA). La synthèse est dans [`docs/research/2026-11-09-etat-de-l-art.md`](../research/2026-11-09-etat-de-l-art.md) et les notes sourcées dans [`docs/research/notes/`](../research/notes/).
 
 ---
 

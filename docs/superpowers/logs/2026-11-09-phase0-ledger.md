@@ -1,0 +1,64 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-11-09-phase0-spike.md
+Spec: docs/specs/2026-11-09-mementum-design.md
+Setup: Ruling: dépôt créé pour ce plan → branche `spike/phase-0` au lieu d'un worktree — rien d'autre à isoler — coût si faux : nul.
+Setup: Ruling: commit initial des docs (spec + plan) sur `main` pour pouvoir brancher — coût si faux : nul.
+Setup: Ruling: aucune machine ARM disponible pour l'instant → mesures sur le PC (référence), colonne ARM laissée « à faire » pour Lenny (Pi 4 ou CAX11) — verdicts de budget marqués provisoires — coût si faux : un budget qui passe sur PC peut échouer sur ARM.
+Pre-flight:
+| T1 → T2 | WS `/sync/{page}` protocole y-websocket ↔ `WebsocketProvider("ws://localhost:8080/sync", page)` | OK |
+| T1 → T2 | page `bench-10k` dans `spike/data/spike.db` ↔ Playwright webServer | Ruling: le serveur lit `SPIKE_DB` (défaut `data/spike.db`, relatif à `spike/`) et Playwright le lance avec ce défaut |
+| T1 → T4/T5 | `Room::transact(origin, f(&mut TransactionMut, &XmlFragmentRef))` | OK |
+| T2 → T4 | fixtures yjs/blocknote ↔ noms du tableau de correspondance | à vérifier à l'exécution (noms réels BlockNote) |
+| T3 → T4 | `Block`, `parse`, `render` | OK |
+| T4 → T5 | T5 doit éditer un `XmlText` précis et insérer après un bloc, absent des Produces de T4 | Ruling: ajouter `ydoc::find_block_xml(txn, frag, id)` et `ydoc::insert_blocks_after(txn, frag, after_id, &[Block])` dans ydoc.rs pendant T5 |
+| T4 ↔ T5 | e2e `browser_edit_reads_back_as_mmd` a besoin de `GET /pages/{id}` | lancé en T5 comme prévu |
+| T6, T7 | indépendants | — |
+Task 1: Ruling: ajout de `Store::counts`, `Store::pending_updates` et `Store::put_snapshot` (non listés) pour le test de compaction et la génération de la page de mesure — coût si faux : nul (spike).
+Task 1: Ruling: yrs avec feature `sync` (Awareness doit être Send/Sync dans axum) — coût si faux : nul.
+Task 1: Ruling: mises à jour vides (poignée de main d'un doc vide) ignorées — sinon chaque connexion ajoute une entrée inutile au journal — coût si faux : nul.
+Task 1: Ruling: test de compaction instable (attente fixe de 1,5 s) → sondage jusqu'à 10 s que les 501 mises à jour soient persistées — coût si faux : nul.
+Task 1: complete (commits 9cc49fa..56d95fb, tests: bash -c 'cd spike && cargo test -p spike-server --test sync' → test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.93s)
+Task 2: complete (commits 56d95fb..56d95fb, tests: bash -c 'cd spike && cargo test -q -p spike-server --test sync && cd web && pnpm exec playwright test' →   5 passed (8.8s))
+Task 2: correction : la ligne « Task 2: complete (commits 56d95fb..56d95fb) » ci-dessus a été écrite avant le commit, à cause d'une commande shell mal formée (heredoc non fermé). Le commit de la Task 2 suit, et une nouvelle ligne « complete » le remplace.
+Task 2: Ruling: BlockNote 0.57 utilise Yjs 14 RC par défaut → chemin Yjs 13 `@blocknote/core/yjs` (`withCollaboration`) + y-prosemirror 1.x, conforme à la contrainte « Yjs 13.6.x » — coût si faux : migration Yjs 14 à refaire plus tard (risque consigné dans RESULTS).
+Task 2: Ruling: e2e hors ligne : `setOffline` + `provider.disconnect()/connect()` (setOffline seul ne coupe pas forcément la WebSocket) — coût si faux : nul.
+Task 2: Ruling: perte de données sur page vide (deux racines concurrentes) → le serveur initialise la racine d'une page neuve (`seed_if_empty`, persistée en instantané) ; nouveau test `new_page_is_seeded_with_blocknote_root` ; le test de compaction compte le texte des `XmlText` seulement — coût si faux : une page créée hors ligne (P5) devra aussi passer par une racine déterministe.
+Task 2: Ruling: budget « page de 10 000 blocs < 300 ms » non tenu (~1,3 s, dont ~0,93 s de synchro) → test marqué `test.fail` avec la mesure, verdict « corrigé » dans RESULTS — coût si faux : nul, c'est une mesure.
+Task 2: Ruling: mesure d'ouverture découpée en synchro + rendu (`tSynced`) ; `window.__mementum` expose l'objet collab lui-même — coût si faux : nul.
+Task 2: complete (commits 56d95fb..2088518, tests: bash -c 'cd spike && cargo test -q -p spike-server --test sync && cd web && pnpm exec playwright test' →   5 passed (8.4s))
+Task 3: Ruling: parseur de blocs maison, ligne à ligne, et pulldown-cmark pour le contenu en ligne seulement (le plan prévoyait pulldown aussi pour les segments Markdown). Le MMD canonique est structuré par lignes, et on évite les ambiguïtés GFM (ancres après un tableau, balises de bloc) — coût si faux : du Markdown « exotique » écrit par un agent (titres setext, lignes paresseuses) n'est pas reconnu.
+Task 3: Ruling: API ajoutée : `normalize`/`normalize_inline` (forme canonique : textes vides retirés, voisins de mêmes marques fusionnés) et un module `inline.rs` — coût si faux : nul.
+Task 3: Ruling: marques en délimiteurs Markdown (`**`, `*`, `~~`, `` ` ``) seulement si le texte est borné par des alphanumériques et entouré de texte sans marque ; sinon balises HTML (`<strong>`, `<em>`, `<s>`, `<code>`) ; `<u>` et `<span color>` toujours en HTML — coût si faux : nul (relu à l'identique).
+Task 3: Ruling: espaces de bord écrits `&#32;`, paragraphe vide écrit `<p/>`, ancre de `<page>` et `<database>` dans un attribut `anchor="bN"` (leur `id` est déjà pris), enfants d'un élément numéroté indentés de la largeur du marqueur (« 1. » = 3), enfants seulement pour les listes, toggle, synced, columns, column et callout — coût si faux : à reporter dans la spec MMD.
+Task 3: Ruling: maths en ligne `$…$` : LaTeX à accolades équilibrées (exigé par pulldown-cmark) ; le générateur proptest en tient compte — coût si faux : un `$x}$` invalide serait relu comme du texte.
+Task 3: Ruling: proptest a trouvé que « ! » + lien se relisait comme une image → « ! » échappé seulement juste avant un lien — coût si faux : nul. Validation : 512 cas en standard, plus 3 × 4 096 cas sans échec.
+Task 3: complete (commits 2088518..3e0fdce, tests: bash -c 'cd spike && cargo test -p spike-mmd' → test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s)
+Task 3: note : la ligne « complete » ci-dessus cite le résultat des doctests (0 test) ; la suite roundtrip (6 tests) est passée dans la même exécution.
+Task 4: Ruling: l'écriture côté serveur n'ajoute pas les attributs par défaut de BlockNote (backgroundColor, textAlignment…) : ProseMirror les complète à l'ouverture, vérifié par l'e2e — coût si faux : nul.
+Task 4: Ruling: un type de nœud BlockNote inconnu du serveur est lu comme `Unknown{type_name: <tag>, data: ""}` (ses attributs sont perdus) ; seuls les blocs `unknown` écrits par nous gardent leurs données — coût si faux : pour la P1, sérialiser les attributs en JSON dans `data`.
+Task 4: Ruling: les nombres sont écrits en entier Yjs quand ils sont entiers (comme le JavaScript), sinon en flottant (`Number::Int`/`Float` de yrs 0.28) — coût si faux : nul.
+Task 4: Ruling: l'e2e compare `editor.document` après un aller-retour JSON, comme la fixture a été produite (les clés `undefined` disparaissent) — coût si faux : nul.
+Task 4: Ruling: route `PUT /pages/{id}/mmd` ajoutée au serveur (204, 422 si le MMD est invalide) — coût si faux : nul.
+Task 4: complete (commits 3e0fdce..4bbd731, tests: bash -c 'cd spike && cargo test -q -p spike-mmd --test ydoc --test roundtrip && cd web && pnpm exec playwright test e2e/server-written.spec.ts -g server_written_doc_opens_in_blocknote' →   1 passed (4.1s))
+Task 5: Ruling: révision = SHA-256 de l'instantané Yjs (vecteur d'état + ensemble des suppressions) et non du seul vecteur d'état comme dans le plan : une suppression pure ne change pas le vecteur d'état, et deux états différents auraient partagé la même révision — coût si faux : nul.
+Task 5: Ruling: appel atomique par répétition à blanc des opérations sur une copie du document, sous le même verrou, avant l'application réelle — coût si faux : coût mémoire d'une copie par appel (acceptable pour le spike ; en P1, valider sans copie).
+Task 5: Ruling: révision inconnue (plus de 100 révisions ou serveur redémarré) → 409 `unknown_revision` avec la consigne de relire la page — coût si faux : nul.
+Task 5: Ruling: empreinte d'un bloc = MMD du bloc seul (enfants exclus) ; un bloc déjà modifié par une opération précédente du même appel n'est pas re-contrôlé ; un `str_replace` qui chevauche une mention ou une formule → 422 `no_match` — coût si faux : nul.
+Task 5: Ruling: l'e2e vérifie « texte humain complet dans le navigateur et sur le serveur, 20 éditions présentes, même nombre de blocs » au lieu de « MMD serveur == rendu navigateur » (le navigateur n'a pas de rendu MMD) — coût si faux : une divergence de mise en forme passerait inaperçue (la convergence Yjs reste couverte par les tests de la Task 1).
+Task 5: Ruling: `tests/common/mod.rs` reprend le client Yjs de test de `sync.rs` (doublon assumé dans le spike) — coût si faux : nul.
+Task 5: Ruling: l'entrée e2e écrit l'espace finale `&#32;` (Markdown supprime les espaces de fin de ligne, règle MMD de la Task 3) — coût si faux : nul.
+Task 5: complete (commits 4bbd731..8e8fe48, tests: bash -c 'cd spike && cargo test -q -p spike-server --test agent --test sync && cd web && pnpm exec playwright test e2e/agent-vs-human.spec.ts e2e/server-written.spec.ts' →   3 passed (14.1s))
+Task 6: Ruling: API ajoutée : `open(path)`, `eval_filter` (évaluateur de référence pour le test différentiel), `Rng` (xorshift déterministe, sans dépendance) — coût si faux : nul.
+Task 6: Ruling: SQL dynamique marqué `sqlx::AssertSqlSafe` (exigé par sqlx 0.9) : noms de propriétés validés par `check_prop`, valeurs toujours en paramètres liés — coût si faux : nul.
+Task 6: Ruling: le bench a montré que `group_counts` ignorait l'index (`CAST`) : 707 ms → 12 ms avec l'expression exacte ; `budgets_100k` est passé de RED à GREEN sur PC — coût si faux : nul.
+Task 6: Ruling: variante « table typée » mesurée dès le PC (plan : seulement si l'ARM échoue), car aucune machine ARM n'est disponible et les groupes échouaient d'abord sur PC. Index `relations(from_row, prop)` ajouté pour construire la table — coût si faux : nul, c'est une mesure en plus.
+Task 6: Ruling: verdict ARM laissé « à faire » : Lenny doit lancer `cargo test --release -p spike-db -- --ignored budgets_100k --nocapture` et le bench sur un Pi 4 ou un CAX11 — coût si faux : budget « filtre + tri » à risque sur Pi.
+Task 6: complete (commits 8e8fe48..68b0c98, tests: bash -c 'cd spike && cargo test -q -p spike-db --test query && cargo test --release -q -p spike-db --test query -- --ignored budgets_100k' → test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.42s)
+Task 7: Ruling: binaire de mesure maison (médiane de 3 à 5 essais) au lieu de criterion : il faut aussi des tailles, de la mémoire et un état de convergence, que criterion ne donne pas, et les charges de 10 000 blocs rendraient criterion très long — coût si faux : précision statistique moindre (les écarts mesurés vont de 2× à 16×, donc pas d'ambiguïté).
+Task 7: Ruling: ajout d'une charge W3b « charger puis lire tous les blocs », car Loro charge paresseusement et W3/W4 seuls le favorisaient à tort — coût si faux : nul.
+Task 7: Ruling: côté JS, W1 à W4 seulement (W5 et W6 mesurés côté Rust) ; la mémoire WASM de Loro n'est pas visible dans le tas JS, c'est noté — coût si faux : nul pour la décision.
+Task 7: Ruling: interblocage trouvé (`get_or_insert_xml_fragment` appelé avec une transaction ouverte, feature `sync` de yrs) → le fragment est obtenu avant la transaction ; à retenir pour le vrai serveur — coût si faux : nul.
+Task 7: Ruling: verdict « on garde Yjs », en appliquant la règle du plan ; loro-prosemirror non évalué puisque la première condition de la règle n'est pas remplie — coût si faux : nul.
+Task 7: complete (commits 68b0c98..0262973, tests: bash -c 'cd spike && cargo test --release -q -p spike-crdt-bench --test converge' → test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s)
+Task 8: Ruling: verdicts de budget marqués « provisoires (PC) », colonne ARM laissée à faire avec les commandes à lancer en fin de RESULTS.md (pas de machine ARM disponible) — coût si faux : un budget peut tomber sur Pi.
+Task 8: Ruling: restes « vmd » de l'ancien nom du format corrigés en « mmd » dans la conception (`body_mmd`, `mementum://spec/mmd`, `spec/mmd/`) — coût si faux : nul.
+Task 8: complete (commits 0262973..a8ab7e6, tests: bash -c 'test -f spike/RESULTS.md && grep -q 'Verdict (9 novembre 2026)' spike/RESULTS.md && grep -q 'Confirmé par la P0' docs/specs/2026-11-09-mementum-design.md && echo verdict-ok' → verdict-ok)
