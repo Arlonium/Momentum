@@ -142,3 +142,36 @@ async fn rebase_when_other_block_changed() {
     let md = get_page(port, "a7", false).await["markdown"].as_str().unwrap().to_string();
     assert!(md.contains("Humain : Premier paragraphe.") && md.contains("Cinquième bloc édité."), "{md}");
 }
+
+/// Relecture finale (C1) : les positions se comptent sur le texte brut du bloc,
+/// jamais sur `get_string()`, qui écrit les marques sous forme de balises.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unicode_safe_after_marks() {
+    const MMD: &str = "Du **gras** puis 🚀 déjà\n";
+    let (_d, port, _s) = setup("a9", MMD).await;
+    let client = connect(port, "a9", new_doc()).await;
+    let page = get_page(port, "a9", false).await;
+    assert_eq!(page["markdown"], MMD, "précondition : MMD canonique");
+    let (status, body) = update(port, "a9", str_replace(&page["revision"], "déjà", "prêt")).await;
+    assert_eq!(status, 200, "{body}");
+    let md = get_page(port, "a9", false).await["markdown"].as_str().unwrap().to_string();
+    assert_eq!(md, "Du **gras** puis 🚀 prêt\n");
+    assert!(
+        wait_until(Duration::from_secs(2), || text_content(&client.doc).contains("🚀 prêt")).await,
+        "{}",
+        text_content(&client.doc)
+    );
+}
+
+/// Relecture finale (C1) : une cible placée après du texte formaté et une mention.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replace_after_marks_and_mention() {
+    const MMD: &str = "Voir **ceci** et <mention type=\"user\" id=\"us_lenny\">Lenny</mention> puis la cible\n";
+    let (_d, port, _s) = setup("a10", MMD).await;
+    let page = get_page(port, "a10", false).await;
+    assert_eq!(page["markdown"], MMD, "précondition : MMD canonique");
+    let (status, body) = update(port, "a10", str_replace(&page["revision"], "cible", "fin")).await;
+    assert_eq!(status, 200, "{body}");
+    let md = get_page(port, "a10", false).await["markdown"].as_str().unwrap().to_string();
+    assert_eq!(md, MMD.replace("cible", "fin"));
+}

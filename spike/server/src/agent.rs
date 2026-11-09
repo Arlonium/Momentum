@@ -13,7 +13,7 @@ use spike_mmd::{render, Block, RenderOpts};
 use yrs::types::text::YChange;
 use yrs::types::Attrs;
 use yrs::updates::decoder::Decode;
-use yrs::{GetString, Out, ReadTxn, StateVector, Text, Transact, TransactionMut, Update, XmlFragment, XmlFragmentRef, XmlOut};
+use yrs::{Out, ReadTxn, StateVector, Text, Transact, TransactionMut, Update, XmlFragment, XmlFragmentRef, XmlOut};
 
 use crate::revisions::{block_markdown, flatten, revision_of, snapshot_of, Snapshot};
 use crate::rooms::Room;
@@ -194,6 +194,18 @@ fn attrs_at<T: ReadTxn>(text: &yrs::XmlTextRef, txn: &T, at: u32) -> Attrs {
     Attrs::new()
 }
 
+/// Texte brut d'un `XmlText`. Ne jamais compter sur `get_string()`, qui écrit les marques
+/// sous forme de balises (`<bold>…</bold>`) et fausse toutes les positions.
+fn plain_text<T: ReadTxn>(text: &yrs::XmlTextRef, txn: &T) -> String {
+    let mut out = String::new();
+    for d in text.diff(txn, YChange::identity) {
+        if let Out::Any(yrs::Any::String(s)) = &d.insert {
+            out.push_str(s);
+        }
+    }
+    out
+}
+
 /// Remplace `len` caractères à partir du caractère `start` du texte du bloc, aux positions UTF-16 de Yjs.
 fn replace_in_block(txn: &mut TransactionMut, frag: &XmlFragmentRef, id: &str, start: usize, len: usize, new: &str) -> Result<(), AgentError> {
     let el = find_block_xml(&*txn, frag, id).ok_or_else(|| AgentError::Conflict(vec![(id.to_string(), String::new())]))?;
@@ -202,7 +214,7 @@ fn replace_in_block(txn: &mut TransactionMut, frag: &XmlFragmentRef, id: &str, s
     for child in children {
         match child {
             XmlOut::Text(t) => {
-                let s = t.get_string(&*txn);
+                let s = plain_text(&t, &*txn);
                 let n = s.chars().count();
                 if start >= pos && start < pos + n {
                     let local = start - pos;
