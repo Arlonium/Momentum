@@ -114,12 +114,15 @@ async fn concurrent_moves_are_deduped() {
     assert_eq!(server.iter().filter(|x| x.id == ids[0]).count(), 1);
 
     // A reçoit aussi le dédoublonnage par la diffusion, qu'il ait envoyé le
-    // premier ou le second déplacement : son état rejoint celui de B.
-    let b_state = b.state_vector();
+    // premier ou le second déplacement. Ce correctif n'est qu'une suppression,
+    // et une suppression ne change pas le vecteur d'état : A a déjà celui de B
+    // avec les deux déplacements, doublon compris. On attend donc le contenu.
     assert!(
-        a.wait_until(WAIT, |c| c.state_vector() == b_state).await,
-        "A n'a pas reçu le dédoublonnage"
+        a.wait_until(WAIT, deduped).await,
+        "A : {:?}",
+        text(&a.blocks())
     );
+    assert_eq!(a.state_vector(), b.state_vector());
     assert_eq!(a.blocks(), server);
     assert_eq!(b.blocks(), server);
     assert_eq!(stored_page(&f.store, f.page).await.read_blocks(), server);
