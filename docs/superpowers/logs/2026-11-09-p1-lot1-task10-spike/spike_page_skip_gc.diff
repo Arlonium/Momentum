@@ -1,0 +1,12 @@
+diff --git a/crates/mementum-crdt/src/page.rs b/crates/mementum-crdt/src/page.rs
+index e39f2a8..8d89fd4 100644
+--- a/crates/mementum-crdt/src/page.rs
++++ b/crates/mementum-crdt/src/page.rs
+@@ -46,6 +46,7 @@ impl PageDoc {
+     fn empty() -> PageDoc {
+         let doc = Doc::with_options(Options {
+             offset_kind: OffsetKind::Utf16,
++            skip_gc: std::env::var_os("SPIKE_GC").is_none(),
+             ..Options::default()
+         });
+         // Avant toute transaction : avec la feature `sync`, l'appel attendrait
