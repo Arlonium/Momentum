@@ -6,10 +6,8 @@
 //! issu de `diff()`, jamais sur `get_string()`, qui écrit les marques en
 //! balises.
 
-use std::collections::HashSet;
-
-use mementum_md::Block;
-use mementum_schema::{ContentKind, block};
+use mementum_md::{Block, normalize};
+use mementum_schema::{ContentKind, MmdForm, block};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
@@ -18,9 +16,11 @@ use yrs::{
 };
 
 use crate::blocknote::{
-    BLOCK_CONTAINER, BLOCK_GROUP, COLUMN, Ids, attr_string, elements, is_block, write_nodes,
+    BLOCK_CONTAINER, BLOCK_GROUP, COLUMN, COLUMN_LIST, Ids, attr_string, block_ids, elements,
+    is_block, write_nodes,
 };
-use crate::{CrdtError, PageDoc};
+use crate::structure::{Slot, check_blocks, depth_of, height_of, remaining, structure};
+use crate::{CrdtError, MAX_YJS_DEPTH, PageDoc};
 
 impl PageDoc {
     /// Remplace `len` caractères à partir de `start` dans le texte du bloc
@@ -40,8 +40,8 @@ impl PageDoc {
         };
         let container = find_block(&txn, &self.fragment, block_id)
             .ok_or_else(|| CrdtError::BlockNotFound(block_id.to_string()))?;
-        let node = inline_node(&txn, &container).ok_or_else(out_of_range)?;
-        let pieces = pieces(&txn, &node);
+        let (node, plain) = inline_node(&txn, &container).ok_or_else(out_of_range)?;
+        let pieces = pieces(&txn, &node, plain);
         let end = start.checked_add(len).ok_or_else(out_of_range)?;
         if end > pieces.iter().map(|p| p.chars).sum() {
             return Err(out_of_range());
@@ -84,7 +84,7 @@ impl PageDoc {
         }
 
         if !new.is_empty() {
-            let pieces = self::pieces(&txn, &node);
+            let pieces = self::pieces(&txn, &node, plain);
             let target = pieces.iter().find_map(|p| match &p.kind {
                 Kind::Text(text, runs) if p.start <= start && start <= p.end() => {
                     Some((text.clone(), utf16_at(runs, start - p.start)))
@@ -112,36 +112,38 @@ impl PageDoc {
     /// déjà dans la page, reçoit un UUIDv7 (sinon le dédoublonnage le
     /// supprimerait).
     ///
-    /// Comme dans BlockNote, une colonne ne se place qu'après une colonne, et
-    /// un autre bloc jamais après une colonne (`OutOfRange`).
+    /// Refusé, sans rien écrire : une structure que BlockNote refuserait
+    /// (`Structure` : colonne hors d'une liste de colonnes, autre chose
+    /// qu'une colonne dans une liste, liste de colonnes dans une colonne,
+    /// liste de moins de deux colonnes, colonne vide) ou un arbre qui
+    /// dépasserait [`MAX_YJS_DEPTH`] (`TooDeep`).
     pub fn insert_blocks_after(
         &self,
         after_id: Option<&str>,
         blocks: &[Block],
     ) -> Result<Vec<u8>, CrdtError> {
+        let blocks = normalize(blocks.to_vec());
         let mut txn = self.doc.transact_mut();
-        let slot = self.slot_after(&txn, after_id)?;
-        if let Some(b) = blocks
-            .iter()
-            .find(|b| (b.kind == COLUMN) != slot.after_column)
-        {
-            return Err(CrdtError::OutOfRange {
-                block_id: after_id.unwrap_or(&b.id).to_string(),
-            });
-        }
+        let place = self.place_after(&txn, after_id)?;
+        let (slot, depth) = place.slot();
+        check_blocks(&blocks, slot, depth)?;
         let mut ids = Ids::taken(block_ids(&txn, &self.fragment));
-        let parent = slot.parent(&mut txn, &self.fragment);
-        write_nodes(&mut txn, &parent, slot.index, blocks, &mut ids);
+        let parent = place.parent(&mut txn, &self.fragment);
+        write_nodes(&mut txn, &parent, place.index, &blocks, &mut ids);
         Ok(txn.encode_update_v1())
     }
 
     /// Déplace le bloc (et ses enfants) juste après `after_id`, ou en tête de
     /// page sans `after_id`. Yjs n'a pas de déplacement : le sous-arbre est
-    /// recopié à l'identique (même id), puis l'original supprimé.
+    /// recopié à l'identique (même id), puis l'original supprimé ; un
+    /// `blockGroup` vidé par le départ du bloc est retiré.
     ///
-    /// Une colonne ne se place qu'après une colonne, un autre bloc jamais
-    /// après une colonne, et aucun bloc dans son propre sous-arbre
-    /// (`OutOfRange`).
+    /// Refusé, sans rien écrire : un déplacement dans son propre sous-arbre
+    /// (`OutOfRange`), ce qui casserait le schéma des colonnes de BlockNote
+    /// (`Structure` : colonne hors d'une liste ou autre bloc dans une liste,
+    /// liste de colonnes dans une colonne, colonne laissée vide, liste
+    /// laissée à moins de deux colonnes), ou ce qui dépasserait
+    /// [`MAX_YJS_DEPTH`] (`TooDeep`).
     pub fn move_block(&self, block_id: &str, after_id: Option<&str>) -> Result<Vec<u8>, CrdtError> {
         let mut txn = self.doc.transact_mut();
         let source = find_block(&txn, &self.fragment, block_id)
@@ -149,64 +151,114 @@ impl PageDoc {
         if after_id == Some(block_id) {
             return Ok(txn.encode_update_v1());
         }
-        let slot = self.slot_after(&txn, after_id)?;
-        if let (Some(id), Some(target)) = (after_id, &slot.target)
+        let place = self.place_after(&txn, after_id)?;
+        if let (Some(id), Some(target)) = (after_id, &place.target)
             && inside(target, &source)
         {
             return Err(CrdtError::OutOfRange {
                 block_id: id.to_string(),
             });
         }
-        if (source.tag().as_ref() == COLUMN) != slot.after_column {
-            return Err(CrdtError::OutOfRange {
-                block_id: block_id.to_string(),
-            });
+        let lost = || CrdtError::BlockNotFound(block_id.to_string());
+        let (old_parent, _) = position(&txn, &source).ok_or_else(lost)?;
+        let (slot, depth) = place.slot();
+        match (source.tag().as_ref(), slot) {
+            (COLUMN, Slot::ColumnList) => {}
+            (COLUMN, _) => {
+                return Err(structure(
+                    "une colonne n'existe que dans une liste de colonnes",
+                ));
+            }
+            (_, Slot::ColumnList) => {
+                return Err(structure(
+                    "une liste de colonnes ne contient que des colonnes",
+                ));
+            }
+            (COLUMN_LIST, Slot::Column) => {
+                return Err(structure(
+                    "une liste de colonnes ne va pas directement dans une colonne",
+                ));
+            }
+            _ => {}
         }
-        let parent = slot.parent(&mut txn, &self.fragment);
-        copy_tree(&mut txn, &source, &parent, slot.index);
-        let (old_parent, old_index) = position(&txn, &source).expect("bloc source en place");
+        let stays = usize::from(place.parent.as_ref() == Some(&old_parent));
+        match Slot::of(&old_parent) {
+            Slot::Column if remaining(&txn, &old_parent, stays) == 0 => {
+                return Err(structure("la colonne resterait vide"));
+            }
+            Slot::ColumnList if remaining(&txn, &old_parent, stays) < 2 => {
+                return Err(structure(
+                    "la liste de colonnes garderait moins de deux colonnes",
+                ));
+            }
+            _ => {}
+        }
+        if depth + height_of(&txn, &source) - 1 > MAX_YJS_DEPTH {
+            return Err(CrdtError::TooDeep);
+        }
+        let parent = place.parent(&mut txn, &self.fragment);
+        copy_tree(&mut txn, &source, &parent, place.index);
+        let (old_parent, old_index) = position(&txn, &source).ok_or_else(lost)?;
         old_parent.remove_range(&mut txn, old_index, 1);
+        remove_if_empty_group(&mut txn, &old_parent);
         Ok(txn.encode_update_v1())
     }
 
     /// Place juste après `after_id`, ou en tête de la racine sans lui.
-    fn slot_after<T: ReadTxn>(&self, txn: &T, after_id: Option<&str>) -> Result<Slot, CrdtError> {
+    fn place_after<T: ReadTxn>(&self, txn: &T, after_id: Option<&str>) -> Result<Place, CrdtError> {
         let Some(id) = after_id else {
-            return Ok(Slot {
+            return Ok(Place {
                 parent: self.root(txn),
                 index: 0,
                 target: None,
-                after_column: false,
             });
         };
         let not_found = || CrdtError::BlockNotFound(id.to_string());
         let target = find_block(txn, &self.fragment, id).ok_or_else(not_found)?;
         let (parent, index) = position(txn, &target).ok_or_else(not_found)?;
-        Ok(Slot {
+        Ok(Place {
             parent: Some(parent),
             index: index + 1,
-            after_column: target.tag().as_ref() == COLUMN,
             target: Some(target),
         })
     }
 }
 
 /// Où insérer des blocs.
-struct Slot {
+struct Place {
     /// `None` : en tête d'une page sans racine, à créer.
     parent: Option<XmlElementRef>,
     index: u32,
     /// Le bloc après lequel on insère.
     target: Option<XmlElementRef>,
-    after_column: bool,
 }
 
-impl Slot {
+impl Place {
+    /// Genre du parent, et profondeur du premier élément écrit dedans.
+    fn slot(&self) -> (Slot, usize) {
+        match &self.parent {
+            Some(parent) => (Slot::of(parent), depth_of(parent) + 1),
+            None => (Slot::Group, 2),
+        }
+    }
+
     fn parent(&self, txn: &mut TransactionMut, fragment: &XmlFragmentRef) -> XmlElementRef {
         match &self.parent {
             Some(parent) => parent.clone(),
             None => fragment.insert(txn, 0, XmlElementPrelim::empty(BLOCK_GROUP)),
         }
+    }
+}
+
+/// Retire un `blockGroup` d'enfants resté vide (BlockNote n'en admet pas).
+pub(crate) fn remove_if_empty_group(txn: &mut TransactionMut, group: &XmlElementRef) {
+    if group.tag().as_ref() != BLOCK_GROUP || group.len(txn) > 0 {
+        return;
+    }
+    if let Some((container, index)) = position(txn, group)
+        && container.tag().as_ref() == BLOCK_CONTAINER
+    {
+        container.remove_range(txn, index, 1);
     }
 }
 
@@ -232,20 +284,11 @@ pub(crate) fn find_block<T: ReadTxn>(
     })
 }
 
-/// Ids de tous les blocs de la page.
-fn block_ids<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef) -> HashSet<String> {
-    fragment
-        .successors(txn)
-        .filter_map(|node| match node {
-            XmlOut::Element(e) if is_block(&e) => Some(attr_string(txn, &e, "id")),
-            _ => None,
-        })
-        .filter(|id| !id.is_empty())
-        .collect()
-}
-
 /// Parent d'un élément et son index parmi les enfants.
-fn position<T: ReadTxn>(txn: &T, element: &XmlElementRef) -> Option<(XmlElementRef, u32)> {
+pub(crate) fn position<T: ReadTxn>(
+    txn: &T,
+    element: &XmlElementRef,
+) -> Option<(XmlElementRef, u32)> {
     let Some(XmlOut::Element(parent)) = element.parent() else {
         return None;
     };
@@ -270,8 +313,9 @@ fn inside(element: &XmlElementRef, ancestor: &XmlElementRef) -> bool {
     false
 }
 
-/// Nœud de contenu en ligne d'un `blockContainer` (paragraphe, titre…).
-fn inline_node<T: ReadTxn>(txn: &T, container: &XmlElementRef) -> Option<XmlElementRef> {
+/// Nœud de contenu en ligne d'un `blockContainer` (paragraphe, titre…), et
+/// vrai pour un bloc de code, dont le contenu est du texte brut.
+fn inline_node<T: ReadTxn>(txn: &T, container: &XmlElementRef) -> Option<(XmlElementRef, bool)> {
     if container.tag().as_ref() != BLOCK_CONTAINER {
         return None;
     }
@@ -279,7 +323,8 @@ fn inline_node<T: ReadTxn>(txn: &T, container: &XmlElementRef) -> Option<XmlElem
         .into_iter()
         .find(|e| e.tag().as_ref() != BLOCK_GROUP)?;
     let spec = block(node.tag())?;
-    (spec.wrapped && spec.content == ContentKind::Inline).then_some(node)
+    (spec.wrapped && spec.content == ContentKind::Inline)
+        .then_some((node, spec.form == MmdForm::Code))
 }
 
 /// Un enfant du nœud de contenu, et sa place dans `block_text`.
@@ -289,7 +334,8 @@ struct Piece {
     /// Position de son premier caractère.
     start: usize,
     /// Nombre de caractères : ceux du texte ; 1 pour une mention, une
-    /// formule ou un saut de ligne ; 0 pour un élément que la lecture ignore.
+    /// formule ou un saut de ligne ; 0 pour un élément que la lecture ignore
+    /// (et, dans un bloc de code, pour une mention ou une formule).
     chars: usize,
     kind: Kind,
 }
@@ -313,7 +359,7 @@ struct Run {
     attrs: Attrs,
 }
 
-fn pieces<T: ReadTxn>(txn: &T, node: &XmlElementRef) -> Vec<Piece> {
+fn pieces<T: ReadTxn>(txn: &T, node: &XmlElementRef, plain: bool) -> Vec<Piece> {
     let mut out = Vec::new();
     let mut start = 0;
     for (index, child) in node.children(txn).enumerate() {
@@ -351,7 +397,11 @@ fn pieces<T: ReadTxn>(txn: &T, node: &XmlElementRef) -> Vec<Piece> {
             XmlOut::Element(e) => Piece {
                 index,
                 start,
-                chars: usize::from(matches!(e.tag().as_ref(), "mention" | "math" | "hardBreak")),
+                chars: usize::from(match e.tag().as_ref() {
+                    "hardBreak" => true,
+                    "mention" | "math" => !plain,
+                    _ => false,
+                }),
                 kind: Kind::Element,
             },
             XmlOut::Fragment(_) => continue,
@@ -428,11 +478,18 @@ fn copy_tree(txn: &mut TransactionMut, source: &XmlElementRef, parent: &XmlEleme
                     let runs = text.diff(txn, YChange::identity);
                     let copy = to.push_back(txn, XmlTextPrelim::new(""));
                     for run in runs {
-                        // y-prosemirror n'incorpore pas d'objet dans un texte.
-                        if let Out::Any(Any::String(s)) = run.insert {
-                            let at = copy.len(txn);
-                            let attrs = run.attributes.map(|a| *a).unwrap_or_default();
-                            copy.insert_with_attributes(txn, at, &s, attrs);
+                        let at = copy.len(txn);
+                        let attrs = run.attributes.map(|a| *a).unwrap_or_default();
+                        match run.insert {
+                            Out::Any(Any::String(s)) => {
+                                copy.insert_with_attributes(txn, at, &s, attrs);
+                            }
+                            // Objet incorporé (nœud étranger) ; un type incorporé est
+                            // perdu, comme dans `data`.
+                            Out::Any(other) => {
+                                copy.insert_embed_with_attributes(txn, at, other, attrs);
+                            }
+                            _ => {}
                         }
                     }
                 }

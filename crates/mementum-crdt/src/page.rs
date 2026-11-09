@@ -1,7 +1,7 @@
 //! Le document de page : création, mises à jour Yjs, lecture et écriture de
 //! l'arbre de blocs.
 
-use mementum_md::Block;
+use mementum_md::{Block, normalize};
 use mementum_schema::SCHEMA_VERSION;
 use yrs::any::Number;
 use yrs::updates::decoder::Decode;
@@ -11,6 +11,8 @@ use yrs::{
 };
 
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, read_page, write_nodes};
+use crate::guard::{Shape, too_deep};
+use crate::structure::{Slot, check_blocks};
 use crate::{CrdtError, FRAGMENT, META};
 
 /// Clé de [`META`] qui porte la version du schéma de la page.
@@ -24,7 +26,7 @@ const SCHEMA_KEY: &str = "schemaVersion";
 pub struct PageDoc {
     pub(crate) doc: Doc,
     pub(crate) fragment: XmlFragmentRef,
-    meta: MapRef,
+    pub(crate) meta: MapRef,
 }
 
 // L'acteur de synchronisation garde le document d'une tâche tokio à l'autre.
@@ -58,7 +60,7 @@ impl PageDoc {
         let page = PageDoc::empty();
         let update = {
             let mut txn = page.doc.transact_mut();
-            page.write_all(&mut txn, &[]);
+            page.write_all(&mut txn, &[empty_paragraph()]);
             page.meta.insert(
                 &mut txn,
                 SCHEMA_KEY,
@@ -81,12 +83,30 @@ impl PageDoc {
     }
 
     /// Intègre une mise à jour (v1) reçue d'un client ou du stockage.
+    ///
+    /// La mise à jour est lue avant yrs (Ruling R17, voir [`crate::guard`]).
+    /// Elle est refusée sans être appliquée si elle est illisible, si elle
+    /// dépend de modifications absentes (rien ne reste en attente) ou si elle
+    /// sort du schéma de la page (`Decode`, `Structure`), ou si ses éléments
+    /// imbriqués dépassent à eux seuls [`MAX_YJS_DEPTH`](crate::MAX_YJS_DEPTH) (`TooDeep`). Après
+    /// l'application, quand elle insère des éléments, la profondeur de la
+    /// page est mesurée : au-delà de la borne, `TooDeep`.
+    ///
+    /// Après une erreur, la mise à jour n'est ni gardée ni diffusée, et le
+    /// `PageDoc` est à jeter : l'appelant le recharge depuis ses mises à jour
+    /// stockées (la plupart des refus laissent le document intact, mais pas
+    /// tous ; l'appelant n'a pas à les distinguer).
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
-        let update = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
-        self.doc
-            .transact_mut()
-            .apply_update(update)
-            .map_err(|e| CrdtError::Decode(e.to_string()))
+        let shape = Shape::read(update)?;
+        let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
+        let mut txn = self.doc.transact_mut();
+        shape.check(&txn.state_vector())?;
+        txn.apply_update(decoded)
+            .map_err(|e| CrdtError::Decode(e.to_string()))?;
+        if shape.inserts_types() && too_deep(&txn, &self.fragment, &self.meta) {
+            return Err(CrdtError::TooDeep);
+        }
+        Ok(())
     }
 
     /// Tout l'état du document, en une mise à jour (v1).
@@ -124,17 +144,30 @@ impl PageDoc {
         read_page(&self.doc.transact(), &self.fragment)
     }
 
-    /// Remplace tout le contenu par `blocks`, en gardant la racine
-    /// `blockGroup`. Un bloc sans id (ou dont l'id est déjà pris plus haut)
-    /// reçoit un UUIDv7. Un arbre vide donne un paragraphe vide.
-    pub fn write_blocks(&self, blocks: &[Block]) -> Vec<u8> {
+    /// Remplace tout le contenu par `blocks` (normalisés au passage), en
+    /// gardant la racine `blockGroup`. Un bloc sans id (ou dont l'id est déjà
+    /// pris plus haut) reçoit un UUIDv7.
+    ///
+    /// BlockNote n'a pas de page sans bloc : un arbre vide s'écrit en un
+    /// paragraphe vide, qui se relit `<p/>` (Ruling R16).
+    ///
+    /// Refusé, sans rien écrire : une structure de colonnes que BlockNote
+    /// refuserait (`Structure`) ou un arbre plus profond que
+    /// [`MAX_YJS_DEPTH`](crate::MAX_YJS_DEPTH) (`TooDeep`).
+    pub fn write_blocks(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
+        let blocks = match normalize(blocks.to_vec()) {
+            b if b.is_empty() => vec![empty_paragraph()],
+            b => b,
+        };
+        check_blocks(&blocks, Slot::Group, 2)?;
         let mut txn = self.doc.transact_mut();
-        self.write_all(&mut txn, blocks);
-        txn.encode_update_v1()
+        self.write_all(&mut txn, &blocks);
+        Ok(txn.encode_update_v1())
     }
 
+    /// Écrit des blocs normalisés et vérifiés à la place de tout le contenu.
     fn write_all(&self, txn: &mut TransactionMut, blocks: &[Block]) {
-        let root = match self.root_index(txn) {
+        match self.root_index(txn) {
             Some(i) => {
                 let len = self.fragment.len(txn);
                 if len > i + 1 {
@@ -143,23 +176,24 @@ impl PageDoc {
                 if i > 0 {
                     self.fragment.remove_range(txn, 0, i);
                 }
-                self.root(txn).expect("racine gardée")
             }
             None => {
                 let len = self.fragment.len(txn);
                 if len > 0 {
                     self.fragment.remove_range(txn, 0, len);
                 }
-                self.fragment
-                    .insert(txn, 0, XmlElementPrelim::empty(BLOCK_GROUP))
             }
+        }
+        let root = match self.fragment.get(txn, 0) {
+            Some(XmlOut::Element(root)) => root,
+            _ => self
+                .fragment
+                .insert(txn, 0, XmlElementPrelim::empty(BLOCK_GROUP)),
         };
         let len = root.len(txn);
         if len > 0 {
             root.remove_range(txn, 0, len);
         }
-        let fallback = [empty_paragraph()];
-        let blocks = if blocks.is_empty() { &fallback } else { blocks };
         write_nodes(txn, &root, 0, blocks, &mut Ids::default());
     }
 

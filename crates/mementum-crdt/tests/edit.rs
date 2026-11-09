@@ -7,7 +7,8 @@ use mementum_md::{Block, RenderOpts, block_text, parse, render};
 /// Page écrite depuis un MMD canonique.
 fn page(mmd: &str) -> PageDoc {
     let (page, _) = PageDoc::new_page();
-    page.write_blocks(&parse(mmd).expect("MMD canonique"));
+    page.write_blocks(&parse(mmd).expect("MMD canonique"))
+        .expect("écriture");
     page
 }
 
@@ -142,13 +143,13 @@ fn moves_and_inserts_keep_blocknote_structure() {
         })
     };
 
+    let refused = |r: Result<Vec<u8>, CrdtError>| matches!(r, Err(CrdtError::Structure(_)));
     // Un paragraphe ne va pas après une colonne, ni une colonne hors d'une liste.
-    assert_eq!(
-        page.insert_blocks_after(Some(&left.id), &parse("X\n").unwrap()),
-        out(&left.id)
-    );
-    assert_eq!(page.move_block(&right.id, None), out(&right.id));
-    assert_eq!(page.move_block(&item.id, Some(&left.id)), out(&item.id));
+    assert!(refused(
+        page.insert_blocks_after(Some(&left.id), &parse("X\n").unwrap())
+    ));
+    assert!(refused(page.move_block(&right.id, None)));
+    assert!(refused(page.move_block(&item.id, Some(&left.id))));
     // Un bloc ne va pas dans son propre sous-arbre.
     assert_eq!(page.move_block(&item.id, Some(&child.id)), out(&child.id));
     assert_eq!(page.read_blocks(), blocks, "rien n'a changé");
@@ -188,4 +189,48 @@ fn move_copies_the_subtree_exactly() {
         .expect("déplacement");
     let after = page.read_blocks();
     assert_eq!(after, [before[1].clone(), before[0].clone()]);
+}
+
+/// Ruling R19 (b) : le contenu d'un bloc de code est du texte brut, à la
+/// lecture comme pour compter les positions.
+#[test]
+fn code_block_is_plain_text() {
+    use mementum_crdt::FRAGMENT;
+    use mementum_md::{Content, Inline, Styles};
+    use yrs::types::Attrs;
+    use yrs::{
+        Any, Doc, OffsetKind, Options, Text, Transact, Xml, XmlElementPrelim, XmlFragment,
+        XmlTextPrelim,
+    };
+    let doc = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let update = {
+        let mut txn = doc.transact_mut();
+        let root = fragment.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
+        let container = root.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(&mut txn, "id", "code");
+        let code = container.push_back(&mut txn, XmlElementPrelim::empty("codeBlock"));
+        let text = code.push_back(&mut txn, XmlTextPrelim::new(""));
+        let bold = Attrs::from([("bold".into(), Any::Map(Default::default()))]);
+        text.insert_with_attributes(&mut txn, 0, "let", bold);
+        code.push_back(&mut txn, XmlElementPrelim::empty("hardBreak"));
+        let mention = code.push_back(&mut txn, XmlElementPrelim::empty("mention"));
+        mention.insert_attribute(&mut txn, "label", "L");
+        code.push_back(&mut txn, XmlTextPrelim::new("x"));
+        txn.encode_update_v1()
+    };
+    let page = PageDoc::from_updates([update.as_slice()]).unwrap();
+    let plain = |s: &str| {
+        Content::Inline(vec![Inline::Text {
+            text: s.into(),
+            styles: Styles::default(),
+        }])
+    };
+    assert_eq!(first(&page).content, plain("let\nx"));
+    // « x » est le 5ᵉ caractère : la mention ne compte pas.
+    page.replace_text("code", 4, 1, "y").expect("remplacement");
+    assert_eq!(first(&page).content, plain("let\ny"));
 }

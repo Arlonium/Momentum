@@ -6,7 +6,7 @@ use mementum_md::{block_text, parse};
 
 fn page(mmd: &str) -> PageDoc {
     let (page, _) = PageDoc::new_page();
-    page.write_blocks(&parse(mmd).unwrap());
+    page.write_blocks(&parse(mmd).unwrap()).unwrap();
     page
 }
 
@@ -48,10 +48,23 @@ fn revision_is_canonical() {
         .insert_blocks_after(Some(&ids[1]), &parse("Delta\n").unwrap())
         .unwrap();
 
-    let updates = [&state, &a1, &a2, &b1, &b2];
-    let x = PageDoc::from_updates(updates.iter().map(|u| u.as_slice())).unwrap();
-    let y = PageDoc::from_updates(updates.iter().rev().map(|u| u.as_slice())).unwrap();
-    let z = PageDoc::from_updates([&b2, &a1, &state, &b1, &a2].map(|u| u.as_slice())).unwrap();
+    // Trois ordres d'arrivée des mises à jour concurrentes ; chaque pair garde
+    // l'ordre de ses propres mises à jour (une mise à jour dont les
+    // dépendances manquent est refusée, Ruling R17).
+    let orders = [
+        [&state, &a1, &a2, &b1, &b2],
+        [&state, &b1, &b2, &a1, &a2],
+        [&state, &b1, &a1, &b2, &a2],
+    ];
+    let [x, y, z] = orders
+        .map(|order| PageDoc::from_updates(order.map(|u| u.as_slice())).expect("ordre causal"));
+    // Hors de l'ordre causal : refusée, document intact.
+    let early = PageDoc::from_updates([state.as_slice()]).unwrap();
+    assert!(matches!(
+        early.apply_update(&a2),
+        Err(mementum_crdt::CrdtError::Decode(_))
+    ));
+    assert_eq!(early.read_blocks(), base.read_blocks());
 
     assert_eq!(x.read_blocks(), y.read_blocks());
     assert_eq!(x.read_blocks(), z.read_blocks());

@@ -14,7 +14,8 @@ fn count(page: &PageDoc, id: &str) -> usize {
 #[test]
 fn concurrent_moves_then_dedupe() {
     let (base, _) = PageDoc::new_page();
-    base.write_blocks(&parse("A\n\nB\n\nC\n\nD\n").unwrap());
+    base.write_blocks(&parse("A\n\nB\n\nC\n\nD\n").unwrap())
+        .unwrap();
     let state = base.encode_state();
     let a = PageDoc::from_updates([state.as_slice()]).unwrap();
     let b = PageDoc::from_updates([state.as_slice()]).unwrap();
@@ -41,6 +42,7 @@ fn concurrent_moves_then_dedupe() {
 #[test]
 fn dedupe_without_duplicate_is_none() {
     let (page, _) = PageDoc::new_page();
-    page.write_blocks(&parse("A\n\n- B\n  - C\n").unwrap());
+    page.write_blocks(&parse("A\n\n- B\n  - C\n").unwrap())
+        .unwrap();
     assert_eq!(page.dedupe_blocks(), None);
 }

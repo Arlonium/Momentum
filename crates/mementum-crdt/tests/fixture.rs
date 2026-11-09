@@ -101,7 +101,7 @@ fn dump(state: &[u8], skip: &dyn Fn(&str, &str, &Any) -> bool) -> Vec<String> {
 fn writes_like_blocknote() {
     let blocks = PageDoc::from_updates([YJS]).unwrap().read_blocks();
     let (page, _) = PageDoc::new_page();
-    page.write_blocks(&blocks);
+    page.write_blocks(&blocks).unwrap();
 
     // Même arbre, mêmes attributs typés, mêmes plages de texte que BlockNote.
     // Seule différence admise : la prop `foreign` du bloc `unknown`, ajoutée

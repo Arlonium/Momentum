@@ -93,7 +93,7 @@ fn unknown_node_passes_through() {
 
     // Réécrit dans une page neuve, il redonne l'élément d'origine.
     let (fresh, _) = PageDoc::new_page();
-    fresh.write_blocks(&parsed);
+    fresh.write_blocks(&parsed).unwrap();
     assert_eq!(fresh.read_blocks(), blocks);
     let raw = decode(&fresh);
     let txn = raw.transact();
@@ -159,5 +159,190 @@ fn new_page_has_root_and_schema() {
         Some(Out::Any(Any::Number(Number::Int(i64::from(
             SCHEMA_VERSION
         )))))
+    );
+}
+
+/// Page construite à la main : `build` reçoit la racine `blockGroup`.
+fn page_from(build: impl FnOnce(&mut yrs::TransactionMut, &XmlElementRef)) -> PageDoc {
+    let doc = raw_doc();
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let update = {
+        let mut txn = doc.transact_mut();
+        let root = fragment.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
+        build(&mut txn, &root);
+        txn.encode_update_v1()
+    };
+    PageDoc::from_updates([update.as_slice()]).unwrap()
+}
+
+/// Réécrit les blocs d'une page dans une page neuve, document brut renvoyé.
+fn rewritten(page: &PageDoc) -> (PageDoc, Doc) {
+    let (fresh, _) = PageDoc::new_page();
+    fresh.write_blocks(&page.read_blocks()).unwrap();
+    let raw = decode(&fresh);
+    (fresh, raw)
+}
+
+fn foreign_block(original_type: &str) -> mementum_md::Block {
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD
+        .encode(r#"{"attrs":{"a":"1"},"content":[],"children":[]}"#);
+    mementum_md::Block {
+        id: "f".into(),
+        kind: "unknown".into(),
+        props: mementum_md::Props::from([
+            (
+                "originalType".to_string(),
+                PropValue::Str(original_type.into()),
+            ),
+            ("data".to_string(), PropValue::Str(data)),
+            ("foreign".to_string(), PropValue::Bool(true)),
+        ]),
+        content: Content::None,
+        children: vec![],
+    }
+}
+
+/// Ruling R20 : un nom de nœud de BlockNote, ou un nom invalide, ne se
+/// recrée pas ; il s'écrit en bloc `unknown` de BlockNote.
+#[test]
+fn blocknote_names_are_never_recreated() {
+    for name in [
+        "tableRow",
+        "mention",
+        "hardBreak",
+        "doc",
+        "paragraph",
+        "a b",
+        "",
+        "x>y",
+    ] {
+        let (page, _) = PageDoc::new_page();
+        page.write_blocks(&[foreign_block(name)]).unwrap();
+        let raw = decode(&page);
+        let txn = raw.transact();
+        let container = find_element(&txn, "blockContainer").unwrap();
+        let Some(XmlOut::Element(node)) = container.get(&txn, 0) else {
+            panic!("nœud de contenu attendu")
+        };
+        assert_eq!(node.tag().as_ref(), "unknown", "« {name} » recréé");
+    }
+    // Un nom étranger valide, lui, se recrée.
+    let (page, _) = PageDoc::new_page();
+    page.write_blocks(&[foreign_block("futureWidget")]).unwrap();
+    let raw = decode(&page);
+    assert!(find_element(&raw.transact(), "futureWidget").is_some());
+}
+
+/// Ruling R20 : ce que la lecture garde d'un nœud étranger profond, la
+/// réécriture le recrée (bornes du JSON alignées sur `serde_json`).
+#[test]
+fn deep_foreign_node_is_recreated_up_to_the_kept_depth() {
+    let page = page_from(|txn, root| {
+        let container = root.push_back(txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(txn, "id", "f");
+        let mut e = container.push_back(txn, XmlElementPrelim::empty("futureWidget"));
+        for _ in 0..70 {
+            e = e.push_back(txn, XmlElementPrelim::empty("inner"));
+        }
+        e.push_back(txn, XmlTextPrelim::new("x"));
+    });
+    let (_, raw) = rewritten(&page);
+    let txn = raw.transact();
+    let widget = find_element(&txn, "futureWidget").expect("futureWidget recréé");
+    let mut depth = 0;
+    let mut current = widget;
+    while let Some(XmlOut::Element(child)) = current.get(&txn, 0) {
+        depth += 1;
+        current = child;
+    }
+    assert_eq!(depth, 48, "profondeur gardée dans data");
+}
+
+/// M3 : un nœud étranger hors `blockContainer` porte `"unwrapped": true`, se
+/// recrée hors enveloppe, et son id passe par le contrôle des doublons.
+#[test]
+fn unwrapped_foreign_node_keeps_its_place_and_a_unique_id() {
+    let page = page_from(|txn, root| {
+        for _ in 0..2 {
+            let list = root.push_back(txn, XmlElementPrelim::empty("futureList"));
+            list.insert_attribute(txn, "id", "fl");
+            let item = list.push_back(txn, XmlElementPrelim::empty("futureItem"));
+            item.push_back(txn, XmlTextPrelim::new("x"));
+        }
+    });
+    let blocks = page.read_blocks();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].id, "fl");
+    let Some(PropValue::Str(data)) = blocks[0].props.get("data") else {
+        panic!("data attendu")
+    };
+    use base64::Engine;
+    let json = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(json.contains(r#""unwrapped":true"#), "{json}");
+
+    let (fresh, raw) = rewritten(&page);
+    let txn = raw.transact();
+    let root = match txn.get_xml_fragment(FRAGMENT).unwrap().get(&txn, 0) {
+        Some(XmlOut::Element(root)) => root,
+        other => panic!("racine attendue, trouvé {other:?}"),
+    };
+    let lists: Vec<String> = root
+        .children(&txn)
+        .map(|c| match c {
+            XmlOut::Element(e) => {
+                assert_eq!(e.tag().as_ref(), "futureList", "recréé hors enveloppe");
+                match e.get_attribute(&txn, "id") {
+                    Some(Out::Any(Any::String(id))) => id.to_string(),
+                    other => panic!("id attendu, trouvé {other:?}"),
+                }
+            }
+            other => panic!("élément attendu, trouvé {other:?}"),
+        })
+        .collect();
+    assert_eq!(lists.len(), 2);
+    assert_eq!(lists[0], "fl");
+    assert_ne!(lists[1], "fl", "le second reçoit un nouvel id");
+    assert_eq!(fresh.read_blocks().len(), 2);
+}
+
+/// M3 : un objet incorporé dans le texte d'un nœud étranger revient tel quel.
+#[test]
+fn foreign_text_embed_passes_through() {
+    let embed = Any::Map(std::sync::Arc::new(HashMap::from([(
+        "k".to_string(),
+        Any::Number(Number::Int(3)),
+    )])));
+    let expected = embed.clone();
+    let page = page_from(move |txn, root| {
+        let container = root.push_back(txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(txn, "id", "f");
+        let widget = container.push_back(txn, XmlElementPrelim::empty("futureWidget"));
+        let text = widget.push_back(txn, XmlTextPrelim::new("ab"));
+        text.insert_embed(txn, 1, embed);
+    });
+    let (_, raw) = rewritten(&page);
+    let txn = raw.transact();
+    let widget = find_element(&txn, "futureWidget").unwrap();
+    let Some(XmlOut::Text(text)) = widget.get(&txn, 0) else {
+        panic!("texte attendu")
+    };
+    let inserts: Vec<Out> = text
+        .diff(&txn, YChange::identity)
+        .into_iter()
+        .map(|d| d.insert)
+        .collect();
+    assert_eq!(
+        inserts,
+        [
+            Out::Any(Any::from("a")),
+            Out::Any(expected),
+            Out::Any(Any::from("b")),
+        ]
     );
 }

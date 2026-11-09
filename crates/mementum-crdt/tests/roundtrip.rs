@@ -14,11 +14,10 @@ use yrs::{
     XmlOut,
 };
 
-/// Ce que Yjs peut distinguer d'un arbre canonique :
-/// - une page vide n'existe pas pour BlockNote : `write_blocks(&[])` écrit
-///   un paragraphe vide, comme `new_page` ;
-/// - deux liens voisins de même `href` ne font qu'un (une marque Yjs, comme
-///   une marque ProseMirror, ne sépare pas deux plages de même valeur).
+/// L'arbre canonique tel que Yjs le porte : une page vide n'existe pas
+/// pour BlockNote, et `write_blocks(&[])` écrit un paragraphe vide, comme
+/// `new_page` (Ruling R16). Le reste est déjà dans `normalize` (liens voisins
+/// fusionnés, en-têtes dans la grille, code en texte brut).
 fn yjs_view(t: &[Block]) -> Vec<Block> {
     if t.is_empty() {
         return vec![Block {
@@ -29,42 +28,7 @@ fn yjs_view(t: &[Block]) -> Vec<Block> {
             children: vec![],
         }];
     }
-    normalize(t.iter().cloned().map(merge_block_links).collect())
-}
-
-fn merge_block_links(mut b: Block) -> Block {
-    b.content = match b.content {
-        Content::Inline(c) => Content::Inline(merge_links(c)),
-        Content::Table(mut t) => {
-            for cell in t.rows.iter_mut().flatten() {
-                cell.content = merge_links(std::mem::take(&mut cell.content));
-            }
-            Content::Table(t)
-        }
-        Content::None => Content::None,
-    };
-    b.children = b.children.into_iter().map(merge_block_links).collect();
-    b
-}
-
-fn merge_links(content: Vec<Inline>) -> Vec<Inline> {
-    let mut out: Vec<Inline> = Vec::new();
-    for inline in content {
-        if let (
-            Some(Inline::Link {
-                href: prev,
-                children: kept,
-            }),
-            Inline::Link { href, children },
-        ) = (out.last_mut(), &inline)
-            && prev == href
-        {
-            kept.extend(children.iter().cloned());
-            continue;
-        }
-        out.push(inline);
-    }
-    out
+    t.to_vec()
 }
 
 /// Vide les ids de l'arbre et les renvoie dans l'ordre du document.
@@ -81,7 +45,7 @@ proptest! {
     #[test]
     fn prop_roundtrip_through_yjs(t in arb::tree()) {
         let (page, _) = PageDoc::new_page();
-        page.write_blocks(&t);
+        page.write_blocks(&t).expect("écriture");
         let back = page.read_blocks();
 
         // Les mêmes blocs, une fois la page encodée puis relue.
@@ -150,19 +114,47 @@ fn headers(page: &PageDoc) -> (u32, u32) {
 
 #[test]
 fn table_headers_through_yjs() {
-    // Écrit par BlockNote : un tableau tout en en-têtes vaut (lignes, 0) (Ruling R19).
+    // Écrit par BlockNote : les en-têtes se lisent sur les cellules `tableHeader`,
+    // et un tableau tout en en-têtes vaut (lignes, 0) (Ruling R19).
     assert_eq!(headers(&one_row_table("tableHeader", &[])), (1, 0));
-    // Indices `headerRows` / `headerCols` qui concordent avec les cellules : gardés.
-    let hinted = [("headerRows", 1), ("headerCols", 0)];
-    assert_eq!(headers(&one_row_table("tableHeader", &hinted)), (1, 0));
-    // Indices périmés (les cellules ont changé depuis) : ignorés.
+    assert_eq!(headers(&one_row_table("tableCell", &[])), (0, 0));
+    // Des attributs `headerRows` / `headerCols` sur `table` (le R15 provisoire,
+    // annulé) sont ignorés : seules les cellules comptent.
+    let hinted = [("headerRows", 0), ("headerCols", 2)];
     assert_eq!(headers(&one_row_table("tableCell", &hinted)), (0, 0));
 
-    // Écrit par le serveur : les en-têtes reviennent tels quels.
+    // Écrit par le serveur : les en-têtes reviennent tels quels, sans
+    // attribut hors du schéma de BlockNote sur `table`.
     let (page, _) = PageDoc::new_page();
-    let table = mementum_md::parse("| a | b |\n| --- | --- |\n").unwrap();
-    page.write_blocks(&table);
-    assert_eq!(headers(&page), (1, 0));
+    let table = mementum_md::parse(
+        "| a | b |
+| --- | --- |
+| 1 | 2 |
+{header-cols=1}
+",
+    )
+    .unwrap();
+    page.write_blocks(&table).unwrap();
+    assert_eq!(headers(&page), (1, 1));
+    let doc = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(&page.encode_state()).unwrap())
+        .unwrap();
+    let txn = doc.transact();
+    let table = fragment
+        .successors(&txn)
+        .find_map(|n| match n {
+            XmlOut::Element(e) if e.tag().as_ref() == "table" => Some(e),
+            _ => None,
+        })
+        .unwrap();
+    let mut attrs: Vec<String> = table.attributes(&txn).map(|(k, _)| k.to_string()).collect();
+    attrs.sort();
+    assert_eq!(attrs, ["textColor"]);
 }
 
 #[test]
@@ -179,7 +171,7 @@ fn hard_break_is_a_yjs_element() {
         children: vec![],
     };
     let (page, _) = PageDoc::new_page();
-    page.write_blocks(&[paragraph]);
+    page.write_blocks(&[paragraph]).unwrap();
 
     // Lecture du document brut, dans un Doc à part.
     let doc = Doc::with_options(Options {

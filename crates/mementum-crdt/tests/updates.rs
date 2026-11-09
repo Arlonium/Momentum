@@ -8,7 +8,7 @@ use mementum_md::parse;
 fn diff_brings_a_peer_up_to_date() {
     let (page, created) = PageDoc::new_page();
     let peer = PageDoc::from_updates([created.as_slice()]).unwrap();
-    page.write_blocks(&parse("Un\n\nDeux\n").unwrap());
+    page.write_blocks(&parse("Un\n\nDeux\n").unwrap()).unwrap();
     let id = page.read_blocks()[0].id.clone();
     page.replace_text(&id, 0, 2, "Premier").unwrap();
 

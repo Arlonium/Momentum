@@ -1,7 +1,7 @@
 //! Ruling R10 : un document écrit par un client buggé ou malveillant se lit
 //! en un arbre que `render` écrit en MMD relisible par `parse`.
 
-use mementum_crdt::{FRAGMENT, PageDoc};
+use mementum_crdt::{FRAGMENT, MAX_YJS_DEPTH, PageDoc};
 use mementum_md::{Block, Content, MAX_DEPTH, PropValue, RenderOpts, block_text, parse, render};
 use yrs::any::Number;
 use yrs::{
@@ -209,7 +209,10 @@ fn ill_typed_props_and_empty_table() {
 
 #[test]
 fn deep_nesting_is_bounded() {
-    const LEVELS: usize = 150;
+    // Le plus profond qu'une page admet (R17) : le texte d'un paragraphe de
+    // niveau n est à la profondeur 2n + 2.
+    const LEVELS: usize = (MAX_YJS_DEPTH - 2) / 2;
+    const { assert!(LEVELS > MAX_DEPTH) };
     let page = page_from(|txn, root| {
         let mut group = root.clone();
         for i in 1..=LEVELS {
@@ -234,4 +237,101 @@ fn deep_nesting_is_bounded() {
     let expected: Vec<String> = (1..=LEVELS).map(|i| format!("niveau {i}")).collect();
     assert_eq!(all, expected, "aucun bloc perdu, ordre du document gardé");
     assert_renders_readable(&blocks);
+}
+
+/// Schéma des colonnes de BlockNote (R16) : la lecture défait une liste de
+/// colonnes mal formée ou trop profonde, ses blocs prennent sa place.
+#[test]
+fn columns_are_read_within_the_schema() {
+    // `columnList[id] > column[id] > blocs`, des textes donnés.
+    fn columns(txn: &mut TransactionMut, parent: &XmlElementRef, id: &str, texts: &[&[&str]]) {
+        let list = parent.push_back(txn, XmlElementPrelim::empty("columnList"));
+        list.insert_attribute(txn, "id", id);
+        for (k, column_texts) in texts.iter().enumerate() {
+            let column = list.push_back(txn, XmlElementPrelim::empty("column"));
+            column.insert_attribute(txn, "id", format!("{id}c{k}"));
+            for t in column_texts.iter() {
+                block(txn, &column, &format!("{id}{t}"), "paragraph", &[], Some(t));
+            }
+        }
+    }
+    let page = page_from(|txn, root| {
+        // Une liste valide.
+        columns(txn, root, "ok", &[&["a"], &["b"]]);
+        // Une seule colonne ; une colonne vide ; une colonne hors de liste.
+        columns(txn, root, "one", &[&["c"]]);
+        columns(txn, root, "empty", &[&["d"], &[]]);
+        let stray = root.push_back(txn, XmlElementPrelim::empty("column"));
+        block(txn, &stray, "stray-e", "paragraph", &[], Some("e"));
+        // Une liste directement dans une colonne.
+        let list = root.push_back(txn, XmlElementPrelim::empty("columnList"));
+        list.insert_attribute(txn, "id", "outer");
+        for k in 0..2 {
+            let column = list.push_back(txn, XmlElementPrelim::empty("column"));
+            column.insert_attribute(txn, "id", format!("outer{k}"));
+            if k == 0 {
+                columns(txn, &column, "inner", &[&["f"], &["g"]]);
+            } else {
+                block(txn, &column, "outer-h", "paragraph", &[], Some("h"));
+            }
+        }
+        // Des listes près de la borne de profondeur : au niveau 98, ses blocs
+        // sont au niveau 100 ; au niveau 99, ils seraient au niveau 101.
+        let mut group = root.clone();
+        for level in 1..MAX_DEPTH - 1 {
+            let (container, _) = block(
+                txn,
+                &group,
+                &format!("d{level}"),
+                "paragraph",
+                &[],
+                Some("p"),
+            );
+            group = container.push_back(txn, XmlElementPrelim::empty("blockGroup"));
+            if level == MAX_DEPTH - 3 {
+                columns(txn, &group, "deep98", &[&["i"], &["j"]]);
+            }
+        }
+        columns(txn, &group, "deep99", &[&["k"], &["l"]]);
+    });
+
+    let blocks = page.read_blocks();
+    assert_renders_readable(&blocks);
+    assert_column_schema(&blocks, false);
+    let lists: Vec<&str> = find_kind(&blocks, "columnList")
+        .into_iter()
+        .map(|b| b.id.as_str())
+        .collect();
+    assert_eq!(lists, ["ok", "outer", "deep98"]);
+    let mut all = Vec::new();
+    texts(&blocks, &mut all);
+    for t in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"] {
+        assert!(all.iter().any(|x| x == t), "texte « {t} » perdu");
+    }
+}
+
+/// Les colonnes suivent le schéma de BlockNote.
+fn assert_column_schema(blocks: &[Block], in_list: bool) {
+    for b in blocks {
+        assert_eq!(b.kind == "column", in_list, "colonne mal placée : {b:?}");
+        if b.kind == "columnList" {
+            assert!(b.children.len() >= 2);
+        }
+        if b.kind == "column" {
+            assert!(!b.children.is_empty());
+            assert!(b.children.iter().all(|c| c.kind != "columnList"));
+        }
+        assert_column_schema(&b.children, b.kind == "columnList");
+    }
+}
+
+fn find_kind<'a>(blocks: &'a [Block], kind: &str) -> Vec<&'a Block> {
+    let mut out = Vec::new();
+    for b in blocks {
+        if b.kind == kind {
+            out.push(b);
+        }
+        out.extend(find_kind(&b.children, kind));
+    }
+    out
 }

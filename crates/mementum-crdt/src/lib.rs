@@ -9,11 +9,16 @@
 mod blocknote;
 mod dedupe;
 mod edit;
+mod foreign;
+mod guard;
 mod page;
 mod revision;
+mod structure;
+mod table;
 
 use std::fmt;
 
+pub use guard::MAX_YJS_DEPTH;
 pub use page::PageDoc;
 
 /// Nom du fragment XML partagé avec BlockNote.
@@ -31,6 +36,11 @@ pub enum CrdtError {
     BlockNotFound(String),
     /// Plage ou position impossible dans ce bloc.
     OutOfRange { block_id: String },
+    /// Arbre Yjs plus profond que [`MAX_YJS_DEPTH`] (Ruling R17).
+    TooDeep,
+    /// Structure que le schéma de BlockNote refuse (Ruling R18), avec ce qui
+    /// la casse.
+    Structure(String),
 }
 
 impl fmt::Display for CrdtError {
@@ -41,6 +51,11 @@ impl fmt::Display for CrdtError {
             CrdtError::OutOfRange { block_id } => {
                 write!(f, "plage impossible dans le bloc « {block_id} »")
             }
+            CrdtError::TooDeep => write!(
+                f,
+                "arbre trop profond : {MAX_YJS_DEPTH} éléments imbriqués au plus"
+            ),
+            CrdtError::Structure(why) => write!(f, "structure refusée par BlockNote : {why}"),
         }
     }
 }
