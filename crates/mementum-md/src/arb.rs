@@ -487,8 +487,11 @@ fn table() -> impl Strategy<Value = Content> {
 /// BlockNote sait écrire : sur la première ligne, une cellule couvre `span`
 /// colonnes à partir de la colonne `at` ; sur la deuxième (s'il y a au moins
 /// trois lignes), la cellule de la colonne `down` couvre `rows_down` lignes,
-/// dont les suivantes ont une cellule de moins. Une largeur par colonne de la
-/// grille.
+/// dont les suivantes ont une cellule de moins. Une fois sur deux, quand la
+/// grille a au moins trois colonnes et que `down` n'est pas la dernière,
+/// cette cellule couvre aussi deux colonnes : elle porte `colspan` et
+/// `rowspan` à la fois, et il reste une case libre sur chaque ligne. Une
+/// largeur par colonne de la grille.
 fn merged_table() -> impl Strategy<Value = Content> {
     (2usize..5, 2usize..5)
         .prop_flat_map(|(ncols, nrows)| {
@@ -498,6 +501,7 @@ fn merged_table() -> impl Strategy<Value = Content> {
                 (2..=ncols).prop_flat_map(move |span| (Just(span), 0..=ncols - span)),
                 0..ncols,
                 2..=nrows.max(3) - 1,
+                any::<bool>(),
                 prop::collection::vec(cell(), ncols * nrows),
                 0..=nrows as u32,
                 0..=1u32,
@@ -511,6 +515,7 @@ fn merged_table() -> impl Strategy<Value = Content> {
                 (span, at),
                 down,
                 rows_down,
+                wide,
                 cells,
                 header_rows,
                 header_cols,
@@ -519,13 +524,19 @@ fn merged_table() -> impl Strategy<Value = Content> {
                 let mut cells = cells.into_iter();
                 let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(nrows);
                 let tall = nrows >= 3;
+                // Colonnes couvertes par la cellule haute de la ligne 1.
+                let down_span = if wide && ncols >= 3 && down + 2 <= ncols {
+                    2
+                } else {
+                    1
+                };
                 for r in 0..nrows {
                     let mut row = Vec::new();
                     let mut col = 0;
                     while col < ncols {
-                        // Colonne occupée par la cellule haute de la ligne 1.
+                        // Colonnes occupées par la cellule haute de la ligne 1.
                         if tall && (2..1 + rows_down).contains(&r) && col == down {
-                            col += 1;
+                            col += down_span;
                             continue;
                         }
                         let mut c = cells.next().expect("une cellule par case de la grille");
@@ -533,11 +544,15 @@ fn merged_table() -> impl Strategy<Value = Content> {
                             c.props
                                 .insert("colspan".into(), PropValue::Int(span as i64));
                             col += span;
-                        } else {
-                            if tall && r == 1 && col == down {
+                        } else if tall && r == 1 && col == down {
+                            c.props
+                                .insert("rowspan".into(), PropValue::Int(rows_down as i64));
+                            if down_span > 1 {
                                 c.props
-                                    .insert("rowspan".into(), PropValue::Int(rows_down as i64));
+                                    .insert("colspan".into(), PropValue::Int(down_span as i64));
                             }
+                            col += down_span;
+                        } else {
                             col += 1;
                         }
                         row.push(c);

@@ -181,6 +181,11 @@ fn features(blocks: &[Block], seen: &mut BTreeSet<String>) {
                         }
                     }
                 }
+                let wide = |c: &Cell, name: &str| matches!(c.props.get(name), Some(PropValue::Int(n)) if *n > 1);
+                let both = |c: &Cell| wide(c, "colspan") && wide(c, "rowspan");
+                if t.rows.iter().flatten().any(both) && blocknote_grid(t) {
+                    seen.insert("colspan et rowspan sur une même cellule, dans une grille".into());
+                }
                 for cell in t.rows.iter().flatten() {
                     if !cell.props.is_empty() {
                         seen.insert("props de cellule".into());
@@ -332,6 +337,7 @@ fn generator_covers_brief() {
         "props de cellule",
         "colspan dans une grille, avec largeurs",
         "rowspan dans une grille, avec largeurs",
+        "colspan et rowspan sur une même cellule, dans une grille",
         "largeur d'aperçu entière",
     ] {
         expected.push(name.into());
