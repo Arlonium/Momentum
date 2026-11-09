@@ -1,0 +1,34 @@
+[package]
+name = "mementum-sync"
+description = "Synchronisation en direct de Mementum : un acteur par page et le protocole y-websocket"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Outils de test partagés avec les autres crates (Ruling R6) : client Yjs en yrs, petit serveur
+# axum qui monte `Hub::serve_connection`, socket en mémoire.
+testkit = ["dep:axum", "dep:tokio-tungstenite", "tokio/net"]
+
+[dependencies]
+futures.workspace = true
+mementum-crdt.workspace = true
+mementum-md.workspace = true
+mementum-schema.workspace = true
+mementum-store.workspace = true
+# États d'awareness vérifiés avant d'être relayés (les navigateurs les relisent en JSON).
+serde_json.workspace = true
+tokio ={ workspace = true, features = ["rt", "sync", "time"] }
+uuid.workspace = true
+yrs.workspace = true
+axum = { workspace = true, optional = true, features = ["http1", "query", "tokio", "ws"] }
+tokio-tungstenite = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Les tests d'intégration utilisent le client et le serveur de la feature `testkit`.
+mementum-sync = { path = ".", features = ["testkit"] }
+sqlx.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
