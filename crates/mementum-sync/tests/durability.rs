@@ -171,6 +171,87 @@ async fn store_failure_closes_everyone_and_reloads() {
     );
 }
 
+/// `seq` de l'instantané et nombre de mises à jour au journal.
+async fn snapshot_and_journal(f: &Fixture) -> (i64, usize) {
+    let state = f.store.load_doc(f.page).await.unwrap();
+    (
+        state.snapshot.as_ref().map_or(-1, |(seq, _)| *seq),
+        state.updates.len(),
+    )
+}
+
+#[tokio::test]
+async fn failed_compaction_keeps_the_journal_and_retries_later() {
+    let f = Fixture::new(SyncConfig {
+        snapshot_every: 3,
+        ..SyncConfig::default()
+    })
+    .await;
+    f.write_mmd("Avant\n").await;
+    let id = f.ids().await[0].clone();
+    let a = f.client().await;
+    let b = f.client().await;
+    assert_eq!(snapshot_and_journal(&f).await, (0, 1));
+
+    // Panne simulée : toute écriture d'un instantané échoue, le journal
+    // s'écrit toujours. La troisième mise à jour déclenche une compaction.
+    for event in ["INSERT", "UPDATE"] {
+        exec_sql(
+            &f.db,
+            &format!(
+                "CREATE TRIGGER panne_{event} BEFORE {event} ON doc_snapshots \
+                 BEGIN SELECT RAISE(ABORT, 'panne simulée'); END"
+            ),
+        )
+        .await;
+    }
+    a.type_text(&id, " un");
+    a.type_text(&id, " deux");
+    processed(&a).await;
+
+    // La compaction a échoué : l'instantané n'a pas bougé, et le journal est
+    // entier. Rien n'est perdu, ni dans le store ni pour les clients, et
+    // personne n'est fermé (ce n'est pas la panne d'écriture du Ruling R21).
+    assert_eq!(snapshot_and_journal(&f).await, (0, 3));
+    assert!(
+        b.wait_until(WAIT, |c| text(&c.blocks()) == "Avant un deux")
+            .await,
+        "B a reçu les mises à jour"
+    );
+    assert!(!a.is_closed() && !b.is_closed());
+    assert_eq!(
+        text(&stored_page(&f.store, f.page).await.read_blocks()),
+        "Avant un deux"
+    );
+    // Un client qui arrive reçoit tout.
+    assert_eq!(text(&f.client().await.blocks()), "Avant un deux");
+
+    // La panne passée, la compaction n'est pas retentée à chaque mise à
+    // jour, mais après `snapshot_every` autres.
+    for event in ["INSERT", "UPDATE"] {
+        exec_sql(&f.db, &format!("DROP TRIGGER panne_{event}")).await;
+    }
+    a.type_text(&id, " trois");
+    a.type_text(&id, " quatre");
+    processed(&a).await;
+    assert_eq!(snapshot_and_journal(&f).await, (0, 5));
+    a.type_text(&id, " cinq");
+    processed(&a).await;
+    assert_eq!(
+        snapshot_and_journal(&f).await,
+        (6, 0),
+        "compaction réussie : le journal est purgé"
+    );
+
+    let expected = "Avant un deux trois quatre cinq";
+    assert_eq!(text(&f.hub.read_blocks(f.page).await.unwrap()), expected);
+    assert_eq!(
+        text(&stored_page(&f.store, f.page).await.read_blocks()),
+        expected
+    );
+    assert!(b.wait_until(WAIT, |c| text(&c.blocks()) == expected).await);
+}
+
 #[tokio::test]
 async fn page_without_document_gets_one_on_first_load() {
     // Un nœud dont `create_page_doc` n'a pas abouti (Ruling R28).
