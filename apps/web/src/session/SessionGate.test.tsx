@@ -9,7 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getMe, getTree, logIn, onSessionLost } from "../api";
 import { REFRESH_INTERVAL_MS, useSpaceTree, useTreeReader } from "../space/useSpaceTree";
-import "../test/hooks";
+import { deferred } from "../test/hooks";
 import { space, unreachable } from "../test/pages";
 import { useSession } from "./session";
 import { SessionGate } from "./SessionGate";
@@ -158,6 +158,56 @@ test("another_account_logging_in_over_the_application_reloads_the_tab", async ()
   expect([...shownFor]).toEqual(["Alice"]);
   expect(host.textContent).toBe("");
   expect(reload).toHaveBeenCalledTimes(1);
+});
+
+/** La fenêtre « Ta session a pris fin », si elle est ouverte. */
+const loginWindow = () => host.querySelector("dialog");
+
+test("account_read_again_under_the_login_window_closes_it", async () => {
+  await opened();
+  // La session est perdue : la connexion est demandée par-dessus l'application.
+  await act(async () => sessionLost());
+  expect(loginWindow()?.textContent).toContain("Ta session a pris fin");
+  // Elle est rouverte ailleurs sous le même compte (un autre onglet), puis le compte est relu
+  // (retour sur l'onglet) : le serveur répond, la session est donc là.
+  vi.mocked(getMe).mockResolvedValueOnce(account("alice", "Alice"));
+  await act(() => refresh());
+  // La fenêtre se ferme, sans mot de passe retapé, et l'application continue.
+  expect(loginWindow()).toBeNull();
+  expect(host.textContent).toBe("Alice");
+  expect(events).toEqual(["montée"]);
+  expect(logIn).not.toHaveBeenCalled();
+  expect(reload).not.toHaveBeenCalled();
+});
+
+test("account_that_cannot_be_read_again_leaves_the_login_window", async () => {
+  await opened();
+  await act(async () => sessionLost());
+  // Le serveur ne répond pas : rien ne prouve la session, la fenêtre reste.
+  vi.mocked(getMe).mockRejectedValueOnce(unreachable());
+  await act(async () => {
+    await refresh().catch(() => {});
+  });
+  expect(loginWindow()?.textContent).toContain("Ta session a pris fin");
+  expect(events).toEqual(["montée"]);
+});
+
+test("account_read_before_the_session_was_lost_leaves_the_login_window", async () => {
+  await opened();
+  // Une relecture du compte est en route quand la session se perd : sa réponse, partie avant,
+  // ne prouve rien de la session d'après.
+  const answer = deferred<Me>();
+  vi.mocked(getMe).mockReturnValueOnce(answer.promise);
+  let read!: Promise<void>;
+  await act(async () => {
+    read = refresh();
+  });
+  await act(async () => sessionLost());
+  await act(async () => {
+    answer.resolve(account("alice", "Alice Martin"));
+    await read;
+  });
+  expect(loginWindow()?.textContent).toContain("Ta session a pris fin");
 });
 
 /** L'application sur un espace, à l'instant `OPENED_AT` ; rend de quoi revenir sur l'onglet. */

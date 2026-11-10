@@ -482,3 +482,38 @@ test("account_changed_in_another_tab_reloads_on_return", async ({ browser }) => 
   // Rien n'est parti sous le mauvais nom : deux lectures, aucune action.
   expect(asked.sort()).toEqual(["GET /api/v1/me", `GET /api/v1/spaces/${space.id}/tree`]);
 });
+
+test("session_reopened_in_another_tab_closes_the_login_window_on_return", async ({ browser }) => {
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const thrown = await createPage(api, { title: `Jetée ${unique()}` });
+  expect((await api.post(`/api/v1/pages/${thrown.id}/trash`)).status()).toBe(200);
+  const first = await newUser(browser, account);
+  // L'horloge de l'onglet est la nôtre : on n'attend pas cinq secondes pour de bon.
+  await first.clock.install();
+  await first.goto(`/s/${space.id}`);
+  await expectSignedInAs(first, account.name);
+  const dialog = first.getByRole("dialog", { name: "Ta session a pris fin" });
+
+  // La session prend fin. Le premier onglet l'apprend en ouvrant la corbeille, qui ne peut
+  // rien lire : la connexion est demandée par-dessus.
+  await first.context().clearCookies();
+  await sidebarOf(first).getByRole("link", { name: "Corbeille" }).click();
+  await expect(dialog).toBeVisible();
+
+  // La personne se reconnecte dans un second onglet du même navigateur, sous le même compte.
+  const second = await first.context().newPage();
+  await second.goto("/");
+  await expect(loginHeading(second)).toBeVisible();
+  await logInWith(second, account.email, account.password);
+  await expectSignedInAs(second, account.name);
+
+  // De retour sur le premier onglet : le compte relu répond, la session est là. La fenêtre se
+  // ferme sans mot de passe retapé, et la corbeille, qui attendait, est lue.
+  await first.clock.fastForward(5_500);
+  await first.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(dialog).toHaveCount(0);
+  await expect(trashItem(first, thrown.title)).toBeVisible();
+  await expectSignedInAs(first, account.name);
+});

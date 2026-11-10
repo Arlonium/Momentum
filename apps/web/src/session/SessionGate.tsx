@@ -13,7 +13,9 @@
 //
 // Session perdue en cours de route (un appel répond `401 unauthenticated`, `api.ts`) : la
 // connexion est demandée par-dessus l'application, qui reste montée. La page ouverte et ce
-// qui y a été tapé restent dans l'onglet, et repartent une fois la session rouverte.
+// qui y a été tapé restent dans l'onglet, et repartent une fois la session rouverte : par
+// cette fenêtre, ou ailleurs (un autre onglet), ce que la relecture du compte constate ; elle
+// ferme alors la fenêtre.
 //
 // Le compte de la session n'est plus celui que l'application a chargé (Ruling R115) : un
 // autre s'est connecté par-dessus elle, ou dans un autre onglet du même navigateur, ce qu'elle
@@ -148,14 +150,17 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
     navigate(to, { replace: true });
   }, [signedIn, onSessionRoute, joining]);
 
+  /** Le nombre de fois où un appel a dit la session perdue. */
+  const losses = useRef(0);
   // Tout appel qui répond `401 unauthenticated`, `getMe` de `refresh` compris.
   useEffect(
     () =>
-      onSessionLost(() =>
+      onSessionLost(() => {
+        losses.current += 1;
         setState((current) =>
           current.name === "signedIn" && !current.lost ? { ...current, lost: true } : current,
-        ),
-      ),
+        );
+      }),
     [],
   );
 
@@ -181,10 +186,18 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
   );
 
   const refresh = useCallback(async () => {
+    const before = losses.current;
     // Session perdue : `getMe` rejette, et `onSessionLost` a déjà demandé la connexion.
     const me = await getMe();
     if (!sameAccount(me)) return;
-    setState((current) => (current.name === "signedIn" ? { ...current, me } : current));
+    // Le serveur a répondu pour ce compte : la session est là. Si la connexion était demandée
+    // par-dessus l'application (session perdue ici, puis rouverte dans un autre onglet), la
+    // fenêtre se ferme, sans mot de passe à retaper. Sauf si la session s'est perdue pendant
+    // cette lecture : sa réponse, partie avant, ne prouve rien.
+    const proven = losses.current === before;
+    setState((current) =>
+      current.name === "signedIn" ? { ...current, me, lost: current.lost && !proven } : current,
+    );
   }, [sameAccount]);
 
   /** La session est rouverte par-dessus l'application (`LoginDialog`) : elle reprend. */
