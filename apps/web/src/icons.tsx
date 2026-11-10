@@ -180,3 +180,19 @@ export const ArrowDownIcon = () => (
     <path d="M6 13l6 6 6-6" />
   </Icon>
 );
+
+/** « Imbriquer dans la page précédente » : un cran vers la droite, sous la ligne du dessus. */
+export const NestIcon = () => (
+  <Icon>
+    <path d="M5 5v7a3 3 0 0 0 3 3h11" />
+    <path d="M15 11l4 4-4 4" />
+  </Icon>
+);
+
+/** « Sortir de la page parente » : un cran vers la gauche. */
+export const UnnestIcon = () => (
+  <Icon>
+    <path d="M19 5v7a3 3 0 0 1-3 3H5" />
+    <path d="M9 11l-4 4 4 4" />
+  </Icon>
+);

@@ -3,7 +3,9 @@
 // section, comme dans Notion ; l'état est gardé par espace, dans le navigateur. Le « + » d'un
 // titre crée une page à la racine de la section (« Espace » et « Privé » seulement) ; le « + »
 // d'une ligne, une sous-page ; son « … », le menu de ses actions (`RowMenu`) : « Déplacer vers
-// le haut », « Déplacer vers le bas », « Mettre à la corbeille ».
+// le haut », « Déplacer vers le bas », « Imbriquer dans la page précédente », « Sortir de la
+// page parente » (ce que la souris fait en glissant, au clavier, R95), « Mettre à la
+// corbeille ».
 //
 // Une page se déplace aussi à la souris, à l'intérieur de sa section (`PageTree`, `drag.ts`).
 // Le glisser-déposer en cours est tenu ici : seul l'arbre d'où vient la page accepte le dépôt.
@@ -18,10 +20,19 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type RefObject,
 } from "react";
-import { ArrowDownIcon, ArrowUpIcon, ChevronIcon, PlusIcon, TrashIcon } from "../icons";
-import { stepTarget, type Drop } from "./drag";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  ChevronIcon,
+  NestIcon,
+  PlusIcon,
+  TrashIcon,
+  UnnestIcon,
+} from "../icons";
+import { nestTarget, stepTarget, unnestTarget, type Drop } from "./drag";
 import { PageTree, type DropAt, type TreeDrag } from "./PageTree";
 import { RowMenu, type MenuAction } from "./RowMenu";
 import { flattenRows } from "./rows";
@@ -204,22 +215,23 @@ export function SectionList({
   const actions: MenuAction[] = [];
   if (menuNode !== undefined) {
     const { id } = menuNode;
-    // Au clavier, ce que la souris fait en glissant : un cran parmi ses sœurs.
-    const up = stepTarget(menuRows, id, "up");
-    const down = stepTarget(menuRows, id, "down");
+    // Au clavier, ce que la souris fait en glissant : un cran parmi ses sœurs, sous la sœur
+    // qui précède, ou hors de sa page parente. Un geste refusé (niveau, section) est grisé.
+    const moves: [label: string, icon: ReactNode, drop: Drop | null][] = [
+      ["Déplacer vers le haut", <ArrowUpIcon />, stepTarget(menuRows, id, "up")],
+      ["Déplacer vers le bas", <ArrowDownIcon />, stepTarget(menuRows, id, "down")],
+      ["Imbriquer dans la page précédente", <NestIcon />, nestTarget(menuRows, id)],
+      ["Sortir de la page parente", <UnnestIcon />, unnestTarget(menuRows, id)],
+    ];
+    for (const [label, icon, drop] of moves) {
+      actions.push({
+        label,
+        icon,
+        disabled: drop === null,
+        onSelect: () => drop !== null && move(id, drop),
+      });
+    }
     actions.push(
-      {
-        label: "Déplacer vers le haut",
-        icon: <ArrowUpIcon />,
-        disabled: up === null,
-        onSelect: () => up !== null && move(id, up),
-      },
-      {
-        label: "Déplacer vers le bas",
-        icon: <ArrowDownIcon />,
-        disabled: down === null,
-        onSelect: () => down !== null && move(id, down),
-      },
       {
         label: "Mettre à la corbeille",
         icon: <TrashIcon />,

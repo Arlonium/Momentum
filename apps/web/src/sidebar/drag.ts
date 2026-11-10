@@ -1,6 +1,8 @@
-// Déplacer une page dans l'arbre d'une section : à la souris (glisser-déposer) ou au clavier
-// (« Déplacer vers le haut / le bas »). Ce module dit où une page irait, et refuse ce que les
-// droits interdisent ; le serveur fait foi, et refuse le reste.
+// Déplacer une page dans l'arbre d'une section : à la souris (glisser-déposer) ou au clavier,
+// par le menu « … » de sa ligne (« Déplacer vers le haut / le bas », « Imbriquer dans la page
+// précédente », « Sortir de la page parente », Ruling R95). Ce module dit où une page irait,
+// et refuse ce que les droits interdisent ; le serveur fait foi, et refuse le reste. Le
+// clavier fait ce que fait la souris, avec les mêmes refus.
 //
 // Ce que le serveur exige (`PATCH /api/v1/pages/{id}`) : changer de place parmi les mêmes
 // sœurs demande de pouvoir modifier la page (`edit`) ; changer de page parente demande l'accès
@@ -115,4 +117,30 @@ export function stepTarget(rows: Row[], id: string, direction: "up" | "down"): D
   if (direction === "up" ? at === 0 : after === undefined) return null;
   const drop = { parentId: from.parent, afterId: after ?? null };
   return allowed(placed, from, drop) ? drop : null;
+}
+
+/**
+ * Où irait la page `id`, imbriquée dans la sœur qui la précède ? Elle en devient la dernière
+ * sous-page : c'est le dépôt « dedans » sur cette sœur, avec ses refus. `null` : pas de sœur
+ * avant elle, ou geste refusé.
+ */
+export function nestTarget(rows: Row[], id: string): Drop | null {
+  const placed = place(rows);
+  const from = placed.find((p) => p.row.node.id === id);
+  if (from === undefined) return null;
+  const siblings = childrenOf(placed, from.parent);
+  const previous = siblings[siblings.indexOf(id) - 1];
+  if (previous === undefined) return null;
+  return dropTarget(rows, id, rows.findIndex((row) => row.node.id === previous), "inside");
+}
+
+/**
+ * Où irait la page `id`, sortie de sa page parente ? Elle en devient la sœur suivante : c'est
+ * le dépôt « après » sur sa page parente, avec ses refus. `null` : elle est à la racine, ou
+ * geste refusé (jusqu'à la racine, hors de « Privé », elle changerait de section).
+ */
+export function unnestTarget(rows: Row[], id: string): Drop | null {
+  const from = place(rows).find((p) => p.row.node.id === id);
+  if (from === undefined || from.parent === null) return null;
+  return dropTarget(rows, id, rows.findIndex((row) => row.node.id === from.parent), "after");
 }

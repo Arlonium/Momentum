@@ -596,13 +596,17 @@ test("row_menu_by_keyboard", async ({ browser }) => {
   await p.keyboard.press("ArrowDown");
   await expect(item("Déplacer vers le bas")).toBeFocused();
   await p.keyboard.press("ArrowDown");
+  await expect(item("Imbriquer dans la page précédente")).toBeFocused();
+  // « Sortir de la page parente » n'a pas de sens à la racine : grisée, les flèches la passent.
+  await expect(item("Sortir de la page parente")).toHaveAttribute("aria-disabled", "true");
+  await p.keyboard.press("ArrowDown");
   await expect(item("Mettre à la corbeille")).toBeFocused();
   await p.keyboard.press("ArrowDown");
   await expect(item("Déplacer vers le haut")).toBeFocused();
   await p.keyboard.press("End");
   await expect(item("Mettre à la corbeille")).toBeFocused();
   await p.keyboard.press("ArrowUp");
-  await expect(item("Déplacer vers le bas")).toBeFocused();
+  await expect(item("Imbriquer dans la page précédente")).toBeFocused();
   await p.keyboard.press("Home");
   await expect(item("Déplacer vers le haut")).toBeFocused();
   // Échap le ferme et rend le focus à son bouton.
@@ -640,6 +644,67 @@ test("row_menu_by_keyboard", async ({ browser }) => {
   await expect(menu).toBeVisible();
   await p.keyboard.press("Tab");
   await expect(menu).toHaveCount(0);
+});
+
+test("row_menu_nests_and_unnests_by_keyboard", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const c = await createPage(api, { title: "Charlie" });
+  const d = await createPage(api, { parentId: c.id, title: "Delta" });
+  const a = await createPage(api, { section: "private", title: "Alpha" });
+  const b = await createPage(api, { section: "private", title: "Bravo" });
+  const parentOf = async (id: string) =>
+    (await getTree(api, space.id)).nodes.find((n) => n.id === id)?.parentId;
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  const start = ["1 Charlie", "2 Delta", "1 Alpha", "1 Bravo"];
+  await expect.poll(() => shownRows(p)).toEqual(start);
+  const button = treeRow(p, b.id).getByRole("button", { name: "Actions de « Bravo »" });
+  const item = (title: string, name: string) =>
+    p.getByRole("menu", { name: `Actions de « ${title} »` }).getByRole("menuitem", { name });
+  const nest = "Imbriquer dans la page précédente";
+  const unnest = "Sortir de la page parente";
+
+  // Dans « Privé ». « Bravo », dernière : ni plus bas, ni hors d'une page parente.
+  await button.focus();
+  await p.keyboard.press("Enter");
+  await expect(item("Bravo", "Déplacer vers le haut")).toBeFocused();
+  await expect(item("Bravo", "Déplacer vers le bas")).toHaveAttribute("aria-disabled", "true");
+  await expect(item("Bravo", unnest)).toHaveAttribute("aria-disabled", "true");
+  // « Imbriquer dans la page précédente » : elle devient la sous-page de « Alpha », qui se
+  // déplie ; le focus reste sur son bouton.
+  await p.keyboard.press("ArrowDown");
+  await expect(item("Bravo", nest)).toBeFocused();
+  await p.keyboard.press("Enter");
+  await expect.poll(() => shownRows(p)).toEqual(["1 Charlie", "2 Delta", "1 Alpha", "2 Bravo"]);
+  await expect(treeRow(p, a.id)).toHaveAttribute("aria-expanded", "true");
+  expect(await parentOf(b.id)).toBe(a.id);
+  await expect(button).toBeFocused();
+
+  // Seule sous sa page parente : il ne lui reste qu'à en sortir, juste après elle.
+  await p.keyboard.press("Enter");
+  await expect(item("Bravo", unnest)).toBeFocused();
+  for (const name of ["Déplacer vers le haut", "Déplacer vers le bas", nest]) {
+    await expect(item("Bravo", name)).toHaveAttribute("aria-disabled", "true");
+  }
+  await p.keyboard.press("Enter");
+  await expect.poll(() => shownRows(p)).toEqual(start);
+  expect(await parentOf(b.id)).toBeNull();
+  expect(
+    byPosition((await getTree(api, space.id)).nodes)
+      .filter((n) => n.section === "private")
+      .map((n) => n.title),
+  ).toEqual(["Alpha", "Bravo"]);
+
+  // Dans « Espace », sortir une sous-page à la racine la rendrait privée : l'action est
+  // grisée, comme le dépôt à la souris est refusé.
+  await openRowMenu(p, d.id, "Delta");
+  await expect(item("Delta", unnest)).toHaveAttribute("aria-disabled", "true");
+  await expect(item("Delta", nest)).toHaveAttribute("aria-disabled", "true");
+  await p.keyboard.press("Escape");
+  expect(await parentOf(d.id)).toBe(c.id);
 });
 
 test("drop_target_is_shown_while_dragging", async ({ browser }) => {

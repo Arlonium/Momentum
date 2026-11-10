@@ -3,7 +3,7 @@
 // déplacement d'un cran au clavier (`stepTarget`).
 import type { Level, PageNode, Section } from "@mementum/protocol";
 import { expect, test } from "vitest";
-import { dropTarget, stepTarget, zonesAt } from "./drag";
+import { dropTarget, nestTarget, stepTarget, unnestTarget, zonesAt } from "./drag";
 import { flattenRows, ROW_HEIGHT, type Row } from "./rows";
 
 function page(
@@ -204,4 +204,48 @@ test("step_moves_one_place_among_siblings", () => {
   // Changer de place demande de pouvoir modifier la page (`edit` suffit).
   expect(stepTarget(tree({ a2: { level: "edit" } }), "a2", "up")).toEqual({ parentId: "a", afterId: null });
   expect(stepTarget(tree({ a2: { level: "read" } }), "a2", "up")).toBeNull();
+});
+
+test("nest_makes_the_page_the_last_child_of_its_previous_sibling", () => {
+  const rows = tree();
+  // « b » suit « a », qui a déjà trois sous-pages : elle devient la quatrième.
+  expect(nestTarget(rows, "b")).toEqual({ parentId: "a", afterId: "a3" });
+  // « c » suit « b », qui n'en a pas : elle devient la première.
+  expect(nestTarget(rows, "c")).toEqual({ parentId: "b", afterId: null });
+  // Plus profond : « a2 » sous « a1 », après « a1x ».
+  expect(nestTarget(rows, "a2")).toEqual({ parentId: "a1", afterId: "a1x" });
+  // C'est le dépôt « dedans » de la souris, sur la sœur précédente.
+  expect(nestTarget(rows, "b")).toEqual(dropTarget(rows, "b", at(rows, "a"), "inside"));
+  // Sans sœur avant elle, ou inconnue : rien.
+  expect(nestTarget(rows, "a")).toBeNull();
+  expect(nestTarget(rows, "a1")).toBeNull();
+  expect(nestTarget(rows, "c1")).toBeNull();
+  expect(nestTarget(rows, "absente")).toBeNull();
+});
+
+test("unnest_makes_the_page_the_next_sibling_of_its_parent", () => {
+  const rows = tree();
+  // « a1x », sous « a1 » : elle passe sous « a », juste après « a1 ».
+  expect(unnestTarget(rows, "a1x")).toEqual({ parentId: "a", afterId: "a1" });
+  // C'est le dépôt « après » de la souris, sur la page parente.
+  expect(unnestTarget(rows, "a1x")).toEqual(dropTarget(rows, "a1x", at(rows, "a1"), "after"));
+  // Une page à la racine n'a pas de page parente d'où sortir.
+  expect(unnestTarget(rows, "a")).toBeNull();
+  expect(unnestTarget(rows, "absente")).toBeNull();
+  // Jusqu'à la racine : dans « Privé » seulement (la page y reste dans sa section).
+  expect(unnestTarget(rows, "a2")).toBeNull();
+  const mine = { section: "private" } as const;
+  const privateRows = tree({ a: mine, a1: mine, a1x: mine, a2: mine, a3: mine, b: mine });
+  expect(unnestTarget(privateRows, "a2")).toEqual({ parentId: null, afterId: "a" });
+});
+
+test("nest_and_unnest_follow_the_rules_of_a_drop", () => {
+  // Changer de page parente demande l'accès complet à la page.
+  const edit = tree({ b: { level: "edit" }, a1x: { level: "edit" } });
+  expect(nestTarget(edit, "b")).toBeNull();
+  expect(unnestTarget(edit, "a1x")).toBeNull();
+  // Et de pouvoir modifier la nouvelle page parente.
+  const locked = tree({ a: { level: "read" }, a1: { level: "read" }, a1x: { level: "full" } });
+  expect(nestTarget(locked, "b")).toBeNull();
+  expect(unnestTarget(locked, "a1x")).toBeNull();
 });
