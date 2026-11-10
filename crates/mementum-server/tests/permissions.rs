@@ -11,7 +11,7 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::{
-    Account, Browser, Reply, Team, TestApp, json_request, outcome, page_routes, query_i64,
+    Account, Browser, Logs, Reply, Team, TestApp, json_request, outcome, page_routes, query_i64,
     sync_url, synced_as, text, trash_list, tree_nodes, uuid,
 };
 use mementum_acl::{Level, Role, Subject};
@@ -69,6 +69,14 @@ async fn seen(by: &Account<'_>, space: Uuid) -> Vec<(String, Option<String>, Str
         .collect();
     seen.sort();
     seen
+}
+
+/// La réponse d'une écriture (créer, déplacer) dit ce que dit ensuite la lecture de la page :
+/// mêmes champs, mêmes valeurs. Le serveur la compose sans relire les droits de l'espace.
+async fn assert_reads_back(by: &Account<'_>, written: &Value) {
+    let read = by.browser.get(&page_uri(uuid(&written["id"]))).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(&read.json(), written);
 }
 
 fn row(
@@ -903,6 +911,7 @@ async fn root_page_gets_the_access_of_its_section() {
         team.grants(uuid(&private["id"])).await,
         [user(mona, Level::Full)]
     );
+    assert_reads_back(mona, &private).await;
     let explicit = created(json!({ "spaceId": space, "section": "private" })).await;
     assert_eq!(
         team.grants(uuid(&explicit["id"])).await,
@@ -916,6 +925,7 @@ async fn root_page_gets_the_access_of_its_section() {
     );
     let shared_id = uuid(&shared["id"]);
     assert_eq!(team.grants(shared_id).await, [members(Level::Full)]);
+    assert_reads_back(mona, &shared).await;
     // Tous les membres y ont l'accès complet, comme dans Notion.
     let for_tom = team.tom.browser.get(&page_uri(shared_id)).await.json();
     assert_eq!(
@@ -937,6 +947,7 @@ async fn root_page_gets_the_access_of_its_section() {
             ("full", "space")
         );
         assert_eq!(team.grants(uuid(&child["id"])).await, []);
+        assert_reads_back(mona, &child).await;
     }
 
     // Les refus n'écrivent rien.
@@ -1012,6 +1023,7 @@ async fn guest_cannot_create_root_page() {
         ("edit", "shared")
     );
     assert_eq!(team.grants(uuid(&child["id"])).await, []);
+    assert_reads_back(gina, &child).await;
 }
 
 /// Changer de place parmi les mêmes frères demande `edit` ; changer de parent demande `full`
@@ -1162,7 +1174,7 @@ async fn page_moved_to_root_stays_visible_to_its_mover() {
             .assert_error(StatusCode::NOT_FOUND, "not_found");
     }
 
-    // Une page qui porte ses propres accès les garde, et rien ne s'y ajoute.
+    // Une page qui porte ses propres accès les garde ; celui de qui la déplace s'y ajoute.
     let lined = team
         .page(Some(shared), "En lecture", &[members(Level::Read)])
         .await;
@@ -1170,28 +1182,304 @@ async fn page_moved_to_root_stays_visible_to_its_mover() {
         .patched(&lined.to_string(), json!({ "parentId": null }))
         .await;
     assert_eq!(moved.parent_id, None);
-    assert_eq!(team.grants(lined).await, [members(Level::Read)]);
+    assert_eq!(
+        team.grants(lined).await,
+        [members(Level::Read), user(olga, Level::Full)]
+    );
     let for_tom = tom.browser.get(&page_uri(lined)).await.json();
     assert_eq!(
         (text(&for_tom, "level"), text(&for_tom, "section")),
         ("read", "space")
     );
+}
 
-    // Une page dont les accès propres ne nomment pas qui la déplace : à la racine, il ne la
-    // verrait plus. Le déplacement est refusé, et rien ne change.
-    let invited = team
-        .page(
-            Some(shared),
+/// Ruling R82 : quand une page arrive à la racine, celui qui la déplace y a toujours l'accès
+/// complet. Sa ligne est posée, ou relevée si elle était plus faible ; les lignes des autres ne
+/// changent pas. Sans cela, une page dont l'accès complet ne venait que de ses ancêtres
+/// n'aurait plus personne pour la partager, la déplacer ni la supprimer.
+#[tokio::test]
+async fn page_moved_to_root_always_keeps_a_full_owner() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, mona, tom, gina) = (&team.olga, &team.mona, &team.tom, &team.gina);
+    let shared = team.page(None, "Commune", &[members(Level::Full)]).await;
+    let full = user(mona, Level::Full);
+    // `(titre, lignes de la page avant, après, section pour Mona)`. Avant, Mona a l'accès
+    // complet par héritage, quoi que disent les lignes de la page.
+    let cases = [
+        ("Sans ligne", vec![], vec![full], "private"),
+        (
+            "Mona en lecture",
+            vec![user(mona, Level::Read)],
+            vec![full],
+            "private",
+        ),
+        (
+            "Mona en modification",
+            vec![user(mona, Level::Edit)],
+            vec![full],
+            "private",
+        ),
+        ("Mona en accès complet", vec![full], vec![full], "private"),
+        (
             "Partagée avec Gina",
-            &[user(&team.gina, Level::Read)],
-        )
+            vec![user(gina, Level::Read)],
+            vec![user(gina, Level::Read), full],
+            "shared",
+        ),
+        (
+            "En lecture pour les membres",
+            vec![members(Level::Read)],
+            vec![members(Level::Read), full],
+            "space",
+        ),
+    ];
+    let mut pages = Vec::new();
+    for (title, before, after, section) in cases {
+        let page = team.page(Some(shared), title, &before).await;
+        let reply = mona
+            .patch(&page.to_string(), json!({ "parentId": null }))
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{title} : {}", reply.text());
+        let moved = reply.json();
+        assert!(moved["parentId"].is_null(), "{title}");
+        assert_eq!(
+            (text(&moved, "level"), text(&moved, "section")),
+            ("full", section),
+            "{title}"
+        );
+        assert_reads_back(mona, &moved).await;
+        let lines = team.grants(page).await;
+        assert_eq!(lines.len(), after.len(), "{title} : {lines:?}");
+        for line in &after {
+            assert!(
+                lines.contains(line),
+                "{title} : {line:?} absent de {lines:?}"
+            );
+        }
+        pages.push(page);
+    }
+    let [bare, _, _, _, with_gina, for_members] = pages[..] else {
+        panic!("six pages attendues");
+    };
+
+    // Les autres gardent ce que leur donnent les lignes de la page, et perdent ce qu'ils ne
+    // tenaient que de l'ancienne page parente.
+    let level = async |who: &Account<'_>, page: Uuid| {
+        let reply = who.browser.get(&page_uri(page)).await;
+        match reply.status {
+            StatusCode::OK => Some(text(&reply.json(), "level").to_string()),
+            StatusCode::NOT_FOUND => None,
+            other => panic!("statut inattendu : {other}"),
+        }
+    };
+    assert_eq!(level(gina, with_gina).await.as_deref(), Some("read"));
+    assert_eq!(level(olga, with_gina).await, None);
+    assert_eq!(level(tom, for_members).await.as_deref(), Some("read"));
+    assert_eq!(level(olga, for_members).await.as_deref(), Some("full"));
+    assert_eq!(level(tom, bare).await, None);
+    assert_eq!(level(olga, bare).await, None);
+}
+
+/// La réponse d'un changement de parent dit les accès d'après le déplacement : ce que les
+/// lignes de la page donnent à la personne, et ce qu'elle hérite du nouveau parent.
+#[tokio::test]
+async fn moved_page_answers_with_its_new_access() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, mona) = (&team.olga, &team.mona);
+    let source = team.page(None, "Source", &[members(Level::Full)]).await;
+    let for_edit = team.page(None, "À modifier", &[members(Level::Edit)]).await;
+    let private = team
+        .page(None, "Privée d'Olga", &[user(olga, Level::Full)])
         .await;
-    let before = team.store.get_node(invited).await.unwrap();
-    mona.patch(&invited.to_string(), json!({ "parentId": null }))
+    let moved = async |by: &Account<'_>, lines: &[(Subject, Level)], destination: Uuid| {
+        let page = team.page(Some(source), "Page", lines).await;
+        let reply = by
+            .patch(
+                &page.to_string(),
+                json!({ "parentId": destination.to_string() }),
+            )
+            .await;
+        reply.assert_status(StatusCode::OK);
+        let node = reply.json();
+        assert_eq!(node["parentId"], destination.to_string());
+        assert!(node["trashedAt"].is_null());
+        assert_reads_back(by, &node).await;
+        (
+            page,
+            text(&node, "level").to_string(),
+            text(&node, "section").to_string(),
+        )
+    };
+    let seen_as = |level: &str, section: &str| (level.to_string(), section.to_string());
+
+    // Sans ligne propre : sous la destination, Mona n'a plus que ce qu'elle y a.
+    let (_, level, section) = moved(mona, &[], for_edit).await;
+    assert_eq!((level, section), seen_as("edit", "space"));
+    // Une ligne plus faible que la destination ne lui retire rien.
+    let (_, level, section) = moved(mona, &[user(mona, Level::Read)], for_edit).await;
+    assert_eq!((level, section), seen_as("edit", "space"));
+    // Sa propre ligne `full` la suit.
+    let (_, level, section) = moved(mona, &[user(mona, Level::Full)], for_edit).await;
+    assert_eq!((level, section), seen_as("full", "space"));
+    // Sous une page privée : la section de la destination, et les autres ne la voient plus.
+    let (page, level, section) = moved(olga, &[], private).await;
+    assert_eq!((level, section), seen_as("full", "private"));
+    mona.browser
+        .get(&page_uri(page))
         .await
-        .assert_error(StatusCode::FORBIDDEN, "forbidden");
-    assert_eq!(team.store.get_node(invited).await.unwrap(), before);
-    assert_eq!(team.grants(invited).await, [user(&team.gina, Level::Read)]);
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+}
+
+/// Un `PATCH` qui ne change rien n'écrit rien : une page déjà à la place demandée garde sa
+/// date et son dernier auteur, et la révision de l'espace ne bouge pas. Un titre ou une place
+/// sous le même parent s'écrivent sans toucher à la révision (Ruling R83) : ils ne changent les
+/// droits de personne, et le cache des accès de l'espace reste valable.
+#[tokio::test]
+async fn patch_that_moves_nothing_writes_nothing() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let tom = &team.tom;
+    let parent = team.page(None, "Parent", &[members(Level::Full)]).await;
+    // Le store les range en tête : l'ordre est C, B, A.
+    let a = team.page(Some(parent), "A", &[]).await;
+    let b = team.page(Some(parent), "B", &[]).await;
+    let c = team.page(Some(parent), "C", &[]).await;
+    let state = async || {
+        let mut nodes = Vec::new();
+        for id in [parent, a, b, c] {
+            nodes.push(team.store.get_node(id).await.unwrap().expect("la page"));
+        }
+        (nodes, team.store.space_rev(team.space).await.unwrap())
+    };
+    let before = state().await;
+
+    // Tom n'est l'auteur d'aucune : une écriture se verrait à `updated_by`.
+    let nowhere = [
+        (c, json!({ "afterId": null })),
+        (b, json!({ "afterId": c.to_string() })),
+        (a, json!({ "afterId": b.to_string() })),
+        (a, json!({ "parentId": parent.to_string() })),
+        (
+            a,
+            json!({ "parentId": parent.to_string(), "afterId": b.to_string() }),
+        ),
+        (b, json!({ "afterId": b.to_string() })),
+        (parent, json!({ "parentId": null })),
+        (parent, json!({ "afterId": null })),
+        (a, json!({})),
+        (a, json!({ "title": null })),
+    ];
+    for (page, body) in nowhere {
+        let reply = tom.patch(&page.to_string(), body.clone()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{body} : {}", reply.text());
+        assert_eq!(reply.json()["id"], page.to_string());
+        assert_eq!(state().await, before, "{body}");
+    }
+
+    // Une vraie place, puis un titre : la page est écrite, la révision ne bouge pas.
+    let (_, rev) = before;
+    tom.patched(&a.to_string(), json!({ "afterId": null }))
+        .await;
+    tom.patched(&b.to_string(), json!({ "title": "B, renommée" }))
+        .await;
+    let (nodes, after) = state().await;
+    assert_eq!(after, rev);
+    assert_eq!(nodes[1].updated_by, Some(tom.id));
+    assert_eq!(
+        (nodes[2].title.as_str(), nodes[2].updated_by),
+        ("B, renommée", Some(tom.id))
+    );
+    let order: Vec<String> = tree_nodes(&tom.browser, team.space)
+        .await
+        .iter()
+        .filter(|n| n["parentId"] == parent.to_string())
+        .map(|n| text(n, "title").to_string())
+        .collect();
+    assert_eq!(order, ["A", "C", "B, renommée"]);
+
+    // Un changement de parent, lui, change les droits : la révision avance.
+    tom.patched(&c.to_string(), json!({ "parentId": null }))
+        .await;
+    assert!(state().await.1 > rev);
+}
+
+/// Un changement de place fait avec `edit` ne défait jamais un changement de parent fait en
+/// même temps. La place est décidée sous le parent lu avec les droits ; si la page l'a quitté
+/// avant l'écriture, le store refuse, la route relit et redécide. Sinon la page reviendrait
+/// sous son ancien parent, par quelqu'un qui n'a pas le droit de la déplacer.
+///
+/// L'ordre est forcé par le verrou d'écriture de SQLite : le test le tient pendant que Tom
+/// envoie sa requête, qui lit donc la page sous son premier parent puis attend pour écrire ;
+/// la page change de parent, et le verrou est rendu.
+#[tokio::test]
+async fn reorder_never_undoes_a_concurrent_move() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let tom = &team.tom;
+    // Tom a `edit` partout : il change de place, pas de parent.
+    let first = team
+        .page(None, "Premier parent", &[members(Level::Edit)])
+        .await;
+    let second = team
+        .page(None, "Second parent", &[members(Level::Edit)])
+        .await;
+    let page = team.page(Some(first), "Page", &[]).await;
+    team.page(Some(second), "Sœur", &[]).await;
+    let id = page.to_string();
+    let rev = team.store.space_rev(team.space).await.unwrap();
+
+    let logs = Logs::capture();
+    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
+        .await
+        .unwrap();
+    let mut lock = side.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let moved_meanwhile = async {
+        // Le temps que la requête de Tom lise la page et vienne attendre le verrou.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        for sql in [
+            format!("UPDATE nodes SET parent_id = '{second}' WHERE id = '{page}'"),
+            format!(
+                "UPDATE spaces SET rev = rev + 1 WHERE id = '{}'",
+                team.space
+            ),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .execute(&mut *lock)
+                .await
+                .unwrap();
+        }
+        lock.commit().await.unwrap();
+    };
+    let (reply, ()) = tokio::join!(tom.patch(&id, json!({ "afterId": null })), moved_meanwhile);
+    side.close().await;
+    let journal = logs.text();
+    drop(logs);
+
+    // La requête a bien été prise de vitesse, et a redécidé.
+    assert!(
+        journal.contains("relit") && journal.contains(&id),
+        "journal : {journal}"
+    );
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(reply.json()["parentId"], second.to_string());
+    // La page est restée sous son nouveau parent, où elle est passée en tête ; la révision
+    // n'a avancé que du changement de parent.
+    let node = team.store.get_node(page).await.unwrap().expect("la page");
+    assert_eq!(node.parent_id, Some(second));
+    assert_eq!(node.updated_by, Some(tom.id));
+    let titles: Vec<String> = tree_nodes(&tom.browser, team.space)
+        .await
+        .iter()
+        .filter(|n| n["parentId"] == second.to_string())
+        .map(|n| text(n, "title").to_string())
+        .collect();
+    assert_eq!(titles, ["Page", "Sœur"]);
+    assert_eq!(
+        team.store.space_rev(team.space).await.unwrap(),
+        rev.map(|rev| rev + 1)
+    );
 }
 
 /// `PATCH` change le titre et la place en une seule écriture : un déplacement refusé (`409
@@ -1304,6 +1592,8 @@ async fn writes_carry_their_author() {
     let team = Team::new(&t).await;
     let (mona, tom) = (&team.mona, &team.tom);
     let space = team.space.to_string();
+    // Une page devant elle : la passer en tête sera un vrai changement de place.
+    team.page(None, "Devant", &[members(Level::Full)]).await;
     let reply = mona
         .browser
         .post(
@@ -1324,7 +1614,7 @@ async fn writes_carry_their_author() {
         (Some(mona.id), Some(mona.id))
     );
 
-    // Tom la renomme, puis la déplace.
+    // Tom la renomme, puis Mona la passe en tête.
     tom.patched(&id, json!({ "title": "Renommée par Tom" }))
         .await;
     let node = team.store.get_node(page).await.unwrap().expect("la page");

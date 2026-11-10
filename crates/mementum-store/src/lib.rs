@@ -18,11 +18,14 @@
 //! Les horodatages sont en millisecondes Unix. Les identifiants sont des UUIDv7 stockés en
 //! `TEXT`. Toutes les requêtes sont écrites à l'exécution, valeurs liées en paramètres.
 //!
-//! **Règle de `rev`** : toute méthode qui crée, renomme, déplace, met à la corbeille, restaure
-//! ou supprime un nœud, ou qui écrit dans `acl` ou `members`, incrémente `spaces.rev` dans la
-//! même transaction. C'est la clé du cache des accès (`mementum-acl`) : une écriture qui
-//! l'oublierait laisserait des droits périmés en cache. Le contenu d'une page (journal,
-//! instantanés) ne la touche pas.
+//! **Règle de `rev`** : `spaces.rev` est la clé du cache des accès (`mementum-acl`), et rien
+//! d'autre. Elle est incrémentée, dans la même transaction, par toute écriture qui change une
+//! entrée du calcul des accès : la création et la suppression d'un nœud, son changement de
+//! parent (passage à la racine compris), sa mise à la corbeille et sa restauration, et toute
+//! écriture dans `acl` ou `members`. Une écriture qui l'oublierait laisserait des droits périmés
+//! en cache. Ce qui ne change les droits de personne ne la touche pas (Ruling R83) : le titre
+//! d'un nœud, sa place sous le même parent, et le contenu d'une page (journal, instantanés).
+//! Sinon, chaque titre tapé viderait le cache de tout l'espace.
 
 mod acl;
 mod backup;
@@ -51,7 +54,7 @@ pub use backup::{Backup, backup_path};
 pub use docs::DocState;
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
 pub use members::{Expected, Member};
-pub use nodes::{NewNode, Node, NodeKind, Place};
+pub use nodes::{NewNode, Node, NodeKind, Place, Sibling};
 pub use position::position_between;
 pub use signup::SignedUp;
 pub use spaces::Space;

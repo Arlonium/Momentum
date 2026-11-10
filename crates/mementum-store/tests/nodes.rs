@@ -5,7 +5,7 @@ mod common;
 
 use common::{break_table, fresh, int, new_user, page, repair, texts};
 use mementum_acl::{Grant, Level, Subject};
-use mementum_store::{NewNode, NodeKind, Place, Space, Store, StoreError};
+use mementum_store::{NewNode, NodeKind, Place, Sibling, Space, Store, StoreError};
 use uuid::Uuid;
 
 async fn titles(store: &Store, space: &Space, parent: Option<Uuid>) -> Vec<String> {
@@ -204,6 +204,7 @@ async fn update_node_changes_title_and_place_together() {
     let place = Place {
         parent_id: Some(a.id),
         after: None,
+        from: None,
     };
     let moved = store
         .update_node(b.id, Some("B, sous A"), Some(place), Some(user), None)
@@ -250,6 +251,7 @@ async fn update_node_is_atomic() {
     let place = Place {
         parent_id: Some(b.id),
         after: None,
+        from: None,
     };
     let r = store
         .update_node(a.id, Some("Nouveau titre"), Some(place), None, None)
@@ -259,7 +261,8 @@ async fn update_node_is_atomic() {
     // De même pour un `after` qui n'est pas un frère à l'endroit visé.
     let place = Place {
         parent_id: None,
-        after: Some(b.id),
+        after: Some(Sibling::Node(b.id)),
+        from: None,
     };
     let r = store
         .update_node(a.id, Some("Nouveau titre"), Some(place), None, None)
@@ -269,22 +272,29 @@ async fn update_node_is_atomic() {
     assert_eq!(store.space_rev(space.id).await.unwrap(), rev);
 }
 
-/// Ruling R66 : un nœud qui arrive à la racine sans aucune ligne d'accès propre reçoit
-/// `root_grant` dans la transaction du déplacement. Il n'est donc jamais, entre deux écritures,
-/// visible de personne.
+/// Ruling R82 : quand un nœud arrive à la racine, `root_grant` y est posé dans la transaction du
+/// déplacement, ou relevé si son sujet y avait un accès plus faible. Celui qui déplace y a donc
+/// toujours l'accès complet, et le nœud n'est jamais, entre deux écritures, sans personne pour
+/// le gérer. Un accès n'est jamais abaissé, et les lignes des autres sujets ne changent pas.
 #[tokio::test]
-async fn update_node_gives_root_grant_to_a_node_arriving_at_root_without_lines() {
+async fn update_node_gives_root_grant_to_a_node_arriving_at_root() {
     let f = fresh().await;
     let (store, space, db) = (&f.store, &f.space, &f.db);
     let user = new_user(db).await;
     let other = new_user(db).await;
-    let full = |user| Grant {
+    let line = |user, level| Grant {
         subject: Subject::User(user),
-        level: Level::Full,
+        level,
+    };
+    let full = |user| line(user, Level::Full);
+    let to_members = Grant {
+        subject: Subject::Members,
+        level: Level::Read,
     };
     let root = Place {
         parent_id: None,
         after: None,
+        from: None,
     };
     let mut parent = page(space, None, None, "Parent");
     parent.grants = vec![Grant {
@@ -293,90 +303,106 @@ async fn update_node_gives_root_grant_to_a_node_arriving_at_root_without_lines()
     }];
     let parent = store.create_node(parent).await.unwrap();
     let rev = || async { store.space_rev(space.id).await.unwrap().unwrap() };
-
-    // Sans ligne propre : le déplacement à la racine pose l'accès, en une seule écriture.
-    let bare = store
-        .create_node(page(space, Some(parent.id), None, "Sans ligne"))
-        .await
-        .unwrap();
-    let before = rev().await;
-    let moved = store
-        .update_node(bare.id, None, Some(root), Some(user), Some(full(user)))
-        .await
-        .unwrap();
-    assert_eq!(moved.parent_id, None);
-    assert_eq!(store.node_grants(bare.id).await.unwrap(), [full(user)]);
-    assert_eq!(rev().await, before + 1, "une seule transaction");
-
-    // Avec une ligne propre, même pour quelqu'un d'autre : rien n'est posé.
-    let mut shared = page(space, Some(parent.id), None, "Partagée");
-    shared.grants = vec![Grant {
-        subject: Subject::User(other),
-        level: Level::Read,
-    }];
-    let shared = store.create_node(shared).await.unwrap();
-    let lines = store.node_grants(shared.id).await.unwrap();
-    store
-        .update_node(shared.id, None, Some(root), Some(user), Some(full(user)))
-        .await
-        .unwrap();
-    assert_eq!(store.node_grants(shared.id).await.unwrap(), lines);
-
-    // Sans `root_grant`, rien n'est posé non plus.
-    let silent = store
-        .create_node(page(space, Some(parent.id), None, "Sans accès demandé"))
-        .await
-        .unwrap();
-    store
-        .update_node(silent.id, None, Some(root), Some(user), None)
-        .await
-        .unwrap();
-    assert_eq!(store.node_grants(silent.id).await.unwrap(), []);
-
-    // Le nœud n'arrive pas à la racine : sous un autre parent, ou déjà à la racine (il change
-    // seulement de place), ou simplement renommé.
-    let elsewhere = store
-        .create_node(page(space, Some(parent.id), None, "Sous un autre parent"))
-        .await
-        .unwrap();
-    let under_bare = Place {
-        parent_id: Some(bare.id),
-        after: None,
+    // Un nœud sous `parent`, avec ces lignes propres.
+    let child = |title: &'static str, grants: Vec<Grant>| async move {
+        let mut child = page(space, Some(parent.id), None, title);
+        child.grants = grants;
+        store.create_node(child).await.unwrap()
     };
-    store
-        .update_node(
-            elsewhere.id,
-            None,
-            Some(under_bare),
-            Some(user),
-            Some(full(user)),
+    // Les lignes du nœud, une fois passé à la racine par `user` avec `grant`.
+    let lines_at_root = |title: &'static str, grants: Vec<Grant>, grant: Option<Grant>| async move {
+        let node = child(title, grants).await;
+        let moved = store
+            .update_node(node.id, None, Some(root), Some(user), grant)
+            .await
+            .unwrap();
+        assert_eq!(moved.parent_id, None, "{title}");
+        store.node_grants(node.id).await.unwrap()
+    };
+
+    // Sans ligne propre : l'accès est posé, en une seule écriture.
+    let before = rev().await;
+    assert_eq!(
+        lines_at_root("Sans ligne", vec![], Some(full(user))).await,
+        [full(user)]
+    );
+    assert_eq!(
+        rev().await,
+        before + 2,
+        "une création, puis une seule transaction"
+    );
+
+    // Une ligne plus faible pour le même sujet : relevée.
+    for (title, level) in [
+        ("En lecture", Level::Read),
+        ("En modification", Level::Edit),
+    ] {
+        assert_eq!(
+            lines_at_root(title, vec![line(user, level)], Some(full(user))).await,
+            [full(user)],
+            "{title}"
+        );
+    }
+    // Il a déjà l'accès complet : rien ne change. Un accès n'est jamais abaissé.
+    assert_eq!(
+        lines_at_root("Déjà complet", vec![full(user)], Some(full(user))).await,
+        [full(user)]
+    );
+    assert_eq!(
+        lines_at_root(
+            "Jamais abaissé",
+            vec![full(user)],
+            Some(line(user, Level::Edit))
         )
-        .await
-        .unwrap();
-    assert_eq!(store.node_grants(elsewhere.id).await.unwrap(), []);
+        .await,
+        [full(user)]
+    );
+    // Les lignes des autres sujets restent telles quelles ; la sienne s'y ajoute.
+    let mut lines = lines_at_root(
+        "Partagée",
+        vec![line(other, Level::Read), to_members],
+        Some(full(user)),
+    )
+    .await;
+    lines.retain(|grant| *grant != full(user));
+    assert_eq!(lines.len(), 2, "la ligne posée, et les deux autres");
+    assert!(lines.contains(&line(other, Level::Read)) && lines.contains(&to_members));
+    // Sans `root_grant`, rien n'est posé.
+    assert_eq!(lines_at_root("Sans accès demandé", vec![], None).await, []);
+
+    // Le nœud n'arrive pas à la racine : sous un autre parent, déjà à la racine (il y change
+    // seulement de place), ou simplement renommé.
+    let elsewhere = child("Sous un autre parent", vec![]).await;
+    let at_root = child("Déjà à la racine", vec![]).await;
     store
-        .update_node(silent.id, None, Some(root), Some(user), Some(full(user)))
+        .update_node(at_root.id, None, Some(root), Some(user), None)
         .await
         .unwrap();
-    assert_eq!(store.node_grants(silent.id).await.unwrap(), []);
-    store
-        .update_node(
-            elsewhere.id,
-            Some("Renommée"),
-            None,
-            Some(user),
-            Some(full(user)),
-        )
-        .await
-        .unwrap();
-    assert_eq!(store.node_grants(elsewhere.id).await.unwrap(), []);
+    let under_parent = Place {
+        parent_id: Some(at_root.id),
+        after: None,
+        from: None,
+    };
+    let last = Place {
+        parent_id: None,
+        after: Some(Sibling::Last),
+        from: None,
+    };
+    for (id, title, place) in [
+        (elsewhere.id, None, Some(under_parent)),
+        (at_root.id, None, Some(last)),
+        (elsewhere.id, Some("Renommée"), None),
+    ] {
+        store
+            .update_node(id, title, place, Some(user), Some(full(user)))
+            .await
+            .unwrap();
+        assert_eq!(store.node_grants(id).await.unwrap(), []);
+    }
 
     // Tout ou rien : si l'accès ne peut pas être écrit, le nœud ne bouge pas ; et un
     // déplacement refusé ne pose pas l'accès.
-    let stuck = store
-        .create_node(page(space, Some(parent.id), None, "Panne"))
-        .await
-        .unwrap();
+    let stuck = child("Panne", vec![]).await;
     let before = rev().await;
     break_table(db, "INSERT", "acl", "1").await;
     let r = store
@@ -393,7 +419,8 @@ async fn update_node_gives_root_grant_to_a_node_arriving_at_root_without_lines()
     assert_eq!(store.get_node(stuck.id).await.unwrap(), Some(stuck.clone()));
     let nowhere = Place {
         parent_id: None,
-        after: Some(elsewhere.id),
+        after: Some(Sibling::Node(elsewhere.id)),
+        from: None,
     };
     let r = store
         .update_node(stuck.id, None, Some(nowhere), Some(user), Some(full(user)))
@@ -402,6 +429,273 @@ async fn update_node_gives_root_grant_to_a_node_arriving_at_root_without_lines()
     assert_eq!(store.node_grants(stuck.id).await.unwrap(), []);
     assert_eq!(store.get_node(stuck.id).await.unwrap(), Some(stuck));
     assert_eq!(rev().await, before);
+}
+
+/// `Sibling::Last` range un nœud en fin de ses frères, à la création comme au déplacement : le
+/// store trouve le dernier frère dans sa transaction, sous ce parent et dans cet espace
+/// seulement.
+#[tokio::test]
+async fn last_goes_after_the_last_sibling() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let other = store.create_space("Autre", None).await.unwrap();
+    let last = |space: &Space, parent: Option<Uuid>, title: &str| {
+        let mut node = page(space, parent, None, title);
+        node.after = Some(Sibling::Last);
+        node
+    };
+    // Dans un espace vide, puis après le dernier, d'où qu'il vienne.
+    let a = store.create_node(last(space, None, "A")).await.unwrap();
+    store.create_node(last(space, None, "B")).await.unwrap();
+    store
+        .create_node(page(space, None, None, "En tête"))
+        .await
+        .unwrap();
+    let c = store.create_node(last(space, None, "C")).await.unwrap();
+    assert_eq!(titles(store, space, None).await, ["En tête", "A", "B", "C"]);
+    // Sous un parent, sans se mêler aux pages de la racine ni à celles d'un autre espace.
+    for title in ["A1", "A2"] {
+        store
+            .create_node(last(space, Some(a.id), title))
+            .await
+            .unwrap();
+    }
+    store.create_node(last(&other, None, "Zzz")).await.unwrap();
+    assert_eq!(titles(store, space, Some(a.id)).await, ["A1", "A2"]);
+    assert_eq!(titles(store, space, None).await, ["En tête", "A", "B", "C"]);
+    assert_eq!(titles(store, &other, None).await, ["Zzz"]);
+
+    // Au déplacement : en fin des enfants du parent visé, le sien ou un autre.
+    let to_end = |parent_id| Place {
+        parent_id,
+        after: Some(Sibling::Last),
+        from: None,
+    };
+    store
+        .update_node(a.id, None, Some(to_end(None)), None, None)
+        .await
+        .unwrap();
+    assert_eq!(titles(store, space, None).await, ["En tête", "B", "C", "A"]);
+    store
+        .update_node(c.id, None, Some(to_end(Some(a.id))), None, None)
+        .await
+        .unwrap();
+    assert_eq!(titles(store, space, Some(a.id)).await, ["A1", "A2", "C"]);
+    assert_eq!(titles(store, space, None).await, ["En tête", "B", "A"]);
+    // Un parent sans enfant.
+    store
+        .update_node(a.id, None, Some(to_end(Some(c.id))), None, None)
+        .await
+        .map(|_| ())
+        .expect_err("a ne va pas sous son propre enfant");
+    let b = store.list_nodes(space.id).await.unwrap();
+    let b = b.iter().find(|n| n.title == "B").expect("B");
+    store
+        .update_node(b.id, None, Some(to_end(Some(c.id))), None, None)
+        .await
+        .unwrap();
+    assert_eq!(titles(store, space, Some(c.id)).await, ["B"]);
+}
+
+/// Un déplacement vers la place où le nœud est déjà n'écrit rien : ni date, ni auteur, ni
+/// révision. Avec un titre, seul le titre est écrit.
+#[tokio::test]
+async fn update_node_writes_nothing_when_the_node_is_already_there() {
+    let f = fresh().await;
+    let (store, space, db) = (&f.store, &f.space, &f.db);
+    let user = new_user(db).await;
+    let parent = store
+        .create_node(page(space, None, None, "Parent"))
+        .await
+        .unwrap();
+    let node = |after: Option<Uuid>, title: &'static str| async move {
+        store
+            .create_node(page(space, Some(parent.id), after, title))
+            .await
+            .unwrap()
+    };
+    let a = node(None, "A").await;
+    let b = node(Some(a.id), "B").await;
+    let c = node(Some(b.id), "C").await;
+    let before = store.list_nodes(space.id).await.unwrap();
+    let rev = store.space_rev(space.id).await.unwrap();
+    let under = |parent_id, after| Place {
+        parent_id,
+        after,
+        from: None,
+    };
+    let here = Some(parent.id);
+    let already_there = [
+        // En tête, après son prédécesseur, en fin, après lui-même.
+        (a.id, under(here, None)),
+        (b.id, under(here, Some(Sibling::Node(a.id)))),
+        (c.id, under(here, Some(Sibling::Node(b.id)))),
+        (c.id, under(here, Some(Sibling::Last))),
+        (b.id, under(here, Some(Sibling::Node(b.id)))),
+        // Seul sous son parent : en tête et en fin à la fois.
+        (parent.id, under(None, None)),
+        (parent.id, under(None, Some(Sibling::Last))),
+    ];
+    for (id, place) in already_there {
+        let node = store
+            .update_node(id, None, Some(place), Some(user), None)
+            .await
+            .unwrap();
+        assert_eq!(Some(&node), before.iter().find(|n| n.id == id), "{place:?}");
+        assert_eq!(
+            store.list_nodes(space.id).await.unwrap(),
+            before,
+            "{place:?}"
+        );
+        assert_eq!(store.space_rev(space.id).await.unwrap(), rev, "{place:?}");
+    }
+
+    // Avec un titre : le titre et son auteur sont écrits, la place et la révision restent.
+    let renamed = store
+        .update_node(
+            b.id,
+            Some("B2"),
+            Some(under(here, Some(Sibling::Node(a.id)))),
+            Some(user),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            renamed.title.as_str(),
+            &renamed.position,
+            renamed.updated_by
+        ),
+        ("B2", &b.position, Some(user))
+    );
+    assert_eq!(store.space_rev(space.id).await.unwrap(), rev);
+    // Une vraie place : écrite, sans toucher à la révision.
+    let moved = store
+        .update_node(c.id, None, Some(under(here, None)), Some(user), None)
+        .await
+        .unwrap();
+    assert!(moved.position < a.position);
+    assert_eq!(moved.updated_by, Some(user));
+    assert_eq!(titles(store, space, here).await, ["C", "A", "B2"]);
+    assert_eq!(store.space_rev(space.id).await.unwrap(), rev);
+}
+
+/// `Place::from` : le parent que l'appelant a lu avant de décider. Si le nœud n'est plus sous
+/// ce parent, le déplacement est refusé (`Stale`) sans rien écrire : les droits vérifiés pour
+/// une place sous l'ancien parent ne valent pas pour un changement de parent.
+#[tokio::test]
+async fn update_node_refuses_a_place_decided_under_another_parent() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let old = store
+        .create_node(page(space, None, None, "Ancien parent"))
+        .await
+        .unwrap();
+    let new = store
+        .create_node(page(space, None, None, "Nouveau parent"))
+        .await
+        .unwrap();
+    let node = store
+        .create_node(page(space, Some(old.id), None, "Page"))
+        .await
+        .unwrap();
+    // Lue sous `old`, la page passe sous `new` avant que l'appelant écrive.
+    let moved = store
+        .move_node(node.id, Some(new.id), None, None)
+        .await
+        .unwrap();
+    let rev = store.space_rev(space.id).await.unwrap();
+    let decided_under = |from: Option<Uuid>, parent_id: Option<Uuid>| Place {
+        parent_id,
+        after: None,
+        from: Some(from),
+    };
+    // Une simple place sous l'ancien parent la ramènerait sous lui ; de même vers la racine, ou
+    // lue à la racine.
+    for place in [
+        decided_under(Some(old.id), Some(old.id)),
+        decided_under(Some(old.id), None),
+        decided_under(None, None),
+    ] {
+        let r = store
+            .update_node(node.id, Some("Renommée"), Some(place), None, None)
+            .await;
+        assert!(matches!(r, Err(StoreError::Stale)), "{place:?} : {r:?}");
+    }
+    assert_eq!(store.get_node(node.id).await.unwrap(), Some(moved));
+    assert_eq!(store.space_rev(space.id).await.unwrap(), rev);
+
+    // Décidé sous le parent qu'elle a : le déplacement passe.
+    let back = store
+        .update_node(
+            node.id,
+            None,
+            Some(decided_under(Some(new.id), Some(old.id))),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(back.parent_id, Some(old.id));
+    let to_root = store
+        .update_node(
+            node.id,
+            None,
+            Some(decided_under(Some(old.id), None)),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(to_root.parent_id, None);
+    let stays = store
+        .update_node(node.id, None, Some(decided_under(None, None)), None, None)
+        .await
+        .unwrap();
+    assert_eq!(stays.parent_id, None);
+}
+
+/// `trashed_since` : la date du nœud s'il est à la corbeille, sinon celle de son plus proche
+/// ancêtre qui y est.
+#[tokio::test]
+async fn trashed_since_is_the_date_of_the_nearest_trashed_node() {
+    let f = fresh().await;
+    let (store, space, db) = (&f.store, &f.space, &f.db);
+    let user = new_user(db).await;
+    let node = |parent: Option<Uuid>, title: &'static str| async move {
+        store
+            .create_node(page(space, parent, None, title))
+            .await
+            .unwrap()
+            .id
+    };
+    let top = node(None, "Haut").await;
+    let middle = node(Some(top), "Milieu").await;
+    let low = node(Some(middle), "Bas").await;
+    let leaf = node(Some(low), "Feuille").await;
+    let aside = node(None, "À côté").await;
+    for id in [top, middle, low, leaf, aside] {
+        assert_eq!(store.trashed_since(id).await.unwrap(), None);
+    }
+    assert_eq!(store.trashed_since(Uuid::now_v7()).await.unwrap(), None);
+
+    // Le haut et le milieu à la corbeille, à des dates qu'on distingue.
+    for (id, at) in [(top, 1000), (middle, 2000)] {
+        store.trash_node(id, user).await.unwrap();
+        let sql = format!("UPDATE nodes SET trashed_at = {at} WHERE id = '{id}'");
+        common::exec_sql(db, &sql).await;
+    }
+    assert_eq!(store.trashed_since(top).await.unwrap(), Some(1000));
+    // Sa propre date, puis celle du plus proche ancêtre, pas celle du plus haut.
+    assert_eq!(store.trashed_since(middle).await.unwrap(), Some(2000));
+    assert_eq!(store.trashed_since(low).await.unwrap(), Some(2000));
+    assert_eq!(store.trashed_since(leaf).await.unwrap(), Some(2000));
+    assert_eq!(store.trashed_since(aside).await.unwrap(), None);
+    // Le milieu restauré (par SQL : le store le refuserait sous un parent à la corbeille).
+    let sql = format!("UPDATE nodes SET trashed_at = NULL WHERE id = '{middle}'");
+    common::exec_sql(db, &sql).await;
+    assert_eq!(store.trashed_since(leaf).await.unwrap(), Some(1000));
 }
 
 /// `subtree_ids` rend le nœud d'abord, puis ses descendants niveau par niveau, quel que soit

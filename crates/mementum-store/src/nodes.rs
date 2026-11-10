@@ -1,10 +1,12 @@
 //! Arbre de pages d'un espace : création, lecture, renommage, déplacement, corbeille,
 //! suppression définitive.
 //!
-//! Toute écriture d'ici incrémente la révision de l'espace dans sa transaction (règle de `rev`,
-//! en tête de la crate).
+//! Une écriture d'ici qui change ce dont dépendent les droits (un nœud créé ou supprimé, un
+//! changement de parent, la corbeille, un accès posé) incrémente la révision de l'espace dans sa
+//! transaction ; un renommage et un changement de place sous le même parent n'y touchent pas
+//! (règle de `rev`, en tête de la crate).
 
-use mementum_acl::Grant;
+use mementum_acl::{Grant, Level};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, SqliteExecutor, Transaction};
 use uuid::Uuid;
@@ -64,7 +66,7 @@ pub struct NewNode {
     pub space_id: Uuid,
     pub parent_id: Option<Uuid>,
     /// Frère après lequel placer le nœud ; `None` = en tête de ses frères.
-    pub after: Option<Uuid>,
+    pub after: Option<Sibling>,
     pub kind: NodeKind,
     /// Enregistré tel quel : les règles de titre sont celles de la route HTTP.
     pub title: String,
@@ -75,11 +77,31 @@ pub struct NewNode {
     pub doc: Option<Vec<u8>>,
 }
 
+/// Le frère après lequel ranger un nœud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sibling {
+    /// Ce frère-là.
+    Node(Uuid),
+    /// Le dernier : le nœud va en fin de ses frères. C'est le store qui le trouve, dans la
+    /// transaction qui écrit, sans que l'appelant ait à lire l'espace.
+    Last,
+}
+
+impl From<Uuid> for Sibling {
+    fn from(id: Uuid) -> Sibling {
+        Sibling::Node(id)
+    }
+}
+
 /// Où mettre un nœud : sous `parent_id` (`None` = racine), après `after` (`None` = en tête).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Place {
     pub parent_id: Option<Uuid>,
-    pub after: Option<Uuid>,
+    pub after: Option<Sibling>,
+    /// Le parent sous lequel l'appelant a lu le nœud quand il a décidé (`Some(None)` : à la
+    /// racine). Si le nœud n'est plus sous ce parent, rien n'est écrit (`Stale`) : l'appelant
+    /// relit et redécide. `None` : pas de contrôle.
+    pub from: Option<Option<Uuid>>,
 }
 
 /// Colonnes d'un nœud, en littéral pour que le SQL reste statique (`concat!`).
@@ -136,16 +158,20 @@ enum Slot {
 /// Calcule la position d'un nœud parmi les enfants de `parent`, après `after` (`None` = en tête).
 /// `exclude` est le nœud qu'on déplace : il ne compte pas parmi ses frères. `NotFound` si
 /// `after` n'est pas, dans cet espace, un enfant de `parent`.
+///
+/// `current` est la position du nœud qu'on déplace, s'il est déjà sous `parent` : s'il est déjà
+/// à la place demandée (entre les deux frères voulus), sa position est gardée.
 async fn slot(
     tx: &mut Transaction<'_, Sqlite>,
     space_id: &str,
     parent: Option<&str>,
-    after: Option<Uuid>,
+    after: Option<Sibling>,
     exclude: Option<&str>,
+    current: Option<&str>,
 ) -> Result<Slot, StoreError> {
     let exclude = exclude.unwrap_or("");
     let (lower, next): (Option<String>, Option<String>) = match after {
-        Some(a) => {
+        Some(Sibling::Node(a)) => {
             let a = a.to_string();
             let pos: String = sqlx::query(
                 "SELECT position FROM nodes WHERE id = ? AND space_id = ? AND parent_id IS ?",
@@ -173,6 +199,21 @@ async fn slot(
             .get(0);
             (Some(pos), next)
         }
+        // Le dernier des autres enfants : une seule entrée de l'index `nodes_by_parent`, lue
+        // par la fin.
+        Some(Sibling::Last) => {
+            let last = sqlx::query(
+                "SELECT position FROM nodes WHERE space_id = ? AND parent_id IS ? AND id != ? \
+                 ORDER BY position DESC LIMIT 1",
+            )
+            .bind(space_id)
+            .bind(parent)
+            .bind(exclude)
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(|r| r.get(0));
+            (last, None)
+        }
         None => {
             let first = sqlx::query(
                 "SELECT MIN(position) FROM nodes WHERE space_id = ? AND parent_id IS ? AND id != ?",
@@ -186,10 +227,41 @@ async fn slot(
             (None, first)
         }
     };
+    // Les positions se comparent en ordre d'octets, comme dans SQLite.
+    if let Some(current) = current
+        && lower.as_deref().is_none_or(|lower| lower < current)
+        && next.as_deref().is_none_or(|next| current < next)
+    {
+        return Ok(Slot::Keep);
+    }
     Ok(Slot::Set(position_between(
         lower.as_deref(),
         next.as_deref(),
     )))
+}
+
+/// Pose `grant` sur le nœud, dans la transaction, si son sujet n'y a pas déjà ce niveau ou
+/// plus : le niveau est posé ou relevé, jamais abaissé. Les lignes des autres sujets ne changent
+/// pas. La révision de l'espace est l'affaire de l'appelant.
+async fn raise_grant(
+    tx: &mut Transaction<'_, Sqlite>,
+    node_id: &str,
+    grant: Grant,
+) -> Result<(), StoreError> {
+    let held: Option<String> =
+        sqlx::query("SELECT level FROM acl WHERE node_id = ? AND subject = ?")
+            .bind(node_id)
+            .bind(grant.subject.to_string())
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(|r| r.get(0));
+    let held = held
+        .map(|level| Level::parse(&level).ok_or_else(|| unreadable("niveau d'accès", &level)))
+        .transpose()?;
+    if held.is_none_or(|held| held < grant.level) {
+        write_grant(tx, node_id, grant).await?;
+    }
+    Ok(())
 }
 
 /// `NotFound` si `parent` n'est pas un nœud de cet espace.
@@ -252,7 +324,7 @@ impl Store {
     /// Crée un nœud, avec ses accès (`grants`) et son document (`doc`, instantané de `seq` 0) :
     /// tout est écrit, ou rien. `NotFound` (sans rien écrire) si l'espace, le parent, `after` ou
     /// l'auteur n'existe pas, si le parent est d'un autre espace, ou si `after` n'est pas un
-    /// enfant du parent visé.
+    /// enfant du parent visé. `after: Some(Sibling::Last)` le range en fin de ses frères.
     pub async fn create_node(&self, n: NewNode) -> Result<Node, StoreError> {
         let space = n.space_id.to_string();
         let parent = n.parent_id.map(|p| p.to_string());
@@ -266,9 +338,10 @@ impl Store {
         if let Some(p) = &parent {
             parent_in_space(&mut tx, p, &space).await?;
         }
-        let Slot::Set(position) = slot(&mut tx, &space, parent.as_deref(), n.after, None).await?
+        let Slot::Set(position) =
+            slot(&mut tx, &space, parent.as_deref(), n.after, None, None).await?
         else {
-            unreachable!("aucun nœud exclu : le calcul de place donne toujours une position");
+            unreachable!("aucun nœud déplacé : le calcul de place donne toujours une position");
         };
         let id = Uuid::now_v7();
         let id_s = id.to_string();
@@ -368,19 +441,31 @@ impl Store {
         after: Option<Uuid>,
         by: Option<Uuid>,
     ) -> Result<Node, StoreError> {
-        self.update_node(id, None, Some(Place { parent_id, after }), by, None)
-            .await
+        let place = Place {
+            parent_id,
+            after: after.map(Sibling::Node),
+            from: None,
+        };
+        self.update_node(id, None, Some(place), by, None).await
     }
 
     /// Change le titre, la place, ou les deux, en une transaction : un refus (`Cycle`,
-    /// `NotFound`, comme pour [`Store::move_node`]) n'écrit rien, pas même le titre. `by` : le
-    /// compte qui fait le changement, gardé dans `updated_by`. Sans titre ni place, rien n'est
-    /// écrit et le nœud est rendu tel quel.
+    /// `NotFound`, comme pour [`Store::move_node`] ; `Stale`, voir [`Place::from`]) n'écrit rien,
+    /// pas même le titre. `by` : le compte qui fait le changement, gardé dans `updated_by`.
     ///
-    /// `root_grant` (Ruling R66) : l'accès posé sur le nœud, dans la même transaction, quand il
-    /// arrive à la racine (il avait un parent, il n'en a plus) sans aucune ligne d'accès propre.
-    /// Un nœud qui ne tenait ses accès que de ses ancêtres n'est ainsi jamais, entre deux
-    /// écritures, visible de personne. Dans tous les autres cas, `root_grant` est ignoré.
+    /// Rien n'est écrit, et le nœud est rendu tel quel, quand il n'y a rien à changer : ni titre
+    /// ni place demandés, ou une place où le nœud est déjà (même parent, entre les mêmes
+    /// frères) sans titre à changer.
+    ///
+    /// La révision de l'espace n'est incrémentée que si le nœud change de parent : un titre et
+    /// une place sous le même parent ne changent les droits de personne (règle de `rev`).
+    ///
+    /// `root_grant` (Ruling R82) : quand le nœud arrive à la racine (il avait un parent, il n'en
+    /// a plus), cet accès y est posé dans la même transaction, ou relevé si son sujet en avait
+    /// un plus faible ; jamais abaissé, et les lignes des autres sujets ne changent pas. Celui
+    /// qui passe une page à la racine y garde ainsi l'accès complet qu'il tenait de ses
+    /// ancêtres, et la page ne reste jamais sans personne pour la gérer. Dans tous les autres
+    /// cas, `root_grant` est ignoré.
     pub async fn update_node(
         &self,
         id: Uuid,
@@ -394,16 +479,14 @@ impl Store {
         }
         let id_s = id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query("SELECT space_id, parent_id FROM nodes WHERE id = ?")
-            .bind(&id_s)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(StoreError::NotFound)?;
-        let space: String = row.get(0);
-        let had_parent = row.get::<Option<String>, _>(1).is_some();
+        let before = node_in(&mut tx, &id_s).await?;
+        let space = before.space_id.to_string();
         // `Some((parent, position))` : le nœud change de place ; `None` : il garde la sienne.
-        let mut target: Option<(Option<String>, String)> = None;
+        let mut target: Option<(Option<Uuid>, String)> = None;
         if let Some(place) = place {
+            if place.from.is_some_and(|from| from != before.parent_id) {
+                return Err(StoreError::Stale);
+            }
             let parent = place.parent_id.map(|p| p.to_string());
             if let Some(p) = &parent {
                 parent_in_space(&mut tx, p, &space).await?;
@@ -425,17 +508,30 @@ impl Store {
                     return Err(StoreError::Cycle);
                 }
             }
-            if let Slot::Set(position) =
-                slot(&mut tx, &space, parent.as_deref(), place.after, Some(&id_s)).await?
-            {
-                target = Some((parent, position));
+            // Sa position ne compte que s'il reste sous le même parent.
+            let current = (place.parent_id == before.parent_id).then_some(before.position.as_str());
+            let slot = slot(
+                &mut tx,
+                &space,
+                parent.as_deref(),
+                place.after,
+                Some(&id_s),
+                current,
+            )
+            .await?;
+            if let Slot::Set(position) = slot {
+                target = Some((place.parent_id, position));
             }
+        }
+        if title.is_none() && target.is_none() {
+            // Déjà à cette place, et pas de titre : la transaction n'a rien écrit.
+            return Ok(before);
         }
         let (moves, parent, position) = match target {
             Some((parent, position)) => (true, parent, Some(position)),
             None => (false, None, None),
         };
-        let reaches_root = moves && had_parent && parent.is_none();
+        let changes_parent = moves && parent != before.parent_id;
         let row = sqlx::query(concat!(
             "UPDATE nodes SET \
                  title = COALESCE(?1, title), \
@@ -447,7 +543,7 @@ impl Store {
         ))
         .bind(title)
         .bind(moves)
-        .bind(parent)
+        .bind(parent.map(|p| p.to_string()))
         .bind(position)
         .bind(now_ms())
         .bind(by.map(|u| u.to_string()))
@@ -456,17 +552,12 @@ impl Store {
         .await
         .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
-        if let Some(grant) = root_grant.filter(|_| reaches_root) {
-            let bare = sqlx::query("SELECT 1 FROM acl WHERE node_id = ? LIMIT 1")
-                .bind(&id_s)
-                .fetch_optional(&mut *tx)
-                .await?
-                .is_none();
-            if bare {
-                write_grant(&mut tx, &id_s, grant).await?;
+        if changes_parent {
+            if let Some(grant) = root_grant.filter(|_| node.parent_id.is_none()) {
+                raise_grant(&mut tx, &id_s, grant).await?;
             }
+            bump_rev(&mut tx, &space).await?;
         }
-        bump_rev(&mut tx, &space).await?;
         tx.commit().await?;
         Ok(node)
     }
@@ -556,6 +647,28 @@ impl Store {
         bump_rev(&mut tx, &node.space_id.to_string()).await?;
         tx.commit().await?;
         Ok(ids)
+    }
+
+    /// Depuis quand le nœud est à la corbeille, en millisecondes Unix : sa propre date, sinon
+    /// celle de son plus proche ancêtre qui y est. `None` s'il n'y est pas, ou s'il n'existe pas.
+    ///
+    /// La remontée va de parent en parent par la clé primaire, et s'arrête au premier nœud à la
+    /// corbeille ; `UNION` (et non `UNION ALL`) : elle s'arrête aussi si des parents tournaient
+    /// en rond.
+    pub async fn trashed_since(&self, id: Uuid) -> Result<Option<i64>, StoreError> {
+        let row = sqlx::query(
+            "WITH RECURSIVE anc(id, parent_id, trashed_at) AS ( \
+                 SELECT id, parent_id, trashed_at FROM nodes WHERE id = ?1 \
+                 UNION \
+                 SELECT n.id, n.parent_id, n.trashed_at FROM nodes n \
+                 JOIN anc ON n.id = anc.parent_id \
+                 WHERE anc.trashed_at IS NULL \
+             ) SELECT trashed_at FROM anc WHERE trashed_at IS NOT NULL LIMIT 1",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get(0)))
     }
 
     /// Les ids du sous-arbre d'un nœud : lui d'abord, puis ses descendants niveau par niveau,

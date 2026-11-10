@@ -25,20 +25,27 @@
 //!
 //! **Positions** (Rulings R13 et R23). Le store place un nœud `after: None` en tête de ses
 //! frères ; les routes :
-//! - `POST` sans `afterId` : en fin des frères (la route passe le dernier frère au store) ;
-//!   `"afterId": null` : en tête ; un id : après lui ;
+//! - `POST` sans `afterId` : en fin des frères (`Sibling::Last` : le store trouve le dernier
+//!   frère dans sa transaction, la route ne lit pas l'espace) ; `"afterId": null` : en tête ;
+//!   un id : après lui ;
 //! - `PATCH` sans `parentId` ni `afterId` : pas de déplacement ; `parentId` seul (`null` =
 //!   racine) : en fin des enfants du nouveau parent ; `afterId` seul : réordonnancement chez
-//!   le parent actuel (`null` = en tête) ; les deux : on suit les deux.
+//!   le parent actuel (`null` = en tête) ; les deux : on suit les deux. Une page déjà à la
+//!   place demandée n'est pas écrite.
 //!
 //! **Connexions de synchro.** Mettre à la corbeille, restaurer et changer de parent changent
 //! ce que chacun peut faire de la page et de ses sous-pages : après le commit, les connexions
 //! de synchro du sous-arbre sont fermées (`rights_changed`), et se rouvrent en relisant leurs
 //! droits. Une suppression définitive arrête les acteurs des pages supprimées (`Hub::forget`).
 //! L'écriture et cette suite vont au bout même si le client coupe la connexion.
+//!
+//! **Réponse d'une écriture.** Créer une page et la changer de parent changent les droits de
+//! l'espace. La réponse n'est pas relue pour autant : elle se compose de ce que l'écriture a
+//! rendu et des accès lus avant elle (ceux du parent, les lignes de la page). Relire pourrait
+//! répondre `404` à une écriture réussie, si les droits bougent entre-temps, et le client
+//! réessaierait.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
 
 use axum::Json;
 use axum::body::Bytes;
@@ -50,7 +57,7 @@ use mementum_acl::{Action, Grant, Level, NodeAccess, Role, SpaceAccess, Subject}
 use mementum_crdt::PageDoc;
 use mementum_md::{Block, Content, Props, RenderOpts, parse, render};
 use mementum_schema::PropSpec;
-use mementum_store::{NewNode, Node, NodeKind, Place, StoreError};
+use mementum_store::{NewNode, Node, NodeKind, Place, Sibling, StoreError};
 use uuid::Uuid;
 
 use crate::access::{at_least, permit};
@@ -69,6 +76,10 @@ pub const MAX_TITLE_CHARS: usize = 500;
 
 /// Type de contenu du MMD renvoyé.
 const MARKDOWN: &str = "text/markdown; charset=utf-8";
+
+/// Reprises d'un `PATCH` quand la page a changé de parent entre la lecture de ses droits et
+/// l'écriture : la route relit et redécide. Au-delà, `503 unavailable`.
+const MOVE_RETRIES: usize = 3;
 
 /// `GET /api/v1/spaces/{id}/tree` : les pages de l'espace que la personne voit, hors
 /// corbeille, chacune avec son niveau et sa section.
@@ -141,7 +152,8 @@ pub(crate) async fn create(
         .as_deref()
         .map(|raw| Uuid::parse_str(raw).map_err(|_| ApiError::space_not_found()))
         .transpose()?;
-    let (space_id, space, parent, grants) = match body.parent_id.as_deref() {
+    // Où va la page, les accès qu'elle reçoit, et ce que son auteur pourra en faire.
+    let (space_id, space, parent, grants, access) = match body.parent_id.as_deref() {
         Some(raw) => {
             if body.section.is_some() {
                 return Err(unexpected_body(
@@ -159,7 +171,18 @@ pub(crate) async fn create(
                 .filter(|(parent, ..)| named_space.is_none_or(|space| space == parent.space_id))
                 .ok_or_else(ApiError::invalid_parent)?;
             permit(&access, Action::CreateChild)?;
-            (parent.space_id, space, Some(parent.id), Vec::new())
+            // Sans ligne propre, la sous-page a les accès de sa page parente.
+            let inherited = NodeAccess {
+                visible_parent: Some(parent.id),
+                ..access
+            };
+            (
+                parent.space_id,
+                space,
+                Some(parent.id),
+                Vec::new(),
+                inherited,
+            )
         }
         None => {
             let space_id = named_space.ok_or_else(|| {
@@ -169,7 +192,7 @@ pub(crate) async fn create(
                 )
             })?;
             let space = state.space_access(&user, space_id).await?;
-            at_least(&space, Role::Member)?;
+            let role = at_least(&space, Role::Member)?;
             let subject = match body.section.unwrap_or_default() {
                 RootSection::Space => Subject::Members,
                 RootSection::Private => Subject::User(user.id),
@@ -178,13 +201,18 @@ pub(crate) async fn create(
                 subject,
                 level: Level::Full,
             };
-            (space_id, space, None, vec![grant])
+            let access = AppState::own_access(&[grant], &user, role)
+                .ok_or_else(|| ApiError::internal(&"page neuve sans accès pour son auteur"))?;
+            (space_id, space, None, vec![grant], access)
         }
     };
     let after = match &body.after_id {
-        None => last_child(&state, space_id, parent).await?,
+        None => Some(Sibling::Last),
         Some(None) => None,
-        Some(Some(raw)) => Some(seen_in(&space, raw).ok_or_else(ApiError::invalid_after)?.0),
+        Some(Some(raw)) => {
+            let (sibling, _) = seen_in(&space, raw).ok_or_else(ApiError::invalid_after)?;
+            Some(Sibling::Node(sibling))
+        }
     };
     // Le document que l'acteur de la page écrirait à son premier chargement : écrit avec le
     // nœud, il n'y a plus d'instant où la page existe sans lui.
@@ -199,19 +227,10 @@ pub(crate) async fn create(
         grants,
         doc: Some(doc),
     };
-    let node = match state.store.create_node(new).await {
-        Ok(node) => node,
-        Err(error) => {
-            return Err(placement_error(&state, error, user.id, space_id, None, parent).await);
-        }
-    };
-    // Ce que l'auteur peut faire de sa page : relu, la création a changé les droits de
-    // l'espace.
-    let (node, access, _) = state
-        .seen_node(&user, node.id)
-        .await?
-        .ok_or_else(ApiError::page_not_found)?;
-    Ok((StatusCode::CREATED, Json(page_node(&node, &access, None))))
+    match state.store.create_node(new).await {
+        Ok(node) => Ok((StatusCode::CREATED, Json(page_node(&node, &access, None)))),
+        Err(error) => Err(placement_error(&state, error, user.id, space_id, None, parent).await),
+    }
 }
 
 /// `GET /api/v1/pages/{id}` : la page, telle que la personne la voit.
@@ -227,12 +246,18 @@ pub(crate) async fn get(
 }
 
 /// `PATCH /api/v1/pages/{id}` : renomme, déplace, ou les deux, en une seule écriture. Tout
-/// est vérifié avant d'écrire, et un refus ne change rien, pas même le titre.
+/// est vérifié avant d'écrire, et un refus ne change rien, pas même le titre. Une page déjà à
+/// la place demandée n'est pas écrite.
 ///
-/// Une page passée à la racine sans accès propre reçoit `(user:<qui la déplace>, full)`, dans
-/// la même transaction (Ruling R66) : elle ne tenait ses accès que de ses ancêtres, et ne
-/// serait plus visible de personne. Si elle porte des accès propres dont aucun ne vaut pour
-/// qui la déplace, le déplacement est refusé (`403 forbidden`) : il ne la verrait plus.
+/// Qui passe une page à la racine y a toujours l'accès complet : sa ligne `(user:<lui>, full)`
+/// est posée, ou relevée si elle était plus faible, dans la transaction du déplacement (Ruling
+/// R82). Sans cela, une page qui ne tenait son accès complet que de ses ancêtres n'aurait
+/// plus personne pour la gérer.
+///
+/// La place est décidée sur le parent lu avec les droits. Si la page change de parent avant
+/// l'écriture, le store refuse (`Stale`) : la route relit et redécide, [`MOVE_RETRIES`] fois
+/// au plus. Un changement de place autorisé par `edit` ne ramène donc jamais une page sous un
+/// parent qu'elle a quitté entre-temps.
 pub(crate) async fn update(
     State(state): State<AppState>,
     user: AuthUser,
@@ -241,99 +266,174 @@ pub(crate) async fn update(
 ) -> Result<Json<PageNode>, ApiError> {
     let id = page_id(path)?;
     // La page d'abord : qui ne la voit pas reçoit `404` avant que le corps soit lu.
-    let (node, access, space) = state
+    let mut seen = state
         .seen_node(&user, id)
         .await?
         .ok_or_else(ApiError::page_not_found)?;
     let Json(body) = body?;
     let title = body.title.as_deref().map(|t| title(Some(t))).transpose()?;
-    if title.is_some() {
-        permit(&access, Action::Rename)?;
-    }
-    let mut changes_parent = false;
-    let mut root_grant = None;
-    let mut place = None;
-    if body.parent_id.is_some() || body.after_id.is_some() {
-        // Un parent nommé doit être visible, même si c'est déjà celui de la page.
-        let named_parent = match &body.parent_id {
-            Some(Some(raw)) => Some(seen_in(&space, raw).ok_or_else(ApiError::invalid_parent)?),
-            Some(None) | None => None,
-        };
-        let parent = match &body.parent_id {
-            None => node.parent_id,
-            Some(_) => named_parent.map(|(parent, _)| parent),
-        };
-        if parent == node.parent_id {
-            permit(&access, Action::Reorder)?;
-        } else {
-            permit(&access, Action::Move)?;
-            match named_parent {
-                Some((_, parent)) => permit(&parent, Action::CreateChild)?,
-                // Pas de parent nommé, et un autre parent que le sien : la racine, où il
-                // faut ce qu'il faut pour y créer une page.
-                None => {
-                    let role = at_least(&space, Role::Member)?;
-                    if !state.seen_at_root(&user, role, &node).await? {
-                        return Err(ApiError::forbidden(
-                            "cette page porte ses propres accès, et aucun ne vaut pour vous : à \
-                             la racine, vous ne la verriez plus ; vous y donner un accès d'abord",
-                        ));
-                    }
-                    root_grant = Some(Grant {
-                        subject: Subject::User(user.id),
-                        level: Level::Full,
-                    });
-                }
-            }
-            changes_parent = true;
+    let mut retries = 0;
+    loop {
+        let (node, access, space) = seen;
+        if title.is_some() {
+            permit(&access, Action::Rename)?;
         }
-        let after = match &body.after_id {
-            // Si la page est déjà la dernière, le store la laisse en place.
-            None => last_child(&state, node.space_id, parent).await?,
-            Some(None) => None,
-            Some(Some(raw)) => Some(seen_in(&space, raw).ok_or_else(ApiError::invalid_after)?.0),
+        let moving = planned_move(&state, &user, &node, &access, &space, &body).await?;
+        if title.is_none() && moving.is_none() {
+            let trashed_at = trashed_since(&state, &node, &access).await?;
+            return Ok(Json(page_node(&node, &access, trashed_at)));
+        }
+        let (place, root_grant, changes_parent) = match &moving {
+            Some(moving) => (Some(moving.place), moving.root_grant, moving.changes_parent),
+            None => (None, None, false),
         };
-        place = Some(Place {
-            parent_id: parent,
-            after,
-        });
-    }
-    if title.is_none() && place.is_none() {
-        let trashed_at = trashed_since(&state, &node, &access).await?;
-        return Ok(Json(page_node(&node, &access, trashed_at)));
-    }
-    let writer = state.clone();
-    let (space_id, by) = (node.space_id, user.id);
-    let updated = to_completion(async move {
-        let written = writer
-            .store
-            .update_node(id, title.as_deref(), place, Some(by), root_grant)
-            .await;
-        let node = match written {
-            Ok(node) => node,
+        let writer = state.clone();
+        let (space_id, by, new_title) = (node.space_id, user.id, title.clone());
+        let written = to_completion(async move {
+            let written = writer
+                .store
+                .update_node(id, new_title.as_deref(), place, Some(by), root_grant)
+                .await;
+            if written.is_ok() && changes_parent {
+                writer.subtree_rights_changed(space_id, id).await;
+            }
+            Ok(written)
+        })
+        .await?;
+        match written {
+            // Ni un titre ni une place sous le même parent ne changent les accès, et une
+            // page à la corbeille n'arrive pas ici.
+            Ok(updated) => {
+                let access = moving.map_or(access, |moving| moving.access);
+                return Ok(Json(page_node(&updated, &access, None)));
+            }
+            Err(StoreError::Stale) if retries < MOVE_RETRIES => {
+                retries += 1;
+                tracing::debug!(
+                    node_id = %id,
+                    retries,
+                    "la page a changé de parent avant l'écriture : la route relit et redécide"
+                );
+                seen = state
+                    .seen_node(&user, id)
+                    .await?
+                    .ok_or_else(ApiError::page_not_found)?;
+            }
+            Err(StoreError::Stale) => {
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorCode::Unavailable,
+                    "la page change de place en ce moment : rien n'a été modifié ; réessayer",
+                ));
+            }
             Err(error) => {
                 let parent = place.and_then(|place| place.parent_id);
-                return Err(placement_error(&writer, error, by, space_id, Some(id), parent).await);
+                return Err(placement_error(&state, error, by, space_id, Some(id), parent).await);
+            }
+        }
+    }
+}
+
+/// Un changement de place décidé par `PATCH`, droits vérifiés.
+struct Move {
+    place: Place,
+    /// L'accès à poser si la page arrive à la racine (Ruling R82).
+    root_grant: Option<Grant>,
+    /// La page change de parent : les droits de son sous-arbre changent.
+    changes_parent: bool,
+    /// Les accès de la personne à la page une fois le déplacement écrit.
+    access: NodeAccess,
+}
+
+/// La place que demande `body` pour la page, si la personne a le droit de l'y mettre ; `None`
+/// s'il ne demande aucune place. Sous le même parent, il faut `Reorder` ; sous un autre, `Move`
+/// sur la page et `CreateChild` sur le nouveau parent, ou être membre pour la racine.
+async fn planned_move(
+    state: &AppState,
+    user: &AuthUser,
+    node: &Node,
+    access: &NodeAccess,
+    space: &SpaceAccess,
+    body: &UpdatePage,
+) -> Result<Option<Move>, ApiError> {
+    if body.parent_id.is_none() && body.after_id.is_none() {
+        return Ok(None);
+    }
+    // Un parent nommé doit être visible, même si c'est déjà celui de la page.
+    let named_parent = match &body.parent_id {
+        Some(Some(raw)) => Some(seen_in(space, raw).ok_or_else(ApiError::invalid_parent)?),
+        Some(None) | None => None,
+    };
+    let parent = match &body.parent_id {
+        None => node.parent_id,
+        Some(_) => named_parent.map(|(parent, _)| parent),
+    };
+    // La place parmi les enfants de ce parent, lue après les droits : un frère que la
+    // personne ne voit pas est refusé comme un id inconnu.
+    let place = || {
+        let after = match &body.after_id {
+            None => Some(Sibling::Last),
+            Some(None) => None,
+            Some(Some(raw)) => {
+                let (sibling, _) = seen_in(space, raw).ok_or_else(ApiError::invalid_after)?;
+                Some(Sibling::Node(sibling))
             }
         };
-        if changes_parent {
-            writer.subtree_rights_changed(space_id, id).await;
-        }
-        Ok(node)
-    })
-    .await?;
-    // Sous un autre parent, la page hérite d'autres accès : ils sont relus. Sinon, ni son
-    // niveau ni sa section n'ont changé (et une page à la corbeille n'arrive pas ici).
-    let (updated, access) = if changes_parent {
-        let (node, access, _) = state
-            .seen_node(&user, id)
-            .await?
-            .ok_or_else(ApiError::page_not_found)?;
-        (node, access)
-    } else {
-        (updated, access)
+        Ok::<_, ApiError>(Place {
+            parent_id: parent,
+            after,
+            from: Some(node.parent_id),
+        })
     };
-    Ok(Json(page_node(&updated, &access, None)))
+    if parent == node.parent_id {
+        permit(access, Action::Reorder)?;
+        return Ok(Some(Move {
+            place: place()?,
+            root_grant: None,
+            changes_parent: false,
+            access: *access,
+        }));
+    }
+    permit(access, Action::Move)?;
+    // Ce que la page devient pour la personne : ce que lui donnent les lignes posées sur la
+    // page, et ce qu'elle hérite du nouveau parent.
+    let (root_grant, access) = match named_parent {
+        Some((parent, under)) => {
+            permit(&under, Action::CreateChild)?;
+            let role = at_least(space, Role::Guest)?;
+            let own = state.store.node_grants(node.id).await?;
+            let alone = AppState::own_access(&own, user, role);
+            let access = NodeAccess {
+                level: alone.map_or(under.level, |alone| alone.level.max(under.level)),
+                section: under.section,
+                in_trash: false,
+                visible_parent: Some(parent),
+            };
+            (None, access)
+        }
+        // Pas de parent nommé, et un autre parent que le sien : la racine. Il faut ce qu'il
+        // faut pour y créer une page, et la personne y aura l'accès complet (Ruling R82).
+        None => {
+            let role = at_least(space, Role::Member)?;
+            let grant = Grant {
+                subject: Subject::User(user.id),
+                level: Level::Full,
+            };
+            let mut own = state.store.node_grants(node.id).await?;
+            own.retain(|line| line.subject != grant.subject);
+            own.push(grant);
+            let access = AppState::own_access(&own, user, role).ok_or_else(|| {
+                ApiError::internal(&"page à la racine sans accès pour qui la déplace")
+            })?;
+            (Some(grant), access)
+        }
+    };
+    Ok(Some(Move {
+        place: place()?,
+        root_grant,
+        changes_parent: true,
+        access,
+    }))
 }
 
 /// `POST /api/v1/pages/{id}/trash` : met la page à la corbeille, et ses sous-pages avec elle
@@ -590,21 +690,6 @@ fn unexpected_body(message: &str) -> ApiError {
     )
 }
 
-/// Le dernier enfant de `parent` (`None` = racine), pour placer une page en
-/// fin de liste : parmi tous les nœuds, y compris ceux que la personne ne voit pas.
-async fn last_child(
-    state: &AppState,
-    space_id: Uuid,
-    parent: Option<Uuid>,
-) -> Result<Option<Uuid>, ApiError> {
-    let nodes = state.store.list_nodes(space_id).await?;
-    Ok(nodes
-        .into_iter()
-        .filter(|n| n.parent_id == parent)
-        .max_by(|a, b| a.position.cmp(&b.position))
-        .map(|n| n.id))
-}
-
 /// Erreur du store à la création (`page` : `None`) ou au déplacement d'une page. `NotFound`
 /// y a plusieurs causes, que la route a toutes écartées avant d'écrire, sauf une : `afterId`
 /// n'est pas un frère à l'endroit visé. Ce qui a pu disparaître entre ses contrôles et
@@ -661,18 +746,8 @@ async fn trashed_since(
     if node.trashed_at.is_some() || !access.in_trash {
         return Ok(node.trashed_at);
     }
-    // Par héritage : on remonte vers la racine. Chaque ancêtre est retiré en passant, la
-    // remontée s'arrête donc même si des parents tournaient en rond.
-    let nodes = state.store.list_nodes(node.space_id).await?;
-    let mut by_id: HashMap<Uuid, &Node> = nodes.iter().map(|n| (n.id, n)).collect();
-    let mut parent = node.parent_id;
-    while let Some(ancestor) = parent.and_then(|id| by_id.remove(&id)) {
-        if ancestor.trashed_at.is_some() {
-            return Ok(ancestor.trashed_at);
-        }
-        parent = ancestor.parent_id;
-    }
-    Ok(None)
+    // Par héritage : le store remonte de parent en parent, sans lire l'espace.
+    Ok(state.store.trashed_since(node.id).await?)
 }
 
 /// La page telle que la voit la personne de `access` : son niveau, sa section, et son parent

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mementum_store::{NewNode, NewUser, NodeKind, Space, Store, User};
+use mementum_store::{NewNode, NewUser, NodeKind, Sibling, Space, Store, User};
 use sqlx::{Row, SqlitePool};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -30,12 +30,12 @@ pub async fn fresh() -> Fixture {
     }
 }
 
-/// Une page sans auteur, sans accès posé et sans document.
+/// Une page sans auteur, sans accès posé et sans document : après le frère `after`, ou en tête.
 pub fn page(space: &Space, parent: Option<Uuid>, after: Option<Uuid>, title: &str) -> NewNode {
     NewNode {
         space_id: space.id,
         parent_id: parent,
-        after,
+        after: after.map(Sibling::Node),
         kind: NodeKind::Page,
         title: title.to_string(),
         created_by: None,

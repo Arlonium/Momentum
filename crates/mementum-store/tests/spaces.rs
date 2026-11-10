@@ -4,7 +4,7 @@ mod common;
 
 use common::{fresh, int, new_user, page, texts};
 use mementum_acl::{Grant, Level, Subject};
-use mementum_store::{NewNode, NodeKind, Place, Store, StoreError};
+use mementum_store::{NewNode, NodeKind, Place, Sibling, Store, StoreError};
 use uuid::Uuid;
 
 async fn rev(store: &Store, space: Uuid) -> i64 {
@@ -77,8 +77,10 @@ async fn space_owner_becomes_member() {
     assert_eq!(int(&f.db, "SELECT COUNT(*) FROM members").await, 1);
 }
 
-/// La règle de `rev` : chaque écriture qui touche à la structure ou aux droits d'un espace
-/// incrémente sa révision, d'un cran, et la sienne seulement.
+/// La règle de `rev` : chaque écriture qui change une entrée du calcul des accès d'un espace
+/// (un nœud créé ou supprimé, un changement de parent, la corbeille, `acl`, `members`)
+/// incrémente sa révision, d'un cran, et la sienne seulement. Un titre et une place sous le même
+/// parent ne changent les droits de personne : la révision ne bouge pas (Ruling R83).
 #[tokio::test]
 async fn every_structural_write_bumps_rev() {
     let f = fresh().await;
@@ -123,17 +125,43 @@ async fn every_structural_write_bumps_rev() {
         "create_node avec accès et document : un seul cran"
     );
 
+    // Un titre : la révision ne bouge pas.
     store.rename_node(a.id, "A2", None).await.unwrap();
-    expected += 1;
     assert_eq!(rev(store, space).await, expected, "rename_node");
 
+    // Un changement de parent, si : `b` quitte `a` pour la racine.
     store.move_node(b.id, None, Some(a.id), None).await.unwrap();
     expected += 1;
-    assert_eq!(rev(store, space).await, expected, "move_node");
+    assert_eq!(
+        rev(store, space).await,
+        expected,
+        "move_node vers un autre parent"
+    );
 
+    // Une place sous le même parent, non : `b` passe devant `a`, avec ou sans nouveau titre.
+    let moved = store.move_node(b.id, None, None, None).await.unwrap();
+    assert!(moved.position < a.position, "b est passé en tête");
+    let last = Place {
+        parent_id: None,
+        after: Some(Sibling::Last),
+        from: None,
+    };
+    let renamed = store
+        .update_node(b.id, Some("B1"), Some(last), Some(user), None)
+        .await
+        .unwrap();
+    assert!(renamed.position > a.position, "b est passé en fin");
+    assert_eq!(
+        rev(store, space).await,
+        expected,
+        "place sous le même parent"
+    );
+
+    // Titre et changement de parent ensemble : un seul cran.
     let place = Place {
         parent_id: Some(a.id),
         after: None,
+        from: None,
     };
     store
         .update_node(b.id, Some("B2"), Some(place), Some(user), None)
@@ -237,6 +265,7 @@ async fn nodes_do_not_cross_spaces() {
     let place = Place {
         parent_id: Some(theirs.id),
         after: None,
+        from: None,
     };
     let r = store
         .update_node(mine.id, None, Some(place), None, None)

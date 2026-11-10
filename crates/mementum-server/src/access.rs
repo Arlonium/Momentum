@@ -27,7 +27,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use mementum_acl::{Action, Level, NodeAccess, Role, SpaceAccess, TreeNode};
+use mementum_acl::{Action, Grant, Level, NodeAccess, Role, SpaceAccess, TreeNode};
 use mementum_store::Node;
 use uuid::Uuid;
 
@@ -144,28 +144,20 @@ impl AppState {
         Ok(Some((node, access, space)))
     }
 
-    /// `user` verrait-il encore `node` à la racine de l'espace, par les seuls accès posés sur
-    /// lui ? Vrai aussi pour un nœud sans aucun accès propre : en arrivant à la racine, il
-    /// reçoit celui de qui le déplace (`Store::update_node`, Ruling R66). Faux : un accès est
-    /// posé sur le nœud, mais aucun ne vaut pour `user`, qui ne le voit que par ses ancêtres.
-    pub(crate) async fn seen_at_root(
-        &self,
-        user: &AuthUser,
-        role: Role,
-        node: &Node,
-    ) -> Result<bool, ApiError> {
-        let own = self.store.node_grants(node.id).await.map_err(internal)?;
-        if own.is_empty() {
-            return Ok(true);
-        }
+    /// Ce que les seules lignes posées sur une page (`own`) donnent à `user`, sans ses
+    /// ancêtres : ses accès à cette page si elle était à la racine de l'espace, hors corbeille.
+    /// `None` : elles ne lui donnent rien. Pour dire ce que devient une page qu'on vient de
+    /// créer ou de changer de parent, sans relire les droits de tout l'espace.
+    pub(crate) fn own_access(own: &[Grant], user: &AuthUser, role: Role) -> Option<NodeAccess> {
+        // Une page seule dans son arbre : son id ne sert qu'à lui rattacher ses lignes.
         let alone = TreeNode {
-            id: node.id,
+            id: Uuid::nil(),
             parent_id: None,
             trashed: false,
         };
-        let lines: Vec<_> = own.into_iter().map(|grant| (node.id, grant)).collect();
+        let lines: Vec<_> = own.iter().map(|grant| (alone.id, *grant)).collect();
         let access = SpaceAccess::compute(&[alone], &lines, user.id, Some(role));
-        Ok(access.node(node.id).is_some())
+        access.node(alone.id).copied()
     }
 
     /// Les accès de `user` dans l'espace : lus dans le cache si `spaces.rev` n'a pas bougé.
