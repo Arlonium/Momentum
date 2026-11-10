@@ -887,6 +887,15 @@ pub(crate) mod tests {
     /// forcé par le tour de lecture : le test le tient, la requête de Mona attend derrière lui,
     /// puis un second tour derrière elle ; la révision recule, la requête lit ; pendant que le
     /// second tour est tenu, la révision revient ; la requête relit, et sert ce qu'elle relit.
+    ///
+    /// Ce test tient au fil unique de `#[tokio::test]` (`current_thread`), et ne doit pas passer
+    /// en `multi_thread`. Prendre son tour se fait en deux pas : compter l'attente
+    /// (`waiting`), puis se mettre dans la file du verrou. Sur un seul fil, la requête fait les
+    /// deux sans rendre la main : quand le test lit `waiting == 2`, elle est dans la file, et le
+    /// second tour, lancé ensuite, s'y range derrière elle. Sur plusieurs fils, le test pourrait
+    /// lire le compte entre les deux pas, et le second tour passer devant la requête : il
+    /// serait pris avant qu'elle ait lu, et le test échouerait sur les données gardées
+    /// (`kept`). Il peut donc échouer à tort sur plusieurs fils, jamais passer à tort.
     #[tokio::test]
     async fn inputs_older_than_the_revision_read_are_reread() {
         let dir = tempfile::tempdir().unwrap();

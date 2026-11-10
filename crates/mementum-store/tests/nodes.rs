@@ -3,11 +3,14 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::{break_table, fresh, int, new_user, page, repair, texts};
 use mementum_acl::{Grant, Level, Role, Subject, chain_level};
 use mementum_store::{
     AccessChange, Expected, NewNode, Node, NodeKind, Place, Sibling, Space, Store, StoreError,
 };
+use tokio::sync::Barrier;
 use uuid::Uuid;
 
 async fn titles(store: &Store, space: &Space, parent: Option<Uuid>) -> Vec<String> {
@@ -1160,12 +1163,19 @@ async fn simultaneous_creations_at_the_end_take_distinct_positions() {
         .unwrap();
     // Sous une page, puis à la racine, où « Parent » est déjà.
     for (under, already_there) in [(Some(parent.id), 0), (None, 1)] {
+        // Une barrière de départ : les créations partent ensemble, une fois toutes lancées.
+        // Sans elle, sur un poste chargé, les premières pouvaient finir avant que les dernières
+        // démarrent, et rien n'était plus simultané.
+        let start = Arc::new(Barrier::new(CREATIONS));
         let creations: Vec<_> = (0..CREATIONS)
             .map(|i| {
-                let store = store.clone();
+                let (store, start) = (store.clone(), start.clone());
                 let mut node = page(space, under, None, &format!("Page {i}"));
                 node.after = Some(Sibling::Last);
-                tokio::spawn(async move { store.create_node(node).await })
+                tokio::spawn(async move {
+                    start.wait().await;
+                    store.create_node(node).await
+                })
             })
             .collect();
         let mut positions = Vec::new();

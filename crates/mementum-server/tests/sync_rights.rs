@@ -25,8 +25,8 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use common::sync::{closed, members, open_app, still_served, text, types, types_unheard, user};
 use common::{
-    Account, Browser, PASSWORD, Team, TestApp, WAIT, exec_sql, handshake, json_request, outcome,
-    query_i64, sync_as, sync_url, synced_as,
+    Account, Browser, HELD, PASSWORD, Team, TestApp, WAIT, exec_sql, handshake, json_request,
+    outcome, query_i64, sync_as, sync_url, synced_as,
 };
 use mementum_acl::{Level, Subject};
 use mementum_crdt::PageDoc;
@@ -735,8 +735,12 @@ async fn put_mmd_checks_rights_again_once_the_page_is_loaded() {
         let mut lock = WriteLock::take(&t).await;
         let commit = async {
             // Le temps que la route contrôle les droits, lise le corps et demande la page,
-            // dont le chargement attend le verrou.
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            // dont le chargement attend le verrou. Rien ne dit de l'extérieur qu'elle y est :
+            // l'attente est fixe, et la plus large que le verrou permet (`HELD`, la moitié des
+            // 5 s qu'une écriture l'attend). Trop courte sur un poste chargé, elle ferait
+            // échouer le test à tort (le refus viendrait du premier contrôle, et la page ne
+            // serait pas chargée : l'assertion sur l'instantané le verrait), jamais passer.
+            tokio::time::sleep(HELD).await;
             if let Some(change) = change {
                 write_rights_change(&mut lock, change, team.space, page, &team.gina).await;
             }
