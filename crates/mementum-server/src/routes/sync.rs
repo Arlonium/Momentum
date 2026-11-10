@@ -47,7 +47,11 @@ pub(crate) async fn sync(
         return Err(guard::bad_origin());
     }
     let id = page_id(path)?;
-    state.page(id).await?;
+    // En attendant les droits (Task 10b du lot 2) : la page doit seulement exister, dans
+    // quelque espace que ce soit.
+    if state.store.get_node(id).await?.is_none() {
+        return Err(ApiError::page_not_found());
+    }
     let upgrade = upgrade.map_err(|e| {
         ApiError::new(
             e.status(),

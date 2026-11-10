@@ -17,11 +17,11 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use common::{
     Logs, PASSWORD, Reply, SESSION_COOKIE, TestApp, all_logs, assert_french, exec_sql,
-    json_request, query_i64,
+    json_request, query_i64, tree_nodes,
 };
 use mementum_acl::{Grant, Level, Role, Subject};
-use mementum_server::{Me, SignupMode};
-use mementum_store::{InvitationGrant, NewInvitation, Store};
+use mementum_server::{Me, PageNode, SignupMode};
+use mementum_store::{InvitationGrant, NewInvitation, NewNode, NodeKind, Store};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -160,13 +160,13 @@ async fn first_signup_is_instance_admin_and_gets_a_space() {
     let info = t.get("/api/v1/info").await.json();
     assert_eq!(info["setup"], false);
 
-    // Un seul espace, dont le compte est propriétaire ; les routes de pages
-    // du lot 1 servent cet espace-là.
+    // Un seul espace, dont le compte est propriétaire, et dont il lit
+    // l'arbre, encore vide.
     assert_eq!(
         query_i64(&t.db_path(), "SELECT COUNT(*) FROM spaces").await,
         1
     );
-    assert_eq!(t.tree().await.vault_id, space.to_string());
+    assert_eq!(tree_nodes(&alice, space).await, [] as [Value; 0]);
     let store = Store::open(&t.db_path()).await.unwrap();
     assert_eq!(store.role_in(space, id).await.unwrap(), Some(Role::Owner));
     let user = store.get_user(id).await.unwrap().expect("le compte");
@@ -180,9 +180,12 @@ async fn first_signup_is_instance_admin_and_gets_a_space() {
 #[tokio::test]
 async fn first_account_adopts_lot1_space() {
     let (t, lot1) = TestApp::on_lot1_database().await;
-    let before = t.tree().await;
-    assert_eq!(before.vault_id, lot1.vault.to_string());
-    let mut titles: Vec<&str> = before.nodes.iter().map(|n| n.title.as_str()).collect();
+    // Avant tout compte, personne ne lit ces pages par l'API : elles sont
+    // relues en base.
+    let store = Store::open(&t.db_path()).await.unwrap();
+    let before = store.list_nodes(lot1.vault).await.unwrap();
+    store.close().await;
+    let mut titles: Vec<&str> = before.iter().map(|n| n.title.as_str()).collect();
     titles.sort();
     assert_eq!(titles, ["Racine", "Sous-page"]);
     assert_eq!(
@@ -204,9 +207,22 @@ async fn first_account_adopts_lot1_space() {
         1
     );
 
-    // Les pages sont toujours là, et celle de la racine va aux membres.
-    assert_eq!(t.tree().await, before);
+    // Les pages sont toujours là, telles quelles, et celle de la racine va
+    // aux membres : le compte les voit dans la section « Espace », en accès
+    // complet.
     let store = Store::open(&t.db_path()).await.unwrap();
+    assert_eq!(store.list_nodes(lot1.vault).await.unwrap(), before);
+    let seen = tree_nodes(&alice, lot1.vault).await;
+    assert_eq!(seen.len(), 2);
+    for node in &seen {
+        assert_eq!(node["level"], "full", "{node}");
+        assert_eq!(node["section"], "space", "{node}");
+    }
+    let child = seen
+        .iter()
+        .find(|n| n["id"] == lot1.child.to_string())
+        .expect("la sous-page");
+    assert_eq!(child["parentId"], lot1.root.to_string());
     assert_eq!(
         store.role_in(lot1.vault, user_id(&me)).await.unwrap(),
         Some(Role::Owner)
@@ -222,32 +238,63 @@ async fn first_account_adopts_lot1_space() {
     store.close().await;
 }
 
-/// Le même sort pour l'espace que les routes de pages créent quand on s'en
-/// sert avant tout compte (Ruling R55) : il revient au premier compte, qui
-/// n'en reçoit pas un second.
+/// Le même sort pour un espace sans membre qui ne vient pas d'une base du
+/// lot 1 : il revient au premier compte, qui n'en reçoit pas un second. (Les
+/// routes de pages en créaient un quand on s'en servait avant tout compte,
+/// Ruling R55 ; elles demandent maintenant une session, et l'espace est ici
+/// posé par le store.)
 #[tokio::test]
 async fn first_account_adopts_the_space_made_before_it() {
     let t = TestApp::new().await;
-    let root = t.create(json!({ "title": "Racine" })).await;
-    t.create(json!({ "title": "Sous-page", "parentId": root.id }))
-        .await;
-    let before = t.tree().await;
-    assert_eq!(before.nodes.len(), 2);
+    let store = Store::open(&t.db_path()).await.unwrap();
+    let orphan = store.create_space("Mon espace", None).await.unwrap();
+    let page = |parent, title: &str, grants| NewNode {
+        space_id: orphan.id,
+        parent_id: parent,
+        after: None,
+        kind: NodeKind::Page,
+        title: title.to_string(),
+        created_by: None,
+        grants,
+        doc: None,
+    };
+    let to_members = Grant {
+        subject: Subject::Members,
+        level: Level::Full,
+    };
+    let root = store
+        .create_node(page(None, "Racine", vec![to_members]))
+        .await
+        .unwrap();
+    store
+        .create_node(page(Some(root.id), "Sous-page", vec![]))
+        .await
+        .unwrap();
+    let before = store.list_nodes(orphan.id).await.unwrap();
+    assert_eq!(before.len(), 2);
     assert_eq!(
         query_i64(&t.db_path(), "SELECT COUNT(*) FROM members").await,
         0
     );
 
-    let (_alice, me) = t.signed_up("alice@exemple.fr", "Alice").await;
+    let (alice, me) = t.signed_up("alice@exemple.fr", "Alice").await;
     assert_eq!(
         me["spaces"],
-        json!([{ "id": before.vault_id, "name": "Mon espace", "role": "owner" }])
+        json!([{ "id": orphan.id.to_string(), "name": "Mon espace", "role": "owner" }])
     );
     assert_eq!(
         query_i64(&t.db_path(), "SELECT COUNT(*) FROM spaces").await,
         1
     );
-    assert_eq!(t.tree().await, before);
+    assert_eq!(store.list_nodes(orphan.id).await.unwrap(), before);
+    store.close().await;
+    let mut titles: Vec<String> = tree_nodes(&alice, orphan.id)
+        .await
+        .iter()
+        .map(|n| n["title"].as_str().unwrap().to_string())
+        .collect();
+    titles.sort();
+    assert_eq!(titles, ["Racine", "Sous-page"]);
 }
 
 /// Ruling R69 : une invitation consultée avec succès peut ne plus valoir un
@@ -1088,8 +1135,20 @@ async fn secrets_never_leave() {
 #[tokio::test]
 async fn mutating_request_with_foreign_origin_is_403() {
     let t = TestApp::new().await;
-    let (alice, _) = t.signed_up("alice@exemple.fr", "Alice").await;
-    let page = t.create(json!({ "title": "Page" })).await;
+    let (alice, me) = t.signed_up("alice@exemple.fr", "Alice").await;
+    let space = me["spaces"][0]["id"]
+        .as_str()
+        .expect("un espace")
+        .to_string();
+    let reply = alice
+        .post(
+            "/api/v1/pages",
+            json!({ "spaceId": space, "title": "Page" }),
+        )
+        .await;
+    reply.assert_status(StatusCode::CREATED);
+    let page: PageNode = serde_json::from_slice(&reply.body).unwrap();
+    let tree = format!("/api/v1/spaces/{space}/tree");
     let with_origin = |mut request: Request<Body>, origin: &str| {
         request
             .headers_mut()
@@ -1104,7 +1163,11 @@ async fn mutating_request_with_foreign_origin_is_403() {
             Request::post("/api/v1/auth/logout")
                 .body(Body::empty())
                 .unwrap(),
-            json_request(Method::POST, "/api/v1/pages", &json!({ "title": "Volée" })),
+            json_request(
+                Method::POST,
+                "/api/v1/pages",
+                &json!({ "spaceId": space, "title": "Volée" }),
+            ),
             json_request(
                 Method::PATCH,
                 &format!("/api/v1/pages/{}", page.id),
@@ -1115,6 +1178,9 @@ async fn mutating_request_with_foreign_origin_is_403() {
                 .body(Body::from("Volé\n"))
                 .unwrap(),
             Request::delete(format!("/api/v1/pages/{}", page.id))
+                .body(Body::empty())
+                .unwrap(),
+            Request::post(format!("/api/v1/pages/{}/trash", page.id))
                 .body(Body::empty())
                 .unwrap(),
             Request::post("/api/v1/inconnue")
@@ -1140,13 +1206,14 @@ async fn mutating_request_with_foreign_origin_is_403() {
         }
     }
     // Rien n'a été écrit, et la session vaut toujours.
-    assert_eq!(t.tree().await.nodes, std::slice::from_ref(&page));
-    assert_eq!(t.get_mmd(&page.id).await.text(), "<p/>\n");
+    let seen: mementum_server::Tree = serde_json::from_slice(&alice.get(&tree).await.body).unwrap();
+    assert_eq!(seen.nodes, std::slice::from_ref(&page));
+    assert_eq!(alice.get_mmd(&page.id).await.text(), "<p/>\n");
     assert_eq!(alice.me().await.status, StatusCode::OK);
 
     // Une lecture avec la même `Origin` passe : elle n'écrit rien, et un
     // site tiers ne lit pas la réponse (pas de CORS).
-    for uri in ["/api/v1/me", "/api/v1/tree", "/api/v1/info"] {
+    for uri in ["/api/v1/me", tree.as_str(), "/api/v1/info"] {
         let request = with_origin(
             Request::get(uri).body(Body::empty()).unwrap(),
             "http://evil.example",
@@ -1167,10 +1234,14 @@ async fn mutating_request_with_foreign_origin_is_403() {
     );
     assert_eq!(t.browser().send(request).await.status, StatusCode::OK);
     let request = with_origin(
-        json_request(Method::POST, "/api/v1/pages", &json!({ "title": "Locale" })),
+        json_request(
+            Method::POST,
+            "/api/v1/pages",
+            &json!({ "spaceId": space, "title": "Locale" }),
+        ),
         "http://127.0.0.1:5174",
     );
-    assert_eq!(t.send(request).await.status, StatusCode::CREATED);
+    assert_eq!(alice.send(request).await.status, StatusCode::CREATED);
     assert_eq!(
         t.browser()
             .log_in("alice@exemple.fr", PASSWORD)
@@ -1216,12 +1287,17 @@ async fn public_origin_is_allowed_to_write() {
         .send_raw(signup("https://notes.exemple.fr", "alice@exemple.fr"))
         .await;
     reply.assert_status(StatusCode::CREATED);
-    // Et toujours l'hôte même du serveur.
+    // Et toujours l'hôte même du serveur, avec la session que l'inscription
+    // vient d'ouvrir.
+    let cookie = reply.session_set_cookie();
+    let cookie = cookie.split(';').next().expect("nom=valeur");
+    let space = reply.json()["spaces"][0]["id"].clone();
     let page = Request::post("/api/v1/pages")
         .header(header::HOST, "10.0.0.5:8080")
         .header(header::ORIGIN, "http://10.0.0.5:8080")
+        .header(header::COOKIE, cookie)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from("{}"))
+        .body(Body::from(json!({ "spaceId": space }).to_string()))
         .unwrap();
     let reply = t.send_raw(page).await;
     reply.assert_status(StatusCode::CREATED);

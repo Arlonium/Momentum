@@ -1095,8 +1095,6 @@ async fn access_cache_follows_rev() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn member_changes_close_live_connections_of_the_space_only() {
     let t = open_app().await;
-    // Le premier compte : son espace est celui que servent encore les routes de pages et
-    // `/sync`.
     let (olga_browser, me) = t.signed_up("olga@exemple.fr", "Olga").await;
     let olga = Person {
         id: uuid(&me["user"]["id"]),
@@ -1110,9 +1108,16 @@ async fn member_changes_close_live_connections_of_the_space_only() {
     join(&olga, &tom, home, "member").await;
 
     let addr = t.listen().await;
-    let page = t.create(json!({ "title": "En direct" })).await;
-    assert_eq!(t.tree().await.vault_id, home.to_string());
-    let url = format!("ws://{addr}/sync/{}?schema={SCHEMA_VERSION}", page.id);
+    let page = olga
+        .browser
+        .post(
+            "/api/v1/pages",
+            json!({ "spaceId": home.to_string(), "section": "space", "title": "En direct" }),
+        )
+        .await;
+    page.assert_status(StatusCode::CREATED);
+    let page = uuid(&page.json()["id"]).to_string();
+    let url = format!("ws://{addr}/sync/{page}?schema={SCHEMA_VERSION}");
     let live = Client::connect_synced(&url).await;
 
     // Dans l'autre espace : la connexion reste ouverte, et ce qu'elle envoie arrive.
@@ -1130,7 +1135,7 @@ async fn member_changes_close_live_connections_of_the_space_only() {
     live.resync();
     assert!(live.wait_until(WAIT, |c| c.step2_count() > start).await);
     assert!(!live.is_closed());
-    assert_eq!(t.get_mmd(&page.id).await.text(), "toujours là\n");
+    assert_eq!(olga.browser.get_mmd(&page).await.text(), "toujours là\n");
 
     // Dans son espace : un changement de rôle la ferme.
     olga.browser

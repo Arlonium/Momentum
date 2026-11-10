@@ -41,9 +41,17 @@ async fn killed_server_loses_nothing_broadcast() {
     let schema = serde_json::from_str::<Value>(&info).unwrap()["schemaVersion"]
         .as_u64()
         .unwrap();
-    let (status, page) = server.http("POST", "/api/v1/pages", Some(r#"{"title":"Frappe"}"#));
-    assert_eq!(status, 201, "{page}");
-    let page = serde_json::from_str::<Value>(&page).unwrap()["id"]
+    // Aucune route de page ne répond sans session : un compte, et son espace.
+    let account =
+        r#"{"email":"alice@exemple.fr","name":"Alice","password":"mot-de-passe-de-test"}"#;
+    let signup = server.request("POST", "/api/v1/auth/signup", Some(account), &[]);
+    assert_eq!(signup.status, 201, "{}", signup.body);
+    let cookie = signup.session_cookie().expect("cookie de session");
+    let space = serde_json::from_str::<Value>(&signup.body).unwrap()["spaces"][0]["id"].clone();
+    let body = serde_json::json!({ "spaceId": space, "title": "Frappe" }).to_string();
+    let page = server.request("POST", "/api/v1/pages", Some(&body), &[("Cookie", &cookie)]);
+    assert_eq!(page.status, 201, "{}", page.body);
+    let page = serde_json::from_str::<Value>(&page.body).unwrap()["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -110,8 +118,9 @@ async fn killed_server_loses_nothing_broadcast() {
         stored.len()
     );
 
-    // Le MMD de la page dit la même chose.
-    let (status, mmd) = server.http("GET", &format!("/api/v1/pages/{page}/mmd"), None);
-    assert_eq!(status, 200);
-    assert_eq!(mmd, format!("{stored}\n"));
+    // Le MMD de la page dit la même chose (la session a survécu au redémarrage).
+    let path = format!("/api/v1/pages/{page}/mmd");
+    let mmd = server.request("GET", &path, None, &[("Cookie", &cookie)]);
+    assert_eq!(mmd.status, 200, "{}", mmd.body);
+    assert_eq!(mmd.body, format!("{stored}\n"));
 }

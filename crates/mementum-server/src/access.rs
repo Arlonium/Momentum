@@ -1,16 +1,23 @@
 //! Les droits, vus du serveur : le seul chemin par lequel une route apprend ce qu'une personne
-//! peut faire dans un espace, et ce qu'elle y voit.
+//! peut faire dans un espace ou sur une page, et ce qu'elle y voit.
 //!
 //! - [`AppState::space_access`] : ce que la personne voit de l'espace, et à quel niveau
 //!   (`mementum_acl::SpaceAccess`), calculé une fois par révision de l'espace et gardé dans le
 //!   cache des accès ;
 //! - [`AppState::role_at_least`] : son rôle, s'il suffit ;
+//! - [`AppState::node_access`] : une page et ce qu'elle peut en faire ([`AppState::seen_node`]
+//!   pour qui vérifie plusieurs actions, avec [`permit`]) ;
 //! - [`AppState::rights_changed`] : à appeler après toute écriture qui change des droits, pour
 //!   fermer les connexions de synchro qui les avaient lus.
 //!
 //! Qui n'a aucun rôle dans l'espace reçoit `404`, exactement comme pour un espace qui n'existe
 //! pas ; l'admin de l'instance n'a aucun droit particulier dans un espace dont il n'est pas
 //! membre. `403 forbidden` ne sert que dans un espace qu'on voit.
+//!
+//! **Pages.** Les refus viennent toujours dans cet ordre : `404 not_found` pour une page que
+//! la personne ne voit pas (la réponse d'une page qui n'existe pas) ; `403 forbidden` si son
+//! niveau ne permet pas l'action ; `409 trashed` si l'action écrit dans une page à la
+//! corbeille. Jamais `403` ni `409` pour une page qu'elle ne voit pas.
 //!
 //! **Cache** : la clé est `spaces.rev`, que le store incrémente dans la transaction de toute
 //! écriture qui touche à la structure ou aux droits de l'espace. La révision est lue **avant**
@@ -20,7 +27,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use mementum_acl::{Role, SpaceAccess, TreeNode};
+use mementum_acl::{Action, Level, NodeAccess, Role, SpaceAccess, TreeNode};
+use mementum_store::Node;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -62,7 +70,114 @@ pub(crate) fn require(role: Role, min: Role) -> Result<Role, ApiError> {
     }))
 }
 
+/// L'action écrit-elle dans la page ? Une page à la corbeille refuse ces actions-là ; elle se
+/// lit, se restaure et se supprime encore.
+fn writes(action: Action) -> bool {
+    match action {
+        Action::Edit
+        | Action::Rename
+        | Action::CreateChild
+        | Action::Reorder
+        | Action::Move
+        | Action::Share
+        | Action::Trash => true,
+        Action::Read | Action::Comment | Action::Restore | Action::Delete => false,
+    }
+}
+
+/// Le nom d'un niveau, dans un message.
+fn level_name(level: Level) -> &'static str {
+    match level {
+        Level::Read => "lecture",
+        Level::Comment => "commentaire",
+        Level::Edit => "modification",
+        Level::Full => "accès complet",
+    }
+}
+
+/// `access` permet-il `action` ? `403 forbidden` si le niveau ne suffit pas ; sinon `409
+/// trashed` si l'action écrit dans une page à la corbeille. Pour une page que la personne
+/// voit : l'appelant a déjà répondu `404` pour les autres.
+pub(crate) fn permit(access: &NodeAccess, action: Action) -> Result<(), ApiError> {
+    if !access.level.allows(action) {
+        let needed = [Level::Read, Level::Comment, Level::Edit, Level::Full]
+            .into_iter()
+            .find(|level| level.allows(action))
+            .unwrap_or(Level::Full);
+        return Err(ApiError::forbidden(format!(
+            "niveau insuffisant sur cette page : il faut « {} », vous avez « {} »",
+            level_name(needed),
+            level_name(access.level)
+        )));
+    }
+    if access.in_trash && writes(action) {
+        return Err(ApiError::trashed());
+    }
+    Ok(())
+}
+
 impl AppState {
+    /// Le nœud et les accès de `user` dessus. `404` s'il ne le voit pas ; `403 forbidden` si
+    /// son niveau ne permet pas `action` ; `409 trashed` si `action` écrit (Edit, Rename,
+    /// CreateChild, Reorder, Move, Share, Trash) dans une page à la corbeille.
+    pub(crate) async fn node_access(
+        &self,
+        user: &AuthUser,
+        id: Uuid,
+        action: Action,
+    ) -> Result<(Node, NodeAccess), ApiError> {
+        let (node, access, _) = self
+            .seen_node(user, id)
+            .await?
+            .ok_or_else(ApiError::page_not_found)?;
+        permit(&access, action)?;
+        Ok((node, access))
+    }
+
+    /// Le nœud `id`, les accès de `user` dessus, et le calcul des accès de son espace.
+    /// `None` s'il ne le voit pas : nœud inconnu, espace où il n'a aucun rôle, page qu'il ne
+    /// peut pas lire. L'appelant répond alors comme pour un id inconnu, sans distinguer.
+    pub(crate) async fn seen_node(
+        &self,
+        user: &AuthUser,
+        id: Uuid,
+    ) -> Result<Option<(Node, NodeAccess, Arc<SpaceAccess>)>, ApiError> {
+        let Some(node) = self.store.get_node(id).await.map_err(internal)? else {
+            return Ok(None);
+        };
+        let Some(space) = self.find_space_access(user, node.space_id).await? else {
+            return Ok(None);
+        };
+        let Some(access) = space.node(id).copied() else {
+            return Ok(None);
+        };
+        Ok(Some((node, access, space)))
+    }
+
+    /// `user` verrait-il encore `node` à la racine de l'espace, par les seuls accès posés sur
+    /// lui ? Vrai aussi pour un nœud sans aucun accès propre : en arrivant à la racine, il
+    /// reçoit celui de qui le déplace (`Store::update_node`, Ruling R66). Faux : un accès est
+    /// posé sur le nœud, mais aucun ne vaut pour `user`, qui ne le voit que par ses ancêtres.
+    pub(crate) async fn seen_at_root(
+        &self,
+        user: &AuthUser,
+        role: Role,
+        node: &Node,
+    ) -> Result<bool, ApiError> {
+        let own = self.store.node_grants(node.id).await.map_err(internal)?;
+        if own.is_empty() {
+            return Ok(true);
+        }
+        let alone = TreeNode {
+            id: node.id,
+            parent_id: None,
+            trashed: false,
+        };
+        let lines: Vec<_> = own.into_iter().map(|grant| (node.id, grant)).collect();
+        let access = SpaceAccess::compute(&[alone], &lines, user.id, Some(role));
+        Ok(access.node(node.id).is_some())
+    }
+
     /// Les accès de `user` dans l'espace : lus dans le cache si `spaces.rev` n'a pas bougé.
     /// `404` s'il n'y a aucun rôle.
     pub(crate) async fn space_access(
@@ -139,6 +254,25 @@ impl AppState {
         match nodes {
             Some(nodes) => self.hub.kick(nodes).await,
             None => self.hub.kick(&self.live_pages_of(space_id).await).await,
+        }
+    }
+
+    /// [`AppState::rights_changed`] pour `node` et tout son sous-arbre : après le commit d'une
+    /// mise à la corbeille, d'une restauration ou d'un changement de parent. Si le sous-arbre
+    /// ne peut pas être lu, ce sont toutes les pages vivantes de l'espace qui sont fermées.
+    pub(crate) async fn subtree_rights_changed(&self, space_id: Uuid, node: Uuid) {
+        match self.store.subtree_ids(node).await {
+            Ok(nodes) => self.rights_changed(space_id, Some(&nodes)).await,
+            Err(error) => {
+                tracing::warn!(
+                    space_id = %space_id,
+                    node_id = %node,
+                    %error,
+                    "sous-arbre illisible après un changement de droits : les connexions de \
+                     synchro de tout l'espace sont fermées"
+                );
+                self.rights_changed(space_id, None).await;
+            }
         }
     }
 

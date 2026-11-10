@@ -5,6 +5,10 @@
 //! la WebSocket, par un écouteur sur un port libre de 127.0.0.1 (jamais 8080,
 //! Ruling R24).
 //!
+//! Aucune route de page ne répond sans session : un test de pages se donne un
+//! compte ([`TestApp::account`], avec son espace) ou une équipe ([`Team`],
+//! un espace où chacun a son rôle).
+//!
 //! Deux façons de lire les journaux :
 //! - [`Logs`] : ceux du fil du test. Les tests qui en lisent tournent en
 //!   `current_thread` (défaut de `#[tokio::test]`), routes et acteurs compris ;
@@ -19,10 +23,13 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_server::{Config, PageNode, Tree};
+use mementum_store::{NewNode, NodeKind, Store};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 /// Délai maximal d'une attente de convergence.
 pub const WAIT: Duration = Duration::from_secs(10);
@@ -200,70 +207,6 @@ impl TestApp {
         self.send(json_request(method, uri, &body)).await
     }
 
-    pub async fn post(&self, body: Value) -> Reply {
-        self.json(Method::POST, "/api/v1/pages", body).await
-    }
-
-    pub async fn create(&self, body: Value) -> PageNode {
-        let reply = self.post(body).await;
-        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
-        serde_json::from_slice(&reply.body).unwrap()
-    }
-
-    pub async fn patch(&self, id: &str, body: Value) -> Reply {
-        self.json(Method::PATCH, &format!("/api/v1/pages/{id}"), body)
-            .await
-    }
-
-    pub async fn patched(&self, id: &str, body: Value) -> PageNode {
-        let reply = self.patch(id, body).await;
-        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
-        serde_json::from_slice(&reply.body).unwrap()
-    }
-
-    pub async fn get_mmd(&self, id: &str) -> Reply {
-        self.get(&format!("/api/v1/pages/{id}/mmd")).await
-    }
-
-    pub async fn put_mmd(&self, id: &str, mmd: impl Into<Body>) -> Reply {
-        self.send(
-            Request::put(format!("/api/v1/pages/{id}/mmd"))
-                .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
-                .body(mmd.into())
-                .unwrap(),
-        )
-        .await
-    }
-
-    pub async fn tree(&self) -> Tree {
-        let reply = self.get("/api/v1/tree").await;
-        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
-        serde_json::from_slice(&reply.body).unwrap()
-    }
-
-    pub async fn node(&self, id: &str) -> PageNode {
-        self.tree()
-            .await
-            .nodes
-            .into_iter()
-            .find(|n| n.id == id)
-            .unwrap_or_else(|| panic!("page {id} absente de l'arbre"))
-    }
-
-    /// Titres des enfants de `parent` (`None` = racine), dans l'ordre des
-    /// positions.
-    pub async fn children(&self, parent: Option<&str>) -> Vec<String> {
-        let mut nodes: Vec<PageNode> = self
-            .tree()
-            .await
-            .nodes
-            .into_iter()
-            .filter(|n| n.parent_id.as_deref() == parent)
-            .collect();
-        nodes.sort_by(|a, b| a.position.cmp(&b.position));
-        nodes.into_iter().map(|n| n.title).collect()
-    }
-
     /// Sert l'application sur un port libre de 127.0.0.1.
     pub async fn listen(&self) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -277,15 +220,6 @@ impl TestApp {
 
     pub fn db_path(&self) -> PathBuf {
         self.cfg.db_path()
-    }
-
-    pub async fn node_titled(&self, title: &str) -> PageNode {
-        self.tree()
-            .await
-            .nodes
-            .into_iter()
-            .find(|n| n.title == title)
-            .unwrap_or_else(|| panic!("aucune page « {title} »"))
     }
 
     /// Un navigateur sans session.
@@ -304,6 +238,19 @@ impl TestApp {
         reply.assert_status(StatusCode::CREATED);
         assert!(browser.session().is_some(), "cookie de session attendu");
         (browser, reply.json())
+    }
+
+    /// Crée le compte `<nom en minuscules>@exemple.fr` et rend ce qu'il faut pour écrire des
+    /// pages : sa session et son espace. Hors du premier compte, les inscriptions doivent être
+    /// ouvertes.
+    pub async fn account(&self, name: &str) -> Account<'_> {
+        let email = format!("{}@exemple.fr", name.to_lowercase());
+        let (browser, me) = self.signed_up(&email, name).await;
+        Account {
+            id: uuid(&me["user"]["id"]),
+            space: uuid(&me["spaces"][0]["id"]),
+            browser,
+        }
     }
 }
 
@@ -509,6 +456,327 @@ impl Browser<'_> {
     pub async fn me(&self) -> Reply {
         self.get("/api/v1/me").await
     }
+
+    pub async fn get_mmd(&self, id: &str) -> Reply {
+        self.get(&format!("/api/v1/pages/{id}/mmd")).await
+    }
+
+    pub async fn put_mmd(&self, id: &str, mmd: impl Into<Body>) -> Reply {
+        self.send(
+            Request::put(format!("/api/v1/pages/{id}/mmd"))
+                .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+                .body(mmd.into())
+                .unwrap(),
+        )
+        .await
+    }
+}
+
+/// Un id écrit dans une réponse JSON.
+pub fn uuid(value: &Value) -> Uuid {
+    Uuid::parse_str(value.as_str().unwrap_or_else(|| panic!("un id : {value}")))
+        .unwrap_or_else(|e| panic!("{value} n'est pas un UUID : {e}"))
+}
+
+/// Un compte : le navigateur qui porte sa session, son id, et l'espace que son inscription lui
+/// a donné (« Espace de `<nom>` », dont il est propriétaire). Les aides de pages visent cet
+/// espace.
+pub struct Account<'a> {
+    pub browser: Browser<'a>,
+    pub id: Uuid,
+    pub space: Uuid,
+}
+
+impl Account<'_> {
+    /// `POST /api/v1/pages`. À la racine (`parentId` absent ou `null`), `spaceId` est ajouté au
+    /// corps s'il n'y est pas : l'espace du compte.
+    pub async fn post(&self, mut body: Value) -> Reply {
+        if let Some(fields) = body.as_object_mut()
+            && fields.get("parentId").is_none_or(Value::is_null)
+            && !fields.contains_key("spaceId")
+        {
+            fields.insert("spaceId".to_string(), json!(self.space.to_string()));
+        }
+        self.browser.post("/api/v1/pages", body).await
+    }
+
+    /// Crée une page (voir [`Account::post`]) : `201`.
+    pub async fn create(&self, body: Value) -> PageNode {
+        let reply = self.post(body).await;
+        reply.assert_status(StatusCode::CREATED);
+        serde_json::from_slice(&reply.body).unwrap()
+    }
+
+    pub async fn patch(&self, id: &str, body: Value) -> Reply {
+        self.browser
+            .patch(&format!("/api/v1/pages/{id}"), body)
+            .await
+    }
+
+    pub async fn patched(&self, id: &str, body: Value) -> PageNode {
+        let reply = self.patch(id, body).await;
+        reply.assert_status(StatusCode::OK);
+        serde_json::from_slice(&reply.body).unwrap()
+    }
+
+    pub async fn get_mmd(&self, id: &str) -> Reply {
+        self.browser.get_mmd(id).await
+    }
+
+    pub async fn put_mmd(&self, id: &str, mmd: impl Into<Body>) -> Reply {
+        self.browser.put_mmd(id, mmd).await
+    }
+
+    /// L'arbre de l'espace du compte (`GET /api/v1/spaces/{id}/tree`).
+    pub async fn tree(&self) -> Tree {
+        let reply = self
+            .browser
+            .get(&format!("/api/v1/spaces/{}/tree", self.space))
+            .await;
+        reply.assert_status(StatusCode::OK);
+        serde_json::from_slice(&reply.body).unwrap()
+    }
+
+    pub async fn node(&self, id: &str) -> PageNode {
+        self.tree()
+            .await
+            .nodes
+            .into_iter()
+            .find(|n| n.id == id)
+            .unwrap_or_else(|| panic!("page {id} absente de l'arbre"))
+    }
+
+    pub async fn node_titled(&self, title: &str) -> PageNode {
+        self.tree()
+            .await
+            .nodes
+            .into_iter()
+            .find(|n| n.title == title)
+            .unwrap_or_else(|| panic!("aucune page « {title} »"))
+    }
+
+    /// Titres des enfants de `parent` (`None` = racine), dans l'ordre des positions.
+    pub async fn children(&self, parent: Option<&str>) -> Vec<String> {
+        let mut nodes: Vec<PageNode> = self
+            .tree()
+            .await
+            .nodes
+            .into_iter()
+            .filter(|n| n.parent_id.as_deref() == parent)
+            .collect();
+        nodes.sort_by(|a, b| a.position.cmp(&b.position));
+        nodes.into_iter().map(|n| n.title).collect()
+    }
+}
+
+/// Le champ texte `key` d'un objet JSON.
+pub fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+    value[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("« {key} » en texte attendu dans {value}"))
+}
+
+/// Les nœuds de l'arbre d'un espace, tels que `by` les voit : `200`, `spaceId` est l'espace
+/// demandé.
+pub async fn tree_nodes(by: &Browser<'_>, space: Uuid) -> Vec<Value> {
+    let reply = by.get(&format!("/api/v1/spaces/{space}/tree")).await;
+    reply.assert_status(StatusCode::OK);
+    let tree = reply.json();
+    assert_eq!(tree["spaceId"], space.to_string(), "{tree}");
+    tree["nodes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("« nodes » en liste attendu dans {tree}"))
+        .clone()
+}
+
+/// La corbeille d'un espace, telle que `by` la voit (`GET /api/v1/spaces/{id}/trash`) : `200`.
+pub async fn trash_list(by: &Browser<'_>, space: Uuid) -> Vec<Value> {
+    let reply = by.get(&format!("/api/v1/spaces/{space}/trash")).await;
+    reply.assert_status(StatusCode::OK);
+    reply
+        .json()
+        .as_array()
+        .unwrap_or_else(|| panic!("une liste attendue : {}", reply.text()))
+        .clone()
+}
+
+/// Une équipe, pour les tests de droits : l'espace « Équipe » d'Olga (propriétaire), avec Adam
+/// (admin), Mona et Tom (membres) et Gina (invitée). Sam, le premier compte, administre
+/// l'instance mais n'a aucun rôle dans l'espace ; Zoé non plus, qui n'a que son propre espace.
+///
+/// Les inscriptions de l'application doivent être ouvertes. Les rôles et les accès sont posés
+/// par le store : les routes qui les posent ne sont pas celles de ces tests.
+pub struct Team<'a> {
+    pub sam: Account<'a>,
+    pub olga: Account<'a>,
+    pub adam: Account<'a>,
+    pub mona: Account<'a>,
+    pub tom: Account<'a>,
+    pub gina: Account<'a>,
+    pub zoe: Account<'a>,
+    /// L'espace « Équipe ».
+    pub space: Uuid,
+    /// Le store, sur la même base que l'application.
+    pub store: Store,
+}
+
+impl<'a> Team<'a> {
+    pub async fn new(t: &'a TestApp) -> Team<'a> {
+        let sam = t.account("Sam").await;
+        let olga = t.account("Olga").await;
+        let adam = t.account("Adam").await;
+        let mona = t.account("Mona").await;
+        let tom = t.account("Tom").await;
+        let gina = t.account("Gina").await;
+        let zoe = t.account("Zoé").await;
+        let store = Store::open(&t.db_path()).await.unwrap();
+        let mut team = Team {
+            sam,
+            olga,
+            adam,
+            mona,
+            tom,
+            gina,
+            zoe,
+            space: Uuid::nil(),
+            store,
+        };
+        team.space = team.another_space("Équipe").await;
+        team
+    }
+
+    /// Un espace de plus, avec les mêmes rôles que « Équipe ».
+    pub async fn another_space(&self, name: &str) -> Uuid {
+        let space = self
+            .store
+            .create_space(name, Some(self.olga.id))
+            .await
+            .unwrap()
+            .id;
+        for (account, role) in [
+            (&self.adam, Role::Admin),
+            (&self.mona, Role::Member),
+            (&self.tom, Role::Member),
+            (&self.gina, Role::Guest),
+        ] {
+            self.store
+                .add_member(space, account.id, role)
+                .await
+                .unwrap();
+        }
+        space
+    }
+
+    /// Une page de l'espace « Équipe », créée par Olga, avec ces accès posés sur elle : en
+    /// tête des enfants de `parent` (`None` = la racine).
+    pub async fn page(
+        &self,
+        parent: Option<Uuid>,
+        title: &str,
+        grants: &[(Subject, Level)],
+    ) -> Uuid {
+        self.page_in(self.space, parent, title, grants).await
+    }
+
+    /// Comme [`Team::page`], dans un autre espace.
+    pub async fn page_in(
+        &self,
+        space: Uuid,
+        parent: Option<Uuid>,
+        title: &str,
+        grants: &[(Subject, Level)],
+    ) -> Uuid {
+        self.store
+            .create_node(NewNode {
+                space_id: space,
+                parent_id: parent,
+                after: None,
+                kind: NodeKind::Page,
+                title: title.to_string(),
+                created_by: Some(self.olga.id),
+                grants: grants
+                    .iter()
+                    .map(|&(subject, level)| Grant { subject, level })
+                    .collect(),
+                doc: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// Met la page à la corbeille, par le store, au nom d'Olga.
+    pub async fn trash(&self, page: Uuid) {
+        self.store.trash_node(page, self.olga.id).await.unwrap();
+    }
+
+    /// Les accès posés sur la page, tels qu'ils sont en base.
+    pub async fn grants(&self, page: Uuid) -> Vec<(Subject, Level)> {
+        self.store
+            .node_grants(page)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|g| (g.subject, g.level))
+            .collect()
+    }
+}
+
+/// Une requête sur chaque route qui porte l'id d'une page dans son chemin, corps valides et
+/// corps illisibles : `(nom, requête)`.
+pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
+    let page = format!("/api/v1/pages/{id}");
+    let bare = |method: Method, uri: String| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let patch = |body: Value| json_request(Method::PATCH, &page, &body);
+    let put = |mmd: &'static str| {
+        Request::put(format!("{page}/mmd"))
+            .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+            .body(Body::from(mmd))
+            .unwrap()
+    };
+    vec![
+        ("GET page", bare(Method::GET, page.clone())),
+        ("PATCH titre", patch(json!({ "title": "Autre titre" }))),
+        ("PATCH place", patch(json!({ "afterId": null }))),
+        ("PATCH parent", patch(json!({ "parentId": null }))),
+        ("PATCH sans rien", patch(json!({}))),
+        ("PATCH champ inconnu", patch(json!({ "titre": "Autre" }))),
+        (
+            "PATCH illisible",
+            Request::patch(&page)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        ),
+        ("POST trash", bare(Method::POST, format!("{page}/trash"))),
+        (
+            "POST restore",
+            bare(Method::POST, format!("{page}/restore")),
+        ),
+        ("DELETE", bare(Method::DELETE, page.clone())),
+        ("GET mmd", bare(Method::GET, format!("{page}/mmd"))),
+        (
+            "PUT mmd",
+            put("Texte
+"),
+        ),
+        (
+            "PUT mmd illisible",
+            put("* x
+"),
+        ),
+    ]
+}
+
+/// Ce qui fait qu'une réponse est la même qu'une autre : statut, type de contenu, corps.
+pub fn outcome(reply: &Reply) -> (StatusCode, Option<String>, String) {
+    (reply.status, reply.content_type.clone(), reply.text())
 }
 
 /// Journaux `tracing` émis sur le fil courant tant que la valeur vit.

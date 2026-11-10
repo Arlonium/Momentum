@@ -13,30 +13,44 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize};
 use ts_rs::TS;
 
-/// Une page de l'arbre (`GET /api/v1/tree`, réponses de `POST` et `PATCH`).
+/// Une page, telle que la voit le compte de la session : dans l'arbre d'un espace, dans sa
+/// corbeille, et dans la réponse de chaque route de page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PageNode {
     pub id: String,
-    /// `null` : la page est à la racine du coffre.
+    /// L'espace de la page.
+    pub space_id: String,
+    /// La page parente, si le compte la voit. `null` : la page est à la racine de l'espace,
+    /// ou sous une page qu'il ne voit pas ; elle est alors à la racine de ce qu'il voit.
     pub parent_id: Option<String>,
-    /// `"page"` (le lot 1 ne crée que des pages).
+    /// `"page"` (aucune route ne crée encore autre chose).
     pub kind: String,
     pub title: String,
     /// Index fractionnaire : l'ordre des frères est l'ordre de ces chaînes,
     /// comparées unité par unité (ASCII).
     pub position: String,
+    /// Le niveau du compte sur la page : le plus fort de ceux que lui donnent la page et ses
+    /// ancêtres.
+    pub level: Level,
+    /// La section de la barre latérale où la page apparaît pour le compte.
+    pub section: Section,
     /// Millisecondes Unix.
     #[ts(type = "number")]
     pub updated_at: i64,
+    /// Millisecondes Unix : depuis quand la page est à la corbeille, qu'elle y ait été mise
+    /// elle-même ou qu'elle y soit par un ancêtre (c'est alors la date du plus proche).
+    /// `null` : elle n'y est pas. Une page à la corbeille se lit, et ne s'écrit plus.
+    #[ts(type = "number | null")]
+    pub trashed_at: Option<i64>,
 }
 
-/// Les pages du coffre (`GET /api/v1/tree`), triées par `(parentId,
-/// position)`, la racine d'abord.
+/// Les pages d'un espace que le compte de la session voit, hors corbeille
+/// (`GET /api/v1/spaces/{id}/tree`), triées par `(parentId, position)`, la racine d'abord.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Tree {
-    pub vault_id: String,
+    pub space_id: String,
     pub nodes: Vec<PageNode>,
 }
 
@@ -225,6 +239,43 @@ impl From<mementum_acl::Level> for Level {
     }
 }
 
+/// Section de la barre latérale où une page apparaît pour une personne. Calculée pour chacun,
+/// jamais stockée : les sous-pages suivent celle de la plus haute page que la personne voit.
+// La forme d'API de `mementum_acl::Section`, écrite comme `Section::as_str` (test
+// `section_is_written_like_the_acl_section`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum Section {
+    /// « Espace » : les pages des membres.
+    Space,
+    /// « Partagé » : les pages où quelqu'un d'autre est nommé. Un invité ne voit qu'elle.
+    Shared,
+    /// « Privé » : les pages où personne d'autre n'a d'accès.
+    Private,
+}
+
+impl From<mementum_acl::Section> for Section {
+    fn from(section: mementum_acl::Section) -> Section {
+        match section {
+            mementum_acl::Section::Space => Section::Space,
+            mementum_acl::Section::Shared => Section::Shared,
+            mementum_acl::Section::Private => Section::Private,
+        }
+    }
+}
+
+/// La section où créer une page à la racine d'un espace. « Partagé » ne se choisit pas : une
+/// page y arrive quand on la partage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum RootSection {
+    /// « Espace » : la page reçoit l'accès `(members, full)`.
+    Space,
+    /// « Privé » : la page reçoit l'accès `(user:<auteur>, full)`.
+    #[default]
+    Private,
+}
+
 /// Corps de `POST /api/v1/spaces`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -348,11 +399,17 @@ pub struct Accepted {
     pub page_id: Option<String>,
 }
 
-/// Corps de `POST /api/v1/pages`. Tous les champs sont facultatifs.
+/// Corps de `POST /api/v1/pages`. Il faut dire où va la page : `parentId` (une sous-page), ou
+/// `spaceId` (à la racine de cet espace).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreatePage {
-    /// Absent ou `null` : à la racine.
+    /// L'espace. Obligatoire à la racine ; avec `parentId`, facultatif, et c'est alors celui
+    /// de la page parente.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub space_id: Option<String>,
+    /// Absent ou `null` : à la racine de l'espace.
     #[serde(default)]
     #[ts(optional = nullable)]
     pub parent_id: Option<String>,
@@ -365,6 +422,11 @@ pub struct CreatePage {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub title: Option<String>,
+    /// À la racine seulement : la section, donc les accès que reçoit la page. Absent ou
+    /// `null` : `private`. Refusé avec `parentId` : une sous-page hérite de sa page parente.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub section: Option<RootSection>,
 }
 
 /// Corps de `PATCH /api/v1/pages/{id}`. Un champ absent ne change rien.
@@ -392,7 +454,8 @@ pub struct UpdatePage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    /// Page (ou route) introuvable.
+    /// Page, espace ou route introuvable ; ou que la personne n'a pas le droit de voir : la
+    /// réponse est la même.
     NotFound,
     /// Méthode non permise sur cette route.
     MethodNotAllowed,
@@ -403,9 +466,9 @@ pub enum ErrorCode {
     /// Blocs que le serveur n'écrit pas : structure ou profondeur que
     /// BlockNote refuse, prop hors registre écrite par MMD (Ruling R41).
     InvalidBlocks,
-    /// `afterId` ne désigne pas un frère à l'endroit visé.
+    /// `afterId` ne désigne pas un frère, que la personne voit, à l'endroit visé.
     InvalidAfter,
-    /// `parentId` ne désigne pas une page du coffre.
+    /// `parentId` ne désigne pas une page que la personne voit dans l'espace.
     InvalidParent,
     /// Titre de plus de 500 caractères.
     TitleTooLong,
@@ -453,6 +516,14 @@ pub enum ErrorCode {
     Forbidden,
     /// L'espace perdrait son dernier propriétaire. Statut 409.
     LastOwner,
+    /// Écriture dans une page à la corbeille (elle-même, ou par un ancêtre) : la restaurer
+    /// d'abord. Statut 409.
+    Trashed,
+    /// Restauration d'une page dont un ancêtre est à la corbeille : c'est lui qu'on restaure.
+    /// Statut 409.
+    ParentTrashed,
+    /// Suppression définitive d'une page qui n'est pas à la corbeille. Statut 409.
+    NotTrashed,
 }
 
 /// Corps de toute réponse d'erreur.
@@ -508,6 +579,8 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<PageNode>(&cfg),
         file::<PendingInvitation>(&cfg),
         file::<Role>(&cfg),
+        file::<RootSection>(&cfg),
+        file::<Section>(&cfg),
         file::<SignUp>(&cfg),
         file::<SignupMode>(&cfg),
         file::<SpaceInfo>(&cfg),
@@ -564,6 +637,24 @@ mod tests {
             let written = serde_json::to_value(Level::from(level)).unwrap();
             assert_eq!(written, level.as_str());
         }
+    }
+
+    /// La section de l'API s'écrit comme celle des droits, pour chacune des trois ; celle où
+    /// l'on crée s'écrit comme elles.
+    #[test]
+    fn section_is_written_like_the_acl_section() {
+        use mementum_acl::Section as Acl;
+        for section in [Acl::Space, Acl::Shared, Acl::Private] {
+            let written = serde_json::to_value(Section::from(section)).unwrap();
+            assert_eq!(written, section.as_str());
+        }
+        for (root, section) in [
+            (RootSection::Space, Acl::Space),
+            (RootSection::Private, Acl::Private),
+        ] {
+            assert_eq!(serde_json::to_value(root).unwrap(), section.as_str());
+        }
+        assert_eq!(RootSection::default(), RootSection::Private);
     }
 
     #[test]

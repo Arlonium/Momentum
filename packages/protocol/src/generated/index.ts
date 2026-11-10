@@ -20,6 +20,8 @@ export type { Member } from "./Member";
 export type { PageNode } from "./PageNode";
 export type { PendingInvitation } from "./PendingInvitation";
 export type { Role } from "./Role";
+export type { RootSection } from "./RootSection";
+export type { Section } from "./Section";
 export type { SignUp } from "./SignUp";
 export type { SignupMode } from "./SignupMode";
 export type { SpaceInfo } from "./SpaceInfo";

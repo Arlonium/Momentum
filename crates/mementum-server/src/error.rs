@@ -35,7 +35,9 @@ impl ApiError {
         }
     }
 
-    /// `404 not_found` : la page n'existe pas.
+    /// `404 not_found` : la page n'existe pas, **ou** la personne ne la voit pas. Les deux
+    /// cas reçoivent exactement cette réponse, comme un id mal formé : qui ne peut pas lire
+    /// une page n'apprend rien d'elle, pas même qu'elle existe.
     pub fn page_not_found() -> ApiError {
         ApiError::new(
             StatusCode::NOT_FOUND,
@@ -44,7 +46,8 @@ impl ApiError {
         )
     }
 
-    /// `422 invalid_after`.
+    /// `422 invalid_after` : la même réponse pour un id inconnu, mal formé, d'une page qui
+    /// n'est pas sœur à l'endroit visé, ou d'une page que la personne ne voit pas.
     pub fn invalid_after() -> ApiError {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -53,12 +56,41 @@ impl ApiError {
         )
     }
 
-    /// `422 invalid_parent`.
+    /// `422 invalid_parent` : la même réponse pour un id inconnu, mal formé, d'un autre
+    /// espace, ou d'une page que la personne ne voit pas.
     pub fn invalid_parent() -> ApiError {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::InvalidParent,
-            "parentId ne désigne pas une page de ce coffre (null : la racine)",
+            "parentId ne désigne pas une page de cet espace (null : la racine)",
+        )
+    }
+
+    /// `409 trashed` : une écriture dans une page à la corbeille.
+    pub fn trashed() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Trashed,
+            "la page est à la corbeille : elle se lit, mais ne s'écrit plus ; la restaurer \
+             d'abord",
+        )
+    }
+
+    /// `409 parent_trashed`.
+    pub fn parent_trashed() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::ParentTrashed,
+            "une page parente est à la corbeille : c'est elle qu'il faut restaurer",
+        )
+    }
+
+    /// `409 not_trashed`.
+    pub fn not_trashed() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::NotTrashed,
+            "la page n'est pas à la corbeille : on ne supprime définitivement que ce qui y est",
         )
     }
 
@@ -166,8 +198,8 @@ impl ApiError {
         )
     }
 
-    /// `403 forbidden` : une action au-dessus de son rôle, dans un espace qu'on
-    /// voit.
+    /// `403 forbidden` : une action au-dessus de son rôle dans un espace qu'on
+    /// voit, ou de son niveau sur une page qu'on voit.
     pub fn forbidden(message: impl Into<String>) -> ApiError {
         ApiError::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, message)
     }
@@ -217,11 +249,9 @@ impl From<StoreError> for ApiError {
             ),
             StoreError::EmailTaken => ApiError::email_taken(),
             StoreError::LastOwner => ApiError::last_owner(),
-            // Corbeille : aucune route ne l'appelle encore. Ces erreurs recevront leur
-            // code avec les routes qui les produisent.
-            e @ (StoreError::Sqlx(_) | StoreError::ParentTrashed | StoreError::NotTrashed) => {
-                ApiError::internal(&e)
-            }
+            StoreError::ParentTrashed => ApiError::parent_trashed(),
+            StoreError::NotTrashed => ApiError::not_trashed(),
+            e @ StoreError::Sqlx(_) => ApiError::internal(&e),
         }
     }
 }
