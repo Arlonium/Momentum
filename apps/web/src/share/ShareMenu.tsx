@@ -319,6 +319,9 @@ function InviteForm({ share, emailRef }: InviteProps) {
           grant={LEVEL_LABELS[created.level]}
           link={created.link}
           copyLabel="Copier le lien d'invitation"
+          // Le lien revient à chaque ouverture du menu, tant que l'invitation attend et que la
+          // page reste ouverte (Ruling R114).
+          warning="Copie ce lien maintenant : il ne sera plus affiché une fois la page fermée."
         />
       )}
     </div>

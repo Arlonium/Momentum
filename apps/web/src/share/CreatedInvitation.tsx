@@ -1,6 +1,8 @@
 // Le lien d'une invitation tout juste créée, à copier tout de suite : le serveur ne garde
-// que le hachage du jeton, le lien ne sera plus jamais montré. Réglages de l'espace, et menu
-// Partager d'une page.
+// que le hachage du jeton, et ne le rendra plus. Réglages de l'espace, et menu Partager d'une
+// page. La phrase d'avertissement dit jusqu'à quand le lien reste à l'écran, là où il est
+// montré : dans les réglages, il ne revient pas une fois parti ; dans le menu Partager, il
+// revient à chaque ouverture du menu tant que la page reste ouverte (`useShare`).
 //
 // Chaque lien a son propre cadre (`key`) : une nouvelle invitation repart de « Copier le
 // lien », jamais de « Lien copié », qui dirait copié un lien qui ne l'est pas (le
@@ -16,13 +18,21 @@ type Props = {
   link: string;
   /** Le nom du bouton, là où un autre lien se copie aussi (celui de la page, menu Partager). */
   copyLabel?: string;
+  /** L'avertissement, là où le lien reste montré autrement (menu Partager). */
+  warning?: string;
 };
 
 export function CreatedInvitation(props: Props) {
   return <LinkPanel key={props.link} {...props} />;
 }
 
-function LinkPanel({ email, grant, link, copyLabel = "Copier le lien" }: Props) {
+function LinkPanel({
+  email,
+  grant,
+  link,
+  copyLabel = "Copier le lien",
+  warning = "Ce lien ne sera plus affiché : copie-le maintenant.",
+}: Props) {
   const linkRef = useRef<HTMLInputElement>(null);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
@@ -44,7 +54,7 @@ function LinkPanel({ email, grant, link, copyLabel = "Copier le lien" }: Props) 
     <div className="mm-invite-created">
       <p className="mm-invite-warning">
         <WarningIcon />
-        <strong>Ce lien ne sera plus affiché : copie-le maintenant.</strong>
+        <strong>{warning}</strong>
       </p>
       <p className="mm-invite-for">
         Lien d'invitation préparé pour {email}

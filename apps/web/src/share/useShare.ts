@@ -15,9 +15,10 @@
 //   ailleurs), ce que la liste relue montre sans un mot ; ou la personne ne peut plus la gérer,
 //   et le serveur répond de même. Le refus est alors dit : par la relecture refusée à son tour,
 //   ou dans le menu si la liste relue porte encore l'invitation.
-// - Une invitation montre son lien une fois : le serveur ne garde que le hachage de son jeton.
-//   Le lien reste à l'écran tant que l'invitation attend, même si la relecture de la liste
-//   échoue ; il part quand elle n'attend plus (acceptée, révoquée).
+// - Le lien d'une invitation n'est donné qu'à sa création : le serveur ne garde que le hachage
+//   de son jeton. Il est montré tant que l'invitation attend et que la page reste ouverte, menu
+//   fermé puis rouvert compris (Ruling R114), même si la relecture de la liste échoue ; il
+//   part quand elle n'attend plus (acceptée, révoquée), et avec la page.
 //
 // Deux réponses ne se croisent pas : seule la plus récente demandée est montrée.
 import type { Level, PageAccess } from "@mementum/protocol";

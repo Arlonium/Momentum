@@ -57,6 +57,10 @@ function raisedBanner(p: Page) {
   return p.getByRole("status").filter({ hasText: "Tu peux maintenant modifier cette page" });
 }
 
+/** Ce que le menu Partager dit du lien d'une invitation tout juste créée. */
+const LINK_WARNING =
+  "Copie ce lien maintenant : il ne sera plus affiché une fois la page fermée.";
+
 /** Le premier paragraphe de la page ouverte. */
 function firstParagraph(p: Page) {
   return p.locator('[data-content-type="paragraph"] .bn-inline-content').first();
@@ -85,14 +89,13 @@ test("invite_by_link_then_edit_together", async ({ browser, page }) => {
   const a = await openPage(browser, shared.id, alice);
   await a.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE_URL });
 
-  // A invite une adresse sur la page, en modification, puis copie le lien, montré cette fois
-  // seulement.
+  // A invite une adresse sur la page, en modification, puis copie le lien.
   const email = `bruno-${unique()}@exemple.fr`;
   const menu = await openShareMenu(a);
   await menu.getByLabel("Adresse e-mail").fill(email);
   await menu.getByLabel("Niveau de l'invitation").selectOption("edit");
   await menu.getByRole("button", { name: "Inviter", exact: true }).click();
-  await expect(menu.getByText("Ce lien ne sera plus affiché : copie-le maintenant")).toBeVisible();
+  await expect(menu.getByText(LINK_WARNING)).toBeVisible();
   const shown = await menu.getByRole("textbox", { name: "Lien d'invitation" }).inputValue();
   await menu.getByRole("button", { name: "Copier le lien d'invitation" }).click();
   await expect(menu.getByRole("button", { name: "Lien copié" })).toBeVisible();
@@ -834,6 +837,41 @@ test("pending_page_invitation_is_revoked_from_the_menu", async ({ browser, page 
   // Le lien ne vaut plus rien.
   await page.goto(`/invite#${token}`);
   await expect(page.getByRole("heading", { name: "Cette invitation n'est plus valable" })).toBeVisible();
+});
+
+test("invitation_link_is_shown_until_the_page_is_closed", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const shared = await createPage(aliceApi, { section: "private", title: `Plan ${unique()}` });
+  const other = await createPage(aliceApi, { section: "private", title: `Autre ${unique()}` });
+  const a = await openPage(browser, shared.id, alice);
+  const email = `attente-${unique()}@exemple.fr`;
+  const linkOf = (menu: ReturnType<typeof shareMenu>) =>
+    menu.getByRole("textbox", { name: "Lien d'invitation" });
+
+  const menu = await openShareMenu(a);
+  await menu.getByLabel("Adresse e-mail").fill(email);
+  await menu.getByRole("button", { name: "Inviter", exact: true }).click();
+  await expect(menu.getByText(LINK_WARNING)).toBeVisible();
+  const link = await linkOf(menu).inputValue();
+
+  // Le menu fermé puis rouvert (un clic à côté par mégarde) : l'invitation attend, et son lien
+  // est encore là, comme le dit la phrase.
+  await a.keyboard.press("Escape");
+  await expect(shareMenu(a)).toHaveCount(0);
+  const reopened = await openShareMenu(a);
+  await expect(linkOf(reopened)).toHaveValue(link);
+  await expect(reopened.getByText(LINK_WARNING)).toBeVisible();
+  await a.keyboard.press("Escape");
+
+  // La page fermée, puis rouverte : l'invitation attend toujours, son lien n'est plus affiché.
+  await treeRow(a, other.id).getByRole("link").click();
+  await expect(titleOf(a)).toHaveValue(other.title);
+  await treeRow(a, shared.id).getByRole("link").click();
+  await expect(titleOf(a)).toHaveValue(shared.title);
+  const again = await openShareMenu(a);
+  await expect(pendingRow(again, email)).toBeVisible();
+  await expect(linkOf(again)).toHaveCount(0);
 });
 
 test("page_trashed_or_deleted_elsewhere_is_seen_while_open", async ({ browser }) => {
