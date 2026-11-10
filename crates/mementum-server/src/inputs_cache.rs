@@ -459,4 +459,57 @@ pub(crate) mod tests {
         // Une révision plus ancienne : jamais. Elle relit.
         assert_eq!(wait_behind_a_read(4, 5).await, (5, 2));
     }
+
+    /// Une requête abandonnée pendant sa lecture (client parti) rend son tour : il ne reste
+    /// d'elle ni attente ni case, et la requête suivante lit. Si une autre attendait derrière
+    /// elle, c'est elle qui lit, à son tour.
+    #[tokio::test]
+    async fn cancelled_read_frees_the_turn() {
+        let cache = Arc::new(InputsCache::new(100));
+        let space = Uuid::now_v7();
+        // Une requête dont la lecture ne finit jamais, dans sa tâche.
+        let stuck = |rev: i64| {
+            let cache = Arc::clone(&cache);
+            tokio::spawn(async move {
+                let never = std::future::pending;
+                cache.get_or_load(space, rev, never).await
+            })
+        };
+
+        let alone = stuck(3);
+        wait_until("la lecture est en cours", || cache.loads() == 1).await;
+        assert_eq!((cache.waiting(space), cache.slots()), (1, 1));
+        alone.abort();
+        assert!(alone.await.unwrap_err().is_cancelled());
+        assert_eq!((cache.waiting(space), cache.slots()), (0, 0));
+        let next = cache
+            .get_or_load(space, 3, || async { Ok(Some(inputs(3, 2))) })
+            .await;
+        assert_eq!(next.unwrap().as_deref(), Some(&inputs(3, 2)));
+        assert_eq!(cache.loads(), 2);
+
+        // La même chose avec une requête qui attend derrière celle qu'on abandonne.
+        let ahead = stuck(4);
+        wait_until("la lecture est en cours", || cache.loads() == 3).await;
+        let behind = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move {
+                cache
+                    .get_or_load(space, 4, || async { Ok(Some(inputs(4, 2))) })
+                    .await
+            }
+        });
+        wait_until("une requête attend derrière la lecture", || {
+            cache.waiting(space) == 2
+        })
+        .await;
+        ahead.abort();
+        assert!(ahead.await.unwrap_err().is_cancelled());
+        let read = tokio::time::timeout(Duration::from_secs(10), behind)
+            .await
+            .expect("la requête qui attendait n'a jamais eu son tour");
+        assert_eq!(read.unwrap().unwrap().as_deref(), Some(&inputs(4, 2)));
+        assert_eq!((cache.loads(), cache.waiting(space)), (4, 0));
+        assert_eq!(cache.kept(space).map(|i| i.rev), Some(4));
+    }
 }
