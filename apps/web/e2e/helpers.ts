@@ -40,17 +40,28 @@ export const REGISTRY_VERSION: number = JSON.parse(
   readFileSync(new URL("../../../spec/schema/blocks.json", import.meta.url), "utf8"),
 ).version;
 
-/** Crée une page par l'API (`POST /api/v1/pages`). */
+/**
+ * Crée une page par l'API (`POST /api/v1/pages`), avec la session de `request`. Une
+ * sous-page (`parentId`) hérite de sa page parente. À la racine, sans autre précision : dans
+ * le premier espace du compte, et dans la section « Espace », que voient tous ses membres.
+ */
 export async function createPage(request: APIRequestContext, body: CreatePage = {}): Promise<PageNode> {
-  const res = await request.post("/api/v1/pages", { data: body });
+  const data: CreatePage =
+    body.parentId != null
+      ? body
+      : { section: "space", ...body, spaceId: body.spaceId ?? (await firstSpaceId(request)) };
+  const res = await request.post("/api/v1/pages", { data });
   expect(res.status(), await res.text()).toBe(201);
   return (await res.json()) as PageNode;
 }
 
-/** L'arbre des pages (`GET /api/v1/tree`). */
-export async function getTree(request: APIRequestContext): Promise<Tree> {
-  const res = await request.get("/api/v1/tree");
-  expect(res.ok()).toBe(true);
+/**
+ * Les pages d'un espace que voit le compte de `request` (`GET /api/v1/spaces/{id}/tree`) ;
+ * sans `spaceId`, son premier espace.
+ */
+export async function getTree(request: APIRequestContext, spaceId?: string): Promise<Tree> {
+  const res = await request.get(`/api/v1/spaces/${spaceId ?? (await firstSpaceId(request))}/tree`);
+  expect(res.status(), await res.text()).toBe(200);
   return (await res.json()) as Tree;
 }
 
@@ -114,11 +125,19 @@ export async function createAccount(
   return { email: body.email, name: body.name, password: body.password, storageState };
 }
 
-/** Un compte neuf, créé par l'API, avec sa session. */
-export async function signUpAccount(name?: string): Promise<Account> {
+/**
+ * Un compte neuf, créé par l'API, avec sa session. Sans `invitation`, il a son propre espace ;
+ * avec le jeton d'une invitation, il n'a que l'espace où elle l'invite.
+ */
+export async function signUpAccount(name?: string, invitation?: string): Promise<Account> {
   const tag = unique();
   return createAccount(
-    { email: `compte-${tag}@exemple.fr`, name: name ?? `Compte ${tag}`, password: PASSWORD },
+    {
+      email: `compte-${tag}@exemple.fr`,
+      name: name ?? `Compte ${tag}`,
+      password: PASSWORD,
+      ...(invitation === undefined ? {} : { invitation }),
+    },
     join(accountsDir(), `${tag}.storage.json`),
   );
 }
@@ -179,6 +198,18 @@ export async function firstSpace(api: APIRequestContext): Promise<SpaceInfo> {
   const { spaces } = await getMe(api);
   expect(spaces.length, "le compte n'a aucun espace").toBeGreaterThan(0);
   return spaces[0];
+}
+
+const firstSpaceIds = new WeakMap<APIRequestContext, string>();
+
+/** L'id du premier espace du compte de `api`, lu une fois par client. */
+async function firstSpaceId(api: APIRequestContext): Promise<string> {
+  let id = firstSpaceIds.get(api);
+  if (id === undefined) {
+    id = (await firstSpace(api)).id;
+    firstSpaceIds.set(api, id);
+  }
+  return id;
 }
 
 /** Les personnes qui ont un rôle dans l'espace (`GET /api/v1/spaces/{id}/members`). */
@@ -277,10 +308,33 @@ export function watchWrites(p: Page): number[][] {
   return writes;
 }
 
+/** Le nom du cookie de session du serveur. */
+const SESSION_COOKIE = "mementum_session";
+
+/**
+ * Une classe `WebSocket` qui joint le cookie de session de `request` à sa demande de
+ * connexion. Un navigateur le joint de lui-même (même origine) ; une WebSocket ouverte par
+ * Node, non : sans lui, `/sync` répond `401` dès qu'il exige une session.
+ */
+async function webSocketWithSession(request: APIRequestContext): Promise<typeof WebSocket> {
+  const { cookies } = await request.storageState();
+  const session = cookies.find((cookie) => cookie.name === SESSION_COOKIE);
+  if (!session) throw new Error("ce client de l'API n'a pas de session");
+  const cookie = `${session.name}=${session.value}`;
+  return class extends WebSocket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      // Le second argument de la WebSocket de Node (undici) admet des en-têtes ; le type du
+      // DOM, lui, ne connaît que les sous-protocoles.
+      super(url, { protocols, headers: { cookie } } as unknown as string[]);
+    }
+  };
+}
+
 /**
  * Ajoute à la page, par un client Yjs nu (sans éditeur, au schéma courant), un bloc d'un
  * type que BlockNote ne connaît pas : `blockContainer > futureWidget`. C'est la forme d'un
- * bloc d'une version plus récente ; le serveur le relit `<block … foreign=true/>`.
+ * bloc d'une version plus récente ; le serveur le relit `<block … foreign=true/>`. Le client
+ * se connecte avec la session de `request`.
  */
 export async function injectForeignBlock(
   request: APIRequestContext,
@@ -291,6 +345,7 @@ export async function injectForeignBlock(
   const provider = new WebsocketProvider(`${baseURL.replace(/^http/, "ws")}/sync`, id, doc, {
     params: { schema: String(REGISTRY_VERSION) },
     disableBc: true,
+    WebSocketPolyfill: await webSocketWithSession(request),
   });
   try {
     await expect.poll(() => provider.synced, { timeout: 10_000 }).toBe(true);

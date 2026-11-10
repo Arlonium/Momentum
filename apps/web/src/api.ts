@@ -185,19 +185,36 @@ export function getInfo(): Promise<Info> {
   return call("GET", "/api/v1/info");
 }
 
-/** `GET /api/v1/tree` : toutes les pages du coffre. */
-export function getTree(): Promise<Tree> {
-  return call("GET", "/api/v1/tree");
+// Pages. Une page que la personne ne voit pas répond `404`, comme une page qui n'existe pas ;
+// une action au-dessus de son niveau sur une page qu'elle voit, `403 forbidden`.
+
+const page = (id: string) => `/api/v1/pages/${encodeURIComponent(id)}`;
+
+/**
+ * `GET /api/v1/spaces/{id}/tree` : les pages de l'espace que la personne voit, hors
+ * corbeille, chacune avec son niveau et sa section.
+ */
+export function getTree(spaceId: string): Promise<Tree> {
+  return call("GET", `${space(spaceId)}/tree`);
 }
 
-/** `POST /api/v1/pages` : sans `afterId`, la page va en fin de ses frères (R23). */
+/**
+ * `POST /api/v1/pages` : à la racine d'un espace (`spaceId`, et `section` : `private` par
+ * défaut) ou sous une page (`parentId`, sans `section` : une sous-page hérite). Sans
+ * `afterId`, la page va en fin de ses frères (R23).
+ */
 export function createPage(body: CreatePage): Promise<PageNode> {
   return call("POST", "/api/v1/pages", body);
 }
 
+/** `GET /api/v1/pages/{id}` : la page, son espace, et depuis quand elle est à la corbeille. */
+export function getPage(id: string): Promise<PageNode> {
+  return call("GET", page(id));
+}
+
 /** `PATCH /api/v1/pages/{id}` : un champ absent ne change rien. */
 export function updatePage(id: string, body: UpdatePage): Promise<PageNode> {
-  return call("PATCH", `/api/v1/pages/${encodeURIComponent(id)}`, body);
+  return call("PATCH", page(id), body);
 }
 
 /** Longueur maximale d'un titre, en caractères Unicode (le serveur fait foi, R30). */

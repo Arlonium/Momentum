@@ -5,7 +5,18 @@ import { expect, test } from "vitest";
 import { flattenRows } from "./rows";
 
 function page(id: string, parentId: string | null, position: string): PageNode {
-  return { id, parentId, kind: "page", title: id.toUpperCase(), position, updatedAt: 0 };
+  return {
+    id,
+    spaceId: "space",
+    parentId,
+    kind: "page",
+    title: id.toUpperCase(),
+    position,
+    level: "full",
+    section: "space",
+    updatedAt: 0,
+    trashedAt: null,
+  };
 }
 
 /** Les lignes, réduites à ce que le test compare. */

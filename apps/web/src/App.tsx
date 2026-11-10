@@ -2,6 +2,10 @@
 // `/p/:id` une page, `/s/:spaceId/settings` les réglages d'un espace. La version de schéma
 // du serveur est lue au chargement, puis relue avant chaque connexion de synchronisation
 // (R35) : si elle diffère, tout passe en lecture seule, pour de bon.
+//
+// L'espace est le premier du compte (`me.spaces`) : son arbre, et les pages créées à sa
+// racine, privées (le défaut du serveur). Le sélecteur d'espace et les sections viennent
+// ensuite.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, createPage, getInfo, getTree } from "./api";
@@ -9,6 +13,7 @@ import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { CLIENT_SCHEMA_VERSION } from "./editor/version";
 import { PageView } from "./page/PageView";
 import { navigate, pagePath, parseRoute, useLinkInterception, usePathname } from "./router";
+import { useSession } from "./session/session";
 import { SpaceSettings } from "./settings/SpaceSettings";
 import { PageTree } from "./sidebar/PageTree";
 
@@ -25,6 +30,8 @@ function merge(server: PageNode[], current: PageNode[] | null): PageNode[] {
 export function App() {
   useLinkInterception();
   const route = parseRoute(usePathname());
+  /** L'espace affiché ; `null` : le compte n'en a aucun. */
+  const spaceId = useSession().me.spaces[0]?.id ?? null;
   const [loaded, setLoaded] = useState(false);
   const [nodes, setNodes] = useState<PageNode[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -54,12 +61,12 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getInfo(), getTree()])
+    Promise.all([getInfo(), spaceId === null ? null : getTree(spaceId)])
       .then(([info, tree]) => {
         if (cancelled) return;
         if (info.schemaVersion !== CLIENT_SCHEMA_VERSION) markStale();
         // Une page créée pendant le chargement n'est peut-être pas dans cette réponse.
-        setNodes((current) => merge(tree.nodes, current));
+        setNodes((current) => merge(tree?.nodes ?? [], current));
         setLoaded(true);
       })
       .catch((error: unknown) => {
@@ -68,21 +75,25 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [markStale]);
+  }, [markStale, spaceId]);
 
-  const create = useCallback(async (parentId: string | null) => {
-    if (staleRef.current) return;
-    setNotice(null);
-    try {
-      // Sans `afterId` : en fin des frères (R23).
-      const node = await createPage(parentId === null ? {} : { parentId });
-      setNodes((current) => [...(current ?? []), node]);
-      setCreated(node.id);
-      navigate(pagePath(node.id));
-    } catch (error) {
-      setNotice(`La page n'a pas pu être créée. ${messageOf(error)}`);
-    }
-  }, []);
+  const create = useCallback(
+    async (parentId: string | null) => {
+      if (staleRef.current || spaceId === null) return;
+      setNotice(null);
+      try {
+        // Sans `afterId` : en fin des frères (R23). À la racine, il faut dire l'espace ; une
+        // sous-page est dans celui de sa page parente.
+        const node = await createPage(parentId === null ? { spaceId } : { parentId });
+        setNodes((current) => [...(current ?? []), node]);
+        setCreated(node.id);
+        navigate(pagePath(node.id));
+      } catch (error) {
+        setNotice(`La page n'a pas pu être créée. ${messageOf(error)}`);
+      }
+    },
+    [spaceId],
+  );
   /** Stable : les lignes de l'arbre, mémoïsées, ne se rendent pas à chaque navigation (R43). */
   const createFromTree = useCallback((parentId: string | null) => void create(parentId), [create]);
 
@@ -98,14 +109,15 @@ export function App() {
   useEffect(() => {
     if (missing === null || reloadedFor === missing) return;
     setReloadedFor(missing);
+    if (spaceId === null) return;
     setReloading(true);
-    getTree()
+    getTree(spaceId)
       .then((tree) => setNodes((current) => merge(tree.nodes, current)))
       .catch(() => {
         // le message « Page introuvable » suffit
       })
       .finally(() => setReloading(false));
-  }, [missing, reloadedFor]);
+  }, [missing, reloadedFor, spaceId]);
 
   const settingsOf = route.name === "spaceSettings" ? route.spaceId : null;
 

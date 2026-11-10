@@ -8,7 +8,9 @@ import {
   apiAs,
   closeContexts,
   createPage,
+  firstSpace,
   getMmd,
+  inviteToSpace,
   newUser,
   NO_SESSION,
   openPage,
@@ -229,8 +231,15 @@ test("account_menu_by_keyboard", async ({ browser }) => {
 
 test("presence_carries_the_account_name", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
-  const bruno = await signUpAccount(`Bruno ${unique()}`);
-  const { id } = await createPage(await apiAs(alice), { title: `Présence ${unique()}` });
+  const aliceApi = await apiAs(alice);
+  // B rejoint l'espace de A par une invitation : il voit les pages de sa section « Espace ».
+  const space = await firstSpace(aliceApi);
+  const { token } = await inviteToSpace(aliceApi, space.id, {
+    email: `bruno-${unique()}@exemple.fr`,
+    role: "member",
+  });
+  const bruno = await signUpAccount(`Bruno ${unique()}`, token);
+  const { id } = await createPage(aliceApi, { title: `Présence ${unique()}` });
   const a = await openPage(browser, id, alice);
   const b = await openPage(browser, id, bruno);
   const aliceId = (await meOf(a)).user.id;
@@ -292,6 +301,8 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
   await p.locator('[data-content-type="paragraph"] .bn-inline-content').first().click();
   await p.keyboard.press("End");
   await p.keyboard.type(", et après");
-  await expect.poll(() => getMmd(api, id)).toBe("Écrit avant la coupure, et après\n");
+  // Par la session rouverte dans l'onglet : celle de `api` a pris fin, et les pages en
+  // demandent une.
+  await expect.poll(() => getMmd(p.request, id)).toBe("Écrit avant la coupure, et après\n");
   expect((await meOf(p)).user.email).toBe(account.email);
 });
