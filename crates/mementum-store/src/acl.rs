@@ -140,13 +140,13 @@ pub(crate) async fn space_of(
 }
 
 /// Une page et ses ancêtres jusqu'à la racine, lus dans une transaction.
-struct Chain {
+pub(crate) struct Chain {
     /// L'espace de la page.
-    space: String,
+    pub(crate) space: String,
     /// La page, ou un de ses ancêtres, est à la corbeille.
     in_trash: bool,
     /// Les lignes de la page et de ses ancêtres : `(nœud, accès)`.
-    lines: Vec<(String, Grant)>,
+    pub(crate) lines: Vec<(String, Grant)>,
 }
 
 impl Chain {
@@ -190,7 +190,7 @@ fn general_line(
 /// sa remontée tourne en rond (un nœud pris dans un cycle de parents, ou suspendu sous un
 /// cycle, n'est vu par personne, R58). Comme pour `SpaceAccess::compute`, un parent hors de
 /// l'espace vaut la racine.
-async fn read_chain(
+pub(crate) async fn read_chain(
     tx: &mut Transaction<'_, Sqlite>,
     node_id: &str,
 ) -> Result<Option<Chain>, StoreError> {

@@ -1128,14 +1128,22 @@ async fn move_to_another_parent_requires_full() {
     assert_eq!(moved.parent_id, Some(elsewhere.to_string()));
 }
 
-/// Une page passée à la racine sans accès propre reçoit `(user:<qui la déplace>, full)` : elle
-/// ne devient pas invisible de tous. Une page qui porte ses propres accès les garde.
+/// Une page passée à la racine sans accès propre, quand sa chaîne ne porte aucun accès général
+/// à garder, reçoit `(user:<qui la déplace>, full)` : elle ne devient pas invisible de tous.
+/// Les lignes nommées de son ancienne page parente ne la suivent pas.
 #[tokio::test]
 async fn page_moved_to_root_stays_visible_to_its_mover() {
     let t = open_app().await;
     let team = Team::new(&t).await;
-    let (olga, mona, tom) = (&team.olga, &team.mona, &team.tom);
-    let shared = team.page(None, "Commune", &[members(Level::Full)]).await;
+    let (olga, mona) = (&team.olga, &team.mona);
+    // Une page d'Olga, partagée avec Mona en accès complet : aucune ligne `members`.
+    let shared = team
+        .page(
+            None,
+            "D'Olga et Mona",
+            &[user(olga, Level::Full), user(mona, Level::Full)],
+        )
+        .await;
     let child = team.page(Some(shared), "Enfant", &[]).await;
     let grandchild = team.page(Some(child), "Petit-enfant", &[]).await;
 
@@ -1149,23 +1157,24 @@ async fn page_moved_to_root_stays_visible_to_its_mover() {
         (text(&moved, "level"), text(&moved, "section")),
         ("full", "private")
     );
+    assert_reads_back(mona, &moved).await;
     assert_eq!(team.grants(child).await, [user(mona, Level::Full)]);
     assert_eq!(team.grants(grandchild).await, []);
     assert_eq!(
         seen(mona, team.space).await,
         [
-            row("Commune", None, "full", "space"),
+            row("D'Olga et Mona", None, "full", "shared"),
             row("Enfant", None, "full", "private"),
             row("Petit-enfant", Some("Enfant"), "full", "private"),
         ]
     );
     let node = team.store.get_node(child).await.unwrap().expect("la page");
     assert_eq!(node.updated_by, Some(mona.id));
-    // Devenue la page privée de Mona, sa sous-page avec elle : la propriétaire ne les voit
-    // plus.
+    // Devenue la page privée de Mona, sa sous-page avec elle : Olga, qui les tenait d'une
+    // ligne à son nom sur l'ancienne page parente, ne les voit plus.
     assert_eq!(
         seen(olga, team.space).await,
-        [row("Commune", None, "full", "space")]
+        [row("D'Olga et Mona", None, "full", "shared")]
     );
     for id in [child, grandchild] {
         olga.browser
@@ -1173,98 +1182,215 @@ async fn page_moved_to_root_stays_visible_to_its_mover() {
             .await
             .assert_error(StatusCode::NOT_FOUND, "not_found");
     }
-
-    // Une page qui porte ses propres accès les garde ; celui de qui la déplace s'y ajoute.
-    let lined = team
-        .page(Some(shared), "En lecture", &[members(Level::Read)])
-        .await;
-    let moved = olga
-        .patched(&lined.to_string(), json!({ "parentId": null }))
-        .await;
-    assert_eq!(moved.parent_id, None);
-    assert_eq!(
-        team.grants(lined).await,
-        [members(Level::Read), user(olga, Level::Full)]
-    );
-    let for_tom = tom.browser.get(&page_uri(lined)).await.json();
-    assert_eq!(
-        (text(&for_tom, "level"), text(&for_tom, "section")),
-        ("read", "space")
-    );
 }
 
-/// Ruling R82 : quand une page arrive à la racine, celui qui la déplace y a toujours l'accès
-/// complet. Sa ligne est posée, ou relevée si elle était plus faible ; les lignes des autres ne
-/// changent pas. Sans cela, une page dont l'accès complet ne venait que de ses ancêtres
-/// n'aurait plus personne pour la partager, la déplacer ni la supprimer.
+/// Ruling R94 : une sous-page d'équipe passée à la racine reste une page de l'équipe. Elle
+/// garde l'accès général qu'elle tenait de sa page parente : les autres membres la voient
+/// toujours, dans la section « Espace », au même niveau. Qui la déplace n'y reçoit de ligne à
+/// son nom que si l'accès général ne lui donne pas déjà l'accès complet.
 #[tokio::test]
-async fn page_moved_to_root_always_keeps_a_full_owner() {
+async fn team_subpage_moved_to_root_stays_a_team_page() {
     let t = open_app().await;
     let team = Team::new(&t).await;
     let (olga, mona, tom, gina) = (&team.olga, &team.mona, &team.tom, &team.gina);
     let shared = team.page(None, "Commune", &[members(Level::Full)]).await;
-    let full = user(mona, Level::Full);
-    // `(titre, lignes de la page avant, après, section pour Mona)`. Avant, Mona a l'accès
-    // complet par héritage, quoi que disent les lignes de la page.
-    let cases = [
-        ("Sans ligne", vec![], vec![full], "private"),
+    let child = team.page(Some(shared), "Enfant", &[]).await;
+    let grandchild = team.page(Some(child), "Petit-enfant", &[]).await;
+    let for_tom = async |page: Uuid| {
+        let reply = tom.browser.get(&page_uri(page)).await;
+        reply.assert_status(StatusCode::OK);
+        let node = reply.json();
         (
-            "Mona en lecture",
+            text(&node, "level").to_string(),
+            text(&node, "section").to_string(),
+        )
+    };
+    let before = for_tom(child).await;
+    assert_eq!(before, ("full".to_string(), "space".to_string()));
+
+    // Mona, membre, y a l'accès complet par la ligne `members` de la page parente.
+    let reply = mona
+        .patch(&child.to_string(), json!({ "parentId": null }))
+        .await;
+    reply.assert_status(StatusCode::OK);
+    let moved = reply.json();
+    assert!(moved["parentId"].is_null());
+    assert_eq!(
+        (text(&moved, "level"), text(&moved, "section")),
+        ("full", "space")
+    );
+    assert_reads_back(mona, &moved).await;
+    // La page porte maintenant l'accès général elle-même, et aucune ligne au nom de Mona.
+    assert_eq!(team.grants(child).await, [members(Level::Full)]);
+    assert_eq!(team.grants(grandchild).await, []);
+
+    // Tom la voit toujours, au même niveau, avec sa sous-page ; la propriétaire aussi.
+    assert_eq!(for_tom(child).await, before);
+    let of_team = [
+        row("Commune", None, "full", "space"),
+        row("Enfant", None, "full", "space"),
+        row("Petit-enfant", Some("Enfant"), "full", "space"),
+    ];
+    for who in [tom, mona, olga] {
+        assert_eq!(seen(who, team.space).await, of_team);
+    }
+    // Une invitée ne la voyait pas, et ne la voit pas davantage.
+    assert_eq!(seen(gina, team.space).await, []);
+
+    // Une page d'équipe en lecture : seule la propriétaire, qui y a l'accès complet, peut la
+    // sortir ; elle reste en lecture pour les membres, sans ligne au nom de la propriétaire.
+    let read_only = team.page(None, "À lire", &[members(Level::Read)]).await;
+    let sub = team.page(Some(read_only), "À lire, sous-page", &[]).await;
+    mona.patch(&sub.to_string(), json!({ "parentId": null }))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    let reply = olga
+        .patch(&sub.to_string(), json!({ "parentId": null }))
+        .await;
+    reply.assert_status(StatusCode::OK);
+    let moved = reply.json();
+    assert_eq!(
+        (text(&moved, "level"), text(&moved, "section")),
+        ("full", "space")
+    );
+    assert_reads_back(olga, &moved).await;
+    assert_eq!(team.grants(sub).await, [members(Level::Read)]);
+    assert_eq!(
+        for_tom(sub).await,
+        ("read".to_string(), "space".to_string())
+    );
+    // La page a toujours quelqu'un pour la gérer : le partage y marche (Ruling R70).
+    olga.browser
+        .put(
+            &format!("/api/v1/pages/{sub}/access/users/{}", gina.id),
+            json!({ "level": "read" }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+/// Rulings R82 et R94 : quand une page arrive à la racine, celui qui la déplace y a toujours
+/// l'accès complet, et la page a toujours quelqu'un pour la gérer. Sa ligne n'est écrite
+/// (posée, ou relevée) que si l'accès général gardé ne lui donne pas déjà l'accès complet ;
+/// les lignes des autres ne changent pas.
+#[tokio::test]
+async fn page_moved_to_root_always_keeps_a_full_owner() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, adam, mona, tom, gina) = (&team.olga, &team.adam, &team.mona, &team.tom, &team.gina);
+    let full = user(mona, Level::Full);
+    // Trois pages parentes : d'équipe en accès complet ; d'équipe en lecture, où Mona a sa
+    // ligne en accès complet ; sans accès général, partagée entre Olga et Mona.
+    let team_full = team.page(None, "Commune", &[members(Level::Full)]).await;
+    let team_read = team
+        .page(None, "En lecture", &[members(Level::Read), full])
+        .await;
+    let private = team
+        .page(None, "D'Olga et Mona", &[user(olga, Level::Full), full])
+        .await;
+    // `(page parente, qui déplace, lignes de la page avant, après, sa section pour lui)`.
+    let cases = [
+        // L'accès général donne déjà l'accès complet à Mona : aucune ligne à son nom n'est
+        // écrite, et celle qu'elle avait, plus faible, reste telle quelle.
+        (team_full, mona, vec![], vec![members(Level::Full)], "space"),
+        (
+            team_full,
+            mona,
+            vec![user(mona, Level::Read)],
+            vec![members(Level::Full), user(mona, Level::Read)],
+            "space",
+        ),
+        (
+            team_full,
+            mona,
+            vec![user(gina, Level::Read)],
+            vec![members(Level::Full), user(gina, Level::Read)],
+            "space",
+        ),
+        (
+            team_full,
+            mona,
+            vec![members(Level::Read)],
+            vec![members(Level::Full)],
+            "space",
+        ),
+        // L'accès général ne lui donne que la lecture : sa ligne est posée, ou relevée.
+        (
+            team_read,
+            mona,
+            vec![],
+            vec![members(Level::Read), full],
+            "space",
+        ),
+        (
+            team_read,
+            mona,
+            vec![user(mona, Level::Edit)],
+            vec![members(Level::Read), full],
+            "space",
+        ),
+        // Une propriétaire et un admin ont l'accès complet là où une ligne `members`
+        // s'applique : aucune ligne à leur nom.
+        (team_read, olga, vec![], vec![members(Level::Read)], "space"),
+        (team_read, adam, vec![], vec![members(Level::Read)], "space"),
+        // Sans accès général : sa ligne est posée, ou relevée ; celle d'une autre reste.
+        (private, mona, vec![], vec![full], "private"),
+        (
+            private,
+            mona,
             vec![user(mona, Level::Read)],
             vec![full],
             "private",
         ),
         (
-            "Mona en modification",
-            vec![user(mona, Level::Edit)],
-            vec![full],
-            "private",
-        ),
-        ("Mona en accès complet", vec![full], vec![full], "private"),
-        (
-            "Partagée avec Gina",
+            private,
+            mona,
             vec![user(gina, Level::Read)],
             vec![user(gina, Level::Read), full],
             "shared",
         ),
-        (
-            "En lecture pour les membres",
-            vec![members(Level::Read)],
-            vec![members(Level::Read), full],
-            "space",
-        ),
     ];
     let mut pages = Vec::new();
-    for (title, before, after, section) in cases {
-        let page = team.page(Some(shared), title, &before).await;
-        let reply = mona
+    for (index, (parent, mover, before, after, section)) in cases.into_iter().enumerate() {
+        let case = format!("cas {index}");
+        let page = team.page(Some(parent), "Page", &before).await;
+        let reply = mover
             .patch(&page.to_string(), json!({ "parentId": null }))
             .await;
-        assert_eq!(reply.status, StatusCode::OK, "{title} : {}", reply.text());
+        assert_eq!(reply.status, StatusCode::OK, "{case} : {}", reply.text());
         let moved = reply.json();
-        assert!(moved["parentId"].is_null(), "{title}");
+        assert!(moved["parentId"].is_null(), "{case}");
+        // Qui déplace a l'accès complet après, dans la section attendue.
         assert_eq!(
             (text(&moved, "level"), text(&moved, "section")),
             ("full", section),
-            "{title}"
+            "{case}"
         );
-        assert_reads_back(mona, &moved).await;
+        assert_reads_back(mover, &moved).await;
         let lines = team.grants(page).await;
-        assert_eq!(lines.len(), after.len(), "{title} : {lines:?}");
+        assert_eq!(lines.len(), after.len(), "{case} : {lines:?}");
         for line in &after {
             assert!(
                 lines.contains(line),
-                "{title} : {line:?} absent de {lines:?}"
+                "{case} : {line:?} absent de {lines:?}"
             );
         }
+        // La page a quelqu'un en accès complet au sens du partage (Ruling R70) : y donner un
+        // accès en commentaire, qui ne met personne en `full`, passe.
+        let target = if mover.id == adam.id { tom } else { adam };
+        mover
+            .browser
+            .put(
+                &format!("/api/v1/pages/{page}/access/users/{}", target.id),
+                json!({ "level": "comment" }),
+            )
+            .await
+            .assert_status(StatusCode::OK);
         pages.push(page);
     }
-    let [bare, _, _, _, with_gina, for_members] = pages[..] else {
-        panic!("six pages attendues");
-    };
 
-    // Les autres gardent ce que leur donnent les lignes de la page, et perdent ce qu'ils ne
-    // tenaient que de l'ancienne page parente.
+    // Les autres gardent l'accès général et ce que leur donnent les lignes de la page ; ils
+    // perdent ce qu'ils ne tenaient que d'une ligne nommée de l'ancienne page parente.
     let level = async |who: &Account<'_>, page: Uuid| {
         let reply = who.browser.get(&page_uri(page)).await;
         match reply.status {
@@ -1273,12 +1399,19 @@ async fn page_moved_to_root_always_keeps_a_full_owner() {
             other => panic!("statut inattendu : {other}"),
         }
     };
-    assert_eq!(level(gina, with_gina).await.as_deref(), Some("read"));
-    assert_eq!(level(olga, with_gina).await, None);
-    assert_eq!(level(tom, for_members).await.as_deref(), Some("read"));
-    assert_eq!(level(olga, for_members).await.as_deref(), Some("full"));
-    assert_eq!(level(tom, bare).await, None);
-    assert_eq!(level(olga, bare).await, None);
+    let (shared_with_gina, team_read_bare, private_bare, private_with_gina) =
+        (pages[2], pages[4], pages[8], pages[10]);
+    assert_eq!(level(gina, shared_with_gina).await.as_deref(), Some("read"));
+    assert_eq!(level(tom, shared_with_gina).await.as_deref(), Some("full"));
+    assert_eq!(level(tom, team_read_bare).await.as_deref(), Some("read"));
+    assert_eq!(level(gina, team_read_bare).await, None);
+    assert_eq!(level(olga, private_bare).await, None);
+    assert_eq!(level(tom, private_bare).await, None);
+    assert_eq!(
+        level(gina, private_with_gina).await.as_deref(),
+        Some("read")
+    );
+    assert_eq!(level(olga, private_with_gina).await, None);
 }
 
 /// La réponse d'un changement de parent dit les accès d'après le déplacement : ce que les

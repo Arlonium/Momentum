@@ -6,12 +6,13 @@
 //! transaction ; un renommage et un changement de place sous le même parent n'y touchent pas
 //! (règle de `rev`, en tête de la crate).
 
-use mementum_acl::{Grant, Level};
+use mementum_acl::{Grant, Role, Subject, chain_level};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, SqliteExecutor, Transaction};
 use uuid::Uuid;
 
-use crate::acl::write_grant;
+use crate::acl::{read_chain, write_grant};
+use crate::members::role_of;
 use crate::spaces::bump_rev;
 use crate::{Store, StoreError, now_ms, parse_uuid, position_between, unreadable};
 
@@ -240,28 +241,83 @@ async fn slot(
     )))
 }
 
-/// Pose `grant` sur le nœud, dans la transaction, si son sujet n'y a pas déjà ce niveau ou
-/// plus : le niveau est posé ou relevé, jamais abaissé. Les lignes des autres sujets ne changent
-/// pas. La révision de l'espace est l'affaire de l'appelant.
-async fn raise_grant(
+/// Les lignes propres d'une page qui arrive à la racine, d'après celles qu'elle a (`own`) et
+/// celles de ses anciens ancêtres (`above`), qu'elle n'héritera plus :
+/// 1. Ruling R94, l'accès général gardé : la page porte la plus forte ligne `members` de son
+///    ancienne chaîne (la sienne comprise, elle ne baisse donc jamais). Sans ligne `members`
+///    dans la chaîne, aucune n'est posée : la page reste privée ;
+/// 2. Ruling R82, au plus juste : `root_grant` (l'accès que doit y avoir qui déplace, avec son
+///    rôle dans l'espace) n'est posé, ou relevé, que si ces lignes ne lui donnent pas déjà ce
+///    niveau. Un membre que l'accès général met en `full`, ou une propriétaire là où une ligne
+///    `members` s'applique, ne reçoit donc pas de ligne à son nom ;
+/// 3. rien d'autre ne change : les lignes nommées des anciens ancêtres ne suivent pas la page,
+///    les autres lignes de la page restent.
+fn root_lines(
+    own: &[Grant],
+    above: &[Grant],
+    root_grant: Option<(Grant, Option<Role>)>,
+) -> Vec<Grant> {
+    // Pose `grant` à la place de la ligne de son sujet, ou en plus.
+    fn put(lines: &mut Vec<Grant>, grant: Grant) {
+        match lines.iter_mut().find(|line| line.subject == grant.subject) {
+            Some(line) => line.level = grant.level,
+            None => lines.push(grant),
+        }
+    }
+    let mut lines = own.to_vec();
+    let general = own
+        .iter()
+        .chain(above)
+        .filter(|line| line.subject == Subject::Members)
+        .map(|line| line.level)
+        .max();
+    if let Some(level) = general {
+        let subject = Subject::Members;
+        put(&mut lines, Grant { subject, level });
+    }
+    if let Some((grant, role)) = root_grant {
+        let held = match (grant.subject, role) {
+            (Subject::User(user), Some(role)) => chain_level(&lines, user, role),
+            // Sans rôle dans l'espace, aucune ligne ne donne de droit : seule compte celle du
+            // sujet, qu'on n'abaisse pas.
+            _ => lines
+                .iter()
+                .find(|line| line.subject == grant.subject)
+                .map(|line| line.level),
+        };
+        if held.is_none_or(|held| held < grant.level) {
+            put(&mut lines, grant);
+        }
+    }
+    lines
+}
+
+/// Les lignes propres du nœud, et celles qu'il aurait en arrivant à la racine ([`root_lines`]) :
+/// `(avant, après)`, d'après sa chaîne et le rôle du sujet de `root_grant`, lus dans la
+/// transaction. `None` : le nœud n'existe pas, ou sa remontée tourne en rond (personne ne le
+/// voit, R58).
+async fn lines_at_root(
     tx: &mut Transaction<'_, Sqlite>,
     node_id: &str,
-    grant: Grant,
-) -> Result<(), StoreError> {
-    let held: Option<String> =
-        sqlx::query("SELECT level FROM acl WHERE node_id = ? AND subject = ?")
-            .bind(node_id)
-            .bind(grant.subject.to_string())
-            .fetch_optional(&mut **tx)
-            .await?
-            .map(|r| r.get(0));
-    let held = held
-        .map(|level| Level::parse(&level).ok_or_else(|| unreadable("niveau d'accès", &level)))
-        .transpose()?;
-    if held.is_none_or(|held| held < grant.level) {
-        write_grant(tx, node_id, grant).await?;
+    root_grant: Option<Grant>,
+) -> Result<Option<(Vec<Grant>, Vec<Grant>)>, StoreError> {
+    let Some(chain) = read_chain(tx, node_id).await? else {
+        return Ok(None);
+    };
+    let role = match root_grant.map(|grant| grant.subject) {
+        Some(Subject::User(user)) => role_of(tx, &chain.space, &user.to_string()).await?,
+        Some(Subject::Members) | None => None,
+    };
+    let (mut own, mut above) = (Vec::new(), Vec::new());
+    for (on, line) in chain.lines {
+        if on == node_id {
+            own.push(line);
+        } else {
+            above.push(line);
+        }
     }
-    Ok(())
+    let after = root_lines(&own, &above, root_grant.map(|grant| (grant, role)));
+    Ok(Some((own, after)))
 }
 
 /// `NotFound` si `parent` n'est pas un nœud de cet espace.
@@ -460,12 +516,21 @@ impl Store {
     /// La révision de l'espace n'est incrémentée que si le nœud change de parent : un titre et
     /// une place sous le même parent ne changent les droits de personne (règle de `rev`).
     ///
-    /// `root_grant` (Ruling R82) : quand le nœud arrive à la racine (il avait un parent, il n'en
-    /// a plus), cet accès y est posé dans la même transaction, ou relevé si son sujet en avait
-    /// un plus faible ; jamais abaissé, et les lignes des autres sujets ne changent pas. Celui
-    /// qui passe une page à la racine y garde ainsi l'accès complet qu'il tenait de ses
-    /// ancêtres, et la page ne reste jamais sans personne pour la gérer. Dans tous les autres
-    /// cas, `root_grant` est ignoré.
+    /// Quand le nœud arrive à la racine (il avait un parent, il n'en a plus), il n'hérite plus
+    /// de rien. Dans la même transaction, d'après son ancienne chaîne (voir `root_lines`) :
+    /// - Ruling R94 : il garde son accès général. La plus forte ligne `members` de l'ancienne
+    ///   chaîne devient la sienne ; une page d'équipe reste donc une page de l'équipe, au même
+    ///   niveau pour les membres. Sans ligne `members` dans la chaîne, il reste privé ;
+    /// - Ruling R82 : `root_grant` est l'accès que doit y avoir celui qui déplace. Il n'est posé,
+    ///   ou relevé, que si les lignes du nœud ne le lui donnent pas déjà, compte tenu de son rôle
+    ///   dans l'espace ; jamais abaissé. Le nœud a ainsi toujours quelqu'un pour le gérer, sans
+    ///   ligne redondante qui resterait à quelqu'un parti de l'espace ;
+    /// - les lignes nommées des anciens ancêtres ne le suivent pas, et ses autres lignes ne
+    ///   changent pas.
+    ///
+    /// Dans tous les autres cas (autre parent, simple place à la racine, titre), aucune ligne
+    /// n'est écrite, et `root_grant` est ignoré. [`Store::grants_at_root`] dit d'avance ce que le
+    /// nœud portera.
     pub async fn update_node(
         &self,
         id: Uuid,
@@ -532,6 +597,13 @@ impl Store {
             None => (false, None, None),
         };
         let changes_parent = moves && parent != before.parent_id;
+        // Ce que le nœud portera à la racine se décide sur son ancienne chaîne : elle est lue
+        // avant qu'il change de parent.
+        let at_root = if changes_parent && parent.is_none() {
+            lines_at_root(&mut tx, &id_s, root_grant).await?
+        } else {
+            None
+        };
         let row = sqlx::query(concat!(
             "UPDATE nodes SET \
                  title = COALESCE(?1, title), \
@@ -553,13 +625,30 @@ impl Store {
         .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
         if changes_parent {
-            if let Some(grant) = root_grant.filter(|_| node.parent_id.is_none()) {
-                raise_grant(&mut tx, &id_s, grant).await?;
+            if let Some((own, wanted)) = at_root {
+                for line in wanted.into_iter().filter(|line| !own.contains(line)) {
+                    write_grant(&mut tx, &id_s, line).await?;
+                }
             }
             bump_rev(&mut tx, &space).await?;
         }
         tx.commit().await?;
         Ok(node)
+    }
+
+    /// Les accès que porterait le nœud s'il arrivait maintenant à la racine, avec `root_grant`
+    /// pour qui le déplace : ce que [`Store::update_node`] écrira (Rulings R94 et R82), sans
+    /// rien écrire. Pour dire d'avance ce qu'une personne y pourra. `NotFound` si le nœud
+    /// n'existe pas, ou si sa remontée tourne en rond (personne ne le voit, R58).
+    pub async fn grants_at_root(
+        &self,
+        id: Uuid,
+        root_grant: Option<Grant>,
+    ) -> Result<Vec<Grant>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let lines = lines_at_root(&mut tx, &id.to_string(), root_grant).await?;
+        tx.commit().await?;
+        lines.map(|(_, after)| after).ok_or(StoreError::NotFound)
     }
 
     /// Met un nœud à la corbeille, pour le compte `by`. Ses descendants y sont par héritage :

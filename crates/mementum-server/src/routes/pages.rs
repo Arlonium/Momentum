@@ -249,10 +249,11 @@ pub(crate) async fn get(
 /// est vérifié avant d'écrire, et un refus ne change rien, pas même le titre. Une page déjà à
 /// la place demandée n'est pas écrite.
 ///
-/// Qui passe une page à la racine y a toujours l'accès complet : sa ligne `(user:<lui>, full)`
-/// est posée, ou relevée si elle était plus faible, dans la transaction du déplacement (Ruling
-/// R82). Sans cela, une page qui ne tenait son accès complet que de ses ancêtres n'aurait
-/// plus personne pour la gérer.
+/// Une page passée à la racine garde l'accès général qu'elle tenait de ses ancêtres (Ruling
+/// R94) : une sous-page d'équipe reste une page de l'équipe, dans la section « Espace ». Et qui
+/// l'y passe y a toujours l'accès complet (Ruling R82) : sa ligne `(user:<lui>, full)` est
+/// posée, ou relevée, si l'accès général ne le lui donne pas déjà. Le tout dans la transaction
+/// du déplacement : la page n'est jamais sans personne pour la gérer.
 ///
 /// La place est décidée sur le parent lu avec les droits. Si la page change de parent avant
 /// l'écriture, le store refuse (`Stale`) : la route relit et redécide, [`MOVE_RETRIES`] fois
@@ -337,7 +338,8 @@ pub(crate) async fn update(
 /// Un changement de place décidé par `PATCH`, droits vérifiés.
 struct Move {
     place: Place,
-    /// L'accès à poser si la page arrive à la racine (Ruling R82).
+    /// L'accès que doit y avoir la personne si la page arrive à la racine (Ruling R82) : le
+    /// store ne l'écrit que si les lignes de la page ne le lui donnent pas déjà.
     root_grant: Option<Grant>,
     /// La page change de parent : les droits de son sous-arbre changent.
     changes_parent: bool,
@@ -412,17 +414,17 @@ async fn planned_move(
             (None, access)
         }
         // Pas de parent nommé, et un autre parent que le sien : la racine. Il faut ce qu'il
-        // faut pour y créer une page, et la personne y aura l'accès complet (Ruling R82).
+        // faut pour y créer une page. La page y garde son accès général (Ruling R94), et la
+        // personne y a l'accès complet (Ruling R82) : le store dit les lignes qu'elle portera,
+        // et les écrira ainsi.
         None => {
             let role = at_least(space, Role::Member)?;
             let grant = Grant {
                 subject: Subject::User(user.id),
                 level: Level::Full,
             };
-            let mut own = state.store.node_grants(node.id).await?;
-            own.retain(|line| line.subject != grant.subject);
-            own.push(grant);
-            let access = AppState::own_access(&own, user, role).ok_or_else(|| {
+            let lines = state.store.grants_at_root(node.id, Some(grant)).await?;
+            let access = AppState::own_access(&lines, user, role).ok_or_else(|| {
                 ApiError::internal(&"page à la racine sans accès pour qui la déplace")
             })?;
             (Some(grant), access)
