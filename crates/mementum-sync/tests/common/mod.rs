@@ -79,16 +79,19 @@ impl Fixture {
     }
 }
 
-/// Crée un nœud de page (sans document) dans le coffre par défaut.
+/// Crée un nœud de page (sans document ni accès posé) dans l'espace par défaut.
 pub async fn new_page(store: &Store) -> Uuid {
     let space = store.default_space().await.unwrap();
     store
         .create_node(NewNode {
-            vault_id: space.vault_id,
+            space_id: space.id,
             parent_id: None,
             after: None,
             kind: NodeKind::Page,
             title: "Page".into(),
+            created_by: None,
+            grants: Vec::new(),
+            doc: None,
         })
         .await
         .unwrap()

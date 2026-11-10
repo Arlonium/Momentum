@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 axum = { workspace = true, features = ["http1", "json", "query", "tokio", "ws"] }
+# Les accès posés sur une page neuve (`Grant`).
+mementum-acl.workspace = true
 mementum-crdt.workspace = true
 mementum-md.workspace = true
 mementum-schema.workspace = true

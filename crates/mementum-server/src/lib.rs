@@ -5,7 +5,7 @@
 //! |---|---|
 //! | `GET /health` | `ok` |
 //! | `GET /api/v1/info` | [`Info`] |
-//! | `GET /api/v1/tree` | [`Tree`] : les pages du coffre par défaut |
+//! | `GET /api/v1/tree` | [`Tree`] : les pages de l'espace par défaut (`vaultId` porte son id) |
 //! | `POST /api/v1/pages` | `201`, [`PageNode`] : le nœud **et** son document |
 //! | `PATCH /api/v1/pages/{id}` | [`PageNode`] ; `409 cycle` ; `404` |
 //! | `GET /api/v1/pages/{id}/mmd` | `text/markdown; charset=utf-8` ; `404` sans rien créer |
@@ -69,18 +69,19 @@ pub const LISTENING: &str = "mementum écoute sur http://";
 pub(crate) struct AppState {
     store: Store,
     hub: Arc<Hub>,
-    /// Le coffre par défaut, seul coffre du lot 1.
-    vault_id: Uuid,
+    /// L'espace par défaut, pris au démarrage : le seul que servent les routes du lot 1
+    /// (transitoire, jusqu'aux pages sous droits du lot 2).
+    space_id: Uuid,
     /// L'en-tête `Host` doit nommer la boucle locale : vrai quand le serveur
     /// n'écoute que sur elle (Ruling R31).
     check_host: bool,
 }
 
 impl AppState {
-    /// La page `id` de ce coffre, sinon `404`.
+    /// La page `id` de cet espace, sinon `404`.
     async fn page(&self, id: Uuid) -> Result<Node, ApiError> {
         match self.store.get_node(id).await? {
-            Some(node) if node.vault_id == self.vault_id => Ok(node),
+            Some(node) if node.space_id == self.space_id => Ok(node),
             _ => Err(ApiError::page_not_found()),
         }
     }
@@ -130,7 +131,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
     let store = Store::open(&db)
         .await
         .with_context(|| format!("impossible d'ouvrir la base {}", db.display()))?;
-    let space = store.default_space().await.context("coffre par défaut")?;
+    let space = store.default_space().await.context("espace par défaut")?;
     let hub = Hub::new(store.clone(), SyncConfig::default());
     let check_host = cfg.bind.ip().is_loopback();
     if !check_host {
@@ -143,7 +144,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
     let state = AppState {
         store: store.clone(),
         hub,
-        vault_id: space.vault_id,
+        space_id: space.id,
         check_host,
     };
     Ok((router(state), store))

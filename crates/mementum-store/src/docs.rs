@@ -1,6 +1,6 @@
 //! Journal des mises à jour Yjs et instantanés.
 
-use sqlx::Row;
+use sqlx::{Row, SqliteExecutor};
 use uuid::Uuid;
 
 use crate::{Store, StoreError, now_ms};
@@ -14,27 +14,86 @@ pub struct DocState {
     pub updates: Vec<(i64, Vec<u8>)>,
 }
 
+/// Le `seq` où en est la page `?1` : `max(plus grand seq du journal, seq de l'instantané, 0)`.
+/// En littéral, pour que le SQL reste statique (`concat!`).
+macro_rules! last_seq {
+    () => {
+        "MAX(COALESCE((SELECT MAX(seq) FROM doc_updates WHERE node_id = ?1), 0), \
+             COALESCE((SELECT seq FROM doc_snapshots WHERE node_id = ?1), 0))"
+    };
+}
+
+/// Ajoute une mise à jour au journal de la page et rend le `seq` attribué : le `seq` où en est
+/// la page, plus un, en un seul `INSERT … SELECT`. Le `seq` repart donc de l'instantané quand
+/// une compaction a vidé le journal. `NotFound` si la page ou l'acteur n'existe pas.
+async fn append<'e>(
+    db: impl SqliteExecutor<'e>,
+    node_id: &str,
+    update: &[u8],
+    actor: Option<&str>,
+    now: i64,
+) -> Result<i64, StoreError> {
+    let row = sqlx::query(concat!(
+        "INSERT INTO doc_updates (node_id, seq, update_blob, created_at, actor_id) \
+         SELECT ?1, ",
+        last_seq!(),
+        " + 1, ?2, ?3, ?4 RETURNING seq"
+    ))
+    .bind(node_id)
+    .bind(update)
+    .bind(now)
+    .bind(actor)
+    .fetch_one(db)
+    .await
+    .map_err(StoreError::from_fk)?;
+    Ok(row.get(0))
+}
+
 impl Store {
-    /// Ajoute une mise à jour au journal de la page et renvoie le `seq` attribué :
-    /// `max(plus grand seq du journal, seq de l'instantané, 0) + 1`, en un seul `INSERT … SELECT`.
-    /// Le `seq` repart donc de l'instantané quand une compaction a vidé le journal.
+    /// Ajoute une mise à jour au journal de la page, sans acteur, et renvoie son `seq`.
+    /// Transitoire : simple appel à [`Store::append_updates`], retiré à la Task 10 du lot 2.
     pub async fn append_update(&self, node_id: Uuid, update: &[u8]) -> Result<i64, StoreError> {
+        self.append_updates(node_id, &[update], None).await
+    }
+
+    /// Ajoute des mises à jour au journal de la page, dans l'ordre, et renvoie le `seq` de la
+    /// dernière. Elles sont écrites toutes ou aucune, avec des `seq` qui se suivent. `actor` :
+    /// le compte qui écrit (`None` : inconnu, ou le serveur). `NotFound` si la page ou le compte
+    /// n'existe pas. Sans mise à jour, rien n'est écrit : c'est le `seq` où en est la page qui
+    /// est rendu (0 si elle n'a ni journal ni instantané).
+    pub async fn append_updates(
+        &self,
+        node_id: Uuid,
+        updates: &[&[u8]],
+        actor: Option<Uuid>,
+    ) -> Result<i64, StoreError> {
         let id = node_id.to_string();
-        let row = sqlx::query(
-            "INSERT INTO doc_updates (node_id, seq, update_blob, created_at) \
-             SELECT ?1, \
-                    MAX(COALESCE((SELECT MAX(seq) FROM doc_updates WHERE node_id = ?1), 0), \
-                        COALESCE((SELECT seq FROM doc_snapshots WHERE node_id = ?1), 0)) + 1, \
-                    ?2, ?3 \
-             RETURNING seq",
-        )
-        .bind(&id)
-        .bind(update)
-        .bind(now_ms())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(StoreError::from_fk)?;
-        Ok(row.get(0))
+        let actor = actor.map(|a| a.to_string());
+        let actor = actor.as_deref();
+        let now = now_ms();
+        match updates {
+            [] => {
+                let row = sqlx::query(concat!("SELECT ", last_seq!()))
+                    .bind(&id)
+                    .fetch_one(&self.pool)
+                    .await?;
+                Ok(row.get(0))
+            }
+            // Une seule instruction est déjà atomique : le chemin de chaque frappe ne paie pas
+            // une transaction explicite.
+            [update] => append(&self.pool, &id, update, actor, now).await,
+            _ => {
+                // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui
+                // échouerait.
+                let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+                let mut seq = 0;
+                for update in updates {
+                    seq = append(&mut *tx, &id, update, actor, now).await?;
+                }
+                tx.commit().await?;
+                Ok(seq)
+            }
+        }
     }
 
     /// Relit l'instantané et les mises à jour de `seq` supérieur au sien (vue cohérente).

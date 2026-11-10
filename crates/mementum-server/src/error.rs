@@ -86,7 +86,13 @@ impl From<StoreError> for ApiError {
                 ErrorCode::Cycle,
                 "une page ne peut pas aller sous elle-même ni sous une de ses descendantes",
             ),
-            e @ StoreError::Sqlx(_) => ApiError::internal(&e),
+            // Comptes, membres et corbeille : aucune route ne les appelle encore. Ces erreurs
+            // recevront leur code avec les routes qui les produisent.
+            e @ (StoreError::Sqlx(_)
+            | StoreError::EmailTaken
+            | StoreError::LastOwner
+            | StoreError::ParentTrashed
+            | StoreError::NotTrashed) => ApiError::internal(&e),
         }
     }
 }

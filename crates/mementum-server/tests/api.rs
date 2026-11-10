@@ -14,6 +14,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{Method, Request, StatusCode, header};
+use mementum_acl::{Grant, Level, Subject};
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::{Config, Info, PageNode, Tree};
 use mementum_store::Store;
@@ -1058,6 +1059,36 @@ async fn positions_combinations() {
     t.patched(&c2.id, json!({ "parentId": null, "afterId": r2.id }))
         .await;
     assert_eq!(t.children(None).await, titles(&["R1", "C1", "R2", "C2"]));
+}
+
+/// Transitoire (lot 2, avant les pages sous droits) : une page créée sans
+/// compte n'a pas d'auteur ; à la racine, elle va à tous les membres de
+/// l'espace (`members`, `full`), et une sous-page hérite de son parent.
+/// `vaultId` porte l'id de l'espace.
+#[tokio::test]
+async fn pages_without_account_go_to_space_members() {
+    let t = TestApp::new().await;
+    let root = t.create(json!({ "title": "Racine" })).await;
+    let child = t
+        .create(json!({ "title": "Sous-page", "parentId": root.id }))
+        .await;
+    let tree = t.tree().await;
+
+    let store = Store::open(&t.db_path()).await.unwrap();
+    let root_id = Uuid::parse_str(&root.id).unwrap();
+    let child_id = Uuid::parse_str(&child.id).unwrap();
+    let node = store.get_node(root_id).await.unwrap().expect("la page");
+    assert_eq!(node.space_id.to_string(), tree.vault_id);
+    assert_eq!(node.created_by, None);
+    assert_eq!(
+        store.node_grants(root_id).await.unwrap(),
+        [Grant {
+            subject: Subject::Members,
+            level: Level::Full,
+        }]
+    );
+    assert_eq!(store.node_grants(child_id).await.unwrap(), []);
+    store.close().await;
 }
 
 /// Ruling R32 : si le document ne peut pas être écrit après le nœud, la page

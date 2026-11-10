@@ -1,17 +1,17 @@
-//! Arbre de pages : organisation et coffre par défaut, création, lecture, renommage, déplacement.
+//! Arbre de pages d'un espace : création, lecture, renommage, déplacement, corbeille,
+//! suppression définitive.
+//!
+//! Toute écriture d'ici incrémente la révision de l'espace dans sa transaction (règle de `rev`,
+//! en tête de la crate).
 
+use mementum_acl::Grant;
 use sqlx::sqlite::SqliteRow;
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{Row, Sqlite, SqliteExecutor, Transaction};
 use uuid::Uuid;
 
-use crate::{Store, StoreError, now_ms, parse_uuid, position_between};
-
-/// Organisation et coffre où vivent les pages (raccourci du lot 1, remplacé au lot 2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Space {
-    pub org_id: Uuid,
-    pub vault_id: Uuid,
-}
+use crate::acl::write_grant;
+use crate::spaces::bump_rev;
+use crate::{Store, StoreError, now_ms, parse_uuid, position_between, unreadable};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
@@ -31,9 +31,7 @@ impl NodeKind {
         match s {
             "page" => Ok(NodeKind::Page),
             "folder" => Ok(NodeKind::Folder),
-            other => Err(StoreError::Sqlx(sqlx::Error::Decode(
-                format!("genre de nœud inconnu : {other}").into(),
-            ))),
+            other => Err(unreadable("genre de nœud", other)),
         }
     }
 }
@@ -41,48 +39,90 @@ impl NodeKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
     pub id: Uuid,
-    pub vault_id: Uuid,
+    pub space_id: Uuid,
     pub parent_id: Option<Uuid>,
     pub kind: NodeKind,
     pub title: String,
     /// Index fractionnaire, à comparer en ordre d'octets parmi les frères.
     pub position: String,
+    /// Le compte qui a créé le nœud ; `None` : inconnu (lot 1).
+    pub created_by: Option<Uuid>,
     /// Millisecondes Unix.
     pub created_at: i64,
+    /// Le compte qui a renommé ou déplacé le nœud en dernier (son auteur, tant que personne ne
+    /// l'a fait) ; `None` : inconnu.
+    pub updated_by: Option<Uuid>,
     /// Millisecondes Unix.
     pub updated_at: i64,
+    /// Millisecondes Unix ; `None` : le nœud n'a pas été mis à la corbeille. Ses descendants y
+    /// sont par héritage, sans que leur `trashed_at` soit posé.
+    pub trashed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct NewNode {
-    pub vault_id: Uuid,
+    pub space_id: Uuid,
     pub parent_id: Option<Uuid>,
     /// Frère après lequel placer le nœud ; `None` = en tête de ses frères.
     pub after: Option<Uuid>,
     pub kind: NodeKind,
     /// Enregistré tel quel : les règles de titre sont celles de la route HTTP.
     pub title: String,
+    pub created_by: Option<Uuid>,
+    /// Accès posés sur le nœud, écrits avec lui. Si un sujet revient, son dernier niveau reste.
+    pub grants: Vec<Grant>,
+    /// Document de la page : écrit avec le nœud, en instantané de `seq` 0.
+    pub doc: Option<Vec<u8>>,
+}
+
+/// Où mettre un nœud : sous `parent_id` (`None` = racine), après `after` (`None` = en tête).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    pub parent_id: Option<Uuid>,
+    pub after: Option<Uuid>,
 }
 
 /// Colonnes d'un nœud, en littéral pour que le SQL reste statique (`concat!`).
 macro_rules! node_columns {
     () => {
-        "id, vault_id, parent_id, kind, title, position, created_at, updated_at"
+        "id, space_id, parent_id, kind, title, position, \
+         created_by, created_at, updated_by, updated_at, trashed_at"
     };
 }
 
+fn optional_uuid(r: &SqliteRow, column: &str) -> Result<Option<Uuid>, StoreError> {
+    let text: Option<String> = r.get(column);
+    text.as_deref().map(parse_uuid).transpose()
+}
+
 fn node_from_row(r: &SqliteRow) -> Result<Node, StoreError> {
-    let parent: Option<String> = r.get("parent_id");
     Ok(Node {
         id: parse_uuid(&r.get::<String, _>("id"))?,
-        vault_id: parse_uuid(&r.get::<String, _>("vault_id"))?,
-        parent_id: parent.as_deref().map(parse_uuid).transpose()?,
+        space_id: parse_uuid(&r.get::<String, _>("space_id"))?,
+        parent_id: optional_uuid(r, "parent_id")?,
         kind: NodeKind::parse(&r.get::<String, _>("kind"))?,
         title: r.get("title"),
         position: r.get("position"),
+        created_by: optional_uuid(r, "created_by")?,
         created_at: r.get("created_at"),
+        updated_by: optional_uuid(r, "updated_by")?,
         updated_at: r.get("updated_at"),
+        trashed_at: r.get("trashed_at"),
     })
+}
+
+/// Le nœud `id`, lu dans la transaction ; `NotFound` s'il n'existe pas.
+async fn node_in(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<Node, StoreError> {
+    let row = sqlx::query(concat!(
+        "SELECT ",
+        node_columns!(),
+        " FROM nodes WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(StoreError::NotFound)?;
+    node_from_row(&row)
 }
 
 /// Résultat du calcul de place.
@@ -94,10 +134,11 @@ enum Slot {
 }
 
 /// Calcule la position d'un nœud parmi les enfants de `parent`, après `after` (`None` = en tête).
-/// `exclude` est le nœud qu'on déplace : il ne compte pas parmi ses frères.
+/// `exclude` est le nœud qu'on déplace : il ne compte pas parmi ses frères. `NotFound` si
+/// `after` n'est pas, dans cet espace, un enfant de `parent`.
 async fn slot(
     tx: &mut Transaction<'_, Sqlite>,
-    vault_id: &str,
+    space_id: &str,
     parent: Option<&str>,
     after: Option<Uuid>,
     exclude: Option<&str>,
@@ -107,10 +148,10 @@ async fn slot(
         Some(a) => {
             let a = a.to_string();
             let pos: String = sqlx::query(
-                "SELECT position FROM nodes WHERE id = ? AND vault_id = ? AND parent_id IS ?",
+                "SELECT position FROM nodes WHERE id = ? AND space_id = ? AND parent_id IS ?",
             )
             .bind(&a)
-            .bind(vault_id)
+            .bind(space_id)
             .bind(parent)
             .fetch_optional(&mut **tx)
             .await?
@@ -121,9 +162,9 @@ async fn slot(
             }
             let next = sqlx::query(
                 "SELECT MIN(position) FROM nodes \
-                 WHERE vault_id = ? AND parent_id IS ? AND position > ? AND id != ?",
+                 WHERE space_id = ? AND parent_id IS ? AND position > ? AND id != ?",
             )
-            .bind(vault_id)
+            .bind(space_id)
             .bind(parent)
             .bind(&pos)
             .bind(exclude)
@@ -134,9 +175,9 @@ async fn slot(
         }
         None => {
             let first = sqlx::query(
-                "SELECT MIN(position) FROM nodes WHERE vault_id = ? AND parent_id IS ? AND id != ?",
+                "SELECT MIN(position) FROM nodes WHERE space_id = ? AND parent_id IS ? AND id != ?",
             )
-            .bind(vault_id)
+            .bind(space_id)
             .bind(parent)
             .bind(exclude)
             .fetch_one(&mut **tx)
@@ -151,105 +192,126 @@ async fn slot(
     )))
 }
 
-impl Store {
-    /// Renvoie l'organisation `default` et son coffre « Mon coffre », en les créant à la première
-    /// demande.
-    pub async fn default_space(&self) -> Result<Space, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let org: String = match sqlx::query("SELECT id FROM orgs WHERE slug = 'default'")
-            .fetch_optional(&mut *tx)
-            .await?
-        {
-            Some(r) => r.get(0),
-            None => {
-                let id = Uuid::now_v7().to_string();
-                sqlx::query("INSERT INTO orgs (id, slug, name, created_at) VALUES (?, 'default', 'default', ?)")
-                    .bind(&id)
-                    .bind(now_ms())
-                    .execute(&mut *tx)
-                    .await?;
-                id
-            }
-        };
-        let vault: String = match sqlx::query(
-            "SELECT id FROM vaults WHERE org_id = ? AND kind = 'personal' ORDER BY created_at, id LIMIT 1",
-        )
-        .bind(&org)
-        .fetch_optional(&mut *tx)
+/// `NotFound` si `parent` n'est pas un nœud de cet espace.
+async fn parent_in_space(
+    tx: &mut Transaction<'_, Sqlite>,
+    parent: &str,
+    space_id: &str,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT 1 FROM nodes WHERE id = ? AND space_id = ?")
+        .bind(parent)
+        .bind(space_id)
+        .fetch_optional(&mut **tx)
         .await?
-        {
-            Some(r) => r.get(0),
-            None => {
-                let id = Uuid::now_v7().to_string();
-                sqlx::query(
-                    "INSERT INTO vaults (id, org_id, name, kind, created_at) \
-                     VALUES (?, ?, 'Mon coffre', 'personal', ?)",
-                )
-                .bind(&id)
-                .bind(&org)
-                .bind(now_ms())
-                .execute(&mut *tx)
-                .await?;
-                id
-            }
-        };
-        tx.commit().await?;
-        Ok(Space {
-            org_id: parse_uuid(&org)?,
-            vault_id: parse_uuid(&vault)?,
-        })
-    }
+        .ok_or(StoreError::NotFound)?;
+    Ok(())
+}
 
-    /// Crée un nœud. `NotFound` (sans rien écrire) si le coffre, le parent ou `after` n'existe
-    /// pas, ou si `after` n'est pas un enfant du parent visé.
+/// Un ancêtre de `id` est-il à la corbeille ? Le nœud lui-même ne compte pas. `UNION` (et non
+/// `UNION ALL`) : la remontée s'arrête même si des parents tournaient en rond.
+async fn ancestor_trashed(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<bool, StoreError> {
+    let found = sqlx::query(
+        "WITH RECURSIVE anc(id) AS ( \
+             SELECT parent_id FROM nodes WHERE id = ?1 \
+             UNION \
+             SELECT n.parent_id FROM nodes n JOIN anc ON n.id = anc.id \
+         ) SELECT 1 FROM nodes n JOIN anc ON n.id = anc.id \
+           WHERE n.trashed_at IS NOT NULL LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(found.is_some())
+}
+
+/// Les ids du sous-arbre de `id`, lui d'abord, puis ses descendants niveau par niveau. Vide si
+/// le nœud n'existe pas. La descente suit l'index `nodes_by_parent` ; `UNION` : elle s'arrête
+/// même si des parents tournaient en rond.
+async fn subtree<'e>(db: impl SqliteExecutor<'e>, id: &str) -> Result<Vec<Uuid>, StoreError> {
+    sqlx::query(
+        "WITH RECURSIVE sub(id, space_id) AS ( \
+             SELECT id, space_id FROM nodes WHERE id = ?1 \
+             UNION \
+             SELECT n.id, n.space_id FROM nodes n \
+             JOIN sub ON n.space_id = sub.space_id AND n.parent_id = sub.id \
+         ) SELECT id FROM sub",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await?
+    .iter()
+    .map(|r| parse_uuid(&r.get::<String, _>(0)))
+    .collect()
+}
+
+impl Store {
+    /// Crée un nœud, avec ses accès (`grants`) et son document (`doc`, instantané de `seq` 0) :
+    /// tout est écrit, ou rien. `NotFound` (sans rien écrire) si l'espace, le parent, `after` ou
+    /// l'auteur n'existe pas, si le parent est d'un autre espace, ou si `after` n'est pas un
+    /// enfant du parent visé.
     pub async fn create_node(&self, n: NewNode) -> Result<Node, StoreError> {
-        let vault = n.vault_id.to_string();
+        let space = n.space_id.to_string();
         let parent = n.parent_id.map(|p| p.to_string());
+        let author = n.created_by.map(|u| u.to_string());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let org: String = sqlx::query("SELECT org_id FROM vaults WHERE id = ?")
-            .bind(&vault)
+        sqlx::query("SELECT 1 FROM spaces WHERE id = ?")
+            .bind(&space)
             .fetch_optional(&mut *tx)
             .await?
-            .ok_or(StoreError::NotFound)?
-            .get(0);
+            .ok_or(StoreError::NotFound)?;
         if let Some(p) = &parent {
-            sqlx::query("SELECT 1 FROM nodes WHERE id = ? AND vault_id = ?")
-                .bind(p)
-                .bind(&vault)
-                .fetch_optional(&mut *tx)
-                .await?
-                .ok_or(StoreError::NotFound)?;
+            parent_in_space(&mut tx, p, &space).await?;
         }
-        let Slot::Set(position) = slot(&mut tx, &vault, parent.as_deref(), n.after, None).await?
+        let Slot::Set(position) = slot(&mut tx, &space, parent.as_deref(), n.after, None).await?
         else {
             unreachable!("aucun nœud exclu : le calcul de place donne toujours une position");
         };
         let id = Uuid::now_v7();
+        let id_s = id.to_string();
         let now = now_ms();
         sqlx::query(
-            "INSERT INTO nodes (id, org_id, vault_id, parent_id, kind, title, position, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            "INSERT INTO nodes (id, space_id, parent_id, kind, title, position, \
+                                created_by, created_at, updated_by, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?7, ?8)",
         )
-        .bind(id.to_string())
-        .bind(&org)
-        .bind(&vault)
+        .bind(&id_s)
+        .bind(&space)
         .bind(&parent)
         .bind(n.kind.as_str())
         .bind(&n.title)
         .bind(&position)
+        .bind(&author)
         .bind(now)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .map_err(StoreError::from_fk)?;
+        if let Some(doc) = &n.doc {
+            sqlx::query(
+                "INSERT INTO doc_snapshots (node_id, seq, state_blob, created_at) VALUES (?, 0, ?, ?)",
+            )
+            .bind(&id_s)
+            .bind(doc.as_slice())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for grant in &n.grants {
+            write_grant(&mut tx, &id_s, *grant).await?;
+        }
+        bump_rev(&mut tx, &space).await?;
         tx.commit().await?;
         Ok(Node {
             id,
-            vault_id: n.vault_id,
+            space_id: n.space_id,
             parent_id: n.parent_id,
             kind: n.kind,
             title: n.title,
             position,
+            created_by: n.created_by,
             created_at: now,
+            updated_by: n.created_by,
             updated_at: now,
+            trashed_at: None,
         })
     }
 
@@ -267,14 +329,14 @@ impl Store {
         .transpose()
     }
 
-    /// Tous les nœuds du coffre, triés par `(parent_id, position)`.
-    pub async fn list_nodes(&self, vault_id: Uuid) -> Result<Vec<Node>, StoreError> {
+    /// Tous les nœuds de l'espace, corbeille comprise, triés par `(parent_id, position)`.
+    pub async fn list_nodes(&self, space_id: Uuid) -> Result<Vec<Node>, StoreError> {
         sqlx::query(concat!(
             "SELECT ",
             node_columns!(),
-            " FROM nodes WHERE vault_id = ? ORDER BY parent_id, position"
+            " FROM nodes WHERE space_id = ? ORDER BY parent_id, position"
         ))
-        .bind(vault_id.to_string())
+        .bind(space_id.to_string())
         .fetch_all(&self.pool)
         .await?
         .iter()
@@ -282,94 +344,205 @@ impl Store {
         .collect()
     }
 
-    /// Renomme un nœud ; le titre est enregistré tel quel.
-    pub async fn rename_node(&self, id: Uuid, title: &str) -> Result<Node, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query(concat!(
-            "UPDATE nodes SET title = ?, updated_at = ? WHERE id = ? RETURNING ",
-            node_columns!()
-        ))
-        .bind(title)
-        .bind(now_ms())
-        .bind(id.to_string())
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(StoreError::NotFound)?;
-        let node = node_from_row(&row)?;
-        tx.commit().await?;
-        Ok(node)
+    /// Renomme un nœud ; le titre est enregistré tel quel. `by` : le compte qui renomme.
+    pub async fn rename_node(
+        &self,
+        id: Uuid,
+        title: &str,
+        by: Option<Uuid>,
+    ) -> Result<Node, StoreError> {
+        self.update_node(id, Some(title), None, by).await
     }
 
     /// Déplace un nœud sous `parent_id` (`None` = racine), après `after` (`None` = en tête).
     /// `Cycle` si le nouveau parent est le nœud ou un de ses descendants ; `NotFound` si le nœud,
-    /// le parent ou `after` manque. Les refus n'écrivent rien (tout se passe dans une transaction).
+    /// le parent ou `after` manque, ou s'ils sont d'un autre espace. Les refus n'écrivent rien.
     pub async fn move_node(
         &self,
         id: Uuid,
         parent_id: Option<Uuid>,
         after: Option<Uuid>,
+        by: Option<Uuid>,
     ) -> Result<Node, StoreError> {
+        self.update_node(id, None, Some(Place { parent_id, after }), by)
+            .await
+    }
+
+    /// Change le titre, la place, ou les deux, en une transaction : un refus (`Cycle`,
+    /// `NotFound`, comme pour [`Store::move_node`]) n'écrit rien, pas même le titre. `by` : le
+    /// compte qui fait le changement, gardé dans `updated_by`. Sans titre ni place, rien n'est
+    /// écrit et le nœud est rendu tel quel.
+    pub async fn update_node(
+        &self,
+        id: Uuid,
+        title: Option<&str>,
+        place: Option<Place>,
+        by: Option<Uuid>,
+    ) -> Result<Node, StoreError> {
+        if title.is_none() && place.is_none() {
+            return self.get_node(id).await?.ok_or(StoreError::NotFound);
+        }
         let id_s = id.to_string();
-        let parent = parent_id.map(|p| p.to_string());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let vault: String = sqlx::query("SELECT vault_id FROM nodes WHERE id = ?")
+        let space: String = sqlx::query("SELECT space_id FROM nodes WHERE id = ?")
             .bind(&id_s)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(StoreError::NotFound)?
             .get(0);
-        if let Some(p) = &parent {
-            sqlx::query("SELECT 1 FROM nodes WHERE id = ? AND vault_id = ?")
+        // `Some((parent, position))` : le nœud change de place ; `None` : il garde la sienne.
+        let mut target: Option<(Option<String>, String)> = None;
+        if let Some(place) = place {
+            let parent = place.parent_id.map(|p| p.to_string());
+            if let Some(p) = &parent {
+                parent_in_space(&mut tx, p, &space).await?;
+                // On remonte du nouveau parent vers la racine : si on croise le nœud, c'est un
+                // cycle.
+                let cycle = sqlx::query(
+                    "WITH RECURSIVE anc(id) AS ( \
+                         SELECT ?1 \
+                         UNION ALL \
+                         SELECT n.parent_id FROM nodes n JOIN anc ON n.id = anc.id \
+                         WHERE n.parent_id IS NOT NULL \
+                     ) SELECT 1 FROM anc WHERE id = ?2 LIMIT 1",
+                )
                 .bind(p)
-                .bind(&vault)
+                .bind(&id_s)
                 .fetch_optional(&mut *tx)
-                .await?
-                .ok_or(StoreError::NotFound)?;
-            // On remonte du nouveau parent vers la racine : si on croise le nœud, c'est un cycle.
-            let cycle = sqlx::query(
-                "WITH RECURSIVE anc(id) AS ( \
-                     SELECT ?1 \
-                     UNION ALL \
-                     SELECT n.parent_id FROM nodes n JOIN anc ON n.id = anc.id \
-                     WHERE n.parent_id IS NOT NULL \
-                 ) SELECT 1 FROM anc WHERE id = ?2 LIMIT 1",
-            )
-            .bind(p)
-            .bind(&id_s)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if cycle.is_some() {
-                return Err(StoreError::Cycle);
+                .await?;
+                if cycle.is_some() {
+                    return Err(StoreError::Cycle);
+                }
+            }
+            if let Slot::Set(position) =
+                slot(&mut tx, &space, parent.as_deref(), place.after, Some(&id_s)).await?
+            {
+                target = Some((parent, position));
             }
         }
-        let slot = slot(&mut tx, &vault, parent.as_deref(), after, Some(&id_s)).await?;
-        let now = now_ms();
-        let row =
-            match slot {
-                Slot::Set(position) => sqlx::query(concat!(
-                    "UPDATE nodes SET parent_id = ?, position = ?, updated_at = ? WHERE id = ? ",
-                    "RETURNING ",
-                    node_columns!()
-                ))
-                .bind(&parent)
-                .bind(position)
-                .bind(now)
-                .bind(&id_s)
-                .fetch_one(&mut *tx)
-                .await?,
-                Slot::Keep => {
-                    sqlx::query(concat!(
-                        "UPDATE nodes SET updated_at = ? WHERE id = ? RETURNING ",
-                        node_columns!()
-                    ))
-                    .bind(now)
-                    .bind(&id_s)
-                    .fetch_one(&mut *tx)
-                    .await?
-                }
-            };
+        let (moves, parent, position) = match target {
+            Some((parent, position)) => (true, parent, Some(position)),
+            None => (false, None, None),
+        };
+        let row = sqlx::query(concat!(
+            "UPDATE nodes SET \
+                 title = COALESCE(?1, title), \
+                 parent_id = CASE WHEN ?2 THEN ?3 ELSE parent_id END, \
+                 position = COALESCE(?4, position), \
+                 updated_at = ?5, updated_by = ?6 \
+             WHERE id = ?7 RETURNING ",
+            node_columns!()
+        ))
+        .bind(title)
+        .bind(moves)
+        .bind(parent)
+        .bind(position)
+        .bind(now_ms())
+        .bind(by.map(|u| u.to_string()))
+        .bind(&id_s)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
+        bump_rev(&mut tx, &space).await?;
         tx.commit().await?;
         Ok(node)
+    }
+
+    /// Met un nœud à la corbeille, pour le compte `by`. Ses descendants y sont par héritage :
+    /// leurs lignes ne changent pas. Sans effet (ni date, ni révision) s'il y est déjà.
+    /// `NotFound` si le nœud ou le compte n'existe pas.
+    pub async fn trash_node(&self, id: Uuid, by: Uuid) -> Result<Node, StoreError> {
+        let id_s = id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let node = node_in(&mut tx, &id_s).await?;
+        if node.trashed_at.is_some() {
+            return Ok(node);
+        }
+        let row = sqlx::query(concat!(
+            "UPDATE nodes SET trashed_at = ?, trashed_by = ? WHERE id = ? RETURNING ",
+            node_columns!()
+        ))
+        .bind(now_ms())
+        .bind(by.to_string())
+        .bind(&id_s)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::from_fk)?;
+        let node = node_from_row(&row)?;
+        bump_rev(&mut tx, &node.space_id.to_string()).await?;
+        tx.commit().await?;
+        Ok(node)
+    }
+
+    /// Sort un nœud de la corbeille. `ParentTrashed` dès qu'un de ses ancêtres y est, que le
+    /// nœud y soit lui-même ou non : c'est l'ancêtre qu'on restaure. Sans effet sur un nœud qui
+    /// n'y est pas.
+    pub async fn restore_node(&self, id: Uuid) -> Result<Node, StoreError> {
+        let id_s = id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let node = node_in(&mut tx, &id_s).await?;
+        if ancestor_trashed(&mut tx, &id_s).await? {
+            return Err(StoreError::ParentTrashed);
+        }
+        if node.trashed_at.is_none() {
+            return Ok(node);
+        }
+        let row = sqlx::query(concat!(
+            "UPDATE nodes SET trashed_at = NULL, trashed_by = NULL WHERE id = ? RETURNING ",
+            node_columns!()
+        ))
+        .bind(&id_s)
+        .fetch_one(&mut *tx)
+        .await?;
+        let node = node_from_row(&row)?;
+        bump_rev(&mut tx, &node.space_id.to_string()).await?;
+        tx.commit().await?;
+        Ok(node)
+    }
+
+    /// Supprime définitivement un nœud et tout son sous-arbre, avec leurs documents, leurs
+    /// accès et leurs invitations, et rend les ids supprimés (le nœud compris). `NotTrashed`
+    /// (sans rien écrire) si le nœud n'est pas à la corbeille, lui-même ou par un ancêtre.
+    pub async fn delete_node(&self, id: Uuid) -> Result<Vec<Uuid>, StoreError> {
+        let id_s = id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let node = node_in(&mut tx, &id_s).await?;
+        if node.trashed_at.is_none() && !ancestor_trashed(&mut tx, &id_s).await? {
+            return Err(StoreError::NotTrashed);
+        }
+        let ids = subtree(&mut *tx, &id_s).await?;
+        // Les ids en un seul paramètre, un tableau JSON : ce sont des UUID relus, sans rien à
+        // échapper.
+        let list = format!(
+            "[{}]",
+            ids.iter()
+                .map(|id| format!("\"{id}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        // Les documents d'abord (`nodes` est leur table mère) ; `acl` et `invitations` suivent
+        // les nœuds (`ON DELETE CASCADE`). Les nœuds partent en une instruction : la clé
+        // `parent_id` n'est vérifiée qu'à la fin, quand parents et enfants sont tous partis.
+        for sql in [
+            "DELETE FROM doc_updates WHERE node_id IN (SELECT value FROM json_each(?))",
+            "DELETE FROM doc_snapshots WHERE node_id IN (SELECT value FROM json_each(?))",
+            "DELETE FROM nodes WHERE id IN (SELECT value FROM json_each(?))",
+        ] {
+            sqlx::query(sql).bind(&list).execute(&mut *tx).await?;
+        }
+        bump_rev(&mut tx, &node.space_id.to_string()).await?;
+        tx.commit().await?;
+        Ok(ids)
+    }
+
+    /// Les ids du sous-arbre d'un nœud : lui d'abord, puis ses descendants, corbeille comprise.
+    /// `NotFound` si le nœud n'existe pas.
+    pub async fn subtree_ids(&self, id: Uuid) -> Result<Vec<Uuid>, StoreError> {
+        let ids = subtree(&self.pool, &id.to_string()).await?;
+        if ids.is_empty() {
+            return Err(StoreError::NotFound);
+        }
+        Ok(ids)
     }
 }

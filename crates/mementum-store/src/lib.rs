@@ -1,17 +1,27 @@
-//! Stockage SQLite de Mementum : arbre de pages, journal Yjs et instantanés.
+//! Stockage SQLite de Mementum : espaces, arbre de pages, accès, journal Yjs et instantanés.
 //!
 //! - [`Store`] ouvre la base (WAL, `synchronous=FULL`, clés étrangères, délai d'attente de 5 s,
 //!   appliqués à **chaque** connexion du pool) et lance les migrations.
-//! - `nodes.rs` : l'arbre de pages, rangé par positions fractionnaires.
+//! - `spaces.rs` : les espaces et leur révision.
+//! - `nodes.rs` : l'arbre de pages, rangé par positions fractionnaires ; la corbeille.
+//! - `acl.rs` : les accès posés sur les pages.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
 //! - `position.rs` : l'index fractionnaire.
 //!
 //! Les horodatages sont en millisecondes Unix. Les identifiants sont des UUIDv7 stockés en
 //! `TEXT`. Toutes les requêtes sont écrites à l'exécution, valeurs liées en paramètres.
+//!
+//! **Règle de `rev`** : toute méthode qui crée, renomme, déplace, met à la corbeille, restaure
+//! ou supprime un nœud, ou qui écrit dans `acl` ou `members`, incrémente `spaces.rev` dans la
+//! même transaction. C'est la clé du cache des accès (`mementum-acl`) : une écriture qui
+//! l'oublierait laisserait des droits périmés en cache. Le contenu d'une page (journal,
+//! instantanés) ne la touche pas.
 
+mod acl;
 mod docs;
 mod nodes;
 mod position;
+mod spaces;
 
 use std::fmt;
 use std::path::Path;
@@ -23,16 +33,26 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use uuid::Uuid;
 
 pub use docs::DocState;
-pub use nodes::{NewNode, Node, NodeKind, Space};
+pub use nodes::{NewNode, Node, NodeKind, Place};
 pub use position::position_between;
+pub use spaces::Space;
 
 /// Erreurs du store.
 #[derive(Debug)]
 pub enum StoreError {
-    /// Un nœud, un parent ou un frère de référence (`after`) n'existe pas.
+    /// Un espace, un nœud, un parent, un frère de référence (`after`) ou un compte n'existe
+    /// pas.
     NotFound,
     /// Le déplacement ferait d'un nœud son propre descendant.
     Cycle,
+    /// Un compte porte déjà cette adresse e-mail.
+    EmailTaken,
+    /// L'espace perdrait son dernier propriétaire.
+    LastOwner,
+    /// Un ancêtre du nœud est à la corbeille : c'est lui qu'on restaure.
+    ParentTrashed,
+    /// Le nœud n'est pas à la corbeille : on ne supprime définitivement que ce qui y est.
+    NotTrashed,
     /// Erreur de la base.
     Sqlx(sqlx::Error),
 }
@@ -42,6 +62,10 @@ impl fmt::Display for StoreError {
         match self {
             StoreError::NotFound => write!(f, "introuvable"),
             StoreError::Cycle => write!(f, "un nœud ne peut pas devenir son propre descendant"),
+            StoreError::EmailTaken => write!(f, "un compte porte déjà cette adresse e-mail"),
+            StoreError::LastOwner => write!(f, "un espace garde au moins un propriétaire"),
+            StoreError::ParentTrashed => write!(f, "une page parente est à la corbeille"),
+            StoreError::NotTrashed => write!(f, "le nœud n'est pas à la corbeille"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),
         }
     }
@@ -69,7 +93,7 @@ impl From<sqlx::migrate::MigrateError> for StoreError {
 }
 
 impl StoreError {
-    /// Une clé étrangère violée veut dire que le nœud visé n'existe pas.
+    /// Une clé étrangère violée veut dire que ce qu'on vise (un nœud, un compte) n'existe pas.
     pub(crate) fn from_fk(e: sqlx::Error) -> Self {
         match &e {
             sqlx::Error::Database(d) if d.is_foreign_key_violation() => StoreError::NotFound,
@@ -157,4 +181,11 @@ pub(crate) fn now_ms() -> i64 {
 /// Relit un UUID stocké en `TEXT`.
 pub(crate) fn parse_uuid(s: &str) -> Result<Uuid, StoreError> {
     Uuid::from_str(s).map_err(|e| StoreError::Sqlx(sqlx::Error::Decode(Box::new(e))))
+}
+
+/// Une valeur lue en base que le code ne sait pas relire : une erreur, jamais une ligne sautée.
+pub(crate) fn unreadable(what: &str, text: &str) -> StoreError {
+    StoreError::Sqlx(sqlx::Error::Decode(
+        format!("{what} illisible : {text}").into(),
+    ))
 }

@@ -16,6 +16,7 @@ use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use mementum_acl::{Grant, Level, Subject};
 use mementum_md::{Block, Content, Props, RenderOpts, parse, render};
 use mementum_schema::PropSpec;
 use mementum_store::{NewNode, Node, NodeKind, StoreError};
@@ -37,9 +38,11 @@ const MARKDOWN: &str = "text/markdown; charset=utf-8";
 
 /// `GET /api/v1/tree`.
 pub(crate) async fn tree(State(state): State<AppState>) -> Result<Json<Tree>, ApiError> {
-    let nodes = state.store.list_nodes(state.vault_id).await?;
+    let nodes = state.store.list_nodes(state.space_id).await?;
     Ok(Json(Tree {
-        vault_id: state.vault_id.to_string(),
+        // Le type de l'API ne change qu'avec les pages sous droits : d'ici là, `vaultId` porte
+        // l'id de l'espace.
+        vault_id: state.space_id.to_string(),
         nodes: nodes.iter().map(page_node).collect(),
     }))
 }
@@ -60,14 +63,27 @@ pub(crate) async fn create(
         Some(None) => None,
         Some(Some(id)) => Some(after_id(&id)?),
     };
+    // Sans compte (routes du lot 1) : pas d'auteur ; une page de racine va à tous les membres
+    // de l'espace, une sous-page hérite de son parent.
+    let grants = match parent {
+        None => vec![Grant {
+            subject: Subject::Members,
+            level: Level::Full,
+        }],
+        Some(_) => Vec::new(),
+    };
     let node = state
         .store
         .create_node(NewNode {
-            vault_id: state.vault_id,
+            space_id: state.space_id,
             parent_id: parent,
             after,
             kind: NodeKind::Page,
             title,
+            created_by: None,
+            grants,
+            // Le document est écrit après le nœud, par le hub (Ruling R32).
+            doc: None,
         })
         .await
         .map_err(placement_error)?;
@@ -109,12 +125,12 @@ pub(crate) async fn update(
         };
         node = state
             .store
-            .move_node(id, parent, after)
+            .move_node(id, parent, after, None)
             .await
             .map_err(placement_error)?;
     }
     if let Some(title) = title {
-        node = state.store.rename_node(id, &title).await?;
+        node = state.store.rename_node(id, &title, None).await?;
     }
     Ok(Json(page_node(&node)))
 }
@@ -279,11 +295,11 @@ pub fn title(raw: Option<&str>) -> Result<String, ApiError> {
     Ok(title.to_string())
 }
 
-/// Le parent visé : une page du coffre, sinon `422 invalid_parent`.
+/// Le parent visé : une page de l'espace, sinon `422 invalid_parent`.
 async fn parent(state: &AppState, raw: &str) -> Result<Uuid, ApiError> {
     let id = Uuid::parse_str(raw).map_err(|_| ApiError::invalid_parent())?;
     match state.store.get_node(id).await? {
-        Some(node) if node.vault_id == state.vault_id => Ok(id),
+        Some(node) if node.space_id == state.space_id => Ok(id),
         _ => Err(ApiError::invalid_parent()),
     }
 }
@@ -295,7 +311,7 @@ fn after_id(raw: &str) -> Result<Uuid, ApiError> {
 /// Le dernier enfant de `parent` (`None` = racine), pour placer une page en
 /// fin de liste.
 async fn last_child(state: &AppState, parent: Option<Uuid>) -> Result<Option<Uuid>, ApiError> {
-    let nodes = state.store.list_nodes(state.vault_id).await?;
+    let nodes = state.store.list_nodes(state.space_id).await?;
     Ok(nodes
         .into_iter()
         .filter(|n| n.parent_id == parent)

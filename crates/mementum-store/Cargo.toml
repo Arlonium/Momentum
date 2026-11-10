@@ -1,6 +1,6 @@
 [package]
 name = "mementum-store"
-description = "Stockage SQLite de Mementum : arbre de pages, journal Yjs et instantanés"
+description = "Stockage SQLite de Mementum : espaces, arbre de pages, accès, journal Yjs et instantanés"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# `Grant`, `Level`, `Subject` : les accès posés sur les pages, dans leur forme texte.
+mementum-acl.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 
