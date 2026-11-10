@@ -1,5 +1,6 @@
 //! Ce qui passe sur la socket : le serveur ne relaie jamais les octets de présence qu'il a
-//! reçus, mais ce qu'il a lu et gardé, réencodé (Ruling R123).
+//! reçus, mais ce qu'il a lu et gardé, réencodé (Ruling R123) ; et un message WebSocket ne porte
+//! pas plus de 32 messages y-websocket (Ruling R124).
 //!
 //! Le serveur lisait une mise à jour de présence avec yrs, et relayait ses octets tels quels
 //! aux clients, qui la lisent avec lib0. Les deux ne lisent pas pareil : yrs laisse tomber les
@@ -442,4 +443,28 @@ async fn repeated_client_does_not_let_a_late_echo_close_honest_connections() {
     let more: Vec<Vec<u8>> = (1..=7).map(|i| entry(910_000 + i, 1, &ghost)).collect();
     alice.send(presence(&[7], &more)).await;
     assert!(alice.presence_so_far().await.is_some());
+}
+
+/// Ruling R124 : un message WebSocket qui porte plus de 32 messages y-websocket est
+/// illisible, et ferme sa connexion ; à 32, il passe.
+#[tokio::test]
+async fn websocket_message_with_more_than_32_messages_closes_the_connection() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let other = f.client().await;
+    // Trente-deux demandes d'awareness (un octet chacune) : servi.
+    let at_limit = f.client().await;
+    at_limit.send_raw(vec![3; 32]);
+    assert!(still_served(&at_limit).await);
+    // Une de plus : fermé.
+    let beyond = f.client().await;
+    beyond.send_raw(vec![3; 33]);
+    assert!(
+        beyond.wait_until(WAIT, |c| c.is_closed()).await,
+        "33 messages y-websocket dans un message WebSocket : la connexion est encore servie"
+    );
+    // Des messages que le serveur ignore (authentification) comptent aussi.
+    let ignored = f.client().await;
+    ignored.send_raw([2, 1].repeat(33));
+    assert!(ignored.wait_until(WAIT, |c| c.is_closed()).await);
+    assert!(still_served(&other).await && still_served(&at_limit).await);
 }

@@ -80,7 +80,9 @@
 //! - **bornes mémoire** (Ruling R27) : un message reçu ne dépasse pas
 //!   `max_message_bytes`, la file d'une connexion ni `max_queue_bytes` ni
 //!   `broadcast_capacity` messages, les diffusions sont partagées entre les
-//!   files, un état d'awareness ne dépasse pas 2 Kio (Ruling R119) ;
+//!   files, un état d'awareness ne dépasse pas 2 Kio (Ruling R119), un
+//!   message WebSocket ne porte pas plus de 32 messages y-websocket (Ruling
+//!   R124) ;
 //! - une page **sans document** reçoit le sien au premier chargement de son
 //!   acteur (Ruling R28).
 //!

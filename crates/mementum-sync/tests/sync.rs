@@ -669,10 +669,11 @@ async fn many_sync_steps_in_one_message_get_one_answer() {
     let f = Fixture::new(SyncConfig::default()).await;
     let (_other, _serving, mut socket) = quiet_connection(&f, "étapes 1").await;
 
-    // 10 000 étapes 1 (vecteur d'état vide) dans un seul message, puis une
-    // demande d'awareness seule, qui sert de barrière.
+    // 32 étapes 1 (vecteur d'état vide) dans un seul message, le plus qu'un message
+    // WebSocket puisse porter (Ruling R124), puis une demande d'awareness seule, qui sert de
+    // barrière.
     let step1 = [0u8, 0, 1, 0];
-    let batch: Vec<u8> = step1.iter().copied().cycle().take(4 * 10_000).collect();
+    let batch: Vec<u8> = step1.iter().copied().cycle().take(4 * 32).collect();
     futures::SinkExt::send(&mut socket, batch).await.unwrap();
     futures::SinkExt::send(&mut socket, vec![3]).await.unwrap();
 
@@ -686,9 +687,9 @@ async fn many_awareness_queries_in_one_message_get_one_answer() {
     let f = Fixture::new(SyncConfig::default()).await;
     let (_other, _serving, mut socket) = quiet_connection(&f, "awareness").await;
 
-    // 10 000 demandes d'awareness dans un seul message, puis une étape 1
-    // seule, qui sert de barrière.
-    futures::SinkExt::send(&mut socket, vec![3; 10_000])
+    // 32 demandes d'awareness dans un seul message, le plus qu'un message WebSocket puisse
+    // porter (Ruling R124), puis une étape 1 seule, qui sert de barrière.
+    futures::SinkExt::send(&mut socket, vec![3; 32])
         .await
         .unwrap();
     futures::SinkExt::send(&mut socket, vec![0, 0, 1, 0])

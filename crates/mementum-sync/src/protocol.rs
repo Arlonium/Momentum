@@ -33,6 +33,9 @@
 //! ([`read_exact_var`]), et un tampon où il reste des octets après les entrées
 //! annoncées est illisible. Et le serveur ne relaie jamais ces octets : il
 //! réencode ce qu'il a lu et gardé (`actor.rs`).
+//!
+//! Un message WebSocket qui porte plus de [`MAX_MESSAGES`] messages
+//! y-websocket est illisible (Ruling R124).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -57,6 +60,21 @@ const PERMISSION_DENIED: u8 = 0;
 
 /// Plus grand identifiant de client Yjs (53 bits, sûr en JavaScript).
 pub(crate) const MAX_CLIENT: u64 = (1 << 53) - 1;
+
+/// Messages y-websocket qu'un message WebSocket peut porter (Ruling R124) :
+/// au-delà, il est illisible, et la connexion est fermée.
+///
+/// Un client y-websocket en envoie un par message WebSocket : son étape 1 et
+/// son état de présence à la connexion, chaque mise à jour, chaque changement
+/// de présence, et la réponse à un message reçu, dont il ne lit que le premier
+/// message y-websocket (`y-websocket.js`, `readMessage`). Rien de ce que le
+/// serveur envoie ne peut l'amener à en mettre plusieurs bout à bout.
+///
+/// Sans borne, un message WebSocket fait d'octets `03` (une demande
+/// d'awareness chacun) était découpé en autant de messages : 72 Mio alloués
+/// pour 1 Mio reçu, et la borne d'un message est de 16 Mio. Le compte se fait
+/// avant de lire le message suivant : rien n'est alloué au-delà de la borne.
+pub(crate) const MAX_MESSAGES: usize = 32;
 
 /// Entrées d'awareness qu'un message WebSocket peut porter, tous ses messages
 /// d'awareness comptés ensemble (Ruling R113) : au-delà, aucune n'est traitée
@@ -138,7 +156,13 @@ pub(crate) fn decode(data: &[u8]) -> Result<Decoded, ProtocolError> {
     // d'awareness comptés ensemble (Ruling R113). Chacun en annonce moins
     // qu'il n'a d'octets : la somme ne déborde pas.
     let mut presence_entries = 0usize;
+    // Messages y-websocket lus, comptés avant de lire le suivant (Ruling R124).
+    let mut read = 0usize;
     while cursor.has_content() {
+        read += 1;
+        if read > MAX_MESSAGES {
+            return Err(ProtocolError);
+        }
         let kind: u8 = cursor.read_var()?;
         match kind {
             MSG_SYNC => {
@@ -669,6 +693,25 @@ mod tests {
             &[entry(7, 1000, r#"{"a":1}"#), entry(7, 1, r#"{"b":2}"#)],
         );
         assert_eq!(entries_of(&twice), [(7, 1, r#"{"b":2}"#.to_string())]);
+    }
+
+    /// Ruling R124 : 32 messages y-websocket dans un message WebSocket passent, 33 le
+    /// rendent illisible, quels qu'ils soient.
+    #[test]
+    fn refuses_more_messages_than_the_limit() {
+        assert_eq!(MAX_MESSAGES, 32);
+        let queries = |count: usize| vec![MSG_QUERY_AWARENESS; count];
+        assert_eq!(messages(&queries(32)).len(), 32);
+        assert_eq!(decode(&queries(33)), Err(ProtocolError));
+        // Ceux que le serveur ignore comptent aussi : ils sont lus.
+        let ignored = |count: usize| Message::Auth(None).encode_v1().repeat(count);
+        assert!(messages(&ignored(32)).is_empty());
+        assert_eq!(decode(&ignored(33)), Err(ProtocolError));
+        let mut mixed = ignored(31);
+        mixed.extend(keepalive());
+        assert_eq!(messages(&mixed).len(), 1);
+        mixed.extend(queries(1));
+        assert_eq!(decode(&mixed), Err(ProtocolError));
     }
 
     #[test]
