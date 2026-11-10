@@ -810,8 +810,10 @@ button.tree-toggle:hover {
   display: flex;
   align-items: center;
   gap: 12px;
+  /* La même hauteur avec ou sans le bouton « Partager » (32 px) : la page ne bouge pas d'une
+     page à l'autre. */
   min-height: 44px;
-  padding: 8px 14px;
+  padding: 6px 14px;
   font-size: 14px;
   color: var(--mm-text-secondary);
 }

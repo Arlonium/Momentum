@@ -866,3 +866,20 @@ test("rights_change_does_not_say_offline", async ({ browser }) => {
   await a.evaluate(() => window.__mementum!.provider.connect());
   await expect(status).toHaveText("");
 });
+
+test("top_bar_keeps_its_height_with_or_without_the_share_button", async ({ browser }) => {
+  const { aliceApi, bruno, brunoId } = await ownerAndMember();
+  const full = await createPage(aliceApi, { title: `Équipe ${unique()}` });
+  const read = await createPage(aliceApi, { section: "private", title: `À lire ${unique()}` });
+  await setPageLevel(aliceApi, read.id, brunoId, "read");
+  const b = await openPage(browser, full.id, bruno);
+  const bar = b.locator(".mm-topbar");
+  // Avec le bouton « Partager », puis sans lui : la barre du haut garde sa hauteur, et la page
+  // ne saute pas d'une page à l'autre.
+  await expect(shareButton(b)).toBeVisible();
+  const withButton = (await bar.boundingBox())!.height;
+  await treeRow(b, read.id).getByRole("link").click();
+  await expect(titleOf(b)).toHaveValue(read.title);
+  await expect(shareButton(b)).toHaveCount(0);
+  expect((await bar.boundingBox())!.height).toBe(withButton);
+});
