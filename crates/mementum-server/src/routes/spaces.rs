@@ -179,15 +179,21 @@ impl Roles {
 }
 
 /// Relit les rôles de l'appelant (`404` s'il n'en a plus) et de la personne visée (`404` si
-/// elle n'en a plus).
+/// elle n'en a plus). Comme à la première lecture, hors départ volontaire (`leaving`),
+/// l'appelant passé sous `admin` reçoit `403` avant que la personne visée soit regardée.
 async fn read_roles(
     state: &AppState,
     user: &AuthUser,
     space_id: Uuid,
     target: Uuid,
+    leaving: bool,
 ) -> Result<Roles, ApiError> {
+    let caller = state.role_at_least(user, space_id, Role::Guest).await?;
+    if !leaving {
+        require(caller, Role::Admin)?;
+    }
     Ok(Roles {
-        caller: state.role_at_least(user, space_id, Role::Guest).await?,
+        caller,
         target: role_in(state, space_id, target).await?,
     })
 }
@@ -229,7 +235,7 @@ async fn change_role(
             }
             Err(StoreError::Stale | StoreError::NotFound) if retries < ROLE_RETRIES => {
                 retries += 1;
-                roles = read_roles(state, user, space_id, target).await?;
+                roles = read_roles(state, user, space_id, target, false).await?;
             }
             Err(e) => return Err(member_error(e)),
         }
@@ -276,7 +282,7 @@ async fn remove(
             }
             Err(StoreError::Stale | StoreError::NotFound) if retries < ROLE_RETRIES => {
                 retries += 1;
-                roles = read_roles(state, user, space_id, target).await?;
+                roles = read_roles(state, user, space_id, target, leaving).await?;
             }
             Err(e) => return Err(member_error(e)),
         }
@@ -488,5 +494,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(role(&state, &space, &mona).await, Some(Role::Member));
+    }
+
+    /// Sur la reprise après un refus du store, l'appelant est contrôlé avant la personne visée,
+    /// comme à la première lecture : Adam, passé invité pendant que Mona quittait l'espace,
+    /// reçoit `403`, pas le `404` d'une personne qui n'est plus là.
+    #[tokio::test]
+    async fn demoted_caller_is_refused_before_the_target_is_looked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let (olga, adam, mona, space) = team(&state).await;
+        // Ce que les routes d'Adam ont lu : lui admin, Mona admin.
+        let read = Roles {
+            caller: Role::Admin,
+            target: Role::Admin,
+        };
+        let by_olga = Roles {
+            caller: Role::Owner,
+            target: Role::Admin,
+        };
+        change_role(&state, &olga, space.id, adam.id, Role::Guest, by_olga)
+            .await
+            .unwrap();
+        remove(&state, &olga, space.id, mona.id, by_olga)
+            .await
+            .unwrap();
+
+        let result = remove(&state, &adam, space.id, mona.id, read).await;
+        assert_eq!(status(result), StatusCode::FORBIDDEN);
+        let result = change_role(&state, &adam, space.id, mona.id, Role::Member, read).await;
+        assert_eq!(status(result), StatusCode::FORBIDDEN);
     }
 }
