@@ -660,3 +660,95 @@ async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
     );
     assert_eq!(state_of(&newcomer, SPARE_CLIENT), None);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Pas plus de 512 entrées de présence par message (Ruling R113).
+//
+// Le serveur regarde chaque entrée d'un message de présence contre chaque connexion de la page.
+// La borne en octets d'un message laisse passer des millions d'entrées, qui occuperaient l'acteur
+// de la page aux dépens de tous. Un client honnête n'annonce que le sien, ou renvoie les états
+// des présents : au-delà de 512 entrées, la connexion est fermée avant qu'aucune soit traitée.
+
+/// Le plus grand nombre d'entrées de présence qu'un message porte sans fermer sa connexion.
+const MAX_ENTRIES: usize = 512;
+
+/// `count` retraits de clients que personne ne tient : des entrées que le serveur ignore sans
+/// fermer la connexion (Ruling R104), de quoi remplir un message sans rien lui faire dire.
+fn free_removals(count: usize) -> Vec<(u64, u32, &'static str)> {
+    (0..count as u64)
+        .map(|i| (800_000 + i, 1, "null"))
+        .collect()
+}
+
+/// Ces entrées en un message WebSocket, réparties sur `parts` messages d'awareness.
+fn frame(entries: &[(u64, u32, &str)], parts: usize) -> Vec<u8> {
+    entries
+        .chunks(entries.len().div_ceil(parts))
+        .flat_map(awareness_message)
+        .collect()
+}
+
+/// Une lectrice a deux onglets. De l'un, un message de 512 entrées passe : les 511 retraits
+/// sont ignorés, et son propre état arrive chez tous. À 513, sa connexion est fermée avant tout
+/// traitement : la dernière entrée remplaçait l'état de son autre onglet (ce que son compte a
+/// le droit de faire), et cet état n'a pas bougé. L'autre onglet, lui, reste servi.
+async fn too_many_entries_close_the_connection(parts: usize) {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let account = new_user(&f.db).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let tab = Client::connect_synced(&f.url_for(reader(account))).await;
+    let sender = Client::connect_synced(&f.url_for(reader(account))).await;
+    let mut witness = Witness::join(&f).await;
+    let (tab_id, sender_id) = (tab.client_id(), sender.client_id());
+    let other_tab = named("Mallory, autre onglet");
+    tab.set_awareness(&other_tab);
+    assert!(sees(&carol, tab_id, Some(&other_tab)).await);
+
+    // À la limite : le message est traité.
+    let at_limit = named("Mallory, à la limite");
+    let mut entries = free_removals(MAX_ENTRIES - 1);
+    entries.push((sender_id, 1, &at_limit));
+    assert_eq!(entries.len(), MAX_ENTRIES);
+    sender.send_raw(frame(&entries, parts));
+    witness.after(&sender, &[&carol]).await;
+    assert_eq!(
+        state_of(&carol, sender_id).as_deref(),
+        Some(at_limit.as_str()),
+        "un message de {MAX_ENTRIES} entrées n'est pas passé"
+    );
+
+    // Une de plus : fermée.
+    let replaced = named("Mallory, remplacée");
+    let mut entries = free_removals(MAX_ENTRIES);
+    entries.push((tab_id, 1_000, &replaced));
+    sender.send_raw(frame(&entries, parts));
+    assert!(
+        sender.wait_until(WAIT, |c| c.is_closed()).await,
+        "un message de {} entrées n'a pas fermé la connexion",
+        MAX_ENTRIES + 1
+    );
+    // Avant tout traitement : ce que le message aurait changé, et que le départ de la connexion
+    // ne déferait pas, n'a pas eu lieu.
+    witness.after(&tab, &[&carol]).await;
+    assert_eq!(
+        state_of(&carol, tab_id).as_deref(),
+        Some(other_tab.as_str()),
+        "une entrée du message a été traitée"
+    );
+    // Le serveur n'en a rien gardé non plus.
+    let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    assert!(sees(&newcomer, tab_id, Some(&other_tab)).await);
+}
+
+#[tokio::test]
+async fn presence_message_with_too_many_entries_closes_the_connection() {
+    too_many_entries_close_the_connection(1).await;
+}
+
+/// Le compte porte sur le message WebSocket entier : les mêmes entrées réparties sur deux
+/// messages d'awareness, envoyés ensemble, ferment la connexion de même. Sinon la limite se
+/// contournerait en mettant bout à bout des messages de 512 entrées.
+#[tokio::test]
+async fn presence_entries_are_counted_over_the_whole_websocket_message() {
+    too_many_entries_close_the_connection(2).await;
+}

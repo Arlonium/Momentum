@@ -49,7 +49,10 @@
 //!   quelqu'un qui est parti est ignoré, et ne donne pas son client. Une
 //!   entrée à la dernière horloge (`u32::MAX`) est ignorée de même, et un
 //!   départ ne compte plus rien pour un client qui y est déjà (Ruling R108) :
-//!   yrs, qui incrémente l'horloge d'un client à son départ, y déborderait ;
+//!   yrs, qui incrémente l'horloge d'un client à son départ, y déborderait.
+//!   Un message qui porte plus de 512 entrées ferme sa connexion avant
+//!   qu'aucune soit traitée (Ruling R113) : chacune est regardée contre
+//!   chaque connexion de la page ;
 //! - **entretien** (Ruling R107) : une connexion à qui rien n'a été envoyé
 //!   depuis [`SyncConfig::keepalive_after`] reçoit une mise à jour de présence
 //!   vide, sans passer par l'acteur. Sans elle, y-websocket, qui ferme sa

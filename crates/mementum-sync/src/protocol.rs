@@ -15,6 +15,9 @@
 //! identifiant de client hors de 53 bits (yrs ne le refuse que par un
 //! `debug_assert!`) ou un état d'awareness qui n'est pas du JSON (les
 //! navigateurs le relisent par `JSON.parse`) rendent le message illisible.
+//! Un message WebSocket qui porte plus de [`MAX_PRESENCE_ENTRIES`] entrées
+//! d'awareness est refusé de même, avant qu'aucune soit confiée à l'acteur
+//! (Ruling R113).
 //! Les mises à jour Yjs, elles, sont lues par `PageDoc::apply_client_update`,
 //! qui refuse aussi celles qui touchent aux métadonnées de la page.
 
@@ -42,6 +45,23 @@ const PERMISSION_DENIED: u8 = 0;
 /// Plus grand identifiant de client Yjs (53 bits, sûr en JavaScript).
 const MAX_CLIENT: u64 = (1 << 53) - 1;
 
+/// Entrées d'awareness qu'un message WebSocket peut porter, tous ses messages
+/// d'awareness comptés ensemble (Ruling R113) : au-delà, la connexion est
+/// fermée avant qu'aucune entrée soit traitée, comme pour un message trop gros.
+///
+/// Le traitement coûte « entrées × connexions de la page » : l'acteur regarde
+/// chaque entrée contre chaque connexion, pour savoir qui tient son client
+/// (Ruling R101). Or la borne en octets d'un message
+/// ([`SyncConfig::max_message_bytes`](crate::SyncConfig::max_message_bytes))
+/// laisse passer des millions d'entrées, qui occuperaient l'acteur aux dépens
+/// de toute la page. Un client honnête n'envoie que le sien, ou renvoie ceux
+/// des présents.
+///
+/// Le compte se fait sur le message WebSocket, pas sur chacun de ses messages
+/// d'awareness : l'acteur les traite d'une traite, et la limite se
+/// contournerait en les mettant bout à bout.
+pub(crate) const MAX_PRESENCE_ENTRIES: usize = 512;
+
 /// Mise à jour Yjs vide (aucun bloc, aucune suppression) : la réponse d'un
 /// document vide à une étape 1. Ni appliquée, ni écrite, ni diffusée.
 pub(crate) const EMPTY_UPDATE: [u8; 2] = [0, 0];
@@ -63,19 +83,30 @@ pub(crate) enum ClientMessage {
     AwarenessQuery,
 }
 
-/// Message illisible : la connexion qui l'a envoyé est fermée.
+/// Message refusé : la connexion qui l'a envoyé est fermée.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProtocolError;
+pub(crate) enum ProtocolError {
+    /// Message illisible.
+    Illegible,
+    /// Plus de [`MAX_PRESENCE_ENTRIES`] entrées d'awareness (Ruling R113).
+    TooManyPresenceEntries,
+}
 
 impl fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "message y-websocket illisible")
+        match self {
+            ProtocolError::Illegible => write!(f, "message y-websocket illisible"),
+            ProtocolError::TooManyPresenceEntries => write!(
+                f,
+                "plus de {MAX_PRESENCE_ENTRIES} entrées d'awareness dans un message"
+            ),
+        }
     }
 }
 
 impl From<yrs::encoding::read::Error> for ProtocolError {
     fn from(_: yrs::encoding::read::Error) -> Self {
-        ProtocolError
+        ProtocolError::Illegible
     }
 }
 
@@ -83,6 +114,8 @@ impl From<yrs::encoding::read::Error> for ProtocolError {
 pub(crate) fn decode(data: &[u8]) -> Result<Vec<ClientMessage>, ProtocolError> {
     let mut cursor = Cursor::new(data);
     let mut messages = Vec::new();
+    // Entrées d'awareness que le message peut encore porter (Ruling R113).
+    let mut presence_left = MAX_PRESENCE_ENTRIES;
     while cursor.has_content() {
         let kind: u8 = cursor.read_var()?;
         match kind {
@@ -95,13 +128,13 @@ pub(crate) fn decode(data: &[u8]) -> Result<Vec<ClientMessage>, ProtocolError> {
                         ClientMessage::SyncStep1(payload.to_vec())
                     }
                     SYNC_STEP_2 | SYNC_UPDATE => ClientMessage::Update(payload.to_vec()),
-                    _ => return Err(ProtocolError),
+                    _ => return Err(ProtocolError::Illegible),
                 });
             }
             MSG_AWARENESS => {
                 let payload = cursor.read_buf()?;
                 messages.push(ClientMessage::Awareness {
-                    update: decode_awareness(payload)?,
+                    update: decode_awareness(payload, &mut presence_left)?,
                     raw: payload.to_vec(),
                 });
             }
@@ -126,7 +159,7 @@ fn check_state_vector(payload: &[u8]) -> Result<(), ProtocolError> {
     let entries: u32 = cursor.read_var()?;
     // Une entrée tient sur 2 octets au moins.
     if entries as usize > payload.len() / 2 {
-        return Err(ProtocolError);
+        return Err(ProtocolError::Illegible);
     }
     for _ in 0..entries {
         read_client(&mut cursor)?;
@@ -137,19 +170,25 @@ fn check_state_vector(payload: &[u8]) -> Result<(), ProtocolError> {
 
 /// Mise à jour d'awareness : `varUint(n)`, puis `n` fois `varUint(client)
 /// varUint(horloge) varString(état JSON)`.
-fn decode_awareness(payload: &[u8]) -> Result<AwarenessUpdate, ProtocolError> {
+///
+/// `left` : les entrées que le message WebSocket peut encore porter, dont
+/// celles-ci sont décomptées avant d'être lues (Ruling R113).
+fn decode_awareness(payload: &[u8], left: &mut usize) -> Result<AwarenessUpdate, ProtocolError> {
     let mut cursor = Cursor::new(payload);
     let entries: u32 = cursor.read_var()?;
     // Une entrée tient sur 3 octets au moins.
     if entries as usize > payload.len() / 3 {
-        return Err(ProtocolError);
+        return Err(ProtocolError::Illegible);
     }
+    *left = left
+        .checked_sub(entries as usize)
+        .ok_or(ProtocolError::TooManyPresenceEntries)?;
     let mut clients = HashMap::new();
     for _ in 0..entries {
         let client = read_client(&mut cursor)?;
         let clock: u32 = cursor.read_var()?;
         let json = cursor.read_string()?;
-        serde_json::from_str::<serde_json::Value>(json).map_err(|_| ProtocolError)?;
+        serde_json::from_str::<serde_json::Value>(json).map_err(|_| ProtocolError::Illegible)?;
         clients.insert(
             client,
             AwarenessUpdateEntry {
@@ -164,7 +203,7 @@ fn decode_awareness(payload: &[u8]) -> Result<AwarenessUpdate, ProtocolError> {
 fn read_client(cursor: &mut Cursor<'_>) -> Result<ClientID, ProtocolError> {
     let client: u64 = cursor.read_var()?;
     if client > MAX_CLIENT {
-        return Err(ProtocolError);
+        return Err(ProtocolError::Illegible);
     }
     Ok(ClientID::new(client))
 }
@@ -328,7 +367,7 @@ mod tests {
             ("awareness hors JSON", not_json),
             ("type tronqué", vec![0x80]),
         ] {
-            assert_eq!(decode(&data), Err(ProtocolError), "{what}");
+            assert_eq!(decode(&data), Err(ProtocolError::Illegible), "{what}");
         }
     }
 
@@ -354,6 +393,65 @@ mod tests {
                 update: empty,
                 raw: vec![0],
             }]
+        );
+    }
+
+    /// Un message d'awareness de `count` entrées, pour les clients `first` et
+    /// suivants.
+    fn presence_of(first: u64, count: u64) -> Vec<u8> {
+        let clients = (first..first + count)
+            .map(|client| {
+                let entry = AwarenessUpdateEntry {
+                    clock: 1,
+                    json: "{}".into(),
+                };
+                (ClientID::new(client), entry)
+            })
+            .collect();
+        Message::Awareness(AwarenessUpdate { clients }).encode_v1()
+    }
+
+    /// Le nombre d'entrées de chaque message d'awareness lu, ou le refus.
+    fn presence_entries(data: &[u8]) -> Result<Vec<usize>, ProtocolError> {
+        Ok(decode(data)?
+            .into_iter()
+            .map(|message| match message {
+                ClientMessage::Awareness { update, .. } => update.clients.len(),
+                other => panic!("{other:?}"),
+            })
+            .collect())
+    }
+
+    /// Ruling R113 : 512 entrées d'awareness passent, 513 non, qu'elles
+    /// tiennent en un message d'awareness ou en plusieurs mis bout à bout.
+    #[test]
+    fn refuses_more_presence_entries_than_the_limit() {
+        let max = MAX_PRESENCE_ENTRIES as u64;
+        assert_eq!(max, 512);
+        assert_eq!(presence_entries(&presence_of(1, max)), Ok(vec![512]));
+        assert_eq!(
+            presence_entries(&presence_of(1, max + 1)),
+            Err(ProtocolError::TooManyPresenceEntries)
+        );
+        let mut two = presence_of(1, 256);
+        two.extend(presence_of(1_000, 256));
+        assert_eq!(presence_entries(&two), Ok(vec![256, 256]));
+        let mut two = presence_of(1, 256);
+        two.extend(presence_of(1_000, 257));
+        assert_eq!(
+            presence_entries(&two),
+            Err(ProtocolError::TooManyPresenceEntries)
+        );
+        // Le reste du message ne compte pas, ni avant ni après.
+        let mut mixed = vec![MSG_QUERY_AWARENESS];
+        mixed.extend(presence_of(1, max));
+        mixed.push(MSG_QUERY_AWARENESS);
+        assert_eq!(decode(&mixed).map(|messages| messages.len()), Ok(3));
+        // Un nombre d'entrées que les octets ne peuvent pas contenir reste un
+        // message illisible, si grand soit-il.
+        assert_eq!(
+            decode(&[1, 3, 0xFF, 0xFF, 0x0F]),
+            Err(ProtocolError::Illegible)
         );
     }
 

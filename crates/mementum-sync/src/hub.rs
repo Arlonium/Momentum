@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::actor::{self, Broadcast, Command, Commands, Event, Joined, Membership, Outcome};
-use crate::protocol;
+use crate::protocol::{self, ProtocolError};
 use crate::{SyncConfig, SyncError};
 
 /// Essais d'une demande dont l'acteur s'est arrêté avant de répondre (un
@@ -529,7 +529,9 @@ impl Hub {
 enum End {
     /// Le client est parti (fin du flux, socket en erreur).
     Left,
-    /// Message plus gros que `max_message_bytes`.
+    /// Message plus gros que `max_message_bytes`, ou qui porte plus de
+    /// [`MAX_PRESENCE_ENTRIES`](protocol::MAX_PRESENCE_ENTRIES) entrées de
+    /// présence (Ruling R113).
     TooBig,
     /// Message illisible.
     Illegible,
@@ -552,7 +554,7 @@ impl End {
     fn describe(self) -> &'static str {
         match self {
             End::Left => "client parti",
-            End::TooBig => "message trop gros",
+            End::TooBig => "message trop gros (en octets, ou en entrées de présence)",
             End::Illegible => "message illisible",
             End::Refused => "fermée par l'acteur",
             End::Kicked => "fermée à la demande (droits changés, session fermée ou page supprimée)",
@@ -720,8 +722,11 @@ where
                     if data.len() > cfg.max_message_bytes {
                         return End::TooBig;
                     }
-                    let Ok(messages) = protocol::decode(&data) else {
-                        return End::Illegible;
+                    let messages = match protocol::decode(&data) {
+                        Ok(messages) => messages,
+                        Err(ProtocolError::Illegible) => return End::Illegible,
+                        // Avant que l'acteur en voie une seule (Ruling R113).
+                        Err(ProtocolError::TooManyPresenceEntries) => return End::TooBig,
                     };
                     if messages.is_empty() {
                         continue;
