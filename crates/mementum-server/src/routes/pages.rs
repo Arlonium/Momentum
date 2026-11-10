@@ -38,11 +38,12 @@ const MARKDOWN: &str = "text/markdown; charset=utf-8";
 
 /// `GET /api/v1/tree`.
 pub(crate) async fn tree(State(state): State<AppState>) -> Result<Json<Tree>, ApiError> {
-    let nodes = state.store.list_nodes(state.space_id).await?;
+    let space_id = state.default_space().await?;
+    let nodes = state.store.list_nodes(space_id).await?;
     Ok(Json(Tree {
         // Le type de l'API ne change qu'avec les pages sous droits : d'ici là, `vaultId` porte
         // l'id de l'espace.
-        vault_id: state.space_id.to_string(),
+        vault_id: space_id.to_string(),
         nodes: nodes.iter().map(page_node).collect(),
     }))
 }
@@ -54,12 +55,13 @@ pub(crate) async fn create(
 ) -> Result<(StatusCode, Json<PageNode>), ApiError> {
     let Json(body) = body?;
     let title = title(body.title.as_deref())?;
+    let space_id = state.default_space().await?;
     let parent = match body.parent_id {
         None => None,
-        Some(id) => Some(parent(&state, &id).await?),
+        Some(id) => Some(parent(&state, space_id, &id).await?),
     };
     let after = match body.after_id {
-        None => last_child(&state, parent).await?,
+        None => last_child(&state, space_id, parent).await?,
         Some(None) => None,
         Some(Some(id)) => Some(after_id(&id)?),
     };
@@ -75,7 +77,7 @@ pub(crate) async fn create(
     let node = state
         .store
         .create_node(NewNode {
-            space_id: state.space_id,
+            space_id,
             parent_id: parent,
             after,
             kind: NodeKind::Page,
@@ -112,14 +114,16 @@ pub(crate) async fn update(
     let Json(body) = body?;
     let title = body.title.as_deref().map(|t| title(Some(t))).transpose()?;
     if body.parent_id.is_some() || body.after_id.is_some() {
+        // L'espace de la page : celui que `state.page` vient de vérifier.
+        let space_id = node.space_id;
         let parent = match body.parent_id {
             None => node.parent_id,
             Some(None) => None,
-            Some(Some(p)) => Some(parent(&state, &p).await?),
+            Some(Some(p)) => Some(parent(&state, space_id, &p).await?),
         };
         let after = match body.after_id {
             // Si la page est déjà la dernière, le store la laisse en place.
-            None => last_child(&state, parent).await?,
+            None => last_child(&state, space_id, parent).await?,
             Some(None) => None,
             Some(Some(a)) => Some(after_id(&a)?),
         };
@@ -296,10 +300,10 @@ pub fn title(raw: Option<&str>) -> Result<String, ApiError> {
 }
 
 /// Le parent visé : une page de l'espace, sinon `422 invalid_parent`.
-async fn parent(state: &AppState, raw: &str) -> Result<Uuid, ApiError> {
+async fn parent(state: &AppState, space_id: Uuid, raw: &str) -> Result<Uuid, ApiError> {
     let id = Uuid::parse_str(raw).map_err(|_| ApiError::invalid_parent())?;
     match state.store.get_node(id).await? {
-        Some(node) if node.space_id == state.space_id => Ok(id),
+        Some(node) if node.space_id == space_id => Ok(id),
         _ => Err(ApiError::invalid_parent()),
     }
 }
@@ -310,8 +314,12 @@ fn after_id(raw: &str) -> Result<Uuid, ApiError> {
 
 /// Le dernier enfant de `parent` (`None` = racine), pour placer une page en
 /// fin de liste.
-async fn last_child(state: &AppState, parent: Option<Uuid>) -> Result<Option<Uuid>, ApiError> {
-    let nodes = state.store.list_nodes(state.space_id).await?;
+async fn last_child(
+    state: &AppState,
+    space_id: Uuid,
+    parent: Option<Uuid>,
+) -> Result<Option<Uuid>, ApiError> {
+    let nodes = state.store.list_nodes(space_id).await?;
     Ok(nodes
         .into_iter()
         .filter(|n| n.parent_id == parent)

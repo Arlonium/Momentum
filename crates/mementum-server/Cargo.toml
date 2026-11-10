@@ -9,8 +9,16 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+# Mots de passe : Argon2id, hachage au format PHC.
+argon2.workspace = true
 axum = { workspace = true, features = ["http1", "json", "query", "tokio", "ws"] }
-# Les accès posés sur une page neuve (`Grant`).
+# Jetons de session et d'invitation, écrits en base64url.
+base64.workspace = true
+# Cookie de session : lecture de l'en-tête `Cookie`, écriture de `Set-Cookie`.
+cookie.workspace = true
+# Octets aléatoires des jetons.
+getrandom.workspace = true
+# Les accès posés sur une page neuve (`Grant`), les rôles dans un espace.
 mementum-acl.workspace = true
 mementum-crdt.workspace = true
 mementum-md.workspace = true
@@ -22,13 +30,15 @@ serde.workspace = true
 # Messages en français pour un corps JSON refusé (erreurs de serde gardées par axum).
 serde_json.workspace = true
 serde_path_to_error.workspace = true
-tokio = { workspace = true, features = ["net", "signal"] }
+# SHA-256 des jetons : la base ne garde que leur hachage.
+sha2.workspace = true
+# `sync` : une inscription à la fois, et les calculs Argon2 chacun leur tour.
+tokio = { workspace = true, features = ["net", "signal", "sync"] }
 tracing.workspace = true
 ts-rs.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-base64.workspace = true
 # Client Yjs de test (Ruling R6) pour la route `/sync/{id}`.
 mementum-sync = { workspace = true, features = ["testkit"] }
 serde_json.workspace = true

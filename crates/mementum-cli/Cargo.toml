@@ -23,6 +23,8 @@ mementum-md.workspace = true
 # Client Yjs de test (Ruling R6) : `killed.rs` le connecte au binaire lancé en sous-processus.
 mementum-sync = { workspace = true, features = ["testkit"] }
 serde_json.workspace = true
+# Une base du lot 1, écrite par sa seule migration (copie d'avant migration, `cli.rs`).
+sqlx.workspace = true
 sysinfo.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

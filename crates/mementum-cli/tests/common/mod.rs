@@ -37,9 +37,16 @@ impl Server {
 
     /// Comme [`Server::start`], avec des variables d'environnement en plus.
     pub fn start_with_env(data_dir: &Path, vars: &[(&str, &str)]) -> Server {
+        Server::start_with_args(data_dir, &[], vars)
+    }
+
+    /// Comme [`Server::start`], avec d'autres options de `serve` et des
+    /// variables d'environnement en plus.
+    pub fn start_with_args(data_dir: &Path, args: &[&str], vars: &[(&str, &str)]) -> Server {
         let mut child = Command::new(env!("CARGO_BIN_EXE_mementum"))
             .args(["serve", "--bind", "127.0.0.1:0", "--data-dir"])
             .arg(data_dir)
+            .args(args)
             .envs(vars.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -127,6 +134,18 @@ impl Server {
     pub fn http(&self, method: &str, path: &str, json: Option<&str>) -> (u16, String) {
         http(self.addr, method, path, json)
     }
+
+    /// Requête HTTP vers ce serveur, avec des en-têtes en plus ; rend aussi
+    /// celles de la réponse.
+    pub fn request(
+        &self,
+        method: &str,
+        path: &str,
+        json: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> Response {
+        request(self.addr, method, path, json, headers)
+    }
 }
 
 impl Drop for Server {
@@ -135,9 +154,94 @@ impl Drop for Server {
     }
 }
 
+/// Écrit dans `db` une base telle que le code du lot 1 la laisse, comme dans
+/// les tests du store : les options de connexion de `Store::open`, la seule
+/// migration `0001_init.sql` lancée par sqlx, puis une organisation, un coffre
+/// et une page écrits en SQL. Les connexions sont fermées au retour.
+pub fn lot1_database(db: &Path) {
+    use sqlx::sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+    };
+    let migrations = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../mementum-store/migrations/0001_init.sql"),
+        migrations.path().join("0001_init.sql"),
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let options = SqliteConnectOptions::new()
+            .filename(db)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Full)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_millis(5000));
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(migrations.path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        for sql in [
+            "INSERT INTO orgs (id, slug, name, created_at) \
+             VALUES ('01890000-0000-7000-8000-000000000001', 'default', 'default', 1000)",
+            "INSERT INTO vaults (id, org_id, name, kind, created_at) \
+             VALUES ('01890000-0000-7000-8000-000000000002', \
+                     '01890000-0000-7000-8000-000000000001', 'Mon coffre', 'personal', 1001)",
+            "INSERT INTO nodes \
+                 (id, org_id, vault_id, kind, title, position, created_at, updated_at) \
+             VALUES ('01890000-0000-7000-8000-000000000003', \
+                     '01890000-0000-7000-8000-000000000001', \
+                     '01890000-0000-7000-8000-000000000002', 'page', 'Accueil', 'a0', 2000, 2000)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+    });
+}
+
+/// La réponse d'une requête HTTP.
+pub struct Response {
+    pub status: u16,
+    /// Les en-têtes, noms en minuscules.
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl Response {
+    /// Le cookie de session posé par la réponse, sous la forme à renvoyer
+    /// dans une en-tête `Cookie` (`mementum_session=<jeton>`).
+    pub fn session_cookie(&self) -> Option<String> {
+        self.headers
+            .iter()
+            .filter(|(name, _)| name == "set-cookie")
+            .filter_map(|(_, value)| value.split(';').next())
+            .find(|pair| pair.starts_with("mementum_session="))
+            .map(str::to_string)
+    }
+}
+
 /// Une requête HTTP/1.1 (`Connection: close`), corps JSON facultatif.
 /// Renvoie le statut et le corps de la réponse.
 pub fn http(addr: SocketAddr, method: &str, path: &str, json: Option<&str>) -> (u16, String) {
+    let response = request(addr, method, path, json, &[]);
+    (response.status, response.body)
+}
+
+/// Comme [`http`], avec des en-têtes en plus ; rend aussi celles de la
+/// réponse.
+pub fn request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    json: Option<&str>,
+    headers: &[(&str, &str)],
+) -> Response {
     let mut stream =
         TcpStream::connect_timeout(&addr, Duration::from_secs(5)).expect("connexion HTTP");
     stream
@@ -150,6 +254,9 @@ pub fn http(addr: SocketAddr, method: &str, path: &str, json: Option<&str>) -> (
     );
     if json.is_some() {
         request.push_str("Content-Type: application/json\r\n");
+    }
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
     }
     request.push_str("\r\n");
     request.push_str(body);
@@ -164,10 +271,19 @@ pub fn http(addr: SocketAddr, method: &str, path: &str, json: Option<&str>) -> (
             .contains("transfer-encoding: chunked"),
         "réponse découpée inattendue : {head}"
     );
-    let status = head
-        .split(' ')
-        .nth(1)
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split(' ').nth(1))
         .and_then(|s| s.parse().ok())
         .expect("statut HTTP");
-    (status, body.to_string())
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    Response {
+        status,
+        headers,
+        body: body.to_string(),
+    }
 }

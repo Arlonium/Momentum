@@ -1,304 +1,22 @@
-//! API HTTP du serveur. Les requêtes passent par `app()` en mémoire
-//! (`tower::ServiceExt::oneshot`) ; la WebSocket, par un écouteur sur un port
-//! libre de 127.0.0.1 (jamais 8080, Ruling R24).
-//!
-//! Les journaux vérifiés sont ceux du fil du test : les tests qui en lisent
-//! tournent en `current_thread` (défaut de `#[tokio::test]`), routes et
-//! acteurs compris.
+//! API HTTP du serveur : pages, MMD, synchronisation, garde-fous réseau. Les
+//! aides (application en mémoire, journaux, SQL direct) sont dans
+//! `common/mod.rs`.
+
+mod common;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::path::Path;
 
-use axum::Router;
-use axum::body::{Body, Bytes};
-use axum::http::{Method, Request, StatusCode, header};
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use common::{Logs, TestApp, WAIT, assert_french, exec_sql, handshake};
 use mementum_acl::{Grant, Level, Subject};
 use mementum_schema::SCHEMA_VERSION;
-use mementum_server::{Config, Info, PageNode, Tree};
+use mementum_server::Info;
 use mementum_store::Store;
 use mementum_sync::testkit::Client;
-use serde_json::{Value, json};
-use tempfile::TempDir;
-use tower::ServiceExt;
+use serde_json::json;
 use uuid::Uuid;
-
-/// Délai maximal d'une attente de convergence.
-const WAIT: Duration = Duration::from_secs(10);
-
-struct TestApp {
-    _dir: TempDir,
-    cfg: Config,
-    router: Router,
-}
-
-struct Reply {
-    status: StatusCode,
-    content_type: Option<String>,
-    body: Bytes,
-}
-
-impl Reply {
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|e| {
-            panic!(
-                "réponse {} illisible en JSON ({e}) : {:?}",
-                self.status,
-                String::from_utf8_lossy(&self.body)
-            )
-        })
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8(self.body.to_vec()).expect("une réponse en UTF-8")
-    }
-
-    /// Vérifie le statut et la forme d'une erreur : `{ "error": code,
-    /// "message": texte non vide }`, en JSON.
-    fn assert_error(&self, status: StatusCode, code: &str) -> Value {
-        assert_eq!(self.status, status, "réponse : {}", self.text());
-        assert_eq!(
-            self.content_type.as_deref(),
-            Some("application/json"),
-            "une erreur est en JSON"
-        );
-        let body = self.json();
-        assert_eq!(body["error"], code, "réponse : {body}");
-        assert!(
-            body["message"].as_str().is_some_and(|m| !m.is_empty()),
-            "message d'erreur attendu : {body}"
-        );
-        body
-    }
-}
-
-impl TestApp {
-    async fn new() -> TestApp {
-        TestApp::with_bind("127.0.0.1:0").await
-    }
-
-    /// `app()` ne lie pas l'adresse : `bind` ne règle que les contrôles.
-    async fn with_bind(bind: &str) -> TestApp {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config {
-            bind: bind.parse().unwrap(),
-            // Un dossier qui n'existe pas encore : `app` le crée.
-            data_dir: dir.path().join("donnees"),
-        };
-        let router = mementum_server::app(&cfg).await.unwrap();
-        TestApp {
-            _dir: dir,
-            cfg,
-            router,
-        }
-    }
-
-    /// Envoie la requête avec `Host: localhost` si elle n'en a pas (comme un
-    /// navigateur, ou le mandataire de Vite).
-    async fn send(&self, mut req: Request<Body>) -> Reply {
-        if !req.headers().contains_key(header::HOST) {
-            req.headers_mut()
-                .insert(header::HOST, "localhost".parse().unwrap());
-        }
-        self.send_raw(req).await
-    }
-
-    /// Envoie la requête telle quelle.
-    async fn send_raw(&self, req: Request<Body>) -> Reply {
-        let res = self.router.clone().oneshot(req).await.unwrap();
-        let status = res.status();
-        let content_type = res
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .map(|v| v.to_str().unwrap().to_string());
-        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        Reply {
-            status,
-            content_type,
-            body,
-        }
-    }
-
-    async fn get(&self, uri: &str) -> Reply {
-        self.send(Request::get(uri).body(Body::empty()).unwrap())
-            .await
-    }
-
-    async fn json(&self, method: Method, uri: &str, body: Value) -> Reply {
-        self.send(
-            Request::builder()
-                .method(method)
-                .uri(uri)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-    }
-
-    async fn post(&self, body: Value) -> Reply {
-        self.json(Method::POST, "/api/v1/pages", body).await
-    }
-
-    async fn create(&self, body: Value) -> PageNode {
-        let reply = self.post(body).await;
-        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
-        serde_json::from_slice(&reply.body).unwrap()
-    }
-
-    async fn patch(&self, id: &str, body: Value) -> Reply {
-        self.json(Method::PATCH, &format!("/api/v1/pages/{id}"), body)
-            .await
-    }
-
-    async fn patched(&self, id: &str, body: Value) -> PageNode {
-        let reply = self.patch(id, body).await;
-        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
-        serde_json::from_slice(&reply.body).unwrap()
-    }
-
-    async fn get_mmd(&self, id: &str) -> Reply {
-        self.get(&format!("/api/v1/pages/{id}/mmd")).await
-    }
-
-    async fn put_mmd(&self, id: &str, mmd: impl Into<Body>) -> Reply {
-        self.send(
-            Request::put(format!("/api/v1/pages/{id}/mmd"))
-                .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
-                .body(mmd.into())
-                .unwrap(),
-        )
-        .await
-    }
-
-    async fn tree(&self) -> Tree {
-        let reply = self.get("/api/v1/tree").await;
-        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
-        serde_json::from_slice(&reply.body).unwrap()
-    }
-
-    async fn node(&self, id: &str) -> PageNode {
-        self.tree()
-            .await
-            .nodes
-            .into_iter()
-            .find(|n| n.id == id)
-            .unwrap_or_else(|| panic!("page {id} absente de l'arbre"))
-    }
-
-    /// Titres des enfants de `parent` (`None` = racine), dans l'ordre des
-    /// positions.
-    async fn children(&self, parent: Option<&str>) -> Vec<String> {
-        let mut nodes: Vec<PageNode> = self
-            .tree()
-            .await
-            .nodes
-            .into_iter()
-            .filter(|n| n.parent_id.as_deref() == parent)
-            .collect();
-        nodes.sort_by(|a, b| a.position.cmp(&b.position));
-        nodes.into_iter().map(|n| n.title).collect()
-    }
-
-    /// Sert l'application sur un port libre de 127.0.0.1.
-    async fn listen(&self) -> std::net::SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let router = self.router.clone();
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        addr
-    }
-
-    fn db_path(&self) -> PathBuf {
-        self.cfg.db_path()
-    }
-
-    async fn node_titled(&self, title: &str) -> PageNode {
-        self.tree()
-            .await
-            .nodes
-            .into_iter()
-            .find(|n| n.title == title)
-            .unwrap_or_else(|| panic!("aucune page « {title} »"))
-    }
-}
-
-/// Journaux `tracing` émis sur le fil courant tant que la valeur vit.
-struct Logs {
-    buffer: Arc<Mutex<Vec<u8>>>,
-    _guard: tracing::subscriber::DefaultGuard,
-}
-
-struct LogWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Logs {
-    fn capture() -> Logs {
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let writer = buffer.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || LogWriter(writer.clone()))
-            .with_ansi(false)
-            .with_max_level(tracing::Level::DEBUG)
-            .finish();
-        Logs {
-            buffer,
-            _guard: tracing::subscriber::set_default(subscriber),
-        }
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.buffer.lock().unwrap_or_else(PoisonError::into_inner))
-            .into_owned()
-    }
-}
-
-/// Exécute du SQL sur la base, par une connexion à part (pannes simulées).
-async fn exec_sql(db: &Path, sql: &str) {
-    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db.display()))
-        .await
-        .unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(sql.to_string()))
-        .execute(&pool)
-        .await
-        .unwrap();
-    pool.close().await;
-}
-
-/// Poignée de main WebSocket avec une en-tête `Origin` facultative :
-/// `Ok` si elle aboutit, sinon le statut HTTP de la réponse.
-async fn handshake(url: &str, origin: Option<&str>) -> Result<(), u16> {
-    use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
-    let mut request = url.into_client_request().unwrap();
-    if let Some(origin) = origin {
-        request
-            .headers_mut()
-            .insert(header::ORIGIN, origin.parse().unwrap());
-    }
-    match tokio_tungstenite::connect_async(request).await {
-        Ok(_) => Ok(()),
-        Err(tungstenite::Error::Http(response)) => Err(response.status().as_u16()),
-        Err(e) => panic!("poignée de main : {e}"),
-    }
-}
 
 fn titles(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
@@ -325,7 +43,14 @@ async fn health_and_info() {
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(
         reply.json(),
-        json!({ "version": env!("CARGO_PKG_VERSION"), "schemaVersion": SCHEMA_VERSION })
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "schemaVersion": SCHEMA_VERSION,
+            // Inscriptions sur invitation par défaut (Ruling R50) ; aucun
+            // compte n'existe encore.
+            "signup": "invite",
+            "setup": true,
+        })
     );
     let info: Info = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(info.schema_version, SCHEMA_VERSION);
@@ -908,31 +633,6 @@ async fn title_rules() {
     );
 }
 
-/// Un message d'erreur en français, sans la cause de serde ou de std recopiée.
-fn assert_french(body: &Value, expected: &[&str]) {
-    let message = body["message"].as_str().unwrap();
-    for part in expected {
-        assert!(message.contains(part), "« {part} » absent de « {message} »");
-    }
-    // Tournures de serde, d'axum et de std.
-    for english in [
-        "expected",
-        "invalid type",
-        "invalid value",
-        "unknown field",
-        "missing field",
-        "Failed",
-        "at line",
-        "EOF",
-        "syntax",
-    ] {
-        assert!(
-            !message.contains(english),
-            "message pas en français : « {message} »"
-        );
-    }
-}
-
 #[tokio::test]
 async fn errors_are_json() {
     let t = TestApp::new().await;
@@ -1181,17 +881,27 @@ async fn host_is_checked_on_loopback() {
 }
 
 /// Ruling R31 : hors de la boucle locale, le contrôle de `Host` est désactivé
-/// et le démarrage le journalise ; l'`Origin` de `/sync` doit alors être
-/// locale ou celle du serveur lui-même.
+/// et le démarrage le journalise : ce sont les comptes qui protègent (R51),
+/// et tant que les routes de pages répondent sans session, il le dit aussi.
+/// L'`Origin` de `/sync` doit alors être locale ou celle du serveur lui-même.
 #[tokio::test]
 async fn non_loopback_bind_warns_and_skips_host_check() {
     let logs = Logs::capture();
     let t = TestApp::with_bind("0.0.0.0:0").await;
     let text = logs.text();
-    assert!(
-        text.contains("WARN") && text.contains("boucle locale") && text.contains("Host"),
-        "avertissement attendu : {text}"
-    );
+    let warning = text
+        .lines()
+        .find(|line| line.contains("boucle locale"))
+        .unwrap_or_else(|| panic!("avertissement attendu : {text}"));
+    for part in ["WARN", "Host", "comptes", "sans session"] {
+        assert!(warning.contains(part), "« {part} » absent de : {warning}");
+    }
+    // Sur la boucle locale, rien de tel.
+    drop(logs);
+    let logs = Logs::capture();
+    TestApp::new().await;
+    assert!(!logs.text().contains("boucle locale"), "{}", logs.text());
+    drop(logs);
     let reply = t
         .send_raw(
             Request::get("/health")
@@ -1221,6 +931,35 @@ async fn non_loopback_bind_warns_and_skips_host_check() {
     t.send_raw(sync("http://evil.example"))
         .await
         .assert_error(StatusCode::FORBIDDEN, "bad_origin");
+}
+
+/// Ruling R67 : quand le démarrage migre une base, le store en écrit d'abord
+/// une copie, et c'est le serveur qui le journalise, avec son chemin et sa
+/// taille.
+#[tokio::test]
+async fn startup_logs_the_backup_made_before_migrating() {
+    let logs = Logs::capture();
+    let (t, lot1) = TestApp::on_lot1_database().await;
+    let text = logs.text();
+    drop(logs);
+    let backup = t.cfg.data_dir.join("mementum.db.avant-0002.bak");
+    assert!(backup.is_file(), "copie attendue : {}", backup.display());
+    let bytes = std::fs::metadata(&backup).unwrap().len();
+    let line = text
+        .lines()
+        .find(|line| line.contains("mementum.db.avant-0002.bak"))
+        .unwrap_or_else(|| panic!("la copie n'est pas nommée dans le journal : {text}"));
+    assert!(line.contains("INFO"), "{line}");
+    assert!(line.contains("migrée"), "{line}");
+    assert!(line.contains(&format!("bytes={bytes}")), "{line}");
+    assert!(line.contains("kept=false"), "{line}");
+    // La base migrée sert bien les pages du lot 1.
+    assert_eq!(t.tree().await.vault_id, lot1.vault.to_string());
+
+    // Au démarrage suivant, plus rien à migrer : rien à dire.
+    let logs = Logs::capture();
+    let _router = mementum_server::app(&t.cfg).await.unwrap();
+    assert!(!logs.text().contains(".bak"), "{}", logs.text());
 }
 
 /// Ruling R31 : une `Origin` présente doit nommer la boucle locale ; sans

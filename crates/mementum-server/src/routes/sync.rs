@@ -1,10 +1,11 @@
 //! `GET /sync/{id}?schema=N` : la WebSocket de synchronisation d'une page,
 //! au protocole de y-websocket, servie par [`Hub::serve_connection`].
 //!
-//! Une en-tête `Origin` d'une autre page que celles de la boucle locale ou du
-//! serveur donne `403 bad_origin`, avant tout (Ruling R31 : une WebSocket
-//! échappe à CORS). L'existence de la page est vérifiée ensuite, **avant** la
-//! poignée de main : une page inconnue donne `404`, sans acteur ni écriture.
+//! Une en-tête `Origin` d'une autre page que celles de la boucle locale, du
+//! serveur ou de son adresse publique donne `403 bad_origin`, avant tout
+//! (Rulings R31 et R51 : une WebSocket échappe à CORS). L'existence de la page
+//! est vérifiée ensuite, **avant** la poignée de main : une page inconnue
+//! donne `404`, sans acteur ni écriture.
 //!
 //! `schema` est la version de schéma du client. Absente ou illisible, elle
 //! vaut 0 : un client qui ne la donne pas est traité comme d'un autre schéma,
@@ -19,7 +20,7 @@ use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, Uri, header};
+use axum::http::{HeaderMap, Uri};
 use axum::response::Response;
 use mementum_sync::ws::WsBytes;
 
@@ -37,12 +38,11 @@ pub(crate) async fn sync(
     query: Result<Query<HashMap<String, String>>, QueryRejection>,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Result<Response, ApiError> {
-    // Illisible, une `Origin` présente est refusée.
-    let origin = match headers.get(header::ORIGIN) {
-        Some(value) => Some(value.to_str().unwrap_or("")),
-        None => None,
-    };
-    if !guard::origin_allowed(origin, guard::request_host(&headers, &uri)) {
+    if !guard::origin_allowed(
+        guard::request_origin(&headers),
+        guard::request_host(&headers, &uri),
+        state.public_origin.as_deref(),
+    ) {
         return Err(guard::bad_origin());
     }
     let id = page_id(path)?;

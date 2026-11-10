@@ -1,28 +1,47 @@
-//! Garde-fous réseau (Ruling R31) : le lot 1 n'a pas d'authentification.
+//! Garde-fous réseau (Rulings R31 et R51). Ils complètent les comptes, ils ne
+//! les remplacent pas.
 //!
-//! - **DNS rebinding.** Écouter sur la boucle locale ne suffit pas : un site
-//!   ouvert dans le navigateur peut faire pointer son propre nom vers
-//!   `127.0.0.1`, puis lire l'arbre et écrire par `PUT mmd`. Quand le serveur
-//!   écoute sur la boucle locale, toute requête dont l'en-tête `Host` ne nomme
-//!   pas `localhost`, `127.0.0.1` ou `[::1]` (port quelconque) reçoit
-//!   `421 bad_host`. Le mandataire de Vite garde `Host: localhost:<port>`.
-//! - **Détournement de WebSocket.** Une WebSocket échappe à CORS : à
-//!   `/sync/{id}`, une en-tête `Origin` présente doit nommer l'un de ces trois
-//!   hôtes, ou être l'origine du serveur lui-même (même hôte et même port que
-//!   `Host`) ; sinon `403 bad_origin`. Sans `Origin` (client hors navigateur),
-//!   la connexion passe.
+//! - **DNS rebinding** (boucle locale seulement). Écouter sur la boucle locale
+//!   ne suffit pas : un site ouvert dans le navigateur peut faire pointer son
+//!   propre nom vers `127.0.0.1`, puis parler au serveur comme s'il était de
+//!   la même origine. Quand le serveur écoute sur la boucle locale, toute
+//!   requête dont l'en-tête `Host` ne nomme pas `localhost`, `127.0.0.1` ou
+//!   `[::1]` (port quelconque) reçoit `421 bad_host`. Le mandataire de Vite
+//!   garde `Host: localhost:<port>`.
+//! - **Écritures et WebSocket venues d'un autre site.** Toute requête autre
+//!   que `GET`, `HEAD` ou `OPTIONS`, et toute connexion à `/sync/{id}` (une
+//!   WebSocket échappe à CORS), est refusée par `403 bad_origin` si elle
+//!   porte une en-tête `Origin` qui n'est ni celle d'une page de la boucle
+//!   locale, ni celle du serveur lui-même (même hôte et même port que
+//!   `Host`), ni celle de l'adresse publique (`MEMENTUM_PUBLIC_URL`). Sans
+//!   `Origin` (client hors navigateur), la requête passe : il n'y a pas de
+//!   navigateur dont on abuserait.
 //!
-//! Ces deux protections ne valent que sur la boucle locale. Hors d'elle, le
-//! contrôle de `Host` est désactivé (le démarrage le journalise) : le DNS
-//! rebinding n'est plus refusé. Celui de l'`Origin` reste, mais il ne protège
-//! plus du DNS rebinding : il compare l'`Origin` à une en-tête `Host` que
-//! personne n'a vérifiée, et une page servie sous un nom qui pointe vers le
-//! serveur a une `Origin` égale à son `Host`. Il n'arrête alors que le site
-//! tiers ordinaire, dont l'`Origin` diffère du `Host`. Sans authentification
-//! au lot 1, n'écouter que sur la boucle locale.
+//! Ce que cela protège, et ce que cela ne protège pas :
+//!
+//! - le contrôle de l'`Origin` arrête le site tiers ordinaire, qui ferait
+//!   écrire le navigateur d'une personne connectée à sa place. Le cookie de
+//!   session en `SameSite=Lax` l'arrête déjà dans les navigateurs récents :
+//!   c'est une seconde barrière. C'est aussi, tant que les routes de pages
+//!   répondent sans session (jusqu'aux pages sous droits), la seule contre
+//!   une écriture lancée par un site tiers vers un serveur de la boucle
+//!   locale ;
+//! - il n'arrête pas le DNS rebinding : il compare l'`Origin` à une en-tête
+//!   `Host` que personne n'a vérifiée hors de la boucle locale, et une page
+//!   servie sous un nom qui pointe vers le serveur a une `Origin` égale à son
+//!   `Host` ;
+//! - hors de la boucle locale, le contrôle de `Host` est désactivé (le
+//!   démarrage le journalise) : là, **ce sont les comptes qui protègent, pas
+//!   ces contrôles**. Un DNS rebinding n'emporte pas le cookie de session,
+//!   lié au vrai nom d'hôte : il ne fait donc rien de plus qu'un visiteur
+//!   sans session. Mais tant que les routes de pages et `/sync` répondent
+//!   sans session, un visiteur sans session lit et modifie les pages : d'ici
+//!   aux pages sous droits, n'écouter que sur la boucle locale ;
+//! - aucun de ces contrôles n'arrête un client hors navigateur, qui écrit les
+//!   en-têtes qu'il veut : lui n'a que ce que sa session lui donne.
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -62,16 +81,22 @@ pub(crate) fn request_host<'a>(
     }
 }
 
-/// Couche de toutes les routes : `421 bad_host` si le serveur écoute sur la
-/// boucle locale et que `Host` ne la nomme pas.
-pub(crate) async fn check_host(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if state.check_host
-        && !request_host(request.headers(), request.uri()).is_some_and(is_loopback_authority)
-    {
+/// L'en-tête `Origin`, si la requête en porte une. Illisible, elle vaut une
+/// origine vide, donc refusée.
+pub(crate) fn request_origin(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::ORIGIN)
+        .map(|value| value.to_str().unwrap_or(""))
+}
+
+/// Couche de toutes les routes, fallbacks compris :
+/// - `421 bad_host` si le serveur écoute sur la boucle locale et que `Host`
+///   ne la nomme pas ;
+/// - `403 bad_origin` si la requête écrit (tout sauf `GET`, `HEAD` et
+///   `OPTIONS`) et porte une `Origin` que [`origin_allowed`] refuse.
+pub(crate) async fn check(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let host = request_host(request.headers(), request.uri());
+    if state.check_host && !host.is_some_and(is_loopback_authority) {
         return ApiError::new(
             StatusCode::MISDIRECTED_REQUEST,
             ErrorCode::BadHost,
@@ -79,14 +104,35 @@ pub(crate) async fn check_host(
         )
         .into_response();
     }
+    let writes = !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    if writes
+        && !origin_allowed(
+            request_origin(request.headers()),
+            host,
+            state.public_origin.as_deref(),
+        )
+    {
+        return bad_origin().into_response();
+    }
     next.run(request).await
 }
 
-/// L'`Origin` d'une connexion `/sync` est-elle acceptée ? Absente : oui.
-/// Présente : seulement `http(s)://` vers la boucle locale, ou vers l'hôte
-/// même du serveur (`host`, l'en-tête `Host` de la requête).
-pub(crate) fn origin_allowed(origin: Option<&str>, host: Option<&str>) -> bool {
+/// L'`Origin` d'une écriture ou d'une connexion `/sync` est-elle acceptée ?
+/// Absente : oui. Présente : seulement `http(s)://` vers la boucle locale ou
+/// vers l'hôte même du serveur (`host`, l'en-tête `Host` de la requête), ou
+/// exactement `public`, l'origine de l'adresse publique, schéma compris.
+pub(crate) fn origin_allowed(
+    origin: Option<&str>,
+    host: Option<&str>,
+    public: Option<&str>,
+) -> bool {
     let Some(origin) = origin else { return true };
+    if public.is_some_and(|public| public.eq_ignore_ascii_case(origin)) {
+        return true;
+    }
     let Some(authority) = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"))
@@ -104,8 +150,8 @@ pub(crate) fn bad_origin() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
         ErrorCode::BadOrigin,
-        "en-tête Origin refusée : la synchronisation n'accepte que les pages servies par \
-         localhost, 127.0.0.1, [::1] ou par ce serveur",
+        "en-tête Origin refusée : seules les pages servies par localhost, 127.0.0.1, [::1], par \
+         ce serveur ou par son adresse publique peuvent écrire et se synchroniser",
     )
 }
 
@@ -147,13 +193,15 @@ mod tests {
     #[test]
     fn origins() {
         let host = Some("192.168.1.10:8080");
-        assert!(origin_allowed(None, host));
-        assert!(origin_allowed(Some("http://localhost:5173"), host));
-        assert!(origin_allowed(Some("https://[::1]"), host));
-        assert!(origin_allowed(Some("http://192.168.1.10:8080"), host));
-        assert!(!origin_allowed(Some("http://192.168.1.10:9090"), host));
-        assert!(!origin_allowed(Some("http://192.168.1.10:8080"), None));
+        let allowed = |origin, host| origin_allowed(origin, host, None);
+        assert!(allowed(None, host));
+        assert!(allowed(Some("http://localhost:5173"), host));
+        assert!(allowed(Some("https://[::1]"), host));
+        assert!(allowed(Some("http://192.168.1.10:8080"), host));
+        assert!(!allowed(Some("http://192.168.1.10:9090"), host));
+        assert!(!allowed(Some("http://192.168.1.10:8080"), None));
         for refused in [
+            "",
             "http://evil.example",
             "null",
             "file://",
@@ -161,7 +209,43 @@ mod tests {
             "http://",
             "http://localhost/chemin",
         ] {
-            assert!(!origin_allowed(Some(refused), host), "{refused}");
+            assert!(!allowed(Some(refused), host), "{refused}");
         }
+    }
+
+    /// L'origine de l'adresse publique est admise telle quelle (même schéma,
+    /// même hôte, même port), quel que soit l'en-tête `Host`.
+    #[test]
+    fn public_origin() {
+        let public = Some("https://notes.exemple.fr");
+        for host in [None, Some("127.0.0.1:8080"), Some("notes.exemple.fr")] {
+            assert!(origin_allowed(
+                Some("https://notes.exemple.fr"),
+                host,
+                public
+            ));
+            assert!(origin_allowed(
+                Some("HTTPS://Notes.Exemple.FR"),
+                host,
+                public
+            ));
+            assert!(origin_allowed(None, host, public));
+        }
+        let host = Some("10.0.0.5:8080");
+        for refused in [
+            "http://notes.exemple.fr",
+            "https://notes.exemple.fr:8443",
+            "https://notes.exemple.fr/",
+            "https://evil.notes.exemple.fr",
+            "https://notes.exemple.fr.evil.example",
+            "https://evil.example",
+            "null",
+            "",
+        ] {
+            assert!(!origin_allowed(Some(refused), host, public), "{refused}");
+        }
+        // L'hôte même du serveur et la boucle locale restent admis.
+        assert!(origin_allowed(Some("http://10.0.0.5:8080"), host, public));
+        assert!(origin_allowed(Some("http://localhost:5173"), host, public));
     }
 }

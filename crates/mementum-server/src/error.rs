@@ -1,9 +1,10 @@
 //! Erreurs de l'API : toujours en JSON, `{ "error": <code>, "message": <texte
-//! en français> }` (plus `line` pour un MMD illisible).
+//! en français> }` (plus `line` pour un MMD illisible, et l'en-tête
+//! `Retry-After` pour un `429`).
 
 use axum::Json;
 use axum::extract::rejection::{BytesRejection, JsonRejection};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mementum_crdt::CrdtError;
 use mementum_md::MmdError;
@@ -17,6 +18,8 @@ use crate::types::{ErrorBody, ErrorCode};
 pub struct ApiError {
     status: StatusCode,
     body: ErrorBody,
+    /// Secondes de l'en-tête `Retry-After` (`429 too_many_attempts`).
+    retry_after: Option<u64>,
 }
 
 impl ApiError {
@@ -28,6 +31,7 @@ impl ApiError {
                 message: message.into(),
                 line: None,
             },
+            retry_after: None,
         }
     }
 
@@ -58,6 +62,78 @@ impl ApiError {
         )
     }
 
+    /// `401 unauthenticated` : pas de session.
+    pub fn unauthenticated() -> ApiError {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Unauthenticated,
+            "session absente ou échue : se connecter",
+        )
+    }
+
+    /// `401 invalid_credentials` : la même réponse pour une adresse inconnue,
+    /// un mot de passe faux et un compte sans mot de passe.
+    pub fn invalid_credentials() -> ApiError {
+        ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::InvalidCredentials,
+            "adresse e-mail ou mot de passe invalide",
+        )
+    }
+
+    /// `429 too_many_attempts`, avec `Retry-After: <secondes>`.
+    pub fn too_many_attempts(retry_after: u64) -> ApiError {
+        let mut error = ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::TooManyAttempts,
+            format!(
+                "trop de tentatives pour cette adresse : réessayer dans {} min",
+                retry_after.div_ceil(60)
+            ),
+        );
+        error.retry_after = Some(retry_after);
+        error
+    }
+
+    /// `403 signup_closed`.
+    pub fn signup_closed() -> ApiError {
+        ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::SignupClosed,
+            "les inscriptions sont sur invitation : il faut le lien d'une invitation pour créer \
+             un compte",
+        )
+    }
+
+    /// `409 email_taken`.
+    pub fn email_taken() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::EmailTaken,
+            "un compte porte déjà cette adresse e-mail",
+        )
+    }
+
+    /// `422 invalid_email`.
+    pub fn invalid_email() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidEmail,
+            "adresse e-mail invalide : une adresse comme nom@exemple.fr, sans espace, de 254 \
+             caractères au plus",
+        )
+    }
+
+    /// `404 invalid_invitation` : la même réponse pour un jeton inconnu,
+    /// échu, révoqué ou déjà accepté.
+    pub fn invalid_invitation() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::InvalidInvitation,
+            "invitation introuvable : le lien est faux, échu, révoqué, ou il a déjà servi",
+        )
+    }
+
     /// `500 internal` : le détail va dans le journal, pas dans la réponse.
     pub fn internal(error: &dyn std::fmt::Display) -> ApiError {
         tracing::error!(%error, "erreur interne");
@@ -71,7 +147,13 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(self.body)).into_response()
+        let mut response = (self.status, Json(self.body)).into_response();
+        if let Some(seconds) = self.retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+        }
+        response
     }
 }
 
@@ -86,10 +168,10 @@ impl From<StoreError> for ApiError {
                 ErrorCode::Cycle,
                 "une page ne peut pas aller sous elle-même ni sous une de ses descendantes",
             ),
-            // Comptes, membres et corbeille : aucune route ne les appelle encore. Ces erreurs
+            StoreError::EmailTaken => ApiError::email_taken(),
+            // Membres et corbeille : aucune route ne les appelle encore. Ces erreurs
             // recevront leur code avec les routes qui les produisent.
             e @ (StoreError::Sqlx(_)
-            | StoreError::EmailTaken
             | StoreError::LastOwner
             | StoreError::ParentTrashed
             | StoreError::NotTrashed) => ApiError::internal(&e),
