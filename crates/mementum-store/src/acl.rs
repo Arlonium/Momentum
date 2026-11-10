@@ -364,11 +364,13 @@ impl Store {
             .collect()
     }
 
+    /// **Réservée aux tests** : n'applique aucune vérification de droits. Ni qui demande, ni son
+    /// niveau, ni la corbeille (R87), ni la règle `last_full_access` (R70), ni le plancher de
+    /// l'accès général (R93), ni la ligne de qui le restreint (R122). Une route passe par
+    /// [`Store::change_access`].
+    ///
     /// Pose un accès sur le nœud : le niveau remplace celui que le sujet y avait. `NotFound` si
     /// le nœud n'existe pas.
-    ///
-    /// Sans la règle `last_full_access` (R70) ni contrôle de qui demande : pour les tests. Le
-    /// partage d'une page passe par [`Store::change_access`].
     pub async fn set_grant(&self, node_id: Uuid, grant: Grant) -> Result<(), StoreError> {
         let id = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -379,11 +381,13 @@ impl Store {
         Ok(())
     }
 
+    /// **Réservée aux tests** : n'applique aucune vérification de droits. Ni qui demande, ni son
+    /// niveau, ni la corbeille (R87), ni la règle `last_full_access` (R70), ni le plancher de
+    /// l'accès général (R93), ni la ligne de qui le restreint (R122). Une route passe par
+    /// [`Store::change_access`].
+    ///
     /// Retire l'accès du sujet sur le nœud ; sans effet (et sans rien écrire) s'il n'en avait
     /// pas. `NotFound` si le nœud n'existe pas.
-    ///
-    /// Sans la règle `last_full_access` (R70) ni contrôle de qui demande : pour les tests. Le
-    /// partage d'une page passe par [`Store::change_access`].
     pub async fn remove_grant(&self, node_id: Uuid, subject: Subject) -> Result<(), StoreError> {
         let id = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;

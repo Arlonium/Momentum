@@ -421,6 +421,11 @@ impl Store {
         .collect()
     }
 
+    /// **Réservée aux tests** : n'applique aucune vérification de droits. Elle ne sait pas qui
+    /// demande, et ne relit pas les rôles sur lesquels il a décidé (`Expected`, R100). Une route
+    /// passe par une invitation ([`Store::accept_invitation`], [`Store::sign_up`]) pour faire
+    /// entrer quelqu'un dans un espace, et par [`Store::set_role`] pour changer un rôle.
+    ///
     /// Ajoute le compte à l'espace avec ce rôle, ou le lui donne s'il en a un plus bas : un rôle
     /// existant n'est jamais abaissé (sans effet, et sans rien écrire, s'il est déjà au moins
     /// aussi haut). `NotFound` si l'espace ou le compte n'existe pas.
@@ -547,6 +552,11 @@ impl Store {
         Ok(())
     }
 
+    /// **Réservée aux tests** : n'applique aucune vérification de droits. Elle fait de n'importe
+    /// quel compte le propriétaire des espaces sans membre. Le serveur ne les confie qu'au
+    /// premier compte de l'instance, dans la transaction de son inscription : une route passe
+    /// par [`Store::sign_up`].
+    ///
     /// Fait le compte `owner` de tout espace qui n'a aucun membre (les espaces venus du lot 1),
     /// et rend ces espaces, par date de création, à leur révision nouvelle. `NotFound` (sans
     /// rien écrire) si le compte n'existe pas et qu'il y avait un espace à prendre.
@@ -557,12 +567,13 @@ impl Store {
         Ok(spaces)
     }
 
+    /// **Réservée aux tests** : n'applique aucune vérification de droits. Ni qui demande, ni son
+    /// niveau, ni la corbeille (R87), ni la règle `last_full_access` (R70). Une route passe par
+    /// [`Store::change_access`].
+    ///
     /// Retire la ligne `user:<id>` posée sur le nœud (sans effet s'il n'y en a pas) ; si la
     /// personne est `guest` et n'a plus aucune ligne dans l'espace, elle en sort, avec ses
     /// invitations en attente. `NotFound` si le nœud n'existe pas.
-    ///
-    /// Sans la règle `last_full_access` (R70) ni contrôle de qui demande : pour les tests. Le
-    /// partage d'une page passe par `Store::change_access`.
     pub async fn revoke_user_grant(&self, node_id: Uuid, user_id: Uuid) -> Result<(), StoreError> {
         let node = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;

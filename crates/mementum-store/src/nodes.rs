@@ -563,6 +563,11 @@ impl Store {
         Ok(updated.node)
     }
 
+    /// **Réservée aux tests** : n'applique aucune vérification de droits. Le déplacement n'est
+    /// pas lié au parent lu ([`Place::from`], R91), et rien ne nomme qui déplace : à la racine,
+    /// le nœud ne reçoit aucune ligne pour lui, et la transaction ne revérifie ni son rôle ni
+    /// son niveau (`root_grant`, R82 et R105). Une route passe par [`Store::update_node`].
+    ///
     /// Déplace un nœud sous `parent_id` (`None` = racine), après `after` (`None` = en tête).
     /// `Cycle` si le nouveau parent est le nœud ou un de ses descendants ; `NotFound` si le nœud,
     /// le parent ou `after` manque, ou s'ils sont d'un autre espace. Les refus n'écrivent rien.
