@@ -176,17 +176,41 @@ struct Lines {
 
 impl Lines {
     fn add(&mut self, grant: Grant, user: Uuid, role: Role) {
-        let level = match grant.subject {
-            Subject::User(id) if id == user => Some(grant.level),
-            Subject::User(_) => None,
-            Subject::Members => {
-                self.members_line = true;
-                members_level(role, grant.level)
-            }
-        };
+        self.members_line |= grant.subject == Subject::Members;
         self.other_subject |= grant.subject != Subject::User(user);
-        self.level = self.level.max(level);
+        self.level = self.level.max(line_level(grant, user, role));
     }
+}
+
+/// Le niveau qu'une ligne donne à `user`, de rôle `role` : la sienne, son niveau ; `members`,
+/// celui de [`members_level`] ; celle d'un autre, rien. La seule règle par ligne, pour
+/// [`SpaceAccess::compute`] comme pour [`chain_level`].
+fn line_level(grant: Grant, user: Uuid, role: Role) -> Option<Level> {
+    match grant.subject {
+        Subject::User(id) if id == user => Some(grant.level),
+        Subject::User(_) => None,
+        Subject::Members => members_level(role, grant.level),
+    }
+}
+
+/// Le niveau de `user`, de rôle `role`, sur une page dont `chain` porte les lignes : celles de
+/// la page et de tous ses ancêtres jusqu'à la racine, dans n'importe quel ordre. C'est le
+/// niveau que [`SpaceAccess::compute`] donne à la page (test `chain_level_matches_compute`),
+/// sans calculer tout l'espace : le store s'en sert dans la transaction d'un changement
+/// d'accès. `None` : la personne ne voit pas la page.
+///
+/// À l'appelant de s'assurer que la chaîne monte jusqu'à une racine : un nœud pris dans un
+/// cycle de parents, ou suspendu sous un cycle, n'est vu par personne. La corbeille ne change
+/// pas le niveau.
+pub fn chain_level<'a>(
+    chain: impl IntoIterator<Item = &'a Grant>,
+    user: Uuid,
+    role: Role,
+) -> Option<Level> {
+    chain
+        .into_iter()
+        .filter_map(|&grant| line_level(grant, user, role))
+        .max()
 }
 
 /// Ce qu'une ligne `(members, level)` donne à quelqu'un de rôle `role`.

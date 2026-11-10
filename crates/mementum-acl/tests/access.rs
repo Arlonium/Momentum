@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use mementum_acl::{
     AccessCache, Action, Grant, Level, NodeAccess, Role, Section, SpaceAccess, Subject, TreeNode,
+    chain_level,
 };
 use proptest::prelude::*;
 use proptest::sample::Index;
@@ -519,6 +520,29 @@ proptest! {
             prop_assert!(
                 child.is_some_and(|c| c.level >= parent.level && c.section == parent.section),
                 "{:?} : {:?} sous {:?}", node, child, parent
+            );
+        }
+    }
+
+    /// Le niveau sur une chaîne (`chain_level`, ce que le store vérifie dans la transaction d'un
+    /// changement d'accès, sans calculer tout l'espace) est toujours celui que
+    /// `SpaceAccess::compute` donne à la page, ou son absence, pour chaque rôle.
+    #[test]
+    fn chain_level_matches_compute(space in space(), who in 0..PEOPLE, role in role()) {
+        let user = person(who);
+        let access = SpaceAccess::compute(&space.nodes, &space.grants, user, Some(role));
+        for node in &space.nodes {
+            let ancestors = chain(&space.nodes, node.id);
+            let lines: Vec<Grant> = space
+                .grants
+                .iter()
+                .filter(|(on, _)| ancestors.contains(on))
+                .map(|(_, g)| *g)
+                .collect();
+            prop_assert_eq!(
+                chain_level(&lines, user, role),
+                access.node(node.id).map(|a| a.level),
+                "{:?} ({:?})", node, role
             );
         }
     }

@@ -4,7 +4,8 @@
 //!   une seule forme texte : `as_str` l'écrit (`Display` pour [`Subject`], qui porte un uuid),
 //!   `parse` ne relit qu'elle.
 //! - `access.rs` : [`SpaceAccess::compute`], le calcul pur de ce qu'une personne voit d'un
-//!   espace, et à quel niveau.
+//!   espace, et à quel niveau ; [`chain_level`], le même niveau pour une seule page, d'après
+//!   les lignes de sa chaîne.
 //! - `cache.rs` : [`AccessCache`], ces calculs gardés tant que la révision de l'espace ne bouge
 //!   pas, dans la limite d'un nombre de nœuds visibles (Ruling R59).
 //!
@@ -18,7 +19,7 @@ use std::fmt;
 
 use uuid::Uuid;
 
-pub use access::{NodeAccess, SpaceAccess, TreeNode};
+pub use access::{NodeAccess, SpaceAccess, TreeNode, chain_level};
 pub use cache::AccessCache;
 
 /// Niveau d'accès à une page, du plus faible au plus fort.
