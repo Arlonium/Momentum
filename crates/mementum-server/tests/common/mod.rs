@@ -462,6 +462,16 @@ impl Browser<'_> {
         self.send(json_request(Method::POST, uri, &body)).await
     }
 
+    pub async fn patch(&self, uri: &str, body: Value) -> Reply {
+        self.send(json_request(Method::PATCH, uri, &body)).await
+    }
+
+    /// `DELETE` sans corps.
+    pub async fn delete(&self, uri: &str) -> Reply {
+        self.send(Request::delete(uri).body(Body::empty()).unwrap())
+            .await
+    }
+
     pub async fn sign_up(
         &self,
         email: &str,

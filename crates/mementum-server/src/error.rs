@@ -134,6 +134,53 @@ impl ApiError {
         )
     }
 
+    /// `404 not_found` : l'espace n'existe pas, **ou** la personne n'y a aucun
+    /// rôle. Les deux cas reçoivent exactement cette réponse : qui n'est pas
+    /// dans un espace n'apprend rien de lui, pas même qu'il existe.
+    pub fn space_not_found() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "espace introuvable",
+        )
+    }
+
+    /// `404 not_found` : la personne visée n'a pas de rôle dans l'espace (à qui
+    /// voit l'espace).
+    pub fn member_not_found() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "cette personne n'est pas dans l'espace",
+        )
+    }
+
+    /// `404 not_found` : l'invitation n'existe pas, est échue ou acceptée, **ou**
+    /// elle est d'un espace (d'une page) où la personne ne voit rien. Même
+    /// réponse dans tous ces cas.
+    pub fn invitation_not_found() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "invitation introuvable",
+        )
+    }
+
+    /// `403 forbidden` : une action au-dessus de son rôle, dans un espace qu'on
+    /// voit.
+    pub fn forbidden(message: impl Into<String>) -> ApiError {
+        ApiError::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, message)
+    }
+
+    /// `409 last_owner`.
+    pub fn last_owner() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::LastOwner,
+            "un espace garde au moins un propriétaire : en nommer un autre d'abord",
+        )
+    }
+
     /// `500 internal` : le détail va dans le journal, pas dans la réponse.
     pub fn internal(error: &dyn std::fmt::Display) -> ApiError {
         tracing::error!(%error, "erreur interne");
@@ -169,12 +216,12 @@ impl From<StoreError> for ApiError {
                 "une page ne peut pas aller sous elle-même ni sous une de ses descendantes",
             ),
             StoreError::EmailTaken => ApiError::email_taken(),
-            // Membres et corbeille : aucune route ne les appelle encore. Ces erreurs
-            // recevront leur code avec les routes qui les produisent.
-            e @ (StoreError::Sqlx(_)
-            | StoreError::LastOwner
-            | StoreError::ParentTrashed
-            | StoreError::NotTrashed) => ApiError::internal(&e),
+            StoreError::LastOwner => ApiError::last_owner(),
+            // Corbeille : aucune route ne l'appelle encore. Ces erreurs recevront leur
+            // code avec les routes qui les produisent.
+            e @ (StoreError::Sqlx(_) | StoreError::ParentTrashed | StoreError::NotTrashed) => {
+                ApiError::internal(&e)
+            }
         }
     }
 }
@@ -284,7 +331,7 @@ fn describe_json(error: &serde_json::Error, path: Option<String>) -> String {
             Some(field) => format!("type invalide pour « {field} »"),
             None => "le corps doit être un objet JSON".to_string(),
         }
-    } else if text.starts_with("invalid value") {
+    } else if text.starts_with("invalid value") || text.starts_with("unknown variant") {
         match field {
             Some(field) => format!("valeur invalide pour « {field} »"),
             None => "valeur invalide".to_string(),

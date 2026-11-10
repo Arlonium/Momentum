@@ -187,6 +187,167 @@ impl From<mementum_acl::Role> for Role {
     }
 }
 
+impl From<Role> for mementum_acl::Role {
+    fn from(role: Role) -> mementum_acl::Role {
+        match role {
+            Role::Owner => mementum_acl::Role::Owner,
+            Role::Admin => mementum_acl::Role::Admin,
+            Role::Member => mementum_acl::Role::Member,
+            Role::Guest => mementum_acl::Role::Guest,
+        }
+    }
+}
+
+/// Niveau d'accès à une page, du plus faible au plus fort.
+// La forme d'API de `mementum_acl::Level`, écrite comme `Level::as_str` (test
+// `level_is_written_like_the_acl_level`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// Peut lire.
+    Read,
+    /// Peut commenter (au lot 2, comme `read`).
+    Comment,
+    /// Peut modifier.
+    Edit,
+    /// Accès complet : déplacer, partager, supprimer.
+    Full,
+}
+
+impl From<mementum_acl::Level> for Level {
+    fn from(level: mementum_acl::Level) -> Level {
+        match level {
+            mementum_acl::Level::Read => Level::Read,
+            mementum_acl::Level::Comment => Level::Comment,
+            mementum_acl::Level::Edit => Level::Edit,
+            mementum_acl::Level::Full => Level::Full,
+        }
+    }
+}
+
+/// Corps de `POST /api/v1/spaces`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateSpace {
+    /// Rogné : 1 à 100 caractères.
+    pub name: String,
+}
+
+/// Corps de `PATCH /api/v1/spaces/{id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateSpace {
+    /// Rogné : 1 à 100 caractères.
+    pub name: String,
+}
+
+/// Une personne qui a un rôle dans un espace (`GET /api/v1/spaces/{id}/members`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Member {
+    pub user_id: String,
+    pub name: String,
+    pub email: String,
+    pub role: Role,
+}
+
+/// Corps de `PATCH /api/v1/spaces/{id}/members/{userId}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateMember {
+    pub role: Role,
+}
+
+/// Le rôle que donne une invitation dans un espace : on n'invite ni un propriétaire (il se
+/// nomme parmi les membres) ni un invité (il vient d'une invitation sur une page).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum InviteRole {
+    Admin,
+    Member,
+}
+
+impl From<InviteRole> for mementum_acl::Role {
+    fn from(role: InviteRole) -> mementum_acl::Role {
+        match role {
+            InviteRole::Admin => mementum_acl::Role::Admin,
+            InviteRole::Member => mementum_acl::Role::Member,
+        }
+    }
+}
+
+/// Corps de `POST /api/v1/spaces/{id}/invitations`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InviteToSpace {
+    /// Rognée et mise en minuscules ; gardée pour l'affichage, jamais vérifiée : c'est le
+    /// jeton qui fait foi (Ruling R47).
+    pub email: String,
+    pub role: InviteRole,
+}
+
+/// Une invitation créée. Le jeton n'est donné qu'ici, une seule fois : le serveur n'en garde
+/// que le SHA-256.
+// Sans `Debug`, comme tout type qui porte un secret : il ne peut pas finir dans un journal par
+// mégarde.
+#[derive(Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationCreated {
+    pub id: String,
+    /// 32 octets aléatoires en base64url, sans remplissage : à mettre dans le lien
+    /// d'invitation.
+    pub token: String,
+}
+
+/// Une invitation qui attend d'être acceptée, sans son jeton
+/// (`GET /api/v1/spaces/{id}/invitations`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInvitation {
+    pub id: String,
+    pub email: String,
+    /// Le rôle donné dans l'espace ; `null` pour une invitation sur une page.
+    pub role: Option<Role>,
+    /// Le niveau donné sur la page ; `null` pour une invitation dans l'espace.
+    pub level: Option<Level>,
+    /// La page ; `null` pour une invitation dans l'espace.
+    pub page_id: Option<String>,
+    /// Millisecondes Unix : l'invitation vaut jusqu'à cet instant, exclu.
+    #[ts(type = "number")]
+    pub expires_at: i64,
+}
+
+/// Corps de `POST /api/v1/invitations/lookup` et `POST /api/v1/invitations/accept`.
+// Sans `Debug` : il porte le jeton.
+#[derive(Clone, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InvitationToken {
+    pub token: String,
+}
+
+/// Ce que dit un lien d'invitation, avant de l'accepter (`POST /api/v1/invitations/lookup`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationInfo {
+    pub space_name: String,
+    /// Le titre de la page ; `null` pour une invitation dans l'espace.
+    pub page_title: Option<String>,
+    /// Le nom de qui a invité.
+    pub invited_by: String,
+    /// L'adresse à qui l'invitation a été faite (pour l'affichage : c'est le jeton qui fait
+    /// foi).
+    pub email: String,
+}
+
+/// Une invitation acceptée (`POST /api/v1/invitations/accept`) : où aller ensuite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Accepted {
+    pub space_id: String,
+    /// La page ; `null` pour une invitation dans l'espace.
+    pub page_id: Option<String>,
+}
+
 /// Corps de `POST /api/v1/pages`. Tous les champs sont facultatifs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -287,6 +448,11 @@ pub enum ErrorCode {
     /// Jeton d'invitation inconnu, échu, révoqué ou déjà accepté : la même
     /// réponse dans les quatre cas. Statut 404.
     InvalidInvitation,
+    /// Action au-dessus de son rôle dans un espace qu'on voit (ou de son niveau
+    /// sur une page qu'on voit). Sans aucun rôle, c'est `not_found`. Statut 403.
+    Forbidden,
+    /// L'espace perdrait son dernier propriétaire. Statut 409.
+    LastOwner,
 }
 
 /// Corps de toute réponse d'erreur.
@@ -323,20 +489,32 @@ pub fn bindings() -> Vec<(String, String)> {
     // Réglages fixes : les variables `TS_RS_*` ne changent rien.
     let cfg = ts_rs::Config::new();
     let mut files = vec![
+        file::<Accepted>(&cfg),
         file::<ChangePassword>(&cfg),
         file::<CreatePage>(&cfg),
+        file::<CreateSpace>(&cfg),
         file::<ErrorBody>(&cfg),
         file::<ErrorCode>(&cfg),
         file::<Info>(&cfg),
+        file::<InvitationCreated>(&cfg),
+        file::<InvitationInfo>(&cfg),
+        file::<InvitationToken>(&cfg),
+        file::<InviteRole>(&cfg),
+        file::<InviteToSpace>(&cfg),
+        file::<Level>(&cfg),
         file::<LogIn>(&cfg),
         file::<Me>(&cfg),
+        file::<Member>(&cfg),
         file::<PageNode>(&cfg),
+        file::<PendingInvitation>(&cfg),
         file::<Role>(&cfg),
         file::<SignUp>(&cfg),
         file::<SignupMode>(&cfg),
         file::<SpaceInfo>(&cfg),
         file::<Tree>(&cfg),
+        file::<UpdateMember>(&cfg),
         file::<UpdatePage>(&cfg),
+        file::<UpdateSpace>(&cfg),
         file::<UserInfo>(&cfg),
     ];
     let mut index = String::from(
@@ -363,6 +541,28 @@ mod tests {
         for role in [Acl::Owner, Acl::Admin, Acl::Member, Acl::Guest] {
             let written = serde_json::to_value(Role::from(role)).unwrap();
             assert_eq!(written, role.as_str());
+        }
+    }
+
+    /// Et dans l'autre sens, sans perte.
+    #[test]
+    fn role_roundtrips_to_the_acl_role() {
+        use mementum_acl::Role as Acl;
+        for role in [Acl::Owner, Acl::Admin, Acl::Member, Acl::Guest] {
+            assert_eq!(Acl::from(Role::from(role)), role);
+        }
+        assert_eq!(Acl::from(InviteRole::Admin), Acl::Admin);
+        assert_eq!(Acl::from(InviteRole::Member), Acl::Member);
+    }
+
+    /// Le niveau de l'API s'écrit comme celui des droits, pour chacun des
+    /// quatre.
+    #[test]
+    fn level_is_written_like_the_acl_level() {
+        use mementum_acl::Level as Acl;
+        for level in [Acl::Read, Acl::Comment, Acl::Edit, Acl::Full] {
+            let written = serde_json::to_value(Level::from(level)).unwrap();
+            assert_eq!(written, level.as_str());
         }
     }
 

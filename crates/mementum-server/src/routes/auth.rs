@@ -16,8 +16,6 @@
 //! espace, puis session) tourne dans sa propre tâche : elle va au bout même
 //! si le client coupe la connexion.
 
-use std::future::Future;
-
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -28,8 +26,9 @@ use uuid::Uuid;
 
 use crate::auth::{self, AuthUser, SESSION_TTL_MS};
 use crate::error::ApiError;
+use crate::routes::invitations;
 use crate::types::{ChangePassword, LogIn, Me, SignUp, SignupMode, SpaceInfo, UserInfo};
-use crate::{AppState, now_ms};
+use crate::{AppState, now_ms, to_completion};
 
 /// `POST /api/v1/auth/signup` : `201` et le compte, session ouverte.
 pub(crate) async fn signup(
@@ -75,11 +74,8 @@ async fn register(
     // crée pas deux comptes.
     let _turn = state.signups.lock().await;
     if let Some(hash) = invitation {
-        state
-            .store
-            .invitation_by_token(hash, now_ms())
-            .await
-            .map_err(internal)?
+        invitations::valid_invitation(&state, hash)
+            .await?
             .ok_or_else(ApiError::invalid_invitation)?;
     } else if state.signup != SignupMode::Open
         && state.store.count_users().await.map_err(internal)? > 0
@@ -126,17 +122,21 @@ async fn register(
         }
     }
     match invitation {
-        Some(hash) => match state.store.accept_invitation(hash, user.id, now_ms()).await {
-            Ok(_) => {}
-            // Révoquée, échue ou prise par un compte déjà inscrit depuis la
-            // vérification, quelques millisecondes plus tôt : le compte
-            // existe, sans elle, donc sans aucun droit.
-            Err(StoreError::NotFound) => tracing::warn!(
-                user_id = %user.id,
-                "invitation retirée pendant l'inscription : compte créé sans elle"
-            ),
-            Err(e) => return Err(internal(e)),
-        },
+        // Le même chemin que `POST /api/v1/invitations/accept`.
+        Some(hash) => {
+            if invitations::accept_invitation(&state, hash, user.id)
+                .await?
+                .is_none()
+            {
+                // Révoquée, échue ou prise par un compte déjà inscrit depuis
+                // la vérification, quelques millisecondes plus tôt : le compte
+                // existe, sans elle, donc sans aucun droit.
+                tracing::warn!(
+                    user_id = %user.id,
+                    "invitation retirée pendant l'inscription : compte créé sans elle"
+                );
+            }
+        }
         // Sans invitation, chacun a un espace à lui.
         None => {
             let spaces = state.store.spaces_of(user.id).await.map_err(internal)?;
@@ -330,14 +330,6 @@ async fn me_of(state: &AppState, user: AuthUser) -> Result<Me, ApiError> {
             })
             .collect(),
     })
-}
-
-/// Mène `work` au bout dans sa propre tâche, même si la requête est
-/// abandonnée en route (client parti).
-async fn to_completion<T: Send + 'static>(
-    work: impl Future<Output = Result<T, ApiError>> + Send + 'static,
-) -> Result<T, ApiError> {
-    tokio::spawn(work).await.map_err(internal)?
 }
 
 /// Une erreur du store qui ne désigne ici aucune page : `500 internal`.
