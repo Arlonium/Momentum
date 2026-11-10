@@ -453,3 +453,31 @@ test("unreadable_server_version_offers_to_retry", async ({ browser }) => {
   await waitSynced(p);
   expect(await p.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBe(true);
 });
+
+test("render_error_shows_a_screen_not_a_blank_page", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const p = await newUser(browser, alice);
+  const errors: string[] = [];
+  p.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  // Le serveur rend un compte sans la liste de ses espaces : l'application, qui la lit dès son
+  // premier rendu, lève une exception.
+  await p.route("**/api/v1/me", async (route) => {
+    const response = await route.fetch();
+    const me = (await response.json()) as Record<string, unknown>;
+    await route.fulfill({ response, json: { ...me, spaces: null } });
+  });
+  await p.goto("/");
+  // Un écran le dit, au lieu d'une page blanche ; ni message d'erreur, ni pile.
+  await expect(p.getByRole("heading", { name: "Quelque chose s'est mal passé" })).toBeVisible();
+  const screen = await p.locator("body").innerText();
+  expect(screen).not.toMatch(/TypeError|Cannot read|\.tsx|at \w+ \(/);
+  // L'erreur est dans la console.
+  expect(errors.some((text) => text.includes("Mementum : erreur pendant l'affichage."))).toBe(true);
+
+  // « Recharger » relance l'application ; le serveur répondant comme il faut, elle s'ouvre.
+  await p.unroute("**/api/v1/me");
+  await p.getByRole("button", { name: "Recharger" }).click();
+  await expect(p.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
+});

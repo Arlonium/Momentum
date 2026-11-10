@@ -9,6 +9,7 @@ import { App } from "./App";
 import { loadEditor } from "./editor/LazyEditor";
 import { reloadWhenRestored } from "./session/bfcache";
 import { SessionGate } from "./session/SessionGate";
+import { ErrorBoundary } from "./ui/ErrorBoundary";
 
 // Rendu par le cache arrière-avant (Précédent après une déconnexion) : rechargé, pour que la
 // session soit relue au lieu d'afficher l'application d'avant.
@@ -18,8 +19,11 @@ reloadWhenRestored(window, () => location.reload());
 // échec n'a pas d'effet ici : l'ouverture d'une page le redemande, et dit s'il manque encore.
 loadEditor().catch(() => {});
 
+// Autour de tout : une exception pendant le rendu montre un écran, pas une page blanche.
 createRoot(document.getElementById("root")!).render(
-  <SessionGate>
-    <App />
-  </SessionGate>,
+  <ErrorBoundary>
+    <SessionGate>
+      <App />
+    </SessionGate>
+  </ErrorBoundary>,
 );
