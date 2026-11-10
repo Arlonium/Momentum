@@ -18,8 +18,8 @@ struct Entries {
 
 /// Les [`SpaceAccess`] déjà calculés, par `(personne, espace)`, chacun avec la révision de
 /// l'espace (`spaces.rev`) à laquelle il a été calculé. Une autre révision est un échec : le
-/// store incrémente `rev` dans la transaction de toute écriture qui touche à la structure ou
-/// aux droits de l'espace.
+/// store incrémente `rev` dans la transaction de toute écriture qui change une entrée du calcul
+/// des accès, et d'elles seules (Ruling R83 : ni un titre, ni une place sous le même parent).
 ///
 /// L'appelant lit la révision **avant** les données du calcul, ou dans la même transaction.
 /// Lue après, elle pourrait couvrir un calcul fait sur des données plus anciennes, et un droit

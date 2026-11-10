@@ -11,8 +11,8 @@ use crate::{Store, StoreError, now_ms, parse_uuid};
 pub struct Space {
     pub id: Uuid,
     pub name: String,
-    /// Révision : incrémentée par toute écriture qui touche à la structure ou aux droits de
-    /// l'espace (règle de `rev`, en tête de la crate).
+    /// Révision : incrémentée par toute écriture qui change une entrée du calcul des accès de
+    /// l'espace, et par elles seules (règle de `rev`, en tête de la crate).
     pub rev: i64,
     /// Millisecondes Unix.
     pub created_at: i64,
