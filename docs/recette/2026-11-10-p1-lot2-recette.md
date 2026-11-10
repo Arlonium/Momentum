@@ -167,7 +167,7 @@ Crée de la même façon deux autres pages : « Courses », puis « Lectures ».
 
 Remarques :
 
-## F. Partager une page (7 minutes)
+## F. Partager une page (8 minutes)
 
 Fenêtre 1 : ouvre « Notes privées ». Elle doit être à la racine de « Privé », sans page parente. Si elle a été rangée sous une autre page, clique son « … », puis « Sortir de la page parente ».
 
@@ -188,6 +188,7 @@ Fenêtre 1 : ouvre « Notes privées ». Elle doit être à la racine de « Priv
 - [ ] **F15.** Fenêtre 1 : clique le « + » de « Page d'équipe », tape « Compte rendu », puis Entrée. Sur cette sous-page, clique « Partager ». « Tous les membres de l'espace » doit être coché et marqué « hérité », et « Seulement les invités » grisé : une page parente ouvre déjà cette page aux membres.
 - [ ] **F16.** Dans ce panneau, ouvre la liste des niveaux, à côté de « hérité ». Seul « Accès complet » doit se choisir : les niveaux plus bas sont grisés.
 - [ ] **F17.** En bas du panneau, clique « Copier le lien ». Le bouton doit dire « Lien copié ». Appuie sur Échap : le panneau doit se fermer.
+- [ ] **F18.** Fenêtre 1 : clique le « + » du titre « Espace », tape « Page reprise », puis Entrée. Clique « Partager », et coche « Seulement les invités ». Tu dois rester sur la page, nommé « (toi) » en « Accès complet », et la page doit passer de « Espace » à « Privé » dans ta barre latérale : une page d'équipe peut redevenir privée.
 
 Remarques :
 
@@ -277,6 +278,7 @@ Elles sont voulues, ou reportées à un lot suivant. Ne les signale pas comme de
 - Un lien d'invitation donne l'accès à qui le détient : l'adresse e-mail n'est pas vérifiée, et rien n'est envoyé (R47).
 - Un niveau qui monte ne s'applique pas tout seul : il faut cliquer « Rouvrir la page ». C'est voulu, pour ne pas changer l'éditeur sous les yeux de qui lit (R111).
 - Sous une page ouverte aux membres, « Seulement les invités » est grisé : une sous-page ne peut pas être plus fermée que sa page parente dans ce lot (R93, R110).
+- Après un `mementum user set-password` sur le serveur, une page déjà ouverte dans un navigateur reste connectée jusqu'à sa prochaine reconnexion. Pour chasser quelqu'un, il faut redémarrer le serveur après la commande (R125).
 - Si tu te reconnectes avec un autre compte dans la fenêtre « Ta session a pris fin », toute l'application se recharge. C'est voulu : le texte tapé par l'un ne doit pas partir sous le nom de l'autre (R115).
 - Deux onglets du même navigateur ne se parlent plus directement : tout passe par le serveur. Hors ligne, ce que tu tapes dans l'un n'apparaît dans l'autre qu'au retour du réseau.
 - Dans le menu Partager, rien ne dit si une personne est membre ou invitée. La confirmation de « Retirer » parle donc d'une nouvelle invitation pour tout le monde (reporté au lot suivant).
