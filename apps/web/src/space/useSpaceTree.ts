@@ -9,6 +9,10 @@
 // Deux lectures ne se croisent pas : celle d'un autre espace, ou qu'une relecture remplace,
 // est abandonnée ; celle qu'un changement fait ici a dépassée (elle date d'avant) est refaite.
 //
+// Une relecture qui rend le même arbre (les mêmes pages, les mêmes champs, le même ordre) ne
+// change rien : l'arbre chargé reste le même objet, et la barre latérale n'est pas rendue de
+// nouveau. Un menu ouvert, un glisser en cours ou le focus n'en sont pas dérangés.
+//
 // Une lecture qui échoue (serveur injoignable) ne retire rien de l'écran : l'arbre chargé
 // reste, l'échec est dit, et la lecture repart d'elle-même quand le réseau revient.
 //
@@ -25,6 +29,19 @@ import { messageOf } from "../session/forms";
 
 /** L'arbre chargé : les pages d'un espace que la personne voit, hors corbeille. */
 export type LoadedTree = { spaceId: string; nodes: PageNode[] };
+
+/** Les mêmes pages, avec les mêmes champs, dans le même ordre ? */
+export function sameNodes(a: PageNode[], b: PageNode[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((node, index) => {
+    const other = b[index];
+    const fields = Object.keys(node) as (keyof PageNode)[];
+    return (
+      fields.length === Object.keys(other).length &&
+      fields.every((field) => node[field] === other[field])
+    );
+  });
+}
 
 /** Au retour sur l'onglet, l'arbre n'est relu que si sa dernière lecture a au moins cet âge. */
 export const REFRESH_INTERVAL_MS = 5_000;
@@ -98,7 +115,7 @@ export function useTreeReader(
   spaceId: string | null,
   reading: Reading,
 ): string | null {
-  const { changes, reloads, set, reload } = tree;
+  const { changes, reloads, set, reload, latest } = tree;
   const { retries } = reading;
   // Les rappels du dernier rendu : en changer ne relance pas la lecture.
   const callbacks = useRef(reading);
@@ -118,7 +135,11 @@ export function useTreeReader(
         if (cancelled) return;
         // Une page créée ou renommée ici pendant la lecture : la réponse date d'avant.
         if (before !== changes.current) continue;
-        set({ spaceId, nodes: fetched.nodes });
+        // Le même arbre que celui qui est chargé : il reste, tel quel.
+        const loaded = latest();
+        const unchanged =
+          loaded !== null && loaded.spaceId === spaceId && sameNodes(loaded.nodes, fetched.nodes);
+        if (!unchanged) set({ spaceId, nodes: fetched.nodes });
         setError(null);
         return;
       }
@@ -132,7 +153,7 @@ export function useTreeReader(
     return () => {
       cancelled = true;
     };
-  }, [spaceId, reloads, retries, changes, set]);
+  }, [spaceId, reloads, retries, changes, set, latest]);
 
   // Une lecture a échoué : elle repart quand le navigateur retrouve le réseau.
   const failed = error !== null;

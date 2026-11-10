@@ -7,6 +7,7 @@ import { deferred, renderHook, settle, type Deferred } from "../test/hooks";
 import { page, unauthenticated, unreachable } from "../test/pages";
 import {
   REFRESH_INTERVAL_MS,
+  sameNodes,
   useSpaceTree,
   useTreeCatchUp,
   useTreeReader,
@@ -84,6 +85,78 @@ test("reload_reads_again_and_replaces_the_tree", async () => {
   expect(tree.current.loaded?.nodes).toEqual([a]);
 });
 
+test("reread_that_changes_nothing_keeps_the_loaded_tree", async () => {
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  const nodes = [page("a"), page("b", { parentId: "a" })];
+  await answer(0, "perso", nodes);
+  const loaded = tree.current.loaded;
+  // Les mêmes pages, les mêmes champs, le même ordre, dans d'autres objets (une autre réponse
+  // du serveur) : l'arbre chargé reste le même objet, et rien de ce qui en dépend n'est rendu
+  // de nouveau (un menu ouvert, un glisser en cours, le focus).
+  const rereads = async (answerNodes: PageNode[]) => {
+    await settle(() => tree.current.reload());
+    await answer(reads.length - 1, "perso", answerNodes);
+  };
+  await rereads(nodes.map((node) => ({ ...node })));
+  expect(tree.current.loaded).toBe(loaded);
+  expect(tree.current.latest()).toBe(loaded);
+
+  // Dès que quelque chose diffère, ce que le serveur rend remplace l'arbre : un champ…
+  const renamed = [page("a", { title: "Renommée ailleurs" }), page("b", { parentId: "a" })];
+  await rereads(renamed);
+  expect(tree.current.loaded?.nodes).toBe(renamed);
+  // … l'ordre…
+  const reordered = [renamed[1], renamed[0]];
+  await rereads(reordered);
+  expect(tree.current.loaded?.nodes).toBe(reordered);
+  // … une page de plus, ou de moins.
+  const more = [...reordered, page("c")];
+  await rereads(more);
+  expect(tree.current.loaded?.nodes).toBe(more);
+  const fewer = more.slice(0, 2);
+  await rereads(fewer);
+  expect(tree.current.loaded?.nodes).toBe(fewer);
+});
+
+test("reread_that_changes_nothing_still_clears_the_read_error", async () => {
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  const a = page("a");
+  await answer(0, "perso", [a]);
+  const loaded = tree.current.loaded;
+  await settle(() => tree.current.reload());
+  await settle(() => reads[1].answer.reject(unreachable()));
+  expect(tree.current.readError).toBe("Le serveur Mementum ne répond pas.");
+  // Le serveur revient, et rend le même arbre : le message part, l'arbre reste le même objet.
+  await settle(() => tree.current.reload());
+  await answer(2, "perso", [{ ...a }]);
+  expect(tree.current.readError).toBeNull();
+  expect(tree.current.loaded).toBe(loaded);
+});
+
+test("same_nodes_compares_pages_fields_and_order", () => {
+  const a = page("a");
+  const b = page("b", { parentId: "a" });
+  expect(sameNodes([], [])).toBe(true);
+  expect(sameNodes([a, b], [{ ...a }, { ...b }])).toBe(true);
+  expect(sameNodes([a, b], [b, a])).toBe(false);
+  expect(sameNodes([a, b], [a])).toBe(false);
+  expect(sameNodes([a], [a, b])).toBe(false);
+  // Chaque champ d'une page compte : ce qu'on y voit, où elle est, ce qu'on peut en faire.
+  const changes: Partial<PageNode>[] = [
+    { title: "Autre" },
+    { position: "a1" },
+    { parentId: "z" },
+    { level: "read" },
+    { section: "private" },
+    { updatedAt: 1 },
+    { trashedAt: 1 },
+    { spaceId: "ailleurs" },
+  ];
+  for (const change of changes) {
+    expect(sameNodes([a], [{ ...a, ...change }]), JSON.stringify(change)).toBe(false);
+  }
+});
+
 test("read_overtaken_by_a_local_change_is_made_again", async () => {
   const tree = await renderHook(hook, { spaceId: "perso" });
   const a = page("a");
@@ -97,7 +170,9 @@ test("read_overtaken_by_a_local_change_is_made_again", async () => {
   await answer(1, "perso", [a]);
   expect(tree.current.loaded?.nodes).toEqual([a, b]);
   expect(reads).toHaveLength(3);
-  const fresh = [page("a"), page("b")];
+  // La lecture refaite rend la page telle que le serveur l'a (une autre date) : c'est elle qui
+  // est montrée. (Identique à l'arbre chargé, elle le laisserait tel quel.)
+  const fresh = [page("a"), page("b", { updatedAt: 5 })];
   await answer(2, "perso", fresh);
   expect(tree.current.loaded?.nodes).toBe(fresh);
 
