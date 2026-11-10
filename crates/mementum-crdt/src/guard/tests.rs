@@ -3,19 +3,23 @@
 //!   (clients, horloges, longueurs, trous) ;
 //! - toute mise à jour que yrs intègre sans rien laisser en attente passe
 //!   [`Shape::check`] et `PageDoc::apply_update`.
+//!
+//! Et les métadonnées de la page (report M7 du lot 1) : un client n'y touche
+//! pas, le stockage se recharge comme avant.
 
 use std::collections::BTreeMap;
 
 use mementum_md::{Block, Content, arb, block_text, parse};
+use mementum_schema::SCHEMA_VERSION;
 use proptest::prelude::*;
 use yrs::updates::decoder::Decode;
 use yrs::{
-    Doc, OffsetKind, Options, ReadTxn, Transact, Update, Xml, XmlElementPrelim, XmlFragment,
-    XmlTextPrelim, merge_updates_v1,
+    Doc, Map, MapRef, OffsetKind, Options, ReadTxn, Transact, TransactionMut, Update, Xml,
+    XmlElementPrelim, XmlFragment, XmlTextPrelim, merge_updates_v1,
 };
 
 use super::{Kind, Shape};
-use crate::{FRAGMENT, PageDoc};
+use crate::{CrdtError, FRAGMENT, META, PageDoc};
 
 /// Ce qu'une mise à jour contient, vu par l'API publique de yrs : plages
 /// insérées (éléments et GC, fusionnées), horloge du premier bloc qui n'est
@@ -191,6 +195,152 @@ fn internal_skip_is_accepted_like_yrs() {
         page.apply_update(&waiting),
         Err(crate::CrdtError::Decode(_))
     ));
+}
+
+/// Mise à jour vide : l'état d'un client qui n'a encore rien reçu.
+const NOTHING: &[u8] = &[0, 0];
+
+/// Clé de la `Y.Map` des métadonnées qui porte la version du schéma.
+const SCHEMA_KEY: &str = "schemaVersion";
+
+/// La mise à jour que produit `edit` sur les métadonnées, chez un client
+/// (un `Y.Doc` brut, comme un navigateur) qui a reçu `state`.
+fn meta_edit(state: &[u8], edit: impl FnOnce(&mut TransactionMut, &MapRef)) -> Vec<u8> {
+    let doc = raw_doc();
+    // Avant toute transaction (interblocage de yrs avec la feature `sync`).
+    let meta = doc.get_or_insert_map(META);
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(state).unwrap())
+        .unwrap();
+    let mut txn = doc.transact_mut();
+    edit(&mut txn, &meta);
+    txn.encode_update_v1()
+}
+
+/// Report M7 du lot 1 : la mise à jour d'un client qui touche à la `Y.Map`
+/// des métadonnées est refusée, sous toutes ses formes. Une entrée qui en
+/// écrase une autre ne nomme pas son parent (elle le tient de l'entrée
+/// écrasée), et une suppression ne nomme que des identifiants : aucune des
+/// deux ne se reconnaît à la seule lecture de la mise à jour.
+#[test]
+fn client_cannot_overwrite_schema_version() {
+    type Edit = fn(&mut TransactionMut, &MapRef);
+    let (_, created) = PageDoc::new_page();
+    let cases: [(&str, &[u8], Edit); 5] = [
+        ("version écrasée", &created, |txn, meta| {
+            meta.insert(txn, SCHEMA_KEY, 999);
+        }),
+        ("version supprimée", &created, |txn, meta| {
+            meta.remove(txn, SCHEMA_KEY);
+        }),
+        ("autre clé", &created, |txn, meta| {
+            meta.insert(txn, "auteur", "x");
+        }),
+        // Écriture concurrente de celle du serveur : laquelle gagne dépend
+        // des identifiants de client.
+        (
+            "version écrite sans avoir reçu la page",
+            NOTHING,
+            |txn, meta| {
+                meta.insert(txn, SCHEMA_KEY, 999);
+            },
+        ),
+        // Un type que le schéma de la page admet ailleurs.
+        (
+            "élément posé à la place de la version",
+            &created,
+            |txn, meta| {
+                meta.insert(txn, SCHEMA_KEY, XmlElementPrelim::empty("paragraph"));
+            },
+        ),
+    ];
+    for (what, state, edit) in cases {
+        let update = meta_edit(state, edit);
+        let page = PageDoc::from_updates([created.as_slice()]).unwrap();
+        let refused = page.apply_client_update(&update);
+        assert!(
+            matches!(refused, Err(CrdtError::Structure(_))),
+            "{what} : {refused:?}"
+        );
+    }
+
+    // Le contenu, lui, passe. L'état complet d'un client aussi, tel qu'il le
+    // renvoie à la reconnexion : il porte l'entrée du serveur, que la page
+    // connaît déjà.
+    let page = PageDoc::from_updates([created.as_slice()]).unwrap();
+    let client = PageDoc::from_updates([created.as_slice()]).unwrap();
+    let typed = client.write_blocks(&parse("Bonjour\n").unwrap()).unwrap();
+    assert_eq!(page.apply_client_update(&typed), Ok(()));
+    assert_eq!(page.apply_client_update(&client.encode_state()), Ok(()));
+    assert_eq!(page.read_blocks(), client.read_blocks());
+    assert_eq!(page.schema_version(), Some(SCHEMA_VERSION));
+}
+
+/// Le refus ne vaut que pour ce qui arrive d'un client. Ce qui est en base
+/// (dont la mise à jour du serveur qui pose `schemaVersion`) repasse par la
+/// garde à chaque chargement : s'il y était refusé, toute page existante
+/// deviendrait illisible.
+#[test]
+fn stored_pages_still_load_after_the_guard_tightens() {
+    let (new_page, created) = PageDoc::new_page();
+    let snapshot = new_page.encode_state();
+    let stored: [(&str, &[u8]); 5] = [
+        (
+            "fixture p0-all-blocks",
+            include_bytes!("../../../../spec/mmd/fixtures/yjs/p0-all-blocks.bin"),
+        ),
+        (
+            "fixture all-blocks",
+            include_bytes!("../../../../spec/mmd/fixtures/yjs/all-blocks.bin"),
+        ),
+        (
+            "fixture non-default",
+            include_bytes!("../../../../spec/mmd/fixtures/yjs/non-default.bin"),
+        ),
+        ("page neuve, mise à jour du serveur", &created),
+        ("page neuve, instantané", &snapshot),
+    ];
+    let mut with_version = 0;
+    for (what, state) in stored {
+        // En instantané (`from_updates`), puis au journal d'une page déjà là.
+        let loaded = PageDoc::from_updates([state]).unwrap_or_else(|e| panic!("{what} : {e}"));
+        assert!(!loaded.read_blocks().is_empty(), "{what}");
+        let (page, _) = PageDoc::new_page();
+        assert_eq!(page.apply_update(state), Ok(()), "{what}");
+
+        // Le piège : la même mise à jour, venue d'un client, est refusée dès
+        // qu'elle pose la version.
+        if loaded.schema_version().is_some() {
+            with_version += 1;
+            let (fresh, _) = PageDoc::new_page();
+            assert!(
+                matches!(
+                    fresh.apply_client_update(state),
+                    Err(CrdtError::Structure(_))
+                ),
+                "{what}"
+            );
+        }
+    }
+    assert!(
+        with_version >= 2,
+        "la page neuve porte sa version, en mise à jour comme en instantané"
+    );
+    assert_eq!(new_page.schema_version(), Some(SCHEMA_VERSION));
+
+    // Une version récrite par le serveur (une migration du schéma, plus
+    // tard) se recharge du journal ; et l'état complet d'un client qui l'a
+    // reçue, où l'ancienne entrée figure parmi les suppressions, passe.
+    let migrated = meta_edit(&created, |txn, meta| {
+        meta.insert(txn, SCHEMA_KEY, i64::from(SCHEMA_VERSION) + 1);
+    });
+    let page = PageDoc::from_updates([created.as_slice(), migrated.as_slice()]).unwrap();
+    assert_eq!(page.schema_version(), Some(SCHEMA_VERSION + 1));
+    let client = PageDoc::from_updates([page.encode_state().as_slice()]).unwrap();
+    client.write_blocks(&parse("Bonjour\n").unwrap()).unwrap();
+    assert_eq!(page.apply_client_update(&client.encode_state()), Ok(()));
+    assert_eq!(page.read_blocks(), client.read_blocks());
+    assert_eq!(page.schema_version(), Some(SCHEMA_VERSION + 1));
 }
 
 /// Premier bloc de la page dont le texte n'est pas vide.

@@ -32,6 +32,19 @@
 //!
 //! Pendant l'application, la récursion reste sous deux fois la borne (test
 //! `twice_the_bound_in_one_update_is_refused` de `tests/depth.rs`).
+//!
+//! # Métadonnées (report M7 du lot 1)
+//!
+//! La `Y.Map` [`META`] porte `schemaVersion`, que seul le serveur écrit, à la
+//! création de la page. La mise à jour d'un client qui y touche est refusée
+//! (`PageDoc::apply_client_update`) ; ce qui est relu du stockage, dont la
+//! mise à jour du serveur qui pose la version, ne l'est pas
+//! (`PageDoc::apply_update`), sans quoi aucune page ne se rechargerait.
+//!
+//! Lire la mise à jour ne suffit pas ici : l'entrée qui en écrase une autre
+//! ne nomme pas son parent (elle le tient de l'entrée écrasée, son origine),
+//! et une suppression ne nomme que des identifiants. [`touched`] demande donc
+//! à yrs, la transaction validée, quels types elle a changés.
 
 use std::collections::HashMap;
 
@@ -43,10 +56,10 @@ use yrs::block::{
     BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID, HAS_ORIGIN, HAS_PARENT_SUB,
     HAS_RIGHT_ORIGIN,
 };
-use yrs::branch::BranchID;
+use yrs::branch::{BranchID, BranchPtr};
 use yrs::encoding::read::{Cursor, Read};
 use yrs::types::{TYPE_REFS_XML_ELEMENT, TYPE_REFS_XML_TEXT};
-use yrs::{ID, ReadTxn, StateVector, XmlOut};
+use yrs::{ID, MapRef, ReadTxn, StateVector, TransactionMut, XmlOut};
 
 use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
@@ -498,6 +511,19 @@ impl Shape {
             })
             .any(|node| depth_in_page(&node) > MAX_YJS_DEPTH)
     }
+}
+
+// ============================================================ métadonnées
+
+/// Vrai si la transaction, déjà validée (`commit`), a changé `map` : une
+/// entrée écrite, écrasée ou supprimée, ou un type posé dedans qui a changé.
+///
+/// yrs dresse à la validation la liste des types changés, chacun avec ses
+/// ancêtres ; une suppression sans effet (l'entrée l'était déjà) n'y met
+/// rien. Les pointeurs sont comparés, jamais suivis.
+pub(crate) fn touched(txn: &TransactionMut, map: &MapRef) -> bool {
+    let map = BranchPtr::from(map.as_ref());
+    txn.changed_parent_types().contains(&map)
 }
 
 #[cfg(test)]

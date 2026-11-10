@@ -13,7 +13,7 @@ use yrs::{
 };
 
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, read_page, write_nodes};
-use crate::guard::{Shape, missing};
+use crate::guard::{Shape, missing, touched};
 use crate::structure::{Slot, check_blocks};
 use crate::{CrdtError, FRAGMENT, META};
 
@@ -91,7 +91,9 @@ impl PageDoc {
         Ok(page)
     }
 
-    /// Intègre une mise à jour (v1) reçue d'un client ou du stockage.
+    /// Intègre une mise à jour (v1) relue du stockage, ou écrite par le
+    /// serveur. Ce qui arrive d'un client passe par
+    /// [`PageDoc::apply_client_update`], plus strict.
     ///
     /// La mise à jour est lue avant yrs (Ruling R17, voir [`crate::guard`]).
     /// Elle est refusée sans être appliquée si elle est illisible (`Decode`),
@@ -108,16 +110,46 @@ impl PageDoc {
     /// stockées (la plupart des refus laissent le document intact, mais pas
     /// tous ; l'appelant n'a pas à les distinguer).
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
+        self.integrate(&mut self.doc.transact_mut(), update)
+    }
+
+    /// Intègre une mise à jour (v1) reçue d'un client : comme
+    /// [`PageDoc::apply_update`], avec les mêmes refus et la même suite à leur
+    /// donner, et refusée en plus (`Structure`) si elle touche à la `Y.Map`
+    /// des métadonnées [`META`], qui porte `schemaVersion` : une entrée
+    /// écrite, écrasée ou supprimée (report M7 du lot 1). Seul le serveur y
+    /// écrit.
+    ///
+    /// Ce refus n'est connu qu'après l'application (voir le module `guard`) :
+    /// comme après toute erreur, le `PageDoc` est à jeter.
+    ///
+    /// À ne pas employer pour ce qui est relu du stockage : la mise à jour du
+    /// serveur qui crée la page pose `schemaVersion`, et y serait refusée.
+    pub fn apply_client_update(&self, update: &[u8]) -> Result<(), CrdtError> {
+        let mut txn = self.doc.transact_mut();
+        self.integrate(&mut txn, update)?;
+        // yrs ne dresse la liste des types changés qu'à la validation.
+        txn.commit();
+        if touched(&txn, &self.meta) {
+            return Err(CrdtError::Structure(
+                "la mise à jour d'un client écrit dans les métadonnées de la page".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Lit la mise à jour, la vérifie et l'applique dans `txn` (voir
+    /// [`PageDoc::apply_update`]).
+    fn integrate(&self, txn: &mut TransactionMut, update: &[u8]) -> Result<(), CrdtError> {
         let shape = Shape::read(update)?;
         let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
-        let mut txn = self.doc.transact_mut();
         shape.check(&txn.state_vector())?;
         txn.apply_update(decoded)
             .map_err(|e| CrdtError::Decode(e.to_string()))?;
         if txn.store().pending_update().is_some() {
             return Err(missing());
         }
-        if shape.deeper_than_bound(&txn) {
+        if shape.deeper_than_bound(txn) {
             return Err(CrdtError::TooDeep);
         }
         if shape.inserts_elements() {
