@@ -134,7 +134,8 @@ impl Store {
     ///
     /// Si le fichier existe déjà et qu'au moins une migration est en attente, une copie cohérente
     /// de la base est d'abord écrite à côté ([`backup_path`]), puis les migrations tournent. Une
-    /// copie du même nom déjà présente est gardée telle quelle. Si la copie échoue, l'ouverture
+    /// copie déjà présente sous ce nom n'est jamais écrasée : identique, elle suffit ; différente
+    /// (la base a changé depuis), la nouvelle prend un nom daté. Si la copie échoue, l'ouverture
     /// échoue, avant toute migration. [`Store::backup`] dit ce qui a été fait.
     pub async fn open(path: &Path) -> Result<Store, StoreError> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -160,9 +161,10 @@ impl Store {
         }
     }
 
-    /// La copie de la base qui a précédé les migrations de cette ouverture (écrite, ou gardée si
-    /// elle était déjà là) ; `None` si aucune migration n'était en attente. Le store n'a pas de
-    /// journal : c'est à l'appelant de la journaliser.
+    /// La copie qui porte l'état de la base juste avant les migrations de cette ouverture : celle
+    /// qui vient d'être écrite, ou celle qui était déjà là si elle lui est identique ; `None` si
+    /// aucune migration n'était en attente. Le store n'a pas de journal : c'est à l'appelant de la
+    /// journaliser.
     pub fn backup(&self) -> Option<&Backup> {
         self.backup.as_deref()
     }

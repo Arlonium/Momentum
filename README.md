@@ -101,7 +101,7 @@ corepack pnpm -C apps/web dev             # dans un autre terminal : Vite sur le
 
 Puis ouvrir `http://localhost:5173`. Vite relaie `/api` et `/sync` (WebSocket comprise) vers le serveur. Le lot 1 n'a pas de comptes : chaque navigateur écrit sous un nom d'invité (« Invité » et 4 chiffres).
 
-Au démarrage, si une migration de schéma attend une base existante, le serveur en écrit d'abord une copie à côté (`data/mementum.db.avant-0002.bak` avant la migration `0002`, chemin et taille dans son journal) et ne démarre pas s'il ne peut pas l'écrire ; ces copies ne sont jamais supprimées automatiquement.
+Au démarrage, si une migration de schéma attend une base existante, le serveur en écrit d'abord une copie à côté (`data/mementum.db.avant-0002.bak` avant la migration `0002`), et ne démarre pas s'il ne peut pas l'écrire. Chaque tentative refait la copie : si la base a changé depuis la précédente (une migration ratée, puis des pages écrites avec l'ancienne version), la nouvelle prend un nom daté en UTC (`mementum.db.avant-0002.20261110T081500Z.bak`) ; aucune copie n'est écrasée ni supprimée automatiquement. Pour restaurer une copie : serveur arrêté, la remettre à la place de `data/mementum.db`, et supprimer `mementum.db-wal` et `mementum.db-shm` s'ils existent (ils appartiennent à la base remplacée).
 
 > **Ne pas écouter hors de la boucle locale** (`serve --bind 0.0.0.0:8080`, ou une adresse du réseau). Le lot 1 n'a aucune authentification : toute personne qui atteint l'adresse lit et modifie toutes les pages. Les protections contre le DNS rebinding ne valent, elles aussi, que sur la boucle locale. Le serveur l'écrit dans son journal au démarrage.
 

@@ -146,6 +146,103 @@ async fn open_alone(backup: &Path) -> (tempfile::TempDir, SqlitePool) {
     (elsewhere, pool)
 }
 
+/// Les copies datées de `db` d'avant la migration `0002`, rangées à côté d'elle :
+/// `<base>.avant-0002.<AAAAMMJJ>T<HHMMSS>Z.bak`.
+fn dated_copies(db: &Path) -> Vec<PathBuf> {
+    let dir = db.parent().unwrap();
+    let prefix = format!("{}.avant-0002.", db.file_name().unwrap().to_str().unwrap());
+    entries(dir)
+        .into_iter()
+        .filter(|name| {
+            let Some(stamp) = name
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".bak"))
+            else {
+                return false;
+            };
+            stamp.len() == 16
+                && stamp.bytes().enumerate().all(|(i, c)| match i {
+                    8 => c == b'T',
+                    15 => c == b'Z',
+                    _ => c.is_ascii_digit(),
+                })
+        })
+        .map(|name| dir.join(name))
+        .collect()
+}
+
+/// Une copie de la base par `VACUUM INTO`, comme celle du store.
+async fn vacuum_into(pool: &SqlitePool, target: &Path) {
+    sqlx::query("VACUUM INTO ?")
+        .bind(target.to_str().unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// L'hypothèse de la comparaison des copies : deux `VACUUM INTO` d'une même base donnent les mêmes
+/// octets, que la base ait encore des pages dans son `-wal` ou non, des pages libres ou non, et
+/// quelle que soit la connexion. Une copie identique déjà là est donc gardée, sans rien de plus.
+#[tokio::test]
+async fn same_database_gives_the_same_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    let pool = lot1_database(&db).await;
+    let vault = lot1_vault(&pool).await;
+    for i in 0..200 {
+        lot1_page(&pool, vault, &format!("Page {i:03}"), &format!("a{i:03}")).await;
+    }
+    sqlx::query("DELETE FROM nodes WHERE title LIKE 'Page %5'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(std::fs::metadata(sibling(&db, "-wal")).unwrap().len() > 0);
+
+    // Une première copie quand les pages sont encore dans le `-wal`, une deuxième par une autre
+    // connexion, une troisième après fermeture (le `-wal` est alors reversé dans la base).
+    let copies = tempfile::tempdir().unwrap();
+    let (first, second, third) = (
+        copies.path().join("1.db"),
+        copies.path().join("2.db"),
+        copies.path().join("3.db"),
+    );
+    vacuum_into(&pool, &first).await;
+    let other = common::side_pool(&db).await;
+    vacuum_into(&other, &second).await;
+    other.close().await;
+    pool.close().await;
+    assert!(!sibling(&db, "-wal").exists());
+    let reopened = common::side_pool(&db).await;
+    vacuum_into(&reopened, &third).await;
+    reopened.close().await;
+    let bytes = std::fs::read(&first).unwrap();
+    assert_eq!(std::fs::read(&second).unwrap(), bytes);
+    assert_eq!(std::fs::read(&third).unwrap(), bytes);
+
+    // Posée au nom de la copie, elle est gardée : la copie fraîche, identique, ne laisse rien.
+    let backup = backup_path(&db, 2);
+    std::fs::copy(&first, &backup).unwrap();
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(
+        store.backup(),
+        Some(&Backup {
+            path: backup.clone(),
+            bytes: bytes.len() as u64,
+            kept: true,
+        })
+    );
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
+    store.close().await;
+    assert_eq!(std::fs::read(&backup).unwrap(), bytes);
+    assert_eq!(
+        entries(dir.path()),
+        BTreeSet::from([
+            "mementum.db".to_string(),
+            "mementum.db.avant-0002.bak".to_string()
+        ])
+    );
+}
+
 #[tokio::test]
 async fn pending_migration_backs_up_first() {
     let dir = tempfile::tempdir().unwrap();
@@ -282,24 +379,153 @@ async fn existing_backup_is_kept() {
     let db = dir.path().join("mementum.db");
     lot1_with_a_page(&db).await;
 
-    // Une montée de version interrompue a laissé sa copie : c'est elle qui porte l'état d'avant.
+    // Un fichier porte déjà le nom de la copie, et ce n'est pas la base d'aujourd'hui.
     let backup = backup_path(&db, 2);
-    let before = b"copie laissee par une montee de version interrompue".to_vec();
+    let before = b"copie laissee par une montee de version precedente".to_vec();
     std::fs::write(&backup, &before).unwrap();
 
+    // Il n'est pas écrasé : la copie fraîche prend un nom daté, à côté.
     let store = Store::open(&db).await.unwrap();
     assert_eq!(std::fs::read(&backup).unwrap(), before);
+    let dated = dated_copies(&db);
+    assert_eq!(dated.len(), 1, "{dated:?}");
     assert_eq!(
         store.backup(),
         Some(&Backup {
-            path: backup,
-            bytes: before.len() as u64,
-            kept: true,
+            path: dated[0].clone(),
+            bytes: std::fs::metadata(&dated[0]).unwrap().len(),
+            kept: false,
         })
     );
     // L'ouverture a continué : la base est migrée.
     assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
     store.close().await;
+    assert_eq!(entries(dir.path()).len(), 3);
+    assert!(!sibling(&backup, ".partiel").exists());
+
+    let (_elsewhere, copy) = open_alone(&dated[0]).await;
+    assert_eq!(lot_tables(&copy).await, ["orgs", "vaults"]);
+    assert_eq!(titles(&copy).await, ["Accueil"]);
+    copy.close().await;
+}
+
+/// La migration échoue deux fois sur une base qui n'a pas bougé entre-temps : une seule copie.
+#[tokio::test]
+async fn unchanged_database_is_not_copied_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    lot1_with_a_page(&db).await;
+    // Un déclencheur refuse que la migration soit notée dans `_sqlx_migrations` : sqlx annule
+    // alors toute sa transaction, migration comprise.
+    common::break_table(&db, "INSERT", "_sqlx_migrations", "1").await;
+
+    let backup = backup_path(&db, 2);
+    let mut first = None;
+    for attempt in 1..=2 {
+        let error = Store::open(&db)
+            .await
+            .err()
+            .expect("la migration doit échouer");
+        assert!(
+            error.to_string().contains("panne simulée"),
+            "tentative {attempt} : {error}"
+        );
+        assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 1);
+        let bytes = std::fs::read(&backup).unwrap();
+        assert_eq!(*first.get_or_insert_with(|| bytes.clone()), bytes);
+        assert_eq!(
+            entries(dir.path()),
+            BTreeSet::from([
+                "mementum.db".to_string(),
+                "mementum.db.avant-0002.bak".to_string()
+            ]),
+            "tentative {attempt}"
+        );
+    }
+}
+
+/// La migration échoue, on revient à l'ancienne version et l'on écrit, puis la version corrigée
+/// arrive : la copie d'avant la première tentative ne porte pas ce qui a été écrit depuis.
+#[tokio::test]
+async fn changed_database_gets_a_fresh_dated_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    let pool = lot1_database(&db).await;
+    let vault = lot1_vault(&pool).await;
+    lot1_page(&pool, vault, "Accueil", "a0").await;
+    pool.close().await;
+
+    // Première tentative : la copie est faite, la migration échoue.
+    common::break_table(&db, "INSERT", "_sqlx_migrations", "1").await;
+    assert!(Store::open(&db).await.is_err());
+    let backup = backup_path(&db, 2);
+    let first = std::fs::read(&backup).unwrap();
+
+    // L'ancienne version écrit une page, avec le schéma du lot 1.
+    let old = common::side_pool(&db).await;
+    lot1_page(&old, vault, "Écrite entre-temps", "a1").await;
+    old.close().await;
+
+    // La version corrigée : une seconde copie, datée, porte la page ; la première est intacte.
+    common::repair(&db).await;
+    let store = Store::open(&db).await.unwrap();
+    let dated = dated_copies(&db);
+    assert_eq!(dated.len(), 1, "{dated:?}");
+    assert_eq!(
+        store.backup(),
+        Some(&Backup {
+            path: dated[0].clone(),
+            bytes: std::fs::metadata(&dated[0]).unwrap().len(),
+            kept: false,
+        })
+    );
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
+    store.close().await;
+    assert_eq!(std::fs::read(&backup).unwrap(), first);
+    assert_eq!(entries(dir.path()).len(), 3);
+
+    let (_elsewhere, copy) = open_alone(&dated[0]).await;
+    assert_eq!(lot_tables(&copy).await, ["orgs", "vaults"]);
+    assert_eq!(titles(&copy).await, ["Accueil", "Écrite entre-temps"]);
+    copy.close().await;
+    let (_elsewhere, copy) = open_alone(&backup).await;
+    assert_eq!(titles(&copy).await, ["Accueil"]);
+    copy.close().await;
+}
+
+/// Sans migration en attente, l'ouverture ne touche à aucun fichier de copie, même temporaire.
+#[tokio::test]
+async fn partial_is_left_alone_when_nothing_is_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    lot1_with_a_page(&db).await;
+    Store::open(&db).await.unwrap().close().await;
+
+    let partial = sibling(&backup_path(&db, 2), ".partiel");
+    std::fs::write(&partial, b"reste d'une copie").unwrap();
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(store.backup(), None);
+    store.close().await;
+    assert_eq!(std::fs::read(&partial).unwrap(), b"reste d'une copie");
+}
+
+/// Le chemin de la copie passe à SQLite en paramètre lié : une apostrophe ou des accents n'y
+/// changent rien.
+#[tokio::test]
+async fn backup_in_a_folder_with_quote_and_accents() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("l'été").join("mementum.db");
+    std::fs::create_dir(db.parent().unwrap()).unwrap();
+    lot1_with_a_page(&db).await;
+
+    let store = Store::open(&db).await.unwrap();
+    let backup = dir.path().join("l'été").join("mementum.db.avant-0002.bak");
+    assert_eq!(store.backup().map(|b| &b.path), Some(&backup));
+    store.close().await;
+
+    let (_elsewhere, copy) = open_alone(&backup).await;
+    assert_eq!(titles(&copy).await, ["Accueil"]);
+    copy.close().await;
 }
 
 #[tokio::test]
@@ -366,8 +592,10 @@ async fn failed_backup_stops_before_migrating() {
             .err()
             .expect("l'ouverture doit échouer");
         assert!(
-            error.to_string().contains("mementum.db.avant-0002.bak"),
-            "{obstacle} : l'erreur nomme la copie : {error}"
+            error
+                .to_string()
+                .contains(&format!("{} avant la migration", blocked.display())),
+            "{obstacle} : l'erreur nomme l'obstacle : {error}"
         );
 
         // La base est restée au lot 1, et rien n'a été laissé à côté.
