@@ -66,7 +66,7 @@ Puis ouvre `http://localhost:5174`. Si `cargo` répond « Accès refusé », un 
 
 **Deux choses à savoir pendant l'essai.**
 
-- La barre latérale ne suit pas en direct ce que font les autres. Elle se met à jour quand tu reviens sur la fenêtre : clique dedans. Si rien ne bouge après quelques secondes, recharge la page (F5). C'est une limite connue, pas un défaut.
+- La barre latérale ne suit pas tout à fait en direct ce que font les autres. Elle se met à jour seule en dix secondes au plus, ou tout de suite quand tu reviens sur la fenêtre : clique dedans. Si rien ne bouge après une vingtaine de secondes, recharge la page (F5). C'est une limite connue, pas un défaut.
 - Ne rate pas dix fois de suite le mot de passe d'une même adresse : elle serait bloquée un quart d'heure. C'est aussi une limite connue.
 
 ## Ce que ce lot contient, et ne contient pas
@@ -269,7 +269,7 @@ Elles sont voulues, ou reportées à un lot suivant. Ne les signale pas comme de
 - Il faut se reconnecter 30 jours après sa dernière connexion, même si l'on ouvre l'application tous les jours (R117).
 - Une invitée à qui tu donnes l'accès complet à une page peut y inviter d'autres personnes, comme dans Notion (R86).
 - Une page sortie à la racine garde son accès d'équipe, mais les personnes nommées sur son ancienne page parente la perdent (R94).
-- La barre latérale ne suit pas en direct ce que font les autres : elle se met à jour quand tu reviens sur la fenêtre, au plus une fois toutes les cinq secondes (R97).
+- La barre latérale ne suit pas tout à fait en direct ce que font les autres : elle se met à jour seule en dix secondes au plus, ou tout de suite quand tu reviens sur la fenêtre (R97, R128).
 - Quelqu'un qui peut modifier une page peut, pendant qu'une autre personne est coupée du réseau, prendre sa place dans l'affichage des curseurs : à son retour, elle écrit normalement, mais son nom et son curseur ne se voient plus chez les autres tant qu'il reste là. Le contenu n'est pas en jeu. Quelqu'un qui ne fait que lire la page ne le peut pas (R109, R118).
 - Par une manœuvre du même genre, quelqu'un qui peut modifier la page peut la laisser invisible même après être parti lui-même, jusqu'à ce que tout le monde ait quitté la page. Là encore, seuls le nom et le curseur sont touchés (R109, R118).
 - Une personne invitée, même en lecture seule, peut surcharger le serveur si elle le veut. Pour l'instant, n'invite que des gens de confiance : les plafonds viennent au lot 7 (R121).

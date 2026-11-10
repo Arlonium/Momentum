@@ -48,7 +48,7 @@ Rien de ceci ne se décide à sa place.
    - les inscriptions sont sur invitation par défaut (R50) ;
    - un invité en accès complet peut inviter à son tour (R86) ;
    - un simple membre peut fermer une page d'équipe aux autres, après confirmation (R122, R127).
-3. **D'autres choix déjà pris, à confirmer** : le menu du compte dans le sélecteur d'espace (R80), une page sortie à la racine garde son accès d'équipe (R94), la barre latérale relue au retour sur l'onglet et non en direct (R97), une session de 30 jours au plus dans un navigateur (R117), les plafonds contre la surcharge reportés au lot 7 (R121), et deux décisions du lot 1 : `PUT /mmd` refuse une propriété inconnue (R41), deux avis de sécurité ouverts sans mise à jour possible (R44).
+3. **D'autres choix déjà pris, à confirmer** : le menu du compte dans le sélecteur d'espace (R80), une page sortie à la racine garde son accès d'équipe (R94), la barre latérale relue au retour sur l'onglet et toutes les dix secondes, et non en direct (R97, R128), une session de 30 jours au plus dans un navigateur (R117), les plafonds contre la surcharge reportés au lot 7 (R121), et deux décisions du lot 1 : `PUT /mmd` refuse une propriété inconnue (R41), deux avis de sécurité ouverts sans mise à jour possible (R44).
 4. **Le choix du lot suivant.** Voir « Par où continuer ».
 
 Les espaces façon Notion, à la place des coffres façon Obsidian, sont confirmés par Lenny (2026-11-10).
@@ -59,7 +59,7 @@ L'ordre prévu des lots est dans le README (« Prochaines étapes ») et la conc
 
 | Lot | Sujet | Ce qu'il reprend des lots faits |
 |---|---|---|
-| 3 | Collaboration et blocs riches : commentaires, historique, arbre des pages et présence en direct, blocs riches | la barre latérale en direct (R97), la présence vérifiée (R109 et les reports de présence ci-dessous), les déplacements de blocs sans perte d'édition (R39), les tableaux mal formés écrits par un client (R54) |
+| 3 | Collaboration et blocs riches : commentaires, historique, arbre des pages et présence en direct, blocs riches | la barre latérale en direct (R97, R128 : le vrai direct remplacera la relecture toutes les dix secondes), la présence vérifiée (R109 et les reports de présence ci-dessous), les déplacements de blocs sans perte d'édition (R39), les tableaux mal formés écrits par un client (R54) |
 | 4 | Recherche | |
 | 5 | Agents : API REST complète, serveur MCP, jetons d'API sur un espace ou sur des pages | l'écriture MMD par différence (R40), un porteur durable pour les propriétés inconnues (R41) |
 | 6 | Imports et export | |
