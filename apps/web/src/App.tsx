@@ -10,7 +10,7 @@
 // - `useCurrentSpace` : l'espace affiché, d'après l'adresse et la page ouverte ;
 // - `usePageActions` : créer, renommer, jeter, restaurer, déplacer, et ce que la page
 //   ouverte devient quand ses droits changent ailleurs.
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { useServerSchema } from "./editor/useServerSchema";
 import { PageView } from "./page/PageView";
@@ -28,6 +28,7 @@ import { useCurrentSpace } from "./space/useCurrentSpace";
 import { usePageActions } from "./space/usePageActions";
 import { useSpaceTree, useTreeCatchUp, useTreeReader } from "./space/useSpaceTree";
 import { TrashView } from "./trash/TrashView";
+import { Message, Retry } from "./ui/Message";
 
 export function App() {
   useLinkInterception();
@@ -235,34 +236,5 @@ export function App() {
       <main className="mm-main">{content}</main>
       {creatingSpace && <CreateSpaceDialog onClose={() => setCreatingSpace(false)} />}
     </div>
-  );
-}
-
-/** « Réessayer », sous le message d'une lecture qui a échoué : elle se refait sans recharger. */
-function Retry({ onRetry }: { onRetry: () => void }) {
-  return (
-    <span className="mm-message-actions">
-      <button type="button" className="mm-button mm-button-primary" onClick={onRetry}>
-        Réessayer
-      </button>
-    </span>
-  );
-}
-
-function Message({
-  title,
-  banner,
-  children,
-}: {
-  title: string;
-  banner?: ReactNode;
-  children?: ReactNode;
-}) {
-  return (
-    <section className="mm-message">
-      {banner}
-      <h1>{title}</h1>
-      {children && <p>{children}</p>}
-    </section>
   );
 }
