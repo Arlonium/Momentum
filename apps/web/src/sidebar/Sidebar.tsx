@@ -7,6 +7,7 @@ import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
 import { trashPath } from "../router";
+import { firstClick } from "../ui/firstClick";
 import type { Drop } from "./drag";
 import { SectionList, type CreateTarget } from "./SectionList";
 import { SpaceSwitcher } from "./SpaceSwitcher";
@@ -101,7 +102,7 @@ export function Sidebar({
                 : "Nouvelle page, dans « Privé »"
             }
             disabled={readOnly}
-            onClick={() => onCreate({ section: "private" })}
+            onClick={firstClick(() => onCreate({ section: "private" }))}
           >
             <ComposeIcon />
           </button>

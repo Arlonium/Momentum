@@ -145,8 +145,9 @@ export function usePageActions({
   const creating = useRef(false);
   const create = useCallback(
     async (target: CreateTarget) => {
-      // Un double clic créerait deux pages : la seconde demande attend que la première ait
-      // répondu.
+      // Deux demandes qui se suivent de près (un réseau lent, deux boutons) : la seconde
+      // attend que la première ait répondu. Le second clic d'un double clic, lui, est ignoré
+      // par les boutons (`firstClick`) : le serveur a souvent répondu avant qu'il n'arrive.
       if (isStale() || creating.current) return;
       creating.current = true;
       setNotice(null);

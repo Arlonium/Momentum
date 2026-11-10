@@ -28,6 +28,7 @@ import { useCurrentSpace } from "./space/useCurrentSpace";
 import { usePageActions } from "./space/usePageActions";
 import { useSpaceTree, useTreeCatchUp, useTreeReader } from "./space/useSpaceTree";
 import { TrashView } from "./trash/TrashView";
+import { firstClick } from "./ui/firstClick";
 import { Message, Retry } from "./ui/Message";
 
 export function App() {
@@ -166,7 +167,7 @@ export function App() {
             <button
               type="button"
               className="mm-button mm-button-primary"
-              onClick={() => void create({ section: "private" })}
+              onClick={firstClick(() => void create({ section: "private" }))}
             >
               Nouvelle page
             </button>

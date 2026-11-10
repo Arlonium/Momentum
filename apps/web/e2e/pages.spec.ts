@@ -1,6 +1,6 @@
 // Arbre de pages et persistance, depuis l'interface ; et le fenêtrage des arbres de la barre
 // latérale (la page ouverte toujours montrée, les sections qui se suivent).
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import type { ErrorBody, PageNode } from "@mementum/protocol";
 import {
   apiAs,
@@ -69,24 +69,45 @@ test("double_click_creates_a_single_page", async ({ browser }) => {
     opened.push(new URL(p.url()).pathname);
     return pageIdOf(p);
   };
+  /**
+   * Un double clic sur un bouton qui reste sous le pointeur, au rythme d'une main : le serveur
+   * a répondu au premier clic, et la page créée est ouverte, quand le second arrive. Ce second
+   * clic ne crée rien ; le clic simple qui le suit, si. Deux créations en tout : celle du
+   * second clic serait partie avant celle du troisième.
+   */
+  const doubleThenSingle = async (button: Locator) => {
+    const before = asked;
+    await button.click();
+    await another();
+    // Le second clic du double clic, seul : au même endroit, `detail` vaut 2. (Avec
+    // `clickCount: 2`, `click()` enverrait les deux clics, dont un premier qui crée.)
+    await button.hover();
+    await p.mouse.down({ clickCount: 2 });
+    await p.mouse.up({ clickCount: 2 });
+    await button.click();
+    const id = await another();
+    expect(asked - before).toBe(2);
+    return id;
+  };
 
-  // « Nouvelle page », dans le contenu puis en tête de barre latérale ; le « + » d'une
-  // section ; le « + » d'une ligne. Un double clic ne crée chaque fois qu'une page.
+  // « Nouvelle page » du contenu part avec le premier clic : les deux clics se suivent sans
+  // attendre, et le second tombe pendant la création.
   await p.getByRole("main").getByRole("button", { name: "Nouvelle page" }).dblclick();
   await another();
   expect(asked).toBe(1);
-  await sidebar.getByRole("button", { name: "Nouvelle page" }).dblclick();
-  await another();
-  expect(asked).toBe(2);
+  // « Nouvelle page » de la barre latérale, le « + » d'une section et le « + » d'une ligne
+  // restent sous le pointeur.
+  await doubleThenSingle(sidebar.getByRole("button", { name: "Nouvelle page" }));
   await sectionOf(p, "Espace").hover();
-  await sidebar.getByRole("button", { name: "Ajouter une page dans « Espace »" }).dblclick();
-  const inSpace = await another();
-  expect(asked).toBe(3);
+  const inSpace = await doubleThenSingle(
+    sidebar.getByRole("button", { name: "Ajouter une page dans « Espace »" }),
+  );
   await treeRow(p, inSpace).hover();
-  await treeRow(p, inSpace).getByRole("button", { name: /^Ajouter une sous-page à / }).dblclick();
-  await another();
-  expect(asked).toBe(4);
-  expect((await getTree(api)).nodes).toHaveLength(4);
+  await doubleThenSingle(
+    treeRow(p, inSpace).getByRole("button", { name: /^Ajouter une sous-page à / }),
+  );
+  expect(asked).toBe(7);
+  expect((await getTree(api)).nodes).toHaveLength(7);
 });
 
 test("subpage_appears_in_tree", async ({ page, request }) => {

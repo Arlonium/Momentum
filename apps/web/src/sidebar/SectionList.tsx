@@ -35,6 +35,7 @@ import {
   TrashIcon,
   UnnestIcon,
 } from "../icons";
+import { firstClick } from "../ui/firstClick";
 import { nestTarget, stepTarget, unnestTarget, type Drop } from "./drag";
 import { PageTree, type DropAt, type TreeDrag } from "./PageTree";
 import { RowMenu, type MenuAction } from "./RowMenu";
@@ -407,7 +408,7 @@ function SectionBlock({
             className="mm-section-add"
             aria-label={`Ajouter une page dans « ${label} »`}
             title="Ajouter une page"
-            onClick={() => onCreateIn(section)}
+            onClick={firstClick(() => onCreateIn(section))}
           >
             <PlusIcon />
           </button>

@@ -7,6 +7,7 @@ import { memo, type CSSProperties } from "react";
 import { ChevronIcon, MoreIcon, PageIcon, PlusIcon } from "../icons";
 import { pagePath } from "../router";
 import { canEdit } from "../share/levels";
+import { firstClick } from "../ui/firstClick";
 import { ROW_HEIGHT, type Row } from "./rows";
 
 type Props = {
@@ -98,7 +99,7 @@ export const TreeRow = memo(function TreeRow({
             className="tree-action"
             aria-label={`Ajouter une sous-page à « ${node.title} »`}
             title="Ajouter une sous-page"
-            onClick={() => onCreate(node.id)}
+            onClick={firstClick(() => onCreate(node.id))}
           >
             <PlusIcon />
           </button>
