@@ -262,8 +262,11 @@ pub(crate) async fn accept(
 /// consultation d'un lien, l'inscription et [`accept_invitation`].
 ///
 /// Ce contrôle et l'acceptation sont deux transactions : un auteur qui perd `full` entre les
-/// deux, à quelques millisecondes près, voit encore son invitation acceptée. Cette fenêtre est
-/// acceptée ; la fermer demanderait le calcul des droits dans la transaction du store.
+/// deux voit encore son invitation acceptée. Pour un compte qui existe ([`accept_invitation`]),
+/// la fenêtre est de quelques millisecondes ; à l'inscription (`routes/auth.rs`), elle contient
+/// en plus le hachage Argon2 du mot de passe, de l'ordre d'une fraction de seconde. Cette
+/// fenêtre est acceptée : le store
+/// revérifie dans sa transaction que l'auteur a encore un rôle, pas son niveau sur la page.
 pub(crate) async fn valid_invitation(
     state: &AppState,
     token_hash: [u8; 32],
