@@ -1321,6 +1321,14 @@ async fn sharing_overtaken_by_the_trash_answers_trashed() {
     let page = shared_with_mona(&team).await;
     let trashed = format!("UPDATE nodes SET trashed_at = 1 WHERE id = '{page}'");
     exec_sql(&t.db_path(), &trashed).await;
+    // Le cache n'en sait rien : la page est encore dans l'arbre de Mona, d'où il exclut la
+    // corbeille. Le contrôle de la route passe donc, et le refus qui suit vient de la
+    // transaction.
+    let tree = tree_nodes(&team.mona.browser, team.space).await;
+    assert!(
+        tree.iter().any(|node| text(node, "id") == page.to_string()),
+        "le cache des accès sait la page à la corbeille : {tree:?}"
+    );
     let before = untouched(&t, &team, page).await;
 
     for (route, reply) in three_changes(&team.mona.browser, page, &team).await {
@@ -1345,6 +1353,12 @@ async fn sharer_demoted_to_guest_cannot_change_general_access() {
         team.space, team.mona.id
     );
     exec_sql(&t.db_path(), &demoted).await;
+    // Le cache n'en sait rien : Mona lit encore les membres de l'espace, ce qu'une invitée ne
+    // peut pas. Le contrôle de la route passe donc, et le refus qui suit vient de la
+    // transaction.
+    mona.get(&format!("/api/v1/spaces/{}/members", team.space))
+        .await
+        .assert_status(StatusCode::OK);
     let before = untouched(&t, &team, page).await;
 
     for level in [json!("read"), Value::Null] {
