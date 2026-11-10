@@ -2,6 +2,42 @@
 //! d'accès, ses rôles), gardées en mémoire et partagées entre les personnes. C'est le premier
 //! étage du cache des droits, que l'en-tête d'`access.rs` décrit en entier ; le second, le
 //! calcul de chaque personne, est `mementum_acl::AccessCache`.
+//!
+//! **À qui des données gardées sont rendues** (Ruling R98). Une requête lit la révision
+//! courante de l'espace, `r`, puis demande ses données ([`InputsCache::get_or_load`]). Des
+//! données gardées lui sont rendues si leur révision est **supérieure ou égale** à `r`, qu'elle
+//! les trouve en arrivant ou après avoir attendu la lecture d'une autre requête. Des données de
+//! révision inférieure à `r` ne lui sont jamais rendues : elle les relit dans la base.
+//!
+//! Cela repose sur une hypothèse : **`spaces.rev` ne fait que croître**. Le store ne l'écrit
+//! que par `rev = rev + 1`, dans la transaction de l'écriture qu'elle date (`bump_rev`, dans
+//! `mementum-store`), et rien de ce que portent ces données ne change sans elle (la règle de
+//! `rev`). Alors :
+//! - des données de révision `r` sont l'état de l'espace que la requête vient de lire comme
+//!   courant ;
+//! - des données de révision supérieure sont un état que l'espace a pris **après** cette
+//!   lecture (quand elle a lu `r`, leur écriture n'était pas validée) et avant que la requête
+//!   ne les reçoive : ce qu'elle aurait vu en arrivant un instant plus tard. Les refuser ne
+//!   la protégerait de rien : elle relirait la base, pour y trouver cet état ou un plus
+//!   récent. Et sous des écritures plus rapprochées qu'une lecture, ces relectures passent
+//!   une à une par le tour de lecture : leurs attentes s'additionnent ;
+//! - des données de révision inférieure sont un état que la requête sait dépassé : un droit
+//!   retiré depuis y figure encore.
+//!
+//! Le calcul tiré de données est rangé sous **leur** révision, jamais sous `r` (`access.rs`) :
+//! il n'est ensuite rendu qu'à qui lit cette révision-là comme courante.
+//!
+//! `/sync` tient par la même règle (`routes/sync.rs`, Ruling R71). La route lit `r`, puis les
+//! droits, et inscrit la connexion avec `r` ; le hub relit alors la révision, et ferme la
+//! connexion si elle n'est plus `r`. Des droits tirés de données de révision `r + 1` n'y
+//! changent rien : la relecture trouve `r + 1` ou plus, qui n'est pas `r`, et la connexion est
+//! fermée ; elle revient. Une fermeture de trop, jamais un droit périmé. Ce qui casserait ce
+//! raisonnement, ce sont des droits tirés de données **plus anciennes** que `r` : la relecture
+//! pourrait trouver `r`, et laisser vivre des droits d'avant.
+//!
+//! Si l'hypothèse tombait (une révision qui recule, écrite à la main dans la base), ce n'est
+//! pas cette règle seule qui serait fausse, mais tout le cache : une révision déjà vue
+//! désignerait un autre état de l'espace.
 
 use std::collections::HashMap;
 #[cfg(test)]
@@ -47,10 +83,13 @@ fn weight(inputs: &AccessInputs) -> usize {
 /// sont lues une fois, et chaque personne refait son calcul en mémoire.
 ///
 /// - Une seule révision par espace : les dernières données lues remplacent les précédentes.
-/// - Elles ne sont rendues qu'à qui demande **leur** révision ([`InputsCache::get_or_load`]).
+/// - Elles sont rendues à qui a lu leur révision ou une révision plus ancienne, jamais à qui
+///   a lu une révision plus récente ([`InputsCache::get_or_load`] ; l'argument est en tête du
+///   module).
 /// - Une lecture à la fois par espace : qui arrive pendant une lecture l'attend au lieu de la
-///   refaire, puis prend ce qu'elle a lu. Les autres espaces n'attendent pas : le verrou de la
-///   table n'est jamais tenu pendant une lecture de la base.
+///   refaire, puis prend ce qu'elle a lu, si ce n'est pas plus ancien que sa révision. Les
+///   autres espaces n'attendent pas : le verrou de la table n'est jamais tenu pendant une
+///   lecture de la base.
 /// - Le cache est borné en unités ([`weight`]), comme celui des accès. Quand des données n'y
 ///   tiennent pas, celles des espaces les plus anciennement servis sortent d'abord ; des
 ///   données plus grosses que le plafond, à elles seules, ne sont pas gardées (chacun les relit).
@@ -142,14 +181,18 @@ impl InputsCache {
     }
 
     /// Les données de l'espace, pour une requête qui vient de lire `rev` comme sa révision
-    /// courante : celles du cache si elles sont de cette révision ; sinon celles que lit
-    /// `load` (`Store::access_inputs`), gardées sous leur propre révision. Celle-ci peut être
-    /// plus récente que `rev`, si une écriture est passée entre-temps : elles sont alors
-    /// rendues quand même, et ne serviront ensuite qu'à qui lira leur révision.
+    /// courante : celles du cache si leur révision est au moins `rev` (Ruling R98, en tête du
+    /// module) ; sinon celles que lit `load` (`Store::access_inputs`), gardées sous leur
+    /// propre révision, qui est plus récente que `rev` si une écriture est passée entre-temps.
     ///
     /// Une seule lecture à la fois par espace : qui arrive pendant une lecture attend, puis
-    /// prend ce qu'elle a lu si c'est sa révision. `None` : l'espace n'existe pas. Si la
-    /// lecture échoue, l'erreur remonte et rien n'est gardé ; qui attendait lit à son tour.
+    /// prend ce qu'elle a gardé si c'est au moins sa révision, et lit à son tour sinon.
+    /// `None` : l'espace n'existe pas. Si la lecture échoue, l'erreur remonte et rien n'est
+    /// gardé ; qui attendait lit à son tour.
+    ///
+    /// Ce que lit `load` est rendu sans que sa révision soit regardée : une lecture de la base
+    /// part du dernier commit, et ne rapporte donc rien de plus ancien que `rev` tant que la
+    /// révision ne fait que croître. C'est l'appelant qui s'en assure (`find_space_access`).
     pub(crate) async fn get_or_load<F, Fut>(
         &self,
         space: Uuid,
@@ -160,13 +203,13 @@ impl InputsCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Option<AccessInputs>, StoreError>>,
     {
-        if let Some(inputs) = self.kept_at(space, rev) {
+        if let Some(inputs) = self.kept_at_least(space, rev) {
             return Ok(Some(inputs));
         }
         let turn = self.turn(space);
         let _reading = turn.gate.lock().await;
         // La lecture qu'on vient d'attendre a pu garder ce qu'il faut.
-        if let Some(inputs) = self.kept_at(space, rev) {
+        if let Some(inputs) = self.kept_at_least(space, rev) {
             return Ok(Some(inputs));
         }
         #[cfg(test)]
@@ -179,13 +222,13 @@ impl InputsCache {
         Ok(Some(inputs))
     }
 
-    /// Les données gardées pour l'espace, si elles sont de la révision `rev`, et de celle-là
-    /// seulement. Les servir en fait les plus récemment servies.
-    fn kept_at(&self, space: Uuid, rev: i64) -> Option<Arc<AccessInputs>> {
+    /// Les données gardées pour l'espace, si leur révision est au moins `rev` : jamais des
+    /// données plus anciennes. Les servir en fait les plus récemment servies.
+    fn kept_at_least(&self, space: Uuid, rev: i64) -> Option<Arc<AccessInputs>> {
         let mut spaces = self.lock();
         let spaces = &mut *spaces;
         let (inputs, served) = spaces.map.get_mut(&space)?.kept.as_mut()?;
-        if inputs.rev != rev {
+        if inputs.rev < rev {
             return None;
         }
         spaces.clock += 1;
@@ -349,10 +392,11 @@ pub(crate) mod tests {
         assert_eq!(cache.kept(space).as_deref(), Some(&inputs(3, 2)));
     }
 
-    /// Des données lues à une révision plus récente que celle demandée sont rendues, et
-    /// gardées sous leur révision : elles ne servent ensuite qu'à qui lit celle-là.
+    /// Des données gardées servent qui a lu leur révision, ou une révision plus ancienne (Ruling
+    /// R98) ; qui a lu une révision plus récente les relit. Ce qui est lu est gardé sous sa
+    /// propre révision, quelle que soit celle qui était demandée.
     #[tokio::test]
-    async fn newer_inputs_are_kept_under_their_own_revision() {
+    async fn kept_inputs_serve_their_revision_and_older_ones() {
         let cache = InputsCache::new(100);
         let space = Uuid::now_v7();
         let read = |rev: i64, found: i64| {
@@ -363,15 +407,56 @@ pub(crate) mod tests {
             )
         };
 
+        // Demandées à la révision 4, lues à la 5 : rendues, et gardées sous la 5.
         assert_eq!(read(4, 5).await.unwrap().map(|i| i.rev), Some(5));
         assert_eq!(cache.loads(), 1);
-        // À la révision 5 : servies, sans lecture.
+        // À la révision 5, ou à une révision plus ancienne : servies, sans lecture.
         assert_eq!(read(5, 9).await.unwrap().map(|i| i.rev), Some(5));
+        assert_eq!(read(4, 9).await.unwrap().map(|i| i.rev), Some(5));
+        assert_eq!(read(1, 9).await.unwrap().map(|i| i.rev), Some(5));
         assert_eq!(cache.loads(), 1);
-        // À une autre révision, plus ancienne ou plus récente : jamais celles-là.
-        assert_eq!(read(4, 6).await.unwrap().map(|i| i.rev), Some(6));
-        assert_eq!(read(7, 7).await.unwrap().map(|i| i.rev), Some(7));
-        assert_eq!(cache.loads(), 3);
+        // À une révision plus récente : jamais celles-là. Elles sont relues.
+        assert_eq!(read(6, 7).await.unwrap().map(|i| i.rev), Some(7));
+        assert_eq!(cache.loads(), 2);
         assert_eq!(cache.kept(space).map(|i| i.rev), Some(7));
+    }
+
+    /// Une lecture est en cours, qui rapporte des données à la révision `found`. Une requête
+    /// qui a lu la révision `rev` arrive pendant ce temps, et attend son tour ; si elle doit
+    /// lire à son tour, elle trouve des données à sa révision. Rend la révision des données
+    /// qu'elle reçoit, et le nombre de lectures faites en tout.
+    async fn wait_behind_a_read(found: i64, rev: i64) -> (i64, usize) {
+        let cache = InputsCache::new(100);
+        let space = Uuid::now_v7();
+        let done = tokio::sync::Notify::new();
+        let reader = cache.get_or_load(space, found, || async {
+            done.notified().await;
+            Ok(Some(inputs(found, 1)))
+        });
+        let waiter = async {
+            wait_until("la lecture est en cours", || cache.waiting(space) == 1).await;
+            cache
+                .get_or_load(space, rev, || async { Ok(Some(inputs(rev, 1))) })
+                .await
+        };
+        let release = async {
+            wait_until("la requête attend son tour", || cache.waiting(space) == 2).await;
+            done.notify_one();
+        };
+        let (read, waited, ()) = tokio::join!(reader, waiter, release);
+        assert_eq!(read.unwrap().map(|i| i.rev), Some(found));
+        (waited.unwrap().expect("des données").rev, cache.loads())
+    }
+
+    /// Après l'attente de son tour (Ruling R98), une requête prend ce que la lecture attendue
+    /// a gardé si c'est au moins sa révision, sans relire ; si c'est plus ancien, elle relit.
+    #[tokio::test]
+    async fn after_its_turn_a_request_takes_newer_inputs_and_rereads_older_ones() {
+        // La révision qu'elle a lue : prise, une seule lecture.
+        assert_eq!(wait_behind_a_read(5, 5).await, (5, 1));
+        // Une révision plus récente, une écriture étant passée : prise aussi.
+        assert_eq!(wait_behind_a_read(6, 5).await, (6, 1));
+        // Une révision plus ancienne : jamais. Elle relit.
+        assert_eq!(wait_behind_a_read(4, 5).await, (5, 2));
     }
 }

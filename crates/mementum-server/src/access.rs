@@ -28,13 +28,15 @@
 //! - le calcul de chaque personne (`mementum_acl::AccessCache`), fait en mémoire sur ces
 //!   données.
 //!
-//! Une requête lit d'abord la révision courante de l'espace, et rien ne lui est rendu d'un
-//! cache qui ne soit rangé sous cette révision-là : ni calcul, ni données. À défaut, les données
-//! sont lues dans la base : elles sont au moins aussi récentes que la révision lue (une
-//! écriture a pu passer entre-temps), et c'est sous **leur** révision, celle de leur
-//! transaction, qu'elles et le calcul sont rangés, jamais sous une révision lue à part. Rien de
-//! périmé n'est donc servi : ce qui est rangé sous une révision est l'état de l'espace à cette
-//! révision, et n'est rendu qu'à qui vient de la lire comme la révision courante.
+//! Une requête lit d'abord la révision courante de l'espace. Un calcul ne lui est rendu que
+//! s'il est rangé sous cette révision-là. À défaut, il est refait sur les données de l'espace :
+//! celles du cache si leur révision est au moins celle que la requête a lue, sinon celles
+//! qu'elle lit dans la base (Ruling R98). Jamais de données plus anciennes que la révision
+//! lue : `rev` ne fait que croître, et des données plus récentes sont ce que la requête aurait
+//! vu en arrivant un instant plus tard (l'argument est en tête de `inputs_cache.rs`). Le
+//! calcul est rangé sous la révision des données, celle de leur transaction, jamais sous une
+//! révision lue à part. Rien de périmé n'est donc servi : ce qui est rangé sous une révision
+//! est l'état de l'espace à cette révision.
 //!
 //! [`InputsCache`]: crate::inputs_cache::InputsCache
 
@@ -194,40 +196,55 @@ impl AppState {
         user: &AuthUser,
         space_id: Uuid,
     ) -> Result<Option<Arc<SpaceAccess>>, ApiError> {
-        // D'abord la révision courante : rien n'est pris d'un cache qui ne soit rangé sous elle
-        // (voir l'en-tête).
+        // D'abord la révision courante : un calcul n'est pris du cache que s'il est rangé sous
+        // elle, et des données, que si elles ne sont pas plus anciennes (voir l'en-tête).
         let Some(rev) = self.store.space_rev(space_id).await.map_err(internal)? else {
             return Ok(None);
         };
         if let Some(access) = self.access.get(user.id, space_id, rev) {
             return Ok(Some(access));
         }
-        // Les données de l'espace, communes à tous : celles de cette révision, ou lues à
-        // l'instant (tout l'arbre, corbeille comprise ; les lignes d'accès ; les rôles).
+        // Les données de l'espace, communes à tous : celles du cache, ou lues à l'instant (tout
+        // l'arbre, corbeille comprise ; les lignes d'accès ; les rôles). Deux lectures au plus.
         let load = || self.store.access_inputs(space_id);
-        let Some(inputs) = self
-            .inputs
-            .get_or_load(space_id, rev, load)
-            .await
-            .map_err(internal)?
-        else {
-            return Ok(None);
-        };
-        // Sans rôle : rien, et aucun calcul n'est rangé.
-        let Some(role) = inputs.role_of(user.id) else {
-            return Ok(None);
-        };
-        let access = Arc::new(SpaceAccess::compute(
-            &inputs.nodes,
-            &inputs.grants,
-            user.id,
-            Some(role),
-        ));
-        // Sous la révision des données, lue avec elles : celle lue plus haut peut être plus
-        // ancienne, et ce calcul n'est pas le sien.
-        self.access
-            .put(user.id, space_id, inputs.rev, Arc::clone(&access));
-        Ok(Some(access))
+        for _ in 0..2 {
+            let Some(inputs) = self
+                .inputs
+                .get_or_load(space_id, rev, load)
+                .await
+                .map_err(internal)?
+            else {
+                return Ok(None);
+            };
+            // Ruling R98 : jamais de données plus anciennes que la révision lue. Plus récentes,
+            // elles sont ce que la requête aurait vu un instant plus tard ; plus anciennes,
+            // elles porteraient encore un droit retiré depuis. Le cache n'en rend pas, et une
+            // lecture de la base part du dernier commit : il faudrait que `rev` recule, ce
+            // que le store ne fait jamais. Si cela arrive quand même, elles sont relues.
+            if inputs.rev < rev {
+                continue;
+            }
+            // Sans rôle : rien, et aucun calcul n'est rangé.
+            let Some(role) = inputs.role_of(user.id) else {
+                return Ok(None);
+            };
+            let access = Arc::new(SpaceAccess::compute(
+                &inputs.nodes,
+                &inputs.grants,
+                user.id,
+                Some(role),
+            ));
+            // Sous la révision des données, lue avec elles : celle lue plus haut peut être
+            // plus ancienne, et ce calcul n'est pas le sien.
+            self.access
+                .put(user.id, space_id, inputs.rev, Arc::clone(&access));
+            return Ok(Some(access));
+        }
+        // Relues, et toujours plus anciennes : pas de droits calculés sur un état dépassé.
+        Err(internal(format_args!(
+            "les données d'accès de l'espace {space_id} sont plus anciennes que sa révision \
+             {rev}, relecture comprise : la révision de l'espace a reculé"
+        )))
     }
 
     /// Le rôle de `user`, au moins `min` (rang guest < member < admin < owner) : `404` sans
@@ -719,6 +736,173 @@ pub(crate) mod tests {
             state.inputs.kept(space.id).map(|inputs| inputs.rev),
             Some(before + 1)
         );
+    }
+
+    /// Ruling R98 : après l'attente de son tour, une requête prend des données plus récentes
+    /// que la révision qu'elle a lue, au lieu de relire. Mona et Tom lisent la révision, puis
+    /// attendent le tour de lecture, que le test tient ; une page est créée ; le tour est rendu.
+    /// La première requête lit les données d'après l'écriture, l'autre les prend : une seule
+    /// lecture pour les deux, et le calcul de chacune est rangé sous la révision des données.
+    #[tokio::test]
+    async fn waiting_requests_take_the_inputs_read_after_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let mona = account(&state, "mona").await;
+        let tom = account(&state, "tom").await;
+        let space = team(&state, &olga, &[&mona, &tom]).await;
+        let before = rev(&state, &space).await;
+
+        let held = state.inputs.hold_turn(space.id).await;
+        let requests = [&mona, &tom].map(|who| {
+            let (state, who, space) = (state.clone(), who.clone(), space.id);
+            tokio::spawn(async move { state.find_space_access(&who, space).await })
+        });
+        wait_until("les deux requêtes attendent leur tour de lecture", || {
+            state.inputs.waiting(space.id) == 3
+        })
+        .await;
+        let page = members_page(&state, &space, &olga, "Écrite pendant l'attente").await;
+        drop(held);
+
+        for (request, who) in requests.into_iter().zip([&mona, &tom]) {
+            let access = request.await.unwrap().unwrap().expect("un rôle");
+            assert!(access.node(page).is_some());
+            assert!(state.access.get(who.id, space.id, before).is_none());
+            let filed = state.access.get(who.id, space.id, before + 1);
+            assert!(filed.is_some_and(|filed| Arc::ptr_eq(&filed, &access)));
+        }
+        assert_eq!(state.inputs.loads(), 1);
+        assert_eq!(
+            state.inputs.kept(space.id).map(|inputs| inputs.rev),
+            Some(before + 1)
+        );
+    }
+
+    /// Une connexion à la base de `dir`, à côté du store : pour y écrire ce qu'aucune de ses
+    /// fonctions n'écrit.
+    async fn beside_the_store(dir: &tempfile::TempDir) -> sqlx::SqlitePool {
+        let db = dir.path().join("m.db");
+        sqlx::SqlitePool::connect(&format!("sqlite:{}", db.display()))
+            .await
+            .unwrap()
+    }
+
+    /// Ajoute `by` à la révision de l'espace, sans rien écrire d'autre : ce que le store ne
+    /// fait jamais, surtout pas vers le bas.
+    async fn shift_rev(side: &sqlx::SqlitePool, space: &Space, by: i64) {
+        sqlx::query("UPDATE spaces SET rev = rev + ? WHERE id = ?")
+            .bind(by)
+            .bind(space.id.to_string())
+            .execute(side)
+            .await
+            .unwrap();
+    }
+
+    /// La garde du Ruling R98, là où le calcul est fait : des données plus anciennes que la
+    /// révision lue par la requête ne servent pas à son calcul, elles sont relues. Il faut pour
+    /// cela que la révision recule, ce que le store ne fait jamais : le test l'écrit dans la
+    /// base, à côté de lui, entre la lecture de la révision et celle des données. L'ordre est
+    /// forcé par le tour de lecture : le test le tient, la requête de Mona attend derrière lui,
+    /// puis un second tour derrière elle ; la révision recule, la requête lit ; pendant que le
+    /// second tour est tenu, la révision revient ; la requête relit, et sert ce qu'elle relit.
+    #[tokio::test]
+    async fn inputs_older_than_the_revision_read_are_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let mona = account(&state, "mona").await;
+        let space = team(&state, &olga, &[&mona]).await;
+        let page = members_page(&state, &space, &olga, "P").await;
+        let before = rev(&state, &space).await;
+        let side = beside_the_store(&dir).await;
+
+        let first = state.inputs.hold_turn(space.id).await;
+        let request = tokio::spawn({
+            let (state, mona, space) = (state.clone(), mona.clone(), space.id);
+            async move { state.find_space_access(&mona, space).await }
+        });
+        wait_until("la requête attend son tour de lecture", || {
+            state.inputs.waiting(space.id) == 2
+        })
+        .await;
+        let (taken, is_taken) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let second = tokio::spawn({
+            let (state, space) = (state.clone(), space.id);
+            async move {
+                let held = state.inputs.hold_turn(space).await;
+                taken.send(()).unwrap();
+                released.await.unwrap();
+                drop(held);
+            }
+        });
+        wait_until("un second tour attend derrière la requête", || {
+            state.inputs.waiting(space.id) == 3
+        })
+        .await;
+
+        shift_rev(&side, &space, -1).await;
+        drop(first);
+        // Le second tour est pris : la requête a lu, et rendu le sien.
+        is_taken.await.unwrap();
+        assert_eq!(
+            state.inputs.kept(space.id).map(|inputs| inputs.rev),
+            Some(before - 1)
+        );
+        shift_rev(&side, &space, 1).await;
+        release.send(()).unwrap();
+
+        let access = request.await.unwrap().unwrap().expect("un rôle");
+        second.await.unwrap();
+        assert!(access.node(page).is_some());
+        assert_eq!(state.inputs.loads(), 2);
+        assert!(state.access.get(mona.id, space.id, before - 1).is_none());
+        let filed = state.access.get(mona.id, space.id, before);
+        assert!(filed.is_some_and(|filed| Arc::ptr_eq(&filed, &access)));
+        side.close().await;
+    }
+
+    /// La même garde, quand la relecture rapporte encore des données plus anciennes que la
+    /// révision lue : la requête répond `500` plutôt que de calculer dessus, et aucun calcul
+    /// n'est rangé. La requête suivante lit la révision d'à présent, et sert.
+    #[tokio::test]
+    async fn inputs_still_older_after_a_reread_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let mona = account(&state, "mona").await;
+        let space = team(&state, &olga, &[&mona]).await;
+        let page = members_page(&state, &space, &olga, "P").await;
+        let before = rev(&state, &space).await;
+        let side = beside_the_store(&dir).await;
+
+        let held = state.inputs.hold_turn(space.id).await;
+        let request = tokio::spawn({
+            let (state, mona, space) = (state.clone(), mona.clone(), space.id);
+            async move { state.find_space_access(&mona, space).await }
+        });
+        wait_until("la requête attend son tour de lecture", || {
+            state.inputs.waiting(space.id) == 2
+        })
+        .await;
+        shift_rev(&side, &space, -1).await;
+        side.close().await;
+        drop(held);
+
+        let error = request.await.unwrap().unwrap_err();
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(state.inputs.loads(), 2);
+        for rev in [before - 1, before] {
+            assert!(state.access.get(mona.id, space.id, rev).is_none());
+        }
+
+        let access = state.space_access(&mona, space.id).await.unwrap();
+        assert!(access.node(page).is_some());
+        assert_eq!(state.inputs.loads(), 2);
     }
 
     /// Sans rôle dans l'espace : rien, et aucun calcul n'est rangé. Les données de l'espace,
