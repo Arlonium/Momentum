@@ -81,7 +81,8 @@ const MARKDOWN: &str = "text/markdown; charset=utf-8";
 
 /// Reprises d'un `PATCH` quand ce sur quoi il a décidé ne tient plus à l'écriture : la page a
 /// changé de parent ou, pour un passage à la racine, la personne n'a plus ce qu'il lui faut. La
-/// route relit et redécide. Au-delà, `503 unavailable`.
+/// route relit et redécide. Au-delà, `409 page_moved` (Ruling R91) : rien n'est écrit, et
+/// c'est au client de réessayer.
 const MOVE_RETRIES: usize = 3;
 
 /// `GET /api/v1/spaces/{id}/tree` : les pages de l'espace que la personne voit, hors
@@ -262,8 +263,8 @@ pub(crate) async fn get(
 ///
 /// La place est décidée sur le parent lu avec les droits. Si la page change de parent avant
 /// l'écriture, le store refuse (`Stale`) : la route relit et redécide, [`MOVE_RETRIES`] fois
-/// au plus. Un changement de place autorisé par `edit` ne ramène donc jamais une page sous un
-/// parent qu'elle a quitté entre-temps.
+/// au plus, puis répond `409 page_moved` (Ruling R91). Un changement de place autorisé par
+/// `edit` ne ramène donc jamais une page sous un parent qu'elle a quitté entre-temps.
 ///
 /// De même pour un passage à la racine, qui écrit des accès : le store revérifie dans sa
 /// transaction ce que la route a lu avant elle (la personne est membre, elle a l'accès complet
@@ -337,13 +338,7 @@ pub(crate) async fn update(
                     .await?
                     .ok_or_else(ApiError::page_not_found)?;
             }
-            Err(StoreError::Stale) => {
-                return Err(ApiError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    ErrorCode::Unavailable,
-                    "la page change de place en ce moment : rien n'a été modifié ; réessayer",
-                ));
-            }
+            Err(StoreError::Stale) => return Err(ApiError::page_moved()),
             Err(error) => {
                 let parent = place.and_then(|place| place.parent_id);
                 return Err(placement_error(&state, error, by, space_id, Some(id), parent).await);

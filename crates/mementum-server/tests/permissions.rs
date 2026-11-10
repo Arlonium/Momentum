@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
 use common::{
-    Account, Browser, Logs, Reply, Team, TestApp, json_request, outcome, page_routes, query_i64,
-    sync_url, synced_as, text, trash_list, tree_nodes, uuid,
+    Account, Browser, Logs, Reply, Team, TestApp, assert_french, exec_sql, json_request, outcome,
+    page_routes, query_i64, sync_url, synced_as, text, trash_list, tree_nodes, uuid,
 };
 use mementum_acl::{Level, Role, Subject};
 use mementum_crdt::PageDoc;
@@ -1561,12 +1561,18 @@ impl Overtaken {
     /// Une fois au moins : la requête avait bien décidé sur la base d'avant. Arrivée après
     /// l'écriture concurrente, elle n'aurait rien eu à relire, et le test ne prouverait rien.
     fn redecided(&self, page: Uuid) -> usize {
-        let page = page.to_string();
-        self.journal
-            .lines()
-            .filter(|line| line.contains("relit") && line.contains(&page))
-            .count()
+        reprises(&self.journal, page)
     }
+}
+
+/// Le nombre de reprises d'un `PATCH` sur `page` que porte le journal du serveur : une ligne
+/// par écriture que le store a refusée, et que la route a redécidée.
+fn reprises(journal: &str, page: Uuid) -> usize {
+    let page = page.to_string();
+    journal
+        .lines()
+        .filter(|line| line.contains("relit") && line.contains(&page))
+        .count()
 }
 
 /// Envoie `request` pendant que le test tient le verrou d'écriture de SQLite : elle lit donc
@@ -1880,6 +1886,52 @@ async fn move_to_root_overtaken_by_the_departure_of_its_mover_writes_nothing() {
     let read = gina.browser.get(&page_uri(page)).await;
     read.assert_status(StatusCode::OK);
     assert_eq!(text(&read.json(), "level"), "read");
+}
+
+/// Ruling R91 : un `PATCH` dont la décision ne tient plus à aucune de ses quatre tentatives
+/// répond `409 page_moved`, sans avoir rien écrit : c'est au client de réessayer.
+///
+/// Pour qu'elle ne tienne à aucune, sans dépendre d'un minutage, le test fait ce que le store
+/// ne fait jamais : il écrit dans la base sans incrémenter la révision de l'espace. Le cache
+/// des accès du serveur reste alors celui d'avant, et la route redécide chaque fois sur des
+/// droits que la transaction ne retrouve pas, comme une requête prise de vitesse à chaque
+/// reprise.
+#[tokio::test]
+async fn patch_overtaken_at_every_attempt_answers_page_moved() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, mona) = (&team.olga, &team.mona);
+    let shared = [user(olga, Level::Full), user(mona, Level::Full)];
+    let parent = team.page(None, "D'Olga et Mona", &shared).await;
+    let page = team.page(Some(parent), "Page", &[]).await;
+    // Les accès de Mona sont en cache : membre, elle a l'accès complet à la page.
+    let read = mona.browser.get(&page_uri(page)).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(text(&read.json(), "level"), "full");
+    // Elle devient invitée, à l'insu du cache.
+    let demoted = format!(
+        "UPDATE members SET role = 'guest' WHERE space_id = '{}' AND user_id = '{}'",
+        team.space, mona.id
+    );
+    exec_sql(&t.db_path(), &demoted).await;
+    let before = team.store.get_node(page).await.unwrap().expect("la page");
+    let rev = team.store.space_rev(team.space).await.unwrap();
+
+    let logs = Logs::capture();
+    let body = json!({ "parentId": null, "title": "Renommée" });
+    let reply = mona.patch(&page.to_string(), body).await;
+    let journal = logs.text();
+    drop(logs);
+
+    let error = reply.assert_error(StatusCode::CONFLICT, "page_moved");
+    assert_french(&error, &["rien n'a été modifié", "réessayer"]);
+    // Quatre tentatives : la première, puis trois reprises.
+    assert_eq!(reprises(&journal, page), 3, "journal : {journal}");
+    // Rien n'a été écrit, pas même le titre.
+    let after = team.store.get_node(page).await.unwrap().expect("la page");
+    assert_eq!(after, before);
+    assert_eq!(team.grants(page).await, []);
+    assert_eq!(team.store.space_rev(team.space).await.unwrap(), rev);
 }
 
 /// `PATCH` change le titre et la place en une seule écriture : un déplacement refusé (`409

@@ -222,6 +222,17 @@ impl ApiError {
         )
     }
 
+    /// `409 page_moved` (Ruling R91) : à chaque tentative d'écriture d'un `PATCH`, la page
+    /// avait changé de parent, ou la personne n'avait plus ce qu'il faut pour la passer à la
+    /// racine. Ce n'est pas une panne du serveur : rien n'est écrit, et réessayer suffit.
+    pub fn page_moved() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::PageMoved,
+            "la page change de place en ce moment : rien n'a été modifié ; réessayer",
+        )
+    }
+
     /// `409 last_full_access` : la page n'aurait plus personne en accès complet (Ruling R70).
     pub fn last_full_access() -> ApiError {
         ApiError::new(

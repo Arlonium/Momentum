@@ -606,6 +606,10 @@ pub enum ErrorCode {
     /// Les rôles sur lesquels la demande était décidée ont changé pendant qu'elle
     /// s'écrivait, plusieurs fois de suite : rien n'est écrit ; réessayer. Statut 409.
     RolesChanged,
+    /// La page a changé de place, ou ce que la personne peut en faire, à chaque tentative
+    /// d'écrire son renommage ou son déplacement (Ruling R91) : rien n'est écrit ; réessayer.
+    /// Statut 409.
+    PageMoved,
     /// Le changement laisserait la page sans personne en accès complet, ni par ses accès ni
     /// par ceux d'une page parente : rien n'est écrit. Statut 409.
     LastFullAccess,
