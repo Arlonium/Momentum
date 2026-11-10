@@ -13,15 +13,17 @@
 //
 // Session perdue en cours de route (un appel répond `401 unauthenticated`, `api.ts`) : la
 // connexion est demandée par-dessus l'application, qui reste montée. La page ouverte et ce
-// qui y a été tapé restent dans l'onglet, et repartent une fois la session rouverte. Si
-// c'est un autre compte qui se connecte, l'application ne reprend pas : elle est démontée
-// aussitôt, et l'onglet rechargé (Ruling R115). Rien de ce que le premier avait ouvert ou tapé
-// ne reste en mémoire, ni ne part sous le nom du second.
+// qui y a été tapé restent dans l'onglet, et repartent une fois la session rouverte.
+//
+// Le compte de la session n'est plus celui que l'application a chargé (Ruling R115) : un
+// autre s'est connecté par-dessus elle, ou dans un autre onglet du même navigateur, ce qu'elle
+// apprend en relisant le compte. Elle ne reprend pas : elle est démontée aussitôt, et l'onglet
+// rechargé. Rien de ce que le premier avait ouvert ou tapé ne reste en mémoire, ni ne part
+// sous le nom du second. Un seul endroit en décide : `sameAccount`.
 //
 // La déconnexion recharge l'onglet (`SpaceSwitcher`) : rien du compte ne reste en mémoire.
 import type { Info, InvitationInfo, Me } from "@mementum/protocol";
 import {
-  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -48,7 +50,16 @@ type State =
   /** `lost` : un appel a dit que la session n'est plus là. */
   | { name: "signedIn"; me: Me; lost: boolean };
 
-export function SessionGate({ children }: { children: ReactNode }) {
+/** Recharge l'onglet : plus rien de l'application ouverte ne reste en mémoire. */
+const reloadTab = () => location.reload();
+
+type Props = {
+  children: ReactNode;
+  /** Recharge l'onglet ; les tests en donnent un autre. */
+  reload?: () => void;
+};
+
+export function SessionGate({ children, reload = reloadTab }: Props) {
   const route = parseRoute(usePathname());
   const [state, setState] = useState<State>({ name: "loading" });
   /** Le jeton du lien d'invitation ouvert dans cet onglet. */
@@ -147,30 +158,40 @@ export function SessionGate({ children }: { children: ReactNode }) {
     [],
   );
 
+  /** Le compte que l'application a chargé ; `null` : elle n'est pas ouverte. */
+  const loaded = useRef<string | null>(null);
+  loaded.current = state.name === "signedIn" ? state.me.user.id : null;
+
+  /**
+   * Le serveur vient de dire quel compte a la session (`GET /api/v1/me`, ou la connexion
+   * par-dessus l'application) : est-ce toujours celui que l'application a chargé ? Sinon
+   * (Ruling R115), elle repart de zéro : l'onglet est rechargé. Elle est d'abord démontée,
+   * sur-le-champ : ses connexions de synchro et ce qui attendait le retour du compte (un
+   * texte, un titre) s'arrêtent là, avant d'avoir pu se servir de la session de l'autre.
+   */
+  const sameAccount = useCallback(
+    (me: Me): boolean => {
+      if (loaded.current === null || me.user.id === loaded.current) return true;
+      flushSync(() => setState({ name: "loading" }));
+      reload();
+      return false;
+    },
+    [reload],
+  );
+
   const refresh = useCallback(async () => {
     // Session perdue : `getMe` rejette, et `onSessionLost` a déjà demandé la connexion.
     const me = await getMe();
+    if (!sameAccount(me)) return;
     setState((current) => (current.name === "signedIn" ? { ...current, me } : current));
-  }, []);
+  }, [sameAccount]);
 
-  /**
-   * La session est rouverte par-dessus l'application (`LoginDialog`). Le même compte reprend où
-   * il en était. Un autre repart de zéro (Ruling R115) : l'onglet est rechargé. L'application
-   * est d'abord démontée, sur-le-champ : ses connexions de synchro et ce qui attendait le
-   * retour du compte (un texte, un titre) s'arrêtent là, avant d'avoir pu se servir de la
-   * session du second.
-   */
-  const previous = state.name === "signedIn" ? state.me.user.id : null;
+  /** La session est rouverte par-dessus l'application (`LoginDialog`) : elle reprend. */
   const resume = useCallback(
     (me: Me) => {
-      if (previous === null || me.user.id === previous) {
-        enter(me);
-        return;
-      }
-      flushSync(() => setState({ name: "loading" }));
-      location.reload();
+      if (sameAccount(me)) enter(me);
     },
-    [enter, previous],
+    [enter, sameAccount],
   );
 
   const showSignup = useCallback(() => navigate("/signup"), []);
@@ -248,13 +269,7 @@ export function SessionGate({ children }: { children: ReactNode }) {
 
   return (
     <SessionContext.Provider value={session}>
-      {route.name === "invite" ? (
-        invitePage
-      ) : (
-        // Le compte de la session a changé sans passer par ici (elle a été rouverte sous un
-        // autre compte dans un autre onglet) : l'application repart de zéro.
-        <Fragment key={state.me.user.id}>{children}</Fragment>
-      )}
+      {route.name === "invite" ? invitePage : children}
       {state.lost && <LoginDialog email={state.me.user.email} onLoggedIn={resume} />}
     </SessionContext.Provider>
   );

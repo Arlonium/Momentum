@@ -412,3 +412,32 @@ test("login_as_someone_else_over_the_open_page_starts_afresh", async ({ browser 
   // L'onglet a été rechargé : rien de l'application ouverte par A n'est resté en mémoire.
   expect(await p.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBeUndefined();
 });
+
+test("account_changed_in_another_tab_reloads_this_one", async ({ browser }) => {
+  const { alice, space, bruno } = await ownerAndMember();
+  // Premier onglet : l'application d'A, sans page ouverte. Rien n'y parle au serveur tant
+  // qu'on n'y touche pas.
+  const first = await newUser(browser, alice);
+  await first.goto(`/s/${space.id}`);
+  await expectSignedInAs(first, alice.name);
+  // Un repère sur la fenêtre : un rechargement de l'onglet l'efface.
+  await first.evaluate(() => ((window as unknown as { kept: boolean }).kept = true));
+
+  // Second onglet du même navigateur : A se déconnecte, B se connecte. Le cookie de session
+  // est désormais celui de B, pour les deux onglets.
+  const second = await first.context().newPage();
+  await second.goto("/");
+  await spaceSwitcher(second).click();
+  await second.getByRole("button", { name: "Se déconnecter" }).click();
+  await expect(loginHeading(second)).toBeVisible();
+  await logInWith(second, bruno.email, bruno.password);
+  await expectSignedInAs(second, bruno.name);
+
+  // Le premier onglet montre toujours A. Dès qu'il relit le compte (le sélecteur d'espace,
+  // ouvert), il apprend que ce n'est plus le sien : il se recharge, et l'écran est celui de B.
+  const reloaded = first.waitForEvent("load", { timeout: 5_000 });
+  await spaceSwitcher(first).click();
+  await reloaded;
+  await expectSignedInAs(first, bruno.name);
+  expect(await first.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBeUndefined();
+});

@@ -22,7 +22,10 @@ export function colorOf(userId: string): string {
 export type Session = {
   /** Le compte connecté et ses espaces. */
   me: Me;
-  /** Relit le compte (`GET /api/v1/me`). Session perdue : la connexion est demandée. */
+  /**
+   * Relit le compte (`GET /api/v1/me`). Session perdue : la connexion est demandée. Session
+   * passée à un autre compte (dans un autre onglet) : l'onglet est rechargé (Ruling R115).
+   */
   refresh(): Promise<void>;
 };
 
