@@ -25,14 +25,34 @@ pub struct Member {
     pub role: Role,
 }
 
-/// Rang d'un rôle : `guest` < `member` < `admin` < `owner`.
-fn rank(role: Role) -> u8 {
-    match role {
-        Role::Guest => 0,
-        Role::Member => 1,
-        Role::Admin => 2,
-        Role::Owner => 3,
+/// Ce sur quoi l'appelant de [`Store::set_role`] ou de [`Store::remove_member`] a décidé :
+/// qui le demande, son rôle, et le rôle de la personne visée, tels qu'il les a lus. Le store les
+/// relit dans sa transaction ; s'ils ont changé, il refuse (`Stale`) sans rien écrire, et
+/// l'appelant redécide sur les rôles relus. Pour qui part, `actor` est la personne visée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Expected {
+    pub actor: Uuid,
+    pub actor_role: Role,
+    pub target_role: Role,
+}
+
+/// Relit, dans la transaction, les rôles sur lesquels l'appelant a décidé (voir [`Expected`]),
+/// et rend celui de la personne visée. `NotFound` si elle n'a pas de rôle dans l'espace ;
+/// `Stale` si elle ou l'acteur n'a plus le rôle attendu.
+async fn check_expected(
+    tx: &mut Transaction<'_, Sqlite>,
+    space_id: &str,
+    user_id: &str,
+    expected: Expected,
+) -> Result<Role, StoreError> {
+    let current = role_of(tx, space_id, user_id)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+    let actor = role_of(tx, space_id, &expected.actor.to_string()).await?;
+    if current != expected.target_role || actor != Some(expected.actor_role) {
+        return Err(StoreError::Stale);
     }
+    Ok(current)
 }
 
 /// Relit `members.role` : une valeur inconnue est une erreur, jamais une ligne sautée.
@@ -81,7 +101,7 @@ pub(crate) async fn raise_role(
     role: Role,
 ) -> Result<bool, StoreError> {
     match role_of(tx, space_id, user_id).await? {
-        Some(current) if rank(current) >= rank(role) => return Ok(false),
+        Some(current) if current.rank() >= role.rank() => return Ok(false),
         Some(_) => {
             sqlx::query("UPDATE members SET role = ? WHERE space_id = ? AND user_id = ?")
                 .bind(role.as_str())
@@ -283,22 +303,23 @@ impl Store {
         Ok(())
     }
 
-    /// Change le rôle d'un membre, dans les deux sens. `NotFound` s'il n'a pas de rôle dans
-    /// l'espace ; `LastOwner` si c'est le dernier propriétaire et qu'il cesserait de l'être.
-    /// Les refus n'écrivent rien ; garder le même rôle non plus.
+    /// Change le rôle d'un membre, dans les deux sens, et rend son rôle d'avant, lu dans la
+    /// transaction. `NotFound` s'il n'a pas de rôle dans l'espace ; `Stale` si lui ou l'acteur
+    /// n'a plus le rôle sur lequel l'appelant a décidé (`expected`) ; `LastOwner` si c'est le
+    /// dernier propriétaire et qu'il cesserait de l'être. Les refus n'écrivent rien ; garder le
+    /// même rôle non plus.
     pub async fn set_role(
         &self,
         space_id: Uuid,
         user_id: Uuid,
         role: Role,
-    ) -> Result<(), StoreError> {
+        expected: Expected,
+    ) -> Result<Role, StoreError> {
         let (space, user) = (space_id.to_string(), user_id.to_string());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let current = role_of(&mut tx, &space, &user)
-            .await?
-            .ok_or(StoreError::NotFound)?;
+        let current = check_expected(&mut tx, &space, &user, expected).await?;
         if current == role {
-            return Ok(());
+            return Ok(current);
         }
         if current == Role::Owner && owners(&mut tx, &space).await? == 1 {
             return Err(StoreError::LastOwner);
@@ -311,7 +332,7 @@ impl Store {
             .await?;
         bump_rev(&mut tx, &space).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(current)
     }
 
     /// Retire le compte de l'espace, en une transaction :
@@ -325,15 +346,20 @@ impl Store {
     ///   il était le dernier sujet en `full`, les lignes de plus haut niveau qui restent passent
     ///   à `full` (détail dans `hand_over_full`).
     ///
-    /// Aucun nœud n'est supprimé. `NotFound` s'il n'a pas de rôle dans l'espace ; `LastOwner`
-    /// si c'est le dernier propriétaire. Tout est écrit, ou rien.
-    pub async fn remove_member(&self, space_id: Uuid, user_id: Uuid) -> Result<(), StoreError> {
+    /// Aucun nœud n'est supprimé. `NotFound` s'il n'a pas de rôle dans l'espace ; `Stale` si lui
+    /// ou l'acteur n'a plus le rôle sur lequel l'appelant a décidé (`expected` ; pour qui part,
+    /// l'acteur est lui) ; `LastOwner` si c'est le dernier propriétaire. Tout est écrit, ou
+    /// rien.
+    pub async fn remove_member(
+        &self,
+        space_id: Uuid,
+        user_id: Uuid,
+        expected: Expected,
+    ) -> Result<(), StoreError> {
         let (space, user) = (space_id.to_string(), user_id.to_string());
         let subject = Subject::User(user_id).to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let current = role_of(&mut tx, &space, &user)
-            .await?
-            .ok_or(StoreError::NotFound)?;
+        let current = check_expected(&mut tx, &space, &user, expected).await?;
         if current == Role::Owner && owners(&mut tx, &space).await? == 1 {
             return Err(StoreError::LastOwner);
         }

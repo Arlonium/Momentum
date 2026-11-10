@@ -17,7 +17,7 @@ use common::{Browser, Reply, TestApp, WAIT, all_logs, assert_french, exec_sql, q
 use mementum_acl::Role;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
-use mementum_store::Store;
+use mementum_store::{Expected, Store};
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -438,7 +438,16 @@ async fn space_routes_by_role() {
         for ((name, browser), status) in who.iter().zip(expected) {
             // Avant chaque appel : Tom est membre, et une invitation neuve d'Olga attend.
             store.add_member(space, tom, Role::Member).await.unwrap();
-            store.set_role(space, tom, Role::Member).await.unwrap();
+            let current = store.role_in(space, tom).await.unwrap().unwrap();
+            let by_olga = Expected {
+                actor: team.olga.id,
+                actor_role: Role::Owner,
+                target_role: current,
+            };
+            store
+                .set_role(space, tom, Role::Member, by_olga)
+                .await
+                .unwrap();
             let (invitation, token) =
                 invited(&team.olga.browser, space, "invite@exemple.fr", "member").await;
 
@@ -1082,7 +1091,12 @@ async fn access_cache_follows_rev() {
 
     // Une écriture faite hors des routes (par le store) compte aussi : elle incrémente `rev`.
     let store = Store::open(&t.db_path()).await.unwrap();
-    store.remove_member(space, adam.id).await.unwrap();
+    let by_olga = Expected {
+        actor: olga.id,
+        actor_role: Role::Owner,
+        target_role: Role::Member,
+    };
+    store.remove_member(space, adam.id, by_olga).await.unwrap();
     store.close().await;
     adam.browser
         .get(&members_uri(space))

@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::{account, break_table, fresh, int, page, repair, side_pool};
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_store::{
-    Invitation, InvitationGrant, NewInvitation, NewNode, Node, Space, Store, StoreError,
+    Expected, Invitation, InvitationGrant, NewInvitation, NewNode, Node, Space, Store, StoreError,
 };
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -24,6 +24,15 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64
+}
+
+/// Ce que l'appelant de `set_role` ou `remove_member` a lu avant de décider.
+fn seen(actor: Uuid, actor_role: Role, target_role: Role) -> Expected {
+    Expected {
+        actor,
+        actor_role,
+        target_role,
+    }
 }
 
 async fn rev(store: &Store, space: Uuid) -> i64 {
@@ -594,7 +603,12 @@ async fn demoted_admin_invitation_is_dead() {
     );
 
     store
-        .set_role(space.id, adam.id, Role::Member)
+        .set_role(
+            space.id,
+            adam.id,
+            Role::Member,
+            seen(olga.id, Role::Owner, Role::Admin),
+        )
         .await
         .unwrap();
     // Ni consultable, ni acceptable, par son auteur comme par un autre.
@@ -618,7 +632,12 @@ async fn demoted_admin_invitation_is_dead() {
 
     // Le droit se lit au moment de l'appel : redevenu admin, son invitation vaut de nouveau.
     store
-        .set_role(space.id, adam.id, Role::Admin)
+        .set_role(
+            space.id,
+            adam.id,
+            Role::Admin,
+            seen(olga.id, Role::Owner, Role::Member),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -676,11 +695,21 @@ async fn owner_invitation_needs_an_owner_author() {
         Some(&to_owner)
     );
     store
-        .set_role(space.id, adam.id, Role::Owner)
+        .set_role(
+            space.id,
+            adam.id,
+            Role::Owner,
+            seen(olga.id, Role::Owner, Role::Admin),
+        )
         .await
         .unwrap();
     store
-        .set_role(space.id, olga.id, Role::Admin)
+        .set_role(
+            space.id,
+            olga.id,
+            Role::Admin,
+            seen(olga.id, Role::Owner, Role::Owner),
+        )
         .await
         .unwrap();
     assert_eq!(store.invitation_by_token([3; 32], t).await.unwrap(), None);
@@ -690,7 +719,12 @@ async fn owner_invitation_needs_an_owner_author() {
 
     // Redevenue propriétaire, son invitation vaut de nouveau, et fait un propriétaire.
     store
-        .set_role(space.id, olga.id, Role::Owner)
+        .set_role(
+            space.id,
+            olga.id,
+            Role::Owner,
+            seen(adam.id, Role::Owner, Role::Admin),
+        )
         .await
         .unwrap();
     store.accept_invitation([3; 32], bob.id, t).await.unwrap();
@@ -789,7 +823,9 @@ async fn removed_member_invitations_are_deleted() {
 
     // Une panne sur leur suppression : rien n'est écrit, Adam est toujours admin.
     break_table(db, "DELETE", "invitations", "1").await;
-    let r = store.remove_member(space.id, adam.id).await;
+    let r = store
+        .remove_member(space.id, adam.id, seen(olga.id, Role::Owner, Role::Admin))
+        .await;
     assert!(matches!(r, Err(StoreError::Sqlx(_))), "{r:?}");
     repair(db).await;
     assert_eq!(
@@ -798,7 +834,10 @@ async fn removed_member_invitations_are_deleted() {
     );
     assert_eq!(store.pending_invitations(space.id).await.unwrap(), pending);
 
-    store.remove_member(space.id, adam.id).await.unwrap();
+    store
+        .remove_member(space.id, adam.id, seen(olga.id, Role::Owner, Role::Admin))
+        .await
+        .unwrap();
     assert_eq!(
         store.pending_invitations(space.id).await.unwrap(),
         slice::from_ref(&pending[2])
@@ -893,7 +932,12 @@ async fn get_invitation_returns_only_pending() {
         .await
         .unwrap();
     store
-        .set_role(space.id, adam.id, Role::Member)
+        .set_role(
+            space.id,
+            adam.id,
+            Role::Member,
+            seen(olga.id, Role::Owner, Role::Admin),
+        )
         .await
         .unwrap();
     assert_eq!(store.invitation_by_token([4; 32], t).await.unwrap(), None);

@@ -13,16 +13,19 @@
 //! | changer un rôle | tous | entre `admin` et `member` | non | non |
 //! | partir | oui, sauf le dernier propriétaire | oui | oui | oui |
 //!
-//! Un changement de rôle et un retrait ferment les connexions de synchro de l'espace
-//! (`rights_changed`), dans la tâche qui écrit : la suite va au bout même si le client coupe la
-//! connexion.
+//! Un changement de rôle et un retrait se décident sur les rôles lus par la route, que le store
+//! revérifie dans la transaction qui écrit (`Expected`) : s'ils ont changé entre-temps, rien
+//! n'est écrit, et la route relit et redécide (deux reprises au plus, puis `409
+//! roles_changed`). Ils ferment ensuite les connexions de synchro de l'espace
+//! (`rights_changed`). Écriture, journal et fermeture vont dans une tâche à part : ils vont au
+//! bout même si le client coupe la connexion.
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use mementum_acl::Role;
-use mementum_store::StoreError;
+use mementum_store::{Expected, StoreError};
 use uuid::Uuid;
 
 use crate::access::require;
@@ -104,33 +107,20 @@ pub(crate) async fn update_member(
     body: Result<Json<UpdateMember>, JsonRejection>,
 ) -> Result<Json<types::Member>, ApiError> {
     let (space_id, target) = member_path(path)?;
+    // Sous `admin`, `403` avant de regarder la personne visée.
     let caller = state.role_at_least(&user, space_id, Role::Admin).await?;
     let Json(body) = body?;
     let target = target.ok_or_else(ApiError::member_not_found)?;
-    let current = role_in(&state, space_id, target).await?;
+    let roles = Roles {
+        caller,
+        target: role_in(&state, space_id, target).await?,
+    };
     let wanted = Role::from(body.role);
-    may_change_role(caller, current, wanted)?;
-    if current != wanted {
-        let writer = state.clone();
-        to_completion(async move {
-            writer
-                .store
-                .set_role(space_id, target, wanted)
-                .await
-                .map_err(member_error)?;
-            writer.rights_changed(space_id, None).await;
-            Ok(())
-        })
-        .await?;
-        tracing::info!(
-            space_id = %space_id,
-            user_id = %user.id,
-            member_id = %target,
-            from = current.as_str(),
-            to = wanted.as_str(),
-            "rôle changé"
-        );
-    }
+    let writer = state.clone();
+    to_completion(
+        async move { change_role(&writer, &user, space_id, target, wanted, roles).await },
+    )
+    .await?;
     let members = state.store.members(space_id).await.map_err(internal)?;
     members
         .into_iter()
@@ -151,39 +141,146 @@ pub(crate) async fn remove_member(
 ) -> Result<StatusCode, ApiError> {
     let (space_id, target) = member_path(path)?;
     let caller = state.role_at_least(&user, space_id, Role::Guest).await?;
-    let leaving = target == Some(user.id);
-    if !leaving {
+    // Sous `admin`, `403` avant de regarder la personne visée : un invité, qui ne voit pas les
+    // membres, n'apprend pas ainsi qui l'est.
+    if target != Some(user.id) {
         require(caller, Role::Admin)?;
     }
     let target = target.ok_or_else(ApiError::member_not_found)?;
-    let current = role_in(&state, space_id, target).await?;
-    if !leaving && caller == Role::Admin && current == Role::Owner {
-        return Err(ApiError::forbidden(
-            "un admin ne retire pas un propriétaire de l'espace",
-        ));
-    }
+    let roles = Roles {
+        caller,
+        target: role_in(&state, space_id, target).await?,
+    };
     let writer = state.clone();
-    to_completion(async move {
-        writer
-            .store
-            .remove_member(space_id, target)
-            .await
-            .map_err(member_error)?;
-        writer.rights_changed(space_id, None).await;
-        Ok(())
-    })
-    .await?;
-    if leaving {
-        tracing::info!(space_id = %space_id, user_id = %user.id, "membre parti de l'espace");
-    } else {
-        tracing::info!(
-            space_id = %space_id,
-            user_id = %user.id,
-            member_id = %target,
-            "membre retiré de l'espace"
-        );
-    }
+    to_completion(async move { remove(&writer, &user, space_id, target, roles).await }).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Reprises d'une décision quand les rôles ont changé entre leur lecture et l'écriture.
+const ROLE_RETRIES: usize = 2;
+
+/// Les rôles sur lesquels une route de membres décide : celui de l'appelant, celui de la
+/// personne visée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Roles {
+    caller: Role,
+    target: Role,
+}
+
+impl Roles {
+    /// Ce que le store doit retrouver dans sa transaction pour écrire.
+    fn expected(self, actor: &AuthUser) -> Expected {
+        Expected {
+            actor: actor.id,
+            actor_role: self.caller,
+            target_role: self.target,
+        }
+    }
+}
+
+/// Relit les rôles de l'appelant (`404` s'il n'en a plus) et de la personne visée (`404` si
+/// elle n'en a plus).
+async fn read_roles(
+    state: &AppState,
+    user: &AuthUser,
+    space_id: Uuid,
+    target: Uuid,
+) -> Result<Roles, ApiError> {
+    Ok(Roles {
+        caller: state.role_at_least(user, space_id, Role::Guest).await?,
+        target: role_in(state, space_id, target).await?,
+    })
+}
+
+/// Passe `target` au rôle `wanted`, décidé sur `roles`. Le store revérifie ces rôles dans la
+/// transaction qui écrit : s'ils ont changé entre-temps (`Stale`), ou si la personne est
+/// partie, la route les relit et redécide, [`ROLE_RETRIES`] fois au plus, puis `409
+/// roles_changed`. Le journal porte le rôle d'avant lu dans cette transaction.
+async fn change_role(
+    state: &AppState,
+    user: &AuthUser,
+    space_id: Uuid,
+    target: Uuid,
+    wanted: Role,
+    mut roles: Roles,
+) -> Result<(), ApiError> {
+    let mut retries = 0;
+    loop {
+        may_change_role(roles.caller, roles.target, wanted)?;
+        if roles.target == wanted {
+            return Ok(());
+        }
+        match state
+            .store
+            .set_role(space_id, target, wanted, roles.expected(user))
+            .await
+        {
+            Ok(before) => {
+                tracing::info!(
+                    space_id = %space_id,
+                    user_id = %user.id,
+                    member_id = %target,
+                    from = before.as_str(),
+                    to = wanted.as_str(),
+                    "rôle changé"
+                );
+                state.rights_changed(space_id, None).await;
+                return Ok(());
+            }
+            Err(StoreError::Stale | StoreError::NotFound) if retries < ROLE_RETRIES => {
+                retries += 1;
+                roles = read_roles(state, user, space_id, target).await?;
+            }
+            Err(e) => return Err(member_error(e)),
+        }
+    }
+}
+
+/// Retire `target` de l'espace (ou l'en fait partir, si c'est l'appelant), décidé sur
+/// `roles`, avec les mêmes reprises que [`change_role`].
+async fn remove(
+    state: &AppState,
+    user: &AuthUser,
+    space_id: Uuid,
+    target: Uuid,
+    mut roles: Roles,
+) -> Result<(), ApiError> {
+    let leaving = target == user.id;
+    let mut retries = 0;
+    loop {
+        may_remove(roles, leaving)?;
+        match state
+            .store
+            .remove_member(space_id, target, roles.expected(user))
+            .await
+        {
+            Ok(()) => {
+                if leaving {
+                    tracing::info!(
+                        space_id = %space_id,
+                        user_id = %user.id,
+                        role = roles.target.as_str(),
+                        "membre parti de l'espace"
+                    );
+                } else {
+                    tracing::info!(
+                        space_id = %space_id,
+                        user_id = %user.id,
+                        member_id = %target,
+                        role = roles.target.as_str(),
+                        "membre retiré de l'espace"
+                    );
+                }
+                state.rights_changed(space_id, None).await;
+                return Ok(());
+            }
+            Err(StoreError::Stale | StoreError::NotFound) if retries < ROLE_RETRIES => {
+                retries += 1;
+                roles = read_roles(state, user, space_id, target).await?;
+            }
+            Err(e) => return Err(member_error(e)),
+        }
+    }
 }
 
 /// L'id d'un espace dans le chemin : illisible, l'espace n'existe pas.
@@ -217,22 +314,38 @@ async fn role_in(state: &AppState, space_id: Uuid, user_id: Uuid) -> Result<Role
 }
 
 /// `caller` peut-il faire passer un membre de `current` à `wanted` ? Un propriétaire, oui ; un
-/// admin, seulement entre `admin` et `member`, donc jamais pour un propriétaire.
+/// admin, seulement entre `admin` et `member`, donc jamais pour un propriétaire ; personne
+/// d'autre.
 fn may_change_role(caller: Role, current: Role, wanted: Role) -> Result<(), ApiError> {
+    require(caller, Role::Admin)?;
     let between_admin_and_member = |role| matches!(role, Role::Admin | Role::Member);
     match caller {
         Role::Owner => Ok(()),
-        Role::Admin if current == Role::Owner => Err(ApiError::forbidden(
+        _ if current == Role::Owner => Err(ApiError::forbidden(
             "un admin ne change pas le rôle d'un propriétaire de l'espace",
         )),
-        Role::Admin if between_admin_and_member(current) && between_admin_and_member(wanted) => {
-            Ok(())
-        }
+        _ if between_admin_and_member(current) && between_admin_and_member(wanted) => Ok(()),
         _ => Err(ApiError::forbidden(
             "un admin ne fait passer un rôle qu'entre admin et member ; le reste revient aux \
              propriétaires",
         )),
     }
+}
+
+/// L'appelant peut-il retirer la personne visée ? Pour partir, toujours (le dernier
+/// propriétaire, c'est le store qui le refuse) ; sinon, il faut être `admin`, et `owner` pour
+/// retirer un propriétaire.
+fn may_remove(roles: Roles, leaving: bool) -> Result<(), ApiError> {
+    if leaving {
+        return Ok(());
+    }
+    require(roles.caller, Role::Admin)?;
+    if roles.caller != Role::Owner && roles.target == Role::Owner {
+        return Err(ApiError::forbidden(
+            "un admin ne retire pas un propriétaire de l'espace",
+        ));
+    }
+    Ok(())
 }
 
 /// Règles du nom d'un espace : rogné, 1 à [`MAX_SPACE_NAME_CHARS`] caractères, sinon `422
@@ -258,11 +371,13 @@ fn member(m: mementum_store::Member) -> types::Member {
     }
 }
 
-/// Erreur d'un changement de rôle ou d'un retrait : la personne a pu partir entre-temps.
+/// Erreur d'un changement de rôle ou d'un retrait, une fois les reprises épuisées.
 fn member_error(error: StoreError) -> ApiError {
     match error {
         StoreError::NotFound => ApiError::member_not_found(),
         StoreError::LastOwner => ApiError::last_owner(),
+        // Les rôles ont bougé à chaque reprise.
+        StoreError::Stale => ApiError::roles_changed(),
         e => internal(e),
     }
 }
@@ -270,4 +385,108 @@ fn member_error(error: StoreError) -> ApiError {
 /// Une erreur du store qui ne désigne ici aucune page : `500 internal`.
 fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::internal(&error)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::response::IntoResponse;
+    use mementum_store::Space;
+
+    use super::*;
+    use crate::access::tests::{account, state};
+
+    /// Olga (propriétaire), Adam (admin) et Mona (admin) dans un espace.
+    async fn team(state: &AppState) -> (AuthUser, AuthUser, AuthUser, Space) {
+        let olga = account(state, "olga").await;
+        let adam = account(state, "adam").await;
+        let mona = account(state, "mona").await;
+        let space = state
+            .store
+            .create_space("Équipe", Some(olga.id))
+            .await
+            .unwrap();
+        for who in [&adam, &mona] {
+            state
+                .store
+                .add_member(space.id, who.id, Role::Admin)
+                .await
+                .unwrap();
+        }
+        (olga, adam, mona, space)
+    }
+
+    fn status(result: Result<(), ApiError>) -> StatusCode {
+        result.unwrap_err().into_response().status()
+    }
+
+    async fn role(state: &AppState, space: &Space, who: &AuthUser) -> Option<Role> {
+        state.store.role_in(space.id, who.id).await.unwrap()
+    }
+
+    /// Adam (admin) a lu Mona admin ; Olga la fait propriétaire avant qu'il écrive. Le store
+    /// refuse l'écriture décidée sur ce qu'Adam avait lu, la route relit et redécide : `403`,
+    /// un admin ne touche pas un propriétaire. Rien n'a changé.
+    #[tokio::test]
+    async fn admin_cannot_demote_someone_just_made_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let (olga, adam, mona, space) = team(&state).await;
+        // Ce que la route d'Adam a lu avant d'écrire.
+        let read = Roles {
+            caller: Role::Admin,
+            target: Role::Admin,
+        };
+        let promoted = Roles {
+            caller: Role::Owner,
+            target: Role::Admin,
+        };
+        change_role(&state, &olga, space.id, mona.id, Role::Owner, promoted)
+            .await
+            .unwrap();
+        let rev = state.store.space_rev(space.id).await.unwrap();
+
+        let result = change_role(&state, &adam, space.id, mona.id, Role::Member, read).await;
+        assert_eq!(status(result), StatusCode::FORBIDDEN);
+        // Ni la rétrograder, ni la retirer.
+        let result = remove(&state, &adam, space.id, mona.id, read).await;
+        assert_eq!(status(result), StatusCode::FORBIDDEN);
+        assert_eq!(role(&state, &space, &mona).await, Some(Role::Owner));
+        assert_eq!(state.store.space_rev(space.id).await.unwrap(), rev);
+
+        // Un admin rétrogradé entre sa lecture et son écriture n'agit plus : la décision
+        // reprise sur son rôle relu (`member`) est un refus.
+        let demoted = Roles {
+            caller: Role::Owner,
+            target: Role::Admin,
+        };
+        change_role(&state, &olga, space.id, adam.id, Role::Member, demoted)
+            .await
+            .unwrap();
+        let mona_admin = Roles {
+            caller: Role::Owner,
+            target: Role::Owner,
+        };
+        change_role(&state, &olga, space.id, mona.id, Role::Admin, mona_admin)
+            .await
+            .unwrap();
+        let read = Roles {
+            caller: Role::Admin,
+            target: Role::Admin,
+        };
+        let result = change_role(&state, &adam, space.id, mona.id, Role::Member, read).await;
+        assert_eq!(status(result), StatusCode::FORBIDDEN);
+        let result = remove(&state, &adam, space.id, mona.id, read).await;
+        assert_eq!(status(result), StatusCode::FORBIDDEN);
+        assert_eq!(role(&state, &space, &mona).await, Some(Role::Admin));
+
+        // Sur des rôles justes, la même fonction écrit du premier coup.
+        let read = Roles {
+            caller: Role::Owner,
+            target: Role::Admin,
+        };
+        change_role(&state, &olga, space.id, mona.id, Role::Member, read)
+            .await
+            .unwrap();
+        assert_eq!(role(&state, &space, &mona).await, Some(Role::Member));
+    }
 }

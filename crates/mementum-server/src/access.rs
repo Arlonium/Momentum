@@ -35,19 +35,9 @@ use crate::AppState;
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 
-/// Nœuds visibles que garde le cache des accès, tous calculs confondus (Ruling R59) : à une
-/// trentaine d'octets par nœud, environ 36 Mo au plus.
+/// Plafond du cache des accès (Ruling R59), en nœuds visibles plus le coût fixe de chaque
+/// calcul (`AccessCache`) : une quarantaine d'octets par unité, soit 40 Mo environ, cache plein.
 pub(crate) const ACCESS_CACHE_NODES: usize = 1_000_000;
-
-/// Rang d'un rôle : `guest` < `member` < `admin` < `owner`.
-fn rank(role: Role) -> u8 {
-    match role {
-        Role::Guest => 0,
-        Role::Member => 1,
-        Role::Admin => 2,
-        Role::Owner => 3,
-    }
-}
 
 /// Le rôle de `access`, s'il vaut au moins `min` ; sinon `403 forbidden`.
 pub(crate) fn at_least(access: &SpaceAccess, min: Role) -> Result<Role, ApiError> {
@@ -58,7 +48,7 @@ pub(crate) fn at_least(access: &SpaceAccess, min: Role) -> Result<Role, ApiError
 /// `role`, s'il vaut au moins `min` ; sinon `403 forbidden`. Pour un rôle lu par
 /// [`AppState::role_at_least`] ou [`AppState::space_access`] : sans rôle, c'est `404`.
 pub(crate) fn require(role: Role, min: Role) -> Result<Role, ApiError> {
-    if rank(role) >= rank(min) {
+    if role.rank() >= min.rank() {
         return Ok(role);
     }
     Err(ApiError::forbidden(match min {
@@ -306,11 +296,11 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use mementum_acl::{AccessCache, Grant, Level, Section, Subject};
-    use mementum_store::{NewNode, NewUser, NodeKind, Store};
+    use mementum_store::{Expected, NewNode, NewUser, NodeKind, Store};
     use mementum_sync::{Hub, SyncConfig};
 
     use super::*;
@@ -318,8 +308,9 @@ mod tests {
     use crate::types::SignupMode;
 
     /// Un état de serveur sur une base neuve, sans routes, avec le hub que monte `serve`
-    /// (le test `e2e_wait_follows_idle_close` de `mementum-sync` y veille).
-    async fn state(dir: &tempfile::TempDir) -> AppState {
+    /// (le test `e2e_wait_follows_idle_close` de `mementum-sync` y veille). Sert aussi aux
+    /// tests des routes.
+    pub(crate) async fn state(dir: &tempfile::TempDir) -> AppState {
         let store = Store::open(&dir.path().join("m.db")).await.unwrap();
         let hub = Hub::new(store.clone(), SyncConfig::default());
         AppState {
@@ -335,7 +326,7 @@ mod tests {
         }
     }
 
-    async fn account(state: &AppState, name: &str) -> AuthUser {
+    pub(crate) async fn account(state: &AppState, name: &str) -> AuthUser {
         state
             .store
             .create_user(NewUser {
@@ -406,7 +397,16 @@ mod tests {
         // Passée invitée : plus de section « Espace », à l'appel suivant.
         state
             .store
-            .set_role(space.id, mona.id, Role::Guest)
+            .set_role(
+                space.id,
+                mona.id,
+                Role::Guest,
+                Expected {
+                    actor: olga.id,
+                    actor_role: Role::Owner,
+                    target_role: Role::Member,
+                },
+            )
             .await
             .unwrap();
         let guest = state.space_access(&mona, space.id).await.unwrap();
@@ -423,7 +423,16 @@ mod tests {
         );
 
         // Retirée : `404`, comme un espace qui n'existe pas.
-        state.store.remove_member(space.id, mona.id).await.unwrap();
+        let by_olga = Expected {
+            actor: olga.id,
+            actor_role: Role::Owner,
+            target_role: Role::Guest,
+        };
+        state
+            .store
+            .remove_member(space.id, mona.id, by_olga)
+            .await
+            .unwrap();
         assert!(
             state
                 .find_space_access(&mona, space.id)

@@ -524,6 +524,9 @@ pub enum ErrorCode {
     ParentTrashed,
     /// Suppression définitive d'une page qui n'est pas à la corbeille. Statut 409.
     NotTrashed,
+    /// Les rôles sur lesquels la demande était décidée ont changé pendant qu'elle
+    /// s'écrivait, plusieurs fois de suite : rien n'est écrit ; réessayer. Statut 409.
+    RolesChanged,
 }
 
 /// Corps de toute réponse d'erreur.

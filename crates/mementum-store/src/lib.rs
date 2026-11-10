@@ -46,7 +46,7 @@ use uuid::Uuid;
 pub use backup::{Backup, backup_path};
 pub use docs::DocState;
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
-pub use members::Member;
+pub use members::{Expected, Member};
 pub use nodes::{NewNode, Node, NodeKind, Place};
 pub use position::position_between;
 pub use spaces::Space;
@@ -65,6 +65,9 @@ pub enum StoreError {
     EmailTaken,
     /// L'espace perdrait son dernier propriétaire.
     LastOwner,
+    /// Les rôles sur lesquels l'appelant a décidé (`Expected`) ont changé depuis qu'il les a
+    /// lus : rien n'est écrit, il redécide sur les rôles relus.
+    Stale,
     /// Un ancêtre du nœud est à la corbeille : c'est lui qu'on restaure.
     ParentTrashed,
     /// Le nœud n'est pas à la corbeille : on ne supprime définitivement que ce qui y est.
@@ -80,6 +83,7 @@ impl fmt::Display for StoreError {
             StoreError::Cycle => write!(f, "un nœud ne peut pas devenir son propre descendant"),
             StoreError::EmailTaken => write!(f, "un compte porte déjà cette adresse e-mail"),
             StoreError::LastOwner => write!(f, "un espace garde au moins un propriétaire"),
+            StoreError::Stale => write!(f, "les rôles ont changé depuis leur lecture"),
             StoreError::ParentTrashed => write!(f, "une page parente est à la corbeille"),
             StoreError::NotTrashed => write!(f, "le nœud n'est pas à la corbeille"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),

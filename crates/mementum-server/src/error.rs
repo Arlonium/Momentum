@@ -213,6 +213,15 @@ impl ApiError {
         )
     }
 
+    /// `409 roles_changed` : les rôles ont bougé à chaque tentative d'écriture.
+    pub fn roles_changed() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::RolesChanged,
+            "les rôles viennent de changer : rien n'a été modifié ; réessayer",
+        )
+    }
+
     /// `500 internal` : le détail va dans le journal, pas dans la réponse.
     pub fn internal(error: &dyn std::fmt::Display) -> ApiError {
         tracing::error!(%error, "erreur interne");
@@ -249,6 +258,7 @@ impl From<StoreError> for ApiError {
             ),
             StoreError::EmailTaken => ApiError::email_taken(),
             StoreError::LastOwner => ApiError::last_owner(),
+            StoreError::Stale => ApiError::roles_changed(),
             StoreError::ParentTrashed => ApiError::parent_trashed(),
             StoreError::NotTrashed => ApiError::not_trashed(),
             e @ StoreError::Sqlx(_) => ApiError::internal(&e),

@@ -6,12 +6,149 @@ mod common;
 use common::{account, break_table, fresh, int, page, repair};
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_store::{
-    InvitationGrant, Member, NewInvitation, NewNode, Node, Space, Store, StoreError,
+    Expected, InvitationGrant, Member, NewInvitation, NewNode, Node, Space, Store, StoreError, User,
 };
 use uuid::Uuid;
 
 async fn rev(store: &Store, space: Uuid) -> i64 {
     store.space_rev(space).await.unwrap().expect("espace")
+}
+
+/// Ce que l'appelant a lu avant de décider : `actor` au rôle `actor_role`, la personne visée au
+/// rôle `target_role`.
+fn seen(actor: &User, actor_role: Role, target_role: Role) -> Expected {
+    Expected {
+        actor: actor.id,
+        actor_role,
+        target_role,
+    }
+}
+
+/// Une route décide sur des rôles lus avant d'écrire. S'ils ont changé entre-temps, le store
+/// refuse (`Stale`) sans rien écrire : ici, Mona est devenue propriétaire depuis que l'admin
+/// Adam l'a lue admin, et il ne la rétrograde pas.
+#[tokio::test]
+async fn set_role_refuses_a_stale_target_role() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let adam = account(store, "adam").await;
+    let mona = account(store, "mona").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    for who in [&adam, &mona] {
+        store
+            .add_member(space.id, who.id, Role::Admin)
+            .await
+            .unwrap();
+    }
+    // Olga la fait propriétaire ; `set_role` rend le rôle d'avant, lu dans sa transaction.
+    let before = store
+        .set_role(
+            space.id,
+            mona.id,
+            Role::Owner,
+            seen(&olga, Role::Owner, Role::Admin),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before, Role::Admin);
+    let rev_before = rev(store, space.id).await;
+
+    // Adam l'avait lue admin : refusé, rien d'écrit, même pour la laisser au même rôle.
+    for wanted in [Role::Member, Role::Admin, Role::Guest] {
+        let r = store
+            .set_role(
+                space.id,
+                mona.id,
+                wanted,
+                seen(&adam, Role::Admin, Role::Admin),
+            )
+            .await;
+        assert!(matches!(r, Err(StoreError::Stale)), "{wanted:?} : {r:?}");
+    }
+    assert_eq!(
+        store.role_in(space.id, mona.id).await.unwrap(),
+        Some(Role::Owner)
+    );
+    assert_eq!(rev(store, space.id).await, rev_before, "rien d'écrit");
+
+    // Sur ce qui est vrai, le store écrit : la règle « un admin ne touche pas un propriétaire »
+    // est celle de la route, qui redécide sur les rôles relus.
+    let before = store
+        .set_role(
+            space.id,
+            mona.id,
+            Role::Admin,
+            seen(&olga, Role::Owner, Role::Owner),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before, Role::Owner);
+    assert_eq!(
+        store.role_in(space.id, mona.id).await.unwrap(),
+        Some(Role::Admin)
+    );
+}
+
+/// L'acteur a perdu le rôle sur lequel il a décidé : un admin rétrogradé (ou sorti de
+/// l'espace) ne retire plus personne. Pour qui part, l'acteur et la personne visée sont la
+/// même.
+#[tokio::test]
+async fn remove_member_refuses_a_stale_actor_role() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let adam = account(store, "adam").await;
+    let mona = account(store, "mona").await;
+    let sam = account(store, "sam").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    store
+        .add_member(space.id, adam.id, Role::Admin)
+        .await
+        .unwrap();
+    store
+        .add_member(space.id, mona.id, Role::Member)
+        .await
+        .unwrap();
+    store
+        .set_role(
+            space.id,
+            adam.id,
+            Role::Member,
+            seen(&olga, Role::Owner, Role::Admin),
+        )
+        .await
+        .unwrap();
+    let rev_before = rev(store, space.id).await;
+
+    // Adam se croit encore admin ; Sam n'a aucun rôle.
+    for (actor, role) in [(&adam, Role::Admin), (&sam, Role::Admin)] {
+        let r = store
+            .remove_member(space.id, mona.id, seen(actor, role, Role::Member))
+            .await;
+        assert!(matches!(r, Err(StoreError::Stale)), "{}: {r:?}", actor.name);
+    }
+    // Il part en se croyant admin : refusé aussi.
+    let r = store
+        .remove_member(space.id, adam.id, seen(&adam, Role::Admin, Role::Admin))
+        .await;
+    assert!(matches!(r, Err(StoreError::Stale)), "{r:?}");
+    assert_eq!(
+        store.role_in(space.id, mona.id).await.unwrap(),
+        Some(Role::Member)
+    );
+    assert_eq!(
+        store.role_in(space.id, adam.id).await.unwrap(),
+        Some(Role::Member)
+    );
+    assert_eq!(rev(store, space.id).await, rev_before, "rien d'écrit");
+
+    // Sur ce qui est vrai, il part.
+    store
+        .remove_member(space.id, adam.id, seen(&adam, Role::Member, Role::Member))
+        .await
+        .unwrap();
+    assert_eq!(store.role_in(space.id, adam.id).await.unwrap(), None);
 }
 
 fn grant(subject: Subject, level: Level) -> Grant {
@@ -45,10 +182,19 @@ async fn last_owner_cannot_leave_or_be_demoted() {
     let before = rev(store, space.id).await;
 
     for role in [Role::Admin, Role::Member, Role::Guest] {
-        let r = store.set_role(space.id, olga.id, role).await;
+        let r = store
+            .set_role(
+                space.id,
+                olga.id,
+                role,
+                seen(&olga, Role::Owner, Role::Owner),
+            )
+            .await;
         assert!(matches!(r, Err(StoreError::LastOwner)), "{role:?} : {r:?}");
     }
-    let r = store.remove_member(space.id, olga.id).await;
+    let r = store
+        .remove_member(space.id, olga.id, seen(&olga, Role::Owner, Role::Owner))
+        .await;
     assert!(matches!(r, Err(StoreError::LastOwner)), "{r:?}");
     assert_eq!(
         store.role_in(space.id, olga.id).await.unwrap(),
@@ -57,7 +203,12 @@ async fn last_owner_cannot_leave_or_be_demoted() {
     assert_eq!(rev(store, space.id).await, before, "un refus n'écrit rien");
     // Rester propriétaire n'est pas un départ.
     store
-        .set_role(space.id, olga.id, Role::Owner)
+        .set_role(
+            space.id,
+            olga.id,
+            Role::Owner,
+            seen(&olga, Role::Owner, Role::Owner),
+        )
         .await
         .unwrap();
 
@@ -67,18 +218,40 @@ async fn last_owner_cannot_leave_or_be_demoted() {
         .await
         .unwrap();
     store
-        .set_role(space.id, olga.id, Role::Admin)
+        .set_role(
+            space.id,
+            olga.id,
+            Role::Admin,
+            seen(&olga, Role::Owner, Role::Owner),
+        )
         .await
         .unwrap();
-    let r = store.set_role(space.id, paul.id, Role::Member).await;
+    let r = store
+        .set_role(
+            space.id,
+            paul.id,
+            Role::Member,
+            seen(&paul, Role::Owner, Role::Owner),
+        )
+        .await;
     assert!(matches!(r, Err(StoreError::LastOwner)), "{r:?}");
-    let r = store.remove_member(space.id, paul.id).await;
+    let r = store
+        .remove_member(space.id, paul.id, seen(&paul, Role::Owner, Role::Owner))
+        .await;
     assert!(matches!(r, Err(StoreError::LastOwner)), "{r:?}");
     store
-        .set_role(space.id, olga.id, Role::Owner)
+        .set_role(
+            space.id,
+            olga.id,
+            Role::Owner,
+            seen(&paul, Role::Owner, Role::Admin),
+        )
         .await
         .unwrap();
-    store.remove_member(space.id, paul.id).await.unwrap();
+    store
+        .remove_member(space.id, paul.id, seen(&paul, Role::Owner, Role::Owner))
+        .await
+        .unwrap();
     assert_eq!(store.role_in(space.id, paul.id).await.unwrap(), None);
 
     // Deux propriétaires qui partent en même temps : l'un des deux reste.
@@ -87,9 +260,15 @@ async fn last_owner_cannot_leave_or_be_demoted() {
         .await
         .unwrap();
     let (a, b) = tokio::join!(
-        store.remove_member(space.id, olga.id),
-        store.set_role(space.id, paul.id, Role::Member),
+        store.remove_member(space.id, olga.id, seen(&olga, Role::Owner, Role::Owner)),
+        store.set_role(
+            space.id,
+            paul.id,
+            Role::Member,
+            seen(&paul, Role::Owner, Role::Owner)
+        ),
     );
+    let b = b.map(drop);
     let refused = [&a, &b]
         .iter()
         .filter(|r| matches!(r, Err(StoreError::LastOwner)))
@@ -113,10 +292,38 @@ async fn last_owner_cannot_leave_or_be_demoted() {
     // Hors de l'espace : `NotFound`.
     let stranger = account(store, "inconnu").await;
     for r in [
-        store.set_role(space.id, stranger.id, Role::Member).await,
-        store.remove_member(space.id, stranger.id).await,
-        store.set_role(Uuid::now_v7(), olga.id, Role::Member).await,
-        store.remove_member(Uuid::now_v7(), olga.id).await,
+        store
+            .set_role(
+                space.id,
+                stranger.id,
+                Role::Member,
+                seen(&olga, Role::Owner, Role::Member),
+            )
+            .await
+            .map(drop),
+        store
+            .remove_member(
+                space.id,
+                stranger.id,
+                seen(&olga, Role::Owner, Role::Member),
+            )
+            .await,
+        store
+            .set_role(
+                Uuid::now_v7(),
+                olga.id,
+                Role::Member,
+                seen(&olga, Role::Owner, Role::Owner),
+            )
+            .await
+            .map(drop),
+        store
+            .remove_member(
+                Uuid::now_v7(),
+                olga.id,
+                seen(&olga, Role::Owner, Role::Owner),
+            )
+            .await,
     ] {
         assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
     }
@@ -152,7 +359,12 @@ async fn add_member_never_downgrades() {
     }
     // `set_role`, lui, change le rôle dans les deux sens.
     store
-        .set_role(space.id, gina.id, Role::Member)
+        .set_role(
+            space.id,
+            gina.id,
+            Role::Member,
+            seen(&olga, Role::Owner, Role::Owner),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -264,7 +476,9 @@ async fn remove_member_drops_shared_grants_and_keeps_private_pages() {
     // Une panne sur le retrait des accès : rien n'est écrit, Alice est toujours membre.
     let before = rev(store, space.id).await;
     break_table(db, "DELETE", "acl", "1").await;
-    let res = store.remove_member(space.id, alice.id).await;
+    let res = store
+        .remove_member(space.id, alice.id, seen(&olga, Role::Owner, Role::Member))
+        .await;
     assert!(matches!(res, Err(StoreError::Sqlx(_))), "{res:?}");
     repair(db).await;
     assert_eq!(
@@ -277,7 +491,10 @@ async fn remove_member_drops_shared_grants_and_keeps_private_pages() {
     );
     assert_eq!(rev(store, space.id).await, before);
 
-    store.remove_member(space.id, alice.id).await.unwrap();
+    store
+        .remove_member(space.id, alice.id, seen(&olga, Role::Owner, Role::Member))
+        .await
+        .unwrap();
     assert_eq!(store.role_in(space.id, alice.id).await.unwrap(), None);
     assert_eq!(store.spaces_of(alice.id).await.unwrap().len(), 1);
     // Ses lignes partent des pages qu'elle partageait, et restent sur ses pages privées. Sur
@@ -389,7 +606,10 @@ async fn leaving_member_hands_shared_pages_to_the_highest_remaining() {
     let w1 = page_with(store, space, Some(w.id), "W1", w1).await;
 
     let before = rev(store, space.id).await;
-    store.remove_member(space.id, alice.id).await.unwrap();
+    store
+        .remove_member(space.id, alice.id, seen(&olga, Role::Owner, Role::Member))
+        .await
+        .unwrap();
     let after = [
         (&q, vec![grant(o, Level::Full), grant(p, Level::Read)]),
         (&q1, vec![grant(p, Level::Read)]),
@@ -508,13 +728,23 @@ async fn membership_writes_bump_rev() {
     );
 
     store
-        .set_role(space.id, alice.id, Role::Admin)
+        .set_role(
+            space.id,
+            alice.id,
+            Role::Admin,
+            seen(&olga, Role::Owner, Role::Member),
+        )
         .await
         .unwrap();
     expected += 1;
     assert_eq!(rev(store, space.id).await, expected, "set_role");
     store
-        .set_role(space.id, alice.id, Role::Admin)
+        .set_role(
+            space.id,
+            alice.id,
+            Role::Admin,
+            seen(&olga, Role::Owner, Role::Admin),
+        )
         .await
         .unwrap();
     assert_eq!(rev(store, space.id).await, expected, "set_role sans effet");
@@ -570,14 +800,27 @@ async fn membership_writes_bump_rev() {
         "revoke_user_grant sans effet"
     );
 
-    store.remove_member(space.id, alice.id).await.unwrap();
+    store
+        .remove_member(space.id, alice.id, seen(&olga, Role::Owner, Role::Admin))
+        .await
+        .unwrap();
     expected += 1;
     assert_eq!(rev(store, space.id).await, expected, "remove_member");
 
     // Les refus n'écrivent rien.
     let refused = [
-        store.set_role(space.id, olga.id, Role::Member).await,
-        store.remove_member(space.id, alice.id).await,
+        store
+            .set_role(
+                space.id,
+                olga.id,
+                Role::Member,
+                seen(&olga, Role::Owner, Role::Owner),
+            )
+            .await
+            .map(drop),
+        store
+            .remove_member(space.id, alice.id, seen(&olga, Role::Owner, Role::Admin))
+            .await,
         store
             .accept_invitation([1; 32], alice.id, t)
             .await
