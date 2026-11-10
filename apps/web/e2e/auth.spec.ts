@@ -11,6 +11,7 @@ import {
   expectSignedInAs,
   firstSpace,
   getMmd,
+  holdPageReads,
   inviteToSpace,
   logInWith,
   newUser,
@@ -282,7 +283,11 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
     p.locator(".mm-editor").evaluate((el) => (el as unknown as { mark?: number }).mark === 1);
   await p.locator(".mm-editor").evaluate((el) => ((el as unknown as { mark: number }).mark = 1));
 
-  // La session prend fin ailleurs (déconnexion depuis un autre onglet du même cookie).
+  // La session prend fin ailleurs (déconnexion depuis un autre onglet du même cookie). Le
+  // serveur ferme alors la synchro du compte, et l'onglet, en revenant, relit la page : cette
+  // relecture est retenue, pour que ce soit le sélecteur d'espace qui découvre la session
+  // perdue (`expired_session_keeps_what_was_typed` laisse la synchro la découvrir).
+  const reads = await holdPageReads(p, id);
   expect((await api.post("/api/v1/auth/logout")).status()).toBe(204);
 
   // Le prochain appel qui demande une session (le sélecteur d'espace, ouvert, relit le
@@ -291,6 +296,7 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
   await spaceSwitcher(p).click();
   const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
   await expect(dialog).toBeVisible();
+  reads.release();
   await expect(editor).toContainText("Écrit avant la coupure");
   expect(await marked()).toBe(true);
   // L'adresse est déjà là : le mot de passe a le focus.
