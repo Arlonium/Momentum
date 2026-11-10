@@ -48,8 +48,12 @@ use crate::{AppState, config, now_ms};
 /// Nom du cookie de session.
 pub const SESSION_COOKIE: &str = "mementum_session";
 
-/// Durée d'une session, en millisecondes : 30 jours. L'échéance glisse avec
-/// l'usage (`Store::session_user`).
+/// Durée d'une session, en millisecondes : 30 jours. Côté serveur, l'échéance
+/// glisse avec l'usage (`Store::session_user`). Le cookie, lui, est posé pour
+/// cette durée à l'inscription, à la connexion et au changement de mot de
+/// passe, et n'est pas renvoyé ensuite : dans un navigateur, une session dure
+/// donc au plus 30 jours après la connexion (Ruling R117, renvoi du cookie
+/// reporté).
 pub const SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Longueur minimale d'un mot de passe, en caractères Unicode.
