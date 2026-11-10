@@ -809,6 +809,97 @@ test("drop_target_is_shown_while_dragging", async ({ browser }) => {
   expect((await getTree(api, space.id)).nodes).toEqual(before);
 });
 
+test("drop_line_is_drawn_where_the_page_will_go", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  // Dans « Privé », où une sous-page peut passer à la racine.
+  const parent = await createPage(api, { section: "private", title: "Parente" });
+  await createPage(api, { parentId: parent.id, title: "Un" });
+  const last = await createPage(api, { parentId: parent.id, title: "Deux" });
+  await createPage(api, { section: "private", title: "Suivante" });
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect
+    .poll(() => shownRows(p))
+    .toEqual(["1 Parente", "2 Un", "2 Deux", "1 Suivante"]);
+  const box = async (id: string) => (await treeRow(p, id).boundingBox())!;
+  const line = sidebarOf(p).locator(".tree-drop-line");
+
+  // « Deux », dernière sous-page de « Parente », est saisie et portée sur la moitié basse de
+  // sa page parente, dépliée. Dedans, rien ne changerait : elle en sortirait, pour se ranger
+  // après elle, donc après toutes ses sous-pages.
+  const from = await box(last.id);
+  await p.mouse.move(from.x + 80, from.y + from.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(from.x + 86, from.y + from.height / 2 + 4, { steps: 3 });
+  await expect(treeRow(p, last.id)).toHaveClass(/is-dragging/);
+  const onto = await box(parent.id);
+  await p.mouse.move(onto.x + 80, onto.y + onto.height * 0.6, { steps: 3 });
+  await expect(line).toHaveCount(1);
+  await expect(sidebarOf(p).locator(".is-drop-inside")).toHaveCount(0);
+  // Le trait est là où la page ira : sous la dernière ligne du sous-arbre, et pas juste sous
+  // « Parente » ; au retrait de « Parente » (son titre commence 22 px après le bord de sa
+  // ligne), pas à celui de ses sous-pages, 14 px plus loin.
+  const drawn = (await line.boundingBox())!;
+  expect(Math.abs(drawn.y - (from.y + from.height))).toBeLessThanOrEqual(2);
+  expect(Math.abs(drawn.x - (onto.x + 22))).toBeLessThanOrEqual(1);
+
+  // Le pointeur quitte la barre latérale, la page toujours tenue : plus rien n'est marqué.
+  await p.mouse.move(700, 400, { steps: 3 });
+  await expect(line).toHaveCount(0);
+  await p.mouse.up();
+  await expect(sidebarOf(p).locator(".is-dragging")).toHaveCount(0);
+  expect(await shownRows(p)).toEqual(["1 Parente", "2 Un", "2 Deux", "1 Suivante"]);
+});
+
+test("drop_target_does_not_need_related_target", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  const c = await createPage(api, { title: "Charlie" });
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  // Les événements d'un glisser, tels qu'un navigateur qui ne dit pas d'où vient ni où va le
+  // pointeur les envoie : sans `relatedTarget`. Le pointeur est au milieu de la ligne visée.
+  const dataTransfer = await p.evaluateHandle(() => new DataTransfer());
+  const fire = async (type: string, id: string) => {
+    const box = (await treeRow(p, id).boundingBox())!;
+    await treeRow(p, id).dispatchEvent(type, {
+      dataTransfer,
+      clientX: box.x + 80,
+      clientY: box.y + box.height / 2,
+    });
+  };
+  const inside = sidebarOf(p).locator(".is-drop-inside");
+
+  await fire("dragstart", c.id);
+  await expect(treeRow(p, c.id)).toHaveClass(/is-dragging/);
+  await fire("dragenter", b.id);
+  await expect(treeRow(p, b.id)).toHaveClass(/is-drop-inside/);
+  // De « Bravo » à « Alpha » : le navigateur annonce l'entrée sur la nouvelle ligne, puis la
+  // sortie de l'ancienne. Cette sortie n'est pas celle de l'arbre : « Alpha » reste éclairée.
+  await fire("dragenter", a.id);
+  await expect(treeRow(p, a.id)).toHaveClass(/is-drop-inside/);
+  await fire("dragleave", b.id);
+  await p.waitForTimeout(100);
+  await expect(treeRow(p, a.id)).toHaveClass(/is-drop-inside/);
+  // La sortie de la dernière ligne où le pointeur est entré : il a quitté l'arbre.
+  await fire("dragleave", a.id);
+  await expect(inside).toHaveCount(0);
+  // Revenu, puis le glisser abandonné : plus rien n'est marqué.
+  await fire("dragenter", b.id);
+  await expect(treeRow(p, b.id)).toHaveClass(/is-drop-inside/);
+  await fire("dragend", c.id);
+  await expect(inside).toHaveCount(0);
+  await expect(sidebarOf(p).locator(".is-dragging")).toHaveCount(0);
+});
+
 /** Deux comptes dans le même espace : A, sa propriétaire, et B, simple membre. */
 async function ownerAndMember() {
   const alice = await signUpAccount(`Alice ${unique()}`);

@@ -5,14 +5,15 @@
 //
 // Une ligne se saisit et se déplace à la souris, à l'intérieur de cet arbre (`drag.ts`) :
 // lâchée au milieu d'une ligne, la page devient sa sous-page (la ligne s'éclaire) ; sur son
-// bord haut ou bas, elle se range avant ou après elle (un trait le montre). Un dépôt refusé
-// ne montre rien, et le pointeur le dit. Les autres arbres n'acceptent pas ce dépôt : une
+// bord haut ou bas, elle se range avant ou après elle (un trait le montre, là où elle ira :
+// après une page dépliée, c'est sous sa dernière sous-page). Un dépôt refusé ne montre rien,
+// et le pointeur le dit. Les autres arbres n'acceptent pas ce dépôt : une
 // page ne change pas de section à la souris.
 import type { PageNode } from "@mementum/protocol";
-import { useLayoutEffect, useMemo, useState, type DragEvent, type RefObject } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
 import { canEdit } from "../share/levels";
 import { dropTarget, zonesAt, type Drop, type Zone } from "./drag";
-import { flattenRows, NONE, ROW_HEIGHT, type Row } from "./rows";
+import { flattenRows, NONE, ROW_HEIGHT, subtreeEnd, type Row } from "./rows";
 import { TreeRow } from "./TreeRow";
 import { useTreeWindow, type Viewport } from "./treeWindow";
 
@@ -147,6 +148,12 @@ export function PageTree({
 
   const over = drag?.over ?? null;
   const overIndex = over === null ? -1 : rows.findIndex((row) => row.node.id === over.id);
+  // Le trait d'insertion se dessine là où la page ira : « après » une page dépliée, c'est
+  // après ses sous-pages montrées, pas entre elle et la première.
+  const lineIndex = over?.zone === "after" ? subtreeEnd(rows, overIndex) : overIndex;
+
+  /** Le dernier élément de l'arbre où le pointeur est entré pendant un glisser. */
+  const entered = useRef<EventTarget | null>(null);
 
   /** Le pointeur vise un endroit de l'arbre : le dépôt y est permis, ou non. */
   const aim = (event: DragEvent<HTMLElement>) => {
@@ -173,12 +180,19 @@ export function PageTree({
       onDragStart={startDrag}
       // En entrant sur un élément comme en le survolant : le navigateur n'annonce le survol
       // qu'au deuxième événement sur le même élément.
-      onDragEnter={aim}
+      onDragEnter={(event) => {
+        entered.current = event.target;
+        aim(event);
+      }}
       onDragOver={aim}
       onDragLeave={(event) => {
-        if (dragged !== null && !event.currentTarget.contains(event.relatedTarget as Node | null)) {
-          onDragOver(null);
-        }
+        // Le pointeur a-t-il quitté l'arbre, ou seulement changé d'élément ? Le navigateur
+        // annonce l'entrée sur le nouvel élément avant la sortie de l'ancien : seule la
+        // sortie du dernier élément où il est entré est celle de l'arbre. `relatedTarget` le
+        // dirait aussi, mais tous les navigateurs ne le donnent pas.
+        if (event.target !== entered.current) return;
+        entered.current = null;
+        if (dragged !== null) onDragOver(null);
       }}
       onDrop={(event) => {
         if (dragged === null) return;
@@ -202,12 +216,12 @@ export function PageTree({
         />
       ))}
       {over !== null && over.zone !== "inside" && overIndex >= 0 && (
-        // Le trait d'insertion, au bord de la ligne visée et à son retrait.
+        // Le trait d'insertion, au retrait de la ligne visée.
         <div
           className="tree-drop-line"
           aria-hidden="true"
           style={{
-            top: (overIndex + (over.zone === "after" ? 1 : 0)) * ROW_HEIGHT - 1,
+            top: lineIndex * ROW_HEIGHT - 1,
             left: rows[overIndex].depth * 14 + 22,
           }}
         />
