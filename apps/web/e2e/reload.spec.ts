@@ -1,13 +1,15 @@
 // L'écran revient à l'état du serveur : après une relecture qui échoue, rien de ce qui est
 // affiché ne se perd ; après un refus, la barre latérale et la page ouverte sont relues ; ce
 // qui change ailleurs finit par apparaître ici.
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import type { ErrorBody } from "@mementum/protocol";
 import {
   apiAs,
   closeContexts,
   createPage,
   firstSpace,
   getMmd,
+  newUser,
   NO_SESSION,
   openPage,
   openRowMenu,
@@ -15,6 +17,8 @@ import {
   sidebarOf,
   signUpAccount,
   titleOf,
+  trashBanner,
+  trashItem,
   treeRow,
   unique,
 } from "./helpers";
@@ -87,4 +91,106 @@ test("failed_reload_keeps_the_open_page_and_what_was_typed", async ({ browser })
   await expect(titleOf(p)).toHaveValue("Bravo");
   await expect(sidebarOf(p).getByRole("alert")).toHaveCount(0);
   expect((await api.get(`/api/v1/spaces/${space.id}/tree`)).status()).toBe(200);
+});
+
+/** Supprime pour de bon la page `id`, comme le ferait quelqu'un d'autre ailleurs. */
+async function deleteElsewhere(api: APIRequestContext, id: string): Promise<void> {
+  expect((await api.post(`/api/v1/pages/${id}/trash`)).status()).toBe(200);
+  expect((await api.delete(`/api/v1/pages/${id}`)).status()).toBe(204);
+}
+
+test("refused_trash_and_creation_reload_the_sidebar", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  await createPage(api, { title: "Charlie" });
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  const alert = sidebarOf(p).getByRole("alert");
+
+  // « Alpha » est supprimée ailleurs ; ici, sa ligne est toujours là. La mettre à la corbeille
+  // est refusé : le message du serveur, et la barre latérale telle qu'il la voit.
+  await deleteElsewhere(api, a.id);
+  const gone = await api.post(`/api/v1/pages/${a.id}/trash`);
+  expect(gone.status()).toBe(404);
+  const body = (await gone.json()) as ErrorBody;
+  await (await openRowMenu(p, a.id, "Alpha"))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  await expect(alert).toContainText("La page n'a pas pu être mise à la corbeille");
+  await expect(alert).toContainText(body.message, { ignoreCase: true });
+  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "1 Charlie"]);
+
+  // « Bravo » aussi : y ajouter une sous-page est refusé, et sa ligne s'en va.
+  await deleteElsewhere(api, b.id);
+  await treeRow(p, b.id).hover();
+  await treeRow(p, b.id).getByRole("button", { name: "Ajouter une sous-page à « Bravo »" }).click();
+  await expect(alert).toContainText("La page n'a pas pu être créée");
+  // Dit pour la personne, sans les noms de champs de l'API.
+  await expect(alert).not.toContainText("parentId");
+  await expect.poll(() => shownRows(p)).toEqual(["1 Charlie"]);
+  expect(new URL(p.url()).pathname).toBe(`/s/${space.id}`);
+});
+
+test("trash_view_follows_the_sidebar", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}/trash`);
+  await expect(p.getByText("La corbeille est vide.")).toBeVisible();
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo"]);
+
+  // Une page jetée depuis la barre latérale arrive dans la corbeille ouverte.
+  await (await openRowMenu(p, a.id, "Alpha"))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  await expect(trashItem(p, "Alpha")).toBeVisible();
+  await expect(p.getByText("La corbeille est vide.")).toHaveCount(0);
+  // Une seconde aussi, la plus récente d'abord.
+  await (await openRowMenu(p, b.id, "Bravo"))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  await expect(
+    p.getByRole("list", { name: "Pages à la corbeille" }).getByRole("listitem"),
+  ).toHaveText([/Bravo/, /Alpha/]);
+  expect(new URL(p.url()).pathname).toBe(`/s/${space.id}/trash`);
+});
+
+test("refused_restore_reads_the_page_again", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  for (const id of [a.id, b.id]) {
+    expect((await api.post(`/api/v1/pages/${id}/trash`)).status()).toBe(200);
+  }
+
+  // « Alpha », à la corbeille, est ouverte ; ailleurs, on la supprime pour de bon.
+  const p = await newUser(browser, alice);
+  await p.goto(`/p/${a.id}`);
+  await expect(trashBanner(p)).toBeVisible();
+  expect((await api.delete(`/api/v1/pages/${a.id}`)).status()).toBe(204);
+  // « Restaurer » est refusé : la page est relue, et elle n'est plus là.
+  await trashBanner(p).getByRole("button", { name: "Restaurer" }).click();
+  await expect(p.getByRole("heading", { name: "Page introuvable" })).toBeVisible();
+  await expect(trashBanner(p)).toHaveCount(0);
+
+  // « Bravo », à la corbeille, est ouverte ; ailleurs, on la restaure. Ici, le bandeau est
+  // toujours là : « Restaurer » la montre telle qu'elle est, et sa ligne revient.
+  await p.goto(`/p/${b.id}`);
+  await expect(trashBanner(p)).toBeVisible();
+  await expect(treeRow(p, b.id)).toHaveCount(0);
+  expect((await api.post(`/api/v1/pages/${b.id}/restore`)).status()).toBe(200);
+  await trashBanner(p).getByRole("button", { name: "Restaurer" }).click();
+  await expect(trashBanner(p)).toHaveCount(0);
+  await expect(treeRow(p, b.id).getByRole("link")).toHaveAttribute("aria-current", "page");
+  await expect(titleOf(p)).not.toHaveAttribute("readonly", "");
 });

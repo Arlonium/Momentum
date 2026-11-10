@@ -7,7 +7,9 @@
 // elles, et reviennent avec elles), et seulement celles que la personne peut restaurer
 // (`edit`). Supprimer définitivement demande l'accès complet (`full`), et une confirmation
 // dans la page (`Confirm`) : la page part avec ses sous-pages et leur contenu, pour de bon.
-// Le serveur fait foi : son refus s'affiche tel quel, et la liste est relue.
+// Le serveur fait foi : son refus s'affiche tel quel, la liste est relue, et la barre latérale
+// avec elle (`onChanged`). La liste se relit aussi quand une page est jetée ou restaurée
+// ailleurs dans l'application (`version`).
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { deletePage, getTrash, isSessionLost, restorePage } from "../api";
@@ -18,8 +20,10 @@ import { Confirm } from "../ui/Confirm";
 
 type Props = {
   space: SpaceInfo;
-  /** Une page est sortie de la corbeille : l'arbre de l'espace a changé. */
-  onRestored: () => void;
+  /** Change quand une page est jetée ou restaurée ailleurs dans l'application. */
+  version: number;
+  /** Une page est sortie de la corbeille, ou le serveur a refusé : l'arbre est à relire. */
+  onChanged: () => void;
 };
 
 type Load =
@@ -34,7 +38,7 @@ const trashedOn = new Intl.DateTimeFormat("fr-FR", {
   minute: "2-digit",
 });
 
-export function TrashView({ space, onRestored }: Props) {
+export function TrashView({ space, version, onChanged }: Props) {
   useDocumentTitle("Corbeille");
   const titleRef = useRef<HTMLHeadingElement>(null);
   const [load, setLoad] = useState<Load>({ name: "loading" });
@@ -58,7 +62,7 @@ export function TrashView({ space, onRestored }: Props) {
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, version]);
 
   // La fenêtre fermée rend le focus au bouton qui l'a ouverte (`Confirm`). Parti avec sa
   // ligne, ce bouton n'est plus là : le focus va au titre de la page, pas dans le vide.
@@ -74,10 +78,13 @@ export function TrashView({ space, onRestored }: Props) {
     setError(null);
     try {
       await restorePage(page.id);
-      onRestored();
+      onChanged();
     } catch (e) {
       // Une page parente est à la corbeille (`409 parent_trashed`), ou la page n'y est plus.
-      if (!isSessionLost(e)) setError(messageOf(e));
+      if (!isSessionLost(e)) {
+        setError(messageOf(e));
+        onChanged();
+      }
     }
     // Réussie ou refusée : la corbeille telle que le serveur la voit.
     await reload();
@@ -91,7 +98,11 @@ export function TrashView({ space, onRestored }: Props) {
     try {
       await deletePage(deleting.id);
     } catch (e) {
-      if (!isSessionLost(e)) setError(messageOf(e));
+      // Restaurée ailleurs, peut-être (`409 not_trashed`) : elle est revenue dans l'arbre.
+      if (!isSessionLost(e)) {
+        setError(messageOf(e));
+        onChanged();
+      }
     }
     await reload();
     setBusy(false);

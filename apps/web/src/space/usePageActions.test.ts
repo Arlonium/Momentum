@@ -2,17 +2,25 @@
 // l'écran une fois qu'il a répondu, et ce qu'elles disent quand il refuse.
 import type { PageNode, Tree } from "@mementum/protocol";
 import { beforeEach, expect, test, vi } from "vitest";
-import { ApiError, createPage, getTree, restorePage, trashPage, updatePage } from "../api";
+import {
+  ApiError,
+  createPage,
+  getPage,
+  getTree,
+  restorePage,
+  trashPage,
+  updatePage,
+} from "../api";
 import { useOpenPage } from "../page/useOpenPage";
 import { renderHook, settle } from "../test/hooks";
-import { page, unauthenticated } from "../test/pages";
+import { notFound, page, unauthenticated } from "../test/pages";
 import { usePageActions } from "./usePageActions";
 import { useSpaceTree, useTreeReader } from "./useSpaceTree";
 
 vi.mock("../api", async (original) => ({
   ...(await original<typeof import("../api")>()),
   getTree: vi.fn(),
-  getPage: vi.fn(() => new Promise(() => {})),
+  getPage: vi.fn(),
   createPage: vi.fn(),
   trashPage: vi.fn(),
   restorePage: vi.fn(),
@@ -28,6 +36,9 @@ beforeEach(() => {
   server = [];
   caughtUp.mockClear();
   for (const mock of [createPage, trashPage, restorePage, updatePage]) vi.mocked(mock).mockReset();
+  // Par défaut, le serveur ne répond pas encore à qui demande une page.
+  vi.mocked(getPage).mockReset();
+  vi.mocked(getPage).mockImplementation(() => new Promise(() => {}));
   vi.mocked(getTree).mockReset();
   vi.mocked(getTree).mockImplementation(
     async (spaceId): Promise<Tree> => ({ spaceId, nodes: [...server] }),
@@ -52,6 +63,9 @@ function hook({ activeId = null, pathname = "/s/space", stale = false }: Props) 
   });
   return { actions, open, nodes: tree.loaded?.nodes ?? null };
 }
+
+/** Le nombre de lectures de l'arbre faites jusqu'ici. */
+const treeReads = () => vi.mocked(getTree).mock.calls.length;
 
 /** Le hook, une fois l'arbre `nodes` lu. */
 async function withTree(nodes: PageNode[], props: Props = {}) {
@@ -107,6 +121,40 @@ test("refused_creation_says_why", async () => {
   expect(app.current.actions.notice).toBeNull();
 });
 
+test("refused_creation_reloads_the_tree", async () => {
+  const app = await withTree([page("a"), page("b")]);
+  // Entre-temps, « a » a été supprimée ailleurs : y créer une sous-page est refusé.
+  server = [page("b")];
+  vi.mocked(createPage).mockRejectedValue(
+    refusal("invalid_parent", "parentId ne désigne pas une page de cet espace", 422),
+  );
+  await settle(() => app.current.actions.create({ parentId: "a" }));
+  // Le refus est dit sans le vocabulaire de l'API, et la barre latérale revient à ce que le
+  // serveur voit.
+  expect(app.current.actions.notice).toBe(
+    "La page n'a pas pu être créée. Sa page parente n'est plus là, ou tu ne la vois plus.",
+  );
+  expect(ids(app.current.nodes)).toEqual(["b"]);
+});
+
+test("lost_session_on_creation_says_nothing", async () => {
+  const app = await withTree([page("a")]);
+  // La connexion est demandée par-dessus : pas de message de plus.
+  vi.mocked(createPage).mockRejectedValue(unauthenticated());
+  await settle(() => app.current.actions.create({ section: "space" }));
+  expect(app.current.actions.notice).toBeNull();
+});
+
+test("created_page_already_in_the_tree_is_not_added_twice", async () => {
+  const app = await withTree([page("a")]);
+  const created = page("n");
+  vi.mocked(createPage).mockResolvedValue(created);
+  await settle(() => app.current.actions.create({ section: "space" }));
+  // La même page rendue une seconde fois (une relecture l'avait déjà apportée) : une ligne.
+  await settle(() => app.current.actions.create({ section: "space" }));
+  expect(ids(app.current.nodes)).toEqual(["a", "n"]);
+});
+
 test("saved_title_updates_the_tree", async () => {
   const app = await withTree([page("a"), page("b")]);
   const renamed = page("a", { title: "Nouveau titre" });
@@ -142,6 +190,36 @@ test("refused_trash_says_why_and_a_lost_session_says_nothing", async () => {
   vi.mocked(trashPage).mockRejectedValue(unauthenticated());
   await settle(() => app.current.actions.trash("a"));
   expect(app.current.actions.notice).toBeNull();
+});
+
+test("refused_trash_reloads_the_tree", async () => {
+  const app = await withTree([page("a"), page("b")]);
+  // Entre-temps, « a » a été supprimée ailleurs.
+  server = [page("b")];
+  vi.mocked(trashPage).mockRejectedValue(notFound());
+  await settle(() => app.current.actions.trash("a"));
+  expect(app.current.actions.notice).toBe(
+    "La page n'a pas pu être mise à la corbeille. Page introuvable",
+  );
+  // Sa ligne s'en va : un second essai ne redonnerait que la même erreur.
+  expect(ids(app.current.nodes)).toEqual(["b"]);
+});
+
+test("trash_and_restore_tell_the_trash_view", async () => {
+  const app = await withTree([page("a"), page("b")], { activeId: "x" });
+  const before = app.current.actions.trashChanges;
+  vi.mocked(trashPage).mockResolvedValue(page("a", { trashedAt: 1 }));
+  await settle(() => app.current.actions.trash("a"));
+  const afterTrash = app.current.actions.trashChanges;
+  expect(afterTrash).not.toBe(before);
+  // Refusée aussi : ce que la corbeille montre a pu changer ailleurs.
+  vi.mocked(trashPage).mockRejectedValue(notFound());
+  await settle(() => app.current.actions.trash("b"));
+  const afterRefusal = app.current.actions.trashChanges;
+  expect(afterRefusal).not.toBe(afterTrash);
+  vi.mocked(restorePage).mockResolvedValue(page("x"));
+  await settle(() => app.current.actions.restore("x"));
+  expect(app.current.actions.trashChanges).not.toBe(afterRefusal);
 });
 
 test("move_among_the_same_siblings_does_not_name_the_parent", async () => {
@@ -209,9 +287,27 @@ test("restored_page_comes_back_and_the_tree_is_reloaded", async () => {
   expect(app.current.open.node).toEqual(restored);
 });
 
-test("refused_restore_rejects_with_the_server_error", async () => {
+test("refused_restore_rejects_and_reads_the_page_and_the_tree_again", async () => {
   const app = await withTree([page("b")], { activeId: "a" });
+  expect(getPage).toHaveBeenCalledTimes(1);
+  const reads = treeReads();
   const error = refusal("parent_trashed", "une page parente est à la corbeille");
   vi.mocked(restorePage).mockRejectedValue(error);
-  await expect(app.current.actions.restore("a")).rejects.toBe(error);
+  let thrown: unknown;
+  await settle(() => app.current.actions.restore("a").catch((e: unknown) => (thrown = e)));
+  // Le bandeau dira le refus du serveur.
+  expect(thrown).toBe(error);
+  // La page ouverte est redemandée (elle a pu être supprimée ou restaurée ailleurs), et la
+  // barre latérale relue.
+  expect(getPage).toHaveBeenCalledTimes(2);
+  expect(treeReads()).toBeGreaterThan(reads);
+});
+
+test("change_from_the_trash_view_reloads_the_tree", async () => {
+  const app = await withTree([page("b")]);
+  const reads = treeReads();
+  server = [page("a"), page("b")];
+  await settle(() => app.current.actions.trashChanged());
+  expect(treeReads()).toBeGreaterThan(reads);
+  expect(ids(app.current.nodes)).toEqual(["a", "b"]);
 });

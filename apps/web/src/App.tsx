@@ -127,7 +127,14 @@ export function App() {
     // En route vers un espace du compte.
     content = <Message title="Chargement…" />;
   } else if (route.name === "trash" && atSpace !== null) {
-    content = <TrashView key={atSpace.id} space={atSpace} onRestored={actions.restored} />;
+    content = (
+      <TrashView
+        key={atSpace.id}
+        space={atSpace}
+        version={actions.trashChanges}
+        onChanged={actions.trashChanged}
+      />
+    );
   } else if (route.name === "space") {
     content = (
       <Message title="Aucune page ouverte" banner={stale ? <ReadOnlyBanner /> : null}>
