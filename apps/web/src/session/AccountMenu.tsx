@@ -19,7 +19,8 @@ function initials(name: string): string {
   return letters.toLocaleUpperCase("fr");
 }
 
-function Avatar({ id, name, size }: { id: string; name: string; size: number }) {
+/** La pastille d'un compte : ses initiales, sur sa couleur de présence. */
+export function Avatar({ id, name, size }: { id: string; name: string; size: number }) {
   return (
     <span
       className="mm-avatar"

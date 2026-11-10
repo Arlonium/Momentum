@@ -1,35 +1,54 @@
-// Routeur minimal (History API) : `/` (accueil), `/p/:id` (une page), `/login` et `/signup`
-// (connexion et inscription, montrées par `SessionGate` sans session). Les liens internes
-// restent de vrais `<a href>` (nouvel onglet, copie du lien) ; un clic simple est
-// intercepté pour changer de page sans recharger l'application.
+// Routeur minimal (History API) : `/` (accueil), `/p/:id` (une page), `/s/:spaceId/settings`
+// (réglages d'un espace), `/login` et `/signup` (connexion et inscription, montrées par
+// `SessionGate` sans session), `/invite` (un lien d'invitation, `/invite#<jeton>`, avec ou
+// sans session). Les liens internes restent de vrais `<a href>` (nouvel onglet, copie du
+// lien) ; un clic simple est intercepté pour changer de page sans recharger l'application.
 import { useEffect, useSyncExternalStore } from "react";
 
 export type Route =
   | { name: "home" }
   | { name: "login" }
   | { name: "signup" }
+  | { name: "invite" }
   | { name: "page"; id: string }
+  | { name: "spaceSettings"; spaceId: string }
   | { name: "notFound" };
 
 const CHANGE = "mementum:navigate";
+
+/** Le segment d'adresse décodé, ou `null` s'il est mal formé. */
+function segment(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
 
 export function parseRoute(pathname: string): Route {
   if (pathname === "/" || pathname === "") return { name: "home" };
   if (/^\/login\/?$/.test(pathname)) return { name: "login" };
   if (/^\/signup\/?$/.test(pathname)) return { name: "signup" };
-  const match = /^\/p\/([^/]+)\/?$/.exec(pathname);
-  if (match) {
-    try {
-      return { name: "page", id: decodeURIComponent(match[1]) };
-    } catch {
-      return { name: "notFound" };
-    }
+  if (/^\/invite\/?$/.test(pathname)) return { name: "invite" };
+  const page = /^\/p\/([^/]+)\/?$/.exec(pathname);
+  if (page) {
+    const id = segment(page[1]);
+    return id === null ? { name: "notFound" } : { name: "page", id };
+  }
+  const settings = /^\/s\/([^/]+)\/settings\/?$/.exec(pathname);
+  if (settings) {
+    const spaceId = segment(settings[1]);
+    return spaceId === null ? { name: "notFound" } : { name: "spaceSettings", spaceId };
   }
   return { name: "notFound" };
 }
 
 export function pagePath(id: string): string {
   return `/p/${encodeURIComponent(id)}`;
+}
+
+export function spaceSettingsPath(spaceId: string): string {
+  return `/s/${encodeURIComponent(spaceId)}/settings`;
 }
 
 /** Va à `path` ; `replace` : à la place de l'entrée courante de l'historique. */
@@ -68,7 +87,11 @@ export function useLinkInterception(): void {
       // seul un îlot non modifiable, comme le cadre d'un `pageLink`, navigue.
       if (anchor.closest("[contenteditable]")?.getAttribute("contenteditable") === "true") return;
       const url = new URL(anchor.href);
-      if (url.origin !== location.origin || parseRoute(url.pathname).name === "notFound") return;
+      if (url.origin !== location.origin) return;
+      // Un lien d'invitation porte son jeton dans le fragment, que `navigate` ne garde pas :
+      // il se suit en chargeant la page, qui lit le jeton.
+      const target = parseRoute(url.pathname).name;
+      if (target === "notFound" || target === "invite") return;
       event.preventDefault();
       navigate(url.pathname + url.search);
     };

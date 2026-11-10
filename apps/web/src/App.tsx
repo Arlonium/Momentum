@@ -1,7 +1,7 @@
 // L'application : barre latérale (arbre des pages) et page ouverte. `/` montre l'accueil,
-// `/p/:id` une page. La version de schéma du serveur est lue au chargement, puis relue avant
-// chaque connexion de synchronisation (R35) : si elle diffère, tout passe en lecture seule,
-// pour de bon.
+// `/p/:id` une page, `/s/:spaceId/settings` les réglages d'un espace. La version de schéma
+// du serveur est lue au chargement, puis relue avant chaque connexion de synchronisation
+// (R35) : si elle diffère, tout passe en lecture seule, pour de bon.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, createPage, getInfo, getTree } from "./api";
@@ -9,6 +9,7 @@ import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { CLIENT_SCHEMA_VERSION } from "./editor/version";
 import { PageView } from "./page/PageView";
 import { navigate, pagePath, parseRoute, useLinkInterception, usePathname } from "./router";
+import { SpaceSettings } from "./settings/SpaceSettings";
 import { PageTree } from "./sidebar/PageTree";
 
 function messageOf(error: unknown): string {
@@ -106,12 +107,19 @@ export function App() {
       .finally(() => setReloading(false));
   }, [missing, reloadedFor]);
 
+  const settingsOf = route.name === "spaceSettings" ? route.spaceId : null;
+
   useEffect(() => {
+    // Les réglages nomment l'onglet eux-mêmes.
+    if (settingsOf !== null) return;
     document.title = active ? `${active.title} · Mementum` : "Mementum";
-  }, [active]);
+  }, [active, settingsOf]);
 
   let content;
-  if (loadError) {
+  if (settingsOf !== null) {
+    // Sans attendre l'arbre des pages : les réglages ont leurs propres appels.
+    content = <SpaceSettings key={settingsOf} spaceId={settingsOf} />;
+  } else if (loadError) {
     content = (
       <Message title="Impossible de charger Mementum">
         {loadError} Recharge la page pour réessayer.
@@ -161,6 +169,7 @@ export function App() {
       <PageTree
         nodes={nodes}
         activeId={activeId}
+        settingsOf={settingsOf}
         readOnly={stale}
         onCreate={createFromTree}
         notice={notice}

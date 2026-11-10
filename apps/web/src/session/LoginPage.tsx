@@ -45,6 +45,8 @@ function LoginForm({ email: initialEmail = "", onLoggedIn }: { email?: string; o
         type="password"
         name="password"
         autoComplete="current-password"
+        // L'adresse est déjà là : le mot de passe reste à taper.
+        autoFocus={!!initialEmail}
         value={password}
         onChange={(e) => setPassword(e.target.value)}
       />
@@ -57,19 +59,28 @@ function LoginForm({ email: initialEmail = "", onLoggedIn }: { email?: string; o
 }
 
 type LoginPageProps = {
-  /** Inscriptions ouvertes (`info.signup === "open"`) : le lien vers l'inscription. */
+  /** On peut s'inscrire (inscriptions ouvertes, ou invitation en cours) : le lien y mène. */
   signupOpen: boolean;
+  /**
+   * Arrivée par une invitation (« J'ai déjà un compte ») : l'adresse invitée, préremplie, et
+   * ce que donne l'invitation, en mots. Une fois connecté, on revient l'accepter.
+   */
+  invitation?: { email: string; invitedTo: string };
   onSignup: () => void;
   onLoggedIn: (me: Me) => void;
 };
 
 /** La connexion, en page : sans session. */
-export function LoginPage({ signupOpen, onSignup, onLoggedIn }: LoginPageProps) {
+export function LoginPage({ signupOpen, invitation, onSignup, onLoggedIn }: LoginPageProps) {
   useDocumentTitle("Connexion");
   return (
     <AuthScreen
       title="Se connecter"
-      lead="Retrouve tes pages et les espaces où l'on t'a invité."
+      lead={
+        invitation
+          ? `Connecte-toi pour rejoindre ${invitation.invitedTo}.`
+          : "Retrouve tes pages et les espaces où l'on t'a invité."
+      }
       footer={
         signupOpen ? (
           <>
@@ -83,7 +94,7 @@ export function LoginPage({ signupOpen, onSignup, onLoggedIn }: LoginPageProps) 
         )
       }
     >
-      <LoginForm onLoggedIn={onLoggedIn} />
+      <LoginForm email={invitation?.email} onLoggedIn={onLoggedIn} />
     </AuthScreen>
   );
 }

@@ -7,17 +7,27 @@
 // `SessionGate`, qui demande la connexion. Les autres `401` (`invalid_credentials` : mot de
 // passe faux) ne disent rien de la session.
 import type {
+  Accepted,
   ChangePassword,
   CreatePage,
   ErrorBody,
   ErrorCode,
   Info,
+  InvitationCreated,
+  InvitationInfo,
+  InvitationToken,
+  InviteToSpace,
   LogIn,
   Me,
+  Member,
   PageNode,
+  PendingInvitation,
   SignUp,
+  SpaceInfo,
   Tree,
+  UpdateMember,
   UpdatePage,
+  UpdateSpace,
 } from "@mementum/protocol";
 
 /** Erreur d'un appel : le code et le message (en français) du serveur, quand il répond. */
@@ -106,6 +116,68 @@ export function logOut(): Promise<void> {
  */
 export function changePassword(body: ChangePassword): Promise<void> {
   return call("POST", "/api/v1/auth/password", body);
+}
+
+// Espaces, membres et invitations. Dans un espace où l'on n'a aucun rôle, toute route répond
+// `404`, comme pour un espace qui n'existe pas ; une action au-dessus de son rôle, `403`.
+
+const space = (spaceId: string) => `/api/v1/spaces/${encodeURIComponent(spaceId)}`;
+
+/** `PATCH /api/v1/spaces/{id}` : renomme l'espace (`admin`). */
+export function updateSpace(spaceId: string, body: UpdateSpace): Promise<SpaceInfo> {
+  return call("PATCH", space(spaceId), body);
+}
+
+/** `GET /api/v1/spaces/{id}/members` : les personnes de l'espace, invités compris (`member`). */
+export function getMembers(spaceId: string): Promise<Member[]> {
+  return call("GET", `${space(spaceId)}/members`);
+}
+
+/**
+ * `PATCH /api/v1/spaces/{id}/members/{userId}` : change un rôle (un `admin`, seulement entre
+ * `admin` et `member`) ; `409 last_owner` si l'espace perdrait son dernier propriétaire.
+ */
+export function updateMember(spaceId: string, userId: string, body: UpdateMember): Promise<Member> {
+  return call("PATCH", `${space(spaceId)}/members/${encodeURIComponent(userId)}`, body);
+}
+
+/**
+ * `DELETE /api/v1/spaces/{id}/members/{userId}` : retire quelqu'un (`admin`, jamais un
+ * propriétaire s'il n'en est pas un), ou part, pour soi ; `409 last_owner`.
+ */
+export function removeMember(spaceId: string, userId: string): Promise<void> {
+  return call("DELETE", `${space(spaceId)}/members/${encodeURIComponent(userId)}`);
+}
+
+/** `POST /api/v1/spaces/{id}/invitations` : l'invitation et son jeton, rendu cette fois seulement. */
+export function inviteToSpace(spaceId: string, body: InviteToSpace): Promise<InvitationCreated> {
+  return call("POST", `${space(spaceId)}/invitations`, body);
+}
+
+/** `GET /api/v1/spaces/{id}/invitations` : celles qui attendent, sans leur jeton (`admin`). */
+export function getSpaceInvitations(spaceId: string): Promise<PendingInvitation[]> {
+  return call("GET", `${space(spaceId)}/invitations`);
+}
+
+/** `DELETE /api/v1/invitations/{id}` : le lien ne vaut plus. */
+export function revokeInvitation(id: string): Promise<void> {
+  return call("DELETE", `/api/v1/invitations/${encodeURIComponent(id)}`);
+}
+
+/**
+ * `POST /api/v1/invitations/lookup`, sans session : ce que dit un lien. Inconnu, échu,
+ * révoqué ou déjà utilisé : `404 invalid_invitation`, toujours la même réponse. Le jeton va
+ * dans le corps, jamais dans une adresse.
+ */
+export function lookupInvitation(token: string): Promise<InvitationInfo> {
+  const body: InvitationToken = { token };
+  return call("POST", "/api/v1/invitations/lookup", body);
+}
+
+/** `POST /api/v1/invitations/accept` : le compte de la session reçoit l'invitation. */
+export function acceptInvitation(token: string): Promise<Accepted> {
+  const body: InvitationToken = { token };
+  return call("POST", "/api/v1/invitations/accept", body);
 }
 
 /** `GET /api/v1/info` : version du serveur et de son schéma de blocs. */

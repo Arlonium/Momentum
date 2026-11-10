@@ -1,7 +1,8 @@
 // Inscription : nom, adresse e-mail et mot de passe, validés par Entrée. Le compte créé a sa
 // session ouverte dans la foulée. Trois cas (`SessionGate`) : le premier compte de
-// l'instance (`setup`), les inscriptions ouvertes, ou l'arrivée par une invitation (Task 13),
-// qui préremplit l'adresse et envoie son jeton avec l'inscription.
+// l'instance (`setup`), les inscriptions ouvertes, ou l'arrivée par une invitation
+// (`InvitePage`), qui préremplit l'adresse et envoie son jeton avec l'inscription : le
+// serveur l'accepte dans la foulée, et le compte n'a pas d'espace à lui.
 import type { Me } from "@mementum/protocol";
 import { useState, type FormEvent } from "react";
 import { signUp } from "../api";
@@ -13,6 +14,8 @@ export type SignupRequest = {
   email?: string;
   /** Le jeton d'invitation, envoyé avec l'inscription (`SignUp.invitation`). */
   invitation?: string;
+  /** Ce que donne l'invitation, en mots (« l'espace « Pro » »), pour la phrase d'accueil. */
+  invitedTo?: string;
 };
 
 type Props = {
@@ -53,7 +56,11 @@ export function SignupPage({ setup, request, onSignedUp, onLogin }: Props) {
 
   let lead = "Ton compte aura son propre espace, où tu pourras inviter d'autres personnes.";
   if (setup) lead = "Créer le premier compte : il administrera cette instance.";
-  else if (request.invitation) lead = "Crée ton compte pour rejoindre ceux qui t'ont invité.";
+  else if (request.invitation) {
+    lead = request.invitedTo
+      ? `Crée ton compte pour rejoindre ${request.invitedTo}.`
+      : "Crée ton compte pour rejoindre ceux qui t'ont invité.";
+  }
 
   return (
     <AuthScreen

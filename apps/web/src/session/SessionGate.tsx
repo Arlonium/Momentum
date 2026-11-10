@@ -1,7 +1,14 @@
 // La porte de l'application. `GET /api/v1/me` d'abord : sans session, l'écran de connexion,
 // ou celui d'inscription s'il est permis (premier compte de l'instance, inscriptions
-// ouvertes, ou jeton d'invitation donné par un autre écran : `showSignup`) ; avec,
-// l'application, qui reçoit le compte par `useSession`.
+// ouvertes, ou invitation en cours) ; avec, l'application, qui reçoit le compte par
+// `useSession`.
+//
+// Lien d'invitation (`/invite#<jeton>`, `InvitePage`), avec ou sans session. Le jeton est lu
+// au chargement (ou quand un autre lien est ouvert dans l'onglet), puis effacé de l'adresse.
+// Il ne vit qu'ici, en mémoire, le temps de l'invitation : sa page, puis l'inscription (qui
+// l'envoie, et s'ouvre même quand les inscriptions sont fermées) ou la connexion (qui ramène à
+// la page d'invitation, pour l'accepter). Il est oublié dès que l'invitation a servi, ou
+// qu'on quitte ces trois écrans.
 //
 // Session perdue en cours de route (un appel répond `401 unauthenticated`, `api.ts`) : la
 // connexion est demandée par-dessus l'application, qui reste montée. La page ouverte et ce
@@ -10,7 +17,7 @@
 // premier avait ouvert ou tapé ne part sous le nom du second.
 //
 // La déconnexion recharge l'onglet (`AccountMenu`) : rien du compte ne reste en mémoire.
-import type { Info, Me } from "@mementum/protocol";
+import type { Info, InvitationInfo, Me } from "@mementum/protocol";
 import {
   Fragment,
   useCallback,
@@ -23,9 +30,10 @@ import {
 import { getInfo, getMe, isSessionLost, onSessionLost } from "../api";
 import { navigate, parseRoute, usePathname } from "../router";
 import { AuthScreen, messageOf } from "./forms";
+import { invitationTarget, InvitePage, takeInvitationToken } from "./InvitePage";
 import { LoginDialog, LoginPage } from "./LoginPage";
 import { SessionContext, type Session } from "./session";
-import { SignupPage, type SignupRequest } from "./SignupPage";
+import { SignupPage } from "./SignupPage";
 
 type State =
   | { name: "loading" }
@@ -38,15 +46,51 @@ type State =
 export function SessionGate({ children }: { children: ReactNode }) {
   const route = parseRoute(usePathname());
   const [state, setState] = useState<State>({ name: "loading" });
-  /** Ce qu'un autre écran a demandé à l'inscription (adresse, jeton d'invitation). */
-  const [signupRequest, setSignupRequest] = useState<SignupRequest>({});
+  /** Le jeton du lien d'invitation ouvert dans cet onglet. */
+  const [invitation, setInvitation] = useState<string | null>(null);
+  /**
+   * Ce que le serveur dit de cette invitation, une fois qu'on a choisi d'y répondre par
+   * l'inscription ou la connexion : ces écrans le reprennent.
+   */
+  const [invited, setInvited] = useState<InvitationInfo | null>(null);
+  const joining = invitation !== null && invited !== null;
 
-  const enter = useCallback((me: Me) => {
-    setState({ name: "signedIn", me, lost: false });
-    // Servie ou non, la demande d'inscription (et son jeton d'invitation) ne survit pas à
-    // l'écran qui l'a reçue.
-    setSignupRequest({});
+  const forgetInvitation = useCallback(() => {
+    setInvitation(null);
+    setInvited(null);
   }, []);
+
+  // Le jeton quitte l'adresse avant le premier affichage ; un autre lien d'invitation ouvert
+  // dans l'onglet (seul le fragment change : pas de rechargement) le remplace.
+  useLayoutEffect(() => {
+    const take = () => {
+      const token = takeInvitationToken();
+      if (token === null) return;
+      setInvitation(token);
+      setInvited(null);
+    };
+    take();
+    window.addEventListener("hashchange", take);
+    return () => window.removeEventListener("hashchange", take);
+  }, []);
+
+  // Hors des écrans de l'invitation, son jeton est oublié.
+  const inInvitationFlow =
+    route.name === "invite" || route.name === "login" || route.name === "signup";
+  useEffect(() => {
+    if (!inInvitationFlow) forgetInvitation();
+  }, [inInvitationFlow, forgetInvitation]);
+
+  const enter = useCallback((me: Me) => setState({ name: "signedIn", me, lost: false }), []);
+
+  /** L'inscription a reçu le jeton, et accepté l'invitation : il ne sert plus. */
+  const signedUp = useCallback(
+    (me: Me) => {
+      forgetInvitation();
+      enter(me);
+    },
+    [enter, forgetInvitation],
+  );
 
   const load = useCallback(async () => {
     setState({ name: "loading" });
@@ -69,13 +113,14 @@ export function SessionGate({ children }: { children: ReactNode }) {
     void load();
   }, [load]);
 
-  // Connecté sur `/login` ou `/signup` (après s'être connecté là, ou par « Précédent ») :
-  // l'accueil, à la place de cette adresse, avant que rien ne s'affiche.
+  // Connecté sur `/login` ou `/signup` (après s'être connecté là, ou par « Précédent ») : à
+  // la place de cette adresse, avant que rien ne s'affiche, la page de l'invitation qu'on
+  // venait accepter, sinon l'accueil.
   const signedIn = state.name === "signedIn";
   const onSessionRoute = route.name === "login" || route.name === "signup";
   useLayoutEffect(() => {
-    if (signedIn && onSessionRoute) navigate("/", { replace: true });
-  }, [signedIn, onSessionRoute]);
+    if (signedIn && onSessionRoute) navigate(joining ? "/invite" : "/", { replace: true });
+  }, [signedIn, onSessionRoute, joining]);
 
   // Tout appel qui répond `401 unauthenticated`, `getMe` de `refresh` compris.
   useEffect(
@@ -94,12 +139,17 @@ export function SessionGate({ children }: { children: ReactNode }) {
     setState((current) => (current.name === "signedIn" ? { ...current, me } : current));
   }, []);
 
-  /** Montre l'inscription, même si elle est fermée quand `request` porte une invitation. */
-  const showSignup = useCallback((request: SignupRequest = {}) => {
-    setSignupRequest(request);
+  const showSignup = useCallback(() => navigate("/signup"), []);
+  const showLogin = useCallback(() => navigate("/login"), []);
+  /** Depuis la page d'invitation : l'inscription ou la connexion, qui la reprennent. */
+  const answerBySignup = useCallback((info: InvitationInfo) => {
+    setInvited(info);
     navigate("/signup");
   }, []);
-  const showLogin = useCallback(() => navigate("/login"), []);
+  const answerByLogin = useCallback((info: InvitationInfo) => {
+    setInvited(info);
+    navigate("/login");
+  }, []);
 
   const me = state.name === "signedIn" ? state.me : null;
   const session = useMemo<Session | null>(() => (me ? { me, refresh } : null), [me, refresh]);
@@ -120,29 +170,56 @@ export function SessionGate({ children }: { children: ReactNode }) {
     );
   }
 
+  const invitePage = (
+    <InvitePage
+      // Un autre lien ouvert dans l'onglet : une autre invitation, relue.
+      key={invitation ?? ""}
+      token={invitation}
+      session={session}
+      onSignup={answerBySignup}
+      onLogin={answerByLogin}
+      onAccepted={forgetInvitation}
+    />
+  );
+
   if (state.name === "anonymous") {
     const { info } = state;
-    const signupAllowed =
-      info.setup || info.signup === "open" || signupRequest.invitation !== undefined;
+    // L'invitation en cours ouvre l'inscription, même fermée : le serveur l'accepte avec son
+    // jeton.
+    const signupAllowed = info.setup || info.signup === "open" || joining;
+    /** L'invitation à laquelle on répond : l'adresse invitée, et ce qu'elle donne, en mots. */
+    const answering = joining
+      ? { email: invited.email, invitedTo: invitationTarget(invited) }
+      : undefined;
     if (info.setup || (route.name === "signup" && signupAllowed)) {
       return (
         <SignupPage
           setup={info.setup}
-          request={signupRequest}
-          onSignedUp={enter}
+          request={answering && invitation ? { ...answering, invitation } : {}}
+          onSignedUp={signedUp}
           onLogin={showLogin}
         />
       );
     }
+    if (route.name === "invite") return invitePage;
     return (
-      <LoginPage signupOpen={info.signup === "open"} onSignup={showSignup} onLoggedIn={enter} />
+      <LoginPage
+        signupOpen={signupAllowed}
+        invitation={answering}
+        onSignup={showSignup}
+        onLoggedIn={enter}
+      />
     );
   }
 
   return (
     <SessionContext.Provider value={session}>
-      {/* Un autre compte connecté par-dessus : l'application repart de zéro. */}
-      <Fragment key={state.me.user.id}>{children}</Fragment>
+      {route.name === "invite" ? (
+        invitePage
+      ) : (
+        // Un autre compte connecté par-dessus : l'application repart de zéro.
+        <Fragment key={state.me.user.id}>{children}</Fragment>
+      )}
       {state.lost && <LoginDialog email={state.me.user.email} onLoggedIn={enter} />}
     </SessionContext.Provider>
   );

@@ -3,7 +3,8 @@
 //
 // Comptes : `global-setup.ts` crée le compte par défaut, dont la session (`storageState`)
 // est celle de tous les contextes des tests (configurations de Playwright). `newUser` et
-// `apiAs` prennent ce compte, ou un autre, créé par `signUpAccount`.
+// `apiAs` prennent ce compte, ou un autre, créé par `signUpAccount`. Chaque compte a son
+// espace (`firstSpace`), où d'autres le rejoignent par une invitation (`joinSpace`).
 import {
   expect,
   request,
@@ -12,7 +13,20 @@ import {
   type BrowserContext,
   type Page,
 } from "@playwright/test";
-import type { CreatePage, PageNode, SignUp, Tree } from "@mementum/protocol";
+import type {
+  Accepted,
+  CreatePage,
+  InvitationCreated,
+  InviteRole,
+  InviteToSpace,
+  Me,
+  Member,
+  PageNode,
+  PendingInvitation,
+  SignUp,
+  SpaceInfo,
+  Tree,
+} from "@mementum/protocol";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WebsocketProvider } from "y-websocket";
@@ -151,6 +165,66 @@ export async function closeContexts(): Promise<void> {
     ...contexts.splice(0).map((c) => c.close()),
     ...apis.splice(0).map((a) => a.dispose()),
   ]);
+}
+
+/** Le compte de la session de `api` et ses espaces (`GET /api/v1/me`). */
+export async function getMe(api: APIRequestContext): Promise<Me> {
+  const res = await api.get("/api/v1/me");
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as Me;
+}
+
+/** Le premier espace du compte de `api` : celui que son inscription a créé. */
+export async function firstSpace(api: APIRequestContext): Promise<SpaceInfo> {
+  const { spaces } = await getMe(api);
+  expect(spaces.length, "le compte n'a aucun espace").toBeGreaterThan(0);
+  return spaces[0];
+}
+
+/** Les personnes qui ont un rôle dans l'espace (`GET /api/v1/spaces/{id}/members`). */
+export async function getMembers(api: APIRequestContext, spaceId: string): Promise<Member[]> {
+  const res = await api.get(`/api/v1/spaces/${spaceId}/members`);
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as Member[];
+}
+
+/** Invite dans l'espace (`POST /api/v1/spaces/{id}/invitations`) : l'id et le jeton, montré une fois. */
+export async function inviteToSpace(
+  api: APIRequestContext,
+  spaceId: string,
+  body: InviteToSpace,
+): Promise<InvitationCreated> {
+  const res = await api.post(`/api/v1/spaces/${spaceId}/invitations`, { data: body });
+  expect(res.status(), await res.text()).toBe(201);
+  return (await res.json()) as InvitationCreated;
+}
+
+/** Les invitations de l'espace qui attendent (`GET /api/v1/spaces/{id}/invitations`). */
+export async function getSpaceInvitations(
+  api: APIRequestContext,
+  spaceId: string,
+): Promise<PendingInvitation[]> {
+  const res = await api.get(`/api/v1/spaces/${spaceId}/invitations`);
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as PendingInvitation[];
+}
+
+/** Le compte de la session de `api` accepte l'invitation (`POST /api/v1/invitations/accept`). */
+export async function acceptInvitation(api: APIRequestContext, token: string): Promise<Accepted> {
+  const res = await api.post("/api/v1/invitations/accept", { data: { token } });
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as Accepted;
+}
+
+/** `account` rejoint l'espace avec `role` : `owner` l'invite, et il accepte, par l'API. */
+export async function joinSpace(
+  owner: APIRequestContext,
+  spaceId: string,
+  account: Account,
+  role: InviteRole,
+): Promise<void> {
+  const { token } = await inviteToSpace(owner, spaceId, { email: account.email, role });
+  await acceptInvitation(await apiAs(account), token);
 }
 
 /** Ouvre la page `id` avec la session de `account` et attend la synchro. */

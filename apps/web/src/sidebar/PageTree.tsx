@@ -1,6 +1,9 @@
 // Barre latérale : l'arbre des pages, « Nouvelle page » (à la racine) et « + » au survol
-// d'une page (sous-page), puis le compte, en bas (`AccountMenu`). Déplacer les pages à la
-// souris viendra au lot 2.
+// d'une page (sous-page), puis, en bas, « Réglages de l'espace » (pour ses propriétaires et
+// ses admins) et le compte (`AccountMenu`). Déplacer les pages à la souris viendra au lot 2.
+//
+// L'espace est le premier du compte (`me.spaces`) : le sélecteur d'espace viendra avec les
+// sections.
 //
 // L'arbre est fenêtré (Ruling R43) : il a la hauteur de toutes ses lignes
 // (`rows.length × ROW_HEIGHT`), mais seules celles de la partie visible de la barre
@@ -9,8 +12,10 @@
 // de nouveau que les lignes dont `active` change (`TreeRow` est mémoïsée).
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { PlusIcon } from "../icons";
+import { PlusIcon, SettingsIcon } from "../icons";
+import { spaceSettingsPath } from "../router";
 import { AccountMenu } from "../session/AccountMenu";
+import { useSession } from "../session/session";
 import { flattenRows, OVERSCAN, ROW_HEIGHT } from "./rows";
 import { TreeRow } from "./TreeRow";
 
@@ -18,6 +23,8 @@ type Props = {
   /** `null` : l'arbre n'est pas encore chargé. */
   nodes: PageNode[] | null;
   activeId: string | null;
+  /** L'espace dont les réglages sont ouverts, sinon `null`. */
+  settingsOf: string | null;
   /** Schéma du serveur différent (R35) : aucune création de page. */
   readOnly: boolean;
   /** Doit garder son identité d'un rendu à l'autre : les lignes sont mémoïsées. */
@@ -47,7 +54,9 @@ function visibleRange(scroller: HTMLElement, tree: HTMLElement, count: number): 
   return { start: clamp(first), end: clamp(last) };
 }
 
-export function PageTree({ nodes, activeId, readOnly, onCreate, notice }: Props) {
+export function PageTree({ nodes, activeId, settingsOf, readOnly, onCreate, notice }: Props) {
+  const space = useSession().me.spaces[0];
+  const manages = space?.role === "owner" || space?.role === "admin";
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const rows = useMemo(() => flattenRows(nodes ?? [], collapsed), [nodes, collapsed]);
   const count = rows.length;
@@ -187,6 +196,16 @@ export function PageTree({ nodes, activeId, readOnly, onCreate, notice }: Props)
       )}
       {/* Collé au bas de la barre latérale, qui défile au-dessus de lui. */}
       <div ref={footerRef} className="mm-side-footer">
+        {space && manages && (
+          <a
+            href={spaceSettingsPath(space.id)}
+            className={`mm-side-action mm-side-link${settingsOf === space.id ? " is-active" : ""}`}
+            aria-current={settingsOf === space.id ? "page" : undefined}
+          >
+            <SettingsIcon />
+            <span>Réglages de l'espace</span>
+          </a>
+        )}
         <AccountMenu />
       </div>
     </nav>

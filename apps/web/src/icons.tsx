@@ -103,6 +103,38 @@ export const LogOutIcon = () => (
   </Icon>
 );
 
+/** Réglages : une roue dentée. */
+export const SettingsIcon = () => (
+  <Icon>
+    <circle cx="12" cy="12" r="3" />
+    <circle cx="12" cy="12" r="6.5" />
+    <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" />
+    <path d="M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" />
+  </Icon>
+);
+
+/** Copier un lien (le maillon du menu Partager de la maquette). */
+export const LinkIcon = () => (
+  <Icon size={15}>
+    <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
+    <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
+  </Icon>
+);
+
+export const CheckIcon = () => (
+  <Icon size={15}>
+    <path d="M5 12.5l4.5 4.5L19 7.5" />
+  </Icon>
+);
+
+/** Une invitation envoyée à une adresse. */
+export const MailIcon = () => (
+  <Icon>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="M3.5 6.5l8.5 6.5 8.5-6.5" />
+  </Icon>
+);
+
 /** Ouvre un menu vers le haut ou vers le bas (bouton du compte). */
 export const ChevronsIcon = () => (
   <Icon size={14}>

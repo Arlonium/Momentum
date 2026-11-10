@@ -11,7 +11,12 @@
   --mm-accent-hover: #174d36;
   --mm-accent-soft: #23704f22;
   --mm-danger: #b4462b;
+  --mm-danger-hover: #923820;
   --mm-danger-soft: #fbefeb;
+  /* Avertissement (lien d'invitation montré une seule fois) : 5,4:1 sur son fond. */
+  --mm-warning: #8a5a0b;
+  --mm-warning-soft: #fcf4e3;
+  --mm-warning-border: #ecd8a6;
   --mm-background: #ffffff;
   --mm-surface: #f4f3ef;
   --mm-border: #e2e0da;
@@ -171,6 +176,27 @@ a:hover {
   padding: 6px 8px;
   font-size: 13px;
   color: var(--mm-danger);
+}
+
+/* Lien de la barre latérale (« Réglages de l'espace ») : l'allure d'une action. */
+.mm-side-link {
+  margin-bottom: 2px;
+  text-decoration: none;
+}
+
+.mm-side-link:hover {
+  color: var(--mm-text-sidebar);
+}
+
+.mm-side-link svg {
+  flex: none;
+  color: var(--mm-text-secondary);
+}
+
+.mm-side-link.is-active {
+  background: var(--mm-sidebar-active);
+  color: var(--mm-text);
+  font-weight: 500;
 }
 
 /* Compte, en bas de la barre latérale : poussé en bas quand l'arbre est court, collé au bas
@@ -430,6 +456,10 @@ button.tree-toggle:hover {
   font-size: 13px;
 }
 
+.mm-topbar-crumb {
+  color: var(--mm-text-secondary);
+}
+
 /* Page */
 
 .mm-page {
@@ -552,9 +582,115 @@ button.tree-toggle:hover {
   background: var(--mm-accent-hover);
 }
 
+.mm-button-danger {
+  border-color: var(--mm-danger);
+  background: var(--mm-danger);
+  color: #ffffff;
+}
+
+.mm-button-danger:hover {
+  border-color: var(--mm-danger-hover);
+  background: var(--mm-danger-hover);
+}
+
+/* Action destructrice hors d'une fenêtre : elle ne crie pas, elle se reconnaît. */
+.mm-button-danger-quiet {
+  color: var(--mm-danger);
+}
+
+.mm-button-danger-quiet:hover {
+  border-color: var(--mm-danger);
+  background: var(--mm-danger-soft);
+}
+
+/* Action d'une ligne (« Retirer », « Révoquer ») : discrète jusqu'au survol. */
+.mm-button-quiet {
+  min-height: 28px;
+  padding: 3px 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--mm-text-secondary);
+  font-size: 13px;
+}
+
+.mm-button-quiet:hover {
+  border-color: var(--mm-border);
+  background: #ffffff;
+  color: var(--mm-danger);
+}
+
+.mm-button-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mm-button-icon svg {
+  flex: none;
+}
+
 .mm-button:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* Liste de choix : discrète dans une ligne (le rôle d'un membre, comme le niveau d'accès
+   du menu Partager de la maquette), encadrée comme un champ dans un formulaire. */
+.mm-select {
+  flex: none;
+  appearance: none;
+  min-height: 28px;
+  padding: 3px 24px 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2366655f' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")
+    no-repeat right 7px center;
+  color: var(--mm-text-sidebar);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mm-select:hover:not(:disabled) {
+  background-color: var(--mm-surface);
+}
+
+.mm-select:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: 0;
+}
+
+.mm-select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.mm-select-boxed {
+  min-height: 36px;
+  padding: 7px 30px 7px 10px;
+  border-color: var(--mm-field-border);
+  background-color: #ffffff;
+  background-position: right 10px center;
+  color: var(--mm-text);
+  font-size: 14px;
+}
+
+.mm-select-boxed:hover:not(:disabled) {
+  background-color: #ffffff;
+}
+
+/* Lu par les lecteurs d'écran, invisible à l'écran. */
+.mm-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* Session : connexion et inscription, en page (sobres et centrées, comme chez Notion). */
@@ -730,6 +866,262 @@ button.tree-toggle:hover {
 .mm-dialog-actions .mm-button {
   min-height: 36px;
   padding: 6px 14px;
+}
+
+/* Page d'invitation : qui la rejoint, ou à quelle adresse elle a été faite. */
+.mm-invite-who {
+  font-weight: 500;
+  color: var(--mm-text);
+}
+
+/* Réglages de l'espace : une page de l'application, centrée comme une page, en sections
+   nettes (titre souligné d'un filet), comme les réglages de Notion. */
+
+.mm-settings {
+  width: 100%;
+  max-width: var(--mm-page-width);
+  margin: 0 auto;
+  padding: 48px var(--mm-page-inset) 96px;
+}
+
+.mm-settings-title {
+  margin: 0 0 6px;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: var(--mm-text-strong);
+}
+
+.mm-settings-lead {
+  margin: 0;
+  color: var(--mm-text-secondary);
+}
+
+.mm-settings-lead strong {
+  font-weight: 500;
+  color: var(--mm-text);
+}
+
+.mm-settings-section {
+  margin-top: 40px;
+}
+
+.mm-settings-heading {
+  margin: 0 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--mm-sidebar-border);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--mm-text-strong);
+}
+
+.mm-settings-heading-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--mm-sidebar-border);
+}
+
+.mm-settings-heading-row .mm-settings-heading {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mm-settings-count {
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-settings-subheading {
+  margin: 28px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mm-text-secondary);
+}
+
+.mm-settings-hint {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mm-settings-row .mm-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mm-settings-row-spread {
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.mm-settings-row-spread .mm-settings-hint {
+  margin: 0;
+}
+
+.mm-settings-row .mm-button {
+  min-height: 36px;
+}
+
+.mm-settings-value {
+  margin: 0;
+}
+
+.mm-settings-note {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--mm-accent);
+}
+
+.mm-settings-empty {
+  margin: 0;
+  padding: 8px 0;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-settings-actions {
+  margin: 12px 0 0;
+}
+
+.mm-settings .mm-form-error {
+  margin: 10px 0;
+}
+
+/* Membres et invitations : une ligne par personne (pastille, nom, adresse, rôle à droite). */
+
+.mm-people {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-person {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--mm-popover-divider);
+}
+
+.mm-person:last-child {
+  border-bottom: 0;
+}
+
+.mm-person-names {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.mm-person-name,
+.mm-person-detail {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mm-person-name {
+  font-weight: 500;
+  color: var(--mm-text);
+}
+
+.mm-person-you {
+  font-weight: 400;
+  color: var(--mm-text-secondary);
+}
+
+.mm-person-detail {
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+/* Le rôle, dans une colonne de largeur fixe : qu'il se change par une liste ou non, il
+   commence au même endroit sur chaque ligne (le texte d'une liste est à 9 px de son bord). */
+.mm-person .mm-select,
+.mm-person-role {
+  flex: none;
+  width: 124px;
+}
+
+.mm-person-role {
+  padding: 0 9px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-person-action {
+  flex: none;
+  width: 76px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.mm-person-tile {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--mm-surface);
+  color: var(--mm-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* L'invitation tout juste créée : son lien, à copier avant qu'il ne disparaisse. */
+.mm-invite-created {
+  margin-top: 16px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--mm-warning-border);
+  border-radius: 8px;
+  background: var(--mm-warning-soft);
+}
+
+.mm-invite-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 2px;
+  color: var(--mm-warning);
+}
+
+.mm-invite-warning svg {
+  flex: none;
+}
+
+.mm-invite-warning strong {
+  font-weight: 600;
+}
+
+.mm-invite-for {
+  margin: 0 0 12px 24px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-invite-link {
+  font-size: 13px;
+}
+
+.mm-invite-copy-error {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--mm-danger);
 }
 
 /* Éditeur BlockNote */
