@@ -22,6 +22,7 @@ import {
   signUpAccount,
   spaceSwitcher,
   unique,
+  UNKNOWN_ID,
 } from "./helpers";
 import { BASE_URL } from "./servers";
 
@@ -568,4 +569,39 @@ test("refusal_stays_when_its_section_goes", async ({ browser }) => {
   await expect(b.getByRole("alert")).not.toHaveText("");
   await expect(b.getByRole("main")).toContainText(space.name);
   expect((await firstSpace(aliceApi)).name).toBe(space.name);
+});
+
+test("space_left_meanwhile_is_the_same_not_found_screen", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const bruno = await signUpAccount(`Bruno ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  await joinSpace(aliceApi, space.id, bruno, "admin");
+  const brunoId = (await getMembers(aliceApi, space.id)).find((m) => m.email === bruno.email)!.userId;
+
+  // B a les réglages de l'espace de A ouverts ; A l'en retire. Sa prochaine action est
+  // refusée, et l'espace n'est plus là pour lui : l'écran d'un espace introuvable, avec son
+  // bouton, à la même adresse.
+  const b = await newUser(browser, bruno);
+  const missing = b.getByRole("heading", { name: "Espace introuvable", level: 1 });
+  await b.goto(settingsPath(space.id));
+  const field = b.getByRole("textbox", { name: "Nom de l'espace" });
+  await expect(field).toHaveValue(space.name);
+  expect((await aliceApi.delete(`/api/v1/spaces/${space.id}/members/${brunoId}`)).status()).toBe(204);
+  const own = await firstSpace(await apiAs(bruno));
+  await field.fill(`Renommé ${unique()}`);
+  await field.press("Enter");
+  await expect(missing).toBeVisible();
+  await expect(b).toHaveURL(`${BASE_URL}${settingsPath(space.id)}`);
+  const open = b.getByRole("main").getByRole("button", { name: `Ouvrir « ${own.name} »` });
+  await expect(open).toBeVisible();
+  const left = await b.getByRole("main").innerText();
+  expect(left).not.toContain(space.name);
+
+  // Mot pour mot l'écran d'un espace qui n'existe pas (R96) : il n'y en a qu'un.
+  await b.goto(`/s/${UNKNOWN_ID}/settings`);
+  await expect(missing).toBeVisible();
+  expect(await b.getByRole("main").innerText()).toBe(left);
+  await b.getByRole("main").getByRole("button", { name: `Ouvrir « ${own.name} »` }).click();
+  await expect(b).toHaveURL(`${BASE_URL}/s/${own.id}`);
 });

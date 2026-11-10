@@ -50,8 +50,8 @@ export function App() {
     refresh,
   });
   const spaceId = space?.id ?? null;
-  // Plus de rôle dans l'espace lu : la liste des espaces du compte est relue, et l'adresse
-  // mènera ailleurs.
+  // Plus de rôle dans l'espace lu : la liste des espaces du compte est relue. L'adresse
+  // reste, et l'écran dit l'espace introuvable (R96).
   const spaceGone = useCallback(() => void refresh().catch(() => {}), [refresh]);
   // Tant que le serveur n'a pas dit dans quel espace est la page ouverte, on ne sait pas quel
   // arbre lire. Une lecture qui échoue ne retire rien de l'écran : elle se dit en pied de

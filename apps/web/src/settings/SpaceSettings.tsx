@@ -37,6 +37,7 @@ import { FormError, messageOf, useDocumentTitle } from "../session/forms";
 import { useSession } from "../session/session";
 import { CreatedInvitation } from "../share/CreatedInvitation";
 import { invitationLink, LEVEL_LABELS, ROLE_LABELS } from "../share/levels";
+import { SpaceNotFound } from "../space/SpaceNotFound";
 import { Avatar } from "../ui/Avatar";
 import { Confirm } from "../ui/Confirm";
 import { isManager, mayRemove, rolesFor } from "./roles";
@@ -89,12 +90,21 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
     refresh().catch(() => {});
   }, [guest, reload, refresh]);
 
+  // Le compte n'a plus de rôle dans cet espace (on l'en a retiré pendant que ses réglages
+  // étaient ouverts) : la liste de ses espaces est relue, et l'écran est celui de tout espace
+  // introuvable (R96), sans rien de celui-ci.
+  const missing = load.name === "missing";
+  useEffect(() => {
+    if (missing) refresh().catch(() => {});
+  }, [missing, refresh]);
+  if (missing) {
+    return <SpaceNotFound first={me.spaces.find((s) => s.id !== spaceId) ?? null} />;
+  }
+
   const name = space?.name ?? "";
   const content =
     load.name === "loading" ? (
       <p className="mm-settings-lead">Chargement…</p>
-    ) : load.name === "missing" ? (
-      <p className="mm-settings-lead">Cet espace n'existe pas, ou tu n'en fais plus partie.</p>
     ) : load.name === "failed" ? (
       <>
         <FormError message={load.message} />
@@ -125,9 +135,7 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
         </span>
       </header>
       <div className="mm-settings">
-        <h1 className="mm-settings-title">
-          {load.name === "missing" ? "Espace introuvable" : "Réglages de l'espace"}
-        </h1>
+        <h1 className="mm-settings-title">Réglages de l'espace</h1>
         <FormError message={refusal} />
         {reloadError && (
           <div className="mm-settings-row mm-settings-reload">
