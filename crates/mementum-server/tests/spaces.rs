@@ -14,8 +14,8 @@ use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use common::{
-    Browser, Reply, TestApp, WAIT, all_logs, assert_french, exec_sql, query_i64, sync_url,
-    synced_as,
+    Browser, Logs, Reply, TestApp, WAIT, all_logs, assert_french, exec_sql, overtaken, query_i64,
+    sync_url, synced_as,
 };
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_server::SignupMode;
@@ -1234,6 +1234,115 @@ async fn access_cache_follows_rev() {
         .get(&members_uri(space))
         .await
         .assert_error(StatusCode::NOT_FOUND, "not_found");
+}
+
+/// Combien de membres de l'espace ont ce rôle, pour ce compte : 1 ou 0, lu en base.
+async fn has_role(t: &TestApp, space: Uuid, user: Uuid, role: &str) -> bool {
+    let sql = format!(
+        "SELECT COUNT(*) FROM members \
+         WHERE space_id = '{space}' AND user_id = '{user}' AND role = '{role}'"
+    );
+    query_i64(&t.db_path(), &sql).await == 1
+}
+
+async fn space_rev(t: &TestApp, space: Uuid) -> i64 {
+    let sql = format!("SELECT rev FROM spaces WHERE id = '{space}'");
+    query_i64(&t.db_path(), &sql).await
+}
+
+/// Le nombre de fois où une route de membres a relu les rôles et redécidé, d'après le journal
+/// du serveur : une ligne par écriture que le store a refusée.
+fn role_reprises(journal: &str) -> usize {
+    journal
+        .lines()
+        .filter(|line| line.contains("relit et redécide"))
+        .count()
+}
+
+/// Un changement de rôle ou un retrait dont la décision ne tient à aucune de ses trois
+/// tentatives répond `409 roles_changed`, sans rien écrire : c'est au client de réessayer.
+/// C'est la route qui traduit ce refus du store (`StoreError::Stale`) : il n'a pas de traduction
+/// générique.
+///
+/// Pour qu'elle ne tienne à aucune, sans dépendre d'un minutage, le test fait ce que le store ne
+/// fait jamais : il change un rôle en base sans incrémenter la révision de l'espace. Le cache
+/// des accès garde alors l'ancien rôle de l'appelant, et la route redécide chaque fois sur un
+/// rôle que la transaction ne retrouve pas, comme une requête prise de vitesse à chaque reprise.
+#[tokio::test]
+async fn member_change_overtaken_at_every_attempt_answers_roles_changed() {
+    let t = open_app().await;
+    let team = team(&t).await;
+    let (adam, tom, space) = (&team.adam, &team.tom, team.space);
+    // Le rôle d'Adam est en cache : admin.
+    assert_eq!(
+        role_of(&adam.browser, space, adam.id).await.as_deref(),
+        Some("admin")
+    );
+    // Il redevient membre, à l'insu du cache.
+    let demoted = format!(
+        "UPDATE members SET role = 'member' WHERE space_id = '{space}' AND user_id = '{}'",
+        adam.id
+    );
+    exec_sql(&t.db_path(), &demoted).await;
+    let rev = space_rev(&t, space).await;
+
+    let logs = Logs::capture();
+    let promote = adam
+        .browser
+        .patch(&member_uri(space, tom.id), json!({ "role": "admin" }))
+        .await;
+    let remove = adam.browser.delete(&member_uri(space, tom.id)).await;
+    let journal = logs.text();
+    drop(logs);
+
+    for reply in [&promote, &remove] {
+        let error = reply.assert_error(StatusCode::CONFLICT, "roles_changed");
+        assert_french(&error, &["rien n'a été modifié", "réessayer"]);
+    }
+    // Trois tentatives chacune : la première, puis deux reprises.
+    assert_eq!(role_reprises(&journal), 4, "journal : {journal}");
+    // Rien n'a été écrit.
+    assert!(has_role(&t, space, tom.id, "member").await);
+    assert_eq!(space_rev(&t, space).await, rev);
+}
+
+/// Une reprise qui finit par écrire. Olga, propriétaire, fait de Mona une admin ; pendant que
+/// sa requête attend pour écrire, Mona, jusque-là membre, devient invitée. Le store refuse
+/// l'écriture décidée sur le rôle qu'Olga avait lu ; la route relit, redécide (une propriétaire
+/// fait d'une invitée une admin), et écrit. Le journal porte le rôle d'avant relu dans la
+/// transaction : `guest`, pas `member`.
+#[tokio::test]
+async fn role_change_overtaken_once_is_redecided_and_written() {
+    let t = open_app().await;
+    let team = team(&t).await;
+    let (olga, mona, space) = (&team.olga, &team.mona, team.space);
+    let rev = space_rev(&t, space).await;
+
+    let demoted = format!(
+        "UPDATE members SET role = 'guest' WHERE space_id = '{space}' AND user_id = '{}'",
+        mona.id
+    );
+    let uri = member_uri(space, mona.id);
+    let request = olga.browser.patch(&uri, json!({ "role": "admin" }));
+    let race = overtaken(&t, space, request, &[demoted]).await;
+
+    // La requête a bien été prise de vitesse : une reprise, pas plus.
+    assert_eq!(
+        role_reprises(&race.journal),
+        1,
+        "journal : {}",
+        race.journal
+    );
+    race.reply.assert_status(StatusCode::OK);
+    assert_eq!(race.reply.json()["role"], "admin");
+    assert!(has_role(&t, space, mona.id, "admin").await);
+    assert!(
+        race.journal.contains("from=\"guest\"") && race.journal.contains("to=\"admin\""),
+        "journal : {}",
+        race.journal
+    );
+    // L'écriture concurrente, puis celle de la route.
+    assert_eq!(space_rev(&t, space).await, rev + 2);
 }
 
 /// Retirer un membre ou changer un rôle ferme les connexions de synchro des pages de cet

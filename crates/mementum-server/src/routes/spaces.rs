@@ -235,6 +235,7 @@ async fn change_role(
             }
             Err(StoreError::Stale | StoreError::NotFound) if retries < ROLE_RETRIES => {
                 retries += 1;
+                log_reprise(space_id, target, retries);
                 roles = read_roles(state, user, space_id, target, false).await?;
             }
             Err(e) => return Err(member_error(e)),
@@ -282,11 +283,23 @@ async fn remove(
             }
             Err(StoreError::Stale | StoreError::NotFound) if retries < ROLE_RETRIES => {
                 retries += 1;
+                log_reprise(space_id, target, retries);
                 roles = read_roles(state, user, space_id, target, leaving).await?;
             }
             Err(e) => return Err(member_error(e)),
         }
     }
+}
+
+/// Journal d'une reprise : le store a refusé l'écriture décidée sur les rôles lus (ils ont
+/// changé, ou la personne visée est partie), la route les relit et redécide.
+fn log_reprise(space_id: Uuid, target: Uuid, retries: usize) {
+    tracing::debug!(
+        space_id = %space_id,
+        member_id = %target,
+        retries,
+        "les rôles lus ne tenaient plus à l'écriture : la route les relit et redécide"
+    );
 }
 
 /// L'id d'un espace dans le chemin : illisible, l'espace n'existe pas.

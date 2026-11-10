@@ -319,6 +319,14 @@ impl IntoResponse for ApiError {
 impl From<StoreError> for ApiError {
     /// Les cas où `NotFound` vise autre chose que la page (parent, `afterId`)
     /// sont traités par les routes avant cette conversion.
+    ///
+    /// `Stale` n'a pas de traduction ici : il sert aux rôles, au parent d'une
+    /// page et au passage à la racine, et chaque route qui l'attend le traduit
+    /// elle-même, après ses reprises (`409 roles_changed` dans
+    /// `routes/spaces.rs`, `409 page_moved` dans `routes/pages.rs`). S'il
+    /// arrive jusqu'ici, une route a oublié de le faire : `500`, et le journal
+    /// le dit, plutôt qu'un « les rôles viennent de changer » pour un
+    /// déplacement.
     fn from(e: StoreError) -> ApiError {
         match e {
             StoreError::NotFound => ApiError::page_not_found(),
@@ -329,7 +337,11 @@ impl From<StoreError> for ApiError {
             ),
             StoreError::EmailTaken => ApiError::email_taken(),
             StoreError::LastOwner => ApiError::last_owner(),
-            StoreError::Stale => ApiError::roles_changed(),
+            StoreError::Stale => ApiError::internal(
+                &"StoreError::Stale est arrivé à la conversion générique : la route qui a \
+                  appelé le store devait le traduire elle-même (relire et redécider, puis \
+                  son propre `409`)",
+            ),
             StoreError::LastFullAccess => ApiError::last_full_access(),
             StoreError::Refused(why) => ApiError::share_refused(why),
             StoreError::ParentTrashed => ApiError::parent_trashed(),
@@ -471,7 +483,95 @@ fn rejection(status: StatusCode, code: ErrorCode, message: String) -> ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex, PoisonError};
+
     use super::*;
+
+    /// Ce que `work` journalise sur ce fil, avec ce qu'il rend.
+    fn logged<T>(work: impl FnOnce() -> T) -> (T, String) {
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || Buffer(writer.clone()))
+            .with_ansi(false)
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, work);
+        let journal = buffer.lock().unwrap_or_else(PoisonError::into_inner);
+        (value, String::from_utf8_lossy(&journal).into_owned())
+    }
+
+    /// `Stale` n'a pas de traduction générique : il dit « ce sur quoi l'appelant a décidé a
+    /// changé », pour les rôles, pour le parent d'une page et pour un passage à la racine, et
+    /// chaque route qui l'attend le traduit elle-même (`409 roles_changed`, `409 page_moved`).
+    /// Arrivé ici, c'est qu'une route l'a oublié : une erreur interne, et le journal le dit.
+    /// Avant, il devenait « les rôles viennent de changer », même pour un déplacement.
+    #[test]
+    fn stale_has_no_generic_translation() {
+        let (error, journal) = logged(|| ApiError::from(StoreError::Stale));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.body.error, ErrorCode::Internal);
+        assert_eq!(error.body.message, "erreur interne du serveur");
+        assert!(
+            journal.contains("ERROR") && journal.contains("StoreError::Stale"),
+            "une ligne `error` qui nomme la conversion oubliée : {journal}"
+        );
+        // Rien de la cause dans la réponse.
+        assert!(!error.body.message.contains("Stale"));
+    }
+
+    /// Les autres refus du store gardent leur traduction.
+    #[test]
+    fn other_store_refusals_keep_their_translation() {
+        let cases = [
+            (
+                StoreError::NotFound,
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+            ),
+            (StoreError::Cycle, StatusCode::CONFLICT, ErrorCode::Cycle),
+            (
+                StoreError::LastOwner,
+                StatusCode::CONFLICT,
+                ErrorCode::LastOwner,
+            ),
+            (
+                StoreError::LastFullAccess,
+                StatusCode::CONFLICT,
+                ErrorCode::LastFullAccess,
+            ),
+            (
+                StoreError::ParentTrashed,
+                StatusCode::CONFLICT,
+                ErrorCode::ParentTrashed,
+            ),
+            (
+                StoreError::NotTrashed,
+                StatusCode::CONFLICT,
+                ErrorCode::NotTrashed,
+            ),
+        ];
+        for (refusal, status, code) in cases {
+            let what = refusal.to_string();
+            let (error, journal) = logged(|| ApiError::from(refusal));
+            assert_eq!((error.status, error.body.error), (status, code), "{what}");
+            assert_eq!(journal, "", "{what} : rien au journal");
+        }
+    }
 
     /// `SyncError::Closed` ne s'obtient pas de bout en bout sans tricher :
     /// un acteur qui ne peut pas charger sa page répond l'erreur réelle au
