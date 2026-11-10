@@ -149,8 +149,11 @@ export function PageTree({
   const over = drag?.over ?? null;
   const overIndex = over === null ? -1 : rows.findIndex((row) => row.node.id === over.id);
   // Le trait d'insertion se dessine là où la page ira : « après » une page dépliée, c'est
-  // après ses sous-pages montrées, pas entre elle et la première.
-  const lineIndex = over?.zone === "after" ? subtreeEnd(rows, overIndex) : overIndex;
+  // après ses sous-pages montrées, pas entre elle et la première. La ligne visée a pu quitter
+  // l'arbre pendant le glisser (une relecture) : `overIndex` vaut alors -1, et il n'y a pas
+  // de trait.
+  const lineIndex =
+    overIndex >= 0 && over?.zone === "after" ? subtreeEnd(rows, overIndex) : overIndex;
 
   /** Le dernier élément de l'arbre où le pointeur est entré pendant un glisser. */
   const entered = useRef<EventTarget | null>(null);

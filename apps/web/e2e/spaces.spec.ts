@@ -921,6 +921,49 @@ test("drop_target_does_not_need_related_target", async ({ browser }) => {
   await expect(sidebarOf(p).locator(".is-dragging")).toHaveCount(0);
 });
 
+test("drop_line_goes_when_its_row_leaves", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  await createPage(api, { title: "Bravo" });
+  const c = await createPage(api, { title: "Charlie" });
+
+  const p = await newUser(browser, alice);
+  // L'horloge de la page est la nôtre : l'arbre ne se relit qu'après cinq secondes (R97).
+  await p.clock.install();
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  const line = sidebarOf(p).locator(".tree-drop-line");
+  const dataTransfer = await p.evaluateHandle(() => new DataTransfer());
+  /** Un événement du glisser sur la ligne `id`, le pointeur à `at` de sa hauteur. */
+  const fire = async (type: string, id: string, at = 0.5) => {
+    const box = (await treeRow(p, id).boundingBox())!;
+    await treeRow(p, id).dispatchEvent(type, {
+      dataTransfer,
+      clientX: box.x + 80,
+      clientY: box.y + box.height * at,
+    });
+  };
+
+  // « Charlie » est tenue sur le bord bas d'« Alpha » : un trait, sous « Alpha ».
+  await fire("dragstart", c.id);
+  await fire("dragenter", a.id, 0.95);
+  await expect(line).toHaveCount(1);
+
+  // Ailleurs, « Alpha » part à la corbeille ; l'onglet reprend le focus, l'arbre est relu : la
+  // ligne visée n'est plus là.
+  expect((await api.post(`/api/v1/pages/${a.id}/trash`)).status()).toBe(200);
+  await p.clock.fastForward(5_500);
+  await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+  // Le trait part avec elle, et rien d'autre : la barre latérale est toujours là.
+  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "1 Charlie"]);
+  await expect(line).toHaveCount(0);
+  await expect(treeRow(p, c.id)).toHaveClass(/is-dragging/);
+  await fire("dragend", c.id);
+  await expect(sidebarOf(p).locator(".is-dragging")).toHaveCount(0);
+});
+
 test("row_actions_are_always_shown_without_hover", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);
