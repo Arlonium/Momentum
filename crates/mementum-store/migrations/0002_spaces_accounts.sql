@@ -90,8 +90,8 @@ CREATE TABLE invitations (
     -- `NULL` : invitation dans l'espace (`grant_role`) ; sinon sur cette page (`grant_level`).
     node_id     TEXT REFERENCES nodes_new(id) ON DELETE CASCADE,
     email       TEXT NOT NULL,
-    grant_role  TEXT,
-    grant_level TEXT,
+    grant_role  TEXT CHECK (grant_role IS NULL OR grant_role IN ('owner','admin','member','guest')),
+    grant_level TEXT CHECK (grant_level IS NULL OR grant_level IN ('read','comment','edit','full')),
     -- SHA-256 du jeton : le jeton lui-même n'est jamais stocké.
     token_hash  BLOB UNIQUE NOT NULL,
     created_by  TEXT NOT NULL REFERENCES users(id),

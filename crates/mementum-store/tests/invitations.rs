@@ -7,11 +7,12 @@ mod common;
 use std::slice;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use common::{account, break_table, fresh, int, page, repair};
+use common::{account, break_table, fresh, int, page, repair, side_pool};
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_store::{
     Invitation, InvitationGrant, NewInvitation, NewNode, Node, Space, Store, StoreError,
 };
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 const DAY: i64 = 86_400_000;
@@ -91,6 +92,85 @@ async fn lines_of(store: &Store, space: &Space, user: Uuid) -> Vec<(Uuid, Level)
         .filter(|(_, g)| g.subject == Subject::User(user))
         .map(|(node, g)| (node, g.level))
         .collect()
+}
+
+/// Écrit une invitation en SQL direct, sans passer par le store.
+async fn insert_invitation(
+    pool: &SqlitePool,
+    (space, node): (Uuid, Option<Uuid>),
+    (role, level): (Option<&str>, Option<&str>),
+    by: Uuid,
+    token: u8,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO invitations (id, space_id, node_id, email, grant_role, grant_level, \
+                                  token_hash, created_by, created_at, expires_at) \
+         VALUES (?, ?, ?, 'x@exemple.test', ?, ?, ?, ?, 1, ?)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(space.to_string())
+    .bind(node.map(|n| n.to_string()))
+    .bind(role)
+    .bind(level)
+    .bind(&[token; 32][..])
+    .bind(by.to_string())
+    .bind(i64::MAX)
+    .execute(pool)
+    .await
+    .map(drop)
+}
+
+/// Le schéma refuse un rôle ou un niveau inconnu dans une invitation, comme dans `members` et
+/// `acl` : sinon une valeur fausse n'échouerait qu'à l'acceptation.
+#[tokio::test]
+async fn invitation_grant_values_are_checked() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let p = space_page(store, &f.space, None, "P").await;
+    let (to_space, to_page) = ((f.space.id, None), (f.space.id, Some(p.id)));
+    let pool = side_pool(&f.db).await;
+
+    for (target, grant) in [
+        (to_space, (Some("superadmin"), None)),
+        (to_space, (Some("Member"), None)),
+        (to_space, (Some(""), None)),
+        (to_page, (None, Some("admin"))),
+        (to_page, (None, Some("Edit"))),
+    ] {
+        let r = insert_invitation(&pool, target, grant, olga.id, 1).await;
+        assert!(
+            matches!(&r, Err(sqlx::Error::Database(e)) if e.is_check_violation()),
+            "{grant:?} : {r:?}"
+        );
+    }
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM invitations").await, 0);
+
+    // Les formes que le store écrit passent, et se relisent.
+    insert_invitation(&pool, to_space, (Some("member"), None), olga.id, 1)
+        .await
+        .unwrap();
+    insert_invitation(&pool, to_page, (None, Some("edit")), olga.id, 2)
+        .await
+        .unwrap();
+    pool.close().await;
+    let grants: Vec<_> = store
+        .pending_invitations(f.space.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| i.grant)
+        .collect();
+    assert_eq!(
+        grants,
+        [
+            InvitationGrant::Space(Role::Member),
+            InvitationGrant::Page {
+                node_id: p.id,
+                level: Level::Edit
+            }
+        ]
+    );
 }
 
 #[tokio::test]
