@@ -89,6 +89,8 @@ function radio(name: string): HTMLInputElement {
 const invited = () => radio("Seulement les invités");
 const members = () => radio("Tous les membres de l'espace");
 const confirmation = () => host.querySelector<HTMLDialogElement>('dialog[role="alertdialog"]');
+/** Le texte de la fenêtre de confirmation, sous son titre. */
+const lead = (dialog: Element) => dialog.querySelector(".mm-dialog-lead")?.textContent ?? "";
 const button = (within: Element, name: string) => {
   const found = [...within.querySelectorAll("button")].find((b) => b.textContent === name);
   if (!found) throw new Error(`pas de bouton « ${name} »`);
@@ -103,8 +105,9 @@ test("closing_a_page_to_members_asks_first", async () => {
   // le choix reste où il était.
   const dialog = confirmation()!;
   expect(dialog.querySelector("h2")?.textContent).toBe("Fermer cette page aux membres\u00a0?");
-  expect(dialog.textContent).toContain(
-    "Les autres membres de l'espace ne la verront plus, ni ses sous-pages. Tu y gardes l'accès complet, avec les personnes nommées ci-dessus.",
+  // Personne n'est nommé sur cette page : le texte ne renvoie à personne.
+  expect(lead(dialog)).toBe(
+    "Les autres membres de l'espace ne la verront plus, ni ses sous-pages. Tu y gardes l'accès complet.",
   );
   expect([...dialog.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
     "Annuler",
@@ -115,6 +118,31 @@ test("closing_a_page_to_members_asks_first", async () => {
   expect(document.activeElement).toBe(button(dialog, "Annuler"));
   expect(setGeneralAccess).not.toHaveBeenCalled();
   expect(members().checked).toBe(true);
+});
+
+test("confirmation_mentions_the_people_named_only_when_there_are_others", async () => {
+  const bruno: AccessEntry = { ...own, userId: "bruno", name: "Bruno", email: "bruno@exemple.fr" };
+  const alone = "Tu y gardes l'accès complet.";
+  const withOthers = "Tu y gardes l'accès complet, avec les personnes nommées ci-dessus.";
+  // Seule la personne connectée est nommée : « les personnes nommées ci-dessus » ne renverrait
+  // qu'à elle.
+  await opened(access({ entries: [own] }));
+  await click(invited());
+  expect(lead(confirmation()!).endsWith(` ${alone}`)).toBe(true);
+  await click(button(confirmation()!, "Annuler"));
+  await act(async () => root.unmount());
+
+  // Quelqu'un d'autre est nommé, avec elle ou sans elle : il garde son accès, et le texte le
+  // dit.
+  for (const entries of [[own, bruno], [bruno]]) {
+    root = createRoot(host);
+    await opened(access({ entries }));
+    await click(invited());
+    expect(lead(confirmation()!).endsWith(` ${withOthers}`)).toBe(true);
+    await click(button(confirmation()!, "Annuler"));
+    await act(async () => root.unmount());
+  }
+  root = createRoot(host);
 });
 
 test("cancelling_leaves_the_page_open_to_members", async () => {

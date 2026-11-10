@@ -25,6 +25,7 @@ import {
   ownerAndMember,
   pageIdOf,
   sectionOf,
+  setPageLevel,
   shareMenu,
   sidebarOf,
   titleOf,
@@ -96,9 +97,11 @@ test("team_page_becomes_private_from_the_share_menu", async ({ browser }) => {
   // que cela change pour les autres et pour lui.
   await invited.click();
   const confirm = closingConfirm(b);
+  // Personne n'est nommé sur la page : le texte ne renvoie à personne d'autre.
   await expect(confirm).toContainText(
-    "Les autres membres de l'espace ne la verront plus, ni ses sous-pages. Tu y gardes l'accès complet, avec les personnes nommées ci-dessus.",
+    "Les autres membres de l'espace ne la verront plus, ni ses sous-pages. Tu y gardes l'accès complet.",
   );
+  await expect(confirm).not.toContainText("personnes nommées");
   await expect(members).toBeChecked();
   // Il confirme : aucun message d'erreur, le choix est coché, et le menu reste ouvert sur la
   // page.
@@ -149,8 +152,10 @@ test("team_page_becomes_private_from_the_share_menu", async ({ browser }) => {
 });
 
 test("closing_a_team_page_to_members_can_be_cancelled", async ({ browser }) => {
-  const { alice, aliceApi, space, brunoApi } = await ownerAndMember();
+  const { alice, aliceApi, space, brunoApi, brunoId } = await ownerAndMember();
   const team = await createPage(aliceApi, { title: `Équipe ${unique()}` });
+  // Bruno y est aussi nommé : il garderait son accès, la page fermée aux membres.
+  await setPageLevel(aliceApi, team.id, brunoId, "edit");
   const seenByBruno = async () =>
     (await getTree(brunoApi, space.id)).nodes.filter((n) => n.id === team.id).map((n) => n.section);
   const a = await openPage(browser, team.id, alice);
@@ -175,6 +180,10 @@ test("closing_a_team_page_to_members_can_be_cancelled", async ({ browser }) => {
   await invited.click();
   await expect(confirm.getByRole("button", { name: "Annuler" })).toBeFocused();
   await expect(confirm.getByRole("button", { name: "Fermer aux membres" })).toBeVisible();
+  // Quelqu'un d'autre est nommé sur la page : le texte le dit.
+  await expect(confirm).toContainText(
+    "Tu y gardes l'accès complet, avec les personnes nommées ci-dessus.",
+  );
   await a.keyboard.press("Enter");
   await stillOpenToMembers();
   // « Annuler » au clic, puis Échap : de même, et Échap ne ferme que la fenêtre, pas le menu.

@@ -101,6 +101,9 @@ export function ShareMenu({ node, onChanged, onAccessLost }: Props) {
     [onAccessLost],
   );
   const share = useShare(node.id, open, { onChanged, onAccessLost: lost });
+  /** Quelqu'un d'autre que la personne connectée est nommé sur la page. */
+  const self = useSession().me.user.id;
+  const othersNamed = share.access?.entries.some((entry) => entry.userId !== self) ?? false;
 
   // Un clic hors du menu le ferme. Le focus revient au bouton, sauf si le clic l'a posé
   // ailleurs (dans la page, par exemple) : on ne le lui reprend pas.
@@ -186,7 +189,9 @@ export function ShareMenu({ node, onChanged, onAccessLost }: Props) {
           onCancel={() => setClosing(false)}
         >
           Les autres membres de l'espace ne la verront plus, ni ses sous-pages. Tu y gardes
-          l'accès complet, avec les personnes nommées ci-dessus.
+          l'accès complet
+          {/* « Ci-dessus » ne renvoie à quelqu'un que si une autre personne est nommée. */}
+          {othersNamed ? ", avec les personnes nommées ci-dessus." : "."}
         </Confirm>
       )}
     </div>
