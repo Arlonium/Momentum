@@ -33,7 +33,7 @@ use yrs::updates::encoder::Encode;
 
 use crate::hub::Hub;
 use crate::protocol::{self, ClientMessage, EMPTY_UPDATE};
-use crate::{SyncConfig, SyncError};
+use crate::{SyncConfig, SyncError, presence};
 
 /// Identifiant d'une connexion, propre à l'acteur.
 pub(crate) type ConnId = u64;
@@ -44,10 +44,6 @@ pub(crate) type Commands = UnboundedSender<Command>;
 /// États d'awareness qu'une connexion peut tenir (un onglet n'en a qu'un) :
 /// au-delà, son message d'awareness est refusé et la connexion fermée.
 const MAX_AWARENESS_CLIENTS: usize = 8;
-
-/// Taille maximale d'un état d'awareness (JSON) : un message qui en porte un
-/// plus gros est ignoré, ni gardé ni relayé (Ruling R27).
-const MAX_AWARENESS_STATE: usize = 64 * 1024;
 
 /// L'état (JSON) d'une entrée d'awareness qui retire celui du client.
 const AWARENESS_REMOVED: &str = "null";
@@ -721,8 +717,8 @@ impl Actor {
                         return Ok(Outcome::Close);
                     }
                 }
-                ClientMessage::Awareness { update, raw } => {
-                    if !self.awareness_update(conn, update, &raw) {
+                ClientMessage::Awareness(update) => {
+                    if !self.awareness_update(conn, update) {
                         return Ok(Outcome::Close);
                     }
                 }
@@ -788,26 +784,30 @@ impl Actor {
         Ok(true)
     }
 
-    /// Message d'awareness d'une connexion : chaque entrée est gardée ou ignorée d'après le
-    /// compte qui tient son client (Ruling R101, [`presence_rule`]), **avant** d'être appliquée.
-    /// Un état porte une horloge par client, et seule une horloge plus haute le remplace :
-    /// appliquer puis défaire laisserait l'horloge de l'intrus, que le titulaire ne rattraperait
-    /// pas. Ce qui reste du message est appliqué, puis relayé aux autres connexions.
-    /// `false` : la connexion est à fermer.
-    fn awareness_update(&mut self, conn: ConnId, mut update: AwarenessUpdate, raw: &[u8]) -> bool {
-        if update
-            .clients
-            .values()
-            .any(|entry| entry.json.len() > MAX_AWARENESS_STATE)
-        {
-            tracing::warn!(node_id = %self.id.node_id, conn, "état d'awareness de plus de 64 Kio : ignoré");
-            return true;
-        }
-        let Some(account) = self.conns.get(&conn).map(|c| c.actor) else {
+    /// Message d'awareness d'une connexion : chaque entrée est gardée ou ignorée, **avant**
+    /// d'être appliquée. Un état porte une horloge par client, et seule une horloge plus haute
+    /// le remplace : appliquer puis défaire laisserait l'horloge de l'intrus, que le titulaire
+    /// ne rattraperait pas. `false` : la connexion est à fermer.
+    ///
+    /// - Ruling R118 : d'une connexion en lecture seule, rien n'est gardé. Le client officiel
+    ///   n'annonce rien en lecture seule, et ce qu'il renvoie des autres serait ignoré de toute
+    ///   façon. Elle continue de recevoir la présence des autres.
+    /// - Ruling R119 : un état qui n'a pas la forme connue ([`presence::known_shape`]) est
+    ///   ignoré ; il ne donne pas son client.
+    /// - Rulings R101, R104, R108, R112 : le compte qui tient le client ([`presence_rule`]).
+    /// - Ruling R123 : ce qui reste est appliqué, puis relayé aux autres connexions, réencodé.
+    ///   Jamais les octets reçus : ce que les clients lisent est ce qui a été lu, vérifié et
+    ///   gardé ici, une entrée par client, chaque état réécrit par le vérificateur.
+    fn awareness_update(&mut self, conn: ConnId, mut update: AwarenessUpdate) -> bool {
+        let Some((writable, account)) = self.conns.get(&conn).map(|c| (c.writable, c.actor)) else {
             return false;
         };
+        if !writable {
+            return true;
+        }
         // Les entrées ignorées le sont en silence : un client honnête en envoie sans cesse.
-        let received = update.clients.len();
+        // Celles d'une forme inconnue sont comptées : aucun client honnête n'en envoie.
+        let mut unknown_shapes = 0usize;
         let mut taken = Vec::new();
         update.clients.retain(|client, entry| {
             // Ruling R108 : une entrée à la dernière horloge est ignorée, quoi qu'elle porte.
@@ -816,6 +816,15 @@ impl Actor {
                 return false;
             }
             let removal = entry.json.as_ref() == AWARENESS_REMOVED;
+            if !removal {
+                // Ruling R119 : la forme d'abord. L'état gardé est celui que le vérificateur
+                // a réécrit.
+                let Some(known) = presence::known_shape(&entry.json) else {
+                    unknown_shapes += 1;
+                    return false;
+                };
+                entry.json = known.into();
+            }
             // Ce que le serveur sait de ce client : l'horloge de son dernier état, ou de son
             // retrait.
             let known = self.awareness.meta(*client).map(|(clock, _)| clock);
@@ -829,6 +838,14 @@ impl Actor {
                 }
             }
         });
+        if unknown_shapes > 0 {
+            tracing::debug!(
+                node_id = %self.id.node_id,
+                conn,
+                entries = unknown_shapes,
+                "états de présence d'une forme inconnue : ignorés"
+            );
+        }
         if update.clients.is_empty() {
             return true;
         }
@@ -841,17 +858,13 @@ impl Actor {
             return false;
         }
         c.clients.extend(taken);
-        // Tel que reçu si rien n'en a été retiré ; sinon, les seules entrées gardées.
-        let kept = (update.clients.len() < received).then(|| update.encode_v1());
+        // Ruling R123 : ce qui est relayé est ce qui a été gardé, réencodé ici.
+        let kept = protocol::awareness(&update.encode_v1());
         if let Err(error) = self.awareness.apply_update(update) {
             tracing::warn!(node_id = %self.id.node_id, conn, %error, "awareness refusée : connexion fermée");
             return false;
         }
-        // Relayée même pour un client en lecture seule : ce n'est pas du contenu.
-        self.broadcast(
-            Some(conn),
-            protocol::awareness(kept.as_deref().unwrap_or(raw)),
-        );
+        self.broadcast(Some(conn), kept);
         true
     }
 

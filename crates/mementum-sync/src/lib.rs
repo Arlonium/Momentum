@@ -38,9 +38,20 @@
 //!   la page est supprimée, [`Hub::forget`] arrête son acteur sans rien
 //!   écrire ;
 //! - **présence** (awareness, Ruling R101) : relayée à tous, lecteurs
-//!   compris, sans être vérifiée (un client annonce le nom qu'il veut pour
-//!   lui-même). Mais un `ClientID` appartient au compte de la première
-//!   connexion inscrite qui l'annonce, jusqu'à son départ : une entrée qui
+//!   compris. Le nom n'est pas vérifié (un client annonce celui qu'il veut
+//!   pour lui-même), mais seule une connexion qui écrit en annonce : rien de
+//!   ce qu'envoie une connexion en lecture seule n'est gardé (Ruling R118).
+//!   Un état n'est gardé et relayé que s'il a la forme de ceux que le client
+//!   écrit : un nom, une couleur à six chiffres, un curseur que Yjs sait lire,
+//!   2 Kio au plus (Ruling R119, module `presence`). Le client pose la
+//!   couleur dans un attribut `style` et décode le curseur sans garde : une
+//!   couleur piégée était du CSS chez tous, et un curseur mal formé figeait
+//!   leur éditeur, qui récrivait ensuite le document par-dessus les frappes
+//!   des autres. Et le serveur ne relaie jamais les octets reçus : il réencode
+//!   ce qu'il a lu et gardé, une entrée par client (Ruling R123), parce qu'il
+//!   ne lit pas ces octets comme les clients les lisent. Un `ClientID`
+//!   appartient au compte de la première connexion inscrite qui l'annonce,
+//!   jusqu'à son départ : une entrée qui
 //!   vise le client d'un autre compte est ignorée avant d'être appliquée,
 //!   sans fermer la connexion (y-websocket renvoie au serveur les états des
 //!   autres) ; le même compte le reprend d'une connexion à l'autre. Un client
@@ -69,7 +80,7 @@
 //! - **bornes mémoire** (Ruling R27) : un message reçu ne dépasse pas
 //!   `max_message_bytes`, la file d'une connexion ni `max_queue_bytes` ni
 //!   `broadcast_capacity` messages, les diffusions sont partagées entre les
-//!   files, un état d'awareness ne dépasse pas 64 Kio ;
+//!   files, un état d'awareness ne dépasse pas 2 Kio (Ruling R119) ;
 //! - une page **sans document** reçoit le sien au premier chargement de son
 //!   acteur (Ruling R28).
 //!
@@ -78,6 +89,7 @@
 
 mod actor;
 mod hub;
+mod presence;
 mod protocol;
 #[cfg(feature = "testkit")]
 pub mod testkit;

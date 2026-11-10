@@ -573,15 +573,19 @@ async fn oversized_awareness_is_ignored() {
     let w = f.client().await;
     let a_id = a.client_id();
 
-    // Un état de plus de 64 Kio : ni gardé, ni relayé, sans fermer la connexion.
-    a.set_awareness(&format!(r#"{{"pad":"{}"}}"#, "x".repeat(70 * 1024)));
+    // Un état de plus de 2 Kio (Ruling R119), ici 70 Kio : ni gardé, ni relayé, sans fermer la
+    // connexion.
+    a.set_awareness(&format!(
+        r#"{{"user":{{"name":"A"}}{}}}"#,
+        " ".repeat(70 * 1024)
+    ));
     a.resync();
     assert!(a.wait_until(WAIT, |c| c.step2_count() >= 2).await);
     assert!(!a.is_closed());
 
     // Les diffusions arrivent dans l'ordre : l'état de W arrive après celui
     // de A, s'il avait été relayé.
-    w.set_awareness(r#"{"user":"W"}"#);
+    w.set_awareness(r#"{"user":{"name":"W"}}"#);
     let w_id = w.client_id();
     assert!(
         b.wait_until(WAIT, |c| c.awareness_states().contains_key(&w_id))
@@ -633,7 +637,7 @@ async fn quiet_connection(
     MemorySocket,
 ) {
     let other = f.client().await;
-    other.set_awareness(r#"{"user":"autre"}"#);
+    other.set_awareness(r#"{"user":{"name":"autre"}}"#);
     other.resync();
     assert!(other.wait_until(WAIT, |c| c.step2_count() >= 2).await);
     let (server_end, mut client_end) = memory_socket(64);

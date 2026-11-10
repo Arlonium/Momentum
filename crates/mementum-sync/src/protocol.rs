@@ -22,6 +22,17 @@
 //! d'awareness n'est pas illisible : ses messages d'awareness sont ignorés,
 //! sans qu'aucune de leurs entrées soit confiée à l'acteur, et le reste est
 //! rendu comme d'habitude ([`Decoded`], Ruling R113).
+//!
+//! Une mise à jour d'awareness est lue comme la lisent les clients (Ruling
+//! R123). yrs lit un entier variable en laissant tomber les bits qui ne
+//! tiennent pas dans son type ; lib0, chez les clients, les garde : les octets
+//! `81 80 80 80 10` valent 1 pour l'un et 2^32 + 1 pour l'autre. Lu ainsi, un
+//! nombre d'entrées laissait passer, derrière la seule entrée que le serveur
+//! regardait, une entrée pour le client de n'importe qui. Les entiers d'une
+//! mise à jour d'awareness sont donc lus sans rien laisser tomber
+//! ([`read_exact_var`]), et un tampon où il reste des octets après les entrées
+//! annoncées est illisible. Et le serveur ne relaie jamais ces octets : il
+//! réencode ce qu'il a lu et gardé (`actor.rs`).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -45,7 +56,7 @@ const SYNC_UPDATE: u8 = 2;
 const PERMISSION_DENIED: u8 = 0;
 
 /// Plus grand identifiant de client Yjs (53 bits, sûr en JavaScript).
-const MAX_CLIENT: u64 = (1 << 53) - 1;
+pub(crate) const MAX_CLIENT: u64 = (1 << 53) - 1;
 
 /// Entrées d'awareness qu'un message WebSocket peut porter, tous ses messages
 /// d'awareness comptés ensemble (Ruling R113) : au-delà, aucune n'est traitée
@@ -85,11 +96,9 @@ pub(crate) enum ClientMessage {
     SyncStep1(Vec<u8>),
     /// Étape 2 ou mise à jour : une mise à jour Yjs (v1), pas encore lue.
     Update(Vec<u8>),
-    /// Awareness : la mise à jour lue, et ses octets tels quels pour la relayer.
-    Awareness {
-        update: AwarenessUpdate,
-        raw: Vec<u8>,
-    },
+    /// Awareness : la mise à jour lue. Ses octets ne sont pas gardés : ce qui
+    /// est relayé est réencodé d'après elle (Ruling R123).
+    Awareness(AwarenessUpdate),
     /// Demande de tous les états d'awareness.
     AwarenessQuery,
 }
@@ -150,10 +159,7 @@ pub(crate) fn decode(data: &[u8]) -> Result<Decoded, ProtocolError> {
                 presence_entries += entries;
                 // Au-delà de la limite, les entrées ne sont pas même lues.
                 if presence_entries <= MAX_PRESENCE_ENTRIES {
-                    messages.push(ClientMessage::Awareness {
-                        update: awareness_entries(first, entries)?,
-                        raw: payload.to_vec(),
-                    });
+                    messages.push(ClientMessage::Awareness(awareness_entries(first, entries)?));
                 }
             }
             MSG_AUTH => {
@@ -169,7 +175,7 @@ pub(crate) fn decode(data: &[u8]) -> Result<Decoded, ProtocolError> {
     }
     let presence_dropped = (presence_entries > MAX_PRESENCE_ENTRIES).then(|| {
         // Tous : ceux qui ont été lus avant que la limite soit dépassée aussi.
-        messages.retain(|message| !matches!(message, ClientMessage::Awareness { .. }));
+        messages.retain(|message| !matches!(message, ClientMessage::Awareness(_)));
         presence_entries
     });
     Ok(Decoded {
@@ -199,12 +205,32 @@ fn check_state_vector(payload: &[u8]) -> Result<(), ProtocolError> {
 /// première entrée : aucune n'est lue.
 fn awareness_header(payload: &[u8]) -> Result<(usize, Cursor<'_>), ProtocolError> {
     let mut cursor = Cursor::new(payload);
-    let entries: u32 = cursor.read_var()?;
+    let entries = read_exact_var(&mut cursor)?;
     // Une entrée tient sur 3 octets au moins.
-    if entries as usize > payload.len() / 3 {
+    if entries > (payload.len() / 3) as u64 {
         return Err(ProtocolError);
     }
     Ok((entries as usize, cursor))
+}
+
+/// Un entier variable de lib0 (7 bits par octet, poids faibles d'abord), lu
+/// sans rien laisser tomber : s'il ne tient pas dans 64 bits, il est
+/// illisible. `Read::read_var` de yrs, lui, tronque (Ruling R123).
+fn read_exact_var(cursor: &mut Cursor<'_>) -> Result<u64, ProtocolError> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = cursor.read_u8()?;
+        let bits = u64::from(byte & 0x7F);
+        if shift >= u64::BITS || (bits << shift) >> shift != bits {
+            return Err(ProtocolError);
+        }
+        value |= bits << shift;
+        if byte < 0x80 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
 }
 
 /// Les `entries` entrées d'une mise à jour d'awareness, que `cursor` va lire
@@ -215,17 +241,28 @@ fn awareness_entries(
 ) -> Result<AwarenessUpdate, ProtocolError> {
     let mut clients = HashMap::new();
     for _ in 0..entries {
-        let client = read_client(&mut cursor)?;
-        let clock: u32 = cursor.read_var()?;
-        let json = cursor.read_string()?;
+        let client = read_exact_var(&mut cursor)?;
+        if client > MAX_CLIENT {
+            return Err(ProtocolError);
+        }
+        let clock = u32::try_from(read_exact_var(&mut cursor)?).map_err(|_| ProtocolError)?;
+        let length = usize::try_from(read_exact_var(&mut cursor)?).map_err(|_| ProtocolError)?;
+        let json = std::str::from_utf8(cursor.read_exact(length)?).map_err(|_| ProtocolError)?;
         serde_json::from_str::<serde_json::Value>(json).map_err(|_| ProtocolError)?;
+        // Un client répété : la dernière entrée fait foi. C'est elle seule qui sera
+        // regardée, gardée et relayée ; les clients ne voient jamais l'autre.
         clients.insert(
-            client,
+            ClientID::new(client),
             AwarenessUpdateEntry {
                 clock,
                 json: json.into(),
             },
         );
+    }
+    // Les entrées annoncées doivent épuiser le tampon : ce qui suivrait ne serait lu par
+    // personne ici, et un client qui compterait autrement y trouverait d'autres entrées.
+    if cursor.has_content() {
+        return Err(ProtocolError);
     }
     Ok(AwarenessUpdate { clients })
 }
@@ -334,10 +371,7 @@ mod tests {
                 ClientMessage::SyncStep1(sv.encode_v1()),
                 ClientMessage::Update(update.clone()),
                 ClientMessage::Update(update),
-                ClientMessage::Awareness {
-                    update: aw.clone(),
-                    raw: aw.encode_v1(),
-                },
+                ClientMessage::Awareness(aw.clone()),
                 ClientMessage::AwarenessQuery,
             ]
         );
@@ -424,13 +458,7 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(read, vec![Message::Awareness(empty.clone())]);
-        assert_eq!(
-            messages(&message),
-            vec![ClientMessage::Awareness {
-                update: empty,
-                raw: vec![0],
-            }]
-        );
+        assert_eq!(messages(&message), vec![ClientMessage::Awareness(empty)]);
     }
 
     /// Un message d'awareness de `count` entrées, pour les clients `first` et
@@ -457,7 +485,7 @@ mod tests {
             .messages
             .iter()
             .filter_map(|message| match message {
-                ClientMessage::Awareness { update, .. } => Some(update.clients.len()),
+                ClientMessage::Awareness(update) => Some(update.clients.len()),
                 _ => None,
             })
             .collect();
@@ -528,6 +556,119 @@ mod tests {
         );
         assert_eq!(decode(&garbage(512)), Err(ProtocolError));
         assert_eq!(decode(&[1, 3, 0xFF, 0xFF, 0x0F]), Err(ProtocolError));
+    }
+
+    /// Une entrée d'awareness, écrite à la main.
+    fn entry(client: u64, clock: u32, json: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.write_var(client);
+        bytes.write_var(clock);
+        bytes.write_string(json);
+        bytes
+    }
+
+    /// Un message d'awareness dont le tampon est `count`, écrit tel quel, puis `entries`.
+    fn framed(count: &[u8], entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut payload = count.to_vec();
+        payload.extend(entries.concat());
+        awareness(&payload)
+    }
+
+    /// Ce que le message donne : `(client, horloge, état)` de chaque entrée gardée.
+    fn entries_of(data: &[u8]) -> Vec<(u64, u32, String)> {
+        let mut read: Vec<(u64, u32, String)> = messages(data)
+            .into_iter()
+            .flat_map(|message| match message {
+                ClientMessage::Awareness(update) => update.clients,
+                other => panic!("{other:?}"),
+            })
+            .map(|(client, entry)| (client.get(), entry.clock, entry.json.to_string()))
+            .collect();
+        read.sort();
+        read
+    }
+
+    /// Ruling R123 : le nombre d'entrées est lu comme le lisent les clients. Les octets
+    /// `81 80 80 80 10` valent 2^32 + 1 pour lib0, et 1 pour le lecteur de yrs, qui laisse
+    /// tomber le 33e bit : derrière l'entrée que le serveur regardait, il en passait une
+    /// autre, pour le client de n'importe qui.
+    #[test]
+    fn entry_count_beyond_32_bits_is_illegible() {
+        let own = entry(7, 1, "{}");
+        let forged = entry(42, 1_000_000, r#"{"user":{"name":"Alice (faux)"}}"#);
+        let beyond = [0x81, 0x80, 0x80, 0x80, 0x10];
+        // Ce que le lecteur de yrs en fait : la raison de ce test.
+        assert_eq!(Cursor::new(&beyond).read_var::<u32>().ok(), Some(1));
+        assert_eq!(
+            decode(&framed(&beyond, &[own.clone(), forged])),
+            Err(ProtocolError)
+        );
+        assert_eq!(
+            decode(&framed(&beyond, std::slice::from_ref(&own))),
+            Err(ProtocolError)
+        );
+        // Un nombre qui ne tient dans aucun entier : illisible aussi, jamais tronqué.
+        let endless = [
+            0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01,
+        ];
+        assert_eq!(
+            decode(&framed(&endless, std::slice::from_ref(&own))),
+            Err(ProtocolError)
+        );
+        // Le même nombre écrit sur plus d'octets qu'il n'en faut vaut pareil pour tous.
+        assert_eq!(
+            entries_of(&framed(&[0x81, 0x00], std::slice::from_ref(&own))),
+            [(7, 1, "{}".to_string())]
+        );
+        assert_eq!(
+            entries_of(&framed(&[1], &[own])),
+            [(7, 1, "{}".to_string())]
+        );
+    }
+
+    /// Ruling R123 : les entrées annoncées épuisent le tampon. Ce qui suivrait ne serait lu
+    /// par personne ici.
+    #[test]
+    fn trailing_bytes_after_the_entries_are_illegible() {
+        let (own, other) = (entry(7, 1, "{}"), entry(42, 9, "{}"));
+        assert_eq!(
+            decode(&framed(&[1], &[own.clone(), other.clone()])),
+            Err(ProtocolError)
+        );
+        assert_eq!(
+            decode(&framed(&[1], &[own.clone(), vec![0]])),
+            Err(ProtocolError)
+        );
+        assert_eq!(decode(&framed(&[0], &[vec![0]])), Err(ProtocolError));
+        assert_eq!(
+            entries_of(&framed(&[2], &[own, other])),
+            [(7, 1, "{}".to_string()), (42, 9, "{}".to_string())]
+        );
+    }
+
+    /// L'horloge et le client d'une entrée sont lus de même, sans rien laisser tomber : une
+    /// horloge qui ne tient pas dans 32 bits est illisible, pas ramenée à une autre.
+    #[test]
+    fn clock_beyond_32_bits_is_illegible() {
+        let mut beyond = Vec::new();
+        beyond.write_var(7u64);
+        beyond.extend([0x81, 0x80, 0x80, 0x80, 0x10]);
+        beyond.write_string("{}");
+        assert_eq!(decode(&framed(&[1], &[beyond])), Err(ProtocolError));
+        assert_eq!(
+            entries_of(&framed(&[1], &[entry(7, u32::MAX, "{}")])),
+            [(7, u32::MAX, "{}".to_string())]
+        );
+    }
+
+    /// Un client répété dans un message : une seule entrée en sort, la dernière.
+    #[test]
+    fn repeated_client_keeps_its_last_entry() {
+        let twice = framed(
+            &[2],
+            &[entry(7, 1000, r#"{"a":1}"#), entry(7, 1, r#"{"b":2}"#)],
+        );
+        assert_eq!(entries_of(&twice), [(7, 1, r#"{"b":2}"#.to_string())]);
     }
 
     #[test]

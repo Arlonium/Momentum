@@ -91,7 +91,7 @@ impl Witness {
             "la connexion de l'expéditeur a été fermée"
         );
         self.marks += 1;
-        let mark = format!(r#"{{"marque":{}}}"#, self.marks);
+        let mark = named(&format!("Témoin {}", self.marks));
         self.client.set_awareness(&mark);
         for observer in observers {
             assert!(
@@ -102,7 +102,7 @@ impl Witness {
     }
 }
 
-/// Une lectrice ne remplace pas l'état de présence d'une autre : ni chez ceux qui sont là, ni
+/// Une personne ne remplace pas l'état de présence d'une autre : ni chez ceux qui sont là, ni
 /// pour qui arrive ensuite, ni en prenant de l'avance sur son horloge. Le reste de son message
 /// (son propre état) passe, et sa connexion reste ouverte.
 #[tokio::test]
@@ -110,8 +110,9 @@ async fn presence_of_another_account_cannot_be_overwritten() {
     let f = Fixture::new(SyncConfig::default()).await;
     let alice = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
-    // Mallory ne fait que lire la page.
-    let mallory = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+    // Mallory écrit dans la page comme les autres : c'est son compte qui la retient. En lecture
+    // seule, rien de ce qu'elle annonce ne serait gardé (Ruling R118).
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let mut witness = Witness::join(&f).await;
     let (alice_id, mallory_id) = (alice.client_id(), mallory.client_id());
     let truth = named("Alice");
@@ -155,7 +156,7 @@ async fn presence_of_another_account_cannot_be_overwritten() {
     assert!(!mallory.is_closed() && !nobody.is_closed());
 }
 
-/// Une lectrice n'efface pas non plus l'état de présence d'une autre : ni par un retrait à la
+/// Une personne n'efface pas non plus l'état de présence d'une autre : ni par un retrait à la
 /// même horloge (celui qu'un client envoie quand il croit quelqu'un parti), ni par un retrait
 /// en avance sur elle.
 #[tokio::test]
@@ -163,7 +164,7 @@ async fn presence_of_another_account_cannot_be_removed() {
     let f = Fixture::new(SyncConfig::default()).await;
     let alice = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
-    let mallory = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let mut witness = Witness::join(&f).await;
     let alice_id = alice.client_id();
     let truth = named("Alice");
@@ -208,7 +209,7 @@ async fn same_account_takes_its_client_id_back_after_reconnecting() {
     let f = Fixture::new(SyncConfig::default()).await;
     let alice = new_user(&f.db).await;
     let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
-    let mallory = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let mut witness = Witness::join(&f).await;
 
     let first = Client::connect_synced(&f.url_for(of(alice))).await;
@@ -363,14 +364,14 @@ async fn connections_without_an_account_share_their_client_ids() {
 // Un client y-websocket renvoie au serveur chaque état qu'il reçoit, et ce renvoi met un
 // aller-retour à arriver. Si le titulaire est parti entre-temps, son client est libre, et son
 // horloge a avancé d'un cran (le retrait du serveur). Le renvoi, à l'ancienne horloge, n'est
-// pas appliqué : il ne doit pas non plus donner le client à qui le renvoie. Sinon un lecteur
+// pas appliqué : il ne doit pas non plus donner le client à qui le renvoie. Sinon quelqu'un
 // ferme les connexions des autres (huit clients inventés, puis il part : chacun les « prend »
 // en les renvoyant, et dépasse la limite), et quelqu'un qui revient reste invisible.
 
-/// Un lecteur annonce huit clients inventés dans un message, puis coupe sa connexion. Le renvoi
+/// Quelqu'un annonce huit clients inventés dans un message, puis coupe sa connexion. Le renvoi
 /// de ces huit états par une connexion honnête, arrivé après le départ, ne la ferme pas, et
 /// elle ne tient toujours que son propre client : il lui reste sept places. Aux horloges
-/// ordinaires, puis au sommet : le départ du lecteur porte alors l'horloge de ses clients à la
+/// ordinaires, puis au sommet : son départ porte alors l'horloge de ses clients à la
 /// dernière, sans qu'elle reboucle.
 #[tokio::test]
 async fn late_echo_of_invented_clients_never_closes_an_honest_connection() {
@@ -378,7 +379,7 @@ async fn late_echo_of_invented_clients_never_closes_an_honest_connection() {
     for (round, clock) in [1, u32::MAX - 1].into_iter().enumerate() {
         let alice = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
         alice.set_awareness(&named("Alice"));
-        let mallory = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+        let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
         let base = 900_000 + 100 * round as u64;
         let fakes: Vec<u64> = (1..=8).map(|i| base + i).collect();
         let ghost = named("Fantôme");
@@ -395,7 +396,7 @@ async fn late_echo_of_invented_clients_never_closes_an_honest_connection() {
             assert!(sees(&alice, *id, None).await, "horloge {clock}");
         }
 
-        // Ce que y-websocket renvoie de ces huit états, arrivé après le départ du lecteur.
+        // Ce que y-websocket renvoie de ces huit états, arrivé après son départ.
         alice.send_raw(awareness_message(&entries));
         assert!(
             still_served(&alice).await,
@@ -508,7 +509,7 @@ const SPARE_CLIENT: u64 = 4_242;
 async fn presence_at_the_last_clock_is_ignored() {
     let f = Fixture::new(SyncConfig::default()).await;
     let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
-    let mallory = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let mut witness = Witness::join(&f).await;
     let mallory_id = mallory.client_id();
 
@@ -573,7 +574,7 @@ async fn page_survives_the_departure(
     );
 }
 
-/// Le scénario entier : un lecteur annonce un état à la dernière horloge, puis s'en va. La page
+/// Le scénario entier : quelqu'un annonce un état à la dernière horloge, puis s'en va. La page
 /// reste en vie : une autre connexion est toujours ouverte, et reçoit ce qu'on écrit ensuite.
 /// Avant la garde, le départ faisait paniquer l'acteur de la page.
 #[tokio::test]
@@ -582,7 +583,7 @@ async fn a_departure_after_the_last_clock_leaves_the_page_alive() {
     let block = f.ids().await[0].clone();
     let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let writer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
-    let mallory = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let mallory_id = mallory.client_id();
 
     // Son propre état, à une horloge ordinaire : sa disparition dira que son départ est traité.
@@ -613,7 +614,7 @@ async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
     let account = new_user(&f.db).await;
 
     // Premier passage : un état juste sous la dernière horloge, que tout le monde reçoit.
-    let first = Client::connect_synced(&f.url_for(reader(account))).await;
+    let first = Client::connect_synced(&f.url_for(of(account))).await;
     let below = named("Juste en dessous");
     first.send_raw(awareness_message(&[
         (SPARE_CLIENT, u32::MAX - 1, &below),
@@ -628,7 +629,7 @@ async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
 
     // Second passage : le même client, annoncé de nouveau (sans effet : son horloge ne peut
     // plus monter), puis un second départ.
-    let second = Client::connect_synced(&f.url_for(reader(account))).await;
+    let second = Client::connect_synced(&f.url_for(of(account))).await;
     let second_id = second.client_id();
     second.send_raw(awareness_message(&[
         (SPARE_CLIENT, 7, &named("De retour")),
@@ -657,7 +658,7 @@ async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
         sees(
             &newcomer,
             witness.client.client_id(),
-            Some(r#"{"marque":1}"#)
+            Some(&named("Témoin 1"))
         )
         .await
     );
@@ -696,7 +697,7 @@ fn frame(entries: &[(u64, u32, &str)], parts: usize) -> Vec<u8> {
         .collect()
 }
 
-/// Une lectrice a deux onglets. De l'un, un message de 512 entrées passe : les 511 retraits
+/// Une personne a deux onglets. De l'un, un message de 512 entrées passe : les 511 retraits
 /// sont ignorés, et son propre état arrive chez tous. À 513, rien du message n'est traité : ni
 /// l'état de plus qu'il portait pour elle, ni le remplacement de celui de son autre onglet (ce
 /// que son compte a le droit de faire), ni le client libre qu'il annonçait, qu'un autre compte
@@ -709,8 +710,8 @@ async fn too_many_entries_are_ignored(parts: usize) {
     let f = Fixture::new(SyncConfig::default()).await;
     let account = new_user(&f.db).await;
     let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
-    let tab = Client::connect_synced(&f.url_for(reader(account))).await;
-    let sender = Client::connect_synced(&f.url_for(reader(account))).await;
+    let tab = Client::connect_synced(&f.url_for(of(account))).await;
+    let sender = Client::connect_synced(&f.url_for(of(account))).await;
     let mut witness = Witness::join(&f).await;
     let (tab_id, sender_id) = (tab.client_id(), sender.client_id());
     let other_tab = named("Mallory, autre onglet");
@@ -793,7 +794,7 @@ async fn presence_entries_are_counted_over_the_whole_websocket_message() {
     too_many_entries_are_ignored(2).await;
 }
 
-/// Le scénario qui a fait réviser le Ruling. Un lecteur ouvre 65 connexions et annonce huit
+/// Le scénario qui a fait réviser le Ruling. Un compte ouvre 65 connexions et annonce huit
 /// clients inventés sur chacune : 520 états. Qui arrive les reçoit, et un client y-websocket
 /// renvoie aussitôt au serveur tout ce qu'il vient de recevoir, en un seul message. Ce renvoi
 /// est ignoré sans fermer la connexion du nouveau venu, et son propre état, qu'il annonce dans
@@ -806,7 +807,7 @@ async fn newcomer_echoing_a_crowded_page_stays_connected() {
     let ghost = named("Fantôme");
     let mut crowd = Vec::new();
     for conn in 0..65u64 {
-        let client = Client::connect_synced(&f.url_for(reader(mallory))).await;
+        let client = Client::connect_synced(&f.url_for(of(mallory))).await;
         let invented: Vec<(u64, u32, &str)> = (0..8)
             .map(|i| (600_000 + conn * 8 + i, 1, ghost.as_str()))
             .collect();
@@ -880,4 +881,229 @@ async fn document_update_beside_too_many_presence_entries_is_not_lost() {
     // La présence du même message, elle, est ignorée.
     witness.after(&writer, &[&carol]).await;
     assert_eq!(state_of(&carol, writer.client_id()), None);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Qui n'écrit pas n'annonce rien (Ruling R118), et un état n'est relayé que s'il a la forme
+// connue (Ruling R119).
+//
+// Le client pose la couleur d'un curseur telle quelle dans un attribut `style`, et décode sa
+// position sans garde : une couleur piégée était du CSS chez tous ceux qui écrivent, et un
+// curseur mal formé figeait leur éditeur, qui récrivait ensuite le document par-dessus ce que
+// les autres avaient tapé (e2e `presence-guard.spec.ts`). Une invitée en lecture y suffisait.
+
+/// La fin du document, en position relative de Yjs : elle ne demande aucun identifiant.
+const END: &str = r#"{"tname":"document-store","assoc":0}"#;
+
+/// Un état tel que le client l'écrit : un nom, une couleur, un curseur à la fin du document.
+fn with_cursor(name: &str, colour: &str) -> String {
+    format!(
+        r#"{{"user":{{"name":"{name}","color":"{colour}"}},"cursor":{{"anchor":{END},"head":{END}}}}}"#
+    )
+}
+
+/// L'état du client `client` chez `seen_by`, relu : l'ordre des clés n'y compte pas.
+fn value_of(seen_by: &Client, client: u64) -> Option<serde_json::Value> {
+    state_of(seen_by, client).map(|json| serde_json::from_str(&json).expect("un état en JSON"))
+}
+
+fn value(json: &str) -> Option<serde_json::Value> {
+    Some(serde_json::from_str(json).expect("un état en JSON"))
+}
+
+/// D'une connexion en lecture seule, rien n'est gardé ni relayé, et aucun client n'est pris :
+/// ni son propre état, ni des clients inventés, même plus que la limite d'une connexion. Elle
+/// n'est pas fermée, et reçoit toujours la présence des autres.
+#[tokio::test]
+async fn presence_of_a_read_only_connection_is_ignored() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let dave = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let gina = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+    let (carol_id, gina_id) = (carol.client_id(), gina.client_id());
+
+    gina.set_awareness(&with_cursor("Gina", "#B4462B"));
+    // Neuf clients inventés : d'une connexion qui écrit, le message la fermerait.
+    let ghost = named("Fantôme");
+    let invented: Vec<(u64, u32, &str)> =
+        (0..9).map(|i| (650_000 + i, 1, ghost.as_str())).collect();
+    gina.send_raw(awareness_message(&invented));
+    witness.after(&gina, &[&carol, &dave]).await;
+    assert_eq!(
+        state_of(&carol, gina_id),
+        None,
+        "l'état d'une lectrice est relayé"
+    );
+    for (id, ..) in &invented {
+        assert_eq!(state_of(&carol, *id), None);
+    }
+    // Aucun client pris : un compte qui écrit annonce l'un d'eux, et il est vu.
+    let by_carol = named("De Carol");
+    carol.send_raw(awareness_message(&[(650_000, 1, &by_carol)]));
+    assert!(
+        sees(&dave, 650_000, Some(&by_carol)).await,
+        "une lectrice a pris un client"
+    );
+    // Elle reçoit la présence des autres, comme avant.
+    let here = named("Carol");
+    carol.set_awareness(&here);
+    assert!(sees(&gina, carol_id, Some(&here)).await);
+    // Le serveur n'a rien gardé d'elle : qui arrive ne la voit pas.
+    let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    assert!(sees(&newcomer, carol_id, Some(&here)).await);
+    assert_eq!(state_of(&newcomer, gina_id), None);
+    assert!(still_served(&gina).await);
+}
+
+/// La couleur du relecteur : la suite de l'attribut `style` où le client la poserait. L'état
+/// n'est ni gardé ni relayé, et ne donne pas son client ; le reste du message passe, et la
+/// connexion reste ouverte.
+#[tokio::test]
+async fn presence_with_a_trapped_colour_is_not_relayed() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+    let mallory_id = mallory.client_id();
+
+    let trapped = with_cursor(
+        "Olga",
+        "red;position:fixed;inset:0;z-index:99999;background:url(https://evil.example/x.png)",
+    );
+    let fine = with_cursor("Mallory", "#2B59C3");
+    mallory.send_raw(awareness_message(&[
+        (SPARE_CLIENT, 1, &trapped),
+        (mallory_id, 1, &fine),
+    ]));
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(
+        value_of(&carol, SPARE_CLIENT),
+        None,
+        "la couleur piégée est relayée"
+    );
+    // Le reste du message est passé.
+    assert_eq!(value_of(&carol, mallory_id), value(&fine));
+    // Sur son propre client non plus, et l'état d'avant reste.
+    mallory.send_raw(awareness_message(&[(mallory_id, 2, &trapped)]));
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(value_of(&carol, mallory_id), value(&fine));
+    // L'état refusé n'a pas donné son client : un autre compte l'annonce, et il est vu.
+    let by_carol = named("De Carol");
+    carol.send_raw(awareness_message(&[(SPARE_CLIENT, 1, &by_carol)]));
+    assert!(
+        sees(&mallory, SPARE_CLIENT, Some(&by_carol)).await,
+        "l'état refusé a donné son client"
+    );
+    let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    assert!(sees(&newcomer, SPARE_CLIENT, Some(&by_carol)).await);
+    assert_eq!(value_of(&newcomer, mallory_id), value(&fine));
+}
+
+/// Un curseur que le client ne saurait pas lire : une position qui n'est pas un objet, une
+/// position qui ne nomme rien (Yjs lève une exception), une clé inconnue. Aucun n'est relayé.
+#[tokio::test]
+async fn presence_with_a_malformed_cursor_is_not_relayed() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+    let user = r##""user":{"name":"Mallory","color":"#2B59C3"}"##;
+    let nothing = r#"{"type":null,"tname":null,"item":null}"#;
+    let malformed = [
+        format!(r#"{{{user},"cursor":{{"anchor":7,"head":7}}}}"#),
+        format!(r#"{{{user},"cursor":{{"anchor":{nothing},"head":{nothing}}}}}"#),
+        format!(r#"{{{user},"cursor":{{"anchor":{END},"head":{END}}},"surprise":true}}"#),
+        format!(r#"{{{user},"cursor":{{"anchor":{END}}}}}"#),
+        format!(r#"{{{user},"cursor":{{"anchor":{{"tname":"autre"}},"head":{END}}}}}"#),
+    ];
+    for (i, state) in malformed.iter().enumerate() {
+        let client = SPARE_CLIENT + i as u64;
+        mallory.send_raw(awareness_message(&[(client, 1, state)]));
+        witness.after(&mallory, &[&carol]).await;
+        assert_eq!(value_of(&carol, client), None, "relayé : {state}");
+    }
+    // Aucun n'a été gardé : qui arrive n'en reçoit rien. Et un état en règle passe ensuite,
+    // sous l'un de ces clients, que les états refusés n'avaient pas donnés.
+    let fine = with_cursor("Mallory", "#2B59C3");
+    mallory.send_raw(awareness_message(&[(SPARE_CLIENT, 1, &fine)]));
+    let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    for seen_by in [&carol, &newcomer] {
+        assert!(
+            seen_by
+                .wait_until(WAIT, |c| value_of(c, SPARE_CLIENT) == value(&fine))
+                .await
+        );
+    }
+    for i in 1..malformed.len() as u64 {
+        assert_eq!(value_of(&newcomer, SPARE_CLIENT + i), None);
+    }
+}
+
+/// Ce que le client réel écrit passe : l'état initial de y-protocols (un objet vide), puis le
+/// nom et la couleur que BlockNote y pose, puis le curseur de y-prosemirror, qui redevient
+/// `null` quand l'éditeur perd le focus ; une position dans un bloc porte des identifiants.
+#[tokio::test]
+async fn presence_of_the_real_client_shape_is_relayed() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mona = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mona_id = mona.client_id();
+    let user = r##""user":{"name":"Mona","color":"#B4462B"}"##;
+    let in_text = r#"{"type":{"client":1440742776,"clock":6},"item":{"client":206716952,"clock":41},"assoc":-1}"#;
+    let states = [
+        "{}".to_string(),
+        format!("{{{user}}}"),
+        format!(r#"{{{user},"cursor":{{"anchor":{END},"head":{END}}}}}"#),
+        format!(r#"{{{user},"cursor":{{"anchor":{in_text},"head":{END}}}}}"#),
+        format!(r#"{{{user},"cursor":null}}"#),
+        // Une couleur en minuscules en est une aussi.
+        with_cursor("Mona", "#b4462b"),
+    ];
+    for (i, state) in states.iter().enumerate() {
+        mona.send_raw(awareness_message(&[(mona_id, i as u32 + 1, state)]));
+        assert!(
+            carol
+                .wait_until(WAIT, |c| value_of(c, mona_id) == value(state))
+                .await,
+            "non relayé : {state}"
+        );
+    }
+}
+
+/// Un état de plus de 2 Kio est ignoré, quelle que soit sa forme ; les autres entrées du
+/// message passent. À 2 Kio tout juste, il passe.
+#[tokio::test]
+async fn presence_state_over_2_kib_is_ignored() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+    let mallory_id = mallory.client_id();
+    // Un état en règle, étiré par des espaces jusqu'à `bytes` octets.
+    let padded = |bytes: usize| {
+        let state = named("Mallory");
+        format!(
+            "{}{}}}",
+            &state[..state.len() - 1],
+            " ".repeat(bytes - state.len())
+        )
+    };
+    assert_eq!(padded(2049).len(), 2049);
+
+    let fine = named("Fantôme");
+    mallory.send_raw(awareness_message(&[
+        (mallory_id, 1, &padded(2049)),
+        (SPARE_CLIENT, 1, &fine),
+    ]));
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(
+        state_of(&carol, mallory_id),
+        None,
+        "un état de 2 049 octets est relayé"
+    );
+    assert_eq!(state_of(&carol, SPARE_CLIENT), Some(fine));
+    // À la limite : gardé. Ce qui est relayé est l'état relu, sans ses espaces.
+    mallory.send_raw(awareness_message(&[(mallory_id, 1, &padded(2048))]));
+    assert!(sees(&carol, mallory_id, Some(&named("Mallory"))).await);
 }

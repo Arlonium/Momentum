@@ -1089,12 +1089,13 @@ async fn logout_with_an_expired_session_still_closes_its_connections() {
     assert_eq!(handshake(&url, None, cookie.as_deref()).await, Err(401));
 }
 
-/// Ruling R101, par la vraie route : une connexion de synchro porte le compte de sa session, et
-/// la présence qu'il annonce est à lui. Gina, invitée en lecture seule sur la page, voit les
-/// autres et s'annonce elle-même ; elle ne remplace ni n'efface l'état de Mona, et renvoyer au
-/// serveur ce qu'elle reçoit des autres, comme le fait y-websocket, ne la ferme pas. (Le détail
-/// de la règle est testé dans `mementum-sync`, `tests/presence.rs` ; ici, que la route donne
-/// bien au hub le compte de chaque connexion.)
+/// Rulings R101 et R118, par la vraie route : une connexion de synchro porte le compte de sa
+/// session, et son droit d'écrire. La présence qu'annonce un compte qui écrit est à lui : Tom
+/// ne remplace ni n'efface l'état de Mona, et renvoyer au serveur ce qu'il reçoit des autres,
+/// comme le fait y-websocket, ne le ferme pas. Gina, invitée en lecture seule sur la page, voit
+/// les autres ; rien de ce qu'elle annonce n'est gardé ni relayé. (Le détail des règles est
+/// testé dans `mementum-sync`, `tests/presence.rs` ; ici, que la route donne bien au hub le
+/// compte et le droit de chaque connexion.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn presence_belongs_to_the_account_of_the_session() {
     let t = open_app().await;
@@ -1106,7 +1107,7 @@ async fn presence_belongs_to_the_account_of_the_session() {
     let mona = synced_as(&team.mona.browser, &url).await;
     let tom = synced_as(&team.tom.browser, &url).await;
     let gina = synced_as(&team.gina.browser, &url).await;
-    let (mona_id, gina_id) = (mona.client_id(), gina.client_id());
+    let (mona_id, tom_id, gina_id) = (mona.client_id(), tom.client_id(), gina.client_id());
     let state = |name: &str| format!(r#"{{"user":{{"name":"{name}"}}}}"#);
     let sees = async |seen_by: &Client, client: u64, state: &str| {
         let arrived =
@@ -1114,30 +1115,43 @@ async fn presence_belongs_to_the_account_of_the_session() {
         seen_by.wait_until(WAIT, arrived).await
     };
 
-    // Chacun s'annonce, lectrice comprise, et chacun voit les autres.
+    // Ceux qui écrivent s'annoncent, et chacun les voit, la lectrice comprise.
     mona.set_awareness(&state("Mona"));
-    gina.set_awareness(&state("Gina"));
+    tom.set_awareness(&state("Tom"));
     for seen_by in [&tom, &gina] {
         assert!(sees(seen_by, mona_id, &state("Mona")).await);
     }
-    for seen_by in [&tom, &mona] {
-        assert!(sees(seen_by, gina_id, &state("Gina")).await);
+    for seen_by in [&mona, &gina] {
+        assert!(sees(seen_by, tom_id, &state("Tom")).await);
     }
 
-    // Gina renvoie l'état de Mona tel qu'elle l'a reçu ; puis le remplace ; puis le retire.
-    gina.send_raw(awareness_message(&[(mona_id, 1, &state("Mona"))]));
-    gina.send_raw(awareness_message(&[(mona_id, 500, &state("Mona ?"))]));
-    gina.send_raw(awareness_message(&[(mona_id, 501, "null")]));
-    assert!(still_served(&gina).await, "fermée pour un état renvoyé");
-    // Barrière : son propre état suivant, envoyé après, arrive chez Tom après tout ce que le
-    // serveur aurait relayé d'elle avant.
-    gina.set_awareness(&state("Gina, encore"));
-    assert!(sees(&tom, gina_id, &state("Gina, encore")).await);
-    assert!(sees(&tom, mona_id, &state("Mona")).await);
-    // Le serveur n'en a rien gardé : qui arrive reçoit l'état de Mona, et son état suivant
-    // passe partout.
+    // Tom renvoie l'état de Mona tel qu'il l'a reçu ; puis le remplace ; puis le retire. Gina
+    // fait de même, et s'annonce.
+    for sender in [&tom, &gina] {
+        sender.send_raw(awareness_message(&[(mona_id, 1, &state("Mona"))]));
+        sender.send_raw(awareness_message(&[(mona_id, 500, &state("Mona ?"))]));
+        sender.send_raw(awareness_message(&[(mona_id, 501, "null")]));
+    }
+    gina.set_awareness(&state("Gina"));
+    assert!(still_served(&tom).await, "fermé pour un état renvoyé");
+    assert!(still_served(&gina).await, "fermée pour un état annoncé");
+    // Barrière : l'état suivant de Tom, envoyé après, arrive chez les autres après tout ce
+    // que le serveur aurait relayé d'eux avant.
+    tom.set_awareness(&state("Tom, encore"));
+    for seen_by in [&mona, &gina] {
+        assert!(sees(seen_by, tom_id, &state("Tom, encore")).await);
+    }
+    assert!(sees(&gina, mona_id, &state("Mona")).await);
+    assert!(
+        !mona.awareness_states().contains_key(&gina_id),
+        "la présence d'une lectrice est relayée"
+    );
+    // Le serveur n'en a rien gardé : qui arrive reçoit l'état de Mona, pas celui de Gina, et
+    // l'état suivant de Mona passe partout.
     let adam = synced_as(&team.adam.browser, &url).await;
     assert!(sees(&adam, mona_id, &state("Mona")).await);
+    assert!(sees(&adam, tom_id, &state("Tom, encore")).await);
+    assert!(!adam.awareness_states().contains_key(&gina_id));
     mona.set_awareness(&state("Mona, plus loin"));
     for seen_by in [&tom, &gina, &adam] {
         assert!(sees(seen_by, mona_id, &state("Mona, plus loin")).await);
