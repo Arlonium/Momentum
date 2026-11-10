@@ -3,7 +3,9 @@
 
 mod common;
 
-use common::{account, exec_sql, fresh, new_user, page, side_pool, texts};
+use std::path::Path;
+
+use common::{account, break_table, exec_sql, fresh, new_user, page, repair, side_pool, texts};
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_store::{
     AccessChange, AccessWritten, InvitationGrant, NewInvitation, ShareRefusal, Space, Store,
@@ -346,13 +348,18 @@ async fn change_access_keeps_someone_in_full() {
     )
     .await;
     refused(dormant, AccessChange::User(t.olga, None)).await;
-    // La ligne `members` compte, à tout niveau ; seule, elle ne part pas.
+    // La ligne `members` compte, à tout niveau : baissée par la propriétaire, elle reste le
+    // seul accès complet de la page. (La retirer ne se refuse plus : depuis R122, qui la retire
+    // reçoit sa ligne, voir `general_access_removed_from_a_team_page_keeps_the_requester_in_full`.)
     let open = page_with(store, space, None, &[(Subject::Members, Level::Full)]).await;
-    refused(open, AccessChange::Members(None)).await;
     store
         .change_access(open, AccessChange::Members(Some(Level::Read)), t.olga)
         .await
         .unwrap();
+    assert_eq!(
+        store.node_grants(open).await.unwrap(),
+        [grant(Subject::Members, Level::Read)]
+    );
     // Sous elle, une page peut perdre sa seule ligne `full`.
     let under = page_with(store, space, Some(open), &[(mona, Level::Full)]).await;
     let written = store
@@ -806,6 +813,7 @@ async fn change_access_writes_nothing_when_nothing_changes() {
             changed: true,
             left_space: false,
             line: Some(Level::Edit),
+            actor_line_posed: false,
         }
     );
     assert_eq!(store.space_rev(space.id).await.unwrap(), Some(rev + 1));
@@ -898,4 +906,411 @@ async fn change_access_lets_a_bare_guest_leave() {
         store.role_in(space.id, t.mona).await.unwrap(),
         Some(Role::Member)
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ruling R122 : qui restreint l'accès général d'une page y garde l'accès complet. Quand le
+// changement (la ligne `members` retirée, ou baissée) lui ferait perdre `full`, sa ligne
+// `(user:<lui>, full)` est posée dans la même transaction ; rien n'est écrit pour lui s'il le
+// garde autrement.
+
+/// Ces lignes, dans l'ordre où `node_grants` les rend : par sujet.
+fn by_subject(lines: &[(Subject, Level)]) -> Vec<Grant> {
+    let mut lines: Vec<Grant> = lines.iter().map(|&(s, l)| grant(s, l)).collect();
+    lines.sort_by_key(|line| line.subject.to_string());
+    lines
+}
+
+/// Un changement de l'accès général de `node` par `actor`, qui doit passer et écrire : ce que
+/// le store dit avoir écrit. La révision de l'espace avance d'un cran, comme pour tout
+/// changement d'accès, même quand deux lignes sont écrites.
+async fn general_changed(
+    store: &Store,
+    space: &Space,
+    node: Uuid,
+    level: Option<Level>,
+    actor: Uuid,
+) -> AccessWritten {
+    let rev = store.space_rev(space.id).await.unwrap().unwrap();
+    let change = AccessChange::Members(level);
+    let written = store
+        .change_access(node, change, actor)
+        .await
+        .unwrap_or_else(|e| panic!("{change:?} par {actor} : {e:?}"));
+    assert!(written.changed && !written.left_space, "{written:?}");
+    assert_eq!(written.space_id, space.id);
+    assert_eq!(store.space_rev(space.id).await.unwrap(), Some(rev + 1));
+    written
+}
+
+/// Cas (a) de la relecture finale : une page née dans « Espace » ne porte que `(members,
+/// full)`, son auteur n'y est pas nommé. Qui en retire l'accès général (un membre simple, la
+/// propriétaire) y reçoit sa ligne `full` : la page devient la sienne, au lieu d'un refus
+/// `LastFullAccess` dont rien ne permettait de sortir.
+#[tokio::test]
+async fn general_access_removed_from_a_team_page_keeps_the_requester_in_full() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    for who in [t.mona, t.olga] {
+        let node = page_with(store, space, None, &[(Subject::Members, Level::Full)]).await;
+        let written = general_changed(store, space, node, None, who).await;
+        assert_eq!(
+            (written.line, written.actor_line_posed),
+            (None, true),
+            "{who}"
+        );
+        assert_eq!(
+            store.node_grants(node).await.unwrap(),
+            [grant(Subject::User(who), Level::Full)],
+            "{who}"
+        );
+    }
+}
+
+/// Cas (b) : une invitée est nommée en accès complet sur la page. Le retrait de l'accès
+/// général passait déjà (elle garde la page), mais qui le demandait la perdait sans un mot,
+/// et tous les membres avec lui. Il y reste, nommé à côté d'elle ; elle n'y perd rien.
+#[tokio::test]
+async fn general_access_removed_keeps_the_requester_beside_a_named_guest() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let gina = Subject::User(t.gina);
+    for who in [t.mona, t.olga] {
+        let lines = [(Subject::Members, Level::Full), (gina, Level::Full)];
+        let node = page_with(store, space, None, &lines).await;
+        let written = general_changed(store, space, node, None, who).await;
+        assert_eq!(
+            (written.line, written.actor_line_posed),
+            (None, true),
+            "{who}"
+        );
+        assert_eq!(
+            store.node_grants(node).await.unwrap(),
+            by_subject(&[(gina, Level::Full), (Subject::User(who), Level::Full)]),
+            "{who}"
+        );
+    }
+}
+
+/// Baisser l'accès général, c'est le restreindre aussi : un membre simple qui le passe de
+/// `full` à un niveau plus bas garde l'accès complet, par sa ligne. S'il en avait déjà une,
+/// plus basse, elle est relevée.
+#[tokio::test]
+async fn general_access_lowered_keeps_the_requester_in_full() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let mona = Subject::User(t.mona);
+    for level in [Level::Read, Level::Comment, Level::Edit] {
+        let node = page_with(store, space, None, &[(Subject::Members, Level::Full)]).await;
+        let written = general_changed(store, space, node, Some(level), t.mona).await;
+        assert_eq!(
+            (written.line, written.actor_line_posed),
+            (Some(level), true),
+            "{level:?}"
+        );
+        assert_eq!(
+            store.node_grants(node).await.unwrap(),
+            by_subject(&[(Subject::Members, level), (mona, Level::Full)]),
+            "{level:?}"
+        );
+    }
+    // Une ligne à son nom, plus basse : relevée, pas doublée.
+    let lines = [(Subject::Members, Level::Full), (mona, Level::Read)];
+    let node = page_with(store, space, None, &lines).await;
+    let written = general_changed(store, space, node, Some(Level::Read), t.mona).await;
+    assert!(written.actor_line_posed);
+    assert_eq!(
+        store.node_grants(node).await.unwrap(),
+        by_subject(&[(Subject::Members, Level::Read), (mona, Level::Full)])
+    );
+}
+
+/// Rien n'est écrit pour qui garde l'accès complet autrement : déjà nommé en `full` sur la
+/// page, ou sur une page parente ; propriétaire ou admin là où une ligne `members` continue de
+/// s'appliquer (la sienne, baissée, ou celle d'une page parente). Ni pour un changement qui ne
+/// restreint rien.
+#[tokio::test]
+async fn no_redundant_line_when_the_requester_keeps_full() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let adam = account(store, "adam").await.id;
+    store.add_member(space.id, adam, Role::Admin).await.unwrap();
+    let mona = Subject::User(t.mona);
+    let (members, full) = (Subject::Members, Level::Full);
+    // Le changement passe, sans ligne pour qui le demande : il reste `left` sur la page.
+    let unposed =
+        async |node: Uuid, level: Option<Level>, actor: Uuid, left: &[(Subject, Level)]| {
+            let written = general_changed(store, space, node, level, actor).await;
+            assert!(!written.actor_line_posed, "{level:?} par {actor}");
+            assert_eq!(
+                store.node_grants(node).await.unwrap(),
+                by_subject(left),
+                "{level:?} par {actor}"
+            );
+        };
+
+    // Déjà nommée en accès complet sur la page : l'accès général baisse, puis part.
+    let named = page_with(store, space, None, &[(members, full), (mona, full)]).await;
+    let lowered = [(members, Level::Read), (mona, full)];
+    unposed(named, Some(Level::Read), t.mona, &lowered).await;
+    unposed(named, None, t.mona, &[(mona, full)]).await;
+    // Nommée sur une page parente : la sous-page n'a plus aucune ligne, elle en hérite.
+    let parent = page_with(store, space, None, &[(mona, full)]).await;
+    let child = page_with(store, space, Some(parent), &[(members, Level::Edit)]).await;
+    unposed(child, None, t.mona, &[]).await;
+
+    // Propriétaire, admin : la ligne `members` reste, plus bas ; ils y gardent `full`.
+    for who in [t.olga, adam] {
+        let node = page_with(store, space, None, &[(members, full)]).await;
+        unposed(node, Some(Level::Read), who, &[(members, Level::Read)]).await;
+    }
+    // De même sous le plancher d'une page parente : la ligne propre part, le plancher reste.
+    let floor = page_with(store, space, None, &[(members, Level::Read)]).await;
+    for (who, wanted) in [(t.olga, None), (adam, Some(Level::Read))] {
+        let under = page_with(store, space, Some(floor), &[(members, full)]).await;
+        unposed(under, wanted, who, &[]).await;
+    }
+
+    // Relever l'accès général ne retire rien à personne.
+    let lines = [(members, Level::Read), (mona, full)];
+    let raised = page_with(store, space, None, &lines).await;
+    let higher = [(members, Level::Edit), (mona, full)];
+    unposed(raised, Some(Level::Edit), t.mona, &higher).await;
+    // Un changement qui ne change rien n'écrit rien, pour personne.
+    let same = page_with(store, space, None, &[(members, full)]).await;
+    let before = untouched(store, space, same).await;
+    let written = store
+        .change_access(same, AccessChange::Members(Some(full)), t.mona)
+        .await
+        .unwrap();
+    assert!(!written.changed && !written.actor_line_posed, "{written:?}");
+    assert_eq!(untouched(store, space, same).await, before);
+}
+
+/// Sous le plancher d'une page parente (R93), retirer la ligne propre de la sous-page (par
+/// `null`, ou en demandant le niveau du plancher) fait retomber un membre simple au niveau du
+/// plancher : sa ligne est posée aussi. La sous-page reste ouverte aux membres, au niveau du
+/// plancher, et la page parente n'est pas touchée.
+#[tokio::test]
+async fn general_access_removed_under_an_inherited_floor_keeps_the_requester_in_full() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let mona = Subject::User(t.mona);
+    let floor = [(Subject::Members, Level::Edit)];
+    for wanted in [None, Some(Level::Edit)] {
+        let parent = page_with(store, space, None, &floor).await;
+        let own = [(Subject::Members, Level::Full)];
+        let child = page_with(store, space, Some(parent), &own).await;
+        let written = general_changed(store, space, child, wanted, t.mona).await;
+        assert_eq!(
+            (written.line, written.actor_line_posed),
+            (None, true),
+            "{wanted:?}"
+        );
+        assert_eq!(
+            store.node_grants(child).await.unwrap(),
+            [grant(mona, Level::Full)],
+            "{wanted:?}"
+        );
+        assert_eq!(
+            store.node_grants(parent).await.unwrap(),
+            by_subject(&floor),
+            "{wanted:?}"
+        );
+    }
+}
+
+/// La ligne de qui demande et le changement de l'accès général sont une seule transaction : si
+/// l'une des deux écritures échoue, aucune n'est faite. Les pannes : la pose d'une ligne
+/// nommée, le retrait d'une ligne `members`, puis sa baisse.
+#[tokio::test]
+async fn general_access_change_and_the_requester_line_are_written_together() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let node = page_with(store, space, None, &[(Subject::Members, Level::Full)]).await;
+    let failures = [
+        ("INSERT", "NEW.subject LIKE 'user:%'", None),
+        ("DELETE", "OLD.subject = 'members'", None),
+        ("UPDATE", "NEW.subject = 'members'", Some(Level::Read)),
+    ];
+    for (event, when, wanted) in failures {
+        break_table(&f.db, event, "acl", when).await;
+        let before = untouched(store, space, node).await;
+        let change = AccessChange::Members(wanted);
+        let r = store.change_access(node, change, t.mona).await;
+        assert!(matches!(r, Err(StoreError::Sqlx(_))), "{event} : {r:?}");
+        assert_eq!(untouched(store, space, node).await, before, "{event}");
+        repair(&f.db).await;
+    }
+    // La panne levée, le changement passe, avec la ligne.
+    let written = general_changed(store, space, node, None, t.mona).await;
+    assert!(written.actor_line_posed);
+}
+
+/// Pose un témoin en base : une transaction qui incrémente la révision d'un espace échoue si
+/// l'une de `pages` (des pages de racine) n'a alors personne en accès complet, ni ligne
+/// `members` ni ligne `full`. Toute écriture de droits du store incrémente la révision juste
+/// avant de valider : le témoin regarde donc l'état que chaque transaction s'apprête à valider,
+/// celui qu'une autre transaction verrait entre deux.
+async fn watch_full_access(db: &Path, pages: &[Uuid]) {
+    let ids: Vec<String> = pages.iter().map(|page| format!("'{page}'")).collect();
+    let watch = format!(
+        "CREATE TRIGGER temoin BEFORE UPDATE OF rev ON spaces \
+         WHEN EXISTS (SELECT 1 FROM nodes n WHERE n.id IN ({}) AND NOT EXISTS ( \
+             SELECT 1 FROM acl a WHERE a.node_id = n.id \
+             AND (a.subject = 'members' OR a.level = 'full'))) \
+         BEGIN SELECT RAISE(ABORT, 'une page sans personne en accès complet'); END",
+        ids.join(", ")
+    );
+    exec_sql(db, &watch).await;
+}
+
+/// La décision se prend, et la ligne se pose, dans la transaction qui écrit. Le verrou
+/// d'écriture de SQLite est tenu par une connexion annexe, qui y écrit les changements croisés
+/// (ce qu'une autre personne change au même moment) sans les valider encore ; les demandes
+/// partent, et attendent ce verrou pour ouvrir leur transaction ; les changements croisés sont
+/// validés. Chaque demande décide donc sur ce qui vient d'être validé, pas sur ce qu'on lisait
+/// avant : c'est le verrou qui force l'ordre, pas une attente. Aucune ligne redondante n'est
+/// écrite, et aucune transaction ne valide une page sans personne en accès complet, pas même
+/// le temps d'une autre transaction (`watch_full_access`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crossed_changes_never_leave_the_page_without_full_access() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    // Une seconde propriétaire, pour qu'Olga puisse cesser de l'être ; un second membre.
+    let paula = account(store, "paula").await.id;
+    let tom = account(store, "tom").await.id;
+    for (who, role) in [(paula, Role::Owner), (tom, Role::Member)] {
+        store.add_member(space.id, who, role).await.unwrap();
+    }
+    let (mona, gina, olga) = (
+        Subject::User(t.mona),
+        Subject::User(t.gina),
+        Subject::User(t.olga),
+    );
+    let (members, full) = (Subject::Members, Level::Full);
+    let team_page = async |more: &[(Subject, Level)]| {
+        let lines: Vec<_> = [(members, full)]
+            .into_iter()
+            .chain(more.iter().copied())
+            .collect();
+        page_with(store, space, None, &lines).await
+    };
+    // 1. Mona est nommée : rien à poser pour elle. Sa ligne lui est retirée entre-temps.
+    let unnamed = team_page(&[(mona, full)]).await;
+    // 2. Gina, invitée, est la seule nommée en accès complet. Sa ligne part entre-temps.
+    let guest_gone = team_page(&[(gina, full)]).await;
+    // 3. Olga, propriétaire, baisse l'accès général : elle y garderait `full`. Elle redevient
+    //    simple membre entre-temps.
+    let demoted = team_page(&[]).await;
+    // 4. Mona n'est pas nommée : sa ligne serait posée. Elle est nommée entre-temps.
+    let named = team_page(&[]).await;
+    // 5. et 6. Deux demandes du store se croisent, sans rien d'écrit à la main.
+    let both_restrict = team_page(&[]).await;
+    let guest_removed = team_page(&[(gina, full)]).await;
+    let pages = [
+        unnamed,
+        guest_gone,
+        demoted,
+        named,
+        both_restrict,
+        guest_removed,
+    ];
+    watch_full_access(&f.db, &pages).await;
+
+    let side = side_pool(&f.db).await;
+    let mut lock = side.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let crossed = [
+        format!("DELETE FROM acl WHERE node_id = '{unnamed}' AND subject = '{mona}'"),
+        format!("DELETE FROM acl WHERE node_id = '{guest_gone}' AND subject = '{gina}'"),
+        format!(
+            "UPDATE members SET role = 'member' WHERE space_id = '{}' AND user_id = '{}'",
+            space.id, t.olga
+        ),
+        format!("INSERT INTO acl (node_id, subject, level) VALUES ('{named}', '{mona}', 'full')"),
+        // Comme le store : toute écriture d'`acl` ou de `members` incrémente la révision.
+        format!("UPDATE spaces SET rev = rev + 1 WHERE id = '{}'", space.id),
+    ];
+    for sql in crossed {
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+    }
+    let general = |node: Uuid, level: Option<Level>, actor: Uuid| {
+        store.change_access(node, AccessChange::Members(level), actor)
+    };
+    let remove_gina = AccessChange::User(t.gina, None);
+    let (r1, r2, r3, r4, r5a, r5b, r6a, r6b, committed) = tokio::join!(
+        general(unnamed, None, t.mona),
+        general(guest_gone, None, t.mona),
+        general(demoted, Some(Level::Read), t.olga),
+        general(named, None, t.mona),
+        general(both_restrict, None, t.mona),
+        general(both_restrict, None, tom),
+        general(guest_removed, None, t.mona),
+        store.change_access(guest_removed, remove_gina, t.olga),
+        lock.commit(),
+    );
+    committed.unwrap();
+    side.close().await;
+
+    // 1. Décidé avant le verrou, « déjà nommée, rien à poser » laissait la page sans personne
+    //    (ou la refusait par `LastFullAccess`).
+    assert!(r1.unwrap().actor_line_posed);
+    assert_eq!(
+        store.node_grants(unnamed).await.unwrap(),
+        [grant(mona, full)]
+    );
+    // 2. La page n'a plus que Mona : sans sa ligne, plus personne.
+    assert!(r2.unwrap().actor_line_posed);
+    assert_eq!(
+        store.node_grants(guest_gone).await.unwrap(),
+        [grant(mona, full)]
+    );
+    // 3. Simple membre désormais, Olga aurait perdu l'accès complet en baissant la ligne.
+    assert!(r3.unwrap().actor_line_posed);
+    assert_eq!(
+        store.node_grants(demoted).await.unwrap(),
+        by_subject(&[(members, Level::Read), (olga, full)])
+    );
+    // 4. Nommée entre-temps : rien n'est écrit pour elle.
+    let written = r4.unwrap();
+    assert!(written.changed && !written.actor_line_posed, "{written:?}");
+    assert_eq!(store.node_grants(named).await.unwrap(), [grant(mona, full)]);
+    // 5. Deux membres restreignent la même page : le premier la garde ; pour le second, elle
+    //    n'existe plus. Dans un ordre ou dans l'autre.
+    let unseen = |r: &Result<AccessWritten, StoreError>| {
+        matches!(r, Err(StoreError::Refused(ShareRefusal::Unseen)))
+    };
+    let kept = store.node_grants(both_restrict).await.unwrap();
+    match (&r5a, &r5b) {
+        (Ok(written), second) if unseen(second) => {
+            assert!(written.actor_line_posed);
+            assert_eq!(kept, [grant(mona, full)]);
+        }
+        (first, Ok(written)) if unseen(first) => {
+            assert!(written.actor_line_posed);
+            assert_eq!(kept, [grant(Subject::User(tom), full)]);
+        }
+        other => panic!("une demande passe, l'autre ne voit plus la page : {other:?}"),
+    }
+    // 6. Mona retire l'accès général pendant qu'Olga retire la ligne de l'invitée. Mona garde
+    //    la page dans les deux ordres ; Olga, passée après elle, ne la voit plus.
+    assert!(r6a.unwrap().actor_line_posed);
+    let kept = store.node_grants(guest_removed).await.unwrap();
+    match &r6b {
+        Ok(_) => assert_eq!(kept, [grant(mona, full)]),
+        second if unseen(second) => {
+            assert_eq!(kept, by_subject(&[(gina, full), (mona, full)]));
+        }
+        other => panic!("{other:?}"),
+    }
 }

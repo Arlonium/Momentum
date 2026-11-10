@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use mementum_acl::{Grant, Level, Subject, chain_level};
+use mementum_acl::{Grant, Level, Role, Subject, chain_level};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
@@ -41,6 +41,10 @@ pub struct AccessWritten {
     /// n'en a pas pour lui. Ce n'est pas toujours ce qui était demandé : un accès général
     /// demandé au niveau du plancher retire la ligne propre (Ruling R93).
     pub line: Option<Level>,
+    /// Ruling R122 : la ligne `(user:<acteur>, full)` a été posée sur la page (ou relevée à
+    /// `full`) dans la même transaction, parce que ce changement de l'accès général lui aurait
+    /// fait perdre l'accès complet. Faux : il le garde autrement, et rien n'a été écrit pour lui.
+    pub actor_line_posed: bool,
 }
 
 /// Pourquoi [`Store::change_access`] refuse un changement, vérifié dans sa transaction (Ruling
@@ -247,17 +251,41 @@ pub(crate) async fn read_chain(
     }))
 }
 
+/// Ruling R122 : `actor`, de rôle `role`, garde-t-il `full` sur la page `node` une fois sa
+/// ligne `members` devenue `general` (posée à ce niveau, ou retirée), sans rien d'autre de
+/// changé ? `chain` est la chaîne de la page, lue dans la transaction avant le changement. Le
+/// calcul est celui du reste du partage ([`chain_level`]) : il garde `full` par une ligne à son
+/// nom, sur la page ou sur un ancêtre, ou, propriétaire ou admin, par une ligne `members` qui
+/// s'applique encore (celle de la page, plus bas, ou celle d'un ancêtre).
+fn actor_keeps_full(
+    chain: &Chain,
+    node: &str,
+    general: Option<Level>,
+    actor: Uuid,
+    role: Role,
+) -> bool {
+    let subject = Subject::Members;
+    let general = general.map(|level| Grant { subject, level });
+    let after = chain
+        .lines
+        .iter()
+        .filter(|(on, line)| !(on == node && line.subject == subject))
+        .map(|(_, line)| line)
+        .chain(&general);
+    chain_level(after, actor, role) == Some(Level::Full)
+}
+
 /// Ce sur quoi repose un changement d'accès de `actor` sur la page, vérifié dans la transaction
 /// (Ruling R87), dans l'ordre des refus : la page existe pour lui (un rôle dans son espace, au
 /// moins `read` sur sa chaîne, par [`chain_level`]) ; il y a `full` ; pour l'accès général
 /// (`general`), il n'est pas invité (R85) ; ni la page ni un ancêtre n'est à la corbeille. Rend
-/// la chaîne de la page.
+/// la chaîne de la page, et le rôle de `actor` dans son espace.
 async fn check_sharer(
     tx: &mut Transaction<'_, Sqlite>,
     node_id: &str,
     actor: Uuid,
     general: bool,
-) -> Result<Chain, StoreError> {
+) -> Result<(Chain, Role), StoreError> {
     let refused = StoreError::Refused;
     let chain = read_chain(tx, node_id)
         .await?
@@ -276,7 +304,7 @@ async fn check_sharer(
     if chain.in_trash {
         return Err(refused(ShareRefusal::Trashed));
     }
-    Ok(chain)
+    Ok((chain, role))
 }
 
 impl Store {
@@ -393,9 +421,19 @@ impl Store {
     ///   par celles d'un ancêtre (une ligne `members` compte ; une ligne restée à quelqu'un sans
     ///   rôle, non) ; sinon `LastFullAccess`.
     ///
+    /// Ruling R122 : qui restreint l'accès général d'une page y garde l'accès complet. Quand le
+    /// changement de la ligne `members` (retirée, ou posée plus bas ; sous un plancher, la
+    /// ligne propre retirée) ferait perdre `full` à `actor`, sa ligne `(user:<actor>, full)`
+    /// est posée sur la page, ou relevée, dans la même transaction (`actor_line_posed`). C'est
+    /// la règle du passage à la racine (R82), au plus juste comme elle : rien n'est écrit pour
+    /// lui s'il garde `full` autrement (`actor_keeps_full`). Un changement de l'accès général
+    /// ne finit donc plus par `LastFullAccess` : une page née dans « Espace », où personne
+    /// n'est nommé, peut redevenir privée. Retirer ou baisser un accès nommé, si.
+    ///
     /// Aucun refus n'écrit rien. Retirer la ligne d'un invité qui n'en a plus aucune autre dans
     /// l'espace l'en fait sortir, avec ses invitations en attente. Une ligne déjà ainsi n'écrit
-    /// rien (`changed` faux) : la révision ne bouge pas.
+    /// rien (`changed` faux) : la révision ne bouge pas. Un changement écrit l'incrémente d'un
+    /// cran, qu'il écrive une ligne ou deux.
     pub async fn change_access(
         &self,
         node_id: Uuid,
@@ -405,7 +443,7 @@ impl Store {
         let node = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let general = matches!(change, AccessChange::Members(_));
-        let chain = check_sharer(&mut tx, &node, actor, general).await?;
+        let (chain, role) = check_sharer(&mut tx, &node, actor, general).await?;
         let space_id = parse_uuid(&chain.space)?;
         // La ligne de la page après le changement : posée à ce niveau, ou retirée (`None`).
         let (subject, line) = match change {
@@ -446,6 +484,7 @@ impl Store {
             changed: false,
             left_space: false,
             line,
+            actor_line_posed: false,
         };
         if !changed {
             return Ok(unchanged);
@@ -456,6 +495,16 @@ impl Store {
             }
             _ => false,
         };
+        // Ruling R122 : qui restreint l'accès général y garde l'accès complet. Décidé ici, sur
+        // la chaîne lue dans cette transaction, et écrit avec le changement.
+        let mut actor_line_posed = false;
+        if general && !actor_keeps_full(&chain, &node, line, actor, role) {
+            let own = Grant {
+                subject: Subject::User(actor),
+                level: Level::Full,
+            };
+            actor_line_posed = write_grant(&mut tx, &node, own).await?;
+        }
         if !keeps_full(&mut tx, &chain.space, &node).await? {
             // La transaction, abandonnée, n'écrit rien.
             return Err(StoreError::LastFullAccess);
@@ -465,6 +514,7 @@ impl Store {
         Ok(AccessWritten {
             changed: true,
             left_space,
+            actor_line_posed,
             ..unchanged
         })
     }

@@ -4,7 +4,7 @@
 //! | Route | Réponse |
 //! |---|---|
 //! | `GET /api/v1/pages/{id}/access` | [`PageAccess`] |
-//! | `PUT /api/v1/pages/{id}/access/general` ([`SetGeneral`]) | [`PageAccess`] ; `level: null` : la ligne `members` de la page est retirée ; réservé aux rôles `member` et plus (R85) ; `409 inherited_access` sous le plancher d'une page parente (R93) |
+//! | `PUT /api/v1/pages/{id}/access/general` ([`SetGeneral`]) | [`PageAccess`], où figure qui a restreint l'accès général (R122) ; `level: null` : la ligne `members` de la page est retirée ; réservé aux rôles `member` et plus (R85) ; `409 inherited_access` sous le plancher d'une page parente (R93) |
 //! | `PUT /api/v1/pages/{id}/access/users/{userId}` ([`SetLevel`]) | [`PageAccess`] ; `404` si le compte n'a aucun rôle dans l'espace |
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | [`PageAccess`] ; `404` si la page n'a pas de ligne propre pour ce compte |
 //! | `POST /api/v1/pages/{id}/invitations` ([`InviteToPage`]) | `201`, `InvitationCreated` |
@@ -17,7 +17,9 @@
 //! encore ; `404` pour la personne visée (sans rôle dans l'espace, ou sans ligne propre à
 //! retirer) ; `409 inherited_access` ; `409 last_full_access`. `GET …/access` porte le nom et
 //! l'adresse des comptes : il n'est rendu qu'à qui a `full` ; après un changement qui lui ôte
-//! `full` (on peut se retirer soi-même), la réponse est `204`, sans corps.
+//! `full` (on peut se retirer soi-même, ou baisser sa ligne), la réponse est `204`, sans corps.
+//! Un changement de l'accès général ne l'ôte jamais à qui le demande (Ruling R122) : sa réponse
+//! est le `PageAccess`.
 //!
 //! **Ce qui fait foi est la transaction** (Ruling R87). Avant de lire le corps, la route répond
 //! par le cache des accès (`access.rs`) : `404`, `403`, `409 trashed`, sans attendre. Mais un
@@ -42,9 +44,20 @@
 //!   derrière lui. Il peut en rester d'ailleurs, sans effet sur les droits : une ligne propre
 //!   posée avant qu'une page parente reçoive un accès général plus fort, ou venue d'un
 //!   changement de parent ; demander le niveau du plancher, ou `null`, la retire ;
+//! - qui restreint l'accès général d'une page y garde l'accès complet (Ruling R122) : quand
+//!   retirer la ligne `members`, ou la baisser, lui ferait perdre `full`, sa ligne
+//!   `(user:<lui>, full)` est posée dans la même transaction, et il figure dans le `PageAccess`
+//!   rendu. C'est la règle du passage à la racine (R82), sans ligne redondante : rien n'est
+//!   écrit pour lui s'il garde `full` autrement (déjà nommé sur la page ou sur une page parente ;
+//!   propriétaire ou admin là où une ligne `members` s'applique encore). Une page née dans
+//!   « Espace », où personne n'est nommé, redevient ainsi privée : elle passe dans « Privé », ou
+//!   dans « Partagé » s'il reste d'autres personnes nommées, et les autres membres, admins
+//!   compris, ne la voient plus (`404`). Sous un plancher (R93), la ligne propre retirée, un
+//!   membre simple retombe au niveau du plancher : sa ligne est posée aussi ;
 //! - après tout changement, la page garde quelqu'un en `full`, par ses lignes ou par celles
 //!   d'un ancêtre (Ruling R70 : une ligne `members` compte, les admins y ont `full` ; une ligne
-//!   restée à quelqu'un sans rôle, non) ; sinon `409 last_full_access`, et rien n'est écrit ;
+//!   restée à quelqu'un sans rôle, non) ; sinon `409 last_full_access`, et rien n'est écrit.
+//!   Depuis R122, ce refus ne vient plus que d'un accès nommé qu'on retire ou qu'on baisse ;
 //! - retirer son dernier accès à un invité le fait sortir de l'espace, avec ses invitations en
 //!   attente (même transaction) ;
 //! - après le commit, les connexions de synchro de la page et de ses sous-pages sont fermées
@@ -232,7 +245,9 @@ async fn write(
 /// Journal d'un changement écrit : qui, sur quelle page, pour qui, et la ligne que la page porte
 /// désormais (`line` : son niveau, ou `aucune`) ; jamais d'adresse. C'est ce que le store a
 /// écrit, pas ce qui était demandé : un accès général demandé au niveau du plancher retire la
-/// ligne propre de la page.
+/// ligne propre de la page. Pour l'accès général, `actor_line_posed` dit l'autre écriture
+/// (Ruling R122) : la ligne `(user:<user_id>, full)` posée avec lui sur la page, pour qui l'a
+/// restreint.
 fn log_change(user: &AuthUser, id: Uuid, change: AccessChange, written: AccessWritten) {
     let line = written.line.map_or("aucune", Level::as_str);
     match change {
@@ -241,6 +256,7 @@ fn log_change(user: &AuthUser, id: Uuid, change: AccessChange, written: AccessWr
             space_id = %written.space_id,
             user_id = %user.id,
             line,
+            actor_line_posed = written.actor_line_posed,
             "accès général d'une page changé"
         ),
         AccessChange::User(target, _) => tracing::info!(

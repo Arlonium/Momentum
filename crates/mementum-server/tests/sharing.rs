@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use axum::http::{Method, StatusCode, header};
 use common::{
     Account, Browser, Logs, Reply, SESSION_COOKIE, Team, TestApp, WAIT, exec_sql, json_request,
-    outcome, query_i64, text, tree_nodes,
+    outcome, overtaken, page_routes, query_i64, text, tree_nodes,
 };
 use mementum_acl::{Level, Subject};
 use mementum_schema::SCHEMA_VERSION;
@@ -569,15 +569,23 @@ async fn last_full_access_cannot_be_removed() {
     }
     assert_eq!(team.grants(shared).await, before);
 
-    // Une page des membres : la ligne `members` est le seul `full`. Elle ne part pas ; elle
-    // peut baisser, elle compte encore.
+    // Une page des membres : la ligne `members` est le seul `full`. Elle peut baisser, elle
+    // compte encore. Elle peut partir aussi, depuis R122 (c'était `409 last_full_access`,
+    // sans issue) : qui la retire reçoit sa ligne, et la page garde quelqu'un en `full`.
     let team_page = team.page(None, "Équipe", &[members(Level::Full)]).await;
-    refused(set_general(olga, team_page, Value::Null).await).await;
-    assert_eq!(team.grants(team_page).await, [members(Level::Full)]);
     let reply = set_general(olga, team_page, json!("read")).await;
     reply.assert_status(StatusCode::OK);
     assert_eq!(reply.json()["general"], "read");
     assert_eq!(team.grants(team_page).await, [members(Level::Read)]);
+    let reply = set_general(olga, team_page, Value::Null).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(entries(&reply.json()), [entry(&team.olga, "full", false)]);
+    assert_eq!(
+        team.grants(team_page).await,
+        [user(&team.olga, Level::Full)]
+    );
+    // Cette ligne-là est désormais la seule : elle ne part pas.
+    refused(remove(olga, team_page, team.olga.id).await).await;
 
     // Sam n'a pas de rôle dans l'espace : sa ligne ne compte pas.
     let dormant = team
@@ -1396,7 +1404,7 @@ async fn sharing_log_says_what_was_written() {
             .next()
             .unwrap_or_else(|| panic!("journal : {journal}"));
         assert_eq!(lines.next(), None, "journal : {journal}");
-        for personal in ["exemple.fr", "Olga", "Tom"] {
+        for personal in ["exemple.fr", "Olga", "Tom", "Mona"] {
             assert!(!line.contains(personal), "{line}");
         }
         line.to_string()
@@ -1426,6 +1434,33 @@ async fn sharing_log_says_what_was_written() {
     let line = logged(remove(olga, child, tom), child).await;
     assert!(
         line.contains(r#"line="aucune""#) && line.contains(&tom.to_string()),
+        "{line}"
+    );
+
+    // Ruling R122 : Mona retire l'accès général d'une page d'équipe, et sa ligne est posée. Le
+    // journal dit les deux écritures : la ligne des membres partie, celle de qui demande
+    // posée, pour le compte dont l'id est déjà là. Rien de plus.
+    let team_page = team.page(None, "Équipe", &[members(Level::Full)]).await;
+    let mona = &team.mona;
+    let line = logged(
+        set_general(&mona.browser, team_page, Value::Null),
+        team_page,
+    )
+    .await;
+    assert!(
+        line.contains(r#"line="aucune""#)
+            && line.contains("actor_line_posed=true")
+            && line.contains(&format!("user_id={}", mona.id)),
+        "{line}"
+    );
+    // Quand rien n'est posé pour qui demande, le journal le dit aussi.
+    let line = logged(
+        set_general(&mona.browser, team_page, json!("read")),
+        team_page,
+    )
+    .await;
+    assert!(
+        line.contains(r#"line="read""#) && line.contains("actor_line_posed=false"),
         "{line}"
     );
 }
@@ -1500,4 +1535,294 @@ async fn sharing_change_kicks_live_connections() {
         );
     }
     assert!(still_served(&bystander).await, "page d'à côté fermée");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ruling R122 : qui restreint l'accès général d'une page y garde l'accès complet. Quand le
+// changement (la ligne `members` retirée, ou baissée) lui ferait perdre `full`, sa ligne
+// `(user:<lui>, full)` est posée dans la même transaction : la réponse est `200`, avec les
+// accès de la page, où il figure, et non plus `409 last_full_access` ou `204`.
+
+/// `PUT …/access/general` par `by`, qui doit passer et lui laisser l'accès complet : `200`, et
+/// le `PageAccess` rendu, qui est aussi celui que relit `GET …/access`.
+async fn restricted(by: &Browser<'_>, page: Uuid, level: Value) -> Value {
+    let reply = set_general(by, page, level.clone()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{level} : {}", reply.text());
+    let access = reply.json();
+    assert_eq!(access_of(by, page).await, access, "{level}");
+    access
+}
+
+/// Les accès posés sur la page, par sujet : pour comparer à [`Team::grants`], qui les rend dans
+/// cet ordre.
+fn by_subject(mut lines: Vec<(Subject, Level)>) -> Vec<(Subject, Level)> {
+    lines.sort_by_key(|(subject, _)| subject.to_string());
+    lines
+}
+
+/// Cas (a) de la relecture finale : une page née dans « Espace » ne porte que la ligne des
+/// membres, son auteur n'y est pas nommé. Qui coche « Seulement les invités » (un membre
+/// simple, un admin, la propriétaire) n'est plus refusé par `409 last_full_access` : il reçoit
+/// sa ligne, et la page est à lui.
+#[tokio::test]
+async fn general_access_removed_from_a_team_page_keeps_the_requester_in_full() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    for who in [&team.mona, &team.adam, &team.olga] {
+        let id = team.page(None, "Équipe", &[members(Level::Full)]).await;
+        let access = restricted(&who.browser, id, Value::Null).await;
+        assert_eq!(access["general"], Value::Null);
+        assert_eq!(access["inheritedGeneral"], Value::Null);
+        assert_eq!(entries(&access), [entry(who, "full", false)]);
+        assert_eq!(team.grants(id).await, [user(who, Level::Full)]);
+    }
+}
+
+/// Cas (b) : une invitée est nommée en accès complet. Le retrait de l'accès général répondait
+/// `204`, et qui le demandait perdait la page sans un mot. Il y reste, à côté d'elle.
+#[tokio::test]
+async fn general_access_removed_keeps_the_requester_beside_a_named_guest() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (mona, gina) = (&team.mona, &team.gina);
+    let lines = [members(Level::Full), user(gina, Level::Full)];
+    let id = team.page(None, "Projet", &lines).await;
+
+    let access = restricted(&mona.browser, id, Value::Null).await;
+    assert_eq!(access["general"], Value::Null);
+    // Dans l'ordre d'arrivée dans l'espace : Mona, puis Gina.
+    assert_eq!(
+        entries(&access),
+        [entry(mona, "full", false), entry(gina, "full", false)]
+    );
+    assert_eq!(
+        team.grants(id).await,
+        by_subject(vec![user(mona, Level::Full), user(gina, Level::Full)])
+    );
+    // L'invitée n'y a rien perdu.
+    assert_eq!(access_of(&gina.browser, id).await, access);
+}
+
+/// Baisser l'accès général, c'est le restreindre aussi : un membre simple qui le passe de
+/// l'accès complet à un niveau plus bas répondait `204`, et ne pouvait plus revenir en arrière.
+/// Il garde l'accès complet, par sa ligne.
+#[tokio::test]
+async fn general_access_lowered_keeps_the_requester_in_full() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+    for (name, level) in [
+        ("edit", Level::Edit),
+        ("comment", Level::Comment),
+        ("read", Level::Read),
+    ] {
+        let id = team.page(None, "Équipe", &[members(Level::Full)]).await;
+        let access = restricted(&mona.browser, id, json!(name)).await;
+        assert_eq!(access["general"], name);
+        assert_eq!(entries(&access), [entry(mona, "full", false)], "{name}");
+        assert_eq!(
+            team.grants(id).await,
+            [members(level), user(mona, Level::Full)],
+            "{name}"
+        );
+        // Elle peut donc le relever.
+        restricted(&mona.browser, id, json!("full")).await;
+    }
+}
+
+/// Rien n'est écrit pour qui garde l'accès complet autrement : déjà nommé sur la page, ou sur
+/// une page parente ; propriétaire ou admin là où une ligne des membres continue de
+/// s'appliquer (la sienne, baissée, ou celle d'une page parente).
+#[tokio::test]
+async fn no_redundant_line_when_the_requester_keeps_full() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+
+    // Déjà nommée en accès complet sur la page.
+    let lines = [members(Level::Full), user(mona, Level::Full)];
+    let named = team.page(None, "Nommée", &lines).await;
+    let access = restricted(&mona.browser, named, Value::Null).await;
+    assert_eq!(entries(&access), [entry(mona, "full", false)]);
+    assert_eq!(team.grants(named).await, [user(mona, Level::Full)]);
+    // Nommée sur la page parente : la sous-page n'a plus aucune ligne.
+    let parent = team.page(None, "Parent", &[user(mona, Level::Full)]).await;
+    let child = team
+        .page(Some(parent), "Enfant", &[members(Level::Edit)])
+        .await;
+    let access = restricted(&mona.browser, child, Value::Null).await;
+    assert_eq!(entries(&access), [entry(mona, "full", true)]);
+    assert!(team.grants(child).await.is_empty());
+
+    // Propriétaire, admin : la ligne des membres reste, plus bas ; ils y gardent l'accès
+    // complet, sans être nommés.
+    for who in [&team.olga, &team.adam] {
+        let id = team.page(None, "Équipe", &[members(Level::Full)]).await;
+        let access = restricted(&who.browser, id, json!("read")).await;
+        assert_eq!(access["general"], "read");
+        assert_eq!(entries(&access), []);
+        assert_eq!(team.grants(id).await, [members(Level::Read)]);
+    }
+    // De même sous le plancher d'une page parente : la ligne propre part, le plancher reste.
+    let floor = team.page(None, "Plancher", &[members(Level::Read)]).await;
+    let under = team
+        .page(Some(floor), "Dessous", &[members(Level::Full)])
+        .await;
+    let access = restricted(&team.olga.browser, under, Value::Null).await;
+    assert_eq!(access["general"], "read");
+    assert_eq!(access["inheritedGeneral"], "read");
+    assert_eq!(entries(&access), []);
+    assert!(team.grants(under).await.is_empty());
+}
+
+/// Sous le plancher d'une page parente (R93), retirer la ligne propre de la sous-page fait
+/// retomber un membre simple au niveau du plancher : sa ligne est posée aussi. La sous-page
+/// reste dans « Espace », ouverte aux membres au niveau du plancher.
+#[tokio::test]
+async fn general_access_removed_under_an_inherited_floor_keeps_the_requester_in_full() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+    let parent = team.page(None, "Parent", &[members(Level::Edit)]).await;
+    let child = team
+        .page(Some(parent), "Enfant", &[members(Level::Full)])
+        .await;
+
+    let access = restricted(&mona.browser, child, Value::Null).await;
+    assert_eq!(access["general"], "edit");
+    assert_eq!(access["inheritedGeneral"], "edit");
+    assert_eq!(entries(&access), [entry(mona, "full", false)]);
+    assert_eq!(team.grants(child).await, [user(mona, Level::Full)]);
+    assert_eq!(team.grants(parent).await, [members(Level::Edit)]);
+    assert_eq!(
+        seen(&mona.browser, team.space).await,
+        [
+            page("Enfant", "full", "space"),
+            page("Parent", "edit", "space")
+        ]
+    );
+    assert_eq!(
+        seen(&team.tom.browser, team.space).await,
+        [
+            page("Enfant", "edit", "space"),
+            page("Parent", "edit", "space")
+        ]
+    );
+}
+
+/// Les sections après coup (`GET …/tree`). La page restreinte passe dans « Privé » pour qui l'a
+/// restreinte, s'il y est seul, sous-pages comprises ; dans « Partagé » s'il reste d'autres
+/// personnes nommées ; baissée seulement, elle reste dans « Espace ». Un autre membre, un admin
+/// et la propriétaire ne voient plus la page restreinte, et reçoivent pour elle, sur chaque
+/// route, exactement la réponse d'une page inconnue : statut, type, corps.
+#[tokio::test]
+async fn restricted_team_page_leaves_the_space_section() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (mona, gina) = (&team.mona, &team.gina);
+    let alone = team.page(None, "Seule", &[members(Level::Full)]).await;
+    let sub = team.page(Some(alone), "Sous-page", &[]).await;
+    let lines = [members(Level::Full), user(gina, Level::Full)];
+    let shared = team.page(None, "À deux", &lines).await;
+    let lowered = team.page(None, "Baissée", &[members(Level::Full)]).await;
+    assert_eq!(
+        seen(&team.tom.browser, team.space).await,
+        [
+            page("Baissée", "full", "space"),
+            page("Seule", "full", "space"),
+            page("Sous-page", "full", "space"),
+            page("À deux", "full", "space"),
+        ]
+    );
+
+    restricted(&mona.browser, alone, Value::Null).await;
+    restricted(&mona.browser, shared, Value::Null).await;
+    restricted(&mona.browser, lowered, json!("read")).await;
+
+    assert_eq!(
+        seen(&mona.browser, team.space).await,
+        [
+            page("Baissée", "full", "space"),
+            page("Seule", "full", "private"),
+            page("Sous-page", "full", "private"),
+            page("À deux", "full", "shared"),
+        ]
+    );
+    assert_eq!(
+        seen(&gina.browser, team.space).await,
+        [page("À deux", "full", "shared")]
+    );
+    // Les autres membres ne gardent que la page baissée ; les admins y ont l'accès complet.
+    assert_eq!(
+        seen(&team.tom.browser, team.space).await,
+        [page("Baissée", "read", "space")]
+    );
+    for who in [&team.adam, &team.olga] {
+        assert_eq!(
+            seen(&who.browser, team.space).await,
+            [page("Baissée", "full", "space")]
+        );
+    }
+
+    // Pour eux, la page restreinte n'existe plus, sur aucune route.
+    let unknown = Uuid::now_v7().to_string();
+    for who in [&team.tom, &team.adam, &team.olga] {
+        let mut missing = Vec::new();
+        for (route, request) in page_routes(&unknown) {
+            let reply = who.browser.send(request).await;
+            let body = reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+            assert_eq!(body["message"], "page introuvable", "{route}");
+            missing.push(outcome(&reply));
+        }
+        for id in [alone, sub, shared] {
+            for ((route, request), missing) in
+                page_routes(&id.to_string()).into_iter().zip(&missing)
+            {
+                let reply = who.browser.send(request).await;
+                assert_eq!(&outcome(&reply), missing, "{route}, page {id}");
+            }
+        }
+    }
+    // Rien de cela n'a rien écrit.
+    assert_eq!(team.grants(alone).await, [user(mona, Level::Full)]);
+    assert!(team.grants(sub).await.is_empty());
+}
+
+/// La décision se prend dans la transaction qui écrit (R87). La demande de Mona passe le
+/// contrôle de la route, puis attend le verrou d'écriture de SQLite, que le test tient ; un
+/// changement croisé est écrit et validé sous ce verrou ; la transaction de Mona vient après
+/// lui, et décide sur ce qu'il a laissé. C'est le verrou qui force cet ordre : l'attente de
+/// [`overtaken`] ne sert qu'à laisser la route faire son contrôle sur la base d'avant.
+#[tokio::test]
+async fn crossed_changes_never_leave_the_page_without_full_access() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (mona, gina) = (&team.mona, &team.gina);
+    let line_removed = |page: Uuid, who: &Account<'_>| {
+        let who = Subject::User(who.id);
+        vec![format!(
+            "DELETE FROM acl WHERE node_id = '{page}' AND subject = '{who}'"
+        )]
+    };
+
+    // Mona est nommée : à sa demande, rien n'était à poser pour elle. Olga lui retire sa ligne
+    // entre-temps (la ligne des membres le permet encore). Décidé sur la base d'avant, le
+    // retrait de l'accès général laissait la page sans personne.
+    let lines = [members(Level::Full), user(mona, Level::Full)];
+    let unnamed = team.page(None, "Dénommée", &lines).await;
+    let request = set_general(&mona.browser, unnamed, Value::Null);
+    let taken = overtaken(&t, team.space, request, &line_removed(unnamed, mona)).await;
+    taken.reply.assert_status(StatusCode::OK);
+    assert_eq!(entries(&taken.reply.json()), [entry(mona, "full", false)]);
+    assert_eq!(team.grants(unnamed).await, [user(mona, Level::Full)]);
+
+    // L'invitée est la seule nommée en accès complet ; sa ligne part entre-temps. Sans celle de
+    // Mona, la page n'avait plus personne.
+    let lines = [members(Level::Full), user(gina, Level::Full)];
+    let guest_gone = team.page(None, "Sans l'invitée", &lines).await;
+    let request = set_general(&mona.browser, guest_gone, Value::Null);
+    let taken = overtaken(&t, team.space, request, &line_removed(guest_gone, gina)).await;
+    taken.reply.assert_status(StatusCode::OK);
+    assert_eq!(entries(&taken.reply.json()), [entry(mona, "full", false)]);
+    assert_eq!(team.grants(guest_gone).await, [user(mona, Level::Full)]);
 }
