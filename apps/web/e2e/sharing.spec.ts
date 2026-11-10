@@ -497,8 +497,13 @@ test("general_access_makes_a_private_page_a_space_page", async ({ browser }) => 
   expect(await seenByBruno()).toEqual([["space", "edit"]]);
   expect((await getAccess(aliceApi, mine.id)).general).toBe("edit");
 
-  // « Seulement les invités » : la page redevient privée, et B, qui l'a ouverte, la perd.
+  // « Seulement les invités », une fois confirmé (R127) : la page redevient privée, et B, qui
+  // l'a ouverte, la perd.
   await invited.click();
+  await a
+    .getByRole("alertdialog", { name: "Fermer cette page aux membres ?" })
+    .getByRole("button", { name: "Fermer aux membres" })
+    .click();
   await expect(invited).toBeChecked();
   await expect(level).toHaveCount(0);
   await expect(sectionOf(a, "Privé").locator(`[data-page-id="${mine.id}"]`)).toBeVisible();

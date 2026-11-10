@@ -8,8 +8,10 @@
 //    elle ; puis les invitations de la page qui attendent, avec « Révoquer » ;
 // 3. l'accès général : « Seulement les invités », ou « Tous les membres de l'espace », à un
 //    niveau. Celui qu'une page parente donne déjà est un plancher (R93) : il se relève, sans se
-//    baisser ni se retirer, et « Seulement les invités » est grisé (R110). Un invité de
-//    l'espace le lit sans le régler (R85) ;
+//    baisser ni se retirer, et « Seulement les invités » est grisé (R110). Fermer aux
+//    membres une page qui leur est ouverte la retire de la section « Espace » de tous les
+//    autres : une fenêtre le fait confirmer (R127). Un invité de l'espace le lit sans le
+//    régler (R85) ;
 // 4. « Copier le lien » de la page.
 // Le partage vaut pour la page et ses sous-pages. Pas d'onglet « Publier » : la publication
 // vient en P3.
@@ -75,6 +77,9 @@ export function ShareMenu({ node, onChanged, onAccessLost }: Props) {
   const panelId = useId();
   /** La personne dont on retire l'accès, le temps de la confirmation. */
   const [removing, setRemoving] = useState<AccessEntry | null>(null);
+  /** « Seulement les invités » sur une page ouverte aux membres, le temps de la confirmation. */
+  const [closing, setClosing] = useState(false);
+  const askToClose = useCallback(() => setClosing(true), []);
   /** Compte les fermetures de la confirmation, pour rattraper le focus après chacune. */
   const [confirmed, setConfirmed] = useState(0);
 
@@ -90,6 +95,7 @@ export function ShareMenu({ node, onChanged, onAccessLost }: Props) {
     (refusal: string | null) => {
       setOpen(false);
       setRemoving(null);
+      setClosing(false);
       onAccessLost(refusal);
     },
     [onAccessLost],
@@ -115,7 +121,7 @@ export function ShareMenu({ node, onChanged, onAccessLost }: Props) {
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     // La fenêtre de confirmation a son propre Échap.
-    if (event.key !== "Escape" || !open || removing !== null) return;
+    if (event.key !== "Escape" || !open || removing !== null || closing) return;
     event.preventDefault();
     event.stopPropagation();
     setOpen(false);
@@ -143,7 +149,14 @@ export function ShareMenu({ node, onChanged, onAccessLost }: Props) {
         Partager
       </button>
       {open && (
-        <Panel id={panelId} panelRef={panelRef} node={node} share={share} onRemove={setRemoving} />
+        <Panel
+          id={panelId}
+          panelRef={panelRef}
+          node={node}
+          share={share}
+          onRemove={setRemoving}
+          onClose={askToClose}
+        />
       )}
       {removing && (
         <RemoveConfirm
@@ -156,6 +169,25 @@ export function ShareMenu({ node, onChanged, onAccessLost }: Props) {
           }}
           onCancel={() => setRemoving(null)}
         />
+      )}
+      {closing && (
+        <Confirm
+          // Espace insécable : le « ? » ne passe pas seul à la ligne.
+          title={"Fermer cette page aux membres\u00a0?"}
+          confirmLabel="Fermer aux membres"
+          destructive
+          busy={share.busy !== null}
+          onConfirm={() =>
+            void share.setGeneral(null).then(() => {
+              setClosing(false);
+              setConfirmed((n) => n + 1);
+            })
+          }
+          onCancel={() => setClosing(false)}
+        >
+          Les autres membres de l'espace ne la verront plus, ni ses sous-pages. Tu y gardes
+          l'accès complet, avec les personnes nommées ci-dessus.
+        </Confirm>
       )}
     </div>
   );
@@ -194,9 +226,11 @@ type PanelProps = {
   node: PageNode;
   share: Share;
   onRemove: (entry: AccessEntry) => void;
+  /** « Seulement les invités » est choisi sur une page ouverte aux membres : à confirmer. */
+  onClose: () => void;
 };
 
-function Panel({ id, panelRef, node, share, onRemove }: PanelProps) {
+function Panel({ id, panelRef, node, share, onRemove, onClose }: PanelProps) {
   const { me } = useSession();
   const emailRef = useRef<HTMLInputElement>(null);
   const { access, busy } = share;
@@ -249,7 +283,7 @@ function Panel({ id, panelRef, node, share, onRemove }: PanelProps) {
             {access.invitations.length > 0 && (
               <Pending invitations={access.invitations} share={share} />
             )}
-            <General share={share} guest={guest} />
+            <General share={share} guest={guest} onClose={onClose} />
           </>
         )}
       </div>
@@ -432,7 +466,18 @@ function Pending({ invitations, share }: { invitations: PendingInvitation[]; sha
   );
 }
 
-function General({ share, guest }: { share: Share; guest: boolean }) {
+type GeneralProps = {
+  share: Share;
+  guest: boolean;
+  /**
+   * « Seulement les invités » est choisi. Le choix ne se fait que sur une page ouverte aux
+   * membres par sa propre ligne (sinon il est déjà coché, ou grisé) : il la fermerait à tous
+   * les autres, et n'est donc envoyé qu'une fois confirmé (Ruling R127).
+   */
+  onClose: () => void;
+};
+
+function General({ share, guest, onClose }: GeneralProps) {
   const headingId = useId();
   const invitedId = useId();
   const membersId = useId();
@@ -488,7 +533,7 @@ function General({ share, guest }: { share: Share; guest: boolean }) {
                 disabled={busy || !general.invitedOnly}
                 aria-labelledby={invitedId}
                 aria-describedby={`${invitedId}-hint`}
-                onChange={() => void share.setGeneral(null)}
+                onChange={onClose}
               />
               <span className="mm-share-dot" aria-hidden="true" />
               <span id={invitedId} className="mm-share-choice-label">

@@ -3,18 +3,24 @@
 // « Seulement les invités » y garde pourtant l'accès complet : le serveur pose sa ligne avec
 // le changement. Avant, le choix était refusé sans issue (`409 last_full_access`), ou retirait
 // la page à celui qui cliquait. Le serveur fait foi : le test relit aussi ce qu'il répond.
+//
+// La page quitte alors la section « Espace » de tous les autres membres, propriétaires et
+// admins compris : le menu le fait confirmer d'abord (Ruling R127).
 import { expect, test, type Page } from "@playwright/test";
 import {
   accessLost,
   accessRow,
   apiAs,
   closeContexts,
+  createPage,
+  forbidNativeDialogs,
   getAccess,
   getMe,
   getTree,
   memberOf,
   newUser,
   NO_SESSION,
+  openPage,
   openShareMenu,
   ownerAndMember,
   pageIdOf,
@@ -44,6 +50,11 @@ async function addTeamPage(p: Page, title: string): Promise<string> {
   await titleOf(p).press("Enter");
   await expect(treeRow(p, id).getByRole("link")).toHaveText(title);
   return id;
+}
+
+/** La fenêtre qui fait confirmer « Seulement les invités » sur une page ouverte aux membres. */
+function closingConfirm(p: Page) {
+  return p.getByRole("alertdialog", { name: "Fermer cette page aux membres ?" });
 }
 
 test("team_page_becomes_private_from_the_share_menu", async ({ browser }) => {
@@ -81,9 +92,18 @@ test("team_page_becomes_private_from_the_share_menu", async ({ browser }) => {
   await expect(members).toBeChecked();
   await expect(invited).toBeEnabled();
 
-  // Il coche « Seulement les invités » : aucun message d'erreur, le choix reste coché, et le
-  // menu reste ouvert sur la page.
+  // Il coche « Seulement les invités » : une fenêtre de la page le fait confirmer, et dit ce
+  // que cela change pour les autres et pour lui.
   await invited.click();
+  const confirm = closingConfirm(b);
+  await expect(confirm).toContainText(
+    "Les autres membres de l'espace ne la verront plus, ni ses sous-pages. Tu y gardes l'accès complet, avec les personnes nommées ci-dessus.",
+  );
+  await expect(members).toBeChecked();
+  // Il confirme : aucun message d'erreur, le choix est coché, et le menu reste ouvert sur la
+  // page.
+  await confirm.getByRole("button", { name: "Fermer aux membres" }).click();
+  await expect(confirm).toHaveCount(0);
   await expect(invited).toBeChecked();
   await expect(menu.getByRole("combobox", { name: "Niveau des membres de l'espace" })).toHaveCount(0);
   await expect(b.getByRole("alert")).toHaveCount(0);
@@ -127,3 +147,52 @@ test("team_page_becomes_private_from_the_share_menu", async ({ browser }) => {
     await unknown.text(),
   ]);
 });
+
+test("closing_a_team_page_to_members_can_be_cancelled", async ({ browser }) => {
+  const { alice, aliceApi, space, brunoApi } = await ownerAndMember();
+  const team = await createPage(aliceApi, { title: `Équipe ${unique()}` });
+  const seenByBruno = async () =>
+    (await getTree(brunoApi, space.id)).nodes.filter((n) => n.id === team.id).map((n) => n.section);
+  const a = await openPage(browser, team.id, alice);
+  const nativeDialogs = forbidNativeDialogs(a);
+  const menu = await openShareMenu(a);
+  const general = menu.getByRole("radiogroup", { name: "Accès général" });
+  const invited = general.getByRole("radio", { name: "Seulement les invités" });
+  const members = general.getByRole("radio", { name: "Tous les membres de l'espace" });
+  const level = menu.getByRole("combobox", { name: "Niveau des membres de l'espace" });
+  const confirm = closingConfirm(a);
+  /** Rien n'a changé : le choix, le menu, et ce que le serveur dit de la page. */
+  const stillOpenToMembers = async () => {
+    await expect(confirm).toHaveCount(0);
+    await expect(members).toBeChecked();
+    await expect(shareMenu(a)).toBeVisible();
+    expect((await getAccess(aliceApi, team.id)).general).toBe("full");
+    expect(await seenByBruno()).toEqual(["space"]);
+  };
+
+  // « Seulement les invités » ouvre la fenêtre, le focus sur « Annuler » : Entrée, tapée par
+  // réflexe, ne ferme pas la page aux membres.
+  await invited.click();
+  await expect(confirm.getByRole("button", { name: "Annuler" })).toBeFocused();
+  await expect(confirm.getByRole("button", { name: "Fermer aux membres" })).toBeVisible();
+  await a.keyboard.press("Enter");
+  await stillOpenToMembers();
+  // « Annuler » au clic, puis Échap : de même, et Échap ne ferme que la fenêtre, pas le menu.
+  await invited.click();
+  await confirm.getByRole("button", { name: "Annuler" }).click();
+  await stillOpenToMembers();
+  await invited.click();
+  await expect(confirm).toBeVisible();
+  await a.keyboard.press("Escape");
+  await stillOpenToMembers();
+
+  // Baisser le niveau des membres ne demande rien : ils voient toujours la page.
+  await level.selectOption("read");
+  await expect(level).toHaveValue("read");
+  await expect(confirm).toHaveCount(0);
+  expect((await getAccess(aliceApi, team.id)).general).toBe("read");
+  expect(await seenByBruno()).toEqual(["space"]);
+  await expect(a.getByRole("alert")).toHaveCount(0);
+  expect(nativeDialogs).toEqual([]);
+});
+
