@@ -871,6 +871,37 @@ test("change_refused_after_full_access_was_lost_elsewhere", async ({ browser }) 
   await expect(readerBanner(b)).toHaveCount(0);
 });
 
+test("revocation_refused_after_full_access_was_lost_elsewhere", async ({ browser }) => {
+  const { aliceApi, bruno, brunoId } = await ownerAndMember();
+  const shared = await createPage(aliceApi, { section: "private", title: `Liste ${unique()}` });
+  await setPageLevel(aliceApi, shared.id, brunoId, "full");
+  const email = `attente-${unique()}@exemple.fr`;
+  const { id } = await inviteToPage(aliceApi, shared.id, { email, level: "read" });
+  const b = await openPage(browser, shared.id, bruno);
+  const menu = await openShareMenu(b);
+  await expect(pendingRow(menu, email)).toBeVisible();
+
+  // Pendant que le menu de B est ouvert, A le fait passer en modification ; la relecture de la
+  // page par son onglet est retenue.
+  const reads = await holdPageReads(b, shared.id);
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  const refused = await (await apiAs(bruno)).get(`/api/v1/pages/${shared.id}/access`);
+  expect(refused.status()).toBe(403);
+  const body = (await refused.json()) as ErrorBody;
+
+  // « Révoquer » lui est refusé comme si l'invitation n'existait pas : le menu se ferme, et ne
+  // laisse pas croire que c'est fait.
+  await pendingRow(menu, email).getByRole("button", { name: "Révoquer" }).click();
+  await expect(shareMenu(b)).toHaveCount(0);
+  const alert = sidebarOf(b).getByRole("alert");
+  await expect(alert).toContainText("Le partage n'a pas pu être modifié.");
+  await expect(alert).toContainText(body.message, { ignoreCase: true });
+  expect((await getAccess(aliceApi, shared.id)).invitations.map((i) => i.id)).toEqual([id]);
+
+  reads.release();
+  await expect(shareButton(b)).toHaveCount(0);
+});
+
 test("rights_change_does_not_say_offline", async ({ browser }) => {
   const { alice, aliceApi, bruno, brunoId } = await ownerAndMember();
   const shared = await createPage(aliceApi, { section: "private", title: `Suivi ${unique()}` });

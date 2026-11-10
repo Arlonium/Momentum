@@ -315,6 +315,46 @@ test("invitation_already_used_is_just_read_again", async () => {
   expect(share.current.error).toBeNull();
 });
 
+test("refused_revocation_is_said_when_full_access_was_lost", async () => {
+  // Qui ne peut plus gérer l'invitation reçoit le même `404` que pour une invitation déjà
+  // utilisée ; le serveur ne lui rend plus les accès non plus, et dit pourquoi.
+  const share = await opened(access({ invitations: [pending("i1", "bruno@exemple.fr")] }));
+  vi.mocked(revokeInvitation).mockRejectedValue(notFound());
+  await settle(() => {
+    void share.current.revoke("i1");
+  });
+  await settle(() => reads[1].reject(forbidden()));
+  // Le menu se ferme, mais pas sans un mot : l'invitation vaut toujours.
+  expect(onAccessLost).toHaveBeenCalledExactlyOnceWith("accès complet requis sur cette page");
+  expect(share.current.busy).toBeNull();
+});
+
+test("refused_revocation_is_said_when_the_page_is_gone", async () => {
+  const share = await opened(access({ invitations: [pending("i1", "bruno@exemple.fr")] }));
+  vi.mocked(revokeInvitation).mockRejectedValue(notFound());
+  await settle(() => {
+    void share.current.revoke("i1");
+  });
+  // « Introuvable » n'apprendrait rien : ce qui n'a pas été fait est dit.
+  await settle(() => reads[1].reject(notFound()));
+  expect(onAccessLost).toHaveBeenCalledExactlyOnceWith("Cette invitation n'a pas pu être révoquée.");
+});
+
+test("refused_revocation_of_an_invitation_that_still_waits_says_so", async () => {
+  const waiting = access({ invitations: [pending("i1", "bruno@exemple.fr")] });
+  const share = await opened(waiting);
+  vi.mocked(revokeInvitation).mockRejectedValue(notFound());
+  await settle(() => {
+    void share.current.revoke("i1");
+  });
+  // La liste relue la porte encore : le menu ne laisse pas croire qu'elle est révoquée.
+  await settle(() => reads[1].resolve(waiting));
+  expect(share.current.access).toEqual(waiting);
+  expect(share.current.error).toBe("Cette invitation n'a pas pu être révoquée.");
+  expect(share.current.busy).toBeNull();
+  expect(onAccessLost).not.toHaveBeenCalled();
+});
+
 test("older_answer_arriving_late_is_dropped", async () => {
   const share = await renderHook(hook, { open: true });
   // Une seconde lecture part avant la réponse de la première.

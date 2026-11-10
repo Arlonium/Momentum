@@ -11,6 +11,10 @@
 //   même quand le serveur ne lui rend plus les accès (`403`), ou plus la page (`404`) :
 //   `onAccessLost`, avec le refus qui l'a révélé s'il y en a un. Le menu n'a plus rien à
 //   montrer ; l'application relit la page.
+// - « Révoquer » refusé par `404` : l'invitation n'attend plus (acceptée, échue, révoquée
+//   ailleurs), ce que la liste relue montre sans un mot ; ou la personne ne peut plus la gérer,
+//   et le serveur répond de même. Le refus est alors dit : par la relecture refusée à son tour,
+//   ou dans le menu si la liste relue porte encore l'invitation.
 // - Une invitation montre son lien une fois : le serveur ne garde que le hachage de son jeton.
 //   Le lien reste à l'écran tant que l'invitation attend, même si la relecture de la liste
 //   échoue ; il part quand elle n'attend plus (acceptée, révoquée).
@@ -74,7 +78,17 @@ type Callbacks = {
 };
 
 /** Le serveur ne rend plus les accès à cette personne, ou plus la page. */
-const isDenied = (e: unknown) => e instanceof ApiError && (e.status === 403 || e.status === 404);
+const isDenied = (e: unknown): e is ApiError =>
+  e instanceof ApiError && (e.status === 403 || e.status === 404);
+
+/** Le refus d'une révocation, quand le serveur n'en dit rien d'utile (« introuvable »). */
+const NOT_REVOKED = "Cette invitation n'a pas pu être révoquée.";
+
+/**
+ * Ce qu'une relecture refusée à son tour rend à l'application : le refus qui l'a demandée,
+ * ou celui que choisit `(denied)`, le refus de la relecture elle-même.
+ */
+type Refusal = string | null | ((denied: ApiError) => string);
 
 export function useShare(pageId: string, open: boolean, callbacks: Callbacks): Share {
   const [access, setAccess] = useState<PageAccess | null>(null);
@@ -103,18 +117,25 @@ export function useShare(pageId: string, open: boolean, callbacks: Callbacks): S
     setCreated((link) => (link && next.invitations.some((i) => i.id === link.id) ? link : null));
   }, []);
 
-  /** Relit les accès ; `refusal` : le refus qui vient de demander cette relecture. */
+  /**
+   * Relit les accès, et les rend s'ils sont montrés ; `refusal` : le refus qui vient de
+   * demander cette relecture.
+   */
   const read = useCallback(
-    async (refusal: string | null) => {
+    async (refusal: Refusal): Promise<PageAccess | null> => {
       const rank = ++asked.current;
       pending.current += 1;
       setReading(true);
       try {
-        show(rank, await getAccess(pageId));
+        const next = await getAccess(pageId);
+        show(rank, next);
+        return rank === asked.current ? next : null;
       } catch (e) {
-        if (rank !== asked.current || isSessionLost(e)) return;
-        if (isDenied(e)) latest.current.onAccessLost(refusal);
-        else setReadError(messageOf(e));
+        if (rank !== asked.current || isSessionLost(e)) return null;
+        if (isDenied(e)) {
+          latest.current.onAccessLost(typeof refusal === "function" ? refusal(e) : refusal);
+        } else setReadError(messageOf(e));
+        return null;
       } finally {
         pending.current -= 1;
         setReading(pending.current > 0);
@@ -122,7 +143,9 @@ export function useShare(pageId: string, open: boolean, callbacks: Callbacks): S
     },
     [pageId, show],
   );
-  const reload = useCallback(() => read(null), [read]);
+  const reload = useCallback(async () => {
+    await read(null);
+  }, [read]);
 
   useEffect(() => {
     if (!open) return;
@@ -216,6 +239,7 @@ export function useShare(pageId: string, open: boolean, callbacks: Callbacks): S
   const revoke = useCallback(
     async (invitationId: string) => {
       if (!begin(`invitation:${invitationId}`)) return;
+      let notFound = false;
       try {
         await revokeInvitation(invitationId);
       } catch (e) {
@@ -223,14 +247,23 @@ export function useShare(pageId: string, open: boolean, callbacks: Callbacks): S
           end();
           return;
         }
-        // Déjà acceptée, échue ou révoquée ailleurs (`404`) : la liste relue le montre.
-        if (!(e instanceof ApiError && e.status === 404)) setError(messageOf(e));
+        notFound = e instanceof ApiError && e.status === 404;
+        if (!notFound) setError(messageOf(e));
       }
       // Réussie ou refusée : la liste telle que le serveur la voit.
-      await reload();
+      if (!notFound) await read(null);
+      else {
+        // Le serveur dit pourquoi il ne rend plus les accès (`403`) ; d'une page qu'il ne rend
+        // plus non plus, il ne dit qu'« introuvable ».
+        const next = await read((denied) =>
+          denied.status === 403 ? messageOf(denied) : NOT_REVOKED,
+        );
+        // Si l'invitation n'attend plus, la liste relue le montre, et il n'y a rien à dire.
+        if (next?.invitations.some((i) => i.id === invitationId)) setError(NOT_REVOKED);
+      }
       end();
     },
-    [reload],
+    [read],
   );
 
   return {
