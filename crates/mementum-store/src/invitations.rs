@@ -5,6 +5,8 @@
 //! SHA-256 du jeton. Une invitation sert une fois ; échue, révoquée (supprimée) ou déjà
 //! acceptée, elle n'existe plus pour personne (`NotFound`).
 
+use std::fmt;
+
 use mementum_acl::{Grant, Level, Role, Subject};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
@@ -27,7 +29,7 @@ pub enum InvitationGrant {
 }
 
 /// Une invitation à créer.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NewInvitation {
     pub space_id: Uuid,
     pub grant: InvitationGrant,
@@ -38,6 +40,20 @@ pub struct NewInvitation {
     pub created_by: Uuid,
     /// Millisecondes Unix.
     pub expires_at: i64,
+}
+
+/// `Debug` masque le hachage du jeton : une invitation écrite dans un journal ne le livre pas.
+impl fmt::Debug for NewInvitation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewInvitation")
+            .field("space_id", &self.space_id)
+            .field("grant", &self.grant)
+            .field("email", &self.email)
+            .field("token_hash", &"<masqué>")
+            .field("created_by", &self.created_by)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Une invitation, sans son jeton.

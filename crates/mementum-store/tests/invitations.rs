@@ -187,6 +187,9 @@ async fn invitation_is_single_use_and_expires() {
     // Acceptée une fois, puis plus jamais.
     let mut new = invitation(&space, to_space(Role::Member), olga.id, 1);
     new.email = "  Alice@Exemple.TEST ".to_string();
+    // Le hachage du jeton ne sort pas par `Debug` (une invitation écrite dans un journal).
+    let shown = format!("{new:?}");
+    assert!(!shown.contains("1, 1, 1"), "{shown}");
     let inv = store.create_invitation(new.clone()).await.unwrap();
     assert_eq!(inv.email, "alice@exemple.test", "rognée, en minuscules");
     assert_eq!(
