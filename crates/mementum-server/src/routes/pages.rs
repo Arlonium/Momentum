@@ -41,9 +41,11 @@
 //!
 //! **Réponse d'une écriture.** Créer une page et la changer de parent changent les droits de
 //! l'espace. La réponse n'est pas relue pour autant : elle se compose de ce que l'écriture a
-//! rendu et des accès lus avant elle (ceux du parent, les lignes de la page). Relire pourrait
-//! répondre `404` à une écriture réussie, si les droits bougent entre-temps, et le client
-//! réessaierait.
+//! rendu et des accès lus avant elle (ceux du parent, les lignes de la page). Pour une page qui
+//! arrive à la racine, rien ne vient d'une lecture faite avant : la transaction rend les
+//! lignes qu'elle a écrites et le rôle qu'elle a lu, et la réponse dit exactement ce qui est
+//! écrit. Relire pourrait répondre `404` à une écriture réussie, si les droits bougent
+//! entre-temps, et le client réessaierait.
 
 use std::cmp::Reverse;
 
@@ -57,7 +59,7 @@ use mementum_acl::{Action, Grant, Level, NodeAccess, Role, SpaceAccess, Subject}
 use mementum_crdt::PageDoc;
 use mementum_md::{Block, Content, Props, RenderOpts, parse, render};
 use mementum_schema::PropSpec;
-use mementum_store::{NewNode, Node, NodeKind, Place, Sibling, StoreError};
+use mementum_store::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, StoreError};
 use uuid::Uuid;
 
 use crate::access::{at_least, permit};
@@ -253,7 +255,9 @@ pub(crate) async fn get(
 /// R94) : une sous-page d'équipe reste une page de l'équipe, dans la section « Espace ». Et qui
 /// l'y passe y a toujours l'accès complet (Ruling R82) : sa ligne `(user:<lui>, full)` est
 /// posée, ou relevée, si l'accès général ne le lui donne pas déjà. Le tout dans la transaction
-/// du déplacement : la page n'est jamais sans personne pour la gérer.
+/// du déplacement : la page n'est jamais sans personne pour la gérer. La réponse se compose de
+/// ce que cette transaction rend (les lignes de la page, le rôle qu'elle a lu), jamais d'une
+/// lecture faite avant elle.
 ///
 /// La place est décidée sur le parent lu avec les droits. Si la page change de parent avant
 /// l'écriture, le store refuse (`Stale`) : la route relit et redécide, [`MOVE_RETRIES`] fois
@@ -305,8 +309,12 @@ pub(crate) async fn update(
             // Ni un titre ni une place sous le même parent ne changent les accès, et une
             // page à la corbeille n'arrive pas ici.
             Ok(updated) => {
-                let access = moving.map_or(access, |moving| moving.access);
-                return Ok(Json(page_node(&updated, &access, None)));
+                let access = match (moving.map(|moving| moving.access), &updated.at_root) {
+                    (None, _) => access,
+                    (Some(Some(after)), _) => after,
+                    (Some(None), at_root) => root_access(at_root.as_ref(), &user)?,
+                };
+                return Ok(Json(page_node(&updated.node, &access, None)));
             }
             Err(StoreError::Stale) if retries < MOVE_RETRIES => {
                 retries += 1;
@@ -343,8 +351,19 @@ struct Move {
     root_grant: Option<Grant>,
     /// La page change de parent : les droits de son sous-arbre changent.
     changes_parent: bool,
-    /// Les accès de la personne à la page une fois le déplacement écrit.
-    access: NodeAccess,
+    /// Les accès de la personne à la page une fois le déplacement écrit. `None` : la page
+    /// arrive à la racine, et c'est la transaction qui dira ce qu'elle y porte
+    /// ([`root_access`]).
+    access: Option<NodeAccess>,
+}
+
+/// Les accès de la personne à la page qu'elle vient de passer à la racine, d'après ce que la
+/// transaction du déplacement a rendu : les lignes que la page y porte, et le rôle qu'elle a
+/// lu pour qui déplace. Rien ne vient du cache des accès, qui date d'avant l'écriture.
+fn root_access(at_root: Option<&AtRoot>, user: &AuthUser) -> Result<NodeAccess, ApiError> {
+    at_root
+        .and_then(|at_root| AppState::own_access(&at_root.grants, user, at_root.role?))
+        .ok_or_else(|| ApiError::internal(&"page à la racine sans accès pour qui la déplace"))
 }
 
 /// La place que demande `body` pour la page, si la personne a le droit de l'y mettre ; `None`
@@ -393,7 +412,7 @@ async fn planned_move(
             place: place()?,
             root_grant: None,
             changes_parent: false,
-            access: *access,
+            access: Some(*access),
         }));
     }
     permit(access, Action::Move)?;
@@ -411,23 +430,19 @@ async fn planned_move(
                 in_trash: false,
                 visible_parent: Some(parent),
             };
-            (None, access)
+            (None, Some(access))
         }
         // Pas de parent nommé, et un autre parent que le sien : la racine. Il faut ce qu'il
         // faut pour y créer une page. La page y garde son accès général (Ruling R94), et la
-        // personne y a l'accès complet (Ruling R82) : le store dit les lignes qu'elle portera,
-        // et les écrira ainsi.
+        // personne y a l'accès complet (Ruling R82) : c'est la transaction du déplacement qui
+        // décide des lignes de la page, et qui les rend.
         None => {
-            let role = at_least(space, Role::Member)?;
+            at_least(space, Role::Member)?;
             let grant = Grant {
                 subject: Subject::User(user.id),
                 level: Level::Full,
             };
-            let lines = state.store.grants_at_root(node.id, Some(grant)).await?;
-            let access = AppState::own_access(&lines, user, role).ok_or_else(|| {
-                ApiError::internal(&"page à la racine sans accès pour qui la déplace")
-            })?;
-            (Some(grant), access)
+            (Some(grant), None)
         }
     };
     Ok(Some(Move {

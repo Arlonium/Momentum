@@ -210,10 +210,15 @@ async fn update_node_changes_title_and_place_together() {
         .update_node(b.id, Some("B, sous A"), Some(place), Some(user), None)
         .await
         .unwrap();
-    assert_eq!(moved.title, "B, sous A");
-    assert_eq!(moved.parent_id, Some(a.id));
-    assert_eq!(moved.updated_by, Some(user));
-    assert_eq!(store.get_node(b.id).await.unwrap(), Some(moved.clone()));
+    // Sous une autre page : rien à dire de la racine.
+    assert_eq!(moved.at_root, None);
+    assert_eq!(moved.node.title, "B, sous A");
+    assert_eq!(moved.node.parent_id, Some(a.id));
+    assert_eq!(moved.node.updated_by, Some(user));
+    assert_eq!(
+        store.get_node(b.id).await.unwrap(),
+        Some(moved.node.clone())
+    );
     // Rien de demandé : rien d'écrit, et le nœud tel qu'il est.
     let rev = store.space_rev(space.id).await.unwrap();
     assert_eq!(
@@ -321,8 +326,17 @@ async fn update_node_gives_root_grant_to_a_node_arriving_at_root() {
             .update_node(node.id, None, Some(root), Some(user), grant)
             .await
             .unwrap();
-        assert_eq!(moved.parent_id, None, "{title}");
-        store.node_grants(node.id).await.unwrap()
+        assert_eq!(moved.node.parent_id, None, "{title}");
+        // La transaction rend ce qu'elle a écrit : les lignes du nœud, et le rôle qu'elle a
+        // lu pour le sujet de `grant`.
+        let lines = store.node_grants(node.id).await.unwrap();
+        let at_root = moved.at_root.expect("un nœud arrivé à la racine");
+        assert_eq!(at_root.role, grant.map(|_| Role::Member), "{title}");
+        assert_eq!(at_root.grants.len(), lines.len(), "{title}");
+        for line in &lines {
+            assert!(at_root.grants.contains(line), "{title} : {line:?}");
+        }
+        lines
     };
 
     // Sans ligne propre : l'accès est posé, en une seule écriture.
@@ -398,10 +412,11 @@ async fn update_node_gives_root_grant_to_a_node_arriving_at_root() {
         (at_root.id, None, Some(last)),
         (elsewhere.id, Some("Renommée"), None),
     ] {
-        store
+        let updated = store
             .update_node(id, title, place, Some(user), Some(full(user)))
             .await
             .unwrap();
+        assert_eq!(updated.at_root, None);
         assert_eq!(store.node_grants(id).await.unwrap(), []);
     }
 
@@ -509,7 +524,15 @@ async fn to_root(f: &common::Fixture, id: Uuid, mover: Uuid) {
         )
         .await
         .unwrap();
-    assert_eq!(moved.parent_id, None);
+    assert_eq!(moved.node.parent_id, None);
+    // La transaction rend ce qu'elle a écrit : les lignes de la page, et le rôle qu'elle a lu
+    // pour qui la déplace.
+    let at_root = moved.at_root.expect("une page arrivée à la racine");
+    assert_lines(f, id, &at_root.grants).await;
+    assert_eq!(
+        at_root.role,
+        f.store.role_in(f.space.id, mover).await.unwrap()
+    );
 }
 
 /// Les lignes propres de la page sont exactement celles-ci, dans n'importe quel ordre.
@@ -729,7 +752,8 @@ async fn reorder_at_root_writes_no_grant() {
                 after,
                 from: None,
             };
-            f.store
+            let updated = f
+                .store
                 .update_node(
                     id,
                     None,
@@ -739,6 +763,7 @@ async fn reorder_at_root_writes_no_grant() {
                 )
                 .await
                 .unwrap();
+            assert_eq!(updated.at_root, None);
             assert_lines(&f, id, &own).await;
         }
     }
@@ -854,7 +879,8 @@ async fn update_node_writes_nothing_when_the_node_is_already_there() {
         let node = store
             .update_node(id, None, Some(place), Some(user), None)
             .await
-            .unwrap();
+            .unwrap()
+            .node;
         assert_eq!(Some(&node), before.iter().find(|n| n.id == id), "{place:?}");
         assert_eq!(
             store.list_nodes(space.id).await.unwrap(),
@@ -874,7 +900,8 @@ async fn update_node_writes_nothing_when_the_node_is_already_there() {
             None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .node;
     assert_eq!(
         (
             renamed.title.as_str(),
@@ -888,7 +915,8 @@ async fn update_node_writes_nothing_when_the_node_is_already_there() {
     let moved = store
         .update_node(c.id, None, Some(under(here, None)), Some(user), None)
         .await
-        .unwrap();
+        .unwrap()
+        .node;
     assert!(moved.position < a.position);
     assert_eq!(moved.updated_by, Some(user));
     assert_eq!(titles(store, space, here).await, ["C", "A", "B2"]);
@@ -950,7 +978,8 @@ async fn update_node_refuses_a_place_decided_under_another_parent() {
             None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .node;
     assert_eq!(back.parent_id, Some(old.id));
     let to_root = store
         .update_node(
@@ -961,12 +990,14 @@ async fn update_node_refuses_a_place_decided_under_another_parent() {
             None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .node;
     assert_eq!(to_root.parent_id, None);
     let stays = store
         .update_node(node.id, None, Some(decided_under(None, None)), None, None)
         .await
-        .unwrap();
+        .unwrap()
+        .node;
     assert_eq!(stays.parent_id, None);
 }
 

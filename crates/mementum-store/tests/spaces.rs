@@ -149,7 +149,8 @@ async fn every_structural_write_bumps_rev() {
     let renamed = store
         .update_node(b.id, Some("B1"), Some(last), Some(user), None)
         .await
-        .unwrap();
+        .unwrap()
+        .node;
     assert!(renamed.position > a.position, "b est passé en fin");
     assert_eq!(
         rev(store, space).await,

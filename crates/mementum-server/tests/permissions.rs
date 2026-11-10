@@ -1738,6 +1738,91 @@ async fn overtaken_patch_naming_the_old_parent_becomes_a_move() {
     );
 }
 
+/// Mona passe à la racine une sous-page de « Parent » (aux accès `above`), pendant qu'une
+/// écriture (`meanwhile`, faite de l'id de ce parent) la prend de vitesse ([`overtaken`]) sans
+/// rien lui retirer de ce qu'il lui faut pour déplacer la page. Vérifie que la page porte
+/// ensuite les lignes `lines`, et que la réponse dit ce que dit la lecture de la page ; rend
+/// le niveau et la section de la réponse.
+///
+/// La requête a bien décidé avant l'écriture concurrente : elle range la page après une page
+/// de racine que Mona ne voit plus ensuite. Arrivée après, elle aurait reçu `422
+/// invalid_after`.
+async fn root_move_overtaken(
+    above: impl FnOnce(&Team<'_>) -> Vec<(Subject, Level)>,
+    meanwhile: impl FnOnce(&Team<'_>, Uuid) -> String,
+    lines: impl FnOnce(&Team<'_>) -> Vec<(Subject, Level)>,
+) -> (String, String) {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, mona) = (&team.olga, &team.mona);
+    let parent = team.page(None, "Parent", &above(&team)).await;
+    let page = team.page(Some(parent), "Page", &[]).await;
+    let seen_before = [user(olga, Level::Full), user(mona, Level::Read)];
+    let witness = team.page(None, "Témoin", &seen_before).await;
+    let unseen = format!(
+        "DELETE FROM acl WHERE node_id = '{witness}' AND subject = '{}'",
+        Subject::User(mona.id)
+    );
+
+    let id = page.to_string();
+    let body = json!({ "parentId": null, "afterId": witness.to_string() });
+    let writes = [meanwhile(&team, parent), unseen];
+    let race = overtaken(&t, team.space, mona.patch(&id, body), &writes).await;
+
+    // Le store n'a rien refusé : ce qu'il fallait à Mona tenait encore.
+    assert_eq!(race.redecided(page), 0, "journal : {}", race.journal);
+    race.reply.assert_status(StatusCode::OK);
+    let moved = race.reply.json();
+    assert!(moved["parentId"].is_null());
+    assert_eq!(team.grants(page).await, lines(&team));
+    assert_reads_back(mona, &moved).await;
+    (
+        text(&moved, "level").to_string(),
+        text(&moved, "section").to_string(),
+    )
+}
+
+/// La réponse d'un passage à la racine dit ce que la transaction a écrit, pas ce que la route
+/// avait lu avant elle. Pendant que la requête de Mona attend pour écrire, l'ancienne page
+/// parente, jusque-là partagée entre Olga et elle, reçoit un accès général : la page le garde
+/// en arrivant à la racine (Ruling R94), et la réponse la range dans « Espace », comme la
+/// lecture qui suit.
+#[tokio::test]
+async fn move_to_root_answers_with_what_its_transaction_wrote() {
+    let seen = root_move_overtaken(
+        |team| vec![user(&team.olga, Level::Full), user(&team.mona, Level::Full)],
+        |_, parent| {
+            format!(
+                "INSERT INTO acl (node_id, subject, level) VALUES ('{parent}', 'members', 'read')"
+            )
+        },
+        |team| vec![members(Level::Read), user(&team.mona, Level::Full)],
+    )
+    .await;
+    assert_eq!(seen, ("full".to_string(), "space".to_string()));
+}
+
+/// Le rôle aussi vient de la transaction. Mona, membre, tient l'accès complet d'une ligne à son
+/// nom sur une page d'équipe en lecture ; pendant que sa requête attend, elle devient admin. La
+/// transaction ne lui écrit alors aucune ligne (un admin a l'accès complet partout où une ligne
+/// `members` s'applique), et la réponse dit `full` : calculée sur ces lignes avec son rôle
+/// d'avant, elle dirait `read`.
+#[tokio::test]
+async fn move_to_root_answers_with_the_role_its_transaction_read() {
+    let seen = root_move_overtaken(
+        |team| vec![members(Level::Read), user(&team.mona, Level::Full)],
+        |team, _| {
+            format!(
+                "UPDATE members SET role = 'admin' WHERE space_id = '{}' AND user_id = '{}'",
+                team.space, team.mona.id
+            )
+        },
+        |_| vec![members(Level::Read)],
+    )
+    .await;
+    assert_eq!(seen, ("full".to_string(), "space".to_string()));
+}
+
 /// `PATCH` change le titre et la place en une seule écriture : un déplacement refusé (`409
 /// cycle`) n'écrit rien, pas même le titre envoyé avec.
 #[tokio::test]

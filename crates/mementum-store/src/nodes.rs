@@ -105,6 +105,27 @@ pub struct Place {
     pub from: Option<Option<Uuid>>,
 }
 
+/// Ce que rend [`Store::update_node`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Updated {
+    /// Le nœud, tel qu'il est après l'appel.
+    pub node: Node,
+    /// Le nœud vient d'arriver à la racine : ce que la transaction y a décidé. `None` dans tous
+    /// les autres cas.
+    pub at_root: Option<AtRoot>,
+}
+
+/// Un nœud qui vient d'arriver à la racine, tel que la transaction de son déplacement l'a
+/// écrit : de quoi dire ce que chacun y peut, sans relire l'espace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtRoot {
+    /// Ses lignes propres, une fois le déplacement écrit.
+    pub grants: Vec<Grant>,
+    /// Le rôle dans l'espace de qui déplace (le sujet de `root_grant`), lu dans la
+    /// transaction. `None` sans `root_grant`, ou s'il n'a pas de rôle.
+    pub role: Option<Role>,
+}
+
 /// Colonnes d'un nœud, en littéral pour que le SQL reste statique (`concat!`).
 macro_rules! node_columns {
     () => {
@@ -292,15 +313,24 @@ fn root_lines(
     lines
 }
 
-/// Les lignes propres du nœud, et celles qu'il aurait en arrivant à la racine ([`root_lines`]) :
-/// `(avant, après)`, d'après sa chaîne et le rôle du sujet de `root_grant`, lus dans la
-/// transaction. `None` : le nœud n'existe pas, ou sa remontée tourne en rond (personne ne le
-/// voit, R58).
-async fn lines_at_root(
+/// Ce qu'un nœud porte en arrivant à la racine, décidé dans la transaction de son déplacement.
+struct Arrival {
+    /// Ses lignes propres, avant.
+    own: Vec<Grant>,
+    /// Celles qu'il porte à la racine ([`root_lines`]).
+    lines: Vec<Grant>,
+    /// Le rôle dans l'espace du sujet de `root_grant`.
+    role: Option<Role>,
+}
+
+/// Ce que le nœud porte en arrivant à la racine, d'après sa chaîne et le rôle du sujet de
+/// `root_grant`, lus dans la transaction, avant qu'il change de parent. `None` : le nœud
+/// n'existe pas, ou sa remontée tourne en rond (personne ne le voit, R58).
+async fn arrival_at_root(
     tx: &mut Transaction<'_, Sqlite>,
     node_id: &str,
     root_grant: Option<Grant>,
-) -> Result<Option<(Vec<Grant>, Vec<Grant>)>, StoreError> {
+) -> Result<Option<Arrival>, StoreError> {
     let Some(chain) = read_chain(tx, node_id).await? else {
         return Ok(None);
     };
@@ -316,8 +346,8 @@ async fn lines_at_root(
             above.push(line);
         }
     }
-    let after = root_lines(&own, &above, root_grant.map(|grant| (grant, role)));
-    Ok(Some((own, after)))
+    let lines = root_lines(&own, &above, root_grant.map(|grant| (grant, role)));
+    Ok(Some(Arrival { own, lines, role }))
 }
 
 /// `NotFound` si `parent` n'est pas un nœud de cet espace.
@@ -484,7 +514,8 @@ impl Store {
         title: &str,
         by: Option<Uuid>,
     ) -> Result<Node, StoreError> {
-        self.update_node(id, Some(title), None, by, None).await
+        let updated = self.update_node(id, Some(title), None, by, None).await?;
+        Ok(updated.node)
     }
 
     /// Déplace un nœud sous `parent_id` (`None` = racine), après `after` (`None` = en tête).
@@ -502,7 +533,8 @@ impl Store {
             after: after.map(Sibling::Node),
             from: None,
         };
-        self.update_node(id, None, Some(place), by, None).await
+        let updated = self.update_node(id, None, Some(place), by, None).await?;
+        Ok(updated.node)
     }
 
     /// Change le titre, la place, ou les deux, en une transaction : un refus (`Cycle`,
@@ -529,8 +561,11 @@ impl Store {
     ///   changent pas.
     ///
     /// Dans tous les autres cas (autre parent, simple place à la racine, titre), aucune ligne
-    /// n'est écrite, et `root_grant` est ignoré. [`Store::grants_at_root`] dit d'avance ce que le
-    /// nœud portera.
+    /// n'est écrite, et `root_grant` est ignoré.
+    ///
+    /// Ce que la transaction a décidé pour un nœud arrivé à la racine est rendu avec lui
+    /// ([`Updated::at_root`] : ses lignes, et le rôle qu'elle a lu pour qui déplace) :
+    /// l'appelant dit de là ce que le nœud est devenu, sans rien relire.
     pub async fn update_node(
         &self,
         id: Uuid,
@@ -538,9 +573,14 @@ impl Store {
         place: Option<Place>,
         by: Option<Uuid>,
         root_grant: Option<Grant>,
-    ) -> Result<Node, StoreError> {
+    ) -> Result<Updated, StoreError> {
+        let unchanged = |node| Updated {
+            node,
+            at_root: None,
+        };
         if title.is_none() && place.is_none() {
-            return self.get_node(id).await?.ok_or(StoreError::NotFound);
+            let node = self.get_node(id).await?.ok_or(StoreError::NotFound)?;
+            return Ok(unchanged(node));
         }
         let id_s = id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -590,7 +630,7 @@ impl Store {
         }
         if title.is_none() && target.is_none() {
             // Déjà à cette place, et pas de titre : la transaction n'a rien écrit.
-            return Ok(before);
+            return Ok(unchanged(before));
         }
         let (moves, parent, position) = match target {
             Some((parent, position)) => (true, parent, Some(position)),
@@ -599,8 +639,8 @@ impl Store {
         let changes_parent = moves && parent != before.parent_id;
         // Ce que le nœud portera à la racine se décide sur son ancienne chaîne : elle est lue
         // avant qu'il change de parent.
-        let at_root = if changes_parent && parent.is_none() {
-            lines_at_root(&mut tx, &id_s, root_grant).await?
+        let arrival = if changes_parent && parent.is_none() {
+            arrival_at_root(&mut tx, &id_s, root_grant).await?
         } else {
             None
         };
@@ -625,30 +665,22 @@ impl Store {
         .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
         if changes_parent {
-            if let Some((own, wanted)) = at_root {
-                for line in wanted.into_iter().filter(|line| !own.contains(line)) {
-                    write_grant(&mut tx, &id_s, line).await?;
+            if let Some(arrival) = &arrival {
+                // Seules les lignes qui changent sont écrites.
+                for line in &arrival.lines {
+                    if !arrival.own.contains(line) {
+                        write_grant(&mut tx, &id_s, *line).await?;
+                    }
                 }
             }
             bump_rev(&mut tx, &space).await?;
         }
         tx.commit().await?;
-        Ok(node)
-    }
-
-    /// Les accès que porterait le nœud s'il arrivait maintenant à la racine, avec `root_grant`
-    /// pour qui le déplace : ce que [`Store::update_node`] écrira (Rulings R94 et R82), sans
-    /// rien écrire. Pour dire d'avance ce qu'une personne y pourra. `NotFound` si le nœud
-    /// n'existe pas, ou si sa remontée tourne en rond (personne ne le voit, R58).
-    pub async fn grants_at_root(
-        &self,
-        id: Uuid,
-        root_grant: Option<Grant>,
-    ) -> Result<Vec<Grant>, StoreError> {
-        let mut tx = self.pool.begin().await?;
-        let lines = lines_at_root(&mut tx, &id.to_string(), root_grant).await?;
-        tx.commit().await?;
-        lines.map(|(_, after)| after).ok_or(StoreError::NotFound)
+        let at_root = arrival.map(|arrival| AtRoot {
+            grants: arrival.lines,
+            role: arrival.role,
+        });
+        Ok(Updated { node, at_root })
     }
 
     /// Met un nœud à la corbeille, pour le compte `by`. Ses descendants y sont par héritage :

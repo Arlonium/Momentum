@@ -57,7 +57,7 @@ pub use backup::{Backup, backup_path};
 pub use docs::DocState;
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
 pub use members::{Expected, Member};
-pub use nodes::{NewNode, Node, NodeKind, Place, Sibling};
+pub use nodes::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, Updated};
 pub use position::position_between;
 pub use signup::SignedUp;
 pub use spaces::Space;
