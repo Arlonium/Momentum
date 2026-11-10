@@ -58,6 +58,11 @@ export class CollabSession {
     // lecture seule (R30) : on la donne toujours.
     this.provider = new WebsocketProvider(syncUrl(), pageId, shared, {
       params: { schema: String(CLIENT_SCHEMA_VERSION) },
+      // Rien ne passe d'un onglet à l'autre hors du serveur. Par défaut, y-websocket relie
+      // par `BroadcastChannel` les onglets d'une même page : une frappe faite sans le droit
+      // de modifier y passerait, puis reviendrait dans les documents neufs d'une session
+      // rouverte, sans que `check` n'ait rien vu.
+      disableBc: true,
       WebSocketPolyfill: gatedWebSocket(
         mode.check,
         // L'état du serveur ne déverrouille qu'un éditeur qui écrit (`onServerState`).

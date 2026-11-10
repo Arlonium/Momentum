@@ -3,7 +3,7 @@
 // par une WebSocket simulée et de vraies trames y-websocket : si leur format changeait, le
 // déverrouillage précoce cesserait sans bruit (l'éditeur se déverrouillerait plus tard, à la
 // synchro), d'où ce test. Et la vérification qui précède chaque connexion, en écriture comme
-// en lecture seule.
+// en lecture seule, et le seul chemin d'un onglet à l'autre : le serveur.
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import * as Y from "yjs";
 import { deferred } from "../test/hooks";
@@ -76,9 +76,16 @@ function serverDoc(): Y.Doc {
 let sessions: CollabSession[] = [];
 let room = 0;
 
-function open(readOnly: boolean, check: ConnectionCheck = async () => true): CollabSession {
-  // Une salle par session : y-websocket relie par BroadcastChannel les onglets d'une salle.
-  const pageId = `page-${Date.now()}-${room++}`;
+/** L'id d'une page que nul autre test n'ouvre. */
+function newPage(): string {
+  return `page-${Date.now()}-${room++}`;
+}
+
+function open(
+  readOnly: boolean,
+  check: ConnectionCheck = async () => true,
+  pageId = newPage(),
+): CollabSession {
   const session = new CollabSession(
     pageId,
     { readOnly, check },
@@ -136,6 +143,35 @@ describe("connection_check", () => {
       expect(check).toHaveBeenCalledTimes(1);
       expect(session.synced).toBe(false);
     }
+  });
+});
+
+describe("same_page_in_two_tabs", () => {
+  /** Ce que porte la page dans un document : le nombre de nœuds à sa racine. */
+  const written = (doc: Y.Doc) => doc.getXmlFragment(FRAGMENT).length;
+
+  test("deux sessions de la même page ne s'échangent rien hors du serveur", async () => {
+    // Deux onglets du même navigateur sur la même page, sans WebSocket : leur vérification
+    // attend (page relue, compte à reconnecter, réseau coupé).
+    const pageId = newPage();
+    const waiting = () => new Promise<boolean>(() => {});
+    const writer = open(false, waiting, pageId);
+    const reader = open(true, waiting, pageId);
+    await flush();
+
+    writer.doc.getXmlFragment(FRAGMENT).insert(0, [new Y.XmlElement("blockGroup")]);
+    await flush();
+    expect(FakeSocket.instances).toHaveLength(0);
+    // Ni le document du serveur de l'autre onglet, ni celui qu'il montre, ne l'ont reçu.
+    expect(written(reader.provider.doc)).toBe(0);
+    expect(written(reader.doc)).toBe(0);
+
+    // Une session neuve de la page ne le tient pas non plus d'un autre onglet : elle n'aura
+    // que ce que le serveur lui donnera, et rien à lui envoyer.
+    const next = open(false, waiting, pageId);
+    await flush();
+    expect(written(next.doc)).toBe(0);
+    expect(written(writer.doc)).toBe(1);
   });
 });
 

@@ -288,6 +288,53 @@ test("downgrade_to_read_makes_the_open_editor_read_only", async ({ browser }) =>
   expect(await getMmd(aliceApi, shared.id)).toBe("Écrit par Bruno, puis par Alice\n");
 });
 
+test("two_tabs_of_one_account_exchange_only_through_the_server", async ({ browser }) => {
+  const { aliceApi, bruno, brunoId } = await ownerAndMember();
+  const shared = await createPage(aliceApi, { section: "private", title: `Onglets ${unique()}` });
+  await putMmd(aliceApi, shared.id, "Écrit par Alice\n");
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  // B a la page ouverte dans deux onglets du même navigateur.
+  const first = await openPage(browser, shared.id, bruno);
+  const second = await first.context().newPage();
+  await second.goto(`/p/${shared.id}`);
+  await waitSynced(second);
+  /** L'onglet est passé en lecture seule, et montre ce que le serveur a, sans la frappe. */
+  const readsWhatTheServerHas = async (tab: Page) => {
+    await expect(readerBanner(tab)).toBeVisible({ timeout: 5_000 });
+    await expect.poll(() => tab.evaluate(() => window.__mementum?.readOnly)).toBe(true);
+    await waitSynced(tab);
+    await expect(tab.locator(".bn-editor")).toContainText("Écrit par Alice");
+    await expect(tab.locator(".bn-editor")).not.toContainText("frappe sans le droit");
+  };
+
+  // A le passe en lecture. Les relectures de la page sont retenues dans les deux onglets : le
+  // temps de taper dans le premier, qui n'a plus de connexion et se croit encore en écriture.
+  const firstReads = await holdPageReads(first, shared.id);
+  const secondReads = await holdPageReads(second, shared.id);
+  await setPageLevel(aliceApi, shared.id, brunoId, "read");
+  await Promise.all([firstReads.asked, secondReads.asked]);
+  await typeAtEnd(first, ", frappe sans le droit");
+  await expect(first.locator(".bn-editor")).toContainText("frappe sans le droit");
+
+  // Le premier onglet apprend la baisse : ses documents neufs n'ont que ce que le serveur a.
+  // Le second, qui n'a encore rien appris, n'a pas reçu la frappe pour la lui rendre.
+  firstReads.release();
+  await readsWhatTheServerHas(first);
+  await expect(second.locator(".bn-editor")).not.toContainText("frappe sans le droit");
+  secondReads.release();
+  await readsWhatTheServerHas(second);
+
+  // Le droit revenu et la page rouverte, la frappe ne revient pas non plus de l'autre onglet.
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  await raisedBanner(first).getByRole("button", { name: "Rouvrir la page" }).click();
+  await expect(raisedBanner(first)).toHaveCount(0);
+  await waitSynced(first);
+  await expect(first.locator(".bn-editor")).toHaveAttribute("contenteditable", "true");
+  await typeAtEnd(first, ", puis avec le droit");
+  await expect.poll(() => getMmd(aliceApi, shared.id)).toBe("Écrit par Alice, puis avec le droit\n");
+  await expect(second.locator(".bn-editor")).toContainText("Écrit par Alice, puis avec le droit");
+});
+
 test("upgrade_to_edit_takes_effect_when_the_page_is_reopened", async ({ browser }) => {
   const { alice, aliceApi, bruno, brunoId } = await ownerAndMember();
   const shared = await createPage(aliceApi, { section: "private", title: `Brouillon ${unique()}` });
