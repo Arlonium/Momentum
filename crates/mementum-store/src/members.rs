@@ -12,7 +12,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
-use crate::acl::{chain_of, space_of};
+use crate::acl::{read_chain, space_of};
 use crate::spaces::{Space, bump_rev, space_from_row};
 use crate::{Store, StoreError, now_ms, parse_uuid, unreadable};
 
@@ -208,26 +208,25 @@ fn someone_in_full(lines: &[(Subject, Level)]) -> bool {
 /// `node_id` a-t-elle encore quelqu'un en `full`, par ses propres lignes ou par celles d'un
 /// ancêtre ? La même notion que [`hand_over_full`] : seules comptent les lignes qui donnent un
 /// droit, et une ligne `members` met quelqu'un en `full`.
+///
+/// La chaîne est relue après l'écriture, par la même lecture que le reste du partage
+/// (`read_chain`) : les lignes d'un parent d'un autre espace ne comptent pas, et une page dont
+/// la chaîne ne se lit pas (un cycle de parents) n'a personne.
 pub(crate) async fn keeps_full(
     tx: &mut Transaction<'_, Sqlite>,
     space_id: &str,
     node_id: &str,
 ) -> Result<bool, StoreError> {
+    let Some(chain) = read_chain(tx, node_id).await? else {
+        return Ok(false);
+    };
     let with_role = with_role(tx, space_id).await?;
-    let rows = sqlx::query(concat!(
-        chain_of!(),
-        "SELECT a.subject, a.level FROM acl a JOIN chain ON a.node_id = chain.id"
-    ))
-    .bind(node_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    let mut lines = Vec::with_capacity(rows.len());
-    for r in &rows {
-        let line = line_from(&r.get::<String, _>(0), &r.get::<String, _>(1))?;
-        if grants_a_right(line.0, &with_role) {
-            lines.push(line);
-        }
-    }
+    let lines: Vec<(Subject, Level)> = chain
+        .lines
+        .iter()
+        .map(|(_, line)| (line.subject, line.level))
+        .filter(|(subject, _)| grants_a_right(*subject, &with_role))
+        .collect();
     Ok(someone_in_full(&lines))
 }
 

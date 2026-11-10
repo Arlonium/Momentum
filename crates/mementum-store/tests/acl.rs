@@ -723,6 +723,57 @@ async fn change_access_ignores_a_parent_from_another_space() {
         store.node_grants(page).await.unwrap(),
         [grant(olga, Level::Full)]
     );
+    // Ruling R70 : la ligne `members` de l'autre espace ne met personne en accès complet ici.
+    // Celle d'Olga est la seule qui compte : elle ne la baisse pas.
+    let before = untouched(store, space, page).await;
+    let lower = AccessChange::User(t.olga, Some(Level::Edit));
+    let r = store.change_access(page, lower, t.olga).await;
+    assert!(matches!(r, Err(StoreError::LastFullAccess)), "{r:?}");
+    assert_eq!(untouched(store, space, page).await, before);
+    // Les lignes de sa chaîne sont les siennes, et elles seules.
+    assert_eq!(
+        store.chain_grants(page).await.unwrap(),
+        [(page, grant(olga, Level::Full))]
+    );
+}
+
+/// `chain_grants` rend les lignes de la page et de chacun de ses ancêtres, et d'eux seuls, par
+/// nœud puis par sujet. Rien pour un nœud inconnu, ni pour un nœud pris dans un cycle de
+/// parents ou suspendu dessous : sa chaîne ne se lit pas (R58).
+#[tokio::test]
+async fn chain_grants_follow_the_chain_of_the_page() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let user = Subject::User(Uuid::now_v7());
+    let top = page_with(store, space, None, &[(Subject::Members, Level::Read)]).await;
+    let lines = [(user, Level::Edit), (Subject::Members, Level::Full)];
+    let middle = page_with(store, space, Some(top), &lines).await;
+    let leaf = page_with(store, space, Some(middle), &[(user, Level::Full)]).await;
+    // Hors de la chaîne de `leaf` : une sœur, une sous-page, une autre page de racine.
+    page_with(store, space, Some(middle), &[(user, Level::Read)]).await;
+    page_with(store, space, Some(leaf), &[(user, Level::Comment)]).await;
+    page_with(store, space, None, &[(Subject::Members, Level::Edit)]).await;
+
+    let mut expected = vec![
+        (top, grant(Subject::Members, Level::Read)),
+        (middle, grant(Subject::Members, Level::Full)),
+        (middle, grant(user, Level::Edit)),
+        (leaf, grant(user, Level::Full)),
+    ];
+    expected.sort_by_key(|(node, line)| (node.to_string(), line.subject.to_string()));
+    assert_eq!(store.chain_grants(leaf).await.unwrap(), expected);
+    assert_eq!(
+        store.chain_grants(top).await.unwrap(),
+        [(top, grant(Subject::Members, Level::Read))]
+    );
+    assert_eq!(store.chain_grants(Uuid::now_v7()).await.unwrap(), []);
+
+    // `top` passe sous `middle`, son propre enfant : plus aucune de ces chaînes ne se lit.
+    let cycle = format!("UPDATE nodes SET parent_id = '{middle}' WHERE id = '{top}'");
+    exec_sql(&f.db, &cycle).await;
+    for node in [top, middle, leaf] {
+        assert_eq!(store.chain_grants(node).await.unwrap(), []);
+    }
 }
 
 /// Une ligne déjà ainsi n'écrit rien : la révision de l'espace ne bouge pas. Un changement fait

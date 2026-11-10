@@ -91,7 +91,6 @@ macro_rules! chain_of {
          ) "
     };
 }
-pub(crate) use chain_of;
 
 /// Relit les colonnes `subject` et `level` d'une ligne d'`acl`.
 fn grant_from_row(r: &SqliteRow) -> Result<Grant, StoreError> {
@@ -316,23 +315,21 @@ impl Store {
 
     /// Les accès posés sur ce nœud et sur chacun de ses ancêtres : `(nœud, accès)`, triés par
     /// nœud puis par sujet. Vide pour un nœud inconnu.
+    ///
+    /// La chaîne est celle que lit le partage (`read_chain`), en une transaction de lecture :
+    /// un parent d'un autre espace vaut la racine, et un nœud pris dans un cycle de parents, ou
+    /// suspendu dessous, n'a pas de chaîne (vide aussi : personne ne le voit, R58).
     pub async fn chain_grants(&self, node_id: Uuid) -> Result<Vec<(Uuid, Grant)>, StoreError> {
-        sqlx::query(concat!(
-            chain_of!(),
-            "SELECT a.node_id, a.subject, a.level FROM acl a JOIN chain ON a.node_id = chain.id \
-             ORDER BY a.node_id, a.subject"
-        ))
-        .bind(node_id.to_string())
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| {
-            Ok((
-                parse_uuid(&r.get::<String, _>("node_id"))?,
-                grant_from_row(r)?,
-            ))
-        })
-        .collect()
+        let mut tx = self.pool.begin().await?;
+        let chain = read_chain(&mut tx, &node_id.to_string()).await?;
+        tx.commit().await?;
+        let mut lines = chain.map(|chain| chain.lines).unwrap_or_default();
+        // L'ordre du texte en base, comme le rendait `ORDER BY node_id, subject`.
+        lines.sort_by_cached_key(|(on, line)| (on.clone(), line.subject.to_string()));
+        lines
+            .into_iter()
+            .map(|(on, line)| Ok((parse_uuid(&on)?, line)))
+            .collect()
     }
 
     /// Pose un accès sur le nœud : le niveau remplace celui que le sujet y avait. `NotFound` si
