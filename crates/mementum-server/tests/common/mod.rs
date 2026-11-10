@@ -785,8 +785,48 @@ pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
             put("* x
 "),
         ),
+        // Le partage de la page (`routes/sharing.rs`), pour un compte quelconque.
+        ("GET access", bare(Method::GET, format!("{page}/access"))),
+        (
+            "PUT accès général",
+            json_request(
+                Method::PUT,
+                &format!("{page}/access/general"),
+                &json!({ "level": "read" }),
+            ),
+        ),
+        (
+            "PUT accès général illisible",
+            Request::put(format!("{page}/access/general"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        ),
+        (
+            "PUT accès d'une personne",
+            json_request(
+                Method::PUT,
+                &format!("{page}/access/users/{SOMEONE}"),
+                &json!({ "level": "read" }),
+            ),
+        ),
+        (
+            "DELETE accès d'une personne",
+            bare(Method::DELETE, format!("{page}/access/users/{SOMEONE}")),
+        ),
+        (
+            "POST invitation sur la page",
+            json_request(
+                Method::POST,
+                &format!("{page}/invitations"),
+                &json!({ "email": "quelqu-un@exemple.fr", "level": "read" }),
+            ),
+        ),
     ]
 }
+
+/// Un compte quelconque, visé par les routes de partage de [`page_routes`].
+const SOMEONE: &str = "01890000-0000-7000-8000-000000000001";
 
 /// Ce qui fait qu'une réponse est la même qu'une autre : statut, type de contenu, corps.
 pub fn outcome(reply: &Reply) -> (StatusCode, Option<String>, String) {
