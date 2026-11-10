@@ -604,6 +604,10 @@ test("refused_move_comes_back_with_the_server_message", async ({ browser }) => {
   await expect(sidebarOf(p).getByRole("alert")).toContainText(body.message, { ignoreCase: true });
   await expect.poll(() => shownRows(p)).toEqual(["1 Alpha"]);
   expect((await getTree(api, space.id)).nodes.map((n) => [n.id, n.parentId])).toEqual([[a.id, null]]);
+  // Le message part à la navigation suivante.
+  await treeRow(p, a.id).getByRole("link").click();
+  await expect(titleOf(p)).toHaveValue("Alpha");
+  await expect(sidebarOf(p).getByRole("alert")).toHaveCount(0);
 });
 
 test("row_menu_by_keyboard", async ({ browser }) => {

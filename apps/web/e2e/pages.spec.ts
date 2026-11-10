@@ -1,4 +1,5 @@
-// Arbre de pages et persistance, depuis l'interface.
+// Arbre de pages et persistance, depuis l'interface ; et le fenêtrage des arbres de la barre
+// latérale (la page ouverte toujours montrée, les sections qui se suivent).
 import { expect, test } from "@playwright/test";
 import type { ErrorBody, PageNode } from "@mementum/protocol";
 import {
@@ -10,6 +11,7 @@ import {
   newUser,
   pageIdOf,
   putMmd,
+  sectionOf,
   sidebarOf,
   signUpAccount,
   treeRow,
@@ -218,4 +220,40 @@ test("active_row_is_shown_clear_of_the_sidebar_edges", async ({ browser }) => {
   await open(pages[16].id);
   await p.waitForTimeout(200);
   expect(await scrollTop()).toBe(before);
+});
+
+test("tree_below_a_long_section_follows_what_happens_above_it", async ({ browser }) => {
+  // Chaque section a son arbre, fenêtré : seules les lignes de la partie visible de la barre
+  // latérale sont dans le document. Quand une section, au-dessus, change de hauteur, les
+  // arbres qui la suivent se déplacent sans que rien ne défile : leur fenêtre doit suivre.
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  for (let i = 0; i < 70; i++) await createPage(api, { title: `Ligne ${i + 1}` });
+  const mine = await createPage(api, { section: "private", title: "Tout en bas" });
+  const p = await newUser(browser, account);
+  const sidebar = sidebarOf(p);
+  await p.goto("/");
+  await expect(sectionOf(p, "Espace").getByRole("treeitem").first()).toBeVisible();
+  const rows = sidebar.getByRole("treeitem");
+
+  // « Privé » est loin sous la partie visible : sa page n'est pas dans le document, et la
+  // longue section « Espace » n'y a que ses premières lignes.
+  await expect(treeRow(p, mine.id)).toHaveCount(0);
+  expect(await rows.count()).toBeLessThan(50);
+
+  // « Espace » repliée : « Privé » remonte d'un coup dans la partie visible, avec sa page.
+  const toggle = sectionOf(p, "Espace").getByRole("button", { name: "Espace", exact: true });
+  await toggle.click();
+  await expect(treeRow(p, mine.id)).toBeVisible();
+  await expect(rows).toHaveCount(1);
+
+  // Dépliée : « Privé » repart sous la partie visible, et sa page quitte le document.
+  await toggle.click();
+  await expect(treeRow(p, mine.id)).toHaveCount(0);
+  expect(await rows.count()).toBeLessThan(50);
+
+  // Tout en bas de la barre latérale, elle y revient.
+  await sidebar.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+  await expect(treeRow(p, mine.id)).toBeInViewport();
+  expect(await rows.count()).toBeLessThan(50);
 });

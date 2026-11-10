@@ -89,7 +89,8 @@ type Lookup =
 
 export function App() {
   useLinkInterception();
-  const route = parseRoute(usePathname());
+  const pathname = usePathname();
+  const route = parseRoute(pathname);
   const { me, refresh } = useSession();
   const { spaces } = me;
   const [infoLoaded, setInfoLoaded] = useState(false);
@@ -98,7 +99,9 @@ export function App() {
   const treeRef = useRef(tree);
   treeRef.current = tree;
   const [lookup, setLookup] = useState<Lookup | null>(null);
+  /** Le refus de la dernière action de la barre latérale ; il part à la navigation suivante. */
   const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => setNotice(null), [pathname]);
   /** Le serveur n'a pas le schéma de ce client : plus aucune écriture (bandeau). */
   const [stale, setStale] = useState(false);
   const staleRef = useRef(false);
@@ -340,6 +343,8 @@ export function App() {
         (current) => current && { ...current, nodes: withoutSubtree(current.nodes, id) },
       );
     } catch (error) {
+      // Session perdue : la connexion est demandée par-dessus, cela suffit.
+      if (isSessionLost(error)) return;
       setNotice(`La page n'a pas pu être mise à la corbeille. ${sentence(error)}`);
     }
   }, []);
@@ -364,6 +369,7 @@ export function App() {
       // relu.
       if (!sameParent) setReloads((n) => n + 1);
     } catch (error) {
+      // Session perdue : la connexion est demandée par-dessus, cela suffit.
       if (isSessionLost(error)) return;
       // La page n'a pas bougé. Ce qui a fait refuser a pu changer ailleurs : la barre latérale
       // est relue, telle que le serveur la voit.

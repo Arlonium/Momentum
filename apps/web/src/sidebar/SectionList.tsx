@@ -101,6 +101,11 @@ export function SectionList({
     setMenu((current) => (current?.id === id ? null : { id, anchor }));
   }, []);
   const closeMenu = useCallback(() => setMenu(null), []);
+  // Sans sa page, le menu est oublié : il ne se rouvre pas si elle revient.
+  const menuGone = menu !== null && menuNode === undefined;
+  useEffect(() => {
+    if (menuGone) setMenu(null);
+  }, [menuGone]);
 
   /** L'arbre déplié de la section de la page du menu : ses sœurs disent où elle peut aller. */
   const menuRows = useMemo(() => {
