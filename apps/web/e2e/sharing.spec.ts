@@ -383,6 +383,40 @@ test("upgrade_to_edit_takes_effect_when_the_page_is_reopened", async ({ browser 
     .toBe("Écrit par Alice, puis par Bruno, deux fois\n");
 });
 
+test("page_raised_before_it_is_opened_opens_for_editing", async ({ browser }) => {
+  const { aliceApi, bruno, brunoId } = await ownerAndMember();
+  const shared = await createPage(aliceApi, { section: "private", title: `Relevée ${unique()}` });
+  const other = await createPage(aliceApi, { section: "private", title: `Autre ${unique()}` });
+  await putMmd(aliceApi, shared.id, "Écrit par Alice\n");
+  await setPageLevel(aliceApi, shared.id, brunoId, "read");
+  await setPageLevel(aliceApi, other.id, brunoId, "read");
+  // B a l'application ouverte sur une autre page ; sa barre latérale porte la page, en lecture.
+  const b = await openPage(browser, other.id, bruno);
+  const row = treeRow(b, shared.id);
+  await expect(row).toBeVisible();
+
+  // A lui donne « Peut modifier ». Rien ne le dit à l'onglet de B, qui n'a pas la page ouverte :
+  // sa barre latérale date d'avant, et la ligne n'offre toujours aucune action.
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  await row.hover();
+  await expect(row.getByRole("button", { name: /^Actions de/ })).toHaveCount(0);
+
+  // B ouvre la page. C'est une ouverture : elle se modifie d'emblée, sans demander à être
+  // rouverte.
+  await row.getByRole("link").click();
+  await expect(titleOf(b)).toHaveValue(shared.title);
+  await waitSynced(b);
+  await expect(b.locator(".bn-editor")).toHaveAttribute("contenteditable", "true");
+  await expect(raisedBanner(b)).toHaveCount(0);
+  await expect(readerBanner(b)).toHaveCount(0);
+  await expect(titleOf(b)).not.toHaveAttribute("readonly", "");
+  await typeAtEnd(b, ", puis par Bruno");
+  await expect.poll(() => getMmd(aliceApi, shared.id)).toBe("Écrit par Alice, puis par Bruno\n");
+  // La barre latérale a suivi.
+  await row.hover();
+  await expect(row.getByRole("button", { name: /^Actions de/ })).toBeVisible();
+});
+
 test("member_invited_to_the_space_sees_space_pages", async ({ browser, page }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const aliceApi = await apiAs(alice);

@@ -9,9 +9,11 @@
 // (`usePageGate`), que le serveur ferme quand ses droits changent. Un niveau qui baisse, ou une
 // page jetée ailleurs, la font passer en lecture seule aussitôt, sur des `Y.Doc` neufs ; un
 // niveau qui monte ne prend effet qu'à la prochaine ouverture (le bandeau a un bouton pour
-// cela) : l'éditeur de qui lit n'est pas remplacé sous ses yeux.
+// cela) : l'éditeur de qui lit n'est pas remplacé sous ses yeux. La première relecture fait
+// encore partie de l'ouverture : la page s'ouvre avec le niveau que dit le serveur, pas avec
+// celui d'une barre latérale qui daterait d'avant.
 import type { PageNode } from "@mementum/protocol";
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isSessionLost } from "../api";
 import { CollabSession } from "../editor/collab";
 import { requestedFixture } from "../editor/fixtures";
@@ -79,6 +81,20 @@ export function PageView({
    */
   const [reader, setReader] = useState(!editable);
   if (!editable && !reader) setReader(true);
+  /** Le serveur n'a pas encore dit, depuis l'ouverture, ce que le compte peut faire de la page. */
+  const opening = useRef(true);
+  const onPage = useCallback(
+    (next: PageNode) => {
+      const first = opening.current;
+      opening.current = false;
+      onReread(next);
+      // Le niveau a monté avant l'ouverture, et la barre latérale ne le savait pas : la page
+      // s'ouvre en écriture, personne ne la lisait encore. `onReread` passe d'abord : la règle
+      // du dessus reposerait la lecture si elle voyait encore l'ancien niveau.
+      if (first && canEdit(next.level)) setReader(false);
+    },
+    [onReread],
+  );
   /** Rien ne s'écrit : schéma d'un autre serveur, page à la corbeille, ou page qu'on ne fait que lire. */
   const locked = readOnly || trashed || reader;
 
@@ -88,7 +104,7 @@ export function PageView({
     id,
     writable: !locked,
     checkSchema,
-    onPage: onReread,
+    onPage,
     onGone,
     afterLogin,
   });
