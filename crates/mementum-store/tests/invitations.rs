@@ -1,5 +1,6 @@
-//! Invitations : usage unique, échéance, révocation ; invitation d'espace et invitation de page,
-//! qui ne baissent jamais un rôle ni un niveau ; l'invité qui perd son dernier accès sort de
+//! Invitations : usage unique, échéance, révocation, lecture par id ; invitation d'espace et
+//! invitation de page, qui ne baissent jamais un rôle ni un niveau ; une invitation qui ne
+//! survit pas aux droits de son auteur (R69) ; l'invité qui perd son dernier accès sort de
 //! l'espace.
 
 mod common;
@@ -557,4 +558,268 @@ async fn guest_leaves_with_last_grant() {
     // Un nœud inconnu : `NotFound`.
     let r = store.revoke_user_grant(Uuid::now_v7(), mona.id).await;
     assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
+}
+
+/// Une invitation d'espace ne vaut que tant que son auteur a encore le droit de la faire
+/// (Ruling R69) : un admin rétrogradé ne remonte pas par un jeton qu'il aurait gardé.
+#[tokio::test]
+async fn demoted_admin_invitation_is_dead() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let adam = account(store, "adam").await;
+    let bob = account(store, "bob").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    store
+        .add_member(space.id, adam.id, Role::Admin)
+        .await
+        .unwrap();
+    let p = space_page(store, &space, None, "P").await;
+    let t = now();
+    let to_admin = store
+        .create_invitation(invitation(&space, to_space(Role::Admin), adam.id, 1))
+        .await
+        .unwrap();
+    let to_p = store
+        .create_invitation(invitation(&space, to_page(&p, Level::Full), adam.id, 2))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .invitation_by_token([1; 32], t)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&to_admin)
+    );
+
+    store
+        .set_role(space.id, adam.id, Role::Member)
+        .await
+        .unwrap();
+    // Ni consultable, ni acceptable, par son auteur comme par un autre.
+    assert_eq!(store.invitation_by_token([1; 32], t).await.unwrap(), None);
+    for who in [adam.id, bob.id] {
+        let r = store.accept_invitation([1; 32], who, t).await;
+        assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
+    }
+    assert_eq!(
+        store.role_in(space.id, adam.id).await.unwrap(),
+        Some(Role::Member)
+    );
+    assert_eq!(store.role_in(space.id, bob.id).await.unwrap(), None);
+
+    // L'invitation de page, elle, vaut toujours pour le store : c'est le serveur qui vérifie
+    // que son auteur a encore `full` sur la page.
+    assert_eq!(
+        store.invitation_by_token([2; 32], t).await.unwrap(),
+        Some(to_p)
+    );
+
+    // Le droit se lit au moment de l'appel : redevenu admin, son invitation vaut de nouveau.
+    store
+        .set_role(space.id, adam.id, Role::Admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.invitation_by_token([1; 32], t).await.unwrap(),
+        Some(to_admin)
+    );
+}
+
+/// Qui quitte un espace emporte les invitations qu'il y avait faites et qui attendaient encore
+/// (Ruling R69), d'espace comme de pages, dans la transaction de son départ.
+#[tokio::test]
+async fn removed_member_invitations_are_deleted() {
+    let f = fresh().await;
+    let (store, db) = (&f.store, &f.db);
+    let olga = account(store, "olga").await;
+    let adam = account(store, "adam").await;
+    let bob = account(store, "bob").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    store
+        .add_member(space.id, adam.id, Role::Admin)
+        .await
+        .unwrap();
+    let p = space_page(store, &space, None, "P").await;
+    let elsewhere = store.create_space("Ailleurs", Some(adam.id)).await.unwrap();
+
+    // Une invitation d'Adam déjà acceptée, puis deux en attente ; une d'Olga ; une d'Adam
+    // dans un autre espace.
+    invite_and_accept(
+        store,
+        invitation(&space, to_space(Role::Member), adam.id, 1),
+        bob.id,
+    )
+    .await
+    .unwrap();
+    let mut pending = Vec::new();
+    for new in [
+        invitation(&space, to_space(Role::Admin), adam.id, 2),
+        invitation(&space, to_page(&p, Level::Edit), adam.id, 3),
+        invitation(&space, to_space(Role::Member), olga.id, 4),
+    ] {
+        pending.push(store.create_invitation(new).await.unwrap());
+    }
+    let away = store
+        .create_invitation(invitation(&elsewhere, to_space(Role::Member), adam.id, 5))
+        .await
+        .unwrap();
+
+    // Une panne sur leur suppression : rien n'est écrit, Adam est toujours admin.
+    break_table(db, "DELETE", "invitations", "1").await;
+    let r = store.remove_member(space.id, adam.id).await;
+    assert!(matches!(r, Err(StoreError::Sqlx(_))), "{r:?}");
+    repair(db).await;
+    assert_eq!(
+        store.role_in(space.id, adam.id).await.unwrap(),
+        Some(Role::Admin)
+    );
+    assert_eq!(store.pending_invitations(space.id).await.unwrap(), pending);
+
+    store.remove_member(space.id, adam.id).await.unwrap();
+    assert_eq!(
+        store.pending_invitations(space.id).await.unwrap(),
+        slice::from_ref(&pending[2])
+    );
+    for token in [2, 3] {
+        assert_eq!(
+            store.invitation_by_token([token; 32], now()).await.unwrap(),
+            None
+        );
+        let r = store.accept_invitation([token; 32], bob.id, now()).await;
+        assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
+    }
+    // L'invitation acceptée reste, comme trace, et Bob reste membre ; l'autre espace n'est pas
+    // touché.
+    assert_eq!(
+        int(
+            db,
+            "SELECT COUNT(*) FROM invitations WHERE accepted_at IS NOT NULL"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        store.role_in(space.id, bob.id).await.unwrap(),
+        Some(Role::Member)
+    );
+    assert_eq!(
+        store.pending_invitations(elsewhere.id).await.unwrap(),
+        [away]
+    );
+}
+
+#[tokio::test]
+async fn get_invitation_returns_only_pending() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let adam = account(store, "adam").await;
+    let alice = account(store, "alice").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    store
+        .add_member(space.id, adam.id, Role::Admin)
+        .await
+        .unwrap();
+    let p = space_page(store, &space, None, "P").await;
+    let t = now();
+
+    // En attente : rendue, jusqu'à son échéance, exclue.
+    let waiting = store
+        .create_invitation(invitation(&space, to_page(&p, Level::Edit), olga.id, 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_invitation(waiting.id, t).await.unwrap().as_ref(),
+        Some(&waiting)
+    );
+    assert_eq!(
+        store
+            .get_invitation(waiting.id, waiting.expires_at - 1)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&waiting)
+    );
+    assert_eq!(
+        store
+            .get_invitation(waiting.id, waiting.expires_at)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Acceptée, révoquée, inconnue : `None`.
+    let accepted = store
+        .create_invitation(invitation(&space, to_space(Role::Member), olga.id, 2))
+        .await
+        .unwrap();
+    store.accept_invitation([2; 32], alice.id, t).await.unwrap();
+    let revoked = store
+        .create_invitation(invitation(&space, to_space(Role::Member), olga.id, 3))
+        .await
+        .unwrap();
+    store.revoke_invitation(revoked.id).await.unwrap();
+    for id in [accepted.id, revoked.id, Uuid::now_v7()] {
+        assert_eq!(store.get_invitation(id, t).await.unwrap(), None);
+    }
+
+    // Une invitation d'espace dont l'auteur n'est plus admin ne s'accepte plus (R69), mais se
+    // lit encore par son id : la route doit pouvoir la révoquer.
+    let dead = store
+        .create_invitation(invitation(&space, to_space(Role::Admin), adam.id, 4))
+        .await
+        .unwrap();
+    store
+        .set_role(space.id, adam.id, Role::Member)
+        .await
+        .unwrap();
+    assert_eq!(store.invitation_by_token([4; 32], t).await.unwrap(), None);
+    assert_eq!(
+        store.get_invitation(dead.id, t).await.unwrap(),
+        Some(dead.clone())
+    );
+    store.revoke_invitation(dead.id).await.unwrap();
+    assert_eq!(store.get_invitation(dead.id, t).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_accepts_of_one_token_let_one_win() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    store
+        .create_invitation(invitation(&space, to_space(Role::Member), olga.id, 1))
+        .await
+        .unwrap();
+
+    let t = now();
+    let (a, b) = tokio::join!(
+        store.accept_invitation([1; 32], alice.id, t),
+        store.accept_invitation([1; 32], bob.id, t),
+    );
+    let won = [&a, &b].iter().filter(|r| r.is_ok()).count();
+    let lost = [&a, &b]
+        .iter()
+        .filter(|r| matches!(r, Err(StoreError::NotFound)))
+        .count();
+    assert_eq!((won, lost), (1, 1), "{a:?}, {b:?}");
+    let mut roles = vec![
+        store.role_in(space.id, alice.id).await.unwrap(),
+        store.role_in(space.id, bob.id).await.unwrap(),
+    ];
+    roles.sort_by_key(Option::is_some);
+    assert_eq!(roles, [None, Some(Role::Member)]);
+    assert_eq!(
+        int(
+            &f.db,
+            "SELECT COUNT(*) FROM invitations WHERE accepted_at IS NOT NULL"
+        )
+        .await,
+        1
+    );
 }

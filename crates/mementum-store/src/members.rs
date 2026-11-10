@@ -206,11 +206,16 @@ impl Store {
         Ok(())
     }
 
-    /// Retire le compte de l'espace, et ses lignes `user:<id>` de l'`acl` de l'espace, **sauf**
-    /// sur ses pages privées : celles où aucune ligne, sur la page ni sur ses ancêtres, ne nomme
-    /// un autre sujet que lui. Sans rôle, il ne les voit plus ; il les retrouve s'il revient
-    /// dans l'espace. Aucun nœud n'est supprimé. `NotFound` s'il n'a pas de rôle dans l'espace ;
-    /// `LastOwner` si c'est le dernier propriétaire. Tout est écrit, ou rien.
+    /// Retire le compte de l'espace, en une transaction :
+    /// - ses lignes `user:<id>` de l'`acl` de l'espace partent, **sauf** sur ses pages
+    ///   privées : celles où aucune ligne, sur la page ni sur ses ancêtres, ne nomme un autre
+    ///   sujet que lui. Sans rôle, il ne les voit plus ; il les retrouve s'il revient dans
+    ///   l'espace ;
+    /// - les invitations qu'il avait faites dans l'espace et qui attendaient encore sont
+    ///   supprimées (Ruling R69).
+    ///
+    /// Aucun nœud n'est supprimé. `NotFound` s'il n'a pas de rôle dans l'espace ; `LastOwner`
+    /// si c'est le dernier propriétaire. Tout est écrit, ou rien.
     pub async fn remove_member(&self, space_id: Uuid, user_id: Uuid) -> Result<(), StoreError> {
         let (space, user) = (space_id.to_string(), user_id.to_string());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -225,6 +230,13 @@ impl Store {
             .bind(&user)
             .execute(&mut *tx)
             .await?;
+        sqlx::query(
+            "DELETE FROM invitations WHERE space_id = ? AND created_by = ? AND accepted_at IS NULL",
+        )
+        .bind(&space)
+        .bind(&user)
+        .execute(&mut *tx)
+        .await?;
         // `chain` : chaque page qui porte une ligne de la personne, avec elle-même et ses
         // ancêtres. Une ligne part si un autre sujet apparaît sur cette chaîne. `UNION` (et non
         // `UNION ALL`) : la remontée s'arrête même si des parents tournaient en rond.

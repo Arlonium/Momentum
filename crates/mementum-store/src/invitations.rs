@@ -4,6 +4,13 @@
 //! l'adresse est gardée pour l'affichage, rognée et en minuscules. Le store ne voit que le
 //! SHA-256 du jeton. Une invitation sert une fois ; échue, révoquée (supprimée) ou déjà
 //! acceptée, elle n'existe plus pour personne (`NotFound`).
+//!
+//! Une invitation ne vaut que tant que son auteur a encore le droit de la faire (Ruling R69) :
+//! celles qu'il attendait encore partent avec lui quand il quitte l'espace (`remove_member`) ;
+//! une invitation d'espace ne s'accepte plus, et ne se consulte plus par son jeton, dès que son
+//! auteur n'est plus `owner` ni `admin` de l'espace. Pour une invitation de page, c'est le
+//! serveur qui vérifie que l'auteur a encore `full` sur la page (le calcul des droits n'est pas
+//! ici).
 
 use std::fmt;
 
@@ -74,6 +81,27 @@ pub struct Invitation {
 macro_rules! invitation_columns {
     () => {
         "id, space_id, node_id, email, grant_role, grant_level, created_by, created_at, expires_at"
+    };
+}
+
+/// Une invitation en attente : ni acceptée, ni échue au paramètre lié (l'heure). Une révoquée
+/// n'existe plus.
+macro_rules! pending {
+    () => {
+        "accepted_at IS NULL AND expires_at > ?"
+    };
+}
+
+/// Une invitation qu'on peut encore accepter : en attente, et, pour une invitation d'espace,
+/// dont l'auteur est encore `owner` ou `admin` de l'espace (Ruling R69).
+macro_rules! acceptable {
+    () => {
+        concat!(
+            pending!(),
+            " AND (node_id IS NOT NULL OR EXISTS ( \
+                 SELECT 1 FROM members m WHERE m.space_id = invitations.space_id \
+                 AND m.user_id = invitations.created_by AND m.role IN ('owner', 'admin')))"
+        )
     };
 }
 
@@ -180,7 +208,8 @@ impl Store {
     }
 
     /// L'invitation de ce jeton, si elle vaut encore à `now` : ni échue, ni révoquée, ni
-    /// acceptée.
+    /// acceptée, et, pour une invitation d'espace, dont l'auteur est encore `owner` ou `admin`
+    /// de l'espace (R69).
     pub async fn invitation_by_token(
         &self,
         token_hash: [u8; 32],
@@ -189,7 +218,8 @@ impl Store {
         sqlx::query(concat!(
             "SELECT ",
             invitation_columns!(),
-            " FROM invitations WHERE token_hash = ? AND accepted_at IS NULL AND expires_at > ?"
+            " FROM invitations WHERE token_hash = ? AND ",
+            acceptable!()
         ))
         .bind(&token_hash[..])
         .bind(now)
@@ -201,10 +231,12 @@ impl Store {
     }
 
     /// Accepte l'invitation de ce jeton pour le compte, en une transaction. `NotFound` si le
-    /// jeton est inconnu, échu, révoqué ou déjà accepté (ou si le compte n'existe pas). Une
-    /// invitation d'espace donne son rôle ; une invitation de page pose `(user:<id>, level)` et
-    /// fait de la personne un `guest` si elle n'a pas de rôle dans l'espace. Rien n'est jamais
-    /// abaissé, ni rôle ni niveau. Puis l'invitation est marquée acceptée : elle ne sert plus.
+    /// jeton est inconnu, échu, révoqué ou déjà accepté, si l'auteur d'une invitation d'espace
+    /// n'est plus `owner` ni `admin` de l'espace (R69, lu dans la même transaction), ou si le
+    /// compte n'existe pas. Une invitation d'espace donne son rôle ; une invitation de page pose
+    /// `(user:<id>, level)` et fait de la personne un `guest` si elle n'a pas de rôle dans
+    /// l'espace. Rien n'est jamais abaissé, ni rôle ni niveau. Puis l'invitation est marquée
+    /// acceptée : elle ne sert plus.
     pub async fn accept_invitation(
         &self,
         token_hash: [u8; 32],
@@ -216,7 +248,8 @@ impl Store {
         let row = sqlx::query(concat!(
             "SELECT ",
             invitation_columns!(),
-            " FROM invitations WHERE token_hash = ? AND accepted_at IS NULL AND expires_at > ?"
+            " FROM invitations WHERE token_hash = ? AND ",
+            acceptable!()
         ))
         .bind(&token_hash[..])
         .bind(now)
@@ -249,6 +282,29 @@ impl Store {
         Ok(invitation)
     }
 
+    /// L'invitation `id` si elle est en attente à `now` : `None` si elle est inconnue, échue,
+    /// révoquée ou acceptée (Ruling R68). Une invitation d'espace dont l'auteur a perdu son
+    /// rôle d'admin est rendue : elle ne s'accepte plus, mais la route doit pouvoir la révoquer.
+    pub async fn get_invitation(
+        &self,
+        id: Uuid,
+        now: i64,
+    ) -> Result<Option<Invitation>, StoreError> {
+        sqlx::query(concat!(
+            "SELECT ",
+            invitation_columns!(),
+            " FROM invitations WHERE id = ? AND ",
+            pending!()
+        ))
+        .bind(id.to_string())
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(invitation_from_row)
+        .transpose()
+    }
+
     /// Révoque une invitation qui n'a pas été acceptée : elle est supprimée. `NotFound` si elle
     /// n'existe pas ou a déjà été acceptée (c'est alors un droit, qui se retire autrement).
     pub async fn revoke_invitation(&self, id: Uuid) -> Result<(), StoreError> {
@@ -264,13 +320,16 @@ impl Store {
     }
 
     /// Les invitations de l'espace qui attendent encore d'être acceptées, d'espace et de pages,
-    /// par date de création : ni acceptées, ni révoquées, ni échues à l'heure du serveur.
+    /// par date de création : ni acceptées, ni révoquées, ni échues à l'heure du serveur. Comme
+    /// pour [`Store::get_invitation`], une invitation d'espace dont l'auteur a perdu son rôle
+    /// d'admin y figure encore : elle ne s'accepte plus, mais se révoque.
     pub async fn pending_invitations(&self, space_id: Uuid) -> Result<Vec<Invitation>, StoreError> {
         sqlx::query(concat!(
             "SELECT ",
             invitation_columns!(),
-            " FROM invitations WHERE space_id = ? AND accepted_at IS NULL AND expires_at > ? \
-             ORDER BY created_at, id"
+            " FROM invitations WHERE space_id = ? AND ",
+            pending!(),
+            " ORDER BY created_at, id"
         ))
         .bind(space_id.to_string())
         .bind(now_ms())
