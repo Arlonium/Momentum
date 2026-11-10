@@ -192,6 +192,15 @@ pub(crate) fn awareness(update: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Message d'entretien (Ruling R107) : une mise à jour d'awareness de zéro
+/// entrée. Un client y-websocket la lit sans rien y trouver (ni état ajouté,
+/// ni état retiré, aucun événement), mais il a reçu un message : il ne se
+/// croit pas seul, et ne ferme pas sa WebSocket.
+pub(crate) fn keepalive() -> Vec<u8> {
+    // `varUint(0)` : aucune entrée.
+    awareness(&[0])
+}
+
 fn sync(step: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 7);
     out.write_var(MSG_SYNC);
@@ -321,6 +330,31 @@ mod tests {
         ] {
             assert_eq!(decode(&data), Err(ProtocolError), "{what}");
         }
+    }
+
+    /// Le message d'entretien est ce que yrs écrit pour une awareness sans
+    /// aucun état, et se relit en mise à jour de zéro entrée ; ce serveur le
+    /// relirait de même (un client qui le renverrait n'est pas fermé).
+    #[test]
+    fn keepalive_is_an_empty_awareness_update() {
+        let empty = AwarenessUpdate {
+            clients: HashMap::new(),
+        };
+        let message = keepalive();
+        assert_eq!(message, Message::Awareness(empty.clone()).encode_v1());
+        assert_eq!(message, [1, 1, 0]);
+        let mut decoder = DecoderV1::from(message.as_slice());
+        let read: Vec<Message> = MessageReader::new(&mut decoder)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(read, vec![Message::Awareness(empty.clone())]);
+        assert_eq!(
+            decode(&message).unwrap(),
+            vec![ClientMessage::Awareness {
+                update: empty,
+                raw: vec![0],
+            }]
+        );
     }
 
     #[test]

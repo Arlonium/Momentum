@@ -626,6 +626,20 @@ impl Outbox {
 /// remplit la file avec les réponses et la diffusion de la page. Un client qui
 /// ne lit plus remplit sa file : il est fermé, au lieu de faire grossir la
 /// mémoire du serveur ou de passer à côté du retard sur la diffusion.
+///
+/// # Message d'entretien (Ruling R107)
+///
+/// y-websocket ferme sa WebSocket quand il n'a reçu aucun message depuis
+/// 30 s, puis se reconnecte ; et une connexion ne reçoit jamais ses propres
+/// messages. Un onglet seul sur sa page se reconnecterait donc toutes les
+/// 30 s. Quand l'écrivain n'a rien envoyé à la connexion depuis
+/// `keepalive_after`, il lui envoie une mise à jour de présence vide
+/// ([`protocol::keepalive`]), que le client lit sans rien y trouver. Le délai
+/// repart à chaque message envoyé, quel qu'il soit, et vaut pour toute
+/// connexion, en lecture seule comprise. Le message ne passe pas par
+/// l'acteur : il n'est ni appliqué, ni écrit, ni relayé à personne. Il passe
+/// par la file, comme les autres ; l'écrivain ne l'y met que quand il attend,
+/// la file vide : une connexion qui ne lit plus n'en accumule pas.
 async fn pump<S>(socket: S, joined: Joined, cfg: &SyncConfig) -> End
 where
     S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
@@ -649,13 +663,33 @@ where
     }
 
     let writer = async {
-        while let Some(message) = queue.recv().await {
+        let mut silence = std::pin::pin!(tokio::time::sleep_until(keepalive_at(cfg)));
+        loop {
+            let message = tokio::select! {
+                // La file d'abord : le message d'entretien ne part que si elle est vide.
+                biased;
+                message = queue.recv() => match message {
+                    Some(message) => message,
+                    None => break,
+                },
+                () = &mut silence => {
+                    // Rien d'envoyé depuis `keepalive_after` : le message d'entretien va en
+                    // file, d'où l'écrivain le reprend au tour suivant.
+                    if !outbox.push(Outgoing::Own(protocol::keepalive())) {
+                        return End::QueueFull;
+                    }
+                    silence.as_mut().reset(keepalive_at(cfg));
+                    continue;
+                }
+            };
             let len = message.len();
             let sent = sink.send(message.into_bytes()).await;
             outbox.sent(len);
             if sent.is_err() {
                 break;
             }
+            // Un message vient de partir : le délai repart.
+            silence.as_mut().reset(keepalive_at(cfg));
         }
         End::Left
     };
@@ -706,6 +740,17 @@ where
     drop(membership);
     let _ = tokio::time::timeout(CLOSE_GRACE, sink.close()).await;
     end
+}
+
+/// L'instant du prochain message d'entretien, si rien n'est envoyé à la
+/// connexion d'ici là : dans `keepalive_after` (Ruling R107), une milliseconde
+/// au moins. Un délai qui ne tient pas dans l'horloge vaut « jamais ».
+fn keepalive_at(cfg: &SyncConfig) -> tokio::time::Instant {
+    /// Une trentaine d'années : « jamais », sans dépasser l'horloge.
+    const NEVER: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
+    let now = tokio::time::Instant::now();
+    let after = cfg.keepalive_after.max(Duration::from_millis(1));
+    now.checked_add(after).unwrap_or(now + NEVER)
 }
 
 /// Confie des messages du client à l'acteur et met ses réponses en file.

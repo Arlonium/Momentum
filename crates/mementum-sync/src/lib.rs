@@ -44,6 +44,11 @@
 //!   vise le client d'un autre compte est ignorée avant d'être appliquée,
 //!   sans fermer la connexion (y-websocket renvoie au serveur les états des
 //!   autres) ; le même compte le reprend d'une connexion à l'autre ;
+//! - **entretien** (Ruling R107) : une connexion à qui rien n'a été envoyé
+//!   depuis [`SyncConfig::keepalive_after`] reçoit une mise à jour de présence
+//!   vide, sans passer par l'acteur. Sans elle, y-websocket, qui ferme sa
+//!   WebSocket après 30 s sans message reçu, reconnecterait toutes les 30 s
+//!   un onglet seul sur sa page ;
 //! - une mise à jour refusée par le document n'est ni gardée ni diffusée :
 //!   l'acteur recharge son document depuis le store et ferme la connexion
 //!   fautive (Rulings R17, R22). C'est aussi le sort de la mise à jour d'un
@@ -106,7 +111,28 @@ pub struct SyncConfig {
     /// Octets qu'une connexion peut avoir en attente vers sa socket : au-delà,
     /// elle est fermée comme un client en retard (Ruling R27).
     pub max_queue_bytes: usize,
+    /// Une connexion à qui le serveur n'a rien envoyé depuis ce délai reçoit
+    /// un message d'entretien : une mise à jour de présence vide (Ruling
+    /// R107, [`KEEPALIVE_AFTER`]). Au moins une milliseconde.
+    pub keepalive_after: Duration,
 }
+
+/// Délai par défaut du message d'entretien ([`SyncConfig::keepalive_after`]) :
+/// 20 secondes.
+///
+/// y-websocket ferme sa WebSocket quand il n'a reçu aucun message depuis 30 s
+/// (`messageReconnectTimeout`), ce qu'il regarde toutes les 3 s, puis se
+/// reconnecte. Or le serveur ne renvoie jamais à une connexion ses propres
+/// messages : un onglet seul sur sa page, où personne ne tape, ne recevait
+/// plus rien après sa première synchro, et se reconnectait toutes les 30 s.
+/// Chaque reconnexion relit la session, les droits et la page.
+///
+/// 20 s, et pas 29 : le délai se compte ici depuis le dernier envoi du
+/// serveur, celui du client depuis sa dernière réception, et il reste dix
+/// secondes pour ce qui les sépare (un réseau lent, un mandataire qui garde
+/// le message, un serveur occupé). Pas moins non plus : c'est trois octets
+/// par connexion inactive, qu'il est inutile d'envoyer plus souvent.
+pub const KEEPALIVE_AFTER: Duration = Duration::from_secs(20);
 
 impl Default for SyncConfig {
     fn default() -> Self {
@@ -117,6 +143,7 @@ impl Default for SyncConfig {
             idle_close: Duration::from_secs(30),
             max_message_bytes: 16 << 20,
             max_queue_bytes: 64 << 20,
+            keepalive_after: KEEPALIVE_AFTER,
         }
     }
 }
