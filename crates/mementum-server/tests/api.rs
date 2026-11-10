@@ -14,11 +14,13 @@ use std::path::Path;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use common::{Logs, TestApp, WAIT, assert_french, exec_sql, handshake, query_i64};
+use common::{
+    Logs, TestApp, WAIT, assert_french, exec_sql, handshake, query_i64, sync_as, sync_url,
+    synced_as,
+};
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::Info;
 use mementum_store::Store;
-use mementum_sync::testkit::Client;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -512,8 +514,7 @@ async fn unregistered_prop_in_yjs_is_still_read() {
     let alice = t.account("Alice").await;
     let addr = t.listen().await;
     let page = alice.create(json!({})).await;
-    let url = format!("ws://{addr}/sync/{}?schema={SCHEMA_VERSION}", page.id);
-    let client = Client::connect_synced(&url).await;
+    let client = synced_as(&alice.browser, &sync_url(addr, &page.id)).await;
 
     let mmd = "Texte {bar=\"x\" foo=1}\n\n| a | B {baz=true} |\n| --- | --- |\n";
     let blocks = mementum_md::parse(mmd).expect("MMD lisible");
@@ -556,16 +557,18 @@ async fn unknown_page_is_404_and_not_created() {
         .assert_error(StatusCode::NOT_FOUND, "not_found");
 
     // `/sync` : 404 avant toute poignée de main WebSocket.
-    t.get(&format!("/sync/{id}?schema={SCHEMA_VERSION}"))
+    alice
+        .browser
+        .get(&format!("/sync/{id}?schema={SCHEMA_VERSION}"))
         .await
         .assert_error(StatusCode::NOT_FOUND, "not_found");
-    let url = format!("ws://{addr}/sync/{id}?schema={SCHEMA_VERSION}");
-    let refused = Client::connect(&url)
+    let refused = sync_as(&alice.browser, &sync_url(addr, id))
         .await
         .err()
         .expect("connexion refusée");
     assert!(refused.contains("404"), "{refused}");
-    let refused = Client::connect(&format!("ws://{addr}/sync/pas-un-uuid?schema=1"))
+    let malformed = format!("ws://{addr}/sync/pas-un-uuid?schema=1");
+    let refused = sync_as(&alice.browser, &malformed)
         .await
         .err()
         .expect("connexion refusée");
@@ -586,11 +589,12 @@ async fn sync_route_serves_existing_page() {
     let alice = t.account("Alice").await;
     let addr = t.listen().await;
     let page = alice.create(json!({ "title": "En direct" })).await;
-    let url = format!("ws://{addr}/sync/{}?schema={SCHEMA_VERSION}", page.id);
-    let client = Client::connect_synced(&url).await;
+    let client = synced_as(&alice.browser, &sync_url(addr, &page.id)).await;
     assert_eq!(client.blocks().len(), 1, "la racine écrite par le serveur");
     // Sans poignée de main WebSocket : une erreur JSON, pas un 404.
-    t.get(&format!("/sync/{}?schema={SCHEMA_VERSION}", page.id))
+    alice
+        .browser
+        .get(&format!("/sync/{}?schema={SCHEMA_VERSION}", page.id))
         .await
         .assert_error(StatusCode::BAD_REQUEST, "invalid_request");
 
@@ -984,9 +988,8 @@ async fn host_is_checked_on_loopback() {
 
 /// Ruling R31 : hors de la boucle locale, le contrôle de `Host` est désactivé
 /// et le démarrage le journalise : ce sont les comptes qui protègent les
-/// pages (R51), dont aucune route ne répond sans session ; tant que `/sync`
-/// ne la vérifie pas, il le dit aussi. L'`Origin` de `/sync` doit alors être
-/// locale ou celle du serveur lui-même.
+/// pages (R51), dont aucune route ne répond sans session, `/sync` comprise.
+/// L'`Origin` de `/sync` doit alors être locale ou celle du serveur lui-même.
 #[tokio::test]
 async fn non_loopback_bind_warns_and_skips_host_check() {
     let logs = Logs::capture();
@@ -1002,9 +1005,12 @@ async fn non_loopback_bind_warns_and_skips_host_check() {
         "comptes qui protègent les pages",
         "sans session",
         "/sync",
-        "pas encore",
     ] {
         assert!(warning.contains(part), "« {part} » absent de : {warning}");
+    }
+    // `/sync` vérifie la session et les droits : plus rien de transitoire à dire.
+    for gone in ["pas encore", "d'ici là"] {
+        assert!(!warning.contains(gone), "« {gone} » dans : {warning}");
     }
     // Sur la boucle locale, rien de tel.
     drop(logs);
@@ -1024,10 +1030,12 @@ async fn non_loopback_bind_warns_and_skips_host_check() {
 
     let alice = t.account("Alice").await;
     let page = alice.create(json!({})).await;
+    let cookie = alice.browser.cookie().expect("la session d'Alice");
     let sync = |origin: &str| {
         Request::get(format!("/sync/{}?schema={SCHEMA_VERSION}", page.id))
             .header(header::HOST, "192.168.1.10:8080")
             .header(header::ORIGIN, origin)
+            .header(header::COOKIE, &cookie)
             .body(Body::empty())
             .unwrap()
     };
@@ -1080,28 +1088,44 @@ async fn startup_logs_the_backup_made_before_migrating() {
 }
 
 /// Ruling R31 : une `Origin` présente doit nommer la boucle locale ; sans
-/// `Origin` (client hors navigateur), la connexion passe.
+/// `Origin` (client hors navigateur), la connexion passe, si elle porte une
+/// session. Une `Origin` refusée l'est avant que la session soit regardée.
 #[tokio::test]
 async fn sync_origin_is_checked() {
     let t = TestApp::new().await;
     let alice = t.account("Alice").await;
     let addr = t.listen().await;
     let page = alice.create(json!({})).await;
-    let url = format!("ws://{addr}/sync/{}?schema={SCHEMA_VERSION}", page.id);
+    let url = sync_url(addr, &page.id);
+    let cookie = alice.browser.cookie();
+    let cookie = cookie.as_deref();
 
-    assert_eq!(handshake(&url, None).await, Ok(()));
-    assert_eq!(handshake(&url, Some("http://localhost:5174")).await, Ok(()));
-    assert_eq!(handshake(&url, Some("http://127.0.0.1:5173")).await, Ok(()));
-    assert_eq!(handshake(&url, Some("https://[::1]")).await, Ok(()));
+    assert_eq!(handshake(&url, None, cookie).await, Ok(()));
+    for origin in [
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "https://[::1]",
+    ] {
+        let origin = Some(origin);
+        assert_eq!(handshake(&url, origin, cookie).await, Ok(()), "{origin:?}");
+        // Une `Origin` admise ne dispense pas de la session.
+        assert_eq!(handshake(&url, origin, None).await, Err(401), "{origin:?}");
+    }
     for origin in [
         "http://evil.example",
         "http://localhost.evil.example:5173",
         "null",
         "file://",
     ] {
-        assert_eq!(handshake(&url, Some(origin)).await, Err(403), "{origin}");
+        let origin = Some(origin);
+        assert_eq!(
+            handshake(&url, origin, cookie).await,
+            Err(403),
+            "{origin:?}"
+        );
+        assert_eq!(handshake(&url, origin, None).await, Err(403), "{origin:?}");
     }
-    let client = Client::connect_synced(&url).await;
+    let client = synced_as(&alice.browser, &url).await;
     assert_eq!(client.blocks().len(), 1);
 
     // La réponse 403 est l'erreur JSON habituelle.
@@ -1128,7 +1152,7 @@ async fn sync_without_schema_is_logged_read_only() {
     for query in ["", "?schema=abc"] {
         let logs = Logs::capture();
         let url = format!("ws://{addr}/sync/{}{query}", page.id);
-        let client = Client::connect_synced(&url).await;
+        let client = synced_as(&alice.browser, &url).await;
         let text = logs.text();
         assert!(
             text.contains("lecture seule") && text.contains(&page.id),
@@ -1138,11 +1162,7 @@ async fn sync_without_schema_is_logged_read_only() {
     }
     // Avec le bon schéma, rien de tel.
     let logs = Logs::capture();
-    let client = Client::connect_synced(&format!(
-        "ws://{addr}/sync/{}?schema={SCHEMA_VERSION}",
-        page.id
-    ))
-    .await;
+    let client = synced_as(&alice.browser, &sync_url(addr, &page.id)).await;
     assert!(!logs.text().contains("lecture seule"), "{}", logs.text());
     drop(client);
 }

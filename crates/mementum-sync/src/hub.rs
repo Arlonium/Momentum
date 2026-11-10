@@ -5,10 +5,21 @@
 //! si la génération inscrite est encore la sienne : jamais deux acteurs pour
 //! une page, et jamais un acteur neuf retiré par l'ancien.
 //!
-//! Le hub ne connaît ni session ni droits : la route qui accepte une
-//! connexion les vérifie et les lui résume dans [`ConnInfo`] ; quand ils
-//! changent, elle appelle [`Hub::kick`], et [`Hub::forget`] quand la page est
-//! supprimée.
+//! Le hub ne lit ni session ni droits : la route qui accepte une connexion
+//! les vérifie, et lui dit dans [`ConnInfo`] ce qu'il doit en savoir : si la
+//! connexion écrit, de quel compte elle est, et de quand datent ces droits
+//! (la révision de l'espace lue avant eux). Il s'en sert pour trois choses :
+//! - ignorer les mises à jour d'une connexion qui ne peut pas écrire, et
+//!   attribuer les autres à leur compte ;
+//! - fermer les connexions quand la route le demande : toutes celles d'une
+//!   page dont les droits ont changé ([`Hub::kick`]), toutes celles d'un
+//!   compte dont une session se ferme ([`Hub::kick_user`]), et l'acteur
+//!   lui-même quand la page est supprimée ([`Hub::forget`]) ;
+//! - fermer, dès son inscription, une connexion dont les droits ont changé
+//!   depuis que la route les a lus (Ruling R71, [`Hub::serve_connection`]).
+//!
+//! Une connexion fermée revient : c'est la poignée de main suivante qui relit
+//! la session et les droits.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -38,8 +49,8 @@ const CLOSE_GRACE: Duration = Duration::from_secs(1);
 /// ce délai, sa demande reste dans sa boîte, et l'appelant n'attend plus.
 const ASK_WAIT: Duration = Duration::from_secs(2);
 
-/// Ce que la poignée de main sait d'une connexion. Le hub ne vérifie rien :
-/// c'est à l'appelant de lire la session et les droits.
+/// Ce que la poignée de main sait d'une connexion. Le hub ne lit ni session
+/// ni droits : c'est à l'appelant de les vérifier, et de les résumer ici.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnInfo {
     /// Version de schéma du client. Autre que [`SCHEMA_VERSION`], la
@@ -48,9 +59,16 @@ pub struct ConnInfo {
     /// Le compte a le droit d'écrire la page. Sinon, la connexion est en
     /// lecture seule.
     pub can_write: bool,
-    /// Le compte à qui sont attribuées les mises à jour de la connexion
-    /// (`None` : inconnu).
+    /// Le compte de la connexion (`None` : inconnu). Ses mises à jour lui
+    /// sont attribuées, et [`Hub::kick_user`] la ferme avec les autres
+    /// connexions de ce compte.
     pub actor: Option<Uuid>,
+    /// L'espace de la page, et la valeur de `spaces.rev` que l'appelant a
+    /// lue **avant** les droits dont il a tiré `can_write` (ou dans la même
+    /// lecture). Si elle a bougé quand la connexion est inscrite, celle-ci
+    /// est fermée aussitôt (Ruling R71, voir [`Hub::serve_connection`]).
+    /// `None` : pas de contrôle (tests du hub).
+    pub space: Option<(Uuid, i64)>,
 }
 
 /// Le registre des acteurs de page.
@@ -130,14 +148,56 @@ impl Hub {
     /// part, envoie un message illisible, trop gros ou une mise à jour
     /// refusée, prend trop de retard (`broadcast_capacity` messages ou
     /// `max_queue_bytes` octets), ou à la demande ([`Hub::kick`],
-    /// [`Hub::forget`]) : il se reconnecte et se resynchronise.
-    /// Toute fin anormale est journalisée par `tracing` (`warn`), avec la page,
-    /// la connexion et sa raison.
+    /// [`Hub::kick_user`], [`Hub::forget`]) : il se reconnecte et se
+    /// resynchronise. Toute fin anormale est journalisée par `tracing`
+    /// (`warn`), avec la page, la connexion et sa raison.
+    ///
+    /// # Droits changés pendant l'ouverture (Ruling R71)
+    ///
+    /// L'appelant lit les droits, puis la connexion est inscrite dans
+    /// l'acteur. Un changement de droits qui passe entre les deux, avec son
+    /// [`Hub::kick`], ne trouve pas la connexion : sans rien d'autre, elle
+    /// garderait des droits périmés sans jamais être fermée. D'où
+    /// `conn.space` : l'espace de la page, et la valeur de `spaces.rev` que
+    /// l'appelant a lue **avant** les droits. Une fois la connexion inscrite
+    /// (l'acteur a répondu), et avant d'envoyer quoi que ce soit, l'accueil
+    /// compris, comme avant de lire la socket, `spaces.rev` est relu. S'il a
+    /// bougé, si l'espace n'existe plus ou si le store ne répond pas, la
+    /// connexion est fermée sans avoir rien reçu ni rien écrit ; le client
+    /// revient, et la poignée de main relit ses droits.
+    ///
+    /// Pourquoi il ne reste pas de course. Une écriture qui retire un droit
+    /// incrémente `spaces.rev` dans sa transaction ; puis, après son commit,
+    /// l'appelant ferme les connexions inscrites des pages touchées
+    /// (`kick`). Pour une connexion, dans l'ordre : `r` est lu, les droits
+    /// sont lus, elle est inscrite, la révision est relue. Le commit de
+    /// l'écriture tombe :
+    /// - avant la lecture de `r` : les droits, lus après, en tiennent compte ;
+    /// - entre la lecture de `r` et la relecture : la révision ne fait que
+    ///   croître, la relecture en trouve une autre, et la connexion est
+    ///   fermée ici ;
+    /// - après la relecture, donc après l'inscription : le `kick`, envoyé
+    ///   après le commit, arrive à l'acteur derrière l'inscription (sa boîte
+    ///   est une file), et ferme la connexion. Si cet acteur s'est arrêté
+    ///   entre-temps, ses connexions se sont fermées avec lui.
+    ///
+    /// Cela tient à quatre conditions. Trois sont à la charge de l'appelant :
+    /// lire `spaces.rev` avant les droits (l'ordre inverse rouvre la course) ;
+    /// incrémenter `rev` dans la transaction de toute écriture qui retire un
+    /// droit, et n'appeler `kick` qu'après son commit ; calculer après le
+    /// commit les pages à fermer. La quatrième est tenue ici : le contrôle
+    /// suit la réponse à l'inscription, et précède tout envoi et toute
+    /// lecture.
+    ///
+    /// Le prix : `spaces.rev` bouge aussi pour une écriture sans effet sur
+    /// les droits de cette page (une page créée ailleurs dans l'espace). Une
+    /// connexion qui s'ouvre à cet instant est fermée une fois, pour rien, et
+    /// revient.
     pub async fn serve_connection<S>(
         self: Arc<Self>,
         node_id: Uuid,
         conn: ConnInfo,
-        socket: S,
+        mut socket: S,
     ) -> Result<(), SyncError>
     where
         S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
@@ -151,7 +211,20 @@ impl Hub {
                 reply,
             })
             .await??;
+        let space = conn.space;
         let conn = joined.membership.conn();
+        // Ruling R71 : la connexion est inscrite, rien n'est encore parti ni
+        // n'a été lu.
+        if let Some((space_id, seen)) = space
+            && !self
+                .rights_still_current(node_id, conn, space_id, seen)
+                .await
+        {
+            // La désinscrit.
+            drop(joined);
+            let _ = tokio::time::timeout(CLOSE_GRACE, socket.close()).await;
+            return Ok(());
+        }
         match pump(socket, joined, &self.cfg).await {
             // Fin normale, à la demande, ou fermeture dont l'acteur a
             // journalisé la raison.
@@ -184,6 +257,59 @@ impl Hub {
     pub async fn kick(&self, node_ids: &[Uuid]) {
         self.ask_all(node_ids, |reply| Command::Kick { reply })
             .await;
+    }
+
+    /// Ferme toutes les connexions du compte `user` (celles dont
+    /// [`ConnInfo::actor`] le nomme), sur toutes les pages qui ont un acteur
+    /// vivant. Les connexions des autres comptes, et celles qui n'ont pas de
+    /// compte, ne sont pas touchées.
+    ///
+    /// À appeler quand une session du compte se ferme (déconnexion,
+    /// changement de mot de passe), **après** l'écriture en base : une
+    /// connexion ouverte ne relit jamais sa session, elle lui survivrait
+    /// (Ruling R73). Les clients reviennent, et la poignée de main relit
+    /// leur session. Toutes les connexions du compte sont fermées, celles de
+    /// ses autres appareils comprises : le hub ne sait pas de quelle session
+    /// vient une connexion.
+    ///
+    /// Comme pour [`Hub::kick`], ni les documents ni le store ne sont
+    /// touchés, et la fonction rend quand chaque acteur a fermé ces
+    /// connexions (plus aucun de leurs messages n'est traité), deux secondes
+    /// au plus.
+    ///
+    /// Ce qu'elle ne ferme pas : une connexion du compte dont la poignée de
+    /// main a déjà lu la session, et qui n'est pas encore inscrite dans son
+    /// acteur. Rien ne date une session comme `spaces.rev` date des droits
+    /// (voir [`Hub::serve_connection`]).
+    pub async fn kick_user(&self, user: Uuid) {
+        let live = self.live_pages().await;
+        self.ask_all(&live, |reply| Command::KickUser { user, reply })
+            .await;
+    }
+
+    /// La révision de l'espace est-elle encore `seen`, celle que l'appelant
+    /// de [`Hub::serve_connection`] a lue avant les droits ? Sinon (elle a
+    /// bougé, l'espace n'existe plus, ou le store ne répond pas), la
+    /// connexion est à fermer : c'est journalisé ici.
+    async fn rights_still_current(
+        &self,
+        node_id: Uuid,
+        conn: actor::ConnId,
+        space_id: Uuid,
+        seen: i64,
+    ) -> bool {
+        match self.store.space_rev(space_id).await {
+            Ok(Some(rev)) if rev == seen => true,
+            Ok(rev) => {
+                // Ordinaire : le client revient, et ses droits sont relus.
+                tracing::debug!(node_id = %node_id, conn, space_id = %space_id, seen, now = ?rev, "connexion fermée à l'inscription : l'espace a changé depuis la lecture des droits");
+                false
+            }
+            Err(error) => {
+                tracing::warn!(node_id = %node_id, conn, space_id = %space_id, %error, "connexion fermée à l'inscription : révision de l'espace illisible");
+                false
+            }
+        }
     }
 
     /// Arrête sans rien écrire les acteurs de pages supprimées (ni instantané
@@ -317,7 +443,8 @@ enum End {
     Illegible,
     /// Fermée à la demande de l'acteur, qui en a journalisé la raison.
     Refused,
-    /// Fermée avec toutes celles de la page : [`Hub::kick`] ou [`Hub::forget`].
+    /// Fermée à la demande : avec toutes celles de la page ([`Hub::kick`],
+    /// [`Hub::forget`]) ou avec celles de son compte ([`Hub::kick_user`]).
     Kicked,
     /// File vers la socket pleine (en messages ou en octets) : le client ne
     /// lit plus assez vite.
@@ -336,7 +463,7 @@ impl End {
             End::TooBig => "message trop gros",
             End::Illegible => "message illisible",
             End::Refused => "fermée par l'acteur",
-            End::Kicked => "fermée à la demande (droits changés ou page supprimée)",
+            End::Kicked => "fermée à la demande (droits changés, session fermée ou page supprimée)",
             End::QueueFull => "file vers le client pleine",
             End::Lagged => "client en retard sur la diffusion",
             End::ActorGone => "acteur arrêté ou diffusion close",
@@ -455,6 +582,9 @@ where
                         }
                     }
                     Ok(Event::Close) => return End::Kicked,
+                    Ok(Event::CloseSome(conns)) if conns.contains(&conn) => return End::Kicked,
+                    // D'autres connexions que celle-ci.
+                    Ok(Event::CloseSome(_)) => {}
                     Err(RecvError::Lagged(_)) => return End::Lagged,
                     Err(RecvError::Closed) => return End::ActorGone,
                 },

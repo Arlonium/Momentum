@@ -7,7 +7,8 @@
 //!
 //! Aucune route de page ne répond sans session : un test de pages se donne un
 //! compte ([`TestApp::account`], avec son espace) ou une équipe ([`Team`],
-//! un espace où chacun a son rôle).
+//! un espace où chacun a son rôle). La synchro non plus : sa WebSocket
+//! s'ouvre avec la session d'un navigateur ([`sync_as`], [`synced_as`]).
 //!
 //! Deux façons de lire les journaux :
 //! - [`Logs`] : ceux du fil du test. Les tests qui en lisent tournent en
@@ -24,8 +25,10 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use mementum_acl::{Grant, Level, Role, Subject};
+use mementum_schema::SCHEMA_VERSION;
 use mementum_server::{Config, PageNode, Tree};
 use mementum_store::{NewNode, NodeKind, Store};
+use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -363,6 +366,13 @@ impl Browser<'_> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// L'en-tête `Cookie` que ce navigateur envoie : celle de sa session,
+    /// s'il en porte une.
+    pub fn cookie(&self) -> Option<String> {
+        self.session()
+            .map(|value| format!("{SESSION_COOKIE}={value}"))
     }
 
     /// Pose (ou retire) le cookie de session à la main : cookie rejoué,
@@ -883,15 +893,51 @@ pub async fn query_i64(db: &Path, sql: &str) -> i64 {
     value
 }
 
-/// Poignée de main WebSocket avec une en-tête `Origin` facultative :
-/// `Ok` si elle aboutit, sinon le statut HTTP de la réponse.
-pub async fn handshake(url: &str, origin: Option<&str>) -> Result<(), u16> {
+/// L'URL de la WebSocket de synchro d'une page, pour un client du schéma
+/// courant, sur l'adresse rendue par [`TestApp::listen`].
+pub fn sync_url(addr: std::net::SocketAddr, page: impl std::fmt::Display) -> String {
+    format!("ws://{addr}/sync/{page}?schema={SCHEMA_VERSION}")
+}
+
+/// Ouvre la WebSocket de synchro `url` avec la session de `by` (sans cookie
+/// s'il n'en porte pas). `Err` : le refus de la poignée de main, où figure
+/// son statut HTTP.
+pub async fn sync_as(by: &Browser<'_>, url: &str) -> Result<Client, String> {
+    let cookie = by.cookie();
+    let headers: Vec<(&str, &str)> = cookie
+        .iter()
+        .map(|cookie| ("cookie", cookie.as_str()))
+        .collect();
+    Client::connect_with_headers(url, &headers).await
+}
+
+/// Comme [`sync_as`], pour une connexion qui doit aboutir : attend la
+/// première étape 2 du serveur ([`WAIT`] au plus).
+pub async fn synced_as(by: &Browser<'_>, url: &str) -> Client {
+    let client = sync_as(by, url)
+        .await
+        .unwrap_or_else(|refusal| panic!("connexion de synchro refusée : {refusal}"));
+    assert!(
+        client.wait_until(WAIT, |c| c.is_synced()).await,
+        "le client n'a pas reçu l'état du serveur"
+    );
+    client
+}
+
+/// Poignée de main WebSocket avec une en-tête `Origin` et un cookie
+/// facultatifs : `Ok` si elle aboutit, sinon le statut HTTP de la réponse.
+pub async fn handshake(url: &str, origin: Option<&str>, cookie: Option<&str>) -> Result<(), u16> {
     use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
     let mut request = url.into_client_request().unwrap();
     if let Some(origin) = origin {
         request
             .headers_mut()
             .insert(header::ORIGIN, origin.parse().unwrap());
+    }
+    if let Some(cookie) = cookie {
+        request
+            .headers_mut()
+            .insert(header::COOKIE, cookie.parse().unwrap());
     }
     match tokio_tungstenite::connect_async(request).await {
         Ok(_) => Ok(()),

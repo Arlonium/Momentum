@@ -65,13 +65,17 @@ pub(crate) enum Event {
     /// Les connexions inscrites jusqu'ici se ferment (`Hub::kick`,
     /// `Hub::forget`) : rien de ce qui suit ne leur parvient.
     Close,
+    /// Ces connexions-là se ferment (`Hub::kick_user`) ; les autres
+    /// continuent.
+    CloseSome(Arc<[ConnId]>),
 }
 
 /// Ce que l'acteur sait faire.
 pub(crate) enum Command {
     /// Inscrire une connexion. `writable` est faux pour un autre schéma, ou
-    /// sans le droit d'écrire ; `actor` est le compte à qui attribuer ses
-    /// mises à jour.
+    /// sans le droit d'écrire ; `actor` est son compte : celui à qui
+    /// attribuer ses mises à jour, et celui dont `KickUser` ferme les
+    /// connexions.
     Join {
         writable: bool,
         actor: Option<Uuid>,
@@ -103,6 +107,13 @@ pub(crate) enum Command {
     /// Fermer toutes les connexions, sans toucher au document (`Hub::kick`).
     /// La réponse part quand plus aucun de leurs messages ne sera traité.
     Kick { reply: oneshot::Sender<()> },
+    /// Fermer les connexions du compte `user`, et elles seules
+    /// (`Hub::kick_user`). La réponse part quand plus aucun de leurs
+    /// messages ne sera traité.
+    KickUser {
+        user: Uuid,
+        reply: oneshot::Sender<()>,
+    },
     /// Arrêter l'acteur sans rien écrire (`Hub::forget`). La réponse part
     /// quand il a quitté le registre.
     Forget { reply: oneshot::Sender<()> },
@@ -126,7 +137,10 @@ impl Command {
             }
             // Il n'y a ni connexion à fermer ni acteur à arrêter : la réponse
             // lâchée le dit au demandeur.
-            Command::Leave { .. } | Command::Kick { .. } | Command::Forget { .. } => {}
+            Command::Leave { .. }
+            | Command::Kick { .. }
+            | Command::KickUser { .. }
+            | Command::Forget { .. } => {}
         }
     }
 }
@@ -392,7 +406,8 @@ struct Conn {
     /// Faux pour un client d'un autre schéma, ou sans le droit d'écrire : ses
     /// mises à jour sont ignorées.
     writable: bool,
-    /// Le compte à qui ses mises à jour sont attribuées.
+    /// Son compte : celui à qui ses mises à jour sont attribuées, et dont
+    /// `Hub::kick_user` ferme les connexions.
     actor: Option<Uuid>,
     /// La connexion doit se fermer (panne du store, Ruling R21, ou fermeture
     /// à la demande) : ses messages ne sont plus traités.
@@ -508,6 +523,10 @@ impl Actor {
                 // du store, et le reste.
                 tracing::debug!(node_id = %self.id.node_id, connections = self.conns.len(), "connexions fermées à la demande");
                 self.close_connections();
+                let _ = reply.send(());
+            }
+            Command::KickUser { user, reply } => {
+                self.close_connections_of(user);
                 let _ = reply.send(());
             }
             Command::Forget { reply } => return Err(Stop::Forgotten(reply)),
@@ -752,6 +771,27 @@ impl Actor {
         }
         // Sans abonné, il n'y a personne à fermer.
         let _ = self.events.send(Event::Close);
+    }
+
+    /// Ferme les connexions inscrites du compte `user`, comme
+    /// [`Actor::close_connections`] ferme toutes celles de la page : leurs
+    /// messages ne sont plus traités, et chacune se ferme en lisant la
+    /// diffusion. Les autres ne voient rien.
+    fn close_connections_of(&mut self, user: Uuid) {
+        let conns: Arc<[ConnId]> = self
+            .conns
+            .iter_mut()
+            .filter(|(_, c)| c.actor == Some(user))
+            .map(|(conn, c)| {
+                c.closing = true;
+                *conn
+            })
+            .collect();
+        if conns.is_empty() {
+            return;
+        }
+        tracing::debug!(node_id = %self.id.node_id, user_id = %user, connections = conns.len(), "connexions du compte fermées à la demande");
+        let _ = self.events.send(Event::CloseSome(conns));
     }
 
     /// Compaction toutes les `snapshot_every` mises à jour écrites, ou dès que

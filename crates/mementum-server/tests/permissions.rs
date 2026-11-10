@@ -11,15 +11,14 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::{
-    Account, Browser, Reply, Team, TestApp, json_request, outcome, page_routes, query_i64, text,
-    trash_list, tree_nodes, uuid,
+    Account, Browser, Reply, Team, TestApp, json_request, outcome, page_routes, query_i64,
+    sync_url, synced_as, text, trash_list, tree_nodes, uuid,
 };
 use mementum_acl::{Level, Role, Subject};
 use mementum_crdt::PageDoc;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
 use mementum_store::Store;
-use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -1284,8 +1283,7 @@ async fn new_page_doc_is_written_with_the_node() {
 
     // La première synchro rend ce paragraphe-là, et n'écrit rien.
     let addr = t.listen().await;
-    let url = format!("ws://{addr}/sync/{id}?schema={SCHEMA_VERSION}");
-    let client = Client::connect_synced(&url).await;
+    let client = synced_as(&alice.browser, &sync_url(addr, id)).await;
     let synced = client.blocks();
     assert_eq!(synced.len(), 1);
     assert_eq!(

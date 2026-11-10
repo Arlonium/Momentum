@@ -1384,12 +1384,13 @@ async fn public_origin_is_allowed_to_write() {
     reply.assert_status(StatusCode::CREATED);
     let id = reply.json()["id"].as_str().unwrap().to_string();
 
-    // `/sync` : l'origine publique passe le contrôle (puis, sans poignée de
-    // main en mémoire, la requête n'est pas une WebSocket).
+    // `/sync` : l'origine publique passe le contrôle (puis, avec la session
+    // et sans poignée de main en mémoire, la requête n'est pas une WebSocket).
     let sync = |origin: &str| {
         Request::get(format!("/sync/{id}?schema=1"))
             .header(header::HOST, "10.0.0.5:8080")
             .header(header::ORIGIN, origin)
+            .header(header::COOKIE, cookie)
             .body(Body::empty())
             .unwrap()
     };

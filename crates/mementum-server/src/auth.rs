@@ -483,6 +483,12 @@ fn make_room(unknown: &mut HashMap<[u8; 32], Window>, now: i64) {
 /// si la base n'existe pas. Le mot de passe n'est ni affiché ni journalisé.
 /// Rend l'adresse du compte, telle que la base la garde.
 ///
+/// Ce qu'elle ne fait pas : fermer les connexions de synchro que le compte a
+/// déjà ouvertes sur un serveur qui tourne (c'est un autre processus ; la
+/// route `POST /api/v1/auth/password`, elle, les ferme). Elles vivent jusqu'à
+/// leur prochaine coupure, et ne reviennent pas, faute de session. Pour
+/// chasser quelqu'un tout de suite, redémarrer le serveur après la commande.
+///
 /// En plus de la règle des longueurs, un mot de passe qui contient un
 /// caractère de contrôle (octet nul compris) est refusé : il vient d'une
 /// saisie abîmée, et personne ne le retaperait.

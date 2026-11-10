@@ -30,7 +30,7 @@
 //! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon ; `409 not_trashed` |
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
 //! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait |
-//! | `GET /sync/{id}?schema=N` | pas encore | WebSocket y-websocket ; `404` si la page n'existe pas |
+//! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, sinon en lecture seule ; `403 bad_origin` avant tout |
 //!
 //! Toute erreur est en JSON : `{ "error": <code>, "message": <texte> }`
 //! ([`types::ErrorBody`]). Une route qui demande une session répond `401
@@ -55,12 +55,14 @@
 //! compte qui protège les pages : plus aucune route de page ne répond sans
 //! session, ni ne lit ou n'écrit une page sans en avoir vérifié le droit.
 //!
-//! **Ce que les comptes ne protègent pas encore.** `/sync` (« pas encore »
-//! ci-dessus) répond toujours sans session ni contrôle des droits, jusqu'à la
-//! tâche suivante du lot 2 : qui atteint le serveur et connaît l'id d'une
-//! page, de quelque espace qu'elle soit, la lit et la modifie par la
-//! synchronisation. D'ici là, n'écouter que sur la boucle locale (le défaut,
-//! `127.0.0.1:8080`).
+//! **Synchronisation** (`routes/sync.rs`). `/sync` est sous les mêmes droits
+//! que les routes de pages : session, puis droit de lire la page, vérifiés
+//! avant la poignée de main. Une connexion garde ensuite les droits qu'elle
+//! avait en s'ouvrant ; le serveur la ferme dès qu'ils changent (corbeille,
+//! restauration, changement de parent, retrait d'un membre, changement de
+//! rôle, suppression) ou que la session de son compte se ferme (déconnexion,
+//! changement de mot de passe), et le client revient par la poignée de main,
+//! qui relit tout.
 //!
 //! **Garde-fous réseau** (`guard.rs`) : sur la boucle locale, l'en-tête `Host`
 //! doit la nommer (DNS rebinding, Ruling R31) ; partout, une requête qui
@@ -251,15 +253,12 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
     let hub = Hub::new(store.clone(), SyncConfig::default());
     let check_host = cfg.bind.ip().is_loopback();
     if !check_host {
-        // La fin de la phrase est transitoire : à retirer quand `/sync` vérifiera la
-        // session et les droits (tâche suivante du lot 2).
         tracing::warn!(
             bind = %cfg.bind,
             "écoute hors de la boucle locale : le contrôle de l'en-tête Host est désactivé, et \
              ce sont les comptes qui protègent les pages : aucune route de page ne répond sans \
-             session ni sans le droit de la personne sur la page ; mais la synchronisation \
-             (/sync) ne vérifie pas encore la session : d'ici là, qui atteint cette adresse et \
-             connaît l'id d'une page la lit et la modifie"
+             session ni sans le droit de la personne sur la page, synchronisation (/sync) \
+             comprise"
         );
     }
     if store.count_users().await.context("lecture des comptes")? == 0 {

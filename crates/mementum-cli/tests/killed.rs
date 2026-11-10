@@ -30,6 +30,19 @@ fn text(client: &Client) -> String {
     client.blocks().first().map(block_text).unwrap_or_default()
 }
 
+/// Ouvre la WebSocket de synchro avec le cookie de session (la synchro ne
+/// répond pas sans lui), et attend la première synchro.
+async fn connect(url: &str, cookie: &str) -> Client {
+    let client = Client::connect_with_headers(url, &[("cookie", cookie)])
+        .await
+        .expect("connexion du client");
+    assert!(
+        client.wait_until(WAIT, |c| c.is_synced()).await,
+        "le client n'a pas reçu l'état du serveur"
+    );
+    client
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn killed_server_loses_nothing_broadcast() {
     let dir = tempfile::tempdir().unwrap();
@@ -56,8 +69,8 @@ async fn killed_server_loses_nothing_broadcast() {
         .unwrap()
         .to_string();
 
-    let a = Client::connect_synced(&server.ws_url(&page, schema)).await;
-    let b = Client::connect_synced(&server.ws_url(&page, schema)).await;
+    let a = connect(&server.ws_url(&page, schema), &cookie).await;
+    let b = connect(&server.ws_url(&page, schema), &cookie).await;
     let block = a.blocks()[0].id.clone();
 
     // A tape 300 caractères à la fin du bloc, une mise à jour chacun. Chaque
@@ -102,7 +115,7 @@ async fn killed_server_loses_nothing_broadcast() {
 
     // Relancé sur le même dossier : le texte contient tout ce que B a reçu.
     let server = Server::start(&data);
-    let c = Client::connect_synced(&server.ws_url(&page, schema)).await;
+    let c = connect(&server.ws_url(&page, schema), &cookie).await;
     let stored = text(&c);
     assert!(
         stored.starts_with(&received),

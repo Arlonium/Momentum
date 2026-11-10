@@ -58,7 +58,8 @@ const REMOTE: &str = "remote";
 /// Petit serveur axum de test : `GET /sync/{id}?schema=N` monte
 /// [`Hub::serve_connection`]. Un `schema` absent ou illisible vaut 0 ;
 /// `write=false` retire le droit d'écrire ; `actor=<uuid>` nomme le compte
-/// de la connexion.
+/// de la connexion ; `space=<uuid>&rev=<n>` donne l'espace et la révision
+/// à contrôler à l'inscription.
 pub struct TestServer {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
@@ -116,6 +117,7 @@ impl TestServer {
                 client_schema: schema,
                 can_write: true,
                 actor: None,
+                space: None,
             },
         )
     }
@@ -131,6 +133,9 @@ impl TestServer {
         }
         if let Some(actor) = conn.actor {
             url.push_str(&format!("&actor={actor}"));
+        }
+        if let Some((space, rev)) = conn.space {
+            url.push_str(&format!("&space={space}&rev={rev}"));
         }
         url
     }
@@ -166,6 +171,10 @@ async fn sync_route(
             .unwrap_or(0),
         can_write: query.get("write").is_none_or(|w| w != "false"),
         actor: query.get("actor").and_then(|a| Uuid::parse_str(a).ok()),
+        space: query
+            .get("space")
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .zip(query.get("rev").and_then(|r| r.parse().ok())),
     };
     // Comme le serveur de la Task 6 : axum refuse un message trop gros (R27).
     let max = state.hub.config().max_message_bytes;

@@ -13,12 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use common::{Browser, Reply, TestApp, WAIT, all_logs, assert_french, exec_sql, query_i64};
+use common::{
+    Browser, Reply, TestApp, WAIT, all_logs, assert_french, exec_sql, query_i64, sync_url,
+    synced_as,
+};
 use mementum_acl::{Grant, Level, Role, Subject};
-use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
 use mementum_store::{Expected, InvitationGrant, NewInvitation, NewNode, NodeKind, Store};
-use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -1259,8 +1260,8 @@ async fn member_changes_close_live_connections_of_the_space_only() {
         .await;
     page.assert_status(StatusCode::CREATED);
     let page = uuid(&page.json()["id"]).to_string();
-    let url = format!("ws://{addr}/sync/{page}?schema={SCHEMA_VERSION}");
-    let live = Client::connect_synced(&url).await;
+    let url = sync_url(addr, &page);
+    let live = synced_as(&olga.browser, &url).await;
 
     // Dans l'autre espace : la connexion reste ouverte, et ce qu'elle envoie arrive.
     olga.browser
@@ -1289,7 +1290,7 @@ async fn member_changes_close_live_connections_of_the_space_only() {
         "connexion fermée après le changement de rôle"
     );
     // Un retrait aussi.
-    let again = Client::connect_synced(&url).await;
+    let again = synced_as(&olga.browser, &url).await;
     olga.browser
         .delete(&member_uri(home, tom.id))
         .await

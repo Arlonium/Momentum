@@ -15,7 +15,8 @@
 //! identifiant de client hors de 53 bits (yrs ne le refuse que par un
 //! `debug_assert!`) ou un état d'awareness qui n'est pas du JSON (les
 //! navigateurs le relisent par `JSON.parse`) rendent le message illisible.
-//! Les mises à jour Yjs, elles, sont lues par `PageDoc::apply_update`.
+//! Les mises à jour Yjs, elles, sont lues par `PageDoc::apply_client_update`,
+//! qui refuse aussi celles qui touchent aux métadonnées de la page.
 
 use std::collections::HashMap;
 use std::fmt;

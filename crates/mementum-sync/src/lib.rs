@@ -22,10 +22,16 @@
 //!   [`SCHEMA_VERSION`](mementum_schema::SCHEMA_VERSION), ou qui n'a pas le
 //!   droit d'écrire la page ([`ConnInfo`]) : il reçoit tout, ses mises à jour
 //!   sont ignorées ;
-//! - **droits** : le hub ne les lit pas. La route qui accepte une connexion
-//!   les lui résume ([`ConnInfo`]) ; quand ils changent, [`Hub::kick`] ferme
-//!   les connexions de la page, qui reviennent et les font relire ; quand la
-//!   page est supprimée, [`Hub::forget`] arrête son acteur sans rien écrire ;
+//! - **droits et sessions** : le hub ne les lit pas. La route qui accepte
+//!   une connexion les lui résume ([`ConnInfo`]) : si elle écrit, de quel
+//!   compte elle est, et la révision de l'espace lue avant ses droits. Quand
+//!   les droits d'une page changent, [`Hub::kick`] ferme ses connexions ;
+//!   quand une session se ferme, [`Hub::kick_user`] ferme celles du compte ;
+//!   les clients reviennent, et la poignée de main relit tout. Une connexion
+//!   inscrite alors que la révision de l'espace a bougé depuis la lecture de
+//!   ses droits est fermée aussitôt, sans avoir rien reçu (Ruling R71,
+//!   [`Hub::serve_connection`]). Quand la page est supprimée,
+//!   [`Hub::forget`] arrête son acteur sans rien écrire ;
 //! - une mise à jour refusée par le document n'est ni gardée ni diffusée :
 //!   l'acteur recharge son document depuis le store et ferme la connexion
 //!   fautive (Rulings R17, R22). C'est aussi le sort de la mise à jour d'un

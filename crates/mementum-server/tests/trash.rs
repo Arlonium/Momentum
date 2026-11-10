@@ -8,11 +8,10 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{
-    Account, Browser, Team, TestApp, WAIT, exec_sql, outcome, page_routes, query_i64, text,
-    trash_list, tree_nodes,
+    Account, Browser, Team, TestApp, WAIT, exec_sql, outcome, page_routes, query_i64, sync_as,
+    sync_url, synced_as, text, trash_list, tree_nodes,
 };
 use mementum_acl::{Level, Subject};
-use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
@@ -437,13 +436,13 @@ async fn deleted_page_is_gone_for_good() {
         ),
         (4, 3, 4)
     );
-    let url = |id: &str| format!("ws://{addr}/sync/{id}?schema={SCHEMA_VERSION}");
-    let live = Client::connect_synced(&url(&child.id)).await;
+    let url = |id: &str| sync_url(addr, id);
+    let live = synced_as(&alice.browser, &url(&child.id)).await;
 
     trash(&alice.browser, &page.id)
         .await
         .assert_status(StatusCode::OK);
-    let live_again = Client::connect_synced(&url(&child.id)).await;
+    let live_again = synced_as(&alice.browser, &url(&child.id)).await;
     let reply = delete(&alice.browser, &page.id).await;
     reply.assert_status(StatusCode::NO_CONTENT);
     assert!(reply.body.is_empty());
@@ -455,7 +454,7 @@ async fn deleted_page_is_gone_for_good() {
             "connexion encore ouverte sur une page supprimée"
         );
     }
-    let refused = Client::connect(&url(&child.id))
+    let refused = sync_as(&alice.browser, &url(&child.id))
         .await
         .err()
         .expect("connexion refusée");
@@ -500,12 +499,12 @@ async fn trash_restore_and_move_close_live_connections_of_the_subtree() {
         .create(json!({ "title": "Enfant", "parentId": page.id }))
         .await;
     let elsewhere = alice.create(json!({ "title": "Ailleurs" })).await;
-    let url = |id: &str| format!("ws://{addr}/sync/{id}?schema={SCHEMA_VERSION}");
+    let url = |id: &str| sync_url(addr, id);
     // Une connexion sur la page, une sur sa sous-page.
     let connect = async || {
         [
-            Client::connect_synced(&url(&page.id)).await,
-            Client::connect_synced(&url(&child.id)).await,
+            synced_as(&alice.browser, &url(&page.id)).await,
+            synced_as(&alice.browser, &url(&child.id)).await,
         ]
     };
     // La connexion est encore servie : une resynchronisation reçoit sa réponse.
@@ -522,7 +521,7 @@ async fn trash_restore_and_move_close_live_connections_of_the_subtree() {
             );
         }
     };
-    let bystander = Client::connect_synced(&url(&elsewhere.id)).await;
+    let bystander = synced_as(&alice.browser, &url(&elsewhere.id)).await;
 
     // Renommer, changer de place : personne n'est fermé.
     let live = connect().await;

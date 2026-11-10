@@ -87,13 +87,14 @@ impl Fixture {
     }
 }
 
-/// Une connexion du schéma courant, qui a le droit d'écrire, sans compte :
-/// celle de [`Fixture::url`].
+/// Une connexion du schéma courant, qui a le droit d'écrire, sans compte et
+/// sans révision à contrôler : celle de [`Fixture::url`].
 pub fn writing_conn() -> ConnInfo {
     ConnInfo {
         client_schema: SCHEMA_VERSION,
         can_write: true,
         actor: None,
+        space: None,
     }
 }
 

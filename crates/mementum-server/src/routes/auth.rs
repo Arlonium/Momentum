@@ -12,7 +12,10 @@
 //!   Une adresse refusée à la connexion n'est pas journalisée non plus : on y
 //!   tape parfois son mot de passe ;
 //! - aucune de leurs réponses, réussite ou refus, ne se garde dans un cache
-//!   (`Cache-Control: no-store`).
+//!   (`Cache-Control: no-store`) ;
+//! - une connexion de synchro ne survit pas à la session de son compte : la
+//!   déconnexion et le changement de mot de passe ferment celles du compte,
+//!   après leur écriture en base (`Hub::kick_user`, Ruling R73).
 //!
 //! Le compte et ce qui vient avec lui (espaces repris, invitation, premier
 //! espace) s'écrivent en une transaction du store (`Store::sign_up`) : une
@@ -225,20 +228,40 @@ async fn log_in(
 
 /// `POST /api/v1/auth/logout` : `204`, session supprimée et cookie effacé.
 /// Sans session : pareil.
-pub(crate) async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    no_store(log_out(state, headers).await)
+///
+/// Les connexions de synchro du compte sont fermées ensuite (Ruling R73) :
+/// toutes, celles de ses autres appareils comprises, qui reviennent aussitôt
+/// avec leur propre session.
+pub(crate) async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    user: Result<AuthUser, ApiError>,
+) -> Response {
+    // Sans session valide, il n'y a pas de compte dont fermer les connexions.
+    no_store(log_out(state, headers, user.ok()).await)
 }
 
-async fn log_out(state: AppState, headers: HeaderMap) -> Result<Response, ApiError> {
+async fn log_out(
+    state: AppState,
+    headers: HeaderMap,
+    user: Option<AuthUser>,
+) -> Result<Response, ApiError> {
+    let secure = state.secure_cookies;
     if let Some(hash) = auth::session_hash(&headers) {
-        state.store.delete_session(hash).await.map_err(internal)?;
+        // La session, puis les connexions de synchro du compte : jusqu'au
+        // bout, même si le client coupe la connexion.
+        to_completion(async move {
+            state.store.delete_session(hash).await.map_err(internal)?;
+            if let Some(user) = user {
+                state.hub.kick_user(user.id).await;
+            }
+            Ok(())
+        })
+        .await?;
     }
     Ok((
         StatusCode::NO_CONTENT,
-        [(
-            header::SET_COOKIE,
-            auth::removal_cookie(state.secure_cookies),
-        )],
+        [(header::SET_COOKIE, auth::removal_cookie(secure))],
     )
         .into_response())
 }
@@ -248,6 +271,15 @@ async fn log_out(state: AppState, headers: HeaderMap) -> Result<Response, ApiErr
 /// cookie de la réponse). Un mot de passe actuel faux, ou un compte qui n'en
 /// a pas : `401 invalid_credentials`. Ces refus ont leur propre frein, à part
 /// de celui de la connexion (Ruling R76) : `429 too_many_attempts`.
+///
+/// Les connexions de synchro du compte sont fermées avec ses sessions
+/// (Ruling R73) : qui change son mot de passe pour chasser un intrus ferme
+/// aussi ce que l'intrus avait ouvert. La commande `mementum user
+/// set-password`, elle, tourne dans un autre processus : elle supprime les
+/// sessions, mais ne peut pas fermer les connexions de synchro déjà ouvertes
+/// sur le serveur. Elles vivent jusqu'à leur prochaine coupure (réseau,
+/// droits de la page qui changent, redémarrage du serveur), et ne reviennent
+/// pas alors, faute de session.
 pub(crate) async fn change_password(
     State(state): State<AppState>,
     user: Result<AuthUser, ApiError>,
@@ -301,6 +333,9 @@ async fn new_password(
             Err(e) => return Err(internal(e)),
         }
         tracing::info!(user_id = %user.id, "mot de passe changé : autres sessions fermées");
+        // Les sessions du compte n'existent plus : ses connexions de synchro
+        // ne leur survivent pas.
+        state.hub.kick_user(user.id).await;
         open_session(&state, user.id).await
     })
     .await?;

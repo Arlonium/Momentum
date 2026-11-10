@@ -29,10 +29,7 @@
 //! - le contrôle de l'`Origin` arrête le site tiers ordinaire, qui ferait
 //!   écrire le navigateur d'une personne connectée à sa place. Le cookie de
 //!   session en `SameSite=Lax` l'arrête déjà dans les navigateurs récents :
-//!   c'est une seconde barrière. C'est aussi, tant que les routes de pages
-//!   répondent sans session (jusqu'aux pages sous droits), la seule contre
-//!   une écriture lancée par un site tiers vers un serveur de la boucle
-//!   locale ;
+//!   c'est une seconde barrière ;
 //! - il n'arrête pas le DNS rebinding : il compare l'`Origin` à une en-tête
 //!   `Host` que personne n'a vérifiée hors de la boucle locale, et une page
 //!   servie sous un nom qui pointe vers le serveur a une `Origin` égale à son
@@ -41,9 +38,7 @@
 //!   démarrage le journalise) : là, **ce sont les comptes qui protègent, pas
 //!   ces contrôles**. Un DNS rebinding n'emporte pas le cookie de session,
 //!   lié au vrai nom d'hôte : il ne fait donc rien de plus qu'un visiteur
-//!   sans session. Mais tant que les routes de pages et `/sync` répondent
-//!   sans session, un visiteur sans session lit et modifie les pages : d'ici
-//!   aux pages sous droits, n'écouter que sur la boucle locale ;
+//!   sans session, à qui ni les routes de pages ni `/sync` ne répondent ;
 //! - aucun de ces contrôles n'arrête un client hors navigateur, qui écrit les
 //!   en-têtes qu'il veut : lui n'a que ce que sa session lui donne.
 
