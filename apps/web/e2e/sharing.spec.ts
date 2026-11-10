@@ -834,3 +834,46 @@ test("change_refused_after_full_access_was_lost_elsewhere", async ({ browser }) 
   await expect(b.locator(".bn-editor")).toHaveAttribute("contenteditable", "true");
   await expect(readerBanner(b)).toHaveCount(0);
 });
+
+test("rights_change_does_not_say_offline", async ({ browser }) => {
+  const { alice, aliceApi, bruno, brunoId } = await ownerAndMember();
+  const shared = await createPage(aliceApi, { section: "private", title: `Suivi ${unique()}` });
+  await setPageLevel(aliceApi, shared.id, brunoId, "read");
+  const a = await openPage(browser, shared.id, alice);
+  const status = a.locator(".mm-topbar-status");
+  await expect(status).toHaveText("");
+  // Tout ce que dit l'état de la connexion à partir d'ici, et ce que fait la synchro.
+  await a.evaluate(() => {
+    const probe = window as unknown as { said: string[]; sync: string[] };
+    probe.said = [];
+    probe.sync = [];
+    const bar = document.querySelector(".mm-topbar")!;
+    const read = () => bar.querySelector(".mm-topbar-status")?.textContent ?? "";
+    new MutationObserver(() => probe.said.push(read())).observe(bar, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    window.__mementum!.provider.on("status", ({ status }) => probe.sync.push(status));
+  });
+  const probe = () =>
+    a.evaluate(() => {
+      const { said, sync } = window as unknown as { said: string[]; sync: string[] };
+      return { said, sync };
+    });
+
+  // A change un accès : le serveur ferme les connexions de synchro de la page, la sienne
+  // comprise, et son onglet revient aussitôt. Ce n'est pas une panne : rien ne le dit.
+  const menu = await openShareMenu(a);
+  await levelOf(menu, bruno).selectOption("edit");
+  await expect(levelOf(menu, bruno)).toHaveValue("edit");
+  await expect.poll(async () => (await probe()).sync.join(" ")).toMatch(/disconnected.* connected/);
+  expect((await probe()).said.filter((text) => text.includes("Hors ligne"))).toEqual([]);
+  await expect(status).toHaveText("");
+
+  // Une coupure qui dure, elle, se dit ; et le message part quand la synchro revient.
+  await a.evaluate(() => window.__mementum!.provider.disconnect());
+  await expect(status).toHaveText("Hors ligne : tes modifications partiront au retour du réseau");
+  await a.evaluate(() => window.__mementum!.provider.connect());
+  await expect(status).toHaveText("");
+});

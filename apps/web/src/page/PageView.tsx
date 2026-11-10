@@ -203,20 +203,39 @@ function TrashBanner({ restore }: { restore: (() => Promise<void>) | null }) {
   );
 }
 
+/**
+ * Une coupure de la synchro plus courte que cela ne se dit pas (ms). Le serveur ferme les
+ * connexions de synchro d'une page quand ses droits changent (un accès donné ou retiré, la
+ * corbeille…), et l'onglet revient dans le quart de seconde : ce n'est pas une panne.
+ */
+const CUT_NOTICE_MS = 1_500;
+
 /** État de la connexion, quand il mérite d'être dit. */
 function SyncState({ session }: { session: CollabSession }) {
   const subscribe = useCallback((onChange: () => void) => session.subscribe(onChange), [session]);
   const state = useSyncExternalStore(subscribe, () => `${session.status}:${session.synced}`);
   const [status, synced] = state.split(":");
+  /** La synchro a été faite, et la connexion n'est plus là (coupée, ou en train de revenir). */
+  const cut = synced === "true" && status !== "connected";
+  /** La coupure dure. */
+  const [lasting, setLasting] = useState(false);
+  useEffect(() => {
+    if (!cut) {
+      setLasting(false);
+      return;
+    }
+    const timer = setTimeout(() => setLasting(true), CUT_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [cut, session]);
+
   let text = "";
-  if (status === "disconnected") {
+  if (synced !== "true") {
+    text = status === "disconnected" ? "Hors ligne" : "Connexion…";
+  } else if (cut && lasting) {
     // En lecture seule, rien ne partira au retour du réseau.
-    text =
-      synced === "true" && !session.readOnly
-        ? "Hors ligne : tes modifications partiront au retour du réseau"
-        : "Hors ligne";
-  } else if (synced !== "true") {
-    text = "Connexion…";
+    text = session.readOnly
+      ? "Hors ligne"
+      : "Hors ligne : tes modifications partiront au retour du réseau";
   }
   return (
     <span className="mm-topbar-status" role="status">
