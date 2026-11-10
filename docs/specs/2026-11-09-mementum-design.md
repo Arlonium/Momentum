@@ -4,6 +4,7 @@
 > **Date** : 2026-11-09 (d'abord « Vivace », puis « Memento », écarté parce que Memento Database existe déjà ; finalement « Mementum »)
 > **Rédigé par** : Claude Code, à partir de 4 recherches (fonctionnalités Notion 2026, alternatives open source, architecture temps réel, accès des agents IA). La synthèse est dans [`docs/research/2026-11-09-etat-de-l-art.md`](../research/2026-11-09-etat-de-l-art.md) et les notes sourcées dans [`docs/research/notes/`](../research/notes/).
 > **Amendement du 2026-11-10** : à la demande d'Alex (2026-11-09), des **espaces façon Notion** remplacent les organisations et les coffres façon Obsidian (§4.1, §4.4, §12). À confirmer avec Lenny (§13).
+> **Mise à jour du 2026-11-10, lot 2 de la P1** : ce que le code du lot 2 (comptes, espaces, droits, corbeille) précise ou corrige est reporté aux §4.1 à §4.4, §5.6, §7.2, §7.4 et §9, avec le numéro de la décision (« Ruling ») du [registre du lot 2](../superpowers/logs/2026-11-10-p1-lot2-ledger.md). Les décisions marquées « à confirmer » attendent l'avis du propriétaire.
 
 ---
 
@@ -122,13 +123,13 @@ Instance (ton serveur)
 ```
 L'**espace** est le « workspace » de Notion : c'est l'unité de rangement, de partage et d'accès par API (§4.4). Il remplace l'organisation et les coffres des premières versions de ce document.
 
-- **Admin d'instance** : gère les inscriptions (ouvertes, sur invitation, par domaine e-mail), la création d'espaces (ouverte à tous les comptes ou réservée), les quotas, les fournisseurs IA autorisés, les sauvegardes et le SMTP.
-- **Rôles d'espace** : Propriétaire, Admin, Membre, Membre restreint, Invité. Les agents forment une catégorie à part (§6.7).
-- **Niveaux de permission sur une page** : Accès complet · Peut modifier · Peut modifier le contenu (bases) · Peut créer (bases) · Peut commenter · Peut lire.
+- **Admin d'instance** : gère les inscriptions (ouvertes, sur invitation, par domaine e-mail), la création d'espaces (ouverte à tous les comptes ou réservée), les quotas, les fournisseurs IA autorisés, les sauvegardes et le SMTP. Au lot 2 de la P1, c'est le premier compte créé ; ce titre ne donne encore aucun pouvoir dans l'application, et les inscriptions se règlent par la configuration du serveur (§7.2).
+- **Rôles d'espace** : Propriétaire, Admin, Membre, Membre restreint, Invité. Les agents forment une catégorie à part (§6.7). Au lot 2 de la P1 : `owner`, `admin`, `member` et `guest` ; les membres restreints viennent en P3.
+- **Niveaux de permission sur une page** : Accès complet · Peut modifier · Peut modifier le contenu (bases) · Peut créer (bases) · Peut commenter · Peut lire. Au lot 2 de la P1 : `read` < `comment` < `edit` < `full` ; `comment` donne les droits de `read` jusqu'aux commentaires (lot 3). Ce que chaque niveau permet (Ruling R48) : `edit` pour écrire, renommer, créer une sous-page, changer de place parmi les mêmes frères, mettre à la corbeille et restaurer ; `full` pour changer de page parente, voir et changer les accès, inviter sur la page et supprimer pour de bon.
 - **Accès général** : seulement les invités · tous les membres de l'espace · toute personne ayant le lien (avec expiration et mot de passe en option) · publié sur le web.
 
 ### 4.2 Écrans principaux
-- **Barre latérale** : sélecteur d'espace (ses espaces, ceux où on l'a invité, « Créer un espace »), recherche, Accueil, Boîte de réception, **Agents** (exécutions en cours, suggestions en attente), **Vue graphe**, Favoris, puis les trois sections de l'espace, **Espace**, **Partagé** et **Privé**, chacune avec son arbre de pages, Modèles, Corbeille, Réglages.
+- **Barre latérale** : sélecteur d'espace (ses espaces, ceux où on l'a invité, « Créer un espace »), recherche, Accueil, Boîte de réception, **Agents** (exécutions en cours, suggestions en attente), **Vue graphe**, Favoris, puis les trois sections de l'espace, **Espace**, **Partagé** et **Privé**, chacune avec son arbre de pages, Modèles, Corbeille, Réglages. Le menu du compte (nom, mot de passe, déconnexion) est dans le sélecteur d'espace, en haut à gauche, comme dans Notion (Ruling R80, à confirmer).
 - **Page** : couverture, icône, titre, propriétés si c'est une ligne de base, éditeur en blocs, rétroliens, commentaires dans la marge, avatars des présents (agents compris, avec un badge 🤖).
 - **Base de données** : onglets de vues, filtres, tris et groupes, recherche interne, ouverture des lignes en panneau latéral, au centre ou en pleine page.
 - **Palette de commandes** (Ctrl+K) : navigation, actions, et questions à l'IA avec citations.
@@ -156,6 +157,8 @@ Maquettes : canvas interactif https://claude.ai/artifact/5VPJk8gPwX1cMdwufLHTXw 
   5. « Copier le lien ».
 
   Le partage porte toujours sur la page ouverte et ses sous-pages. Les maquettes montrent encore la bascule « Tout le coffre / Cette page seulement » de la première version : elle disparaît avec les coffres (§4.4).
+
+  Au lot 2 de la P1, le menu n'a que l'onglet Partager (Publier vient en P3), et l'accès général a deux choix : seulement les personnes invitées, ou tous les membres de l'espace, à un niveau donné ; « toute personne ayant le lien » vient en P3 avec les liens publics. Les accès d'une page ne se voient et ne se changent qu'avec l'accès complet sur elle. Un invité en accès complet y fait tout, sauf changer l'accès général : ce que voient les membres de l'espace, c'est aux membres d'en décider (Ruling R85).
 - **Collaboration visible** : curseur nommé de chaque personne. Une suggestion d'agent apparaît surlignée dans le texte, avec une petite barre « Scribe (agent) propose un ajout · Accepter · Refuser ». Après décision : « Suggestion acceptée · Annuler ».
 - **Bases** : en-tête avec onglets de vues (Tableau, Kanban, Calendrier) et bouton « Nouveau » à la couleur d'accent ; tableau sobre à lignes fines.
 - **Thème sombre** : dérivé du même système, sans changer la mise en page. Les directions B (« Atelier ») et C (« Nuit ») restent des sources d'idées : panneau d'activité des agents, barre IA flottante Ctrl+K.
@@ -166,19 +169,27 @@ La première version de ce document rangeait le contenu dans des coffres à la m
 - **Un compte, plusieurs espaces.**
   - Chacun crée autant d'espaces qu'il veut (« Perso », « Pro », « Asso »…). Le sélecteur de la barre latérale montre ceux qu'il a créés et ceux où on l'a invité.
   - Un espace est cloisonné : ses pages, ses membres, ses agents, ses jetons d'API et ses réglages ne se voient pas depuis un autre espace.
-  - Le premier espace est créé à l'inscription, sauf quand on arrive par une invitation *(choix de rédaction)*. L'admin d'instance peut réserver la création d'espaces à certains comptes *(choix de rédaction)*.
+  - Le premier espace est créé à l'inscription, sauf quand on arrive par une invitation *(choix de rédaction)*. L'admin d'instance peut réserver la création d'espaces à certains comptes *(choix de rédaction ; pas encore fait au lot 2 de la P1, Ruling R52)*. Au lot 2, ce premier espace s'appelle « Espace de » suivi du nom de la personne ; sur une base du lot 1, le premier compte de l'instance reprend à la place son espace, « Mon espace ».
 - **Trois sections dans un espace**, comme dans la barre latérale de Notion :
   - **Espace** : les pages que voient tous les membres de l'espace ;
   - **Partagé** : les pages partagées avec des personnes précises ;
   - **Privé** : les pages que seul leur auteur voit.
 
-  La section d'une page se déduit de ses accès : il n'y a rien à ranger à la main.
-- **Inviter dans l'espace** : la personne devient **membre**. Elle voit la section « Espace », y crée des pages et a ses propres pages privées. Rôles : Propriétaire, Admin, Membre, Membre restreint (§4.1).
-- **Inviter sur une page** : la personne devient **invitée** de l'espace. Elle ne voit que les pages partagées avec elle, sous-pages comprises, au niveau qu'on lui donne.
+  La section d'une page se déduit de ses accès : il n'y a rien à ranger à la main. Règles du lot 2 de la P1, calculées pour la plus haute page que la personne voit, ses sous-pages suivant : « Espace » si elle est membre et qu'un accès général s'applique à la page ou à une page parente ; « Privé » si aucun accès de la page ni de ses pages parentes ne nomme quelqu'un d'autre qu'elle (partager une page privée avec une personne la fait passer dans « Partagé ») ; « Partagé » pour tout le reste. Un invité ne voit donc que « Partagé », même pour une page où il est seul (Ruling R57). Le propriétaire et les admins de l'espace, comme l'admin d'instance, ne voient pas les pages privées des autres. Celles d'un membre qui part restent en base, invisibles, et il les retrouve s'il revient (Ruling R49).
+- **Inviter dans l'espace** : la personne devient **membre**. Elle voit la section « Espace », y crée des pages et a ses propres pages privées. Rôles : Propriétaire, Admin, Membre, Membre restreint (§4.1). Au lot 2 de la P1, une page créée à la racine de la section « Espace » donne l'accès complet à tous les membres, comme dans Notion (Ruling R48, à confirmer : passer à « Peut modifier » est un changement d'une ligne) ; le propriétaire et les admins ont l'accès complet partout où les membres voient. Un espace garde toujours au moins un propriétaire.
+- **Inviter sur une page** : la personne devient **invitée** de l'espace. Elle ne voit que les pages partagées avec elle, sous-pages comprises, au niveau qu'on lui donne. Une personne qui a déjà un rôle dans l'espace le garde : une invitation ne fait jamais baisser ce qu'on a.
+- **Invitations sans SMTP** (lot 2 de la P1, Ruling R47) : une invitation est un lien à copier, que l'on envoie soi-même. Il sert une fois, vaut 7 jours et se révoque tant qu'il attend. C'est le jeton du lien qui donne l'accès, jamais l'adresse e-mail, qui n'est pas vérifiée. Un lien ne vaut que tant que son auteur a encore le droit de le faire : être propriétaire ou admin de l'espace pour une invitation dans l'espace, avoir l'accès complet sur la page pour une invitation sur une page (Ruling R69).
 - **Partage d'une page** (menu Partager, §4.3) :
   - avec des **personnes**, des **groupes** ou des **agents** ; niveaux : Accès complet · Peut modifier · Peut commenter · Peut lire, et pour les agents `suggérer` ;
   - les sous-pages héritent de ces accès ; une sous-page peut être plus ouverte que son parent et, à partir de la P3, plus fermée ;
   - **accès général** : seulement les invités · tous les membres de l'espace · toute personne ayant le lien · publié sur le web.
+
+  Précisions du lot 2 de la P1 (personnes seulement : groupes et liens en P3, agents en P4) :
+  - l'accès général se règle par les membres de l'espace, jamais par un invité, même en accès complet (Ruling R85) ;
+  - un invité en accès complet sur une page peut y inviter d'autres personnes, jusqu'à l'accès complet, et changer ou retirer leurs accès, comme dans Notion (Ruling R86, à confirmer : une option d'espace « les invités n'invitent pas » se poserait en une ligne) ;
+  - l'accès général qu'une page parente donne aux membres est le plancher de ses sous-pages : on peut l'y relever, pas le baisser ni le retirer ; ramené au plancher, l'accès propre de la sous-page disparaît (Ruling R93) ;
+  - une page garde toujours quelqu'un en accès complet. Un changement qui la laisserait sans personne est refusé, et quand un membre quitte l'espace, sur chaque page dont il était le dernier en accès complet, les autres accès posés sur la page qui ont le plus haut niveau passent à l'accès complet (Ruling R70) ;
+  - une page qu'on sort à la racine garde son accès général : une sous-page d'équipe reste dans la section « Espace ». Les personnes nommées sur son ancienne page parente la perdent, comme dans Notion. Qui la déplace y garde l'accès complet (Rulings R82 et R94, R94 à confirmer).
 - **API et agents, sur un espace ou sur des pages** (§6.5, §6.7) :
   - un **jeton personnel** se crée dans le compte. Il agit au nom de son propriétaire, avec ses droits, et on le limite si on veut : tous ses espaces, un seul espace, ou des pages choisies avec leurs sous-pages ;
   - un **jeton d'intégration** se crée dans les réglages d'un espace. Il appartient à un agent de cet espace et n'ouvre que ce qu'on partage avec cet agent : l'espace entier, ou des pages choisies avec leurs sous-pages ;
@@ -429,6 +440,15 @@ Le client ouvre **une seule WebSocket**, multiplexée, encodée en MessagePack :
 - **Vérification** : `check(sujet, action, objet)` en Rust, avec un cache invalidé par les opérations ACL. Toute diffusion WebSocket est filtrée : personne ne reçoit une opération sur un objet qu'il ne peut pas lire.
 - **Agents** : droits effectifs = leurs droits ∩ droits de l'humain pour qui ils agissent (s'il y en a un) ∩ portée du jeton (§6.7).
 - **Cloisonnement des espaces** : un sujet n'a aucun droit dans un espace dont il n'est ni membre ni invité. L'admin d'instance gère le serveur (comptes, quotas, liste et suppression des espaces) ; par l'application, il ne lit pas les pages d'un espace dont il n'est pas membre *(choix de rédaction, §12)*.
+
+**Ce qu'en fait le lot 2 de la P1** (crate `mementum-acl`, et `crates/mementum-server/src/access.rs`, seul chemin par lequel une route apprend les droits) :
+- **Sujets et calcul.** Une ligne d'accès donne un niveau (§4.1) à un compte ou à « tous les membres de l'espace ». Le niveau d'une personne sur une page est le plus fort de ceux que lui donnent la page et ses pages parentes ; rien ne retire un droit hérité avant la P3. Sur une page que les membres voient, le propriétaire et les admins ont l'accès complet. Qui n'a aucun rôle dans un espace n'y a aucun droit, admin d'instance compris.
+- **Réponses.** Une page qu'on ne voit pas répond `404 not_found`, exactement comme une page qui n'existe pas, sur toutes les routes, synchronisation comprise ; `403 forbidden` ne sert que sous le niveau, sur une page qu'on voit ; `409 trashed` refuse une écriture dans une page à la corbeille.
+- **Ce que le modèle laisse deviner**, sans jamais donner l'id ni le titre d'une page invisible : à qui voit une sous-page sans voir sa page parente (un invité, souvent), `PATCH parentId: null` répond `200` si la page est vraiment à la racine et peut répondre `403` si elle a une page parente cachée ; un `afterId` qui nomme une autre page vue à la racine est accepté si les deux ont la même page parente cachée, refusé sinon ; le `trashedAt` d'une page à la corbeille par héritage donne la date de cette page parente ; et les positions des pages de racine, communes à tout l'espace, laissent voir par leurs écarts que d'autres y ont des pages.
+- **Cache.** `spaces.rev` est incrémenté, dans la même transaction, par toute écriture qui change une entrée du calcul des accès : création et suppression d'une page, changement de page parente, corbeille et restauration, accès, membres ; pas par un renommage ni par un changement de place parmi les mêmes frères (Ruling R83). Ce n'est pas la version monotone du journal d'opérations (§5.2), qui reste à faire. Deux caches sont rangés sous cette révision : les données de l'espace (pages, accès, rôles), lues en une transaction une fois par révision pour tout le monde (Ruling R92), et le calcul de chaque personne, borné en nombre de pages gardées (Ruling R59). Rien n'est servi d'une autre révision que celle qu'on vient de lire.
+- **Contrôles dans la transaction qui écrit.** Le cache sert à répondre vite, pas à décider une écriture de droits : un changement de rôle et un retrait sont revérifiés par le store dans leur transaction (la route relit et redécide, puis `409 roles_changed`) ; un changement d'accès est vérifié en entier dans la sienne, au nom de qui le demande (Ruling R87) ; un changement de page parente est lié au parent lu avec les droits (Rulings R66, R82 et R94). Pour une seule page, le store calcule le niveau sur sa chaîne de pages parentes (`mementum_acl::chain_level`), avec la même règle par ligne que le calcul de tout l'espace ; un test de propriétés compare les deux.
+- **Synchronisation.** `/sync` vérifie la session et le droit de lire avant la poignée de main, puis les relit une fois la page chargée : la connexion ne tient ses droits (lecture seule ou écriture) que de cette seconde lecture (Ruling R89). Elle les garde jusqu'à ce qu'une écriture de droits la ferme (corbeille, restauration, changement de parent, partage, retrait d'un membre, changement de rôle, suppression), ou que la session de son compte se ferme (déconnexion, changement de mot de passe, connexion par-dessus une session : Rulings R73 et R90). Le client revient alors par la poignée de main. Une connexion qui s'ouvre au même instant est fermée à son inscription, avant d'avoir rien reçu (Rulings R71 et R88).
+- **Fenêtres acceptées**, de l'ordre de la milliseconde (Ruling R74) : les messages déjà en file quand un droit change sont traités avec les anciens droits ; `PUT /mmd` relit les droits une fois la page chargée, puis écrit ; un passage à la racine est lié au parent lu, pas à la révision. Une connexion restée ouverte sans coupure jusqu'à l'échéance de sa session (30 jours) n'est fermée qu'à sa reconnexion.
 
 ### 5.7 Recherche
 - Tantivy indexe les titres et les blocs (`blocks_index`), avec le fil d'Ariane de chaque page. Les résultats sont filtrés par permissions au moment de la requête.
@@ -725,6 +745,21 @@ acme_email = "admin@exemple.fr"
 ```
 Les secrets passent par des variables d'environnement ou des fichiers (`*_FILE`), jamais en clair dans le toml.
 
+**Déjà configurable au lot 2 de la P1.** Pas encore de fichier `mementum.toml` (lot 7) : quatre réglages, chacun par une variable d'environnement ou par une option de `mementum serve`, l'option l'emportant sur la variable. Une valeur invalide arrête le démarrage.
+
+| Réglage | Variable | Option | Défaut |
+|---|---|---|---|
+| adresse d'écoute | `MEMENTUM_BIND` | `--bind` | `127.0.0.1:8080`, la boucle locale seulement |
+| `data_dir` | `MEMENTUM_DATA_DIR` | `--data-dir` | `./data` (base SQLite `mementum.db`) |
+| `auth.signup` | `MEMENTUM_SIGNUP` | `--signup` | `invite` (Ruling R50) ; `open` admis ; `domain` au lot 7 |
+| `public_url` | `MEMENTUM_PUBLIC_URL` | `--public-url` | aucune |
+
+- Le premier compte est toujours permis, quel que soit `signup`, et administre l'instance ; le serveur le rappelle dans son journal tant qu'aucun compte n'existe.
+- `public_url` (Ruling R51) : en `https`, le cookie de session porte `Secure` ; son origine est admise sur les écritures et sur la synchronisation ; son hôte est admis par le contrôle de l'en-tête `Host` quand le serveur n'écoute que sur la boucle locale, derrière un mandataire ou un tunnel (Ruling R78). L'option `MEMENTUM_ALLOWED_HOSTS` n'est pas faite : le propriétaire l'a écartée. Hors de la boucle locale, le contrôle de `Host` est coupé (Ruling R31) : ce sont les comptes qui protègent.
+- Le lien d'une invitation est construit par l'application, sur l'adresse où elle est ouverte, et non sur `public_url`.
+- Pas de SMTP : une invitation est un lien à copier, et un mot de passe oublié se règle par `mementum user set-password` (Ruling R47). Pas d'OIDC avant la P3.
+- Le niveau des journaux se règle par `RUST_LOG`.
+
 ### 7.3 Montée en charge
 1. **Un nœud + SQLite** : jusqu'à quelques centaines d'utilisateurs actifs.
 2. **Un nœud + Postgres + S3** : plusieurs milliers. On monte en puissance la machine.
@@ -734,6 +769,7 @@ Les secrets passent par des variables d'environnement ou des fichiers (`*_FILE`)
 - `mementum backup` (à chaud, cohérent) vers un disque ou S3, planifiable dans l'admin. Compatible Litestream pour la réplication continue de SQLite.
 - `mementum restore`, et `mementum migrate --to postgres` pour passer de SQLite à Postgres sans rien perdre.
 - Migrations de schéma automatiques au démarrage, avec sauvegarde préalable. Le changelog signale les ruptures, et il n'y en aura pas sans outil de migration.
+  - Fait au lot 2 de la P1 (Rulings R67, R72 et R75) : avant toute migration en attente, une copie cohérente de la base est écrite à côté d'elle (`mementum.db.avant-<version>.bak`, puis des noms datés si la base a changé entre deux tentatives). Rien n'est jamais écrasé ni supprimé, et le serveur ne démarre pas s'il ne peut pas l'écrire. Le README dit comment reconnaître la plus récente et la restaurer. `mementum backup` et `mementum restore` restent à faire.
 
 ### 7.5 Fédération *(après la 1.0)*
 En v1, chaque instance est indépendante. On collabore entre serveurs avec des invités (connexion OIDC d'une instance à l'autre) et des liens publics. L'étape suivante, « Mementum Link », synchroniserait une page partagée entre deux instances (CRDT de serveur à serveur). Les « Spaces » privés d'AT Protocol ne sont qu'en alpha, donc on ne s'y appuie pas pour l'instant.
@@ -810,12 +846,32 @@ mementum/
 | **Cloud** | « Mementum Cloud » (en parallèle de la P4) | Service `mementum-cloud` : inscription, Stripe, création et mise en veille des instances, sauvegardes S3, domaines personnalisés, tableau de bord, bouton « Passer en auto-hébergement ». Pages légales (CGU, confidentialité, DPA). Bêta fermée dès que la P3 est stable | 10 organisations bêta hébergées pendant un mois sans incident, et une migration cloud → auto-hébergé réussie de bout en bout |
 | **+** | Après la 1.0 | Mobile natif, fédération (Mementum Link), bases synchronisées depuis des API externes, notes de réunion (Whisper local), mode présentation, permissions par colonne, SCIM, tableau blanc | — |
 
-**Avancement de la P1** (9 novembre 2026). La phase est découpée en 7 lots : socle et édition en direct ; comptes, espaces, droits et corbeille ; collaboration et blocs riches ; recherche ; agents ; imports et export ; livraison. Le lot 1 ([plan](../superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](../superpowers/logs/2026-11-09-p1-lot1-ledger.md)) est fait : ses 10 tâches sont closes, et la relecture finale de toute la branche est faite, corrections comprises. Il livre 7 crates (`mementum-schema`, `-md`, `-crdt`, `-store`, `-sync`, `-server`, `-cli`) et le client `apps/web` : l'arbre de pages, l'édition à plusieurs en direct et le format MMD de la P1 (§6.2), sans comptes ni droits. Limites connues laissées par ce lot :
+**Avancement de la P1** (10 novembre 2026). La phase est découpée en 7 lots : socle et édition en direct ; comptes, espaces, droits et corbeille ; collaboration et blocs riches ; recherche ; agents ; imports et export ; livraison. Le lot 1 ([plan](../superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](../superpowers/logs/2026-11-09-p1-lot1-ledger.md)) est fait : ses 10 tâches sont closes, et la relecture finale de toute la branche est faite, corrections comprises. Il livre 7 crates (`mementum-schema`, `-md`, `-crdt`, `-store`, `-sync`, `-server`, `-cli`) et le client `apps/web` : l'arbre de pages, l'édition à plusieurs en direct et le format MMD de la P1 (§6.2), sans comptes ni droits. Limites connues laissées par ce lot :
 - **R39** : une édition faite sur un bloc pendant qu'un autre client le déplace est perdue (§11) ; à traiter au lot 3 ;
 - **R40** : la réécriture complète d'une page de 10 000 blocs bloque l'acteur de la page 2,5 à 4 s selon la machine et sa charge (§5.10) ; remède prévu au lot 5, une écriture MMD par différence ;
 - **R41** : `PUT /mmd` refuse une prop hors registre (§6.2, « Limites connues ») ; à lever quand le schéma du client saura la porter ;
-- **R43** : l'ouverture d'une page ralentit avec le nombre de pages affichées dans l'arbre, et dépasse 300 ms vers 350 à 400 pages (§5.10) ; correctif prévu au lot 2 ;
+- **R43** : l'ouverture d'une page ralentissait avec le nombre de pages affichées dans l'arbre ; **corrigé au lot 2** : l'arbre ne met plus dans le document que ses lignes visibles (§5.10) ;
 - **R44** : deux avis RustSec sont ouverts sans mise à jour possible : RUSTSEC-2026-0459 (`libsqlite3-sys` 0.37.0, bloqué par `sqlx` 0.9.0) et RUSTSEC-2026-0215 (`smallstr`, non maintenu, tiré par `yrs` 0.28.1). Le premier ne touche qu'un processus qui ouvre une base écrite par un tiers ; le serveur n'ouvre que la sienne. La CI ne contrôle pas encore les avis (`cargo deny check advisories` à la main) ; à revoir avant toute fonction qui ouvre une base reçue d'ailleurs, et au lot 7.
+
+Le lot 2, « Comptes, espaces, droits et corbeille » ([plan](../superpowers/plans/2026-11-10-p1-lot2-comptes-espaces-droits.md), [registre](../superpowers/logs/2026-11-10-p1-lot2-ledger.md)), est presque fini : le serveur est fait et relu ; il reste le menu Partager du client, la relecture finale de tout le lot et la recette du propriétaire. Il ajoute la crate `mementum-acl` (qui voit quoi dans un espace) et la migration `0002`, qui remplace organisations et coffres par des espaces. Il livre :
+- des comptes locaux : mot de passe haché en Argon2id, session par cookie de 30 jours ; le premier compte administre l'instance ; inscriptions sur invitation par défaut (Ruling R50) ; mot de passe oublié par `mementum user set-password`, faute de SMTP (Ruling R47) ;
+- des espaces façon Notion (demande d'Alex, à confirmer avec Lenny, Ruling R45), plusieurs par compte, avec les rôles propriétaire, admin, membre et invité, et des invitations par lien, dans l'espace ou sur une page (§4.4) ;
+- des pages d'espace, partagées et privées, en trois sections calculées ; le partage d'une page et son accès général (§4.3, §4.4) ;
+- les droits vérifiés à chaque appel, synchronisation comprise : une connexion ouverte est fermée dès que ses droits changent, et ne revient qu'avec ses nouveaux droits (§5.6) ;
+- la corbeille : une page y part avec ses sous-pages et en revient avec elles ; à la corbeille, elle se lit et ne s'écrit plus ; on ne la supprime pour de bon que depuis la corbeille ;
+- la migration d'une base du lot 1 sans perte : copie de la base d'abord (§7.4), puis ses pages vont dans « Mon espace », que reprend le premier compte ;
+- deux reports du lot 1 : l'arbre fenêtré (R43) et les budgets du navigateur mesurés sur un build de production et un serveur `--release` (R38). Les budgets du §5.10 tiennent ; les mesures sont au registre du lot 2.
+
+Limites connues laissées par le lot 2 :
+- **R76** : dix mots de passe faux bloquent une adresse 15 minutes, même pour son titulaire ; un tiers peut donc l'empêcher de se connecter (ses sessions ouvertes continuent) ;
+- **R77** et **R84** : l'inscription dit si une adresse a un compte ; sur une instance sur invitation, quelqu'un du dehors peut le savoir, à une douzaine de requêtes par adresse. Ces trois limites attendent les limites de débit par adresse IP du lot 7 (Ruling R54) ;
+- **présence** : une connexion en lecture seule peut encore annoncer sa présence, et rien ne lie un identifiant de client à la connexion qui l'annonce. Un lecteur, invité compris, peut donc remplacer ou effacer le nom et le curseur d'un autre à l'écran des autres, sans toucher au contenu. À trier à la relecture finale du lot ; la présence vérifiée par le serveur est prévue au lot 3 (Ruling R52) ;
+- **R97** : la barre latérale ne suit pas en direct les pages créées, renommées ou déplacées par d'autres ; elle est relue quand l'onglet revient au premier plan, au plus une fois toutes les cinq secondes. Le direct viendra avec le journal d'opérations (canal `space:<id>`, §5.4), au lot 3 ;
+- **R86** : un invité en accès complet sur une page peut y inviter d'autres personnes (à confirmer, §4.4) ;
+- `mementum user set-password` tourne dans un autre processus que le serveur : il ferme les sessions du compte, pas ses connexions de synchro déjà ouvertes, qui tombent à leur prochaine coupure (Ruling R73) ; il ne lève pas non plus le frein des connexions, gardé en mémoire ;
+- **R46** : pas de passkeys au lot 2. Le §4.5 les place en P3, le tableau ci-dessus en P1 : la contradiction reste à trancher ;
+- **R52** : hors du lot, suppression d'un espace ou d'un compte, création d'espaces réservée par l'admin d'instance, inscription par domaine e-mail, vidage automatique de la corbeille ;
+- **R53** : jusqu'à la clôture du lot, la migration `0002` peut encore changer ; aucun binaire intermédiaire ne doit ouvrir une base qu'on veut garder.
 
 ---
 
