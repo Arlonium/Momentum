@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::http::{Method, StatusCode, header};
 use common::{
-    Account, Browser, Reply, SESSION_COOKIE, Team, TestApp, WAIT, json_request, outcome, text,
-    tree_nodes,
+    Account, Browser, Reply, SESSION_COOKIE, Team, TestApp, WAIT, exec_sql, json_request, outcome,
+    query_i64, text, tree_nodes,
 };
 use mementum_acl::{Level, Subject};
 use mementum_schema::SCHEMA_VERSION;
@@ -1242,6 +1242,125 @@ async fn trashed_page_access_is_read_only() {
         assert!(text(&body, "message").contains("corbeille"), "{route}");
     }
     assert_eq!(team.grants(project).await, [members(Level::Full)]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Les refus de la transaction (Ruling R87), tels qu'ils sortent par HTTP.
+//
+// Avant le corps, la route répond par le cache des accès ; c'est la transaction du store qui
+// fait foi. Trois de ses refus ne se voient qu'en course : la page devenue invisible, mise à la
+// corbeille, ou l'appelant devenu invité, entre le contrôle de la route et l'écriture. Pour que
+// le refus vienne de la transaction sans dépendre d'un minutage, ces tests font ce que le store
+// ne fait jamais : ils écrivent en base sans incrémenter la révision de l'espace. Le cache garde
+// les droits d'avant, le contrôle de la route passe, et la transaction, qui relit tout, refuse.
+
+/// Une page qu'Olga partage avec Mona, toutes deux en accès complet, sans accès général. Les
+/// accès de Mona sont en cache : elle en lit les accès.
+async fn shared_with_mona(team: &Team<'_>) -> Uuid {
+    let lines = [user(&team.olga, Level::Full), user(&team.mona, Level::Full)];
+    let page = team.page(None, "D'Olga et Mona", &lines).await;
+    access_of(&team.mona.browser, page).await;
+    page
+}
+
+/// Ce qu'un changement d'accès refusé ne touche pas : les lignes de la page et la révision de
+/// l'espace.
+async fn untouched(t: &TestApp, team: &Team<'_>, page: Uuid) -> (Vec<(Subject, Level)>, i64) {
+    let rev = format!("SELECT rev FROM spaces WHERE id = '{}'", team.space);
+    (team.grants(page).await, query_i64(&t.db_path(), &rev).await)
+}
+
+/// Les trois routes qui changent un accès, appelées par `by` sur `page` : l'accès général,
+/// l'accès de Tom, le retrait de celui d'Olga.
+async fn three_changes(
+    by: &Browser<'_>,
+    page: Uuid,
+    team: &Team<'_>,
+) -> Vec<(&'static str, Reply)> {
+    vec![
+        ("PUT general", set_general(by, page, json!("read")).await),
+        ("PUT users", set_level(by, page, team.tom.id, "read").await),
+        ("DELETE users", remove(by, page, team.olga.id).await),
+    ]
+}
+
+/// `Unseen` : Mona perd son accès à la page entre le contrôle de la route et l'écriture. La
+/// transaction ne la lui montre plus, et la réponse est exactement celle d'une page qui
+/// n'existe pas : même statut, même type, même corps. Rien n'est écrit.
+#[tokio::test]
+async fn sharer_who_lost_the_page_gets_the_404_of_an_unknown_page() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona.browser;
+    let page = shared_with_mona(&team).await;
+    let gone = format!(
+        "DELETE FROM acl WHERE node_id = '{page}' AND subject = '{}'",
+        Subject::User(team.mona.id)
+    );
+    exec_sql(&t.db_path(), &gone).await;
+    // Le cache n'en sait rien : il lui laisse encore lire les accès. Le refus qui suit vient
+    // donc de la transaction.
+    access_of(mona, page).await;
+    let before = untouched(&t, &team, page).await;
+
+    let unknown = three_changes(mona, Uuid::now_v7(), &team).await;
+    let refused = three_changes(mona, page, &team).await;
+    for ((route, reply), (_, unknown)) in refused.iter().zip(&unknown) {
+        reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+        assert_eq!(outcome(reply), outcome(unknown), "{route}");
+    }
+    assert_eq!(untouched(&t, &team, page).await, before);
+}
+
+/// `Trashed` : la page part à la corbeille entre le contrôle de la route et l'écriture :
+/// `409 trashed`, rien n'est écrit.
+#[tokio::test]
+async fn sharing_overtaken_by_the_trash_answers_trashed() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = shared_with_mona(&team).await;
+    let trashed = format!("UPDATE nodes SET trashed_at = 1 WHERE id = '{page}'");
+    exec_sql(&t.db_path(), &trashed).await;
+    let before = untouched(&t, &team, page).await;
+
+    for (route, reply) in three_changes(&team.mona.browser, page, &team).await {
+        let body = reply.assert_error(StatusCode::CONFLICT, "trashed");
+        assert!(text(&body, "message").contains("corbeille"), "{route}");
+    }
+    assert_eq!(untouched(&t, &team, page).await, before);
+}
+
+/// `GuestGeneral` (Ruling R85) : Mona, membre, devient invitée entre le contrôle de la route et
+/// l'écriture. Sa ligne lui garde l'accès complet, mais l'accès général n'est plus à elle :
+/// `403 forbidden`, avec le message de R85, et rien n'est écrit. Le reste de ce que donne
+/// l'accès complet lui reste (R86).
+#[tokio::test]
+async fn sharer_demoted_to_guest_cannot_change_general_access() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona.browser;
+    let page = shared_with_mona(&team).await;
+    let demoted = format!(
+        "UPDATE members SET role = 'guest' WHERE space_id = '{}' AND user_id = '{}'",
+        team.space, team.mona.id
+    );
+    exec_sql(&t.db_path(), &demoted).await;
+    let before = untouched(&t, &team, page).await;
+
+    for level in [json!("read"), Value::Null] {
+        let reply = set_general(mona, page, level.clone()).await;
+        let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+        let message = text(&body, "message");
+        assert!(
+            message.contains("invité") && message.contains("accès général"),
+            "{level} : {body}"
+        );
+    }
+    assert_eq!(untouched(&t, &team, page).await, before);
+    // Invitée en accès complet, elle donne encore un accès à quelqu'un.
+    set_level(mona, page, team.tom.id, "read")
+        .await
+        .assert_status(StatusCode::OK);
 }
 
 /// Review Focus 1 : chaque changement d'accès ferme les connexions de synchro de la page et de
