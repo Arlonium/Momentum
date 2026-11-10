@@ -97,6 +97,19 @@ export async function waitSynced(p: Page): Promise<void> {
   );
 }
 
+/** Le bandeau d'un onglet dont le schéma n'est plus celui du serveur (lecture seule, R35). */
+export const READ_ONLY_BANNER =
+  "Une nouvelle version de Mementum est disponible. Recharge la page pour continuer à écrire.";
+
+/** `/api/v1/info` annonce désormais un schéma plus récent que celui du client. */
+export async function serverSchemaBumped(p: Page): Promise<void> {
+  await p.route("**/api/v1/info", async (route) => {
+    const response = await route.fetch();
+    const info = (await response.json()) as { schemaVersion: number };
+    await route.fulfill({ response, json: { ...info, schemaVersion: info.schemaVersion + 1 } });
+  });
+}
+
 /** Mot de passe des comptes de test : une constante manifestement fausse. */
 export const PASSWORD = "mot-de-passe-de-test";
 

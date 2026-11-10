@@ -1,7 +1,7 @@
 // Édition à plusieurs : latence, verrou avant la synchro, lecture seule d'un client d'un
 // autre schéma, au chargement ou à une reconnexion (Review Focus 2, R35), et fusion après
 // une coupure réseau (Review Focus 4).
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import {
   closeContexts,
   createPage,
@@ -12,7 +12,9 @@ import {
   openPage,
   percentile,
   putMmd,
+  READ_ONLY_BANNER,
   REGISTRY_VERSION,
+  serverSchemaBumped,
   unique,
   waitSynced,
   watchWrites,
@@ -116,17 +118,7 @@ test("editing_locked_until_synced", async ({ browser, request }) => {
   expect(await getMmd(request, id)).not.toContain("trop tôt");
 });
 
-const BANNER =
-  "Une nouvelle version de Mementum est disponible. Recharge la page pour continuer à écrire.";
-
-/** `/api/v1/info` annonce désormais un schéma plus récent que celui du client. */
-async function serverSchemaBumped(p: Page): Promise<void> {
-  await p.route("**/api/v1/info", async (route) => {
-    const response = await route.fetch();
-    const info = (await response.json()) as { schemaVersion: number };
-    await route.fulfill({ response, json: { ...info, schemaVersion: info.schemaVersion + 1 } });
-  });
-}
+const BANNER = READ_ONLY_BANNER;
 
 test("stale_schema_is_read_only", async ({ browser, request, baseURL }) => {
   const { id } = await createPage(request, { title: `Schéma ${unique()}` });
