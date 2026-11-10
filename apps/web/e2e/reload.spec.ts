@@ -14,6 +14,8 @@ import {
   NO_SESSION,
   openPage,
   openRowMenu,
+  ownerAndMember,
+  pageIdOf,
   sectionOf,
   shownRows,
   sidebarOf,
@@ -319,6 +321,122 @@ test("tree_is_read_again_when_the_tab_comes_back", async ({ browser }) => {
   await comeBack();
   await p.waitForTimeout(300);
   expect(reads).toBe(1);
+});
+
+test("page_created_by_someone_else_appears_without_returning_to_the_tab", async ({ browser }) => {
+  // Deux membres du même espace, chacun dans sa fenêtre.
+  const { alice, space, bruno } = await ownerAndMember();
+  const a = await newUser(browser, alice);
+  await a.goto(`/s/${space.id}`);
+  const b = await newUser(browser, bruno);
+  await b.goto(`/s/${space.id}`);
+  await expect(sectionOf(b, "Espace")).toBeVisible();
+  // Dans la fenêtre de B, un repère qu'un rechargement effacerait, et le compte des retours
+  // sur l'onglet (focus, visibilité) : il ne doit y en avoir aucun.
+  await b.evaluate(() => {
+    const seen = window as unknown as { kept: boolean; returns: number };
+    seen.kept = true;
+    seen.returns = 0;
+    window.addEventListener("focus", () => (seen.returns += 1));
+    document.addEventListener("visibilitychange", () => (seen.returns += 1));
+  });
+
+  // A crée une page dans « Espace ». B ne touche à rien : elle apparaît dans sa barre latérale
+  // en moins de quinze secondes (l'arbre est relu toutes les dix secondes, Ruling R128).
+  const before = new URL(a.url()).pathname;
+  await sectionOf(a, "Espace")
+    .getByRole("button", { name: "Ajouter une page dans « Espace »" })
+    .click();
+  await a.waitForURL((url) => url.pathname.startsWith("/p/") && url.pathname !== before);
+  const id = pageIdOf(a);
+  await expect(treeRow(b, id)).toBeVisible({ timeout: 15_000 });
+  // De même quand A la nomme.
+  const title = `Créée ailleurs ${unique()}`;
+  await titleOf(a).fill(title);
+  await titleOf(a).press("Enter");
+  await expect(treeRow(b, id).getByRole("link")).toHaveText(title, { timeout: 15_000 });
+  // Ni clic, ni focus, ni rechargement dans la fenêtre de B.
+  expect(
+    await b.evaluate(() => {
+      const seen = window as unknown as { kept?: boolean; returns?: number };
+      return [seen.kept, seen.returns];
+    }),
+  ).toEqual([true, 0]);
+});
+
+test("tree_read_again_without_a_change_disturbs_nothing_in_the_sidebar", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  const c = await createPage(api, { title: "Charlie" });
+
+  const p = await newUser(browser, alice);
+  // L'horloge de la page est la nôtre : on n'attend pas dix secondes pour de bon.
+  await p.clock.install();
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  /**
+   * Dix secondes passent : le minuteur relit l'arbre (Ruling R128). Rend la main une fois la
+   * réponse reçue, et l'application passée par quelques tours de sa boucle d'événements : ce
+   * qu'elle avait à rendre de nouveau l'est.
+   */
+  const treeIsReadAgain = async () => {
+    const answered = p.waitForResponse((response) =>
+      response.url().endsWith(`/spaces/${space.id}/tree`),
+    );
+    await p.clock.fastForward(10_000);
+    await (await answered).finished();
+    await p.evaluate(async () => {
+      for (let turn = 0; turn < 5; turn++) {
+        await new Promise<void>((done) => {
+          const channel = new MessageChannel();
+          channel.port1.onmessage = () => done();
+          channel.port2.postMessage(null);
+        });
+      }
+    });
+  };
+
+  // Un menu ouvert reste ouvert, le focus sur son action.
+  const menu = await openRowMenu(p, b.id, "Bravo");
+  const action = menu.getByRole("menuitem", { name: "Mettre à la corbeille" });
+  await action.focus();
+  await treeIsReadAgain();
+  await expect(menu).toBeVisible();
+  await expect(action).toBeFocused();
+  await p.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+
+  // Le focus posé sur une ligne y reste.
+  const link = treeRow(p, a.id).getByRole("link");
+  await link.focus();
+  await treeIsReadAgain();
+  await expect(link).toBeFocused();
+
+  // Un glisser en cours garde sa page saisie et sa cible, et finit où il allait.
+  const box = async (id: string) => (await treeRow(p, id).boundingBox())!;
+  const from = await box(c.id);
+  await p.mouse.move(from.x + 80, from.y + from.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(from.x + 86, from.y + from.height / 2 + 4, { steps: 3 });
+  await expect(treeRow(p, c.id)).toHaveClass(/is-dragging/);
+  const onto = await box(b.id);
+  await p.mouse.move(onto.x + 80, onto.y + onto.height / 2);
+  await expect(treeRow(p, b.id)).toHaveClass(/is-drop-inside/);
+  await treeIsReadAgain();
+  await expect(treeRow(p, c.id)).toHaveClass(/is-dragging/);
+  await expect(treeRow(p, b.id)).toHaveClass(/is-drop-inside/);
+  await p.mouse.up();
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "2 Charlie"]);
+
+  // Avec un changement, la barre suit, comme au retour sur l'onglet : une page créée ailleurs
+  // arrive au tour suivant du minuteur.
+  const d = await createPage(api, { title: "Delta" });
+  await treeIsReadAgain();
+  await expect(treeRow(p, d.id)).toBeVisible();
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "2 Charlie", "1 Delta"]);
 });
 
 /** Ce que l'application dit d'un serveur qui ne répond pas (`api.ts`). */

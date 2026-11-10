@@ -6,6 +6,7 @@ import { ApiError, getTree } from "../api";
 import { deferred, renderHook, settle, type Deferred } from "../test/hooks";
 import { page, unauthenticated, unreachable } from "../test/pages";
 import {
+  POLL_INTERVAL_MS,
   REFRESH_INTERVAL_MS,
   sameNodes,
   useSpaceTree,
@@ -321,7 +322,7 @@ test("tab_coming_back_reads_nothing_before_a_space_is_known", async () => {
 
 test("tab_coming_back_is_told_with_the_tree_read_and_no_more_often", async () => {
   // Ce qui se relit avec l'arbre au retour sur l'onglet (le compte, Ruling R126) : au même
-  // moment, sous le même plafond.
+  // moment, au plus une fois toutes les cinq secondes.
   vi.useFakeTimers({ toFake: ["Date"], now: 1_000_000 });
   const focus = () => settle(() => window.dispatchEvent(new Event("focus")));
   const tree = await renderHook(hook, { spaceId: "perso" });
@@ -341,18 +342,160 @@ test("tab_coming_back_is_told_with_the_tree_read_and_no_more_often", async () =>
   expect(onReturn).toHaveBeenCalledTimes(1);
   await answer(1, "perso", [page("a")]);
 
-  // Une relecture de l'arbre demandée par une action n'est pas un retour sur l'onglet ; et
-  // le retour qui la suit de près ne relit rien.
+  // Une relecture de l'arbre demandée par une action, ou par le minuteur (R128), n'est pas un
+  // retour sur l'onglet. Le retour qui la suit de près ne relit pas l'arbre une seconde fois,
+  // mais il relit le compte, qui a son propre compte de temps : le minuteur, qui relit l'arbre
+  // seul, ne doit pas l'en priver.
   vi.setSystemTime(1_000_000 + 3 * REFRESH_INTERVAL_MS);
   await settle(() => tree.current.reload());
   expect(reads).toHaveLength(3);
-  await focus();
   expect(onReturn).toHaveBeenCalledTimes(1);
+  await focus();
+  expect(reads).toHaveLength(3);
+  expect(onReturn).toHaveBeenCalledTimes(2);
+  // Un autre retour dans les cinq secondes : rien.
+  vi.setSystemTime(1_000_000 + 4 * REFRESH_INTERVAL_MS - 1);
+  await focus();
+  expect(reads).toHaveLength(3);
+  expect(onReturn).toHaveBeenCalledTimes(2);
   // Cinq secondes plus tard : de nouveau les deux.
   vi.setSystemTime(1_000_000 + 4 * REFRESH_INTERVAL_MS);
   await focus();
   expect(reads).toHaveLength(4);
-  expect(onReturn).toHaveBeenCalledTimes(2);
+  expect(onReturn).toHaveBeenCalledTimes(3);
+});
+
+/**
+ * Horloge et minuteurs simulés, et la visibilité de l'onglet : le minuteur de relecture (R128)
+ * avance à la demande. Les promesses suivent leur cours.
+ */
+function simulated() {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], now: 1_000_000 });
+  let visibility: DocumentVisibilityState = "visible";
+  vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+  return {
+    pass: (ms: number) => settle(() => vi.advanceTimersByTime(ms)),
+    focus: () => settle(() => window.dispatchEvent(new Event("focus"))),
+    show: (state: DocumentVisibilityState) =>
+      settle(() => {
+        visibility = state;
+        document.dispatchEvent(new Event("visibilitychange"));
+      }),
+  };
+}
+
+test("tree_is_read_again_every_ten_seconds_while_the_tab_is_visible", async () => {
+  const clock = simulated();
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  await answer(0, "perso", [page("a")]);
+  expect(POLL_INTERVAL_MS).toBe(10_000);
+
+  // Sans retour sur l'onglet ni action : dix secondes après la dernière lecture, pas avant.
+  await clock.pass(POLL_INTERVAL_MS - 1);
+  expect(reads).toHaveLength(1);
+  await clock.pass(1);
+  expect(reads).toHaveLength(2);
+  // Ce que quelqu'un d'autre a créé entre-temps arrive.
+  const fresh = [page("a"), page("b")];
+  await answer(1, "perso", fresh);
+  expect(tree.current.loaded?.nodes).toBe(fresh);
+  // Et ainsi de suite.
+  await clock.pass(POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(3);
+  await answer(
+    2,
+    "perso",
+    fresh.map((node) => ({ ...node })),
+  );
+  // Rien n'a changé : l'arbre chargé reste le même objet.
+  expect(tree.current.loaded?.nodes).toBe(fresh);
+  // Le minuteur ne relit que l'arbre : le compte reste relu au retour sur l'onglet (R126).
+  expect(onReturn).not.toHaveBeenCalled();
+});
+
+test("hidden_tab_reads_nothing_until_it_comes_back", async () => {
+  const clock = simulated();
+  await renderHook(hook, { spaceId: "perso" });
+  await answer(0, "perso", []);
+  await clock.show("hidden");
+  await clock.pass(5 * POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(1);
+  // De retour : relu tout de suite (R97), puis dix secondes après cette lecture.
+  await clock.show("visible");
+  expect(reads).toHaveLength(2);
+  await answer(1, "perso", []);
+  await clock.pass(POLL_INTERVAL_MS - 1);
+  expect(reads).toHaveLength(2);
+  await clock.pass(1);
+  expect(reads).toHaveLength(3);
+});
+
+test("timer_starts_again_from_the_last_read_whatever_asked_for_it", async () => {
+  const clock = simulated();
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  await answer(0, "perso", []);
+  // Retour sur l'onglet à 7 s : l'arbre est relu. Le minuteur, qui tombait à 10 s, ne relit
+  // pas coup sur coup : il repart de cette lecture, et tombe à 17 s.
+  await clock.pass(7_000);
+  await clock.focus();
+  expect(reads).toHaveLength(2);
+  await answer(1, "perso", []);
+  await clock.pass(3_000);
+  expect(reads).toHaveLength(2);
+  await clock.pass(6_999);
+  expect(reads).toHaveLength(2);
+  await clock.pass(1);
+  expect(reads).toHaveLength(3);
+  await answer(2, "perso", []);
+  // De même après une relecture demandée par une action, à 21 s : la suivante tombe à 31 s.
+  await clock.pass(4_000);
+  await settle(() => tree.current.reload());
+  expect(reads).toHaveLength(4);
+  await answer(3, "perso", []);
+  await clock.pass(9_999);
+  expect(reads).toHaveLength(4);
+  await clock.pass(1);
+  expect(reads).toHaveLength(5);
+  // Et le retour sur l'onglet juste après une lecture du minuteur ne la double pas.
+  await answer(4, "perso", []);
+  await clock.pass(1_000);
+  await clock.focus();
+  expect(reads).toHaveLength(5);
+});
+
+test("timer_does_not_read_over_a_read_in_flight", async () => {
+  const clock = simulated();
+  await renderHook(hook, { spaceId: "perso" });
+  // La première lecture n'a pas encore répondu (serveur lent) : pas d'autre par-dessus.
+  await clock.pass(3 * POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(1);
+  await answer(0, "perso", []);
+  // Elle a répondu : dix secondes plus tard au plus, l'arbre est relu.
+  await clock.pass(POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(2);
+});
+
+test("timer_stops_without_a_space_and_with_the_view", async () => {
+  const clock = simulated();
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  await answer(0, "perso", []);
+  // Plus d'espace connu : plus de minuteur.
+  await tree.rerender({ spaceId: null });
+  expect(vi.getTimerCount()).toBe(0);
+  await clock.pass(3 * POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(1);
+  // De nouveau un espace : lu, puis relu dix secondes après.
+  await tree.rerender({ spaceId: "pro" });
+  expect(reads).toHaveLength(2);
+  await answer(1, "pro", []);
+  await clock.pass(POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(3);
+  await answer(2, "pro", []);
+  // La vue démontée : plus rien n'est relu, et aucun minuteur ne reste.
+  await tree.unmount();
+  expect(vi.getTimerCount()).toBe(0);
+  await clock.pass(3 * POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(3);
 });
 
 type CatchUpProps = { nodes: PageNode[] | null; activeId: string | null; found: PageNode | null };

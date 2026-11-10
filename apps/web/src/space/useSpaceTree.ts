@@ -17,11 +17,17 @@
 // reste, l'échec est dit, et la lecture repart d'elle-même quand le réseau revient.
 //
 // Rien ne pousse encore ici ce que d'autres changent dans l'espace (le journal d'opérations
-// de l'espace viendra dans un lot suivant, conception §5.3). En attendant, l'arbre est relu
-// quand l'onglet redevient visible ou reprend le focus, au plus une fois toutes les cinq
-// secondes (Ruling R97). Pas de relecture à intervalle fixe. Le compte est relu au même
-// moment (`onReturn`, Ruling R126) : son rôle dans l'espace a pu changer, et la session a pu
-// être rouverte sous un autre compte dans un autre onglet.
+// de l'espace viendra dans un lot suivant, conception §5.3). En attendant, l'arbre est relu :
+// - quand l'onglet redevient visible ou reprend le focus, au plus une fois toutes les cinq
+//   secondes (Ruling R97) ;
+// - toutes les dix secondes tant que l'onglet est visible (Ruling R128) : à deux sur un
+//   espace, sans changer de fenêtre, rien d'autre ne déclencherait la relecture. Le minuteur
+//   repart de la dernière lecture partie, quelle qu'en soit la raison, et ne lit ni pour un
+//   onglet caché, ni par-dessus une lecture en route.
+// Le compte est relu au retour sur l'onglet (`onReturn`, Ruling R126), pas par le minuteur :
+// son rôle dans l'espace a pu changer, et la session a pu être rouverte sous un autre compte
+// dans un autre onglet. Il a son propre compte de temps, cinq secondes aussi : une lecture de
+// l'arbre par le minuteur ne l'en prive pas au retour qui la suit.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ApiError, getTree, isSessionLost } from "../api";
@@ -45,6 +51,13 @@ export function sameNodes(a: PageNode[], b: PageNode[]): boolean {
 
 /** Au retour sur l'onglet, l'arbre n'est relu que si sa dernière lecture a au moins cet âge. */
 export const REFRESH_INTERVAL_MS = 5_000;
+
+/**
+ * Tant que l'onglet est visible, l'arbre est relu quand sa dernière lecture a cet âge (Ruling
+ * R128) : ce que d'autres créent, renomment ou déplacent arrive en dix secondes au plus, sans
+ * changer de fenêtre. En attendant le journal d'opérations de l'espace, qui le poussera.
+ */
+export const POLL_INTERVAL_MS = 10_000;
 
 export type SpaceTree = {
   /** L'arbre chargé ; `null` : aucun encore. Ce peut être celui d'un espace qu'on a quitté. */
@@ -123,11 +136,20 @@ export function useTreeReader(
   const [error, setError] = useState<string | null>(null);
   /** Quand la dernière lecture est partie (millisecondes Unix). */
   const readAt = useRef(0);
+  /** Le rang de la lecture en route ; 0 : aucune. */
+  const pending = useRef(0);
+  const ranks = useRef(0);
 
   useEffect(() => {
     if (spaceId === null) return;
     let cancelled = false;
     readAt.current = Date.now();
+    const rank = ++ranks.current;
+    pending.current = rank;
+    /** Cette lecture est finie ou abandonnée : si c'est toujours elle, plus rien n'est en route. */
+    const settled = () => {
+      if (pending.current === rank) pending.current = 0;
+    };
     const read = async () => {
       for (;;) {
         const before = changes.current;
@@ -144,14 +166,17 @@ export function useTreeReader(
         return;
       }
     };
-    read().catch((e: unknown) => {
-      if (cancelled) return;
-      if (isSessionLost(e)) callbacks.current.onSessionLost();
-      else if (e instanceof ApiError && e.status === 404) callbacks.current.onGone();
-      else setError(messageOf(e));
-    });
+    read()
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        if (isSessionLost(e)) callbacks.current.onSessionLost();
+        else if (e instanceof ApiError && e.status === 404) callbacks.current.onGone();
+        else setError(messageOf(e));
+      })
+      .finally(settled);
     return () => {
       cancelled = true;
+      settled();
     };
   }, [spaceId, reloads, retries, changes, set, latest]);
 
@@ -163,17 +188,27 @@ export function useTreeReader(
     return () => window.removeEventListener("online", reload);
   }, [failed, reload]);
 
-  // De retour sur l'onglet : ce que d'autres ont créé, renommé ou déplacé entre-temps (R97).
+  // De retour sur l'onglet : ce que d'autres ont créé, renommé ou déplacé entre-temps (R97),
+  // et le compte (R126).
   const known = spaceId !== null;
+  /** Quand le compte a été relu pour la dernière fois ; d'abord au chargement de l'application. */
+  const returnedAt = useRef(Date.now());
   useEffect(() => {
     if (!known) return;
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
-      if (Date.now() - readAt.current < REFRESH_INTERVAL_MS) return;
-      // Deux signaux du même retour (visible, puis focus) ne font qu'une lecture.
-      readAt.current = Date.now();
-      reload();
-      callbacks.current.onReturn();
+      const now = Date.now();
+      // Deux signaux du même retour (visible, puis focus) ne font qu'une lecture. Et pas de
+      // lecture coup sur coup avec celle du minuteur, ou d'une action.
+      if (now - readAt.current >= REFRESH_INTERVAL_MS) {
+        readAt.current = now;
+        reload();
+      }
+      // Le compte a son propre compte de temps : le minuteur relit l'arbre sans lui.
+      if (now - returnedAt.current >= REFRESH_INTERVAL_MS) {
+        returnedAt.current = now;
+        callbacks.current.onReturn();
+      }
     };
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
@@ -181,6 +216,28 @@ export function useTreeReader(
       document.removeEventListener("visibilitychange", refresh);
       window.removeEventListener("focus", refresh);
     };
+  }, [known, reload]);
+
+  // Tant que l'onglet est visible : dix secondes après la dernière lecture partie (R128).
+  useEffect(() => {
+    if (!known) return;
+    let timer: ReturnType<typeof setTimeout>;
+    const arm = () => {
+      const age = Date.now() - readAt.current;
+      // Une lecture plus ancienne que cela n'a pas été refaite (onglet caché, lecture en
+      // route) : on y revient dans dix secondes.
+      timer = setTimeout(tick, age < POLL_INTERVAL_MS ? POLL_INTERVAL_MS - age : POLL_INTERVAL_MS);
+    };
+    const tick = () => {
+      const due = Date.now() - readAt.current >= POLL_INTERVAL_MS;
+      if (due && pending.current === 0 && document.visibilityState === "visible") {
+        readAt.current = Date.now();
+        reload();
+      }
+      arm();
+    };
+    arm();
+    return () => clearTimeout(timer);
   }, [known, reload]);
 
   return error;
