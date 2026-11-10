@@ -11,6 +11,7 @@
     "dev": "corepack pnpm -C apps/web dev",
     "test": "corepack pnpm -C apps/web test",
     "e2e": "corepack pnpm -C apps/web e2e",
+    "e2e:budgets": "corepack pnpm -C apps/web e2e:budgets",
     "licenses": "node tools/check-npm-licenses.mjs"
   }
 }

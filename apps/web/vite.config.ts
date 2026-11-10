@@ -18,18 +18,25 @@ logger.error = (message, options) => {
   logError(message, options);
 };
 
+// Pas de `changeOrigin` : le serveur ne répond qu'à `Host: localhost`, `127.0.0.1` ou
+// `[::1]` (Ruling R31), et le mandataire doit garder `Host: localhost:<port>`. L'`Origin`
+// de la page (`http://localhost:<port>`) passe aussi telle quelle.
+const proxy = {
+  "/api/": { target: API },
+  "/sync/": { target: API, ws: true },
+};
+
 export default defineConfig({
   plugins: [react()],
   customLogger: logger,
   server: {
     port: WEB_PORT,
     strictPort: true,
-    // Pas de `changeOrigin` : le serveur ne répond qu'à `Host: localhost`, `127.0.0.1`
-    // ou `[::1]` (Ruling R31), et le mandataire doit garder `Host: localhost:<port>`.
-    // L'`Origin` de la page (`http://localhost:<port>`) passe aussi telle quelle.
-    proxy: {
-      "/api/": { target: API },
-      "/sync/": { target: API, ws: true },
-    },
+    proxy,
+  },
+  // `vite preview` sert le build de production, avec le même mandataire : les budgets du
+  // navigateur s'y mesurent (`playwright.budgets.config.ts`, Ruling R38).
+  preview: {
+    proxy,
   },
 });

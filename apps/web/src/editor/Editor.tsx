@@ -136,6 +136,10 @@ export function Editor({ session, fixture = null }: Props) {
     [editor],
   );
 
+  // `data-synced` (première synchro faite) et `data-editable` (éditeur modifiable) sur le
+  // conteneur, en développement comme en production : les e2e s'y fient (`waitSynced`, et
+  // les budgets du navigateur, mesurés sur un build de production, R38), là où
+  // `window.__mementum` n'existe qu'en développement.
   return (
     <BlockNoteView
       editor={editor}
@@ -143,6 +147,8 @@ export function Editor({ session, fixture = null }: Props) {
       theme="light"
       slashMenu={false}
       className="mm-editor"
+      data-synced={String(synced)}
+      data-editable={String(editable)}
     >
       <SuggestionMenuController
         triggerCharacter="/"

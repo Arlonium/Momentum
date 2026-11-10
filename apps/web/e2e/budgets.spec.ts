@@ -6,10 +6,15 @@
 // Ce qui est mesuré : l'application est déjà chargée, sur une autre page, dans un onglet
 // neuf ; le chronomètre part au clic sur la page dans l'arbre (navigation interne) et
 // s'arrête quand la première image où le premier bloc de la page est dans l'éditeur,
-// synchronisé avec le serveur (`provider.synced`) et modifiable, a fini son rendu (styles,
-// mise en page et peinture compris). Chaque ouverture vise une page que l'onglet n'a
-// jamais ouverte, et que le serveur n'a plus en mémoire : il la relit dans SQLite, comme
-// une page que personne n'a ouverte depuis un moment.
+// synchronisé avec le serveur (`data-synced`) et modifiable (`data-editable`), a fini son
+// rendu (styles, mise en page et peinture compris). Chaque ouverture vise une page que
+// l'onglet n'a jamais ouverte, et que le serveur n'a plus en mémoire : il la relit dans
+// SQLite, comme une page que personne n'a ouverte depuis un moment.
+//
+// Où : sur ce que les gens utiliseront, un build de production (`vite build`, servi par
+// `vite preview`) et un serveur compilé en release (`playwright.budgets.config.ts`,
+// `corepack pnpm -C apps/web e2e:budgets`, Ruling R38). `window.__mementum` n'existe pas
+// en production : la mesure lit les attributs du conteneur de l'éditeur.
 //
 // Seule la durée totale est affirmée. L'image la plus longue (`longestFrame`) est mesurée
 // et affichée, jamais affirmée : la conception définit « sans geler l'onglet » par « moins
@@ -99,12 +104,20 @@ async function openFromTree(browser: Browser, target: Target): Promise<Opening> 
           reject(new Error(`page ${id} absente de l'arbre`));
           return;
         }
-        // La session vise la page, sa première synchro est faite, et l'éditeur montre
-        // le premier bloc de la page (pas celui de la page quittée) et accepte la frappe.
+        // L'éditeur montre le premier bloc de la page (pas celui de la page quittée), sa
+        // première synchro est faite, et il accepte la frappe. Le texte du premier bloc
+        // est propre à chaque page, et le conteneur repasse à `data-synced="false"` dès que
+        // l'éditeur prend la session d'une autre page, avant d'en rien montrer : les deux
+        // attributs sont donc ceux de cette page.
         const opened = () => {
-          const m = window.__mementum;
-          if (!m || m.provider.roomname !== id || !m.provider.synced) return false;
-          const editor = document.querySelector(".bn-editor");
+          const container = document.querySelector(".mm-editor");
+          if (
+            container?.getAttribute("data-synced") !== "true" ||
+            container.getAttribute("data-editable") !== "true"
+          ) {
+            return false;
+          }
+          const editor = container.querySelector(".bn-editor");
           return (
             editor?.getAttribute("contenteditable") === "true" &&
             editor.querySelector(".bn-block-content")?.textContent === first

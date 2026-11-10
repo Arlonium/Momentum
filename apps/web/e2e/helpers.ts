@@ -49,9 +49,17 @@ export async function putMmd(request: APIRequestContext, id: string, mmd: string
   expect(res.status(), await res.text()).toBe(204);
 }
 
-/** Attend la première synchronisation de l'éditeur (il est alors déverrouillé). */
+/**
+ * Attend la première synchronisation de l'éditeur (il est alors déverrouillé, hors lecture
+ * seule). Lit `data-synced` sur le conteneur de l'éditeur (`.mm-editor`), posé en
+ * développement comme en production, à la différence de `window.__mementum`.
+ */
 export async function waitSynced(p: Page): Promise<void> {
-  await p.waitForFunction(() => window.__mementum?.synced === true, null, { timeout: 30_000 });
+  await p.waitForFunction(
+    () => document.querySelector(".mm-editor")?.getAttribute("data-synced") === "true",
+    null,
+    { timeout: 30_000 },
+  );
 }
 
 const contexts: BrowserContext[] = [];

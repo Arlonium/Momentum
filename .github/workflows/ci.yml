@@ -30,7 +30,8 @@ jobs:
 
   # Budgets de performance du §5.10 côté serveur : tests marqués `#[ignore]`, qui n'ont de
   # sens qu'en release (chargement d'une page de 10 000 blocs depuis SQLite). Les budgets
-  # du navigateur tournent avec les autres tests e2e, dans le job `web`.
+  # du navigateur tournent dans le job `web`, après les autres tests e2e, sur un build de
+  # production et un serveur `--release` (Ruling R38).
   budgets:
     name: budgets
     runs-on: ubuntu-latest
@@ -51,7 +52,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # Les tests e2e lancent le vrai serveur (`cargo run -p mementum-cli -- serve`).
+      # Les tests e2e lancent le vrai serveur (`cargo run -p mementum-cli -- serve`, en
+      # debug pour la suite ordinaire, en release pour les budgets).
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: corepack pnpm install --frozen-lockfile
@@ -60,6 +62,8 @@ jobs:
       - run: node tools/check-npm-licenses.mjs
       - run: corepack pnpm -C apps/web exec playwright install --with-deps chromium
       - run: corepack pnpm -C apps/web exec playwright test
+      # Budgets du navigateur (§5.10) : `vite build` puis `vite preview`, serveur `--release`.
+      - run: corepack pnpm -C apps/web exec playwright test -c playwright.budgets.config.ts
 
   deny:
     name: deny
