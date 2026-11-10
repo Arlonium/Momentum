@@ -137,6 +137,20 @@ pub(crate) fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Ce qu'il faut signaler, en avertissement, d'une copie d'avant migration
+/// posée sans lien physique (`Backup::without_hard_link`) ; `None` si elle a
+/// pris son nom de façon atomique, ou si une copie identique a été gardée.
+/// Le serveur le journalise ; `mementum user set-password` l'écrit sur la
+/// sortie d'erreur.
+pub fn backup_warning(backup: &Backup) -> Option<&'static str> {
+    backup.without_hard_link.then_some(
+        "la copie d'avant migration a pris son nom par un renommage, parce que ce système de \
+         fichiers ne permet pas les liens physiques : rien n'a été écrasé, mais deux processus \
+         qui ouvriraient la même base au même instant pourraient viser le même nom ; ne lancer \
+         qu'un processus à la fois sur ces données pendant une mise à jour",
+    )
+}
+
 /// L'application : ouvre (et crée au besoin) le dossier des données et la
 /// base, puis monte les routes.
 pub async fn app(cfg: &Config) -> anyhow::Result<Router> {
@@ -197,6 +211,9 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
             "base migrée ; la copie d'avant migration est à côté d'elle (kept : une copie \
              identique, d'une tentative précédente, y était déjà)"
         );
+        if let Some(warning) = backup_warning(backup) {
+            tracing::warn!(path = %backup.path.display(), "{warning}");
+        }
     }
     let expired = store
         .purge_sessions(now_ms())
@@ -300,4 +317,29 @@ async fn shutdown_signal() {
         _ = terminate => {}
     }
     tracing::info!("arrêt demandé");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Une copie posée sans lien physique se signale ; une copie posée de
+    /// façon atomique, ou gardée, non. (Le cas ne se provoque pas sur le
+    /// disque d'un test : il demande un système de fichiers sans liens
+    /// physiques.)
+    #[test]
+    fn backup_without_hard_link_is_a_warning() {
+        let backup = |kept, without_hard_link| Backup {
+            path: "mementum.db.avant-0002.bak".into(),
+            bytes: 4096,
+            kept,
+            without_hard_link,
+        };
+        assert_eq!(backup_warning(&backup(false, false)), None);
+        assert_eq!(backup_warning(&backup(true, false)), None);
+        let warning = backup_warning(&backup(false, true)).expect("un avertissement");
+        for part in ["renommage", "liens physiques", "rien n'a été écrasé"] {
+            assert!(warning.contains(part), "« {part} » absent de : {warning}");
+        }
+    }
 }

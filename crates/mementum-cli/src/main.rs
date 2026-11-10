@@ -125,6 +125,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         ""
                     }
                 );
+                if let Some(warning) = mementum_server::backup_warning(backup) {
+                    eprintln!("mementum : attention : {warning}");
+                }
             })
             .await?;
             println!("mot de passe changé pour {account} ; toutes ses sessions sont fermées");
