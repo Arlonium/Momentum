@@ -627,6 +627,127 @@ async fn demoted_admin_invitation_is_dead() {
     );
 }
 
+/// Une invitation au rôle `owner` ne vaut que si son auteur est encore `owner` : un admin ne
+/// fait pas un propriétaire, et un propriétaire passé admin non plus (Ruling R69).
+#[tokio::test]
+async fn owner_invitation_needs_an_owner_author() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let adam = account(store, "adam").await;
+    let bob = account(store, "bob").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    store
+        .add_member(space.id, adam.id, Role::Admin)
+        .await
+        .unwrap();
+    let t = now();
+
+    // D'un admin : ni consultable, ni acceptable.
+    store
+        .create_invitation(invitation(&space, to_space(Role::Owner), adam.id, 1))
+        .await
+        .unwrap();
+    assert_eq!(store.invitation_by_token([1; 32], t).await.unwrap(), None);
+    let r = store.accept_invitation([1; 32], bob.id, t).await;
+    assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
+    assert_eq!(store.role_in(space.id, bob.id).await.unwrap(), None);
+    // Ses invitations aux autres rôles valent.
+    let to_admin = store
+        .create_invitation(invitation(&space, to_space(Role::Admin), adam.id, 2))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.invitation_by_token([2; 32], t).await.unwrap(),
+        Some(to_admin)
+    );
+
+    // D'un propriétaire : elle vaut, tant qu'il l'est.
+    let to_owner = store
+        .create_invitation(invitation(&space, to_space(Role::Owner), olga.id, 3))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .invitation_by_token([3; 32], t)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&to_owner)
+    );
+    store
+        .set_role(space.id, adam.id, Role::Owner)
+        .await
+        .unwrap();
+    store
+        .set_role(space.id, olga.id, Role::Admin)
+        .await
+        .unwrap();
+    assert_eq!(store.invitation_by_token([3; 32], t).await.unwrap(), None);
+    let r = store.accept_invitation([3; 32], bob.id, t).await;
+    assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
+    assert_eq!(store.role_in(space.id, bob.id).await.unwrap(), None);
+
+    // Redevenue propriétaire, son invitation vaut de nouveau, et fait un propriétaire.
+    store
+        .set_role(space.id, olga.id, Role::Owner)
+        .await
+        .unwrap();
+    store.accept_invitation([3; 32], bob.id, t).await.unwrap();
+    assert_eq!(
+        store.role_in(space.id, bob.id).await.unwrap(),
+        Some(Role::Owner)
+    );
+}
+
+/// Une invitation de page ne vaut que si son auteur a encore un rôle dans l'espace : un invité
+/// qui sort de l'espace avec sa dernière ligne (`revoke_user_grant`, qui ne supprime pas ses
+/// invitations) n'y fait plus entrer personne (Ruling R69).
+#[tokio::test]
+async fn page_invitation_needs_an_author_in_the_space() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let gina = account(store, "gina").await;
+    let bob = account(store, "bob").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    let p = space_page(store, &space, None, "P").await;
+    // Gina, invitée avec `full` sur P, y invite à son tour.
+    invite_and_accept(
+        store,
+        invitation(&space, to_page(&p, Level::Full), olga.id, 1),
+        gina.id,
+    )
+    .await
+    .unwrap();
+    let t = now();
+    let from_gina = store
+        .create_invitation(invitation(&space, to_page(&p, Level::Read), gina.id, 2))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .invitation_by_token([2; 32], t)
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(&from_gina)
+    );
+
+    store.revoke_user_grant(p.id, gina.id).await.unwrap();
+    assert_eq!(store.role_in(space.id, gina.id).await.unwrap(), None);
+    assert_eq!(store.invitation_by_token([2; 32], t).await.unwrap(), None);
+    let r = store.accept_invitation([2; 32], bob.id, t).await;
+    assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
+    assert_eq!(store.role_in(space.id, bob.id).await.unwrap(), None);
+    assert_eq!(lines_of(store, &space, bob.id).await, []);
+    // Elle reste en attente, à révoquer : elle se lit par son id.
+    assert_eq!(
+        store.get_invitation(from_gina.id, t).await.unwrap(),
+        Some(from_gina)
+    );
+}
+
 /// Qui quitte un espace emporte les invitations qu'il y avait faites et qui attendaient encore
 /// (Ruling R69), d'espace comme de pages, dans la transaction de son départ.
 #[tokio::test]

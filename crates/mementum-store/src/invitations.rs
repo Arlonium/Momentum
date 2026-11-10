@@ -7,10 +7,11 @@
 //!
 //! Une invitation ne vaut que tant que son auteur a encore le droit de la faire (Ruling R69) :
 //! celles qu'il attendait encore partent avec lui quand il quitte l'espace (`remove_member`) ;
-//! une invitation d'espace ne s'accepte plus, et ne se consulte plus par son jeton, dès que son
-//! auteur n'est plus `owner` ni `admin` de l'espace. Pour une invitation de page, c'est le
-//! serveur qui vérifie que l'auteur a encore `full` sur la page (le calcul des droits n'est pas
-//! ici).
+//! une invitation ne s'accepte plus, et ne se consulte plus par son jeton, dès que son auteur
+//! n'a plus le rôle qu'elle demande : `owner` ou `admin` pour une invitation d'espace, `owner`
+//! pour une invitation au rôle `owner`, un rôle quelconque pour une invitation de page. Pour
+//! une invitation de page, c'est en plus le serveur qui vérifie que l'auteur a encore `full`
+//! sur la page (le calcul des droits n'est pas ici).
 
 use std::fmt;
 
@@ -92,15 +93,21 @@ macro_rules! pending {
     };
 }
 
-/// Une invitation qu'on peut encore accepter : en attente, et, pour une invitation d'espace,
-/// dont l'auteur est encore `owner` ou `admin` de l'espace (Ruling R69).
+/// Une invitation qu'on peut encore accepter (Ruling R69) : en attente, et dont l'auteur a
+/// encore un rôle dans l'espace qui lui permet de la faire :
+/// - une invitation de page : un rôle, quel qu'il soit (le niveau sur la page, c'est le
+///   serveur qui le vérifie) ;
+/// - une invitation d'espace : `owner`, ou `admin` si elle ne donne pas le rôle `owner`.
 macro_rules! acceptable {
     () => {
         concat!(
             pending!(),
-            " AND (node_id IS NOT NULL OR EXISTS ( \
+            " AND EXISTS ( \
                  SELECT 1 FROM members m WHERE m.space_id = invitations.space_id \
-                 AND m.user_id = invitations.created_by AND m.role IN ('owner', 'admin')))"
+                 AND m.user_id = invitations.created_by \
+                 AND (invitations.node_id IS NOT NULL \
+                      OR m.role = 'owner' \
+                      OR (m.role = 'admin' AND invitations.grant_role != 'owner')))"
         )
     };
 }
@@ -208,8 +215,7 @@ impl Store {
     }
 
     /// L'invitation de ce jeton, si elle vaut encore à `now` : ni échue, ni révoquée, ni
-    /// acceptée, et, pour une invitation d'espace, dont l'auteur est encore `owner` ou `admin`
-    /// de l'espace (R69).
+    /// acceptée, et dont l'auteur a encore le rôle qu'elle demande (R69, voir `acceptable!`).
     pub async fn invitation_by_token(
         &self,
         token_hash: [u8; 32],
@@ -231,11 +237,10 @@ impl Store {
     }
 
     /// Accepte l'invitation de ce jeton pour le compte, en une transaction. `NotFound` si le
-    /// jeton est inconnu, échu, révoqué ou déjà accepté, si l'auteur d'une invitation d'espace
-    /// n'est plus `owner` ni `admin` de l'espace (R69, lu dans la même transaction), ou si le
-    /// compte n'existe pas. Une invitation d'espace donne son rôle ; une invitation de page pose
-    /// `(user:<id>, level)` et fait de la personne un `guest` si elle n'a pas de rôle dans
-    /// l'espace. Rien n'est jamais abaissé, ni rôle ni niveau. Puis l'invitation est marquée
+    /// jeton est inconnu, échu, révoqué ou déjà accepté, si son auteur n'a plus le rôle qu'elle
+    /// demande (R69, lu dans la même transaction), ou si le compte n'existe pas. Une invitation
+    /// d'espace donne son rôle ; une invitation de page pose `(user:<id>, level)` et fait de la
+    /// personne un `guest` si elle n'a pas de rôle dans l'espace. Rien n'est jamais abaissé, ni rôle ni niveau. Puis l'invitation est marquée
     /// acceptée : elle ne sert plus.
     pub async fn accept_invitation(
         &self,
