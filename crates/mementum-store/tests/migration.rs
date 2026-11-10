@@ -190,9 +190,6 @@ async fn migration_keeps_lot1_pages() {
         .await,
         0
     );
-    // C'est lui, l'espace par défaut : rien n'est créé à côté.
-    assert_eq!(store.default_space().await.unwrap(), space);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM spaces").await, 1);
 
     // Les trois nœuds, avec leur id, leur parent, leur place et leur titre.
     let nodes = store.list_nodes(vault).await.unwrap();

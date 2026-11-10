@@ -77,19 +77,6 @@ async fn space_owner_becomes_member() {
     assert_eq!(int(&f.db, "SELECT COUNT(*) FROM members").await, 1);
 }
 
-#[tokio::test]
-async fn default_space_is_the_oldest_and_is_created_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("m.db");
-    let store = Store::open(&db).await.unwrap();
-    let first = store.default_space().await.unwrap();
-    assert_eq!(first.name, "Mon espace");
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM members").await, 0);
-    store.create_space("Plus récent", None).await.unwrap();
-    assert_eq!(store.default_space().await.unwrap(), first);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM spaces").await, 2);
-}
-
 /// La règle de `rev` : chaque écriture qui touche à la structure ou aux droits d'un espace
 /// incrémente sa révision, d'un cran, et la sienne seulement.
 #[tokio::test]

@@ -97,9 +97,10 @@ pub fn writing_conn() -> ConnInfo {
     }
 }
 
-/// Crée un nœud de page (sans document ni accès posé) dans l'espace par défaut.
+/// Crée un nœud de page (sans document ni accès posé), dans un espace à elle : le hub ne
+/// connaît pas les espaces.
 pub async fn new_page(store: &Store) -> Uuid {
-    let space = store.default_space().await.unwrap();
+    let space = store.create_space("Essais", None).await.unwrap();
     store
         .create_node(NewNode {
             space_id: space.id,

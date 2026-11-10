@@ -6,9 +6,6 @@ use uuid::Uuid;
 
 use crate::{Store, StoreError, now_ms, parse_uuid};
 
-/// Nom de l'espace créé d'office, et de celui que devient un coffre du lot 1 (migration `0002`).
-const DEFAULT_NAME: &str = "Mon espace";
-
 /// Un espace : ce qui porte les pages, les membres et leurs droits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Space {
@@ -137,24 +134,5 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
             .map(|r| r.get(0)))
-    }
-
-    /// Transitoire, pour les routes du lot 1 (retiré à la Task 9 du lot 2) : le plus ancien
-    /// espace, créé (« Mon espace », sans membre) s'il n'y en a aucun.
-    pub async fn default_space(&self) -> Result<Space, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let oldest = sqlx::query(concat!(
-            "SELECT ",
-            space_columns!(),
-            " FROM spaces ORDER BY created_at, id LIMIT 1"
-        ))
-        .fetch_optional(&mut *tx)
-        .await?;
-        let space = match oldest {
-            Some(row) => space_from_row(&row)?,
-            None => insert_space(&mut tx, DEFAULT_NAME, None).await?,
-        };
-        tx.commit().await?;
-        Ok(space)
     }
 }
