@@ -129,6 +129,9 @@ impl Store {
     ///
     /// Le compte seul : ni espace, ni invitation. Une inscription passe par
     /// [`Store::sign_up`], qui écrit le tout en une transaction.
+    ///
+    /// **Réservée aux tests** : elle n'applique ni le réglage des inscriptions, ni une
+    /// invitation. Aucune route ne l'appelle.
     pub async fn create_user(&self, u: NewUser) -> Result<User, StoreError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let user = insert_user(&mut tx, u).await?;

@@ -19,7 +19,8 @@
 //! l'adresse des comptes : il n'est rendu qu'à qui a `full` ; après un changement qui lui ôte
 //! `full` (on peut se retirer soi-même, ou baisser sa ligne), la réponse est `204`, sans corps.
 //! Un changement de l'accès général ne l'ôte jamais à qui le demande (Ruling R122) : sa réponse
-//! est le `PageAccess`.
+//! est le `PageAccess`, sauf si un autre changement lui ôte `full` entre le commit et la
+//! relecture des accès : la réponse est alors `204`, que le client traite de même.
 //!
 //! **Ce qui fait foi est la transaction** (Ruling R87). Avant de lire le corps, la route répond
 //! par le cache des accès (`access.rs`) : `404`, `403`, `409 trashed`, sans attendre. Mais un
