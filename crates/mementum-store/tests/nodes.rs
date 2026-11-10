@@ -5,7 +5,9 @@ mod common;
 
 use common::{break_table, fresh, int, new_user, page, repair, texts};
 use mementum_acl::{Grant, Level, Role, Subject, chain_level};
-use mementum_store::{AccessChange, NewNode, NodeKind, Place, Sibling, Space, Store, StoreError};
+use mementum_store::{
+    AccessChange, Expected, NewNode, Node, NodeKind, Place, Sibling, Space, Store, StoreError,
+};
 use uuid::Uuid;
 
 async fn titles(store: &Store, space: &Space, parent: Option<Uuid>) -> Vec<String> {
@@ -284,7 +286,8 @@ async fn update_node_is_atomic() {
 ///
 /// Ici la chaîne ne porte aucune ligne `members` au-dessus de la page : celui qui déplace, un
 /// membre, n'a l'accès complet que par les lignes à son nom (les autres cas sont plus bas, avec
-/// le Ruling R94).
+/// le Ruling R94). Il le tient de la page parente, qu'il partage avec un autre : sans lui, le
+/// store refuserait le déplacement (plus bas aussi).
 #[tokio::test]
 async fn update_node_gives_root_grant_to_a_node_arriving_at_root() {
     let f = fresh().await;
@@ -310,7 +313,7 @@ async fn update_node_gives_root_grant_to_a_node_arriving_at_root() {
         from: None,
     };
     let mut parent = page(space, None, None, "Parent");
-    parent.grants = vec![full(other)];
+    parent.grants = vec![full(other), full(user)];
     let parent = store.create_node(parent).await.unwrap();
     let rev = || async { store.space_rev(space.id).await.unwrap().unwrap() };
     // Un nœud sous `parent`, avec ces lignes propres.
@@ -768,6 +771,252 @@ async fn reorder_at_root_writes_no_grant() {
         }
     }
     assert_eq!(f.store.space_rev(f.space.id).await.unwrap(), rev);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Le passage à la racine revérifie, dans sa transaction, la décision de qui déplace.
+//
+// L'appelant a décidé sur ce qu'il avait lu : le rôle de qui déplace (membre au moins), son
+// accès complet sur la page, la page hors corbeille. Si cela ne tient plus quand la transaction
+// commence, rien n'est écrit (`Stale`) : il relit et redécide. Sans cela, une ligne `full`
+// serait posée pour quelqu'un qui n'a plus à l'avoir, ou que le partage ne compte plus.
+
+/// Ce qu'un déplacement refusé ne touche pas : les nœuds de l'espace, ses lignes d'accès, sa
+/// révision.
+async fn written(f: &common::Fixture) -> (Vec<Node>, Vec<(Uuid, Grant)>, Option<i64>) {
+    (
+        f.store.list_nodes(f.space.id).await.unwrap(),
+        f.store.space_grants(f.space.id).await.unwrap(),
+        f.store.space_rev(f.space.id).await.unwrap(),
+    )
+}
+
+/// Le passage de la page à la racine avec `root_grant` est refusé (`Stale`) sans rien écrire :
+/// ni sa place, ni le titre envoyé avec, ni une ligne d'accès, ni la révision.
+async fn assert_stale_at_root(f: &common::Fixture, id: Uuid, root_grant: Grant, case: &str) {
+    let before = written(f).await;
+    let root = Place {
+        parent_id: None,
+        after: Some(Sibling::Last),
+        from: None,
+    };
+    let by = match root_grant.subject {
+        Subject::User(user) => Some(user),
+        Subject::Members => None,
+    };
+    let r = f
+        .store
+        .update_node(id, Some("Renommée"), Some(root), by, Some(root_grant))
+        .await;
+    assert!(matches!(r, Err(StoreError::Stale)), "{case} : {r:?}");
+    assert_eq!(written(f).await, before, "{case}");
+}
+
+/// Un compte de plus dans l'espace, avec ce rôle.
+async fn joined(f: &common::Fixture, role: Role) -> Uuid {
+    let user = new_user(&f.db).await;
+    f.store.add_member(f.space.id, user, role).await.unwrap();
+    user
+}
+
+/// Le membre `user` quitte l'espace.
+async fn leaves(f: &common::Fixture, user: Uuid) {
+    let expected = Expected {
+        actor: user,
+        actor_role: Role::Member,
+        target_role: Role::Member,
+    };
+    f.store
+        .remove_member(f.space.id, user, expected)
+        .await
+        .unwrap();
+}
+
+/// Qui a quitté l'espace entre sa demande et l'écriture ne passe plus une page à la racine :
+/// sans rôle, sa ligne `full` n'y donnerait aucun droit, et la page pourrait rester sans
+/// personne pour la gérer (le partage ne compte pas une ligne restée à quelqu'un sans rôle).
+#[tokio::test]
+async fn move_to_root_is_stale_once_the_mover_has_left_the_space() {
+    let f = fresh().await;
+    let c = cast(&f).await;
+    let full = |user| named(user, Level::Full);
+
+    // Une page partagée entre la propriétaire et un membre ; une invitée lit sa sous-page.
+    let parent = with_lines(&f, None, "Partagée", vec![full(c.owner), full(c.member)]).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![named(c.guest, Level::Read)]).await;
+    leaves(&f, c.member).await;
+    // Son départ a retiré sa ligne de la page parente.
+    assert_lines(&f, parent, &[full(c.owner)]).await;
+    assert_stale_at_root(&f, page, full(c.member), "partie d'une page partagée").await;
+    // La page garde quelqu'un pour la gérer : la propriétaire, par la page parente.
+    assert_eq!(level_of(&f, page, c.owner).await, Some(Level::Full));
+    // Le refus passe avant tout le reste : un `after` qui n'est pas à la racine ne se dit
+    // (`NotFound`) qu'à qui peut encore déplacer la page.
+    let nowhere = Place {
+        parent_id: None,
+        after: Some(Sibling::Node(page)),
+        from: None,
+    };
+    let r = f
+        .store
+        .update_node(
+            page,
+            None,
+            Some(nowhere),
+            Some(c.member),
+            Some(full(c.member)),
+        )
+        .await;
+    assert!(matches!(r, Err(StoreError::Stale)), "{r:?}");
+
+    // Sa page privée, où une invitée lit la sous-page : à son départ, sa ligne y reste (elle la
+    // retrouve si elle revient), et l'invitée reçoit l'accès complet à la sous-page (R70).
+    let mona = joined(&f, Role::Member).await;
+    let parent = with_lines(&f, None, "Privée", vec![full(mona)]).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![named(c.guest, Level::Read)]).await;
+    leaves(&f, mona).await;
+    assert_lines(&f, parent, &[full(mona)]).await;
+    assert_lines(&f, page, &[full(c.guest)]).await;
+    assert_stale_at_root(&f, page, full(mona), "partie de sa page privée").await;
+
+    // Une page d'équipe en lecture, où elle tenait l'accès complet d'une ligne à son nom :
+    // cette ligne est partie avec elle, et ne revient pas sur la page.
+    let tess = joined(&f, Role::Member).await;
+    let lines = vec![to_members(Level::Read), full(tess)];
+    let parent = with_lines(&f, None, "D'équipe", lines).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![]).await;
+    leaves(&f, tess).await;
+    assert_lines(&f, parent, &[to_members(Level::Read)]).await;
+    assert_stale_at_root(&f, page, full(tess), "partie d'une page d'équipe").await;
+
+    // Un compte qui n'a jamais eu de rôle dans l'espace.
+    let stranger = new_user(&f.db).await;
+    assert_stale_at_root(&f, page, full(stranger), "sans rôle").await;
+}
+
+/// La racine d'un espace est aux membres : un invité n'y passe pas une page, même s'il y a
+/// l'accès complet par une ligne à son nom.
+#[tokio::test]
+async fn move_to_root_is_stale_for_a_guest() {
+    let f = fresh().await;
+    let c = cast(&f).await;
+    let full = |user| named(user, Level::Full);
+    let parent = with_lines(&f, None, "Partagée", vec![full(c.owner), full(c.guest)]).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![]).await;
+    assert_eq!(level_of(&f, page, c.guest).await, Some(Level::Full));
+    assert_stale_at_root(&f, page, full(c.guest), "invité").await;
+
+    // Un membre devenu invité entre-temps : sa ligne lui donne toujours l'accès complet.
+    let parent = with_lines(&f, None, "Partagée", vec![full(c.owner), full(c.member)]).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![]).await;
+    let expected = Expected {
+        actor: c.owner,
+        actor_role: Role::Owner,
+        target_role: Role::Member,
+    };
+    f.store
+        .set_role(f.space.id, c.member, Role::Guest, expected)
+        .await
+        .unwrap();
+    assert_eq!(level_of(&f, page, c.member).await, Some(Level::Full));
+    assert_stale_at_root(&f, page, full(c.member), "devenu invité").await;
+}
+
+/// Il faut encore, sur l'ancienne chaîne de la page, le niveau demandé pour qui déplace : sinon
+/// le passage à la racine lui donnerait pour de bon un accès complet qu'il n'a plus.
+#[tokio::test]
+async fn move_to_root_is_stale_below_full_on_the_old_chain() {
+    let f = fresh().await;
+    let c = cast(&f).await;
+    let full = |user| named(user, Level::Full);
+
+    // Un admin a l'accès complet partout où une ligne `members` s'applique ; redevenu membre,
+    // il n'a plus que la lecture.
+    let parent = with_lines(&f, None, "D'équipe", vec![to_members(Level::Read)]).await;
+    let first = with_lines(&f, Some(parent), "Avant", vec![]).await;
+    let page = with_lines(&f, Some(parent), "Après", vec![]).await;
+    to_root(&f, first, c.admin).await;
+    let expected = Expected {
+        actor: c.owner,
+        actor_role: Role::Owner,
+        target_role: Role::Admin,
+    };
+    f.store
+        .set_role(f.space.id, c.admin, Role::Member, expected)
+        .await
+        .unwrap();
+    assert_stale_at_root(&f, page, full(c.admin), "admin redevenu membre").await;
+
+    // Un membre dont la ligne sur la page parente a baissé ; sa ligne sur la page elle-même,
+    // plus faible, n'y change rien.
+    let parent = with_lines(&f, None, "Partagée", vec![full(c.owner), full(c.member)]).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![]).await;
+    let lower = with_lines(
+        &f,
+        Some(parent),
+        "Page",
+        vec![named(c.member, Level::Comment)],
+    )
+    .await;
+    let edit = named(c.member, Level::Edit);
+    f.store.set_grant(parent, edit).await.unwrap();
+    for id in [page, lower] {
+        assert_stale_at_root(&f, id, full(c.member), "ligne baissée").await;
+    }
+    // C'est le niveau demandé qui compte : celui qu'il a encore passe, sans rien lui donner
+    // de plus.
+    let root = Place {
+        parent_id: None,
+        after: Some(Sibling::Last),
+        from: None,
+    };
+    f.store
+        .update_node(page, None, Some(root), Some(c.member), Some(edit))
+        .await
+        .unwrap();
+    assert_lines(&f, page, &[edit]).await;
+
+    // Une page qu'il ne voit plus du tout.
+    f.store
+        .remove_grant(parent, Subject::User(c.member))
+        .await
+        .unwrap();
+    assert_stale_at_root(&f, lower, full(c.member), "ligne retirée").await;
+}
+
+/// Une page à la corbeille, elle-même ou par un ancêtre, ne se déplace pas.
+#[tokio::test]
+async fn move_to_root_is_stale_in_the_trash() {
+    let f = fresh().await;
+    let c = cast(&f).await;
+    let full = named(c.member, Level::Full);
+    let parent = with_lines(&f, None, "D'équipe", vec![to_members(Level::Full)]).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![]).await;
+    let child = with_lines(&f, Some(page), "Sous-page", vec![]).await;
+
+    f.store.trash_node(page, c.owner).await.unwrap();
+    assert_stale_at_root(&f, page, full, "à la corbeille").await;
+    assert_stale_at_root(&f, child, full, "sous une page à la corbeille").await;
+    f.store.restore_node(page).await.unwrap();
+    f.store.trash_node(parent, c.owner).await.unwrap();
+    assert_stale_at_root(&f, page, full, "page parente à la corbeille").await;
+
+    // Restaurée, elle se déplace de nouveau.
+    f.store.restore_node(parent).await.unwrap();
+    to_root(&f, page, c.member).await;
+    assert_lines(&f, page, &[to_members(Level::Full)]).await;
+}
+
+/// `root_grant` nomme qui déplace : un compte. Avec `members` pour sujet, il relèverait l'accès
+/// général de la page au lieu de garder celui de sa chaîne ; il est refusé de la même façon.
+#[tokio::test]
+async fn move_to_root_is_stale_for_a_members_root_grant() {
+    let f = fresh().await;
+    for level in [Level::Read, Level::Full] {
+        let parent = with_lines(&f, None, "D'équipe", vec![to_members(level)]).await;
+        let page = with_lines(&f, Some(parent), "Page", vec![]).await;
+        assert_stale_at_root(&f, page, to_members(Level::Full), "sujet `members`").await;
+    }
 }
 
 /// `Sibling::Last` range un nœud en fin de ses frères, à la création comme au déplacement : le

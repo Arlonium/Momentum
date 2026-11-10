@@ -79,8 +79,9 @@ pub const MAX_TITLE_CHARS: usize = 500;
 /// Type de contenu du MMD renvoyé.
 const MARKDOWN: &str = "text/markdown; charset=utf-8";
 
-/// Reprises d'un `PATCH` quand la page a changé de parent entre la lecture de ses droits et
-/// l'écriture : la route relit et redécide. Au-delà, `503 unavailable`.
+/// Reprises d'un `PATCH` quand ce sur quoi il a décidé ne tient plus à l'écriture : la page a
+/// changé de parent ou, pour un passage à la racine, la personne n'a plus ce qu'il lui faut. La
+/// route relit et redécide. Au-delà, `503 unavailable`.
 const MOVE_RETRIES: usize = 3;
 
 /// `GET /api/v1/spaces/{id}/tree` : les pages de l'espace que la personne voit, hors
@@ -263,6 +264,13 @@ pub(crate) async fn get(
 /// l'écriture, le store refuse (`Stale`) : la route relit et redécide, [`MOVE_RETRIES`] fois
 /// au plus. Un changement de place autorisé par `edit` ne ramène donc jamais une page sous un
 /// parent qu'elle a quitté entre-temps.
+///
+/// De même pour un passage à la racine, qui écrit des accès : le store revérifie dans sa
+/// transaction ce que la route a lu avant elle (la personne est membre, elle a l'accès complet
+/// à la page, la page n'est pas à la corbeille). Si ce n'est plus vrai, il n'écrit rien, et la
+/// route, qui relit, répond `404`, `403` ou `409 trashed`, comme si la requête était arrivée
+/// après. Aucune ligne n'est donc posée pour quelqu'un qui vient de quitter l'espace, d'y
+/// devenir invité ou de perdre l'accès complet.
 pub(crate) async fn update(
     State(state): State<AppState>,
     user: AuthUser,
@@ -321,7 +329,8 @@ pub(crate) async fn update(
                 tracing::debug!(
                     node_id = %id,
                     retries,
-                    "la page a changé de parent avant l'écriture : la route relit et redécide"
+                    "la décision ne tenait plus à l'écriture (parent, rôle ou accès changés) : \
+                     la route relit et redécide"
                 );
                 seen = state
                     .seen_node(&user, id)

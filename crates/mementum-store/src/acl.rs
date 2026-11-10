@@ -144,7 +144,7 @@ pub(crate) struct Chain {
     /// L'espace de la page.
     pub(crate) space: String,
     /// La page, ou un de ses ancêtres, est à la corbeille.
-    in_trash: bool,
+    pub(crate) in_trash: bool,
     /// Les lignes de la page et de ses ancêtres : `(nœud, accès)`.
     pub(crate) lines: Vec<(String, Grant)>,
 }

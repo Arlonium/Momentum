@@ -6,12 +6,12 @@
 //! transaction ; un renommage et un changement de place sous le même parent n'y touchent pas
 //! (règle de `rev`, en tête de la crate).
 
-use mementum_acl::{Grant, Role, Subject, chain_level};
+use mementum_acl::{Grant, Level, Role, Subject, chain_level};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, SqliteExecutor, Transaction};
 use uuid::Uuid;
 
-use crate::acl::{read_chain, write_grant};
+use crate::acl::{Chain, read_chain, write_grant};
 use crate::members::role_of;
 use crate::spaces::bump_rev;
 use crate::{Store, StoreError, now_ms, parse_uuid, position_between, unreadable};
@@ -122,7 +122,7 @@ pub struct AtRoot {
     /// Ses lignes propres, une fois le déplacement écrit.
     pub grants: Vec<Grant>,
     /// Le rôle dans l'espace de qui déplace (le sujet de `root_grant`), lu dans la
-    /// transaction. `None` sans `root_grant`, ou s'il n'a pas de rôle.
+    /// transaction : `member` au moins. `None` sans `root_grant`.
     pub role: Option<Role>,
 }
 
@@ -262,22 +262,28 @@ async fn slot(
     )))
 }
 
+/// Qui passe un nœud à la racine, tel que la transaction l'a relu ([`checked_mover`]) : son
+/// rôle dans l'espace, et le niveau qu'il doit avoir sur le nœud une fois celui-ci à la racine
+/// (Ruling R82).
+#[derive(Debug, Clone, Copy)]
+struct Mover {
+    user: Uuid,
+    role: Role,
+    level: Level,
+}
+
 /// Les lignes propres d'une page qui arrive à la racine, d'après celles qu'elle a (`own`) et
 /// celles de ses anciens ancêtres (`above`), qu'elle n'héritera plus :
 /// 1. Ruling R94, l'accès général gardé : la page porte la plus forte ligne `members` de son
 ///    ancienne chaîne (la sienne comprise, elle ne baisse donc jamais). Sans ligne `members`
 ///    dans la chaîne, aucune n'est posée : la page reste privée ;
-/// 2. Ruling R82, au plus juste : `root_grant` (l'accès que doit y avoir qui déplace, avec son
-///    rôle dans l'espace) n'est posé, ou relevé, que si ces lignes ne lui donnent pas déjà ce
-///    niveau. Un membre que l'accès général met en `full`, ou une propriétaire là où une ligne
-///    `members` s'applique, ne reçoit donc pas de ligne à son nom ;
+/// 2. Ruling R82, au plus juste : la ligne de qui déplace (`mover`) n'est posée, ou relevée, à
+///    son niveau, que si ces lignes ne le lui donnent pas déjà. Un membre que l'accès général
+///    met en `full`, ou une propriétaire là où une ligne `members` s'applique, ne reçoit donc
+///    pas de ligne à son nom ;
 /// 3. rien d'autre ne change : les lignes nommées des anciens ancêtres ne suivent pas la page,
 ///    les autres lignes de la page restent.
-fn root_lines(
-    own: &[Grant],
-    above: &[Grant],
-    root_grant: Option<(Grant, Option<Role>)>,
-) -> Vec<Grant> {
+fn root_lines(own: &[Grant], above: &[Grant], mover: Option<Mover>) -> Vec<Grant> {
     // Pose `grant` à la place de la ligne de son sujet, ou en plus.
     fn put(lines: &mut Vec<Grant>, grant: Grant) {
         match lines.iter_mut().find(|line| line.subject == grant.subject) {
@@ -296,21 +302,50 @@ fn root_lines(
         let subject = Subject::Members;
         put(&mut lines, Grant { subject, level });
     }
-    if let Some((grant, role)) = root_grant {
-        let held = match (grant.subject, role) {
-            (Subject::User(user), Some(role)) => chain_level(&lines, user, role),
-            // Sans rôle dans l'espace, aucune ligne ne donne de droit : seule compte celle du
-            // sujet, qu'on n'abaisse pas.
-            _ => lines
-                .iter()
-                .find(|line| line.subject == grant.subject)
-                .map(|line| line.level),
-        };
-        if held.is_none_or(|held| held < grant.level) {
-            put(&mut lines, grant);
+    if let Some(mover) = mover {
+        let held = chain_level(&lines, mover.user, mover.role);
+        if held.is_none_or(|held| held < mover.level) {
+            let subject = Subject::User(mover.user);
+            let level = mover.level;
+            put(&mut lines, Grant { subject, level });
         }
     }
     lines
+}
+
+/// La décision de l'appelant, revérifiée dans la transaction du passage à la racine : ce sur
+/// quoi elle repose a pu changer depuis qu'il l'a lu. `root_grant` nomme qui déplace le nœud de
+/// chaîne `chain`, et le niveau qu'il y a. `Stale`, pour que rien ne soit écrit et que
+/// l'appelant relise et redécide, si :
+/// - son sujet n'est pas un compte (`members` relèverait l'accès général du nœud au lieu de
+///   garder celui de sa chaîne) ;
+/// - ce compte n'a pas de rôle dans l'espace, ou y est invité : la racine est aux membres, et
+///   une ligne posée pour quelqu'un sans rôle ne donne aucun droit (le nœud pourrait rester
+///   sans personne en `full`, Ruling R70) ;
+/// - il a moins que ce niveau sur l'ancienne chaîne (les lignes du nœud et de ses ancêtres) :
+///   le passage à la racine lui donnerait pour de bon un accès qu'il n'a plus ;
+/// - le nœud, ou un de ses ancêtres, est à la corbeille.
+///
+/// C'est la règle des autres écritures qui reposent sur ce que l'appelant a lu : `Expected`
+/// pour les rôles, Ruling R87 pour le partage, [`Place::from`] pour le parent.
+async fn checked_mover(
+    tx: &mut Transaction<'_, Sqlite>,
+    chain: &Chain,
+    root_grant: Grant,
+) -> Result<Mover, StoreError> {
+    let Subject::User(user) = root_grant.subject else {
+        return Err(StoreError::Stale);
+    };
+    let role = role_of(tx, &chain.space, &user.to_string())
+        .await?
+        .filter(|role| role.is_member())
+        .ok_or(StoreError::Stale)?;
+    let level = root_grant.level;
+    let held = chain_level(chain.lines.iter().map(|(_, line)| line), user, role);
+    if chain.in_trash || held.is_none_or(|held| held < level) {
+        return Err(StoreError::Stale);
+    }
+    Ok(Mover { user, role, level })
 }
 
 /// Ce qu'un nœud porte en arrivant à la racine, décidé dans la transaction de son déplacement.
@@ -319,24 +354,29 @@ struct Arrival {
     own: Vec<Grant>,
     /// Celles qu'il porte à la racine ([`root_lines`]).
     lines: Vec<Grant>,
-    /// Le rôle dans l'espace du sujet de `root_grant`.
+    /// Le rôle dans l'espace de qui déplace (le sujet de `root_grant`).
     role: Option<Role>,
 }
 
-/// Ce que le nœud porte en arrivant à la racine, d'après sa chaîne et le rôle du sujet de
-/// `root_grant`, lus dans la transaction, avant qu'il change de parent. `None` : le nœud
-/// n'existe pas, ou sa remontée tourne en rond (personne ne le voit, R58).
+/// Ce que le nœud porte en arrivant à la racine, d'après sa chaîne, lue dans la transaction
+/// avant qu'il change de parent. Avec `root_grant`, la décision de qui déplace y est d'abord
+/// revérifiée ([`checked_mover`]) : `Stale` si elle ne tient plus. `None` : le nœud n'existe
+/// pas, ou sa remontée tourne en rond ; personne ne le voit alors (R58), qui dit le déplacer
+/// non plus (`Stale`).
 async fn arrival_at_root(
     tx: &mut Transaction<'_, Sqlite>,
     node_id: &str,
     root_grant: Option<Grant>,
 ) -> Result<Option<Arrival>, StoreError> {
     let Some(chain) = read_chain(tx, node_id).await? else {
-        return Ok(None);
+        return match root_grant {
+            Some(_) => Err(StoreError::Stale),
+            None => Ok(None),
+        };
     };
-    let role = match root_grant.map(|grant| grant.subject) {
-        Some(Subject::User(user)) => role_of(tx, &chain.space, &user.to_string()).await?,
-        Some(Subject::Members) | None => None,
+    let mover = match root_grant {
+        Some(grant) => Some(checked_mover(tx, &chain, grant).await?),
+        None => None,
     };
     let (mut own, mut above) = (Vec::new(), Vec::new());
     for (on, line) in chain.lines {
@@ -346,7 +386,8 @@ async fn arrival_at_root(
             above.push(line);
         }
     }
-    let lines = root_lines(&own, &above, root_grant.map(|grant| (grant, role)));
+    let lines = root_lines(&own, &above, mover);
+    let role = mover.map(|mover| mover.role);
     Ok(Some(Arrival { own, lines, role }))
 }
 
@@ -538,8 +579,9 @@ impl Store {
     }
 
     /// Change le titre, la place, ou les deux, en une transaction : un refus (`Cycle`,
-    /// `NotFound`, comme pour [`Store::move_node`] ; `Stale`, voir [`Place::from`]) n'écrit rien,
-    /// pas même le titre. `by` : le compte qui fait le changement, gardé dans `updated_by`.
+    /// `NotFound`, comme pour [`Store::move_node`] ; `Stale`, voir [`Place::from`] et, pour un
+    /// passage à la racine, plus bas) n'écrit rien, pas même le titre. `by` : le compte qui fait
+    /// le changement, gardé dans `updated_by`.
     ///
     /// Rien n'est écrit, et le nœud est rendu tel quel, quand il n'y a rien à changer : ni titre
     /// ni place demandés, ou une place où le nœud est déjà (même parent, entre les mêmes
@@ -559,6 +601,13 @@ impl Store {
     ///   ligne redondante qui resterait à quelqu'un parti de l'espace ;
     /// - les lignes nommées des anciens ancêtres ne le suivent pas, et ses autres lignes ne
     ///   changent pas.
+    ///
+    /// `root_grant` porte aussi la décision de l'appelant : il a lu que ce compte pouvait
+    /// passer le nœud à la racine (un membre, qui a ce niveau sur le nœud, hors corbeille). La
+    /// transaction le revérifie avant tout le reste, sur l'ancienne chaîne et le rôle relu
+    /// (`checked_mover`) : si ce n'est plus vrai, ou si le sujet de `root_grant` n'est pas un
+    /// compte, rien n'est écrit (`Stale`), et l'appelant relit et redécide. Sans `root_grant`,
+    /// le store ne sait pas qui déplace : il ne vérifie rien, et n'écrit de ligne pour personne.
     ///
     /// Dans tous les autres cas (autre parent, simple place à la racine, titre), aucune ligne
     /// n'est écrite, et `root_grant` est ignoré.
@@ -588,9 +637,17 @@ impl Store {
         let space = before.space_id.to_string();
         // `Some((parent, position))` : le nœud change de place ; `None` : il garde la sienne.
         let mut target: Option<(Option<Uuid>, String)> = None;
+        let mut arrival = None;
         if let Some(place) = place {
             if place.from.is_some_and(|from| from != before.parent_id) {
                 return Err(StoreError::Stale);
+            }
+            // Le nœud arrive à la racine. Ce qu'il y portera se décide sur son ancienne chaîne,
+            // lue avant qu'il change de parent ; et la décision de qui le déplace est revérifiée
+            // avant le calcul de sa place : un `after` introuvable ne se dit qu'à qui peut
+            // encore le déplacer.
+            if place.parent_id.is_none() && before.parent_id.is_some() {
+                arrival = arrival_at_root(&mut tx, &id_s, root_grant).await?;
             }
             let parent = place.parent_id.map(|p| p.to_string());
             if let Some(p) = &parent {
@@ -637,13 +694,6 @@ impl Store {
             None => (false, None, None),
         };
         let changes_parent = moves && parent != before.parent_id;
-        // Ce que le nœud portera à la racine se décide sur son ancienne chaîne : elle est lue
-        // avant qu'il change de parent.
-        let arrival = if changes_parent && parent.is_none() {
-            arrival_at_root(&mut tx, &id_s, root_grant).await?
-        } else {
-            None
-        };
         let row = sqlx::query(concat!(
             "UPDATE nodes SET \
                  title = COALESCE(?1, title), \
@@ -665,6 +715,7 @@ impl Store {
         .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
         if changes_parent {
+            // Un nœud qui arrive à la racine change de parent : sa place y est toujours neuve.
             if let Some(arrival) = &arrival {
                 // Seules les lignes qui changent sont écrites.
                 for line in &arrival.lines {

@@ -76,8 +76,9 @@ pub enum StoreError {
     EmailTaken,
     /// L'espace perdrait son dernier propriétaire.
     LastOwner,
-    /// Les rôles sur lesquels l'appelant a décidé (`Expected`) ont changé depuis qu'il les a
-    /// lus : rien n'est écrit, il redécide sur les rôles relus.
+    /// Ce sur quoi l'appelant a décidé a changé depuis qu'il l'a lu : les rôles (`Expected`),
+    /// le parent d'un nœud ([`Place::from`]), ou ce qu'il faut à qui passe un nœud à la racine
+    /// ([`Store::update_node`]). Rien n'est écrit : il relit et redécide.
     Stale,
     /// La page n'aurait plus personne en `full`, ni par ses lignes ni par un ancêtre (Ruling
     /// R70) : rien n'est écrit.
@@ -100,7 +101,10 @@ impl fmt::Display for StoreError {
             StoreError::Cycle => write!(f, "un nœud ne peut pas devenir son propre descendant"),
             StoreError::EmailTaken => write!(f, "un compte porte déjà cette adresse e-mail"),
             StoreError::LastOwner => write!(f, "un espace garde au moins un propriétaire"),
-            StoreError::Stale => write!(f, "les rôles ont changé depuis leur lecture"),
+            StoreError::Stale => write!(
+                f,
+                "ce sur quoi la demande a été décidée a changé depuis sa lecture"
+            ),
             StoreError::LastFullAccess => {
                 write!(f, "la page n'aurait plus personne en accès complet")
             }

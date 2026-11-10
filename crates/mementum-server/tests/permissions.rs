@@ -1823,6 +1823,65 @@ async fn move_to_root_answers_with_the_role_its_transaction_read() {
     assert_eq!(seen, ("full".to_string(), "space".to_string()));
 }
 
+/// Le passage à la racine revérifie, dans sa transaction, ce sur quoi la route a décidé. Mona
+/// partage une page avec Olga ; elle en passe la sous-page à la racine, et quitte l'espace en
+/// même temps. Son départ validé le premier, le déplacement ne pose pas `(user:mona, full)`
+/// pour un compte sans rôle, sur une page où Gina ne fait que lire : plus personne ne pourrait
+/// la partager, la déplacer ni la supprimer. Le store refuse, la route relit, et Mona, qui ne
+/// voit plus la page, reçoit `404`, comme si sa requête était arrivée après son départ.
+#[tokio::test]
+async fn move_to_root_overtaken_by_the_departure_of_its_mover_writes_nothing() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, adam, mona, gina) = (&team.olga, &team.adam, &team.mona, &team.gina);
+    let shared = [user(olga, Level::Full), user(mona, Level::Full)];
+    let parent = team.page(None, "D'Olga et Mona", &shared).await;
+    let page = team
+        .page(Some(parent), "Page", &[user(gina, Level::Read)])
+        .await;
+    let before = team.store.get_node(page).await.unwrap().expect("la page");
+    let rev = team.store.space_rev(team.space).await.unwrap();
+
+    // Ce qu'écrit ici le départ de Mona (`Store::remove_member`, dont les tests du store font
+    // le même cas) : son rôle part, et sa ligne sur la page qu'elle partageait.
+    let departure = [
+        format!(
+            "DELETE FROM members WHERE space_id = '{}' AND user_id = '{}'",
+            team.space, mona.id
+        ),
+        format!(
+            "DELETE FROM acl WHERE node_id = '{parent}' AND subject = '{}'",
+            Subject::User(mona.id)
+        ),
+    ];
+    let id = page.to_string();
+    let request = mona.patch(&id, json!({ "parentId": null }));
+    let race = overtaken(&t, team.space, request, &departure).await;
+
+    assert_eq!(race.redecided(page), 1, "journal : {}", race.journal);
+    race.reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+    // Rien n'a été écrit : la page n'a pas bougé, et n'a reçu aucune ligne.
+    let after = team.store.get_node(page).await.unwrap().expect("la page");
+    assert_eq!(after, before);
+    assert_eq!(team.grants(page).await, [user(gina, Level::Read)]);
+    assert_eq!(team.grants(parent).await, [user(olga, Level::Full)]);
+    assert_eq!(
+        team.store.space_rev(team.space).await.unwrap(),
+        rev.map(|rev| rev + 1)
+    );
+    // Elle a toujours quelqu'un pour la gérer : Olga, par la page parente, peut la partager.
+    olga.browser
+        .put(
+            &format!("/api/v1/pages/{page}/access/users/{}", adam.id),
+            json!({ "level": "comment" }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    let read = gina.browser.get(&page_uri(page)).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(text(&read.json(), "level"), "read");
+}
+
 /// `PATCH` change le titre et la place en une seule écriture : un déplacement refusé (`409
 /// cycle`) n'écrit rien, pas même le titre envoyé avec.
 #[tokio::test]
