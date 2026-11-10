@@ -5,7 +5,9 @@
 //! toute écriture dans `acl` faite d'ici, incrémente la révision de l'espace dans sa transaction
 //! (règle de `rev`, en tête de la crate) ; un appel qui n'écrit rien ne la touche pas.
 
-use mementum_acl::{Role, Subject};
+use std::collections::{HashMap, HashSet};
+
+use mementum_acl::{Level, Role, Subject};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
@@ -102,6 +104,112 @@ pub(crate) async fn raise_role(
         }
     }
     Ok(true)
+}
+
+/// Ruling R70, dans la transaction de [`Store::remove_member`], une fois la personne qui part
+/// retirée de `members` et ses lignes partagées retirées : sur toute page dont elle était le
+/// dernier sujet en `full` (`had_full` : les pages où elle avait une ligne `full` ; le `full`
+/// d'un ancêtre vaut pour ses descendants) et qui garde d'autres lignes propres, les lignes de
+/// plus haut niveau passent à `full`. Une ligne `members` qui s'applique (sur la page ou un
+/// ancêtre) compte comme un sujet en `full`, les admins y ayant `full` : rien à faire alors.
+/// Aucun sujet nouveau n'apparaît.
+///
+/// Seules comptent les lignes qui donnent un droit : `members`, et celles des comptes qui ont
+/// encore un rôle dans l'espace. Une ligne restée à quelqu'un sans rôle (celles de la personne
+/// qui part, sur ses pages privées, ou d'un départ plus ancien) ne compte pas, et n'est pas
+/// élevée.
+///
+/// L'arbre est parcouru des racines vers les feuilles : une page dont un ancêtre vient d'être
+/// confié à quelqu'un en `full` en hérite, et n'a pas besoin d'élévation. Un nœud pris dans un
+/// cycle de parents (que le store interdit) n'est vu par personne (R58) et n'est pas visité.
+async fn hand_over_full(
+    tx: &mut Transaction<'_, Sqlite>,
+    space_id: &str,
+    had_full: &HashSet<String>,
+) -> Result<(), StoreError> {
+    if had_full.is_empty() {
+        return Ok(());
+    }
+    let mut children: HashMap<Option<String>, Vec<String>> = HashMap::new();
+    for r in sqlx::query("SELECT id, parent_id FROM nodes WHERE space_id = ?")
+        .bind(space_id)
+        .fetch_all(&mut **tx)
+        .await?
+    {
+        children.entry(r.get(1)).or_default().push(r.get(0));
+    }
+    // Ceux qui ont encore un rôle dans l'espace (la personne qui part n'en a plus).
+    let active: HashSet<Uuid> = sqlx::query("SELECT user_id FROM members WHERE space_id = ?")
+        .bind(space_id)
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|r| parse_uuid(&r.get::<String, _>(0)))
+        .collect::<Result<_, _>>()?;
+    // Les lignes propres de chaque page qui donnent un droit : celles des membres et des
+    // comptes qui ont un rôle. Une ligne restée à quelqu'un sans rôle (celles de la personne
+    // qui part, sur ses pages privées ; celles d'un départ plus ancien) ne compte pas.
+    let mut lines: HashMap<String, Vec<(Subject, Level)>> = HashMap::new();
+    for r in sqlx::query(
+        "SELECT a.node_id, a.subject, a.level FROM acl a JOIN nodes n ON n.id = a.node_id \
+         WHERE n.space_id = ?",
+    )
+    .bind(space_id)
+    .fetch_all(&mut **tx)
+    .await?
+    {
+        let subject: String = r.get(1);
+        let level: String = r.get(2);
+        let subject =
+            Subject::parse(&subject).ok_or_else(|| unreadable("sujet d'accès", &subject))?;
+        let level = Level::parse(&level).ok_or_else(|| unreadable("niveau d'accès", &level))?;
+        let counts = match subject {
+            Subject::Members => true,
+            Subject::User(id) => active.contains(&id),
+        };
+        if counts {
+            lines.entry(r.get(0)).or_default().push((subject, level));
+        }
+    }
+
+    // (page, la personne y avait `full`, quelqu'un d'autre y a `full`), hérités du parent.
+    let mut todo: Vec<(String, bool, bool)> = children
+        .get(&None)
+        .into_iter()
+        .flatten()
+        .map(|id| (id.clone(), false, false))
+        .collect();
+    let mut raised: Vec<(String, Subject)> = Vec::new();
+    while let Some((id, parent_had_full, parent_others_full)) = todo.pop() {
+        let own = lines.get(&id).map(Vec::as_slice).unwrap_or_default();
+        let had = parent_had_full || had_full.contains(&id);
+        let mut others = parent_others_full
+            || own
+                .iter()
+                .any(|(s, l)| *s == Subject::Members || *l == Level::Full);
+        if had
+            && !others
+            && let Some(top) = own.iter().map(|(_, l)| *l).max()
+        {
+            raised.extend(
+                own.iter()
+                    .filter(|(_, l)| *l == top)
+                    .map(|(s, _)| (id.clone(), *s)),
+            );
+            others = true;
+        }
+        for child in children.get(&Some(id)).into_iter().flatten() {
+            todo.push((child.clone(), had, others));
+        }
+    }
+    for (node, subject) in raised {
+        sqlx::query("UPDATE acl SET level = 'full' WHERE node_id = ? AND subject = ?")
+            .bind(&node)
+            .bind(subject.to_string())
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 impl Store {
@@ -212,12 +320,16 @@ impl Store {
     ///   sujet que lui. Sans rôle, il ne les voit plus ; il les retrouve s'il revient dans
     ///   l'espace ;
     /// - les invitations qu'il avait faites dans l'espace et qui attendaient encore sont
-    ///   supprimées (Ruling R69).
+    ///   supprimées (Ruling R69) ;
+    /// - une page partagée ne reste pas sans personne en `full` (Ruling R70) : sur une page dont
+    ///   il était le dernier sujet en `full`, les lignes de plus haut niveau qui restent passent
+    ///   à `full` (détail dans `hand_over_full`).
     ///
     /// Aucun nœud n'est supprimé. `NotFound` s'il n'a pas de rôle dans l'espace ; `LastOwner`
     /// si c'est le dernier propriétaire. Tout est écrit, ou rien.
     pub async fn remove_member(&self, space_id: Uuid, user_id: Uuid) -> Result<(), StoreError> {
         let (space, user) = (space_id.to_string(), user_id.to_string());
+        let subject = Subject::User(user_id).to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let current = role_of(&mut tx, &space, &user)
             .await?
@@ -225,6 +337,18 @@ impl Store {
         if current == Role::Owner && owners(&mut tx, &space).await? == 1 {
             return Err(StoreError::LastOwner);
         }
+        // Les pages où la personne a une ligne `full`, lues avant que ses lignes partent.
+        let had_full: HashSet<String> = sqlx::query(
+            "SELECT a.node_id FROM acl a JOIN nodes n ON n.id = a.node_id \
+             WHERE n.space_id = ? AND a.subject = ? AND a.level = 'full'",
+        )
+        .bind(&space)
+        .bind(&subject)
+        .fetch_all(&mut *tx)
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
         sqlx::query("DELETE FROM members WHERE space_id = ? AND user_id = ?")
             .bind(&space)
             .bind(&user)
@@ -258,9 +382,10 @@ impl Store {
              )",
         )
         .bind(&space)
-        .bind(Subject::User(user_id).to_string())
+        .bind(&subject)
         .execute(&mut *tx)
         .await?;
+        hand_over_full(&mut tx, &space, &had_full).await?;
         bump_rev(&mut tx, &space).await?;
         tx.commit().await?;
         Ok(())

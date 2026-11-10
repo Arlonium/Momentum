@@ -280,14 +280,15 @@ async fn remove_member_drops_shared_grants_and_keeps_private_pages() {
     store.remove_member(space.id, alice.id).await.unwrap();
     assert_eq!(store.role_in(space.id, alice.id).await.unwrap(), None);
     assert_eq!(store.spaces_of(alice.id).await.unwrap().len(), 1);
-    // Ses lignes partent des pages qu'elle partageait, et restent sur ses pages privées.
+    // Ses lignes partent des pages qu'elle partageait, et restent sur ses pages privées. Sur
+    // Q, Olga reste seule, et prend `full` (Ruling R70).
     for (node, expected) in [
         (&r, vec![grant(Subject::Members, Level::Full)]),
         (&r1, vec![]),
         (&p, vec![grant(a, Level::Full)]),
         (&p1, vec![]),
         (&p2, vec![grant(a, Level::Edit)]),
-        (&q, vec![grant(o, Level::Edit)]),
+        (&q, vec![grant(o, Level::Full)]),
         (&q1, vec![]),
         (&z1, vec![grant(a, Level::Edit)]),
     ] {
@@ -311,6 +312,117 @@ async fn remove_member_drops_shared_grants_and_keeps_private_pages() {
         store.node_grants(p.id).await.unwrap(),
         [grant(a, Level::Full)]
     );
+}
+
+/// Ruling R70 : qui quitte un espace ne laisse pas derrière lui une page partagée sans personne
+/// en `full`. Sur une page dont il était le dernier sujet en `full` (à elle ou hérité), et qui
+/// garde d'autres lignes propres, les lignes de plus haut niveau passent à `full`. Une ligne
+/// `members` qui s'applique, ou un `full` hérité d'un ancêtre, suffit : rien ne bouge.
+#[tokio::test]
+async fn leaving_member_hands_shared_pages_to_the_highest_remaining() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let alice = account(store, "alice").await;
+    let paul = account(store, "paul").await;
+    let hugo = account(store, "hugo").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    for who in [&alice, &paul, &hugo] {
+        store
+            .add_member(space.id, who.id, Role::Member)
+            .await
+            .unwrap();
+    }
+    let (a, o, p, h) = (
+        Subject::User(alice.id),
+        Subject::User(olga.id),
+        Subject::User(paul.id),
+        Subject::User(hugo.id),
+    );
+    let space = &space;
+
+    // Q : Olga en `edit`, Paul en `read` : Olga seule passe à `full`. Q1, dessous : Olga y a
+    // désormais `full` par héritage de Q, Paul garde `read`.
+    let q = vec![
+        grant(a, Level::Full),
+        grant(o, Level::Edit),
+        grant(p, Level::Read),
+    ];
+    let q = page_with(store, space, None, "Q", q).await;
+    let q1 = page_with(store, space, Some(q.id), "Q1", vec![grant(p, Level::Read)]).await;
+    // S : Olga et Paul tous deux en `edit` : les deux passent à `full`.
+    let s = vec![
+        grant(a, Level::Full),
+        grant(o, Level::Edit),
+        grant(p, Level::Edit),
+    ];
+    let s = page_with(store, space, None, "S", s).await;
+    // T1 : Alice y avait `full`, mais Olga l'a déjà par héritage de T : rien ne bouge.
+    let t = page_with(store, space, None, "T", vec![grant(o, Level::Full)]).await;
+    let t1 = vec![grant(a, Level::Full), grant(p, Level::Read)];
+    let t1 = page_with(store, space, Some(t.id), "T1", t1).await;
+    // M1 : une ligne `members` s'applique (les admins y ont `full`) : rien ne bouge.
+    let m = vec![grant(Subject::Members, Level::Read)];
+    let m = page_with(store, space, None, "M", m).await;
+    let m1 = vec![grant(a, Level::Full), grant(p, Level::Read)];
+    let m1 = page_with(store, space, Some(m.id), "M1", m1).await;
+    // U : Alice n'y avait pas `full`, personne ne l'avait : son départ n'y change rien.
+    let u = vec![grant(a, Level::Edit), grant(p, Level::Read)];
+    let u = page_with(store, space, None, "U", u).await;
+    // V : Alice y a `full` sans être la dernière (Hugo aussi) : rien ne bouge.
+    let v = vec![
+        grant(a, Level::Full),
+        grant(h, Level::Full),
+        grant(p, Level::Edit),
+    ];
+    let v = page_with(store, space, None, "V", v).await;
+    // P : sa page privée, gardée telle quelle ; P1, dessous, partagée avec Paul en lecture :
+    // Alice y avait `full` par héritage, et personne d'autre ne peut plus la gérer.
+    let pp = page_with(store, space, None, "P", vec![grant(a, Level::Full)]).await;
+    let pp1 = page_with(store, space, Some(pp.id), "P1", vec![grant(p, Level::Read)]).await;
+    // W : une ligne `full` restée à Xavier, qui n'a plus de rôle dans l'espace (sa page
+    // privée, gardée à son départ) ; elle ne donne aucun droit, donc ne compte pas : sur W1,
+    // Paul passe à `full`.
+    let xavier = Subject::User(account(store, "xavier").await.id);
+    let w = page_with(store, space, None, "W", vec![grant(xavier, Level::Full)]).await;
+    let w1 = vec![grant(a, Level::Full), grant(p, Level::Read)];
+    let w1 = page_with(store, space, Some(w.id), "W1", w1).await;
+
+    let before = rev(store, space.id).await;
+    store.remove_member(space.id, alice.id).await.unwrap();
+    let after = [
+        (&q, vec![grant(o, Level::Full), grant(p, Level::Read)]),
+        (&q1, vec![grant(p, Level::Read)]),
+        (&s, vec![grant(o, Level::Full), grant(p, Level::Full)]),
+        (&t, vec![grant(o, Level::Full)]),
+        (&t1, vec![grant(p, Level::Read)]),
+        (&m, vec![grant(Subject::Members, Level::Read)]),
+        (&m1, vec![grant(p, Level::Read)]),
+        (&u, vec![grant(p, Level::Read)]),
+        (&v, vec![grant(h, Level::Full), grant(p, Level::Edit)]),
+        (&pp, vec![grant(a, Level::Full)]),
+        (&pp1, vec![grant(p, Level::Full)]),
+        (&w, vec![grant(xavier, Level::Full)]),
+        (&w1, vec![grant(p, Level::Full)]),
+    ];
+    // Comparées sans ordre : `node_grants` trie par le texte du sujet, donc par uuid.
+    let sorted = |mut grants: Vec<Grant>| {
+        grants.sort_by_key(|g| g.subject.to_string());
+        grants
+    };
+    for (node, expected) in &after {
+        assert_eq!(
+            sorted(store.node_grants(node.id).await.unwrap()),
+            sorted(expected.clone()),
+            "{}",
+            node.title
+        );
+    }
+    // Ce sont toutes les lignes de l'espace : aucun sujet n'est apparu ailleurs.
+    let total: usize = after.iter().map(|(_, g)| g.len()).sum();
+    assert_eq!(store.space_grants(space.id).await.unwrap().len(), total);
+    // Une seule écriture.
+    assert_eq!(rev(store, space.id).await, before + 1);
 }
 
 #[tokio::test]
