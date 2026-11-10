@@ -2,8 +2,8 @@
 // invitations par lien, et « Quitter l'espace ». Une page de l'application, barre latérale à
 // gauche, contenu centré, comme les réglages de Notion.
 //
-// Ce que chacun y fait suit le tableau des rôles ; le serveur fait foi, et ses refus
-// s'affichent tels quels :
+// Ce que chacun y fait suit le tableau des rôles (`roles.ts`) ; le serveur fait foi, et ses
+// refus s'affichent tels quels :
 // - propriétaire : tout, le rôle de chacun compris ;
 // - admin : renommer, inviter (`admin` ou `member`), révoquer, retirer qui n'est pas
 //   propriétaire, faire passer quelqu'un d'`admin` à `member` et retour ;
@@ -13,8 +13,10 @@
 // rôle ne se change pas ici.
 //
 // Le rôle de la personne connectée est relu avec la liste des membres, pas pris de la
-// session, qui peut dater. Le lien d'une invitation n'est montré qu'à sa création : le
-// serveur ne garde que le hachage de son jeton.
+// session, qui peut dater. Après un refus du serveur (un rôle changé ailleurs, quelqu'un
+// déjà parti), l'écran relit tout : il montre l'état du serveur, plus celui qu'il croyait.
+// Le lien d'une invitation n'est montré qu'à sa création : le serveur ne garde que le
+// hachage de son jeton.
 import type { InviteRole, Member, PendingInvitation, Role } from "@mementum/protocol";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import {
@@ -27,13 +29,15 @@ import {
   updateMember,
   updateSpace,
 } from "../api";
-import { CheckIcon, LinkIcon, MailIcon, WarningIcon } from "../icons";
+import { MailIcon } from "../icons";
 import { navigate } from "../router";
-import { Avatar } from "../session/AccountMenu";
 import { FormError, messageOf, useDocumentTitle } from "../session/forms";
 import { useSession } from "../session/session";
+import { CreatedInvitation } from "../share/CreatedInvitation";
 import { invitationLink, LEVEL_LABELS, ROLE_LABELS } from "../share/levels";
+import { Avatar } from "../ui/Avatar";
 import { Confirm } from "../ui/Confirm";
+import { isManager, mayRemove, rolesFor } from "./roles";
 
 type Load =
   | { name: "loading" }
@@ -45,26 +49,7 @@ type Load =
 /** Une invitation tout juste créée, avec son lien : montré cette fois seulement. */
 type Created = { email: string; role: InviteRole; link: string };
 
-const ALL_ROLES: Role[] = ["owner", "admin", "member", "guest"];
 const INVITE_ROLES: InviteRole[] = ["member", "admin"];
-
-const isManager = (role: Role | undefined) => role === "owner" || role === "admin";
-
-/** Les rôles que `caller` peut donner à `target`, ou `null` s'il ne peut pas le changer. */
-function rolesFor(caller: Role | undefined, target: Member, self: string): Role[] | null {
-  if (target.userId === self) return null;
-  if (caller === "owner") return ALL_ROLES;
-  if (caller === "admin" && (target.role === "admin" || target.role === "member")) {
-    return ["admin", "member"];
-  }
-  return null;
-}
-
-/** `caller` peut-il retirer `target` de l'espace ? (Soi-même : « Quitter l'espace ».) */
-function mayRemove(caller: Role | undefined, target: Member, self: string): boolean {
-  if (target.userId === self) return false;
-  return caller === "owner" || (caller === "admin" && target.role !== "owner");
-}
 
 const expiry = new Intl.DateTimeFormat("fr-FR", {
   day: "numeric",
@@ -79,6 +64,11 @@ function grantOf(invitation: PendingInvitation): string {
   return invitation.level ? `${LEVEL_LABELS[invitation.level]} sur une page` : "Sur une page";
 }
 
+const roleOf = (members: Member[], self: string) => members.find((m) => m.userId === self)?.role;
+
+/** Le serveur dit que la personne n'a pas (ou plus) ce rôle, ou que l'objet a disparu. */
+const isRefusal = (e: unknown) => e instanceof ApiError && (e.status === 403 || e.status === 404);
+
 export function SpaceSettings({ spaceId }: { spaceId: string }) {
   const { me, refresh } = useSession();
   const self = me.user.id;
@@ -92,15 +82,26 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
     if (guest) navigate("/", { replace: true });
   }, [guest]);
 
+  /** Relit les membres, et les invitations pour qui les gère. */
   const reload = useCallback(async () => {
     try {
-      const members = await getMembers(spaceId);
-      const role = members.find((m) => m.userId === self)?.role;
-      const invitations = isManager(role) ? await getSpaceInvitations(spaceId) : [];
+      let members = await getMembers(spaceId);
+      let invitations: PendingInvitation[] = [];
+      if (isManager(roleOf(members, self))) {
+        try {
+          invitations = await getSpaceInvitations(spaceId);
+        } catch (e) {
+          // Le rôle a baissé entre les deux appels : ce n'est pas un invité, les membres
+          // relus disent ce qu'il est devenu.
+          if (!(e instanceof ApiError && e.status === 403)) throw e;
+          members = await getMembers(spaceId);
+        }
+      }
       setLoad({ name: "ready", members, invitations });
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) setLoad({ name: "missing" });
-      // Invité, d'après le serveur (la session le disait encore membre).
+      // La liste des membres refusée : un invité, d'après le serveur (la session le disait
+      // encore membre).
       else if (e instanceof ApiError && e.status === 403) navigate("/", { replace: true });
       else setLoad({ name: "failed", message: messageOf(e) });
     }
@@ -135,7 +136,7 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
         self={self}
         members={load.members}
         invitations={load.invitations}
-        onChange={(members, invitations) => setLoad({ name: "ready", members, invitations })}
+        onInvitations={(invitations) => setLoad({ name: "ready", members: load.members, invitations })}
         reload={reload}
       />
     );
@@ -164,12 +165,13 @@ type ReadyProps = {
   self: string;
   members: Member[];
   invitations: PendingInvitation[];
-  onChange: (members: Member[], invitations: PendingInvitation[]) => void;
+  onInvitations: (invitations: PendingInvitation[]) => void;
+  /** Relit tout depuis le serveur : après chaque action, et après chaque refus. */
   reload: () => Promise<void>;
 };
 
-function Ready({ spaceId, name, self, members, invitations, onChange, reload }: ReadyProps) {
-  const role = members.find((m) => m.userId === self)?.role;
+function Ready({ spaceId, name, self, members, invitations, onInvitations, reload }: ReadyProps) {
+  const role = roleOf(members, self);
   const manager = isManager(role);
   return (
     <>
@@ -178,21 +180,21 @@ function Ready({ spaceId, name, self, members, invitations, onChange, reload }: 
           Ton rôle dans cet espace : <strong>{ROLE_LABELS[role]}</strong>.
         </p>
       )}
-      <NameSection spaceId={spaceId} name={name} editable={manager} />
+      <NameSection spaceId={spaceId} name={name} editable={manager} reload={reload} />
       <MembersSection
         spaceId={spaceId}
         spaceName={name}
         self={self}
         role={role}
         members={members}
-        onMembers={(next) => onChange(next, invitations)}
         reload={reload}
       />
       {manager && (
         <InvitationsSection
           spaceId={spaceId}
           invitations={invitations}
-          onInvitations={(next) => onChange(members, next)}
+          onInvitations={onInvitations}
+          reload={reload}
         />
       )}
       <LeaveSection spaceId={spaceId} spaceName={name} self={self} />
@@ -200,7 +202,14 @@ function Ready({ spaceId, name, self, members, invitations, onChange, reload }: 
   );
 }
 
-function NameSection({ spaceId, name, editable }: { spaceId: string; name: string; editable: boolean }) {
+type NameProps = {
+  spaceId: string;
+  name: string;
+  editable: boolean;
+  reload: () => Promise<void>;
+};
+
+function NameSection({ spaceId, name, editable, reload }: NameProps) {
   const { refresh } = useSession();
   const headingId = useId();
   /** Ce qui a été tapé ; `null` : le nom de l'espace, tel quel. */
@@ -209,7 +218,9 @@ function NameSection({ spaceId, name, editable }: { spaceId: string; name: strin
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const value = draft ?? name;
-  const changed = draft !== null && draft.trim() !== name;
+  // Rogné, comme le serveur le rognera : c'est ce nom-là qui part, et qu'on compare.
+  const next = value.trim();
+  const changed = draft !== null && next !== name;
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -218,13 +229,14 @@ function NameSection({ spaceId, name, editable }: { spaceId: string; name: strin
     setError(null);
     setSaved(false);
     try {
-      await updateSpace(spaceId, { name: value });
+      await updateSpace(spaceId, { name: next });
       // Le nouveau nom, dans la session : ici, et partout où l'espace est nommé.
       await refresh().catch(() => {});
       setDraft(null);
       setSaved(true);
     } catch (e) {
       setError(messageOf(e));
+      if (isRefusal(e)) await reload();
     } finally {
       setBusy(false);
     }
@@ -247,7 +259,7 @@ function NameSection({ spaceId, name, editable }: { spaceId: string; name: strin
                 setSaved(false);
               }}
             />
-            <button type="submit" className="mm-button" disabled={!changed || busy}>
+            <button type="submit" className="mm-button mm-button-field" disabled={!changed || busy}>
               Enregistrer
             </button>
           </form>
@@ -269,30 +281,40 @@ type MembersProps = {
   self: string;
   role: Role | undefined;
   members: Member[];
-  onMembers: (members: Member[]) => void;
   reload: () => Promise<void>;
 };
 
-function MembersSection({ spaceId, spaceName, self, role, members, onMembers, reload }: MembersProps) {
+function MembersSection({ spaceId, spaceName, self, role, members, reload }: MembersProps) {
   const headingId = useId();
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const [error, setError] = useState<string | null>(null);
   /** La personne dont le rôle est en train de changer. */
   const [changing, setChanging] = useState<string | null>(null);
   /** La personne à retirer, le temps de la confirmation. */
   const [removing, setRemoving] = useState<Member | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Compte les fermetures de la confirmation, pour rattraper le focus après chacune. */
+  const [closed, setClosed] = useState(0);
+
+  // La fenêtre fermée rend le focus au bouton qui l'a ouverte (`Confirm`). Parti avec sa
+  // ligne, ce bouton n'est plus là : le focus va au titre de la liste, pas dans le vide.
+  useEffect(() => {
+    if (closed === 0) return;
+    const active = document.activeElement;
+    if (!active || active === document.body) headingRef.current?.focus();
+  }, [closed]);
 
   const changeRole = async (member: Member, next: Role) => {
     setChanging(member.userId);
     setError(null);
     try {
-      const updated = await updateMember(spaceId, member.userId, { role: next });
-      onMembers(members.map((m) => (m.userId === updated.userId ? updated : m)));
+      await updateMember(spaceId, member.userId, { role: next });
     } catch (e) {
       setError(messageOf(e));
-    } finally {
-      setChanging(null);
     }
+    // Réussi ou refusé : la liste telle que le serveur la voit.
+    await reload();
+    setChanging(null);
   };
 
   const remove = async () => {
@@ -301,14 +323,14 @@ function MembersSection({ spaceId, spaceName, self, role, members, onMembers, re
     setError(null);
     try {
       await removeMember(spaceId, removing.userId);
-      // Ses invitations en attente partent avec lui : la liste est relue.
-      await reload();
     } catch (e) {
       setError(messageOf(e));
-    } finally {
-      setBusy(false);
-      setRemoving(null);
     }
+    // Réussi ou refusé : la liste relue (ses invitations en attente partent avec lui).
+    await reload();
+    setBusy(false);
+    setRemoving(null);
+    setClosed((n) => n + 1);
   };
 
   const count = members.length;
@@ -317,7 +339,7 @@ function MembersSection({ spaceId, spaceName, self, role, members, onMembers, re
   return (
     <section className="mm-settings-section" aria-labelledby={headingId}>
       <div className="mm-settings-heading-row">
-        <h2 id={headingId} className="mm-settings-heading">
+        <h2 id={headingId} ref={headingRef} className="mm-settings-heading" tabIndex={-1}>
           Membres
         </h2>
         <span className="mm-settings-count">
@@ -338,23 +360,25 @@ function MembersSection({ spaceId, spaceName, self, role, members, onMembers, re
                 </span>
                 <span className="mm-person-detail">{member.email}</span>
               </span>
-              {roles ? (
-                <select
-                  className="mm-select"
-                  aria-label={`Rôle de ${member.name}`}
-                  value={member.role}
-                  disabled={changing === member.userId}
-                  onChange={(e) => void changeRole(member, e.target.value as Role)}
-                >
-                  {roles.map((r) => (
-                    <option key={r} value={r}>
-                      {ROLE_LABELS[r]}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <span className="mm-person-role">{ROLE_LABELS[member.role]}</span>
-              )}
+              <span className="mm-person-role">
+                {roles ? (
+                  <select
+                    className="mm-select"
+                    aria-label={`Rôle de ${member.name}`}
+                    value={member.role}
+                    disabled={changing === member.userId}
+                    onChange={(e) => void changeRole(member, e.target.value as Role)}
+                  >
+                    {roles.map((r) => (
+                      <option key={r} value={r}>
+                        {ROLE_LABELS[r]}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  ROLE_LABELS[member.role]
+                )}
+              </span>
               {manager && (
                 <span className="mm-person-action">
                   {mayRemove(role, member, self) && (
@@ -393,9 +417,10 @@ type InvitationsProps = {
   spaceId: string;
   invitations: PendingInvitation[];
   onInvitations: (invitations: PendingInvitation[]) => void;
+  reload: () => Promise<void>;
 };
 
-function InvitationsSection({ spaceId, invitations, onInvitations }: InvitationsProps) {
+function InvitationsSection({ spaceId, invitations, onInvitations, reload }: InvitationsProps) {
   const headingId = useId();
   const emailId = useId();
   const roleId = useId();
@@ -404,6 +429,8 @@ function InvitationsSection({ spaceId, invitations, onInvitations }: Invitations
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<Created | null>(null);
+  /** L'invitation en cours de révocation : un double clic n'envoie qu'une requête. */
+  const [revoking, setRevoking] = useState<string | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
 
   const invite = async (event: FormEvent) => {
@@ -411,31 +438,40 @@ function InvitationsSection({ spaceId, invitations, onInvitations }: Invitations
     if (busy) return;
     setBusy(true);
     setError(null);
+    let token: string;
     try {
-      const { token } = await inviteToSpace(spaceId, { email, role });
-      setCreated({ email: email.trim().toLowerCase(), role, link: invitationLink(token) });
-      setEmail("");
-      // La nouvelle invitation, sans son jeton, dans la liste de celles qui attendent.
-      onInvitations(await getSpaceInvitations(spaceId));
+      ({ token } = await inviteToSpace(spaceId, { email, role }));
     } catch (e) {
       setError(messageOf(e));
-    } finally {
       setBusy(false);
+      if (isRefusal(e)) await reload();
+      return;
+    }
+    setCreated({ email: email.trim().toLowerCase(), role, link: invitationLink(token) });
+    setEmail("");
+    setBusy(false);
+    // La nouvelle invitation, sans son jeton, dans la liste de celles qui attendent. Si la
+    // relecture échoue, l'invitation existe quand même et son lien est montré : pas d'erreur.
+    try {
+      onInvitations(await getSpaceInvitations(spaceId));
+    } catch {
+      // la liste sera relue à la prochaine action ou au prochain affichage
     }
   };
 
   const revoke = async (invitation: PendingInvitation) => {
+    if (revoking) return;
+    setRevoking(invitation.id);
     setRevokeError(null);
     try {
       await revokeInvitation(invitation.id);
     } catch (e) {
-      // Déjà acceptée, échue ou révoquée ailleurs (`404`) : la liste relue le dira.
-      if (!(e instanceof ApiError && e.status === 404)) {
-        setRevokeError(messageOf(e));
-        return;
-      }
+      // Déjà acceptée, échue ou révoquée ailleurs (`404`) : la liste relue le montre.
+      if (!(e instanceof ApiError && e.status === 404)) setRevokeError(messageOf(e));
     }
-    onInvitations(invitations.filter((i) => i.id !== invitation.id));
+    // Réussie ou refusée : la liste telle que le serveur la voit.
+    await reload();
+    setRevoking(null);
   };
 
   return (
@@ -480,7 +516,9 @@ function InvitationsSection({ spaceId, invitations, onInvitations }: Invitations
         </button>
       </form>
       <FormError message={error} />
-      {created && <CreatedInvitation created={created} />}
+      {created && (
+        <CreatedInvitation email={created.email} grant={ROLE_LABELS[created.role]} link={created.link} />
+      )}
 
       <h3 className="mm-settings-subheading">En attente</h3>
       <FormError message={revokeError} />
@@ -503,6 +541,7 @@ function InvitationsSection({ spaceId, invitations, onInvitations }: Invitations
                 <button
                   type="button"
                   className="mm-button mm-button-quiet"
+                  aria-disabled={revoking !== null || undefined}
                   onClick={() => void revoke(invitation)}
                 >
                   Révoquer
@@ -513,56 +552,6 @@ function InvitationsSection({ spaceId, invitations, onInvitations }: Invitations
         </ul>
       )}
     </section>
-  );
-}
-
-/** Le lien de l'invitation créée, à copier tout de suite : il ne sera plus montré. */
-function CreatedInvitation({ created }: { created: Created }) {
-  const linkRef = useRef<HTMLInputElement>(null);
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
-
-  const copy = async () => {
-    setCopyError(null);
-    try {
-      // Absent hors d'un contexte sécurisé (instance servie en `http` sur le réseau local).
-      await navigator.clipboard.writeText(created.link);
-      setCopied(true);
-    } catch {
-      linkRef.current?.focus();
-      linkRef.current?.select();
-      setCopyError("Le navigateur a refusé la copie : le lien est sélectionné, copie-le avec Ctrl+C.");
-    }
-  };
-
-  return (
-    <div className="mm-invite-created">
-      <p className="mm-invite-warning">
-        <WarningIcon />
-        <strong>Ce lien ne sera plus affiché : copie-le maintenant.</strong>
-      </p>
-      <p className="mm-invite-for">
-        Invitation pour {created.email} · {ROLE_LABELS[created.role]}
-      </p>
-      <div className="mm-settings-row">
-        <input
-          ref={linkRef}
-          className="mm-input mm-invite-link"
-          aria-label="Lien d'invitation"
-          readOnly
-          value={created.link}
-          onFocus={(e) => e.currentTarget.select()}
-        />
-        <button type="button" className="mm-button mm-button-primary mm-button-icon" onClick={() => void copy()}>
-          {copied ? <CheckIcon /> : <LinkIcon />}
-          {copied ? "Lien copié" : "Copier le lien"}
-        </button>
-      </div>
-      <p className="mm-visually-hidden" role="status">
-        {copied ? "Lien copié dans le presse-papiers." : ""}
-      </p>
-      {copyError && <p className="mm-invite-copy-error">{copyError}</p>}
-    </div>
   );
 }
 

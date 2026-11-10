@@ -109,6 +109,22 @@ test("login_logout_roundtrip", async ({ page }) => {
   await expect(loginHeading(page)).toBeVisible();
 });
 
+test("back_after_logout_leaves_the_app", async ({ page }) => {
+  const account = await signUpAccount();
+  const { id } = await createPage(await apiAs(account), { title: `Retour ${unique()}` });
+  // Une page de l'application, ouverte puis connectée dans le même onglet.
+  await page.goto(`/p/${id}`);
+  await logInWith(page, account.email, account.password);
+  await expect(page.getByRole("textbox", { name: "Titre de la page" })).toBeVisible();
+  await accountButton(page, account.name).click();
+  await page.getByRole("button", { name: "Se déconnecter" }).click();
+  await expect(loginHeading(page)).toBeVisible();
+  // La déconnexion a remplacé l'adresse de la page : Précédent ne revient pas sur elle.
+  await page.goBack();
+  expect(page.url()).not.toContain(`/p/${id}`);
+  expect(page.url().startsWith(BASE_URL) && new URL(page.url()).pathname !== "/login").toBe(false);
+});
+
 test("wrong_password_shows_the_server_message", async ({ page, request }) => {
   const account = await signUpAccount();
   // Ce que le serveur répond à ce mot de passe.

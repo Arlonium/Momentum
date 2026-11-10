@@ -2,9 +2,16 @@
 //
 // Le jeton est dans le fragment, que le navigateur n'envoie pas au serveur. `SessionGate`
 // le lit dès le chargement (`takeInvitationToken`) puis efface le fragment de l'adresse
-// (`history.replaceState`) : il ne reste ni dans l'historique, ni dans une capture d'écran,
-// ni dans un lien copié depuis la barre d'adresse. Il ne vit plus qu'en mémoire, le temps de
-// l'invitation (cette page, puis l'inscription ou la connexion), et part avec elle.
+// (`history.replaceState`) avant le premier affichage : il n'est plus dans la barre
+// d'adresse (ni dans une capture d'écran, ni dans un lien recopié depuis elle), ni dans
+// l'entrée de l'historique de l'onglet. L'historique global du navigateur et les suggestions
+// de la barre d'adresse peuvent, eux, garder l'adresse ouverte avec son fragment : c'est le
+// navigateur qui les tient. Le jeton ne vit ensuite qu'en mémoire, le temps de l'invitation
+// (cette page, puis l'inscription ou la connexion), et part avec elle. Un jeton qui a servi
+// ne vaut plus rien.
+//
+// L'adresse e-mail de l'invitation n'est jamais vérifiée (pas de SMTP, Ruling R47) : le lien
+// s'accepte avec n'importe quel compte, et l'écran le dit.
 //
 // Le serveur dit ce que donne le lien (`lookup`) : « <Nom> t'invite dans l'espace « … » »
 // (ou sur une page). Avec une session, « Accepter » y mène. Sans session : « Créer mon
@@ -65,7 +72,7 @@ export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Pr
   const [state, setState] = useState<State>(token ? { name: "loading" } : { name: "invalid" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  useDocumentTitle(state.name === "invalid" ? "Invitation expirée" : "Invitation");
+  useDocumentTitle(state.name === "invalid" ? "Invitation non valable" : "Invitation");
 
   const lookup = useCallback(async () => {
     if (!token) return;
@@ -181,8 +188,9 @@ export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Pr
       lead={
         <>
           {where}
-          Invitation pour <strong className="mm-invite-who">{info.email}</strong>. Crée ton compte
-          pour l'accepter, ou connecte-toi si tu en as déjà un.
+          L'invitation a été préparée pour <strong className="mm-invite-who">{info.email}</strong>.
+          Tu peux l'accepter avec le compte de ton choix : crée-en un, ou{" "}
+          <span className="mm-nowrap">connecte-toi</span>.
         </>
       }
     >

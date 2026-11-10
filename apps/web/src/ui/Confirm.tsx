@@ -11,7 +11,9 @@
 // - à la fermeture, le focus revient où il était (s'il est encore là).
 //
 // La fenêtre ne se ferme pas d'elle-même : `onCancel` et `onConfirm` disent au parent de la
-// retirer, après l'action pour une confirmation (`busy` pendant ce temps).
+// retirer, après l'action pour une confirmation (`busy` pendant ce temps). Pendant l'action,
+// les boutons restent focalisables (`aria-disabled`, clics ignorés) : un bouton désactivé
+// perdrait le focus, qui sortirait de la fenêtre.
 import {
   useEffect,
   useId,
@@ -64,6 +66,9 @@ export function Confirm({
 
   const cancel = () => {
     if (!busy) onCancel();
+  };
+  const confirm = () => {
+    if (!busy) onConfirm();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
@@ -132,7 +137,7 @@ export function Confirm({
           ref={cancelRef}
           type="button"
           className="mm-button"
-          disabled={busy}
+          aria-disabled={busy || undefined}
           onClick={cancel}
         >
           {cancelLabel}
@@ -140,8 +145,8 @@ export function Confirm({
         <button
           type="button"
           className={`mm-button ${destructive ? "mm-button-danger" : "mm-button-primary"}`}
-          disabled={busy}
-          onClick={onConfirm}
+          aria-disabled={busy || undefined}
+          onClick={confirm}
         >
           {confirmLabel}
         </button>

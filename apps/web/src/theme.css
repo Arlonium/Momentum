@@ -629,7 +629,14 @@ button.tree-toggle:hover {
   flex: none;
 }
 
-.mm-button:disabled {
+/* Voisin d'un champ : la même bordure que lui. */
+.mm-button-field {
+  border-color: var(--mm-field-border);
+}
+
+/* `aria-disabled` : en attente, mais focalisable (le focus ne sort pas d'une fenêtre). */
+.mm-button:disabled,
+.mm-button[aria-disabled="true"] {
   opacity: 0.6;
   cursor: default;
 }
@@ -868,6 +875,11 @@ button.tree-toggle:hover {
   padding: 6px 14px;
 }
 
+/* Un mot composé qui ne se coupe pas à son trait d'union (« connecte-toi »). */
+.mm-nowrap {
+  white-space: nowrap;
+}
+
 /* Page d'invitation : qui la rejoint, ou à quelle adresse elle a été faite. */
 .mm-invite-who {
   font-weight: 500;
@@ -1050,18 +1062,21 @@ button.tree-toggle:hover {
   color: var(--mm-text-secondary);
 }
 
-/* Le rôle, dans une colonne de largeur fixe : qu'il se change par une liste ou non, il
-   commence au même endroit sur chaque ligne (le texte d'une liste est à 9 px de son bord). */
-.mm-person .mm-select,
+/* Le rôle, dans une cellule de largeur fixe : qu'il se change par une liste ou non, il
+   commence au même endroit sur chaque ligne. La liste épouse son libellé (chevron collé au
+   texte) ; son texte est à 9 px de son bord, d'où le retrait. */
 .mm-person-role {
   flex: none;
   width: 124px;
-}
-
-.mm-person-role {
-  padding: 0 9px;
+  padding-left: 9px;
   font-size: 13px;
   color: var(--mm-text-secondary);
+}
+
+.mm-person-role .mm-select {
+  max-width: calc(100% + 9px);
+  margin-left: -9px;
+  field-sizing: content;
 }
 
 .mm-person-action {

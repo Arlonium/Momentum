@@ -90,6 +90,8 @@ test("invite_to_space_by_link_then_signup", async ({ browser, page }) => {
   await expect(
     invitations.getByText("Ce lien ne sera plus affiché : copie-le maintenant"),
   ).toBeVisible();
+  // Préparé pour cette adresse, sans la lui réserver : c'est le lien qui fait foi.
+  await expect(invitations).toContainText(`Lien d'invitation préparé pour ${email}`);
   const shown = await invitations.getByRole("textbox", { name: "Lien d'invitation" }).inputValue();
   await invitations.getByRole("button", { name: "Copier le lien" }).click();
   await expect(invitations.getByRole("button", { name: "Lien copié" })).toBeVisible();
@@ -105,6 +107,10 @@ test("invite_to_space_by_link_then_signup", async ({ browser, page }) => {
   await page.goto(link);
   await expect(invitedHeading(page, alice.name, space.name)).toBeVisible();
   expect(page.url()).toBe(`${BASE_URL}/invite`);
+  // L'adresse n'est pas vérifiée : l'écran ne la donne pas pour une condition.
+  await expect(page.getByRole("main")).toContainText(
+    "Tu peux l'accepter avec le compte de ton choix",
+  );
   await page.getByRole("button", { name: "Créer mon compte" }).click();
   await expect(page.getByRole("heading", { name: "Créer un compte" })).toBeVisible();
   // L'adresse de l'invitation est préremplie.
@@ -241,6 +247,8 @@ test("owner_changes_a_role_and_removes_a_member", async ({ browser }) => {
   await confirm.getByRole("button", { name: "Retirer" }).click();
   await expect(confirm).toHaveCount(0);
   await expect(memberRow(a, chloe.email)).toHaveCount(0);
+  // Le bouton qui a ouvert la fenêtre est parti avec sa ligne : le focus va au titre de la liste.
+  await expect(a.getByRole("heading", { name: "Membres", level: 2 })).toBeFocused();
   expect(await roleOf(chloe.email)).toBeUndefined();
   // Chloé n'a plus l'espace.
   expect((await getMe(await apiAs(chloe))).spaces.map((s) => s.id)).not.toContain(space.id);
@@ -325,6 +333,120 @@ test("member_sees_members_without_actions", async ({ browser }) => {
   await expect(b.getByRole("button", { name: "Révoquer" })).toHaveCount(0);
   await expect(b.getByRole("textbox", { name: "Nom de l'espace" })).toHaveCount(0);
   await expect(b.getByRole("main")).toContainText(space.name);
+  // Partir reste possible : c'est une action pour soi.
+  await expect(b.getByRole("button", { name: "Quitter l'espace" })).toBeVisible();
+});
+
+test("guest_is_sent_home", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const bruno = await signUpAccount(`Bruno ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  await joinSpace(aliceApi, space.id, bruno, "member");
+  // A fait de B un invité de l'espace.
+  const { user } = await getMe(await apiAs(bruno));
+  const res = await aliceApi.patch(`/api/v1/spaces/${space.id}/members/${user.id}`, {
+    data: { role: "guest" },
+  });
+  expect(res.status(), await res.text()).toBe(200);
+
+  const b = await newUser(browser, bruno);
+  await b.goto(settingsPath(space.id));
+  await expect(b).toHaveURL(`${BASE_URL}/`);
+  await expect(accountButton(b, bruno.name)).toBeVisible();
+  await expect(b.getByRole("list", { name: "Membres" })).toHaveCount(0);
+});
+
+test("space_without_a_role_is_not_found", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const bruno = await signUpAccount(`Bruno ${unique()}`);
+  const space = await firstSpace(await apiAs(alice));
+
+  const b = await newUser(browser, bruno);
+  await b.goto(settingsPath(space.id));
+  await expect(b.getByRole("heading", { name: "Espace introuvable", level: 1 })).toBeVisible();
+  // Rien de l'espace : ni son nom, ni ses membres.
+  await expect(b.getByRole("list", { name: "Membres" })).toHaveCount(0);
+  await expect(b.getByRole("main")).not.toContainText(space.name);
+  await expect(b.getByRole("main")).not.toContainText(alice.email);
+});
+
+test("second_invitation_does_not_claim_it_was_copied", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const space = await firstSpace(await apiAs(alice));
+  const a = await newUser(browser, alice);
+  await a.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE_URL });
+  await a.goto(settingsPath(space.id));
+  const invitations = invitationsOf(a);
+  const link = invitations.getByRole("textbox", { name: "Lien d'invitation" });
+  const clipboard = () => a.evaluate(() => navigator.clipboard.readText());
+  const invite = async (email: string) => {
+    await invitations.getByLabel("Adresse e-mail").fill(email);
+    await invitations.getByRole("button", { name: "Inviter", exact: true }).click();
+  };
+
+  // Le lien d'une première invitation, copié.
+  await invite(`premiere-${unique()}@exemple.fr`);
+  await expect(link).toBeVisible();
+  const first = await link.inputValue();
+  await invitations.getByRole("button", { name: "Copier le lien" }).click();
+  await expect(invitations.getByRole("button", { name: "Lien copié" })).toBeVisible();
+  expect(await clipboard()).toBe(first);
+
+  // Une seconde : son lien n'est pas copié, et l'écran ne le prétend pas.
+  await invite(`seconde-${unique()}@exemple.fr`);
+  await expect(link).not.toHaveValue(first);
+  const second = await link.inputValue();
+  await expect(invitations.getByRole("button", { name: "Copier le lien" })).toBeVisible();
+  await expect(invitations.getByRole("button", { name: "Lien copié" })).toHaveCount(0);
+  expect(await clipboard()).toBe(first);
+  await invitations.getByRole("button", { name: "Copier le lien" }).click();
+  await expect(invitations.getByRole("button", { name: "Lien copié" })).toBeVisible();
+  expect(await clipboard()).toBe(second);
+});
+
+test("refused_action_reloads_the_server_state", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const bruno = await signUpAccount(`Bruno ${unique()}`);
+  const chloe = await signUpAccount(`Chloé ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  await joinSpace(aliceApi, space.id, bruno, "admin");
+  await joinSpace(aliceApi, space.id, chloe, "member");
+  const idOf = async (email: string) =>
+    (await getMembers(aliceApi, space.id)).find((m) => m.email === email)!.userId;
+
+  // B, admin, ouvre les réglages : il peut changer le rôle de C.
+  const b = await newUser(browser, bruno);
+  await b.goto(settingsPath(space.id));
+  const chloeRole = memberRow(b, chloe.email).getByRole("combobox", { name: `Rôle de ${chloe.name}` });
+  await expect(chloeRole).toBeVisible();
+
+  // Pendant que l'écran est ouvert, A fait de B un simple membre.
+  const demoted = await aliceApi.patch(`/api/v1/spaces/${space.id}/members/${await idOf(bruno.email)}`, {
+    data: { role: "member" },
+  });
+  expect(demoted.status(), await demoted.text()).toBe(200);
+  // Ce que le serveur répond désormais à B : un refus, sans effet.
+  const refused = await (await apiAs(bruno)).patch(
+    `/api/v1/spaces/${space.id}/members/${await idOf(chloe.email)}`,
+    { data: { role: "admin" } },
+  );
+  expect(refused.status()).toBe(403);
+  const body = (await refused.json()) as ErrorBody;
+
+  // L'action refusée : le message du serveur, puis l'écran tel que le serveur le voit.
+  await chloeRole.selectOption("admin");
+  await expect(b.getByRole("alert")).toHaveText(body.message);
+  await expect(memberRow(b, bruno.email)).toContainText("Membre");
+  const members = b.getByRole("list", { name: "Membres" });
+  await expect(members.getByRole("combobox")).toHaveCount(0);
+  await expect(members.getByRole("button", { name: "Retirer" })).toHaveCount(0);
+  await expect(invitationsOf(b)).toHaveCount(0);
+  await expect(memberRow(b, chloe.email)).toContainText("Membre");
+  expect((await getMembers(aliceApi, space.id)).find((m) => m.email === chloe.email)?.role).toBe(
+    "member",
+  );
 });
 
 test("last_owner_cannot_leave", async ({ browser }) => {

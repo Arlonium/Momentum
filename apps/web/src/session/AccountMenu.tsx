@@ -8,29 +8,9 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { ApiError, changePassword, isSessionLost, logOut } from "../api";
 import { ChevronsIcon, KeyIcon, LogOutIcon } from "../icons";
+import { Avatar } from "../ui/Avatar";
 import { Field, FormError, messageOf } from "./forms";
-import { colorOf, useSession } from "./session";
-
-/** Les initiales d'un nom : celles des deux premiers mots, ou la première lettre. */
-function initials(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  const first = (word: string) => Array.from(word)[0] ?? "";
-  const letters = words.length >= 2 ? first(words[0]) + first(words[1]) : first(words[0] ?? "");
-  return letters.toLocaleUpperCase("fr");
-}
-
-/** La pastille d'un compte : ses initiales, sur sa couleur de présence. */
-export function Avatar({ id, name, size }: { id: string; name: string; size: number }) {
-  return (
-    <span
-      className="mm-avatar"
-      aria-hidden="true"
-      style={{ background: colorOf(id), width: size, height: size, fontSize: size <= 24 ? 10 : 11 }}
-    >
-      {initials(name)}
-    </span>
-  );
-}
+import { useSession } from "./session";
 
 export function AccountMenu() {
   const { me, refresh } = useSession();
