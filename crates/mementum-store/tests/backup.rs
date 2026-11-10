@@ -232,6 +232,7 @@ async fn same_database_gives_the_same_copy() {
             path: backup.clone(),
             bytes: bytes.len() as u64,
             kept: true,
+            without_hard_link: false,
         })
     );
     assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
@@ -283,6 +284,7 @@ async fn pending_migration_backs_up_first() {
             path: backup.clone(),
             bytes,
             kept: false,
+            without_hard_link: false,
         })
     );
     // Puis la migration a tourné.
@@ -398,6 +400,7 @@ async fn existing_backup_is_kept() {
             path: dated[0].clone(),
             bytes: std::fs::metadata(&dated[0]).unwrap().len(),
             kept: false,
+            without_hard_link: false,
         })
     );
     // L'ouverture a continué : la base est migrée.
@@ -510,6 +513,7 @@ async fn changed_database_gets_a_fresh_dated_copy() {
             path: dated[0].clone(),
             bytes: std::fs::metadata(&dated[0]).unwrap().len(),
             kept: false,
+            without_hard_link: false,
         })
     );
     assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
@@ -585,6 +589,7 @@ async fn interrupted_backup_is_redone() {
             path: backup.clone(),
             bytes,
             kept: false,
+            without_hard_link: false,
         })
     );
     assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);

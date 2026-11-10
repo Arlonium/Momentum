@@ -17,10 +17,13 @@
 //! `same_database_gives_the_same_copy`) : c'est ce qui rend la comparaison utile.
 //!
 //! Une copie rangée n'est jamais écrasée ni supprimée. La copie fraîche prend son nom par
-//! `hard_link`, qui refuse de façon atomique un nom déjà pris, jamais par `rename`, qui remplacerait
-//! sa cible ; un système de fichiers sans liens physiques fait échouer l'ouverture. Un `.partiel`
-//! est le reste d'une copie interrompue : il est supprimé juste avant la copie suivante, donc
-//! seulement quand une migration est en attente. Sinon, rien n'y touche.
+//! `hard_link`, qui refuse de façon atomique un nom déjà pris. Sur un système de fichiers sans liens
+//! physiques (partage SMB, exFAT, certains volumes Docker), elle le prend par `rename`, après avoir
+//! vérifié que ce nom est libre : un filet qui empêcherait toute mise à jour serait pire que le
+//! risque, qui ne concerne que deux processus ouvrant la même base au même instant
+//! ([`Backup::without_hard_link`] le signale). Un `.partiel` est le reste d'une copie interrompue :
+//! il est supprimé juste avant la copie suivante, donc seulement quand une migration est en
+//! attente. Sinon, rien n'y touche.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -44,6 +47,12 @@ pub struct Backup {
     /// copie fraîche. Elle est gardée, et la copie fraîche, en double, est supprimée. `false` : la
     /// copie vient d'être écrite.
     pub kept: bool,
+    /// `true` : le système de fichiers n'a pas permis de lien physique, et la copie a pris son nom
+    /// par un renommage, après avoir vérifié que ce nom était libre. Rien n'a été écrasé, mais sans
+    /// la garantie atomique de `hard_link` : deux processus ouvrant la même base au même instant
+    /// pourraient viser le même nom. À journaliser en avertissement. Toujours `false` quand
+    /// `kept` est vrai (rien n'a été posé).
+    pub without_hard_link: bool,
 }
 
 /// Nom de la copie : `<fichier>.avant-<version>.bak`, où `<version>` est la version de la première
@@ -88,17 +97,22 @@ pub(crate) async fn before_migrations(
                 path: copy.clone(),
                 bytes,
                 kept: true,
+                without_hard_link: false,
             }));
         }
     }
     let undated_free = !existing
         .iter()
         .any(|(copy, _)| copy.file_name() == path.file_name());
-    match place_copy(&partial, db, first, unix_secs(), undated_free) {
-        Ok(Placed::Fresh(path)) => Ok(Some(Backup {
+    match place_copy(&partial, db, first, unix_secs(), undated_free, hard_link) {
+        Ok(Placed::Fresh {
+            path,
+            without_hard_link,
+        }) => Ok(Some(Backup {
             path,
             bytes,
             kept: false,
+            without_hard_link,
         })),
         Ok(Placed::Identical(path)) => {
             discard_quietly(&partial);
@@ -106,6 +120,7 @@ pub(crate) async fn before_migrations(
                 path,
                 bytes,
                 kept: true,
+                without_hard_link: false,
             }))
         }
         Err((name, e)) => Err(discard(&partial, failed(&name, first, e))),
@@ -192,11 +207,23 @@ fn is_copy_name(name: &str, prefix: &str) -> bool {
 /// Où la copie fraîche a été rangée.
 #[derive(Debug, PartialEq, Eq)]
 enum Placed {
-    /// Sous ce nom, qui était libre.
-    Fresh(PathBuf),
+    /// Sous ce nom, qui était libre ; `without_hard_link` : par le renommage de repli.
+    Fresh {
+        path: PathBuf,
+        without_hard_link: bool,
+    },
     /// Nulle part : le nom sans date a été pris entre-temps par une copie identique, qui suffit.
     /// Le `.partiel` reste à supprimer.
     Identical(PathBuf),
+}
+
+/// Ce qui donne à la copie fraîche un second nom sans jamais remplacer un fichier : `hard_link`,
+/// sauf dans les tests, qui simulent un système de fichiers sans liens physiques.
+type Linker = fn(&Path, &Path) -> io::Result<()>;
+
+/// Le [`Linker`] normal.
+fn hard_link(partial: &Path, target: &Path) -> io::Result<()> {
+    fs::hard_link(partial, target)
 }
 
 /// Pose la copie fraîche `partial` sous un nom libre, sans jamais remplacer un fichier : le nom
@@ -210,11 +237,17 @@ fn place_copy(
     first: i64,
     at: u64,
     undated_free: bool,
+    link: Linker,
 ) -> Result<Placed, (PathBuf, io::Error)> {
     if undated_free {
         let undated = backup_path(db, first);
-        match link_durably(partial, &undated) {
-            Ok(()) => return Ok(Placed::Fresh(undated)),
+        match put(partial, &undated, link) {
+            Ok(without_hard_link) => {
+                return Ok(Placed::Fresh {
+                    path: undated,
+                    without_hard_link,
+                });
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 let taken = fs::symlink_metadata(&undated).map_err(|e| (undated.clone(), e))?;
                 if !taken.is_file() {
@@ -232,21 +265,57 @@ fn place_copy(
     let mut n = 1;
     loop {
         let dated = dated_path(db, first, &stamp, n);
-        match link_durably(partial, &dated) {
-            Ok(()) => return Ok(Placed::Fresh(dated)),
+        match put(partial, &dated, link) {
+            Ok(without_hard_link) => {
+                return Ok(Placed::Fresh {
+                    path: dated,
+                    without_hard_link,
+                });
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
             Err(e) => return Err((dated, e)),
         }
     }
 }
 
-/// Donne à `partial` le nom `target`, qui doit être libre : `hard_link` échoue (`AlreadyExists`)
-/// plutôt que de remplacer un fichier. Puis le `.partiel` est supprimé (s'il reste, la tentative
-/// suivante le supprimera) et, sous Unix, le dossier est forcé sur le disque : sans cela, une
-/// coupure peut faire perdre le nouveau nom.
-fn link_durably(partial: &Path, target: &Path) -> io::Result<()> {
-    fs::hard_link(partial, target)?;
-    discard_quietly(partial);
+/// Donne à `partial` le nom `target`, qui doit être libre ; un nom pris rend `AlreadyExists`, et
+/// rien n'est remplacé. Rend `true` si la copie a dû passer par le renommage de repli.
+///
+/// D'abord `link` (`hard_link`), qui refuse un nom pris de façon atomique ; puis le `.partiel` est
+/// supprimé (seul ce nom part ; s'il reste, la tentative suivante le supprimera). Si le système de
+/// fichiers refuse le lien pour une autre raison (pas de liens physiques, permission), repli :
+/// `rename`, après avoir vérifié par `symlink_metadata` que le nom est libre. Entre ce contrôle et
+/// le renommage, un autre processus qui ouvrirait la même base au même instant pourrait prendre ce
+/// nom, et `rename` le remplacerait : c'est accepté, pour qu'un tel système de fichiers n'empêche
+/// pas toute mise à jour.
+///
+/// Sous Unix, le dossier est ensuite forcé sur le disque : sans cela, une coupure peut faire perdre
+/// le nouveau nom.
+fn put(partial: &Path, target: &Path, link: Linker) -> io::Result<bool> {
+    let without_hard_link = match link(partial, target) {
+        Ok(()) => {
+            discard_quietly(partial);
+            false
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+        Err(link_error) => {
+            match fs::symlink_metadata(target) {
+                Ok(_) => return Err(io::ErrorKind::AlreadyExists.into()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            fs::rename(partial, target).map_err(|rename_error| {
+                io::Error::new(
+                    rename_error.kind(),
+                    format!(
+                        "le système de fichiers refuse le lien physique ({link_error}), et le \
+                         renommage de repli a échoué aussi ({rename_error})"
+                    ),
+                )
+            })?;
+            true
+        }
+    };
     #[cfg(unix)]
     {
         let dir = target
@@ -255,7 +324,7 @@ fn link_durably(partial: &Path, target: &Path) -> io::Result<()> {
             .unwrap_or(Path::new("."));
         File::open(dir)?.sync_all()?;
     }
-    Ok(())
+    Ok(without_hard_link)
 }
 
 /// `<base>.avant-<version>.<stamp>.bak`, ou `….<stamp>-<n>.bak` à partir de `n = 2`.
@@ -401,22 +470,35 @@ mod tests {
         }
     }
 
-    /// La pose de la copie au niveau de [`place_copy`] : des noms pris entre le contrôle et la pose
-    /// (par un autre processus) ne sont jamais remplacés ; la copie prend le nom suivant.
-    #[test]
-    fn a_name_taken_meanwhile_is_never_replaced() {
+    const AT: u64 = 1_762_739_619;
+
+    /// Un système de fichiers sans liens physiques.
+    fn no_hard_link(_: &Path, _: &Path) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "pas de liens physiques ici",
+        ))
+    }
+
+    /// La pose au niveau de [`place_copy`], avec `link` : des noms pris entre le contrôle et la
+    /// pose (par un autre processus) ne sont jamais remplacés, la copie prend le nom suivant.
+    /// `fallback` : la copie doit passer par le renommage de repli.
+    fn names_taken_are_never_replaced(link: Linker, fallback: bool) {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("mementum.db");
         let partial = dir.path().join("mementum.db.avant-0002.bak.partiel");
-        let at = 1_762_739_619;
         let name = |n: &str| dir.path().join(format!("mementum.db.avant-0002.{n}"));
+        let fresh = |n: &str| Placed::Fresh {
+            path: name(n),
+            without_hard_link: fallback,
+        };
 
         // Le nom daté de cet instant est pris : la copie prend `-2`.
         fs::write(&partial, b"copie fraiche").unwrap();
         fs::write(name("20251110T015339Z.bak"), b"deja la").unwrap();
         assert_eq!(
-            place_copy(&partial, &db, 2, at, false).unwrap(),
-            Placed::Fresh(name("20251110T015339Z-2.bak"))
+            place_copy(&partial, &db, 2, AT, false, link).unwrap(),
+            fresh("20251110T015339Z-2.bak")
         );
         assert_eq!(fs::read(name("20251110T015339Z.bak")).unwrap(), b"deja la");
         assert_eq!(
@@ -430,8 +512,8 @@ mod tests {
         fs::write(&partial, b"copie fraiche 2").unwrap();
         fs::write(name("bak"), b"autre copie").unwrap();
         assert_eq!(
-            place_copy(&partial, &db, 2, at, true).unwrap(),
-            Placed::Fresh(name("20251110T015339Z-3.bak"))
+            place_copy(&partial, &db, 2, AT, true, link).unwrap(),
+            fresh("20251110T015339Z-3.bak")
         );
         assert_eq!(fs::read(name("bak")).unwrap(), b"autre copie");
         assert!(!partial.exists());
@@ -439,7 +521,7 @@ mod tests {
         // Pris par une copie identique : elle suffit, rien n'est rangé.
         fs::write(&partial, b"autre copie").unwrap();
         assert_eq!(
-            place_copy(&partial, &db, 2, at, true).unwrap(),
+            place_copy(&partial, &db, 2, AT, true, link).unwrap(),
             Placed::Identical(name("bak"))
         );
         assert!(!name("20251110T015339Z-4.bak").exists());
@@ -447,8 +529,52 @@ mod tests {
         // Pris par un dossier : ce n'est pas une copie, la pose échoue en le nommant.
         fs::remove_file(name("bak")).unwrap();
         fs::create_dir(name("bak")).unwrap();
-        let (failed_on, _) = place_copy(&partial, &db, 2, at, true).unwrap_err();
+        let (failed_on, _) = place_copy(&partial, &db, 2, AT, true, link).unwrap_err();
         assert_eq!(failed_on, name("bak"));
+    }
+
+    #[test]
+    fn a_name_taken_meanwhile_is_never_replaced() {
+        names_taken_are_never_replaced(hard_link, false);
+    }
+
+    /// Sans liens physiques (partage SMB, exFAT, certains volumes Docker), la copie est posée par
+    /// renommage, et le dit ; un nom pris n'est pas plus remplacé qu'avec `hard_link`.
+    #[test]
+    fn copy_is_placed_without_hard_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mementum.db");
+        let partial = dir.path().join("mementum.db.avant-0002.bak.partiel");
+        let undated = dir.path().join("mementum.db.avant-0002.bak");
+
+        // Un nom libre : la copie y arrive, et le `.partiel` n'existe plus.
+        fs::write(&partial, b"copie fraiche").unwrap();
+        assert_eq!(
+            place_copy(&partial, &db, 2, AT, true, no_hard_link).unwrap(),
+            Placed::Fresh {
+                path: undated.clone(),
+                without_hard_link: true,
+            }
+        );
+        assert_eq!(fs::read(&undated).unwrap(), b"copie fraiche");
+        assert!(!partial.exists());
+
+        // Des noms pris : jamais remplacés.
+        names_taken_are_never_replaced(no_hard_link, true);
+
+        // Le renommage échoue aussi (ici, plus de `.partiel`) : l'erreur nomme le fichier visé et
+        // dit les deux causes en clair.
+        fs::remove_file(&undated).unwrap();
+        let (failed_on, error) = place_copy(&partial, &db, 2, AT, true, no_hard_link).unwrap_err();
+        assert_eq!(failed_on, undated);
+        let message = error.to_string();
+        assert!(
+            message.contains("le système de fichiers refuse le lien physique")
+                && message.contains("pas de liens physiques ici")
+                && message.contains("le renommage de repli a échoué aussi"),
+            "{message}"
+        );
+        assert!(!undated.exists());
     }
 
     #[test]
