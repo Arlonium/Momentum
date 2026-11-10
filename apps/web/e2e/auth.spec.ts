@@ -1,6 +1,6 @@
 // Comptes, depuis l'interface : inscription, connexion et déconnexion, mot de passe faux ou
-// changé, menu du compte au clavier, présence au nom du compte, et session perdue pendant
-// qu'une page est ouverte.
+// changé, menu du compte au clavier (il est dans le sélecteur d'espace, en tête de barre
+// latérale), présence au nom du compte, et session perdue pendant qu'une page est ouverte.
 import { expect, request as apiRequest, test, type Page } from "@playwright/test";
 import type { ErrorBody, Me } from "@mementum/protocol";
 import { colorOf } from "../src/session/session";
@@ -8,6 +8,7 @@ import {
   apiAs,
   closeContexts,
   createPage,
+  expectSignedInAs,
   firstSpace,
   getMmd,
   inviteToSpace,
@@ -15,7 +16,9 @@ import {
   NO_SESSION,
   openPage,
   PASSWORD,
+  sidebarOf,
   signUpAccount,
+  spaceSwitcher,
   unique,
 } from "./helpers";
 import { BASE_URL } from "./servers";
@@ -26,15 +29,6 @@ test.afterEach(closeContexts);
 
 /** Un autre mot de passe de test, manifestement faux lui aussi. */
 const NEW_PASSWORD = "nouveau-mot-de-passe-de-test";
-
-function sidebarOf(p: Page) {
-  return p.getByRole("navigation", { name: "Barre latérale" });
-}
-
-/** Le bouton du menu du compte, en bas de la barre latérale : le nom, puis ce qu'il ouvre. */
-function accountButton(p: Page, name: string) {
-  return sidebarOf(p).getByRole("button", { name: `${name}, menu du compte`, exact: true });
-}
 
 const loginHeading = (p: Page) => p.getByRole("heading", { name: "Se connecter" });
 
@@ -67,17 +61,18 @@ test("signup_then_lands_in_the_app", async ({ page }) => {
   await password.fill(PASSWORD);
   await password.press("Enter");
 
-  // Dans l'application, à l'accueil, son compte en bas de la barre latérale.
-  await expect(accountButton(page, name)).toBeVisible();
+  // Dans l'application, à l'accueil de son espace, sous son compte.
   await expect(page.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
-  expect(new URL(page.url()).pathname).toBe("/");
+  await expect(spaceSwitcher(page, `Espace de ${name}`)).toBeVisible();
+  await expectSignedInAs(page, name);
   const me = await meOf(page);
   expect(me.user).toMatchObject({ name, email, instanceAdmin: false });
   expect(me.spaces).toEqual([expect.objectContaining({ name: `Espace de ${name}`, role: "owner" })]);
+  expect(new URL(page.url()).pathname).toBe(`/s/${me.spaces[0].id}`);
 
   // La session tient au rechargement.
   await page.reload();
-  await expect(accountButton(page, name)).toBeVisible();
+  await expectSignedInAs(page, name);
 });
 
 test("login_logout_roundtrip", async ({ page }) => {
@@ -94,7 +89,7 @@ test("login_logout_roundtrip", async ({ page }) => {
   expect((await meOf(page)).user.email).toBe(account.email);
 
   const session = await page.context().storageState();
-  await accountButton(page, account.name).click();
+  await spaceSwitcher(page).click();
   await page.getByRole("button", { name: "Se déconnecter" }).click();
   await expect(loginHeading(page)).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/login");
@@ -118,7 +113,7 @@ test("back_after_logout_leaves_the_app", async ({ page }) => {
   await page.goto(`/p/${id}`);
   await logInWith(page, account.email, account.password);
   await expect(page.getByRole("textbox", { name: "Titre de la page" })).toBeVisible();
-  await accountButton(page, account.name).click();
+  await spaceSwitcher(page).click();
   await page.getByRole("button", { name: "Se déconnecter" }).click();
   await expect(loginHeading(page)).toBeVisible();
   // La déconnexion a remplacé l'adresse de la page : Précédent ne revient pas sur elle.
@@ -160,7 +155,7 @@ test("change_password_then_old_one_fails", async ({ browser, page, request }) =>
 
   const p = await newUser(browser, account);
   await p.goto("/");
-  await accountButton(p, account.name).click();
+  await spaceSwitcher(p).click();
   await p.getByRole("button", { name: "Changer le mot de passe" }).click();
   const dialog = p.getByRole("dialog", { name: "Changer le mot de passe" });
   await expect(dialog).toBeVisible();
@@ -180,12 +175,13 @@ test("change_password_then_old_one_fails", async ({ browser, page, request }) =>
   await expect(dialog.getByText("Mot de passe changé.")).toBeVisible();
   await dialog.getByRole("button", { name: "Fermer" }).click();
   await expect(dialog).toHaveCount(0);
-  // Le menu d'où venait la fenêtre est fermé : le focus revient au bouton du compte.
-  await expect(accountButton(p, account.name)).toBeFocused();
+  // Le menu d'où venait la fenêtre est fermé : le focus revient au sélecteur d'espace.
+  await expect(spaceSwitcher(p)).toBeFocused();
+  await expect(spaceSwitcher(p)).toHaveAttribute("aria-expanded", "false");
 
   // L'onglet garde sa session (le serveur lui a donné un cookie neuf) ; l'autre est fermée.
   await p.reload();
-  await expect(accountButton(p, account.name)).toBeVisible();
+  await expectSignedInAs(p, account.name);
   expect((await meOf(p)).user.email).toBe(account.email);
   expect((await other.get("/api/v1/me")).status()).toBe(401);
 
@@ -201,23 +197,35 @@ test("change_password_then_old_one_fails", async ({ browser, page, request }) =>
   await logInWith(page, account.email, account.password);
   await expect(page.getByRole("alert")).toHaveText(loginBody.message);
   await logInWith(page, account.email, NEW_PASSWORD);
-  await expect(accountButton(page, account.name)).toBeVisible();
+  await expectSignedInAs(page, account.name);
 });
 
 test("account_menu_by_keyboard", async ({ browser }) => {
   const account = await signUpAccount();
+  const space = await firstSpace(await apiAs(account));
   const p = await newUser(browser, account);
   await p.goto("/");
-  const button = accountButton(p, account.name);
+  // Le menu du compte est dans le sélecteur d'espace : ses espaces, puis son compte.
+  const button = spaceSwitcher(p, space.name);
+  const menu = sidebarOf(p);
+  const current = menu.getByRole("list", { name: "Espaces" }).getByRole("link", { name: space.name });
   await button.focus();
-  // Ouvert par Entrée : la première action a le focus.
+  // Ouvert par Entrée : son premier élément, l'espace ouvert, a le focus.
   await p.keyboard.press("Enter");
   await expect(button).toHaveAttribute("aria-expanded", "true");
-  await expect(p.getByRole("button", { name: "Changer le mot de passe" })).toBeFocused();
-  // Tab passe à l'action suivante, menu ouvert ; Échap le ferme et rend le focus au bouton.
-  await p.keyboard.press("Tab");
-  await expect(p.getByRole("button", { name: "Se déconnecter" })).toBeFocused();
-  await expect(button).toHaveAttribute("aria-expanded", "true");
+  await expect(current).toBeFocused();
+  // Tab passe d'une action à la suivante, menu ouvert, jusqu'à la déconnexion.
+  for (const next of [
+    menu.getByRole("button", { name: "Créer un espace" }),
+    menu.getByRole("link", { name: "Réglages de l'espace" }),
+    menu.getByRole("button", { name: "Changer le mot de passe" }),
+    menu.getByRole("button", { name: "Se déconnecter" }),
+  ]) {
+    await p.keyboard.press("Tab");
+    await expect(next).toBeFocused();
+    await expect(button).toHaveAttribute("aria-expanded", "true");
+  }
+  // Échap le ferme et rend le focus au bouton.
   await p.keyboard.press("Escape");
   await expect(button).toHaveAttribute("aria-expanded", "false");
   await expect(button).toBeFocused();
@@ -225,8 +233,12 @@ test("account_menu_by_keyboard", async ({ browser }) => {
   await button.click();
   await expect(button).toHaveAttribute("aria-expanded", "true");
   await p.keyboard.press("Tab");
-  await expect(p.getByRole("button", { name: "Changer le mot de passe" })).toBeFocused();
+  await expect(current).toBeFocused();
   await expect(button).toHaveAttribute("aria-expanded", "true");
+  // Le focus qui en sort le ferme.
+  await p.keyboard.press("Shift+Tab");
+  await p.keyboard.press("Shift+Tab");
+  await expect(button).toHaveAttribute("aria-expanded", "false");
 });
 
 test("presence_carries_the_account_name", async ({ browser }) => {
@@ -280,9 +292,10 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
   // La session prend fin ailleurs (déconnexion depuis un autre onglet du même cookie).
   expect((await api.post("/api/v1/auth/logout")).status()).toBe(204);
 
-  // Le prochain appel qui demande une session (le menu du compte relit le compte) répond
-  // `401 unauthenticated` : la connexion est demandée par-dessus la page, toujours là.
-  await accountButton(p, account.name).click();
+  // Le prochain appel qui demande une session (le sélecteur d'espace, ouvert, relit le
+  // compte) répond `401 unauthenticated` : la connexion est demandée par-dessus la page,
+  // toujours là.
+  await spaceSwitcher(p).click();
   const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
   await expect(dialog).toBeVisible();
   await expect(editor).toContainText("Écrit avant la coupure");
@@ -293,8 +306,8 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
 
   await logInWith(dialog, account.email, account.password);
   await expect(dialog).toHaveCount(0);
-  // Le focus revient où il était avant la fenêtre : le bouton du compte.
-  await expect(accountButton(p, account.name)).toBeFocused();
+  // Le focus revient où il était avant la fenêtre : le sélecteur d'espace.
+  await expect(spaceSwitcher(p)).toBeFocused();
   // La même page, le même éditeur, qui s'édite toujours.
   expect(await marked()).toBe(true);
   await expect(editor).toContainText("Écrit avant la coupure");

@@ -1,7 +1,7 @@
 // Libellés des rôles et des niveaux, et lien d'invitation : le jeton voyage dans le fragment
 // (`/invite#<jeton>`), que le navigateur n'envoie jamais au serveur.
 import { expect, test } from "vitest";
-import { invitationLink, invitationToken, LEVEL_LABELS, ROLE_LABELS } from "./levels";
+import { canEdit, invitationLink, invitationToken, LEVEL_LABELS, ROLE_LABELS } from "./levels";
 
 /** Un jeton de la forme de ceux du serveur : 32 octets aléatoires en base64url, sans `=`. */
 function serverToken(): string {
@@ -63,4 +63,12 @@ test("labels_cover_every_role_and_level", () => {
     edit: "Peut modifier",
     full: "Accès complet",
   });
+});
+
+test("edit_and_full_can_edit", () => {
+  // Lire et commenter ne permettent pas de modifier (au lot 2, commenter vaut lire).
+  expect(canEdit("read")).toBe(false);
+  expect(canEdit("comment")).toBe(false);
+  expect(canEdit("edit")).toBe(true);
+  expect(canEdit("full")).toBe(true);
 });

@@ -1,10 +1,11 @@
-// Une ligne de l'arbre des pages : repli, lien vers la page, « + » au survol (sous-page).
-// Mémoïsée (Ruling R43) : d'une navigation à l'autre, seules les lignes dont `active` change
-// se rendent de nouveau. Ses autres props gardent donc leur identité : la ligne vient de
-// `flattenRows`, les rappels sont stables.
+// Une ligne de l'arbre des pages : repli, lien vers la page, « + » au survol (sous-page) pour
+// qui peut modifier la page. Mémoïsée (Ruling R43) : d'une navigation à l'autre, seules les
+// lignes dont `active` change se rendent de nouveau. Ses autres props gardent donc leur
+// identité : la ligne vient de `flattenRows`, les rappels sont stables.
 import { memo, type CSSProperties } from "react";
 import { ChevronIcon, PageIcon, PlusIcon } from "../icons";
 import { pagePath } from "../router";
+import { canEdit } from "../share/levels";
 import { ROW_HEIGHT, type Row } from "./rows";
 
 type Props = {
@@ -54,7 +55,7 @@ export const TreeRow = memo(function TreeRow({
         <PageIcon />
         <span className="tree-title">{node.title}</span>
       </a>
-      {!readOnly && (
+      {!readOnly && canEdit(node.level) && (
         <button
           type="button"
           className="tree-add"

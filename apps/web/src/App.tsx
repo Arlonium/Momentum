@@ -1,40 +1,61 @@
-// L'application : barre latérale (arbre des pages) et page ouverte. `/` montre l'accueil,
-// `/p/:id` une page, `/s/:spaceId/settings` les réglages d'un espace. La version de schéma
-// du serveur est lue au chargement, puis relue avant chaque connexion de synchronisation
-// (R35) : si elle diffère, tout passe en lecture seule, pour de bon.
+// L'application : barre latérale (sélecteur d'espace, sections et arbres des pages) et
+// contenu. `/` mène au dernier espace ouvert (gardé dans le navigateur), sinon au premier du
+// compte ; `/s/:spaceId` montre un espace, `/s/:spaceId/settings` ses réglages, `/p/:id` une
+// page.
 //
-// L'espace est le premier du compte (`me.spaces`) : son arbre, et les pages créées à sa
-// racine, privées (le défaut du serveur). Le sélecteur d'espace et les sections viennent
-// ensuite.
+// L'espace affiché est celui que nomme l'adresse. Pour une page, c'est le sien : une page de
+// l'arbre chargé le dit elle-même ; sinon (lien direct, page d'un autre espace) le serveur est
+// interrogé (`getPage`), et répond `404` pour une page que la personne ne voit pas, comme
+// pour une page qui n'existe pas. Un espace où le compte n'a pas, ou plus, de rôle ramène à
+// son premier espace, sans rien en dire.
+//
+// La version de schéma du serveur est lue au chargement, puis relue avant chaque connexion de
+// synchronisation (R35) : si elle diffère, tout passe en lecture seule, pour de bon.
 import type { PageNode } from "@mementum/protocol";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ApiError, createPage, getInfo, getTree } from "./api";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ApiError, createPage, getInfo, getPage, getTree, isSessionLost } from "./api";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { CLIENT_SCHEMA_VERSION } from "./editor/version";
 import { PageView } from "./page/PageView";
-import { navigate, pagePath, parseRoute, useLinkInterception, usePathname } from "./router";
+import {
+  navigate,
+  pagePath,
+  parseRoute,
+  spacePath,
+  useLinkInterception,
+  usePathname,
+} from "./router";
 import { useSession } from "./session/session";
 import { SpaceSettings } from "./settings/SpaceSettings";
-import { PageTree } from "./sidebar/PageTree";
+import type { CreateTarget } from "./sidebar/SectionList";
+import { Sidebar } from "./sidebar/Sidebar";
+import { CreateSpaceDialog } from "./sidebar/SpaceSwitcher";
+import { preferredSpace, readLastSpace, writeLastSpace } from "./spaces";
 
 function messageOf(error: unknown): string {
   return error instanceof ApiError ? error.message : "Une erreur inattendue est survenue.";
 }
 
-/** Les pages du serveur, plus celles d'ici qu'une réponse plus ancienne n'avait pas. */
-function merge(server: PageNode[], current: PageNode[] | null): PageNode[] {
-  const known = new Set(server.map((n) => n.id));
-  return [...server, ...(current ?? []).filter((n) => !known.has(n.id))];
-}
+/** L'arbre chargé : les pages d'un espace que la personne voit, hors corbeille. */
+type LoadedTree = { spaceId: string; nodes: PageNode[] };
+
+/** Ce que le serveur dit d'une page ouverte qui n'est pas dans l'arbre chargé. */
+type Lookup =
+  | { id: string; state: "loading" }
+  | { id: string; state: "found"; node: PageNode }
+  /** Elle n'existe pas, ou la personne ne la voit pas : la même réponse. */
+  | { id: string; state: "missing" }
+  | { id: string; state: "failed"; message: string };
 
 export function App() {
   useLinkInterception();
   const route = parseRoute(usePathname());
-  /** L'espace affiché ; `null` : le compte n'en a aucun. */
-  const spaceId = useSession().me.spaces[0]?.id ?? null;
-  const [loaded, setLoaded] = useState(false);
-  const [nodes, setNodes] = useState<PageNode[] | null>(null);
+  const { me, refresh } = useSession();
+  const { spaces } = me;
+  const [infoLoaded, setInfoLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [tree, setTree] = useState<LoadedTree | null>(null);
+  const [lookup, setLookup] = useState<Lookup | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   /** Le serveur n'a pas le schéma de ce client : plus aucune écriture (bandeau). */
   const [stale, setStale] = useState(false);
@@ -42,9 +63,20 @@ export function App() {
   /** Page tout juste créée : son titre prendra le focus, à sa première ouverture seulement. */
   const [created, setCreated] = useState<string | null>(null);
   const titleFocused = useCallback(() => setCreated(null), []);
-  /** Page absente de l'arbre pour laquelle l'arbre a déjà été relu une fois. */
-  const [reloadedFor, setReloadedFor] = useState<string | null>(null);
-  const [reloading, setReloading] = useState(false);
+  /** Le dernier espace affiché : il reste quand l'adresse n'en nomme aucun. */
+  const [shown, setShown] = useState(() => preferredSpace(spaces, readLastSpace())?.id ?? null);
+  /** Compte les changements faits ici à l'arbre : une lecture commencée avant est périmée. */
+  const mutations = useRef(0);
+  /** Demande une nouvelle lecture de l'arbre. */
+  const [reloads, setReloads] = useState(0);
+  /** La session s'est perdue pendant une lecture : à refaire quand elle revient. */
+  const lost = useRef(false);
+  const [retries, setRetries] = useState(0);
+  useEffect(() => {
+    if (!lost.current) return;
+    lost.current = false;
+    setRetries((n) => n + 1);
+  }, [me]);
 
   const markStale = useCallback(() => {
     staleRef.current = true;
@@ -61,13 +93,11 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getInfo(), spaceId === null ? null : getTree(spaceId)])
-      .then(([info, tree]) => {
+    getInfo()
+      .then((info) => {
         if (cancelled) return;
         if (info.schemaVersion !== CLIENT_SCHEMA_VERSION) markStale();
-        // Une page créée pendant le chargement n'est peut-être pas dans cette réponse.
-        setNodes((current) => merge(tree?.nodes ?? [], current));
-        setLoaded(true);
+        setInfoLoaded(true);
       })
       .catch((error: unknown) => {
         if (!cancelled) setLoadError(messageOf(error));
@@ -75,17 +105,151 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [markStale, spaceId]);
+  }, [markStale]);
+
+  // La page ouverte : celle de l'arbre chargé, sinon celle que le serveur a rendue.
+  const activeId = route.name === "page" ? route.id : null;
+  const inTree = activeId === null ? undefined : tree?.nodes.find((n) => n.id === activeId);
+  const looked = lookup !== null && lookup.id === activeId ? lookup : null;
+  const active = inTree ?? (looked?.state === "found" ? looked.node : undefined);
+
+  // L'espace affiché : celui que nomme l'adresse (pour une page, le sien), si le compte y a
+  // un rôle ; sinon le dernier affiché, sinon le premier du compte.
+  const named =
+    route.name === "space" || route.name === "spaceSettings"
+      ? route.spaceId
+      : (active?.spaceId ?? null);
+  const space =
+    spaces.find((s) => s.id === named) ?? spaces.find((s) => s.id === shown) ?? spaces[0] ?? null;
+  const spaceId = space?.id ?? null;
+
+  useEffect(() => {
+    if (spaceId === null) return;
+    setShown(spaceId);
+    writeLastSpace(spaceId);
+  }, [spaceId]);
+
+  // L'adresse nomme un espace que le compte n'a pas : sa liste d'espaces est relue une fois
+  // (il vient peut-être de le rejoindre ailleurs).
+  const unknown = named !== null && !spaces.some((s) => s.id === named) ? named : null;
+  const [checked, setChecked] = useState<string | null>(null);
+  useEffect(() => {
+    if (unknown === null) {
+      setChecked(null);
+      return;
+    }
+    if (checked === unknown) return;
+    let cancelled = false;
+    void refresh()
+      .catch(() => {})
+      .then(() => {
+        if (!cancelled) setChecked(unknown);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [unknown, checked, refresh]);
+
+  // Toujours pas de rôle dans cet espace : l'accueil, donc le premier espace du compte, à la
+  // place de cette adresse. Rien ne dit si l'espace existe.
+  const gone = route.name === "space" && unknown !== null && checked === unknown;
+  // `/` : l'espace à ouvrir, à la place de cette adresse.
+  const home = route.name === "home" ? spaceId : null;
+  useLayoutEffect(() => {
+    if (gone) navigate("/", { replace: true });
+    else if (home !== null) navigate(spacePath(home), { replace: true });
+  }, [gone, home]);
+
+  // La page ouverte n'est pas dans l'arbre chargé (lien direct, page d'un autre espace, page
+  // créée ailleurs depuis) : le serveur dit si la personne la voit, et dans quel espace.
+  const outsideTree = activeId !== null && inTree === undefined;
+  useEffect(() => {
+    if (activeId === null || !outsideTree) return;
+    let cancelled = false;
+    // Déjà rendue par le serveur : elle reste à l'écran pendant qu'il est relu.
+    setLookup((current) =>
+      current !== null && current.id === activeId && current.state === "found"
+        ? current
+        : { id: activeId, state: "loading" },
+    );
+    getPage(activeId).then(
+      (node) => {
+        if (!cancelled) setLookup({ id: activeId, state: "found", node });
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        if (isSessionLost(error)) lost.current = true;
+        else if (error instanceof ApiError && error.status === 404) {
+          setLookup({ id: activeId, state: "missing" });
+        } else setLookup({ id: activeId, state: "failed", message: messageOf(error) });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, outsideTree, retries]);
+
+  // L'arbre de l'espace affiché. Tant que le serveur n'a pas dit dans quel espace est la page
+  // ouverte, on ne sait pas lequel charger.
+  const resolving =
+    activeId !== null && active === undefined && (looked === null || looked.state === "loading");
+  const treeSpace = resolving ? null : spaceId;
+  useEffect(() => {
+    if (treeSpace === null) return;
+    let cancelled = false;
+    const load = async () => {
+      for (;;) {
+        const before = mutations.current;
+        const fetched = await getTree(treeSpace);
+        if (cancelled) return;
+        // Une page créée ou renommée ici pendant la lecture : la réponse date d'avant.
+        if (before !== mutations.current) continue;
+        setTree({ spaceId: treeSpace, nodes: fetched.nodes });
+        return;
+      }
+    };
+    load().catch((error: unknown) => {
+      if (cancelled) return;
+      if (isSessionLost(error)) lost.current = true;
+      // Plus de rôle dans cet espace : la liste des espaces du compte est relue, et l'adresse
+      // mènera ailleurs.
+      else if (error instanceof ApiError && error.status === 404) void refresh().catch(() => {});
+      else setLoadError(messageOf(error));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [treeSpace, reloads, retries, refresh]);
+
+  /** Les pages de l'espace affiché ; `null` : pas encore chargées. */
+  const nodes = tree !== null && tree.spaceId === spaceId ? tree.nodes : null;
+
+  // Une page que le serveur rend, hors corbeille, mais que l'arbre chargé de son espace n'a
+  // pas (créée ailleurs depuis) : l'arbre est relu une fois.
+  const [reloadedFor, setReloadedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (looked?.state !== "found" || looked.node.trashedAt !== null || nodes === null) return;
+    if (reloadedFor === looked.id || nodes.some((n) => n.id === looked.id)) return;
+    setReloadedFor(looked.id);
+    setReloads((n) => n + 1);
+  }, [looked, nodes, reloadedFor]);
 
   const create = useCallback(
-    async (parentId: string | null) => {
-      if (staleRef.current || spaceId === null) return;
+    async (target: CreateTarget) => {
+      if (staleRef.current) return;
       setNotice(null);
       try {
-        // Sans `afterId` : en fin des frères (R23). À la racine, il faut dire l'espace ; une
-        // sous-page est dans celui de sa page parente.
-        const node = await createPage(parentId === null ? { spaceId } : { parentId });
-        setNodes((current) => [...(current ?? []), node]);
+        // Sans `afterId` : en fin des frères (R23). À la racine, il faut dire l'espace et la
+        // section ; une sous-page est dans l'espace de sa page parente, et hérite de ses accès.
+        const node = await createPage(
+          "parentId" in target ? target : { spaceId, section: target.section },
+        );
+        mutations.current += 1;
+        setTree((current) =>
+          current !== null && current.spaceId === node.spaceId
+            ? { ...current, nodes: [...current.nodes, node] }
+            : current,
+        );
         setCreated(node.id);
         navigate(pagePath(node.id));
       } catch (error) {
@@ -95,37 +259,34 @@ export function App() {
     [spaceId],
   );
   /** Stable : les lignes de l'arbre, mémoïsées, ne se rendent pas à chaque navigation (R43). */
-  const createFromTree = useCallback((parentId: string | null) => void create(parentId), [create]);
+  const createFromTree = useCallback((target: CreateTarget) => void create(target), [create]);
 
   const saved = useCallback((node: PageNode) => {
-    setNodes((current) => current?.map((n) => (n.id === node.id ? node : n)) ?? null);
+    mutations.current += 1;
+    setTree(
+      (current) =>
+        current && { ...current, nodes: current.nodes.map((n) => (n.id === node.id ? node : n)) },
+    );
+    setLookup((current) =>
+      current !== null && current.id === node.id && current.state === "found"
+        ? { ...current, node }
+        : current,
+    );
   }, []);
 
-  const activeId = route.name === "page" ? route.id : null;
-  const active = activeId === null ? undefined : nodes?.find((n) => n.id === activeId);
-  // Page inconnue de l'arbre chargé (créée ailleurs depuis ?) : l'arbre est relu une fois.
-  const missing = loaded && activeId !== null && !active ? activeId : null;
-
-  useEffect(() => {
-    if (missing === null || reloadedFor === missing) return;
-    setReloadedFor(missing);
-    if (spaceId === null) return;
-    setReloading(true);
-    getTree(spaceId)
-      .then((tree) => setNodes((current) => merge(tree.nodes, current)))
-      .catch(() => {
-        // le message « Page introuvable » suffit
-      })
-      .finally(() => setReloading(false));
-  }, [missing, reloadedFor, spaceId]);
-
   const settingsOf = route.name === "spaceSettings" ? route.spaceId : null;
+  const atSpace = route.name === "space" && unknown === null ? space : null;
 
   useEffect(() => {
     // Les réglages nomment l'onglet eux-mêmes.
     if (settingsOf !== null) return;
-    document.title = active ? `${active.title} · Mementum` : "Mementum";
-  }, [active, settingsOf]);
+    const title = active?.title ?? atSpace?.name;
+    document.title = title === undefined ? "Mementum" : `${title} · Mementum`;
+  }, [active, atSpace, settingsOf]);
+
+  /** Créer une page à la racine : pas pour un invité, ni en lecture seule. */
+  const mayCreate = !stale && space !== null && space.role !== "guest";
+  const [creatingSpace, setCreatingSpace] = useState(false);
 
   let content;
   if (settingsOf !== null) {
@@ -137,18 +298,36 @@ export function App() {
         {loadError} Recharge la page pour réessayer.
       </Message>
     );
-  } else if (!loaded || (missing !== null && (reloading || reloadedFor !== missing))) {
+  } else if (!infoLoaded) {
     content = <Message title="Chargement…" />;
-  } else if (route.name === "home") {
+  } else if (route.name === "home" && space === null) {
+    content = (
+      <Message title="Tu n'as aucun espace">
+        Un espace range tes pages, et celles que tu partages. Crée le tien pour commencer.
+        <span className="mm-message-actions">
+          <button
+            type="button"
+            className="mm-button mm-button-primary"
+            onClick={() => setCreatingSpace(true)}
+          >
+            Créer un espace
+          </button>
+        </span>
+      </Message>
+    );
+  } else if (route.name === "home" || (route.name === "space" && atSpace === null)) {
+    // En route vers un espace du compte.
+    content = <Message title="Chargement…" />;
+  } else if (route.name === "space") {
     content = (
       <Message title="Aucune page ouverte" banner={stale ? <ReadOnlyBanner /> : null}>
-        Choisis une page dans la barre latérale{stale ? "." : ", ou crée-en une."}
-        {!stale && (
+        Choisis une page dans la barre latérale{mayCreate ? ", ou crée-en une." : "."}
+        {mayCreate && (
           <span className="mm-message-actions">
             <button
               type="button"
               className="mm-button mm-button-primary"
-              onClick={() => void create(null)}
+              onClick={() => void create({ section: "private" })}
             >
               Nouvelle page
             </button>
@@ -156,7 +335,7 @@ export function App() {
         )}
       </Message>
     );
-  } else if (route.name === "page" && active) {
+  } else if (active) {
     content = (
       <PageView
         key={active.id}
@@ -168,6 +347,14 @@ export function App() {
         onSaved={saved}
       />
     );
+  } else if (looked?.state === "failed") {
+    content = (
+      <Message title="Impossible d'ouvrir la page">
+        {looked.message} Recharge la page pour réessayer.
+      </Message>
+    );
+  } else if (activeId !== null && looked?.state !== "missing") {
+    content = <Message title="Chargement…" />;
   } else {
     content = (
       <Message title="Page introuvable">
@@ -178,15 +365,17 @@ export function App() {
 
   return (
     <div className="mm-app">
-      <PageTree
+      <Sidebar
+        space={space}
         nodes={nodes}
         activeId={activeId}
-        settingsOf={settingsOf}
+        settingsOpen={settingsOf !== null && settingsOf === spaceId}
         readOnly={stale}
         onCreate={createFromTree}
         notice={notice}
       />
       <main className="mm-main">{content}</main>
+      {creatingSpace && <CreateSpaceDialog onClose={() => setCreatingSpace(false)} />}
     </div>
   );
 }

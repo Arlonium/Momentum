@@ -22,7 +22,7 @@
 import type { InvitationInfo } from "@mementum/protocol";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, acceptInvitation, isSessionLost, lookupInvitation } from "../api";
-import { navigate, pagePath, parseRoute } from "../router";
+import { navigate, pagePath, parseRoute, spacePath } from "../router";
 import { invitationToken } from "../share/levels";
 import { AuthScreen, FormError, messageOf, ScreenLink, useDocumentTitle } from "./forms";
 import type { Session } from "./session";
@@ -100,8 +100,11 @@ export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Pr
       const accepted = await acceptInvitation(token);
       // L'espace rejoint, dans la liste du compte. En cas d'échec, l'application la relira.
       await session.refresh().catch(() => {});
-      // À la place de cette adresse : Précédent ne revient pas sur une invitation qui a servi.
-      navigate(accepted.pageId ? pagePath(accepted.pageId) : "/", { replace: true });
+      // La page ou l'espace rejoint, à la place de cette adresse : Précédent ne revient pas
+      // sur une invitation qui a servi.
+      navigate(accepted.pageId ? pagePath(accepted.pageId) : spacePath(accepted.spaceId), {
+        replace: true,
+      });
       onAccepted();
     } catch (e) {
       setBusy(false);

@@ -16,7 +16,7 @@
 // c'est un autre compte qui se connecte, l'application est remontée : rien de ce que le
 // premier avait ouvert ou tapé ne part sous le nom du second.
 //
-// La déconnexion recharge l'onglet (`AccountMenu`) : rien du compte ne reste en mémoire.
+// La déconnexion recharge l'onglet (`SpaceSwitcher`) : rien du compte ne reste en mémoire.
 import type { Info, InvitationInfo, Me } from "@mementum/protocol";
 import {
   Fragment,

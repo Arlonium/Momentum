@@ -1,213 +1,83 @@
-// Barre latérale : l'arbre des pages, « Nouvelle page » (à la racine) et « + » au survol
-// d'une page (sous-page), puis, en bas, « Réglages de l'espace » (pour ses propriétaires et
-// ses admins) et le compte (`AccountMenu`). Déplacer les pages à la souris viendra au lot 2.
-//
-// L'espace est le premier du compte (`me.spaces`) : le sélecteur d'espace viendra avec les
-// sections.
-//
-// L'arbre est fenêtré (Ruling R43) : il a la hauteur de toutes ses lignes
-// (`rows.length × ROW_HEIGHT`), mais seules celles de la partie visible de la barre
-// latérale, plus `OVERSCAN` de chaque côté, sont dans le document, chacune placée à son
-// rang. Une navigation ne recalcule donc plus les styles de toutes les pages, et ne rend
-// de nouveau que les lignes dont `active` change (`TreeRow` est mémoïsée).
-import type { PageNode } from "@mementum/protocol";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { PlusIcon, SettingsIcon } from "../icons";
-import { spaceSettingsPath } from "../router";
-import { AccountMenu } from "../session/AccountMenu";
-import { useSession } from "../session/session";
-import { flattenRows, OVERSCAN, ROW_HEIGHT } from "./rows";
+// L'arbre des pages d'une section de la barre latérale. Il est fenêtré (Ruling R43,
+// `treeWindow.ts`) : il a la hauteur de toutes ses lignes, mais seules celles de la partie
+// visible de la barre latérale sont dans le document. Une navigation ne rend de nouveau que
+// les lignes dont `active` change (`TreeRow` est mémoïsée).
+import { useLayoutEffect, useState, type RefObject } from "react";
+import { ROW_HEIGHT, type Row } from "./rows";
 import { TreeRow } from "./TreeRow";
+import { useTreeWindow, type Viewport } from "./treeWindow";
 
 type Props = {
-  /** `null` : l'arbre n'est pas encore chargé. */
-  nodes: PageNode[] | null;
+  /** L'id de l'arbre dans le document : le titre de sa section le désigne (`aria-controls`). */
+  id: string;
+  /** Le nom de l'arbre : le titre de sa section. */
+  label: string;
+  /** Les lignes de l'arbre, de haut en bas (`flattenRows`). */
+  rows: Row[];
+  /** La barre latérale, où l'arbre défile ; `null` : pas encore dans le document. */
+  viewport: Viewport | null;
   activeId: string | null;
-  /** L'espace dont les réglages sont ouverts, sinon `null`. */
-  settingsOf: string | null;
-  /** Schéma du serveur différent (R35) : aucune création de page. */
+  /**
+   * La page active que la barre latérale a déjà montrée : elle n'y revient pas tant que la
+   * page active ne change pas. Partagée par les arbres des sections : la page active est dans
+   * l'un d'eux.
+   */
+  revealed: RefObject<string | null>;
+  /** Schéma du serveur différent (R35) : aucune création de sous-page. */
   readOnly: boolean;
-  /** Doit garder son identité d'un rendu à l'autre : les lignes sont mémoïsées. */
-  onCreate: (parentId: string | null) => void;
-  /** Erreur de la dernière action (création), en français. */
-  notice: string | null;
+  /** Ces rappels gardent leur identité d'un rendu à l'autre : les lignes sont mémoïsées. */
+  onToggle: (id: string) => void;
+  onCreate: (parentId: string) => void;
 };
 
-/** Les lignes rendues : de `start` (comprise) à `end` (exclue). */
-type Range = { start: number; end: number };
-
-/** Haut de la partie visible de `scroller` (zone de défilement), dans la fenêtre. */
-function viewTop(scroller: HTMLElement): number {
-  return scroller.getBoundingClientRect().top + scroller.clientTop;
-}
-
-/**
- * Les lignes de `tree` (qui en compte `count`) à rendre pour la partie visible de
- * `scroller`, plus `OVERSCAN` de chaque côté.
- */
-function visibleRange(scroller: HTMLElement, tree: HTMLElement, count: number): Range {
-  // Haut de la partie visible, mesuré depuis le haut de l'arbre (négatif : au-dessus).
-  const top = viewTop(scroller) - tree.getBoundingClientRect().top;
-  const first = Math.floor(top / ROW_HEIGHT) - OVERSCAN;
-  const last = Math.ceil((top + scroller.clientHeight) / ROW_HEIGHT) + OVERSCAN;
-  const clamp = (n: number) => Math.min(Math.max(n, 0), count);
-  return { start: clamp(first), end: clamp(last) };
-}
-
-export function PageTree({ nodes, activeId, settingsOf, readOnly, onCreate, notice }: Props) {
-  const space = useSession().me.spaces[0];
-  const manages = space?.role === "owner" || space?.role === "admin";
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
-  const rows = useMemo(() => flattenRows(nodes ?? [], collapsed), [nodes, collapsed]);
-  const count = rows.length;
-  /** La barre latérale, qui défile. */
-  const scrollerRef = useRef<HTMLElement>(null);
-  const treeRef = useRef<HTMLDivElement>(null);
-  /** Le compte, collé au bas de la partie visible : il cache les lignes qui passent dessous. */
-  const footerRef = useRef<HTMLDivElement>(null);
-  const [range, setRange] = useState<Range>({ start: 0, end: 0 });
-
-  const measure = useCallback(() => {
-    const scroller = scrollerRef.current;
-    const tree = treeRef.current;
-    if (!scroller || !tree) return;
-    const next = visibleRange(scroller, tree, count);
-    setRange((current) =>
-      current.start === next.start && current.end === next.end ? current : next,
-    );
-  }, [count]);
-
-  // Avant la peinture : à l'arrivée de l'arbre, et chaque fois que son nombre de lignes change.
-  useLayoutEffect(() => measure(), [measure]);
-
-  // Au défilement de la barre latérale, et quand sa hauteur change.
-  useEffect(() => {
-    const scroller = scrollerRef.current;
-    if (!scroller) return;
-    scroller.addEventListener("scroll", measure, { passive: true });
-    const resized = new ResizeObserver(measure);
-    resized.observe(scroller);
-    return () => {
-      scroller.removeEventListener("scroll", measure);
-      resized.disconnect();
-    };
-  }, [measure]);
-
-  /** Page active que l'arbre a déjà montrée : il n'y revient pas tant qu'elle ne change pas. */
-  const revealed = useRef<string | null>(null);
+export function PageTree({
+  id,
+  label,
+  rows,
+  viewport,
+  activeId,
+  revealed,
+  readOnly,
+  onToggle,
+  onCreate,
+}: Props) {
+  const [tree, setTree] = useState<HTMLDivElement | null>(null);
+  const { range, reveal } = useTreeWindow(viewport, tree, rows.length);
 
   // La page active est hors de la partie visible (lien direct vers une page loin dans
   // l'arbre, page tout juste créée en fin de liste) : la barre latérale défile jusqu'à elle,
-  // une fois. Absente des lignes (arbre pas encore chargé, parent replié), elle le sera dès
+  // une fois. Absente des lignes (une autre section, un parent replié), elle le sera dès
   // qu'elle y apparaît.
   useLayoutEffect(() => {
     if (activeId === null) {
       revealed.current = null;
       return;
     }
-    const scroller = scrollerRef.current;
-    const tree = treeRef.current;
-    if (revealed.current === activeId || !scroller || !tree) return;
+    if (revealed.current === activeId) return;
     const index = rows.findIndex((row) => row.node.id === activeId);
-    if (index < 0) return;
-    revealed.current = activeId;
-    // Haut de la ligne, mesuré depuis le haut de la partie visible, dont le bas est caché par
-    // le compte.
-    const top = tree.getBoundingClientRect().top + index * ROW_HEIGHT - viewTop(scroller);
-    const height = scroller.clientHeight - (footerRef.current?.offsetHeight ?? 0);
-    if (top >= 0 && top + ROW_HEIGHT <= height) return;
-    scroller.scrollTop += top - (height - ROW_HEIGHT) / 2;
-    measure();
-  }, [activeId, rows, measure]);
-
-  const toggle = useCallback((id: string) => {
-    setCollapsed((current) => {
-      const next = new Set(current);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
-  }, []);
-
-  const create = useCallback(
-    (parentId: string | null) => {
-      // La sous-page doit se voir : son parent se déplie. Déjà déplié, l'ensemble ne change
-      // pas, et les lignes non plus.
-      if (parentId !== null) {
-        setCollapsed((current) => {
-          if (!current.has(parentId)) return current;
-          const next = new Set(current);
-          next.delete(parentId);
-          return next;
-        });
-      }
-      onCreate(parentId);
-    },
-    [onCreate],
-  );
+    if (index >= 0 && reveal(index)) revealed.current = activeId;
+  }, [activeId, rows, reveal, revealed]);
 
   return (
-    <nav ref={scrollerRef} className="mm-sidebar" aria-label="Barre latérale">
-      <div className="mm-brand">
-        <span className="mm-brand-tile" aria-hidden="true">
-          M
-        </span>
-        <span>Mementum</span>
-      </div>
-      <button
-        type="button"
-        className="mm-side-action"
-        disabled={readOnly}
-        title={readOnly ? "Lecture seule : recharge la page pour écrire" : undefined}
-        onClick={() => create(null)}
-      >
-        <PlusIcon size={16} />
-        <span>Nouvelle page</span>
-      </button>
-      <div className="mm-side-section">Pages</div>
-      {nodes === null ? (
-        <p className="mm-side-note">Chargement…</p>
-      ) : count === 0 ? (
-        <p className="mm-side-note">Aucune page pour l'instant.</p>
-      ) : (
-        <div
-          ref={treeRef}
-          role="tree"
-          aria-label="Pages"
-          className="tree"
-          style={{ height: count * ROW_HEIGHT }}
-        >
-          {rows.slice(range.start, range.end).map((row, i) => (
-            <TreeRow
-              key={row.node.id}
-              row={row}
-              index={range.start + i}
-              active={row.node.id === activeId}
-              readOnly={readOnly}
-              onToggle={toggle}
-              onCreate={create}
-            />
-          ))}
-        </div>
-      )}
-      {notice && (
-        <p className="mm-side-error" role="alert">
-          {notice}
-        </p>
-      )}
-      {/* Collé au bas de la barre latérale, qui défile au-dessus de lui. */}
-      <div ref={footerRef} className="mm-side-footer">
-        {space && manages && (
-          <a
-            href={spaceSettingsPath(space.id)}
-            className={`mm-side-action mm-side-link${settingsOf === space.id ? " is-active" : ""}`}
-            aria-current={settingsOf === space.id ? "page" : undefined}
-          >
-            <SettingsIcon />
-            <span>Réglages de l'espace</span>
-          </a>
-        )}
-        <AccountMenu />
-      </div>
-    </nav>
+    <div
+      ref={setTree}
+      id={id}
+      role="tree"
+      aria-label={label}
+      className="tree"
+      style={{ height: rows.length * ROW_HEIGHT }}
+    >
+      {rows.slice(range.start, range.end).map((row, i) => (
+        <TreeRow
+          key={row.node.id}
+          row={row}
+          index={range.start + i}
+          active={row.node.id === activeId}
+          readOnly={readOnly}
+          onToggle={onToggle}
+          onCreate={onCreate}
+        />
+      ))}
+    </div>
   );
 }

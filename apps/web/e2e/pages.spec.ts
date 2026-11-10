@@ -1,7 +1,23 @@
 // Arbre de pages et persistance, depuis l'interface.
 import { expect, test } from "@playwright/test";
-import type { ErrorBody } from "@mementum/protocol";
-import { createPage, getMmd, getTree, pageIdOf, putMmd, unique, waitSynced } from "./helpers";
+import type { ErrorBody, PageNode } from "@mementum/protocol";
+import {
+  apiAs,
+  closeContexts,
+  createPage,
+  getMmd,
+  getTree,
+  newUser,
+  pageIdOf,
+  putMmd,
+  sidebarOf,
+  signUpAccount,
+  treeRow,
+  unique,
+  waitSynced,
+} from "./helpers";
+
+test.afterEach(closeContexts);
 
 const UUID = /\/p\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -136,4 +152,68 @@ test("unregistered_mmd_prop_is_refused", async ({ page, request }) => {
   await expect.poll(() => getMmd(request, id)).toBe("Avant!\n");
   await expect(editor).toContainText("Avant!");
   await expect(editor).not.toContainText("Texte");
+});
+
+test("active_row_is_shown_clear_of_the_sidebar_edges", async ({ browser }) => {
+  // La barre latérale défile sous sa tête (le sélecteur d'espace), collée à son bord : la
+  // ligne de la page ouverte ne doit jamais rester dessous.
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const pages: PageNode[] = [];
+  for (let i = 0; i < 40; i++) pages.push(await createPage(api, { title: `Ligne ${i + 1}` }));
+  const p = await newUser(browser, account);
+  const sidebar = sidebarOf(p);
+  /** La ligne est-elle visible en entier, sans rien par-dessus ? */
+  const clear = (id: string) =>
+    treeRow(p, id).evaluate((row) => {
+      const box = row.getBoundingClientRect();
+      const at = (y: number) => row.contains(document.elementFromPoint(box.left + box.width / 2, y));
+      return at(box.top + 1) && at(box.bottom - 1);
+    });
+  const scrollTop = () => sidebar.evaluate((el) => el.scrollTop);
+  /** Ouvre la page par son lien, sans que Playwright fasse défiler la barre pour cliquer. */
+  const open = async (id: string) => {
+    await treeRow(p, id).getByRole("link").evaluate((link: HTMLElement) => link.click());
+    await expect(p).toHaveURL(new RegExp(`/p/${id}$`));
+    await expect(treeRow(p, id).getByRole("link")).toHaveAttribute("aria-current", "page");
+  };
+
+  // Lien direct vers la dernière page, loin sous la partie visible : la barre défile
+  // jusqu'à elle.
+  const last = pages[pages.length - 1];
+  await p.goto(`/p/${last.id}`);
+  await expect(treeRow(p, last.id)).toBeVisible();
+  await expect.poll(() => clear(last.id)).toBe(true);
+
+  // Une ligne coupée par le bas de la barre : elle défile de ce qui manque, sans la centrer.
+  await sidebar.evaluate((el) => (el.scrollTop = 0));
+  const low = pages[25].id;
+  await expect(treeRow(p, low)).toBeVisible();
+  await sidebar.evaluate((el, id) => {
+    const row = el.querySelector(`[data-page-id="${id}"]`)!.getBoundingClientRect();
+    el.scrollTop += row.bottom - el.getBoundingClientRect().bottom - 12;
+  }, low);
+  let before = await scrollTop();
+  await open(low);
+  await expect.poll(scrollTop).toBe(before + 12);
+  expect(await clear(low)).toBe(true);
+
+  // Une ligne coupée par la tête : pareil, vers le haut.
+  const high = pages[14].id;
+  await sidebar.evaluate((el, id) => {
+    const row = el.querySelector(`[data-page-id="${id}"]`)!.getBoundingClientRect();
+    const head = el.querySelector(".mm-side-head")!.getBoundingClientRect();
+    el.scrollTop += row.top - head.bottom + 10;
+  }, high);
+  expect(await clear(high)).toBe(false);
+  before = await scrollTop();
+  await open(high);
+  await expect.poll(scrollTop).toBe(before - 10);
+  expect(await clear(high)).toBe(true);
+
+  // Une ligne déjà visible en entier : la barre ne bouge pas.
+  before = await scrollTop();
+  await open(pages[16].id);
+  await p.waitForTimeout(200);
+  expect(await scrollTop()).toBe(before);
 });

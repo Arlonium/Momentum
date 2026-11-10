@@ -91,7 +91,8 @@ a:hover {
   flex-direction: column;
 }
 
-/* Barre latérale */
+/* Barre latérale : elle défile en entier ; sa tête (le sélecteur d'espace) et son pied
+   restent collés à ses bords, par-dessus les sections. */
 
 .mm-sidebar {
   flex: 0 0 var(--mm-sidebar-width);
@@ -102,22 +103,10 @@ a:hover {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  /* Le bas est celui du compte (`.mm-side-footer`), collé au bas de la barre. */
-  padding: 10px 8px 0;
+  /* Le haut est celui de la tête, le bas celui des sections ou du pied. */
+  padding: 0 8px;
   background: var(--mm-sidebar-bg);
   border-right: 1px solid var(--mm-sidebar-border);
-}
-
-.mm-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: var(--mm-action-height);
-  padding: 4px 8px;
-  margin-bottom: 4px;
-  font-weight: 600;
-  color: var(--mm-text);
 }
 
 .mm-brand-tile {
@@ -157,13 +146,6 @@ a:hover {
   cursor: default;
 }
 
-.mm-side-section {
-  padding: 14px 8px 4px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--mm-text-secondary);
-}
-
 .mm-side-note {
   margin: 0;
   padding: 4px 8px;
@@ -172,7 +154,7 @@ a:hover {
 }
 
 .mm-side-error {
-  margin: 8px 0 0;
+  margin: 0;
   padding: 6px 8px;
   font-size: 13px;
   color: var(--mm-danger);
@@ -180,7 +162,6 @@ a:hover {
 
 /* Lien de la barre latérale (« Réglages de l'espace ») : l'allure d'une action. */
 .mm-side-link {
-  margin-bottom: 2px;
   text-decoration: none;
 }
 
@@ -193,47 +174,214 @@ a:hover {
   color: var(--mm-text-secondary);
 }
 
-.mm-side-link.is-active {
+.mm-side-link[aria-current="page"] {
   background: var(--mm-sidebar-active);
   color: var(--mm-text);
   font-weight: 500;
 }
 
-/* Compte, en bas de la barre latérale : poussé en bas quand l'arbre est court, collé au bas
-   de la partie visible quand il défile. */
-
-.mm-side-footer {
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
+/* Bouton réduit à son icône (« Nouvelle page », à côté du sélecteur d'espace). */
+.mm-icon-button {
   flex: none;
-  margin: auto -8px 0;
-  padding: 8px 8px 10px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--mm-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.mm-icon-button:hover:not(:disabled) {
+  background: var(--mm-sidebar-hover);
+  color: var(--mm-text);
+}
+
+.mm-icon-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Tête : le sélecteur d'espace et « Nouvelle page », collés au haut de la barre. */
+
+.mm-side-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 -8px;
+  padding: 10px 8px 6px;
   background: var(--mm-sidebar-bg);
-  border-top: 1px solid var(--mm-sidebar-border);
 }
 
-.mm-account {
-  position: relative;
+.mm-switcher {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.mm-account-button {
+.mm-switcher-button {
   width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--mm-action-height);
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--mm-text);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
 }
 
-.mm-account-label {
+.mm-switcher-button:hover,
+.mm-switcher-button[aria-expanded="true"] {
+  background: var(--mm-sidebar-hover);
+}
+
+.mm-switcher-button svg {
+  flex: none;
+  color: var(--mm-text-secondary);
+}
+
+.mm-switcher-label {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* La tuile d'un espace : son initiale, à la couleur d'accent. */
+.mm-space-tile {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--mm-accent);
+  color: #ffffff;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.mm-space-tile-small {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.mm-space-tile-large {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* Le menu s'ouvre sous la tête (son repère), sur la largeur de la barre latérale. */
+.mm-switcher-menu {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 8px;
+  right: 8px;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--mm-popover-border);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: var(--mm-popover-shadow);
+}
+
+.mm-switcher-spaces {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mm-switcher-space {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 8px;
+  border-radius: 6px;
   color: var(--mm-text);
+  text-decoration: none;
+}
+
+.mm-switcher-space:hover {
+  background: var(--mm-surface);
+  color: var(--mm-text);
+}
+
+.mm-switcher-space svg {
+  flex: none;
+  color: var(--mm-accent);
+}
+
+.mm-switcher-names {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.mm-switcher-name,
+.mm-switcher-role {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mm-switcher-name {
   font-weight: 500;
 }
 
-.mm-account-button svg {
-  flex: none;
+.mm-switcher-role {
+  font-size: 12px;
   color: var(--mm-text-secondary);
+}
+
+/* Les actions de l'espace, puis le compte : chaque groupe sous un filet. */
+.mm-switcher-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--mm-popover-divider);
+}
+
+.mm-switcher-group:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.mm-switcher-menu .mm-side-action:hover {
+  background: var(--mm-surface);
+}
+
+.mm-switcher-menu .mm-side-link[aria-current="page"] {
+  background: var(--mm-surface);
+}
+
+.mm-switcher-menu .mm-side-error {
+  margin-top: 4px;
 }
 
 .mm-avatar {
@@ -248,26 +396,11 @@ a:hover {
   line-height: 1;
 }
 
-/* Le menu s'ouvre au-dessus du bouton, sur la largeur de la barre latérale. */
-.mm-account-menu {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 6px);
-  padding: 6px;
-  border: 1px solid var(--mm-popover-border);
-  border-radius: 10px;
-  background: #ffffff;
-  box-shadow: var(--mm-popover-shadow);
-}
-
 .mm-account-who {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 8px 10px;
-  margin-bottom: 4px;
-  border-bottom: 1px solid var(--mm-popover-divider);
+  padding: 6px 8px 8px;
 }
 
 .mm-account-names {
@@ -301,18 +434,111 @@ a:hover {
   color: var(--mm-accent);
 }
 
-.mm-account-actions {
+/* Sections (« Espace », « Partagé », « Privé ») : un titre discret, comme dans Notion, qui
+   replie la section ; son « + » n'apparaît qu'au survol. */
+
+.mm-sections {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 12px;
+}
+
+.mm-section {
   display: flex;
   flex-direction: column;
   gap: 1px;
 }
 
-.mm-account-actions .mm-side-action:hover {
-  background: var(--mm-surface);
+.mm-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-height: 28px;
+  margin-top: 10px;
+  padding: 0 4px 2px 2px;
 }
 
-.mm-account-menu .mm-side-error {
-  margin: 4px 0 0;
+.mm-section:first-child .mm-section-head {
+  margin-top: 4px;
+}
+
+.mm-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mm-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mm-section-title:hover {
+  background: var(--mm-sidebar-hover);
+  color: var(--mm-text-sidebar);
+}
+
+/* Le chevron : au survol, au clavier, et tant que la section est repliée. */
+.mm-section-title svg {
+  flex: none;
+  opacity: 0;
+  transition: transform 120ms ease;
+}
+
+.mm-section-title.is-open svg {
+  transform: rotate(90deg);
+}
+
+.mm-section-head:hover .mm-section-title svg,
+.mm-section-title:focus-visible svg,
+.mm-section-title:not(.is-open) svg {
+  opacity: 1;
+}
+
+.mm-section-add {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mm-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.mm-section-head:hover .mm-section-add,
+.mm-section-add:focus-visible {
+  opacity: 1;
+}
+
+.mm-section-add:hover {
+  background: var(--mm-border);
+  color: var(--mm-text);
+}
+
+/* Pied, collé au bas de la barre latérale, qui défile au-dessus de lui : poussé en bas quand
+   les sections sont courtes. */
+
+.mm-side-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  flex: none;
+  margin: auto -8px 0;
+  padding: 8px 8px 10px;
+  background: var(--mm-sidebar-bg);
+  border-top: 1px solid var(--mm-sidebar-border);
 }
 
 /* Arbre fenêtré (R43) : il a la hauteur de toutes ses lignes, posée par `PageTree`, mais
@@ -320,7 +546,7 @@ a:hover {
    pose `top` et `height`, celle de `ROW_HEIGHT`). */
 .tree {
   position: relative;
-  /* La colonne de la barre latérale ne doit pas réduire cette hauteur. */
+  /* La colonne de sa section ne doit pas réduire cette hauteur. */
   flex: none;
 }
 

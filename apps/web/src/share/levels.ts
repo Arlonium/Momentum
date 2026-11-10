@@ -22,6 +22,14 @@ export const LEVEL_LABELS: Record<Level, string> = {
   full: "Accès complet",
 };
 
+/**
+ * Ce niveau permet-il de modifier la page : écrire, renommer, créer une sous-page, changer de
+ * place parmi les mêmes frères, mettre à la corbeille et restaurer ? Le serveur fait foi.
+ */
+export function canEdit(level: Level): boolean {
+  return level === "edit" || level === "full";
+}
+
 /** Un jeton d'invitation du serveur : 32 octets en base64url, sans remplissage. */
 const TOKEN = /^#([A-Za-z0-9_-]{43})$/;
 

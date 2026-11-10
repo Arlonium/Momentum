@@ -1,5 +1,6 @@
-// Routeur minimal (History API) : `/` (accueil), `/p/:id` (une page), `/s/:spaceId/settings`
-// (réglages d'un espace), `/login` et `/signup` (connexion et inscription, montrées par
+// Routeur minimal (History API) : `/` (le dernier espace ouvert, sinon le premier),
+// `/s/:spaceId` (un espace), `/s/:spaceId/settings` (ses réglages), `/p/:id` (une page :
+// l'espace affiché est le sien), `/login` et `/signup` (connexion et inscription, montrées par
 // `SessionGate` sans session), `/invite` (un lien d'invitation, `/invite#<jeton>`, avec ou
 // sans session). Les liens internes restent de vrais `<a href>` (nouvel onglet, copie du
 // lien) ; un clic simple est intercepté pour changer de page sans recharger l'application.
@@ -11,6 +12,7 @@ export type Route =
   | { name: "signup" }
   | { name: "invite" }
   | { name: "page"; id: string }
+  | { name: "space"; spaceId: string }
   | { name: "spaceSettings"; spaceId: string }
   | { name: "notFound" };
 
@@ -35,16 +37,21 @@ export function parseRoute(pathname: string): Route {
     const id = segment(page[1]);
     return id === null ? { name: "notFound" } : { name: "page", id };
   }
-  const settings = /^\/s\/([^/]+)\/settings\/?$/.exec(pathname);
-  if (settings) {
-    const spaceId = segment(settings[1]);
-    return spaceId === null ? { name: "notFound" } : { name: "spaceSettings", spaceId };
+  const space = /^\/s\/([^/]+)(?:\/(settings))?\/?$/.exec(pathname);
+  if (space) {
+    const spaceId = segment(space[1]);
+    if (spaceId === null) return { name: "notFound" };
+    return space[2] === "settings" ? { name: "spaceSettings", spaceId } : { name: "space", spaceId };
   }
   return { name: "notFound" };
 }
 
 export function pagePath(id: string): string {
   return `/p/${encodeURIComponent(id)}`;
+}
+
+export function spacePath(spaceId: string): string {
+  return `/s/${encodeURIComponent(spaceId)}`;
 }
 
 export function spaceSettingsPath(spaceId: string): string {

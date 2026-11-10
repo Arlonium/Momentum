@@ -7,6 +7,7 @@ import {
   acceptInvitation,
   apiAs,
   closeContexts,
+  expectSignedInAs,
   firstSpace,
   getMe,
   getMembers,
@@ -16,7 +17,9 @@ import {
   newUser,
   NO_SESSION,
   PASSWORD,
+  sidebarOf,
   signUpAccount,
+  spaceSwitcher,
   unique,
 } from "./helpers";
 import { BASE_URL } from "./servers";
@@ -24,15 +27,6 @@ import { BASE_URL } from "./servers";
 // La page de chaque test arrive sans session ; `newUser(browser, compte)` en donne une.
 test.use({ storageState: NO_SESSION });
 test.afterEach(closeContexts);
-
-function sidebarOf(p: Page) {
-  return p.getByRole("navigation", { name: "Barre latérale" });
-}
-
-/** Le bouton du menu du compte : on est dans l'application, sous ce compte. */
-function accountButton(p: Page, name: string) {
-  return sidebarOf(p).getByRole("button", { name: `${name}, menu du compte`, exact: true });
-}
 
 /** La ligne d'une personne dans la liste des membres. */
 function memberRow(p: Page, email: string) {
@@ -75,8 +69,9 @@ test("invite_to_space_by_link_then_signup", async ({ browser, page }) => {
   const a = await newUser(browser, alice);
   await a.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE_URL });
 
-  // Le lien de la barre latérale mène aux réglages de l'espace.
+  // Le sélecteur d'espace mène aux réglages de l'espace.
   await a.goto("/");
+  await spaceSwitcher(a).click();
   await sidebarOf(a).getByRole("link", { name: "Réglages de l'espace" }).click();
   await expect(a).toHaveURL(`${BASE_URL}${settingsPath(space.id)}`);
   await expect(a.getByRole("heading", { name: "Réglages de l'espace", level: 1 })).toBeVisible();
@@ -121,9 +116,10 @@ test("invite_to_space_by_link_then_signup", async ({ browser, page }) => {
   await password.fill(PASSWORD);
   await password.press("Enter");
 
-  // Dans l'application, à l'accueil, son compte en bas de la barre latérale.
-  await expect(accountButton(page, name)).toBeVisible();
-  expect(page.url()).toBe(`${BASE_URL}/`);
+  // Dans l'application, sous son compte, dans l'espace rejoint : le seul qu'il ait.
+  await expect(page).toHaveURL(`${BASE_URL}/s/${space.id}`);
+  await expect(spaceSwitcher(page, space.name)).toBeVisible();
+  await expectSignedInAs(page, name);
   const me = await getMe(page.request);
   expect(me.spaces).toContainEqual({ id: space.id, name: space.name, role: "member" });
 
@@ -156,9 +152,10 @@ test("existing_account_accepts_an_invitation", async ({ browser }) => {
   await expect(b.getByRole("main")).toContainText(bruno.email);
   await b.getByRole("button", { name: "Accepter" }).click();
 
-  // L'espace, avec le rôle de l'invitation.
-  await expect(accountButton(b, bruno.name)).toBeVisible();
-  expect(b.url()).toBe(`${BASE_URL}/`);
+  // L'espace rejoint (et non le sien), avec le rôle de l'invitation.
+  await expect(b).toHaveURL(`${BASE_URL}/s/${space.id}`);
+  await expect(spaceSwitcher(b, space.name)).toBeVisible();
+  await expectSignedInAs(b, bruno.name);
   const me = await getMe(b.request);
   expect(me.spaces).toContainEqual({ id: space.id, name: space.name, role: "admin" });
   expect(await getMembers(aliceApi, space.id)).toContainEqual(
@@ -189,8 +186,8 @@ test("existing_account_logs_in_then_accepts", async ({ page }) => {
   await expect(invitedHeading(page, alice.name, space.name)).toBeVisible();
   expect(page.url()).toBe(`${BASE_URL}/invite`);
   await page.getByRole("button", { name: "Accepter" }).click();
-  await expect(accountButton(page, bruno.name)).toBeVisible();
-  expect(page.url()).toBe(`${BASE_URL}/`);
+  await expect(page).toHaveURL(`${BASE_URL}/s/${space.id}`);
+  await expectSignedInAs(page, bruno.name);
   expect((await getMe(page.request)).spaces).toContainEqual({
     id: space.id,
     name: space.name,
@@ -316,8 +313,12 @@ test("member_sees_members_without_actions", async ({ browser }) => {
   await joinSpace(aliceApi, space.id, bruno, "member");
   await inviteToSpace(aliceApi, space.id, { email: `attente-${unique()}@exemple.fr`, role: "admin" });
 
+  // Un simple membre arrive aux réglages par le sélecteur d'espace, comme les autres.
   const b = await newUser(browser, bruno);
-  await b.goto(settingsPath(space.id));
+  await b.goto(`/s/${space.id}`);
+  await spaceSwitcher(b, space.name).click();
+  await sidebarOf(b).getByRole("link", { name: "Réglages de l'espace" }).click();
+  await expect(b).toHaveURL(`${BASE_URL}${settingsPath(space.id)}`);
   await expect(b.getByRole("heading", { name: "Réglages de l'espace", level: 1 })).toBeVisible();
   // La liste des membres : nom, adresse, rôle.
   await expect(memberRow(b, alice.email)).toContainText(alice.name);
@@ -350,10 +351,11 @@ test("guest_is_sent_home", async ({ browser }) => {
   });
   expect(res.status(), await res.text()).toBe(200);
 
+  // Renvoyé à l'accueil de l'espace, où il reste invité.
   const b = await newUser(browser, bruno);
   await b.goto(settingsPath(space.id));
-  await expect(b).toHaveURL(`${BASE_URL}/`);
-  await expect(accountButton(b, bruno.name)).toBeVisible();
+  await expect(b).toHaveURL(`${BASE_URL}/s/${space.id}`);
+  await expect(spaceSwitcher(b, space.name)).toBeVisible();
   await expect(b.getByRole("list", { name: "Membres" })).toHaveCount(0);
 });
 

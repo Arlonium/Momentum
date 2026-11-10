@@ -11,6 +11,7 @@ import {
   type APIRequestContext,
   type Browser,
   type BrowserContext,
+  type Locator,
   type Page,
 } from "@playwright/test";
 import type {
@@ -212,6 +213,13 @@ async function firstSpaceId(api: APIRequestContext): Promise<string> {
   return id;
 }
 
+/** Crée un espace par l'API (`POST /api/v1/spaces`) : le compte de `api` en est propriétaire. */
+export async function createSpace(api: APIRequestContext, name: string): Promise<SpaceInfo> {
+  const res = await api.post("/api/v1/spaces", { data: { name } });
+  expect(res.status(), await res.text()).toBe(201);
+  return (await res.json()) as SpaceInfo;
+}
+
 /** Les personnes qui ont un rôle dans l'espace (`GET /api/v1/spaces/{id}/members`). */
 export async function getMembers(api: APIRequestContext, spaceId: string): Promise<Member[]> {
   const res = await api.get(`/api/v1/spaces/${spaceId}/members`);
@@ -256,6 +264,41 @@ export async function joinSpace(
 ): Promise<void> {
   const { token } = await inviteToSpace(owner, spaceId, { email: account.email, role });
   await acceptInvitation(await apiAs(account), token);
+}
+
+/** La barre latérale de l'application. */
+export function sidebarOf(p: Page): Locator {
+  return p.getByRole("navigation", { name: "Barre latérale" });
+}
+
+/**
+ * Le sélecteur d'espace, en tête de barre latérale : il nomme l'espace ouvert (`spaceName`,
+ * s'il est donné), et ouvre la liste des espaces et le menu du compte.
+ */
+export function spaceSwitcher(p: Page, spaceName?: string): Locator {
+  return sidebarOf(p).getByRole("button", {
+    name: spaceName === undefined ? /, espaces et compte$/ : `${spaceName}, espaces et compte`,
+    exact: true,
+  });
+}
+
+/** On est dans l'application, sous le compte `name` : le sélecteur d'espace, ouvert, le nomme. */
+export async function expectSignedInAs(p: Page, name: string): Promise<void> {
+  const switcher = spaceSwitcher(p);
+  await switcher.click();
+  await expect(sidebarOf(p).getByRole("group", { name: "Compte" })).toContainText(name);
+  await p.keyboard.press("Escape");
+  await expect(switcher).toHaveAttribute("aria-expanded", "false");
+}
+
+/** Une section de la barre latérale, avec son titre et son arbre. */
+export function sectionOf(p: Page, label: "Espace" | "Partagé" | "Privé"): Locator {
+  return sidebarOf(p).getByRole("group", { name: label, exact: true });
+}
+
+/** La ligne d'une page dans la barre latérale. */
+export function treeRow(p: Page, id: string): Locator {
+  return sidebarOf(p).locator(`[role="treeitem"][data-page-id="${id}"]`);
 }
 
 /** Ouvre la page `id` avec la session de `account` et attend la synchro. */

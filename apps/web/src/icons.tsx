@@ -133,10 +133,17 @@ export const MailIcon = () => (
   </Icon>
 );
 
-/** Ouvre un menu vers le haut ou vers le bas (bouton du compte). */
-export const ChevronsIcon = () => (
+/** Ouvre un menu vers le bas (sélecteur d'espace de la maquette). */
+export const ChevronDownIcon = () => (
   <Icon size={14}>
-    <path d="M8 9l4-4 4 4" />
-    <path d="M8 15l4 4 4-4" />
+    <path d="M6 9l6 6 6-6" />
+  </Icon>
+);
+
+/** « Nouvelle page » : le crayon de la maquette, à côté du sélecteur d'espace. */
+export const ComposeIcon = () => (
+  <Icon size={17}>
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
   </Icon>
 );

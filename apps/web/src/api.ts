@@ -10,6 +10,7 @@ import type {
   Accepted,
   ChangePassword,
   CreatePage,
+  CreateSpace,
   ErrorBody,
   ErrorCode,
   Info,
@@ -122,6 +123,11 @@ export function changePassword(body: ChangePassword): Promise<void> {
 // `404`, comme pour un espace qui n'existe pas ; une action au-dessus de son rôle, `403`.
 
 const space = (spaceId: string) => `/api/v1/spaces/${encodeURIComponent(spaceId)}`;
+
+/** `POST /api/v1/spaces` : crée un espace, dont le compte est propriétaire. */
+export function createSpace(body: CreateSpace): Promise<SpaceInfo> {
+  return call("POST", "/api/v1/spaces", body);
+}
 
 /** `PATCH /api/v1/spaces/{id}` : renomme l'espace (`admin`). */
 export function updateSpace(spaceId: string, body: UpdateSpace): Promise<SpaceInfo> {
