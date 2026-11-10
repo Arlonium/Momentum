@@ -545,6 +545,16 @@ async fn change_access_keeps_general_access_above_the_inherited_floor() {
     assert!(set(child, Some(Level::Full)).await);
     assert!(set(child, Some(Level::Edit)).await);
     assert_eq!(own(child).await, None);
+    // L'appel rend la ligne que la page porte ensuite, pas le niveau demandé : au plancher,
+    // aucune.
+    let full = general(Some(Level::Full));
+    let written = store.change_access(child, full, t.olga).await.unwrap();
+    assert_eq!((written.changed, written.line), (true, Some(Level::Full)));
+    let floor = general(Some(Level::Edit));
+    let written = store.change_access(child, floor, t.olga).await.unwrap();
+    assert_eq!((written.changed, written.line), (true, None));
+    let written = store.change_access(child, floor, t.olga).await.unwrap();
+    assert_eq!((written.changed, written.line), (false, None));
 
     // Une ligne redondante d'avant (posée sous le plancher, ou à son niveau) : plus bas reste
     // refusé ; égal ou `null` la retirent.
@@ -794,7 +804,8 @@ async fn change_access_writes_nothing_when_nothing_changes() {
         AccessWritten {
             space_id: space.id,
             changed: true,
-            left_space: false
+            left_space: false,
+            line: Some(Level::Edit),
         }
     );
     assert_eq!(store.space_rev(space.id).await.unwrap(), Some(rev + 1));

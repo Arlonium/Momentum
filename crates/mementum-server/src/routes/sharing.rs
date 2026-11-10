@@ -226,24 +226,26 @@ async fn write(
     Ok(written)
 }
 
-/// Journal d'un changement écrit : qui, sur quelle page, pour qui, à quel niveau ; jamais
-/// d'adresse.
+/// Journal d'un changement écrit : qui, sur quelle page, pour qui, et la ligne que la page porte
+/// désormais (`line` : son niveau, ou `aucune`) ; jamais d'adresse. C'est ce que le store a
+/// écrit, pas ce qui était demandé : un accès général demandé au niveau du plancher retire la
+/// ligne propre de la page.
 fn log_change(user: &AuthUser, id: Uuid, change: AccessChange, written: AccessWritten) {
-    let level = |level: Option<Level>| level.map_or("aucun", Level::as_str);
+    let line = written.line.map_or("aucune", Level::as_str);
     match change {
-        AccessChange::Members(to) => tracing::info!(
+        AccessChange::Members(_) => tracing::info!(
             node_id = %id,
             space_id = %written.space_id,
             user_id = %user.id,
-            level = level(to),
+            line,
             "accès général d'une page changé"
         ),
-        AccessChange::User(target, to) => tracing::info!(
+        AccessChange::User(target, _) => tracing::info!(
             node_id = %id,
             space_id = %written.space_id,
             user_id = %user.id,
             target_id = %target,
-            level = level(to),
+            line,
             left_space = written.left_space,
             "accès d'une personne à une page changé"
         ),

@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::http::{Method, StatusCode, header};
 use common::{
-    Account, Browser, Reply, SESSION_COOKIE, Team, TestApp, WAIT, exec_sql, json_request, outcome,
-    query_i64, text, tree_nodes,
+    Account, Browser, Logs, Reply, SESSION_COOKIE, Team, TestApp, WAIT, exec_sql, json_request,
+    outcome, query_i64, text, tree_nodes,
 };
 use mementum_acl::{Level, Subject};
 use mementum_schema::SCHEMA_VERSION;
@@ -1361,6 +1361,59 @@ async fn sharer_demoted_to_guest_cannot_change_general_access() {
     set_level(mona, page, team.tom.id, "read")
         .await
         .assert_status(StatusCode::OK);
+}
+
+/// Le journal d'un changement d'accès dit ce qui a été écrit, pas ce qui était demandé. Au
+/// plancher qu'une page parente donne, la ligne `members` de la sous-page est retirée : le
+/// journal dit qu'elle n'a plus de ligne, pas le niveau demandé. Jamais d'adresse ni de nom.
+#[tokio::test]
+async fn sharing_log_says_what_was_written() {
+    /// La ligne que le serveur journalise pour un changement d'accès de `page`, pendant
+    /// `change`, qui doit réussir : une seule, au niveau `info`, sans adresse ni nom.
+    async fn logged(change: impl Future<Output = Reply>, page: Uuid) -> String {
+        let logs = Logs::capture();
+        change.await.assert_status(StatusCode::OK);
+        let journal = logs.text();
+        let page = page.to_string();
+        let mut lines = journal
+            .lines()
+            .filter(|line| line.contains(" INFO ") && line.contains(&page));
+        let line = lines
+            .next()
+            .unwrap_or_else(|| panic!("journal : {journal}"));
+        assert_eq!(lines.next(), None, "journal : {journal}");
+        for personal in ["exemple.fr", "Olga", "Tom"] {
+            assert!(!line.contains(personal), "{line}");
+        }
+        line.to_string()
+    }
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let olga = &team.olga.browser;
+    let parent = team.page(None, "Parent", &[members(Level::Edit)]).await;
+    let child = team.page(Some(parent), "Enfant", &[]).await;
+
+    // Au-dessus du plancher : la ligne est posée, à ce niveau.
+    let line = logged(set_general(olga, child, json!("full")), child).await;
+    assert!(line.contains(r#"line="full""#), "{line}");
+    // Au plancher : la ligne propre part. Le niveau demandé (`edit`) n'est pas écrit.
+    let line = logged(set_general(olga, child, json!("edit")), child).await;
+    assert!(line.contains(r#"line="aucune""#), "{line}");
+    assert!(!line.contains("edit"), "{line}");
+    assert!(team.grants(child).await.is_empty());
+
+    // L'accès d'une personne : posé, puis retiré.
+    let tom = team.tom.id;
+    let line = logged(set_level(olga, child, tom, "read"), child).await;
+    assert!(
+        line.contains(r#"line="read""#) && line.contains(&tom.to_string()),
+        "{line}"
+    );
+    let line = logged(remove(olga, child, tom), child).await;
+    assert!(
+        line.contains(r#"line="aucune""#) && line.contains(&tom.to_string()),
+        "{line}"
+    );
 }
 
 /// Review Focus 1 : chaque changement d'accès ferme les connexions de synchro de la page et de

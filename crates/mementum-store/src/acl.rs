@@ -37,6 +37,10 @@ pub struct AccessWritten {
     /// La personne dont la ligne est retirée, invitée, n'a plus aucune ligne dans l'espace :
     /// elle en est sortie.
     pub left_space: bool,
+    /// La ligne propre du sujet sur la page après l'appel : son niveau, ou `None` si la page
+    /// n'en a pas pour lui. Ce n'est pas toujours ce qui était demandé : un accès général
+    /// demandé au niveau du plancher retire la ligne propre (Ruling R93).
+    pub line: Option<Level>,
 }
 
 /// Pourquoi [`Store::change_access`] refuse un changement, vérifié dans sa transaction (Ruling
@@ -438,6 +442,7 @@ impl Store {
             space_id,
             changed: false,
             left_space: false,
+            line,
         };
         if !changed {
             return Ok(unchanged);
