@@ -117,7 +117,7 @@ Remarques :
 
 ## C. Inviter quelqu'un dans l'espace, par un lien (5 minutes)
 
-- [ ] **C1.** Fenêtre 1 : ouvre les réglages de ton premier espace (son nom, puis « Réglages de l'espace »). Dans la partie « Invitations », tape `camille@exemple.fr`, garde le rôle « Membre », clique « Inviter ». Tu dois voir un cadre qui t'avertit de copier le lien tout de suite, avec le lien.
+- [ ] **C1.** Fenêtre 1 : ouvre les réglages de ton premier espace (son nom, puis « Réglages de l'espace »). Dans la partie « Invitations », tape `camille@exemple.fr`, garde le rôle « Membre », clique « Inviter ». Tu dois voir un cadre qui dit « Ce lien ne sera plus affiché : copie-le maintenant. », avec le lien.
 - [ ] **C2.** Clique « Copier le lien ». Le bouton doit dire « Lien copié ».
 - [ ] **C3.** Regarde sous « En attente ». L'invitation doit y être, avec l'adresse, « Membre » et sa date de fin, dans 7 jours.
 - [ ] **C4.** Fenêtre 2 : colle le lien dans la barre d'adresse. Tu dois lire ton nom, suivi de « t'invite dans l'espace » et du nom de l'espace, et voir deux boutons : « Créer mon compte » et « J'ai déjà un compte ».
@@ -180,15 +180,15 @@ Fenêtre 1 : ouvre « Notes privées ». Elle doit être à la racine de « Priv
 - [ ] **F7.** Fenêtre 2 : regarde la page. Un bandeau doit dire « Tu peux lire cette page, pas la modifier. ». Dana ne peut taper ni dans le titre, ni dans le texte.
 - [ ] **F8.** Fenêtre 2 : cherche l'icône du crayon, en haut de la barre latérale, et le bouton « Partager ». Dana ne doit avoir ni l'une ni l'autre : une invitée ne crée pas de page à la racine, et ne partage qu'avec l'accès complet.
 - [ ] **F9.** Fenêtre 1 : clique dans la page, puis regarde la barre latérale. « Notes privées » doit être passée de « Privé » à « Partagé ».
-- [ ] **F10.** Fenêtre 1 : rouvre « Partager ». Dana est maintenant dans la liste des personnes. Sur sa ligne, passe de « Peut lire » à « Peut modifier ». Fenêtre 2 : un bandeau doit annoncer que Dana peut maintenant modifier la page, avec un bouton « Rouvrir la page ». Clique-le : Dana doit pouvoir écrire.
+- [ ] **F10.** Fenêtre 1 : rouvre « Partager ». Dana est maintenant dans la liste des personnes. Sur sa ligne, passe de « Peut lire » à « Peut modifier ». Fenêtre 2 : un bandeau doit dire « Tu peux maintenant modifier cette page : rouvre-la. », avec un bouton « Rouvrir la page ». Clique-le : Dana doit pouvoir écrire.
 - [ ] **F11.** Fenêtre 1 : passe Dana en « Accès complet ». Fenêtre 2 : en une ou deux secondes, Dana doit avoir le bouton « Partager ».
 - [ ] **F12.** Fenêtre 2 : clique ce bouton. Dans le panneau de Dana, l'accès général se lit sans se régler : « Seuls les membres de l'espace règlent l'accès général. ». Ferme le panneau (Échap).
 - [ ] **F13.** Fenêtre 1 : sous « Accès général », coche « Tous les membres de l'espace ». Une liste de niveaux doit apparaître à côté, sur « Peut lire ». Dans la barre latérale, la page doit passer dans « Espace ».
-- [ ] **F14.** Fenêtre 1 : recoche « Seulement les invités ». La page doit revenir dans « Partagé ».
+- [ ] **F14.** Fenêtre 1 : recoche « Seulement les invités ». Une fenêtre doit demander « Fermer cette page aux membres ? », avec un bouton rouge « Fermer aux membres ». Clique-le : la page doit revenir dans « Partagé ».
 - [ ] **F15.** Fenêtre 1 : clique le « + » de « Page d'équipe », tape « Compte rendu », puis Entrée. Sur cette sous-page, clique « Partager ». « Tous les membres de l'espace » doit être coché et marqué « hérité », et « Seulement les invités » grisé : une page parente ouvre déjà cette page aux membres.
 - [ ] **F16.** Dans ce panneau, ouvre la liste des niveaux, à côté de « hérité ». Seul « Accès complet » doit se choisir : les niveaux plus bas sont grisés.
 - [ ] **F17.** En bas du panneau, clique « Copier le lien ». Le bouton doit dire « Lien copié ». Appuie sur Échap : le panneau doit se fermer.
-- [ ] **F18.** Fenêtre 1 : clique le « + » du titre « Espace », tape « Page reprise », puis Entrée. Clique « Partager », et coche « Seulement les invités ». Tu dois rester sur la page, nommé « (toi) » en « Accès complet », et la page doit passer de « Espace » à « Privé » dans ta barre latérale : une page d'équipe peut redevenir privée.
+- [ ] **F18.** Fenêtre 1 : clique le « + » du titre « Espace », tape « Page reprise », puis Entrée. Clique « Partager », coche « Seulement les invités », puis confirme par « Fermer aux membres ». Tu dois rester sur la page, nommé « (toi) » en « Accès complet » dans le panneau, et la page doit passer de « Espace » à « Privé » dans ta barre latérale : une page d'équipe peut redevenir privée.
 
 Remarques :
 
@@ -279,7 +279,8 @@ Elles sont voulues, ou reportées à un lot suivant. Ne les signale pas comme de
 - Un niveau qui monte ne s'applique pas tout seul : il faut cliquer « Rouvrir la page ». C'est voulu, pour ne pas changer l'éditeur sous les yeux de qui lit (R111).
 - Sous une page ouverte aux membres, « Seulement les invités » est grisé : une sous-page ne peut pas être plus fermée que sa page parente dans ce lot (R93, R110).
 - Après un `mementum user set-password` sur le serveur, une page déjà ouverte dans un navigateur reste connectée jusqu'à sa prochaine reconnexion. Pour chasser quelqu'un, il faut redémarrer le serveur après la commande (R125).
-- Si tu te reconnectes avec un autre compte dans la fenêtre « Ta session a pris fin », toute l'application se recharge. C'est voulu : le texte tapé par l'un ne doit pas partir sous le nom de l'autre (R115).
+- Si un autre compte se connecte dans le même navigateur, l'onglet resté ouvert sous le premier se recharge : tout de suite si c'est dans la fenêtre « Ta session a pris fin », à ton retour sur l'onglet si c'est dans un autre onglet. C'est voulu : le texte tapé par l'un ne doit pas partir sous le nom de l'autre (R115, R126).
+- Un simple membre peut fermer aux autres membres une page d'équipe, après la confirmation « Fermer cette page aux membres ? ». Elle disparaît alors pour tous les autres, propriétaire et admins compris, et lui reste (R122, R127).
 - Deux onglets du même navigateur ne se parlent plus directement : tout passe par le serveur. Hors ligne, ce que tu tapes dans l'un n'apparaît dans l'autre qu'au retour du réseau.
 - Dans le menu Partager, rien ne dit si une personne est membre ou invitée. La confirmation de « Retirer » parle donc d'une nouvelle invitation pour tout le monde (reporté au lot suivant).
 - La corbeille est une liste à plat. Pour restaurer une sous-page partie avec sa page parente, c'est la page parente qu'il faut restaurer, et le message le dit (connu, à améliorer plus tard).
