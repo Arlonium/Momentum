@@ -13,9 +13,14 @@
 //!   tape parfois son mot de passe ;
 //! - aucune de leurs réponses, réussite ou refus, ne se garde dans un cache
 //!   (`Cache-Control: no-store`) ;
-//! - une connexion de synchro ne survit pas à la session de son compte : la
-//!   déconnexion et le changement de mot de passe ferment celles du compte,
-//!   après leur écriture en base (`Hub::kick_user`, Ruling R73).
+//! - une connexion de synchro ne survit pas à la fermeture de la session de
+//!   son compte : la déconnexion, le changement de mot de passe et la
+//!   connexion par-dessus une session ferment celles du compte, après leur
+//!   écriture en base (`Hub::kick_user`, Rulings R73 et R90). Celle qui
+//!   s'ouvrait au même instant est fermée à son inscription, où la route de
+//!   synchro relit sa session (Ruling R88). Une session qui arrive à
+//!   échéance, elle, ne ferme rien : la connexion vit jusqu'à sa prochaine
+//!   coupure.
 //!
 //! Le compte et ce qui vient avec lui (espaces repris, invitation, premier
 //! espace) s'écrivent en une transaction du store (`Store::sign_up`) : une
@@ -159,7 +164,11 @@ async fn register(
 }
 
 /// `POST /api/v1/auth/login` : `200` et le compte, session ouverte. La
-/// session que portait déjà le navigateur est fermée.
+/// session que portait déjà le navigateur est fermée, et avec elle les
+/// connexions de synchro du compte qu'elle portait (Ruling R90) : sur un
+/// navigateur partagé, les pages ouvertes par la personne d'avant ne restent
+/// pas ouvertes sous le nom de la suivante. Une connexion refusée ne ferme
+/// rien.
 pub(crate) async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -205,22 +214,22 @@ async fn log_in(
     };
     state.logins.succeeded(Guarded::Login, &email);
     // Le cookie que portait ce navigateur va être remplacé : sa session ne
-    // doit plus rien valoir, pour personne.
-    if let Some(carried) = auth::session_hash(&headers) {
-        state
-            .store
-            .delete_session(carried)
-            .await
-            .map_err(internal)?;
-    }
-    let token = open_session(&state, user.id).await?;
+    // doit plus rien valoir, pour personne, ni les connexions de synchro du
+    // compte qu'elle portait (Ruling R90). Suppression, fermeture et session
+    // neuve : jusqu'au bout, même si le client coupe la connexion.
+    let carried = auth::session_hash(&headers);
+    let secure = state.secure_cookies;
+    let writer = state.clone();
+    let user_id = user.id;
+    let token = to_completion(async move {
+        close_session(&writer, carried).await?;
+        open_session(&writer, user_id).await
+    })
+    .await?;
     tracing::info!(user_id = %user.id, "session ouverte");
     let me = me_of(&state, user.into()).await?;
     Ok((
-        [(
-            header::SET_COOKIE,
-            auth::session_cookie(&token, state.secure_cookies),
-        )],
+        [(header::SET_COOKIE, auth::session_cookie(&token, secure))],
         Json(me),
     )
         .into_response())
@@ -231,34 +240,17 @@ async fn log_in(
 ///
 /// Les connexions de synchro du compte sont fermées ensuite (Ruling R73) :
 /// toutes, celles de ses autres appareils comprises, qui reviennent aussitôt
-/// avec leur propre session.
-pub(crate) async fn logout(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    user: Result<AuthUser, ApiError>,
-) -> Response {
-    // Sans session valide, il n'y a pas de compte dont fermer les connexions.
-    no_store(log_out(state, headers, user.ok()).await)
+/// avec leur propre session. Le compte est celui que rend la suppression de
+/// la session : une session échue ferme encore ses connexions (Ruling R90).
+pub(crate) async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    no_store(log_out(state, headers).await)
 }
 
-async fn log_out(
-    state: AppState,
-    headers: HeaderMap,
-    user: Option<AuthUser>,
-) -> Result<Response, ApiError> {
+async fn log_out(state: AppState, headers: HeaderMap) -> Result<Response, ApiError> {
     let secure = state.secure_cookies;
-    if let Some(hash) = auth::session_hash(&headers) {
-        // La session, puis les connexions de synchro du compte : jusqu'au
-        // bout, même si le client coupe la connexion.
-        to_completion(async move {
-            state.store.delete_session(hash).await.map_err(internal)?;
-            if let Some(user) = user {
-                state.hub.kick_user(user.id).await;
-            }
-            Ok(())
-        })
-        .await?;
-    }
+    let carried = auth::session_hash(&headers);
+    // Jusqu'au bout, même si le client coupe la connexion.
+    to_completion(async move { close_session(&state, carried).await }).await?;
     Ok((
         StatusCode::NO_CONTENT,
         [(header::SET_COOKIE, auth::removal_cookie(secure))],
@@ -420,6 +412,26 @@ fn too_many_wrong_passwords(retry_after: u64) -> Response {
         .headers_mut()
         .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
     response
+}
+
+/// Ferme la session de ce hachage, s'il y en a une, puis les connexions de
+/// synchro du compte qu'elle portait : celui que rend la suppression, sans
+/// lecture préalable, donc pour une session échue aussi (Ruling R90). Une
+/// connexion qui s'ouvrait avec cette session au même instant est fermée à
+/// son inscription (Ruling R88).
+async fn close_session(state: &AppState, session: Option<[u8; 32]>) -> Result<(), ApiError> {
+    let Some(session) = session else {
+        return Ok(());
+    };
+    if let Some(user_id) = state
+        .store
+        .delete_session(session)
+        .await
+        .map_err(internal)?
+    {
+        state.hub.kick_user(user_id).await;
+    }
+    Ok(())
 }
 
 /// Ouvre une session pour ce compte et rend son jeton, à poser en cookie.

@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use common::{
-    Account, Browser, PASSWORD, Team, TestApp, WAIT, handshake, json_request, outcome, query_i64,
-    sync_as, sync_url, synced_as,
+    Account, Browser, PASSWORD, Team, TestApp, WAIT, exec_sql, handshake, json_request, outcome,
+    query_i64, sync_as, sync_url, synced_as,
 };
 use mementum_acl::{Level, Subject};
 use mementum_crdt::PageDoc;
@@ -633,6 +633,112 @@ async fn rights_change_bumps_rev_before_the_kick() {
         reply.assert_status(expected);
         assert_eq!(rev().await, before + 1, "{what}");
     }
+}
+
+/// Ruling R90 : se connecter par-dessus une session la ferme, avec les connexions de synchro
+/// du compte qu'elle portait. Celles du compte qui se connecte, et des autres, ne sont pas
+/// touchées ; une connexion ratée ne ferme rien.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_over_a_session_closes_the_previous_account_connections() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let page = team.page(None, "Commune", &[members(Level::Edit)]).await;
+    let url = sync_url(addr, page);
+    // Un navigateur partagé : Mona y est connectée, la page ouverte. Elle l'est aussi chez
+    // elle ; Tom et Adam ont la page ouverte ailleurs.
+    let shared = t.browser();
+    shared
+        .log_in("mona@exemple.fr", PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    let mona = synced_as(&shared, &url).await;
+    let mona_home = synced_as(&team.mona.browser, &url).await;
+    let tom_elsewhere = synced_as(&team.tom.browser, &url).await;
+    let adam = synced_as(&team.adam.browser, &url).await;
+    types(&mona, "avant").await;
+    let replaced = t.browser();
+    replaced.set_session(shared.session().as_deref());
+
+    // Un mot de passe faux par-dessus la session : rien n'est fermé, elle vaut toujours.
+    shared
+        .log_in("tom@exemple.fr", "pas-le-mot-de-passe-de-test")
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+    assert!(still_served(&mona).await, "fermée par une connexion ratée");
+    shared.me().await.assert_status(StatusCode::OK);
+
+    // Tom se connecte par-dessus.
+    shared
+        .log_in("tom@exemple.fr", PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    types_unheard(&mona, " trop tard");
+    assert!(
+        closed(&mona).await,
+        "la connexion de Mona est encore ouverte"
+    );
+    assert_eq!(refused(&replaced, &url).await, 401);
+    assert!(still_served(&tom_elsewhere).await, "Tom est fermé");
+    assert!(still_served(&adam).await, "Adam est fermé");
+    // Toutes les connexions du compte remplacé sont fermées (Ruling R73) ; son autre
+    // appareil, qui a gardé sa session, revient.
+    assert!(closed(&mona_home).await);
+    let mona_home = synced_as(&team.mona.browser, &url).await;
+    assert_eq!(text(&mona_home), "avant");
+
+    // Le navigateur porte maintenant la session de Tom : ce qu'il écrit est de Tom.
+    let tom = synced_as(&shared, &url).await;
+    types(&tom, " puis Tom").await;
+    assert_eq!(
+        actors(&t.db_path(), page).await,
+        [Some(team.mona.id), Some(team.tom.id)]
+    );
+}
+
+/// Ruling R90 : la déconnexion ferme les connexions du compte que la session supprimée
+/// portait, sans dépendre d'une lecture faite avant : même quand la session est échue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn logout_with_an_expired_session_still_closes_its_connections() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let page = team.page(None, "Commune", &[members(Level::Edit)]).await;
+    let url = sync_url(addr, page);
+    let mona = synced_as(&team.mona.browser, &url).await;
+    let tom = synced_as(&team.tom.browser, &url).await;
+
+    // La session de Mona arrive à échéance, la page ouverte. Sa connexion lui survit (elle
+    // n'est relue qu'à l'ouverture).
+    let expire = format!(
+        "UPDATE sessions SET expires_at = 1 WHERE user_id = '{}'",
+        team.mona.id
+    );
+    exec_sql(&t.db_path(), &expire).await;
+    team.mona
+        .browser
+        .me()
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+    assert!(still_served(&mona).await);
+
+    let cookie = team.mona.browser.cookie();
+    team.mona
+        .browser
+        .log_out()
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert!(
+        closed(&mona).await,
+        "la connexion de Mona est encore ouverte"
+    );
+    assert!(still_served(&tom).await, "Tom est fermé");
+    let left = format!(
+        "SELECT COUNT(*) FROM sessions WHERE user_id = '{}'",
+        team.mona.id
+    );
+    assert_eq!(query_i64(&t.db_path(), &left).await, 0);
+    assert_eq!(handshake(&url, None, cookie.as_deref()).await, Err(401));
 }
 
 /// Le centile `percent` de durées triées, en millisecondes.
