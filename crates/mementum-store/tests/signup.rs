@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::{break_table, fresh, int, page, repair};
 use mementum_acl::{Grant, Level, Role, Subject};
-use mementum_store::{InvitationGrant, NewInvitation, NewUser, Store, StoreError};
+use mementum_store::{Expected, InvitationGrant, NewInvitation, NewUser, Store, StoreError};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -252,8 +252,13 @@ async fn sign_up_with_a_withdrawn_invitation_makes_an_account_without_space() {
     store.revoke_invitation(id).await.unwrap();
     // Son auteur n'est plus admin de l'espace.
     let (orphaned, _) = invite(&store, space.id, member, dan.user.id, 3, now() + DAY).await;
+    let seen = Expected {
+        actor: alice.user.id,
+        actor_role: Role::Owner,
+        target_role: Role::Admin,
+    };
     store
-        .set_role(space.id, dan.user.id, Role::Member)
+        .set_role(space.id, dan.user.id, Role::Member, seen)
         .await
         .unwrap();
     let unknown = [9; 32];
