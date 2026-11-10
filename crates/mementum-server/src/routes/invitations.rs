@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::access::at_least;
 use crate::auth::{self, AuthUser};
-use crate::error::ApiError;
+use crate::error::{ApiError, internal};
 use crate::routes::spaces::space_id;
 use crate::types::{
     Accepted, InvitationCreated, InvitationInfo, InvitationToken, InviteToSpace, PendingInvitation,
@@ -358,9 +358,4 @@ pub(crate) fn pending_invitation(invitation: Invitation) -> PendingInvitation {
         page_id,
         expires_at: invitation.expires_at,
     }
-}
-
-/// Une erreur du store qui ne désigne ici aucune page : `500 internal`.
-fn internal(error: impl std::fmt::Display) -> ApiError {
-    ApiError::internal(&error)
 }

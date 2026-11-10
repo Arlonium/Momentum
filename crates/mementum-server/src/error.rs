@@ -113,15 +113,24 @@ impl ApiError {
         )
     }
 
-    /// `429 too_many_attempts`, avec `Retry-After: <secondes>`.
+    /// `429 too_many_attempts`, avec `Retry-After: <secondes>` : trop de connexions ratées
+    /// pour une adresse.
     pub fn too_many_attempts(retry_after: u64) -> ApiError {
+        ApiError::throttled("trop de tentatives pour cette adresse", retry_after)
+    }
+
+    /// Le `429 too_many_attempts` du changement de mot de passe, avec son `Retry-After`. Le
+    /// code de la connexion, mais pas son message : ici, personne n'a tapé d'adresse.
+    pub fn too_many_wrong_passwords(retry_after: u64) -> ApiError {
+        ApiError::throttled("trop de mots de passe actuels incorrects", retry_after)
+    }
+
+    /// `429 too_many_attempts` pour `what`, à réessayer dans `retry_after` secondes.
+    fn throttled(what: &str, retry_after: u64) -> ApiError {
         let mut error = ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             ErrorCode::TooManyAttempts,
-            format!(
-                "trop de tentatives pour cette adresse : réessayer dans {} min",
-                retry_after.div_ceil(60)
-            ),
+            format!("{what} : réessayer dans {} min", retry_after.div_ceil(60)),
         );
         error.retry_after = Some(retry_after);
         error
@@ -302,6 +311,13 @@ impl ApiError {
             "erreur interne du serveur",
         )
     }
+}
+
+/// Une erreur, du store le plus souvent, qui ne désigne pour l'appelant ni page ni espace :
+/// `500 internal`, le détail au journal. Pour les routes qui ne passent pas par
+/// `From<StoreError>`, qui lirait un `NotFound` comme une page introuvable.
+pub(crate) fn internal(error: impl std::fmt::Display) -> ApiError {
+    ApiError::internal(&error)
 }
 
 impl IntoResponse for ApiError {

@@ -42,7 +42,7 @@ use mementum_store::{NewUser, StoreError};
 use uuid::Uuid;
 
 use crate::auth::{self, AuthUser, Guarded, SESSION_TTL_MS};
-use crate::error::ApiError;
+use crate::error::{ApiError, internal};
 use crate::routes::invitations;
 use crate::types::{ChangePassword, ErrorCode, LogIn, Me, SignUp, SignupMode, SpaceInfo, UserInfo};
 use crate::{AppState, now_ms, to_completion};
@@ -328,9 +328,8 @@ async fn new_password(
     auth::check_password(&body.new)?;
     // Sans ce frein, une session volée essaierait des mots de passe actuels
     // sans limite. Il porte toujours sur un compte : celui de la session.
-    if let Err(retry_after) = attempt(&state, Guarded::PasswordChange, &user.email, Some(user.id)) {
-        return Ok(too_many_wrong_passwords(retry_after));
-    }
+    attempt(&state, Guarded::PasswordChange, &user.email, Some(user.id))
+        .map_err(ApiError::too_many_wrong_passwords)?;
     let account = state
         .store
         .get_user(user.id)
@@ -433,25 +432,6 @@ fn attempt(state: &AppState, what: Guarded, email: &str, account: Option<Uuid>) 
     Err(throttled.retry_after)
 }
 
-/// Le `429 too_many_attempts` du changement de mot de passe, avec son
-/// `Retry-After`. Le code de la connexion, mais pas son message : ici,
-/// personne n'a tapé d'adresse.
-fn too_many_wrong_passwords(retry_after: u64) -> Response {
-    let mut response = ApiError::new(
-        StatusCode::TOO_MANY_REQUESTS,
-        ErrorCode::TooManyAttempts,
-        format!(
-            "trop de mots de passe actuels incorrects : réessayer dans {} min",
-            retry_after.div_ceil(60)
-        ),
-    )
-    .into_response();
-    response
-        .headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
-    response
-}
-
 /// Ferme la session de ce hachage, s'il y en a une, puis les connexions de
 /// synchro du compte qu'elle portait : celui que rend la suppression, sans
 /// lecture préalable, donc pour une session échue aussi (Ruling R90). Une
@@ -501,10 +481,4 @@ async fn me_of(state: &AppState, user: AuthUser) -> Result<Me, ApiError> {
             })
             .collect(),
     })
-}
-
-/// Une erreur du store qui ne désigne ici aucune page : `500 internal`.
-/// (`From<StoreError>` lirait un `NotFound` comme une page introuvable.)
-fn internal(error: impl std::fmt::Display) -> ApiError {
-    ApiError::internal(&error)
 }

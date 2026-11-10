@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use crate::access::require;
 use crate::auth::AuthUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, internal};
 use crate::types::{self, CreateSpace, ErrorCode, SpaceInfo, UpdateMember, UpdateSpace};
 use crate::{AppState, to_completion};
 
@@ -399,11 +399,6 @@ fn member_error(error: StoreError) -> ApiError {
         StoreError::Stale => ApiError::roles_changed(),
         e => internal(e),
     }
-}
-
-/// Une erreur du store qui ne désigne ici aucune page : `500 internal`.
-fn internal(error: impl std::fmt::Display) -> ApiError {
-    ApiError::internal(&error)
 }
 
 #[cfg(test)]

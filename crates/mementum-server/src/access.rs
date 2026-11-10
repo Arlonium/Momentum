@@ -50,7 +50,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::AuthUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, internal};
 
 /// Plafond du cache des accès (Ruling R59), en nœuds visibles plus le coût fixe de chaque
 /// calcul (`AccessCache`) : une quarantaine d'octets par unité, soit 40 Mo environ, cache plein.
@@ -328,11 +328,6 @@ impl AppState {
             }
         }
     }
-}
-
-/// Une erreur du store qui ne désigne ici ni page ni espace : `500 internal`.
-fn internal(error: impl std::fmt::Display) -> ApiError {
-    ApiError::internal(&error)
 }
 
 #[cfg(test)]
