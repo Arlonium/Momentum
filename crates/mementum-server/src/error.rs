@@ -222,6 +222,37 @@ impl ApiError {
         )
     }
 
+    /// `409 last_full_access` : la page n'aurait plus personne en accès complet (Ruling R70).
+    pub fn last_full_access() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::LastFullAccess,
+            "la page n'aurait plus personne en accès complet : donner d'abord l'accès complet à \
+             quelqu'un d'autre ; rien n'a été modifié",
+        )
+    }
+
+    /// `409 access_changed` : l'espace a bougé à chaque tentative d'écrire un changement
+    /// d'accès.
+    pub fn access_changed() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::AccessChanged,
+            "les droits de l'espace viennent de changer : rien n'a été modifié ; réessayer",
+        )
+    }
+
+    /// `404 not_found` : la page n'a pas d'accès propre pour ce compte (il n'en a aucun, ou
+    /// seulement par une page parente), ou le compte est inconnu. Même réponse dans ces cas.
+    pub fn access_not_found() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "ce compte n'a pas d'accès propre sur cette page : un accès hérité se change sur la \
+             page qui le porte",
+        )
+    }
+
     /// `500 internal` : le détail va dans le journal, pas dans la réponse.
     pub fn internal(error: &dyn std::fmt::Display) -> ApiError {
         tracing::error!(%error, "erreur interne");
@@ -259,6 +290,7 @@ impl From<StoreError> for ApiError {
             StoreError::EmailTaken => ApiError::email_taken(),
             StoreError::LastOwner => ApiError::last_owner(),
             StoreError::Stale => ApiError::roles_changed(),
+            StoreError::LastFullAccess => ApiError::last_full_access(),
             StoreError::ParentTrashed => ApiError::parent_trashed(),
             StoreError::NotTrashed => ApiError::not_trashed(),
             e @ StoreError::Sqlx(_) => ApiError::internal(&e),

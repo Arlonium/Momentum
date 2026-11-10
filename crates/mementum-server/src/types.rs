@@ -239,6 +239,17 @@ impl From<mementum_acl::Level> for Level {
     }
 }
 
+impl From<Level> for mementum_acl::Level {
+    fn from(level: Level) -> mementum_acl::Level {
+        match level {
+            Level::Read => mementum_acl::Level::Read,
+            Level::Comment => mementum_acl::Level::Comment,
+            Level::Edit => mementum_acl::Level::Edit,
+            Level::Full => mementum_acl::Level::Full,
+        }
+    }
+}
+
 /// Section de la barre latérale où une page apparaît pour une personne. Calculée pour chacun,
 /// jamais stockée : les sous-pages suivent celle de la plus haute page que la personne voit.
 // La forme d'API de `mementum_acl::Section`, écrite comme `Section::as_str` (test
@@ -390,6 +401,66 @@ pub struct InvitationInfo {
     pub email: String,
 }
 
+/// Qui a accès à une page, et à quel niveau (`GET /api/v1/pages/{id}/access`, et la réponse des
+/// routes qui changent ces accès). Rendu seulement à qui a `full` sur la page : il porte le nom
+/// et l'adresse des comptes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PageAccess {
+    /// L'accès général : le niveau que la ligne `members` de la page, ou d'un ancêtre (la plus
+    /// forte), donne aux membres de l'espace (les propriétaires et les admins y ont `full`).
+    /// `null` : seulement les personnes nommées ci-dessous.
+    pub general: Option<Level>,
+    /// Les comptes qui ont un rôle dans l'espace et une ligne sur la page ou sur un ancêtre,
+    /// une fois chacun, dans l'ordre de leur arrivée dans l'espace.
+    pub entries: Vec<AccessEntry>,
+    /// Les invitations sur cette page qui attendent encore, sans leur jeton.
+    pub invitations: Vec<PendingInvitation>,
+}
+
+/// Un compte nommé dans les accès d'une page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessEntry {
+    pub user_id: String,
+    pub name: String,
+    pub email: String,
+    /// Son niveau effectif : le plus fort de ceux que lui donnent ses lignes sur la page et
+    /// sur ses ancêtres.
+    pub level: Level,
+    /// Ce niveau vient d'un ancêtre : il se change sur la page qui le porte. Un compte qui a
+    /// une ligne sur la page et un niveau hérité plus fort apparaît ainsi, une fois.
+    pub inherited: bool,
+}
+
+/// Corps de `PUT /api/v1/pages/{id}/access/general`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetGeneral {
+    /// Le niveau de la ligne `members` de la page ; `null` : « seulement les invités », la
+    /// ligne est retirée. Obligatoire : un corps sans lui ne retire rien.
+    #[serde(deserialize_with = "nullable")]
+    pub level: Option<Level>,
+}
+
+/// Corps de `PUT /api/v1/pages/{id}/access/users/{userId}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetLevel {
+    pub level: Level,
+}
+
+/// Corps de `POST /api/v1/pages/{id}/invitations`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InviteToPage {
+    /// Rognée et mise en minuscules ; gardée pour l'affichage, jamais vérifiée : c'est le
+    /// jeton qui fait foi (Ruling R47). La réponse ne dit pas si un compte la porte.
+    pub email: String,
+    /// Le niveau que donne l'invitation sur la page (et, par héritage, ses sous-pages).
+    pub level: Level,
+}
+
 /// Une invitation acceptée (`POST /api/v1/invitations/accept`) : où aller ensuite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -527,6 +598,12 @@ pub enum ErrorCode {
     /// Les rôles sur lesquels la demande était décidée ont changé pendant qu'elle
     /// s'écrivait, plusieurs fois de suite : rien n'est écrit ; réessayer. Statut 409.
     RolesChanged,
+    /// Le changement laisserait la page sans personne en accès complet, ni par ses accès ni
+    /// par ceux d'une page parente : rien n'est écrit. Statut 409.
+    LastFullAccess,
+    /// L'espace a changé pendant qu'un changement d'accès s'écrivait, plusieurs fois de suite :
+    /// rien n'est écrit ; réessayer. Statut 409.
+    AccessChanged,
 }
 
 /// Corps de toute réponse d'erreur.
@@ -551,6 +628,16 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
+/// Un champ obligatoire qui peut valoir `null` : sans `#[serde(default)]`, il ne peut pas
+/// manquer (serde ne le rend plus `None` d'office).
+fn nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// Les fichiers TypeScript de `packages/protocol/src/generated/` : nom et
 /// contenu, `index.ts` compris. Sert au test `bindings_are_committed`.
 #[doc(hidden)]
@@ -564,6 +651,7 @@ pub fn bindings() -> Vec<(String, String)> {
     let cfg = ts_rs::Config::new();
     let mut files = vec![
         file::<Accepted>(&cfg),
+        file::<AccessEntry>(&cfg),
         file::<ChangePassword>(&cfg),
         file::<CreatePage>(&cfg),
         file::<CreateSpace>(&cfg),
@@ -574,16 +662,20 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<InvitationInfo>(&cfg),
         file::<InvitationToken>(&cfg),
         file::<InviteRole>(&cfg),
+        file::<InviteToPage>(&cfg),
         file::<InviteToSpace>(&cfg),
         file::<Level>(&cfg),
         file::<LogIn>(&cfg),
         file::<Me>(&cfg),
         file::<Member>(&cfg),
+        file::<PageAccess>(&cfg),
         file::<PageNode>(&cfg),
         file::<PendingInvitation>(&cfg),
         file::<Role>(&cfg),
         file::<RootSection>(&cfg),
         file::<Section>(&cfg),
+        file::<SetGeneral>(&cfg),
+        file::<SetLevel>(&cfg),
         file::<SignUp>(&cfg),
         file::<SignupMode>(&cfg),
         file::<SpaceInfo>(&cfg),
@@ -632,14 +724,28 @@ mod tests {
     }
 
     /// Le niveau de l'API s'écrit comme celui des droits, pour chacun des
-    /// quatre.
+    /// quatre, et revient sans perte.
     #[test]
     fn level_is_written_like_the_acl_level() {
         use mementum_acl::Level as Acl;
         for level in [Acl::Read, Acl::Comment, Acl::Edit, Acl::Full] {
             let written = serde_json::to_value(Level::from(level)).unwrap();
             assert_eq!(written, level.as_str());
+            assert_eq!(Acl::from(Level::from(level)), level);
         }
+    }
+
+    /// `SetGeneral.level` se donne toujours : `null` retire l'accès général, un corps sans
+    /// lui est refusé (il ne retire rien).
+    #[test]
+    fn set_general_level_is_required_but_nullable() {
+        let read: SetGeneral =
+            serde_json::from_value(serde_json::json!({ "level": "read" })).unwrap();
+        assert_eq!(read.level, Some(Level::Read));
+        let none: SetGeneral =
+            serde_json::from_value(serde_json::json!({ "level": null })).unwrap();
+        assert_eq!(none.level, None);
+        assert!(serde_json::from_value::<SetGeneral>(serde_json::json!({})).is_err());
     }
 
     /// La section de l'API s'écrit comme celle des droits, pour chacune des trois ; celle où

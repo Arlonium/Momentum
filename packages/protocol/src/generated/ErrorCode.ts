@@ -3,4 +3,4 @@
 /**
  * Code d'une erreur de l'API.
  */
-export type ErrorCode = "not_found" | "method_not_allowed" | "cycle" | "invalid_mmd" | "invalid_blocks" | "invalid_after" | "invalid_parent" | "title_too_long" | "invalid_json" | "invalid_request" | "payload_too_large" | "unavailable" | "internal" | "bad_host" | "bad_origin" | "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "signup_closed" | "email_taken" | "invalid_email" | "invalid_name" | "invalid_password" | "invalid_invitation" | "forbidden" | "last_owner" | "trashed" | "parent_trashed" | "not_trashed" | "roles_changed";
+export type ErrorCode = "not_found" | "method_not_allowed" | "cycle" | "invalid_mmd" | "invalid_blocks" | "invalid_after" | "invalid_parent" | "title_too_long" | "invalid_json" | "invalid_request" | "payload_too_large" | "unavailable" | "internal" | "bad_host" | "bad_origin" | "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "signup_closed" | "email_taken" | "invalid_email" | "invalid_name" | "invalid_password" | "invalid_invitation" | "forbidden" | "last_owner" | "trashed" | "parent_trashed" | "not_trashed" | "roles_changed" | "last_full_access" | "access_changed";

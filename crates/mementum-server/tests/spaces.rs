@@ -1021,8 +1021,8 @@ async fn page_invitations_are_hidden_from_who_cannot_share() {
     }
 
     // La révoquer : comme une invitation qui n'existe pas, que l'admin ne voie pas la page ou
-    // qu'il la voie sans pouvoir la partager. Mona, qui peut partager ses pages mais n'est pas
-    // admin, non plus (la Task 11 ouvre la révocation à qui peut partager la page).
+    // qu'il la voie sans pouvoir la partager. (Mona, qui peut partager ses pages sans être
+    // admin, peut aussi révoquer leurs invitations : voir plus bas, et `tests/sharing.rs`.)
     let missing = adam
         .browser
         .delete(&format!("/api/v1/invitations/{}", Uuid::now_v7()))
@@ -1032,8 +1032,6 @@ async fn page_invitations_are_hidden_from_who_cannot_share() {
         (&adam, on_private),
         (&adam, on_read_only),
         (&olga, on_private),
-        (&mona, on_private),
-        (&mona, on_team),
     ] {
         let reply = who
             .browser
@@ -1062,6 +1060,11 @@ async fn page_invitations_are_hidden_from_who_cannot_share() {
     let mut expected = vec![on_private, on_read_only];
     expected.sort();
     assert_eq!(left, expected);
+    // Mona, qui n'est pas admin, révoque l'invitation de sa page privée : elle peut la partager.
+    mona.browser
+        .delete(&format!("/api/v1/invitations/{on_private}"))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
     store.close().await;
 }
 

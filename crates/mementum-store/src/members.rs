@@ -162,6 +162,113 @@ pub(crate) async fn adopt_orphans(
     Ok(spaces)
 }
 
+/// Ceux qui ont un rôle dans l'espace, invités compris, lus dans la transaction.
+async fn with_role(
+    tx: &mut Transaction<'_, Sqlite>,
+    space_id: &str,
+) -> Result<HashSet<Uuid>, StoreError> {
+    sqlx::query("SELECT user_id FROM members WHERE space_id = ?")
+        .bind(space_id)
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(|r| parse_uuid(&r.get::<String, _>(0)))
+        .collect()
+}
+
+/// Relit le sujet et le niveau d'une ligne d'`acl` : une valeur inconnue est une erreur.
+fn line_from(subject: &str, level: &str) -> Result<(Subject, Level), StoreError> {
+    Ok((
+        Subject::parse(subject).ok_or_else(|| unreadable("sujet d'accès", subject))?,
+        Level::parse(level).ok_or_else(|| unreadable("niveau d'accès", level))?,
+    ))
+}
+
+/// Ruling R70 : une ligne d'accès donne-t-elle un droit ? `members`, toujours ; `user:<id>`, si
+/// le compte a encore un rôle dans l'espace (`with_role`). Une ligne restée à quelqu'un sans
+/// rôle (celles d'un compte parti, sur ses pages privées) ne compte pas.
+fn grants_a_right(subject: Subject, with_role: &HashSet<Uuid>) -> bool {
+    match subject {
+        Subject::Members => true,
+        Subject::User(id) => with_role.contains(&id),
+    }
+}
+
+/// Ruling R70 : ces lignes, qui donnent un droit ([`grants_a_right`]), mettent-elles quelqu'un
+/// en `full` sur leur page, et par héritage sur ses descendants ? Une ligne `members` compte à
+/// tout niveau : les propriétaires et les admins y ont `full`, et l'espace a toujours un
+/// propriétaire.
+fn someone_in_full(lines: &[(Subject, Level)]) -> bool {
+    lines
+        .iter()
+        .any(|(subject, level)| *subject == Subject::Members || *level == Level::Full)
+}
+
+/// Ruling R70, dans la transaction d'un changement d'accès (`Store::change_access`) : la page
+/// `node_id` a-t-elle encore quelqu'un en `full`, par ses propres lignes ou par celles d'un
+/// ancêtre ? La même notion que [`hand_over_full`] : seules comptent les lignes qui donnent un
+/// droit, et une ligne `members` met quelqu'un en `full`.
+pub(crate) async fn keeps_full(
+    tx: &mut Transaction<'_, Sqlite>,
+    space_id: &str,
+    node_id: &str,
+) -> Result<bool, StoreError> {
+    let with_role = with_role(tx, space_id).await?;
+    // La page et ses ancêtres. `UNION` (et non `UNION ALL`) : la remontée s'arrête même si des
+    // parents tournaient en rond.
+    let rows = sqlx::query(
+        "WITH RECURSIVE chain(id) AS ( \
+             SELECT ?1 \
+             UNION \
+             SELECT n.parent_id FROM chain JOIN nodes n ON n.id = chain.id \
+             WHERE n.parent_id IS NOT NULL \
+         ) \
+         SELECT a.subject, a.level FROM acl a JOIN chain ON a.node_id = chain.id",
+    )
+    .bind(node_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut lines = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let line = line_from(&r.get::<String, _>(0), &r.get::<String, _>(1))?;
+        if grants_a_right(line.0, &with_role) {
+            lines.push(line);
+        }
+    }
+    Ok(someone_in_full(&lines))
+}
+
+/// Si `user_id` est invité dans l'espace et n'y a plus aucune ligne d'accès, il en sort, dans la
+/// transaction. Rend vrai s'il est sorti ; la révision est l'affaire de l'appelant.
+pub(crate) async fn guest_leaves_if_bare(
+    tx: &mut Transaction<'_, Sqlite>,
+    space_id: &str,
+    user_id: Uuid,
+) -> Result<bool, StoreError> {
+    let user = user_id.to_string();
+    if role_of(tx, space_id, &user).await? != Some(Role::Guest) {
+        return Ok(false);
+    }
+    let left: bool = sqlx::query(
+        "SELECT EXISTS (SELECT 1 FROM acl a JOIN nodes n ON n.id = a.node_id \
+                        WHERE n.space_id = ? AND a.subject = ?)",
+    )
+    .bind(space_id)
+    .bind(Subject::User(user_id).to_string())
+    .fetch_one(&mut **tx)
+    .await?
+    .get(0);
+    if left {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM members WHERE space_id = ? AND user_id = ?")
+        .bind(space_id)
+        .bind(&user)
+        .execute(&mut **tx)
+        .await?;
+    Ok(true)
+}
+
 /// Ruling R70, dans la transaction de [`Store::remove_member`], une fois la personne qui part
 /// retirée de `members` et ses lignes partagées retirées : sur toute page dont elle était le
 /// dernier sujet en `full` (`had_full` : les pages où elle avait une ligne `full` ; le `full`
@@ -170,10 +277,11 @@ pub(crate) async fn adopt_orphans(
 /// ancêtre) compte comme un sujet en `full`, les admins y ayant `full` : rien à faire alors.
 /// Aucun sujet nouveau n'apparaît.
 ///
-/// Seules comptent les lignes qui donnent un droit : `members`, et celles des comptes qui ont
-/// encore un rôle dans l'espace. Une ligne restée à quelqu'un sans rôle (celles de la personne
-/// qui part, sur ses pages privées, ou d'un départ plus ancien) ne compte pas, et n'est pas
-/// élevée.
+/// Seules comptent les lignes qui donnent un droit ([`grants_a_right`]) : `members`, et celles
+/// des comptes qui ont encore un rôle dans l'espace. Une ligne restée à quelqu'un sans rôle
+/// (celles de la personne qui part, sur ses pages privées, ou d'un départ plus ancien) ne
+/// compte pas, et n'est pas élevée. `Store::change_access` refuse un changement sur la même
+/// notion ([`keeps_full`]).
 ///
 /// L'arbre est parcouru des racines vers les feuilles : une page dont un ancêtre vient d'être
 /// confié à quelqu'un en `full` en hérite, et n'a pas besoin d'élévation. Un nœud pris dans un
@@ -195,16 +303,8 @@ async fn hand_over_full(
         children.entry(r.get(1)).or_default().push(r.get(0));
     }
     // Ceux qui ont encore un rôle dans l'espace (la personne qui part n'en a plus).
-    let active: HashSet<Uuid> = sqlx::query("SELECT user_id FROM members WHERE space_id = ?")
-        .bind(space_id)
-        .fetch_all(&mut **tx)
-        .await?
-        .iter()
-        .map(|r| parse_uuid(&r.get::<String, _>(0)))
-        .collect::<Result<_, _>>()?;
-    // Les lignes propres de chaque page qui donnent un droit : celles des membres et des
-    // comptes qui ont un rôle. Une ligne restée à quelqu'un sans rôle (celles de la personne
-    // qui part, sur ses pages privées ; celles d'un départ plus ancien) ne compte pas.
+    let with_role = with_role(tx, space_id).await?;
+    // Les lignes propres de chaque page qui donnent un droit.
     let mut lines: HashMap<String, Vec<(Subject, Level)>> = HashMap::new();
     for r in sqlx::query(
         "SELECT a.node_id, a.subject, a.level FROM acl a JOIN nodes n ON n.id = a.node_id \
@@ -214,17 +314,9 @@ async fn hand_over_full(
     .fetch_all(&mut **tx)
     .await?
     {
-        let subject: String = r.get(1);
-        let level: String = r.get(2);
-        let subject =
-            Subject::parse(&subject).ok_or_else(|| unreadable("sujet d'accès", &subject))?;
-        let level = Level::parse(&level).ok_or_else(|| unreadable("niveau d'accès", &level))?;
-        let counts = match subject {
-            Subject::Members => true,
-            Subject::User(id) => active.contains(&id),
-        };
-        if counts {
-            lines.entry(r.get(0)).or_default().push((subject, level));
+        let line = line_from(&r.get::<String, _>(1), &r.get::<String, _>(2))?;
+        if grants_a_right(line.0, &with_role) {
+            lines.entry(r.get(0)).or_default().push(line);
         }
     }
 
@@ -239,10 +331,7 @@ async fn hand_over_full(
     while let Some((id, parent_had_full, parent_others_full)) = todo.pop() {
         let own = lines.get(&id).map(Vec::as_slice).unwrap_or_default();
         let had = parent_had_full || had_full.contains(&id);
-        let mut others = parent_others_full
-            || own
-                .iter()
-                .any(|(s, l)| *s == Subject::Members || *l == Level::Full);
+        let mut others = parent_others_full || someone_in_full(own);
         if had
             && !others
             && let Some(top) = own.iter().map(|(_, l)| *l).max()
@@ -467,37 +556,18 @@ impl Store {
     /// personne est `guest` et n'a plus aucune ligne dans l'espace, elle en sort. `NotFound` si
     /// le nœud n'existe pas.
     pub async fn revoke_user_grant(&self, node_id: Uuid, user_id: Uuid) -> Result<(), StoreError> {
-        let (node, user) = (node_id.to_string(), user_id.to_string());
-        let subject = Subject::User(user_id).to_string();
+        let node = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let space = space_of(&mut tx, &node).await?;
-        let mut wrote = sqlx::query("DELETE FROM acl WHERE node_id = ? AND subject = ?")
+        let removed = sqlx::query("DELETE FROM acl WHERE node_id = ? AND subject = ?")
             .bind(&node)
-            .bind(&subject)
+            .bind(Subject::User(user_id).to_string())
             .execute(&mut *tx)
             .await?
             .rows_affected()
             > 0;
-        if role_of(&mut tx, &space, &user).await? == Some(Role::Guest) {
-            let left: bool = sqlx::query(
-                "SELECT EXISTS (SELECT 1 FROM acl a JOIN nodes n ON n.id = a.node_id \
-                                WHERE n.space_id = ? AND a.subject = ?)",
-            )
-            .bind(&space)
-            .bind(&subject)
-            .fetch_one(&mut *tx)
-            .await?
-            .get(0);
-            if !left {
-                sqlx::query("DELETE FROM members WHERE space_id = ? AND user_id = ?")
-                    .bind(&space)
-                    .bind(&user)
-                    .execute(&mut *tx)
-                    .await?;
-                wrote = true;
-            }
-        }
-        if wrote {
+        let left = guest_leaves_if_bare(&mut tx, &space, user_id).await?;
+        if removed || left {
             bump_rev(&mut tx, &space).await?;
             tx.commit().await?;
         }

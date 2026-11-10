@@ -1,0 +1,1070 @@
+//! Le partage d'une page : qui y a accès (`GET …/access`), l'accès général des membres, l'accès
+//! d'une personne, les invitations sur la page. Toutes ces routes demandent `full` ; une page
+//! garde toujours quelqu'un en `full` ; une invitation sur une page ne donne jamais le reste de
+//! l'espace, ne dit rien des comptes, et ne vaut que tant que son auteur peut partager la page.
+//!
+//! Les rôles et les pages de départ sont posés par le store (`Team`, dans `common/mod.rs`) ; les
+//! accès qu'on teste passent par les routes. Les valeurs du contrat (codes d'erreur, niveaux)
+//! sont écrites ici en clair.
+
+mod common;
+
+use std::collections::BTreeMap;
+
+use axum::http::StatusCode;
+use common::{
+    Account, Browser, Reply, SESSION_COOKIE, Team, TestApp, WAIT, outcome, text, tree_nodes,
+};
+use mementum_acl::{Level, Subject};
+use mementum_schema::SCHEMA_VERSION;
+use mementum_server::SignupMode;
+use mementum_sync::testkit::Client;
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+/// Une application où tout le monde peut s'inscrire : les comptes de ces tests reçoivent leur
+/// rôle par le store, ou par une invitation.
+async fn open_app() -> TestApp {
+    TestApp::with_config(|cfg| cfg.signup = SignupMode::Open).await
+}
+
+fn members(level: Level) -> (Subject, Level) {
+    (Subject::Members, level)
+}
+
+fn user(account: &Account<'_>, level: Level) -> (Subject, Level) {
+    (Subject::User(account.id), level)
+}
+
+fn access_uri(page: impl std::fmt::Display) -> String {
+    format!("/api/v1/pages/{page}/access")
+}
+
+fn general_uri(page: impl std::fmt::Display) -> String {
+    format!("/api/v1/pages/{page}/access/general")
+}
+
+fn user_uri(page: impl std::fmt::Display, user: impl std::fmt::Display) -> String {
+    format!("/api/v1/pages/{page}/access/users/{user}")
+}
+
+fn page_invitations_uri(page: impl std::fmt::Display) -> String {
+    format!("/api/v1/pages/{page}/invitations")
+}
+
+/// `GET …/access` : `200`, le corps.
+async fn access_of(by: &Browser<'_>, page: Uuid) -> Value {
+    let reply = by.get(&access_uri(page)).await;
+    reply.assert_status(StatusCode::OK);
+    reply.json()
+}
+
+/// `PUT …/access/general` avec `{ "level": level }`.
+async fn set_general(by: &Browser<'_>, page: Uuid, level: Value) -> Reply {
+    by.put(&general_uri(page), json!({ "level": level })).await
+}
+
+/// `PUT …/access/users/{user}` avec `{ "level": level }`.
+async fn set_level(
+    by: &Browser<'_>,
+    page: Uuid,
+    user: impl std::fmt::Display,
+    level: &str,
+) -> Reply {
+    by.put(&user_uri(page, user), json!({ "level": level }))
+        .await
+}
+
+/// `DELETE …/access/users/{user}`.
+async fn remove(by: &Browser<'_>, page: Uuid, user: impl std::fmt::Display) -> Reply {
+    by.delete(&user_uri(page, user)).await
+}
+
+/// `POST …/invitations` : la réponse.
+async fn invite(by: &Browser<'_>, page: Uuid, email: &str, level: &str) -> Reply {
+    by.post(
+        &page_invitations_uri(page),
+        json!({ "email": email, "level": level }),
+    )
+    .await
+}
+
+/// Une invitation sur une page, créée : `(id, jeton)`.
+async fn invited(by: &Browser<'_>, page: Uuid, email: &str, level: &str) -> (Uuid, String) {
+    let reply = invite(by, page, email, level).await;
+    reply.assert_status(StatusCode::CREATED);
+    let body = reply.json();
+    (common::uuid(&body["id"]), text(&body, "token").to_string())
+}
+
+async fn lookup(browser: &Browser<'_>, token: &str) -> Reply {
+    browser
+        .post("/api/v1/invitations/lookup", json!({ "token": token }))
+        .await
+}
+
+async fn accept(browser: &Browser<'_>, token: &str) -> Reply {
+    browser
+        .post("/api/v1/invitations/accept", json!({ "token": token }))
+        .await
+}
+
+/// Ce que `by` voit de l'espace : `(titre, niveau, section)` de chaque page de son arbre, par
+/// titre.
+async fn seen(by: &Browser<'_>, space: Uuid) -> Vec<(String, String, String)> {
+    let mut pages: Vec<(String, String, String)> = tree_nodes(by, space)
+        .await
+        .iter()
+        .map(|n| {
+            (
+                text(n, "title").to_string(),
+                text(n, "level").to_string(),
+                text(n, "section").to_string(),
+            )
+        })
+        .collect();
+    pages.sort();
+    pages
+}
+
+/// `(titre, niveau, section)`, pour comparer à [`seen`].
+fn page(title: &str, level: &str, section: &str) -> (String, String, String) {
+    (title.to_string(), level.to_string(), section.to_string())
+}
+
+/// Les entrées d'un `PageAccess` : `(userId, niveau, hérité)`, dans l'ordre de la réponse.
+fn entries(access: &Value) -> Vec<(Uuid, String, bool)> {
+    access["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("« entries » en liste attendu dans {access}"))
+        .iter()
+        .map(|e| {
+            (
+                common::uuid(&e["userId"]),
+                text(e, "level").to_string(),
+                e["inherited"]
+                    .as_bool()
+                    .unwrap_or_else(|| panic!("« inherited » booléen attendu dans {e}")),
+            )
+        })
+        .collect()
+}
+
+fn entry(account: &Account<'_>, level: &str, inherited: bool) -> (Uuid, String, bool) {
+    (account.id, level.to_string(), inherited)
+}
+
+/// Le rôle de `account` dans l'espace, d'après son `GET /api/v1/me` ; `None` s'il n'y est pas.
+async fn role_in(account: &Account<'_>, space: Uuid) -> Option<String> {
+    let me = account.browser.me().await;
+    me.assert_status(StatusCode::OK);
+    me.json()["spaces"]
+        .as_array()
+        .expect("« spaces » en liste")
+        .iter()
+        .find(|s| s["id"] == space.to_string())
+        .map(|s| text(s, "role").to_string())
+}
+
+/// Les cinq routes du partage, sur la page `id` (corps valides) : `(nom, réponse)`.
+async fn five_routes(
+    by: &Browser<'_>,
+    id: &str,
+    some_user: Uuid,
+    other_user: Uuid,
+) -> Vec<(&'static str, Reply)> {
+    vec![
+        ("GET access", by.get(&access_uri(id)).await),
+        (
+            "PUT general",
+            by.put(&general_uri(id), json!({ "level": "read" })).await,
+        ),
+        (
+            "PUT user",
+            by.put(&user_uri(id, some_user), json!({ "level": "full" }))
+                .await,
+        ),
+        ("DELETE user", by.delete(&user_uri(id, other_user)).await),
+        (
+            "POST invitation",
+            by.post(
+                &page_invitations_uri(id),
+                json!({ "email": "quelqu-un@exemple.fr", "level": "read" }),
+            )
+            .await,
+        ),
+    ]
+}
+
+/// Les cinq routes demandent `full` : sous ce niveau, `403 forbidden` ; sans voir la page (pas
+/// de rôle dans l'espace, invitée sans accès, admin de l'instance), la réponse d'une page qui
+/// n'existe pas, avant même que le corps soit lu. Rien n'est écrit.
+#[tokio::test]
+async fn sharing_requires_full() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    // Mona (membre) y a `edit` par la ligne des membres ; Olga, `full`.
+    let id = team
+        .page(
+            None,
+            "Page",
+            &[members(Level::Edit), user(&team.olga, Level::Full)],
+        )
+        .await;
+    let before = team.grants(id).await;
+    let (tom, olga) = (team.tom.id, team.olga.id);
+
+    for (route, reply) in five_routes(&team.mona.browser, &id.to_string(), tom, olga).await {
+        let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+        assert!(text(&body, "message").contains("accès complet"), "{route}");
+    }
+    // Un corps illisible n'y change rien : les droits d'abord.
+    set_general(&team.mona.browser, id, json!("owner"))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+
+    for who in [&team.zoe, &team.gina, &team.sam] {
+        let unknown = Uuid::now_v7().to_string();
+        let missing = five_routes(&who.browser, &unknown, tom, olga).await;
+        let malformed = five_routes(&who.browser, "pas-un-id", tom, olga).await;
+        let real = five_routes(&who.browser, &id.to_string(), tom, olga).await;
+        for (((route, real), (_, missing)), (_, malformed)) in
+            real.iter().zip(&missing).zip(&malformed)
+        {
+            real.assert_error(StatusCode::NOT_FOUND, "not_found");
+            assert_eq!(outcome(real), outcome(missing), "{route}");
+            assert_eq!(outcome(real), outcome(malformed), "{route}");
+        }
+        // Corps illisible : toujours la réponse d'une page qui n'existe pas.
+        let bad = set_general(&who.browser, id, json!("owner")).await;
+        assert_eq!(outcome(&bad), outcome(&missing[1].1));
+    }
+
+    // Sans session.
+    for (_, reply) in five_routes(&t.browser(), &id.to_string(), tom, olga).await {
+        reply.assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+    }
+
+    // Olga, en `full`, lit les accès.
+    access_of(&team.olga.browser, id).await;
+    // Rien n'a été écrit, aucune invitation créée.
+    assert_eq!(team.grants(id).await, before);
+    assert!(
+        team.store
+            .pending_invitations(team.space)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// L'accès général déplace une page entre les sections : privée, puis ouverte aux membres en
+/// lecture (dans « Espace » pour un autre membre, sous-page comprise, et pas pour l'invitée),
+/// puis `null` (« seulement les invités ») : elle redevient invisible pour lui.
+#[tokio::test]
+async fn general_access_switch_moves_the_page_between_sections() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let olga = &team.olga;
+    let notes = olga
+        .create(json!({ "title": "Notes", "spaceId": team.space.to_string() }))
+        .await;
+    olga.create(json!({ "title": "Sous-notes", "parentId": notes.id }))
+        .await;
+    let id = common::uuid(&json!(notes.id));
+    assert!(seen(&team.mona.browser, team.space).await.is_empty());
+    assert_eq!(
+        seen(&olga.browser, team.space).await,
+        [
+            page("Notes", "full", "private"),
+            page("Sous-notes", "full", "private")
+        ]
+    );
+
+    // Ouverte aux membres, en lecture.
+    let reply = set_general(&olga.browser, id, json!("read")).await;
+    reply.assert_status(StatusCode::OK);
+    let access = reply.json();
+    assert_eq!(access["general"], "read");
+    assert_eq!(entries(&access), [entry(olga, "full", false)]);
+    assert_eq!(access["invitations"], json!([]));
+    assert_eq!(access_of(&olga.browser, id).await, access);
+    assert_eq!(
+        seen(&team.mona.browser, team.space).await,
+        [
+            page("Notes", "read", "space"),
+            page("Sous-notes", "read", "space")
+        ]
+    );
+    // En lecture seulement.
+    team.mona
+        .get_mmd(&notes.id)
+        .await
+        .assert_status(StatusCode::OK);
+    team.mona
+        .put_mmd(&notes.id, "Texte\n")
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    // Pour Olga aussi, la page est passée dans « Espace ».
+    assert_eq!(
+        seen(&olga.browser, team.space).await,
+        [
+            page("Notes", "full", "space"),
+            page("Sous-notes", "full", "space")
+        ]
+    );
+    // L'invitée n'est pas un membre : rien.
+    assert!(seen(&team.gina.browser, team.space).await.is_empty());
+
+    // Un corps sans « level » ne retire rien : `null` se demande.
+    olga.browser
+        .put(&general_uri(id), json!({}))
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json");
+    assert_eq!(access_of(&olga.browser, id).await["general"], "read");
+
+    // « Seulement les invités » : la ligne des membres part.
+    let reply = set_general(&olga.browser, id, Value::Null).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(reply.json()["general"], Value::Null);
+    assert!(seen(&team.mona.browser, team.space).await.is_empty());
+    let gone = team.mona.browser.get(&format!("/api/v1/pages/{id}")).await;
+    let unknown = team
+        .mona
+        .browser
+        .get(&format!("/api/v1/pages/{}", Uuid::now_v7()))
+        .await;
+    assert_eq!(outcome(&gone), outcome(&unknown));
+    assert_eq!(
+        seen(&olga.browser, team.space).await,
+        [
+            page("Notes", "full", "private"),
+            page("Sous-notes", "full", "private")
+        ]
+    );
+    assert_eq!(team.grants(id).await, [user(olga, Level::Full)]);
+}
+
+/// Review Focus 2 : B, invité sur une page, accepte. Il voit la page et ses sous-pages, et rien
+/// d'autre de l'espace ; il n'en est pas membre : ni la liste des membres, ni une page à la
+/// racine.
+#[tokio::test]
+async fn page_invitation_makes_a_guest_not_a_member() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let project = team.page(None, "Projet", &[members(Level::Full)]).await;
+    let chapter = team.page(Some(project), "Chapitre", &[]).await;
+    let beside = team.page(None, "À côté", &[members(Level::Read)]).await;
+    let private = team
+        .page(None, "Privée", &[user(&team.olga, Level::Full)])
+        .await;
+
+    // Zoé n'a aucun rôle dans l'espace : elle est B.
+    let zoe = &team.zoe;
+    assert_eq!(role_in(zoe, team.space).await, None);
+    let (_, token) = invited(&team.olga.browser, project, "zoe@exemple.fr", "edit").await;
+    let reply = accept(&zoe.browser, &token).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(
+        reply.json(),
+        json!({ "spaceId": team.space.to_string(), "pageId": project.to_string() })
+    );
+
+    // Invitée, pas membre.
+    assert_eq!(role_in(zoe, team.space).await.as_deref(), Some("guest"));
+    // La page et sa sous-page, dans « Partagé », et rien d'autre.
+    assert_eq!(
+        seen(&zoe.browser, team.space).await,
+        [
+            page("Chapitre", "edit", "shared"),
+            page("Projet", "edit", "shared")
+        ]
+    );
+    for id in [project, chapter] {
+        zoe.browser
+            .get(&format!("/api/v1/pages/{id}"))
+            .await
+            .assert_status(StatusCode::OK);
+    }
+    zoe.put_mmd(&chapter.to_string(), "Écrit par Zoé\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let unknown = zoe
+        .browser
+        .get(&format!("/api/v1/pages/{}", Uuid::now_v7()))
+        .await;
+    for id in [beside, private] {
+        let reply = zoe.browser.get(&format!("/api/v1/pages/{id}")).await;
+        assert_eq!(outcome(&reply), outcome(&unknown));
+    }
+    // Ni les membres, ni les invitations de l'espace, ni une page à la racine.
+    zoe.browser
+        .get(&format!("/api/v1/spaces/{}/members", team.space))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    zoe.browser
+        .get(&format!("/api/v1/spaces/{}/invitations", team.space))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    for section in ["space", "private"] {
+        zoe.post(json!({ "spaceId": team.space.to_string(), "section": section }))
+            .await
+            .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    // Le partage de la page ne lui est pas ouvert non plus (`edit`).
+    zoe.browser
+        .get(&access_uri(project))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    // Le lien a servi.
+    accept(&team.tom.browser, &token)
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "invalid_invitation");
+}
+
+/// Un membre invité sur une page n'y gagne que le niveau de l'invitation, sur elle et ses
+/// sous-pages : son rôle ne change pas, ni ce qu'il a ailleurs, ni ce qu'ont les autres.
+#[tokio::test]
+async fn invited_member_gets_only_the_extra_level() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let project = team.page(None, "Projet", &[members(Level::Read)]).await;
+    team.page(Some(project), "Chapitre", &[]).await;
+    team.page(None, "Autre", &[members(Level::Read)]).await;
+
+    let (_, token) = invited(&team.olga.browser, project, "tom@exemple.fr", "edit").await;
+    accept(&team.tom.browser, &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    assert_eq!(
+        role_in(&team.tom, team.space).await.as_deref(),
+        Some("member")
+    );
+    assert_eq!(
+        seen(&team.tom.browser, team.space).await,
+        [
+            page("Autre", "read", "space"),
+            page("Chapitre", "edit", "space"),
+            page("Projet", "edit", "space")
+        ]
+    );
+    assert_eq!(
+        seen(&team.mona.browser, team.space).await,
+        [
+            page("Autre", "read", "space"),
+            page("Chapitre", "read", "space"),
+            page("Projet", "read", "space")
+        ]
+    );
+    let access = access_of(&team.olga.browser, project).await;
+    assert_eq!(access["general"], "read");
+    assert_eq!(entries(&access), [entry(&team.tom, "edit", false)]);
+}
+
+/// Retirer son dernier accès à un invité le sort de l'espace ; tant qu'il en garde un, il reste.
+#[tokio::test]
+async fn guest_leaves_the_space_with_his_last_grant() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let gina = &team.gina;
+    let first = team
+        .page(
+            None,
+            "Première",
+            &[members(Level::Full), user(gina, Level::Read)],
+        )
+        .await;
+    let second = team
+        .page(
+            None,
+            "Seconde",
+            &[members(Level::Full), user(gina, Level::Edit)],
+        )
+        .await;
+    assert_eq!(
+        seen(&gina.browser, team.space).await,
+        [
+            page("Première", "read", "shared"),
+            page("Seconde", "edit", "shared")
+        ]
+    );
+
+    let reply = remove(&team.olga.browser, first, gina.id).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(entries(&reply.json()), []);
+    assert_eq!(role_in(gina, team.space).await.as_deref(), Some("guest"));
+    assert_eq!(
+        seen(&gina.browser, team.space).await,
+        [page("Seconde", "edit", "shared")]
+    );
+
+    remove(&team.olga.browser, second, gina.id)
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(role_in(gina, team.space).await, None);
+    gina.browser
+        .get(&format!("/api/v1/spaces/{}/tree", team.space))
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+    let listed = team
+        .olga
+        .browser
+        .get(&format!("/api/v1/spaces/{}/members", team.space))
+        .await;
+    listed.assert_status(StatusCode::OK);
+    assert!(!listed.text().contains(&gina.id.to_string()));
+    // Un membre dont on retire une ligne, lui, reste membre (il n'en avait pas d'autre).
+    let third = team
+        .page(
+            None,
+            "Troisième",
+            &[members(Level::Full), user(&team.tom, Level::Edit)],
+        )
+        .await;
+    remove(&team.olga.browser, third, team.tom.id)
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(
+        role_in(&team.tom, team.space).await.as_deref(),
+        Some("member")
+    );
+}
+
+/// Ruling R70 : après tout changement, la page garde quelqu'un en `full`, à elle ou hérité ;
+/// sinon `409 last_full_access`, et rien n'est écrit. Une ligne `members` compte (les admins y
+/// ont `full`), un `full` hérité aussi ; une ligne restée à quelqu'un sans rôle, non.
+#[tokio::test]
+async fn last_full_access_cannot_be_removed() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let olga = &team.olga.browser;
+    let refused = async |reply: Reply| {
+        let body = reply.assert_error(StatusCode::CONFLICT, "last_full_access");
+        assert!(text(&body, "message").contains("accès complet"), "{body}");
+    };
+
+    // La page privée d'Olga, partagée en lecture avec Mona.
+    let shared = team
+        .page(
+            None,
+            "Partagée",
+            &[user(&team.olga, Level::Full), user(&team.mona, Level::Read)],
+        )
+        .await;
+    let before = team.grants(shared).await;
+    refused(remove(olga, shared, team.olga.id).await).await;
+    for level in ["edit", "comment", "read"] {
+        refused(set_level(olga, shared, team.olga.id, level).await).await;
+    }
+    assert_eq!(team.grants(shared).await, before);
+
+    // Une page des membres : la ligne `members` est le seul `full`. Elle ne part pas ; elle
+    // peut baisser, elle compte encore.
+    let team_page = team.page(None, "Équipe", &[members(Level::Full)]).await;
+    refused(set_general(olga, team_page, Value::Null).await).await;
+    assert_eq!(team.grants(team_page).await, [members(Level::Full)]);
+    let reply = set_general(olga, team_page, json!("read")).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(reply.json()["general"], "read");
+    assert_eq!(team.grants(team_page).await, [members(Level::Read)]);
+
+    // Sam n'a pas de rôle dans l'espace : sa ligne ne compte pas.
+    let dormant = team
+        .page(
+            None,
+            "Dormante",
+            &[user(&team.olga, Level::Full), user(&team.sam, Level::Full)],
+        )
+        .await;
+    let before = team.grants(dormant).await;
+    refused(remove(olga, dormant, team.olga.id).await).await;
+    refused(set_level(olga, dormant, team.olga.id, "edit").await).await;
+    assert_eq!(team.grants(dormant).await, before);
+
+    // Un `full` hérité compte : Olga l'a sur le parent.
+    let parent = team
+        .page(None, "Parent", &[user(&team.olga, Level::Full)])
+        .await;
+    let child = team
+        .page(Some(parent), "Enfant", &[user(&team.mona, Level::Full)])
+        .await;
+    let reply = remove(olga, child, team.mona.id).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(entries(&reply.json()), [entry(&team.olga, "full", true)]);
+    // Sur le parent, la seule ligne en `full` ne part pas.
+    refused(remove(olga, parent, team.olga.id).await).await;
+
+    // Une ligne `members` sur un ancêtre compte, à tout niveau.
+    let open = team.page(None, "Ouverte", &[members(Level::Read)]).await;
+    let under = team
+        .page(Some(open), "Dessous", &[user(&team.mona, Level::Full)])
+        .await;
+    remove(olga, under, team.mona.id)
+        .await
+        .assert_status(StatusCode::OK);
+    assert!(team.grants(under).await.is_empty());
+}
+
+/// On peut se retirer à soi-même son accès, même le dernier moyen de voir la page, tant que
+/// quelqu'un d'autre y garde `full` : le changement est fait (`204`, on ne voit plus les accès),
+/// et la page sort de son arbre.
+#[tokio::test]
+async fn removing_oneself_is_allowed() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+    let both = [user(&team.olga, Level::Full), user(mona, Level::Full)];
+    let left = team.page(None, "Quittée", &both).await;
+    let lowered = team.page(None, "Baissée", &both).await;
+
+    let reply = remove(&mona.browser, left, mona.id).await;
+    reply.assert_status(StatusCode::NO_CONTENT);
+    assert!(reply.body.is_empty());
+    assert_eq!(team.grants(left).await, [user(&team.olga, Level::Full)]);
+    mona.browser
+        .get(&format!("/api/v1/pages/{left}"))
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+
+    // Se baisser en lecture : on voit encore la page, plus ses accès.
+    set_level(&mona.browser, lowered, mona.id, "read")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        seen(&mona.browser, team.space).await,
+        [page("Baissée", "read", "shared")]
+    );
+    mona.browser
+        .get(&access_uri(lowered))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+
+    // Olga, seule en `full` désormais, ne se retire pas.
+    remove(&team.olga.browser, lowered, team.olga.id)
+        .await
+        .assert_error(StatusCode::CONFLICT, "last_full_access");
+}
+
+/// Ce qu'on hérite d'un ancêtre se voit sur la sous-page (`inherited: true`, au niveau hérité),
+/// et ne s'y retire pas : `404`, comme pour un compte sans ligne. Un compte qui a une ligne sur la
+/// page et un niveau hérité plus fort n'apparaît qu'une fois, au niveau effectif, hérité.
+#[tokio::test]
+async fn inherited_entries_cannot_be_deleted_from_the_child() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let olga = &team.olga.browser;
+    let parent = team
+        .page(
+            None,
+            "Parent",
+            &[
+                user(&team.olga, Level::Full),
+                user(&team.mona, Level::Edit),
+                user(&team.tom, Level::Read),
+            ],
+        )
+        .await;
+    let child = team
+        .page(
+            Some(parent),
+            "Enfant",
+            &[
+                user(&team.mona, Level::Read),
+                user(&team.tom, Level::Edit),
+                user(&team.gina, Level::Comment),
+            ],
+        )
+        .await;
+
+    let access = access_of(olga, child).await;
+    assert_eq!(access["general"], Value::Null);
+    // Dans l'ordre d'arrivée dans l'espace : Olga, Mona, Tom, Gina.
+    assert_eq!(
+        entries(&access),
+        [
+            entry(&team.olga, "full", true),
+            entry(&team.mona, "edit", true),
+            entry(&team.tom, "edit", false),
+            entry(&team.gina, "comment", false),
+        ]
+    );
+    let olga_entry = &access["entries"][0];
+    assert_eq!(olga_entry["name"], "Olga");
+    assert_eq!(olga_entry["email"], "olga@exemple.fr");
+    assert_eq!(
+        entries(&access_of(olga, parent).await),
+        [
+            entry(&team.olga, "full", false),
+            entry(&team.mona, "edit", false),
+            entry(&team.tom, "read", false),
+        ]
+    );
+
+    // Olga n'a pas de ligne sur l'enfant : `404`, comme un compte inconnu ou mal écrit.
+    let before = team.grants(child).await;
+    let inherited = remove(olga, child, team.olga.id).await;
+    inherited.assert_error(StatusCode::NOT_FOUND, "not_found");
+    for other in [Uuid::now_v7().to_string(), "pas-un-id".to_string()] {
+        assert_eq!(
+            outcome(&remove(olga, child, &other).await),
+            outcome(&inherited)
+        );
+    }
+    assert_eq!(team.grants(child).await, before);
+
+    // Mona a sa ligne : elle part, et Mona garde ce qu'elle hérite.
+    let reply = remove(olga, child, team.mona.id).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(
+        entries(&reply.json()),
+        [
+            entry(&team.olga, "full", true),
+            entry(&team.mona, "edit", true),
+            entry(&team.tom, "edit", false),
+            entry(&team.gina, "comment", false),
+        ]
+    );
+}
+
+/// Ruling R47 : une invitation sur une page ne dit pas si l'adresse a déjà un compte. La réponse
+/// a le même statut et la même forme pour un membre, un compte hors de l'espace et une adresse
+/// inconnue ; la liste des invitations et la consultation du lien aussi.
+#[tokio::test]
+async fn page_invitation_answer_does_not_reveal_accounts() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let project = team.page(None, "Projet", &[members(Level::Full)]).await;
+    /// Statut, type de contenu, et chaque champ avec la sorte de sa valeur.
+    fn shape(reply: &Reply) -> (StatusCode, Option<String>, BTreeMap<String, String>) {
+        let fields = reply
+            .json()
+            .as_object()
+            .expect("un objet")
+            .iter()
+            .map(|(key, value)| {
+                let kind = match value {
+                    Value::String(s) => format!("texte de {} caractères", s.len()),
+                    other => format!("{other:?}"),
+                };
+                (key.clone(), kind)
+            })
+            .collect();
+        (reply.status, reply.content_type.clone(), fields)
+    }
+
+    let emails = ["mona@exemple.fr", "zoe@exemple.fr", "personne@exemple.fr"];
+    let mut tokens = Vec::new();
+    let mut shapes = Vec::new();
+    for email in emails {
+        let reply = invite(&team.olga.browser, project, email, "read").await;
+        reply.assert_status(StatusCode::CREATED);
+        // `id` (36 caractères) et `token` (43), rien d'autre.
+        let mut fields = shape(&reply).2.into_keys().collect::<Vec<_>>();
+        fields.sort();
+        assert_eq!(fields, ["id", "token"]);
+        tokens.push(text(&reply.json(), "token").to_string());
+        shapes.push(shape(&reply));
+    }
+    assert!(shapes.windows(2).all(|w| w[0] == w[1]), "{shapes:?}");
+
+    // La liste des invitations de la page : les trois, pareilles.
+    let access = access_of(&team.olga.browser, project).await;
+    let listed = access["invitations"].as_array().expect("une liste");
+    assert_eq!(listed.len(), 3);
+    for (invitation, email) in listed.iter().zip(emails) {
+        assert_eq!(invitation["email"], email);
+        assert_eq!(invitation["level"], "read");
+        assert_eq!(invitation["role"], Value::Null);
+        assert_eq!(invitation["pageId"], project.to_string());
+        assert!(invitation.get("token").is_none());
+    }
+    // La consultation du lien, sans session : même forme.
+    let looked: Vec<_> = {
+        let mut all = Vec::new();
+        for token in &tokens {
+            let reply = lookup(&t.browser(), token).await;
+            reply.assert_status(StatusCode::OK);
+            all.push(shape(&reply).2.into_keys().collect::<Vec<_>>());
+        }
+        all
+    };
+    assert!(looked.windows(2).all(|w| w[0] == w[1]), "{looked:?}");
+
+    // Une adresse mal formée, elle, est refusée.
+    invite(&team.olga.browser, project, "pas une adresse", "read")
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_email");
+}
+
+/// Ruling R69 : une invitation de page ne vaut que tant que son auteur peut partager la page.
+/// Mona perd `full` : son lien ne se consulte plus, ne s'accepte plus et ne sert plus à
+/// s'inscrire, comme un lien inconnu. Elle le retrouve : le lien revaut.
+#[tokio::test]
+async fn page_invitation_dies_when_its_author_loses_full() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let project = team
+        .page(
+            None,
+            "Projet",
+            &[user(&team.olga, Level::Full), user(&team.mona, Level::Full)],
+        )
+        .await;
+    let (_, token) = invited(&team.mona.browser, project, "zoe@exemple.fr", "read").await;
+    lookup(&t.browser(), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    set_level(&team.olga.browser, project, team.mona.id, "edit")
+        .await
+        .assert_status(StatusCode::OK);
+
+    let unknown = lookup(&t.browser(), &"A".repeat(43)).await;
+    unknown.assert_error(StatusCode::NOT_FOUND, "invalid_invitation");
+    let looked = lookup(&t.browser(), &token).await;
+    assert_eq!(outcome(&looked), outcome(&unknown));
+    accept(&team.zoe.browser, &token)
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "invalid_invitation");
+    let newcomer = t.browser();
+    newcomer
+        .sign_up(
+            "nouvelle@exemple.fr",
+            "Nouvelle",
+            common::PASSWORD,
+            Some(&token),
+        )
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "invalid_invitation");
+    assert!(newcomer.session().is_none());
+    newcomer
+        .log_in("nouvelle@exemple.fr", common::PASSWORD)
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+    assert_eq!(role_in(&team.zoe, team.space).await, None);
+
+    // Mona retrouve `full` : son lien revaut.
+    set_level(&team.olga.browser, project, team.mona.id, "full")
+        .await
+        .assert_status(StatusCode::OK);
+    accept(&team.zoe.browser, &token)
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(
+        seen(&team.zoe.browser, team.space).await,
+        [page("Projet", "read", "shared")]
+    );
+}
+
+/// Une invitation de page se révoque par qui peut partager la page, membre ou non ; pour qui ne
+/// le peut pas, admin compris, comme une invitation qui n'existe pas.
+#[tokio::test]
+async fn page_invitation_is_revoked_by_who_can_share() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    // La page de Mona (membre), partagée en lecture avec Tom ; Adam (admin) ne la voit pas.
+    let page_id = team
+        .page(
+            None,
+            "De Mona",
+            &[user(&team.mona, Level::Full), user(&team.tom, Level::Read)],
+        )
+        .await;
+    let (id, _) = invited(&team.mona.browser, page_id, "x@exemple.fr", "edit").await;
+    assert_eq!(
+        access_of(&team.mona.browser, page_id).await["invitations"][0]["id"],
+        id.to_string()
+    );
+    let missing = team
+        .adam
+        .browser
+        .delete(&format!("/api/v1/invitations/{}", Uuid::now_v7()))
+        .await;
+    missing.assert_error(StatusCode::NOT_FOUND, "not_found");
+    for who in [&team.adam, &team.tom, &team.olga, &team.zoe] {
+        let reply = who
+            .browser
+            .delete(&format!("/api/v1/invitations/{id}"))
+            .await;
+        assert_eq!(outcome(&reply), outcome(&missing));
+    }
+    team.mona
+        .browser
+        .delete(&format!("/api/v1/invitations/{id}"))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        access_of(&team.mona.browser, page_id).await["invitations"],
+        json!([])
+    );
+    // Une invitation d'espace, elle, reste aux admins.
+    let space_invitation = team
+        .olga
+        .browser
+        .post(
+            &format!("/api/v1/spaces/{}/invitations", team.space),
+            json!({ "email": "y@exemple.fr", "role": "member" }),
+        )
+        .await;
+    space_invitation.assert_status(StatusCode::CREATED);
+    let space_id = text(&space_invitation.json(), "id").to_string();
+    let reply = team
+        .mona
+        .browser
+        .delete(&format!("/api/v1/invitations/{space_id}"))
+        .await;
+    assert_eq!(outcome(&reply), outcome(&missing));
+}
+
+/// On ne donne un accès qu'à un compte qui a un rôle dans l'espace, membre ou invité, à l'un
+/// des quatre niveaux. Un compte sans rôle répond comme un compte inconnu : on n'apprend pas
+/// qu'il existe.
+#[tokio::test]
+async fn access_is_given_only_to_people_of_the_space() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let olga = &team.olga.browser;
+    let project = team.page(None, "Projet", &[members(Level::Full)]).await;
+    let before = team.grants(project).await;
+
+    // Sam existe (il administre l'instance), sans rôle dans l'espace.
+    let outsider = set_level(olga, project, team.sam.id, "read").await;
+    outsider.assert_error(StatusCode::NOT_FOUND, "not_found");
+    for other in [Uuid::now_v7().to_string(), "pas-un-id".to_string()] {
+        assert_eq!(
+            outcome(&set_level(olga, project, &other, "read").await),
+            outcome(&outsider)
+        );
+    }
+    assert_eq!(team.grants(project).await, before);
+
+    // L'invitée, oui : elle voit la page, dans « Partagé ».
+    let reply = set_level(olga, project, team.gina.id, "comment").await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(
+        entries(&reply.json()),
+        [entry(&team.gina, "comment", false)]
+    );
+    assert_eq!(
+        seen(&team.gina.browser, team.space).await,
+        [page("Projet", "comment", "shared")]
+    );
+    // Les quatre niveaux, et eux seuls.
+    for level in ["read", "comment", "edit", "full"] {
+        let reply = set_level(olga, project, team.tom.id, level).await;
+        reply.assert_status(StatusCode::OK);
+        assert!(
+            entries(&reply.json()).contains(&entry(&team.tom, level, false)),
+            "{level}"
+        );
+    }
+    for bad in [json!({ "level": "owner" }), json!({})] {
+        olga.put(&user_uri(project, team.tom.id), bad)
+            .await
+            .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json");
+    }
+    // `null` ne retire pas l'accès : c'est `DELETE`. (serde_json le lit comme une erreur de
+    // syntaxe, `400`.)
+    let null = olga
+        .put(&user_uri(project, team.tom.id), json!({ "level": null }))
+        .await;
+    assert!(null.status.is_client_error(), "{}", null.text());
+    assert_eq!(null.json()["error"], "invalid_json");
+    assert!(entries(&access_of(olga, project).await).contains(&entry(&team.tom, "full", false)));
+    invite(olga, project, "x@exemple.fr", "owner")
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json");
+}
+
+/// Une page à la corbeille garde ses accès : on les lit, on ne les change pas (`409 trashed`).
+#[tokio::test]
+async fn trashed_page_access_is_read_only() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let project = team.page(None, "Projet", &[members(Level::Full)]).await;
+    team.trash(project).await;
+    let olga = &team.olga.browser;
+    assert_eq!(access_of(olga, project).await["general"], "full");
+    for (route, reply) in five_routes(olga, &project.to_string(), team.tom.id, team.tom.id)
+        .await
+        .into_iter()
+        .skip(1)
+    {
+        let body = reply.assert_error(StatusCode::CONFLICT, "trashed");
+        assert!(text(&body, "message").contains("corbeille"), "{route}");
+    }
+    assert_eq!(team.grants(project).await, [members(Level::Full)]);
+}
+
+/// Review Focus 1 : chaque changement d'accès ferme les connexions de synchro de la page et de
+/// ses sous-pages (elles se rouvrent en relisant leurs droits) ; une invitation, une lecture des
+/// accès ou un changement qui ne change rien n'en ferme aucune, et les autres pages ne sont
+/// jamais touchées.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_change_kicks_live_connections() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let project = team.page(None, "Projet", &[members(Level::Full)]).await;
+    let chapter = team.page(Some(project), "Chapitre", &[]).await;
+    let elsewhere = team.page(None, "Ailleurs", &[members(Level::Full)]).await;
+    let session = team.mona.browser.session().expect("la session de Mona");
+    let cookie = format!("{SESSION_COOKIE}={session}");
+    let connect = async |id: Uuid| {
+        let url = format!("ws://{addr}/sync/{id}?schema={SCHEMA_VERSION}");
+        let client = Client::connect_with_headers(&url, &[("cookie", &cookie)])
+            .await
+            .expect("connexion de Mona");
+        assert!(client.wait_until(WAIT, |c| c.is_synced()).await);
+        client
+    };
+    let still_served = async |client: &Client| {
+        let start = client.step2_count();
+        client.resync();
+        client.wait_until(WAIT, |c| c.step2_count() > start).await && !client.is_closed()
+    };
+    let olga = &team.olga.browser;
+    let bystander = connect(elsewhere).await;
+
+    // Chaque changement doit fermer les connexions rouvertes après le précédent.
+    let mut live = [connect(project).await, connect(chapter).await];
+    for step in 0..3 {
+        let (what, reply) = match step {
+            0 => (
+                "l'accès général",
+                set_general(olga, project, json!("edit")).await,
+            ),
+            1 => (
+                "l'accès de Tom",
+                set_level(olga, project, team.tom.id, "read").await,
+            ),
+            _ => (
+                "le retrait de Tom",
+                remove(olga, project, team.tom.id).await,
+            ),
+        };
+        reply.assert_status(StatusCode::OK);
+        for client in &live {
+            assert!(
+                client.wait_until(WAIT, |c| c.is_closed()).await,
+                "connexion encore ouverte après {what}"
+            );
+        }
+        live = [connect(project).await, connect(chapter).await];
+    }
+
+    // Ni une invitation, ni une lecture, ni un changement à l'identique.
+    invited(olga, project, "x@exemple.fr", "read").await;
+    access_of(olga, project).await;
+    set_general(olga, project, json!("edit"))
+        .await
+        .assert_status(StatusCode::OK);
+    for client in &live {
+        assert!(
+            still_served(client).await,
+            "connexion fermée sans changement"
+        );
+    }
+    assert!(still_served(&bystander).await, "page d'à côté fermée");
+}

@@ -6,19 +6,19 @@
 //! | `GET /health` | non | `ok` |
 //! | `GET /api/v1/info` | non | [`Info`] : versions, `signup` (`open` ou `invite`), `setup` (aucun compte n'existe encore) |
 //! | `POST /api/v1/auth/signup` | non | `201`, [`Me`], cookie de session ; `403 signup_closed` ; `404 invalid_invitation` ; `409 email_taken` ; `422 invalid_email`, `invalid_name`, `invalid_password` |
-//! | `POST /api/v1/auth/login` | non | [`Me`], cookie de session ; `401 invalid_credentials` ; `429 too_many_attempts` (avec `Retry-After`) |
+//! | `POST /api/v1/auth/login` | non | [`Me`], cookie de session (celle que portait déjà le navigateur est fermée) ; `401 invalid_credentials` ; `429 too_many_attempts` (avec `Retry-After`) |
 //! | `POST /api/v1/auth/logout` | non | `204`, session supprimée, cookie effacé |
 //! | `POST /api/v1/auth/password` | oui | `204`, les autres sessions du compte sont supprimées ; `401 invalid_credentials` ; `422 invalid_password` ; `429 too_many_attempts` |
 //! | `GET /api/v1/me` | oui | [`Me`] : le compte et ses espaces |
 //! | `POST /api/v1/spaces` | oui | `201`, `SpaceInfo` : l'espace créé, dont le compte est `owner` ; `422 invalid_name` |
 //! | `PATCH /api/v1/spaces/{id}` | `admin` | `SpaceInfo` ; `422 invalid_name` |
 //! | `GET /api/v1/spaces/{id}/members` | `member` | `Member[]` |
-//! | `PATCH /api/v1/spaces/{id}/members/{userId}` | `admin` (entre `admin` et `member`) ou `owner` | `Member` ; `409 last_owner` |
-//! | `DELETE /api/v1/spaces/{id}/members/{userId}` | `admin` (jamais un `owner`), ou soi-même | `204` ; `409 last_owner` |
+//! | `PATCH /api/v1/spaces/{id}/members/{userId}` | `admin` (entre `admin` et `member`) ou `owner` | `Member` ; `409 last_owner` ; `409 roles_changed` (les rôles ont bougé à chaque reprise) |
+//! | `DELETE /api/v1/spaces/{id}/members/{userId}` | `admin` (jamais un `owner`), ou soi-même | `204` ; `409 last_owner` ; `409 roles_changed` |
 //! | `POST /api/v1/spaces/{id}/invitations` | `admin` | `201`, `InvitationCreated` (le jeton, montré cette fois seulement) ; `422 invalid_email` |
 //! | `GET /api/v1/spaces/{id}/invitations` | `admin` | `PendingInvitation[]` : celles qui attendent, sans jeton (une invitation de page, seulement si l'on peut partager la page) |
-//! | `DELETE /api/v1/invitations/{id}` | `admin` de l'espace de l'invitation (de page : qui peut aussi partager la page) | `204` ; `404` pour une invitation inconnue, échue, acceptée, ou d'un espace où l'on n'est rien |
-//! | `POST /api/v1/invitations/lookup` | non | `InvitationInfo` ; `404 invalid_invitation` |
+//! | `DELETE /api/v1/invitations/{id}` | invitation d'espace : `admin` de son espace ; invitation de page : `full` sur la page, `admin` ou non | `204` ; `404` sous `admin` ou sans le droit de partager la page, comme pour une invitation inconnue, échue, acceptée, ou d'un espace où l'on n'est rien |
+//! | `POST /api/v1/invitations/lookup` | non | `InvitationInfo` ; `404 invalid_invitation` (aussi pour une invitation de page dont l'auteur ne peut plus partager la page) |
 //! | `POST /api/v1/invitations/accept` | oui | `Accepted` ; `404 invalid_invitation` |
 //! | `GET /api/v1/spaces/{id}/tree` | un rôle | [`Tree`] : les pages de l'espace que la personne voit, hors corbeille, avec son niveau et sa section |
 //! | `GET /api/v1/spaces/{id}/trash` | un rôle | [`PageNode`]`[]` : les pages mises à la corbeille qu'elle peut restaurer, la plus récente d'abord |
@@ -30,6 +30,11 @@
 //! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon ; `409 not_trashed` |
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
 //! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait |
+//! | `GET /api/v1/pages/{id}/access` | `full` | `PageAccess` : l'accès général, les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
+//! | `PUT /api/v1/pages/{id}/access/general` | `full` | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `level: null` retire la ligne `members` de la page ; `409 last_full_access` ; `409 access_changed` |
+//! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`, de même) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` ; `409 access_changed` |
+//! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; `409 access_changed` ; un invité sans plus aucun accès sort de l'espace |
+//! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, sinon en lecture seule ; `403 bad_origin` avant tout |
 //!
 //! Toute erreur est en JSON : `{ "error": <code>, "message": <texte> }`
@@ -45,15 +50,22 @@
 //! demandé, `403 forbidden`. De même pour une page : `404 not_found` pour qui
 //! ne la voit pas, exactement la réponse d'une page qui n'existe pas ; `403
 //! forbidden` sous le niveau demandé ; `409 trashed` pour qui écrit dans une
-//! page à la corbeille. Le détail est en tête de `routes/pages.rs`.
+//! page à la corbeille. Le détail est en tête de `routes/pages.rs`, et celui
+//! du partage (une page garde toujours quelqu'un en `full`, décision et
+//! écriture prises sur la même révision de l'espace) en tête de
+//! `routes/sharing.rs`. Un changement de rôle, un retrait, un changement
+//! d'accès se décident sur ce que la route a lu, que le store revérifie dans
+//! la transaction qui écrit ; s'il a bougé, la route relit et redécide, puis
+//! répond `409 roles_changed` ou `409 access_changed` après deux reprises.
 //!
 //! **Comptes** (`auth.rs`, `routes/auth.rs`) : comptes locaux, mot de passe
 //! haché en Argon2id, session par cookie. Le premier compte créé administre
 //! l'instance ; ensuite, on s'inscrit librement (`MEMENTUM_SIGNUP=open`) ou
-//! avec le jeton d'une invitation (`invite`, le défaut). Un mot de passe
-//! oublié se règle par `mementum user set-password`, faute de SMTP. C'est le
-//! compte qui protège les pages : plus aucune route de page ne répond sans
-//! session, ni ne lit ou n'écrit une page sans en avoir vérifié le droit.
+//! avec le jeton d'une invitation (`invite`, le défaut). Se connecter ferme
+//! la session que portait déjà le navigateur. Un mot de passe oublié se règle
+//! par `mementum user set-password`, faute de SMTP. C'est le compte qui
+//! protège les pages : plus aucune route de page ne répond sans session, ni
+//! ne lit ou n'écrit une page sans en avoir vérifié le droit.
 //!
 //! **Synchronisation** (`routes/sync.rs`). `/sync` est sous les mêmes droits
 //! que les routes de pages : session, puis droit de lire la page, vérifiés
@@ -65,9 +77,10 @@
 //! qui relit tout.
 //!
 //! **Garde-fous réseau** (`guard.rs`) : sur la boucle locale, l'en-tête `Host`
-//! doit la nommer (DNS rebinding, Ruling R31) ; partout, une requête qui
-//! écrit, comme une connexion `/sync`, est refusée si elle porte l'`Origin`
-//! d'un autre site.
+//! doit la nommer (DNS rebinding, Ruling R31), ou nommer l'hôte de
+//! `MEMENTUM_PUBLIC_URL` quand elle est réglée (un mandataire ou un tunnel qui
+//! garde le `Host` public, Ruling R78) ; partout, une requête qui écrit, comme
+//! une connexion `/sync`, est refusée si elle porte l'`Origin` d'un autre site.
 
 mod access;
 pub mod auth;
@@ -81,6 +94,7 @@ mod routes {
     pub(crate) mod info;
     pub(crate) mod invitations;
     pub(crate) mod pages;
+    pub(crate) mod sharing;
     pub(crate) mod spaces;
     pub(crate) mod sync;
 }
@@ -95,7 +109,7 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::middleware;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use mementum_acl::AccessCache;
 use mementum_store::Store;
 use mementum_sync::{Hub, SyncConfig};
@@ -110,7 +124,7 @@ pub use routes::pages::{MAX_TITLE_CHARS, UNTITLED};
 pub use types::{Info, Me, PageNode, SignupMode, Tree};
 
 use auth::LoginThrottle;
-use routes::{info, invitations, pages, spaces, sync};
+use routes::{info, invitations, pages, sharing, spaces, sync};
 use types::ErrorCode;
 
 /// Taille maximale d'un corps de requête (celle d'axum par défaut, posée
@@ -319,6 +333,16 @@ fn router(state: AppState) -> Router {
             "/api/v1/pages/{id}/mmd",
             get(pages::get_mmd).put(pages::put_mmd),
         )
+        .route("/api/v1/pages/{id}/access", get(sharing::access))
+        .route(
+            "/api/v1/pages/{id}/access/general",
+            put(sharing::set_general),
+        )
+        .route(
+            "/api/v1/pages/{id}/access/users/{user_id}",
+            put(sharing::set_user).delete(sharing::remove_user),
+        )
+        .route("/api/v1/pages/{id}/invitations", post(sharing::invite))
         .route("/sync/{id}", get(sync::sync))
         .fallback(async || {
             ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "route inconnue")

@@ -46,6 +46,7 @@ use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use uuid::Uuid;
 
+pub use acl::{AccessChange, AccessWritten};
 pub use backup::{Backup, backup_path};
 pub use docs::DocState;
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
@@ -69,9 +70,13 @@ pub enum StoreError {
     EmailTaken,
     /// L'espace perdrait son dernier propriétaire.
     LastOwner,
-    /// Les rôles sur lesquels l'appelant a décidé (`Expected`) ont changé depuis qu'il les a
-    /// lus : rien n'est écrit, il redécide sur les rôles relus.
+    /// Ce sur quoi l'appelant a décidé a changé depuis qu'il l'a lu : les rôles (`Expected`), ou
+    /// la révision de l'espace (`Store::change_access`). Rien n'est écrit ; il relit et
+    /// redécide.
     Stale,
+    /// La page n'aurait plus personne en `full`, ni par ses lignes ni par un ancêtre (Ruling
+    /// R70) : rien n'est écrit.
+    LastFullAccess,
     /// Un ancêtre du nœud est à la corbeille : c'est lui qu'on restaure.
     ParentTrashed,
     /// Le nœud n'est pas à la corbeille : on ne supprime définitivement que ce qui y est.
@@ -87,7 +92,10 @@ impl fmt::Display for StoreError {
             StoreError::Cycle => write!(f, "un nœud ne peut pas devenir son propre descendant"),
             StoreError::EmailTaken => write!(f, "un compte porte déjà cette adresse e-mail"),
             StoreError::LastOwner => write!(f, "un espace garde au moins un propriétaire"),
-            StoreError::Stale => write!(f, "les rôles ont changé depuis leur lecture"),
+            StoreError::Stale => write!(f, "les droits ont changé depuis leur lecture"),
+            StoreError::LastFullAccess => {
+                write!(f, "la page n'aurait plus personne en accès complet")
+            }
             StoreError::ParentTrashed => write!(f, "une page parente est à la corbeille"),
             StoreError::NotTrashed => write!(f, "le nœud n'est pas à la corbeille"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),

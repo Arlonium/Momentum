@@ -1,5 +1,6 @@
 //! Routes des invitations : inviter dans un espace, lister et révoquer celles qui attendent,
-//! consulter un lien sans session, l'accepter.
+//! consulter un lien sans session, l'accepter. L'invitation sur une page se crée par
+//! `routes/sharing.rs`, avec [`create`].
 //!
 //! C'est le jeton qui fait foi, jamais l'adresse e-mail, qui n'est pas vérifiée (Ruling R47).
 //! Le jeton (32 octets aléatoires en base64url) n'est montré qu'une fois, dans la réponse qui
@@ -10,12 +11,13 @@
 //! [`valid_invitation`] est le seul chemin par lequel le serveur consulte une invitation par
 //! son jeton, et toute acceptation passe d'abord par lui : [`accept_invitation`] pour un compte
 //! qui existe, et l'inscription (`routes/auth.rs`), qui consulte puis laisse le store accepter
-//! dans la transaction qui crée le compte (`Store::sign_up`). Un contrôle de plus sur les
-//! invitations (l'auteur d'une invitation de page a-t-il encore `full` sur la page, Ruling
-//! R69) n'a donc qu'un endroit où s'ajouter : [`valid_invitation`].
+//! dans la transaction qui crée le compte (`Store::sign_up`). C'est donc là que se vérifie que
+//! l'auteur d'une invitation de page peut encore partager la page (Ruling R69).
 //!
-//! Une invitation de page n'est listée, et ne se révoque ici, que pour qui peut partager la
-//! page : un admin ne voit pas les pages privées des autres, ni donc qui y est invité.
+//! Une invitation d'espace se révoque par un `admin` de l'espace. Une invitation de page n'est
+//! listée parmi celles de l'espace (`admin`) que pour qui peut partager la page : un admin ne
+//! voit pas les pages privées des autres, ni donc qui y est invité ; elle se révoque par qui
+//! peut partager la page, `admin` ou non.
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -48,35 +50,60 @@ pub(crate) async fn invite_to_space(
     let space_id = space_id(path)?;
     state.role_at_least(&user, space_id, Role::Admin).await?;
     let Json(body) = body?;
-    let email = auth::normalize_email(&body.email);
+    let grant = InvitationGrant::Space(Role::from(body.role));
+    create(&state, &user, space_id, grant, &body.email).await
+}
+
+/// Crée l'invitation `grant` dans l'espace, au nom de `user`, pour `email` (rognée, en
+/// minuscules ; `422 invalid_email` si elle est mal formée) : `201`, son id et son jeton,
+/// montré cette fois seulement. L'appelant a vérifié le droit de `user` à la faire. Aucun
+/// compte n'est cherché : la réponse est la même, que l'adresse en ait un ou non (Ruling R47).
+pub(crate) async fn create(
+    state: &AppState,
+    user: &AuthUser,
+    space_id: Uuid,
+    grant: InvitationGrant,
+    email: &str,
+) -> Result<(StatusCode, Json<InvitationCreated>), ApiError> {
+    let email = auth::normalize_email(email);
     if !auth::email_is_valid(&email) {
         return Err(ApiError::invalid_email());
     }
-    let role = Role::from(body.role);
     let (token, token_hash) = auth::new_token();
     let invitation = state
         .store
         .create_invitation(NewInvitation {
             space_id,
-            grant: InvitationGrant::Space(role),
+            grant,
             email,
             token_hash,
             created_by: user.id,
             expires_at: now_ms() + INVITATION_TTL_MS,
         })
         .await
-        .map_err(|e| match e {
-            // L'espace, ou le compte, a disparu depuis la lecture des droits.
-            StoreError::NotFound => ApiError::space_not_found(),
-            e => internal(e),
+        .map_err(|e| match (e, grant) {
+            // L'espace, la page ou le compte a disparu depuis la lecture des droits.
+            (StoreError::NotFound, InvitationGrant::Space(_)) => ApiError::space_not_found(),
+            (StoreError::NotFound, InvitationGrant::Page { .. }) => ApiError::page_not_found(),
+            (e, _) => internal(e),
         })?;
-    tracing::info!(
-        invitation_id = %invitation.id,
-        space_id = %space_id,
-        user_id = %user.id,
-        role = role.as_str(),
-        "invitation créée"
-    );
+    match grant {
+        InvitationGrant::Space(role) => tracing::info!(
+            invitation_id = %invitation.id,
+            space_id = %space_id,
+            user_id = %user.id,
+            role = role.as_str(),
+            "invitation créée"
+        ),
+        InvitationGrant::Page { node_id, level } => tracing::info!(
+            invitation_id = %invitation.id,
+            space_id = %space_id,
+            node_id = %node_id,
+            user_id = %user.id,
+            level = level.as_str(),
+            "invitation sur une page créée"
+        ),
+    }
     Ok((
         StatusCode::CREATED,
         Json(InvitationCreated {
@@ -112,9 +139,10 @@ pub(crate) async fn space_invitations(
 }
 
 /// `DELETE /api/v1/invitations/{id}` : `204`, l'invitation est supprimée, par qui peut la
-/// lister (`admin` de son espace ; pour une invitation de page, qui peut aussi partager la
-/// page). Pour tout autre, et pour une invitation inconnue, échue ou acceptée, la même
-/// réponse, `404` : qui ne peut pas la lister n'apprend pas qu'elle existe.
+/// gérer : un `admin` de son espace pour une invitation d'espace ; qui peut partager la page,
+/// `admin` ou non, pour une invitation de page. Pour tout autre, et pour une invitation
+/// inconnue, échue ou acceptée, la même réponse, `404` : qui ne peut pas la gérer n'apprend
+/// pas qu'elle existe.
 pub(crate) async fn revoke(
     State(state): State<AppState>,
     user: AuthUser,
@@ -134,7 +162,11 @@ pub(crate) async fn revoke(
         .find_space_access(&user, invitation.space_id)
         .await?
         .ok_or_else(ApiError::invitation_not_found)?;
-    if at_least(&access, Role::Admin).is_err() || !may_manage(&access, &invitation) {
+    let allowed = match invitation.grant {
+        InvitationGrant::Space(_) => at_least(&access, Role::Admin).is_ok(),
+        InvitationGrant::Page { .. } => may_manage(&access, &invitation),
+    };
+    if !allowed {
         return Err(ApiError::invitation_not_found());
     }
     match state.store.revoke_invitation(id).await {
@@ -220,20 +252,46 @@ pub(crate) async fn accept(
 }
 
 /// L'invitation de ce jeton (son SHA-256), si elle vaut encore : `None` si elle est inconnue,
-/// échue, révoquée, déjà acceptée, ou si son auteur n'a plus le rôle qu'elle demande (le store
-/// le vérifie, Ruling R69).
+/// échue, révoquée, déjà acceptée, ou si son auteur n'a plus le droit de la faire (Ruling R69) :
+/// le rôle qu'elle demande (le store le vérifie) et, pour une invitation de page, `full` sur la
+/// page (vérifié ici : il y faut le calcul des droits). Une invitation de page dont l'auteur ne
+/// peut plus partager la page reçoit donc la réponse d'une invitation inconnue ; s'il retrouve
+/// ce droit, elle revaut.
 ///
 /// Le seul chemin par lequel le serveur consulte une invitation par son jeton : la
 /// consultation d'un lien, l'inscription et [`accept_invitation`].
+///
+/// Ce contrôle et l'acceptation sont deux transactions : un auteur qui perd `full` entre les
+/// deux, à quelques millisecondes près, voit encore son invitation acceptée. Cette fenêtre est
+/// acceptée ; la fermer demanderait le calcul des droits dans la transaction du store.
 pub(crate) async fn valid_invitation(
     state: &AppState,
     token_hash: [u8; 32],
 ) -> Result<Option<Invitation>, ApiError> {
-    state
+    let Some(invitation) = state
         .store
         .invitation_by_token(token_hash, now_ms())
         .await
-        .map_err(internal)
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    let InvitationGrant::Page { node_id, .. } = invitation.grant else {
+        return Ok(Some(invitation));
+    };
+    let Some(author) = state
+        .store
+        .get_user(invitation.created_by)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(None);
+    };
+    let author_can_share = state
+        .find_space_access(&author.into(), invitation.space_id)
+        .await?
+        .is_some_and(|access| access.can(Action::Share, node_id));
+    Ok(author_can_share.then_some(invitation))
 }
 
 /// Accepte l'invitation de ce jeton pour le compte `user_id` : `None` si elle ne vaut plus
@@ -281,7 +339,8 @@ fn may_manage(access: &SpaceAccess, invitation: &Invitation) -> bool {
     }
 }
 
-fn pending_invitation(invitation: Invitation) -> PendingInvitation {
+/// Une invitation en attente, telle que la liste la rend : sans jeton.
+pub(crate) fn pending_invitation(invitation: Invitation) -> PendingInvitation {
     let (role, level, page_id) = match invitation.grant {
         InvitationGrant::Space(role) => (Some(role.into()), None, None),
         InvitationGrant::Page { node_id, level } => {
