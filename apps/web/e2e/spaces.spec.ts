@@ -1250,10 +1250,28 @@ test("page_one_can_only_read_offers_no_action", async ({ browser }) => {
 
   // Glisser quand même la page en lecture (par son lien, qui se glisse comme tout lien) ne
   // la déplace pas, et rien ne s'y dépose : ni dans une autre page, ni dans sa sous-page.
+  // Tout ce que l'onglet demande d'écrire au serveur à partir d'ici est noté.
+  const writes: string[] = [];
+  b.on("request", (request) => {
+    if (request.method() !== "GET") {
+      writes.push(`${request.method()} ${new URL(request.url()).pathname}`);
+    }
+  });
   await treeRow(b, read.id).dragTo(editable);
   await treeRow(b, sub.id).dragTo(editable);
-  await b.waitForTimeout(300);
-  expect(await getTree(brunoApi, space.id)).toEqual(before);
+  // Puis un geste permis : une sous-page de la page qu'il peut modifier. Sa demande part
+  // après celles qu'auraient faites les deux glissers ; c'est la seule que l'onglet ait
+  // envoyée.
+  const start = new URL(b.url()).pathname;
+  await editable.hover();
+  await editable.getByRole("button", { name: "Ajouter une sous-page à « À modifier »" }).click();
+  await b.waitForURL((url) => url.pathname.startsWith("/p/") && url.pathname !== start);
+  const created = pageIdOf(b);
+  expect(writes).toEqual(["POST /api/v1/pages"]);
+  // Aucune page n'a changé de place.
+  const places = (nodes: PageNode[]) => nodes.map((n) => [n.id, n.parentId, n.position]);
+  const after = await getTree(brunoApi, space.id);
+  expect(places(after.nodes.filter((n) => n.id !== created))).toEqual(places(before.nodes));
   await expect(sidebarOf(b).getByRole("alert")).toHaveCount(0);
 });
 
