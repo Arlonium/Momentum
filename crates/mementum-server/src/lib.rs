@@ -94,6 +94,7 @@ pub mod auth;
 pub mod config;
 mod error;
 mod guard;
+mod inputs_cache;
 pub mod types;
 
 mod routes {
@@ -165,8 +166,8 @@ pub(crate) struct AppState {
     /// Les accès déjà calculés, par personne et par espace (`access.rs`).
     access: Arc<AccessCache>,
     /// Les données des espaces dont ces accès se calculent, lues une fois par
-    /// révision pour tout le monde (`access.rs`).
-    inputs: Arc<access::InputsCache>,
+    /// révision pour tout le monde (`inputs_cache.rs`).
+    inputs: Arc<inputs_cache::InputsCache>,
 }
 
 /// Millisecondes Unix.
@@ -303,7 +304,9 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
         logins: Arc::new(LoginThrottle::default()),
         signups: Arc::new(tokio::sync::Mutex::new(())),
         access: Arc::new(AccessCache::new(access::ACCESS_CACHE_NODES)),
-        inputs: Arc::new(access::InputsCache::new(access::INPUTS_CACHE_NODES)),
+        inputs: Arc::new(inputs_cache::InputsCache::new(
+            inputs_cache::INPUTS_CACHE_NODES,
+        )),
     };
     Ok((router(state), store))
 }
