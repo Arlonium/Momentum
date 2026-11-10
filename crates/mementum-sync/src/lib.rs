@@ -43,7 +43,10 @@
 //!   connexion inscrite qui l'annonce, jusqu'à son départ : une entrée qui
 //!   vise le client d'un autre compte est ignorée avant d'être appliquée,
 //!   sans fermer la connexion (y-websocket renvoie au serveur les états des
-//!   autres) ; le même compte le reprend d'une connexion à l'autre. Une
+//!   autres) ; le même compte le reprend d'une connexion à l'autre. Un client
+//!   que personne ne tient ne se prend que par une entrée plus récente que ce
+//!   que le serveur en sait (Ruling R112) : le renvoi tardif de l'état de
+//!   quelqu'un qui est parti est ignoré, et ne donne pas son client. Une
 //!   entrée à la dernière horloge (`u32::MAX`) est ignorée de même, et un
 //!   départ ne compte plus rien pour un client qui y est déjà (Ruling R108) :
 //!   yrs, qui incrémente l'horloge d'un client à son départ, y déborderait ;

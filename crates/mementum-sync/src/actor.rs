@@ -447,7 +447,9 @@ enum Presence {
 /// connexions du même compte peuvent l'annoncer aussi (un onglet qui revient avant que son
 /// ancienne connexion soit fermée), et le tiennent alors avec elle.
 ///
-/// `removal` : l'entrée retire l'état (`null`). Pour une connexion du compte `account` :
+/// `removal` : l'entrée retire l'état (`null`). `newer` : son horloge est strictement
+/// au-dessus de celle que le serveur connaît pour ce client (ou il n'en connaît aucune) :
+/// c'est une entrée que l'awareness applique. Pour une connexion du compte `account` :
 /// - un client tenu par une connexion d'un **autre** compte : ignorée. Un client y-websocket
 ///   honnête renvoie au serveur tous les états qu'il reçoit des autres, et les retraits qu'il
 ///   déduit de leur silence : rien de cela ne doit toucher l'état de leur titulaire ;
@@ -456,7 +458,16 @@ enum Presence {
 ///   l'horloge du client, et l'état que son titulaire annoncerait ensuite serait ignoré de
 ///   tous. Et il ne donne pas le client à qui l'envoie : renvoyer le départ de quelqu'un
 ///   l'empêcherait de revenir ;
+/// - un état pour un client que personne ne tient, qui n'est pas plus récent que ce que le
+///   serveur en sait : ignoré de même (Ruling R112). C'est le renvoi d'un état arrivé après
+///   le départ de son titulaire, dont le retrait a fait avancer l'horloge. Il ne serait pas
+///   appliqué ; il ne doit pas non plus donner le client à qui le renvoie, qui dépasserait
+///   ainsi la limite de [`MAX_AWARENESS_CLIENTS`] pour des clients qui ne sont pas les siens,
+///   et rendrait invisible le titulaire à son retour. Un client libre ne se prend donc que
+///   par une entrée que l'awareness applique ;
 /// - sinon, l'entrée est appliquée ; si elle annonce un état, la connexion tient le client.
+///   Un client que son compte tient déjà, elle le tient avec l'autre connexion quelle que
+///   soit l'horloge : l'onglet qui revient renvoie son état à l'horloge qu'il avait.
 ///
 /// Sans compte (`None` : les tests du hub), les connexions ne sont pas bridées entre elles ;
 /// elles le sont face à un compte, et lui face à elles.
@@ -465,6 +476,7 @@ fn presence_rule(
     account: Option<Uuid>,
     client: ClientID,
     removal: bool,
+    newer: bool,
 ) -> Presence {
     let mut held = false;
     for c in conns.values().filter(|c| c.clients.contains(&client)) {
@@ -476,7 +488,9 @@ fn presence_rule(
     match (removal, held) {
         (true, false) => Presence::Ignored,
         (true, true) => Presence::Applied,
-        (false, _) => Presence::Held,
+        (false, true) => Presence::Held,
+        (false, false) if newer => Presence::Held,
+        (false, false) => Presence::Ignored,
     }
 }
 
@@ -639,9 +653,13 @@ impl Actor {
         // Leurs états sont retirés ; un client que tient aussi une autre connexion (du même
         // compte : l'onglet est revenu entre-temps) reste annoncé.
         //
-        // Ruling R108 : un client déjà à la dernière horloge est laissé tel quel. Il n'a plus
-        // d'état à retirer (aucune entrée n'est appliquée à cette horloge : il n'y est arrivé
-        // que par un retrait), et yrs ne peut plus la lui incrémenter.
+        // Ruling R108 : un client déjà à la dernière horloge est laissé tel quel : yrs ne peut
+        // plus la lui incrémenter. C'est un filet. Depuis le Ruling R112, une connexion ne
+        // prend un client libre que par une entrée plus récente que ce que le serveur en sait,
+        // et rien n'est plus récent que la dernière horloge : aucune ne tient donc un client
+        // qu'un départ y a porté. Il ne reste que le client du document d'awareness de l'acteur
+        // lui-même, dont yrs avance l'horloge au lieu de retirer l'état, et que personne ne
+        // connaît.
         let ids: Vec<ClientID> = gone
             .clients
             .into_iter()
@@ -798,7 +816,11 @@ impl Actor {
                 return false;
             }
             let removal = entry.json.as_ref() == AWARENESS_REMOVED;
-            match presence_rule(&self.conns, account, *client, removal) {
+            // Ce que le serveur sait de ce client : l'horloge de son dernier état, ou de son
+            // retrait.
+            let known = self.awareness.meta(*client).map(|(clock, _)| clock);
+            let newer = known.is_none_or(|known| entry.clock > known);
+            match presence_rule(&self.conns, account, *client, removal, newer) {
                 Presence::Ignored => false,
                 Presence::Applied => true,
                 Presence::Held => {
