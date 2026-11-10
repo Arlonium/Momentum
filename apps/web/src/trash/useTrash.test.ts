@@ -14,9 +14,11 @@ vi.mock("../api", async (original) => ({
 
 /** Les lectures de la corbeille, dans l'ordre : le test tient ou rompt chacune. */
 let reads: { spaceId: string; answer: Deferred<PageNode[]> }[] = [];
+const sessionLost = vi.fn();
 
 beforeEach(() => {
   reads = [];
+  sessionLost.mockClear();
   vi.mocked(getTrash).mockReset();
   vi.mocked(getTrash).mockImplementation((spaceId) => {
     const answer = deferred<PageNode[]>();
@@ -25,8 +27,9 @@ beforeEach(() => {
   });
 });
 
-type Props = { spaceId: string; version: number };
-const hook = ({ spaceId, version }: Props) => useTrash(spaceId, version);
+type Props = { spaceId: string; version: number; retries?: number };
+const hook = ({ spaceId, version, retries = 0 }: Props) =>
+  useTrash(spaceId, version, { retries, sessionLost });
 const trashed = (id: string) => page(id, { trashedAt: 1 });
 
 test("trash_is_read_at_first_and_when_its_version_changes", async () => {
@@ -125,6 +128,23 @@ test("lost_session_says_nothing_and_keeps_the_list", async () => {
   await settle(() => reads[1].answer.reject(unauthenticated()));
   expect(trash.current.pages).toEqual([a]);
   expect(trash.current.error).toBeNull();
+});
+
+test("read_lost_with_the_session_is_done_again_when_the_account_is_back", async () => {
+  const trash = await renderHook(hook, { spaceId: "perso", version: 0 });
+  await settle(() => reads[0].answer.reject(unauthenticated()));
+  // Rien n'est dit (la connexion est demandée par-dessus), mais la lecture se signale : elle
+  // n'a rien lu, et la vue en est à « Chargement… ».
+  expect(trash.current.pages).toBeNull();
+  expect(trash.current.error).toBeNull();
+  expect(sessionLost).toHaveBeenCalledTimes(1);
+  expect(reads).toHaveLength(1);
+  // Le compte revient : la corbeille est lue.
+  await trash.rerender({ spaceId: "perso", version: 0, retries: 1 });
+  expect(reads).toHaveLength(2);
+  const a = trashed("a");
+  await settle(() => reads[1].answer.resolve([a]));
+  expect(trash.current.pages).toEqual([a]);
 });
 
 test("answer_after_the_view_is_gone_is_dropped", async () => {

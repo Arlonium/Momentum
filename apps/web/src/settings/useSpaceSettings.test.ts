@@ -35,11 +35,13 @@ const forbidden = () => new ApiError(403, "forbidden", "réservé aux admins de 
 let members: Deferred<Member[]>[] = [];
 let invitations: Deferred<PendingInvitation[]>[] = [];
 const onForbidden = vi.fn();
+const onSessionLost = vi.fn();
 
 beforeEach(() => {
   members = [];
   invitations = [];
   onForbidden.mockClear();
+  onSessionLost.mockClear();
   vi.mocked(getMembers).mockReset();
   vi.mocked(getMembers).mockImplementation(() => {
     const answer = deferred<Member[]>();
@@ -54,7 +56,7 @@ beforeEach(() => {
   });
 });
 
-const hook = () => useSpaceSettings("pro", "alice", onForbidden);
+const hook = () => useSpaceSettings("pro", "alice", onForbidden, onSessionLost);
 
 const owner = [member("alice", "owner"), member("bruno", "member")];
 
@@ -197,4 +199,26 @@ test("lost_session_keeps_what_is_shown", async () => {
   await settle(() => members[1].reject(unauthenticated()));
   expect(settings.current.load).toBe(before);
   expect(settings.current.reloadError).toBeNull();
+  // La lecture se signale : elle sera refaite au retour du compte.
+  expect(onSessionLost).toHaveBeenCalledTimes(1);
+});
+
+test("first_read_lost_with_the_session_signals_itself", async () => {
+  const settings = await renderHook(hook, undefined);
+  await settle(() => {
+    void settings.current.reload();
+  });
+  await settle(() => members[0].reject(unauthenticated()));
+  // Rien n'a été lu : l'écran en est à « Chargement… », et ne doit pas y rester une fois le
+  // compte revenu.
+  expect(settings.current.load).toEqual({ name: "loading" });
+  expect(onSessionLost).toHaveBeenCalledTimes(1);
+  // Les invitations aussi peuvent tomber sur la session perdue.
+  await settle(() => {
+    void settings.current.reload();
+  });
+  await settle(() => members[1].resolve(owner));
+  await settle(() => invitations[0].reject(unauthenticated()));
+  expect(settings.current.load).toEqual({ name: "loading" });
+  expect(onSessionLost).toHaveBeenCalledTimes(2);
 });

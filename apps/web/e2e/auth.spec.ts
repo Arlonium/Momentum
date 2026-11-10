@@ -25,6 +25,7 @@ import {
   signUpAccount,
   spaceSwitcher,
   titleOf,
+  trashItem,
   unique,
   waitSynced,
 } from "./helpers";
@@ -322,6 +323,37 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
   // demandent une.
   await expect.poll(() => getMmd(p.request, id)).toBe("Écrit avant la coupure, et après\n");
   expect((await meOf(p)).user.email).toBe(account.email);
+});
+
+test("trash_and_settings_are_read_once_logged_in_again", async ({ browser }) => {
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const thrown = await createPage(api, { title: `Jetée ${unique()}` });
+  expect((await api.post(`/api/v1/pages/${thrown.id}/trash`)).status()).toBe(200);
+  const p = await newUser(browser, account);
+  await p.goto(`/s/${space.id}/settings`);
+  const members = p.getByRole("heading", { name: "Membres" });
+  await expect(members).toBeVisible();
+  const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
+
+  // La session prend fin. La corbeille, ouverte ensuite, ne peut rien lire : la connexion est
+  // demandée par-dessus. Reconnecté, on y trouve ses pages, pas « Chargement… ».
+  await p.context().clearCookies();
+  await sidebarOf(p).getByRole("link", { name: "Corbeille" }).click();
+  await expect(dialog).toBeVisible();
+  await logInWith(dialog, account.email, account.password);
+  await expect(dialog).toHaveCount(0);
+  await expect(trashItem(p, thrown.title)).toBeVisible();
+
+  // De même pour les réglages de l'espace, où l'on revient par « Précédent ».
+  await p.context().clearCookies();
+  await p.goBack();
+  await expect(dialog).toBeVisible();
+  await expect(members).toHaveCount(0);
+  await logInWith(dialog, account.email, account.password);
+  await expect(dialog).toHaveCount(0);
+  await expect(members).toBeVisible();
 });
 
 test("login_as_someone_else_over_the_open_page_starts_afresh", async ({ browser }) => {

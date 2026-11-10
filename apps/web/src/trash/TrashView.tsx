@@ -21,6 +21,8 @@ import { ReadOnlyBanner } from "../editor/ReadOnlyBanner";
 import { PageIcon } from "../icons";
 import { pagePath } from "../router";
 import { FormError, messageOf, useDocumentTitle } from "../session/forms";
+import { useSession } from "../session/session";
+import { useRetryAfterLogin } from "../session/useRetryAfterLogin";
 import { Confirm } from "../ui/Confirm";
 import { trashedOnLabel, useTrash } from "./useTrash";
 
@@ -37,7 +39,8 @@ type Props = {
 export function TrashView({ space, version, readOnly, onChanged }: Props) {
   useDocumentTitle("Corbeille");
   const titleRef = useRef<HTMLHeadingElement>(null);
-  const { pages, error: readError, reload } = useTrash(space.id, version);
+  const { me } = useSession();
+  const { pages, error: readError, reload } = useTrash(space.id, version, useRetryAfterLogin(me));
   const [error, setError] = useState<string | null>(null);
   /** La page en cours de restauration : un double clic n'envoie qu'une requête. */
   const [restoring, setRestoring] = useState<string | null>(null);

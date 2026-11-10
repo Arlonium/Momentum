@@ -35,6 +35,7 @@ import { MailIcon } from "../icons";
 import { navigate } from "../router";
 import { FormError, messageOf, useDocumentTitle } from "../session/forms";
 import { useSession } from "../session/session";
+import { useRetryAfterLogin } from "../session/useRetryAfterLogin";
 import { CreatedInvitation } from "../share/CreatedInvitation";
 import { invitationLink, LEVEL_LABELS, ROLE_LABELS } from "../share/levels";
 import { SpaceNotFound } from "../space/SpaceNotFound";
@@ -79,16 +80,18 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
     if (guest) goHome();
   }, [guest, goHome]);
 
-  const { load, reloadError, reload } = useSpaceSettings(spaceId, self, goHome);
+  const { retries, sessionLost } = useRetryAfterLogin(me);
+  const { load, reloadError, reload } = useSpaceSettings(spaceId, self, goHome, sessionLost);
   /** Le dernier refus du serveur pour rôle insuffisant, ou pour quelqu'un qui n'est plus là. */
   const [refusal, setRefusal] = useState<string | null>(null);
 
+  // `retries` : une lecture tombée sur une session perdue est refaite quand le compte revient.
   useEffect(() => {
     if (guest) return;
     void reload();
     // Le nom et le rôle de la session, à jour (barre latérale comprise).
     refresh().catch(() => {});
-  }, [guest, reload, refresh]);
+  }, [guest, reload, refresh, retries]);
 
   // Le compte n'a plus de rôle dans cet espace (on l'en a retiré pendant que ses réglages
   // étaient ouverts) : la liste de ses espaces est relue, et l'écran est celui de tout espace

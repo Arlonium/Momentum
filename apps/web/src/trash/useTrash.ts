@@ -6,10 +6,13 @@
 // Deux relectures peuvent se suivre de près : seule la réponse de la plus récente compte, une
 // plus ancienne qui arrive après elle est jetée. Une relecture qui échoue garde la liste déjà
 // lue à l'écran, avec le message du serveur, que la relecture suivante qui réussit efface.
+// Une lecture tombée sur une session perdue ne dit rien, et se refait quand le compte revient
+// (`useRetryAfterLogin`).
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getTrash, isSessionLost } from "../api";
 import { messageOf } from "../session/forms";
+import type { RetryAfterLogin } from "../session/useRetryAfterLogin";
 
 export type TrashList = {
   /** Les pages à la corbeille, la plus récente d'abord ; `null` : pas encore lues. */
@@ -20,7 +23,11 @@ export type TrashList = {
   reload: () => Promise<void>;
 };
 
-export function useTrash(spaceId: string, version: number): TrashList {
+export function useTrash(
+  spaceId: string,
+  version: number,
+  { retries, sessionLost }: RetryAfterLogin,
+): TrashList {
   const [pages, setPages] = useState<PageNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Le rang de la dernière lecture lancée : la réponse d'une plus ancienne est jetée. */
@@ -34,10 +41,13 @@ export function useTrash(spaceId: string, version: number): TrashList {
       setPages(list);
       setError(null);
     } catch (e) {
-      // Session perdue : la connexion est demandée par-dessus ; la liste garde ce qu'elle a.
-      if (read === reads.current && !isSessionLost(e)) setError(messageOf(e));
+      if (read !== reads.current) return;
+      // Session perdue : la connexion est demandée par-dessus ; la liste garde ce qu'elle a,
+      // et sera relue au retour du compte.
+      if (isSessionLost(e)) sessionLost();
+      else setError(messageOf(e));
     }
-  }, [spaceId]);
+  }, [spaceId, sessionLost]);
 
   useEffect(() => {
     void reload();
@@ -45,7 +55,7 @@ export function useTrash(spaceId: string, version: number): TrashList {
     return () => {
       reads.current++;
     };
-  }, [reload, version]);
+  }, [reload, version, retries]);
 
   return { pages, error, reload };
 }

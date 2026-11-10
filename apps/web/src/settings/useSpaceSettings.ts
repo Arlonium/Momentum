@@ -7,7 +7,8 @@
 // plus ancienne qui arrive après elle est jetée. Une relecture qui échoue garde à l'écran ce
 // qui a déjà été lu, avec le message du serveur (`reloadError`), que la relecture suivante qui
 // réussit efface. Le rôle de la personne connectée est lu avec la liste des membres, pas pris
-// de la session, qui peut dater.
+// de la session, qui peut dater. Une lecture tombée sur une session perdue ne dit rien, et se
+// signale (`onSessionLost`) : elle est refaite quand le compte revient.
 import type { Member, PendingInvitation } from "@mementum/protocol";
 import { useCallback, useRef, useState } from "react";
 import { ApiError, getMembers, getSpaceInvitations, isSessionLost } from "../api";
@@ -35,11 +36,13 @@ const roleOf = (members: Member[], self: string) => members.find((m) => m.userId
 /**
  * `self` : le compte connecté. `onForbidden` : la liste des membres lui est refusée, c'est un
  * invité de l'espace d'après le serveur, et les réglages ne sont pas pour lui.
+ * `onSessionLost` : une lecture a répondu `401 unauthenticated`, et n'a rien lu.
  */
 export function useSpaceSettings(
   spaceId: string,
   self: string,
   onForbidden: () => void,
+  onSessionLost: () => void,
 ): SpaceSettingsData {
   const [load, setLoad] = useState<Load>({ name: "loading" });
   const [reloadError, setReloadError] = useState<string | null>(null);
@@ -47,6 +50,8 @@ export function useSpaceSettings(
   const reads = useRef(0);
   const forbidden = useRef(onForbidden);
   forbidden.current = onForbidden;
+  const sessionLost = useRef(onSessionLost);
+  sessionLost.current = onSessionLost;
   /** Ce qui est à l'écran, à l'instant : pour une lecture qui a attendu le serveur. */
   const shown = useRef<Load["name"]>("loading");
   const show = useCallback((next: Load) => {
@@ -75,9 +80,11 @@ export function useSpaceSettings(
       show({ name: "ready", members, invitations });
       setReloadError(null);
     } catch (e) {
-      // Session perdue : la connexion est demandée par-dessus ; l'écran garde ce qu'il a.
-      if (outdated() || isSessionLost(e)) return;
-      if (e instanceof ApiError && e.status === 404) show({ name: "missing" });
+      if (outdated()) return;
+      // Session perdue : la connexion est demandée par-dessus ; l'écran garde ce qu'il a, et
+      // sera relu au retour du compte.
+      if (isSessionLost(e)) sessionLost.current();
+      else if (e instanceof ApiError && e.status === 404) show({ name: "missing" });
       // La liste des membres refusée : un invité, d'après le serveur (la session le disait
       // encore membre).
       else if (e instanceof ApiError && e.status === 403) forbidden.current();
