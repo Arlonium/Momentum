@@ -160,6 +160,9 @@ pub(crate) struct AppState {
     signups: Arc<tokio::sync::Mutex<()>>,
     /// Les accès déjà calculés, par personne et par espace (`access.rs`).
     access: Arc<AccessCache>,
+    /// Les données des espaces dont ces accès se calculent, lues une fois par
+    /// révision pour tout le monde (`access.rs`).
+    inputs: Arc<access::InputsCache>,
 }
 
 /// Millisecondes Unix.
@@ -296,6 +299,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
         logins: Arc::new(LoginThrottle::default()),
         signups: Arc::new(tokio::sync::Mutex::new(())),
         access: Arc::new(AccessCache::new(access::ACCESS_CACHE_NODES)),
+        inputs: Arc::new(access::InputsCache::new(access::INPUTS_CACHE_NODES)),
     };
     Ok((router(state), store))
 }
