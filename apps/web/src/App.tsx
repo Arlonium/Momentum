@@ -22,6 +22,7 @@ import type { Drop } from "./sidebar/drag";
 import type { CreateTarget } from "./sidebar/SectionList";
 import { Sidebar } from "./sidebar/Sidebar";
 import { CreateSpaceDialog } from "./sidebar/SpaceSwitcher";
+import { SpaceNotFound } from "./space/SpaceNotFound";
 import { useCurrentSpace } from "./space/useCurrentSpace";
 import { usePageActions } from "./space/usePageActions";
 import { useSpaceTree, useTreeCatchUp, useTreeReader } from "./space/useSpaceTree";
@@ -41,7 +42,7 @@ export function App() {
   const inTree = activeId === null ? undefined : tree.loaded?.nodes.find((n) => n.id === activeId);
   const page = useOpenPage(activeId, inTree, { retries, onSessionLost: sessionLost });
   const active = page.node;
-  const { space, atSpace } = useCurrentSpace({
+  const { space, atSpace, missing } = useCurrentSpace({
     route,
     pageSpaceId: active?.spaceId ?? null,
     spaces: me.spaces,
@@ -84,11 +85,11 @@ export function App() {
   const inSpace = route.name === "space" || route.name === "trash";
 
   useEffect(() => {
-    // Les réglages et la corbeille nomment l'onglet eux-mêmes.
-    if (settingsOf !== null || route.name === "trash") return;
+    // Les réglages, la corbeille et l'espace introuvable nomment l'onglet eux-mêmes.
+    if (settingsOf !== null || route.name === "trash" || missing) return;
     const title = active?.title ?? atSpace?.name;
     document.title = title === undefined ? "Mementum" : `${title} · Mementum`;
-  }, [active, atSpace, settingsOf, route.name]);
+  }, [active, atSpace, settingsOf, route.name, missing]);
 
   /** Créer une page à la racine : pas pour un invité, ni en lecture seule. */
   const mayCreate = !stale && space !== null && space.role !== "guest";
@@ -96,9 +97,18 @@ export function App() {
   const { looked } = page;
 
   let content;
-  if (settingsOf !== null) {
-    // Sans attendre l'arbre des pages : les réglages ont leurs propres appels.
-    content = <SpaceSettings key={settingsOf} spaceId={settingsOf} />;
+  if (missing) {
+    // Un espace où le compte n'a pas de rôle : le même écran pour son accueil, sa corbeille
+    // et ses réglages (R96).
+    content = <SpaceNotFound first={me.spaces[0] ?? null} />;
+  } else if (settingsOf !== null) {
+    // Sans attendre l'arbre des pages : les réglages ont leurs propres appels. Un espace que
+    // le compte n'a pas (encore) : on attend de savoir s'il vient de le rejoindre.
+    content = me.spaces.some((s) => s.id === settingsOf) ? (
+      <SpaceSettings key={settingsOf} spaceId={settingsOf} />
+    ) : (
+      <Message title="Chargement…" />
+    );
   } else if (schema.error) {
     // Au premier chargement seulement : sans la version du serveur, rien ne peut s'ouvrir.
     content = (

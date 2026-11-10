@@ -3,9 +3,11 @@
 // n'a pas dit où est la page), le dernier espace affiché reste ; à défaut, le dernier ouvert
 // dans ce navigateur (`spaces.ts`), sinon le premier du compte.
 //
-// `/` mène à cet espace, à la place de son adresse. Un espace où le compte n'a pas de rôle :
-// sa liste d'espaces est relue une fois (il vient peut-être de le rejoindre ailleurs), puis
-// l'adresse ramène à son premier espace, sans rien dire de l'autre.
+// `/` mène à cet espace, à la place de son adresse : ce n'est pas un lien vers un espace, et
+// un dernier espace gardé qui n'est plus là retombe sur le premier sans rien dire. Une adresse
+// qui nomme un espace où le compte n'a pas de rôle, elle, reste (Ruling R96) : la liste de ses
+// espaces est relue une fois (il vient peut-être de le rejoindre ailleurs), puis l'espace est
+// dit introuvable (`missing`), qu'il existe ou non.
 import type { SpaceInfo } from "@mementum/protocol";
 import { useEffect, useLayoutEffect, useState } from "react";
 import { navigate, spacePath, type Route } from "../router";
@@ -19,6 +21,11 @@ export type CurrentSpace = {
    * `null` : l'adresse n'est pas celle d'un espace, ou le compte n'y a pas de rôle.
    */
   atSpace: SpaceInfo | null;
+  /**
+   * L'adresse nomme un espace (son accueil, sa corbeille, ses réglages) où le compte n'a pas
+   * de rôle, liste de ses espaces relue.
+   */
+  missing: boolean;
 };
 
 type Inputs = {
@@ -31,11 +38,11 @@ type Inputs = {
   refresh: () => Promise<void>;
 };
 
-/** L'espace que nomme l'adresse : le sien, ou celui de la page ouverte. */
-function namedBy(route: Route, pageSpaceId: string | null): string | null {
+/** L'espace dont l'adresse est celle (accueil, corbeille, réglages), sinon `null`. */
+function addressed(route: Route): string | null {
   return route.name === "space" || route.name === "trash" || route.name === "spaceSettings"
     ? route.spaceId
-    : pageSpaceId;
+    : null;
 }
 
 /**
@@ -55,7 +62,8 @@ export function resolveSpace(
 export function useCurrentSpace({ route, pageSpaceId, spaces, refresh }: Inputs): CurrentSpace {
   /** Le dernier espace affiché : il reste quand l'adresse n'en nomme aucun. */
   const [shown, setShown] = useState(() => preferredSpace(spaces, readLastSpace())?.id ?? null);
-  const named = namedBy(route, pageSpaceId);
+  // L'espace que nomme l'adresse : le sien, ou celui de la page ouverte.
+  const named = addressed(route) ?? pageSpaceId;
   const space = resolveSpace(spaces, named, shown);
   const spaceId = space?.id ?? null;
 
@@ -85,16 +93,17 @@ export function useCurrentSpace({ route, pageSpaceId, spaces, refresh }: Inputs)
     };
   }, [unknown, checked, refresh]);
 
-  // Toujours pas de rôle dans cet espace : l'accueil, donc le premier espace du compte, à la
-  // place de cette adresse. Rien ne dit si l'espace existe.
-  const inSpace = route.name === "space" || route.name === "trash";
-  const gone = inSpace && unknown !== null && checked === unknown;
   // `/` : l'espace à ouvrir, à la place de cette adresse.
   const home = route.name === "home" ? spaceId : null;
   useLayoutEffect(() => {
-    if (gone) navigate("/", { replace: true });
-    else if (home !== null) navigate(spacePath(home), { replace: true });
-  }, [gone, home]);
+    if (home !== null) navigate(spacePath(home), { replace: true });
+  }, [home]);
 
-  return { space, atSpace: inSpace && unknown === null ? space : null };
+  const inSpace = route.name === "space" || route.name === "trash";
+  return {
+    space,
+    atSpace: inSpace && unknown === null ? space : null,
+    // Toujours pas de rôle dans l'espace de l'adresse, liste relue. Rien ne dit s'il existe.
+    missing: addressed(route) !== null && unknown !== null && checked === unknown,
+  };
 }

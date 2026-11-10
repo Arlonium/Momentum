@@ -273,26 +273,36 @@ test("page_link_opens_its_own_space", async ({ browser }) => {
   expect(await p.evaluate(() => localStorage.getItem("mementum.space"))).toBe(second.id);
 });
 
-test("space_without_a_role_goes_to_the_first_space", async ({ browser }) => {
+test("space_without_a_role_is_not_found", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const bruno = await signUpAccount(`Bruno ${unique()}`);
   const foreign = await firstSpace(await apiAs(alice));
   const own = await firstSpace(await apiAs(bruno));
 
   const b = await newUser(browser, bruno);
-  // Un espace qui n'existe pas : le premier espace du compte.
+  const missing = b.getByRole("heading", { name: "Espace introuvable", level: 1 });
+  // Un espace qui n'existe pas : l'écran le dit, à cette adresse (un lien collé ne mène pas
+  // ailleurs sans un mot). La barre latérale reste celle d'un espace du compte.
   await b.goto(`/s/${UNKNOWN_ID}`);
-  await expect(b).toHaveURL(`${BASE_URL}/s/${own.id}`);
-  await expect(b.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
+  await expect(missing).toBeVisible();
+  await expect(b).toHaveURL(`${BASE_URL}/s/${UNKNOWN_ID}`);
+  await expect(spaceSwitcher(b, own.name)).toBeVisible();
   const unknown = await b.locator("body").innerText();
-  // Un espace où B n'a aucun rôle : exactement le même écran, sans rien de cet espace.
-  for (const path of [`/s/${foreign.id}`, `/s/${foreign.id}/trash`]) {
+
+  // Un espace où B n'a aucun rôle : exactement le même écran, sans rien de cet espace, pour
+  // son accueil, sa corbeille et ses réglages.
+  for (const path of [`/s/${foreign.id}`, `/s/${foreign.id}/trash`, `/s/${foreign.id}/settings`]) {
     await b.goto(path);
-    await expect(b).toHaveURL(`${BASE_URL}/s/${own.id}`);
-    await expect(b.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
+    await expect(missing).toBeVisible();
+    await expect(b).toHaveURL(`${BASE_URL}${path}`);
     expect(await b.locator("body").innerText()).toBe(unknown);
   }
   expect(unknown).not.toContain(foreign.name);
+
+  // Son bouton mène au premier espace du compte.
+  await b.getByRole("main").getByRole("button", { name: `Ouvrir « ${own.name} »` }).click();
+  await expect(b).toHaveURL(`${BASE_URL}/s/${own.id}`);
+  await expect(b.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
 });
 
 test("collapsed_section_is_remembered_per_space", async ({ browser }) => {

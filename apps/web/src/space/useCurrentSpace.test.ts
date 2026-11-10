@@ -118,22 +118,44 @@ test("space_just_joined_elsewhere_is_found_after_one_refresh", async () => {
   expect(refresh).toHaveBeenCalledTimes(1);
 });
 
-test("space_without_a_role_goes_home_after_one_refresh", async () => {
-  const refresh = vi.fn(async () => {});
+test("space_without_a_role_is_missing_after_one_refresh", async () => {
+  // La relecture du compte est en cours : on ne sait pas encore.
+  const read = deferred<void>();
+  const refresh = vi.fn(() => read.promise);
   const hook = await render({ path: "/s/ailleurs" }, refresh);
-  await settle();
-  // La liste relue n'a toujours pas cet espace : l'accueil, à la place de cette adresse.
   expect(refresh).toHaveBeenCalledTimes(1);
+  expect(hook.current.missing).toBe(false);
   expect(hook.current.atSpace).toBeNull();
-  expect(location.pathname).toBe("/");
-  // Une relecture qui échoue ne change rien à la suite.
-  history.replaceState(null, "", "/s/autre/trash");
-  const failing = vi.fn(async () => {
-    throw new Error("réseau");
-  });
-  const other = await renderHook(at(failing), { path: "/s/autre/trash" });
+  // La liste relue n'a toujours pas cet espace : il est introuvable. L'adresse reste (pas de
+  // renvoi silencieux ailleurs), et la barre latérale garde un espace du compte.
+  await settle(() => read.resolve());
+  expect(hook.current.missing).toBe(true);
+  expect(hook.current.atSpace).toBeNull();
+  expect(hook.current.space).toBe(perso);
+  expect(location.pathname).toBe("/s/ailleurs");
+  expect(refresh).toHaveBeenCalledTimes(1);
+  // Cet espace n'est pas gardé comme le dernier ouvert.
+  expect(localStorage.getItem(LAST_SPACE_KEY)).toBe("perso");
+
+  // Pareil pour sa corbeille et ses réglages ; une relecture qui échoue ne change rien.
+  for (const path of ["/s/autre/trash", "/s/autre/settings"]) {
+    const failing = vi.fn(async () => {
+      throw new Error("réseau");
+    });
+    const other = await render({ path }, failing);
+    await settle();
+    expect(failing).toHaveBeenCalledTimes(1);
+    expect(other.current.missing).toBe(true);
+    expect(location.pathname).toBe(path);
+    await other.unmount();
+  }
+});
+
+test("known_space_is_never_missing", async () => {
+  const hook = await render({ path: "/s/pro/settings" });
+  expect(hook.current.missing).toBe(false);
+  // Ni l'accueil, ni une page (dont l'espace se lit ailleurs).
+  await hook.rerender({ path: "/p/x", pageSpaceId: "ailleurs" });
   await settle();
-  expect(failing).toHaveBeenCalledTimes(1);
-  expect(other.current.atSpace).toBeNull();
-  expect(location.pathname).toBe("/");
+  expect(hook.current.missing).toBe(false);
 });
