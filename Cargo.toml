@@ -57,3 +57,11 @@ uuid = { version = "1.29", features = ["v7"] }
 # yrs 0.28.1 (`Update::decode`, `ItemContent::decode`) et sa façon d'intégrer (trous, attente) ;
 # toute montée de version doit le revérifier, test différentiel compris.
 yrs = { version = "=0.28.1", features = ["sync"] }
+
+# Argon2 optimisé même en développement : compilé en debug, une vérification de mot de passe
+# prend environ 430 ms (25 ms optimisée), que paient chaque inscription et chaque connexion,
+# donc chaque test qui ouvre une session, e2e compris. Seule cette crate est optimisée : le
+# reste du serveur reste en debug. Optimiser aussi `blake2`, dont elle dépend, ne gagne
+# qu'une ou deux millisecondes.
+[profile.dev.package.argon2]
+opt-level = 3
