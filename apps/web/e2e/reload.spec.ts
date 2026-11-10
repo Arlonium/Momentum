@@ -7,6 +7,7 @@ import {
   apiAs,
   closeContexts,
   createPage,
+  expectUnder,
   firstSpace,
   getMmd,
   newUser,
@@ -187,6 +188,7 @@ test("failed_trash_reload_keeps_the_list", async ({ browser }) => {
     .click();
   await expect(treeRow(p, b.id)).toHaveCount(0);
   await expect(main.getByRole("alert")).toContainText("La corbeille n'a pas pu être relue.");
+  await expectUnder(main.getByRole("alert"), main.getByRole("button", { name: "Réessayer" }));
   // La liste déjà lue reste à l'écran, avec ses actions.
   await expect(trashItem(p, "Alpha")).toBeVisible();
   await expect(trashItem(p, "Alpha").getByRole("button", { name: "Restaurer" })).toBeVisible();

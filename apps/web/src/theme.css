@@ -1432,9 +1432,9 @@ button.tree-toggle:hover {
   margin: 10px 0;
 }
 
-/* Une relecture qui a échoué : son message, et de quoi la refaire. */
-.mm-settings-reload .mm-form-error {
-  flex: 1 1 auto;
+/* Une relecture qui a échoué : sous son message, de quoi la refaire ; puis les réglages. */
+.mm-settings-reload {
+  margin-bottom: 16px;
 }
 
 /* Membres et invitations : une ligne par personne (pastille, nom, adresse, rôle à droite). */
@@ -1598,14 +1598,21 @@ button.tree-toggle:hover {
   align-items: stretch;
 }
 
+/* Étiré sur la largeur du panneau, le bouton centre son icône et son libellé. */
+.mm-share-invite .mm-invite-created .mm-button-icon {
+  justify-content: center;
+}
+
+/* Une lecture des accès qui a échoué : sous son message, de quoi la refaire. */
 .mm-share-read-error {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 8px;
 }
 
 .mm-share-read-error .mm-form-error {
-  flex: 1 1 auto;
+  align-self: stretch;
 }
 
 /* Les lignes des réglages de l'espace, resserrées : pastille, nom et adresse, niveau, action. */
@@ -1827,14 +1834,16 @@ button.tree-toggle:hover {
 
 .mm-invite-warning {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   margin: 0 0 2px;
   color: var(--mm-warning);
 }
 
+/* Au milieu de la première ligne (21 px de haut), que la phrase tienne sur une ligne ou deux. */
 .mm-invite-warning svg {
   flex: none;
+  margin-top: 2.5px;
 }
 
 .mm-invite-warning strong {

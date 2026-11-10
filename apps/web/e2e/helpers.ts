@@ -449,6 +449,17 @@ export async function holdPageReads(
   return { asked, release };
 }
 
+/**
+ * `below` est sous `above`, calé sur son bord gauche : le bouton « Réessayer » sous le message
+ * de la lecture qu'il refait. Un seul dessin, de la corbeille au menu Partager.
+ */
+export async function expectUnder(above: Locator, below: Locator): Promise<void> {
+  const [upper, lower] = [await above.boundingBox(), await below.boundingBox()];
+  if (!upper || !lower) throw new Error("un des deux éléments n'est pas affiché");
+  expect(lower.y).toBeGreaterThanOrEqual(upper.y + upper.height);
+  expect(lower.x).toBe(upper.x);
+}
+
 /** La barre latérale de l'application. */
 export function sidebarOf(p: Page): Locator {
   return p.getByRole("navigation", { name: "Barre latérale" });

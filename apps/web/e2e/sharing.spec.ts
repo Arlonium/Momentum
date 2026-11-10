@@ -10,6 +10,7 @@ import {
   apiAs,
   closeContexts,
   createPage,
+  expectUnder,
   firstSpace,
   forbidNativeDialogs,
   getAccess,
@@ -854,6 +855,17 @@ test("invitation_link_is_shown_until_the_page_is_closed", async ({ browser }) =>
   await menu.getByRole("button", { name: "Inviter", exact: true }).click();
   await expect(menu.getByText(LINK_WARNING)).toBeVisible();
   const link = await linkOf(menu).inputValue();
+  // Le bouton prend la largeur du panneau : son libellé y est centré, comme sur les autres
+  // boutons pleine largeur.
+  const [before, after] = await menu
+    .getByRole("button", { name: "Copier le lien d'invitation" })
+    .evaluate((button) => {
+      const label = document.createRange();
+      label.selectNodeContents(button);
+      const [inner, outer] = [label.getBoundingClientRect(), button.getBoundingClientRect()];
+      return [inner.left - outer.left, outer.right - inner.right];
+    });
+  expect(Math.abs(before - after)).toBeLessThanOrEqual(1);
 
   // Le menu fermé puis rouvert (un clic à côté par mégarde) : l'invitation attend, et son lien
   // est encore là, comme le dit la phrase.
@@ -872,6 +884,29 @@ test("invitation_link_is_shown_until_the_page_is_closed", async ({ browser }) =>
   const again = await openShareMenu(a);
   await expect(pendingRow(again, email)).toBeVisible();
   await expect(linkOf(again)).toHaveCount(0);
+});
+
+test("failed_access_read_offers_to_retry_under_its_message", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const shared = await createPage(aliceApi, { section: "private", title: `Plan ${unique()}` });
+  const a = await openPage(browser, shared.id, alice);
+
+  // Le serveur ne répond pas quand le menu s'ouvre : le menu le dit, avec de quoi relire.
+  const access = `**/api/v1/pages/${shared.id}/access`;
+  await a.route(access, (route) => route.abort());
+  const menu = await openShareMenu(a);
+  const alert = menu.getByRole("alert");
+  const retry = menu.getByRole("button", { name: "Réessayer" });
+  await expect(alert).toContainText("Les accès n'ont pas pu être lus.");
+  await expectUnder(alert, retry);
+
+  // Le serveur revient : « Réessayer » lit les accès, et le message part.
+  await a.unroute(access);
+  await retry.click();
+  await expect(accessRow(menu, alice.email)).toBeVisible();
+  await expect(alert).toHaveCount(0);
+  await expect(retry).toHaveCount(0);
 });
 
 test("page_trashed_or_deleted_elsewhere_is_seen_while_open", async ({ browser }) => {

@@ -8,6 +8,7 @@ import {
   apiAs,
   closeContexts,
   expectSignedInAs,
+  expectUnder,
   firstSpace,
   forbidNativeDialogs,
   getMe,
@@ -496,6 +497,8 @@ test("failed_reload_keeps_the_settings_and_the_invitation_link", async ({ browse
   const role = memberRow(a, bruno.email).getByRole("combobox", { name: `Rôle de ${bruno.name}` });
   await role.selectOption("admin");
   await expect(a.getByRole("alert")).toContainText("Les réglages n'ont pas pu être relus.");
+  // De quoi la refaire, sous le message, comme dans la corbeille.
+  await expectUnder(a.getByRole("alert"), a.getByRole("button", { name: "Réessayer" }));
   // Rien de ce qui était affiché ne se perd : ni les réglages, ni le lien de l'invitation,
   // que le serveur ne redonnera jamais.
   await expect(a.getByRole("heading", { name: "Réglages de l'espace", level: 1 })).toBeVisible();

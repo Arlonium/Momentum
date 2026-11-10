@@ -138,12 +138,15 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
         <h1 className="mm-settings-title">Réglages de l'espace</h1>
         <FormError message={refusal} />
         {reloadError && (
-          <div className="mm-settings-row mm-settings-reload">
+          // Le message, et dessous de quoi refaire la lecture : comme dans la corbeille.
+          <>
             <FormError message={`Les réglages n'ont pas pu être relus. ${reloadError}`} />
-            <button type="button" className="mm-button" onClick={() => void reload()}>
-              Réessayer
-            </button>
-          </div>
+            <p className="mm-settings-actions mm-settings-reload">
+              <button type="button" className="mm-button" onClick={() => void reload()}>
+                Réessayer
+              </button>
+            </p>
+          </>
         )}
         {content}
       </div>
