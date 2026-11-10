@@ -976,12 +976,43 @@ async fn move_to_root_is_stale_below_full_on_the_old_chain() {
         .unwrap();
     assert_lines(&f, page, &[edit]).await;
 
-    // Une page qu'il ne voit plus du tout.
+    // La ligne de la page parente retirée : il ne garde, sur cette page-ci, que sa propre ligne
+    // en commentaire. (Une page qu'il ne voit plus du tout : le test suivant.)
     f.store
         .remove_grant(parent, Subject::User(c.member))
         .await
         .unwrap();
+    assert_eq!(level_of(&f, lower, c.member).await, Some(Level::Comment));
     assert_stale_at_root(&f, lower, full(c.member), "ligne retirée").await;
+}
+
+/// Un membre qui ne voit plus du tout la page ne la passe pas à la racine : elle n'a pas de
+/// ligne propre, et la ligne qu'il tenait sur la page parente a été retirée. Son niveau sur
+/// l'ancienne chaîne n'est pas « plus bas que demandé », il n'existe plus (`None`) : sans ce
+/// cas, le passage à la racine lui écrirait une ligne `full` sur une page devenue celle d'une
+/// autre.
+#[tokio::test]
+async fn move_to_root_is_stale_for_a_member_who_no_longer_sees_the_page() {
+    let f = fresh().await;
+    let c = cast(&f).await;
+    let full = |user| named(user, Level::Full);
+    let parent = with_lines(&f, None, "Partagée", vec![full(c.owner), full(c.member)]).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![]).await;
+    assert_eq!(level_of(&f, page, c.member).await, Some(Level::Full));
+    f.store
+        .remove_grant(parent, Subject::User(c.member))
+        .await
+        .unwrap();
+    // Toujours membre de l'espace, mais plus rien sur cette chaîne.
+    let role = f.store.role_in(f.space.id, c.member).await.unwrap();
+    assert_eq!(role, Some(Role::Member));
+    assert_eq!(level_of(&f, page, c.member).await, None);
+
+    assert_stale_at_root(&f, page, full(c.member), "page qu'il ne voit plus").await;
+    assert_lines(&f, page, &[]).await;
+    // La page reste à sa propriétaire, qui la déplace, elle.
+    to_root(&f, page, c.owner).await;
+    assert_lines(&f, page, &[full(c.owner)]).await;
 }
 
 /// Une page à la corbeille, elle-même ou par un ancêtre, ne se déplace pas.
