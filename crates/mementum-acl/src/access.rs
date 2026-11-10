@@ -125,6 +125,8 @@ impl SpaceAccess {
             }
         }
         visible.sort_unstable_by_key(|&(id, _)| id);
+        // Gardé en cache : pas de place réservée en trop.
+        visible.shrink_to_fit();
         SpaceAccess {
             role: Some(role),
             visible,
@@ -221,5 +223,39 @@ impl Chain {
         } else {
             Section::Shared
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gardé en cache, un calcul ne réserve pas de place en trop : son poids dans le cache (ses
+    /// nœuds visibles) est bien ce qu'il occupe.
+    #[test]
+    fn visible_nodes_take_no_spare_room() {
+        let user = Uuid::from_u128(1);
+        let nodes: Vec<TreeNode> = (0..100)
+            .map(|i| TreeNode {
+                id: Uuid::from_u128(1_000 + i),
+                parent_id: None,
+                trashed: false,
+            })
+            .collect();
+        // Un nœud sur trois visible : le calcul en écarte, sa liste ne doit pas garder leur place.
+        let grants: Vec<(Uuid, Grant)> = nodes
+            .iter()
+            .step_by(3)
+            .map(|n| {
+                let grant = Grant {
+                    subject: Subject::User(user),
+                    level: Level::Read,
+                };
+                (n.id, grant)
+            })
+            .collect();
+        let access = SpaceAccess::compute(&nodes, &grants, user, Some(Role::Member));
+        assert_eq!(access.visible_count(), 34);
+        assert_eq!(access.visible.capacity(), access.visible.len());
     }
 }

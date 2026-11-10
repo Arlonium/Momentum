@@ -26,11 +26,13 @@ struct Entries {
 /// retiré entre-temps resterait en cache.
 ///
 /// Le cache est borné en nœuds visibles gardés, pas en entrées (Ruling R59) : c'est ce qui
-/// pèse en mémoire (une trentaine d'octets par nœud). Un calcul compte pour ses nœuds
-/// visibles, et pour un au moins : des calculs vides ne le font pas grossir sans fin. Plein, il
-/// se vide d'un coup avant de garder un nouveau calcul ; un calcul plus gros que le plafond, à
-/// lui seul, n'est pas gardé. Il se partage entre tâches (`Send + Sync`) : le verrou n'est tenu
-/// que le temps d'une lecture ou d'une écriture.
+/// pèse en mémoire, 36 octets par nœud. Un calcul compte pour ses nœuds visibles, plus
+/// [`FIXED_COST`] pour ce qu'il coûte même vide (sa case dans la table, son `Arc`, son `Vec` :
+/// 150 à 300 octets) ; des calculs vides ne le font donc pas grossir sans fin. Chaque unité du
+/// plafond pèse ainsi une quarantaine d'octets au plus. Plein, il se vide d'un coup avant de
+/// garder un nouveau calcul ; un calcul plus gros que le plafond, à lui seul, n'est pas gardé.
+/// Il se partage entre tâches (`Send + Sync`) : le verrou n'est tenu que le temps d'une lecture
+/// ou d'une écriture.
 pub struct AccessCache {
     max_nodes: usize,
     entries: Mutex<Entries>,
@@ -42,14 +44,18 @@ const _: () = {
     shared::<AccessCache>();
 };
 
-/// Ce que compte un calcul dans le plafond du cache : ses nœuds visibles, un au moins.
+/// Ce qu'un calcul compte dans le plafond du cache en plus de ses nœuds visibles : son coût
+/// fixe (150 à 300 octets), à 36 octets l'unité.
+const FIXED_COST: usize = 8;
+
+/// Ce que compte un calcul dans le plafond du cache : ses nœuds visibles, plus son coût fixe.
 fn weight(access: &SpaceAccess) -> usize {
-    access.visible_count().max(1)
+    access.visible_count() + FIXED_COST
 }
 
 impl AccessCache {
-    /// Un cache qui garde au plus `max_nodes` nœuds visibles, tous calculs confondus (`0` : il
-    /// ne garde rien).
+    /// Un cache qui garde au plus `max_nodes` unités, tous calculs confondus : leurs nœuds
+    /// visibles et leur coût fixe (sous ce coût, il ne garde rien).
     pub fn new(max_nodes: usize) -> AccessCache {
         AccessCache {
             max_nodes,

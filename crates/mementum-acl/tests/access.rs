@@ -87,6 +87,18 @@ fn level_allows_matrix() {
     }
 }
 
+/// Un seul ordre des rôles : `guest` < `member` < `admin` < `owner`.
+#[test]
+fn roles_are_ranked() {
+    let ranked = [Role::Guest, Role::Member, Role::Admin, Role::Owner];
+    for (i, low) in ranked.iter().enumerate() {
+        for high in &ranked[i + 1..] {
+            assert!(low.rank() < high.rank(), "{low:?} < {high:?}");
+        }
+    }
+    assert_eq!(ranked.map(Role::rank), [0, 1, 2, 3]);
+}
+
 #[test]
 fn text_forms_roundtrip() {
     let levels = [
@@ -654,43 +666,41 @@ fn cache_misses_on_another_rev() {
 
 /// Les accès d'un membre à un espace de `pages` pages à la racine, toutes ouvertes aux membres :
 /// il en voit `pages`.
-fn access_to(pages: u128) -> Arc<SpaceAccess> {
-    let nodes: Vec<TreeNode> = (0..pages).map(|i| root(id(100 + i))).collect();
+fn access_to(pages: usize) -> Arc<SpaceAccess> {
+    let nodes: Vec<TreeNode> = (0..pages).map(|i| root(id(100 + i as u128))).collect();
     let grants: Vec<(Uuid, Grant)> = nodes
         .iter()
         .map(|n| grant(n.id, Subject::Members, Level::Read))
         .collect();
     let access = SpaceAccess::compute(&nodes, &grants, id(1), Some(Role::Member));
-    assert_eq!(access.visible().count() as u128, pages);
+    assert_eq!(access.visible().count(), pages);
     Arc::new(access)
+}
+
+/// Ce que pèse un calcul de `nodes` nœuds visibles dans le plafond du cache : ses nœuds, plus 8
+/// pour son coût fixe (case de la table, `Arc`, `Vec`).
+fn weight(nodes: usize) -> usize {
+    nodes + 8
 }
 
 /// Ruling R59 : le cache est borné en nœuds visibles gardés, pas en entrées.
 #[test]
 fn full_cache_is_emptied() {
     let space = id(10);
-    let (a, b, c) = (id(1), id(2), id(3));
-    let (three, two, one) = (access_to(3), access_to(2), access_to(1));
-    let cache = AccessCache::new(5);
-    cache.put(a, space, 1, Arc::clone(&three));
-    cache.put(b, space, 1, Arc::clone(&two));
-    // 3 + 2 nœuds : le plafond est atteint, pas dépassé.
+    let (a, b) = (id(1), id(2));
+    let cache = AccessCache::new(weight(3) + weight(2));
+    cache.put(a, space, 1, access_to(3));
+    cache.put(b, space, 1, access_to(1));
     assert!(cache.get(a, space, 1).is_some() && cache.get(b, space, 1).is_some());
 
-    // Remplacer une entrée ne compte que la nouvelle : rien n'est vidé.
-    cache.put(b, space, 2, Arc::clone(&two));
+    // Remplacer une entrée ne compte que la nouvelle : pile au plafond, rien n'est vidé.
+    cache.put(b, space, 2, access_to(2));
     assert!(cache.get(a, space, 1).is_some() && cache.get(b, space, 2).is_some());
-    cache.put(b, space, 3, Arc::clone(&one));
-    cache.put(c, space, 1, Arc::clone(&one));
-    // 3 + 1 + 1 nœuds.
-    assert!(cache.get(a, space, 1).is_some());
-    assert!(cache.get(b, space, 3).is_some() && cache.get(c, space, 1).is_some());
 
     // Un nœud de plus que le plafond : tout est vidé, puis la nouvelle entrée est gardée.
-    cache.put(b, space, 4, Arc::clone(&two));
+    cache.put(b, space, 3, access_to(3));
     assert!(cache.get(a, space, 1).is_none());
-    assert!(cache.get(c, space, 1).is_none());
-    assert!(cache.get(b, space, 4).is_some());
+    assert!(cache.get(b, space, 3).is_some());
 }
 
 /// Un calcul plus gros que le plafond, à lui seul, n'est pas gardé ; il ne vide pas le cache,
@@ -699,26 +709,30 @@ fn full_cache_is_emptied() {
 fn oversized_access_is_not_kept() {
     let space = id(10);
     let (a, b) = (id(1), id(2));
-    let cache = AccessCache::new(4);
+    let max = 2 * weight(2);
+    let cache = AccessCache::new(max);
     cache.put(a, space, 1, access_to(2));
     cache.put(b, space, 1, access_to(2));
-    cache.put(b, space, 2, access_to(5));
+    // Un nœud de trop : pas gardé.
+    cache.put(b, space, 2, access_to(max - 8 + 1));
     assert!(cache.get(b, space, 2).is_none());
     assert!(cache.get(b, space, 1).is_none());
     assert!(cache.get(a, space, 1).is_some());
-    // Pile au plafond : gardé.
-    cache.put(b, space, 3, access_to(4));
+    // Pile au plafond : gardé, après avoir vidé le reste.
+    cache.put(b, space, 3, access_to(max - 8));
     assert!(cache.get(b, space, 3).is_some());
+    assert!(cache.get(a, space, 1).is_none());
 }
 
-/// Un calcul vide (un membre d'un espace sans page) compte pour un nœud : des calculs vides ne
-/// font pas grossir le cache sans fin. Un cache de plafond nul ne garde rien.
+/// Un calcul a un coût fixe, même vide (un membre d'un espace sans page) : il pèse 8, et des
+/// calculs vides ne font pas grossir le cache sans fin. Un cache plus petit qu'un calcul vide
+/// ne garde rien.
 #[test]
-fn empty_access_counts_as_one_node() {
+fn each_access_has_a_fixed_cost() {
     let space = id(10);
     let (a, b, c) = (id(1), id(2), id(3));
     let empty = access_to(0);
-    let cache = AccessCache::new(2);
+    let cache = AccessCache::new(2 * weight(0));
     cache.put(a, space, 1, Arc::clone(&empty));
     cache.put(b, space, 1, Arc::clone(&empty));
     assert!(cache.get(a, space, 1).is_some() && cache.get(b, space, 1).is_some());
@@ -726,7 +740,9 @@ fn empty_access_counts_as_one_node() {
     assert!(cache.get(a, space, 1).is_none() && cache.get(b, space, 1).is_none());
     assert!(cache.get(c, space, 1).is_some());
 
-    let none = AccessCache::new(0);
-    none.put(a, space, 1, empty);
-    assert!(none.get(a, space, 1).is_none());
+    for max in [0, weight(0) - 1] {
+        let small = AccessCache::new(max);
+        small.put(a, space, 1, Arc::clone(&empty));
+        assert!(small.get(a, space, 1).is_none(), "plafond {max}");
+    }
 }

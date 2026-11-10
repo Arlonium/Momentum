@@ -99,6 +99,16 @@ impl Role {
     pub fn is_member(self) -> bool {
         matches!(self, Role::Owner | Role::Admin | Role::Member)
     }
+
+    /// Rang du rôle, le seul ordre des rôles : `guest` (0) < `member` < `admin` < `owner` (3).
+    pub fn rank(self) -> u8 {
+        match self {
+            Role::Guest => 0,
+            Role::Member => 1,
+            Role::Admin => 2,
+            Role::Owner => 3,
+        }
+    }
 }
 
 /// À qui une ligne d'accès donne son niveau. Forme texte (`Display`, [`Subject::parse`]) :
