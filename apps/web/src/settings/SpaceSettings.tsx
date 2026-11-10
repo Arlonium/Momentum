@@ -13,16 +13,18 @@
 // rôle ne se change pas ici.
 //
 // Le rôle de la personne connectée est relu avec la liste des membres, pas pris de la
-// session, qui peut dater. Après un refus du serveur (un rôle changé ailleurs, quelqu'un
-// déjà parti), l'écran relit tout : il montre l'état du serveur, plus celui qu'il croyait.
+// session, qui peut dater (`useSpaceSettings`). Après chaque action, et après un refus du
+// serveur (un rôle changé ailleurs, quelqu'un déjà parti), l'écran relit tout : il montre
+// l'état du serveur, plus celui qu'il croyait. Une relecture qui échoue ne retire rien de
+// l'écran. Un refus pour rôle insuffisant (`403`) ou pour quelqu'un qui n'est plus là (`404`)
+// se dit en tête des réglages, pas dans la section d'où il vient : le rôle perdu peut la
+// faire disparaître, et son message avec elle.
 // Le lien d'une invitation n'est montré qu'à sa création : le serveur ne garde que le
 // hachage de son jeton.
 import type { InviteRole, Member, PendingInvitation, Role } from "@mementum/protocol";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import {
   ApiError,
-  getMembers,
-  getSpaceInvitations,
   inviteToSpace,
   removeMember,
   revokeInvitation,
@@ -38,13 +40,7 @@ import { invitationLink, LEVEL_LABELS, ROLE_LABELS } from "../share/levels";
 import { Avatar } from "../ui/Avatar";
 import { Confirm } from "../ui/Confirm";
 import { isManager, mayRemove, rolesFor } from "./roles";
-
-type Load =
-  | { name: "loading" }
-  /** Aucun rôle dans cet espace, ou pas d'espace : le serveur répond `404`. */
-  | { name: "missing" }
-  | { name: "failed"; message: string }
-  | { name: "ready"; members: Member[]; invitations: PendingInvitation[] };
+import { useSpaceSettings } from "./useSpaceSettings";
 
 /** Une invitation tout juste créée, avec son lien : montré cette fois seulement. */
 type Created = { email: string; role: InviteRole; link: string };
@@ -74,38 +70,17 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
   const self = me.user.id;
   const space = me.spaces.find((s) => s.id === spaceId);
   useDocumentTitle("Réglages de l'espace");
-  const [load, setLoad] = useState<Load>({ name: "loading" });
 
   // Un invité n'a rien à faire ici : l'accueil, à la place de cette adresse.
   const guest = space?.role === "guest";
+  const goHome = useCallback(() => navigate("/", { replace: true }), []);
   useLayoutEffect(() => {
-    if (guest) navigate("/", { replace: true });
-  }, [guest]);
+    if (guest) goHome();
+  }, [guest, goHome]);
 
-  /** Relit les membres, et les invitations pour qui les gère. */
-  const reload = useCallback(async () => {
-    try {
-      let members = await getMembers(spaceId);
-      let invitations: PendingInvitation[] = [];
-      if (isManager(roleOf(members, self))) {
-        try {
-          invitations = await getSpaceInvitations(spaceId);
-        } catch (e) {
-          // Le rôle a baissé entre les deux appels : ce n'est pas un invité, les membres
-          // relus disent ce qu'il est devenu.
-          if (!(e instanceof ApiError && e.status === 403)) throw e;
-          members = await getMembers(spaceId);
-        }
-      }
-      setLoad({ name: "ready", members, invitations });
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 404) setLoad({ name: "missing" });
-      // La liste des membres refusée : un invité, d'après le serveur (la session le disait
-      // encore membre).
-      else if (e instanceof ApiError && e.status === 403) navigate("/", { replace: true });
-      else setLoad({ name: "failed", message: messageOf(e) });
-    }
-  }, [spaceId, self]);
+  const { load, reloadError, reload } = useSpaceSettings(spaceId, self, goHome);
+  /** Le dernier refus du serveur pour rôle insuffisant, ou pour quelqu'un qui n'est plus là. */
+  const [refusal, setRefusal] = useState<string | null>(null);
 
   useEffect(() => {
     if (guest) return;
@@ -136,8 +111,8 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
         self={self}
         members={load.members}
         invitations={load.invitations}
-        onInvitations={(invitations) => setLoad({ name: "ready", members: load.members, invitations })}
         reload={reload}
+        onRefused={setRefusal}
       />
     );
 
@@ -153,6 +128,15 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
         <h1 className="mm-settings-title">
           {load.name === "missing" ? "Espace introuvable" : "Réglages de l'espace"}
         </h1>
+        <FormError message={refusal} />
+        {reloadError && (
+          <div className="mm-settings-row mm-settings-reload">
+            <FormError message={`Les réglages n'ont pas pu être relus. ${reloadError}`} />
+            <button type="button" className="mm-button" onClick={() => void reload()}>
+              Réessayer
+            </button>
+          </div>
+        )}
         {content}
       </div>
     </>
@@ -165,12 +149,16 @@ type ReadyProps = {
   self: string;
   members: Member[];
   invitations: PendingInvitation[];
-  onInvitations: (invitations: PendingInvitation[]) => void;
   /** Relit tout depuis le serveur : après chaque action, et après chaque refus. */
   reload: () => Promise<void>;
+  /**
+   * Le serveur a refusé une action (`403`, `404`) : son message, à dire en tête des réglages.
+   * `null` : une nouvelle action commence, le refus d'avant n'a plus cours.
+   */
+  onRefused: (message: string | null) => void;
 };
 
-function Ready({ spaceId, name, self, members, invitations, onInvitations, reload }: ReadyProps) {
+function Ready({ spaceId, name, self, members, invitations, reload, onRefused }: ReadyProps) {
   const role = roleOf(members, self);
   const manager = isManager(role);
   return (
@@ -180,7 +168,13 @@ function Ready({ spaceId, name, self, members, invitations, onInvitations, reloa
           Ton rôle dans cet espace : <strong>{ROLE_LABELS[role]}</strong>.
         </p>
       )}
-      <NameSection spaceId={spaceId} name={name} editable={manager} reload={reload} />
+      <NameSection
+        spaceId={spaceId}
+        name={name}
+        editable={manager}
+        reload={reload}
+        onRefused={onRefused}
+      />
       <MembersSection
         spaceId={spaceId}
         spaceName={name}
@@ -188,13 +182,14 @@ function Ready({ spaceId, name, self, members, invitations, onInvitations, reloa
         role={role}
         members={members}
         reload={reload}
+        onRefused={onRefused}
       />
       {manager && (
         <InvitationsSection
           spaceId={spaceId}
           invitations={invitations}
-          onInvitations={onInvitations}
           reload={reload}
+          onRefused={onRefused}
         />
       )}
       <LeaveSection spaceId={spaceId} spaceName={name} self={self} />
@@ -207,9 +202,10 @@ type NameProps = {
   name: string;
   editable: boolean;
   reload: () => Promise<void>;
+  onRefused: (message: string | null) => void;
 };
 
-function NameSection({ spaceId, name, editable, reload }: NameProps) {
+function NameSection({ spaceId, name, editable, reload, onRefused }: NameProps) {
   const { refresh } = useSession();
   const headingId = useId();
   /** Ce qui a été tapé ; `null` : le nom de l'espace, tel quel. */
@@ -227,6 +223,7 @@ function NameSection({ spaceId, name, editable, reload }: NameProps) {
     if (!changed || busy) return;
     setBusy(true);
     setError(null);
+    onRefused(null);
     setSaved(false);
     try {
       await updateSpace(spaceId, { name: next });
@@ -235,8 +232,11 @@ function NameSection({ spaceId, name, editable, reload }: NameProps) {
       setDraft(null);
       setSaved(true);
     } catch (e) {
-      setError(messageOf(e));
-      if (isRefusal(e)) await reload();
+      if (isRefusal(e)) {
+        // Plus le rôle qu'il faut : le champ va disparaître, le refus se dit en tête.
+        onRefused(messageOf(e));
+        await reload();
+      } else setError(messageOf(e));
     } finally {
       setBusy(false);
     }
@@ -282,9 +282,18 @@ type MembersProps = {
   role: Role | undefined;
   members: Member[];
   reload: () => Promise<void>;
+  onRefused: (message: string | null) => void;
 };
 
-function MembersSection({ spaceId, spaceName, self, role, members, reload }: MembersProps) {
+function MembersSection({
+  spaceId,
+  spaceName,
+  self,
+  role,
+  members,
+  reload,
+  onRefused,
+}: MembersProps) {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -304,13 +313,20 @@ function MembersSection({ spaceId, spaceName, self, role, members, reload }: Mem
     if (!active || active === document.body) headingRef.current?.focus();
   }, [closed]);
 
+  /** Le refus d'une action : en tête des réglages s'il tient au rôle, sinon ici. */
+  const refused = (e: unknown) => {
+    if (isRefusal(e)) onRefused(messageOf(e));
+    else setError(messageOf(e));
+  };
+
   const changeRole = async (member: Member, next: Role) => {
     setChanging(member.userId);
     setError(null);
+    onRefused(null);
     try {
       await updateMember(spaceId, member.userId, { role: next });
     } catch (e) {
-      setError(messageOf(e));
+      refused(e);
     }
     // Réussi ou refusé : la liste telle que le serveur la voit.
     await reload();
@@ -321,10 +337,11 @@ function MembersSection({ spaceId, spaceName, self, role, members, reload }: Mem
     if (!removing) return;
     setBusy(true);
     setError(null);
+    onRefused(null);
     try {
       await removeMember(spaceId, removing.userId);
     } catch (e) {
-      setError(messageOf(e));
+      refused(e);
     }
     // Réussi ou refusé : la liste relue (ses invitations en attente partent avec lui).
     await reload();
@@ -416,11 +433,11 @@ function MembersSection({ spaceId, spaceName, self, role, members, reload }: Mem
 type InvitationsProps = {
   spaceId: string;
   invitations: PendingInvitation[];
-  onInvitations: (invitations: PendingInvitation[]) => void;
   reload: () => Promise<void>;
+  onRefused: (message: string | null) => void;
 };
 
-function InvitationsSection({ spaceId, invitations, onInvitations, reload }: InvitationsProps) {
+function InvitationsSection({ spaceId, invitations, reload, onRefused }: InvitationsProps) {
   const headingId = useId();
   const emailId = useId();
   const roleId = useId();
@@ -438,31 +455,33 @@ function InvitationsSection({ spaceId, invitations, onInvitations, reload }: Inv
     if (busy) return;
     setBusy(true);
     setError(null);
+    onRefused(null);
     let token: string;
     try {
       ({ token } = await inviteToSpace(spaceId, { email, role }));
     } catch (e) {
-      setError(messageOf(e));
       setBusy(false);
-      if (isRefusal(e)) await reload();
+      if (isRefusal(e)) {
+        // Plus le rôle qu'il faut : cette section va disparaître, le refus se dit en tête.
+        onRefused(messageOf(e));
+        await reload();
+      } else setError(messageOf(e));
       return;
     }
     setCreated({ email: email.trim().toLowerCase(), role, link: invitationLink(token) });
     setEmail("");
     setBusy(false);
     // La nouvelle invitation, sans son jeton, dans la liste de celles qui attendent. Si la
-    // relecture échoue, l'invitation existe quand même et son lien est montré : pas d'erreur.
-    try {
-      onInvitations(await getSpaceInvitations(spaceId));
-    } catch {
-      // la liste sera relue à la prochaine action ou au prochain affichage
-    }
+    // relecture échoue, l'invitation existe quand même : son lien reste montré, avec ce qui
+    // était déjà à l'écran (`useSpaceSettings`).
+    await reload();
   };
 
   const revoke = async (invitation: PendingInvitation) => {
     if (revoking) return;
     setRevoking(invitation.id);
     setRevokeError(null);
+    onRefused(null);
     try {
       await revokeInvitation(invitation.id);
     } catch (e) {

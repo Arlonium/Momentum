@@ -467,3 +467,105 @@ test("last_owner_cannot_leave", async ({ browser }) => {
   expect((await getMe(aliceApi)).spaces).toContainEqual({ ...space, role: "owner" });
   expect(nativeDialogs).toEqual([]);
 });
+
+test("failed_reload_keeps_the_settings_and_the_invitation_link", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const bruno = await signUpAccount(`Bruno ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  await joinSpace(aliceApi, space.id, bruno, "member");
+
+  const a = await newUser(browser, alice);
+  await a.goto(settingsPath(space.id));
+  const invitations = invitationsOf(a);
+  const link = invitations.getByRole("textbox", { name: "Lien d'invitation" });
+  // Une invitation créée : son lien n'est montré que cette fois.
+  const email = `invitee-${unique()}@exemple.fr`;
+  await invitations.getByLabel("Adresse e-mail").fill(email);
+  await invitations.getByRole("button", { name: "Inviter", exact: true }).click();
+  await expect(link).toHaveValue(/\/invite#/);
+  await expect(pendingRow(a, email)).toBeVisible();
+  const shown = await link.inputValue();
+
+  // Le serveur ne répond plus aux lectures des membres. Un rôle est changé : le changement
+  // passe, la relecture qui le suit échoue.
+  await a.route("**/api/v1/spaces/*/members", (route) =>
+    route.request().method() === "GET" ? route.abort() : route.continue(),
+  );
+  const role = memberRow(a, bruno.email).getByRole("combobox", { name: `Rôle de ${bruno.name}` });
+  await role.selectOption("admin");
+  await expect(a.getByRole("alert")).toContainText("Les réglages n'ont pas pu être relus.");
+  // Rien de ce qui était affiché ne se perd : ni les réglages, ni le lien de l'invitation,
+  // que le serveur ne redonnera jamais.
+  await expect(a.getByRole("heading", { name: "Réglages de l'espace", level: 1 })).toBeVisible();
+  await expect(link).toHaveValue(shown);
+  await expect(memberRow(a, bruno.email)).toBeVisible();
+  await expect(pendingRow(a, email)).toBeVisible();
+  expect((await getMembers(aliceApi, space.id)).find((m) => m.email === bruno.email)?.role).toBe(
+    "admin",
+  );
+
+  // Le serveur revient : « Réessayer » relit, le message part, et l'écran montre son état.
+  await a.unroute("**/api/v1/spaces/*/members");
+  await a.getByRole("button", { name: "Réessayer" }).click();
+  await expect(a.getByRole("alert")).toHaveCount(0);
+  await expect(role).toHaveValue("admin");
+  await expect(link).toHaveValue(shown);
+});
+
+test("refusal_stays_when_its_section_goes", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const bruno = await signUpAccount(`Bruno ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  await joinSpace(aliceApi, space.id, bruno, "admin");
+  const brunoId = (await getMembers(aliceApi, space.id)).find((m) => m.email === bruno.email)!.userId;
+
+  // B, admin, a les réglages ouverts : il invite, et renomme l'espace.
+  const b = await newUser(browser, bruno);
+  await b.goto(settingsPath(space.id));
+  const invitations = invitationsOf(b);
+  await expect(invitations).toBeVisible();
+  const demote = async () => {
+    const res = await aliceApi.patch(`/api/v1/spaces/${space.id}/members/${brunoId}`, {
+      data: { role: "member" },
+    });
+    expect(res.status(), await res.text()).toBe(200);
+  };
+  const promote = async () => {
+    const res = await aliceApi.patch(`/api/v1/spaces/${space.id}/members/${brunoId}`, {
+      data: { role: "admin" },
+    });
+    expect(res.status(), await res.text()).toBe(200);
+  };
+
+  // Pendant ce temps, A en fait un simple membre. Ce que le serveur lui répond désormais.
+  await demote();
+  const refused = await (await apiAs(bruno)).post(`/api/v1/spaces/${space.id}/invitations`, {
+    data: { email: "x@exemple.fr", role: "member" },
+  });
+  expect(refused.status()).toBe(403);
+  const body = (await refused.json()) as ErrorBody;
+
+  // Son invitation est refusée, et la section des invitations, qui n'est plus pour lui,
+  // disparaît : le refus du serveur reste à l'écran.
+  await invitations.getByLabel("Adresse e-mail").fill(`ami-${unique()}@exemple.fr`);
+  await invitations.getByRole("button", { name: "Inviter", exact: true }).click();
+  await expect(invitationsOf(b)).toHaveCount(0);
+  await expect(b.getByRole("alert")).toHaveText(body.message);
+  await expect(memberRow(b, bruno.email)).toContainText("Membre");
+
+  // De même pour le nom de l'espace, dont le champ disparaît avec le rôle.
+  await promote();
+  await b.reload();
+  const field = b.getByRole("textbox", { name: "Nom de l'espace" });
+  await expect(field).toHaveValue(space.name);
+  await expect(b.getByRole("alert")).toHaveCount(0);
+  await demote();
+  await field.fill(`Renommé ${unique()}`);
+  await field.press("Enter");
+  await expect(field).toHaveCount(0);
+  await expect(b.getByRole("alert")).not.toHaveText("");
+  await expect(b.getByRole("main")).toContainText(space.name);
+  expect((await firstSpace(aliceApi)).name).toBe(space.name);
+});

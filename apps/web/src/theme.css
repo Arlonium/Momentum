@@ -1425,6 +1425,11 @@ button.tree-toggle:hover {
   margin: 10px 0;
 }
 
+/* Une relecture qui a échoué : son message, et de quoi la refaire. */
+.mm-settings-reload .mm-form-error {
+  flex: 1 1 auto;
+}
+
 /* Membres et invitations : une ligne par personne (pastille, nom, adresse, rôle à droite). */
 
 .mm-people {
