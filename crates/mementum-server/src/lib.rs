@@ -305,7 +305,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
         signups: Arc::new(tokio::sync::Mutex::new(())),
         access: Arc::new(AccessCache::new(access::ACCESS_CACHE_NODES)),
         inputs: Arc::new(inputs_cache::InputsCache::new(
-            inputs_cache::INPUTS_CACHE_NODES,
+            inputs_cache::INPUTS_CACHE_UNITS,
         )),
     };
     Ok((router(state), store))

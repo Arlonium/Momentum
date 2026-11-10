@@ -315,7 +315,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::auth::LoginThrottle;
     use crate::inputs_cache::tests::wait_until;
-    use crate::inputs_cache::{INPUTS_CACHE_NODES, InputsCache};
+    use crate::inputs_cache::{INPUTS_CACHE_UNITS, InputsCache};
     use crate::types::SignupMode;
 
     /// Un état de serveur sur une base neuve, sans routes, avec le hub que monte `serve`
@@ -334,7 +334,7 @@ pub(crate) mod tests {
             logins: Arc::new(LoginThrottle::default()),
             signups: Arc::new(tokio::sync::Mutex::new(())),
             access: Arc::new(AccessCache::new(ACCESS_CACHE_NODES)),
-            inputs: Arc::new(InputsCache::new(INPUTS_CACHE_NODES)),
+            inputs: Arc::new(InputsCache::new(INPUTS_CACHE_UNITS)),
         }
     }
 
@@ -761,7 +761,7 @@ pub(crate) mod tests {
         assert_eq!((state.inputs.loads(), state.inputs.slots()), (1, 1));
     }
 
-    /// Le plafond en nœuds est tenu : quand les données d'un espace de plus n'y tiennent pas,
+    /// Le plafond, en unités, est tenu : quand les données d'un espace de plus n'y tiennent pas,
     /// celles de l'espace le plus anciennement servi sortent d'abord ; des données plus grosses
     /// que le plafond, à elles seules, ne sont pas gardées, et ne chassent rien.
     #[tokio::test]
@@ -789,14 +789,14 @@ pub(crate) mod tests {
 
         state.space_access(&olga, a).await.unwrap();
         state.space_access(&olga, b).await.unwrap();
-        assert_eq!(state.inputs.kept_nodes(), 32);
+        assert_eq!(state.inputs.kept_units(), 32);
         // Mona est servie des données de A, sans lecture : B devient le plus ancien servi.
         state.space_access(&mona, a).await.unwrap();
         assert_eq!(state.inputs.loads(), 2);
 
         state.space_access(&olga, c).await.unwrap();
         assert_eq!((kept(a), kept(b), kept(c)), (true, false, true));
-        assert_eq!(state.inputs.kept_nodes(), 32);
+        assert_eq!(state.inputs.kept_units(), 32);
 
         // 20 pages pèsent 50 : servies, pas gardées ; la personne suivante les relit.
         let access = state.space_access(&olga, big).await.unwrap();
@@ -804,7 +804,7 @@ pub(crate) mod tests {
         assert_eq!((kept(a), kept(c), kept(big)), (true, true, false));
         state.space_access(&mona, big).await.unwrap();
         assert_eq!(state.inputs.loads(), 5);
-        assert_eq!((state.inputs.kept_nodes(), state.inputs.slots()), (32, 2));
+        assert_eq!((state.inputs.kept_units(), state.inputs.slots()), (32, 2));
     }
 
     /// Une lecture qui échoue : l'erreur remonte (`500`), et rien n'est rangé, ni données ni

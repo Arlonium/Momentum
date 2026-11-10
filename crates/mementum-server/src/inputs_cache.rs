@@ -12,23 +12,28 @@ use mementum_acl::{Grant, Role, TreeNode};
 use mementum_store::{AccessInputs, StoreError};
 use uuid::Uuid;
 
-/// Plafond du cache des données des espaces ([`InputsCache`]), dans l'unité du cache des accès
-/// (Ruling R59) : une unité par nœud, par ligne d'accès et par rôle gardés, plus le coût fixe
-/// de chaque espace. Une unité pèse 34 octets au plus, soit 17 Mo environ, cache plein. Il
-/// tient les données de cinquante espaces de 10 000 pages : elles ne servent qu'entre une
-/// écriture et la requête suivante de chacun.
-pub(crate) const INPUTS_CACHE_NODES: usize = 500_000;
+/// Plafond du cache des données des espaces ([`InputsCache`]), en unités : une par nœud, par
+/// ligne d'accès et par rôle gardés, plus le coût fixe de chaque espace
+/// ([`INPUTS_FIXED_COST`]). C'est l'unité du cache des accès (Ruling R59) ; elle pèse ici 34
+/// octets au plus, soit 17 Mo environ, cache plein.
+///
+/// Un espace de 10 000 pages et d'une dizaine de membres pèse 10 000 unités environ si ses
+/// pages ne portent aucune ligne d'accès, 20 000 si chacune en porte une : le cache en tient
+/// quarante-neuf dans le premier cas, vingt-quatre dans le second. Ces données ne servent
+/// qu'entre une écriture et la requête suivante de chacun.
+pub(crate) const INPUTS_CACHE_UNITS: usize = 500_000;
 
 /// Ce que les données d'un espace comptent dans le plafond en plus de leurs lignes : leur coût
 /// fixe (leur case dans la table, leur `Arc`, leurs trois `Vec`, le tour de lecture : 250 octets
 /// environ).
 const INPUTS_FIXED_COST: usize = 8;
 
-// Une unité du plafond ne pèse pas plus qu'une unité du cache des accès.
+// Ce que pèse une unité, au plus : moins qu'une unité du cache des accès (une quarantaine
+// d'octets).
 const _: () = {
-    assert!(size_of::<TreeNode>() <= 40);
-    assert!(size_of::<(Uuid, Grant)>() <= 40);
-    assert!(size_of::<(Uuid, Role)>() <= 40);
+    assert!(size_of::<TreeNode>() <= 34);
+    assert!(size_of::<(Uuid, Grant)>() <= 34);
+    assert!(size_of::<(Uuid, Role)>() <= 34);
 };
 
 /// Ce que comptent les données d'un espace dans le plafond : leurs nœuds, leurs lignes d'accès
@@ -46,11 +51,11 @@ fn weight(inputs: &AccessInputs) -> usize {
 /// - Une lecture à la fois par espace : qui arrive pendant une lecture l'attend au lieu de la
 ///   refaire, puis prend ce qu'elle a lu. Les autres espaces n'attendent pas : le verrou de la
 ///   table n'est jamais tenu pendant une lecture de la base.
-/// - Le cache est borné en nœuds ([`weight`]), comme celui des accès. Quand des données n'y
+/// - Le cache est borné en unités ([`weight`]), comme celui des accès. Quand des données n'y
 ///   tiennent pas, celles des espaces les plus anciennement servis sortent d'abord ; des
 ///   données plus grosses que le plafond, à elles seules, ne sont pas gardées (chacun les relit).
 pub(crate) struct InputsCache {
-    max_nodes: usize,
+    max_units: usize,
     spaces: Mutex<Spaces>,
     /// Le nombre de lectures de la base demandées, pour les tests.
     #[cfg(test)]
@@ -62,8 +67,8 @@ pub(crate) struct InputsCache {
 struct Spaces {
     /// Une case par espace qui a des données gardées, ou une lecture en cours ou attendue.
     map: HashMap<Uuid, Slot>,
-    /// La somme des poids ([`weight`]) des données gardées.
-    nodes: usize,
+    /// La somme des poids ([`weight`]) des données gardées, en unités.
+    units: usize,
     /// L'heure du dernier service : avance d'un cran chaque fois que des données sont servies
     /// ou gardées.
     clock: u64,
@@ -88,7 +93,7 @@ impl Spaces {
             return;
         };
         if let Some((old, _)) = slot.kept.take() {
-            self.nodes -= weight(&old);
+            self.units -= weight(&old);
         }
         if slot.waiting == 0 {
             self.map.remove(&space);
@@ -126,10 +131,10 @@ pub(crate) struct HeldTurn<'a> {
 }
 
 impl InputsCache {
-    /// Un cache qui garde au plus `max_nodes` unités, tous espaces confondus.
-    pub(crate) fn new(max_nodes: usize) -> InputsCache {
+    /// Un cache qui garde au plus `max_units` unités, tous espaces confondus.
+    pub(crate) fn new(max_units: usize) -> InputsCache {
         InputsCache {
-            max_nodes,
+            max_units,
             spaces: Mutex::new(Spaces::default()),
             #[cfg(test)]
             loads: AtomicUsize::new(0),
@@ -209,10 +214,10 @@ impl InputsCache {
         let mut spaces = self.lock();
         let spaces = &mut *spaces;
         spaces.drop_kept(space);
-        if added > self.max_nodes {
+        if added > self.max_units {
             return;
         }
-        while spaces.nodes + added > self.max_nodes {
+        while spaces.units + added > self.max_units {
             let oldest = spaces
                 .map
                 .iter()
@@ -225,7 +230,7 @@ impl InputsCache {
         }
         spaces.clock += 1;
         spaces.map.entry(space).or_default().kept = Some((inputs, spaces.clock));
-        spaces.nodes += added;
+        spaces.units += added;
     }
 
     /// Un verrou empoisonné (panique pendant un autre appel) ne laisse pas la table dans un
@@ -261,10 +266,10 @@ impl InputsCache {
         Some(Arc::clone(inputs))
     }
 
-    /// La somme des poids des données gardées.
+    /// La somme des poids des données gardées, en unités.
     #[cfg(test)]
-    pub(crate) fn kept_nodes(&self) -> usize {
-        self.lock().nodes
+    pub(crate) fn kept_units(&self) -> usize {
+        self.lock().units
     }
 
     /// Le nombre de requêtes qui tiennent ou attendent le tour de lecture de l'espace.
