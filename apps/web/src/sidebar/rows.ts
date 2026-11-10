@@ -87,12 +87,18 @@ export function subtreeEnd(rows: Row[], index: number): number {
 
 /**
  * La page dont la ligne prend la place de celle de `id` quand elle quitte l'arbre avec ses
- * sous-pages : celle qui la suit, sinon celle qui la précède. `null` : il ne reste personne,
- * ou `id` n'est pas dans les lignes.
+ * sous-pages : celle qui la suit, sinon celle qui la précède. `stays` dit lesquelles restent
+ * (toutes, par défaut ; une relecture peut en retirer plusieurs à la fois). `null` : il ne
+ * reste personne, ou `id` n'est pas dans les lignes.
  */
-export function neighbourOf(rows: Row[], id: string): string | null {
+export function neighbourOf(
+  rows: Row[],
+  id: string,
+  stays: (id: string) => boolean = () => true,
+): string | null {
   const at = rows.findIndex((row) => row.node.id === id);
   if (at < 0) return null;
-  const next = rows[subtreeEnd(rows, at)] ?? rows[at - 1];
-  return next?.node.id ?? null;
+  const after = rows.slice(subtreeEnd(rows, at)).find((row) => stays(row.node.id));
+  const before = rows.slice(0, at).findLast((row) => stays(row.node.id));
+  return (after ?? before)?.node.id ?? null;
 }

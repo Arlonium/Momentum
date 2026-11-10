@@ -158,3 +158,24 @@ test("neighbour_takes_the_place_of_a_page_that_leaves", () => {
   expect(neighbourOf(flattenRows(nodes.slice(1, 4), new Set()), "b")).toBeNull();
   expect(neighbourOf(rows, "absente")).toBeNull();
 });
+
+test("neighbour_of_a_row_that_left_is_one_that_stays", () => {
+  const nodes = [
+    page("a", null, "a0"),
+    page("b", null, "a1"),
+    page("b1", "b", "a0"),
+    page("c", null, "a2"),
+    page("d", null, "a3"),
+  ];
+  // Lignes d'avant : a, b, b1, c, d. Une relecture en retire plusieurs à la fois : la voisine
+  // est la première qui reste après elle, sinon la dernière qui reste avant.
+  const rows = flattenRows(nodes, new Set());
+  const stays = (...ids: string[]) => (id: string) => ids.includes(id);
+  expect(neighbourOf(rows, "b", stays("a", "c", "d"))).toBe("c");
+  expect(neighbourOf(rows, "b", stays("a", "d"))).toBe("d");
+  expect(neighbourOf(rows, "b", stays("a"))).toBe("a");
+  expect(neighbourOf(rows, "d", stays("a", "b"))).toBe("b");
+  // Ses sous-pages ne comptent pas, même si elles restent ailleurs dans l'arbre.
+  expect(neighbourOf(rows, "b", stays("b1"))).toBeNull();
+  expect(neighbourOf(rows, "b", stays())).toBeNull();
+});

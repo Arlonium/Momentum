@@ -13,6 +13,7 @@ import {
   NO_SESSION,
   openPage,
   openRowMenu,
+  sectionOf,
   shownRows,
   sidebarOf,
   signUpAccount,
@@ -228,6 +229,54 @@ test("refused_restore_reads_the_page_again", async ({ browser }) => {
   await expect(trashBanner(p)).toHaveCount(0);
   await expect(treeRow(p, b.id).getByRole("link")).toHaveAttribute("aria-current", "page");
   await expect(titleOf(p)).not.toHaveAttribute("readonly", "");
+});
+
+test("focus_follows_a_page_removed_elsewhere", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  await createPage(api, { parentId: b.id, title: "Bravo bis" });
+  const c = await createPage(api, { title: "Charlie" });
+
+  const p = await newUser(browser, alice);
+  // L'horloge de la page est la nôtre : on n'attend pas cinq secondes pour de bon.
+  await p.clock.install();
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "2 Bravo bis", "1 Charlie"]);
+  const comeBack = async () => {
+    await p.clock.fastForward(5_500);
+    await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+  };
+
+  // Le focus est sur la ligne de « Bravo ». Ailleurs, elle est supprimée avec sa sous-page ;
+  // de retour sur l'onglet, l'arbre est relu, sa ligne part, et le focus va à celle qui prend
+  // sa place, comme après une mise à la corbeille d'ici.
+  await treeRow(p, b.id).getByRole("link").focus();
+  await deleteElsewhere(api, b.id);
+  await comeBack();
+  await expect(treeRow(p, b.id)).toHaveCount(0);
+  await expect(treeRow(p, c.id).getByRole("link")).toBeFocused();
+  // La dernière ligne part : le focus va à celle d'avant.
+  await deleteElsewhere(api, c.id);
+  await comeBack();
+  await expect(treeRow(p, c.id)).toHaveCount(0);
+  await expect(treeRow(p, a.id).getByRole("link")).toBeFocused();
+
+  // Une ligne qui n'a pas le focus part sans le déplacer.
+  const d = await createPage(api, { title: "Delta" });
+  await comeBack();
+  await expect(treeRow(p, d.id)).toBeVisible();
+  await deleteElsewhere(api, d.id);
+  await comeBack();
+  await expect(treeRow(p, d.id)).toHaveCount(0);
+  await expect(treeRow(p, a.id).getByRole("link")).toBeFocused();
+  // La seule ligne de la section part : le focus va au titre de la section.
+  await deleteElsewhere(api, a.id);
+  await comeBack();
+  await expect(treeRow(p, a.id)).toHaveCount(0);
+  await expect(sectionOf(p, "Espace").getByRole("button", { name: "Espace", exact: true })).toBeFocused();
 });
 
 test("tree_is_read_again_when_the_tab_comes_back", async ({ browser }) => {

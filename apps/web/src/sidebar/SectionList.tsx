@@ -5,8 +5,9 @@
 // d'une ligne, une sous-page ; son « … », le menu de ses actions (`RowMenu`) : « Déplacer vers
 // le haut », « Déplacer vers le bas », « Imbriquer dans la page précédente », « Sortir de la
 // page parente » (ce que la souris fait en glissant, au clavier, R95), « Mettre à la
-// corbeille ». La page mise à la corbeille emporte sa ligne : le focus va à celle qui prend sa
-// place.
+// corbeille ». Une page qui quitte l'arbre (mise à la corbeille ici, ou retirée par une
+// relecture : jetée, supprimée ou plus partagée ailleurs) emporte sa ligne : si elle avait le
+// focus, il va à celle qui prend sa place.
 //
 // Une page se déplace aussi à la souris, à l'intérieur de sa section (`PageTree`, `drag.ts`).
 // Le glisser-déposer en cours est tenu ici : seul l'arbre d'où vient la page accepte le dépôt.
@@ -21,6 +22,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type FocusEvent,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -75,12 +77,8 @@ type Props = {
 /** Le menu « … » ouvert : sa page, et le bouton qui l'a ouvert. */
 type OpenMenu = { id: string; anchor: HTMLElement };
 
-/**
- * La page que le menu vient de mettre à la corbeille : le bouton « … » de sa ligne, à qui le
- * menu a rendu le focus, et ce qui le recevra quand la ligne partira : la ligne voisine
- * (`neighbour`), sinon le titre de sa section.
- */
-type Leaving = { id: string; anchor: HTMLElement; section: Section; neighbour: string | null };
+/** Les pages de chaque section et celles qui sont repliées : de quoi retrouver les lignes montrées. */
+type Shown = { groups: Record<Section, PageNode[]>; collapsed: ReadonlySet<string> };
 
 /** Le même dépôt visé ? */
 function sameDrop(a: DropAt | null, b: DropAt | null): boolean {
@@ -123,31 +121,53 @@ export function SectionList({
   const closeMenu = useCallback(() => setMenu(null), []);
 
   const root = useRef<HTMLDivElement>(null);
-  const leaving = useRef<Leaving | null>(null);
-  // La ligne d'une page mise à la corbeille part avec le focus, que le menu avait rendu à son
-  // bouton « … » : il va à la ligne qui prend sa place, sinon au titre de la section. Seulement
-  // s'il s'est perdu : on ne le reprend pas à qui l'a posé ailleurs entre-temps.
+  /** La page dont la ligne a le focus (son lien, son repli, son « … » ou son « + »). */
+  const focused = useRef<string | null>(null);
+  /** Ce qui était montré au rendu d'avant : la voisine d'une ligne partie s'y lit. */
+  const before = useRef<Shown | null>(null);
+  // Une ligne qui quitte l'arbre (page mise à la corbeille par son menu, qui avait rendu le
+  // focus à son bouton « … » ; page retirée par une relecture) part avec le focus : il va à la
+  // ligne qui prend sa place, sinon au titre de sa section. Seulement s'il s'est perdu : on
+  // ne le reprend pas à qui l'a posé ailleurs entre-temps.
   useEffect(() => {
-    const left = leaving.current;
-    if (left === null || nodes === null) return;
-    if (nodes.some((node) => node.id === left.id)) {
-      // Toujours là (le serveur n'a pas encore répondu, ou il a refusé). Le focus a quitté son
-      // bouton : la personne est passée à autre chose.
-      if (document.activeElement !== left.anchor) leaving.current = null;
-      return;
-    }
-    leaving.current = null;
+    const previous = before.current;
+    before.current = { groups, collapsed };
+    const id = focused.current;
+    if (id === null || nodes === null || previous === null) return;
+    if (nodes.some((node) => node.id === id)) return;
+    focused.current = null;
     const active = document.activeElement;
     if (active !== null && active !== document.body) return;
+    const section = SECTIONS.find((s) => previous.groups[s].some((node) => node.id === id));
+    if (section === undefined) return;
+    // Les lignes telles qu'elles étaient montrées : la voisine est celle qu'on voyait, et
+    // qui reste.
+    const stays = new Set(nodes.map((node) => node.id));
+    const rows = flattenRows(previous.groups[section], previous.collapsed);
+    const neighbour = neighbourOf(rows, id, (other) => stays.has(other));
     const row =
-      left.neighbour === null
+      neighbour === null
         ? null
-        : root.current?.querySelector<HTMLElement>(`[data-page-id="${left.neighbour}"] .tree-link`);
+        : root.current?.querySelector<HTMLElement>(`[data-page-id="${neighbour}"] .tree-link`);
     const title = root.current?.querySelector<HTMLElement>(
-      `[data-section="${left.section}"] .mm-section-title`,
+      `[data-section="${section}"] .mm-section-title`,
     );
     (row ?? title)?.focus();
-  }, [nodes]);
+  }, [nodes, groups, collapsed]);
+
+  /** La page de la ligne où est `target`, dans cette barre ; `null` : ce n'est pas une ligne. */
+  const rowOf = (target: EventTarget | null): string | null => {
+    if (!(target instanceof Element) || !root.current?.contains(target)) return null;
+    return target.closest("[data-page-id]")?.getAttribute("data-page-id") ?? null;
+  };
+  const onFocus = (event: FocusEvent<HTMLDivElement>) => {
+    focused.current = rowOf(event.target);
+  };
+  const onBlur = (event: FocusEvent<HTMLDivElement>) => {
+    // Le focus va ailleurs : la ligne ne l'a plus. S'il ne va nulle part, c'est peut-être
+    // qu'elle vient de quitter le document : l'effet ci-dessus tranche.
+    if (event.relatedTarget !== null) focused.current = rowOf(event.relatedTarget);
+  };
   // Sans sa page, le menu est oublié : il ne se rouvre pas si elle revient.
   const menuGone = menu !== null && menuNode === undefined;
   useEffect(() => {
@@ -235,7 +255,7 @@ export function SectionList({
 
   if (nodes === null) {
     return (
-      <div ref={root} className="mm-sections">
+      <div ref={root} className="mm-sections" onFocus={onFocus} onBlur={onBlur}>
         {!unavailable && <p className="mm-side-note">Chargement…</p>}
       </div>
     );
@@ -265,21 +285,13 @@ export function SectionList({
         label: "Mettre à la corbeille",
         icon: <TrashIcon />,
         destructive: true,
-        onSelect: () => {
-          const section = SECTIONS.find((s) => groups[s].includes(menuNode));
-          if (section !== undefined) {
-            // Les lignes telles qu'elles sont montrées : la voisine est celle qu'on voit.
-            const neighbour = neighbourOf(flattenRows(groups[section], collapsed), id);
-            leaving.current = { id, anchor: menu.anchor, section, neighbour };
-          }
-          onTrash(id);
-        },
+        onSelect: () => onTrash(id),
       },
     );
   }
 
   return (
-    <div ref={root} className="mm-sections">
+    <div ref={root} className="mm-sections" onFocus={onFocus} onBlur={onBlur}>
       {visibleSections(role, groups).map((section) => (
         <SectionBlock
           key={section}
