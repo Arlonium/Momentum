@@ -149,6 +149,17 @@ Alex fait tourner une instance sur son poste pour regarder l'application et fair
   ```
 
   Puis ouvrir `http://localhost:5175`.
+- **Pour tester à plusieurs par Tailscale** (adresse du PC d'Alex : `100.87.123.94`), le serveur reçoit en plus l'adresse publique de la page, et un second Vite écoute sur l'adresse Tailscale :
+
+  ```
+  .	argetelease\mementum.exe serve --bind 127.0.0.1:8090 --data-dir data\instance --public-url http://100.87.123.94:5127
+  ```
+
+  ```
+  $env:MEMENTUM_E2E_WEB_PORT = "5127"; $env:MEMENTUM_E2E_API_PORT = "8090"; corepack pnpm -C apps/web dev --host 100.87.123.94
+  ```
+
+  Créer les invitations depuis `http://100.87.123.94:5127` : le lien reprend l'adresse de la page. Le serveur reste sur la boucle locale ; seule la page est exposée, et elle relaie l'API. Pour une personne hors du tailnet d'Alex, partager la machine dans Tailscale et n'ouvrir que le port 5127 (`autogroup:shared`), plutôt que de l'ajouter comme membre.
 - **Avant toute mise à jour du serveur** : l'arrêter, copier `data/instance` ailleurs, puis relancer. Une migration écrit sa propre copie, mais une sauvegarde à part ne coûte rien.
 - **Ne jamais lancer de tests sur les ports 5175 et 8090**, ni sur `data/instance`.
 - La page est servie par Vite depuis l'arbre de travail : dès que le code du client change sur `main`, la page change aussi. Si le client et le serveur ne sont plus de la même version, la page dit « Impossible de joindre Mementum » : recompiler et relancer le serveur.
