@@ -149,7 +149,7 @@ async fn every_structural_write_bumps_rev() {
         after: None,
     };
     store
-        .update_node(b.id, Some("B2"), Some(place), Some(user))
+        .update_node(b.id, Some("B2"), Some(place), Some(user), None)
         .await
         .unwrap();
     expected += 1;
@@ -251,7 +251,9 @@ async fn nodes_do_not_cross_spaces() {
         parent_id: Some(theirs.id),
         after: None,
     };
-    let r = store.update_node(mine.id, None, Some(place), None).await;
+    let r = store
+        .update_node(mine.id, None, Some(place), None, None)
+        .await;
     assert!(matches!(r, Err(StoreError::NotFound)));
 
     // Rien n'a bougé, d'un côté comme de l'autre.

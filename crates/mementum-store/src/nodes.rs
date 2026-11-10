@@ -224,17 +224,21 @@ async fn ancestor_trashed(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<
     Ok(found.is_some())
 }
 
-/// Les ids du sous-arbre de `id`, lui d'abord, puis ses descendants niveau par niveau. Vide si
-/// le nœud n'existe pas. La descente suit l'index `nodes_by_parent` ; `UNION` : elle s'arrête
-/// même si des parents tournaient en rond.
+/// Les ids du sous-arbre de `id`, lui d'abord, puis ses descendants niveau par niveau (par id
+/// dans un même niveau) : chaque ligne porte sa profondeur, et le `ORDER BY` trie dessus. Vide si
+/// le nœud n'existe pas. La descente suit l'index `nodes_by_parent`.
+///
+/// Elle s'arrête même si des parents tournaient en rond : un nœud n'a qu'un parent, la descente
+/// ne peut donc repasser par un nœud qu'en revenant à `id`, que le pas récursif écarte.
 async fn subtree<'e>(db: impl SqliteExecutor<'e>, id: &str) -> Result<Vec<Uuid>, StoreError> {
     sqlx::query(
-        "WITH RECURSIVE sub(id, space_id) AS ( \
-             SELECT id, space_id FROM nodes WHERE id = ?1 \
-             UNION \
-             SELECT n.id, n.space_id FROM nodes n \
+        "WITH RECURSIVE sub(id, space_id, depth) AS ( \
+             SELECT id, space_id, 0 FROM nodes WHERE id = ?1 \
+             UNION ALL \
+             SELECT n.id, n.space_id, sub.depth + 1 FROM nodes n \
              JOIN sub ON n.space_id = sub.space_id AND n.parent_id = sub.id \
-         ) SELECT id FROM sub",
+             WHERE n.id != ?1 \
+         ) SELECT id FROM sub ORDER BY depth, id",
     )
     .bind(id)
     .fetch_all(db)
@@ -351,7 +355,7 @@ impl Store {
         title: &str,
         by: Option<Uuid>,
     ) -> Result<Node, StoreError> {
-        self.update_node(id, Some(title), None, by).await
+        self.update_node(id, Some(title), None, by, None).await
     }
 
     /// Déplace un nœud sous `parent_id` (`None` = racine), après `after` (`None` = en tête).
@@ -364,7 +368,7 @@ impl Store {
         after: Option<Uuid>,
         by: Option<Uuid>,
     ) -> Result<Node, StoreError> {
-        self.update_node(id, None, Some(Place { parent_id, after }), by)
+        self.update_node(id, None, Some(Place { parent_id, after }), by, None)
             .await
     }
 
@@ -372,24 +376,31 @@ impl Store {
     /// `NotFound`, comme pour [`Store::move_node`]) n'écrit rien, pas même le titre. `by` : le
     /// compte qui fait le changement, gardé dans `updated_by`. Sans titre ni place, rien n'est
     /// écrit et le nœud est rendu tel quel.
+    ///
+    /// `root_grant` (Ruling R66) : l'accès posé sur le nœud, dans la même transaction, quand il
+    /// arrive à la racine (il avait un parent, il n'en a plus) sans aucune ligne d'accès propre.
+    /// Un nœud qui ne tenait ses accès que de ses ancêtres n'est ainsi jamais, entre deux
+    /// écritures, visible de personne. Dans tous les autres cas, `root_grant` est ignoré.
     pub async fn update_node(
         &self,
         id: Uuid,
         title: Option<&str>,
         place: Option<Place>,
         by: Option<Uuid>,
+        root_grant: Option<Grant>,
     ) -> Result<Node, StoreError> {
         if title.is_none() && place.is_none() {
             return self.get_node(id).await?.ok_or(StoreError::NotFound);
         }
         let id_s = id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let space: String = sqlx::query("SELECT space_id FROM nodes WHERE id = ?")
+        let row = sqlx::query("SELECT space_id, parent_id FROM nodes WHERE id = ?")
             .bind(&id_s)
             .fetch_optional(&mut *tx)
             .await?
-            .ok_or(StoreError::NotFound)?
-            .get(0);
+            .ok_or(StoreError::NotFound)?;
+        let space: String = row.get(0);
+        let had_parent = row.get::<Option<String>, _>(1).is_some();
         // `Some((parent, position))` : le nœud change de place ; `None` : il garde la sienne.
         let mut target: Option<(Option<String>, String)> = None;
         if let Some(place) = place {
@@ -424,6 +435,7 @@ impl Store {
             Some((parent, position)) => (true, parent, Some(position)),
             None => (false, None, None),
         };
+        let reaches_root = moves && had_parent && parent.is_none();
         let row = sqlx::query(concat!(
             "UPDATE nodes SET \
                  title = COALESCE(?1, title), \
@@ -444,6 +456,16 @@ impl Store {
         .await
         .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
+        if let Some(grant) = root_grant.filter(|_| reaches_root) {
+            let bare = sqlx::query("SELECT 1 FROM acl WHERE node_id = ? LIMIT 1")
+                .bind(&id_s)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none();
+            if bare {
+                write_grant(&mut tx, &id_s, grant).await?;
+            }
+        }
         bump_rev(&mut tx, &space).await?;
         tx.commit().await?;
         Ok(node)
@@ -536,8 +558,8 @@ impl Store {
         Ok(ids)
     }
 
-    /// Les ids du sous-arbre d'un nœud : lui d'abord, puis ses descendants, corbeille comprise.
-    /// `NotFound` si le nœud n'existe pas.
+    /// Les ids du sous-arbre d'un nœud : lui d'abord, puis ses descendants niveau par niveau,
+    /// corbeille comprise. `NotFound` si le nœud n'existe pas.
     pub async fn subtree_ids(&self, id: Uuid) -> Result<Vec<Uuid>, StoreError> {
         let ids = subtree(&self.pool, &id.to_string()).await?;
         if ids.is_empty() {

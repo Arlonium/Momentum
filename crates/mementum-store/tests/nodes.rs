@@ -28,14 +28,6 @@ fn sql_list(ids: &[Uuid]) -> String {
 }
 
 #[tokio::test]
-async fn default_space_is_stable() {
-    let f = fresh().await;
-    let store = &f.store;
-    let space = store.default_space().await.unwrap();
-    assert_eq!(store.default_space().await.unwrap(), space);
-}
-
-#[tokio::test]
 async fn create_and_list_in_order() {
     let f = fresh().await;
     let (store, space, db) = (&f.store, &f.space, &f.db);
@@ -214,7 +206,7 @@ async fn update_node_changes_title_and_place_together() {
         after: None,
     };
     let moved = store
-        .update_node(b.id, Some("B, sous A"), Some(place), Some(user))
+        .update_node(b.id, Some("B, sous A"), Some(place), Some(user), None)
         .await
         .unwrap();
     assert_eq!(moved.title, "B, sous A");
@@ -224,12 +216,17 @@ async fn update_node_changes_title_and_place_together() {
     // Rien de demandé : rien d'écrit, et le nœud tel qu'il est.
     let rev = store.space_rev(space.id).await.unwrap();
     assert_eq!(
-        store.update_node(b.id, None, None, None).await.unwrap(),
+        store
+            .update_node(b.id, None, None, None, None)
+            .await
+            .unwrap(),
         moved
     );
     assert_eq!(store.space_rev(space.id).await.unwrap(), rev);
     assert!(matches!(
-        store.update_node(Uuid::now_v7(), None, None, None).await,
+        store
+            .update_node(Uuid::now_v7(), None, None, None, None)
+            .await,
         Err(StoreError::NotFound)
     ));
 }
@@ -255,7 +252,7 @@ async fn update_node_is_atomic() {
         after: None,
     };
     let r = store
-        .update_node(a.id, Some("Nouveau titre"), Some(place), None)
+        .update_node(a.id, Some("Nouveau titre"), Some(place), None, None)
         .await;
     assert!(matches!(r, Err(StoreError::Cycle)));
     assert_eq!(store.get_node(a.id).await.unwrap().unwrap().title, "A");
@@ -265,11 +262,184 @@ async fn update_node_is_atomic() {
         after: Some(b.id),
     };
     let r = store
-        .update_node(a.id, Some("Nouveau titre"), Some(place), None)
+        .update_node(a.id, Some("Nouveau titre"), Some(place), None, None)
         .await;
     assert!(matches!(r, Err(StoreError::NotFound)));
     assert_eq!(store.list_nodes(space.id).await.unwrap(), before);
     assert_eq!(store.space_rev(space.id).await.unwrap(), rev);
+}
+
+/// Ruling R66 : un nœud qui arrive à la racine sans aucune ligne d'accès propre reçoit
+/// `root_grant` dans la transaction du déplacement. Il n'est donc jamais, entre deux écritures,
+/// visible de personne.
+#[tokio::test]
+async fn update_node_gives_root_grant_to_a_node_arriving_at_root_without_lines() {
+    let f = fresh().await;
+    let (store, space, db) = (&f.store, &f.space, &f.db);
+    let user = new_user(db).await;
+    let other = new_user(db).await;
+    let full = |user| Grant {
+        subject: Subject::User(user),
+        level: Level::Full,
+    };
+    let root = Place {
+        parent_id: None,
+        after: None,
+    };
+    let mut parent = page(space, None, None, "Parent");
+    parent.grants = vec![Grant {
+        subject: Subject::Members,
+        level: Level::Full,
+    }];
+    let parent = store.create_node(parent).await.unwrap();
+    let rev = || async { store.space_rev(space.id).await.unwrap().unwrap() };
+
+    // Sans ligne propre : le déplacement à la racine pose l'accès, en une seule écriture.
+    let bare = store
+        .create_node(page(space, Some(parent.id), None, "Sans ligne"))
+        .await
+        .unwrap();
+    let before = rev().await;
+    let moved = store
+        .update_node(bare.id, None, Some(root), Some(user), Some(full(user)))
+        .await
+        .unwrap();
+    assert_eq!(moved.parent_id, None);
+    assert_eq!(store.node_grants(bare.id).await.unwrap(), [full(user)]);
+    assert_eq!(rev().await, before + 1, "une seule transaction");
+
+    // Avec une ligne propre, même pour quelqu'un d'autre : rien n'est posé.
+    let mut shared = page(space, Some(parent.id), None, "Partagée");
+    shared.grants = vec![Grant {
+        subject: Subject::User(other),
+        level: Level::Read,
+    }];
+    let shared = store.create_node(shared).await.unwrap();
+    let lines = store.node_grants(shared.id).await.unwrap();
+    store
+        .update_node(shared.id, None, Some(root), Some(user), Some(full(user)))
+        .await
+        .unwrap();
+    assert_eq!(store.node_grants(shared.id).await.unwrap(), lines);
+
+    // Sans `root_grant`, rien n'est posé non plus.
+    let silent = store
+        .create_node(page(space, Some(parent.id), None, "Sans accès demandé"))
+        .await
+        .unwrap();
+    store
+        .update_node(silent.id, None, Some(root), Some(user), None)
+        .await
+        .unwrap();
+    assert_eq!(store.node_grants(silent.id).await.unwrap(), []);
+
+    // Le nœud n'arrive pas à la racine : sous un autre parent, ou déjà à la racine (il change
+    // seulement de place), ou simplement renommé.
+    let elsewhere = store
+        .create_node(page(space, Some(parent.id), None, "Sous un autre parent"))
+        .await
+        .unwrap();
+    let under_bare = Place {
+        parent_id: Some(bare.id),
+        after: None,
+    };
+    store
+        .update_node(
+            elsewhere.id,
+            None,
+            Some(under_bare),
+            Some(user),
+            Some(full(user)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.node_grants(elsewhere.id).await.unwrap(), []);
+    store
+        .update_node(silent.id, None, Some(root), Some(user), Some(full(user)))
+        .await
+        .unwrap();
+    assert_eq!(store.node_grants(silent.id).await.unwrap(), []);
+    store
+        .update_node(
+            elsewhere.id,
+            Some("Renommée"),
+            None,
+            Some(user),
+            Some(full(user)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.node_grants(elsewhere.id).await.unwrap(), []);
+
+    // Tout ou rien : si l'accès ne peut pas être écrit, le nœud ne bouge pas ; et un
+    // déplacement refusé ne pose pas l'accès.
+    let stuck = store
+        .create_node(page(space, Some(parent.id), None, "Panne"))
+        .await
+        .unwrap();
+    let before = rev().await;
+    break_table(db, "INSERT", "acl", "1").await;
+    let r = store
+        .update_node(
+            stuck.id,
+            Some("Déplacée"),
+            Some(root),
+            Some(user),
+            Some(full(user)),
+        )
+        .await;
+    assert!(matches!(r, Err(StoreError::Sqlx(_))), "{r:?}");
+    repair(db).await;
+    assert_eq!(store.get_node(stuck.id).await.unwrap(), Some(stuck.clone()));
+    let nowhere = Place {
+        parent_id: None,
+        after: Some(elsewhere.id),
+    };
+    let r = store
+        .update_node(stuck.id, None, Some(nowhere), Some(user), Some(full(user)))
+        .await;
+    assert!(matches!(r, Err(StoreError::NotFound)));
+    assert_eq!(store.node_grants(stuck.id).await.unwrap(), []);
+    assert_eq!(store.get_node(stuck.id).await.unwrap(), Some(stuck));
+    assert_eq!(rev().await, before);
+}
+
+/// `subtree_ids` rend le nœud d'abord, puis ses descendants niveau par niveau, quel que soit
+/// l'ordre dans lequel ils ont été créés.
+#[tokio::test]
+async fn subtree_ids_come_level_by_level() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let node = |parent: Option<Uuid>, title: &'static str| async move {
+        store
+            .create_node(page(space, parent, None, title))
+            .await
+            .unwrap()
+            .id
+    };
+    // Créés en profondeur d'abord : P, C1, G (sous C1), GG (sous G), puis C2 et son enfant H.
+    let p = node(None, "P").await;
+    let c1 = node(Some(p), "C1").await;
+    let g = node(Some(c1), "G").await;
+    let gg = node(Some(g), "GG").await;
+    let c2 = node(Some(p), "C2").await;
+    let h = node(Some(c2), "H").await;
+    // Une page à côté, qui n'en est pas.
+    node(None, "Ailleurs").await;
+
+    let ids = store.subtree_ids(p).await.unwrap();
+    let level = |id: &Uuid| match *id {
+        id if id == p => 0,
+        id if id == c1 || id == c2 => 1,
+        id if id == g || id == h => 2,
+        id if id == gg => 3,
+        other => panic!("{other} n'est pas dans le sous-arbre"),
+    };
+    let levels: Vec<u32> = ids.iter().map(level).collect();
+    assert_eq!(levels, [0, 1, 1, 2, 2, 3], "{ids:?}");
+    // Le même ordre à chaque appel.
+    assert_eq!(store.subtree_ids(p).await.unwrap(), ids);
+    assert_eq!(store.subtree_ids(g).await.unwrap(), [g, gg]);
 }
 
 #[tokio::test]
@@ -637,7 +807,7 @@ async fn reopen_keeps_everything() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("m.db");
     let store = Store::open(&path).await.unwrap();
-    let space = store.default_space().await.unwrap();
+    let space = store.create_space("Essais", None).await.unwrap();
     let a = store
         .create_node(page(&space, None, None, "A"))
         .await
@@ -654,7 +824,10 @@ async fn reopen_keeps_everything() {
     store.close().await;
 
     let store = Store::open(&path).await.unwrap();
-    assert_eq!(store.default_space().await.unwrap(), space);
+    assert_eq!(
+        store.get_space(space.id).await.unwrap(),
+        Some(space.clone())
+    );
     assert_eq!(store.list_nodes(space.id).await.unwrap(), nodes);
     let doc = store.load_doc(b.id).await.unwrap();
     assert_eq!(doc.snapshot, Some((1, b"s".to_vec())));
