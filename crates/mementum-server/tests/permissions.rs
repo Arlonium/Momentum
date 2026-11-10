@@ -9,6 +9,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use axum::http::{Method, StatusCode};
 use common::{
     Account, Browser, Logs, Reply, Team, TestApp, json_request, outcome, page_routes, query_i64,
@@ -18,7 +20,7 @@ use mementum_acl::{Level, Role, Subject};
 use mementum_crdt::PageDoc;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
-use mementum_store::Store;
+use mementum_store::{Node, Store};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -1538,14 +1540,77 @@ async fn patch_that_moves_nothing_writes_nothing() {
     assert!(state().await.1 > rev);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Les écritures prises de vitesse.
+
+/// Combien de temps un test tient le verrou d'écriture de SQLite avant d'y écrire : la moitié
+/// du délai d'attente d'une connexion (5 s, `Store::open`), la marge la plus large des deux
+/// côtés. La requête a 2,5 s pour lire la base d'avant et venir attendre le verrou ; le test en
+/// garde 2,5 pour écrire et valider avant qu'elle renonce.
+const HELD: Duration = Duration::from_millis(2_500);
+
+/// Une requête prise de vitesse par une écriture : sa réponse, et ce que le serveur a
+/// journalisé pendant qu'elle tournait.
+struct Overtaken {
+    reply: Reply,
+    journal: String,
+}
+
+impl Overtaken {
+    /// Combien de fois la route a relu `page` et redécidé, son écriture refusée par le store.
+    /// Une fois au moins : la requête avait bien décidé sur la base d'avant. Arrivée après
+    /// l'écriture concurrente, elle n'aurait rien eu à relire, et le test ne prouverait rien.
+    fn redecided(&self, page: Uuid) -> usize {
+        let page = page.to_string();
+        self.journal
+            .lines()
+            .filter(|line| line.contains("relit") && line.contains(&page))
+            .count()
+    }
+}
+
+/// Envoie `request` pendant que le test tient le verrou d'écriture de SQLite : elle lit donc
+/// la base d'avant, décide, puis attend pour écrire. `meanwhile` (du SQL) est alors écrit, avec
+/// la révision de l'espace comme le fait le store, et le verrou est rendu : l'écriture de la
+/// requête passe après.
+async fn overtaken(
+    t: &TestApp,
+    space: Uuid,
+    request: impl Future<Output = Reply>,
+    meanwhile: &[String],
+) -> Overtaken {
+    let logs = Logs::capture();
+    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
+        .await
+        .unwrap();
+    let mut lock = side.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let written_meanwhile = async {
+        tokio::time::sleep(HELD).await;
+        let rev = format!("UPDATE spaces SET rev = rev + 1 WHERE id = '{space}'");
+        for sql in meanwhile.iter().chain([&rev]) {
+            sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+                .execute(&mut *lock)
+                .await
+                .unwrap();
+        }
+        lock.commit().await.unwrap();
+    };
+    let (reply, ()) = tokio::join!(request, written_meanwhile);
+    side.close().await;
+    Overtaken {
+        reply,
+        journal: logs.text(),
+    }
+}
+
 /// Un changement de place fait avec `edit` ne défait jamais un changement de parent fait en
 /// même temps. La place est décidée sous le parent lu avec les droits ; si la page l'a quitté
 /// avant l'écriture, le store refuse, la route relit et redécide. Sinon la page reviendrait
 /// sous son ancien parent, par quelqu'un qui n'a pas le droit de la déplacer.
 ///
-/// L'ordre est forcé par le verrou d'écriture de SQLite : le test le tient pendant que Tom
-/// envoie sa requête, qui lit donc la page sous son premier parent puis attend pour écrire ;
-/// la page change de parent, et le verrou est rendu.
+/// L'ordre est forcé par le verrou d'écriture de SQLite ([`overtaken`]) : la requête de Tom
+/// lit la page sous son premier parent puis attend pour écrire ; la page change de parent, et
+/// le verrou est rendu.
 #[tokio::test]
 async fn reorder_never_undoes_a_concurrent_move() {
     let t = open_app().await;
@@ -1563,38 +1628,18 @@ async fn reorder_never_undoes_a_concurrent_move() {
     let id = page.to_string();
     let rev = team.store.space_rev(team.space).await.unwrap();
 
-    let logs = Logs::capture();
-    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
-        .await
-        .unwrap();
-    let mut lock = side.begin_with("BEGIN IMMEDIATE").await.unwrap();
-    let moved_meanwhile = async {
-        // Le temps que la requête de Tom lise la page et vienne attendre le verrou.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        for sql in [
-            format!("UPDATE nodes SET parent_id = '{second}' WHERE id = '{page}'"),
-            format!(
-                "UPDATE spaces SET rev = rev + 1 WHERE id = '{}'",
-                team.space
-            ),
-        ] {
-            sqlx::query(sqlx::AssertSqlSafe(sql))
-                .execute(&mut *lock)
-                .await
-                .unwrap();
-        }
-        lock.commit().await.unwrap();
-    };
-    let (reply, ()) = tokio::join!(tom.patch(&id, json!({ "afterId": null })), moved_meanwhile);
-    side.close().await;
-    let journal = logs.text();
-    drop(logs);
+    let moved = format!("UPDATE nodes SET parent_id = '{second}' WHERE id = '{page}'");
+    let race = overtaken(
+        &t,
+        team.space,
+        tom.patch(&id, json!({ "afterId": null })),
+        &[moved],
+    )
+    .await;
 
     // La requête a bien été prise de vitesse, et a redécidé.
-    assert!(
-        journal.contains("relit") && journal.contains(&id),
-        "journal : {journal}"
-    );
+    assert_eq!(race.redecided(page), 1, "journal : {}", race.journal);
+    let reply = race.reply;
     reply.assert_status(StatusCode::OK);
     assert_eq!(reply.json()["parentId"], second.to_string());
     // La page est restée sous son nouveau parent, où elle est passée en tête ; la révision
@@ -1612,6 +1657,84 @@ async fn reorder_never_undoes_a_concurrent_move() {
     assert_eq!(
         team.store.space_rev(team.space).await.unwrap(),
         rev.map(|rev| rev + 1)
+    );
+}
+
+/// Tom, qui a `edit` sous « Premier parent », envoie `body` (fait de l'id de ce parent) pour une
+/// page qui s'y trouve ; pendant ce temps ([`overtaken`]), la page passe sous une autre page
+/// de racine, aux accès `elsewhere`. Rend la réponse de Tom, une fois vérifié que sa requête a
+/// été prise de vitesse, qu'elle a redécidé, et qu'elle n'a rien écrit : la page est là où le
+/// déplacement concurrent l'a mise, telle quelle.
+async fn patch_overtaken_by_a_move(
+    body: impl FnOnce(Uuid) -> Value,
+    elsewhere: impl FnOnce(&Team<'_>) -> (Subject, Level),
+) -> Reply {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let first = team
+        .page(None, "Premier parent", &[members(Level::Edit)])
+        .await;
+    let second = team.page(None, "Second parent", &[elsewhere(&team)]).await;
+    let page = team.page(Some(first), "Page", &[]).await;
+    let before = team.store.get_node(page).await.unwrap().expect("la page");
+    let rev = team.store.space_rev(team.space).await.unwrap();
+
+    let moved = format!("UPDATE nodes SET parent_id = '{second}' WHERE id = '{page}'");
+    let id = page.to_string();
+    let request = team.tom.patch(&id, body(first));
+    let race = overtaken(&t, team.space, request, &[moved]).await;
+
+    assert_eq!(race.redecided(page), 1, "journal : {}", race.journal);
+    let after = team.store.get_node(page).await.unwrap().expect("la page");
+    let expected = Node {
+        parent_id: Some(second),
+        ..before
+    };
+    assert_eq!(after, expected);
+    assert_eq!(
+        team.store.space_rev(team.space).await.unwrap(),
+        rev.map(|rev| rev + 1)
+    );
+    race.reply
+}
+
+/// Une reprise redécide sur les droits qu'elle relit, jamais sur ceux de la première lecture.
+/// Tom pouvait changer la page de place sous son premier parent ; passée entre-temps sous une
+/// page où il ne peut que lire, elle n'est plus à lui de ranger : `403`, rien d'écrit.
+#[tokio::test]
+async fn overtaken_reorder_is_refused_where_it_can_only_read() {
+    let reply =
+        patch_overtaken_by_a_move(|_| json!({ "afterId": null }), |_| members(Level::Read)).await;
+    let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+    let message = text(&body, "message");
+    assert!(
+        message.contains("« modification »") && message.contains("« lecture »"),
+        "{message}"
+    );
+}
+
+/// De même quand la page passe entre-temps sous une page que Tom ne voit pas : sa reprise ne
+/// la voit plus, et répond `404`, comme pour une page qui n'existe pas.
+#[tokio::test]
+async fn overtaken_reorder_no_longer_sees_the_page() {
+    let private = |team: &Team<'_>| user(&team.olga, Level::Full);
+    let reply = patch_overtaken_by_a_move(|_| json!({ "afterId": null }), private).await;
+    reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+}
+
+/// Nommer le parent que la page a déjà n'est qu'un changement de place, permis avec `edit`.
+/// Si la page l'a quitté entre-temps, la reprise y voit ce que c'est devenu : un changement de
+/// parent, qui demande l'accès complet. Tom, qui a `edit` des deux côtés, ne la ramène pas
+/// sous son ancien parent.
+#[tokio::test]
+async fn overtaken_patch_naming_the_old_parent_becomes_a_move() {
+    let back = |first: Uuid| json!({ "parentId": first.to_string() });
+    let reply = patch_overtaken_by_a_move(back, |_| members(Level::Edit)).await;
+    let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+    let message = text(&body, "message");
+    assert!(
+        message.contains("« accès complet »") && message.contains("« modification »"),
+        "{message}"
     );
 }
 
