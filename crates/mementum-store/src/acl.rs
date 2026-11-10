@@ -43,7 +43,10 @@ pub(crate) async fn write_grant(
 }
 
 /// L'espace du nœud, lu dans la transaction ; `NotFound` s'il n'existe pas.
-async fn space_of(tx: &mut Transaction<'_, Sqlite>, node_id: &str) -> Result<String, StoreError> {
+pub(crate) async fn space_of(
+    tx: &mut Transaction<'_, Sqlite>,
+    node_id: &str,
+) -> Result<String, StoreError> {
     Ok(sqlx::query("SELECT space_id FROM nodes WHERE id = ?")
         .bind(node_id)
         .fetch_optional(&mut **tx)

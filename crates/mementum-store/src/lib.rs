@@ -1,8 +1,12 @@
-//! Stockage SQLite de Mementum : espaces, arbre de pages, accès, journal Yjs et instantanés.
+//! Stockage SQLite de Mementum : comptes et sessions, espaces et leurs membres, invitations,
+//! arbre de pages, accès, journal Yjs et instantanés.
 //!
 //! - [`Store`] ouvre la base (WAL, `synchronous=FULL`, clés étrangères, délai d'attente de 5 s,
 //!   appliqués à **chaque** connexion du pool) et lance les migrations.
+//! - `users.rs` : les comptes et les sessions (le store ne voit que des hachages).
 //! - `spaces.rs` : les espaces et leur révision.
+//! - `members.rs` : les rôles dans un espace, le départ, l'adoption des espaces sans membre.
+//! - `invitations.rs` : les invitations dans un espace ou sur une page.
 //! - `nodes.rs` : l'arbre de pages, rangé par positions fractionnaires ; la corbeille.
 //! - `acl.rs` : les accès posés sur les pages.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
@@ -19,9 +23,12 @@
 
 mod acl;
 mod docs;
+mod invitations;
+mod members;
 mod nodes;
 mod position;
 mod spaces;
+mod users;
 
 use std::fmt;
 use std::path::Path;
@@ -33,15 +40,19 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use uuid::Uuid;
 
 pub use docs::DocState;
+pub use invitations::{Invitation, InvitationGrant, NewInvitation};
+pub use members::Member;
 pub use nodes::{NewNode, Node, NodeKind, Place};
 pub use position::position_between;
 pub use spaces::Space;
+pub use users::{NewUser, User};
 
 /// Erreurs du store.
 #[derive(Debug)]
 pub enum StoreError {
     /// Un espace, un nœud, un parent, un frère de référence (`after`) ou un compte n'existe
-    /// pas.
+    /// pas ; la personne n'a pas de rôle dans l'espace ; l'invitation est inconnue, échue,
+    /// révoquée ou déjà acceptée.
     NotFound,
     /// Le déplacement ferait d'un nœud son propre descendant.
     Cycle,

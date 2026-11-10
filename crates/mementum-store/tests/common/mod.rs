@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mementum_store::{NewNode, NodeKind, Space, Store};
+use mementum_store::{NewNode, NewUser, NodeKind, Space, Store, User};
 use sqlx::{Row, SqlitePool};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -102,6 +102,18 @@ pub async fn new_user(db: &Path) -> Uuid {
     .unwrap();
     pool.close().await;
     id
+}
+
+/// Crée un compte par l'API du store : `<tag>@exemple.test`, nommé `tag`, au hachage factice.
+pub async fn account(store: &Store, tag: &str) -> User {
+    store
+        .create_user(NewUser {
+            email: format!("{tag}@exemple.test"),
+            name: tag.to_string(),
+            password_hash: "pas-un-hachage".to_string(),
+        })
+        .await
+        .unwrap()
 }
 
 /// Pose une panne : toute écriture `event` (`INSERT`, `UPDATE`…) sur `table` échoue, pour les

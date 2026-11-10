@@ -28,7 +28,8 @@ macro_rules! space_columns {
     };
 }
 
-fn space_from_row(r: &SqliteRow) -> Result<Space, StoreError> {
+/// Relit un espace par les noms de colonnes `id`, `name`, `rev`, `created_at`.
+pub(crate) fn space_from_row(r: &SqliteRow) -> Result<Space, StoreError> {
     Ok(Space {
         id: parse_uuid(&r.get::<String, _>("id"))?,
         name: r.get("name"),
