@@ -221,7 +221,8 @@ function Panel({ id, panelRef, node, share, onRemove }: PanelProps) {
       id={id}
       role="dialog"
       aria-label="Partager"
-      aria-busy={share.reading}
+      // Occupé dès l'ouverture, avant même que la première lecture soit partie.
+      aria-busy={share.reading || (access === null && share.readError === null)}
       className="mm-share-panel"
       tabIndex={-1}
     >
