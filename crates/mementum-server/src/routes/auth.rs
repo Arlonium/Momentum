@@ -10,29 +10,41 @@
 //! - rien de secret ne sort : ni mot de passe, ni hachage, ni jeton dans une
 //!   réponse (le jeton ne voyage que dans `Set-Cookie`) ou dans un journal.
 //!   Une adresse refusée à la connexion n'est pas journalisée non plus : on y
-//!   tape parfois son mot de passe.
+//!   tape parfois son mot de passe ;
+//! - aucune de leurs réponses, réussite ou refus, ne se garde dans un cache
+//!   (`Cache-Control: no-store`).
 //!
-//! Une suite d'écritures qui ne doit pas s'arrêter au milieu (compte, puis
-//! espace, puis session) tourne dans sa propre tâche : elle va au bout même
-//! si le client coupe la connexion.
+//! Le compte et ce qui vient avec lui (espaces repris, invitation, premier
+//! espace) s'écrivent en une transaction du store (`Store::sign_up`) : une
+//! panne au milieu ne laisse pas un compte sans espace. Ce qui suit une
+//! écriture et ne doit pas s'arrêter en route (la session, après le compte ou
+//! le nouveau mot de passe) tourne dans sa propre tâche : elle va au bout
+//! même si le client coupe la connexion.
 
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mementum_store::{NewUser, StoreError};
 use uuid::Uuid;
 
-use crate::auth::{self, AuthUser, SESSION_TTL_MS};
+use crate::auth::{self, AuthUser, Guarded, SESSION_TTL_MS};
 use crate::error::ApiError;
 use crate::routes::invitations;
-use crate::types::{ChangePassword, LogIn, Me, SignUp, SignupMode, SpaceInfo, UserInfo};
+use crate::types::{ChangePassword, ErrorCode, LogIn, Me, SignUp, SignupMode, SpaceInfo, UserInfo};
 use crate::{AppState, now_ms, to_completion};
 
 /// `POST /api/v1/auth/signup` : `201` et le compte, session ouverte.
 pub(crate) async fn signup(
     State(state): State<AppState>,
+    body: Result<Json<SignUp>, JsonRejection>,
+) -> Response {
+    no_store(sign_up(state, body).await)
+}
+
+async fn sign_up(
+    state: AppState,
     body: Result<Json<SignUp>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(body) = body?;
@@ -74,6 +86,7 @@ async fn register(
     // crée pas deux comptes.
     let _turn = state.signups.lock().await;
     if let Some(hash) = invitation {
+        // La consultation par laquelle passe toute acceptation (Ruling R69).
         invitations::valid_invitation(&state, hash)
             .await?
             .ok_or_else(ApiError::invalid_invitation)?;
@@ -83,7 +96,7 @@ async fn register(
         return Err(ApiError::signup_closed());
     }
     // Avant le hachage : une adresse prise ne coûte pas un calcul Argon2.
-    // `create_user` le revérifie.
+    // `sign_up` le revérifie.
     if state
         .store
         .user_by_email(&email)
@@ -94,74 +107,72 @@ async fn register(
         return Err(ApiError::email_taken());
     }
     let password_hash = auth::hash_password(password).await.map_err(internal)?;
-    let user = state
+    // Le compte, les espaces que reprend le premier compte, l'invitation,
+    // sinon un espace à lui : tout, ou rien.
+    let first_space = format!("Espace de {name}");
+    let new_user = NewUser {
+        email,
+        name,
+        password_hash,
+    };
+    let signed_up = state
         .store
-        .create_user(NewUser {
-            email,
-            name,
-            password_hash,
-        })
+        .sign_up(new_user, invitation, &first_space, now_ms())
         .await
-        .map_err(account_error)?;
+        .map_err(|e| match e {
+            // Prise entre-temps.
+            StoreError::EmailTaken => ApiError::email_taken(),
+            e => internal(e),
+        })?;
+    let user = signed_up.user;
     tracing::info!(user_id = %user.id, instance_admin = user.instance_admin, "compte créé");
-
-    // Le premier compte reprend les espaces sans membre : ceux d'une base du
-    // lot 1.
-    if user.instance_admin {
-        let adopted = state
-            .store
-            .adopt_orphan_spaces(user.id)
-            .await
-            .map_err(internal)?;
-        if !adopted.is_empty() {
-            tracing::info!(
-                user_id = %user.id,
-                spaces = adopted.len(),
-                "espaces sans membre repris par le premier compte"
-            );
-        }
+    if !signed_up.adopted.is_empty() {
+        tracing::info!(
+            user_id = %user.id,
+            spaces = signed_up.adopted.len(),
+            "espaces sans membre repris par le premier compte"
+        );
     }
-    match invitation {
-        // Le même chemin que `POST /api/v1/invitations/accept`.
-        Some(hash) => {
-            if invitations::accept_invitation(&state, hash, user.id)
-                .await?
-                .is_none()
-            {
-                // Révoquée, échue ou prise par un compte déjà inscrit depuis
-                // la vérification, quelques millisecondes plus tôt : le compte
-                // existe, sans elle, donc sans aucun droit.
-                tracing::warn!(
-                    user_id = %user.id,
-                    "invitation retirée pendant l'inscription : compte créé sans elle"
-                );
-            }
-        }
-        // Sans invitation, chacun a un espace à lui.
-        None => {
-            let spaces = state.store.spaces_of(user.id).await.map_err(internal)?;
-            if spaces.is_empty() {
-                state
-                    .store
-                    .create_space(&format!("Espace de {}", user.name), Some(user.id))
-                    .await
-                    .map_err(internal)?;
-            }
-        }
+    if let Some(invitation) = &signed_up.accepted {
+        tracing::info!(
+            invitation_id = %invitation.id,
+            space_id = %invitation.space_id,
+            user_id = %user.id,
+            "invitation acceptée"
+        );
+    }
+    if signed_up.invitation_withdrawn {
+        // Révoquée, échue ou prise par un compte déjà inscrit depuis la
+        // vérification, quelques millisecondes plus tôt : le compte existe,
+        // sans elle, donc sans aucun droit.
+        tracing::warn!(
+            user_id = %user.id,
+            "invitation retirée pendant l'inscription : compte créé sans elle"
+        );
     }
     let token = open_session(&state, user.id).await?;
     let me = me_of(&state, user.into()).await?;
     Ok((me, token))
 }
 
-/// `POST /api/v1/auth/login` : `200` et le compte, session ouverte.
+/// `POST /api/v1/auth/login` : `200` et le compte, session ouverte. La
+/// session que portait déjà le navigateur est fermée.
 pub(crate) async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<LogIn>, JsonRejection>,
+) -> Response {
+    no_store(log_in(state, headers, body).await)
+}
+
+async fn log_in(
+    state: AppState,
+    headers: HeaderMap,
     body: Result<Json<LogIn>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(body) = body?;
     let email = auth::normalize_email(&body.email);
-    attempt(&state, &email).await?;
+    attempt(&state, Guarded::Login, &email).await?;
     let user = state.store.user_by_email(&email).await.map_err(internal)?;
     let hash = user.as_ref().and_then(|u| u.password_hash.clone());
     // Toujours une vérification Argon2, qu'il y ait un compte ou non.
@@ -184,7 +195,16 @@ pub(crate) async fn login(
             return Err(ApiError::invalid_credentials());
         }
     };
-    state.logins.succeeded(&email);
+    state.logins.succeeded(Guarded::Login, &email);
+    // Le cookie que portait ce navigateur va être remplacé : sa session ne
+    // doit plus rien valoir, pour personne.
+    if let Some(carried) = auth::session_hash(&headers) {
+        state
+            .store
+            .delete_session(carried)
+            .await
+            .map_err(internal)?;
+    }
     let token = open_session(&state, user.id).await?;
     tracing::info!(user_id = %user.id, "session ouverte");
     let me = me_of(&state, user.into()).await?;
@@ -200,10 +220,11 @@ pub(crate) async fn login(
 
 /// `POST /api/v1/auth/logout` : `204`, session supprimée et cookie effacé.
 /// Sans session : pareil.
-pub(crate) async fn logout(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
+pub(crate) async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    no_store(log_out(state, headers).await)
+}
+
+async fn log_out(state: AppState, headers: HeaderMap) -> Result<Response, ApiError> {
     if let Some(hash) = auth::session_hash(&headers) {
         state.store.delete_session(hash).await.map_err(internal)?;
     }
@@ -220,18 +241,27 @@ pub(crate) async fn logout(
 /// `POST /api/v1/auth/password` : `204`. Toutes les sessions du compte sont
 /// supprimées, et celle qui a fait la demande repart avec un jeton neuf (le
 /// cookie de la réponse). Un mot de passe actuel faux, ou un compte qui n'en
-/// a pas : `401 invalid_credentials`, compté par le frein des connexions
-/// comme une connexion ratée.
+/// a pas : `401 invalid_credentials`. Ces refus ont leur propre frein, à part
+/// de celui de la connexion (Ruling R76) : `429 too_many_attempts`.
 pub(crate) async fn change_password(
     State(state): State<AppState>,
-    user: AuthUser,
+    user: Result<AuthUser, ApiError>,
+    body: Result<Json<ChangePassword>, JsonRejection>,
+) -> Response {
+    no_store(new_password(state, user, body).await)
+}
+
+async fn new_password(
+    state: AppState,
+    user: Result<AuthUser, ApiError>,
     body: Result<Json<ChangePassword>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let user = user?;
     let Json(body) = body?;
     auth::check_password(&body.new)?;
     // Sans ce frein, une session volée essaierait des mots de passe actuels
     // sans limite.
-    attempt(&state, &user.email).await?;
+    attempt(&state, Guarded::PasswordChange, &user.email).await?;
     let account = state
         .store
         .get_user(user.id)
@@ -246,9 +276,15 @@ pub(crate) async fn change_password(
             user_id = %user.id,
             "changement de mot de passe refusé : mot de passe actuel invalide"
         );
-        return Err(ApiError::invalid_credentials());
+        // Le code de la connexion, mais pas son message : ici, personne n'a
+        // tapé d'adresse.
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::InvalidCredentials,
+            "le mot de passe actuel est incorrect",
+        ));
     }
-    state.logins.succeeded(&user.email);
+    state.logins.succeeded(Guarded::PasswordChange, &user.email);
     let password_hash = auth::hash_password(body.new).await.map_err(internal)?;
     let secure = state.secure_cookies;
     let token = to_completion(async move {
@@ -271,26 +307,42 @@ pub(crate) async fn change_password(
 /// `GET /api/v1/me` : le compte de la session et ses espaces.
 pub(crate) async fn me(
     State(state): State<AppState>,
-    user: AuthUser,
-) -> Result<Json<Me>, ApiError> {
-    me_of(&state, user).await.map(Json)
+    user: Result<AuthUser, ApiError>,
+) -> Response {
+    let me = async {
+        me_of(&state, user?)
+            .await
+            .map(|me| Json(me).into_response())
+    };
+    no_store(me.await)
+}
+
+/// La réponse, réussite ou refus, avec `Cache-Control: no-store` : ce que
+/// disent ces routes (un compte, ses espaces, un refus daté) ne doit rester
+/// dans aucun cache, ni celui du navigateur, ni celui d'un mandataire.
+fn no_store(result: Result<Response, ApiError>) -> Response {
+    let mut response = result.unwrap_or_else(IntoResponse::into_response);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Compte une tentative pour cette adresse, ou la refuse (`429`). Le premier
 /// refus d'une fenêtre est journalisé, sans l'adresse : en avertissement si
 /// elle est celle d'un compte, au niveau `debug` sinon (des adresses
 /// inventées ne remplissent pas le journal).
-async fn attempt(state: &AppState, email: &str) -> Result<(), ApiError> {
-    let Err(throttled) = state.logins.attempt(email, now_ms()) else {
+async fn attempt(state: &AppState, what: Guarded, email: &str) -> Result<(), ApiError> {
+    let Err(throttled) = state.logins.attempt(what, email, now_ms()) else {
         return Ok(());
     };
     if throttled.first {
         match state.store.user_by_email(email).await.map_err(internal)? {
             Some(user) => tracing::warn!(
                 user_id = %user.id,
+                guarded = ?what,
                 retry_after_s = throttled.retry_after,
-                "trop d'échecs de connexion pour ce compte : tentatives refusées jusqu'à la \
-                 fin de la fenêtre"
+                "trop d'échecs pour ce compte : tentatives refusées jusqu'à la fin de la fenêtre"
             ),
             None => tracing::debug!(
                 retry_after_s = throttled.retry_after,
@@ -336,12 +388,4 @@ async fn me_of(state: &AppState, user: AuthUser) -> Result<Me, ApiError> {
 /// (`From<StoreError>` lirait un `NotFound` comme une page introuvable.)
 fn internal(error: impl std::fmt::Display) -> ApiError {
     ApiError::internal(&error)
-}
-
-/// Erreur de `create_user` : l'adresse a pu être prise entre-temps.
-fn account_error(error: StoreError) -> ApiError {
-    match error {
-        StoreError::EmailTaken => ApiError::email_taken(),
-        e => internal(e),
-    }
 }

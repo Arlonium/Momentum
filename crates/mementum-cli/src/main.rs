@@ -8,7 +8,8 @@
 //! - `mementum user set-password --email <adresse> [--data-dir <dossier>]`
 //!   donne un nouveau mot de passe à un compte : l'issue d'un mot de passe
 //!   oublié, faute de SMTP. Le mot de passe est la première ligne de l'entrée
-//!   standard ; il n'est jamais affiché.
+//!   standard ; il n'est jamais affiché (la commande dit sa longueur), et un
+//!   caractère de contrôle le fait refuser.
 //!
 //! Les journaux vont sur la sortie d'erreur, au niveau `info` par défaut,
 //! réglable par `RUST_LOG` (par exemple `RUST_LOG=mementum_sync=debug`). La
@@ -69,8 +70,9 @@ enum Command {
 enum UserCommand {
     /// Donne un nouveau mot de passe à un compte et ferme toutes ses
     /// sessions. Le mot de passe est la première ligne de l'entrée standard
-    /// (10 à 200 caractères) ; il n'est jamais affiché. Peut tourner pendant
-    /// que le serveur tourne.
+    /// (10 à 200 caractères, sans caractère de contrôle) ; il n'est jamais
+    /// affiché, seule sa longueur est dite. Peut tourner pendant que le
+    /// serveur tourne.
     SetPassword {
         /// Adresse e-mail du compte.
         #[arg(long, value_name = "ADRESSE")]
@@ -130,7 +132,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             })
             .await?;
-            println!("mot de passe changé pour {account} ; toutes ses sessions sont fermées");
+            // La longueur, jamais le mot de passe : de quoi voir qu'une ligne
+            // tronquée ou un caractère en trop s'est glissé dans la saisie.
+            println!(
+                "mot de passe de {} caractères enregistré pour {account} ; toutes ses sessions \
+                 sont fermées",
+                password.chars().count()
+            );
             Ok(())
         }
     }

@@ -183,6 +183,13 @@ fn cli_set_password_recovers_account() {
     let (stdout, stderr) = text(&output);
     assert!(output.status.success(), "échec : {stdout}\n{stderr}");
     assert!(stdout.contains("alice@exemple.fr"), "{stdout}");
+    // La commande dit la longueur de ce qu'elle a enregistré : de quoi voir
+    // une ligne tronquée ou un caractère en trop.
+    assert_eq!(NEW_PASSWORD.chars().count(), 28);
+    assert!(
+        stdout.contains("mot de passe de 28 caractères enregistré"),
+        "{stdout}"
+    );
     // Jamais affiché, même avec les journaux au plus bavard ; pas plus que
     // son hachage.
     for secret in [NEW_PASSWORD, PASSWORD, "$argon2", "une seconde ligne"] {
@@ -254,6 +261,30 @@ fn cli_set_password_refusals() {
     failed(&run("alice@exemple.fr", &data, ""), "10 à 200");
     let long = format!("{}\n", "a".repeat(201));
     failed(&run("alice@exemple.fr", &data, &long), "10 à 200");
+    // Un caractère de contrôle : la commande dit lequel et où, sans rien
+    // montrer d'autre du mot de passe. Une tabulation, un retour chariot au
+    // milieu, un octet nul ; et une entrée en UTF-16, comme l'écrit
+    // PowerShell 5 (un octet nul après chaque lettre).
+    for (stdin, expected) in [
+        (format!("{NEW_PASSWORD}\tx\n"), "U+0009, en position 29"),
+        (
+            "nouveau\rmot-de-passe\n".to_string(),
+            "U+000D, en position 8",
+        ),
+        (
+            "nouveau\0mot-de-passe\n".to_string(),
+            "U+0000, en position 8",
+        ),
+        (
+            "n\0o\0u\0v\0e\0a\0u\0-\0m\0o\0t\0\n\0".to_string(),
+            "UTF-16",
+        ),
+    ] {
+        let output = run("alice@exemple.fr", &data, &stdin);
+        failed(&output, "caractère de contrôle");
+        failed(&output, expected);
+        failed(&output, "Rien n'a été changé");
+    }
     // L'adresse est obligatoire.
     let output = set_password(&["--data-dir", data.to_str().unwrap()], &[], &new_line);
     assert!(!output.status.success());

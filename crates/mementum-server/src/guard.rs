@@ -1,5 +1,5 @@
-//! Garde-fous réseau (Rulings R31 et R51). Ils complètent les comptes, ils ne
-//! les remplacent pas.
+//! Garde-fous réseau (Rulings R31, R51 et R78). Ils complètent les comptes,
+//! ils ne les remplacent pas.
 //!
 //! - **DNS rebinding** (boucle locale seulement). Écouter sur la boucle locale
 //!   ne suffit pas : un site ouvert dans le navigateur peut faire pointer son
@@ -8,6 +8,13 @@
 //!   requête dont l'en-tête `Host` ne nomme pas `localhost`, `127.0.0.1` ou
 //!   `[::1]` (port quelconque) reçoit `421 bad_host`. Le mandataire de Vite
 //!   garde `Host: localhost:<port>`.
+//!
+//!   Un seul autre hôte est admis, quand `MEMENTUM_PUBLIC_URL` est réglé :
+//!   celui de l'adresse publique (Ruling R78). Derrière un tunnel ou un
+//!   mandataire qui garde l'en-tête `Host` publique, le serveur n'écoute que
+//!   sur la boucle locale, et sans cela tout répondrait `421`. Cela n'ouvre
+//!   rien au DNS rebinding : la page d'un attaquant envoie le `Host` de son
+//!   propre nom, pas celui de l'adresse publique.
 //! - **Écritures et WebSocket venues d'un autre site.** Toute requête autre
 //!   que `GET`, `HEAD` ou `OPTIONS`, et toute connexion à `/sync/{id}` (une
 //!   WebSocket échappe à CORS), est refusée par `403 bad_origin` si elle
@@ -89,18 +96,46 @@ pub(crate) fn request_origin(headers: &HeaderMap) -> Option<&str> {
         .map(|value| value.to_str().unwrap_or(""))
 }
 
+/// `host`, l'en-tête `Host` d'une requête, est-il celui de l'adresse publique
+/// (`public`, son origine : `schéma://hôte[:port]`, sans le port par défaut
+/// du schéma) ? L'hôte et le port doivent être les siens ; le port par défaut
+/// du schéma peut être écrit en toutes lettres (`notes.exemple.fr:443`).
+pub(crate) fn is_public_host(host: &str, public: Option<&str>) -> bool {
+    let Some((scheme, authority)) = public.and_then(|origin| origin.split_once("://")) else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case(authority) {
+        return true;
+    }
+    // L'adresse publique porte-t-elle un port (elle ne garde que celui qui
+    // n'est pas le port par défaut) ? Alors c'est ce port-là, rien d'autre.
+    let has_port = authority
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+    let default_port = if scheme == "https" { ":443" } else { ":80" };
+    !has_port
+        && host
+            .strip_suffix(default_port)
+            .is_some_and(|name| name.eq_ignore_ascii_case(authority))
+}
+
 /// Couche de toutes les routes, fallbacks compris :
 /// - `421 bad_host` si le serveur écoute sur la boucle locale et que `Host`
-///   ne la nomme pas ;
+///   ne nomme ni elle, ni l'hôte de l'adresse publique ([`is_public_host`]) ;
 /// - `403 bad_origin` si la requête écrit (tout sauf `GET`, `HEAD` et
 ///   `OPTIONS`) et porte une `Origin` que [`origin_allowed`] refuse.
 pub(crate) async fn check(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let host = request_host(request.headers(), request.uri());
-    if state.check_host && !host.is_some_and(is_loopback_authority) {
+    let public = state.public_origin.as_deref();
+    if state.check_host
+        && !host.is_some_and(|host| is_loopback_authority(host) || is_public_host(host, public))
+    {
         return ApiError::new(
             StatusCode::MISDIRECTED_REQUEST,
             ErrorCode::BadHost,
-            "en-tête Host refusée : ce serveur ne répond qu'à localhost, 127.0.0.1 ou [::1]",
+            "en-tête Host refusée : ce serveur ne répond qu'à localhost, 127.0.0.1 ou [::1]. \
+             Derrière un mandataire ou un tunnel, régler MEMENTUM_PUBLIC_URL sur l'adresse \
+             publique : son hôte est alors admis",
         )
         .into_response();
     }
@@ -108,13 +143,7 @@ pub(crate) async fn check(State(state): State<AppState>, request: Request, next:
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
     );
-    if writes
-        && !origin_allowed(
-            request_origin(request.headers()),
-            host,
-            state.public_origin.as_deref(),
-        )
-    {
+    if writes && !origin_allowed(request_origin(request.headers()), host, public) {
         return bad_origin().into_response();
     }
     next.run(request).await
@@ -151,7 +180,8 @@ pub(crate) fn bad_origin() -> ApiError {
         StatusCode::FORBIDDEN,
         ErrorCode::BadOrigin,
         "en-tête Origin refusée : seules les pages servies par localhost, 127.0.0.1, [::1], par \
-         ce serveur ou par son adresse publique peuvent écrire et se synchroniser",
+         ce serveur ou par son adresse publique peuvent écrire et se synchroniser. Derrière un \
+         mandataire ou un tunnel, régler MEMENTUM_PUBLIC_URL sur l'adresse publique",
     )
 }
 
@@ -247,5 +277,61 @@ mod tests {
         // L'hôte même du serveur et la boucle locale restent admis.
         assert!(origin_allowed(Some("http://10.0.0.5:8080"), host, public));
         assert!(origin_allowed(Some("http://localhost:5173"), host, public));
+    }
+
+    /// Ruling R78 : l'hôte de l'adresse publique, et lui seul, avec son port.
+    #[test]
+    fn public_hosts() {
+        let public = Some("https://notes.exemple.fr");
+        for ok in [
+            "notes.exemple.fr",
+            "NOTES.exemple.FR",
+            "notes.exemple.fr:443",
+        ] {
+            assert!(is_public_host(ok, public), "{ok}");
+        }
+        for refused in [
+            "",
+            "evil.example",
+            "exemple.fr",
+            "sub.notes.exemple.fr",
+            "notes.exemple.fr.evil.example",
+            "notes.exemple.fr:80",
+            "notes.exemple.fr:8443",
+            "notes.exemple.fr:",
+            "notes.exemple.fr:443:443",
+            "alex@notes.exemple.fr",
+            "https://notes.exemple.fr",
+            "localhost",
+        ] {
+            assert!(!is_public_host(refused, public), "{refused}");
+        }
+        // Sans adresse publique, personne.
+        assert!(!is_public_host("notes.exemple.fr", None));
+
+        // En `http`, le port par défaut est 80.
+        let public = Some("http://notes.exemple.fr");
+        assert!(is_public_host("notes.exemple.fr:80", public));
+        assert!(!is_public_host("notes.exemple.fr:443", public));
+
+        // Une adresse publique qui porte un port : ce port-là, et rien d'autre.
+        let public = Some("https://notes.exemple.fr:8443");
+        assert!(is_public_host("notes.exemple.fr:8443", public));
+        for refused in [
+            "notes.exemple.fr",
+            "notes.exemple.fr:443",
+            "notes.exemple.fr:8443:443",
+        ] {
+            assert!(!is_public_host(refused, public), "{refused}");
+        }
+        // Une adresse IPv6, sans port puis avec.
+        let public = Some("http://[2001:db8::1]");
+        assert!(is_public_host("[2001:db8::1]", public));
+        assert!(is_public_host("[2001:db8::1]:80", public));
+        assert!(!is_public_host("[2001:db8::2]", public));
+        let public = Some("http://[2001:db8::1]:8080");
+        assert!(is_public_host("[2001:db8::1]:8080", public));
+        assert!(!is_public_host("[2001:db8::1]", public));
+        assert!(!is_public_host("[2001:db8::1]:8080:80", public));
     }
 }

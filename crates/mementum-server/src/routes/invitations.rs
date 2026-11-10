@@ -7,9 +7,10 @@
 //! invitation dure [`INVITATION_TTL_MS`] et sert une fois. Un jeton inconnu, mal formé, échu,
 //! révoqué ou déjà accepté reçoit toujours la même réponse, `404 invalid_invitation`.
 //!
-//! [`valid_invitation`] et [`accept_invitation`] sont les seuls chemins par lesquels le serveur
-//! consulte et accepte une invitation par son jeton, inscription comprise
-//! (`routes/auth.rs`) ; l'acceptation passe par la consultation. Un contrôle de plus sur les
+//! [`valid_invitation`] est le seul chemin par lequel le serveur consulte une invitation par
+//! son jeton, et toute acceptation passe d'abord par lui : [`accept_invitation`] pour un compte
+//! qui existe, et l'inscription (`routes/auth.rs`), qui consulte puis laisse le store accepter
+//! dans la transaction qui crée le compte (`Store::sign_up`). Un contrôle de plus sur les
 //! invitations (l'auteur d'une invitation de page a-t-il encore `full` sur la page, Ruling
 //! R69) n'a donc qu'un endroit où s'ajouter : [`valid_invitation`].
 //!
@@ -239,8 +240,10 @@ pub(crate) async fn valid_invitation(
 /// (voir [`valid_invitation`], par où elle passe d'abord), ou si elle a cessé de valoir à
 /// l'instant de l'écriture, que le store revérifie dans sa transaction.
 ///
-/// Le seul chemin par lequel le serveur accepte une invitation : `POST
-/// /api/v1/invitations/accept` et l'inscription.
+/// Le chemin par lequel un compte qui existe accepte une invitation (`POST
+/// /api/v1/invitations/accept`). L'inscription, elle, consulte par
+/// [`valid_invitation`], puis l'accepte dans la transaction qui crée le compte
+/// (`Store::sign_up`).
 pub(crate) async fn accept_invitation(
     state: &AppState,
     token_hash: [u8; 32],

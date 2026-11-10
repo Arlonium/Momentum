@@ -15,8 +15,10 @@
 //!   unauthenticated`.
 //! - **Frein des connexions** ([`LoginThrottle`]) : après
 //!   [`LOGIN_MAX_FAILURES`] échecs pour une même adresse en
-//!   [`LOGIN_WINDOW_MS`], tout est refusé jusqu'à la fin de la fenêtre. Le
-//!   compteur est en mémoire : il repart de zéro au redémarrage.
+//!   [`LOGIN_WINDOW_MS`], tout est refusé jusqu'à la fin de la fenêtre. La
+//!   connexion et le changement de mot de passe ont chacun leur compteur
+//!   ([`Guarded`], Ruling R76). Le compteur est en mémoire : il repart de
+//!   zéro au redémarrage.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -72,7 +74,7 @@ pub const LOGIN_WINDOW_MS: i64 = 15 * 60 * 1000;
 /// prenne ni toute la mémoire ni tous les fils bloquants.
 pub const MAX_CONCURRENT_HASHES: usize = 4;
 
-/// Adresses suivies à la fois par le frein des connexions, au plus : la
+/// Fenêtres suivies à la fois par le frein des connexions, au plus : la
 /// mémoire du compteur est bornée (moins de 1 Mo), même sous une rafale
 /// d'adresses toutes différentes.
 const LOGIN_TRACKED_MAX: usize = 10_000;
@@ -301,6 +303,17 @@ pub(crate) struct Throttled {
     pub(crate) first: bool,
 }
 
+/// Ce que garde un compteur du frein. Chacun a ses propres fenêtres (Ruling
+/// R76) : dix connexions ratées par un tiers ne bloquent pas le titulaire
+/// qui change son mot de passe, et l'inverse non plus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Guarded {
+    /// `POST /api/v1/auth/login`.
+    Login,
+    /// `POST /api/v1/auth/password` : la vérification du mot de passe actuel.
+    PasswordChange,
+}
+
 /// La fenêtre d'une adresse.
 struct Window {
     /// Millisecondes Unix de la première tentative comptée.
@@ -311,6 +324,32 @@ struct Window {
     refused: bool,
 }
 
+impl Window {
+    fn new(now: i64) -> Window {
+        Window {
+            started: now,
+            failures: 0,
+            refused: false,
+        }
+    }
+
+    /// La fenêtre est-elle finie à `now` ?
+    fn ended(&self, now: i64) -> bool {
+        now - self.started >= LOGIN_WINDOW_MS
+    }
+
+    /// A-t-elle atteint le seuil ? Elle refuse alors tout jusqu'à sa fin.
+    fn blocks(&self) -> bool {
+        self.failures >= LOGIN_MAX_FAILURES
+    }
+
+    /// Secondes qui restent à `now` avant sa fin : au moins une.
+    fn seconds_left(&self, now: i64) -> u64 {
+        let left_ms = (self.started + LOGIN_WINDOW_MS - now).clamp(1, LOGIN_WINDOW_MS);
+        (left_ms as u64).div_ceil(1000)
+    }
+}
+
 /// Le frein des connexions : après [`LOGIN_MAX_FAILURES`] échecs pour une
 /// même adresse (rognée, en minuscules) dans une fenêtre de
 /// [`LOGIN_WINDOW_MS`], toute tentative pour cette adresse est refusée
@@ -319,9 +358,14 @@ struct Window {
 ///
 /// Une tentative est comptée comme un échec dès qu'elle commence, et
 /// décomptée si elle réussit : des tentatives simultanées ne dépassent pas le
-/// seuil. Le compteur ne garde pas les adresses, seulement leur SHA-256, et
-/// il suit [`LOGIN_TRACKED_MAX`] adresses au plus : au-delà, la plus ancienne
-/// fenêtre est oubliée.
+/// seuil. Le compteur ne garde pas les adresses, seulement leur SHA-256.
+///
+/// Il suit [`LOGIN_TRACKED_MAX`] fenêtres au plus. Plein, il fait de la place
+/// sans jamais oublier une fenêtre qui bloque : partent d'abord les fenêtres
+/// finies, puis la moins chargée de celles qui n'ont pas atteint le seuil.
+/// Si tout ce qu'il suit bloque, une adresse nouvelle est refusée : sinon,
+/// dix mille adresses jetables rendraient ses dix essais à qui attaque une
+/// adresse.
 #[derive(Default)]
 pub(crate) struct LoginThrottle {
     windows: Mutex<HashMap<[u8; 32], Window>>,
@@ -329,31 +373,36 @@ pub(crate) struct LoginThrottle {
 
 impl LoginThrottle {
     /// Compte une tentative pour `email` à `now` (millisecondes Unix), ou la
-    /// refuse si l'adresse a épuisé ses échecs.
-    pub(crate) fn attempt(&self, email: &str, now: i64) -> Result<(), Throttled> {
-        let key = throttle_key(email);
+    /// refuse si l'adresse a épuisé ses échecs pour `what`.
+    pub(crate) fn attempt(&self, what: Guarded, email: &str, now: i64) -> Result<(), Throttled> {
+        let key = throttle_key(what, email);
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
-        if !windows.contains_key(&key) && windows.len() >= LOGIN_TRACKED_MAX {
-            make_room(&mut windows, now);
+        // Une fenêtre finie repart de zéro.
+        if windows.get(&key).is_some_and(|window| window.ended(now)) {
+            windows.remove(&key);
         }
-        let window = windows.entry(key).or_insert(Window {
-            started: now,
-            failures: 0,
-            refused: false,
-        });
-        if now - window.started >= LOGIN_WINDOW_MS {
-            *window = Window {
-                started: now,
-                failures: 0,
-                refused: false,
-            };
+        if !windows.contains_key(&key)
+            && windows.len() >= LOGIN_TRACKED_MAX
+            && !make_room(&mut windows, now)
+        {
+            // Tout ce que suit le frein bloque encore : la place reviendra à
+            // la fin de la première de ces fenêtres.
+            let retry_after = windows
+                .values()
+                .map(|window| window.seconds_left(now))
+                .min()
+                .unwrap_or(1);
+            return Err(Throttled {
+                retry_after,
+                first: false,
+            });
         }
-        if window.failures >= LOGIN_MAX_FAILURES {
+        let window = windows.entry(key).or_insert(Window::new(now));
+        if window.blocks() {
             let first = !window.refused;
             window.refused = true;
-            let left_ms = (window.started + LOGIN_WINDOW_MS - now).clamp(1, LOGIN_WINDOW_MS);
             return Err(Throttled {
-                retry_after: (left_ms as u64).div_ceil(1000),
+                retry_after: window.seconds_left(now),
                 first,
             });
         }
@@ -361,33 +410,49 @@ impl LoginThrottle {
         Ok(())
     }
 
-    /// La tentative a réussi : le compteur de `email` repart de zéro.
-    pub(crate) fn succeeded(&self, email: &str) {
+    /// La tentative a réussi : le compteur de `email` pour `what` repart de
+    /// zéro.
+    pub(crate) fn succeeded(&self, what: Guarded, email: &str) {
         self.windows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&throttle_key(email));
+            .remove(&throttle_key(what, email));
     }
 }
 
-/// La clé d'une adresse dans le frein : le SHA-256 de sa forme normalisée,
-/// celle sous laquelle le compte est cherché.
-fn throttle_key(email: &str) -> [u8; 32] {
-    Sha256::digest(normalize_email(email).as_bytes()).into()
+/// La clé d'une fenêtre : le SHA-256 de ce qu'elle garde et de l'adresse sous
+/// sa forme normalisée, celle sous laquelle le compte est cherché.
+fn throttle_key(what: Guarded, email: &str) -> [u8; 32] {
+    let tag: &[u8] = match what {
+        Guarded::Login => b"login:",
+        Guarded::PasswordChange => b"password:",
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(tag);
+    hasher.update(normalize_email(email).as_bytes());
+    hasher.finalize().into()
 }
 
-/// Fait de la place dans un frein plein : les fenêtres finies partent ; s'il
-/// n'y en a pas, la plus ancienne.
-fn make_room(windows: &mut HashMap<[u8; 32], Window>, now: i64) {
-    windows.retain(|_, window| now - window.started < LOGIN_WINDOW_MS);
-    if windows.len() >= LOGIN_TRACKED_MAX {
-        let oldest = windows
-            .iter()
-            .min_by_key(|(_, window)| window.started)
-            .map(|(key, _)| *key);
-        if let Some(key) = oldest {
+/// Fait de la place dans un frein plein, sans toucher à une fenêtre qui
+/// bloque : les fenêtres finies partent ; s'il n'y en a pas, la moins chargée
+/// de celles qui n'ont pas atteint le seuil (à charge égale, la plus
+/// ancienne). Rend faux si aucune place n'a pu être faite.
+fn make_room(windows: &mut HashMap<[u8; 32], Window>, now: i64) -> bool {
+    windows.retain(|_, window| !window.ended(now));
+    if windows.len() < LOGIN_TRACKED_MAX {
+        return true;
+    }
+    let lightest = windows
+        .iter()
+        .filter(|(_, window)| !window.blocks())
+        .min_by_key(|(_, window)| (window.failures, window.started))
+        .map(|(key, _)| *key);
+    match lightest {
+        Some(key) => {
             windows.remove(&key);
+            true
         }
+        None => false,
     }
 }
 
@@ -401,6 +466,10 @@ fn make_room(windows: &mut HashMap<[u8; 32], Window>, now: i64) {
 /// si la base n'existe pas. Le mot de passe n'est ni affiché ni journalisé.
 /// Rend l'adresse du compte, telle que la base la garde.
 ///
+/// En plus de la règle des longueurs, un mot de passe qui contient un
+/// caractère de contrôle (octet nul compris) est refusé : il vient d'une
+/// saisie abîmée, et personne ne le retaperait.
+///
 /// Ouvrir la base la migre si une migration est en attente : la commande
 /// peut être la première à ouvrir une base d'une version plus ancienne. Une
 /// copie de la base est alors écrite d'abord (`Store::open`), et `on_backup`
@@ -411,6 +480,19 @@ pub async fn set_password(
     password: &str,
     on_backup: impl FnOnce(&Backup),
 ) -> anyhow::Result<String> {
+    // Avant la longueur : une entrée en UTF-16 double le nombre de caractères,
+    // et c'est cette raison-ci qu'il faut dire.
+    if let Some((index, c)) = password.chars().enumerate().find(|(_, c)| c.is_control()) {
+        anyhow::bail!(
+            "le mot de passe contient un caractère de contrôle (U+{:04X}, en position {}) : il \
+             ne se retape pas au clavier. C'est sans doute un reste de la saisie : une \
+             tabulation, un retour chariot, ou les octets nuls d'une entrée en UTF-16 (ce \
+             qu'écrit PowerShell 5) ; passer le mot de passe en UTF-8, seul sur sa ligne. \
+             Rien n'a été changé",
+            c as u32,
+            index + 1
+        );
+    }
     let chars = password.chars().count();
     if !(PASSWORD_MIN_CHARS..=PASSWORD_MAX_CHARS).contains(&chars) {
         anyhow::bail!("{} ; celui-ci en a {chars}", password_rule());
@@ -644,19 +726,20 @@ mod tests {
     #[test]
     fn throttle_blocks_until_the_window_ends() {
         let throttle = LoginThrottle::default();
+        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
         let start = 1_000_000;
         // Dix tentatives passent, étalées dans la fenêtre.
-        for attempt in 0..10 {
+        for n in 0..10 {
             assert_eq!(
-                throttle.attempt("alice@exemple.fr", start + attempt * 1000),
+                attempt("alice@exemple.fr", start + n * 1000),
                 Ok(()),
-                "essai {attempt}"
+                "essai {n}"
             );
         }
         // La onzième est refusée, jusqu'à la fin de la fenêtre ouverte par
         // la première.
         assert_eq!(
-            throttle.attempt("alice@exemple.fr", start + 10_000),
+            attempt("alice@exemple.fr", start + 10_000),
             Err(Throttled {
                 retry_after: 890,
                 first: true
@@ -664,31 +747,31 @@ mod tests {
         );
         // La même adresse, écrite autrement.
         assert_eq!(
-            throttle.attempt("  ALICE@Exemple.fr ", start + 10_500),
+            attempt("  ALICE@Exemple.fr ", start + 10_500),
             Err(Throttled {
                 retry_after: 890,
                 first: false
             })
         );
         assert_eq!(
-            throttle.attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS - 1),
+            attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS - 1),
             Err(Throttled {
                 retry_after: 1,
                 first: false
             })
         );
         // Une autre adresse n'est pas touchée.
-        assert_eq!(throttle.attempt("bob@exemple.fr", start + 10_000), Ok(()));
+        assert_eq!(attempt("bob@exemple.fr", start + 10_000), Ok(()));
         // La fenêtre finie, le compteur repart : dix tentatives de nouveau.
-        for attempt in 0..10 {
+        for n in 0..10 {
             assert_eq!(
-                throttle.attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS + attempt),
+                attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS + n),
                 Ok(()),
-                "essai {attempt} de la fenêtre suivante"
+                "essai {n} de la fenêtre suivante"
             );
         }
         assert_eq!(
-            throttle.attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS + 10),
+            attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS + 10),
             Err(Throttled {
                 retry_after: 900,
                 first: true
@@ -699,48 +782,178 @@ mod tests {
     #[test]
     fn throttle_resets_on_success() {
         let throttle = LoginThrottle::default();
+        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
         for round in 0..3 {
-            for attempt in 0..10 {
+            for n in 0..10 {
                 assert_eq!(
-                    throttle.attempt("alice@exemple.fr", attempt),
+                    attempt("alice@exemple.fr", n),
                     Ok(()),
-                    "tour {round}, essai {attempt}"
+                    "tour {round}, essai {n}"
                 );
             }
-            throttle.succeeded(" Alice@exemple.FR ");
+            throttle.succeeded(Guarded::Login, " Alice@exemple.FR ");
         }
         // Une réussite d'une autre adresse ne décompte rien.
-        for attempt in 0..10 {
-            assert_eq!(throttle.attempt("alice@exemple.fr", attempt), Ok(()));
+        for n in 0..10 {
+            assert_eq!(attempt("alice@exemple.fr", n), Ok(()));
         }
-        throttle.succeeded("bob@exemple.fr");
-        assert!(throttle.attempt("alice@exemple.fr", 10).is_err());
+        throttle.succeeded(Guarded::Login, "bob@exemple.fr");
+        assert!(attempt("alice@exemple.fr", 10).is_err());
+    }
+
+    /// Ruling R76 : la connexion et le changement de mot de passe d'une même
+    /// adresse ont chacun leur fenêtre. Épuiser l'une ne touche pas à
+    /// l'autre, et la réussite de l'une ne remet pas l'autre à zéro.
+    #[test]
+    fn throttle_counts_each_guarded_action_apart() {
+        let throttle = LoginThrottle::default();
+        let email = "alice@exemple.fr";
+        for n in 0..10 {
+            assert_eq!(throttle.attempt(Guarded::Login, email, n), Ok(()));
+        }
+        assert!(throttle.attempt(Guarded::Login, email, 10).is_err());
+        // Le changement de mot de passe a encore ses dix essais.
+        for n in 0..10 {
+            assert_eq!(
+                throttle.attempt(Guarded::PasswordChange, email, 10 + n),
+                Ok(()),
+                "essai {n}"
+            );
+        }
+        assert!(
+            throttle
+                .attempt(Guarded::PasswordChange, email, 20)
+                .is_err()
+        );
+        // Un changement réussi ne rouvre pas la connexion, et l'inverse.
+        throttle.succeeded(Guarded::PasswordChange, email);
+        assert!(throttle.attempt(Guarded::Login, email, 21).is_err());
+        assert_eq!(throttle.attempt(Guarded::PasswordChange, email, 21), Ok(()));
+        throttle.succeeded(Guarded::Login, email);
+        assert_eq!(throttle.attempt(Guarded::Login, email, 22), Ok(()));
+        assert_ne!(
+            throttle_key(Guarded::Login, email),
+            throttle_key(Guarded::PasswordChange, email)
+        );
     }
 
     /// Le frein ne grossit pas sans fin : plein, il oublie les fenêtres
-    /// finies, sinon la plus ancienne.
+    /// finies, sinon la moins chargée (à charge égale, la plus ancienne).
     #[test]
     fn throttle_memory_is_bounded() {
         let throttle = LoginThrottle::default();
-        let len = |throttle: &LoginThrottle| throttle.windows.lock().unwrap().len();
+        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
+        let tracked = |email: &str| {
+            let windows = throttle.windows.lock().unwrap();
+            windows.contains_key(&throttle_key(Guarded::Login, email))
+        };
+        let len = || throttle.windows.lock().unwrap().len();
         for i in 0..LOGIN_TRACKED_MAX as i64 {
-            assert_eq!(throttle.attempt(&format!("{i}@exemple.fr"), i), Ok(()));
+            assert_eq!(attempt(&format!("{i}@exemple.fr"), i), Ok(()));
         }
-        assert_eq!(len(&throttle), LOGIN_TRACKED_MAX);
-        // Aucune fenêtre n'est finie : la plus ancienne part.
+        assert_eq!(len(), LOGIN_TRACKED_MAX);
+        // Aucune fenêtre n'est finie, toutes ont un échec : la plus ancienne
+        // part.
         let now = LOGIN_TRACKED_MAX as i64;
-        assert_eq!(throttle.attempt("une-de-plus@exemple.fr", now), Ok(()));
-        assert_eq!(len(&throttle), LOGIN_TRACKED_MAX);
-        let windows = throttle.windows.lock().unwrap();
-        assert!(!windows.contains_key(&throttle_key("0@exemple.fr")));
-        assert!(windows.contains_key(&throttle_key("1@exemple.fr")));
-        drop(windows);
-        // Une adresse déjà suivie ne chasse personne.
-        assert_eq!(throttle.attempt("1@exemple.fr", now), Ok(()));
-        assert_eq!(len(&throttle), LOGIN_TRACKED_MAX);
+        assert_eq!(attempt("une-de-plus@exemple.fr", now), Ok(()));
+        assert_eq!(len(), LOGIN_TRACKED_MAX);
+        assert!(!tracked("0@exemple.fr"));
+        assert!(tracked("1@exemple.fr"));
+        // Une adresse déjà suivie ne chasse personne. Avec deux échecs, « 1 »
+        // est maintenant plus chargée que les autres : ce n'est plus elle la
+        // prochaine à partir, bien qu'elle soit la plus ancienne.
+        assert_eq!(attempt("1@exemple.fr", now), Ok(()));
+        assert_eq!(len(), LOGIN_TRACKED_MAX);
+        assert_eq!(attempt("encore-une@exemple.fr", now), Ok(()));
+        assert!(tracked("1@exemple.fr"));
+        assert!(!tracked("2@exemple.fr"));
         // Toutes les fenêtres finies partent d'un coup.
         let later = now + LOGIN_WINDOW_MS;
-        assert_eq!(throttle.attempt("plus-tard@exemple.fr", later), Ok(()));
-        assert_eq!(len(&throttle), 1);
+        assert_eq!(attempt("plus-tard@exemple.fr", later), Ok(()));
+        assert_eq!(len(), 1);
+    }
+
+    /// Une adresse bloquée le reste, quoi qu'il arrive au frein : dix mille
+    /// adresses jetables ne lui rendent pas ses dix essais.
+    #[test]
+    fn full_throttle_never_forgets_a_blocked_address() {
+        let throttle = LoginThrottle::default();
+        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
+        let len = || throttle.windows.lock().unwrap().len();
+        // La victime est bloquée.
+        for n in 0..10 {
+            assert_eq!(attempt("victime@exemple.fr", n), Ok(()));
+        }
+        assert!(attempt("victime@exemple.fr", 10).is_err());
+        // Dix mille autres adresses passent : le frein, plein, fait de la
+        // place parmi elles.
+        for i in 0..LOGIN_TRACKED_MAX as i64 {
+            assert_eq!(
+                attempt(&format!("{i}@jetable.example"), 11 + i),
+                Ok(()),
+                "adresse {i}"
+            );
+        }
+        assert_eq!(len(), LOGIN_TRACKED_MAX);
+        // Elle l'est toujours, et jusqu'à la fin de sa fenêtre (ouverte à 0 :
+        // il en reste 889 989 ms).
+        let now = 11 + LOGIN_TRACKED_MAX as i64;
+        assert_eq!(
+            attempt("victime@exemple.fr", now),
+            Err(Throttled {
+                retry_after: 890,
+                first: false
+            })
+        );
+        assert!(attempt("victime@exemple.fr", LOGIN_WINDOW_MS - 1).is_err());
+        assert_eq!(attempt("victime@exemple.fr", LOGIN_WINDOW_MS), Ok(()));
+    }
+
+    /// Quand tout ce que suit le frein bloque, une adresse nouvelle est
+    /// refusée plutôt que d'en faire oublier une ; la place revient à la fin
+    /// des fenêtres.
+    #[test]
+    fn throttle_full_of_blocked_addresses_refuses_new_ones() {
+        let throttle = LoginThrottle::default();
+        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
+        let len = || throttle.windows.lock().unwrap().len();
+        for i in 0..LOGIN_TRACKED_MAX {
+            let email = format!("{i}@exemple.fr");
+            for _ in 0..10 {
+                assert_eq!(attempt(&email, 1000), Ok(()));
+            }
+        }
+        assert_eq!(len(), LOGIN_TRACKED_MAX);
+        // Refusée, jusqu'à la fin de la première fenêtre ; sans rien évincer.
+        assert_eq!(
+            attempt("nouvelle@exemple.fr", 61_000),
+            Err(Throttled {
+                retry_after: 840,
+                first: false
+            })
+        );
+        assert_eq!(len(), LOGIN_TRACKED_MAX);
+        // Les adresses déjà suivies restent bloquées pour leur compte.
+        assert_eq!(
+            attempt("0@exemple.fr", 61_000),
+            Err(Throttled {
+                retry_after: 840,
+                first: true
+            })
+        );
+        // Une réussite libère une place (une tentative en cours peut finir).
+        throttle.succeeded(Guarded::Login, "0@exemple.fr");
+        assert_eq!(attempt("nouvelle@exemple.fr", 61_000), Ok(()));
+        assert_eq!(len(), LOGIN_TRACKED_MAX);
+        // « nouvelle » n'a qu'un échec : c'est elle qui cède sa place, pas
+        // une adresse bloquée.
+        assert_eq!(attempt("suivante@exemple.fr", 61_000), Ok(()));
+        assert!(attempt("1@exemple.fr", 61_000).is_err());
+        // À la fin des fenêtres, tout repart.
+        assert_eq!(
+            attempt("plus-tard@exemple.fr", 61_000 + LOGIN_WINDOW_MS),
+            Ok(())
+        );
+        assert_eq!(len(), 1);
     }
 }

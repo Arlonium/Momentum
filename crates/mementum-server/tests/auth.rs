@@ -238,6 +238,49 @@ async fn first_account_adopts_lot1_space() {
     store.close().await;
 }
 
+/// Une erreur de la base au milieu de l'inscription du premier compte (ici, à
+/// la reprise de l'espace du lot 1) ne laisse rien derrière elle : ni compte,
+/// ni adresse prise. L'inscription relancée est encore celle du premier
+/// compte, et les pages du lot 1 lui reviennent.
+#[tokio::test]
+async fn failed_signup_leaves_no_account_behind() {
+    let (t, lot1) = TestApp::on_lot1_database().await;
+    exec_sql(
+        &t.db_path(),
+        "CREATE TRIGGER panne BEFORE INSERT ON members \
+         BEGIN SELECT RAISE(ABORT, 'panne simulée'); END",
+    )
+    .await;
+    let alice = t.browser();
+    let reply = alice
+        .sign_up("alice@exemple.fr", "Alice", PASSWORD, None)
+        .await;
+    reply.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+    assert!(alice.session().is_none());
+    assert_eq!(
+        query_i64(&t.db_path(), "SELECT COUNT(*) FROM users").await,
+        0
+    );
+    assert_eq!(t.get("/api/v1/info").await.json()["setup"], true);
+
+    // La panne passée, la même adresse s'inscrit, et tout lui revient.
+    exec_sql(&t.db_path(), "DROP TRIGGER panne").await;
+    let reply = alice
+        .sign_up("alice@exemple.fr", "Alice", PASSWORD, None)
+        .await;
+    reply.assert_status(StatusCode::CREATED);
+    let me = reply.json();
+    assert_eq!(me["user"]["instanceAdmin"], true);
+    assert_eq!(
+        me["spaces"],
+        json!([{ "id": lot1.vault.to_string(), "name": "Mon espace", "role": "owner" }])
+    );
+    assert_eq!(
+        query_i64(&t.db_path(), "SELECT COUNT(*) FROM users").await,
+        1
+    );
+}
+
 /// Le même sort pour un espace sans membre qui ne vient pas d'une base du
 /// lot 1 : il revient au premier compte, qui n'en reçoit pas un second. (Les
 /// routes de pages en créaient un quand on s'en servait avant tout compte,
@@ -774,11 +817,17 @@ async fn change_password_kills_other_sessions() {
         .assert_status(StatusCode::OK);
     let before = laptop.session().unwrap();
 
-    // Refus : rien ne change.
-    laptop
+    // Refus : rien ne change. Le message parle du mot de passe actuel, pas
+    // d'une adresse que la personne n'a pas tapée (celui de la connexion).
+    let body = laptop
         .change_password("pas-le-bon-mot-de-passe", NEW_PASSWORD)
         .await
         .assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+    assert_french(&body, &["mot de passe actuel"]);
+    assert!(
+        !body["message"].as_str().unwrap().contains("adresse"),
+        "{body}"
+    );
     laptop
         .change_password(PASSWORD, "neuf-car.")
         .await
@@ -1165,6 +1214,11 @@ async fn mutating_request_with_foreign_origin_is_403() {
                 .unwrap(),
             json_request(
                 Method::POST,
+                "/api/v1/auth/password",
+                &json!({ "current": PASSWORD, "new": NEW_PASSWORD }),
+            ),
+            json_request(
+                Method::POST,
                 "/api/v1/pages",
                 &json!({ "spaceId": space, "title": "Volée" }),
             ),
@@ -1201,15 +1255,24 @@ async fn mutating_request_with_foreign_origin_is_403() {
             // Avec la session d'Alice : c'est elle qu'un site tiers viserait.
             let reply = alice.send(request).await;
             let body = reply.assert_error(StatusCode::FORBIDDEN, "bad_origin");
-            assert_french(&body, &["Origin"]);
+            // Le message nomme le réglage qui admet une autre origine.
+            assert_french(&body, &["Origin", "MEMENTUM_PUBLIC_URL"]);
             assert!(reply.set_cookies().is_empty(), "{line}");
         }
     }
-    // Rien n'a été écrit, et la session vaut toujours.
+    // Rien n'a été écrit, et la session vaut toujours ; le mot de passe n'a
+    // pas changé.
     let seen: mementum_server::Tree = serde_json::from_slice(&alice.get(&tree).await.body).unwrap();
     assert_eq!(seen.nodes, std::slice::from_ref(&page));
     assert_eq!(alice.get_mmd(&page.id).await.text(), "<p/>\n");
     assert_eq!(alice.me().await.status, StatusCode::OK);
+    assert_eq!(
+        t.browser()
+            .log_in("alice@exemple.fr", NEW_PASSWORD)
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
 
     // Une lecture avec la même `Origin` passe : elle n'écrit rien, et un
     // site tiers ne lit pas la réponse (pas de CORS).
@@ -1388,4 +1451,390 @@ async fn sessions_are_per_account() {
     t.send(request(format!("session={token}")))
         .await
         .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+}
+
+/// Huit inscriptions lancées de front ; rend le statut et le code d'erreur de
+/// chacune.
+async fn eight_signups(t: &TestApp, invitation: Option<&str>) -> Vec<(StatusCode, String)> {
+    let sign_up = |i: usize| async move {
+        let reply = t
+            .browser()
+            .sign_up(
+                &format!("compte{i}@exemple.fr"),
+                &format!("Compte {i}"),
+                PASSWORD,
+                invitation,
+            )
+            .await;
+        let code = match reply.status {
+            StatusCode::CREATED => String::new(),
+            _ => reply.json()["error"].as_str().unwrap_or("").to_string(),
+        };
+        (reply.status, code)
+    };
+    let (a, b, c, d, e, f, g, h) = tokio::join!(
+        sign_up(0),
+        sign_up(1),
+        sign_up(2),
+        sign_up(3),
+        sign_up(4),
+        sign_up(5),
+        sign_up(6),
+        sign_up(7),
+    );
+    vec![a, b, c, d, e, f, g, h]
+}
+
+/// Le verrou des inscriptions : sur une instance neuve, en mode `invite`, le
+/// droit du premier compte ne vaut qu'une fois, même pour des inscriptions
+/// qui arrivent ensemble (chacune voit « aucun compte » tant que le hachage
+/// de la première n'est pas fini).
+#[tokio::test]
+async fn concurrent_first_signups_make_one_account_in_invite_mode() {
+    let t = TestApp::new().await;
+    let replies = eight_signups(&t, None).await;
+    let created = replies
+        .iter()
+        .filter(|(status, _)| *status == StatusCode::CREATED)
+        .count();
+    let closed = replies
+        .iter()
+        .filter(|reply| **reply == (StatusCode::FORBIDDEN, "signup_closed".to_string()))
+        .count();
+    assert_eq!((created, closed), (1, 7), "{replies:?}");
+    assert_eq!(
+        query_i64(&t.db_path(), "SELECT COUNT(*) FROM users").await,
+        1
+    );
+    assert_eq!(
+        query_i64(
+            &t.db_path(),
+            "SELECT COUNT(*) FROM users WHERE instance_admin = 1"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        query_i64(&t.db_path(), "SELECT COUNT(*) FROM spaces").await,
+        1
+    );
+}
+
+/// Le verrou des inscriptions : un jeton d'invitation sert une fois, même
+/// pour des inscriptions qui arrivent ensemble. Les autres ne créent pas de
+/// compte.
+#[tokio::test]
+async fn one_invitation_makes_one_account() {
+    let t = TestApp::new().await;
+    let (_alice, me) = t.signed_up("alice@exemple.fr", "Alice").await;
+    let space = space_id(&me, 0);
+    let store = Store::open(&t.db_path()).await.unwrap();
+    let (token, _) = invite(
+        &store,
+        space,
+        user_id(&me),
+        Role::Member,
+        6,
+        now_ms() + WEEK_MS,
+    )
+    .await;
+
+    let replies = eight_signups(&t, Some(&token)).await;
+    let created = replies
+        .iter()
+        .filter(|(status, _)| *status == StatusCode::CREATED)
+        .count();
+    let invalid = replies
+        .iter()
+        .filter(|reply| **reply == (StatusCode::NOT_FOUND, "invalid_invitation".to_string()))
+        .count();
+    assert_eq!((created, invalid), (1, 7), "{replies:?}");
+    // Alice, et un seul compte de plus, entré dans son espace.
+    assert_eq!(
+        query_i64(&t.db_path(), "SELECT COUNT(*) FROM users").await,
+        2
+    );
+    assert_eq!(store.members(space).await.unwrap().len(), 2);
+    assert_eq!(
+        query_i64(&t.db_path(), "SELECT COUNT(*) FROM spaces").await,
+        1
+    );
+    store.close().await;
+}
+
+/// Ruling R76 : le changement de mot de passe a son propre frein. Dix
+/// connexions ratées par un tiers ne bloquent pas le titulaire qui change son
+/// mot de passe ; dix mots de passe actuels faux ne bloquent pas la
+/// connexion.
+#[tokio::test]
+async fn password_change_has_its_own_throttle() {
+    let t = open_app().await;
+    let (alice, _) = t.signed_up("alice@exemple.fr", "Alice").await;
+    let (bob, _) = t.signed_up("bob@exemple.fr", "Bob").await;
+    let too_many = |reply: &Reply| {
+        reply.assert_error(StatusCode::TOO_MANY_REQUESTS, "too_many_attempts");
+        let seconds: u64 = reply
+            .headers
+            .get(header::RETRY_AFTER)
+            .expect("Retry-After")
+            .to_str()
+            .unwrap()
+            .parse()
+            .expect("Retry-After en secondes");
+        assert!((1..=900).contains(&seconds), "Retry-After: {seconds}");
+    };
+
+    // Un tiers épuise les connexions d'Alice.
+    for attempt in 1..=10 {
+        let reply = t.browser().log_in("alice@exemple.fr", "pas-le-bon").await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
+    }
+    too_many(&t.browser().log_in("alice@exemple.fr", PASSWORD).await);
+    // Alice, déjà connectée, change quand même son mot de passe.
+    alice
+        .change_password(PASSWORD, NEW_PASSWORD)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(alice.me().await.status, StatusCode::OK);
+
+    // Dix mots de passe actuels faux avec la session de Bob : le changement
+    // est refusé, même avec le bon, jusqu'à la fin de la fenêtre.
+    for attempt in 1..=10 {
+        let reply = bob.change_password("pas-le-bon", NEW_PASSWORD).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
+        assert!(reply.headers.get(header::RETRY_AFTER).is_none());
+    }
+    too_many(&bob.change_password("pas-le-bon", NEW_PASSWORD).await);
+    too_many(&bob.change_password(PASSWORD, NEW_PASSWORD).await);
+    // Sa connexion, elle, n'est pas freinée, et son mot de passe n'a pas
+    // changé.
+    t.browser()
+        .log_in("bob@exemple.fr", PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(bob.me().await.status, StatusCode::OK);
+}
+
+/// Les réponses des routes d'authentification et de `GET /api/v1/me` ne se
+/// gardent dans aucun cache, réussites et refus compris.
+#[tokio::test]
+async fn auth_responses_are_never_cached() {
+    let t = TestApp::new().await;
+    let no_store = |reply: &Reply, expected: StatusCode, what: &str| {
+        assert_eq!(reply.status, expected, "{what} : {}", reply.text());
+        assert_eq!(
+            reply
+                .headers
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "{what}"
+        );
+    };
+    let alice = t.browser();
+    no_store(
+        &alice.me().await,
+        StatusCode::UNAUTHORIZED,
+        "me sans session",
+    );
+    no_store(
+        &alice.sign_up("alice", "Alice", PASSWORD, None).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "inscription refusée",
+    );
+    no_store(
+        &alice
+            .post("/api/v1/auth/signup", json!({ "email": 3 }))
+            .await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "inscription au corps illisible",
+    );
+    no_store(
+        &alice
+            .sign_up("alice@exemple.fr", "Alice", PASSWORD, None)
+            .await,
+        StatusCode::CREATED,
+        "inscription",
+    );
+    no_store(&alice.me().await, StatusCode::OK, "me");
+    no_store(
+        &t.browser()
+            .sign_up("bob@exemple.fr", "Bob", PASSWORD, None)
+            .await,
+        StatusCode::FORBIDDEN,
+        "inscription fermée",
+    );
+    no_store(
+        &t.browser().log_in("alice@exemple.fr", "pas-le-bon").await,
+        StatusCode::UNAUTHORIZED,
+        "connexion refusée",
+    );
+    no_store(
+        &t.browser().log_in("alice@exemple.fr", PASSWORD).await,
+        StatusCode::OK,
+        "connexion",
+    );
+    no_store(
+        &t.browser().change_password(PASSWORD, NEW_PASSWORD).await,
+        StatusCode::UNAUTHORIZED,
+        "changement sans session",
+    );
+    no_store(
+        &alice.change_password("pas-le-bon", NEW_PASSWORD).await,
+        StatusCode::UNAUTHORIZED,
+        "mot de passe actuel faux",
+    );
+    no_store(
+        &alice.change_password(PASSWORD, "neuf-car.").await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "nouveau mot de passe refusé",
+    );
+    no_store(
+        &alice.change_password(PASSWORD, NEW_PASSWORD).await,
+        StatusCode::NO_CONTENT,
+        "changement de mot de passe",
+    );
+    no_store(
+        &alice.log_out().await,
+        StatusCode::NO_CONTENT,
+        "déconnexion",
+    );
+    no_store(
+        &alice.log_out().await,
+        StatusCode::NO_CONTENT,
+        "déconnexion sans session",
+    );
+}
+
+/// Se connecter ferme la session que le navigateur portait déjà : l'ancien
+/// cookie, rejoué, ne vaut plus rien. Une connexion ratée ne ferme rien.
+#[tokio::test]
+async fn login_closes_the_session_the_browser_carried() {
+    let t = open_app().await;
+    let (alice, me) = t.signed_up("alice@exemple.fr", "Alice").await;
+    let first = alice.session().expect("session de l'inscription");
+    let sessions = "SELECT COUNT(*) FROM sessions";
+
+    // Ratée : la session portée vaut toujours.
+    alice
+        .log_in("alice@exemple.fr", "pas-le-bon")
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+    assert_eq!(alice.session().as_deref(), Some(first.as_str()));
+    assert_eq!(alice.me().await.status, StatusCode::OK);
+
+    // Réussie, dans le même navigateur : un jeton neuf, l'ancien est fermé.
+    alice
+        .log_in("alice@exemple.fr", PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    let second = alice.session().expect("session de la connexion");
+    assert_ne!(second, first);
+    assert_eq!(alice.me().await.json(), me);
+    let replay = t.browser();
+    replay.set_session(Some(&first));
+    replay
+        .me()
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+    assert_eq!(query_i64(&t.db_path(), sessions).await, 1);
+
+    // Un autre compte se connecte dans ce navigateur : la session d'Alice
+    // qu'il portait est fermée, pas celles d'ailleurs.
+    let elsewhere = t.browser();
+    elsewhere
+        .log_in("alice@exemple.fr", PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    let (_bob, _) = t.signed_up("bob@exemple.fr", "Bob").await;
+    let reply = alice.log_in("bob@exemple.fr", PASSWORD).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(reply.json()["user"]["email"], "bob@exemple.fr");
+    replay.set_session(Some(&second));
+    replay
+        .me()
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+    assert_eq!(elsewhere.me().await.json(), me);
+    // Alice ailleurs, Bob à son inscription, Bob ici.
+    assert_eq!(query_i64(&t.db_path(), sessions).await, 3);
+}
+
+/// Ruling R78 : derrière un tunnel qui garde l'en-tête `Host` publique, le
+/// serveur n'écoute que sur la boucle locale. L'hôte de
+/// `MEMENTUM_PUBLIC_URL` est alors admis par le contrôle de `Host`, et lui
+/// seul.
+#[tokio::test]
+async fn public_url_host_is_admitted_on_loopback() {
+    let health = |host: &'static str| {
+        Request::get("/health")
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let t = TestApp::with_config(|cfg| {
+        cfg.public_url = Some("https://notes.exemple.fr".to_string());
+    })
+    .await;
+    for host in [
+        "notes.exemple.fr",
+        "Notes.Exemple.FR",
+        // Le port par défaut du schéma, écrit en toutes lettres.
+        "notes.exemple.fr:443",
+        // La boucle locale, comme avant.
+        "localhost:8080",
+        "127.0.0.1",
+    ] {
+        let reply = t.send_raw(health(host)).await;
+        assert_eq!(reply.status, StatusCode::OK, "Host: {host}");
+    }
+    for host in [
+        "evil.example",
+        "notes.exemple.fr.evil.example",
+        "sub.notes.exemple.fr",
+        "exemple.fr",
+        "notes.exemple.fr:8443",
+        "notes.exemple.fr:80",
+        "notes.exemple.fr:",
+        "alex@notes.exemple.fr",
+    ] {
+        let body = t
+            .send_raw(health(host))
+            .await
+            .assert_error(StatusCode::MISDIRECTED_REQUEST, "bad_host");
+        // Le message nomme le réglage qui admet un autre hôte.
+        assert_french(&body, &["Host", "MEMENTUM_PUBLIC_URL"]);
+    }
+    // De bout en bout : une écriture venue de l'adresse publique.
+    let signup = Request::post("/api/v1/auth/signup")
+        .header(header::HOST, "notes.exemple.fr")
+        .header(header::ORIGIN, "https://notes.exemple.fr")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({ "email": "alice@exemple.fr", "name": "Alice", "password": PASSWORD })
+                .to_string(),
+        ))
+        .unwrap();
+    t.send_raw(signup).await.assert_status(StatusCode::CREATED);
+
+    // Avec un port dans l'adresse publique, c'est cet hôte-là, port compris.
+    let t = TestApp::with_config(|cfg| {
+        cfg.public_url = Some("http://notes.exemple.fr:8443/".to_string());
+    })
+    .await;
+    assert_eq!(
+        t.send_raw(health("notes.exemple.fr:8443")).await.status,
+        StatusCode::OK
+    );
+    for host in ["notes.exemple.fr", "notes.exemple.fr:80"] {
+        t.send_raw(health(host))
+            .await
+            .assert_error(StatusCode::MISDIRECTED_REQUEST, "bad_host");
+    }
+
+    // Sans adresse publique : la boucle locale seulement.
+    let t = TestApp::new().await;
+    t.send_raw(health("notes.exemple.fr"))
+        .await
+        .assert_error(StatusCode::MISDIRECTED_REQUEST, "bad_host");
 }
