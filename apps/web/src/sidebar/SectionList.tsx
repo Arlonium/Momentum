@@ -2,15 +2,27 @@
 // « Privé » (`sections.ts`), chacune avec son titre et son arbre de pages. Un titre replie sa
 // section, comme dans Notion ; l'état est gardé par espace, dans le navigateur. Le « + » d'un
 // titre crée une page à la racine de la section (« Espace » et « Privé » seulement) ; le « + »
-// d'une ligne, une sous-page ; son « … », le menu de ses actions (`RowMenu`) : « Mettre à la
-// corbeille ».
+// d'une ligne, une sous-page ; son « … », le menu de ses actions (`RowMenu`) : « Déplacer vers
+// le haut », « Déplacer vers le bas », « Mettre à la corbeille ».
+//
+// Une page se déplace aussi à la souris, à l'intérieur de sa section (`PageTree`, `drag.ts`).
+// Le glisser-déposer en cours est tenu ici : seul l'arbre d'où vient la page accepte le dépôt.
 //
 // Les pages repliées (une page et ses sous-pages) ne sont pas gardées : tout est déplié au
 // chargement.
 import type { PageNode, Role, RootSection, Section } from "@mementum/protocol";
-import { useCallback, useId, useMemo, useRef, useState, type RefObject } from "react";
-import { ChevronIcon, PlusIcon, TrashIcon } from "../icons";
-import { PageTree } from "./PageTree";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
+import { ArrowDownIcon, ArrowUpIcon, ChevronIcon, PlusIcon, TrashIcon } from "../icons";
+import { stepTarget, type Drop } from "./drag";
+import { PageTree, type DropAt, type TreeDrag } from "./PageTree";
 import { RowMenu, type MenuAction } from "./RowMenu";
 import { flattenRows } from "./rows";
 import {
@@ -18,6 +30,7 @@ import {
   canCreateIn,
   readCollapsedSections,
   SECTION_LABELS,
+  SECTIONS,
   visibleSections,
   writeCollapsedSections,
 } from "./sections";
@@ -41,10 +54,25 @@ type Props = {
   onCreate: (target: CreateTarget) => void;
   /** Met la page à la corbeille, avec ses sous-pages. */
   onTrash: (id: string) => void;
+  /** Range la page ailleurs dans sa section (`drag.ts`). */
+  onMove: (id: string, drop: Drop) => void;
 };
 
 /** Le menu « … » ouvert : sa page, et le bouton qui l'a ouvert. */
 type OpenMenu = { id: string; anchor: HTMLElement };
+
+const NONE: ReadonlySet<string> = new Set();
+
+/** Le même dépôt visé ? */
+function sameDrop(a: DropAt | null, b: DropAt | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.id === b.id &&
+    a.zone === b.zone &&
+    a.drop.parentId === b.drop.parentId &&
+    a.drop.afterId === b.drop.afterId
+  );
+}
 
 export function SectionList({
   spaceId,
@@ -55,6 +83,7 @@ export function SectionList({
   readOnly,
   onCreate,
   onTrash,
+  onMove,
 }: Props) {
   /** Les sections repliées. */
   const [closed, setClosed] = useState<readonly Section[]>(() => readCollapsedSections(spaceId));
@@ -72,6 +101,53 @@ export function SectionList({
     setMenu((current) => (current?.id === id ? null : { id, anchor }));
   }, []);
   const closeMenu = useCallback(() => setMenu(null), []);
+
+  /** L'arbre déplié de la section de la page du menu : ses sœurs disent où elle peut aller. */
+  const menuRows = useMemo(() => {
+    const section = SECTIONS.find((s) => menuNode !== undefined && groups[s].includes(menuNode));
+    return section === undefined ? [] : flattenRows(groups[section], NONE);
+  }, [menuNode, groups]);
+
+  const move = useCallback(
+    (id: string, drop: Drop) => {
+      // La page doit se voir à sa nouvelle place : sa nouvelle page parente se déplie.
+      const { parentId } = drop;
+      if (parentId !== null) {
+        setCollapsed((current) => {
+          if (!current.has(parentId)) return current;
+          const next = new Set(current);
+          next.delete(parentId);
+          return next;
+        });
+      }
+      onMove(id, drop);
+    },
+    [onMove],
+  );
+
+  /** Le glisser-déposer en cours : la page saisie, et où elle irait. */
+  const [drag, setDrag] = useState<TreeDrag | null>(null);
+  const startDrag = useCallback((id: string) => setDrag({ id, over: null }), []);
+  const dragOver = useCallback((over: DropAt | null) => {
+    setDrag((current) =>
+      current === null || sameDrop(current.over, over) ? current : { ...current, over },
+    );
+  }, []);
+  const drop = useCallback(
+    (id: string, over: DropAt | null) => {
+      setDrag(null);
+      if (over !== null) move(id, over.drop);
+    },
+    [move],
+  );
+  // Lâchée ailleurs, ou glisser abandonné (Échap) : le navigateur le dit à la ligne saisie.
+  const dragging = drag !== null;
+  useEffect(() => {
+    if (!dragging) return;
+    const end = () => setDrag(null);
+    document.addEventListener("dragend", end);
+    return () => document.removeEventListener("dragend", end);
+  }, [dragging]);
 
   const openSection = (section: Section, open: boolean) => {
     const next = closed.filter((other) => other !== section);
@@ -117,17 +193,33 @@ export function SectionList({
     );
   }
 
-  const actions: MenuAction[] =
-    menuNode === undefined
-      ? []
-      : [
-          {
-            label: "Mettre à la corbeille",
-            icon: <TrashIcon />,
-            destructive: true,
-            onSelect: () => onTrash(menuNode.id),
-          },
-        ];
+  const actions: MenuAction[] = [];
+  if (menuNode !== undefined) {
+    const { id } = menuNode;
+    // Au clavier, ce que la souris fait en glissant : un cran parmi ses sœurs.
+    const up = stepTarget(menuRows, id, "up");
+    const down = stepTarget(menuRows, id, "down");
+    actions.push(
+      {
+        label: "Déplacer vers le haut",
+        icon: <ArrowUpIcon />,
+        disabled: up === null,
+        onSelect: () => up !== null && move(id, up),
+      },
+      {
+        label: "Déplacer vers le bas",
+        icon: <ArrowDownIcon />,
+        disabled: down === null,
+        onSelect: () => down !== null && move(id, down),
+      },
+      {
+        label: "Mettre à la corbeille",
+        icon: <TrashIcon />,
+        destructive: true,
+        onSelect: () => onTrash(id),
+      },
+    );
+  }
 
   return (
     <div className="mm-sections">
@@ -142,12 +234,17 @@ export function SectionList({
           activeId={activeId}
           revealed={revealed}
           menuFor={menuNode?.id ?? null}
+          // Seul l'arbre d'où vient la page saisie connaît le glisser-déposer.
+          drag={drag !== null && groups[section].some((n) => n.id === drag.id) ? drag : null}
           readOnly={readOnly}
           onOpen={openSection}
           onToggle={togglePage}
           onCreateUnder={createUnder}
           onCreateIn={createIn}
           onMenu={toggleMenu}
+          onDragStart={startDrag}
+          onDragOver={dragOver}
+          onDrop={drop}
         />
       ))}
       {menu !== null && menuNode !== undefined && (
@@ -172,12 +269,16 @@ type BlockProps = {
   activeId: string | null;
   revealed: RefObject<string | null>;
   menuFor: string | null;
+  drag: TreeDrag | null;
   readOnly: boolean;
   onOpen: (section: Section, open: boolean) => void;
   onToggle: (id: string) => void;
   onCreateUnder: (parentId: string) => void;
   onCreateIn: (section: RootSection) => void;
   onMenu: (id: string, anchor: HTMLElement) => void;
+  onDragStart: (id: string) => void;
+  onDragOver: (over: DropAt | null) => void;
+  onDrop: (id: string, over: DropAt | null) => void;
 };
 
 function SectionBlock({
@@ -189,12 +290,16 @@ function SectionBlock({
   activeId,
   revealed,
   menuFor,
+  drag,
   readOnly,
   onOpen,
   onToggle,
   onCreateUnder,
   onCreateIn,
   onMenu,
+  onDragStart,
+  onDragOver,
+  onDrop,
 }: BlockProps) {
   const titleId = useId();
   const bodyId = useId();
@@ -237,15 +342,20 @@ function SectionBlock({
           <PageTree
             id={bodyId}
             label={label}
+            nodes={nodes}
             rows={rows}
             viewport={viewport}
             activeId={activeId}
             revealed={revealed}
             menuFor={menuFor}
+            drag={drag}
             readOnly={readOnly}
             onToggle={onToggle}
             onCreate={onCreateUnder}
             onMenu={onMenu}
+            onDragStart={onDragStart}
+            onDragOver={onDragOver}
+            onDrop={onDrop}
           />
         ))}
     </div>

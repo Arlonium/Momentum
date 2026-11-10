@@ -165,3 +165,18 @@ export const MoreIcon = () => (
     <circle cx="19" cy="12" r="1.6" />
   </svg>
 );
+
+/** « Déplacer vers le haut », « vers le bas » : une flèche. */
+export const ArrowUpIcon = () => (
+  <Icon>
+    <path d="M12 19V5" />
+    <path d="M6 11l6-6 6 6" />
+  </Icon>
+);
+
+export const ArrowDownIcon = () => (
+  <Icon>
+    <path d="M12 5v14" />
+    <path d="M6 13l6 6 6-6" />
+  </Icon>
+);

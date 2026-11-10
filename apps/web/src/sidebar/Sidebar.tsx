@@ -6,6 +6,7 @@ import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
 import { trashPath } from "../router";
+import type { Drop } from "./drag";
 import { SectionList, type CreateTarget } from "./SectionList";
 import { SpaceSwitcher } from "./SpaceSwitcher";
 import type { Viewport } from "./treeWindow";
@@ -25,7 +26,8 @@ type Props = {
   /** Doit garder son identité d'un rendu à l'autre : les lignes sont mémoïsées. */
   onCreate: (target: CreateTarget) => void;
   onTrash: (id: string) => void;
-  /** Erreur de la dernière action (création, mise à la corbeille), en français. */
+  onMove: (id: string, drop: Drop) => void;
+  /** Erreur de la dernière action (création, corbeille, déplacement), en français. */
   notice: string | null;
 };
 
@@ -38,6 +40,7 @@ export function Sidebar({
   readOnly,
   onCreate,
   onTrash,
+  onMove,
   notice,
 }: Props) {
   // La barre latérale défile ; sa tête et son pied restent collés à ses bords, par-dessus les
@@ -84,6 +87,7 @@ export function Sidebar({
           readOnly={readOnly}
           onCreate={onCreate}
           onTrash={onTrash}
+          onMove={onMove}
         />
       )}
       {(space || notice) && (

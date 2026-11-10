@@ -10,7 +10,8 @@
 // son premier espace, sans rien en dire.
 //
 // Une page mise à la corbeille quitte l'arbre avec ses sous-pages ; ouverte, elle se lit
-// encore, avec son bandeau (`PageView`).
+// encore, avec son bandeau (`PageView`). Une page déplacée ne bouge à l'écran qu'une fois le
+// serveur d'accord : sur son refus, elle n'a pas quitté sa place, et son message s'affiche.
 //
 // La version de schéma du serveur est lue au chargement, puis relue avant chaque connexion de
 // synchronisation (R35) : si elle diffère, tout passe en lecture seule, pour de bon.
@@ -25,6 +26,7 @@ import {
   isSessionLost,
   restorePage,
   trashPage,
+  updatePage,
 } from "./api";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { CLIENT_SCHEMA_VERSION } from "./editor/version";
@@ -39,6 +41,7 @@ import {
 } from "./router";
 import { useSession } from "./session/session";
 import { SpaceSettings } from "./settings/SpaceSettings";
+import type { Drop } from "./sidebar/drag";
 import { withoutSubtree } from "./sidebar/rows";
 import type { CreateTarget } from "./sidebar/SectionList";
 import { Sidebar } from "./sidebar/Sidebar";
@@ -48,6 +51,29 @@ import { TrashView } from "./trash/TrashView";
 
 function messageOf(error: unknown): string {
   return error instanceof ApiError ? error.message : "Une erreur inattendue est survenue.";
+}
+
+/** Le message du serveur, en phrase : son initiale en capitale. */
+function sentence(error: unknown): string {
+  const message = messageOf(error);
+  return message.charAt(0).toUpperCase() + message.slice(1);
+}
+
+/**
+ * Le refus d'un déplacement, en phrase. Deux codes du serveur (`invalid_after`,
+ * `invalid_parent`) parlent des champs de l'API, pas à la personne : on dit à leur place ce
+ * qui s'est passé. Ils arrivent quand l'arbre a changé ailleurs entre-temps, ou dans
+ * « Partagé », où deux pages voisines à l'écran peuvent être rangées sous des pages
+ * différentes, que la personne ne voit pas.
+ */
+function moveRefusal(error: unknown): string {
+  if (
+    error instanceof ApiError &&
+    (error.code === "invalid_after" || error.code === "invalid_parent")
+  ) {
+    return "Ces pages ne sont pas rangées ensemble dans l'espace, ou l'endroit visé a changé entre-temps.";
+  }
+  return sentence(error);
 }
 
 /** L'arbre chargé : les pages d'un espace que la personne voit, hors corbeille. */
@@ -273,7 +299,7 @@ export function App() {
         setCreated(node.id);
         navigate(pagePath(node.id));
       } catch (error) {
-        setNotice(`La page n'a pas pu être créée. ${messageOf(error)}`);
+        setNotice(`La page n'a pas pu être créée. ${sentence(error)}`);
       }
     },
     [spaceId],
@@ -314,11 +340,39 @@ export function App() {
         (current) => current && { ...current, nodes: withoutSubtree(current.nodes, id) },
       );
     } catch (error) {
-      setNotice(`La page n'a pas pu être mise à la corbeille. ${messageOf(error)}`);
+      setNotice(`La page n'a pas pu être mise à la corbeille. ${sentence(error)}`);
     }
   }, []);
   /** Stable, comme `createFromTree`. */
   const trashFromTree = useCallback((id: string) => void trash(id), [trash]);
+
+  const move = useCallback(async (id: string, drop: Drop) => {
+    const node = treeRef.current?.nodes.find((n) => n.id === id);
+    if (node === undefined) return;
+    setNotice(null);
+    // Parmi les mêmes sœurs, la page garde sa page parente, qu'on ne nomme pas : celle que le
+    // serveur lui connaît n'est pas toujours visible d'ici (`parentId` vaut alors `null`).
+    const sameParent = drop.parentId === node.parentId;
+    try {
+      const moved = await updatePage(id, sameParent ? { afterId: drop.afterId } : drop);
+      mutations.current += 1;
+      setTree(
+        (current) =>
+          current && { ...current, nodes: current.nodes.map((n) => (n.id === id ? moved : n)) },
+      );
+      // Sous une autre page, la page et ses sous-pages héritent d'autres accès : l'arbre est
+      // relu.
+      if (!sameParent) setReloads((n) => n + 1);
+    } catch (error) {
+      if (isSessionLost(error)) return;
+      // La page n'a pas bougé. Ce qui a fait refuser a pu changer ailleurs : la barre latérale
+      // est relue, telle que le serveur la voit.
+      setNotice(`La page n'a pas pu être déplacée. ${moveRefusal(error)}`);
+      setReloads((n) => n + 1);
+    }
+  }, []);
+  /** Stable, comme `createFromTree`. */
+  const moveFromTree = useCallback((id: string, drop: Drop) => void move(id, drop), [move]);
 
   /** Une page est sortie de la corbeille : l'arbre de l'espace est relu. */
   const restored = useCallback(() => {
@@ -443,6 +497,7 @@ export function App() {
         readOnly={stale}
         onCreate={createFromTree}
         onTrash={trashFromTree}
+        onMove={moveFromTree}
         notice={notice}
       />
       <main className="mm-main">{content}</main>

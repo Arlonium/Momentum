@@ -1,7 +1,7 @@
 // Espaces et sections, depuis l'interface : le sélecteur d'espace, les trois sections de la
 // barre latérale (« Espace », « Partagé », « Privé »), ce que chacun y voit, l'espace gardé
-// d'une visite à l'autre, et la corbeille. Le serveur fait foi pour les droits : chaque test
-// relit aussi ce qu'il répond.
+// d'une visite à l'autre, la corbeille, et le déplacement des pages, à la souris ou au
+// clavier. Le serveur fait foi pour les droits : chaque test relit aussi ce qu'il répond.
 import { expect, test, type Page } from "@playwright/test";
 import type { ErrorBody, PageNode } from "@mementum/protocol";
 import {
@@ -517,4 +517,215 @@ test("delete_forever_asks_first", async ({ browser }) => {
   const trash = await api.get(`/api/v1/spaces/${space.id}/trash`);
   expect(((await trash.json()) as PageNode[]).map((n) => n.id)).toEqual([kept.id]);
   expect(nativeDialogs).toEqual([]);
+});
+
+/** Les titres des lignes de la barre latérale, de haut en bas, avec leur niveau. */
+async function shownRows(p: Page): Promise<string[]> {
+  return sidebarOf(p)
+    .getByRole("treeitem")
+    .evaluateAll((rows) =>
+      rows.map((row) => `${row.getAttribute("aria-level")} ${row.querySelector("a")?.textContent}`),
+    );
+}
+
+test("drag_a_page_under_another", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  const c = await createPage(api, { title: "Charlie" });
+  const mine = await createPage(api, { section: "private", title: "Delta" });
+  /** L'arbre du serveur : sous chaque page parente (ou à la racine), ses pages dans l'ordre. */
+  const serverTree = async () => {
+    const { nodes } = await getTree(api, space.id);
+    const under: Record<string, string[]> = {};
+    for (const node of nodes
+      .slice()
+      .sort((x, y) => (x.position < y.position ? -1 : x.position > y.position ? 1 : 0))) {
+      const parent = nodes.find((n) => n.id === node.parentId)?.title ?? "racine";
+      (under[parent] ??= []).push(node.title);
+    }
+    return under;
+  };
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie", "1 Delta"]);
+
+  // « Charlie », lâchée au milieu de la ligne de « Bravo », devient sa sous-page.
+  await treeRow(p, c.id).dragTo(treeRow(p, b.id));
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "2 Charlie", "1 Delta"]);
+  await expect(treeRow(p, b.id)).toHaveAttribute("aria-expanded", "true");
+  expect((await getTree(api, space.id)).nodes.find((n) => n.id === c.id)?.parentId).toBe(b.id);
+  expect(await serverTree()).toEqual({ racine: ["Alpha", "Bravo", "Delta"], Bravo: ["Charlie"] });
+
+  // « Bravo », lâchée sur le bord haut de « Alpha », passe avant elle, avec sa sous-page.
+  await treeRow(p, b.id).dragTo(treeRow(p, a.id), { targetPosition: { x: 80, y: 2 } });
+  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "2 Charlie", "1 Alpha", "1 Delta"]);
+  expect(await serverTree()).toEqual({ racine: ["Bravo", "Alpha", "Delta"], Bravo: ["Charlie"] });
+
+  // Refusés, et sans effet : une page sous sa propre sous-page, et d'une section à l'autre.
+  const before = await serverTree();
+  await treeRow(p, b.id).dragTo(treeRow(p, c.id));
+  await treeRow(p, mine.id).dragTo(treeRow(p, a.id));
+  await treeRow(p, a.id).dragTo(treeRow(p, mine.id));
+  await p.waitForTimeout(300);
+  expect(await shownRows(p)).toEqual(["1 Bravo", "2 Charlie", "1 Alpha", "1 Delta"]);
+  expect(await serverTree()).toEqual(before);
+  await expect(sidebarOf(p).getByRole("alert")).toHaveCount(0);
+
+  // Tout est gardé au rechargement.
+  await p.reload();
+  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "2 Charlie", "1 Alpha", "1 Delta"]);
+});
+
+test("refused_move_comes_back_with_the_server_message", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo"]);
+
+  // Pendant que la barre latérale est ouverte, « Bravo » part à la corbeille ailleurs.
+  expect((await api.post(`/api/v1/pages/${b.id}/trash`)).status()).toBe(200);
+  // Ce que le serveur répond désormais à qui y range une page.
+  const refused = await api.patch(`/api/v1/pages/${a.id}`, { data: { parentId: b.id } });
+  expect(refused.ok()).toBe(false);
+  const body = (await refused.json()) as ErrorBody;
+
+  // Le dépôt est refusé : le message du serveur, la page à sa place, et la barre latérale
+  // telle que le serveur la voit.
+  await treeRow(p, a.id).dragTo(treeRow(p, b.id));
+  await expect(sidebarOf(p).getByRole("alert")).toContainText(body.message, { ignoreCase: true });
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha"]);
+  expect((await getTree(api, space.id)).nodes.map((n) => [n.id, n.parentId])).toEqual([[a.id, null]]);
+});
+
+test("row_menu_by_keyboard", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  await createPage(api, { title: "Charlie" });
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  const button = treeRow(p, b.id).getByRole("button", { name: "Actions de « Bravo »" });
+  const menu = p.getByRole("menu", { name: "Actions de « Bravo »" });
+  const item = (name: string) => menu.getByRole("menuitem", { name });
+
+  // Ouvert par Entrée : le focus est sur sa première action ; les flèches passent de l'une à
+  // l'autre, en boucle ; Fin et Début vont aux extrémités.
+  await button.focus();
+  await p.keyboard.press("Enter");
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+  await expect(item("Déplacer vers le haut")).toBeFocused();
+  await p.keyboard.press("ArrowDown");
+  await expect(item("Déplacer vers le bas")).toBeFocused();
+  await p.keyboard.press("ArrowDown");
+  await expect(item("Mettre à la corbeille")).toBeFocused();
+  await p.keyboard.press("ArrowDown");
+  await expect(item("Déplacer vers le haut")).toBeFocused();
+  await p.keyboard.press("End");
+  await expect(item("Mettre à la corbeille")).toBeFocused();
+  await p.keyboard.press("ArrowUp");
+  await expect(item("Déplacer vers le bas")).toBeFocused();
+  await p.keyboard.press("Home");
+  await expect(item("Déplacer vers le haut")).toBeFocused();
+  // Échap le ferme et rend le focus à son bouton.
+  await p.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(button).toBeFocused();
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+
+  // « Déplacer vers le haut » : la page monte d'un cran, sur le serveur aussi.
+  await p.keyboard.press("Enter");
+  await expect(item("Déplacer vers le haut")).toBeFocused();
+  await p.keyboard.press("Enter");
+  await expect(menu).toHaveCount(0);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "1 Alpha", "1 Charlie"]);
+  await expect(button).toBeFocused();
+  const titles = async () =>
+    (await getTree(api, space.id)).nodes
+      .slice()
+      .sort((x, y) => (x.position < y.position ? -1 : x.position > y.position ? 1 : 0))
+      .map((n) => n.title);
+  expect(await titles()).toEqual(["Bravo", "Alpha", "Charlie"]);
+
+  // En tête, elle ne monte pas plus haut : l'action est grisée, et le focus va à la suivante.
+  await p.keyboard.press("Enter");
+  await expect(item("Déplacer vers le haut")).toHaveAttribute("aria-disabled", "true");
+  await expect(item("Déplacer vers le bas")).toBeFocused();
+  // « Déplacer vers le bas », deux fois : elle finit dernière.
+  await p.keyboard.press("Enter");
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  await p.keyboard.press("Enter");
+  await p.keyboard.press("ArrowDown");
+  await expect(item("Déplacer vers le bas")).toBeFocused();
+  await p.keyboard.press("Enter");
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Charlie", "1 Bravo"]);
+  expect(await titles()).toEqual(["Alpha", "Charlie", "Bravo"]);
+  // Tab ferme le menu.
+  await p.keyboard.press("Enter");
+  await expect(menu).toBeVisible();
+  await p.keyboard.press("Tab");
+  await expect(menu).toHaveCount(0);
+});
+
+test("drop_target_is_shown_while_dragging", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  const c = await createPage(api, { title: "Charlie" });
+  const before = (await getTree(api, space.id)).nodes;
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  const box = async (id: string) => (await treeRow(p, id).boundingBox())!;
+  const line = sidebarOf(p).locator(".tree-drop-line");
+
+  // « Charlie » est saisie : sa ligne s'efface.
+  const from = await box(c.id);
+  await p.mouse.move(from.x + 80, from.y + from.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(from.x + 86, from.y + from.height / 2 + 4, { steps: 3 });
+  await expect(treeRow(p, c.id)).toHaveClass(/is-dragging/);
+
+  // Dès que le pointeur arrive au milieu de « Bravo », elle s'éclaire : la page deviendrait
+  // sa sous-page.
+  const onto = await box(b.id);
+  await p.mouse.move(onto.x + 80, onto.y + onto.height / 2);
+  await expect(treeRow(p, b.id)).toHaveClass(/is-drop-inside/);
+  await expect(line).toHaveCount(0);
+
+  // Sur le bord haut de « Alpha » : un trait, au-dessus d'elle ; plus aucune ligne éclairée.
+  const first = await box(a.id);
+  await p.mouse.move(first.x + 80, first.y + 2);
+  await expect(line).toHaveCount(1);
+  expect(Math.abs((await line.boundingBox())!.y - first.y)).toBeLessThanOrEqual(2);
+  await expect(sidebarOf(p).locator(".is-drop-inside")).toHaveCount(0);
+
+  // Sur le bord bas de « Bravo », juste au-dessus d'elle-même : rien ne changerait, et le
+  // milieu de « Bravo » reste permis ; sur elle-même : rien.
+  await p.mouse.move(from.x + 80, from.y + from.height / 2);
+  await expect(line).toHaveCount(0);
+  await expect(sidebarOf(p).locator(".is-drop-inside")).toHaveCount(0);
+
+  // Lâchée hors de la barre latérale : rien ne bouge, et plus rien n'est marqué.
+  await p.mouse.move(700, 400, { steps: 3 });
+  await p.mouse.up();
+  await expect(sidebarOf(p).locator(".is-dragging")).toHaveCount(0);
+  await expect(line).toHaveCount(0);
+  expect(await shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  expect((await getTree(api, space.id)).nodes).toEqual(before);
 });
