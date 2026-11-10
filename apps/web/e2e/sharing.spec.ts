@@ -22,11 +22,11 @@ import {
   inviteToPage,
   inviteToSpace,
   logInWith,
-  memberOf,
   newUser,
   NO_SESSION,
   openPage,
   openShareMenu,
+  ownerAndMember,
   PASSWORD,
   pendingRow,
   putMmd,
@@ -51,17 +51,6 @@ import { BASE_URL } from "./servers";
 // La page de chaque test arrive sans session ; `newUser(browser, compte)` en donne une.
 test.use({ storageState: NO_SESSION });
 test.afterEach(closeContexts);
-
-/** Deux comptes dans le même espace : A, sa propriétaire, et B, simple membre. */
-async function ownerAndMember() {
-  const alice = await signUpAccount(`Alice ${unique()}`);
-  const aliceApi = await apiAs(alice);
-  const space = await firstSpace(aliceApi);
-  const bruno = await memberOf(alice, space.id, `Bruno ${unique()}`);
-  const brunoApi = await apiAs(bruno);
-  const { user } = await getMe(brunoApi);
-  return { alice, aliceApi, space, bruno, brunoApi, brunoId: user.id };
-}
 
 /** Le bandeau d'une page ouverte en lecture seule dont le niveau vient de monter. */
 function raisedBanner(p: Page) {

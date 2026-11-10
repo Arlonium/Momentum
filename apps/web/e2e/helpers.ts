@@ -305,6 +305,17 @@ export async function memberOf(
   return signUpAccount(name, token);
 }
 
+/** Deux comptes dans le même espace : A, sa propriétaire, et B, simple membre. */
+export async function ownerAndMember() {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const bruno = await memberOf(alice, space.id, `Bruno ${unique()}`);
+  const brunoApi = await apiAs(bruno);
+  const { user } = await getMe(brunoApi);
+  return { alice, aliceApi, space, bruno, brunoApi, brunoId: user.id };
+}
+
 /**
  * Donne à un compte de l'espace le niveau `level` sur la page, et sur ses sous-pages par
  * héritage (`PUT /api/v1/pages/{id}/access/users/{userId}`). `api` doit y avoir l'accès complet.
