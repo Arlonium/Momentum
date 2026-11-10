@@ -6,7 +6,11 @@
 //!   ou avec le jeton d'une invitation valide, acceptée dans la foulée ; c'est
 //!   le jeton qui fait foi, pas l'adresse (Ruling R47) ;
 //! - une adresse inconnue, un mot de passe faux et un compte sans mot de passe
-//!   reçoivent la même réponse, après la même vérification Argon2 ;
+//!   reçoivent la même réponse, après la même vérification Argon2. Le frein
+//!   des connexions, lui, laisse un indice quand son réservoir d'adresses sans
+//!   compte est saturé : une telle adresse y retrouve ses essais plus tôt
+//!   qu'un compte (accepté, Rulings R81 et R84 : une douzaine de requêtes par
+//!   adresse sondée, par lots) ;
 //! - rien de secret ne sort : ni mot de passe, ni hachage, ni jeton dans une
 //!   réponse (le jeton ne voyage que dans `Set-Cookie`) ou dans un journal.
 //!   Une adresse refusée à la connexion n'est pas journalisée non plus : on y
@@ -218,8 +222,10 @@ async fn log_in(
     let email = auth::normalize_email(&body.email);
     // Le compte d'abord : le frein ne garde pas de la même façon la fenêtre
     // d'une adresse qui en a un (Ruling R81). Cette lecture a lieu dans tous
-    // les cas, comme la vérification Argon2 plus bas : ni la réponse ni son
-    // délai ne disent si le compte existe.
+    // les cas, comme la vérification Argon2 plus bas : tant que le frein n'est
+    // pas saturé, ni la réponse ni son délai ne disent si le compte existe.
+    // Saturé, il le laisse deviner (un `429` qui cesse plus tôt pour une
+    // adresse sans compte) : l'indice accepté par les Rulings R81 et R84.
     let user = state.store.user_by_email(&email).await.map_err(internal)?;
     attempt(&state, Guarded::Login, &email, user.as_ref().map(|u| u.id))
         .map_err(ApiError::too_many_attempts)?;

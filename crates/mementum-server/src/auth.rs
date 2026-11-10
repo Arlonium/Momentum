@@ -378,8 +378,14 @@ impl Window {
 ///
 /// Le prix, accepté : quand le réservoir est saturé, et seulement alors, une
 /// adresse sans compte retrouve ses essais plus tôt qu'un compte. C'est un
-/// indice d'existence pour qui paie au moins dix mille requêtes par adresse
-/// sondée.
+/// indice d'existence, et il n'est pas cher : par lots, savoir si une adresse
+/// a un compte coûte une douzaine de requêtes par adresse (`11 × N + 10 000`
+/// pour N adresses, Ruling R84 ; pas dix mille par adresse, comme l'écrivait
+/// le Ruling R81). Sur une instance sur invitation, quelqu'un du dehors peut
+/// donc dresser la liste des adresses qui y ont un compte. Accepté jusqu'aux
+/// limites de débit par adresse IP du lot 7 (Ruling R54) : fermer l'indice
+/// sans connaître l'IP du client redonne le contournement, ou le blocage de
+/// tout le monde.
 #[derive(Default)]
 pub(crate) struct LoginThrottle {
     windows: Mutex<Windows>,
