@@ -189,8 +189,16 @@ async fn serve(
         .clone()
         .serve_connection_if(id, conn, session_still_valid, WsBytes(socket))
         .await;
-    if let Err(error) = served {
-        tracing::warn!(node_id = %id, %error, "connexion de synchronisation refusée");
+    match served {
+        Ok(()) => {}
+        // Supprimée entre l'admission et l'inscription : rien d'anormal, et rien à dire de
+        // plus que dans `admit`. Le client revient, et la poignée de main lui répond `404`.
+        Err(SyncError::NotFound) => {
+            tracing::debug!(node_id = %id, "page supprimée pendant l'ouverture de sa connexion de synchronisation");
+        }
+        Err(error) => {
+            tracing::warn!(node_id = %id, %error, "connexion de synchronisation refusée");
+        }
     }
 }
 
