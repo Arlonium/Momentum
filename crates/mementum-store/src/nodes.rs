@@ -88,12 +88,6 @@ pub enum Sibling {
     Last,
 }
 
-impl From<Uuid> for Sibling {
-    fn from(id: Uuid) -> Sibling {
-        Sibling::Node(id)
-    }
-}
-
 /// Où mettre un nœud : sous `parent_id` (`None` = racine), après `after` (`None` = en tête).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Place {
@@ -173,7 +167,8 @@ async fn node_in(tx: &mut Transaction<'_, Sqlite>, id: &str) -> Result<Node, Sto
 enum Slot {
     /// Nouvelle position.
     Set(String),
-    /// Le nœud est déjà là où on le veut (déplacé après lui-même).
+    /// Le nœud tient déjà la place demandée, sous le même parent : nommé après lui-même, ou
+    /// déjà entre les deux frères voulus. Sa position est gardée.
     Keep,
 }
 
