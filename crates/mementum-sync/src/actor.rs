@@ -653,9 +653,9 @@ impl Actor {
         // plus la lui incrémenter. C'est un filet. Depuis le Ruling R112, une connexion ne
         // prend un client libre que par une entrée plus récente que ce que le serveur en sait,
         // et rien n'est plus récent que la dernière horloge : aucune ne tient donc un client
-        // qu'un départ y a porté. Il ne reste que le client du document d'awareness de l'acteur
-        // lui-même, dont yrs avance l'horloge au lieu de retirer l'état, et que personne ne
-        // connaît.
+        // qu'un départ y a porté. Et le client du document d'awareness de l'acteur lui-même,
+        // dont yrs avance l'horloge au lieu de retirer l'état, n'est tenu par personne : toute
+        // entrée qui le nomme est écartée (`awareness_update`).
         let ids: Vec<ClientID> = gone
             .clients
             .into_iter()
@@ -805,6 +805,9 @@ impl Actor {
         if !writable {
             return true;
         }
+        // Le client du document d'awareness de l'acteur : personne ne l'annonce. yrs le traite
+        // à part (un retrait venu d'ailleurs y fait monter l'horloge au lieu de retirer l'état).
+        let own = self.awareness.client_id();
         // Les entrées ignorées le sont en silence : un client honnête en envoie sans cesse.
         // Celles d'une forme inconnue sont comptées : aucun client honnête n'en envoie.
         let mut unknown_shapes = 0usize;
@@ -812,7 +815,7 @@ impl Actor {
         update.clients.retain(|client, entry| {
             // Ruling R108 : une entrée à la dernière horloge est ignorée, quoi qu'elle porte.
             // Elle ne donne pas non plus le client à la connexion.
-            if entry.clock == LAST_AWARENESS_CLOCK {
+            if *client == own || entry.clock == LAST_AWARENESS_CLOCK {
                 return false;
             }
             let removal = entry.json.as_ref() == AWARENESS_REMOVED;
