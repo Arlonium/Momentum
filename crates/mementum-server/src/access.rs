@@ -340,7 +340,7 @@ pub(crate) mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use mementum_acl::{AccessCache, Grant, Level, Section, Subject};
-    use mementum_store::{Expected, NewNode, NewUser, NodeKind, Space, Store};
+    use mementum_store::{AccessChange, Expected, NewNode, NewUser, NodeKind, Space, Store};
     use mementum_sync::{Hub, SyncConfig};
 
     use super::*;
@@ -1070,6 +1070,75 @@ pub(crate) mod tests {
         state.space_access(&mona, big).await.unwrap();
         assert_eq!(state.inputs.loads(), 5);
         assert_eq!((state.inputs.kept_units(), state.inputs.slots()), (32, 2));
+    }
+
+    /// Une ligne d'accès retirée, pas un rôle, à travers les deux étages. Olga partage sa page
+    /// privée avec Mona, par une ligne à son nom ; les données de l'espace et le calcul de Mona
+    /// sont gardés. Olga retire la ligne, par le chemin du partage : à sa requête suivante,
+    /// Mona ne voit plus la page, ni dans l'espace ni par son id. Elle garde son rôle et les
+    /// pages des membres ; Olga voit toujours la sienne.
+    #[tokio::test]
+    async fn removed_grant_line_hides_the_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let mona = account(&state, "mona").await;
+        let space = team(&state, &olga, &[&mona]).await;
+        let open = members_page(&state, &space, &olga, "Ouverte").await;
+        let line = Grant {
+            subject: Subject::User(mona.id),
+            level: Level::Read,
+        };
+        let private = state
+            .store
+            .create_node(NewNode {
+                space_id: space.id,
+                parent_id: None,
+                after: None,
+                kind: NodeKind::Page,
+                title: "Privée".to_string(),
+                created_by: Some(olga.id),
+                grants: vec![
+                    Grant {
+                        subject: Subject::User(olga.id),
+                        level: Level::Full,
+                    },
+                    line,
+                ],
+                doc: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let before = rev(&state, &space).await;
+        let access = state.space_access(&mona, space.id).await.unwrap();
+        assert_eq!(access.node(private).map(|a| a.level), Some(Level::Read));
+        assert!(state.seen_node(&mona, private).await.unwrap().is_some());
+
+        let written = state
+            .store
+            .change_access(private, AccessChange::User(mona.id, None), olga.id)
+            .await
+            .unwrap();
+        assert!(written.changed && !written.left_space);
+        // Les deux étages portent encore la ligne : les données, et le calcul de Mona.
+        let kept = state.inputs.kept(space.id).expect("des données gardées");
+        assert_eq!(kept.rev, before);
+        assert!(kept.grants.contains(&(private, line)));
+        let filed = state.access.get(mona.id, space.id, before);
+        assert!(filed.is_some_and(|filed| filed.node(private).is_some()));
+
+        let access = state.space_access(&mona, space.id).await.unwrap();
+        assert_eq!(access.role(), Some(Role::Member));
+        assert!(access.node(private).is_none());
+        assert!(access.node(open).is_some());
+        assert!(state.seen_node(&mona, private).await.unwrap().is_none());
+        assert_eq!(state.inputs.loads(), 2);
+        let kept = state.inputs.kept(space.id).expect("des données gardées");
+        assert_eq!(kept.rev, before + 1);
+        assert!(!kept.grants.contains(&(private, line)));
+        let olga_sees = state.space_access(&olga, space.id).await.unwrap();
+        assert_eq!(olga_sees.node(private).map(|a| a.level), Some(Level::Full));
     }
 
     /// Une lecture qui échoue : l'erreur remonte (`500`), et rien n'est rangé, ni données ni
