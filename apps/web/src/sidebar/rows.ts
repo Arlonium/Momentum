@@ -72,6 +72,9 @@ export function withoutSubtree(nodes: PageNode[], id: string): PageNode[] {
   return nodes.filter((node) => !gone.has(node.id));
 }
 
+/** Aucune page repliée : l'arbre entier, comme le voient un dépôt ou le menu d'une ligne. */
+export const NONE: ReadonlySet<string> = new Set();
+
 /**
  * Le rang de la première ligne après celle de rang `index` et ses sous-pages montrées
  * (`rows.length` : il n'y en a pas). C'est là que se range une page posée « après » elle.

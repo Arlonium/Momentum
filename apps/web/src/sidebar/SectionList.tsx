@@ -36,7 +36,7 @@ import {
 import { nestTarget, stepTarget, unnestTarget, type Drop } from "./drag";
 import { PageTree, type DropAt, type TreeDrag } from "./PageTree";
 import { RowMenu, type MenuAction } from "./RowMenu";
-import { flattenRows, neighbourOf } from "./rows";
+import { flattenRows, neighbourOf, NONE } from "./rows";
 import {
   bySection,
   canCreateIn,
@@ -81,8 +81,6 @@ type OpenMenu = { id: string; anchor: HTMLElement };
  * (`neighbour`), sinon le titre de sa section.
  */
 type Leaving = { id: string; anchor: HTMLElement; section: Section; neighbour: string | null };
-
-const NONE: ReadonlySet<string> = new Set();
 
 /** Le même dépôt visé ? */
 function sameDrop(a: DropAt | null, b: DropAt | null): boolean {
@@ -162,21 +160,23 @@ export function SectionList({
     return section === undefined ? [] : flattenRows(groups[section], NONE);
   }, [menuNode, groups]);
 
+  /** Déplie la page `id`. Déjà dépliée, l'ensemble ne change pas, et les lignes non plus. */
+  const expand = useCallback((id: string) => {
+    setCollapsed((current) => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
   const move = useCallback(
     (id: string, drop: Drop) => {
       // La page doit se voir à sa nouvelle place : sa nouvelle page parente se déplie.
-      const { parentId } = drop;
-      if (parentId !== null) {
-        setCollapsed((current) => {
-          if (!current.has(parentId)) return current;
-          const next = new Set(current);
-          next.delete(parentId);
-          return next;
-        });
-      }
+      if (drop.parentId !== null) expand(drop.parentId);
       onMove(id, drop);
     },
-    [onMove],
+    [onMove, expand],
   );
 
   /** Le glisser-déposer en cours : la page saisie, et où elle irait. */
@@ -220,17 +220,11 @@ export function SectionList({
 
   const createUnder = useCallback(
     (parentId: string) => {
-      // La sous-page doit se voir : son parent se déplie. Déjà déplié, l'ensemble ne change
-      // pas, et les lignes non plus.
-      setCollapsed((current) => {
-        if (!current.has(parentId)) return current;
-        const next = new Set(current);
-        next.delete(parentId);
-        return next;
-      });
+      // La sous-page doit se voir : sa page parente se déplie.
+      expand(parentId);
       onCreate({ parentId });
     },
-    [onCreate],
+    [onCreate, expand],
   );
 
   const createIn = (section: RootSection) => {

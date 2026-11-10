@@ -12,7 +12,7 @@ import type { PageNode } from "@mementum/protocol";
 import { useLayoutEffect, useMemo, useState, type DragEvent, type RefObject } from "react";
 import { canEdit } from "../share/levels";
 import { dropTarget, zonesAt, type Drop, type Zone } from "./drag";
-import { flattenRows, ROW_HEIGHT, type Row } from "./rows";
+import { flattenRows, NONE, ROW_HEIGHT, type Row } from "./rows";
 import { TreeRow } from "./TreeRow";
 import { useTreeWindow, type Viewport } from "./treeWindow";
 
@@ -57,8 +57,6 @@ type Props = {
   /** La page `id` est lâchée : sur un dépôt permis, ou nulle part (`null`). */
   onDrop: (id: string, over: DropAt | null) => void;
 };
-
-const NONE: ReadonlySet<string> = new Set();
 
 /** La ligne de l'arbre sous le pointeur, et la hauteur du pointeur sur elle. */
 function rowUnder(event: DragEvent<HTMLElement>): { id: string; offset: number; height: number } | null {
