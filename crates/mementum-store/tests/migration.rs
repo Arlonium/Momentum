@@ -378,6 +378,124 @@ async fn migration_keeps_lot1_pages() {
     store.close().await;
 }
 
+/// Review Focus 4, pour ce que le test ci-dessus ne porte pas : une base du lot 1 à deux
+/// coffres, dont une page est à la corbeille avec sa sous-page. Chaque coffre devient son
+/// espace, avec ses pages et elles seules ; la corbeille est gardée telle quelle (sa date, sans
+/// auteur : le lot 1 n'en avait pas), et une page de racine à la corbeille reçoit l'accès des
+/// membres comme les autres : restaurée, elle est à eux.
+#[tokio::test]
+async fn migration_keeps_every_vault_and_the_trash() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    let pool = lot1_database(&db).await;
+    let org = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO orgs (id, slug, name, created_at) VALUES (?, 'default', 'default', 1000)",
+    )
+    .bind(org.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (home, work) = (Uuid::now_v7(), Uuid::now_v7());
+    for (vault, name, kind, at) in [
+        (home, "Mon coffre", "personal", 1001),
+        (work, "Travail", "shared", 1002),
+    ] {
+        sqlx::query(
+            "INSERT INTO vaults (id, org_id, name, kind, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(vault.to_string())
+        .bind(org.to_string())
+        .bind(name)
+        .bind(kind)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let kept = lot1_page(&pool, (org, home), None, "Gardée", "a0", 2000).await;
+    let binned = lot1_page(&pool, (org, home), None, "Jetée", "a1", 3000).await;
+    let under = lot1_page(
+        &pool,
+        (org, home),
+        Some(binned),
+        "Sous la jetée",
+        "a0",
+        4000,
+    )
+    .await;
+    let at_work = lot1_page(&pool, (org, work), None, "Au travail", "a0", 5000).await;
+    sqlx::query("UPDATE nodes SET trashed_at = 3500 WHERE id = ?")
+        .bind(binned.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let store = Store::open(&db).await.unwrap();
+    // Deux espaces, de même id que les coffres, sans membre.
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM spaces").await, 2);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM members").await, 0);
+    for (vault, created_at) in [(home, 1001), (work, 1002)] {
+        let space = store.get_space(vault).await.unwrap().expect("espace");
+        assert_eq!((space.rev, space.created_at), (0, created_at));
+    }
+    // Chacun a ses pages, et elles seules.
+    let ids = async |space: Uuid| {
+        let mut ids: Vec<Uuid> = store
+            .list_nodes(space)
+            .await
+            .unwrap()
+            .iter()
+            .map(|n| n.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let mut at_home = vec![kept, binned, under];
+    at_home.sort();
+    assert_eq!(ids(home).await, at_home);
+    assert_eq!(ids(work).await, [at_work]);
+
+    // La corbeille : la page y est toujours, depuis la même date ; sa sous-page y est par
+    // héritage, sans date à elle ; les autres n'y sont pas.
+    let node = async |id: Uuid| store.get_node(id).await.unwrap().expect("nœud");
+    assert_eq!(node(binned).await.trashed_at, Some(3500));
+    assert_eq!(node(under).await.parent_id, Some(binned));
+    for id in [under, kept, at_work] {
+        assert_eq!(node(id).await.trashed_at, None);
+    }
+    assert_eq!(store.trashed_since(under).await.unwrap(), Some(3500));
+    assert_eq!(store.trashed_since(kept).await.unwrap(), None);
+    assert_eq!(
+        int(
+            &db,
+            "SELECT COUNT(*) FROM nodes WHERE trashed_by IS NOT NULL"
+        )
+        .await,
+        0
+    );
+    // Les pages de racine vont aux membres, celle de la corbeille comprise ; la sous-page
+    // hérite.
+    let members_full = Grant {
+        subject: Subject::Members,
+        level: Level::Full,
+    };
+    for root in [kept, binned, at_work] {
+        assert_eq!(store.node_grants(root).await.unwrap(), [members_full]);
+    }
+    assert_eq!(store.node_grants(under).await.unwrap(), []);
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0
+    );
+    // Elle se restaure, et se supprime, comme une page jetée depuis.
+    let restored = store.restore_node(binned).await.unwrap();
+    assert_eq!(restored.trashed_at, None);
+    assert_eq!(store.trashed_since(under).await.unwrap(), None);
+    store.close().await;
+}
+
 #[tokio::test]
 async fn fresh_database_has_no_space() {
     let dir = tempfile::tempdir().unwrap();
