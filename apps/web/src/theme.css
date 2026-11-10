@@ -667,7 +667,9 @@ button.tree-toggle:hover {
 
 /* « … » et « + » au survol (ou au clavier, ou tant que le menu de la ligne est ouvert) :
    opacité, pour rester atteignables par Tab. Posés sur le bord droit de la ligne, ils ne
-   retirent de la place au titre que lorsqu'ils se montrent. */
+   retirent de la place au titre que lorsqu'ils se montrent. Au clavier seulement
+   (`:focus-visible`) : une ligne qui reçoit le focus après un geste à la souris (sa voisine
+   vient d'être mise à la corbeille) ne les montre pas. */
 .tree-actions {
   position: absolute;
   top: 4px;
@@ -677,7 +679,7 @@ button.tree-toggle:hover {
 }
 
 .tree-row:hover .tree-link,
-.tree-row:focus-within .tree-link,
+.tree-row:has(:focus-visible) .tree-link,
 .tree-row.is-menu-open .tree-link {
   padding-right: 50px;
 }
@@ -699,7 +701,7 @@ button.tree-toggle:hover {
 }
 
 .tree-row:hover .tree-action,
-.tree-row:focus-within .tree-action,
+.tree-row:has(:focus-visible) .tree-action,
 .tree-row.is-menu-open .tree-action {
   opacity: 1;
 }
@@ -721,7 +723,7 @@ button.tree-toggle:hover {
 
   /* Le titre n'a plus à leur céder de place, même la ligne touchée ou son menu ouvert. */
   .tree-row:hover .tree-link,
-  .tree-row:focus-within .tree-link,
+  .tree-row:has(:focus-visible) .tree-link,
   .tree-row.is-menu-open .tree-link {
     padding-right: 4px;
   }

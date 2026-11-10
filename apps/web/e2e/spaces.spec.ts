@@ -867,6 +867,43 @@ test("focus_follows_a_page_that_leaves", async ({ browser }) => {
   await expect(p.getByRole("heading", { name: "Corbeille", level: 1 })).toBeFocused();
 });
 
+test("row_actions_show_for_keyboard_focus_only", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  const c = await createPage(api, { title: "Charlie" });
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
+  const more = (id: string) => treeRow(p, id).getByRole("button", { name: /^Actions de / });
+  const add = (id: string) => treeRow(p, id).getByRole("button", { name: /^Ajouter une sous-page à / });
+
+  // À la souris : « Bravo » part à la corbeille, et le focus va à la ligne qui prend sa place.
+  // Elle ne montre pas pour autant ses « … » et « + » : personne ne l'a survolée, ni n'y est
+  // venu au clavier.
+  await (await openRowMenu(p, b.id, "Bravo"))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  await expect(treeRow(p, b.id)).toHaveCount(0);
+  await expect(treeRow(p, c.id).getByRole("link")).toBeFocused();
+  await p.mouse.move(800, 500);
+  await expect(more(c.id)).toHaveCSS("opacity", "0");
+  await expect(add(c.id)).toHaveCSS("opacity", "0");
+
+  // Au clavier, la ligne où l'on arrive les montre ; celle qu'on quitte les cache.
+  await p.keyboard.press("Shift+Tab");
+  await expect(add(a.id)).toBeFocused();
+  await expect(more(a.id)).toHaveCSS("opacity", "1");
+  await expect(add(a.id)).toHaveCSS("opacity", "1");
+  await expect(more(c.id)).toHaveCSS("opacity", "0");
+  await p.keyboard.press("Tab");
+  await expect(treeRow(p, c.id).getByRole("link")).toBeFocused();
+  await expect(more(c.id)).toHaveCSS("opacity", "1");
+  await expect(more(a.id)).toHaveCSS("opacity", "0");
+});
+
 test("drop_target_is_shown_while_dragging", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);
