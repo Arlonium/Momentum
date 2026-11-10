@@ -16,6 +16,7 @@ import {
   getSpaceInvitations,
   inviteToSpace,
   joinSpace,
+  logInWith,
   newUser,
   NO_SESSION,
   PASSWORD,
@@ -607,4 +608,81 @@ test("space_left_meanwhile_is_the_same_not_found_screen", async ({ browser }) =>
   expect(await b.getByRole("main").innerText()).toBe(left);
   await b.getByRole("main").getByRole("button", { name: `Ouvrir « ${own.name} »` }).click();
   await expect(b).toHaveURL(`${BASE_URL}/s/${own.id}`);
+});
+
+test("lost_session_in_the_settings_only_asks_to_log_in", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const bruno = await signUpAccount(`Bruno ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  await joinSpace(aliceApi, space.id, bruno, "member");
+  const waiting = `attente-${unique()}@exemple.fr`;
+  await inviteToSpace(aliceApi, space.id, { email: waiting, role: "member" });
+
+  const a = await newUser(browser, alice);
+  await a.goto(settingsPath(space.id));
+  await expect(memberRow(a, bruno.email)).toBeVisible();
+  await expect(pendingRow(a, waiting)).toBeVisible();
+  const dialog = a.getByRole("dialog", { name: "Ta session a pris fin" });
+  const alerts = a.getByRole("main").getByRole("alert");
+  /**
+   * La session prend fin, puis `act` demande quelque chose au serveur : la connexion est
+   * demandée par-dessus les réglages, qui n'en disent rien de plus, ni alors ni une fois le
+   * compte revenu.
+   */
+  const lostThen = async (act: () => Promise<unknown>) => {
+    await a.context().clearCookies();
+    await act();
+    await expect(dialog).toBeVisible();
+    await logInWith(dialog, alice.email, alice.password);
+    await expect(dialog).toHaveCount(0);
+    await expect(memberRow(a, bruno.email)).toBeVisible();
+    await expect(alerts).toHaveCount(0);
+  };
+
+  // Renommer l'espace.
+  const name = a.getByRole("textbox", { name: "Nom de l'espace" });
+  await lostThen(async () => {
+    await name.fill(`Pro ${unique()}`);
+    await name.press("Enter");
+  });
+  // Changer un rôle.
+  await lostThen(() =>
+    memberRow(a, bruno.email)
+      .getByRole("combobox", { name: `Rôle de ${bruno.name}` })
+      .selectOption("admin"),
+  );
+  // Inviter.
+  const invitations = invitationsOf(a);
+  await lostThen(async () => {
+    await invitations.getByLabel("Adresse e-mail").fill(`ami-${unique()}@exemple.fr`);
+    await invitations.getByRole("button", { name: "Inviter", exact: true }).click();
+  });
+  // Révoquer une invitation.
+  await lostThen(() => pendingRow(a, waiting).getByRole("button", { name: "Révoquer" }).click());
+  // Retirer un membre, puis quitter l'espace : la confirmation se ferme, la connexion reste.
+  await lostThen(async () => {
+    await memberRow(a, bruno.email).getByRole("button", { name: "Retirer" }).click();
+    await a
+      .getByRole("alertdialog", { name: `Retirer ${bruno.name} de l'espace ?` })
+      .getByRole("button", { name: "Retirer" })
+      .click();
+  });
+  await lostThen(async () => {
+    await a.getByRole("button", { name: "Quitter l'espace" }).click();
+    await a
+      .getByRole("alertdialog", { name: `Quitter l'espace « ${space.name} » ?` })
+      .getByRole("button", { name: "Quitter l'espace" })
+      .click();
+  });
+
+  // Le serveur a tout refusé : rien de cela n'est fait.
+  expect((await firstSpace(aliceApi)).name).toBe(space.name);
+  expect((await getMembers(aliceApi, space.id)).map((m) => [m.email, m.role]).sort()).toEqual(
+    [
+      [alice.email, "owner"],
+      [bruno.email, "member"],
+    ].sort(),
+  );
+  expect((await getSpaceInvitations(aliceApi, space.id)).map((i) => i.email)).toEqual([waiting]);
 });

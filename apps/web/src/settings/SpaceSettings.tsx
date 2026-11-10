@@ -26,6 +26,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import {
   ApiError,
   inviteToSpace,
+  isSessionLost,
   removeMember,
   revokeInvitation,
   updateMember,
@@ -246,6 +247,8 @@ function NameSection({ spaceId, name, editable, reload, onRefused }: NameProps) 
       setDraft(null);
       setSaved(true);
     } catch (e) {
+      // Session perdue : la connexion est demandée par-dessus, rien de plus à dire ici.
+      if (isSessionLost(e)) return;
       if (isRefusal(e)) {
         // Plus le rôle qu'il faut : le champ va disparaître, le refus se dit en tête.
         onRefused(messageOf(e));
@@ -327,8 +330,12 @@ function MembersSection({
     if (!active || active === document.body) headingRef.current?.focus();
   }, [closed]);
 
-  /** Le refus d'une action : en tête des réglages s'il tient au rôle, sinon ici. */
+  /**
+   * Le refus d'une action : en tête des réglages s'il tient au rôle, sinon ici. Une session
+   * perdue ne se dit pas : la connexion est demandée par-dessus.
+   */
   const refused = (e: unknown) => {
+    if (isSessionLost(e)) return;
     if (isRefusal(e)) onRefused(messageOf(e));
     else setError(messageOf(e));
   };
@@ -475,6 +482,8 @@ function InvitationsSection({ spaceId, invitations, reload, onRefused }: Invitat
       ({ token } = await inviteToSpace(spaceId, { email, role }));
     } catch (e) {
       setBusy(false);
+      // Session perdue : la connexion est demandée par-dessus, rien de plus à dire ici.
+      if (isSessionLost(e)) return;
       if (isRefusal(e)) {
         // Plus le rôle qu'il faut : cette section va disparaître, le refus se dit en tête.
         onRefused(messageOf(e));
@@ -499,8 +508,11 @@ function InvitationsSection({ spaceId, invitations, reload, onRefused }: Invitat
     try {
       await revokeInvitation(invitation.id);
     } catch (e) {
-      // Déjà acceptée, échue ou révoquée ailleurs (`404`) : la liste relue le montre.
-      if (!(e instanceof ApiError && e.status === 404)) setRevokeError(messageOf(e));
+      // Déjà acceptée, échue ou révoquée ailleurs (`404`) : la liste relue le montre. Session
+      // perdue : la connexion est demandée par-dessus.
+      if (!(e instanceof ApiError && e.status === 404) && !isSessionLost(e)) {
+        setRevokeError(messageOf(e));
+      }
     }
     // Réussie ou refusée : la liste telle que le serveur la voit.
     await reload();
@@ -601,8 +613,9 @@ function LeaveSection({ spaceId, spaceName, self }: { spaceId: string; spaceName
     try {
       await removeMember(spaceId, self);
     } catch (e) {
-      // Le dernier propriétaire (`409 last_owner`) : le message du serveur, tel quel.
-      setError(messageOf(e));
+      // Le dernier propriétaire (`409 last_owner`) : le message du serveur, tel quel. Session
+      // perdue : la connexion est demandée par-dessus, la confirmation se ferme sans un mot.
+      if (!isSessionLost(e)) setError(messageOf(e));
       setBusy(false);
       setConfirming(false);
       return;
