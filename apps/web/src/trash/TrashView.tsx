@@ -48,8 +48,8 @@ export function TrashView({ space, version, onChanged }: Props) {
   /** La page à supprimer, le temps de la confirmation. */
   const [deleting, setDeleting] = useState<PageNode | null>(null);
   const [busy, setBusy] = useState(false);
-  /** Compte les fermetures de la confirmation, pour rattraper le focus après chacune. */
-  const [closed, setClosed] = useState(0);
+  /** Compte les actions finies, pour rattraper le focus après chacune. */
+  const [acted, setActed] = useState(0);
 
   const reload = useCallback(async () => {
     try {
@@ -64,13 +64,14 @@ export function TrashView({ space, version, onChanged }: Props) {
     void reload();
   }, [reload, version]);
 
-  // La fenêtre fermée rend le focus au bouton qui l'a ouverte (`Confirm`). Parti avec sa
-  // ligne, ce bouton n'est plus là : le focus va au titre de la page, pas dans le vide.
+  // Une page restaurée ou supprimée quitte la liste, et le bouton qui avait le focus avec
+  // elle (« Restaurer », ou celui à qui la confirmation fermée l'a rendu, `Confirm`) : le
+  // focus va au titre de la vue, pas dans le vide.
   useEffect(() => {
-    if (closed === 0) return;
+    if (acted === 0) return;
     const active = document.activeElement;
     if (!active || active === document.body) titleRef.current?.focus();
-  }, [closed]);
+  }, [acted]);
 
   const restore = async (page: PageNode) => {
     if (restoring) return;
@@ -89,6 +90,7 @@ export function TrashView({ space, version, onChanged }: Props) {
     // Réussie ou refusée : la corbeille telle que le serveur la voit.
     await reload();
     setRestoring(null);
+    setActed((n) => n + 1);
   };
 
   const remove = async () => {
@@ -107,7 +109,7 @@ export function TrashView({ space, version, onChanged }: Props) {
     await reload();
     setBusy(false);
     setDeleting(null);
-    setClosed((n) => n + 1);
+    setActed((n) => n + 1);
   };
 
   let content;

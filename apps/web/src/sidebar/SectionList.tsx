@@ -5,7 +5,8 @@
 // d'une ligne, une sous-page ; son « … », le menu de ses actions (`RowMenu`) : « Déplacer vers
 // le haut », « Déplacer vers le bas », « Imbriquer dans la page précédente », « Sortir de la
 // page parente » (ce que la souris fait en glissant, au clavier, R95), « Mettre à la
-// corbeille ».
+// corbeille ». La page mise à la corbeille emporte sa ligne : le focus va à celle qui prend sa
+// place.
 //
 // Une page se déplace aussi à la souris, à l'intérieur de sa section (`PageTree`, `drag.ts`).
 // Le glisser-déposer en cours est tenu ici : seul l'arbre d'où vient la page accepte le dépôt.
@@ -35,7 +36,7 @@ import {
 import { nestTarget, stepTarget, unnestTarget, type Drop } from "./drag";
 import { PageTree, type DropAt, type TreeDrag } from "./PageTree";
 import { RowMenu, type MenuAction } from "./RowMenu";
-import { flattenRows } from "./rows";
+import { flattenRows, neighbourOf } from "./rows";
 import {
   bySection,
   canCreateIn,
@@ -73,6 +74,13 @@ type Props = {
 
 /** Le menu « … » ouvert : sa page, et le bouton qui l'a ouvert. */
 type OpenMenu = { id: string; anchor: HTMLElement };
+
+/**
+ * La page que le menu vient de mettre à la corbeille : le bouton « … » de sa ligne, à qui le
+ * menu a rendu le focus, et ce qui le recevra quand la ligne partira : la ligne voisine
+ * (`neighbour`), sinon le titre de sa section.
+ */
+type Leaving = { id: string; anchor: HTMLElement; section: Section; neighbour: string | null };
 
 const NONE: ReadonlySet<string> = new Set();
 
@@ -115,6 +123,33 @@ export function SectionList({
     setMenu((current) => (current?.id === id ? null : { id, anchor }));
   }, []);
   const closeMenu = useCallback(() => setMenu(null), []);
+
+  const root = useRef<HTMLDivElement>(null);
+  const leaving = useRef<Leaving | null>(null);
+  // La ligne d'une page mise à la corbeille part avec le focus, que le menu avait rendu à son
+  // bouton « … » : il va à la ligne qui prend sa place, sinon au titre de la section. Seulement
+  // s'il s'est perdu : on ne le reprend pas à qui l'a posé ailleurs entre-temps.
+  useEffect(() => {
+    const left = leaving.current;
+    if (left === null || nodes === null) return;
+    if (nodes.some((node) => node.id === left.id)) {
+      // Toujours là (le serveur n'a pas encore répondu, ou il a refusé). Le focus a quitté son
+      // bouton : la personne est passée à autre chose.
+      if (document.activeElement !== left.anchor) leaving.current = null;
+      return;
+    }
+    leaving.current = null;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    const row =
+      left.neighbour === null
+        ? null
+        : root.current?.querySelector<HTMLElement>(`[data-page-id="${left.neighbour}"] .tree-link`);
+    const title = root.current?.querySelector<HTMLElement>(
+      `[data-section="${left.section}"] .mm-section-title`,
+    );
+    (row ?? title)?.focus();
+  }, [nodes]);
   // Sans sa page, le menu est oublié : il ne se rouvre pas si elle revient.
   const menuGone = menu !== null && menuNode === undefined;
   useEffect(() => {
@@ -206,14 +241,14 @@ export function SectionList({
 
   if (nodes === null) {
     return (
-      <div className="mm-sections">
+      <div ref={root} className="mm-sections">
         {!unavailable && <p className="mm-side-note">Chargement…</p>}
       </div>
     );
   }
 
   const actions: MenuAction[] = [];
-  if (menuNode !== undefined) {
+  if (menu !== null && menuNode !== undefined) {
     const { id } = menuNode;
     // Au clavier, ce que la souris fait en glissant : un cran parmi ses sœurs, sous la sœur
     // qui précède, ou hors de sa page parente. Un geste refusé (niveau, section) est grisé.
@@ -236,13 +271,21 @@ export function SectionList({
         label: "Mettre à la corbeille",
         icon: <TrashIcon />,
         destructive: true,
-        onSelect: () => onTrash(id),
+        onSelect: () => {
+          const section = SECTIONS.find((s) => groups[s].includes(menuNode));
+          if (section !== undefined) {
+            // Les lignes telles qu'elles sont montrées : la voisine est celle qu'on voit.
+            const neighbour = neighbourOf(flattenRows(groups[section], collapsed), id);
+            leaving.current = { id, anchor: menu.anchor, section, neighbour };
+          }
+          onTrash(id);
+        },
       },
     );
   }
 
   return (
-    <div className="mm-sections">
+    <div ref={root} className="mm-sections">
       {visibleSections(role, groups).map((section) => (
         <SectionBlock
           key={section}
@@ -326,7 +369,7 @@ function SectionBlock({
   const rows = useMemo(() => flattenRows(nodes, collapsed), [nodes, collapsed]);
   const label = SECTION_LABELS[section];
   return (
-    <div role="group" aria-labelledby={titleId} className="mm-section">
+    <div role="group" aria-labelledby={titleId} className="mm-section" data-section={section}>
       <div className="mm-section-head">
         <button
           id={titleId}

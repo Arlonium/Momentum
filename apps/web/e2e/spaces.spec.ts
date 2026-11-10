@@ -594,8 +594,13 @@ test("row_menu_by_keyboard", async ({ browser }) => {
   await p.keyboard.press("Enter");
   await expect(button).toHaveAttribute("aria-expanded", "true");
   await expect(item("Déplacer vers le haut")).toBeFocused();
+  // L'action qui a le focus se voit, comme dans les autres menus : un contour.
+  await expect(item("Déplacer vers le haut")).toHaveCSS("outline-style", "solid");
+  await expect(item("Déplacer vers le haut")).toHaveCSS("outline-width", "2px");
+  await expect(item("Déplacer vers le bas")).toHaveCSS("outline-style", "none");
   await p.keyboard.press("ArrowDown");
   await expect(item("Déplacer vers le bas")).toBeFocused();
+  await expect(item("Déplacer vers le bas")).toHaveCSS("outline-style", "solid");
   await p.keyboard.press("ArrowDown");
   await expect(item("Imbriquer dans la page précédente")).toBeFocused();
   // « Sortir de la page parente » n'a pas de sens à la racine : grisée, les flèches la passent.
@@ -706,6 +711,51 @@ test("row_menu_nests_and_unnests_by_keyboard", async ({ browser }) => {
   await expect(item("Delta", nest)).toHaveAttribute("aria-disabled", "true");
   await p.keyboard.press("Escape");
   expect(await parentOf(d.id)).toBe(c.id);
+});
+
+test("focus_follows_a_page_that_leaves", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  await createPage(api, { parentId: b.id, title: "Bravo bis" });
+  const c = await createPage(api, { title: "Charlie" });
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "2 Bravo bis", "1 Charlie"]);
+  /** Met à la corbeille, au clavier, la page de la ligne `id`. */
+  const trashByKeyboard = async (id: string, title: string) => {
+    await treeRow(p, id).getByRole("button", { name: `Actions de « ${title} »` }).focus();
+    await p.keyboard.press("Enter");
+    await p.keyboard.press("End");
+    await expect(
+      p.getByRole("menu").getByRole("menuitem", { name: "Mettre à la corbeille" }),
+    ).toBeFocused();
+    await p.keyboard.press("Enter");
+    await expect(treeRow(p, id)).toHaveCount(0);
+  };
+
+  // « Bravo » part avec sa sous-page : le focus va à la ligne qui prend sa place.
+  await trashByKeyboard(b.id, "Bravo");
+  await expect(treeRow(p, c.id).getByRole("link")).toBeFocused();
+  // La dernière ligne part : le focus va à celle d'avant.
+  await trashByKeyboard(c.id, "Charlie");
+  await expect(treeRow(p, a.id).getByRole("link")).toBeFocused();
+  // La seule ligne de la section part : le focus va au titre de la section.
+  await trashByKeyboard(a.id, "Alpha");
+  await expect(
+    sectionOf(p, "Espace").getByRole("button", { name: "Espace", exact: true }),
+  ).toBeFocused();
+
+  // Dans la corbeille, « Restaurer » retire la ligne : le focus va au titre de la vue.
+  await sidebarOf(p).getByRole("link", { name: "Corbeille" }).click();
+  const restore = trashItem(p, "Charlie").getByRole("button", { name: "Restaurer" });
+  await restore.focus();
+  await p.keyboard.press("Enter");
+  await expect(trashItem(p, "Charlie")).toHaveCount(0);
+  await expect(p.getByRole("heading", { name: "Corbeille", level: 1 })).toBeFocused();
 });
 
 test("drop_target_is_shown_while_dragging", async ({ browser }) => {

@@ -220,6 +220,49 @@ test("active_row_is_shown_clear_of_the_sidebar_edges", async ({ browser }) => {
   await open(pages[16].id);
   await p.waitForTimeout(200);
   expect(await scrollTop()).toBe(before);
+
+  // Au clavier aussi. La première ligne coupée par le pied, et celle d'avant, visible.
+  await sidebar.evaluate((el) => (el.scrollTop = 0));
+  const [seen, cut] = await sidebar.evaluate((el) => {
+    const footer = el.querySelector(".mm-side-footer")!.getBoundingClientRect();
+    const rows = [...el.querySelectorAll<HTMLElement>("[data-page-id]")];
+    const at = rows.findIndex((row) => row.getBoundingClientRect().bottom > footer.top);
+    return [rows[at - 1].dataset.pageId!, rows[at].dataset.pageId!];
+  });
+  expect(await clear(seen)).toBe(true);
+  expect(await clear(cut)).toBe(false);
+  // Tab depuis le lien de la ligne visible : ses deux boutons, puis le lien de la suivante,
+  // que la barre fait remonter de sous son pied.
+  await treeRow(p, seen).getByRole("link").evaluate((link: HTMLElement) =>
+    link.focus({ preventScroll: true }),
+  );
+  for (let i = 0; i < 3; i++) await p.keyboard.press("Tab");
+  await expect(treeRow(p, cut).getByRole("link")).toBeFocused();
+  await expect.poll(() => clear(cut)).toBe(true);
+
+  // Et vers le haut : Maj+Tab jusqu'au lien d'une ligne passée sous la tête.
+  const [hidden, below] = await sidebar.evaluate((el) => {
+    const head = el.querySelector(".mm-side-head")!.getBoundingClientRect();
+    const rows = [...el.querySelectorAll<HTMLElement>("[data-page-id]")];
+    const target = rows[6];
+    el.scrollTop += target.getBoundingClientRect().top - head.bottom + 14;
+    return [target.dataset.pageId!, rows[7].dataset.pageId!];
+  });
+  expect(await clear(hidden)).toBe(false);
+  await treeRow(p, below).getByRole("link").evaluate((link: HTMLElement) =>
+    link.focus({ preventScroll: true }),
+  );
+  for (let i = 0; i < 3; i++) await p.keyboard.press("Shift+Tab");
+  await expect(treeRow(p, hidden).getByRole("link")).toBeFocused();
+  await expect.poll(() => clear(hidden)).toBe(true);
+
+  // La tête et le pied, eux, sont toujours visibles : y poser le focus ne fait pas défiler.
+  before = await scrollTop();
+  expect(before).toBeGreaterThan(0);
+  await sidebar.getByRole("button", { name: "Nouvelle page" }).focus();
+  await sidebar.getByRole("link", { name: "Corbeille" }).focus();
+  await p.waitForTimeout(200);
+  expect(await scrollTop()).toBe(before);
 });
 
 test("tree_below_a_long_section_follows_what_happens_above_it", async ({ browser }) => {

@@ -2,7 +2,7 @@
 // lignes que la barre latérale affiche, une par page visible.
 import type { PageNode } from "@mementum/protocol";
 import { expect, test } from "vitest";
-import { flattenRows, withoutSubtree } from "./rows";
+import { flattenRows, neighbourOf, subtreeEnd, withoutSubtree } from "./rows";
 
 function page(id: string, parentId: string | null, position: string): PageNode {
   return {
@@ -109,4 +109,52 @@ test("subtree_leaves_with_its_root", () => {
   expect(withoutSubtree(nodes, "a1").map((n) => n.id)).toEqual(["a", "b", "b1"]);
   // Une page absente : rien ne change.
   expect(withoutSubtree(nodes, "absente")).toEqual(nodes);
+});
+
+test("subtree_ends_before_the_next_row_that_is_not_deeper", () => {
+  const nodes = [
+    page("a", null, "a0"),
+    page("a1", "a", "a0"),
+    page("a1x", "a1", "a0"),
+    page("a2", "a", "a1"),
+    page("b", null, "a1"),
+    page("c", null, "a2"),
+    page("c1", "c", "a0"),
+  ];
+  // Lignes : a, a1, a1x, a2, b, c, c1.
+  const rows = flattenRows(nodes, new Set());
+  // « a » et tout ce qu'elle porte : la suite commence à « b ».
+  expect(subtreeEnd(rows, 0)).toBe(4);
+  expect(subtreeEnd(rows, 1)).toBe(3);
+  // Une page sans sous-page : la ligne suivante.
+  expect(subtreeEnd(rows, 2)).toBe(3);
+  expect(subtreeEnd(rows, 4)).toBe(5);
+  // Le dernier sous-arbre va jusqu'au bout.
+  expect(subtreeEnd(rows, 5)).toBe(7);
+  expect(subtreeEnd(rows, 6)).toBe(7);
+  // Repliée, « a » ne montre plus ses sous-pages : la suite est la ligne d'après.
+  expect(subtreeEnd(flattenRows(nodes, new Set(["a"])), 0)).toBe(1);
+});
+
+test("neighbour_takes_the_place_of_a_page_that_leaves", () => {
+  const nodes = [
+    page("a", null, "a0"),
+    page("b", null, "a1"),
+    page("b1", "b", "a0"),
+    page("b2", "b", "a1"),
+    page("c", null, "a2"),
+  ];
+  // Lignes : a, b, b1, b2, c.
+  const rows = flattenRows(nodes, new Set());
+  // La ligne qui suit la page et ses sous-pages remonte à sa place.
+  expect(neighbourOf(rows, "a")).toBe("b");
+  expect(neighbourOf(rows, "b")).toBe("c");
+  expect(neighbourOf(rows, "b1")).toBe("b2");
+  // Rien après : la ligne d'avant.
+  expect(neighbourOf(rows, "c")).toBe("b2");
+  expect(neighbourOf(rows, "b2")).toBe("c");
+  expect(neighbourOf(flattenRows(nodes.slice(0, 4), new Set()), "b")).toBe("a");
+  // Seule dans son arbre (avec ses sous-pages), ou absente : personne.
+  expect(neighbourOf(flattenRows(nodes.slice(1, 4), new Set()), "b")).toBeNull();
+  expect(neighbourOf(rows, "absente")).toBeNull();
 });

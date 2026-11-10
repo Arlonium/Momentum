@@ -109,6 +109,15 @@ a:hover {
   border-right: 1px solid var(--mm-sidebar-border);
 }
 
+/* Un lien ou un bouton des sections qui prend le focus (Tab) est montré hors de la tête et du
+   pied, dont `Sidebar` donne les hauteurs. Une marge sur ce qui se focalise, et pas un
+   `scroll-padding` sur la barre : avec lui, poser le focus dans la tête ou le pied, toujours
+   visibles, ferait défiler la barre de leur hauteur. */
+.mm-sections :is(a, button) {
+  scroll-margin-top: var(--mm-side-head-height, 0px);
+  scroll-margin-bottom: var(--mm-side-footer-height, 0px);
+}
+
 .mm-brand-tile {
   width: 22px;
   height: 22px;
@@ -737,9 +746,11 @@ button.tree-toggle:hover {
   color: var(--mm-text-secondary);
 }
 
+/* L'action qui a le focus au clavier garde le contour de tout ce qui se focalise (`:focus-visible`,
+   en tête de ce fichier), comme dans le menu du sélecteur d'espace : le fond seul ne se voit
+   pas assez sur du blanc. */
 .mm-menu-item:hover,
 .mm-menu-item:focus-visible {
-  outline: none;
   background: var(--mm-surface);
 }
 

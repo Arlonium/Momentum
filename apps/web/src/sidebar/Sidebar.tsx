@@ -4,7 +4,7 @@
 // dernière action refusée (à défaut, celui d'une relecture des pages qui a échoué), et
 // « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
 import { trashPath } from "../router";
 import type { Drop } from "./drag";
@@ -56,6 +56,22 @@ export function Sidebar({
     () => (scroller ? { scroller, top: head, bottom: footer } : null),
     [scroller, head, footer],
   );
+  // Ce qui prend le focus au clavier (Tab) est montré par le navigateur, qui ne sait pas que
+  // la tête et le pied recouvrent les bords de la barre : on lui dit de combien, à chaque fois
+  // qu'ils changent de hauteur (un message en pied). `theme.css` en fait la marge de
+  // défilement (`scroll-margin`) de ce qui se focalise dans les sections.
+  useLayoutEffect(() => {
+    if (!scroller) return;
+    const measure = () => {
+      scroller.style.setProperty("--mm-side-head-height", `${head?.offsetHeight ?? 0}px`);
+      scroller.style.setProperty("--mm-side-footer-height", `${footer?.offsetHeight ?? 0}px`);
+    };
+    measure();
+    const resized = new ResizeObserver(measure);
+    if (head) resized.observe(head);
+    if (footer) resized.observe(footer);
+    return () => resized.disconnect();
+  }, [scroller, head, footer]);
   // Un invité ne crée pas de page à la racine d'un espace.
   const member = space !== null && space.role !== "guest";
   // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
