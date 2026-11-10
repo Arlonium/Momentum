@@ -44,9 +44,10 @@ export type GeneralAccess = {
   /** Ce niveau est celui d'une page parente, tel quel : la page n'a pas d'accès général à elle. */
   inherited: boolean;
   /**
-   * « Seulement les invités » se choisit : la page retire son propre accès général. Sous
-   * celui d'une page parente, elle y revient ; si elle n'en a pas à elle, il n'y a rien à
-   * retirer, et le choix est grisé.
+   * « Seulement les invités » se choisit : la page retire son accès général. Jamais sous
+   * celui d'une page parente, que la page ait ou non relevé le sien (Ruling R110) : elle
+   * resterait ouverte aux membres, et le choix dirait le contraire. Le choix est alors grisé ;
+   * pour revenir à l'accès de la page parente, on choisit son niveau.
    */
   invitedOnly: boolean;
   /** Tous les niveaux, du plus faible au plus fort ; `allowed` : il se choisit ici. */
@@ -67,7 +68,7 @@ export function generalAccess({
   return {
     level: general,
     inherited,
-    invitedOnly: !inherited,
+    invitedOnly: inheritedGeneral === null,
     levels: LEVELS.map((level, rank) => ({ level, allowed: rank >= floor })),
   };
 }

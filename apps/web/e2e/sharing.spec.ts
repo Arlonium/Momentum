@@ -794,10 +794,12 @@ test("inherited_general_access_is_a_floor", async ({ browser }) => {
 
   // L'accès de la page parente est le plancher : marqué « hérité », il ne se baisse ni ne se
   // retire ici.
+  const floorHint = "Une page parente ouvre déjà cette page aux membres de l'espace.";
   await expect(members).toBeChecked();
   await expect(level).toHaveValue("edit");
   await expect(general).toContainText("hérité");
   await expect(invited).toBeDisabled();
+  await expect(general).toContainText(floorHint);
   expect(await optionDisabled("read")).toBe(true);
   expect(await optionDisabled("comment")).toBe(true);
   expect(await optionDisabled("edit")).toBe(false);
@@ -812,11 +814,17 @@ test("inherited_general_access_is_a_floor", async ({ browser }) => {
     general: "full",
     inheritedGeneral: "edit",
   });
+  // « Seulement les invités » ne se choisit toujours pas : la page parente l'ouvrirait encore
+  // aux membres (Ruling R110).
+  await expect(invited).toBeDisabled();
+  await expect(general).toContainText(floorHint);
+  expect(await optionDisabled("read")).toBe(true);
   // Ramené au niveau de la page parente : de nouveau hérité.
   await level.selectOption("edit");
   await expect(level).toHaveValue("edit");
   await expect(general).toContainText("hérité");
   expect(await seenByBruno()).toBe("edit");
+  await expect(invited).toBeDisabled();
   await expect(menu.getByRole("alert")).toHaveCount(0);
 });
 

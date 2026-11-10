@@ -107,10 +107,11 @@ test("general_access_under_a_parent_floor", () => {
   expect(floor).toMatchObject({ level: "edit", inherited: true, invitedOnly: false });
   expect(allowed(floor.levels)).toEqual(["edit", "full"]);
   expect(floor.levels.map((choice) => choice.level)).toEqual(LEVELS);
-  // Relevé sur la page : son accès à elle se retire (on revient au plancher), et ne descend
-  // toujours pas dessous.
+  // Relevé sur la page : son accès à elle ne descend toujours pas sous le plancher, et
+  // « Seulement les invités » ne se choisit pas davantage (Ruling R110) : la page resterait
+  // ouverte aux membres. Choisir le niveau du plancher y ramène.
   const raised = generalAccess({ general: "full", inheritedGeneral: "edit" });
-  expect(raised).toMatchObject({ level: "full", inherited: false, invitedOnly: true });
+  expect(raised).toMatchObject({ level: "full", inherited: false, invitedOnly: false });
   expect(allowed(raised.levels)).toEqual(["edit", "full"]);
   // Le plancher le plus bas n'interdit aucun niveau, mais ne se retire pas.
   const lowest = generalAccess({ general: "read", inheritedGeneral: "read" });

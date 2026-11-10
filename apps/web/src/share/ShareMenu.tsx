@@ -7,7 +7,8 @@
 //    elle ; puis les invitations de la page qui attendent, avec « Révoquer » ;
 // 3. l'accès général : « Seulement les invités », ou « Tous les membres de l'espace », à un
 //    niveau. Celui qu'une page parente donne déjà est un plancher (R93) : il se relève, sans se
-//    baisser ni se retirer. Un invité de l'espace le lit sans le régler (R85) ;
+//    baisser ni se retirer, et « Seulement les invités » est grisé (R110). Un invité de
+//    l'espace le lit sans le régler (R85) ;
 // 4. « Copier le lien » de la page.
 // Le partage vaut pour la page et ses sous-pages. Pas d'onglet « Publier » : la publication
 // vient en P3.
@@ -442,7 +443,6 @@ function General({ share, guest }: { share: Share; guest: boolean }) {
   const general = generalAccess(access);
   const busy = share.busy !== null;
   const open = general.level !== null;
-  const floor = access.inheritedGeneral !== null;
 
   if (guest) {
     return (
@@ -497,11 +497,9 @@ function General({ share, guest }: { share: Share; guest: boolean }) {
           </div>
           {/* La précision, sous le choix : elle le coche aussi. */}
           <label id={`${invitedId}-hint`} htmlFor={invitedRadio} className="mm-share-choice-hint">
-            {!floor
+            {general.invitedOnly
               ? "Les personnes nommées ci-dessus."
-              : general.invitedOnly
-                ? "Retire l'accès propre à cette page : celui de la page parente reste."
-                : "Une page parente ouvre déjà cette page aux membres de l'espace."}
+              : "Une page parente ouvre déjà cette page aux membres de l'espace."}
           </label>
         </div>
         <div className={open ? "mm-share-choice is-checked" : "mm-share-choice"}>
