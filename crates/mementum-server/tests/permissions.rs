@@ -473,6 +473,16 @@ async fn foreign_page_is_indistinguishable_from_missing() {
             assert_eq!(&outcome(&reply), missing, "{name}, page {what}");
         }
     }
+    // De même pour une invitée de l'espace face à une page vivante des membres, qu'elle ne voit
+    // pas : elle a un rôle dans l'espace, et n'en apprend pas davantage, sur aucune route.
+    let gina = &team.gina.browser;
+    let in_the_team = [foreign.to_string(), foreign_child.to_string()];
+    for id in &in_the_team {
+        for ((name, request), missing) in page_routes(id).into_iter().zip(&missing) {
+            let reply = gina.send(request).await;
+            assert_eq!(&outcome(&reply), missing, "{name}, par une invitée");
+        }
+    }
 
     // L'id dans le corps : le parent d'une page neuve, le nouveau parent d'une page, le frère
     // après lequel se placer. `(nom, code attendu, requête)`.

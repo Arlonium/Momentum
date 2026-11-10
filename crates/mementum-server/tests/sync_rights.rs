@@ -610,6 +610,8 @@ const DEMOTED_TO_READ: &str =
     "UPDATE acl SET level = 'read' WHERE node_id = '{page}' AND subject = '{who}'";
 const TRASHED: &str = "UPDATE nodes SET trashed_at = 1 WHERE id = '{page}'";
 const ACCESS_REMOVED: &str = "DELETE FROM acl WHERE node_id = '{page}' AND subject = '{who}'";
+/// La page supprimée pour de bon : ses accès partent avec elle (`ON DELETE CASCADE`).
+const DELETED: &str = "DELETE FROM nodes WHERE id = '{page}'";
 
 /// Écrit `change` (un des modèles ci-dessus) pour cette page et cette personne, et incrémente
 /// la révision de l'espace, dans la transaction du verrou.
@@ -661,6 +663,9 @@ async fn rights_changed_while_the_page_loads_are_the_ones_served() {
         ),
         ("mise à la corbeille", Some(TRASHED), Served::ReadOnly),
         ("accès retiré", Some(ACCESS_REMOVED), Served::Closed),
+        // Supprimée pendant que son acteur attend pour écrire son premier document : il ne le
+        // peut plus, et la connexion est fermée sans avoir rien reçu.
+        ("page supprimée", Some(DELETED), Served::Closed),
     ];
     for (what, change, expected) in cases {
         // Une page que personne n'a ouverte, et qui n'a pas encore de document.
@@ -697,6 +702,34 @@ async fn rights_changed_while_the_page_loads_are_the_ones_served() {
             }
         }
     }
+}
+
+/// La seconde lecture des droits, une fois la page chargée, peut échouer : une panne du store.
+/// La connexion est alors fermée sans avoir rien reçu, plutôt que servie sur ce que le premier
+/// contrôle avait lu avant la poignée de main. La panne : la révision de l'espace ne se lit
+/// plus (sa colonne est renommée pendant le chargement de la page).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn store_failure_at_the_second_rights_read_closes_the_connection() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let grants = [user(&team.olga, Level::Full), user(&team.gina, Level::Edit)];
+    let page = team.page(None, "Panne", &grants).await;
+    let mut lock = WriteLock::take(&t).await;
+    // La poignée de main aboutit ; le chargement de la page attend le verrou.
+    let client = sync_as(&team.gina.browser, &sync_url(addr, page))
+        .await
+        .unwrap_or_else(|refusal| panic!("connexion de synchro refusée : {refusal}"));
+    lock.run("ALTER TABLE spaces RENAME COLUMN rev TO rev_illisible")
+        .await;
+    lock.commit().await;
+
+    assert!(closed(&client).await, "encore ouverte");
+    assert!(!client.is_synced(), "elle a reçu la page");
+    assert_eq!(updates(&t, page).await, 0);
+    // La page a bien été chargée : le refus vient de la lecture d'après.
+    let snapshots = format!("SELECT COUNT(*) FROM doc_snapshots WHERE node_id = '{page}'");
+    assert_eq!(query_i64(&t.db_path(), &snapshots).await, 1);
 }
 
 /// Ruling R89, pour `PUT /mmd` : les droits sont contrôlés avant la lecture du corps, puis de

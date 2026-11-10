@@ -10,12 +10,13 @@ mod common;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use common::{
-    Browser, Logs, Reply, TestApp, WAIT, all_logs, assert_french, exec_sql, overtaken, query_i64,
-    sync_url, synced_as,
+    Browser, Logs, Reply, TestApp, WAIT, all_logs, assert_french, exec_sql, outcome, overtaken,
+    query_i64, sync_url, synced_as,
 };
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_server::SignupMode;
@@ -484,6 +485,67 @@ async fn space_routes_by_role() {
         }
     }
     store.close().await;
+}
+
+/// Qui n'a aucun rôle dans un espace reçoit `404` avant que le corps de sa requête soit lu, sur
+/// chaque route d'espace qui en porte un : un corps invalide ou illisible ne lui vaut ni `422`
+/// ni `400`, qui diraient que l'espace existe. La réponse est celle d'un espace inconnu, au
+/// même corps près.
+#[tokio::test]
+async fn stranger_learns_nothing_from_an_invalid_body() {
+    let t = open_app().await;
+    let team = team(&t).await;
+    let (space, tom) = (team.space, team.tom.id);
+    let routes = |space: Uuid| {
+        [
+            (Method::PATCH, format!("/api/v1/spaces/{space}")),
+            (Method::PATCH, member_uri(space, tom)),
+            (Method::POST, invitations_uri(space)),
+        ]
+    };
+    let bodies = [
+        "{",
+        "[]",
+        r#"{"name":""}"#,
+        r#"{"role":"empereur"}"#,
+        r#"{"email":"pas une adresse","role":"member"}"#,
+        r#"{"inconnu":1}"#,
+    ];
+    let send = async |by: &Browser<'_>, method: &Method, uri: &str, body: &'static str| {
+        let request = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        by.send(request).await
+    };
+
+    let sam = &team.sam.browser;
+    for ((method, uri), (_, unknown)) in routes(space).iter().zip(&routes(Uuid::now_v7())) {
+        for body in bodies {
+            let reply = send(sam, method, uri, body).await;
+            reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+            let missing = send(sam, method, unknown, body).await;
+            assert_eq!(
+                outcome(&reply),
+                outcome(&missing),
+                "{method} {uri} : {body}"
+            );
+        }
+    }
+    // À la propriétaire, les mêmes corps valent bien un refus du corps.
+    let olga = &team.olga.browser;
+    for (method, uri) in &routes(space) {
+        let reply = send(olga, method, uri, "{").await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{method} {uri}");
+        let reply = send(olga, method, uri, r#"{"inconnu":1}"#).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{method} {uri}"
+        );
+    }
 }
 
 /// Un admin ne change ni ne retire un propriétaire, et ne fait passer un rôle qu'entre `admin`
