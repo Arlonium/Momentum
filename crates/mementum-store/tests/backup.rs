@@ -96,7 +96,7 @@ fn entries(dir: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// `db` suivi de `suffix` (`-wal`, `-shm`).
+/// `db` suivi de `suffix` (`-wal`, `-shm`, `.partiel`).
 fn sibling(db: &Path, suffix: &str) -> PathBuf {
     let mut name = db.as_os_str().to_owned();
     name.push(suffix);
@@ -120,6 +120,30 @@ async fn titles(pool: &SqlitePool) -> Vec<String> {
         .iter()
         .map(|r| r.get(0))
         .collect()
+}
+
+/// Les tables du lot 1 (`orgs`, `vaults`) et du lot 2 (`spaces`) que `pool` porte.
+async fn lot_tables(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('orgs', 'vaults', 'spaces') \
+         ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.get(0))
+    .collect()
+}
+
+/// La copie `backup`, recopiée sans rien d'autre dans un dossier neuf (ni `-wal` ni `-shm`), et
+/// ouverte en lecture seule par sqlx, sans le `Store`. Le dossier vit autant que la connexion.
+async fn open_alone(backup: &Path) -> (tempfile::TempDir, SqlitePool) {
+    let elsewhere = tempfile::tempdir().unwrap();
+    let alone = elsewhere.path().join("copie.db");
+    std::fs::copy(backup, &alone).unwrap();
+    let pool = read_only(&alone).await;
+    (elsewhere, pool)
 }
 
 #[tokio::test]
@@ -174,14 +198,10 @@ async fn pending_migration_backs_up_first() {
     pool.close().await;
     assert!(!sibling(&backup, "-wal").exists());
     assert!(!sibling(&backup, "-shm").exists());
+    assert!(!sibling(&backup, ".partiel").exists());
 
-    // La copie se lit seule : recopiée sans rien d'autre dans un autre dossier (ni `-wal` ni
-    // `-shm`), ouverte en lecture seule par sqlx, sans le `Store`. C'est la base du lot 1, avec ses
-    // trois pages.
-    let elsewhere = tempfile::tempdir().unwrap();
-    let alone = elsewhere.path().join("copie.db");
-    std::fs::copy(&backup, &alone).unwrap();
-    let copy = read_only(&alone).await;
+    // La copie se lit seule. C'est la base du lot 1, avec ses trois pages.
+    let (_elsewhere, copy) = open_alone(&backup).await;
     // `VACUUM INTO` écrit une base en mode de journal classique : elle n'a jamais besoin de `-shm`,
     // même sur un support en lecture seule.
     let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
@@ -189,17 +209,7 @@ async fn pending_migration_backs_up_first() {
         .await
         .unwrap();
     assert_eq!(mode, "delete");
-    let tables: Vec<String> = sqlx::query(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('orgs', 'vaults', 'spaces') \
-         ORDER BY name",
-    )
-    .fetch_all(&copy)
-    .await
-    .unwrap()
-    .iter()
-    .map(|r| r.get(0))
-    .collect();
-    assert_eq!(tables, ["orgs", "vaults"]);
+    assert_eq!(lot_tables(&copy).await, ["orgs", "vaults"]);
     assert_eq!(
         titles(&copy).await,
         ["Accueil", "Notes", "Écrite juste avant"]
@@ -293,35 +303,99 @@ async fn existing_backup_is_kept() {
 }
 
 #[tokio::test]
-async fn failed_backup_stops_before_migrating() {
+async fn interrupted_backup_is_redone() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("mementum.db");
-    lot1_with_a_page(&db).await;
+    let pool = lot1_database(&db).await;
+    let vault = lot1_vault(&pool).await;
+    lot1_page(&pool, vault, "Accueil", "a0").await;
+    lot1_page(&pool, vault, "Notes", "a1").await;
+    pool.close().await;
 
-    // Un dossier porte le nom de la copie : SQLite ne peut pas l'écrire.
+    // Une coupure pendant `VACUUM INTO` a laissé la copie à moitié écrite, sous son nom temporaire :
+    // la première page d'une base SQLite, sans la suite.
     let backup = backup_path(&db, 2);
-    std::fs::create_dir(&backup).unwrap();
+    let partial = sibling(&backup, ".partiel");
+    std::fs::write(&partial, &std::fs::read(&db).unwrap()[..4096]).unwrap();
 
-    let error = Store::open(&db)
-        .await
-        .err()
-        .expect("l'ouverture doit échouer");
-    assert!(
-        error.to_string().contains("mementum.db.avant-0002.bak"),
-        "l'erreur nomme la copie : {error}"
-    );
-
-    // La base est restée au lot 1.
+    let store = Store::open(&db).await.unwrap();
+    let bytes = std::fs::metadata(&backup).unwrap().len();
     assert_eq!(
-        int(
-            &db,
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('orgs', 'vaults')"
-        )
-        .await,
-        2
+        store.backup(),
+        Some(&Backup {
+            path: backup.clone(),
+            bytes,
+            kept: false,
+        })
     );
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 1);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM nodes").await, 1);
-    assert!(backup.is_dir());
-    assert!(entries(&backup).is_empty());
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
+    store.close().await;
+    assert!(!partial.exists());
+    assert_eq!(
+        entries(dir.path()),
+        BTreeSet::from([
+            "mementum.db".to_string(),
+            "mementum.db.avant-0002.bak".to_string()
+        ])
+    );
+
+    // La copie refaite se lit seule, avec toutes les pages.
+    let (_elsewhere, copy) = open_alone(&backup).await;
+    assert_eq!(lot_tables(&copy).await, ["orgs", "vaults"]);
+    assert_eq!(titles(&copy).await, ["Accueil", "Notes"]);
+    copy.close().await;
+}
+
+#[tokio::test]
+async fn failed_backup_stops_before_migrating() {
+    // La copie est rendue impossible par un dossier : au nom de la copie (elle s'écrit, mais ne peut
+    // pas prendre son nom), puis au nom temporaire (ce n'est pas le reste d'une copie interrompue,
+    // rien ne le supprime).
+    for obstacle in [
+        "mementum.db.avant-0002.bak",
+        "mementum.db.avant-0002.bak.partiel",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mementum.db");
+        lot1_with_a_page(&db).await;
+        let blocked = dir.path().join(obstacle);
+        std::fs::create_dir(&blocked).unwrap();
+
+        let error = Store::open(&db)
+            .await
+            .err()
+            .expect("l'ouverture doit échouer");
+        assert!(
+            error.to_string().contains("mementum.db.avant-0002.bak"),
+            "{obstacle} : l'erreur nomme la copie : {error}"
+        );
+
+        // La base est restée au lot 1, et rien n'a été laissé à côté.
+        assert_eq!(
+            int(
+                &db,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('orgs', 'vaults')"
+            )
+            .await,
+            2,
+            "{obstacle}"
+        );
+        assert_eq!(
+            int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await,
+            1,
+            "{obstacle}"
+        );
+        assert_eq!(
+            int(&db, "SELECT COUNT(*) FROM nodes").await,
+            1,
+            "{obstacle}"
+        );
+        assert!(blocked.is_dir(), "{obstacle}");
+        assert!(entries(&blocked).is_empty(), "{obstacle}");
+        assert_eq!(
+            entries(dir.path()),
+            BTreeSet::from(["mementum.db".to_string(), obstacle.to_string()]),
+            "{obstacle}"
+        );
+    }
 }

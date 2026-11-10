@@ -2,9 +2,13 @@
 //! automatiques au démarrage, avec sauvegarde préalable »).
 //!
 //! La copie est écrite par SQLite lui-même (`VACUUM INTO`) : elle contient aussi ce qui n'est encore
-//! que dans le fichier `-wal`, et se lit seule, sans `-wal` ni `-shm`. Elle n'est jamais écrasée ni
-//! supprimée : si elle existe déjà (montée de version interrompue puis relancée), c'est elle qui
-//! porte l'état d'avant.
+//! que dans le fichier `-wal`, et se lit seule, sans `-wal` ni `-shm`.
+//!
+//! Elle s'écrit sous un nom temporaire (`<copie>.partiel`), forcée sur le disque, puis prend son nom
+//! final : un fichier au nom final est donc toujours une copie complète. Il n'est jamais écrasé ni
+//! supprimé : si une montée de version a été interrompue puis relancée, c'est lui qui porte l'état
+//! d'avant. Un `.partiel` trouvé à l'ouverture est le reste d'une copie interrompue : il est
+//! supprimé, et la copie recommence.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -60,27 +64,49 @@ pub(crate) async fn before_migrations(
             kept: true,
         }));
     }
-    // Un dossier ou autre chose qu'un fichier à ce nom : `VACUUM INTO` échoue, et l'ouverture avec.
-    let target = path
-        .to_str()
-        .ok_or_else(|| failed(&path, first, "le chemin n'est pas en UTF-8"))?;
+    let mut partial = path.clone().into_os_string();
+    partial.push(".partiel");
+    let partial = PathBuf::from(partial);
+    // Le reste d'une copie interrompue. Un dossier à ce nom n'en est pas un : il reste, et
+    // l'ouverture échoue.
+    match std::fs::remove_file(&partial) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(failed(&path, first, e)),
+        _ => {}
+    }
+    match write_copy(pool, &partial, &path).await {
+        Ok(bytes) => Ok(Some(Backup {
+            path,
+            bytes,
+            kept: false,
+        })),
+        Err(e) => {
+            // Ce qui est au nom temporaire vient d'être écrit ici, et n'est pas complet.
+            let _ = std::fs::remove_file(&partial);
+            Err(failed(&path, first, e))
+        }
+    }
+}
+
+/// Écrit une copie complète de la base sous `partial`, forcée sur le disque, puis lui donne son
+/// nom final, `path`. Rend sa taille.
+async fn write_copy(
+    pool: &SqlitePool,
+    partial: &Path,
+    path: &Path,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let name = partial.to_str().ok_or("le chemin n'est pas en UTF-8")?;
     sqlx::query("VACUUM INTO ?")
-        .bind(target)
+        .bind(name)
         .execute(pool)
-        .await
-        .map_err(|e| failed(&path, first, e))?;
+        .await?;
     // SQLite ne force pas la copie sur le disque : elle doit y être avant que la migration écrive.
-    let file = OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .map_err(|e| failed(&path, first, e))?;
-    file.sync_all().map_err(|e| failed(&path, first, e))?;
-    let bytes = file.metadata().map_err(|e| failed(&path, first, e))?.len();
-    Ok(Some(Backup {
-        path,
-        bytes,
-        kept: false,
-    }))
+    let file = OpenOptions::new().write(true).open(partial)?;
+    file.sync_all()?;
+    let bytes = file.metadata()?.len();
+    drop(file);
+    // Un dossier au nom final : la copie ne peut pas le prendre, et l'ouverture échoue.
+    std::fs::rename(partial, path)?;
+    Ok(bytes)
 }
 
 /// La version de la première migration de `migrator` que la base n'a pas encore, comme
