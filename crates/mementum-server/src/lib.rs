@@ -101,7 +101,9 @@
 //! à une requête qui écrit (tout sauf `GET`, `HEAD` et `OPTIONS`) et qui
 //! porte l'`Origin` d'un autre site. Une connexion `/sync` est un `GET` : la
 //! couche ne regarde pas son `Origin`. C'est la route qui la contrôle, avant
-//! tout le reste, par la même règle (`routes/sync.rs`).
+//! tout le reste, par la même règle (`routes/sync.rs`). Une seconde couche,
+//! par-dessus, pose `Cache-Control: no-store` et `X-Content-Type-Options:
+//! nosniff` sur toute réponse de l'API (`/api/…`), refus compris.
 
 mod access;
 pub mod auth;
@@ -385,6 +387,8 @@ fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         // Avant toute route, fallbacks compris (Rulings R31 et R51).
         .layer(middleware::from_fn_with_state(state.clone(), guard::check))
+        // Par-dessus tout, refus de la couche précédente compris.
+        .layer(middleware::from_fn(guard::api_headers))
         .with_state(state)
 }
 

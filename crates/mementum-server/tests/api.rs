@@ -1206,3 +1206,108 @@ fn bindings_are_committed() {
         assert!(!content.contains('\r'), "fichiers générés en LF");
     }
 }
+
+/// Défense en profondeur (mineur M3 de la relecture de sécurité) : toute réponse de l'API,
+/// réussite ou refus, porte `Cache-Control: no-store` et `X-Content-Type-Options: nosniff`.
+/// Elle peut porter un jeton d'invitation, des adresses ou le contenu d'une page : rien n'en
+/// reste dans un cache, et aucun navigateur ne lui devine un autre type que celui annoncé.
+#[tokio::test]
+async fn api_responses_carry_defensive_headers() {
+    let t = TestApp::new().await;
+    let alice = t.account("Alice").await;
+    let page = alice.create(json!({ "title": "Page" })).await;
+    let stranger = t.browser();
+    let foreign_origin = Request::post("/api/v1/auth/logout")
+        .header(header::ORIGIN, "https://ailleurs.exemple")
+        .body(Body::empty())
+        .unwrap();
+    let other_host = Request::get("/api/v1/info")
+        .header(header::HOST, "ailleurs.exemple")
+        .body(Body::empty())
+        .unwrap();
+    let replies = [
+        ("info", t.get("/api/v1/info").await),
+        ("me", alice.browser.me().await),
+        (
+            "arbre",
+            alice
+                .browser
+                .get(&format!("/api/v1/spaces/{}/tree", alice.space))
+                .await,
+        ),
+        (
+            "page",
+            alice
+                .browser
+                .get(&format!("/api/v1/pages/{}", page.id))
+                .await,
+        ),
+        ("mmd", alice.get_mmd(&page.id).await),
+        (
+            "accès",
+            alice
+                .browser
+                .get(&format!("/api/v1/pages/{}/access", page.id))
+                .await,
+        ),
+        (
+            "membres",
+            alice
+                .browser
+                .get(&format!("/api/v1/spaces/{}/members", alice.space))
+                .await,
+        ),
+        (
+            "sans session",
+            stranger.get(&format!("/api/v1/pages/{}", page.id)).await,
+        ),
+        (
+            "page inconnue",
+            alice
+                .browser
+                .get(&format!("/api/v1/pages/{}", Uuid::now_v7()))
+                .await,
+        ),
+        (
+            "route inconnue",
+            alice.browser.get("/api/v1/nulle-part").await,
+        ),
+        (
+            "méthode non permise",
+            alice.browser.delete("/api/v1/info").await,
+        ),
+        ("origine refusée", t.send(foreign_origin).await),
+        ("hôte refusé", t.send_raw(other_host).await),
+    ];
+    for (what, reply) in &replies {
+        let header_of = |name| {
+            reply
+                .headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+        };
+        assert_eq!(
+            header_of(header::CACHE_CONTROL),
+            Some("no-store"),
+            "{what} ({})",
+            reply.status
+        );
+        assert_eq!(
+            header_of(header::X_CONTENT_TYPE_OPTIONS),
+            Some("nosniff"),
+            "{what} ({})",
+            reply.status
+        );
+    }
+    // Les statuts sont ceux qu'on attend : la couche ne change que des en-têtes.
+    let statuses: Vec<u16> = replies
+        .iter()
+        .map(|(_, reply)| reply.status.as_u16())
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            200, 200, 200, 200, 200, 200, 200, 401, 404, 404, 405, 403, 421
+        ]
+    );
+}

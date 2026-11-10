@@ -43,7 +43,7 @@
 //!   en-têtes qu'il veut : lui n'a que ce que sa session lui donne.
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -142,6 +142,25 @@ pub(crate) async fn check(State(state): State<AppState>, request: Request, next:
         return bad_origin().into_response();
     }
     next.run(request).await
+}
+
+/// Couche la plus extérieure : toute réponse de l'API (`/api/…`), réussite ou refus, ceux de
+/// [`check`] compris, porte `Cache-Control: no-store` et `X-Content-Type-Options: nosniff`.
+/// Défense en profondeur : une réponse peut porter un jeton d'invitation, des adresses ou le
+/// contenu d'une page, qu'aucun cache ne doit garder, et dont aucun navigateur ne doit deviner
+/// un autre type que celui annoncé.
+pub(crate) async fn api_headers(request: Request, next: Next) -> Response {
+    let api = request.uri().path().starts_with("/api/");
+    let mut response = next.run(request).await;
+    if api {
+        let headers = response.headers_mut();
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+    }
+    response
 }
 
 /// L'`Origin` d'une écriture ou d'une connexion `/sync` est-elle acceptée ?
