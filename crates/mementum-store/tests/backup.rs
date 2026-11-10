@@ -415,6 +415,19 @@ async fn existing_backup_is_kept() {
     copy.close().await;
 }
 
+/// L'ouverture échoue, et c'est la migration qui échoue, sur la panne posée par le test : pas
+/// la copie, ni autre chose.
+async fn migration_fails(db: &Path, attempt: &str) {
+    let error = Store::open(db)
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("{attempt} : la migration doit échouer"));
+    assert!(
+        error.to_string().contains("panne simulée"),
+        "{attempt} : {error}"
+    );
+}
+
 /// La migration échoue deux fois sur une base qui n'a pas bougé entre-temps : une seule copie.
 #[tokio::test]
 async fn unchanged_database_is_not_copied_twice() {
@@ -462,7 +475,7 @@ async fn retry_loop_does_not_pile_up_copies() {
     lot1_page(&pool, vault, "Accueil", "a0").await;
     pool.close().await;
     common::break_table(&db, "INSERT", "_sqlx_migrations", "1").await;
-    assert!(Store::open(&db).await.is_err());
+    migration_fails(&db, "première tentative").await;
     assert!(backup_path(&db, 2).is_file());
 
     let old = common::side_pool(&db).await;
@@ -471,7 +484,7 @@ async fn retry_loop_does_not_pile_up_copies() {
 
     let mut dated_bytes = None;
     for attempt in 1..=3 {
-        assert!(Store::open(&db).await.is_err(), "tentative {attempt}");
+        migration_fails(&db, &format!("tentative {attempt}")).await;
         let dated = dated_copies(&db);
         assert_eq!(dated.len(), 1, "tentative {attempt} : {dated:?}");
         let bytes = std::fs::read(&dated[0]).unwrap();
@@ -493,7 +506,7 @@ async fn changed_database_gets_a_fresh_dated_copy() {
 
     // Première tentative : la copie est faite, la migration échoue.
     common::break_table(&db, "INSERT", "_sqlx_migrations", "1").await;
-    assert!(Store::open(&db).await.is_err());
+    migration_fails(&db, "première tentative").await;
     let backup = backup_path(&db, 2);
     let first = std::fs::read(&backup).unwrap();
 

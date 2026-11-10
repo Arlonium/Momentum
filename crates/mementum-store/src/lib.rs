@@ -68,7 +68,8 @@ pub use users::{NewUser, User};
 pub enum StoreError {
     /// Un espace, un nœud, un parent, un frère de référence (`after`) ou un compte n'existe
     /// pas ; la personne n'a pas de rôle dans l'espace ; l'invitation est inconnue, échue,
-    /// révoquée ou déjà acceptée.
+    /// révoquée ou déjà acceptée, ou son auteur n'a plus le rôle qu'il faut pour la faire
+    /// (Ruling R69).
     NotFound,
     /// Le déplacement ferait d'un nœud son propre descendant.
     Cycle,

@@ -490,6 +490,26 @@ async fn remove_member_drops_shared_grants_and_keeps_private_pages() {
         [grant(a, Level::Full)]
     );
     assert_eq!(rev(store, space.id).await, before);
+    // De même sur le dernier pas, la ligne d'Olga élevée à `full` sur Q (Ruling R70) : le
+    // retrait d'Alice, ses lignes déjà parties dans la transaction, est annulé avec elle.
+    break_table(db, "UPDATE", "acl", "1").await;
+    let res = store
+        .remove_member(space.id, alice.id, seen(&olga, Role::Owner, Role::Member))
+        .await;
+    assert!(matches!(res, Err(StoreError::Sqlx(_))), "{res:?}");
+    repair(db).await;
+    assert_eq!(
+        store.role_in(space.id, alice.id).await.unwrap(),
+        Some(Role::Member)
+    );
+    let mut on_q = store.node_grants(q.id).await.unwrap();
+    on_q.sort_by_key(|line| line.level);
+    assert_eq!(on_q, [grant(o, Level::Edit), grant(a, Level::Full)]);
+    assert_eq!(
+        store.node_grants(q1.id).await.unwrap(),
+        [grant(a, Level::Read)]
+    );
+    assert_eq!(rev(store, space.id).await, before);
 
     store
         .remove_member(space.id, alice.id, seen(&olga, Role::Owner, Role::Member))
@@ -826,7 +846,15 @@ async fn membership_writes_bump_rev() {
             .await
             .map(drop),
     ];
-    assert!(refused.iter().all(Result::is_err), "{refused:?}");
+    // Le dernier propriétaire ne cesse pas de l'être ; Alice n'est plus dans l'espace ;
+    // l'invitation a déjà servi.
+    let [last_owner, gone, used] = &refused;
+    assert!(
+        matches!(last_owner, Err(StoreError::LastOwner)),
+        "{last_owner:?}"
+    );
+    assert!(matches!(gone, Err(StoreError::NotFound)), "{gone:?}");
+    assert!(matches!(used, Err(StoreError::NotFound)), "{used:?}");
     assert_eq!(rev(store, space.id).await, expected, "refus");
 
     // L'adoption : un cran pour chaque espace adopté.
