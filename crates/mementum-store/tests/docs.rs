@@ -20,8 +20,8 @@ async fn fresh_page() -> (Fixture, Uuid) {
 async fn append_and_load() {
     let (f, id) = fresh_page().await;
     let store = &f.store;
-    assert_eq!(store.append_update(id, b"a").await.unwrap(), 1);
-    assert_eq!(store.append_update(id, b"b").await.unwrap(), 2);
+    assert_eq!(store.append_updates(id, &[b"a"], None).await.unwrap(), 1);
+    assert_eq!(store.append_updates(id, &[b"b"], None).await.unwrap(), 2);
     let doc = store.load_doc(id).await.unwrap();
     assert!(doc.snapshot.is_none());
     assert_eq!(doc.updates, vec![(1, b"a".to_vec()), (2, b"b".to_vec())]);
@@ -32,7 +32,7 @@ async fn append_to_unknown_page_is_not_found() {
     let (f, _id) = fresh_page().await;
     let store = &f.store;
     assert!(matches!(
-        store.append_update(Uuid::now_v7(), b"a").await,
+        store.append_updates(Uuid::now_v7(), &[b"a"], None).await,
         Err(StoreError::NotFound)
     ));
     assert!(matches!(
@@ -44,12 +44,36 @@ async fn append_to_unknown_page_is_not_found() {
     assert_eq!(int(&f.db, "SELECT COUNT(*) FROM doc_updates").await, 0);
 }
 
+/// Sans mise à jour, rien n'est écrit, mais la page et le compte sont vérifiés comme pour une
+/// écriture.
+#[tokio::test]
+async fn empty_append_checks_page_and_actor() {
+    let (f, id) = fresh_page().await;
+    let store = &f.store;
+    let actor = new_user(&f.db).await;
+    assert_eq!(store.append_updates(id, &[], None).await.unwrap(), 0);
+    assert_eq!(store.append_updates(id, &[], Some(actor)).await.unwrap(), 0);
+    assert!(matches!(
+        store.append_updates(Uuid::now_v7(), &[], None).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.append_updates(Uuid::now_v7(), &[], Some(actor)).await,
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store.append_updates(id, &[], Some(Uuid::now_v7())).await,
+        Err(StoreError::NotFound)
+    ));
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM doc_updates").await, 0);
+}
+
 #[tokio::test]
 async fn snapshot_never_goes_backwards() {
     let (f, id) = fresh_page().await;
     let store = &f.store;
     for i in 1..=12u8 {
-        store.append_update(id, &[i]).await.unwrap();
+        store.append_updates(id, &[&[i]], None).await.unwrap();
     }
     store.put_snapshot(id, 10, b"dix").await.unwrap();
     store.put_snapshot(id, 5, b"cinq").await.unwrap();
@@ -63,10 +87,13 @@ async fn seq_continues_after_snapshot() {
     let (f, id) = fresh_page().await;
     let store = &f.store;
     for i in 1..=10u8 {
-        store.append_update(id, &[i]).await.unwrap();
+        store.append_updates(id, &[&[i]], None).await.unwrap();
     }
     store.put_snapshot(id, 10, b"dix").await.unwrap();
-    assert_eq!(store.append_update(id, b"onze").await.unwrap(), 11);
+    assert_eq!(
+        store.append_updates(id, &[b"onze"], None).await.unwrap(),
+        11
+    );
     let doc = store.load_doc(id).await.unwrap();
     assert_eq!(doc.snapshot, Some((10, b"dix".to_vec())));
     assert_eq!(doc.updates, vec![(11, b"onze".to_vec())]);
@@ -81,7 +108,7 @@ async fn concurrent_appends_get_distinct_seqs() {
         tasks.push(tokio::spawn(async move {
             // Un appel sur deux écrit deux mises à jour d'un coup.
             if i % 2 == 0 {
-                s.append_update(id, &[i]).await.unwrap()
+                s.append_updates(id, &[&[i]], None).await.unwrap()
             } else {
                 s.append_updates(id, &[&[i], &[i]], None).await.unwrap()
             }
@@ -148,7 +175,7 @@ async fn append_updates_returns_last_seq() {
 async fn append_updates_is_atomic() {
     let (f, id) = fresh_page().await;
     let store = &f.store;
-    store.append_update(id, b"avant").await.unwrap();
+    store.append_updates(id, &[b"avant"], None).await.unwrap();
     let before = store.load_doc(id).await.unwrap();
 
     // La panne tombe sur la deuxième mise à jour de l'appel : la première est déjà écrite dans
@@ -193,16 +220,14 @@ async fn append_updates_records_actor() {
         .append_updates(id, &[b"c"], Some(actor))
         .await
         .unwrap();
-    // Sans acteur connu : une écriture du serveur, ou le chemin du lot 1.
+    // Sans acteur connu : une écriture du serveur.
     store.append_updates(id, &[b"d"], None).await.unwrap();
-    store.append_update(id, b"e").await.unwrap();
     assert_eq!(
         texts(&f.db, "SELECT actor_id FROM doc_updates ORDER BY seq").await,
         [
             Some(actor.to_string()),
             Some(actor.to_string()),
             Some(actor.to_string()),
-            None,
             None,
         ]
     );
@@ -213,5 +238,5 @@ async fn append_updates_records_actor() {
             .await,
         Err(StoreError::NotFound)
     ));
-    assert_eq!(store.load_doc(id).await.unwrap().updates.len(), 5);
+    assert_eq!(store.load_doc(id).await.unwrap().updates.len(), 4);
 }

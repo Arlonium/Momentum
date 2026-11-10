@@ -51,7 +51,9 @@ async fn append<'e>(
 
 impl Store {
     /// Ajoute une mise à jour au journal de la page, sans acteur, et renvoie son `seq`.
-    /// Transitoire : simple appel à [`Store::append_updates`], retiré à la Task 10 du lot 2.
+    /// Transitoire : simple appel à [`Store::append_updates`]. Plus rien ne s'en sert que des
+    /// tests du store (`tests/migration.rs`, `tests/nodes.rs`, `tests/spaces.rs`) : à retirer
+    /// avec ces appels.
     pub async fn append_update(&self, node_id: Uuid, update: &[u8]) -> Result<i64, StoreError> {
         self.append_updates(node_id, &[update], None).await
     }
@@ -59,8 +61,8 @@ impl Store {
     /// Ajoute des mises à jour au journal de la page, dans l'ordre, et renvoie le `seq` de la
     /// dernière. Elles sont écrites toutes ou aucune, avec des `seq` qui se suivent. `actor` :
     /// le compte qui écrit (`None` : inconnu, ou le serveur). `NotFound` si la page ou le compte
-    /// n'existe pas. Sans mise à jour, rien n'est écrit : c'est le `seq` où en est la page qui
-    /// est rendu (0 si elle n'a ni journal ni instantané).
+    /// n'existe pas, même sans mise à jour. Sans mise à jour, rien n'est écrit : c'est le `seq`
+    /// où en est la page qui est rendu (0 si elle n'a ni journal ni instantané).
     pub async fn append_updates(
         &self,
         node_id: Uuid,
@@ -73,10 +75,19 @@ impl Store {
         let now = now_ms();
         match updates {
             [] => {
-                let row = sqlx::query(concat!("SELECT ", last_seq!()))
-                    .bind(&id)
-                    .fetch_one(&self.pool)
-                    .await?;
+                // Rien à écrire, donc aucune clé étrangère à violer : la page et le compte
+                // sont cherchés ici.
+                let row = sqlx::query(concat!(
+                    "SELECT ",
+                    last_seq!(),
+                    " FROM nodes WHERE id = ?1 \
+                     AND (?2 IS NULL OR EXISTS (SELECT 1 FROM users WHERE id = ?2))"
+                ))
+                .bind(&id)
+                .bind(actor)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or(StoreError::NotFound)?;
                 Ok(row.get(0))
             }
             // Une seule instruction est déjà atomique : le chemin de chaque frappe ne paie pas
