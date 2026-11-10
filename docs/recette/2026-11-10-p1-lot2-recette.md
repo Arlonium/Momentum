@@ -205,13 +205,13 @@ Remarques :
 
 Le dessin doit ressembler à Notion sans le copier : mêmes emplacements, tons de papier, un seul vert. Regarde chaque écran d'un œil critique, et note ce qui s'en écarte.
 
-- [ ] **J1. Connexion.** Déconnecte-toi. Tu dois voir une colonne étroite, centrée, sur fond blanc : le carré vert « M » et « Mementum », un titre en gras, deux champs à bordure fine, un bouton vert plein sur toute la largeur. Rien d'autre à l'écran.
+- [ ] **J1. Connexion.** Déconnecte-toi. Tu dois voir une colonne étroite, centrée, sur fond blanc : le carré vert « M » et « Mementum », un titre en gras, deux champs à bordure fine, un bouton vert plein sur toute la largeur. Rien d'autre à l'écran. Reconnecte-toi ensuite.
 - [ ] **J2. Barre latérale.** Fond gris chaud très clair, séparé de la page par un trait fin. Les titres de section sont petits et gris. Les lignes sont serrées et régulières. La page ouverte a un fond un peu plus foncé. « Corbeille » reste collée en bas, même quand la liste défile.
 - [ ] **J3. Page.** Une colonne blanche centrée, large de 760 pixels au plus. Le titre est grand et gras. Il est aligné, à gauche, sur le texte qui le suit.
 - [ ] **J4. Barre du haut.** Elle est fine : le titre de la page à gauche, en gris, « Partager » à droite. Passe d'une page avec « Partager » à une page sans (une page de la corbeille) : le contenu ne doit pas sauter en hauteur.
 - [ ] **J5. Menu Partager.** Un panneau blanc sous le bouton, aligné sur son bord droit, coins arrondis, ombre douce. « Inviter » est le seul bouton vert plein. « Retirer » et « Révoquer » sont discrets, en simple texte. Le choix coché de l'accès général est sur fond gris clair, avec une pastille verte. Aucun texte ne déborde ni ne passe à la ligne pour un seul mot.
 - [ ] **J6. Corbeille et réglages.** Même colonne que la page, mêmes titres. Les parties sont séparées par un trait fin. « Retirer », « Révoquer » et « Supprimer définitivement » sont discrets dans les listes. Le rouge est gardé pour « Quitter l'espace » et pour les boutons des fenêtres de confirmation.
-- [ ] **J7. Écrans d'erreur.** Dans la fenêtre 1, ajoute des lettres à la fin de l'adresse d'une page, puis Entrée. Tu dois lire « Page introuvable », avec une phrase simple, en français. Aucun code technique, aucun mot d'anglais.
+- [ ] **J7. Écrans d'erreur.** Dans la fenêtre 1, change le dernier caractère de l'adresse d'une page, puis Entrée. Tu dois lire « Page introuvable », avec une phrase simple, en français. Aucun code technique, aucun mot d'anglais.
 - [ ] **J8. Survol et clavier.** Survole les lignes, les boutons, les entrées de menu : chacun doit réagir par un léger changement de fond. Appuie plusieurs fois sur Tab : ce qui a le focus doit porter un contour vert, bien visible.
 - [ ] **J9. Fenêtre étroite.** Réduis la fenêtre à la moitié de l'écran. La barre latérale garde sa largeur, le texte de la page se resserre, et le menu Partager reste en entier dans la fenêtre. Il n'y a pas encore de mise en page pour téléphone : en dessous de cette largeur, ne signale rien.
 
@@ -222,12 +222,12 @@ Remarques :
 - [ ] **K1. Réseau coupé.** Fenêtre 1, sur une page : ouvre les outils du navigateur (F12), onglet « Réseau », et choisis « Hors connexion » (« Offline »). Continue de taper. Après une ou deux secondes, la barre du haut doit dire « Hors ligne : tes modifications partiront au retour du réseau ». Tu peux encore écrire. Si la mention ne vient pas, ton navigateur ne coupe pas ce type de connexion : arrête plutôt le serveur (Ctrl+C dans son terminal).
 - [ ] **K2. Réseau rétabli.** Remets le réglage d'origine dans le même onglet (ou relance le serveur). La mention doit partir. Recharge la page : ce que tu as tapé hors ligne doit être là.
 - [ ] **K3. Rechargement en pleine frappe.** Tape une phrase et appuie sur F5 dans la seconde. Après le rechargement, la phrase doit être là.
-- [ ] **K4. Une page sans y avoir droit.** Fenêtre 1 : copie l'adresse d'une page de « Privé ». Fenêtre 2 : connecte-toi en Camille et colle cette adresse. Tu dois lire « Page introuvable », exactement comme pour l'adresse inventée de J7. Rien ne doit dire que la page existe.
+- [ ] **K4. Une page sans y avoir droit.** Fenêtre 1 : copie l'adresse d'une page de « Privé ». Fenêtre 2 : déconnecte Dana, connecte-toi avec le compte de Camille, puis colle cette adresse. Tu dois lire « Page introuvable », exactement comme pour l'adresse inventée de J7. Rien ne doit dire que la page existe.
 - [ ] **K5. Très longue page.** Colle un très long texte dans une page (plusieurs centaines de lignes). La frappe et le défilement doivent rester fluides.
 - [ ] **K6. Titre très long.** Donne à une page un titre de trois lignes. Dans la page, il passe à la ligne. Dans la barre latérale, il est coupé par des points de suspension, sur une seule ligne, sans passer sous les boutons « … » et « + ».
 - [ ] **K7. Bouton Précédent.** Ouvre trois pages l'une après l'autre, puis clique deux fois Précédent. Tu dois revenir à la première, et la ligne de la page ouverte doit suivre dans la barre latérale.
 - [ ] **K8. Précédent après la déconnexion.** Déconnecte-toi, puis clique Précédent. Tu ne dois pas revoir tes pages : l'écran « Se connecter » doit revenir.
-- [ ] **K9. Deux onglets du même compte.** Ouvre la même page dans deux onglets de la fenêtre 1. Tape dans l'un : le texte doit apparaître dans l'autre.
+- [ ] **K9. Deux onglets du même compte.** Reconnecte-toi, puis ouvre la même page dans deux onglets de la fenêtre 1. Tape dans l'un : le texte doit apparaître dans l'autre.
 - [ ] **K10. Déconnexion dans un onglet.** Déconnecte-toi dans l'un des deux. Dans l'autre, une fenêtre « Ta session a pris fin » doit s'ouvrir par-dessus la page, sans la fermer. Reconnecte-toi là : la page doit être restée, avec son texte.
 
 Remarques :
