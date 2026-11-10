@@ -410,6 +410,59 @@ test("unreadable_tree_offers_to_retry", async ({ browser }) => {
   await expect(alert).toHaveCount(0);
 });
 
+test("sidebar_retry_is_only_under_the_failed_tree_read", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+
+  const p = await newUser(browser, alice);
+  // L'horloge de la page est la nôtre : on n'attend pas cinq secondes pour de bon.
+  await p.clock.install();
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo"]);
+  const alert = sidebarOf(p).getByRole("alert");
+  const retry = sidebarOf(p).getByRole("button", { name: "Réessayer" });
+
+  // Le serveur ne répond plus, ni pour l'arbre, ni pour ce qu'on change. De retour sur
+  // l'onglet, la relecture de l'arbre échoue : son message, et de quoi la refaire.
+  const tree = "**/api/v1/spaces/*/tree";
+  const pages = "**/api/v1/pages/**";
+  await p.route(tree, (route) => route.abort());
+  await p.route(pages, (route) =>
+    route.request().method() === "GET" ? route.continue() : route.abort(),
+  );
+  await p.clock.fastForward(5_500);
+  await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(alert).toContainText("La liste des pages n'a pas pu être mise à jour");
+  await expect(retry).toBeVisible();
+
+  // Un déplacement échoue à son tour, et la relecture qui le suit aussi. C'est son refus qui
+  // est dit : « Réessayer », qui ne le referait pas, n'est pas dessous.
+  const reread = p.waitForEvent("requestfailed", (request) => request.url().endsWith("/tree"));
+  await (await openRowMenu(p, b.id, "Bravo"))
+    .getByRole("menuitem", { name: "Déplacer vers le haut" })
+    .click();
+  await reread;
+  await expect(alert).toContainText("La page n'a pas pu être déplacée");
+  await expect(alert).not.toContainText("La liste des pages");
+  await expect(retry).toHaveCount(0);
+
+  // Le refus part à la navigation suivante : la lecture qui a échoué se dit de nouveau, avec
+  // son bouton, qui la refait une fois le serveur revenu.
+  await treeRow(p, a.id).getByRole("link").click();
+  await expect(titleOf(p)).toHaveValue("Alpha");
+  await expect(alert).toContainText("La liste des pages n'a pas pu être mise à jour");
+  const c = await createPage(api, { title: "Charlie" });
+  await p.unroute(tree);
+  await p.unroute(pages);
+  await retry.click();
+  await expect(treeRow(p, c.id)).toBeVisible();
+  await expect(alert).toHaveCount(0);
+  await expect(retry).toHaveCount(0);
+});
+
 test("unreadable_page_offers_to_retry", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);

@@ -78,11 +78,14 @@ export function Sidebar({
   // Un invité ne crée pas de page à la racine d'un espace.
   const member = space !== null && space.role !== "guest";
   // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
-  const message =
-    notice ??
-    (readError === null
+  const readFailure =
+    readError === null
       ? null
-      : `La liste des pages n'a pas pu être ${nodes === null ? "lue" : "mise à jour"}. ${readError}`);
+      : `La liste des pages n'a pas pu être ${nodes === null ? "lue" : "mise à jour"}. ${readError}`;
+  const message = notice ?? readFailure;
+  // « Réessayer » refait la lecture, pas l'action refusée : il n'est que sous le message de la
+  // lecture, qui revient quand le refus n'est plus dit.
+  const retryable = notice === null && readFailure !== null;
   return (
     <nav ref={setScroller} className="mm-sidebar" aria-label="Barre latérale">
       <div ref={setHead} className="mm-side-head">
@@ -127,7 +130,7 @@ export function Sidebar({
               {message}
             </p>
           )}
-          {readError !== null && (
+          {retryable && (
             // Sans attendre le retour sur l'onglet ou celui du réseau : la lecture se refait ici.
             <button type="button" className="mm-button mm-button-small mm-side-retry" onClick={onRetry}>
               Réessayer
