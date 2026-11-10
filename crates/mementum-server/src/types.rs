@@ -407,14 +407,15 @@ pub struct InvitationInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PageAccess {
-    /// L'accès général : le niveau que la ligne `members` de la page, ou d'un ancêtre (la plus
-    /// forte), donne aux membres de l'espace (les propriétaires et les admins y ont `full`).
-    /// `null` : seulement les personnes nommées ci-dessous.
+    /// L'accès général effectif : le niveau que la ligne `members` de la page, ou d'un ancêtre
+    /// (la plus forte), donne aux membres de l'espace (les propriétaires et les admins y ont
+    /// `full`). `null` : seulement les personnes nommées ci-dessous.
     pub general: Option<Level>,
-    /// L'accès général affiché vient d'une page parente, au moins en partie (sa ligne `members`
-    /// donne au moins ce niveau) : il ne se retire ni ne se baisse ici (`409 inherited_access`) ;
-    /// il peut y monter.
-    pub general_inherited: bool,
+    /// Le plancher de l'accès général (Ruling R93) : le niveau que la ligne `members` d'un
+    /// ancêtre donne aux membres (la plus forte des ancêtres). On ne le baisse ni ne le retire
+    /// ici (`409 inherited_access`) : les choix plus bas sont à griser. `null` : aucun ancêtre
+    /// n'en a.
+    pub inherited_general: Option<Level>,
     /// Les comptes qui ont un rôle dans l'espace et une ligne sur la page ou sur un ancêtre,
     /// une fois chacun, dans l'ordre de leur arrivée dans l'espace.
     pub entries: Vec<AccessEntry>,
@@ -442,8 +443,10 @@ pub struct AccessEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetGeneral {
-    /// Le niveau de la ligne `members` de la page ; `null` : « seulement les invités », la
-    /// ligne est retirée. Obligatoire : un corps sans lui ne retire rien.
+    /// Le niveau de la ligne `members` de la page ; `null` : la ligne est retirée (on revient au
+    /// plancher d'une page parente, `inheritedGeneral`, ou sans lui à « seulement les personnes
+    /// nommées »). Au plancher, la ligne part aussi ; dessous, `409 inherited_access` (Ruling
+    /// R93). Obligatoire : un corps sans lui ne retire rien.
     #[serde(deserialize_with = "nullable")]
     pub level: Option<Level>,
 }

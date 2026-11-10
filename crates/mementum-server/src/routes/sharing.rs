@@ -4,7 +4,7 @@
 //! | Route | Réponse |
 //! |---|---|
 //! | `GET /api/v1/pages/{id}/access` | [`PageAccess`] |
-//! | `PUT /api/v1/pages/{id}/access/general` ([`SetGeneral`]) | [`PageAccess`] ; `level: null` = « seulement les invités » : la ligne `members` de la page est retirée ; réservé aux rôles `member` et plus (R85) ; `409 inherited_access` sous l'accès général d'une page parente |
+//! | `PUT /api/v1/pages/{id}/access/general` ([`SetGeneral`]) | [`PageAccess`] ; `level: null` : la ligne `members` de la page est retirée ; réservé aux rôles `member` et plus (R85) ; `409 inherited_access` sous le plancher d'une page parente (R93) |
 //! | `PUT /api/v1/pages/{id}/access/users/{userId}` ([`SetLevel`]) | [`PageAccess`] ; `404` si le compte n'a aucun rôle dans l'espace |
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | [`PageAccess`] ; `404` si la page n'a pas de ligne propre pour ce compte |
 //! | `POST /api/v1/pages/{id}/invitations` ([`InviteToPage`]) | `201`, `InvitationCreated` |
@@ -34,8 +34,11 @@
 //! - un invité en `full` fait tout ce que donne `full` (Ruling R86 : inviter jusqu'à `full`,
 //!   changer ou retirer les lignes des autres, lire les accès, révoquer les invitations de la
 //!   page), sauf toucher à l'accès général (R85) ;
-//! - l'accès général qu'une page parente donne (`generalInherited`) ne se retire ni ne se
-//!   baisse sur la sous-page (`409 inherited_access`) ; il peut y monter ;
+//! - l'accès général qu'une page parente donne est le plancher de la sous-page (Ruling R93,
+//!   `inheritedGeneral` ; `general` est le niveau effectif) : un niveau plus bas, ou `null`
+//!   sans ligne propre, répond `409 inherited_access` ; au plancher, la ligne propre part ;
+//!   au-dessus, elle est posée ; `null` la retire (on revient au plancher, ou, sans plancher, à
+//!   « seulement les personnes nommées »). Il ne reste jamais de ligne redondante ;
 //! - après tout changement, la page garde quelqu'un en `full`, par ses lignes ou par celles
 //!   d'un ancêtre (Ruling R70 : une ligne `members` compte, les admins y ont `full` ; une ligne
 //!   restée à quelqu'un sans rôle, non) ; sinon `409 last_full_access`, et rien n'est écrit ;
@@ -302,8 +305,7 @@ async fn page_access(state: &AppState, node: &Node) -> Result<PageAccess, ApiErr
         .collect();
     Ok(PageAccess {
         general: own_general.max(above_general).map(Into::into),
-        general_inherited: above_general
-            .is_some_and(|above| own_general.is_none_or(|own| above >= own)),
+        inherited_general: above_general.map(Into::into),
         entries,
         invitations,
     })

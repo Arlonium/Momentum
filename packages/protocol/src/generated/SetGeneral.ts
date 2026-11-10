@@ -6,7 +6,9 @@ import type { Level } from "./Level";
  */
 export type SetGeneral = { 
 /**
- * Le niveau de la ligne `members` de la page ; `null` : « seulement les invités », la
- * ligne est retirée. Obligatoire : un corps sans lui ne retire rien.
+ * Le niveau de la ligne `members` de la page ; `null` : la ligne est retirée (on revient au
+ * plancher d'une page parente, `inheritedGeneral`, ou sans lui à « seulement les personnes
+ * nommées »). Au plancher, la ligne part aussi ; dessous, `409 inherited_access` (Ruling
+ * R93). Obligatoire : un corps sans lui ne retire rien.
  */
 level: Level | null, };

@@ -58,8 +58,9 @@ pub enum ShareRefusal {
     /// La page n'a pas de ligne propre pour la personne dont on retire l'accès (elle n'en a
     /// aucune, ou seulement sur un ancêtre).
     NoOwnLine,
-    /// L'accès général demandé (retiré, ou un niveau plus bas) est sous celui qu'une ligne
-    /// `members` d'un ancêtre donne déjà : il ne se baisse pas ici.
+    /// Ruling R93 : l'accès général demandé est sous le plancher que donne la ligne `members`
+    /// d'un ancêtre, ou c'est `null` alors que la page n'a pas de ligne propre et qu'un ancêtre
+    /// en a une : il ne se baisse ni ne se retire ici.
     InheritedAccess,
 }
 
@@ -146,6 +147,43 @@ struct Chain {
     in_trash: bool,
     /// Les lignes de la page et de ses ancêtres : `(nœud, accès)`.
     lines: Vec<(String, Grant)>,
+}
+
+impl Chain {
+    /// La page `node` a-t-elle sa propre ligne pour `subject` ?
+    fn has_own(&self, node: &str, subject: Subject) -> bool {
+        self.lines
+            .iter()
+            .any(|(on, grant)| on == node && grant.subject == subject)
+    }
+}
+
+/// Ruling R93 : la ligne `members` de la page `node` (de chaîne `chain`) quand on demande
+/// `wanted` comme accès général : posée à ce niveau, ou retirée (`None`). Le plancher est la
+/// plus forte des lignes `members` des ancêtres ; il n'y a jamais de ligne redondante :
+/// - `null` : la ligne propre part (sans elle, rien) ; sans ligne propre sous un plancher,
+///   `InheritedAccess`, le plancher ne se retire pas d'ici ;
+/// - un niveau sous le plancher : `InheritedAccess` (la ligne n'aurait aucun effet) ; au
+///   plancher : la ligne propre part ; au-dessus, ou sans plancher : elle est posée.
+fn general_line(
+    chain: &Chain,
+    node: &str,
+    wanted: Option<Level>,
+) -> Result<Option<Level>, StoreError> {
+    let floor = chain
+        .lines
+        .iter()
+        .filter(|(on, grant)| on != node && grant.subject == Subject::Members)
+        .map(|(_, grant)| grant.level)
+        .max();
+    let refused = || Err(StoreError::Refused(ShareRefusal::InheritedAccess));
+    match (wanted, floor) {
+        (None, Some(_)) if !chain.has_own(node, Subject::Members) => refused(),
+        (None, _) => Ok(None),
+        (Some(level), Some(floor)) if level < floor => refused(),
+        (Some(level), Some(floor)) if level == floor => Ok(None),
+        (Some(level), _) => Ok(Some(level)),
+    }
 }
 
 /// La chaîne de la page `node_id`, lue dans la transaction. `None` : la page n'existe pas, ou
@@ -340,8 +378,9 @@ impl Store {
     /// - ni la page ni un ancêtre n'est à la corbeille : `Trashed` ;
     /// - la personne qui reçoit un accès a un rôle dans l'espace (`NotInSpace`) ; celle dont on
     ///   retire l'accès a une ligne sur la page (`NoOwnLine`) ;
-    /// - l'accès général ne se retire ni ne descend sous celui qu'une ligne `members` d'un
-    ///   ancêtre donne déjà : `InheritedAccess` ; égal ou plus haut, il s'écrit ;
+    /// - l'accès général a pour plancher la ligne `members` d'un ancêtre (Ruling R93, voir
+    ///   `general_line`) : sous lui, ou `null` sans ligne propre, `InheritedAccess` ; à son
+    ///   niveau, la ligne propre part ; au-dessus, elle est posée ; jamais de ligne redondante ;
     /// - Ruling R70 : après le changement, la page garde quelqu'un en `full`, par ses lignes ou
     ///   par celles d'un ancêtre (une ligne `members` compte ; une ligne restée à quelqu'un sans
     ///   rôle, non) ; sinon `LastFullAccess`.
@@ -360,43 +399,29 @@ impl Store {
         let general = matches!(change, AccessChange::Members(_));
         let chain = check_sharer(&mut tx, &node, actor, general).await?;
         let space_id = parse_uuid(&chain.space)?;
-        match change {
-            AccessChange::User(target, Some(_)) => {
+        // La ligne de la page après le changement : posée à ce niveau, ou retirée (`None`).
+        let (subject, line) = match change {
+            AccessChange::User(target, Some(level)) => {
                 if role_of(&mut tx, &chain.space, &target.to_string())
                     .await?
                     .is_none()
                 {
                     return Err(StoreError::Refused(ShareRefusal::NotInSpace));
                 }
+                (Subject::User(target), Some(level))
             }
             AccessChange::User(target, None) => {
-                let own = chain
-                    .lines
-                    .iter()
-                    .any(|(on, grant)| *on == node && grant.subject == Subject::User(target));
-                if !own {
+                let subject = Subject::User(target);
+                if !chain.has_own(&node, subject) {
                     return Err(StoreError::Refused(ShareRefusal::NoOwnLine));
                 }
+                (subject, None)
             }
             AccessChange::Members(wanted) => {
-                let inherited = chain
-                    .lines
-                    .iter()
-                    .filter(|(on, grant)| *on != node && grant.subject == Subject::Members)
-                    .map(|(_, grant)| grant.level)
-                    .max();
-                if let Some(inherited) = inherited
-                    && wanted.is_none_or(|wanted| wanted < inherited)
-                {
-                    return Err(StoreError::Refused(ShareRefusal::InheritedAccess));
-                }
+                (Subject::Members, general_line(&chain, &node, wanted)?)
             }
-        }
-        let (subject, level) = match change {
-            AccessChange::Members(level) => (Subject::Members, level),
-            AccessChange::User(user, level) => (Subject::User(user), level),
         };
-        let changed = match level {
+        let changed = match line {
             Some(level) => write_grant(&mut tx, &node, Grant { subject, level }).await?,
             None => {
                 sqlx::query("DELETE FROM acl WHERE node_id = ? AND subject = ?")

@@ -30,8 +30,8 @@
 //! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon ; `409 not_trashed` |
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
 //! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait |
-//! | `GET /api/v1/pages/{id}/access` | `full` | `PageAccess` : l'accès général (et s'il vient d'une page parente), les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
-//! | `PUT /api/v1/pages/{id}/access/general` | `full`, et le rôle `member` ou plus (un invité : `403`, R85) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `level: null` retire la ligne `members` de la page ; `409 inherited_access` (retirer ou baisser l'accès qu'une page parente donne) ; `409 last_full_access` |
+//! | `GET /api/v1/pages/{id}/access` | `full` | `PageAccess` : l'accès général effectif et son plancher (celui d'une page parente), les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
+//! | `PUT /api/v1/pages/{id}/access/general` | `full`, et le rôle `member` ou plus (un invité : `403`, R85) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `level: null` retire la ligne `members` de la page ; le plancher est l'accès qu'une page parente donne (R93) : au plancher, la ligne propre part, il n'en reste jamais de redondante ; `409 inherited_access` sous lui, ou pour `null` sans ligne propre ; `409 last_full_access` |
 //! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`, de même) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` |
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |

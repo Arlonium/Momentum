@@ -10,17 +10,18 @@ import type { PendingInvitation } from "./PendingInvitation";
  */
 export type PageAccess = { 
 /**
- * L'accès général : le niveau que la ligne `members` de la page, ou d'un ancêtre (la plus
- * forte), donne aux membres de l'espace (les propriétaires et les admins y ont `full`).
- * `null` : seulement les personnes nommées ci-dessous.
+ * L'accès général effectif : le niveau que la ligne `members` de la page, ou d'un ancêtre
+ * (la plus forte), donne aux membres de l'espace (les propriétaires et les admins y ont
+ * `full`). `null` : seulement les personnes nommées ci-dessous.
  */
 general: Level | null, 
 /**
- * L'accès général affiché vient d'une page parente, au moins en partie (sa ligne `members`
- * donne au moins ce niveau) : il ne se retire ni ne se baisse ici (`409 inherited_access`) ;
- * il peut y monter.
+ * Le plancher de l'accès général (Ruling R93) : le niveau que la ligne `members` d'un
+ * ancêtre donne aux membres (la plus forte des ancêtres). On ne le baisse ni ne le retire
+ * ici (`409 inherited_access`) : les choix plus bas sont à griser. `null` : aucun ancêtre
+ * n'en a.
  */
-generalInherited: boolean, 
+inheritedGeneral: Level | null, 
 /**
  * Les comptes qui ont un rôle dans l'espace et une ligne sur la page ou sur un ancêtre,
  * une fois chacun, dans l'ordre de leur arrivée dans l'espace.

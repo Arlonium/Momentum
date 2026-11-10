@@ -1114,28 +1114,41 @@ async fn sharing_is_not_blocked_by_writes_elsewhere_in_the_space() {
     assert!(entries(&access_of(olga, project).await).contains(&entry(&team.tom, "edit", false)));
 }
 
-/// L'accès général qu'une page parente donne se voit sur la sous-page (`generalInherited`) et ne
-/// s'y baisse ni ne s'y retire : `409 inherited_access`, rien d'écrit. Plus haut, ou au même
-/// niveau, il s'écrit.
+/// Ruling R93 : l'accès général qu'une page parente donne est le plancher de la sous-page
+/// (`inheritedGeneral`) ; `general` est le niveau effectif. Sous le plancher, ou `null` sans
+/// ligne propre : `409 inherited_access`, rien d'écrit. Au plancher : la ligne propre part, il
+/// n'en reste jamais de redondante. Au-dessus : elle est posée ; `null` la retire et revient au
+/// plancher. Sans plancher : `null` retire la ligne propre, ou ne fait rien. Chaque cas, avec ce
+/// qui reste en base et ce que rend `PageAccess`.
 #[tokio::test]
-async fn inherited_general_access_is_not_lowered_from_the_child() {
+async fn inherited_general_access_is_a_floor_on_the_child() {
     let t = open_app().await;
     let team = Team::new(&t).await;
     let olga = &team.olga.browser;
     let parent = team.page(None, "Parent", &[members(Level::Edit)]).await;
     let child = team.page(Some(parent), "Enfant", &[]).await;
+    // `(general, inheritedGeneral)` d'un `PageAccess`.
+    let floor = |access: &Value| {
+        (
+            access["general"].clone(),
+            access["inheritedGeneral"].clone(),
+        )
+    };
+    let edit_floor = (json!("edit"), json!("edit"));
+    // Un `PUT …/general` qui passe : `200`, et le `PageAccess` rendu.
+    let set = async |id: Uuid, level: Value| {
+        let reply = set_general(olga, id, level.clone()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{level} : {}", reply.text());
+        reply.json()
+    };
 
-    let access = access_of(olga, child).await;
+    assert_eq!(floor(&access_of(olga, child).await), edit_floor);
     assert_eq!(
-        (&access["general"], &access["generalInherited"]),
-        (&json!("edit"), &json!(true))
-    );
-    let access = access_of(olga, parent).await;
-    assert_eq!(
-        (&access["general"], &access["generalInherited"]),
-        (&json!("edit"), &json!(false))
+        floor(&access_of(olga, parent).await),
+        (json!("edit"), Value::Null)
     );
 
+    // Sous le plancher, ou `null` sans ligne propre : refusé, rien d'écrit.
     let refused = async |level: Value| {
         let before = team.grants(child).await;
         let reply = set_general(olga, child, level.clone()).await;
@@ -1149,16 +1162,14 @@ async fn inherited_general_access_is_not_lowered_from_the_child() {
     for level in [Value::Null, json!("read"), json!("comment")] {
         refused(level).await;
     }
+    // Au plancher, sans ligne propre : rien à écrire.
+    assert_eq!(floor(&set(child, json!("edit")).await), edit_floor);
     assert!(team.grants(child).await.is_empty());
 
-    // Plus haut : écrit, et ce n'est plus l'héritage qu'on voit.
-    let reply = set_general(olga, child, json!("full")).await;
-    reply.assert_status(StatusCode::OK);
-    let access = reply.json();
-    assert_eq!(
-        (&access["general"], &access["generalInherited"]),
-        (&json!("full"), &json!(false))
-    );
+    // Au-dessus : la ligne est posée ; c'est elle qu'on voit, sur le plancher hérité.
+    let access = set(child, json!("full")).await;
+    assert_eq!(floor(&access), (json!("full"), json!("edit")));
+    assert_eq!(team.grants(child).await, [members(Level::Full)]);
     assert_eq!(
         seen(&team.mona.browser, team.space).await,
         [
@@ -1166,17 +1177,44 @@ async fn inherited_general_access_is_not_lowered_from_the_child() {
             page("Parent", "edit", "space")
         ]
     );
-    // Retirer sa ligne ne la rendrait pas aux seuls invités : refusé ; revenir au niveau hérité,
-    // oui.
-    refused(Value::Null).await;
-    assert_eq!(team.grants(child).await, [members(Level::Full)]);
-    let reply = set_general(olga, child, json!("edit")).await;
-    reply.assert_status(StatusCode::OK);
-    let access = reply.json();
+    // Ligne propre plus haute, puis `null` : retour au plancher, sans ligne.
+    assert_eq!(floor(&set(child, Value::Null).await), edit_floor);
+    assert!(team.grants(child).await.is_empty());
     assert_eq!(
-        (&access["general"], &access["generalInherited"]),
-        (&json!("edit"), &json!(true))
+        seen(&team.mona.browser, team.space).await,
+        [
+            page("Enfant", "edit", "space"),
+            page("Parent", "edit", "space")
+        ]
     );
+    // Ligne propre plus haute, puis le niveau du plancher : pas de ligne redondante.
+    set(child, json!("full")).await;
+    assert_eq!(floor(&set(child, json!("edit")).await), edit_floor);
+    assert!(team.grants(child).await.is_empty());
+    // Sous le plancher, même avec une ligne propre : refusé, elle reste.
+    set(child, json!("full")).await;
+    refused(json!("read")).await;
+    assert_eq!(team.grants(child).await, [members(Level::Full)]);
+
+    // Sans plancher (une page privée d'Olga) : `null` sans ligne ne fait rien ; un niveau se
+    // pose ; `null` le retire.
+    let alone = team
+        .page(None, "Seule", &[user(&team.olga, Level::Full)])
+        .await;
+    assert_eq!(
+        floor(&set(alone, Value::Null).await),
+        (Value::Null, Value::Null)
+    );
+    assert_eq!(team.grants(alone).await, [user(&team.olga, Level::Full)]);
+    assert_eq!(
+        floor(&set(alone, json!("read")).await),
+        (json!("read"), Value::Null)
+    );
+    assert_eq!(
+        floor(&set(alone, Value::Null).await),
+        (Value::Null, Value::Null)
+    );
+    assert_eq!(team.grants(alone).await, [user(&team.olga, Level::Full)]);
 }
 
 /// Une page à la corbeille garde ses accès : on les lit, on ne les change pas (`409 trashed`).

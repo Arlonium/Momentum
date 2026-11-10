@@ -487,53 +487,93 @@ async fn change_access_checks_who_asks_in_its_transaction() {
     }
 }
 
-/// L'accès général d'une page ne se baisse ni ne se retire en dessous de celui que donne une
-/// ligne `members` d'un ancêtre (`InheritedAccess`, rien d'écrit) ; un niveau égal ou plus haut
-/// s'écrit.
+/// Ruling R93 : l'accès général d'une page a pour plancher celui que donne la ligne `members`
+/// d'un ancêtre, et ne laisse jamais de ligne redondante. Avec un plancher : plus bas,
+/// `InheritedAccess` ; égal, la ligne propre part (s'il y en a une) ; plus haut, elle est
+/// posée ; `null` retire la ligne propre, et sans ligne propre, `InheritedAccess`. Sans
+/// plancher : `null` retire la ligne propre (sans elle, rien), un niveau la pose. Chaque cas,
+/// avec ce qui reste en base.
 #[tokio::test]
-async fn change_access_refuses_to_lower_an_inherited_general_access() {
+async fn change_access_keeps_general_access_above_the_inherited_floor() {
     let f = fresh().await;
     let (store, space) = (&f.store, &f.space);
     let t = team(store, space.id).await;
     let parent = page_with(store, space, None, &[(Subject::Members, Level::Edit)]).await;
     let child = page_with(store, space, Some(parent), &[]).await;
+    let general = |level: Option<Level>| AccessChange::Members(level);
+    // La ligne `members` posée sur la page, s'il y en a une.
+    let own = async |node: Uuid| {
+        store
+            .node_grants(node)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|g| g.subject == Subject::Members)
+            .map(|g| g.level)
+    };
     let refused = async |level: Option<Level>| {
         let before = untouched(store, space, child).await;
-        let r = store
-            .change_access(child, AccessChange::Members(level), t.olga)
-            .await;
+        let r = store.change_access(child, general(level), t.olga).await;
         assert!(
             matches!(r, Err(StoreError::Refused(ShareRefusal::InheritedAccess))),
             "{level:?} : {r:?}"
         );
-        assert_eq!(untouched(store, space, child).await, before);
+        assert_eq!(untouched(store, space, child).await, before, "{level:?}");
     };
+    // Rend vrai si une ligne a été écrite ou retirée.
+    let set = async |node: Uuid, level: Option<Level>| {
+        store
+            .change_access(node, general(level), t.olga)
+            .await
+            .unwrap()
+            .changed
+    };
+
+    // Plancher `edit`, sans ligne propre : `null` et plus bas refusés ; égal, rien à écrire.
     for level in [None, Some(Level::Read), Some(Level::Comment)] {
         refused(level).await;
     }
-    for level in [Level::Edit, Level::Full] {
-        let written = store
-            .change_access(child, AccessChange::Members(Some(level)), t.olga)
-            .await
-            .unwrap();
-        assert!(written.changed, "{level:?}");
-        assert_eq!(
-            store.node_grants(child).await.unwrap(),
-            [grant(Subject::Members, level)]
-        );
-    }
-    // Plus haut que l'héritage, la ligne de la page ne se retire pas non plus : on revient au
-    // niveau hérité.
-    refused(None).await;
+    assert!(!set(child, Some(Level::Edit)).await);
+    assert_eq!(own(child).await, None);
+    // Plus haut : la ligne est posée.
+    assert!(set(child, Some(Level::Full)).await);
+    assert_eq!(own(child).await, Some(Level::Full));
+    // `null` avec une ligne propre : elle part, on revient au plancher, sans ligne.
+    assert!(set(child, None).await);
+    assert_eq!(own(child).await, None);
+    // Égal au plancher avec une ligne propre plus haute : elle part aussi, sans ligne.
+    assert!(set(child, Some(Level::Full)).await);
+    assert!(set(child, Some(Level::Edit)).await);
+    assert_eq!(own(child).await, None);
+
+    // Une ligne redondante d'avant (posée sous le plancher, ou à son niveau) : plus bas reste
+    // refusé ; égal ou `null` la retirent.
     store
-        .change_access(child, AccessChange::Members(Some(Level::Edit)), t.olga)
+        .set_grant(child, grant(Subject::Members, Level::Read))
         .await
         .unwrap();
-    // Sur la page parente, rien n'est hérité : elle baisse.
+    refused(Some(Level::Read)).await;
+    assert_eq!(own(child).await, Some(Level::Read));
+    assert!(set(child, Some(Level::Edit)).await);
+    assert_eq!(own(child).await, None);
     store
-        .change_access(parent, AccessChange::Members(Some(Level::Read)), t.olga)
+        .set_grant(child, grant(Subject::Members, Level::Edit))
         .await
         .unwrap();
+    assert!(set(child, None).await);
+    assert_eq!(own(child).await, None);
+
+    // Sans plancher (une page d'Olga, à la racine) : `null` sans ligne, rien ; un niveau, posé ;
+    // `null`, retiré.
+    let alone = page_with(store, space, None, &[(Subject::User(t.olga), Level::Full)]).await;
+    assert!(!set(alone, None).await);
+    assert!(set(alone, Some(Level::Read)).await);
+    assert_eq!(own(alone).await, Some(Level::Read));
+    assert!(set(alone, None).await);
+    assert_eq!(own(alone).await, None);
+    // La page parente n'a pas de plancher : elle baisse.
+    assert!(set(parent, Some(Level::Read)).await);
+    assert_eq!(own(parent).await, Some(Level::Read));
 }
 
 /// Une ligne déjà ainsi n'écrit rien : la révision de l'espace ne bouge pas. Un changement fait
