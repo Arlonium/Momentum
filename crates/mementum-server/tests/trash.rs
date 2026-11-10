@@ -2,34 +2,21 @@
 //! n'écrit dans une page qui y est, on ne supprime définitivement que ce qui y est, et ce qui
 //! est supprimé l'est pour de bon. Les connexions de synchro des pages touchées sont fermées.
 //!
-//! Les aides (application en mémoire, équipe, routes d'une page) sont dans `common/mod.rs`.
+//! Les aides (application en mémoire, équipe, routes d'une page) sont dans `common/mod.rs`,
+//! celles des connexions de synchro dans `common/sync.rs`.
 
 mod common;
 
 use axum::http::StatusCode;
+use common::sync::{members, open_app, still_served, user};
 use common::{
     Account, Browser, Team, TestApp, WAIT, exec_sql, outcome, page_routes, query_i64, sync_as,
     sync_url, synced_as, text, trash_list, tree_nodes,
 };
-use mementum_acl::{Level, Subject};
-use mementum_server::SignupMode;
+use mementum_acl::Level;
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-/// Une application où tout le monde peut s'inscrire : les comptes de ces tests reçoivent leur
-/// rôle par le store.
-async fn open_app() -> TestApp {
-    TestApp::with_config(|cfg| cfg.signup = SignupMode::Open).await
-}
-
-fn members(level: Level) -> (Subject, Level) {
-    (Subject::Members, level)
-}
-
-fn user(account: &Account<'_>, level: Level) -> (Subject, Level) {
-    (Subject::User(account.id), level)
-}
 
 async fn trash(by: &Browser<'_>, id: impl std::fmt::Display) -> common::Reply {
     by.post_empty(&format!("/api/v1/pages/{id}/trash")).await
@@ -506,12 +493,6 @@ async fn trash_restore_and_move_close_live_connections_of_the_subtree() {
             synced_as(&alice.browser, &url(&page.id)).await,
             synced_as(&alice.browser, &url(&child.id)).await,
         ]
-    };
-    // La connexion est encore servie : une resynchronisation reçoit sa réponse.
-    let still_served = async |client: &Client| {
-        let start = client.step2_count();
-        client.resync();
-        client.wait_until(WAIT, |c| c.step2_count() > start).await && !client.is_closed()
     };
     let closed = async |clients: &[Client; 2], after: &str| {
         for client in clients {

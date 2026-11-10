@@ -32,8 +32,9 @@ serde_json.workspace = true
 serde_path_to_error.workspace = true
 # SHA-256 des jetons : la base ne garde que leur hachage.
 sha2.workspace = true
-# `sync` : une inscription à la fois, et les calculs Argon2 chacun leur tour.
-tokio = { workspace = true, features = ["net", "signal", "sync"] }
+# `sync` : une inscription à la fois, et les calculs Argon2 chacun leur tour. `time` : le délai
+# laissé à une connexion de synchro refusée pour recevoir sa trame de fermeture.
+tokio = { workspace = true, features = ["net", "signal", "sync", "time"] }
 tracing.workspace = true
 ts-rs.workspace = true
 uuid.workspace = true

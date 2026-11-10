@@ -3,12 +3,16 @@
 //! fermée dès que les droits de sa page changent ou que la session de son compte se ferme.
 //! Elle revient alors par la poignée de main, qui relit tout.
 //!
-//! Deux tests de la même série sont dans `src/routes/sync.rs`, parce qu'ils regardent ce
-//! qu'on ne voit pas d'ici : `revoked_access_closes_live_connection` (`rights_changed`, que la
-//! route de partage appellera) et `deleted_page_actor_is_forgotten` (les acteurs vivants).
+//! Ce qui change pendant qu'une connexion s'ouvre est couvert aussi : les droits lus par la
+//! route le sont après le chargement de la page (Ruling R89), et la session est relue une fois
+//! la connexion inscrite (Ruling R88). Ces tests tiennent le verrou d'écriture de SQLite pour
+//! arrêter la route au milieu de son travail ([`WriteLock`]).
 //!
-//! Les aides (application, équipe, navigateurs, WebSocket avec session) sont dans
-//! `common/mod.rs`.
+//! Un test de la même série est dans `src/routes/sync.rs`, parce qu'il regarde ce qu'on ne
+//! voit pas d'ici : `deleted_page_actor_is_forgotten` (les acteurs vivants du hub).
+//!
+//! Les aides sont dans `common/mod.rs` (application, équipe, navigateurs, WebSocket avec
+//! session) et dans `common/sync.rs` (ce qu'un client tape et reçoit).
 
 mod common;
 
@@ -19,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
+use common::sync::{closed, members, open_app, still_served, text, types, types_unheard, user};
 use common::{
     Account, Browser, PASSWORD, Team, TestApp, WAIT, exec_sql, handshake, json_request, outcome,
     query_i64, sync_as, sync_url, synced_as,
@@ -26,77 +31,14 @@ use common::{
 use mementum_acl::{Level, Subject};
 use mementum_crdt::PageDoc;
 use mementum_schema::SCHEMA_VERSION;
-use mementum_server::SignupMode;
 use mementum_store::Store;
-use mementum_sync::testkit::Client;
 use serde_json::json;
 use sqlx::{Connection, Row};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-/// Délai dans lequel une connexion doit être fermée quand ses droits changent (Review
-/// Focus 1).
-const CLOSES_WITHIN: Duration = Duration::from_secs(2);
-
-/// Une application où tout le monde peut s'inscrire : les comptes de ces tests reçoivent leur
-/// rôle par le store.
-async fn open_app() -> TestApp {
-    TestApp::with_config(|cfg| cfg.signup = SignupMode::Open).await
-}
-
-fn members(level: Level) -> (Subject, Level) {
-    (Subject::Members, level)
-}
-
-fn user(account: &Account<'_>, level: Level) -> (Subject, Level) {
-    (Subject::User(account.id), level)
-}
-
 fn member_uri(space: Uuid, account: &Account<'_>) -> String {
     format!("/api/v1/spaces/{space}/members/{}", account.id)
-}
-
-/// Le texte de chaque bloc de premier niveau du document du client, une ligne par bloc.
-fn text(client: &Client) -> String {
-    client
-        .blocks()
-        .iter()
-        .map(mementum_md::block_text)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Tape `typed` à la fin du premier bloc, puis attend que le serveur ait traité tout ce que
-/// la connexion a envoyé : il traite ses messages dans l'ordre, et répond ensuite à la
-/// resynchronisation.
-async fn types(client: &Client, typed: &str) {
-    let block = client.blocks()[0].id.clone();
-    let start = client.step2_count();
-    client.type_text(&block, typed);
-    client.resync();
-    assert!(
-        client.wait_until(WAIT, |c| c.step2_count() > start).await,
-        "le serveur n'a pas traité « {typed} »"
-    );
-}
-
-/// Tape `typed` à la fin du premier bloc sans rien attendre : pour une connexion que le
-/// serveur vient de fermer, et qui ne le sait peut-être pas encore.
-fn types_unheard(client: &Client, typed: &str) {
-    let block = client.blocks()[0].id.clone();
-    client.type_text(&block, typed);
-}
-
-/// Le serveur ferme la connexion, en moins de deux secondes.
-async fn closed(client: &Client) -> bool {
-    client.wait_until(CLOSES_WITHIN, |c| c.is_closed()).await
-}
-
-/// La connexion est encore servie : une resynchronisation reçoit sa réponse.
-async fn still_served(client: &Client) -> bool {
-    let start = client.step2_count();
-    client.resync();
-    client.wait_until(WAIT, |c| c.step2_count() > start).await && !client.is_closed()
 }
 
 /// Le statut du refus d'une connexion de synchro demandée avec la session de `by` (sans
@@ -610,19 +552,12 @@ async fn rights_change_bumps_rev_before_the_kick() {
     for (what, request, expected) in changes {
         let live = synced_as(&team.mona.browser, &url).await;
         let before = rev().await;
-        let mut lock =
-            sqlx::SqliteConnection::connect(&format!("sqlite:{}", t.db_path().display()))
-                .await
-                .unwrap();
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut lock)
-            .await
-            .unwrap();
+        let lock = WriteLock::take(&t).await;
         let watch = async {
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert!(!live.is_closed(), "fermée avant le commit : {what}");
             assert_eq!(rev().await, before, "{what}");
-            sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
+            lock.commit().await;
             assert!(closed(&live).await, "encore ouverte après {what}");
             assert!(
                 rev().await > before,
@@ -632,6 +567,265 @@ async fn rights_change_bumps_rev_before_the_kick() {
         let (reply, ()) = tokio::join!(team.olga.browser.send(request), watch);
         reply.assert_status(expected);
         assert_eq!(rev().await, before + 1, "{what}");
+    }
+}
+
+/// Le verrou d'écriture de SQLite, tenu par une connexion annexe. Tant qu'il l'est, rien ne
+/// s'écrit dans la base, et une route qui doit écrire attend (cinq secondes au plus) : c'est
+/// ce qui arrête, à un endroit connu, le chargement d'une page sans document, dont l'acteur
+/// écrit le sien à son premier chargement.
+///
+/// Ce que [`WriteLock::run`] exécute part au [`WriteLock::commit`], en une transaction, avec
+/// le verrou : comme une écriture du store validée pendant que la route attend.
+struct WriteLock(sqlx::SqliteConnection);
+
+impl WriteLock {
+    async fn take(t: &TestApp) -> WriteLock {
+        let url = format!("sqlite:{}", t.db_path().display());
+        let mut connection = sqlx::SqliteConnection::connect(&url).await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        WriteLock(connection)
+    }
+
+    async fn run(&mut self, sql: &str) {
+        sqlx::query(sqlx::AssertSqlSafe(sql.to_string()))
+            .execute(&mut self.0)
+            .await
+            .unwrap_or_else(|error| panic!("{sql} : {error}"));
+    }
+
+    async fn commit(mut self) {
+        self.run("COMMIT").await;
+    }
+}
+
+/// Ce qu'une écriture de droits change en base, en SQL, pour [`WriteLock::run`] : `{page}` et
+/// `{who}` y sont remplacés par la page et par le sujet (`user:<id>`) de la personne. La
+/// révision de l'espace est incrémentée avec, comme le fait le store dans sa transaction.
+const DEMOTED_TO_READ: &str =
+    "UPDATE acl SET level = 'read' WHERE node_id = '{page}' AND subject = '{who}'";
+const TRASHED: &str = "UPDATE nodes SET trashed_at = 1 WHERE id = '{page}'";
+const ACCESS_REMOVED: &str = "DELETE FROM acl WHERE node_id = '{page}' AND subject = '{who}'";
+
+/// Écrit `change` (un des modèles ci-dessus) pour cette page et cette personne, et incrémente
+/// la révision de l'espace, dans la transaction du verrou.
+async fn write_rights_change(
+    lock: &mut WriteLock,
+    change: &str,
+    space: Uuid,
+    page: Uuid,
+    who: &Account<'_>,
+) {
+    let change = change
+        .replace("{page}", &page.to_string())
+        .replace("{who}", &Subject::User(who.id).to_string());
+    lock.run(&change).await;
+    lock.run(&format!(
+        "UPDATE spaces SET rev = rev + 1 WHERE id = '{space}'"
+    ))
+    .await;
+}
+
+/// Ce que devient une connexion ouverte pendant un changement de droits.
+#[derive(Clone, Copy)]
+enum Served {
+    Writing,
+    ReadOnly,
+    Closed,
+}
+
+/// Ruling R89 : la route charge la page, **puis** lit la révision et les droits ; la connexion
+/// ne tient que de cette seconde lecture. Un changement de droits validé pendant le chargement
+/// est donc celui que la connexion reçoit : rétrogradée ou mise à la corbeille, elle est
+/// servie en lecture seule, sans être fermée ; devenue illisible, elle est fermée sans avoir
+/// rien reçu.
+///
+/// Le piège : la révision lue après le chargement est déjà celle d'après le changement, et la
+/// relecture d'après inscription ne voit rien bouger. Si `can_write` venait du contrôle fait
+/// avant la poignée de main, la connexion écrirait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rights_changed_while_the_page_loads_are_the_ones_served() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let cases = [
+        ("rien ne change", None, Served::Writing),
+        (
+            "rétrogradée à la lecture",
+            Some(DEMOTED_TO_READ),
+            Served::ReadOnly,
+        ),
+        ("mise à la corbeille", Some(TRASHED), Served::ReadOnly),
+        ("accès retiré", Some(ACCESS_REMOVED), Served::Closed),
+    ];
+    for (what, change, expected) in cases {
+        // Une page que personne n'a ouverte, et qui n'a pas encore de document.
+        let grants = [user(&team.olga, Level::Full), user(&team.gina, Level::Edit)];
+        let page = team.page(None, what, &grants).await;
+        let mut lock = WriteLock::take(&t).await;
+        // La poignée de main aboutit : le premier contrôle a lu les droits d'avant. Le
+        // chargement de la page attend le verrou.
+        let client = sync_as(&team.gina.browser, &sync_url(addr, page))
+            .await
+            .unwrap_or_else(|refusal| panic!("{what} : {refusal}"));
+        if let Some(change) = change {
+            write_rights_change(&mut lock, change, team.space, page, &team.gina).await;
+        }
+        lock.commit().await;
+
+        match expected {
+            Served::Closed => {
+                assert!(closed(&client).await, "{what} : encore ouverte");
+                assert!(!client.is_synced(), "{what} : elle a reçu la page");
+                assert_eq!(updates(&t, page).await, 0, "{what}");
+            }
+            Served::Writing | Served::ReadOnly => {
+                assert!(
+                    client.wait_until(WAIT, |c| c.is_synced()).await,
+                    "{what} : la connexion n'est pas servie"
+                );
+                types(&client, "tapé").await;
+                let written = matches!(expected, Served::Writing);
+                assert_eq!(updates(&t, page).await, i64::from(written), "{what}");
+                let expected = if written { "tapé\n" } else { "<p/>\n" };
+                assert_eq!(mmd(&team.olga, page).await, expected, "{what}");
+                assert!(!client.is_closed(), "{what}");
+            }
+        }
+    }
+}
+
+/// Ruling R89, pour `PUT /mmd` : les droits sont contrôlés avant la lecture du corps, puis de
+/// nouveau une fois la page chargée, juste avant d'écrire. Un droit retiré pendant le
+/// chargement n'écrit plus rien, et la réponse est celle du droit qui manque.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_mmd_checks_rights_again_once_the_page_is_loaded() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let snapshots = async |page: Uuid| {
+        let sql = format!("SELECT COUNT(*) FROM doc_snapshots WHERE node_id = '{page}'");
+        query_i64(&t.db_path(), &sql).await
+    };
+    let cases = [
+        ("rien ne change", None, None),
+        (
+            "rétrogradée à la lecture",
+            Some(DEMOTED_TO_READ),
+            Some((StatusCode::FORBIDDEN, "forbidden")),
+        ),
+        (
+            "mise à la corbeille",
+            Some(TRASHED),
+            Some((StatusCode::CONFLICT, "trashed")),
+        ),
+        (
+            "accès retiré",
+            Some(ACCESS_REMOVED),
+            Some((StatusCode::NOT_FOUND, "not_found")),
+        ),
+    ];
+    for (what, change, refusal) in cases {
+        let grants = [user(&team.olga, Level::Full), user(&team.gina, Level::Edit)];
+        let page = team.page(None, what, &grants).await;
+        let id = page.to_string();
+        let mut lock = WriteLock::take(&t).await;
+        let commit = async {
+            // Le temps que la route contrôle les droits, lise le corps et demande la page,
+            // dont le chargement attend le verrou.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if let Some(change) = change {
+                write_rights_change(&mut lock, change, team.space, page, &team.gina).await;
+            }
+            lock.commit().await;
+        };
+        let (reply, ()) = tokio::join!(team.gina.put_mmd(&id, "Écrit\n"), commit);
+
+        // La page a été chargée : un refus vient donc du second contrôle, pas du premier.
+        assert_eq!(snapshots(page).await, 1, "{what}");
+        match refusal {
+            None => {
+                reply.assert_status(StatusCode::NO_CONTENT);
+                assert_eq!(mmd(&team.olga, page).await, "Écrit\n", "{what}");
+            }
+            Some((status, code)) => {
+                reply.assert_error(status, code);
+                assert_eq!(updates(&t, page).await, 0, "{what} : rien d'écrit");
+                assert_eq!(mmd(&team.olga, page).await, "<p/>\n", "{what}");
+            }
+        }
+    }
+}
+
+/// Le hachage de la session que porte ce navigateur, en hexadécimal, comme le rend
+/// `hex(token_hash)` en SQL.
+fn session_hex(browser: &Browser<'_>) -> String {
+    let token = browser.session().expect("une session");
+    let hash = mementum_server::auth::token_hash(&token).expect("un jeton de session");
+    hash.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
+/// Ruling R88 : la course elle-même, forcée. La session est fermée entre le contrôle de la
+/// route et l'inscription de la connexion, sans `kick_user` (il passerait avant l'inscription,
+/// sans trouver la connexion) : elle est fermée quand même, sans avoir rien reçu.
+///
+/// C'est la session de la connexion qui est relue, pas « une session du compte » : le compte en
+/// a une autre, qui vaut toujours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_closed_while_the_connection_opens_closes_it() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let cases = [
+        ("rien ne change", None),
+        (
+            "session supprimée",
+            Some("DELETE FROM sessions WHERE hex(token_hash) = '{session}'"),
+        ),
+        (
+            "session échue",
+            Some("UPDATE sessions SET expires_at = 1 WHERE hex(token_hash) = '{session}'"),
+        ),
+    ];
+    for (what, change) in cases {
+        let page = team.page(None, what, &[members(Level::Edit)]).await;
+        let url = sync_url(addr, page);
+        // Un second appareil de Mona, avec sa propre session.
+        let phone = t.browser();
+        phone
+            .log_in("mona@exemple.fr", PASSWORD)
+            .await
+            .assert_status(StatusCode::OK);
+        let session = session_hex(&phone);
+        let mut lock = WriteLock::take(&t).await;
+        // La poignée de main aboutit : la route a lu la session. Le chargement de la page
+        // attend le verrou.
+        let client = sync_as(&phone, &url)
+            .await
+            .unwrap_or_else(|refusal| panic!("{what} : {refusal}"));
+        if let Some(change) = change {
+            lock.run(&change.replace("{session}", &session)).await;
+        }
+        lock.commit().await;
+
+        let Some(_) = change else {
+            assert!(
+                client.wait_until(WAIT, |c| c.is_synced()).await,
+                "{what} : la connexion n'est pas servie"
+            );
+            types(&client, "tapé").await;
+            assert_eq!(updates(&t, page).await, 1, "{what}");
+            continue;
+        };
+        assert!(closed(&client).await, "{what} : encore ouverte");
+        assert!(!client.is_synced(), "{what} : elle a reçu la page");
+        assert_eq!(updates(&t, page).await, 0, "{what}");
+        assert_eq!(refused(&phone, &url).await, 401, "{what}");
+        // L'autre session du compte vaut toujours : elle ouvre la page.
+        let home = synced_as(&team.mona.browser, &url).await;
+        assert!(still_served(&home).await, "{what}");
     }
 }
 
@@ -741,6 +935,67 @@ async fn logout_with_an_expired_session_still_closes_its_connections() {
     assert_eq!(handshake(&url, None, cookie.as_deref()).await, Err(401));
 }
 
+/// Délai dans lequel une connexion doit être fermée quand son accès est retiré (Review
+/// Focus 1).
+const CLOSES_WITHIN: Duration = Duration::from_secs(2);
+
+/// Review Focus 1 : B écrit sur une page partagée avec lui, puis son accès est retiré par la
+/// route de partage. Sa connexion se ferme en moins de deux secondes, sa reconnexion reçoit
+/// `404`, et ce qu'il envoie ensuite n'est pas dans le MMD.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoked_access_closes_live_connection() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    // Une page d'Olga, partagée avec Gina en modification ; sa sous-page en hérite.
+    let grants = [user(&team.olga, Level::Full), user(&team.gina, Level::Edit)];
+    let shared = team.page(None, "Partagée", &grants).await;
+    let child = team.page(Some(shared), "Sous-page", &[]).await;
+    let (shared_url, child_url) = (sync_url(addr, shared), sync_url(addr, child));
+    let olga = synced_as(&team.olga.browser, &shared_url).await;
+    let gina = synced_as(&team.gina.browser, &shared_url).await;
+    let gina_child = synced_as(&team.gina.browser, &child_url).await;
+    types(&gina, "de Gina").await;
+    assert!(olga.wait_until(WAIT, |c| text(c) == "de Gina").await);
+
+    let revoked = Instant::now();
+    team.olga
+        .browser
+        .delete(&format!(
+            "/api/v1/pages/{shared}/access/users/{}",
+            team.gina.id
+        ))
+        .await
+        .assert_status(StatusCode::OK);
+    // Au retour de la route, plus rien de ce qu'elle envoie n'est traité.
+    types_unheard(&gina, " en trop");
+    for (client, which) in [(&gina, "la page"), (&gina_child, "la sous-page")] {
+        assert!(
+            client.wait_until(CLOSES_WITHIN, |c| c.is_closed()).await,
+            "encore ouverte : {which}"
+        );
+    }
+    let took = revoked.elapsed();
+    assert!(took < CLOSES_WITHIN, "fermées en {took:?}");
+
+    // Elle ne revient pas : la réponse d'une page qui n'existe pas.
+    for url in [&shared_url, &child_url] {
+        assert_eq!(refused(&team.gina.browser, url).await, 404);
+    }
+    assert_eq!(
+        outcome(&plain_get(&team.gina.browser, shared).await),
+        outcome(&plain_get(&team.gina.browser, Uuid::now_v7()).await)
+    );
+    assert_eq!(mmd(&team.olga, shared).await, "de Gina\n");
+
+    // Olga, fermée avec toute la page, revient et écrit.
+    assert!(closed(&olga).await);
+    let olga = synced_as(&team.olga.browser, &shared_url).await;
+    assert_eq!(text(&olga), "de Gina");
+    types(&olga, ", puis d'Olga").await;
+    assert_eq!(mmd(&team.olga, shared).await, "de Gina, puis d'Olga\n");
+}
+
 /// Le centile `percent` de durées triées, en millisecondes.
 fn centile(sorted: &[Duration], percent: usize) -> f64 {
     let rank = (sorted.len() * percent).div_ceil(100).max(1);
@@ -750,6 +1005,11 @@ fn centile(sorted: &[Duration], percent: usize) -> f64 {
 /// L'attente d'un navigateur avant de revenir après `closures` fermetures de suite sans
 /// synchro (y-websocket 3.1.0) : 200 ms après la première, le double après chaque suivante,
 /// 2,5 s au plus.
+///
+/// Recopié à la main de y-websocket 3.1.0, `src/y-websocket.js`, lignes 184 à 207
+/// (`closeWebsocketConnection` : `wsUnsuccessfulReconnects++`, puis `min(2^n × 100,
+/// maxBackoffTime)`) et ligne 324 (`maxBackoffTime = 2500`). À relire quand la version de
+/// y-websocket d'`apps/web` change.
 fn browser_backoff(closures: usize) -> Duration {
     (1..=closures as u32)
         .map(|n| Duration::from_millis((100 * 2u64.pow(n)).min(2_500)))

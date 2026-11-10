@@ -17,6 +17,8 @@
 //!   plus bavard (fils de SQLite et des calculs bloquants compris).
 #![allow(dead_code)]
 
+pub mod sync;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;

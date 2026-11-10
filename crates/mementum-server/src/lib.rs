@@ -70,12 +70,14 @@
 //!
 //! **Synchronisation** (`routes/sync.rs`). `/sync` est sous les mêmes droits
 //! que les routes de pages : session, puis droit de lire la page, vérifiés
-//! avant la poignée de main. Une connexion garde ensuite les droits qu'elle
-//! avait en s'ouvrant ; le serveur la ferme dès qu'ils changent (corbeille,
-//! restauration, changement de parent, retrait d'un membre, changement de
-//! rôle, suppression) ou que la session de son compte se ferme (déconnexion,
-//! changement de mot de passe), et le client revient par la poignée de main,
-//! qui relit tout.
+//! avant la poignée de main, et relus juste après, une fois la page chargée.
+//! Une connexion garde ensuite les droits qu'elle avait en s'ouvrant ; le
+//! serveur la ferme dès qu'ils changent (corbeille, restauration, changement
+//! de parent, partage, retrait d'un membre, changement de rôle, suppression)
+//! ou que la session de son compte se ferme (déconnexion, changement de mot
+//! de passe, connexion par-dessus une session), et le client revient par la
+//! poignée de main, qui relit tout. Une connexion en train de s'ouvrir à cet
+//! instant est fermée avant d'avoir rien reçu.
 //!
 //! **Garde-fous réseau** (`guard.rs`) : sur la boucle locale, l'en-tête `Host`
 //! doit la nommer (DNS rebinding, Ruling R31), ou nommer l'hôte de

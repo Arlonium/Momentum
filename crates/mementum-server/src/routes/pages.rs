@@ -528,6 +528,12 @@ pub(crate) async fn get_mmd(
 /// `PUT /api/v1/pages/{id}/mmd` : remplace le contenu de la page, au nom du compte de la
 /// session. L'écriture est persistée, puis diffusée aux connexions ouvertes. Une prop hors
 /// registre est refusée (`422 invalid_blocks`, Ruling R41).
+///
+/// Les droits sont contrôlés deux fois (Ruling R89) : avant la lecture du corps, pour que les
+/// refus viennent d'abord ; puis une fois la page chargée, juste avant d'écrire. Charger une
+/// page que personne n'a ouverte peut durer : un droit retiré pendant ce temps n'écrit plus.
+/// Entre le second contrôle et l'écriture, il ne reste que l'envoi d'une commande à l'acteur
+/// déjà chargé (la fenêtre du Ruling R74).
 pub(crate) async fn put_mmd(
     State(state): State<AppState>,
     user: AuthUser,
@@ -535,6 +541,7 @@ pub(crate) async fn put_mmd(
     body: Result<Bytes, BytesRejection>,
 ) -> Result<StatusCode, ApiError> {
     let id = page_id(path)?;
+    // Premier contrôle : les refus, avant que le corps soit lu.
     state.node_access(&user, id, Action::Edit).await?;
     let body = body?;
     let text = std::str::from_utf8(&body).map_err(|e| {
@@ -551,6 +558,10 @@ pub(crate) async fn put_mmd(
     let mut blocks = parse(text)?;
     registered_props_only(&blocks)?;
     unknown_not_foreign(&mut blocks);
+    // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise
+    // l'écriture.
+    state.hub.load_page(id).await?;
+    state.node_access(&user, id, Action::Edit).await?;
     state.hub.write_blocks(id, blocks, Some(user.id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
