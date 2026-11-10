@@ -576,6 +576,155 @@ async fn change_access_keeps_general_access_above_the_inherited_floor() {
     assert_eq!(own(parent).await, Some(Level::Read));
 }
 
+/// La chaîne d'une page va jusqu'à la racine, pas jusqu'à sa page parente : le plancher de
+/// l'accès général (R93) est la plus forte ligne `members` de **tous** ses ancêtres, où qu'elle
+/// soit ; le niveau de qui demande et la corbeille se lisent de même sur toute la chaîne.
+#[tokio::test]
+async fn change_access_reads_every_ancestor_of_the_page() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let general = |level: Level| AccessChange::Members(Some(level));
+    let own_general = async |node: Uuid| {
+        let lines = store.node_grants(node).await.unwrap();
+        let line = lines.into_iter().find(|g| g.subject == Subject::Members);
+        line.map(|g| g.level)
+    };
+
+    // Le plancher : `edit`, posé tour à tour sur la page parente et sur la grand-parente,
+    // l'autre ne donnant que `read`.
+    for (top, middle) in [(Level::Read, Level::Edit), (Level::Edit, Level::Read)] {
+        let what = format!("grand-parente {top:?}, parente {middle:?}");
+        let grandparent = page_with(store, space, None, &[(Subject::Members, top)]).await;
+        let lines = [(Subject::Members, middle)];
+        let parent = page_with(store, space, Some(grandparent), &lines).await;
+        let child = page_with(store, space, Some(parent), &[]).await;
+        // Sous le plancher, même au-dessus de la plus faible des deux lignes : refusé.
+        for below in [Level::Read, Level::Comment] {
+            let before = untouched(store, space, child).await;
+            let r = store.change_access(child, general(below), t.olga).await;
+            assert!(
+                matches!(r, Err(StoreError::Refused(ShareRefusal::InheritedAccess))),
+                "{what}, {below:?} : {r:?}"
+            );
+            assert_eq!(untouched(store, space, child).await, before, "{what}");
+        }
+        // Au plancher : rien à écrire. Au-dessus : la ligne est posée.
+        let written = store.change_access(child, general(Level::Edit), t.olga);
+        assert!(!written.await.unwrap().changed, "{what}");
+        assert_eq!(own_general(child).await, None, "{what}");
+        let written = store.change_access(child, general(Level::Full), t.olga);
+        assert!(written.await.unwrap().changed, "{what}");
+        assert_eq!(own_general(child).await, Some(Level::Full), "{what}");
+    }
+
+    // Le niveau de qui demande : Mona tient l'accès complet d'une ligne à son nom, tour à tour
+    // sur la page parente et sur la grand-parente, l'autre ne lui donnant que la lecture.
+    let (olga, mona) = (Subject::User(t.olga), Subject::User(t.mona));
+    let to_gina = AccessChange::User(t.gina, Some(Level::Read));
+    for (top, middle) in [(Level::Read, Level::Full), (Level::Full, Level::Read)] {
+        let what = format!("grand-parente {top:?}, parente {middle:?}");
+        let lines = [(olga, Level::Full), (mona, top)];
+        let grandparent = page_with(store, space, None, &lines).await;
+        let parent = page_with(store, space, Some(grandparent), &[(mona, middle)]).await;
+        let child = page_with(store, space, Some(parent), &[]).await;
+        let written = store.change_access(child, to_gina, t.mona).await;
+        assert!(written.is_ok_and(|w| w.changed), "{what}");
+        // La corbeille aussi : celle de la grand-parente vaut pour la petite-fille.
+        store.trash_node(grandparent, t.olga).await.unwrap();
+        let to_gina = AccessChange::User(t.gina, Some(Level::Edit));
+        let r = store.change_access(child, to_gina, t.mona).await;
+        assert!(
+            matches!(r, Err(StoreError::Refused(ShareRefusal::Trashed))),
+            "{what} : {r:?}"
+        );
+    }
+}
+
+/// Un nœud pris dans un cycle de parents, ou suspendu sous un cycle, n'est vu par personne
+/// (R58) : pour le partage, la page n'existe pas (`Unseen`), même pour une propriétaire qui y
+/// a une ligne `full`, et rien n'est écrit. Le store interdit les cycles : celui-ci est écrit en
+/// base.
+#[tokio::test]
+async fn change_access_sees_no_page_on_a_cycle_of_parents() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let olga = Subject::User(t.olga);
+    let lines = [(olga, Level::Full), (Subject::Members, Level::Full)];
+    let a = page_with(store, space, None, &lines).await;
+    let b = page_with(store, space, Some(a), &[(olga, Level::Full)]).await;
+    let under = page_with(store, space, Some(b), &[(olga, Level::Full)]).await;
+    // Avant le cycle, Olga y partage ce qu'elle veut.
+    let to_mona = AccessChange::User(t.mona, Some(Level::Read));
+    for node in [a, b, under] {
+        let written = store.change_access(node, to_mona, t.olga).await;
+        assert!(written.is_ok_and(|w| w.changed));
+    }
+
+    // `a` passe sous `b`, son propre enfant : `a` et `b` tournent en rond, `under` y est
+    // suspendu.
+    let cycle = format!("UPDATE nodes SET parent_id = '{b}' WHERE id = '{a}'");
+    exec_sql(&f.db, &cycle).await;
+    let changes = [
+        AccessChange::User(t.mona, Some(Level::Edit)),
+        AccessChange::User(t.mona, None),
+        AccessChange::Members(Some(Level::Read)),
+        AccessChange::Members(None),
+    ];
+    for node in [a, b, under] {
+        for change in changes {
+            let before = untouched(store, space, node).await;
+            let r = store.change_access(node, change, t.olga).await;
+            assert!(
+                matches!(r, Err(StoreError::Refused(ShareRefusal::Unseen))),
+                "{change:?} : {r:?}"
+            );
+            assert_eq!(untouched(store, space, node).await, before, "{change:?}");
+        }
+    }
+}
+
+/// Un parent d'un autre espace vaut la racine, comme pour le calcul des accès de tout l'espace :
+/// ses lignes ne donnent à la page ni niveau ni plancher. Le store refuse un tel parent : il
+/// est écrit en base.
+#[tokio::test]
+async fn change_access_ignores_a_parent_from_another_space() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let (olga, mona) = (Subject::User(t.olga), Subject::User(t.mona));
+    let there = store.create_space("Ailleurs", None).await.unwrap();
+    // Ailleurs : une page ouverte à tous en accès complet, où Mona a aussi sa ligne.
+    let lines = [(Subject::Members, Level::Full), (mona, Level::Full)];
+    let foreign = page_with(store, &there, None, &lines).await;
+    let page = page_with(store, space, None, &[(olga, Level::Full)]).await;
+    let adopted = format!("UPDATE nodes SET parent_id = '{foreign}' WHERE id = '{page}'");
+    exec_sql(&f.db, &adopted).await;
+
+    // Mona, membre de l'espace de la page, n'y voit rien : ni la ligne `members` ni la ligne à
+    // son nom de l'autre espace ne comptent.
+    let before = untouched(store, space, page).await;
+    let to_gina = AccessChange::User(t.gina, Some(Level::Read));
+    let r = store.change_access(page, to_gina, t.mona).await;
+    assert!(
+        matches!(r, Err(StoreError::Refused(ShareRefusal::Unseen))),
+        "{r:?}"
+    );
+    assert_eq!(untouched(store, space, page).await, before);
+    // Olga y est chez elle, sans plancher : un accès général en lecture se pose, et se retire.
+    let read = AccessChange::Members(Some(Level::Read));
+    let written = store.change_access(page, read, t.olga).await;
+    assert!(written.is_ok_and(|w| w.changed));
+    let none = AccessChange::Members(None);
+    let written = store.change_access(page, none, t.olga).await;
+    assert!(written.is_ok_and(|w| w.changed));
+    assert_eq!(
+        store.node_grants(page).await.unwrap(),
+        [grant(olga, Level::Full)]
+    );
+}
+
 /// Une ligne déjà ainsi n'écrit rien : la révision de l'espace ne bouge pas. Un changement fait
 /// l'incrémente d'un cran, et dit dans quel espace il a écrit.
 #[tokio::test]
