@@ -19,8 +19,8 @@
   --mm-sidebar-hover: #efede8;
   --mm-sidebar-active: #e9e7e1;
   --mm-sidebar-width: 260px;
-  /* Éléments de la barre latérale : 30 à 32 px. */
-  --mm-item-height: 30px;
+  /* Éléments de la barre latérale : 30 à 32 px. Les lignes de l'arbre ont 30 px,
+     `ROW_HEIGHT` de `sidebar/rows.ts`, que l'arbre fenêtré lit pour les placer. */
   --mm-action-height: 32px;
   --mm-page-width: 760px;
   /* Marge du texte de BlockNote (place de la poignée des blocs) : le titre s'y aligne. */
@@ -161,26 +161,23 @@ a:hover {
   color: var(--mm-danger);
 }
 
-.tree,
-.tree-children {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.tree-children {
-  margin-top: 1px;
-  padding-left: 14px;
+/* Arbre fenêtré (R43) : il a la hauteur de toutes ses lignes, posée par `PageTree`, mais
+   seules les lignes visibles sont dans le document, chacune placée à son rang (`TreeRow`
+   pose `top` et `height`, celle de `ROW_HEIGHT`). */
+.tree {
+  position: relative;
+  /* La colonne de la barre latérale ne doit pas réduire cette hauteur. */
+  flex: none;
 }
 
 .tree-row {
+  position: absolute;
+  /* Retrait de 14 px par niveau (`--depth`, posé par `TreeRow`). */
+  left: calc(var(--depth, 0) * 14px);
+  right: 0;
   display: flex;
   align-items: center;
   gap: 2px;
-  min-height: var(--mm-item-height);
   padding: 0 4px 0 2px;
   border-radius: 6px;
   color: var(--mm-text-sidebar);

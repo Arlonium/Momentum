@@ -38,14 +38,16 @@ test("subpage_appears_in_tree", async ({ page, request }) => {
   const parent = await createPage(request, { title: parentTitle });
   await page.goto(`/p/${parent.id}`);
   const sidebar = page.getByRole("navigation", { name: "Barre latérale" });
-  const parentItem = sidebar.locator(`[data-page-id="${parent.id}"]`);
-  await expect(parentItem.getByRole("link").first()).toHaveText(parentTitle);
+  // Une ligne par page (`treeitem`), toutes au même niveau du document : l'imbrication se
+  // lit dans `aria-level` et dans l'ordre des lignes.
+  const parentRow = sidebar.locator(`[role="treeitem"][data-page-id="${parent.id}"]`);
+  await expect(parentRow.getByRole("link")).toHaveText(parentTitle);
+  await expect(parentRow).toHaveAttribute("aria-level", "1");
 
   // Le « + » n'apparaît qu'au survol de la page.
-  const row = parentItem.locator(".tree-row").first();
-  const add = row.getByRole("button", { name: "Ajouter une sous-page" });
+  const add = parentRow.getByRole("button", { name: "Ajouter une sous-page" });
   await expect(add).toHaveCSS("opacity", "0");
-  await row.hover();
+  await parentRow.hover();
   await expect(add).toHaveCSS("opacity", "1");
   await add.click();
   // La page parente est déjà une `/p/:id` : attendre l'adresse de la sous-page.
@@ -56,19 +58,26 @@ test("subpage_appears_in_tree", async ({ page, request }) => {
   await title.fill("Sous-page");
   await title.press("Enter");
 
-  // Imbriquée sous sa page parente, dans l'interface comme sur le serveur.
-  const child = parentItem.locator(`[data-page-id="${childId}"]`);
-  await expect(child.getByRole("link")).toHaveText("Sous-page");
+  // Imbriquée sous sa page parente, dans l'interface comme sur le serveur : sa ligne suit
+  // celle du parent, un niveau plus bas, et le parent est déplié.
+  const child = sidebar.locator(`[data-page-id="${parent.id}"] + [role="treeitem"]`);
+  const nested = async () => {
+    await expect(child).toHaveAttribute("data-page-id", childId);
+    await expect(child).toHaveAttribute("aria-level", "2");
+    await expect(child.getByRole("link")).toHaveText("Sous-page");
+    await expect(parentRow).toHaveAttribute("aria-expanded", "true");
+  };
+  await nested();
   const node = (await getTree(request)).nodes.find((n) => n.id === childId);
   expect(node?.parentId).toBe(parent.id);
   expect(node?.title).toBe("Sous-page");
 
   await page.reload();
-  await expect(child.getByRole("link")).toHaveText("Sous-page");
+  await nested();
 
   // Un clic dans l'arbre ouvre la page, sans recharger l'application.
   await page.evaluate(() => ((window as unknown as { __loaded: boolean }).__loaded = true));
-  await parentItem.getByRole("link").first().click();
+  await parentRow.getByRole("link").click();
   await expect(page).toHaveURL(new RegExp(`/p/${parent.id}$`));
   await expect(title).toHaveValue(parentTitle);
   expect(await page.evaluate(() => (window as unknown as { __loaded?: boolean }).__loaded)).toBe(true);

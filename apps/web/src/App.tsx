@@ -89,6 +89,8 @@ export function App() {
       setNotice(`La page n'a pas pu être créée. ${messageOf(error)}`);
     }
   }, []);
+  /** Stable : les lignes de l'arbre, mémoïsées, ne se rendent pas à chaque navigation (R43). */
+  const createFromTree = useCallback((parentId: string | null) => void create(parentId), [create]);
 
   const saved = useCallback((node: PageNode) => {
     setNodes((current) => current?.map((n) => (n.id === node.id ? node : n)) ?? null);
@@ -167,7 +169,7 @@ export function App() {
         nodes={nodes}
         activeId={activeId}
         readOnly={stale}
-        onCreate={(id) => void create(id)}
+        onCreate={createFromTree}
         notice={notice}
       />
       <main className="mm-main">{content}</main>
