@@ -355,9 +355,11 @@ struct Arrival {
 
 /// Ce que le nœud porte en arrivant à la racine, d'après sa chaîne, lue dans la transaction
 /// avant qu'il change de parent. Avec `root_grant`, la décision de qui déplace y est d'abord
-/// revérifiée ([`checked_mover`]) : `Stale` si elle ne tient plus. `None` : le nœud n'existe
-/// pas, ou sa remontée tourne en rond ; personne ne le voit alors (R58), qui dit le déplacer
-/// non plus (`Stale`).
+/// revérifiée ([`checked_mover`]) : `Stale` si elle ne tient plus.
+///
+/// Un nœud dont la remontée tourne en rond n'est vu par personne (R58) : `Stale` avec
+/// `root_grant`, puisque qui dit le déplacer ne le voit pas non plus ; `None` sans lui, et
+/// aucune ligne ne sera écrite.
 async fn arrival_at_root(
     tx: &mut Transaction<'_, Sqlite>,
     node_id: &str,

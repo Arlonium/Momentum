@@ -351,7 +351,8 @@ pub(crate) async fn update(
 struct Move {
     place: Place,
     /// L'accès que doit y avoir la personne si la page arrive à la racine (Ruling R82) : le
-    /// store ne l'écrit que si les lignes de la page ne le lui donnent pas déjà.
+    /// store ne l'écrit que si les lignes de la page ne le lui donnent pas déjà. Il dit aussi
+    /// au store qui déplace : sa transaction revérifie que cette personne le peut encore.
     root_grant: Option<Grant>,
     /// La page change de parent : les droits de son sous-arbre changent.
     changes_parent: bool,
