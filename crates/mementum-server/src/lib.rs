@@ -5,42 +5,45 @@
 //! |---|---|---|
 //! | `GET /health` | non | `ok` |
 //! | `GET /api/v1/info` | non | [`Info`] : versions, `signup` (`open` ou `invite`), `setup` (aucun compte n'existe encore) |
-//! | `POST /api/v1/auth/signup` | non | `201`, [`Me`], cookie de session ; `403 signup_closed` ; `404 invalid_invitation` ; `409 email_taken` ; `422 invalid_email`, `invalid_name`, `invalid_password` |
-//! | `POST /api/v1/auth/login` | non | [`Me`], cookie de session (celle que portait déjà le navigateur est fermée) ; `401 invalid_credentials` ; `429 too_many_attempts` (avec `Retry-After`) |
-//! | `POST /api/v1/auth/logout` | non | `204`, session supprimée, cookie effacé |
-//! | `POST /api/v1/auth/password` | oui | `204`, les autres sessions du compte sont supprimées ; `401 invalid_credentials` ; `422 invalid_password` ; `429 too_many_attempts` |
+//! | `POST /api/v1/auth/signup` | non | `201`, [`Me`], cookie de session ; le premier compte est toujours permis ; `403 signup_closed` ; `404 invalid_invitation` ; `409 email_taken` ; `422 invalid_email`, `invalid_name`, `invalid_password` |
+//! | `POST /api/v1/auth/login` | non | [`Me`], cookie de session (celle que portait déjà le navigateur est fermée, avec les connexions de synchro de son compte, Ruling R90) ; `401 invalid_credentials` ; `429 too_many_attempts` (avec `Retry-After`) |
+//! | `POST /api/v1/auth/logout` | non | `204`, session supprimée, cookie effacé, connexions de synchro du compte fermées (Ruling R73) ; sans session : `204` aussi |
+//! | `POST /api/v1/auth/password` | oui | `204` : toutes les sessions du compte sont supprimées et ses connexions de synchro fermées ; la demande repart avec une session neuve (cookie de la réponse) ; `401 invalid_credentials` (mot de passe actuel faux) ; `422 invalid_password` ; `429 too_many_attempts` (frein à part de celui de la connexion, Ruling R76) |
 //! | `GET /api/v1/me` | oui | [`Me`] : le compte et ses espaces |
 //! | `POST /api/v1/spaces` | oui | `201`, `SpaceInfo` : l'espace créé, dont le compte est `owner` ; `422 invalid_name` |
 //! | `PATCH /api/v1/spaces/{id}` | `admin` | `SpaceInfo` ; `422 invalid_name` |
-//! | `GET /api/v1/spaces/{id}/members` | `member` | `Member[]` |
-//! | `PATCH /api/v1/spaces/{id}/members/{userId}` | `admin` (entre `admin` et `member`) ou `owner` | `Member` ; `409 last_owner` ; `409 roles_changed` (les rôles ont bougé à chaque reprise) |
-//! | `DELETE /api/v1/spaces/{id}/members/{userId}` | `admin` (jamais un `owner`), ou soi-même | `204` ; `409 last_owner` ; `409 roles_changed` |
-//! | `POST /api/v1/spaces/{id}/invitations` | `admin` | `201`, `InvitationCreated` (le jeton, montré cette fois seulement) ; `422 invalid_email` |
+//! | `GET /api/v1/spaces/{id}/members` | `member` | `Member[]` : invités compris, dans l'ordre d'arrivée ; un invité : `403` |
+//! | `PATCH /api/v1/spaces/{id}/members/{userId}` | `admin` (entre `admin` et `member`) ou `owner` | `Member` ; `404` si la personne n'a pas de rôle dans l'espace ; `409 last_owner` ; `409 roles_changed` (les rôles ont bougé à chaque reprise) |
+//! | `DELETE /api/v1/spaces/{id}/members/{userId}` | `admin` (jamais un `owner`), ou soi-même, quel que soit son rôle | `204` ; `404` comme ci-dessus ; `409 last_owner` ; `409 roles_changed` |
+//! | `POST /api/v1/spaces/{id}/invitations` | `admin` | `201`, `InvitationCreated` (le jeton, montré cette fois seulement ; rôle `admin` ou `member`) ; `422 invalid_email` |
 //! | `GET /api/v1/spaces/{id}/invitations` | `admin` | `PendingInvitation[]` : celles qui attendent, sans jeton (une invitation de page, seulement si l'on peut partager la page) |
 //! | `DELETE /api/v1/invitations/{id}` | invitation d'espace : `admin` de son espace ; invitation de page : `full` sur la page, `admin` ou non | `204` ; `404` sous `admin` ou sans le droit de partager la page, comme pour une invitation inconnue, échue, acceptée, ou d'un espace où l'on n'est rien |
-//! | `POST /api/v1/invitations/lookup` | non | `InvitationInfo` ; `404 invalid_invitation` (aussi pour une invitation de page dont l'auteur ne peut plus partager la page) |
-//! | `POST /api/v1/invitations/accept` | oui | `Accepted` ; `404 invalid_invitation` |
+//! | `POST /api/v1/invitations/lookup` | non | `InvitationInfo` ; `404 invalid_invitation` (aussi pour une invitation dont l'auteur n'a plus le droit de la faire, Ruling R69) |
+//! | `POST /api/v1/invitations/accept` | oui | `Accepted` (rien de ce qu'avait le compte ne baisse) ; `404 invalid_invitation` |
 //! | `GET /api/v1/spaces/{id}/tree` | un rôle | [`Tree`] : les pages de l'espace que la personne voit, hors corbeille, avec son niveau et sa section |
 //! | `GET /api/v1/spaces/{id}/trash` | un rôle | [`PageNode`]`[]` : les pages mises à la corbeille qu'elle peut restaurer, la plus récente d'abord |
-//! | `POST /api/v1/pages` | racine : `member` ; sous-page : `edit` sur le parent | `201`, [`PageNode`] : le nœud, ses accès et son document, écrits ensemble ; `422 invalid_parent`, `invalid_after` |
+//! | `POST /api/v1/pages` | racine : `member` (un invité : `403`) ; sous-page : `edit` sur le parent | `201`, [`PageNode`] : le nœud, ses accès et son document, écrits ensemble ; `409 trashed` sous un parent à la corbeille ; `422 invalid_parent`, `invalid_after`, `title_too_long` ; `422 invalid_json` sans `spaceId` à la racine, ou avec `section` sous un parent |
 //! | `GET /api/v1/pages/{id}` | `read` | [`PageNode`] |
-//! | `PATCH /api/v1/pages/{id}` | titre, place sous le même parent : `edit` ; autre parent : `full`, et `edit` sur le nouveau parent (racine : `member`) | [`PageNode`] ; `409 cycle` |
-//! | `POST /api/v1/pages/{id}/trash` | `edit` | [`PageNode`] : la page et son sous-arbre sont à la corbeille |
-//! | `POST /api/v1/pages/{id}/restore` | `edit` | [`PageNode`] ; `409 parent_trashed` |
-//! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon ; `409 not_trashed` |
+//! | `PATCH /api/v1/pages/{id}` | titre, place sous le même parent : `edit` ; autre parent : `full`, et `edit` sur le nouveau parent (racine : `member`) | [`PageNode`] ; `409 cycle` ; `422 invalid_parent`, `invalid_after`, `title_too_long` ; `503 unavailable` si la page a changé de parent à chacune des quatre tentatives (Ruling R91 : `409 page_moved` à venir). À la racine, la page garde son accès général et qui la déplace y a `full` (Rulings R82 et R94) |
+//! | `POST /api/v1/pages/{id}/trash` | `edit` | [`PageNode`] : la page et son sous-arbre sont à la corbeille ; `409 trashed` si elle y est déjà, elle-même ou par une page parente |
+//! | `POST /api/v1/pages/{id}/restore` | `edit` | [`PageNode`] : la page et son sous-arbre reviennent (sans effet hors corbeille) ; `409 parent_trashed` si une page parente y est |
+//! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon ; `409 not_trashed` si ni elle ni une page parente n'est à la corbeille (Ruling R65) |
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
-//! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait |
-//! | `GET /api/v1/pages/{id}/access` | `full` | `PageAccess` : l'accès général effectif et son plancher (celui d'une page parente), les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
+//! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait ; droits revérifiés une fois la page chargée (Ruling R89) |
+//! | `GET /api/v1/pages/{id}/access` | `full` (à la corbeille aussi) | `PageAccess` : l'accès général effectif et son plancher (celui d'une page parente), les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
 //! | `PUT /api/v1/pages/{id}/access/general` | `full`, et le rôle `member` ou plus (un invité : `403`, R85) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `level: null` retire la ligne `members` de la page ; le plancher est l'accès qu'une page parente donne (R93) : au plancher, la ligne propre part, il n'en reste jamais de redondante ; `409 inherited_access` sous lui, ou pour `null` sans ligne propre ; `409 last_full_access` |
-//! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`, de même) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` |
+//! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` (un invité aussi, R86) | `PageAccess` (ou `204`, de même) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` |
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
-//! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, sinon en lecture seule ; `403 bad_origin` avant tout |
+//! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
 //!
 //! Toute erreur est en JSON : `{ "error": <code>, "message": <texte> }`
 //! ([`types::ErrorBody`]). Une route qui demande une session répond `401
-//! unauthenticated` sans elle. La base SQLite est le fichier
-//! [`config::DB_FILE`] du dossier des données.
+//! unauthenticated` sans elle. Un corps illisible reçoit `invalid_json` (ou
+//! `invalid_request`), un corps de plus de 2 Mio `413 payload_too_large`, une
+//! route inconnue `404 not_found`, une méthode inconnue `405
+//! method_not_allowed`. La base SQLite est le fichier [`config::DB_FILE`] du
+//! dossier des données.
 //!
 //! **Droits** (`access.rs`, le seul chemin par lequel le serveur les calcule) :
 //! la colonne « Session » donne ce qu'il faut : un rôle dans l'espace pour les
@@ -79,11 +82,12 @@
 //! poignée de main, qui relit tout. Une connexion en train de s'ouvrir à cet
 //! instant est fermée avant d'avoir rien reçu.
 //!
-//! **Garde-fous réseau** (`guard.rs`) : sur la boucle locale, l'en-tête `Host`
-//! doit la nommer (DNS rebinding, Ruling R31), ou nommer l'hôte de
-//! `MEMENTUM_PUBLIC_URL` quand elle est réglée (un mandataire ou un tunnel qui
-//! garde le `Host` public, Ruling R78) ; partout, une requête qui écrit, comme
-//! une connexion `/sync`, est refusée si elle porte l'`Origin` d'un autre site.
+//! **Garde-fous réseau** (`guard.rs`), avant toute route : sur la boucle
+//! locale, l'en-tête `Host` doit la nommer (DNS rebinding, Ruling R31), ou
+//! nommer l'hôte de `MEMENTUM_PUBLIC_URL` quand elle est réglée (un mandataire
+//! ou un tunnel qui garde le `Host` public, Ruling R78), sinon `421 bad_host` ;
+//! partout, une requête qui écrit, comme une connexion `/sync`, reçoit `403
+//! bad_origin` si elle porte l'`Origin` d'un autre site.
 
 mod access;
 pub mod auth;
