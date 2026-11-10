@@ -5,8 +5,11 @@
 // `404`, comme une page qui n'existe pas.
 //
 // Une page affichée ne quitte l'écran que si le serveur dit qu'elle n'est plus là. Sortie de
-// l'arbre chargé (une relecture ne la porte plus), elle reste telle qu'on la connaissait, le
-// temps de sa réponse ; et s'il ne répond pas, elle reste encore, avec ce qu'on y a tapé.
+// l'arbre chargé (une relecture ne la porte plus), elle reste telle qu'on la connaissait, à
+// chaque rendu, le temps de sa réponse : un seul rendu sans elle démonterait son éditeur et
+// recréerait sa session de synchro. Et s'il ne répond pas, elle reste encore, avec ce qu'on y
+// a tapé. Une page que le serveur a dite introuvable est oubliée : revenir à son adresse la
+// redemande, sans la remontrer d'abord.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, getPage, isSessionLost } from "../api";
@@ -55,11 +58,21 @@ export function useOpenPage(
   const { retries } = reading;
   const callbacks = useRef(reading);
   callbacks.current = reading;
-  /** La page ouverte, telle que l'arbre chargé la portait la dernière fois. */
+  /**
+   * La page ouverte, telle que l'arbre chargé la portait la dernière fois ; `null` : il ne l'a
+   * pas portée, ou le serveur a dit depuis qu'elle n'est plus là.
+   */
   const last = useRef<PageNode | null>(null);
   if (inTree !== undefined) last.current = inTree;
   /** Compte les demandes de relecture (`ask`). */
   const [asks, setAsks] = useState(0);
+
+  // Dans l'arbre chargé, ce que le serveur avait répondu d'autre pour elle (introuvable,
+  // injoignable) ne vaut plus : gardé, il la ferait disparaître le temps d'un rendu, le jour
+  // où elle quitte l'arbre.
+  if (inTree !== undefined && lookup !== null && lookup.id === inTree.id && lookup.state !== "found") {
+    setLookup(null);
+  }
 
   const outsideTree = activeId !== null && inTree === undefined;
   useEffect(() => {
@@ -82,6 +95,8 @@ export function useOpenPage(
         if (cancelled) return;
         if (isSessionLost(error)) callbacks.current.onSessionLost();
         else if (error instanceof ApiError && error.status === 404) {
+          // Elle n'est plus là : ce qu'on en savait ne se remontre pas, même en y revenant.
+          if (last.current !== null && last.current.id === activeId) last.current = null;
           setLookup({ id: activeId, state: "missing" });
         } else {
           // Le serveur ne répond pas : une page affichée le reste ; sinon, l'échec est dit.
@@ -110,7 +125,11 @@ export function useOpenPage(
   const ask = useCallback(() => setAsks((n) => n + 1), []);
 
   const looked = lookup !== null && lookup.id === activeId ? lookup : null;
-  const node = inTree ?? (looked?.state === "found" ? looked.node : undefined);
+  // Sortie de l'arbre chargé à ce rendu même : l'effet qui la redemande n'a pas encore tourné,
+  // et elle reste telle que l'arbre la portait.
+  const known = last.current !== null && last.current.id === activeId ? last.current : undefined;
+  const fromServer = looked === null ? known : looked.state === "found" ? looked.node : undefined;
+  const node = inTree ?? fromServer;
   const resolving =
     activeId !== null && node === undefined && (looked === null || looked.state === "loading");
   return useMemo(

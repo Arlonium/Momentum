@@ -16,6 +16,7 @@ let asked: { id: string; answer: Deferred<PageNode> }[] = [];
 
 beforeEach(() => {
   asked = [];
+  rendered = [];
   vi.mocked(getPage).mockReset();
   vi.mocked(getPage).mockImplementation((id) => {
     const answer = deferred<PageNode>();
@@ -26,8 +27,13 @@ beforeEach(() => {
 
 type Props = { activeId: string | null; inTree?: PageNode; retries?: number };
 const sessionLost = vi.fn();
-const hook = ({ activeId, inTree, retries = 0 }: Props) =>
-  useOpenPage(activeId, inTree, { retries, onSessionLost: sessionLost });
+/** La page rendue à chaque rendu du hook, dans l'ordre : un rendu sans elle la démonterait. */
+let rendered: (PageNode | undefined)[] = [];
+const hook = ({ activeId, inTree, retries = 0 }: Props) => {
+  const open = useOpenPage(activeId, inTree, { retries, onSessionLost: sessionLost });
+  rendered.push(open.node);
+  return open;
+};
 
 test("page_of_the_loaded_tree_is_shown_without_asking", async () => {
   const x = page("x");
@@ -162,6 +168,48 @@ test("page_that_leaves_the_tree_stays_when_the_server_fails", async () => {
   await settle(() => asked[1].answer.reject(notFound()));
   expect(open.current.node).toBeUndefined();
   expect(open.current.looked).toEqual({ id: "x", state: "missing" });
+});
+
+test("page_that_leaves_the_tree_is_never_unmounted_meanwhile", async () => {
+  const x = page("x");
+  const open = await renderHook(hook, { activeId: "x", inTree: x });
+  rendered = [];
+  // Une relecture de l'arbre ne la porte plus (jetée, retirée ou déplacée ailleurs). À aucun
+  // rendu elle ne manque : sans elle, l'éditeur serait démonté, et sa session de synchro
+  // recréée, avec la sélection et le défilement.
+  await open.rerender({ activeId: "x" });
+  expect(rendered.length).toBeGreaterThan(0);
+  expect(rendered.every((node) => node === x)).toBe(true);
+  expect(open.current.resolving).toBe(false);
+  // Le serveur la rend, à la corbeille : toujours là, d'un rendu à l'autre.
+  const trashed = page("x", { trashedAt: 5 });
+  await settle(() => asked[0].answer.resolve(trashed));
+  expect(rendered.every((node) => node !== undefined)).toBe(true);
+  expect(open.current.node).toBe(trashed);
+});
+
+test("missing_page_does_not_come_back_when_its_address_is_opened_again", async () => {
+  const x = page("x");
+  const open = await renderHook(hook, { activeId: "x", inTree: x });
+  // Elle quitte l'arbre, et le serveur dit qu'elle n'est plus là.
+  await open.rerender({ activeId: "x" });
+  await settle(() => asked[0].answer.reject(notFound()));
+  expect(open.current.looked).toEqual({ id: "x", state: "missing" });
+
+  // On va ailleurs, puis on revient à son adresse (« Précédent ») : à aucun rendu elle ne
+  // réapparaît telle qu'on la connaissait. Un éditeur et une connexion de synchro
+  // s'ouvriraient pour rien.
+  await open.rerender({ activeId: null });
+  rendered = [];
+  await open.rerender({ activeId: "x" });
+  expect(rendered.length).toBeGreaterThan(0);
+  expect(rendered.every((node) => node === undefined)).toBe(true);
+  // Le serveur est redemandé, et le redit.
+  expect(asked).toHaveLength(2);
+  expect(open.current.looked).toEqual({ id: "x", state: "loading" });
+  await settle(() => asked[1].answer.reject(notFound()));
+  expect(open.current.looked).toEqual({ id: "x", state: "missing" });
+  expect(rendered.every((node) => node === undefined)).toBe(true);
 });
 
 test("ask_reads_again_only_a_page_outside_the_tree", async () => {
