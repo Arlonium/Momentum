@@ -15,6 +15,17 @@
 //!   réponse (le jeton ne voyage que dans `Set-Cookie`) ou dans un journal.
 //!   Une adresse refusée à la connexion n'est pas journalisée non plus : on y
 //!   tape parfois son mot de passe ;
+//! - une session n'est ouverte, après la vérification d'un mot de passe, que
+//!   si le hachage vérifié est encore celui du compte (Ruling R120). Entre la
+//!   lecture du hachage et l'écriture, il y a un calcul Argon2 et l'attente
+//!   de son tour : un changement de mot de passe qui passe là supprime les
+//!   sessions du compte, et celle d'une connexion en vol lui survivrait. La
+//!   condition est dans l'instruction qui écrit (`create_session_verified`,
+//!   `change_password` du store) ; non remplie, la réponse est celle d'un mot
+//!   de passe faux, et la tentative compte comme un échec pour le frein. Le
+//!   changement de mot de passe, qui rouvre une session, y est soumis aussi :
+//!   une demande vérifiée contre un mot de passe remplacé depuis ne change
+//!   rien. L'inscription, non : elle crée le compte ;
 //! - aucune de leurs réponses, réussite ou refus, ne se garde dans un cache
 //!   (`Cache-Control: no-store`) ;
 //! - une connexion de synchro ne survit pas à la fermeture de la session de
@@ -235,15 +246,15 @@ async fn log_in(
         .map_err(ApiError::too_many_attempts)?;
     let hash = user.as_ref().and_then(|u| u.password_hash.clone());
     // Toujours une vérification Argon2, qu'il y ait un compte ou non.
-    let verified = auth::verify_password(body.password, hash)
+    let right_password = auth::verify_password(body.password, hash.clone())
         .await
         .map_err(internal)?;
-    let user = match user {
-        Some(user) if verified => user,
+    let (user, verified) = match (user, hash) {
+        (Some(user), Some(hash)) if right_password => (user, hash),
         // Le journal dit pourquoi ; la réponse, non. Pour un compte, le frein
         // borne ces lignes (dix par fenêtre) ; pour une adresse sans compte,
         // rien ne les borne : elles ne sortent qu'au niveau `debug`.
-        refused => {
+        (refused, _) => {
             match refused {
                 Some(user) => tracing::info!(
                     user_id = %user.id,
@@ -254,20 +265,34 @@ async fn log_in(
             return Err(ApiError::invalid_credentials());
         }
     };
-    state.logins.succeeded(Guarded::Login, &email);
-    // Le cookie que portait ce navigateur va être remplacé : sa session ne
-    // doit plus rien valoir, pour personne, ni les connexions de synchro du
-    // compte qu'elle portait (Ruling R90). Suppression, fermeture et session
-    // neuve : jusqu'au bout, même si le client coupe la connexion.
+    // La session, liée au hachage qui vient d'être vérifié (Ruling R120) :
+    // refusée, rien n'est fermé. Ouverte, le cookie que portait ce navigateur
+    // va être remplacé : sa session ne doit plus rien valoir, pour personne,
+    // ni les connexions de synchro du compte qu'elle portait (Ruling R90).
+    // Session neuve, suppression et fermeture : jusqu'au bout, même si le
+    // client coupe la connexion.
     let carried = auth::session_hash(&headers);
     let secure = state.secure_cookies;
     let writer = state.clone();
     let user_id = user.id;
-    let token = to_completion(async move {
+    let opened = to_completion(async move {
+        let Some(token) = open_session_verified(&writer, user_id, &verified).await? else {
+            return Ok(None);
+        };
         close_session(&writer, carried).await?;
-        open_session(&writer, user_id).await
+        Ok(Some(token))
     })
     .await?;
+    let Some(token) = opened else {
+        // Le mot de passe vérifié n'est plus celui du compte : la réponse d'un
+        // mot de passe faux, et la tentative reste comptée comme un échec.
+        tracing::info!(
+            user_id = %user.id,
+            "connexion refusée : mot de passe changé pendant sa vérification"
+        );
+        return Err(ApiError::invalid_credentials());
+    };
+    state.logins.succeeded(Guarded::Login, &email);
     tracing::info!(user_id = %user.id, "session ouverte");
     let me = me_of(&state, user.into()).await?;
     Ok((
@@ -340,38 +365,57 @@ async fn new_password(
         .await
         .map_err(internal)?
         .ok_or_else(ApiError::unauthenticated)?;
-    let verified = auth::verify_password(body.current, account.password_hash)
+    let right_password = auth::verify_password(body.current, account.password_hash.clone())
         .await
         .map_err(internal)?;
-    if !verified {
+    let Some(verified) = account.password_hash.filter(|_| right_password) else {
         tracing::info!(
             user_id = %user.id,
             "changement de mot de passe refusé : mot de passe actuel invalide"
         );
-        // Le code de la connexion, mais pas son message : ici, personne n'a
-        // tapé d'adresse.
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::InvalidCredentials,
-            "le mot de passe actuel est incorrect",
-        ));
-    }
-    state.logins.succeeded(Guarded::PasswordChange, &user.email);
+        return Err(wrong_current_password());
+    };
     let password_hash = auth::hash_password(body.new).await.map_err(internal)?;
     let secure = state.secure_cookies;
-    let token = to_completion(async move {
-        match state.store.set_password(user.id, &password_hash).await {
-            Ok(()) => {}
-            Err(StoreError::NotFound) => return Err(ApiError::unauthenticated()),
-            Err(e) => return Err(internal(e)),
+    let writer = state.clone();
+    let user_id = user.id;
+    let changed = to_completion(async move {
+        // Le hachage n'est remplacé que s'il est encore celui qui vient d'être
+        // vérifié (Ruling R120) ; les sessions du compte sont supprimées et la
+        // sienne ouverte dans la même transaction.
+        let (token, session) = auth::new_token();
+        let changed = writer
+            .store
+            .change_password(
+                user_id,
+                &verified,
+                &password_hash,
+                session,
+                now_ms() + SESSION_TTL_MS,
+            )
+            .await
+            .map_err(internal)?;
+        if !changed {
+            return Ok(None);
         }
-        tracing::info!(user_id = %user.id, "mot de passe changé : autres sessions fermées");
+        tracing::info!(%user_id, "mot de passe changé : autres sessions fermées");
         // Les sessions du compte n'existent plus : ses connexions de synchro
         // ne leur survivent pas.
-        state.hub.kick_user(user.id).await;
-        open_session(&state, user.id).await
+        writer.hub.kick_user(user_id).await;
+        Ok(Some(token))
     })
     .await?;
+    let Some(token) = changed else {
+        // Un autre changement est passé entre la vérification et l'écriture :
+        // le mot de passe vérifié n'est plus l'actuel. La réponse d'un mot de
+        // passe actuel faux, et la tentative reste comptée comme un échec.
+        tracing::info!(
+            user_id = %user.id,
+            "changement de mot de passe refusé : mot de passe changé pendant sa vérification"
+        );
+        return Err(wrong_current_password());
+    };
+    state.logins.succeeded(Guarded::PasswordChange, &user.email);
     Ok((
         StatusCode::NO_CONTENT,
         [(header::SET_COOKIE, auth::session_cookie(&token, secure))],
@@ -456,7 +500,37 @@ async fn close_session(state: &AppState, session: Option<[u8; 32]>) -> Result<()
     Ok(())
 }
 
-/// Ouvre une session pour ce compte et rend son jeton, à poser en cookie.
+/// Le refus d'un mot de passe actuel faux : le code de la connexion, mais pas
+/// son message. Ici, personne n'a tapé d'adresse.
+fn wrong_current_password() -> ApiError {
+    ApiError::new(
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::InvalidCredentials,
+        "le mot de passe actuel est incorrect",
+    )
+}
+
+/// Ouvre une session pour ce compte si le hachage de son mot de passe est
+/// encore `verified`, celui que la route vient de vérifier, et rend son jeton,
+/// à poser en cookie. `None` : le mot de passe a changé entre-temps, et aucune
+/// session n'est ouverte (Ruling R120).
+async fn open_session_verified(
+    state: &AppState,
+    user_id: Uuid,
+    verified: &str,
+) -> Result<Option<String>, ApiError> {
+    let (token, hash) = auth::new_token();
+    let opened = state
+        .store
+        .create_session_verified(user_id, verified, hash, now_ms() + SESSION_TTL_MS)
+        .await
+        .map_err(internal)?;
+    Ok(opened.then_some(token))
+}
+
+/// Ouvre une session pour ce compte, qui vient d'être créé, et rend son jeton,
+/// à poser en cookie. Après la vérification d'un mot de passe, c'est
+/// [`open_session_verified`].
 async fn open_session(state: &AppState, user_id: Uuid) -> Result<String, ApiError> {
     let (token, hash) = auth::new_token();
     state

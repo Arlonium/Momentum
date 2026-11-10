@@ -9,7 +9,7 @@
 mod common;
 
 use std::collections::BTreeSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
@@ -17,13 +17,14 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use common::{
     Logs, PASSWORD, Reply, SESSION_COOKIE, TestApp, all_logs, assert_french, exec_sql,
-    json_request, query_i64, tree_nodes,
+    json_request, overtaken, query_i64, tree_nodes,
 };
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_server::{Me, PageNode, SignupMode};
 use mementum_store::{InvitationGrant, NewInvitation, NewNode, NodeKind, Store};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 /// Un autre mot de passe de test, tout aussi faux.
@@ -1862,4 +1863,291 @@ async fn public_url_host_is_admitted_on_loopback() {
     t.send_raw(health("notes.exemple.fr"))
         .await
         .assert_error(StatusCode::MISDIRECTED_REQUEST, "bad_host");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Une session ne s'ouvre que si le hachage vérifié est encore celui du compte (Ruling R120).
+//
+// Entre la lecture du hachage et l'ouverture de la session, il y a une vérification Argon2 et
+// l'attente de son tour. Un changement de mot de passe qui se glisse là supprime les sessions
+// du compte, mais pas celle qui naît après lui : la connexion en vol, vérifiée contre l'ancien
+// mot de passe, rendait une session qui lui survivait. La session est donc liée au hachage
+// vérifié, dans l'instruction qui l'écrit.
+//
+// Pour forcer l'entrelacement sans dépendre d'un minutage, ces tests font comme ceux du partage
+// (`overtaken`) : la requête part pendant que le test tient le verrou d'écriture de SQLite. Elle
+// lit le hachage d'avant, le vérifie, puis attend pour écrire ; le test écrit alors ce qu'écrit
+// un changement de mot de passe, et rend le verrou. Le journal dit que la requête avait bien
+// vérifié l'ancien mot de passe : arrivée après, elle serait refusée pour un mot de passe faux,
+// et le test ne prouverait rien.
+
+/// Le mot de passe que se choisit l'intrus.
+const INTRUDER_PASSWORD: &str = "mot-de-passe-de-l-intrus";
+
+/// Ce qu'écrit un changement de mot de passe (`Store::set_password`), en SQL : le hachage de
+/// `account` devient celui de `donor` (un compte inscrit avec le nouveau mot de passe), et ses
+/// sessions sont supprimées.
+fn password_replaced(account: Uuid, donor: Uuid) -> [String; 2] {
+    [
+        format!(
+            "UPDATE users SET password_hash = (SELECT password_hash FROM users WHERE id = \
+             '{donor}') WHERE id = '{account}'"
+        ),
+        format!("DELETE FROM sessions WHERE user_id = '{account}'"),
+    ]
+}
+
+/// Alice, et Bob, inscrit avec [`NEW_PASSWORD`] : son hachage sert de nouveau mot de passe à
+/// Alice. Rend le `Me` d'Alice et l'id de Bob.
+async fn alice_and_a_donor(t: &TestApp) -> (Value, Uuid) {
+    let (_, me) = t.signed_up("alice@exemple.fr", "Alice").await;
+    let reply = t
+        .browser()
+        .sign_up("bob@exemple.fr", "Bob", NEW_PASSWORD, None)
+        .await;
+    reply.assert_status(StatusCode::CREATED);
+    (me, user_id(&reply.json()))
+}
+
+/// La même réponse, corps et en-têtes compris, et sans cookie.
+fn assert_same_refusal(raced: &Reply, wrong: &Reply) {
+    assert_eq!(raced.status, wrong.status, "réponse : {}", raced.text());
+    assert_eq!(raced.body, wrong.body);
+    assert_eq!(raced.headers, wrong.headers);
+    assert!(raced.set_cookies().is_empty());
+}
+
+/// Une connexion en vol avec l'ancien mot de passe, vérifiée avant le changement et qui écrit
+/// après : aucune session. Elle reçoit la réponse d'un mot de passe faux, et compte comme un
+/// échec pour le frein.
+#[tokio::test]
+async fn login_verified_before_a_password_change_opens_no_session() {
+    let t = open_app().await;
+    let (me, bob) = alice_and_a_donor(&t).await;
+    let (alice, space) = (user_id(&me), space_id(&me, 0));
+    // La session qu'Alice avait, et ce que répond un mot de passe faux (un échec au compteur).
+    let laptop = t.browser();
+    laptop
+        .log_in("alice@exemple.fr", PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    let wrong = t
+        .browser()
+        .log_in("alice@exemple.fr", "pas-le-bon-mot-de-passe")
+        .await;
+    wrong.assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+
+    // Le navigateur d'où part la connexion porte déjà une session, celle de Bob : une connexion
+    // refusée ne doit rien fermer.
+    let intruder = t.browser();
+    intruder
+        .log_in("bob@exemple.fr", NEW_PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    let carried = intruder.session();
+    let raced = overtaken(
+        &t,
+        space,
+        intruder.log_in("alice@exemple.fr", PASSWORD),
+        &password_replaced(alice, bob),
+    )
+    .await;
+
+    // Elle avait bien vérifié l'ancien mot de passe, et c'est à l'écriture qu'elle est refusée.
+    assert!(
+        raced.journal.contains("mot de passe changé pendant"),
+        "réponse {} : {}\njournal : {}",
+        raced.reply.status,
+        raced.reply.text(),
+        raced.journal
+    );
+    assert!(
+        !raced.journal.contains("mot de passe invalide"),
+        "la connexion est arrivée après le changement : {}",
+        raced.journal
+    );
+    assert_same_refusal(&raced.reply, &wrong);
+    // La session que portait le navigateur n'est pas fermée : c'est toujours celle de Bob.
+    assert_eq!(intruder.session(), carried);
+    let still = intruder.me().await;
+    still.assert_status(StatusCode::OK);
+    assert_eq!(user_id(&still.json()), bob);
+    // Plus aucune session pour le compte : celle d'Alice est partie avec le changement, et
+    // celle de l'intrus n'est pas née.
+    let sessions = format!("SELECT COUNT(*) FROM sessions WHERE user_id = '{alice}'");
+    assert_eq!(query_i64(&t.db_path(), &sessions).await, 0);
+    laptop
+        .me()
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+
+    // Elle compte comme un échec : avec celui d'avant et huit autres, le compte est à dix, et
+    // même le bon mot de passe est refusé jusqu'à la fin de la fenêtre.
+    for attempt in 1..=8 {
+        let reply = t.browser().log_in("alice@exemple.fr", "pas-le-bon").await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
+    }
+    t.browser()
+        .log_in("alice@exemple.fr", NEW_PASSWORD)
+        .await
+        .assert_error(StatusCode::TOO_MANY_REQUESTS, "too_many_attempts");
+}
+
+/// Le même entrelacement sur le changement de mot de passe, qui rouvre une session : l'intrus
+/// tient une session du compte et connaît l'ancien mot de passe ; sa demande, vérifiée avant le
+/// changement d'Alice, écrit après. Elle ne change rien : ni le mot de passe (celui d'Alice
+/// reste), ni aucune session. Sans cela, l'intrus reprenait le compte.
+#[tokio::test]
+async fn password_change_verified_before_another_one_changes_nothing() {
+    let t = open_app().await;
+    let (me, bob) = alice_and_a_donor(&t).await;
+    let (alice, space) = (user_id(&me), space_id(&me, 0));
+    let intruder = t.browser();
+    intruder
+        .log_in("alice@exemple.fr", PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    // Ce que répond un mot de passe actuel faux.
+    let wrong = intruder
+        .change_password("pas-le-bon-mot-de-passe", INTRUDER_PASSWORD)
+        .await;
+    wrong.assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+
+    let raced = overtaken(
+        &t,
+        space,
+        intruder.change_password(PASSWORD, INTRUDER_PASSWORD),
+        &password_replaced(alice, bob),
+    )
+    .await;
+
+    assert!(
+        raced.journal.contains("mot de passe changé pendant"),
+        "réponse {} : {}\njournal : {}",
+        raced.reply.status,
+        raced.reply.text(),
+        raced.journal
+    );
+    assert!(
+        !raced.journal.contains("mot de passe actuel invalide"),
+        "la demande est arrivée après le changement : {}",
+        raced.journal
+    );
+    assert_same_refusal(&raced.reply, &wrong);
+    // Le mot de passe est celui du changement passé devant, et le compte n'a aucune session.
+    let kept = format!(
+        "SELECT COUNT(*) FROM users WHERE id = '{alice}' AND password_hash = (SELECT \
+         password_hash FROM users WHERE id = '{bob}')"
+    );
+    assert_eq!(query_i64(&t.db_path(), &kept).await, 1);
+    let sessions = format!("SELECT COUNT(*) FROM sessions WHERE user_id = '{alice}'");
+    assert_eq!(query_i64(&t.db_path(), &sessions).await, 0);
+    intruder
+        .me()
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+    t.browser()
+        .log_in("alice@exemple.fr", INTRUDER_PASSWORD)
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+    let alice_again = t.browser();
+    alice_again
+        .log_in("alice@exemple.fr", NEW_PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+
+    // La demande refusée compte comme un échec : avec celui d'avant et huit autres, le compte
+    // est à dix, et même le bon mot de passe actuel est refusé jusqu'à la fin de la fenêtre.
+    for attempt in 1..=8 {
+        let reply = alice_again
+            .change_password("pas-le-bon", INTRUDER_PASSWORD)
+            .await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
+    }
+    alice_again
+        .change_password(NEW_PASSWORD, INTRUDER_PASSWORD)
+        .await
+        .assert_error(StatusCode::TOO_MANY_REQUESTS, "too_many_attempts");
+}
+
+/// Le test de charge de la relecture de sécurité : 150 connexions avec l'ancien mot de passe,
+/// une toutes les deux millisecondes, pendant qu'Alice change le sien. Après le `204`, aucune
+/// des sessions que ces connexions ont reçues ne vaut encore : celles d'avant le changement
+/// sont supprimées par lui, et celles qui étaient en vol ne naissent pas.
+///
+/// Sur le code d'avant, la moitié environ lui survivait (73 sur 150 à la relecture). Ce test-ci
+/// dépend du minutage pour échouer, pas pour passer : les deux tests au-dessus forcent
+/// l'entrelacement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn logins_in_flight_never_survive_a_password_change() {
+    let t = TestApp::new().await;
+    let (alice, _) = t.signed_up("alice@exemple.fr", "Alice").await;
+
+    let mut logins = tokio::task::JoinSet::new();
+    for i in 0..150u64 {
+        let router = t.router.clone();
+        logins.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2 * i)).await;
+            let mut request = json_request(
+                Method::POST,
+                "/api/v1/auth/login",
+                &json!({ "email": "alice@exemple.fr", "password": PASSWORD }),
+            );
+            request
+                .headers_mut()
+                .insert(header::HOST, "localhost".parse().unwrap());
+            let response = router.oneshot(request).await.unwrap();
+            let session = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .filter_map(|raw| raw.strip_prefix(&format!("{SESSION_COOKIE}=")))
+                .filter_map(|rest| rest.split(';').next())
+                .map(str::to_string)
+                .next();
+            (response.status(), session)
+        });
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    alice
+        .change_password(PASSWORD, NEW_PASSWORD)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let outcomes = logins.join_all().await;
+
+    // Le `204` est reçu, et toutes les connexions ont répondu.
+    let opened: Vec<&String> = outcomes
+        .iter()
+        .filter_map(|(_, session)| session.as_ref())
+        .collect();
+    assert!(
+        !opened.is_empty(),
+        "aucune connexion n'a abouti avant le changement : {:?}",
+        outcomes
+            .iter()
+            .map(|(status, _)| status)
+            .collect::<Vec<_>>()
+    );
+    let mut survivors = 0;
+    for session in &opened {
+        let browser = t.browser();
+        browser.set_session(Some(session.as_str()));
+        if browser.me().await.status != StatusCode::UNAUTHORIZED {
+            survivors += 1;
+        }
+    }
+    assert_eq!(
+        survivors,
+        0,
+        "{survivors} sessions ouvertes avec l'ancien mot de passe valent encore après le \
+         changement, sur {} connexions abouties",
+        opened.len()
+    );
+    // La session qui a changé le mot de passe est la seule du compte.
+    assert_eq!(alice.me().await.status, StatusCode::OK);
+    assert_eq!(
+        query_i64(&t.db_path(), "SELECT COUNT(*) FROM sessions").await,
+        1
+    );
 }

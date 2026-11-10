@@ -174,6 +174,10 @@ impl Store {
 
     /// Change le hachage du mot de passe et supprime toutes les sessions du compte, dans la
     /// même transaction. `NotFound` (sans rien écrire) si le compte n'existe pas.
+    ///
+    /// Sans condition : pour qui n'a vérifié aucun mot de passe (la commande `mementum user
+    /// set-password`). Une demande qui a vérifié le mot de passe actuel passe par
+    /// [`Store::change_password`].
     pub async fn set_password(&self, user_id: Uuid, password_hash: &str) -> Result<(), StoreError> {
         let id = user_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -194,8 +198,91 @@ impl Store {
         Ok(())
     }
 
+    /// Remplace le hachage `verified` du compte par `new_hash`, supprime toutes ses sessions
+    /// et lui en ouvre une (`token_hash`, `expires_at`), dans la même transaction. `false`,
+    /// sans rien écrire, si le hachage du compte n'est plus `verified` (ou si le compte
+    /// n'existe pas).
+    ///
+    /// Ruling R120 : `verified` est le hachage contre lequel l'appelant vient de vérifier le
+    /// mot de passe actuel. Entre cette vérification (un calcul Argon2, et l'attente de son
+    /// tour) et l'écriture, un autre changement de mot de passe peut passer. La demande, qui a
+    /// prouvé la connaissance d'un mot de passe qui n'est plus celui du compte, ne doit alors
+    /// ni le remplacer, ni ouvrir de session : qui change son mot de passe pour chasser un
+    /// intrus le verrait sinon repris par lui.
+    pub async fn change_password(
+        &self,
+        user_id: Uuid,
+        verified: &str,
+        new_hash: &str,
+        token_hash: [u8; 32],
+        expires_at: i64,
+    ) -> Result<bool, StoreError> {
+        let id = user_id.to_string();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let changed =
+            sqlx::query("UPDATE users SET password_hash = ? WHERE id = ? AND password_hash IS ?")
+                .bind(new_hash)
+                .bind(&id)
+                .bind(verified)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        if changed == 0 {
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&token_hash[..])
+        .bind(&id)
+        .bind(now_ms())
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Ouvre une session pour le compte, si le hachage de son mot de passe est encore
+    /// `verified`. `false`, sans rien écrire, s'il ne l'est plus (ou si le compte n'existe pas,
+    /// ou n'a pas de mot de passe).
+    ///
+    /// Ruling R120 : `verified` est le hachage contre lequel l'appelant vient de vérifier un
+    /// mot de passe. Entre cette vérification et l'écriture, un changement de mot de passe peut
+    /// passer : il supprime les sessions qui existent à son commit, pas celle qui naîtrait
+    /// après. La lecture du hachage et l'écriture de la session tiennent donc en une seule
+    /// instruction : la session naît avant le changement, qui la supprime, ou ne naît pas.
+    pub async fn create_session_verified(
+        &self,
+        user_id: Uuid,
+        verified: &str,
+        token_hash: [u8; 32],
+        expires_at: i64,
+    ) -> Result<bool, StoreError> {
+        let created = sqlx::query(
+            "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) \
+             SELECT ?, id, ?, ? FROM users WHERE id = ? AND password_hash IS ?",
+        )
+        .bind(&token_hash[..])
+        .bind(now_ms())
+        .bind(expires_at)
+        .bind(user_id.to_string())
+        .bind(verified)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(created == 1)
+    }
+
     /// Ouvre une session : `token_hash` est le SHA-256 du jeton, `expires_at` son échéance
     /// (millisecondes Unix). `NotFound` si le compte n'existe pas.
+    ///
+    /// Sans condition : pour un compte qui vient d'être créé (l'inscription). Après la
+    /// vérification d'un mot de passe, c'est [`Store::create_session_verified`].
     pub async fn create_session(
         &self,
         user_id: Uuid,

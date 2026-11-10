@@ -294,3 +294,164 @@ async fn session_liveness_is_read_without_sliding() {
     store.delete_session(token).await.unwrap();
     assert!(!store.session_is_live(token, T0).await.unwrap());
 }
+
+/// Le hachage du compte, lu en base.
+async fn password_hash(store: &mementum_store::Store, user: Uuid) -> Option<String> {
+    store.get_user(user).await.unwrap().unwrap().password_hash
+}
+
+/// Ruling R120 : une session ne naît que si le hachage que l'appelant vient de vérifier est
+/// encore celui du compte. `set_password` le change, et supprime les sessions : une connexion
+/// vérifiée avant lui n'ouvre plus rien après. C'est lui que lancent la route de changement
+/// comme la commande `mementum user set-password` : les deux sont couvertes.
+#[tokio::test]
+async fn session_is_only_opened_for_the_verified_password_hash() {
+    let f = fresh().await;
+    let (store, db) = (&f.store, &f.db);
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let expires = T0 + TTL;
+    let verified = alice.password_hash.clone().unwrap();
+
+    // Le hachage vérifié est celui du compte : la session est ouverte.
+    assert!(
+        store
+            .create_session_verified(alice.id, &verified, [1; 32], expires)
+            .await
+            .unwrap()
+    );
+    let opened = store.session_user([1; 32], T0, TTL).await.unwrap().unwrap();
+    assert_eq!(opened.id, alice.id);
+    assert_eq!(expiry(db, [1; 32]).await, expires);
+
+    // Le mot de passe change : le hachage vérifié avant ne vaut plus, et rien n'est écrit.
+    store
+        .set_password(alice.id, "nouveau-hachage")
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .create_session_verified(alice.id, &verified, [2; 32], expires)
+            .await
+            .unwrap()
+    );
+    assert_eq!(int(db, "SELECT COUNT(*) FROM sessions").await, 0);
+    // Celui d'après le changement, si.
+    assert!(
+        store
+            .create_session_verified(alice.id, "nouveau-hachage", [3; 32], expires)
+            .await
+            .unwrap()
+    );
+
+    // Le hachage est celui du compte nommé, pas celui d'un autre : Bob porte encore le hachage
+    // qu'Alice avait, et c'est sa session à lui que ce hachage ouvre.
+    assert_eq!(
+        password_hash(store, bob.id).await.as_deref(),
+        Some(verified.as_str())
+    );
+    assert!(
+        store
+            .create_session_verified(bob.id, &verified, [4; 32], expires)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .session_user([4; 32], T0, TTL)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        bob.id
+    );
+    // Un compte inconnu, un compte sans mot de passe (Ruling R60) : rien, sans erreur.
+    assert!(
+        !store
+            .create_session_verified(Uuid::now_v7(), &verified, [5; 32], expires)
+            .await
+            .unwrap()
+    );
+    common::exec_sql(
+        db,
+        &format!(
+            "UPDATE users SET password_hash = NULL WHERE id = '{}'",
+            bob.id
+        ),
+    )
+    .await;
+    for hash in [verified.as_str(), ""] {
+        assert!(
+            !store
+                .create_session_verified(bob.id, hash, [6; 32], expires)
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(int(db, "SELECT COUNT(*) FROM sessions").await, 2);
+}
+
+/// Ruling R120, pour le changement de mot de passe, qui rouvre une session : le hachage n'est
+/// remplacé que s'il est encore celui que l'appelant a vérifié. Alors les sessions du compte
+/// sont supprimées et la sienne est ouverte, dans la même transaction. Sinon rien ne change :
+/// ni le hachage, ni les sessions.
+#[tokio::test]
+async fn password_is_only_changed_from_the_verified_hash() {
+    let f = fresh().await;
+    let (store, db) = (&f.store, &f.db);
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let expires = T0 + TTL;
+    let verified = alice.password_hash.clone().unwrap();
+    for (user, token) in [(alice.id, [1; 32]), (alice.id, [2; 32]), (bob.id, [3; 32])] {
+        store.create_session(user, token, expires).await.unwrap();
+    }
+
+    assert!(
+        store
+            .change_password(alice.id, &verified, "premier-changement", [4; 32], expires)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        password_hash(store, alice.id).await.as_deref(),
+        Some("premier-changement")
+    );
+    // Les sessions d'avant sont mortes, la neuve vaut, celle de Bob aussi.
+    for dead in [[1; 32], [2; 32]] {
+        assert_eq!(store.session_user(dead, T0, TTL).await.unwrap(), None);
+    }
+    for (live, user) in [([4; 32], alice.id), ([3; 32], bob.id)] {
+        assert_eq!(
+            store.session_user(live, T0, TTL).await.unwrap().unwrap().id,
+            user
+        );
+    }
+
+    // Une demande vérifiée contre le hachage d'avant, arrivée après : rien ne change.
+    assert!(
+        !store
+            .change_password(alice.id, &verified, "second-changement", [5; 32], expires)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        password_hash(store, alice.id).await.as_deref(),
+        Some("premier-changement")
+    );
+    assert!(store.session_is_live([4; 32], T0).await.unwrap());
+    assert!(!store.session_is_live([5; 32], T0).await.unwrap());
+    // Un compte inconnu : rien non plus, sans erreur.
+    assert!(
+        !store
+            .change_password(Uuid::now_v7(), &verified, "x", [6; 32], expires)
+            .await
+            .unwrap()
+    );
+    // Le hachage de Bob, le même texte que celui d'Alice avant, n'a pas bougé.
+    assert_eq!(
+        password_hash(store, bob.id).await.as_deref(),
+        Some(verified.as_str())
+    );
+    assert_eq!(int(db, "SELECT COUNT(*) FROM sessions").await, 2);
+}
