@@ -100,7 +100,7 @@ Remarques :
 
 ## C. Inviter quelqu'un dans l'espace, par un lien (5 minutes)
 
-- [ ] **C1.** Fenêtre 1, réglages de l'espace, partie « Invitations ». Tape `camille@exemple.fr`, garde le rôle « Membre », clique « Inviter ». Tu dois voir un cadre qui dit « Ce lien ne sera plus affiché : copie-le maintenant. », avec le lien.
+- [ ] **C1.** Fenêtre 1, réglages de l'espace, partie « Invitations ». Tape `camille@exemple.fr`, garde le rôle « Membre », clique « Inviter ». Tu dois voir un cadre qui t'avertit de copier le lien tout de suite, avec le lien.
 - [ ] **C2.** Clique « Copier le lien ». Le bouton doit dire « Lien copié ».
 - [ ] **C3.** Regarde sous « En attente ». L'invitation doit y être, avec l'adresse, « Membre » et sa date de fin, dans 7 jours.
 - [ ] **C4.** Fenêtre 2 : colle le lien dans la barre d'adresse. Tu dois lire ton nom, suivi de « t'invite dans l'espace » et du nom de l'espace, et voir deux boutons : « Créer mon compte » et « J'ai déjà un compte ».
@@ -148,21 +148,22 @@ Remarques :
 Fenêtre 1 : ouvre « Notes privées ».
 
 - [ ] **F1.** Clique « Partager », en haut à droite. Un panneau doit s'ouvrir sous le bouton, le curseur dans le champ « Adresse e-mail ». Tu dois t'y voir, marqué « (toi) », en « Accès complet ».
-- [ ] **F2.** Tape `dana@exemple.fr`, choisis « Peut lire » dans la liste à côté, clique « Inviter ». Tu dois voir le lien de l'invitation, et un bouton « Copier le lien d'invitation ». Copie-le.
-- [ ] **F3.** Fenêtre 2 : déconnecte Camille, puis colle le lien. Tu dois lire ton nom, suivi de « t'invite sur la page « Notes privées » », et le nom de l'espace où elle est.
-- [ ] **F4.** Fenêtre 2 : clique « Créer mon compte », donne le nom « Dana » et un mot de passe. Dana doit arriver directement sur « Notes privées ».
-- [ ] **F5.** Fenêtre 2 : regarde la barre latérale de Dana. Elle ne doit avoir qu'une section, « Partagé », avec cette seule page.
-- [ ] **F6.** Fenêtre 2 : regarde la page. Un bandeau doit dire « Tu peux lire cette page, pas la modifier. ». Dana ne peut taper ni dans le titre, ni dans le texte.
-- [ ] **F7.** Fenêtre 2 : cherche l'icône du crayon, en haut de la barre latérale, et le bouton « Partager ». Dana ne doit avoir ni l'une ni l'autre : une invitée ne crée pas de page à la racine, et ne partage qu'avec l'accès complet.
-- [ ] **F8.** Fenêtre 1 : clique dans la fenêtre et regarde la barre latérale. « Notes privées » doit être passée de « Privé » à « Partagé ».
-- [ ] **F9.** Fenêtre 1 : rouvre « Partager ». Sur la ligne de Dana, passe de « Peut lire » à « Peut modifier ». Fenêtre 2 : un bandeau doit dire « Tu peux maintenant modifier cette page : rouvre-la. ». Clique « Rouvrir la page » : Dana doit pouvoir écrire.
-- [ ] **F10.** Fenêtre 1 : passe Dana en « Accès complet ». Fenêtre 2 : en une ou deux secondes, Dana doit avoir le bouton « Partager ».
-- [ ] **F11.** Fenêtre 2 : clique ce bouton. Dans le panneau de Dana, l'accès général se lit sans se régler : « Seuls les membres de l'espace règlent l'accès général. ».
-- [ ] **F12.** Fenêtre 1 : sous « Accès général », coche « Tous les membres de l'espace ». Une liste de niveaux doit apparaître à côté, sur « Peut lire ». Dans la barre latérale, la page doit passer dans « Espace ».
-- [ ] **F13.** Fenêtre 1 : recoche « Seulement les invités ». La page doit revenir dans « Partagé ».
-- [ ] **F14.** Fenêtre 1 : crée une sous-page sous « Page d'équipe », ouvre-la, puis clique « Partager ». « Tous les membres de l'espace » doit être coché et marqué « hérité », et « Seulement les invités » grisé : une page parente ouvre déjà cette page aux membres.
-- [ ] **F15.** Dans ce panneau, ouvre la liste des niveaux, à côté de « hérité ». Seul « Accès complet » doit se choisir : les niveaux plus bas sont grisés.
-- [ ] **F16.** En bas du panneau, clique « Copier le lien ». Le bouton doit dire « Lien copié ». Appuie sur Échap : le panneau doit se fermer.
+- [ ] **F2.** Tape `dana@exemple.fr`, choisis « Peut lire » dans la liste à côté, clique « Inviter ». Tu dois lire « Copie ce lien maintenant : il ne sera plus affiché une fois la page fermée. », et voir le lien, avec un bouton « Copier le lien d'invitation ». Copie-le.
+- [ ] **F3.** Clique en dehors du panneau, puis rouvre « Partager ». Le lien de l'invitation doit être encore là : il reste affiché tant que l'invitation attend et que la page est ouverte.
+- [ ] **F4.** Fenêtre 2 : déconnecte Camille, puis colle le lien. Tu dois lire ton nom, suivi de « t'invite sur la page « Notes privées » », et le nom de l'espace où elle est.
+- [ ] **F5.** Fenêtre 2 : clique « Créer mon compte », donne le nom « Dana » et un mot de passe. Dana doit arriver directement sur « Notes privées ».
+- [ ] **F6.** Fenêtre 2 : regarde la barre latérale de Dana. Elle ne doit avoir qu'une section, « Partagé », avec cette seule page.
+- [ ] **F7.** Fenêtre 2 : regarde la page. Un bandeau doit dire « Tu peux lire cette page, pas la modifier. ». Dana ne peut taper ni dans le titre, ni dans le texte.
+- [ ] **F8.** Fenêtre 2 : cherche l'icône du crayon, en haut de la barre latérale, et le bouton « Partager ». Dana ne doit avoir ni l'une ni l'autre : une invitée ne crée pas de page à la racine, et ne partage qu'avec l'accès complet.
+- [ ] **F9.** Fenêtre 1 : clique dans la fenêtre et regarde la barre latérale. « Notes privées » doit être passée de « Privé » à « Partagé ».
+- [ ] **F10.** Fenêtre 1 : rouvre « Partager ». Sur la ligne de Dana, passe de « Peut lire » à « Peut modifier ». Fenêtre 2 : un bandeau doit annoncer que Dana peut maintenant modifier la page, avec un bouton « Rouvrir la page ». Clique-le : Dana doit pouvoir écrire.
+- [ ] **F11.** Fenêtre 1 : passe Dana en « Accès complet ». Fenêtre 2 : en une ou deux secondes, Dana doit avoir le bouton « Partager ».
+- [ ] **F12.** Fenêtre 2 : clique ce bouton. Dans le panneau de Dana, l'accès général se lit sans se régler : « Seuls les membres de l'espace règlent l'accès général. ».
+- [ ] **F13.** Fenêtre 1 : sous « Accès général », coche « Tous les membres de l'espace ». Une liste de niveaux doit apparaître à côté, sur « Peut lire ». Dans la barre latérale, la page doit passer dans « Espace ».
+- [ ] **F14.** Fenêtre 1 : recoche « Seulement les invités ». La page doit revenir dans « Partagé ».
+- [ ] **F15.** Fenêtre 1 : crée une sous-page sous « Page d'équipe », ouvre-la, puis clique « Partager ». « Tous les membres de l'espace » doit être coché et marqué « hérité », et « Seulement les invités » grisé : une page parente ouvre déjà cette page aux membres.
+- [ ] **F16.** Dans ce panneau, ouvre la liste des niveaux, à côté de « hérité ». Seul « Accès complet » doit se choisir : les niveaux plus bas sont grisés.
+- [ ] **F17.** En bas du panneau, clique « Copier le lien ». Le bouton doit dire « Lien copié ». Appuie sur Échap : le panneau doit se fermer.
 
 Remarques :
 
@@ -248,8 +249,10 @@ Elles sont voulues, ou reportées à un lot suivant. Ne les signale pas comme de
 - Un lien d'invitation donne l'accès à qui le détient : l'adresse e-mail n'est pas vérifiée, et rien n'est envoyé (R47).
 - Un niveau qui monte ne s'applique pas tout seul : il faut cliquer « Rouvrir la page ». C'est voulu, pour ne pas changer l'éditeur sous les yeux de qui lit (R111).
 - Sous une page ouverte aux membres, « Seulement les invités » est grisé : une sous-page ne peut pas être plus fermée que sa page parente dans ce lot (R93, R110).
-- Dans le menu Partager, rien ne dit si une personne est membre ou invitée. La confirmation de « Retirer » parle donc d'une nouvelle invitation pour tout le monde (R111).
-- La corbeille est une liste à plat. Pour restaurer une sous-page partie avec sa page parente, c'est la page parente qu'il faut restaurer, et le message le dit (R65).
+- Si tu te reconnectes avec un autre compte dans la fenêtre « Ta session a pris fin », toute l'application se recharge. C'est voulu : le texte tapé par l'un ne doit pas partir sous le nom de l'autre (R115).
+- Deux onglets du même navigateur ne se parlent plus directement : tout passe par le serveur. Hors ligne, ce que tu tapes dans l'un n'apparaît dans l'autre qu'au retour du réseau.
+- Dans le menu Partager, rien ne dit si une personne est membre ou invitée. La confirmation de « Retirer » parle donc d'une nouvelle invitation pour tout le monde (reporté au lot suivant).
+- La corbeille est une liste à plat. Pour restaurer une sous-page partie avec sa page parente, c'est la page parente qu'il faut restaurer, et le message le dit (connu, à améliorer plus tard).
 - Le premier compte porte la mention « Admin de l'instance », mais elle ne lui donne encore aucun pouvoir dans l'application. Lui non plus ne voit pas les pages privées des autres (R49).
 - Un mot de passe oublié se règle sur le serveur, par une commande : il n'y a pas d'e-mail de secours (R47).
 - On ne peut pas encore supprimer un espace ni un compte, et la corbeille ne se vide pas toute seule (R52).
