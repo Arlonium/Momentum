@@ -4,33 +4,43 @@
 //! | Route | Réponse |
 //! |---|---|
 //! | `GET /api/v1/pages/{id}/access` | [`PageAccess`] |
-//! | `PUT /api/v1/pages/{id}/access/general` ([`SetGeneral`]) | [`PageAccess`] ; `level: null` = « seulement les invités » : la ligne `members` de la page est retirée |
+//! | `PUT /api/v1/pages/{id}/access/general` ([`SetGeneral`]) | [`PageAccess`] ; `level: null` = « seulement les invités » : la ligne `members` de la page est retirée ; réservé aux rôles `member` et plus (R85) ; `409 inherited_access` sous l'accès général d'une page parente |
 //! | `PUT /api/v1/pages/{id}/access/users/{userId}` ([`SetLevel`]) | [`PageAccess`] ; `404` si le compte n'a aucun rôle dans l'espace |
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | [`PageAccess`] ; `404` si la page n'a pas de ligne propre pour ce compte |
 //! | `POST /api/v1/pages/{id}/invitations` ([`InviteToPage`]) | `201`, `InvitationCreated` |
 //!
-//! **Droits.** Toutes demandent `Share`, donc `full` sur la page, par `access.rs`, avant que le
-//! corps soit lu : `404` pour qui ne la voit pas, la réponse d'une page qui n'existe pas ;
-//! `403 forbidden` sous `full` ; `409 trashed` pour un changement sur une page à la corbeille,
-//! dont les accès se lisent encore. `GET …/access` porte le nom et l'adresse des comptes : il
-//! n'est rendu qu'à qui a `full` ; après un changement qui lui ôte `full` (on peut se retirer
-//! soi-même), la réponse est `204`, sans corps.
+//! **Droits.** Toutes demandent `Share`, donc `full` sur la page. Les refus viennent dans cet
+//! ordre : `404` pour qui ne la voit pas, la réponse d'une page qui n'existe pas ; `403
+//! forbidden` sous `full` ; pour l'accès général, `403 forbidden` pour un invité, même en `full`
+//! (Ruling R85 : ce que voient les membres de l'espace, c'est aux membres de le décider) ;
+//! `409 trashed` pour un changement sur une page à la corbeille, dont les accès se lisent
+//! encore ; `404` pour la personne visée (sans rôle dans l'espace, ou sans ligne propre à
+//! retirer) ; `409 inherited_access` ; `409 last_full_access`. `GET …/access` porte le nom et
+//! l'adresse des comptes : il n'est rendu qu'à qui a `full` ; après un changement qui lui ôte
+//! `full` (on peut se retirer soi-même), la réponse est `204`, sans corps.
+//!
+//! **Ce qui fait foi est la transaction** (Ruling R87). Avant de lire le corps, la route répond
+//! par le cache des accès (`access.rs`) : `404`, `403`, `409 trashed`, sans attendre. Mais un
+//! changement est vérifié en entier par le store, dans la transaction qui l'écrit
+//! (`Store::change_access`, au nom de qui demande) : son rôle et son niveau sur la page et ses
+//! ancêtres (`mementum_acl::chain_level`, le même calcul que celui de tout l'espace), R85, la
+//! corbeille, la personne visée, l'accès général hérité, et R70. Rien n'y dépend de la révision
+//! de l'espace : écrire ailleurs dans l'espace ne bloque pas un partage, et un appelant qui perd
+//! `full` entre sa requête et l'écriture n'écrit rien.
 //!
 //! **Règles.**
 //! - on donne `read`, `comment`, `edit` ou `full`, à un compte qui a un rôle dans l'espace,
 //!   membre ou invité. Un compte sans rôle répond comme un compte inconnu ;
+//! - un invité en `full` fait tout ce que donne `full` (Ruling R86 : inviter jusqu'à `full`,
+//!   changer ou retirer les lignes des autres, lire les accès, révoquer les invitations de la
+//!   page), sauf toucher à l'accès général (R85) ;
+//! - l'accès général qu'une page parente donne (`generalInherited`) ne se retire ni ne se
+//!   baisse sur la sous-page (`409 inherited_access`) ; il peut y monter ;
 //! - après tout changement, la page garde quelqu'un en `full`, par ses lignes ou par celles
 //!   d'un ancêtre (Ruling R70 : une ligne `members` compte, les admins y ont `full` ; une ligne
-//!   restée à quelqu'un sans rôle, non) ; sinon `409 last_full_access`, et rien n'est écrit.
-//!   C'est le store qui le vérifie, dans la transaction de l'écriture
-//!   (`Store::change_access`), sur la même notion que le départ d'un membre ;
-//! - retirer son dernier accès à un invité le fait sortir de l'espace (même transaction) ;
-//! - **décision et écriture tiennent ensemble** : la route lit la révision de l'espace
-//!   (`spaces.rev`), puis décide (le droit de l'appelant, le rôle de la personne visée, la
-//!   ligne à retirer) sur ce qu'elle lit ensuite ; le store n'écrit que si l'espace est encore
-//!   à cette révision. Sinon la route relit et redécide, [`ACCESS_RETRIES`] fois au plus, puis
-//!   `409 access_changed`. Un appelant qui perd `full` entre sa lecture et son écriture
-//!   n'écrit donc rien ;
+//!   restée à quelqu'un sans rôle, non) ; sinon `409 last_full_access`, et rien n'est écrit ;
+//! - retirer son dernier accès à un invité le fait sortir de l'espace, avec ses invitations en
+//!   attente (même transaction) ;
 //! - après le commit, les connexions de synchro de la page et de ses sous-pages sont fermées
 //!   (`rights_changed`), et la page sort de l'arbre de qui l'a perdue à l'appel suivant (le
 //!   cache des accès suit `spaces.rev`). Écriture et fermeture vont dans une tâche à part :
@@ -38,10 +48,12 @@
 //!   n'écrit rien et ne ferme rien ;
 //! - une invitation sur une page ne cherche aucun compte : la réponse est la même, que
 //!   l'adresse en ait un ou non (Ruling R47). Elle ne vaut que tant que son auteur peut
-//!   partager la page (Ruling R69, `invitations::valid_invitation`). Ce n'est pas un droit : la
-//!   créer ne ferme aucune connexion.
+//!   partager la page (Ruling R69, `invitations::valid_invitation`, à chaque usage) : sa
+//!   création n'est pas revérifiée dans une transaction, une invitation faite par quelqu'un qui
+//!   vient de perdre `full` ne servant à rien. Ce n'est pas un droit : la créer ne ferme aucune
+//!   connexion.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -49,7 +61,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use mementum_acl::{Action, Level, NodeAccess, Subject};
-use mementum_store::{AccessChange, AccessWritten, InvitationGrant, Node, StoreError};
+use mementum_store::{AccessChange, AccessWritten, InvitationGrant, Node};
 use uuid::Uuid;
 
 use crate::access::permit;
@@ -61,9 +73,6 @@ use crate::types::{
     AccessEntry, InvitationCreated, InviteToPage, PageAccess, SetGeneral, SetLevel,
 };
 use crate::{AppState, to_completion};
-
-/// Reprises d'un changement d'accès quand l'espace a bougé entre la décision et l'écriture.
-const ACCESS_RETRIES: usize = 2;
 
 /// `GET /api/v1/pages/{id}/access` : qui a accès à la page, et à quel niveau (`full`). Une
 /// page à la corbeille se lit encore : ses accès aussi.
@@ -77,17 +86,12 @@ pub(crate) async fn access(
         .seen_node(&user, id)
         .await?
         .ok_or_else(ApiError::page_not_found)?;
-    // Lire n'écrit pas : la corbeille ne compte pas ici, seul le niveau.
-    let reading = NodeAccess {
-        in_trash: false,
-        ..access
-    };
-    permit(&reading, Action::Share)?;
+    permit(&ignoring_trash(access), Action::Share)?;
     Ok(Json(page_access(&state, &node).await?))
 }
 
 /// `PUT /api/v1/pages/{id}/access/general` : pose la ligne `members` de la page à ce niveau,
-/// ou la retire (`null`).
+/// ou la retire (`null`). Réservé aux rôles `member` et plus (R85).
 pub(crate) async fn set_general(
     State(state): State<AppState>,
     user: AuthUser,
@@ -95,8 +99,17 @@ pub(crate) async fn set_general(
     body: Result<Json<SetGeneral>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let id = page_id(path)?;
-    // La page d'abord : `404` ou `403` avant que le corps soit lu.
-    state.node_access(&user, id, Action::Share).await?;
+    // Avant le corps, par le cache, dans l'ordre des refus : la page, le niveau, R85, la
+    // corbeille. La transaction du store revérifie tout.
+    let (_, access, space) = state
+        .seen_node(&user, id)
+        .await?
+        .ok_or_else(ApiError::page_not_found)?;
+    permit(&ignoring_trash(access), Action::Share)?;
+    if !space.role().is_some_and(|role| role.is_member()) {
+        return Err(ApiError::guest_general_access());
+    }
+    permit(&access, Action::Share)?;
     let Json(body) = body?;
     let change = AccessChange::Members(body.level.map(Level::from));
     change_and_answer(state, user, id, change).await
@@ -150,6 +163,15 @@ pub(crate) async fn invite(
     invitations::create(&state, &user, node.space_id, grant, &body.email).await
 }
 
+/// Les accès `access`, sans la corbeille : pour une lecture, ou pour donner le refus de niveau
+/// avant `409 trashed` quand un refus se glisse entre les deux (R85).
+fn ignoring_trash(access: NodeAccess) -> NodeAccess {
+    NodeAccess {
+        in_trash: false,
+        ..access
+    }
+}
+
 /// La page et le compte visé d'un chemin `…/pages/{id}/access/users/{userId}`. Une page
 /// illisible n'existe pas (`404`) ; un compte illisible (`None`) n'existe pas non plus, mais on
 /// ne le dit qu'à qui peut partager la page.
@@ -163,8 +185,8 @@ fn user_path(
     Ok((page, Uuid::parse_str(&user).ok()))
 }
 
-/// Écrit `change` (décidé, puis écrit dans une tâche à part), puis répond : les accès de la
-/// page si l'appelant y a encore `full`, sinon `204`.
+/// Écrit `change` dans une tâche à part, puis répond : les accès de la page si l'appelant y a
+/// encore `full`, sinon `204`.
 async fn change_and_answer(
     state: AppState,
     user: AuthUser,
@@ -173,11 +195,7 @@ async fn change_and_answer(
 ) -> Result<Response, ApiError> {
     let writer = state.clone();
     let by = user.clone();
-    to_completion(async move {
-        let decided = decide(&writer, &by, id, change).await?;
-        write(&writer, &by, id, change, decided).await
-    })
-    .await?;
+    to_completion(async move { write(&writer, &by, id, change).await }).await?;
     match state.seen_node(&user, id).await? {
         Some((node, access, _)) if access.level.allows(Action::Share) => {
             Ok(Json(page_access(&state, &node).await?).into_response())
@@ -188,107 +206,38 @@ async fn change_and_answer(
     }
 }
 
-/// Une décision prise par [`decide`] : l'espace de la page, et la révision sur laquelle elle a
-/// été prise.
-#[derive(Debug, Clone, Copy)]
-struct Decided {
-    space_id: Uuid,
-    rev: i64,
-}
-
-/// Décide `change` sur la page `id` pour `user`. La révision de l'espace est lue d'abord, et
-/// tout ce qui décide (le droit de `user` de partager la page, ce que vise le changement) est
-/// lu à elle ou après : le store n'écrira que si l'espace y est encore.
-async fn decide(
-    state: &AppState,
-    user: &AuthUser,
-    id: Uuid,
-    change: AccessChange,
-) -> Result<Decided, ApiError> {
-    let space_id = state
-        .store
-        .get_node(id)
-        .await?
-        .ok_or_else(ApiError::page_not_found)?
-        .space_id;
-    let rev = state
-        .store
-        .space_rev(space_id)
-        .await?
-        .ok_or_else(ApiError::page_not_found)?;
-    state.node_access(user, id, Action::Share).await?;
-    match change {
-        AccessChange::Members(_) => {}
-        // Un accès ne se donne qu'à quelqu'un de l'espace ; un compte sans rôle répond comme un
-        // compte inconnu.
-        AccessChange::User(target, Some(_)) => {
-            if state.store.role_in(space_id, target).await?.is_none() {
-                return Err(ApiError::member_not_found());
-            }
-        }
-        // Seule une ligne posée sur la page se retire ici.
-        AccessChange::User(target, None) => {
-            let own = state.store.node_grants(id).await?;
-            if !own.iter().any(|g| g.subject == Subject::User(target)) {
-                return Err(ApiError::access_not_found());
-            }
-        }
-    }
-    Ok(Decided { space_id, rev })
-}
-
-/// Écrit `change`, décidé par [`decide`]. Si l'espace a bougé depuis la décision, le store
-/// n'écrit rien (`Stale`) : elle est reprise sur ce qui est relu, [`ACCESS_RETRIES`] fois au
-/// plus, puis `409 access_changed`. Après le commit, les connexions de synchro du sous-arbre de
-/// la page sont fermées.
+/// Écrit `change` au nom de `user` : le store vérifie tout dans la transaction qui écrit, et
+/// rend un refus typé, que `error.rs` traduit dans les statuts du partage. Après le commit, les
+/// connexions de synchro du sous-arbre de la page sont fermées.
 async fn write(
     state: &AppState,
     user: &AuthUser,
     id: Uuid,
     change: AccessChange,
-    mut decided: Decided,
 ) -> Result<AccessWritten, ApiError> {
-    let mut retries = 0;
-    loop {
-        match state.store.change_access(id, change, decided.rev).await {
-            Ok(written) => {
-                if written.changed {
-                    log_change(user, id, decided.space_id, change, written);
-                    state.subtree_rights_changed(decided.space_id, id).await;
-                }
-                return Ok(written);
-            }
-            Err(StoreError::Stale) if retries < ACCESS_RETRIES => {
-                retries += 1;
-                decided = decide(state, user, id, change).await?;
-            }
-            Err(StoreError::Stale) => return Err(ApiError::access_changed()),
-            Err(e) => return Err(e.into()),
-        }
+    let written = state.store.change_access(id, change, user.id).await?;
+    if written.changed {
+        log_change(user, id, change, written);
+        state.subtree_rights_changed(written.space_id, id).await;
     }
+    Ok(written)
 }
 
 /// Journal d'un changement écrit : qui, sur quelle page, pour qui, à quel niveau ; jamais
 /// d'adresse.
-fn log_change(
-    user: &AuthUser,
-    id: Uuid,
-    space_id: Uuid,
-    change: AccessChange,
-    written: AccessWritten,
-) {
+fn log_change(user: &AuthUser, id: Uuid, change: AccessChange, written: AccessWritten) {
     let level = |level: Option<Level>| level.map_or("aucun", Level::as_str);
     match change {
         AccessChange::Members(to) => tracing::info!(
             node_id = %id,
-            space_id = %space_id,
+            space_id = %written.space_id,
             user_id = %user.id,
             level = level(to),
             "accès général d'une page changé"
         ),
         AccessChange::User(target, to) => tracing::info!(
             node_id = %id,
-            space_id = %space_id,
+            space_id = %written.space_id,
             user_id = %user.id,
             target_id = %target,
             level = level(to),
@@ -298,31 +247,22 @@ fn log_change(
     }
 }
 
-/// Les accès de la page `node` : la ligne `members` la plus forte de la page et de ses
-/// ancêtres, les comptes nommés sur eux (une fois chacun, au niveau effectif), et les
-/// invitations sur la page qui attendent encore. Seuls les comptes qui ont un rôle dans
-/// l'espace y figurent : une ligne restée à quelqu'un qui n'en a plus ne donne rien.
+/// Les accès de la page `node`, lus sur sa chaîne (la page et ses ancêtres) : la ligne
+/// `members` la plus forte, et si elle vient d'un ancêtre ; les comptes nommés (une fois
+/// chacun, au niveau de leurs lignes) ; les invitations sur la page qui attendent encore.
+/// Seuls les comptes qui ont un rôle dans l'espace y figurent : une ligne restée à quelqu'un
+/// qui n'en a plus ne donne rien.
 async fn page_access(state: &AppState, node: &Node) -> Result<PageAccess, ApiError> {
-    let space_id = node.space_id;
-    let nodes = state.store.list_nodes(space_id).await?;
-    let parents: HashMap<Uuid, Option<Uuid>> = nodes.iter().map(|n| (n.id, n.parent_id)).collect();
-    // La page et ses ancêtres ; chacun une fois, la remontée s'arrête même si des parents
-    // tournaient en rond.
-    let mut chain = HashSet::from([node.id]);
-    let mut parent = node.parent_id;
-    while let Some(id) = parent.filter(|id| chain.insert(*id)) {
-        parent = parents.get(&id).copied().flatten();
-    }
-    let mut general: Option<Level> = None;
+    let mut own_general: Option<Level> = None;
+    let mut above_general: Option<Level> = None;
     let mut own: HashMap<Uuid, Level> = HashMap::new();
     let mut above: HashMap<Uuid, Level> = HashMap::new();
-    for (on, grant) in state.store.space_grants(space_id).await? {
-        if !chain.contains(&on) {
-            continue;
-        }
+    for (on, grant) in state.store.chain_grants(node.id).await? {
+        let here = on == node.id;
         match grant.subject {
-            Subject::Members => general = general.max(Some(grant.level)),
-            Subject::User(user) if on == node.id => {
+            Subject::Members if here => own_general = own_general.max(Some(grant.level)),
+            Subject::Members => above_general = above_general.max(Some(grant.level)),
+            Subject::User(user) if here => {
                 own.insert(user, grant.level);
             }
             Subject::User(user) => {
@@ -333,7 +273,7 @@ async fn page_access(state: &AppState, node: &Node) -> Result<PageAccess, ApiErr
     }
     let entries = state
         .store
-        .members(space_id)
+        .members(node.space_id)
         .await?
         .into_iter()
         .filter_map(|member| {
@@ -354,14 +294,16 @@ async fn page_access(state: &AppState, node: &Node) -> Result<PageAccess, ApiErr
         .collect();
     let invitations = state
         .store
-        .pending_invitations(space_id)
+        .pending_invitations(node.space_id)
         .await?
         .into_iter()
         .filter(|i| matches!(i.grant, InvitationGrant::Page { node_id, .. } if node_id == node.id))
         .map(pending_invitation)
         .collect();
     Ok(PageAccess {
-        general: general.map(Into::into),
+        general: own_general.max(above_general).map(Into::into),
+        general_inherited: above_general
+            .is_some_and(|above| own_general.is_none_or(|own| above >= own)),
         entries,
         invitations,
     })
@@ -376,9 +318,9 @@ mod tests {
     use super::*;
     use crate::access::tests::{account, state};
 
-    /// Mona a décidé de donner `full` à Tom alors qu'elle avait `full` ; Olga la baisse en
-    /// lecture avant que Mona écrive. Le store refuse l'écriture décidée sur l'état d'avant, la
-    /// route relit et redécide : `403`, et Tom n'a rien reçu.
+    /// Mona a passé le contrôle de la route (elle avait `full`) ; Olga la baisse en lecture
+    /// avant que Mona écrive. La transaction de l'écriture revérifie son niveau : `403`, et Tom
+    /// n'a rien reçu. Olga, elle, écrit.
     #[tokio::test]
     async fn caller_who_loses_full_before_writing_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -416,19 +358,17 @@ mod tests {
             })
             .await
             .unwrap();
-        let give_tom = AccessChange::User(tom.id, Some(Level::Full));
-        // Ce que la route de Mona a décidé avant d'écrire.
-        let decided = decide(&state, &mona, page.id, give_tom).await.unwrap();
-        // Olga baisse Mona entre-temps.
-        let lower_mona = AccessChange::User(mona.id, Some(Level::Read));
-        let olga_decided = decide(&state, &olga, page.id, lower_mona).await.unwrap();
-        write(&state, &olga, page.id, lower_mona, olga_decided)
+        // Le contrôle de la route de Mona, avant le corps : il passe.
+        state
+            .node_access(&mona, page.id, Action::Share)
             .await
             .unwrap();
+        // Olga baisse Mona entre-temps.
+        let lower_mona = AccessChange::User(mona.id, Some(Level::Read));
+        write(&state, &olga, page.id, lower_mona).await.unwrap();
 
-        let error = write(&state, &mona, page.id, give_tom, decided)
-            .await
-            .unwrap_err();
+        let give_tom = AccessChange::User(tom.id, Some(Level::Full));
+        let error = write(&state, &mona, page.id, give_tom).await.unwrap_err();
         assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
         let grants = state.store.node_grants(page.id).await.unwrap();
         assert!(
@@ -436,11 +376,8 @@ mod tests {
             "{grants:?}"
         );
 
-        // Décidée sur l'état juste, la même écriture passe du premier coup.
-        let decided = decide(&state, &olga, page.id, give_tom).await.unwrap();
-        let written = write(&state, &olga, page.id, give_tom, decided)
-            .await
-            .unwrap();
+        let written = write(&state, &olga, page.id, give_tom).await.unwrap();
         assert!(written.changed);
+        assert_eq!(written.space_id, space.id);
     }
 }

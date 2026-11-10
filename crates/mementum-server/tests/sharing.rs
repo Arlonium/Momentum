@@ -10,16 +10,20 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode, header};
 use common::{
-    Account, Browser, Reply, SESSION_COOKIE, Team, TestApp, WAIT, outcome, text, tree_nodes,
+    Account, Browser, Reply, SESSION_COOKIE, Team, TestApp, WAIT, json_request, outcome, text,
+    tree_nodes,
 };
 use mementum_acl::{Level, Subject};
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
+use tower::ServiceExt;
 use uuid::Uuid;
 
 /// Une application où tout le monde peut s'inscrire : les comptes de ces tests reçoivent leur
@@ -479,14 +483,14 @@ async fn guest_leaves_the_space_with_his_last_grant() {
         .page(
             None,
             "Seconde",
-            &[members(Level::Full), user(gina, Level::Edit)],
+            &[members(Level::Full), user(gina, Level::Full)],
         )
         .await;
     assert_eq!(
         seen(&gina.browser, team.space).await,
         [
             page("Première", "read", "shared"),
-            page("Seconde", "edit", "shared")
+            page("Seconde", "full", "shared")
         ]
     );
 
@@ -496,12 +500,18 @@ async fn guest_leaves_the_space_with_his_last_grant() {
     assert_eq!(role_in(gina, team.space).await.as_deref(), Some("guest"));
     assert_eq!(
         seen(&gina.browser, team.space).await,
-        [page("Seconde", "edit", "shared")]
+        [page("Seconde", "full", "shared")]
     );
+    // En `full` sur la seconde page, elle y invite quelqu'un.
+    invited(&gina.browser, second, "ami@exemple.fr", "read").await;
+    let invitations = &access_of(&team.olga.browser, second).await["invitations"];
+    assert_eq!(invitations.as_array().map(Vec::len), Some(1));
 
-    remove(&team.olga.browser, second, gina.id)
-        .await
-        .assert_status(StatusCode::OK);
+    // Sa dernière ligne partie, elle sort de l'espace, et ses invitations en attente avec elle,
+    // comme au départ d'un membre.
+    let reply = remove(&team.olga.browser, second, gina.id).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(reply.json()["invitations"], json!([]));
     assert_eq!(role_in(gina, team.space).await, None);
     gina.browser
         .get(&format!("/api/v1/spaces/{}/tree", team.space))
@@ -975,6 +985,198 @@ async fn access_is_given_only_to_people_of_the_space() {
     invite(olga, project, "x@exemple.fr", "owner")
         .await
         .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json");
+}
+
+/// Ruling R85 : l'accès général (ce que voient les membres de l'espace) ne se pose ni ne se
+/// retire par un invité, même en `full` : `403`, après le refus de niveau et avant
+/// `409 trashed`, et rien n'est écrit. Le reste de ce que donne `full` lui reste (R86).
+#[tokio::test]
+async fn guest_with_full_cannot_change_general_access() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let gina = &team.gina;
+    // Une page partagée avec elle, sans accès général ; une page d'équipe où elle a sa ligne.
+    let shared = team
+        .page(
+            None,
+            "Partagée",
+            &[user(&team.olga, Level::Full), user(gina, Level::Full)],
+        )
+        .await;
+    let team_page = team
+        .page(
+            None,
+            "Équipe",
+            &[members(Level::Full), user(gina, Level::Full)],
+        )
+        .await;
+    let guest_refusal = async |id: Uuid, level: Value| {
+        let before = team.grants(id).await;
+        let reply = set_general(&gina.browser, id, level.clone()).await;
+        let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+        assert!(
+            text(&body, "message").contains("invité"),
+            "{level} : {body}"
+        );
+        assert_eq!(team.grants(id).await, before, "{level}");
+    };
+    // Poser, dans les deux sens de niveau, et retirer.
+    for level in [json!("read"), json!("full")] {
+        guest_refusal(shared, level).await;
+    }
+    for level in [Value::Null, json!("read")] {
+        guest_refusal(team_page, level).await;
+    }
+    // Mona ne voit toujours pas la page partagée ; l'équipe garde la sienne.
+    assert_eq!(
+        seen(&team.mona.browser, team.space).await,
+        [page("Équipe", "full", "space")]
+    );
+
+    // R86 : le reste de `full` lui reste. Elle lit les accès, en donne, invite.
+    access_of(&gina.browser, shared).await;
+    set_level(&gina.browser, shared, team.tom.id, "read")
+        .await
+        .assert_status(StatusCode::OK);
+    invited(&gina.browser, shared, "ami@exemple.fr", "full").await;
+
+    // L'ordre des refus : sous `full`, le refus de niveau ; à la corbeille, R85 d'abord.
+    let read_only = team
+        .page(
+            None,
+            "Lue",
+            &[user(&team.olga, Level::Full), user(gina, Level::Edit)],
+        )
+        .await;
+    let body = set_general(&gina.browser, read_only, json!("read"))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    assert!(text(&body, "message").contains("accès complet"), "{body}");
+    team.trash(shared).await;
+    guest_refusal(shared, json!("read")).await;
+    set_general(&team.olga.browser, shared, json!("read"))
+        .await
+        .assert_error(StatusCode::CONFLICT, "trashed");
+}
+
+/// Ruling R87 : un changement d'accès ne dépend que de ce sur quoi il repose, vérifié dans sa
+/// transaction. Mona, qui crée des sous-pages sans arrêt ailleurs dans l'espace (chacune fait
+/// bouger `spaces.rev`), ne le bloque pas : l'ancien contrôle, sur la révision de tout
+/// l'espace, finissait en `409 access_changed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_is_not_blocked_by_writes_elsewhere_in_the_space() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let project = team.page(None, "Projet", &[members(Level::Full)]).await;
+    let busy = team.page(None, "Agitée", &[members(Level::Edit)]).await;
+    let stop = Arc::new(AtomicBool::new(false));
+    let cookie = team.mona.browser.cookie().expect("la session de Mona");
+    let writers: Vec<_> = (0..2)
+        .map(|_| {
+            let (router, cookie, stop) = (t.router.clone(), cookie.clone(), stop.clone());
+            tokio::spawn(async move {
+                let mut created = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let body = json!({ "parentId": busy.to_string(), "title": "Encore" });
+                    let mut request = json_request(Method::POST, "/api/v1/pages", &body);
+                    let headers = request.headers_mut();
+                    headers.insert(header::HOST, "localhost".parse().unwrap());
+                    headers.insert(header::COOKIE, cookie.parse().unwrap());
+                    let reply = router.clone().oneshot(request).await.unwrap();
+                    assert_eq!(reply.status(), StatusCode::CREATED);
+                    created += 1;
+                }
+                created
+            })
+        })
+        .collect();
+
+    let olga = &team.olga.browser;
+    for step in 0..30 {
+        let level = if step % 2 == 0 { "read" } else { "edit" };
+        let reply = set_level(olga, project, team.tom.id, level).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "étape {step} : {}",
+            reply.text()
+        );
+    }
+    stop.store(true, Ordering::Relaxed);
+    let mut created = 0;
+    for writer in writers {
+        created += writer.await.unwrap();
+    }
+    assert!(
+        created >= 10,
+        "{created} pages créées pendant les changements"
+    );
+    assert!(entries(&access_of(olga, project).await).contains(&entry(&team.tom, "edit", false)));
+}
+
+/// L'accès général qu'une page parente donne se voit sur la sous-page (`generalInherited`) et ne
+/// s'y baisse ni ne s'y retire : `409 inherited_access`, rien d'écrit. Plus haut, ou au même
+/// niveau, il s'écrit.
+#[tokio::test]
+async fn inherited_general_access_is_not_lowered_from_the_child() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let olga = &team.olga.browser;
+    let parent = team.page(None, "Parent", &[members(Level::Edit)]).await;
+    let child = team.page(Some(parent), "Enfant", &[]).await;
+
+    let access = access_of(olga, child).await;
+    assert_eq!(
+        (&access["general"], &access["generalInherited"]),
+        (&json!("edit"), &json!(true))
+    );
+    let access = access_of(olga, parent).await;
+    assert_eq!(
+        (&access["general"], &access["generalInherited"]),
+        (&json!("edit"), &json!(false))
+    );
+
+    let refused = async |level: Value| {
+        let before = team.grants(child).await;
+        let reply = set_general(olga, child, level.clone()).await;
+        let body = reply.assert_error(StatusCode::CONFLICT, "inherited_access");
+        assert!(
+            text(&body, "message").contains("parente"),
+            "{level} : {body}"
+        );
+        assert_eq!(team.grants(child).await, before, "{level}");
+    };
+    for level in [Value::Null, json!("read"), json!("comment")] {
+        refused(level).await;
+    }
+    assert!(team.grants(child).await.is_empty());
+
+    // Plus haut : écrit, et ce n'est plus l'héritage qu'on voit.
+    let reply = set_general(olga, child, json!("full")).await;
+    reply.assert_status(StatusCode::OK);
+    let access = reply.json();
+    assert_eq!(
+        (&access["general"], &access["generalInherited"]),
+        (&json!("full"), &json!(false))
+    );
+    assert_eq!(
+        seen(&team.mona.browser, team.space).await,
+        [
+            page("Enfant", "full", "space"),
+            page("Parent", "edit", "space")
+        ]
+    );
+    // Retirer sa ligne ne la rendrait pas aux seuls invités : refusé ; revenir au niveau hérité,
+    // oui.
+    refused(Value::Null).await;
+    assert_eq!(team.grants(child).await, [members(Level::Full)]);
+    let reply = set_general(olga, child, json!("edit")).await;
+    reply.assert_status(StatusCode::OK);
+    let access = reply.json();
+    assert_eq!(
+        (&access["general"], &access["generalInherited"]),
+        (&json!("edit"), &json!(true))
+    );
 }
 
 /// Une page à la corbeille garde ses accès : on les lit, on ne les change pas (`409 trashed`).

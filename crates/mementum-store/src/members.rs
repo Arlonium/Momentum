@@ -12,7 +12,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
-use crate::acl::space_of;
+use crate::acl::{chain_of, space_of};
 use crate::spaces::{Space, bump_rev, space_from_row};
 use crate::{Store, StoreError, now_ms, parse_uuid, unreadable};
 
@@ -65,7 +65,7 @@ fn role_from_row(r: &SqliteRow) -> Result<Role, StoreError> {
 }
 
 /// Le rôle de `user_id` dans l'espace, lu dans la transaction.
-async fn role_of(
+pub(crate) async fn role_of(
     tx: &mut Transaction<'_, Sqlite>,
     space_id: &str,
     user_id: &str,
@@ -214,17 +214,10 @@ pub(crate) async fn keeps_full(
     node_id: &str,
 ) -> Result<bool, StoreError> {
     let with_role = with_role(tx, space_id).await?;
-    // La page et ses ancêtres. `UNION` (et non `UNION ALL`) : la remontée s'arrête même si des
-    // parents tournaient en rond.
-    let rows = sqlx::query(
-        "WITH RECURSIVE chain(id) AS ( \
-             SELECT ?1 \
-             UNION \
-             SELECT n.parent_id FROM chain JOIN nodes n ON n.id = chain.id \
-             WHERE n.parent_id IS NOT NULL \
-         ) \
-         SELECT a.subject, a.level FROM acl a JOIN chain ON a.node_id = chain.id",
-    )
+    let rows = sqlx::query(concat!(
+        chain_of!(),
+        "SELECT a.subject, a.level FROM acl a JOIN chain ON a.node_id = chain.id"
+    ))
     .bind(node_id)
     .fetch_all(&mut **tx)
     .await?;
@@ -238,8 +231,26 @@ pub(crate) async fn keeps_full(
     Ok(someone_in_full(&lines))
 }
 
+/// Supprime, dans la transaction, les invitations que `user_id` avait faites dans l'espace et
+/// qui attendaient encore (Ruling R69) : au départ d'un membre comme à la sortie d'un invité.
+async fn drop_pending_invitations(
+    tx: &mut Transaction<'_, Sqlite>,
+    space_id: &str,
+    user_id: &str,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "DELETE FROM invitations WHERE space_id = ? AND created_by = ? AND accepted_at IS NULL",
+    )
+    .bind(space_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Si `user_id` est invité dans l'espace et n'y a plus aucune ligne d'accès, il en sort, dans la
-/// transaction. Rend vrai s'il est sorti ; la révision est l'affaire de l'appelant.
+/// transaction, avec les invitations qu'il y avait faites et qui attendaient encore, comme au
+/// départ d'un membre. Rend vrai s'il est sorti ; la révision est l'affaire de l'appelant.
 pub(crate) async fn guest_leaves_if_bare(
     tx: &mut Transaction<'_, Sqlite>,
     space_id: &str,
@@ -266,6 +277,7 @@ pub(crate) async fn guest_leaves_if_bare(
         .bind(&user)
         .execute(&mut **tx)
         .await?;
+    drop_pending_invitations(tx, space_id, &user).await?;
     Ok(true)
 }
 
@@ -505,13 +517,7 @@ impl Store {
             .bind(&user)
             .execute(&mut *tx)
             .await?;
-        sqlx::query(
-            "DELETE FROM invitations WHERE space_id = ? AND created_by = ? AND accepted_at IS NULL",
-        )
-        .bind(&space)
-        .bind(&user)
-        .execute(&mut *tx)
-        .await?;
+        drop_pending_invitations(&mut tx, &space, &user).await?;
         // `chain` : chaque page qui porte une ligne de la personne, avec elle-même et ses
         // ancêtres. Une ligne part si un autre sujet apparaît sur cette chaîne. `UNION` (et non
         // `UNION ALL`) : la remontée s'arrête même si des parents tournaient en rond.
@@ -553,8 +559,11 @@ impl Store {
     }
 
     /// Retire la ligne `user:<id>` posée sur le nœud (sans effet s'il n'y en a pas) ; si la
-    /// personne est `guest` et n'a plus aucune ligne dans l'espace, elle en sort. `NotFound` si
-    /// le nœud n'existe pas.
+    /// personne est `guest` et n'a plus aucune ligne dans l'espace, elle en sort, avec ses
+    /// invitations en attente. `NotFound` si le nœud n'existe pas.
+    ///
+    /// Sans la règle `last_full_access` (R70) ni contrôle de qui demande : pour les tests. Le
+    /// partage d'une page passe par `Store::change_access`.
     pub async fn revoke_user_grant(&self, node_id: Uuid, user_id: Uuid) -> Result<(), StoreError> {
         let node = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;

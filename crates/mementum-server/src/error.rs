@@ -8,7 +8,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mementum_crdt::CrdtError;
 use mementum_md::MmdError;
-use mementum_store::StoreError;
+use mementum_store::{ShareRefusal, StoreError};
 use mementum_sync::SyncError;
 
 use crate::types::{ErrorBody, ErrorCode};
@@ -232,14 +232,43 @@ impl ApiError {
         )
     }
 
-    /// `409 access_changed` : l'espace a bougé à chaque tentative d'écrire un changement
-    /// d'accès.
-    pub fn access_changed() -> ApiError {
+    /// `409 inherited_access` : l'accès général demandé (retiré, ou plus bas) est sous celui
+    /// qu'une page parente donne déjà aux membres.
+    pub fn inherited_access() -> ApiError {
         ApiError::new(
             StatusCode::CONFLICT,
-            ErrorCode::AccessChanged,
-            "les droits de l'espace viennent de changer : rien n'a été modifié ; réessayer",
+            ErrorCode::InheritedAccess,
+            "l'accès général vient d'une page parente : il ne se retire ni ne se baisse ici, mais \
+             sur elle ; rien n'a été modifié",
         )
+    }
+
+    /// `403 forbidden` (Ruling R85) : un invité ne pose ni ne retire l'accès général d'une
+    /// page, même en accès complet.
+    pub fn guest_general_access() -> ApiError {
+        ApiError::forbidden(
+            "un invité ne change pas l'accès général d'une page (ce qu'en voient les membres de \
+             l'espace) : c'est aux membres de le faire",
+        )
+    }
+
+    /// `403 forbidden` : il faut l'accès complet sur la page. (Avant le corps de la requête,
+    /// `access.rs` donne aussi le niveau qu'on a ; ce refus-ci vient de la transaction.)
+    fn below_full() -> ApiError {
+        ApiError::forbidden("niveau insuffisant sur cette page : il faut « accès complet »")
+    }
+
+    /// Un changement d'accès refusé par le store, dans les statuts des routes du partage.
+    fn share_refused(why: ShareRefusal) -> ApiError {
+        match why {
+            ShareRefusal::Unseen => ApiError::page_not_found(),
+            ShareRefusal::BelowFull => ApiError::below_full(),
+            ShareRefusal::GuestGeneral => ApiError::guest_general_access(),
+            ShareRefusal::Trashed => ApiError::trashed(),
+            ShareRefusal::NotInSpace => ApiError::member_not_found(),
+            ShareRefusal::NoOwnLine => ApiError::access_not_found(),
+            ShareRefusal::InheritedAccess => ApiError::inherited_access(),
+        }
     }
 
     /// `404 not_found` : la page n'a pas d'accès propre pour ce compte (il n'en a aucun, ou
@@ -291,6 +320,7 @@ impl From<StoreError> for ApiError {
             StoreError::LastOwner => ApiError::last_owner(),
             StoreError::Stale => ApiError::roles_changed(),
             StoreError::LastFullAccess => ApiError::last_full_access(),
+            StoreError::Refused(why) => ApiError::share_refused(why),
             StoreError::ParentTrashed => ApiError::parent_trashed(),
             StoreError::NotTrashed => ApiError::not_trashed(),
             e @ StoreError::Sqlx(_) => ApiError::internal(&e),

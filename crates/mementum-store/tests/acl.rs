@@ -5,7 +5,10 @@ mod common;
 
 use common::{account, exec_sql, fresh, new_user, page, side_pool, texts};
 use mementum_acl::{Grant, Level, Role, Subject};
-use mementum_store::{AccessChange, AccessWritten, Space, Store, StoreError};
+use mementum_store::{
+    AccessChange, AccessWritten, InvitationGrant, NewInvitation, ShareRefusal, Space, Store,
+    StoreError,
+};
 use uuid::Uuid;
 
 fn grant(subject: Subject, level: Level) -> Grant {
@@ -296,6 +299,14 @@ async fn page_with(
     store.create_node(new).await.unwrap().id
 }
 
+/// Ce qu'un refus doit laisser intact : les lignes de la page, et la révision de l'espace.
+async fn untouched(store: &Store, space: &Space, node: Uuid) -> (Vec<Grant>, Option<i64>) {
+    (
+        store.node_grants(node).await.unwrap(),
+        store.space_rev(space.id).await.unwrap(),
+    )
+}
+
 /// Ruling R70, dans la transaction de l'écriture : un changement qui laisserait la page sans
 /// personne en `full` est refusé, sans rien écrire. Une ligne `members` compte, un `full`
 /// hérité aussi ; une ligne restée à quelqu'un sans rôle, non.
@@ -309,15 +320,11 @@ async fn change_access_keeps_someone_in_full() {
         Subject::User(t.mona),
         Subject::User(t.sam),
     );
-    let rev = async || store.space_rev(space.id).await.unwrap().unwrap();
     let refused = async |node: Uuid, change: AccessChange| {
-        let before = (store.node_grants(node).await.unwrap(), rev().await);
-        let r = store.change_access(node, change, rev().await).await;
+        let before = untouched(store, space, node).await;
+        let r = store.change_access(node, change, t.olga).await;
         assert!(matches!(r, Err(StoreError::LastFullAccess)), "{r:?}");
-        assert_eq!(
-            (store.node_grants(node).await.unwrap(), rev().await),
-            before
-        );
+        assert_eq!(untouched(store, space, node).await, before);
     };
 
     // La seule ligne `full` ne part pas, et ne baisse pas.
@@ -343,13 +350,13 @@ async fn change_access_keeps_someone_in_full() {
     let open = page_with(store, space, None, &[(Subject::Members, Level::Full)]).await;
     refused(open, AccessChange::Members(None)).await;
     store
-        .change_access(open, AccessChange::Members(Some(Level::Read)), rev().await)
+        .change_access(open, AccessChange::Members(Some(Level::Read)), t.olga)
         .await
         .unwrap();
     // Sous elle, une page peut perdre sa seule ligne `full`.
     let under = page_with(store, space, Some(open), &[(mona, Level::Full)]).await;
     let written = store
-        .change_access(under, AccessChange::User(t.mona, None), rev().await)
+        .change_access(under, AccessChange::User(t.mona, None), t.olga)
         .await
         .unwrap();
     assert!(written.changed && !written.left_space);
@@ -357,11 +364,7 @@ async fn change_access_keeps_someone_in_full() {
     let parent = page_with(store, space, None, &[(olga, Level::Full)]).await;
     let child = page_with(store, space, Some(parent), &[(mona, Level::Full)]).await;
     store
-        .change_access(
-            child,
-            AccessChange::User(t.mona, Some(Level::Read)),
-            rev().await,
-        )
+        .change_access(child, AccessChange::User(t.mona, Some(Level::Read)), t.olga)
         .await
         .unwrap();
     assert_eq!(
@@ -374,12 +377,12 @@ async fn change_access_keeps_someone_in_full() {
         .change_access(
             shared,
             AccessChange::User(t.mona, Some(Level::Full)),
-            rev().await,
+            t.olga,
         )
         .await
         .unwrap();
     store
-        .change_access(shared, AccessChange::User(t.olga, None), rev().await)
+        .change_access(shared, AccessChange::User(t.olga, None), t.olga)
         .await
         .unwrap();
     assert_eq!(
@@ -388,59 +391,186 @@ async fn change_access_keeps_someone_in_full() {
     );
 }
 
-/// L'écriture n'a lieu que si l'espace est encore à la révision sur laquelle l'appelant a
-/// décidé ; sinon `Stale`, et rien n'est écrit. Une ligne déjà ainsi n'écrit rien non plus, et
-/// la révision ne bouge pas ; une page inconnue est `NotFound`.
+/// Ruling R87 : ce sur quoi un changement d'accès repose est vérifié dans sa transaction, sans
+/// dépendre de la révision de l'espace, et chaque refus a son cas, dans cet ordre : la page
+/// n'existe pas pour qui demande (aucun rôle, sous `read`, page inconnue) ; il la voit sous
+/// `full` ; un invité touche à l'accès général (R85) ; la page ou un ancêtre est à la
+/// corbeille ; la personne visée n'a pas de rôle, ou pas de ligne propre à retirer. Aucun
+/// refus n'écrit rien.
 #[tokio::test]
-async fn change_access_writes_only_on_the_rev_it_was_decided_on() {
+async fn change_access_checks_who_asks_in_its_transaction() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let (olga, mona, gina) = (
+        Subject::User(t.olga),
+        Subject::User(t.mona),
+        Subject::User(t.gina),
+    );
+    let refused = async |node: Uuid, change: AccessChange, actor: Uuid, why: ShareRefusal| {
+        let before = untouched(store, space, node).await;
+        let r = store.change_access(node, change, actor).await;
+        assert!(
+            matches!(r, Err(StoreError::Refused(got)) if got == why),
+            "{change:?} par {actor} : {r:?}, attendu {why:?}"
+        );
+        assert_eq!(untouched(store, space, node).await, before);
+    };
+    let read_mona = AccessChange::User(t.mona, Some(Level::Read));
+    let general = AccessChange::Members(Some(Level::Read));
+
+    // Olga en `full`, Mona en `edit`, Gina (invitée) en `full`.
+    let shared = page_with(
+        store,
+        space,
+        None,
+        &[
+            (olga, Level::Full),
+            (mona, Level::Edit),
+            (gina, Level::Full),
+        ],
+    )
+    .await;
+    let child = page_with(store, space, Some(shared), &[]).await;
+    let private = page_with(store, space, None, &[(olga, Level::Full)]).await;
+    let team_page = page_with(
+        store,
+        space,
+        None,
+        &[(Subject::Members, Level::Full), (gina, Level::Full)],
+    )
+    .await;
+
+    // La page n'existe pas pour qui demande.
+    refused(Uuid::now_v7(), read_mona, t.olga, ShareRefusal::Unseen).await;
+    refused(shared, read_mona, t.sam, ShareRefusal::Unseen).await;
+    refused(shared, read_mona, Uuid::now_v7(), ShareRefusal::Unseen).await;
+    refused(private, read_mona, t.mona, ShareRefusal::Unseen).await;
+    // Sous `full`.
+    refused(shared, read_mona, t.mona, ShareRefusal::BelowFull).await;
+    refused(shared, general, t.mona, ShareRefusal::BelowFull).await;
+    // R85 : un invité en `full` ne pose ni ne retire l'accès général.
+    refused(shared, general, t.gina, ShareRefusal::GuestGeneral).await;
+    refused(
+        team_page,
+        AccessChange::Members(None),
+        t.gina,
+        ShareRefusal::GuestGeneral,
+    )
+    .await;
+    // La personne visée : un rôle pour recevoir un accès, une ligne propre pour le perdre.
+    for nobody in [t.sam, Uuid::now_v7()] {
+        let to_nobody = AccessChange::User(nobody, Some(Level::Read));
+        refused(shared, to_nobody, t.olga, ShareRefusal::NotInSpace).await;
+    }
+    let remove_sam = AccessChange::User(t.sam, None);
+    refused(shared, remove_sam, t.olga, ShareRefusal::NoOwnLine).await;
+    // La ligne de Mona est sur la page parente.
+    let remove_mona = AccessChange::User(t.mona, None);
+    refused(child, remove_mona, t.olga, ShareRefusal::NoOwnLine).await;
+
+    // Le reste découle de `full` (R86) : Gina change la ligne d'un autre.
+    let written = store
+        .change_access(shared, read_mona, t.gina)
+        .await
+        .unwrap();
+    assert!(written.changed);
+    assert_eq!(written.space_id, space.id);
+
+    // À la corbeille, la page et sa sous-page : après les refus de niveau et de R85.
+    store.trash_node(shared, t.olga).await.unwrap();
+    for node in [shared, child] {
+        refused(node, read_mona, t.olga, ShareRefusal::Trashed).await;
+        refused(node, general, t.gina, ShareRefusal::GuestGeneral).await;
+        let edit_mona = AccessChange::User(t.mona, Some(Level::Edit));
+        refused(node, edit_mona, t.mona, ShareRefusal::BelowFull).await;
+    }
+}
+
+/// L'accès général d'une page ne se baisse ni ne se retire en dessous de celui que donne une
+/// ligne `members` d'un ancêtre (`InheritedAccess`, rien d'écrit) ; un niveau égal ou plus haut
+/// s'écrit.
+#[tokio::test]
+async fn change_access_refuses_to_lower_an_inherited_general_access() {
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let t = team(store, space.id).await;
+    let parent = page_with(store, space, None, &[(Subject::Members, Level::Edit)]).await;
+    let child = page_with(store, space, Some(parent), &[]).await;
+    let refused = async |level: Option<Level>| {
+        let before = untouched(store, space, child).await;
+        let r = store
+            .change_access(child, AccessChange::Members(level), t.olga)
+            .await;
+        assert!(
+            matches!(r, Err(StoreError::Refused(ShareRefusal::InheritedAccess))),
+            "{level:?} : {r:?}"
+        );
+        assert_eq!(untouched(store, space, child).await, before);
+    };
+    for level in [None, Some(Level::Read), Some(Level::Comment)] {
+        refused(level).await;
+    }
+    for level in [Level::Edit, Level::Full] {
+        let written = store
+            .change_access(child, AccessChange::Members(Some(level)), t.olga)
+            .await
+            .unwrap();
+        assert!(written.changed, "{level:?}");
+        assert_eq!(
+            store.node_grants(child).await.unwrap(),
+            [grant(Subject::Members, level)]
+        );
+    }
+    // Plus haut que l'héritage, la ligne de la page ne se retire pas non plus : on revient au
+    // niveau hérité.
+    refused(None).await;
+    store
+        .change_access(child, AccessChange::Members(Some(Level::Edit)), t.olga)
+        .await
+        .unwrap();
+    // Sur la page parente, rien n'est hérité : elle baisse.
+    store
+        .change_access(parent, AccessChange::Members(Some(Level::Read)), t.olga)
+        .await
+        .unwrap();
+}
+
+/// Une ligne déjà ainsi n'écrit rien : la révision de l'espace ne bouge pas. Un changement fait
+/// l'incrémente d'un cran, et dit dans quel espace il a écrit.
+#[tokio::test]
+async fn change_access_writes_nothing_when_nothing_changes() {
     let f = fresh().await;
     let (store, space) = (&f.store, &f.space);
     let t = team(store, space.id).await;
     let node = page_with(store, space, None, &[(Subject::Members, Level::Full)]).await;
     let rev = store.space_rev(space.id).await.unwrap().unwrap();
-    for stale in [rev - 1, rev + 1] {
-        let r = store
-            .change_access(node, AccessChange::User(t.mona, Some(Level::Edit)), stale)
-            .await;
-        assert!(matches!(r, Err(StoreError::Stale)), "{r:?}");
-    }
-    assert_eq!(
-        store.node_grants(node).await.unwrap(),
-        [grant(Subject::Members, Level::Full)]
-    );
-    assert_eq!(store.space_rev(space.id).await.unwrap(), Some(rev));
-
-    // Sur la bonne révision : écrit, un cran.
     let written = store
-        .change_access(node, AccessChange::User(t.mona, Some(Level::Edit)), rev)
+        .change_access(node, AccessChange::User(t.mona, Some(Level::Edit)), t.olga)
         .await
         .unwrap();
     assert_eq!(
         written,
         AccessWritten {
+            space_id: space.id,
             changed: true,
             left_space: false
         }
     );
     assert_eq!(store.space_rev(space.id).await.unwrap(), Some(rev + 1));
-    // À l'identique : rien d'écrit.
     for change in [
         AccessChange::User(t.mona, Some(Level::Edit)),
-        AccessChange::User(t.olga, None),
         AccessChange::Members(Some(Level::Full)),
     ] {
-        let written = store.change_access(node, change, rev + 1).await.unwrap();
-        assert_eq!(written, AccessWritten::default(), "{change:?}");
+        let written = store.change_access(node, change, t.olga).await.unwrap();
+        assert!(!written.changed && !written.left_space, "{change:?}");
     }
     assert_eq!(store.space_rev(space.id).await.unwrap(), Some(rev + 1));
-    let r = store
-        .change_access(Uuid::now_v7(), AccessChange::Members(None), rev + 1)
-        .await;
-    assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
 }
 
-/// Retirer à un invité sa dernière ligne de l'espace l'en fait sortir ; tant qu'il en garde
-/// une, il reste. Un membre reste membre.
+/// Retirer à un invité sa dernière ligne de l'espace l'en fait sortir, avec les invitations
+/// qu'il y avait faites et qui attendaient encore, comme au départ d'un membre ; tant qu'il
+/// garde une ligne, il reste, et elles aussi. Un membre reste membre.
 #[tokio::test]
 async fn change_access_lets_a_bare_guest_leave() {
     let f = fresh().await;
@@ -462,13 +592,36 @@ async fn change_access_lets_a_bare_guest_leave() {
         store,
         space,
         None,
-        &[(Subject::Members, Level::Full), (gina, Level::Edit)],
+        &[(Subject::Members, Level::Full), (gina, Level::Full)],
     )
     .await;
-    let rev = async || store.space_rev(space.id).await.unwrap().unwrap();
+    // Gina, en `full` sur la seconde page, y a invité quelqu'un.
+    let hers = store
+        .create_invitation(NewInvitation {
+            space_id: space.id,
+            grant: InvitationGrant::Page {
+                node_id: second,
+                level: Level::Read,
+            },
+            email: "invite@exemple.test".to_string(),
+            token_hash: [7; 32],
+            created_by: t.gina,
+            expires_at: i64::MAX,
+        })
+        .await
+        .unwrap();
+    let pending = async || {
+        store
+            .pending_invitations(space.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect::<Vec<_>>()
+    };
 
     let written = store
-        .change_access(first, AccessChange::User(t.gina, None), rev().await)
+        .change_access(first, AccessChange::User(t.gina, None), t.olga)
         .await
         .unwrap();
     assert!(written.changed && !written.left_space);
@@ -476,15 +629,17 @@ async fn change_access_lets_a_bare_guest_leave() {
         store.role_in(space.id, t.gina).await.unwrap(),
         Some(Role::Guest)
     );
+    assert_eq!(pending().await, [hers.id]);
     let written = store
-        .change_access(second, AccessChange::User(t.gina, None), rev().await)
+        .change_access(second, AccessChange::User(t.gina, None), t.olga)
         .await
         .unwrap();
     assert!(written.changed && written.left_space);
     assert_eq!(store.role_in(space.id, t.gina).await.unwrap(), None);
+    assert!(pending().await.is_empty());
     // Un membre sans plus aucune ligne reste membre.
     let written = store
-        .change_access(first, AccessChange::User(t.mona, None), rev().await)
+        .change_access(first, AccessChange::User(t.mona, None), t.olga)
         .await
         .unwrap();
     assert!(written.changed && !written.left_space);

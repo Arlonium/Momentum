@@ -30,10 +30,10 @@
 //! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon ; `409 not_trashed` |
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
 //! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait |
-//! | `GET /api/v1/pages/{id}/access` | `full` | `PageAccess` : l'accès général, les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
-//! | `PUT /api/v1/pages/{id}/access/general` | `full` | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `level: null` retire la ligne `members` de la page ; `409 last_full_access` ; `409 access_changed` |
-//! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`, de même) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` ; `409 access_changed` |
-//! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; `409 access_changed` ; un invité sans plus aucun accès sort de l'espace |
+//! | `GET /api/v1/pages/{id}/access` | `full` | `PageAccess` : l'accès général (et s'il vient d'une page parente), les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
+//! | `PUT /api/v1/pages/{id}/access/general` | `full`, et le rôle `member` ou plus (un invité : `403`, R85) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `level: null` retire la ligne `members` de la page ; `409 inherited_access` (retirer ou baisser l'accès qu'une page parente donne) ; `409 last_full_access` |
+//! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`, de même) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` |
+//! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, sinon en lecture seule ; `403 bad_origin` avant tout |
 //!
@@ -51,12 +51,13 @@
 //! ne la voit pas, exactement la réponse d'une page qui n'existe pas ; `403
 //! forbidden` sous le niveau demandé ; `409 trashed` pour qui écrit dans une
 //! page à la corbeille. Le détail est en tête de `routes/pages.rs`, et celui
-//! du partage (une page garde toujours quelqu'un en `full`, décision et
-//! écriture prises sur la même révision de l'espace) en tête de
-//! `routes/sharing.rs`. Un changement de rôle, un retrait, un changement
-//! d'accès se décident sur ce que la route a lu, que le store revérifie dans
-//! la transaction qui écrit ; s'il a bougé, la route relit et redécide, puis
-//! répond `409 roles_changed` ou `409 access_changed` après deux reprises.
+//! du partage (une page garde toujours quelqu'un en `full`) en tête de
+//! `routes/sharing.rs`. Un changement de rôle et un retrait se décident sur
+//! les rôles que la route a lus, que le store revérifie dans la transaction
+//! qui écrit ; s'ils ont bougé, la route relit et redécide, puis répond `409
+//! roles_changed` après deux reprises. Un changement d'accès, lui, est
+//! vérifié en entier dans la transaction qui l'écrit (Ruling R87) : le cache
+//! ne sert qu'à répondre vite avant le corps.
 //!
 //! **Comptes** (`auth.rs`, `routes/auth.rs`) : comptes locaux, mot de passe
 //! haché en Argon2id, session par cookie. Le premier compte créé administre

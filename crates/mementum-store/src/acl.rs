@@ -5,12 +5,15 @@
 //! `members`), un niveau sous celle de `Level::as_str`. Une ligne qui ne se relit pas est une
 //! erreur, jamais une ligne sautée : un accès ignoré en silence fausserait le calcul des droits.
 
-use mementum_acl::{Grant, Level, Subject};
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+
+use mementum_acl::{Grant, Level, Subject, chain_level};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
-use crate::members::{guest_leaves_if_bare, keeps_full};
+use crate::members::{guest_leaves_if_bare, keeps_full, role_of};
 use crate::spaces::bump_rev;
 use crate::{Store, StoreError, parse_uuid, unreadable};
 
@@ -24,8 +27,10 @@ pub enum AccessChange {
 }
 
 /// Ce qu'a écrit [`Store::change_access`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccessWritten {
+    /// L'espace de la page.
+    pub space_id: Uuid,
     /// Une ligne a été posée, changée ou retirée. Faux : elle était déjà ainsi ; rien n'a été
     /// écrit, et la révision de l'espace n'a pas bougé.
     pub changed: bool,
@@ -33,6 +38,59 @@ pub struct AccessWritten {
     /// elle en est sortie.
     pub left_space: bool,
 }
+
+/// Pourquoi [`Store::change_access`] refuse un changement, vérifié dans sa transaction (Ruling
+/// R87), dans l'ordre où les cas sont regardés.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareRefusal {
+    /// La page n'existe pas pour qui demande : inconnue, d'un espace où il n'a aucun rôle, ou
+    /// qu'il ne peut pas lire (y compris sous un cycle de parents, R58).
+    Unseen,
+    /// Il la voit, sous `full`.
+    BelowFull,
+    /// Il est invité, et le changement touche à l'accès général (Ruling R85) : poser ou retirer
+    /// la ligne `members` est réservé aux rôles `member` et plus.
+    GuestGeneral,
+    /// La page, ou un de ses ancêtres, est à la corbeille.
+    Trashed,
+    /// La personne qui recevrait l'accès n'a aucun rôle dans l'espace (ou n'existe pas).
+    NotInSpace,
+    /// La page n'a pas de ligne propre pour la personne dont on retire l'accès (elle n'en a
+    /// aucune, ou seulement sur un ancêtre).
+    NoOwnLine,
+    /// L'accès général demandé (retiré, ou un niveau plus bas) est sous celui qu'une ligne
+    /// `members` d'un ancêtre donne déjà : il ne se baisse pas ici.
+    InheritedAccess,
+}
+
+impl fmt::Display for ShareRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ShareRefusal::Unseen => "page introuvable",
+            ShareRefusal::BelowFull => "accès complet nécessaire",
+            ShareRefusal::GuestGeneral => "un invité ne change pas l'accès général",
+            ShareRefusal::Trashed => "page à la corbeille",
+            ShareRefusal::NotInSpace => "la personne visée n'a pas de rôle dans l'espace",
+            ShareRefusal::NoOwnLine => "pas de ligne propre pour la personne visée",
+            ShareRefusal::InheritedAccess => "accès général hérité d'une page parente",
+        })
+    }
+}
+
+/// La requête récursive `chain(id)` : une page (liée en `?1`) et ses ancêtres. `UNION` (et non
+/// `UNION ALL`) : la remontée s'arrête même si des parents tournaient en rond. En littéral pour
+/// que le SQL reste statique (`concat!`).
+macro_rules! chain_of {
+    () => {
+        "WITH RECURSIVE chain(id) AS ( \
+             SELECT ?1 \
+             UNION \
+             SELECT n.parent_id FROM chain JOIN nodes n ON n.id = chain.id \
+             WHERE n.parent_id IS NOT NULL \
+         ) "
+    };
+}
+pub(crate) use chain_of;
 
 /// Relit les colonnes `subject` et `level` d'une ligne d'`acl`.
 fn grant_from_row(r: &SqliteRow) -> Result<Grant, StoreError> {
@@ -80,6 +138,106 @@ pub(crate) async fn space_of(
         .get(0))
 }
 
+/// Une page et ses ancêtres jusqu'à la racine, lus dans une transaction.
+struct Chain {
+    /// L'espace de la page.
+    space: String,
+    /// La page, ou un de ses ancêtres, est à la corbeille.
+    in_trash: bool,
+    /// Les lignes de la page et de ses ancêtres : `(nœud, accès)`.
+    lines: Vec<(String, Grant)>,
+}
+
+/// La chaîne de la page `node_id`, lue dans la transaction. `None` : la page n'existe pas, ou
+/// sa remontée tourne en rond (un nœud pris dans un cycle de parents, ou suspendu sous un
+/// cycle, n'est vu par personne, R58). Comme pour `SpaceAccess::compute`, un parent hors de
+/// l'espace vaut la racine.
+async fn read_chain(
+    tx: &mut Transaction<'_, Sqlite>,
+    node_id: &str,
+) -> Result<Option<Chain>, StoreError> {
+    let mut nodes: HashMap<String, (Option<String>, bool, String)> = HashMap::new();
+    for r in sqlx::query(concat!(
+        chain_of!(),
+        "SELECT n.id, n.parent_id, n.trashed_at IS NOT NULL, n.space_id \
+         FROM nodes n JOIN chain ON n.id = chain.id"
+    ))
+    .bind(node_id)
+    .fetch_all(&mut **tx)
+    .await?
+    {
+        nodes.insert(r.get(0), (r.get(1), r.get(2), r.get(3)));
+    }
+    let Some((_, _, space)) = nodes.get(node_id) else {
+        return Ok(None);
+    };
+    let space = space.clone();
+    let mut on_chain = HashSet::new();
+    let mut in_trash = false;
+    let mut current = Some(node_id.to_string());
+    while let Some(id) = current {
+        let Some((parent, trashed, _)) = nodes.get(&id).filter(|(_, _, s)| *s == space) else {
+            break;
+        };
+        if !on_chain.insert(id) {
+            return Ok(None);
+        }
+        in_trash |= *trashed;
+        current = parent.clone();
+    }
+    let mut lines = Vec::new();
+    for r in sqlx::query(concat!(
+        chain_of!(),
+        "SELECT a.node_id, a.subject, a.level FROM acl a JOIN chain ON a.node_id = chain.id"
+    ))
+    .bind(node_id)
+    .fetch_all(&mut **tx)
+    .await?
+    {
+        let on: String = r.get("node_id");
+        if on_chain.contains(&on) {
+            lines.push((on, grant_from_row(&r)?));
+        }
+    }
+    Ok(Some(Chain {
+        space,
+        in_trash,
+        lines,
+    }))
+}
+
+/// Ce sur quoi repose un changement d'accès de `actor` sur la page, vérifié dans la transaction
+/// (Ruling R87), dans l'ordre des refus : la page existe pour lui (un rôle dans son espace, au
+/// moins `read` sur sa chaîne, par [`chain_level`]) ; il y a `full` ; pour l'accès général
+/// (`general`), il n'est pas invité (R85) ; ni la page ni un ancêtre n'est à la corbeille. Rend
+/// la chaîne de la page.
+async fn check_sharer(
+    tx: &mut Transaction<'_, Sqlite>,
+    node_id: &str,
+    actor: Uuid,
+    general: bool,
+) -> Result<Chain, StoreError> {
+    let refused = StoreError::Refused;
+    let chain = read_chain(tx, node_id)
+        .await?
+        .ok_or(refused(ShareRefusal::Unseen))?;
+    let role = role_of(tx, &chain.space, &actor.to_string())
+        .await?
+        .ok_or(refused(ShareRefusal::Unseen))?;
+    let level = chain_level(chain.lines.iter().map(|(_, grant)| grant), actor, role)
+        .ok_or(refused(ShareRefusal::Unseen))?;
+    if level < Level::Full {
+        return Err(refused(ShareRefusal::BelowFull));
+    }
+    if general && !role.is_member() {
+        return Err(refused(ShareRefusal::GuestGeneral));
+    }
+    if chain.in_trash {
+        return Err(refused(ShareRefusal::Trashed));
+    }
+    Ok(chain)
+}
+
 impl Store {
     /// Tous les accès posés dans l'espace, corbeille comprise : `(nœud, accès)`, triés par
     /// nœud puis par sujet.
@@ -114,8 +272,32 @@ impl Store {
             .collect()
     }
 
+    /// Les accès posés sur ce nœud et sur chacun de ses ancêtres : `(nœud, accès)`, triés par
+    /// nœud puis par sujet. Vide pour un nœud inconnu.
+    pub async fn chain_grants(&self, node_id: Uuid) -> Result<Vec<(Uuid, Grant)>, StoreError> {
+        sqlx::query(concat!(
+            chain_of!(),
+            "SELECT a.node_id, a.subject, a.level FROM acl a JOIN chain ON a.node_id = chain.id \
+             ORDER BY a.node_id, a.subject"
+        ))
+        .bind(node_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            Ok((
+                parse_uuid(&r.get::<String, _>("node_id"))?,
+                grant_from_row(r)?,
+            ))
+        })
+        .collect()
+    }
+
     /// Pose un accès sur le nœud : le niveau remplace celui que le sujet y avait. `NotFound` si
     /// le nœud n'existe pas.
+    ///
+    /// Sans la règle `last_full_access` (R70) ni contrôle de qui demande : pour les tests. Le
+    /// partage d'une page passe par [`Store::change_access`].
     pub async fn set_grant(&self, node_id: Uuid, grant: Grant) -> Result<(), StoreError> {
         let id = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -128,6 +310,9 @@ impl Store {
 
     /// Retire l'accès du sujet sur le nœud ; sans effet (et sans rien écrire) s'il n'en avait
     /// pas. `NotFound` si le nœud n'existe pas.
+    ///
+    /// Sans la règle `last_full_access` (R70) ni contrôle de qui demande : pour les tests. Le
+    /// partage d'une page passe par [`Store::change_access`].
     pub async fn remove_grant(&self, node_id: Uuid, subject: Subject) -> Result<(), StoreError> {
         let id = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -145,34 +330,67 @@ impl Store {
         Ok(())
     }
 
-    /// Change un accès posé sur la page, en une transaction, pour le partage d'une page :
-    /// - l'appelant a décidé sur l'état de l'espace à la révision `expected_rev` (son droit de
-    ///   partager, la personne visée…) : si l'espace n'y est plus, `Stale`, et rien n'est
-    ///   écrit ; il relit et redécide ;
-    /// - retirer la ligne d'un invité qui n'en a plus aucune autre dans l'espace l'en fait
-    ///   sortir ;
-    /// - Ruling R70 : après le changement, la page doit garder quelqu'un en `full`, par ses
-    ///   lignes ou par celles d'un ancêtre (une ligne `members` compte ; une ligne restée à
-    ///   quelqu'un sans rôle, non) ; sinon `LastFullAccess`, et rien n'est écrit.
+    /// Change, au nom de `actor`, un accès posé sur la page, en une transaction : le partage
+    /// d'une page. Tout ce sur quoi le changement repose est vérifié dans cette transaction
+    /// (Ruling R87), sans dépendre de la révision de l'espace, et chaque refus a son cas
+    /// ([`ShareRefusal`], dans `StoreError::Refused`), dans cet ordre :
+    /// - la page existe pour `actor` (un rôle dans son espace, au moins `read` sur la page et
+    ///   ses ancêtres), sinon `Unseen` ; il y a `full`, sinon `BelowFull` ;
+    /// - l'accès général ne se pose ni ne se retire par un invité (Ruling R85) : `GuestGeneral` ;
+    /// - ni la page ni un ancêtre n'est à la corbeille : `Trashed` ;
+    /// - la personne qui reçoit un accès a un rôle dans l'espace (`NotInSpace`) ; celle dont on
+    ///   retire l'accès a une ligne sur la page (`NoOwnLine`) ;
+    /// - l'accès général ne se retire ni ne descend sous celui qu'une ligne `members` d'un
+    ///   ancêtre donne déjà : `InheritedAccess` ; égal ou plus haut, il s'écrit ;
+    /// - Ruling R70 : après le changement, la page garde quelqu'un en `full`, par ses lignes ou
+    ///   par celles d'un ancêtre (une ligne `members` compte ; une ligne restée à quelqu'un sans
+    ///   rôle, non) ; sinon `LastFullAccess`.
     ///
-    /// Une ligne déjà ainsi (même niveau, ou absente à retirer) n'écrit rien (`changed` faux) :
-    /// la révision ne bouge pas. `NotFound` si le nœud n'existe pas.
+    /// Aucun refus n'écrit rien. Retirer la ligne d'un invité qui n'en a plus aucune autre dans
+    /// l'espace l'en fait sortir, avec ses invitations en attente. Une ligne déjà ainsi n'écrit
+    /// rien (`changed` faux) : la révision ne bouge pas.
     pub async fn change_access(
         &self,
         node_id: Uuid,
         change: AccessChange,
-        expected_rev: i64,
+        actor: Uuid,
     ) -> Result<AccessWritten, StoreError> {
         let node = node_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let space = space_of(&mut tx, &node).await?;
-        let rev: i64 = sqlx::query("SELECT rev FROM spaces WHERE id = ?")
-            .bind(&space)
-            .fetch_one(&mut *tx)
-            .await?
-            .get(0);
-        if rev != expected_rev {
-            return Err(StoreError::Stale);
+        let general = matches!(change, AccessChange::Members(_));
+        let chain = check_sharer(&mut tx, &node, actor, general).await?;
+        let space_id = parse_uuid(&chain.space)?;
+        match change {
+            AccessChange::User(target, Some(_)) => {
+                if role_of(&mut tx, &chain.space, &target.to_string())
+                    .await?
+                    .is_none()
+                {
+                    return Err(StoreError::Refused(ShareRefusal::NotInSpace));
+                }
+            }
+            AccessChange::User(target, None) => {
+                let own = chain
+                    .lines
+                    .iter()
+                    .any(|(on, grant)| *on == node && grant.subject == Subject::User(target));
+                if !own {
+                    return Err(StoreError::Refused(ShareRefusal::NoOwnLine));
+                }
+            }
+            AccessChange::Members(wanted) => {
+                let inherited = chain
+                    .lines
+                    .iter()
+                    .filter(|(on, grant)| *on != node && grant.subject == Subject::Members)
+                    .map(|(_, grant)| grant.level)
+                    .max();
+                if let Some(inherited) = inherited
+                    && wanted.is_none_or(|wanted| wanted < inherited)
+                {
+                    return Err(StoreError::Refused(ShareRefusal::InheritedAccess));
+                }
+            }
         }
         let (subject, level) = match change {
             AccessChange::Members(level) => (Subject::Members, level),
@@ -190,22 +408,30 @@ impl Store {
                     > 0
             }
         };
+        let unchanged = AccessWritten {
+            space_id,
+            changed: false,
+            left_space: false,
+        };
         if !changed {
-            return Ok(AccessWritten::default());
+            return Ok(unchanged);
         }
         let left_space = match change {
-            AccessChange::User(user, None) => guest_leaves_if_bare(&mut tx, &space, user).await?,
+            AccessChange::User(user, None) => {
+                guest_leaves_if_bare(&mut tx, &chain.space, user).await?
+            }
             _ => false,
         };
-        if !keeps_full(&mut tx, &space, &node).await? {
+        if !keeps_full(&mut tx, &chain.space, &node).await? {
             // La transaction, abandonnée, n'écrit rien.
             return Err(StoreError::LastFullAccess);
         }
-        bump_rev(&mut tx, &space).await?;
+        bump_rev(&mut tx, &chain.space).await?;
         tx.commit().await?;
         Ok(AccessWritten {
-            changed,
+            changed: true,
             left_space,
+            ..unchanged
         })
     }
 }

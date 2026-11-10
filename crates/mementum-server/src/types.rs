@@ -411,6 +411,10 @@ pub struct PageAccess {
     /// forte), donne aux membres de l'espace (les propriétaires et les admins y ont `full`).
     /// `null` : seulement les personnes nommées ci-dessous.
     pub general: Option<Level>,
+    /// L'accès général affiché vient d'une page parente, au moins en partie (sa ligne `members`
+    /// donne au moins ce niveau) : il ne se retire ni ne se baisse ici (`409 inherited_access`) ;
+    /// il peut y monter.
+    pub general_inherited: bool,
     /// Les comptes qui ont un rôle dans l'espace et une ligne sur la page ou sur un ancêtre,
     /// une fois chacun, dans l'ordre de leur arrivée dans l'espace.
     pub entries: Vec<AccessEntry>,
@@ -425,8 +429,9 @@ pub struct AccessEntry {
     pub user_id: String,
     pub name: String,
     pub email: String,
-    /// Son niveau effectif : le plus fort de ceux que lui donnent ses lignes sur la page et
-    /// sur ses ancêtres.
+    /// Le niveau que lui donnent ses lignes nommées : le plus fort de celles de la page et de
+    /// ses ancêtres. L'accès général (`general`) s'y ajoute pour un membre ; un propriétaire ou
+    /// un admin a même `full` là où il s'applique, ce que ce niveau ne dit pas.
     pub level: Level,
     /// Ce niveau vient d'un ancêtre : il se change sur la page qui le porte. Un compte qui a
     /// une ligne sur la page et un niveau hérité plus fort apparaît ainsi, une fois.
@@ -601,9 +606,9 @@ pub enum ErrorCode {
     /// Le changement laisserait la page sans personne en accès complet, ni par ses accès ni
     /// par ceux d'une page parente : rien n'est écrit. Statut 409.
     LastFullAccess,
-    /// L'espace a changé pendant qu'un changement d'accès s'écrivait, plusieurs fois de suite :
-    /// rien n'est écrit ; réessayer. Statut 409.
-    AccessChanged,
+    /// L'accès général demandé sur une page (retiré, ou plus bas) est sous celui qu'une page
+    /// parente donne déjà aux membres : il se change sur elle ; rien n'est écrit. Statut 409.
+    InheritedAccess,
 }
 
 /// Corps de toute réponse d'erreur.

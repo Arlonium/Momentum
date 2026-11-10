@@ -735,8 +735,9 @@ async fn owner_invitation_needs_an_owner_author() {
 }
 
 /// Une invitation de page ne vaut que si son auteur a encore un rôle dans l'espace : un invité
-/// qui sort de l'espace avec sa dernière ligne (`revoke_user_grant`, qui ne supprime pas ses
-/// invitations) n'y fait plus entrer personne (Ruling R69).
+/// qui sort de l'espace avec sa dernière ligne (`revoke_user_grant`) n'y fait plus entrer
+/// personne (Ruling R69), et ses invitations en attente partent avec lui, comme au départ d'un
+/// membre.
 #[tokio::test]
 async fn page_invitation_needs_an_author_in_the_space() {
     let f = fresh().await;
@@ -775,10 +776,14 @@ async fn page_invitation_needs_an_author_in_the_space() {
     assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
     assert_eq!(store.role_in(space.id, bob.id).await.unwrap(), None);
     assert_eq!(lines_of(store, &space, bob.id).await, []);
-    // Elle reste en attente, à révoquer : elle se lit par son id.
-    assert_eq!(
-        store.get_invitation(from_gina.id, t).await.unwrap(),
-        Some(from_gina)
+    // Elle est partie avec Gina : ni par son id, ni dans la liste.
+    assert_eq!(store.get_invitation(from_gina.id, t).await.unwrap(), None);
+    assert!(
+        store
+            .pending_invitations(space.id)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 

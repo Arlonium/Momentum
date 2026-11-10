@@ -16,6 +16,12 @@ export type PageAccess = {
  */
 general: Level | null, 
 /**
+ * L'accès général affiché vient d'une page parente, au moins en partie (sa ligne `members`
+ * donne au moins ce niveau) : il ne se retire ni ne se baisse ici (`409 inherited_access`) ;
+ * il peut y monter.
+ */
+generalInherited: boolean, 
+/**
  * Les comptes qui ont un rôle dans l'espace et une ligne sur la page ou sur un ancêtre,
  * une fois chacun, dans l'ordre de leur arrivée dans l'espace.
  */

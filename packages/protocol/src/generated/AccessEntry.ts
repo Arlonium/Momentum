@@ -6,8 +6,9 @@ import type { Level } from "./Level";
  */
 export type AccessEntry = { userId: string, name: string, email: string, 
 /**
- * Son niveau effectif : le plus fort de ceux que lui donnent ses lignes sur la page et
- * sur ses ancêtres.
+ * Le niveau que lui donnent ses lignes nommées : le plus fort de celles de la page et de
+ * ses ancêtres. L'accès général (`general`) s'y ajoute pour un membre ; un propriétaire ou
+ * un admin a même `full` là où il s'applique, ce que ce niveau ne dit pas.
  */
 level: Level, 
 /**
