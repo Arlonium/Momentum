@@ -6,44 +6,37 @@ import { expect, test, type Page } from "@playwright/test";
 import type { ErrorBody, PageNode } from "@mementum/protocol";
 import {
   apiAs,
+  byPosition,
   closeContexts,
   createPage,
   createSpace,
   firstSpace,
+  forbidNativeDialogs,
   getMe,
   getTree,
-  inviteToSpace,
+  memberOf,
   newUser,
   NO_SESSION,
+  openRowMenu,
   pageIdOf,
   sectionOf,
+  shownRows,
   sidebarOf,
   signUpAccount,
   spaceSwitcher,
+  titleOf,
+  trashBanner,
+  trashItem,
   treeRow,
   unique,
+  UNKNOWN_ID,
   waitSynced,
-  type Account,
 } from "./helpers";
 import { BASE_URL } from "./servers";
 
 // La page de chaque test arrive sans session ; `newUser(browser, compte)` en donne une.
 test.use({ storageState: NO_SESSION });
 test.afterEach(closeContexts);
-
-const titleOf = (p: Page) => p.getByRole("textbox", { name: "Titre de la page" });
-
-/** Un id de page ou d'espace que le serveur ne connaît pas. */
-const UNKNOWN_ID = "00000000-0000-7000-8000-000000000000";
-
-/** Un compte neuf qui n'a que l'espace `spaceId`, où `owner` l'invite comme membre. */
-async function memberOf(owner: Account, spaceId: string, name: string): Promise<Account> {
-  const { token } = await inviteToSpace(await apiAs(owner), spaceId, {
-    email: `invite-${unique()}@exemple.fr`,
-    role: "member",
-  });
-  return signUpAccount(name, token);
-}
 
 /** Crée une page par le « + » d'une section, la nomme, et rend son id. */
 async function addPageIn(p: Page, section: "Espace" | "Privé", title: string): Promise<string> {
@@ -345,36 +338,6 @@ test("collapsed_section_is_remembered_per_space", async ({ browser }) => {
   await expect(treeRow(p, inFirst.id)).toBeVisible();
 });
 
-/** Échoue si la page ouvre une fenêtre du navigateur (`window.confirm`, `alert`…). */
-function forbidNativeDialogs(p: Page): string[] {
-  const opened: string[] = [];
-  p.on("dialog", (dialog) => {
-    opened.push(dialog.message());
-    void dialog.dismiss();
-  });
-  return opened;
-}
-
-/** Ouvre le menu « … » de la ligne d'une page, et le rend. */
-async function openRowMenu(p: Page, id: string, title: string) {
-  await treeRow(p, id).hover();
-  await treeRow(p, id).getByRole("button", { name: `Actions de « ${title} »` }).click();
-  const menu = p.getByRole("menu", { name: `Actions de « ${title} »` });
-  await expect(menu).toBeVisible();
-  return menu;
-}
-
-/** La ligne d'une page dans la liste de la corbeille. */
-function trashItem(p: Page, title: string) {
-  return p
-    .getByRole("list", { name: "Pages à la corbeille" })
-    .getByRole("listitem")
-    .filter({ hasText: title });
-}
-
-const trashBanner = (p: Page) =>
-  p.getByRole("status").filter({ hasText: "Cette page est à la corbeille" });
-
 test("trash_and_restore_from_the_sidebar", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);
@@ -519,15 +482,6 @@ test("delete_forever_asks_first", async ({ browser }) => {
   expect(nativeDialogs).toEqual([]);
 });
 
-/** Les titres des lignes de la barre latérale, de haut en bas, avec leur niveau. */
-async function shownRows(p: Page): Promise<string[]> {
-  return sidebarOf(p)
-    .getByRole("treeitem")
-    .evaluateAll((rows) =>
-      rows.map((row) => `${row.getAttribute("aria-level")} ${row.querySelector("a")?.textContent}`),
-    );
-}
-
 test("drag_a_page_under_another", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);
@@ -540,9 +494,7 @@ test("drag_a_page_under_another", async ({ browser }) => {
   const serverTree = async () => {
     const { nodes } = await getTree(api, space.id);
     const under: Record<string, string[]> = {};
-    for (const node of nodes
-      .slice()
-      .sort((x, y) => (x.position < y.position ? -1 : x.position > y.position ? 1 : 0))) {
+    for (const node of byPosition(nodes)) {
       const parent = nodes.find((n) => n.id === node.parentId)?.title ?? "racine";
       (under[parent] ??= []).push(node.title);
     }
@@ -657,10 +609,7 @@ test("row_menu_by_keyboard", async ({ browser }) => {
   await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "1 Alpha", "1 Charlie"]);
   await expect(button).toBeFocused();
   const titles = async () =>
-    (await getTree(api, space.id)).nodes
-      .slice()
-      .sort((x, y) => (x.position < y.position ? -1 : x.position > y.position ? 1 : 0))
-      .map((n) => n.title);
+    byPosition((await getTree(api, space.id)).nodes).map((n) => n.title);
   expect(await titles()).toEqual(["Bravo", "Alpha", "Charlie"]);
 
   // En tête, elle ne monte pas plus haut : l'action est grisée, et le focus va à la suivante.

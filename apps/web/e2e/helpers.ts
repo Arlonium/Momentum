@@ -266,6 +266,23 @@ export async function joinSpace(
   await acceptInvitation(await apiAs(account), token);
 }
 
+/**
+ * Un compte neuf qui n'a que l'espace `spaceId` : `owner` l'y invite avec `role`, et il
+ * s'inscrit avec cette invitation.
+ */
+export async function memberOf(
+  owner: Account,
+  spaceId: string,
+  name: string,
+  role: InviteRole = "member",
+): Promise<Account> {
+  const { token } = await inviteToSpace(await apiAs(owner), spaceId, {
+    email: `invite-${unique()}@exemple.fr`,
+    role,
+  });
+  return signUpAccount(name, token);
+}
+
 /** La barre latérale de l'application. */
 export function sidebarOf(p: Page): Locator {
   return p.getByRole("navigation", { name: "Barre latérale" });
@@ -299,6 +316,52 @@ export function sectionOf(p: Page, label: "Espace" | "Partagé" | "Privé"): Loc
 /** La ligne d'une page dans la barre latérale. */
 export function treeRow(p: Page, id: string): Locator {
   return sidebarOf(p).locator(`[role="treeitem"][data-page-id="${id}"]`);
+}
+
+/** Le titre de la page ouverte. */
+export function titleOf(p: Page): Locator {
+  return p.getByRole("textbox", { name: "Titre de la page" });
+}
+
+/** Les titres des lignes de la barre latérale, de haut en bas, avec leur niveau. */
+export async function shownRows(p: Page): Promise<string[]> {
+  return sidebarOf(p)
+    .getByRole("treeitem")
+    .evaluateAll((rows) =>
+      rows.map((row) => `${row.getAttribute("aria-level")} ${row.querySelector("a")?.textContent}`),
+    );
+}
+
+/** Ouvre le menu « … » de la ligne d'une page, et le rend. */
+export async function openRowMenu(p: Page, id: string, title: string): Promise<Locator> {
+  await treeRow(p, id).hover();
+  await treeRow(p, id).getByRole("button", { name: `Actions de « ${title} »` }).click();
+  const menu = p.getByRole("menu", { name: `Actions de « ${title} »` });
+  await expect(menu).toBeVisible();
+  return menu;
+}
+
+/** La ligne d'une page dans la liste de la corbeille. */
+export function trashItem(p: Page, title: string): Locator {
+  return p
+    .getByRole("list", { name: "Pages à la corbeille" })
+    .getByRole("listitem")
+    .filter({ hasText: title });
+}
+
+/** Le bandeau d'une page ouverte qui est à la corbeille. */
+export function trashBanner(p: Page): Locator {
+  return p.getByRole("status").filter({ hasText: "Cette page est à la corbeille" });
+}
+
+/** Échoue si la page ouvre une fenêtre du navigateur (`window.confirm`, `alert`…). */
+export function forbidNativeDialogs(p: Page): string[] {
+  const opened: string[] = [];
+  p.on("dialog", (dialog) => {
+    opened.push(dialog.message());
+    void dialog.dismiss();
+  });
+  return opened;
 }
 
 /** Ouvre la page `id` avec la session de `account` et attend la synchro. */
@@ -416,6 +479,14 @@ export function pageIdOf(p: Page): string {
   const match = /\/p\/([^/?#]+)/.exec(new URL(p.url()).pathname);
   if (!match) throw new Error(`pas une page : ${p.url()}`);
   return decodeURIComponent(match[1]);
+}
+
+/** Un id de page ou d'espace que le serveur ne connaît pas. */
+export const UNKNOWN_ID = "00000000-0000-7000-8000-000000000000";
+
+/** Les pages dans l'ordre de leur `position` (index fractionnaire, comparé en ASCII). */
+export function byPosition<T extends { position: string }>(nodes: T[]): T[] {
+  return [...nodes].sort((a, b) => (a.position < b.position ? -1 : a.position > b.position ? 1 : 0));
 }
 
 /** Centile `q` (entre 0 et 1), au plus proche rang. */

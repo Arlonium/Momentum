@@ -9,6 +9,7 @@ import {
   closeContexts,
   expectSignedInAs,
   firstSpace,
+  forbidNativeDialogs,
   getMe,
   getMembers,
   getSpaceInvitations,
@@ -52,16 +53,6 @@ function invitedHeading(p: Page, by: string, spaceName: string) {
 }
 
 const settingsPath = (spaceId: string) => `/s/${spaceId}/settings`;
-
-/** Échoue si la page ouvre une fenêtre du navigateur (`window.confirm`, `alert`…). */
-function forbidNativeDialogs(p: Page): string[] {
-  const opened: string[] = [];
-  p.on("dialog", (dialog) => {
-    opened.push(dialog.message());
-    void dialog.dismiss();
-  });
-  return opened;
-}
 
 test("invite_to_space_by_link_then_signup", async ({ browser, page }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
