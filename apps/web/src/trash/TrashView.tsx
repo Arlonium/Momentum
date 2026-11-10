@@ -196,7 +196,7 @@ export function TrashView({ space, version, readOnly, onChanged }: Props) {
         {deleting && !readOnly && (
           <Confirm
             // Espaces insécables : le titre ne se coupe ni de ses guillemets ni du « ? ».
-            title={`Supprimer définitivement « ${deleting.title} » ?`}
+            title={`Supprimer définitivement «\u00a0${deleting.title}\u00a0»\u00a0?`}
             confirmLabel="Supprimer définitivement"
             destructive
             busy={busy}

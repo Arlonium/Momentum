@@ -415,7 +415,7 @@ function MembersSection({
       </ul>
       {removing && (
         <Confirm
-          title={`Retirer ${removing.name} de l'espace ?`}
+          title={`Retirer ${removing.name} de l'espace\u00a0?`}
           confirmLabel="Retirer"
           destructive
           busy={busy}
@@ -613,7 +613,7 @@ function LeaveSection({ spaceId, spaceName, self }: { spaceId: string; spaceName
       <FormError message={error} />
       {confirming && (
         <Confirm
-          title={`Quitter l'espace « ${spaceName} » ?`}
+          title={`Quitter l'espace «\u00a0${spaceName}\u00a0»\u00a0?`}
           confirmLabel="Quitter l'espace"
           destructive
           busy={busy}

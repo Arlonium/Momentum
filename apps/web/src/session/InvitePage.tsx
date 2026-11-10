@@ -45,8 +45,8 @@ export function takeInvitationToken(): string | null {
  */
 export function invitationTarget(info: InvitationInfo): string {
   return info.pageTitle === null
-    ? `l'espace « ${info.spaceName} »`
-    : `la page « ${info.pageTitle || "Sans titre"} »`;
+    ? `l'espace «\u00a0${info.spaceName}\u00a0»`
+    : `la page «\u00a0${info.pageTitle || "Sans titre"}\u00a0»`;
 }
 
 type Props = {

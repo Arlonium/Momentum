@@ -24,7 +24,7 @@ export function SpaceNotFound({ first }: Props) {
             className="mm-button mm-button-primary"
             onClick={() => navigate(first === null ? "/" : spacePath(first.id))}
           >
-            {first === null ? "Revenir à l'accueil" : `Ouvrir « ${first.name} »`}
+            {first === null ? "Revenir à l'accueil" : `Ouvrir «\u00a0${first.name}\u00a0»`}
           </button>
         </span>
       </p>
