@@ -118,11 +118,18 @@ async fn concurrent_moves_are_deduped() {
     assert_eq!(server.iter().filter(|x| x.id == ids[0]).count(), 1);
 
     // A reçoit aussi le dédoublonnage par la diffusion, qu'il ait envoyé le
-    // premier ou le second déplacement. Ce correctif n'est qu'une suppression,
-    // et une suppression ne change pas le vecteur d'état : A a déjà celui de B
-    // avec les deux déplacements, doublon compris. On attend donc le contenu.
+    // premier ou le second déplacement. Deux conditions, attendues ensemble :
+    // - le vecteur d'état de B, que A n'atteint qu'en recevant le déplacement
+    //   de B. Le contenu seul ne suffit pas : « B C A D » est déjà ce que vaut
+    //   le document de A après son propre déplacement, avant qu'il ait rien
+    //   reçu, et l'attente rendrait vrai tout de suite ;
+    // - le contenu. Le vecteur d'état seul ne suffit pas non plus : le
+    //   correctif n'est qu'une suppression, qui ne le change pas, et A a celui
+    //   de B dès les deux déplacements, doublon compris.
+    let b_state = b.state_vector();
     assert!(
-        a.wait_until(WAIT, deduped).await,
+        a.wait_until(WAIT, |c| c.state_vector() == b_state && deduped(c))
+            .await,
         "A : {:?}",
         text(&a.blocks())
     );
