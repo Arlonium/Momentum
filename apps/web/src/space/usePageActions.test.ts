@@ -311,3 +311,20 @@ test("change_from_the_trash_view_reloads_the_tree", async () => {
   expect(treeReads()).toBeGreaterThan(reads);
   expect(ids(app.current.nodes)).toEqual(["a", "b"]);
 });
+
+test("page_moved_meanwhile_says_so_and_reloads_the_tree", async () => {
+  const app = await withTree([page("a"), page("b", { position: "a1" })]);
+  const reads = treeReads();
+  // La page a changé de place ailleurs à chaque tentative du serveur (R91) : rien n'est écrit.
+  server = [page("b", { position: "a0" }), page("a", { position: "a1" })];
+  vi.mocked(updatePage).mockRejectedValue(
+    refusal("page_moved", "la page a changé de place entre-temps : réessayer"),
+  );
+  await settle(() => app.current.actions.move("b", { parentId: null, afterId: null }));
+  // Le message du serveur, en pied de barre, et l'arbre tel qu'il le voit.
+  expect(app.current.actions.notice).toBe(
+    "La page n'a pas pu être déplacée. La page a changé de place entre-temps : réessayer",
+  );
+  expect(treeReads()).toBeGreaterThan(reads);
+  expect(app.current.nodes).toEqual(server);
+});
