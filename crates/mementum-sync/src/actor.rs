@@ -791,7 +791,9 @@ impl Actor {
     ///
     /// - Ruling R118 : d'une connexion en lecture seule, rien n'est gardé. Le client officiel
     ///   n'annonce rien en lecture seule, et ce qu'il renvoie des autres serait ignoré de toute
-    ///   façon. Elle continue de recevoir la présence des autres.
+    ///   façon. Elle continue de recevoir la présence des autres. Le hub ne rend déjà aucun
+    ///   message d'awareness d'une telle connexion (`protocol::decode`, pour ne pas même
+    ///   copier ses états) : le contrôle fait ici est un filet.
     /// - Ruling R119 : un état qui n'a pas la forme connue ([`presence::known_shape`]) est
     ///   ignoré ; il ne donne pas son client.
     /// - Rulings R101, R104, R108, R112 : le compte qui tient le client ([`presence_rule`]).

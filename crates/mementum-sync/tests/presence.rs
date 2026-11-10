@@ -1107,3 +1107,26 @@ async fn presence_state_over_2_kib_is_ignored() {
     mallory.send_raw(awareness_message(&[(mallory_id, 1, &padded(2048))]));
     assert!(sees(&carol, mallory_id, Some(&named("Mallory"))).await);
 }
+
+/// Un état qui n'est pas du JSON est une forme inconnue comme une autre : ignoré, sans fermer
+/// la connexion. (Le décodeur ne relit plus les états : ce qui n'est pas du JSON n'y est plus
+/// un message illisible.)
+#[tokio::test]
+async fn presence_state_that_is_not_json_is_ignored() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+    let mallory_id = mallory.client_id();
+    let fine = named("Fantôme");
+    mallory.send_raw(awareness_message(&[
+        (mallory_id, 1, "{pas du json"),
+        (SPARE_CLIENT, 1, &fine),
+    ]));
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(state_of(&carol, mallory_id), None);
+    assert_eq!(state_of(&carol, SPARE_CLIENT), Some(fine));
+    // Son état suivant, en règle, passe : l'entrée ignorée n'a rien laissé.
+    mallory.send_raw(awareness_message(&[(mallory_id, 1, &named("Mallory"))]));
+    assert!(sees(&carol, mallory_id, Some(&named("Mallory"))).await);
+}

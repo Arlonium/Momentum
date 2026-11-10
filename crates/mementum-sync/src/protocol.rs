@@ -13,10 +13,20 @@
 //! Ce qui sera confié à yrs est vérifié avant : un vecteur d'état ou une
 //! awareness qui annonce plus d'entrées que ses octets n'en contiennent, un
 //! identifiant de client hors de 53 bits (yrs ne le refuse que par un
-//! `debug_assert!`) ou un état d'awareness qui n'est pas du JSON (les
-//! navigateurs le relisent par `JSON.parse`) rendent le message illisible.
+//! `debug_assert!`) ou un état d'awareness gardé qui n'est pas de l'UTF-8
+//! rendent le message illisible.
 //! Les mises à jour Yjs, elles, sont lues par `PageDoc::apply_client_update`,
 //! qui refuse aussi celles qui touchent aux métadonnées de la page.
+//!
+//! Un état d'awareness n'est pas lu ici : c'est une tranche d'octets, de la
+//! longueur annoncée. Qu'il soit du JSON, et de la forme connue, se juge
+//! après, sur un état de 2 Kio au plus (`presence::known_shape`, Ruling
+//! R119). Le relire ici, quelle que soit sa taille, coûtait une cinquantaine
+//! de fois la taille du message : un état `[0,0,…]` d'un mégaoctet faisait
+//! allouer 54 Mio, à une connexion en lecture seule comme à une autre. Un
+//! état de plus de 2 Kio est donc sauté sans être lu, et son entrée ignorée ;
+//! et d'une connexion en lecture seule, dont rien n'est gardé (Ruling R118),
+//! seules les longueurs sont lues.
 //!
 //! Un message WebSocket qui porte plus de [`MAX_PRESENCE_ENTRIES`] entrées
 //! d'awareness n'est pas illisible : ses messages d'awareness sont ignorés,
@@ -45,6 +55,8 @@ use yrs::encoding::read::{Cursor, Read};
 use yrs::encoding::write::Write;
 use yrs::sync::AwarenessUpdate;
 use yrs::sync::awareness::AwarenessUpdateEntry;
+
+use crate::presence::MAX_PRESENCE_STATE;
 
 const MSG_SYNC: u8 = 0;
 const MSG_AWARENESS: u8 = 1;
@@ -149,7 +161,12 @@ impl From<yrs::encoding::read::Error> for ProtocolError {
 }
 
 /// Découpe un message WebSocket en messages y-websocket.
-pub(crate) fn decode(data: &[u8]) -> Result<Decoded, ProtocolError> {
+///
+/// `keep_presence` : faux pour une connexion en lecture seule, dont la
+/// présence n'est pas gardée (Ruling R118). Ses messages d'awareness sont lus
+/// comme les autres (un tampon mal formé reste illisible), mais aucun n'est
+/// rendu, et aucun état n'est copié.
+pub(crate) fn decode(data: &[u8], keep_presence: bool) -> Result<Decoded, ProtocolError> {
     let mut cursor = Cursor::new(data);
     let mut messages = Vec::new();
     // Entrées d'awareness que le message annonce, tous ses messages
@@ -183,7 +200,10 @@ pub(crate) fn decode(data: &[u8]) -> Result<Decoded, ProtocolError> {
                 presence_entries += entries;
                 // Au-delà de la limite, les entrées ne sont pas même lues.
                 if presence_entries <= MAX_PRESENCE_ENTRIES {
-                    messages.push(ClientMessage::Awareness(awareness_entries(first, entries)?));
+                    let update = awareness_entries(first, entries, keep_presence)?;
+                    if keep_presence {
+                        messages.push(ClientMessage::Awareness(update));
+                    }
                 }
             }
             MSG_AUTH => {
@@ -258,10 +278,16 @@ fn read_exact_var(cursor: &mut Cursor<'_>) -> Result<u64, ProtocolError> {
 }
 
 /// Les `entries` entrées d'une mise à jour d'awareness, que `cursor` va lire
-/// ([`awareness_header`]).
+/// ([`awareness_header`]). `keep` : faux, les entrées sont parcourues, et
+/// aucune n'est gardée.
+///
+/// Un état n'est pas lu : c'est une tranche d'octets, de la longueur
+/// annoncée. Au-delà de [`MAX_PRESENCE_STATE`], elle est sautée, et l'entrée
+/// ignorée ; sinon elle est copiée, et doit être de l'UTF-8.
 fn awareness_entries(
     mut cursor: Cursor<'_>,
     entries: usize,
+    keep: bool,
 ) -> Result<AwarenessUpdate, ProtocolError> {
     let mut clients = HashMap::new();
     for _ in 0..entries {
@@ -271,12 +297,19 @@ fn awareness_entries(
         }
         let clock = u32::try_from(read_exact_var(&mut cursor)?).map_err(|_| ProtocolError)?;
         let length = usize::try_from(read_exact_var(&mut cursor)?).map_err(|_| ProtocolError)?;
-        let json = std::str::from_utf8(cursor.read_exact(length)?).map_err(|_| ProtocolError)?;
-        serde_json::from_str::<serde_json::Value>(json).map_err(|_| ProtocolError)?;
+        let state = cursor.read_exact(length)?;
+        let client = ClientID::new(client);
         // Un client répété : la dernière entrée fait foi. C'est elle seule qui sera
         // regardée, gardée et relayée ; les clients ne voient jamais l'autre.
+        if !keep || length > MAX_PRESENCE_STATE {
+            // Sautée sans être lue. Ignorée, elle fait foi quand même : ce que le
+            // message disait de ce client avant elle ne vaut plus.
+            clients.remove(&client);
+            continue;
+        }
+        let json = std::str::from_utf8(state).map_err(|_| ProtocolError)?;
         clients.insert(
-            ClientID::new(client),
+            client,
             AwarenessUpdateEntry {
                 clock,
                 json: json.into(),
@@ -347,6 +380,11 @@ mod tests {
     use yrs::{Doc, GetString, ReadTxn, StateVector, Text, Transact};
 
     use super::*;
+
+    /// La découpe d'un message d'une connexion qui écrit : sa présence est gardée.
+    fn decode(data: &[u8]) -> Result<Decoded, ProtocolError> {
+        super::decode(data, true)
+    }
 
     fn sample() -> (Doc, Vec<u8>, StateVector) {
         let doc = Doc::with_client_id(7);
@@ -444,11 +482,7 @@ mod tests {
         let mut aw_huge_client = vec![1, 14, 1];
         aw_huge_client.extend(huge_client);
         aw_huge_client.extend([1, 2, b'{', b'}']);
-        let not_json = awareness(&{
-            let mut p = vec![1, 42, 1];
-            p.write_string("{pas du json");
-            p
-        });
+        let not_utf8 = awareness(&[1, 42, 1, 2, 0xC3, 0x28]);
         for (what, data) in [
             (
                 "vecteur d'état géant",
@@ -459,7 +493,7 @@ mod tests {
             ("longueur au-delà du message", vec![0, 2, 50, 1, 2]),
             ("awareness : client hors de 53 bits", aw_huge_client),
             ("awareness géante", vec![1, 3, 0xFF, 0xFF, 0x0F]),
-            ("awareness hors JSON", not_json),
+            ("awareness hors UTF-8", not_utf8),
             ("type tronqué", vec![0x80]),
         ] {
             assert_eq!(decode(&data), Err(ProtocolError), "{what}");
@@ -682,6 +716,82 @@ mod tests {
         assert_eq!(
             entries_of(&framed(&[1], &[entry(7, u32::MAX, "{}")])),
             [(7, u32::MAX, "{}".to_string())]
+        );
+    }
+
+    /// Un état n'est pas lu au décodage : ce qui n'est pas du JSON en sort tel quel, et sera
+    /// jugé après, à 2 Kio au plus. Au-delà, l'état est sauté sans être lu, pas même pour
+    /// savoir s'il est de l'UTF-8, et son entrée ignorée ; les autres entrées du message
+    /// restent.
+    #[test]
+    fn presence_states_are_not_read_at_decoding() {
+        assert_eq!(MAX_PRESENCE_STATE, 2048);
+        assert_eq!(
+            entries_of(&framed(&[1], &[entry(42, 1, "{pas du json")])),
+            [(42, 1, "{pas du json".to_string())]
+        );
+        let at_limit = "[".repeat(2048);
+        assert_eq!(
+            entries_of(&framed(&[1], &[entry(42, 1, &at_limit)])),
+            [(42, 1, at_limit.clone())]
+        );
+        let beyond = "[".repeat(2049);
+        assert_eq!(
+            entries_of(&framed(&[2], &[entry(42, 1, &beyond), entry(7, 1, "{}")])),
+            [(7, 1, "{}".to_string())]
+        );
+        // Sauté sans être lu : des octets qui ne sont pas de l'UTF-8 n'y changent rien.
+        let mut raw = vec![42, 1];
+        raw.write_var(2049u32);
+        raw.extend([0xFF; 2049]);
+        assert!(entries_of(&framed(&[1], &[raw])).is_empty());
+        // Mais sa longueur est lue : un état qui déborde du tampon reste illisible.
+        let mut truncated = vec![42, 1];
+        truncated.write_var(4096u32);
+        truncated.extend([b'0'; 100]);
+        assert_eq!(decode(&framed(&[1], &[truncated])), Err(ProtocolError));
+        // Ignorée, la dernière entrée d'un client fait foi quand même.
+        assert!(entries_of(&framed(&[2], &[entry(42, 1, "{}"), entry(42, 2, &beyond)])).is_empty());
+    }
+
+    /// Ruling R118, au décodage : d'une connexion en lecture seule, aucun message
+    /// d'awareness n'est rendu, et aucun état n'est copié. Le reste du message l'est, et un
+    /// tampon mal formé reste illisible.
+    #[test]
+    fn presence_of_a_read_only_connection_is_not_decoded() {
+        let reader = |data: &[u8]| super::decode(data, false);
+        let (_, update, _) = sample();
+        let mut data = framed(&[2], &[entry(42, 1, "{}"), entry(7, 1, "{}")]);
+        data.extend(Message::Sync(SyncMessage::Update(update.clone())).encode_v1());
+        data.extend(keepalive());
+        assert_eq!(
+            reader(&data),
+            Ok(Decoded {
+                messages: vec![ClientMessage::Update(update)],
+                presence_dropped: None,
+            })
+        );
+        // Ni un nombre d'entrées que les octets ne contiennent pas, ni des octets après
+        // elles, ni un client hors de 53 bits ne passent pour autant.
+        assert_eq!(reader(&[1, 3, 0xFF, 0xFF, 0x0F]), Err(ProtocolError));
+        assert_eq!(
+            reader(&framed(&[1], &[entry(42, 1, "{}"), vec![0]])),
+            Err(ProtocolError)
+        );
+        assert_eq!(
+            reader(&framed(&[1], &[entry(MAX_CLIENT + 1, 1, "{}")])),
+            Err(ProtocolError)
+        );
+        // Plus de 512 entrées : comptées de même.
+        let many: Vec<Vec<u8>> = (0..513).map(|client| entry(client, 1, "{}")).collect();
+        let mut count = Vec::new();
+        count.write_var(513u32);
+        assert_eq!(
+            reader(&framed(&count, &many)),
+            Ok(Decoded {
+                messages: vec![],
+                presence_dropped: Some(513),
+            })
         );
     }
 

@@ -301,7 +301,7 @@ impl Hub {
             let _ = tokio::time::timeout(CLOSE_GRACE, socket.close()).await;
             return Ok(());
         }
-        match pump(socket, joined, node_id, &self.cfg).await {
+        match pump(socket, joined, node_id, writable, &self.cfg).await {
             // Fin normale, à la demande, ou fermeture dont l'acteur a
             // journalisé la raison.
             end @ (End::Left | End::Refused | End::Kicked) => {
@@ -620,6 +620,8 @@ impl Outbox {
 
 /// Fait passer les messages entre la socket et l'acteur jusqu'à la fin de la
 /// connexion, et en rend la raison. `node_id`, la page, ne sert qu'au journal.
+/// `writable` : la connexion écrit ; sinon, sa présence n'est pas même décodée
+/// (Ruling R118).
 ///
 /// Un écrivain vide une file bornée vers la socket ; le lecteur traite les
 /// messages du client (par l'acteur, un lot à la fois, dans l'ordre) et
@@ -645,7 +647,7 @@ impl Outbox {
 /// l'acteur : il n'est ni appliqué, ni écrit, ni relayé à personne. Il passe
 /// par la file, comme les autres ; l'écrivain ne l'y met que quand il attend,
 /// la file vide : une connexion qui ne lit plus n'en accumule pas.
-async fn pump<S>(socket: S, joined: Joined, node_id: Uuid, cfg: &SyncConfig) -> End
+async fn pump<S>(socket: S, joined: Joined, node_id: Uuid, writable: bool, cfg: &SyncConfig) -> End
 where
     S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
 {
@@ -725,7 +727,9 @@ where
                     if data.len() > cfg.max_message_bytes {
                         return End::TooBig;
                     }
-                    let Ok(decoded) = protocol::decode(&data) else {
+                    // D'une connexion en lecture seule, la présence n'est pas même
+                    // copiée (Ruling R118).
+                    let Ok(decoded) = protocol::decode(&data, writable) else {
                         return End::Illegible;
                     };
                     if let Some(entries) = decoded.presence_dropped {
