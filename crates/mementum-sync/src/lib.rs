@@ -7,22 +7,31 @@
 //!
 //! Règles tenues par l'acteur :
 //! - **persister puis diffuser** : une mise à jour n'est diffusée qu'une fois
-//!   écrite dans SQLite (`append_update` attendu), et ce qui a été diffusé
-//!   n'est donc jamais perdu ;
+//!   écrite dans SQLite (`append_updates` attendu), et ce qui a été diffusé
+//!   n'est donc jamais perdu ; chaque mise à jour écrite porte le compte qui
+//!   l'a faite, quand on le connaît ;
 //! - **compaction sûre** : l'instantané est pris dans l'acteur, entre deux
 //!   commandes, si bien qu'il couvre exactement les mises à jour écrites
 //!   jusqu'à son `seq` ; elle a lieu toutes les `snapshot_every` mises à jour,
 //!   et dès qu'une grosse suppression est écrite (Ruling R40), pour que le
 //!   ramasse-miettes de yrs ne soit pas rejoué à chaque chargement ;
 //! - **dédoublonnage** après chaque mise à jour d'un client (déplacements
-//!   concurrents), écrit puis diffusé à toutes les connexions ;
+//!   concurrents) : le correctif est écrit avec la mise à jour, tous deux ou
+//!   aucun, puis diffusé à toutes les connexions ;
 //! - **lecture seule** d'un client dont le schéma diffère de
-//!   [`SCHEMA_VERSION`](mementum_schema::SCHEMA_VERSION) : il reçoit tout,
-//!   ses mises à jour sont ignorées ;
+//!   [`SCHEMA_VERSION`](mementum_schema::SCHEMA_VERSION), ou qui n'a pas le
+//!   droit d'écrire la page ([`ConnInfo`]) : il reçoit tout, ses mises à jour
+//!   sont ignorées ;
+//! - **droits** : le hub ne les lit pas. La route qui accepte une connexion
+//!   les lui résume ([`ConnInfo`]) ; quand ils changent, [`Hub::kick`] ferme
+//!   les connexions de la page, qui reviennent et les font relire ; quand la
+//!   page est supprimée, [`Hub::forget`] arrête son acteur sans rien écrire ;
 //! - une mise à jour refusée par le document n'est ni gardée ni diffusée :
 //!   l'acteur recharge son document depuis le store et ferme la connexion
-//!   fautive (Rulings R17, R22) ; si c'est le store qui n'a pas pu l'écrire, il
-//!   recharge de même et ferme toutes les connexions (Ruling R21) ;
+//!   fautive (Rulings R17, R22). C'est aussi le sort de la mise à jour d'un
+//!   client qui touche aux métadonnées de la page (`schemaVersion`). Si
+//!   c'est le store qui n'a pas pu l'écrire, il recharge de même et ferme
+//!   toutes les connexions (Ruling R21) ;
 //! - **bornes mémoire** (Ruling R27) : un message reçu ne dépasse pas
 //!   `max_message_bytes`, la file d'une connexion ni `max_queue_bytes` ni
 //!   `broadcast_capacity` messages, les diffusions sont partagées entre les
@@ -48,7 +57,7 @@ use mementum_crdt::CrdtError;
 use mementum_store::StoreError;
 use yrs::{Doc, OffsetKind, Options};
 
-pub use hub::Hub;
+pub use hub::{ConnInfo, Hub};
 
 /// Réglages de la synchronisation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

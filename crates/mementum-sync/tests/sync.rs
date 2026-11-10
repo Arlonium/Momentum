@@ -1,6 +1,8 @@
 //! Synchronisation entre clients : convergence, page inconnue, déplacements
 //! concurrents, client en retard, mises à jour refusées, bornes mémoire,
-//! awareness, acteurs qui s'arrêtent et repartent.
+//! awareness, acteurs qui s'arrêtent et repartent ; et les droits : connexion
+//! sans le droit d'écrire, connexions fermées à la demande (`kick`), pages
+//! oubliées (`forget`), écritures attribuées et atomiques.
 
 mod common;
 
@@ -8,15 +10,15 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use futures::StreamExt;
-use mementum_crdt::FRAGMENT;
+use mementum_crdt::{FRAGMENT, META};
 use mementum_md::parse;
 use mementum_schema::SCHEMA_VERSION;
-use mementum_sync::{SyncConfig, SyncError};
+use mementum_sync::{ConnInfo, Hub, SyncConfig, SyncError};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 use yrs::sync::{Message, SyncMessage};
 use yrs::updates::encoder::Encode;
-use yrs::{Text, Transact, Xml, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+use yrs::{Map, Text, Transact, Xml, XmlElementPrelim, XmlFragment, XmlTextPrelim};
 
 #[tokio::test]
 async fn two_clients_converge() {
@@ -50,7 +52,7 @@ async fn unknown_page_is_rejected() {
     let served = f
         .hub
         .clone()
-        .serve_connection(unknown, SCHEMA_VERSION, server_end)
+        .serve_connection(unknown, writing_conn(), server_end)
         .await;
     assert!(matches!(served, Err(SyncError::NotFound)), "{served:?}");
 
@@ -67,7 +69,9 @@ async fn unknown_page_is_rejected() {
         Err(SyncError::NotFound)
     ));
     assert!(matches!(
-        f.hub.write_blocks(unknown, parse("x\n").unwrap()).await,
+        f.hub
+            .write_blocks(unknown, parse("x\n").unwrap(), None)
+            .await,
         Err(SyncError::NotFound)
     ));
     assert!(matches!(
@@ -144,7 +148,7 @@ async fn lagged_client_is_disconnected() {
     let serving = tokio::spawn(
         f.hub
             .clone()
-            .serve_connection(f.page, SCHEMA_VERSION, server_end),
+            .serve_connection(f.page, writing_conn(), server_end),
     );
     let hello = tokio::time::timeout(WAIT, stalled.next()).await.unwrap();
     assert!(hello.is_some(), "le serveur envoie son étape 1");
@@ -344,7 +348,7 @@ async fn churning_actors_never_diverge() {
         tasks.spawn(async move {
             for i in 0..15 {
                 let blocks = parse(&format!("t{t} {i}\n")).unwrap();
-                hub.write_blocks(page, blocks).await.unwrap();
+                hub.write_blocks(page, blocks, None).await.unwrap();
             }
         });
     }
@@ -482,7 +486,7 @@ async fn oversized_message_closes_its_author() {
     let serving = tokio::spawn(
         f.hub
             .clone()
-            .serve_connection(f.page, SCHEMA_VERSION, server_end),
+            .serve_connection(f.page, writing_conn(), server_end),
     );
     assert!(
         tokio::time::timeout(WAIT, author.next())
@@ -525,7 +529,7 @@ async fn queue_over_max_bytes_closes_the_connection() {
     let serving = tokio::spawn(
         f.hub
             .clone()
-            .serve_connection(f.page, SCHEMA_VERSION, server_end),
+            .serve_connection(f.page, writing_conn(), server_end),
     );
     assert!(
         tokio::time::timeout(WAIT, stalled.next())
@@ -629,7 +633,7 @@ async fn quiet_connection(
     let serving = tokio::spawn(
         f.hub
             .clone()
-            .serve_connection(f.page, SCHEMA_VERSION, server_end),
+            .serve_connection(f.page, writing_conn(), server_end),
     );
     for expected in ["étape 1", "awareness"] {
         let hello = tokio::time::timeout(WAIT, client_end.next())
@@ -704,4 +708,459 @@ async fn replies_beyond_max_queue_bytes_close_the_connection() {
         .expect("la connexion est fermée")
         .unwrap();
     assert!(served.is_ok(), "{served:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Droits : lecture seule, fermeture à la demande, écritures attribuées
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cannot_write_connection_is_ignored() {
+    // Le schéma courant, mais sans le droit d'écrire.
+    assert_read_only(ConnInfo {
+        can_write: false,
+        ..writing_conn()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn kick_closes_every_connection_of_the_page() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let elsewhere = new_page(&f.store).await;
+    let id = f.ids().await[0].clone();
+    let a = f.client().await;
+    let b = f.client().await;
+    let c = Client::connect_synced(&f.server.url(elsewhere, SCHEMA_VERSION)).await;
+    a.type_text(&id, "avant");
+    assert!(b.wait_until(WAIT, |c| text(&c.blocks()) == "avant").await);
+    let rows = row_counts(&f.db).await;
+    let mut pages = vec![f.page, elsewhere];
+    pages.sort();
+    assert_eq!(live(&f.hub).await, pages);
+
+    f.hub.kick(&[f.page]).await;
+    // Au retour, l'acteur ne traite plus rien de ces connexions : ce que A
+    // tape avant d'avoir vu la fermeture n'arrive pas au serveur.
+    a.type_text(&id, " après");
+    assert!(a.wait_until(WAIT, |c| c.is_closed()).await, "A est fermé");
+    assert!(b.wait_until(WAIT, |c| c.is_closed()).await, "B aussi");
+    assert_eq!(text(&b.blocks()), "avant");
+    assert_eq!(row_counts(&f.db).await, rows, "rien d'écrit");
+
+    // La connexion d'une autre page n'est pas touchée.
+    let there = c.blocks()[0].id.clone();
+    c.type_text(&there, "ailleurs");
+    processed(&c).await;
+    assert!(!c.is_closed());
+    assert_eq!(
+        text(&f.hub.read_blocks(elsewhere).await.unwrap()),
+        "ailleurs"
+    );
+
+    // L'acteur est resté, avec son document : une reconnexion retrouve tout
+    // le contenu.
+    assert_eq!(live(&f.hub).await, pages);
+    let again = f.client().await;
+    assert_eq!(text(&again.blocks()), "avant");
+    // Et A, revenu avec son document comme le fait y-websocket, apporte ce
+    // qu'il avait tapé pendant la fermeture.
+    again.apply_local(&a.page().unwrap().encode_state());
+    processed(&again).await;
+    assert_eq!(
+        text(&f.hub.read_blocks(f.page).await.unwrap()),
+        "avant après"
+    );
+    assert_eq!(
+        text(&stored_page(&f.store, f.page).await.read_blocks()),
+        "avant après"
+    );
+}
+
+#[tokio::test]
+async fn kick_on_a_page_without_actor_is_a_no_op() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let never_opened = new_page(&f.store).await;
+    let rows = row_counts(&f.db).await;
+
+    // Une page que personne n'a ouverte, une page inconnue, aucune page :
+    // ni erreur, ni attente, ni acteur lancé (il écrirait le document de la
+    // page, Ruling R28).
+    let kicked = tokio::time::timeout(WAIT, async {
+        f.hub.kick(&[never_opened, Uuid::now_v7()]).await;
+        f.hub.kick(&[]).await;
+    })
+    .await;
+    assert!(kicked.is_ok(), "kick rend la main");
+    assert_eq!(live(&f.hub).await, [f.page], "aucun acteur lancé");
+    assert_eq!(row_counts(&f.db).await, rows, "rien d'écrit");
+
+    // Un acteur sans connexion : rien à fermer, il reste là avec son document.
+    f.write_mmd("Bonjour\n").await;
+    f.hub.kick(&[f.page]).await;
+    assert_eq!(live(&f.hub).await, [f.page]);
+    assert_eq!(text(&f.client().await.blocks()), "Bonjour");
+}
+
+#[tokio::test]
+async fn kick_does_not_wait_for_a_busy_actor() {
+    use sqlx::Connection;
+    let f = Fixture::new(SyncConfig::default()).await;
+    let a = f.client().await;
+
+    // L'acteur est pris : une connexion annexe tient le verrou d'écriture de
+    // SQLite, et l'écriture qu'on lui demande attend ce verrou (5 s au plus).
+    let mut lock = sqlx::SqliteConnection::connect(&format!("sqlite:{}", f.db.display()))
+        .await
+        .unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut lock)
+        .await
+        .unwrap();
+    let mut writing = Box::pin(f.hub.write_blocks(f.page, parse("Écrit\n").unwrap(), None));
+    // Une fois tentée, la demande d'écriture est dans la boîte de l'acteur,
+    // devant celle de `kick`.
+    assert!(futures::poll!(&mut writing).is_pending());
+
+    f.hub.kick(&[f.page]).await;
+    assert!(
+        futures::poll!(&mut writing).is_pending(),
+        "kick a rendu la main sans attendre l'acteur"
+    );
+    assert!(!a.is_closed());
+
+    // Le verrou rendu, l'acteur finit son écriture, puis ferme les
+    // connexions : la demande était restée dans sa boîte.
+    sqlx::query("ROLLBACK").execute(&mut lock).await.unwrap();
+    writing.await.unwrap();
+    assert!(a.wait_until(WAIT, |c| c.is_closed()).await, "A est fermé");
+    assert_eq!(
+        text(&stored_page(&f.store, f.page).await.read_blocks()),
+        "Écrit"
+    );
+}
+
+#[tokio::test]
+async fn forget_stops_the_actor_without_writing() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Avant\n").await;
+    let id = f.ids().await[0].clone();
+    let a = f.client().await;
+    let b = f.client().await;
+    a.type_text(&id, " suite");
+    assert!(
+        b.wait_until(WAIT, |c| text(&c.blocks()) == "Avant suite")
+            .await
+    );
+    // Un journal de deux mises à jour, que rien n'a compacté : un instantané
+    // pris à l'arrêt se verrait.
+    let before = f.store.load_doc(f.page).await.unwrap();
+    assert_eq!(before.updates.len(), 2);
+    let rows = row_counts(&f.db).await;
+
+    // Avec une page inconnue, ignorée.
+    f.hub.forget(&[f.page, Uuid::now_v7()]).await;
+    assert!(live(&f.hub).await.is_empty(), "au retour, plus d'acteur");
+    a.type_text(&id, " perdu");
+    assert!(a.wait_until(WAIT, |c| c.is_closed()).await, "A est fermé");
+    assert!(b.wait_until(WAIT, |c| c.is_closed()).await, "B aussi");
+    assert_eq!(
+        f.store.load_doc(f.page).await.unwrap(),
+        before,
+        "ni instantané ni mise à jour"
+    );
+    assert_eq!(row_counts(&f.db).await, rows);
+    assert!(live(&f.hub).await.is_empty(), "personne ne l'a relancé");
+
+    // Rien n'était perdu : la page, toujours en base, se rouvre entière.
+    let c = f.client().await;
+    assert_eq!(text(&c.blocks()), "Avant suite");
+
+    // Comme la suppression définitive : la page quitte la base, puis le hub
+    // l'oublie. Rien n'est écrit pour elle, et qui revient ne la trouve plus.
+    let user = new_user(&f.db).await;
+    f.store.trash_node(f.page, user).await.unwrap();
+    f.store.delete_node(f.page).await.unwrap();
+    let rows = row_counts(&f.db).await;
+    f.hub.forget(&[f.page]).await;
+    assert!(c.wait_until(WAIT, |c| c.is_closed()).await);
+    assert!(live(&f.hub).await.is_empty());
+    assert!(matches!(
+        f.hub.read_blocks(f.page).await,
+        Err(SyncError::NotFound)
+    ));
+    let back = Client::connect(&f.url()).await.unwrap();
+    assert!(back.wait_until(WAIT, |c| c.is_closed()).await);
+    assert!(!back.is_synced());
+    assert_eq!(row_counts(&f.db).await, rows, "rien d'écrit");
+}
+
+#[tokio::test]
+async fn live_pages_lists_pages_with_an_actor() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let second = new_page(&f.store).await;
+    let third = new_page(&f.store).await;
+    // L'acteur de la page de la fixture vit depuis `create_page_doc`.
+    assert_eq!(live(&f.hub).await, [f.page]);
+
+    // Une connexion sur une autre page : un acteur de plus.
+    let _client = Client::connect_synced(&f.server.url(second, SCHEMA_VERSION)).await;
+    let mut both = vec![f.page, second];
+    both.sort();
+    assert_eq!(live(&f.hub).await, both);
+
+    // Une page inconnue n'y entre pas, une page oubliée en sort.
+    assert!(matches!(
+        f.hub.read_blocks(Uuid::now_v7()).await,
+        Err(SyncError::NotFound)
+    ));
+    assert_eq!(live(&f.hub).await, both);
+    f.hub.forget(&[f.page]).await;
+    assert_eq!(live(&f.hub).await, [second]);
+
+    // Un acteur qui s'arrête de lui-même (ni connexion ni demande pendant
+    // `idle_close`) en sort aussi.
+    let idle = Hub::new(
+        f.store.clone(),
+        SyncConfig {
+            idle_close: Duration::ZERO,
+            ..SyncConfig::default()
+        },
+    );
+    idle.read_blocks(third).await.unwrap();
+    assert!(live_becomes(&idle, &[]).await, "l'acteur s'est arrêté");
+}
+
+#[tokio::test]
+async fn client_update_and_dedupe_fix_are_one_write() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("A\n\nB\n\nC\n\nD\n").await;
+    let ids = f.ids().await;
+    let a = f.client().await;
+    let b = f.client().await;
+    let observer = f.client().await;
+
+    // Le même bloc A, déplacé chez deux clients depuis le même état : après
+    // C chez A, après D chez B.
+    let from_a = a
+        .page()
+        .unwrap()
+        .move_block(&ids[0], Some(&ids[2]))
+        .unwrap();
+    let from_b = b
+        .page()
+        .unwrap()
+        .move_block(&ids[0], Some(&ids[3]))
+        .unwrap();
+    // Celui de A d'abord : seul, il ne duplique rien, et fait une ligne.
+    let moved = |c: &Client| text(&c.blocks()) == "B\nC\nA\nD";
+    a.apply_local(&from_a);
+    processed(&a).await;
+    assert!(b.wait_until(WAIT, moved).await);
+    assert!(observer.wait_until(WAIT, moved).await);
+    let before = f.store.load_doc(f.page).await.unwrap();
+    let last = before.updates.last().unwrap().0;
+    let seen = observer.state_vector();
+
+    // Celui de B duplique le bloc : sa mise à jour et le correctif de
+    // dédoublonnage du serveur font deux lignes. La panne tombe sur la seconde.
+    exec_sql(
+        &f.db,
+        &format!(
+            "CREATE TRIGGER panne BEFORE INSERT ON doc_updates WHEN NEW.seq = {} \
+             BEGIN SELECT RAISE(ABORT, 'panne simulée'); END",
+            last + 2
+        ),
+    )
+    .await;
+    b.apply_local(&from_b);
+    for client in [&a, &b, &observer] {
+        assert!(
+            client.wait_until(WAIT, |c| c.is_closed()).await,
+            "panne du store : tout le monde est fermé (Ruling R21)"
+        );
+    }
+
+    // Aucune des deux lignes n'est en base, et rien n'a été diffusé (les
+    // diffusions précèdent la fermeture, dans l'ordre).
+    assert_eq!(
+        f.store.load_doc(f.page).await.unwrap(),
+        before,
+        "ni la mise à jour ni son correctif"
+    );
+    assert_eq!(observer.state_vector(), seen, "rien de diffusé");
+    let live = f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(
+        text(&live),
+        "B\nC\nA\nD",
+        "document rechargé depuis le store"
+    );
+    assert_eq!(live.iter().filter(|x| x.id == ids[0]).count(), 1);
+
+    // La panne passée, B revient avec son déplacement : les deux lignes
+    // s'écrivent, et le doublon ne reste pas.
+    exec_sql(&f.db, "DROP TRIGGER panne").await;
+    let back = f.client().await;
+    back.apply_local(&from_b);
+    processed(&back).await;
+    let after = f.store.load_doc(f.page).await.unwrap();
+    assert_eq!(after.updates.len(), before.updates.len() + 2);
+    let live = f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(text(&live), "B\nC\nA\nD");
+    assert_eq!(live.iter().filter(|x| x.id == ids[0]).count(), 1);
+    assert_eq!(stored_page(&f.store, f.page).await.read_blocks(), live);
+}
+
+#[tokio::test]
+async fn updates_carry_the_actor() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let alice = new_user(&f.db).await;
+    let bob = new_user(&f.db).await;
+    // Une écriture du serveur sans compte (1).
+    f.write_mmd("A\n\nB\n\nC\n\nD\n").await;
+    let ids = f.ids().await;
+    let with_account = Client::connect_synced(&f.url_for(ConnInfo {
+        actor: Some(bob),
+        ..writing_conn()
+    }))
+    .await;
+    let without = f.client().await;
+
+    // Une frappe de chaque connexion : la mise à jour porte son compte (2),
+    // ou aucun (3).
+    with_account.type_text(&ids[1], "!");
+    processed(&with_account).await;
+    without.type_text(&ids[2], "?");
+    processed(&without).await;
+
+    // Deux déplacements concurrents du même bloc : le premier, sans compte
+    // (4) ; le second (5) et le correctif de dédoublonnage qui le suit (6)
+    // portent le compte de la connexion dont la mise à jour l'a provoqué.
+    let first = without
+        .page()
+        .unwrap()
+        .move_block(&ids[0], Some(&ids[2]))
+        .unwrap();
+    let second = with_account
+        .page()
+        .unwrap()
+        .move_block(&ids[0], Some(&ids[3]))
+        .unwrap();
+    without.apply_local(&first);
+    processed(&without).await;
+    with_account.apply_local(&second);
+    processed(&with_account).await;
+
+    // Une écriture du serveur au nom d'un compte (7).
+    f.hub
+        .write_blocks(f.page, parse("Fin\n").unwrap(), Some(alice))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        actors(&f.db, f.page).await,
+        [
+            None,
+            Some(bob),
+            None,
+            None,
+            Some(bob),
+            Some(bob),
+            Some(alice)
+        ]
+    );
+}
+
+/// Report M7 du lot 1, vu de la synchro : l'acteur applique ce qui vient
+/// d'un client par `apply_client_update`, et recharge le reste comme avant.
+#[tokio::test]
+async fn client_cannot_write_page_metadata() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let id = f.ids().await[0].clone();
+    let a = f.client().await;
+    let b = f.client().await;
+    let hostile = f.client().await;
+    let before = f.store.load_doc(f.page).await.unwrap();
+
+    // `schemaVersion` écrasée, chez un client qui a reçu la page.
+    let doc = detached(&hostile);
+    let meta = doc.get_or_insert_map(META);
+    let update = {
+        let mut txn = doc.transact_mut();
+        meta.insert(&mut txn, "schemaVersion", 999);
+        txn.encode_update_v1()
+    };
+    hostile.send_update(&update);
+    assert!(
+        hostile.wait_until(WAIT, |c| c.is_closed()).await,
+        "le client fautif est fermé"
+    );
+    assert_eq!(
+        f.store.load_doc(f.page).await.unwrap(),
+        before,
+        "sa mise à jour n'est pas écrite"
+    );
+
+    // Ni diffusée ni gardée : les autres continuent, et tous lisent la
+    // version posée par le serveur. La page, elle, se recharge du store
+    // (c'est ce que l'acteur vient de faire).
+    a.type_text(&id, "ok");
+    assert!(b.wait_until(WAIT, |c| text(&c.blocks()) == "ok").await);
+    assert!(!a.is_closed() && !b.is_closed());
+    let newcomer = f.client().await;
+    assert_eq!(text(&newcomer.blocks()), "ok");
+    for page in [
+        a.page().unwrap(),
+        b.page().unwrap(),
+        newcomer.page().unwrap(),
+        stored_page(&f.store, f.page).await,
+    ] {
+        assert_eq!(page.schema_version(), Some(SCHEMA_VERSION));
+    }
+}
+
+#[tokio::test]
+async fn connect_with_headers_sends_them() {
+    use std::io::{Read, Write};
+    // Un serveur qui lit la demande de poignée de main, puis la refuse.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("ws://{}/sync/page?schema=1", listener.local_addr().unwrap());
+    let handshake = tokio::task::spawn_blocking(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = socket.read(&mut chunk).unwrap();
+            assert!(n > 0, "demande coupée");
+            request.extend_from_slice(&chunk[..n]);
+        }
+        socket
+            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+            .unwrap();
+        String::from_utf8(request).unwrap().to_ascii_lowercase()
+    });
+
+    let refused = Client::connect_with_headers(
+        &url,
+        &[
+            ("Cookie", "mementum_session=jeton-de-test"),
+            ("X-Autre", "valeur"),
+        ],
+    )
+    .await;
+    assert!(refused.is_err(), "une réponse 404 est une erreur");
+    let request = handshake.await.unwrap();
+    for header in ["cookie: mementum_session=jeton-de-test", "x-autre: valeur"] {
+        assert!(
+            request.contains(&format!("\r\n{header}\r\n")),
+            "« {header} » absent de {request:?}"
+        );
+    }
+
+    // Une en-tête impossible est une erreur, sans connexion.
+    assert!(
+        Client::connect_with_headers(&url, &[("en tête", "x")])
+            .await
+            .is_err()
+    );
 }

@@ -22,6 +22,7 @@ use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Uri};
 use axum::response::Response;
+use mementum_sync::ConnInfo;
 use mementum_sync::ws::WsBytes;
 
 use crate::AppState;
@@ -72,6 +73,13 @@ pub(crate) async fn sync(
     // entier ; `serve_connection` contrôle la même borne.
     let max = state.hub.config().max_message_bytes;
     let hub = state.hub.clone();
+    // En attendant les droits (Task 10b du lot 2) : tout le monde écrit, sans
+    // compte.
+    let conn = ConnInfo {
+        client_schema: schema,
+        can_write: true,
+        actor: None,
+    };
     Ok(upgrade
         .max_message_size(max)
         .max_frame_size(max)
@@ -79,7 +87,7 @@ pub(crate) async fn sync(
             tracing::warn!(node_id = %id, %error, "poignée de main WebSocket manquée");
         })
         .on_upgrade(move |socket| async move {
-            if let Err(error) = hub.serve_connection(id, schema, WsBytes(socket)).await {
+            if let Err(error) = hub.serve_connection(id, conn, WsBytes(socket)).await {
                 tracing::warn!(node_id = %id, %error, "connexion de synchronisation refusée");
             }
         }))

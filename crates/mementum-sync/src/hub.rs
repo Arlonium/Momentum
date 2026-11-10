@@ -4,6 +4,11 @@
 //! acteur et un numéro de génération. Un acteur qui s'arrête ne se retire que
 //! si la génération inscrite est encore la sienne : jamais deux acteurs pour
 //! une page, et jamais un acteur neuf retiré par l'ancien.
+//!
+//! Le hub ne connaît ni session ni droits : la route qui accepte une
+//! connexion les vérifie et les lui résume dans [`ConnInfo`] ; quand ils
+//! changent, elle appelle [`Hub::kick`], et [`Hub::forget`] quand la page est
+//! supprimée.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -18,7 +23,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::actor::{self, Broadcast, Command, Commands, Joined, Membership, Outcome};
+use crate::actor::{self, Broadcast, Command, Commands, Event, Joined, Membership, Outcome};
 use crate::protocol;
 use crate::{SyncConfig, SyncError};
 
@@ -28,6 +33,25 @@ const ATTEMPTS: usize = 8;
 
 /// Délai laissé à une socket pour se fermer proprement (trame de fermeture).
 const CLOSE_GRACE: Duration = Duration::from_secs(1);
+
+/// Attente maximale d'un acteur par [`Hub::kick`] et [`Hub::forget`] : passé
+/// ce délai, sa demande reste dans sa boîte, et l'appelant n'attend plus.
+const ASK_WAIT: Duration = Duration::from_secs(2);
+
+/// Ce que la poignée de main sait d'une connexion. Le hub ne vérifie rien :
+/// c'est à l'appelant de lire la session et les droits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnInfo {
+    /// Version de schéma du client. Autre que [`SCHEMA_VERSION`], la
+    /// connexion est en lecture seule.
+    pub client_schema: u32,
+    /// Le compte a le droit d'écrire la page. Sinon, la connexion est en
+    /// lecture seule.
+    pub can_write: bool,
+    /// Le compte à qui sont attribuées les mises à jour de la connexion
+    /// (`None` : inconnu).
+    pub actor: Option<Uuid>,
+}
 
 /// Le registre des acteurs de page.
 pub struct Hub {
@@ -75,11 +99,18 @@ impl Hub {
         self.call(node_id, |reply| Command::Read { reply }).await?
     }
 
-    /// Remplace les blocs de la page. L'écriture est persistée, puis diffusée
-    /// à toutes les connexions.
-    pub async fn write_blocks(&self, node_id: Uuid, blocks: Vec<Block>) -> Result<(), SyncError> {
+    /// Remplace les blocs de la page, au nom de `actor` (le compte qui demande
+    /// l'écriture ; `None` : inconnu, ou le serveur). L'écriture est persistée,
+    /// puis diffusée à toutes les connexions.
+    pub async fn write_blocks(
+        &self,
+        node_id: Uuid,
+        blocks: Vec<Block>,
+        actor: Option<Uuid>,
+    ) -> Result<(), SyncError> {
         self.call(node_id, |reply| Command::Write {
             blocks: blocks.clone(),
+            actor,
             reply,
         })
         .await?
@@ -87,33 +118,44 @@ impl Hub {
 
     /// Sert une connexion au protocole de y-websocket jusqu'à sa fin.
     ///
-    /// `Err(NotFound)` avant toute écriture si la page n'existe pas. Un
-    /// `client_schema` différent de [`SCHEMA_VERSION`] donne une connexion en
-    /// lecture seule : elle reçoit tout, ses mises à jour sont ignorées.
+    /// `Err(NotFound)` avant toute écriture si la page n'existe pas. La
+    /// connexion écrit si `conn.client_schema` vaut [`SCHEMA_VERSION`] **et**
+    /// si `conn.can_write` ; sinon elle est en lecture seule : elle reçoit
+    /// tout, ses mises à jour sont ignorées. Les mises à jour qu'elle écrit
+    /// sont attribuées à `conn.actor`. `conn` vaut pour toute la connexion :
+    /// quand les droits changent, [`Hub::kick`] la ferme, et celle qui la
+    /// remplace les relit.
     ///
     /// La connexion est fermée (et la fonction rend `Ok`) quand le client
     /// part, envoie un message illisible, trop gros ou une mise à jour
-    /// refusée, ou prend trop de retard (`broadcast_capacity` messages ou
-    /// `max_queue_bytes` octets) : il se reconnecte et se resynchronise.
+    /// refusée, prend trop de retard (`broadcast_capacity` messages ou
+    /// `max_queue_bytes` octets), ou à la demande ([`Hub::kick`],
+    /// [`Hub::forget`]) : il se reconnecte et se resynchronise.
     /// Toute fin anormale est journalisée par `tracing` (`warn`), avec la page,
     /// la connexion et sa raison.
     pub async fn serve_connection<S>(
         self: Arc<Self>,
         node_id: Uuid,
-        client_schema: u32,
+        conn: ConnInfo,
         socket: S,
     ) -> Result<(), SyncError>
     where
         S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
     {
-        let writable = client_schema == SCHEMA_VERSION;
+        let writable = conn.client_schema == SCHEMA_VERSION && conn.can_write;
+        let actor = conn.actor;
         let joined = self
-            .call(node_id, |reply| Command::Join { writable, reply })
+            .call(node_id, |reply| Command::Join {
+                writable,
+                actor,
+                reply,
+            })
             .await??;
         let conn = joined.membership.conn();
         match pump(socket, joined, &self.cfg).await {
-            // Fin normale, ou fermeture dont l'acteur a journalisé la raison.
-            end @ (End::Left | End::Refused) => {
+            // Fin normale, à la demande, ou fermeture dont l'acteur a
+            // journalisé la raison.
+            end @ (End::Left | End::Refused | End::Kicked) => {
                 tracing::debug!(node_id = %node_id, conn, reason = end.describe(), "connexion fermée");
             }
             end => {
@@ -121,6 +163,70 @@ impl Hub {
             }
         }
         Ok(())
+    }
+
+    /// Ferme toutes les connexions de ces pages (celles qui ont un acteur
+    /// vivant). Les clients se reconnectent, et la poignée de main relit leurs
+    /// droits.
+    ///
+    /// Le document n'est ni rechargé ni écrit : ce que ces connexions avaient
+    /// envoyé, et que l'acteur avait traité, reste écrit. Une page sans acteur
+    /// vivant (jamais ouverte, refermée, inconnue) est ignorée, sans erreur et
+    /// sans lancer d'acteur.
+    ///
+    /// La fonction rend quand l'acteur de chaque page a fermé ses
+    /// connexions : plus aucun de leurs messages n'est traité, et rien de ce
+    /// qui est diffusé ensuite ne leur parvient ; leurs sockets se ferment
+    /// dans la foulée. Elle n'attend jamais plus de deux secondes
+    /// (`ASK_WAIT`) un acteur occupé (grosse page en cours de chargement,
+    /// store lent) : la demande reste alors dans sa boîte, et les connexions
+    /// sont fermées dès qu'il la lit.
+    pub async fn kick(&self, node_ids: &[Uuid]) {
+        self.ask_all(node_ids, |reply| Command::Kick { reply })
+            .await;
+    }
+
+    /// Arrête sans rien écrire les acteurs de pages supprimées (ni instantané
+    /// ni mise à jour : la page n'existe plus en base), et ferme leurs
+    /// connexions. À appeler après la suppression en base : qui revient ne
+    /// trouve plus la page. Une page sans acteur vivant est ignorée.
+    ///
+    /// La fonction rend quand chaque acteur s'est arrêté : il a quitté le
+    /// registre, et les demandes qu'il n'avait pas encore lues sont lâchées.
+    /// Comme [`Hub::kick`], elle n'attend jamais plus de deux secondes un
+    /// acteur occupé, qui s'arrête alors dès qu'il lit la demande.
+    pub async fn forget(&self, node_ids: &[Uuid]) {
+        self.ask_all(node_ids, |reply| Command::Forget { reply })
+            .await;
+    }
+
+    /// Les pages qui ont un acteur vivant, avec ou sans connexion.
+    pub async fn live_pages(&self) -> Vec<Uuid> {
+        self.lock()
+            .iter()
+            .filter(|(_, entry)| !entry.commands.is_closed())
+            .map(|(node_id, _)| *node_id)
+            .collect()
+    }
+
+    /// Envoie une demande à l'acteur vivant de chacune de ces pages, sans en
+    /// lancer aucun, et attend qu'ils l'aient tous traitée, [`ASK_WAIT`] au
+    /// plus.
+    async fn ask_all(&self, node_ids: &[Uuid], make: impl Fn(oneshot::Sender<()>) -> Command) {
+        let answers: Vec<oneshot::Receiver<()>> = node_ids
+            .iter()
+            .filter_map(|node_id| {
+                let commands = self.live(*node_id)?;
+                let (reply, answer) = oneshot::channel();
+                // Boîte fermée à l'instant : l'acteur s'arrête, ses connexions
+                // avec lui.
+                commands.send(make(reply)).ok()?;
+                Some(answer)
+            })
+            .collect();
+        // Une réponse lâchée vaut réponse : l'acteur s'est arrêté avant de
+        // lire la demande, et ses connexions sont fermées.
+        let _ = tokio::time::timeout(ASK_WAIT, futures::future::join_all(answers)).await;
     }
 
     /// Envoie une demande à l'acteur de la page et attend sa réponse. Un
@@ -185,7 +291,7 @@ impl Hub {
     }
 
     /// Retire l'acteur de la page du registre, s'il est de cette génération.
-    pub(crate) fn forget(&self, node_id: Uuid, generation: u64) {
+    pub(crate) fn unregister(&self, node_id: Uuid, generation: u64) {
         let mut actors = self.lock();
         if actors
             .get(&node_id)
@@ -211,6 +317,8 @@ enum End {
     Illegible,
     /// Fermée à la demande de l'acteur, qui en a journalisé la raison.
     Refused,
+    /// Fermée avec toutes celles de la page : [`Hub::kick`] ou [`Hub::forget`].
+    Kicked,
     /// File vers la socket pleine (en messages ou en octets) : le client ne
     /// lit plus assez vite.
     QueueFull,
@@ -228,6 +336,7 @@ impl End {
             End::TooBig => "message trop gros",
             End::Illegible => "message illisible",
             End::Refused => "fermée par l'acteur",
+            End::Kicked => "fermée à la demande (droits changés ou page supprimée)",
             End::QueueFull => "file vers le client pleine",
             End::Lagged => "client en retard sur la diffusion",
             End::ActorGone => "acteur arrêté ou diffusion close",
@@ -339,12 +448,13 @@ where
                 // client qui écrit vite.
                 biased;
                 event = events.recv() => match event {
-                    Ok(event) if event.from == Some(conn) => {}
-                    Ok(event) => {
-                        if !outbox.push(Outgoing::Shared(event)) {
+                    Ok(Event::Message(message)) if message.from == Some(conn) => {}
+                    Ok(Event::Message(message)) => {
+                        if !outbox.push(Outgoing::Shared(message)) {
                             return End::QueueFull;
                         }
                     }
+                    Ok(Event::Close) => return End::Kicked,
                     Err(RecvError::Lagged(_)) => return End::Lagged,
                     Err(RecvError::Closed) => return End::ActorGone,
                 },
@@ -410,6 +520,6 @@ async fn exchange(
 const _: fn() = || {
     fn sendable<T: Send>() {}
     sendable::<Command>();
-    sendable::<Arc<Broadcast>>();
+    sendable::<Event>();
     sendable::<Membership>();
 };

@@ -290,17 +290,6 @@ fn paragraphs(n: usize, word: &str) -> String {
         + "\n"
 }
 
-/// Attend que le serveur ait traité tout ce que `client` a envoyé (il traite
-/// les messages d'une connexion dans l'ordre, et répond ensuite par une étape 2).
-async fn processed(client: &Client) {
-    let before = client.step2_count();
-    client.resync();
-    assert!(
-        client.wait_until(WAIT, |c| c.step2_count() > before).await,
-        "le serveur n'a pas traité les mises à jour du client"
-    );
-}
-
 /// La page est compactée (journal vide), et relue depuis SQLite, c'est le même
 /// document que le document vivant et que celui de `client`, à la même révision.
 async fn assert_compacted_and_identical(f: &Fixture, client: &Client) {

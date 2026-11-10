@@ -1,10 +1,13 @@
 //! Outils de test partagés (feature `testkit`, Ruling R6).
 //!
 //! - [`TestServer`] : un petit serveur axum sur un port libre de `127.0.0.1`,
-//!   qui monte [`Hub::serve_connection`] sur `GET /sync/{id}?schema=N` ;
+//!   qui monte [`Hub::serve_connection`] sur `GET /sync/{id}?schema=N`. Sans
+//!   session ni droits, il lit le reste de [`ConnInfo`] dans l'URL
+//!   ([`TestServer::url_for`]) ;
 //! - [`Client`] : un client Yjs en yrs, qui parle y-websocket comme un
 //!   navigateur (étapes 1 et 2, mises à jour, awareness) et sait se connecter
-//!   à n'importe quelle URL (le serveur de la Task 6 compris) ;
+//!   à n'importe quelle URL (le serveur de `mementum-server` compris, avec
+//!   son cookie de session : [`Client::connect_with_headers`]) ;
 //! - [`memory_socket`] : une paire de sockets en mémoire, pour appeler
 //!   `serve_connection` sans réseau.
 //!
@@ -31,6 +34,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use uuid::Uuid;
 use yrs::sync::{Awareness, Message, MessageReader, SyncMessage};
 use yrs::updates::decoder::{Decode, DecoderV1};
@@ -39,8 +44,8 @@ use yrs::{
     Doc, ReadTxn, StateVector, Text, Transact, Update, Xml, XmlFragment, XmlOut, XmlTextPrelim,
 };
 
-use crate::Hub;
 use crate::ws::WsBytes;
+use crate::{ConnInfo, Hub};
 
 /// Origine des transactions qui appliquent ce que le serveur envoie : elles
 /// ne repartent pas vers le serveur.
@@ -51,7 +56,9 @@ const REMOTE: &str = "remote";
 // ---------------------------------------------------------------------------
 
 /// Petit serveur axum de test : `GET /sync/{id}?schema=N` monte
-/// [`Hub::serve_connection`]. Un `schema` absent ou illisible vaut 0.
+/// [`Hub::serve_connection`]. Un `schema` absent ou illisible vaut 0 ;
+/// `write=false` retire le droit d'écrire ; `actor=<uuid>` nomme le compte
+/// de la connexion.
 pub struct TestServer {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
@@ -100,9 +107,32 @@ impl TestServer {
         self.addr
     }
 
-    /// URL WebSocket de la page `node_id` pour un client du schéma `schema`.
+    /// URL WebSocket de la page `node_id` pour un client du schéma `schema`,
+    /// qui a le droit d'écrire, sans compte.
     pub fn url(&self, node_id: Uuid, schema: u32) -> String {
-        format!("ws://{}/sync/{node_id}?schema={schema}", self.addr)
+        self.url_for(
+            node_id,
+            ConnInfo {
+                client_schema: schema,
+                can_write: true,
+                actor: None,
+            },
+        )
+    }
+
+    /// URL WebSocket de la page `node_id` pour une connexion `conn`.
+    pub fn url_for(&self, node_id: Uuid, conn: ConnInfo) -> String {
+        let mut url = format!(
+            "ws://{}/sync/{node_id}?schema={}",
+            self.addr, conn.client_schema
+        );
+        if !conn.can_write {
+            url.push_str("&write=false");
+        }
+        if let Some(actor) = conn.actor {
+            url.push_str(&format!("&actor={actor}"));
+        }
+        url
     }
 
     /// N'accepte plus de connexion, ferme celles qui restent et attend
@@ -129,10 +159,14 @@ async fn sync_route(
     State(state): State<AppState>,
 ) -> Response {
     let node_id = Uuid::parse_str(&id).unwrap_or(Uuid::nil());
-    let schema = query
-        .get("schema")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let conn = ConnInfo {
+        client_schema: query
+            .get("schema")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        can_write: query.get("write").is_none_or(|w| w != "false"),
+        actor: query.get("actor").and_then(|a| Uuid::parse_str(a).ok()),
+    };
     // Comme le serveur de la Task 6 : axum refuse un message trop gros (R27).
     let max = state.hub.config().max_message_bytes;
     ws.max_message_size(max)
@@ -143,7 +177,7 @@ async fn sync_route(
                 alive,
             } = state;
             tokio::select! {
-                _ = hub.serve_connection(node_id, schema, WsBytes(socket)) => {}
+                _ = hub.serve_connection(node_id, conn, WsBytes(socket)) => {}
                 _ = shutdown.wait_for(|stop| *stop) => {}
             }
             drop(alive);
@@ -255,7 +289,23 @@ impl Client {
     /// synchronisation. `Err` si la poignée de main WebSocket échoue (une
     /// réponse 404, par exemple).
     pub async fn connect(url: &str) -> Result<Client, String> {
-        let (ws, _) = tokio_tungstenite::connect_async(url)
+        Client::connect_with_headers(url, &[]).await
+    }
+
+    /// Comme [`Client::connect`], avec des en-têtes de plus à la poignée de
+    /// main WebSocket : le cookie de session qu'attend le serveur, par
+    /// exemple. `Err` aussi pour une en-tête impossible (nom ou valeur).
+    pub async fn connect_with_headers(
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<Client, String> {
+        let mut request = url.into_client_request().map_err(|e| e.to_string())?;
+        for (name, value) in headers {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| e.to_string())?;
+            let value = HeaderValue::from_str(value).map_err(|e| e.to_string())?;
+            request.headers_mut().append(name, value);
+        }
+        let (ws, _) = tokio_tungstenite::connect_async(request)
             .await
             .map_err(|e| e.to_string())?;
         let (mut sink, mut stream) = ws.split();

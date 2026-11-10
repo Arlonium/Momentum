@@ -3,10 +3,15 @@
 //!
 //! Invariant : entre deux commandes, le document vivant est exactement
 //! l'instantané du store suivi de son journal. Toute mise à jour appliquée est
-//! écrite (`append_update` attendu) avant la commande suivante et avant d'être
-//! diffusée ; une mise à jour refusée ou non écrite fait recharger le document
-//! depuis le store. D'où une compaction sûre : l'instantané pris entre deux
-//! commandes couvre exactement les mises à jour écrites jusqu'à son `seq`.
+//! écrite (`append_updates` attendu) avant la commande suivante et avant
+//! d'être diffusée ; une mise à jour refusée ou non écrite fait recharger le
+//! document depuis le store. D'où une compaction sûre : l'instantané pris
+//! entre deux commandes couvre exactement les mises à jour écrites jusqu'à
+//! son `seq`.
+//!
+//! La mise à jour d'un client et le correctif de dédoublonnage qui la suit
+//! sont écrits ensemble, tous deux ou aucun, au nom du compte de la
+//! connexion (report M3 du lot 1).
 //!
 //! Chaque fin anormale (mise à jour refusée, panne du store, document
 //! impossible à charger, compaction en échec, awareness refusée) est
@@ -52,11 +57,24 @@ pub(crate) struct Broadcast {
     pub(crate) message: Vec<u8>,
 }
 
+/// Ce que l'acteur diffuse aux connexions de la page, dans l'ordre.
+#[derive(Clone)]
+pub(crate) enum Event {
+    /// Un message y-websocket, partagé entre les connexions.
+    Message(Arc<Broadcast>),
+    /// Les connexions inscrites jusqu'ici se ferment (`Hub::kick`,
+    /// `Hub::forget`) : rien de ce qui suit ne leur parvient.
+    Close,
+}
+
 /// Ce que l'acteur sait faire.
 pub(crate) enum Command {
-    /// Inscrire une connexion ; `writable` est faux pour un autre schéma.
+    /// Inscrire une connexion. `writable` est faux pour un autre schéma, ou
+    /// sans le droit d'écrire ; `actor` est le compte à qui attribuer ses
+    /// mises à jour.
     Join {
         writable: bool,
+        actor: Option<Uuid>,
         reply: oneshot::Sender<Result<Joined, SyncError>>,
     },
     /// Désinscrire une connexion (envoyé par [`Membership`]).
@@ -76,11 +94,18 @@ pub(crate) enum Command {
     Read {
         reply: oneshot::Sender<Result<Vec<Block>, SyncError>>,
     },
-    /// Remplacer les blocs (écriture serveur).
+    /// Remplacer les blocs (écriture serveur), au nom du compte `actor`.
     Write {
         blocks: Vec<Block>,
+        actor: Option<Uuid>,
         reply: oneshot::Sender<Result<(), SyncError>>,
     },
+    /// Fermer toutes les connexions, sans toucher au document (`Hub::kick`).
+    /// La réponse part quand plus aucun de leurs messages ne sera traité.
+    Kick { reply: oneshot::Sender<()> },
+    /// Arrêter l'acteur sans rien écrire (`Hub::forget`). La réponse part
+    /// quand il a quitté le registre.
+    Forget { reply: oneshot::Sender<()> },
 }
 
 impl Command {
@@ -99,7 +124,9 @@ impl Command {
             Command::Messages { reply, .. } => {
                 let _ = reply.send(Outcome::Close);
             }
-            Command::Leave { .. } => {}
+            // Il n'y a ni connexion à fermer ni acteur à arrêter : la réponse
+            // lâchée le dit au demandeur.
+            Command::Leave { .. } | Command::Kick { .. } | Command::Forget { .. } => {}
         }
     }
 }
@@ -107,7 +134,7 @@ impl Command {
 /// Réponse à [`Command::Join`].
 pub(crate) struct Joined {
     /// Diffusion de la page, abonnée au moment de l'inscription.
-    pub(crate) events: broadcast::Receiver<Arc<Broadcast>>,
+    pub(crate) events: broadcast::Receiver<Event>,
     /// Accueil : l'étape 1 du serveur et les états d'awareness connus.
     pub(crate) hello: Vec<Vec<u8>>,
     pub(crate) membership: Membership,
@@ -180,6 +207,23 @@ impl Replies {
 /// Le document n'a pas pu être rechargé : l'acteur s'arrête.
 struct Broken;
 
+/// Pourquoi l'acteur s'arrête.
+enum Stop {
+    /// Ni connexion ni demande pendant `idle_close`.
+    Idle,
+    /// Le document n'a pas pu être rechargé.
+    Broken,
+    /// La page est supprimée (`Hub::forget`) : la réponse part une fois
+    /// l'acteur hors du registre.
+    Forgotten(oneshot::Sender<()>),
+}
+
+impl From<Broken> for Stop {
+    fn from(_: Broken) -> Stop {
+        Stop::Broken
+    }
+}
+
 /// Lance l'acteur de la page `node_id` et renvoie sa boîte aux lettres.
 pub(crate) fn spawn(
     node_id: Uuid,
@@ -220,7 +264,7 @@ impl Identity {
     fn retire(&self, rx: &mut UnboundedReceiver<Command>) -> Vec<Command> {
         rx.close();
         if let Some(hub) = self.hub.upgrade() {
-            hub.forget(self.node_id, self.generation);
+            hub.unregister(self.node_id, self.generation);
         }
         let mut pending = Vec::new();
         while let Ok(command) = rx.try_recv() {
@@ -345,9 +389,13 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
 }
 
 struct Conn {
-    /// Faux pour un client d'un autre schéma : ses mises à jour sont ignorées.
+    /// Faux pour un client d'un autre schéma, ou sans le droit d'écrire : ses
+    /// mises à jour sont ignorées.
     writable: bool,
-    /// La connexion doit se fermer (Ruling R21) : ses messages ne sont plus traités.
+    /// Le compte à qui ses mises à jour sont attribuées.
+    actor: Option<Uuid>,
+    /// La connexion doit se fermer (panne du store, Ruling R21, ou fermeture
+    /// à la demande) : ses messages ne sont plus traités.
     closing: bool,
     /// Clients d'awareness annoncés par cette connexion.
     clients: HashSet<ClientID>,
@@ -366,7 +414,7 @@ struct Actor {
     /// Awareness des clients, sur un document à part : elle ne touche jamais
     /// au contenu, et survit au rechargement du document.
     awareness: Awareness,
-    events: broadcast::Sender<Arc<Broadcast>>,
+    events: broadcast::Sender<Event>,
     conns: HashMap<ConnId, Conn>,
     next_conn: ConnId,
 }
@@ -398,30 +446,39 @@ impl Actor {
     }
 
     async fn serve(mut self, mut rx: UnboundedReceiver<Command>) {
-        loop {
+        let stop = loop {
             let next = if self.conns.is_empty() {
                 match tokio::time::timeout(self.cfg.idle_close, rx.recv()).await {
                     Ok(next) => next,
-                    // Ni connexion ni demande pendant `idle_close`.
-                    Err(_) => break,
+                    Err(_) => break Stop::Idle,
                 }
             } else {
                 rx.recv().await
             };
             // Plus personne ne peut écrire à l'acteur (hub lâché, connexions finies).
             let Some(command) = next else { return };
-            if self.handle(command).await.is_err() {
-                break;
+            if let Err(stop) = self.handle(command).await {
+                break stop;
             }
-        }
+        };
         // Les commandes reçues entre-temps sont lâchées sans réponse : leurs
         // demandeurs réessaient auprès d'un nouvel acteur.
         drop(self.id.retire(&mut rx));
+        if let Stop::Forgotten(reply) = stop {
+            // Rien n'est écrit : ni instantané, ni ce qui restait dans la boîte.
+            tracing::debug!(node_id = %self.id.node_id, connections = self.conns.len(), "page oubliée : acteur arrêté, connexions fermées");
+            self.close_connections();
+            let _ = reply.send(());
+        }
     }
 
-    async fn handle(&mut self, command: Command) -> Result<(), Broken> {
+    async fn handle(&mut self, command: Command) -> Result<(), Stop> {
         match command {
-            Command::Join { writable, reply } => self.join(writable, reply),
+            Command::Join {
+                writable,
+                actor,
+                reply,
+            } => self.join(writable, actor, reply),
             Command::Leave { conn } => self.leave(conn),
             Command::Messages {
                 conn,
@@ -438,15 +495,32 @@ impl Actor {
             Command::Read { reply } => {
                 let _ = reply.send(Ok(self.page.read_blocks()));
             }
-            Command::Write { blocks, reply } => {
-                let result = self.write(blocks).await?;
+            Command::Write {
+                blocks,
+                actor,
+                reply,
+            } => {
+                let result = self.write(blocks, actor).await?;
                 let _ = reply.send(result);
             }
+            Command::Kick { reply } => {
+                // Ni rechargement ni écriture : le document vivant est celui
+                // du store, et le reste.
+                tracing::debug!(node_id = %self.id.node_id, connections = self.conns.len(), "connexions fermées à la demande");
+                self.close_connections();
+                let _ = reply.send(());
+            }
+            Command::Forget { reply } => return Err(Stop::Forgotten(reply)),
         }
         Ok(())
     }
 
-    fn join(&mut self, writable: bool, reply: oneshot::Sender<Result<Joined, SyncError>>) {
+    fn join(
+        &mut self,
+        writable: bool,
+        actor: Option<Uuid>,
+        reply: oneshot::Sender<Result<Joined, SyncError>>,
+    ) {
         let Some(commands) = self.id.me.upgrade() else {
             let _ = reply.send(Err(SyncError::Closed));
             return;
@@ -457,6 +531,7 @@ impl Actor {
             conn,
             Conn {
                 writable,
+                actor,
                 closing: false,
                 clients: HashSet::new(),
             },
@@ -498,8 +573,8 @@ impl Actor {
         conn: ConnId,
         messages: Vec<ClientMessage>,
     ) -> Result<Outcome, Broken> {
-        let writable = match self.conns.get(&conn) {
-            Some(c) if !c.closing => c.writable,
+        let (writable, actor) = match self.conns.get(&conn) {
+            Some(c) if !c.closing => (c.writable, c.actor),
             _ => return Ok(Outcome::Close),
         };
         // Ruling R29 : les réponses d'un même message sont bornées avant
@@ -530,7 +605,7 @@ impl Actor {
                 ClientMessage::Update(_) if !writable => {}
                 ClientMessage::Update(update) if update == EMPTY_UPDATE => {}
                 ClientMessage::Update(update) => {
-                    if !self.client_update(conn, &update).await? {
+                    if !self.client_update(conn, actor, &update).await? {
                         return Ok(Outcome::Close);
                     }
                 }
@@ -558,10 +633,18 @@ impl Actor {
         Outcome::Close
     }
 
-    /// Mise à jour d'un client : appliquer, dédoublonner, écrire, puis
-    /// diffuser. `false` : la connexion est à fermer.
-    async fn client_update(&mut self, conn: ConnId, update: &[u8]) -> Result<bool, Broken> {
-        if let Err(error) = self.page.apply_update(update) {
+    /// Mise à jour d'un client : appliquer, dédoublonner, écrire au nom de
+    /// `actor` (le compte de la connexion), puis diffuser. `false` : la
+    /// connexion est à fermer.
+    async fn client_update(
+        &mut self,
+        conn: ConnId,
+        actor: Option<Uuid>,
+        update: &[u8],
+    ) -> Result<bool, Broken> {
+        // Ce qui vient d'un client ne touche pas aux métadonnées de la page
+        // (report M7 du lot 1) ; ce que `load` relit du store, si.
+        if let Err(error) = self.page.apply_client_update(update) {
             // Rulings R17 et R22 : ni écrite ni diffusée ; le document, peut-être
             // entamé (yrs garde en attente une mise à jour à dépendance
             // manquante), est rechargé depuis le store ; le client fautif est
@@ -573,11 +656,16 @@ impl Actor {
         }
         // Après des déplacements concurrents, un bloc peut exister en double.
         let fix = self.page.dedupe_blocks();
-        for written in std::iter::once(update).chain(fix.as_deref()) {
-            if let Err(error) = self.persist(written).await {
-                self.store_failed(&error).await?;
-                return Ok(false);
-            }
+        // La mise à jour et son correctif en une écriture, tous deux ou aucun
+        // (report M3 du lot 1) : sans le correctif, le store garderait le
+        // doublon, que le rechargement servirait.
+        let written = match &fix {
+            Some(fix) => self.persist(&[update, fix], actor).await,
+            None => self.persist(&[update], actor).await,
+        };
+        if let Err(error) = written {
+            self.store_failed(&error).await?;
+            return Ok(false);
         }
         self.broadcast(Some(conn), protocol::update(update));
         if let Some(fix) = fix {
@@ -625,13 +713,17 @@ impl Actor {
         (!update.clients.is_empty()).then(|| protocol::awareness(&update.encode_v1()))
     }
 
-    async fn write(&mut self, blocks: Vec<Block>) -> Result<Result<(), SyncError>, Broken> {
+    async fn write(
+        &mut self,
+        blocks: Vec<Block>,
+        actor: Option<Uuid>,
+    ) -> Result<Result<(), SyncError>, Broken> {
         // Refusée sans rien écrire : le document reste intact.
         let update = match self.page.write_blocks(&blocks) {
             Ok(update) => update,
             Err(e) => return Ok(Err(e.into())),
         };
-        if let Err(error) = self.persist(&update).await {
+        if let Err(error) = self.persist(&[&update], actor).await {
             self.store_failed(&error).await?;
             return Ok(Err(error.into()));
         }
@@ -640,10 +732,26 @@ impl Actor {
         Ok(Ok(()))
     }
 
-    async fn persist(&mut self, update: &[u8]) -> Result<(), StoreError> {
-        self.last_seq = self.store.append_update(self.id.node_id, update).await?;
-        self.since_snapshot += 1;
+    /// Écrit des mises à jour au journal, dans l'ordre, toutes ou aucune, au
+    /// nom du compte `actor`.
+    async fn persist(&mut self, updates: &[&[u8]], actor: Option<Uuid>) -> Result<(), StoreError> {
+        self.last_seq = self
+            .store
+            .append_updates(self.id.node_id, updates, actor)
+            .await?;
+        self.since_snapshot += updates.len() as u64;
         Ok(())
+    }
+
+    /// Ferme toutes les connexions inscrites : leurs messages ne sont plus
+    /// traités, et chacune se ferme en lisant la diffusion, après ce qui a été
+    /// diffusé jusqu'ici. Ni le document ni le store ne sont touchés.
+    fn close_connections(&mut self) {
+        for c in self.conns.values_mut() {
+            c.closing = true;
+        }
+        // Sans abonné, il n'y a personne à fermer.
+        let _ = self.events.send(Event::Close);
     }
 
     /// Compaction toutes les `snapshot_every` mises à jour écrites, ou dès que
@@ -703,6 +811,8 @@ impl Actor {
 
     fn broadcast(&self, from: Option<ConnId>, message: Vec<u8>) {
         // Sans abonné, il n'y a personne à prévenir.
-        let _ = self.events.send(Arc::new(Broadcast { from, message }));
+        let _ = self
+            .events
+            .send(Event::Message(Arc::new(Broadcast { from, message })));
     }
 }

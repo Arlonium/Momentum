@@ -177,7 +177,8 @@ pub(crate) async fn put_mmd(
     let mut blocks = parse(text)?;
     registered_props_only(&blocks)?;
     unknown_not_foreign(&mut blocks);
-    state.hub.write_blocks(id, blocks).await?;
+    // Sans compte, en attendant les droits (Task 10b du lot 2).
+    state.hub.write_blocks(id, blocks, None).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
