@@ -923,6 +923,75 @@ pub async fn exec_sql(db: &Path, sql: &str) {
     pool.close().await;
 }
 
+/// Combien de temps un test tient le verrou d'écriture de SQLite avant d'y écrire : la moitié
+/// du délai d'attente d'une connexion (5 s, `Store::open`), la marge la plus large des deux
+/// côtés. La requête a 2,5 s pour lire la base d'avant et venir attendre le verrou ; le test en
+/// garde 2,5 pour écrire et valider avant qu'elle renonce.
+pub const HELD: Duration = Duration::from_millis(2_500);
+
+/// Une requête prise de vitesse par une écriture ([`overtaken`]) : sa réponse, et ce que le
+/// serveur a journalisé pendant qu'elle tournait.
+pub struct Overtaken {
+    pub reply: Reply,
+    pub journal: String,
+}
+
+impl Overtaken {
+    /// Combien de fois la route d'un `PATCH` a relu `page` et redécidé, son écriture refusée
+    /// par le store. Une fois au moins : la requête avait bien décidé sur la base d'avant.
+    /// Arrivée après l'écriture concurrente, elle n'aurait rien eu à relire, et le test ne
+    /// prouverait rien.
+    pub fn redecided(&self, page: Uuid) -> usize {
+        reprises(&self.journal, page)
+    }
+}
+
+/// Le nombre de reprises d'un `PATCH` sur `page` que porte le journal du serveur : une ligne
+/// par écriture que le store a refusée, et que la route a redécidée.
+pub fn reprises(journal: &str, page: Uuid) -> usize {
+    let page = page.to_string();
+    journal
+        .lines()
+        .filter(|line| line.contains("relit") && line.contains(&page))
+        .count()
+}
+
+/// Envoie `request` pendant que le test tient le verrou d'écriture de SQLite : elle lit donc
+/// la base d'avant, décide, puis attend pour écrire. `meanwhile` (du SQL) est alors écrit, avec
+/// la révision de l'espace comme le fait le store, et le verrou est rendu : l'écriture de la
+/// requête passe après.
+///
+/// Le journal est celui du fil du test ([`Logs`]) : à appeler d'un test en `current_thread`.
+pub async fn overtaken(
+    t: &TestApp,
+    space: Uuid,
+    request: impl Future<Output = Reply>,
+    meanwhile: &[String],
+) -> Overtaken {
+    let logs = Logs::capture();
+    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
+        .await
+        .unwrap();
+    let mut lock = side.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let written_meanwhile = async {
+        tokio::time::sleep(HELD).await;
+        let rev = format!("UPDATE spaces SET rev = rev + 1 WHERE id = '{space}'");
+        for sql in meanwhile.iter().chain([&rev]) {
+            sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
+                .execute(&mut *lock)
+                .await
+                .unwrap();
+        }
+        lock.commit().await.unwrap();
+    };
+    let (reply, ()) = tokio::join!(request, written_meanwhile);
+    side.close().await;
+    Overtaken {
+        reply,
+        journal: logs.text(),
+    }
+}
+
 /// La première colonne de la première ligne d'une requête, par une connexion
 /// à part.
 pub async fn query_i64(db: &Path, sql: &str) -> i64 {

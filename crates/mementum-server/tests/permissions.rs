@@ -9,12 +9,11 @@
 
 mod common;
 
-use std::time::Duration;
-
 use axum::http::{Method, StatusCode};
 use common::{
     Account, Browser, Logs, Reply, Team, TestApp, assert_french, exec_sql, json_request, outcome,
-    page_routes, query_i64, sync_url, synced_as, text, trash_list, tree_nodes, uuid,
+    overtaken, page_routes, query_i64, reprises, sync_url, synced_as, text, trash_list, tree_nodes,
+    uuid,
 };
 use mementum_acl::{Level, Role, Subject};
 use mementum_crdt::PageDoc;
@@ -1541,73 +1540,7 @@ async fn patch_that_moves_nothing_writes_nothing() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Les écritures prises de vitesse.
-
-/// Combien de temps un test tient le verrou d'écriture de SQLite avant d'y écrire : la moitié
-/// du délai d'attente d'une connexion (5 s, `Store::open`), la marge la plus large des deux
-/// côtés. La requête a 2,5 s pour lire la base d'avant et venir attendre le verrou ; le test en
-/// garde 2,5 pour écrire et valider avant qu'elle renonce.
-const HELD: Duration = Duration::from_millis(2_500);
-
-/// Une requête prise de vitesse par une écriture : sa réponse, et ce que le serveur a
-/// journalisé pendant qu'elle tournait.
-struct Overtaken {
-    reply: Reply,
-    journal: String,
-}
-
-impl Overtaken {
-    /// Combien de fois la route a relu `page` et redécidé, son écriture refusée par le store.
-    /// Une fois au moins : la requête avait bien décidé sur la base d'avant. Arrivée après
-    /// l'écriture concurrente, elle n'aurait rien eu à relire, et le test ne prouverait rien.
-    fn redecided(&self, page: Uuid) -> usize {
-        reprises(&self.journal, page)
-    }
-}
-
-/// Le nombre de reprises d'un `PATCH` sur `page` que porte le journal du serveur : une ligne
-/// par écriture que le store a refusée, et que la route a redécidée.
-fn reprises(journal: &str, page: Uuid) -> usize {
-    let page = page.to_string();
-    journal
-        .lines()
-        .filter(|line| line.contains("relit") && line.contains(&page))
-        .count()
-}
-
-/// Envoie `request` pendant que le test tient le verrou d'écriture de SQLite : elle lit donc
-/// la base d'avant, décide, puis attend pour écrire. `meanwhile` (du SQL) est alors écrit, avec
-/// la révision de l'espace comme le fait le store, et le verrou est rendu : l'écriture de la
-/// requête passe après.
-async fn overtaken(
-    t: &TestApp,
-    space: Uuid,
-    request: impl Future<Output = Reply>,
-    meanwhile: &[String],
-) -> Overtaken {
-    let logs = Logs::capture();
-    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
-        .await
-        .unwrap();
-    let mut lock = side.begin_with("BEGIN IMMEDIATE").await.unwrap();
-    let written_meanwhile = async {
-        tokio::time::sleep(HELD).await;
-        let rev = format!("UPDATE spaces SET rev = rev + 1 WHERE id = '{space}'");
-        for sql in meanwhile.iter().chain([&rev]) {
-            sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
-                .execute(&mut *lock)
-                .await
-                .unwrap();
-        }
-        lock.commit().await.unwrap();
-    };
-    let (reply, ()) = tokio::join!(request, written_meanwhile);
-    side.close().await;
-    Overtaken {
-        reply,
-        journal: logs.text(),
-    }
-}
+// Les écritures prises de vitesse (l'aide `overtaken` est dans `common/mod.rs`).
 
 /// Un changement de place fait avec `edit` ne défait jamais un changement de parent fait en
 /// même temps. La place est décidée sous le parent lu avec les droits ; si la page l'a quitté
