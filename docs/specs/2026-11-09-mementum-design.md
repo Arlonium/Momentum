@@ -3,7 +3,7 @@
 > **Statut** : proposition. Nom (**Mementum**) et direction visuelle (**A « Papier »**) choisis par Lenny ; le reste est à valider
 > **Date** : 2026-11-09 (d'abord « Vivace », puis « Memento », écarté parce que Memento Database existe déjà ; finalement « Mementum »)
 > **Rédigé par** : Claude Code, à partir de 4 recherches (fonctionnalités Notion 2026, alternatives open source, architecture temps réel, accès des agents IA). La synthèse est dans [`docs/research/2026-11-09-etat-de-l-art.md`](../research/2026-11-09-etat-de-l-art.md) et les notes sourcées dans [`docs/research/notes/`](../research/notes/).
-> **Amendement du 2026-11-10** : à la demande d'Alex (2026-11-09), des **espaces façon Notion** remplacent les organisations et les coffres façon Obsidian (§4.1, §4.4, §12). À confirmer avec Lenny (§13).
+> **Amendement du 2026-11-10** : à la demande d'Alex (2026-11-09), des **espaces façon Notion** remplacent les organisations et les coffres façon Obsidian (§4.1, §4.4, §12). Confirmé par Lenny le 2026-11-10, d'après Alex (§13).
 > **Mise à jour du 2026-11-10, lot 2 de la P1** : ce que le code du lot 2 (comptes, espaces, droits, corbeille) précise ou corrige est reporté aux §4.1 à §4.4, §5.6, §7.2, §7.4 et §9, avec le numéro de la décision (« Ruling ») du [registre du lot 2](../superpowers/logs/2026-11-10-p1-lot2-ledger.md). Les décisions marquées « à confirmer » attendent l'avis du propriétaire. Le lot est livré le 2026-11-10 : le §4.3 décrit le menu Partager tel qu'il est.
 
 ---
@@ -894,7 +894,7 @@ mementum/
 
 Le lot 2, « Comptes, espaces, droits et corbeille » ([plan](../superpowers/plans/2026-11-10-p1-lot2-comptes-espaces-droits.md), [registre](../superpowers/logs/2026-11-10-p1-lot2-ledger.md)), est livré le 10 novembre 2026 ; la recette du propriétaire se déroule avec la [checklist](../recette/2026-11-10-p1-lot2-recette.md). Il ajoute la crate `mementum-acl` (qui voit quoi dans un espace) et la migration `0002`, qui remplace organisations et coffres par des espaces. Il livre :
 - des comptes locaux : mot de passe haché en Argon2id, session par cookie, 30 jours au plus après la connexion (Ruling R117) ; le premier compte administre l'instance ; inscriptions sur invitation par défaut (Ruling R50, à confirmer) ; mot de passe oublié par `mementum user set-password`, faute de SMTP (Ruling R47) ;
-- des espaces façon Notion (demande d'Alex, à confirmer avec Lenny, Ruling R45), plusieurs par compte, avec les rôles propriétaire, admin, membre et invité, et des invitations par lien, dans l'espace ou sur une page (§4.4) ;
+- des espaces façon Notion (demande d'Alex, confirmée par Lenny le 2026-11-10, Ruling R45), plusieurs par compte, avec les rôles propriétaire, admin, membre et invité, et des invitations par lien, dans l'espace ou sur une page (§4.4) ;
 - des pages d'espace, partagées et privées, en trois sections calculées ; le partage d'une page et son accès général, par le menu Partager (§4.3, §4.4) ; le déplacement des pages, à la souris et au clavier (§4.2) ;
 - les droits vérifiés à chaque appel, synchronisation comprise : une connexion ouverte est fermée dès qu'une écriture change ses droits, et ne revient qu'avec ses nouveaux droits (§5.6). Seule exception, sans risque : des droits qui montent quand la personne accepte une invitation ne ferment rien, et valent à sa prochaine connexion ;
 - la corbeille : une page y part avec ses sous-pages et en revient avec elles ; à la corbeille, elle se lit et ne s'écrit plus ; on ne la supprime pour de bon que depuis la corbeille ;
@@ -971,7 +971,7 @@ Limites connues laissées par le lot 2 :
 ### Demande d'Alex (2026-11-09)
 - **Espaces façon Notion**, à la place des organisations et des coffres (§4.1, §4.4). Sa demande : se faire plusieurs espaces (« Perso », « Pro »), demander à Claude Code de verser du contenu dans l'un d'eux, inviter des gens dans un espace ou sur une page de l'espace, ouvrir des accès d'API sur un espace ou sur des pages, « vraiment comme Notion ».
   - Les **coffres façon Obsidian** étaient une idée de Lenny, validée sur le principe. Il en reste les conventions d'Obsidian (liens `[[…]]`, rétroliens, vue graphe, dossiers, frontmatter, callouts, tags), le modèle d'espace « LLM wiki » et l'absence de miroir en fichiers.
-  - **À confirmer avec Lenny** (§13).
+  - **Confirmé par Lenny le 2026-11-10**, d'après Alex (§13).
   - **Choix de rédaction** faits pour traduire la demande, à relire :
     - l'espace remplace aussi l'organisation, pas seulement le coffre ;
     - les trois sections « Espace », « Partagé », « Privé », déduites des accès ;
@@ -998,6 +998,6 @@ Limites connues laissées par le lot 2 :
 ---
 
 ## 13. Questions ouvertes pour Lenny
-- **Espaces façon Notion à la place des coffres façon Obsidian** (demande d'Alex du 2026-11-09, §4.4 et §12) : à confirmer. Le lot 2 de la P1, livré le 2026-11-10, est bâti sur ce modèle (Ruling R45).
+- **Espaces façon Notion à la place des coffres façon Obsidian** (demande d'Alex du 2026-11-09, §4.4 et §12) : **confirmé par Lenny le 2026-11-10**, d'après Alex. Le lot 2 de la P1, livré le 2026-11-10, est bâti sur ce modèle (Ruling R45).
 
 Aucune autre question bloquante pour commencer. À trancher avant d'ouvrir Mementum Cloud (§7.6) : les prix, une éventuelle offre gratuite, l'hébergeur et la structure juridique pour facturer.

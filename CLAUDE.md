@@ -4,6 +4,8 @@ Tu reprends **Mementum**, un espace de travail open source façon Notion, auto-h
 
 ## Avant de commencer
 
+Si tu arrives sans rien savoir du projet, commence par [`docs/REPRISE.md`](docs/REPRISE.md) : où on en est, ce qui reste, comment mener un lot, l'instance d'Alex.
+
 1. Lis [`README.md`](README.md) : état du projet, décisions, ordre de lecture.
 2. Lis la conception : [`docs/specs/2026-11-09-mementum-design.md`](docs/specs/2026-11-09-mementum-design.md). C'est **la référence**. En cas de conflit, la conception l'emporte sur les plans et sur le code.
 3. Lis [`spike/RESULTS.md`](spike/RESULTS.md) : ce que la phase 0 a mesuré, confirmé ou corrigé.
@@ -20,7 +22,7 @@ Tu reprends **Mementum**, un espace de travail open source façon Notion, auto-h
   - pas de miroir en fichiers, mais import Notion et Obsidian ;
   - MCP dès la phase 1 ;
   - design A « Papier ».
-- **Demande d'Alex (2026-11-09), à confirmer avec Lenny** : des **espaces façon Notion** à la place des organisations et des coffres façon Obsidian (conception, §4.4 et §12). Les coffres étaient une idée de Lenny. Le lot 2 a bâti les comptes et les droits sur ces espaces (Ruling R45) et renommé `vaults` et `vault_id` du lot 1 en `spaces` et `space_id` (migration `0002`).
+- **Demande d'Alex (2026-11-09), confirmée par Lenny le 2026-11-10 (d'après Alex)** : des **espaces façon Notion** à la place des organisations et des coffres façon Obsidian (conception, §4.4 et §12). Les coffres étaient une idée de Lenny. Le lot 2 a bâti les comptes et les droits sur ces espaces (Ruling R45) et renommé `vaults` et `vault_id` du lot 1 en `spaces` et `space_id` (migration `0002`).
 - **Commits** : petits, un sujet chacun, **sans aucune ligne d'attribution d'outil** (ni `Co-Authored-By: Claude…`, ni `Claude-Session:`, ni « Generated with Claude Code »), dans les commits comme dans les PR. Ne jamais pousser de secrets (clés, jetons, mots de passe).
 
 ## Pièges déjà rencontrés en phase 0
