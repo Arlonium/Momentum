@@ -593,19 +593,26 @@ test("space_left_meanwhile_is_the_same_not_found_screen", async ({ browser }) =>
   await expect(field).toHaveValue(space.name);
   expect((await aliceApi.delete(`/api/v1/spaces/${space.id}/members/${brunoId}`)).status()).toBe(204);
   const own = await firstSpace(await apiAs(bruno));
+
+  // L'écran d'un espace qui n'existe pas (R96 : il n'y en a qu'un), lu d'abord dans un autre
+  // onglet du même compte, à une adresse inconnue, où rien ne le précède.
+  const probe = await b.context().newPage();
+  await probe.goto(`/s/${UNKNOWN_ID}/settings`);
+  await expect(probe.getByRole("heading", { name: "Espace introuvable", level: 1 })).toBeVisible();
+  const unknownScreen = await probe.getByRole("main").innerText();
+  await probe.close();
+  // Les guillemets de l'écran portent des espaces insécables.
+  expect(unknownScreen.replace(/\u00a0/g, " ")).toContain(`Ouvrir « ${own.name} »`);
+  expect(unknownScreen).not.toContain(space.name);
+
   await field.fill(`Renommé ${unique()}`);
   await field.press("Enter");
   await expect(missing).toBeVisible();
   await expect(b).toHaveURL(`${BASE_URL}${settingsPath(space.id)}`);
-  const open = b.getByRole("main").getByRole("button", { name: `Ouvrir « ${own.name} »` });
-  await expect(open).toBeVisible();
-  const left = await b.getByRole("main").innerText();
-  expect(left).not.toContain(space.name);
-
-  // Mot pour mot l'écran d'un espace qui n'existe pas (R96) : il n'y en a qu'un.
-  await b.goto(`/s/${UNKNOWN_ID}/settings`);
-  await expect(missing).toBeVisible();
-  expect(await b.getByRole("main").innerText()).toBe(left);
+  // Mot pour mot le même écran. Il repasse un instant par « Chargement… », le temps que la
+  // liste des espaces du compte soit relue : lire le texte une seule fois pouvait tomber
+  // dessus (vu en CI) ; on attend donc l'écran final.
+  await expect.poll(() => b.getByRole("main").innerText()).toBe(unknownScreen);
   await b.getByRole("main").getByRole("button", { name: `Ouvrir « ${own.name} »` }).click();
   await expect(b).toHaveURL(`${BASE_URL}/s/${own.id}`);
 });
