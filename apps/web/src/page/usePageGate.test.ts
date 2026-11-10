@@ -184,3 +184,81 @@ test("reread_tells_what_the_page_became", async () => {
   expect(onPage).toHaveBeenCalledTimes(1);
   expect(onGone).toHaveBeenCalledTimes(1);
 });
+
+test("older_answer_arriving_after_a_newer_one_is_dropped", async () => {
+  const gate = await renderHook(hook, { writable: true });
+  // Deux lectures de la page sont en route : celle d'une connexion de synchro, puis celle que
+  // demande le menu Partager.
+  const state = connecting(gate.current.check);
+  await settle();
+  void gate.current.reread();
+  await settle();
+  expect(asked).toHaveLength(2);
+  // La plus récente répond d'abord ; l'autre, partie avant un changement, arrive ensuite.
+  const fresh = page("x", { level: "edit", title: "Titre d'après" });
+  await settle(() => asked[1].answer.resolve(fresh));
+  await settle(() => asked[0].answer.resolve(page("x", { level: "read", title: "Titre d'avant" })));
+  // Elle ne dit plus rien de la page à l'application.
+  expect(onPage).toHaveBeenCalledExactlyOnceWith(fresh);
+  // La connexion se décide d'après ce que l'application sait : refusée au vu de l'ancien
+  // niveau, elle resterait fermée sans que rien ne la remplace.
+  expect(state.verdict).toBe(true);
+});
+
+test("older_answer_that_the_page_is_gone_is_dropped_too", async () => {
+  const gate = await renderHook(hook, { writable: false });
+  const state = connecting(gate.current.check);
+  await settle();
+  void gate.current.reread();
+  await settle();
+  const fresh = page("x", { level: "read" });
+  await settle(() => asked[1].answer.resolve(fresh));
+  await settle(() => asked[0].answer.reject(notFound()));
+  expect(onGone).not.toHaveBeenCalled();
+  expect(onPage).toHaveBeenCalledExactlyOnceWith(fresh);
+  expect(state.verdict).toBe(true);
+});
+
+test("answers_arriving_in_order_all_count", async () => {
+  const gate = await renderHook(hook, { writable: true });
+  const state = connecting(gate.current.check);
+  await settle();
+  void gate.current.reread();
+  await settle();
+  const before = page("x", { level: "edit", title: "Titre d'avant" });
+  const after = page("x", { level: "edit", title: "Titre d'après" });
+  await settle(() => asked[0].answer.resolve(before));
+  await settle(() => asked[1].answer.resolve(after));
+  expect(onPage.mock.calls).toEqual([[before], [after]]);
+  expect(state.verdict).toBe(true);
+});
+
+test("older_answer_counts_when_the_newer_read_fails", async () => {
+  const gate = await renderHook(hook, { writable: true });
+  const state = connecting(gate.current.check);
+  await settle();
+  void gate.current.reread();
+  await settle();
+  // La plus récente n'a rien appris (serveur injoignable) : l'autre reste ce qu'on sait de
+  // mieux, et la connexion ne reste pas refusée sans que l'application sache pourquoi.
+  await settle(() => asked[1].answer.reject(unreachable()));
+  const lowered = page("x", { level: "read" });
+  await settle(() => asked[0].answer.resolve(lowered));
+  expect(onPage).toHaveBeenCalledExactlyOnceWith(lowered);
+  expect(state.verdict).toBe(false);
+});
+
+test("answers_arriving_once_unmounted_say_nothing", async () => {
+  const gate = await renderHook(hook, { writable: true });
+  const first = connecting(gate.current.check);
+  const second = connecting(gate.current.check);
+  await settle();
+  // La page est quittée (ou rouverte dans une autre instance) : ces réponses ne sont plus à
+  // personne, et ne doivent pas arriver après celles de la page rouverte.
+  await gate.unmount();
+  await settle(() => asked[0].answer.resolve(page("x", { level: "read" })));
+  await settle(() => asked[1].answer.reject(notFound()));
+  expect(onPage).not.toHaveBeenCalled();
+  expect(onGone).not.toHaveBeenCalled();
+  expect([first.verdict, second.verdict]).toEqual([false, false]);
+});

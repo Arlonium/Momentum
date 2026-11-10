@@ -16,8 +16,14 @@
 //
 // Sans cela, le serveur servirait en lecture seule une connexion ouverte pour écrire, et
 // ignorerait en silence tout ce que tape l'onglet.
+//
+// Deux lectures de la page peuvent être en route (une connexion de synchro, et le menu
+// Partager qui vient de perdre l'accès complet) : une réponse plus ancienne qu'une autre déjà
+// retenue ne dit plus rien. C'est le rang de la demande qui compte, et seulement parmi les
+// lectures qui ont répondu : si la plus récente échoue, l'autre reste ce qu'on sait de mieux.
+// Une fois la page quittée, plus aucune réponse ne compte.
 import type { PageNode } from "@mementum/protocol";
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { ApiError, getPage, isSessionLost } from "../api";
 import type { ConnectionCheck, SchemaCheck } from "../editor/schemaGate";
 import { canEdit } from "../share/levels";
@@ -53,23 +59,44 @@ export function usePageGate(inputs: Inputs): PageGate {
   const latest = useRef(inputs);
   latest.current = inputs;
 
+  /** Le rang de la dernière lecture demandée. */
+  const asked = useRef(0);
+  /** La réponse retenue (`null` : la page n'est plus là), et le rang de sa lecture. */
+  const kept = useRef<{ rank: number; node: PageNode | null }>({ rank: 0, node: null });
+  const unmounted = useRef(false);
+  useEffect(() => {
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+    };
+  }, []);
+
+  /**
+   * Retient la réponse de la lecture de rang `rank` et la dit à l'application, sauf si une
+   * lecture demandée après elle a déjà répondu. Rend ce qu'on sait de la page.
+   */
+  const keep = useCallback((rank: number, node: PageNode | null): PageNode | null => {
+    if (unmounted.current) return null;
+    if (rank < kept.current.rank) return kept.current.node;
+    kept.current = { rank, node };
+    if (node === null) latest.current.onGone();
+    else latest.current.onPage(node);
+    return node;
+  }, []);
+
   /** Ce que le serveur dit de la page, le compte revenu s'il le faut ; `null` : plus là. */
   const read = useCallback(async (): Promise<PageNode | null> => {
+    const rank = ++asked.current;
     for (;;) {
       try {
-        const node = await getPage(id);
-        latest.current.onPage(node);
-        return node;
+        return keep(rank, await getPage(id));
       } catch (error) {
-        if (error instanceof ApiError && error.status === 404) {
-          latest.current.onGone();
-          return null;
-        }
+        if (error instanceof ApiError && error.status === 404) return keep(rank, null);
         if (!isSessionLost(error)) throw error;
         await latest.current.afterLogin();
       }
     }
-  }, [id]);
+  }, [id, keep]);
 
   const check = useCallback(async () => {
     // Le schéma ne compte que pour qui écrit : une session en lecture seule ne fait que
@@ -79,6 +106,8 @@ export function usePageGate(inputs: Inputs): PageGate {
       writable ? latest.current.checkSchema() : true,
       read(),
     ]);
+    // `node` : ce qu'on sait de plus récent de la page, que ce soit ou non la réponse de cette
+    // lecture. La connexion se décide d'après ce que l'application sait.
     if (node === null) return false;
     return !writable || (sameSchema && canEdit(node.level) && node.trashedAt === null);
   }, [writable, read]);
