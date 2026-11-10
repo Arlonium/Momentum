@@ -164,6 +164,41 @@ test("trash_view_follows_the_sidebar", async ({ browser }) => {
   expect(new URL(p.url()).pathname).toBe(`/s/${space.id}/trash`);
 });
 
+test("failed_trash_reload_keeps_the_list", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  expect((await api.post(`/api/v1/pages/${a.id}/trash`)).status()).toBe(200);
+
+  const p = await newUser(browser, alice);
+  await p.goto(`/s/${space.id}/trash`);
+  await expect(trashItem(p, "Alpha")).toBeVisible();
+  const main = p.getByRole("main");
+
+  // Le serveur ne répond plus pour la corbeille. Une page est jetée depuis la barre
+  // latérale : la corbeille ouverte est relue, en vain.
+  await p.route("**/api/v1/spaces/*/trash", (route) => route.abort());
+  await (await openRowMenu(p, b.id, "Bravo"))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  await expect(treeRow(p, b.id)).toHaveCount(0);
+  await expect(main.getByRole("alert")).toContainText("La corbeille n'a pas pu être relue.");
+  // La liste déjà lue reste à l'écran, avec ses actions.
+  await expect(trashItem(p, "Alpha")).toBeVisible();
+  await expect(trashItem(p, "Alpha").getByRole("button", { name: "Restaurer" })).toBeVisible();
+
+  // Le serveur revient : « Réessayer » relit, le message part, et la page jetée entre-temps
+  // est là.
+  await p.unroute("**/api/v1/spaces/*/trash");
+  await main.getByRole("button", { name: "Réessayer" }).click();
+  await expect(main.getByRole("alert")).toHaveCount(0);
+  await expect(
+    p.getByRole("list", { name: "Pages à la corbeille" }).getByRole("listitem"),
+  ).toHaveText([/Bravo/, /Alpha/]);
+});
+
 test("refused_restore_reads_the_page_again", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);

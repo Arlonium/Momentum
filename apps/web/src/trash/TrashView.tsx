@@ -9,39 +9,35 @@
 // dans la page (`Confirm`) : la page part avec ses sous-pages et leur contenu, pour de bon.
 // Le serveur fait foi : son refus s'affiche tel quel, la liste est relue, et la barre latérale
 // avec elle (`onChanged`). La liste se relit aussi quand une page est jetée ou restaurée
-// ailleurs dans l'application (`version`).
+// ailleurs dans l'application (`version`) ; une relecture qui échoue la laisse à l'écran
+// (`useTrash`).
+//
+// Sous un schéma qui n'est plus celui du serveur (R35), l'onglet n'écrit plus rien : la liste
+// se lit, sans ses actions, et le bandeau dit pourquoi.
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { deletePage, getTrash, isSessionLost, restorePage } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { deletePage, isSessionLost, restorePage } from "../api";
+import { ReadOnlyBanner } from "../editor/ReadOnlyBanner";
 import { PageIcon } from "../icons";
 import { pagePath } from "../router";
 import { FormError, messageOf, useDocumentTitle } from "../session/forms";
 import { Confirm } from "../ui/Confirm";
+import { trashedOnLabel, useTrash } from "./useTrash";
 
 type Props = {
   space: SpaceInfo;
   /** Change quand une page est jetée ou restaurée ailleurs dans l'application. */
   version: number;
+  /** Schéma du serveur différent (R35) : ni restauration, ni suppression. */
+  readOnly: boolean;
   /** Une page est sortie de la corbeille, ou le serveur a refusé : l'arbre est à relire. */
   onChanged: () => void;
 };
 
-type Load =
-  | { name: "loading" }
-  | { name: "failed"; message: string }
-  | { name: "ready"; pages: PageNode[] };
-
-const trashedOn = new Intl.DateTimeFormat("fr-FR", {
-  day: "numeric",
-  month: "long",
-  hour: "2-digit",
-  minute: "2-digit",
-});
-
-export function TrashView({ space, version, onChanged }: Props) {
+export function TrashView({ space, version, readOnly, onChanged }: Props) {
   useDocumentTitle("Corbeille");
   const titleRef = useRef<HTMLHeadingElement>(null);
-  const [load, setLoad] = useState<Load>({ name: "loading" });
+  const { pages, error: readError, reload } = useTrash(space.id, version);
   const [error, setError] = useState<string | null>(null);
   /** La page en cours de restauration : un double clic n'envoie qu'une requête. */
   const [restoring, setRestoring] = useState<string | null>(null);
@@ -50,19 +46,6 @@ export function TrashView({ space, version, onChanged }: Props) {
   const [busy, setBusy] = useState(false);
   /** Compte les actions finies, pour rattraper le focus après chacune. */
   const [acted, setActed] = useState(0);
-
-  const reload = useCallback(async () => {
-    try {
-      setLoad({ name: "ready", pages: await getTrash(space.id) });
-    } catch (e) {
-      // Session perdue : la connexion est demandée par-dessus ; la liste garde ce qu'elle a.
-      if (!isSessionLost(e)) setLoad({ name: "failed", message: messageOf(e) });
-    }
-  }, [space.id]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload, version]);
 
   // Une page restaurée ou supprimée quitte la liste, et le bouton qui avait le focus avec
   // elle (« Restaurer », ou celui à qui la confirmation fermée l'a rendu, `Confirm`) : le
@@ -112,62 +95,80 @@ export function TrashView({ space, version, onChanged }: Props) {
     setActed((n) => n + 1);
   };
 
+  const retry = (
+    <p className="mm-settings-actions">
+      <button type="button" className="mm-button" onClick={() => void reload()}>
+        Réessayer
+      </button>
+    </p>
+  );
+
   let content;
-  if (load.name === "loading") {
-    content = <p className="mm-settings-empty">Chargement…</p>;
-  } else if (load.name === "failed") {
-    content = (
-      <>
-        <FormError message={load.message} />
-        <p className="mm-settings-actions">
-          <button type="button" className="mm-button" onClick={() => void reload()}>
-            Réessayer
-          </button>
-        </p>
-      </>
-    );
-  } else if (load.pages.length === 0) {
-    content = <p className="mm-settings-empty">La corbeille est vide.</p>;
+  if (pages === null) {
+    content =
+      readError === null ? (
+        <p className="mm-settings-empty">Chargement…</p>
+      ) : (
+        <>
+          <FormError message={readError} />
+          {retry}
+        </>
+      );
   } else {
     content = (
-      <ul className="mm-people" aria-label="Pages à la corbeille">
-        {load.pages.map((page) => (
-          <li key={page.id} className="mm-person">
-            <span className="mm-person-tile">
-              <PageIcon size={16} />
-            </span>
-            <span className="mm-person-names">
-              <a className="mm-person-name mm-trash-link" href={pagePath(page.id)}>
-                {page.title}
-              </a>
-              {page.trashedAt !== null && (
-                <span className="mm-person-detail">
-                  À la corbeille depuis le {trashedOn.format(new Date(page.trashedAt))}
+      <>
+        {readError !== null && (
+          // La liste d'avant reste : c'est sa relecture qui a échoué.
+          <>
+            <FormError message={`La corbeille n'a pas pu être relue. ${readError}`} />
+            {retry}
+          </>
+        )}
+        {pages.length === 0 ? (
+          <p className="mm-settings-empty">La corbeille est vide.</p>
+        ) : (
+          <ul className="mm-people" aria-label="Pages à la corbeille">
+            {pages.map((page) => (
+              <li key={page.id} className="mm-person">
+                <span className="mm-person-tile">
+                  <PageIcon size={16} />
                 </span>
-              )}
-            </span>
-            <span className="mm-trash-actions">
-              <button
-                type="button"
-                className="mm-button mm-button-small"
-                aria-disabled={restoring !== null || undefined}
-                onClick={() => void restore(page)}
-              >
-                Restaurer
-              </button>
-              {page.level === "full" && (
-                <button
-                  type="button"
-                  className="mm-button mm-button-quiet"
-                  onClick={() => setDeleting(page)}
-                >
-                  Supprimer définitivement
-                </button>
-              )}
-            </span>
-          </li>
-        ))}
-      </ul>
+                <span className="mm-person-names">
+                  <a className="mm-person-name mm-trash-link" href={pagePath(page.id)}>
+                    {page.title}
+                  </a>
+                  {page.trashedAt !== null && (
+                    <span className="mm-person-detail">
+                      À la corbeille depuis le {trashedOnLabel(page.trashedAt)}
+                    </span>
+                  )}
+                </span>
+                {!readOnly && (
+                  <span className="mm-trash-actions">
+                    <button
+                      type="button"
+                      className="mm-button mm-button-small"
+                      aria-disabled={restoring !== null || undefined}
+                      onClick={() => void restore(page)}
+                    >
+                      Restaurer
+                    </button>
+                    {page.level === "full" && (
+                      <button
+                        type="button"
+                        className="mm-button mm-button-quiet"
+                        onClick={() => setDeleting(page)}
+                      >
+                        Supprimer définitivement
+                      </button>
+                    )}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </>
     );
   }
 
@@ -180,6 +181,7 @@ export function TrashView({ space, version, onChanged }: Props) {
         </span>
       </header>
       <div className="mm-settings">
+        {readOnly && <ReadOnlyBanner />}
         <h1 ref={titleRef} className="mm-settings-title" tabIndex={-1}>
           Corbeille
         </h1>
@@ -191,10 +193,10 @@ export function TrashView({ space, version, onChanged }: Props) {
           <FormError message={error} />
           {content}
         </div>
-        {deleting && (
+        {deleting && !readOnly && (
           <Confirm
             // Espaces insécables : le titre ne se coupe ni de ses guillemets ni du « ? ».
-            title={`Supprimer définitivement «\u00a0${deleting.title}\u00a0»\u00a0?`}
+            title={`Supprimer définitivement « ${deleting.title} » ?`}
             confirmLabel="Supprimer définitivement"
             destructive
             busy={busy}

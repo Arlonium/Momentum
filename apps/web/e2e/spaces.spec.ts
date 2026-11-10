@@ -19,7 +19,9 @@ import {
   NO_SESSION,
   openRowMenu,
   pageIdOf,
+  READ_ONLY_BANNER,
   sectionOf,
+  serverSchemaBumped,
   setPageLevel,
   shownRows,
   sidebarOf,
@@ -435,6 +437,25 @@ test("trash_and_restore_from_the_sidebar", async ({ browser }) => {
   await expect(titleOf(a)).not.toHaveAttribute("readonly", "");
   expect(await visible()).toEqual([parent.id, child.id, other.id].sort());
   expect(nativeDialogs).toEqual([]);
+});
+
+test("trash_view_is_read_only_under_another_schema", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  expect((await api.post(`/api/v1/pages/${a.id}/trash`)).status()).toBe(200);
+
+  // Le serveur a été mis à jour : cet onglet n'écrit plus rien (R35), la corbeille comprise.
+  const p = await newUser(browser, alice);
+  await serverSchemaBumped(p);
+  await p.goto(`/s/${space.id}/trash`);
+  // La liste se lit, avec le lien vers la page ; le bandeau dit pourquoi rien ne s'y fait.
+  await expect(trashItem(p, "Alpha").getByRole("link", { name: "Alpha" })).toBeVisible();
+  await expect(p.getByRole("main").getByText(READ_ONLY_BANNER)).toBeVisible();
+  // Ni « Restaurer », ni « Supprimer définitivement ».
+  await expect(trashItem(p, "Alpha").getByRole("button")).toHaveCount(0);
+  expect((await getTree(api, space.id)).nodes).toEqual([]);
 });
 
 test("delete_forever_asks_first", async ({ browser }) => {

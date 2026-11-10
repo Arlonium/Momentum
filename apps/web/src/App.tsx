@@ -142,6 +142,7 @@ export function App() {
         key={atSpace.id}
         space={atSpace}
         version={actions.trashChanges}
+        readOnly={stale}
         onChanged={actions.trashChanged}
       />
     );

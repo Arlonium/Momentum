@@ -922,7 +922,8 @@ button.tree-toggle:hover {
   padding: 120px var(--mm-page-inset) 64px;
 }
 
-.mm-message .mm-banner {
+.mm-message .mm-banner,
+.mm-settings .mm-banner {
   margin: 0 0 24px;
 }
 
