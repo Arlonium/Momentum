@@ -526,9 +526,19 @@ async fn logout_and_password_change_close_the_account_connections() {
 /// Ruling R71, conditions 3 et 4 : un retrait de membre et un changement de rôle incrémentent
 /// `spaces.rev` dans leur transaction, et ne ferment les connexions qu'après le commit.
 ///
-/// Le verrou d'écriture de SQLite est tenu par une connexion annexe : l'écriture de la route
-/// attend, et tant qu'elle n'est pas validée, personne n'est fermé ; quand la connexion l'est,
-/// la révision a déjà bougé.
+/// Deux preuves, pour chaque changement.
+///
+/// 1. Une écriture qui n'est pas validée ne ferme personne. La base refuse l'écriture de la
+///    route (une panne posée sur `members`) : `500`, la connexion est encore servie, et la
+///    révision n'a pas bougé. Aucune attente ici : si la fermeture venait avant le commit,
+///    elle serait faite, et le test le voit à coup sûr.
+/// 2. Le verrou d'écriture de SQLite est tenu par une connexion annexe : l'écriture de la route
+///    attend, et tant qu'elle n'est pas validée, personne n'est fermé ; quand la connexion
+///    l'est, la révision a déjà bougé. Rien ne dit de l'extérieur que la route attend le
+///    verrou : le test lui laisse `HELD`, comme ses voisins. Trop courte sur un poste très
+///    chargé, cette attente rendrait ses deux premières affirmations vraies d'office ; elle
+///    ne peut pas pour autant faire passer le test à tort, puisque la première preuve n'en
+///    dépend pas.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rights_change_bumps_rev_before_the_kick() {
     let t = open_app().await;
@@ -538,24 +548,40 @@ async fn rights_change_bumps_rev_before_the_kick() {
     let url = sync_url(addr, page);
     let rev = async || team.store.space_rev(team.space).await.unwrap().unwrap();
     let member = member_uri(team.space, &team.tom);
+    // `(nom, ce que la route écrit dans `members`, le statut quand elle passe)`.
     let changes = [
-        (
-            "le changement de rôle",
-            json_request(Method::PATCH, &member, &json!({ "role": "admin" })),
-            StatusCode::OK,
-        ),
-        (
-            "le retrait du membre",
-            Request::delete(&member).body(Body::empty()).unwrap(),
-            StatusCode::NO_CONTENT,
-        ),
+        ("le changement de rôle", "UPDATE", StatusCode::OK),
+        ("le retrait du membre", "DELETE", StatusCode::NO_CONTENT),
     ];
-    for (what, request, expected) in changes {
+    for (what, event, expected) in changes {
+        // La requête du changement : chaque preuve envoie la sienne.
+        let request = || match event {
+            "UPDATE" => json_request(Method::PATCH, &member, &json!({ "role": "admin" })),
+            _ => Request::delete(&member).body(Body::empty()).unwrap(),
+        };
         let live = synced_as(&team.mona.browser, &url).await;
         let before = rev().await;
+
+        // 1. L'écriture échoue dans sa transaction : rien n'est validé, personne n'est fermé.
+        let failure = format!(
+            "CREATE TRIGGER panne BEFORE {event} ON members \
+             BEGIN SELECT RAISE(ABORT, 'panne simulée'); END"
+        );
+        exec_sql(&t.db_path(), &failure).await;
+        let reply = team.olga.browser.send(request()).await;
+        reply.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+        exec_sql(&t.db_path(), "DROP TRIGGER panne").await;
+        assert!(
+            still_served(&live).await,
+            "fermée par une écriture qui n'a pas été validée : {what}"
+        );
+        assert_eq!(rev().await, before, "{what}");
+
+        // 2. L'écriture attend le verrou, puis passe.
         let lock = WriteLock::take(&t).await;
         let watch = async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            // Le temps que la route lise les rôles et vienne attendre le verrou.
+            tokio::time::sleep(HELD).await;
             assert!(!live.is_closed(), "fermée avant le commit : {what}");
             assert_eq!(rev().await, before, "{what}");
             lock.commit().await;
@@ -565,7 +591,7 @@ async fn rights_change_bumps_rev_before_the_kick() {
                 "connexion fermée avant que la révision ait bougé : {what}"
             );
         };
-        let (reply, ()) = tokio::join!(team.olga.browser.send(request), watch);
+        let (reply, ()) = tokio::join!(team.olga.browser.send(request()), watch);
         reply.assert_status(expected);
         assert_eq!(rev().await, before + 1, "{what}");
     }
