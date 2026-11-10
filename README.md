@@ -15,7 +15,7 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 
 ---
 
-## Où en est le projet (9 novembre 2026)
+## Où en est le projet (10 novembre 2026)
 
 | Étape | État |
 |---|---|
@@ -23,14 +23,37 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 | Conception complète | ✅ validée : [`docs/specs/2026-11-09-mementum-design.md`](docs/specs/2026-11-09-mementum-design.md) |
 | Maquettes (3 directions, **A « Papier » retenue**) | ✅ faites : [`docs/design/`](docs/design/) |
 | Phase 0 : prototype jetable qui valide les choix techniques | ✅ faite sur PC et relue (relecture finale du 9 novembre, voir [`spike/RESULTS.md`](spike/RESULTS.md)) ; ⏳ **mesures ARM repoussées avant la phase 2** (bases de données) |
-| Phase 1 « Écrire ensemble » (MVP) | 🚧 en cours, découpée en 7 lots. Lot 1 « Socle et édition en direct » **fait** : 10 tâches closes, relecture finale faite, corrections comprises ([plan](docs/superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md)). Lots 2 à 7 à venir |
+| Phase 1 « Écrire ensemble » (MVP) | 🚧 en cours, découpée en 7 lots. Lot 1 « Socle et édition en direct » **fait** ([plan](docs/superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md)). Lot 2 « Comptes, espaces, droits et corbeille » **presque fini** : le serveur est fait et relu ; il reste le menu Partager de l'application, la relecture finale de tout le lot et la recette ([plan](docs/superpowers/plans/2026-11-10-p1-lot2-comptes-espaces-droits.md), [registre](docs/superpowers/logs/2026-11-10-p1-lot2-ledger.md)). Lots 3 à 7 à venir |
 
-Le lot 1 livre le vrai code (`crates/mementum-*`, `apps/web`, `packages/protocol`, `spec/`) : un arbre de pages, l'édition à plusieurs en direct dans BlockNote et le format MMD de la phase 1, sans comptes ni droits (lot 2). Il laisse cinq limites connues, décrites dans la conception (§9) :
+Le lot 1 a livré le vrai code (`crates/mementum-*`, `apps/web`, `packages/protocol`, `spec/`) : un arbre de pages, l'édition à plusieurs en direct dans BlockNote et le format MMD de la phase 1. Le lot 2 a corrigé une de ses limites connues : l'arbre des pages ne ralentit plus l'ouverture d'une page (Ruling R43). Les quatre autres restent, décrites dans la conception (§9) :
 - une édition faite sur un bloc pendant qu'un autre client le déplace est perdue (Ruling R39, à traiter au lot 3) ;
 - la réécriture complète d'une page de 10 000 blocs par `PUT /mmd` bloque cette page 2,5 à 4 s selon la machine et sa charge (Ruling R40, remède prévu au lot 5) ;
 - `PUT /mmd` refuse une prop hors du registre des blocs, parce qu'un navigateur l'effacerait ensuite sans bruit (Ruling R41) ;
-- l'ouverture d'une page ralentit avec le nombre de pages affichées dans l'arbre, et dépasse le budget de 300 ms vers 350 à 400 pages (Ruling R43, correctif prévu au lot 2) ;
 - deux avis de sécurité RustSec sont ouverts sans mise à jour possible, sur `libsqlite3-sys` et `smallstr` ; le premier ne touche qu'un serveur qui ouvrirait une base écrite par un tiers, ce que Mementum ne fait pas (Ruling R44).
+
+Un « Ruling » est une décision prise en cours de route, numérotée (R1, R2…) et expliquée dans le registre de son lot.
+
+### Ce que livre le lot 2
+
+Tout le produit est maintenant sous comptes et sous droits. Rien ne se lit ni ne s'écrit sans compte. Le serveur vérifie le droit de la personne à chaque demande, édition en direct comprise.
+
+- **Comptes.** Chacun a un compte local : une adresse e-mail et un mot de passe. Le premier compte créé administre l'instance. Ensuite, on ne crée un compte qu'avec le lien d'une invitation, sauf si l'exploitant ouvre les inscriptions (voir « Réglages »).
+- **Espaces**, comme les espaces de travail de Notion (demande d'Alex, à confirmer avec Lenny). Chacun reçoit le sien à l'inscription (sauf s'il arrive par une invitation), en crée d'autres (« Perso », « Pro ») et passe de l'un à l'autre. Un espace ne voit rien des autres.
+- **Membres et invités.** On invite quelqu'un dans tout l'espace : il devient membre (ou admin). On l'invite sur une seule page : il devient invité, et ne voit que cette page et ses sous-pages. Le propriétaire et les admins changent les rôles et retirent des personnes. Chacun peut quitter un espace, qui garde toujours au moins un propriétaire.
+- **Pages privées et partagées.** La barre latérale range les pages en trois sections, comme Notion : « Espace » (les pages de tous les membres), « Partagé » (les pages ouvertes à des personnes précises) et « Privé » (les pages que seul leur auteur voit). La section se déduit des accès de la page : rien à ranger à la main. Une sous-page a les accès de sa page parente. Il y a quatre niveaux sur une page : lire, commenter (pour l'instant, comme lire), modifier, et accès complet (partager, changer de page parente, supprimer pour de bon). Le partage d'une page est fait par le serveur ; son menu dans l'application est la dernière tâche du lot.
+- **Invitations par lien.** Il n'y a pas encore d'envoi d'e-mails : une invitation est un lien, à copier et à envoyer soi-même. Il sert une fois et vaut 7 jours. On peut le révoquer tant qu'il attend. C'est le lien qui donne l'accès, jamais l'adresse e-mail, que personne ne vérifie. Un lien ne vaut plus si son auteur a perdu le droit de le faire.
+- **Corbeille.** Une page mise à la corbeille part avec ses sous-pages, et revient avec elles. À la corbeille, elle se lit encore mais ne s'écrit plus. On la supprime pour de bon depuis la corbeille.
+- **Pages du lot 1.** Le binaire du lot 2 met à jour une base du lot 1 à sa première ouverture, après en avoir écrit une copie (voir plus bas). Ses pages vont dans un espace « Mon espace », section « Espace », que reprend le premier compte créé.
+
+Le premier compte administre l'instance, mais au lot 2 ce titre ne lui donne aucun pouvoir dans l'application. Comme tout le monde, il ne voit que les espaces où il a un rôle. Personne, ni lui, ni le propriétaire ou un admin de l'espace, ne voit les pages privées des autres.
+
+**Limites connues du lot 2** (détail dans la conception, §9) :
+- dix mots de passe faux pour une même adresse la bloquent 15 minutes, même avec le bon mot de passe : quelqu'un d'autre peut donc empêcher une personne de se connecter. Ses sessions déjà ouvertes continuent (Ruling R76) ;
+- l'inscription dit si une adresse a déjà un compte ; et même sur une instance où l'on s'inscrit sur invitation, quelqu'un du dehors peut le savoir, en une douzaine d'essais par adresse (Rulings R77 et R84). Ces trois points attendent une limite du nombre de demandes par adresse IP, prévue au lot 7 ;
+- quelqu'un qui peut seulement lire une page peut quand même changer ou effacer, chez les autres, le nom et le curseur affichés d'une autre personne. Il ne peut rien changer au contenu ;
+- un invité à qui l'on donne l'accès complet à une page peut y inviter d'autres personnes, comme dans Notion (Ruling R86) ;
+- la barre latérale ne montre pas en direct ce que font les autres (pages créées, renommées, déplacées) : elle se met à jour quand on revient sur l'onglet (Ruling R97). Le direct viendra avec le journal d'opérations, au lot 3 ;
+- pas encore d'e-mails, de connexion par passkey, de suppression d'un espace ou d'un compte, de vidage automatique de la corbeille, ni de création d'espaces réservée par l'admin (Rulings R46, R47 et R52).
 
 Le dossier `spike/` est le **prototype jetable** de la phase 0 : on en garde les leçons, les fixtures et les tests d'aller-retour, pas le code.
 
@@ -55,7 +78,7 @@ La liste complète, avec les raisons, est dans la conception, §12 et §13.
 1. **Ce README.**
 2. **La conception** : [`docs/specs/2026-11-09-mementum-design.md`](docs/specs/2026-11-09-mementum-design.md). C'est la référence : vision, fonctionnalités, architecture, format MMD, MCP, feuille de route (§9).
 3. **Les résultats de la phase 0** : [`spike/RESULTS.md`](spike/RESULTS.md). Ce qui a été mesuré, ce qui est confirmé ou corrigé, et **ce qui change pour la phase 1**.
-4. **Le plan de la phase 0** : [`docs/superpowers/plans/2026-11-09-phase0-spike.md`](docs/superpowers/plans/2026-11-09-phase0-spike.md), et son registre de décisions : [`docs/superpowers/logs/2026-11-09-phase0-ledger.md`](docs/superpowers/logs/2026-11-09-phase0-ledger.md).
+4. **Les plans et leurs registres de décisions** : phase 0 ([plan](docs/superpowers/plans/2026-11-09-phase0-spike.md), [registre](docs/superpowers/logs/2026-11-09-phase0-ledger.md)) ; lots 1 et 2 de la phase 1 (plans dans `docs/superpowers/plans/`, registres dans `docs/superpowers/logs/`). Les Rulings cités par ce README et par la conception y sont expliqués.
 5. **Si besoin, la recherche** : [`docs/research/2026-11-09-etat-de-l-art.md`](docs/research/2026-11-09-etat-de-l-art.md) (synthèse) et [`docs/research/notes/`](docs/research/notes/) (notes sourcées).
 6. **Pour un agent IA** : [`CLAUDE.md`](CLAUDE.md) (conventions et pièges déjà rencontrés).
 
@@ -70,9 +93,9 @@ docs/
   research/                 état de l'art + notes sourcées
   design/                   maquettes des 3 directions (A retenue)
   superpowers/
-    plans/                  plans d'implémentation (phase 0, lot 1 de la phase 1)
+    plans/                  plans d'implémentation (phase 0, lots 1 et 2 de la phase 1)
     logs/                   registres d'exécution (décisions prises en cours de route)
-crates/mementum-*/          serveur Rust : schema, md, crdt, store, sync, server, cli
+crates/mementum-*/          serveur Rust : schema, md, crdt, store, acl, sync, server, cli
 apps/web/                   client React + Vite + BlockNote, tests e2e Playwright
 packages/protocol/          types TypeScript de l'API, générés depuis Rust
 spec/                       registre des blocs (schema/) et fixtures MMD (mmd/fixtures/)
@@ -99,15 +122,63 @@ cargo run -p mementum-cli -- serve        # serveur sur 127.0.0.1:8080, données
 corepack pnpm -C apps/web dev             # dans un autre terminal : Vite sur le port 5173
 ```
 
-Puis ouvrir `http://localhost:5173`. Vite relaie `/api` et `/sync` (WebSocket comprise) vers le serveur. Le lot 1 n'a pas de comptes : chaque navigateur écrit sous un nom d'invité (« Invité » et 4 chiffres).
+Puis ouvrir `http://localhost:5173`. Vite relaie `/api` et `/sync` (WebSocket comprise) vers le serveur. Au lot 2, l'application est encore servie par Vite, comme en développement : le binaire qui l'embarque et l'image Docker viennent au lot 7.
 
-Au démarrage, si une migration de schéma attend une base existante, le serveur en écrit d'abord une copie à côté (`data/mementum.db.avant-0002.bak` avant la migration `0002`), et ne démarre pas s'il ne peut pas l'écrire. Chaque tentative refait la copie et la compare à toutes celles de cette version : si l'une est identique, elle suffit ; sinon (la base a changé, par exemple une migration ratée puis des pages écrites avec l'ancienne version), la nouvelle prend un nom daté en UTC (`mementum.db.avant-0002.20261110T081500Z.bak`, puis `…Z-2.bak` dans la même seconde) ; aucune copie n'est écrasée ni supprimée automatiquement. La plus récente se reconnaît à la date de son nom, la copie sans date étant la plus ancienne (l'ordre alphabétique ne suit pas la date ; en cas de doute, la date de modification du fichier départage). Pour restaurer une copie : serveur arrêté, la remettre à la place de `data/mementum.db`, et supprimer `mementum.db-wal` et `mementum.db-shm` s'ils existent (ils appartiennent à la base remplacée).
+> **Tant que le lot 2 n'est pas clos, sa migration `0002` peut encore changer** (Ruling R53). Une base ouverte par un binaire d'avant ce changement refuserait ensuite de démarrer. N'ouvrez pas avec ce binaire une base que vous voulez garder : travaillez sur une copie.
 
-> **Ne pas écouter hors de la boucle locale** (`serve --bind 0.0.0.0:8080`, ou une adresse du réseau). Le lot 1 n'a aucune authentification : toute personne qui atteint l'adresse lit et modifie toutes les pages. Les protections contre le DNS rebinding ne valent, elles aussi, que sur la boucle locale. Le serveur l'écrit dans son journal au démarrage.
+### Premier compte
 
-Autres ports : `MEMENTUM_E2E_WEB_PORT` (Vite) et `MEMENTUM_E2E_API_PORT` (le serveur que vise le mandataire), à donner aussi à `serve --bind 127.0.0.1:<port>`.
+Sur une instance neuve, l'application propose d'abord de créer le premier compte. Il administrera l'instance, quel que soit le réglage des inscriptions. Tant qu'aucun compte n'existe, le serveur le rappelle dans son journal à chaque démarrage. Créez ce compte avant de rendre le serveur joignable par d'autres : sinon, le premier venu devient administrateur. Sur une base du lot 1, ce compte reprend « Mon espace » et ses pages ; sinon, il reçoit un espace neuf, « Espace de » suivi de son nom.
 
-Tests :
+### Réglages
+
+| Réglage | Variable | Option de `serve` | Défaut |
+|---|---|---|---|
+| adresse d'écoute | `MEMENTUM_BIND` | `--bind` | `127.0.0.1:8080` |
+| dossier des données | `MEMENTUM_DATA_DIR` | `--data-dir` | `./data` |
+| inscriptions | `MEMENTUM_SIGNUP` | `--signup` | `invite` |
+| adresse publique | `MEMENTUM_PUBLIC_URL` | `--public-url` | aucune |
+
+Une option l'emporte sur sa variable. Une valeur invalide arrête le démarrage, avec un message qui la nomme. Par exemple : `cargo run -p mementum-cli -- serve --signup open`.
+
+- **`MEMENTUM_SIGNUP`** dit ce que peut faire quelqu'un qui arrive sans invitation. Avec `invite` (le défaut), il peut seulement se connecter : pour créer un compte, il faut le lien d'une invitation. Avec `open`, n'importe qui crée un compte, et reçoit son propre espace. Le premier compte est permis dans les deux cas (Ruling R50).
+- **`MEMENTUM_PUBLIC_URL`** est l'adresse sous laquelle les gens atteignent l'instance, par exemple `https://notes.exemple.fr` derrière un mandataire HTTPS ou un tunnel. Elle sert à trois choses. En `https`, le cookie de session ne part que sur une connexion chiffrée (`Secure`). Son nom d'hôte est accepté dans l'en-tête `Host`, même quand le serveur n'écoute que sur la boucle locale (Ruling R78). Et les écritures venues de cette adresse sont acceptées (Ruling R51). Sans elle, derrière un mandataire HTTPS, le cookie n'a pas `Secure`.
+- Un lien d'invitation reprend l'adresse sous laquelle on a ouvert l'application. Pour envoyer un lien qui marche chez les autres, ouvrez l'application par son adresse publique avant d'inviter.
+- Les journaux vont sur la sortie d'erreur, au niveau `info`. `RUST_LOG` les règle, par exemple `RUST_LOG=mementum_sync=debug`.
+
+> **Écouter hors de la boucle locale** (`serve --bind 0.0.0.0:8080`, ou une adresse du réseau). Ce sont alors les comptes qui protègent les pages : aucune ne se lit ni ne s'écrit sans session et sans droit. Le contrôle de l'en-tête `Host`, qui protège du DNS rebinding, ne vaut que sur la boucle locale ; le serveur écrit dans son journal qu'il est coupé. Créez d'abord le premier compte. Pour un accès depuis Internet, mettez un mandataire HTTPS devant, et réglez `MEMENTUM_PUBLIC_URL`.
+
+### Mot de passe perdu
+
+Il n'y a pas encore d'envoi d'e-mails. Un mot de passe oublié se règle sur le serveur, par quelqu'un qui a accès au dossier des données (Ruling R47) :
+
+```bash
+cargo run -p mementum-cli -- user set-password --email alice@exemple.fr
+```
+
+Mettez l'adresse du compte à la place de `alice@exemple.fr`. Ajoutez `--data-dir` suivi du dossier si les données ne sont ni dans `./data` ni dans `MEMENTUM_DATA_DIR`. Avec le binaire compilé, la commande est `mementum user set-password --email alice@exemple.fr`.
+
+La commande lit le nouveau mot de passe sur **la première ligne de son entrée standard** : tapé au clavier puis Entrée, ou passé par un tuyau ou une redirection. Tapé dans un terminal, il reste affiché à l'écran ; la commande le rappelle avant de lire. Il fait 10 à 200 caractères, en UTF-8, sans caractère de contrôle (tabulation, retour chariot au milieu de la ligne, octet nul) : sinon, la commande refuse et ne change rien. Elle n'affiche jamais le mot de passe, seulement le nombre de caractères enregistrés : vérifiez ce nombre.
+
+Ensuite, toutes les sessions du compte sont fermées. La commande peut tourner pendant que le serveur tourne. Mais elle ne ferme pas les pages que ce compte a déjà ouvertes : elles restent ouvertes jusqu'à leur prochaine coupure, puis ne reviennent pas, faute de session (Ruling R73). Elle ne lève pas non plus le blocage après dix mots de passe faux : il dure 15 minutes, et le serveur le garde en mémoire. Pour fermer ces pages ou lever ce blocage tout de suite, redémarrez le serveur après la commande.
+
+**Sous Windows PowerShell 5.1** (celui livré avec Windows, pas PowerShell 7) :
+- un tuyau (`'…' | mementum user set-password …`) remplace par défaut chaque lettre accentuée par `?`, sans aucune erreur. La commande enregistre alors un autre mot de passe, de même longueur. Tapez plutôt le mot de passe quand la commande le demande, ou lancez d'abord `$OutputEncoding = [System.Text.UTF8Encoding]::new()` dans la même fenêtre ;
+- une entrée en UTF-16, comme un fichier écrit par `>` ou par `Out-File`, est refusée sans rien changer.
+
+### Copies avant migration
+
+Au démarrage, si une migration de schéma attend une base existante, le serveur en écrit d'abord une copie à côté (`data/mementum.db.avant-0002.bak` avant la migration `0002`). Il ne démarre pas s'il ne peut pas l'écrire. `mementum user set-password` fait de même quand il est le premier à ouvrir la base.
+
+Chaque tentative refait la copie et la compare à toutes celles de cette version. Si l'une est identique, elle suffit. Sinon (la base a changé, par exemple une migration ratée puis des pages écrites avec l'ancienne version), la nouvelle copie prend le nom sans date s'il est libre, sinon un nom daté en UTC (`mementum.db.avant-0002.20261110T081500Z.bak`, puis `…Z-2.bak` dans la même seconde). Aucune copie n'est écrasée ni supprimée automatiquement.
+
+Pour trouver la plus récente, regardez la date de modification des fichiers. Ni le nom ni l'ordre alphabétique ne suffisent : si l'on a déplacé la copie sans date (pour la restaurer, par exemple), la copie suivante reprend ce nom.
+
+Sur un système de fichiers sans liens physiques (partage réseau SMB, exFAT, certains volumes Docker), la copie est quand même écrite, et le journal le signale : pendant une mise à jour, ne lancez alors qu'un processus à la fois sur ces données (Ruling R75).
+
+Pour restaurer une copie : serveur arrêté, la remettre à la place de `data/mementum.db`, et supprimer `mementum.db-wal` et `mementum.db-shm` s'ils existent (ils appartiennent à la base remplacée).
+
+### Tests
 
 ```bash
 cargo test --workspace                                  # Rust
@@ -116,9 +187,12 @@ corepack pnpm -C apps/web typecheck                     # TypeScript
 node tools/check-npm-licenses.mjs                       # licences npm de production
 corepack pnpm -C apps/web exec playwright install chromium
 corepack pnpm e2e                                       # Playwright : lance le serveur et Vite
+corepack pnpm e2e:budgets                               # budgets du navigateur (§5.10), à part
 ```
 
-Les tests e2e ne réutilisent jamais un serveur déjà lancé : si le port 5173 ou 8080 est pris, ils s'arrêtent en le nommant. Choisir alors d'autres ports, par exemple `MEMENTUM_E2E_WEB_PORT=5174 corepack pnpm e2e`.
+Les tests e2e ne réutilisent jamais un serveur déjà lancé : si le port 5173 ou 8080 est pris, ils s'arrêtent en le nommant. Choisir alors d'autres ports, par exemple `MEMENTUM_E2E_WEB_PORT=5174 corepack pnpm e2e`. Ces deux variables valent aussi hors des tests : `MEMENTUM_E2E_WEB_PORT` règle le port de Vite, `MEMENTUM_E2E_API_PORT` le serveur que vise son mandataire (à donner aussi à `serve --bind 127.0.0.1:<port>`).
+
+`corepack pnpm e2e` ne mesure pas les budgets du navigateur. `corepack pnpm e2e:budgets` les mesure sur ce que les gens utiliseront : l'application construite (`vite build`, servie par `vite preview`) et un serveur compilé en `--release`. Sa première compilation en release est longue.
 
 ## Lancer le prototype de la phase 0
 
@@ -156,11 +230,13 @@ L'éditeur de démo s'ouvre avec `cargo run --release -p spike-server --bin spik
 
 ## Prochaines étapes
 
-1. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11), à faire **avant la phase 2**, et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
-2. **Lot 2 de la phase 1** : comptes, espaces, droits et corbeille. Son [plan](docs/superpowers/plans/2026-11-10-p1-lot2-comptes-espaces-droits.md) est écrit (14 tâches), sur le modèle des espaces façon Notion, et son [registre](docs/superpowers/logs/2026-11-10-p1-lot2-ledger.md) est ouvert. Il reprend ce que le [registre du lot 1](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md) lui reporte : arbre des pages et budgets du navigateur (R43, R38), écritures du store en transactions, version de schéma qu'un client ne doit pas pouvoir écraser. Les fusions de tableau écrites par un client Yjs restent à traiter (lot 3).
-3. **Lots 3 à 7**, dans cet ordre : collaboration et blocs riches ; recherche ; agents (REST complet, MCP v1, jetons) ; imports et export ; livraison. Ils reprennent les limites connues du lot 1 :
-   - lot 3 : déplacements de blocs sans perte d'édition (pistes (a) et (b) du Ruling R39, conception §11), et, là ou au lot 5, un porteur durable pour les props hors registre (Ruling R41) ;
-   - lot 5 : écriture MMD par différence, pour ne plus bloquer une page pendant sa réécriture (Ruling R40).
+1. **Finir le lot 2** : le menu Partager de l'application ; la relecture de tout le lot, avec une passe dédiée à la sécurité ; toutes les suites relancées sur un clone neuf ; un essai sur une copie d'une vraie base du lot 1 ; puis la recette du propriétaire. Plusieurs choix du lot attendent un avis : les espaces façon Notion eux-mêmes (à confirmer avec Lenny, Ruling R45), l'accès complet donné par défaut aux membres sur les pages d'espace (R48), les inscriptions sur invitation par défaut (R50), le menu du compte placé dans le sélecteur d'espace (R80), l'invité en accès complet qui peut inviter (R86), et la page sortie à la racine qui garde son accès d'équipe (R94).
+2. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11), à faire **avant la phase 2**, et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
+3. **Lots 3 à 7**, dans cet ordre : collaboration et blocs riches ; recherche ; agents (REST complet, MCP v1, jetons d'API) ; imports et export ; livraison. Ils reprennent les limites connues des lots 1 et 2 :
+   - lot 3 : commentaires, historique, arbre des pages et présence en direct (journal d'opérations, présence vérifiée par le serveur) ; déplacements de blocs sans perte d'édition (pistes (a) et (b) du Ruling R39, conception §11) ; tableaux mal formés écrits directement par un client Yjs (R54) ; là ou au lot 5, un porteur durable pour les props hors registre (Ruling R41) ;
+   - lot 5 : écriture MMD par différence, pour ne plus bloquer une page pendant sa réécriture (Ruling R40) ;
+   - lot 7 : livraison (binaire qui embarque l'application, image Docker, fichier `mementum.toml`, inscription par domaine e-mail) ; limites du nombre de demandes, dont celle par adresse IP qui lèvera R76, R77 et R84 (R54) ; contrôle des avis de sécurité en CI (R44).
+4. **Sans date, à décider** : envoi d'e-mails (invitations, mot de passe oublié), suppression d'un espace ou d'un compte, création d'espaces réservée par l'admin d'instance, vidage automatique de la corbeille, passkeys (R46).
 
 ## Méthode de travail
 
