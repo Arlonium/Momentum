@@ -14,10 +14,10 @@ use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use common::{Browser, Reply, TestApp, WAIT, all_logs, assert_french, exec_sql, query_i64};
-use mementum_acl::Role;
+use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
-use mementum_store::{Expected, Store};
+use mementum_store::{Expected, InvitationGrant, NewInvitation, NewNode, NodeKind, Store};
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -360,7 +360,8 @@ const MATRIX: [(&str, [u16; 6]); 10] = [
     ),
     (
         "DELETE /api/v1/invitations/{invitation}",
-        [204, 204, 403, 403, 404, 401],
+        // Qui ne peut pas lister l'invitation n'apprend pas qu'elle existe.
+        [204, 204, 404, 404, 404, 401],
     ),
     // Sans session : le jeton suffit.
     (
@@ -934,6 +935,133 @@ async fn revoked_invitation_is_404() {
         role_of(&olga.browser, space, bob.id).await.as_deref(),
         Some("member")
     );
+}
+
+/// Une invitation de page n'est listée, et ne se révoque, que par qui peut partager la page : un
+/// admin n'apprend ni l'id d'une page privée ni l'adresse de qui y est invité. Pour qui ne peut
+/// pas la lister, la révoquer répond comme pour une invitation qui n'existe pas.
+#[tokio::test]
+async fn page_invitations_are_hidden_from_who_cannot_share() {
+    let t = open_app().await;
+    let Team {
+        olga,
+        adam,
+        mona,
+        space,
+        ..
+    } = team(&t).await;
+    // Les pages et leurs invitations, par le store : les routes de pages et de partage viennent
+    // ensuite.
+    let store = Store::open(&t.db_path()).await.unwrap();
+    let line = |subject, level| Grant { subject, level };
+    let page = |title: &str, grants: Vec<Grant>| NewNode {
+        space_id: space,
+        parent_id: None,
+        after: None,
+        kind: NodeKind::Page,
+        title: title.to_string(),
+        created_by: Some(mona.id),
+        grants,
+        doc: None,
+    };
+    let mona_full = line(Subject::User(mona.id), Level::Full);
+    // Privée de Mona : ni Adam ni Olga ne la voient.
+    let private = page("Privée", vec![mona_full]);
+    // Partagée à Adam en lecture : il la voit, sans pouvoir la partager.
+    let read_only = page(
+        "Lue",
+        vec![mona_full, line(Subject::User(adam.id), Level::Read)],
+    );
+    // Une page des membres : propriétaires et admins y ont `full`.
+    let team_page = page("Équipe", vec![line(Subject::Members, Level::Full)]);
+    let mut on = Vec::new();
+    for (seed, new) in [private, read_only, team_page].into_iter().enumerate() {
+        let node = store.create_node(new).await.unwrap();
+        let invitation = store
+            .create_invitation(NewInvitation {
+                space_id: space,
+                grant: InvitationGrant::Page {
+                    node_id: node.id,
+                    level: Level::Edit,
+                },
+                email: format!("invite-{seed}@exemple.fr"),
+                token_hash: [seed as u8 + 1; 32],
+                created_by: mona.id,
+                expires_at: now_ms() + WEEK_MS,
+            })
+            .await
+            .unwrap();
+        on.push((node.id, invitation.id));
+    }
+    let [(_, on_private), (_, on_read_only), (team_id, on_team)] = on[..] else {
+        unreachable!("trois pages")
+    };
+
+    // La liste : seulement l'invitation de la page des membres, pour l'admin comme pour la
+    // propriétaire.
+    for who in [&adam, &olga] {
+        let reply = who.browser.get(&invitations_uri(space)).await;
+        reply.assert_status(StatusCode::OK);
+        let listed = reply.json();
+        assert_eq!(
+            listed,
+            json!([{
+                "id": on_team.to_string(),
+                "email": "invite-2@exemple.fr",
+                "role": null,
+                "level": "edit",
+                "pageId": team_id.to_string(),
+                "expiresAt": listed[0]["expiresAt"],
+            }])
+        );
+        for hidden in [on_private, on_read_only] {
+            assert!(!reply.text().contains(&hidden.to_string()));
+        }
+    }
+
+    // La révoquer : comme une invitation qui n'existe pas, que l'admin ne voie pas la page ou
+    // qu'il la voie sans pouvoir la partager. Mona, qui peut partager ses pages mais n'est pas
+    // admin, non plus (la Task 11 ouvre la révocation à qui peut partager la page).
+    let missing = adam
+        .browser
+        .delete(&format!("/api/v1/invitations/{}", Uuid::now_v7()))
+        .await;
+    missing.assert_error(StatusCode::NOT_FOUND, "not_found");
+    for (who, invitation) in [
+        (&adam, on_private),
+        (&adam, on_read_only),
+        (&olga, on_private),
+        (&mona, on_private),
+        (&mona, on_team),
+    ] {
+        let reply = who
+            .browser
+            .delete(&format!("/api/v1/invitations/{invitation}"))
+            .await;
+        assert_eq!(
+            (reply.status, &reply.body),
+            (missing.status, &missing.body),
+            "{invitation}"
+        );
+    }
+
+    // La propriétaire, qui a `full` sur la page des membres, la révoque.
+    olga.browser
+        .delete(&format!("/api/v1/invitations/{on_team}"))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        adam.browser.get(&invitations_uri(space)).await.json(),
+        json!([])
+    );
+    // Les deux autres attendent toujours.
+    let pending = store.pending_invitations(space).await.unwrap();
+    let mut left: Vec<Uuid> = pending.iter().map(|i| i.id).collect();
+    left.sort();
+    let mut expected = vec![on_private, on_read_only];
+    expected.sort();
+    assert_eq!(left, expected);
+    store.close().await;
 }
 
 /// Accepter une invitation ne baisse jamais un rôle ; elle peut en monter un.

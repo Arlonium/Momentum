@@ -110,10 +110,10 @@ pub(crate) async fn space_invitations(
     ))
 }
 
-/// `DELETE /api/v1/invitations/{id}` : `204`, l'invitation est supprimée (`admin` de son
-/// espace ; pour une invitation de page, qui peut aussi partager la page). Inconnue, échue,
-/// acceptée, d'un espace où l'on n'a aucun rôle ou d'une page qu'on ne voit pas : la même
-/// réponse, `404`.
+/// `DELETE /api/v1/invitations/{id}` : `204`, l'invitation est supprimée, par qui peut la
+/// lister (`admin` de son espace ; pour une invitation de page, qui peut aussi partager la
+/// page). Pour tout autre, et pour une invitation inconnue, échue ou acceptée, la même
+/// réponse, `404` : qui ne peut pas la lister n'apprend pas qu'elle existe.
 pub(crate) async fn revoke(
     State(state): State<AppState>,
     user: AuthUser,
@@ -133,16 +133,8 @@ pub(crate) async fn revoke(
         .find_space_access(&user, invitation.space_id)
         .await?
         .ok_or_else(ApiError::invitation_not_found)?;
-    if let InvitationGrant::Page { node_id, .. } = invitation.grant
-        && access.node(node_id).is_none()
-    {
+    if at_least(&access, Role::Admin).is_err() || !may_manage(&access, &invitation) {
         return Err(ApiError::invitation_not_found());
-    }
-    at_least(&access, Role::Admin)?;
-    if !may_manage(&access, &invitation) {
-        return Err(ApiError::forbidden(
-            "révoquer une invitation sur une page demande l'accès complet à la page",
-        ));
     }
     match state.store.revoke_invitation(id).await {
         Ok(()) => {}
