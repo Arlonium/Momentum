@@ -1,7 +1,8 @@
 //! Mesures, pas des tests : elles n'affirment rien, elles affichent des lignes `MESURE`. À
-//! lancer à la demande, sur un serveur compilé en `--release` :
+//! lancer à la demande, sur un serveur compilé en `--release`, une mesure à la fois (ensemble,
+//! elles se gêneraient) :
 //!
-//! `cargo test --release -p mementum-server --test measure -- --ignored --nocapture`
+//! `cargo test --release -p mementum-server --test measure -- --ignored --nocapture --test-threads=1`
 //!
 //! Les requêtes passent par l'application en mémoire (`common/mod.rs`) : tout le chemin d'une
 //! requête (garde-fous, session, droits, écriture durable dans SQLite), sans la couche TCP.
@@ -12,10 +13,19 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use common::TestApp;
+use mementum_acl::{Grant, Level, Role, Subject};
+use mementum_server::SignupMode;
+use mementum_store::{NewNode, NodeKind, Sibling, Store};
 use serde_json::json;
 
 /// Créations par série.
 const SERIES: usize = 200;
+
+/// Pages de l'espace où se mesure la première lecture après une écriture.
+const PAGES: usize = 2000;
+
+/// Écritures suivies de leurs lectures, dans cette mesure.
+const ROUNDS: usize = 100;
 
 /// Le centile `percent` de durées triées, en millisecondes.
 fn centile(sorted: &[Duration], percent: usize) -> f64 {
@@ -111,4 +121,84 @@ async fn measure_page_creation() {
         reply.assert_status(StatusCode::OK);
     }
     report("renommer une page d'un espace de 2 200 pages", times);
+}
+
+/// Ce qu'une écriture dans un espace coûte à ceux qui le lisent ensuite. Dans un espace de
+/// 2 000 pages, Alice crée une page (la révision de l'espace avance), puis cinq autres membres
+/// lisent chacun cette page (`GET /api/v1/pages/{id}`), l'un après l'autre : c'est leur
+/// première requête depuis l'écriture, celle où leurs droits sont recalculés. Une ligne par
+/// personne, dans l'ordre où elles lisent ; puis la somme des cinq ; puis, pour comparer, la
+/// même lecture refaite sans écriture entre-temps (droits déjà calculés).
+#[tokio::test]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_first_read_after_a_write() {
+    let t = TestApp::with_config(|cfg| cfg.signup = SignupMode::Open).await;
+    let alice = t.account("Alice").await;
+    let mut readers = Vec::new();
+    for name in ["Basile", "Chloe", "David", "Emma", "Farid"] {
+        readers.push(t.account(name).await);
+    }
+    // Les rôles et les pages de départ sont posés par le store : ce ne sont pas eux qu'on
+    // mesure.
+    let store = Store::open(&t.db_path()).await.unwrap();
+    for reader in &readers {
+        store
+            .add_member(alice.space, reader.id, Role::Member)
+            .await
+            .unwrap();
+    }
+    for i in 0..PAGES {
+        store
+            .create_node(NewNode {
+                space_id: alice.space,
+                parent_id: None,
+                after: Some(Sibling::Last),
+                kind: NodeKind::Page,
+                title: format!("Page {i}"),
+                created_by: Some(alice.id),
+                grants: vec![Grant {
+                    subject: Subject::Members,
+                    level: Level::Full,
+                }],
+                doc: None,
+            })
+            .await
+            .unwrap();
+    }
+    store.close().await;
+
+    let read = async |reader: &common::Account<'_>, id: &str| {
+        let start = Instant::now();
+        let reply = reader.browser.get(&format!("/api/v1/pages/{id}")).await;
+        let elapsed = start.elapsed();
+        reply.assert_status(StatusCode::OK);
+        elapsed
+    };
+    let mut first: Vec<Vec<Duration>> = vec![Vec::new(); readers.len()];
+    let mut all = Vec::new();
+    let mut again = Vec::new();
+    for i in 0..ROUNDS {
+        // Dans la section « Espace » : les cinq autres la voient.
+        let body = json!({ "title": format!("Neuve {i}"), "section": "space" });
+        let id = alice.create(body).await.id;
+        let mut sum = Duration::ZERO;
+        for (rank, reader) in readers.iter().enumerate() {
+            let elapsed = read(reader, &id).await;
+            first[rank].push(elapsed);
+            sum += elapsed;
+        }
+        all.push(sum);
+        for reader in &readers {
+            again.push(read(reader, &id).await);
+        }
+    }
+    let what = format!("première lecture après une écriture, espace de {PAGES} pages");
+    for (rank, times) in first.into_iter().enumerate() {
+        report(&format!("{what}, personne {}", rank + 1), times);
+    }
+    report(&format!("{what}, somme des cinq personnes"), all);
+    report(
+        &format!("lecture suivante, sans écriture entre-temps, espace de {PAGES} pages"),
+        again,
+    );
 }
