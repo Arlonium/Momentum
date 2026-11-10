@@ -317,3 +317,41 @@ test("tree_is_read_again_when_the_tab_comes_back", async ({ browser }) => {
   await p.waitForTimeout(300);
   expect(reads).toBe(1);
 });
+
+/** Ce que l'application dit d'un serveur qui ne répond pas (`api.ts`). */
+const UNREACHABLE = "Le serveur Mementum ne répond pas. Vérifie qu'il est lancé, puis réessaie.";
+
+test("failed_tree_read_says_whether_the_list_was_read_or_updated", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+
+  const p = await newUser(browser, alice);
+  // L'horloge de la page est la nôtre : on n'attend pas cinq secondes pour de bon.
+  await p.clock.install();
+  const alert = sidebarOf(p).getByRole("alert");
+  const tree = "**/api/v1/spaces/*/tree";
+  const comeBack = async () => {
+    await p.clock.fastForward(5_500);
+    await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+  };
+
+  // Au premier chargement, l'arbre ne se lit pas : la liste n'a pas pu être « lue ».
+  await p.route(tree, (route) => route.abort());
+  await p.goto(`/s/${space.id}`);
+  await expect(alert).toHaveText(`La liste des pages n'a pas pu être lue. ${UNREACHABLE}`);
+  await expect(sidebarOf(p).getByRole("treeitem")).toHaveCount(0);
+  // Le serveur revient ; de retour sur l'onglet, l'arbre est lu, et le message part.
+  await p.unroute(tree);
+  await comeBack();
+  await expect(treeRow(p, a.id)).toBeVisible();
+  await expect(alert).toHaveCount(0);
+
+  // Une relecture qui échoue ensuite garde les pages à l'écran, et le dit autrement : la liste
+  // n'a pas pu être « mise à jour ».
+  await p.route(tree, (route) => route.abort());
+  await comeBack();
+  await expect(alert).toHaveText(`La liste des pages n'a pas pu être mise à jour. ${UNREACHABLE}`);
+  await expect(treeRow(p, a.id)).toBeVisible();
+});
