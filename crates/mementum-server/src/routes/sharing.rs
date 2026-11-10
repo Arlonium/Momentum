@@ -38,7 +38,10 @@
 //!   `inheritedGeneral` ; `general` est le niveau effectif) : un niveau plus bas, ou `null`
 //!   sans ligne propre, répond `409 inherited_access` ; au plancher, la ligne propre part ;
 //!   au-dessus, elle est posée ; `null` la retire (on revient au plancher, ou, sans plancher, à
-//!   « seulement les personnes nommées »). Il ne reste jamais de ligne redondante ;
+//!   « seulement les personnes nommées »). Ce `PUT` ne laisse donc pas de ligne redondante
+//!   derrière lui. Il peut en rester d'ailleurs, sans effet sur les droits : une ligne propre
+//!   posée avant qu'une page parente reçoive un accès général plus fort, ou venue d'un
+//!   changement de parent ; demander le niveau du plancher, ou `null`, la retire ;
 //! - après tout changement, la page garde quelqu'un en `full`, par ses lignes ou par celles
 //!   d'un ancêtre (Ruling R70 : une ligne `members` compte, les admins y ont `full` ; une ligne
 //!   restée à quelqu'un sans rôle, non) ; sinon `409 last_full_access`, et rien n'est écrit ;
@@ -252,9 +255,11 @@ fn log_change(user: &AuthUser, id: Uuid, change: AccessChange, written: AccessWr
     }
 }
 
-/// Les accès de la page `node`, lus sur sa chaîne (la page et ses ancêtres) : la ligne
-/// `members` la plus forte, et si elle vient d'un ancêtre ; les comptes nommés (une fois
-/// chacun, au niveau de leurs lignes) ; les invitations sur la page qui attendent encore.
+/// Les accès de la page `node`, lus sur sa chaîne (la page et ses ancêtres) : l'accès général
+/// effectif (`general`, la plus forte ligne `members` de la chaîne) et son plancher
+/// (`inheritedGeneral`, la plus forte de celles des ancêtres, Ruling R93) ; les comptes nommés
+/// (une fois chacun, à leur niveau le plus fort, hérité ou non) ; les invitations sur la page
+/// qui attendent encore.
 /// Seuls les comptes qui ont un rôle dans l'espace y figurent : une ligne restée à quelqu'un
 /// qui n'en a plus ne donne rien.
 async fn page_access(state: &AppState, node: &Node) -> Result<PageAccess, ApiError> {

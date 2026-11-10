@@ -1,10 +1,13 @@
-//! Les droits qui changent pendant qu'une connexion s'ouvre ou qu'elle est
-//! ouverte, vus du hub : les connexions d'un compte fermées à la demande
-//! (`kick_user`, Ruling R73), et la connexion inscrite après un changement de
-//! droits, fermée dès son inscription (Ruling R71).
+//! Les droits et la session qui changent pendant qu'une connexion s'ouvre ou
+//! qu'elle est ouverte, vus du hub : les connexions d'un compte fermées à la
+//! demande (`kick_user`, Ruling R73) ; la connexion inscrite après un
+//! changement de droits, fermée dès son inscription (Ruling R71) ; celle que
+//! l'appelant ne reconnaît plus une fois inscrite, fermée de même (le contrôle
+//! de `serve_connection_if`, où la route relit la session, Ruling R88) ; et la
+//! page chargée avant toute connexion (`load_page`, Ruling R89).
 //!
 //! Le reste des droits (lecture seule, `kick`, `forget`, écritures
-//! attribuées) est dans `sync.rs`.
+//! attribuées) est dans `sync.rs` ; la présence, dans `presence.rs`.
 
 mod common;
 

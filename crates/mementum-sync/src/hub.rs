@@ -259,9 +259,11 @@ impl Hub {
     ///   après la suppression à tous les acteurs alors vivants, arrive à
     ///   celui-ci derrière l'inscription, et ferme la connexion.
     ///
-    /// Ce contrôle-ci ne ferme jamais une connexion dont la session vaut
-    /// encore. Le hub n'y voit ni session ni jeton : ils restent chez
-    /// l'appelant.
+    /// Contrairement à celui de la révision, ce contrôle-ci ne ferme pas une
+    /// connexion pour une écriture sans rapport avec elle : seulement quand
+    /// l'appelant répond faux. C'est lui qui décide ce que vaut une session
+    /// qu'il ne peut pas relire (la route de synchro, dans le doute, ferme).
+    /// Le hub n'y voit ni session ni jeton : ils restent chez l'appelant.
     pub async fn serve_connection_if<S, C>(
         self: Arc<Self>,
         node_id: Uuid,
@@ -339,13 +341,12 @@ impl Hub {
     /// compte, ne sont pas touchées.
     ///
     /// À appeler quand une session du compte est fermée (déconnexion,
-    /// changement de mot de passe, connexion par-dessus elle), **après**
-    /// l'écriture en base : une connexion ouverte ne relit jamais sa session,
-    /// elle lui survivrait (Ruling R73). Les clients reviennent, et la
-    /// poignée de main relit
-    /// leur session. Toutes les connexions du compte sont fermées, celles de
-    /// ses autres appareils comprises : le hub ne sait pas de quelle session
-    /// vient une connexion.
+    /// changement de mot de passe, connexion ou inscription par-dessus elle),
+    /// **après** l'écriture en base : une connexion ouverte ne relit jamais sa
+    /// session, elle lui survivrait (Ruling R73). Les clients reviennent, et
+    /// la poignée de main relit leur session. Toutes les connexions du compte
+    /// sont fermées, celles de ses autres appareils comprises : le hub ne sait
+    /// pas de quelle session vient une connexion.
     ///
     /// Comme pour [`Hub::kick`], ni les documents ni le store ne sont
     /// touchés, et la fonction rend quand chaque acteur a fermé ces

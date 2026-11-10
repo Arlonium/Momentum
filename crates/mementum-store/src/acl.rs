@@ -163,7 +163,7 @@ impl Chain {
 
 /// Ruling R93 : la ligne `members` de la page `node` (de chaîne `chain`) quand on demande
 /// `wanted` comme accès général : posée à ce niveau, ou retirée (`None`). Le plancher est la
-/// plus forte des lignes `members` des ancêtres ; il n'y a jamais de ligne redondante :
+/// plus forte des lignes `members` des ancêtres ; ce changement n'en laisse pas de redondante :
 /// - `null` : la ligne propre part (sans elle, rien) ; sans ligne propre sous un plancher,
 ///   `InheritedAccess`, le plancher ne se retire pas d'ici ;
 /// - un niveau sous le plancher : `InheritedAccess` (la ligne n'aurait aucun effet) ; au
@@ -385,7 +385,10 @@ impl Store {
     ///   retire l'accès a une ligne sur la page (`NoOwnLine`) ;
     /// - l'accès général a pour plancher la ligne `members` d'un ancêtre (Ruling R93, voir
     ///   `general_line`) : sous lui, ou `null` sans ligne propre, `InheritedAccess` ; à son
-    ///   niveau, la ligne propre part ; au-dessus, elle est posée ; jamais de ligne redondante ;
+    ///   niveau, la ligne propre part ; au-dessus, elle est posée. Ce changement-ci ne laisse
+    ///   donc pas de ligne redondante ; les autres écritures peuvent en laisser une (un accès
+    ///   général posé plus tard sur un ancêtre, un changement de parent), sans effet sur les
+    ///   droits ;
     /// - Ruling R70 : après le changement, la page garde quelqu'un en `full`, par ses lignes ou
     ///   par celles d'un ancêtre (une ligne `members` compte ; une ligne restée à quelqu'un sans
     ///   rôle, non) ; sinon `LastFullAccess`.

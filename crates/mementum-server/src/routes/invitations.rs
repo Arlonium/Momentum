@@ -265,8 +265,8 @@ pub(crate) async fn accept(
 /// deux voit encore son invitation acceptée. Pour un compte qui existe ([`accept_invitation`]),
 /// la fenêtre est de quelques millisecondes ; à l'inscription (`routes/auth.rs`), elle contient
 /// en plus le hachage Argon2 du mot de passe, de l'ordre d'une fraction de seconde. Cette
-/// fenêtre est acceptée : le store
-/// revérifie dans sa transaction que l'auteur a encore un rôle, pas son niveau sur la page.
+/// fenêtre est acceptée : le store revérifie dans sa transaction que l'auteur a encore un
+/// rôle, pas son niveau sur la page.
 pub(crate) async fn valid_invitation(
     state: &AppState,
     token_hash: [u8; 32],
