@@ -155,8 +155,8 @@ test("unregistered_mmd_prop_is_refused", async ({ page, request }) => {
 });
 
 test("active_row_is_shown_clear_of_the_sidebar_edges", async ({ browser }) => {
-  // La barre latérale défile sous sa tête (le sélecteur d'espace), collée à son bord : la
-  // ligne de la page ouverte ne doit jamais rester dessous.
+  // La barre latérale défile sous sa tête (le sélecteur d'espace) et son pied (la corbeille),
+  // collés à ses bords : la ligne de la page ouverte ne doit jamais rester dessous.
   const account = await signUpAccount();
   const api = await apiAs(account);
   const pages: PageNode[] = [];
@@ -185,14 +185,16 @@ test("active_row_is_shown_clear_of_the_sidebar_edges", async ({ browser }) => {
   await expect(treeRow(p, last.id)).toBeVisible();
   await expect.poll(() => clear(last.id)).toBe(true);
 
-  // Une ligne coupée par le bas de la barre : elle défile de ce qui manque, sans la centrer.
+  // Une ligne coupée par le pied : la barre défile de ce qui manque, sans la centrer.
   await sidebar.evaluate((el) => (el.scrollTop = 0));
   const low = pages[25].id;
   await expect(treeRow(p, low)).toBeVisible();
   await sidebar.evaluate((el, id) => {
     const row = el.querySelector(`[data-page-id="${id}"]`)!.getBoundingClientRect();
-    el.scrollTop += row.bottom - el.getBoundingClientRect().bottom - 12;
+    const footer = el.querySelector(".mm-side-footer")!.getBoundingClientRect();
+    el.scrollTop += row.bottom - footer.top - 12;
   }, low);
+  expect(await clear(low)).toBe(false);
   let before = await scrollTop();
   await open(low);
   await expect.poll(scrollTop).toBe(before + 12);

@@ -23,11 +23,14 @@ type Props = {
    * l'un d'eux.
    */
   revealed: RefObject<string | null>;
-  /** Schéma du serveur différent (R35) : aucune création de sous-page. */
+  /** La page dont le menu « … » est ouvert, sinon `null`. */
+  menuFor: string | null;
+  /** Schéma du serveur différent (R35) : ni action, ni création de sous-page. */
   readOnly: boolean;
   /** Ces rappels gardent leur identité d'un rendu à l'autre : les lignes sont mémoïsées. */
   onToggle: (id: string) => void;
   onCreate: (parentId: string) => void;
+  onMenu: (id: string, anchor: HTMLElement) => void;
 };
 
 export function PageTree({
@@ -37,9 +40,11 @@ export function PageTree({
   viewport,
   activeId,
   revealed,
+  menuFor,
   readOnly,
   onToggle,
   onCreate,
+  onMenu,
 }: Props) {
   const [tree, setTree] = useState<HTMLDivElement | null>(null);
   const { range, reveal } = useTreeWindow(viewport, tree, rows.length);
@@ -73,9 +78,11 @@ export function PageTree({
           row={row}
           index={range.start + i}
           active={row.node.id === activeId}
+          menuOpen={row.node.id === menuFor}
           readOnly={readOnly}
           onToggle={onToggle}
           onCreate={onCreate}
+          onMenu={onMenu}
         />
       ))}
     </div>

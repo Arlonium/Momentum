@@ -1,6 +1,6 @@
 // Fenêtre de confirmation dans la page, jamais `window.confirm` : ni en français ni à nos
-// couleurs, et bloquante. Sert à retirer quelqu'un d'un espace, à le quitter, et servira à
-// la corbeille.
+// couleurs, et bloquante. Sert à retirer quelqu'un d'un espace, à le quitter, et à supprimer
+// définitivement une page de la corbeille.
 //
 // Accessible (`alertdialog`, nommée par son titre et décrite par son texte) :
 // - le focus reste dans la fenêtre, Tab et Maj+Tab tournent entre ses boutons ;

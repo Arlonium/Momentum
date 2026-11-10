@@ -2,14 +2,16 @@
 // « Privé » (`sections.ts`), chacune avec son titre et son arbre de pages. Un titre replie sa
 // section, comme dans Notion ; l'état est gardé par espace, dans le navigateur. Le « + » d'un
 // titre crée une page à la racine de la section (« Espace » et « Privé » seulement) ; le « + »
-// d'une ligne, une sous-page.
+// d'une ligne, une sous-page ; son « … », le menu de ses actions (`RowMenu`) : « Mettre à la
+// corbeille ».
 //
 // Les pages repliées (une page et ses sous-pages) ne sont pas gardées : tout est déplié au
 // chargement.
 import type { PageNode, Role, RootSection, Section } from "@mementum/protocol";
 import { useCallback, useId, useMemo, useRef, useState, type RefObject } from "react";
-import { ChevronIcon, PlusIcon } from "../icons";
+import { ChevronIcon, PlusIcon, TrashIcon } from "../icons";
 import { PageTree } from "./PageTree";
+import { RowMenu, type MenuAction } from "./RowMenu";
 import { flattenRows } from "./rows";
 import {
   bySection,
@@ -37,9 +39,23 @@ type Props = {
   readOnly: boolean;
   /** Doit garder son identité d'un rendu à l'autre : les lignes sont mémoïsées. */
   onCreate: (target: CreateTarget) => void;
+  /** Met la page à la corbeille, avec ses sous-pages. */
+  onTrash: (id: string) => void;
 };
 
-export function SectionList({ spaceId, role, nodes, viewport, activeId, readOnly, onCreate }: Props) {
+/** Le menu « … » ouvert : sa page, et le bouton qui l'a ouvert. */
+type OpenMenu = { id: string; anchor: HTMLElement };
+
+export function SectionList({
+  spaceId,
+  role,
+  nodes,
+  viewport,
+  activeId,
+  readOnly,
+  onCreate,
+  onTrash,
+}: Props) {
   /** Les sections repliées. */
   const [closed, setClosed] = useState<readonly Section[]>(() => readCollapsedSections(spaceId));
   /** Les pages repliées, toutes sections confondues. */
@@ -47,6 +63,15 @@ export function SectionList({ spaceId, role, nodes, viewport, activeId, readOnly
   const groups = useMemo(() => bySection(nodes ?? []), [nodes]);
   /** La page active déjà montrée par l'un des arbres (`PageTree`). */
   const revealed = useRef<string | null>(null);
+  const [menu, setMenu] = useState<OpenMenu | null>(null);
+  /** La page du menu ouvert ; partie de l'arbre entre-temps, le menu n'a plus lieu d'être. */
+  const menuNode = menu === null ? undefined : nodes?.find((node) => node.id === menu.id);
+
+  /** Le bouton « … » d'une ligne : ouvre son menu, ou le ferme s'il est déjà ouvert. */
+  const toggleMenu = useCallback((id: string, anchor: HTMLElement) => {
+    setMenu((current) => (current?.id === id ? null : { id, anchor }));
+  }, []);
+  const closeMenu = useCallback(() => setMenu(null), []);
 
   const openSection = (section: Section, open: boolean) => {
     const next = closed.filter((other) => other !== section);
@@ -92,6 +117,18 @@ export function SectionList({ spaceId, role, nodes, viewport, activeId, readOnly
     );
   }
 
+  const actions: MenuAction[] =
+    menuNode === undefined
+      ? []
+      : [
+          {
+            label: "Mettre à la corbeille",
+            icon: <TrashIcon />,
+            destructive: true,
+            onSelect: () => onTrash(menuNode.id),
+          },
+        ];
+
   return (
     <div className="mm-sections">
       {visibleSections(role, groups).map((section) => (
@@ -104,13 +141,23 @@ export function SectionList({ spaceId, role, nodes, viewport, activeId, readOnly
           viewport={viewport}
           activeId={activeId}
           revealed={revealed}
+          menuFor={menuNode?.id ?? null}
           readOnly={readOnly}
           onOpen={openSection}
           onToggle={togglePage}
           onCreateUnder={createUnder}
           onCreateIn={createIn}
+          onMenu={toggleMenu}
         />
       ))}
+      {menu !== null && menuNode !== undefined && (
+        <RowMenu
+          label={`Actions de « ${menuNode.title} »`}
+          anchor={menu.anchor}
+          actions={actions}
+          onClose={closeMenu}
+        />
+      )}
     </div>
   );
 }
@@ -124,11 +171,13 @@ type BlockProps = {
   viewport: Viewport | null;
   activeId: string | null;
   revealed: RefObject<string | null>;
+  menuFor: string | null;
   readOnly: boolean;
   onOpen: (section: Section, open: boolean) => void;
   onToggle: (id: string) => void;
   onCreateUnder: (parentId: string) => void;
   onCreateIn: (section: RootSection) => void;
+  onMenu: (id: string, anchor: HTMLElement) => void;
 };
 
 function SectionBlock({
@@ -139,11 +188,13 @@ function SectionBlock({
   viewport,
   activeId,
   revealed,
+  menuFor,
   readOnly,
   onOpen,
   onToggle,
   onCreateUnder,
   onCreateIn,
+  onMenu,
 }: BlockProps) {
   const titleId = useId();
   const bodyId = useId();
@@ -190,9 +241,11 @@ function SectionBlock({
             viewport={viewport}
             activeId={activeId}
             revealed={revealed}
+            menuFor={menuFor}
             readOnly={readOnly}
             onToggle={onToggle}
             onCreate={onCreateUnder}
+            onMenu={onMenu}
           />
         ))}
     </div>

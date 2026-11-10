@@ -223,6 +223,35 @@ export function updatePage(id: string, body: UpdatePage): Promise<PageNode> {
   return call("PATCH", page(id), body);
 }
 
+/**
+ * `GET /api/v1/spaces/{id}/trash` : les pages mises à la corbeille (pas leurs sous-pages, qui
+ * n'y sont que par elles) que la personne peut restaurer, la plus récente d'abord.
+ */
+export function getTrash(spaceId: string): Promise<PageNode[]> {
+  return call("GET", `${space(spaceId)}/trash`);
+}
+
+/** `POST /api/v1/pages/{id}/trash` : la page part à la corbeille, avec ses sous-pages. */
+export function trashPage(id: string): Promise<PageNode> {
+  return call("POST", `${page(id)}/trash`);
+}
+
+/**
+ * `POST /api/v1/pages/{id}/restore` : la page revient, avec ses sous-pages ; `409
+ * parent_trashed` si une de ses pages parentes est à la corbeille (c'est elle qu'on restaure).
+ */
+export function restorePage(id: string): Promise<PageNode> {
+  return call("POST", `${page(id)}/restore`);
+}
+
+/**
+ * `DELETE /api/v1/pages/{id}` : supprime pour de bon la page et ses sous-pages (`full`) ; `409
+ * not_trashed` si elle n'est pas à la corbeille.
+ */
+export function deletePage(id: string): Promise<void> {
+  return call("DELETE", page(id));
+}
+
 /** Longueur maximale d'un titre, en caractères Unicode (le serveur fait foi, R30). */
 export const MAX_TITLE_CHARS = 500;
 

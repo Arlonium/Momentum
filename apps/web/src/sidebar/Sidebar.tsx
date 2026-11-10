@@ -1,10 +1,11 @@
 // La barre latérale. En tête, collés à son bord haut : le sélecteur d'espace (avec le menu du
 // compte, Ruling R80) et « Nouvelle page ». Puis les sections de l'espace, chacune avec son
-// arbre de pages, qui défilent dessous. En pied, collé à son bord bas, le message de la
-// dernière action refusée.
+// arbre de pages, qui défilent dessous. En pied, collés à son bord bas : le message de la
+// dernière action refusée, et « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useMemo, useState } from "react";
-import { ComposeIcon } from "../icons";
+import { ComposeIcon, TrashIcon } from "../icons";
+import { trashPath } from "../router";
 import { SectionList, type CreateTarget } from "./SectionList";
 import { SpaceSwitcher } from "./SpaceSwitcher";
 import type { Viewport } from "./treeWindow";
@@ -17,15 +18,28 @@ type Props = {
   activeId: string | null;
   /** Les réglages de l'espace affiché sont à l'écran. */
   settingsOpen: boolean;
+  /** La corbeille de l'espace affiché est à l'écran. */
+  trashOpen: boolean;
   /** Schéma du serveur différent (R35) : aucune création de page. */
   readOnly: boolean;
   /** Doit garder son identité d'un rendu à l'autre : les lignes sont mémoïsées. */
   onCreate: (target: CreateTarget) => void;
-  /** Erreur de la dernière action (création), en français. */
+  onTrash: (id: string) => void;
+  /** Erreur de la dernière action (création, mise à la corbeille), en français. */
   notice: string | null;
 };
 
-export function Sidebar({ space, nodes, activeId, settingsOpen, readOnly, onCreate, notice }: Props) {
+export function Sidebar({
+  space,
+  nodes,
+  activeId,
+  settingsOpen,
+  trashOpen,
+  readOnly,
+  onCreate,
+  onTrash,
+  notice,
+}: Props) {
   // La barre latérale défile ; sa tête et son pied restent collés à ses bords, par-dessus les
   // arbres, qui en tiennent compte pour montrer la page active (`treeWindow.ts`).
   const [scroller, setScroller] = useState<HTMLElement | null>(null);
@@ -69,13 +83,26 @@ export function Sidebar({ space, nodes, activeId, settingsOpen, readOnly, onCrea
           activeId={activeId}
           readOnly={readOnly}
           onCreate={onCreate}
+          onTrash={onTrash}
         />
       )}
-      {notice && (
+      {(space || notice) && (
         <div ref={setFooter} className="mm-side-footer">
-          <p className="mm-side-error" role="alert">
-            {notice}
-          </p>
+          {notice && (
+            <p className="mm-side-error" role="alert">
+              {notice}
+            </p>
+          )}
+          {space && (
+            <a
+              href={trashPath(space.id)}
+              className="mm-side-action mm-side-link"
+              aria-current={trashOpen ? "page" : undefined}
+            >
+              <TrashIcon />
+              <span>Corbeille</span>
+            </a>
+          )}
         </div>
       )}
     </nav>

@@ -54,3 +54,20 @@ export function flattenRows(nodes: PageNode[], collapsed: ReadonlySet<string>): 
   }
   return rows;
 }
+
+/** Les pages de `nodes` sans la page `id` ni ses descendantes (elle part à la corbeille). */
+export function withoutSubtree(nodes: PageNode[], id: string): PageNode[] {
+  const gone = new Set([id]);
+  // Une descendante peut précéder sa page parente dans la liste : on repasse tant qu'on en
+  // trouve.
+  for (let found = true; found; ) {
+    found = false;
+    for (const node of nodes) {
+      if (node.parentId !== null && gone.has(node.parentId) && !gone.has(node.id)) {
+        gone.add(node.id);
+        found = true;
+      }
+    }
+  }
+  return nodes.filter((node) => !gone.has(node.id));
+}

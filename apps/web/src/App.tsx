@@ -1,7 +1,7 @@
 // L'application : barre latérale (sélecteur d'espace, sections et arbres des pages) et
 // contenu. `/` mène au dernier espace ouvert (gardé dans le navigateur), sinon au premier du
-// compte ; `/s/:spaceId` montre un espace, `/s/:spaceId/settings` ses réglages, `/p/:id` une
-// page.
+// compte ; `/s/:spaceId` montre un espace, `/s/:spaceId/trash` sa corbeille,
+// `/s/:spaceId/settings` ses réglages, `/p/:id` une page.
 //
 // L'espace affiché est celui que nomme l'adresse. Pour une page, c'est le sien : une page de
 // l'arbre chargé le dit elle-même ; sinon (lien direct, page d'un autre espace) le serveur est
@@ -9,11 +9,23 @@
 // pour une page qui n'existe pas. Un espace où le compte n'a pas, ou plus, de rôle ramène à
 // son premier espace, sans rien en dire.
 //
+// Une page mise à la corbeille quitte l'arbre avec ses sous-pages ; ouverte, elle se lit
+// encore, avec son bandeau (`PageView`).
+//
 // La version de schéma du serveur est lue au chargement, puis relue avant chaque connexion de
 // synchronisation (R35) : si elle diffère, tout passe en lecture seule, pour de bon.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ApiError, createPage, getInfo, getPage, getTree, isSessionLost } from "./api";
+import {
+  ApiError,
+  createPage,
+  getInfo,
+  getPage,
+  getTree,
+  isSessionLost,
+  restorePage,
+  trashPage,
+} from "./api";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { CLIENT_SCHEMA_VERSION } from "./editor/version";
 import { PageView } from "./page/PageView";
@@ -27,10 +39,12 @@ import {
 } from "./router";
 import { useSession } from "./session/session";
 import { SpaceSettings } from "./settings/SpaceSettings";
+import { withoutSubtree } from "./sidebar/rows";
 import type { CreateTarget } from "./sidebar/SectionList";
 import { Sidebar } from "./sidebar/Sidebar";
 import { CreateSpaceDialog } from "./sidebar/SpaceSwitcher";
 import { preferredSpace, readLastSpace, writeLastSpace } from "./spaces";
+import { TrashView } from "./trash/TrashView";
 
 function messageOf(error: unknown): string {
   return error instanceof ApiError ? error.message : "Une erreur inattendue est survenue.";
@@ -55,6 +69,8 @@ export function App() {
   const [infoLoaded, setInfoLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [tree, setTree] = useState<LoadedTree | null>(null);
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
   const [lookup, setLookup] = useState<Lookup | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   /** Le serveur n'a pas le schéma de ce client : plus aucune écriture (bandeau). */
@@ -109,6 +125,8 @@ export function App() {
 
   // La page ouverte : celle de l'arbre chargé, sinon celle que le serveur a rendue.
   const activeId = route.name === "page" ? route.id : null;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
   const inTree = activeId === null ? undefined : tree?.nodes.find((n) => n.id === activeId);
   const looked = lookup !== null && lookup.id === activeId ? lookup : null;
   const active = inTree ?? (looked?.state === "found" ? looked.node : undefined);
@@ -116,7 +134,7 @@ export function App() {
   // L'espace affiché : celui que nomme l'adresse (pour une page, le sien), si le compte y a
   // un rôle ; sinon le dernier affiché, sinon le premier du compte.
   const named =
-    route.name === "space" || route.name === "spaceSettings"
+    route.name === "space" || route.name === "trash" || route.name === "spaceSettings"
       ? route.spaceId
       : (active?.spaceId ?? null);
   const space =
@@ -152,7 +170,8 @@ export function App() {
 
   // Toujours pas de rôle dans cet espace : l'accueil, donc le premier espace du compte, à la
   // place de cette adresse. Rien ne dit si l'espace existe.
-  const gone = route.name === "space" && unknown !== null && checked === unknown;
+  const inSpace = route.name === "space" || route.name === "trash";
+  const gone = inSpace && unknown !== null && checked === unknown;
   // `/` : l'espace à ouvrir, à la place de cette adresse.
   const home = route.name === "home" ? spaceId : null;
   useLayoutEffect(() => {
@@ -227,6 +246,7 @@ export function App() {
   // Une page que le serveur rend, hors corbeille, mais que l'arbre chargé de son espace n'a
   // pas (créée ailleurs depuis) : l'arbre est relu une fois.
   const [reloadedFor, setReloadedFor] = useState<string | null>(null);
+  useEffect(() => setReloadedFor(null), [activeId]);
   useEffect(() => {
     if (looked?.state !== "found" || looked.node.trashedAt !== null || nodes === null) return;
     if (reloadedFor === looked.id || nodes.some((n) => n.id === looked.id)) return;
@@ -274,15 +294,61 @@ export function App() {
     );
   }, []);
 
+  const trash = useCallback(async (id: string) => {
+    setNotice(null);
+    try {
+      const trashed = await trashPage(id);
+      mutations.current += 1;
+      // La page ouverte part avec elle (elle-même, ou une de ses pages parentes) : elle reste
+      // à l'écran, à la corbeille, le temps que le serveur le confirme.
+      const before = treeRef.current?.nodes ?? [];
+      const open = before.find((n) => n.id === activeIdRef.current);
+      if (open !== undefined && !withoutSubtree(before, id).includes(open)) {
+        setLookup({
+          id: open.id,
+          state: "found",
+          node: open.id === id ? trashed : { ...open, trashedAt: trashed.trashedAt },
+        });
+      }
+      setTree(
+        (current) => current && { ...current, nodes: withoutSubtree(current.nodes, id) },
+      );
+    } catch (error) {
+      setNotice(`La page n'a pas pu être mise à la corbeille. ${messageOf(error)}`);
+    }
+  }, []);
+  /** Stable, comme `createFromTree`. */
+  const trashFromTree = useCallback((id: string) => void trash(id), [trash]);
+
+  /** Une page est sortie de la corbeille : l'arbre de l'espace est relu. */
+  const restored = useCallback(() => {
+    mutations.current += 1;
+    setReloads((n) => n + 1);
+  }, []);
+
+  const restore = useCallback(
+    async (id: string) => {
+      const node = await restorePage(id);
+      setLookup((current) =>
+        current !== null && current.id === id ? { id, state: "found", node } : current,
+      );
+      // L'arbre est relu ici : pas besoin de le relire pour cette page absente.
+      setReloadedFor(id);
+      restored();
+    },
+    [restored],
+  );
+
   const settingsOf = route.name === "spaceSettings" ? route.spaceId : null;
-  const atSpace = route.name === "space" && unknown === null ? space : null;
+  /** L'espace que montre l'adresse (son accueil ou sa corbeille), si le compte y a un rôle. */
+  const atSpace = inSpace && unknown === null ? space : null;
 
   useEffect(() => {
-    // Les réglages nomment l'onglet eux-mêmes.
-    if (settingsOf !== null) return;
+    // Les réglages et la corbeille nomment l'onglet eux-mêmes.
+    if (settingsOf !== null || route.name === "trash") return;
     const title = active?.title ?? atSpace?.name;
     document.title = title === undefined ? "Mementum" : `${title} · Mementum`;
-  }, [active, atSpace, settingsOf]);
+  }, [active, atSpace, settingsOf, route.name]);
 
   /** Créer une page à la racine : pas pour un invité, ni en lecture seule. */
   const mayCreate = !stale && space !== null && space.role !== "guest";
@@ -315,9 +381,11 @@ export function App() {
         </span>
       </Message>
     );
-  } else if (route.name === "home" || (route.name === "space" && atSpace === null)) {
+  } else if (route.name === "home" || (inSpace && atSpace === null)) {
     // En route vers un espace du compte.
     content = <Message title="Chargement…" />;
+  } else if (route.name === "trash" && atSpace !== null) {
+    content = <TrashView key={atSpace.id} space={atSpace} onRestored={restored} />;
   } else if (route.name === "space") {
     content = (
       <Message title="Aucune page ouverte" banner={stale ? <ReadOnlyBanner /> : null}>
@@ -345,6 +413,7 @@ export function App() {
         autoFocusTitle={created === active.id}
         onTitleFocused={titleFocused}
         onSaved={saved}
+        onRestore={restore}
       />
     );
   } else if (looked?.state === "failed") {
@@ -370,8 +439,10 @@ export function App() {
         nodes={nodes}
         activeId={activeId}
         settingsOpen={settingsOf !== null && settingsOf === spaceId}
+        trashOpen={route.name === "trash" && atSpace !== null}
         readOnly={stale}
         onCreate={createFromTree}
+        onTrash={trashFromTree}
         notice={notice}
       />
       <main className="mm-main">{content}</main>

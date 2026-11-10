@@ -2,7 +2,7 @@
 // lignes que la barre latérale affiche, une par page visible.
 import type { PageNode } from "@mementum/protocol";
 import { expect, test } from "vitest";
-import { flattenRows } from "./rows";
+import { flattenRows, withoutSubtree } from "./rows";
 
 function page(id: string, parentId: string | null, position: string): PageNode {
   return {
@@ -92,4 +92,21 @@ test("orphan_parent_goes_to_root", () => {
     { id: "o1", depth: 1, hasChildren: false, open: true },
     { id: "r2", depth: 0, hasChildren: false, open: true },
   ]);
+});
+
+test("subtree_leaves_with_its_root", () => {
+  const nodes = [
+    page("a", null, "a0"),
+    page("a1", "a", "a0"),
+    page("a1x", "a1", "a0"),
+    page("b", null, "a1"),
+    page("b1", "b", "a0"),
+  ];
+  // La page et toutes ses descendantes ; le reste garde son ordre et ses objets.
+  const kept = withoutSubtree(nodes, "a");
+  expect(kept.map((n) => n.id)).toEqual(["b", "b1"]);
+  expect(kept[0]).toBe(nodes[3]);
+  expect(withoutSubtree(nodes, "a1").map((n) => n.id)).toEqual(["a", "b", "b1"]);
+  // Une page absente : rien ne change.
+  expect(withoutSubtree(nodes, "absente")).toEqual(nodes);
 });

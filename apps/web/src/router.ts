@@ -1,9 +1,10 @@
 // Routeur minimal (History API) : `/` (le dernier espace ouvert, sinon le premier),
-// `/s/:spaceId` (un espace), `/s/:spaceId/settings` (ses réglages), `/p/:id` (une page :
-// l'espace affiché est le sien), `/login` et `/signup` (connexion et inscription, montrées par
-// `SessionGate` sans session), `/invite` (un lien d'invitation, `/invite#<jeton>`, avec ou
-// sans session). Les liens internes restent de vrais `<a href>` (nouvel onglet, copie du
-// lien) ; un clic simple est intercepté pour changer de page sans recharger l'application.
+// `/s/:spaceId` (un espace), `/s/:spaceId/trash` (sa corbeille), `/s/:spaceId/settings` (ses
+// réglages), `/p/:id` (une page : l'espace affiché est le sien), `/login` et `/signup`
+// (connexion et inscription, montrées par `SessionGate` sans session), `/invite` (un lien
+// d'invitation, `/invite#<jeton>`, avec ou sans session). Les liens internes restent de vrais
+// `<a href>` (nouvel onglet, copie du lien) ; un clic simple est intercepté pour changer de
+// page sans recharger l'application.
 import { useEffect, useSyncExternalStore } from "react";
 
 export type Route =
@@ -13,6 +14,7 @@ export type Route =
   | { name: "invite" }
   | { name: "page"; id: string }
   | { name: "space"; spaceId: string }
+  | { name: "trash"; spaceId: string }
   | { name: "spaceSettings"; spaceId: string }
   | { name: "notFound" };
 
@@ -37,11 +39,12 @@ export function parseRoute(pathname: string): Route {
     const id = segment(page[1]);
     return id === null ? { name: "notFound" } : { name: "page", id };
   }
-  const space = /^\/s\/([^/]+)(?:\/(settings))?\/?$/.exec(pathname);
+  const space = /^\/s\/([^/]+)(?:\/(settings|trash))?\/?$/.exec(pathname);
   if (space) {
     const spaceId = segment(space[1]);
     if (spaceId === null) return { name: "notFound" };
-    return space[2] === "settings" ? { name: "spaceSettings", spaceId } : { name: "space", spaceId };
+    if (space[2] === "settings") return { name: "spaceSettings", spaceId };
+    return space[2] === "trash" ? { name: "trash", spaceId } : { name: "space", spaceId };
   }
   return { name: "notFound" };
 }
@@ -52,6 +55,10 @@ export function pagePath(id: string): string {
 
 export function spacePath(spaceId: string): string {
   return `/s/${encodeURIComponent(spaceId)}`;
+}
+
+export function trashPath(spaceId: string): string {
+  return `/s/${encodeURIComponent(spaceId)}/trash`;
 }
 
 export function spaceSettingsPath(spaceId: string): string {

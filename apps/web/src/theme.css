@@ -563,7 +563,8 @@ a:hover {
   color: var(--mm-text-sidebar);
 }
 
-.tree-row:hover {
+.tree-row:hover,
+.tree-row.is-menu-open {
   background: var(--mm-sidebar-hover);
 }
 
@@ -629,8 +630,24 @@ button.tree-toggle:hover {
   text-overflow: ellipsis;
 }
 
-/* « + » au survol (ou au clavier) : opacité, pour rester atteignable par Tab. */
-.tree-add {
+/* « … » et « + » au survol (ou au clavier, ou tant que le menu de la ligne est ouvert) :
+   opacité, pour rester atteignables par Tab. Posés sur le bord droit de la ligne, ils ne
+   retirent de la place au titre que lorsqu'ils se montrent. */
+.tree-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+}
+
+.tree-row:hover .tree-link,
+.tree-row:focus-within .tree-link,
+.tree-row.is-menu-open .tree-link {
+  padding-right: 50px;
+}
+
+.tree-action {
   flex: none;
   width: 22px;
   height: 22px;
@@ -646,14 +663,78 @@ button.tree-toggle:hover {
   opacity: 0;
 }
 
-.tree-row:hover .tree-add,
-.tree-row:focus-within .tree-add {
+.tree-row:hover .tree-action,
+.tree-row:focus-within .tree-action,
+.tree-row.is-menu-open .tree-action {
   opacity: 1;
 }
 
-.tree-add:hover {
+.tree-action:hover,
+.tree-action[aria-expanded="true"] {
   background: var(--mm-border);
   color: var(--mm-text);
+}
+
+/* Menu d'actions (le « … » d'une ligne) : posé dans `body`, par-dessus la page. */
+
+.mm-menu {
+  position: fixed;
+  z-index: 30;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  border: 1px solid var(--mm-popover-border);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: var(--mm-popover-shadow);
+}
+
+.mm-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: var(--mm-action-height);
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--mm-text-sidebar);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mm-menu-item svg {
+  flex: none;
+  color: var(--mm-text-secondary);
+}
+
+.mm-menu-item:hover,
+.mm-menu-item:focus-visible {
+  outline: none;
+  background: var(--mm-surface);
+}
+
+.mm-menu-item.is-destructive:hover,
+.mm-menu-item.is-destructive:focus-visible {
+  background: var(--mm-danger-soft);
+  color: var(--mm-danger);
+}
+
+.mm-menu-item.is-destructive:hover svg,
+.mm-menu-item.is-destructive:focus-visible svg {
+  color: var(--mm-danger);
+}
+
+.mm-menu-item[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mm-menu-item[aria-disabled="true"]:hover {
+  background: transparent;
 }
 
 /* Barre du haut */
@@ -748,6 +829,33 @@ button.tree-toggle:hover {
 .mm-banner p {
   flex: 1 1 auto;
   margin: 0;
+}
+
+/* Page à la corbeille : le bandeau le dit sans crier, et la restaure. */
+.mm-banner-trash {
+  align-items: center;
+  background: var(--mm-danger-soft);
+}
+
+.mm-banner-trash svg {
+  margin-top: 0;
+  color: var(--mm-danger);
+}
+
+.mm-banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Le refus du serveur, tel quel : seule son initiale passe en capitale, à l'affichage. */
+.mm-banner-error {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--mm-danger);
+}
+
+.mm-banner-error::first-letter {
+  text-transform: uppercase;
 }
 
 .mm-message {
@@ -858,6 +966,13 @@ button.tree-toggle:hover {
 /* Voisin d'un champ : la même bordure que lui. */
 .mm-button-field {
   border-color: var(--mm-field-border);
+}
+
+/* Action d'une ligne qui ne retire rien (« Restaurer ») : la taille d'une action discrète. */
+.mm-button-small {
+  min-height: 28px;
+  padding: 3px 10px;
+  font-size: 13px;
 }
 
 /* `aria-disabled` : en attente, mais focalisable (le focus ne sort pas d'une fenêtre). */
@@ -1322,6 +1437,30 @@ button.tree-toggle:hover {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* Corbeille : une ligne par page (tuile, titre, date, actions à droite). */
+
+.mm-trash {
+  margin-top: 28px;
+  border-top: 1px solid var(--mm-sidebar-border);
+}
+
+.mm-trash-link {
+  color: var(--mm-text);
+  text-decoration: none;
+}
+
+.mm-trash-link:hover {
+  color: var(--mm-text);
+  text-decoration: underline;
+}
+
+.mm-trash-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* L'invitation tout juste créée : son lien, à copier avant qu'il ne disparaisse. */

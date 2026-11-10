@@ -1,8 +1,9 @@
 // Espaces et sections, depuis l'interface : le sélecteur d'espace, les trois sections de la
-// barre latérale (« Espace », « Partagé », « Privé »), ce que chacun y voit, et l'espace
-// gardé d'une visite à l'autre. Le serveur fait foi pour les droits : chaque test relit
-// aussi ce qu'il répond.
+// barre latérale (« Espace », « Partagé », « Privé »), ce que chacun y voit, l'espace gardé
+// d'une visite à l'autre, et la corbeille. Le serveur fait foi pour les droits : chaque test
+// relit aussi ce qu'il répond.
 import { expect, test, type Page } from "@playwright/test";
+import type { ErrorBody, PageNode } from "@mementum/protocol";
 import {
   apiAs,
   closeContexts,
@@ -292,7 +293,7 @@ test("space_without_a_role_goes_to_the_first_space", async ({ browser }) => {
   await expect(b.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
   const unknown = await b.locator("body").innerText();
   // Un espace où B n'a aucun rôle : exactement le même écran, sans rien de cet espace.
-  for (const path of [`/s/${foreign.id}`]) {
+  for (const path of [`/s/${foreign.id}`, `/s/${foreign.id}/trash`]) {
     await b.goto(path);
     await expect(b).toHaveURL(`${BASE_URL}/s/${own.id}`);
     await expect(b.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
@@ -342,4 +343,178 @@ test("collapsed_section_is_remembered_per_space", async ({ browser }) => {
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(treeRow(p, inFirst.id)).toBeVisible();
+});
+
+/** Échoue si la page ouvre une fenêtre du navigateur (`window.confirm`, `alert`…). */
+function forbidNativeDialogs(p: Page): string[] {
+  const opened: string[] = [];
+  p.on("dialog", (dialog) => {
+    opened.push(dialog.message());
+    void dialog.dismiss();
+  });
+  return opened;
+}
+
+/** Ouvre le menu « … » de la ligne d'une page, et le rend. */
+async function openRowMenu(p: Page, id: string, title: string) {
+  await treeRow(p, id).hover();
+  await treeRow(p, id).getByRole("button", { name: `Actions de « ${title} »` }).click();
+  const menu = p.getByRole("menu", { name: `Actions de « ${title} »` });
+  await expect(menu).toBeVisible();
+  return menu;
+}
+
+/** La ligne d'une page dans la liste de la corbeille. */
+function trashItem(p: Page, title: string) {
+  return p
+    .getByRole("list", { name: "Pages à la corbeille" })
+    .getByRole("listitem")
+    .filter({ hasText: title });
+}
+
+const trashBanner = (p: Page) =>
+  p.getByRole("status").filter({ hasText: "Cette page est à la corbeille" });
+
+test("trash_and_restore_from_the_sidebar", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const parent = await createPage(api, { title: `Projet ${unique()}` });
+  const child = await createPage(api, { parentId: parent.id, title: `Notes ${unique()}` });
+  const other = await createPage(api, { title: `Autre ${unique()}` });
+  const visible = async () => (await getTree(api, space.id)).nodes.map((n) => n.id).sort();
+  const trashedAt = async (id: string) => {
+    const res = await api.get(`/api/v1/pages/${id}`);
+    expect(res.status(), await res.text()).toBe(200);
+    return ((await res.json()) as PageNode).trashedAt;
+  };
+
+  const a = await newUser(browser, alice);
+  const nativeDialogs = forbidNativeDialogs(a);
+  await a.goto(`/p/${parent.id}`);
+  await waitSynced(a);
+  const editor = a.locator(".bn-editor");
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+  await expect(treeRow(a, child.id)).toBeVisible();
+
+  // « Mettre à la corbeille », dans le menu « … » de la ligne : la page part avec sa sous-page.
+  const menu = await openRowMenu(a, parent.id, parent.title);
+  await menu.getByRole("menuitem", { name: "Mettre à la corbeille" }).click();
+  await expect(menu).toHaveCount(0);
+  await expect(treeRow(a, parent.id)).toHaveCount(0);
+  await expect(treeRow(a, child.id)).toHaveCount(0);
+  await expect(treeRow(a, other.id)).toBeVisible();
+  expect(await visible()).toEqual([other.id]);
+  expect(await trashedAt(parent.id)).not.toBeNull();
+  // La page ouverte le dit, et ne s'écrit plus.
+  await expect(trashBanner(a)).toBeVisible();
+  await expect(titleOf(a)).toHaveValue(parent.title);
+  await expect(titleOf(a)).toHaveAttribute("readonly", "");
+  await expect(editor).toHaveAttribute("contenteditable", "false");
+
+  // « Corbeille », en bas de la barre latérale : la page jetée y est, pas sa sous-page, qui
+  // n'y est que par elle.
+  await sidebarOf(a).getByRole("link", { name: "Corbeille" }).click();
+  await expect(a).toHaveURL(`${BASE_URL}/s/${space.id}/trash`);
+  await expect(a.getByRole("heading", { name: "Corbeille", level: 1 })).toBeVisible();
+  await expect(trashItem(a, parent.title)).toBeVisible();
+  await expect(trashItem(a, child.title)).toHaveCount(0);
+
+  // « Restaurer » : elle revient dans la barre latérale, avec sa sous-page.
+  await trashItem(a, parent.title).getByRole("button", { name: "Restaurer" }).click();
+  await expect(trashItem(a, parent.title)).toHaveCount(0);
+  await expect(a.getByText("La corbeille est vide.")).toBeVisible();
+  await expect(treeRow(a, parent.id).getByRole("link")).toHaveText(parent.title);
+  await expect(treeRow(a, child.id)).toHaveAttribute("aria-level", "2");
+  expect(await visible()).toEqual([parent.id, child.id, other.id].sort());
+  expect(await trashedAt(parent.id)).toBeNull();
+
+  // Une sous-page partie avec sa page parente le dit aussi ; c'est la page parente qu'on
+  // restaure, et le serveur le dit à qui essaie sur la sous-page.
+  await treeRow(a, child.id).getByRole("link").click();
+  await waitSynced(a);
+  await (await openRowMenu(a, parent.id, parent.title))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  await expect(trashBanner(a)).toBeVisible();
+  await expect(titleOf(a)).toHaveValue(child.title);
+  await expect(editor).toHaveAttribute("contenteditable", "false");
+  expect(await trashedAt(child.id)).not.toBeNull();
+  const refused = await api.post(`/api/v1/pages/${child.id}/restore`);
+  expect(refused.status()).toBe(409);
+  const body = (await refused.json()) as ErrorBody;
+  expect(body.error).toBe("parent_trashed");
+  await trashBanner(a).getByRole("button", { name: "Restaurer" }).click();
+  await expect(a.getByRole("main").getByRole("alert")).toHaveText(body.message);
+  await expect(trashBanner(a)).toBeVisible();
+
+  // La page parente, ouverte depuis la corbeille, se restaure par son bandeau.
+  await sidebarOf(a).getByRole("link", { name: "Corbeille" }).click();
+  await trashItem(a, parent.title).getByRole("link", { name: parent.title }).click();
+  await expect(a).toHaveURL(`${BASE_URL}/p/${parent.id}`);
+  await trashBanner(a).getByRole("button", { name: "Restaurer" }).click();
+  await expect(trashBanner(a)).toHaveCount(0);
+  await expect(treeRow(a, parent.id).getByRole("link")).toHaveAttribute("aria-current", "page");
+  await expect(treeRow(a, child.id)).toBeVisible();
+  await waitSynced(a);
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+  await expect(titleOf(a)).not.toHaveAttribute("readonly", "");
+  expect(await visible()).toEqual([parent.id, child.id, other.id].sort());
+  expect(nativeDialogs).toEqual([]);
+});
+
+test("delete_forever_asks_first", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const parent = await createPage(api, { title: `Brouillon ${unique()}` });
+  const child = await createPage(api, { parentId: parent.id, title: `Annexe ${unique()}` });
+  const kept = await createPage(api, { title: `À garder ${unique()}` });
+  for (const id of [parent.id, kept.id]) {
+    expect((await api.post(`/api/v1/pages/${id}/trash`)).status()).toBe(200);
+  }
+  const status = async (id: string) => (await api.get(`/api/v1/pages/${id}`)).status();
+
+  const a = await newUser(browser, alice);
+  const nativeDialogs = forbidNativeDialogs(a);
+  await a.goto(`/s/${space.id}/trash`);
+  // La plus récente d'abord.
+  await expect(
+    a.getByRole("list", { name: "Pages à la corbeille" }).getByRole("listitem"),
+  ).toHaveText([new RegExp(kept.title), new RegExp(parent.title)]);
+  const remove = trashItem(a, parent.title).getByRole("button", { name: "Supprimer définitivement" });
+  const confirm = a.getByRole("alertdialog", {
+    name: `Supprimer définitivement « ${parent.title} » ?`,
+  });
+
+  // La suppression demande une confirmation dans la page. Le focus est sur « Annuler » :
+  // Entrée ne supprime rien.
+  await remove.click();
+  await expect(confirm).toBeVisible();
+  await expect(confirm.getByRole("button", { name: "Annuler" })).toBeFocused();
+  await a.keyboard.press("Enter");
+  await expect(confirm).toHaveCount(0);
+  // Échap annule aussi.
+  await remove.click();
+  await expect(confirm).toBeVisible();
+  await a.keyboard.press("Escape");
+  await expect(confirm).toHaveCount(0);
+  await expect(trashItem(a, parent.title)).toBeVisible();
+  expect(await status(parent.id)).toBe(200);
+  expect(await status(child.id)).toBe(200);
+
+  // Confirmée : la page et sa sous-page n'existent plus ; l'autre est toujours à la corbeille.
+  await remove.click();
+  await confirm.getByRole("button", { name: "Supprimer définitivement" }).click();
+  await expect(confirm).toHaveCount(0);
+  await expect(trashItem(a, parent.title)).toHaveCount(0);
+  await expect(trashItem(a, kept.title)).toBeVisible();
+  // Le bouton qui a ouvert la fenêtre est parti avec sa ligne : le focus va au titre.
+  await expect(a.getByRole("heading", { name: "Corbeille", level: 1 })).toBeFocused();
+  expect(await status(parent.id)).toBe(404);
+  expect(await status(child.id)).toBe(404);
+  expect(await status(kept.id)).toBe(200);
+  const trash = await api.get(`/api/v1/spaces/${space.id}/trash`);
+  expect(((await trash.json()) as PageNode[]).map((n) => n.id)).toEqual([kept.id]);
+  expect(nativeDialogs).toEqual([]);
 });
