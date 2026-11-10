@@ -948,9 +948,14 @@ test("row_actions_are_always_shown_without_hover", async ({ browser }) => {
   // Le titre s'arrête avant eux.
   const link = (await row.getByRole("link").boundingBox())!;
   expect(link.x + link.width).toBeLessThanOrEqual((await more.boundingBox())!.x);
-  // Et ils répondent au doigt.
+  // Et ils répondent au doigt. Le menu ouvert, le titre garde sa place : il n'a pas à en
+  // céder à des boutons qui ont déjà la leur.
+  const title = row.locator(".tree-title");
+  const width = (await title.boundingBox())!.width;
   await more.tap();
   await expect(p.getByRole("menu", { name: /^Actions de / })).toBeVisible();
+  await expect(row).toHaveClass(/is-menu-open/);
+  expect((await title.boundingBox())!.width).toBe(width);
 });
 
 /** Deux comptes dans le même espace : A, sa propriétaire, et B, simple membre. */

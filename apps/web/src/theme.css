@@ -719,7 +719,10 @@ button.tree-toggle:hover {
     flex: none;
   }
 
-  .tree-row .tree-link {
+  /* Le titre n'a plus à leur céder de place, même la ligne touchée ou son menu ouvert. */
+  .tree-row:hover .tree-link,
+  .tree-row:focus-within .tree-link,
+  .tree-row.is-menu-open .tree-link {
     padding-right: 4px;
   }
 
