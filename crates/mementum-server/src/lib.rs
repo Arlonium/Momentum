@@ -14,15 +14,15 @@
 //! | `PATCH /api/v1/spaces/{id}` | `admin` | `SpaceInfo` ; `422 invalid_name` |
 //! | `GET /api/v1/spaces/{id}/members` | `member` | `Member[]` : invités compris, dans l'ordre d'arrivée ; un invité : `403` |
 //! | `PATCH /api/v1/spaces/{id}/members/{userId}` | `admin` (entre `admin` et `member`) ou `owner` | `Member` ; `404` si la personne n'a pas de rôle dans l'espace ; `409 last_owner` ; `409 roles_changed` (les rôles ont bougé à chaque reprise) |
-//! | `DELETE /api/v1/spaces/{id}/members/{userId}` | `admin` (jamais un `owner`), ou soi-même, quel que soit son rôle | `204` ; `404` comme ci-dessus ; `409 last_owner` ; `409 roles_changed` |
+//! | `DELETE /api/v1/spaces/{id}/members/{userId}` | `admin` (un admin ne retire pas un `owner`, un `owner` le peut), ou soi-même, quel que soit son rôle | `204` ; `404` comme ci-dessus ; `409 last_owner` ; `409 roles_changed` |
 //! | `POST /api/v1/spaces/{id}/invitations` | `admin` | `201`, `InvitationCreated` (le jeton, montré cette fois seulement ; rôle `admin` ou `member`) ; `422 invalid_email` |
 //! | `GET /api/v1/spaces/{id}/invitations` | `admin` | `PendingInvitation[]` : celles qui attendent, sans jeton (une invitation de page, seulement si l'on peut partager la page) |
 //! | `DELETE /api/v1/invitations/{id}` | invitation d'espace : `admin` de son espace ; invitation de page : `full` sur la page, `admin` ou non | `204` ; `404` sous `admin` ou sans le droit de partager la page, comme pour une invitation inconnue, échue, acceptée, ou d'un espace où l'on n'est rien |
 //! | `POST /api/v1/invitations/lookup` | non | `InvitationInfo` ; `404 invalid_invitation` (aussi pour une invitation dont l'auteur n'a plus le droit de la faire, Ruling R69) |
 //! | `POST /api/v1/invitations/accept` | oui | `Accepted` (rien de ce qu'avait le compte ne baisse) ; `404 invalid_invitation` |
 //! | `GET /api/v1/spaces/{id}/tree` | un rôle | [`Tree`] : les pages de l'espace que la personne voit, hors corbeille, avec son niveau et sa section |
-//! | `GET /api/v1/spaces/{id}/trash` | un rôle | [`PageNode`]`[]` : les pages mises à la corbeille qu'elle peut restaurer, la plus récente d'abord |
-//! | `POST /api/v1/pages` | racine : `member` (un invité : `403`) ; sous-page : `edit` sur le parent | `201`, [`PageNode`] : le nœud, ses accès et son document, écrits ensemble ; `409 trashed` sous un parent à la corbeille ; `422 invalid_parent`, `invalid_after`, `title_too_long` ; `422 invalid_json` sans `spaceId` à la racine, ou avec `section` sous un parent |
+//! | `GET /api/v1/spaces/{id}/trash` | un rôle | [`PageNode`]`[]` : les pages mises elles-mêmes à la corbeille, là où son niveau permet de restaurer (`edit`), la plus récente d'abord ; si une page parente y est aussi, la restauration répond `409 parent_trashed` |
+//! | `POST /api/v1/pages` | racine : `member` (un invité : `403`) ; sous-page : `edit` sur le parent | `201`, [`PageNode`] : le nœud, ses accès et son document, écrits ensemble ; `404 not_found` pour un `spaceId` mal formé, inconnu ou d'un espace où l'on n'a aucun rôle ; `409 trashed` sous un parent à la corbeille ; `422 invalid_parent`, `invalid_after`, `title_too_long` ; `422 invalid_json` sans `spaceId` à la racine, ou avec `section` sous un parent |
 //! | `GET /api/v1/pages/{id}` | `read` | [`PageNode`] |
 //! | `PATCH /api/v1/pages/{id}` | titre, place sous le même parent : `edit` ; autre parent : `full`, et `edit` sur le nouveau parent (racine : `member`) | [`PageNode`] ; `409 cycle` ; `422 invalid_parent`, `invalid_after`, `title_too_long` ; `409 page_moved` si la page a changé de place, ou ce qu'on peut en faire, à chacune des quatre tentatives : rien n'est écrit (Ruling R91). À la racine, la page garde son accès général et qui la déplace y a `full` (Rulings R82 et R94) |
 //! | `POST /api/v1/pages/{id}/trash` | `edit` | [`PageNode`] : la page et son sous-arbre sont à la corbeille ; `409 trashed` si elle y est déjà, elle-même ou par une page parente |
@@ -31,7 +31,7 @@
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
 //! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait ; droits revérifiés une fois la page chargée (Ruling R89) |
 //! | `GET /api/v1/pages/{id}/access` | `full` (à la corbeille aussi) | `PageAccess` : l'accès général effectif et son plancher (celui d'une page parente), les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
-//! | `PUT /api/v1/pages/{id}/access/general` | `full`, et le rôle `member` ou plus (un invité : `403`, R85) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `level: null` retire la ligne `members` de la page ; le plancher est l'accès qu'une page parente donne (R93) : au plancher, la ligne propre part : ce `PUT` n'en laisse pas de redondante ; `409 inherited_access` sous lui, ou pour `null` sans ligne propre ; `409 last_full_access` |
+//! | `PUT /api/v1/pages/{id}/access/general` | `full`, et le rôle `member` ou plus (un invité : `403`, R85) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `level: null` retire la ligne `members` de la page ; le plancher est l'accès qu'une page parente donne (R93) : au plancher, la ligne propre part : ce `PUT` n'en laisse pas de redondante ; `409 inherited_access` sous lui, ou pour `null` sur une page sans ligne propre qui a un plancher (sans plancher, `null` sans ligne propre ne change rien) ; `409 last_full_access` |
 //! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` (un invité aussi, R86) | `PageAccess` (ou `204`, de même) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` |
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
@@ -42,10 +42,12 @@
 //! unauthenticated` sans elle. Un corps illisible reçoit `invalid_json` (ou
 //! `invalid_request`), un corps de plus de 2 Mio `413 payload_too_large`, une
 //! route inconnue `404 not_found`, une méthode inconnue `405
-//! method_not_allowed`. La base SQLite est le fichier [`config::DB_FILE`] du
-//! dossier des données.
+//! method_not_allowed`. Une page dont l'acteur ne répond plus reçoit `503
+//! unavailable`, sur `GET` et `PUT …/mmd` (Ruling R26). La base SQLite est le
+//! fichier [`config::DB_FILE`] du dossier des données.
 //!
-//! **Droits** (`access.rs`, le seul chemin par lequel le serveur les calcule) :
+//! **Droits** (`access.rs`, le seul chemin par lequel les routes les calculent ;
+//! le store revérifie lui-même, dans ses transactions, ce qu'il écrit) :
 //! la colonne « Session » donne ce qu'il faut : un rôle dans l'espace pour les
 //! routes d'un espace, un niveau sur la page pour les routes d'une page. Qui
 //! n'a aucun rôle dans un espace reçoit `404 not_found`, la réponse d'un
@@ -82,12 +84,14 @@
 //! que les routes de pages : session, puis droit de lire la page, vérifiés
 //! avant la poignée de main, et relus juste après, une fois la page chargée.
 //! Une connexion garde ensuite les droits qu'elle avait en s'ouvrant ; le
-//! serveur la ferme dès qu'ils changent (corbeille, restauration, changement
-//! de parent, partage, retrait d'un membre, changement de rôle, suppression)
-//! ou que la session de son compte se ferme (déconnexion, changement de mot
-//! de passe, connexion ou inscription par-dessus une session), et le client
-//! revient par la poignée de main, qui relit tout. Une connexion en train de
-//! s'ouvrir à cet instant est fermée avant d'avoir rien reçu.
+//! serveur la ferme quand l'une de ces écritures les change (corbeille,
+//! restauration, changement de parent, partage, retrait d'un membre,
+//! changement de rôle, suppression ; une invitation acceptée, qui ne fait
+//! qu'en ajouter, ne ferme rien) ou qu'une session de son compte se ferme
+//! (déconnexion, changement de mot de passe, connexion ou inscription
+//! par-dessus une session), et le client revient par la poignée de main, qui
+//! relit tout. Une connexion en train de s'ouvrir à cet instant est fermée
+//! avant d'avoir rien reçu.
 //!
 //! **Garde-fous réseau** (`guard.rs`). Une couche passe avant toute route.
 //! Sur la boucle locale, l'en-tête `Host` doit la nommer (DNS rebinding,
