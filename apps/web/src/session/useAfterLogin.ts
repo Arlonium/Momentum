@@ -3,8 +3,9 @@
 // (`SessionGate`), qui reste montée, et l'envoi attend ici le retour du compte pour repartir.
 // `useRetryAfterLogin` fait de même pour une lecture, qui se refait en entier.
 //
-// Si c'est un autre compte qui se connecte, l'application est remontée (`SessionGate`) : ce
-// hook est démonté avec elle, et ceux qui attendaient n'envoient jamais rien sous son nom.
+// Si c'est un autre compte qui se connecte, l'application est démontée, puis l'onglet rechargé
+// (`SessionGate`, Ruling R115) : ce hook est démonté avec elle, et ceux qui attendaient
+// n'envoient jamais rien sous son nom.
 import type { Me } from "@mementum/protocol";
 import { useCallback, useEffect, useRef } from "react";
 

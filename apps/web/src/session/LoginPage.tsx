@@ -104,7 +104,7 @@ export function LoginPage({ signupOpen, invitation, onSignup, onLoggedIn }: Logi
  * l'application reste montée derrière (la page ouverte, ce qui y a été tapé), mais inerte
  * tant que la session n'est pas rouverte. On ne peut que se reconnecter : Échap ne ferme
  * pas cette fenêtre. Une fois la session rouverte, le focus revient où il était (l'éditeur,
- * par exemple).
+ * par exemple) ; sous un autre compte, l'onglet est rechargé (`SessionGate`).
  */
 export function LoginDialog({ email, onLoggedIn }: { email: string; onLoggedIn: (me: Me) => void }) {
   const ref = useRef<HTMLDialogElement>(null);

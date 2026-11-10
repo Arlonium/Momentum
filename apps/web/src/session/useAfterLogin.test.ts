@@ -43,8 +43,9 @@ test("nobody_resumes_once_unmounted", async () => {
   const hook = await renderHook(useAfterLogin, me());
   let resumed = 0;
   void hook.current().then(() => resumed++);
-  // Un autre compte se connecte par-dessus : l'application est remontée. Ce que le premier
-  // attendait d'envoyer ne part jamais sous le nom du second.
+  // Un autre compte se connecte par-dessus : l'application est démontée (puis l'onglet
+  // rechargé, R115). Ce que le premier attendait d'envoyer ne part jamais sous le nom du
+  // second.
   await hook.unmount();
   await settle();
   expect(resumed).toBe(0);

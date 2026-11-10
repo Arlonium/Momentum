@@ -14,8 +14,9 @@
 // Session perdue en cours de route (un appel répond `401 unauthenticated`, `api.ts`) : la
 // connexion est demandée par-dessus l'application, qui reste montée. La page ouverte et ce
 // qui y a été tapé restent dans l'onglet, et repartent une fois la session rouverte. Si
-// c'est un autre compte qui se connecte, l'application est remontée : rien de ce que le
-// premier avait ouvert ou tapé ne part sous le nom du second.
+// c'est un autre compte qui se connecte, l'application ne reprend pas : elle est démontée
+// aussitôt, et l'onglet rechargé (Ruling R115). Rien de ce que le premier avait ouvert ou tapé
+// ne reste en mémoire, ni ne part sous le nom du second.
 //
 // La déconnexion recharge l'onglet (`SpaceSwitcher`) : rien du compte ne reste en mémoire.
 import type { Info, InvitationInfo, Me } from "@mementum/protocol";
@@ -29,6 +30,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
 import { getInfo, getMe, isSessionLost, onSessionLost } from "../api";
 import { navigate, pagePath, parseRoute, usePathname } from "../router";
 import { AuthScreen, messageOf } from "./forms";
@@ -151,6 +153,26 @@ export function SessionGate({ children }: { children: ReactNode }) {
     setState((current) => (current.name === "signedIn" ? { ...current, me } : current));
   }, []);
 
+  /**
+   * La session est rouverte par-dessus l'application (`LoginDialog`). Le même compte reprend où
+   * il en était. Un autre repart de zéro (Ruling R115) : l'onglet est rechargé. L'application
+   * est d'abord démontée, sur-le-champ : ses connexions de synchro et ce qui attendait le
+   * retour du compte (un texte, un titre) s'arrêtent là, avant d'avoir pu se servir de la
+   * session du second.
+   */
+  const previous = state.name === "signedIn" ? state.me.user.id : null;
+  const resume = useCallback(
+    (me: Me) => {
+      if (previous === null || me.user.id === previous) {
+        enter(me);
+        return;
+      }
+      flushSync(() => setState({ name: "loading" }));
+      location.reload();
+    },
+    [enter, previous],
+  );
+
   const showSignup = useCallback(() => navigate("/signup"), []);
   const showLogin = useCallback(() => navigate("/login"), []);
   /** Depuis la page d'invitation : l'inscription ou la connexion, qui la reprennent. */
@@ -229,10 +251,11 @@ export function SessionGate({ children }: { children: ReactNode }) {
       {route.name === "invite" ? (
         invitePage
       ) : (
-        // Un autre compte connecté par-dessus : l'application repart de zéro.
+        // Le compte de la session a changé sans passer par ici (elle a été rouverte sous un
+        // autre compte dans un autre onglet) : l'application repart de zéro.
         <Fragment key={state.me.user.id}>{children}</Fragment>
       )}
-      {state.lost && <LoginDialog email={state.me.user.email} onLoggedIn={enter} />}
+      {state.lost && <LoginDialog email={state.me.user.email} onLoggedIn={resume} />}
     </SessionContext.Provider>
   );
 }

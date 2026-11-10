@@ -11,17 +11,22 @@ import {
   expectSignedInAs,
   firstSpace,
   getMmd,
+  getPage,
   holdPageReads,
   inviteToSpace,
   logInWith,
   newUser,
   NO_SESSION,
   openPage,
+  ownerAndMember,
   PASSWORD,
+  setPageLevel,
   sidebarOf,
   signUpAccount,
   spaceSwitcher,
+  titleOf,
   unique,
+  waitSynced,
 } from "./helpers";
 import { BASE_URL } from "./servers";
 
@@ -317,4 +322,61 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
   // demandent une.
   await expect.poll(() => getMmd(p.request, id)).toBe("Écrit avant la coupure, et après\n");
   expect((await meOf(p)).user.email).toBe(account.email);
+});
+
+test("login_as_someone_else_over_the_open_page_starts_afresh", async ({ browser }) => {
+  const { alice, aliceApi, bruno, brunoApi, brunoId } = await ownerAndMember();
+  const shared = await createPage(aliceApi, { section: "private", title: `Commune ${unique()}` });
+  // B peut modifier la page : reprise sous son compte, l'application y enverrait sous son nom
+  // ce qu'A a tapé.
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  const p = await openPage(browser, shared.id, alice);
+  const editor = p.locator(".bn-editor");
+  const typeAtEnd = async (text: string) => {
+    await p.locator('[data-content-type="paragraph"] .bn-inline-content').first().click();
+    await p.keyboard.press("End");
+    await p.keyboard.type(text);
+  };
+  await editor.click();
+  await p.keyboard.type("Écrit par Alice");
+  await expect.poll(() => getMmd(aliceApi, shared.id)).toBe("Écrit par Alice\n");
+  // Un repère sur la fenêtre : un rechargement de l'onglet l'efface.
+  await p.evaluate(() => ((window as unknown as { kept: boolean }).kept = true));
+  const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
+
+  // La session d'A prend fin, puis la synchro se reconnecte. La relecture de la page est
+  // retenue, le temps qu'A écrive encore : dans la page, puis dans son titre.
+  await p.context().clearCookies();
+  const reads = await holdPageReads(p, shared.id);
+  await p.evaluate(() => {
+    const { provider } = window.__mementum!;
+    provider.disconnect();
+    provider.connect();
+  });
+  await reads.asked;
+  await typeAtEnd(", tapé sans session");
+  await expect(editor).toContainText("Écrit par Alice, tapé sans session");
+  await titleOf(p).fill("Titre tapé sans session");
+  await titleOf(p).press("Enter");
+  // Le titre est refusé : la connexion est demandée par-dessus la page, où tout cela attend.
+  await expect(dialog).toBeVisible();
+  reads.release();
+  await expect(dialog.getByLabel("Adresse e-mail")).toHaveValue(alice.email);
+
+  // C'est B qui se connecte. L'écran est le sien, avec la page telle que le serveur l'a.
+  await logInWith(dialog, bruno.email, bruno.password);
+  await expect(dialog).toHaveCount(0);
+  await expectSignedInAs(p, bruno.name);
+  expect((await meOf(p)).user.email).toBe(bruno.email);
+  await expect(titleOf(p)).toHaveValue(shared.title);
+  await waitSynced(p);
+  await expect(editor).toContainText("Écrit par Alice");
+  await expect(editor).not.toContainText("tapé sans session");
+  // Rien de ce qu'A avait en attente n'est parti sous le compte de B, ni le texte ni le
+  // titre : B écrit, et seul ce qu'il écrit arrive.
+  await typeAtEnd(", puis Bruno");
+  await expect.poll(() => getMmd(brunoApi, shared.id)).toBe("Écrit par Alice, puis Bruno\n");
+  expect((await getPage(brunoApi, shared.id)).title).toBe(shared.title);
+  // L'onglet a été rechargé : rien de l'application ouverte par A n'est resté en mémoire.
+  expect(await p.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBeUndefined();
 });
