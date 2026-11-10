@@ -536,3 +536,22 @@ test("render_error_shows_a_screen_not_a_blank_page", async ({ browser }) => {
   await p.getByRole("button", { name: "Recharger" }).click();
   await expect(p.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
 });
+
+test("render_error_before_login_shows_the_same_screen", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  // Sans session. Le serveur ne rend rien de ce qu'il dit de lui (`null`), que l'écran de
+  // connexion lit dès son rendu : l'exception est levée avant l'application, dans la porte de
+  // la session. La barrière d'erreur est autour d'elle aussi.
+  await page.route("**/api/v1/info", (route) => route.fulfill({ json: null }));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Quelque chose s'est mal passé" })).toBeVisible();
+  expect(errors.some((text) => text.includes("Mementum : erreur pendant l'affichage."))).toBe(true);
+
+  // « Recharger » : le serveur répondant comme il faut, la connexion est demandée.
+  await page.unroute("**/api/v1/info");
+  await page.getByRole("button", { name: "Recharger" }).click();
+  await expect(page.getByRole("heading", { name: "Se connecter" })).toBeVisible();
+});
