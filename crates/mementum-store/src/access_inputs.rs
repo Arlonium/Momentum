@@ -11,8 +11,10 @@ use crate::{Store, StoreError, parse_uuid, unreadable};
 /// les quatre valeurs sont celles du même instant.
 ///
 /// Rien ici ne change sans que la révision change (règle de `rev`, en tête de la crate) : ni
-/// titre, ni position. Ces données valent donc pour toute lecture qui trouve l'espace à la
-/// révision `rev`, et pour elle seule.
+/// titre, ni position. Ces données sont donc l'état de l'espace tant que sa révision est
+/// `rev`, et de cette révision seulement. Elle ne fait que croître : pour qui a lu une
+/// révision plus ancienne, elles sont plus récentes que ce qu'il a lu ; pour qui en a lu une
+/// plus récente, elles sont périmées.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessInputs {
     /// La révision de l'espace à l'instant de la lecture.
