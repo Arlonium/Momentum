@@ -353,6 +353,42 @@ fn subpage_shared_from_a_private_page_is_shared_for_a_member() {
     assert_eq!(access.node(shared).unwrap().visible_parent, None);
 }
 
+/// Un id en double dans l'arbre, ce que le store interdit : le premier nœud de cet id compte,
+/// le second est ignoré. Le calcul va au bout, et ne rend le nœud qu'une fois.
+#[test]
+fn duplicate_id_keeps_the_first_node() {
+    let user = id(1);
+    let (open, closed, twice) = (id(10), id(11), id(12));
+    let grants = [grant(open, Subject::User(user), Level::Edit)];
+    let compute = |nodes: &[TreeNode]| {
+        let access = SpaceAccess::compute(nodes, &grants, user, Some(Role::Member));
+        let seen: Vec<Uuid> = access.visible().map(|(node, _)| node).collect();
+        (access, seen)
+    };
+
+    // Le premier est sous la page que la personne voit.
+    let first_under_open = [
+        root(open),
+        root(closed),
+        child(twice, open),
+        child(twice, closed),
+    ];
+    let (access, seen) = compute(&first_under_open);
+    assert_eq!(seen, [open, twice]);
+    let node = access.node(twice).unwrap();
+    assert_eq!((node.level, node.visible_parent), (Level::Edit, Some(open)));
+    // Le premier est sous celle qu'elle ne voit pas : le nœud non plus.
+    let first_under_closed = [
+        root(open),
+        root(closed),
+        child(twice, closed),
+        child(twice, open),
+    ];
+    let (access, seen) = compute(&first_under_closed);
+    assert_eq!(seen, [open]);
+    assert_eq!(access.node(twice), None);
+}
+
 #[test]
 fn trash_is_inherited() {
     let (user, guest) = (id(1), id(2));
@@ -584,6 +620,54 @@ proptest! {
             access.visible().count(),
             space.nodes.iter().filter(|n| access.node(n.id).is_some()).count()
         );
+    }
+
+    /// Chaque rôle face à un modèle naïf, écrit ici d'après le « Modèle des droits » sans rien
+    /// reprendre du calcul : le niveau sur un nœud est le plus fort de ceux que donnent les
+    /// lignes de sa chaîne (la sienne à son niveau ; `members` à son niveau pour un membre, en
+    /// accès complet pour un propriétaire ou un admin, rien pour un invité) ; la section est
+    /// celle du plus haut nœud visible de la chaîne.
+    #[test]
+    fn every_role_matches_a_naive_model(space in space(), who in 0..PEOPLE, role in role()) {
+        let user = person(who);
+        let member = matches!(role, Role::Owner | Role::Admin | Role::Member);
+        // Les lignes posées sur la chaîne de `node` : lui et ses ancêtres.
+        let lines_above = |node: Uuid| -> Vec<Grant> {
+            let ancestors = chain(&space.nodes, node);
+            let on_chain = space.grants.iter().filter(|(on, _)| ancestors.contains(on));
+            on_chain.map(|(_, line)| *line).collect()
+        };
+        let naive_level = |node: Uuid| -> Option<Level> {
+            let given = |line: &Grant| match (line.subject, role) {
+                (Subject::User(named), _) if named == user => Some(line.level),
+                (Subject::User(_), _) | (Subject::Members, Role::Guest) => None,
+                (Subject::Members, Role::Member) => Some(line.level),
+                (Subject::Members, Role::Owner | Role::Admin) => Some(Level::Full),
+            };
+            lines_above(node).iter().filter_map(given).max()
+        };
+        let naive_section = |top: Uuid| -> Section {
+            let lines = lines_above(top);
+            let for_members = lines.iter().any(|line| line.subject == Subject::Members);
+            let only_hers = lines.iter().all(|line| line.subject == Subject::User(user));
+            match (member, for_members, only_hers) {
+                (true, true, _) => Section::Space,
+                (true, false, true) => Section::Private,
+                _ => Section::Shared,
+            }
+        };
+
+        let access = SpaceAccess::compute(&space.nodes, &space.grants, user, Some(role));
+        for node in &space.nodes {
+            let expected = naive_level(node.id).map(|level| {
+                // Le plus haut nœud visible de sa chaîne : le dernier, en montant, que la
+                // personne voit.
+                let ancestors = chain(&space.nodes, node.id);
+                let top = ancestors.iter().rev().find(|a| naive_level(**a).is_some());
+                (level, naive_section(*top.expect("le nœud lui-même est visible")))
+            });
+            prop_assert_eq!(seen(&access, node.id), expected, "{:?} ({:?})", node, role);
+        }
     }
 
     #[test]
