@@ -1089,6 +1089,69 @@ test("drop_line_goes_when_its_row_leaves", async ({ browser }) => {
   await expect(sidebarOf(p).locator(".is-dragging")).toHaveCount(0);
 });
 
+test("drag_state_does_not_linger_when_the_tree_changes_under_it", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const b = await createPage(api, { title: "Bravo" });
+  const c = await createPage(api, { title: "Charlie" });
+  const d = await createPage(api, { title: "Delta" });
+
+  const p = await newUser(browser, alice);
+  // L'horloge de la page est la nôtre : l'arbre ne se relit qu'après cinq secondes (R97).
+  await p.clock.install();
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie", "1 Delta"]);
+  const dataTransfer = await p.evaluateHandle(() => new DataTransfer());
+  const fire = async (type: string, id: string) => {
+    const box = (await treeRow(p, id).boundingBox())!;
+    await treeRow(p, id).dispatchEvent(type, {
+      dataTransfer,
+      clientX: box.x + 80,
+      clientY: box.y + box.height / 2,
+    });
+  };
+  const comeBack = async () => {
+    await p.clock.fastForward(5_500);
+    await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+  };
+  const inside = sidebarOf(p).locator(".is-drop-inside");
+  const trashElsewhere = async (id: string) =>
+    expect((await api.post(`/api/v1/pages/${id}/trash`)).status()).toBe(200);
+
+  // « Delta » est tenue sur « Alpha », la dernière ligne où le pointeur est entré. Ailleurs,
+  // « Alpha » part à la corbeille : sa ligne quitte le document, sans que le navigateur ait
+  // annoncé de sortie.
+  await fire("dragstart", d.id);
+  await fire("dragenter", a.id);
+  await expect(treeRow(p, a.id)).toHaveClass(/is-drop-inside/);
+  await trashElsewhere(a.id);
+  await comeBack();
+  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "1 Charlie", "1 Delta"]);
+  await expect(inside).toHaveCount(0);
+  // Le pointeur survole maintenant « Bravo », remontée sous lui, puis quitte l'arbre : plus
+  // rien n'est éclairé, bien que la dernière entrée annoncée ait été sur une ligne disparue.
+  await fire("dragover", b.id);
+  await expect(treeRow(p, b.id)).toHaveClass(/is-drop-inside/);
+  await fire("dragleave", b.id);
+  await expect(inside).toHaveCount(0);
+  await expect(treeRow(p, d.id)).toHaveClass(/is-dragging/);
+
+  // La page tenue part à son tour à la corbeille, ailleurs : sa ligne quitte le document, et
+  // le navigateur ne dira jamais la fin du glisser. Restaurée, elle n'est plus « tenue ».
+  await trashElsewhere(d.id);
+  await comeBack();
+  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "1 Charlie"]);
+  expect((await api.post(`/api/v1/pages/${d.id}/restore`)).status()).toBe(200);
+  await comeBack();
+  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "1 Charlie", "1 Delta"]);
+  await expect(sidebarOf(p).locator(".is-dragging")).toHaveCount(0);
+  // Et plus rien ne s'éclaire sans un nouveau glisser.
+  await fire("dragenter", c.id);
+  await expect(inside).toHaveCount(0);
+});
+
 test("row_actions_are_always_shown_without_hover", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);

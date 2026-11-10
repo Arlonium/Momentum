@@ -214,6 +214,16 @@ export function SectionList({
     },
     [move],
   );
+  // L'arbre change sous un glisser en cours (une relecture) : ce qui était visé se recalcule au
+  // prochain mouvement du pointeur. Et si la page saisie n'est plus dans l'arbre, le glisser
+  // est fini : sa ligne a quitté le document, et le navigateur ne le dira à personne.
+  useEffect(() => {
+    setDrag((current) => {
+      if (current === null) return current;
+      if (nodes === null || !nodes.some((node) => node.id === current.id)) return null;
+      return current.over === null ? current : { ...current, over: null };
+    });
+  }, [nodes]);
   // Lâchée ailleurs, ou glisser abandonné (Échap) : le navigateur le dit à la ligne saisie.
   const dragging = drag !== null;
   useEffect(() => {

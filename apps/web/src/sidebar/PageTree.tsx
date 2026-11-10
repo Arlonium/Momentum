@@ -158,7 +158,11 @@ export function PageTree({
   const lineIndex =
     overIndex >= 0 && over?.zone === "after" ? subtreeEnd(rows, overIndex) : overIndex;
 
-  /** Le dernier élément de l'arbre où le pointeur est entré pendant un glisser. */
+  /**
+   * L'élément de l'arbre que le pointeur survole pendant un glisser : le dernier où il est
+   * entré, ou qu'il a survolé depuis. Une relecture peut retirer du document celui où il est
+   * entré, sans que le navigateur annonce de sortie : le survol suivant le remplace.
+   */
   const entered = useRef<EventTarget | null>(null);
 
   /** Le pointeur vise un endroit de l'arbre : le dépôt y est permis, ou non. */
@@ -190,11 +194,14 @@ export function PageTree({
         entered.current = event.target;
         aim(event);
       }}
-      onDragOver={aim}
+      onDragOver={(event) => {
+        entered.current = event.target;
+        aim(event);
+      }}
       onDragLeave={(event) => {
         // Le pointeur a-t-il quitté l'arbre, ou seulement changé d'élément ? Le navigateur
         // annonce l'entrée sur le nouvel élément avant la sortie de l'ancien : seule la
-        // sortie du dernier élément où il est entré est celle de l'arbre. `relatedTarget` le
+        // sortie de l'élément qu'il survolait est celle de l'arbre. `relatedTarget` le
         // dirait aussi, mais tous les navigateurs ne le donnent pas.
         if (event.target !== entered.current) return;
         entered.current = null;
