@@ -51,6 +51,44 @@ test("create_page_and_type_persists", async ({ page, request }) => {
   expect(node?.title).toBe("Essai");
 });
 
+test("double_click_creates_a_single_page", async ({ browser }) => {
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const p = await newUser(browser, account);
+  await p.goto("/");
+  const sidebar = sidebarOf(p);
+  // Toutes les créations de page que l'onglet demande au serveur.
+  let asked = 0;
+  p.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/pages") asked++;
+  });
+  /** Les pages déjà ouvertes : la suivante est une autre. */
+  const opened: string[] = [];
+  const another = async () => {
+    await p.waitForURL((url) => UUID.test(url.pathname) && !opened.includes(url.pathname));
+    opened.push(new URL(p.url()).pathname);
+    return pageIdOf(p);
+  };
+
+  // « Nouvelle page », dans le contenu puis en tête de barre latérale ; le « + » d'une
+  // section ; le « + » d'une ligne. Un double clic ne crée chaque fois qu'une page.
+  await p.getByRole("main").getByRole("button", { name: "Nouvelle page" }).dblclick();
+  await another();
+  expect(asked).toBe(1);
+  await sidebar.getByRole("button", { name: "Nouvelle page" }).dblclick();
+  await another();
+  expect(asked).toBe(2);
+  await sectionOf(p, "Espace").hover();
+  await sidebar.getByRole("button", { name: "Ajouter une page dans « Espace »" }).dblclick();
+  const inSpace = await another();
+  expect(asked).toBe(3);
+  await treeRow(p, inSpace).hover();
+  await treeRow(p, inSpace).getByRole("button", { name: /^Ajouter une sous-page à / }).dblclick();
+  await another();
+  expect(asked).toBe(4);
+  expect((await getTree(api)).nodes).toHaveLength(4);
+});
+
 test("subpage_appears_in_tree", async ({ page, request }) => {
   const parentTitle = `Parent ${unique()}`;
   const parent = await createPage(request, { title: parentTitle });

@@ -101,6 +101,41 @@ test("created_page_joins_the_tree_and_opens", async () => {
   expect(ids(app.current.nodes)).toEqual(["a", "n", "n1"]);
 });
 
+test("double_click_creates_a_single_page", async () => {
+  const app = await withTree([page("a")]);
+  const answer = deferred<PageNode>();
+  vi.mocked(createPage).mockReturnValue(answer.promise);
+  // Deux clics de suite sur « Nouvelle page » ou sur un « + » : tant que la première création
+  // n'a pas répondu, la seconde ne part pas.
+  await settle(() => {
+    void app.current.actions.create({ section: "private" });
+    void app.current.actions.create({ section: "private" });
+    void app.current.actions.create({ parentId: "a" });
+  });
+  expect(createPage).toHaveBeenCalledTimes(1);
+  await settle(() => answer.resolve(page("n", { section: "private" })));
+  expect(ids(app.current.nodes)).toEqual(["a", "n"]);
+  expect(location.pathname).toBe("/p/n");
+
+  // Elle a répondu : la suivante part.
+  vi.mocked(createPage).mockResolvedValue(page("m", { section: "private" }));
+  await settle(() => app.current.actions.create({ section: "private" }));
+  expect(createPage).toHaveBeenCalledTimes(2);
+  expect(ids(app.current.nodes)).toEqual(["a", "n", "m"]);
+});
+
+test("creation_is_possible_again_after_a_refusal_or_a_lost_session", async () => {
+  const app = await withTree([page("a")]);
+  for (const failure of [refusal("invalid_parent", "page parente inconnue", 422), unauthenticated()]) {
+    vi.mocked(createPage).mockRejectedValueOnce(failure);
+    await settle(() => app.current.actions.create({ parentId: "a" }));
+  }
+  vi.mocked(createPage).mockResolvedValue(page("n", { parentId: "a" }));
+  await settle(() => app.current.actions.create({ parentId: "a" }));
+  expect(createPage).toHaveBeenCalledTimes(3);
+  expect(ids(app.current.nodes)).toEqual(["a", "n"]);
+});
+
 test("nothing_is_created_under_a_stale_schema", async () => {
   const app = await withTree([page("a")], { stale: true });
   await settle(() => app.current.actions.create({ section: "space" }));

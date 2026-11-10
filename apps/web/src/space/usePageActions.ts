@@ -141,9 +141,14 @@ export function usePageActions({
   const { show, update, ask, gone } = page;
   const [trashChanges, setTrashChanges] = useState(0);
 
+  /** Une création est en route : « Nouvelle page » et les « + » n'en lancent pas d'autre. */
+  const creating = useRef(false);
   const create = useCallback(
     async (target: CreateTarget) => {
-      if (isStale()) return;
+      // Un double clic créerait deux pages : la seconde demande attend que la première ait
+      // répondu.
+      if (isStale() || creating.current) return;
+      creating.current = true;
       setNotice(null);
       try {
         // Sans `afterId` : en fin des frères (R23). À la racine, il faut dire l'espace et la
@@ -161,6 +166,8 @@ export function usePageActions({
         if (isSessionLost(error)) return;
         setNotice(`La page n'a pas pu être créée. ${creationRefusal(error)}`);
         reload();
+      } finally {
+        creating.current = false;
       }
     },
     [spaceId, isStale, change, reload],
