@@ -29,14 +29,15 @@
 //!   données.
 //!
 //! Une requête lit d'abord la révision courante de l'espace. Un calcul ne lui est rendu que
-//! s'il est rangé sous cette révision-là. À défaut, il est refait sur les données de l'espace :
-//! celles du cache si leur révision est au moins celle que la requête a lue, sinon celles
-//! qu'elle lit dans la base (Ruling R98). Jamais de données plus anciennes que la révision
-//! lue : `rev` ne fait que croître, et des données plus récentes sont ce que la requête aurait
-//! vu en arrivant un instant plus tard (l'argument est en tête de `inputs_cache.rs`). Le
-//! calcul est rangé sous la révision des données, celle de leur transaction, jamais sous une
-//! révision lue à part. Rien de périmé n'est donc servi : ce qui est rangé sous une révision
-//! est l'état de l'espace à cette révision.
+//! s'il est rangé sous cette révision-là. À défaut, elle lit le rôle de la personne : sans
+//! rôle, rien, et l'espace n'est pas lu (Ruling R99). Avec un rôle, le calcul est refait sur
+//! les données de l'espace, rôle compris : celles du cache si leur révision est au moins celle
+//! que la requête a lue, sinon celles qu'elle lit dans la base (Ruling R98). Jamais de données
+//! plus anciennes que la révision lue : `rev` ne fait que croître, et des données plus récentes
+//! sont ce que la requête aurait vu en arrivant un instant plus tard (l'argument est en tête de
+//! `inputs_cache.rs`). Le calcul est rangé sous la révision des données, celle de leur
+//! transaction, jamais sous une révision lue à part. Rien de périmé n'est donc servi : ce qui
+//! est rangé sous une révision est l'état de l'espace à cette révision.
 //!
 //! [`InputsCache`]: crate::inputs_cache::InputsCache
 
@@ -204,6 +205,18 @@ impl AppState {
         if let Some(access) = self.access.get(user.id, space_id, rev) {
             return Ok(Some(access));
         }
+        // Ruling R99 : l'appartenance d'abord, par une lecture indexée. Pour qui n'a aucun
+        // rôle, l'espace n'est pas lu et le tour de lecture n'est pas pris : sa réponse ne dit
+        // rien de la taille de l'espace ni de ce qu'on vient d'y écrire, et ne fait attendre
+        // personne. Ce rôle-ci ne sert qu'à cela : le calcul prend celui des données.
+        let member = self
+            .store
+            .role_in(space_id, user.id)
+            .await
+            .map_err(internal)?;
+        if member.is_none() {
+            return Ok(None);
+        }
         // Les données de l'espace, communes à tous : celles du cache, ou lues à l'instant (tout
         // l'arbre, corbeille comprise ; les lignes d'accès ; les rôles). Deux lectures au plus.
         let load = || self.store.access_inputs(space_id);
@@ -224,7 +237,8 @@ impl AppState {
             if inputs.rev < rev {
                 continue;
             }
-            // Sans rôle : rien, et aucun calcul n'est rangé.
+            // Le rôle que portent les données fait foi, pas celui lu plus haut : sans rôle
+            // dans celles-ci (retiré entre-temps), rien, et aucun calcul n'est rangé.
             let Some(role) = inputs.role_of(user.id) else {
                 return Ok(None);
             };
@@ -633,18 +647,21 @@ pub(crate) mod tests {
         assert_eq!(state.inputs.loads(), 2);
     }
 
-    /// Des données gardées ne servent qu'à leur révision. Les données de l'espace sont en
-    /// cache, et Mona, qui n'a encore rien demandé, y est membre ; elle est retirée : à sa
-    /// première requête, elle n'a rien. Tom, dont le calcul est gardé, passe invité : à sa
-    /// requête suivante, il ne voit plus la page des membres.
+    /// Des données gardées ne servent jamais à qui a lu une révision plus récente. Les données
+    /// de l'espace sont en cache. Mona, qui y est membre, est retirée : à sa requête suivante
+    /// elle n'a rien, bien que ces données lui donnent encore un rôle, et l'espace n'est pas
+    /// relu pour elle (Ruling R99). Léa, qui n'a encore rien demandé, passe invitée : à sa
+    /// première requête, elle ne voit pas la page des membres. Tom, dont le calcul est gardé,
+    /// passe invité : à sa requête suivante, il ne la voit plus.
     #[tokio::test]
     async fn stale_inputs_are_never_served() {
         let dir = tempfile::tempdir().unwrap();
         let state = state(&dir).await;
         let olga = account(&state, "olga").await;
         let mona = account(&state, "mona").await;
+        let lea = account(&state, "lea").await;
         let tom = account(&state, "tom").await;
-        let space = team(&state, &olga, &[&mona, &tom]).await;
+        let space = team(&state, &olga, &[&mona, &lea, &tom]).await;
         let page = members_page(&state, &space, &olga, "P").await;
         for who in [&olga, &tom] {
             let access = state.space_access(who, space.id).await.unwrap();
@@ -675,9 +692,28 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_none()
         );
+        // Rien n'a été relu pour elle : ce sont encore les données d'avant.
+        assert_eq!(state.inputs.loads(), 1);
+        let kept = state.inputs.kept(space.id).expect("des données gardées");
+        assert_eq!(
+            (kept.rev, kept.role_of(mona.id)),
+            (before, Some(Role::Member))
+        );
+
+        state
+            .store
+            .set_role(space.id, lea.id, Role::Guest, by_olga)
+            .await
+            .unwrap();
+        let access = state.space_access(&lea, space.id).await.unwrap();
+        assert_eq!(access.role(), Some(Role::Guest));
+        assert!(access.node(page).is_none());
         assert_eq!(state.inputs.loads(), 2);
         let kept = state.inputs.kept(space.id).expect("des données gardées");
-        assert_eq!((kept.rev, kept.role_of(mona.id)), (before + 1, None));
+        assert_eq!(
+            (kept.rev, kept.role_of(mona.id), kept.role_of(lea.id)),
+            (before + 2, None, Some(Role::Guest))
+        );
 
         state
             .store
@@ -688,6 +724,51 @@ pub(crate) mod tests {
         assert_eq!(access.role(), Some(Role::Guest));
         assert!(access.node(page).is_none());
         assert_eq!(state.inputs.loads(), 3);
+    }
+
+    /// Ruling R99 : le rôle lu d'abord ne sert qu'à ne pas lire l'espace pour qui n'en a pas ;
+    /// le calcul se fait sur le rôle que portent les données. La requête de Mona lit la
+    /// révision et son rôle, puis attend le tour de lecture, que le test tient ; Mona est
+    /// retirée de l'espace ; le tour est rendu. Les données lues ne lui donnent plus de rôle :
+    /// elle n'a rien, et aucun calcul n'est rangé.
+    #[tokio::test]
+    async fn the_role_of_the_inputs_decides() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let mona = account(&state, "mona").await;
+        let space = team(&state, &olga, &[&mona]).await;
+        members_page(&state, &space, &olga, "P").await;
+        let before = rev(&state, &space).await;
+
+        let held = state.inputs.hold_turn(space.id).await;
+        let request = tokio::spawn({
+            let (state, mona, space) = (state.clone(), mona.clone(), space.id);
+            async move { state.find_space_access(&mona, space).await }
+        });
+        wait_until("la requête attend son tour de lecture", || {
+            state.inputs.waiting(space.id) == 2
+        })
+        .await;
+        let by_olga = Expected {
+            actor: olga.id,
+            actor_role: Role::Owner,
+            target_role: Role::Member,
+        };
+        state
+            .store
+            .remove_member(space.id, mona.id, by_olga)
+            .await
+            .unwrap();
+        drop(held);
+
+        assert!(request.await.unwrap().unwrap().is_none());
+        for rev in [before, before + 1] {
+            assert!(state.access.get(mona.id, space.id, rev).is_none());
+        }
+        assert_eq!(state.inputs.loads(), 1);
+        let kept = state.inputs.kept(space.id).expect("des données gardées");
+        assert_eq!((kept.rev, kept.role_of(mona.id)), (before + 1, None));
     }
 
     /// Une écriture qui passe entre la lecture de la révision et celle des données : la
@@ -905,8 +986,9 @@ pub(crate) mod tests {
         assert_eq!(state.inputs.loads(), 2);
     }
 
-    /// Sans rôle dans l'espace : rien, et aucun calcul n'est rangé. Les données de l'espace,
-    /// elles, sont gardées : elles servent à ceux qui y ont un rôle.
+    /// Sans rôle dans l'espace : rien, exactement comme pour un espace qui n'existe pas. Aucun
+    /// calcul n'est rangé, et les données de l'espace ne sont pas lues pour lui (Ruling R99) :
+    /// ni cache froid, ni cache chaud, ni par l'id de l'espace, ni par celui d'une de ses pages.
     #[tokio::test]
     async fn no_role_is_not_cached() {
         let dir = tempfile::tempdir().unwrap();
@@ -914,34 +996,33 @@ pub(crate) mod tests {
         let sam = account(&state, "sam").await;
         let olga = account(&state, "olga").await;
         let space = team(&state, &olga, &[]).await;
-        members_page(&state, &space, &olga, "P").await;
+        let page = members_page(&state, &space, &olga, "P").await;
         let now = rev(&state, &space).await;
+        // Ce que Sam apprend de l'espace, par son id puis par celui d'une de ses pages.
+        let seen_by_sam = async |space: Uuid, page: Uuid| {
+            let access = state.find_space_access(&sam, space).await.unwrap();
+            let node = state.seen_node(&sam, page).await.unwrap();
+            (access.is_some(), node.is_some())
+        };
 
+        // Cache froid : rien n'est lu, et aucune case n'est prise dans le cache des données.
         for _ in 0..2 {
-            assert!(
-                state
-                    .find_space_access(&sam, space.id)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
+            assert_eq!(seen_by_sam(space.id, page).await, (false, false));
             assert!(state.access.get(sam.id, space.id, now).is_none());
         }
-        assert_eq!(state.inputs.loads(), 1);
+        assert_eq!((state.inputs.loads(), state.inputs.slots()), (0, 0));
+
+        // Cache chaud : les données servent à qui a un rôle, et toujours pas à lui.
         state.space_access(&olga, space.id).await.unwrap();
         assert!(state.access.get(olga.id, space.id, now).is_some());
+        assert_eq!((state.inputs.loads(), state.inputs.slots()), (1, 1));
+        assert_eq!(seen_by_sam(space.id, page).await, (false, false));
         assert!(state.access.get(sam.id, space.id, now).is_none());
-        assert_eq!(state.inputs.loads(), 1);
 
-        // Un espace qui n'existe pas : rien n'est lu ni gardé pour lui.
+        // La même réponse qu'un espace et une page qui n'existent pas ; rien n'est lu ni gardé
+        // pour eux non plus.
         let nowhere = Uuid::now_v7();
-        assert!(
-            state
-                .find_space_access(&olga, nowhere)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert_eq!(seen_by_sam(nowhere, nowhere).await, (false, false));
         assert_eq!((state.inputs.loads(), state.inputs.slots()), (1, 1));
     }
 
@@ -992,12 +1073,14 @@ pub(crate) mod tests {
     }
 
     /// Une lecture qui échoue : l'erreur remonte (`500`), et rien n'est rangé, ni données ni
-    /// calcul. La lecture suivante, réparée, sert.
+    /// calcul. Qui n'a aucun rôle n'en voit rien : pour lui l'espace n'est pas lu, et sa
+    /// réponse est celle de toujours (Ruling R99). La lecture suivante, réparée, sert.
     #[tokio::test]
     async fn failed_read_is_an_error_and_keeps_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let state = state(&dir).await;
         let olga = account(&state, "olga").await;
+        let sam = account(&state, "sam").await;
         let space = team(&state, &olga, &[]).await;
         let page = members_page(&state, &space, &olga, "P").await;
         let now = rev(&state, &space).await;
@@ -1019,6 +1102,14 @@ pub(crate) mod tests {
         );
         assert_eq!((state.inputs.loads(), state.inputs.slots()), (1, 0));
         assert!(state.access.get(olga.id, space.id, now).is_none());
+        assert!(
+            state
+                .find_space_access(&sam, space.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!((state.inputs.loads(), state.inputs.slots()), (1, 0));
 
         sqlx::query("DELETE FROM acl WHERE subject = 'personne'")
             .execute(&side)
