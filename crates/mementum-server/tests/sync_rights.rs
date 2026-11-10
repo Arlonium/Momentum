@@ -890,6 +890,96 @@ async fn login_over_a_session_closes_the_previous_account_connections() {
     );
 }
 
+/// Ruling R90, pour l'inscription : créer un compte par-dessus une session la ferme, avec les
+/// connexions de synchro du compte qu'elle portait, comme le fait la connexion. Sur un
+/// navigateur partagé, les pages ouvertes par la personne d'avant ne restent pas ouvertes sous
+/// le cookie de la suivante. Une inscription refusée ne ferme rien.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signup_over_a_session_closes_the_previous_account_connections() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let page = team.page(None, "Commune", &[members(Level::Edit)]).await;
+    let url = sync_url(addr, page);
+    let sessions_of = async |account: &Account<'_>| {
+        let sql = format!(
+            "SELECT COUNT(*) FROM sessions WHERE user_id = '{}'",
+            account.id
+        );
+        query_i64(&t.db_path(), &sql).await
+    };
+    // Un navigateur partagé : Mona y est connectée, la page ouverte. Elle l'est aussi chez
+    // elle ; Tom a la page ouverte ailleurs.
+    let shared = t.browser();
+    shared
+        .log_in("mona@exemple.fr", PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    let mona = synced_as(&shared, &url).await;
+    let mona_home = synced_as(&team.mona.browser, &url).await;
+    let tom = synced_as(&team.tom.browser, &url).await;
+    types(&mona, "avant").await;
+    let replaced = t.browser();
+    replaced.set_session(shared.session().as_deref());
+    assert_eq!(sessions_of(&team.mona).await, 2);
+
+    // Des inscriptions refusées par-dessus la session : une adresse prise, une invitation qui
+    // n'existe pas. Rien n'est fermé, et la session vaut toujours.
+    shared
+        .sign_up("tom@exemple.fr", "Tom bis", PASSWORD, None)
+        .await
+        .assert_error(StatusCode::CONFLICT, "email_taken");
+    let no_such_invitation = "A".repeat(43);
+    shared
+        .sign_up(
+            "nina@exemple.fr",
+            "Nina",
+            PASSWORD,
+            Some(&no_such_invitation),
+        )
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "invalid_invitation");
+    assert!(
+        still_served(&mona).await,
+        "fermée par une inscription ratée"
+    );
+    let me = shared.me().await;
+    me.assert_status(StatusCode::OK);
+    assert_eq!(me.json()["user"]["email"], "mona@exemple.fr");
+    assert_eq!(sessions_of(&team.mona).await, 2);
+
+    // Nina s'inscrit par-dessus.
+    shared
+        .sign_up("nina@exemple.fr", "Nina", PASSWORD, None)
+        .await
+        .assert_status(StatusCode::CREATED);
+    types_unheard(&mona, " trop tard");
+    assert!(
+        closed(&mona).await,
+        "la connexion de Mona est encore ouverte"
+    );
+    // La session remplacée ne vaut plus rien, pour personne.
+    assert_eq!(refused(&replaced, &url).await, 401);
+    replaced
+        .me()
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+    assert_eq!(sessions_of(&team.mona).await, 1);
+    assert!(still_served(&tom).await, "Tom est fermé");
+    // Toutes les connexions du compte remplacé sont fermées (Ruling R73) ; son autre appareil,
+    // qui a gardé sa session, revient, et rien de « trop tard » n'a été écrit.
+    assert!(closed(&mona_home).await);
+    let mona_home = synced_as(&team.mona.browser, &url).await;
+    assert_eq!(text(&mona_home), "avant");
+
+    // Le navigateur porte maintenant la session de Nina, qui n'a aucun rôle dans l'espace : la
+    // page n'existe pas pour elle.
+    let me = shared.me().await;
+    me.assert_status(StatusCode::OK);
+    assert_eq!(me.json()["user"]["email"], "nina@exemple.fr");
+    assert_eq!(refused(&shared, &url).await, 404);
+}
+
 /// Ruling R90 : la déconnexion ferme les connexions du compte que la session supprimée
 /// portait, sans dépendre d'une lecture faite avant : même quand la session est échue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

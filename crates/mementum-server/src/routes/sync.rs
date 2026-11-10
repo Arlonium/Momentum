@@ -42,9 +42,9 @@
 //!   rôle : celles de tout l'espace ; suppression définitive : l'acteur de
 //!   chaque page supprimée est arrêté (`Hub::forget`). Toute route qui
 //!   retire un droit doit en faire autant ;
-//! - déconnexion, changement de mot de passe, connexion par-dessus une
-//!   session : celles du compte dont la session se ferme (`Hub::kick_user`,
-//!   Rulings R73 et R90).
+//! - déconnexion, changement de mot de passe, connexion ou inscription
+//!   par-dessus une session : celles du compte dont la session se ferme
+//!   (`Hub::kick_user`, Rulings R73 et R90).
 //!
 //! Ces fermetures ne trouvent pas une connexion en train de s'ouvrir : ce
 //! sont les deux relectures de l'étape 4 qui la ferment. Pour les droits, la

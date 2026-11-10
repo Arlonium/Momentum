@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | `GET /health` | non | `ok` |
 //! | `GET /api/v1/info` | non | [`Info`] : versions, `signup` (`open` ou `invite`), `setup` (aucun compte n'existe encore) |
-//! | `POST /api/v1/auth/signup` | non | `201`, [`Me`], cookie de session ; le premier compte est toujours permis ; `403 signup_closed` ; `404 invalid_invitation` ; `409 email_taken` ; `422 invalid_email`, `invalid_name`, `invalid_password` |
+//! | `POST /api/v1/auth/signup` | non | `201`, [`Me`], cookie de session (celle que portait déjà le navigateur est fermée, avec les connexions de synchro de son compte, comme à la connexion, Ruling R90 ; une inscription refusée ne ferme rien) ; le premier compte est toujours permis ; `403 signup_closed` ; `404 invalid_invitation` ; `409 email_taken` ; `422 invalid_email`, `invalid_name`, `invalid_password` |
 //! | `POST /api/v1/auth/login` | non | [`Me`], cookie de session (celle que portait déjà le navigateur est fermée, avec les connexions de synchro de son compte, Ruling R90) ; `401 invalid_credentials` ; `429 too_many_attempts` (avec `Retry-After`) |
 //! | `POST /api/v1/auth/logout` | non | `204`, session supprimée, cookie effacé, connexions de synchro du compte fermées (Ruling R73) ; sans session : `204` aussi |
 //! | `POST /api/v1/auth/password` | oui | `204` : toutes les sessions du compte sont supprimées et ses connexions de synchro fermées ; la demande repart avec une session neuve (cookie de la réponse) ; `401 invalid_credentials` (mot de passe actuel faux) ; `422 invalid_password` ; `429 too_many_attempts` (frein à part de celui de la connexion, Ruling R76) |
@@ -65,11 +65,11 @@
 //! **Comptes** (`auth.rs`, `routes/auth.rs`) : comptes locaux, mot de passe
 //! haché en Argon2id, session par cookie. Le premier compte créé administre
 //! l'instance ; ensuite, on s'inscrit librement (`MEMENTUM_SIGNUP=open`) ou
-//! avec le jeton d'une invitation (`invite`, le défaut). Se connecter ferme
-//! la session que portait déjà le navigateur. Un mot de passe oublié se règle
-//! par `mementum user set-password`, faute de SMTP. C'est le compte qui
-//! protège les pages : plus aucune route de page ne répond sans session, ni
-//! ne lit ou n'écrit une page sans en avoir vérifié le droit.
+//! avec le jeton d'une invitation (`invite`, le défaut). Se connecter ou
+//! s'inscrire ferme la session que portait déjà le navigateur. Un mot de passe
+//! oublié se règle par `mementum user set-password`, faute de SMTP. C'est le
+//! compte qui protège les pages : plus aucune route de page ne répond sans
+//! session, ni ne lit ou n'écrit une page sans en avoir vérifié le droit.
 //!
 //! **Synchronisation** (`routes/sync.rs`). `/sync` est sous les mêmes droits
 //! que les routes de pages : session, puis droit de lire la page, vérifiés
@@ -78,9 +78,9 @@
 //! serveur la ferme dès qu'ils changent (corbeille, restauration, changement
 //! de parent, partage, retrait d'un membre, changement de rôle, suppression)
 //! ou que la session de son compte se ferme (déconnexion, changement de mot
-//! de passe, connexion par-dessus une session), et le client revient par la
-//! poignée de main, qui relit tout. Une connexion en train de s'ouvrir à cet
-//! instant est fermée avant d'avoir rien reçu.
+//! de passe, connexion ou inscription par-dessus une session), et le client
+//! revient par la poignée de main, qui relit tout. Une connexion en train de
+//! s'ouvrir à cet instant est fermée avant d'avoir rien reçu.
 //!
 //! **Garde-fous réseau** (`guard.rs`), avant toute route : sur la boucle
 //! locale, l'en-tête `Host` doit la nommer (DNS rebinding, Ruling R31), ou

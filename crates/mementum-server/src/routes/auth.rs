@@ -14,9 +14,9 @@
 //! - aucune de leurs réponses, réussite ou refus, ne se garde dans un cache
 //!   (`Cache-Control: no-store`) ;
 //! - une connexion de synchro ne survit pas à la fermeture de la session de
-//!   son compte : la déconnexion, le changement de mot de passe et la
-//!   connexion par-dessus une session ferment celles du compte, après leur
-//!   écriture en base (`Hub::kick_user`, Rulings R73 et R90). Celle qui
+//!   son compte : la déconnexion, le changement de mot de passe, la connexion
+//!   et l'inscription par-dessus une session ferment celles du compte, après
+//!   leur écriture en base (`Hub::kick_user`, Rulings R73 et R90). Celle qui
 //!   s'ouvrait au même instant est fermée à son inscription, où la route de
 //!   synchro relit sa session (Ruling R88). Une session qui arrive à
 //!   échéance, elle, ne ferme rien : la connexion vit jusqu'à sa prochaine
@@ -43,16 +43,21 @@ use crate::routes::invitations;
 use crate::types::{ChangePassword, ErrorCode, LogIn, Me, SignUp, SignupMode, SpaceInfo, UserInfo};
 use crate::{AppState, now_ms, to_completion};
 
-/// `POST /api/v1/auth/signup` : `201` et le compte, session ouverte.
+/// `POST /api/v1/auth/signup` : `201` et le compte, session ouverte. Comme à
+/// la connexion, la session que portait déjà le navigateur est fermée, et avec
+/// elle les connexions de synchro du compte qu'elle portait (Ruling R90) : le
+/// cookie de la réponse la remplace. Une inscription refusée ne ferme rien.
 pub(crate) async fn signup(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<SignUp>, JsonRejection>,
 ) -> Response {
-    no_store(sign_up(state, body).await)
+    no_store(sign_up(state, headers, body).await)
 }
 
 async fn sign_up(
     state: AppState,
+    headers: HeaderMap,
     body: Result<Json<SignUp>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(body) = body?;
@@ -69,8 +74,17 @@ async fn sign_up(
         None => None,
     };
     let secure = state.secure_cookies;
-    let (me, token) =
-        to_completion(register(state, email, name, body.password, invitation)).await?;
+    let account = NewAccount {
+        email,
+        name,
+        password: body.password,
+        invitation,
+        // La session que le cookie de la réponse va remplacer.
+        carried: auth::session_hash(&headers),
+    };
+    // Compte, fermeture de la session portée, session neuve : jusqu'au bout,
+    // même si le client coupe la connexion.
+    let (me, token) = to_completion(register(state, account)).await?;
     Ok((
         StatusCode::CREATED,
         [(header::SET_COOKIE, auth::session_cookie(&token, secure))],
@@ -79,15 +93,28 @@ async fn sign_up(
         .into_response())
 }
 
-/// Crée le compte, lui donne son espace et ouvre sa session. Rend le `Me` et
-/// le jeton de session.
-async fn register(
-    state: AppState,
+/// Une inscription, corps vérifié. Sans `Debug` : elle porte un mot de passe.
+struct NewAccount {
     email: String,
     name: String,
     password: String,
+    /// Le hachage du jeton d'invitation, s'il y en a un.
     invitation: Option<[u8; 32]>,
-) -> Result<(Me, String), ApiError> {
+    /// Le hachage de la session que portait déjà le navigateur, s'il y en a
+    /// une : fermée une fois le compte créé (Ruling R90).
+    carried: Option<[u8; 32]>,
+}
+
+/// Crée le compte, lui donne son espace, ferme la session que portait le
+/// navigateur et ouvre celle du compte. Rend le `Me` et le jeton de session.
+async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), ApiError> {
+    let NewAccount {
+        email,
+        name,
+        password,
+        invitation,
+        carried,
+    } = account;
     // Une inscription à la fois : entre la vérification du droit de
     // s'inscrire et la création du compte, aucune autre ne passe. Deux
     // « premiers comptes » ne se croisent pas, et un jeton d'invitation ne
@@ -158,6 +185,11 @@ async fn register(
             "invitation retirée pendant l'inscription : compte créé sans elle"
         );
     }
+    // Le compte existe : le cookie que portait ce navigateur va être remplacé.
+    // Sa session ne doit plus rien valoir, pour personne, ni les connexions de
+    // synchro du compte qu'elle portait (Ruling R90, comme à la connexion).
+    // Pas avant : une inscription refusée ne ferme rien.
+    close_session(&state, carried).await?;
     let token = open_session(&state, user.id).await?;
     let me = me_of(&state, user.into()).await?;
     Ok((me, token))
