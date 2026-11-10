@@ -194,3 +194,42 @@ test("refused_restore_reads_the_page_again", async ({ browser }) => {
   await expect(treeRow(p, b.id).getByRole("link")).toHaveAttribute("aria-current", "page");
   await expect(titleOf(p)).not.toHaveAttribute("readonly", "");
 });
+
+test("tree_is_read_again_when_the_tab_comes_back", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+
+  const p = await newUser(browser, alice);
+  // L'horloge de la page est la nôtre : on n'attend pas cinq secondes pour de bon.
+  await p.clock.install();
+  await p.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha"]);
+  let reads = 0;
+  p.on("request", (request) => {
+    if (request.url().endsWith(`/spaces/${space.id}/tree`)) reads += 1;
+  });
+  const comeBack = () => p.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+  // Ailleurs, une page est créée et une autre renommée ; ici, rien ne bouge.
+  const b = await createPage(api, { title: "Bravo" });
+  const renamed = await api.patch(`/api/v1/pages/${a.id}`, { data: { title: "Alpha, renommée" } });
+  expect(renamed.status()).toBe(200);
+  // Retour sur l'onglet juste après son chargement : l'arbre vient d'être lu.
+  await comeBack();
+  await p.waitForTimeout(300);
+  expect(reads).toBe(0);
+  expect(await shownRows(p)).toEqual(["1 Alpha"]);
+
+  // Plus de cinq secondes après : il est relu, et ce qui a changé ailleurs arrive.
+  await p.clock.fastForward(5_500);
+  await comeBack();
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha, renommée", "1 Bravo"]);
+  await expect(treeRow(p, b.id)).toBeVisible();
+  expect(reads).toBe(1);
+  // Pas deux fois de suite.
+  await comeBack();
+  await p.waitForTimeout(300);
+  expect(reads).toBe(1);
+});

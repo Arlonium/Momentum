@@ -11,6 +11,11 @@
 //
 // Une lecture qui échoue (serveur injoignable) ne retire rien de l'écran : l'arbre chargé
 // reste, l'échec est dit, et la lecture repart d'elle-même quand le réseau revient.
+//
+// Rien ne pousse encore ici ce que d'autres changent dans l'espace (le journal d'opérations
+// de l'espace viendra dans un lot suivant, conception §5.3). En attendant, l'arbre est relu
+// quand l'onglet redevient visible ou reprend le focus, au plus une fois toutes les cinq
+// secondes (Ruling R97). Pas de relecture à intervalle fixe.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ApiError, getTree, isSessionLost } from "../api";
@@ -18,6 +23,9 @@ import { messageOf } from "../session/forms";
 
 /** L'arbre chargé : les pages d'un espace que la personne voit, hors corbeille. */
 export type LoadedTree = { spaceId: string; nodes: PageNode[] };
+
+/** Au retour sur l'onglet, l'arbre n'est relu que si sa dernière lecture a au moins cet âge. */
+export const REFRESH_INTERVAL_MS = 5_000;
 
 export type SpaceTree = {
   /** L'arbre chargé ; `null` : aucun encore. Ce peut être celui d'un espace qu'on a quitté. */
@@ -92,10 +100,13 @@ export function useTreeReader(
   const callbacks = useRef(reading);
   callbacks.current = reading;
   const [error, setError] = useState<string | null>(null);
+  /** Quand la dernière lecture est partie (millisecondes Unix). */
+  const readAt = useRef(0);
 
   useEffect(() => {
     if (spaceId === null) return;
     let cancelled = false;
+    readAt.current = Date.now();
     const read = async () => {
       for (;;) {
         const before = changes.current;
@@ -126,6 +137,25 @@ export function useTreeReader(
     window.addEventListener("online", reload);
     return () => window.removeEventListener("online", reload);
   }, [failed, reload]);
+
+  // De retour sur l'onglet : ce que d'autres ont créé, renommé ou déplacé entre-temps (R97).
+  const known = spaceId !== null;
+  useEffect(() => {
+    if (!known) return;
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - readAt.current < REFRESH_INTERVAL_MS) return;
+      // Deux signaux du même retour (visible, puis focus) ne font qu'une lecture.
+      readAt.current = Date.now();
+      reload();
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [known, reload]);
 
   return error;
 }

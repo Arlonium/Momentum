@@ -1,11 +1,16 @@
 // L'arbre de l'espace affiché : sa lecture, ses relectures, et ce que les actions d'ici y
 // changent sans l'attendre.
 import type { PageNode, Tree } from "@mementum/protocol";
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError, getTree } from "../api";
 import { deferred, renderHook, settle, type Deferred } from "../test/hooks";
 import { page, unauthenticated, unreachable } from "../test/pages";
-import { useSpaceTree, useTreeCatchUp, useTreeReader } from "./useSpaceTree";
+import {
+  REFRESH_INTERVAL_MS,
+  useSpaceTree,
+  useTreeCatchUp,
+  useTreeReader,
+} from "./useSpaceTree";
 
 vi.mock("../api", async (original) => ({
   ...(await original<typeof import("../api")>()),
@@ -173,6 +178,68 @@ test("failed_read_is_made_again_when_the_network_is_back", async () => {
   // Sans échec en attente, le retour du réseau ne relit rien.
   await settle(() => window.dispatchEvent(new Event("online")));
   expect(reads).toHaveLength(2);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+test("tree_is_read_again_when_the_tab_comes_back", async () => {
+  // Seule l'horloge est fausse : les promesses suivent leur cours.
+  vi.useFakeTimers({ toFake: ["Date"], now: 1_000_000 });
+  let visibility: DocumentVisibilityState = "visible";
+  vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+  const focus = () => settle(() => window.dispatchEvent(new Event("focus")));
+  const visible = (state: DocumentVisibilityState) =>
+    settle(() => {
+      visibility = state;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  await answer(0, "perso", [page("a")]);
+  expect(REFRESH_INTERVAL_MS).toBe(5_000);
+
+  // L'onglet reprend le focus juste après une lecture : elle est assez fraîche.
+  vi.setSystemTime(1_000_000 + REFRESH_INTERVAL_MS - 1);
+  await focus();
+  expect(reads).toHaveLength(1);
+  // Cinq secondes après : l'arbre est relu, et ce que d'autres ont changé arrive.
+  vi.setSystemTime(1_000_000 + REFRESH_INTERVAL_MS);
+  await focus();
+  expect(reads).toHaveLength(2);
+  const fresh = [page("a"), page("b")];
+  await answer(1, "perso", fresh);
+  expect(tree.current.loaded?.nodes).toBe(fresh);
+  // Au plus une fois toutes les cinq secondes, quel que soit le signal.
+  await focus();
+  await visible("visible");
+  expect(reads).toHaveLength(2);
+
+  // L'onglet passe à l'arrière-plan : rien. Il redevient visible : relu.
+  vi.setSystemTime(1_000_000 + 3 * REFRESH_INTERVAL_MS);
+  await visible("hidden");
+  expect(reads).toHaveLength(2);
+  await visible("visible");
+  expect(reads).toHaveLength(3);
+  await answer(2, "perso", fresh);
+
+  // Une relecture demandée par une action compte aussi : le retour sur l'onglet, juste
+  // après, n'en refait pas une.
+  vi.setSystemTime(1_000_000 + 5 * REFRESH_INTERVAL_MS);
+  await settle(() => tree.current.reload());
+  expect(reads).toHaveLength(4);
+  await focus();
+  expect(reads).toHaveLength(4);
+});
+
+test("tab_coming_back_reads_nothing_before_a_space_is_known", async () => {
+  vi.useFakeTimers({ toFake: ["Date"], now: 1_000_000 });
+  await renderHook(hook, { spaceId: null });
+  vi.setSystemTime(2_000_000);
+  await settle(() => window.dispatchEvent(new Event("focus")));
+  expect(reads).toEqual([]);
 });
 
 type CatchUpProps = { nodes: PageNode[] | null; activeId: string | null; found: PageNode | null };
