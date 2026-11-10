@@ -17,8 +17,10 @@
 //!   [`LOGIN_MAX_FAILURES`] échecs pour une même adresse en
 //!   [`LOGIN_WINDOW_MS`], tout est refusé jusqu'à la fin de la fenêtre. La
 //!   connexion et le changement de mot de passe ont chacun leur compteur
-//!   ([`Guarded`], Ruling R76). Le compteur est en mémoire : il repart de
-//!   zéro au redémarrage.
+//!   ([`Guarded`], Ruling R76). La fenêtre d'une adresse qui a un compte
+//!   n'est jamais oubliée avant sa fin ; celles des adresses sans compte
+//!   vivent dans un réservoir borné, qui ne refuse personne (Ruling R81). Le
+//!   compteur est en mémoire : il repart de zéro au redémarrage.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -74,9 +76,9 @@ pub const LOGIN_WINDOW_MS: i64 = 15 * 60 * 1000;
 /// prenne ni toute la mémoire ni tous les fils bloquants.
 pub const MAX_CONCURRENT_HASHES: usize = 4;
 
-/// Fenêtres suivies à la fois par le frein des connexions, au plus : la
-/// mémoire du compteur est bornée (moins de 1 Mo), même sous une rafale
-/// d'adresses toutes différentes.
+/// Adresses sans compte suivies à la fois par le frein des connexions, au
+/// plus : sa mémoire est bornée (moins de 1 Mo pour elles, plus deux fenêtres
+/// par compte), même sous une rafale d'adresses toutes différentes.
 const LOGIN_TRACKED_MAX: usize = 10_000;
 
 /// Octets d'un jeton.
@@ -360,44 +362,64 @@ impl Window {
 /// décomptée si elle réussit : des tentatives simultanées ne dépassent pas le
 /// seuil. Le compteur ne garde pas les adresses, seulement leur SHA-256.
 ///
-/// Il suit [`LOGIN_TRACKED_MAX`] fenêtres au plus. Plein, il fait de la place
-/// sans jamais oublier une fenêtre qui bloque : partent d'abord les fenêtres
-/// finies, puis la moins chargée de celles qui n'ont pas atteint le seuil.
-/// Si tout ce qu'il suit bloque, une adresse nouvelle est refusée : sinon,
-/// dix mille adresses jetables rendraient ses dix essais à qui attaque une
-/// adresse.
+/// Deux classes de fenêtres (Ruling R81), parce qu'un seul réservoir borné,
+/// où un attaquant crée des fenêtres à volonté, se contourne (on fait évincer
+/// la fenêtre qu'on attaque) ou se sature (on ferme la porte à tout le
+/// monde) :
+/// - celles des adresses **qui ont un compte** ne sont jamais évincées, et ne
+///   comptent dans aucune borne. Il y en a au plus deux par compte, une par
+///   [`Guarded`] : leur mémoire est bornée par le nombre de comptes. Elles
+///   partent sur une réussite, ou quand le compte revient après leur fin ;
+/// - celles des adresses **sans compte** vivent dans un réservoir de
+///   [`LOGIN_TRACKED_MAX`] fenêtres. Plein, il fait de la place sans jamais
+///   refuser une adresse nouvelle : partent les fenêtres finies, sinon la
+///   plus ancienne, même si elle bloque. Il n'y a pas de mot de passe
+///   derrière ces adresses : ce frein-là ne protège que le serveur.
+///
+/// Le prix, accepté : quand le réservoir est saturé, et seulement alors, une
+/// adresse sans compte retrouve ses essais plus tôt qu'un compte. C'est un
+/// indice d'existence pour qui paie au moins dix mille requêtes par adresse
+/// sondée.
 #[derive(Default)]
 pub(crate) struct LoginThrottle {
-    windows: Mutex<HashMap<[u8; 32], Window>>,
+    windows: Mutex<Windows>,
+}
+
+/// Les fenêtres du frein, par classe.
+#[derive(Default)]
+struct Windows {
+    /// Celles des adresses qui ont un compte : jamais évincées.
+    accounts: HashMap<[u8; 32], Window>,
+    /// Celles des adresses sans compte : [`LOGIN_TRACKED_MAX`] au plus.
+    unknown: HashMap<[u8; 32], Window>,
 }
 
 impl LoginThrottle {
     /// Compte une tentative pour `email` à `now` (millisecondes Unix), ou la
-    /// refuse si l'adresse a épuisé ses échecs pour `what`.
-    pub(crate) fn attempt(&self, what: Guarded, email: &str, now: i64) -> Result<(), Throttled> {
+    /// refuse si l'adresse a épuisé ses échecs pour `what`. `has_account` dit
+    /// si un compte porte cette adresse : c'est à l'appelant de l'avoir lu.
+    pub(crate) fn attempt(
+        &self,
+        what: Guarded,
+        email: &str,
+        has_account: bool,
+        now: i64,
+    ) -> Result<(), Throttled> {
         let key = throttle_key(what, email);
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        let class = if has_account {
+            &mut windows.accounts
+        } else {
+            &mut windows.unknown
+        };
         // Une fenêtre finie repart de zéro.
-        if windows.get(&key).is_some_and(|window| window.ended(now)) {
-            windows.remove(&key);
+        if class.get(&key).is_some_and(|window| window.ended(now)) {
+            class.remove(&key);
         }
-        if !windows.contains_key(&key)
-            && windows.len() >= LOGIN_TRACKED_MAX
-            && !make_room(&mut windows, now)
-        {
-            // Tout ce que suit le frein bloque encore : la place reviendra à
-            // la fin de la première de ces fenêtres.
-            let retry_after = windows
-                .values()
-                .map(|window| window.seconds_left(now))
-                .min()
-                .unwrap_or(1);
-            return Err(Throttled {
-                retry_after,
-                first: false,
-            });
+        if !has_account && !class.contains_key(&key) && class.len() >= LOGIN_TRACKED_MAX {
+            make_room(class, now);
         }
-        let window = windows.entry(key).or_insert(Window::new(now));
+        let window = class.entry(key).or_insert(Window::new(now));
         if window.blocks() {
             let first = !window.refused;
             window.refused = true;
@@ -411,11 +433,13 @@ impl LoginThrottle {
     }
 
     /// La tentative a réussi : le compteur de `email` pour `what` repart de
-    /// zéro.
+    /// zéro. Seul un compte réussit : rien ne change pour une adresse comptée
+    /// comme sans compte.
     pub(crate) fn succeeded(&self, what: Guarded, email: &str) {
         self.windows
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .accounts
             .remove(&throttle_key(what, email));
     }
 }
@@ -433,26 +457,19 @@ fn throttle_key(what: Guarded, email: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Fait de la place dans un frein plein, sans toucher à une fenêtre qui
-/// bloque : les fenêtres finies partent ; s'il n'y en a pas, la moins chargée
-/// de celles qui n'ont pas atteint le seuil (à charge égale, la plus
-/// ancienne). Rend faux si aucune place n'a pu être faite.
-fn make_room(windows: &mut HashMap<[u8; 32], Window>, now: i64) -> bool {
-    windows.retain(|_, window| !window.ended(now));
-    if windows.len() < LOGIN_TRACKED_MAX {
-        return true;
-    }
-    let lightest = windows
-        .iter()
-        .filter(|(_, window)| !window.blocks())
-        .min_by_key(|(_, window)| (window.failures, window.started))
-        .map(|(key, _)| *key);
-    match lightest {
-        Some(key) => {
-            windows.remove(&key);
-            true
+/// Fait de la place dans le réservoir plein des adresses sans compte : les
+/// fenêtres finies partent ; s'il n'y en a pas, la plus ancienne, qu'elle
+/// bloque ou non.
+fn make_room(unknown: &mut HashMap<[u8; 32], Window>, now: i64) {
+    unknown.retain(|_, window| !window.ended(now));
+    if unknown.len() >= LOGIN_TRACKED_MAX {
+        let oldest = unknown
+            .iter()
+            .min_by_key(|(_, window)| window.started)
+            .map(|(key, _)| *key);
+        if let Some(key) = oldest {
+            unknown.remove(&key);
         }
-        None => false,
     }
 }
 
@@ -723,66 +740,72 @@ mod tests {
         );
     }
 
+    /// La règle des dix échecs, pour une adresse qui a un compte comme pour
+    /// une adresse qui n'en a pas.
     #[test]
     fn throttle_blocks_until_the_window_ends() {
-        let throttle = LoginThrottle::default();
-        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
-        let start = 1_000_000;
-        // Dix tentatives passent, étalées dans la fenêtre.
-        for n in 0..10 {
+        for has_account in [true, false] {
+            let throttle = LoginThrottle::default();
+            let attempt =
+                |email: &str, now: i64| throttle.attempt(Guarded::Login, email, has_account, now);
+            let start = 1_000_000;
+            // Dix tentatives passent, étalées dans la fenêtre.
+            for n in 0..10 {
+                assert_eq!(
+                    attempt("alice@exemple.fr", start + n * 1000),
+                    Ok(()),
+                    "essai {n}"
+                );
+            }
+            // La onzième est refusée, jusqu'à la fin de la fenêtre ouverte
+            // par la première.
             assert_eq!(
-                attempt("alice@exemple.fr", start + n * 1000),
-                Ok(()),
-                "essai {n}"
+                attempt("alice@exemple.fr", start + 10_000),
+                Err(Throttled {
+                    retry_after: 890,
+                    first: true
+                })
+            );
+            // La même adresse, écrite autrement.
+            assert_eq!(
+                attempt("  ALICE@Exemple.fr ", start + 10_500),
+                Err(Throttled {
+                    retry_after: 890,
+                    first: false
+                })
+            );
+            assert_eq!(
+                attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS - 1),
+                Err(Throttled {
+                    retry_after: 1,
+                    first: false
+                })
+            );
+            // Une autre adresse n'est pas touchée.
+            assert_eq!(attempt("bob@exemple.fr", start + 10_000), Ok(()));
+            // La fenêtre finie, le compteur repart : dix tentatives de
+            // nouveau.
+            for n in 0..10 {
+                assert_eq!(
+                    attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS + n),
+                    Ok(()),
+                    "essai {n} de la fenêtre suivante"
+                );
+            }
+            assert_eq!(
+                attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS + 10),
+                Err(Throttled {
+                    retry_after: 900,
+                    first: true
+                })
             );
         }
-        // La onzième est refusée, jusqu'à la fin de la fenêtre ouverte par
-        // la première.
-        assert_eq!(
-            attempt("alice@exemple.fr", start + 10_000),
-            Err(Throttled {
-                retry_after: 890,
-                first: true
-            })
-        );
-        // La même adresse, écrite autrement.
-        assert_eq!(
-            attempt("  ALICE@Exemple.fr ", start + 10_500),
-            Err(Throttled {
-                retry_after: 890,
-                first: false
-            })
-        );
-        assert_eq!(
-            attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS - 1),
-            Err(Throttled {
-                retry_after: 1,
-                first: false
-            })
-        );
-        // Une autre adresse n'est pas touchée.
-        assert_eq!(attempt("bob@exemple.fr", start + 10_000), Ok(()));
-        // La fenêtre finie, le compteur repart : dix tentatives de nouveau.
-        for n in 0..10 {
-            assert_eq!(
-                attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS + n),
-                Ok(()),
-                "essai {n} de la fenêtre suivante"
-            );
-        }
-        assert_eq!(
-            attempt("alice@exemple.fr", start + LOGIN_WINDOW_MS + 10),
-            Err(Throttled {
-                retry_after: 900,
-                first: true
-            })
-        );
     }
 
     #[test]
     fn throttle_resets_on_success() {
         let throttle = LoginThrottle::default();
-        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
+        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, true, now);
         for round in 0..3 {
             for n in 0..10 {
                 assert_eq!(
@@ -799,6 +822,14 @@ mod tests {
         }
         throttle.succeeded(Guarded::Login, "bob@exemple.fr");
         assert!(attempt("alice@exemple.fr", 10).is_err());
+        // Une réussite ne vaut que pour un compte : elle ne rend pas ses
+        // essais à une adresse comptée comme sans compte.
+        let unknown = |now: i64| throttle.attempt(Guarded::Login, "carol@exemple.fr", false, now);
+        for n in 0..10 {
+            assert_eq!(unknown(n), Ok(()));
+        }
+        throttle.succeeded(Guarded::Login, "carol@exemple.fr");
+        assert!(unknown(10).is_err());
     }
 
     /// Ruling R76 : la connexion et le changement de mot de passe d'une même
@@ -808,152 +839,222 @@ mod tests {
     fn throttle_counts_each_guarded_action_apart() {
         let throttle = LoginThrottle::default();
         let email = "alice@exemple.fr";
+        let attempt = |what: Guarded, now: i64| throttle.attempt(what, email, true, now);
         for n in 0..10 {
-            assert_eq!(throttle.attempt(Guarded::Login, email, n), Ok(()));
+            assert_eq!(attempt(Guarded::Login, n), Ok(()));
         }
-        assert!(throttle.attempt(Guarded::Login, email, 10).is_err());
+        assert!(attempt(Guarded::Login, 10).is_err());
         // Le changement de mot de passe a encore ses dix essais.
         for n in 0..10 {
             assert_eq!(
-                throttle.attempt(Guarded::PasswordChange, email, 10 + n),
+                attempt(Guarded::PasswordChange, 10 + n),
                 Ok(()),
                 "essai {n}"
             );
         }
-        assert!(
-            throttle
-                .attempt(Guarded::PasswordChange, email, 20)
-                .is_err()
-        );
+        assert!(attempt(Guarded::PasswordChange, 20).is_err());
         // Un changement réussi ne rouvre pas la connexion, et l'inverse.
         throttle.succeeded(Guarded::PasswordChange, email);
-        assert!(throttle.attempt(Guarded::Login, email, 21).is_err());
-        assert_eq!(throttle.attempt(Guarded::PasswordChange, email, 21), Ok(()));
+        assert!(attempt(Guarded::Login, 21).is_err());
+        assert_eq!(attempt(Guarded::PasswordChange, 21), Ok(()));
         throttle.succeeded(Guarded::Login, email);
-        assert_eq!(throttle.attempt(Guarded::Login, email, 22), Ok(()));
+        assert_eq!(attempt(Guarded::Login, 22), Ok(()));
         assert_ne!(
             throttle_key(Guarded::Login, email),
             throttle_key(Guarded::PasswordChange, email)
         );
     }
 
-    /// Le frein ne grossit pas sans fin : plein, il oublie les fenêtres
-    /// finies, sinon la moins chargée (à charge égale, la plus ancienne).
+    /// Le nombre de fenêtres de chaque classe (comptes, adresses sans compte).
+    fn tracked(throttle: &LoginThrottle) -> (usize, usize) {
+        let windows = throttle.windows.lock().unwrap();
+        (windows.accounts.len(), windows.unknown.len())
+    }
+
+    /// Ruling R81 : le réservoir des adresses sans compte ne dépasse jamais
+    /// [`LOGIN_TRACKED_MAX`] ; plein, il oublie les fenêtres finies, sinon la
+    /// plus ancienne. Les fenêtres des comptes n'y comptent pas.
     #[test]
     fn throttle_memory_is_bounded() {
         let throttle = LoginThrottle::default();
-        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
-        let tracked = |email: &str| {
+        let unknown = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, false, now);
+        let account = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, true, now);
+        let is_tracked = |email: &str| {
             let windows = throttle.windows.lock().unwrap();
-            windows.contains_key(&throttle_key(Guarded::Login, email))
+            windows
+                .unknown
+                .contains_key(&throttle_key(Guarded::Login, email))
         };
-        let len = || throttle.windows.lock().unwrap().len();
-        for i in 0..LOGIN_TRACKED_MAX as i64 {
-            assert_eq!(attempt(&format!("{i}@exemple.fr"), i), Ok(()));
+        // Des fenêtres de comptes, puis le réservoir rempli.
+        for i in 0..500 {
+            assert_eq!(account(&format!("compte{i}@exemple.fr"), 0), Ok(()));
         }
-        assert_eq!(len(), LOGIN_TRACKED_MAX);
-        // Aucune fenêtre n'est finie, toutes ont un échec : la plus ancienne
-        // part.
+        for i in 0..LOGIN_TRACKED_MAX as i64 {
+            assert_eq!(unknown(&format!("{i}@exemple.fr"), i), Ok(()));
+        }
+        assert_eq!(tracked(&throttle), (500, LOGIN_TRACKED_MAX));
+        // Aucune fenêtre n'est finie : la plus ancienne du réservoir part.
         let now = LOGIN_TRACKED_MAX as i64;
-        assert_eq!(attempt("une-de-plus@exemple.fr", now), Ok(()));
-        assert_eq!(len(), LOGIN_TRACKED_MAX);
-        assert!(!tracked("0@exemple.fr"));
-        assert!(tracked("1@exemple.fr"));
-        // Une adresse déjà suivie ne chasse personne. Avec deux échecs, « 1 »
-        // est maintenant plus chargée que les autres : ce n'est plus elle la
-        // prochaine à partir, bien qu'elle soit la plus ancienne.
-        assert_eq!(attempt("1@exemple.fr", now), Ok(()));
-        assert_eq!(len(), LOGIN_TRACKED_MAX);
-        assert_eq!(attempt("encore-une@exemple.fr", now), Ok(()));
-        assert!(tracked("1@exemple.fr"));
-        assert!(!tracked("2@exemple.fr"));
-        // Toutes les fenêtres finies partent d'un coup.
+        assert_eq!(unknown("une-de-plus@exemple.fr", now), Ok(()));
+        assert_eq!(tracked(&throttle), (500, LOGIN_TRACKED_MAX));
+        assert!(!is_tracked("0@exemple.fr"));
+        assert!(is_tracked("1@exemple.fr"));
+        // Une adresse déjà suivie ne chasse personne.
+        assert_eq!(unknown("1@exemple.fr", now), Ok(()));
+        assert_eq!(tracked(&throttle), (500, LOGIN_TRACKED_MAX));
+        assert!(is_tracked("2@exemple.fr"));
+        // Une fenêtre de compte de plus ne prend la place de personne.
+        assert_eq!(account("compte-de-plus@exemple.fr", now), Ok(()));
+        assert_eq!(tracked(&throttle), (501, LOGIN_TRACKED_MAX));
+        // Dix mille adresses de plus : le réservoir ne grossit pas, et les
+        // comptes n'ont pas bougé.
+        for i in 0..LOGIN_TRACKED_MAX {
+            assert_eq!(unknown(&format!("{i}@jetable.example"), now), Ok(()));
+        }
+        assert_eq!(tracked(&throttle), (501, LOGIN_TRACKED_MAX));
+        // Toutes les fenêtres finies du réservoir partent d'un coup.
         let later = now + LOGIN_WINDOW_MS;
-        assert_eq!(attempt("plus-tard@exemple.fr", later), Ok(()));
-        assert_eq!(len(), 1);
+        assert_eq!(unknown("plus-tard@exemple.fr", later), Ok(()));
+        assert_eq!(tracked(&throttle).1, 1);
+        // Celle d'un compte part à sa fin, quand il revient, ou sur une
+        // réussite.
+        assert_eq!(account("compte0@exemple.fr", later), Ok(()));
+        throttle.succeeded(Guarded::Login, "compte1@exemple.fr");
+        assert_eq!(tracked(&throttle).0, 500);
     }
 
-    /// Une adresse bloquée le reste, quoi qu'il arrive au frein : dix mille
-    /// adresses jetables ne lui rendent pas ses dix essais.
+    /// Ruling R81 : la fenêtre d'un compte n'est jamais évincée. La parade
+    /// qui rendait un essai pour deux requêtes (un essai sur le compte, puis
+    /// une adresse jetable qui chasse sa fenêtre du frein plein) ne rend plus
+    /// rien : le onzième essai est refusé, et les suivants jusqu'à la fin de
+    /// la fenêtre.
     #[test]
-    fn full_throttle_never_forgets_a_blocked_address() {
+    fn account_window_survives_a_flood_of_unknown_addresses() {
         let throttle = LoginThrottle::default();
-        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
-        let len = || throttle.windows.lock().unwrap().len();
-        // La victime est bloquée.
-        for n in 0..10 {
-            assert_eq!(attempt("victime@exemple.fr", n), Ok(()));
+        let victim = |now: i64| throttle.attempt(Guarded::Login, "victime@exemple.fr", true, now);
+        let junk = |name: &str, now: i64| throttle.attempt(Guarded::Login, name, false, now);
+        // Le compte a déjà cinq échecs.
+        for n in 0..5 {
+            assert_eq!(victim(n), Ok(()));
         }
-        assert!(attempt("victime@exemple.fr", 10).is_err());
-        // Dix mille autres adresses passent : le frein, plein, fait de la
-        // place parmi elles.
-        for i in 0..LOGIN_TRACKED_MAX as i64 {
-            assert_eq!(
-                attempt(&format!("{i}@jetable.example"), 11 + i),
-                Ok(()),
-                "adresse {i}"
-            );
+        // Le réservoir est plein : dix mille adresses sans compte, deux
+        // échecs chacune.
+        for i in 0..LOGIN_TRACKED_MAX {
+            let name = format!("{i}@jetable.example");
+            assert_eq!(junk(&name, 10), Ok(()));
+            assert_eq!(junk(&name, 10), Ok(()));
         }
-        assert_eq!(len(), LOGIN_TRACKED_MAX);
-        // Elle l'est toujours, et jusqu'à la fin de sa fenêtre (ouverte à 0 :
-        // il en reste 889 989 ms).
-        let now = 11 + LOGIN_TRACKED_MAX as i64;
+        assert_eq!(tracked(&throttle), (1, LOGIN_TRACKED_MAX));
+        // L'alternance : un essai sur le compte, une adresse jetable neuve.
+        let mut now = 20;
+        for n in 6..=10 {
+            assert_eq!(victim(now), Ok(()), "essai {n}");
+            assert_eq!(junk(&format!("alternance{n}@jetable.example"), now), Ok(()));
+            now += 1;
+        }
+        // Le onzième essai est refusé, et les suivants aussi, malgré les
+        // adresses jetables qui continuent d'arriver.
         assert_eq!(
-            attempt("victime@exemple.fr", now),
+            victim(now),
             Err(Throttled {
-                retry_after: 890,
+                retry_after: 900,
+                first: true
+            })
+        );
+        for round in 0..5_000 {
+            assert_eq!(junk(&format!("suite{round}@jetable.example"), now), Ok(()));
+            assert!(victim(now).is_err(), "tour {round}");
+        }
+        assert_eq!(tracked(&throttle), (1, LOGIN_TRACKED_MAX));
+        // La même alternance contre un compte qui n'a encore rien tenté : sa
+        // fenêtre fraîche, à un seul échec, était la moins chargée du frein,
+        // donc la première à partir. Deux cents essais n'en rendent que dix.
+        let fresh = |now: i64| throttle.attempt(Guarded::Login, "autre@exemple.fr", true, now);
+        let mut accepted = 0;
+        for round in 0..200 {
+            if fresh(now).is_ok() {
+                accepted += 1;
+            }
+            assert_eq!(junk(&format!("parade{round}@jetable.example"), now), Ok(()));
+        }
+        assert_eq!(accepted, 10);
+        // Jusqu'à la fin de sa fenêtre, ouverte à 0.
+        assert_eq!(
+            victim(LOGIN_WINDOW_MS - 1),
+            Err(Throttled {
+                retry_after: 1,
                 first: false
             })
         );
-        assert!(attempt("victime@exemple.fr", LOGIN_WINDOW_MS - 1).is_err());
-        assert_eq!(attempt("victime@exemple.fr", LOGIN_WINDOW_MS), Ok(()));
+        assert_eq!(victim(LOGIN_WINDOW_MS), Ok(()));
     }
 
-    /// Quand tout ce que suit le frein bloque, une adresse nouvelle est
-    /// refusée plutôt que d'en faire oublier une ; la place revient à la fin
-    /// des fenêtres.
+    /// Ruling R81 : les fenêtres des comptes ne comptent dans aucune borne.
+    /// Plus de comptes que le réservoir n'a de places (une instance ouverte
+    /// aux inscriptions) : aucune de leurs fenêtres n'est évincée.
     #[test]
-    fn throttle_full_of_blocked_addresses_refuses_new_ones() {
+    fn account_windows_are_never_evicted_however_many() {
         let throttle = LoginThrottle::default();
-        let attempt = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, now);
-        let len = || throttle.windows.lock().unwrap().len();
+        let account = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, true, now);
+        for n in 0..10 {
+            assert_eq!(account("victime@exemple.fr", n), Ok(()));
+        }
+        assert!(account("victime@exemple.fr", 10).is_err());
+        for i in 0..=LOGIN_TRACKED_MAX {
+            assert_eq!(account(&format!("compte{i}@exemple.fr"), 11), Ok(()));
+        }
+        assert_eq!(tracked(&throttle), (LOGIN_TRACKED_MAX + 2, 0));
+        assert!(account("victime@exemple.fr", 12).is_err());
+        // Le premier des autres comptes a toujours sa fenêtre : un échec déjà
+        // compté, donc neuf essais avant le refus.
+        for n in 0..9 {
+            assert_eq!(account("compte0@exemple.fr", 12), Ok(()), "essai {n}");
+        }
+        assert!(account("compte0@exemple.fr", 12).is_err());
+    }
+
+    /// Ruling R81 : les adresses sans compte ne bloquent personne. Cent mille
+    /// tentatives sur dix mille d'entre elles (dix chacune, toutes au seuil)
+    /// ne ferment la porte ni à une adresse nouvelle, ni à un compte.
+    #[test]
+    fn unknown_addresses_never_lock_anyone_out() {
+        let throttle = LoginThrottle::default();
+        let unknown = |email: &str, now: i64| throttle.attempt(Guarded::Login, email, false, now);
         for i in 0..LOGIN_TRACKED_MAX {
             let email = format!("{i}@exemple.fr");
-            for _ in 0..10 {
-                assert_eq!(attempt(&email, 1000), Ok(()));
+            for n in 0..10 {
+                assert_eq!(unknown(&email, 1000), Ok(()), "adresse {i}, essai {n}");
             }
         }
-        assert_eq!(len(), LOGIN_TRACKED_MAX);
-        // Refusée, jusqu'à la fin de la première fenêtre ; sans rien évincer.
+        assert_eq!(tracked(&throttle), (0, LOGIN_TRACKED_MAX));
+        // Chacune a sa fenêtre, à dix échecs : la onzième tentative est
+        // refusée, tant que la fenêtre est suivie.
         assert_eq!(
-            attempt("nouvelle@exemple.fr", 61_000),
-            Err(Throttled {
-                retry_after: 840,
-                first: false
-            })
-        );
-        assert_eq!(len(), LOGIN_TRACKED_MAX);
-        // Les adresses déjà suivies restent bloquées pour leur compte.
-        assert_eq!(
-            attempt("0@exemple.fr", 61_000),
+            unknown("9999@exemple.fr", 61_000),
             Err(Throttled {
                 retry_after: 840,
                 first: true
             })
         );
-        // Une réussite libère une place (une tentative en cours peut finir).
-        throttle.succeeded(Guarded::Login, "0@exemple.fr");
-        assert_eq!(attempt("nouvelle@exemple.fr", 61_000), Ok(()));
-        assert_eq!(len(), LOGIN_TRACKED_MAX);
-        // « nouvelle » n'a qu'un échec : c'est elle qui cède sa place, pas
-        // une adresse bloquée.
-        assert_eq!(attempt("suivante@exemple.fr", 61_000), Ok(()));
-        assert!(attempt("1@exemple.fr", 61_000).is_err());
-        // À la fin des fenêtres, tout repart.
+        // Une adresse nouvelle passe toujours : la plus ancienne fenêtre lui
+        // cède sa place, même si elle bloquait.
+        for i in 0..100 {
+            let email = format!("nouvelle{i}@exemple.fr");
+            assert_eq!(unknown(&email, 61_000), Ok(()), "{email}");
+        }
+        assert_eq!(tracked(&throttle), (0, LOGIN_TRACKED_MAX));
+        // Un compte qui n'a rien tenté a ses dix essais.
+        for n in 0..10 {
+            assert_eq!(
+                throttle.attempt(Guarded::Login, "alice@exemple.fr", true, 61_000),
+                Ok(()),
+                "essai {n}"
+            );
+        }
         assert_eq!(
-            attempt("plus-tard@exemple.fr", 61_000 + LOGIN_WINDOW_MS),
+            throttle.attempt(Guarded::PasswordChange, "alice@exemple.fr", true, 61_000),
             Ok(())
         );
-        assert_eq!(len(), 1);
+        assert_eq!(tracked(&throttle), (2, LOGIN_TRACKED_MAX));
     }
 }

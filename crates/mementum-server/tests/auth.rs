@@ -699,12 +699,30 @@ async fn login_is_throttled_after_10_failures() {
     assert_eq!(alice.me().await.status, StatusCode::OK);
 
     // Une adresse sans compte est freinée de même : le 429 ne dit pas si
-    // l'adresse existe.
+    // l'adresse existe. Même corps et mêmes en-têtes que pour un compte, au
+    // délai près (chaque adresse a sa fenêtre).
     for attempt in 1..=10 {
         let reply = t.browser().log_in("personne@exemple.fr", PASSWORD).await;
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
     }
-    retry_after(&t.browser().log_in("personne@exemple.fr", PASSWORD).await);
+    let unknown = t.browser().log_in("personne@exemple.fr", PASSWORD).await;
+    retry_after(&unknown);
+    let known = t.browser().log_in("alice@exemple.fr", PASSWORD).await;
+    retry_after(&known);
+    // Le délai, en secondes dans l'en-tête et en minutes dans le message,
+    // est le seul écart permis.
+    let without_delay = |reply: &Reply| {
+        let mut headers = reply.headers.clone();
+        headers.remove(header::RETRY_AFTER);
+        headers.remove(header::CONTENT_LENGTH);
+        let body: String = reply
+            .text()
+            .chars()
+            .filter(|c| !c.is_ascii_digit())
+            .collect();
+        (headers, body)
+    };
+    assert_eq!(without_delay(&unknown), without_delay(&known));
 }
 
 #[tokio::test]
@@ -1571,8 +1589,8 @@ async fn password_change_has_its_own_throttle() {
     let t = open_app().await;
     let (alice, _) = t.signed_up("alice@exemple.fr", "Alice").await;
     let (bob, _) = t.signed_up("bob@exemple.fr", "Bob").await;
-    let too_many = |reply: &Reply| {
-        reply.assert_error(StatusCode::TOO_MANY_REQUESTS, "too_many_attempts");
+    let too_many = |reply: &Reply| -> String {
+        let body = reply.assert_error(StatusCode::TOO_MANY_REQUESTS, "too_many_attempts");
         let seconds: u64 = reply
             .headers
             .get(header::RETRY_AFTER)
@@ -1582,6 +1600,7 @@ async fn password_change_has_its_own_throttle() {
             .parse()
             .expect("Retry-After en secondes");
         assert!((1..=900).contains(&seconds), "Retry-After: {seconds}");
+        body["message"].as_str().unwrap().to_string()
     };
 
     // Un tiers épuise les connexions d'Alice.
@@ -1589,7 +1608,8 @@ async fn password_change_has_its_own_throttle() {
         let reply = t.browser().log_in("alice@exemple.fr", "pas-le-bon").await;
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
     }
-    too_many(&t.browser().log_in("alice@exemple.fr", PASSWORD).await);
+    let message = too_many(&t.browser().log_in("alice@exemple.fr", PASSWORD).await);
+    assert!(message.contains("adresse"), "{message}");
     // Alice, déjà connectée, change quand même son mot de passe.
     alice
         .change_password(PASSWORD, NEW_PASSWORD)
@@ -1605,7 +1625,11 @@ async fn password_change_has_its_own_throttle() {
         assert!(reply.headers.get(header::RETRY_AFTER).is_none());
     }
     too_many(&bob.change_password("pas-le-bon", NEW_PASSWORD).await);
-    too_many(&bob.change_password(PASSWORD, NEW_PASSWORD).await);
+    // Le refus parle de mots de passe actuels, pas d'une adresse que
+    // personne n'a tapée ici (le message de la connexion).
+    let message = too_many(&bob.change_password(PASSWORD, NEW_PASSWORD).await);
+    assert!(message.contains("mots de passe actuels"), "{message}");
+    assert!(!message.contains("adresse"), "{message}");
     // Sa connexion, elle, n'est pas freinée, et son mot de passe n'a pas
     // changé.
     t.browser()

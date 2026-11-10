@@ -172,8 +172,13 @@ async fn log_in(
 ) -> Result<Response, ApiError> {
     let Json(body) = body?;
     let email = auth::normalize_email(&body.email);
-    attempt(&state, Guarded::Login, &email).await?;
+    // Le compte d'abord : le frein ne garde pas de la même façon la fenêtre
+    // d'une adresse qui en a un (Ruling R81). Cette lecture a lieu dans tous
+    // les cas, comme la vérification Argon2 plus bas : ni la réponse ni son
+    // délai ne disent si le compte existe.
     let user = state.store.user_by_email(&email).await.map_err(internal)?;
+    attempt(&state, Guarded::Login, &email, user.as_ref().map(|u| u.id))
+        .map_err(ApiError::too_many_attempts)?;
     let hash = user.as_ref().and_then(|u| u.password_hash.clone());
     // Toujours une vérification Argon2, qu'il y ait un compte ou non.
     let verified = auth::verify_password(body.password, hash)
@@ -260,8 +265,10 @@ async fn new_password(
     let Json(body) = body?;
     auth::check_password(&body.new)?;
     // Sans ce frein, une session volée essaierait des mots de passe actuels
-    // sans limite.
-    attempt(&state, Guarded::PasswordChange, &user.email).await?;
+    // sans limite. Il porte toujours sur un compte : celui de la session.
+    if let Err(retry_after) = attempt(&state, Guarded::PasswordChange, &user.email, Some(user.id)) {
+        return Ok(too_many_wrong_passwords(retry_after));
+    }
     let account = state
         .store
         .get_user(user.id)
@@ -328,18 +335,26 @@ fn no_store(result: Result<Response, ApiError>) -> Response {
     response
 }
 
-/// Compte une tentative pour cette adresse, ou la refuse (`429`). Le premier
-/// refus d'une fenêtre est journalisé, sans l'adresse : en avertissement si
-/// elle est celle d'un compte, au niveau `debug` sinon (des adresses
+/// Compte une tentative pour cette adresse, ou rend les secondes à attendre
+/// avant la suivante (`429`). `account` est le compte qui porte l'adresse,
+/// s'il y en a un, lu par l'appelant : la fenêtre d'un compte n'est jamais
+/// oubliée avant sa fin, celle d'une adresse sans compte peut l'être (Ruling
+/// R81).
+///
+/// Le premier refus d'une fenêtre est journalisé, sans l'adresse : en
+/// avertissement pour un compte, au niveau `debug` sinon (des adresses
 /// inventées ne remplissent pas le journal).
-async fn attempt(state: &AppState, what: Guarded, email: &str) -> Result<(), ApiError> {
-    let Err(throttled) = state.logins.attempt(what, email, now_ms()) else {
+fn attempt(state: &AppState, what: Guarded, email: &str, account: Option<Uuid>) -> Result<(), u64> {
+    let Err(throttled) = state
+        .logins
+        .attempt(what, email, account.is_some(), now_ms())
+    else {
         return Ok(());
     };
     if throttled.first {
-        match state.store.user_by_email(email).await.map_err(internal)? {
-            Some(user) => tracing::warn!(
-                user_id = %user.id,
+        match account {
+            Some(user_id) => tracing::warn!(
+                %user_id,
                 guarded = ?what,
                 retry_after_s = throttled.retry_after,
                 "trop d'échecs pour ce compte : tentatives refusées jusqu'à la fin de la fenêtre"
@@ -350,7 +365,26 @@ async fn attempt(state: &AppState, what: Guarded, email: &str) -> Result<(), Api
             ),
         }
     }
-    Err(ApiError::too_many_attempts(throttled.retry_after))
+    Err(throttled.retry_after)
+}
+
+/// Le `429 too_many_attempts` du changement de mot de passe, avec son
+/// `Retry-After`. Le code de la connexion, mais pas son message : ici,
+/// personne n'a tapé d'adresse.
+fn too_many_wrong_passwords(retry_after: u64) -> Response {
+    let mut response = ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        ErrorCode::TooManyAttempts,
+        format!(
+            "trop de mots de passe actuels incorrects : réessayer dans {} min",
+            retry_after.div_ceil(60)
+        ),
+    )
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(retry_after));
+    response
 }
 
 /// Ouvre une session pour ce compte et rend son jeton, à poser en cookie.
