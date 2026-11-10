@@ -11,7 +11,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::http::{Method, StatusCode, header};
 use common::{
@@ -1070,12 +1070,13 @@ async fn sharing_is_not_blocked_by_writes_elsewhere_in_the_space() {
     let project = team.page(None, "Projet", &[members(Level::Full)]).await;
     let busy = team.page(None, "Agitée", &[members(Level::Edit)]).await;
     let stop = Arc::new(AtomicBool::new(false));
+    let created = Arc::new(AtomicUsize::new(0));
     let cookie = team.mona.browser.cookie().expect("la session de Mona");
     let writers: Vec<_> = (0..2)
         .map(|_| {
             let (router, cookie, stop) = (t.router.clone(), cookie.clone(), stop.clone());
+            let created = created.clone();
             tokio::spawn(async move {
-                let mut created = 0;
                 while !stop.load(Ordering::Relaxed) {
                     let body = json!({ "parentId": busy.to_string(), "title": "Encore" });
                     let mut request = json_request(Method::POST, "/api/v1/pages", &body);
@@ -1084,34 +1085,40 @@ async fn sharing_is_not_blocked_by_writes_elsewhere_in_the_space() {
                     headers.insert(header::COOKIE, cookie.parse().unwrap());
                     let reply = router.clone().oneshot(request).await.unwrap();
                     assert_eq!(reply.status(), StatusCode::CREATED);
-                    created += 1;
+                    created.fetch_add(1, Ordering::Relaxed);
                 }
-                created
             })
         })
         .collect();
 
+    // Au moins trente changements, et autant qu'il en faut pour que dix pages aient été créées
+    // pendant qu'ils passaient. Un nombre fixe de changements ne suffit pas : sur un poste
+    // chargé, trente changements passent avant dix créations (vu : sept), et le test ne
+    // prouverait plus que les écritures de Mona étaient là.
     let olga = &team.olga.browser;
-    for step in 0..30 {
-        let level = if step % 2 == 0 { "read" } else { "edit" };
-        let reply = set_level(olga, project, team.tom.id, level).await;
+    let mut steps = 0;
+    let mut last = "";
+    while steps < 30 || created.load(Ordering::Relaxed) < 10 {
+        assert!(
+            steps < 5_000,
+            "les créations n'avancent pas : {} en {steps} changements",
+            created.load(Ordering::Relaxed)
+        );
+        last = if steps % 2 == 0 { "read" } else { "edit" };
+        let reply = set_level(olga, project, team.tom.id, last).await;
         assert_eq!(
             reply.status,
             StatusCode::OK,
-            "étape {step} : {}",
+            "étape {steps} : {}",
             reply.text()
         );
+        steps += 1;
     }
     stop.store(true, Ordering::Relaxed);
-    let mut created = 0;
     for writer in writers {
-        created += writer.await.unwrap();
+        writer.await.unwrap();
     }
-    assert!(
-        created >= 10,
-        "{created} pages créées pendant les changements"
-    );
-    assert!(entries(&access_of(olga, project).await).contains(&entry(&team.tom, "edit", false)));
+    assert!(entries(&access_of(olga, project).await).contains(&entry(&team.tom, last, false)));
 }
 
 /// Ruling R93 : l'accès général qu'une page parente donne est le plancher de la sous-page
