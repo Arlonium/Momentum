@@ -123,7 +123,7 @@ async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), 
     // s'inscrire et la création du compte, aucune autre ne passe. Deux
     // « premiers comptes » ne se croisent pas, et un jeton d'invitation ne
     // crée pas deux comptes.
-    let _turn = state.signups.lock().await;
+    let turn = state.signups.lock().await;
     if let Some(hash) = invitation {
         // La consultation par laquelle passe toute acceptation (Ruling R69).
         invitations::valid_invitation(&state, hash)
@@ -163,6 +163,10 @@ async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), 
             StoreError::EmailTaken => ApiError::email_taken(),
             e => internal(e),
         })?;
+    // Le compte est créé : le tour est rendu avant de fermer la session
+    // portée, ce qui peut attendre des acteurs de pages occupés
+    // (`Hub::kick_user`, deux secondes au plus).
+    drop(turn);
     let user = signed_up.user;
     tracing::info!(user_id = %user.id, instance_admin = user.instance_admin, "compte créé");
     if !signed_up.adopted.is_empty() {
