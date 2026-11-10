@@ -250,13 +250,33 @@ impl Store {
         user_from_row(&row).map(Some)
     }
 
-    /// Ferme une session ; sans effet pour un jeton inconnu.
-    pub async fn delete_session(&self, token_hash: [u8; 32]) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+    /// La session vaut-elle encore : connue, et non échue (`expires_at > now`) ? Lecture seule :
+    /// contrairement à [`Store::session_user`], l'échéance ne glisse pas.
+    pub async fn session_is_live(
+        &self,
+        token_hash: [u8; 32],
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        Ok(
+            sqlx::query("SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?")
+                .bind(&token_hash[..])
+                .bind(now)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some(),
+        )
+    }
+
+    /// Ferme une session, et rend le compte qu'elle portait, qu'elle soit échue ou non : à
+    /// l'appelant de fermer ce qu'elle avait ouvert. `None`, sans rien écrire, pour un jeton
+    /// inconnu.
+    pub async fn delete_session(&self, token_hash: [u8; 32]) -> Result<Option<Uuid>, StoreError> {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = ? RETURNING user_id")
             .bind(&token_hash[..])
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|row| parse_uuid(&row.get::<String, _>(0)))
+            .transpose()
     }
 
     /// Supprime les sessions échues (`expires_at <= now`) et rend leur nombre.

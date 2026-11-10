@@ -246,3 +246,51 @@ async fn session_expires_and_slides() {
     assert_eq!(store.session_user([9; 32], end, TTL).await.unwrap(), None);
     assert_eq!(int(db, "SELECT COUNT(*) FROM sessions").await, 0);
 }
+
+/// Fermer une session rend son compte, qu'elle soit échue ou non : qui la ferme doit aussi
+/// fermer ce qu'elle avait ouvert. Un jeton inconnu ne rend rien.
+#[tokio::test]
+async fn closed_session_names_its_account() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    store
+        .create_session(alice.id, [1; 32], T0 + TTL)
+        .await
+        .unwrap();
+    // Celle de Bob est déjà échue.
+    store.create_session(bob.id, [2; 32], T0 - 1).await.unwrap();
+    assert_eq!(store.session_user([2; 32], T0, TTL).await.unwrap(), None);
+
+    assert_eq!(store.delete_session([1; 32]).await.unwrap(), Some(alice.id));
+    assert_eq!(store.delete_session([2; 32]).await.unwrap(), Some(bob.id));
+    // Déjà fermées, ou jamais ouverte.
+    assert_eq!(store.delete_session([1; 32]).await.unwrap(), None);
+    assert_eq!(store.delete_session([9; 32]).await.unwrap(), None);
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM sessions").await, 0);
+}
+
+/// `session_is_live` dit si une session vaut encore, sans rien écrire : son échéance ne glisse
+/// pas, même là où `session_user` la ferait glisser.
+#[tokio::test]
+async fn session_liveness_is_read_without_sliding() {
+    let f = fresh().await;
+    let (store, db) = (&f.store, &f.db);
+    let alice = account(store, "alice").await;
+    let token = [7; 32];
+    store
+        .create_session(alice.id, token, T0 + TTL)
+        .await
+        .unwrap();
+
+    assert!(store.session_is_live(token, T0).await.unwrap());
+    // Une milliseconde avant l'échéance : vivante, et l'échéance n'a pas bougé.
+    assert!(store.session_is_live(token, T0 + TTL - 1).await.unwrap());
+    assert_eq!(expiry(db, token).await, T0 + TTL);
+    // Échue dès l'échéance, comme pour `session_user` ; inconnue ; fermée.
+    assert!(!store.session_is_live(token, T0 + TTL).await.unwrap());
+    assert!(!store.session_is_live([8; 32], T0).await.unwrap());
+    store.delete_session(token).await.unwrap();
+    assert!(!store.session_is_live(token, T0).await.unwrap());
+}
