@@ -55,13 +55,24 @@ test("double_click_creates_a_single_page", async ({ browser }) => {
   const account = await signUpAccount();
   const api = await apiAs(account);
   const p = await newUser(browser, account);
+  // Les créations de page que l'onglet demande au serveur, comptées dans la page à l'appel
+  // même de `fetch` : lu juste après un clic, le compte dit si ce clic a créé, que le serveur
+  // ait répondu ou non.
+  await p.addInitScript(() => {
+    const counted = window as unknown as { __created: number };
+    counted.__created = 0;
+    const send = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const asked = input instanceof Request ? input : null;
+      const { pathname } = new URL(asked ? asked.url : String(input), location.href);
+      const method = init?.method ?? asked?.method ?? "GET";
+      if (method === "POST" && pathname === "/api/v1/pages") counted.__created += 1;
+      return send(input, init);
+    };
+  });
+  const created = () => p.evaluate(() => (window as unknown as { __created: number }).__created);
   await p.goto("/");
   const sidebar = sidebarOf(p);
-  // Toutes les créations de page que l'onglet demande au serveur.
-  let asked = 0;
-  p.on("request", (request) => {
-    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/pages") asked++;
-  });
   /** Les pages déjà ouvertes : la suivante est une autre. */
   const opened: string[] = [];
   const another = async () => {
@@ -72,21 +83,25 @@ test("double_click_creates_a_single_page", async ({ browser }) => {
   /**
    * Un double clic sur un bouton qui reste sous le pointeur, au rythme d'une main : le serveur
    * a répondu au premier clic, et la page créée est ouverte, quand le second arrive. Ce second
-   * clic ne crée rien ; le clic simple qui le suit, si. Deux créations en tout : celle du
-   * second clic serait partie avant celle du troisième.
+   * clic ne crée rien ; le clic simple qui le suit, si.
    */
   const doubleThenSingle = async (button: Locator) => {
-    const before = asked;
+    const before = await created();
     await button.click();
     await another();
+    expect(await created()).toBe(before + 1);
     // Le second clic du double clic, seul : au même endroit, `detail` vaut 2. (Avec
     // `clickCount: 2`, `click()` enverrait les deux clics, dont un premier qui crée.)
     await button.hover();
     await p.mouse.down({ clickCount: 2 });
     await p.mouse.up({ clickCount: 2 });
+    // La création part dans la tâche même du clic : si celui-ci avait créé, c'est déjà compté.
+    // Compter après le clic suivant ne suffirait pas : une création encore en route
+    // l'avalerait, et le compte final serait le bon.
+    expect(await created()).toBe(before + 1);
     await button.click();
     const id = await another();
-    expect(asked - before).toBe(2);
+    expect(await created()).toBe(before + 2);
     return id;
   };
 
@@ -94,7 +109,7 @@ test("double_click_creates_a_single_page", async ({ browser }) => {
   // attendre, et le second tombe pendant la création.
   await p.getByRole("main").getByRole("button", { name: "Nouvelle page" }).dblclick();
   await another();
-  expect(asked).toBe(1);
+  expect(await created()).toBe(1);
   // « Nouvelle page » de la barre latérale, le « + » d'une section et le « + » d'une ligne
   // restent sous le pointeur.
   await doubleThenSingle(sidebar.getByRole("button", { name: "Nouvelle page" }));
@@ -106,7 +121,7 @@ test("double_click_creates_a_single_page", async ({ browser }) => {
   await doubleThenSingle(
     treeRow(p, inSpace).getByRole("button", { name: /^Ajouter une sous-page à / }),
   );
-  expect(asked).toBe(7);
+  expect(await created()).toBe(7);
   expect((await getTree(api)).nodes).toHaveLength(7);
 });
 
