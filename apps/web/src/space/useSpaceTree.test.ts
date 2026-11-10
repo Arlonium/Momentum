@@ -19,11 +19,10 @@ const answer = (index: number, spaceId: string, nodes: PageNode[]) =>
 
 const onSessionLost = vi.fn();
 const onGone = vi.fn();
-const onError = vi.fn();
 
 beforeEach(() => {
   reads = [];
-  for (const mock of [onSessionLost, onGone, onError]) mock.mockClear();
+  for (const mock of [onSessionLost, onGone]) mock.mockClear();
   vi.mocked(getTree).mockReset();
   vi.mocked(getTree).mockImplementation((spaceId) => {
     const answer = deferred<Tree>();
@@ -35,8 +34,8 @@ beforeEach(() => {
 type Props = { spaceId: string | null; retries?: number };
 function hook({ spaceId, retries = 0 }: Props) {
   const tree = useSpaceTree();
-  useTreeReader(tree, spaceId, { retries, onSessionLost, onGone, onError });
-  return tree;
+  const readError = useTreeReader(tree, spaceId, { retries, onSessionLost, onGone });
+  return { ...tree, readError };
 }
 
 test("tree_of_the_space_is_read_once_known", async () => {
@@ -137,10 +136,43 @@ test("failed_read_tells_why", async () => {
   expect(onSessionLost).toHaveBeenCalledTimes(1);
   await tree.rerender({ spaceId: "perso", retries: 1 });
   expect(reads).toHaveLength(3);
-  // Serveur injoignable : son message.
+  // Serveur injoignable : son message. Ni l'espace parti ni la session perdue n'en sont un.
+  expect(tree.current.readError).toBeNull();
   await settle(() => reads[2].answer.reject(unreachable()));
-  expect(onError).toHaveBeenCalledWith("Le serveur Mementum ne répond pas.");
+  expect(tree.current.readError).toBe("Le serveur Mementum ne répond pas.");
   expect(tree.current.loaded).toBeNull();
+});
+
+test("failed_reload_keeps_the_tree_and_says_so", async () => {
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  const a = page("a");
+  await answer(0, "perso", [a]);
+  expect(tree.current.readError).toBeNull();
+  // Relecture, serveur injoignable : l'arbre affiché reste, et l'échec est dit.
+  await settle(() => tree.current.reload());
+  await settle(() => reads[1].answer.reject(unreachable()));
+  expect(tree.current.loaded).toEqual({ spaceId: "perso", nodes: [a] });
+  expect(tree.current.readError).toBe("Le serveur Mementum ne répond pas.");
+  // La relecture suivante réussit : le message part.
+  await settle(() => tree.current.reload());
+  const fresh = [page("a"), page("b")];
+  await answer(2, "perso", fresh);
+  expect(tree.current.loaded?.nodes).toBe(fresh);
+  expect(tree.current.readError).toBeNull();
+});
+
+test("failed_read_is_made_again_when_the_network_is_back", async () => {
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  await settle(() => reads[0].answer.reject(unreachable()));
+  expect(tree.current.readError).not.toBeNull();
+  // Le navigateur retrouve le réseau : la lecture repart d'elle-même.
+  await settle(() => window.dispatchEvent(new Event("online")));
+  expect(reads).toHaveLength(2);
+  await answer(1, "perso", [page("a")]);
+  expect(tree.current.readError).toBeNull();
+  // Sans échec en attente, le retour du réseau ne relit rien.
+  await settle(() => window.dispatchEvent(new Event("online")));
+  expect(reads).toHaveLength(2);
 });
 
 type CatchUpProps = { nodes: PageNode[] | null; activeId: string | null; found: PageNode | null };

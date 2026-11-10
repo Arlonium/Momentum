@@ -1,7 +1,8 @@
 // La barre latérale. En tête, collés à son bord haut : le sélecteur d'espace (avec le menu du
 // compte, Ruling R80) et « Nouvelle page ». Puis les sections de l'espace, chacune avec son
 // arbre de pages, qui défilent dessous. En pied, collés à son bord bas : le message de la
-// dernière action refusée, et « Corbeille ».
+// dernière action refusée (à défaut, celui d'une relecture des pages qui a échoué), et
+// « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
@@ -29,6 +30,8 @@ type Props = {
   onMove: (id: string, drop: Drop) => void;
   /** Erreur de la dernière action (création, corbeille, déplacement), en français. */
   notice: string | null;
+  /** Les pages n'ont pas pu être lues, ou relues : le message du serveur, en français. */
+  readError: string | null;
 };
 
 export function Sidebar({
@@ -42,6 +45,7 @@ export function Sidebar({
   onTrash,
   onMove,
   notice,
+  readError,
 }: Props) {
   // La barre latérale défile ; sa tête et son pied restent collés à ses bords, par-dessus les
   // arbres, qui en tiennent compte pour montrer la page active (`treeWindow.ts`).
@@ -54,6 +58,12 @@ export function Sidebar({
   );
   // Un invité ne crée pas de page à la racine d'un espace.
   const member = space !== null && space.role !== "guest";
+  // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
+  const message =
+    notice ??
+    (readError === null
+      ? null
+      : `La liste des pages n'a pas pu être ${nodes === null ? "lue" : "mise à jour"}. ${readError}`);
   return (
     <nav ref={setScroller} className="mm-sidebar" aria-label="Barre latérale">
       <div ref={setHead} className="mm-side-head">
@@ -82,6 +92,7 @@ export function Sidebar({
           spaceId={space.id}
           role={space.role}
           nodes={nodes}
+          unavailable={readError !== null}
           viewport={viewport}
           activeId={activeId}
           readOnly={readOnly}
@@ -90,11 +101,11 @@ export function Sidebar({
           onMove={onMove}
         />
       )}
-      {(space || notice) && (
+      {(space || message) && (
         <div ref={setFooter} className="mm-side-footer">
-          {notice && (
+          {message && (
             <p className="mm-side-error" role="alert">
-              {notice}
+              {message}
             </p>
           )}
           {space && (

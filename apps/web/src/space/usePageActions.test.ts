@@ -40,12 +40,7 @@ function hook({ activeId = null, pathname = "/s/space", stale = false }: Props) 
   const tree = useSpaceTree();
   const inTree = tree.loaded?.nodes.find((n) => n.id === activeId);
   const open = useOpenPage(activeId, inTree, { retries: 0, onSessionLost: () => {} });
-  useTreeReader(tree, "space", {
-    retries: 0,
-    onSessionLost: () => {},
-    onGone: () => {},
-    onError: () => {},
-  });
+  useTreeReader(tree, "space", { retries: 0, onSessionLost: () => {}, onGone: () => {} });
   const actions = usePageActions({
     tree,
     page: open,

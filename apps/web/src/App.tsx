@@ -35,8 +35,6 @@ export function App() {
   const schema = useServerSchema();
   const { retries, sessionLost } = useRetryAfterLogin(me);
   const tree = useSpaceTree();
-  /** L'arbre n'a pas pu être lu : le message, en français. */
-  const [treeError, setTreeError] = useState<string | null>(null);
 
   // La page ouverte, puis l'espace affiché, qui est le sien ; puis l'arbre de cet espace.
   const activeId = route.name === "page" ? route.id : null;
@@ -54,12 +52,12 @@ export function App() {
   // mènera ailleurs.
   const spaceGone = useCallback(() => void refresh().catch(() => {}), [refresh]);
   // Tant que le serveur n'a pas dit dans quel espace est la page ouverte, on ne sait pas quel
-  // arbre lire.
-  useTreeReader(tree, page.resolving ? null : spaceId, {
+  // arbre lire. Une lecture qui échoue ne retire rien de l'écran : elle se dit en pied de
+  // barre latérale.
+  const treeError = useTreeReader(tree, page.resolving ? null : spaceId, {
     retries,
     onSessionLost: sessionLost,
     onGone: spaceGone,
-    onError: setTreeError,
   });
   /** Les pages de l'espace affiché ; `null` : pas encore chargées. */
   const nodes = tree.loaded !== null && tree.loaded.spaceId === spaceId ? tree.loaded.nodes : null;
@@ -95,17 +93,17 @@ export function App() {
   /** Créer une page à la racine : pas pour un invité, ni en lecture seule. */
   const mayCreate = !stale && space !== null && space.role !== "guest";
   const [creatingSpace, setCreatingSpace] = useState(false);
-  const loadError = schema.error ?? treeError;
   const { looked } = page;
 
   let content;
   if (settingsOf !== null) {
     // Sans attendre l'arbre des pages : les réglages ont leurs propres appels.
     content = <SpaceSettings key={settingsOf} spaceId={settingsOf} />;
-  } else if (loadError) {
+  } else if (schema.error) {
+    // Au premier chargement seulement : sans la version du serveur, rien ne peut s'ouvrir.
     content = (
       <Message title="Impossible de charger Mementum">
-        {loadError} Recharge la page pour réessayer.
+        {schema.error} Recharge la page pour réessayer.
       </Message>
     );
   } else if (!schema.loaded) {
@@ -189,6 +187,7 @@ export function App() {
         onTrash={trashFromTree}
         onMove={moveFromTree}
         notice={actions.notice}
+        readError={treeError}
       />
       <main className="mm-main">{content}</main>
       {creatingSpace && <CreateSpaceDialog onClose={() => setCreatingSpace(false)} />}

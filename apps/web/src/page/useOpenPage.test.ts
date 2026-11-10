@@ -140,3 +140,34 @@ test("update_replaces_only_the_page_the_server_was_asked_for", async () => {
   await settle(() => open.current.update(restored));
   expect(open.current.node).toBe(restored);
 });
+
+test("page_that_leaves_the_tree_stays_when_the_server_fails", async () => {
+  const x = page("x");
+  const open = await renderHook(hook, { activeId: "x", inTree: x });
+  // Une relecture de l'arbre ne la porte plus. Elle reste à l'écran, telle qu'on la
+  // connaissait, le temps que le serveur dise ce qu'elle est devenue.
+  await open.rerender({ activeId: "x" });
+  expect(open.current.node).toBe(x);
+  expect(open.current.resolving).toBe(false);
+  expect(asked.map((a) => a.id)).toEqual(["x"]);
+  // Le serveur ne répond pas : elle reste, avec ce qu'on y a tapé.
+  await settle(() => asked[0].answer.reject(unreachable()));
+  expect(open.current.node).toBe(x);
+  expect(open.current.looked).toEqual({ id: "x", state: "found", node: x });
+  // Redemandée : le serveur répond qu'elle n'existe plus (ou qu'on ne la voit plus), et
+  // alors elle s'en va.
+  await settle(() => open.current.ask());
+  expect(asked).toHaveLength(2);
+  expect(open.current.node).toBe(x);
+  await settle(() => asked[1].answer.reject(notFound()));
+  expect(open.current.node).toBeUndefined();
+  expect(open.current.looked).toEqual({ id: "x", state: "missing" });
+});
+
+test("ask_reads_again_only_a_page_outside_the_tree", async () => {
+  const x = page("x");
+  const open = await renderHook(hook, { activeId: "x", inTree: x });
+  // Dans l'arbre : c'est lui qui la tient à jour.
+  await settle(() => open.current.ask());
+  expect(asked).toEqual([]);
+});

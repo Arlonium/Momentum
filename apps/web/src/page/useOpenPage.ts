@@ -3,6 +3,10 @@
 // ailleurs depuis), le serveur est interrogé (`getPage`) : il dit si la personne la voit, dans
 // quel espace, et depuis quand elle est à la corbeille. Une page qu'elle ne voit pas répond
 // `404`, comme une page qui n'existe pas.
+//
+// Une page affichée ne quitte l'écran que si le serveur dit qu'elle n'est plus là. Sortie de
+// l'arbre chargé (une relecture ne la porte plus), elle reste telle qu'on la connaissait, le
+// temps de sa réponse ; et s'il ne répond pas, elle reste encore, avec ce qu'on y a tapé.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, getPage, isSessionLost } from "../api";
@@ -27,6 +31,8 @@ export type OpenPage = {
   show(node: PageNode): void;
   /** La page a changé (renommée, restaurée) : si le serveur a été interrogé pour elle, la voici. */
   update(node: PageNode): void;
+  /** Redemande au serveur la page ouverte, si elle n'est pas dans l'arbre chargé. */
+  ask(): void;
 };
 
 type Reading = {
@@ -49,17 +55,25 @@ export function useOpenPage(
   const { retries } = reading;
   const callbacks = useRef(reading);
   callbacks.current = reading;
+  /** La page ouverte, telle que l'arbre chargé la portait la dernière fois. */
+  const last = useRef<PageNode | null>(null);
+  if (inTree !== undefined) last.current = inTree;
+  /** Compte les demandes de relecture (`ask`). */
+  const [asks, setAsks] = useState(0);
 
   const outsideTree = activeId !== null && inTree === undefined;
   useEffect(() => {
     if (activeId === null || !outsideTree) return;
     let cancelled = false;
-    // Déjà rendue par le serveur : elle reste à l'écran pendant qu'il est relu.
-    setLookup((current) =>
-      current !== null && current.id === activeId && current.state === "found"
-        ? current
-        : { id: activeId, state: "loading" },
-    );
+    // Déjà connue (le serveur l'a rendue, ou l'arbre la portait) : elle reste à l'écran
+    // pendant que le serveur est relu.
+    const known = last.current !== null && last.current.id === activeId ? last.current : null;
+    setLookup((current) => {
+      if (current !== null && current.id === activeId && current.state === "found") return current;
+      return known === null
+        ? { id: activeId, state: "loading" }
+        : { id: activeId, state: "found", node: known };
+    });
     getPage(activeId).then(
       (node) => {
         if (!cancelled) setLookup({ id: activeId, state: "found", node });
@@ -69,13 +83,20 @@ export function useOpenPage(
         if (isSessionLost(error)) callbacks.current.onSessionLost();
         else if (error instanceof ApiError && error.status === 404) {
           setLookup({ id: activeId, state: "missing" });
-        } else setLookup({ id: activeId, state: "failed", message: messageOf(error) });
+        } else {
+          // Le serveur ne répond pas : une page affichée le reste ; sinon, l'échec est dit.
+          setLookup((current) =>
+            current !== null && current.id === activeId && current.state === "found"
+              ? current
+              : { id: activeId, state: "failed", message: messageOf(error) },
+          );
+        }
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [activeId, outsideTree, retries]);
+  }, [activeId, outsideTree, retries, asks]);
 
   const show = useCallback((node: PageNode) => {
     setLookup({ id: node.id, state: "found", node });
@@ -86,12 +107,14 @@ export function useOpenPage(
     );
   }, []);
 
+  const ask = useCallback(() => setAsks((n) => n + 1), []);
+
   const looked = lookup !== null && lookup.id === activeId ? lookup : null;
   const node = inTree ?? (looked?.state === "found" ? looked.node : undefined);
   const resolving =
     activeId !== null && node === undefined && (looked === null || looked.state === "loading");
   return useMemo(
-    () => ({ looked, node, resolving, show, update }),
-    [looked, node, resolving, show, update],
+    () => ({ looked, node, resolving, show, update, ask }),
+    [looked, node, resolving, show, update, ask],
   );
 }

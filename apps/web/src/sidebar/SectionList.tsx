@@ -45,6 +45,8 @@ type Props = {
   role: Role;
   /** Les pages de l'espace ; `null` : pas encore chargées. */
   nodes: PageNode[] | null;
+  /** Leur lecture a échoué : sans pages chargées, on ne dit pas qu'elles arrivent. */
+  unavailable: boolean;
   /** La barre latérale, où les arbres défilent. */
   viewport: Viewport | null;
   activeId: string | null;
@@ -78,6 +80,7 @@ export function SectionList({
   spaceId,
   role,
   nodes,
+  unavailable,
   viewport,
   activeId,
   readOnly,
@@ -193,7 +196,7 @@ export function SectionList({
   if (nodes === null) {
     return (
       <div className="mm-sections">
-        <p className="mm-side-note">Chargement…</p>
+        {!unavailable && <p className="mm-side-note">Chargement…</p>}
       </div>
     );
   }

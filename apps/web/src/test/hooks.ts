@@ -1,13 +1,25 @@
 // Outils des tests unitaires de hooks (Vitest, jsdom), sans dépendance de plus : un hook est
 // rendu par un composant minimal, dans une racine React, sous `act`.
 import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach } from "vitest";
 
 declare global {
   // Dit à React que les mises à jour d'état des tests passent par `act`.
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+/** Les racines des hooks rendus par le test en cours : démontées à sa fin. */
+const roots = new Set<Root>();
+afterEach(async () => {
+  // Un hook resté monté écouterait encore la fenêtre pendant les tests suivants.
+  const mounted = [...roots];
+  roots.clear();
+  await act(async () => {
+    for (const root of mounted) root.unmount();
+  });
+});
 
 export type RenderedHook<P, R> = {
   /** Ce que le hook a rendu à son dernier rendu. */
@@ -31,6 +43,7 @@ export async function renderHook<P, R>(
     return null;
   }
   const root = createRoot(document.createElement("div"));
+  roots.add(root);
   const render = (value: P) => act(async () => root.render(createElement(Probe, { value })));
   await render(props);
   return {
@@ -38,7 +51,10 @@ export async function renderHook<P, R>(
       return current;
     },
     rerender: render,
-    unmount: () => act(async () => root.unmount()),
+    unmount: async () => {
+      roots.delete(root);
+      await act(async () => root.unmount());
+    },
   };
 }
 

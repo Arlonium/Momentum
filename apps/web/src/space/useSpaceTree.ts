@@ -8,6 +8,9 @@
 //
 // Deux lectures ne se croisent pas : celle d'un autre espace, ou qu'une relecture remplace,
 // est abandonnée ; celle qu'un changement fait ici a dépassée (elle date d'avant) est refaite.
+//
+// Une lecture qui échoue (serveur injoignable) ne retire rien de l'écran : l'arbre chargé
+// reste, l'échec est dit, et la lecture repart d'elle-même quand le réseau revient.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ApiError, getTree, isSessionLost } from "../api";
@@ -71,20 +74,24 @@ type Reading = {
   onSessionLost: () => void;
   /** L'espace répond `404` : le compte n'y a plus de rôle. */
   onGone: () => void;
-  /** La lecture a échoué : le message, en français. */
-  onError: (message: string) => void;
 };
 
 /**
  * Lit dans `tree` l'arbre de l'espace `spaceId` (`null` : on ne sait pas encore lequel), et le
- * relit quand `tree.reload()` le demande.
+ * relit quand `tree.reload()` le demande. Rend le message de la dernière lecture si elle a
+ * échoué (`null` sinon) : l'arbre chargé, lui, reste tel qu'il était.
  */
-export function useTreeReader(tree: SpaceTree, spaceId: string | null, reading: Reading): void {
-  const { changes, reloads, set } = tree;
+export function useTreeReader(
+  tree: SpaceTree,
+  spaceId: string | null,
+  reading: Reading,
+): string | null {
+  const { changes, reloads, set, reload } = tree;
   const { retries } = reading;
   // Les rappels du dernier rendu : en changer ne relance pas la lecture.
   const callbacks = useRef(reading);
   callbacks.current = reading;
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (spaceId === null) return;
@@ -97,19 +104,30 @@ export function useTreeReader(tree: SpaceTree, spaceId: string | null, reading: 
         // Une page créée ou renommée ici pendant la lecture : la réponse date d'avant.
         if (before !== changes.current) continue;
         set({ spaceId, nodes: fetched.nodes });
+        setError(null);
         return;
       }
     };
-    read().catch((error: unknown) => {
+    read().catch((e: unknown) => {
       if (cancelled) return;
-      if (isSessionLost(error)) callbacks.current.onSessionLost();
-      else if (error instanceof ApiError && error.status === 404) callbacks.current.onGone();
-      else callbacks.current.onError(messageOf(error));
+      if (isSessionLost(e)) callbacks.current.onSessionLost();
+      else if (e instanceof ApiError && e.status === 404) callbacks.current.onGone();
+      else setError(messageOf(e));
     });
     return () => {
       cancelled = true;
     };
   }, [spaceId, reloads, retries, changes, set]);
+
+  // Une lecture a échoué : elle repart quand le navigateur retrouve le réseau.
+  const failed = error !== null;
+  useEffect(() => {
+    if (!failed) return;
+    window.addEventListener("online", reload);
+    return () => window.removeEventListener("online", reload);
+  }, [failed, reload]);
+
+  return error;
 }
 
 /**
