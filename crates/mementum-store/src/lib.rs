@@ -134,9 +134,10 @@ impl Store {
     ///
     /// Si le fichier existe déjà et qu'au moins une migration est en attente, une copie cohérente
     /// de la base est d'abord écrite à côté ([`backup_path`]), puis les migrations tournent. Une
-    /// copie déjà présente sous ce nom n'est jamais écrasée : identique, elle suffit ; différente
-    /// (la base a changé depuis), la nouvelle prend un nom daté. Si la copie échoue, l'ouverture
-    /// échoue, avant toute migration. [`Store::backup`] dit ce qui a été fait.
+    /// copie déjà rangée n'est jamais écrasée : si l'une d'elles est identique à la nouvelle, elle
+    /// suffit ; sinon, la nouvelle prend le nom sans date s'il est libre, ou un nom daté. Si la
+    /// copie échoue, l'ouverture échoue, avant toute migration. [`Store::backup`] dit ce qui a été
+    /// fait.
     pub async fn open(path: &Path) -> Result<Store, StoreError> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| StoreError::Sqlx(sqlx::Error::Io(e)))?;

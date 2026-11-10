@@ -147,20 +147,23 @@ async fn open_alone(backup: &Path) -> (tempfile::TempDir, SqlitePool) {
 }
 
 /// Les copies datées de `db` d'avant la migration `0002`, rangées à côté d'elle :
-/// `<base>.avant-0002.<AAAAMMJJ>T<HHMMSS>Z.bak`.
+/// `<base>.avant-0002.<AAAAMMJJ>T<HHMMSS>Z.bak`, ou `…Z-<n>.bak`.
 fn dated_copies(db: &Path) -> Vec<PathBuf> {
     let dir = db.parent().unwrap();
     let prefix = format!("{}.avant-0002.", db.file_name().unwrap().to_str().unwrap());
     entries(dir)
         .into_iter()
         .filter(|name| {
-            let Some(stamp) = name
+            let Some(rest) = name
                 .strip_prefix(&prefix)
                 .and_then(|rest| rest.strip_suffix(".bak"))
             else {
                 return false;
             };
-            stamp.len() == 16
+            let (stamp, n) = rest.split_once('-').unwrap_or((rest, "2"));
+            !n.is_empty()
+                && n.bytes().all(|c| c.is_ascii_digit())
+                && stamp.len() == 16
                 && stamp.bytes().enumerate().all(|(i, c)| match i {
                     8 => c == b'T',
                     15 => c == b'Z',
@@ -441,6 +444,36 @@ async fn unchanged_database_is_not_copied_twice() {
             ]),
             "tentative {attempt}"
         );
+    }
+}
+
+/// Un redémarrage automatique sur une migration qui échoue : une copie sans date existe, la base a
+/// changé depuis, puis trois tentatives de suite échouent. La première écrit une copie datée ; les
+/// suivantes la trouvent identique. Deux copies en tout, pas quatre.
+#[tokio::test]
+async fn retry_loop_does_not_pile_up_copies() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    let pool = lot1_database(&db).await;
+    let vault = lot1_vault(&pool).await;
+    lot1_page(&pool, vault, "Accueil", "a0").await;
+    pool.close().await;
+    common::break_table(&db, "INSERT", "_sqlx_migrations", "1").await;
+    assert!(Store::open(&db).await.is_err());
+    assert!(backup_path(&db, 2).is_file());
+
+    let old = common::side_pool(&db).await;
+    lot1_page(&old, vault, "Écrite entre-temps", "a1").await;
+    old.close().await;
+
+    let mut dated_bytes = None;
+    for attempt in 1..=3 {
+        assert!(Store::open(&db).await.is_err(), "tentative {attempt}");
+        let dated = dated_copies(&db);
+        assert_eq!(dated.len(), 1, "tentative {attempt} : {dated:?}");
+        let bytes = std::fs::read(&dated[0]).unwrap();
+        assert_eq!(*dated_bytes.get_or_insert_with(|| bytes.clone()), bytes);
+        assert_eq!(entries(dir.path()).len(), 3, "tentative {attempt}");
     }
 }
 
