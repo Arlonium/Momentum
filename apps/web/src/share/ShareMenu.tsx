@@ -1,7 +1,8 @@
 // Le menu Partager d'une page (conception, §4.3) : le bouton « Partager », en haut à droite, et
 // le panneau qu'il ouvre sous lui, comme dans Notion. Pour qui a l'accès complet sur la page.
 // De haut en bas :
-// 1. inviter une adresse, à un niveau : l'invitation est un lien, montré cette fois seulement ;
+// 1. inviter une adresse, à un niveau : l'invitation est un lien, que le serveur ne redonne
+//    pas, montré tant qu'elle attend et que la page reste ouverte (R114) ;
 // 2. les personnes qui ont un accès nommé, avec leur niveau, qui se change ici, et
 //    « Retirer » ; un accès posé sur une page parente est marqué « hérité », et se change sur
 //    elle ; puis les invitations de la page qui attendent, avec « Révoquer » ;
