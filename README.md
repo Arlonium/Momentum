@@ -48,8 +48,9 @@ Tout le produit est maintenant sous comptes et sous droits. Rien ne se lit ni ne
 Le premier compte administre l'instance, mais au lot 2 ce titre ne lui donne aucun pouvoir dans l'application. Comme tout le monde, il ne voit que les espaces où il a un rôle. Personne, ni lui, ni le propriétaire ou un admin de l'espace, ne voit les pages privées des autres.
 
 **Limites connues du lot 2** (détail dans la conception, §9) :
-- dix mots de passe faux pour une même adresse la bloquent 15 minutes, même avec le bon mot de passe : quelqu'un d'autre peut donc empêcher une personne de se connecter. Ses sessions déjà ouvertes continuent (Ruling R76) ;
-- l'inscription dit si une adresse a déjà un compte ; et même sur une instance où l'on s'inscrit sur invitation, quelqu'un du dehors peut le savoir, en une douzaine d'essais par adresse (Rulings R77 et R84). Ces trois points attendent une limite du nombre de demandes par adresse IP, prévue au lot 7 ;
+- dix mots de passe faux pour une même adresse la bloquent, même avec le bon mot de passe, pendant 15 minutes au plus : le quart d'heure court depuis le premier essai raté. Quelqu'un d'autre peut donc empêcher une personne de se connecter. Ses sessions déjà ouvertes continuent (Ruling R76) ;
+- l'inscription dit si une adresse a déjà un compte (Ruling R77) ;
+- même sur une instance où l'on s'inscrit sur invitation, quelqu'un du dehors peut savoir si une adresse a un compte. Il lui faut une douzaine d'essais par adresse quand il en sonde beaucoup à la fois, et plus de 10 000 pour une seule (Ruling R84). Une limite du nombre de demandes par adresse IP, prévue au lot 7, lèvera ce point et le blocage par un tiers ; elle freinera seulement ce que dit l'inscription ;
 - quelqu'un qui peut seulement lire une page peut quand même changer ou effacer, chez les autres, le nom et le curseur affichés d'une autre personne. Il ne peut rien changer au contenu ;
 - un invité à qui l'on donne l'accès complet à une page peut y inviter d'autres personnes, comme dans Notion (Ruling R86) ;
 - la barre latérale ne montre pas en direct ce que font les autres (pages créées, renommées, déplacées) : elle se met à jour quand on revient sur l'onglet (Ruling R97). Le direct viendra avec le journal d'opérations, au lot 3 ;
@@ -142,7 +143,10 @@ Sur une instance neuve, l'application propose d'abord de créer le premier compt
 Une option l'emporte sur sa variable. Une valeur invalide arrête le démarrage, avec un message qui la nomme. Par exemple : `cargo run -p mementum-cli -- serve --signup open`.
 
 - **`MEMENTUM_SIGNUP`** dit ce que peut faire quelqu'un qui arrive sans invitation. Avec `invite` (le défaut), il peut seulement se connecter : pour créer un compte, il faut le lien d'une invitation. Avec `open`, n'importe qui crée un compte, et reçoit son propre espace. Le premier compte est permis dans les deux cas (Ruling R50).
-- **`MEMENTUM_PUBLIC_URL`** est l'adresse sous laquelle les gens atteignent l'instance, par exemple `https://notes.exemple.fr` derrière un mandataire HTTPS ou un tunnel. Elle sert à trois choses. En `https`, le cookie de session ne part que sur une connexion chiffrée (`Secure`). Son nom d'hôte est accepté dans l'en-tête `Host`, même quand le serveur n'écoute que sur la boucle locale (Ruling R78). Et les écritures venues de cette adresse sont acceptées (Ruling R51). Sans elle, derrière un mandataire HTTPS, le cookie n'a pas `Secure`.
+- **`MEMENTUM_PUBLIC_URL`** est l'adresse sous laquelle les gens atteignent l'instance, par exemple `https://notes.exemple.fr` derrière un mandataire HTTPS ou un tunnel. Elle sert à trois choses. En `https`, le cookie de session ne part que sur une connexion chiffrée (`Secure`). Son nom d'hôte est accepté dans l'en-tête `Host`, même quand le serveur n'écoute que sur la boucle locale (Ruling R78). Et les écritures et la synchronisation (`/sync`) venues de cette adresse sont acceptées (Ruling R51). Sans elle, derrière un mandataire HTTPS :
+  - le cookie n'a pas `Secure` ;
+  - si le mandataire garde le `Host` public et que le serveur n'écoute que sur la boucle locale, tout répond `421 bad_host` ;
+  - si le mandataire réécrit `Host`, toute écriture et toute connexion `/sync` reçoivent `403 bad_origin`.
 - Un lien d'invitation reprend l'adresse sous laquelle on a ouvert l'application. Pour envoyer un lien qui marche chez les autres, ouvrez l'application par son adresse publique avant d'inviter.
 - Les journaux vont sur la sortie d'erreur, au niveau `info`. `RUST_LOG` les règle, par exemple `RUST_LOG=mementum_sync=debug`.
 
@@ -156,11 +160,11 @@ Il n'y a pas encore d'envoi d'e-mails. Un mot de passe oublié se règle sur le 
 cargo run -p mementum-cli -- user set-password --email alice@exemple.fr
 ```
 
-Mettez l'adresse du compte à la place de `alice@exemple.fr`. Ajoutez `--data-dir` suivi du dossier si les données ne sont ni dans `./data` ni dans `MEMENTUM_DATA_DIR`. Avec le binaire compilé, la commande est `mementum user set-password --email alice@exemple.fr`.
+Mettez l'adresse du compte à la place de `alice@exemple.fr`. Ajoutez `--data-dir` suivi du dossier si les données ne sont ni dans `./data` ni dans `MEMENTUM_DATA_DIR`. Avec le binaire compilé, la commande est `mementum user set-password --email alice@exemple.fr`. Sous Windows, pendant que le serveur tourne depuis `target/debug`, `cargo run` échoue (« Accès refusé ») dès qu'il doit recompiler : lancez alors le binaire déjà compilé, `target\debug\mementum.exe user set-password --email alice@exemple.fr`.
 
 La commande lit le nouveau mot de passe sur **la première ligne de son entrée standard** : tapé au clavier puis Entrée, ou passé par un tuyau ou une redirection. Tapé dans un terminal, il reste affiché à l'écran ; la commande le rappelle avant de lire. Il fait 10 à 200 caractères, en UTF-8, sans caractère de contrôle (tabulation, retour chariot au milieu de la ligne, octet nul) : sinon, la commande refuse et ne change rien. Elle n'affiche jamais le mot de passe, seulement le nombre de caractères enregistrés : vérifiez ce nombre.
 
-Ensuite, toutes les sessions du compte sont fermées. La commande peut tourner pendant que le serveur tourne. Mais elle ne ferme pas les pages que ce compte a déjà ouvertes : elles restent ouvertes jusqu'à leur prochaine coupure, puis ne reviennent pas, faute de session (Ruling R73). Elle ne lève pas non plus le blocage après dix mots de passe faux : il dure 15 minutes, et le serveur le garde en mémoire. Pour fermer ces pages ou lever ce blocage tout de suite, redémarrez le serveur après la commande.
+Ensuite, toutes les sessions du compte sont fermées. La commande peut tourner pendant que le serveur tourne. Mais elle ne ferme pas les pages que ce compte a déjà ouvertes : elles restent ouvertes jusqu'à leur prochaine coupure, puis ne reviennent pas, faute de session (Ruling R73). Elle ne lève pas non plus le blocage après dix mots de passe faux : il dure 15 minutes au plus, et le serveur le garde en mémoire. Pour fermer ces pages ou lever ce blocage tout de suite, redémarrez le serveur après la commande.
 
 **Sous Windows PowerShell 5.1** (celui livré avec Windows, pas PowerShell 7) :
 - un tuyau (`'…' | mementum user set-password …`) remplace par défaut chaque lettre accentuée par `?`, sans aucune erreur. La commande enregistre alors un autre mot de passe, de même longueur. Tapez plutôt le mot de passe quand la commande le demande, ou lancez d'abord `$OutputEncoding = [System.Text.UTF8Encoding]::new()` dans la même fenêtre ;
@@ -176,7 +180,9 @@ Pour trouver la plus récente, regardez la date de modification des fichiers. Ni
 
 Sur un système de fichiers sans liens physiques (partage réseau SMB, exFAT, certains volumes Docker), la copie est quand même écrite, et le journal le signale : pendant une mise à jour, ne lancez alors qu'un processus à la fois sur ces données (Ruling R75).
 
-Pour restaurer une copie : serveur arrêté, la remettre à la place de `data/mementum.db`, et supprimer `mementum.db-wal` et `mementum.db-shm` s'ils existent (ils appartiennent à la base remplacée).
+Pour restaurer une copie : arrêter le serveur, la remettre à la place de `data/mementum.db`, supprimer `mementum.db-wal` et `mementum.db-shm` s'ils existent (ils appartiennent à la base remplacée), puis relancer le serveur.
+
+Arrêtez toujours le serveur avant de restaurer une copie, ou de récrire la base à la main. Il garde en mémoire les droits de chaque espace, datés par un numéro de révision qui ne fait que monter. Sur une base revenue en arrière, il servirait ces droits d'avant jusqu'à son redémarrage (Ruling R98).
 
 ### Tests
 
@@ -235,7 +241,7 @@ L'éditeur de démo s'ouvre avec `cargo run --release -p spike-server --bin spik
 3. **Lots 3 à 7**, dans cet ordre : collaboration et blocs riches ; recherche ; agents (REST complet, MCP v1, jetons d'API) ; imports et export ; livraison. Ils reprennent les limites connues des lots 1 et 2 :
    - lot 3 : commentaires, historique, arbre des pages et présence en direct (journal d'opérations, présence vérifiée par le serveur) ; déplacements de blocs sans perte d'édition (pistes (a) et (b) du Ruling R39, conception §11) ; tableaux mal formés écrits directement par un client Yjs (R54) ; là ou au lot 5, un porteur durable pour les props hors registre (Ruling R41) ;
    - lot 5 : écriture MMD par différence, pour ne plus bloquer une page pendant sa réécriture (Ruling R40) ;
-   - lot 7 : livraison (binaire qui embarque l'application, image Docker, fichier `mementum.toml`, inscription par domaine e-mail) ; limites du nombre de demandes, dont celle par adresse IP qui lèvera R76, R77 et R84 (R54) ; contrôle des avis de sécurité en CI (R44).
+   - lot 7 : livraison (binaire qui embarque l'application, image Docker, fichier `mementum.toml`, inscription par domaine e-mail) ; limites du nombre de demandes (R54), dont celle par adresse IP : elle lèvera R76 et R84, et freinera R77 sans le lever (là où l'inscription est ouverte, sa réponse reste un indice en une seule demande) ; contrôle des avis de sécurité en CI (R44).
 4. **Sans date, à décider** : envoi d'e-mails (invitations, mot de passe oublié), suppression d'un espace ou d'un compte, création d'espaces réservée par l'admin d'instance, vidage automatique de la corbeille, passkeys (R46).
 
 ## Méthode de travail

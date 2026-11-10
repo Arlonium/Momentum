@@ -60,7 +60,14 @@
 //! qui écrit ; s'ils ont bougé, la route relit et redécide, puis répond `409
 //! roles_changed` après deux reprises. Un changement d'accès, lui, est
 //! vérifié en entier dans la transaction qui l'écrit (Ruling R87) : le cache
-//! ne sert qu'à répondre vite avant le corps.
+//! ne sert qu'à répondre vite avant le corps. De même, un passage à la racine
+//! n'écrit ses accès que si la personne a encore, dans la transaction, son
+//! rôle et l'accès complet à la page. C'est le principe (Ruling R100) : ce
+//! qui écrit un droit durable est revérifié dans la transaction qui l'écrit.
+//! Les autres écritures de page (création, corbeille, restauration,
+//! suppression, changement de parent hors racine) se décident sur les droits
+//! lus juste avant, sans aller-retour réseau : une fenêtre de quelques
+//! millisecondes, acceptée.
 //!
 //! **Comptes** (`auth.rs`, `routes/auth.rs`) : comptes locaux, mot de passe
 //! haché en Argon2id, session par cookie. Le premier compte créé administre
@@ -82,12 +89,15 @@
 //! revient par la poignée de main, qui relit tout. Une connexion en train de
 //! s'ouvrir à cet instant est fermée avant d'avoir rien reçu.
 //!
-//! **Garde-fous réseau** (`guard.rs`), avant toute route : sur la boucle
-//! locale, l'en-tête `Host` doit la nommer (DNS rebinding, Ruling R31), ou
-//! nommer l'hôte de `MEMENTUM_PUBLIC_URL` quand elle est réglée (un mandataire
-//! ou un tunnel qui garde le `Host` public, Ruling R78), sinon `421 bad_host` ;
-//! partout, une requête qui écrit, comme une connexion `/sync`, reçoit `403
-//! bad_origin` si elle porte l'`Origin` d'un autre site.
+//! **Garde-fous réseau** (`guard.rs`). Une couche passe avant toute route.
+//! Sur la boucle locale, l'en-tête `Host` doit la nommer (DNS rebinding,
+//! Ruling R31), ou nommer l'hôte de `MEMENTUM_PUBLIC_URL` quand elle est
+//! réglée (un mandataire ou un tunnel qui garde le `Host` public, Ruling
+//! R78), sinon `421 bad_host`. Partout, cette couche répond `403 bad_origin`
+//! à une requête qui écrit (tout sauf `GET`, `HEAD` et `OPTIONS`) et qui
+//! porte l'`Origin` d'un autre site. Une connexion `/sync` est un `GET` : la
+//! couche ne regarde pas son `Origin`. C'est la route qui la contrôle, avant
+//! tout le reste, par la même règle (`routes/sync.rs`).
 
 mod access;
 pub mod auth;
