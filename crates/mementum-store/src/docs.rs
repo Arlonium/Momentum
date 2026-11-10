@@ -50,14 +50,6 @@ async fn append<'e>(
 }
 
 impl Store {
-    /// Ajoute une mise à jour au journal de la page, sans acteur, et renvoie son `seq`.
-    /// Transitoire : simple appel à [`Store::append_updates`]. Plus rien ne s'en sert que des
-    /// tests du store (`tests/migration.rs`, `tests/nodes.rs`, `tests/spaces.rs`) : à retirer
-    /// avec ces appels.
-    pub async fn append_update(&self, node_id: Uuid, update: &[u8]) -> Result<i64, StoreError> {
-        self.append_updates(node_id, &[update], None).await
-    }
-
     /// Ajoute des mises à jour au journal de la page, dans l'ordre, et renvoie le `seq` de la
     /// dernière. Elles sont écrites toutes ou aucune, avec des `seq` qui se suivent. `actor` :
     /// le compte qui écrit (`None` : inconnu, ou le serveur). `NotFound` si la page ou le compte

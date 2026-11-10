@@ -174,7 +174,7 @@ async fn every_structural_write_bumps_rev() {
         .await
         .unwrap();
     expected += 1;
-    store.append_update(c.id, b"u1").await.unwrap();
+    store.append_updates(c.id, &[b"u1"], None).await.unwrap();
     store
         .append_updates(c.id, &[b"u2", b"u3"], Some(user))
         .await

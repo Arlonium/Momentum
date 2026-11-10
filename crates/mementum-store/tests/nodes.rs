@@ -572,7 +572,7 @@ async fn delete_requires_trash() {
         .create_node(page(space, Some(a.id), None, "B"))
         .await
         .unwrap();
-    store.append_update(b.id, b"u").await.unwrap();
+    store.append_updates(b.id, &[b"u"], None).await.unwrap();
     let before = store.list_nodes(space.id).await.unwrap();
 
     assert!(matches!(
@@ -649,7 +649,7 @@ async fn delete_removes_subtree_docs_and_grants() {
         .await
         .unwrap();
     for id in [p.id, c1.id, g.id, s.id] {
-        store.append_update(id, b"u1").await.unwrap();
+        store.append_updates(id, &[b"u1"], None).await.unwrap();
         store
             .append_updates(id, &[b"u2", b"u3"], Some(user))
             .await
@@ -798,7 +798,10 @@ async fn create_node_writes_grants_and_doc_atomically() {
     assert_eq!(doc.snapshot, Some((0, vec![0x00, 0xff, 0x01])));
     assert!(doc.updates.is_empty());
     // La première mise à jour suit l'instantané de `seq` 0.
-    assert_eq!(store.append_update(node.id, b"u").await.unwrap(), 1);
+    assert_eq!(
+        store.append_updates(node.id, &[b"u"], None).await.unwrap(),
+        1
+    );
     assert_eq!(store.space_rev(space.id).await.unwrap(), Some(1));
 }
 
@@ -816,9 +819,9 @@ async fn reopen_keeps_everything() {
         .create_node(page(&space, None, Some(a.id), "B"))
         .await
         .unwrap();
-    store.append_update(b.id, b"u1").await.unwrap();
+    store.append_updates(b.id, &[b"u1"], None).await.unwrap();
     store.put_snapshot(b.id, 1, b"s").await.unwrap();
-    store.append_update(b.id, b"u2").await.unwrap();
+    store.append_updates(b.id, &[b"u2"], None).await.unwrap();
     let nodes = store.list_nodes(space.id).await.unwrap();
     let space = store.get_space(space.id).await.unwrap().unwrap();
     store.close().await;

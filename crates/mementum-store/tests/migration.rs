@@ -361,9 +361,9 @@ async fn migration_keeps_lot1_pages() {
         .await
         .unwrap();
     assert!(d.position.as_str() > "a1");
-    assert_eq!(store.append_update(a, b"suite").await.unwrap(), 4);
+    assert_eq!(store.append_updates(a, &[b"suite"], None).await.unwrap(), 4);
     assert!(matches!(
-        store.append_update(Uuid::now_v7(), b"x").await,
+        store.append_updates(Uuid::now_v7(), &[b"x"], None).await,
         Err(StoreError::NotFound)
     ));
     store.close().await;
