@@ -3,6 +3,7 @@
 //!
 //! - [`Store`] ouvre la base (WAL, `synchronous=FULL`, clés étrangères, délai d'attente de 5 s,
 //!   appliqués à **chaque** connexion du pool) et lance les migrations.
+//! - `backup.rs` : la copie de la base, à côté d'elle, avant toute migration en attente.
 //! - `users.rs` : les comptes et les sessions (le store ne voit que des hachages).
 //! - `spaces.rs` : les espaces et leur révision.
 //! - `members.rs` : les rôles dans un espace, le départ, l'adoption des espaces sans membre.
@@ -22,6 +23,7 @@
 //! instantanés) ne la touche pas.
 
 mod acl;
+mod backup;
 mod docs;
 mod invitations;
 mod members;
@@ -33,12 +35,15 @@ mod users;
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sqlx::SqlitePool;
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use uuid::Uuid;
 
+pub use backup::{Backup, backup_path};
 pub use docs::DocState;
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
 pub use members::Member;
@@ -113,15 +118,24 @@ impl StoreError {
     }
 }
 
+/// Les migrations du store, embarquées dans le binaire.
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
 /// La base de Mementum. Se clone à bas coût (le pool est partagé).
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    backup: Option<Arc<Backup>>,
 }
 
 impl Store {
     /// Ouvre (et crée au besoin, dossier compris) la base, applique les pragmas à chaque
     /// connexion et lance les migrations.
+    ///
+    /// Si le fichier existe déjà et qu'au moins une migration est en attente, une copie cohérente
+    /// de la base est d'abord écrite à côté ([`backup_path`]), puis les migrations tournent. Une
+    /// copie du même nom déjà présente est gardée telle quelle. Si la copie échoue, l'ouverture
+    /// échoue, avant toute migration. [`Store::backup`] dit ce qui a été fait.
     pub async fn open(path: &Path) -> Result<Store, StoreError> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| StoreError::Sqlx(sqlx::Error::Io(e)))?;
@@ -134,8 +148,23 @@ impl Store {
             .foreign_keys(true)
             .busy_timeout(Duration::from_millis(5000));
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
-        Ok(Store { pool })
+        match migrate(&pool, path).await {
+            Ok(backup) => Ok(Store {
+                pool,
+                backup: backup.map(Arc::new),
+            }),
+            Err(e) => {
+                pool.close().await;
+                Err(e)
+            }
+        }
+    }
+
+    /// La copie de la base qui a précédé les migrations de cette ouverture (écrite, ou gardée si
+    /// elle était déjà là) ; `None` si aucune migration n'était en attente. Le store n'a pas de
+    /// journal : c'est à l'appelant de la journaliser.
+    pub fn backup(&self) -> Option<&Backup> {
+        self.backup.as_deref()
     }
 
     /// Ferme le pool (attend la fin des requêtes en cours).
@@ -179,6 +208,14 @@ impl Store {
         }
         Ok(all)
     }
+}
+
+/// Copie la base si une migration est en attente, puis lance les migrations. Sans copie, rien ne
+/// migre.
+async fn migrate(pool: &SqlitePool, path: &Path) -> Result<Option<Backup>, StoreError> {
+    let backup = backup::before_migrations(pool, path, &MIGRATOR).await?;
+    MIGRATOR.run(pool).await?;
+    Ok(backup)
 }
 
 /// Millisecondes Unix.

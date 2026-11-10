@@ -101,6 +101,8 @@ corepack pnpm -C apps/web dev             # dans un autre terminal : Vite sur le
 
 Puis ouvrir `http://localhost:5173`. Vite relaie `/api` et `/sync` (WebSocket comprise) vers le serveur. Le lot 1 n'a pas de comptes : chaque navigateur écrit sous un nom d'invité (« Invité » et 4 chiffres).
 
+Au démarrage, si une migration de schéma attend une base existante, le serveur en écrit d'abord une copie à côté (`data/mementum.db.avant-0002.bak` avant la migration `0002`, chemin et taille dans son journal) et ne démarre pas s'il ne peut pas l'écrire ; ces copies ne sont jamais supprimées automatiquement.
+
 > **Ne pas écouter hors de la boucle locale** (`serve --bind 0.0.0.0:8080`, ou une adresse du réseau). Le lot 1 n'a aucune authentification : toute personne qui atteint l'adresse lit et modifie toutes les pages. Les protections contre le DNS rebinding ne valent, elles aussi, que sur la boucle locale. Le serveur l'écrit dans son journal au démarrage.
 
 Autres ports : `MEMENTUM_E2E_WEB_PORT` (Vite) et `MEMENTUM_E2E_API_PORT` (le serveur que vise le mandataire), à donner aussi à `serve --bind 127.0.0.1:<port>`.
