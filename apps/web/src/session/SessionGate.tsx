@@ -8,7 +8,8 @@
 // Il ne vit qu'ici, en mémoire, le temps de l'invitation : sa page, puis l'inscription (qui
 // l'envoie, et s'ouvre même quand les inscriptions sont fermées) ou la connexion (qui ramène à
 // la page d'invitation, pour l'accepter). Il est oublié dès que l'invitation a servi, ou
-// qu'on quitte ces trois écrans.
+// qu'on quitte ces trois écrans. Un compte créé par une invitation sur une page arrive sur
+// cette page (`landing.ts`).
 //
 // Session perdue en cours de route (un appel répond `401 unauthenticated`, `api.ts`) : la
 // connexion est demandée par-dessus l'application, qui reste montée. La page ouverte et ce
@@ -24,13 +25,15 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { getInfo, getMe, isSessionLost, onSessionLost } from "../api";
-import { navigate, parseRoute, usePathname } from "../router";
+import { navigate, pagePath, parseRoute, usePathname } from "../router";
 import { AuthScreen, messageOf } from "./forms";
 import { invitationTarget, InvitePage, takeInvitationToken } from "./InvitePage";
+import { invitedPage } from "./landing";
 import { LoginDialog, LoginPage } from "./LoginPage";
 import { SessionContext, type Session } from "./session";
 import { SignupPage } from "./SignupPage";
@@ -83,13 +86,19 @@ export function SessionGate({ children }: { children: ReactNode }) {
 
   const enter = useCallback((me: Me) => setState({ name: "signedIn", me, lost: false }), []);
 
+  /** Où aller en quittant l'inscription, quand ce n'est pas l'accueil : la page de l'invitation. */
+  const landing = useRef<string | null>(null);
+
   /** L'inscription a reçu le jeton, et accepté l'invitation : il ne sert plus. */
   const signedUp = useCallback(
-    (me: Me) => {
+    async (me: Me) => {
+      // Invité sur une page : il y arrive, comme le compte qui accepte avec une session.
+      const page = invited !== null && invited.pageTitle !== null ? await invitedPage(me) : null;
+      landing.current = page === null ? null : pagePath(page);
       forgetInvitation();
       enter(me);
     },
-    [enter, forgetInvitation],
+    [enter, forgetInvitation, invited],
   );
 
   const load = useCallback(async () => {
@@ -115,11 +124,14 @@ export function SessionGate({ children }: { children: ReactNode }) {
 
   // Connecté sur `/login` ou `/signup` (après s'être connecté là, ou par « Précédent ») : à
   // la place de cette adresse, avant que rien ne s'affiche, la page de l'invitation qu'on
-  // venait accepter, sinon l'accueil.
+  // venait accepter, celle où elle mène si l'inscription vient de l'accepter, sinon l'accueil.
   const signedIn = state.name === "signedIn";
   const onSessionRoute = route.name === "login" || route.name === "signup";
   useLayoutEffect(() => {
-    if (signedIn && onSessionRoute) navigate(joining ? "/invite" : "/", { replace: true });
+    if (!signedIn || !onSessionRoute) return;
+    const to = landing.current ?? (joining ? "/invite" : "/");
+    landing.current = null;
+    navigate(to, { replace: true });
   }, [signedIn, onSessionRoute, joining]);
 
   // Tout appel qui répond `401 unauthenticated`, `getMe` de `refresh` compris.
