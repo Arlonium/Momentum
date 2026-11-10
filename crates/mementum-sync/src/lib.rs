@@ -28,10 +28,15 @@
 //!   les droits d'une page changent, [`Hub::kick`] ferme ses connexions ;
 //!   quand une session se ferme, [`Hub::kick_user`] ferme celles du compte ;
 //!   les clients reviennent, et la poignée de main relit tout. Une connexion
-//!   inscrite alors que la révision de l'espace a bougé depuis la lecture de
-//!   ses droits est fermée aussitôt, sans avoir rien reçu (Ruling R71,
-//!   [`Hub::serve_connection`]). Quand la page est supprimée,
-//!   [`Hub::forget`] arrête son acteur sans rien écrire ;
+//!   en train de s'ouvrir échapperait à ces fermetures : une fois inscrite,
+//!   et avant d'avoir rien reçu, elle est fermée si la révision de l'espace
+//!   a bougé depuis la lecture de ses droits (Ruling R71), ou si la route,
+//!   à qui le hub le demande, ne retrouve plus sa session (Ruling R88) ; les
+//!   deux contrôles sont dans [`Hub::serve_connection_if`]. La route charge
+//!   la page avant de lire les droits ([`Hub::load_page`], Ruling R89), pour
+//!   que cette lecture précède l'inscription d'aussi peu que possible. Quand
+//!   la page est supprimée, [`Hub::forget`] arrête son acteur sans rien
+//!   écrire ;
 //! - une mise à jour refusée par le document n'est ni gardée ni diffusée :
 //!   l'acteur recharge son document depuis le store et ferme la connexion
 //!   fautive (Rulings R17, R22). C'est aussi le sort de la mise à jour d'un

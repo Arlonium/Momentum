@@ -15,11 +15,17 @@
 //!   page dont les droits ont changé ([`Hub::kick`]), toutes celles d'un
 //!   compte dont une session se ferme ([`Hub::kick_user`]), et l'acteur
 //!   lui-même quand la page est supprimée ([`Hub::forget`]) ;
-//! - fermer, dès son inscription, une connexion dont les droits ont changé
-//!   depuis que la route les a lus (Ruling R71, [`Hub::serve_connection`]).
+//! - fermer, dès son inscription, la connexion que ces fermetures auraient
+//!   manquée parce qu'elle était en train de s'ouvrir : celle dont les droits
+//!   ont changé depuis que la route les a lus (il relit la révision de
+//!   l'espace, Ruling R71), et celle dont la session s'est fermée entre-temps
+//!   (il le demande à la route, qui lui passe de quoi la relire, Ruling R88).
+//!   Les deux contrôles sont dans [`Hub::serve_connection_if`].
 //!
 //! Une connexion fermée revient : c'est la poignée de main suivante qui relit
-//! la session et les droits.
+//! la session et les droits. [`Hub::load_page`] permet à la route de charger
+//! la page avant de les lire, pour que cette lecture soit aussi fraîche que
+//! possible à l'inscription (Ruling R89).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -51,6 +57,9 @@ const ASK_WAIT: Duration = Duration::from_secs(2);
 
 /// Ce que la poignée de main sait d'une connexion. Le hub ne lit ni session
 /// ni droits : c'est à l'appelant de les vérifier, et de les résumer ici.
+/// Rien de secret n'y entre (le type s'affiche par `Debug`) : la session
+/// reste chez l'appelant, qui la relit par le contrôle qu'il passe à
+/// [`Hub::serve_connection_if`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnInfo {
     /// Version de schéma du client. Autre que [`SCHEMA_VERSION`], la
@@ -66,7 +75,7 @@ pub struct ConnInfo {
     /// L'espace de la page, et la valeur de `spaces.rev` que l'appelant a
     /// lue **avant** les droits dont il a tiré `can_write` (ou dans la même
     /// lecture). Si elle a bougé quand la connexion est inscrite, celle-ci
-    /// est fermée aussitôt (Ruling R71, voir [`Hub::serve_connection`]).
+    /// est fermée aussitôt (Ruling R71, voir [`Hub::serve_connection_if`]).
     /// `None` : pas de contrôle (tests du hub).
     pub space: Option<(Uuid, i64)>,
 }
@@ -106,8 +115,22 @@ impl Hub {
 
     /// Crée le document d'une page neuve (`PageDoc::new_page`) et l'écrit en
     /// instantané de `seq` 0. Idempotent : l'acteur de la page le fait à son
-    /// premier chargement si la page n'a pas encore de document (Ruling R28).
+    /// premier chargement si la page n'a pas encore de document (Ruling R28),
+    /// et c'est ce chargement qui est demandé ici ([`Hub::load_page`]).
     pub async fn create_page_doc(&self, node_id: Uuid) -> Result<(), SyncError> {
+        self.load_page(node_id).await
+    }
+
+    /// Charge la page : lance son acteur s'il n'est pas vivant, et rend quand
+    /// il a son document. Aucune connexion n'est inscrite, et rien n'est écrit
+    /// pour une page qui a déjà son document. `Err(NotFound)`, sans acteur ni
+    /// écriture, si la page n'existe pas.
+    ///
+    /// Pour qui doit lire quelque chose de frais juste avant d'inscrire une
+    /// connexion ou d'écrire (Ruling R89) : le chargement d'une page froide,
+    /// qui peut durer, est alors derrière lui. L'acteur reste vivant
+    /// `idle_close` sans connexion ni demande : ce qui suit le trouve chargé.
+    pub async fn load_page(&self, node_id: Uuid) -> Result<(), SyncError> {
         self.call(node_id, |reply| Command::Create { reply })
             .await?
     }
@@ -132,6 +155,22 @@ impl Hub {
             reply,
         })
         .await?
+    }
+
+    /// [`Hub::serve_connection_if`] sans contrôle de l'appelant : pour qui n'a
+    /// pas de session à relire (le serveur de test, les tests du hub). Une
+    /// route qui lit une session passe par `serve_connection_if`.
+    pub async fn serve_connection<S>(
+        self: Arc<Self>,
+        node_id: Uuid,
+        conn: ConnInfo,
+        socket: S,
+    ) -> Result<(), SyncError>
+    where
+        S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
+    {
+        self.serve_connection_if(node_id, conn, std::future::ready(true), socket)
+            .await
     }
 
     /// Sert une connexion au protocole de y-websocket jusqu'à sa fin.
@@ -192,15 +231,47 @@ impl Hub {
     /// Le prix : `spaces.rev` bouge aussi pour une écriture sans effet sur
     /// les droits de cette page (une page créée ailleurs dans l'espace). Une
     /// connexion qui s'ouvre à cet instant est fermée une fois, pour rien, et
-    /// revient.
-    pub async fn serve_connection<S>(
+    /// revient. Plus l'appelant lit la révision tard, plus c'est rare : il
+    /// charge d'abord la page ([`Hub::load_page`], Ruling R89).
+    ///
+    /// # Session fermée pendant l'ouverture (Ruling R88)
+    ///
+    /// La même course existe pour la session : l'appelant l'a lue, puis une
+    /// déconnexion ou un changement de mot de passe la supprime et ferme les
+    /// connexions du compte ([`Hub::kick_user`]) avant que celle-ci soit
+    /// inscrite. Rien ne date une session comme `spaces.rev` date des droits :
+    /// c'est donc l'appelant qui la relit. `still_allowed` est attendu au
+    /// même endroit que le contrôle de la révision, une fois la connexion
+    /// inscrite, avant tout envoi et toute lecture ; s'il répond faux, la
+    /// connexion est fermée sans avoir rien reçu ni rien écrit. Il n'est pas
+    /// attendu si la connexion n'est pas inscrite, ni si la révision a déjà
+    /// bougé.
+    ///
+    /// Il ne reste pas de course, à deux conditions pour l'appelant :
+    /// `still_allowed` relit **la session de cette connexion** (pas « une
+    /// session du compte » : un changement de mot de passe en rouvre une
+    /// aussitôt), et la session est supprimée avant l'appel à `kick_user`. La
+    /// suppression tombe alors :
+    /// - avant la lecture de l'appelant : il ne sert pas la connexion ;
+    /// - entre cette lecture et la relecture : la relecture ne trouve plus la
+    ///   session, la connexion est fermée ici ;
+    /// - après la relecture, donc après l'inscription : `kick_user`, envoyé
+    ///   après la suppression à tous les acteurs alors vivants, arrive à
+    ///   celui-ci derrière l'inscription, et ferme la connexion.
+    ///
+    /// Ce contrôle-ci ne ferme jamais une connexion dont la session vaut
+    /// encore. Le hub n'y voit ni session ni jeton : ils restent chez
+    /// l'appelant.
+    pub async fn serve_connection_if<S, C>(
         self: Arc<Self>,
         node_id: Uuid,
         conn: ConnInfo,
+        still_allowed: C,
         mut socket: S,
     ) -> Result<(), SyncError>
     where
         S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
+        C: Future<Output = bool> + Send,
     {
         let writable = conn.client_schema == SCHEMA_VERSION && conn.can_write;
         let actor = conn.actor;
@@ -213,13 +284,16 @@ impl Hub {
             .await??;
         let space = conn.space;
         let conn = joined.membership.conn();
-        // Ruling R71 : la connexion est inscrite, rien n'est encore parti ni
-        // n'a été lu.
-        if let Some((space_id, seen)) = space
-            && !self
-                .rights_still_current(node_id, conn, space_id, seen)
-                .await
-        {
+        // Rulings R71 et R88 : la connexion est inscrite, rien n'est encore
+        // parti ni n'a été lu.
+        let current = match space {
+            Some((space_id, seen)) => {
+                self.rights_still_current(node_id, conn, space_id, seen)
+                    .await
+            }
+            None => true,
+        };
+        if !current || !Self::caller_still_allows(node_id, conn, still_allowed).await {
             // La désinscrit.
             drop(joined);
             let _ = tokio::time::timeout(CLOSE_GRACE, socket.close()).await;
@@ -264,10 +338,11 @@ impl Hub {
     /// vivant. Les connexions des autres comptes, et celles qui n'ont pas de
     /// compte, ne sont pas touchées.
     ///
-    /// À appeler quand une session du compte se ferme (déconnexion,
-    /// changement de mot de passe), **après** l'écriture en base : une
-    /// connexion ouverte ne relit jamais sa session, elle lui survivrait
-    /// (Ruling R73). Les clients reviennent, et la poignée de main relit
+    /// À appeler quand une session du compte est fermée (déconnexion,
+    /// changement de mot de passe, connexion par-dessus elle), **après**
+    /// l'écriture en base : une connexion ouverte ne relit jamais sa session,
+    /// elle lui survivrait (Ruling R73). Les clients reviennent, et la
+    /// poignée de main relit
     /// leur session. Toutes les connexions du compte sont fermées, celles de
     /// ses autres appareils comprises : le hub ne sait pas de quelle session
     /// vient une connexion.
@@ -277,18 +352,34 @@ impl Hub {
     /// connexions (plus aucun de leurs messages n'est traité), deux secondes
     /// au plus.
     ///
-    /// Ce qu'elle ne ferme pas : une connexion du compte dont la poignée de
-    /// main a déjà lu la session, et qui n'est pas encore inscrite dans son
-    /// acteur. Rien ne date une session comme `spaces.rev` date des droits
-    /// (voir [`Hub::serve_connection`]).
+    /// Une connexion du compte en train de s'ouvrir, que cette fermeture ne
+    /// trouve pas encore inscrite, n'y échappe pas : à son inscription,
+    /// l'appelant relit sa session, et elle est fermée (Ruling R88, voir
+    /// [`Hub::serve_connection_if`]).
     pub async fn kick_user(&self, user: Uuid) {
         let live = self.live_pages().await;
         self.ask_all(&live, |reply| Command::KickUser { user, reply })
             .await;
     }
 
+    /// L'appelant de [`Hub::serve_connection_if`] reconnaît-il encore la
+    /// connexion, maintenant qu'elle est inscrite (Ruling R88) ? Sinon, elle
+    /// est à fermer : c'est journalisé ici, sans rien de ce que l'appelant a
+    /// relu.
+    async fn caller_still_allows(
+        node_id: Uuid,
+        conn: actor::ConnId,
+        still_allowed: impl Future<Output = bool>,
+    ) -> bool {
+        let allowed = still_allowed.await;
+        if !allowed {
+            tracing::debug!(node_id = %node_id, conn, "connexion fermée à l'inscription : l'appelant ne la reconnaît plus (session fermée depuis la poignée de main)");
+        }
+        allowed
+    }
+
     /// La révision de l'espace est-elle encore `seen`, celle que l'appelant
-    /// de [`Hub::serve_connection`] a lue avant les droits ? Sinon (elle a
+    /// de [`Hub::serve_connection_if`] a lue avant les droits ? Sinon (elle a
     /// bougé, l'espace n'existe plus, ou le store ne répond pas), la
     /// connexion est à fermer : c'est journalisé ici.
     async fn rights_still_current(
