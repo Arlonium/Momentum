@@ -220,7 +220,11 @@ async fn sharing_requires_full() {
 
     for (route, reply) in five_routes(&team.mona.browser, &id.to_string(), tom, olga).await {
         let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
-        assert!(text(&body, "message").contains("accès complet"), "{route}");
+        let message = text(&body, "message");
+        assert!(
+            message.contains("il faut « Accès complet », tu as « Peut modifier »"),
+            "{route} : {message}"
+        );
     }
     // Un corps illisible n'y change rien : les droits d'abord.
     set_general(&team.mona.browser, id, json!("owner"))
@@ -1059,7 +1063,10 @@ async fn guest_with_full_cannot_change_general_access() {
     let body = set_general(&gina.browser, read_only, json!("read"))
         .await
         .assert_error(StatusCode::FORBIDDEN, "forbidden");
-    assert!(text(&body, "message").contains("accès complet"), "{body}");
+    assert!(
+        text(&body, "message").contains("« Accès complet »"),
+        "{body}"
+    );
     team.trash(shared).await;
     guest_refusal(shared, json!("read")).await;
     set_general(&team.olga.browser, shared, json!("read"))

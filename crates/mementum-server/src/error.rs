@@ -275,7 +275,7 @@ impl ApiError {
     /// `403 forbidden` : il faut l'accès complet sur la page. (Avant le corps de la requête,
     /// `access.rs` donne aussi le niveau qu'on a ; ce refus-ci vient de la transaction.)
     fn below_full() -> ApiError {
-        ApiError::forbidden("niveau insuffisant sur cette page : il faut « accès complet »")
+        ApiError::forbidden("niveau insuffisant sur cette page : il faut « Accès complet »")
     }
 
     /// Un changement d'accès refusé par le store, dans les statuts des routes du partage.

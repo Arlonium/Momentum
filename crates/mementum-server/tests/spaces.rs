@@ -572,17 +572,24 @@ async fn admin_cannot_touch_owners() {
         .delete(&member_uri(space, olga.id))
         .await
         .assert_error(StatusCode::FORBIDDEN, "forbidden");
-    // Ni propriétaire, ni invité ; un invité ne devient pas membre par un admin.
+    // Ni propriétaire, ni invité ; un invité ne devient pas membre par un admin. Le message
+    // s'affiche tel quel dans les réglages : il nomme les rôles comme l'écran, en français.
+    let between = async |member: Uuid, role: &str| {
+        let reply = adam
+            .browser
+            .patch(&member_uri(space, member), json!({ "role": role }))
+            .await;
+        let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+        let message = body["message"].as_str().expect("un message");
+        assert!(
+            message.contains("entre admin et membre") && !message.contains("member"),
+            "{role} : {message}"
+        );
+    };
     for role in ["owner", "guest"] {
-        adam.browser
-            .patch(&member_uri(space, mona.id), json!({ "role": role }))
-            .await
-            .assert_error(StatusCode::FORBIDDEN, "forbidden");
+        between(mona.id, role).await;
     }
-    adam.browser
-        .patch(&member_uri(space, gina.id), json!({ "role": "member" }))
-        .await
-        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    between(gina.id, "member").await;
     assert_eq!(
         role_of(&olga.browser, space, olga.id).await.as_deref(),
         Some("owner")

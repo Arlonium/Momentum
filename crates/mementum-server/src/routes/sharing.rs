@@ -394,7 +394,18 @@ mod tests {
 
         let give_tom = AccessChange::User(tom.id, Some(Level::Full));
         let error = write(&state, &mona, page.id, give_tom).await.unwrap_err();
-        assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        // Le refus de la transaction nomme le niveau comme celui du contrôle de la route, et
+        // comme l'écran.
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["message"],
+            "niveau insuffisant sur cette page : il faut « Accès complet »"
+        );
         let grants = state.store.node_grants(page.id).await.unwrap();
         assert!(
             !grants.iter().any(|g| g.subject == Subject::User(tom.id)),

@@ -1657,7 +1657,7 @@ async fn overtaken_reorder_is_refused_where_it_can_only_read() {
     let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
     let message = text(&body, "message");
     assert!(
-        message.contains("« modification »") && message.contains("« lecture »"),
+        message.contains("il faut « Peut modifier »") && message.contains("tu as « Peut lire »"),
         "{message}"
     );
 }
@@ -1682,7 +1682,8 @@ async fn overtaken_patch_naming_the_old_parent_becomes_a_move() {
     let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
     let message = text(&body, "message");
     assert!(
-        message.contains("« accès complet »") && message.contains("« modification »"),
+        message.contains("il faut « Accès complet »")
+            && message.contains("tu as « Peut modifier »"),
         "{message}"
     );
 }

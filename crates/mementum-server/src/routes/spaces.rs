@@ -345,7 +345,7 @@ fn may_change_role(caller: Role, current: Role, wanted: Role) -> Result<(), ApiE
         )),
         _ if between_admin_and_member(current) && between_admin_and_member(wanted) => Ok(()),
         _ => Err(ApiError::forbidden(
-            "un admin ne fait passer un rôle qu'entre admin et member ; le reste revient aux \
+            "un admin ne fait passer un rôle qu'entre admin et membre ; le reste revient aux \
              propriétaires",
         )),
     }

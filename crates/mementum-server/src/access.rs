@@ -92,13 +92,14 @@ fn writes(action: Action) -> bool {
     }
 }
 
-/// Le nom d'un niveau, dans un message.
+/// Le nom d'un niveau, dans un message : celui que l'écran lui donne (menu Partager du client,
+/// `LEVEL_LABELS`), puisque le message s'y affiche tel quel.
 fn level_name(level: Level) -> &'static str {
     match level {
-        Level::Read => "lecture",
-        Level::Comment => "commentaire",
-        Level::Edit => "modification",
-        Level::Full => "accès complet",
+        Level::Read => "Peut lire",
+        Level::Comment => "Peut commenter",
+        Level::Edit => "Peut modifier",
+        Level::Full => "Accès complet",
     }
 }
 
@@ -112,7 +113,7 @@ pub(crate) fn permit(access: &NodeAccess, action: Action) -> Result<(), ApiError
             .find(|level| level.allows(action))
             .unwrap_or(Level::Full);
         return Err(ApiError::forbidden(format!(
-            "niveau insuffisant sur cette page : il faut « {} », vous avez « {} »",
+            "niveau insuffisant sur cette page : il faut « {} », tu as « {} »",
             level_name(needed),
             level_name(access.level)
         )));
@@ -375,6 +376,54 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .into()
+    }
+
+    /// Le message du refus de `action` à qui a `level` sur la page, tel qu'il part dans la
+    /// réponse (`403 forbidden`).
+    async fn refusal(level: Level, action: Action) -> String {
+        let access = NodeAccess {
+            level,
+            section: Section::Space,
+            in_trash: false,
+            visible_parent: None,
+        };
+        let response = permit(&access, action)
+            .expect_err("un refus")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "forbidden");
+        body["message"].as_str().expect("un message").to_string()
+    }
+
+    /// Le refus de niveau s'affiche tel quel dans le client : il tutoie, comme le reste de
+    /// l'interface, et nomme les niveaux comme l'écran (« Peut lire », « Peut commenter »,
+    /// « Peut modifier », « Accès complet »).
+    #[tokio::test]
+    async fn level_refusal_speaks_like_the_screen() {
+        let cases = [
+            (Level::Read, Action::Comment, "Peut commenter", "Peut lire"),
+            (Level::Read, Action::Edit, "Peut modifier", "Peut lire"),
+            (
+                Level::Comment,
+                Action::Rename,
+                "Peut modifier",
+                "Peut commenter",
+            ),
+            (Level::Edit, Action::Share, "Accès complet", "Peut modifier"),
+        ];
+        for (level, action, needed, held) in cases {
+            assert_eq!(
+                refusal(level, action).await,
+                format!(
+                    "niveau insuffisant sur cette page : il faut « {needed} », tu as « {held} »"
+                ),
+                "{action:?} avec {level:?}"
+            );
+        }
     }
 
     /// Le cache suit `spaces.rev` (complément de `access_cache_follows_rev`, dans
