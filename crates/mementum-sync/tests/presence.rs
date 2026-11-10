@@ -353,3 +353,152 @@ async fn connections_without_an_account_share_their_client_ids() {
     witness.after(&account, &[&observer]).await;
     assert_eq!(state_of(&observer, id), Some(other));
 }
+
+// ---------------------------------------------------------------------------------------------
+// La dernière horloge (Ruling R108).
+//
+// Un état de présence porte une horloge par client, que yrs incrémente quand il retire l'état
+// d'un client parti (`Awareness::remove_state`), sans regarder si elle peut encore l'être. À
+// `u32::MAX`, l'addition déborde : l'acteur de la page panique dans un build de développement,
+// et toutes ses connexions se ferment. Une entrée à cette horloge est donc ignorée, et un départ
+// ne compte plus rien pour un client qui y est déjà.
+
+/// Un `ClientID` que personne n'a annoncé : celui qu'un message écrit à la main vise.
+const SPARE_CLIENT: u64 = 4_242;
+
+/// Une entrée de présence à la dernière horloge est ignorée : elle n'apparaît chez personne, ni
+/// tout de suite, ni pour qui arrive ; elle ne donne pas son client à qui l'envoie ; le reste du
+/// message passe, et la connexion reste ouverte. De même pour un retrait à cette horloge.
+#[tokio::test]
+async fn presence_at_the_last_clock_is_ignored() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+    let mallory_id = mallory.client_id();
+
+    // Dans le même message : un état à la dernière horloge, et l'état de Mallory elle-même.
+    let (last, own) = (named("À la dernière horloge"), named("Mallory"));
+    mallory.send_raw(awareness_message(&[
+        (SPARE_CLIENT, u32::MAX, &last),
+        (mallory_id, 1, &own),
+    ]));
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(state_of(&carol, mallory_id).as_deref(), Some(own.as_str()));
+    assert_eq!(state_of(&carol, SPARE_CLIENT), None);
+    let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    assert!(sees(&newcomer, mallory_id, Some(&own)).await);
+    assert_eq!(state_of(&newcomer, SPARE_CLIENT), None);
+
+    // Un retrait à la dernière horloge, de son propre état : ignoré lui aussi.
+    mallory.send_raw(awareness_message(&[(mallory_id, u32::MAX, "null")]));
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(state_of(&carol, mallory_id).as_deref(), Some(own.as_str()));
+
+    // L'entrée ignorée n'a pas donné le client à Mallory : un autre compte l'annonce.
+    let dave = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let taken = named("Dave");
+    dave.send_raw(awareness_message(&[(SPARE_CLIENT, 1, &taken)]));
+    assert!(
+        sees(&carol, SPARE_CLIENT, Some(&taken)).await,
+        "l'entrée ignorée a donné le client à qui l'a envoyée"
+    );
+    assert!(!mallory.is_closed());
+}
+
+/// Ce que `carol` voit quand la connexion d'un client part, puis ce qu'elle reçoit encore :
+/// le départ est traité (l'état que le client annonçait sous `own` disparaît), la connexion de
+/// `carol` est toujours ouverte, et ce que `writer` tape ensuite lui parvient.
+async fn page_survives_the_departure(
+    carol: &Client,
+    writer: &Client,
+    block: &str,
+    own: u64,
+    typed: &str,
+) {
+    assert!(
+        carol
+            .wait_until(WAIT, |c| c.is_closed() || state_of(c, own).is_none())
+            .await,
+        "le départ n'a pas été traité"
+    );
+    assert!(
+        !carol.is_closed(),
+        "la page a fermé ses connexions au départ du client"
+    );
+    writer.type_text(block, typed);
+    assert!(
+        carol
+            .wait_until(WAIT, |c| c.is_closed() || text(&c.blocks()).contains(typed))
+            .await
+    );
+    assert!(
+        !carol.is_closed() && text(&carol.blocks()).contains(typed),
+        "la page ne sert plus ses connexions"
+    );
+}
+
+/// Le scénario entier : un lecteur annonce un état à la dernière horloge, puis s'en va. La page
+/// reste en vie : une autre connexion est toujours ouverte, et reçoit ce qu'on écrit ensuite.
+/// Avant la garde, le départ faisait paniquer l'acteur de la page.
+#[tokio::test]
+async fn a_departure_after_the_last_clock_leaves_the_page_alive() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let block = f.ids().await[0].clone();
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let writer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(reader(new_user(&f.db).await))).await;
+    let mallory_id = mallory.client_id();
+
+    // Son propre état, à une horloge ordinaire : sa disparition dira que son départ est traité.
+    let own = named("Mallory");
+    mallory.send_raw(awareness_message(&[
+        (SPARE_CLIENT, u32::MAX, &named("À la dernière horloge")),
+        (mallory_id, 1, &own),
+    ]));
+    assert!(sees(&carol, mallory_id, Some(&own)).await);
+    assert!(still_served(&mallory).await);
+
+    drop(mallory);
+    page_survives_the_departure(&carol, &writer, &block, mallory_id, "après son départ").await;
+}
+
+/// La dernière horloge s'atteint aussi par un départ : un état annoncé juste en dessous, et le
+/// retrait qu'en fait le serveur l'y porte. Le client y reste ; qui l'annonce de nouveau, puis
+/// part, ne fait plus rien compter. Sans cela, ce second départ faisait paniquer l'acteur.
+#[tokio::test]
+async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let block = f.ids().await[0].clone();
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let writer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let account = new_user(&f.db).await;
+
+    // Premier passage : un état juste sous la dernière horloge, que tout le monde reçoit.
+    let first = Client::connect_synced(&f.url_for(reader(account))).await;
+    let below = named("Juste en dessous");
+    first.send_raw(awareness_message(&[
+        (SPARE_CLIENT, u32::MAX - 1, &below),
+        (first.client_id(), 1, &named("Mallory")),
+    ]));
+    assert!(sees(&carol, SPARE_CLIENT, Some(&below)).await);
+    let first_id = first.client_id();
+    drop(first);
+    // Son départ retire l'état : l'horloge du client est maintenant la dernière.
+    assert!(sees(&carol, SPARE_CLIENT, None).await);
+    page_survives_the_departure(&carol, &writer, &block, first_id, "un").await;
+
+    // Second passage : le même client, annoncé de nouveau (sans effet : son horloge ne peut
+    // plus monter), puis un second départ.
+    let second = Client::connect_synced(&f.url_for(reader(account))).await;
+    let second_id = second.client_id();
+    second.send_raw(awareness_message(&[
+        (SPARE_CLIENT, 7, &named("De retour")),
+        (second_id, 1, &named("Mallory, encore")),
+    ]));
+    assert!(sees(&carol, second_id, Some(&named("Mallory, encore"))).await);
+    assert!(still_served(&second).await);
+    drop(second);
+    page_survives_the_departure(&carol, &writer, &block, second_id, "deux").await;
+    assert_eq!(state_of(&carol, SPARE_CLIENT), None);
+}

@@ -52,6 +52,15 @@ const MAX_AWARENESS_STATE: usize = 64 * 1024;
 /// L'état (JSON) d'une entrée d'awareness qui retire celui du client.
 const AWARENESS_REMOVED: &str = "null";
 
+/// La dernière horloge qu'un état d'awareness peut porter (Ruling R108). yrs
+/// incrémente l'horloge d'un client quand il retire son état
+/// (`Awareness::remove_state`, au départ de la connexion qui le tenait), sans
+/// regarder si elle peut encore l'être : à cette valeur, l'addition déborde.
+/// L'acteur panique dans un build de développement, et toutes les connexions
+/// de la page se ferment ; en release, l'horloge repart de zéro. Une horloge
+/// honnête, qui avance d'un cran par changement d'état, n'y arrive jamais.
+const LAST_AWARENESS_CLOCK: u32 = u32::MAX;
+
 /// Message diffusé aux connexions de la page.
 pub(crate) struct Broadcast {
     /// Connexion d'origine, qui ne le reçoit pas ; `None` : toutes le reçoivent.
@@ -629,10 +638,18 @@ impl Actor {
         };
         // Leurs états sont retirés ; un client que tient aussi une autre connexion (du même
         // compte : l'onglet est revenu entre-temps) reste annoncé.
+        //
+        // Ruling R108 : un client déjà à la dernière horloge est laissé tel quel. Il n'a plus
+        // d'état à retirer (aucune entrée n'est appliquée à cette horloge : il n'y est arrivé
+        // que par un retrait), et yrs ne peut plus la lui incrémenter.
         let ids: Vec<ClientID> = gone
             .clients
             .into_iter()
             .filter(|id| !self.conns.values().any(|c| c.clients.contains(id)))
+            .filter(|id| {
+                let clock = self.awareness.meta(*id).map(|(clock, _)| clock);
+                clock.is_none_or(|clock| clock < LAST_AWARENESS_CLOCK)
+            })
             .collect();
         if ids.is_empty() {
             return;
@@ -775,6 +792,11 @@ impl Actor {
         let received = update.clients.len();
         let mut taken = Vec::new();
         update.clients.retain(|client, entry| {
+            // Ruling R108 : une entrée à la dernière horloge est ignorée, quoi qu'elle porte.
+            // Elle ne donne pas non plus le client à la connexion.
+            if entry.clock == LAST_AWARENESS_CLOCK {
+                return false;
+            }
             let removal = entry.json.as_ref() == AWARENESS_REMOVED;
             match presence_rule(&self.conns, account, *client, removal) {
                 Presence::Ignored => false,

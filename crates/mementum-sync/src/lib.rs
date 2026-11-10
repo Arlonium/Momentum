@@ -43,7 +43,10 @@
 //!   connexion inscrite qui l'annonce, jusqu'à son départ : une entrée qui
 //!   vise le client d'un autre compte est ignorée avant d'être appliquée,
 //!   sans fermer la connexion (y-websocket renvoie au serveur les états des
-//!   autres) ; le même compte le reprend d'une connexion à l'autre ;
+//!   autres) ; le même compte le reprend d'une connexion à l'autre. Une
+//!   entrée à la dernière horloge (`u32::MAX`) est ignorée de même, et un
+//!   départ ne compte plus rien pour un client qui y est déjà (Ruling R108) :
+//!   yrs, qui incrémente l'horloge d'un client à son départ, y déborderait ;
 //! - **entretien** (Ruling R107) : une connexion à qui rien n'a été envoyé
 //!   depuis [`SyncConfig::keepalive_after`] reçoit une mise à jour de présence
 //!   vide, sans passer par l'acteur. Sans elle, y-websocket, qui ferme sa
