@@ -20,6 +20,7 @@ import type {
   InvitationCreated,
   InviteRole,
   InviteToSpace,
+  Level,
   Me,
   Member,
   PageNode,
@@ -281,6 +282,20 @@ export async function memberOf(
     role,
   });
   return signUpAccount(name, token);
+}
+
+/**
+ * Donne à un compte de l'espace le niveau `level` sur la page, et sur ses sous-pages par
+ * héritage (`PUT /api/v1/pages/{id}/access/users/{userId}`). `api` doit y avoir l'accès complet.
+ */
+export async function setPageLevel(
+  api: APIRequestContext,
+  pageId: string,
+  userId: string,
+  level: Level,
+): Promise<void> {
+  const res = await api.put(`/api/v1/pages/${pageId}/access/users/${userId}`, { data: { level } });
+  expect(res.status(), await res.text()).toBe(200);
 }
 
 /** La barre latérale de l'application. */

@@ -20,6 +20,7 @@ import {
   openRowMenu,
   pageIdOf,
   sectionOf,
+  setPageLevel,
   shownRows,
   sidebarOf,
   signUpAccount,
@@ -756,4 +757,103 @@ test("drop_target_is_shown_while_dragging", async ({ browser }) => {
   await expect(line).toHaveCount(0);
   expect(await shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "1 Charlie"]);
   expect((await getTree(api, space.id)).nodes).toEqual(before);
+});
+
+/** Deux comptes dans le même espace : A, sa propriétaire, et B, simple membre. */
+async function ownerAndMember() {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const bruno = await memberOf(alice, space.id, `Bruno ${unique()}`);
+  const brunoApi = await apiAs(bruno);
+  const { user } = await getMe(brunoApi);
+  return { alice, aliceApi, space, bruno, brunoApi, brunoId: user.id };
+}
+
+test("page_one_can_only_read_offers_no_action", async ({ browser }) => {
+  const { aliceApi, space, bruno, brunoApi, brunoId } = await ownerAndMember();
+  // Deux pages privées de A, partagées avec B : l'une en lecture, l'autre en modification.
+  const read = await createPage(aliceApi, { section: "private", title: "À lire" });
+  const sub = await createPage(aliceApi, { parentId: read.id, title: "Annexe" });
+  const edit = await createPage(aliceApi, { section: "private", title: "À modifier" });
+  await setPageLevel(aliceApi, read.id, brunoId, "read");
+  await setPageLevel(aliceApi, edit.id, brunoId, "edit");
+  const seen = byPosition((await getTree(brunoApi, space.id)).nodes).map((n) => [n.title, n.level, n.section]);
+  expect(seen).toEqual(
+    expect.arrayContaining([
+      ["À lire", "read", "shared"],
+      ["Annexe", "read", "shared"],
+      ["À modifier", "edit", "shared"],
+    ]),
+  );
+  const before = await getTree(brunoApi, space.id);
+
+  const b = await newUser(browser, bruno);
+  await b.goto(`/s/${space.id}`);
+  const shared = sectionOf(b, "Partagé");
+  await expect(shared.getByRole("treeitem")).toHaveCount(3);
+
+  // En lecture, et sa sous-page avec elle : ni « … », ni « + », ni saisie pour la glisser.
+  for (const [id, title] of [
+    [read.id, "À lire"],
+    [sub.id, "Annexe"],
+  ]) {
+    const row = treeRow(b, id);
+    await row.hover();
+    await expect(row.getByRole("link")).toHaveText(title);
+    await expect(row.getByRole("button", { name: /^Actions de/ })).toHaveCount(0);
+    await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toHaveCount(0);
+    await expect(row).not.toHaveAttribute("draggable", "true");
+  }
+  // Seul le repli d'une page qui a des sous-pages reste : il ne change rien sur le serveur.
+  await expect(treeRow(b, read.id).getByRole("button")).toHaveCount(1);
+  await expect(treeRow(b, sub.id).getByRole("button")).toHaveCount(0);
+
+  // En modification : les deux boutons, et la ligne se saisit.
+  const editable = treeRow(b, edit.id);
+  await editable.hover();
+  await expect(editable.getByRole("button", { name: "Actions de « À modifier »" })).toBeVisible();
+  await expect(
+    editable.getByRole("button", { name: "Ajouter une sous-page à « À modifier »" }),
+  ).toBeVisible();
+  await expect(editable).toHaveAttribute("draggable", "true");
+
+  // Glisser quand même la page en lecture (par son lien, qui se glisse comme tout lien) ne
+  // la déplace pas, et rien ne s'y dépose : ni dans une autre page, ni dans sa sous-page.
+  await treeRow(b, read.id).dragTo(editable);
+  await treeRow(b, sub.id).dragTo(editable);
+  await b.waitForTimeout(300);
+  expect(await getTree(brunoApi, space.id)).toEqual(before);
+  await expect(sidebarOf(b).getByRole("alert")).toHaveCount(0);
+});
+
+test("delete_forever_needs_full_access", async ({ browser }) => {
+  const { alice, aliceApi, space, bruno, brunoApi, brunoId } = await ownerAndMember();
+  const shared = await createPage(aliceApi, { section: "private", title: "Brouillon commun" });
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+
+  // B, qui peut la modifier, la met à la corbeille depuis sa barre latérale.
+  const b = await newUser(browser, bruno);
+  await b.goto(`/s/${space.id}`);
+  await (await openRowMenu(b, shared.id, "Brouillon commun"))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  await expect(treeRow(b, shared.id)).toHaveCount(0);
+
+  // Dans sa corbeille : « Restaurer », pas « Supprimer définitivement », que le serveur lui
+  // refuserait.
+  await sidebarOf(b).getByRole("link", { name: "Corbeille" }).click();
+  const mine = trashItem(b, "Brouillon commun");
+  await expect(mine.getByRole("button", { name: "Restaurer" })).toBeVisible();
+  await expect(mine.getByRole("button", { name: "Supprimer définitivement" })).toHaveCount(0);
+  await expect(mine.getByRole("button")).toHaveCount(1);
+  const refused = await brunoApi.delete(`/api/v1/pages/${shared.id}`);
+  expect(refused.status()).toBe(403);
+
+  // A, en accès complet, a les deux.
+  const a = await newUser(browser, alice);
+  await a.goto(`/s/${space.id}/trash`);
+  const hers = trashItem(a, "Brouillon commun");
+  await expect(hers.getByRole("button", { name: "Restaurer" })).toBeVisible();
+  await expect(hers.getByRole("button", { name: "Supprimer définitivement" })).toBeVisible();
 });
