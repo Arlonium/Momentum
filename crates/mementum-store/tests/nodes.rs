@@ -1085,6 +1085,50 @@ async fn last_goes_after_the_last_sibling() {
     assert_eq!(titles(store, space, Some(c.id)).await, ["B"]);
 }
 
+/// Des créations simultanées en fin des mêmes frères (`Sibling::Last`) prennent chacune sa
+/// position : le dernier frère est cherché dans la transaction qui écrit, et ces transactions
+/// passent l'une après l'autre. Cherché avant, il serait le même pour toutes, et elles
+/// recevraient la même position.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_creations_at_the_end_take_distinct_positions() {
+    const CREATIONS: usize = 8;
+    let f = fresh().await;
+    let (store, space) = (&f.store, &f.space);
+    let parent = store
+        .create_node(page(space, None, None, "Parent"))
+        .await
+        .unwrap();
+    // Sous une page, puis à la racine, où « Parent » est déjà.
+    for (under, already_there) in [(Some(parent.id), 0), (None, 1)] {
+        let creations: Vec<_> = (0..CREATIONS)
+            .map(|i| {
+                let store = store.clone();
+                let mut node = page(space, under, None, &format!("Page {i}"));
+                node.after = Some(Sibling::Last);
+                tokio::spawn(async move { store.create_node(node).await })
+            })
+            .collect();
+        let mut positions = Vec::new();
+        for creation in creations {
+            let node = creation.await.unwrap().unwrap();
+            positions.push(node.position);
+        }
+        positions.sort();
+        let created = positions.clone();
+        positions.dedup();
+        assert_eq!(positions, created, "une position par création");
+        // Toutes en fin : après ce qui était là, et l'arbre les range toutes.
+        let siblings = store.list_nodes(space.id).await.unwrap();
+        let siblings: Vec<_> = siblings
+            .iter()
+            .filter(|n| n.parent_id == under)
+            .map(|n| n.position.clone())
+            .collect();
+        assert_eq!(siblings.len(), already_there + CREATIONS);
+        assert_eq!(siblings[already_there..], created[..]);
+    }
+}
+
 /// Un déplacement vers la place où le nœud est déjà n'écrit rien : ni date, ni auteur, ni
 /// révision. Avec un titre, seul le titre est écrit.
 #[tokio::test]
