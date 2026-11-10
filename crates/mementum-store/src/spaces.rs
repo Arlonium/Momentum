@@ -49,7 +49,7 @@ pub(crate) async fn bump_rev(
 }
 
 /// Écrit un espace neuf, de révision 0, dans la transaction.
-async fn insert_space(
+pub(crate) async fn insert_space(
     tx: &mut Transaction<'_, Sqlite>,
     name: &str,
     created_by: Option<Uuid>,

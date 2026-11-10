@@ -162,6 +162,61 @@ async fn raise_level(
     Ok(true)
 }
 
+/// L'invitation de ce jeton, lue dans la transaction, si elle peut encore être acceptée à
+/// `now` (voir `acceptable!`) ; sinon `None`.
+pub(crate) async fn acceptable(
+    tx: &mut Transaction<'_, Sqlite>,
+    token_hash: [u8; 32],
+    now: i64,
+) -> Result<Option<Invitation>, StoreError> {
+    sqlx::query(concat!(
+        "SELECT ",
+        invitation_columns!(),
+        " FROM invitations WHERE token_hash = ? AND ",
+        acceptable!()
+    ))
+    .bind(&token_hash[..])
+    .bind(now)
+    .fetch_optional(&mut **tx)
+    .await?
+    .as_ref()
+    .map(invitation_from_row)
+    .transpose()
+}
+
+/// Donne au compte ce que donne l'invitation (lue par [`acceptable`] dans la même
+/// transaction), sans rien abaisser, puis la marque acceptée ; la révision de l'espace bouge
+/// si un droit a été écrit. `NotFound` si le compte n'existe pas.
+pub(crate) async fn accept(
+    tx: &mut Transaction<'_, Sqlite>,
+    invitation: &Invitation,
+    user_id: Uuid,
+    now: i64,
+) -> Result<(), StoreError> {
+    let user = user_id.to_string();
+    let space = invitation.space_id.to_string();
+    let wrote = match invitation.grant {
+        InvitationGrant::Space(role) => raise_role(tx, &space, &user, role).await?,
+        InvitationGrant::Page { node_id, level } => {
+            let joined = raise_role(tx, &space, &user, Role::Guest).await?;
+            let raised =
+                raise_level(tx, &node_id.to_string(), Subject::User(user_id), level).await?;
+            joined || raised
+        }
+    };
+    sqlx::query("UPDATE invitations SET accepted_at = ?, accepted_by = ? WHERE id = ?")
+        .bind(now)
+        .bind(&user)
+        .bind(invitation.id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(StoreError::from_fk)?;
+    if wrote {
+        bump_rev(tx, &space).await?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// Crée une invitation. `NotFound` (sans rien écrire) si l'espace ou l'auteur n'existe pas,
     /// ou si la page d'une invitation de page n'est pas un nœud de cet espace. Une invitation
@@ -248,41 +303,11 @@ impl Store {
         user_id: Uuid,
         now: i64,
     ) -> Result<Invitation, StoreError> {
-        let user = user_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query(concat!(
-            "SELECT ",
-            invitation_columns!(),
-            " FROM invitations WHERE token_hash = ? AND ",
-            acceptable!()
-        ))
-        .bind(&token_hash[..])
-        .bind(now)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(StoreError::NotFound)?;
-        let invitation = invitation_from_row(&row)?;
-        let space = invitation.space_id.to_string();
-        let wrote = match invitation.grant {
-            InvitationGrant::Space(role) => raise_role(&mut tx, &space, &user, role).await?,
-            InvitationGrant::Page { node_id, level } => {
-                let joined = raise_role(&mut tx, &space, &user, Role::Guest).await?;
-                let raised =
-                    raise_level(&mut tx, &node_id.to_string(), Subject::User(user_id), level)
-                        .await?;
-                joined || raised
-            }
-        };
-        sqlx::query("UPDATE invitations SET accepted_at = ?, accepted_by = ? WHERE id = ?")
-            .bind(now)
-            .bind(&user)
-            .bind(invitation.id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(StoreError::from_fk)?;
-        if wrote {
-            bump_rev(&mut tx, &space).await?;
-        }
+        let invitation = acceptable(&mut tx, token_hash, now)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        accept(&mut tx, &invitation, user_id, now).await?;
         tx.commit().await?;
         Ok(invitation)
     }

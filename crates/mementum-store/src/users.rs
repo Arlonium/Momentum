@@ -6,8 +6,8 @@
 
 use std::fmt;
 
-use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
+use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
 use crate::{Store, StoreError, now_ms, parse_uuid};
@@ -82,42 +82,56 @@ fn user_from_row(r: &SqliteRow) -> Result<User, StoreError> {
     })
 }
 
+/// Écrit un compte neuf dans la transaction (ouverte par `BEGIN IMMEDIATE` : deux créations
+/// concurrentes ne voient pas toutes deux une base vide). Le premier compte de l'instance en
+/// devient l'admin. `EmailTaken` si l'adresse, rognée et en minuscules, est déjà prise.
+pub(crate) async fn insert_user(
+    tx: &mut Transaction<'_, Sqlite>,
+    u: NewUser,
+) -> Result<User, StoreError> {
+    let first = sqlx::query("SELECT NOT EXISTS (SELECT 1 FROM users)")
+        .fetch_one(&mut **tx)
+        .await?
+        .get::<bool, _>(0);
+    let user = User {
+        id: Uuid::now_v7(),
+        email: normalize_email(&u.email),
+        name: u.name,
+        password_hash: Some(u.password_hash),
+        instance_admin: first,
+        created_at: now_ms(),
+    };
+    sqlx::query(concat!(
+        "INSERT INTO users (",
+        user_columns!(),
+        ") VALUES (?, ?, ?, ?, ?, ?)"
+    ))
+    .bind(user.id.to_string())
+    .bind(&user.email)
+    .bind(&user.name)
+    .bind(&user.password_hash)
+    .bind(user.instance_admin)
+    .bind(user.created_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| match &e {
+        sqlx::Error::Database(d) if d.is_unique_violation() => StoreError::EmailTaken,
+        _ => StoreError::Sqlx(e),
+    })?;
+    Ok(user)
+}
+
 impl Store {
     /// Crée un compte. Le premier compte de l'instance en devient l'admin : la question est
     /// tranchée dans la transaction (`BEGIN IMMEDIATE`), pour que deux créations concurrentes
     /// ne voient pas toutes deux une base vide. `EmailTaken` si l'adresse, rognée et en
     /// minuscules, est déjà prise.
+    ///
+    /// Le compte seul : ni espace, ni invitation. Une inscription passe par
+    /// [`Store::sign_up`], qui écrit le tout en une transaction.
     pub async fn create_user(&self, u: NewUser) -> Result<User, StoreError> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let first = sqlx::query("SELECT NOT EXISTS (SELECT 1 FROM users)")
-            .fetch_one(&mut *tx)
-            .await?
-            .get::<bool, _>(0);
-        let user = User {
-            id: Uuid::now_v7(),
-            email: normalize_email(&u.email),
-            name: u.name,
-            password_hash: Some(u.password_hash),
-            instance_admin: first,
-            created_at: now_ms(),
-        };
-        sqlx::query(concat!(
-            "INSERT INTO users (",
-            user_columns!(),
-            ") VALUES (?, ?, ?, ?, ?, ?)"
-        ))
-        .bind(user.id.to_string())
-        .bind(&user.email)
-        .bind(&user.name)
-        .bind(&user.password_hash)
-        .bind(user.instance_admin)
-        .bind(user.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(d) if d.is_unique_violation() => StoreError::EmailTaken,
-            _ => StoreError::Sqlx(e),
-        })?;
+        let user = insert_user(&mut tx, u).await?;
         tx.commit().await?;
         Ok(user)
     }

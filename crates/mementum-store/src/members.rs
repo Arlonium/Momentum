@@ -126,6 +126,42 @@ pub(crate) async fn raise_role(
     Ok(true)
 }
 
+/// Fait le compte `owner` de tout espace qui n'a aucun membre, dans la transaction, et rend ces
+/// espaces, par date de création, à leur révision nouvelle. `NotFound` si le compte n'existe
+/// pas et qu'il y avait un espace à prendre.
+pub(crate) async fn adopt_orphans(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: Uuid,
+) -> Result<Vec<Space>, StoreError> {
+    let user = user_id.to_string();
+    let mut spaces = sqlx::query(
+        "SELECT id, name, rev, created_at FROM spaces s \
+         WHERE NOT EXISTS (SELECT 1 FROM members m WHERE m.space_id = s.id) \
+         ORDER BY created_at, id",
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    .iter()
+    .map(space_from_row)
+    .collect::<Result<Vec<_>, _>>()?;
+    let now = now_ms();
+    for space in &mut spaces {
+        let id = space.id.to_string();
+        sqlx::query(
+            "INSERT INTO members (space_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
+        )
+        .bind(&id)
+        .bind(&user)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(StoreError::from_fk)?;
+        bump_rev(tx, &id).await?;
+        space.rev += 1;
+    }
+    Ok(spaces)
+}
+
 /// Ruling R70, dans la transaction de [`Store::remove_member`], une fois la personne qui part
 /// retirée de `members` et ses lignes partagées retirées : sur toute page dont elle était le
 /// dernier sujet en `full` (`had_full` : les pages où elle avait une ligne `full` ; le `full`
@@ -421,33 +457,8 @@ impl Store {
     /// et rend ces espaces, par date de création, à leur révision nouvelle. `NotFound` (sans
     /// rien écrire) si le compte n'existe pas et qu'il y avait un espace à prendre.
     pub async fn adopt_orphan_spaces(&self, user_id: Uuid) -> Result<Vec<Space>, StoreError> {
-        let user = user_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut spaces = sqlx::query(
-            "SELECT id, name, rev, created_at FROM spaces s \
-             WHERE NOT EXISTS (SELECT 1 FROM members m WHERE m.space_id = s.id) \
-             ORDER BY created_at, id",
-        )
-        .fetch_all(&mut *tx)
-        .await?
-        .iter()
-        .map(space_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-        let now = now_ms();
-        for space in &mut spaces {
-            let id = space.id.to_string();
-            sqlx::query(
-                "INSERT INTO members (space_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
-            )
-            .bind(&id)
-            .bind(&user)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(StoreError::from_fk)?;
-            bump_rev(&mut tx, &id).await?;
-            space.rev += 1;
-        }
+        let spaces = adopt_orphans(&mut tx, user_id).await?;
         tx.commit().await?;
         Ok(spaces)
     }

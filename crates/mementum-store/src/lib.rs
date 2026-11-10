@@ -8,6 +8,8 @@
 //! - `spaces.rs` : les espaces et leur révision.
 //! - `members.rs` : les rôles dans un espace, le départ, l'adoption des espaces sans membre.
 //! - `invitations.rs` : les invitations dans un espace ou sur une page.
+//! - `signup.rs` : l'inscription (compte, espaces repris, invitation, premier espace), en une
+//!   transaction.
 //! - `nodes.rs` : l'arbre de pages, rangé par positions fractionnaires ; la corbeille.
 //! - `acl.rs` : les accès posés sur les pages.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
@@ -29,6 +31,7 @@ mod invitations;
 mod members;
 mod nodes;
 mod position;
+mod signup;
 mod spaces;
 mod users;
 
@@ -49,6 +52,7 @@ pub use invitations::{Invitation, InvitationGrant, NewInvitation};
 pub use members::{Expected, Member};
 pub use nodes::{NewNode, Node, NodeKind, Place};
 pub use position::position_between;
+pub use signup::SignedUp;
 pub use spaces::Space;
 pub use users::{NewUser, User};
 
