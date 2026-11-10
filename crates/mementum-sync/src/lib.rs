@@ -37,6 +37,13 @@
 //!   que cette lecture précède l'inscription d'aussi peu que possible. Quand
 //!   la page est supprimée, [`Hub::forget`] arrête son acteur sans rien
 //!   écrire ;
+//! - **présence** (awareness, Ruling R101) : relayée à tous, lecteurs
+//!   compris, sans être vérifiée (un client annonce le nom qu'il veut pour
+//!   lui-même). Mais un `ClientID` appartient au compte de la première
+//!   connexion inscrite qui l'annonce, jusqu'à son départ : une entrée qui
+//!   vise le client d'un autre compte est ignorée avant d'être appliquée,
+//!   sans fermer la connexion (y-websocket renvoie au serveur les états des
+//!   autres) ; le même compte le reprend d'une connexion à l'autre ;
 //! - une mise à jour refusée par le document n'est ni gardée ni diffusée :
 //!   l'acteur recharge son document depuis le store et ferme la connexion
 //!   fautive (Rulings R17, R22). C'est aussi le sort de la mise à jour d'un

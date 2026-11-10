@@ -37,11 +37,13 @@ use tokio_tungstenite::tungstenite::Message as TMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use uuid::Uuid;
-use yrs::sync::{Awareness, Message, MessageReader, SyncMessage};
+use yrs::sync::awareness::AwarenessUpdateEntry;
+use yrs::sync::{Awareness, AwarenessUpdate, Message, MessageReader, SyncMessage};
 use yrs::updates::decoder::{Decode, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Doc, ReadTxn, StateVector, Text, Transact, Update, Xml, XmlFragment, XmlOut, XmlTextPrelim,
+    ClientID, Doc, ReadTxn, StateVector, Text, Transact, Update, Xml, XmlFragment, XmlOut,
+    XmlTextPrelim,
 };
 
 use crate::ws::WsBytes;
@@ -538,6 +540,24 @@ impl Client {
 /// Un document yrs comme ceux des navigateurs (`OffsetKind::Utf16`).
 pub fn new_doc() -> Doc {
     crate::utf16_doc()
+}
+
+/// Un message d'awareness écrit à la main, pour [`Client::send_raw`] : `(client, horloge, état
+/// JSON)` pour chaque entrée ; l'état `null` retire celui du client. [`Client::set_awareness`]
+/// n'annonce que l'état du client lui-même, comme un navigateur : c'est ici qu'un test écrit ce
+/// qu'un client renvoie des autres, ou ce qu'un attaquant envoie à leur place.
+pub fn awareness_message(entries: &[(u64, u32, &str)]) -> Vec<u8> {
+    let clients = entries
+        .iter()
+        .map(|&(client, clock, json)| {
+            let entry = AwarenessUpdateEntry {
+                clock,
+                json: json.into(),
+            };
+            (ClientID::new(client), entry)
+        })
+        .collect();
+    Message::Awareness(AwarenessUpdate { clients }).encode_v1()
 }
 
 fn sync_step1(doc: &Doc) -> Vec<u8> {
