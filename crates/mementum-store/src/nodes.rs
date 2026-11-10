@@ -314,6 +314,10 @@ fn root_lines(own: &[Grant], above: &[Grant], mover: Option<Mover>) -> Vec<Grant
 /// l'appelant relise et redécide, si :
 /// - son sujet n'est pas un compte (`members` relèverait l'accès général du nœud au lieu de
 ///   garder celui de sa chaîne) ;
+/// - son niveau n'est pas `full` : c'est lui qui garantit qu'à la racine le nœud garde
+///   quelqu'un pour le gérer (Rulings R70 et R82). Plus bas, le nœud pourrait n'y avoir pour
+///   toute ligne que `(user:<lui>, edit)`. Ce n'est pas une course mais une faute de
+///   l'appelant, refusée de la même façon : rien n'est écrit ;
 /// - ce compte n'a pas de rôle dans l'espace, ou y est invité : la racine est aux membres, et
 ///   une ligne posée pour quelqu'un sans rôle ne donne aucun droit (le nœud pourrait rester
 ///   sans personne en `full`, Ruling R70) ;
@@ -331,6 +335,9 @@ async fn checked_mover(
     let Subject::User(user) = root_grant.subject else {
         return Err(StoreError::Stale);
     };
+    if root_grant.level != Level::Full {
+        return Err(StoreError::Stale);
+    }
     let role = role_of(tx, &chain.space, &user.to_string())
         .await?
         .filter(|role| role.is_member())
@@ -592,19 +599,21 @@ impl Store {
     /// - Ruling R94 : il garde son accès général. La plus forte ligne `members` de l'ancienne
     ///   chaîne devient la sienne ; une page d'équipe reste donc une page de l'équipe, au même
     ///   niveau pour les membres. Sans ligne `members` dans la chaîne, il reste privé ;
-    /// - Ruling R82 : `root_grant` est l'accès que doit y avoir celui qui déplace. Il n'est posé,
-    ///   ou relevé, que si les lignes du nœud ne le lui donnent pas déjà, compte tenu de son rôle
-    ///   dans l'espace ; jamais abaissé. Le nœud a ainsi toujours quelqu'un pour le gérer, sans
-    ///   ligne redondante qui resterait à quelqu'un parti de l'espace ;
+    /// - Ruling R82 : `root_grant` est l'accès que doit y avoir celui qui déplace, toujours
+    ///   `full`. Il n'est posé, ou relevé, que si les lignes du nœud ne le lui donnent pas déjà,
+    ///   compte tenu de son rôle dans l'espace ; jamais abaissé. Le nœud a ainsi toujours
+    ///   quelqu'un pour le gérer, sans ligne redondante qui resterait à quelqu'un parti de
+    ///   l'espace ;
     /// - les lignes nommées des anciens ancêtres ne le suivent pas, et ses autres lignes ne
     ///   changent pas.
     ///
     /// `root_grant` porte aussi la décision de l'appelant : il a lu que ce compte pouvait
     /// passer le nœud à la racine (un membre, qui a ce niveau sur le nœud, hors corbeille). La
     /// transaction le revérifie avant tout le reste, sur l'ancienne chaîne et le rôle relu
-    /// (`checked_mover`) : si ce n'est plus vrai, ou si le sujet de `root_grant` n'est pas un
-    /// compte, rien n'est écrit (`Stale`), et l'appelant relit et redécide. Sans `root_grant`,
-    /// le store ne sait pas qui déplace : il ne vérifie rien, et n'écrit de ligne pour personne.
+    /// (`checked_mover`) : si ce n'est plus vrai, si le sujet de `root_grant` n'est pas un
+    /// compte, ou si son niveau n'est pas `full`, rien n'est écrit (`Stale`), et l'appelant
+    /// relit et redécide. Sans `root_grant`, le store ne sait pas qui déplace : il ne vérifie
+    /// rien, et n'écrit de ligne pour personne.
     ///
     /// Dans tous les autres cas (autre parent, simple place à la racine, titre), aucune ligne
     /// n'est écrite, et `root_grant` est ignoré.

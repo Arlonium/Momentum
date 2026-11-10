@@ -365,20 +365,21 @@ async fn update_node_gives_root_grant_to_a_node_arriving_at_root() {
             "{title}"
         );
     }
-    // Il a déjà l'accès complet : rien ne change. Un accès n'est jamais abaissé.
+    // Il a déjà l'accès complet : rien ne change.
     assert_eq!(
         lines_at_root("Déjà complet", vec![full(user)], Some(full(user))).await,
         [full(user)]
     );
-    assert_eq!(
-        lines_at_root(
-            "Jamais abaissé",
-            vec![full(user)],
-            Some(line(user, Level::Edit))
-        )
-        .await,
-        [full(user)]
-    );
+    // Un accès n'est jamais abaissé : un `root_grant` plus bas que `full` est refusé, sans
+    // rien écrire (voir `move_to_root_is_stale_for_a_root_grant_below_full`).
+    let kept = child("Jamais abaissé", vec![full(user)]).await;
+    let lower = Some(line(user, Level::Edit));
+    let r = store
+        .update_node(kept.id, None, Some(root), Some(user), lower)
+        .await;
+    assert!(matches!(r, Err(StoreError::Stale)), "{r:?}");
+    assert_eq!(store.node_grants(kept.id).await.unwrap(), [full(user)]);
+    assert_eq!(store.get_node(kept.id).await.unwrap(), Some(kept));
     // Les lignes des autres sujets restent telles quelles ; la sienne s'y ajoute.
     let mut lines = lines_at_root(
         "Partagée",
@@ -963,18 +964,12 @@ async fn move_to_root_is_stale_below_full_on_the_old_chain() {
     for id in [page, lower] {
         assert_stale_at_root(&f, id, full(c.member), "ligne baissée").await;
     }
-    // C'est le niveau demandé qui compte : celui qu'il a encore passe, sans rien lui donner
-    // de plus.
-    let root = Place {
-        parent_id: None,
-        after: Some(Sibling::Last),
-        from: None,
-    };
-    f.store
-        .update_node(page, None, Some(root), Some(c.member), Some(edit))
-        .await
-        .unwrap();
-    assert_lines(&f, page, &[edit]).await;
+    // Demander pour lui le niveau qu'il a encore ne passe pas davantage : à la racine, la page
+    // n'aurait plus personne en accès complet (voir
+    // `move_to_root_is_stale_for_a_root_grant_below_full`).
+    for id in [page, lower] {
+        assert_stale_at_root(&f, id, edit, "niveau qu'il a encore").await;
+    }
 
     // La ligne de la page parente retirée : il ne garde, sur cette page-ci, que sa propre ligne
     // en commentaire. (Une page qu'il ne voit plus du tout : le test suivant.)
@@ -1013,6 +1008,40 @@ async fn move_to_root_is_stale_for_a_member_who_no_longer_sees_the_page() {
     // La page reste à sa propriétaire, qui la déplace, elle.
     to_root(&f, page, c.owner).await;
     assert_lines(&f, page, &[full(c.owner)]).await;
+}
+
+/// `root_grant` demande l'accès complet, et rien de moins : c'est lui qui garantit qu'une page
+/// arrivée à la racine a quelqu'un pour la gérer (Rulings R70 et R82). Un niveau plus bas est
+/// refusé, même à qui le tient sur l'ancienne chaîne : sinon une page de racine pourrait n'avoir
+/// pour toute ligne que `(user, edit)`, et plus personne ne pourrait la partager, la déplacer ni
+/// la supprimer.
+#[tokio::test]
+async fn move_to_root_is_stale_for_a_root_grant_below_full() {
+    let f = fresh().await;
+    let c = cast(&f).await;
+    let below_full = [Level::Read, Level::Comment, Level::Edit];
+
+    // Une page privée, partagée entre la propriétaire et un membre qui y a tout.
+    let shared = vec![named(c.owner, Level::Full), named(c.member, Level::Full)];
+    let parent = with_lines(&f, None, "Partagée", shared).await;
+    let page = with_lines(&f, Some(parent), "Page", vec![]).await;
+    for level in below_full {
+        assert_eq!(level_of(&f, page, c.member).await, Some(Level::Full));
+        assert_stale_at_root(&f, page, named(c.member, level), "sous une page partagée").await;
+    }
+    // Une page d'équipe, où il a déjà l'accès complet par l'accès général : la règle ne dépend
+    // pas de ce que la page porterait à la racine.
+    let parent = with_lines(&f, None, "D'équipe", vec![to_members(Level::Full)]).await;
+    let team = with_lines(&f, Some(parent), "Page", vec![]).await;
+    for level in below_full {
+        assert_stale_at_root(&f, team, named(c.member, level), "sous une page d'équipe").await;
+    }
+
+    // Avec l'accès complet, les deux se déplacent, et gardent quelqu'un pour les gérer.
+    for id in [page, team] {
+        to_root(&f, id, c.member).await;
+        assert_still_owned(&f, &c, id, c.member).await;
+    }
 }
 
 /// Une page à la corbeille, elle-même ou par un ancêtre, ne se déplace pas.
