@@ -1,10 +1,14 @@
 // Le compte, en bas de la barre latérale : son nom, et au clic un menu (adresse, « Changer le
 // mot de passe », « Se déconnecter »). Ouvrir le menu relit le compte (`refresh`) : c'est
 // aussi ce qui s'aperçoit d'une session fermée ailleurs, et fait demander la connexion.
+//
+// Au clavier : le menu suit le bouton dans le document (il s'affiche au-dessus), Tab y
+// entre donc depuis le bouton ; ouvert par Entrée ou Espace, il donne le focus à sa première
+// action. Échap le ferme et rend le focus au bouton, comme la fenêtre du mot de passe.
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { changePassword, isSessionLost, logOut } from "../api";
+import { ApiError, changePassword, isSessionLost, logOut } from "../api";
 import { ChevronsIcon, KeyIcon, LogOutIcon } from "../icons";
-import { Field, FormError, messageOf } from "./LoginPage";
+import { Field, FormError, messageOf } from "./forms";
 import { colorOf, useSession } from "./session";
 
 /** Les initiales d'un nom : celles des deux premiers mots, ou la première lettre. */
@@ -35,11 +39,18 @@ export function AccountMenu() {
   const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  /** Le menu vient d'être ouvert au clavier : sa première action prendra le focus. */
+  const focusFirst = useRef(false);
   const menuId = useId();
 
   // Fermé par un clic hors du menu, ou par Échap (le focus revient au bouton).
   useEffect(() => {
     if (!open) return;
+    if (focusFirst.current) {
+      focusFirst.current = false;
+      menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    }
     const onPointerDown = (event: PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
@@ -56,11 +67,13 @@ export function AccountMenu() {
     };
   }, [open]);
 
-  const toggle = () => {
+  /** `byKeyboard` : ouvert par Entrée ou Espace (un clic du clavier n'a pas de `detail`). */
+  const toggle = (byKeyboard: boolean) => {
     if (open) {
       setOpen(false);
       return;
     }
+    focusFirst.current = byKeyboard;
     setOpen(true);
     setError(null);
     // Le compte tel que le serveur le connaît maintenant. Session perdue : la connexion est
@@ -76,8 +89,10 @@ export function AccountMenu() {
       setError(`La déconnexion a échoué. ${messageOf(e)}`);
       return;
     }
-    // Un onglet neuf : plus rien du compte en mémoire, ni page, ni connexion de synchro.
-    location.assign("/login");
+    // Un onglet neuf : plus rien du compte en mémoire, ni page, ni connexion de synchro. À la
+    // place de l'entrée courante : Précédent ne revient pas sur l'application connectée (et
+    // un document gardé par le cache arrière-avant se recharge, `main.tsx`).
+    location.replace("/login");
   };
 
   return (
@@ -89,8 +104,23 @@ export function AccountMenu() {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
       }}
     >
+      <button
+        ref={buttonRef}
+        type="button"
+        className="mm-side-action mm-account-button"
+        // Le nom affiché d'abord, puis ce que fait le bouton.
+        aria-label={`${user.name}, menu du compte`}
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={(event) => toggle(event.detail === 0)}
+      >
+        <Avatar id={user.id} name={user.name} size={22} />
+        <span className="mm-account-label">{user.name}</span>
+        <ChevronsIcon />
+      </button>
+      {/* Après le bouton dans le document, au-dessus de lui à l'écran. */}
       {open && (
-        <div id={menuId} className="mm-account-menu">
+        <div ref={menuRef} id={menuId} className="mm-account-menu">
           <div className="mm-account-who">
             <Avatar id={user.id} name={user.name} size={28} />
             <span className="mm-account-names">
@@ -123,19 +153,16 @@ export function AccountMenu() {
           )}
         </div>
       )}
-      <button
-        ref={buttonRef}
-        type="button"
-        className="mm-side-action mm-account-button"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        onClick={toggle}
-      >
-        <Avatar id={user.id} name={user.name} size={22} />
-        <span className="mm-account-label">{user.name}</span>
-        <ChevronsIcon />
-      </button>
-      {changing && <PasswordDialog email={user.email} onClose={() => setChanging(false)} />}
+      {changing && (
+        <PasswordDialog
+          email={user.email}
+          onClose={() => {
+            setChanging(false);
+            // Le menu d'où elle venait est fermé : le focus revient au bouton du compte.
+            buttonRef.current?.focus();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -153,6 +180,8 @@ function PasswordDialog({ email, onClose }: { email: string; onClose: () => void
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const currentRef = useRef<HTMLInputElement>(null);
+  const nextRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const dialog = ref.current;
@@ -169,7 +198,13 @@ function PasswordDialog({ email, onClose }: { email: string; onClose: () => void
       setDone(true);
     } catch (e) {
       // Session perdue : la connexion est demandée par-dessus ; les champs restent remplis.
-      if (!isSessionLost(e)) setError(messageOf(e));
+      if (!isSessionLost(e)) {
+        setError(messageOf(e));
+        // Le champ à reprendre : le nouveau mot de passe s'il est refusé, sinon l'actuel.
+        const field = e instanceof ApiError && e.code === "invalid_password" ? nextRef : currentRef;
+        field.current?.focus();
+        field.current?.select();
+      }
     } finally {
       setBusy(false);
     }
@@ -203,6 +238,7 @@ function PasswordDialog({ email, onClose }: { email: string; onClose: () => void
             {/* Pour les gestionnaires de mots de passe : le compte dont on change le mot de passe. */}
             <input type="email" name="username" autoComplete="username" value={email} readOnly hidden />
             <Field
+              ref={currentRef}
               label="Mot de passe actuel"
               type="password"
               name="current-password"
@@ -212,6 +248,7 @@ function PasswordDialog({ email, onClose }: { email: string; onClose: () => void
               onChange={(e) => setCurrent(e.target.value)}
             />
             <Field
+              ref={nextRef}
               label="Nouveau mot de passe"
               type="password"
               name="new-password"

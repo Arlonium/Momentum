@@ -1,7 +1,7 @@
 // L'éditeur, chargé à la demande. BlockNote, ProseMirror, TipTap, Mantine et KaTeX font
 // l'essentiel du code de l'application : dans un chunk à part, ils ne retardent ni la
-// barre latérale ni l'arbre des pages. L'application lance ce chargement dès son premier
-// affichage (`App.tsx`), pour qu'il soit fait quand on ouvre une page.
+// barre latérale ni l'arbre des pages. Le point d'entrée lance ce chargement dès le début
+// (`main.tsx`), sans attendre la session, pour qu'il soit fait quand on ouvre une page.
 import { Component, lazy, Suspense, type ComponentProps, type ReactNode } from "react";
 import { WarningIcon } from "../icons";
 

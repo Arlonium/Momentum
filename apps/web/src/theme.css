@@ -15,6 +15,12 @@
   --mm-background: #ffffff;
   --mm-surface: #f4f3ef;
   --mm-border: #e2e0da;
+  /* Bord d'un champ : 3,1:1 sur blanc, le minimum pour la limite d'un composant (WCAG
+     1.4.11). `--mm-border` (1,3:1) reste pour les boutons et les cadres, que leur texte
+     désigne. */
+  --mm-field-border: #949289;
+  /* Voile des fenêtres : le papier, flouté. */
+  --mm-veil: rgba(246, 245, 241, 0.78);
   --mm-sidebar-bg: #f6f5f1;
   --mm-sidebar-border: #e8e6e1;
   --mm-sidebar-hover: #efede8;
@@ -634,7 +640,7 @@ button.tree-toggle:hover {
   min-height: 36px;
   margin: 0;
   padding: 7px 10px;
-  border: 1px solid var(--mm-border);
+  border: 1px solid var(--mm-field-border);
   border-radius: 6px;
   background: #ffffff;
   color: var(--mm-text);
@@ -669,12 +675,14 @@ button.tree-toggle:hover {
   text-transform: uppercase;
 }
 
-/* Fenêtres (élément `dialog`, ouvert par `showModal`) */
+/* Fenêtres (élément `dialog`, ouvert par `showModal`) : un seul dessin pour toutes
+   (reconnexion, mot de passe, confirmation). La page reste visible derrière, sous un voile
+   de papier flouté. */
 
 .mm-dialog {
   width: min(400px, calc(100vw - 32px));
   max-width: none;
-  padding: 22px 24px 20px;
+  padding: 28px 28px 24px;
   border: 1px solid var(--mm-popover-border);
   border-radius: 10px;
   background: #ffffff;
@@ -685,13 +693,16 @@ button.tree-toggle:hover {
 }
 
 .mm-dialog::backdrop {
-  background: rgba(31, 30, 28, 0.28);
+  background: var(--mm-veil);
+  backdrop-filter: blur(2px);
 }
 
 .mm-dialog-title {
   margin: 0 0 6px;
-  font-size: 18px;
-  font-weight: 650;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
   color: var(--mm-text-strong);
 }
 
@@ -701,29 +712,24 @@ button.tree-toggle:hover {
 }
 
 .mm-dialog .mm-auth-form {
-  margin-top: 16px;
+  margin-top: 20px;
 }
 
+/* Les boutons d'une fenêtre ont la hauteur de celui des écrans de session. */
 .mm-dialog-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 4px;
+  margin-top: 20px;
 }
 
-/* Connexion demandée par-dessus la page ouverte : la page reste visible, voilée. */
-.mm-relogin {
-  width: min(380px, calc(100vw - 32px));
-  padding: 28px 28px 24px;
+.mm-auth-form .mm-dialog-actions {
+  margin-top: 2px;
 }
 
-.mm-relogin .mm-auth-form {
-  margin-top: 0;
-}
-
-.mm-relogin::backdrop {
-  background: rgba(246, 245, 241, 0.78);
-  backdrop-filter: blur(2px);
+.mm-dialog-actions .mm-button {
+  min-height: 36px;
+  padding: 6px 14px;
 }
 
 /* Éditeur BlockNote */

@@ -5,7 +5,7 @@
 import type { Me } from "@mementum/protocol";
 import { useState, type FormEvent } from "react";
 import { signUp } from "../api";
-import { AuthScreen, Field, FormError, messageOf, ScreenLink, useDocumentTitle } from "./LoginPage";
+import { AuthScreen, Field, FormError, messageOf, ScreenLink, useDocumentTitle } from "./forms";
 
 /** Ce qu'un autre écran (la page d'invitation) donne à l'inscription. */
 export type SignupRequest = {

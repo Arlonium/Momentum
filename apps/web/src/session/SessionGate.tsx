@@ -22,7 +22,8 @@ import {
 } from "react";
 import { getInfo, getMe, isSessionLost, onSessionLost } from "../api";
 import { navigate, parseRoute, usePathname } from "../router";
-import { AuthScreen, LoginDialog, LoginPage, messageOf } from "./LoginPage";
+import { AuthScreen, messageOf } from "./forms";
+import { LoginDialog, LoginPage } from "./LoginPage";
 import { SessionContext, type Session } from "./session";
 import { SignupPage, type SignupRequest } from "./SignupPage";
 
@@ -40,7 +41,12 @@ export function SessionGate({ children }: { children: ReactNode }) {
   /** Ce qu'un autre écran a demandé à l'inscription (adresse, jeton d'invitation). */
   const [signupRequest, setSignupRequest] = useState<SignupRequest>({});
 
-  const enter = useCallback((me: Me) => setState({ name: "signedIn", me, lost: false }), []);
+  const enter = useCallback((me: Me) => {
+    setState({ name: "signedIn", me, lost: false });
+    // Servie ou non, la demande d'inscription (et son jeton d'invitation) ne survit pas à
+    // l'écran qui l'a reçue.
+    setSignupRequest({});
+  }, []);
 
   const load = useCallback(async () => {
     setState({ name: "loading" });

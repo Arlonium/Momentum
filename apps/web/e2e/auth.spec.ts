@@ -1,5 +1,6 @@
 // Comptes, depuis l'interface : inscription, connexion et déconnexion, mot de passe faux ou
-// changé, présence au nom du compte, et session perdue pendant qu'une page est ouverte.
+// changé, menu du compte au clavier, présence au nom du compte, et session perdue pendant
+// qu'une page est ouverte.
 import { expect, request as apiRequest, test, type Page } from "@playwright/test";
 import type { ErrorBody, Me } from "@mementum/protocol";
 import { colorOf } from "../src/session/session";
@@ -28,9 +29,9 @@ function sidebarOf(p: Page) {
   return p.getByRole("navigation", { name: "Barre latérale" });
 }
 
-/** Le bouton du menu du compte, en bas de la barre latérale. */
+/** Le bouton du menu du compte, en bas de la barre latérale : le nom, puis ce qu'il ouvre. */
 function accountButton(p: Page, name: string) {
-  return sidebarOf(p).getByRole("button", { name, exact: true });
+  return sidebarOf(p).getByRole("button", { name: `${name}, menu du compte`, exact: true });
 }
 
 const loginHeading = (p: Page) => p.getByRole("heading", { name: "Se connecter" });
@@ -127,7 +128,7 @@ test("wrong_password_shows_the_server_message", async ({ page, request }) => {
   expect((await page.request.get("/api/v1/me")).status()).toBe(401);
 });
 
-test("change_password_then_old_one_fails", async ({ browser, page }) => {
+test("change_password_then_old_one_fails", async ({ browser, page, request }) => {
   const account = await signUpAccount();
   // Une autre session du même compte (un autre appareil).
   const other = await apiAs(account);
@@ -147,17 +148,22 @@ test("change_password_then_old_one_fails", async ({ browser, page }) => {
   await expect(dialog).toBeVisible();
 
   // Mot de passe actuel faux : le message du serveur ; ce `401` n'est pas une session perdue.
-  await dialog.getByLabel("Mot de passe actuel").fill("pas-le-bon-mot-de-passe");
+  // Le focus revient au champ à reprendre.
+  const current = dialog.getByLabel("Mot de passe actuel");
+  await current.fill("pas-le-bon-mot-de-passe");
   await dialog.getByLabel("Nouveau mot de passe").fill(NEW_PASSWORD);
   await dialog.getByLabel("Nouveau mot de passe").press("Enter");
   await expect(dialog.getByRole("alert")).toHaveText(body.message);
+  await expect(current).toBeFocused();
   await expect(p.getByRole("dialog", { name: "Ta session a pris fin" })).toHaveCount(0);
 
-  await dialog.getByLabel("Mot de passe actuel").fill(account.password);
+  await current.fill(account.password);
   await dialog.getByLabel("Nouveau mot de passe").press("Enter");
   await expect(dialog.getByText("Mot de passe changé.")).toBeVisible();
   await dialog.getByRole("button", { name: "Fermer" }).click();
   await expect(dialog).toHaveCount(0);
+  // Le menu d'où venait la fenêtre est fermé : le focus revient au bouton du compte.
+  await expect(accountButton(p, account.name)).toBeFocused();
 
   // L'onglet garde sa session (le serveur lui a donné un cookie neuf) ; l'autre est fermée.
   await p.reload();
@@ -165,12 +171,44 @@ test("change_password_then_old_one_fails", async ({ browser, page }) => {
   expect((await meOf(p)).user.email).toBe(account.email);
   expect((await other.get("/api/v1/me")).status()).toBe(401);
 
-  // L'ancien mot de passe ne connecte plus ; le nouveau, si.
+  // L'ancien mot de passe ne connecte plus, avec le message de la connexion refusée ; le
+  // nouveau, si.
+  const loginRefused = await request.post("/api/v1/auth/login", {
+    data: { email: account.email, password: account.password },
+  });
+  expect(loginRefused.status()).toBe(401);
+  const loginBody = (await loginRefused.json()) as ErrorBody;
+  expect(loginBody.error).toBe("invalid_credentials");
   await page.goto("/login");
   await logInWith(page, account.email, account.password);
-  await expect(page.getByRole("alert")).toHaveText(body.message);
+  await expect(page.getByRole("alert")).toHaveText(loginBody.message);
   await logInWith(page, account.email, NEW_PASSWORD);
   await expect(accountButton(page, account.name)).toBeVisible();
+});
+
+test("account_menu_by_keyboard", async ({ browser }) => {
+  const account = await signUpAccount();
+  const p = await newUser(browser, account);
+  await p.goto("/");
+  const button = accountButton(p, account.name);
+  await button.focus();
+  // Ouvert par Entrée : la première action a le focus.
+  await p.keyboard.press("Enter");
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+  await expect(p.getByRole("button", { name: "Changer le mot de passe" })).toBeFocused();
+  // Tab passe à l'action suivante, menu ouvert ; Échap le ferme et rend le focus au bouton.
+  await p.keyboard.press("Tab");
+  await expect(p.getByRole("button", { name: "Se déconnecter" })).toBeFocused();
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+  await p.keyboard.press("Escape");
+  await expect(button).toHaveAttribute("aria-expanded", "false");
+  await expect(button).toBeFocused();
+  // Depuis le bouton, Tab entre dans le menu ouvert à la souris, sans le fermer.
+  await button.click();
+  await expect(button).toHaveAttribute("aria-expanded", "true");
+  await p.keyboard.press("Tab");
+  await expect(p.getByRole("button", { name: "Changer le mot de passe" })).toBeFocused();
+  await expect(button).toHaveAttribute("aria-expanded", "true");
 });
 
 test("presence_carries_the_account_name", async ({ browser }) => {
@@ -230,6 +268,8 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
 
   await logInWith(dialog, account.email, account.password);
   await expect(dialog).toHaveCount(0);
+  // Le focus revient où il était avant la fenêtre : le bouton du compte.
+  await expect(accountButton(p, account.name)).toBeFocused();
   // La même page, le même éditeur, qui s'édite toujours.
   expect(await marked()).toBe(true);
   await expect(editor).toContainText("Écrit avant la coupure");
