@@ -279,6 +279,10 @@ async fn check_sharer(
 impl Store {
     /// Tous les accès posés dans l'espace, corbeille comprise : `(nœud, accès)`, triés par
     /// nœud puis par sujet.
+    ///
+    /// Ne sert plus qu'aux tests, qui y lisent toutes les lignes d'un espace : le serveur les
+    /// lit avec le reste de ce dont se calculent les accès, en une transaction
+    /// ([`Store::access_inputs`]).
     pub async fn space_grants(&self, space_id: Uuid) -> Result<Vec<(Uuid, Grant)>, StoreError> {
         sqlx::query(
             "SELECT a.node_id, a.subject, a.level FROM acl a \
