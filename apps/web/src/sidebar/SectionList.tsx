@@ -249,8 +249,8 @@ export function SectionList({
     const moves: [label: string, icon: ReactNode, drop: Drop | null][] = [
       ["Déplacer vers le haut", <ArrowUpIcon />, stepTarget(menuRows, id, "up")],
       ["Déplacer vers le bas", <ArrowDownIcon />, stepTarget(menuRows, id, "down")],
-      ["Imbriquer dans la page précédente", <NestIcon />, nestTarget(menuRows, id)],
-      ["Sortir de la page parente", <UnnestIcon />, unnestTarget(menuRows, id)],
+      ["Imbriquer dans la page précédente", <NestIcon />, nestTarget(menuRows, id, role)],
+      ["Sortir de la page parente", <UnnestIcon />, unnestTarget(menuRows, id, role)],
     ];
     for (const [label, icon, drop] of moves) {
       actions.push({
@@ -285,6 +285,7 @@ export function SectionList({
           key={section}
           section={section}
           nodes={groups[section]}
+          role={role}
           collapsed={collapsed}
           open={!closed.includes(section)}
           viewport={viewport}
@@ -320,6 +321,7 @@ type BlockProps = {
   section: Section;
   /** Les pages de la section. */
   nodes: PageNode[];
+  role: Role;
   collapsed: ReadonlySet<string>;
   open: boolean;
   viewport: Viewport | null;
@@ -341,6 +343,7 @@ type BlockProps = {
 function SectionBlock({
   section,
   nodes,
+  role,
   collapsed,
   open,
   viewport,
@@ -400,6 +403,7 @@ function SectionBlock({
             id={bodyId}
             label={label}
             nodes={nodes}
+            role={role}
             rows={rows}
             viewport={viewport}
             activeId={activeId}

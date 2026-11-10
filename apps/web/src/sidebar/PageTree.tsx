@@ -9,7 +9,7 @@
 // après une page dépliée, c'est sous sa dernière sous-page). Un dépôt refusé ne montre rien,
 // et le pointeur le dit. Les autres arbres n'acceptent pas ce dépôt : une
 // page ne change pas de section à la souris.
-import type { PageNode } from "@mementum/protocol";
+import type { PageNode, Role } from "@mementum/protocol";
 import { useLayoutEffect, useMemo, useRef, useState, type DragEvent, type RefObject } from "react";
 import { canEdit } from "../share/levels";
 import { dropTarget, zonesAt, type Drop, type Zone } from "./drag";
@@ -30,6 +30,8 @@ type Props = {
   label: string;
   /** Les pages de la section. */
   nodes: PageNode[];
+  /** Le rôle de la personne dans l'espace : il dit où une page peut être déposée (`drag.ts`). */
+  role: Role;
   /** Les lignes de l'arbre, de haut en bas (`flattenRows` de `nodes`, sans les repliées). */
   rows: Row[];
   /** La barre latérale, où l'arbre défile ; `null` : pas encore dans le document. */
@@ -72,6 +74,7 @@ export function PageTree({
   id,
   label,
   nodes,
+  role,
   rows,
   viewport,
   activeId,
@@ -117,7 +120,7 @@ export function PageTree({
     const shown = rows.find((row) => row.node.id === under.id);
     if (index < 0 || shown === undefined) return null;
     for (const zone of zonesAt(under.offset, under.height, shown)) {
-      const drop = dropTarget(all, dragged, index, zone);
+      const drop = dropTarget(all, dragged, index, zone, role);
       if (drop !== null) return { id: under.id, zone, drop };
     }
     return null;

@@ -8,10 +8,13 @@
 // sœurs demande de pouvoir modifier la page (`edit`) ; changer de page parente demande l'accès
 // complet à la page (`full`) et de pouvoir modifier la nouvelle page parente.
 //
-// Un déplacement reste dans sa section. Une sous-page passée à la racine ne garde que l'accès
-// de qui la déplace : elle devient privée. Dans « Privé », elle reste donc dans sa section ;
-// dans « Espace » ou « Partagé », elle en changerait, et disparaîtrait pour les autres :
-// c'est refusé ici. Changer une page de section passera par le menu Partager.
+// Un déplacement reste dans sa section. Une sous-page passée à la racine garde l'accès général
+// qu'elle avait, perd les accès nommés sur son ancienne page parente, et qui la déplace y
+// garde l'accès complet (Rulings R82 et R94). Dans « Privé » comme dans « Espace », elle reste
+// donc dans sa section ; à la racine de « Espace », il faut être membre de l'espace, le serveur
+// l'exige. Dans « Partagé », elle en changerait, et disparaîtrait pour les autres : c'est
+// refusé ici. Une page change de section par le menu Partager (son accès général).
+import type { Role } from "@mementum/protocol";
 import { canEdit } from "../share/levels";
 import type { Row } from "./rows";
 
@@ -44,8 +47,11 @@ function childrenOf(placed: Placed[], parent: string | null): string[] {
   return placed.filter((p) => p.parent === parent).map((p) => p.row.node.id);
 }
 
-/** Le dépôt est-il permis, pour la page de `from` ? Il doit aussi changer quelque chose. */
-function allowed(placed: Placed[], from: Placed, drop: Drop): boolean {
+/**
+ * Le dépôt est-il permis, pour la page de `from` et une personne qui a le rôle `role` dans
+ * l'espace ? Il doit aussi changer quelque chose.
+ */
+function allowed(placed: Placed[], from: Placed, drop: Drop, role: Role): boolean {
   const { node } = from.row;
   // Même changer de place demande de pouvoir modifier la page.
   if (!canEdit(node.level)) return false;
@@ -53,19 +59,28 @@ function allowed(placed: Placed[], from: Placed, drop: Drop): boolean {
   const before = siblings[siblings.indexOf(node.id) - 1] ?? null;
   if (drop.parentId === from.parent) return drop.afterId !== before;
   if (node.level !== "full") return false;
-  // À la racine : seule une page privée reste dans sa section.
-  if (drop.parentId === null) return node.section === "private";
+  // À la racine : une page privée reste privée, et une page de « Espace » y reste (R94), pour
+  // un membre de l'espace. Une page de « Partagé » changerait de section.
+  if (drop.parentId === null) {
+    return node.section === "private" || (node.section === "space" && role !== "guest");
+  }
   const parent = placed.find((p) => p.row.node.id === drop.parentId);
   return parent !== undefined && canEdit(parent.row.node.level);
 }
 
 /**
  * Où irait la page `dragged`, lâchée sur la zone `zone` de la ligne de rang `overIndex` ?
- * `rows` : toutes les lignes de l'arbre de sa section, dépliées. `null` : dépôt refusé (sur
- * elle-même ou sous une de ses descendantes, au-dessus de son niveau, hors de sa section), ou
- * qui ne changerait rien.
+ * `rows` : toutes les lignes de l'arbre de sa section, dépliées ; `role` : le rôle de la
+ * personne dans l'espace. `null` : dépôt refusé (sur elle-même ou sous une de ses descendantes,
+ * au-dessus de son niveau, hors de sa section), ou qui ne changerait rien.
  */
-export function dropTarget(rows: Row[], dragged: string, overIndex: number, zone: Zone): Drop | null {
+export function dropTarget(
+  rows: Row[],
+  dragged: string,
+  overIndex: number,
+  zone: Zone,
+  role: Role,
+): Drop | null {
   const placed = place(rows);
   const from = placed.find((p) => p.row.node.id === dragged);
   const over = placed[overIndex];
@@ -86,7 +101,7 @@ export function dropTarget(rows: Row[], dragged: string, overIndex: number, zone
     const before = siblings[siblings.indexOf(target) - 1] ?? null;
     drop = { parentId: over.parent, afterId: zone === "after" ? target : before };
   }
-  return allowed(placed, from, drop) ? drop : null;
+  return allowed(placed, from, drop, role) ? drop : null;
 }
 
 /**
@@ -115,8 +130,8 @@ export function stepTarget(rows: Row[], id: string, direction: "up" | "down"): D
   // Vers le haut : avant la sœur qui précède, donc après celle d'encore avant.
   const after = direction === "up" ? siblings[at - 2] ?? null : siblings[at + 1];
   if (direction === "up" ? at === 0 : after === undefined) return null;
-  const drop = { parentId: from.parent, afterId: after ?? null };
-  return allowed(placed, from, drop) ? drop : null;
+  // Parmi les mêmes sœurs : il suffit de pouvoir modifier la page.
+  return canEdit(from.row.node.level) ? { parentId: from.parent, afterId: after ?? null } : null;
 }
 
 /**
@@ -124,23 +139,23 @@ export function stepTarget(rows: Row[], id: string, direction: "up" | "down"): D
  * sous-page : c'est le dépôt « dedans » sur cette sœur, avec ses refus. `null` : pas de sœur
  * avant elle, ou geste refusé.
  */
-export function nestTarget(rows: Row[], id: string): Drop | null {
+export function nestTarget(rows: Row[], id: string, role: Role): Drop | null {
   const placed = place(rows);
   const from = placed.find((p) => p.row.node.id === id);
   if (from === undefined) return null;
   const siblings = childrenOf(placed, from.parent);
   const previous = siblings[siblings.indexOf(id) - 1];
   if (previous === undefined) return null;
-  return dropTarget(rows, id, rows.findIndex((row) => row.node.id === previous), "inside");
+  return dropTarget(rows, id, rows.findIndex((row) => row.node.id === previous), "inside", role);
 }
 
 /**
  * Où irait la page `id`, sortie de sa page parente ? Elle en devient la sœur suivante : c'est
  * le dépôt « après » sur sa page parente, avec ses refus. `null` : elle est à la racine, ou
- * geste refusé (jusqu'à la racine, hors de « Privé », elle changerait de section).
+ * geste refusé (jusqu'à la racine, dans « Partagé », elle changerait de section).
  */
-export function unnestTarget(rows: Row[], id: string): Drop | null {
+export function unnestTarget(rows: Row[], id: string, role: Role): Drop | null {
   const from = place(rows).find((p) => p.row.node.id === id);
   if (from === undefined || from.parent === null) return null;
-  return dropTarget(rows, id, rows.findIndex((row) => row.node.id === from.parent), "after");
+  return dropTarget(rows, id, rows.findIndex((row) => row.node.id === from.parent), "after", role);
 }

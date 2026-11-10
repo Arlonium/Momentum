@@ -2,7 +2,7 @@
 // barre latérale (« Espace », « Partagé », « Privé »), ce que chacun y voit, l'espace gardé
 // d'une visite à l'autre, la corbeille, et le déplacement des pages, à la souris ou au
 // clavier. Le serveur fait foi pour les droits : chaque test relit aussi ce qu'il répond.
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import type { ErrorBody, PageNode } from "@mementum/protocol";
 import {
   apiAs,
@@ -725,13 +725,101 @@ test("row_menu_nests_and_unnests_by_keyboard", async ({ browser }) => {
       .map((n) => n.title),
   ).toEqual(["Alpha", "Bravo"]);
 
-  // Dans « Espace », sortir une sous-page à la racine la rendrait privée : l'action est
-  // grisée, comme le dépôt à la souris est refusé.
+  // Dans « Espace » aussi, une sous-page peut sortir à la racine : elle y garde son accès
+  // général, et reste une page de l'espace (R94). Sans sœur avant elle, elle ne s'imbrique
+  // nulle part.
   await openRowMenu(p, d.id, "Delta");
-  await expect(item("Delta", unnest)).toHaveAttribute("aria-disabled", "true");
+  await expect(item("Delta", unnest)).not.toHaveAttribute("aria-disabled", "true");
   await expect(item("Delta", nest)).toHaveAttribute("aria-disabled", "true");
   await p.keyboard.press("Escape");
   expect(await parentOf(d.id)).toBe(c.id);
+});
+
+/** Ce que le compte de `api` voit des pages de l'espace : où est chacune, et dans quelle section. */
+async function placesSeenBy(api: APIRequestContext, spaceId: string) {
+  const { nodes } = await getTree(api, spaceId);
+  return Object.fromEntries(
+    nodes.map((n) => [n.title, `${n.parentId === null ? "racine" : "sous-page"}, ${n.section}`]),
+  );
+}
+
+test("subpage_dragged_to_the_space_root_stays_a_team_page", async ({ browser }) => {
+  const { alice, aliceApi, space, bruno, brunoApi } = await ownerAndMember();
+  const parent = await createPage(aliceApi, { title: "Projet" });
+  const child = await createPage(aliceApi, { parentId: parent.id, title: "Chapitre" });
+  expect(await placesSeenBy(brunoApi, space.id)).toEqual({
+    Projet: "racine, space",
+    Chapitre: "sous-page, space",
+  });
+
+  const a = await newUser(browser, alice);
+  await a.goto(`/s/${space.id}`);
+  await expect.poll(() => shownRows(a)).toEqual(["1 Projet", "2 Chapitre"]);
+  // « Chapitre », lâchée sur le bord haut de « Projet », sort à la racine, avant elle.
+  await treeRow(a, child.id).dragTo(treeRow(a, parent.id), { targetPosition: { x: 80, y: 2 } });
+  await expect.poll(() => shownRows(a)).toEqual(["1 Chapitre", "1 Projet"]);
+  await expect(sectionOf(a, "Espace").locator(`[data-page-id="${child.id}"]`)).toBeVisible();
+  await expect(sidebarOf(a).getByRole("alert")).toHaveCount(0);
+
+  // Elle reste une page d'équipe (R94) : l'autre membre la voit toujours, dans « Espace ».
+  expect(await placesSeenBy(brunoApi, space.id)).toEqual({
+    Projet: "racine, space",
+    Chapitre: "racine, space",
+  });
+  const b = await newUser(browser, bruno);
+  await b.goto(`/s/${space.id}`);
+  await expect(sectionOf(b, "Espace").locator(`[data-page-id="${child.id}"]`)).toHaveAttribute(
+    "aria-level",
+    "1",
+  );
+  await expect.poll(() => shownRows(b)).toEqual(["1 Chapitre", "1 Projet"]);
+});
+
+test("subpage_unnested_by_keyboard_to_the_space_root_stays_a_team_page", async ({ browser }) => {
+  const { alice, aliceApi, space, brunoApi } = await ownerAndMember();
+  const parent = await createPage(aliceApi, { title: "Projet" });
+  const child = await createPage(aliceApi, { parentId: parent.id, title: "Chapitre" });
+  // Dans « Partagé », pour A : une page privée de B et sa sous-page, partagées avec elle en
+  // accès complet.
+  const { user } = await getMe(aliceApi);
+  const theirs = await createPage(brunoApi, { spaceId: space.id, section: "private", title: "Dossier" });
+  const piece = await createPage(brunoApi, { parentId: theirs.id, title: "Pièce" });
+  await setPageLevel(brunoApi, theirs.id, user.id, "full");
+  const unnest = "Sortir de la page parente";
+  const item = (title: string, name: string) =>
+    a.getByRole("menu", { name: `Actions de « ${title} »` }).getByRole("menuitem", { name });
+
+  const a = await newUser(browser, alice);
+  await a.goto(`/s/${space.id}`);
+  const start = ["1 Projet", "2 Chapitre", "1 Dossier", "2 Pièce"];
+  await expect.poll(() => shownRows(a)).toEqual(start);
+
+  // « Sortir de la page parente », au clavier : seule sous sa page parente, c'est la seule
+  // action de déplacement qui lui reste, et elle a le focus à l'ouverture du menu.
+  await treeRow(a, child.id).getByRole("button", { name: "Actions de « Chapitre »" }).focus();
+  await a.keyboard.press("Enter");
+  await expect(item("Chapitre", unnest)).toBeFocused();
+  await a.keyboard.press("Enter");
+  await expect.poll(() => shownRows(a)).toEqual(["1 Projet", "1 Chapitre", "1 Dossier", "2 Pièce"]);
+  await expect(sidebarOf(a).getByRole("alert")).toHaveCount(0);
+  // Elle reste une page d'équipe : l'autre membre la voit toujours, dans « Espace ».
+  expect(await placesSeenBy(brunoApi, space.id)).toMatchObject({
+    Projet: "racine, space",
+    Chapitre: "racine, space",
+  });
+
+  // Dans « Partagé », rien ne change : sortie à la racine, la sous-page quitterait sa section.
+  // L'action est grisée, et le dépôt à la souris refusé.
+  await openRowMenu(a, piece.id, "Pièce");
+  await expect(item("Pièce", unnest)).toHaveAttribute("aria-disabled", "true");
+  await a.keyboard.press("Escape");
+  await treeRow(a, piece.id).dragTo(treeRow(a, theirs.id), { targetPosition: { x: 80, y: 2 } });
+  // Le déplacement suivant, lui, est fait : quand il se voit, le précédent aurait eu lieu.
+  await treeRow(a, child.id).dragTo(treeRow(a, parent.id), { targetPosition: { x: 80, y: 2 } });
+  await expect.poll(() => shownRows(a)).toEqual(["1 Chapitre", "1 Projet", "1 Dossier", "2 Pièce"]);
+  expect((await getTree(aliceApi, space.id)).nodes.find((n) => n.id === piece.id)?.parentId).toBe(
+    theirs.id,
+  );
 });
 
 test("focus_follows_a_page_that_leaves", async ({ browser }) => {

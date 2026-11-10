@@ -1,10 +1,19 @@
 // Déplacer une page dans l'arbre d'une section : où un dépôt la range (`dropTarget`), ce
 // qu'il refuse, la zone visée d'après la place du pointeur sur une ligne (`zonesAt`), et le
 // déplacement d'un cran au clavier (`stepTarget`).
-import type { Level, PageNode, Section } from "@mementum/protocol";
+import type { Level, PageNode, Role, Section } from "@mementum/protocol";
 import { expect, test } from "vitest";
-import { dropTarget, nestTarget, stepTarget, unnestTarget, zonesAt } from "./drag";
+import * as drag from "./drag";
+import { stepTarget, zonesAt, type Zone } from "./drag";
 import { flattenRows, ROW_HEIGHT, type Row } from "./rows";
+
+// Sauf mention contraire, la personne est membre de l'espace.
+const dropTarget = (rows: Row[], dragged: string, over: number, zone: Zone, role: Role = "member") =>
+  drag.dropTarget(rows, dragged, over, zone, role);
+const nestTarget = (rows: Row[], id: string, role: Role = "member") =>
+  drag.nestTarget(rows, id, role);
+const unnestTarget = (rows: Row[], id: string, role: Role = "member") =>
+  drag.unnestTarget(rows, id, role);
 
 function page(
   id: string,
@@ -144,20 +153,45 @@ test("drop_that_changes_nothing_is_refused", () => {
   expect(dropTarget(rows, "a", at(rows, "b"), "before")).toBeNull();
 });
 
-test("leaving_a_parent_for_the_root_stays_in_the_private_section", () => {
-  // Une sous-page passée à la racine ne garde que l'accès de qui la déplace : elle devient
-  // privée. Dans « Privé », elle reste dans sa section ; ailleurs, elle en changerait, ce
-  // que le glisser-déposer ne fait pas.
-  for (const section of ["space", "shared"] as const) {
-    const rows = tree({ a1: { section }, a: { section }, b: { section } });
-    expect(dropTarget(rows, "a1", at(rows, "b"), "before")).toBeNull();
-    expect(dropTarget(rows, "a1", at(rows, "a"), "before")).toBeNull();
-    // Une page déjà à la racine y change de place.
-    expect(dropTarget(rows, "c", at(rows, "a"), "before")).toEqual({ parentId: null, afterId: null });
+/** L'arbre des tests, tout entier dans la section `section`. */
+function treeIn(section: Section, overrides: Partial<Record<string, Partial<PageNode>>> = {}): Row[] {
+  const ids = ["a", "a1", "a1x", "a2", "a3", "b", "c", "c1"];
+  return tree(Object.fromEntries(ids.map((id) => [id, { section, ...overrides[id] }])));
+}
+
+test("subpage_leaves_for_the_root_of_the_space_section", () => {
+  // Une sous-page passée à la racine garde son accès général (R94) : une page de « Espace »
+  // y reste, visible des autres membres.
+  const rows = treeIn("space");
+  for (const role of ["owner", "admin", "member"] as const) {
+    expect(dropTarget(rows, "a1", at(rows, "b"), "before", role)).toEqual({ parentId: null, afterId: "a" });
+    expect(dropTarget(rows, "a1", at(rows, "a"), "before", role)).toEqual({ parentId: null, afterId: null });
+    expect(dropTarget(rows, "a1x", at(rows, "c"), "after", role)).toEqual({ parentId: null, afterId: "c" });
   }
-  const mine = { section: "private" } as const;
-  const rows = tree({ a: mine, a1: mine, a1x: mine, a2: mine, a3: mine, b: mine, c: mine, c1: mine });
+  // Le serveur demande d'être membre de l'espace pour ranger une page à sa racine.
+  expect(dropTarget(rows, "a1", at(rows, "b"), "before", "guest")).toBeNull();
+  // Et l'accès complet à la page : la modifier ne suffit pas.
+  const edit = treeIn("space", { a1: { level: "edit" } });
+  expect(dropTarget(edit, "a1", at(edit, "b"), "before")).toBeNull();
+});
+
+test("subpage_leaves_for_the_root_of_the_private_section", () => {
+  const rows = treeIn("private");
   expect(dropTarget(rows, "a1", at(rows, "b"), "before")).toEqual({ parentId: null, afterId: "a" });
+});
+
+test("subpage_does_not_leave_for_the_root_of_the_shared_section", () => {
+  // Dans « Partagé », les accès nommés sur la page parente partiraient avec elle : la page
+  // changerait de section, et disparaîtrait pour les autres. Quel que soit le rôle.
+  const rows = treeIn("shared");
+  for (const role of ["owner", "admin", "member", "guest"] as const) {
+    expect(dropTarget(rows, "a1", at(rows, "b"), "before", role)).toBeNull();
+    expect(dropTarget(rows, "a1", at(rows, "a"), "before", role)).toBeNull();
+  }
+  // Une page déjà à la racine y change de place.
+  expect(dropTarget(rows, "c", at(rows, "a"), "before")).toEqual({ parentId: null, afterId: null });
+  // Sous une autre page de la section, rien ne s'y oppose.
+  expect(dropTarget(rows, "a1", at(rows, "b"), "inside")).toEqual({ parentId: "b", afterId: null });
 });
 
 test("pointer_height_on_a_row_picks_the_zone", () => {
@@ -232,11 +266,12 @@ test("unnest_makes_the_page_the_next_sibling_of_its_parent", () => {
   // Une page à la racine n'a pas de page parente d'où sortir.
   expect(unnestTarget(rows, "a")).toBeNull();
   expect(unnestTarget(rows, "absente")).toBeNull();
-  // Jusqu'à la racine : dans « Privé » seulement (la page y reste dans sa section).
-  expect(unnestTarget(rows, "a2")).toBeNull();
-  const mine = { section: "private" } as const;
-  const privateRows = tree({ a: mine, a1: mine, a1x: mine, a2: mine, a3: mine, b: mine });
-  expect(unnestTarget(privateRows, "a2")).toEqual({ parentId: null, afterId: "a" });
+  // Jusqu'à la racine : dans « Espace » (pour un membre) et dans « Privé », où la page reste
+  // dans sa section ; pas dans « Partagé ».
+  expect(unnestTarget(rows, "a2")).toEqual({ parentId: null, afterId: "a" });
+  expect(unnestTarget(rows, "a2", "guest")).toBeNull();
+  expect(unnestTarget(treeIn("private"), "a2")).toEqual({ parentId: null, afterId: "a" });
+  expect(unnestTarget(treeIn("shared"), "a2")).toBeNull();
 });
 
 test("nest_and_unnest_follow_the_rules_of_a_drop", () => {
