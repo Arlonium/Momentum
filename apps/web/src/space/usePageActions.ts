@@ -8,6 +8,11 @@
 // visait. Sans cela, la ligne d'une page qui n'existe plus resterait, et chaque essai
 // redonnerait la même erreur. Une session perdue n'est pas un refus : la connexion est
 // demandée par-dessus l'application, sans message de plus.
+//
+// Ce que d'autres changent à la page ouverte arrive aussi par ici : elle est relue avant
+// chaque connexion de synchro (`usePageGate`), que le serveur ferme quand ses droits changent.
+// Niveau changé, page jetée ou restaurée (`reread`), page perdue (`lost`) : la page ouverte et
+// sa ligne le savent aussitôt, et la barre latérale est relue pour ses sous-pages.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, createPage, isSessionLost, restorePage, trashPage, updatePage } from "../api";
@@ -19,10 +24,14 @@ import { withoutSubtree } from "../sidebar/rows";
 import type { CreateTarget } from "../sidebar/SectionList";
 import type { SpaceTree } from "./useSpaceTree";
 
-/** Le message du serveur, en phrase : son initiale en capitale. */
-function sentence(error: unknown): string {
-  const message = messageOf(error);
+/** Un message du serveur, en phrase : son initiale en capitale. */
+function capitalize(message: string): string {
   return message.charAt(0).toUpperCase() + message.slice(1);
+}
+
+/** Le message de l'erreur, en phrase. */
+function sentence(error: unknown): string {
+  return capitalize(messageOf(error));
 }
 
 /** Le serveur dit-il que l'endroit visé n'existe pas, dans les mots de l'API ? */
@@ -89,6 +98,23 @@ export type PageActions = {
    * barre latérale est relue.
    */
   trashChanged: () => void;
+  /**
+   * Ce que le serveur dit de la page ouverte, relue avant une connexion de synchro. Garde son
+   * identité.
+   */
+  reread: (node: PageNode) => void;
+  /**
+   * Le serveur dit que la page n'est plus là pour ce compte (supprimée, ou plus partagée avec
+   * lui). Garde son identité.
+   */
+  lost: (id: string) => void;
+  /** Les accès de la page ouverte ont changé d'ici (menu Partager) : sa section a pu changer. */
+  shared: () => void;
+  /**
+   * Le serveur a refusé un changement d'accès parce que la personne n'a plus l'accès complet :
+   * le menu Partager s'est fermé, et son message se dit ici.
+   */
+  shareRefused: (message: string) => void;
   /** Change quand une page est jetée ou restaurée d'ici : la vue de la corbeille se relit. */
   trashChanges: number;
 };
@@ -108,8 +134,11 @@ export function usePageActions({
   const titleFocused = useCallback(() => setCreated(null), []);
   const open = useRef(activeId);
   open.current = activeId;
+  /** La page ouverte, telle qu'elle est à l'écran. */
+  const shown = useRef(page.node);
+  shown.current = page.node;
   const { change, touch, reload, latest } = tree;
-  const { show, update, ask } = page;
+  const { show, update, ask, gone } = page;
   const [trashChanges, setTrashChanges] = useState(0);
 
   const create = useCallback(
@@ -220,6 +249,55 @@ export function usePageActions({
     [update, caughtUp, ask, trashChanged],
   );
 
+  const reread = useCallback(
+    (node: PageNode) => {
+      const known = shown.current;
+      // La réponse d'une page qu'on a quittée entre-temps ne touche à rien.
+      if (known === undefined || known.id !== node.id) return;
+      const trashed = node.trashedAt !== null;
+      // Ce qui change ce que la personne peut faire de la page, ou l'endroit où elle la voit :
+      // ses sous-pages suivent, et l'arbre est à relire.
+      const moved =
+        known.level !== node.level ||
+        (known.trashedAt !== null) !== trashed ||
+        known.section !== node.section ||
+        known.parentId !== node.parentId;
+      if (!moved && known.title === node.title && known.position === node.position) return;
+      if (trashed) {
+        // À la corbeille, elle reste à l'écran et quitte l'arbre, avec ses sous-pages.
+        show(node);
+        change((nodes) => withoutSubtree(nodes, node.id));
+      } else {
+        update(node);
+        change((nodes) => nodes.map((n) => (n.id === node.id ? node : n)));
+      }
+      if (!moved) return;
+      // L'arbre est relu ici : inutile de le relire encore pour une page qui y revient.
+      if (!trashed) caughtUp(node.id);
+      reload();
+    },
+    [show, update, change, reload, caughtUp],
+  );
+
+  const lost = useCallback(
+    (id: string) => {
+      gone(id);
+      change((nodes) => withoutSubtree(nodes, id));
+      // Ce que le compte voit de l'espace a changé : l'arbre tel que le serveur le rend.
+      reload();
+    },
+    [gone, change, reload],
+  );
+
+  const shared = useCallback(() => {
+    touch();
+    reload();
+  }, [touch, reload]);
+
+  const shareRefused = useCallback((message: string) => {
+    setNotice(`Le partage n'a pas pu être modifié. ${capitalize(message)}`);
+  }, []);
+
   return {
     notice,
     created,
@@ -231,5 +309,9 @@ export function usePageActions({
     restore,
     trashChanged,
     trashChanges,
+    reread,
+    lost,
+    shared,
+    shareRefused,
   };
 }

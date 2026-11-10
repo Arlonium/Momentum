@@ -2,7 +2,7 @@
 // `/sync/{id}` (protocole y-websocket), et le compte affiché près du curseur.
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
-import { schemaGatedWebSocket, type SchemaCheck } from "./schemaGate";
+import { gatedWebSocket, type ConnectionCheck } from "./schemaGate";
 import { CLIENT_SCHEMA_VERSION } from "./version";
 
 /** Nom du fragment partagé, celui que le serveur lit et écrit (`mementum-crdt`). */
@@ -17,20 +17,23 @@ export type PresenceUser = { name: string; color: string };
 export type SyncStatus = "connecting" | "connected" | "disconnected";
 
 /**
- * Mode d'une session : en écriture, chaque connexion n'ouvre sa WebSocket qu'après `check`
- * (version de schéma relue, R35) ; en lecture seule, l'onglet ne fait que recevoir.
+ * Mode d'une session. En lecture seule, l'onglet ne fait que recevoir. Dans les deux modes,
+ * chaque connexion n'ouvre sa WebSocket qu'après `check` : la version de schéma relue (R35)
+ * pour qui écrit, et la page relue, avec ce que le compte peut encore y faire
+ * (`page/usePageGate.ts`).
  */
-export type SessionMode = { readOnly: false; check: SchemaCheck } | { readOnly: true };
+export type SessionMode = { readOnly: boolean; check: ConnectionCheck };
 
 /**
  * Une page ouverte. `doc` est le document lié à l'éditeur ; `provider` le synchronise.
  *
- * En lecture seule (schéma différent de celui du serveur), l'éditeur est lié à une copie
- * locale qui reçoit tout du serveur et ne lui renvoie rien : y-prosemirror supprime les
- * nœuds qu'il ne sait pas construire, et ces suppressions ne doivent jamais quitter
- * l'onglet (Review Focus 2). Le document du serveur reste `provider.doc`. Les deux
- * `Y.Doc` sont neufs : une session qui passe en lecture seule n'en réutilise aucun, car
- * l'ancien document porte déjà des éditions et des suppressions locales.
+ * En lecture seule (schéma différent de celui du serveur, niveau qui ne permet pas de
+ * modifier, page à la corbeille), l'éditeur est lié à une copie locale qui reçoit tout du
+ * serveur et ne lui renvoie rien : y-prosemirror supprime les nœuds qu'il ne sait pas
+ * construire, et ces suppressions ne doivent jamais quitter l'onglet (Review Focus 2). Le
+ * document du serveur reste `provider.doc`. Les deux `Y.Doc` sont neufs : une session qui
+ * passe en lecture seule n'en réutilise aucun, car l'ancien document porte déjà des
+ * éditions et des suppressions locales.
  */
 export class CollabSession {
   readonly pageId: string;
@@ -55,13 +58,11 @@ export class CollabSession {
     // lecture seule (R30) : on la donne toujours.
     this.provider = new WebsocketProvider(syncUrl(), pageId, shared, {
       params: { schema: String(CLIENT_SCHEMA_VERSION) },
-      ...(mode.readOnly
-        ? {}
-        : {
-            WebSocketPolyfill: schemaGatedWebSocket(mode.check, (data) =>
-              this.beforeMessage(data),
-            ),
-          }),
+      WebSocketPolyfill: gatedWebSocket(
+        mode.check,
+        // L'état du serveur ne déverrouille qu'un éditeur qui écrit (`onServerState`).
+        mode.readOnly ? undefined : (data) => this.beforeMessage(data),
+      ),
     });
     if (mode.readOnly) {
       // Ni curseur ni présence : rien de cet onglet n'est annoncé.

@@ -219,3 +219,49 @@ test("ask_reads_again_only_a_page_outside_the_tree", async () => {
   await settle(() => open.current.ask());
   expect(asked).toEqual([]);
 });
+
+test("page_lost_while_open_says_so_and_is_not_called_missing", async () => {
+  const x = page("x");
+  const open = await renderHook(hook, { activeId: "x", inTree: x });
+  // Avant une connexion de synchro, le serveur dit qu'elle n'est plus là pour ce compte ; la
+  // barre latérale la retire dans le même geste.
+  await settle(() => open.current.gone("x"));
+  await open.rerender({ activeId: "x" });
+  expect(open.current.looked).toEqual({ id: "x", state: "gone" });
+  expect(open.current.node).toBeUndefined();
+  expect(open.current.resolving).toBe(false);
+  // Redemandée, puisqu'elle a quitté l'arbre : le serveur le redit. L'écran reste celui d'un
+  // accès perdu, pas celui d'une page qui n'a jamais existé.
+  expect(asked.map((a) => a.id)).toEqual(["x"]);
+  await settle(() => asked[0].answer.reject(notFound()));
+  expect(open.current.looked).toEqual({ id: "x", state: "gone" });
+  expect(open.current.node).toBeUndefined();
+
+  // On va ailleurs, puis on y revient : elle ne réapparaît pas.
+  await open.rerender({ activeId: null });
+  rendered = [];
+  await open.rerender({ activeId: "x" });
+  expect(rendered.every((node) => node === undefined)).toBe(true);
+});
+
+test("page_lost_then_shared_again_comes_back", async () => {
+  const open = await renderHook(hook, { activeId: "x", inTree: page("x") });
+  await settle(() => open.current.gone("x"));
+  await open.rerender({ activeId: "x" });
+  expect(open.current.looked).toEqual({ id: "x", state: "gone" });
+  // Partagée de nouveau : une relecture de l'arbre la rapporte, et elle se rouvre.
+  const back = page("x", { level: "read" });
+  await open.rerender({ activeId: "x", inTree: back });
+  expect(open.current.node).toBe(back);
+  expect(open.current.looked).toBeNull();
+});
+
+test("gone_is_for_the_open_page_only", async () => {
+  const open = await renderHook(hook, { activeId: "y" });
+  const y = page("y");
+  await settle(() => asked[0].answer.resolve(y));
+  // La réponse pour une page qu'on a quittée entre-temps ne touche pas celle qui est ouverte.
+  await settle(() => open.current.gone("x"));
+  expect(open.current.node).toBe(y);
+  expect(open.current.looked).toEqual({ id: "y", state: "found", node: y });
+});

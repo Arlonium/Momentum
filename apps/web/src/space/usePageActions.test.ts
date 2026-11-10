@@ -12,7 +12,7 @@ import {
   updatePage,
 } from "../api";
 import { useOpenPage } from "../page/useOpenPage";
-import { renderHook, settle } from "../test/hooks";
+import { deferred, renderHook, settle } from "../test/hooks";
 import { notFound, page, unauthenticated } from "../test/pages";
 import { usePageActions } from "./usePageActions";
 import { useSpaceTree, useTreeReader } from "./useSpaceTree";
@@ -327,4 +327,112 @@ test("page_moved_meanwhile_says_so_and_reloads_the_tree", async () => {
   );
   expect(treeReads()).toBeGreaterThan(reads);
   expect(app.current.nodes).toEqual(server);
+});
+
+test("page_reread_with_another_level_updates_its_row_and_reloads_the_tree", async () => {
+  const child = page("a1", { parentId: "a" });
+  const app = await withTree([page("a"), child, page("b")], { activeId: "a" });
+  const reads = treeReads();
+  // Avant une connexion de synchro, le serveur dit que le niveau a baissé. La page ouverte et
+  // sa ligne le savent tout de suite, sans attendre la relecture de l'arbre ; ses sous-pages
+  // suivront avec elle.
+  const lowered = page("a", { level: "read" });
+  const reread = deferred<Tree>();
+  vi.mocked(getTree).mockImplementation(() => reread.promise);
+  await settle(() => app.current.actions.reread(lowered));
+  expect(app.current.open.node).toEqual(lowered);
+  expect(app.current.nodes).toEqual([lowered, child, page("b")]);
+  expect(treeReads()).toBeGreaterThan(reads);
+  // L'arbre relu arrive : les sous-pages ont suivi.
+  const after = [lowered, { ...child, level: "read" as const }, page("b")];
+  await settle(() => reread.resolve({ spaceId: "space", nodes: after }));
+  expect(app.current.nodes).toEqual(after);
+});
+
+test("page_reread_as_it_was_changes_nothing", async () => {
+  const a = page("a");
+  const app = await withTree([a, page("b")], { activeId: "a" });
+  const reads = treeReads();
+  const before = app.current.nodes;
+  // À chaque connexion de synchro, le plus souvent : rien de neuf.
+  await settle(() => app.current.actions.reread({ ...a }));
+  expect(app.current.nodes).toBe(before);
+  expect(treeReads()).toBe(reads);
+  // Renommée ailleurs : sa ligne suit, sans relire tout l'arbre.
+  const renamed = page("a", { title: "Renommée ailleurs" });
+  await settle(() => app.current.actions.reread(renamed));
+  expect(app.current.nodes).toEqual([renamed, page("b")]);
+  expect(app.current.open.node).toEqual(renamed);
+  expect(treeReads()).toBe(reads);
+});
+
+test("page_reread_at_the_trash_stays_on_screen_and_leaves_the_tree", async () => {
+  const child = page("a1", { parentId: "a" });
+  const app = await withTree([page("a"), child, page("b")], { activeId: "a" });
+  // Jetée ailleurs pendant qu'elle est ouverte : elle reste à l'écran, à la corbeille, et sa
+  // ligne part avec celles de ses sous-pages.
+  const trashed = page("a", { trashedAt: 42 });
+  server = [page("b")];
+  await settle(() => app.current.actions.reread(trashed));
+  expect(app.current.open.node).toEqual(trashed);
+  expect(ids(app.current.nodes)).toEqual(["b"]);
+
+  // Restaurée ailleurs : elle revient, et l'arbre est relu.
+  const restored = page("a");
+  server = [restored, child, page("b")];
+  await settle(() => app.current.actions.reread(restored));
+  expect(app.current.open.node).toEqual(restored);
+  expect(ids(app.current.nodes)).toEqual(["a", "a1", "b"]);
+});
+
+test("page_reread_after_it_was_left_is_ignored", async () => {
+  const app = await withTree([page("a"), page("b")], { activeId: "b" });
+  const before = app.current.nodes;
+  const reads = treeReads();
+  // La réponse arrive après qu'on a ouvert une autre page : elle ne touche à rien.
+  await settle(() => app.current.actions.reread(page("a", { trashedAt: 42 })));
+  expect(app.current.nodes).toBe(before);
+  expect(app.current.open.node).toEqual(page("b"));
+  expect(treeReads()).toBe(reads);
+});
+
+test("lost_page_says_so_and_leaves_the_tree_with_its_subpages", async () => {
+  const app = await withTree([page("a"), page("a1", { parentId: "a" }), page("b")], {
+    activeId: "a",
+  });
+  const reads = treeReads();
+  // Le serveur dit que la page ouverte n'est plus là pour ce compte (supprimée, ou plus
+  // partagée avec lui).
+  server = [page("b")];
+  vi.mocked(getPage).mockRejectedValue(notFound());
+  await settle(() => app.current.actions.lost("a"));
+  expect(app.current.open.node).toBeUndefined();
+  expect(app.current.open.looked).toEqual({ id: "a", state: "gone" });
+  expect(ids(app.current.nodes)).toEqual(["b"]);
+  expect(treeReads()).toBeGreaterThan(reads);
+  expect(app.current.actions.notice).toBeNull();
+});
+
+test("change_from_the_share_menu_reloads_the_tree", async () => {
+  const mine = page("a", { section: "private" });
+  const app = await withTree([mine], { activeId: "a" });
+  const reads = treeReads();
+  // Ouverte aux membres par le menu Partager : elle change de section, ce que seul le serveur
+  // calcule.
+  server = [page("a", { section: "space" })];
+  await settle(() => app.current.actions.shared());
+  expect(treeReads()).toBeGreaterThan(reads);
+  expect(app.current.nodes).toEqual(server);
+});
+
+test("refusal_from_the_share_menu_is_said_in_the_sidebar", async () => {
+  const app = await withTree([page("a")], { activeId: "a" });
+  // Le menu Partager s'est fermé (la personne n'a plus l'accès complet) : le refus du serveur
+  // qui l'a révélé se dit en pied de barre latérale, jusqu'à la navigation suivante.
+  await settle(() => app.current.actions.shareRefused("accès complet requis sur cette page"));
+  expect(app.current.actions.notice).toBe(
+    "Le partage n'a pas pu être modifié. Accès complet requis sur cette page",
+  );
+  await app.rerender({ activeId: "a", pathname: "/s/space/trash" });
+  expect(app.current.actions.notice).toBeNull();
 });

@@ -893,6 +893,16 @@ button.tree-toggle:hover {
   margin: 0;
 }
 
+/* Page qu'on lit sans pouvoir la modifier : une ligne, son bouton (« Rouvrir la page ») à
+   sa hauteur. */
+.mm-banner-reader {
+  align-items: center;
+}
+
+.mm-banner-reader svg {
+  margin-top: 0;
+}
+
 /* Page à la corbeille : le bandeau le dit sans crier, et la restaure. */
 .mm-banner-trash {
   align-items: center;
@@ -1500,6 +1510,274 @@ button.tree-toggle:hover {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* Menu Partager (conception §4.3, maquette) : le bouton, en haut à droite de la page, et le
+   panneau qui s'ouvre sous lui, sans voile. */
+
+.mm-share {
+  position: relative;
+  flex: none;
+}
+
+.mm-share-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: 460px;
+  max-width: calc(100vw - 28px);
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  border: 1px solid var(--mm-popover-border);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: var(--mm-popover-shadow);
+  color: var(--mm-text);
+  font-size: 14px;
+}
+
+.mm-share-panel:focus-visible {
+  outline-offset: -2px;
+}
+
+.mm-share-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 14px 12px;
+}
+
+.mm-share-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-share-invite .mm-share-note {
+  margin-top: 6px;
+}
+
+.mm-share .mm-form-error {
+  margin: 0;
+}
+
+.mm-share-invite .mm-form-error {
+  margin-top: 8px;
+}
+
+.mm-share-invite .mm-invite-created {
+  margin-top: 10px;
+  padding: 12px 12px 14px;
+}
+
+/* Le panneau est étroit : ce que donne l'invitation sur sa ligne, le lien sur la sienne, et
+   son bouton dessous. */
+.mm-share-invite .mm-invite-grant {
+  display: block;
+}
+
+.mm-share-invite .mm-invite-separator {
+  display: none;
+}
+
+.mm-share-invite .mm-invite-created .mm-settings-row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.mm-share-read-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mm-share-read-error .mm-form-error {
+  flex: 1 1 auto;
+}
+
+/* Les lignes des réglages de l'espace, resserrées : pastille, nom et adresse, niveau, action. */
+.mm-share-people .mm-person {
+  gap: 10px;
+  min-height: 44px;
+  padding: 4px 0;
+  border-bottom: 0;
+}
+
+.mm-share-people .mm-person-detail {
+  font-size: 12px;
+}
+
+.mm-share-people .mm-person-role {
+  width: 128px;
+}
+
+.mm-share-people .mm-person-action {
+  width: 68px;
+}
+
+.mm-share-people .mm-person-tile {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+}
+
+.mm-share-people + .mm-share-note {
+  margin-top: 4px;
+}
+
+/* « hérité » finit là où finit le texte de « Retirer ». */
+.mm-share-people .mm-tag {
+  margin-right: 8px;
+}
+
+/* « hérité » : un accès qui vient d'une page parente, et ne se change pas ici. */
+.mm-tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--mm-surface);
+  color: var(--mm-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.mm-share-general {
+  padding-top: 10px;
+  border-top: 1px solid var(--mm-popover-divider);
+}
+
+.mm-share-heading {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mm-text-secondary);
+}
+
+.mm-share-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Un choix : sur sa première ligne, son bouton radio (dessiné par le rond) et son libellé,
+   puis, pour « Tous les membres de l'espace », « hérité » et le niveau, à droite ; dessous, sa
+   précision. */
+.mm-share-choice {
+  padding: 5px 8px 6px;
+  border-radius: 6px;
+}
+
+.mm-share-choice.is-checked {
+  background: var(--mm-surface);
+}
+
+.mm-share-choice label {
+  cursor: pointer;
+}
+
+.mm-share-choice.is-disabled label {
+  cursor: default;
+}
+
+.mm-share-choice-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.mm-share-choice-main label {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mm-share-choice-main .mm-select {
+  field-sizing: content;
+  margin: -2px -4px -2px 0;
+}
+
+/* Le vrai bouton radio reste dans le document (clavier, lecteurs d'écran), sans se voir. */
+.mm-share-choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  opacity: 0;
+}
+
+.mm-share-dot {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--mm-placeholder);
+  border-radius: 50%;
+  background: #ffffff;
+}
+
+.mm-share-choice input:checked + .mm-share-dot {
+  border: 4px solid var(--mm-accent);
+}
+
+.mm-share-choice input:focus-visible + .mm-share-dot {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: 2px;
+}
+
+.mm-share-choice.is-disabled .mm-share-dot,
+.mm-share-choice.is-disabled .mm-share-choice-label {
+  opacity: 0.5;
+}
+
+.mm-share-choice-label {
+  margin: 0;
+  font-weight: 500;
+  color: var(--mm-text);
+}
+
+/* Sous le libellé, au même retrait (le rond et son écart). */
+.mm-share-choice-hint {
+  display: block;
+  margin: 0 0 0 24px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--mm-text-secondary);
+}
+
+/* Sur le fond d'un choix coché, ce qui a ce même fond s'en détache. */
+.mm-share-choice.is-checked .mm-tag {
+  background: #ffffff;
+}
+
+.mm-share-choice.is-checked .mm-select:hover:not(:disabled) {
+  background-color: var(--mm-border);
+}
+
+/* L'accès général, pour qui le lit sans le régler (un invité de l'espace). */
+.mm-share-fixed {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--mm-surface);
+  line-height: 1.4;
+}
+
+.mm-share-fixed .mm-share-choice-hint {
+  margin-left: 0;
+}
+
+.mm-share-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--mm-popover-divider);
+  border-radius: 0 0 10px 10px;
+  background: #fafaf8;
 }
 
 /* Corbeille : une ligne par page (tuile, titre, date, actions à droite). */

@@ -17,12 +17,17 @@ import type {
   InvitationCreated,
   InvitationInfo,
   InvitationToken,
+  InviteToPage,
   InviteToSpace,
+  Level,
   LogIn,
   Me,
   Member,
+  PageAccess,
   PageNode,
   PendingInvitation,
+  SetGeneral,
+  SetLevel,
   SignUp,
   SpaceInfo,
   Tree,
@@ -250,6 +255,65 @@ export function restorePage(id: string): Promise<PageNode> {
  */
 export function deletePage(id: string): Promise<void> {
   return call("DELETE", page(id));
+}
+
+// Partage d'une page : qui y a accès, et à quel niveau. Ces routes demandent l'accès complet
+// (`full`) sur la page ; sous ce niveau, `403 forbidden`.
+
+const access = (pageId: string) => `${page(pageId)}/access`;
+
+/**
+ * Un changement d'accès : le serveur rend les accès tels qu'ils sont devenus. `null` : il a
+ * répondu `204`, sans corps. Le changement est fait, mais la personne connectée n'a plus
+ * l'accès complet (elle s'est baissée ou retirée elle-même) : les accès ne lui sont plus rendus.
+ */
+async function changeAccess(method: string, path: string, body?: unknown): Promise<PageAccess | null> {
+  return (await call<PageAccess | undefined>(method, path, body)) ?? null;
+}
+
+/**
+ * `GET /api/v1/pages/{id}/access` : l'accès général et son plancher (celui d'une page parente),
+ * les comptes nommés sur la page ou ses pages parentes, les invitations de la page qui attendent.
+ */
+export function getAccess(pageId: string): Promise<PageAccess> {
+  return call("GET", access(pageId));
+}
+
+/**
+ * `PUT /api/v1/pages/{id}/access/general` : le niveau de tous les membres de l'espace sur la
+ * page ; `null` : seulement les personnes nommées. Réservé aux membres de l'espace (un invité :
+ * `403`, R85). `409 inherited_access` sous le niveau qu'une page parente donne déjà (R93) ;
+ * `409 last_full_access` si la page n'avait plus personne en accès complet.
+ */
+export function setGeneralAccess(pageId: string, level: Level | null): Promise<PageAccess | null> {
+  const body: SetGeneral = { level };
+  return changeAccess("PUT", `${access(pageId)}/general`, body);
+}
+
+/**
+ * `PUT /api/v1/pages/{id}/access/users/{userId}` : le niveau d'un compte de l'espace sur la
+ * page ; `409 last_full_access`.
+ */
+export function setUserLevel(pageId: string, userId: string, level: Level): Promise<PageAccess | null> {
+  const body: SetLevel = { level };
+  return changeAccess("PUT", `${access(pageId)}/users/${encodeURIComponent(userId)}`, body);
+}
+
+/**
+ * `DELETE /api/v1/pages/{id}/access/users/{userId}` : retire l'accès posé sur la page pour ce
+ * compte (un accès hérité se retire sur la page qui le porte : `404`) ; `409 last_full_access`.
+ * Un invité qui n'a plus aucun accès sort de l'espace.
+ */
+export function removeUserAccess(pageId: string, userId: string): Promise<PageAccess | null> {
+  return changeAccess("DELETE", `${access(pageId)}/users/${encodeURIComponent(userId)}`);
+}
+
+/**
+ * `POST /api/v1/pages/{id}/invitations` : l'invitation et son jeton, rendu cette fois
+ * seulement. La réponse est la même, que l'adresse ait un compte ou non.
+ */
+export function inviteToPage(pageId: string, body: InviteToPage): Promise<InvitationCreated> {
+  return call("POST", `${page(pageId)}/invitations`, body);
 }
 
 /** Longueur maximale d'un titre, en caractères Unicode (le serveur fait foi, R30). */

@@ -20,10 +20,12 @@ import type {
   CreatePage,
   InvitationCreated,
   InviteRole,
+  InviteToPage,
   InviteToSpace,
   Level,
   Me,
   Member,
+  PageAccess,
   PageNode,
   PendingInvitation,
   SignUp,
@@ -317,6 +319,125 @@ export async function setPageLevel(
   expect(res.status(), await res.text()).toBe(200);
 }
 
+/** La page telle que la voit le compte de `api` (`GET /api/v1/pages/{id}`). */
+export async function getPage(api: APIRequestContext, id: string): Promise<PageNode> {
+  const res = await api.get(`/api/v1/pages/${id}`);
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as PageNode;
+}
+
+/** Qui a accès à la page (`GET /api/v1/pages/{id}/access`). `api` doit y avoir l'accès complet. */
+export async function getAccess(api: APIRequestContext, pageId: string): Promise<PageAccess> {
+  const res = await api.get(`/api/v1/pages/${pageId}/access`);
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as PageAccess;
+}
+
+/** Règle l'accès général de la page (`PUT …/access/general`) ; `null` : seulement les invités. */
+export async function setGeneralAccess(
+  api: APIRequestContext,
+  pageId: string,
+  level: Level | null,
+): Promise<void> {
+  const res = await api.put(`/api/v1/pages/${pageId}/access/general`, { data: { level } });
+  expect(res.status(), await res.text()).toBe(200);
+}
+
+/** Invite sur la page (`POST /api/v1/pages/{id}/invitations`) : l'id et le jeton, montré une fois. */
+export async function inviteToPage(
+  api: APIRequestContext,
+  pageId: string,
+  body: InviteToPage,
+): Promise<InvitationCreated> {
+  const res = await api.post(`/api/v1/pages/${pageId}/invitations`, { data: body });
+  expect(res.status(), await res.text()).toBe(201);
+  return (await res.json()) as InvitationCreated;
+}
+
+/**
+ * Un compte neuf, invité de l'espace : `owner` l'invite sur la page avec `level`, et il
+ * s'inscrit avec cette invitation. Il ne voit que cette page et ses sous-pages.
+ */
+export async function guestOf(
+  owner: Account,
+  pageId: string,
+  name: string,
+  level: Level,
+): Promise<Account> {
+  const { token } = await inviteToPage(await apiAs(owner), pageId, {
+    email: `invite-${unique()}@exemple.fr`,
+    level,
+  });
+  return signUpAccount(name, token);
+}
+
+/** Le bouton « Partager » de la page ouverte : pour qui y a l'accès complet. */
+export function shareButton(p: Page): Locator {
+  return p.getByRole("button", { name: "Partager", exact: true });
+}
+
+/** Le menu Partager de la page ouverte. */
+export function shareMenu(p: Page): Locator {
+  return p.getByRole("dialog", { name: "Partager" });
+}
+
+/** Ouvre le menu Partager, attend que les accès de la page soient lus, et le rend. */
+export async function openShareMenu(p: Page): Promise<Locator> {
+  await shareButton(p).click();
+  const menu = shareMenu(p);
+  await expect(menu).toHaveAttribute("aria-busy", "false");
+  return menu;
+}
+
+/** La ligne d'une personne dans la liste des accès du menu Partager. */
+export function accessRow(menu: Locator, email: string): Locator {
+  return menu
+    .getByRole("list", { name: "Personnes qui ont accès" })
+    .getByRole("listitem")
+    .filter({ hasText: email });
+}
+
+/** La ligne d'une invitation qui attend, dans le menu Partager. */
+export function pendingRow(menu: Locator, email: string): Locator {
+  return menu
+    .getByRole("list", { name: "Invitations en attente" })
+    .getByRole("listitem")
+    .filter({ hasText: email });
+}
+
+/** Le bandeau d'une page qu'on peut lire, pas modifier. */
+export function readerBanner(p: Page): Locator {
+  return p.getByRole("status").filter({ hasText: "Tu peux lire cette page, pas la modifier" });
+}
+
+/** L'écran d'une page ouverte dont l'accès vient d'être perdu. */
+export function accessLost(p: Page): Locator {
+  return p.getByRole("heading", { name: "Tu n'as plus accès à cette page" });
+}
+
+/**
+ * Retient les lectures de la page (`GET /api/v1/pages/{id}`) faites par l'onglet, jusqu'à
+ * `release()`. `asked` est tenue quand la première arrive : c'est celle que fait une connexion
+ * de synchro avant de s'ouvrir.
+ */
+export async function holdPageReads(
+  p: Page,
+  id: string,
+): Promise<{ asked: Promise<void>; release: () => void }> {
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let seen = () => {};
+  const asked = new Promise<void>((resolve) => (seen = resolve));
+  await p.route(`**/api/v1/pages/${id}`, async (route) => {
+    if (route.request().method() === "GET") {
+      seen();
+      await released;
+    }
+    await route.continue();
+  });
+  return { asked, release };
+}
+
 /** La barre latérale de l'application. */
 export function sidebarOf(p: Page): Locator {
   return p.getByRole("navigation", { name: "Barre latérale" });
@@ -340,6 +461,14 @@ export async function expectSignedInAs(p: Page, name: string): Promise<void> {
   await expect(sidebarOf(p).getByRole("group", { name: "Compte" })).toContainText(name);
   await p.keyboard.press("Escape");
   await expect(switcher).toHaveAttribute("aria-expanded", "false");
+}
+
+/** Remplit le formulaire de connexion de `scope` (un écran, une fenêtre) et l'envoie par Entrée. */
+export async function logInWith(scope: Page | Locator, email: string, password: string): Promise<void> {
+  await scope.getByLabel("Adresse e-mail").fill(email);
+  const field = scope.getByLabel("Mot de passe", { exact: true });
+  await field.fill(password);
+  await field.press("Enter");
 }
 
 /** Une section de la barre latérale, avec son titre et son arbre. */

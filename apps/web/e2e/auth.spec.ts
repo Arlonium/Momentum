@@ -12,6 +12,7 @@ import {
   firstSpace,
   getMmd,
   inviteToSpace,
+  logInWith,
   newUser,
   NO_SESSION,
   openPage,
@@ -37,14 +38,6 @@ async function meOf(p: Page): Promise<Me> {
   const res = await p.request.get("/api/v1/me");
   expect(res.status(), await res.text()).toBe(200);
   return (await res.json()) as Me;
-}
-
-/** Remplit le formulaire de connexion de `scope` et l'envoie par Entrée. */
-async function logInWith(scope: Page | ReturnType<Page["getByRole"]>, email: string, password: string) {
-  await scope.getByLabel("Adresse e-mail").fill(email);
-  const field = scope.getByLabel("Mot de passe", { exact: true });
-  await field.fill(password);
-  await field.press("Enter");
 }
 
 test("signup_then_lands_in_the_app", async ({ page }) => {

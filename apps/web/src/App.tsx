@@ -8,7 +8,8 @@
 // - `useSpaceTree`, `useTreeReader` : l'arbre de l'espace affiché ;
 // - `useOpenPage` : la page ouverte, celle de l'arbre ou celle que le serveur rend ;
 // - `useCurrentSpace` : l'espace affiché, d'après l'adresse et la page ouverte ;
-// - `usePageActions` : créer, renommer, jeter, restaurer, déplacer.
+// - `usePageActions` : créer, renommer, jeter, restaurer, déplacer, et ce que la page
+//   ouverte devient quand ses droits changent ailleurs.
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { useServerSchema } from "./editor/useServerSchema";
@@ -174,7 +175,20 @@ export function App() {
         onTitleFocused={actions.titleFocused}
         onSaved={actions.saved}
         onRestore={actions.restore}
+        onReread={actions.reread}
+        onLost={actions.lost}
+        onShared={actions.shared}
+        onShareRefused={actions.shareRefused}
       />
+    );
+  } else if (looked?.state === "gone") {
+    // Perdue pendant qu'elle était ouverte : le serveur répond comme pour une page qui
+    // n'existe pas, qu'elle ait été supprimée ou que l'accès ait été retiré.
+    content = (
+      <Message title="Tu n'as plus accès à cette page">
+        Elle a été supprimée, ou son accès t'a été retiré.
+        {space !== null && " Choisis-en une autre dans la barre latérale."}
+      </Message>
     );
   } else if (looked?.state === "failed") {
     content = (

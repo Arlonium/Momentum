@@ -2,10 +2,13 @@
 // (première étape 2 de la synchro), juste avant que y-websocket ne l'applique. Le test passe
 // par une WebSocket simulée et de vraies trames y-websocket : si leur format changeait, le
 // déverrouillage précoce cesserait sans bruit (l'éditeur se déverrouillerait plus tard, à la
-// synchro), d'où ce test.
+// synchro), d'où ce test. Et la vérification qui précède chaque connexion, en écriture comme
+// en lecture seule.
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import * as Y from "yjs";
+import { deferred } from "../test/hooks";
 import { CollabSession, FRAGMENT } from "./collab";
+import type { ConnectionCheck } from "./schemaGate";
 
 /** WebSocket simulée : le test ouvre la connexion et lui fait recevoir des trames. */
 class FakeSocket {
@@ -73,19 +76,24 @@ function serverDoc(): Y.Doc {
 let sessions: CollabSession[] = [];
 let room = 0;
 
-function open(readOnly: boolean): CollabSession {
+function open(readOnly: boolean, check: ConnectionCheck = async () => true): CollabSession {
   // Une salle par session : y-websocket relie par BroadcastChannel les onglets d'une salle.
   const pageId = `page-${Date.now()}-${room++}`;
   const session = new CollabSession(
     pageId,
-    readOnly ? { readOnly: true } : { readOnly: false, check: async () => true },
+    { readOnly, check },
     { name: "Compte de test", color: "#23704F" },
   );
   sessions.push(session);
   return session;
 }
 
-/** La WebSocket ouverte par la session (après la vérification du schéma). */
+/** Laisse passer les promesses déjà tenues, et celles qu'elles tiennent à leur tour. */
+async function flush(): Promise<void> {
+  await new Promise((done) => setTimeout(done, 0));
+}
+
+/** La WebSocket ouverte par la session (après la vérification qui précède la connexion). */
 async function connected(): Promise<FakeSocket> {
   await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
   const socket = FakeSocket.instances[0];
@@ -102,6 +110,33 @@ afterEach(() => {
   for (const session of sessions) session.destroy();
   sessions = [];
   vi.unstubAllGlobals();
+});
+
+describe("connection_check", () => {
+  test("aucune connexion avant la vérification, en écriture comme en lecture seule", async () => {
+    for (const readOnly of [false, true]) {
+      FakeSocket.instances = [];
+      const verdict = deferred<boolean>();
+      open(readOnly, () => verdict.promise);
+      await flush();
+      expect(FakeSocket.instances, `lecture seule : ${readOnly}`).toHaveLength(0);
+      verdict.resolve(true);
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    }
+  });
+
+  test("jamais de connexion quand la vérification dit non", async () => {
+    for (const readOnly of [false, true]) {
+      FakeSocket.instances = [];
+      const check = vi.fn(async () => false);
+      const session = open(readOnly, check);
+      await flush();
+      // Ni connexion, ni nouvel essai : l'application remplace ou ferme la session.
+      expect(FakeSocket.instances, `lecture seule : ${readOnly}`).toHaveLength(0);
+      expect(check).toHaveBeenCalledTimes(1);
+      expect(session.synced).toBe(false);
+    }
+  });
 });
 
 describe("on_server_state", () => {

@@ -1,10 +1,19 @@
-// WebSocket de synchronisation qui ne s'ouvre qu'après avoir relu la version de schéma du
-// serveur (Ruling R35). y-websocket la crée à chaque connexion et à chaque reconnexion :
-// un serveur mis à jour pendant que l'onglet est ouvert n'en reçoit donc jamais rien, ni
-// étape de synchro ni frappe, puisque la vérification précède l'ouverture.
+// WebSocket de synchronisation qui ne s'ouvre qu'après une vérification : la version de
+// schéma du serveur (Ruling R35) et, depuis les comptes, les droits sur la page
+// (`page/usePageGate.ts`). y-websocket la crée à chaque connexion et à chaque reconnexion :
+// un serveur mis à jour pendant que l'onglet est ouvert, ou une page dont les droits ont
+// changé, n'en reçoit donc jamais rien, ni étape de synchro ni frappe, puisque la
+// vérification précède l'ouverture.
 
 /** `true` : même schéma, on se connecte ; `false` : schéma différent, jamais de connexion. */
 export type SchemaCheck = () => Promise<boolean>;
+
+/**
+ * Ce qui est vérifié avant chaque connexion. `true` : on se connecte. `false` : jamais par
+ * cette session, que l'application remplace ou ferme. Rejetée : le serveur ne répond pas,
+ * la connexion échoue, et y-websocket réessaiera.
+ */
+export type ConnectionCheck = () => Promise<boolean>;
 
 const CONNECTING = 0;
 const OPEN = 1;
@@ -15,11 +24,11 @@ const CLOSED = 3;
  * Classe WebSocket pour l'option `WebSocketPolyfill` de y-websocket. `beforeMessage` voit
  * chaque message reçu juste avant y-websocket, dans la même tâche.
  */
-export function schemaGatedWebSocket(
-  check: SchemaCheck,
+export function gatedWebSocket(
+  check: ConnectionCheck,
   beforeMessage?: (data: unknown) => void,
 ): typeof WebSocket {
-  class SchemaGatedWebSocket {
+  class GatedWebSocket {
     static readonly CONNECTING = CONNECTING;
     static readonly OPEN = OPEN;
     static readonly CLOSING = CLOSING;
@@ -40,10 +49,11 @@ export function schemaGatedWebSocket(
 
     constructor(url: string | URL, protocols?: string | string[]) {
       check().then(
-        (sameSchema) => {
-          // Fermée pendant la vérification, ou serveur d'un autre schéma : la session est
-          // alors remplacée par une session en lecture seule, et cette socket reste close.
-          if (this.state !== CONNECTING || !sameSchema) return;
+        (connect) => {
+          // Fermée pendant la vérification, ou vérification qui dit non (autre schéma, droit
+          // perdu) : la session est alors remplacée par une session en lecture seule, ou
+          // fermée, et cette socket reste close.
+          if (this.state !== CONNECTING || !connect) return;
           const socket = new WebSocket(url, protocols);
           socket.binaryType = this.binaryType;
           socket.onopen = (event) => this.onopen?.(event);
@@ -82,5 +92,5 @@ export function schemaGatedWebSocket(
       else this.state = CLOSED;
     }
   }
-  return SchemaGatedWebSocket as unknown as typeof WebSocket;
+  return GatedWebSocket as unknown as typeof WebSocket;
 }

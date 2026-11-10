@@ -1,6 +1,6 @@
 // Le lien d'une invitation tout juste créée, à copier tout de suite : le serveur ne garde
-// que le hachage du jeton, le lien ne sera plus jamais montré. Réglages de l'espace, et
-// bientôt le menu Partager d'une page.
+// que le hachage du jeton, le lien ne sera plus jamais montré. Réglages de l'espace, et menu
+// Partager d'une page.
 //
 // Chaque lien a son propre cadre (`key`) : une nouvelle invitation repart de « Copier le
 // lien », jamais de « Lien copié », qui dirait copié un lien qui ne l'est pas (le
@@ -14,13 +14,15 @@ type Props = {
   /** Ce que donne l'invitation, en mots (« Membre », « Peut modifier »). */
   grant: string;
   link: string;
+  /** Le nom du bouton, là où un autre lien se copie aussi (celui de la page, menu Partager). */
+  copyLabel?: string;
 };
 
 export function CreatedInvitation(props: Props) {
   return <LinkPanel key={props.link} {...props} />;
 }
 
-function LinkPanel({ email, grant, link }: Props) {
+function LinkPanel({ email, grant, link, copyLabel = "Copier le lien" }: Props) {
   const linkRef = useRef<HTMLInputElement>(null);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
@@ -45,7 +47,12 @@ function LinkPanel({ email, grant, link }: Props) {
         <strong>Ce lien ne sera plus affiché : copie-le maintenant.</strong>
       </p>
       <p className="mm-invite-for">
-        Lien d'invitation préparé pour {email} · {grant}
+        Lien d'invitation préparé pour {email}
+        {/* Ce que donne l'invitation : à la suite, ou sur sa ligne là où la place manque. */}
+        <span className="mm-invite-grant">
+          <span className="mm-invite-separator"> · </span>
+          {grant}
+        </span>
       </p>
       <div className="mm-settings-row">
         <input
@@ -62,7 +69,7 @@ function LinkPanel({ email, grant, link }: Props) {
           onClick={() => void copy()}
         >
           {copied ? <CheckIcon /> : <LinkIcon />}
-          {copied ? "Lien copié" : "Copier le lien"}
+          {copied ? "Lien copié" : copyLabel}
         </button>
       </div>
       <p className="mm-visually-hidden" role="status">
