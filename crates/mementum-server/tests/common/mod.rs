@@ -836,9 +836,17 @@ pub fn outcome(reply: &Reply) -> (StatusCode, Option<String>, String) {
 }
 
 /// Journaux `tracing` émis sur le fil courant tant que la valeur vit.
+///
+/// Elle tient aussi un second abonné, inerte, pour toute sa durée. Sans lui, quand cet abonné
+/// est le seul du processus, `tracing` décide de l'intérêt d'un point de journal d'après le fil
+/// qui l'atteint le premier (`tracing-core`, `Rebuilder::JustOne`) : atteint d'abord par le fil
+/// d'un autre test, qui n'a pas d'abonné, il est tenu pour éteint, et ce fil-ci n'en reçoit
+/// plus rien. Un test qui lit une ligne que d'autres tests font aussi écrire échouait ainsi
+/// une fois sur deux ou trois. Avec deux abonnés inscrits, l'intérêt se décide sur tous.
 pub struct Logs {
     buffer: Arc<Mutex<Vec<u8>>>,
     _guard: tracing::subscriber::DefaultGuard,
+    _never_alone: tracing::Dispatch,
 }
 
 struct LogWriter(Arc<Mutex<Vec<u8>>>);
@@ -859,6 +867,8 @@ impl std::io::Write for LogWriter {
 
 impl Logs {
     pub fn capture() -> Logs {
+        // Inscrit avant l'abonné du fil, et lâché après lui.
+        let never_alone = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let writer = buffer.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -869,6 +879,7 @@ impl Logs {
         Logs {
             buffer,
             _guard: tracing::subscriber::set_default(subscriber),
+            _never_alone: never_alone,
         }
     }
 

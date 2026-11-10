@@ -505,6 +505,11 @@ mod tests {
     use super::*;
 
     /// Ce que `work` journalise sur ce fil, avec ce qu'il rend.
+    ///
+    /// Un second abonné, inerte, est inscrit le temps de la lecture. Seul inscrit du
+    /// processus, celui de ce fil ne recevrait rien d'un point de journal que le fil d'un autre
+    /// test, sans abonné, atteint le premier : `tracing` décide alors de l'intérêt du point
+    /// d'après ce fil-là (`tracing-core`, `Rebuilder::JustOne`), et le tient pour éteint.
     fn logged<T>(work: impl FnOnce() -> T) -> (T, String) {
         struct Buffer(Arc<Mutex<Vec<u8>>>);
         impl Write for Buffer {
@@ -520,6 +525,7 @@ mod tests {
                 Ok(())
             }
         }
+        let _never_alone = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let writer = buffer.clone();
         let subscriber = tracing_subscriber::fmt()
