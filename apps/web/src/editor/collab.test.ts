@@ -79,6 +79,7 @@ function open(readOnly: boolean): CollabSession {
   const session = new CollabSession(
     pageId,
     readOnly ? { readOnly: true } : { readOnly: false, check: async () => true },
+    { name: "Compte de test", color: "#23704F" },
   );
   sessions.push(session);
   return session;

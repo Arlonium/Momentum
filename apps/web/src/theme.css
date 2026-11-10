@@ -11,6 +11,7 @@
   --mm-accent-hover: #174d36;
   --mm-accent-soft: #23704f22;
   --mm-danger: #b4462b;
+  --mm-danger-soft: #fbefeb;
   --mm-background: #ffffff;
   --mm-surface: #f4f3ef;
   --mm-border: #e2e0da;
@@ -18,6 +19,10 @@
   --mm-sidebar-border: #e8e6e1;
   --mm-sidebar-hover: #efede8;
   --mm-sidebar-active: #e9e7e1;
+  /* Menus et fenêtres (menu Partager de la maquette). */
+  --mm-popover-border: #e5e3de;
+  --mm-popover-divider: #efede8;
+  --mm-popover-shadow: 0 14px 36px rgba(20, 20, 20, 0.14), 0 2px 6px rgba(20, 20, 20, 0.06);
   --mm-sidebar-width: 260px;
   /* Éléments de la barre latérale : 30 à 32 px. Les lignes de l'arbre ont 30 px,
      `ROW_HEIGHT` de `sidebar/rows.ts`, que l'arbre fenêtré lit pour les placer. */
@@ -87,7 +92,8 @@ a:hover {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 10px 8px 12px;
+  /* Le bas est celui du compte (`.mm-side-footer`), collé au bas de la barre. */
+  padding: 10px 8px 0;
   background: var(--mm-sidebar-bg);
   border-right: 1px solid var(--mm-sidebar-border);
 }
@@ -159,6 +165,122 @@ a:hover {
   padding: 6px 8px;
   font-size: 13px;
   color: var(--mm-danger);
+}
+
+/* Compte, en bas de la barre latérale : poussé en bas quand l'arbre est court, collé au bas
+   de la partie visible quand il défile. */
+
+.mm-side-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  flex: none;
+  margin: auto -8px 0;
+  padding: 8px 8px 10px;
+  background: var(--mm-sidebar-bg);
+  border-top: 1px solid var(--mm-sidebar-border);
+}
+
+.mm-account {
+  position: relative;
+}
+
+.mm-account-button {
+  width: 100%;
+}
+
+.mm-account-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--mm-text);
+  font-weight: 500;
+}
+
+.mm-account-button svg {
+  flex: none;
+  color: var(--mm-text-secondary);
+}
+
+.mm-avatar {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #ffffff;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+/* Le menu s'ouvre au-dessus du bouton, sur la largeur de la barre latérale. */
+.mm-account-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  padding: 6px;
+  border: 1px solid var(--mm-popover-border);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: var(--mm-popover-shadow);
+}
+
+.mm-account-who {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--mm-popover-divider);
+}
+
+.mm-account-names {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.mm-account-name,
+.mm-account-email {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mm-account-name {
+  font-weight: 500;
+  color: var(--mm-text);
+}
+
+.mm-account-email {
+  font-size: 12px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-account-role {
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--mm-accent);
+}
+
+.mm-account-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mm-account-actions .mm-side-action:hover {
+  background: var(--mm-surface);
+}
+
+.mm-account-menu .mm-side-error {
+  margin: 4px 0 0;
 }
 
 /* Arbre fenêtré (R43) : il a la hauteur de toutes ses lignes, posée par `PageTree`, mais
@@ -422,6 +544,186 @@ button.tree-toggle:hover {
 .mm-button-primary:hover {
   border-color: var(--mm-accent-hover);
   background: var(--mm-accent-hover);
+}
+
+.mm-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Session : connexion et inscription, en page (sobres et centrées, comme chez Notion). */
+
+.mm-auth {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  padding: 14vh 16px 64px;
+  background: var(--mm-background);
+}
+
+.mm-auth-column {
+  width: 100%;
+  max-width: 340px;
+}
+
+.mm-auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 32px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--mm-text);
+}
+
+.mm-auth-brand .mm-brand-tile {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.mm-auth-title {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--mm-text-strong);
+}
+
+.mm-auth-lead {
+  margin: 0 0 24px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mm-auth-submit {
+  width: 100%;
+  min-height: 36px;
+  margin-top: 2px;
+}
+
+.mm-auth-footer {
+  margin: 22px 0 0;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+/* Champs */
+
+.mm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.mm-field label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--mm-text-sidebar);
+}
+
+.mm-input {
+  width: 100%;
+  min-height: 36px;
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--mm-text);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.mm-input:focus,
+.mm-input:focus-visible {
+  outline: none;
+  border-color: var(--mm-accent);
+  box-shadow: 0 0 0 3px var(--mm-accent-soft);
+}
+
+.mm-field-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--mm-text-secondary);
+}
+
+/* Message du serveur tel quel : seule son initiale passe en capitale, à l'affichage. */
+.mm-form-error {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--mm-danger-soft);
+  color: var(--mm-danger);
+  font-size: 13px;
+}
+
+.mm-form-error::first-letter {
+  text-transform: uppercase;
+}
+
+/* Fenêtres (élément `dialog`, ouvert par `showModal`) */
+
+.mm-dialog {
+  width: min(400px, calc(100vw - 32px));
+  max-width: none;
+  padding: 22px 24px 20px;
+  border: 1px solid var(--mm-popover-border);
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--mm-text);
+  box-shadow: var(--mm-popover-shadow);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.mm-dialog::backdrop {
+  background: rgba(31, 30, 28, 0.28);
+}
+
+.mm-dialog-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 650;
+  color: var(--mm-text-strong);
+}
+
+.mm-dialog-lead {
+  margin: 0;
+  color: var(--mm-text-secondary);
+}
+
+.mm-dialog .mm-auth-form {
+  margin-top: 16px;
+}
+
+.mm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* Connexion demandée par-dessus la page ouverte : la page reste visible, voilée. */
+.mm-relogin {
+  width: min(380px, calc(100vw - 32px));
+  padding: 28px 28px 24px;
+}
+
+.mm-relogin .mm-auth-form {
+  margin-top: 0;
+}
+
+.mm-relogin::backdrop {
+  background: rgba(246, 245, 241, 0.78);
+  backdrop-filter: blur(2px);
 }
 
 /* Éditeur BlockNote */

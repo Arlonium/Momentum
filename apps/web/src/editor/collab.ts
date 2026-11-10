@@ -1,5 +1,5 @@
 // Collaboration d'une page : un Y.Doc synchronisé avec le serveur par la WebSocket
-// `/sync/{id}` (protocole y-websocket), et l'identité d'invité affichée près du curseur.
+// `/sync/{id}` (protocole y-websocket), et le compte affiché près du curseur.
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 import { schemaGatedWebSocket, type SchemaCheck } from "./schemaGate";
@@ -8,34 +8,11 @@ import { CLIENT_SCHEMA_VERSION } from "./version";
 /** Nom du fragment partagé, celui que le serveur lit et écrit (`mementum-crdt`). */
 export const FRAGMENT = "document-store";
 
-/** Couleurs des curseurs (celles des avatars de la maquette « Papier »). */
-const PALETTE = ["#B4462B", "#2B59C3", "#23704F", "#6B4FBB", "#C27A12"];
-
-const GUEST_KEY = "mementum.guest";
-
-export type Guest = { name: string; color: string };
-
 /**
- * L'invité de ce navigateur : le lot 1 n'a pas de comptes. « Invité » suivi de 4 chiffres
- * tirés au premier lancement et gardés dans `localStorage` ; la couleur en découle.
+ * Ce que l'onglet annonce aux autres présents (curseur, présence) : le nom du compte et sa
+ * couleur (`colorOf` de `session/session.ts`).
  */
-export function guest(): Guest {
-  let digits: string | null = null;
-  try {
-    digits = localStorage.getItem(GUEST_KEY);
-  } catch {
-    // stockage refusé (navigation privée stricte) : un invité pour cette visite seulement
-  }
-  if (!digits || !/^\d{4}$/.test(digits)) {
-    digits = String(Math.floor(Math.random() * 10_000)).padStart(4, "0");
-    try {
-      localStorage.setItem(GUEST_KEY, digits);
-    } catch {
-      // idem
-    }
-  }
-  return { name: `Invité ${digits}`, color: PALETTE[Number(digits) % PALETTE.length] };
-}
+export type PresenceUser = { name: string; color: string };
 
 export type SyncStatus = "connecting" | "connected" | "disconnected";
 
@@ -60,7 +37,8 @@ export class CollabSession {
   readonly readOnly: boolean;
   readonly provider: WebsocketProvider;
   readonly doc: Y.Doc;
-  readonly user: Guest = guest();
+  /** Annoncé aux autres présents ; rien en lecture seule. */
+  readonly user: PresenceUser;
   /** La première synchronisation est faite : la racine de la page est celle du serveur. */
   synced = false;
   status: SyncStatus = "connecting";
@@ -68,9 +46,10 @@ export class CollabSession {
   private readonly serverStateListeners = new Set<() => void>();
   private readonly cleanups: (() => void)[] = [];
 
-  constructor(pageId: string, mode: SessionMode) {
+  constructor(pageId: string, mode: SessionMode, user: PresenceUser) {
     this.pageId = pageId;
     this.readOnly = mode.readOnly;
+    this.user = user;
     const shared = new Y.Doc();
     // Sans `schema`, le serveur traiterait la connexion comme celle du schéma 0, en
     // lecture seule (R30) : on la donne toujours.

@@ -1,5 +1,6 @@
 // Barre latérale : l'arbre des pages, « Nouvelle page » (à la racine) et « + » au survol
-// d'une page (sous-page). Déplacer les pages à la souris viendra au lot 2.
+// d'une page (sous-page), puis le compte, en bas (`AccountMenu`). Déplacer les pages à la
+// souris viendra au lot 2.
 //
 // L'arbre est fenêtré (Ruling R43) : il a la hauteur de toutes ses lignes
 // (`rows.length × ROW_HEIGHT`), mais seules celles de la partie visible de la barre
@@ -9,6 +10,7 @@
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { PlusIcon } from "../icons";
+import { AccountMenu } from "../session/AccountMenu";
 import { flattenRows, OVERSCAN, ROW_HEIGHT } from "./rows";
 import { TreeRow } from "./TreeRow";
 
@@ -52,6 +54,8 @@ export function PageTree({ nodes, activeId, readOnly, onCreate, notice }: Props)
   /** La barre latérale, qui défile. */
   const scrollerRef = useRef<HTMLElement>(null);
   const treeRef = useRef<HTMLDivElement>(null);
+  /** Le compte, collé au bas de la partie visible : il cache les lignes qui passent dessous. */
+  const footerRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState<Range>({ start: 0, end: 0 });
 
   const measure = useCallback(() => {
@@ -98,10 +102,12 @@ export function PageTree({ nodes, activeId, readOnly, onCreate, notice }: Props)
     const index = rows.findIndex((row) => row.node.id === activeId);
     if (index < 0) return;
     revealed.current = activeId;
-    // Haut de la ligne, mesuré depuis le haut de la partie visible.
+    // Haut de la ligne, mesuré depuis le haut de la partie visible, dont le bas est caché par
+    // le compte.
     const top = tree.getBoundingClientRect().top + index * ROW_HEIGHT - viewTop(scroller);
-    if (top >= 0 && top + ROW_HEIGHT <= scroller.clientHeight) return;
-    scroller.scrollTop += top - (scroller.clientHeight - ROW_HEIGHT) / 2;
+    const height = scroller.clientHeight - (footerRef.current?.offsetHeight ?? 0);
+    if (top >= 0 && top + ROW_HEIGHT <= height) return;
+    scroller.scrollTop += top - (height - ROW_HEIGHT) / 2;
     measure();
   }, [activeId, rows, measure]);
 
@@ -179,6 +185,10 @@ export function PageTree({ nodes, activeId, readOnly, onCreate, notice }: Props)
           {notice}
         </p>
       )}
+      {/* Collé au bas de la barre latérale, qui défile au-dessus de lui. */}
+      <div ref={footerRef} className="mm-side-footer">
+        <AccountMenu />
+      </div>
     </nav>
   );
 }

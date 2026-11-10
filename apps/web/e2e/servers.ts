@@ -8,8 +8,13 @@
 // (`reuseExistingServer: false`) : en phase 0, un autre projet occupait 5173 et les tests
 // visaient son application. Les configurations vérifient donc d'abord que les deux ports
 // sont libres, et s'arrêtent sinon en nommant le port pris.
+//
+// Sessions : `global-setup.ts` crée le compte par défaut et enregistre sa session
+// (`defaultStorageState()`), que portent tous les contextes des tests ; `e2e/helpers.ts`
+// crée les autres comptes (`signUpAccount`).
+import type { PlaywrightTestConfig } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +25,8 @@ export const API_PORT = Number(process.env.MEMENTUM_E2E_API_PORT || 8080);
 export const REPO = fileURLToPath(new URL("../../..", import.meta.url));
 /** `apps/web`. */
 export const WEB = fileURLToPath(new URL("..", import.meta.url));
+/** L'application, telle que les tests l'ouvrent (par le mandataire de Vite pour l'API). */
+export const BASE_URL = `http://localhost:${WEB_PORT}`;
 
 /** Environnement des serveurs lancés : Vite lit les ports pour son mandataire. */
 export const env = {
@@ -61,18 +68,19 @@ function takenOn(port: number): string | null {
   return out.trim() || null;
 }
 
-const DATA_DIR_VAR = "MEMENTUM_E2E_INTERNAL_DATA_DIR";
+const RUN_DIR_VAR = "MEMENTUM_E2E_INTERNAL_RUN_DIR";
 
 /**
- * Le dossier de données du serveur de cette exécution. La configuration est relue par
- * chaque processus de test, et parfois par le processus principal lui-même (modes UI et
- * watch), alors que nos serveurs tiennent déjà les ports. La première lecture vérifie les
- * ports (et arrête tout si l'un est pris), crée le dossier et le note dans
- * l'environnement, dont héritent les processus de test.
+ * Le dossier de cette exécution : `data/`, les données du serveur, et `accounts/`, les
+ * comptes de test et leurs sessions. La configuration est relue par chaque processus de
+ * test, et parfois par le processus principal lui-même (modes UI et watch), alors que nos
+ * serveurs tiennent déjà les ports. La première lecture vérifie les ports (et arrête tout
+ * si l'un est pris), crée le dossier et le note dans l'environnement, dont héritent les
+ * processus de test.
  */
 export function prepareServers(): string {
-  let dataDir = process.env[DATA_DIR_VAR] ?? "";
-  if (dataDir || process.env.TEST_WORKER_INDEX !== undefined) return dataDir;
+  let runDir = process.env[RUN_DIR_VAR] ?? "";
+  if (runDir || process.env.TEST_WORKER_INDEX !== undefined) return runDir;
   for (const [name, port] of [
     ["MEMENTUM_E2E_WEB_PORT", WEB_PORT],
     ["MEMENTUM_E2E_API_PORT", API_PORT],
@@ -87,15 +95,49 @@ export function prepareServers(): string {
       process.exit(1);
     }
   }
-  dataDir = mkdtempSync(join(tmpdir(), "mementum-e2e-"));
-  process.env[DATA_DIR_VAR] = dataDir;
+  runDir = mkdtempSync(join(tmpdir(), "mementum-e2e-"));
+  mkdirSync(join(runDir, "data"));
+  mkdirSync(join(runDir, "accounts"));
+  process.env[RUN_DIR_VAR] = runDir;
   // Après l'arrêt des serveurs ; un fichier encore verrouillé reste dans le dossier temporaire.
   process.on("exit", () => {
     try {
-      rmSync(dataDir, { recursive: true, force: true, maxRetries: 3 });
+      rmSync(runDir, { recursive: true, force: true, maxRetries: 3 });
     } catch {
       // dossier temporaire du système : sans conséquence
     }
   });
-  return dataDir;
+  return runDir;
+}
+
+/** Le dossier des comptes de test et de leurs sessions (`storageState`). */
+export function accountsDir(): string {
+  return join(prepareServers(), "accounts");
+}
+
+/** La session du compte par défaut, créée par `global-setup.ts`. */
+export function defaultStorageState(): string {
+  return join(accountsDir(), "default.storage.json");
+}
+
+type WebServer = Exclude<NonNullable<PlaywrightTestConfig["webServer"]>, unknown[]>;
+
+/**
+ * Le serveur Mementum des tests, sur le dossier de données de cette exécution : compilé en
+ * debug pour la suite ordinaire, en release pour les budgets (`release`, Ruling R38).
+ * Inscriptions ouvertes (`MEMENTUM_SIGNUP=open`) : chaque test crée ses comptes.
+ */
+export function apiServer({ release }: { release: boolean }): WebServer {
+  const dataDir = join(prepareServers(), "data");
+  return {
+    // La première compilation (en release surtout) peut être longue : délai généreux.
+    command: `cargo run ${release ? "--release " : ""}-p mementum-cli -- serve --bind 127.0.0.1:${API_PORT} --data-dir "${dataDir}"`,
+    cwd: REPO,
+    url: `http://127.0.0.1:${API_PORT}/health`,
+    reuseExistingServer: false,
+    timeout: 900_000,
+    stdout: "ignore",
+    stderr: "pipe",
+    env: { ...env, MEMENTUM_SIGNUP: "open" },
+  };
 }

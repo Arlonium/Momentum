@@ -1,18 +1,25 @@
 // Outils partagés des tests de bout en bout. Les appels REST passent par le mandataire de
 // Vite (`baseURL`), comme ceux de l'application.
+//
+// Comptes : `global-setup.ts` crée le compte par défaut, dont la session (`storageState`)
+// est celle de tous les contextes des tests (configurations de Playwright). `newUser` et
+// `apiAs` prennent ce compte, ou un autre, créé par `signUpAccount`.
 import {
   expect,
+  request,
   type APIRequestContext,
   type Browser,
   type BrowserContext,
   type Page,
 } from "@playwright/test";
-import type { CreatePage, PageNode, Tree } from "@mementum/protocol";
+import type { CreatePage, PageNode, SignUp, Tree } from "@mementum/protocol";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 // Déclare `window.__mementum` pour les fonctions passées à `page.evaluate`.
 import type {} from "../src/editor/debug";
+import { accountsDir, BASE_URL } from "./servers";
 
 /** Version du registre des blocs (`spec/schema/blocks.json`), celle du client et du serveur. */
 export const REGISTRY_VERSION: number = JSON.parse(
@@ -62,23 +69,93 @@ export async function waitSynced(p: Page): Promise<void> {
   );
 }
 
-const contexts: BrowserContext[] = [];
+/** Mot de passe des comptes de test : une constante manifestement fausse. */
+export const PASSWORD = "mot-de-passe-de-test";
 
-/** Un nouveau contexte de navigateur (un autre utilisateur), fermé par `closeContexts`. */
-export async function newUser(browser: Browser): Promise<Page> {
-  const context = await browser.newContext();
+/** Un compte de test, et le fichier de sa session (`storageState` de Playwright). */
+export type Account = { email: string; name: string; password: string; storageState: string };
+
+/** Aucun cookie : un navigateur ou un client sans session. */
+export const NO_SESSION = { cookies: [], origins: [] };
+
+/**
+ * Crée le compte par l'API (`POST /api/v1/auth/signup`, inscriptions ouvertes) et
+ * enregistre sa session dans `storageState`. Sert aussi à `global-setup.ts`.
+ */
+export async function createAccount(
+  body: SignUp,
+  storageState: string,
+  baseURL: string = BASE_URL,
+): Promise<Account> {
+  const api = await request.newContext({ baseURL, storageState: NO_SESSION });
+  try {
+    const res = await api.post("/api/v1/auth/signup", { data: body });
+    if (res.status() !== 201) {
+      throw new Error(`inscription de ${body.email} refusée : ${res.status()} ${await res.text()}`);
+    }
+    await api.storageState({ path: storageState });
+  } finally {
+    await api.dispose();
+  }
+  return { email: body.email, name: body.name, password: body.password, storageState };
+}
+
+/** Un compte neuf, créé par l'API, avec sa session. */
+export async function signUpAccount(name?: string): Promise<Account> {
+  const tag = unique();
+  return createAccount(
+    { email: `compte-${tag}@exemple.fr`, name: name ?? `Compte ${tag}`, password: PASSWORD },
+    join(accountsDir(), `${tag}.storage.json`),
+  );
+}
+
+/** Où `global-setup.ts` décrit le compte par défaut. */
+export function defaultAccountFile(): string {
+  return join(accountsDir(), "default.json");
+}
+
+let defaultAccountCache: Account | null = null;
+
+/** Le compte par défaut, créé par `global-setup.ts` : celui de tous les tests. */
+export function defaultAccount(): Account {
+  defaultAccountCache ??= JSON.parse(readFileSync(defaultAccountFile(), "utf8")) as Account;
+  return defaultAccountCache;
+}
+
+const contexts: BrowserContext[] = [];
+const apis: APIRequestContext[] = [];
+
+/**
+ * Un nouveau contexte de navigateur (un autre onglet, une autre machine), avec la session
+ * de `account` (par défaut, le compte du `globalSetup`), fermé par `closeContexts`.
+ */
+export async function newUser(browser: Browser, account: Account = defaultAccount()): Promise<Page> {
+  const context = await browser.newContext({ storageState: account.storageState });
   contexts.push(context);
   return context.newPage();
 }
 
-/** Ferme les contextes ouverts par `newUser` et `openPage`. */
-export async function closeContexts(): Promise<void> {
-  await Promise.all(contexts.splice(0).map((c) => c.close()));
+/**
+ * Un client de l'API avec la session de `account` (par défaut, le compte du `globalSetup`),
+ * fermé par `closeContexts`.
+ */
+export async function apiAs(account: Account = defaultAccount()): Promise<APIRequestContext> {
+  const api = await request.newContext({ baseURL: BASE_URL, storageState: account.storageState });
+  apis.push(api);
+  return api;
 }
 
-/** Ouvre la page `id` pour un nouvel utilisateur et attend la synchro. */
-export async function openPage(browser: Browser, id: string): Promise<Page> {
-  const p = await newUser(browser);
+/** Ferme les contextes ouverts par `newUser`, `openPage` et `apiAs`. */
+export async function closeContexts(): Promise<void> {
+  await Promise.all([
+    ...contexts.splice(0).map((c) => c.close()),
+    ...apis.splice(0).map((a) => a.dispose()),
+  ]);
+}
+
+/** Ouvre la page `id` avec la session de `account` et attend la synchro. */
+export async function openPage(browser: Browser, id: string, account?: Account): Promise<Page> {
+  const p = await newUser(browser, account);
   await p.goto(`/p/${id}`);
   await waitSynced(p);
   return p;

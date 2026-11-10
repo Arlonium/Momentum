@@ -85,3 +85,28 @@ export const TocIcon = () => (
     <path d="M4 6h.01M4 12h.01M4 18h.01" />
   </Icon>
 );
+
+export const KeyIcon = () => (
+  <Icon>
+    <circle cx="8" cy="15" r="4" />
+    <path d="M11 12l9-9" />
+    <path d="M16 7l3 3" />
+    <path d="M14 9l2 2" />
+  </Icon>
+);
+
+export const LogOutIcon = () => (
+  <Icon>
+    <path d="M9 4H5v16h4" />
+    <path d="M16 8l4 4-4 4" />
+    <path d="M20 12H9" />
+  </Icon>
+);
+
+/** Ouvre un menu vers le haut ou vers le bas (bouton du compte). */
+export const ChevronsIcon = () => (
+  <Icon size={14}>
+    <path d="M8 9l4-4 4 4" />
+    <path d="M8 15l4 4 4-4" />
+  </Icon>
+);

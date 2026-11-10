@@ -6,6 +6,7 @@ import { requestedFixture } from "../editor/fixtures";
 import { LazyEditor } from "../editor/LazyEditor";
 import { ReadOnlyBanner } from "../editor/ReadOnlyBanner";
 import type { SchemaCheck } from "../editor/schemaGate";
+import { colorOf, useSession } from "../session/session";
 import { TitleInput } from "./TitleInput";
 
 type Props = {
@@ -33,19 +34,22 @@ export function PageView({
   const [session, setSession] = useState<CollabSession | null>(null);
   // `?fixture=<nom>`, en développement seulement : la fixture est chargée dans la page neuve.
   const [fixture] = useState(requestedFixture);
+  // La présence porte le nom du compte et sa couleur.
+  const { id: userId, name: userName } = useSession().me.user;
 
   // Passer en lecture seule recrée la session, sur des `Y.Doc` neufs.
   useEffect(() => {
     const opened = new CollabSession(
       node.id,
       readOnly ? { readOnly: true } : { readOnly: false, check: checkSchema },
+      { name: userName, color: colorOf(userId) },
     );
     setSession(opened);
     return () => {
       opened.destroy();
       setSession((current) => (current === opened ? null : current));
     };
-  }, [node.id, readOnly, checkSchema]);
+  }, [node.id, readOnly, checkSchema, userId, userName]);
 
   return (
     <>

@@ -1,14 +1,22 @@
-// Routeur minimal (History API) : `/` (accueil) et `/p/:id` (une page). Les liens internes
+// Routeur minimal (History API) : `/` (accueil), `/p/:id` (une page), `/login` et `/signup`
+// (connexion et inscription, montrées par `SessionGate` sans session). Les liens internes
 // restent de vrais `<a href>` (nouvel onglet, copie du lien) ; un clic simple est
 // intercepté pour changer de page sans recharger l'application.
 import { useEffect, useSyncExternalStore } from "react";
 
-export type Route = { name: "home" } | { name: "page"; id: string } | { name: "notFound" };
+export type Route =
+  | { name: "home" }
+  | { name: "login" }
+  | { name: "signup" }
+  | { name: "page"; id: string }
+  | { name: "notFound" };
 
 const CHANGE = "mementum:navigate";
 
 export function parseRoute(pathname: string): Route {
   if (pathname === "/" || pathname === "") return { name: "home" };
+  if (/^\/login\/?$/.test(pathname)) return { name: "login" };
+  if (/^\/signup\/?$/.test(pathname)) return { name: "signup" };
   const match = /^\/p\/([^/]+)\/?$/.exec(pathname);
   if (match) {
     try {
@@ -24,9 +32,11 @@ export function pagePath(id: string): string {
   return `/p/${encodeURIComponent(id)}`;
 }
 
-export function navigate(path: string): void {
+/** Va à `path` ; `replace` : à la place de l'entrée courante de l'historique. */
+export function navigate(path: string, { replace = false }: { replace?: boolean } = {}): void {
   if (path === location.pathname + location.search) return;
-  history.pushState(null, "", path);
+  if (replace) history.replaceState(null, "", path);
+  else history.pushState(null, "", path);
   window.dispatchEvent(new Event(CHANGE));
 }
 
