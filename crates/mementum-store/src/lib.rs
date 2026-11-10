@@ -12,6 +12,7 @@
 //!   transaction.
 //! - `nodes.rs` : l'arbre de pages, rangé par positions fractionnaires ; la corbeille.
 //! - `acl.rs` : les accès posés sur les pages.
+//! - `access_inputs.rs` : ce que le calcul des accès lit d'un espace, en une transaction.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
 //! - `position.rs` : l'index fractionnaire.
 //!
@@ -27,6 +28,7 @@
 //! d'un nœud, sa place sous le même parent, et le contenu d'une page (journal, instantanés).
 //! Sinon, chaque titre tapé viderait le cache de tout l'espace.
 
+mod access_inputs;
 mod acl;
 mod backup;
 mod docs;
@@ -49,6 +51,7 @@ use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use uuid::Uuid;
 
+pub use access_inputs::AccessInputs;
 pub use acl::{AccessChange, AccessWritten, ShareRefusal};
 pub use backup::{Backup, backup_path};
 pub use docs::DocState;
