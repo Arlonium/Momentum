@@ -441,3 +441,44 @@ test("account_changed_in_another_tab_reloads_this_one", async ({ browser }) => {
   await expectSignedInAs(first, bruno.name);
   expect(await first.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBeUndefined();
 });
+
+test("account_changed_in_another_tab_reloads_on_return", async ({ browser }) => {
+  const { alice, space, bruno } = await ownerAndMember();
+  // Premier onglet : l'application d'A, sans page ouverte.
+  const first = await newUser(browser, alice);
+  // L'horloge de l'onglet est la nôtre : on n'attend pas cinq secondes pour de bon.
+  await first.clock.install();
+  await first.goto(`/s/${space.id}`);
+  await expectSignedInAs(first, alice.name);
+  // Un repère sur la fenêtre : un rechargement de l'onglet l'efface.
+  await first.evaluate(() => ((window as unknown as { kept: boolean }).kept = true));
+
+  // Second onglet du même navigateur : A se déconnecte, B se connecte. Le cookie de session
+  // est désormais celui de B, pour les deux onglets.
+  const second = await first.context().newPage();
+  await second.goto("/");
+  await spaceSwitcher(second).click();
+  await second.getByRole("button", { name: "Se déconnecter" }).click();
+  await expect(loginHeading(second)).toBeVisible();
+  await logInWith(second, bruno.email, bruno.password);
+  await expectSignedInAs(second, bruno.name);
+
+  // Ce que le premier onglet demande au serveur d'ici à son rechargement.
+  const asked: string[] = [];
+  let reloading = false;
+  first.on("request", (request) => {
+    reloading ||= request.isNavigationRequest();
+    const { pathname } = new URL(request.url());
+    if (!reloading && pathname.startsWith("/api/")) asked.push(`${request.method()} ${pathname}`);
+  });
+  // On revient sur le premier onglet, sans rien y toucher : il relit l'arbre et le compte,
+  // apprend que ce n'est plus le sien, et se recharge. L'écran est celui de B.
+  const reloaded = first.waitForEvent("load", { timeout: 5_000 });
+  await first.clock.fastForward(5_500);
+  await first.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await reloaded;
+  await expectSignedInAs(first, bruno.name);
+  expect(await first.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBeUndefined();
+  // Rien n'est parti sous le mauvais nom : deux lectures, aucune action.
+  expect(asked.sort()).toEqual(["GET /api/v1/me", `GET /api/v1/spaces/${space.id}/tree`]);
+});

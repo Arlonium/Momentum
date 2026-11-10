@@ -2,19 +2,22 @@
 // (Ruling R115) : rouvert sous un autre compte par la fenêtre « Ta session a pris fin », ou
 // changé dans un autre onglet du même navigateur et appris à la relecture du compte. Dans les
 // deux cas l'application est démontée, puis l'onglet rechargé ; le même compte, lui, continue.
-import type { Me } from "@mementum/protocol";
-import { act, useEffect } from "react";
+// Et le compte relu au retour sur l'onglet, avec l'arbre (Ruling R126).
+import type { Me, Tree } from "@mementum/protocol";
+import { act, useCallback, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { getMe, logIn, onSessionLost } from "../api";
+import { getMe, getTree, logIn, onSessionLost } from "../api";
+import { REFRESH_INTERVAL_MS, useSpaceTree, useTreeReader } from "../space/useSpaceTree";
 import "../test/hooks";
-import { space } from "../test/pages";
+import { space, unreachable } from "../test/pages";
 import { useSession } from "./session";
 import { SessionGate } from "./SessionGate";
 
 vi.mock("../api", async (original) => ({
   ...(await original<typeof import("../api")>()),
   getMe: vi.fn(),
+  getTree: vi.fn(),
   logIn: vi.fn(),
   onSessionLost: vi.fn(),
 }));
@@ -52,6 +55,22 @@ function App() {
   return <p>{session.me.user.name}</p>;
 }
 
+/**
+ * L'application sur un espace, câblée comme `App.tsx` : au retour sur l'onglet, le compte est
+ * relu avec l'arbre, et un échec de cette relecture ne dit rien.
+ */
+function AppOnASpace() {
+  const { refresh } = useSession();
+  const reread = useCallback(() => void refresh().catch(() => {}), [refresh]);
+  useTreeReader(useSpaceTree(), "perso", {
+    retries: 0,
+    onSessionLost: () => {},
+    onGone: () => {},
+    onReturn: reread,
+  });
+  return <App />;
+}
+
 beforeEach(() => {
   history.replaceState(null, "", "/");
   host = document.createElement("div");
@@ -61,6 +80,8 @@ beforeEach(() => {
   shownFor = new Set();
   reload.mockClear();
   for (const mock of [getMe, logIn]) vi.mocked(mock).mockReset();
+  vi.mocked(getTree).mockReset();
+  vi.mocked(getTree).mockImplementation(async (spaceId): Promise<Tree> => ({ spaceId, nodes: [] }));
   vi.mocked(onSessionLost).mockReset();
   vi.mocked(onSessionLost).mockImplementation((listener) => {
     sessionLost = listener;
@@ -75,18 +96,13 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
+  vi.useRealTimers();
 });
 
 /** L'application ouverte sous le compte d'Alice. */
-async function opened() {
+async function opened(app: ReactNode = <App />) {
   vi.mocked(getMe).mockResolvedValueOnce(account("alice", "Alice"));
-  await act(async () =>
-    root.render(
-      <SessionGate reload={reload}>
-        <App />
-      </SessionGate>,
-    ),
-  );
+  await act(async () => root.render(<SessionGate reload={reload}>{app}</SessionGate>));
   expect(host.textContent).toBe("Alice");
   expect(events).toEqual(["montée"]);
 }
@@ -142,4 +158,66 @@ test("another_account_logging_in_over_the_application_reloads_the_tab", async ()
   expect([...shownFor]).toEqual(["Alice"]);
   expect(host.textContent).toBe("");
   expect(reload).toHaveBeenCalledTimes(1);
+});
+
+/** L'application sur un espace, à l'instant `OPENED_AT` ; rend de quoi revenir sur l'onglet. */
+const OPENED_AT = 1_000_000;
+async function openedOnASpace() {
+  // Seule l'horloge est fausse : les promesses suivent leur cours.
+  vi.useFakeTimers({ toFake: ["Date"], now: OPENED_AT });
+  await opened(<AppOnASpace />);
+  expect(getMe).toHaveBeenCalledTimes(1);
+  /** L'onglet reprend le focus, `after` millisecondes après l'ouverture. */
+  return async (after: number) => {
+    vi.setSystemTime(OPENED_AT + after);
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+  };
+}
+
+test("tab_coming_back_reads_the_account_again_at_most_every_five_seconds", async () => {
+  const comeBack = await openedOnASpace();
+  // Trop tôt après la dernière lecture de l'arbre : ni l'arbre ni le compte.
+  await comeBack(REFRESH_INTERVAL_MS - 1);
+  expect(getMe).toHaveBeenCalledTimes(1);
+  // Cinq secondes après : le compte est relu avec l'arbre, et ce que d'autres y ont changé
+  // (son nom, son rôle dans l'espace) arrive à l'application, qui continue.
+  vi.mocked(getMe).mockResolvedValueOnce({
+    ...account("alice", "Alice Martin"),
+    spaces: [space("perso", { role: "admin" })],
+  });
+  await comeBack(REFRESH_INTERVAL_MS);
+  expect(getMe).toHaveBeenCalledTimes(2);
+  expect(getTree).toHaveBeenCalledTimes(2);
+  expect(host.textContent).toBe("Alice Martin");
+  expect(events).toEqual(["montée"]);
+  // Au plus une fois toutes les cinq secondes.
+  await comeBack(REFRESH_INTERVAL_MS + 1);
+  expect(getMe).toHaveBeenCalledTimes(2);
+  expect(reload).not.toHaveBeenCalled();
+});
+
+test("tab_coming_back_under_another_account_reloads_the_tab", async () => {
+  const comeBack = await openedOnASpace();
+  // Pendant que l'onglet était à l'arrière-plan, la session a été rouverte sous un autre
+  // compte dans un autre onglet.
+  vi.mocked(getMe).mockResolvedValueOnce(account("bruno", "Bruno"));
+  await comeBack(REFRESH_INTERVAL_MS);
+  expect(events).toEqual(["montée", "démontée", "rechargé"]);
+  expect([...shownFor]).toEqual(["Alice"]);
+  expect(host.textContent).toBe("");
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+test("tab_coming_back_to_an_unreachable_server_changes_nothing", async () => {
+  const comeBack = await openedOnASpace();
+  vi.mocked(getMe).mockRejectedValueOnce(unreachable());
+  await comeBack(REFRESH_INTERVAL_MS);
+  // La relecture du compte a échoué : rien n'est dit, rien n'est rechargé, l'application
+  // continue avec le compte qu'elle avait.
+  expect(getMe).toHaveBeenCalledTimes(2);
+  expect(host.textContent).toBe("Alice");
+  expect(events).toEqual(["montée"]);
+  expect(reload).not.toHaveBeenCalled();
 });

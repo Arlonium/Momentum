@@ -14,6 +14,7 @@ import {
   firstSpace,
   getMe,
   getTree,
+  guestOf,
   memberOf,
   newUser,
   NO_SESSION,
@@ -495,4 +496,39 @@ test("page_one_can_only_read_offers_no_action", async ({ browser }) => {
   const after = await getTree(brunoApi, space.id);
   expect(places(after.nodes.filter((n) => n.id !== created))).toEqual(places(before.nodes));
   await expect(sidebarOf(b).getByRole("alert")).toHaveCount(0);
+});
+
+test("role_changed_elsewhere_reaches_the_sidebar_on_return", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const team = await createPage(aliceApi, { title: `Équipe ${unique()}` });
+  const shared = await createPage(aliceApi, { section: "private", title: `Partagée ${unique()}` });
+  const dana = await guestOf(alice, shared.id, `Dana ${unique()}`, "read");
+  const { user } = await getMe(await apiAs(dana));
+
+  const d = await newUser(browser, dana);
+  // L'horloge de l'onglet est la nôtre : on n'attend pas cinq secondes pour de bon.
+  await d.clock.install();
+  await d.goto(`/s/${space.id}`);
+  // Invitée : « Partagé » seulement, et rien pour créer une page.
+  const newPage = sidebarOf(d).getByRole("button", { name: "Nouvelle page" });
+  await expect(treeRow(d, shared.id)).toBeVisible();
+  await expect(sectionOf(d, "Espace")).toHaveCount(0);
+  await expect(newPage).toHaveCount(0);
+
+  // A la passe « Membre ». Rien ne le dit à l'onglet de D.
+  const promoted = await aliceApi.patch(`/api/v1/spaces/${space.id}/members/${user.id}`, {
+    data: { role: "member" },
+  });
+  expect(promoted.status(), await promoted.text()).toBe(200);
+
+  // D revient sur son onglet : sans ouvrir le menu de l'espace, elle a les sections d'un
+  // membre, la page d'équipe, et de quoi créer une page.
+  await d.clock.fastForward(5_500);
+  await d.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(newPage).toBeVisible();
+  await expect(sectionOf(d, "Espace").locator(`[data-page-id="${team.id}"]`)).toBeVisible();
+  await expect(sectionOf(d, "Privé")).toBeVisible();
+  await expect(sectionOf(d, "Partagé").locator(`[data-page-id="${shared.id}"]`)).toBeVisible();
 });

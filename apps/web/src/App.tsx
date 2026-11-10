@@ -52,16 +52,17 @@ export function App() {
     refresh,
   });
   const spaceId = space?.id ?? null;
-  // Plus de rôle dans l'espace lu : la liste des espaces du compte est relue. L'adresse
-  // reste, et l'écran dit l'espace introuvable (R96).
-  const spaceGone = useCallback(() => void refresh().catch(() => {}), [refresh]);
+  // Le compte relu, sans rien dire d'un échec : quand il n'a plus de rôle dans l'espace lu
+  // (l'adresse reste, l'écran dit l'espace introuvable, R96), et au retour sur l'onglet (R126).
+  const rereadAccount = useCallback(() => void refresh().catch(() => {}), [refresh]);
   // Tant que le serveur n'a pas dit dans quel espace est la page ouverte, on ne sait pas quel
   // arbre lire. Une lecture qui échoue ne retire rien de l'écran : elle se dit en pied de
   // barre latérale.
   const treeError = useTreeReader(tree, page.resolving ? null : spaceId, {
     retries,
     onSessionLost: sessionLost,
-    onGone: spaceGone,
+    onGone: rereadAccount,
+    onReturn: rereadAccount,
   });
   /** Les pages de l'espace affiché ; `null` : pas encore chargées. */
   const nodes = tree.loaded !== null && tree.loaded.spaceId === spaceId ? tree.loaded.nodes : null;

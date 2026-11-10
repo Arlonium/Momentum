@@ -24,10 +24,11 @@ const answer = (index: number, spaceId: string, nodes: PageNode[]) =>
 
 const onSessionLost = vi.fn();
 const onGone = vi.fn();
+const onReturn = vi.fn();
 
 beforeEach(() => {
   reads = [];
-  for (const mock of [onSessionLost, onGone]) mock.mockClear();
+  for (const mock of [onSessionLost, onGone, onReturn]) mock.mockClear();
   vi.mocked(getTree).mockReset();
   vi.mocked(getTree).mockImplementation((spaceId) => {
     const answer = deferred<Tree>();
@@ -39,7 +40,7 @@ beforeEach(() => {
 type Props = { spaceId: string | null; retries?: number };
 function hook({ spaceId, retries = 0 }: Props) {
   const tree = useSpaceTree();
-  const readError = useTreeReader(tree, spaceId, { retries, onSessionLost, onGone });
+  const readError = useTreeReader(tree, spaceId, { retries, onSessionLost, onGone, onReturn });
   return { ...tree, readError };
 }
 
@@ -240,6 +241,43 @@ test("tab_coming_back_reads_nothing_before_a_space_is_known", async () => {
   vi.setSystemTime(2_000_000);
   await settle(() => window.dispatchEvent(new Event("focus")));
   expect(reads).toEqual([]);
+  expect(onReturn).not.toHaveBeenCalled();
+});
+
+test("tab_coming_back_is_told_with_the_tree_read_and_no_more_often", async () => {
+  // Ce qui se relit avec l'arbre au retour sur l'onglet (le compte, Ruling R126) : au même
+  // moment, sous le même plafond.
+  vi.useFakeTimers({ toFake: ["Date"], now: 1_000_000 });
+  const focus = () => settle(() => window.dispatchEvent(new Event("focus")));
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  await answer(0, "perso", [page("a")]);
+  // La première lecture de l'arbre n'est pas un retour.
+  expect(onReturn).not.toHaveBeenCalled();
+
+  // Trop tôt : ni l'arbre ni le reste.
+  vi.setSystemTime(1_000_000 + REFRESH_INTERVAL_MS - 1);
+  await focus();
+  expect(onReturn).not.toHaveBeenCalled();
+  // Cinq secondes après : les deux, une fois, quel que soit le nombre de signaux.
+  vi.setSystemTime(1_000_000 + REFRESH_INTERVAL_MS);
+  await focus();
+  await settle(() => document.dispatchEvent(new Event("visibilitychange")));
+  expect(reads).toHaveLength(2);
+  expect(onReturn).toHaveBeenCalledTimes(1);
+  await answer(1, "perso", [page("a")]);
+
+  // Une relecture de l'arbre demandée par une action n'est pas un retour sur l'onglet ; et
+  // le retour qui la suit de près ne relit rien.
+  vi.setSystemTime(1_000_000 + 3 * REFRESH_INTERVAL_MS);
+  await settle(() => tree.current.reload());
+  expect(reads).toHaveLength(3);
+  await focus();
+  expect(onReturn).toHaveBeenCalledTimes(1);
+  // Cinq secondes plus tard : de nouveau les deux.
+  vi.setSystemTime(1_000_000 + 4 * REFRESH_INTERVAL_MS);
+  await focus();
+  expect(reads).toHaveLength(4);
+  expect(onReturn).toHaveBeenCalledTimes(2);
 });
 
 type CatchUpProps = { nodes: PageNode[] | null; activeId: string | null; found: PageNode | null };

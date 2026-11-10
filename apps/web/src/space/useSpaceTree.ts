@@ -15,7 +15,9 @@
 // Rien ne pousse encore ici ce que d'autres changent dans l'espace (le journal d'opérations
 // de l'espace viendra dans un lot suivant, conception §5.3). En attendant, l'arbre est relu
 // quand l'onglet redevient visible ou reprend le focus, au plus une fois toutes les cinq
-// secondes (Ruling R97). Pas de relecture à intervalle fixe.
+// secondes (Ruling R97). Pas de relecture à intervalle fixe. Le compte est relu au même
+// moment (`onReturn`, Ruling R126) : son rôle dans l'espace a pu changer, et la session a pu
+// être rouverte sous un autre compte dans un autre onglet.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ApiError, getTree, isSessionLost } from "../api";
@@ -82,6 +84,8 @@ type Reading = {
   onSessionLost: () => void;
   /** L'espace répond `404` : le compte n'y a plus de rôle. */
   onGone: () => void;
+  /** De retour sur l'onglet, l'arbre est relu : ce qui se relit avec lui (le compte). */
+  onReturn: () => void;
 };
 
 /**
@@ -148,6 +152,7 @@ export function useTreeReader(
       // Deux signaux du même retour (visible, puis focus) ne font qu'une lecture.
       readAt.current = Date.now();
       reload();
+      callbacks.current.onReturn();
     };
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
