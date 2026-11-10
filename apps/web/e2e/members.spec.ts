@@ -686,3 +686,34 @@ test("lost_session_in_the_settings_only_asks_to_log_in", async ({ browser }) => 
   );
   expect((await getSpaceInvitations(aliceApi, space.id)).map((i) => i.email)).toEqual([waiting]);
 });
+
+test("reloaded_invitation_page_asks_to_open_the_link_again", async ({ page }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const { token } = await inviteToSpace(aliceApi, space.id, {
+    email: `invitee-${unique()}@exemple.fr`,
+    role: "member",
+  });
+  await page.goto(`/invite#${token}`);
+  await expect(invitedHeading(page, alice.name, space.name)).toBeVisible();
+  expect(page.url()).toBe(`${BASE_URL}/invite`);
+
+  // La page rechargée : l'adresse ne porte plus le jeton. L'écran ne dit pas l'invitation
+  // périmée, ce qu'il ne sait pas, et ne demande rien au serveur à son sujet.
+  const asked: string[] = [];
+  page.on("request", (request) => {
+    const { pathname } = new URL(request.url());
+    if (pathname.startsWith("/api/v1/invitations")) asked.push(pathname);
+  });
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Ce lien d'invitation est incomplet" })).toBeVisible();
+  await expect(page.getByRole("main")).toContainText("Rouvre le lien que tu as reçu.");
+  await expect(page.getByRole("main")).not.toContainText("n'est plus valable");
+  expect(asked).toEqual([]);
+
+  // Le lien, rouvert, vaut toujours.
+  await page.goto(`/invite#${token}`);
+  await expect(invitedHeading(page, alice.name, space.name)).toBeVisible();
+  expect(asked).toEqual(["/api/v1/invitations/lookup"]);
+});

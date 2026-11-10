@@ -19,6 +19,10 @@
 // « J'ai déjà un compte » (connexion, puis retour ici pour accepter). Un jeton inconnu, échu,
 // révoqué ou déjà utilisé, ou dont l'auteur a perdu son rôle : « Cette invitation n'est plus
 // valable », sans autre détail, comme le serveur.
+//
+// Sans jeton dans l'adresse (la page rechargée, puisqu'il en a été effacé, ou un lien
+// tronqué), l'écran ne sait rien de l'invitation, qui vaut peut-être encore : il dit le lien
+// incomplet et demande de le rouvrir, sans rien demander au serveur.
 import type { InvitationInfo } from "@mementum/protocol";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, acceptInvitation, isSessionLost, lookupInvitation } from "../api";
@@ -64,15 +68,23 @@ type Props = {
 
 type State =
   | { name: "loading" }
+  /** L'adresse ne porte pas de jeton : rien à demander au serveur. */
+  | { name: "incomplete" }
   | { name: "invalid" }
   | { name: "failed"; message: string }
   | { name: "ready"; info: InvitationInfo };
 
 export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Props) {
-  const [state, setState] = useState<State>(token ? { name: "loading" } : { name: "invalid" });
+  const [state, setState] = useState<State>(token ? { name: "loading" } : { name: "incomplete" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  useDocumentTitle(state.name === "invalid" ? "Invitation non valable" : "Invitation");
+  useDocumentTitle(
+    state.name === "invalid"
+      ? "Invitation non valable"
+      : state.name === "incomplete"
+        ? "Lien d'invitation incomplet"
+        : "Invitation",
+  );
 
   const lookup = useCallback(async () => {
     if (!token) return;
@@ -125,6 +137,16 @@ export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Pr
   );
 
   if (state.name === "loading") return <main className="mm-auth" aria-busy="true" />;
+
+  if (state.name === "incomplete") {
+    return (
+      <AuthScreen
+        title="Ce lien d'invitation est incomplet"
+        lead="Rouvre le lien que tu as reçu."
+        footer={home}
+      />
+    );
+  }
 
   if (state.name === "invalid") {
     return (
