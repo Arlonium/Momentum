@@ -11,6 +11,7 @@ import {
   type APIRequestContext,
   type Browser,
   type BrowserContext,
+  type BrowserContextOptions,
   type Locator,
   type Page,
 } from "@playwright/test";
@@ -163,9 +164,14 @@ const apis: APIRequestContext[] = [];
 /**
  * Un nouveau contexte de navigateur (un autre onglet, une autre machine), avec la session
  * de `account` (par défaut, le compte du `globalSetup`), fermé par `closeContexts`.
+ * `options` : ce que ce navigateur a de particulier (un écran tactile).
  */
-export async function newUser(browser: Browser, account: Account = defaultAccount()): Promise<Page> {
-  const context = await browser.newContext({ storageState: account.storageState });
+export async function newUser(
+  browser: Browser,
+  account: Account = defaultAccount(),
+  options: BrowserContextOptions = {},
+): Promise<Page> {
+  const context = await browser.newContext({ ...options, storageState: account.storageState });
   contexts.push(context);
   return context.newPage();
 }

@@ -710,6 +710,26 @@ button.tree-toggle:hover {
   color: var(--mm-text);
 }
 
+/* Écran sans survol (tactile) : ce qui ne se montre qu'au survol y serait invisible, et
+   pourtant cliquable. « … » et « + » y sont toujours montrés, à leur place dans la ligne (le
+   titre s'arrête avant eux) ; de même le « + » et le chevron d'un titre de section. */
+@media (hover: none) {
+  .tree-actions {
+    position: static;
+    flex: none;
+  }
+
+  .tree-row .tree-link {
+    padding-right: 4px;
+  }
+
+  .tree-action,
+  .mm-section-add,
+  .mm-section-title svg {
+    opacity: 1;
+  }
+}
+
 /* Menu d'actions (le « … » d'une ligne) : posé dans `body`, par-dessus la page. */
 
 .mm-menu {

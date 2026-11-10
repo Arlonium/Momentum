@@ -900,6 +900,38 @@ test("drop_target_does_not_need_related_target", async ({ browser }) => {
   await expect(sidebarOf(p).locator(".is-dragging")).toHaveCount(0);
 });
 
+test("row_actions_are_always_shown_without_hover", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+  const long = await createPage(api, {
+    title: `Un titre bien trop long pour sa ligne ${"très ".repeat(12)}long`,
+  });
+
+  // Un écran tactile : rien n'y survole. Ce qui ne se montre qu'au survol y serait invisible,
+  // et pourtant cliquable.
+  const p = await newUser(browser, alice, { hasTouch: true, isMobile: true });
+  await p.goto(`/s/${space.id}`);
+  await expect(treeRow(p, a.id)).toBeVisible();
+  expect(await p.evaluate(() => matchMedia("(hover: none)").matches)).toBe(true);
+
+  const row = treeRow(p, long.id);
+  const more = row.getByRole("button", { name: /^Actions de / });
+  const add = row.getByRole("button", { name: /^Ajouter une sous-page à / });
+  await expect(more).toHaveCSS("opacity", "1");
+  await expect(add).toHaveCSS("opacity", "1");
+  await expect(
+    sectionOf(p, "Espace").getByRole("button", { name: "Ajouter une page dans « Espace »" }),
+  ).toHaveCSS("opacity", "1");
+  // Le titre s'arrête avant eux.
+  const link = (await row.getByRole("link").boundingBox())!;
+  expect(link.x + link.width).toBeLessThanOrEqual((await more.boundingBox())!.x);
+  // Et ils répondent au doigt.
+  await more.tap();
+  await expect(p.getByRole("menu", { name: /^Actions de / })).toBeVisible();
+});
+
 /** Deux comptes dans le même espace : A, sa propriétaire, et B, simple membre. */
 async function ownerAndMember() {
   const alice = await signUpAccount(`Alice ${unique()}`);
