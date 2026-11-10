@@ -17,6 +17,9 @@ mod common;
 use common::*;
 use mementum_sync::{ConnInfo, SyncConfig};
 use uuid::Uuid;
+use yrs::sync::{Message, SyncMessage};
+use yrs::updates::encoder::Encode;
+use yrs::{Transact, XmlFragment, XmlTextPrelim};
 
 /// Une connexion du compte `account`, qui a le droit d'écrire.
 fn of(account: Uuid) -> ConnInfo {
@@ -666,14 +669,19 @@ async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
 //
 // Le serveur regarde chaque entrée d'un message de présence contre chaque connexion de la page.
 // La borne en octets d'un message laisse passer des millions d'entrées, qui occuperaient l'acteur
-// de la page aux dépens de tous. Un client honnête n'annonce que le sien, ou renvoie les états
-// des présents : au-delà de 512 entrées, la connexion est fermée avant qu'aucune soit traitée.
+// de la page aux dépens de tous. Au-delà de 512 entrées, la présence d'un message est donc
+// ignorée : aucune entrée n'est appliquée ni relayée, aucun client n'est pris.
+//
+// La connexion, elle, reste ouverte. Un client y-websocket renvoie en un seul message tous les
+// états qu'il reçoit d'un coup, et rien ne borne ceux d'une page : la fermer donnait à un
+// lecteur le moyen de fermer les autres. Ignorer ne coûte rien à un client honnête, qui annonce
+// son propre état dans un message à part.
 
-/// Le plus grand nombre d'entrées de présence qu'un message porte sans fermer sa connexion.
+/// Le plus grand nombre d'entrées de présence qu'un message porte sans qu'elles soient ignorées.
 const MAX_ENTRIES: usize = 512;
 
-/// `count` retraits de clients que personne ne tient : des entrées que le serveur ignore sans
-/// fermer la connexion (Ruling R104), de quoi remplir un message sans rien lui faire dire.
+/// `count` retraits de clients que personne ne tient : des entrées que le serveur ignore de
+/// toute façon (Ruling R104), de quoi remplir un message sans rien lui faire dire.
 fn free_removals(count: usize) -> Vec<(u64, u32, &'static str)> {
     (0..count as u64)
         .map(|i| (800_000 + i, 1, "null"))
@@ -689,10 +697,15 @@ fn frame(entries: &[(u64, u32, &str)], parts: usize) -> Vec<u8> {
 }
 
 /// Une lectrice a deux onglets. De l'un, un message de 512 entrées passe : les 511 retraits
-/// sont ignorés, et son propre état arrive chez tous. À 513, sa connexion est fermée avant tout
-/// traitement : la dernière entrée remplaçait l'état de son autre onglet (ce que son compte a
-/// le droit de faire), et cet état n'a pas bougé. L'autre onglet, lui, reste servi.
-async fn too_many_entries_close_the_connection(parts: usize) {
+/// sont ignorés, et son propre état arrive chez tous. À 513, rien du message n'est traité : ni
+/// l'état de plus qu'il portait pour elle, ni le remplacement de celui de son autre onglet (ce
+/// que son compte a le droit de faire), ni le client libre qu'il annonçait, qu'un autre compte
+/// prend ensuite. Sa connexion reste servie, et l'état qu'elle annonce après, dans un message à
+/// part, arrive chez tous.
+///
+/// Les entrées qui disent quelque chose sont en tête : réparties sur deux messages d'awareness,
+/// elles sont dans le premier, lu quand la limite n'est pas encore dépassée.
+async fn too_many_entries_are_ignored(parts: usize) {
     let f = Fixture::new(SyncConfig::default()).await;
     let account = new_user(&f.db).await;
     let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
@@ -706,8 +719,8 @@ async fn too_many_entries_close_the_connection(parts: usize) {
 
     // À la limite : le message est traité.
     let at_limit = named("Mallory, à la limite");
-    let mut entries = free_removals(MAX_ENTRIES - 1);
-    entries.push((sender_id, 1, &at_limit));
+    let mut entries = vec![(sender_id, 1, at_limit.as_str())];
+    entries.extend(free_removals(MAX_ENTRIES - 1));
     assert_eq!(entries.len(), MAX_ENTRIES);
     sender.send_raw(frame(&entries, parts));
     witness.after(&sender, &[&carol]).await;
@@ -717,38 +730,154 @@ async fn too_many_entries_close_the_connection(parts: usize) {
         "un message de {MAX_ENTRIES} entrées n'est pas passé"
     );
 
-    // Une de plus : fermée.
-    let replaced = named("Mallory, remplacée");
-    let mut entries = free_removals(MAX_ENTRIES);
-    entries.push((tab_id, 1_000, &replaced));
-    sender.send_raw(frame(&entries, parts));
-    assert!(
-        sender.wait_until(WAIT, |c| c.is_closed()).await,
-        "un message de {} entrées n'a pas fermé la connexion",
-        MAX_ENTRIES + 1
+    // Une de plus : ignoré en entier, et la connexion est encore servie (`after` l'affirme).
+    let (beyond, replaced, ghost) = (
+        named("Mallory, au-delà"),
+        named("Mallory, remplacée"),
+        named("Fantôme"),
     );
-    // Avant tout traitement : ce que le message aurait changé, et que le départ de la connexion
-    // ne déferait pas, n'a pas eu lieu.
-    witness.after(&tab, &[&carol]).await;
+    let mut entries = vec![
+        (sender_id, 2, beyond.as_str()),
+        (tab_id, 1_000, replaced.as_str()),
+        (SPARE_CLIENT, 1, ghost.as_str()),
+    ];
+    entries.extend(free_removals(MAX_ENTRIES - 2));
+    assert_eq!(entries.len(), MAX_ENTRIES + 1);
+    sender.send_raw(frame(&entries, parts));
+    witness.after(&sender, &[&carol]).await;
+    // Rien d'appliqué ni de relayé.
+    assert_eq!(
+        state_of(&carol, sender_id).as_deref(),
+        Some(at_limit.as_str()),
+        "une entrée du message a été traitée"
+    );
     assert_eq!(
         state_of(&carol, tab_id).as_deref(),
         Some(other_tab.as_str()),
         "une entrée du message a été traitée"
     );
-    // Le serveur n'en a rien gardé non plus.
+    assert_eq!(state_of(&carol, SPARE_CLIENT), None);
+    // Aucun client pris : le client libre que le message annonçait, un autre compte l'annonce,
+    // et il est vu.
+    let by_carol = named("De Carol");
+    carol.send_raw(awareness_message(&[(SPARE_CLIENT, 1, &by_carol)]));
+    assert!(
+        sees(&tab, SPARE_CLIENT, Some(&by_carol)).await,
+        "le message ignoré a donné un client à qui l'a envoyé"
+    );
+
+    // Son propre état, annoncé ensuite dans un message à part, est relayé.
+    let afterwards = named("Mallory, ensuite");
+    sender.send_raw(awareness_message(&[(sender_id, 2, &afterwards)]));
+    assert!(
+        sees(&carol, sender_id, Some(&afterwards)).await,
+        "l'état annoncé après le message ignoré n'est pas arrivé"
+    );
+    // Le serveur n'a rien gardé du message ignoré : qui arrive reçoit le reste.
     let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    assert!(sees(&newcomer, sender_id, Some(&afterwards)).await);
     assert!(sees(&newcomer, tab_id, Some(&other_tab)).await);
+    assert!(sees(&newcomer, SPARE_CLIENT, Some(&by_carol)).await);
 }
 
 #[tokio::test]
-async fn presence_message_with_too_many_entries_closes_the_connection() {
-    too_many_entries_close_the_connection(1).await;
+async fn presence_message_with_too_many_entries_is_ignored() {
+    too_many_entries_are_ignored(1).await;
 }
 
 /// Le compte porte sur le message WebSocket entier : les mêmes entrées réparties sur deux
-/// messages d'awareness, envoyés ensemble, ferment la connexion de même. Sinon la limite se
-/// contournerait en mettant bout à bout des messages de 512 entrées.
+/// messages d'awareness, envoyés ensemble, sont ignorées de même, celles du premier comprises.
+/// Sinon la limite se contournerait en mettant bout à bout des messages de 512 entrées.
 #[tokio::test]
 async fn presence_entries_are_counted_over_the_whole_websocket_message() {
-    too_many_entries_close_the_connection(2).await;
+    too_many_entries_are_ignored(2).await;
+}
+
+/// Le scénario qui a fait réviser le Ruling. Un lecteur ouvre 65 connexions et annonce huit
+/// clients inventés sur chacune : 520 états. Qui arrive les reçoit, et un client y-websocket
+/// renvoie aussitôt au serveur tout ce qu'il vient de recevoir, en un seul message. Ce renvoi
+/// est ignoré sans fermer la connexion du nouveau venu, et son propre état, qu'il annonce dans
+/// un message à part, est vu des autres.
+#[tokio::test]
+async fn newcomer_echoing_a_crowded_page_stays_connected() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mallory = new_user(&f.db).await;
+    let ghost = named("Fantôme");
+    let mut crowd = Vec::new();
+    for conn in 0..65u64 {
+        let client = Client::connect_synced(&f.url_for(reader(mallory))).await;
+        let invented: Vec<(u64, u32, &str)> = (0..8)
+            .map(|i| (600_000 + conn * 8 + i, 1, ghost.as_str()))
+            .collect();
+        client.send_raw(awareness_message(&invented));
+        crowd.push(client);
+    }
+
+    let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    assert!(
+        newcomer
+            .wait_until(WAIT, |c| c.awareness_states().len() >= 520)
+            .await,
+        "le nouveau venu n'a pas reçu les états de la page"
+    );
+    let states = newcomer.awareness_states();
+    assert!(states.len() > MAX_ENTRIES);
+    // Ce que y-websocket en renvoie : tous, en un message.
+    let echo: Vec<(u64, u32, &str)> = states
+        .iter()
+        .map(|(id, json)| (*id, 1, json.as_str()))
+        .collect();
+    newcomer.send_raw(awareness_message(&echo));
+    assert!(
+        still_served(&newcomer).await,
+        "le nouveau venu est fermé pour avoir renvoyé les états de la page"
+    );
+    // Son propre état, annoncé à part, est vu.
+    let own = named("Nouveau venu");
+    newcomer.set_awareness(&own);
+    assert!(sees(&carol, newcomer.client_id(), Some(&own)).await);
+    assert!(still_served(&newcomer).await);
+    // La foule est restée jusqu'au bout : ses états étaient bien ceux d'une page pleine.
+    assert!(crowd.iter().all(|client| !client.is_closed()));
+}
+
+/// Seule la présence d'un tel message est ignorée : ce qu'il porte d'autre est traité. Une mise
+/// à jour du document envoyée dans le même message WebSocket, après les entrées de trop, est
+/// appliquée, écrite et relayée.
+#[tokio::test]
+async fn document_update_beside_too_many_presence_entries_is_not_lost() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let writer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+
+    // Une frappe préparée à part, pour l'écrire à la main dans le message.
+    let doc = detached(&writer);
+    let paragraph = first_content(&doc);
+    let typed = {
+        let mut txn = doc.transact_mut();
+        paragraph.insert(&mut txn, 0, XmlTextPrelim::new("gardée"));
+        txn.encode_update_v1()
+    };
+    let beyond = named("Au-delà");
+    let mut entries = vec![(writer.client_id(), 1, beyond.as_str())];
+    entries.extend(free_removals(MAX_ENTRIES));
+    let mut message = awareness_message(&entries);
+    message.extend(Message::Sync(SyncMessage::Update(typed)).encode_v1());
+    writer.send_raw(message);
+
+    assert!(
+        carol
+            .wait_until(WAIT, |c| text(&c.blocks()) == "gardée")
+            .await,
+        "la mise à jour du document, envoyée avec trop d'entrées de présence, est perdue"
+    );
+    assert_eq!(
+        text(&stored_page(&f.store, f.page).await.read_blocks()),
+        "gardée"
+    );
+    // La présence du même message, elle, est ignorée.
+    witness.after(&writer, &[&carol]).await;
+    assert_eq!(state_of(&carol, writer.client_id()), None);
 }

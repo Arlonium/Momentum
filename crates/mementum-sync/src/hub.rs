@@ -41,7 +41,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::actor::{self, Broadcast, Command, Commands, Event, Joined, Membership, Outcome};
-use crate::protocol::{self, ProtocolError};
+use crate::protocol;
 use crate::{SyncConfig, SyncError};
 
 /// Essais d'une demande dont l'acteur s'est arrêté avant de répondre (un
@@ -301,7 +301,7 @@ impl Hub {
             let _ = tokio::time::timeout(CLOSE_GRACE, socket.close()).await;
             return Ok(());
         }
-        match pump(socket, joined, &self.cfg).await {
+        match pump(socket, joined, node_id, &self.cfg).await {
             // Fin normale, à la demande, ou fermeture dont l'acteur a
             // journalisé la raison.
             end @ (End::Left | End::Refused | End::Kicked) => {
@@ -529,9 +529,7 @@ impl Hub {
 enum End {
     /// Le client est parti (fin du flux, socket en erreur).
     Left,
-    /// Message plus gros que `max_message_bytes`, ou qui porte plus de
-    /// [`MAX_PRESENCE_ENTRIES`](protocol::MAX_PRESENCE_ENTRIES) entrées de
-    /// présence (Ruling R113).
+    /// Message plus gros que `max_message_bytes`.
     TooBig,
     /// Message illisible.
     Illegible,
@@ -554,7 +552,7 @@ impl End {
     fn describe(self) -> &'static str {
         match self {
             End::Left => "client parti",
-            End::TooBig => "message trop gros (en octets, ou en entrées de présence)",
+            End::TooBig => "message trop gros",
             End::Illegible => "message illisible",
             End::Refused => "fermée par l'acteur",
             End::Kicked => "fermée à la demande (droits changés, session fermée ou page supprimée)",
@@ -621,13 +619,18 @@ impl Outbox {
 }
 
 /// Fait passer les messages entre la socket et l'acteur jusqu'à la fin de la
-/// connexion, et en rend la raison.
+/// connexion, et en rend la raison. `node_id`, la page, ne sert qu'au journal.
 ///
 /// Un écrivain vide une file bornée vers la socket ; le lecteur traite les
 /// messages du client (par l'acteur, un lot à la fois, dans l'ordre) et
 /// remplit la file avec les réponses et la diffusion de la page. Un client qui
 /// ne lit plus remplit sa file : il est fermé, au lieu de faire grossir la
 /// mémoire du serveur ou de passer à côté du retard sur la diffusion.
+///
+/// La présence d'un message qui en porte plus de
+/// [`MAX_PRESENCE_ENTRIES`](protocol::MAX_PRESENCE_ENTRIES) entrées est
+/// ignorée, sans passer par l'acteur ; le reste du message est traité, et la
+/// connexion reste ouverte (Ruling R113).
 ///
 /// # Message d'entretien (Ruling R107)
 ///
@@ -642,7 +645,7 @@ impl Outbox {
 /// l'acteur : il n'est ni appliqué, ni écrit, ni relayé à personne. Il passe
 /// par la file, comme les autres ; l'écrivain ne l'y met que quand il attend,
 /// la file vide : une connexion qui ne lit plus n'en accumule pas.
-async fn pump<S>(socket: S, joined: Joined, cfg: &SyncConfig) -> End
+async fn pump<S>(socket: S, joined: Joined, node_id: Uuid, cfg: &SyncConfig) -> End
 where
     S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
 {
@@ -722,12 +725,23 @@ where
                     if data.len() > cfg.max_message_bytes {
                         return End::TooBig;
                     }
-                    let messages = match protocol::decode(&data) {
-                        Ok(messages) => messages,
-                        Err(ProtocolError::Illegible) => return End::Illegible,
-                        // Avant que l'acteur en voie une seule (Ruling R113).
-                        Err(ProtocolError::TooManyPresenceEntries) => return End::TooBig,
+                    let Ok(decoded) = protocol::decode(&data) else {
+                        return End::Illegible;
                     };
+                    if let Some(entries) = decoded.presence_dropped {
+                        // Ruling R113 : ignorées, sans que l'acteur en voie une
+                        // seule, et sans fermer la connexion. Un client honnête
+                        // en envoie autant quand il renvoie les états d'une page
+                        // pleine : ce n'est pas un avertissement.
+                        tracing::debug!(
+                            node_id = %node_id,
+                            conn,
+                            entries,
+                            max = protocol::MAX_PRESENCE_ENTRIES,
+                            "trop d'entrées de présence dans un message : ignorées"
+                        );
+                    }
+                    let messages = decoded.messages;
                     if messages.is_empty() {
                         continue;
                     }
