@@ -154,6 +154,11 @@ impl SpaceAccess {
     pub fn visible(&self) -> impl Iterator<Item = (Uuid, &NodeAccess)> + '_ {
         self.visible.iter().map(|(id, access)| (*id, access))
     }
+
+    /// Le nombre de nœuds qu'elle voit : ce que pèse le calcul dans le cache.
+    pub(crate) fn visible_count(&self) -> usize {
+        self.visible.len()
+    }
 }
 
 /// Les lignes posées sur un nœud, résumées pour la personne du calcul.

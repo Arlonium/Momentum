@@ -6,7 +6,7 @@
 //! - `access.rs` : [`SpaceAccess::compute`], le calcul pur de ce qu'une personne voit d'un
 //!   espace, et à quel niveau.
 //! - `cache.rs` : [`AccessCache`], ces calculs gardés tant que la révision de l'espace ne bouge
-//!   pas.
+//!   pas, dans la limite d'un nombre de nœuds visibles (Ruling R59).
 //!
 //! Les règles sont celles du « Modèle des droits » du plan du lot 2
 //! (`docs/superpowers/plans/2026-11-10-p1-lot2-comptes-espaces-droits.md`).

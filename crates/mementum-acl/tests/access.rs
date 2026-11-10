@@ -321,6 +321,25 @@ fn shared_subpage_shows_as_root_for_the_guest() {
     assert_eq!(access.node(deep).unwrap().visible_parent, Some(shared));
 }
 
+/// « Privé » demande qu'aucune ligne ne nomme un autre sujet, ni sur le nœud **ni sur ses
+/// ancêtres** : la sous-page d'une page privée d'Alice, partagée à Bob (simple membre), est
+/// « Partagé » chez lui, bien que sa seule ligne propre soit la sienne.
+#[test]
+fn subpage_shared_from_a_private_page_is_shared_for_a_member() {
+    let (alice, bob) = (id(1), id(2));
+    let (private, shared) = (id(10), id(11));
+    let nodes = [root(private), child(shared, private)];
+    let grants = [
+        grant(private, Subject::User(alice), Level::Full),
+        grant(shared, Subject::User(bob), Level::Edit),
+    ];
+
+    let access = SpaceAccess::compute(&nodes, &grants, bob, Some(Role::Member));
+    assert_eq!(access.node(private), None);
+    assert_eq!(seen(&access, shared), Some((Level::Edit, Section::Shared)));
+    assert_eq!(access.node(shared).unwrap().visible_parent, None);
+}
+
 #[test]
 fn trash_is_inherited() {
     let (user, guest) = (id(1), id(2));
@@ -633,28 +652,81 @@ fn cache_misses_on_another_rev() {
     assert!(cache.get(user, space, 3).is_none());
 }
 
+/// Les accès d'un membre à un espace de `pages` pages à la racine, toutes ouvertes aux membres :
+/// il en voit `pages`.
+fn access_to(pages: u128) -> Arc<SpaceAccess> {
+    let nodes: Vec<TreeNode> = (0..pages).map(|i| root(id(100 + i))).collect();
+    let grants: Vec<(Uuid, Grant)> = nodes
+        .iter()
+        .map(|n| grant(n.id, Subject::Members, Level::Read))
+        .collect();
+    let access = SpaceAccess::compute(&nodes, &grants, id(1), Some(Role::Member));
+    assert_eq!(access.visible().count() as u128, pages);
+    Arc::new(access)
+}
+
+/// Ruling R59 : le cache est borné en nœuds visibles gardés, pas en entrées.
 #[test]
 fn full_cache_is_emptied() {
     let space = id(10);
     let (a, b, c) = (id(1), id(2), id(3));
-    let access = Arc::new(SpaceAccess::compute(&[], &[], a, Some(Role::Member)));
-    let cache = AccessCache::new(2);
-    cache.put(a, space, 1, Arc::clone(&access));
-    cache.put(b, space, 1, Arc::clone(&access));
+    let (three, two, one) = (access_to(3), access_to(2), access_to(1));
+    let cache = AccessCache::new(5);
+    cache.put(a, space, 1, Arc::clone(&three));
+    cache.put(b, space, 1, Arc::clone(&two));
+    // 3 + 2 nœuds : le plafond est atteint, pas dépassé.
     assert!(cache.get(a, space, 1).is_some() && cache.get(b, space, 1).is_some());
 
-    // Remplacer une entrée ne fait pas grandir le cache : rien n'est vidé.
-    cache.put(b, space, 2, Arc::clone(&access));
+    // Remplacer une entrée ne compte que la nouvelle : rien n'est vidé.
+    cache.put(b, space, 2, Arc::clone(&two));
     assert!(cache.get(a, space, 1).is_some() && cache.get(b, space, 2).is_some());
+    cache.put(b, space, 3, Arc::clone(&one));
+    cache.put(c, space, 1, Arc::clone(&one));
+    // 3 + 1 + 1 nœuds.
+    assert!(cache.get(a, space, 1).is_some());
+    assert!(cache.get(b, space, 3).is_some() && cache.get(c, space, 1).is_some());
 
-    // Une troisième entrée dans un cache plein : tout est vidé, puis elle est gardée.
-    cache.put(c, space, 1, Arc::clone(&access));
+    // Un nœud de plus que le plafond : tout est vidé, puis la nouvelle entrée est gardée.
+    cache.put(b, space, 4, Arc::clone(&two));
     assert!(cache.get(a, space, 1).is_none());
+    assert!(cache.get(c, space, 1).is_none());
+    assert!(cache.get(b, space, 4).is_some());
+}
+
+/// Un calcul plus gros que le plafond, à lui seul, n'est pas gardé ; il ne vide pas le cache,
+/// mais l'entrée qu'il remplace, d'une révision passée, part.
+#[test]
+fn oversized_access_is_not_kept() {
+    let space = id(10);
+    let (a, b) = (id(1), id(2));
+    let cache = AccessCache::new(4);
+    cache.put(a, space, 1, access_to(2));
+    cache.put(b, space, 1, access_to(2));
+    cache.put(b, space, 2, access_to(5));
     assert!(cache.get(b, space, 2).is_none());
+    assert!(cache.get(b, space, 1).is_none());
+    assert!(cache.get(a, space, 1).is_some());
+    // Pile au plafond : gardé.
+    cache.put(b, space, 3, access_to(4));
+    assert!(cache.get(b, space, 3).is_some());
+}
+
+/// Un calcul vide (un membre d'un espace sans page) compte pour un nœud : des calculs vides ne
+/// font pas grossir le cache sans fin. Un cache de plafond nul ne garde rien.
+#[test]
+fn empty_access_counts_as_one_node() {
+    let space = id(10);
+    let (a, b, c) = (id(1), id(2), id(3));
+    let empty = access_to(0);
+    let cache = AccessCache::new(2);
+    cache.put(a, space, 1, Arc::clone(&empty));
+    cache.put(b, space, 1, Arc::clone(&empty));
+    assert!(cache.get(a, space, 1).is_some() && cache.get(b, space, 1).is_some());
+    cache.put(c, space, 1, Arc::clone(&empty));
+    assert!(cache.get(a, space, 1).is_none() && cache.get(b, space, 1).is_none());
     assert!(cache.get(c, space, 1).is_some());
 
-    // Un cache de capacité nulle ne garde rien.
     let none = AccessCache::new(0);
-    none.put(a, space, 1, access);
+    none.put(a, space, 1, empty);
     assert!(none.get(a, space, 1).is_none());
 }
