@@ -114,7 +114,8 @@ export function App() {
     // Au premier chargement seulement : sans la version du serveur, rien ne peut s'ouvrir.
     content = (
       <Message title="Impossible de charger Mementum">
-        {schema.error} Recharge la page pour réessayer.
+        {schema.error}
+        <Retry onRetry={schema.retry} />
       </Message>
     );
   } else if (!schema.loaded) {
@@ -146,6 +147,14 @@ export function App() {
         readOnly={stale}
         onChanged={actions.trashChanged}
       />
+    );
+  } else if (route.name === "space" && nodes === null && treeError !== null) {
+    // L'arbre n'a jamais pu être lu : la barre latérale est vide, il n'y a rien à y choisir.
+    content = (
+      <Message title="La liste des pages n'a pas pu être lue">
+        {treeError}
+        <Retry onRetry={tree.reload} />
+      </Message>
     );
   } else if (route.name === "space") {
     content = (
@@ -193,7 +202,8 @@ export function App() {
   } else if (looked?.state === "failed") {
     content = (
       <Message title="Impossible d'ouvrir la page">
-        {looked.message} Recharge la page pour réessayer.
+        {looked.message}
+        <Retry onRetry={page.ask} />
       </Message>
     );
   } else if (activeId !== null && looked?.state !== "missing") {
@@ -220,10 +230,22 @@ export function App() {
         onMove={moveFromTree}
         notice={actions.notice}
         readError={treeError}
+        onRetry={tree.reload}
       />
       <main className="mm-main">{content}</main>
       {creatingSpace && <CreateSpaceDialog onClose={() => setCreatingSpace(false)} />}
     </div>
+  );
+}
+
+/** « Réessayer », sous le message d'une lecture qui a échoué : elle se refait sans recharger. */
+function Retry({ onRetry }: { onRetry: () => void }) {
+  return (
+    <span className="mm-message-actions">
+      <button type="button" className="mm-button mm-button-primary" onClick={onRetry}>
+        Réessayer
+      </button>
+    </span>
   );
 }
 

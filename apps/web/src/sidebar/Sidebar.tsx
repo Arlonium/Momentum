@@ -1,8 +1,8 @@
 // La barre latérale. En tête, collés à son bord haut : le sélecteur d'espace (avec le menu du
 // compte, Ruling R80) et « Nouvelle page ». Puis les sections de l'espace, chacune avec son
 // arbre de pages, qui défilent dessous. En pied, collés à son bord bas : le message de la
-// dernière action refusée (à défaut, celui d'une relecture des pages qui a échoué), et
-// « Corbeille ».
+// dernière action refusée (à défaut, celui d'une lecture des pages qui a échoué), avec
+// « Réessayer » tant que les pages n'ont pas pu être lues, et « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
@@ -32,6 +32,8 @@ type Props = {
   notice: string | null;
   /** Les pages n'ont pas pu être lues, ou relues : le message du serveur, en français. */
   readError: string | null;
+  /** Relit les pages de l'espace. */
+  onRetry: () => void;
 };
 
 export function Sidebar({
@@ -46,6 +48,7 @@ export function Sidebar({
   onMove,
   notice,
   readError,
+  onRetry,
 }: Props) {
   // La barre latérale défile ; sa tête et son pied restent collés à ses bords, par-dessus les
   // arbres, qui en tiennent compte pour montrer la page active (`treeWindow.ts`).
@@ -123,6 +126,12 @@ export function Sidebar({
             <p className="mm-side-error" role="alert">
               {message}
             </p>
+          )}
+          {readError !== null && (
+            // Sans attendre le retour sur l'onglet ou celui du réseau : la lecture se refait ici.
+            <button type="button" className="mm-button mm-button-small mm-side-retry" onClick={onRetry}>
+              Réessayer
+            </button>
           )}
           {space && (
             <a

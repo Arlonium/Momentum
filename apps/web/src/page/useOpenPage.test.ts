@@ -265,3 +265,16 @@ test("gone_is_for_the_open_page_only", async () => {
   expect(open.current.node).toBe(y);
   expect(open.current.looked).toEqual({ id: "y", state: "found", node: y });
 });
+
+test("failed_first_read_is_made_again_on_demand", async () => {
+  const open = await renderHook(hook, { activeId: "x" });
+  await settle(() => asked[0].answer.reject(unreachable()));
+  expect(open.current.looked).toMatchObject({ id: "x", state: "failed" });
+  // « Réessayer » : la page est redemandée, sans recharger l'application.
+  await settle(() => open.current.ask());
+  expect(asked).toHaveLength(2);
+  expect(open.current.looked).toEqual({ id: "x", state: "loading" });
+  const x = page("x");
+  await settle(() => asked[1].answer.resolve(x));
+  expect(open.current.node).toBe(x);
+});

@@ -169,6 +169,11 @@ a:hover {
   color: var(--mm-danger);
 }
 
+/* « Réessayer », sous le message d'une lecture des pages qui a échoué. */
+.mm-side-retry {
+  margin: 0 8px 6px;
+}
+
 /* Lien de la barre latérale (« Réglages de l'espace ») : l'allure d'une action. */
 .mm-side-link {
   text-decoration: none;

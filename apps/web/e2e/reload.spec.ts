@@ -22,6 +22,7 @@ import {
   trashItem,
   treeRow,
   unique,
+  waitSynced,
 } from "./helpers";
 
 // La page de chaque test arrive sans session ; `newUser(browser, compte)` en donne une.
@@ -354,4 +355,101 @@ test("failed_tree_read_says_whether_the_list_was_read_or_updated", async ({ brow
   await comeBack();
   await expect(alert).toHaveText(`La liste des pages n'a pas pu être mise à jour. ${UNREACHABLE}`);
   await expect(treeRow(p, a.id)).toBeVisible();
+});
+
+test("unreadable_tree_offers_to_retry", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const space = await firstSpace(api);
+  const a = await createPage(api, { title: "Alpha" });
+
+  const p = await newUser(browser, alice);
+  // L'horloge de la page est la nôtre : on n'attend pas cinq secondes pour de bon.
+  await p.clock.install();
+  const main = p.getByRole("main");
+  const alert = sidebarOf(p).getByRole("alert");
+  const retryInSidebar = sidebarOf(p).getByRole("button", { name: "Réessayer" });
+  const tree = "**/api/v1/spaces/*/tree";
+
+  // Au premier chargement, l'arbre ne se lit pas. La barre latérale a de quoi réessayer ; le
+  // contenu le dit aussi, avec le même bouton, au lieu d'inviter à choisir une page dans une
+  // barre vide.
+  await p.route(tree, (route) => route.abort());
+  await p.goto(`/s/${space.id}`);
+  await expect(alert).toBeVisible();
+  await expect(retryInSidebar).toBeVisible();
+  await expect(main.getByRole("heading", { name: "La liste des pages n'a pas pu être lue" })).toBeVisible();
+  await expect(main).toContainText(UNREACHABLE);
+  await expect(main).not.toContainText("Choisis une page");
+  // Toujours en panne : « Réessayer » relit, et l'écran le dit encore.
+  const failed = p.waitForEvent("requestfailed", (request) => request.url().endsWith("/tree"));
+  await main.getByRole("button", { name: "Réessayer" }).click();
+  await failed;
+  await expect(alert).toBeVisible();
+
+  // Le serveur revient : « Réessayer » relit, les pages arrivent, les messages partent.
+  await p.unroute(tree);
+  await main.getByRole("button", { name: "Réessayer" }).click();
+  await expect(treeRow(p, a.id)).toBeVisible();
+  await expect(alert).toHaveCount(0);
+  await expect(retryInSidebar).toHaveCount(0);
+  await expect(main.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
+  await expect(main).toContainText("Choisis une page dans la barre latérale");
+
+  // Une relecture qui échoue ensuite garde les pages et le contenu : le bouton de la barre
+  // latérale la refait.
+  const b = await createPage(api, { title: "Bravo" });
+  await p.route(tree, (route) => route.abort());
+  await p.clock.fastForward(5_500);
+  await p.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(alert).toBeVisible();
+  await expect(main.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
+  await p.unroute(tree);
+  await retryInSidebar.click();
+  await expect(treeRow(p, b.id)).toBeVisible();
+  await expect(alert).toHaveCount(0);
+});
+
+test("unreadable_page_offers_to_retry", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  // À la corbeille : la page n'est pas dans l'arbre, seul le serveur peut la rendre.
+  const a = await createPage(api, { title: "Alpha" });
+  expect((await api.post(`/api/v1/pages/${a.id}/trash`)).status()).toBe(200);
+
+  const p = await newUser(browser, alice);
+  const main = p.getByRole("main");
+  await p.route(`**/api/v1/pages/${a.id}`, (route) => route.abort());
+  await p.goto(`/p/${a.id}`);
+  await expect(main.getByRole("heading", { name: "Impossible d'ouvrir la page" })).toBeVisible();
+  await expect(main).toContainText(UNREACHABLE);
+  await expect(main).not.toContainText("Recharge la page");
+  // Le serveur revient : « Réessayer » redemande la page, sans recharger l'application.
+  await p.evaluate(() => ((window as unknown as { kept: boolean }).kept = true));
+  await p.unroute(`**/api/v1/pages/${a.id}`);
+  await main.getByRole("button", { name: "Réessayer" }).click();
+  await expect(titleOf(p)).toHaveValue("Alpha");
+  await expect(trashBanner(p)).toBeVisible();
+  expect(await p.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBe(true);
+});
+
+test("unreadable_server_version_offers_to_retry", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(alice);
+  const a = await createPage(api, { title: "Alpha" });
+
+  const p = await newUser(browser, alice);
+  const main = p.getByRole("main");
+  // Le compte se lit, pas la version du serveur : rien ne peut s'ouvrir sans elle.
+  await p.route("**/api/v1/info", (route) => route.abort());
+  await p.goto(`/p/${a.id}`);
+  await expect(main.getByRole("heading", { name: "Impossible de charger Mementum" })).toBeVisible();
+  await expect(main).toContainText(UNREACHABLE);
+  await expect(main).not.toContainText("Recharge la page");
+  await p.evaluate(() => ((window as unknown as { kept: boolean }).kept = true));
+  await p.unroute("**/api/v1/info");
+  await main.getByRole("button", { name: "Réessayer" }).click();
+  await expect(titleOf(p)).toHaveValue("Alpha");
+  await waitSynced(p);
+  expect(await p.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBe(true);
 });

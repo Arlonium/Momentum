@@ -1,6 +1,7 @@
 // La version de schéma du serveur, vue de l'application. Elle est lue au chargement, puis
 // relue avant chaque connexion de synchronisation (R35, `schemaGate.ts`) : si elle diffère de
-// celle de ce client, tout passe en lecture seule, pour de bon.
+// celle de ce client, tout passe en lecture seule, pour de bon. Une première lecture qui
+// échoue se refait à la demande (`retry`), sans recharger l'application.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getInfo } from "../api";
 import { messageOf } from "../session/forms";
@@ -18,6 +19,8 @@ export type ServerSchema = {
   isStale(): boolean;
   /** Relit la version du serveur ; `false` met l'application en lecture seule. */
   check: SchemaCheck;
+  /** Refait la première lecture, qui a échoué. */
+  retry(): void;
 };
 
 export function useServerSchema(): ServerSchema {
@@ -25,6 +28,8 @@ export function useServerSchema(): ServerSchema {
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   const staleRef = useRef(false);
+  /** Compte les premières lectures refaites à la demande. */
+  const [retries, setRetries] = useState(0);
 
   const markStale = useCallback(() => {
     staleRef.current = true;
@@ -40,6 +45,7 @@ export function useServerSchema(): ServerSchema {
 
   useEffect(() => {
     let cancelled = false;
+    setError(null);
     getInfo()
       .then((info) => {
         if (cancelled) return;
@@ -52,8 +58,9 @@ export function useServerSchema(): ServerSchema {
     return () => {
       cancelled = true;
     };
-  }, [markStale]);
+  }, [markStale, retries]);
 
   const isStale = useCallback(() => staleRef.current, []);
-  return { loaded, error, stale, isStale, check };
+  const retry = useCallback(() => setRetries((n) => n + 1), []);
+  return { loaded, error, stale, isStale, check, retry };
 }

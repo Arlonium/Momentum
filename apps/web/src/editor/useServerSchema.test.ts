@@ -70,3 +70,21 @@ test("unreachable_server_at_load_is_an_error", async () => {
     error: "Le serveur Mementum ne répond pas.",
   });
 });
+
+test("failed_first_read_is_made_again_on_demand", async () => {
+  vi.mocked(getInfo).mockRejectedValue(unreachable());
+  const schema = await renderHook(useServerSchema, undefined);
+  await settle();
+  expect(schema.current.error).toBe("Le serveur Mementum ne répond pas.");
+  // « Réessayer » : le serveur est relu, et l'application s'ouvre.
+  vi.mocked(getInfo).mockResolvedValue(info(CLIENT_SCHEMA_VERSION));
+  await settle(() => schema.current.retry());
+  expect(schema.current).toMatchObject({ loaded: true, error: null, stale: false });
+  expect(getInfo).toHaveBeenCalledTimes(2);
+  // Toujours injoignable : l'erreur revient, après avoir disparu le temps de la lecture.
+  vi.mocked(getInfo).mockRejectedValue(unreachable());
+  const again = await renderHook(useServerSchema, undefined);
+  await settle();
+  await settle(() => again.current.retry());
+  expect(again.current).toMatchObject({ loaded: false, error: "Le serveur Mementum ne répond pas." });
+});
