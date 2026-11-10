@@ -1860,6 +1860,25 @@ async fn patch_overtaken_at_every_attempt_answers_page_moved() {
     assert_french(&error, &["rien n'a été modifié", "réessayer"]);
     // Quatre tentatives : la première, puis trois reprises.
     assert_eq!(reprises(&journal, page), 3, "journal : {journal}");
+    // Les reprises épuisées laissent une trace au-dessus de `debug` : une révision d'espace
+    // qu'une écriture aurait oublié d'incrémenter se verrait exactement ainsi. Une ligne, qui
+    // nomme la page, et rien de la personne ni de ce qu'elle envoyait.
+    let warnings: Vec<&str> = journal
+        .lines()
+        .filter(|line| line.contains(" WARN "))
+        .collect();
+    assert_eq!(warnings.len(), 1, "journal : {journal}");
+    let warning = warnings[0];
+    assert!(
+        warning.contains(&page.to_string()) && warning.contains("page_moved"),
+        "{warning}"
+    );
+    for personal in ["mona", "Mona", "Renommée", &mona.id.to_string()] {
+        assert!(
+            !warning.contains(personal),
+            "« {personal} » dans : {warning}"
+        );
+    }
     // Rien n'a été écrit, pas même le titre.
     let after = team.store.get_node(page).await.unwrap().expect("la page");
     assert_eq!(after, before);

@@ -338,7 +338,19 @@ pub(crate) async fn update(
                     .await?
                     .ok_or_else(ApiError::page_not_found)?;
             }
-            Err(StoreError::Stale) => return Err(ApiError::page_moved()),
+            Err(StoreError::Stale) => {
+                // Ordinaire sous des déplacements rapprochés ; mais c'est aussi ce qu'on
+                // verrait si une écriture oubliait d'incrémenter la révision de l'espace : la
+                // route redéciderait chaque fois sur des droits périmés. D'où une trace, avec
+                // la page seule (ni compte, ni titre).
+                tracing::warn!(
+                    node_id = %id,
+                    attempts = retries + 1,
+                    "409 page_moved : la décision d'un PATCH n'a tenu à aucune tentative \
+                     (parent, rôle ou accès changés à chaque fois) ; rien n'est écrit"
+                );
+                return Err(ApiError::page_moved());
+            }
             Err(error) => {
                 let parent = place.and_then(|place| place.parent_id);
                 return Err(placement_error(&state, error, by, space_id, Some(id), parent).await);
