@@ -73,18 +73,28 @@ test("drag_a_page_under_another", async ({ browser }) => {
   expect(await serverTree()).toEqual({ racine: ["Bravo", "Alpha", "Delta"], Bravo: ["Charlie"] });
 
   // Refusés, et sans effet : une page sous sa propre sous-page, et d'une section à l'autre.
-  const before = await serverTree();
+  // Tout ce que l'onglet demande d'écrire au serveur à partir d'ici est noté.
+  const writes: string[] = [];
+  p.on("request", (request) => {
+    if (request.method() !== "GET") {
+      writes.push(`${request.method()} ${new URL(request.url()).pathname}`);
+    }
+  });
   await treeRow(p, b.id).dragTo(treeRow(p, c.id));
   await treeRow(p, mine.id).dragTo(treeRow(p, a.id));
   await treeRow(p, a.id).dragTo(treeRow(p, mine.id));
-  await p.waitForTimeout(300);
-  expect(await shownRows(p)).toEqual(["1 Bravo", "2 Charlie", "1 Alpha", "1 Delta"]);
-  expect(await serverTree()).toEqual(before);
+  // Puis un glisser permis : « Alpha », lâchée sur le bord haut de « Bravo », repasse en tête.
+  // Sa demande part après celles qu'auraient faites les trois autres ; c'est la seule que
+  // l'onglet ait envoyée.
+  await treeRow(p, a.id).dragTo(treeRow(p, b.id), { targetPosition: { x: 80, y: 2 } });
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "2 Charlie", "1 Delta"]);
+  expect(writes).toEqual([`PATCH /api/v1/pages/${a.id}`]);
+  expect(await serverTree()).toEqual({ racine: ["Alpha", "Bravo", "Delta"], Bravo: ["Charlie"] });
   await expect(sidebarOf(p).getByRole("alert")).toHaveCount(0);
 
   // Tout est gardé au rechargement.
   await p.reload();
-  await expect.poll(() => shownRows(p)).toEqual(["1 Bravo", "2 Charlie", "1 Alpha", "1 Delta"]);
+  await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo", "2 Charlie", "1 Delta"]);
 });
 
 test("refused_move_comes_back_with_the_server_message", async ({ browser }) => {
