@@ -35,7 +35,7 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 | 10. Historique (serveur) | **close** | 3 | R179 à R186, R188 à R191, R197 |
 | 11. Historique (client) | **close** | 2 | R192 à R196 |
 | 12. Tests de la limite R39 (bloc déplacé) | **tour de correction 1 en cours** | — | aucun |
-| 13. Édition gardée pendant un déplacement (R39, R138) | **essai borné en cours ; aucune ligne de production** | — | voir plus bas |
+| 13. Édition gardée pendant un déplacement (R39, R138) | **essai borné en cours ; aucune ligne de production avant son verdict** ; à faire correctement d'après ce verdict (demande de Lenny, 2026-11-12 : « il faut le faire bien ») | — | voir plus bas |
 | 14. Documentation et recette de la partie A | à faire | — | — |
 
 Dernières mesures (poste de Lenny, 2026-11-12, à la tête poussée) : `cargo fmt` et `cargo clippy -D warnings` propres ; 681 tests Rust verts (15 ignorés : les mesures en release et les tests de la limite R39) ; 436 tests du client verts et 12 marqués `it.fails` (les scénarios du bloc déplacé) ; typecheck et licences npm propres ; la dernière suite complète de bout en bout date de la Task 11 : 148 parcours verts et 2 marqués `fixme` (ceux de la Task 12) ; budgets du navigateur relancés à la Task 11 : page de 1 000 blocs à 142 ms au p95 (budget 300), page de 10 000 blocs en 1,2 s (budget 3 s) ; côté serveur, la frappe qui déclenche la coupe d'une version reste vue par un autre en 39 ms au p95 (budget 150).
@@ -83,7 +83,9 @@ Décision du contrôleur : **aucune ligne de production de la Task 13 avant un v
 5. deux déplacements concurrents : ce qu'on veut, et si le dédoublonnage existant suffit ;
 6. ce qui reste hors d'atteinte.
 
-Il doit rendre l'un de trois verdicts : faisable maintenant (dessin découpé en tâches), faisable mais pas dans ce lot (avec le plus petit pas sûr), ou clause de sortie (la limite reste, décrite exactement). **Si ce verdict n'est pas au registre quand tu reprends, l'essai est à refaire** : commence par là, ou applique la clause de sortie du plan (les tests de la Task 12 restent marqués, la limite R39 est écrite telle que mesurée dans le README, la conception §11 et `CLAUDE.md`).
+Il doit rendre l'un de trois verdicts : faisable maintenant (dessin découpé en tâches), faisable mais pas dans ce lot (avec le plus petit pas sûr), ou clause de sortie (la limite reste, décrite exactement).
+
+**Consigne de Lenny, le 2026-11-12 : finir le lot 3 vite, mais le faire bien.** La Task 13 n'est donc pas escamotée : on attend le verdict de l'essai, puis on la fait selon un découpage écrit d'après ce verdict, en TDD, relue comme les autres (les tests de la Task 12 sont sa cible : `it.fails`, `test.fixme` et `#[ignore]` à retirer un par un). La clause de sortie du plan ne s'applique que si l'essai conclut, preuves à l'appui, que rien de sûr n'est faisable : alors la limite est écrite telle que mesurée (le tableau plus haut) dans le README, la conception §11 et `CLAUDE.md`, et le reste au registre. **Si ce verdict n'est pas au registre quand tu reprends, l'essai est à refaire** : commence par là. Ce qui va vite sans rien rogner : mener en parallèle ce qui ne se touche pas (relecture finale des tâches closes, plan de la partie B).
 
 ## Ce qui reste, dans l'ordre
 
