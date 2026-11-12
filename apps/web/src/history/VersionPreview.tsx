@@ -8,9 +8,15 @@
 // dans le document de l'aperçu, que rien ne lit.
 // - Une version : son état est lu au moment où on la choisit (`GET …/state`, plusieurs
 //   mégaoctets pour une grande page), puis appliqué dans un document neuf.
-// - La version actuelle : une copie du document de la page tel que le serveur le connaît
-//   (`provider.doc` de la session), qui suit ce qui y arrive. La copie lit ce document, elle n'y
-//   écrit rien.
+// - La version actuelle : une copie figée du document de la page tel que le serveur le connaît
+//   (`provider.doc` de la session), prise au moment où on la choisit, et reprise quand on la
+//   choisit de nouveau (R192). Elle ne le suit pas : l'historique ne pose aucun écouteur sur un
+//   document de la session. Une copie qui suivrait se mettrait à jour dans l'événement `update`
+//   de ce document, et une exception de l'éditeur de l'aperçu remonterait alors dans la
+//   transaction de la session, qui resterait bloquée : plus rien n'en partirait ni ne s'en
+//   afficherait.
+// Chaque document d'aperçu est détruit quand on le quitte et à la fermeture, et le
+// téléchargement d'une version qu'on quitte avant son arrivée est annulé.
 import { Component, useEffect, useRef, useState, type ReactNode } from "react";
 import * as Y from "yjs";
 import { ApiError, getVersionState } from "../api";
@@ -24,19 +30,21 @@ type Props = {
   versionId: string | null;
   /**
    * Le document de la page tel que le serveur le donne à la session (`provider.doc`), pour la
-   * version actuelle ; `null` : pas de session ouverte en ce moment.
+   * version actuelle ; `null` : pas de session ouverte en ce moment. Il n'est que lu.
    */
   current: Y.Doc | null;
+  /** Change à chaque choix de la version actuelle : sa copie est reprise. */
+  snapshot?: number;
   /** Le serveur ne trouve pas l'état de la version (`404`) : elle a pu sortir de l'historique. */
   onMissing?: () => void;
 };
 
-/** L'état d'une version, lu pour `versionId`. */
-type Loaded =
-  | { versionId: string; status: "loading" }
-  | { versionId: string; status: "ready"; doc: Y.Doc }
-  | { versionId: string; status: "failed"; message: string }
-  | { versionId: string; status: "unreadable" };
+/** Ce que montre l'aperçu, rangé sous la demande qui l'a produit (`key`). */
+type Shown =
+  | { key: string; status: "loading" }
+  | { key: string; status: "ready"; doc: Y.Doc }
+  | { key: string; status: "failed"; message: string }
+  | { key: string; status: "unreadable" };
 
 /** Un document neuf, rempli par l'état d'une version ; `null` si Yjs ne sait pas le lire. */
 export function versionDoc(state: Uint8Array): Y.Doc | null {
@@ -51,69 +59,73 @@ export function versionDoc(state: Uint8Array): Y.Doc | null {
 }
 
 /**
- * Une copie de `source` qui suit ce qui y arrive, sans jamais y écrire ; `null` sans source.
- * Une source neuve (la session de la page a été remplacée) donne une copie neuve.
+ * Une copie figée de `source` : son état encodé, appliqué à un document neuf, hors de toute
+ * transaction de `source`. Rien n'est posé sur `source`.
  */
-function useCopyOf(source: Y.Doc | null): Y.Doc | null {
-  const [copy, setCopy] = useState<{ source: Y.Doc; doc: Y.Doc } | null>(null);
-  useEffect(() => {
-    if (source === null) return;
-    const doc = new Y.Doc();
-    Y.applyUpdate(doc, Y.encodeStateAsUpdate(source));
-    const follow = (update: Uint8Array) => Y.applyUpdate(doc, update);
-    source.on("update", follow);
-    setCopy({ source, doc });
-    return () => {
-      source.off("update", follow);
-    };
-  }, [source]);
-  return copy !== null && copy.source === source ? copy.doc : null;
+export function frozenCopy(source: Y.Doc): Y.Doc {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, Y.encodeStateAsUpdate(source));
+  return doc;
 }
 
-export function VersionPreview({ pageId, versionId, current, onMissing }: Props) {
-  const copy = useCopyOf(versionId === null ? current : null);
-  const [loaded, setLoaded] = useState<Loaded | null>(null);
+export function VersionPreview({ pageId, versionId, current, snapshot = 0, onMissing }: Props) {
+  const [shown, setShown] = useState<Shown | null>(null);
   /** Change à chaque « Réessayer » : l'état est relu. */
   const [attempt, setAttempt] = useState(0);
   // Le rappel du dernier rendu : en changer ne relit rien.
   const missing = useRef(onMissing);
   missing.current = onMissing;
+  /** La demande en cours ; `null` : la version actuelle, sans session pour la copier. */
+  const key =
+    versionId === null
+      ? current === null
+        ? null
+        : `current:${current.guid}:${snapshot}`
+      : `version:${pageId}:${versionId}:${attempt}`;
 
+  // Une demande, et le document qu'elle crée. Quitter la demande (une autre version, la version
+  // actuelle reprise, la fermeture) annule son téléchargement et détruit son document : l'éditeur
+  // qui le montrait est déjà retiré, puisque l'aperçu ne montre que ce qui est rangé sous la
+  // demande en cours.
   useEffect(() => {
-    if (versionId === null) return;
-    let stopped = false;
-    setLoaded({ versionId, status: "loading" });
-    getVersionState(pageId, versionId).then(
+    if (key === null) return;
+    let made: Y.Doc | null = null;
+    if (versionId === null) {
+      made = frozenCopy(current!);
+      setShown({ key, status: "ready", doc: made });
+      return () => made?.destroy();
+    }
+    const download = new AbortController();
+    setShown({ key, status: "loading" });
+    getVersionState(pageId, versionId, download.signal).then(
       (state) => {
-        if (stopped) return;
-        const doc = versionDoc(state);
-        setLoaded(doc ? { versionId, status: "ready", doc } : { versionId, status: "unreadable" });
+        if (download.signal.aborted) return;
+        made = versionDoc(state);
+        setShown(made ? { key, status: "ready", doc: made } : { key, status: "unreadable" });
       },
       (error: unknown) => {
-        if (stopped) return;
-        setLoaded({ versionId, status: "failed", message: messageOf(error) });
+        if (download.signal.aborted) return;
+        setShown({ key, status: "failed", message: messageOf(error) });
         if (error instanceof ApiError && error.status === 404) missing.current?.();
       },
     );
     return () => {
-      stopped = true;
+      download.abort();
+      made?.destroy();
     };
-  }, [pageId, versionId, attempt]);
+    // La demande dit tout : `pageId`, `versionId` et `current` y sont.
+  }, [key]);
 
-  if (versionId === null) {
-    if (copy === null) return <p className="mm-history-note">Chargement…</p>;
+  // Une réponse rangée sous une autre demande ne vaut pas pour celle-ci.
+  const state = shown !== null && shown.key === key ? shown : null;
+  if (state === null || state.status === "loading") {
     return (
-      <PreviewBoundary key="current">
-        <PreviewEditor doc={copy} />
-      </PreviewBoundary>
+      <p className="mm-history-note">
+        {versionId === null ? "Chargement…" : "Chargement de la version…"}
+      </p>
     );
   }
-  // Une réponse rangée sous une autre version ne vaut pas pour celle-ci.
-  const state: Loaded =
-    loaded !== null && loaded.versionId === versionId ? loaded : { versionId, status: "loading" };
   switch (state.status) {
-    case "loading":
-      return <p className="mm-history-note">Chargement de la version…</p>;
     case "unreadable":
       return <Problem>Cette version n'a pas pu être lue.</Problem>;
     case "failed":
@@ -128,7 +140,7 @@ export function VersionPreview({ pageId, versionId, current, onMissing }: Props)
       );
     case "ready":
       return (
-        <PreviewBoundary key={versionId}>
+        <PreviewBoundary key={state.key}>
           <PreviewEditor doc={state.doc} />
         </PreviewBoundary>
       );

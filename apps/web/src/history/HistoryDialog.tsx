@@ -98,6 +98,11 @@ export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onCl
   const { versions, state, error, reload } = useVersions(node.id, session);
   /** La version choisie ; `null` : la version actuelle. */
   const [chosen, setChosen] = useState<string | null>(null);
+  /**
+   * Compte les choix de la version actuelle : chacun reprend sa copie, figée au moment du choix
+   * (R192). Rechoisir la version actuelle la remet donc à jour.
+   */
+  const [snapshot, setSnapshot] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
@@ -136,6 +141,7 @@ export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onCl
 
   const choose = (id: string | null) => {
     setChosen(id);
+    if (id === null) setSnapshot((n) => n + 1);
     setRestoreError(null);
   };
 
@@ -323,6 +329,7 @@ export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onCl
                   pageId={node.id}
                   versionId={chosen}
                   current={session?.provider.doc ?? null}
+                  snapshot={snapshot}
                   onMissing={reload}
                 />
               )}

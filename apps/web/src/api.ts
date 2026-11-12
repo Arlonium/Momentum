@@ -80,16 +80,26 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   return (res.status === 204 ? undefined : await res.json()) as T;
 }
 
-/** Une réponse réussie, sinon l'erreur du serveur (ou `UNREACHABLE`), levée en `ApiError`. */
-async function send(method: string, path: string, body?: unknown): Promise<Response> {
+/**
+ * Une réponse réussie, sinon l'erreur du serveur (ou `UNREACHABLE`), levée en `ApiError`.
+ * Une requête annulée par `signal` rejette avec l'erreur de l'annulation, telle quelle.
+ */
+async function send(
+  method: string,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<Response> {
   let res: Response;
   try {
     res = await fetch(path, {
       method,
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
-  } catch {
+  } catch (e) {
+    if (signal?.aborted) throw e;
     throw new ApiError(0, null, UNREACHABLE);
   }
   if (res.ok) return res;
@@ -415,12 +425,18 @@ export function getVersions(pageId: string): Promise<Version[]> {
 /**
  * `GET …/versions/{versionId}/state` : l'état Yjs (v1) de la version, plusieurs mégaoctets pour
  * une grande page. À appliquer dans un document à part, jamais dans celui d'une session.
+ * `signal` annule le téléchargement (on a choisi une autre version, ou fermé la fenêtre).
  */
-export async function getVersionState(pageId: string, versionId: string): Promise<Uint8Array> {
-  const res = await send("GET", `${version(pageId, versionId)}/state`);
+export async function getVersionState(
+  pageId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const res = await send("GET", `${version(pageId, versionId)}/state`, undefined, signal);
   try {
     return new Uint8Array(await res.arrayBuffer());
-  } catch {
+  } catch (e) {
+    if (signal?.aborted) throw e;
     // Connexion coupée pendant le corps.
     throw new ApiError(0, null, UNREACHABLE);
   }
