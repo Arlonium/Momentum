@@ -1352,3 +1352,60 @@ async fn a_full_table_of_holders_hides_and_closes_no_one() {
         assert!(still_served(client).await);
     }
 }
+
+/// La limite de la garantie, telle qu'elle est (registre du lot 3, Task 6, tour de correction
+/// 1, et coût de R162) : la table des titulaires vit dans l'acteur de la page, et part avec
+/// lui. Alice part ; la page reste vide plus de `idle_close`, et l'acteur s'arrête. Mallory, qui
+/// a vu le `ClientID` d'Alice pendant une session précédente, ouvre la page la première, annonce
+/// ce client, puis s'en va : il lui reste, pour l'acteur neuf. Alice revient, et reste invisible
+/// tant que cet acteur vit, quelle que soit son horloge. Le jour où un client sera rattaché à
+/// son compte au-delà de l'acteur (piste notée au registre), ce test échouera : c'est voulu.
+#[tokio::test]
+async fn after_the_actor_stops_another_account_can_take_a_departed_client() {
+    let idle = SyncConfig {
+        idle_close: std::time::Duration::from_millis(200),
+        ..SyncConfig::default()
+    };
+    let f = Fixture::new(idle).await;
+    let alice = new_user(&f.db).await;
+    let first = Client::connect_synced(&f.url_for(of(alice))).await;
+    let tab = first.client_id();
+    first.set_awareness(&named("Alice"));
+    assert!(still_served(&first).await);
+    drop(first);
+    // La page se vide : son acteur s'arrête, et sa table avec lui.
+    assert!(
+        live_becomes(&f.hub, &[]).await,
+        "l'acteur ne s'est pas arrêté"
+    );
+
+    // Mallory ouvre la page la première, avec une témoin qui reste : le client d'Alice est
+    // libre pour l'acteur neuf, et Mallory le prend.
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+    let squat = named("Mallory, à la place d'Alice");
+    mallory.send_raw(awareness_message(&[(tab, 1_000, &squat)]));
+    assert!(
+        sees(&carol, tab, Some(&squat)).await,
+        "Mallory n'a pas pris le client"
+    );
+    drop(mallory);
+    assert!(sees(&carol, tab, None).await);
+
+    // Alice revient avec le même document : son état suivant, puis un état plus récent que
+    // celui de Mallory, sont ignorés. Le client reste à Mallory tant que l'acteur vit.
+    let back = Client::connect_synced(&f.url_for(of(alice))).await;
+    back.send_raw(awareness_message(&[(tab, 2, &named("Alice, revenue"))]));
+    back.send_raw(awareness_message(&[(
+        tab,
+        2_000,
+        &named("Alice, plus loin"),
+    )]));
+    witness.after(&back, &[&carol]).await;
+    assert_eq!(
+        state_of(&carol, tab),
+        None,
+        "la limite est levée : mettre à jour ce test, le registre et les limites connues"
+    );
+}
