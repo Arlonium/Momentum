@@ -31,13 +31,17 @@ use crate::blocknote::{
 const COLWIDTH: &str = "colwidth";
 
 /// Marge du bourrage : la lecture en grille ajoute au plus autant de cellules
-/// vides que de cellules lues, plus cette marge (Ruling R147), une ligne
-/// entière à la largeur maximale d'un tableau. Un petit tableau inégal est
-/// donc toujours bourré ;
-/// seule une forme qui demanderait bien plus de cellules vides que le
-/// document n'en porte se lit en une colonne. La marge vaut par tableau, et
-/// une page en porte plusieurs : elle reste petite.
-const PADDING_ALLOWANCE: usize = 100;
+/// vides que de cellules lues, plus cette marge (Ruling R147). La part
+/// relative couvre les tableaux qu'une édition concurrente a rendus inégaux ;
+/// la marge, les tout petits tableaux inégaux (une ligne de cinq cellules et
+/// deux lignes d'une : huit vides pour sept lues), qui sont ainsi toujours
+/// bourrés. Elle vaut par tableau, et une page en porte plusieurs : elle
+/// reste petite. Au pire (deux cellules, dont un `colspan` de 19 sur deux
+/// lignes que l'autre coupe), un tableau de 163 octets de Yjs se lit en 20
+/// cellules ; mesuré en release sur 10 000 tels tableaux, 0,09 s, contre
+/// 0,06 s pour des paragraphes de même taille (une marge de 100 en faisait
+/// lire 101 par tableau).
+const PADDING_ALLOWANCE: usize = 16;
 
 fn empty_cell() -> Cell {
     Cell {

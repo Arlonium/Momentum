@@ -422,12 +422,11 @@ fn row_covered_by_rowspans_is_read_with_its_cells() {
 }
 
 /// Ruling R147 : le bourrage ne dépasse jamais le nombre de cellules lues,
-/// plus cent cellules (une ligne entière à la largeur maximale d'un
-/// tableau) : un petit tableau est toujours bourré. Au-delà, le tableau se
-/// lit en une seule colonne, une cellule par ligne, dans l'ordre du
-/// document, sans fusion : aucune cellule n'est perdue, et la lecture reste
-/// proportionnelle à ce que le document porte, quelles que soient la forme
-/// des lignes et la taille des fusions.
+/// plus seize : un tout petit tableau inégal est toujours bourré. Au-delà,
+/// le tableau se lit en une seule colonne, une cellule par ligne, dans
+/// l'ordre du document, sans fusion : aucune cellule n'est perdue, et la
+/// lecture reste proportionnelle à ce que le document porte, quelles que
+/// soient la forme des lignes et la taille des fusions.
 #[test]
 fn padding_beyond_its_allowance_reads_in_one_column() {
     // Sept cellules lues, huit de bourrage : en grille.
@@ -449,18 +448,27 @@ fn padding_beyond_its_allowance_reads_in_one_column() {
         rows.extend((0..n).map(|_| vec![td("y")]));
         client_table(rows)
     };
-    // 52 lignes : 156 de bourrage pour 56 lues, juste à la borne : en grille.
+    // 10 lignes : 30 de bourrage pour 14 lues, juste à la borne : en grille.
     let at_bound = format!(
         "| a | b | c | d |\n| --- | --- | --- | --- |\n{}",
-        "| y |  |  |  |\n".repeat(52)
+        "| y |  |  |  |\n".repeat(10)
     );
-    assert_eq!(readable_mmd(&ragged(52)), at_bound);
-    // 53 lignes : 159 de bourrage pour 57 lues, au-delà : en une colonne.
+    assert_eq!(readable_mmd(&ragged(10)), at_bound);
+    // 11 lignes : 33 de bourrage pour 15 lues, au-delà : en une colonne.
     let beyond = format!(
         "| a |\n| --- |\n| b |\n| c |\n| d |\n{}{{header-rows=4}}\n",
-        "| y |\n".repeat(53)
+        "| y |\n".repeat(11)
     );
-    assert_eq!(readable_mmd(&ragged(53)), beyond);
+    assert_eq!(readable_mmd(&ragged(11)), beyond);
+
+    // Deux cellules, dont la première couvre 100 colonnes sur deux lignes :
+    // B coupe son `rowspan` et demanderait 99 cellules vides pour 2 lues.
+    // En une colonne : A, puis B, sans fusion.
+    let page = client_table(vec![
+        vec![th("A").with("colspan", 100).with("rowspan", 2)],
+        vec![td("B")],
+    ]);
+    assert_eq!(readable_mmd(&page), "| A |\n| --- |\n| B |\n");
 
     // Une ligne de 1 000 cellules, dont la première porte des fusions
     // démesurées, puis 1 000 lignes d'une cellule : près d'un million de
