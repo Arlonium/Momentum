@@ -11,11 +11,13 @@
 // ses cent dernières) ferme son aperçu, et une phrase le dit.
 //
 // Restaurer demande « Peut modifier », hors corbeille, depuis un onglet qui a le schéma du
-// serveur (R35) : sinon le bouton n'existe pas. Une confirmation le précède : le contenu actuel
-// sera remplacé, et restera dans l'historique ; quand d'autres ont la page ouverte (la liste des
-// présents de la session, hors soi), elle dit aussi que ce qu'ils tapent pendant la restauration
-// peut être perdu. Restaurée, la version arrive à tous les onglets par la synchro, et la fenêtre
-// se ferme. Un refus du serveur s'affiche tel quel, et la page est relue.
+// serveur (R35) : sinon le bouton n'existe pas, et une phrase dit pourquoi. Une confirmation le
+// précède : le contenu actuel sera remplacé, et restera dans l'historique ; quand d'autres ont la
+// page ouverte (la liste des présents de la session, hors soi), elle dit aussi que ce qu'ils
+// tapent pendant la restauration peut être perdu. Pendant la requête (plusieurs secondes sur une
+// grande page), son bouton dit « Restauration… », et un second clic n'en demande pas une autre.
+// Restaurée, la version arrive à tous les onglets par la synchro, la page l'annonce (`PageMenu`)
+// et la fenêtre se ferme. Un refus du serveur s'affiche tel quel, et la page est relue.
 //
 // Les noms des auteurs viennent d'autres comptes : du texte, chacun isolé (`dir="auto"`,
 // `unicode-bidi: isolate`), et entouré de U+2068 et U+2069 dans un attribut.
@@ -66,6 +68,8 @@ type Props = {
   selfId: string;
   /** Le serveur a refusé une restauration (`403`, `404`, `409`) : la page est à relire. */
   onRefused: () => void;
+  /** Une version vient d'être restaurée : la page l'annonce (la fenêtre se ferme ensuite). */
+  onRestored: () => void;
   /** La fenêtre se ferme : Échap, « Fermer », un clic sur le voile, une restauration faite. */
   onClose: () => void;
 };
@@ -90,7 +94,15 @@ function useOthersPresent(session: HistorySession | null, selfId: string): boole
   return roster.some((user) => user.id !== selfId);
 }
 
-export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onClose }: Props) {
+export function HistoryDialog({
+  node,
+  session,
+  readOnly,
+  selfId,
+  onRefused,
+  onRestored,
+  onClose,
+}: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const titleId = useId();
@@ -105,6 +117,11 @@ export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onCl
   const [snapshot, setSnapshot] = useState(0);
   const [confirming, setConfirming] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  /**
+   * Une restauration est partie : posé avant tout rendu, pour qu'un second clic (ou une seconde
+   * Entrée) coup sur coup n'en demande pas une autre.
+   */
+  const sending = useRef(false);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const now = useNow();
   const othersPresent = useOthersPresent(session, selfId);
@@ -146,14 +163,18 @@ export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onCl
   };
 
   const restore = async () => {
-    if (chosen === null || restoring) return;
+    if (chosen === null || sending.current) return;
+    sending.current = true;
     setRestoring(true);
     try {
       await restoreVersion(node.id, chosen);
+      sending.current = false;
       setRestoring(false);
       setConfirming(false);
+      onRestored();
       onClose();
     } catch (e) {
+      sending.current = false;
       setRestoring(false);
       setConfirming(false);
       // Session perdue : la connexion est demandée par-dessus la page ; la fenêtre attend.
@@ -224,10 +245,13 @@ export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onCl
 
   let hint: string | null = null;
   if (chosen === null) hint = "Choisis une version pour la voir.";
-  else if (version !== null && !canRestore && !readOnly) {
-    hint = trashed
-      ? "La page est à la corbeille : aucune version ne s'y restaure."
-      : "Restaurer une version demande de pouvoir modifier la page.";
+  else if (version !== null && !canRestore) {
+    hint = readOnly
+      ? // Ce que dit le bandeau de l'onglet (R35), pour la restauration.
+        "Une nouvelle version de Mementum est disponible : recharge la page pour restaurer une version."
+      : trashed
+        ? "La page est à la corbeille : aucune version ne s'y restaure."
+        : "Restaurer une version demande de pouvoir modifier la page.";
   }
 
   return (
@@ -363,7 +387,8 @@ export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onCl
         <Confirm
           // Espace insécable : le « ? » ne passe pas seul à la ligne.
           title={"Restaurer cette version ?"}
-          confirmLabel="Restaurer"
+          // Plusieurs secondes sur une grande page (toute la page est réécrite) : le bouton le dit.
+          confirmLabel={restoring ? "Restauration…" : "Restaurer"}
           busy={restoring}
           onConfirm={() => void restore()}
           onCancel={() => setConfirming(false)}

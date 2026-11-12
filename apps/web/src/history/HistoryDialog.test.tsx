@@ -10,7 +10,7 @@ import * as Y from "yjs";
 import { ApiError, getVersions, restoreVersion } from "../api";
 import type { PageEvent, RosterUser, SyncStatus } from "../editor/collab";
 import { author } from "../test/comments";
-import "../test/hooks";
+import { deferred } from "../test/hooks";
 import { page } from "../test/pages";
 import { HistoryDialog } from "./HistoryDialog";
 
@@ -81,6 +81,7 @@ let host: HTMLDivElement;
 let root: Root;
 const onClose = vi.fn();
 const onRefused = vi.fn();
+const onRestored = vi.fn();
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
@@ -90,6 +91,7 @@ beforeEach(() => {
   root = createRoot(host);
   onClose.mockClear();
   onRefused.mockClear();
+  onRestored.mockClear();
   vi.mocked(getVersions).mockReset();
   vi.mocked(restoreVersion).mockReset();
   // jsdom n'ouvre pas les fenêtres `dialog`.
@@ -130,6 +132,7 @@ async function opened({
         readOnly={readOnly}
         selfId="alice"
         onRefused={onRefused}
+        onRestored={onRestored}
         onClose={onClose}
       />,
     ),
@@ -253,12 +256,45 @@ test("restore_asks_first_and_restores", async () => {
   // Le focus va sur « Annuler » : Entrée par réflexe ne restaure rien.
   expect(document.activeElement).toBe(buttonNamed(asked, "Annuler"));
 
-  vi.mocked(restoreVersion).mockResolvedValue(undefined);
+  // Une restauration prend plusieurs secondes sur une grande page : le bouton le dit.
+  const answer = deferred<void>();
+  vi.mocked(restoreVersion).mockReturnValue(answer.promise);
   await click(buttonNamed(asked, "Restaurer")!);
   expect(restoreVersion).toHaveBeenCalledWith("p", "v1");
-  // Fait : la fenêtre se ferme, et le contenu arrive par la synchro.
+  const pending = buttonNamed(asked, "Restauration…")!;
+  expect(pending).not.toBeNull();
+  expect(pending.getAttribute("aria-disabled")).toBe("true");
+  expect(onClose).not.toHaveBeenCalled();
+  await act(async () => answer.resolve());
+  // Fait : la page l'annonce, la fenêtre se ferme, et le contenu arrive par la synchro.
+  expect(onRestored).toHaveBeenCalledTimes(1);
   expect(onClose).toHaveBeenCalled();
   expect(onRefused).not.toHaveBeenCalled();
+});
+
+test("restore_is_asked_once_on_a_double_click_or_a_double_enter", async () => {
+  await opened();
+  await click(items()[1]);
+  await click(restoreButton()!);
+  const answer = deferred<void>();
+  vi.mocked(restoreVersion).mockReturnValue(answer.promise);
+  const confirm = buttonNamed(confirmation()!, "Restaurer")!;
+  // Deux clics coup sur coup, avant tout rendu.
+  await act(async () => {
+    confirm.click();
+    confirm.click();
+  });
+  expect(restoreVersion).toHaveBeenCalledTimes(1);
+  // Entrée, tapée deux fois : le navigateur fait un clic de chaque.
+  await act(async () => {
+    for (let i = 0; i < 2; i += 1) {
+      confirm.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      confirm.click();
+    }
+  });
+  expect(restoreVersion).toHaveBeenCalledTimes(1);
+  await act(async () => answer.resolve());
+  expect(onRestored).toHaveBeenCalledTimes(1);
 });
 
 test("restore_warns_when_others_have_the_page_open", async () => {
@@ -308,9 +344,7 @@ test("a_purged_version_closes_its_preview_with_a_sentence", async () => {
   // Une version de plus : la plus ancienne sort des cent gardées.
   vi.mocked(getVersions).mockResolvedValue([{ ...v2, id: "v3" }, v2]);
   await act(async () => session!.frame("versions"));
-  await act(async () => {
-    await new Promise((done) => setTimeout(done, 400));
-  });
+  await until(() => preview() === null, "l'aperçu fermé");
   expect(items()).toHaveLength(3);
   expect(preview()).toBeNull();
   expect(restoreButton()).toBeNull();
@@ -342,6 +376,7 @@ test("a_confirmation_without_object_closes_and_focus_stays_in_the_window", async
         readOnly={false}
         selfId="alice"
         onRefused={onRefused}
+        onRestored={onRestored}
         onClose={onClose}
       />,
     ),
@@ -349,6 +384,15 @@ test("a_confirmation_without_object_closes_and_focus_stays_in_the_window", async
   expect(confirmation()).toBeNull();
   expect(restoreButton()).toBeNull();
   expect(dialog().contains(document.activeElement)).toBe(true);
+});
+
+test("the_footer_says_why_nothing_is_restored_from_a_tab_of_another_schema", async () => {
+  await opened({ readOnly: true });
+  await click(items()[1]);
+  expect(restoreButton()).toBeNull();
+  expect(dialog().querySelector(".mm-history-hint")?.textContent).toBe(
+    "Une nouvelle version de Mementum est disponible : recharge la page pour restaurer une version.",
+  );
 });
 
 test("focus_enters_the_window_stays_in_it_and_escape_closes_it", async () => {

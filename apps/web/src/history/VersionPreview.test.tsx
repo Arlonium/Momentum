@@ -306,6 +306,7 @@ test("the_history_leaves_no_listener_on_the_page_document", async () => {
       readOnly={false}
       selfId="alice"
       onRefused={() => {}}
+      onRestored={() => {}}
       onClose={() => {}}
     />,
   );

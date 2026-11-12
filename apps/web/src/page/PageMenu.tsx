@@ -7,7 +7,8 @@
 // entrée, les flèches passent de l'une à l'autre, Échap et Tab le ferment. La fenêtre
 // « Historique » est chargée à la demande : son code, et celui de l'aperçu, ne pèsent pas sur
 // l'ouverture d'une page. Il est demandé dès que le menu s'ouvre, pour être là au clic. Fermée,
-// la fenêtre rend le focus au bouton du menu.
+// la fenêtre rend le focus au bouton du menu. Une version restaurée est annoncée par une région
+// `role="status"` (invisible : le contenu qui change suffit à l'œil), posée avant l'annonce.
 import type { PageNode } from "@mementum/protocol";
 import {
   Component,
@@ -48,11 +49,14 @@ export function PageMenu({ node, session, readOnly, selfId, onRefused }: Props) 
   /** Le bouton du menu ouvert ; `null` : fermé. */
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [history, setHistory] = useState(false);
+  /** Ce qu'annonce la région d'état (un lecteur d'écran la lit quand elle change). */
+  const [announced, setAnnounced] = useState("");
   const buttonRef = useRef<HTMLButtonElement>(null);
   /** La fenêtre vient de se fermer : le focus revient au bouton, une fois qu'elle n'est plus là. */
   const closed = useRef(false);
 
   const closeMenu = useCallback(() => setAnchor(null), []);
+  const announceRestored = useCallback(() => setAnnounced("Version restaurée."), []);
   const closeHistory = useCallback(() => {
     closed.current = true;
     setHistory(false);
@@ -68,6 +72,9 @@ export function PageMenu({ node, session, readOnly, selfId, onRefused }: Props) 
 
   return (
     <>
+      <p className="mm-visually-hidden" role="status">
+        {announced}
+      </p>
       <button
         ref={buttonRef}
         type="button"
@@ -94,7 +101,16 @@ export function PageMenu({ node, session, readOnly, selfId, onRefused }: Props) 
         <RowMenu
           label={LABEL}
           anchor={anchor}
-          actions={[{ label: "Historique", icon: <HistoryIcon />, onSelect: () => setHistory(true) }]}
+          actions={[
+            {
+              label: "Historique",
+              icon: <HistoryIcon />,
+              onSelect: () => {
+                setAnnounced("");
+                setHistory(true);
+              },
+            },
+          ]}
           onClose={closeMenu}
         />
       )}
@@ -107,6 +123,7 @@ export function PageMenu({ node, session, readOnly, selfId, onRefused }: Props) 
               readOnly={readOnly}
               selfId={selfId}
               onRefused={onRefused}
+              onRestored={announceRestored}
               onClose={closeHistory}
             />
           </Suspense>
