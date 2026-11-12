@@ -470,12 +470,19 @@ async fn presence_name_is_the_account_name() {
 }
 
 /// La piste du registre du lot 2 (reportée avec R109) : le serveur retirait l'état d'une
-/// connexion qui part en avançant l'horloge de son client (`remove_state` de yrs). L'état que
-/// l'onglet annonçait en revenant, à l'horloge suivante de la sienne, n'était donc pas plus
-/// récent : ignoré, et sa présence ne revenait qu'à son deuxième changement d'état. Le retrait
-/// se fait désormais à l'horloge de l'état retiré : un client l'applique (rien ne reste d'une
-/// connexion partie, pas de curseur fantôme), et le premier état que la connexion qui revient
-/// annonce est relayé tout de suite, puis appliqué. Lu octet par octet, comme un client le lit.
+/// connexion qui part en avançant l'horloge de son client (`remove_state` de yrs). L'état
+/// suivant de l'onglet, à l'horloge juste au-dessus de la sienne, n'était donc pas plus récent :
+/// ignoré, et sa présence ne revenait qu'au changement d'état d'après. Le retrait se fait
+/// désormais à l'horloge de l'état retiré : un client l'applique (rien ne reste d'une connexion
+/// partie, pas de curseur fantôme), et l'état suivant que la connexion qui revient annonce, à
+/// une horloge plus haute que celle du retrait, est relayé tout de suite, puis appliqué. Lu
+/// octet par octet, comme un client le lit.
+///
+/// Ce que le test ne dit pas : y-websocket, à `onopen`, réannonce l'état de l'onglet à
+/// l'horloge qu'il avait. Ce renvoi n'est pas plus récent que le retrait, et il est ignoré ; la
+/// présence revient à l'état suivant (un mouvement de curseur, ou le renouvellement de
+/// y-protocols). Pour un retour dès la reconnexion, le client doit annoncer un état neuf à
+/// chaque connexion (registre du lot 3, Task 6).
 #[tokio::test]
 async fn presence_returns_at_once_after_a_reconnect() {
     const TAB: u64 = 4_242;
@@ -521,7 +528,8 @@ async fn presence_returns_at_once_after_a_reconnect() {
         "un état fantôme reste chez un client"
     );
 
-    // L'onglet revient par une connexion neuve, et annonce son état suivant : horloge 2.
+    // L'onglet revient par une connexion neuve, et annonce son état suivant : horloge 2, plus
+    // haute que celle du retrait (un renvoi à l'horloge 1 serait ignoré).
     let second = Client::connect_synced(&f.url_for(of(alice))).await;
     let back = named("Alice, revenue");
     second.send_raw(presence(&[1], &[entry(TAB, 2, &back)]));

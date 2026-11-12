@@ -211,7 +211,11 @@ pub const MAX_REMEMBERED_CLIENTS: usize = 4096;
 /// autres connexions du même compte peuvent le tenir avec elle. Quand la dernière part, il reste
 /// au compte, sans connexion vivante, tant que l'acteur de la page vit : personne d'autre ne le
 /// prend pendant une coupure, et la personne qui revient avec le même document le retrouve
-/// (Ruling R109, cas a et c, fermés). Le lot 2 le libérait au départ : un autre compte qui
+/// (Ruling R109, cas a et c, fermés tant que l'acteur vit). La table part avec l'acteur : si la
+/// page reste vide plus de `idle_close`, un compte qui a vu le client d'une personne peut ouvrir
+/// la page le premier et le prendre, et elle reste invisible à son retour tant que l'acteur neuf
+/// vit (test `after_the_actor_stops_another_account_can_take_a_departed_client`, registre du lot
+/// 3, Task 6). Le lot 2 le libérait au départ : un autre compte qui
 /// écrivait dans la page pouvait alors le prendre, ou avancer son horloge, et rendre invisible la
 /// personne qui revenait. R109 l'acceptait parce que garder le compte d'un client aurait cassé un
 /// changement de compte dans le même onglet sans rechargement ; depuis le Ruling R115, l'onglet

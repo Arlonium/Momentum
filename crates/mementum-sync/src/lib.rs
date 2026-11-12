@@ -94,8 +94,9 @@
 //!   La liste des présents (`roster` : une ligne par compte, son identifiant,
 //!   son nom par [`display_name`] et s'il peut écrire, rien d'autre ; une
 //!   connexion sans compte n'y figure pas, Ruling R143) part à toutes les
-//!   connexions de la page, lecteurs compris, à chaque arrivée et à chaque
-//!   départ qui la change. Une connexion n'y entre qu'une fois passés les
+//!   connexions de la page, lecteurs compris, à chaque arrivée, fermeture et
+//!   départ qui la change ; une connexion qui se ferme n'y figure plus, sans
+//!   attendre son départ. Une connexion n'y entre qu'une fois passés les
 //!   contrôles de son inscription (R71, R88) : fermée avant, elle n'a été
 //!   nommée à personne. Elle reçoit la liste juste derrière son accueil.
 //!   [`Hub::page_event`] dit aux connexions d'une page vivante qu'il y a du
