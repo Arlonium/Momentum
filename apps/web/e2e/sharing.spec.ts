@@ -20,6 +20,7 @@ import {
   getTree,
   guestOf,
   holdPageReads,
+  holdTreeReads,
   inviteToPage,
   inviteToSpace,
   logInWith,
@@ -315,6 +316,10 @@ test("two_tabs_of_one_account_exchange_only_through_the_server", async ({ browse
   // temps de taper dans le premier, qui n'a plus de connexion et se croit encore en écriture.
   const firstReads = await holdPageReads(first, shared.id);
   const secondReads = await holdPageReads(second, shared.id);
+  // Et celles de l'arbre, qui porte aussi le niveau de la page ouverte : sans cela, le canal de
+  // l'espace le leur apprendrait aussitôt.
+  const firstTree = await holdTreeReads(first);
+  const secondTree = await holdTreeReads(second);
   await setPageLevel(aliceApi, shared.id, brunoId, "read");
   await Promise.all([firstReads.asked, secondReads.asked]);
   await typeAtEnd(first, ", frappe sans le droit");
@@ -323,9 +328,11 @@ test("two_tabs_of_one_account_exchange_only_through_the_server", async ({ browse
   // Le premier onglet apprend la baisse : ses documents neufs n'ont que ce que le serveur a.
   // Le second, qui n'a encore rien appris, n'a pas reçu la frappe pour la lui rendre.
   firstReads.release();
+  firstTree.release();
   await readsWhatTheServerHas(first);
   await expect(second.locator(".bn-editor")).not.toContainText("frappe sans le droit");
   secondReads.release();
+  secondTree.release();
   await readsWhatTheServerHas(second);
 
   // Le droit revenu et la page rouverte, la frappe ne revient pas non plus de l'autre onglet.

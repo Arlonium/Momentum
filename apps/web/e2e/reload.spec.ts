@@ -6,6 +6,7 @@ import type { ErrorBody } from "@mementum/protocol";
 import {
   apiAs,
   closeContexts,
+  closeEventsChannel,
   createPage,
   expectUnder,
   firstSpace,
@@ -291,6 +292,8 @@ test("tree_is_read_again_when_the_tab_comes_back", async ({ browser }) => {
   const a = await createPage(api, { title: "Alpha" });
 
   const p = await newUser(browser, alice);
+  // Le canal de l'espace est fermé : l'arbre ne se relit que par le retour sur l'onglet.
+  await closeEventsChannel(p);
   // L'horloge de la page est la nôtre : on n'attend pas cinq secondes pour de bon.
   await p.clock.install();
   await p.goto(`/s/${space.id}`);
@@ -373,6 +376,8 @@ test("tree_read_again_without_a_change_disturbs_nothing_in_the_sidebar", async (
   const c = await createPage(api, { title: "Charlie" });
 
   const p = await newUser(browser, alice);
+  // Le canal de l'espace est fermé : l'arbre ne se relit que par le minuteur de repli.
+  await closeEventsChannel(p);
   // L'horloge de la page est la nôtre : on n'attend pas dix secondes pour de bon.
   await p.clock.install();
   await p.goto(`/s/${space.id}`);

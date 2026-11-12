@@ -450,6 +450,37 @@ export async function holdPageReads(
 }
 
 /**
+ * Retient les lectures de l'arbre de l'espace (`GET /api/v1/spaces/{id}/tree`) faites par
+ * l'onglet, jusqu'à `release()`. Depuis le canal de l'espace (R133), l'arbre relu porte aussi
+ * le niveau de la page ouverte : un onglet qui ne doit rien apprendre d'un changement de droit
+ * ne doit pas le lire par là non plus.
+ */
+export async function holdTreeReads(p: Page): Promise<{ release: () => void }> {
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  await p.route(/\/api\/v1\/spaces\/[^/]+\/tree$/, async (route) => {
+    if (route.request().method() === "GET") await released;
+    await route.continue();
+  });
+  return { release };
+}
+
+/**
+ * Ferme le canal de l'espace (`/events/…`) de l'onglet dès qu'il s'ouvre, à appeler avant
+ * `goto` : la barre latérale ne se relit plus que par son minuteur de repli (R128) et au
+ * retour sur l'onglet (R97). Pour un test de ces relectures, ou d'un onglet qui ne doit rien
+ * apprendre de ce qui change ailleurs. Rend le nombre de tentatives d'ouverture.
+ */
+export async function closeEventsChannel(p: Page): Promise<() => number> {
+  let attempts = 0;
+  await p.routeWebSocket(/\/events\//, (ws) => {
+    attempts += 1;
+    void ws.close();
+  });
+  return () => attempts;
+}
+
+/**
  * `below` est sous `above`, calé sur son bord gauche : le bouton « Réessayer » sous le message
  * de la lecture qu'il refait. Un seul dessin, de la corbeille au menu Partager.
  */
