@@ -823,6 +823,75 @@ async fn put_mmd_checks_rights_again_once_the_page_is_loaded() {
     }
 }
 
+/// Ruling R89, pour un fil sur un bloc (`POST …/comments` avec `blockId`, Ruling R134) : les
+/// droits sont contrôlés avant la lecture du corps, puis de nouveau une fois la page chargée,
+/// avant de chercher le bloc et d'écrire. Un droit retiré pendant le chargement n'écrit aucun
+/// fil, et la réponse est celle du droit qui manque, pas celle d'un bloc inconnu. Sans
+/// changement, la route va jusqu'au bloc : l'identifiant donné, inconnu (celui du document neuf
+/// ne se connaît qu'une fois la page chargée), répond `422 invalid_block`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn comment_on_a_block_checks_rights_again_once_the_page_is_loaded() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let count = async |table: &str, page: Uuid| {
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE node_id = '{page}'");
+        query_i64(&t.db_path(), &sql).await
+    };
+    let cases = [
+        (
+            "rien ne change",
+            None,
+            (StatusCode::UNPROCESSABLE_ENTITY, "invalid_block"),
+        ),
+        (
+            "rétrogradée à la lecture",
+            Some(DEMOTED_TO_READ),
+            (StatusCode::FORBIDDEN, "forbidden"),
+        ),
+        (
+            "mise à la corbeille",
+            Some(TRASHED),
+            (StatusCode::CONFLICT, "trashed"),
+        ),
+        (
+            "accès retiré",
+            Some(ACCESS_REMOVED),
+            (StatusCode::NOT_FOUND, "not_found"),
+        ),
+    ];
+    for (what, change, (status, code)) in cases {
+        let grants = [user(&team.olga, Level::Full), user(&team.gina, Level::Edit)];
+        let page = team.page(None, what, &grants).await;
+        let mut lock = WriteLock::take(&t).await;
+        let commit = async {
+            // Le temps que la route contrôle les droits, lise le corps et demande les blocs de
+            // la page, dont le chargement attend le verrou : la même attente fixe que pour
+            // `PUT /mmd`, qui peut faire échouer le test à tort sur un poste chargé (la page ne
+            // serait pas chargée : l'assertion sur l'instantané le verrait), jamais passer.
+            tokio::time::sleep(HELD).await;
+            if let Some(change) = change {
+                write_rights_change(&mut lock, change, team.space, page, &team.gina).await;
+            }
+            lock.commit().await;
+        };
+        let body = json!({ "blockId": "un-bloc", "body": "Sur un bloc" });
+        let uri = format!("/api/v1/pages/{page}/comments");
+        let (reply, ()) = tokio::join!(team.gina.browser.post(&uri, body), commit);
+
+        // La page a été chargée : un refus vient donc du second contrôle, pas du premier.
+        assert_eq!(count("doc_snapshots", page).await, 1, "{what}");
+        let refusal = reply.assert_error(status, code);
+        if status == StatusCode::NOT_FOUND {
+            assert_eq!(refusal["message"], "page introuvable", "{what}");
+        }
+        assert_eq!(
+            count("comment_threads", page).await,
+            0,
+            "{what} : aucun fil"
+        );
+    }
+}
+
 /// Le hachage de la session que porte ce navigateur, en hexadécimal, comme le rend
 /// `hex(token_hash)` en SQL.
 fn session_hex(browser: &Browser<'_>) -> String {
