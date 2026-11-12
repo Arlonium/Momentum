@@ -203,13 +203,29 @@ export function CommentsPanel({
 
   // Filet : un rendu a retiré l'élément du panneau qui avait le focus (un fil qui change de
   // liste est recréé), sans que le focus soit parti ailleurs par un geste (un `blur` l'aurait
-  // dit). Il va au fil, là où il est maintenant, ou au titre du panneau.
+  // dit). Si c'était un champ où l'on tapait, et qu'il est revenu (son brouillon le rouvre), le
+  // focus y retourne, le curseur à sa place ; sinon, il va au fil, là où il est maintenant, ou
+  // au titre du panneau.
   useLayoutEffect(() => {
     const lost = focused.current;
     if (lost === null || lost.isConnected) return;
     focused.current = null;
     const active = document.activeElement;
     if (active !== null && active !== document.body) return;
+    const draftKey = lost.getAttribute("data-draft");
+    const same =
+      draftKey === null
+        ? null
+        : panelRef.current?.querySelector<HTMLTextAreaElement>(
+            `textarea[data-draft=${cssString(draftKey)}]`,
+          );
+    if (same) {
+      const at = lost instanceof HTMLTextAreaElement ? lost.selectionEnd : same.value.length;
+      same.focus();
+      same.setSelectionRange(at, at);
+      caught.current = same;
+      return;
+    }
     const threadId = lost.closest("[data-thread-id]")?.getAttribute("data-thread-id");
     const thread =
       threadId == null

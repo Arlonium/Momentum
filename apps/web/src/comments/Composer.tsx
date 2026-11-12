@@ -96,6 +96,8 @@ export function Composer({
       <textarea
         ref={field}
         className="mm-composer-field"
+        // Le brouillon du champ : s'il est recréé sous le focus, le panneau le lui rend.
+        data-draft={draft?.key}
         aria-label={label}
         placeholder={`${label}…`}
         dir="auto"

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { author, message, thread, useMemoryComments } from "../test/comments";
 import "../test/hooks";
 import { CommentsPanel } from "./CommentsPanel";
+import { createDrafts, DRAFT, type Drafts } from "./drafts";
 
 let host: HTMLDivElement;
 let root: Root;
@@ -228,4 +229,137 @@ test("a_thread_that_changes_list_under_the_focus_keeps_it", async () => {
   await act(async () => root.render(<Moving order={["revenu"]} />));
   expect(host.querySelector('ul[aria-label="Fils ouverts"] [data-thread-id="t"]')).not.toBeNull();
   await focusStaysAndEscapeCloses((active) => active.getAttribute("data-thread-id") === "t");
+});
+
+// Un champ ne prend le focus que sur un geste (« Répondre », « Modifier », « Commenter »…) : un
+// champ rouvert parce qu'il a un brouillon s'affiche avec son texte, sans prendre le focus, et
+// aucun rendu venu du réseau, de l'éditeur ou d'un changement de liste ne déplace le focus hors
+// de l'endroit où la personne tape.
+
+function Listed({
+  drafts,
+  order,
+  absent,
+  initial,
+}: {
+  drafts: Drafts;
+  order: string[];
+  absent: string[];
+  initial: Thread[];
+}) {
+  const comments = useMemoryComments(initial);
+  return (
+    <CommentsPanel
+      id="panneau"
+      comments={comments}
+      order={order}
+      absent={absent}
+      level="full"
+      trashed={false}
+      readOnly={false}
+      selfId="alice"
+      target={null}
+      drafts={drafts}
+      composing={null}
+      excerpt={() => null}
+      onShowBlock={() => {}}
+      onTargetDone={() => {}}
+      onClose={onClose}
+    />
+  );
+}
+
+/** Un fil sur le bloc `b`, avec une réponse en brouillon. */
+function withReplyDraft() {
+  const drafts = createDrafts();
+  drafts.set(DRAFT.reply("t"), "réponse en cours");
+  const initial = [thread("t", { blockId: "b" })];
+  return { drafts, initial };
+}
+
+test("a_reply_draft_reopened_by_a_list_change_leaves_the_focus_in_the_editor", async () => {
+  // La sonde du re-relecteur, telle quelle.
+  const { drafts, initial } = withReplyDraft();
+  const editor = document.createElement("div");
+  editor.contentEditable = "true";
+  editor.tabIndex = 0;
+  document.body.append(editor);
+  await act(async () =>
+    root.render(<Listed drafts={drafts} order={["b"]} absent={[]} initial={initial} />),
+  );
+  await act(async () => editor.focus());
+  // Le bloc commenté est supprimé dans l'éditeur : le fil passe sous « Bloc supprimé ».
+  await act(async () =>
+    root.render(<Listed drafts={drafts} order={[]} absent={["b"]} initial={initial} />),
+  );
+  expect(document.activeElement).toBe(editor);
+  // Le champ rouvert montre son texte.
+  const field = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Répondre au fil"]');
+  expect(field?.value).toBe("réponse en cours");
+  editor.remove();
+});
+
+test("a_reply_draft_reopened_by_a_list_change_leaves_the_focus_in_the_page_comment", async () => {
+  const { drafts, initial } = withReplyDraft();
+  await act(async () =>
+    root.render(<Listed drafts={drafts} order={["b"]} absent={[]} initial={initial} />),
+  );
+  const page = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Commenter la page"]')!;
+  await act(async () => page.focus());
+  await act(async () =>
+    root.render(<Listed drafts={drafts} order={[]} absent={["b"]} initial={initial} />),
+  );
+  expect(document.activeElement).toBe(page);
+});
+
+test("showing_resolved_threads_with_a_draft_leaves_the_focus_on_the_toggle", async () => {
+  const drafts = createDrafts();
+  drafts.set(DRAFT.reply("clos"), "réponse au fil résolu");
+  const initial = [thread("clos", { resolvedAt: 5, resolvedBy: author("alice") })];
+  await act(async () =>
+    root.render(<Listed drafts={drafts} order={[]} absent={[]} initial={initial} />),
+  );
+  const toggle = button(host, "Fils résolus (1)");
+  await click(toggle);
+  expect(
+    host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Répondre au fil"]')?.value,
+  ).toBe("réponse au fil résolu");
+  expect(document.activeElement).toBe(toggle);
+});
+
+test("a_click_on_reply_still_gives_the_field_the_focus", async () => {
+  const drafts = createDrafts();
+  await act(async () =>
+    root.render(<Listed drafts={drafts} order={[]} absent={[]} initial={[thread("t")]} />),
+  );
+  await click(button(host, "Répondre"));
+  expect(document.activeElement).toBe(
+    host.querySelector('textarea[aria-label="Répondre au fil"]'),
+  );
+  // Et « Modifier » aussi.
+  await click(button(host, "Modifier ce message"));
+  expect(document.activeElement).toBe(
+    host.querySelector('textarea[aria-label="Modifier le message"]'),
+  );
+});
+
+test("typing_in_a_reply_that_changes_list_keeps_the_focus_in_it", async () => {
+  // La personne tape sa réponse quand le fil change de liste (un autre supprime le bloc) : le
+  // champ est recréé, et le focus le retrouve.
+  const drafts = createDrafts();
+  const initial = [thread("t", { blockId: "b" })];
+  await act(async () =>
+    root.render(<Listed drafts={drafts} order={["b"]} absent={[]} initial={initial} />),
+  );
+  await click(button(host, "Répondre"));
+  await type(
+    host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Répondre au fil"]')!,
+    "je tape",
+  );
+  await act(async () =>
+    root.render(<Listed drafts={drafts} order={[]} absent={["b"]} initial={initial} />),
+  );
+  const field = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Répondre au fil"]')!;
+  expect(field.value).toBe("je tape");
+  expect(document.activeElement).toBe(field);
 });

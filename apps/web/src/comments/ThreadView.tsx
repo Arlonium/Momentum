@@ -76,11 +76,17 @@ export function ThreadView({
   drafts,
   onFocusMove,
 }: Props) {
-  // Une réponse ou une modification qui a un brouillon reprend où elle en était.
-  const [replying, setReplying] = useState(() => drafts.has(DRAFT.reply(thread.id)));
-  const [editing, setEditing] = useState<string | null>(
-    () => thread.comments.find((c) => drafts.has(DRAFT.edit(c.id)))?.id ?? null,
+  // Une réponse ou une modification qui a un brouillon reprend où elle en était, sans prendre
+  // le focus : un champ ne le prend que sur un geste (« Répondre », « Modifier »). Le fil est
+  // recréé quand il change de liste, sur un rendu venu du réseau ou de l'éditeur : le focus
+  // reste où la personne tape.
+  const [replying, setReplying] = useState<"gesture" | "draft" | null>(() =>
+    drafts.has(DRAFT.reply(thread.id)) ? "draft" : null,
   );
+  const [editing, setEditing] = useState<{ id: string; gesture: boolean } | null>(() => {
+    const drafted = thread.comments.find((c) => drafts.has(DRAFT.edit(c.id)));
+    return drafted === undefined ? null : { id: drafted.id, gesture: false };
+  });
   /** Le message dont on confirme la suppression. */
   const [deleting, setDeleting] = useState<Comment | null>(null);
   const [busy, setBusy] = useState(false);
@@ -150,14 +156,14 @@ export function ThreadView({
         {thread.comments.map((comment) => (
           <li key={comment.id} className="mm-comment">
             <MessageHead comment={comment} now={now} />
-            {editing === comment.id ? (
+            {editing?.id === comment.id ? (
               <Composer
                 label="Modifier le message"
                 submitLabel="Enregistrer"
                 submitName="Enregistrer le message"
                 initial={comment.body}
                 draft={{ store: drafts, key: DRAFT.edit(comment.id) }}
-                autoFocus
+                autoFocus={editing.gesture}
                 clearOnSent={false}
                 onSubmit={async (body) => {
                   await comments.edit(thread.id, comment.id, body);
@@ -186,7 +192,7 @@ export function ThreadView({
               }
               onPicked={() => onFocusMove(FOCUS.react(comment.id))}
             >
-              {editing !== comment.id &&
+              {editing?.id !== comment.id &&
                 (canEditMessage(rights, comment) || canDeleteMessage(rights, comment)) && (
                   <div className="mm-comment-actions">
                     {canEditMessage(rights, comment) && (
@@ -195,7 +201,7 @@ export function ThreadView({
                         className="mm-button mm-button-quiet"
                         aria-label="Modifier ce message"
                         data-focus={FOCUS.edit(comment.id)}
-                        onClick={() => setEditing(comment.id)}
+                        onClick={() => setEditing({ id: comment.id, gesture: true })}
                       >
                         Modifier
                       </button>
@@ -228,7 +234,7 @@ export function ThreadView({
               type="button"
               className="mm-button mm-button-small"
               data-focus={FOCUS.reply}
-              onClick={() => setReplying(true)}
+              onClick={() => setReplying("gesture")}
             >
               Répondre
             </button>
@@ -253,14 +259,14 @@ export function ThreadView({
           submitLabel="Envoyer"
           submitName="Envoyer la réponse"
           draft={{ store: drafts, key: DRAFT.reply(thread.id) }}
-          autoFocus
+          autoFocus={replying === "gesture"}
           onSubmit={async (body) => {
             await comments.reply(thread.id, body);
-            setReplying(false);
+            setReplying(null);
             onFocusMove(FOCUS.reply);
           }}
           onCancel={() => {
-            setReplying(false);
+            setReplying(null);
             onFocusMove(FOCUS.reply);
           }}
         />
