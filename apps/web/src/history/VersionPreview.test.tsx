@@ -383,3 +383,90 @@ test("a_version_the_server_no_longer_has_is_reported", async () => {
   await until(() => onMissing.mock.calls.length > 0, "le signalement");
   expect(shown()).toBeNull();
 });
+
+/**
+ * Une session de synchro réduite à ce que la fenêtre lit, sur le document `doc` (celui du
+ * serveur, `provider.doc`) ; `sync(state)` y applique l'état du serveur, puis la dit synchronisée.
+ */
+function syncingSession(doc: Y.Doc, synced: boolean) {
+  const listeners = new Set<() => void>();
+  const session = {
+    synced,
+    status: (synced ? "connected" : "connecting") as SyncStatus,
+    roster: [],
+    provider: { doc },
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    onPageEvent() {
+      return () => {};
+    },
+    sync(state: Uint8Array) {
+      Y.applyUpdate(doc, state, "server");
+      session.synced = true;
+      session.status = "connected";
+      for (const listener of [...listeners]) listener();
+    },
+  };
+  return session;
+}
+
+type SyncingSession = ReturnType<typeof syncingSession>;
+
+/** La fenêtre de l'historique, ouverte sur la session `session`. */
+function historyOf(session: SyncingSession) {
+  return (
+    <HistoryDialog
+      node={page("p")}
+      session={session}
+      readOnly={false}
+      selfId="alice"
+      onRefused={() => {}}
+      onRestored={() => {}}
+      onClose={() => {}}
+    />
+  );
+}
+
+/** L'aperçu montre « Chargement… », et aucun éditeur. */
+const waiting = () =>
+  shown() === null && (host.querySelector(".mm-history-preview")?.textContent ?? "").includes("Chargement…");
+
+test("current_version_waits_for_the_first_sync", async () => {
+  vi.mocked(getVersions).mockResolvedValue([]);
+  // La fenêtre s'ouvre avant la première synchro : le document de la session est encore vide.
+  const session = syncingSession(new Y.Doc(), false);
+  await render(historyOf(session));
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 50));
+  });
+  expect(waiting()).toBe(true);
+  // La synchro arrive : la copie est prise, avec le contenu de la page.
+  await act(async () => session.sync(Y.encodeStateAsUpdate(pageDoc(["Le texte du serveur"]))));
+  await until(() => shown()?.textContent?.includes("Le texte du serveur") ?? false, "la copie");
+  expect(previewDocs()).toHaveLength(1);
+});
+
+test("current_version_never_shows_the_empty_document_of_a_new_session", async () => {
+  vi.mocked(getVersions).mockResolvedValue([]);
+  const first = syncingSession(new Y.Doc(), false);
+  first.sync(Y.encodeStateAsUpdate(pageDoc(["Avant la corbeille"])));
+  await render(historyOf(first));
+  await until(() => shown()?.textContent?.includes("Avant la corbeille") ?? false, "la première copie");
+  // La session est remplacée (page mise à la corbeille ailleurs, niveau baissé) : la neuve, sur
+  // un document neuf, n'a pas encore fait sa première synchro. L'aperçu attend, sans page vide.
+  const next = syncingSession(new Y.Doc(), false);
+  await render(historyOf(next));
+  expect(waiting()).toBe(true);
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 50));
+  });
+  expect(waiting()).toBe(true);
+  // La synchro de la session neuve : sa copie montre la page.
+  await act(async () => next.sync(Y.encodeStateAsUpdate(pageDoc(["Dans la corbeille"]))));
+  await until(() => shown()?.textContent?.includes("Dans la corbeille") ?? false, "la copie neuve");
+  // Aucune copie d'un document vide n'a été montrée : deux copies, chacune d'une page synchronisée.
+  expect(previewDocs()).toHaveLength(2);
+  expect(previewDocs()[0].isDestroyed).toBe(true);
+});

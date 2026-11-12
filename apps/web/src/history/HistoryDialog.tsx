@@ -94,6 +94,20 @@ function useOthersPresent(session: HistorySession | null, selfId: string): boole
   return roster.some((user) => user.id !== selfId);
 }
 
+/**
+ * La session a-t-elle fait sa première synchro ? Avant, son document est vide (une session
+ * neuve : fenêtre ouverte tôt, ou page passée en lecture seule ou revenue de la corbeille), et sa
+ * copie montrerait une page vide. Appris par la session (`subscribe`), jamais par un écouteur
+ * posé sur son document.
+ */
+function useSynced(session: HistorySession | null): boolean {
+  const subscribe = useCallback(
+    (onChange: () => void) => (session ? session.subscribe(onChange) : () => {}),
+    [session],
+  );
+  return useSyncExternalStore(subscribe, () => session?.synced ?? false);
+}
+
 export function HistoryDialog({
   node,
   session,
@@ -125,6 +139,12 @@ export function HistoryDialog({
   const [restoreError, setRestoreError] = useState<string | null>(null);
   const now = useNow();
   const othersPresent = useOthersPresent(session, selfId);
+  /**
+   * Le document de la page pour la version actuelle : celui de la session une fois synchronisée ;
+   * `null` d'ici là (l'aperçu dit « Chargement… »). Une session remplacée attend de même.
+   */
+  const synced = useSynced(session);
+  const current = session !== null && synced ? session.provider.doc : null;
 
   useEffect(() => {
     const dialog = ref.current;
@@ -352,7 +372,7 @@ export function HistoryDialog({
                 <VersionPreview
                   pageId={node.id}
                   versionId={chosen}
-                  current={session?.provider.doc ?? null}
+                  current={current}
                   snapshot={snapshot}
                   onMissing={reload}
                 />

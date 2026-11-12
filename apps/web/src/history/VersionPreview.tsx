@@ -10,11 +10,13 @@
 //   mégaoctets pour une grande page), puis appliqué dans un document neuf.
 // - La version actuelle : une copie figée du document de la page tel que le serveur le connaît
 //   (`provider.doc` de la session), prise au moment où on la choisit, et reprise quand on la
-//   choisit de nouveau (R192). Elle ne le suit pas : l'historique ne pose aucun écouteur sur un
-//   document de la session. Une copie qui suivrait se mettrait à jour dans l'événement `update`
-//   de ce document, et une exception de l'éditeur de l'aperçu remonterait alors dans la
-//   transaction de la session, qui resterait bloquée : plus rien n'en partirait ni ne s'en
-//   afficherait.
+//   choisit de nouveau (R192). Pas avant la première synchro de la session, dont le document est
+//   encore vide : la fenêtre ne le donne qu'ensuite, et l'aperçu dit « Chargement… » d'ici là ;
+//   une session remplacée attend de même. Elle ne suit pas ce document : l'historique ne pose
+//   aucun écouteur sur un document de la session. Une copie qui suivrait se mettrait à jour dans
+//   l'événement `update` de ce document, et une exception de l'éditeur de l'aperçu remonterait
+//   alors dans la transaction de la session, qui resterait bloquée : plus rien n'en partirait ni
+//   ne s'en afficherait.
 // Chaque document d'aperçu est détruit quand on le quitte et à la fermeture, et le
 // téléchargement d'une version qu'on quitte avant son arrivée est annulé.
 import { Component, useEffect, useRef, useState, type ReactNode } from "react";
@@ -30,7 +32,7 @@ type Props = {
   versionId: string | null;
   /**
    * Le document de la page tel que le serveur le donne à la session (`provider.doc`), pour la
-   * version actuelle ; `null` : pas de session ouverte en ce moment. Il n'est que lu.
+   * version actuelle ; `null` : pas de session, ou pas encore synchronisée. Il n'est que lu.
    */
   current: Y.Doc | null;
   /** Change à chaque choix de la version actuelle : sa copie est reprise. */
