@@ -362,6 +362,7 @@ pub(crate) mod tests {
             signups: Arc::new(tokio::sync::Mutex::new(())),
             access: Arc::new(AccessCache::new(ACCESS_CACHE_NODES)),
             inputs: Arc::new(InputsCache::new(INPUTS_CACHE_UNITS)),
+            events_ping: crate::EVENTS_PING,
         }
     }
 

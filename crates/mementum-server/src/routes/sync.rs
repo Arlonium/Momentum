@@ -9,7 +9,11 @@
 //! 2. `401 unauthenticated` sans session ;
 //! 3. `404 not_found` pour une page que la personne ne lit pas : inconnue,
 //!    mal formée, d'un espace où elle n'a aucun rôle, ou hors de ses accès.
-//!    La réponse est la même dans tous ces cas, et aucun acteur n'est lancé.
+//!    La réponse est la même dans tous ces cas, et aucun acteur n'est lancé ;
+//! 4. `400 invalid_request` sans demande de WebSocket.
+//!
+//! Le canal de l'espace (`routes/events.rs`) passe par les mêmes contrôles, dans le même ordre
+//! ([`caller`], puis son propre `404`, puis [`websocket`]).
 //!
 //! **Ce qu'elle peut faire.** La connexion est servie au nom du compte de la
 //! session. Elle écrit si le niveau de la personne permet de modifier la
@@ -95,6 +99,50 @@ use crate::{AppState, now_ms};
 /// recevoir sa trame de fermeture.
 const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
+/// Qui demande une WebSocket (`/sync`, `/events`), une fois passés les deux premiers refus
+/// ([`caller`]).
+pub(crate) struct Caller {
+    pub(crate) user: AuthUser,
+    /// La session que l'extracteur vient de lire : c'est elle, et pas une autre du compte, que
+    /// la connexion relira (Ruling R88 pour `/sync`).
+    pub(crate) session: [u8; 32],
+}
+
+/// Les deux premiers refus d'avant la poignée de main, communs à `/sync` et à `/events` :
+/// `403 bad_origin` pour une en-tête `Origin` d'un autre site (une WebSocket échappe à CORS, et
+/// la couche de `guard.rs` ne regarde pas l'`Origin` d'un `GET`), puis `401` sans session.
+pub(crate) fn caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    user: Result<AuthUser, ApiError>,
+) -> Result<Caller, ApiError> {
+    if !guard::origin_allowed(
+        guard::request_origin(headers),
+        guard::request_host(headers, uri),
+        state.public_origin.as_deref(),
+    ) {
+        return Err(guard::bad_origin());
+    }
+    let user = user?;
+    let session = auth::session_hash(headers).ok_or_else(ApiError::unauthenticated)?;
+    Ok(Caller { user, session })
+}
+
+/// Le dernier refus d'avant la poignée de main, commun à `/sync` et à `/events` : `400
+/// invalid_request` (ou le statut de l'extracteur) sans demande de WebSocket.
+pub(crate) fn websocket(
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Result<WebSocketUpgrade, ApiError> {
+    upgrade.map_err(|e| {
+        ApiError::new(
+            e.status(),
+            ErrorCode::InvalidRequest,
+            "connexion WebSocket attendue (en-têtes Upgrade: websocket)",
+        )
+    })
+}
+
 pub(crate) async fn sync(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -104,28 +152,12 @@ pub(crate) async fn sync(
     query: Result<Query<HashMap<String, String>>, QueryRejection>,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Result<Response, ApiError> {
-    if !guard::origin_allowed(
-        guard::request_origin(&headers),
-        guard::request_host(&headers, &uri),
-        state.public_origin.as_deref(),
-    ) {
-        return Err(guard::bad_origin());
-    }
-    let user = user?;
-    // La session que l'extracteur vient de lire : c'est elle, et pas une autre du compte,
-    // qui sera relue une fois la connexion inscrite (Ruling R88).
-    let session = auth::session_hash(&headers).ok_or_else(ApiError::unauthenticated)?;
+    let Caller { user, session } = caller(&state, &headers, &uri, user)?;
     let id = page_id(path)?;
     // Ce contrôle ne sert qu'aux refus : rien de ce qu'il lit n'entre dans la connexion
     // (Ruling R89).
     state.node_access(&user, id, Action::Read).await?;
-    let upgrade = upgrade.map_err(|e| {
-        ApiError::new(
-            e.status(),
-            ErrorCode::InvalidRequest,
-            "connexion WebSocket attendue (en-têtes Upgrade: websocket)",
-        )
-    })?;
+    let upgrade = websocket(upgrade)?;
     let schema = query
         .ok()
         .and_then(|Query(q)| q.get("schema").and_then(|s| s.trim().parse::<u32>().ok()));

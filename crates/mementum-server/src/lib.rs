@@ -1,5 +1,5 @@
-//! Serveur HTTP de Mementum : comptes et sessions, API REST des pages, MMD et
-//! WebSocket de synchronisation.
+//! Serveur HTTP de Mementum : comptes et sessions, API REST des pages, MMD,
+//! WebSocket de synchronisation et canal de l'espace.
 //!
 //! | Route | Session | Réponse |
 //! |---|---|---|
@@ -36,6 +36,7 @@
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
+//! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant chaque trame de version et à chaque ping, et la connexion est fermée sans rien recevoir s'ils ne valent plus ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
 //! Toute erreur est en JSON : `{ "error": <code>, "message": <texte> }`
 //! ([`types::ErrorBody`]). Une route qui demande une session répond `401
@@ -93,28 +94,38 @@
 //! relit tout. Une connexion en train de s'ouvrir à cet instant est fermée
 //! avant d'avoir rien reçu.
 //!
+//! **Canal de l'espace** (`events.rs`, `routes/events.rs`, Ruling R133). Une
+//! WebSocket par espace, qui ne porte que sa version (`spaces.lsn`) : le
+//! client relit l'arbre par `GET /api/v1/spaces/{id}/tree`, déjà filtré par
+//! `access.rs`. Aucun second calcul de « qui voit quoi » n'est écrit pour un
+//! flux poussé. Mêmes contrôles que `/sync` avant la poignée de main ; après,
+//! la session et le rôle sont revérifiés avant chaque trame et à chaque ping.
+//!
 //! **Garde-fous réseau** (`guard.rs`). Une couche passe avant toute route.
 //! Sur la boucle locale, l'en-tête `Host` doit la nommer (DNS rebinding,
 //! Ruling R31), ou nommer l'hôte de `MEMENTUM_PUBLIC_URL` quand elle est
 //! réglée (un mandataire ou un tunnel qui garde le `Host` public, Ruling
 //! R78), sinon `421 bad_host`. Partout, cette couche répond `403 bad_origin`
 //! à une requête qui écrit (tout sauf `GET`, `HEAD` et `OPTIONS`) et qui
-//! porte l'`Origin` d'un autre site. Une connexion `/sync` est un `GET` : la
-//! couche ne regarde pas son `Origin`. C'est la route qui la contrôle, avant
-//! tout le reste, par la même règle (`routes/sync.rs`). Une seconde couche,
-//! par-dessus, pose `Cache-Control: no-store` et `X-Content-Type-Options:
-//! nosniff` sur toute réponse de l'API (`/api/…`), refus compris.
+//! porte l'`Origin` d'un autre site. Une connexion `/sync` ou `/events` est un
+//! `GET` : la couche ne regarde pas son `Origin`. C'est la route qui la
+//! contrôle, avant tout le reste, par la même règle (`routes/sync.rs`). Une
+//! seconde couche, par-dessus, pose `Cache-Control: no-store` et
+//! `X-Content-Type-Options: nosniff` sur toute réponse de l'API (`/api/…`),
+//! refus compris ; ni `/sync` ni `/events` n'en sont.
 
 mod access;
 pub mod auth;
 pub mod config;
 mod error;
+mod events;
 mod guard;
 mod inputs_cache;
 pub mod types;
 
 mod routes {
     pub(crate) mod auth;
+    pub(crate) mod events;
     pub(crate) mod info;
     pub(crate) mod invitations;
     pub(crate) mod pages;
@@ -126,7 +137,7 @@ mod routes {
 use std::future::Future;
 use std::io::Write;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use axum::Router;
@@ -142,6 +153,7 @@ use tokio::net::TcpListener;
 pub use auth::set_password;
 pub use config::Config;
 pub use error::ApiError;
+pub use events::EVENTS_PING;
 // La copie d'avant migration, que `set_password` signale à qui l'appelle.
 pub use mementum_store::Backup;
 pub use routes::pages::{MAX_TITLE_CHARS, UNTITLED};
@@ -184,6 +196,8 @@ pub(crate) struct AppState {
     /// Les données des espaces dont ces accès se calculent, lues une fois par
     /// révision pour tout le monde (`inputs_cache.rs`).
     inputs: Arc<inputs_cache::InputsCache>,
+    /// Intervalle des pings du canal de l'espace (`events.rs`).
+    events_ping: Duration,
 }
 
 /// Millisecondes Unix.
@@ -323,6 +337,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
         inputs: Arc::new(inputs_cache::InputsCache::new(
             inputs_cache::INPUTS_CACHE_UNITS,
         )),
+        events_ping: cfg.events_ping,
     };
     Ok((router(state), store))
 }
@@ -374,6 +389,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/v1/pages/{id}/invitations", post(sharing::invite))
         .route("/sync/{id}", get(sync::sync))
+        .route("/events/{id}", get(routes::events::events))
         .fallback(async || {
             ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "route inconnue")
         })

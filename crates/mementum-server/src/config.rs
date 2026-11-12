@@ -9,7 +9,9 @@
 //! | adresse publique | `MEMENTUM_PUBLIC_URL` | `--public-url` | aucune |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
-//! l'emporte sur le défaut.
+//! l'emporte sur le défaut. Un dernier réglage n'a ni variable ni option :
+//! l'intervalle des pings du canal de l'espace ([`Config::events_ping`]), que
+//! seuls les tests raccourcissent.
 //!
 //! Le serveur n'écoute jamais par défaut sur une autre interface que la
 //! boucle locale, et les inscriptions sont par défaut sur invitation (Ruling
@@ -18,9 +20,11 @@
 use std::ffi::{OsStr, OsString};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::http::Uri;
 
+use crate::events::EVENTS_PING;
 pub use crate::types::SignupMode;
 
 /// Adresse d'écoute par défaut : la boucle locale seulement.
@@ -65,6 +69,10 @@ pub struct Config {
     /// `Secure` ; et cette origine est admise sur les écritures et sur la
     /// synchronisation (Ruling R51).
     pub public_url: Option<String>,
+    /// Intervalle des pings du canal de l'espace (`/events/{spaceId}`), [`EVENTS_PING`] par
+    /// défaut. Ni variable ni option : seuls les tests le raccourcissent, pour ne pas attendre
+    /// 20 s.
+    pub events_ping: Duration,
 }
 
 impl Default for Config {
@@ -74,6 +82,7 @@ impl Default for Config {
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
             signup: SignupMode::default(),
             public_url: None,
+            events_ping: EVENTS_PING,
         }
     }
 }
@@ -144,6 +153,7 @@ impl Config {
             data_dir: resolve_data_dir(data_dir, &var),
             signup,
             public_url,
+            events_ping: EVENTS_PING,
         })
     }
 

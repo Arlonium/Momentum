@@ -16,8 +16,9 @@
 //!   rien au DNS rebinding : la page d'un attaquant envoie le `Host` de son
 //!   propre nom, pas celui de l'adresse publique.
 //! - **Écritures et WebSocket venues d'un autre site.** Toute requête autre
-//!   que `GET`, `HEAD` ou `OPTIONS`, et toute connexion à `/sync/{id}` (une
-//!   WebSocket échappe à CORS), est refusée par `403 bad_origin` si elle
+//!   que `GET`, `HEAD` ou `OPTIONS`, et toute connexion à `/sync/{id}` ou à
+//!   `/events/{spaceId}` (une WebSocket échappe à CORS ; c'est la route qui
+//!   le contrôle, `routes/sync.rs`), est refusée par `403 bad_origin` si elle
 //!   porte une en-tête `Origin` qui n'est ni celle d'une page de la boucle
 //!   locale, ni celle du serveur lui-même (même hôte et même port que
 //!   `Host`), ni celle de l'adresse publique (`MEMENTUM_PUBLIC_URL`). Sans
@@ -163,7 +164,7 @@ pub(crate) async fn api_headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// L'`Origin` d'une écriture ou d'une connexion `/sync` est-elle acceptée ?
+/// L'`Origin` d'une écriture ou d'une connexion `/sync` ou `/events` est-elle acceptée ?
 /// Absente : oui. Présente : seulement `http(s)://` vers la boucle locale ou
 /// vers l'hôte même du serveur (`host`, l'en-tête `Host` de la requête), ou
 /// exactement `public`, l'origine de l'adresse publique, schéma compris.
