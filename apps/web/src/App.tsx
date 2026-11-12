@@ -6,6 +6,7 @@
 // Ce fichier assemble. La logique est dans ses hooks, un sujet chacun :
 // - `useServerSchema` : la version de schéma du serveur (R35), et la lecture seule ;
 // - `useSpaceTree`, `useTreeReader` : l'arbre de l'espace affiché ;
+// - `useSpaceEvents` : le canal de l'espace, qui le fait relire quand d'autres le changent ;
 // - `useOpenPage` : la page ouverte, celle de l'arbre ou celle que le serveur rend ;
 // - `useCurrentSpace` : l'espace affiché, d'après l'adresse et la page ouverte ;
 // - `usePageActions` : créer, renommer, jeter, restaurer, déplacer, et ce que la page
@@ -26,6 +27,7 @@ import { CreateSpaceDialog } from "./sidebar/SpaceSwitcher";
 import { SpaceNotFound } from "./space/SpaceNotFound";
 import { useCurrentSpace } from "./space/useCurrentSpace";
 import { usePageActions } from "./space/usePageActions";
+import { useSpaceEvents } from "./space/useSpaceEvents";
 import { useSpaceTree, useTreeCatchUp, useTreeReader } from "./space/useSpaceTree";
 import { TrashView } from "./trash/TrashView";
 import { firstClick } from "./ui/firstClick";
@@ -58,8 +60,23 @@ export function App() {
   // Tant que le serveur n'a pas dit dans quel espace est la page ouverte, on ne sait pas quel
   // arbre lire. Une lecture qui échoue ne retire rien de l'écran : elle se dit en pied de
   // barre latérale.
-  const treeError = useTreeReader(tree, page.resolving ? null : spaceId, {
+  const readSpaceId = page.resolving ? null : spaceId;
+  // Ce que d'autres changent dans l'espace arrive par son canal (R133) : une version plus haute
+  // que celle de l'arbre affiché le relit, avec le compte (nom de l'espace, rôles, R150). Tant
+  // qu'il est tombé, l'arbre se relit par le minuteur de repli.
+  const { reload: reloadTree, rereadAccount: rereadAfterChange, knownLsn } = tree;
+  const changed = useCallback(() => {
+    reloadTree();
+    rereadAfterChange();
+  }, [reloadTree, rereadAfterChange]);
+  const knownVersion = useCallback(
+    () => (readSpaceId === null ? null : knownLsn(readSpaceId)),
+    [readSpaceId, knownLsn],
+  );
+  const { live } = useSpaceEvents(readSpaceId, changed, knownVersion);
+  const treeError = useTreeReader(tree, readSpaceId, {
     retries,
+    live,
     onSessionLost: sessionLost,
     onGone: rereadAccount,
     onReturn: rereadAccount,

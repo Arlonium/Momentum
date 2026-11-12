@@ -21,8 +21,8 @@ vi.mock("../api", async (original) => ({
 
 /** Les lectures de l'arbre, dans l'ordre : le test tient ou rompt chacune. */
 let reads: { spaceId: string; answer: Deferred<Tree> }[] = [];
-const answer = (index: number, spaceId: string, nodes: PageNode[]) =>
-  settle(() => reads[index].answer.resolve({ spaceId, lsn: 0, nodes }));
+const answer = (index: number, spaceId: string, nodes: PageNode[], lsn = 0) =>
+  settle(() => reads[index].answer.resolve({ spaceId, lsn, nodes }));
 
 const onSessionLost = vi.fn();
 const onGone = vi.fn();
@@ -39,10 +39,16 @@ beforeEach(() => {
   });
 });
 
-type Props = { spaceId: string | null; retries?: number };
-function hook({ spaceId, retries = 0 }: Props) {
+type Props = { spaceId: string | null; retries?: number; live?: boolean };
+function hook({ spaceId, retries = 0, live }: Props) {
   const tree = useSpaceTree();
-  const readError = useTreeReader(tree, spaceId, { retries, onSessionLost, onGone, onReturn });
+  const readError = useTreeReader(tree, spaceId, {
+    retries,
+    live,
+    onSessionLost,
+    onGone,
+    onReturn,
+  });
   return { ...tree, readError };
 }
 
@@ -536,4 +542,80 @@ test("catch_up_is_skipped_for_a_page_just_reloaded_for", async () => {
   await settle(() => hook.current.skip("x"));
   await hook.rerender({ nodes: [a], activeId: "x", found: page("x") });
   expect(hook.current.reloads).toBe(0);
+});
+
+test("tree_remembers_the_version_it_was_read_at", async () => {
+  // C'est avec elle que le canal de l'espace compare ses trames (R141), même quand une
+  // relecture rend les mêmes pages : l'arbre chargé reste alors le même objet.
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  expect(tree.current.knownLsn("perso")).toBeNull();
+  const a = [page("a")];
+  await answer(0, "perso", a, 7);
+  expect(tree.current.knownLsn("perso")).toBe(7);
+  // Celle d'un autre espace n'est pas celle de l'arbre affiché.
+  expect(tree.current.knownLsn("autre")).toBeNull();
+  await settle(() => tree.current.reload());
+  await answer(1, "perso", [{ ...a[0] }], 9);
+  expect(tree.current.loaded?.nodes).toBe(a);
+  expect(tree.current.knownLsn("perso")).toBe(9);
+});
+
+test("polling_stops_while_the_channel_is_live_and_resumes_when_it_falls", async () => {
+  const clock = simulated();
+  const tree = await renderHook(hook, { spaceId: "perso", live: true });
+  await answer(0, "perso", [page("a")]);
+  await clock.pass(3 * POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(1);
+  // Le canal tombe : le minuteur reprend, depuis la dernière lecture (déjà ancienne).
+  await tree.rerender({ spaceId: "perso", live: false });
+  await clock.pass(POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(2);
+  await answer(1, "perso", [page("a")]);
+  // Il revient : le minuteur se tait de nouveau.
+  await tree.rerender({ spaceId: "perso", live: true });
+  await clock.pass(3 * POLL_INTERVAL_MS);
+  expect(reads).toHaveLength(2);
+  // Le retour sur l'onglet reste une raison de relire.
+  await clock.focus();
+  expect(reads).toHaveLength(3);
+});
+
+test("account_is_read_again_after_a_change_with_the_same_limit_and_replayed", async () => {
+  // Un espace renommé, un rôle changé par quelqu'un d'autre (R150) : le compte est relu par
+  // le chemin du retour sur l'onglet, au plus une fois toutes les cinq secondes ; un appel
+  // retenu par la limite est rejoué à son échéance, une seule fois pour tous ceux qu'elle a
+  // retenus.
+  const clock = simulated();
+  const tree = await renderHook(hook, { spaceId: "perso", live: true });
+  await answer(0, "perso", [page("a")]);
+  // Le compte vient d'être lu, au chargement de l'application : trop tôt.
+  await clock.pass(1_000);
+  await settle(() => tree.current.rereadAccount());
+  await settle(() => tree.current.rereadAccount());
+  expect(onReturn).not.toHaveBeenCalled();
+  await clock.pass(REFRESH_INTERVAL_MS - 1_000 - 1);
+  expect(onReturn).not.toHaveBeenCalled();
+  await clock.pass(1);
+  expect(onReturn).toHaveBeenCalledTimes(1);
+  // Hors limite : tout de suite, et la limite repart.
+  await clock.pass(REFRESH_INTERVAL_MS);
+  await settle(() => tree.current.rereadAccount());
+  expect(onReturn).toHaveBeenCalledTimes(2);
+  await clock.pass(100);
+  await settle(() => tree.current.rereadAccount());
+  expect(onReturn).toHaveBeenCalledTimes(2);
+  await clock.pass(REFRESH_INTERVAL_MS - 100);
+  expect(onReturn).toHaveBeenCalledTimes(3);
+  await clock.pass(10 * REFRESH_INTERVAL_MS);
+  expect(onReturn).toHaveBeenCalledTimes(3);
+});
+
+test("account_replay_is_cancelled_when_the_hook_unmounts", async () => {
+  const clock = simulated();
+  const tree = await renderHook(hook, { spaceId: "perso", live: true });
+  await answer(0, "perso", [page("a")]);
+  await settle(() => tree.current.rereadAccount());
+  await tree.unmount();
+  await clock.pass(2 * REFRESH_INTERVAL_MS);
+  expect(onReturn).not.toHaveBeenCalled();
 });

@@ -16,18 +16,24 @@
 // Une lecture qui échoue (serveur injoignable) ne retire rien de l'écran : l'arbre chargé
 // reste, l'échec est dit, et la lecture repart d'elle-même quand le réseau revient.
 //
-// Rien ne pousse encore ici ce que d'autres changent dans l'espace (le journal d'opérations
-// de l'espace viendra dans un lot suivant, conception §5.3). En attendant, l'arbre est relu :
+// Ce que d'autres changent dans l'espace arrive par le canal de l'espace (`useSpaceEvents`,
+// Ruling R133) : quand la version qu'il pousse dépasse celle de l'arbre affiché (`knownLsn`,
+// la version que le serveur a donnée avec l'arbre, R141), l'arbre est relu. Le canal tombé,
+// l'arbre est relu par repli :
 // - quand l'onglet redevient visible ou reprend le focus, au plus une fois toutes les cinq
-//   secondes (Ruling R97) ;
-// - toutes les dix secondes tant que l'onglet est visible (Ruling R128) : à deux sur un
-//   espace, sans changer de fenêtre, rien d'autre ne déclencherait la relecture. Le minuteur
-//   repart de la dernière lecture partie, quelle qu'en soit la raison, et ne lit ni pour un
-//   onglet caché, ni par-dessus une lecture en route.
+//   secondes (Ruling R97), canal ou non ;
+// - toutes les dix secondes tant que l'onglet est visible (Ruling R128), seulement quand le
+//   canal est tombé (`live` faux) : sans lui, à deux sur un espace, sans changer de fenêtre,
+//   rien d'autre ne déclencherait la relecture. Le minuteur repart de la dernière lecture
+//   partie, quelle qu'en soit la raison, et ne lit ni pour un onglet caché, ni par-dessus une
+//   lecture en route. Il reprend dès que le canal tombe.
 // Le compte est relu au retour sur l'onglet (`onReturn`, Ruling R126), pas par le minuteur :
 // son rôle dans l'espace a pu changer, et la session a pu être rouverte sous un autre compte
 // dans un autre onglet. Il a son propre compte de temps, cinq secondes aussi : une lecture de
-// l'arbre par le minuteur ne l'en prive pas au retour qui la suit.
+// l'arbre par le minuteur ne l'en prive pas au retour qui la suit. Une nouvelle version de
+// l'espace le relit aussi (`rereadAccount`, Ruling R150) : le nom de l'espace et les rôles ne
+// sont pas dans l'arbre. Avec la même limite ; un appel qu'elle retient est rejoué à son
+// échéance, pour que le dernier changement finisse toujours par arriver.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ApiError, getTree, isSessionLost } from "../api";
@@ -53,9 +59,10 @@ export function sameNodes(a: PageNode[], b: PageNode[]): boolean {
 export const REFRESH_INTERVAL_MS = 5_000;
 
 /**
- * Tant que l'onglet est visible, l'arbre est relu quand sa dernière lecture a cet âge (Ruling
- * R128) : ce que d'autres créent, renomment ou déplacent arrive en dix secondes au plus, sans
- * changer de fenêtre. En attendant le journal d'opérations de l'espace, qui le poussera.
+ * Quand le canal de l'espace est tombé, et tant que l'onglet est visible, l'arbre est relu
+ * quand sa dernière lecture a cet âge (Ruling R128) : ce que d'autres créent, renomment ou
+ * déplacent arrive en dix secondes au plus, sans changer de fenêtre. Un repli : canal ouvert,
+ * le serveur le pousse.
  */
 export const POLL_INTERVAL_MS = 10_000;
 
@@ -76,10 +83,22 @@ export type SpaceTree = {
   touch(): void;
   /** Demande une nouvelle lecture de l'arbre. */
   reload(): void;
+  /**
+   * La version de l'espace que le serveur a donnée avec l'arbre affiché de `spaceId` (R141) ;
+   * `null` : pas d'arbre lu pour cet espace. Le canal de l'espace la compare à ses trames.
+   */
+  knownLsn(spaceId: string): number | null;
+  /**
+   * Relit le compte (noms des espaces, rôles) après une nouvelle version de l'espace, par le
+   * chemin du retour sur l'onglet et avec sa limite (R150).
+   */
+  rereadAccount(): void;
   /** Pour `useTreeReader` : le compte des changements, celui des relectures, la pose. */
   changes: RefObject<number>;
   reloads: number;
   set(tree: LoadedTree): void;
+  lsn: RefObject<{ spaceId: string; lsn: number } | null>;
+  account: RefObject<() => void>;
 };
 
 export function useSpaceTree(): SpaceTree {
@@ -88,6 +107,8 @@ export function useSpaceTree(): SpaceTree {
   latest.current = loaded;
   const changes = useRef(0);
   const [reloads, setReloads] = useState(0);
+  const lsn = useRef<{ spaceId: string; lsn: number } | null>(null);
+  const account = useRef<() => void>(() => {});
 
   const change = useCallback((update: (nodes: PageNode[], spaceId: string) => PageNode[]) => {
     changes.current += 1;
@@ -100,10 +121,28 @@ export function useSpaceTree(): SpaceTree {
   }, []);
   const reload = useCallback(() => setReloads((n) => n + 1), []);
   const read = useCallback(() => latest.current, []);
+  const knownLsn = useCallback(
+    (spaceId: string) => (lsn.current?.spaceId === spaceId ? lsn.current.lsn : null),
+    [],
+  );
+  const rereadAccount = useCallback(() => account.current(), []);
 
   return useMemo(
-    () => ({ loaded, latest: read, change, touch, reload, changes, reloads, set: setLoaded }),
-    [loaded, read, change, touch, reload, reloads],
+    () => ({
+      loaded,
+      latest: read,
+      change,
+      touch,
+      reload,
+      knownLsn,
+      rereadAccount,
+      changes,
+      reloads,
+      set: setLoaded,
+      lsn,
+      account,
+    }),
+    [loaded, read, change, touch, reload, knownLsn, rereadAccount, reloads],
   );
 }
 
@@ -116,6 +155,8 @@ type Reading = {
   onGone: () => void;
   /** De retour sur l'onglet, l'arbre est relu : ce qui se relit avec lui (le compte). */
   onReturn: () => void;
+  /** Le canal de l'espace est ouvert : il pousse les changements, le minuteur se tait. */
+  live?: boolean;
 };
 
 /**
@@ -128,8 +169,9 @@ export function useTreeReader(
   spaceId: string | null,
   reading: Reading,
 ): string | null {
-  const { changes, reloads, set, reload, latest } = tree;
+  const { changes, reloads, set, reload, latest, lsn, account } = tree;
   const { retries } = reading;
+  const live = reading.live === true;
   // Les rappels du dernier rendu : en changer ne relance pas la lecture.
   const callbacks = useRef(reading);
   callbacks.current = reading;
@@ -159,6 +201,13 @@ export function useTreeReader(
         if (before !== changes.current) continue;
         // Le même arbre que celui qui est chargé : il reste, tel quel.
         const loaded = latest();
+        // La version suit même quand l'arbre ne change pas : un changement qu'on ne voit pas
+        // (une page privée d'un autre) ne doit pas faire relire à chaque trame.
+        const previous = lsn.current;
+        lsn.current = {
+          spaceId,
+          lsn: previous?.spaceId === spaceId ? Math.max(previous.lsn, fetched.lsn) : fetched.lsn,
+        };
         const unchanged =
           loaded !== null && loaded.spaceId === spaceId && sameNodes(loaded.nodes, fetched.nodes);
         if (!unchanged) set({ spaceId, nodes: fetched.nodes });
@@ -178,7 +227,7 @@ export function useTreeReader(
       cancelled = true;
       settled();
     };
-  }, [spaceId, reloads, retries, changes, set, latest]);
+  }, [spaceId, reloads, retries, changes, set, latest, lsn]);
 
   // Une lecture a échoué : elle repart quand le navigateur retrouve le réseau.
   const failed = error !== null;
@@ -193,6 +242,28 @@ export function useTreeReader(
   const known = spaceId !== null;
   /** Quand le compte a été relu pour la dernière fois ; d'abord au chargement de l'application. */
   const returnedAt = useRef(Date.now());
+  // Une nouvelle version de l'espace (R150) : le compte est relu avec la même limite, et un
+  // appel retenu est rejoué à son échéance. Un seul rejeu en attente, quel que soit le nombre
+  // d'appels qu'il remplace.
+  useEffect(() => {
+    let replay: ReturnType<typeof setTimeout> | undefined;
+    const request = () => {
+      clearTimeout(replay);
+      replay = undefined;
+      const wait = returnedAt.current + REFRESH_INTERVAL_MS - Date.now();
+      if (wait > 0) {
+        replay = setTimeout(request, wait);
+        return;
+      }
+      returnedAt.current = Date.now();
+      callbacks.current.onReturn();
+    };
+    account.current = request;
+    return () => {
+      clearTimeout(replay);
+      account.current = () => {};
+    };
+  }, [account]);
   useEffect(() => {
     if (!known) return;
     const refresh = () => {
@@ -218,9 +289,10 @@ export function useTreeReader(
     };
   }, [known, reload]);
 
-  // Tant que l'onglet est visible : dix secondes après la dernière lecture partie (R128).
+  // Canal tombé, tant que l'onglet est visible : dix secondes après la dernière lecture
+  // partie (R128).
   useEffect(() => {
-    if (!known) return;
+    if (!known || live) return;
     let timer: ReturnType<typeof setTimeout>;
     const arm = () => {
       const age = Date.now() - readAt.current;
@@ -238,7 +310,7 @@ export function useTreeReader(
     };
     arm();
     return () => clearTimeout(timer);
-  }, [known, reload]);
+  }, [known, live, reload]);
 
   return error;
 }

@@ -24,6 +24,8 @@ logger.error = (message, options) => {
 const proxy = {
   "/api/": { target: API },
   "/sync/": { target: API, ws: true },
+  // Le canal de l'espace (R133), une WebSocket par espace affiché.
+  "/events/": { target: API, ws: true },
 };
 
 export default defineConfig({
