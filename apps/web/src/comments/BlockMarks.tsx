@@ -20,9 +20,8 @@
 // bloc » suit alors le bloc survolé, dans la même marge.
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { CommentIcon } from "../icons";
+import { BLOCK, blockElement, blockText, shorten } from "./dom";
 
-/** L'élément extérieur d'un bloc de BlockNote, qui porte son identifiant (`data-id`). */
-const BLOCK = '[data-node-type="blockOuter"]';
 /** Plus de blocs que cela à chercher : un seul parcours de la page plutôt qu'une recherche par bloc. */
 const FULL_SCAN_AT = 8;
 /** Un bloc introuvable est recherché cette durée après le dernier changement du document. */
@@ -31,27 +30,6 @@ export const RECHECK_MS = 1_000;
 const GLOW_MS = 1_600;
 /** Le début du texte d'un bloc qui nomme sa pastille : au plus tant de caractères. */
 const LABEL_CHARS = 40;
-
-/** Une valeur d'attribut entre guillemets dans un sélecteur CSS, quoi qu'elle contienne. */
-export function cssString(value: string): string {
-  const escaped = value
-    .replace(/["\\]/g, "\\$&")
-    .replace(/[\u0000-\u001f\u007f]/g, (c) => `\\${c.charCodeAt(0).toString(16)} `);
-  return `"${escaped}"`;
-}
-
-/** Le texte propre d'un bloc (sans celui de ses blocs enfants). */
-export function blockText(element: Element): string {
-  return (
-    element.querySelector(":scope > .bn-block > .bn-block-content")?.textContent?.trim() ?? ""
-  );
-}
-
-/** Les premiers `max` caractères de `text`, suivis de « … » s'il en avait plus. */
-export function shorten(text: string, max: number): string {
-  const chars = Array.from(text);
-  return chars.length > max ? `${chars.slice(0, max).join("")}…` : text;
-}
 
 /** Où sont, dans l'éditeur, les blocs commentés : ceux-là seulement. */
 export class BlockTracker {
@@ -95,7 +73,7 @@ export class BlockTracker {
       }
     } else {
       for (const id of missing) {
-        const element = root.querySelector(`${BLOCK}[data-id=${cssString(id)}]`);
+        const element = blockElement(root, id);
         if (element) this.elements.set(id, element);
       }
     }
@@ -319,7 +297,7 @@ export function BlockMarks({
   useEffect(() => {
     const root = frame.current;
     if (highlight === null || root === null) return;
-    const element = root.querySelector(`${BLOCK}[data-id=${cssString(highlight.blockId)}]`);
+    const element = blockElement(root, highlight.blockId);
     if (element === null) return;
     const block = element.getBoundingClientRect();
     const origin = root.getBoundingClientRect();

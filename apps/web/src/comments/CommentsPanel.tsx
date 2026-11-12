@@ -18,7 +18,7 @@ import type { Level } from "@mementum/protocol";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { CloseIcon } from "../icons";
 import { arrangeThreads, canWrite, type CommentRights } from "./arrange";
-import { cssString } from "./BlockMarks";
+import { cssString } from "./dom";
 import { Composer } from "./Composer";
 import { ThreadView } from "./ThreadView";
 import type { Comments } from "./useComments";

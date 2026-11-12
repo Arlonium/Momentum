@@ -17,26 +17,19 @@
 // encore partie de l'ouverture : la page s'ouvre avec le niveau que dit le serveur, pas avec
 // celui d'une barre latérale qui daterait d'avant.
 import type { PageNode } from "@mementum/protocol";
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isSessionLost } from "../api";
-import { openCount } from "../comments/arrange";
-import { BlockMarks, blockText, cssString, shorten } from "../comments/BlockMarks";
-import { CommentsPanel, type PanelTarget } from "../comments/CommentsPanel";
+import { BlockMarks } from "../comments/BlockMarks";
+import { CommentsButton } from "../comments/CommentsButton";
+import { CommentsPanel } from "../comments/CommentsPanel";
 import { useComments } from "../comments/useComments";
+import { useCommentsPanel } from "../comments/useCommentsPanel";
 import { CollabSession } from "../editor/collab";
 import { requestedFixture } from "../editor/fixtures";
 import { LazyEditor } from "../editor/LazyEditor";
 import { ReaderBanner, ReadOnlyBanner } from "../editor/ReadOnlyBanner";
 import type { SchemaCheck } from "../editor/schemaGate";
-import { CommentIcon, TrashIcon } from "../icons";
+import { TrashIcon } from "../icons";
 import { messageOf } from "../session/forms";
 import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
@@ -156,85 +149,22 @@ export function PageView({
   // du serveur (un droit, ou la page, ont changé entre-temps) fait aussi relire la page : son
   // niveau et la corbeille décident des boutons du panneau.
   const comments = useComments(id, session, { onRefused: () => void reread() });
-  const panelId = useId();
-  const commentsButton = useRef<HTMLButtonElement>(null);
-  /** Autour de l'éditeur : les blocs de la page y sont cherchés par leur identifiant. */
+  /** Autour de l'éditeur : les pastilles s'y placent, les blocs y sont cherchés. */
   const frame = useRef<HTMLDivElement>(null);
-  /** Le panneau des commentaires, et ce sur quoi il s'est ouvert ; `null` : fermé. */
-  const [panel, setPanel] = useState<{ target: PanelTarget | null } | null>(null);
-  /** Ce qui avait le focus avant que le panneau s'ouvre : il le retrouve à la fermeture. */
-  const returnFocus = useRef<HTMLElement | null>(null);
-  /** Numérote les demandes faites au panneau (un fil, un bloc à commenter, un bloc à montrer). */
-  const requests = useRef(0);
-  const panelOpen = panel !== null;
-  const openPanel = (target: PanelTarget | null) => {
-    if (!panelOpen) {
-      const active = document.activeElement;
-      returnFocus.current = active instanceof HTMLElement ? active : null;
-    }
-    setPanel({ target });
-  };
-  const closePanel = () => {
-    const back = returnFocus.current;
-    returnFocus.current = null;
-    setPanel(null);
-    const panelElement = document.getElementById(panelId);
-    if (back !== null && back.isConnected && !panelElement?.contains(back)) back.focus();
-    else commentsButton.current?.focus();
-  };
-  const openOnThread = (threadId: string) =>
-    openPanel({ kind: "thread", threadId, seq: ++requests.current });
-  const commentBlockNow = useRef((_: string) => {});
-  commentBlockNow.current = (blockId: string) =>
-    openPanel({ kind: "block", blockId, seq: ++requests.current });
-  /** « Commenter » sur un bloc : le panneau s'ouvre sur son commentaire neuf. Stable. */
-  const commentBlock = useCallback((blockId: string) => commentBlockNow.current(blockId), []);
-
-  // Ce que les pastilles de la marge suivent : les blocs des fils, et les fils ouverts de chacun.
-  const { threads } = comments;
-  const blockIds = useMemo(
-    () => [...new Set(threads?.flatMap((t) => (t.blockId === null ? [] : [t.blockId])))],
-    [threads],
-  );
-  const marks = useMemo(() => {
-    const open = new Map<string, string[]>();
-    for (const t of threads ?? []) {
-      if (t.blockId === null || t.resolvedAt !== null) continue;
-      open.set(t.blockId, [...(open.get(t.blockId) ?? []), t.id]);
-    }
-    return open;
-  }, [threads]);
-  /** Les blocs commentés qui sont dans la page, dans l'ordre ; `null` : pas encore lus. */
-  const [order, setOrder] = useState<string[] | null>(null);
-  const [highlight, setHighlight] = useState<{ blockId: string; seq: number } | null>(null);
-  /** L'élément d'un bloc de la page, cherché à la demande (un clic, pas une frappe). */
-  const blockElement = (blockId: string) =>
-    frame.current?.querySelector<HTMLElement>(
-      `[data-node-type="blockOuter"][data-id=${cssString(blockId)}]`,
-    ) ?? null;
-  const excerpt = (blockId: string) => {
-    const element = blockElement(blockId);
-    const text = element === null ? "" : blockText(element);
-    return text === "" ? null : shorten(text, EXCERPT_CHARS);
-  };
-  const showBlock = (blockId: string) => {
-    blockElement(blockId)?.scrollIntoView({ block: "center", behavior: "smooth" });
-    setHighlight({ blockId, seq: ++requests.current });
-  };
-  /**
-   * L'éditeur est en lecture seule alors que la personne peut commenter : BlockNote n'y montre
-   * pas la poignée des blocs, et « Commenter ce bloc » suit alors le bloc survolé.
-   */
+  const wiring = useCommentsPanel(comments, frame);
+  /** Commenter d'ici : le niveau, hors corbeille, depuis un onglet du schéma du serveur (R177). */
   const commentsWritable = canComment(node.level) && !trashed && !readOnly;
-  const hoverComment = commentsWritable && locked ? commentBlock : null;
-  /** « Commenter » dans le menu de la poignée d'un bloc, quand l'éditeur se modifie. */
-  const menuComment = commentsWritable && !locked ? commentBlock : null;
+  /**
+   * Éditeur en lecture seule, où BlockNote ne montre pas la poignée des blocs : « Commenter ce
+   * bloc » suit le bloc survolé (R176). Sinon, « Commenter » est dans le menu de la poignée.
+   */
+  const hoverComment = commentsWritable && locked ? wiring.commentBlock : null;
+  const menuComment = commentsWritable && !locked ? wiring.commentBlock : null;
   // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.
   const editor = useMemo(
     () => session && <LazyEditor session={session} fixture={fixture} onComment={menuComment} />,
     [session, fixture, menuComment],
   );
-  const count = threads === null ? null : openCount(threads);
 
   return (
     <>
@@ -242,21 +172,7 @@ export function PageView({
         <span className="mm-topbar-title">{node.title}</span>
         {session && <SyncState session={session} />}
         {session && <Presence session={session} selfId={userId} />}
-        <button
-          ref={commentsButton}
-          type="button"
-          className="mm-button mm-comments-button"
-          // Le nombre, en toutes lettres pour les lecteurs d'écran ; le nom commence par ce
-          // qui se lit sur le bouton.
-          aria-label={count === null ? undefined : `Commentaires, ${openThreadsText(count)}`}
-          aria-expanded={panelOpen}
-          aria-controls={panelOpen ? panelId : undefined}
-          onClick={() => (panelOpen ? closePanel() : openPanel(null))}
-        >
-          <CommentIcon />
-          <span>Commentaires</span>
-          {count !== null && count > 0 && <span className="mm-count">{count}</span>}
-        </button>
+        <CommentsButton {...wiring.button} />
         {/* Les accès ne se voient et ne se changent qu'avec l'accès complet, et rien ne s'y
             change à la corbeille, ni depuis un onglet qui n'écrit plus (R35). */}
         {node.level === "full" && !trashed && !readOnly && (
@@ -288,43 +204,24 @@ export function PageView({
             <BlockMarks
               frame={frame}
               session={session}
-              blockIds={blockIds}
-              marks={marks}
-              onOrder={setOrder}
-              onOpenThread={openOnThread}
-              highlight={highlight}
+              {...wiring.marks}
               onComment={hoverComment}
             />
           </div>
         </article>
-        {panel && (
+        {wiring.panel && (
           <CommentsPanel
-            id={panelId}
+            {...wiring.panel}
             comments={comments}
-            order={order}
             level={node.level}
             trashed={trashed}
             readOnly={readOnly}
             selfId={userId}
-            target={panel.target}
-            excerpt={excerpt}
-            onShowBlock={showBlock}
-            onTargetDone={() => setPanel((current) => current && { target: null })}
-            onClose={closePanel}
           />
         )}
       </div>
     </>
   );
-}
-
-/** Le début du texte d'un bloc, au-dessus de son commentaire neuf : au plus tant de caractères. */
-const EXCERPT_CHARS = 120;
-
-/** Le nombre de fils ouverts, en toutes lettres pour les lecteurs d'écran. */
-function openThreadsText(count: number): string {
-  if (count === 0) return "aucun fil ouvert";
-  return count === 1 ? "1 fil ouvert" : `${count} fils ouverts`;
 }
 
 /**
