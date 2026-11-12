@@ -52,3 +52,18 @@ test("resolved_threads_are_apart_in_the_same_order", () => {
   expect(ids(arranged.resolved)).toEqual(["un", "page", "parti"]);
   expect(openCount(threads)).toBe(1);
 });
+
+test("a_block_not_yet_looked_for_is_not_said_deleted", () => {
+  // Le bloc d'un fil tout neuf n'a pas encore été cherché dans la page : il n'est pas supprimé
+  // pour autant. Seul un bloc cherché et introuvable l'est.
+  const threads = [
+    thread("neuf", { blockId: "neuf" }),
+    thread("parti", { blockId: "parti" }),
+    thread("un", { blockId: "un" }),
+    thread("page"),
+  ];
+  const arranged = arrangeThreads(threads, ["un"], ["parti"]);
+  expect(ids(arranged.open)).toEqual(["un", "neuf", "page"]);
+  expect(ids(arranged.orphans)).toEqual(["parti"]);
+  expect(arranged.deleted(threads[0])).toBe(false);
+});

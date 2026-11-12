@@ -195,3 +195,37 @@ test("after_the_last_message_is_deleted_the_focus_is_on_the_panel_title", async 
   expect(host.querySelector('[data-thread-id="seul"]')).toBeNull();
   await focusStaysAndEscapeCloses((active) => active.textContent === "Commentaires");
 });
+
+test("a_thread_that_changes_list_under_the_focus_keeps_it", async () => {
+  // Le bloc d'un fil revient dans la page (une annulation) : le fil passe de « Bloc supprimé »
+  // aux fils ouverts, et son élément est recréé sous le focus.
+  const threads = [thread("t", { blockId: "revenu" })];
+  function Moving({ order }: { order: string[] }) {
+    const comments = useMemoryComments(threads);
+    return (
+      <CommentsPanel
+        id="panneau"
+        comments={comments}
+        order={order}
+        absent={order.includes("revenu") ? [] : ["revenu"]}
+        level="full"
+        trashed={false}
+        readOnly={false}
+        selfId="alice"
+        target={null}
+        excerpt={() => null}
+        onShowBlock={() => {}}
+        onTargetDone={() => {}}
+        onClose={onClose}
+      />
+    );
+  }
+  await act(async () => root.render(<Moving order={[]} />));
+  expect(host.querySelector('ul[aria-label="Fils d\'un bloc supprimé"]')).not.toBeNull();
+  await click(button(host, "Répondre"));
+  await click(button(host, "Annuler"));
+  expect(document.activeElement?.textContent).toBe("Répondre");
+  await act(async () => root.render(<Moving order={["revenu"]} />));
+  expect(host.querySelector('ul[aria-label="Fils ouverts"] [data-thread-id="t"]')).not.toBeNull();
+  await focusStaysAndEscapeCloses((active) => active.getAttribute("data-thread-id") === "t");
+});

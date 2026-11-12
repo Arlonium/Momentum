@@ -45,6 +45,11 @@ export class BlockTracker {
     this.root = root;
   }
 
+  /** Parmi `ids`, les blocs cherchés dans la page et introuvables. */
+  missing(ids: readonly string[]): string[] {
+    return ids.filter((id) => this.absent.has(id));
+  }
+
   /** L'éditeur est affiché. */
   hasRoot(): boolean {
     return this.root() !== null;
@@ -120,8 +125,11 @@ type Props = {
   blockIds: readonly string[];
   /** Les fils ouverts de chaque bloc, du plus ancien au plus récent : une pastille par bloc. */
   marks: ReadonlyMap<string, readonly string[]>;
-  /** Les blocs commentés qui sont dans la page, dans l'ordre ; `null` : pas encore lus. */
-  onOrder: (order: string[] | null) => void;
+  /**
+   * Les blocs commentés qui sont dans la page, dans l'ordre (`null` : pas encore lus), et ceux
+   * qui y ont été cherchés sans succès (un bloc pas encore cherché n'est dans aucun des deux).
+   */
+  onOrder: (order: string[] | null, absent: string[]) => void;
   onOpenThread: (threadId: string) => void;
   /** Le bloc à mettre en évidence un instant ; `seq` change à chaque demande. */
   highlight: { blockId: string; seq: number } | null;
@@ -144,7 +152,7 @@ function samePlaced(a: Placed[], b: Placed[]): boolean {
   );
 }
 
-function sameOrder(a: string[] | null, b: string[] | null | undefined): boolean {
+function sameList(a: string[] | null, b: string[] | null | undefined): boolean {
   if (a === null || b === null || b === undefined) return a === b;
   return a.length === b.length && a.every((id, i) => id === b[i]);
 }
@@ -194,11 +202,11 @@ export function BlockMarks({
     /** Les blocs introuvables sont à chercher de nouveau. */
     let recheck = true;
     let recheckTimer: ReturnType<typeof setTimeout> | undefined;
-    let told: string[] | null | undefined;
-    const tell = (order: string[] | null) => {
-      if (sameOrder(order, told)) return;
-      told = order;
-      latest.current.onOrder(order);
+    let told: { order: string[] | null; absent: string[] } | undefined;
+    const tell = (order: string[] | null, absent: string[]) => {
+      if (told && sameList(order, told.order) && sameList(absent, told.absent)) return;
+      told = { order, absent };
+      latest.current.onOrder(order, absent);
     };
     /** Les éléments de la dernière mise en ordre, et cet ordre : ils ne bougent pas à la frappe. */
     let sorted = new Map<string, Element>();
@@ -208,7 +216,7 @@ export function BlockMarks({
       request = null;
       const root = frame.current;
       if (!session.synced || root === null || !tracker.hasRoot()) {
-        tell(null);
+        tell(null, []);
         setPlaced((current) => (current.length === 0 ? current : []));
         return;
       }
@@ -223,7 +231,7 @@ export function BlockMarks({
         sorted = found;
         order = BlockTracker.order(found);
       }
-      tell(order);
+      tell(order, tracker.missing(blockIds));
       // Un bloc caché (enfant d'un bloc repliable fermé) n'a pas de pastille : sa boîte ne dit rien
       // de sa place. Son fil reste dans le panneau.
       const marked = order.filter(

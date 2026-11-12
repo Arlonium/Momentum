@@ -49,6 +49,11 @@ type Props = {
   comments: Comments;
   /** Les blocs commentés qui sont dans la page, dans l'ordre du document ; `null` : pas encore lu. */
   order: readonly string[] | null;
+  /**
+   * Les blocs cherchés dans la page et introuvables : leurs fils vont sous « Bloc supprimé ».
+   * Absent : tout bloc hors de `order`.
+   */
+  absent?: readonly string[];
   level: Level;
   trashed: boolean;
   /** L'onglet n'a plus le schéma du serveur (R35) : rien ne s'écrit d'ici. */
@@ -91,6 +96,7 @@ export function CommentsPanel({
   id,
   comments,
   order,
+  absent,
   level,
   trashed,
   readOnly,
@@ -117,7 +123,10 @@ export function CommentsPanel({
   const composing = givenComposing === undefined ? targetBlock : givenComposing;
   const write = canWrite(rights);
   const { threads } = comments;
-  const arranged = useMemo(() => threads && arrangeThreads(threads, order), [threads, order]);
+  const arranged = useMemo(
+    () => threads && arrangeThreads(threads, order, absent),
+    [threads, order, absent],
+  );
 
   // Le focus, à l'ouverture et à chaque demande : le fil choisi, ou le panneau lui-même. La
   // zone d'un commentaire de bloc le prend d'elle-même. Une demande qui s'achève (le commentaire
@@ -151,6 +160,11 @@ export function CommentsPanel({
     panel.focus({ preventScroll: true });
   }, [target]);
 
+  /** L'élément du panneau qui a le focus, tant qu'aucun geste ne l'a emmené ailleurs. */
+  const focused = useRef<HTMLElement | null>(null);
+  /** Où le filet (plus bas) a mis le focus, tant que rien d'autre ne l'a pris. */
+  const caught = useRef<HTMLElement | null>(null);
+
   /**
    * Le focus a pu tomber (l'élément qui l'avait a quitté la page) : il va, dans le fil
    * `threadId`, à l'élément marqué `data-focus="<within>"`, sinon au fil, sinon au titre du
@@ -169,20 +183,42 @@ export function CommentsPanel({
   );
   useLayoutEffect(() => {
     if (refocus === null) return;
-    const active = document.activeElement;
-    if (active !== null && active !== document.body && active.isConnected) return;
     const panel = panelRef.current;
     if (!panel) return;
     const thread =
       refocus.threadId === null
         ? null
         : panel.querySelector<HTMLElement>(`[data-thread-id=${cssString(refocus.threadId)}]`);
+    // Le focus est encore quelque part : rien ne bouge, sauf si c'est le filet ci-dessous qui l'y
+    // a mis, faute de mieux : on précise.
+    const active = document.activeElement;
+    const fallen = active === null || active === document.body || !active.isConnected;
+    if (!fallen && active !== caught.current) return;
     const inside =
       refocus.within === null
         ? null
         : thread?.querySelector<HTMLElement>(`[data-focus=${cssString(refocus.within)}]`);
     (inside ?? thread ?? titleRef.current)?.focus();
   }, [refocus]);
+
+  // Filet : un rendu a retiré l'élément du panneau qui avait le focus (un fil qui change de
+  // liste est recréé), sans que le focus soit parti ailleurs par un geste (un `blur` l'aurait
+  // dit). Il va au fil, là où il est maintenant, ou au titre du panneau.
+  useLayoutEffect(() => {
+    const lost = focused.current;
+    if (lost === null || lost.isConnected) return;
+    focused.current = null;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    const threadId = lost.closest("[data-thread-id]")?.getAttribute("data-thread-id");
+    const thread =
+      threadId == null
+        ? null
+        : panelRef.current?.querySelector<HTMLElement>(`[data-thread-id=${cssString(threadId)}]`);
+    const target = thread ?? titleRef.current;
+    target?.focus();
+    caught.current = target;
+  });
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== "Escape") return;
@@ -230,6 +266,15 @@ export function CommentsPanel({
       aria-labelledby={titleId}
       tabIndex={-1}
       onKeyDown={onKeyDown}
+      onFocus={(event) => {
+        focused.current = event.target as HTMLElement;
+        if (event.target !== caught.current) caught.current = null;
+      }}
+      onBlur={(event) => {
+        // Le focus part par un geste, hors du panneau : ce n'est pas un élément retiré.
+        const next = event.relatedTarget;
+        if (!(next instanceof Node) || !event.currentTarget.contains(next)) focused.current = null;
+      }}
     >
       <div className="mm-comments-head">
         <h2 ref={titleRef} id={titleId} className="mm-comments-title" tabIndex={-1}>

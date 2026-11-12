@@ -5,7 +5,10 @@
 // l'éditeur, `BlockMarks.tsx`). Un fil dont le bloc n'y est plus est rangé à part, sous « Bloc
 // supprimé » : le serveur garde son identifiant de bloc, et le fil se lit toujours. Tant que
 // le document n'est pas connu (`order` nul : éditeur pas encore synchronisé), aucun fil n'est
-// dit d'un bloc supprimé.
+// dit d'un bloc supprimé ; ensuite, seul l'est le fil d'un bloc cherché dans la page et
+// introuvable (`absent`). Le bloc d'un fil tout neuf, pas encore cherché, se range après les
+// blocs connus, sans changer de liste : son fil ne passe pas sous « Bloc supprimé » le temps
+// d'une image.
 import type { Comment, Level, Thread } from "@mementum/protocol";
 import { canComment, canEdit } from "../share/levels";
 
@@ -20,15 +23,28 @@ export type Arranged = {
   deleted: (thread: Thread) => boolean;
 };
 
-export function arrangeThreads(threads: Thread[], order: readonly string[] | null): Arranged {
+export function arrangeThreads(
+  threads: Thread[],
+  order: readonly string[] | null,
+  /** Les blocs cherchés dans la page et introuvables ; absent : tout bloc hors de `order`. */
+  absent?: readonly string[],
+): Arranged {
   const rank = new Map(order?.map((id, index) => [id, index]));
+  const gone = absent === undefined ? null : new Set(absent);
   const deleted = (thread: Thread) =>
-    order !== null && thread.blockId !== null && !rank.has(thread.blockId);
-  /** Rang d'un fil : un bloc par sa place, puis la page, puis les blocs supprimés. */
+    order !== null &&
+    thread.blockId !== null &&
+    !rank.has(thread.blockId) &&
+    (gone === null || gone.has(thread.blockId));
+  /**
+   * Rang d'un fil : un bloc par sa place (un bloc pas encore cherché, après les autres), puis la
+   * page, puis les blocs supprimés.
+   */
   const place = (thread: Thread) => {
     if (thread.blockId === null) return Number.MAX_SAFE_INTEGER - 1;
     if (order === null) return -1;
-    return rank.get(thread.blockId) ?? Number.MAX_SAFE_INTEGER;
+    if (deleted(thread)) return Number.MAX_SAFE_INTEGER;
+    return rank.get(thread.blockId) ?? order.length;
   };
   // `sort` est stable : à rang égal, l'ordre du serveur (le plus ancien d'abord) reste.
   const sorted = [...threads].sort((a, b) => place(a) - place(b));

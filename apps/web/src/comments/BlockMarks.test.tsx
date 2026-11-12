@@ -178,7 +178,7 @@ test("each_block_with_an_open_thread_has_a_mark_that_opens_it", async () => {
     ),
   );
   await frameTick();
-  expect(onOrder).toHaveBeenLastCalledWith(["un", "trois"]);
+  expect(onOrder).toHaveBeenLastCalledWith(["un", "trois"], ["parti"]);
   const list = host.querySelector('ul[aria-label="Blocs commentés"]')!;
   const items = [...list.children];
   expect(items.every((item) => item.tagName === "LI")).toBe(true);
@@ -224,7 +224,7 @@ test("the_order_is_told_again_only_when_it_changes", async () => {
   deux.remove();
   await act(async () => session.change());
   await frameTick();
-  expect(onOrder).toHaveBeenLastCalledWith(["deux", "un"]);
+  expect(onOrder).toHaveBeenLastCalledWith(["deux", "un"], []);
 });
 
 test("nothing_is_known_before_the_first_sync", async () => {
@@ -247,7 +247,7 @@ test("nothing_is_known_before_the_first_sync", async () => {
     ),
   );
   await frameTick();
-  expect(onOrder).not.toHaveBeenCalledWith(["un"]);
+  expect(onOrder).not.toHaveBeenCalledWith(["un"], []);
   expect(host.querySelector("button")).toBeNull();
 });
 
@@ -278,7 +278,7 @@ test("a_block_hidden_in_a_closed_toggle_gets_no_mark", async () => {
   );
   await frameTick();
   // Toujours dans la page (le fil reste à sa place dans le panneau), sans pastille.
-  expect(onOrder).toHaveBeenLastCalledWith(["un", "caché"]);
+  expect(onOrder).toHaveBeenLastCalledWith(["un", "caché"], []);
   const labels = [...host.querySelectorAll(".mm-block-mark")].map((b) => b.getAttribute("aria-label"));
   expect(labels).toEqual(["1 fil de commentaires sur « ⁨Premier⁩ »"]);
 });

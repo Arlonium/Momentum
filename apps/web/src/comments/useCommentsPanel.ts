@@ -34,7 +34,7 @@ export type CommentsPanelWiring = {
   marks: {
     blockIds: string[];
     marks: Map<string, string[]>;
-    onOrder: (order: string[] | null) => void;
+    onOrder: (order: string[] | null, absent: string[]) => void;
     onOpenThread: (threadId: string) => void;
     highlight: { blockId: string; seq: number } | null;
   };
@@ -42,6 +42,7 @@ export type CommentsPanelWiring = {
   panel: {
     id: string;
     order: string[] | null;
+    absent: string[];
     target: PanelTarget | null;
     drafts: Drafts;
     composing: string | null;
@@ -109,8 +110,18 @@ export function useCommentsPanel(
     }
     return opened;
   }, [threads]);
-  /** Les blocs commentés qui sont dans la page, dans l'ordre ; `null` : pas encore lus. */
-  const [order, setOrder] = useState<string[] | null>(null);
+  /**
+   * Les blocs commentés qui sont dans la page, dans l'ordre (`null` : pas encore lus), et ceux qui
+   * y ont été cherchés sans succès.
+   */
+  const [blocks, setBlocks] = useState<{ order: string[] | null; absent: string[] }>({
+    order: null,
+    absent: [],
+  });
+  const onOrder = useCallback(
+    (order: string[] | null, absent: string[]) => setBlocks({ order, absent }),
+    [],
+  );
   const [highlight, setHighlight] = useState<{ blockId: string; seq: number } | null>(null);
 
   // Les blocs de la page sont cherchés à la demande (un clic, pas une frappe).
@@ -134,10 +145,11 @@ export function useCommentsPanel(
       panelId,
       onClick: () => (open ? closePanel() : openPanel(null)),
     },
-    marks: { blockIds, marks, onOrder: setOrder, onOpenThread: openOnThread, highlight },
+    marks: { blockIds, marks, onOrder, onOpenThread: openOnThread, highlight },
     panel: panel && {
       id: panelId,
-      order,
+      order: blocks.order,
+      absent: blocks.absent,
       target: panel.target,
       drafts,
       composing,
