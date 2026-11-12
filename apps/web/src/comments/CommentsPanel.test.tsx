@@ -436,3 +436,20 @@ test("names_and_emojis_in_attributes_are_isolated", async () => {
   expect(chip.getAttribute("title")).toBe("⁨‮onurb⁩, ⁨Carla⁩");
   expect(chip.getAttribute("aria-label")).toBe("⁨‮👍⁩ 2");
 });
+
+test("an_absurd_date_shows_a_neutral_text", async () => {
+  const threads = [
+    thread("t", {
+      resolvedAt: Number.NaN,
+      resolvedBy: author("bruno"),
+      comments: [message("m", { createdAt: 1e20, editedAt: -1e20, body: "daté de nulle part" })],
+    }),
+  ];
+  await show(fakeComments(threads));
+  await click(buttons(host, "Fils résolus (1)")[0]);
+  expect(host.textContent).toContain("daté de nulle part");
+  const time = host.querySelector<HTMLTimeElement>(".mm-comment-time")!;
+  expect(time.textContent).toBe("date inconnue");
+  expect(time.hasAttribute("datetime")).toBe(false);
+  expect(host.textContent).toContain("Résolu par BRUNO, date inconnue");
+});

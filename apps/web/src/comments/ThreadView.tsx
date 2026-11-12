@@ -30,7 +30,7 @@ import {
 import { Composer } from "./Composer";
 import { isolate } from "./dom";
 import { DRAFT, type Drafts } from "./drafts";
-import { fullDate, relativeTime } from "./time";
+import { fullDate, isoDate, relativeTime } from "./time";
 import type { Comments } from "./useComments";
 
 /**
@@ -308,7 +308,7 @@ function MessageHead({ comment, now }: { comment: Comment; now: number }) {
       </span>
       <time
         className="mm-comment-time"
-        dateTime={new Date(comment.createdAt).toISOString()}
+        dateTime={isoDate(comment.createdAt)}
         title={fullDate(comment.createdAt)}
       >
         {relativeTime(comment.createdAt, now)}

@@ -1,6 +1,6 @@
 // « il y a… » : l'âge d'un message, en français, écrit à la main (aucune dépendance).
 import { expect, test } from "vitest";
-import { relativeTime } from "./time";
+import { fullDate, isoDate, relativeTime } from "./time";
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -28,4 +28,14 @@ test("older_messages_give_their_date", () => {
 test("a_date_from_the_future_is_now", () => {
   // Horloge du poste en retard sur celle du serveur.
   expect(relativeTime(NOW + 5 * MINUTE, NOW)).toBe("à l'instant");
+});
+
+test("an_impossible_date_is_said_unknown", () => {
+  // Hors de ce que `Date` sait dire (au-delà de ±8,64e15 ms), ou pas un nombre.
+  for (const at of [Number.NaN, 1e20, -1e20, Number.POSITIVE_INFINITY]) {
+    expect(relativeTime(at, NOW)).toBe("date inconnue");
+    expect(fullDate(at)).toBe("date inconnue");
+    expect(isoDate(at)).toBeUndefined();
+  }
+  expect(isoDate(0)).toBe("1970-01-01T00:00:00.000Z");
 });

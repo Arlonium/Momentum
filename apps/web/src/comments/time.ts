@@ -13,12 +13,20 @@ const DAY_MONTH_YEAR = new Intl.DateTimeFormat("fr-FR", {
 });
 const FULL = new Intl.DateTimeFormat("fr-FR", { dateStyle: "long", timeStyle: "short" });
 
+/** Le texte d'une date que `Date` ne sait pas dire (pas un nombre, ou hors de ±8,64e15 ms). */
+const UNKNOWN = "date inconnue";
+
+function valid(at: number): boolean {
+  return Number.isFinite(at) && !Number.isNaN(new Date(at).getTime());
+}
+
 function ago(count: number, one: string, many: string): string {
   return `il y a ${count} ${count === 1 ? one : many}`;
 }
 
 /** L'âge de `at` à l'instant `now` (millisecondes Unix). Une date à venir vaut « à l'instant ». */
 export function relativeTime(at: number, now: number): string {
+  if (!valid(at) || !valid(now)) return UNKNOWN;
   const elapsed = now - at;
   if (elapsed < MINUTE) return "à l'instant";
   if (elapsed < HOUR) return ago(Math.floor(elapsed / MINUTE), "minute", "minutes");
@@ -31,5 +39,10 @@ export function relativeTime(at: number, now: number): string {
 
 /** La date et l'heure complètes de `at`, pour l'infobulle. */
 export function fullDate(at: number): string {
-  return FULL.format(new Date(at));
+  return valid(at) ? FULL.format(new Date(at)) : UNKNOWN;
+}
+
+/** `at` au format ISO, pour l'attribut `dateTime` ; `undefined` pour une date que `Date` ne sait pas dire. */
+export function isoDate(at: number): string | undefined {
+  return valid(at) ? new Date(at).toISOString() : undefined;
 }
