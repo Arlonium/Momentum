@@ -7,10 +7,14 @@
 // - Les pastilles suivent les blocs des fils, et les fils ouverts de chacun ; elles disent en
 //   retour quels blocs commentés sont dans la page, et dans quel ordre.
 // - Un fil mène à son bloc : la page défile jusqu'à lui, qui est mis en évidence un instant.
+// - Les brouillons vivent ici, pour la page ouverte, hors du panneau qui se démonte ; le bloc dont
+//   on rédige le commentaire neuf aussi : une pastille, un second « Commenter » ou le panneau
+//   fermé puis rouvert les retrouvent (`drafts.ts`).
 import { useCallback, useId, useMemo, useRef, useState, type RefObject } from "react";
 import { openCount } from "./arrange";
 import type { PanelTarget } from "./CommentsPanel";
 import { blockElement, blockText, shorten } from "./dom";
+import { createDrafts, type Drafts } from "./drafts";
 import type { Comments } from "./useComments";
 
 /** Le début du texte d'un bloc, au-dessus de son commentaire neuf : au plus tant de caractères. */
@@ -39,6 +43,8 @@ export type CommentsPanelWiring = {
     id: string;
     order: string[] | null;
     target: PanelTarget | null;
+    drafts: Drafts;
+    composing: string | null;
     excerpt: (blockId: string) => string | null;
     onShowBlock: (blockId: string) => void;
     onTargetDone: () => void;
@@ -62,6 +68,9 @@ export function useCommentsPanel(
   /** Numérote les demandes faites au panneau (un fil, un bloc à commenter, un bloc à montrer). */
   const requests = useRef(0);
   const open = panel !== null;
+  const [drafts] = useState(createDrafts);
+  /** Le bloc dont on rédige le commentaire neuf, jusqu'à ce qu'il parte ou soit annulé. */
+  const [composing, setComposing] = useState<string | null>(null);
 
   const openPanel = (target: PanelTarget | null) => {
     if (!open) {
@@ -81,8 +90,10 @@ export function useCommentsPanel(
   const openOnThread = (threadId: string) =>
     openPanel({ kind: "thread", threadId, seq: ++requests.current });
   const commentBlockNow = useRef((_: string) => {});
-  commentBlockNow.current = (blockId: string) =>
+  commentBlockNow.current = (blockId: string) => {
+    setComposing(blockId);
     openPanel({ kind: "block", blockId, seq: ++requests.current });
+  };
   const commentBlock = useCallback((blockId: string) => commentBlockNow.current(blockId), []);
 
   const { threads } = comments;
@@ -128,9 +139,14 @@ export function useCommentsPanel(
       id: panelId,
       order,
       target: panel.target,
+      drafts,
+      composing,
       excerpt,
       onShowBlock: showBlock,
-      onTargetDone: () => setPanel((current) => current && { target: null }),
+      onTargetDone: () => {
+        setComposing(null);
+        setPanel((current) => current && { target: null });
+      },
       onClose: closePanel,
     },
     commentBlock,

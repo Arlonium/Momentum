@@ -32,6 +32,7 @@ import { CloseIcon } from "../icons";
 import { arrangeThreads, canWrite, type CommentRights } from "./arrange";
 import { cssString } from "./dom";
 import { Composer } from "./Composer";
+import { createDrafts, DRAFT, type Drafts } from "./drafts";
 import { ThreadView } from "./ThreadView";
 import type { Comments } from "./useComments";
 
@@ -55,6 +56,16 @@ type Props = {
   /** Le compte de la session. */
   selfId: string;
   target: PanelTarget | null;
+  /**
+   * Les brouillons de la page, qui survivent au panneau (`useCommentsPanel`). Sans eux, un
+   * brouillon ne vit que le temps du panneau.
+   */
+  drafts?: Drafts;
+  /**
+   * Le bloc dont on rédige le commentaire neuf ; il le reste quand le panneau va à un fil ou se
+   * ferme, jusqu'à ce que le commentaire parte ou soit annulé. Absent : le bloc de `target`.
+   */
+  composing?: string | null;
   /** Le début du texte d'un bloc, montré au-dessus de son commentaire neuf. */
   excerpt: (blockId: string) => string | null;
   /** Fait défiler la page jusqu'au bloc. */
@@ -85,6 +96,8 @@ export function CommentsPanel({
   readOnly,
   selfId,
   target,
+  drafts: givenDrafts,
+  composing: givenComposing,
   excerpt,
   onShowBlock,
   onTargetDone,
@@ -98,6 +111,10 @@ export function CommentsPanel({
   const [showResolved, setShowResolved] = useState(false);
   const now = useNow();
   const rights: CommentRights = { level, locked: trashed || readOnly, selfId };
+  const [ownDrafts] = useState(createDrafts);
+  const drafts = givenDrafts ?? ownDrafts;
+  const targetBlock = target?.kind === "block" ? target.blockId : null;
+  const composing = givenComposing === undefined ? targetBlock : givenComposing;
   const write = canWrite(rights);
   const { threads } = comments;
   const arranged = useMemo(() => threads && arrangeThreads(threads, order), [threads, order]);
@@ -112,7 +129,15 @@ export function CommentsPanel({
     const first = !opened.current;
     opened.current = true;
     if (target === null && !first) return;
-    if (target?.kind === "block" && panel.querySelector("textarea")) return;
+    if (target?.kind === "block") {
+      // Le champ du bloc, neuf ou déjà là (un second « Commenter » sur le même bloc).
+      const field = panel.querySelector<HTMLTextAreaElement>(".mm-comments-new textarea");
+      if (field) {
+        field.focus();
+        field.setSelectionRange(field.value.length, field.value.length);
+        return;
+      }
+    }
     if (target?.kind === "thread") {
       const chosen = panel.querySelector<HTMLElement>(
         `[data-thread-id=${cssString(target.threadId)}]`,
@@ -163,6 +188,13 @@ export function CommentsPanel({
     if (event.key !== "Escape") return;
     // Une fenêtre de confirmation (suppression d'un message) a son propre Échap.
     if ((event.target as Element).closest("dialog")) return;
+    // Échap ne détruit jamais un texte tapé : dans un champ qui en a, il sort du champ.
+    if (event.target instanceof HTMLTextAreaElement && event.target.value !== "") {
+      event.preventDefault();
+      event.stopPropagation();
+      panelRef.current?.focus();
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     onClose();
@@ -181,13 +213,14 @@ export function CommentsPanel({
           deleted={deleted}
           onShowBlock={show(thread.blockId, deleted)}
           comments={comments}
+          drafts={drafts}
           onFocusMove={(within) => moveFocus(thread.id, within)}
         />
       </li>
     );
   };
 
-  const quote = target?.kind === "block" ? excerpt(target.blockId) : null;
+  const quote = composing === null ? null : excerpt(composing);
 
   return (
     <aside
@@ -222,7 +255,7 @@ export function CommentsPanel({
           </button>
         </div>
       )}
-      {write && target?.kind === "block" && (
+      {write && composing !== null && (
         <div className="mm-comments-new">
           <p className="mm-comments-quote-label">Sur le bloc :</p>
           {quote && (
@@ -231,13 +264,14 @@ export function CommentsPanel({
             </blockquote>
           )}
           <Composer
-            key={target.seq}
+            // Un champ par bloc : le même bloc garde le sien, et son brouillon.
+            key={composing}
             label="Commenter le bloc"
             submitLabel="Commenter"
             submitName="Commenter le bloc"
-            autoFocus
+            draft={{ store: drafts, key: DRAFT.block(composing) }}
             onSubmit={async (body) => {
-              const created = await comments.open(target.blockId, body);
+              const created = await comments.open(composing, body);
               onTargetDone();
               moveFocus(created.id, null);
             }}
@@ -253,6 +287,7 @@ export function CommentsPanel({
           <Composer
             label="Commenter la page"
             submitLabel="Commenter"
+            draft={{ store: drafts, key: DRAFT.page }}
             onSubmit={async (body) => {
               await comments.open(null, body);
             }}

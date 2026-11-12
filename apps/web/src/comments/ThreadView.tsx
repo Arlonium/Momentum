@@ -28,6 +28,7 @@ import {
   type CommentRights,
 } from "./arrange";
 import { Composer } from "./Composer";
+import { DRAFT, type Drafts } from "./drafts";
 import { fullDate, relativeTime } from "./time";
 import type { Comments } from "./useComments";
 
@@ -47,6 +48,8 @@ type Props = {
   /** Le bloc du fil n'est plus dans la page. */
   deleted: boolean;
   comments: Pick<Comments, "reply" | "edit" | "remove" | "resolve" | "react">;
+  /** Les brouillons de la page : une réponse ou une modification en cours se retrouvent. */
+  drafts: Drafts;
   /**
    * Après une action, l'élément qui avait le focus a pu quitter la page : le panneau le rend à
    * l'élément du fil marqué `data-focus="<within>"`, sinon au fil, sinon à son titre (le fil
@@ -69,10 +72,14 @@ export function ThreadView({
   onShowBlock,
   deleted,
   comments,
+  drafts,
   onFocusMove,
 }: Props) {
-  const [replying, setReplying] = useState(false);
-  const [editing, setEditing] = useState<string | null>(null);
+  // Une réponse ou une modification qui a un brouillon reprend où elle en était.
+  const [replying, setReplying] = useState(() => drafts.has(DRAFT.reply(thread.id)));
+  const [editing, setEditing] = useState<string | null>(
+    () => thread.comments.find((c) => drafts.has(DRAFT.edit(c.id)))?.id ?? null,
+  );
   /** Le message dont on confirme la suppression. */
   const [deleting, setDeleting] = useState<Comment | null>(null);
   const [busy, setBusy] = useState(false);
@@ -148,6 +155,7 @@ export function ThreadView({
                 submitLabel="Enregistrer"
                 submitName="Enregistrer le message"
                 initial={comment.body}
+                draft={{ store: drafts, key: DRAFT.edit(comment.id) }}
                 autoFocus
                 clearOnSent={false}
                 onSubmit={async (body) => {
@@ -243,6 +251,7 @@ export function ThreadView({
           label="Répondre au fil"
           submitLabel="Envoyer"
           submitName="Envoyer la réponse"
+          draft={{ store: drafts, key: DRAFT.reply(thread.id) }}
           autoFocus
           onSubmit={async (body) => {
             await comments.reply(thread.id, body);
