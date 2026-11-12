@@ -1,5 +1,5 @@
 //! Stockage SQLite de Mementum : comptes et sessions, espaces et leurs membres, invitations,
-//! arbre de pages, accès, fils de commentaires, journal Yjs et instantanés.
+//! arbre de pages, accès, fils de commentaires, journal Yjs, instantanés et versions.
 //!
 //! - [`Store`] ouvre la base (WAL, `synchronous=FULL`, clés étrangères, délai d'attente de 5 s,
 //!   appliqués à **chaque** connexion du pool) et lance les migrations.
@@ -16,6 +16,7 @@
 //! - `access_inputs.rs` : ce que le calcul des accès lit d'un espace, en une transaction.
 //! - `comments.rs` : les fils de commentaires d'une page, leurs messages et leurs réactions.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
+//! - `versions.rs` : les versions d'une page (état Yjs complet et auteurs), cent par page.
 //! - `position.rs` : l'index fractionnaire.
 //!
 //! Les horodatages sont en millisecondes Unix. Les identifiants sont des UUIDv7 stockés en
@@ -56,6 +57,7 @@ mod position;
 mod signup;
 mod spaces;
 mod users;
+mod versions;
 
 use std::fmt;
 use std::path::Path;
@@ -80,6 +82,7 @@ pub use position::position_between;
 pub use signup::SignedUp;
 pub use spaces::Space;
 pub use users::{NewUser, User};
+pub use versions::{MAX_VERSIONS, Unversioned, Version, VersionReason};
 
 /// Erreurs du store.
 #[derive(Debug)]
