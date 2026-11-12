@@ -3,7 +3,7 @@
 // (R141). La WebSocket est simulée ; le client n'y envoie jamais rien.
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { renderHook, settle } from "../test/hooks";
-import { EVENTS_DEBOUNCE_MS, useSpaceEvents } from "./useSpaceEvents";
+import { EVENTS_DEBOUNCE_MS, EVENTS_MAX_WAIT_MS, useSpaceEvents } from "./useSpaceEvents";
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
@@ -109,6 +109,42 @@ test("a_lower_or_equal_version_is_ignored", async () => {
   known = 10;
   await advance(EVENTS_DEBOUNCE_MS);
   expect(onChange).not.toHaveBeenCalled();
+});
+
+test("a_first_frame_lower_than_the_tree_reloads_it_once", async () => {
+  // Une version qui redescend : la base a été restaurée sous un serveur relancé (R156).
+  known = 9;
+  await renderHook(hook, { spaceId: "perso" });
+  const socket = FakeSocket.instances[0];
+  await settle(() => socket.open());
+  await settle(() => socket.frame(3));
+  await advance(EVENTS_DEBOUNCE_MS);
+  expect(onChange).toHaveBeenCalledTimes(1);
+  // Les trames suivantes de la même connexion suivent la règle : plus bas ou égal, ignoré.
+  await settle(() => socket.frame(2));
+  await advance(EVENTS_DEBOUNCE_MS * 4);
+  expect(onChange).toHaveBeenCalledTimes(1);
+  // Une nouvelle connexion a de nouveau sa première trame.
+  await settle(() => socket.drop());
+  await advance(1_000);
+  await settle(() => FakeSocket.instances[1].open());
+  await settle(() => FakeSocket.instances[1].frame(4));
+  await advance(EVENTS_DEBOUNCE_MS);
+  expect(onChange).toHaveBeenCalledTimes(2);
+});
+
+test("a_burst_of_frames_reloads_at_most_one_second_after_the_first", async () => {
+  known = 0;
+  await renderHook(hook, { spaceId: "perso" });
+  const socket = FakeSocket.instances[0];
+  await settle(() => socket.open());
+  // Une trame tous les 200 ms : l'anti-rebond seul ne partirait jamais.
+  for (let n = 1; n <= 15; n += 1) {
+    await settle(() => socket.frame(n));
+    await advance(200);
+  }
+  expect(onChange.mock.calls.length).toBeGreaterThanOrEqual(3);
+  expect(EVENTS_MAX_WAIT_MS).toBe(1_000);
 });
 
 test("a_closed_channel_comes_back", async () => {

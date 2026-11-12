@@ -64,16 +64,12 @@ export function App() {
   // Ce que d'autres changent dans l'espace arrive par son canal (R133) : une version plus haute
   // que celle de l'arbre affiché le relit, avec le compte (nom de l'espace, rôles, R150). Tant
   // qu'il est tombé, l'arbre se relit par le minuteur de repli.
-  const { reload: reloadTree, rereadAccount: rereadAfterChange, knownLsn } = tree;
-  const changed = useCallback(() => {
-    reloadTree();
-    rereadAfterChange();
-  }, [reloadTree, rereadAfterChange]);
+  const { channelChanged, knownLsn } = tree;
   const knownVersion = useCallback(
     () => (readSpaceId === null ? null : knownLsn(readSpaceId)),
     [readSpaceId, knownLsn],
   );
-  const { live } = useSpaceEvents(readSpaceId, changed, knownVersion);
+  const { live } = useSpaceEvents(readSpaceId, channelChanged, knownVersion);
   const treeError = useTreeReader(tree, readSpaceId, {
     retries,
     live,

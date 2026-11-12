@@ -6,7 +6,10 @@
 // Le numéro ne dit pas ce qui a changé : quand il dépasse celui de l'arbre affiché (la version
 // lue avant ses pages, donc une borne basse, R141), l'arbre est relu par l'API, déjà filtrée
 // par les droits. Égal ou plus petit, rien ne part. Plusieurs trames rapprochées ne font
-// qu'une relecture, `EVENTS_DEBOUNCE_MS` après la dernière.
+// qu'une relecture, `EVENTS_DEBOUNCE_MS` après la dernière, et au plus tard
+// `EVENTS_MAX_WAIT_MS` après la première. La première trame d'une connexion fait relire dès
+// qu'elle diffère de la version de l'arbre, plus basse comprise (R156) : une version qui
+// redescend dit que la base a été restaurée sous un serveur relancé.
 //
 // Le canal ne passe pas par `gatedWebSocket` : il n'écrit rien dans un document. Il ne survit
 // pas pour autant à ce que l'application démonte (le compte a changé, R115) : sa WebSocket est
@@ -21,6 +24,11 @@ import { useEffect, useRef, useState } from "react";
 
 /** Plusieurs trames qui se suivent ne font qu'une relecture, cette durée après la dernière. */
 export const EVENTS_DEBOUNCE_MS = 250;
+/**
+ * Une relecture part au plus tard cette durée après la première trame qu'elle doit traiter :
+ * une suite de trames plus rapprochées que l'anti-rebond ne fige pas la barre latérale.
+ */
+export const EVENTS_MAX_WAIT_MS = 1_000;
 /** Délai avant la première reconnexion ; il double à chaque échec. */
 export const RECONNECT_FIRST_MS = 1_000;
 /** Le délai de reconnexion ne dépasse jamais cela. */
@@ -43,13 +51,14 @@ function lsnOf(data: unknown): number | null {
 }
 
 /**
- * Ouvre le canal de l'espace `spaceId` (`null` : aucun). `onChange` est appelé quand la
- * version poussée dépasse `known()`, la version de l'arbre affiché (`null` : pas d'arbre
- * encore, la relecture ne coûte rien). `live` : le canal est ouvert.
+ * Ouvre le canal de l'espace `spaceId` (`null` : aucun). `onChange(lsn)` est appelé, avec la
+ * plus haute version reçue, quand elle dépasse `known()`, la version de l'arbre affiché
+ * (`null` : pas d'arbre encore ; c'est à l'appelant de ne pas jeter la lecture en route).
+ * `live` : le canal est ouvert.
  */
 export function useSpaceEvents(
   spaceId: string | null,
-  onChange: () => void,
+  onChange: (lsn: number) => void,
   known: () => number | null = () => null,
 ): { live: boolean } {
   const [live, setLive] = useState(false);
@@ -64,19 +73,29 @@ export function useSpaceEvents(
     let debounce: ReturnType<typeof setTimeout> | undefined;
     let reconnect: ReturnType<typeof setTimeout> | undefined;
     let delay = RECONNECT_FIRST_MS;
+    /** Quand la première trame non traitée est arrivée ; `null` : aucune en attente. */
+    let waitingSince: number | null = null;
+    /** La première trame de la connexion n'a pas encore été vue. */
+    let first = true;
+    /** La première trame diffère de la version de l'arbre : relire, même plus bas. */
+    let forced = false;
     /** La plus haute version reçue sur ce canal. */
     let seen = -1;
 
     const fire = () => {
       debounce = undefined;
+      waitingSince = null;
       const current = callbacks.current.known();
-      if (current === null || seen > current) callbacks.current.onChange();
+      const due = forced || current === null || seen > current;
+      forced = false;
+      if (due) callbacks.current.onChange(seen);
     };
 
     const connect = () => {
       reconnect = undefined;
       const mine = new WebSocket(eventsUrl(spaceId));
       socket = mine;
+      first = true;
       mine.onopen = () => {
         if (!stopped && socket === mine) setLive(true);
       };
@@ -86,11 +105,21 @@ export function useSpaceEvents(
         if (lsn === null) return;
         delay = RECONNECT_FIRST_MS;
         const current = callbacks.current.known();
-        if (lsn > seen) seen = lsn;
+        const opening = first;
+        first = false;
+        // Une version plus basse que celle déjà vue sur cette connexion ne compte pas, sauf
+        // à l'ouverture : `seen` part de ce que dit la première trame.
+        if (opening || lsn > seen) seen = lsn;
+        if (opening && current !== null && lsn !== current) forced = true;
         // Pas plus récente que l'arbre : rien à relire, et pas de minuteur.
-        if (current !== null && lsn <= current) return;
+        if (!forced && current !== null && lsn <= current) return;
+        const now = Date.now();
+        waitingSince ??= now;
         clearTimeout(debounce);
-        debounce = setTimeout(fire, EVENTS_DEBOUNCE_MS);
+        debounce = setTimeout(
+          fire,
+          Math.max(0, Math.min(EVENTS_DEBOUNCE_MS, waitingSince + EVENTS_MAX_WAIT_MS - now)),
+        );
       };
       mine.onclose = () => {
         if (stopped || socket !== mine) return;

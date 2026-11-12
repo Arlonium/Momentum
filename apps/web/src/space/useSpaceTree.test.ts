@@ -619,3 +619,13 @@ test("account_replay_is_cancelled_when_the_hook_unmounts", async () => {
   await clock.pass(2 * REFRESH_INTERVAL_MS);
   expect(onReturn).not.toHaveBeenCalled();
 });
+
+test("known_version_follows_the_last_read_even_when_it_goes_down", async () => {
+  // Une base restaurée sous un serveur relancé : l'arbre n'est plus à jour de ce qu'on croyait
+  // (R156), la version connue est celle que la dernière lecture a rendue.
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  await answer(0, "perso", [page("a")], 9);
+  await settle(() => tree.current.reload());
+  await answer(1, "perso", [page("a")], 4);
+  expect(tree.current.knownLsn("perso")).toBe(4);
+});
