@@ -1373,6 +1373,259 @@ button.tree-toggle:hover {
   padding: 6px 14px;
 }
 
+/* Un texte de confirmation en plusieurs paragraphes (restaurer une version, d'autres présents). */
+.mm-dialog-lead p {
+  margin: 0;
+}
+
+.mm-dialog-lead p + p {
+  margin-top: 8px;
+}
+
+/* Historique d'une page (R135) : une grande fenêtre, la liste des versions à gauche, sur le
+   papier de la barre latérale, l'aperçu à droite, comme la page, et « Restaurer cette version »
+   en bas. Le texte secondaire tient 4,7:1 sur la ligne choisie, 5,4:1 ailleurs. */
+
+.mm-history {
+  width: min(1080px, calc(100vw - 32px));
+  height: min(760px, calc(100vh - 32px));
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Seulement ouverte : un `display` posé sur une fenêtre fermée la montrerait. */
+.mm-history[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.mm-history-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 14px 12px 24px;
+  border-bottom: 1px solid var(--mm-popover-divider);
+}
+
+.mm-history-head .mm-dialog-title {
+  margin: 0;
+}
+
+.mm-history-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+}
+
+.mm-history-side {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  border-right: 1px solid var(--mm-sidebar-border);
+  background: var(--mm-sidebar-bg);
+}
+
+.mm-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-history-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--mm-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mm-history-item:hover {
+  background: var(--mm-sidebar-hover);
+}
+
+.mm-history-item[aria-current="true"] {
+  background: var(--mm-sidebar-active);
+}
+
+.mm-history-date {
+  font-weight: 600;
+  color: var(--mm-text-strong);
+}
+
+.mm-history-detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+/* « avant une restauration » : la couleur des avertissements, 5,4:1 sur son fond. */
+.mm-history-tag {
+  background: var(--mm-warning-soft);
+  color: var(--mm-warning);
+}
+
+.mm-history-authors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-history-avatars {
+  display: flex;
+  flex: none;
+}
+
+/* Pastilles de 20 px qui se chevauchent, au bord du papier de la liste. L'initiale prend la
+   couleur qui tient 4,5:1 sur celle du compte (`inkOn`). */
+.mm-history-avatar,
+.mm-history-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: -5px;
+  border: 2px solid var(--mm-sidebar-bg);
+  border-radius: 50%;
+  box-sizing: content-box;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.mm-history-avatars > :first-child {
+  margin-left: 0;
+}
+
+.mm-history-more {
+  background: var(--mm-surface);
+  color: var(--mm-text-secondary);
+}
+
+.mm-history-names {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mm-history-note {
+  margin: 8px 10px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-history-read-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 8px 10px;
+}
+
+.mm-history-read-error .mm-form-error {
+  margin: 0;
+}
+
+.mm-history-preview {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.mm-history-preview-title {
+  margin: 0;
+  padding: 18px var(--mm-page-inset) 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mm-text-secondary);
+}
+
+.mm-history-preview-body {
+  padding-bottom: 32px;
+}
+
+.mm-history-preview-body > .mm-history-note,
+.mm-history-problem {
+  margin: 8px var(--mm-page-inset);
+}
+
+.mm-history-problem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-history-problem p {
+  margin: 0;
+}
+
+.mm-history-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  /* La hauteur du bouton, qu'il soit là ou non : l'aperçu ne bouge pas quand on choisit. */
+  min-height: 61px;
+  padding: 12px 16px 12px 24px;
+  border-top: 1px solid var(--mm-popover-divider);
+}
+
+.mm-history-foot-text {
+  min-width: 0;
+}
+
+.mm-history-foot .mm-form-error,
+.mm-history-hint {
+  margin: 0;
+}
+
+.mm-history-hint {
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-history-foot .mm-button {
+  min-height: 36px;
+  padding: 6px 14px;
+}
+
+/* Fenêtre étroite : la liste au-dessus de l'aperçu. */
+@media (max-width: 720px) {
+  .mm-history-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 2fr) minmax(0, 3fr);
+  }
+
+  .mm-history-side {
+    border-right: 0;
+    border-bottom: 1px solid var(--mm-sidebar-border);
+  }
+}
+
 /* Un mot composé qui ne se coupe pas à son trait d'union (« connecte-toi »). */
 .mm-nowrap {
   white-space: nowrap;
@@ -2427,14 +2680,16 @@ button.mm-reaction:hover {
 
 /* Éditeur BlockNote */
 
-.bn-container.mm-editor[data-color-scheme] {
+/* L'éditeur de la page, et celui de l'aperçu d'une version (`PreviewEditor`), qui a sa propre
+   classe : les e2e et les budgets cherchent `.mm-editor`, celui de la page. */
+.bn-container:is(.mm-editor, .mm-preview-editor)[data-color-scheme] {
   --bn-font-family: var(--mm-font);
   --bn-colors-editor-text: var(--mm-text);
   --bn-colors-editor-background: var(--mm-background);
   --bn-colors-side-menu: #a8a69f;
 }
 
-.mm-editor .bn-editor {
+:is(.mm-editor, .mm-preview-editor) .bn-editor {
   padding-inline: var(--mm-page-inset);
 }
 

@@ -8,6 +8,9 @@
 // curseur. Rien n'est écrit dans le document : le
 // commentaire part par l'API (R134). BlockNote ne montre pas la poignée d'un éditeur en
 // lecture seule : pour qui commente sans modifier, c'est la marge qui l'offre (`BlockMarks`).
+//
+// `PreviewEditor` est le même éditeur, lié à un document local sans fournisseur : l'aperçu d'une
+// version dans la fenêtre « Historique » (R135).
 import "@blocknote/mantine/style.css";
 import "katex/dist/katex.min.css";
 import { syntaxHighlighter } from "@blocknote/code-block";
@@ -68,13 +71,21 @@ type Props = {
   onComment?: ((blockId: string) => void) | null;
 };
 
+/**
+ * Ce que partagent l'éditeur de la page et celui d'un aperçu de version : le schéma des blocs, la
+ * langue, les extensions. Un aperçu montre donc une version comme la page la montrerait.
+ */
+const EDITOR_OPTIONS = {
+  schema,
+  dictionary: { ...fr, multi_column: multiColumnLocales.fr },
+  dropCursor: multiColumnDropCursor,
+  extensions: [syntaxHighlighter],
+};
+
 export function Editor({ session, fixture = null, onComment = null }: Props) {
   const editor = useCreateBlockNote(
     withCollaboration({
-      schema,
-      dictionary: { ...fr, multi_column: multiColumnLocales.fr },
-      dropCursor: multiColumnDropCursor,
-      extensions: [syntaxHighlighter],
+      ...EDITOR_OPTIONS,
       collaboration: {
         fragment: session.doc.getXmlFragment(FRAGMENT),
         user: session.user,
@@ -215,6 +226,53 @@ export function Editor({ session, fixture = null, onComment = null }: Props) {
       />
       {sideMenu && <SideMenuController sideMenu={sideMenu} />}
     </BlockNoteView>
+  );
+}
+
+/**
+ * Le compte d'un aperçu, que `withCollaboration` demande : il n'est montré nulle part, un aperçu
+ * n'a ni curseur ni présence.
+ */
+const PREVIEW_USER = { name: "Aperçu", color: "#66655f" };
+
+/**
+ * L'éditeur d'un aperçu de version (R135) : le même que celui de la page, lié à `doc`, un
+ * document local que l'appelant remplit, sans fournisseur. Ni WebSocket, ni `BroadcastChannel`,
+ * ni présence : y-prosemirror retire de `doc` ce qu'il ne sait pas construire (un bloc d'un
+ * autre schéma), et ces suppressions ne quittent jamais ce document. Jamais modifiable : ni
+ * poignée, ni menus, ni barre de mise en forme. Sa classe n'est pas `mm-editor`, celle de
+ * l'éditeur de la page, que les e2e et les budgets du navigateur cherchent.
+ */
+export function PreviewEditor({ doc }: { doc: Y.Doc }) {
+  const editor = useCreateBlockNote(
+    withCollaboration({
+      ...EDITOR_OPTIONS,
+      collaboration: {
+        fragment: doc.getXmlFragment(FRAGMENT),
+        user: PREVIEW_USER,
+        provider: undefined,
+      },
+    }),
+    [doc],
+  );
+  useLayoutEffect(() => {
+    editor.isEditable = false;
+  }, [editor]);
+  return (
+    <BlockNoteView
+      editor={editor}
+      editable={false}
+      theme="light"
+      formattingToolbar={false}
+      linkToolbar={false}
+      slashMenu={false}
+      sideMenu={false}
+      filePanel={false}
+      tableHandles={false}
+      emojiPicker={false}
+      comments={false}
+      className="mm-preview-editor"
+    />
   );
 }
 

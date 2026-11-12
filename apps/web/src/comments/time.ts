@@ -1,9 +1,24 @@
-// L'âge d'un message de commentaire, « il y a… », écrit à la main en français : jusqu'à une
-// semaine, en minutes, heures ou jours ; au-delà, sa date. La date complète va dans l'infobulle.
+// L'âge d'un message de commentaire, ou d'une version de l'historique, « il y a… », écrit à la
+// main en français : jusqu'à une semaine, en minutes, heures ou jours ; au-delà, sa date. La date
+// complète va dans l'infobulle.
+import { useEffect, useState } from "react";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+
+/** « il y a… » se remet à jour à ce rythme, tant que ce qui l'affiche est ouvert. */
+const CLOCK_MS = 30_000;
+
+/** L'instant présent (millisecondes Unix), remis à jour toutes les `CLOCK_MS`. */
+export function useNow(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), CLOCK_MS);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
+}
 
 const DAY_MONTH = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long" });
 const DAY_MONTH_YEAR = new Intl.DateTimeFormat("fr-FR", {

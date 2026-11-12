@@ -39,6 +39,7 @@ import type {
   UpdateMember,
   UpdatePage,
   UpdateSpace,
+  Version,
 } from "@mementum/protocol";
 
 /** Erreur d'un appel : le code et le message (en français) du serveur, quand il répond. */
@@ -74,6 +75,13 @@ export function isSessionLost(error: unknown): boolean {
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await send(method, path, body);
+  // `204` : pas de corps.
+  return (res.status === 204 ? undefined : await res.json()) as T;
+}
+
+/** Une réponse réussie, sinon l'erreur du serveur (ou `UNREACHABLE`), levée en `ApiError`. */
+async function send(method: string, path: string, body?: unknown): Promise<Response> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -84,8 +92,7 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   } catch {
     throw new ApiError(0, null, UNREACHABLE);
   }
-  // `204` : pas de corps.
-  if (res.ok) return (res.status === 204 ? undefined : await res.json()) as T;
+  if (res.ok) return res;
   let error: Partial<ErrorBody> = {};
   try {
     error = (await res.json()) as ErrorBody;
@@ -389,6 +396,43 @@ export function setReaction(
 ): Promise<Comment> {
   const path = `${message(pageId, threadId, commentId)}/reactions/${encodeURIComponent(emoji)}`;
   return call(on ? "PUT" : "DELETE", path);
+}
+
+// Historique d'une page (R135) : ses versions, chacune l'état complet de la page à un instant.
+// Lire demande `read` (à la corbeille aussi) ; restaurer, `edit`, et rien ne se restaure à la
+// corbeille (`409 trashed`). Une version qui n'est pas de la page, ou qui n'est plus gardée,
+// reçoit la réponse d'une page introuvable (`404`).
+
+const versions = (pageId: string) => `${page(pageId)}/versions`;
+const version = (pageId: string, versionId: string) =>
+  `${versions(pageId)}/${encodeURIComponent(versionId)}`;
+
+/** `GET /api/v1/pages/{id}/versions` : les versions de la page, la plus récente d'abord. */
+export function getVersions(pageId: string): Promise<Version[]> {
+  return call("GET", versions(pageId));
+}
+
+/**
+ * `GET …/versions/{versionId}/state` : l'état Yjs (v1) de la version, plusieurs mégaoctets pour
+ * une grande page. À appliquer dans un document à part, jamais dans celui d'une session.
+ */
+export async function getVersionState(pageId: string, versionId: string): Promise<Uint8Array> {
+  const res = await send("GET", `${version(pageId, versionId)}/state`);
+  try {
+    return new Uint8Array(await res.arrayBuffer());
+  } catch {
+    // Connexion coupée pendant le corps.
+    throw new ApiError(0, null, UNREACHABLE);
+  }
+}
+
+/**
+ * `POST …/versions/{versionId}/restore` : les blocs de la version sont écrits par-dessus le
+ * contenu, et ce qu'ils remplacent est gardé dans une version (« avant une restauration »). Le
+ * contenu arrive ensuite aux onglets ouverts par la synchro.
+ */
+export function restoreVersion(pageId: string, versionId: string): Promise<void> {
+  return call("POST", `${version(pageId, versionId)}/restore`);
 }
 
 /** Longueur maximale d'un titre, en caractères Unicode (le serveur fait foi, R30). */

@@ -34,6 +34,7 @@ import { cssString } from "./dom";
 import { Composer } from "./Composer";
 import { createDrafts, DRAFT, type Drafts, type OrphanDraft } from "./drafts";
 import { ThreadView } from "./ThreadView";
+import { useNow } from "./time";
 import type { Comments } from "./useComments";
 
 /**
@@ -85,18 +86,6 @@ type Props = {
   onTargetDone: () => void;
   onClose: () => void;
 };
-
-/** « il y a… » se remet à jour à ce rythme, tant que le panneau est ouvert. */
-const CLOCK_MS = 30_000;
-
-function useNow(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), CLOCK_MS);
-    return () => clearInterval(timer);
-  }, []);
-  return now;
-}
 
 export function CommentsPanel({
   id,
