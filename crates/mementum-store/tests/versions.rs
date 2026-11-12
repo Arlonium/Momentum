@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Fixture, account, break_table, fresh, int, new_user, page, repair, texts};
-use mementum_store::{MAX_VERSIONS, StoreError, Unversioned, VersionReason};
+use mementum_store::{MAX_BEFORE_RESTORE, MAX_VERSIONS, StoreError, Unversioned, VersionReason};
 use uuid::Uuid;
 
 async fn fresh_page() -> (Fixture, Uuid) {
@@ -257,5 +257,62 @@ async fn unversioned_is_read_from_what_the_journal_keeps() {
             since: Some(snapshot),
             authors: Vec::new(),
         }
+    );
+}
+
+/// Une page garde au plus vingt versions `before_restore` : la purge retire d'abord les plus
+/// anciennes de cette sorte, puis applique le plafond de cent. Cent restaurations après cent
+/// versions ordinaires n'en évincent donc que vingt : il en reste quatre-vingts, et les vingt
+/// `before_restore` les plus récentes.
+#[tokio::test]
+async fn at_most_twenty_versions_before_a_restore_are_kept() {
+    let (f, id) = fresh_page().await;
+    let mut ordinary = Vec::new();
+    for seq in 0..MAX_VERSIONS as i64 {
+        let reason = if seq % 2 == 0 {
+            VersionReason::Periodic
+        } else {
+            VersionReason::Closing
+        };
+        ordinary.push(
+            f.store
+                .put_version(id, seq, b"o", &[], reason)
+                .await
+                .unwrap(),
+        );
+    }
+    let mut before = Vec::new();
+    for seq in 0..MAX_VERSIONS as i64 {
+        let seq = MAX_VERSIONS as i64 + seq;
+        before.push(
+            f.store
+                .put_version(id, seq, b"r", &[], VersionReason::BeforeRestore)
+                .await
+                .unwrap(),
+        );
+    }
+    let listed = f.store.list_versions(id).await.unwrap();
+    let kept = |reason: VersionReason| -> Vec<Uuid> {
+        listed
+            .iter()
+            .filter(|v| v.reason == reason)
+            .map(|v| v.id)
+            .collect()
+    };
+    let mut newest_before: Vec<Uuid> = before[before.len() - MAX_BEFORE_RESTORE..].to_vec();
+    newest_before.reverse();
+    assert_eq!(kept(VersionReason::BeforeRestore), newest_before);
+    let ordinary_kept = listed.len() - MAX_BEFORE_RESTORE;
+    assert_eq!(ordinary_kept, MAX_VERSIONS - MAX_BEFORE_RESTORE);
+    let mut newest_ordinary: Vec<Uuid> = ordinary[MAX_BEFORE_RESTORE..].to_vec();
+    newest_ordinary.reverse();
+    let ordinary_ids: Vec<Uuid> = listed
+        .iter()
+        .filter(|v| v.reason != VersionReason::BeforeRestore)
+        .map(|v| v.id)
+        .collect();
+    assert_eq!(
+        ordinary_ids, newest_ordinary,
+        "les vingt plus anciennes sont parties"
     );
 }

@@ -82,7 +82,7 @@ pub use position::position_between;
 pub use signup::SignedUp;
 pub use spaces::Space;
 pub use users::{NewUser, User};
-pub use versions::{MAX_VERSIONS, Unversioned, Version, VersionReason};
+pub use versions::{MAX_BEFORE_RESTORE, MAX_VERSIONS, Unversioned, Version, VersionReason};
 
 /// Erreurs du store.
 #[derive(Debug)]

@@ -4,8 +4,11 @@
 //! C'est l'acteur de la page (`mementum-sync`) qui décide quand en couper une, et qui encode
 //! l'état depuis son document : le store ne garde jamais d'octets reçus d'un client. Il garde
 //! l'état tel qu'on le lui donne, et le rend tel quel. Une page garde ses [`MAX_VERSIONS`]
-//! dernières versions : la purge se fait dans la transaction qui écrit la version neuve, si bien
-//! qu'une version refusée n'efface rien. Elles suivent leur page (`ON DELETE CASCADE`, migration
+//! dernières versions, dont au plus [`MAX_BEFORE_RESTORE`] `before_restore` (Ruling R189) : la
+//! purge retire d'abord les plus anciennes de cette sorte au-delà de vingt, puis les plus
+//! anciennes de toutes au-delà de cent, dans la transaction qui écrit la version neuve, si bien
+//! qu'une version refusée n'efface rien. Des restaurations répétées ne font donc jamais partir
+//! plus de vingt versions ordinaires. Elles suivent leur page (`ON DELETE CASCADE`, migration
 //! `0003`) ; la compaction, qui purge le journal, n'y touche pas.
 //!
 //! **Ordre.** La plus récente d'abord : par date d'écriture, puis par identifiant (UUIDv7,
@@ -28,6 +31,10 @@ use crate::{Author, Store, StoreError, now_ms, parse_uuid, unreadable};
 
 /// Versions gardées par page : au-delà, les plus anciennes partent.
 pub const MAX_VERSIONS: usize = 100;
+
+/// Versions `before_restore` gardées par page : au-delà, les plus anciennes de cette sorte
+/// partent d'abord, avant le plafond de [`MAX_VERSIONS`] (Ruling R189).
+pub const MAX_BEFORE_RESTORE: usize = 20;
 
 /// Pourquoi une version a été coupée.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +97,8 @@ impl Store {
     /// Garde une version de la page : son état Yjs (`state`, écrit par le serveur), le `seq` du
     /// journal qu'il couvre, les comptes qui l'ont modifiée depuis la version d'avant (triés et
     /// dédoublonnés ici) et la raison. Dans la même transaction, seules les [`MAX_VERSIONS`]
-    /// dernières versions de la page restent. `NotFound` si la page n'existe pas.
+    /// dernières versions de la page restent, dont au plus [`MAX_BEFORE_RESTORE`]
+    /// `before_restore`. `NotFound` si la page n'existe pas.
     pub async fn put_version(
         &self,
         node_id: Uuid,
@@ -127,6 +135,18 @@ impl Store {
         .execute(&mut *tx)
         .await
         .map_err(StoreError::from_fk)?;
+        // Les `before_restore` au-delà des vingt plus récentes d'abord (Ruling R189), puis toutes
+        // au-delà des cent plus récentes.
+        sqlx::query(
+            "DELETE FROM doc_versions WHERE node_id = ?1 AND reason = ?2 AND id NOT IN ( \
+                 SELECT id FROM doc_versions WHERE node_id = ?1 AND reason = ?2 \
+                 ORDER BY created_at DESC, id DESC LIMIT ?3)",
+        )
+        .bind(&node)
+        .bind(VersionReason::BeforeRestore.as_str())
+        .bind(MAX_BEFORE_RESTORE as i64)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "DELETE FROM doc_versions WHERE node_id = ?1 AND id NOT IN ( \
                  SELECT id FROM doc_versions WHERE node_id = ?1 \
