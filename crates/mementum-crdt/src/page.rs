@@ -9,7 +9,7 @@ use yrs::any::Number;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Doc, Map, MapRef, OffsetKind, Options, Out, ReadTxn, StateVector, Transact,
+    Any, ClientID, Doc, Map, MapRef, OffsetKind, Options, Out, ReadTxn, StateVector, Transact,
     TransactionMut, Update, XmlElementPrelim, XmlElementRef, XmlFragment, XmlFragmentRef, XmlOut,
 };
 
@@ -20,6 +20,14 @@ use crate::{CrdtError, FRAGMENT, META};
 
 /// Clé de [`META`] qui porte la version du schéma de la page.
 const SCHEMA_KEY: &str = "schemaVersion";
+
+/// Ce qu'une mise à jour qui laisserait un trou attend de la page (Ruling
+/// R131) : pour chaque client en cause, l'horloge que la page doit avoir
+/// atteinte. Rendu par [`PageDoc::awaits`], comparé à la page par
+/// [`PageDoc::has_reached`] : qui retient une mise à jour sait quand la
+/// réessayer sans la relire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Awaited(Vec<(u64, u32)>);
 
 /// Document Yjs d'une page, au format de BlockNote.
 ///
@@ -151,6 +159,45 @@ impl PageDoc {
             ));
         }
         Ok(read)
+    }
+
+    /// Vrai si la mise à jour (v1), reçue d'un client, laisserait un trou
+    /// dans les horloges d'un de ses clients : un bloc qui commence au-delà de
+    /// ce que la page connaît de ce client, sans que la mise à jour porte ce
+    /// qui manque (Ruling R131). yrs l'intégrerait en laissant le trou ; un
+    /// navigateur la garde en attente tant que le trou n'est pas comblé, et le
+    /// serveur lirait un texte qu'aucun navigateur n'affiche.
+    ///
+    /// La mise à jour est lue sans être appliquée : la page ne change pas.
+    /// `Decode` si elle est illisible.
+    pub fn leaves_gap(&self, update: &[u8]) -> Result<bool, CrdtError> {
+        let shape = Shape::read(update)?;
+        Ok(shape.leaves_gap(&self.doc.transact().state_vector()))
+    }
+
+    /// Ce qu'une mise à jour (v1) reçue d'un client attend encore de la page
+    /// pour ne plus laisser de trou : `None` si elle n'en laisserait aucun
+    /// ([`PageDoc::leaves_gap`]). Ce qui est rendu se compare ensuite à la
+    /// page par [`PageDoc::has_reached`], sans relire la mise à jour.
+    ///
+    /// La mise à jour est lue sans être appliquée : la page ne change pas.
+    /// `Decode` si elle est illisible.
+    pub fn awaits(&self, update: &[u8]) -> Result<Option<Awaited>, CrdtError> {
+        let shape = Shape::read(update)?;
+        let awaited = shape.awaited(&self.doc.transact().state_vector());
+        Ok((!awaited.is_empty()).then_some(Awaited(awaited)))
+    }
+
+    /// Vrai si la page a atteint ce qu'attendait une mise à jour
+    /// ([`PageDoc::awaits`]) : donnée maintenant, elle ne laisserait plus de
+    /// trou. Ce qui est atteint le reste : le vecteur d'état d'une page ne
+    /// fait que croître.
+    pub fn has_reached(&self, awaited: &Awaited) -> bool {
+        let state = self.doc.transact().state_vector();
+        awaited
+            .0
+            .iter()
+            .all(|(client, clock)| state.get(&ClientID::new(*client)) >= *clock)
     }
 
     /// Lit la mise à jour, par la garde puis par yrs, et la vérifie contre

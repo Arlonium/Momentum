@@ -186,3 +186,120 @@ Un **gras**, un [lien](https://exemple.fr).
     assert_eq!(mirror.revision(), page.revision());
     assert_eq!(mirror.state_vector(), page.state_vector());
 }
+
+/// Trois éditions d'un même client, chacune dans son bloc : aucune ne dépend d'une autre.
+struct Edits {
+    /// L'état de départ de la page, que le client a reçu.
+    state: Vec<u8>,
+    a1: Vec<u8>,
+    a2: Vec<u8>,
+    a3: Vec<u8>,
+    /// a1 et a3 fusionnées : un `Skip` tient la place de a2, avant les blocs de a3.
+    skipping: Vec<u8>,
+}
+
+fn three_edits() -> Edits {
+    let (base, _) = PageDoc::new_page();
+    base.write_blocks(&parse("Alpha\n\nBêta\n\nGamma\n").unwrap())
+        .unwrap();
+    let state = base.encode_state();
+    let ids: Vec<String> = base.read_blocks().into_iter().map(|b| b.id).collect();
+    let client = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let a1 = client.replace_text(&ids[0], 5, 0, " un").unwrap();
+    let a2 = client.replace_text(&ids[1], 4, 0, " deux").unwrap();
+    let a3 = client.replace_text(&ids[2], 5, 0, " trois").unwrap();
+    let skipping = yrs::merge_updates_v1([a1.as_slice(), a3.as_slice()]).unwrap();
+    Edits {
+        state,
+        a1,
+        a2,
+        a3,
+        skipping,
+    }
+}
+
+/// Ruling R131 : un client fait des éditions qui ne dépendent pas l'une de l'autre. La deuxième,
+/// arrivée seule, laisserait un trou dans les horloges de son client : yrs l'intégrerait, et le
+/// serveur lirait un texte qu'un navigateur, qui la garde en attente, n'affiche pas. La page le
+/// dit avant de rien appliquer.
+#[test]
+fn update_ahead_of_its_client_leaves_a_gap() {
+    let Edits {
+        state,
+        a1,
+        a2,
+        skipping,
+        ..
+    } = three_edits();
+    let page = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let revision = page.revision();
+    assert_eq!(page.leaves_gap(&a2), Ok(true), "a2 avant a1");
+    assert_eq!(page.leaves_gap(&a1), Ok(false), "a1, la première");
+    assert_eq!(
+        page.leaves_gap(&skipping),
+        Ok(true),
+        "un Skip avant un bloc inconnu"
+    );
+    assert_eq!(
+        page.leaves_gap(&state),
+        Ok(false),
+        "tous ses blocs sont connus"
+    );
+    assert!(matches!(
+        page.leaves_gap(&[0xff, 0xff, 0xff]),
+        Err(CrdtError::Decode(_))
+    ));
+    assert_eq!(page.revision(), revision, "rien n'est appliqué");
+
+    page.apply_client_update(&a1).unwrap();
+    let revision = page.revision();
+    assert_eq!(page.leaves_gap(&a2), Ok(false), "a1 arrivée, a2 la suit");
+    assert_eq!(page.leaves_gap(&a1), Ok(false), "a1, déjà connue");
+    assert_eq!(page.leaves_gap(&skipping), Ok(true), "a3 attend encore a2");
+    assert_eq!(page.revision(), revision, "rien n'est appliqué");
+
+    page.apply_client_update(&a2).unwrap();
+    assert_eq!(
+        page.leaves_gap(&skipping),
+        Ok(false),
+        "a2 arrivée, a3 la suit"
+    );
+}
+
+/// Ce qu'attend une mise à jour retenue se compare à la page sans la relire : la page qui l'a
+/// atteint la prend sans trou, et ne le perd plus.
+#[test]
+fn what_an_update_awaits_is_reached_once_its_gap_is_filled() {
+    let Edits {
+        state,
+        a1,
+        a2,
+        a3,
+        skipping,
+    } = three_edits();
+    let page = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let revision = page.revision();
+    assert_eq!(page.awaits(&a1), Ok(None), "a1 n'attend rien");
+    assert_eq!(page.awaits(&state), Ok(None), "tous ses blocs sont connus");
+    assert!(matches!(
+        page.awaits(&[0xff, 0xff, 0xff]),
+        Err(CrdtError::Decode(_))
+    ));
+    let after_a1 = page.awaits(&a2).unwrap().expect("a2 attend a1");
+    let after_a2 = page.awaits(&skipping).unwrap().expect("a3 attend a2");
+    assert_eq!(page.revision(), revision, "rien n'est appliqué");
+    assert!(!page.has_reached(&after_a1));
+    assert!(!page.has_reached(&after_a2));
+
+    page.apply_client_update(&a1).unwrap();
+    assert!(page.has_reached(&after_a1));
+    assert!(!page.has_reached(&after_a2), "a1 ne suffit pas à a3");
+    assert_eq!(page.leaves_gap(&a2), Ok(false));
+
+    page.apply_client_update(&a2).unwrap();
+    assert!(page.has_reached(&after_a2));
+    assert_eq!(page.leaves_gap(&skipping), Ok(false));
+    // Atteint, il le reste.
+    page.apply_client_update(&a3).unwrap();
+    assert!(page.has_reached(&after_a1) && page.has_reached(&after_a2));
+}

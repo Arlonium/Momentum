@@ -33,6 +33,19 @@
 //! Pendant l'application, la récursion reste sous deux fois la borne (test
 //! `twice_the_bound_in_one_update_is_refused` de `tests/depth.rs`).
 //!
+//! # Trous d'horloge (Ruling R131)
+//!
+//! Un bloc arrivé avant ses prédécesseurs du même client, yrs l'intègre en
+//! laissant un trou ; un navigateur le garde en attente tant que le trou
+//! n'est pas comblé, y compris dans l'état complet que le serveur lui donne.
+//! Le serveur, l'API MMD et les agents liraient alors un texte qu'aucun
+//! navigateur n'affiche. [`Shape::leaves_gap`] dit, sans rien appliquer, si
+//! une mise à jour laisserait un tel trou, et [`Shape::awaited`] ce qu'elle
+//! attend pour ne plus en laisser : l'acteur de synchronisation retient la
+//! mise à jour d'un client jusque-là. `PageDoc::apply_update`, qui relit le
+//! stockage, accepte toujours un tel bloc, comme yrs : ce qui est écrit doit
+//! se relire, dans n'importe quel ordre (test `revision_is_canonical`).
+//!
 //! # Métadonnées (report M7 du lot 1)
 //!
 //! La `Y.Map` [`META`] porte `schemaVersion`, que seul le serveur écrit, à la
@@ -214,6 +227,66 @@ impl Shape {
             return Err(CrdtError::TooDeep);
         }
         Ok(())
+    }
+
+    /// Vrai si la mise à jour, donnée à une page dont le vecteur d'état est
+    /// `state`, laisserait un trou dans les horloges d'un de ses clients
+    /// (Ruling R131). yrs intégrerait ses blocs en laissant le trou, quand
+    /// leurs dépendances sont là ; un navigateur les garde en attente tant que
+    /// le trou n'est pas comblé, y compris quand il les reçoit dans l'état
+    /// complet du serveur. Le serveur lirait alors un texte qu'aucun
+    /// navigateur n'affiche.
+    ///
+    /// Pour chaque client, dans l'ordre des horloges : ce que la page couvre
+    /// part de son horloge dans `state` ; un bloc (élément ou plage ramassée)
+    /// qui commence au-delà est un trou ; sinon il étend ce qui est couvert.
+    /// Un `Skip` n'avance rien : c'est un trou de la mise à jour elle-même.
+    pub(crate) fn leaves_gap(&self, state: &StateVector) -> bool {
+        self.clients.iter().any(|(client, structs)| {
+            let mut covered = state.get(&ClientID::new(*client));
+            for s in structs {
+                if matches!(s.kind, Kind::Skip) {
+                    continue;
+                }
+                if s.id.1 > covered {
+                    return true;
+                }
+                // Sans débordement : `read` a vérifié chaque fin de bloc.
+                covered = covered.max(s.id.1 + s.len);
+            }
+            false
+        })
+    }
+
+    /// Ce que la mise à jour attend encore d'une page dont le vecteur d'état
+    /// est `state` : chaque client pour lequel [`Shape::leaves_gap`] voit un
+    /// trou, avec l'horloge que la page doit atteindre pour qu'il n'y en ait
+    /// plus. Vide si elle n'en laisserait aucun.
+    ///
+    /// Cette horloge ne dépend que de la mise à jour : c'est le début de son
+    /// dernier bloc qui ne prolonge pas le précédent (un `Skip` les sépare, ou
+    /// c'est le premier). Une suite de blocs sans trou est couverte dès que son
+    /// début l'est, et ces débuts croissent. Comme un vecteur d'état ne fait
+    /// que croître, une page qui a atteint cette horloge ne voit plus de trou
+    /// pour ce client, ni plus tard : l'appelant compare sans relire la mise à
+    /// jour. Le test `awaited_agrees_with_leaves_gap` le vérifie contre
+    /// [`Shape::leaves_gap`].
+    pub(crate) fn awaited(&self, state: &StateVector) -> Vec<(u64, u32)> {
+        self.clients
+            .iter()
+            .filter_map(|(client, structs)| {
+                let mut start = None;
+                let mut end = None;
+                for s in structs.iter().filter(|s| !matches!(s.kind, Kind::Skip)) {
+                    if end != Some(s.id.1) {
+                        start = Some(s.id.1);
+                    }
+                    end = Some(s.id.1 + s.len);
+                }
+                let clock = start?;
+                (clock > state.get(&ClientID::new(*client))).then_some((*client, clock))
+            })
+            .collect()
     }
 
     /// Plus longue chaîne de types imbriqués entre eux dans la mise à jour

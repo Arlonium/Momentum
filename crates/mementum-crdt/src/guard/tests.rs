@@ -18,7 +18,7 @@ use yrs::{
     XmlElementPrelim, XmlFragment, XmlTextPrelim, merge_updates_v1,
 };
 
-use super::{Kind, Shape};
+use super::{Insert, Kind, Parent, Shape, Struct};
 use crate::{CrdtError, FRAGMENT, META, PageDoc};
 
 /// Ce qu'une mise à jour contient, vu par l'API publique de yrs : plages
@@ -353,6 +353,80 @@ fn first_text(blocks: &[Block]) -> Option<(String, usize)> {
         }
         _ => first_text(&b.children),
     })
+}
+
+/// Une entrée de mise à jour : le client, l'horloge du premier bloc, puis chaque bloc (0 :
+/// élément, 1 : plage ramassée, 2 : `Skip`) et sa longueur.
+type Entry = (u64, u32, Vec<(u8, u32)>);
+
+/// Une mise à jour lue, faite à la main, les horloges se suivant comme dans [`Shape::read`].
+fn shape_of(entries: &[Entry]) -> Shape {
+    let clients = entries
+        .iter()
+        .map(|(client, start, blocks)| {
+            let mut clock = *start;
+            let structs = blocks
+                .iter()
+                .map(|&(kind, len)| {
+                    let kind = match kind {
+                        0 => Kind::Insert(Insert {
+                            parent: Parent::Named(FRAGMENT.to_string(), false),
+                            type_ref: None,
+                        }),
+                        1 => Kind::Gc,
+                        _ => Kind::Skip,
+                    };
+                    let s = Struct {
+                        id: (*client, clock),
+                        len,
+                        kind,
+                    };
+                    clock += len;
+                    s
+                })
+                .collect();
+            (*client, structs)
+        })
+        .collect();
+    Shape { clients }
+}
+
+/// Un vecteur d'état pour les clients 1, 2 et 3.
+fn state_of(clocks: &[u32]) -> yrs::StateVector {
+    let mut state = yrs::StateVector::default();
+    for (client, clock) in (1..).zip(clocks) {
+        state.set_max(yrs::block::ClientID::new(client), *clock);
+    }
+    state
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+    /// Ruling R131 : ce qu'une mise à jour attend d'une page ([`Shape::awaited`]), comparé à un
+    /// vecteur d'état atteint plus tard, dit la même chose que [`Shape::leaves_gap`] relu sur ce
+    /// vecteur : l'appelant peut réessayer une mise à jour retenue sans la relire. Les entrées
+    /// d'un même client peuvent se répéter, comme dans une mise à jour écrite à la main.
+    #[test]
+    fn awaited_agrees_with_leaves_gap(
+        entries in prop::collection::vec(
+            (1u64..4, 0u32..20, prop::collection::vec((0u8..3, 1u32..5), 0..6)),
+            0..4,
+        ),
+        now in prop::collection::vec(0u32..40, 3),
+        later in prop::collection::vec(0u32..20, 3),
+    ) {
+        let shape = shape_of(&entries);
+        let state = state_of(&now);
+        let awaited = shape.awaited(&state);
+        prop_assert_eq!(awaited.is_empty(), !shape.leaves_gap(&state));
+        let grown: Vec<u32> = now.iter().zip(&later).map(|(n, l)| n + l).collect();
+        let grown = state_of(&grown);
+        let reached = awaited
+            .iter()
+            .all(|(client, clock)| grown.get(&yrs::block::ClientID::new(*client)) >= *clock);
+        prop_assert_eq!(reached, !shape.leaves_gap(&grown));
+    }
 }
 
 proptest! {

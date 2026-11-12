@@ -19,7 +19,7 @@ mod table;
 use std::fmt;
 
 pub use guard::MAX_YJS_DEPTH;
-pub use page::PageDoc;
+pub use page::{Awaited, PageDoc};
 
 /// Nom du fragment XML partagé avec BlockNote.
 pub const FRAGMENT: &str = "document-store";
