@@ -29,7 +29,7 @@
 //! `tracing`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -400,10 +400,10 @@ struct Loaded {
 /// - les **changements** : les transactions qui ont inséré quelque chose (le
 ///   vecteur d'état a avancé) ou supprimé quelque chose (yrs n'inscrit au jeu
 ///   de suppressions que ce qu'elle supprime vraiment). Sert à l'historique
-///   (Ruling R135) : une mise à jour réappliquée sans effet (une mise à jour
-///   retenue que l'étape 2 couvrait déjà, un état renvoyé tel quel) est écrite
-///   au journal et relayée comme une autre, mais n'est pas une écriture à
-///   versionner. Le compte se lit avant et après une écriture : rien n'est
+///   (Ruling R135) et au journal (Ruling R181) : une mise à jour qui n'a rien
+///   changé (une mise à jour retenue que l'étape 2 couvrait déjà, l'étape 2
+///   d'un onglet qui revient sans rien de neuf) n'est ni écrite, ni relayée, ni
+///   versionnée. Le compte se lit avant et après une écriture : rien n'est
 ///   encodé ni relu du document pour le savoir.
 #[derive(Default)]
 struct Watch(Arc<Counters>);
@@ -412,6 +412,9 @@ struct Watch(Arc<Counters>);
 struct Counters {
     deletions: AtomicU64,
     changes: AtomicU64,
+    /// L'observateur n'a pas pu être posé : toute écriture compte alors comme
+    /// un changement, pour que rien ne manque au journal.
+    blind: AtomicBool,
 }
 
 impl Watch {
@@ -435,9 +438,10 @@ impl Watch {
                 });
         if let Err(error) = watched {
             // Sans compteur, la compaction n'a plus lieu que toutes les `snapshot_every` mises à
-            // jour (plus lent au chargement, sans perte), et aucune écriture n'est vue comme un
-            // changement : plus aucune version n'est coupée, faute de le savoir.
-            tracing::warn!(%error, "transactions non comptées : compaction au rythme ordinaire, et pas de version");
+            // jour (plus lent au chargement, sans perte), et toute écriture compte comme un
+            // changement : écrite au journal et relayée, comme avant le Ruling R181.
+            tracing::warn!(%error, "transactions non comptées : compaction au rythme ordinaire, toute écriture vue comme un changement");
+            watch.0.blind.store(true, Ordering::Relaxed);
         }
         watch
     }
@@ -452,6 +456,12 @@ impl Watch {
 
     fn changes(&self) -> u64 {
         self.0.changes.load(Ordering::Relaxed)
+    }
+
+    /// Une transaction a-t-elle changé le document depuis que le compte valait
+    /// `changes` ? Toujours vrai sans observateur.
+    fn changed_since(&self, changes: u64) -> bool {
+        self.0.blind.load(Ordering::Relaxed) || self.changes() != changes
     }
 }
 
@@ -1093,7 +1103,9 @@ impl Actor {
     ///
     /// Ce qui passe suit le chemin d'une mise à jour reçue
     /// ([`Actor::client_update`]) : lu et réencodé, dédoublonné, écrit au nom
-    /// du compte de sa connexion, puis relayé à toutes les autres. Ce que la
+    /// du compte de sa connexion, puis relayé à toutes les autres ; une mise à
+    /// jour que l'étape 2 du client couvrait déjà ne change plus rien, et n'est
+    /// ni écrite ni relayée (Ruling R181). Ce que la
     /// page refuse alors est traité comme à la réception : le document est
     /// rechargé, et la connexion qui l'avait envoyé est fermée, elle seule.
     /// Une connexion qui se ferme (départ, fermeture à la demande, refus,
@@ -1175,6 +1187,16 @@ impl Actor {
         };
         // Après des déplacements concurrents, un bloc peut exister en double.
         let fix = self.page.dedupe_blocks();
+        // Ruling R181 : une mise à jour qui ne change rien à la page (rien d'inséré, rien de
+        // supprimé, aucune suppression laissée en attente) n'est ni écrite ni relayée. Tout ce
+        // qu'elle porte est déjà dans le document, donc déjà au journal et chez les autres :
+        // c'est l'étape 2 d'un onglet qui revient sans rien de neuf (Yjs y met tout son jeu de
+        // suppressions), ou une mise à jour retenue que l'étape 2 couvrait déjà. Écrite, le
+        // rechargement la relisait comme une écriture de son compte. Elle répond à son
+        // expéditeur comme une autre.
+        if !self.watch.changed_since(changes) && !self.page.has_pending_deletions() {
+            return Ok(true);
+        }
         // La mise à jour et son correctif en une écriture, tous deux ou aucun
         // (report M3 du lot 1) : sans le correctif, le store garderait le
         // doublon, que le rechargement servirait.
@@ -1328,10 +1350,12 @@ impl Actor {
     /// Une écriture vient d'être appliquée et écrite au journal au nom de
     /// `actor`, `changes` étant le compte des changements d'avant elle : si
     /// elle a changé la page, elle entre dans la tranche en cours (Ruling
-    /// R135), qu'elle ouvre au besoin. Une mise à jour réappliquée sans effet
-    /// n'y entre pas : sinon, une page qui n'a pas changé couperait une version.
+    /// R135), qu'elle ouvre au besoin. Une écriture qui n'a rien changé n'y
+    /// entre pas : sinon, une page qui n'a pas changé couperait une version.
+    /// (Une mise à jour de client sans effet n'arrive même pas ici : elle n'est
+    /// pas écrite, Ruling R181.)
     fn wrote(&mut self, changes: u64, actor: Option<Uuid>) {
-        if self.watch.changes() == changes {
+        if !self.watch.changed_since(changes) {
             return;
         }
         self.slice.since.get_or_insert_with(Instant::now);

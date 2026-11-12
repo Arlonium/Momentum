@@ -231,6 +231,21 @@ impl PageDoc {
         Ok(())
     }
 
+    /// Vrai si le document garde des suppressions en attente : des plages
+    /// qu'une mise à jour supprimait et que la page ne connaît pas encore. yrs
+    /// les applique à l'arrivée des éléments, dans une autre transaction. Une
+    /// mise à jour qui en laisse ne « change rien » sur le moment, mais doit
+    /// être écrite et relayée comme une autre (Ruling R181) : sinon la
+    /// suppression passerait plus tard dans le document du serveur, sans être
+    /// au journal ni chez les autres.
+    pub fn has_pending_deletions(&self) -> bool {
+        self.doc
+            .transact()
+            .store()
+            .pending_ds()
+            .is_some_and(|pending| !pending.is_empty())
+    }
+
     /// Tout l'état du document, en une mise à jour (v1).
     pub fn encode_state(&self) -> Vec<u8> {
         self.doc
@@ -334,8 +349,10 @@ impl PageDoc {
         }
     }
 
-    /// Pour `mementum-sync` seulement, qui y pose son observateur des
-    /// suppressions (Ruling R40) ; jamais pour lire le contenu.
+    /// Pour `mementum-sync` seulement, qui y pose son observateur des fins de
+    /// transaction : le compte des suppressions (compaction, Ruling R40) et
+    /// celui des changements (journal et historique, Rulings R135 et R181) ;
+    /// jamais pour lire le contenu.
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
     }

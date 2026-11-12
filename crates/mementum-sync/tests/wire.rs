@@ -652,3 +652,102 @@ async fn relayed_update_is_what_the_server_read_not_what_it_received() {
     let (_, last) = stored.updates.last().expect("une mise à jour au journal");
     assert_eq!(last, &relayed[0]);
 }
+
+/// Ruling R181 : une mise à jour d'un client qui ne change rien à la page n'est ni écrite au
+/// journal ni relayée ; elle répond à son expéditeur comme une autre. Yjs met tout son jeu de
+/// suppressions dans l'étape 2 : c'est ce qu'envoie un onglet qui revient sans rien de neuf, sur
+/// une page qui a des suppressions. Tout ce qu'elle porte est déjà dans le document du serveur,
+/// donc déjà chez les autres. Une mise à jour qui ne fait que supprimer change la page : elle est
+/// écrite et relayée.
+#[tokio::test]
+async fn update_that_changes_nothing_is_neither_written_nor_relayed() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Bonjour\n").await;
+    // Elle remplace la première : la page a des suppressions.
+    f.write_mmd("Bonjour tout le monde\n").await;
+    let id = f.ids().await.remove(0);
+    let tab = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut observer = Raw::connect(&f, of(new_user(&f.db).await)).await;
+    assert_eq!(
+        observer
+            .updates_so_far()
+            .await
+            .expect("observatrice servie"),
+        Vec::<Vec<u8>>::new()
+    );
+    let journal = f.store.load_doc(f.page).await.unwrap().updates.len();
+
+    let page = tab.page().unwrap();
+    let step2 = page.encode_diff(&page.state_vector()).unwrap();
+    assert!(
+        step2.len() > 2,
+        "l'étape 2 porte des suppressions : {step2:?}"
+    );
+    tab.send_update(&step2);
+    assert!(still_served(&tab).await);
+    assert_eq!(
+        f.store.load_doc(f.page).await.unwrap().updates.len(),
+        journal,
+        "rien au journal"
+    );
+    assert_eq!(
+        observer
+            .updates_so_far()
+            .await
+            .expect("observatrice servie"),
+        Vec::<Vec<u8>>::new(),
+        "rien chez l'observatrice"
+    );
+
+    // Une suppression seule : écrite et relayée.
+    let deletion = tab.page().unwrap().replace_text(&id, 0, 8, "").unwrap();
+    tab.send_update(&deletion);
+    assert!(still_served(&tab).await);
+    assert_eq!(
+        text(&f.hub.read_blocks(f.page).await.unwrap()),
+        "tout le monde"
+    );
+    let relayed = observer
+        .updates_so_far()
+        .await
+        .expect("observatrice servie");
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    let stored = f.store.load_doc(f.page).await.unwrap();
+    assert_eq!(stored.updates.len(), journal + 1);
+    assert_eq!(stored.updates.last().map(|(_, u)| u), Some(&relayed[0]));
+}
+
+/// Une mise à jour qui supprime ce que la page ne connaît pas encore ne change rien sur le
+/// moment : yrs garde la suppression en attente, et l'applique à l'arrivée des éléments, dans
+/// une autre transaction. Elle reste écrite au journal et relayée, comme avant le Ruling R181 :
+/// sinon, la suppression passerait plus tard dans le document du serveur sans être au journal
+/// (un rechargement la perdrait) ni chez les autres (ils garderaient le texte).
+#[tokio::test]
+async fn pending_deletion_is_still_written_and_relayed() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Bonjour\n").await;
+    let tab = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut observer = Raw::connect(&f, of(new_user(&f.db).await)).await;
+    assert_eq!(
+        observer
+            .updates_so_far()
+            .await
+            .expect("observatrice servie"),
+        Vec::<Vec<u8>>::new()
+    );
+    let journal = f.store.load_doc(f.page).await.unwrap().updates.len();
+
+    // Un client que la page ne connaît pas, des éléments qu'elle n'a jamais reçus.
+    let pending = deletion(4242, 10, 3);
+    tab.send_update(&pending);
+    assert!(still_served(&tab).await);
+    let relayed = observer
+        .updates_so_far()
+        .await
+        .expect("observatrice servie");
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    assert_eq!(deletion_of(&relayed[0]), (4242, 10, 3));
+    let stored = f.store.load_doc(f.page).await.unwrap();
+    assert_eq!(stored.updates.len(), journal + 1);
+    assert_eq!(text(&f.hub.read_blocks(f.page).await.unwrap()), "Bonjour");
+}

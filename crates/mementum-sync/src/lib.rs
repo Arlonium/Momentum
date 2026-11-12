@@ -17,6 +17,13 @@
 //!   octets pareil (yrs laisse tomber les bits d'un entier au-delà de 32) :
 //!   relayée telle quelle, une suppression pouvait effacer un texte sur le
 //!   serveur et rien dans les navigateurs ;
+//! - **rien de neuf, rien d'écrit** (Ruling R181) : une mise à jour d'un
+//!   client qui ne change rien à la page (rien d'inséré, rien de supprimé,
+//!   aucune suppression laissée en attente) n'est ni écrite ni relayée ; elle
+//!   répond à son expéditeur comme une autre. Yjs met tout son jeu de
+//!   suppressions dans l'étape 2 : un onglet qui revient sans rien de neuf en
+//!   envoie une à chaque reconnexion, que le rechargement de l'acteur relisait
+//!   comme une écriture de son compte ;
 //! - **retenir ce qui laisserait un trou** (Ruling R131) : la mise à jour
 //!   d'un client dont un bloc commence au-delà de ce que la page connaît de
 //!   son client n'est ni appliquée, ni écrite, ni relayée. Elle attend, dans

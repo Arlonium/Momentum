@@ -218,9 +218,9 @@ impl Store {
     ///
     /// La compaction purge le journal et ses auteurs : si l'instantané couvre des écritures
     /// au-delà de la dernière version, la tranche date au plus tard de lui (sa date est
-    /// postérieure aux écritures purgées), et ses auteurs ne sont plus connus. Une écriture qui
-    /// n'a rien changé (une mise à jour réappliquée sans effet) compte ici comme une autre : le
-    /// journal ne le dit pas.
+    /// postérieure aux écritures purgées), et ses auteurs ne sont plus connus. Le journal ne
+    /// porte que des écritures qui ont changé la page : une mise à jour de client sans effet
+    /// n'y est pas écrite (Ruling R181).
     pub async fn unversioned(&self, node_id: Uuid) -> Result<Unversioned, StoreError> {
         let node = node_id.to_string();
         let mut tx = self.pool.begin().await?;

@@ -248,32 +248,56 @@ async fn long_session_cuts_a_version_before_the_write_that_follows_the_interval(
     assert_eq!(authors(&kept[0]), [bob]);
 }
 
-/// Une page qui n'a pas changé ne coupe rien, ni en cours de session ni à l'arrêt, même quand
-/// des mises à jour lui arrivent : une mise à jour que la page a déjà (l'état qu'elle vient de
-/// donner au client, renvoyé tel quel) est réappliquée sans effet, écrite au journal et
-/// relayée, mais ce n'est pas une écriture à versionner.
+/// Une page qui n'a pas changé ne coupe rien, ni en cours de session, ni à l'arrêt, ni après
+/// un rechargement de son acteur, même quand des mises à jour lui arrivent. Yjs met tout son
+/// jeu de suppressions dans l'étape 2 : un onglet qui revient (coupure du réseau, veille,
+/// connexions fermées pour un droit) envoie donc, sur une page qui a des suppressions, une mise
+/// à jour qui ne change rien. Elle n'est ni écrite au journal ni relayée (Ruling R181) : écrite,
+/// l'acteur suivant, chargé par une simple lecture, la relisait comme une écriture de l'onglet,
+/// et coupait à son arrêt une version identique à la précédente, avec un auteur qui n'avait rien
+/// changé. Deux cycles, comme le relecteur l'a montré.
 #[tokio::test]
 async fn page_that_did_not_change_cuts_nothing() {
     let _clock = StoppedClock::start();
     let f = Fixture::new(config()).await;
     let alice = new_user(&f.db).await;
-    let a = connect(&f, alice).await;
-    let known = a.page().unwrap().encode_state();
+    f.write_mmd("Un\n").await;
+    // Elle remplace la première : la page a des suppressions.
+    f.write_mmd("Deux\n").await;
+    actor_stops(&f).await;
+    let kept: Vec<Uuid> = versions(&f).await.iter().map(|v| v.id).collect();
+    assert_eq!(kept.len(), 1);
     let journal = actors(&f.db, f.page).await.len();
 
-    heard(&a, || a.send_update(&known)).await;
-    advance(INTERVAL + Duration::from_secs(60)).await;
-    heard(&a, || a.send_update(&known)).await;
-    assert_eq!(
-        actors(&f.db, f.page).await.len(),
-        journal + 2,
-        "les mises à jour sans effet sont bien passées par l'acteur"
-    );
-    assert!(versions(&f).await.is_empty());
-
-    drop(a);
-    actor_stops(&f).await;
-    assert!(versions(&f).await.is_empty(), "rien à l'arrêt non plus");
+    for cycle in 0..2 {
+        let tab = connect(&f, alice).await;
+        // L'étape 2 d'un onglet qui revient, sans rien de neuf : tout son jeu de suppressions.
+        let page = tab.page().unwrap();
+        let step2 = page.encode_diff(&page.state_vector()).unwrap();
+        assert!(
+            step2.len() > 2,
+            "cycle {cycle} : des suppressions : {step2:?}"
+        );
+        heard(&tab, || tab.send_update(&step2)).await;
+        advance(INTERVAL + Duration::from_secs(60)).await;
+        heard(&tab, || tab.send_update(&step2)).await;
+        assert!(
+            versions(&f).await.len() == 1,
+            "cycle {cycle} : rien en session"
+        );
+        assert_eq!(
+            actors(&f.db, f.page).await.len(),
+            journal,
+            "cycle {cycle} : rien au journal"
+        );
+        drop(tab);
+        actor_stops(&f).await;
+        // Une simple lecture : un acteur neuf charge la page, relit la tranche, puis s'arrête.
+        assert_eq!(live_text(&f).await, "Deux");
+        actor_stops(&f).await;
+        let now: Vec<Uuid> = versions(&f).await.iter().map(|v| v.id).collect();
+        assert_eq!(now, kept, "cycle {cycle} : aucune version de plus");
+    }
 }
 
 /// Une écriture du serveur (`PUT /mmd`) compte comme celle d'un client : elle ouvre une
