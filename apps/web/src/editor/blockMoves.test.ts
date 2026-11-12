@@ -16,8 +16,10 @@
 // fois, chaque texte dans son bloc, rien en double, Mona, Tom et le serveur d'accord. Ceux qui
 // échouent aujourd'hui sont marqués `test.fails` : la suite reste verte, et le jour où l'un
 // passe, elle le dit. `MEMENTUM_SHOW_R39=1` les lance comme des tests ordinaires, pour voir leur
-// échec. Chaque geste a son témoin, vert : seul, il fait ce qu'on attend. Ce que montre chaque
-// scénario aujourd'hui est au registre du lot 3, sous « Task 12 ».
+// échec. Chaque geste a son témoin, vert : seul, il fait ce qu'on attend. Une dernière partie
+// relit ce que chaque geste, fait seul, écrit dans le document : les éléments Yjs gardés (et
+// l'id qu'ils portent ensuite), supprimés, créés. Ce que montre chaque scénario aujourd'hui est
+// au registre du lot 3, sous « Task 12 ».
 //
 // Une correction faite par le serveur (R138) ne rendrait pas ces tests verts : il n'y a pas de
 // serveur ici. Ils disent ce que les clients écrivent et ce que donne leur fusion ; ce que le
@@ -615,6 +617,124 @@ describe("deux glissers en même temps, sans aucune frappe", () => {
     if (!locallyDone(s, { mona: [Y_, Z, X, A], tom: [X, Z, A, Y_] })) return;
     await exchange(s.server, [s.mona, s.tom]);
     expectEverywhere(s, [Z, X, A, Y_]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ce que chaque geste écrit
+// ---------------------------------------------------------------------------
+
+/** Les éléments Yjs de la page, dans l'ordre du document. */
+function elements(doc: Y.Doc): Y.XmlElement[] {
+  const found: Y.XmlElement[] = [];
+  const walk = (parent: Y.XmlElement | Y.XmlFragment) =>
+    parent.toArray().forEach((child) => {
+      if (child instanceof Y.XmlElement) {
+        found.push(child);
+        walk(child);
+      }
+    });
+  walk(doc.getXmlFragment(FRAGMENT));
+  return found;
+}
+
+/**
+ * Un élément nommé pour les messages : `blockContainer x` par son id, les autres par le bloc qui
+ * les porte (`paragraph de x`, `blockGroup de w`, `blockGroup racine`).
+ */
+function nameOf(element: Y.XmlElement): string {
+  if (element.nodeName === "blockContainer") return `blockContainer ${element.getAttribute("id")}`;
+  const parent = element.parent;
+  const owner = parent instanceof Y.XmlElement ? `de ${parent.getAttribute("id")}` : "racine";
+  return `${element.nodeName} ${owner}`;
+}
+
+/**
+ * Ce qu'un geste fait des éléments Yjs du document de `p` : ceux qu'il supprime et ceux qu'il
+ * crée (nommés avant et après lui), et l'id que porte désormais chaque `blockContainer` gardé
+ * dont l'id a changé (par son id d'avant).
+ */
+function written(p: Peer, gesture: () => void) {
+  const before = new Map(elements(p.doc).map((element) => [element, nameOf(element)]));
+  gesture();
+  const after = elements(p.doc);
+  const deleted = [...before].filter(([element]) => element._item?.deleted).map(([, n]) => n);
+  const created = after.filter((element) => !before.has(element)).map(nameOf);
+  const renamed: Record<string, string> = {};
+  for (const element of after) {
+    const was = before.get(element);
+    if (was?.startsWith("blockContainer ") && was !== nameOf(element)) {
+      renamed[was.slice("blockContainer ".length)] = String(element.getAttribute("id"));
+    }
+  }
+  return { deleted, created, renamed };
+}
+
+// Ce qu'écrivent y-prosemirror 1.3.7 et BlockNote 0.57 pour chaque geste, fait seul : ce sur
+// quoi repose le tableau du registre (Task 12). Une mise à jour de l'une ou de l'autre peut
+// changer ces formes ; ces tests le diront.
+describe("ce que chaque geste écrit dans le document", () => {
+  test("glisser au même niveau : les blocs de la plage changent d'id sur place, rien n'est supprimé", async () => {
+    const s = await scene(XYZ);
+    expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
+      deleted: [],
+      created: [],
+      renamed: { x: "y", y: "z", z: "x" },
+    });
+  });
+
+  test("glisser de plusieurs places vers le haut : tout bloc entre les deux places change d'id", async () => {
+    const s = await scene(XYZW);
+    expect(written(s.mona, () => drag(s.mona, "w", { above: "x" }))).toEqual({
+      deleted: [],
+      created: [],
+      renamed: { x: "w", y: "x", z: "y", w: "z" },
+    });
+  });
+
+  test("déplacer au clavier : la même récriture sur place que le glisser", async () => {
+    const s = await scene(XYZ);
+    expect(written(s.mona, () => keyboardDown(s.mona, "x"))).toEqual({
+      deleted: [],
+      created: [],
+      renamed: { x: "y", y: "x" },
+    });
+  });
+
+  test("glisser par-dessus un autre type : le contenu d'un autre type est supprimé et recréé", async () => {
+    const s = await scene(TITLED);
+    expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
+      deleted: ["paragraph de x", "heading de y"],
+      created: ["heading de y", "paragraph de z"],
+      renamed: { x: "y", y: "z", z: "x" },
+    });
+  });
+
+  test("glisser un bloc qui a des enfants : les enfants sont copiés sous un autre élément", async () => {
+    const s = await scene(PARENTED);
+    expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
+      deleted: ["blockGroup de x", "blockContainer x1", "paragraph de x1"],
+      created: ["blockGroup de x", "blockContainer x1", "paragraph de x1"],
+      renamed: { x: "y", y: "z", z: "x" },
+    });
+  });
+
+  test("Tab : une copie au même id sous le bloc d'au-dessus, l'original supprimé", async () => {
+    const s = await scene(W_FIRST);
+    expect(written(s.mona, () => tab(s.mona, "x"))).toEqual({
+      deleted: ["blockContainer x", "paragraph de x"],
+      created: ["blockGroup de w", "blockContainer x", "paragraph de x"],
+      renamed: {},
+    });
+  });
+
+  test("Maj+Tab : une copie au même id un niveau plus haut, l'original supprimé", async () => {
+    const s = await scene(W_PARENT);
+    expect(written(s.mona, () => shiftTab(s.mona, "x"))).toEqual({
+      deleted: ["blockGroup de w", "blockContainer x", "paragraph de x"],
+      created: ["blockContainer x", "paragraph de x"],
+      renamed: {},
+    });
   });
 });
 
