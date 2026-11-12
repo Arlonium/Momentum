@@ -825,10 +825,97 @@ pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
             ),
         ),
     ]
+    .into_iter()
+    // Les commentaires de la page (`routes/comments.rs`), sur un fil et un message quelconques.
+    .chain(comment_routes(id, SOME_THREAD, SOME_MESSAGE))
+    .collect()
+}
+
+/// Une requête sur chaque route des commentaires de la page `id`, méthodes comprises, celles
+/// qui nomment un fil sur `thread` et son message `message` ; corps valides, illisibles ou hors
+/// bornes : `(nom, requête)`.
+pub fn comment_routes(id: &str, thread: &str, message: &str) -> Vec<(&'static str, Request<Body>)> {
+    let comments = format!("/api/v1/pages/{id}/comments");
+    let thread_at = format!("{comments}/{thread}");
+    let message_at = format!("{thread_at}/messages/{message}");
+    // 👍, encodé pour le chemin.
+    let reaction = format!("{message_at}/reactions/%F0%9F%91%8D");
+    let bare = |method: Method, uri: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let unreadable = |method: Method, uri: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{"))
+            .unwrap()
+    };
+    let replies = format!("{thread_at}/replies");
+    vec![
+        ("GET commentaires", bare(Method::GET, &comments)),
+        (
+            "POST fil",
+            json_request(Method::POST, &comments, &json!({ "body": "Un fil" })),
+        ),
+        (
+            "POST fil sur un bloc",
+            json_request(
+                Method::POST,
+                &comments,
+                &json!({ "blockId": "un-bloc", "body": "Sur un bloc" }),
+            ),
+        ),
+        (
+            "POST fil vide",
+            json_request(Method::POST, &comments, &json!({ "body": "" })),
+        ),
+        ("POST fil illisible", unreadable(Method::POST, &comments)),
+        (
+            "POST réponse",
+            json_request(Method::POST, &replies, &json!({ "body": "Réponse" })),
+        ),
+        ("POST réponse illisible", unreadable(Method::POST, &replies)),
+        (
+            "PATCH fil",
+            json_request(Method::PATCH, &thread_at, &json!({ "resolved": true })),
+        ),
+        (
+            "PATCH fil sans rien",
+            json_request(Method::PATCH, &thread_at, &json!({})),
+        ),
+        (
+            "PATCH message",
+            json_request(Method::PATCH, &message_at, &json!({ "body": "Modifié" })),
+        ),
+        (
+            "PATCH message champ en trop",
+            json_request(
+                Method::PATCH,
+                &message_at,
+                &json!({ "body": "Modifié", "author": "moi" }),
+            ),
+        ),
+        ("DELETE message", bare(Method::DELETE, &message_at)),
+        ("PUT réaction", bare(Method::PUT, &reaction)),
+        ("DELETE réaction", bare(Method::DELETE, &reaction)),
+        (
+            "PUT réaction hors bornes",
+            bare(Method::PUT, &format!("{message_at}/reactions/%20")),
+        ),
+    ]
 }
 
 /// Un compte quelconque, visé par les routes de partage de [`page_routes`].
 const SOMEONE: &str = "01890000-0000-7000-8000-000000000001";
+
+/// Un fil et un message quelconques, visés par les routes des commentaires de [`page_routes`].
+const SOME_THREAD: &str = "01890000-0000-7000-8000-000000000002";
+const SOME_MESSAGE: &str = "01890000-0000-7000-8000-000000000003";
 
 /// Ce qui fait qu'une réponse est la même qu'une autre : statut, type de contenu, corps.
 pub fn outcome(reply: &Reply) -> (StatusCode, Option<String>, String) {

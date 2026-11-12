@@ -302,6 +302,54 @@ impl ApiError {
         )
     }
 
+    /// `404 not_found` : le fil n'est pas de cette page. La même réponse qu'il existe sur une
+    /// autre page, nulle part, ou que son identifiant soit mal formé : qui voit une page
+    /// n'apprend rien des fils d'une autre.
+    pub fn thread_not_found() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "fil de commentaires introuvable sur cette page",
+        )
+    }
+
+    /// `404 not_found` : le message n'est pas de ce fil, de la même façon.
+    pub fn comment_not_found() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "message introuvable dans ce fil",
+        )
+    }
+
+    /// `422 invalid_body` : le texte d'un message hors de ses bornes.
+    pub fn invalid_body(message: &str) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidBody,
+            message,
+        )
+    }
+
+    /// `422 invalid_block` : la même réponse pour un bloc inconnu, vide, ou d'une autre page.
+    pub fn invalid_block() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidBlock,
+            "blockId ne nomme aucun bloc de cette page : sans blockId (ou avec null), le fil porte \
+             sur la page",
+        )
+    }
+
+    /// `422 invalid_emoji` : l'emoji d'une réaction hors de ses bornes.
+    pub fn invalid_emoji(message: &str) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidEmoji,
+            message,
+        )
+    }
+
     /// `500 internal` : le détail va dans le journal, pas dans la réponse.
     pub fn internal(error: &dyn std::fmt::Display) -> ApiError {
         tracing::error!(%error, "erreur interne");

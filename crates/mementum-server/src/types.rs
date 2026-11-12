@@ -226,7 +226,7 @@ impl From<Role> for mementum_acl::Role {
 pub enum Level {
     /// Peut lire.
     Read,
-    /// Peut commenter (au lot 2, comme `read`).
+    /// Peut commenter : lire, ouvrir un fil, répondre, réagir (Ruling R134).
     Comment,
     /// Peut modifier.
     Edit,
@@ -535,6 +535,97 @@ pub struct UpdatePage {
     pub after_id: Option<Option<String>>,
 }
 
+/// Un compte, tel que le nomme un fil de commentaires : son identifiant et son nom affiché,
+/// jamais son adresse (un invité ne lit pas celle des autres). Un compte qui n'est plus dans
+/// l'espace reste l'auteur de ses messages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Author {
+    pub id: String,
+    /// Le nom montré pour le compte, comme dans la liste des présents de la page : sans
+    /// caractère de contrôle, 100 caractères au plus, « Sans nom » s'il n'en reste rien.
+    pub name: String,
+}
+
+/// Les comptes qui ont posé un même emoji sur un message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Reaction {
+    /// De 1 à 16 octets, sans espace ni caractère de contrôle.
+    pub emoji: String,
+    /// Dans l'ordre où ils l'ont posé.
+    pub users: Vec<Author>,
+}
+
+/// Un message d'un fil de commentaires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Comment {
+    pub id: String,
+    pub author: Author,
+    /// Le texte, sans espaces de bord : de 1 à 10 000 caractères, sauts de ligne compris.
+    pub body: String,
+    /// Millisecondes Unix.
+    #[ts(type = "number")]
+    pub created_at: i64,
+    /// Millisecondes Unix : la dernière modification du texte ; `null` s'il n'a jamais changé.
+    #[ts(type = "number | null")]
+    pub edited_at: Option<i64>,
+    /// Dans l'ordre où chaque emoji est apparu sur le message.
+    pub reactions: Vec<Reaction>,
+}
+
+/// Un fil de commentaires d'une page, avec ses messages (`GET /api/v1/pages/{id}/comments`,
+/// Ruling R134). Rien n'en est écrit dans le document de la page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Thread {
+    pub id: String,
+    /// L'identifiant du bloc auquel le fil est attaché ; `null` : un commentaire de la page.
+    /// Il reste quand le bloc disparaît du document : le fil se lit toujours.
+    pub block_id: Option<String>,
+    /// Millisecondes Unix.
+    #[ts(type = "number")]
+    pub created_at: i64,
+    /// Millisecondes Unix ; `null` : le fil est ouvert.
+    #[ts(type = "number | null")]
+    pub resolved_at: Option<i64>,
+    pub resolved_by: Option<Author>,
+    /// Du plus ancien au plus récent ; un message modifié garde sa place.
+    pub comments: Vec<Comment>,
+}
+
+/// Corps de `POST /api/v1/pages/{id}/comments`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewThread {
+    /// Le bloc où attacher le fil : il doit être dans le document de la page
+    /// (`422 invalid_block` sinon). Absent ou `null` : un commentaire de la page.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub block_id: Option<String>,
+    /// Le premier message : espaces de bord retirées, de 1 à 10 000 caractères, sans caractère
+    /// de contrôle autre que le saut de ligne (`422 invalid_body` sinon).
+    pub body: String,
+}
+
+/// Corps de `POST /api/v1/pages/{id}/comments/{threadId}/replies` et de
+/// `PATCH /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewComment {
+    /// Mêmes règles que le premier message d'un fil.
+    pub body: String,
+}
+
+/// Corps de `PATCH /api/v1/pages/{id}/comments/{threadId}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolveThread {
+    /// `true` : résoudre le fil ; `false` : le rouvrir. Déjà dans cet état, rien ne change.
+    pub resolved: bool,
+}
+
 /// Code d'une erreur de l'API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -622,6 +713,14 @@ pub enum ErrorCode {
     /// L'accès général demandé sur une page (retiré, ou plus bas) est sous celui qu'une page
     /// parente donne déjà aux membres : il se change sur elle ; rien n'est écrit. Statut 409.
     InheritedAccess,
+    /// Texte d'un message vide, de plus de 10 000 caractères une fois les espaces de bord
+    /// retirées, ou qui porte un caractère de contrôle autre que le saut de ligne. Statut 422.
+    InvalidBody,
+    /// `blockId` ne nomme aucun bloc du document de la page. Statut 422.
+    InvalidBlock,
+    /// Emoji d'une réaction de plus de 16 octets, ou qui porte une espace ou un caractère de
+    /// contrôle. Statut 422.
+    InvalidEmoji,
 }
 
 /// Corps de toute réponse d'erreur.
@@ -670,7 +769,9 @@ pub fn bindings() -> Vec<(String, String)> {
     let mut files = vec![
         file::<Accepted>(&cfg),
         file::<AccessEntry>(&cfg),
+        file::<Author>(&cfg),
         file::<ChangePassword>(&cfg),
+        file::<Comment>(&cfg),
         file::<CreatePage>(&cfg),
         file::<CreateSpace>(&cfg),
         file::<ErrorBody>(&cfg),
@@ -686,9 +787,13 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<LogIn>(&cfg),
         file::<Me>(&cfg),
         file::<Member>(&cfg),
+        file::<NewComment>(&cfg),
+        file::<NewThread>(&cfg),
         file::<PageAccess>(&cfg),
         file::<PageNode>(&cfg),
         file::<PendingInvitation>(&cfg),
+        file::<Reaction>(&cfg),
+        file::<ResolveThread>(&cfg),
         file::<Role>(&cfg),
         file::<RootSection>(&cfg),
         file::<Section>(&cfg),
@@ -697,6 +802,7 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<SignUp>(&cfg),
         file::<SignupMode>(&cfg),
         file::<SpaceInfo>(&cfg),
+        file::<Thread>(&cfg),
         file::<Tree>(&cfg),
         file::<UpdateMember>(&cfg),
         file::<UpdatePage>(&cfg),

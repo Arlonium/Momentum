@@ -11,9 +11,9 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::{
-    Account, Browser, Logs, Reply, Team, TestApp, assert_french, exec_sql, json_request, outcome,
-    overtaken, page_routes, query_i64, reprises, sync_url, synced_as, text, trash_list, tree_nodes,
-    uuid,
+    Account, Browser, Logs, Reply, Team, TestApp, assert_french, comment_routes, exec_sql,
+    json_request, outcome, overtaken, page_routes, query_i64, reprises, sync_url, synced_as, text,
+    trash_list, tree_nodes, uuid,
 };
 use mementum_acl::{Level, Role, Subject};
 use mementum_crdt::PageDoc;
@@ -483,6 +483,42 @@ async fn foreign_page_is_indistinguishable_from_missing() {
             assert_eq!(&outcome(&reply), missing, "{name}, par une invitée");
         }
     }
+    // Les commentaires d'une page qu'on ne voit pas, nommés par leurs vrais identifiants (un
+    // fil et son message, sur la page même) : la réponse d'une page inconnue, sur toutes leurs
+    // routes. Rien ne dit que le fil existe.
+    let mut threads = Vec::new();
+    for page in [foreign, binned, private] {
+        let thread = team
+            .store
+            .create_thread(page, None, team.tom.id, "Fil caché")
+            .await
+            .unwrap();
+        threads.push((page, thread));
+    }
+    for (page, thread) in &threads {
+        let (thread_id, message) = (thread.id.to_string(), thread.comments[0].id.to_string());
+        let missing = {
+            let mut replies = Vec::new();
+            for (name, request) in comment_routes(&unknown, &thread_id, &message) {
+                let reply = zoe.browser.send(request).await;
+                let body = reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+                assert_eq!(body["message"], "page introuvable", "{name}");
+                replies.push(outcome(&reply));
+            }
+            replies
+        };
+        let mut askers = vec![("Zoé", &zoe.browser)];
+        if *page == foreign {
+            askers.push(("une invitée", gina));
+        }
+        for (who, browser) in askers {
+            let routes = comment_routes(&page.to_string(), &thread_id, &message);
+            for ((name, request), missing) in routes.into_iter().zip(&missing) {
+                let reply = browser.send(request).await;
+                assert_eq!(&outcome(&reply), missing, "{name}, fil caché, par {who}");
+            }
+        }
+    }
 
     // L'id dans le corps : le parent d'une page neuve, le nouveau parent d'une page, le frère
     // après lequel se placer. `(nom, code attendu, requête)`.
@@ -571,6 +607,12 @@ async fn foreign_page_is_indistinguishable_from_missing() {
         (commune.title.as_str(), commune.trashed_at),
         ("Commune", None)
     );
+    for (page, thread) in &threads {
+        assert_eq!(
+            team.store.comment_threads(*page).await.unwrap(),
+            std::slice::from_ref(thread)
+        );
+    }
 }
 
 /// L'arbre d'un espace ne montre à chacun que ce qu'il peut lire, hors corbeille, avec son

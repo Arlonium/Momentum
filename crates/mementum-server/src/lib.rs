@@ -1,5 +1,5 @@
 //! Serveur HTTP de Mementum : comptes et sessions, API REST des pages, MMD,
-//! WebSocket de synchronisation et canal de l'espace.
+//! commentaires, WebSocket de synchronisation et canal de l'espace.
 //!
 //! | Route | Session | Réponse |
 //! |---|---|---|
@@ -35,6 +35,13 @@
 //! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` (un invité aussi, R86) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` |
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
+//! | `GET /api/v1/pages/{id}/comments` | `read` (à la corbeille aussi) | `Thread[]` : les fils de la page, résolus compris, du plus ancien au plus récent ; chaque message avec son auteur (identifiant et nom, jamais l'adresse) et ses réactions (Ruling R134) |
+//! | `POST /api/v1/pages/{id}/comments` | `comment` | `201`, `Thread` : un fil neuf et son premier message ; `422 invalid_body` ; `422 invalid_block` si `blockId` ne nomme aucun bloc du document vivant de la page, droits revérifiés une fois la page chargée (Ruling R89) ; sans `blockId`, la page n'est pas chargée |
+//! | `POST /api/v1/pages/{id}/comments/{threadId}/replies` | `comment` | `201`, `Comment` ; `422 invalid_body` |
+//! | `PATCH /api/v1/pages/{id}/comments/{threadId}` | l'avoir ouvert avec `comment`, ou `edit` | `Thread` : résolu (`{"resolved": true}`) ou rouvert ; déjà dans cet état, rien ne change |
+//! | `PATCH /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | `comment`, et en être l'auteur | `Comment` ; `422 invalid_body` |
+//! | `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | en être l'auteur avec `comment`, ou `full` | `204` : le message part avec ses réactions, le fil avec son dernier message |
+//! | `PUT`, `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}/reactions/{emoji}` | `comment` | `Comment` : la réaction de la personne posée ou retirée (on ne retire que la sienne ; déjà dans cet état, rien ne change) ; `422 invalid_emoji` |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
 //! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
@@ -44,7 +51,8 @@
 //! `invalid_request`), un corps de plus de 2 Mio `413 payload_too_large`, une
 //! route inconnue `404 not_found`, une méthode inconnue `405
 //! method_not_allowed`. Une page dont l'acteur ne répond plus reçoit `503
-//! unavailable`, sur `GET` et `PUT …/mmd` (Ruling R26). La base SQLite est le
+//! unavailable`, sur `GET` et `PUT …/mmd` (Ruling R26), et sur `POST …/comments`
+//! avec un `blockId`. La base SQLite est le
 //! fichier [`config::DB_FILE`] du dossier des données.
 //!
 //! **Droits** (`access.rs`, le seul chemin par lequel les routes les calculent ;
@@ -71,6 +79,16 @@
 //! suppression, changement de parent hors racine) se décident sur les droits
 //! lus juste avant, sans aller-retour réseau : une fenêtre de quelques
 //! millisecondes, acceptée.
+//!
+//! **Commentaires** (`routes/comments.rs`, Ruling R134). Des fils attachés à une page, et au
+//! plus à un bloc par son identifiant ; rien n'est écrit dans le document. Refus dans l'ordre de
+//! `access.rs` : `404` pour la page, `403` sous `comment`, puis `404` pour un fil qui n'est pas
+//! de cette page ou un message qui n'est pas de ce fil (la même réponse qu'il existe ailleurs ou
+//! nulle part), `403` de la règle de l'auteur, `409 trashed`, enfin le corps (`422`). Le store
+//! revérifie dans la transaction qui écrit que le fil est de la page, le message du fil, et
+//! l'auteur quand c'est lui qui donne le droit. Chaque écriture validée qui change quelque chose
+//! envoie la trame `{"type":"comments"}` aux connexions de synchro de la page (Ruling R136) ;
+//! elle n'avance ni `spaces.rev` ni `spaces.lsn`.
 //!
 //! **Comptes** (`auth.rs`, `routes/auth.rs`) : comptes locaux, mot de passe
 //! haché en Argon2id, session par cookie. Le premier compte créé administre
@@ -127,6 +145,7 @@ pub mod types;
 
 mod routes {
     pub(crate) mod auth;
+    pub(crate) mod comments;
     pub(crate) mod events;
     pub(crate) mod info;
     pub(crate) mod invitations;
@@ -162,7 +181,7 @@ pub use routes::pages::{MAX_TITLE_CHARS, UNTITLED};
 pub use types::{Info, Me, PageNode, SignupMode, Tree};
 
 use auth::LoginThrottle;
-use routes::{info, invitations, pages, sharing, spaces, sync};
+use routes::{comments, info, invitations, pages, sharing, spaces, sync};
 use types::ErrorCode;
 
 /// Taille maximale d'un corps de requête (celle d'axum par défaut, posée
@@ -390,6 +409,26 @@ fn router(state: AppState) -> Router {
             put(sharing::set_user).delete(sharing::remove_user),
         )
         .route("/api/v1/pages/{id}/invitations", post(sharing::invite))
+        .route(
+            "/api/v1/pages/{id}/comments",
+            get(comments::list).post(comments::open),
+        )
+        .route(
+            "/api/v1/pages/{id}/comments/{thread_id}",
+            patch(comments::resolve),
+        )
+        .route(
+            "/api/v1/pages/{id}/comments/{thread_id}/replies",
+            post(comments::reply),
+        )
+        .route(
+            "/api/v1/pages/{id}/comments/{thread_id}/messages/{comment_id}",
+            patch(comments::edit).delete(comments::delete),
+        )
+        .route(
+            "/api/v1/pages/{id}/comments/{thread_id}/messages/{comment_id}/reactions/{emoji}",
+            put(comments::react).delete(comments::unreact),
+        )
         .route("/sync/{id}", get(sync::sync))
         .route("/events/{id}", get(routes::events::events))
         .fallback(async || {

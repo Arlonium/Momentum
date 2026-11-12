@@ -8,6 +8,8 @@
 //! - [`AppState::role_at_least`] : son rôle, s'il suffit ;
 //! - [`AppState::node_access`] : une page et ce qu'elle peut en faire ([`AppState::seen_node`]
 //!   pour qui vérifie plusieurs actions, avec [`permit`]) ;
+//! - [`permit_level`] puis [`permit_own`] : pour un message ou un fil de commentaires, le niveau
+//!   seul, puis la règle de son auteur et la corbeille (Ruling R134) ;
 //! - [`AppState::rights_changed`] : à appeler après toute écriture qui change des droits, pour
 //!   fermer les connexions de synchro qui les avaient lus.
 //!
@@ -45,7 +47,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use mementum_acl::{Action, Grant, Level, NodeAccess, Role, SpaceAccess, TreeNode};
-use mementum_store::Node;
+use mementum_store::{Authorship, Node};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -78,7 +80,9 @@ pub(crate) fn require(role: Role, min: Role) -> Result<Role, ApiError> {
 }
 
 /// L'action écrit-elle dans la page ? Une page à la corbeille refuse ces actions-là ; elle se
-/// lit, se restaure et se supprime encore.
+/// lit, se restaure et se supprime encore. Commenter (ouvrir un fil, répondre, réagir, modifier
+/// ou supprimer un message, résoudre un fil) écrit : une page à la corbeille garde ses fils, qui
+/// se lisent, mais n'en reçoit plus (Ruling R134).
 fn writes(action: Action) -> bool {
     match action {
         Action::Edit
@@ -87,8 +91,9 @@ fn writes(action: Action) -> bool {
         | Action::Reorder
         | Action::Move
         | Action::Share
-        | Action::Trash => true,
-        Action::Read | Action::Comment | Action::Restore | Action::Delete => false,
+        | Action::Trash
+        | Action::Comment => true,
+        Action::Read | Action::Restore | Action::Delete => false,
     }
 }
 
@@ -124,10 +129,74 @@ pub(crate) fn permit(access: &NodeAccess, action: Action) -> Result<(), ApiError
     Ok(())
 }
 
+/// Le niveau seul de [`permit`] : `403 forbidden` s'il ne suffit pas pour `action`, sans
+/// regarder la corbeille. Pour une route qui a d'autres refus à dire entre le niveau et la
+/// corbeille (le `404` d'un fil, le `403` de son auteur) ; elle appelle ensuite [`permit`], ou
+/// [`permit_own`].
+pub(crate) fn permit_level(access: &NodeAccess, action: Action) -> Result<(), ApiError> {
+    let ignoring_trash = NodeAccess {
+        in_trash: false,
+        ..*access
+    };
+    permit(&ignoring_trash, action)
+}
+
+/// Ce qu'une personne fait d'un message ou d'un fil de commentaires qui n'est pas forcément le
+/// sien (Ruling R134).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnWork {
+    /// Modifier un message : `comment`, et en être l'auteur.
+    EditMessage,
+    /// Supprimer un message : en être l'auteur avec `comment`, ou avoir `full`.
+    DeleteMessage,
+    /// Résoudre ou rouvrir un fil : l'avoir ouvert avec `comment`, ou avoir `edit`.
+    ResolveThread,
+}
+
+/// `access` permet-il `work` à `user`, auteur du message ou du fil (`own`) ou non ? Pour une
+/// page que la personne voit, une fois `comment` vérifié ([`permit_level`]) et le message ou le
+/// fil trouvé sur la page.
+///
+/// Rend ce que le store doit revérifier dans la transaction qui écrit : `Authorship::Of(user)`
+/// quand seul le fait d'en être l'auteur le permet, `Authorship::Any` quand le niveau suffit.
+/// Sinon `403 forbidden`, qui dit à qui est le message ou le fil ; puis `409 trashed` pour une
+/// page à la corbeille, comme toute écriture de commentaire.
+pub(crate) fn permit_own(
+    access: &NodeAccess,
+    work: OwnWork,
+    own: bool,
+    user: Uuid,
+) -> Result<Authorship, ApiError> {
+    // Le niveau qui permet `work` sans en être l'auteur.
+    let by_level = match work {
+        OwnWork::EditMessage => None,
+        OwnWork::DeleteMessage => Some(Level::Full),
+        OwnWork::ResolveThread => Some(Level::Edit),
+    };
+    let authorship = if by_level.is_some_and(|level| access.level >= level) {
+        Authorship::Any
+    } else if own {
+        Authorship::Of(user)
+    } else {
+        let whose = match work {
+            OwnWork::ResolveThread => "ce fil n'est pas le tien : il faut l'avoir ouvert",
+            OwnWork::EditMessage | OwnWork::DeleteMessage => {
+                "ce message n'est pas le tien : il faut en être l'auteur"
+            }
+        };
+        return Err(ApiError::forbidden(match by_level {
+            None => "ce message n'est pas le tien : seul son auteur le modifie".to_string(),
+            Some(level) => format!("{whose}, ou avoir « {} » sur la page", level_name(level)),
+        }));
+    };
+    permit(access, Action::Comment)?;
+    Ok(authorship)
+}
+
 impl AppState {
     /// Le nœud et les accès de `user` dessus. `404` s'il ne le voit pas ; `403 forbidden` si
     /// son niveau ne permet pas `action` ; `409 trashed` si `action` écrit (Edit, Rename,
-    /// CreateChild, Reorder, Move, Share, Trash) dans une page à la corbeille.
+    /// CreateChild, Reorder, Move, Share, Trash, Comment) dans une page à la corbeille.
     pub(crate) async fn node_access(
         &self,
         user: &AuthUser,
