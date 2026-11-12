@@ -394,6 +394,10 @@ async fn silent(by: &Browser<'_>, addr: SocketAddr, space: impl std::fmt::Displa
     channel
 }
 
+/// Un ping si long qu'aucun test n'en voit : une fermeture qu'ils attendent ne peut alors venir
+/// que de l'annonce d'une écriture ou de la trame suivante.
+const NO_PING: Duration = Duration::from_secs(3600);
+
 /// La version de l'espace « Équipe », lue dans la base.
 async fn lsn(team: &Team<'_>) -> i64 {
     team.store
@@ -529,13 +533,13 @@ async fn space_events_carry_only_the_version() {
     assert_eq!(seen_by_gina().await, [shared.to_string()]);
 }
 
-/// Mona est retirée de l'espace : son canal est fermé par le serveur dès le retrait (le ping,
-/// lui, ne viendrait que dans 20 s), sans lui avoir envoyé la version qui la retire ; une
-/// écriture faite ensuite ne lui envoie rien, et elle ne peut plus l'ouvrir. Tom, resté
+/// Mona est retirée de l'espace : son canal est fermé par le serveur dès le retrait (aucun
+/// ping ne vient pendant le test, [`NO_PING`]), sans lui avoir envoyé la version qui la retire ;
+/// une écriture faite ensuite ne lui envoie rien, et elle ne peut plus l'ouvrir. Tom, resté
 /// membre, reçoit les deux.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_stop_for_a_removed_member() {
-    let t = open_app().await;
+    let t = app_pinging_every(NO_PING).await;
     let team = Team::new(&t).await;
     let addr = t.listen().await;
     let mona = opened(&team.mona.browser, addr, team.space).await;
@@ -571,13 +575,13 @@ async fn events_stop_for_a_removed_member() {
 }
 
 /// La session qui a ouvert le canal se ferme : déconnexion, changement de mot de passe (qui
-/// ferme toutes celles du compte). D'abord avec le ping par défaut (20 s) : l'écriture
+/// ferme toutes celles du compte). D'abord sans ping pendant le test ([`NO_PING`]) : l'écriture
 /// suivante ne leur envoie rien, et ferme leur canal ; Adam, lui, la reçoit. Puis avec un ping
 /// court, sans aucune écriture : le ping suivant ferme le canal, après avoir laissé passer les
 /// précédents tant que la session valait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_stop_when_the_session_ends() {
-    let t = open_app().await;
+    let t = app_pinging_every(NO_PING).await;
     let team = Team::new(&t).await;
     let addr = t.listen().await;
     let adam = opened(&team.adam.browser, addr, team.space).await;
