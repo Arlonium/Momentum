@@ -1,21 +1,26 @@
-//! Présence (awareness) : à qui appartient un `ClientID` (Ruling R101).
+//! Présence (awareness) : à qui appartient un `ClientID` (Rulings R101, R136).
 //!
 //! Un état de présence (un nom, un curseur) est annoncé sous le `ClientID` du document Yjs de
-//! son onglet. Le serveur ne le vérifie pas (un client peut annoncer le nom qu'il veut pour
-//! lui-même, Ruling R52), mais il le range sous le compte de la connexion : un `ClientID`
-//! appartient au compte de la première connexion vivante qui l'annonce, jusqu'à ce qu'elle
-//! parte. Une entrée qui vise le `ClientID` d'un autre compte est ignorée, avant d'être
-//! appliquée (les états portent une horloge : appliquée puis défaite, elle aurait déjà dépassé
-//! celle du titulaire), sans fermer la connexion : un client y-websocket honnête renvoie au
-//! serveur tous les états qu'il reçoit des autres.
+//! son onglet. Le serveur le range sous le compte de la connexion : un `ClientID` appartient au
+//! compte de la première connexion vivante qui l'annonce, et lui reste tant que l'acteur de la
+//! page vit, même quand plus aucune connexion ne le tient (Ruling R136). Une entrée qui vise le
+//! `ClientID` d'un autre compte est ignorée, avant d'être appliquée (les états portent une
+//! horloge : appliquée puis défaite, elle aurait déjà dépassé celle du titulaire), sans fermer
+//! la connexion : un client y-websocket honnête renvoie au serveur tous les états qu'il reçoit
+//! des autres. Et le nom d'un état est celui du compte de la connexion, que le serveur écrit
+//! (Ruling R136) ; les connexions de ces tests n'ont pas de nom (`ConnInfo::name`), sauf mention
+//! contraire : leur nom annoncé reste jugé et gardé, et sert à distinguer leurs états.
 //!
 //! Les messages d'un attaquant sont écrits à la main (`awareness_message`, du testkit) : le
 //! client de test, comme un navigateur, n'annonce que le sien.
 
 mod common;
 
+use common::raw::STEP_1;
 use common::*;
-use mementum_sync::{ConnInfo, SyncConfig};
+use futures::{SinkExt, StreamExt};
+use mementum_sync::{ConnInfo, MAX_REMEMBERED_CLIENTS, SyncConfig};
+use serde_json::json;
 use uuid::Uuid;
 use yrs::sync::{Message, SyncMessage};
 use yrs::updates::encoder::Encode;
@@ -203,7 +208,9 @@ async fn presence_of_another_account_cannot_be_removed() {
 /// document revient par une connexion neuve du même compte et reprend son `ClientID` ; pendant
 /// qu'une connexion du compte le tient, une autre du même compte peut l'annoncer aussi (la
 /// nouvelle arrive avant que l'ancienne soit fermée), et aucun autre compte ne le prend. Quand
-/// la dernière connexion qui le tenait part, son état est retiré et il est libre.
+/// la dernière connexion qui le tenait part, son état est retiré, et le client reste à son
+/// compte tant que l'acteur de la page vit (Ruling R136 ; ce test disait qu'il était alors
+/// libre, et récrit selon R142, il dit qu'un autre compte ne le prend toujours pas).
 #[tokio::test]
 async fn same_account_takes_its_client_id_back_after_reconnecting() {
     let f = Fixture::new(SyncConfig::default()).await;
@@ -216,12 +223,12 @@ async fn same_account_takes_its_client_id_back_after_reconnecting() {
     let tab = first.client_id();
     first.set_awareness(&named("Alice"));
     assert!(sees(&carol, tab, Some(&named("Alice"))).await);
-    // Coupure : le serveur retire son état (son horloge passe à 2).
+    // Coupure : le serveur retire son état, à son horloge (1).
     drop(first);
     assert!(sees(&carol, tab, None).await, "état gardé après le départ");
-    // Pendant la coupure, un retrait en avance sur son horloge, pour ce client que personne ne
-    // tient : ignoré. Appliqué, il laisserait l'horloge du client à 1 000, et l'état qu'Alice
-    // annonce en revenant serait ignoré de tous.
+    // Pendant la coupure, un retrait en avance sur son horloge, pour ce client qu'aucune
+    // connexion ne tient : ignoré. Appliqué, il laisserait l'horloge du client à 1 000, et
+    // l'état qu'Alice annonce en revenant serait ignoré de tous.
     mallory.send_raw(awareness_message(&[(tab, 1_000, "null")]));
     witness.after(&mallory, &[&carol]).await;
 
@@ -254,14 +261,22 @@ async fn same_account_takes_its_client_id_back_after_reconnecting() {
     witness.after(&mallory, &[&carol]).await;
     assert_eq!(state_of(&carol, tab).as_deref(), Some(again.as_str()));
 
-    // La dernière connexion qui le tenait part : son état est retiré, et il est libre.
+    // La dernière connexion qui le tenait part : son état est retiré, et le client reste au
+    // compte d'Alice. Mallory ne le prend pas plus qu'avant.
     drop(third);
     assert!(sees(&carol, tab, None).await);
     mallory.send_raw(awareness_message(&[(tab, 60, &squat)]));
-    assert!(
-        sees(&carol, tab, Some(&squat)).await,
-        "client non libéré au départ de la connexion qui le tenait"
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(
+        state_of(&carol, tab),
+        None,
+        "client pris par un autre compte après le départ de son titulaire"
     );
+    // Alice revient, et le reprend : son état suivant (horloge 5) est vu.
+    let fourth = Client::connect_synced(&f.url_for(of(alice))).await;
+    let home = named("Alice, de nouveau");
+    fourth.send_raw(awareness_message(&[(tab, 5, &home)]));
+    assert!(sees(&carol, tab, Some(&home)).await);
 }
 
 /// Un client y-websocket renvoie au serveur chaque changement de présence qu'il reçoit des
@@ -317,8 +332,8 @@ async fn echoed_states_of_others_do_not_close_the_connection() {
     let gone_id = gone.client_id();
     drop(gone);
     assert!(sees(&bob, gone_id, None).await);
-    // Quatre états annoncés, puis le retrait du serveur : horloge 5.
-    bob.send_raw(awareness_message(&[(gone_id, 5, "null")]));
+    // Quatre états annoncés, puis le retrait du serveur, à l'horloge du dernier : 4.
+    bob.send_raw(awareness_message(&[(gone_id, 4, "null")]));
     assert!(
         still_served(&bob).await,
         "fermé pour avoir renvoyé un départ"
@@ -326,7 +341,7 @@ async fn echoed_states_of_others_do_not_close_the_connection() {
     // Ce renvoi ne lui a pas donné le client : son titulaire revient et le reprend.
     let back = Client::connect_synced(&f.url_for(of(gone_account))).await;
     let state = named("De retour");
-    back.send_raw(awareness_message(&[(gone_id, 6, &state)]));
+    back.send_raw(awareness_message(&[(gone_id, 5, &state)]));
     assert!(
         sees(&bob, gone_id, Some(&state)).await,
         "le renvoi d'un départ a pris le client de celui qui est parti"
@@ -362,17 +377,17 @@ async fn connections_without_an_account_share_their_client_ids() {
 // Un client libre ne se prend que par une entrée plus récente (Ruling R112).
 //
 // Un client y-websocket renvoie au serveur chaque état qu'il reçoit, et ce renvoi met un
-// aller-retour à arriver. Si le titulaire est parti entre-temps, son client est libre, et son
-// horloge a avancé d'un cran (le retrait du serveur). Le renvoi, à l'ancienne horloge, n'est
-// pas appliqué : il ne doit pas non plus donner le client à qui le renvoie. Sinon quelqu'un
-// ferme les connexions des autres (huit clients inventés, puis il part : chacun les « prend »
-// en les renvoyant, et dépasse la limite), et quelqu'un qui revient reste invisible.
+// aller-retour à arriver. Si le titulaire est parti entre-temps, son état a été retiré, à son
+// horloge. Le renvoi, à cette horloge, n'est pas appliqué : il ne doit pas non plus donner le
+// client à qui le renvoie. Sinon quelqu'un ferme les connexions des autres (huit clients
+// inventés, puis il part : chacun les « prend » en les renvoyant, et dépasse la limite), et
+// quelqu'un qui revient reste invisible. Depuis le Ruling R136, le client reste en outre au
+// compte de son titulaire tant que l'acteur vit : ces renvois sont écartés deux fois.
 
 /// Quelqu'un annonce huit clients inventés dans un message, puis coupe sa connexion. Le renvoi
 /// de ces huit états par une connexion honnête, arrivé après le départ, ne la ferme pas, et
 /// elle ne tient toujours que son propre client : il lui reste sept places. Aux horloges
-/// ordinaires, puis au sommet : son départ porte alors l'horloge de ses clients à la
-/// dernière, sans qu'elle reboucle.
+/// ordinaires, puis juste sous la dernière, où le départ laisse l'horloge de ses clients.
 #[tokio::test]
 async fn late_echo_of_invented_clients_never_closes_an_honest_connection() {
     let f = Fixture::new(SyncConfig::default()).await;
@@ -417,7 +432,9 @@ async fn late_echo_of_invented_clients_never_closes_an_honest_connection() {
 
 /// Le même mécanisme entre clients honnêtes : Bob annonce un état, puis sa connexion tombe ;
 /// le renvoi d'Alice arrive après. Il ne prend pas le client de Bob : revenu avec le même
-/// document, Bob est vu de tous.
+/// document, Bob est vu de tous. Le renvoi à l'horloge où Alice l'avait reçu, celle du retrait,
+/// n'est pas plus récent (Ruling R112) ; celui d'une horloge plus haute l'est, mais le client
+/// reste au compte de Bob (Ruling R136).
 #[tokio::test]
 async fn late_echo_does_not_take_the_client_of_someone_who_left() {
     let f = Fixture::new(SyncConfig::default()).await;
@@ -435,8 +452,8 @@ async fn late_echo_does_not_take_the_client_of_someone_who_left() {
         assert!(sees(seen_by, tab, None).await);
     }
 
-    // Le renvoi tardif d'Alice : l'état de Bob, à l'horloge où elle l'avait reçu. Puis à
-    // l'horloge de son retrait (2) : pas plus récent non plus, il faut la dépasser.
+    // Le renvoi tardif d'Alice : l'état de Bob, à l'horloge où elle l'avait reçu, qui est aussi
+    // celle de son retrait. Puis une de plus.
     alice.send_raw(awareness_message(&[(tab, 1, &named("Bob"))]));
     alice.send_raw(awareness_message(&[(tab, 2, &named("Bob"))]));
     assert!(still_served(&alice).await);
@@ -496,8 +513,9 @@ async fn returning_tab_keeps_its_client_at_the_same_clock() {
 // Un état de présence porte une horloge par client, que yrs incrémente quand il retire l'état
 // d'un client parti (`Awareness::remove_state`), sans regarder si elle peut encore l'être. À
 // `u32::MAX`, l'addition déborde : l'acteur de la page panique dans un build de développement,
-// et toutes ses connexions se ferment. Une entrée à cette horloge est donc ignorée, et un départ
-// ne compte plus rien pour un client qui y est déjà.
+// et toutes ses connexions se ferment. Une entrée à cette horloge est donc ignorée. Depuis le
+// Ruling R136, un départ ne passe plus par `remove_state` : l'état est retiré à son horloge,
+// qui n'avance plus. Ces tests gardent la page en vie dans les deux cas.
 
 /// Un `ClientID` que personne n'a annoncé : celui qu'un message écrit à la main vise.
 const SPARE_CLIENT: u64 = 4_242;
@@ -599,12 +617,13 @@ async fn a_departure_after_the_last_clock_leaves_the_page_alive() {
     page_survives_the_departure(&carol, &writer, &block, mallory_id, "après son départ").await;
 }
 
-/// La dernière horloge s'atteint aussi par un départ : un état annoncé juste en dessous, et le
-/// retrait qu'en fait le serveur l'y porte. Le client y reste, pour de bon : qui l'annonce de
-/// nouveau ne le prend pas (son entrée n'est pas plus récente, Ruling R112), et son départ ne
-/// fait plus rien compter. Quand une telle entrée donnait encore le client, ce second départ
-/// faisait paniquer l'acteur dans un build de développement ; en release, l'horloge du client
-/// rebouclait à zéro, et tout redevenait « plus récent » qu'elle.
+/// Un état annoncé juste sous la dernière horloge, puis deux départs. Le retrait que faisait le
+/// serveur l'y portait ; quand une entrée suivante donnait encore le client, le second départ
+/// faisait paniquer l'acteur dans un build de développement, et en release l'horloge du client
+/// rebouclait à zéro, si bien que tout redevenait « plus récent » qu'elle. Depuis le Ruling
+/// R136, le retrait laisse l'horloge où elle est : elle n'atteint plus la dernière. Le client y
+/// reste, pour de bon : son compte l'annonce de nouveau à une horloge plus basse, sans effet
+/// (Ruling R112), et un autre compte ne le prend pas (il reste au premier, Ruling R136).
 #[tokio::test]
 async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
     let f = Fixture::new(SyncConfig::default()).await;
@@ -623,12 +642,12 @@ async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
     assert!(sees(&carol, SPARE_CLIENT, Some(&below)).await);
     let first_id = first.client_id();
     drop(first);
-    // Son départ retire l'état : l'horloge du client est maintenant la dernière.
+    // Son départ retire l'état, à son horloge.
     assert!(sees(&carol, SPARE_CLIENT, None).await);
     page_survives_the_departure(&carol, &writer, &block, first_id, "un").await;
 
-    // Second passage : le même client, annoncé de nouveau (sans effet : son horloge ne peut
-    // plus monter), puis un second départ.
+    // Second passage : le même client, annoncé de nouveau à une horloge plus basse (sans
+    // effet), puis un second départ.
     let second = Client::connect_synced(&f.url_for(of(account))).await;
     let second_id = second.client_id();
     second.send_raw(awareness_message(&[
@@ -641,10 +660,10 @@ async fn a_departure_just_below_the_last_clock_leaves_the_page_alive() {
     page_survives_the_departure(&carol, &writer, &block, second_id, "deux").await;
     assert_eq!(state_of(&carol, SPARE_CLIENT), None);
 
-    // L'horloge du client n'a pas rebouclé : une annonce à une horloge ordinaire, venue d'un
-    // autre compte, n'est toujours pas plus récente qu'elle, et personne ne la voit. (C'est
-    // ce que ce second départ changerait en release, sans panique, si l'horloge repartait
-    // de zéro.)
+    // L'horloge du client n'a pas rebouclé, et il est toujours au premier compte : une annonce
+    // à une horloge ordinaire, venue d'un autre compte, n'est pas gardée, et personne ne la
+    // voit. (C'est ce qu'un second départ changeait en release, sans panique, quand l'horloge
+    // repartait de zéro.)
     let mut witness = Witness::join(&f).await;
     writer.send_raw(awareness_message(&[(
         SPARE_CLIENT,
@@ -1129,4 +1148,207 @@ async fn presence_state_that_is_not_json_is_ignored() {
     // Son état suivant, en règle, passe : l'entrée ignorée n'a rien laissé.
     mallory.send_raw(awareness_message(&[(mallory_id, 1, &named("Mallory"))]));
     assert!(sees(&carol, mallory_id, Some(&named("Mallory"))).await);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Présence vérifiée (Ruling R136).
+//
+// Le nom d'un état de présence est celui du compte de la connexion, que le serveur écrit quoi
+// que le client annonce ; et un `ClientID` reste au compte qui l'a tenu tant que l'acteur de la
+// page vit : personne ne le prend pendant une coupure (R109, cas a et c).
+
+/// La connexion du compte `account`, qui s'appelle `name` : celle que la route de synchro
+/// ouvre, le nom lu avec la session.
+fn named_account(account: Uuid, name: &str) -> ConnInfo {
+    ConnInfo {
+        name: Some(name.into()),
+        ..of(account)
+    }
+}
+
+/// La conséquence connue de R119 est levée : le client écrit dans son état le nom de son compte
+/// tel quel, et un nom à caractère de contrôle (admis à l'inscription) faisait ignorer l'état.
+/// Le compte n'avait pas de présence. Le serveur y écrit désormais le nom qu'il montre, sans
+/// ces caractères : la personne est vue, chez qui est là comme chez qui arrive.
+#[tokio::test]
+async fn account_name_with_control_characters_has_a_presence() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let account = new_user(&f.db).await;
+    let mona = Client::connect_synced(&f.url_for(named_account(account, "Mo\u{7}na\n"))).await;
+    let mona_id = mona.client_id();
+    // Ce que le client écrit : le nom du compte tel quel, sa couleur, son curseur.
+    let written = json!({ "user": { "name": "Mo\u{7}na\n", "color": "#B4462B" }, "cursor": null });
+    mona.set_awareness(&written.to_string());
+    let shown = json!({ "user": { "name": "Mona", "color": "#B4462B" }, "cursor": null });
+    assert!(
+        carol
+            .wait_until(WAIT, |c| value_of(c, mona_id).as_ref() == Some(&shown))
+            .await,
+        "pas de présence pour un nom de compte à caractère de contrôle : {:?}",
+        state_of(&carol, mona_id)
+    );
+    let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    assert!(
+        newcomer
+            .wait_until(WAIT, |c| value_of(c, mona_id).as_ref() == Some(&shown))
+            .await
+    );
+}
+
+/// Ruling R136, cas (a) et (c) de R109. Alice part : son client lui reste. Mallory, qui écrit
+/// dans la page, l'annonce à une horloge plus haute que tout ce qu'Alice a annoncé : ignoré, et
+/// rien n'est vu. Alice revient avec le même document, et son état suivant est gardé et relayé
+/// pendant que Mallory est là (a). Alice repart ; Mallory avance l'horloge du client, puis part
+/// à son tour : Alice revient, et elle est vue (c), chez qui est là comme chez qui arrive.
+#[tokio::test]
+async fn client_id_stays_with_its_account_while_the_actor_lives() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let alice = new_user(&f.db).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut witness = Witness::join(&f).await;
+
+    let first = Client::connect_synced(&f.url_for(of(alice))).await;
+    let tab = first.client_id();
+    first.set_awareness(&named("Alice"));
+    assert!(sees(&carol, tab, Some(&named("Alice"))).await);
+    drop(first);
+    assert!(sees(&carol, tab, None).await);
+
+    // (a) Pendant la coupure, Mallory annonce le client d'Alice ; puis le retire.
+    let squat = named("Mallory, à la place d'Alice");
+    mallory.send_raw(awareness_message(&[(tab, 1_000, &squat)]));
+    mallory.send_raw(awareness_message(&[(tab, 1_001, "null")]));
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(state_of(&carol, tab), None, "le client d'Alice est pris");
+    // Alice revient, Mallory toujours là : son état suivant (horloge 2) passe.
+    let second = Client::connect_synced(&f.url_for(of(alice))).await;
+    let back = named("Alice, revenue");
+    second.send_raw(awareness_message(&[(tab, 2, &back)]));
+    for seen_by in [&carol, &mallory] {
+        assert!(
+            sees(seen_by, tab, Some(&back)).await,
+            "Alice, revenue, est invisible tant que Mallory est là"
+        );
+    }
+
+    // (c) Alice repart. Mallory annonce son client à une horloge haute, et s'en va.
+    drop(second);
+    assert!(sees(&carol, tab, None).await);
+    mallory.send_raw(awareness_message(&[(tab, 5_000, &squat)]));
+    witness.after(&mallory, &[&carol]).await;
+    assert_eq!(state_of(&carol, tab), None, "le client d'Alice est pris");
+    drop(mallory);
+    // Alice revient : son état suivant (horloge 3) passe, l'horloge de Mallory n'y est pour rien.
+    let third = Client::connect_synced(&f.url_for(of(alice))).await;
+    let again = named("Alice, encore");
+    third.send_raw(awareness_message(&[(tab, 3, &again)]));
+    assert!(
+        sees(&carol, tab, Some(&again)).await,
+        "Alice reste invisible après le départ de Mallory"
+    );
+    let newcomer = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    assert!(sees(&newcomer, tab, Some(&again)).await);
+}
+
+/// La table des titulaires survit aux départs, et elle est bornée : au plus
+/// `MAX_REMEMBERED_CLIENTS` clients retenus sans connexion vivante. Mallory la remplit seule, de
+/// clients inventés, connexion après connexion. Elle n'empêche personne d'avoir une présence, ne
+/// ferme aucune connexion, et ne fait pas oublier le client de Bob, parti avant : ce sont ses
+/// propres clients, les plus anciens, que la table oublie (d'abord ceux du compte qui en retient
+/// le plus, le plus ancien départ d'abord). Un client oublié retombe sur la règle du lot 2 : un
+/// autre compte le prend par une entrée plus récente.
+#[tokio::test]
+async fn a_full_table_of_holders_hides_and_closes_no_one() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let carol = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let bob_account = new_user(&f.db).await;
+    let mallory = new_user(&f.db).await;
+    let mut witness = Witness::join(&f).await;
+
+    // Bob passe, et part : son client lui reste.
+    let bob = Client::connect_synced(&f.url_for(of(bob_account))).await;
+    let bob_tab = bob.client_id();
+    bob.set_awareness(&named("Bob"));
+    assert!(sees(&carol, bob_tab, Some(&named("Bob"))).await);
+    drop(bob);
+    assert!(sees(&carol, bob_tab, None).await);
+
+    // Mallory : huit clients inventés par connexion, une connexion à la fois, de quoi dépasser
+    // la borne d'une connexion pleine. Chaque connexion est finie (son départ est dans la boîte
+    // de l'acteur) avant la suivante.
+    let rounds = MAX_REMEMBERED_CLIENTS / 8 + 1;
+    let ghost = named("Fantôme");
+    let mut fakes: Vec<u64> = Vec::new();
+    for round in 0..rounds {
+        let ids: Vec<u64> = (0..8).map(|i| 1_000_000 + (round * 8 + i) as u64).collect();
+        let entries: Vec<(u64, u32, &str)> =
+            ids.iter().map(|id| (*id, 1, ghost.as_str())).collect();
+        let (server_end, mut socket) = memory_socket(64);
+        let serving = tokio::spawn(
+            f.hub
+                .clone()
+                .serve_connection(f.page, of(mallory), server_end),
+        );
+        socket.send(awareness_message(&entries)).await.unwrap();
+        socket.send(STEP_1.to_vec()).await.unwrap();
+        // Servie jusqu'à l'étape 2 : ses huit clients sont à elle.
+        loop {
+            let message = tokio::time::timeout(WAIT, socket.next())
+                .await
+                .expect("une réponse du serveur")
+                .expect("connexion de Mallory fermée");
+            if message.starts_with(&[0, 1]) {
+                break;
+            }
+        }
+        drop(socket);
+        serving.await.unwrap().unwrap();
+        fakes.extend(ids);
+    }
+    assert!(fakes.len() > MAX_REMEMBERED_CLIENTS);
+
+    // Le client de Bob est toujours à lui : Mallory ne le prend pas, même plus récent.
+    let mallory_tab = Client::connect_synced(&f.url_for(of(mallory))).await;
+    mallory_tab.send_raw(awareness_message(&[(bob_tab, 1_000, &named("Pas Bob"))]));
+    witness.after(&mallory_tab, &[&carol]).await;
+    assert_eq!(
+        state_of(&carol, bob_tab),
+        None,
+        "la table pleine a fait oublier le titulaire d'un client parti"
+    );
+
+    // Personne n'est privé de présence : Dave, qui arrive, annonce son état et il est vu. Les
+    // clients que la table a oubliés sont les plus anciens de Mallory : Dave prend le tout
+    // premier par une entrée plus récente ; un plus récent reste à Mallory.
+    let dave = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    dave.set_awareness(&named("Dave"));
+    assert!(sees(&carol, dave.client_id(), Some(&named("Dave"))).await);
+    let by_dave = named("Pris par Dave");
+    let (oldest, later) = (fakes[0], fakes[16]);
+    dave.send_raw(awareness_message(&[
+        (oldest, 2, &by_dave),
+        (later, 2, &by_dave),
+    ]));
+    witness.after(&dave, &[&carol]).await;
+    assert_eq!(
+        state_of(&carol, oldest),
+        Some(by_dave.clone()),
+        "le plus ancien client de Mallory n'est pas oublié"
+    );
+    assert_eq!(
+        state_of(&carol, later),
+        None,
+        "un client récent de Mallory est oublié"
+    );
+
+    // Bob revient, et reprend son client.
+    let back = Client::connect_synced(&f.url_for(of(bob_account))).await;
+    back.send_raw(awareness_message(&[(bob_tab, 2, &named("Bob, revenu"))]));
+    assert!(sees(&carol, bob_tab, Some(&named("Bob, revenu"))).await);
+    // Aucune connexion n'a été fermée.
+    for client in [&carol, &witness.client, &mallory_tab, &dave, &back] {
+        assert!(still_served(client).await);
+    }
 }

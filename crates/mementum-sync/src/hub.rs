@@ -8,9 +8,12 @@
 //! Le hub ne lit ni session ni droits : la route qui accepte une connexion
 //! les vérifie, et lui dit dans [`ConnInfo`] ce qu'il doit en savoir : si la
 //! connexion écrit, de quel compte elle est, et de quand datent ces droits
-//! (la révision de l'espace lue avant eux). Il s'en sert pour trois choses :
+//! (la révision de l'espace lue avant eux). Il s'en sert pour quatre choses :
 //! - ignorer les mises à jour d'une connexion qui ne peut pas écrire, et
 //!   attribuer les autres à leur compte ;
+//! - nommer la connexion : la liste des présents (trame `roster`) et son état
+//!   de présence portent le nom de son compte, jamais celui qu'annonce le
+//!   client (Ruling R136) ;
 //! - fermer les connexions quand la route le demande : toutes celles d'une
 //!   page dont les droits ont changé ([`Hub::kick`]), toutes celles d'un
 //!   compte dont une session se ferme ([`Hub::kick_user`]), et l'acteur

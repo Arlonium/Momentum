@@ -34,10 +34,12 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender}
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 use yrs::ClientID;
+use yrs::sync::awareness::AwarenessUpdateEntry;
 use yrs::sync::{Awareness, AwarenessUpdate};
 use yrs::updates::encoder::Encode;
 
 use crate::hub::Hub;
+use crate::presence::{Holders, Holding};
 use crate::protocol::{self, ClientMessage, EMPTY_UPDATE, RosterLine};
 use crate::{PageEvent, SyncConfig, SyncError, presence};
 
@@ -56,11 +58,14 @@ const AWARENESS_REMOVED: &str = "null";
 
 /// La dernière horloge qu'un état d'awareness peut porter (Ruling R108). yrs
 /// incrémente l'horloge d'un client quand il retire son état
-/// (`Awareness::remove_state`, au départ de la connexion qui le tenait), sans
-/// regarder si elle peut encore l'être : à cette valeur, l'addition déborde.
-/// L'acteur panique dans un build de développement, et toutes les connexions
-/// de la page se ferment ; en release, l'horloge repart de zéro. Une horloge
-/// honnête, qui avance d'un cran par changement d'état, n'y arrive jamais.
+/// (`Awareness::remove_state`), sans regarder si elle peut encore l'être : à
+/// cette valeur, l'addition déborde. L'acteur paniquait dans un build de
+/// développement, et toutes les connexions de la page se fermaient ; en
+/// release, l'horloge repartait de zéro. Depuis le Ruling R136, l'acteur
+/// n'appelle plus `remove_state` (un départ retire l'état à son horloge,
+/// [`Actor::leave`]) : rien n'incrémente plus une horloge. Une entrée à cette
+/// valeur reste ignorée, comme filet. Une horloge honnête, qui avance d'un cran
+/// par changement d'état, n'y arrive jamais.
 const LAST_AWARENESS_CLOCK: u32 = u32::MAX;
 
 /// Mises à jour qu'une connexion peut retenir en attendant que le trou
@@ -457,8 +462,9 @@ struct Conn {
     /// traités. Posé par [`Conn::close`].
     closing: bool,
     /// Les clients d'awareness que cette connexion tient (Ruling R101) : ceux dont elle a
-    /// annoncé un état. Ils sont à son compte tant qu'elle est inscrite, et libérés quand elle
-    /// part ([`Actor::leave`]).
+    /// annoncé un état gardé. Ils sont à son compte, et le restent quand elle part
+    /// ([`Actor::leave`], Ruling R136) ; la table de l'acteur ([`presence::Holders`]) en tient
+    /// le compte.
     clients: HashSet<ClientID>,
     /// Ses mises à jour qui laisseraient un trou d'horloge, dans l'ordre où elle les a
     /// envoyées (Ruling R131). Elles partent avec elle, et quand elle se ferme.
@@ -512,49 +518,49 @@ enum Presence {
     Held,
 }
 
-/// Ruling R101 : à qui appartient un `ClientID` d'awareness. Un client appartient au compte de
-/// la première connexion inscrite qui en annonce un état, jusqu'à ce qu'elle parte ; les autres
-/// connexions du même compte peuvent l'annoncer aussi (un onglet qui revient avant que son
-/// ancienne connexion soit fermée), et le tiennent alors avec elle.
+/// Rulings R101 et R136 : à qui appartient un `ClientID` d'awareness. Un client appartient au
+/// compte de la première connexion inscrite qui en annonce un état gardé ; les autres connexions
+/// du même compte peuvent l'annoncer aussi (un onglet qui revient avant que son ancienne
+/// connexion soit fermée), et le tiennent alors avec elle. Quand la dernière part, il reste à
+/// son compte, sans connexion vivante, tant que l'acteur vit (`holding`, de
+/// [`presence::Holders`], qui le dit).
 ///
 /// `removal` : l'entrée retire l'état (`null`). `newer` : son horloge est strictement
 /// au-dessus de celle que le serveur connaît pour ce client (ou il n'en connaît aucune) :
 /// c'est une entrée que l'awareness applique. Pour une connexion du compte `account` :
-/// - un client tenu par une connexion d'un **autre** compte : ignorée. Un client y-websocket
-///   honnête renvoie au serveur tous les états qu'il reçoit des autres, et les retraits qu'il
-///   déduit de leur silence : rien de cela ne doit toucher l'état de leur titulaire ;
-/// - le retrait d'un client que personne ne tient : ignoré aussi. Il n'y a pas d'état à
-///   retirer (un état gardé a toujours une connexion qui le tient) ; il ne ferait qu'avancer
-///   l'horloge du client, et l'état que son titulaire annoncerait ensuite serait ignoré de
-///   tous. Et il ne donne pas le client à qui l'envoie : renvoyer le départ de quelqu'un
-///   l'empêcherait de revenir ;
-/// - un état pour un client que personne ne tient, qui n'est pas plus récent que ce que le
-///   serveur en sait : ignoré de même (Ruling R112). C'est le renvoi d'un état arrivé après
-///   le départ de son titulaire, dont le retrait a fait avancer l'horloge. Il ne serait pas
-///   appliqué ; il ne doit pas non plus donner le client à qui le renvoie, qui dépasserait
-///   ainsi la limite de [`MAX_AWARENESS_CLIENTS`] pour des clients qui ne sont pas les siens,
-///   et rendrait invisible le titulaire à son retour. Un client libre ne se prend donc que
-///   par une entrée que l'awareness applique ;
+/// - un client d'un **autre** compte, qu'une de ses connexions le tienne ou qu'il soit retenu
+///   pour lui : ignorée. Un client y-websocket honnête renvoie au serveur tous les états qu'il
+///   reçoit des autres, et les retraits qu'il déduit de leur silence : rien de cela ne doit
+///   toucher l'état de leur titulaire. Et personne ne prend le client de quelqu'un qui est
+///   coupé, ni n'avance son horloge (Ruling R109, cas a et c) ;
+/// - le retrait d'un client qu'aucune connexion vivante ne tient : ignoré aussi. Il n'y a pas
+///   d'état à retirer (un état gardé a toujours une connexion qui le tient, et son départ l'a
+///   retiré) ; il ne ferait qu'avancer l'horloge du client, et l'état que son titulaire
+///   annoncerait ensuite serait ignoré de tous. Et il ne donne pas le client à qui l'envoie ;
+/// - un état pour un client qu'aucune connexion vivante ne tient, qui n'est pas plus récent que
+///   ce que le serveur en sait : ignoré de même (Ruling R112). C'est le renvoi d'un état arrivé
+///   après le départ de son titulaire, à l'horloge de son retrait. Il ne serait pas appliqué ;
+///   il ne doit pas non plus donner le client, à son compte qui revient comme à un autre si la
+///   table l'a oublié : ce dernier dépasserait la limite de [`MAX_AWARENESS_CLIENTS`] pour des
+///   clients qui ne sont pas les siens, et rendrait invisible le titulaire à son retour. Un
+///   client libre ou retenu ne se prend donc que par une entrée que l'awareness applique ;
 /// - sinon, l'entrée est appliquée ; si elle annonce un état, la connexion tient le client.
-///   Un client que son compte tient déjà, elle le tient avec l'autre connexion quelle que
-///   soit l'horloge : l'onglet qui revient renvoie son état à l'horloge qu'il avait.
+///   Un client que son compte tient déjà par une connexion vivante, elle le tient avec elle
+///   quelle que soit l'horloge : l'onglet qui revient renvoie son état à l'horloge qu'il avait.
 ///
 /// Sans compte (`None` : les tests du hub), les connexions ne sont pas bridées entre elles ;
 /// elles le sont face à un compte, et lui face à elles.
 fn presence_rule(
-    conns: &HashMap<ConnId, Conn>,
+    holding: Option<Holding>,
     account: Option<Uuid>,
-    client: ClientID,
     removal: bool,
     newer: bool,
 ) -> Presence {
-    let mut held = false;
-    for c in conns.values().filter(|c| c.clients.contains(&client)) {
-        if c.actor != account {
-            return Presence::Ignored;
-        }
-        held = true;
-    }
+    let held = match holding {
+        Some(holding) if holding.account != account => return Presence::Ignored,
+        Some(holding) => holding.live,
+        None => false,
+    };
     match (removal, held) {
         (true, false) => Presence::Ignored,
         (true, true) => Presence::Applied,
@@ -577,6 +583,9 @@ struct Actor {
     /// Awareness des clients, sur un document à part : elle ne touche jamais
     /// au contenu, et survit au rechargement du document.
     awareness: Awareness,
+    /// À quel compte appartient chaque client d'awareness, connexions parties
+    /// comprises (Rulings R101, R136).
+    holders: Holders,
     events: broadcast::Sender<Event>,
     conns: HashMap<ConnId, Conn>,
     next_conn: ConnId,
@@ -598,6 +607,7 @@ impl Actor {
             since_snapshot: loaded.since_snapshot,
             deletions: loaded.deletions,
             awareness,
+            holders: Holders::default(),
             events,
             conns: HashMap::new(),
             next_conn: 0,
@@ -744,42 +754,62 @@ impl Actor {
     }
 
     fn leave(&mut self, conn: ConnId) {
-        // La connexion n'est plus inscrite : les clients d'awareness qu'elle tenait sont
-        // libérés avec elle (Ruling R101), et un autre compte peut désormais les annoncer.
         let Some(gone) = self.conns.remove(&conn) else {
             return;
         };
+        self.release_clients(gone.clients);
         if gone.listed {
             self.roster_changed();
         }
-        // Leurs états sont retirés ; un client que tient aussi une autre connexion (du même
-        // compte : l'onglet est revenu entre-temps) reste annoncé.
-        //
-        // Ruling R108 : un client déjà à la dernière horloge est laissé tel quel : yrs ne peut
-        // plus la lui incrémenter. C'est un filet. Depuis le Ruling R112, une connexion ne
-        // prend un client libre que par une entrée plus récente que ce que le serveur en sait,
-        // et rien n'est plus récent que la dernière horloge : aucune ne tient donc un client
-        // qu'un départ y a porté. Et le client du document d'awareness de l'acteur lui-même,
-        // dont yrs avance l'horloge au lieu de retirer l'état, n'est tenu par personne : toute
-        // entrée qui le nomme est écartée (`awareness_update`).
-        let ids: Vec<ClientID> = gone
-            .clients
+    }
+
+    /// Les clients d'awareness d'une connexion qui part. Un client que tient encore une autre
+    /// connexion (du même compte : l'onglet est revenu entre-temps) reste annoncé. Les autres
+    /// restent à leur compte, sans connexion vivante, tant que l'acteur vit (Ruling R136), et
+    /// leur état est retiré, chez tous : aucun curseur ne reste d'une connexion partie.
+    ///
+    /// Le retrait se fait à l'horloge de l'état retiré, sans l'avancer : yrs l'applique ainsi à
+    /// un client qui n'est pas le sien, comme y-protocols chez les clients (une entrée `null` à
+    /// l'horloge connue retire un état présent). `Awareness::remove_state`, qu'appelait le lot
+    /// 2, avançait l'horloge d'un cran : l'état que l'onglet annonçait en revenant, à l'horloge
+    /// suivante de la sienne, n'était donc pas plus récent, et sa présence ne revenait qu'à son
+    /// deuxième changement d'état (piste notée avec R109). Et rien n'incrémente plus une
+    /// horloge : le débordement à `u32::MAX` de R108 n'a plus d'occasion. Le client du document
+    /// d'awareness de l'acteur lui-même, que yrs traite à part, n'est tenu par personne : toute
+    /// entrée qui le nomme est écartée (`awareness_update`).
+    ///
+    /// Ce qui est appliqué et relayé est écrit ici, une entrée par client (Ruling R123).
+    fn release_clients(&mut self, clients: HashSet<ClientID>) {
+        let freed: Vec<ClientID> = clients
             .into_iter()
-            .filter(|id| !self.conns.values().any(|c| c.clients.contains(id)))
-            .filter(|id| {
-                let clock = self.awareness.meta(*id).map(|(clock, _)| clock);
-                clock.is_none_or(|clock| clock < LAST_AWARENESS_CLOCK)
+            .filter(|client| self.holders.release(*client))
+            .collect();
+        self.holders.forget_beyond_bound();
+        let removals: HashMap<ClientID, AwarenessUpdateEntry> = freed
+            .into_iter()
+            .filter_map(|client| {
+                let mut current = self.awareness.update_with_clients([client]).ok()?;
+                let entry = current.clients.remove(&client)?;
+                // Un état déjà retiré (par son client lui-même) : rien à dire.
+                (entry.json.as_ref() != AWARENESS_REMOVED).then(|| {
+                    let removal = AwarenessUpdateEntry {
+                        clock: entry.clock,
+                        json: AWARENESS_REMOVED.into(),
+                    };
+                    (client, removal)
+                })
             })
             .collect();
-        if ids.is_empty() {
+        if removals.is_empty() {
             return;
         }
-        for id in &ids {
-            self.awareness.remove_state(*id);
+        let update = AwarenessUpdate { clients: removals };
+        let message = protocol::awareness(&update.encode_v1());
+        if let Err(error) = self.awareness.apply_update(update) {
+            tracing::warn!(node_id = %self.id.node_id, %error, "retrait d'états de présence refusé");
+            return;
         }
-        if let Ok(update) = self.awareness.update_with_clients(ids) {
-            self.broadcast(None, protocol::awareness(&update.encode_v1()));
-        }
+        self.broadcast(None, message);
     }
 
     async fn messages(
@@ -1038,12 +1068,19 @@ impl Actor {
     ///   copier ses états) : le contrôle fait ici est un filet.
     /// - Ruling R119 : un état qui n'a pas la forme connue ([`presence::known_shape`]) est
     ///   ignoré ; il ne donne pas son client.
-    /// - Rulings R101, R104, R108, R112 : le compte qui tient le client ([`presence_rule`]).
+    /// - Ruling R136 : pour une connexion qui a un compte, le nom de l'état est celui du compte,
+    ///   écrit par le serveur quoi que le client annonce ; le reste de la forme est jugé.
+    /// - Rulings R101, R104, R108, R112, R136 : le compte qui tient le client, ou l'a tenu
+    ///   ([`presence_rule`]).
     /// - Ruling R123 : ce qui reste est appliqué, puis relayé aux autres connexions, réencodé.
     ///   Jamais les octets reçus : ce que les clients lisent est ce qui a été lu, vérifié et
     ///   gardé ici, une entrée par client, chaque état réécrit par le vérificateur.
     fn awareness_update(&mut self, conn: ConnId, mut update: AwarenessUpdate) -> bool {
-        let Some((writable, account)) = self.conns.get(&conn).map(|c| (c.writable, c.actor)) else {
+        let Some((writable, account, name)) = self
+            .conns
+            .get(&conn)
+            .map(|c| (c.writable, c.actor, c.name.clone()))
+        else {
             return false;
         };
         if !writable {
@@ -1065,8 +1102,8 @@ impl Actor {
             let removal = entry.json.as_ref() == AWARENESS_REMOVED;
             if !removal {
                 // Ruling R119 : la forme d'abord. L'état gardé est celui que le vérificateur
-                // a réécrit.
-                let Some(known) = presence::known_shape(&entry.json) else {
+                // a réécrit, avec le nom du compte de la connexion (Ruling R136).
+                let Some(known) = presence::known_shape(&entry.json, name.as_deref()) else {
                     unknown_shapes += 1;
                     return false;
                 };
@@ -1076,7 +1113,7 @@ impl Actor {
             // retrait.
             let known = self.awareness.meta(*client).map(|(clock, _)| clock);
             let newer = known.is_none_or(|known| entry.clock > known);
-            match presence_rule(&self.conns, account, *client, removal, newer) {
+            match presence_rule(self.holders.get(*client), account, removal, newer) {
                 Presence::Ignored => false,
                 Presence::Applied => true,
                 Presence::Held => {
@@ -1099,12 +1136,15 @@ impl Actor {
         let Some(c) = self.conns.get_mut(&conn) else {
             return false;
         };
-        let new = taken.iter().filter(|id| !c.clients.contains(id)).count();
-        if c.clients.len() + new > MAX_AWARENESS_CLIENTS {
+        taken.retain(|id| !c.clients.contains(id));
+        if c.clients.len() + taken.len() > MAX_AWARENESS_CLIENTS {
             tracing::warn!(node_id = %self.id.node_id, conn, "trop de clients d'awareness : connexion fermée");
             return false;
         }
-        c.clients.extend(taken);
+        for client in taken {
+            c.clients.insert(client);
+            self.holders.take(client, account);
+        }
         // Ruling R123 : ce qui est relayé est ce qui a été gardé, réencodé ici.
         let kept = protocol::awareness(&update.encode_v1());
         if let Err(error) = self.awareness.apply_update(update) {

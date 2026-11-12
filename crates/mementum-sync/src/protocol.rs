@@ -120,9 +120,10 @@ pub(crate) const MAX_MESSAGES: usize = 32;
 /// (ni appliquée, ni relayée, et elle ne donne aucun client). Le reste du
 /// message est traité, et la connexion reste ouverte.
 ///
-/// Le traitement coûte « entrées × connexions de la page » : l'acteur regarde
-/// chaque entrée contre chaque connexion, pour savoir qui tient son client
-/// (Ruling R101). Or la borne en octets d'un message
+/// Le traitement coûte « entrées × connexions de la page » : ce qui est gardé
+/// part à chaque connexion (et jusqu'au Ruling R136, l'acteur regardait aussi
+/// chaque entrée contre chaque connexion, pour savoir qui tenait son client ;
+/// il le lit désormais dans une table). Or la borne en octets d'un message
 /// ([`SyncConfig::max_message_bytes`](crate::SyncConfig::max_message_bytes))
 /// laisse passer des millions d'entrées, qui occuperaient l'acteur aux dépens
 /// de toute la page. Un client honnête n'envoie que le sien, ou renvoie ceux

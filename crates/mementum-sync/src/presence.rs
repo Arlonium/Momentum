@@ -1,4 +1,5 @@
-//! La forme d'un état de présence (Ruling R119).
+//! La forme d'un état de présence (Ruling R119), son nom (Ruling R136), et à quel compte
+//! appartient chaque client d'awareness ([`Holders`], Rulings R101, R136).
 //!
 //! Le serveur ne relayait d'un état de présence que ce qu'il en vérifiait : que c'était du
 //! JSON. Or le client en fait deux usages sans garde. La couleur d'un curseur est posée telle
@@ -24,9 +25,19 @@
 //!
 //! Ce qui est rendu n'est pas le texte reçu, mais l'état lu, réécrit : ce que les clients
 //! relisent est exactement ce qui a été vérifié ici (Ruling R123).
+//!
+//! Pour une connexion qui a un compte (le nom que la route de synchro lit avec la session), le
+//! nom n'est pas jugé mais remplacé par celui du compte, tel que le serveur le montre
+//! ([`display_name`], Ruling R136) : un client n'annonce plus le nom qu'il veut (R52), et un nom
+//! de compte à caractère de contrôle ne prive plus son compte de présence (conséquence de R119).
+
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, HashMap};
 
 use mementum_crdt::FRAGMENT;
 use serde_json::{Map, Value};
+use uuid::Uuid;
+use yrs::ClientID;
 
 use crate::protocol::MAX_CLIENT;
 
@@ -71,15 +82,37 @@ pub fn display_name(name: &str) -> String {
 /// L'état de présence `json`, réécrit, s'il a la forme connue ; `None` sinon : trop gros,
 /// illisible, ou d'une autre forme. L'état `null` (le retrait d'un état) n'en est pas un :
 /// l'appelant le traite à part.
-pub(crate) fn known_shape(json: &str) -> Option<String> {
+///
+/// `account` : le nom que le serveur montre pour le compte de la connexion ([`display_name`]),
+/// s'il en a un (Ruling R136). Il remplace le nom de l'état, quel qu'il soit : absent, mal formé
+/// ou mensonger, le nom annoncé n'est pas jugé, et un état sans `user` en reçoit un. Le reste
+/// est jugé comme d'habitude (`user`, s'il est là, reste un objet aux seules clés `name` et
+/// `color`), et gardé tel que le client l'a écrit, à sa place. Un nom de compte peut faire
+/// dépasser [`MAX_PRESENCE_STATE`] à l'état réécrit, de 400 octets au plus (cent caractères de
+/// quatre octets) : la borne est celle du texte reçu. Sans compte (`None`, les tests du hub), le
+/// nom annoncé est jugé, et gardé.
+pub(crate) fn known_shape(json: &str, account: Option<&str>) -> Option<String> {
     if json.len() > MAX_PRESENCE_STATE {
         return None;
     }
-    let state: Value = serde_json::from_str(json).ok()?;
+    let mut state: Value = serde_json::from_str(json).ok()?;
     let fields = only_keys(&state, &["user", "cursor"])?;
-    let user = fields.get("user").is_none_or(is_user);
+    let user = fields
+        .get("user")
+        .is_none_or(|user| is_user(user, account.is_none()));
     let cursor = fields.get("cursor").is_none_or(is_cursor);
-    (user && cursor).then(|| state.to_string())
+    if !(user && cursor) {
+        return None;
+    }
+    if let Some(name) = account {
+        let user = state
+            .as_object_mut()?
+            .entry("user")
+            .or_insert_with(|| Value::Object(Map::new()));
+        user.as_object_mut()?
+            .insert("name".to_string(), Value::String(name.to_string()));
+    }
+    Some(state.to_string())
 }
 
 /// L'objet `value`, s'il en est un et n'a pas d'autre clé que `allowed`.
@@ -91,11 +124,13 @@ fn only_keys<'a>(value: &'a Value, allowed: &[&str]) -> Option<&'a Map<String, V
         .then_some(object)
 }
 
-fn is_user(value: &Value) -> bool {
+/// `user` : un objet aux seules clés `name` et `color`, celle-ci en règle ; `name` aussi, si
+/// `judge_name` (sans compte : sinon le nom annoncé est remplacé, et il n'y a rien à juger).
+fn is_user(value: &Value, judge_name: bool) -> bool {
     let Some(user) = only_keys(value, &["name", "color"]) else {
         return false;
     };
-    user.get("name").is_none_or(is_name) && user.get("color").is_none_or(is_colour)
+    (!judge_name || user.get("name").is_none_or(is_name)) && user.get("color").is_none_or(is_colour)
 }
 
 fn is_name(value: &Value) -> bool {
@@ -162,6 +197,167 @@ fn is_assoc(value: &Value) -> bool {
         .is_some_and(|assoc| i32::try_from(assoc).is_ok())
 }
 
+/// Clients d'awareness qu'une page vivante retient pour leur compte sans qu'aucune connexion
+/// vivante les tienne, au plus (Ruling R136, [`Holders`]).
+///
+/// Un onglet en laisse un à chaque départ (chaque ouverture de page tire un nouveau `ClientID`) :
+/// quatre mille départs avant le premier oubli, sur une page que l'acteur garde ouverte tant que
+/// quelqu'un y est. Une quarantaine d'octets chacun.
+pub const MAX_REMEMBERED_CLIENTS: usize = 4096;
+
+/// À quel compte appartient chaque client d'awareness de la page (Rulings R101, R136).
+///
+/// Un client appartient au compte de la première connexion qui en annonce un état gardé ; les
+/// autres connexions du même compte peuvent le tenir avec elle. Quand la dernière part, il reste
+/// au compte, sans connexion vivante, tant que l'acteur de la page vit : personne d'autre ne le
+/// prend pendant une coupure, et la personne qui revient avec le même document le retrouve
+/// (Ruling R109, cas a et c, fermés). Le lot 2 le libérait au départ : un autre compte qui
+/// écrivait dans la page pouvait alors le prendre, ou avancer son horloge, et rendre invisible la
+/// personne qui revenait. R109 l'acceptait parce que garder le compte d'un client aurait cassé un
+/// changement de compte dans le même onglet sans rechargement ; depuis le Ruling R115, l'onglet
+/// se recharge quand son compte change, et ce cas n'existe plus.
+///
+/// La table est bornée ([`MAX_REMEMBERED_CLIENTS`] clients retenus sans connexion vivante) : un
+/// compte qui écrit dans la page peut la remplir de clients inventés, huit par connexion, en
+/// ouvrant et fermant des connexions. Au-delà de la borne, elle oublie d'abord les clients du
+/// compte qui en retient le plus, le plus ancien départ d'abord : qui la remplit seul n'y fait
+/// oublier que les siens. Un client oublié retombe sur la règle du lot 2 (un autre compte le
+/// prend par une entrée plus récente que ce que le serveur en sait, Ruling R112). Un client
+/// tenu par une connexion vivante n'est jamais oublié, et ne compte pas dans la borne : il y en
+/// a au plus huit par connexion. Remplir la table ne prive donc personne de présence (un client
+/// neuf se prend toujours) et ne ferme aucune connexion.
+#[derive(Default)]
+pub(crate) struct Holders {
+    clients: HashMap<ClientID, Holder>,
+    /// Les clients qu'aucune connexion vivante ne tient, par compte, dans l'ordre de leur départ
+    /// (la clé : son numéro). Un compte sans client retenu n'y figure pas.
+    remembered: HashMap<Option<Uuid>, BTreeMap<u64, ClientID>>,
+    /// Combien de clients y sont, tous comptes ensemble.
+    remembered_count: usize,
+    /// Départs comptés depuis le lancement de l'acteur : l'ordre dans lequel les clients ont été
+    /// lâchés.
+    departures: u64,
+}
+
+/// Ce que la table dit d'un client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Holding {
+    /// Le compte qui le tient, ou l'a tenu ; `None` : des connexions sans compte.
+    pub(crate) account: Option<Uuid>,
+    /// Une connexion vivante le tient.
+    pub(crate) live: bool,
+}
+
+struct Holder {
+    account: Option<Uuid>,
+    /// Les connexions vivantes qui le tiennent ; 0 : retenu, depuis le départ `left`.
+    live: usize,
+    left: u64,
+}
+
+impl Holders {
+    /// À qui est `client`, s'il est à quelqu'un.
+    pub(crate) fn get(&self, client: ClientID) -> Option<Holding> {
+        self.clients.get(&client).map(|holder| Holding {
+            account: holder.account,
+            live: holder.live > 0,
+        })
+    }
+
+    /// Une connexion du compte `account` prend `client`, qu'elle ne tenait pas : il était à
+    /// personne, retenu pour ce compte, ou tenu par une autre connexion de ce compte. C'est
+    /// `presence_rule` qui en décide : jamais le client d'un autre compte.
+    pub(crate) fn take(&mut self, client: ClientID, account: Option<Uuid>) {
+        match self.clients.get_mut(&client) {
+            Some(holder) => {
+                debug_assert_eq!(holder.account, account, "client pris à un autre compte");
+                if holder.live == 0 {
+                    // Retenu jusqu'ici : il ne l'est plus.
+                    if let Some(kept) = self.remembered.get_mut(&holder.account) {
+                        kept.remove(&holder.left);
+                        if kept.is_empty() {
+                            self.remembered.remove(&holder.account);
+                        }
+                    }
+                    self.remembered_count -= 1;
+                }
+                holder.live += 1;
+            }
+            None => {
+                self.clients.insert(
+                    client,
+                    Holder {
+                        account,
+                        live: 1,
+                        left: 0,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Une connexion qui tenait `client` part. `true` : c'était la dernière ; le client reste à
+    /// son compte, retenu sans connexion vivante, et son état est à retirer. Appeler ensuite
+    /// [`Holders::forget_beyond_bound`].
+    pub(crate) fn release(&mut self, client: ClientID) -> bool {
+        let Some(holder) = self.clients.get_mut(&client).filter(|h| h.live > 0) else {
+            return false;
+        };
+        holder.live -= 1;
+        if holder.live > 0 {
+            return false;
+        }
+        holder.left = self.departures;
+        self.departures += 1;
+        self.remembered
+            .entry(holder.account)
+            .or_default()
+            .insert(holder.left, client);
+        self.remembered_count += 1;
+        true
+    }
+
+    /// Oublie des clients retenus tant qu'il y en a plus que [`MAX_REMEMBERED_CLIENTS`] :
+    /// d'abord ceux du compte qui en retient le plus, le plus ancien départ d'abord ; entre
+    /// comptes à égalité, le plus ancien départ.
+    ///
+    /// Chaque oubli parcourt les comptes qui retiennent des clients : il n'en arrive qu'au
+    /// départ d'une connexion, au plus huit (les clients qu'elle tenait), et jamais à une frappe
+    /// ni à un changement de présence.
+    pub(crate) fn forget_beyond_bound(&mut self) {
+        while self.remembered_count > MAX_REMEMBERED_CLIENTS {
+            let most = self
+                .remembered
+                .iter()
+                .filter_map(|(account, kept)| {
+                    let (oldest, _) = kept.first_key_value()?;
+                    Some(((kept.len(), Reverse(*oldest)), *account))
+                })
+                .max()
+                .map(|(_, account)| account);
+            let Some(account) = most else {
+                return;
+            };
+            let Some(kept) = self.remembered.get_mut(&account) else {
+                return;
+            };
+            if let Some((_, client)) = kept.pop_first() {
+                self.clients.remove(&client);
+                self.remembered_count -= 1;
+            }
+            if kept.is_empty() {
+                self.remembered.remove(&account);
+            }
+        }
+    }
+
+    /// Combien de clients sont retenus sans connexion vivante.
+    #[cfg(test)]
+    pub(crate) fn remembered(&self) -> usize {
+        self.remembered_count
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,7 +405,7 @@ mod tests {
             cursor(&top_ids, END),
             long_name,
         ] {
-            let kept = known_shape(&state);
+            let kept = known_shape(&state, None);
             assert!(kept.is_some(), "refusé : {state}");
             // Réécrit, il dit la même chose.
             assert_eq!(parsed(&kept.unwrap()), parsed(&state), "{state}");
@@ -345,7 +541,7 @@ mod tests {
             ),
         ];
         for (what, state) in cases {
-            assert_eq!(known_shape(&state), None, "{what} : {state}");
+            assert_eq!(known_shape(&state, None), None, "{what} : {state}");
         }
     }
 
@@ -354,15 +550,15 @@ mod tests {
     #[test]
     fn rewritten_state_is_what_was_checked() {
         let twice = r##"{"user":{"name":"Mona","color":"#B4462B"},"user":{"name":"Mona","color":"red;x"}}"##;
-        assert_eq!(known_shape(twice), None);
+        assert_eq!(known_shape(twice, None), None);
         let twice = r##"{"user":{"name":"Mona","color":"red;x"},"user":{"name":"Mona","color":"#B4462B"}}"##;
-        let kept = known_shape(twice).expect("la dernière valeur est en règle");
+        let kept = known_shape(twice, None).expect("la dernière valeur est en règle");
         assert_eq!(kept.matches("color").count(), 1, "{kept}");
         assert!(!kept.contains("red"), "{kept}");
         // Des espaces, un échappement : réécrits sans.
         let spaced = "{ \"user\" : { \"n\\u0061me\" : \"Mona\" } }";
         assert_eq!(
-            known_shape(spaced).as_deref(),
+            known_shape(spaced, None).as_deref(),
             Some(r#"{"user":{"name":"Mona"}}"#)
         );
     }
@@ -391,7 +587,7 @@ mod tests {
             let shown = display_name(account);
             assert_eq!(shown, expected, "{account:?}");
             let state = serde_json::json!({ "user": { "name": shown } }).to_string();
-            assert!(known_shape(&state).is_some(), "{account:?} : {state}");
+            assert!(known_shape(&state, None).is_some(), "{account:?} : {state}");
         }
     }
 
@@ -402,14 +598,249 @@ mod tests {
         // Un nom de 100 caractères de quatre octets tient largement.
         let widest = format!(r#"{{"user":{{"name":"{}"}}}}"#, "🚀".repeat(100));
         assert!(widest.len() < MAX_PRESENCE_STATE);
-        assert!(known_shape(&widest).is_some());
+        assert!(known_shape(&widest, None).is_some());
         // La taille est celle du texte reçu, regardée avant toute lecture.
         let padded = |total: usize| {
             let base = state(100);
             format!("{base}{}", " ".repeat(total - base.len()))
         };
         assert_eq!(MAX_PRESENCE_STATE, 2048);
-        assert!(known_shape(&padded(2048)).is_some());
-        assert_eq!(known_shape(&padded(2049)), None);
+        assert!(known_shape(&padded(2048), None).is_some());
+        assert_eq!(known_shape(&padded(2049), None), None);
+    }
+
+    /// Ruling R136 : pour une connexion qui a un compte, le nom de l'état est celui du compte.
+    /// Annoncé, absent, mal formé ou mensonger, le nom du client est remplacé, et un état sans
+    /// `user` en reçoit un ; le reste est gardé tel que le client l'a écrit, à sa place.
+    #[test]
+    fn the_account_name_replaces_the_announced_one() {
+        let account = Some("Mallory Martin");
+        let in_text = cursor(IN_TEXT, END);
+        let with_cursor = parsed(&in_text);
+        let cases: Vec<(String, String)> =
+            vec![
+            (
+                r#"{"user":{"name":"Alice"}}"#.into(),
+                r#"{"user":{"name":"Mallory Martin"}}"#.into(),
+            ),
+            ("{}".into(), r#"{"user":{"name":"Mallory Martin"}}"#.into()),
+            (
+                r#"{"cursor":null}"#.into(),
+                r#"{"cursor":null,"user":{"name":"Mallory Martin"}}"#.into(),
+            ),
+            (
+                r##"{"user":{"color":"#B4462B"}}"##.into(),
+                r##"{"user":{"color":"#B4462B","name":"Mallory Martin"}}"##.into(),
+            ),
+            (r#"{"user":{}}"#.into(), r#"{"user":{"name":"Mallory Martin"}}"#.into()),
+            // Un nom que la règle refuse ne fait plus ignorer l'état : il est remplacé.
+            (
+                r##"{"user":{"name":"","color":"#B4462B"}}"##.into(),
+                r##"{"user":{"name":"Mallory Martin","color":"#B4462B"}}"##.into(),
+            ),
+            (
+                format!(r#"{{"user":{{"name":"{}"}}}}"#, "a".repeat(101)),
+                r#"{"user":{"name":"Mallory Martin"}}"#.into(),
+            ),
+            (
+                r#"{"user":{"name":"Mo\u0000na"}}"#.into(),
+                r#"{"user":{"name":"Mallory Martin"}}"#.into(),
+            ),
+            (
+                r#"{"user":{"name":7}}"#.into(),
+                r#"{"user":{"name":"Mallory Martin"}}"#.into(),
+            ),
+            (
+                r#"{"user":{"name":null}}"#.into(),
+                r#"{"user":{"name":"Mallory Martin"}}"#.into(),
+            ),
+            // Une clé répétée : la dernière fait foi, et elle seule est réécrite.
+            (
+                r##"{"user":{"name":"A","color":"red;x"},"user":{"name":"B","color":"#B4462B"}}"##
+                    .into(),
+                r##"{"user":{"name":"Mallory Martin","color":"#B4462B"}}"##.into(),
+            ),
+        ];
+        for (announced, expected) in cases {
+            assert_eq!(
+                known_shape(&announced, account).as_deref(),
+                Some(expected.as_str()),
+                "{announced}"
+            );
+        }
+        // Le curseur reste tel que le client l'a écrit.
+        let kept = parsed(&known_shape(&in_text, account).unwrap());
+        assert_eq!(kept["cursor"], with_cursor["cursor"]);
+        assert_eq!(kept["user"]["name"], "Mallory Martin");
+        assert_eq!(kept["user"]["color"], "#B4462B");
+        // Sans compte, rien ne change : le nom annoncé est jugé, et gardé.
+        assert_eq!(
+            known_shape(r#"{"user":{"name":"Alice"}}"#, None).as_deref(),
+            Some(r#"{"user":{"name":"Alice"}}"#)
+        );
+        assert_eq!(known_shape(r#"{"user":{"name":""}}"#, None), None);
+    }
+
+    /// Avec un compte, le reste de la forme est jugé comme avant : la couleur, le curseur, et
+    /// aucune autre clé, ni dans l'état, ni dans `user`, qui reste un objet. Et la taille du
+    /// texte reçu.
+    #[test]
+    fn with_an_account_the_rest_of_the_shape_is_still_judged() {
+        let account = Some("Mallory");
+        let too_big = format!(r#"{{"user":{{"name":"{}"}}}}"#, " ".repeat(2048));
+        for state in [
+            r#"{"user":{"name":"Mona","color":"red;position:fixed"}}"#.to_string(),
+            r#"{"user":{"name":"Mona","avatar":"x"}}"#.into(),
+            r#"{"user":null}"#.into(),
+            r#"{"user":"Mona"}"#.into(),
+            r#"{"surprise":true}"#.into(),
+            r#"{"cursor":{"anchor":7,"head":7}}"#.into(),
+            format!(r#"{{"cursor":{{"anchor":{END}}}}}"#),
+            "[]".into(),
+            "{".into(),
+            too_big,
+        ] {
+            assert_eq!(known_shape(&state, account), None, "{state}");
+        }
+        // Le nom du compte peut faire dépasser 2 Kio à l'état réécrit : la borne est celle du
+        // texte reçu, et l'état reste lisible par tous.
+        let longest = display_name(&"🚀".repeat(100));
+        let padded = format!(
+            r#"{{"user":{{}}{}}}"#,
+            " ".repeat(2048 - r#"{"user":{}}"#.len())
+        );
+        assert_eq!(padded.len(), 2048);
+        let kept = known_shape(&padded, Some(&longest)).expect("un état de 2 Kio");
+        assert_eq!(parsed(&kept)["user"]["name"], longest.as_str());
+    }
+
+    /// Un client que son compte a tenu lui reste quand sa dernière connexion part : la table le
+    /// garde, sans connexion vivante. Le compte le reprend ; d'autres connexions du même compte
+    /// le tiennent avec la première.
+    #[test]
+    fn holders_keep_a_released_client_for_its_account() {
+        let (alice, bob) = (Some(Uuid::now_v7()), Some(Uuid::now_v7()));
+        let (tab, other) = (ClientID::new(7), ClientID::new(8));
+        let mut holders = Holders::default();
+        assert_eq!(holders.get(tab), None);
+        holders.take(tab, alice);
+        holders.take(other, bob);
+        let live = |account| {
+            Some(Holding {
+                account,
+                live: true,
+            })
+        };
+        let kept = |account| {
+            Some(Holding {
+                account,
+                live: false,
+            })
+        };
+        assert_eq!(holders.get(tab), live(alice));
+        // Deux connexions d'Alice le tiennent : il reste tenu tant que l'une vit.
+        holders.take(tab, alice);
+        assert!(!holders.release(tab));
+        assert_eq!(holders.get(tab), live(alice));
+        assert!(
+            holders.release(tab),
+            "la dernière connexion qui le tenait part"
+        );
+        assert_eq!(holders.get(tab), kept(alice));
+        assert_eq!(holders.remembered(), 1);
+        // Relâché de nouveau : rien, il n'était plus tenu.
+        assert!(!holders.release(tab));
+        assert_eq!(holders.remembered(), 1);
+        // Alice le reprend.
+        holders.take(tab, alice);
+        assert_eq!(holders.get(tab), live(alice));
+        assert_eq!(holders.remembered(), 0);
+        assert_eq!(holders.get(other), live(bob));
+    }
+
+    /// Au-delà de [`MAX_REMEMBERED_CLIENTS`] clients retenus sans connexion vivante, la table
+    /// oublie d'abord ceux du compte qui en a le plus, le plus ancien départ d'abord : un compte
+    /// qui la remplit n'y fait oublier que les siens. Entre comptes à égalité, le plus ancien
+    /// départ part.
+    #[test]
+    fn holders_forget_first_the_account_with_the_most() {
+        assert_eq!(MAX_REMEMBERED_CLIENTS, 4096);
+        let (alice, bob, mallory) = (
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+            Some(Uuid::now_v7()),
+        );
+        let mut holders = Holders::default();
+        let leave = |holders: &mut Holders, client: u64, account| {
+            let client = ClientID::new(client);
+            holders.take(client, account);
+            assert!(holders.release(client));
+            holders.forget_beyond_bound();
+        };
+        // Alice et Bob partent les premiers ; puis Mallory, autant qu'elle veut.
+        leave(&mut holders, 1, alice);
+        leave(&mut holders, 2, bob);
+        for client in 0..MAX_REMEMBERED_CLIENTS as u64 + 50 {
+            leave(&mut holders, 1_000 + client, mallory);
+        }
+        assert_eq!(holders.remembered(), MAX_REMEMBERED_CLIENTS);
+        // Alice et Bob sont toujours retenus ; Mallory a perdu ses 52 plus anciens.
+        for (client, account) in [(1, alice), (2, bob)] {
+            assert_eq!(
+                holders.get(ClientID::new(client)).map(|h| h.account),
+                Some(account)
+            );
+        }
+        for client in 1_000..1_052 {
+            assert_eq!(holders.get(ClientID::new(client)), None, "{client}");
+        }
+        for client in [1_052, 1_000 + MAX_REMEMBERED_CLIENTS as u64 + 49] {
+            assert!(holders.get(ClientID::new(client)).is_some(), "{client}");
+        }
+
+        // Des comptes à égalité, un client chacun : le plus ancien départ part le premier.
+        let mut holders = Holders::default();
+        for client in 0..MAX_REMEMBERED_CLIENTS as u64 + 2 {
+            leave(&mut holders, client, Some(Uuid::now_v7()));
+        }
+        assert_eq!(holders.remembered(), MAX_REMEMBERED_CLIENTS);
+        assert_eq!(holders.get(ClientID::new(0)), None);
+        assert_eq!(holders.get(ClientID::new(1)), None);
+        assert!(holders.get(ClientID::new(2)).is_some());
+    }
+
+    /// Un client tenu par une connexion vivante n'est jamais oublié, et ne compte pas dans la
+    /// borne : des connexions vivantes en tiennent autant qu'elles veulent (huit chacune).
+    #[test]
+    fn holders_never_forget_a_live_client() {
+        let mallory = Some(Uuid::now_v7());
+        let mut holders = Holders::default();
+        let count = 2 * MAX_REMEMBERED_CLIENTS as u64;
+        for client in 0..count {
+            holders.take(ClientID::new(client), mallory);
+        }
+        holders.forget_beyond_bound();
+        assert_eq!(holders.remembered(), 0);
+        // Tous partent : la borne s'applique à ceux qui restent sans connexion.
+        for client in 0..count {
+            assert!(holders.release(ClientID::new(client)));
+        }
+        holders.forget_beyond_bound();
+        assert_eq!(holders.remembered(), MAX_REMEMBERED_CLIENTS);
+        // Un client repris est de nouveau vivant : jamais oublié, quoi qu'il parte ensuite.
+        let last = ClientID::new(count - 1);
+        holders.take(last, mallory);
+        for client in count..count + 100 {
+            holders.take(ClientID::new(client), mallory);
+            holders.release(ClientID::new(client));
+            holders.forget_beyond_bound();
+        }
+        assert_eq!(
+            holders.get(last),
+            Some(Holding {
+                account: mallory,
+                live: true
+            })
+        );
     }
 }

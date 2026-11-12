@@ -387,6 +387,158 @@ async fn repeated_client_does_not_let_a_late_echo_close_honest_connections() {
     assert!(alice.presence_so_far().await.is_some());
 }
 
+/// Ruling R136 : le nom d'un état de présence est celui du compte de la connexion, que le
+/// serveur écrit quoi que le client annonce. Ce que l'observatrice lit, octet par octet, porte le
+/// nom du compte de Mallory, pas celui qu'elle a mis ; un état sans `user` en reçoit un ; un nom
+/// mal formé ne fait plus ignorer l'état, le reste de sa forme toujours. Une connexion sans
+/// compte (tests du hub) garde le nom annoncé.
+#[tokio::test]
+async fn presence_name_is_the_account_name() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let account = ConnInfo {
+        name: Some("Mallory Martin".into()),
+        ..of(new_user(&f.db).await)
+    };
+    let mallory = Client::connect_synced(&f.url_for(account)).await;
+    let mut observer = Raw::connect(&f, of(new_user(&f.db).await)).await;
+    assert_eq!(observer.presence_so_far().await, Some(vec![]));
+    let id = mallory.client_id();
+    let long = format!(r#"{{"user":{{"name":"{}"}}}}"#, "a".repeat(101));
+    let cases: [(&str, &str); 7] = [
+        (
+            r#"{"user":{"name":"Alice"}}"#,
+            r#"{"user":{"name":"Mallory Martin"}}"#,
+        ),
+        ("{}", r#"{"user":{"name":"Mallory Martin"}}"#),
+        (
+            r##"{"cursor":null,"user":{"color":"#2B59C3"}}"##,
+            r##"{"cursor":null,"user":{"color":"#2B59C3","name":"Mallory Martin"}}"##,
+        ),
+        (
+            r##"{"user":{"name":7,"color":"#2B59C3"}}"##,
+            r##"{"user":{"name":"Mallory Martin","color":"#2B59C3"}}"##,
+        ),
+        (
+            r#"{"user":{"name":""}}"#,
+            r#"{"user":{"name":"Mallory Martin"}}"#,
+        ),
+        (
+            r#"{"user":{"name":"Mal\u0007lory"}}"#,
+            r#"{"user":{"name":"Mallory Martin"}}"#,
+        ),
+        (&long, r#"{"user":{"name":"Mallory Martin"}}"#),
+    ];
+    for (clock, (announced, relayed)) in (1..).zip(cases) {
+        mallory.send_raw(presence(&[1], &[entry(id, clock, announced)]));
+        assert!(still_served(&mallory).await);
+        assert_eq!(
+            observer
+                .presence_so_far()
+                .await
+                .expect("observatrice servie"),
+            [presence(&[1], &[entry(id, clock, relayed)])],
+            "annoncé : {announced}"
+        );
+    }
+    // Le reste de la forme est jugé comme avant : rien n'est relayé.
+    for (clock, refused) in (10..).zip([
+        r#"{"user":{"name":"Mona","color":"red;position:fixed"}}"#,
+        r#"{"user":{"name":"Mona","avatar":"x"}}"#,
+        r#"{"user":null}"#,
+        r#"{"surprise":true}"#,
+    ]) {
+        mallory.send_raw(presence(&[1], &[entry(id, clock, refused)]));
+        assert!(still_served(&mallory).await);
+        assert_eq!(
+            observer.presence_so_far().await,
+            Some(vec![]),
+            "relayé : {refused}"
+        );
+    }
+    // Une connexion sans compte : son nom, s'il est en règle, est gardé.
+    let nobody = f.client().await;
+    let alice = r#"{"user":{"name":"Alice"}}"#;
+    nobody.send_raw(presence(&[1], &[entry(nobody.client_id(), 1, alice)]));
+    assert!(still_served(&nobody).await);
+    assert_eq!(
+        observer
+            .presence_so_far()
+            .await
+            .expect("observatrice servie"),
+        [presence(&[1], &[entry(nobody.client_id(), 1, alice)])]
+    );
+}
+
+/// La piste du registre du lot 2 (reportée avec R109) : le serveur retirait l'état d'une
+/// connexion qui part en avançant l'horloge de son client (`remove_state` de yrs). L'état que
+/// l'onglet annonçait en revenant, à l'horloge suivante de la sienne, n'était donc pas plus
+/// récent : ignoré, et sa présence ne revenait qu'à son deuxième changement d'état. Le retrait
+/// se fait désormais à l'horloge de l'état retiré : un client l'applique (rien ne reste d'une
+/// connexion partie, pas de curseur fantôme), et le premier état que la connexion qui revient
+/// annonce est relayé tout de suite, puis appliqué. Lu octet par octet, comme un client le lit.
+#[tokio::test]
+async fn presence_returns_at_once_after_a_reconnect() {
+    const TAB: u64 = 4_242;
+    let f = Fixture::new(SyncConfig::default()).await;
+    let alice = new_user(&f.db).await;
+    let mut observer = Raw::connect(&f, of(new_user(&f.db).await)).await;
+    let mut retained = Retained::default();
+    let first = Client::connect_synced(&f.url_for(of(alice))).await;
+    first.send_raw(presence(&[1], &[entry(TAB, 1, &named("Alice"))]));
+    assert!(still_served(&first).await);
+    for message in observer
+        .presence_so_far()
+        .await
+        .expect("observatrice servie")
+    {
+        retained.apply(&message);
+    }
+    assert_eq!(retained.state(TAB), Some(named("Alice").as_str()));
+
+    // Coupure. Le retrait arrive, à l'horloge de l'état retiré.
+    drop(first);
+    let mut relayed = Vec::new();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while relayed.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "le départ n'a pas été relayé"
+        );
+        relayed = observer
+            .presence_so_far()
+            .await
+            .expect("observatrice servie");
+    }
+    assert_eq!(
+        relayed,
+        [presence(&[1], &[entry(TAB, 1, "null")])],
+        "le retrait n'est pas à l'horloge de l'état"
+    );
+    retained.apply(&relayed[0]);
+    assert_eq!(
+        retained.state(TAB),
+        None,
+        "un état fantôme reste chez un client"
+    );
+
+    // L'onglet revient par une connexion neuve, et annonce son état suivant : horloge 2.
+    let second = Client::connect_synced(&f.url_for(of(alice))).await;
+    let back = named("Alice, revenue");
+    second.send_raw(presence(&[1], &[entry(TAB, 2, &back)]));
+    assert!(still_served(&second).await);
+    let relayed = observer
+        .presence_so_far()
+        .await
+        .expect("observatrice servie");
+    assert_eq!(
+        relayed,
+        [presence(&[1], &[entry(TAB, 2, &back)])],
+        "le premier état annoncé au retour n'est pas relayé"
+    );
+    retained.apply(&relayed[0]);
+    assert_eq!(retained.state(TAB), Some(back.as_str()));
+}
+
 /// Ruling R124 : un message WebSocket qui porte plus de 32 messages y-websocket est
 /// illisible, et ferme sa connexion ; à 32, il passe.
 #[tokio::test]

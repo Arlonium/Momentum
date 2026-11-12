@@ -55,32 +55,37 @@
 //!   la page est supprimée, [`Hub::forget`] arrête son acteur sans rien
 //!   écrire ;
 //! - **présence** (awareness, Ruling R101) : relayée à tous, lecteurs
-//!   compris. Le nom n'est pas vérifié (un client annonce celui qu'il veut
-//!   pour lui-même), mais seule une connexion qui écrit en annonce : rien de
-//!   ce qu'envoie une connexion en lecture seule n'est gardé (Ruling R118).
+//!   compris, mais seule une connexion qui écrit en annonce : rien de ce
+//!   qu'envoie une connexion en lecture seule n'est gardé (Ruling R118).
 //!   Un état n'est gardé et relayé que s'il a la forme de ceux que le client
 //!   écrit : un nom, une couleur à six chiffres, un curseur que Yjs sait lire,
 //!   2 Kio au plus (Ruling R119, module `presence`). Le client pose la
 //!   couleur dans un attribut `style` et décode le curseur sans garde : une
 //!   couleur piégée était du CSS chez tous, et un curseur mal formé figeait
 //!   leur éditeur, qui récrivait ensuite le document par-dessus les frappes
-//!   des autres. Et le serveur ne relaie jamais les octets reçus : il réencode
-//!   ce qu'il a lu et gardé, une entrée par client (Ruling R123), parce qu'il
-//!   ne lit pas ces octets comme les clients les lisent. Un `ClientID`
-//!   appartient au compte de la première connexion inscrite qui l'annonce,
-//!   jusqu'à son départ : une entrée qui
-//!   vise le client d'un autre compte est ignorée avant d'être appliquée,
-//!   sans fermer la connexion (y-websocket renvoie au serveur les états des
-//!   autres) ; le même compte le reprend d'une connexion à l'autre. Un client
-//!   que personne ne tient ne se prend que par une entrée plus récente que ce
-//!   que le serveur en sait (Ruling R112) : le renvoi tardif de l'état de
-//!   quelqu'un qui est parti est ignoré, et ne donne pas son client. Une
-//!   entrée à la dernière horloge (`u32::MAX`) est ignorée de même, et un
-//!   départ ne compte plus rien pour un client qui y est déjà (Ruling R108) :
-//!   yrs, qui incrémente l'horloge d'un client à son départ, y déborderait.
-//!   La présence d'un message qui en porte plus de 512 entrées est ignorée
-//!   en entier, sans fermer la connexion (Ruling R113) : chaque entrée est
-//!   regardée contre chaque connexion de la page, et un client honnête, qui
+//!   des autres. Le nom n'est pas celui que le client annonce : pour une
+//!   connexion qui a un compte ([`ConnInfo::name`]), le serveur y écrit le nom
+//!   du compte, par [`display_name`] (Ruling R136). Et le serveur ne relaie
+//!   jamais les octets reçus : il réencode ce qu'il a lu, réécrit et gardé,
+//!   une entrée par client (Ruling R123), parce qu'il ne lit pas ces octets
+//!   comme les clients les lisent. Un `ClientID` appartient au compte de la
+//!   première connexion inscrite qui l'annonce, et lui reste tant que
+//!   l'acteur de la page vit, même quand plus aucune connexion ne le tient
+//!   (Ruling R136, table bornée à [`MAX_REMEMBERED_CLIENTS`] clients retenus) :
+//!   une entrée qui vise le client d'un autre compte est ignorée avant d'être
+//!   appliquée, sans fermer la connexion (y-websocket renvoie au serveur les
+//!   états des autres) ; le même compte le reprend d'une connexion à l'autre.
+//!   Un client qu'aucune connexion vivante ne tient ne se prend que par une
+//!   entrée plus récente que ce que le serveur en sait (Ruling R112) : le
+//!   renvoi tardif de l'état de quelqu'un qui est parti est ignoré, et ne
+//!   donne pas son client. Au départ d'une connexion, l'état des clients
+//!   qu'elle était seule à tenir est retiré chez tous, à son horloge, sans
+//!   l'avancer : l'état suivant de l'onglet qui revient est donc plus récent,
+//!   et relayé aussitôt. Une entrée à la dernière horloge (`u32::MAX`) est
+//!   ignorée (Ruling R108), un filet depuis que rien n'incrémente plus une
+//!   horloge. La présence d'un message qui en porte plus de 512 entrées est
+//!   ignorée en entier, sans fermer la connexion (Ruling R113) : ce qui en est
+//!   gardé part à chaque connexion de la page, et un client honnête, qui
 //!   renvoie en un message les états d'une page pleine, annonce le sien dans
 //!   un message à part ;
 //! - **trame de page** (Ruling R136) : ce qui ne doit aller qu'aux personnes
@@ -137,7 +142,7 @@ use mementum_store::StoreError;
 use yrs::{Doc, OffsetKind, Options};
 
 pub use hub::{ConnInfo, Hub, PageEvent};
-pub use presence::display_name;
+pub use presence::{MAX_REMEMBERED_CLIENTS, display_name};
 pub use protocol::MESSAGE_PAGE_EVENT;
 
 /// Réglages de la synchronisation.

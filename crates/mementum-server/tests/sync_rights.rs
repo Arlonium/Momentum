@@ -1089,13 +1089,18 @@ async fn logout_with_an_expired_session_still_closes_its_connections() {
     assert_eq!(handshake(&url, None, cookie.as_deref()).await, Err(401));
 }
 
-/// Rulings R101 et R118, par la vraie route : une connexion de synchro porte le compte de sa
-/// session, et son droit d'écrire. La présence qu'annonce un compte qui écrit est à lui : Tom
-/// ne remplace ni n'efface l'état de Mona, et renvoyer au serveur ce qu'il reçoit des autres,
-/// comme le fait y-websocket, ne le ferme pas. Gina, invitée en lecture seule sur la page, voit
-/// les autres ; rien de ce qu'elle annonce n'est gardé ni relayé. (Le détail des règles est
-/// testé dans `mementum-sync`, `tests/presence.rs` ; ici, que la route donne bien au hub le
-/// compte et le droit de chaque connexion.)
+/// Rulings R101, R118 et R136, par la vraie route : une connexion de synchro porte le compte de
+/// sa session, son nom, et son droit d'écrire. La présence qu'annonce un compte qui écrit est à
+/// lui : Tom ne remplace ni n'efface l'état de Mona, et renvoyer au serveur ce qu'il reçoit des
+/// autres, comme le fait y-websocket, ne le ferme pas. Le nom d'un état est celui du compte, lu
+/// avec la session : Tom a beau s'annoncer « Mona », les autres voient « Tom ». Gina, invitée en
+/// lecture seule sur la page, voit les autres ; rien de ce qu'elle annonce n'est gardé ni
+/// relayé. (Le détail des règles est testé dans `mementum-sync`, `tests/presence.rs` et
+/// `tests/wire.rs` ; ici, que la route donne bien au hub le compte, le nom et le droit de chaque
+/// connexion.)
+///
+/// Les états se distinguent par leur couleur : le nom, que le serveur écrit, ne change plus
+/// quand le client en annonce un autre (avant R136, ce test les distinguait par le nom).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn presence_belongs_to_the_account_of_the_session() {
     let t = open_app().await;
@@ -1108,7 +1113,8 @@ async fn presence_belongs_to_the_account_of_the_session() {
     let tom = synced_as(&team.tom.browser, &url).await;
     let gina = synced_as(&team.gina.browser, &url).await;
     let (mona_id, tom_id, gina_id) = (mona.client_id(), tom.client_id(), gina.client_id());
-    let state = |name: &str| format!(r#"{{"user":{{"name":"{name}"}}}}"#);
+    let state =
+        |name: &str, colour: &str| format!(r#"{{"user":{{"name":"{name}","color":"{colour}"}}}}"#);
     let sees = async |seen_by: &Client, client: u64, state: &str| {
         let arrived =
             |c: &Client| c.awareness_states().get(&client).map(String::as_str) == Some(state);
@@ -1116,32 +1122,44 @@ async fn presence_belongs_to_the_account_of_the_session() {
     };
 
     // Ceux qui écrivent s'annoncent, et chacun les voit, la lectrice comprise.
-    mona.set_awareness(&state("Mona"));
-    tom.set_awareness(&state("Tom"));
+    mona.set_awareness(&state("Mona", "#000001"));
+    tom.set_awareness(&state("Tom", "#000002"));
     for seen_by in [&tom, &gina] {
-        assert!(sees(seen_by, mona_id, &state("Mona")).await);
+        assert!(sees(seen_by, mona_id, &state("Mona", "#000001")).await);
     }
     for seen_by in [&mona, &gina] {
-        assert!(sees(seen_by, tom_id, &state("Tom")).await);
+        assert!(sees(seen_by, tom_id, &state("Tom", "#000002")).await);
     }
 
     // Tom renvoie l'état de Mona tel qu'il l'a reçu ; puis le remplace ; puis le retire. Gina
     // fait de même, et s'annonce.
     for sender in [&tom, &gina] {
-        sender.send_raw(awareness_message(&[(mona_id, 1, &state("Mona"))]));
-        sender.send_raw(awareness_message(&[(mona_id, 500, &state("Mona ?"))]));
+        sender.send_raw(awareness_message(&[(
+            mona_id,
+            1,
+            &state("Mona", "#000001"),
+        )]));
+        sender.send_raw(awareness_message(&[(
+            mona_id,
+            500,
+            &state("Mona ?", "#0000ff"),
+        )]));
         sender.send_raw(awareness_message(&[(mona_id, 501, "null")]));
     }
-    gina.set_awareness(&state("Gina"));
+    gina.set_awareness(&state("Gina", "#000004"));
     assert!(still_served(&tom).await, "fermé pour un état renvoyé");
     assert!(still_served(&gina).await, "fermée pour un état annoncé");
     // Barrière : l'état suivant de Tom, envoyé après, arrive chez les autres après tout ce
-    // que le serveur aurait relayé d'eux avant.
-    tom.set_awareness(&state("Tom, encore"));
+    // que le serveur aurait relayé d'eux avant. Il s'y dit « Mona » : les autres lisent le nom
+    // de son compte.
+    tom.set_awareness(&state("Mona", "#000003"));
     for seen_by in [&mona, &gina] {
-        assert!(sees(seen_by, tom_id, &state("Tom, encore")).await);
+        assert!(
+            sees(seen_by, tom_id, &state("Tom", "#000003")).await,
+            "le nom annoncé par Tom est relayé"
+        );
     }
-    assert!(sees(&gina, mona_id, &state("Mona")).await);
+    assert!(sees(&gina, mona_id, &state("Mona", "#000001")).await);
     assert!(
         !mona.awareness_states().contains_key(&gina_id),
         "la présence d'une lectrice est relayée"
@@ -1149,12 +1167,35 @@ async fn presence_belongs_to_the_account_of_the_session() {
     // Le serveur n'en a rien gardé : qui arrive reçoit l'état de Mona, pas celui de Gina, et
     // l'état suivant de Mona passe partout.
     let adam = synced_as(&team.adam.browser, &url).await;
-    assert!(sees(&adam, mona_id, &state("Mona")).await);
-    assert!(sees(&adam, tom_id, &state("Tom, encore")).await);
+    assert!(sees(&adam, mona_id, &state("Mona", "#000001")).await);
+    assert!(sees(&adam, tom_id, &state("Tom", "#000003")).await);
     assert!(!adam.awareness_states().contains_key(&gina_id));
-    mona.set_awareness(&state("Mona, plus loin"));
+    // La liste des présents (trame de page, Ruling R136), par la même route : une ligne par
+    // compte, dans l'ordre des comptes, le nom du compte, la lectrice sans le droit d'écrire,
+    // et rien d'autre (pas d'adresse).
+    let roster = serde_json::json!({ "type": "roster", "users": [
+        { "id": team.adam.id.to_string(), "name": "Adam", "canWrite": true },
+        { "id": team.mona.id.to_string(), "name": "Mona", "canWrite": true },
+        { "id": team.tom.id.to_string(), "name": "Tom", "canWrite": true },
+        { "id": team.gina.id.to_string(), "name": "Gina", "canWrite": false },
+    ] });
+    let last_roster = |c: &Client| {
+        c.page_events()
+            .last()
+            .map(|json| serde_json::from_str::<serde_json::Value>(json).unwrap())
+    };
+    for seen_by in [&gina, &adam] {
+        assert!(
+            seen_by
+                .wait_until(WAIT, |c| last_roster(c).as_ref() == Some(&roster))
+                .await,
+            "{:?}",
+            seen_by.page_events()
+        );
+    }
+    mona.set_awareness(&state("Mona", "#000005"));
     for seen_by in [&tom, &gina, &adam] {
-        assert!(sees(seen_by, mona_id, &state("Mona, plus loin")).await);
+        assert!(sees(seen_by, mona_id, &state("Mona", "#000005")).await);
     }
     assert!(!gina.is_closed());
 }
