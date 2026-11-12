@@ -72,8 +72,8 @@ type Props = {
    */
   composing?: string | null;
   /**
-   * Les brouillons dont le fil ou le message a disparu (supprimé entre-temps) : montrés une fois,
-   * en haut du panneau, avec leur texte, jusqu'à ce qu'on les écarte.
+   * Les brouillons dont le fil ou le message a disparu (supprimé entre-temps) : montrés en haut du
+   * panneau, avec leur texte, jusqu'à ce qu'on les écarte.
    */
   orphans?: OrphanDraft[];
   onDismissOrphan?: (key: string) => void;
