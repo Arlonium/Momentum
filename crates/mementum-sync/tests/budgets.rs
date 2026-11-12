@@ -286,6 +286,52 @@ async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
     assert!(over.is_empty(), "{}", over.join("\n"));
 }
 
+/// Ce que coûtent, sur une page de `BLOCKS` blocs, une restauration (le temps pendant lequel
+/// l'acteur de la page est occupé : version `before_restore` coupée, puis tout le contenu
+/// réécrit) et une version coupée quand la page en garde déjà cent (la purge en efface une dans
+/// la même transaction). Mesuré et consigné au registre ; aucun budget du §5.10 ne porte sur une
+/// restauration, qui ne bloque pas une frappe ordinaire hors de cet instant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn restore_and_cut_with_a_full_history_of_10000_block_page() {
+    release_only();
+    let mmd = page_mmd();
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd(&mmd).await;
+    let state = stored_page(&f.store, f.page).await.encode_state();
+
+    // Cent versions déjà gardées, puis une de plus : la purge en retire une.
+    let mut cuts = Vec::new();
+    for seq in 0..=mementum_store::MAX_VERSIONS as i64 {
+        let start = Instant::now();
+        f.store
+            .put_version(f.page, seq, &state, &[], VersionReason::Periodic)
+            .await
+            .unwrap();
+        cuts.push(start.elapsed());
+    }
+    let full = *cuts.last().unwrap();
+    let first = cuts[0];
+    println!(
+        "MESURE version d'une page de {BLOCKS} blocs ({} octets) : la première écrite en \
+         {first:?}, la cent-unième (purge d'une version comprise) en {full:?}",
+        state.len()
+    );
+
+    // Une restauration : la page a changé depuis (réécrite), une version d'avant restauration
+    // est coupée, puis les blocs de la version sont écrits par-dessus.
+    let version = f.store.list_versions(f.page).await.unwrap()[0].id;
+    f.write_mmd(&mmd).await;
+    let mut restores = Vec::new();
+    for _ in 0..3 {
+        f.write_mmd(&mmd).await;
+        let start = Instant::now();
+        f.hub.restore_version(f.page, version, None).await.unwrap();
+        restores.push(start.elapsed());
+    }
+    println!("MESURE restauration d'une page de {BLOCKS} blocs (acteur occupé) : {restores:?}");
+}
+
 /// L'e2e `apps/web/e2e/budgets.spec.ts` attend `SERVER_IDLE_CLOSE_MS` (plus une
 /// marge) pour que le serveur ferme l'acteur des pages qu'il vient d'écrire, et
 /// les relise dans SQLite à leur ouverture. Ce test échoue, au lieu que l'e2e
