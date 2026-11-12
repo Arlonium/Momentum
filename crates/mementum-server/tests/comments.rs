@@ -129,24 +129,84 @@ const ACTS: [Act; 9] = [
     Act::Unreact,
 ];
 
-/// Ce que reçoit Mona, de niveau `level` sur la page, quand le fil et son message sont d'elle
-/// (`own`) ou de Tom : le tableau « Commentaires (R134) ». Un refus de niveau ou d'auteur
+/// Qui a ouvert le fil, et qui a écrit le message que vise la requête : Mona (qui demande) ou
+/// Tom. Le tableau R134 juge les deux à part : modifier ou supprimer un message regarde son
+/// auteur, résoudre ou rouvrir regarde qui a ouvert le fil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owners {
+    /// Mona a ouvert le fil ; le message est le sien, le premier.
+    Mine,
+    /// Tom a ouvert le fil ; le message est le sien, le premier.
+    Others,
+    /// Mona a ouvert le fil ; le message est une réponse de Tom.
+    MyThreadTheirReply,
+    /// Tom a ouvert le fil ; le message est une réponse de Mona.
+    TheirThreadMyReply,
+    /// Mona a ouvert le fil, puis supprimé son premier message : reste la réponse de Tom.
+    MyThreadOnlyTheirReply,
+    /// Tom a ouvert le fil, puis supprimé son premier message : reste la réponse de Mona.
+    TheirThreadOnlyMyReply,
+}
+
+const OWNERS: [Owners; 6] = [
+    Owners::Mine,
+    Owners::Others,
+    Owners::MyThreadTheirReply,
+    Owners::TheirThreadMyReply,
+    Owners::MyThreadOnlyTheirReply,
+    Owners::TheirThreadOnlyMyReply,
+];
+
+impl Owners {
+    /// Mona a ouvert le fil.
+    fn opened(self) -> bool {
+        matches!(
+            self,
+            Owners::Mine | Owners::MyThreadTheirReply | Owners::MyThreadOnlyTheirReply
+        )
+    }
+
+    /// Le message visé est de Mona.
+    fn wrote(self) -> bool {
+        matches!(
+            self,
+            Owners::Mine | Owners::TheirThreadMyReply | Owners::TheirThreadOnlyMyReply
+        )
+    }
+
+    /// Le premier message, celui de qui a ouvert le fil, a été supprimé.
+    fn first_deleted(self) -> bool {
+        matches!(
+            self,
+            Owners::MyThreadOnlyTheirReply | Owners::TheirThreadOnlyMyReply
+        )
+    }
+}
+
+/// Ce que reçoit Mona, de niveau `level` sur la page, selon qui a ouvert le fil et écrit le
+/// message (`owners`) : le tableau « Commentaires (R134) ». Un refus de niveau ou d'auteur
 /// passe avant la corbeille (`403`, puis `409 trashed`), et la lecture passe toujours.
-fn expected(level: Lvl, own: bool, trashed: bool, act: Act) -> (StatusCode, Option<&'static str>) {
+fn expected(
+    level: Lvl,
+    owners: Owners,
+    trashed: bool,
+    act: Act,
+) -> (StatusCode, Option<&'static str>) {
     let commenter = level >= Lvl::Comment;
+    let (opened, wrote) = (owners.opened(), owners.wrote());
     let (success, allowed) = match act {
         Act::List => return (StatusCode::OK, None),
         Act::Open | Act::Reply => (StatusCode::CREATED, commenter),
         Act::React | Act::Unreact => (StatusCode::OK, commenter),
         // Modifier son message : `comment`, et en être l'auteur.
-        Act::Edit => (StatusCode::OK, commenter && own),
+        Act::Edit => (StatusCode::OK, commenter && wrote),
         // Supprimer un message : en être l'auteur avec `comment`, ou `full`.
         Act::Delete => (
             StatusCode::NO_CONTENT,
-            commenter && (own || level >= Lvl::Full),
+            commenter && (wrote || level >= Lvl::Full),
         ),
         // Résoudre ou rouvrir un fil : l'avoir ouvert avec `comment`, ou `edit`.
-        Act::Resolve | Act::Reopen => (StatusCode::OK, commenter && (own || level >= Lvl::Edit)),
+        Act::Resolve | Act::Reopen => (StatusCode::OK, commenter && (opened || level >= Lvl::Edit)),
     };
     if !allowed {
         return (StatusCode::FORBIDDEN, Some("forbidden"));
@@ -187,28 +247,45 @@ async fn attempt(by: &Browser<'_>, act: Act, page: Uuid, thread: Uuid, message: 
     }
 }
 
-/// Chaque niveau, auteur ou non, à la corbeille ou non, sur chaque route : le statut est celui
-/// du tableau, un refus n'écrit rien, une écriture permise change ce qu'on relit. Chaque case a
-/// sa propre page, avec un fil neuf : elle ne change rien pour la suivante.
+/// Chaque niveau, chaque façon d'avoir ouvert le fil et écrit le message (`Owners`), à la
+/// corbeille ou non, sur chaque route : le statut est celui du tableau, un refus n'écrit rien,
+/// une écriture permise change ce qu'on relit. Chaque case a sa propre page, avec un fil neuf :
+/// elle ne change rien pour la suivante.
 #[tokio::test]
 async fn comment_routes_follow_the_levels() {
     let t = open_app().await;
     let team = Team::new(&t).await;
     let (mona, tom) = (&team.mona, &team.tom);
+    let store = &team.store;
     let mut cells = 0;
     for level in LEVELS {
-        for own in [true, false] {
+        for owners in OWNERS {
             for trashed in [false, true] {
                 for act in ACTS {
-                    let author = if own { mona.id } else { tom.id };
+                    let opener = if owners.opened() { mona.id } else { tom.id };
+                    let writer = if owners.wrote() { mona.id } else { tom.id };
                     let grants = [user(mona, acl_level(level)), user(tom, Level::Full)];
                     let page = team.page(None, "Commentée", &grants).await;
-                    let store = &team.store;
                     let thread = store
-                        .create_thread(page, None, author, "Ouverture")
+                        .create_thread(page, None, opener, "Ouverture")
                         .await
                         .unwrap();
-                    let message = thread.comments[0].id;
+                    let first = thread.comments[0].id;
+                    let message = if writer == opener && !owners.first_deleted() {
+                        first
+                    } else {
+                        store
+                            .reply_to_thread(page, thread.id, writer, "Réponse")
+                            .await
+                            .unwrap()
+                            .id
+                    };
+                    if owners.first_deleted() {
+                        store
+                            .delete_comment(page, thread.id, first, Authorship::Any)
+                            .await
+                            .unwrap();
+                    }
                     if act == Act::Reopen {
                         store
                             .resolve_thread(page, thread.id, tom.id, true, Authorship::Any)
@@ -228,10 +305,9 @@ async fn comment_routes_follow_the_levels() {
 
                     let reply = attempt(&mona.browser, act, page, thread.id, message).await;
                     let after = store.comment_threads(page).await.unwrap();
-                    let (status, code) = expected(level, own, trashed, act);
+                    let (status, code) = expected(level, owners, trashed, act);
                     let cell = format!(
-                        "{level:?}, {}, {}, {act:?}",
-                        if own { "son fil" } else { "le fil d'un autre" },
+                        "{level:?}, {owners:?}, {}, {act:?}",
                         if trashed {
                             "à la corbeille"
                         } else {
@@ -264,7 +340,7 @@ async fn comment_routes_follow_the_levels() {
             }
         }
     }
-    assert_eq!(cells, 4 * 2 * 2 * 9, "toutes les cases ont été jouées");
+    assert_eq!(cells, 4 * 6 * 2 * 9, "toutes les cases ont été jouées");
 }
 
 // ---------------------------------------------------------------------------------------------

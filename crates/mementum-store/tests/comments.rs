@@ -388,6 +388,81 @@ async fn author_is_checked_in_the_writing_transaction() {
     assert!(store.comment_threads(p).await.unwrap().is_empty());
 }
 
+/// L'auteur d'un message et celui qui a ouvert son fil sont jugés à part. Alice ouvre un fil,
+/// Bob y répond : elle ne modifie ni ne supprime la réponse de Bob (`Authorship::Of`), il ne
+/// résout pas le fil d'Alice, et il modifie sa réponse. Alice supprime son premier message : le
+/// fil reste le sien. Bob, seul auteur qui reste, ne le résout toujours pas ; elle le résout, et
+/// il ne le rouvre pas.
+#[tokio::test]
+async fn thread_opener_and_message_author_are_judged_apart() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let p = new_page(&f, "Page").await;
+    let thread = store
+        .create_thread(p, None, alice.id, "D'Alice")
+        .await
+        .unwrap();
+    let first = thread.comments[0].id;
+    let reply = store
+        .reply_to_thread(p, thread.id, bob.id, "De Bob")
+        .await
+        .unwrap()
+        .id;
+    let not_author = |result: Result<(), StoreError>| matches!(result, Err(StoreError::NotAuthor));
+    let resolve = async |by: Uuid, resolved: bool| {
+        store
+            .resolve_thread(p, thread.id, by, resolved, Authorship::Of(by))
+            .await
+            .map(|(thread, changed)| (thread.resolved_by.map(|a| a.id), changed))
+    };
+
+    assert!(not_author(
+        store
+            .edit_comment(p, thread.id, reply, alice.id, "Pris par Alice")
+            .await
+            .map(|_| ())
+    ));
+    assert!(not_author(
+        store
+            .delete_comment(p, thread.id, reply, Authorship::Of(alice.id))
+            .await
+            .map(|_| ())
+    ));
+    assert!(not_author(resolve(bob.id, true).await.map(|_| ())));
+    let edited = store
+        .edit_comment(p, thread.id, reply, bob.id, "De Bob, corrigé")
+        .await
+        .unwrap();
+    assert_eq!(edited.body, "De Bob, corrigé");
+
+    let thread_gone = store
+        .delete_comment(p, thread.id, first, Authorship::Of(alice.id))
+        .await
+        .unwrap();
+    assert!(!thread_gone);
+    let left = store.comment_threads(p).await.unwrap();
+    assert_eq!(left[0].opened_by.id, alice.id);
+    assert_eq!(
+        left[0]
+            .comments
+            .iter()
+            .map(|c| c.author.id)
+            .collect::<Vec<_>>(),
+        [bob.id]
+    );
+    assert!(not_author(resolve(bob.id, true).await.map(|_| ())));
+    assert_eq!(
+        resolve(alice.id, true).await.unwrap(),
+        (Some(alice.id), true)
+    );
+    assert!(not_author(resolve(bob.id, false).await.map(|_| ())));
+    let after = store.comment_threads(p).await.unwrap();
+    assert_eq!(after[0].resolved_by.as_ref().map(|a| a.id), Some(alice.id));
+    assert_eq!(after[0].comments[0].body, "De Bob, corrigé");
+}
+
 /// Supprimer un message emporte ses réactions ; supprimer le dernier emporte son fil, dans la
 /// même transaction.
 #[tokio::test]
