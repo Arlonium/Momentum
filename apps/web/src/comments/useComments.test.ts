@@ -205,7 +205,7 @@ test("threads_are_reread_when_the_connection_comes_back", async () => {
 });
 
 test("a_new_session_of_the_same_page_rereads_once_synced", async () => {
-  const { rendered } = await loaded();
+  const { session: old, rendered } = await loaded();
   // La page passe en lecture seule : une session neuve, qui a pu manquer une trame.
   const next = fakeSession({ synced: false, status: "connecting" });
   await rendered.rerender({ pageId: "p", session: next });
@@ -214,7 +214,17 @@ test("a_new_session_of_the_same_page_rereads_once_synced", async () => {
   await settle(() => next.set({ status: "connected", synced: true }));
   await advance(COMMENTS_MAX_WAIT_MS);
   expect(reads).toHaveLength(2);
-  // L'ancienne session ne dit plus rien au hook.
+  await settle(() => reads[1].resolve([thread("t1")]));
+  // L'ancienne session ne dit plus rien au hook : ni ses trames, ni ses retours.
+  await settle(() => old.frame("comments"));
+  await settle(() => old.set({ status: "disconnected" }));
+  await settle(() => old.set({ status: "connected" }));
+  await advance(COMMENTS_MAX_WAIT_MS * 2);
+  expect(reads).toHaveLength(2);
+  // La neuve, si.
+  await settle(() => next.frame("comments"));
+  await advance(COMMENTS_MAX_WAIT_MS);
+  expect(reads).toHaveLength(3);
 });
 
 test("state_is_bound_to_the_page", async () => {
