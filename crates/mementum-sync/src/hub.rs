@@ -506,8 +506,17 @@ impl Hub {
     /// manque : le contenu est au journal, et l'acteur suivant y relit la
     /// tranche en cours.
     pub async fn shutdown(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        let live = self.live_pages().await;
+        // Sous le verrou du registre : un acteur qu'un appel concurrent lance est dans la liste,
+        // ou ne démarre pas (le drapeau est relu sous ce verrou avant de lancer).
+        let live: Vec<Uuid> = {
+            let actors = self.lock();
+            self.closed.store(true, Ordering::SeqCst);
+            actors
+                .iter()
+                .filter(|(_, entry)| !entry.commands.is_closed())
+                .map(|(node_id, _)| *node_id)
+                .collect()
+        };
         self.ask_all(&live, SHUTDOWN_WAIT, |reply| Command::Shutdown { reply })
             .await;
     }
@@ -580,6 +589,11 @@ impl Hub {
             return Err(SyncError::NotFound);
         }
         let mut actors = self.lock();
+        // Relu sous le verrou du registre, que `shutdown` tient pour lever le drapeau et prendre
+        // sa liste : un acteur lancé ici y est, ou n'est pas lancé du tout.
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SyncError::Closed);
+        }
         if let Some(entry) = actors.get(&node_id)
             && !entry.commands.is_closed()
         {
