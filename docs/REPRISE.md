@@ -2,34 +2,36 @@
 
 Ce document est fait pour quelqu'un, humain ou agent IA, qui ouvre ce dépôt sans rien savoir de son histoire. Il dit où en est le projet, ce qui reste à faire, et comment s'y prendre. Il renvoie aux sources plutôt que de les recopier.
 
-Écrit le 2026-11-10, à la clôture du lot 2 de la phase 1. À mettre à jour à chaque clôture de lot.
+Écrit le 2026-11-10, à la clôture du lot 2 de la phase 1. Mis à jour le 2026-11-12, à l'ouverture du lot 3. À mettre à jour à chaque clôture de lot.
 
 ## En une minute
 
 - **Mementum** est un espace de travail open source façon Notion, auto-hébergeable, conçu pour que les agents IA lisent et écrivent les pages aussi proprement que les humains. Licence AGPL-3.0.
 - **Pile** : serveur Rust en un binaire (axum, sqlx sur SQLite, yrs), client React avec BlockNote dans `apps/web`, texte des pages en CRDT Yjs, format Markdown canonique « MMD » pour les agents.
 - **Deux personnes** : Lenny est le propriétaire du projet, ses décisions ne se remettent pas en cause sans lui (liste dans [`CLAUDE.md`](../CLAUDE.md)). Alex pilote le développement et fait la recette.
-- **Où on en est** : la phase 0 (essais) est finie. La phase 1 compte sept lots. Les lots 1 et 2 sont faits et poussés. Les lots 3 à 7 restent à faire, et le lot suivant n'est pas encore choisi.
+- **Où on en est** : la phase 0 (essais) est finie. La phase 1 compte sept lots. Les lots 1 et 2 sont faits et poussés. Le lot 3 est ouvert : Lenny l'a choisi le 2026-11-12, son plan est écrit et attend sa relecture. Les lots 4 à 7 restent à faire.
 
 ## Dans quel ordre lire
 
 1. [`CLAUDE.md`](../CLAUDE.md) : les règles du projet et tous les pièges déjà rencontrés. À lire en entier avant de toucher au code.
 2. [`README.md`](../README.md) : ce que l'application fait aujourd'hui, comment la lancer, ses limites connues, les prochaines étapes.
 3. [`docs/specs/2026-11-09-mementum-design.md`](specs/2026-11-09-mementum-design.md) : la conception. C'est la référence : en cas de conflit, elle l'emporte sur les plans et sur le code. Le §9 dit ce que chaque lot livre, le §4 décrit les droits, le §5.6 le contrôle des accès, le §6 le format MMD et les agents.
-4. Le registre du dernier lot clos : [`docs/superpowers/logs/2026-11-10-p1-lot2-ledger.md`](superpowers/logs/2026-11-10-p1-lot2-ledger.md). Ses dernières sections (« Relecture finale et vagues de correction », « Clôture du lot 2 », « Après la clôture ») donnent l'état exact, les mesures, ce qui est reporté et ce qui attend le propriétaire.
+4. Le registre du dernier lot clos : [`docs/superpowers/logs/2026-11-10-p1-lot2-ledger.md`](superpowers/logs/2026-11-10-p1-lot2-ledger.md). Ses dernières sections (« Relecture finale et vagues de correction », « Clôture du lot 2 », « Après la clôture ») donnent l'état exact, les mesures, ce qui est reporté et ce qui attend le propriétaire. Puis le plan et le registre du lot en cours : [`docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md`](superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md) et [`docs/superpowers/logs/2026-11-12-p1-lot3-ledger.md`](superpowers/logs/2026-11-12-p1-lot3-ledger.md).
 5. L'en-tête de `crates/mementum-server/src/lib.rs` : le tableau de toutes les routes, avec qui y a droit et les statuts de refus.
 
-Chaque décision prise en cours de route est un « Ruling », numéroté à la suite d'un lot à l'autre : R1 à R44 au lot 1, R45 à R127 au lot 2. On cherche « Ruling R93 » dans les registres pour savoir pourquoi le code fait ce qu'il fait.
+Chaque décision prise en cours de route est un « Ruling », numéroté à la suite d'un lot à l'autre : R1 à R44 au lot 1, R45 à R128 au lot 2, R129 et plus au lot 3. On cherche « Ruling R93 » dans les registres pour savoir pourquoi le code fait ce qu'il fait.
 
-## État au 2026-11-10
+## État au 2026-11-12
 
 | Étape | État | Où |
 |---|---|---|
 | Phase 0, essais | finie, poussée | `spike/`, `spike/RESULTS.md` |
 | Phase 1, lot 1 : socle et édition en direct | fini, poussé le 2026-11-09 | plan et registre datés du 2026-11-09 dans `docs/superpowers/` |
 | Phase 1, lot 2 : comptes, espaces, droits et corbeille | fini, poussé le 2026-11-10 (`main`, commit `7fb1b55` et suivants) | plan et registre datés du 2026-11-10 |
-| Recette du lot 2 par Alex | **à faire** | [`docs/recette/2026-11-10-p1-lot2-recette.md`](recette/2026-11-10-p1-lot2-recette.md) |
-| Phase 1, lots 3 à 7 | à faire, aucun plan écrit | voir plus bas |
+| Recette du lot 2 | aucun défaut à corriger avant le lot 3 (réponse de Lenny, 2026-11-12) | [`docs/recette/2026-11-10-p1-lot2-recette.md`](recette/2026-11-10-p1-lot2-recette.md) |
+| Deux reports du lot 2 qui touchent à l'intégrité du contenu | faits le 2026-11-12 (R129, R130), pas encore poussés | registre du lot 3, « Avant le plan » |
+| Phase 1, lot 3 : collaboration et blocs riches | **ouvert** : plan écrit, à relire par le propriétaire avant de commencer | plan et registre datés du 2026-11-12 |
+| Phase 1, lots 4 à 7 | à faire, aucun plan écrit | voir plus bas |
 | Mesures ARM de la phase 0 | repoussées avant la phase 2 | `spike/RESULTS.md` |
 
 Ce que l'application fait aujourd'hui : des comptes avec mot de passe, des espaces (plusieurs par compte), des membres et des invités, des pages en blocs rangées en arbre et en trois sections (« Espace », « Partagé », « Privé »), l'édition à plusieurs en direct avec le curseur de chacun, le partage d'une page à quatre niveaux, les invitations par lien, la lecture seule selon le droit, la corbeille, et le format MMD en lecture et en écriture par l'API.
@@ -42,14 +44,14 @@ Vérification à la clôture du lot 2, sur un clone neuf, comme la CI : 548 test
 
 Rien de ceci ne se décide à sa place.
 
-1. **La recette du lot 2**, avec la checklist (93 cases). Il rend la liste des numéros qui ne vont pas : chacun est un défaut à corriger avant d'ouvrir le lot suivant, ou une limite à écrire.
+1. **La relecture du plan du lot 3**, avant qu'on commence : [`docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md`](superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md). Ses décisions d'écriture sont au registre du lot.
 2. **Quatre règles à valider**, parce qu'elles se voient à l'usage :
    - les membres ont l'accès complet aux pages d'équipe, comme dans Notion (R48) ;
    - les inscriptions sont sur invitation par défaut (R50) ;
    - un invité en accès complet peut inviter à son tour (R86) ;
    - un simple membre peut fermer une page d'équipe aux autres, après confirmation (R122, R127).
 3. **D'autres choix déjà pris, à confirmer** : le menu du compte dans le sélecteur d'espace (R80), une page sortie à la racine garde son accès d'équipe (R94), la barre latérale relue au retour sur l'onglet et toutes les dix secondes, et non en direct (R97, R128), une session de 30 jours au plus dans un navigateur (R117), les plafonds contre la surcharge reportés au lot 7 (R121), et deux décisions du lot 1 : `PUT /mmd` refuse une propriété inconnue (R41), deux avis de sécurité ouverts sans mise à jour possible (R44).
-4. **Le choix du lot suivant.** Voir « Par où continuer ».
+4. **Pousser ou non** les commits faits depuis le 2026-11-12 : rien n'est poussé sans sa demande.
 
 Les espaces façon Notion, à la place des coffres façon Obsidian, sont confirmés par Lenny (2026-11-10).
 
@@ -69,10 +71,10 @@ Sans date, à décider avec le propriétaire : l'envoi d'e-mails (invitations, m
 
 ### Reports précis du lot 2
 
-La liste complète est au registre du lot 2, section « Reportés au lot suivant ». Les plus importants, dans l'ordre où je les traiterais :
+La liste complète est au registre du lot 2, section « Reportés au lot suivant ». Les deux premiers sont faits (2026-11-12, registre du lot 3) ; les autres sont repris par le plan du lot 3, ou restent à leur lot :
 
-1. **Le client n'a aucune garde à lui contre une présence mal formée.** Un curseur mal formé qui atteindrait un navigateur figerait son éditeur, qui effacerait ensuite les frappes des autres. Aujourd'hui seul le serveur l'empêche (R118, R119). À faire : un `renderCursor` et un filtre des états dans `apps/web/src/editor/Editor.tsx`.
-2. **Les mises à jour du document sont relayées telles que reçues.** La question qu'on a fermée pour la présence (le serveur et le navigateur ne lisent pas les octets pareil, R123) reste posée pour elles. À examiner avant d'ouvrir l'instance à des inconnus.
+1. ~~Le client n'a aucune garde à lui contre une présence mal formée.~~ **Fait (R129)** : l'éditeur ne lit des autres que les états de présence en règle (`apps/web/src/editor/presenceGuard.ts`).
+2. ~~Les mises à jour du document sont relayées telles que reçues.~~ **Fait pour la lecture des octets (R130)** : le serveur écrit et relaie ce qu'il a lu, réencodé. L'examen a trouvé un second écart, **encore ouvert (R131)** : le serveur intègre un bloc arrivé avant ses prédécesseurs, que le navigateur garde en attente ; le serveur et l'API MMD lisent alors un texte qu'aucun navigateur n'affiche. C'est une tâche du plan du lot 3.
 3. **La surcharge par un compte autorisé** (R121) : aucun plafond de connexions de synchro par compte ni par page, et la file d'une connexion qui ne lit pas peut grossir. Prévu au lot 7 ; à avancer si l'instance s'ouvre plus tôt.
 4. **La présence après une reconnexion** met jusqu'à 30 secondes à revenir pour une personne qui ne tape pas. Piste écrite au registre : retirer l'état sans avancer l'horloge, et faire annoncer un état neuf par le client à chaque connexion.
 5. **Une session supprimée en ligne de commande** (`mementum user set-password`) laisse ouvertes les pages déjà connectées (R125). D'ici là : redémarrer le serveur après la commande.
@@ -81,12 +83,13 @@ La liste complète est au registre du lot 2, section « Reportés au lot suivant
 
 ## Par où continuer
 
-Le propriétaire n'a pas choisi. Deux suites se défendent :
+Lenny a choisi le 2026-11-12 : **le lot 3, comme prévu**. Il lève les limites les plus visibles du lot 2 (barre latérale qui ne suit pas en direct, présence fragile) et apporte les commentaires et l'historique. Le lot 5 (agents, serveur MCP : Alex veut que Claude Code puisse verser du contenu dans un de ses espaces) vient ensuite, dans l'ordre de la conception.
 
-- **Le lot 3, comme prévu.** Il lève les limites les plus visibles du lot 2 (barre latérale qui ne suit pas en direct, présence fragile) et apporte les commentaires. C'est la suite naturelle si le but est un Notion agréable à plusieurs.
-- **Le lot 5 d'abord.** Alex veut que Claude Code puisse verser du contenu dans un de ses espaces, par un serveur MCP qu'il branche dans son client. C'est la suite si le but est l'usage par les agents. Il s'appuie sur les droits du lot 2 : un jeton agit au nom d'un humain, dans la limite de ses droits (conception §6.7).
+La suite, dans l'ordre :
 
-Dans les deux cas, commencer par les défauts que la recette aura trouvés, puis par les reports 1 et 2 ci-dessus, qui touchent à l'intégrité du contenu.
+1. le propriétaire relit le plan du lot 3 ;
+2. l'exécution, tâche par tâche, comme décrit ci-dessous ;
+3. à la clôture, mettre ce document à jour.
 
 ## Comment mener un lot
 
@@ -152,7 +155,8 @@ Alex fait tourner une instance sur son poste pour regarder l'application et fair
 - **Pour tester à plusieurs par Tailscale** (adresse du PC d'Alex : `100.87.123.94`), le serveur reçoit en plus l'adresse publique de la page, et un second Vite écoute sur l'adresse Tailscale :
 
   ```
-  .	argetelease\mementum.exe serve --bind 127.0.0.1:8090 --data-dir data\instance --public-url http://100.87.123.94:5127
+  .	arget
+elease\mementum.exe serve --bind 127.0.0.1:8090 --data-dir data\instance --public-url http://100.87.123.94:5127
   ```
 
   ```

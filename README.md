@@ -15,7 +15,7 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 
 ---
 
-## Où en est le projet (10 novembre 2026)
+## Où en est le projet (12 novembre 2026)
 
 | Étape | État |
 |---|---|
@@ -23,7 +23,7 @@ Il est **conçu dès le départ pour que les agents IA lisent et écrivent les p
 | Conception complète | validée : [`docs/specs/2026-11-09-mementum-design.md`](docs/specs/2026-11-09-mementum-design.md) |
 | Maquettes (3 directions, **A « Papier » retenue**) | faites : [`docs/design/`](docs/design/) |
 | Phase 0 : prototype jetable qui valide les choix techniques | faite sur PC et relue (relecture finale du 9 novembre, voir [`spike/RESULTS.md`](spike/RESULTS.md)) ; **mesures ARM reportées avant la phase 2** (bases de données) |
-| Phase 1 « Écrire ensemble » (MVP) | en cours, découpée en 7 lots. Lot 1 « Socle et édition en direct » **fait** ([plan](docs/superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md)). Lot 2 « Comptes, espaces, droits et corbeille » **livré** ([plan](docs/superpowers/plans/2026-11-10-p1-lot2-comptes-espaces-droits.md), [registre](docs/superpowers/logs/2026-11-10-p1-lot2-ledger.md), [checklist de recette](docs/recette/2026-11-10-p1-lot2-recette.md)). Lots 3 à 7 à venir |
+| Phase 1 « Écrire ensemble » (MVP) | en cours, découpée en 7 lots. Lot 1 « Socle et édition en direct » **fait** ([plan](docs/superpowers/plans/2026-11-09-p1-lot1-socle-edition.md), [registre](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md)). Lot 2 « Comptes, espaces, droits et corbeille » **livré** ([plan](docs/superpowers/plans/2026-11-10-p1-lot2-comptes-espaces-droits.md), [registre](docs/superpowers/logs/2026-11-10-p1-lot2-ledger.md), [checklist de recette](docs/recette/2026-11-10-p1-lot2-recette.md)). Lot 3 « Collaboration et blocs riches » **ouvert le 12 novembre**, en deux plans : deux reports du lot 2 qui touchaient à l'intégrité du contenu sont faits (Rulings R129 et R130), et le plan de la partie A, « Collaboration », est écrit et attend la relecture du propriétaire ([plan](docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md), [registre](docs/superpowers/logs/2026-11-12-p1-lot3-ledger.md)). Lots 4 à 7 à venir |
 
 Le lot 1 a livré le vrai code (`crates/mementum-*`, `apps/web`, `packages/protocol`, `spec/`) : un arbre de pages, l'édition à plusieurs en direct dans BlockNote et le format MMD de la phase 1. Le lot 2 a corrigé une de ses limites connues : l'arbre des pages ne ralentit plus l'ouverture d'une page (Ruling R43). Les quatre autres restent, décrites dans la conception (§9) :
 - une édition faite sur un bloc pendant qu'un autre client le déplace est perdue (Ruling R39, à traiter au lot 3) ;
@@ -99,7 +99,7 @@ docs/
   design/                   maquettes des 3 directions (A retenue)
   recette/                  checklists de recette du propriétaire, par lot
   superpowers/
-    plans/                  plans d'implémentation (phase 0, lots 1 et 2 de la phase 1)
+    plans/                  plans d'implémentation (phase 0, lots 1 à 3 de la phase 1)
     logs/                   registres d'exécution (décisions prises en cours de route)
 crates/mementum-*/          serveur Rust : schema, md, crdt, store, acl, sync, server, cli
 apps/web/                   client React + Vite + BlockNote, tests e2e Playwright
@@ -247,13 +247,14 @@ L'éditeur de démo s'ouvre avec `cargo run --release -p spike-server --bin spik
 
 Pour reprendre le projet sans contexte, humain ou agent : [`docs/REPRISE.md`](docs/REPRISE.md).
 
-1. **Recette du lot 2** par le propriétaire, avec la [checklist](docs/recette/2026-11-10-p1-lot2-recette.md). Les espaces façon Notion sont confirmés par Lenny (2026-11-10, Ruling R45). Plusieurs choix du lot attendent encore un avis : l'accès complet donné par défaut aux membres sur les pages d'espace (R48), les inscriptions sur invitation par défaut (R50), le menu du compte placé dans le sélecteur d'espace (R80), l'invité en accès complet qui peut inviter (R86), et la page sortie à la racine qui garde son accès d'équipe (R94).
-2. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11), à faire **avant la phase 2**, et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
-3. **Lots 3 à 7**, dans cet ordre : collaboration et blocs riches ; recherche ; agents (REST complet, MCP v1, jetons d'API) ; imports et export ; livraison. Ils reprennent les limites connues des lots 1 et 2 :
+1. **Relecture du plan du lot 3, partie A**, par le propriétaire, avant de commencer : [plan](docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md). Il porte la barre latérale et les présents en direct, les commentaires, l'historique, et trois reports d'intégrité : une mise à jour qui laisse un trou d'horloge (Ruling R131), les tableaux mal formés par un client (R54), l'édition faite pendant le déplacement d'un bloc (R39). La partie B, « Blocs riches et organisation », aura son plan ensuite (Ruling R132).
+2. **Recette du lot 2** : aucun défaut à corriger avant le lot 3 (réponse de Lenny, 12 novembre). [Checklist](docs/recette/2026-11-10-p1-lot2-recette.md). Les espaces façon Notion sont confirmés par Lenny (2026-11-10, Ruling R45). Plusieurs choix du lot attendent encore un avis : l'accès complet donné par défaut aux membres sur les pages d'espace (R48), les inscriptions sur invitation par défaut (R50), le menu du compte placé dans le sélecteur d'espace (R80), l'invité en accès complet qui peut inviter (R86), et la page sortie à la racine qui garde son accès d'équipe (R94).
+3. **Mesures ARM** de la phase 0 (Pi 4 ou Hetzner CAX11), à faire **avant la phase 2**, et report dans `spike/RESULTS.md`. Le budget le plus à risque est « filtre + tri < 300 ms ».
+4. **Lots 3 à 7**, dans cet ordre : collaboration et blocs riches ; recherche ; agents (REST complet, MCP v1, jetons d'API) ; imports et export ; livraison. Ils reprennent les limites connues des lots 1 et 2 :
    - lot 3 : commentaires, historique, arbre des pages et présence en direct (journal d'opérations, présence vérifiée par le serveur, ce qui lèvera R97, R128 et R109) ; déplacements de blocs sans perte d'édition (pistes (a) et (b) du Ruling R39, conception §11) ; tableaux mal formés écrits directement par un client Yjs (R54) ; là ou au lot 5, un porteur durable pour les props hors registre (Ruling R41) ;
    - lot 5 : écriture MMD par différence, pour ne plus bloquer une page pendant sa réécriture (Ruling R40) ;
    - lot 7 : livraison (binaire qui embarque l'application, image Docker, fichier `mementum.toml`, inscription par domaine e-mail) ; limites du nombre de demandes (R54), dont celle par adresse IP : elle lèvera R76 et R84, et freinera R77 sans le lever (là où l'inscription est ouverte, sa réponse reste un indice en une seule demande) ; contrôle des avis de sécurité en CI (R44).
-4. **Sans date, à décider** : envoi d'e-mails (invitations, mot de passe oublié), suppression d'un espace ou d'un compte, création d'espaces réservée par l'admin d'instance, vidage automatique de la corbeille, passkeys (R46).
+5. **Sans date, à décider** : envoi d'e-mails (invitations, mot de passe oublié), suppression d'un espace ou d'un compte, création d'espaces réservée par l'admin d'instance, vidage automatique de la corbeille, passkeys (R46).
 
 ## Méthode de travail
 
