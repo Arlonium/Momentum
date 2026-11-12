@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Fixture, account, break_table, fresh, int, new_user, page, repair, texts};
+use common::{Fixture, account, break_table, exec_sql, fresh, int, new_user, page, repair, texts};
 use mementum_store::{MAX_BEFORE_RESTORE, MAX_VERSIONS, StoreError, Unversioned, VersionReason};
 use uuid::Uuid;
 
@@ -314,5 +314,48 @@ async fn at_most_twenty_versions_before_a_restore_are_kept() {
     assert_eq!(
         ordinary_ids, newest_ordinary,
         "les vingt plus anciennes sont parties"
+    );
+}
+
+/// Les versions se rangent d'abord par `seq`, qui ne fait que croître pour une page : une
+/// horloge système qui recule (les versions déjà gardées datées plus tard que la neuve) ne fait
+/// ni effacer par la purge la version qu'on vient d'écrire, ni la ranger après les autres.
+#[tokio::test]
+async fn version_just_written_survives_a_clock_that_went_back() {
+    let (f, id) = fresh_page().await;
+    for seq in 0..MAX_VERSIONS as i64 {
+        f.store
+            .put_version(id, seq, b"avant", &[], VersionReason::Periodic)
+            .await
+            .unwrap();
+    }
+    // L'horloge recule : tout ce qui est gardé paraît écrit dans une heure.
+    exec_sql(
+        &f.db,
+        "UPDATE doc_versions SET created_at = created_at + 3600000",
+    )
+    .await;
+    let newest = f
+        .store
+        .put_version(
+            id,
+            MAX_VERSIONS as i64,
+            b"neuve",
+            &[],
+            VersionReason::Closing,
+        )
+        .await
+        .unwrap();
+    let listed = f.store.list_versions(id).await.unwrap();
+    assert_eq!(listed.len(), MAX_VERSIONS);
+    assert_eq!(listed[0].id, newest, "la plus récente d'abord");
+    assert_eq!(
+        listed[MAX_VERSIONS - 1].seq,
+        1,
+        "la plus ancienne (seq 0) est partie"
+    );
+    assert_eq!(
+        f.store.get_version(id, newest).await.unwrap(),
+        Some(b"neuve".to_vec())
     );
 }

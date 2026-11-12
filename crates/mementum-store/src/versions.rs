@@ -11,8 +11,10 @@
 //! plus de vingt versions ordinaires. Elles suivent leur page (`ON DELETE CASCADE`, migration
 //! `0003`) ; la compaction, qui purge le journal, n'y touche pas.
 //!
-//! **Ordre.** La plus récente d'abord : par date d'écriture, puis par identifiant (UUIDv7,
-//! croissant dans le processus) à égalité de milliseconde.
+//! **Ordre.** La plus récente d'abord : par `seq` (le journal de la page qu'elle couvre, qui ne
+//! fait que croître), puis par date d'écriture, puis par identifiant (UUIDv7, croissant dans le
+//! processus). Le `seq` d'abord : une horloge système qui recule ne fait ni purger la version
+//! qu'on vient d'écrire, ni la ranger après les autres.
 //!
 //! **Auteurs.** Des identifiants de comptes, triés et sans doublon, en JSON (`["…","…"]`) : ce
 //! sont des UUID relus, sans rien à échapper. Ils se relisent avec le nom que le store connaît du
@@ -140,7 +142,7 @@ impl Store {
         sqlx::query(
             "DELETE FROM doc_versions WHERE node_id = ?1 AND reason = ?2 AND id NOT IN ( \
                  SELECT id FROM doc_versions WHERE node_id = ?1 AND reason = ?2 \
-                 ORDER BY created_at DESC, id DESC LIMIT ?3)",
+                 ORDER BY seq DESC, created_at DESC, id DESC LIMIT ?3)",
         )
         .bind(&node)
         .bind(VersionReason::BeforeRestore.as_str())
@@ -150,7 +152,7 @@ impl Store {
         sqlx::query(
             "DELETE FROM doc_versions WHERE node_id = ?1 AND id NOT IN ( \
                  SELECT id FROM doc_versions WHERE node_id = ?1 \
-                 ORDER BY created_at DESC, id DESC LIMIT ?2)",
+                 ORDER BY seq DESC, created_at DESC, id DESC LIMIT ?2)",
         )
         .bind(&node)
         .bind(MAX_VERSIONS as i64)
@@ -167,7 +169,7 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let mut versions = sqlx::query(
             "SELECT id, seq, reason, created_at FROM doc_versions WHERE node_id = ? \
-             ORDER BY created_at DESC, id DESC",
+             ORDER BY seq DESC, created_at DESC, id DESC",
         )
         .bind(&node)
         .fetch_all(&mut *tx)
