@@ -1,8 +1,12 @@
 // Un bloc déplacé pendant que quelqu'un d'autre y écrit (limite R39 du lot 1, que la Task 13
 // lève, R138). Yjs n'a pas de déplacement, et ce qu'une autre personne a tapé en même temps dans
-// le bloc ne le suit pas. Dans le navigateur, un glisser n'est même pas une copie suivie d'une
-// suppression : y-prosemirror récrit sur place les éléments Yjs entre l'ancienne place et la
-// nouvelle, chacun prenant l'id et le texte de son voisin (constat de la Task 12, au registre).
+// le bloc ne le suit pas. Pour le glisser que font ces tests (un bloc sous un autre, au même
+// niveau, entre des blocs du même type et sans enfants), y-prosemirror n'écrit ni copie ni
+// suppression : il récrit sur place les éléments entre l'ancienne place et la nouvelle, chacun
+// prenant l'id et le texte de son voisin, et le texte de Tom finit dans le bloc Y. Ce n'est pas
+// général : selon les blocs touchés (un autre type, des enfants) et le geste (Tab, Maj+Tab), une
+// frappe concurrente est déplacée dans un voisin ou perdue. Ces cas, et les autres gestes, sont
+// dans `src/editor/blockMoves.test.ts` ; ces deux tests en sont la preuve dans un navigateur.
 //
 // Ces tests disent ce qui est voulu, pas ce qui se passe aujourd'hui : après le scénario, le
 // bloc X est juste sous le bloc Z, une seule fois, et porte le texte que Tom y a tapé, chez
