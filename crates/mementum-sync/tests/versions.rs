@@ -879,3 +879,39 @@ async fn typing_concurrent_with_a_restore_is_lost() {
         );
     }
 }
+
+/// Un bloc supprimé après la version revient avec son identifiant quand on la restaure : c'est
+/// ce qui fait retrouver leur bloc aux fils de commentaires.
+#[tokio::test]
+async fn deleted_block_comes_back_with_its_id() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    f.hub
+        .write_blocks(f.page, parse("Un\n\nDeux\n").unwrap(), Some(alice))
+        .await
+        .unwrap();
+    actor_stops(&f).await;
+    let first = versions(&f).await[0].id;
+    let before = f.hub.read_blocks(f.page).await.unwrap();
+    let deux = before[1].id.clone();
+
+    // « Deux » supprimé : seul le premier bloc reste, avec son identifiant.
+    f.hub
+        .write_blocks(f.page, before[..1].to_vec(), Some(alice))
+        .await
+        .unwrap();
+    let ids = f.ids().await;
+    assert_eq!(ids, [before[0].id.clone()]);
+
+    f.hub
+        .restore_version(f.page, first, Some(alice))
+        .await
+        .unwrap();
+    let after = f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(after, before);
+    assert_eq!(
+        after[1].id, deux,
+        "le bloc supprimé revient avec son identifiant"
+    );
+}
