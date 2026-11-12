@@ -49,7 +49,7 @@ use crate::{PageEvent, SyncConfig, SyncError, presence};
 
 mod history;
 
-use history::{Slice, Watch};
+use history::{History, Slice, Watch};
 
 /// Identifiant d'une connexion, propre à l'acteur.
 pub(crate) type ConnId = u64;
@@ -1214,18 +1214,16 @@ impl Actor {
         blocks: Vec<Block>,
         actor: Option<Uuid>,
     ) -> Result<Result<(), SyncError>, Broken> {
-        self.server_write(blocks, actor, true).await
+        self.server_write(blocks, actor, History::Slice).await
     }
 
     /// Une écriture du serveur, au nom de `actor` : `PUT /mmd`, ou une
-    /// restauration. `opens_slice` : si elle change la page, elle entre dans la
-    /// tranche en cours ; une restauration ne le fait pas d'ordinaire, son
-    /// contenu étant celui d'une version gardée (Ruling R190).
+    /// restauration ; `history` dit ce qu'elle fait de l'historique.
     async fn server_write(
         &mut self,
         blocks: Vec<Block>,
         actor: Option<Uuid>,
-        opens_slice: bool,
+        history: History,
     ) -> Result<Result<(), SyncError>, Broken> {
         self.version_if_due().await;
         let changes = self.watch.changes();
@@ -1234,16 +1232,38 @@ impl Actor {
             Ok(update) => update,
             Err(e) => return Ok(Err(e.into())),
         };
-        if let Err(error) = self.persist(&[&update], actor).await {
+        let written = match history {
+            History::Slice => self.persist(&[&update], actor).await,
+            History::Kept(version) => self.persist_restore(&update, actor, version).await,
+        };
+        if let Err(error) = written {
             self.store_failed(&error).await?;
             return Ok(Err(error.into()));
         }
-        if opens_slice {
-            self.wrote(changes, actor);
+        match history {
+            History::Slice => self.wrote(changes, actor),
+            History::Kept(_) => self.wrote_kept(),
         }
         self.broadcast(None, protocol::update(&update));
         self.compact_if_due().await;
         Ok(Ok(()))
+    }
+
+    /// Écrit au journal la mise à jour d'une restauration de `version`, au nom
+    /// de `actor`, avec la borne de la version (`covers_seq`) : les deux, ou rien
+    /// (Ruling R197). Un rechargement relit ainsi un contenu gardé, sans tranche.
+    async fn persist_restore(
+        &mut self,
+        update: &[u8],
+        actor: Option<Uuid>,
+        version: Uuid,
+    ) -> Result<(), StoreError> {
+        self.last_seq = self
+            .store
+            .append_restore(self.id.node_id, update, actor, version)
+            .await?;
+        self.since_snapshot += 1;
+        Ok(())
     }
 
     /// Écrit des mises à jour au journal, dans l'ordre, toutes ou aucune, au

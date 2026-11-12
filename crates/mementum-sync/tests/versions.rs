@@ -915,3 +915,107 @@ async fn deleted_block_comes_back_with_its_id() {
         "le bloc supprimé revient avec son identifiant"
     );
 }
+
+/// Deux versions, `A` puis `B`, coupées à l'arrêt de l'acteur, sans connexion : rend leurs
+/// identifiants, `B` (la plus récente) d'abord.
+async fn two_versions(f: &Fixture) -> (Uuid, Uuid) {
+    f.write_mmd("A\n").await;
+    actor_stops(f).await;
+    f.write_mmd("B\n").await;
+    actor_stops(f).await;
+    let kept = versions(f).await;
+    assert_eq!(kept.len(), 2);
+    (kept[0].id, kept[1].id)
+}
+
+/// P3 (Ruling R197) : une simple lecture après une restauration ne coupe rien, et ne nomme
+/// personne. L'écriture de la restauration est au journal, après la dernière version ; sans la
+/// borne de la version restaurée (`covers_seq`), l'acteur rechargé par la lecture la relisait
+/// comme une tranche ouverte, au nom de qui avait restauré, et coupait à son arrêt une version
+/// identique à la restaurée.
+#[tokio::test]
+async fn a_read_after_a_restore_cuts_nothing() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let (_, a) = two_versions(&f).await;
+    let before = versions(&f).await;
+
+    f.hub.restore_version(f.page, a, Some(alice)).await.unwrap();
+    actor_stops(&f).await;
+    assert_eq!(live_text(&f).await, "A", "une simple lecture");
+    actor_stops(&f).await;
+    assert_eq!(versions(&f).await, before, "rien de coupé");
+}
+
+/// P2 (Ruling R197) : des restaurations successives sans écriture entre elles ne coupent rien,
+/// y compris quand l'acteur s'arrête et se recharge entre elles (un agent qui passe par l'API
+/// à plus de trente secondes d'intervalle) : hormis la première version `before_restore`, si la
+/// page avait changé depuis sa dernière version.
+#[tokio::test]
+async fn restores_across_reloads_cut_nothing() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let (b, a) = two_versions(&f).await;
+    // La page change : la première restauration garde ce qu'elle remplace.
+    f.write_mmd("C\n").await;
+    let start = versions(&f).await.len();
+    for round in 0..6 {
+        let (version, expected) = if round % 2 == 0 { (a, "A") } else { (b, "B") };
+        f.hub
+            .restore_version(f.page, version, Some(alice))
+            .await
+            .unwrap();
+        actor_stops(&f).await;
+        assert_eq!(live_text(&f).await, expected, "tour {round}");
+        actor_stops(&f).await;
+    }
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), start + 1, "{kept:?}");
+    let restores = kept
+        .iter()
+        .filter(|v| v.reason == VersionReason::BeforeRestore)
+        .count();
+    assert_eq!(restores, 1, "seule la première restauration coupe");
+}
+
+/// P1 (Ruling R197) : aucun contenu qu'une restauration remplace n'est perdu, rechargements de
+/// l'acteur compris : chacun est dans une version.
+#[tokio::test]
+async fn content_replaced_by_a_restore_is_kept_across_reloads() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let (b, a) = two_versions(&f).await;
+    let mut replaced = Vec::new();
+    let restore = async |version: Uuid, replaced: &mut Vec<String>| {
+        replaced.push(live_text(&f).await);
+        f.hub
+            .restore_version(f.page, version, Some(alice))
+            .await
+            .unwrap();
+        actor_stops(&f).await;
+    };
+
+    f.write_mmd("C\n").await;
+    restore(a, &mut replaced).await;
+    // Une simple lecture, l'acteur rechargé puis arrêté.
+    assert_eq!(live_text(&f).await, "A");
+    actor_stops(&f).await;
+    restore(b, &mut replaced).await;
+    f.write_mmd("D\n").await;
+    actor_stops(&f).await;
+    restore(a, &mut replaced).await;
+    f.write_mmd("E\n").await;
+    restore(b, &mut replaced).await;
+
+    assert_eq!(replaced, ["C", "A", "D", "E"]);
+    let mut kept = Vec::new();
+    for version in versions(&f).await {
+        kept.push(version_text(&f, version.id).await);
+    }
+    for content in &replaced {
+        assert!(kept.contains(content), "« {content} » perdu : {kept:?}");
+    }
+}

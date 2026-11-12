@@ -98,6 +98,18 @@ impl Watch {
     }
 }
 
+/// Ce qu'une écriture du serveur fait de l'historique.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum History {
+    /// Si elle change la page, elle entre dans la tranche en cours : `PUT /mmd`,
+    /// ou une restauration dont la version partirait à la prochaine purge.
+    Slice,
+    /// Son contenu est celui de cette version gardée (une restauration) : elle
+    /// n'ouvre pas de tranche, et le store retient, dans la transaction qui
+    /// l'écrit au journal, que la version vaut jusqu'à ce `seq` (Ruling R197).
+    Kept(Uuid),
+}
+
 /// La tranche en cours de l'historique (Ruling R135) : les écritures qui ont
 /// changé la page depuis sa dernière version.
 #[derive(Debug, Default)]
@@ -174,6 +186,13 @@ impl Actor {
         self.slice.since.get_or_insert_with(Instant::now);
         self.slice.authors.extend(actor);
         self.slice.kept = false;
+    }
+
+    /// Une restauration vient d'écrire au journal le contenu d'une version
+    /// gardée, avec sa borne : le contenu est celui de cette version, et le
+    /// store le sait ; aucune tranche ne s'ouvre (Ruling R197).
+    pub(super) fn wrote_kept(&mut self) {
+        self.slice.kept = true;
     }
 
     /// Ruling R135 : juste avant d'appliquer une écriture, une version
@@ -292,11 +311,11 @@ impl Actor {
             tracing::warn!(node_id = %self.id.node_id, version_id = %version, %error, "version d'avant restauration impossible à écrire : rien n'est restauré");
             return Ok(Err(error.into()));
         }
-        let written = self.server_write(blocks, actor, next_in_line).await?;
-        if written.is_ok() && !next_in_line {
-            // Le contenu est désormais celui de la version restaurée.
-            self.slice.kept = true;
-        }
-        Ok(written)
+        let history = if next_in_line {
+            History::Slice
+        } else {
+            History::Kept(version)
+        };
+        self.server_write(blocks, actor, history).await
     }
 }
