@@ -445,7 +445,7 @@ fn read_children(
                 .iter()
                 .position(|l| !l.text.is_empty())
                 .map_or(lines.len(), |p| j + p);
-            if !lines.get(end).is_some_and(|l| l.indent >= width) {
+            if lines.get(end).is_none_or(|l| l.indent < width) {
                 break;
             }
             region.extend_from_slice(&lines[j..end]);
