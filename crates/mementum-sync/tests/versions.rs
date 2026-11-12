@@ -1169,3 +1169,36 @@ async fn restores_alone_push_out_no_ordinary_version() {
     assert_eq!(ordinary_ids(&after), ordinary_ids(&before));
     assert_eq!(after.len(), MAX_VERSIONS);
 }
+
+/// P1 sur le chemin d'un arrêt brutal (Ruling R197) : une restauration couverte, puis une
+/// écriture posée au journal sans version `closing` (l'acteur oublié, sans arrêt propre) ;
+/// l'acteur rechargé relit cette écriture comme une tranche ouverte, et la restauration suivante
+/// la garde dans sa version `before_restore`.
+#[tokio::test]
+async fn content_replaced_after_a_crash_is_kept() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let (b, a) = two_versions(&f).await;
+    f.hub.restore_version(f.page, a, Some(alice)).await.unwrap();
+    actor_stops(&f).await;
+
+    f.hub
+        .write_blocks(
+            f.page,
+            parse("Écrit avant la panne\n").unwrap(),
+            Some(alice),
+        )
+        .await
+        .unwrap();
+    // L'acteur s'arrête sans couper de version, comme un processus tué.
+    f.hub.forget(&[f.page]).await;
+    assert_eq!(versions(&f).await.len(), 2);
+
+    f.hub.restore_version(f.page, b, Some(alice)).await.unwrap();
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 3, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::BeforeRestore);
+    assert_eq!(version_text(&f, kept[0].id).await, "Écrit avant la panne");
+    assert_eq!(authors(&kept[0]), [alice]);
+}
