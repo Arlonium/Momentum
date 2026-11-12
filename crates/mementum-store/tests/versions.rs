@@ -367,24 +367,14 @@ async fn version_just_written_survives_a_clock_that_went_back() {
     );
 }
 
-/// Ce que la purge retirerait à la version suivante : rien sous les plafonds ; la plus ancienne
-/// de toutes à cent ; la plus ancienne `before_restore` à vingt de cette sorte.
+/// Ce qu'une version ordinaire ferait partir (Ruling R197) : rien sous cent versions, même à
+/// vingt `before_restore` (leur plafond ne la compte pas) ; à cent, la plus ancienne de toutes,
+/// `before_restore` comprise quand c'est elle.
 #[tokio::test]
-async fn next_purged_names_what_the_next_version_would_push_out() {
+async fn an_ordinary_version_pushes_out_only_the_oldest_of_a_full_history() {
     let (f, id) = fresh_page().await;
-    let mut ordinary = Vec::new();
-    for seq in 0..(MAX_VERSIONS - MAX_BEFORE_RESTORE) as i64 {
-        ordinary.push(
-            f.store
-                .put_version(id, seq, b"o", &[], VersionReason::Periodic)
-                .await
-                .unwrap(),
-        );
-    }
-    assert!(f.store.next_purged(id).await.unwrap().is_empty());
     let mut before = Vec::new();
     for seq in 0..MAX_BEFORE_RESTORE as i64 {
-        let seq = (MAX_VERSIONS - MAX_BEFORE_RESTORE) as i64 + seq;
         before.push(
             f.store
                 .put_version(id, seq, b"r", &[], VersionReason::BeforeRestore)
@@ -392,16 +382,46 @@ async fn next_purged_names_what_the_next_version_would_push_out() {
                 .unwrap(),
         );
     }
+    assert_eq!(f.store.purged_by_next_ordinary(id).await.unwrap(), None);
+    let mut ordinary = Vec::new();
+    for seq in 0..(MAX_VERSIONS - MAX_BEFORE_RESTORE) as i64 {
+        let seq = MAX_BEFORE_RESTORE as i64 + seq;
+        if seq + 1 == MAX_VERSIONS as i64 {
+            assert_eq!(f.store.purged_by_next_ordinary(id).await.unwrap(), None);
+        }
+        ordinary.push(
+            f.store
+                .put_version(id, seq, b"o", &[], VersionReason::Periodic)
+                .await
+                .unwrap(),
+        );
+    }
     assert_eq!(
-        f.store.next_purged(id).await.unwrap(),
-        [before[0], ordinary[0]]
+        f.store.purged_by_next_ordinary(id).await.unwrap(),
+        Some(before[0]),
+        "à cent, la plus ancienne de toutes"
     );
+    let pushed = f
+        .store
+        .put_version(id, MAX_VERSIONS as i64, b"o", &[], VersionReason::Closing)
+        .await
+        .unwrap();
+    let kept = f.store.list_versions(id).await.unwrap();
+    assert!(kept.iter().any(|v| v.id == pushed));
     assert!(
+        !kept.iter().any(|v| v.id == before[0]),
+        "c'est elle qui est partie"
+    );
+    assert_eq!(
+        f.store.purged_by_next_ordinary(id).await.unwrap(),
+        Some(before[1])
+    );
+    assert_eq!(
         f.store
-            .next_purged(Uuid::now_v7())
+            .purged_by_next_ordinary(Uuid::now_v7())
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        None
     );
 }
 

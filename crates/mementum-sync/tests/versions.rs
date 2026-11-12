@@ -1060,3 +1060,112 @@ async fn restored_content_survives_the_purge_its_own_cut_makes() {
     }
     assert!(found, "le contenu restauré n'est plus dans aucune version");
 }
+
+/// Ruling R197, P2 au plafond des versions d'avant restauration : restaurer la plus ancienne
+/// `before_restore` d'une page qui en garde vingt ne coupe aucune copie, rechargements compris.
+/// Seule une autre coupe `before_restore` la retirerait, et il lui faut une écriture d'abord,
+/// donc un contenu qui n'est plus le sien : la version ordinaire qu'une tranche produirait ne la
+/// touche pas. L'exception de purge la prenait pour « la prochaine à partir », ouvrait une
+/// tranche, et chaque arrêt coupait une `closing` identique.
+#[tokio::test]
+async fn restoring_at_the_cap_of_versions_before_a_restore_cuts_no_copy() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let (_, a) = two_versions(&f).await;
+    for i in 0..MAX_BEFORE_RESTORE {
+        f.write_mmd(&format!("X{i}\n")).await;
+        f.hub.restore_version(f.page, a, Some(alice)).await.unwrap();
+    }
+    let before = versions(&f).await;
+    assert_eq!(before.len(), 2 + MAX_BEFORE_RESTORE);
+    let oldest_before_restore = before
+        .iter()
+        .rev()
+        .find(|v| v.reason == VersionReason::BeforeRestore)
+        .unwrap()
+        .id;
+    assert_eq!(version_text(&f, oldest_before_restore).await, "X0");
+    actor_stops(&f).await;
+
+    for round in 0..4 {
+        f.hub
+            .restore_version(f.page, oldest_before_restore, Some(alice))
+            .await
+            .unwrap();
+        actor_stops(&f).await;
+        assert_eq!(
+            live_text(&f).await,
+            "X0",
+            "tour {round} : une simple lecture"
+        );
+        actor_stops(&f).await;
+        f.hub.restore_version(f.page, a, Some(alice)).await.unwrap();
+        actor_stops(&f).await;
+    }
+    let after = versions(&f).await;
+    assert_eq!(
+        after, before,
+        "aucune version de plus, aucune copie de « X0 »"
+    );
+}
+
+/// La promesse de R189, sur un historique plein (quatre-vingts versions ordinaires et vingt
+/// `before_restore`) : des restaurations seules, l'acteur rechargé entre elles, ne font partir
+/// aucune version ordinaire.
+#[tokio::test]
+async fn restores_alone_push_out_no_ordinary_version() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let open = f.client().await;
+    let ordinary = MAX_VERSIONS - MAX_BEFORE_RESTORE;
+    for i in 0..=ordinary {
+        if i > 0 {
+            advance(INTERVAL + Duration::from_secs(1)).await;
+        }
+        f.write_mmd(&format!("Texte {i}\n")).await;
+    }
+    let target = versions(&f).await[0].id;
+    for i in 0..MAX_BEFORE_RESTORE {
+        f.write_mmd(&format!("X{i}\n")).await;
+        f.hub
+            .restore_version(f.page, target, Some(alice))
+            .await
+            .unwrap();
+    }
+    drop(open);
+    actor_stops(&f).await;
+    let before = versions(&f).await;
+    assert_eq!(before.len(), MAX_VERSIONS);
+    let ordinary_ids = |kept: &[Version]| -> Vec<Uuid> {
+        kept.iter()
+            .filter(|v| v.reason != VersionReason::BeforeRestore)
+            .map(|v| v.id)
+            .collect()
+    };
+    let oldest_before_restore = before
+        .iter()
+        .rev()
+        .find(|v| v.reason == VersionReason::BeforeRestore)
+        .unwrap()
+        .id;
+
+    for round in 0..3 {
+        f.hub
+            .restore_version(f.page, oldest_before_restore, Some(alice))
+            .await
+            .unwrap();
+        actor_stops(&f).await;
+        assert_eq!(live_text(&f).await, "X0", "tour {round}");
+        actor_stops(&f).await;
+        f.hub
+            .restore_version(f.page, target, Some(alice))
+            .await
+            .unwrap();
+        actor_stops(&f).await;
+    }
+    let after = versions(&f).await;
+    assert_eq!(ordinary_ids(&after), ordinary_ids(&before));
+    assert_eq!(after.len(), MAX_VERSIONS);
+}

@@ -7,9 +7,11 @@
 //! dernières versions, dont au plus [`MAX_BEFORE_RESTORE`] `before_restore` (Ruling R189) : la
 //! purge retire d'abord les plus anciennes de cette sorte au-delà de vingt, puis les plus
 //! anciennes de toutes au-delà de cent, dans la transaction qui écrit la version neuve, si bien
-//! qu'une version refusée n'efface rien. Des restaurations répétées ne font donc jamais partir
-//! plus de vingt versions ordinaires. Elles suivent leur page (`ON DELETE CASCADE`, migration
-//! `0003`) ; la compaction, qui purge le journal, n'y touche pas.
+//! qu'une version refusée n'efface rien. Une coupe d'avant restauration ne fait donc partir une
+//! version ordinaire que si la page garde moins de vingt `before_restore` ; une version
+//! ordinaire, elle, n'est pas comptée par ce plafond ([`Store::purged_by_next_ordinary`]). Elles
+//! suivent leur page (`ON DELETE CASCADE`, migration `0003`) ; la compaction, qui purge le
+//! journal, n'y touche pas.
 //!
 //! **Ordre.** La plus récente d'abord : par `seq` (le journal de la page qu'elle couvre, qui ne
 //! fait que croître), puis par date d'écriture, puis par identifiant (UUIDv7, croissant dans le
@@ -224,36 +226,23 @@ impl Store {
         Ok(versions)
     }
 
-    /// Les versions de la page que la purge retirerait si une version de plus y était écrite
-    /// maintenant, de quelque sorte qu'elle soit : la plus ancienne `before_restore` si la page
-    /// en garde déjà [`MAX_BEFORE_RESTORE`], la plus ancienne de toutes si elle en garde déjà
-    /// [`MAX_VERSIONS`]. Lu en une transaction.
-    pub async fn next_purged(&self, node_id: Uuid) -> Result<Vec<Uuid>, StoreError> {
-        let node = node_id.to_string();
-        let mut tx = self.pool.begin().await?;
-        let mut next = Vec::new();
-        for (reason, cap) in [
-            (Some(VersionReason::BeforeRestore), MAX_BEFORE_RESTORE),
-            (None, MAX_VERSIONS),
-        ] {
-            let row = sqlx::query(
-                "SELECT id FROM doc_versions \
-                 WHERE node_id = ?1 AND (?2 IS NULL OR reason = ?2) \
-                   AND (SELECT COUNT(*) FROM doc_versions \
-                        WHERE node_id = ?1 AND (?2 IS NULL OR reason = ?2)) >= ?3 \
-                 ORDER BY seq, created_at, id LIMIT 1",
-            )
-            .bind(&node)
-            .bind(reason.map(VersionReason::as_str))
-            .bind(cap as i64)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if let Some(row) = row {
-                next.push(parse_uuid(&row.get::<String, _>(0))?);
-            }
-        }
-        tx.commit().await?;
-        Ok(next)
+    /// La version que la purge retirerait si une version **ordinaire** (`periodic` ou `closing`)
+    /// était écrite maintenant sur la page : la plus ancienne de toutes, si la page en garde déjà
+    /// [`MAX_VERSIONS`] ; sinon aucune. Le plafond des `before_restore` n'y entre pas : il ne
+    /// compte qu'elles, et seule une autre coupe d'avant restauration le fait jouer ; une version
+    /// ordinaire ne retire une `before_restore` que si c'est la plus ancienne de toutes. C'est la
+    /// coupe qu'une tranche ouverte produirait (Ruling R197).
+    pub async fn purged_by_next_ordinary(&self, node_id: Uuid) -> Result<Option<Uuid>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id FROM doc_versions WHERE node_id = ?1 \
+               AND (SELECT COUNT(*) FROM doc_versions WHERE node_id = ?1) >= ?2 \
+             ORDER BY seq, created_at, id LIMIT 1",
+        )
+        .bind(node_id.to_string())
+        .bind(MAX_VERSIONS as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| parse_uuid(&r.get::<String, _>(0))).transpose()
     }
 
     /// Écrit au journal la mise à jour d'une restauration de la version `version`, au nom de
