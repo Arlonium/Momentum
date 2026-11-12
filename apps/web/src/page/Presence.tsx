@@ -5,6 +5,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { CollabSession } from "../editor/collab";
 import { colorOf } from "../session/session";
+import { inkOn } from "./avatarInk";
 
 /** Avatars montrés avant le « +N ». */
 const MAX_AVATARS = 5;
@@ -23,31 +24,36 @@ export function Presence({ session, selfId }: Props) {
   if (others.length === 0) return null;
   const shown = others.slice(0, MAX_AVATARS);
   const hidden = others.length - shown.length;
+  const more = `${hidden} ${hidden === 1 ? "autre personne" : "autres personnes"}`;
   return (
     <ul className="mm-presence" aria-label="Présents sur la page">
       {shown.map((user) => {
         const label = user.canWrite ? user.name : `${user.name} (lecture)`;
+        const color = colorOf(user.id);
         return (
-          <li
-            key={user.id}
-            className="mm-avatar"
-            role="img"
-            title={label}
-            aria-label={label}
-            style={{ backgroundColor: colorOf(user.id) }}
-          >
-            {Array.from(user.name.trim())[0]?.toLocaleUpperCase() ?? "?"}
+          <li key={user.id}>
+            <span
+              className="mm-avatar"
+              role="img"
+              title={label}
+              aria-label={label}
+              style={{ backgroundColor: color, color: inkOn(color) }}
+            >
+              {Array.from(user.name.trim())[0]?.toLocaleUpperCase() ?? "?"}
+            </span>
           </li>
         );
       })}
       {hidden > 0 && (
-        <li
-          className="mm-avatar mm-avatar-more"
-          role="img"
-          title={`${hidden} ${hidden === 1 ? "autre personne" : "autres personnes"}`}
-          aria-label={`${hidden} ${hidden === 1 ? "autre personne" : "autres personnes"}`}
-        >
-          +{hidden}
+        <li>
+          <span
+            className="mm-avatar mm-avatar-more"
+            role="img"
+            title={more}
+            aria-label={more}
+          >
+            +{hidden}
+          </span>
         </li>
       )}
     </ul>

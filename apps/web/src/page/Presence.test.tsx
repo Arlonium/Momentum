@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import type { RosterUser } from "../editor/collab";
 import { colorOf } from "../session/session";
 import "../test/hooks";
+import { INK } from "./avatarInk";
 import { Presence } from "./Presence";
 
 let host: HTMLDivElement;
@@ -103,4 +104,27 @@ test("the_list_follows_the_session", async () => {
   expect(avatars()).toHaveLength(1);
   await act(async () => session.set([]));
   expect(avatars()).toHaveLength(0);
+});
+
+test("each_avatar_is_an_image_inside_a_list_item", async () => {
+  const session = fakeSession([user(2), user(3)]);
+  await act(async () => root.render(<Presence session={session} selfId="autre" />));
+  const items = [...host.querySelectorAll("ul > li")];
+  expect(items).toHaveLength(2);
+  for (const item of items) {
+    expect(item.getAttribute("role")).toBeNull();
+    expect(item.querySelector(':scope > span[role="img"].mm-avatar')).not.toBeNull();
+  }
+});
+
+test("the_initial_takes_the_ink_where_white_is_not_readable", async () => {
+  // Une couleur de la palette où le blanc n'atteint pas 4,5:1 (`#C27A12`).
+  const id = [...Array(2000).keys()]
+    .map((n) => `compte-${n}`)
+    .find((candidate) => colorOf(candidate) === "#C27A12")!;
+  const session = fakeSession([{ id, name: "Ocre", canWrite: true }]);
+  await act(async () => root.render(<Presence session={session} selfId="autre" />));
+  const probe = document.createElement("i");
+  probe.style.color = INK;
+  expect(avatars()[0].style.color).toBe(probe.style.color);
 });
