@@ -18,6 +18,7 @@ import type { Level } from "@mementum/protocol";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { CloseIcon } from "../icons";
 import { arrangeThreads, canWrite, type CommentRights } from "./arrange";
+import { cssString } from "./BlockMarks";
 import { Composer } from "./Composer";
 import { ThreadView } from "./ThreadView";
 import type { Comments } from "./useComments";
@@ -63,11 +64,6 @@ function useNow(): number {
   return now;
 }
 
-/** Une valeur d'attribut entre guillemets dans un sélecteur CSS. */
-export function cssString(value: string): string {
-  return `"${value.replace(/["\\]/g, "\\$&").replace(/[\u0000-\u001f\u007f]/g, (c) => `\\${c.charCodeAt(0).toString(16)} `)}"`;
-}
-
 export function CommentsPanel({
   id,
   comments,
@@ -100,7 +96,9 @@ export function CommentsPanel({
     if (!panel) return;
     if (target?.kind === "block" && panel.querySelector("textarea")) return;
     if (target?.kind === "thread") {
-      const chosen = panel.querySelector<HTMLElement>(`[data-thread-id=${cssString(target.threadId)}]`);
+      const chosen = panel.querySelector<HTMLElement>(
+        `[data-thread-id=${cssString(target.threadId)}]`,
+      );
       if (chosen) {
         chosen.scrollIntoView?.({ block: "nearest" });
         chosen.focus({ preventScroll: true });

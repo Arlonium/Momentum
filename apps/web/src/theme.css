@@ -2290,6 +2290,80 @@ button.mm-reaction:hover {
   gap: 6px;
 }
 
+/* Les pastilles des blocs commentés, dans la marge droite du texte (`--mm-page-inset`) : posées
+   par-dessus l'éditeur, à la hauteur de leur bloc, hors du document. */
+.mm-block-marks {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-block-marks li {
+  position: absolute;
+  right: 12px;
+}
+
+.mm-block-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: 24px;
+  min-width: 28px;
+  padding: 0 5px;
+  border: 1px solid var(--mm-border);
+  border-radius: 12px;
+  background: #ffffff;
+  color: var(--mm-text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mm-block-mark:hover {
+  background: var(--mm-surface);
+  color: var(--mm-text);
+}
+
+/* « Commenter ce bloc », qui suit le bloc survolé quand l'éditeur est en lecture seule. */
+.mm-block-comment {
+  position: absolute;
+  right: 12px;
+  z-index: 2;
+}
+
+/* Le bloc qu'un fil fait voir : un fond qui s'efface. */
+.mm-block-glow {
+  position: absolute;
+  border-radius: 4px;
+  background: var(--mm-accent-soft);
+  mix-blend-mode: multiply;
+  pointer-events: none;
+  animation: mm-glow 1.6s ease-out forwards;
+}
+
+@keyframes mm-glow {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mm-block-glow {
+    animation: none;
+  }
+}
+
 /* Un bouton qui se lit comme un lien (« Aller au bloc », « Fils résolus (N) »). */
 .mm-link-button {
   padding: 0;

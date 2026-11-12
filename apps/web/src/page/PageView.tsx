@@ -17,10 +17,19 @@
 // encore partie de l'ouverture : la page s'ouvre avec le niveau que dit le serveur, pas avec
 // celui d'une barre latérale qui daterait d'avant.
 import type { PageNode } from "@mementum/protocol";
-import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { isSessionLost } from "../api";
 import { openCount } from "../comments/arrange";
-import { CommentsPanel, cssString, type PanelTarget } from "../comments/CommentsPanel";
+import { BlockMarks, blockText, cssString, shorten } from "../comments/BlockMarks";
+import { CommentsPanel, type PanelTarget } from "../comments/CommentsPanel";
 import { useComments } from "../comments/useComments";
 import { CollabSession } from "../editor/collab";
 import { requestedFixture } from "../editor/fixtures";
@@ -31,7 +40,7 @@ import { CommentIcon, TrashIcon } from "../icons";
 import { messageOf } from "../session/forms";
 import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
-import { canEdit } from "../share/levels";
+import { canComment, canEdit } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
 import { Presence } from "./Presence";
 import { TitleInput } from "./TitleInput";
@@ -155,6 +164,8 @@ export function PageView({
   const [panel, setPanel] = useState<{ target: PanelTarget | null } | null>(null);
   /** Ce qui avait le focus avant que le panneau s'ouvre : il le retrouve à la fermeture. */
   const returnFocus = useRef<HTMLElement | null>(null);
+  /** Numérote les demandes faites au panneau (un fil, un bloc à commenter, un bloc à montrer). */
+  const requests = useRef(0);
   const panelOpen = panel !== null;
   const openPanel = (target: PanelTarget | null) => {
     if (!panelOpen) {
@@ -171,23 +182,57 @@ export function PageView({
     if (back !== null && back.isConnected && !panelElement?.contains(back)) back.focus();
     else commentsButton.current?.focus();
   };
+  const openOnThread = (threadId: string) =>
+    openPanel({ kind: "thread", threadId, seq: ++requests.current });
+  const commentBlockNow = useRef((_: string) => {});
+  commentBlockNow.current = (blockId: string) =>
+    openPanel({ kind: "block", blockId, seq: ++requests.current });
+  /** « Commenter » sur un bloc : le panneau s'ouvre sur son commentaire neuf. Stable. */
+  const commentBlock = useCallback((blockId: string) => commentBlockNow.current(blockId), []);
+
+  // Ce que les pastilles de la marge suivent : les blocs des fils, et les fils ouverts de chacun.
+  const { threads } = comments;
+  const blockIds = useMemo(
+    () => [...new Set(threads?.flatMap((t) => (t.blockId === null ? [] : [t.blockId])))],
+    [threads],
+  );
+  const marks = useMemo(() => {
+    const open = new Map<string, string[]>();
+    for (const t of threads ?? []) {
+      if (t.blockId === null || t.resolvedAt !== null) continue;
+      open.set(t.blockId, [...(open.get(t.blockId) ?? []), t.id]);
+    }
+    return open;
+  }, [threads]);
+  /** Les blocs commentés qui sont dans la page, dans l'ordre ; `null` : pas encore lus. */
+  const [order, setOrder] = useState<string[] | null>(null);
+  const [highlight, setHighlight] = useState<{ blockId: string; seq: number } | null>(null);
   /** L'élément d'un bloc de la page, cherché à la demande (un clic, pas une frappe). */
   const blockElement = (blockId: string) =>
     frame.current?.querySelector<HTMLElement>(
       `[data-node-type="blockOuter"][data-id=${cssString(blockId)}]`,
     ) ?? null;
   const excerpt = (blockId: string) => {
-    const text = blockElement(blockId)
-      ?.querySelector(":scope > .bn-block > .bn-block-content")
-      ?.textContent?.trim();
-    if (!text) return null;
-    const chars = Array.from(text);
-    return chars.length > EXCERPT_CHARS ? `${chars.slice(0, EXCERPT_CHARS).join("")}…` : text;
+    const element = blockElement(blockId);
+    const text = element === null ? "" : blockText(element);
+    return text === "" ? null : shorten(text, EXCERPT_CHARS);
   };
   const showBlock = (blockId: string) => {
     blockElement(blockId)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    setHighlight({ blockId, seq: ++requests.current });
   };
-  const count = comments.threads === null ? null : openCount(comments.threads);
+  /**
+   * L'éditeur est en lecture seule alors que la personne peut commenter : BlockNote n'y montre
+   * pas la poignée des blocs, et « Commenter ce bloc » suit alors le bloc survolé.
+   */
+  const commentsWritable = canComment(node.level) && !trashed && !readOnly;
+  const hoverComment = commentsWritable && locked ? commentBlock : null;
+  // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.
+  const editor = useMemo(
+    () => session && <LazyEditor session={session} fixture={fixture} />,
+    [session, fixture],
+  );
+  const count = threads === null ? null : openCount(threads);
 
   return (
     <>
@@ -243,14 +288,24 @@ export function PageView({
           />
           <div ref={frame} className="mm-editor-frame">
             {/* La session se connecte pendant que le code de l'éditeur se charge. */}
-            {session && <LazyEditor session={session} fixture={fixture} />}
+            {editor}
+            <BlockMarks
+              frame={frame}
+              session={session}
+              blockIds={blockIds}
+              marks={marks}
+              onOrder={setOrder}
+              onOpenThread={openOnThread}
+              highlight={highlight}
+              onComment={hoverComment}
+            />
           </div>
         </article>
         {panel && (
           <CommentsPanel
             id={panelId}
             comments={comments}
-            order={null}
+            order={order}
             level={node.level}
             trashed={trashed}
             readOnly={readOnly}
