@@ -136,6 +136,40 @@ fn text(output: &Output) -> (String, String) {
     )
 }
 
+/// Attente maximale d'un démarrage refusé : bien plus qu'il n'en faut pour lire le réglage et
+/// s'arrêter, bien moins qu'un test qui pendrait.
+const REFUSAL_WAIT: Duration = Duration::from_secs(25);
+
+/// Lance `mementum serve` avec `args` et `vars`, qui doivent arrêter le démarrage, et rend sa
+/// sortie d'erreur. Un serveur qui démarre quand même (la validation a disparu) n'est pas
+/// attendu sans fin : il est tué après [`REFUSAL_WAIT`], et le test échoue en le disant.
+fn refused_start(data: &Path, args: &[&str], vars: &[(&str, &str)]) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mementum"))
+        .args(["serve", "--bind", "127.0.0.1:0", "--data-dir"])
+        .arg(data)
+        .args(args)
+        .envs(vars.iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("lancement de mementum");
+    let deadline = std::time::Instant::now() + REFUSAL_WAIT;
+    while child.try_wait().expect("état de mementum").is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().expect("sortie de mementum");
+            let (_, stderr) = text(&output);
+            panic!("mementum a démarré malgré {args:?} et {vars:?} : {stderr}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("sortie de mementum");
+    let (stdout, stderr) = text(&output);
+    assert!(!output.status.success(), "{stdout}");
+    stderr
+}
+
 /// Crée le compte d'Alice et rend le cookie de sa session.
 fn sign_up_alice(server: &Server) -> String {
     let body = json!({ "email": "alice@exemple.fr", "name": "Alice", "password": PASSWORD });
@@ -412,15 +446,7 @@ fn signup_and_public_url_options() {
             "adresse publique invalide",
         ),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_mementum"))
-            .args(["serve", "--bind", "127.0.0.1:0", "--data-dir"])
-            .arg(&data)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .expect("lancement de mementum");
-        let (stdout, stderr) = text(&output);
-        assert!(!output.status.success(), "{stdout}");
+        let stderr = refused_start(&data, &args, &[]);
         assert!(
             stderr.contains(expected),
             "« {expected} » attendu : {stderr}"
@@ -450,16 +476,7 @@ fn invalid_version_interval_stops_startup() {
         ),
     ];
     for (args, vars, expected) in cases {
-        let output = Command::new(env!("CARGO_BIN_EXE_mementum"))
-            .args(["serve", "--bind", "127.0.0.1:0", "--data-dir"])
-            .arg(&data)
-            .args(args)
-            .envs(vars.iter().copied())
-            .stdin(Stdio::null())
-            .output()
-            .expect("lancement de mementum");
-        let (stdout, stderr) = text(&output);
-        assert!(!output.status.success(), "{stdout}");
+        let stderr = refused_start(&data, args, vars);
         assert!(
             stderr.contains(expected),
             "« {expected} » attendu : {stderr}"
