@@ -362,6 +362,11 @@ impl From<StoreError> for ApiError {
             StoreError::Refused(why) => ApiError::share_refused(why),
             StoreError::ParentTrashed => ApiError::parent_trashed(),
             StoreError::NotTrashed => ApiError::not_trashed(),
+            // Les routes des commentaires disent elles-mêmes à qui est le message ou le fil,
+            // avant d'écrire : ce refus-ci vient de la transaction.
+            StoreError::NotAuthor => ApiError::forbidden(
+                "ce message, ou ce fil, n'est pas le tien : rien n'a été modifié",
+            ),
             e @ StoreError::Sqlx(_) => ApiError::internal(&e),
         }
     }
@@ -585,6 +590,11 @@ mod tests {
                 StoreError::NotTrashed,
                 StatusCode::CONFLICT,
                 ErrorCode::NotTrashed,
+            ),
+            (
+                StoreError::NotAuthor,
+                StatusCode::FORBIDDEN,
+                ErrorCode::Forbidden,
             ),
         ];
         for (refusal, status, code) in cases {

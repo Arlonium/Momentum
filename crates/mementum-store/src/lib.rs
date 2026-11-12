@@ -1,5 +1,5 @@
 //! Stockage SQLite de Mementum : comptes et sessions, espaces et leurs membres, invitations,
-//! arbre de pages, accès, journal Yjs et instantanés.
+//! arbre de pages, accès, fils de commentaires, journal Yjs et instantanés.
 //!
 //! - [`Store`] ouvre la base (WAL, `synchronous=FULL`, clés étrangères, délai d'attente de 5 s,
 //!   appliqués à **chaque** connexion du pool) et lance les migrations.
@@ -14,6 +14,7 @@
 //! - `nodes.rs` : l'arbre de pages, rangé par positions fractionnaires ; la corbeille.
 //! - `acl.rs` : les accès posés sur les pages.
 //! - `access_inputs.rs` : ce que le calcul des accès lit d'un espace, en une transaction.
+//! - `comments.rs` : les fils de commentaires d'une page, leurs messages et leurs réactions.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
 //! - `position.rs` : l'index fractionnaire.
 //!
@@ -46,6 +47,7 @@
 mod access_inputs;
 mod acl;
 mod backup;
+mod comments;
 mod docs;
 mod invitations;
 mod members;
@@ -69,6 +71,7 @@ use uuid::Uuid;
 pub use access_inputs::AccessInputs;
 pub use acl::{AccessChange, AccessWritten, ShareRefusal};
 pub use backup::{Backup, backup_path};
+pub use comments::{Author, Authorship, Comment, Reaction, Thread, ThreadAuthors};
 pub use docs::DocState;
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
 pub use members::{Expected, Member};
@@ -106,6 +109,9 @@ pub enum StoreError {
     ParentTrashed,
     /// Le nœud n'est pas à la corbeille : on ne supprime définitivement que ce qui y est.
     NotTrashed,
+    /// Le message n'est pas de ce compte, ou le fil n'a pas été ouvert par lui, alors que
+    /// l'appelant le demandait (`Authorship::Of`) : rien n'est écrit.
+    NotAuthor,
     /// Erreur de la base.
     Sqlx(sqlx::Error),
 }
@@ -127,6 +133,7 @@ impl fmt::Display for StoreError {
             StoreError::Refused(why) => write!(f, "changement d'accès refusé : {why}"),
             StoreError::ParentTrashed => write!(f, "une page parente est à la corbeille"),
             StoreError::NotTrashed => write!(f, "le nœud n'est pas à la corbeille"),
+            StoreError::NotAuthor => write!(f, "ce message, ou ce fil, est d'un autre compte"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),
         }
     }
