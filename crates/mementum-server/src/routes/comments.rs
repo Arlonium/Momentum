@@ -195,10 +195,7 @@ pub(crate) async fn edit(
     let text = comment_body(&body.body)?;
     let (store, by, thread_id) = (state.store.clone(), user.id, found.thread);
     let edited = written(&state, id, ApiError::comment_not_found, async move {
-        let edited = store
-            .edit_comment(id, thread_id, message, by, &text)
-            .await?;
-        Ok((edited, true))
+        store.edit_comment(id, thread_id, message, by, &text).await
     })
     .await?;
     Ok(Json(comment(&edited)))

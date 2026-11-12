@@ -1034,20 +1034,38 @@ async fn comment_write_tells_the_page() {
     replied.assert_status(StatusCode::CREATED);
     let second = uuid(&replied.json()["id"]);
     heard(2).await;
-    for resolved in [true, false] {
+    // Résolu, puis résolu encore (rien ne change : rien n'est envoyé) ; rouvert de même.
+    for resolved in [true, true] {
+        mona.browser
+            .patch(&thread_uri(page, thread), json!({ "resolved": resolved }))
+            .await
+            .assert_status(StatusCode::OK);
+    }
+    heard(3).await;
+    for resolved in [false, false] {
         mona.browser
             .patch(&thread_uri(page, thread), json!({ "resolved": resolved }))
             .await
             .assert_status(StatusCode::OK);
     }
     heard(4).await;
-    mona.browser
-        .patch(
-            &message_uri(page, thread, first),
-            json!({ "body": "Un, corrigé" }),
-        )
-        .await
-        .assert_status(StatusCode::OK);
+    let edit = message_uri(page, thread, first);
+    let edited = mona
+        .browser
+        .patch(&edit, json!({ "body": "Un, corrigé" }))
+        .await;
+    edited.assert_status(StatusCode::OK);
+    let edited = edited.json();
+    assert!(edited["editedAt"].is_number(), "{edited}");
+    heard(5).await;
+    // Le même texte (aux espaces de bord près) : rien ne change, ni la date de modification,
+    // et rien n'est envoyé.
+    let same = mona
+        .browser
+        .patch(&edit, json!({ "body": "  Un, corrigé\n" }))
+        .await;
+    same.assert_status(StatusCode::OK);
+    assert_eq!(same.json(), edited);
     heard(5).await;
     let reaction = reaction_uri(page, thread, first, "👍");
     put_empty(&mona.browser, &reaction)

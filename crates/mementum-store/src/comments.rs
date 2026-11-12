@@ -455,7 +455,8 @@ impl Store {
     }
 
     /// Remplace le texte du message, s'il est de `author` : `NotAuthor` sinon. `NotFound` si le
-    /// message n'est pas de ce fil, ou le fil de cette page.
+    /// message n'est pas de ce fil, ou le fil de cette page. Le même texte qu'il a déjà ne change
+    /// rien, pas même la date de modification : rend le message, et s'il a changé.
     pub async fn edit_comment(
         &self,
         node_id: Uuid,
@@ -463,7 +464,7 @@ impl Store {
         comment_id: Uuid,
         author: Uuid,
         body: &str,
-    ) -> Result<Comment, StoreError> {
+    ) -> Result<(Comment, bool), StoreError> {
         let comment_id = comment_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let written_by = comment_author(
@@ -474,15 +475,20 @@ impl Store {
         )
         .await?;
         allowed(Authorship::Of(author), written_by)?;
-        sqlx::query("UPDATE comments SET body = ?, edited_at = ? WHERE id = ?")
-            .bind(body)
-            .bind(now_ms())
-            .bind(&comment_id)
-            .execute(&mut *tx)
-            .await?;
+        // Textes comparés octet pour octet (collation `BINARY`, celle de SQLite par défaut).
+        let changed = sqlx::query(
+            "UPDATE comments SET body = ?, edited_at = ? WHERE id = ? AND body IS NOT ?",
+        )
+        .bind(body)
+        .bind(now_ms())
+        .bind(&comment_id)
+        .bind(body)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
         let comment = read_comment(&mut tx, &comment_id).await?;
         tx.commit().await?;
-        Ok(comment)
+        Ok((comment, changed > 0))
     }
 
     /// Supprime le message, et ses réactions ; si c'était le dernier du fil, le fil aussi, dans

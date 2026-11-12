@@ -131,10 +131,11 @@ async fn thread_with_replies_and_reactions_reads_back_in_order() {
         view("bob", "Réponse", false, &[("👀", &["alice"])])
     );
     // Un message modifié garde sa place, et dit qu'il l'a été.
-    let edited = store
+    let (edited, changed) = store
         .edit_comment(p, first.id, reply.id, bob.id, "Réponse corrigée")
         .await
         .unwrap();
+    assert!(changed);
     assert_eq!(
         comment_view(&edited),
         view("bob", "Réponse corrigée", true, &[("👀", &["alice"])])
@@ -431,7 +432,7 @@ async fn thread_opener_and_message_author_are_judged_apart() {
             .map(|_| ())
     ));
     assert!(not_author(resolve(bob.id, true).await.map(|_| ())));
-    let edited = store
+    let (edited, _) = store
         .edit_comment(p, thread.id, reply, bob.id, "De Bob, corrigé")
         .await
         .unwrap();
@@ -461,6 +462,33 @@ async fn thread_opener_and_message_author_are_judged_apart() {
     let after = store.comment_threads(p).await.unwrap();
     assert_eq!(after[0].resolved_by.as_ref().map(|a| a.id), Some(alice.id));
     assert_eq!(after[0].comments[0].body, "De Bob, corrigé");
+}
+
+/// Modifier un message avec le texte qu'il a déjà ne change rien : ni le texte, ni la date de
+/// modification, et le store le dit (`false`). Un autre texte, si.
+#[tokio::test]
+async fn editing_without_a_change_writes_nothing() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let p = new_page(&f, "Page").await;
+    let thread = store.create_thread(p, None, alice.id, "Un").await.unwrap();
+    let message = thread.comments[0].id;
+    let edit = async |body: &str| {
+        store
+            .edit_comment(p, thread.id, message, alice.id, body)
+            .await
+            .unwrap()
+    };
+
+    let (same, changed) = edit("Un").await;
+    assert!(!changed);
+    assert_eq!(same, thread.comments[0]);
+    let (edited, changed) = edit("Deux").await;
+    assert!(changed && edited.edited_at.is_some());
+    let (again, changed) = edit("Deux").await;
+    assert!(!changed);
+    assert_eq!(again, edited);
 }
 
 /// Supprimer un message emporte ses réactions ; supprimer le dernier emporte son fil, dans la
