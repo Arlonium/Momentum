@@ -21,19 +21,21 @@ const CLOSING = 2;
 const CLOSED = 3;
 
 /**
- * Ce que `beforeMessage` décide d'un message reçu : `true`, il l'a pris et y-websocket ne le
- * voit pas ; `false`, il suit tel quel ; un `ArrayBuffer`, y-websocket reçoit cela à la place
- * (ce qui reste d'un message groupé dont la tête a été prise).
+ * Mise à jour de présence vide : le message d'entretien du serveur (R107). y-websocket ne
+ * compte pour « message reçu » que ce qu'il voit lui-même, et ferme sa connexion après 30 s
+ * sans en voir ; le serveur, lui, compte ses trames de page dans son délai d'entretien. Un
+ * message pris par `beforeMessage` est donc remplacé par celui-ci, qui ne fait rien d'autre.
  */
-export type MessageVerdict = boolean | ArrayBuffer;
+const KEEPALIVE = [1, 1, 0];
 
 /**
  * Classe WebSocket pour l'option `WebSocketPolyfill` de y-websocket. `beforeMessage` voit
- * chaque message reçu juste avant y-websocket, dans la même tâche, et peut le prendre.
+ * chaque message reçu juste avant y-websocket, dans la même tâche. `true` : il l'a pris, et
+ * y-websocket ne reçoit à sa place que le message d'entretien.
  */
 export function gatedWebSocket(
   check: ConnectionCheck,
-  beforeMessage?: (data: unknown) => MessageVerdict,
+  beforeMessage?: (data: unknown) => boolean,
 ): typeof WebSocket {
   class GatedWebSocket {
     static readonly CONNECTING = CONNECTING;
@@ -65,10 +67,13 @@ export function gatedWebSocket(
           socket.binaryType = this.binaryType;
           socket.onopen = (event) => this.onopen?.(event);
           socket.onmessage = (event) => {
-            const verdict = beforeMessage?.(event.data) ?? false;
-            if (verdict === true) return;
+            if (!beforeMessage?.(event.data)) {
+              this.onmessage?.(event);
+              return;
+            }
             // Un `MessageEvent` n'est pas modifiable : y-websocket ne lit que `data`.
-            this.onmessage?.(verdict === false ? event : ({ data: verdict } as MessageEvent));
+            const data = Uint8Array.from(KEEPALIVE).buffer;
+            this.onmessage?.({ data } as MessageEvent);
           };
           socket.onerror = (event) => this.onerror?.(event);
           socket.onclose = (event) => {

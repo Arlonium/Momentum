@@ -2,7 +2,7 @@
 // `/sync/{id}` (protocole y-websocket), et le compte affiché près du curseur.
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
-import { gatedWebSocket, type ConnectionCheck, type MessageVerdict } from "./schemaGate";
+import { gatedWebSocket, type ConnectionCheck } from "./schemaGate";
 import { CLIENT_SCHEMA_VERSION } from "./version";
 
 /** Nom du fragment partagé, celui que le serveur lit et écrit (`mementum-crdt`). */
@@ -165,14 +165,15 @@ export class CollabSession {
    * Message de la WebSocket, avant y-websocket : retire la trame de page du serveur, et
    * repère la première étape 2. Dans les deux modes : un lecteur voit les présents aussi.
    */
-  private beforeMessage(data: unknown): MessageVerdict {
+  private beforeMessage(data: unknown): boolean {
     if (!(data instanceof ArrayBuffer)) return false;
     const bytes = new Uint8Array(data);
     if (bytes[0] === MESSAGE_PAGE_EVENT) {
-      // Le serveur écrit une trame par message WebSocket, mais ce qui suit la trame, s'il y
-      // a quelque chose, est rendu à y-websocket.
-      const end = this.takePageFrame(bytes);
-      return end >= bytes.length ? true : data.slice(end);
+      // Le serveur écrit une trame par message WebSocket, et y-websocket ne lit que le premier
+      // message d'un message WebSocket : un message qui commence par le type 100 est pris en
+      // entier.
+      this.takePageFrame(bytes);
+      return true;
     }
     // L'état du serveur ne déverrouille qu'un éditeur qui écrit (`onServerState`).
     if (this.readOnly || this.synced || this.serverStateListeners.size === 0) return false;
@@ -186,28 +187,24 @@ export class CollabSession {
 
   /**
    * Lit la trame de page en tête de `bytes` (type 100, longueur en entier variable, JSON en
-   * UTF-8), et rend l'indice de fin. Illisible, tronquée ou inconnue : rien n'est fait, sans
-   * erreur.
+   * UTF-8). Illisible, tronquée ou inconnue : rien n'est fait, sans erreur.
    */
-  private takePageFrame(bytes: Uint8Array): number {
+  private takePageFrame(bytes: Uint8Array): void {
     let at = 1;
     let length = 0;
     for (let shift = 0; ; shift += 7) {
-      if (at >= bytes.length || shift > 28) return bytes.length;
+      if (at >= bytes.length || shift > 28) return;
       const byte = bytes[at++];
       length += (byte & 0x7f) * 2 ** shift;
       if (byte < 0x80) break;
     }
-    if (at + length > bytes.length) return bytes.length;
-    let frame: unknown;
+    if (at + length > bytes.length) return;
     try {
       const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(at, at + length));
-      frame = JSON.parse(text);
+      this.applyPageFrame(JSON.parse(text));
     } catch {
-      return at + length;
+      // JSON ou UTF-8 illisible : la trame est retirée sans effet.
     }
-    this.applyPageFrame(frame);
-    return at + length;
   }
 
   private applyPageFrame(frame: unknown): void {
@@ -215,11 +212,14 @@ export class CollabSession {
     const { type, users } = frame as { type?: unknown; users?: unknown };
     if (type === "roster") {
       if (!Array.isArray(users)) return;
-      this.roster = users.filter(isRosterUser).map((u) => ({
-        id: u.id,
-        name: u.name,
-        canWrite: u.canWrite,
-      }));
+      // Un compte une fois : la première ligne gagne (les identifiants sont des clés d'affichage).
+      const seen = new Set<string>();
+      this.roster = [];
+      for (const user of users) {
+        if (!isRosterUser(user) || seen.has(user.id)) continue;
+        seen.add(user.id);
+        this.roster.push({ id: user.id, name: user.name, canWrite: user.canWrite });
+      }
       this.emit();
     } else if (type === "comments" || type === "versions") {
       for (const listener of [...this.pageListeners]) listener(type);

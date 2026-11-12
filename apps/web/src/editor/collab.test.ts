@@ -117,6 +117,8 @@ afterEach(() => {
   for (const session of sessions) session.destroy();
   sessions = [];
   vi.unstubAllGlobals();
+  // Les espions de `console.error` ne restent pas muets pour les tests suivants.
+  vi.restoreAllMocks();
 });
 
 describe("connection_check", () => {
@@ -355,14 +357,25 @@ describe("page_frame", () => {
     expect(session.roster).toEqual([ALICE]);
   });
 
-  test("the_rest_of_a_grouped_message_is_not_lost", async () => {
+  test("un_message_qui_commence_par_une_trame_est_pris_en_entier", async () => {
+    // y-websocket ne lit que le premier message d'un message WebSocket : le reste n'a pas
+    // de lecteur, il n'est pas rendu (R163, retiré).
     const session = open(false);
     const socket = await connected();
     const seen = vi.fn();
     session.provider.messageHandlers[101] = seen;
     socket.receive(Uint8Array.from([...pageFrame({ type: "roster", users: [ALICE] }), 101, 0]));
     expect(session.roster).toEqual([ALICE]);
-    expect(seen).toHaveBeenCalledTimes(1);
+    expect(seen).not.toHaveBeenCalled();
+  });
+
+  test("duplicate_accounts_in_a_roster_are_shown_once", async () => {
+    const session = open(false);
+    const socket = await connected();
+    socket.receive(
+      pageFrame({ type: "roster", users: [ALICE, BOB, { ...ALICE, name: "Alice bis" }] }),
+    );
+    expect(session.roster).toEqual([ALICE, BOB]);
   });
 });
 
@@ -384,9 +397,40 @@ describe("presence_at_reconnect", () => {
     expect(clock()).toBeGreaterThan(first);
   });
 
-  test("rien n'est annoncé en lecture seule", async () => {
+  test("rien n'est annoncé en lecture seule, ni à la connexion ni au retour", async () => {
     const session = open(true);
-    await connected();
+    const first = await connected();
+    first.readyState = 3;
+    first.onclose?.({ code: 1006 } as CloseEvent);
+    FakeSocket.instances = [];
+    session.provider.disconnect();
+    session.provider.connect();
+    const next = await connected();
     expect(session.provider.awareness.getLocalState()).toBeNull();
+    // Ce qui part sur les sockets : l'étape 1 de la synchro, jamais de présence (type 1).
+    const types = [first, next].flatMap((socket) =>
+      socket.sent.map((message) => (message as Uint8Array)[0]),
+    );
+    expect(types).not.toEqual([]);
+    expect(types.filter((type) => type !== 0)).toEqual([]);
   });
+});
+
+describe("watchdog", () => {
+  test("une trame de page compte pour le chien de garde de y-websocket", async () => {
+    // y-websocket ferme sa connexion après 30 s sans message qu'il ait vu (il vérifie toutes
+    // les 3 s), et le serveur compte ses trames de page dans son délai d'entretien (R107) :
+    // une trame qui arrive 28 s après le dernier message visible ne doit pas laisser tomber
+    // la connexion. En temps réel : les faux minuteurs ne pilotent pas ce chien de garde.
+    const session = open(false);
+    const socket = await connected();
+    const statuses: string[] = [];
+    session.provider.on("status", ({ status }: { status: string }) => statuses.push(status));
+    session.provider.wsLastMessageReceived = Date.now() - 28_000;
+    socket.receive(pageFrame({ type: "roster", users: [ALICE] }));
+    await new Promise((done) => setTimeout(done, 3_500));
+    expect(statuses).toEqual([]);
+    expect(Date.now() - session.provider.wsLastMessageReceived).toBeLessThan(5_000);
+    expect(session.roster).toEqual([ALICE]);
+  }, 10_000);
 });
