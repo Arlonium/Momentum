@@ -359,7 +359,7 @@ impl Identity {
 async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedReceiver<Command>) {
     match load(&store, id.node_id).await {
         Ok(loaded) => {
-            let slice = Slice::read(&store, id.node_id).await;
+            let slice = Slice::read(&store, id.node_id, cfg.version_every).await;
             let mut actor = Actor::new(id, store, cfg, loaded, slice);
             // Un journal qui porte une grosse suppression (écrite avant une
             // panne, ou avant ce réglage) est compacté dès le chargement : il

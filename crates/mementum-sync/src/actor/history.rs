@@ -116,13 +116,17 @@ impl Slice {
     /// ce qu'il en reste après la compaction. C'est ce qu'un arrêt brutal ne
     /// perd pas : le contenu est au journal, seule la version `closing` manque.
     /// Sa date est celle de la plus ancienne écriture connue, ramenée à
-    /// l'horloge de l'acteur. Illisible, la tranche est vide : la page est
-    /// servie quand même, et la prochaine écriture en ouvre une.
-    pub(super) async fn read(store: &Store, node_id: Uuid) -> Slice {
+    /// l'horloge de l'acteur, sans remonter plus loin que `version_every` :
+    /// une tranche plus ancienne est due tout de suite, et l'instant de tokio
+    /// ne remonte pas avant le démarrage de la machine. Illisible, la tranche
+    /// est vide : la page est servie quand même, et la prochaine écriture en
+    /// ouvre une.
+    pub(super) async fn read(store: &Store, node_id: Uuid, version_every: Duration) -> Slice {
         match store.unversioned(node_id).await {
             Ok(found) => Slice {
                 since: found.since.map(|at| {
                     let ago = Duration::from_millis(now_ms().saturating_sub(at).max(0) as u64);
+                    let ago = ago.min(version_every);
                     Instant::now().checked_sub(ago).unwrap_or_else(Instant::now)
                 }),
                 authors: found.authors.into_iter().collect(),

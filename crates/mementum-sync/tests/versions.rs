@@ -801,3 +801,34 @@ async fn closing_version_that_cannot_be_written_does_not_keep_the_actor() {
     assert_eq!(version_text(&f, kept[0].id).await, "Gardé");
     assert_eq!(authors(&kept[0]), [alice]);
 }
+
+/// Une tranche relue au journal plus vieille que l'horloge de la machine (une écriture d'avant
+/// son démarrage, ou du temps où l'horloge système était fausse) est due tout de suite : la
+/// première écriture qui suit coupe sa version. L'instant de tokio ne remonte pas avant le
+/// démarrage de la machine ; la tranche repartait de « maintenant », un intervalle de plus.
+#[tokio::test]
+async fn slice_older_than_the_machine_is_due_at_once() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    actor_stops(&f).await;
+    let page = stored_page(&f.store, f.page).await;
+    let update = page.write_blocks(&parse("Très ancien\n").unwrap()).unwrap();
+    f.store
+        .append_updates(f.page, &[&update], Some(alice))
+        .await
+        .unwrap();
+    // Écrite en 1970.
+    exec_sql(&f.db, "UPDATE doc_updates SET created_at = 1").await;
+
+    let _open = f.client().await;
+    f.hub
+        .write_blocks(f.page, parse("Neuf\n").unwrap(), Some(bob))
+        .await
+        .unwrap();
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Periodic);
+    assert_eq!(version_text(&f, kept[0].id).await, "Très ancien");
+    assert_eq!(authors(&kept[0]), [alice]);
+}
