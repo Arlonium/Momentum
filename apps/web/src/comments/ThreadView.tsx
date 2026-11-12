@@ -47,9 +47,30 @@ type Props = {
   /** Le bloc du fil n'est plus dans la page. */
   deleted: boolean;
   comments: Pick<Comments, "reply" | "edit" | "remove" | "resolve" | "react">;
+  /**
+   * Après une action, l'élément qui avait le focus a pu quitter la page : le panneau le rend à
+   * l'élément du fil marqué `data-focus="<within>"`, sinon au fil, sinon à son titre (le fil
+   * a quitté la liste affichée). Rien ne change si le focus est encore quelque part.
+   */
+  onFocusMove: (within: string | null) => void;
 };
 
-export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments }: Props) {
+/** Les éléments d'un fil où le focus revient après une action (`data-focus`). */
+export const FOCUS = {
+  reply: "reply",
+  edit: (commentId: string) => `edit:${commentId}`,
+  react: (commentId: string) => `react:${commentId}`,
+};
+
+export function ThreadView({
+  thread,
+  rights,
+  now,
+  onShowBlock,
+  deleted,
+  comments,
+  onFocusMove,
+}: Props) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   /** Le message dont on confirme la suppression. */
@@ -60,8 +81,11 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
   const write = canWrite(rights);
   const resolvable = canResolve(rights, thread);
 
-  /** Une action du fil : son refus s'affiche tel quel (sauf une session perdue). */
-  const run = async (action: () => Promise<unknown>) => {
+  /**
+   * Une action du fil : son refus s'affiche tel quel (sauf une session perdue) ; ensuite, le
+   * focus revient à `within` s'il est tombé (l'élément qui l'avait a pu partir).
+   */
+  const run = async (action: () => Promise<unknown>, within: string | null) => {
     if (busy) return;
     setBusy(true);
     setError(null);
@@ -71,6 +95,7 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
       if (!isSessionLost(e)) setError(messageOf(e));
     } finally {
       setBusy(false);
+      onFocusMove(within);
     }
   };
 
@@ -128,8 +153,12 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
                 onSubmit={async (body) => {
                   await comments.edit(thread.id, comment.id, body);
                   setEditing(null);
+                  onFocusMove(FOCUS.edit(comment.id));
                 }}
-                onCancel={() => setEditing(null)}
+                onCancel={() => {
+                  setEditing(null);
+                  onFocusMove(FOCUS.edit(comment.id));
+                }}
               />
             ) : (
               <p className="mm-comment-body mm-isolate" dir="auto">
@@ -141,8 +170,12 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
               selfId={rights.selfId}
               canReact={write}
               onToggle={(emoji, on) =>
-                void run(() => comments.react(thread.id, comment.id, emoji, on))
+                void run(
+                  () => comments.react(thread.id, comment.id, emoji, on),
+                  FOCUS.react(comment.id),
+                )
               }
+              onPicked={() => onFocusMove(FOCUS.react(comment.id))}
             >
               {editing !== comment.id &&
                 (canEditMessage(rights, comment) || canDeleteMessage(rights, comment)) && (
@@ -152,6 +185,7 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
                         type="button"
                         className="mm-button mm-button-quiet"
                         aria-label="Modifier ce message"
+                        data-focus={FOCUS.edit(comment.id)}
                         onClick={() => setEditing(comment.id)}
                       >
                         Modifier
@@ -184,6 +218,7 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
             <button
               type="button"
               className="mm-button mm-button-small"
+              data-focus={FOCUS.reply}
               onClick={() => setReplying(true)}
             >
               Répondre
@@ -194,7 +229,9 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
               type="button"
               className="mm-button mm-button-small"
               aria-disabled={busy || undefined}
-              onClick={() => void run(() => comments.resolve(thread.id, !resolved))}
+              // Le fil quitte la liste où il était : le focus va au fil, là où il arrive, ou au
+              // titre du panneau.
+              onClick={() => void run(() => comments.resolve(thread.id, !resolved), null)}
             >
               {resolved ? "Rouvrir" : "Résoudre"}
             </button>
@@ -210,8 +247,12 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
           onSubmit={async (body) => {
             await comments.reply(thread.id, body);
             setReplying(false);
+            onFocusMove(FOCUS.reply);
           }}
-          onCancel={() => setReplying(false)}
+          onCancel={() => {
+            setReplying(false);
+            onFocusMove(FOCUS.reply);
+          }}
         />
       )}
       {deleting && (
@@ -221,8 +262,11 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
           confirmLabel="Supprimer"
           destructive
           busy={busy}
+          // Le message parti, le focus va au fil, ou au titre du panneau si le fil est parti avec.
           onConfirm={() =>
-            void run(() => comments.remove(thread.id, deleting.id)).then(() => setDeleting(null))
+            void run(() => comments.remove(thread.id, deleting.id), null).then(() =>
+              setDeleting(null),
+            )
           }
           onCancel={() => setDeleting(null)}
         >
@@ -274,6 +318,8 @@ type ReactionsProps = {
   /** Les réactions se posent et se retirent d'ici ; sinon, elles se lisent seulement. */
   canReact: boolean;
   onToggle: (emoji: string, on: boolean) => void;
+  /** Une réaction a été choisie dans le choix des six, qui se ferme. */
+  onPicked: () => void;
   /** Les actions du message (« Modifier », « Supprimer »), sur la même ligne. */
   children?: ReactNode;
 };
@@ -282,7 +328,7 @@ type ReactionsProps = {
  * Le pied d'un message : ses réactions, ses actions à droite, et dessous, pour qui peut réagir,
  * le choix des six.
  */
-function Reactions({ comment, selfId, canReact, onToggle, children }: ReactionsProps) {
+function Reactions({ comment, selfId, canReact, onToggle, onPicked, children }: ReactionsProps) {
   const [picking, setPicking] = useState(false);
   const shown = comment.reactions.filter((reaction) => reaction.users.length > 0);
   const hasActions = children !== undefined && children !== null && children !== false;
@@ -334,6 +380,7 @@ function Reactions({ comment, selfId, canReact, onToggle, children }: ReactionsP
                   type="button"
                   className="mm-reaction mm-reaction-add"
                   aria-label="Ajouter une réaction"
+                  data-focus={FOCUS.react(comment.id)}
                   aria-expanded={picking}
                   onClick={() => setPicking((was) => !was)}
                 >
@@ -358,6 +405,7 @@ function Reactions({ comment, selfId, canReact, onToggle, children }: ReactionsP
                 aria-pressed={mine}
                 onClick={() => {
                   setPicking(false);
+                  onPicked();
                   onToggle(emoji, !mine);
                 }}
               >

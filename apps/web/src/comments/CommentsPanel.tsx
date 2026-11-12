@@ -13,9 +13,21 @@
 //
 // Au clavier : le panneau prend le focus à son ouverture (sur le fil choisi, ou sur la zone du
 // bloc à commenter) ; Échap le ferme, sauf depuis une fenêtre de confirmation, qui a le sien.
-// C'est la page qui rend le focus où il était (`PageView`).
+// C'est la page qui rend le focus où il était (`useCommentsPanel`). Après chaque action, le focus
+// ne tombe jamais sur `body` : l'élément qui l'avait (une zone de rédaction refermée, un bouton
+// de réaction parti, un fil qui change de liste) le rend à ce qui suit l'action dans le fil, au
+// fil lui-même, ou au titre du panneau.
 import type { Level } from "@mementum/protocol";
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import { CloseIcon } from "../icons";
 import { arrangeThreads, canWrite, type CommentRights } from "./arrange";
 import { cssString } from "./dom";
@@ -79,6 +91,7 @@ export function CommentsPanel({
   onClose,
 }: Props) {
   const panelRef = useRef<HTMLElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const titleId = useId();
   const deletedId = useId();
   const resolvedId = useId();
@@ -90,10 +103,15 @@ export function CommentsPanel({
   const arranged = useMemo(() => threads && arrangeThreads(threads, order), [threads, order]);
 
   // Le focus, à l'ouverture et à chaque demande : le fil choisi, ou le panneau lui-même. La
-  // zone d'un commentaire de bloc le prend d'elle-même.
+  // zone d'un commentaire de bloc le prend d'elle-même. Une demande qui s'achève (le commentaire
+  // d'un bloc envoyé ou abandonné) ne le déplace pas : c'est `moveFocus` qui s'en charge.
+  const opened = useRef(false);
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
+    const first = !opened.current;
+    opened.current = true;
+    if (target === null && !first) return;
     if (target?.kind === "block" && panel.querySelector("textarea")) return;
     if (target?.kind === "thread") {
       const chosen = panel.querySelector<HTMLElement>(
@@ -107,6 +125,39 @@ export function CommentsPanel({
     }
     panel.focus({ preventScroll: true });
   }, [target]);
+
+  /**
+   * Le focus a pu tomber (l'élément qui l'avait a quitté la page) : il va, dans le fil
+   * `threadId`, à l'élément marqué `data-focus="<within>"`, sinon au fil, sinon au titre du
+   * panneau. S'il est encore quelque part, rien ne bouge.
+   */
+  const [refocus, setRefocus] = useState<{
+    threadId: string | null;
+    within: string | null;
+    seq: number;
+  } | null>(null);
+  const refocusSeq = useRef(0);
+  const moveFocus = useCallback(
+    (threadId: string | null, within: string | null) =>
+      setRefocus({ threadId, within, seq: ++refocusSeq.current }),
+    [],
+  );
+  useLayoutEffect(() => {
+    if (refocus === null) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active.isConnected) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const thread =
+      refocus.threadId === null
+        ? null
+        : panel.querySelector<HTMLElement>(`[data-thread-id=${cssString(refocus.threadId)}]`);
+    const inside =
+      refocus.within === null
+        ? null
+        : thread?.querySelector<HTMLElement>(`[data-focus=${cssString(refocus.within)}]`);
+    (inside ?? thread ?? titleRef.current)?.focus();
+  }, [refocus]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== "Escape") return;
@@ -130,6 +181,7 @@ export function CommentsPanel({
           deleted={deleted}
           onShowBlock={show(thread.blockId, deleted)}
           comments={comments}
+          onFocusMove={(within) => moveFocus(thread.id, within)}
         />
       </li>
     );
@@ -147,7 +199,7 @@ export function CommentsPanel({
       onKeyDown={onKeyDown}
     >
       <div className="mm-comments-head">
-        <h2 id={titleId} className="mm-comments-title">
+        <h2 ref={titleRef} id={titleId} className="mm-comments-title" tabIndex={-1}>
           Commentaires
         </h2>
         <button
@@ -185,10 +237,14 @@ export function CommentsPanel({
             submitName="Commenter le bloc"
             autoFocus
             onSubmit={async (body) => {
-              await comments.open(target.blockId, body);
+              const created = await comments.open(target.blockId, body);
               onTargetDone();
+              moveFocus(created.id, null);
             }}
-            onCancel={onTargetDone}
+            onCancel={() => {
+              onTargetDone();
+              moveFocus(null, null);
+            }}
           />
         </div>
       )}
