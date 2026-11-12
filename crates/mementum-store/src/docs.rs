@@ -26,7 +26,7 @@ macro_rules! last_seq {
 /// Ajoute une mise à jour au journal de la page et rend le `seq` attribué : le `seq` où en est
 /// la page, plus un, en un seul `INSERT … SELECT`. Le `seq` repart donc de l'instantané quand
 /// une compaction a vidé le journal. `NotFound` si la page ou l'acteur n'existe pas.
-async fn append<'e>(
+pub(crate) async fn append<'e>(
     db: impl SqliteExecutor<'e>,
     node_id: &str,
     update: &[u8],

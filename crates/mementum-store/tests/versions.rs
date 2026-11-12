@@ -423,3 +423,98 @@ async fn state_is_the_last_column_of_a_version() {
         "{columns:?}"
     );
 }
+
+/// Une restauration écrit au journal le contenu d'une version gardée : dans la même
+/// transaction, la version retient ce `seq` comme le dernier où le contenu de la page valait
+/// elle (Ruling R197). La tranche pas encore versionnée ne compte donc que ce qui suit, et une
+/// version restaurée ne change pas de place dans la liste (rangée par le `seq` de sa coupe).
+#[tokio::test]
+async fn restore_write_is_covered_by_its_version() {
+    let (f, id) = fresh_page().await;
+    let alice = new_user(&f.db).await;
+    let store = &f.store;
+    store
+        .append_updates(id, &[b"a"], Some(alice))
+        .await
+        .unwrap();
+    let older = store
+        .put_version(id, 1, b"ancienne", &[alice], VersionReason::Closing)
+        .await
+        .unwrap();
+    store
+        .append_updates(id, &[b"b"], Some(alice))
+        .await
+        .unwrap();
+    let newer = store
+        .put_version(id, 2, b"recente", &[alice], VersionReason::Closing)
+        .await
+        .unwrap();
+
+    let seq = store
+        .append_restore(id, b"restauree", Some(alice), older)
+        .await
+        .unwrap();
+    assert_eq!(seq, 3);
+    let covered = Unversioned {
+        versioned: true,
+        ..Unversioned::default()
+    };
+    assert_eq!(store.unversioned(id).await.unwrap(), covered, "rien après");
+    let order: Vec<Uuid> = store
+        .list_versions(id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|v| v.id)
+        .collect();
+    assert_eq!(order, [newer, older], "la liste ne bouge pas");
+
+    // Une écriture de plus ouvre une tranche, que la version restaurée ne couvre pas.
+    store
+        .append_updates(id, &[b"c"], Some(alice))
+        .await
+        .unwrap();
+    let fourth = int(&f.db, "SELECT created_at FROM doc_updates WHERE seq = 4").await;
+    assert_eq!(
+        store.unversioned(id).await.unwrap(),
+        Unversioned {
+            since: Some(fourth),
+            authors: vec![alice],
+            versioned: true,
+        }
+    );
+}
+
+/// L'écriture d'une restauration au journal et la borne de sa version vont ensemble, ou pas du
+/// tout : une version qui n'est pas de la page, ou une borne que la base refuse, n'écrivent rien
+/// au journal.
+#[tokio::test]
+async fn restore_write_and_its_bound_are_all_or_nothing() {
+    let (f, id) = fresh_page().await;
+    let other = f
+        .store
+        .create_node(page(&f.space, None, None, "Autre"))
+        .await
+        .unwrap()
+        .id;
+    let theirs = f
+        .store
+        .put_version(other, 0, b"e", &[], VersionReason::Closing)
+        .await
+        .unwrap();
+    let ours = f
+        .store
+        .put_version(id, 0, b"e", &[], VersionReason::Closing)
+        .await
+        .unwrap();
+    for version in [theirs, Uuid::now_v7()] {
+        assert!(matches!(
+            f.store.append_restore(id, b"r", None, version).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+    break_table(&f.db, "UPDATE", "doc_versions", "1").await;
+    assert!(f.store.append_restore(id, b"r", None, ours).await.is_err());
+    repair(&f.db).await;
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM doc_updates").await, 0);
+}

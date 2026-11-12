@@ -381,7 +381,7 @@ async fn migration_keeps_lot1_pages() {
     for (index, columns) in [
         ("comment_threads_by_node", &["node_id", "created_at"][..]),
         ("comments_by_thread", &["thread_id", "created_at"]),
-        ("doc_versions_by_node", &["node_id", "created_at"]),
+        ("doc_versions_by_node", &["node_id", "seq", "created_at"]),
         ("invitations_node_key", &["node_id"]),
         ("nodes_by_parent", &["space_id", "parent_id", "position"]),
         ("nodes_parent_key", &["parent_id"]),
@@ -828,8 +828,9 @@ async fn deleting_a_page_deletes_its_threads_versions_and_moves() {
         .await;
         exec(
             &pool,
-            "INSERT INTO doc_versions (id, node_id, seq, state_blob, reason, authors, created_at) \
-             VALUES (?1, ?2, 3, x'00ff', 'periodic', '[]', 1)",
+            "INSERT INTO doc_versions \
+             (id, node_id, seq, covers_seq, state_blob, reason, authors, created_at) \
+             VALUES (?1, ?2, 3, 3, x'00ff', 'periodic', '[]', 1)",
             &[&Uuid::now_v7().to_string(), &node],
         )
         .await;

@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use sqlx::Row;
 use uuid::Uuid;
 
+use crate::docs::append;
 use crate::{Author, Store, StoreError, now_ms, parse_uuid, unreadable};
 
 /// Versions gardées par page : au-delà, les plus anciennes partent.
@@ -127,11 +128,13 @@ impl Store {
         // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui échouerait.
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
-            "INSERT INTO doc_versions (id, node_id, seq, state_blob, reason, authors, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO doc_versions \
+             (id, node_id, seq, covers_seq, state_blob, reason, authors, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(&node)
+        .bind(seq)
         .bind(seq)
         .bind(state)
         .bind(reason.as_str())
@@ -253,6 +256,39 @@ impl Store {
         Ok(next)
     }
 
+    /// Écrit au journal la mise à jour d'une restauration de la version `version`, au nom de
+    /// `actor`, et rend son `seq` ; dans la même transaction, la version retient ce `seq` comme
+    /// le dernier où le contenu de la page valait elle (`covers_seq`, Ruling R197) : ce qui reste
+    /// à versionner ne compte que ce qui suit, et l'acteur qui se recharge sait que le contenu
+    /// est gardé. Les deux, ou rien : `NotFound` si la version n'est pas de cette page (ou si la
+    /// page ou le compte n'existe pas), sans rien écrire au journal. La version garde sa place
+    /// dans la liste, rangée par le `seq` de sa coupe.
+    pub async fn append_restore(
+        &self,
+        node_id: Uuid,
+        update: &[u8],
+        actor: Option<Uuid>,
+        version: Uuid,
+    ) -> Result<i64, StoreError> {
+        let (node, actor) = (node_id.to_string(), actor.map(|a| a.to_string()));
+        // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui échouerait.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let seq = append(&mut *tx, &node, update, actor.as_deref(), now_ms()).await?;
+        let bound =
+            sqlx::query("UPDATE doc_versions SET covers_seq = ? WHERE id = ? AND node_id = ?")
+                .bind(seq)
+                .bind(version.to_string())
+                .bind(&node)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        if bound == 0 {
+            return Err(StoreError::NotFound);
+        }
+        tx.commit().await?;
+        Ok(seq)
+    }
+
     /// La version `id` est-elle de cette page ? Sans lire son état : pour qui doit dire un refus
     /// avant d'en faire autre chose.
     pub async fn has_version(&self, node_id: Uuid, id: Uuid) -> Result<bool, StoreError> {
@@ -279,8 +315,10 @@ impl Store {
         Ok(row.map(|r| r.get(0)))
     }
 
-    /// Ce que le journal garde des écritures faites après la dernière version de la page
-    /// (celle de plus grand `seq` ; sans version, depuis la création), lu en une transaction :
+    /// Ce que le journal garde des écritures faites après que le contenu de la page a été,
+    /// pour la dernière fois, celui d'une version gardée (le plus grand `covers_seq` : la
+    /// dernière coupe, ou la dernière restauration, Ruling R197 ; sans version, depuis la
+    /// création), lu en une transaction :
     /// de quoi reprendre la tranche en cours quand l'acteur de la page redémarre (après un arrêt
     /// brutal, la version `closing` n'a pas été coupée).
     ///
@@ -292,7 +330,7 @@ impl Store {
     pub async fn unversioned(&self, node_id: Uuid) -> Result<Unversioned, StoreError> {
         let node = node_id.to_string();
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query("SELECT MAX(seq) FROM doc_versions WHERE node_id = ?")
+        let row = sqlx::query("SELECT MAX(covers_seq) FROM doc_versions WHERE node_id = ?")
             .bind(&node)
             .fetch_one(&mut *tx)
             .await?;
