@@ -21,14 +21,16 @@
 // qu'il est tombé, `live` est faux, et la barre latérale se rabat sur son minuteur de dix
 // secondes (R128) : ce sont les relectures existantes qui disent à l'écran ce qui se passe.
 import { useEffect, useRef, useState } from "react";
+import { groupedDelay, REREAD_DEBOUNCE_MS, REREAD_MAX_WAIT_MS } from "../rereads";
 
 /** Plusieurs trames qui se suivent ne font qu'une relecture, cette durée après la dernière. */
-export const EVENTS_DEBOUNCE_MS = 250;
+export const EVENTS_DEBOUNCE_MS = REREAD_DEBOUNCE_MS;
 /**
  * Une relecture part au plus tard cette durée après la première trame qu'elle doit traiter :
- * une suite de trames plus rapprochées que l'anti-rebond ne fige pas la barre latérale.
+ * une suite de trames plus rapprochées que l'anti-rebond ne fige pas la barre latérale. Le
+ * calcul est celui des relectures groupées (`groupedDelay`, `rereads.ts`).
  */
-export const EVENTS_MAX_WAIT_MS = 1_000;
+export const EVENTS_MAX_WAIT_MS = REREAD_MAX_WAIT_MS;
 /** Délai avant la première reconnexion ; il double à chaque échec. */
 export const RECONNECT_FIRST_MS = 1_000;
 /** Le délai de reconnexion ne dépasse jamais cela. */
@@ -119,10 +121,7 @@ export function useSpaceEvents(
         const now = Date.now();
         waitingSince ??= now;
         clearTimeout(debounce);
-        debounce = setTimeout(
-          fire,
-          Math.max(0, Math.min(EVENTS_DEBOUNCE_MS, waitingSince + EVENTS_MAX_WAIT_MS - now)),
-        );
+        debounce = setTimeout(fire, groupedDelay(waitingSince, now));
       };
       mine.onclose = () => {
         if (stopped || socket !== mine) return;

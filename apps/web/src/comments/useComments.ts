@@ -11,14 +11,15 @@
 // Rien sur le chemin de l'ouverture de la page : la première lecture attend la première synchro
 // de l'éditeur, et ne la retarde donc pas (budgets du §5.10).
 //
-// Les relectures sont groupées, comme celles de la barre latérale (`useSpaceEvents`) : une
-// rafale de trames n'en fait qu'une, `COMMENTS_DEBOUNCE_MS` après la dernière et au plus tard
+// Les relectures sont groupées (`rereads.ts`, comme celles de l'historique) : une rafale de
+// trames n'en fait qu'une, `COMMENTS_DEBOUNCE_MS` après la dernière et au plus tard
 // `COMMENTS_MAX_WAIT_MS` après la première. Une relecture demandée pendant une lecture ne
-// l'annule pas : elle est faite une fois, à sa fin. Une lecture partie avant une écriture d'ici
-// qui a abouti peut dater d'avant elle : sa réponse est laissée, et la lecture refaite. Une
-// lecture qui échoue garde ce qui était affiché, dit pourquoi, et ne se refait pas d'elle-même :
-// la prochaine trame, le retour de la connexion ou « Réessayer » la refont. Tout est lié à la
-// page : rien ne passe d'une page à l'autre, et plus rien n'est appelé après le démontage.
+// l'annule pas : elle est faite une fois, à sa fin. Ce qui est propre aux commentaires : une
+// lecture partie avant une écriture d'ici qui a abouti peut dater d'avant elle ; sa réponse est
+// laissée, et la lecture refaite. Une lecture qui échoue garde ce qui était affiché, dit
+// pourquoi, et ne se refait pas d'elle-même : la prochaine trame, le retour de la connexion ou
+// « Réessayer » la refont. Tout est lié à la page : rien ne passe d'une page à l'autre, et plus
+// rien n'est appelé après le démontage.
 import type { Comment, Thread } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -33,13 +34,13 @@ import {
   setReaction,
 } from "../api";
 import type { CollabSession } from "../editor/collab";
+import { REREAD_DEBOUNCE_MS, REREAD_MAX_WAIT_MS, scheduleRereads } from "../rereads";
 import { messageOf } from "../session/forms";
-import { EVENTS_DEBOUNCE_MS, EVENTS_MAX_WAIT_MS } from "../space/useSpaceEvents";
 
 /** Plusieurs trames qui se suivent ne font qu'une relecture, cette durée après la dernière. */
-export const COMMENTS_DEBOUNCE_MS = EVENTS_DEBOUNCE_MS;
+export const COMMENTS_DEBOUNCE_MS = REREAD_DEBOUNCE_MS;
 /** Une relecture part au plus tard cette durée après la première trame qu'elle doit traiter. */
-export const COMMENTS_MAX_WAIT_MS = EVENTS_MAX_WAIT_MS;
+export const COMMENTS_MAX_WAIT_MS = REREAD_MAX_WAIT_MS;
 
 /** `loading` : rien n'est encore lu ; `failed` : la dernière lecture a échoué. */
 export type CommentsState = "loading" | "ready" | "failed";
@@ -121,33 +122,17 @@ export function useComments(
   }, []);
 
   useEffect(() => {
-    let stopped = false;
-    /** Une lecture est en route. */
-    let reading = false;
-    /** Une relecture a été demandée pendant la lecture en route : elle sera faite à sa fin. */
-    let due = false;
-    /** Une relecture immédiate est prévue : une trame ne la repousse pas. */
-    let urgent = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    /** Quand la première demande non traitée est arrivée ; `null` : aucune en attente. */
-    let waitingSince: number | null = null;
-
-    const read = async () => {
-      clearTimeout(timer);
-      timer = undefined;
-      waitingSince = null;
-      urgent = false;
-      reading = true;
-      due = false;
+    // Groupées, jamais annulées en route, rien après l'arrêt (`rereads.ts`).
+    const rereads = scheduleRereads(async () => {
       const before = writes.current;
       try {
         const threads = await getComments(pageId);
-        if (stopped) return;
+        if (rereads.stopped) return;
         // Une écriture d'ici a abouti pendant la lecture : la réponse peut dater d'avant elle.
-        if (writes.current !== before) due = true;
-        else setLoaded({ pageId, threads, state: "ready", error: null });
+        if (writes.current !== before) return true;
+        setLoaded({ pageId, threads, state: "ready", error: null });
       } catch (e) {
-        if (stopped) return;
+        if (rereads.stopped) return;
         // Session perdue : la connexion est demandée par-dessus la page (`api.ts`), et la
         // connexion de synchro qui revient ensuite fait relire.
         if (!isSessionLost(e)) {
@@ -158,37 +143,12 @@ export function useComments(
             error: messageOf(e),
           }));
         }
-      } finally {
-        reading = false;
-        if (!stopped && due) void read();
       }
-    };
-
-    request.current = (immediate) => {
-      if (stopped) return;
-      if (reading) {
-        due = true;
-        return;
-      }
-      if (immediate) {
-        clearTimeout(timer);
-        urgent = true;
-        timer = setTimeout(() => void read(), 0);
-        return;
-      }
-      if (urgent) return;
-      const now = Date.now();
-      waitingSince ??= now;
-      clearTimeout(timer);
-      timer = setTimeout(
-        () => void read(),
-        Math.max(0, Math.min(COMMENTS_DEBOUNCE_MS, waitingSince + COMMENTS_MAX_WAIT_MS - now)),
-      );
-    };
+    });
+    request.current = rereads.request;
 
     return () => {
-      stopped = true;
-      clearTimeout(timer);
+      rereads.stop();
       request.current = () => {};
     };
   }, [pageId]);
