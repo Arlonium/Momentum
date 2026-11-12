@@ -1203,12 +1203,25 @@ impl Actor {
         (!update.clients.is_empty()).then(|| protocol::awareness(&update.encode_v1()))
     }
 
-    /// Écriture du serveur (`PUT /mmd`, restauration), au nom de `actor` : elle
-    /// compte dans l'historique comme celle d'un client (Ruling R135).
+    /// Écriture du serveur (`PUT /mmd`), au nom de `actor` : elle compte dans
+    /// l'historique comme celle d'un client (Ruling R135).
     async fn write(
         &mut self,
         blocks: Vec<Block>,
         actor: Option<Uuid>,
+    ) -> Result<Result<(), SyncError>, Broken> {
+        self.server_write(blocks, actor, true).await
+    }
+
+    /// Une écriture du serveur, au nom de `actor` : `PUT /mmd`, ou une
+    /// restauration. `opens_slice` : si elle change la page, elle entre dans la
+    /// tranche en cours ; une restauration ne le fait pas d'ordinaire, son
+    /// contenu étant celui d'une version gardée (Ruling R190).
+    async fn server_write(
+        &mut self,
+        blocks: Vec<Block>,
+        actor: Option<Uuid>,
+        opens_slice: bool,
     ) -> Result<Result<(), SyncError>, Broken> {
         self.version_if_due().await;
         let changes = self.watch.changes();
@@ -1221,7 +1234,9 @@ impl Actor {
             self.store_failed(&error).await?;
             return Ok(Err(error.into()));
         }
-        self.wrote(changes, actor);
+        if opens_slice {
+            self.wrote(changes, actor);
+        }
         self.broadcast(None, protocol::update(&update));
         self.compact_if_due().await;
         Ok(Ok(()))

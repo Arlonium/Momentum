@@ -291,14 +291,17 @@ impl PageDoc {
     /// refuserait (`Structure`) ou un arbre plus profond que
     /// [`MAX_YJS_DEPTH`](crate::MAX_YJS_DEPTH) (`TooDeep`).
     pub fn write_blocks(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
-        let blocks = match normalize(blocks.to_vec()) {
-            b if b.is_empty() => vec![empty_paragraph()],
-            b => b,
-        };
-        check_blocks(&blocks, Slot::Group, 2)?;
+        let blocks = writable(blocks)?;
         let mut txn = self.doc.transact_mut();
         self.write_all(&mut txn, &blocks);
         Ok(txn.encode_update_v1())
+    }
+
+    /// Les refus de [`PageDoc::write_blocks`], sans rien écrire : pour qui doit
+    /// savoir que l'écriture passera avant de faire autre chose (l'acteur de la
+    /// page, qui coupe une version avant une restauration).
+    pub fn check_writable(blocks: &[Block]) -> Result<(), CrdtError> {
+        writable(blocks).map(|_| ())
     }
 
     /// Écrit des blocs normalisés et vérifiés à la place de tout le contenu.
@@ -356,4 +359,15 @@ impl PageDoc {
     pub fn yrs_doc(&self) -> &Doc {
         &self.doc
     }
+}
+
+/// Les blocs que [`PageDoc::write_blocks`] écrit : normalisés, un paragraphe vide pour un
+/// arbre vide (Ruling R16), et refusés si BlockNote les refuserait (`Structure`, `TooDeep`).
+fn writable(blocks: &[Block]) -> Result<Vec<Block>, CrdtError> {
+    let blocks = match normalize(blocks.to_vec()) {
+        b if b.is_empty() => vec![empty_paragraph()],
+        b => b,
+    };
+    check_blocks(&blocks, Slot::Group, 2)?;
+    Ok(blocks)
 }

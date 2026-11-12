@@ -19,7 +19,7 @@ use std::time::Duration;
 use common::*;
 use mementum_crdt::PageDoc;
 use mementum_md::{Block, parse};
-use mementum_store::{MAX_VERSIONS, Version, VersionReason};
+use mementum_store::{MAX_BEFORE_RESTORE, MAX_VERSIONS, Version, VersionReason};
 use mementum_sync::{ConnInfo, SyncConfig, SyncError};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -343,9 +343,11 @@ async fn server_write_counts_like_a_client_write() {
 
 /// Restaurer écrit les blocs de la version par-dessus le contenu, avec leurs identifiants, par
 /// une écriture ordinaire : les connexions la reçoivent par la synchro, avec la trame
-/// `versions`. Juste avant, une version `before_restore` garde ce qui est remplacé, avec les
-/// auteurs de la tranche ; elle se restaure à son tour, et la restauration compte au nom de qui
-/// l'a demandée.
+/// `versions`. Quand la page a changé depuis sa dernière version, une version `before_restore`
+/// garde juste avant ce qui est remplacé, avec les auteurs de la tranche ; elle se restaure à son
+/// tour. Une restauration qui suit une restauration, sans écriture entre elles, ne coupe rien : ce
+/// qu'elle remplace est le contenu d'une version gardée (Ruling R190). L'écriture d'une
+/// restauration n'ouvre pas de tranche : l'acteur qui s'arrête ensuite ne coupe rien.
 #[tokio::test]
 async fn restore_cuts_a_version_of_what_it_replaces() {
     let _clock = StoppedClock::start();
@@ -393,30 +395,164 @@ async fn restore_cuts_a_version_of_what_it_replaces() {
     assert_eq!(version_blocks(&f, kept[0].id).await, replaced);
     assert_eq!(authors(&kept[0]), [carol]);
 
-    // Ce qui a été remplacé se restaure à son tour ; ce qu'il remplace, la version restaurée,
-    // est gardé de même, au nom de Bob, qui a restauré.
+    // Ce qui a été remplacé se restaure à son tour, sans rien couper : ce que cette
+    // restauration remplace est le contenu de la première version, toujours gardée.
     let before_restore = kept[0].id;
     f.hub
         .restore_version(f.page, before_restore, Some(alice))
         .await
         .unwrap();
     assert_eq!(f.hub.read_blocks(f.page).await.unwrap(), replaced);
+    assert_eq!(versions(&f).await, kept, "rien de coupé");
+    assert_eq!(version_blocks(&f, first).await, first_blocks);
+
+    // Une écriture, puis une restauration : la page a changé, ce qu'elle remplace est gardé.
+    types(&observer, "Quatre").await;
+    let changed = f.hub.read_blocks(f.page).await.unwrap();
+    f.hub
+        .restore_version(f.page, first, Some(bob))
+        .await
+        .unwrap();
     let kept = versions(&f).await;
     assert_eq!(kept.len(), 3, "{kept:?}");
     assert_eq!(kept[0].reason, VersionReason::BeforeRestore);
-    assert_eq!(version_blocks(&f, kept[0].id).await, first_blocks);
-    assert_eq!(authors(&kept[0]), [bob]);
+    assert_eq!(version_blocks(&f, kept[0].id).await, changed);
+    assert_eq!(authors(&kept[0]), [carol]);
 
     drop(observer);
     actor_stops(&f).await;
-    let kept = versions(&f).await;
-    assert_eq!(kept.len(), 4, "{kept:?}");
-    assert_eq!(kept[0].reason, VersionReason::Closing);
     assert_eq!(
-        authors(&kept[0]),
-        [alice],
-        "la restauration compte au nom d'Alice"
+        versions(&f).await,
+        kept,
+        "l'écriture de la restauration n'ouvre pas de tranche"
     );
+}
+
+/// Restaurer tour à tour deux versions, sans écriture entre elles, ne coupe rien : ce que chaque
+/// restauration remplace est le contenu d'une version gardée (Ruling R190). Avant, chacune
+/// coupait une version `before_restore`, et cent requêtes vidaient l'historique.
+#[tokio::test]
+async fn alternating_restores_cut_nothing() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    f.write_mmd("A\n").await;
+    actor_stops(&f).await;
+    f.write_mmd("B\n").await;
+    actor_stops(&f).await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 2);
+    let (b, a) = (kept[0].id, kept[1].id);
+    let _open = f.client().await;
+    for round in 0..50 {
+        let (version, expected) = if round % 2 == 0 { (a, "A") } else { (b, "B") };
+        f.hub
+            .restore_version(f.page, version, Some(alice))
+            .await
+            .unwrap();
+        assert_eq!(live_text(&f).await, expected, "tour {round}");
+    }
+    assert_eq!(versions(&f).await, kept, "rien de coupé");
+}
+
+/// Une boucle « écriture puis restauration », cent fois, après cent versions ordinaires : chaque
+/// restauration coupe sa version `before_restore` (la page a changé), mais une page n'en garde
+/// que vingt (Ruling R189) : il reste au moins quatre-vingts versions `periodic` et `closing`
+/// d'avant, dont celle qu'on restaure.
+#[tokio::test]
+async fn write_and_restore_loop_keeps_the_versions_from_before() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let (alice, mallory) = (new_user(&f.db).await, new_user(&f.db).await);
+    let open = f.client().await;
+    // Une version avant chaque écriture qui suit la première ; aucune attente après la
+    // dernière : les écritures de la boucle ne coupent pas de version périodique.
+    for i in 0..=MAX_VERSIONS {
+        if i > 0 {
+            advance(INTERVAL + Duration::from_secs(1)).await;
+        }
+        f.hub
+            .write_blocks(f.page, parse(&format!("Texte {i}\n")).unwrap(), Some(alice))
+            .await
+            .unwrap();
+    }
+    let before: Vec<Uuid> = versions(&f).await.iter().map(|v| v.id).collect();
+    assert_eq!(before.len(), MAX_VERSIONS);
+    let target = before[0];
+    for i in 0..100 {
+        f.hub
+            .write_blocks(
+                f.page,
+                parse(&format!("Vandale {i}\n")).unwrap(),
+                Some(mallory),
+            )
+            .await
+            .unwrap();
+        f.hub
+            .restore_version(f.page, target, Some(mallory))
+            .await
+            .unwrap();
+    }
+    let kept = versions(&f).await;
+    let ordinary: Vec<Uuid> = kept
+        .iter()
+        .filter(|v| v.reason != VersionReason::BeforeRestore)
+        .map(|v| v.id)
+        .collect();
+    let restores = kept.len() - ordinary.len();
+    assert!(
+        restores <= MAX_BEFORE_RESTORE,
+        "{restores} versions d'avant restauration"
+    );
+    assert!(
+        ordinary.len() >= MAX_VERSIONS - MAX_BEFORE_RESTORE,
+        "{} versions ordinaires gardées",
+        ordinary.len()
+    );
+    assert!(ordinary.iter().all(|id| before.contains(id)));
+    assert!(
+        ordinary.contains(&target),
+        "la version restaurée est restée"
+    );
+    drop(open);
+}
+
+/// Le cas limite de la règle : la version restaurée est la prochaine que la purge retirerait.
+/// Sans écriture, aucune version n'est coupée, donc aucune n'est purgée ; mais la première coupe
+/// suivante l'emporterait, et l'état que la page a gardé depuis la restauration ne serait plus
+/// atteignable seul. L'écriture de la restauration ouvre donc une tranche dans ce cas : la version
+/// `closing` en garde une copie neuve, qui survit à la purge de l'ancienne (Ruling R190).
+#[tokio::test]
+async fn restored_version_next_in_line_for_purge_is_kept_afresh() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let open = f.client().await;
+    for i in 0..=MAX_VERSIONS {
+        f.write_mmd(&format!("Texte {i}\n")).await;
+        advance(INTERVAL + Duration::from_secs(1)).await;
+    }
+    drop(open);
+    actor_stops(&f).await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), MAX_VERSIONS);
+    let oldest = kept[MAX_VERSIONS - 1].id;
+    let oldest_blocks = version_blocks(&f, oldest).await;
+
+    f.hub
+        .restore_version(f.page, oldest, Some(alice))
+        .await
+        .unwrap();
+    actor_stops(&f).await;
+    let now = versions(&f).await;
+    assert_eq!(now.len(), MAX_VERSIONS);
+    assert!(
+        now.iter().all(|v| v.id != oldest),
+        "la version restaurée est partie à la coupe suivante"
+    );
+    assert_eq!(now[0].reason, VersionReason::Closing);
+    assert_eq!(version_blocks(&f, now[0].id).await, oldest_blocks);
+    assert_eq!(authors(&now[0]), [alice]);
 }
 
 /// Restaurer ce que la page a déjà comme contenu ne change rien : ni écriture au journal, ni

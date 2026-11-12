@@ -218,6 +218,38 @@ impl Store {
         Ok(versions)
     }
 
+    /// Les versions de la page que la purge retirerait si une version de plus y était écrite
+    /// maintenant, de quelque sorte qu'elle soit : la plus ancienne `before_restore` si la page
+    /// en garde déjà [`MAX_BEFORE_RESTORE`], la plus ancienne de toutes si elle en garde déjà
+    /// [`MAX_VERSIONS`]. Lu en une transaction.
+    pub async fn next_purged(&self, node_id: Uuid) -> Result<Vec<Uuid>, StoreError> {
+        let node = node_id.to_string();
+        let mut tx = self.pool.begin().await?;
+        let mut next = Vec::new();
+        for (reason, cap) in [
+            (Some(VersionReason::BeforeRestore), MAX_BEFORE_RESTORE),
+            (None, MAX_VERSIONS),
+        ] {
+            let row = sqlx::query(
+                "SELECT id FROM doc_versions \
+                 WHERE node_id = ?1 AND (?2 IS NULL OR reason = ?2) \
+                   AND (SELECT COUNT(*) FROM doc_versions \
+                        WHERE node_id = ?1 AND (?2 IS NULL OR reason = ?2)) >= ?3 \
+                 ORDER BY seq, created_at, id LIMIT 1",
+            )
+            .bind(&node)
+            .bind(reason.map(VersionReason::as_str))
+            .bind(cap as i64)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(row) = row {
+                next.push(parse_uuid(&row.get::<String, _>(0))?);
+            }
+        }
+        tx.commit().await?;
+        Ok(next)
+    }
+
     /// L'état gardé de la version `id`, tel qu'il a été écrit, si elle est de cette page ;
     /// `None` si elle est d'une autre page, ou n'existe pas (la même réponse).
     pub async fn get_version(

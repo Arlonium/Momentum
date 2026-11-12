@@ -359,3 +359,41 @@ async fn version_just_written_survives_a_clock_that_went_back() {
         Some(b"neuve".to_vec())
     );
 }
+
+/// Ce que la purge retirerait à la version suivante : rien sous les plafonds ; la plus ancienne
+/// de toutes à cent ; la plus ancienne `before_restore` à vingt de cette sorte.
+#[tokio::test]
+async fn next_purged_names_what_the_next_version_would_push_out() {
+    let (f, id) = fresh_page().await;
+    let mut ordinary = Vec::new();
+    for seq in 0..(MAX_VERSIONS - MAX_BEFORE_RESTORE) as i64 {
+        ordinary.push(
+            f.store
+                .put_version(id, seq, b"o", &[], VersionReason::Periodic)
+                .await
+                .unwrap(),
+        );
+    }
+    assert!(f.store.next_purged(id).await.unwrap().is_empty());
+    let mut before = Vec::new();
+    for seq in 0..MAX_BEFORE_RESTORE as i64 {
+        let seq = (MAX_VERSIONS - MAX_BEFORE_RESTORE) as i64 + seq;
+        before.push(
+            f.store
+                .put_version(id, seq, b"r", &[], VersionReason::BeforeRestore)
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        f.store.next_purged(id).await.unwrap(),
+        [before[0], ordinary[0]]
+    );
+    assert!(
+        f.store
+            .next_purged(Uuid::now_v7())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

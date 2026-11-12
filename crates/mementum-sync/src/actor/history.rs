@@ -213,16 +213,28 @@ impl Actor {
 
     /// Ruling R135 : restaure la version `version`, au nom de `actor`. Ses blocs
     /// sont lus dans un document à part, bâti depuis l'état gardé, puis écrits
-    /// par-dessus le contenu vivant par une écriture ordinaire ([`Actor::write`] :
-    /// journal, diffusion, compaction), avec leurs identifiants : les fils de
-    /// commentaires retrouvent leurs blocs. Juste avant, dans la même commande
-    /// (rien ne passe entre les deux), une version `before_restore` garde ce
-    /// qui est remplacé ; si le store la refuse, rien n'est restauré.
+    /// par-dessus le contenu vivant par une écriture du serveur (journal,
+    /// diffusion, compaction), avec leurs identifiants : les fils de
+    /// commentaires retrouvent leurs blocs. Une édition faite en même temps sur
+    /// le contenu remplacé est perdue, comme sous `PUT /mmd` (Ruling R188).
+    ///
+    /// Ruling R190 : une version `before_restore` garde ce qui est remplacé,
+    /// dans la même commande (rien ne passe entre les deux), **si la page a
+    /// changé depuis sa dernière version** ; sinon ce qui est remplacé est déjà
+    /// le contenu d'une version gardée (la dernière coupée, ou la dernière
+    /// restaurée), et restaurable. Si le store la refuse, rien n'est restauré.
+    /// L'écriture d'une restauration n'ouvre pas de tranche, son contenu étant
+    /// celui de la version : des restaurations successives, sans écriture entre
+    /// elles, ne coupent rien. Sauf quand la version restaurée est la prochaine
+    /// que la purge retirerait : l'état que la page garde ensuite ne serait plus
+    /// atteignable seul après la coupe suivante, et l'écriture ouvre alors une
+    /// tranche, que la coupe suivante garde comme une version neuve.
     ///
     /// Une version qui n'est pas de cette page, ou qui n'existe pas :
     /// `NotFound`. Un état gardé que la page ne relit pas (base abîmée) : une
-    /// erreur, sans toucher au document. Restaurer ce que la page a déjà comme
-    /// contenu ne fait rien : ni écriture, ni version (Ruling R180).
+    /// erreur, sans toucher au document. Des blocs que l'écriture refuserait
+    /// sont refusés avant de couper quoi que ce soit. Restaurer ce que la page a
+    /// déjà comme contenu ne fait rien : ni écriture, ni version (Ruling R180).
     pub(super) async fn restore(
         &mut self,
         version: Uuid,
@@ -244,10 +256,20 @@ impl Actor {
         if blocks == self.page.read_blocks() {
             return Ok(Ok(()));
         }
-        if let Err(error) = self.cut_version(VersionReason::BeforeRestore).await {
+        if let Err(error) = PageDoc::check_writable(&blocks) {
+            return Ok(Err(error.into()));
+        }
+        // Avant toute coupe : celle d'avant restauration peut elle-même la purger.
+        let next_in_line = match self.store.next_purged(self.id.node_id).await {
+            Ok(next) => next.contains(&version),
+            Err(error) => return Ok(Err(error.into())),
+        };
+        if self.slice.since.is_some()
+            && let Err(error) = self.cut_version(VersionReason::BeforeRestore).await
+        {
             tracing::warn!(node_id = %self.id.node_id, version_id = %version, %error, "version d'avant restauration impossible à écrire : rien n'est restauré");
             return Ok(Err(error.into()));
         }
-        self.write(blocks, actor).await
+        self.server_write(blocks, actor, next_in_line).await
     }
 }
