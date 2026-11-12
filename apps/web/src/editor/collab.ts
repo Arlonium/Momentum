@@ -89,7 +89,17 @@ export class CollabSession {
       // Ni curseur ni présence : rien de cet onglet n'est annoncé.
       this.provider.awareness.setLocalState(null);
       const local = new Y.Doc();
-      const mirror = (update: Uint8Array) => Y.applyUpdate(local, update, this.provider);
+      // La copie suit dans l'événement `update` du document du serveur : une exception de
+      // l'éditeur (un observateur de la copie) remonterait dans la transaction de ce document, et
+      // le laisserait bloqué, sans plus rien émettre ni appeler. Elle est donc attrapée ici et
+      // journalisée ; la copie a reçu la mise à jour, et l'éditeur montre ce qu'il peut.
+      const mirror = (update: Uint8Array) => {
+        try {
+          Y.applyUpdate(local, update, this.provider);
+        } catch (error) {
+          console.error("Mementum : l'éditeur en lecture seule n'a pas pu montrer un changement.", error);
+        }
+      };
       shared.on("update", mirror);
       this.cleanups.push(() => {
         shared.off("update", mirror);

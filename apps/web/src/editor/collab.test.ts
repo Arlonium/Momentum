@@ -434,3 +434,42 @@ describe("watchdog", () => {
     expect(session.roster).toEqual([ALICE]);
   }, 10_000);
 });
+
+describe("read_only_copy", () => {
+  test("an_exception_in_the_editor_never_blocks_the_document_that_receives", async () => {
+    // Une session en lecture seule : l'éditeur est lié à une copie locale, qui suit le document
+    // du serveur (`provider.doc`) dans son événement `update`. Un observateur de la copie qui lève
+    // (ce que ferait y-prosemirror sur un changement qu'il ne sait pas montrer) ne doit pas
+    // remonter dans la transaction du document qui reçoit : il resterait bloqué, sans plus rien
+    // émettre ni appeler, même après la fermeture de l'éditeur.
+    const session = open(true, () => new Promise<boolean>(() => {}));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const shared = session.provider.doc;
+    expect(session.doc).not.toBe(shared);
+    let failing = true;
+    session.doc.getXmlFragment(FRAGMENT).observeDeep(() => {
+      if (failing) throw new Error("éditeur en erreur");
+    });
+    let updates = 0;
+    let observed = 0;
+    shared.on("update", () => {
+      updates += 1;
+    });
+    shared.getXmlFragment(FRAGMENT).observeDeep(() => {
+      observed += 1;
+    });
+
+    const server = serverDoc();
+    expect(() => Y.applyUpdate(shared, Y.encodeStateAsUpdate(server))).not.toThrow();
+    expect(logged).toHaveBeenCalledTimes(1);
+    // Le document qui reçoit n'est pas bloqué : le changement suivant est émis et observé.
+    const before = Y.encodeStateVector(server);
+    server.getXmlFragment(FRAGMENT).insert(1, [new Y.XmlElement("blockGroup")]);
+    failing = false;
+    expect(() => Y.applyUpdate(shared, Y.encodeStateAsUpdate(server, before))).not.toThrow();
+    expect(updates).toBe(2);
+    expect(observed).toBe(2);
+    // La copie a reçu les deux : rien n'est perdu pour l'éditeur, qui montre ce qu'il peut.
+    expect(session.doc.getXmlFragment(FRAGMENT).length).toBe(2);
+  });
+});
