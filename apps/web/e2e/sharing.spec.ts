@@ -207,8 +207,10 @@ test("revoked_user_loses_the_page", async ({ browser }) => {
   await expect(treeRow(b, shared.id)).toBeVisible();
 
   // Les lectures de la page par l'onglet de B sont retenues : le temps de taper entre le
-  // retrait et l'écran qui l'annonce.
+  // retrait et l'écran qui l'annonce. Celles de l'arbre aussi : relu, il ne porte plus la page
+  // (ou plus son niveau), et l'écran l'annoncerait avant l'heure.
   const reads = await holdPageReads(b, shared.id);
+  const tree = await holdTreeReads(b);
   // A retire l'accès de B, par le menu Partager ; une fenêtre de la page le fait confirmer.
   const menu = await openShareMenu(a);
   await expect(levelOf(menu, bruno)).toHaveValue("edit");
@@ -232,6 +234,7 @@ test("revoked_user_loses_the_page", async ({ browser }) => {
   await expect(editor).toContainText("Avant le retrait, et après");
   const released = Date.now();
   reads.release();
+  tree.release();
   // En moins de 5 s (sans compter le temps de la frappe retenue), B sait qu'il a perdu la page.
   await expect(accessLost(b)).toBeVisible({ timeout: 5_000 });
   expect(reconnecting + (Date.now() - released)).toBeLessThan(5_000);
@@ -973,8 +976,10 @@ test("change_refused_after_full_access_was_lost_elsewhere", async ({ browser }) 
   await expect(levelOf(menu, bruno)).toHaveValue("full");
 
   // Pendant que le menu de B est ouvert, A le fait passer en modification. La relecture de la
-  // page par l'onglet de B est retenue : son écran croit encore qu'il a l'accès complet.
+  // page par l'onglet de B est retenue, et celle de l'arbre aussi (il porte le niveau de la
+  // page) : son écran croit encore qu'il a l'accès complet.
   const reads = await holdPageReads(b, shared.id);
+  const tree = await holdTreeReads(b);
   await setPageLevel(aliceApi, shared.id, brunoId, "edit");
   const refused = await (await apiAs(bruno)).get(`/api/v1/pages/${shared.id}/access`);
   expect(refused.status()).toBe(403);
@@ -992,6 +997,7 @@ test("change_refused_after_full_access_was_lost_elsewhere", async ({ browser }) 
 
   // La page relue, il n'a plus le bouton Partager ; il la modifie toujours.
   reads.release();
+  tree.release();
   await expect(shareButton(b)).toHaveCount(0);
   await waitSynced(b);
   await expect(b.locator(".bn-editor")).toHaveAttribute("contenteditable", "true");
@@ -1009,8 +1015,9 @@ test("revocation_refused_after_full_access_was_lost_elsewhere", async ({ browser
   await expect(pendingRow(menu, email)).toBeVisible();
 
   // Pendant que le menu de B est ouvert, A le fait passer en modification ; la relecture de la
-  // page par son onglet est retenue.
+  // page par son onglet est retenue, et celle de l'arbre aussi (il porte le niveau de la page).
   const reads = await holdPageReads(b, shared.id);
+  const tree = await holdTreeReads(b);
   await setPageLevel(aliceApi, shared.id, brunoId, "edit");
   const refused = await (await apiAs(bruno)).get(`/api/v1/pages/${shared.id}/access`);
   expect(refused.status()).toBe(403);
@@ -1026,6 +1033,7 @@ test("revocation_refused_after_full_access_was_lost_elsewhere", async ({ browser
   expect((await getAccess(aliceApi, shared.id)).invitations.map((i) => i.id)).toEqual([id]);
 
   reads.release();
+  tree.release();
   await expect(shareButton(b)).toHaveCount(0);
 });
 
