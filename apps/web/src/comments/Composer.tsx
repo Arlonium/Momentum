@@ -5,9 +5,20 @@
 // essai ; une session perdue n'affiche rien : la connexion est demandée par-dessus la page. Le
 // texte tapé va dans son brouillon (`drafts.ts`), qui survit à la zone : il part quand le texte
 // est envoyé, ou annulé. Pendant l'envoi, le champ est en lecture seule (pas désactivé : il
-// garde le focus) et le bouton inactif ; un second envoi ne part pas. À la réussite, le texte
-// envoyé est retiré ; à l'échec, tout est rendu tel quel.
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+// garde le focus) et le bouton inactif ; un second envoi ne part pas. L'envoi en cours est tenu
+// par le brouillon (`Drafts.startSending`), pas par la zone : une zone recréée pendant l'envoi
+// (son fil change de liste) est verrouillée elle aussi, et suit l'issue de l'envoi. À la
+// réussite, le texte envoyé est retiré ; à l'échec, tout est rendu tel quel.
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import { isSessionLost } from "../api";
 import { messageOf } from "../session/forms";
 import type { Drafts } from "./drafts";
@@ -52,8 +63,29 @@ export function Composer({
   const [error, setError] = useState<string | null>(null);
   const field = useRef<HTMLTextAreaElement>(null);
   const errorId = useId();
-  /** Un envoi est en route : vrai dès le premier, avant tout rendu (deux Ctrl+Entrée coup sur coup). */
+  /**
+   * Sans brouillon : un envoi est en route, vrai dès le premier, avant tout rendu (deux
+   * Ctrl+Entrée coup sur coup). Avec un brouillon, c'est lui qui le tient.
+   */
   const sending = useRef(false);
+  const store = draft?.store;
+  const key = draft?.key;
+  const subscribe = useCallback(
+    (listener: () => void) => (store ? store.subscribe(listener) : () => {}),
+    [store],
+  );
+  /** Un envoi du brouillon est en route, parti d'ici ou d'une zone d'avant un remontage. */
+  const draftSending = useSyncExternalStore(subscribe, () =>
+    store && key !== undefined ? store.isSending(key) : false,
+  );
+  // Un envoi s'achève : le texte suit le brouillon (retiré à la réussite, gardé à l'échec).
+  const wasSending = useRef(draftSending);
+  useEffect(() => {
+    if (wasSending.current && !draftSending && store && key !== undefined) {
+      setText(store.has(key) ? store.get(key) : clearOnSent ? "" : initial);
+    }
+    wasSending.current = draftSending;
+  }, [draftSending, store, key, clearOnSent, initial]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -73,20 +105,29 @@ export function Composer({
   }, [autoFocus]);
 
   const empty = text.trim() === "";
+  const locked = busy || draftSending;
 
   const send = async () => {
-    if (empty || sending.current) return;
-    sending.current = true;
+    if (empty) return;
+    if (store && key !== undefined) {
+      if (!store.startSending(key)) return;
+    } else {
+      if (sending.current) return;
+      sending.current = true;
+    }
+    const sent = text;
+    let succeeded = false;
     setBusy(true);
     setError(null);
     try {
-      await onSubmit(text);
-      draft?.store.drop(draft.key);
-      if (mounted.current && clearOnSent) setText("");
+      await onSubmit(sent);
+      succeeded = true;
+      if (!store && mounted.current && clearOnSent) setText("");
     } catch (e) {
       if (mounted.current && !isSessionLost(e)) setError(messageOf(e));
     } finally {
-      sending.current = false;
+      if (store && key !== undefined) store.finishSending(key, sent, succeeded);
+      else sending.current = false;
       if (mounted.current) setBusy(false);
     }
   };
@@ -115,7 +156,7 @@ export function Composer({
         dir="auto"
         rows={2}
         value={text}
-        readOnly={busy}
+        readOnly={locked}
         aria-describedby={error ? errorId : undefined}
         onChange={(event) => {
           setText(event.target.value);
@@ -145,7 +186,7 @@ export function Composer({
           type="submit"
           className="mm-button mm-button-primary mm-button-small"
           aria-label={submitName}
-          aria-disabled={empty || busy || undefined}
+          aria-disabled={empty || locked || undefined}
         >
           {submitLabel}
         </button>

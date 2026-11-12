@@ -89,3 +89,69 @@ test("a_refused_send_gives_everything_back", async () => {
   expect(drafts.get(DRAFT.page)).toBe("refusé");
   expect(host.querySelector('[role="alert"]')?.textContent).toBe("il faut « Peut commenter »");
 });
+
+// L'envoi en cours vit avec le brouillon, pas dans le composant : le fil change de liste pendant
+// l'envoi, et le champ recréé depuis le brouillon est verrouillé lui aussi.
+
+function reply(key: string, drafts: ReturnType<typeof createDrafts>, onSubmit: (body: string) => Promise<void>) {
+  return (
+    <Composer
+      key={key}
+      label="Répondre au fil"
+      submitLabel="Envoyer"
+      draft={{ store: drafts, key: DRAFT.reply("t") }}
+      onSubmit={onSubmit}
+    />
+  );
+}
+
+test("two_ctrl_enter_around_a_remount_send_once", async () => {
+  const answer = deferred<void>();
+  const onSubmit = vi.fn(() => answer.promise);
+  const drafts = createDrafts();
+  await act(async () => root.render(reply("avant", drafts, onSubmit)));
+  await type(host.querySelector("textarea")!, "une seule réponse");
+  await act(async () => ctrlEnter(host.querySelector("textarea")!));
+  // Le fil change de liste : le champ est recréé, depuis son brouillon.
+  await act(async () => root.render(reply("après", drafts, onSubmit)));
+  const field = host.querySelector("textarea")!;
+  expect(field.value).toBe("une seule réponse");
+  const probe = () => ({ lockedAfterRemount: field.readOnly, calls: onSubmit.mock.calls.length });
+  await act(async () => ctrlEnter(field));
+  expect(probe()).toEqual({ lockedAfterRemount: true, calls: 1 });
+  // L'envoi aboutit : le texte envoyé ne reste pas dans le champ recréé, qui se déverrouille.
+  await act(async () => answer.resolve());
+  expect(field.value).toBe("");
+  expect(field.readOnly).toBe(false);
+  expect(drafts.has(DRAFT.reply("t"))).toBe(false);
+});
+
+test("a_send_refused_after_a_remount_unlocks_and_keeps_the_text", async () => {
+  const answer = deferred<void>();
+  const drafts = createDrafts();
+  await act(async () => root.render(reply("avant", drafts, () => answer.promise)));
+  await type(host.querySelector("textarea")!, "à garder");
+  await act(async () => ctrlEnter(host.querySelector("textarea")!));
+  await act(async () => root.render(reply("après", drafts, () => answer.promise)));
+  const field = host.querySelector("textarea")!;
+  expect(field.readOnly).toBe(true);
+  await act(async () => answer.reject(new ApiError(409, "trashed", "cette page est à la corbeille")));
+  expect(field.value).toBe("à garder");
+  expect(field.readOnly).toBe(false);
+  expect(drafts.get(DRAFT.reply("t"))).toBe("à garder");
+});
+
+test("a_draft_changed_during_the_send_is_not_removed", () => {
+  // Défense : à la réussite, le brouillon n'est retiré que s'il vaut encore le texte envoyé.
+  const drafts = createDrafts();
+  drafts.set(DRAFT.page, "envoyé");
+  drafts.startSending(DRAFT.page);
+  expect(drafts.isSending(DRAFT.page)).toBe(true);
+  drafts.set(DRAFT.page, "envoyé, puis autre chose");
+  drafts.finishSending(DRAFT.page, "envoyé", true);
+  expect(drafts.get(DRAFT.page)).toBe("envoyé, puis autre chose");
+  expect(drafts.isSending(DRAFT.page)).toBe(false);
+  drafts.startSending(DRAFT.page);
+  drafts.finishSending(DRAFT.page, "envoyé, puis autre chose", true);
+  expect(drafts.has(DRAFT.page)).toBe(false);
+});

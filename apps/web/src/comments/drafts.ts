@@ -8,6 +8,11 @@
 // Un brouillon dont la cible n'existe plus après une relecture des fils (le fil, ou le message
 // qu'on modifiait, a été supprimé entre-temps) n'est pas jeté en silence : il sort des brouillons
 // et devient « orphelin », que le panneau montre, avec son texte, jusqu'à ce qu'on l'écarte.
+//
+// L'envoi en cours vit ici aussi, par la clé du brouillon, et non dans la zone de rédaction : un
+// champ recréé pendant l'envoi (le fil change de liste) est verrouillé lui aussi, et un second
+// Ctrl+Entrée n'envoie rien. À la réussite, le brouillon n'est retiré que s'il vaut encore le
+// texte envoyé ; à l'échec, le verrou tombe et le texte reste.
 import type { Thread } from "@mementum/protocol";
 
 /** Un brouillon dont la cible a disparu : le fil d'une réponse, ou le message d'une modification. */
@@ -29,6 +34,16 @@ export type Drafts = {
   orphans(): OrphanDraft[];
   /** Écarte un orphelin : son texte part pour de bon. */
   dismiss(key: string): void;
+  /** Le texte du brouillon `key` part au serveur : rend faux s'il y partait déjà. */
+  startSending(key: string): boolean;
+  isSending(key: string): boolean;
+  /**
+   * L'envoi de `sent` s'achève : à la réussite, le brouillon part s'il vaut encore `sent` ; dans
+   * tous les cas, le verrou tombe.
+   */
+  finishSending(key: string, sent: string, succeeded: boolean): void;
+  /** Appelle `listener` quand un envoi commence ou s'achève. */
+  subscribe(listener: () => void): () => void;
 };
 
 const REPLY = "reply:";
@@ -45,6 +60,11 @@ export const DRAFT = {
 export function createDrafts(): Drafts {
   const texts = new Map<string, string>();
   const orphaned: OrphanDraft[] = [];
+  const sending = new Set<string>();
+  const listeners = new Set<() => void>();
+  const notify = () => {
+    for (const listener of [...listeners]) listener();
+  };
   return {
     get: (key) => texts.get(key) ?? "",
     set: (key, text) => {
@@ -76,6 +96,22 @@ export function createDrafts(): Drafts {
     dismiss: (key) => {
       const at = orphaned.findIndex((orphan) => orphan.key === key);
       if (at !== -1) orphaned.splice(at, 1);
+    },
+    startSending: (key) => {
+      if (sending.has(key)) return false;
+      sending.add(key);
+      notify();
+      return true;
+    },
+    isSending: (key) => sending.has(key),
+    finishSending: (key, sent, succeeded) => {
+      if (succeeded && texts.get(key) === sent) texts.delete(key);
+      sending.delete(key);
+      notify();
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
     },
   };
 }
