@@ -167,6 +167,25 @@ test("commenter_who_cannot_edit_comments", async ({ browser }) => {
   expect(await getMmd(aliceApi, page.id)).toBe(before);
 });
 
+test("commenter_comments_the_selected_block_with_ctrl_alt_m", async ({ browser }) => {
+  const { aliceApi, bruno, page } = await scene("comment");
+  const before = await getMmd(aliceApi, page.id);
+  const commenter = await openPage(browser, page.id, bruno);
+  await expect(commenter.locator(".mm-editor")).toHaveAttribute("data-editable", "false");
+  // Au clavier, sans poignée ni survol : la sélection du document dit le bloc (R176).
+  await blockOf(commenter, "Deuxième bloc").locator(".bn-inline-content").first().selectText();
+  await commenter.keyboard.press("Control+Alt+m");
+  const panel = commentsPanel(commenter);
+  const field = panel.getByRole("textbox", { name: "Commenter le bloc" });
+  await expect(field).toBeFocused();
+  await expect(panel).toContainText("Deuxième bloc");
+  await commenter.keyboard.type("Choisi au clavier");
+  await commenter.keyboard.press("Control+Enter");
+  await expect(threadOf(panel, "Choisi au clavier")).toBeVisible();
+  await expect(markOf(commenter, "Deuxième bloc")).toBeVisible();
+  expect(await getMmd(aliceApi, page.id)).toBe(before);
+});
+
 test("reader_reads_comments_and_cannot_write_one", async ({ browser }) => {
   const { alice, aliceApi, bruno, page } = await scene("read");
   const owner = await openPage(browser, page.id, alice);

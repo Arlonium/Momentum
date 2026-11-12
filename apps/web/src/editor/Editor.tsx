@@ -4,7 +4,8 @@
 //
 // Le menu d'un bloc (sa poignée, à gauche) garde les entrées de BlockNote et gagne
 // « Commenter », qui ouvre le panneau des commentaires sur ce bloc ; au clavier, Ctrl+Alt+M
-// (Cmd+Option+M) commente le bloc où est le curseur. Rien n'est écrit dans le document : le
+// (Cmd+Option+M ; la lettre tapée, pas la position de la touche) commente le bloc où est le
+// curseur. Rien n'est écrit dans le document : le
 // commentaire part par l'API (R134). BlockNote ne montre pas la poignée d'un éditeur en
 // lecture seule : pour qui commente sans modifier, c'est la marge qui l'offre (`BlockMarks`).
 import "@blocknote/mantine/style.css";
@@ -48,6 +49,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import * as Y from "yjs";
+import { isCommentShortcut } from "../comments/shortcut";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug } from "./debug";
 import { fixtureInput, replaceNewPage } from "./fixtures";
@@ -178,13 +180,12 @@ export function Editor({ session, fixture = null, onComment = null }: Props) {
     };
   }, [onComment]);
 
-  /** Ctrl+Alt+M (Cmd+Option+M) : commenter le bloc où est le curseur. */
+  /**
+   * Ctrl+Alt+M (Cmd+Option+M) : commenter le bloc où est le curseur. La lettre tapée fait foi,
+   * et AltGr garde ses caractères (`isCommentShortcut`).
+   */
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (onComment === null || !event.altKey || !(event.ctrlKey || event.metaKey)) return;
-    // AltGr (Ctrl+Alt sous Windows) tape des caractères : il garde sa touche.
-    if (event.getModifierState("AltGraph")) return;
-    // La touche, pas le caractère : Option la change sur Mac (« µ »).
-    if (event.code !== "KeyM" || !editor.isFocused()) return;
+    if (onComment === null || !isCommentShortcut(event) || !editor.isFocused()) return;
     event.preventDefault();
     onComment(editor.getTextCursorPosition().block.id);
   };

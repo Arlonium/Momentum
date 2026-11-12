@@ -18,6 +18,22 @@ export function blockElement(root: ParentNode, blockId: string): HTMLElement | n
   return root.querySelector<HTMLElement>(`${BLOCK}[data-id=${cssString(blockId)}]`);
 }
 
+/**
+ * Le bloc où est la sélection du document (son point de départ), s'il est sous `root` ; sinon
+ * `null`. Pour Ctrl+Alt+M dans un éditeur en lecture seule, qui n'a pas de curseur à lui : une
+ * sélection à la souris, ou le curseur de la navigation au curseur du navigateur (F7). Le bloc
+ * le plus profond : un bloc imbriqué plutôt que son parent, un tableau pour une de ses cellules.
+ */
+export function blockOfSelection(root: Element, selection: Selection | null): string | null {
+  if (selection === null || selection.rangeCount === 0) return null;
+  const node = selection.anchorNode;
+  if (node === null) return null;
+  const element = node instanceof Element ? node : node.parentElement;
+  const block = element?.closest(`${BLOCK}[data-id]`);
+  if (!block || !root.contains(block)) return null;
+  return block.getAttribute("data-id");
+}
+
 /** Le texte propre d'un bloc (sans celui de ses blocs enfants). */
 export function blockText(element: Element): string {
   return (

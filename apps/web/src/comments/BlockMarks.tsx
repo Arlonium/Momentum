@@ -17,10 +17,12 @@
 //
 // Pour qui peut commenter sans pouvoir modifier, l'éditeur est en lecture seule, et BlockNote n'y
 // montre pas la poignée des blocs (ni son menu, ni « Commenter ») : un bouton « Commenter ce
-// bloc » suit alors le bloc survolé, dans la même marge.
+// bloc » suit alors le bloc survolé, dans la même marge, et Ctrl+Alt+M commente le bloc où est
+// la sélection du document (R176).
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { CommentIcon } from "../icons";
-import { BLOCK, blockElement, blockText, shorten } from "./dom";
+import { BLOCK, blockElement, blockOfSelection, blockText, shorten } from "./dom";
+import { isCommentShortcut } from "./shortcut";
 
 /** Plus de blocs que cela à chercher : un seul parcours de la page plutôt qu'une recherche par bloc. */
 const FULL_SCAN_AT = 8;
@@ -36,7 +38,8 @@ export class BlockTracker {
   private readonly elements = new Map<string, Element>();
   /** Les blocs cherchés sans succès : ils ne le sont de nouveau que sur demande. */
   private readonly absent = new Set<string>();
-  private readonly root: () => Element | null;
+  /** L'éditeur affiché, sous lequel les blocs sont cherchés ; `null` : pas encore là. */
+  readonly root: () => Element | null;
 
   constructor(root: () => Element | null) {
     this.root = root;
@@ -285,13 +288,25 @@ export function BlockMarks({
       );
     };
     const onLeave = () => setHover(null);
+    // Au clavier : Ctrl+Alt+M commente le bloc où est la sélection du document (à la souris, ou
+    // par la navigation au curseur du navigateur, F7). Rien ne s'écrit dans le document.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !isCommentShortcut(event)) return;
+      const editor = tracker.root();
+      const blockId = editor === null ? null : blockOfSelection(editor, document.getSelection());
+      if (blockId === null) return;
+      event.preventDefault();
+      onComment(blockId);
+    };
     root.addEventListener("mousemove", onMove);
     root.addEventListener("mouseleave", onLeave);
+    document.addEventListener("keydown", onKey);
     return () => {
       root.removeEventListener("mousemove", onMove);
       root.removeEventListener("mouseleave", onLeave);
+      document.removeEventListener("keydown", onKey);
     };
-  }, [onComment, frame]);
+  }, [onComment, frame, tracker]);
 
   // Le bloc qu'un fil fait voir : un fond qui s'efface, posé par-dessus, hors du document.
   useEffect(() => {
