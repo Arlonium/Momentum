@@ -8,6 +8,7 @@ import {
   closeContexts,
   createPage,
   getMmd,
+  newUser,
   openPage,
   ownerAndMember,
   putMmd,
@@ -15,6 +16,7 @@ import {
   setPageLevel,
   trashBanner,
   unique,
+  waitSynced,
   watchWrites,
 } from "./helpers";
 
@@ -88,6 +90,18 @@ function threadOf(scope: Locator, body: string): Locator {
   return scope.getByRole("article").filter({ hasText: body });
 }
 
+/**
+ * Survole `target`, et attend que la page l'ait vu (`:hover`) puis ait rendu deux images : ce qui
+ * réagit au survol a eu le temps de paraître. Avant d'affirmer qu'un bouton n'est pas là.
+ */
+async function hoverAndSettle(p: Page, target: Locator): Promise<void> {
+  await target.hover();
+  await expect.poll(() => target.evaluate((element) => element.matches(":hover"))).toBe(true);
+  await p.evaluate(
+    () => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))),
+  );
+}
+
 /** Ouvre le menu de la poignée d'un bloc et y choisit `item`. */
 async function blockMenu(p: Page, text: string, item: string): Promise<void> {
   await blockOf(p, text).locator(OWN_CONTENT).hover();
@@ -144,13 +158,12 @@ test("commenter_who_cannot_edit_comments", async ({ browser }) => {
   const { alice, aliceApi, bruno, page } = await scene("comment");
   const before = await getMmd(aliceApi, page.id);
   const commenter = await openPage(browser, page.id, bruno);
-  const writes = watchWrites(commenter);
   // L'éditeur est en lecture seule.
   await expect(readerBanner(commenter)).toBeVisible();
   await expect(commenter.locator(".mm-editor")).toHaveAttribute("data-editable", "false");
 
   // Un bloc : la poignée de BlockNote n'est pas là, la marge offre « Commenter ce bloc ».
-  await blockOf(commenter, "Premier bloc").locator(".bn-block-content").first().hover();
+  await blockOf(commenter, "Premier bloc").locator(OWN_CONTENT).hover();
   await commenter.getByRole("button", { name: "Commenter ce bloc" }).click();
   const panel = commentsPanel(commenter);
   const field = panel.getByRole("textbox", { name: "Commenter le bloc" });
@@ -170,8 +183,8 @@ test("commenter_who_cannot_edit_comments", async ({ browser }) => {
   const ownerPanel = await openComments(owner);
   await expect(threadOf(ownerPanel, "Une remarque sur le premier bloc")).toBeVisible();
   await expect(threadOf(ownerPanel, "Et une sur la page")).toBeVisible();
-  // Rien n'est parti dans le document.
-  expect(writes).toEqual([]);
+  // Rien n'a changé dans le document. (Une session en lecture seule n'écrit rien de toute façon :
+  // l'écriture se surveille dans l'éditeur modifiable, `ctrl_alt_m_comments_the_block_of_the_cursor`.)
   expect(await getMmd(aliceApi, page.id)).toBe(before);
 });
 
@@ -195,7 +208,7 @@ test("commenter_comments_the_selected_block_with_ctrl_alt_m", async ({ browser }
 });
 
 test("reader_reads_comments_and_cannot_write_one", async ({ browser }) => {
-  const { alice, aliceApi, bruno, page } = await scene("read");
+  const { alice, aliceApi, bruno, brunoId, page } = await scene("read");
   const owner = await openPage(browser, page.id, alice);
   const blockId = await blockIdOf(owner, "Deuxième bloc");
   const thread = await openThread(aliceApi, page.id, blockId, "Un fil à lire");
@@ -216,9 +229,18 @@ test("reader_reads_comments_and_cannot_write_one", async ({ browser }) => {
     await expect(panel.getByRole("button", { name })).toHaveCount(0);
   }
   await expect(shown.getByRole("list", { name: "Réactions" }).getByRole("button")).toHaveCount(0);
-  // Ni « Commenter ce bloc » dans la marge.
-  await blockOf(reader, "Premier bloc").locator(".bn-block-content").first().hover();
+  // Ni « Commenter ce bloc » dans la marge : le survol a été vu, et le bouton n'est pas venu.
+  const premier = blockOf(reader, "Premier bloc").locator(OWN_CONTENT);
+  await hoverAndSettle(reader, premier);
   await expect(reader.getByRole("button", { name: "Commenter ce bloc" })).toHaveCount(0);
+  // Contrôle : au niveau « Peut commenter », le même survol le fait paraître.
+  await setPageLevel(aliceApi, page.id, brunoId, "comment");
+  await expect(panel.getByRole("textbox", { name: "Commenter la page" })).toBeVisible({
+    timeout: 10_000,
+  });
+  await reader.mouse.move(1, 1);
+  await hoverAndSettle(reader, premier);
+  await expect(reader.getByRole("button", { name: "Commenter ce bloc" })).toBeVisible();
 });
 
 test("resolve_hides_the_thread_and_reopen_brings_it_back", async ({ browser }) => {
@@ -323,10 +345,25 @@ test("the_panel_closes_with_escape_and_gives_the_focus_back", async ({ browser }
 });
 
 test("ctrl_alt_m_comments_the_block_of_the_cursor", async ({ browser }) => {
-  const { alice, page } = await scene("read");
-  const owner = await openPage(browser, page.id, alice);
-  await blockOf(owner, "Troisième bloc").locator(".bn-block-content").first().click();
-  await owner.keyboard.press("Control+Alt+KeyM");
+  const { alice, aliceApi, page } = await scene("read");
+  const before = await getMmd(aliceApi, page.id);
+  // L'éditeur se modifie : c'est là qu'une écriture pourrait partir. On écoute ce qu'envoie sa
+  // connexion de synchro dès l'ouverture.
+  const owner = await newUser(browser, alice);
+  const writes = watchWrites(owner);
+  await owner.goto(`/p/${page.id}`);
+  await waitSynced(owner);
+  await expect(owner.locator(".mm-editor")).toHaveAttribute("data-editable", "true");
+  // Par le menu de la poignée.
+  await blockMenu(owner, "Premier bloc", "Commenter");
+  await commentsPanel(owner).getByRole("textbox", { name: "Commenter le bloc" }).fill("Par le menu");
+  await commentsPanel(owner).getByRole("button", { name: "Commenter le bloc" }).click();
+  await expect(markOf(owner, "Premier bloc")).toBeVisible();
+  await owner.keyboard.press("Escape");
+  await expect(commentsPanel(owner)).toHaveCount(0);
+  // Par le raccourci, la lettre « m » tapée.
+  await blockOf(owner, "Troisième bloc").locator(OWN_CONTENT).click();
+  await owner.keyboard.press("Control+Alt+m");
   const panel = commentsPanel(owner);
   const field = panel.getByRole("textbox", { name: "Commenter le bloc" });
   await expect(field).toBeFocused();
@@ -338,4 +375,7 @@ test("ctrl_alt_m_comments_the_block_of_the_cursor", async ({ browser }) => {
   await owner.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);
   await expect(owner.locator(".bn-editor")).toBeFocused();
+  // Rien n'est parti dans le document, ni par le menu ni par le raccourci.
+  expect(writes).toEqual([]);
+  expect(await getMmd(aliceApi, page.id)).toBe(before);
 });
