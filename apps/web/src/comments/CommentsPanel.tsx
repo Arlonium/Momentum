@@ -11,6 +11,12 @@
 // cliquable : les fils se lisent. À la corbeille, tout se lit et rien ne s'écrit. Un onglet
 // d'un autre schéma que le serveur (R35) n'écrit rien non plus, comme pour le menu Partager.
 //
+// Le droit d'écrire peut partir pendant qu'on rédige (un refus du serveur fait relire la page,
+// qui dit un niveau plus bas ou la corbeille) : les zones disparaissent, pas leurs brouillons.
+// Ils sont montrés en haut, dans « Textes non envoyés », avec la raison (le refus du serveur, ou
+// « Tu ne peux plus écrire ici. ») et « Écarter » ; si le droit revient, chacun retrouve sa
+// zone, sans rien envoyer de lui-même ni prendre le focus.
+//
 // Au clavier : le panneau prend le focus à son ouverture (sur le fil choisi, ou sur la zone du
 // bloc à commenter) ; Échap le ferme, sauf depuis une fenêtre de confirmation, qui a le sien.
 // C'est la page qui rend le focus où il était (`useCommentsPanel`). Après chaque action, le focus
@@ -26,6 +32,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
 } from "react";
 import { CloseIcon } from "../icons";
@@ -119,6 +126,11 @@ export function CommentsPanel({
   const targetBlock = target?.kind === "block" ? target.blockId : null;
   const composing = givenComposing === undefined ? targetBlock : givenComposing;
   const write = canWrite(rights);
+  // Un refus qui arrive, un brouillon écarté : l'encart des textes non envoyés suit.
+  const draftsChanged = useCallback((listener: () => void) => drafts.subscribe(listener), [drafts]);
+  useSyncExternalStore(draftsChanged, drafts.version);
+  /** Les brouillons qu'aucune zone ne peut plus montrer : la personne ne peut plus écrire ici. */
+  const unsent = write ? [] : drafts.list();
   const { threads } = comments;
   const arranged = useMemo(
     () => threads && arrangeThreads(threads, order, absent),
@@ -308,7 +320,7 @@ export function CommentsPanel({
           <CloseIcon />
         </button>
       </div>
-      {orphans.length > 0 && (
+      {(orphans.length > 0 || unsent.length > 0) && (
         <section className="mm-comments-orphans" aria-label="Textes non envoyés">
           <ul>
             {orphans.map((orphan) => (
@@ -326,6 +338,29 @@ export function CommentsPanel({
                   className="mm-button mm-button-small"
                   aria-label="Écarter ce texte"
                   onClick={() => onDismissOrphan(orphan.key)}
+                >
+                  Écarter
+                </button>
+              </li>
+            ))}
+            {unsent.map((draft) => (
+              <li key={draft.key}>
+                {/* Le refus du serveur tel qu'il le dit, comme sous la zone qui a envoyé. */}
+                <p className="mm-comments-orphan-lead">
+                  {drafts.refusal(draft.key) ?? "Tu ne peux plus écrire ici."}
+                </p>
+                <p className="mm-comments-orphan-text mm-isolate" dir="auto">
+                  {draft.text}
+                </p>
+                <button
+                  type="button"
+                  className="mm-button mm-button-small"
+                  aria-label="Écarter ce texte"
+                  onClick={() => {
+                    drafts.drop(draft.key);
+                    // Le commentaire neuf d'un bloc, sans texte : sa zone ne reviendra pas.
+                    if (composing !== null && draft.key === DRAFT.block(composing)) onTargetDone();
+                  }}
                 >
                   Écarter
                 </button>

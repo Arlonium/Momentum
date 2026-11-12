@@ -8,7 +8,10 @@
 // garde le focus) et le bouton inactif ; un second envoi ne part pas. L'envoi en cours est tenu
 // par le brouillon (`Drafts.startSending`), pas par la zone : une zone recréée pendant l'envoi
 // (son fil change de liste) est verrouillée elle aussi, et suit l'issue de l'envoi. À la
-// réussite, le texte envoyé est retiré ; à l'échec, tout est rendu tel quel.
+// réussite, le texte envoyé est retiré ; à l'échec, tout est rendu tel quel, et le refus est
+// gardé avec le brouillon (`Drafts.refuse`). Une zone ne s'affiche que pour qui peut écrire :
+// sans ce droit, son brouillon est montré par le panneau, et la retrouve si le droit revient,
+// sans rien envoyer de lui-même.
 import {
   useCallback,
   useEffect,
@@ -124,7 +127,12 @@ export function Composer({
       succeeded = true;
       if (!store && mounted.current && clearOnSent) setText("");
     } catch (e) {
-      if (mounted.current && !isSessionLost(e)) setError(messageOf(e));
+      if (!isSessionLost(e)) {
+        // Le brouillon garde la raison, même si la zone est partie entre-temps : si le droit
+        // d'écrire est perdu, le panneau la montre avec le texte.
+        if (store && key !== undefined) store.refuse(key, messageOf(e));
+        if (mounted.current) setError(messageOf(e));
+      }
     } finally {
       if (store && key !== undefined) store.finishSending(key, sent, succeeded);
       else sending.current = false;

@@ -13,6 +13,11 @@
 // champ recréé pendant l'envoi (le fil change de liste) est verrouillé lui aussi, et un second
 // Ctrl+Entrée n'envoie rien. À la réussite, le brouillon n'est retiré que s'il vaut encore le
 // texte envoyé ; à l'échec, le verrou tombe et le texte reste.
+//
+// Le refus du serveur aussi (`refuse`) : quand le droit d'écrire part (le refus a fait relire la
+// page, qui dit un niveau plus bas ou la corbeille), les champs disparaissent, et le panneau
+// montre leurs brouillons avec ce message, que la zone de rédaction ne peut plus dire. Il tombe
+// dès que le texte change ou repart.
 import type { Thread } from "@mementum/protocol";
 
 /** Un brouillon dont la cible a disparu : le fil d'une réponse, ou le message d'une modification. */
@@ -25,6 +30,12 @@ export type Drafts = {
   set(key: string, text: string): void;
   drop(key: string): void;
   has(key: string): boolean;
+  /** Les brouillons, dans l'ordre où ils ont été commencés. */
+  list(): { key: string; text: string }[];
+  /** Le serveur a refusé le texte du brouillon `key` : son message, tel qu'il le dit. */
+  refuse(key: string, message: string): void;
+  /** Le message du dernier refus du texte du brouillon, s'il n'a pas changé depuis. */
+  refusal(key: string): string | null;
   /**
    * Après une relecture des fils : les brouillons dont le fil ou le message n'est plus dans
    * `threads` deviennent orphelins. Rend vrai si la liste des orphelins a changé.
@@ -42,8 +53,13 @@ export type Drafts = {
    * tous les cas, le verrou tombe.
    */
   finishSending(key: string, sent: string, succeeded: boolean): void;
-  /** Appelle `listener` quand un envoi commence ou s'achève. */
+  /**
+   * Appelle `listener` quand un envoi commence ou s'achève, quand un texte est refusé, et
+   * quand un brouillon est retiré (`drop`).
+   */
   subscribe(listener: () => void): () => void;
+  /** Change à chaque appel des écouteurs de `subscribe`. */
+  version(): number;
 };
 
 const REPLY = "reply:";
@@ -59,22 +75,37 @@ export const DRAFT = {
 
 export function createDrafts(): Drafts {
   const texts = new Map<string, string>();
+  const refusals = new Map<string, string>();
   const orphaned: OrphanDraft[] = [];
   const sending = new Set<string>();
   const listeners = new Set<() => void>();
+  let version = 0;
   const notify = () => {
+    version += 1;
     for (const listener of [...listeners]) listener();
   };
   return {
     get: (key) => texts.get(key) ?? "",
     set: (key, text) => {
+      // Un texte qui change n'est plus celui que le serveur a refusé.
+      if (texts.get(key) !== text) refusals.delete(key);
       if (text === "") texts.delete(key);
       else texts.set(key, text);
     },
     drop: (key) => {
       texts.delete(key);
+      refusals.delete(key);
+      notify();
     },
     has: (key) => texts.has(key),
+    list: () => [...texts].map(([key, text]) => ({ key, text })),
+    refuse: (key, message) => {
+      // Un brouillon retiré pendant l'envoi : rien à expliquer.
+      if (!texts.has(key)) return;
+      refusals.set(key, message);
+      notify();
+    },
+    refusal: (key) => refusals.get(key) ?? null,
     settle: (threads) => {
       const threadIds = new Set(threads.map((t) => t.id));
       const commentIds = new Set(threads.flatMap((t) => t.comments.map((c) => c.id)));
@@ -87,6 +118,7 @@ export function createDrafts(): Drafts {
             : false;
         if (gone === false) continue;
         texts.delete(key);
+        refusals.delete(key);
         orphaned.push({ key, kind: gone, text });
         changed = true;
       }
@@ -100,6 +132,7 @@ export function createDrafts(): Drafts {
     startSending: (key) => {
       if (sending.has(key)) return false;
       sending.add(key);
+      refusals.delete(key);
       notify();
       return true;
     },
@@ -113,5 +146,6 @@ export function createDrafts(): Drafts {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    version: () => version,
   };
 }

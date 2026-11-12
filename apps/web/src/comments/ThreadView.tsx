@@ -157,7 +157,9 @@ export function ThreadView({
         {thread.comments.map((comment) => (
           <li key={comment.id} className="mm-comment">
             <MessageHead comment={comment} now={now} />
-            {editing?.id === comment.id ? (
+            {/* Sans le droit de modifier, le brouillon de la modification est montré en haut du
+                panneau, et le message tel qu'il est ici ; le champ revient avec le droit. */}
+            {editing?.id === comment.id && canEditMessage(rights, comment) ? (
               <Composer
                 label="Modifier le message"
                 submitLabel="Enregistrer"
