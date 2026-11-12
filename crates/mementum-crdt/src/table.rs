@@ -30,6 +30,15 @@ use crate::blocknote::{
 
 const COLWIDTH: &str = "colwidth";
 
+/// Marge du bourrage : la lecture en grille ajoute au plus autant de cellules
+/// vides que de cellules lues, plus cette marge (Ruling R147), une ligne
+/// entière à la largeur maximale d'un tableau. Un petit tableau inégal est
+/// donc toujours bourré ;
+/// seule une forme qui demanderait bien plus de cellules vides que le
+/// document n'en porte se lit en une colonne. La marge vaut par tableau, et
+/// une page en porte plusieurs : elle reste petite.
+const PADDING_ALLOWANCE: usize = 100;
+
 fn empty_cell() -> Cell {
     Cell {
         content: vec![],
@@ -153,7 +162,8 @@ struct Grid {
 ///   cellules vides au bout.
 ///
 /// `None` si ces cellules vides seraient plus nombreuses que les cellules
-/// lues (Ruling R147) : le calcul s'arrête alors, sans rien allouer de plus.
+/// lues plus [`PADDING_ALLOWANCE`] (Ruling R147) : le calcul s'arrête alors,
+/// dès la ligne qui dépasse, sans rien allouer de plus.
 /// Sinon, le coût est en `O(n log n)` pour `n` cellules, quels que soient
 /// la largeur de la grille et les `colspan` ou `rowspan` écrits.
 fn grid(wanted: &[Vec<Span>]) -> Option<Grid> {
@@ -217,7 +227,7 @@ fn grid(wanted: &[Vec<Span>]) -> Option<Grid> {
         let covered = taken.width + placed.iter().map(|s| s.colspan).sum::<usize>();
         let pad = width.saturating_sub(covered);
         padded = padded.saturating_add(pad);
-        if padded > cells {
+        if padded > cells.saturating_add(PADDING_ALLOWANCE) {
             return None;
         }
         for (index, (&start, span)) in starts.iter().zip(&placed).enumerate() {

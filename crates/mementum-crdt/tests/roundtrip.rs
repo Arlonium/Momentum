@@ -188,8 +188,8 @@ proptest! {
     /// Rulings R54 et R137 : quoi qu'un client écrive dans un tableau, la page
     /// le lit en une grille que `parse` accepte, et le MMD rendu redonne
     /// exactement les blocs lus. Aucune cellule n'est perdue ni répétée, le
-    /// bourrage ne fait au plus que doubler les cellules lues, et ce MMD,
-    /// écrit tel quel (`PUT /mmd`), se relit pareil.
+    /// bourrage ne dépasse pas les cellules lues plus cent (Ruling R147), et
+    /// ce MMD, écrit tel quel (`PUT /mmd`), se relit pareil.
     #[test]
     fn any_yjs_table_reads_as_mmd_that_parses(rows in client_table()) {
         let page = client_table_page(&rows);
@@ -217,10 +217,14 @@ proptest! {
             .collect();
         prop_assert_eq!(read, written, "MMD :\n{}", markdown);
         // Cellules lues : celles du client, plus une par ligne sans cellule
-        // (une ligne s'il n'y en a pas).
+        // (une ligne s'il n'y en a pas) ; le bourrage en ajoute au plus
+        // autant, plus cent.
         let real = rows.iter().map(|r| r.len().max(1)).sum::<usize>().max(1);
         let total: usize = table.rows.iter().map(Vec::len).sum();
-        prop_assert!(total <= 2 * real, "{} cellules pour {} lues\nMMD :\n{}", total, real, markdown);
+        prop_assert!(
+            total <= 2 * real + 100,
+            "{} cellules pour {} lues\nMMD :\n{}", total, real, markdown
+        );
 
         let (fresh, _) = PageDoc::new_page();
         fresh.write_blocks(&parsed).expect("écriture");

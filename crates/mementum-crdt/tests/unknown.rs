@@ -421,25 +421,16 @@ fn row_covered_by_rowspans_is_read_with_its_cells() {
     );
 }
 
-/// Ruling R147 : le bourrage ne dépasse jamais le nombre de cellules lues.
-/// Au-delà, le tableau se lit en une seule colonne, une cellule par ligne,
-/// dans l'ordre du document, sans fusion : aucune cellule n'est perdue, et
-/// la lecture reste proportionnelle à ce que le document porte, quelles que
-/// soient la forme des lignes et la taille des fusions.
+/// Ruling R147 : le bourrage ne dépasse jamais le nombre de cellules lues,
+/// plus cent cellules (une ligne entière à la largeur maximale d'un
+/// tableau) : un petit tableau est toujours bourré. Au-delà, le tableau se
+/// lit en une seule colonne, une cellule par ligne, dans l'ordre du
+/// document, sans fusion : aucune cellule n'est perdue, et la lecture reste
+/// proportionnelle à ce que le document porte, quelles que soient la forme
+/// des lignes et la taille des fusions.
 #[test]
-fn padding_never_exceeds_the_cells_read() {
-    // Six cellules lues, six de bourrage : en grille.
-    let page = client_table(vec![
-        vec![th("a"), th("b"), th("c"), th("d")],
-        vec![td("e")],
-        vec![td("f")],
-    ]);
-    assert_eq!(
-        readable_mmd(&page),
-        "| a | b | c | d |\n| --- | --- | --- | --- |\n| e |  |  |  |\n| f |  |  |  |\n"
-    );
-
-    // Sept lues, huit de bourrage : en une colonne.
+fn padding_beyond_its_allowance_reads_in_one_column() {
+    // Sept cellules lues, huit de bourrage : en grille.
     let page = client_table(vec![
         vec![th("a"), th("b"), th("c"), th("d"), th("e")],
         vec![td("f")],
@@ -447,8 +438,29 @@ fn padding_never_exceeds_the_cells_read() {
     ]);
     assert_eq!(
         readable_mmd(&page),
-        "| a |\n| --- |\n| b |\n| c |\n| d |\n| e |\n| f |\n| g |\n{header-rows=5}\n"
+        "| a | b | c | d | e |\n| --- | --- | --- | --- | --- |\n| f |  |  |  |  |\n\
+         | g |  |  |  |  |\n"
     );
+
+    // Une ligne de quatre cellules, puis `n` lignes d'une : `4 + n` lues,
+    // `3n` de bourrage.
+    let ragged = |n: usize| {
+        let mut rows = vec![vec![th("a"), th("b"), th("c"), th("d")]];
+        rows.extend((0..n).map(|_| vec![td("y")]));
+        client_table(rows)
+    };
+    // 52 lignes : 156 de bourrage pour 56 lues, juste à la borne : en grille.
+    let at_bound = format!(
+        "| a | b | c | d |\n| --- | --- | --- | --- |\n{}",
+        "| y |  |  |  |\n".repeat(52)
+    );
+    assert_eq!(readable_mmd(&ragged(52)), at_bound);
+    // 53 lignes : 159 de bourrage pour 57 lues, au-delà : en une colonne.
+    let beyond = format!(
+        "| a |\n| --- |\n| b |\n| c |\n| d |\n{}{{header-rows=4}}\n",
+        "| y |\n".repeat(53)
+    );
+    assert_eq!(readable_mmd(&ragged(53)), beyond);
 
     // Une ligne de 1 000 cellules, dont la première porte des fusions
     // démesurées, puis 1 000 lignes d'une cellule : près d'un million de
