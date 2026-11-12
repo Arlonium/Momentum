@@ -31,7 +31,7 @@
 //! possible à l'inscription (Ruling R89).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
@@ -57,6 +57,11 @@ const CLOSE_GRACE: Duration = Duration::from_secs(1);
 /// Attente maximale d'un acteur par [`Hub::kick`] et [`Hub::forget`] : passé
 /// ce délai, sa demande reste dans sa boîte, et l'appelant n'attend plus.
 const ASK_WAIT: Duration = Duration::from_secs(2);
+
+/// Attente maximale des acteurs par [`Hub::shutdown`] : le temps de couper la
+/// version `closing` de chaque page ouverte (l'état complet d'une page de
+/// 10 000 blocs s'encode et s'écrit en quelques dizaines de millisecondes).
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(10);
 
 /// Ce que la poignée de main sait d'une connexion. Le hub ne lit ni session
 /// ni droits : c'est à l'appelant de les vérifier, et de les résumer ici.
@@ -104,6 +109,8 @@ pub struct Hub {
     cfg: SyncConfig,
     actors: Mutex<HashMap<Uuid, Entry>>,
     generations: AtomicU64,
+    /// Le serveur s'arrête ([`Hub::shutdown`]) : plus aucun acteur ne démarre.
+    closed: AtomicBool,
     /// Le hub lui-même, sans le garder en vie : les acteurs s'en servent pour
     /// quitter le registre.
     me: Weak<Hub>,
@@ -121,6 +128,7 @@ impl Hub {
             cfg,
             actors: Mutex::new(HashMap::new()),
             generations: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
             me: me.clone(),
         })
     }
@@ -169,6 +177,33 @@ impl Hub {
     ) -> Result<(), SyncError> {
         self.call(node_id, |reply| Command::Write {
             blocks: blocks.clone(),
+            actor,
+            reply,
+        })
+        .await?
+    }
+
+    /// Restaure la version `version` de la page, au nom de `actor` (le compte
+    /// qui la demande), Ruling R135. L'acteur coupe d'abord une version
+    /// `before_restore` de ce qu'elle remplace, puis écrit les blocs de la
+    /// version par-dessus le contenu, avec leurs identifiants, comme une
+    /// écriture du serveur : persistée, puis diffusée à toutes les connexions,
+    /// qui reçoivent aussi la trame `versions`. Rien ne passe entre les deux.
+    ///
+    /// `Err(NotFound)` si la version n'est pas de cette page, ou n'existe pas
+    /// (comme pour une page inconnue) ; `Err(Crdt(Decode))` si son état gardé
+    /// est illisible, sans toucher au document ; `Err(Store)` si la version
+    /// `before_restore` n'a pas pu être écrite, et rien n'est restauré.
+    /// Restaurer ce que la page a déjà comme contenu ne fait rien : ni
+    /// écriture, ni version.
+    pub async fn restore_version(
+        &self,
+        node_id: Uuid,
+        version: Uuid,
+        actor: Option<Uuid>,
+    ) -> Result<(), SyncError> {
+        self.call(node_id, |reply| Command::Restore {
+            version,
             actor,
             reply,
         })
@@ -357,7 +392,7 @@ impl Hub {
     /// store lent) : la demande reste alors dans sa boîte, et les connexions
     /// sont fermées dès qu'il la lit.
     pub async fn kick(&self, node_ids: &[Uuid]) {
-        self.ask_all(node_ids, |reply| Command::Kick { reply })
+        self.ask_all(node_ids, ASK_WAIT, |reply| Command::Kick { reply })
             .await;
     }
 
@@ -385,7 +420,7 @@ impl Hub {
     /// [`Hub::serve_connection_if`]).
     pub async fn kick_user(&self, user: Uuid) {
         let live = self.live_pages().await;
-        self.ask_all(&live, |reply| Command::KickUser { user, reply })
+        self.ask_all(&live, ASK_WAIT, |reply| Command::KickUser { user, reply })
             .await;
     }
 
@@ -455,7 +490,25 @@ impl Hub {
     /// Comme [`Hub::kick`], elle n'attend jamais plus de deux secondes un
     /// acteur occupé, qui s'arrête alors dès qu'il lit la demande.
     pub async fn forget(&self, node_ids: &[Uuid]) {
-        self.ask_all(node_ids, |reply| Command::Forget { reply })
+        self.ask_all(node_ids, ASK_WAIT, |reply| Command::Forget { reply })
+            .await;
+    }
+
+    /// Le serveur s'arrête : chaque acteur vivant coupe sa version `closing`
+    /// s'il lui reste des écritures non versionnées (Ruling R135), ferme ses
+    /// connexions et quitte le registre ; ensuite, plus aucun acteur ne
+    /// démarre (les demandes reçoivent `Err(Closed)`). À appeler quand le
+    /// serveur HTTP n'accepte plus de requête, avant de fermer le store.
+    ///
+    /// La fonction rend quand tous l'ont fait, dix secondes au plus
+    /// (`SHUTDOWN_WAIT`). Une version que le store refuse est journalisée, et
+    /// l'acteur s'arrête quand même. Après un arrêt brutal, seule cette version
+    /// manque : le contenu est au journal, et l'acteur suivant y relit la
+    /// tranche en cours.
+    pub async fn shutdown(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let live = self.live_pages().await;
+        self.ask_all(&live, SHUTDOWN_WAIT, |reply| Command::Shutdown { reply })
             .await;
     }
 
@@ -469,9 +522,13 @@ impl Hub {
     }
 
     /// Envoie une demande à l'acteur vivant de chacune de ces pages, sans en
-    /// lancer aucun, et attend qu'ils l'aient tous traitée, [`ASK_WAIT`] au
-    /// plus.
-    async fn ask_all(&self, node_ids: &[Uuid], make: impl Fn(oneshot::Sender<()>) -> Command) {
+    /// lancer aucun, et attend qu'ils l'aient tous traitée, `wait` au plus.
+    async fn ask_all(
+        &self,
+        node_ids: &[Uuid],
+        wait: Duration,
+        make: impl Fn(oneshot::Sender<()>) -> Command,
+    ) {
         let answers: Vec<oneshot::Receiver<()>> = node_ids
             .iter()
             .filter_map(|node_id| {
@@ -485,7 +542,7 @@ impl Hub {
             .collect();
         // Une réponse lâchée vaut réponse : l'acteur s'est arrêté avant de
         // lire la demande, et ses connexions sont fermées.
-        let _ = tokio::time::timeout(ASK_WAIT, futures::future::join_all(answers)).await;
+        let _ = tokio::time::timeout(wait, futures::future::join_all(answers)).await;
     }
 
     /// Envoie une demande à l'acteur de la page et attend sa réponse. Un
@@ -509,8 +566,12 @@ impl Hub {
         Err(SyncError::Closed)
     }
 
-    /// La boîte aux lettres de l'acteur de la page, lancé au besoin.
+    /// La boîte aux lettres de l'acteur de la page, lancé au besoin ;
+    /// `Err(Closed)` une fois le serveur arrêté ([`Hub::shutdown`]).
     async fn actor(&self, node_id: Uuid) -> Result<Commands, SyncError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SyncError::Closed);
+        }
         if let Some(commands) = self.live(node_id) {
             return Ok(commands);
         }

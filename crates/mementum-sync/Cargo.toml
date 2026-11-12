@@ -36,4 +36,6 @@ tokio-tungstenite = { workspace = true, optional = true }
 mementum-sync = { path = ".", features = ["testkit"] }
 sqlx.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+# `test-util` : l'horloge de tokio arrêtée des tests de l'historique (`tests/versions.rs`), qui
+# n'avance que quand le test l'avance (Ruling R179). Une fonction de tokio, pas une crate de plus.
+tokio = { workspace = true, features = ["test-util"] }

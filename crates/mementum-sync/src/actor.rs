@@ -19,19 +19,26 @@
 //! [`Actor::receive_update`]). Elle n'est donc jamais dans le document vivant
 //! sans être au journal : l'invariant tient.
 //!
+//! L'acteur coupe aussi les versions de la page (Ruling R135, voir
+//! [`Actor::version_if_due`]) : l'état complet n'est encodé qu'au moment de
+//! couper, jamais à chaque mise à jour.
+//!
 //! Chaque fin anormale (mise à jour refusée, panne du store, document
 //! impossible à charger, compaction en échec, awareness refusée, trop de
-//! mises à jour retenues) est journalisée par `tracing`.
+//! mises à jour retenues, version impossible à écrire) est journalisée par
+//! `tracing`.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mementum_crdt::{Awaited, PageDoc};
+use mementum_crdt::{Awaited, CrdtError, PageDoc};
 use mementum_md::Block;
-use mementum_store::{DocState, Store, StoreError};
+use mementum_store::{DocState, Store, StoreError, VersionReason};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Instant;
 use uuid::Uuid;
 use yrs::ClientID;
 use yrs::sync::awareness::AwarenessUpdateEntry;
@@ -142,6 +149,12 @@ pub(crate) enum Command {
         actor: Option<Uuid>,
         reply: oneshot::Sender<Result<(), SyncError>>,
     },
+    /// Restaurer la version `version` de la page, au nom du compte `actor` (Ruling R135).
+    Restore {
+        version: Uuid,
+        actor: Option<Uuid>,
+        reply: oneshot::Sender<Result<(), SyncError>>,
+    },
     /// Fermer toutes les connexions, sans toucher au document (`Hub::kick`).
     /// La réponse part quand plus aucun de leurs messages ne sera traité.
     Kick { reply: oneshot::Sender<()> },
@@ -155,6 +168,10 @@ pub(crate) enum Command {
     /// Arrêter l'acteur sans rien écrire (`Hub::forget`). La réponse part
     /// quand il a quitté le registre.
     Forget { reply: oneshot::Sender<()> },
+    /// Arrêter l'acteur, le serveur s'arrête (`Hub::shutdown`) : la version
+    /// `closing` est coupée s'il le faut, puis les connexions sont fermées. La
+    /// réponse part quand il a quitté le registre.
+    Shutdown { reply: oneshot::Sender<()> },
 }
 
 impl Command {
@@ -164,7 +181,9 @@ impl Command {
             Command::Join { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
-            Command::Create { reply } | Command::Write { reply, .. } => {
+            Command::Create { reply }
+            | Command::Write { reply, .. }
+            | Command::Restore { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Command::Read { reply } => {
@@ -180,7 +199,8 @@ impl Command {
             | Command::PageEvent { .. }
             | Command::Kick { .. }
             | Command::KickUser { .. }
-            | Command::Forget { .. } => {}
+            | Command::Forget { .. }
+            | Command::Shutdown { .. } => {}
         }
     }
 }
@@ -267,11 +287,16 @@ struct Broken;
 enum Stop {
     /// Ni connexion ni demande pendant `idle_close`.
     Idle,
+    /// Plus personne ne peut écrire à l'acteur (hub lâché, connexions finies).
+    Orphaned,
     /// Le document n'a pas pu être rechargé.
     Broken,
     /// La page est supprimée (`Hub::forget`) : la réponse part une fois
     /// l'acteur hors du registre.
     Forgotten(oneshot::Sender<()>),
+    /// Le serveur s'arrête (`Hub::shutdown`) : la réponse part une fois
+    /// l'acteur hors du registre.
+    Shutdown(oneshot::Sender<()>),
 }
 
 impl From<Broken> for Stop {
@@ -333,7 +358,8 @@ impl Identity {
 async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedReceiver<Command>) {
     match load(&store, id.node_id).await {
         Ok(loaded) => {
-            let mut actor = Actor::new(id, store, cfg, loaded);
+            let slice = Slice::read(&store, id.node_id).await;
+            let mut actor = Actor::new(id, store, cfg, loaded, slice);
             // Un journal qui porte une grosse suppression (écrite avant une
             // panne, ou avant ce réglage) est compacté dès le chargement : il
             // ne coûte qu'une fois.
@@ -358,52 +384,120 @@ struct Loaded {
     last_seq: i64,
     /// Mises à jour du journal depuis l'instantané.
     since_snapshot: u64,
-    /// Suppressions faites dans le document depuis l'instantané (journal compris).
-    deletions: Deletions,
+    /// Ce qui est compté des transactions du document, à partir du journal
+    /// (les suppressions de l'instantané sont déjà nettoyées).
+    watch: Watch,
 }
 
-/// Compte les suppressions faites dans un document, en unités d'horloge Yjs
-/// (un caractère, un élément ou un attribut chacun), d'après le jeu de
-/// suppressions de chaque transaction validée. Sert au déclenchement de la
-/// compaction (Ruling R40) : le ramasse-miettes de yrs, qui nettoie ce qui est
-/// supprimé, est rejoué à chaque chargement tant que la suppression est au
-/// journal ; une grosse suppression coûte alors plusieurs secondes à chaque
-/// ouverture de la page.
+/// Ce que l'acteur compte des transactions validées dans son document, d'après
+/// l'événement de fin de chacune :
+/// - les **suppressions**, en unités d'horloge Yjs (un caractère, un élément
+///   ou un attribut chacun), d'après son jeu de suppressions. Sert au
+///   déclenchement de la compaction (Ruling R40) : le ramasse-miettes de yrs,
+///   qui nettoie ce qui est supprimé, est rejoué à chaque chargement tant que
+///   la suppression est au journal ; une grosse suppression coûte alors
+///   plusieurs secondes à chaque ouverture de la page ;
+/// - les **changements** : les transactions qui ont inséré quelque chose (le
+///   vecteur d'état a avancé) ou supprimé quelque chose (yrs n'inscrit au jeu
+///   de suppressions que ce qu'elle supprime vraiment). Sert à l'historique
+///   (Ruling R135) : une mise à jour réappliquée sans effet (une mise à jour
+///   retenue que l'étape 2 couvrait déjà, un état renvoyé tel quel) est écrite
+///   au journal et relayée comme une autre, mais n'est pas une écriture à
+///   versionner. Le compte se lit avant et après une écriture : rien n'est
+///   encodé ni relu du document pour le savoir.
 #[derive(Default)]
-struct Deletions(Arc<AtomicU64>);
+struct Watch(Arc<Counters>);
 
-impl Deletions {
-    /// Compte les suppressions des transactions de `page` validées désormais.
-    fn watch(page: &PageDoc) -> Deletions {
-        let deletions = Deletions::default();
-        let count = deletions.0.clone();
-        let watched = page.yrs_doc().observe_transaction_cleanup(
-            "mementum-sync/deletions",
-            move |_, event| {
-                let units: u64 = event
-                    .delete_set
-                    .iter()
-                    .flat_map(|(_, ranges)| ranges.iter())
-                    .map(|range| u64::from(range.end - range.start))
-                    .sum();
-                count.fetch_add(units, Ordering::Relaxed);
-            },
-        );
+#[derive(Default)]
+struct Counters {
+    deletions: AtomicU64,
+    changes: AtomicU64,
+}
+
+impl Watch {
+    /// Compte les transactions de `page` validées désormais.
+    fn on(page: &PageDoc) -> Watch {
+        let watch = Watch::default();
+        let counters = watch.0.clone();
+        let watched =
+            page.yrs_doc()
+                .observe_transaction_cleanup("mementum-sync/watch", move |_, event| {
+                    let units: u64 = event
+                        .delete_set
+                        .iter()
+                        .flat_map(|(_, ranges)| ranges.iter())
+                        .map(|range| u64::from(range.end - range.start))
+                        .sum();
+                    counters.deletions.fetch_add(units, Ordering::Relaxed);
+                    if units > 0 || event.before_state != event.after_state {
+                        counters.changes.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
         if let Err(error) = watched {
-            // Sans compteur, la compaction n'a plus lieu que toutes les
-            // `snapshot_every` mises à jour : plus lent au chargement, sans perte.
-            tracing::warn!(%error, "suppressions non comptées : compaction au rythme ordinaire");
+            // Sans compteur, la compaction n'a plus lieu que toutes les `snapshot_every` mises à
+            // jour (plus lent au chargement, sans perte), et aucune écriture n'est vue comme un
+            // changement : plus aucune version n'est coupée, faute de le savoir.
+            tracing::warn!(%error, "transactions non comptées : compaction au rythme ordinaire, et pas de version");
         }
-        deletions
+        watch
     }
 
-    fn count(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
+    fn deletions(&self) -> u64 {
+        self.0.deletions.load(Ordering::Relaxed)
     }
 
-    fn reset(&self) {
-        self.0.store(0, Ordering::Relaxed);
+    fn reset_deletions(&self) {
+        self.0.deletions.store(0, Ordering::Relaxed);
     }
+
+    fn changes(&self) -> u64 {
+        self.0.changes.load(Ordering::Relaxed)
+    }
+}
+
+/// La tranche en cours de l'historique (Ruling R135) : les écritures qui ont
+/// changé la page depuis sa dernière version.
+#[derive(Debug, Default)]
+struct Slice {
+    /// L'instant de la première ; `None` : aucune.
+    since: Option<Instant>,
+    /// Les comptes qui les ont faites : ceux des connexions qui ont écrit, et
+    /// celui donné à une écriture du serveur. Une écriture sans compte n'ajoute
+    /// personne.
+    authors: BTreeSet<Uuid>,
+}
+
+impl Slice {
+    /// La tranche en cours quand l'acteur démarre, relue au journal : les
+    /// écritures au-delà de la dernière version (`Store::unversioned`), pour
+    /// ce qu'il en reste après la compaction. C'est ce qu'un arrêt brutal ne
+    /// perd pas : le contenu est au journal, seule la version `closing` manque.
+    /// Sa date est celle de la plus ancienne écriture connue, ramenée à
+    /// l'horloge de l'acteur. Illisible, la tranche est vide : la page est
+    /// servie quand même, et la prochaine écriture en ouvre une.
+    async fn read(store: &Store, node_id: Uuid) -> Slice {
+        match store.unversioned(node_id).await {
+            Ok(found) => Slice {
+                since: found.since.map(|at| {
+                    let ago = Duration::from_millis(now_ms().saturating_sub(at).max(0) as u64);
+                    Instant::now().checked_sub(ago).unwrap_or_else(Instant::now)
+                }),
+                authors: found.authors.into_iter().collect(),
+            },
+            Err(error) => {
+                tracing::warn!(node_id = %node_id, %error, "tranche en cours de l'historique illisible : elle repart de zéro");
+                Slice::default()
+            }
+        }
+    }
+}
+
+/// Millisecondes Unix, comme les dates du store.
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Relit l'instantané, puis les mises à jour dans l'ordre des `seq`.
@@ -417,12 +511,12 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     if snapshot.is_none() && updates.is_empty() {
         let (page, _) = PageDoc::new_page();
         store.put_snapshot(node_id, 0, &page.encode_state()).await?;
-        let deletions = Deletions::watch(&page);
+        let watch = Watch::on(&page);
         return Ok(Loaded {
             page,
             last_seq: 0,
             since_snapshot: 0,
-            deletions,
+            watch,
         });
     }
     let last_seq = updates
@@ -432,7 +526,7 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     // Les suppressions sont comptées à partir du journal : celles de
     // l'instantané sont déjà nettoyées par le ramasse-miettes.
     let page = PageDoc::from_updates(snapshot.iter().map(|(_, bytes)| bytes.as_slice()))?;
-    let deletions = Deletions::watch(&page);
+    let watch = Watch::on(&page);
     for (_, update) in &updates {
         page.apply_update(update)?;
     }
@@ -440,7 +534,7 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
         page,
         last_seq,
         since_snapshot: updates.len() as u64,
-        deletions,
+        watch,
     })
 }
 
@@ -578,8 +672,12 @@ struct Actor {
     last_seq: i64,
     /// Mises à jour écrites depuis la dernière compaction (ou tentative).
     since_snapshot: u64,
-    /// Suppressions faites depuis la dernière compaction (ou tentative).
-    deletions: Deletions,
+    /// Suppressions faites depuis la dernière compaction (ou tentative), et
+    /// transactions qui ont changé le document.
+    watch: Watch,
+    /// La tranche en cours de l'historique (Ruling R135). Elle survit au
+    /// rechargement du document : ce qu'elle compte a été écrit.
+    slice: Slice,
     /// Awareness des clients, sur un document à part : elle ne touche jamais
     /// au contenu, et survit au rechargement du document.
     awareness: Awareness,
@@ -595,7 +693,7 @@ struct Actor {
 }
 
 impl Actor {
-    fn new(id: Identity, store: Store, cfg: SyncConfig, loaded: Loaded) -> Actor {
+    fn new(id: Identity, store: Store, cfg: SyncConfig, loaded: Loaded, slice: Slice) -> Actor {
         let awareness = Awareness::new(crate::utf16_doc());
         let (events, _) = broadcast::channel(cfg.broadcast_capacity.max(1));
         Actor {
@@ -605,7 +703,8 @@ impl Actor {
             page: loaded.page,
             last_seq: loaded.last_seq,
             since_snapshot: loaded.since_snapshot,
-            deletions: loaded.deletions,
+            watch: loaded.watch,
+            slice,
             awareness,
             holders: Holders::default(),
             events,
@@ -619,7 +718,7 @@ impl Actor {
         self.page = loaded.page;
         self.last_seq = loaded.last_seq;
         self.since_snapshot = loaded.since_snapshot;
-        self.deletions = loaded.deletions;
+        self.watch = loaded.watch;
     }
 
     async fn serve(mut self, mut rx: UnboundedReceiver<Command>) {
@@ -632,20 +731,38 @@ impl Actor {
             } else {
                 rx.recv().await
             };
-            // Plus personne ne peut écrire à l'acteur (hub lâché, connexions finies).
-            let Some(command) = next else { return };
+            let Some(command) = next else {
+                break Stop::Orphaned;
+            };
             if let Err(stop) = self.handle(command).await {
                 break stop;
             }
         };
+        // Ruling R135 : avant de disparaître, la version `closing` des écritures
+        // pas encore versionnées. L'acteur est encore au registre : ce qui arrive
+        // pendant ce temps attend dans sa boîte, puis repart vers un acteur neuf,
+        // qui trouve la version écrite. Ni pour une page supprimée, ni pour un
+        // document qui n'a pas pu être rechargé (il peut porter une mise à jour
+        // que le store n'a pas).
+        if matches!(stop, Stop::Idle | Stop::Orphaned | Stop::Shutdown(_)) {
+            self.cut_closing().await;
+        }
         // Les commandes reçues entre-temps sont lâchées sans réponse : leurs
         // demandeurs réessaient auprès d'un nouvel acteur.
         drop(self.id.retire(&mut rx));
-        if let Stop::Forgotten(reply) = stop {
-            // Rien n'est écrit : ni instantané, ni ce qui restait dans la boîte.
-            tracing::debug!(node_id = %self.id.node_id, connections = self.conns.len(), "page oubliée : acteur arrêté, connexions fermées");
-            self.close_connections();
-            let _ = reply.send(());
+        match stop {
+            Stop::Forgotten(reply) => {
+                // Rien n'est écrit : ni instantané, ni version, ni ce qui restait dans la boîte.
+                tracing::debug!(node_id = %self.id.node_id, connections = self.conns.len(), "page oubliée : acteur arrêté, connexions fermées");
+                self.close_connections();
+                let _ = reply.send(());
+            }
+            Stop::Shutdown(reply) => {
+                tracing::debug!(node_id = %self.id.node_id, connections = self.conns.len(), "arrêt du serveur : acteur arrêté, connexions fermées");
+                self.close_connections();
+                let _ = reply.send(());
+            }
+            Stop::Idle | Stop::Orphaned | Stop::Broken => {}
         }
     }
 
@@ -697,6 +814,19 @@ impl Actor {
                     self.release_held().await?;
                 }
             }
+            Command::Restore {
+                version,
+                actor,
+                reply,
+            } => {
+                let result = self.restore(version, actor).await?;
+                let written = result.is_ok();
+                // Comme une écriture du serveur : la réponse, puis les mises à jour retenues.
+                let _ = reply.send(result);
+                if written {
+                    self.release_held().await?;
+                }
+            }
             Command::Kick { reply } => {
                 // Ni rechargement ni écriture : le document vivant est celui
                 // du store, et le reste.
@@ -709,6 +839,7 @@ impl Actor {
                 let _ = reply.send(());
             }
             Command::Forget { reply } => return Err(Stop::Forgotten(reply)),
+            Command::Shutdown { reply } => return Err(Stop::Shutdown(reply)),
         }
         Ok(())
     }
@@ -1015,12 +1146,18 @@ impl Actor {
     /// la page l'a lue, réencodée, jamais les octets reçus. Ce que les clients
     /// appliquent, et ce que le journal garde, est ce que le serveur a
     /// appliqué.
+    ///
+    /// Ruling R135 : une version est coupée avant, si elle est due
+    /// ([`Actor::version_if_due`]) ; l'écriture compte dans la tranche en
+    /// cours si elle a changé la page ([`Actor::wrote`]).
     async fn client_update(
         &mut self,
         conn: ConnId,
         actor: Option<Uuid>,
         update: &[u8],
     ) -> Result<bool, Broken> {
+        self.version_if_due().await;
+        let changes = self.watch.changes();
         // Ce qui vient d'un client ne touche pas aux métadonnées de la page
         // (report M7 du lot 1) ; ce que `load` relit du store, si.
         let read = match self.page.apply_client_update(update) {
@@ -1049,6 +1186,7 @@ impl Actor {
             self.store_failed(&error).await?;
             return Ok(false);
         }
+        self.wrote(changes, actor);
         self.broadcast(Some(conn), protocol::update(&read));
         if let Some(fix) = fix {
             // À toutes les connexions, l'expéditeur compris.
@@ -1163,11 +1301,15 @@ impl Actor {
         (!update.clients.is_empty()).then(|| protocol::awareness(&update.encode_v1()))
     }
 
+    /// Écriture du serveur (`PUT /mmd`, restauration), au nom de `actor` : elle
+    /// compte dans l'historique comme celle d'un client (Ruling R135).
     async fn write(
         &mut self,
         blocks: Vec<Block>,
         actor: Option<Uuid>,
     ) -> Result<Result<(), SyncError>, Broken> {
+        self.version_if_due().await;
+        let changes = self.watch.changes();
         // Refusée sans rien écrire : le document reste intact.
         let update = match self.page.write_blocks(&blocks) {
             Ok(update) => update,
@@ -1177,9 +1319,115 @@ impl Actor {
             self.store_failed(&error).await?;
             return Ok(Err(error.into()));
         }
+        self.wrote(changes, actor);
         self.broadcast(None, protocol::update(&update));
         self.compact_if_due().await;
         Ok(Ok(()))
+    }
+
+    /// Une écriture vient d'être appliquée et écrite au journal au nom de
+    /// `actor`, `changes` étant le compte des changements d'avant elle : si
+    /// elle a changé la page, elle entre dans la tranche en cours (Ruling
+    /// R135), qu'elle ouvre au besoin. Une mise à jour réappliquée sans effet
+    /// n'y entre pas : sinon, une page qui n'a pas changé couperait une version.
+    fn wrote(&mut self, changes: u64, actor: Option<Uuid>) {
+        if self.watch.changes() == changes {
+            return;
+        }
+        self.slice.since.get_or_insert_with(Instant::now);
+        self.slice.authors.extend(actor);
+    }
+
+    /// Ruling R135 : juste avant d'appliquer une écriture, une version
+    /// `periodic` est coupée si la première écriture non versionnée a au moins
+    /// [`SyncConfig::version_every`]. Elle porte donc l'état d'avant cette
+    /// écriture, et la tranche suivante commence avec elle.
+    ///
+    /// L'état n'est encodé qu'ici, au plus une fois par intervalle : une
+    /// frappe ordinaire ne paie qu'une comparaison d'instants. Une version que
+    /// le store refuse est journalisée, et réessayée après un nouvel
+    /// intervalle, pas à chaque frappe : l'écriture passe quand même, et la
+    /// tranche garde ses auteurs.
+    async fn version_if_due(&mut self) {
+        let Some(since) = self.slice.since else {
+            return;
+        };
+        if since.elapsed() < self.cfg.version_every {
+            return;
+        }
+        if let Err(error) = self.cut_version(VersionReason::Periodic).await {
+            tracing::warn!(node_id = %self.id.node_id, %error, "version impossible à écrire : réessai après un autre intervalle");
+            self.slice.since = Some(Instant::now());
+        }
+    }
+
+    /// Coupe une version : l'état complet du document vivant, encodé ici (jamais
+    /// des octets reçus d'un client), le `seq` du journal qu'il couvre (entre
+    /// deux commandes, le document est exactement ce que le journal a écrit) et
+    /// les comptes de la tranche. Une fois écrite, la tranche est vide, et les
+    /// connexions de la page reçoivent la trame `versions` (Ruling R136).
+    async fn cut_version(&mut self, reason: VersionReason) -> Result<(), StoreError> {
+        let state = self.page.encode_state();
+        let authors: Vec<Uuid> = self.slice.authors.iter().copied().collect();
+        self.store
+            .put_version(self.id.node_id, self.last_seq, &state, &authors, reason)
+            .await?;
+        self.slice = Slice::default();
+        self.broadcast(None, protocol::page_event(PageEvent::Versions));
+        Ok(())
+    }
+
+    /// À l'arrêt de l'acteur : la version `closing`, s'il reste des écritures non
+    /// versionnées. Si le store la refuse, l'arrêt se fait quand même : le
+    /// contenu est au journal, et l'acteur suivant y relit la tranche
+    /// ([`Slice::read`]).
+    async fn cut_closing(&mut self) {
+        if self.slice.since.is_none() {
+            return;
+        }
+        if let Err(error) = self.cut_version(VersionReason::Closing).await {
+            tracing::error!(node_id = %self.id.node_id, %error, "version de fin impossible à écrire : l'acteur s'arrête quand même, le contenu est au journal");
+        }
+    }
+
+    /// Ruling R135 : restaure la version `version`, au nom de `actor`. Ses blocs
+    /// sont lus dans un document à part, bâti depuis l'état gardé, puis écrits
+    /// par-dessus le contenu vivant par une écriture ordinaire ([`Actor::write`] :
+    /// journal, diffusion, compaction), avec leurs identifiants : les fils de
+    /// commentaires retrouvent leurs blocs. Juste avant, dans la même commande
+    /// (rien ne passe entre les deux), une version `before_restore` garde ce
+    /// qui est remplacé ; si le store la refuse, rien n'est restauré.
+    ///
+    /// Une version qui n'est pas de cette page, ou qui n'existe pas :
+    /// `NotFound`. Un état gardé que la page ne relit pas (base abîmée) : une
+    /// erreur, sans toucher au document. Restaurer ce que la page a déjà comme
+    /// contenu ne fait rien : ni écriture, ni version (Ruling R180).
+    async fn restore(
+        &mut self,
+        version: Uuid,
+        actor: Option<Uuid>,
+    ) -> Result<Result<(), SyncError>, Broken> {
+        let state = match self.store.get_version(self.id.node_id, version).await {
+            Ok(Some(state)) => state,
+            Ok(None) => return Ok(Err(SyncError::NotFound)),
+            Err(error) => return Ok(Err(error.into())),
+        };
+        let blocks = match PageDoc::from_updates([state.as_slice()]) {
+            Ok(kept) => kept.read_blocks(),
+            Err(error) => {
+                tracing::error!(node_id = %self.id.node_id, version_id = %version, %error, "état d'une version illisible : restauration refusée, page intacte");
+                let unreadable = format!("état de la version {version} : {error}");
+                return Ok(Err(SyncError::Crdt(CrdtError::Decode(unreadable))));
+            }
+        };
+        if blocks == self.page.read_blocks() {
+            return Ok(Ok(()));
+        }
+        if let Err(error) = self.cut_version(VersionReason::BeforeRestore).await {
+            tracing::warn!(node_id = %self.id.node_id, version_id = %version, %error, "version d'avant restauration impossible à écrire : rien n'est restauré");
+            return Ok(Err(error.into()));
+        }
+        self.write(blocks, actor).await
     }
 
     /// Écrit des mises à jour au journal, dans l'ordre, toutes ou aucune, au
@@ -1249,12 +1497,12 @@ impl Actor {
     /// `snapshot_every` mises à jour ou autant de suppressions), pas à chacune.
     async fn compact_if_due(&mut self) {
         let many_updates = self.since_snapshot >= self.cfg.snapshot_every.max(1);
-        let many_deletions = self.deletions.count() >= self.cfg.compact_after_deletions.max(1);
+        let many_deletions = self.watch.deletions() >= self.cfg.compact_after_deletions.max(1);
         if !many_updates && !many_deletions {
             return;
         }
         self.since_snapshot = 0;
-        self.deletions.reset();
+        self.watch.reset_deletions();
         let state = self.page.encode_state();
         if let Err(error) = self
             .store
@@ -1407,7 +1655,7 @@ mod tests {
             hub: Weak::new(),
             me: commands.downgrade(),
         };
-        let actor = Actor::new(id, store, SyncConfig::default(), loaded);
+        let actor = Actor::new(id, store, SyncConfig::default(), loaded, Slice::default());
         (actor, commands, rx)
     }
 

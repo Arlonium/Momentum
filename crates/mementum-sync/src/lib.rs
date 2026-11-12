@@ -121,7 +121,16 @@
 //!   R124), une connexion ne retient pas plus de 32 mises à jour ni 1 Mio
 //!   (Ruling R131) ;
 //! - une page **sans document** reçoit le sien au premier chargement de son
-//!   acteur (Ruling R28).
+//!   acteur (Ruling R28) ;
+//! - **historique** (Ruling R135) : l'acteur coupe les versions de la page,
+//!   l'état complet de son document encodé par lui, avec les comptes qui l'ont
+//!   modifiée depuis la version d'avant ; juste avant l'écriture qui suit de
+//!   [`SyncConfig::version_every`] la première écriture non versionnée, à son
+//!   arrêt s'il en reste (page vide depuis `idle_close`, [`Hub::shutdown`]), et
+//!   avant toute restauration ([`Hub::restore_version`], une écriture comme
+//!   une autre, identifiants des blocs gardés). Une écriture qui n'a rien
+//!   changé n'en ouvre pas ; rien n'est encodé à chaque frappe. Chaque version
+//!   coupée envoie la trame `versions` aux connexions de la page.
 //!
 //! La feature `axum` expose `ws::WsBytes`, qui ramène la WebSocket d'axum
 //! au flux attendu par [`Hub::serve_connection`].
@@ -179,6 +188,26 @@ pub struct SyncConfig {
     /// un message d'entretien : une mise à jour de présence vide (Ruling
     /// R107, [`KEEPALIVE_AFTER`]). Au moins une milliseconde.
     pub keepalive_after: Duration,
+    /// L'intervalle des versions d'une page (Ruling R135, [`VERSION_EVERY`]) :
+    /// une version est coupée juste avant l'écriture qui suit de ce délai, ou
+    /// plus, la première écriture non versionnée. Zéro : avant chaque écriture
+    /// qui en suit une autre (mesures).
+    pub version_every: Duration,
+}
+
+/// Intervalle par défaut des versions ([`SyncConfig::version_every`]) : dix
+/// minutes (Ruling R135). Au plus dix minutes de frappe entre deux versions.
+pub const VERSION_EVERY: Duration = Duration::from_secs(10 * 60);
+
+impl SyncConfig {
+    /// Le même réglage, avec cet intervalle des versions : ce que règle
+    /// `mementum serve` (`MEMENTUM_VERSION_EVERY_SECS`), le reste par défaut.
+    pub fn with_version_every(self, version_every: Duration) -> SyncConfig {
+        SyncConfig {
+            version_every,
+            ..self
+        }
+    }
 }
 
 /// Délai par défaut du message d'entretien ([`SyncConfig::keepalive_after`]) :
@@ -208,6 +237,7 @@ impl Default for SyncConfig {
             max_message_bytes: 16 << 20,
             max_queue_bytes: 64 << 20,
             keepalive_after: KEEPALIVE_AFTER,
+            version_every: VERSION_EVERY,
         }
     }
 }

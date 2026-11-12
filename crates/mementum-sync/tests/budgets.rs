@@ -7,6 +7,11 @@
 //!   contenu remplacé par un client (Ruling R40 : le ramasse-miettes de yrs
 //!   se paie à l'écriture, jamais à chaque chargement).
 //!
+//! Et la part du serveur dans « frappe visible chez un autre < 150 ms » quand
+//! la frappe coupe une version (Ruling R135) : la version, l'état complet
+//! d'une page de 10 000 blocs encodé et écrit, passe avant la frappe qui la
+//! déclenche ; la frappe arrive chez l'autre client en moins de 150 ms au p95.
+//!
 //! Ignorés par défaut, car la mesure n'a de sens qu'en `--release` :
 //! `cargo test --release -p mementum-sync -- --ignored` (job `budgets` de la
 //! CI).
@@ -22,11 +27,18 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use mementum_md::parse;
-use mementum_store::Store;
+use mementum_store::{Store, VersionReason};
 use mementum_sync::SyncConfig;
+use yrs::ClientID;
 
 /// Blocs de la page.
 const BLOCKS: usize = 10_000;
+
+/// « Frappe visible chez un autre (réseau local) < 150 ms » (§5.10).
+const TYPING_BUDGET: Duration = Duration::from_millis(150);
+
+/// Frappes mesurées.
+const KEYSTROKES: usize = 20;
 
 /// Chargements mesurés.
 const LOADS: usize = 20;
@@ -190,6 +202,87 @@ async fn load_10000_block_page_after_full_rewrite_under_300ms() {
 
     // Les deux cas sont mesurés avant de conclure.
     let over: Vec<String> = [rewritten, replaced].into_iter().flatten().collect();
+    assert!(over.is_empty(), "{}", over.join("\n"));
+}
+
+/// `KEYSTROKES` frappes d'un client dans une page de `BLOCKS` blocs, chronométrées jusqu'à ce
+/// qu'un autre client les ait reçues (son vecteur d'état atteint celui de l'auteur : un contrôle
+/// qui ne relit pas la page). Renvoie les durées.
+async fn keystrokes_seen_by_another(f: &Fixture) -> Vec<Duration> {
+    let id = f.ids().await[0].clone();
+    let (author, other) = (f.client().await, f.client().await);
+    let mut times = Vec::with_capacity(KEYSTROKES);
+    for _ in 0..KEYSTROKES {
+        let start = Instant::now();
+        author.type_text(&id, "x");
+        let client = ClientID::new(author.client_id());
+        let target = author.state_vector().get(&client);
+        assert!(
+            other
+                .wait_until(Duration::from_secs(60), |c| c.state_vector().get(&client)
+                    >= target)
+                .await,
+            "la frappe n'est pas arrivée"
+        );
+        times.push(start.elapsed());
+    }
+    times
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
+    release_only();
+    let mmd = page_mmd();
+
+    // Ce que coûte une version, à part : l'état encodé depuis le document de l'acteur, puis
+    // écrit, comme le fait `Actor::cut_version`.
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd(&mmd).await;
+    let page = stored_page(&f.store, f.page).await;
+    let start = Instant::now();
+    let state = page.encode_state();
+    let encoded = start.elapsed();
+    let start = Instant::now();
+    f.store
+        .put_version(f.page, 1, &state, &[], VersionReason::Periodic)
+        .await
+        .unwrap();
+    let written = start.elapsed();
+    println!(
+        "MESURE version d'une page de {BLOCKS} blocs : {} octets, encodée en {encoded:?}, \
+         écrite en {written:?}",
+        state.len()
+    );
+    drop(f);
+
+    // Les frappes sans version (dix minutes), puis chacune précédée d'une version (intervalle
+    // nul : l'écriture d'avant est toujours assez ancienne).
+    let mut over = Vec::new();
+    for (what, every) in [
+        ("sans version", SyncConfig::default().version_every),
+        ("chacune précédée d'une version", Duration::ZERO),
+    ] {
+        let f = Fixture::new(SyncConfig::default().with_version_every(every)).await;
+        f.write_mmd(&mmd).await;
+        let times = keystrokes_seen_by_another(&f).await;
+        let versions = f.store.list_versions(f.page).await.unwrap().len();
+        let (p50, p95) = (percentile(&times, 0.5), percentile(&times, 0.95));
+        println!(
+            "MESURE frappe vue par un autre client, page de {BLOCKS} blocs, {what} \
+             ({versions} versions coupées) : p50 {p50:?}, p95 {p95:?}, max {:?} \
+             ({KEYSTROKES} frappes)",
+            times.iter().max().unwrap()
+        );
+        if every.is_zero() {
+            assert_eq!(versions, KEYSTROKES, "une version avant chaque frappe");
+        }
+        if p95 >= TYPING_BUDGET {
+            over.push(format!(
+                "frappe, {what} : p95 {p95:?} (budget {TYPING_BUDGET:?}), mesures {times:?}"
+            ));
+        }
+    }
     assert!(over.is_empty(), "{}", over.join("\n"));
 }
 

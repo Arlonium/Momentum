@@ -1,0 +1,643 @@
+//! L'historique d'une page (Ruling R135), côté acteur : quand une version est coupée, ce qu'elle
+//! porte (l'état et les comptes qui ont écrit depuis la version d'avant), la restauration, et ce
+//! que la compaction et un redémarrage n'en perdent pas.
+//!
+//! **L'horloge de tokio est arrêtée** ([`StoppedClock`]) : elle n'avance que quand le test
+//! l'avance (`tokio::time::advance`), si bien que « dix minutes plus tard » ne dépend pas de la
+//! vitesse du poste. Une horloge simplement en pause (`tokio::time::pause`) ne suffit pas : dès
+//! que plus aucune tâche n'a de travail, tokio l'avance de lui-même jusqu'au prochain délai, et
+//! c'est le cas à chaque lecture ou écriture dans SQLite, faite par un fil à part : les dix
+//! minutes de la maintenance du pool de sqlx, les 30 s de son délai d'acquisition ou de
+//! `idle_close` passeraient pendant une écriture. Une tâche qui cède la main sans fin garde le
+//! moteur occupé, et l'horloge ne bouge plus d'elle-même. En contrepartie, aucun délai de tokio
+//! ne finit tout seul : les attentes de ces tests se bornent en temps réel ([`until`]).
+
+mod common;
+
+use std::time::Duration;
+
+use common::*;
+use mementum_crdt::PageDoc;
+use mementum_md::{Block, parse};
+use mementum_store::{MAX_VERSIONS, Version, VersionReason};
+use mementum_sync::{ConnInfo, SyncConfig, SyncError};
+use tokio::task::JoinHandle;
+use uuid::Uuid;
+
+/// L'intervalle des versions de ces tests : celui du réglage par défaut.
+const INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// Attente maximale d'une condition, en temps réel.
+const REAL_WAIT: Duration = Duration::from_secs(30);
+
+/// L'horloge de tokio arrêtée, tant qu'elle vit (voir l'en-tête du fichier).
+struct StoppedClock(JoinHandle<()>);
+
+impl StoppedClock {
+    fn start() -> StoppedClock {
+        tokio::time::pause();
+        StoppedClock(tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        }))
+    }
+}
+
+impl Drop for StoppedClock {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn config() -> SyncConfig {
+    SyncConfig {
+        version_every: INTERVAL,
+        ..SyncConfig::default()
+    }
+}
+
+/// Attend que `ready` soit vraie, [`REAL_WAIT`] de temps réel au plus.
+async fn until(what: &str, mut ready: impl AsyncFnMut() -> bool) {
+    let deadline = std::time::Instant::now() + REAL_WAIT;
+    while !ready().await {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Une connexion du compte `account`, qui peut écrire, synchronisée.
+async fn connect(f: &Fixture, account: Uuid) -> Client {
+    let conn = ConnInfo {
+        actor: Some(account),
+        ..writing_conn()
+    };
+    let client = Client::connect(&f.url_for(conn))
+        .await
+        .expect("connexion du client");
+    until("le client n'a pas reçu l'état du serveur", async || {
+        client.is_synced()
+    })
+    .await;
+    client
+}
+
+/// Tape `typed` à la fin du premier bloc, puis attend que le serveur l'ait traité : il traite
+/// les messages d'une connexion dans l'ordre, et répond ensuite à la resynchronisation.
+async fn types(client: &Client, typed: &str) {
+    let block = client.blocks()[0].id.clone();
+    heard(client, || client.type_text(&block, typed)).await;
+}
+
+/// Fait `send`, puis attend que le serveur ait traité ce que le client a envoyé.
+async fn heard(client: &Client, send: impl FnOnce()) {
+    let before = client.step2_count();
+    send();
+    client.resync();
+    until("le serveur n'a pas traité le message", async || {
+        client.step2_count() > before
+    })
+    .await;
+}
+
+async fn advance(by: Duration) {
+    tokio::time::advance(by).await;
+}
+
+/// L'acteur de la page s'arrête faute de connexion et de demande pendant `idle_close`, et
+/// quitte le registre. Une connexion lâchée part un peu après (la socket se ferme, puis
+/// l'acteur l'apprend) : tant que l'acteur n'est pas arrêté, l'horloge est poussée de nouveau,
+/// une fois laissé à ce qu'il faisait le temps de finir (5 s réelles). La borne peut faire
+/// échouer le test à tort sur un poste très chargé, jamais le faire passer.
+async fn actor_stops(f: &Fixture) {
+    let deadline = std::time::Instant::now() + REAL_WAIT;
+    // Le temps qu'une connexion lâchée soit partie.
+    let settle = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < settle {
+        tokio::task::yield_now().await;
+    }
+    loop {
+        advance(f.hub.config().idle_close + Duration::from_millis(1)).await;
+        let round = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < round {
+            if f.hub.live_pages().await.is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "l'acteur de la page ne s'arrête pas"
+        );
+    }
+}
+
+async fn versions(f: &Fixture) -> Vec<Version> {
+    f.store.list_versions(f.page).await.unwrap()
+}
+
+/// Les blocs de l'état gardé par la version `id`.
+async fn version_blocks(f: &Fixture, id: Uuid) -> Vec<Block> {
+    let state = f
+        .store
+        .get_version(f.page, id)
+        .await
+        .unwrap()
+        .expect("la version");
+    PageDoc::from_updates([state.as_slice()])
+        .expect("un état lisible")
+        .read_blocks()
+}
+
+async fn version_text(f: &Fixture, id: Uuid) -> String {
+    text(&version_blocks(f, id).await)
+}
+
+fn authors(version: &Version) -> Vec<Uuid> {
+    version.authors.iter().map(|a| a.id).collect()
+}
+
+fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+    ids.sort();
+    ids
+}
+
+async fn live_text(f: &Fixture) -> String {
+    text(&f.hub.read_blocks(f.page).await.unwrap())
+}
+
+/// Les trames `versions` qu'a reçues le client.
+fn versions_frames(client: &Client) -> usize {
+    client
+        .page_events()
+        .iter()
+        .filter(|frame| frame.as_str() == r#"{"type":"versions"}"#)
+        .count()
+}
+
+/// Des frappes pendant deux minutes, moins que l'intervalle : aucune version pendant la
+/// session ; à l'arrêt de l'acteur, une seule, `closing`, qui porte l'état de la fin et les deux
+/// comptes qui ont tapé.
+#[tokio::test]
+async fn burst_shorter_than_the_interval_is_one_version_at_stop() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    let (a, b) = (connect(&f, alice).await, connect(&f, bob).await);
+    for i in 0..12 {
+        let (client, typed) = if i % 2 == 0 { (&a, "a") } else { (&b, "b") };
+        types(client, typed).await;
+        advance(Duration::from_secs(10)).await;
+    }
+    assert!(
+        versions(&f).await.is_empty(),
+        "aucune version en cours de session"
+    );
+    let end = live_text(&f).await;
+    assert_eq!(end, "abababababab");
+
+    drop((a, b));
+    actor_stops(&f).await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Closing);
+    assert_eq!(authors(&kept[0]), sorted(vec![alice, bob]));
+    assert_eq!(version_text(&f, kept[0].id).await, end);
+}
+
+/// Une session plus longue que l'intervalle : la version est coupée juste avant l'écriture qui
+/// suit l'intervalle (compté depuis la première écriture non versionnée), et porte l'état
+/// d'avant elle, avec les comptes de la tranche. La connexion reçoit la trame `versions`. La
+/// tranche suivante commence avec cette écriture.
+#[tokio::test]
+async fn long_session_cuts_a_version_before_the_write_that_follows_the_interval() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    let (a, b) = (connect(&f, alice).await, connect(&f, bob).await);
+
+    types(&a, "A").await;
+    advance(INTERVAL - Duration::from_secs(60)).await;
+    types(&a, "B").await;
+    assert!(versions(&f).await.is_empty(), "neuf minutes : pas encore");
+    advance(Duration::from_secs(120)).await;
+    // Onze minutes après la première écriture non versionnée.
+    types(&b, "C").await;
+
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Periodic);
+    assert_eq!(version_text(&f, kept[0].id).await, "AB", "l'état d'avant C");
+    assert_eq!(authors(&kept[0]), [alice]);
+    assert_eq!(live_text(&f).await, "ABC");
+    until("la trame `versions` n'est pas arrivée", async || {
+        versions_frames(&a) == 1
+    })
+    .await;
+
+    // La tranche suivante ne compte que C, et Bob.
+    advance(Duration::from_secs(60)).await;
+    types(&b, "D").await;
+    assert_eq!(versions(&f).await.len(), 1, "une minute après C : rien");
+    drop((a, b));
+    actor_stops(&f).await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Closing);
+    assert_eq!(version_text(&f, kept[0].id).await, "ABCD");
+    assert_eq!(authors(&kept[0]), [bob]);
+}
+
+/// Une page qui n'a pas changé ne coupe rien, ni en cours de session ni à l'arrêt, même quand
+/// des mises à jour lui arrivent : une mise à jour que la page a déjà (l'état qu'elle vient de
+/// donner au client, renvoyé tel quel) est réappliquée sans effet, écrite au journal et
+/// relayée, mais ce n'est pas une écriture à versionner.
+#[tokio::test]
+async fn page_that_did_not_change_cuts_nothing() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let a = connect(&f, alice).await;
+    let known = a.page().unwrap().encode_state();
+    let journal = actors(&f.db, f.page).await.len();
+
+    heard(&a, || a.send_update(&known)).await;
+    advance(INTERVAL + Duration::from_secs(60)).await;
+    heard(&a, || a.send_update(&known)).await;
+    assert_eq!(
+        actors(&f.db, f.page).await.len(),
+        journal + 2,
+        "les mises à jour sans effet sont bien passées par l'acteur"
+    );
+    assert!(versions(&f).await.is_empty());
+
+    drop(a);
+    actor_stops(&f).await;
+    assert!(versions(&f).await.is_empty(), "rien à l'arrêt non plus");
+}
+
+/// Une écriture du serveur (`PUT /mmd`) compte comme celle d'un client : elle ouvre une
+/// tranche, son compte en est l'auteur, et la version suivante est coupée avant l'écriture qui
+/// suit l'intervalle. Une écriture sans compte n'ajoute personne.
+#[tokio::test]
+async fn server_write_counts_like_a_client_write() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    // Quelqu'un a la page ouverte : sans connexion, l'acteur s'arrêterait pendant les dix
+    // minutes, et couperait sa version `closing`.
+    let open = f.client().await;
+    let write = async |mmd: &str, actor: Option<Uuid>| {
+        f.hub
+            .write_blocks(f.page, parse(mmd).unwrap(), actor)
+            .await
+            .unwrap();
+    };
+
+    write("Un\n", Some(alice)).await;
+    advance(INTERVAL + Duration::from_secs(1)).await;
+    write("Deux\n", Some(bob)).await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Periodic);
+    assert_eq!(version_text(&f, kept[0].id).await, "Un");
+    assert_eq!(authors(&kept[0]), [alice]);
+
+    write("Trois\n", None).await;
+    drop(open);
+    actor_stops(&f).await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Closing);
+    assert_eq!(version_text(&f, kept[0].id).await, "Trois");
+    assert_eq!(
+        authors(&kept[0]),
+        [bob],
+        "l'écriture sans compte n'ajoute personne"
+    );
+}
+
+/// Restaurer écrit les blocs de la version par-dessus le contenu, avec leurs identifiants, par
+/// une écriture ordinaire : les connexions la reçoivent par la synchro, avec la trame
+/// `versions`. Juste avant, une version `before_restore` garde ce qui est remplacé, avec les
+/// auteurs de la tranche ; elle se restaure à son tour, et la restauration compte au nom de qui
+/// l'a demandée.
+#[tokio::test]
+async fn restore_cuts_a_version_of_what_it_replaces() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let (alice, bob, carol) = (
+        new_user(&f.db).await,
+        new_user(&f.db).await,
+        new_user(&f.db).await,
+    );
+    f.hub
+        .write_blocks(f.page, parse("Un\n\nDeux\n").unwrap(), Some(alice))
+        .await
+        .unwrap();
+    actor_stops(&f).await;
+    let first = versions(&f).await[0].id;
+    let first_blocks = version_blocks(&f, first).await;
+    assert_eq!(text(&first_blocks), "Un\nDeux");
+
+    let observer = connect(&f, carol).await;
+    types(&observer, "Trois").await;
+    let replaced = f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(text(&replaced), "UnTrois\nDeux");
+
+    f.hub
+        .restore_version(f.page, first, Some(bob))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.hub.read_blocks(f.page).await.unwrap(),
+        first_blocks,
+        "les blocs de la version, identifiants compris"
+    );
+    until(
+        "le contenu restauré n'est pas arrivé par la synchro",
+        async || observer.blocks() == first_blocks,
+    )
+    .await;
+    until("la trame `versions` n'est pas arrivée", async || {
+        versions_frames(&observer) == 1
+    })
+    .await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::BeforeRestore);
+    assert_eq!(version_blocks(&f, kept[0].id).await, replaced);
+    assert_eq!(authors(&kept[0]), [carol]);
+
+    // Ce qui a été remplacé se restaure à son tour ; ce qu'il remplace, la version restaurée,
+    // est gardé de même, au nom de Bob, qui a restauré.
+    let before_restore = kept[0].id;
+    f.hub
+        .restore_version(f.page, before_restore, Some(alice))
+        .await
+        .unwrap();
+    assert_eq!(f.hub.read_blocks(f.page).await.unwrap(), replaced);
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 3, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::BeforeRestore);
+    assert_eq!(version_blocks(&f, kept[0].id).await, first_blocks);
+    assert_eq!(authors(&kept[0]), [bob]);
+
+    drop(observer);
+    actor_stops(&f).await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 4, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Closing);
+    assert_eq!(
+        authors(&kept[0]),
+        [alice],
+        "la restauration compte au nom d'Alice"
+    );
+}
+
+/// Restaurer ce que la page a déjà comme contenu ne change rien : ni écriture au journal, ni
+/// version `before_restore`, ni trame.
+#[tokio::test]
+async fn restoring_what_the_page_already_has_changes_nothing() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    f.write_mmd("Un\n").await;
+    actor_stops(&f).await;
+    let first = versions(&f).await[0].id;
+    let observer = connect(&f, alice).await;
+    let rows = row_counts(&f.db).await;
+
+    f.hub
+        .restore_version(f.page, first, Some(alice))
+        .await
+        .unwrap();
+    assert!(still_open(&observer).await);
+    assert_eq!(row_counts(&f.db).await, rows, "rien d'écrit");
+    assert_eq!(versions_frames(&observer), 0);
+    assert_eq!(live_text(&f).await, "Un");
+}
+
+/// La connexion est encore servie : une resynchronisation reçoit sa réponse. Elle passe
+/// derrière tout ce que l'acteur a diffusé avant.
+async fn still_open(client: &Client) -> bool {
+    heard(client, || {}).await;
+    !client.is_closed()
+}
+
+/// Une version d'une autre page, ou inconnue, ne se restaure pas : `NotFound`, et rien
+/// n'est écrit.
+#[tokio::test]
+async fn version_of_another_page_is_not_restored() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let other = new_page(&f.store).await;
+    f.hub
+        .write_blocks(other, parse("Ailleurs\n").unwrap(), None)
+        .await
+        .unwrap();
+    let theirs = f
+        .store
+        .put_version(
+            other,
+            1,
+            &stored_page(&f.store, other).await.encode_state(),
+            &[],
+            VersionReason::Closing,
+        )
+        .await
+        .unwrap();
+    f.write_mmd("Ici\n").await;
+    let rows = row_counts(&f.db).await;
+    for version in [theirs, Uuid::now_v7()] {
+        let refused = f.hub.restore_version(f.page, version, None).await;
+        assert!(matches!(refused, Err(SyncError::NotFound)), "{refused:?}");
+    }
+    assert_eq!(row_counts(&f.db).await, rows);
+    assert_eq!(live_text(&f).await, "Ici");
+}
+
+/// Un état gardé que la page ne relit pas (base abîmée) : la restauration est refusée par une
+/// erreur, sans toucher au contenu ni arrêter l'acteur, et sans version `before_restore`.
+#[tokio::test]
+async fn unreadable_version_is_refused_without_touching_the_page() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    f.write_mmd("Un\n").await;
+    actor_stops(&f).await;
+    let broken = versions(&f).await[0].id;
+    exec_sql(
+        &f.db,
+        &format!("UPDATE doc_versions SET state_blob = x'01ff07' WHERE id = '{broken}'"),
+    )
+    .await;
+    let observer = connect(&f, alice).await;
+    types(&observer, " et deux").await;
+    let rows = row_counts(&f.db).await;
+
+    let refused = f.hub.restore_version(f.page, broken, Some(alice)).await;
+    assert!(matches!(refused, Err(SyncError::Crdt(_))), "{refused:?}");
+    assert_eq!(row_counts(&f.db).await, rows, "rien d'écrit");
+    assert!(still_open(&observer).await, "l'acteur sert toujours");
+    assert_eq!(live_text(&f).await, "Un et deux");
+}
+
+/// Une page garde ses cent dernières versions : les plus anciennes partent.
+#[tokio::test]
+async fn versions_are_capped_at_100() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let _open = f.client().await;
+    // Chaque écriture après la première suit l'intervalle : une version avant chacune.
+    for i in 0..=MAX_VERSIONS + 1 {
+        f.write_mmd(&format!("Texte {i}\n")).await;
+        advance(INTERVAL + Duration::from_secs(1)).await;
+    }
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), MAX_VERSIONS);
+    assert_eq!(
+        version_text(&f, kept[0].id).await,
+        format!("Texte {MAX_VERSIONS}")
+    );
+    assert_eq!(
+        version_text(&f, kept[MAX_VERSIONS - 1].id).await,
+        "Texte 1",
+        "la plus ancienne, « Texte 0 », est partie"
+    );
+}
+
+/// La compaction purge le journal, pas les versions : une version coupée avant elle se relit
+/// et se restaure après. Et les auteurs d'une tranche dont le journal a été purgé restent
+/// connus de l'acteur, qui les a notés en écrivant.
+#[tokio::test]
+async fn version_survives_compaction() {
+    let _clock = StoppedClock::start();
+    let cfg = SyncConfig {
+        snapshot_every: 2,
+        ..config()
+    };
+    let f = Fixture::new(cfg).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    f.hub
+        .write_blocks(f.page, parse("Avant\n").unwrap(), Some(alice))
+        .await
+        .unwrap();
+    actor_stops(&f).await;
+    let first = versions(&f).await[0].id;
+
+    let b = connect(&f, bob).await;
+    for typed in [" un", " deux", " trois"] {
+        types(&b, typed).await;
+    }
+    let (journal, snapshot) = (
+        actors(&f.db, f.page).await.len(),
+        f.store.load_doc(f.page).await.unwrap().snapshot,
+    );
+    assert!(journal < 3, "le journal a été compacté : {journal}");
+    let versioned = versions(&f).await[0].seq;
+    assert!(snapshot.is_some_and(|(seq, _)| seq > versioned));
+    assert_eq!(version_text(&f, first).await, "Avant");
+
+    f.hub
+        .restore_version(f.page, first, Some(alice))
+        .await
+        .unwrap();
+    assert_eq!(live_text(&f).await, "Avant");
+    let kept = versions(&f).await;
+    assert_eq!(kept[0].reason, VersionReason::BeforeRestore);
+    assert_eq!(version_text(&f, kept[0].id).await, "Avant un deux trois");
+    assert_eq!(
+        authors(&kept[0]),
+        [bob],
+        "Bob, que le journal ne nomme plus"
+    );
+}
+
+/// Après un arrêt brutal (le processus tué : pas de version `closing`), l'acteur qui démarre
+/// relit au journal la tranche en cours, ses auteurs et sa date : la version suivante les
+/// porte.
+#[tokio::test]
+async fn slice_is_read_again_from_the_journal_after_a_restart() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    // L'acteur qu'a lancé la création du document, arrêté sans rien avoir écrit.
+    actor_stops(&f).await;
+    // Ce qu'un processus précédent a écrit avant d'être tué : une écriture d'Alice, au journal.
+    let page = stored_page(&f.store, f.page).await;
+    let update = page
+        .write_blocks(&parse("Avant la panne\n").unwrap())
+        .unwrap();
+    f.store
+        .append_updates(f.page, &[&update], Some(alice))
+        .await
+        .unwrap();
+
+    // Quelqu'un ouvre la page : un acteur neuf la charge.
+    let _open = f.client().await;
+    assert_eq!(live_text(&f).await, "Avant la panne");
+    advance(INTERVAL + Duration::from_secs(1)).await;
+    f.hub
+        .write_blocks(f.page, parse("Après\n").unwrap(), Some(bob))
+        .await
+        .unwrap();
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Periodic);
+    assert_eq!(version_text(&f, kept[0].id).await, "Avant la panne");
+    assert_eq!(authors(&kept[0]), [alice]);
+}
+
+/// À l'arrêt du serveur (`Hub::shutdown`), l'acteur d'une page ouverte coupe sa version
+/// `closing`, puis ferme ses connexions ; aucun acteur ne démarre plus ensuite.
+#[tokio::test]
+async fn server_stop_cuts_a_closing_version() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let a = connect(&f, alice).await;
+    types(&a, "Tapé").await;
+
+    f.hub.shutdown().await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::Closing);
+    assert_eq!(version_text(&f, kept[0].id).await, "Tapé");
+    assert_eq!(authors(&kept[0]), [alice]);
+    until("la connexion n'est pas fermée", async || a.is_closed()).await;
+    assert!(f.hub.live_pages().await.is_empty());
+    assert!(matches!(
+        f.hub.read_blocks(f.page).await,
+        Err(SyncError::Closed)
+    ));
+}
+
+/// Une version `closing` que la base refuse n'empêche pas l'acteur de s'arrêter ; le contenu
+/// est au journal, et l'acteur suivant y relit la tranche : elle sera dans la version d'après.
+#[tokio::test]
+async fn closing_version_that_cannot_be_written_does_not_keep_the_actor() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    exec_sql(
+        &f.db,
+        "CREATE TRIGGER panne BEFORE INSERT ON doc_versions \
+         BEGIN SELECT RAISE(ABORT, 'panne simulée'); END",
+    )
+    .await;
+    f.hub
+        .write_blocks(f.page, parse("Gardé\n").unwrap(), Some(alice))
+        .await
+        .unwrap();
+    actor_stops(&f).await;
+    assert!(versions(&f).await.is_empty());
+
+    exec_sql(&f.db, "DROP TRIGGER panne").await;
+    assert_eq!(live_text(&f).await, "Gardé", "le contenu est au journal");
+    actor_stops(&f).await;
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(version_text(&f, kept[0].id).await, "Gardé");
+    assert_eq!(authors(&kept[0]), [alice]);
+}
