@@ -35,11 +35,11 @@
 //! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` (un invité aussi, R86) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` |
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
-//! | `GET /api/v1/pages/{id}/comments` | `read` (à la corbeille aussi) | `Thread[]` : les fils de la page, résolus compris, du plus ancien au plus récent ; chaque message avec son auteur (identifiant et nom, jamais l'adresse) et ses réactions (Ruling R134) |
+//! | `GET /api/v1/pages/{id}/comments` | `read` (à la corbeille aussi) | `Thread[]` : les fils de la page, résolus compris, du plus ancien au plus récent, chacun avec qui l'a ouvert (`openedBy`, qui le reste quand son premier message est supprimé) ; chaque message avec son auteur (identifiant et nom, jamais l'adresse) et ses réactions (Ruling R134) |
 //! | `POST /api/v1/pages/{id}/comments` | `comment` | `201`, `Thread` : un fil neuf et son premier message ; `422 invalid_body` ; `422 invalid_block` si `blockId` ne nomme aucun bloc du document vivant de la page, droits revérifiés une fois la page chargée (Ruling R89) ; sans `blockId`, la page n'est pas chargée |
 //! | `POST /api/v1/pages/{id}/comments/{threadId}/replies` | `comment` | `201`, `Comment` ; `422 invalid_body` |
 //! | `PATCH /api/v1/pages/{id}/comments/{threadId}` | l'avoir ouvert avec `comment`, ou `edit` | `Thread` : résolu (`{"resolved": true}`) ou rouvert ; déjà dans cet état, rien ne change |
-//! | `PATCH /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | `comment`, et en être l'auteur | `Comment` ; `422 invalid_body` |
+//! | `PATCH /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | `comment`, et en être l'auteur | `Comment` ; le même texte ne change rien, pas même `editedAt` ; `422 invalid_body` |
 //! | `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | en être l'auteur avec `comment`, ou `full` | `204` : le message part avec ses réactions, le fil avec son dernier message |
 //! | `PUT`, `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}/reactions/{emoji}` | `comment` | `Comment` : la réaction de la personne posée ou retirée (on ne retire que la sienne ; déjà dans cet état, rien ne change) ; `422 invalid_emoji` |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
@@ -81,14 +81,17 @@
 //! millisecondes, acceptée.
 //!
 //! **Commentaires** (`routes/comments.rs`, Ruling R134). Des fils attachés à une page, et au
-//! plus à un bloc par son identifiant ; rien n'est écrit dans le document. Refus dans l'ordre de
-//! `access.rs` : `404` pour la page, `403` sous `comment`, puis `404` pour un fil qui n'est pas
-//! de cette page ou un message qui n'est pas de ce fil (la même réponse qu'il existe ailleurs ou
-//! nulle part), `403` de la règle de l'auteur, `409 trashed`, enfin le corps (`422`). Le store
-//! revérifie dans la transaction qui écrit que le fil est de la page, le message du fil, et
-//! l'auteur quand c'est lui qui donne le droit. Chaque écriture validée qui change quelque chose
-//! envoie la trame `{"type":"comments"}` aux connexions de synchro de la page (Ruling R136) ;
-//! elle n'avance ni `spaces.rev` ni `spaces.lsn`.
+//! plus à un bloc par son identifiant ; rien n'est écrit dans le document. L'ordre des refus est
+//! celui des pages, avec deux étapes de plus entre le niveau et la corbeille (Ruling R168, écrit
+//! en tête de `access.rs`) : `404` pour la page, `403` sous `comment`, puis `404` pour un fil qui
+//! n'est pas de cette page ou un message qui n'est pas de ce fil (la même réponse qu'il existe
+//! ailleurs ou nulle part), `403` de la règle de l'auteur, `409 trashed`, enfin le corps
+//! (`422`). Le store revérifie dans la transaction qui écrit que le fil est de la page, le
+//! message du fil, et l'auteur quand c'est lui qui donne le droit. Chaque écriture validée qui
+//! change quelque chose envoie la trame `{"type":"comments"}` aux connexions de synchro de la
+//! page (Ruling R136) ; une écriture sans effet (réaction déjà posée, fil déjà résolu, message
+//! modifié avec le même texte) n'écrit rien et n'envoie rien (Ruling R170). Aucune n'avance
+//! `spaces.rev` ni `spaces.lsn`.
 //!
 //! **Comptes** (`auth.rs`, `routes/auth.rs`) : comptes locaux, mot de passe
 //! haché en Argon2id, session par cookie. Le premier compte créé administre

@@ -22,6 +22,12 @@
 //! niveau ne permet pas l'action ; `409 trashed` si l'action écrit dans une page à la
 //! corbeille. Jamais `403` ni `409` pour une page qu'elle ne voit pas.
 //!
+//! Les commentaires glissent deux étapes entre le niveau et la corbeille (Ruling R168) :
+//! `404`, puis `403` sous `comment` ([`permit_level`]) ; `404` pour un fil qui n'est pas de la
+//! page, puis pour un message qui n'est pas du fil ; `403` de la règle de l'auteur
+//! ([`permit_own`]) ; enfin `409 trashed`. La corbeille reste le dernier refus de droit, et
+//! toujours après celui de la page.
+//!
 //! **Cache** : la clé est `spaces.rev`, que le store incrémente dans la transaction de toute
 //! écriture qui change une entrée du calcul des accès. Deux étages, tous deux rangés sous elle :
 //! - les données de l'espace ([`InputsCache`]) : ses nœuds, ses lignes d'accès et ses rôles,

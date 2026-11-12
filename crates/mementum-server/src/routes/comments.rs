@@ -12,7 +12,8 @@
 //! | `DELETE …/comments/{threadId}/messages/{commentId}` | en être l'auteur avec `comment`, ou `full` | `204` ; le fil part avec son dernier message |
 //! | `PUT`, `DELETE …/messages/{commentId}/reactions/{emoji}` | `comment` | [`Comment`] ; `422 invalid_emoji` |
 //!
-//! **Refus**, dans cet ordre (celui de `access.rs`, où passent tous les droits) :
+//! **Refus**, dans cet ordre (Ruling R168 : celui des pages, écrit en tête de `access.rs`, où
+//! passent tous les droits, avec les étapes 4 et 5 de plus entre le niveau et la corbeille) :
 //! 1. `401` sans session ;
 //! 2. `404 not_found` pour une page que la personne ne voit pas, la réponse d'une page qui
 //!    n'existe pas, quels que soient le fil, le message ou le corps nommés ;
@@ -43,7 +44,8 @@
 //! **Lecteurs prévenus.** Après chaque écriture validée qui change quelque chose, les
 //! connexions de synchro de la page reçoivent la trame `{"type":"comments"}` (`Hub::page_event`,
 //! Ruling R136), lecteurs compris, et relisent par `GET`. Une réaction déjà posée, un fil déjà
-//! résolu : rien ne change, rien n'est envoyé. L'écriture et la trame vont au bout même si le
+//! résolu, un message modifié avec le texte qu'il a déjà : rien ne change, rien n'est envoyé
+//! (Ruling R170). L'écriture et la trame vont au bout même si le
 //! client coupe la connexion. Une écriture de commentaire n'avance ni `spaces.rev` ni
 //! `spaces.lsn` : elle ne change ni les droits ni ce que montre la barre latérale.
 
