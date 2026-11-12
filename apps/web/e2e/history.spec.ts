@@ -96,8 +96,9 @@ async function restoreChosen(p: Page, dialog: Locator, { othersWarned }: { other
   else await expect(confirm).not.toContainText(OTHERS);
   await confirm.getByRole("button", { name: "Restaurer", exact: true }).click();
   await expect(dialog).toBeHidden();
-  // Le focus revient au bouton du menu.
+  // Le focus revient au bouton du menu, et la page l'annonce.
   await expect(menuButton(p)).toBeFocused();
+  await expect(p.getByRole("status").filter({ hasText: "Version restaurée." })).toHaveCount(1);
 }
 
 test("version_is_listed_and_previewed", async ({ browser, request, baseURL }) => {
@@ -198,6 +199,14 @@ test("version_is_listed_and_previewed", async ({ browser, request, baseURL }) =>
   await p.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(menuButton(p)).toBeFocused();
+
+  // Le document de la page n'est pas bloqué : une frappe faite après l'historique part au
+  // serveur (un document resté bloqué dans une transaction n'émettrait plus rien).
+  await pageEditor(p).getByText(NEW).click();
+  await p.keyboard.press("End");
+  await p.keyboard.type(" et après");
+  await expect.poll(() => getMmd(request, id)).toContain(`${NEW} et après`);
+  expect(await p.evaluate(() => (window as unknown as { updatesDuringHistory: number }).updatesDuringHistory)).toBeGreaterThan(0);
 });
 
 test("restore_brings_the_old_content_back_for_everyone", async ({ browser }) => {
