@@ -45,14 +45,17 @@ CREATE TABLE comment_reactions (
     PRIMARY KEY (comment_id, user_id, emoji)
 );
 
+-- L'état (`state_blob`, quelques mégaoctets pour une grande page) vient en dernier : SQLite lit
+-- les colonnes d'une ligne dans l'ordre, et une colonne placée après lui ferait lire tout l'état
+-- à chaque liste des versions et à chaque purge (Ruling R191).
 CREATE TABLE doc_versions (
     id TEXT PRIMARY KEY NOT NULL,
     node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     seq INTEGER NOT NULL,
-    state_blob BLOB NOT NULL,
     reason TEXT NOT NULL CHECK (reason IN ('periodic', 'closing', 'before_restore')),
     authors TEXT NOT NULL,          -- JSON : identifiants des comptes, triés
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    state_blob BLOB NOT NULL
 );
 CREATE INDEX doc_versions_by_node ON doc_versions (node_id, created_at);
 

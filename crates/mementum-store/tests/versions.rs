@@ -404,3 +404,22 @@ async fn next_purged_names_what_the_next_version_would_push_out() {
             .is_empty()
     );
 }
+
+/// L'état d'une version est sa dernière colonne (Ruling R191) : SQLite lit les colonnes d'une
+/// ligne dans l'ordre, et une colonne placée après lui faisait lire tout l'état à chaque liste
+/// des versions et à chaque purge. Mesuré en release sur une page de 10 000 blocs (3 Mo par
+/// version) : la cent-unième version prenait 343 ms, purge comprise, au lieu de 29 ms.
+#[tokio::test]
+async fn state_is_the_last_column_of_a_version() {
+    let (f, _) = fresh_page().await;
+    let columns = texts(
+        &f.db,
+        "SELECT name FROM pragma_table_info('doc_versions') ORDER BY cid",
+    )
+    .await;
+    assert_eq!(
+        columns.last(),
+        Some(&Some("state_blob".to_string())),
+        "{columns:?}"
+    );
+}
