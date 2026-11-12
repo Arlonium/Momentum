@@ -270,8 +270,9 @@ fn client_cannot_overwrite_schema_version() {
     let page = PageDoc::from_updates([created.as_slice()]).unwrap();
     let client = PageDoc::from_updates([created.as_slice()]).unwrap();
     let typed = client.write_blocks(&parse("Bonjour\n").unwrap()).unwrap();
-    assert_eq!(page.apply_client_update(&typed), Ok(()));
-    assert_eq!(page.apply_client_update(&client.encode_state()), Ok(()));
+    page.apply_client_update(&typed).expect("le contenu passe");
+    page.apply_client_update(&client.encode_state())
+        .expect("l'état complet d'un client passe");
     assert_eq!(page.read_blocks(), client.read_blocks());
     assert_eq!(page.schema_version(), Some(SCHEMA_VERSION));
 }
@@ -338,7 +339,8 @@ fn stored_pages_still_load_after_the_guard_tightens() {
     assert_eq!(page.schema_version(), Some(SCHEMA_VERSION + 1));
     let client = PageDoc::from_updates([page.encode_state().as_slice()]).unwrap();
     client.write_blocks(&parse("Bonjour\n").unwrap()).unwrap();
-    assert_eq!(page.apply_client_update(&client.encode_state()), Ok(()));
+    page.apply_client_update(&client.encode_state())
+        .expect("l'état complet d'un client passe");
     assert_eq!(page.read_blocks(), client.read_blocks());
     assert_eq!(page.schema_version(), Some(SCHEMA_VERSION + 1));
 }

@@ -59,3 +59,23 @@ fn writes_like_blocknote_all_blocks() {
 fn writes_like_blocknote_non_default() {
     assert_writes_like_blocknote(NON_DEFAULT_MMD, NON_DEFAULT_YJS);
 }
+
+/// Ce qui est relayé et écrit d'un client est ce que la page a lu, réencodé
+/// par yrs (Ruling R130). Pour ce qu'écrit un vrai navigateur, cela ne doit
+/// rien changer : l'état complet d'une page de BlockNote, rendu par la page
+/// qui le connaît déjà, redonne le même arbre, attribut par attribut.
+#[test]
+fn blocknote_state_is_returned_with_the_same_tree() {
+    let everything = |_: &str, _: &str, _: &yrs::Any| false;
+    for (what, state) in [
+        ("all-blocks", ALL_BLOCKS_YJS),
+        ("non-default", NON_DEFAULT_YJS),
+    ] {
+        let page = PageDoc::from_updates([state]).expect("fixture lisible");
+        let read = page.apply_client_update(state).expect("un état déjà connu");
+        let theirs = dump(state, &everything);
+        assert!(theirs.len() > 50, "{what} : fixture lue en entier");
+        assert_eq!(dump(&read, &everything), theirs, "{what}");
+        assert_eq!(mmd_of(&read), mmd_of(state), "{what}");
+    }
+}

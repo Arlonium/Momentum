@@ -7,6 +7,7 @@ use mementum_md::{Block, normalize};
 use mementum_schema::SCHEMA_VERSION;
 use yrs::any::Number;
 use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
 use yrs::{
     Any, Doc, Map, MapRef, OffsetKind, Options, Out, ReadTxn, StateVector, Transact,
     TransactionMut, Update, XmlElementPrelim, XmlElementRef, XmlFragment, XmlFragmentRef, XmlOut,
@@ -110,7 +111,9 @@ impl PageDoc {
     /// stockées (la plupart des refus laissent le document intact, mais pas
     /// tous ; l'appelant n'a pas à les distinguer).
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
-        self.integrate(&mut self.doc.transact_mut(), update)
+        let mut txn = self.doc.transact_mut();
+        let (shape, decoded) = self.read(&txn, update)?;
+        self.integrate(&mut txn, &shape, decoded)
     }
 
     /// Intègre une mise à jour (v1) reçue d'un client : comme
@@ -123,11 +126,23 @@ impl PageDoc {
     /// Ce refus n'est connu qu'après l'application (voir le module `guard`) :
     /// comme après toute erreur, le `PageDoc` est à jeter.
     ///
+    /// Rend la mise à jour telle que la page l'a lue, réencodée (v1) : **c'est
+    /// elle qu'on écrit au journal et qu'on relaie aux autres clients, jamais
+    /// les octets reçus** (Ruling R130). yrs et Yjs ne lisent pas les mêmes
+    /// octets pareil : yrs laisse tomber les bits d'un entier au-delà de 32,
+    /// Yjs lit l'entier en entier. Relayée telle quelle, une suppression dont
+    /// l'horloge est écrite avec 2^32 de plus efface un texte sur le serveur,
+    /// et rien dans les navigateurs, où l'on continue d'y écrire à perte.
+    /// Réencodée, elle dit à tous ce que la page a fait.
+    ///
     /// À ne pas employer pour ce qui est relu du stockage : la mise à jour du
     /// serveur qui crée la page pose `schemaVersion`, et y serait refusée.
-    pub fn apply_client_update(&self, update: &[u8]) -> Result<(), CrdtError> {
+    pub fn apply_client_update(&self, update: &[u8]) -> Result<Vec<u8>, CrdtError> {
         let mut txn = self.doc.transact_mut();
-        self.integrate(&mut txn, update)?;
+        let (shape, decoded) = self.read(&txn, update)?;
+        // Avant l'application, qui consomme la mise à jour lue.
+        let read = decoded.encode_v1();
+        self.integrate(&mut txn, &shape, decoded)?;
         // yrs ne dresse la liste des types changés qu'à la validation.
         txn.commit();
         if touched(&txn, &self.meta) {
@@ -135,15 +150,26 @@ impl PageDoc {
                 "la mise à jour d'un client écrit dans les métadonnées de la page".to_string(),
             ));
         }
-        Ok(())
+        Ok(read)
     }
 
-    /// Lit la mise à jour, la vérifie et l'applique dans `txn` (voir
-    /// [`PageDoc::apply_update`]).
-    fn integrate(&self, txn: &mut TransactionMut, update: &[u8]) -> Result<(), CrdtError> {
+    /// Lit la mise à jour, par la garde puis par yrs, et la vérifie contre
+    /// l'état de `txn`, sans rien appliquer (voir [`PageDoc::apply_update`]).
+    fn read(&self, txn: &TransactionMut, update: &[u8]) -> Result<(Shape, Update), CrdtError> {
         let shape = Shape::read(update)?;
         let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
         shape.check(&txn.state_vector())?;
+        Ok((shape, decoded))
+    }
+
+    /// Applique dans `txn` une mise à jour lue par [`PageDoc::read`], et
+    /// vérifie ce qui ne se sait qu'après (voir [`PageDoc::apply_update`]).
+    fn integrate(
+        &self,
+        txn: &mut TransactionMut,
+        shape: &Shape,
+        decoded: Update,
+    ) -> Result<(), CrdtError> {
         txn.apply_update(decoded)
             .map_err(|e| CrdtError::Decode(e.to_string()))?;
         if txn.store().pending_update().is_some() {
@@ -167,7 +193,6 @@ impl PageDoc {
 
     /// Vecteur d'état (v1).
     pub fn state_vector(&self) -> Vec<u8> {
-        use yrs::updates::encoder::Encode;
         self.doc.transact().state_vector().encode_v1()
     }
 
