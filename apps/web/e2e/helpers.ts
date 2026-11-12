@@ -653,6 +653,14 @@ async function webSocketWithSession(request: APIRequestContext): Promise<typeof 
 }
 
 /**
+ * Type des trames de page que le serveur écrit sur la connexion de synchro (`roster`,
+ * `comments`, `versions`, R136). y-websocket ne le connaît pas : sans gestionnaire, il écrit
+ * « Unable to compute message » pour chacune. Le client de l'application les retire avant
+ * lui (`CollabSession`) ; un client nu des tests les ignore.
+ */
+const MESSAGE_PAGE_EVENT = 100;
+
+/**
  * Ajoute à la page, par un client Yjs nu (sans éditeur, au schéma courant), un bloc d'un
  * type que BlockNote ne connaît pas : `blockContainer > futureWidget`. C'est la forme d'un
  * bloc d'une version plus récente ; le serveur le relit `<block … foreign=true/>`. Le client
@@ -668,7 +676,13 @@ export async function injectForeignBlock(
     params: { schema: String(REGISTRY_VERSION) },
     disableBc: true,
     WebSocketPolyfill: await webSocketWithSession(request),
+    // Le gestionnaire est posé avant la connexion : la première trame `roster` suit de près la
+    // poignée de main.
+    connect: false,
   });
+  // Ignorée : rien n'est lu, rien n'est répondu.
+  provider.messageHandlers[MESSAGE_PAGE_EVENT] = () => {};
+  provider.connect();
   try {
     await expect.poll(() => provider.synced, { timeout: 10_000 }).toBe(true);
     const group = doc.getXmlFragment("document-store").get(0) as Y.XmlElement;
