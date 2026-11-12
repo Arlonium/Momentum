@@ -243,3 +243,150 @@ describe("on_server_state", () => {
     expect(listener).not.toHaveBeenCalled();
   });
 });
+
+/** Trame de page du serveur : type, puis un `varUint8Array` (longueur, octets). */
+function pageFrame(payload: unknown, type = 100): Uint8Array {
+  const body =
+    typeof payload === "string" ? new TextEncoder().encode(payload) : payload instanceof Uint8Array
+      ? payload
+      : new TextEncoder().encode(JSON.stringify(payload));
+  return Uint8Array.from([...varUint(type), ...varUint(body.length), ...body]);
+}
+
+const ALICE = { id: "11111111-1111-1111-1111-111111111111", name: "Alice", canWrite: true };
+const BOB = { id: "22222222-2222-2222-2222-222222222222", name: "Bob", canWrite: false };
+
+describe("page_frame", () => {
+  test("page_frame_never_reaches_y_websocket", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const readOnly of [false, true]) {
+      FakeSocket.instances = [];
+      const session = open(readOnly);
+      const socket = await connected();
+      const seen = vi.fn();
+      // y-websocket lirait la trame par son gestionnaire de type 100, s'il en avait un.
+      session.provider.messageHandlers[100] = seen;
+      socket.receive(pageFrame({ type: "roster", users: [ALICE] }));
+      socket.receive(pageFrame({ type: "comments" }));
+      socket.receive(pageFrame({ type: "versions" }));
+      expect(seen, `lecture seule : ${readOnly}`).not.toHaveBeenCalled();
+      expect(errors, `lecture seule : ${readOnly}`).not.toHaveBeenCalled();
+    }
+  });
+
+  test("roster_frame_updates_the_session", async () => {
+    for (const readOnly of [false, true]) {
+      FakeSocket.instances = [];
+      const session = open(readOnly);
+      const changed = vi.fn();
+      session.subscribe(changed);
+      expect(session.roster).toEqual([]);
+      const socket = await connected();
+      socket.receive(pageFrame({ type: "roster", users: [ALICE, BOB] }));
+      expect(session.roster, `lecture seule : ${readOnly}`).toEqual([ALICE, BOB]);
+      expect(changed).toHaveBeenCalled();
+      socket.receive(pageFrame({ type: "roster", users: [BOB] }));
+      expect(session.roster).toEqual([BOB]);
+      // Une ligne mal formée est laissée de côté, les autres restent.
+      socket.receive(
+        pageFrame({ type: "roster", users: [{ id: 3, name: "x", canWrite: true }, ALICE, null] }),
+      );
+      expect(session.roster).toEqual([ALICE]);
+      // La liste d'une connexion tombée ne reste pas affichée : elle revient avec la suivante.
+      socket.readyState = 3;
+      socket.onclose?.({ code: 1006 } as CloseEvent);
+      expect(session.roster).toEqual([]);
+    }
+  });
+
+  test("comments_and_versions_frames_reach_the_page_listeners", async () => {
+    const session = open(false);
+    const seen: string[] = [];
+    const stop = session.onPageEvent((event) => seen.push(event));
+    const socket = await connected();
+    socket.receive(pageFrame({ type: "comments" }));
+    socket.receive(pageFrame({ type: "versions" }));
+    stop();
+    socket.receive(pageFrame({ type: "comments" }));
+    expect(seen).toEqual(["comments", "versions"]);
+  });
+
+  test("unknown_page_frame_is_dropped_without_an_error", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const readOnly of [false, true]) {
+      FakeSocket.instances = [];
+      const session = open(readOnly);
+      const socket = await connected();
+      socket.receive(pageFrame({ type: "roster", users: [ALICE] }));
+      const events = vi.fn();
+      session.onPageEvent(events);
+      // Ni effet ni erreur : type inconnu, JSON illisible, tronquée, UTF-8 invalide, sans liste.
+      socket.receive(pageFrame({ type: "inconnu" }));
+      socket.receive(pageFrame("{pas du json"));
+      socket.receive(pageFrame(Uint8Array.from([0xff, 0xfe])));
+      socket.receive(pageFrame({ type: "roster" }));
+      socket.receive(pageFrame({ type: "roster", users: "Alice" }));
+      socket.receive(Uint8Array.from([100]));
+      socket.receive(Uint8Array.from([100, 50, 123]));
+      expect(events).not.toHaveBeenCalled();
+      expect(session.roster, `lecture seule : ${readOnly}`).toEqual([ALICE]);
+      expect(errors, `lecture seule : ${readOnly}`).not.toHaveBeenCalled();
+    }
+  });
+
+  test("a_message_of_another_type_still_goes_to_y_websocket", async () => {
+    const session = open(false);
+    const socket = await connected();
+    const seen = vi.fn();
+    session.provider.messageHandlers[101] = seen;
+    socket.receive(Uint8Array.from([101, 0]));
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
+
+  test("page_frame_before_the_first_sync_is_kept", async () => {
+    const session = open(false);
+    const socket = await connected();
+    expect(session.synced).toBe(false);
+    socket.receive(pageFrame({ type: "roster", users: [ALICE] }));
+    expect(session.roster).toEqual([ALICE]);
+    // Et la synchro se fait comme d'habitude derrière elle.
+    socket.receive(syncFrame(1, Y.encodeStateAsUpdate(serverDoc())));
+    expect(session.synced).toBe(true);
+    expect(session.roster).toEqual([ALICE]);
+  });
+
+  test("the_rest_of_a_grouped_message_is_not_lost", async () => {
+    const session = open(false);
+    const socket = await connected();
+    const seen = vi.fn();
+    session.provider.messageHandlers[101] = seen;
+    socket.receive(Uint8Array.from([...pageFrame({ type: "roster", users: [ALICE] }), 101, 0]));
+    expect(session.roster).toEqual([ALICE]);
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("presence_at_reconnect", () => {
+  test("une connexion rétablie annonce un état neuf, pas à la première connexion seulement", async () => {
+    const session = open(false);
+    session.provider.awareness.setLocalState({ user: { name: "A", color: "#23704F" } });
+    const clock = () => session.provider.awareness.meta.get(session.provider.doc.clientID)!.clock;
+    const socket = await connected();
+    const first = clock();
+    // Coupure puis retour, comme y-websocket le fait.
+    socket.readyState = 3;
+    socket.onclose?.({ code: 1006 } as CloseEvent);
+    FakeSocket.instances = [];
+    session.provider.disconnect();
+    session.provider.connect();
+    const next = await connected();
+    expect(next).not.toBe(socket);
+    expect(clock()).toBeGreaterThan(first);
+  });
+
+  test("rien n'est annoncé en lecture seule", async () => {
+    const session = open(true);
+    await connected();
+    expect(session.provider.awareness.getLocalState()).toBeNull();
+  });
+});

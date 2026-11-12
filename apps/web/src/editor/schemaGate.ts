@@ -21,12 +21,19 @@ const CLOSING = 2;
 const CLOSED = 3;
 
 /**
+ * Ce que `beforeMessage` décide d'un message reçu : `true`, il l'a pris et y-websocket ne le
+ * voit pas ; `false`, il suit tel quel ; un `ArrayBuffer`, y-websocket reçoit cela à la place
+ * (ce qui reste d'un message groupé dont la tête a été prise).
+ */
+export type MessageVerdict = boolean | ArrayBuffer;
+
+/**
  * Classe WebSocket pour l'option `WebSocketPolyfill` de y-websocket. `beforeMessage` voit
- * chaque message reçu juste avant y-websocket, dans la même tâche.
+ * chaque message reçu juste avant y-websocket, dans la même tâche, et peut le prendre.
  */
 export function gatedWebSocket(
   check: ConnectionCheck,
-  beforeMessage?: (data: unknown) => void,
+  beforeMessage?: (data: unknown) => MessageVerdict,
 ): typeof WebSocket {
   class GatedWebSocket {
     static readonly CONNECTING = CONNECTING;
@@ -58,8 +65,10 @@ export function gatedWebSocket(
           socket.binaryType = this.binaryType;
           socket.onopen = (event) => this.onopen?.(event);
           socket.onmessage = (event) => {
-            beforeMessage?.(event.data);
-            this.onmessage?.(event);
+            const verdict = beforeMessage?.(event.data) ?? false;
+            if (verdict === true) return;
+            // Un `MessageEvent` n'est pas modifiable : y-websocket ne lit que `data`.
+            this.onmessage?.(verdict === false ? event : ({ data: verdict } as MessageEvent));
           };
           socket.onerror = (event) => this.onerror?.(event);
           socket.onclose = (event) => {
