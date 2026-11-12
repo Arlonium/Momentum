@@ -5,7 +5,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { CollabSession } from "../editor/collab";
 import { colorOf } from "../session/session";
-import { inkOn } from "./avatarInk";
+import { initialOf, inkOn } from "./avatarInk";
 
 /** Avatars montrés avant le « +N ». */
 const MAX_AVATARS = 5;
@@ -39,7 +39,7 @@ export function Presence({ session, selfId }: Props) {
               aria-label={label}
               style={{ backgroundColor: color, color: inkOn(color) }}
             >
-              {Array.from(user.name.trim())[0]?.toLocaleUpperCase() ?? "?"}
+              {initialOf(user.name)}
             </span>
           </li>
         );

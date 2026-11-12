@@ -41,7 +41,7 @@ import { isolate } from "../comments/dom";
 import { fullDate, isoDate, relativeTime, useNow } from "../comments/time";
 import type { CollabSession, RosterUser } from "../editor/collab";
 import { CloseIcon } from "../icons";
-import { inkOn } from "../page/avatarInk";
+import { initialOf, inkOn } from "../page/avatarInk";
 import { FormError, messageOf } from "../session/forms";
 import { colorOf } from "../session/session";
 import { canEdit } from "../share/levels";
@@ -445,9 +445,4 @@ function VersionItem({ version, now, chosen, onChoose }: ItemProps) {
       )}
     </button>
   );
-}
-
-/** L'initiale d'un nom : sa première lettre ou son premier chiffre, pas un caractère de format. */
-function initialOf(name: string): string {
-  return name.match(/[\p{L}\p{N}]/u)?.[0]?.toLocaleUpperCase() ?? "?";
 }

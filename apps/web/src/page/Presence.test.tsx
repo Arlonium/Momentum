@@ -61,6 +61,15 @@ test("nothing_is_drawn_when_nobody_else_is_there", async () => {
   expect(host.innerHTML).toBe("");
 });
 
+test("the_initial_is_the_one_shown_everywhere_else", async () => {
+  // Un nom qui commence par un caractère de format : la même initiale qu'au fil des commentaires
+  // et dans l'historique (`initialOf`).
+  const odd = { ...user(2), name: "⁨Zoé⁩" };
+  const session = fakeSession([odd]);
+  await act(async () => root.render(<Presence session={session} selfId="autre" />));
+  expect(avatars()[0].textContent).toBe("Z");
+});
+
 test("an_avatar_has_the_initial_the_colour_and_the_name", async () => {
   const reader = { ...user(2, false), name: "élodie" };
   const session = fakeSession([reader]);

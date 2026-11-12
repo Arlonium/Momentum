@@ -16,7 +16,7 @@ import type { Comment, Thread } from "@mementum/protocol";
 import { useState, type MouseEvent, type ReactNode } from "react";
 import { isSessionLost } from "../api";
 import { ReactIcon } from "../icons";
-import { inkOn } from "../page/avatarInk";
+import { initialOf, inkOn } from "../page/avatarInk";
 import { messageOf } from "../session/forms";
 import { colorOf } from "../session/session";
 import { Confirm } from "../ui/Confirm";
@@ -303,8 +303,7 @@ export function ThreadView({
 /** L'auteur d'un message, son âge et s'il a été modifié. */
 function MessageHead({ comment, now }: { comment: Comment; now: number }) {
   const color = colorOf(comment.author.id);
-  // L'initiale : la première lettre ou le premier chiffre du nom, pas un caractère de format.
-  const initial = comment.author.name.match(/[\p{L}\p{N}]/u)?.[0]?.toLocaleUpperCase() ?? "?";
+  const initial = initialOf(comment.author.name);
   return (
     <div className="mm-comment-head">
       <span
