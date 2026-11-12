@@ -1,6 +1,7 @@
 //! Ce qui passe sur la socket : le serveur ne relaie jamais les octets de présence qu'il a
-//! reçus, mais ce qu'il a lu et gardé, réencodé (Ruling R123) ; et un message WebSocket ne porte
-//! pas plus de 32 messages y-websocket (Ruling R124).
+//! reçus, mais ce qu'il a lu et gardé, réencodé (Ruling R123) ; il en va de même d'une mise à
+//! jour du document (Ruling R130) ; et un message WebSocket ne porte pas plus de 32 messages
+//! y-websocket (Ruling R124).
 //!
 //! Le serveur lisait une mise à jour de présence avec yrs, et relayait ses octets tels quels
 //! aux clients, qui la lisent avec lib0. Les deux ne lisent pas pareil : yrs laisse tomber les
@@ -176,6 +177,27 @@ impl Raw {
             match message[..] {
                 [0, 1, ..] => return Some(presence),
                 [1, ..] => presence.push(message),
+                _ => {}
+            }
+        }
+    }
+
+    /// Comme [`Raw::presence_so_far`], pour les mises à jour du document : rend celles que le
+    /// serveur a relayées avant cette demande, chacune telle qu'un client la reçoit (sans
+    /// l'en-tête du message de synchro).
+    async fn updates_so_far(&mut self) -> Option<Vec<Vec<u8>>> {
+        self.send(STEP_1.to_vec()).await;
+        let mut updates = Vec::new();
+        loop {
+            let message = self.next().await?;
+            match message[..] {
+                [0, 1, ..] => return Some(updates),
+                [0, 2, ..] => {
+                    let mut at = 2;
+                    let length = read_var(&message, &mut at) as usize;
+                    assert_eq!(at + length, message.len(), "un seul message y-websocket");
+                    updates.push(message[at..].to_vec());
+                }
                 _ => {}
             }
         }
@@ -467,4 +489,86 @@ async fn websocket_message_with_more_than_32_messages_closes_the_connection() {
     ignored.send_raw([2, 1].repeat(33));
     assert!(ignored.wait_until(WAIT, |c| c.is_closed()).await);
     assert!(still_served(&other).await && still_served(&at_limit).await);
+}
+
+/// Une mise à jour sans bloc, qui supprime une plage : `(client, horloge, longueur)`, écrits
+/// tels quels.
+fn deletion(client: u64, clock: u64, len: u64) -> Vec<u8> {
+    let mut update = vec![0, 1];
+    write_var(&mut update, client);
+    update.push(1);
+    write_var(&mut update, clock);
+    write_var(&mut update, len);
+    update
+}
+
+/// La seule plage qu'une mise à jour sans bloc supprime, lue à la manière de lib0, jusqu'au
+/// dernier octet.
+fn deletion_of(update: &[u8]) -> (u128, u128, u128) {
+    let mut at = 0;
+    assert_eq!(read_var(update, &mut at), 0, "aucun bloc");
+    assert_eq!(read_var(update, &mut at), 1, "un client");
+    let client = read_var(update, &mut at);
+    assert_eq!(read_var(update, &mut at), 1, "une plage");
+    let clock = read_var(update, &mut at);
+    let len = read_var(update, &mut at);
+    assert_eq!(at, update.len(), "des octets après les suppressions");
+    (client, clock, len)
+}
+
+/// Une horloge écrite avec 2^32 de plus : yrs, qui lit sur 32 bits, y voit le texte de la page,
+/// et le serveur le supprime ; un navigateur, qui lit l'entier en entier, y voit une plage
+/// qu'il ne connaît pas, la garde en attente et ne supprime rien. Relayée telle quelle, la mise
+/// à jour laissait donc les navigateurs afficher un texte que le serveur n'a plus : tout ce
+/// qu'on y tapait ensuite était perdu, sans que rien le dise. Le serveur relaie et écrit ce
+/// qu'il a lu, réencodé : les navigateurs suppriment le même texte que lui.
+#[tokio::test]
+async fn relayed_update_is_what_the_server_read_not_what_it_received() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd(
+        "Bonjour
+",
+    )
+    .await;
+    let id = f.ids().await.remove(0);
+    let mallory = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+    let mut observer = Raw::connect(&f, of(new_user(&f.db).await)).await;
+    assert_eq!(
+        observer
+            .updates_so_far()
+            .await
+            .expect("observatrice servie"),
+        Vec::<Vec<u8>>::new()
+    );
+
+    // La suppression honnête de « Bonjour », préparée sans être envoyée : elle dit le client
+    // et la plage du texte.
+    let honest = mallory.page().unwrap().replace_text(&id, 0, 7, "").unwrap();
+    let (client, clock, len) = deletion_of(&honest);
+    let forged = deletion(client as u64, clock as u64 + (1 << 32), len as u64);
+    assert_eq!(deletion_of(&forged), (client, clock + (1 << 32), len));
+
+    mallory.send_update(&forged);
+    assert!(still_served(&mallory).await);
+    assert_eq!(
+        text(&f.hub.read_blocks(f.page).await.unwrap()),
+        "",
+        "le serveur a supprimé le texte"
+    );
+
+    let relayed = observer
+        .updates_so_far()
+        .await
+        .expect("observatrice servie");
+    assert_eq!(relayed.len(), 1, "{relayed:?}");
+    assert_eq!(
+        deletion_of(&relayed[0]),
+        (client, clock, len),
+        "un navigateur supprime ce que le serveur a supprimé"
+    );
+    assert_ne!(relayed[0], forged);
+    // Le journal garde lui aussi ce qui a été lu, pas ce qui a été reçu.
+    let stored = f.store.load_doc(f.page).await.unwrap();
+    let (_, last) = stored.updates.last().expect("une mise à jour au journal");
+    assert_eq!(last, &relayed[0]);
 }

@@ -744,6 +744,11 @@ impl Actor {
     /// Mise à jour d'un client : appliquer, dédoublonner, écrire au nom de
     /// `actor` (le compte de la connexion), puis diffuser. `false` : la
     /// connexion est à fermer.
+    ///
+    /// Ruling R130 : ce qui est écrit et diffusé est la mise à jour telle que
+    /// la page l'a lue, réencodée, jamais les octets reçus. Ce que les clients
+    /// appliquent, et ce que le journal garde, est ce que le serveur a
+    /// appliqué.
     async fn client_update(
         &mut self,
         conn: ConnId,
@@ -752,30 +757,33 @@ impl Actor {
     ) -> Result<bool, Broken> {
         // Ce qui vient d'un client ne touche pas aux métadonnées de la page
         // (report M7 du lot 1) ; ce que `load` relit du store, si.
-        if let Err(error) = self.page.apply_client_update(update) {
-            // Rulings R17 et R22 : ni écrite ni diffusée ; le document, peut-être
-            // entamé (yrs garde en attente une mise à jour à dépendance
-            // manquante), est rechargé depuis le store ; le client fautif est
-            // fermé. Il se reconnecte, et sa synchro complète apporte ce qui
-            // manquait.
-            tracing::warn!(node_id = %self.id.node_id, conn, %error, "mise à jour refusée : document rechargé, connexion fermée");
-            self.reload().await?;
-            return Ok(false);
-        }
+        let read = match self.page.apply_client_update(update) {
+            Ok(read) => read,
+            Err(error) => {
+                // Rulings R17 et R22 : ni écrite ni diffusée ; le document,
+                // peut-être entamé (yrs garde en attente une mise à jour à
+                // dépendance manquante), est rechargé depuis le store ; le
+                // client fautif est fermé. Il se reconnecte, et sa synchro
+                // complète apporte ce qui manquait.
+                tracing::warn!(node_id = %self.id.node_id, conn, %error, "mise à jour refusée : document rechargé, connexion fermée");
+                self.reload().await?;
+                return Ok(false);
+            }
+        };
         // Après des déplacements concurrents, un bloc peut exister en double.
         let fix = self.page.dedupe_blocks();
         // La mise à jour et son correctif en une écriture, tous deux ou aucun
         // (report M3 du lot 1) : sans le correctif, le store garderait le
         // doublon, que le rechargement servirait.
         let written = match &fix {
-            Some(fix) => self.persist(&[update, fix], actor).await,
-            None => self.persist(&[update], actor).await,
+            Some(fix) => self.persist(&[&read, fix], actor).await,
+            None => self.persist(&[&read], actor).await,
         };
         if let Err(error) = written {
             self.store_failed(&error).await?;
             return Ok(false);
         }
-        self.broadcast(Some(conn), protocol::update(update));
+        self.broadcast(Some(conn), protocol::update(&read));
         if let Some(fix) = fix {
             // À toutes les connexions, l'expéditeur compris.
             self.broadcast(None, protocol::update(&fix));
