@@ -1,24 +1,27 @@
 //! Synchronisation entre clients : convergence, page inconnue, déplacements
 //! concurrents, client en retard, mises à jour refusées, bornes mémoire,
-//! awareness, acteurs qui s'arrêtent et repartent ; et les droits : connexion
+//! awareness, acteurs qui s'arrêtent et repartent ; les droits : connexion
 //! sans le droit d'écrire, connexions fermées à la demande (`kick`), pages
-//! oubliées (`forget`), écritures attribuées et atomiques.
+//! oubliées (`forget`), écritures attribuées et atomiques ; et les mises à jour
+//! retenues tant qu'elles laisseraient un trou d'horloge (Ruling R131).
 
 mod common;
 
 use std::time::{Duration, Instant};
 
+use common::raw::Raw;
 use common::*;
 use futures::StreamExt;
-use mementum_crdt::{FRAGMENT, META};
+use mementum_crdt::{FRAGMENT, META, PageDoc};
 use mementum_md::parse;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_sync::{ConnInfo, Hub, SyncConfig, SyncError};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 use yrs::sync::{Message, SyncMessage};
+use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
-use yrs::{Map, Text, Transact, Xml, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+use yrs::{Map, Text, Transact, Update, Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim};
 
 #[tokio::test]
 async fn two_clients_converge() {
@@ -393,16 +396,28 @@ async fn refused_update_is_never_served() {
     let f = Fixture::new(SyncConfig::default()).await;
     let writer = f.client().await;
 
-    // u1 tape « a », u2 tape « b » après : u2 dépend de u1.
+    // u1 tape « a » ; u2, écrite par un autre client qui a reçu u1, tape « b » après : u2
+    // dépend de u1. Écrite par le même client, u2 laisserait un trou dans ses horloges :
+    // elle serait retenue jusqu'à u1, pas refusée (Ruling R131).
     let doc = detached(&writer);
     let paragraph = first_content(&doc);
-    let (u1, typed) = {
+    let u1 = {
         let mut txn = doc.transact_mut();
-        let typed = paragraph.insert(&mut txn, 0, XmlTextPrelim::new("a"));
-        (txn.encode_update_v1(), typed)
+        paragraph.insert(&mut txn, 0, XmlTextPrelim::new("a"));
+        txn.encode_update_v1()
+    };
+    let other = detached(&writer);
+    other
+        .transact_mut()
+        .apply_update(Update::decode_v1(&u1).unwrap())
+        .unwrap();
+    let paragraph = first_content(&other);
+    let typed = match paragraph.get(&other.transact(), 0) {
+        Some(XmlOut::Text(typed)) => typed,
+        _ => panic!("le texte de u1 attendu"),
     };
     let u2 = {
-        let mut txn = doc.transact_mut();
+        let mut txn = other.transact_mut();
         typed.insert(&mut txn, 1, "b");
         txn.encode_update_v1()
     };
@@ -1175,4 +1190,252 @@ async fn connect_with_headers_sends_them() {
             .await
             .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Mises à jour qui laisseraient un trou d'horloge (Ruling R131)
+// ---------------------------------------------------------------------------
+
+/// Ce que le serveur écrit et relaie d'une mise à jour reçue d'un client : ce que yrs en a lu,
+/// réencodé (Ruling R130).
+fn as_read(update: &[u8]) -> Vec<u8> {
+    Update::decode_v1(update).unwrap().encode_v1()
+}
+
+/// Les mises à jour au journal de la page, dans l'ordre des `seq`.
+async fn journal(f: &Fixture) -> Vec<Vec<u8>> {
+    f.store
+        .load_doc(f.page)
+        .await
+        .unwrap()
+        .updates
+        .into_iter()
+        .map(|(_, update)| update)
+        .collect()
+}
+
+/// Le texte de la page, lu par le hub.
+async fn served_text(f: &Fixture) -> String {
+    text(&f.hub.read_blocks(f.page).await.unwrap())
+}
+
+/// Un client fait deux éditions, a1 puis a2, qui ne dépendent pas l'une de l'autre ; a2 arrive
+/// seule. yrs l'intégrait en laissant un trou dans les horloges du client : le serveur, l'API
+/// MMD et les agents lisaient « deux », qu'aucun navigateur n'affichait, puisque Yjs garde a2
+/// en attente de a1. Le serveur la retient : ni appliquée, ni écrite, ni relayée. Quand a1
+/// arrive, les deux passent, dans l'ordre.
+#[tokio::test]
+async fn update_that_leaves_a_gap_is_held_until_the_gap_is_filled() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Alpha\n\nBêta\n").await;
+    let ids = f.ids().await;
+    let writer = f.client().await;
+    let mut observer = Raw::connect(&f, writing_conn()).await;
+    assert_eq!(observer.updates_so_far().await, Some(vec![]));
+    let before = journal(&f).await;
+
+    let edits = writer.page().unwrap();
+    let a1 = edits.replace_text(&ids[0], 5, 0, " un").unwrap();
+    let a2 = edits.replace_text(&ids[1], 4, 0, " deux").unwrap();
+
+    writer.send_update(&a2);
+    processed(&writer).await;
+    assert_eq!(
+        served_text(&f).await,
+        "Alpha\nBêta",
+        "a2 n'est pas appliquée"
+    );
+    assert_eq!(journal(&f).await, before, "ni écrite");
+    assert_eq!(observer.updates_so_far().await, Some(vec![]), "ni relayée");
+
+    writer.send_update(&a1);
+    processed(&writer).await;
+    assert_eq!(served_text(&f).await, "Alpha un\nBêta deux");
+    let mut expected = before.clone();
+    expected.extend([as_read(&a1), as_read(&a2)]);
+    assert_eq!(journal(&f).await, expected, "a1, puis a2");
+    assert_eq!(
+        observer.updates_so_far().await,
+        Some(vec![as_read(&a1), as_read(&a2)]),
+        "a1, puis a2"
+    );
+    assert_eq!(
+        text(&stored_page(&f.store, f.page).await.read_blocks()),
+        "Alpha un\nBêta deux"
+    );
+
+    // Une frappe qui prolonge la précédente, envoyée avant elle : elle en dépend. C'est un
+    // onglet qui revient en ligne et tape avant d'avoir envoyé ce qu'il avait tapé hors ligne.
+    // Retenue, elle passe après la précédente ; sans cela, elle restait en attente d'une
+    // dépendance, était refusée, et la connexion fermée.
+    let t1 = edits.replace_text(&ids[0], 8, 0, " deux").unwrap();
+    let t2 = edits.replace_text(&ids[0], 13, 0, " trois").unwrap();
+    writer.send_update(&t2);
+    processed(&writer).await;
+    assert_eq!(served_text(&f).await, "Alpha un\nBêta deux");
+    writer.send_update(&t1);
+    processed(&writer).await;
+    assert_eq!(served_text(&f).await, "Alpha un deux trois\nBêta deux");
+    assert!(!writer.is_closed());
+}
+
+/// Une connexion retient au plus 32 mises à jour, et 1 Mio : au-delà, elle est fermée, elle
+/// seule, et rien de ce qu'elle retenait n'est écrit.
+#[tokio::test]
+async fn held_updates_are_bounded() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Alpha\n").await;
+    let id = f.ids().await.remove(0);
+    let other = f.client().await;
+    let rows = row_counts(&f.db).await;
+
+    // Des frappes qui suivent une première, jamais envoyée : chacune laisse un trou.
+    let hoarder = f.client().await;
+    let edits = hoarder.page().unwrap();
+    edits.replace_text(&id, 0, 0, "0").unwrap();
+    let gapped: Vec<Vec<u8>> = (0..33)
+        .map(|_| edits.replace_text(&id, 0, 0, "x").unwrap())
+        .collect();
+    for update in &gapped[..32] {
+        hoarder.send_update(update);
+    }
+    processed(&hoarder).await;
+    hoarder.send_update(&gapped[32]);
+    assert!(
+        hoarder.wait_until(WAIT, |c| c.is_closed()).await,
+        "33 mises à jour retenues : la connexion est encore servie"
+    );
+
+    // En octets : deux de 600 Kio. La première est retenue, la seconde dépasse 1 Mio.
+    let heavy = f.client().await;
+    let edits = heavy.page().unwrap();
+    edits.replace_text(&id, 0, 0, "0").unwrap();
+    let chunk = "y".repeat(600 * 1024);
+    let first = edits.replace_text(&id, 0, 0, &chunk).unwrap();
+    let second = edits.replace_text(&id, 0, 0, &chunk).unwrap();
+    heavy.send_update(&first);
+    processed(&heavy).await;
+    heavy.send_update(&second);
+    assert!(
+        heavy.wait_until(WAIT, |c| c.is_closed()).await,
+        "plus de 1 Mio retenu : la connexion est encore servie"
+    );
+
+    assert_eq!(row_counts(&f.db).await, rows, "rien d'écrit");
+    assert_eq!(served_text(&f).await, "Alpha");
+    // Les autres connexions ne voient rien.
+    processed(&other).await;
+    assert!(!other.is_closed());
+}
+
+/// Ce qu'une connexion retenait part avec elle : a2 attendait a1 ; la connexion s'en va, puis
+/// a1 arrive d'une autre. Seule a1 est appliquée.
+#[tokio::test]
+async fn held_update_is_dropped_when_its_connection_leaves() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Alpha\n\nBêta\n").await;
+    let ids = f.ids().await;
+    let other = f.client().await;
+    let leaving = f.client().await;
+    let edits = leaving.page().unwrap();
+    let a1 = edits.replace_text(&ids[0], 5, 0, " un").unwrap();
+    let a2 = edits.replace_text(&ids[1], 4, 0, " deux").unwrap();
+    let before = journal(&f).await;
+
+    // Son état de présence, que l'autre voit partir quand l'acteur a traité son départ.
+    let leaving_id = leaving.client_id();
+    leaving.set_awareness(r#"{"user":{"name":"Partie"}}"#);
+    assert!(
+        other
+            .wait_until(WAIT, |c| c.awareness_states().contains_key(&leaving_id))
+            .await
+    );
+    leaving.send_update(&a2);
+    processed(&leaving).await;
+    drop(leaving);
+    assert!(
+        other
+            .wait_until(WAIT, |c| !c.awareness_states().contains_key(&leaving_id))
+            .await,
+        "le départ n'a pas été traité"
+    );
+
+    other.send_update(&a1);
+    processed(&other).await;
+    assert_eq!(served_text(&f).await, "Alpha un\nBêta");
+    let mut expected = before;
+    expected.push(as_read(&a1));
+    assert_eq!(journal(&f).await, expected, "a1 seule");
+}
+
+/// Une connexion fermée à la demande (droits changés, session fermée) ne fait plus rien passer,
+/// pas même ce qu'elle retenait : a2 attendait a1 ; le compte qui l'a envoyée est fermé ; a1
+/// arrive d'une autre connexion. Seule a1 est appliquée.
+#[tokio::test]
+async fn held_update_is_dropped_when_its_connection_is_kicked() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Alpha\n\nBêta\n").await;
+    let ids = f.ids().await;
+    let account = new_user(&f.db).await;
+    let other = f.client().await;
+    let kicked = Client::connect_synced(&f.url_for(ConnInfo {
+        actor: Some(account),
+        ..writing_conn()
+    }))
+    .await;
+    let edits = kicked.page().unwrap();
+    let a1 = edits.replace_text(&ids[0], 5, 0, " un").unwrap();
+    let a2 = edits.replace_text(&ids[1], 4, 0, " deux").unwrap();
+    let before = journal(&f).await;
+
+    kicked.send_update(&a2);
+    processed(&kicked).await;
+    f.hub.kick_user(account).await;
+    assert!(kicked.wait_until(WAIT, |c| c.is_closed()).await);
+
+    other.send_update(&a1);
+    processed(&other).await;
+    assert_eq!(served_text(&f).await, "Alpha un\nBêta");
+    let mut expected = before;
+    expected.push(as_read(&a1));
+    assert_eq!(journal(&f).await, expected, "a1 seule");
+}
+
+/// Une mise à jour retenue que la page refuse quand son trou est comblé est traitée comme à sa
+/// réception : ni écrite ni relayée, le document rechargé, et sa connexion fermée. Pas celle
+/// dont la mise à jour a comblé le trou.
+#[tokio::test]
+async fn held_update_refused_on_retry_closes_only_its_connection() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Alpha\n\nBêta\n").await;
+    let ids = f.ids().await;
+    let holder = f.client().await;
+    let filler = f.client().await;
+    let state = holder.page().unwrap().encode_state();
+
+    // `absent` tape « f », que le serveur ne recevra jamais. Un autre client, qui l'a reçu,
+    // fait e0, puis `held`, qui tape après « f » : `held` laisse un trou (e0) et dépend d'un
+    // texte absent du serveur.
+    let absent = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let f1 = absent.replace_text(&ids[0], 5, 0, "f").unwrap();
+    let edits = PageDoc::from_updates([state.as_slice(), f1.as_slice()]).unwrap();
+    let e0 = edits.replace_text(&ids[1], 4, 0, " deux").unwrap();
+    let held = edits.replace_text(&ids[0], 6, 0, "h").unwrap();
+    let before = journal(&f).await;
+
+    holder.send_update(&held);
+    processed(&holder).await;
+    filler.send_update(&e0);
+    assert!(
+        holder.wait_until(WAIT, |c| c.is_closed()).await,
+        "la connexion de la mise à jour refusée est encore servie"
+    );
+    processed(&filler).await;
+    assert!(!filler.is_closed(), "celle qui a comblé le trou est fermée");
+    assert_eq!(served_text(&f).await, "Alpha\nBêta deux");
+    let mut expected = before;
+    expected.push(as_read(&e0));
+    assert_eq!(journal(&f).await, expected, "e0 seule");
+    let newcomer = f.client().await;
+    assert_eq!(text(&newcomer.blocks()), "Alpha\nBêta deux");
 }

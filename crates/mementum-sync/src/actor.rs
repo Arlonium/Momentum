@@ -13,15 +13,21 @@
 //! sont écrits ensemble, tous deux ou aucun, au nom du compte de la
 //! connexion (report M3 du lot 1).
 //!
+//! La mise à jour d'un client qui laisserait un trou dans les horloges de
+//! son client n'est ni appliquée, ni écrite, ni relayée : elle attend dans la
+//! file de sa connexion que le trou soit comblé (Ruling R131, voir
+//! [`Actor::receive_update`]). Elle n'est donc jamais dans le document vivant
+//! sans être au journal : l'invariant tient.
+//!
 //! Chaque fin anormale (mise à jour refusée, panne du store, document
-//! impossible à charger, compaction en échec, awareness refusée) est
-//! journalisée par `tracing`.
+//! impossible à charger, compaction en échec, awareness refusée, trop de
+//! mises à jour retenues) est journalisée par `tracing`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
-use mementum_crdt::PageDoc;
+use mementum_crdt::{Awaited, PageDoc};
 use mementum_md::Block;
 use mementum_store::{DocState, Store, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
@@ -56,6 +62,15 @@ const AWARENESS_REMOVED: &str = "null";
 /// de la page se ferment ; en release, l'horloge repart de zéro. Une horloge
 /// honnête, qui avance d'un cran par changement d'état, n'y arrive jamais.
 const LAST_AWARENESS_CLOCK: u32 = u32::MAX;
+
+/// Mises à jour qu'une connexion peut retenir en attendant que le trou
+/// d'horloge qu'elles laisseraient soit comblé (Ruling R131) : au-delà, elle
+/// est fermée.
+const MAX_HELD_UPDATES: usize = 32;
+
+/// Octets qu'une connexion peut retenir ainsi, toutes ses mises à jour
+/// retenues comptées ensemble : au-delà, elle est fermée.
+const MAX_HELD_BYTES: usize = 1 << 20;
 
 /// Message diffusé aux connexions de la page.
 pub(crate) struct Broadcast {
@@ -417,13 +432,50 @@ struct Conn {
     /// Son compte : celui à qui ses mises à jour sont attribuées, et dont
     /// `Hub::kick_user` ferme les connexions.
     actor: Option<Uuid>,
-    /// La connexion doit se fermer (panne du store, Ruling R21, ou fermeture
-    /// à la demande) : ses messages ne sont plus traités.
+    /// La connexion doit se fermer (panne du store, Ruling R21, fermeture à
+    /// la demande, ou l'un de ses messages refusé) : ses messages ne sont plus
+    /// traités. Posé par [`Conn::close`].
     closing: bool,
     /// Les clients d'awareness que cette connexion tient (Ruling R101) : ceux dont elle a
     /// annoncé un état. Ils sont à son compte tant qu'elle est inscrite, et libérés quand elle
     /// part ([`Actor::leave`]).
     clients: HashSet<ClientID>,
+    /// Ses mises à jour qui laisseraient un trou d'horloge, dans l'ordre où elle les a
+    /// envoyées (Ruling R131). Elles partent avec elle, et quand elle se ferme.
+    held: VecDeque<Held>,
+    /// Leur taille, en octets reçus.
+    held_bytes: usize,
+}
+
+impl Conn {
+    fn new(writable: bool, actor: Option<Uuid>) -> Conn {
+        Conn {
+            writable,
+            actor,
+            closing: false,
+            clients: HashSet::new(),
+            held: VecDeque::new(),
+            held_bytes: 0,
+        }
+    }
+
+    /// La connexion se ferme : ses messages ne sont plus traités, et rien de ce qu'elle
+    /// retenait ne passera (Ruling R131). Sans cela, une mise à jour retenue par une connexion
+    /// dont le droit d'écrire vient d'être retiré serait appliquée plus tard.
+    fn close(&mut self) {
+        self.closing = true;
+        self.held.clear();
+        self.held_bytes = 0;
+    }
+}
+
+/// Une mise à jour retenue (Ruling R131) : les octets reçus, que la page lira quand le trou sera
+/// comblé, et ce qu'elle attend de la page pour ne plus en laisser. Ces octets ne sont jamais
+/// écrits ni relayés : ce qui passe suit le chemin de toute mise à jour de client
+/// ([`Actor::client_update`], Ruling R130).
+struct Held {
+    update: Vec<u8>,
+    awaited: Awaited,
 }
 
 /// Ce que devient une entrée d'awareness reçue d'une connexion (Ruling R101).
@@ -575,6 +627,10 @@ impl Actor {
                 reply,
             } => {
                 let outcome = self.messages(conn, messages).await?;
+                if let (Outcome::Close, Some(c)) = (&outcome, self.conns.get_mut(&conn)) {
+                    // Le hub la ferme : rien de ce qu'elle retenait ne passera après elle.
+                    c.close();
+                }
                 let _ = reply.send(outcome);
             }
             Command::Create { reply } => {
@@ -590,7 +646,12 @@ impl Actor {
                 reply,
             } => {
                 let result = self.write(blocks, actor).await?;
+                let written = result.is_ok();
+                // La réponse d'abord : l'écriture est faite, quoi qu'il arrive ensuite.
                 let _ = reply.send(result);
+                if written {
+                    self.release_held().await?;
+                }
             }
             Command::Kick { reply } => {
                 // Ni rechargement ni écriture : le document vivant est celui
@@ -620,15 +681,7 @@ impl Actor {
         };
         let conn = self.next_conn;
         self.next_conn += 1;
-        self.conns.insert(
-            conn,
-            Conn {
-                writable,
-                actor,
-                closing: false,
-                clients: HashSet::new(),
-            },
-        );
+        self.conns.insert(conn, Conn::new(writable, actor));
         let mut hello = vec![protocol::sync_step1(&self.page.state_vector())];
         hello.extend(self.awareness_state());
         // Si le demandeur est déjà parti, la réponse lâchée lâche `Membership`,
@@ -713,7 +766,7 @@ impl Actor {
                 ClientMessage::Update(_) if !writable => {}
                 ClientMessage::Update(update) if update == EMPTY_UPDATE => {}
                 ClientMessage::Update(update) => {
-                    if !self.client_update(conn, actor, &update).await? {
+                    if !self.receive_update(conn, actor, update).await? {
                         return Ok(Outcome::Close);
                     }
                 }
@@ -739,6 +792,134 @@ impl Actor {
     fn too_many_replies(&self, conn: ConnId) -> Outcome {
         tracing::warn!(node_id = %self.id.node_id, conn, "réponses d'un message au-delà de max_queue_bytes : connexion fermée");
         Outcome::Close
+    }
+
+    /// Mise à jour reçue d'une connexion qui écrit. `false` : la connexion est
+    /// à fermer.
+    ///
+    /// Ruling R131 : si elle laisserait un trou dans les horloges de son
+    /// client, elle est retenue ([`Actor::hold`]) : ni appliquée, ni écrite,
+    /// ni relayée. yrs l'intégrerait en laissant le trou, mais un navigateur
+    /// la garde en attente tant que le trou n'est pas comblé, y compris dans
+    /// l'état complet que le serveur lui donne : le serveur, l'API MMD et les
+    /// agents liraient un texte qu'aucun navigateur n'affiche. Elle n'est pas
+    /// refusée non plus : un client honnête en envoie une quand il tape entre
+    /// l'ouverture de sa connexion et sa réponse à l'étape 1 du serveur, qui
+    /// porte ce qu'il avait tapé hors ligne ; un refus fermerait sa connexion
+    /// à chaque retour.
+    ///
+    /// Sinon, elle est appliquée ([`Actor::client_update`]), même si sa
+    /// connexion en retient d'autres : c'est d'ordinaire celle qui comble leur
+    /// trou. Puis les mises à jour retenues dont le trou est comblé passent
+    /// ([`Actor::release_held`]).
+    async fn receive_update(
+        &mut self,
+        conn: ConnId,
+        actor: Option<Uuid>,
+        update: Vec<u8>,
+    ) -> Result<bool, Broken> {
+        let awaited = match self.page.awaits(&update) {
+            Ok(awaited) => awaited,
+            Err(error) => {
+                // Lue avant d'être appliquée : le document n'a pas à être rechargé.
+                tracing::warn!(node_id = %self.id.node_id, conn, %error, "mise à jour illisible : connexion fermée");
+                return Ok(false);
+            }
+        };
+        if let Some(awaited) = awaited {
+            return Ok(self.hold(conn, update, awaited));
+        }
+        if !self.client_update(conn, actor, &update).await? {
+            return Ok(false);
+        }
+        self.release_held().await?;
+        // Une mise à jour qu'elle retenait a pu être refusée entre-temps.
+        Ok(self.conns.get(&conn).is_some_and(|c| !c.closing))
+    }
+
+    /// Retient la mise à jour d'une connexion, au bout de sa file (Ruling
+    /// R131). `false` : la file dépasserait [`MAX_HELD_UPDATES`] mises à jour
+    /// ou [`MAX_HELD_BYTES`] octets, et la connexion est à fermer, elle seule.
+    /// Chaque connexion a sa file, et rien de ce qu'envoie une autre n'y
+    /// entre.
+    fn hold(&mut self, conn: ConnId, update: Vec<u8>, awaited: Awaited) -> bool {
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return false;
+        };
+        if c.held.len() >= MAX_HELD_UPDATES || c.held_bytes + update.len() > MAX_HELD_BYTES {
+            tracing::warn!(
+                node_id = %self.id.node_id,
+                conn,
+                held = c.held.len(),
+                bytes = c.held_bytes,
+                "trop de mises à jour retenues : connexion fermée"
+            );
+            return false;
+        }
+        tracing::debug!(node_id = %self.id.node_id, conn, bytes = update.len(), "mise à jour retenue : elle laisserait un trou d'horloge");
+        c.held_bytes += update.len();
+        c.held.push_back(Held { update, awaited });
+        true
+    }
+
+    /// Fait passer les mises à jour retenues dont le trou est comblé (Ruling
+    /// R131). Appelé après chaque mise à jour appliquée, d'où qu'elle vienne :
+    /// le trou d'une connexion peut être comblé par une autre.
+    ///
+    /// Chaque file est réessayée dans l'ordre où sa connexion l'a remplie, et
+    /// s'arrête à la première mise à jour qui attend encore : une connexion ne
+    /// fait jamais passer une mise à jour avant celles qu'elle a envoyées
+    /// plus tôt. On recommence tant que quelque chose passe, puisque ce qui
+    /// passe peut combler un autre trou. Savoir si un trou est comblé ne
+    /// relit pas la mise à jour (`PageDoc::has_reached`) : ce réessai, fait à
+    /// chaque frappe, ne coûte pas plus cher quand des connexions retiennent
+    /// de gros messages.
+    ///
+    /// Ce qui passe suit le chemin d'une mise à jour reçue
+    /// ([`Actor::client_update`]) : lu et réencodé, dédoublonné, écrit au nom
+    /// du compte de sa connexion, puis relayé à toutes les autres. Ce que la
+    /// page refuse alors est traité comme à la réception : le document est
+    /// rechargé, et la connexion qui l'avait envoyé est fermée, elle seule.
+    /// Une connexion qui se ferme (départ, fermeture à la demande, refus,
+    /// panne du store) n'a plus rien en file ([`Conn::close`]).
+    async fn release_held(&mut self) -> Result<(), Broken> {
+        loop {
+            let mut waiting: Vec<ConnId> = self
+                .conns
+                .iter()
+                .filter(|(_, c)| !c.closing && !c.held.is_empty())
+                .map(|(conn, _)| *conn)
+                .collect();
+            if waiting.is_empty() {
+                return Ok(());
+            }
+            waiting.sort_unstable();
+            let mut released = false;
+            for conn in waiting {
+                while let Some((update, actor)) = self.next_released(conn) {
+                    released = true;
+                    if !self.client_update(conn, actor, &update).await? {
+                        self.close_connection(conn);
+                        break;
+                    }
+                }
+            }
+            if !released {
+                return Ok(());
+            }
+        }
+    }
+
+    /// La plus ancienne mise à jour que retient `conn`, retirée de sa file si
+    /// son trou est comblé ; avec le compte de la connexion, à qui l'attribuer.
+    fn next_released(&mut self, conn: ConnId) -> Option<(Vec<u8>, Option<Uuid>)> {
+        let c = self.conns.get_mut(&conn).filter(|c| !c.closing)?;
+        if !self.page.has_reached(&c.held.front()?.awaited) {
+            return None;
+        }
+        let held = c.held.pop_front()?;
+        c.held_bytes -= held.update.len();
+        Some((held.update, c.actor))
     }
 
     /// Mise à jour d'un client : appliquer, dédoublonner, écrire au nom de
@@ -922,10 +1103,19 @@ impl Actor {
     /// diffusé jusqu'ici. Ni le document ni le store ne sont touchés.
     fn close_connections(&mut self) {
         for c in self.conns.values_mut() {
-            c.closing = true;
+            c.close();
         }
         // Sans abonné, il n'y a personne à fermer.
         let _ = self.events.send(Event::Close);
+    }
+
+    /// Ferme la connexion `conn`, elle seule, comme
+    /// [`Actor::close_connections_of`] celles d'un compte.
+    fn close_connection(&mut self, conn: ConnId) {
+        if let Some(c) = self.conns.get_mut(&conn) {
+            c.close();
+        }
+        let _ = self.events.send(Event::CloseSome(Arc::from([conn])));
     }
 
     /// Ferme les connexions inscrites du compte `user`, comme
@@ -938,7 +1128,7 @@ impl Actor {
             .iter_mut()
             .filter(|(_, c)| c.actor == Some(user))
             .map(|(conn, c)| {
-                c.closing = true;
+                c.close();
                 *conn
             })
             .collect();
@@ -983,7 +1173,7 @@ impl Actor {
         tracing::error!(node_id = %self.id.node_id, %error, "écriture impossible : document rechargé, connexions fermées");
         self.reload().await?;
         for c in self.conns.values_mut() {
-            c.closing = true;
+            c.close();
         }
         // Les connexions voient la fin de l'ancienne diffusion et se ferment.
         let (events, _) = broadcast::channel(self.cfg.broadcast_capacity.max(1));

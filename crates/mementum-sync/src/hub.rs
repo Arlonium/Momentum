@@ -185,8 +185,9 @@ impl Hub {
     ///
     /// La connexion est fermée (et la fonction rend `Ok`) quand le client
     /// part, envoie un message illisible, trop gros ou une mise à jour
-    /// refusée, prend trop de retard (`broadcast_capacity` messages ou
-    /// `max_queue_bytes` octets), ou à la demande ([`Hub::kick`],
+    /// refusée, retient trop de mises à jour qui laisseraient un trou
+    /// d'horloge (Ruling R131), prend trop de retard (`broadcast_capacity`
+    /// messages ou `max_queue_bytes` octets), ou à la demande ([`Hub::kick`],
     /// [`Hub::kick_user`], [`Hub::forget`]) : il se reconnecte et se
     /// resynchronise. Toute fin anormale est journalisée par `tracing`
     /// (`warn`), avec la page, la connexion et sa raison.

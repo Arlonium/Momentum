@@ -17,6 +17,16 @@
 //!   octets pareil (yrs laisse tomber les bits d'un entier au-delà de 32) :
 //!   relayée telle quelle, une suppression pouvait effacer un texte sur le
 //!   serveur et rien dans les navigateurs ;
+//! - **retenir ce qui laisserait un trou** (Ruling R131) : la mise à jour
+//!   d'un client dont un bloc commence au-delà de ce que la page connaît de
+//!   son client n'est ni appliquée, ni écrite, ni relayée. Elle attend, dans
+//!   la file de sa connexion, que le trou soit comblé, par elle ou par une
+//!   autre, puis passe comme si elle venait d'arriver. yrs l'intégrait en
+//!   laissant le trou ; un navigateur la garde en attente : le serveur,
+//!   l'API MMD et les agents lisaient un texte qu'aucun navigateur
+//!   n'affichait. Une connexion retient au plus 32 mises à jour et 1 Mio,
+//!   au-delà de quoi elle est fermée ; ce qu'elle retenait part avec elle, et
+//!   ne passe plus dès qu'elle est fermée, à la demande ou pour un refus ;
 //! - **compaction sûre** : l'instantané est pris dans l'acteur, entre deux
 //!   commandes, si bien qu'il couvre exactement les mises à jour écrites
 //!   jusqu'à son `seq` ; elle a lieu toutes les `snapshot_every` mises à jour,
@@ -89,7 +99,8 @@
 //!   `broadcast_capacity` messages, les diffusions sont partagées entre les
 //!   files, un état d'awareness ne dépasse pas 2 Kio (Ruling R119), un
 //!   message WebSocket ne porte pas plus de 32 messages y-websocket (Ruling
-//!   R124) ;
+//!   R124), une connexion ne retient pas plus de 32 mises à jour ni 1 Mio
+//!   (Ruling R131) ;
 //! - une page **sans document** reçoit le sien au premier chargement de son
 //!   acteur (Ruling R28).
 //!

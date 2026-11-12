@@ -1,5 +1,8 @@
-//! Outils des tests d'intégration : base temporaire, page créée, hub et serveur de test.
+//! Outils des tests d'intégration : base temporaire, page créée, hub et serveur de test, et une
+//! connexion lue octet par octet (`raw`).
 #![allow(dead_code)]
+
+pub mod raw;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
