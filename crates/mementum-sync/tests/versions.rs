@@ -23,6 +23,7 @@ use mementum_store::{MAX_BEFORE_RESTORE, MAX_VERSIONS, Version, VersionReason};
 use mementum_sync::{ConnInfo, SyncConfig, SyncError};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+use yrs::{Text, Transact, XmlFragment, XmlOut};
 
 /// L'intervalle des versions de ces tests : celui du réglage par défaut.
 const INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -831,4 +832,50 @@ async fn slice_older_than_the_machine_is_due_at_once() {
     assert_eq!(kept[0].reason, VersionReason::Periodic);
     assert_eq!(version_text(&f, kept[0].id).await, "Très ancien");
     assert_eq!(authors(&kept[0]), [alice]);
+}
+
+/// La limite de la restauration, telle qu'elle est (Ruling R188) : restaurer remplace tout le
+/// contenu, comme `PUT /mmd`. Une frappe partie avant la restauration, sur le contenu remplacé,
+/// arrive dans des nœuds supprimés : elle n'est ni dans la page, ni dans aucune version.
+/// L'écriture par différence du lot 5 (R40) servira aux deux. Ce test le dit, et changera de
+/// sens ce jour-là.
+#[tokio::test]
+async fn typing_concurrent_with_a_restore_is_lost() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    f.hub
+        .write_blocks(f.page, parse("Un\n").unwrap(), Some(alice))
+        .await
+        .unwrap();
+    actor_stops(&f).await;
+    let first = versions(&f).await[0].id;
+    let tab = connect(&f, bob).await;
+    types(&tab, " deux").await;
+
+    // Une frappe faite sur le contenu d'avant, encore en route quand la restauration passe.
+    let offline = detached(&tab);
+    let typed = {
+        let content = first_content(&offline);
+        let mut txn = offline.transact_mut();
+        let Some(XmlOut::Text(text)) = content.get(&txn, 0) else {
+            panic!("pas de texte dans le premier bloc");
+        };
+        let end = text.len(&txn);
+        text.insert(&mut txn, end, " trois");
+        txn.encode_update_v1()
+    };
+    f.hub
+        .restore_version(f.page, first, Some(alice))
+        .await
+        .unwrap();
+    heard(&tab, || tab.send_update(&typed)).await;
+
+    assert_eq!(live_text(&f).await, "Un", "la frappe en route est perdue");
+    for version in versions(&f).await {
+        assert!(
+            !version_text(&f, version.id).await.contains("trois"),
+            "elle n'est dans aucune version"
+        );
+    }
 }
