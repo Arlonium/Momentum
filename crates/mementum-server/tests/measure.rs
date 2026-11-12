@@ -123,6 +123,91 @@ async fn measure_page_creation() {
     report("renommer une page d'un espace de 2 200 pages", times);
 }
 
+/// Fils d'une page chargée de commentaires, et messages par fil : dix mille messages.
+const THREADS: usize = 1_000;
+const MESSAGES_PER_THREAD: usize = 10;
+
+/// Report de la Task 8 du lot 3 (aucun plafond de fils ni de messages par page avant le lot 7) :
+/// ce que coûte `GET /api/v1/pages/{id}/comments` sur une page de 1 000 fils de 10 messages,
+/// chaque message de 120 caractères avec une réaction. Les fils sont écrits en SQL, en une
+/// transaction : ce n'est pas leur écriture qu'on mesure. Une ligne pour la durée de 20
+/// lectures, une pour la taille de la réponse.
+#[tokio::test]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_comments_of_a_busy_page() {
+    let t = TestApp::new().await;
+    let alice = t.account("Alice").await;
+    let page = alice.create(json!({ "title": "Très commentée" })).await.id;
+    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
+        .await
+        .unwrap();
+    let mut tx = side.begin().await.unwrap();
+    let body = "Un message d'une longueur ordinaire, comme on en écrit dans la marge d'une page, \
+                avec un peu de texte.";
+    let mut at = 1_000_000_i64;
+    for _ in 0..THREADS {
+        let thread = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO comment_threads (id, node_id, block_id, created_by, created_at) \
+             VALUES (?, ?, NULL, ?, ?)",
+        )
+        .bind(&thread)
+        .bind(&page)
+        .bind(alice.id.to_string())
+        .bind(at)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        for _ in 0..MESSAGES_PER_THREAD {
+            at += 1;
+            let comment = uuid::Uuid::now_v7().to_string();
+            sqlx::query(
+                "INSERT INTO comments (id, thread_id, author_id, body, created_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&comment)
+            .bind(&thread)
+            .bind(alice.id.to_string())
+            .bind(body)
+            .bind(at)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
+                 VALUES (?, ?, '👍', ?)",
+            )
+            .bind(&comment)
+            .bind(alice.id.to_string())
+            .bind(at)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+    }
+    tx.commit().await.unwrap();
+    side.close().await;
+
+    let uri = format!("/api/v1/pages/{page}/comments");
+    let mut times = Vec::new();
+    let mut bytes = 0;
+    for _ in 0..20 {
+        let start = Instant::now();
+        let reply = alice.browser.get(&uri).await;
+        times.push(start.elapsed());
+        reply.assert_status(StatusCode::OK);
+        bytes = reply.body.len();
+    }
+    let what = format!(
+        "GET …/comments, {THREADS} fils de {MESSAGES_PER_THREAD} messages, une réaction chacun"
+    );
+    report(&what, times);
+    println!(
+        "MESURE taille de la réponse : {bytes} octets ({:.1} Mio)",
+        bytes as f64 / (1024.0 * 1024.0)
+    );
+}
+
 /// Ce qu'une écriture dans un espace coûte à ceux qui le lisent ensuite. Dans un espace de
 /// 2 000 pages, Alice crée une page (la révision de l'espace avance), puis cinq autres membres
 /// lisent chacun cette page (`GET /api/v1/pages/{id}`), l'un après l'autre : c'est leur
