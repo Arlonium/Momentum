@@ -188,6 +188,15 @@ impl Actor {
         self.slice.kept = false;
     }
 
+    /// La version `version` est-elle partie, ou la prochaine que la purge
+    /// retirerait ? Son contenu ne serait alors plus atteignable seul après la
+    /// coupe suivante.
+    async fn next_to_go(&self, version: Uuid) -> Result<bool, StoreError> {
+        let node = self.id.node_id;
+        Ok(!self.store.has_version(node, version).await?
+            || self.store.next_purged(node).await?.contains(&version))
+    }
+
     /// Une restauration vient d'écrire au journal le contenu d'une version
     /// gardée, avec sa borne : le contenu est celui de cette version, et le
     /// store le sait ; aucune tranche ne s'ouvre (Ruling R197).
@@ -265,11 +274,17 @@ impl Actor {
     /// dernière restaurée), et restaurable. Si le store la refuse, rien n'est
     /// restauré.
     /// L'écriture d'une restauration n'ouvre pas de tranche, son contenu étant
-    /// celui de la version : des restaurations successives, sans écriture entre
-    /// elles, ne coupent rien. Sauf quand la version restaurée est la prochaine
-    /// que la purge retirerait : l'état que la page garde ensuite ne serait plus
-    /// atteignable seul après la coupe suivante, et l'écriture ouvre alors une
-    /// tranche, que la coupe suivante garde comme une version neuve.
+    /// celui de la version : elle passe au journal avec la borne de la version
+    /// (`covers_seq`, Ruling R197), si bien qu'un acteur rechargé sait encore
+    /// que le contenu est gardé. Des restaurations successives, sans écriture
+    /// entre elles, ne coupent donc rien, l'acteur arrêté entre elles ou non.
+    /// Sauf quand la version restaurée est partie, ou la prochaine que la purge
+    /// retirerait, jugé **après** la coupe d'avant restauration, qui peut
+    /// elle-même la purger ou la mettre en tête : l'état que la page garde
+    /// ensuite ne serait plus atteignable seul après la coupe suivante ;
+    /// l'écriture passe alors au journal sans borne et ouvre une tranche, que la
+    /// coupe suivante (avant une écriture qui suit d'un intervalle, ou à
+    /// l'arrêt, rechargement compris) garde comme une version neuve.
     ///
     /// Une version qui n'est pas de cette page, ou qui n'existe pas :
     /// `NotFound`. Un état gardé que la page ne relit pas (base abîmée) : une
@@ -300,17 +315,18 @@ impl Actor {
         if let Err(error) = PageDoc::check_writable(&blocks) {
             return Ok(Err(error.into()));
         }
-        // Avant toute coupe : celle d'avant restauration peut elle-même la purger.
-        let next_in_line = match self.store.next_purged(self.id.node_id).await {
-            Ok(next) => next.contains(&version),
-            Err(error) => return Ok(Err(error.into())),
-        };
         if !self.slice.kept
             && let Err(error) = self.cut_version(VersionReason::BeforeRestore).await
         {
             tracing::warn!(node_id = %self.id.node_id, version_id = %version, %error, "version d'avant restauration impossible à écrire : rien n'est restauré");
             return Ok(Err(error.into()));
         }
+        // Après la coupe : c'est elle qui peut avoir purgé la version, ou en avoir fait la
+        // prochaine à partir.
+        let next_in_line = match self.next_to_go(version).await {
+            Ok(next) => next,
+            Err(error) => return Ok(Err(error.into())),
+        };
         let history = if next_in_line {
             History::Slice
         } else {

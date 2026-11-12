@@ -1019,3 +1019,44 @@ async fn content_replaced_by_a_restore_is_kept_across_reloads() {
         assert!(kept.contains(content), "« {content} » perdu : {kept:?}");
     }
 }
+
+/// P4 (Ruling R197) : ce que porte la version restaurée reste atteignable tant que c'est le
+/// contenu de la page, y compris quand c'est la version `before_restore` de la même
+/// restauration qui en fait la prochaine que la purge retirerait. Historique plein, page
+/// changée depuis sa dernière version : on restaure la deuxième plus ancienne ; sa coupe
+/// `before_restore` purge la plus ancienne. L'état restauré dure plus d'un intervalle, puis une
+/// écriture arrive : une version `periodic` le garde avant elle. Sans cela, la version
+/// `closing` d'après purgeait la version restaurée, et ce contenu n'était plus nulle part.
+#[tokio::test]
+async fn restored_content_survives_the_purge_its_own_cut_makes() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    let alice = new_user(&f.db).await;
+    let open = f.client().await;
+    for i in 0..=MAX_VERSIONS {
+        if i > 0 {
+            advance(INTERVAL + Duration::from_secs(1)).await;
+        }
+        f.write_mmd(&format!("Texte {i}\n")).await;
+    }
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), MAX_VERSIONS);
+    let second_oldest = kept[MAX_VERSIONS - 2].id;
+    let restored = version_blocks(&f, second_oldest).await;
+    assert_eq!(text(&restored), "Texte 1");
+
+    f.hub
+        .restore_version(f.page, second_oldest, Some(alice))
+        .await
+        .unwrap();
+    advance(INTERVAL + Duration::from_secs(1)).await;
+    f.write_mmd("Après\n").await;
+    drop(open);
+    actor_stops(&f).await;
+
+    let mut found = false;
+    for version in versions(&f).await {
+        found |= version_blocks(&f, version.id).await == restored;
+    }
+    assert!(found, "le contenu restauré n'est plus dans aucune version");
+}
