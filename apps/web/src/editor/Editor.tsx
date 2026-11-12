@@ -1,17 +1,36 @@
 // L'éditeur BlockNote d'une page, lié à son Y.Doc par `withCollaboration` (chemin Yjs 13
 // de BlockNote 0.57, y-prosemirror 1.x). Chargé à la demande (`LazyEditor.tsx`), avec ses
 // styles.
+//
+// Le menu d'un bloc (sa poignée, à gauche) garde les entrées de BlockNote et gagne
+// « Commenter », qui ouvre le panneau des commentaires sur ce bloc ; au clavier, Ctrl+Alt+M
+// (Cmd+Option+M) commente le bloc où est le curseur. Rien n'est écrit dans le document : le
+// commentaire part par l'API (R134). BlockNote ne montre pas la poignée d'un éditeur en
+// lecture seule : pour qui commente sans modifier, c'est la marge qui l'offre (`BlockMarks`).
 import "@blocknote/mantine/style.css";
 import "katex/dist/katex.min.css";
 import { syntaxHighlighter } from "@blocknote/code-block";
 import { combineByGroup, filterSuggestionItems } from "@blocknote/core";
+import { SideMenuExtension } from "@blocknote/core/extensions";
 import { fr } from "@blocknote/core/locales";
 import { withCollaboration } from "@blocknote/core/yjs";
 import { BlockNoteView } from "@blocknote/mantine";
 import {
+  BlockColorsItem,
+  DragHandleMenu,
   getDefaultReactSlashMenuItems,
+  RemoveBlockItem,
+  SideMenu,
+  SideMenuController,
   SuggestionMenuController,
+  TableColumnHeaderItem,
+  TableRowHeaderItem,
+  useBlockNoteEditor,
+  useComponentsContext,
   useCreateBlockNote,
+  useDictionary,
+  useExtensionState,
+  type SideMenuProps,
 } from "@blocknote/react";
 import {
   getMultiColumnSlashMenuItems,
@@ -26,6 +45,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type KeyboardEvent,
 } from "react";
 import * as Y from "yjs";
 import { FRAGMENT, type CollabSession } from "./collab";
@@ -38,9 +58,14 @@ type Props = {
   session: CollabSession;
   /** Fixture à charger dans la page neuve (`?fixture=<nom>`), en développement seulement. */
   fixture?: string | null;
+  /**
+   * Commente un bloc (la personne peut commenter la page) : le menu de la poignée gagne
+   * « Commenter », et Ctrl+Alt+M commente le bloc du curseur. `null` : ni l'un ni l'autre.
+   */
+  onComment?: ((blockId: string) => void) | null;
 };
 
-export function Editor({ session, fixture = null }: Props) {
+export function Editor({ session, fixture = null, onComment = null }: Props) {
   const editor = useCreateBlockNote(
     withCollaboration({
       schema,
@@ -142,6 +167,28 @@ export function Editor({ session, fixture = null }: Props) {
     [editor],
   );
 
+  // Le menu de la poignée : celui de BlockNote, et « Commenter » pour qui peut commenter.
+  const sideMenu = useMemo(() => {
+    if (onComment === null) return undefined;
+    function CommentingDragHandleMenu() {
+      return <BlockMenu onComment={onComment!} />;
+    }
+    return function CommentingSideMenu(props: SideMenuProps) {
+      return <SideMenu {...props} dragHandleMenu={CommentingDragHandleMenu} />;
+    };
+  }, [onComment]);
+
+  /** Ctrl+Alt+M (Cmd+Option+M) : commenter le bloc où est le curseur. */
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (onComment === null || !event.altKey || !(event.ctrlKey || event.metaKey)) return;
+    // AltGr (Ctrl+Alt sous Windows) tape des caractères : il garde sa touche.
+    if (event.getModifierState("AltGraph")) return;
+    // La touche, pas le caractère : Option la change sur Mac (« µ »).
+    if (event.code !== "KeyM" || !editor.isFocused()) return;
+    event.preventDefault();
+    onComment(editor.getTextCursorPosition().block.id);
+  };
+
   // `data-synced` (première synchro faite) et `data-editable` (éditeur modifiable) sur le
   // conteneur, en développement comme en production : les e2e s'y fient (`waitSynced`, et
   // les budgets du navigateur, mesurés sur un build de production, R38), là où
@@ -152,14 +199,50 @@ export function Editor({ session, fixture = null }: Props) {
       editable={mountEditable}
       theme="light"
       slashMenu={false}
+      sideMenu={sideMenu === undefined}
       className="mm-editor"
       data-synced={String(synced)}
       data-editable={String(editable)}
+      onKeyDown={onKeyDown}
     >
       <SuggestionMenuController
         triggerCharacter="/"
         getItems={async (query) => filterSuggestionItems(slashItems, query)}
       />
+      {sideMenu && <SideMenuController sideMenu={sideMenu} />}
     </BlockNoteView>
+  );
+}
+
+/**
+ * Le menu de la poignée d'un bloc : « Commenter », puis les entrées de BlockNote, dans son ordre
+ * et avec ses libellés (supprimer, couleurs, en-têtes d'un tableau).
+ */
+function BlockMenu({ onComment }: { onComment: (blockId: string) => void }) {
+  const dictionary = useDictionary();
+  return (
+    <DragHandleMenu>
+      <CommentItem onComment={onComment} />
+      <RemoveBlockItem>{dictionary.drag_handle.delete_menuitem}</RemoveBlockItem>
+      <BlockColorsItem>{dictionary.drag_handle.colors_menuitem}</BlockColorsItem>
+      <TableRowHeaderItem>{dictionary.drag_handle.header_row_menuitem}</TableRowHeaderItem>
+      <TableColumnHeaderItem>{dictionary.drag_handle.header_column_menuitem}</TableColumnHeaderItem>
+    </DragHandleMenu>
+  );
+}
+
+/** « Commenter » : le bloc dont la poignée a ouvert le menu. */
+function CommentItem({ onComment }: { onComment: (blockId: string) => void }) {
+  const Components = useComponentsContext()!;
+  const editor = useBlockNoteEditor();
+  const block = useExtensionState(SideMenuExtension, {
+    editor,
+    selector: (state) => state?.block,
+  });
+  if (block === undefined) return null;
+  return (
+    <Components.Generic.Menu.Item className="bn-menu-item" onClick={() => onComment(block.id)}>
+      Commenter
+    </Components.Generic.Menu.Item>
   );
 }

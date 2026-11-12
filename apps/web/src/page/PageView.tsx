@@ -227,10 +227,12 @@ export function PageView({
    */
   const commentsWritable = canComment(node.level) && !trashed && !readOnly;
   const hoverComment = commentsWritable && locked ? commentBlock : null;
+  /** « Commenter » dans le menu de la poignée d'un bloc, quand l'éditeur se modifie. */
+  const menuComment = commentsWritable && !locked ? commentBlock : null;
   // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.
   const editor = useMemo(
-    () => session && <LazyEditor session={session} fixture={fixture} />,
-    [session, fixture],
+    () => session && <LazyEditor session={session} fixture={fixture} onComment={menuComment} />,
+    [session, fixture, menuComment],
   );
   const count = threads === null ? null : openCount(threads);
 
