@@ -9,7 +9,7 @@ Ce document est fait pour quelqu'un, humain ou agent IA, qui ouvre ce dépôt sa
 - **Mementum** est un espace de travail open source façon Notion, auto-hébergeable, conçu pour que les agents IA lisent et écrivent les pages aussi proprement que les humains. Licence AGPL-3.0.
 - **Pile** : serveur Rust en un binaire (axum, sqlx sur SQLite, yrs), client React avec BlockNote dans `apps/web`, texte des pages en CRDT Yjs, format Markdown canonique « MMD » pour les agents.
 - **Deux personnes** : Lenny est le propriétaire du projet, ses décisions ne se remettent pas en cause sans lui (liste dans [`CLAUDE.md`](../CLAUDE.md)). Alex pilote le développement et fait la recette.
-- **Où on en est** : la phase 0 (essais) est finie. La phase 1 compte sept lots. Les lots 1 et 2 sont faits et poussés. Le lot 3 est ouvert : Lenny l'a choisi le 2026-11-12, son plan est écrit et attend sa relecture. Les lots 4 à 7 restent à faire.
+- **Où on en est** : la phase 0 (essais) est finie. La phase 1 compte sept lots. Les lots 1 et 2 sont faits et poussés. Le lot 3 est ouvert : Lenny l'a choisi le 2026-11-12 et a validé le plan de sa partie A le même jour ; elle est en cours d'exécution, tâche par tâche (avancement au registre du lot). Les lots 4 à 7 restent à faire.
 
 ## Dans quel ordre lire
 
@@ -30,7 +30,7 @@ Chaque décision prise en cours de route est un « Ruling », numéroté à la s
 | Phase 1, lot 2 : comptes, espaces, droits et corbeille | fini, poussé le 2026-11-10 (`main`, commit `7fb1b55` et suivants) | plan et registre datés du 2026-11-10 |
 | Recette du lot 2 | aucun défaut à corriger avant le lot 3 (réponse de Lenny, 2026-11-12) | [`docs/recette/2026-11-10-p1-lot2-recette.md`](recette/2026-11-10-p1-lot2-recette.md) |
 | Deux reports du lot 2 qui touchent à l'intégrité du contenu | faits le 2026-11-12 (R129, R130), pas encore poussés | registre du lot 3, « Avant le plan » |
-| Phase 1, lot 3 : collaboration et blocs riches | **ouvert** : plan écrit, à relire par le propriétaire avant de commencer | plan et registre datés du 2026-11-12 |
+| Phase 1, lot 3 : collaboration et blocs riches | **en cours** : plan de la partie A validé par Lenny le 2026-11-12, exécution commencée (R140) | plan et registre datés du 2026-11-12 |
 | Phase 1, lots 4 à 7 | à faire, aucun plan écrit | voir plus bas |
 | Mesures ARM de la phase 0 | repoussées avant la phase 2 | `spike/RESULTS.md` |
 
@@ -44,7 +44,7 @@ Vérification à la clôture du lot 2, sur un clone neuf, comme la CI : 548 test
 
 Rien de ceci ne se décide à sa place.
 
-1. **La relecture du plan du lot 3**, avant qu'on commence : [`docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md`](superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md). Ses décisions d'écriture sont au registre du lot.
+1. **Pousser ou non le lot 3** : le plan de la partie A ([`docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md`](superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md)) est validé (Lenny, 2026-11-12) et s'exécute sur `main`, sans rien pousser. À la clôture : la recette de la partie A, et le niveau qui lit l'historique (« Peut lire » dans le plan ; voir le registre du lot).
 2. **Quatre règles à valider**, parce qu'elles se voient à l'usage :
    - les membres ont l'accès complet aux pages d'équipe, comme dans Notion (R48) ;
    - les inscriptions sont sur invitation par défaut (R50) ;
