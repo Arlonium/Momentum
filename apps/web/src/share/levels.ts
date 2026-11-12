@@ -34,6 +34,15 @@ export function canEdit(level: Level): boolean {
   return level === "edit" || level === "full";
 }
 
+/**
+ * Ce niveau permet-il de commenter la page : ouvrir un fil, répondre, réagir ? Commenter
+ * n'écrit rien dans le document (R134) : « Peut commenter » suffit, sans « Peut modifier ».
+ * Le serveur fait foi.
+ */
+export function canComment(level: Level): boolean {
+  return level !== "read";
+}
+
 /** L'accès général d'une page, tel que le menu Partager le montre et le laisse régler. */
 export type GeneralAccess = {
   /**

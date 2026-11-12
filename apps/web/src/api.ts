@@ -9,6 +9,7 @@
 import type {
   Accepted,
   ChangePassword,
+  Comment,
   CreatePage,
   CreateSpace,
   ErrorBody,
@@ -23,13 +24,17 @@ import type {
   LogIn,
   Me,
   Member,
+  NewComment,
+  NewThread,
   PageAccess,
   PageNode,
   PendingInvitation,
+  ResolveThread,
   SetGeneral,
   SetLevel,
   SignUp,
   SpaceInfo,
+  Thread,
   Tree,
   UpdateMember,
   UpdatePage,
@@ -314,6 +319,76 @@ export function removeUserAccess(pageId: string, userId: string): Promise<PageAc
  */
 export function inviteToPage(pageId: string, body: InviteToPage): Promise<InvitationCreated> {
   return call("POST", `${page(pageId)}/invitations`, body);
+}
+
+// Commentaires d'une page (R134) : des fils attachés à la page, ou à un de ses blocs par son
+// identifiant. Rien n'en est écrit dans le document. Lire demande `read` (à la corbeille
+// aussi) ; écrire, `comment`, et rien ne s'écrit à la corbeille (`409 trashed`). Un fil ou un
+// message qui n'est plus là (supprimé entre-temps) répond `404`.
+
+const comments = (pageId: string) => `${page(pageId)}/comments`;
+const thread = (pageId: string, threadId: string) =>
+  `${comments(pageId)}/${encodeURIComponent(threadId)}`;
+const message = (pageId: string, threadId: string, commentId: string) =>
+  `${thread(pageId, threadId)}/messages/${encodeURIComponent(commentId)}`;
+
+/** `GET /api/v1/pages/{id}/comments` : les fils de la page, résolus compris, du plus ancien au plus récent. */
+export function getComments(pageId: string): Promise<Thread[]> {
+  return call("GET", comments(pageId));
+}
+
+/**
+ * `POST /api/v1/pages/{id}/comments` : un fil neuf et son premier message ; sur un bloc
+ * (`422 invalid_block` s'il n'est plus dans la page), ou sur la page (`blockId` nul).
+ */
+export function openThread(pageId: string, body: NewThread): Promise<Thread> {
+  return call("POST", comments(pageId), body);
+}
+
+/** `POST /api/v1/pages/{id}/comments/{threadId}/replies` : une réponse, même à un fil résolu (R171). */
+export function replyToThread(pageId: string, threadId: string, body: NewComment): Promise<Comment> {
+  return call("POST", `${thread(pageId, threadId)}/replies`, body);
+}
+
+/**
+ * `PATCH /api/v1/pages/{id}/comments/{threadId}` : résout ou rouvre le fil (l'avoir ouvert
+ * avec `comment`, ou `edit`). Déjà dans cet état : rien ne change (R170).
+ */
+export function resolveThread(pageId: string, threadId: string, body: ResolveThread): Promise<Thread> {
+  return call("PATCH", thread(pageId, threadId), body);
+}
+
+/** `PATCH …/messages/{commentId}` : le texte d'un message, par son auteur. */
+export function editComment(
+  pageId: string,
+  threadId: string,
+  commentId: string,
+  body: NewComment,
+): Promise<Comment> {
+  return call("PATCH", message(pageId, threadId, commentId), body);
+}
+
+/**
+ * `DELETE …/messages/{commentId}` : par son auteur, ou avec l'accès complet. Le fil part avec
+ * son dernier message.
+ */
+export function deleteComment(pageId: string, threadId: string, commentId: string): Promise<void> {
+  return call("DELETE", message(pageId, threadId, commentId));
+}
+
+/**
+ * `PUT` (`on`) ou `DELETE …/messages/{commentId}/reactions/{emoji}` : la réaction de la
+ * personne, posée ou retirée. L'emoji va dans le chemin, encodé en UTF-8.
+ */
+export function setReaction(
+  pageId: string,
+  threadId: string,
+  commentId: string,
+  emoji: string,
+  on: boolean,
+): Promise<Comment> {
+  const path = `${message(pageId, threadId, commentId)}/reactions/${encodeURIComponent(emoji)}`;
+  return call(on ? "PUT" : "DELETE", path);
 }
 
 /** Longueur maximale d'un titre, en caractères Unicode (le serveur fait foi, R30). */

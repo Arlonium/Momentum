@@ -3,6 +3,7 @@
 // offre pour l'accès général d'une page.
 import { expect, test } from "vitest";
 import {
+  canComment,
   canEdit,
   generalAccess,
   invitationLink,
@@ -125,4 +126,12 @@ test("edit_and_full_can_edit", () => {
   expect(canEdit("comment")).toBe(false);
   expect(canEdit("edit")).toBe(true);
   expect(canEdit("full")).toBe(true);
+});
+
+test("every_level_but_read_can_comment", () => {
+  // Commenter n'écrit rien dans le document (R134) : « Peut commenter » suffit.
+  expect(canComment("read")).toBe(false);
+  expect(canComment("comment")).toBe(true);
+  expect(canComment("edit")).toBe(true);
+  expect(canComment("full")).toBe(true);
 });
