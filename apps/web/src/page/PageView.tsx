@@ -26,6 +26,7 @@ import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
 import { canEdit } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
+import { Presence } from "./Presence";
 import { TitleInput } from "./TitleInput";
 import { usePageGate } from "./usePageGate";
 
@@ -140,6 +141,7 @@ export function PageView({
       <header className="mm-topbar">
         <span className="mm-topbar-title">{node.title}</span>
         {session && <SyncState session={session} />}
+        {session && <Presence session={session} selfId={userId} />}
         {/* Les accès ne se voient et ne se changent qu'avec l'accès complet, et rien ne s'y
             change à la corbeille, ni depuis un onglet qui n'écrit plus (R35). */}
         {node.level === "full" && !trashed && !readOnly && (
