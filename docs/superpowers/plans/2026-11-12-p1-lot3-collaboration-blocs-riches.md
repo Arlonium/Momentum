@@ -444,3 +444,62 @@ Cette tâche n'écrit que des tests, ignorés, qui disent la perte telle qu'elle
 3. Essai de migration sur une copie d'une base du lot 2.
 4. Registre : mesures, reports, ce qui attend le propriétaire. `docs/REPRISE.md` à jour.
 5. Le plan de la partie B.
+
+---
+
+## Task 13, récrite d'après l'essai (2026-11-12)
+
+La Task 13 écrite plus haut repose sur une prémisse fausse : « un déplacement vaut copie + suppression ». La Task 12 et sa relecture ont mesuré ce qu'un navigateur écrit vraiment, et l'essai borné de l'étape 1 a rendu son verdict : [`docs/superpowers/logs/2026-11-12-p1-lot3-essai-deplacement.md`](../logs/2026-11-12-p1-lot3-essai-deplacement.md). **Ce découpage remplace les étapes 2 à 7 de la Task 13 d'origine.** L'implémenteur d'une de ses tâches lit d'abord le compte rendu de l'essai en entier.
+
+### Décisions
+
+**Forme à clés (R220).** Le client écrit un réordonnancement comme « le bloc déplacé est supprimé et recréé avec le même `id` ; les autres ne sont pas touchés », par un correctif de la dépendance y-prosemirror (`pnpm patch`, fonction `updateYFragment` : les enfants du milieu sont appariés par `id` de bloc, repli sur le code d'origine sans clés sûres). Pourquoi : aujourd'hui une frappe concurrente dans **n'importe quel bloc de la plage** atterrit dans un bloc voisin, deux déplacements abîment la page, et un élément change d'`id`, ce qui détache les fils de commentaires ; avec les clés, seul le bloc déplacé est en jeu, deux déplacements de blocs différents sont justes, et le serveur voit enfin un doublon. Coût si faux, accepté : ce qui est tapé dans le bloc déplacé passe de « chez un voisin » à « perdu » quand le serveur ne l'avait pas avant le déplacement ; annuler un déplacement retire ce que d'autres ont écrit dans le bloc depuis ; un correctif de dépendance à porter à chaque montée de version de y-prosemirror (l'installation échoue s'il ne s'applique plus).
+
+**Report à l'arrivée, sans état (R221).** Le serveur reconnaît dans une mise à jour d'un client un bloc recréé avec l'`id` d'un bloc vivant que son jeu de suppressions couvre, et reporte sur la copie, **avant d'appliquer**, ce que ce jeu de suppressions ne couvre pas dans l'original (texte et marques ; sous-blocs). Il s'abstient hors du cas simple (contenu en ligne à plusieurs textes ; copie dont le texte n'est pas celui que l'auteur avait vu). Pas de table, pas d'enregistrement : la table `block_moves` de la migration `0003` est retirée (R139 le permet). Pourquoi : c'est la part de R138 que l'essai a prouvée ; elle règle l'ordre « le déplacement arrive après l'édition », pour le glisser, le clavier, Tab, Maj+Tab et les enfants. Coût si faux : un report mal placé met du texte au mauvais endroit d'un bloc ; d'où l'abstention dès que la correspondance n'est pas sûre.
+
+**Ce qui reste, dit (R222).** Une frappe faite sans avoir vu le déplacement et arrivée après lui reste perdue : la reconnaître demande d'énumérer les éléments supprimés d'un texte, ce que yrs 0.28.1 n'offre pas (contournement mesuré : 6,9 s sur 10 000 blocs). C'est la clause de sortie du plan, appliquée à cette seule part, preuves à l'appui. Elle a son plan à part après le lot 3, avec la règle d'annulation et le report hors du cas simple.
+
+### Task 13a : client, la forme à clés
+
+Menée **dans un atelier git à part** (le correctif change `node_modules` et le fichier de verrou), puis reprise sur `main`.
+
+**Files:**
+- Create: `patches/y-prosemirror@1.3.7.patch` ; `apps/web/src/editor/followBlock.ts`, `followBlock.test.ts` ; `apps/web/src/editor/keyedBlocks.test.ts`
+- Modify: `package.json` de la racine (`pnpm.patchedDependencies`), `pnpm-lock.yaml` ; `apps/web/src/editor/Editor.tsx` (brancher `followBlock`) ; `apps/web/src/editor/blockMoves.test.ts` ; `crates/mementum-sync/tests/fixtures/moves/` (réécrites par Vitest) ; `apps/web/e2e/block-move.spec.ts`
+
+**Interfaces:**
+- Produces: aucune option. Le correctif est actif dès que tous les enfants du milieu ont un `id` distinct et non vide ; sinon, le code d'origine. `followBlock` : une extension de l'éditeur qui, quand la sélection locale tombe hors de tout bloc après un changement distant, la remet dans le bloc de même `id` qu'avant, à la même place dans son texte.
+- Les fixtures de `crates/mementum-sync/tests/fixtures/moves/` sont désormais écrites par le client corrigé, **pour chaque scénario S1 à S11 et dans les deux ordres des identifiants de client** : elles servent à la Task 13b.
+
+- [ ] **Step 1 : durcir la cible** (constats de la relecture de la Task 12), sans rien corriger encore. Dans `blockMoves.test.ts` : une précondition manquée **lève** au lieu de rendre la main ; chaque scénario marqué `test.fails` affirme que son échec est bien l'assertion attendue, pas une autre exception ; le glisser de Tom de S6 a son témoin ; chaque scénario est joué dans les deux ordres d'identifiants (Mona < Tom, Tom < Mona) ; la comparaison lit les enfants et les types. Tout reste vert (scénarios en échec attendu).
+- [ ] **Step 2 : les tests de la forme, vus rouges** (`keyedBlocks.test.ts`, vrai BlockNote, deux éditeurs) : `a_move_rewrites_only_the_moved_block` (un conteneur supprimé, un créé, aucun élément dont l'`id` change) ; `typing_in_another_block_of_the_range_stays_in_its_block` ; `ordinary_gestures_write_what_they_wrote_before` (comptes de structures figés, relevés **avant** le correctif, pour la frappe, Entrée au début, au milieu et à la fin, retour arrière, insertion, suppression, changement de type) ; `missing_or_duplicate_ids_fall_back_to_positions` ; `two_moves_of_different_blocks_keep_every_block_once` ; `keyed_and_unkeyed_tabs_converge` (au hasard, graines fixées, un onglet corrigé et un onglet d'origine : même document, ProseMirror égal à Yjs) ; `undo_of_a_move_leaves_other_blocks_alone` ; `a_big_move_writes_a_small_update` (premier bloc de 2 000 glissé en bas : la mise à jour pèse moins de 2 Ko).
+- [ ] **Step 3 : le correctif**, par `pnpm patch y-prosemirror@1.3.7`. `corepack pnpm install --frozen-lockfile` l'applique sur un clone neuf ; `node tools/check-npm-licenses.mjs` reste vert.
+- [ ] **Step 4 : `followBlock`**, test d'abord : `cursor_follows_its_block_when_someone_else_moves_it` (la frappe suivante tombe dans le bon bloc) ; `cursor_is_left_alone_when_nothing_moved` ; rien n'est écrit dans le document par l'extension.
+- [ ] **Step 5 : les scénarios changent d'état.** Dans `blockMoves.test.ts`, ceux que la forme à clés rend justes passent de `test.fails` à `test` (frappe dans un bloc non déplacé : S4, S5 ; deux déplacements de blocs différents : S11 ; et ce que le Step 2 montre juste) ; ceux qui demandent le serveur restent en échec attendu, chacun avec sa raison à jour (« attend le report du serveur, Task 13b » ou « limite R222 »). Les tests « de forme » sont récrits sur la nouvelle forme. Les fixtures sont réécrites (`EXPORT_FIXTURES=1`).
+- [ ] **Step 6 : dans un vrai navigateur.** `block-move.spec.ts` : deux e2e neufs, verts — `typing_in_a_neighbour_while_someone_drags_stays_in_place` (en ligne et hors ligne) et `two_people_moving_two_blocks_keep_the_page` ; les deux `test.fixme` restent, raison à jour. Puis toute la suite e2e, et `corepack pnpm e2e:budgets` : ouverture de 1 000 blocs sous 300 ms, de 10 000 sous 3 s, comme avant.
+- [ ] **Critère d'arrêt** : un seul compte de structures qui diffère sur un geste ordinaire, une divergence au hasard, ou un budget qui recule : on s'arrête, on consigne, la forme à clés n'est pas livrée.
+- [ ] **Step 7 : commits** `web : un bloc déplacé est recréé, les autres ne sont plus récrits (R220)`, `web : le curseur suit son bloc quand un autre le déplace`, `tests : …`, `e2e : …`.
+
+### Task 13b : serveur, le report à l'arrivée
+
+Après la Task 13a (elle rejoue ses fixtures) et après la vague de correction de la relecture finale (elle touche les mêmes fichiers).
+
+**Files:**
+- Create: `crates/mementum-crdt/src/moves.rs`
+- Modify: `crates/mementum-crdt/src/guard.rs`, `page.rs`, `lib.rs` ; `crates/mementum-sync/src/actor.rs` ; `crates/mementum-store/migrations/0003_collaboration.sql` (retirer `block_moves`) et ses tests
+- Test: `crates/mementum-crdt/tests/move_edit.rs`, `crates/mementum-sync/tests/moves.rs`
+
+**Interfaces:**
+- Produces: `PageDoc::apply_client_update` rend, avec la mise à jour lue, un correctif à écrire et à diffuser avec elle, comme celui du dédoublonnage : `pub struct Applied { pub read: Vec<u8>, pub carried: Option<Vec<u8>> }`. Le report est calculé **avant** l'application, écrit dans la même transaction du journal que la mise à jour et le correctif du dédoublonnage (tous ou aucun), puis diffusé à toutes les connexions, l'expéditeur compris.
+
+- [ ] **Step 1 : tests de la crate, vus rouges** (`move_edit.rs`), sur les octets des fixtures de la Task 13a, dans les deux ordres d'identifiants : `text_typed_before_the_move_arrives_is_carried` (début, milieu, fin) ; `carried_text_keeps_its_marks` ; `child_block_added_under_the_original_follows_it` ; `typing_in_a_child_of_a_moved_block_is_carried` ; `indent_and_outdent_carry_what_was_typed` (Tab, Maj+Tab) ; `mover_own_offline_edits_are_not_doubled` (abstention) ; `inline_content_with_several_texts_is_left_alone` (abstention) ; `the_same_move_received_twice_carries_once` ; `concurrent_delete_is_not_carried_and_removes_nothing_typed`.
+- [ ] **Step 2 : test de propriétés** `moves_and_earlier_edits_lose_no_insert` : des insertions de texte par deux clients, puis des déplacements par un troisième arrivés après elles : chaque texte inséré est présent exactement une fois, dans son bloc, et la page se lit en MMD.
+- [ ] **Step 3 : écrire `moves.rs`**, puis l'acteur. Rien ne s'exécute pour une mise à jour qui n'insère aucun élément (le chemin d'une frappe ne change pas).
+- [ ] **Step 4 : les tests de l'acteur** (`moves.rs`) : ceux de l'ordre « le déplacement arrive après l'édition » perdent leur `#[ignore]` et passent, aux quatre endroits (les deux clients, l'acteur, le journal relu) ; ceux de l'ordre inverse restent ignorés, raison à jour (R222) ; `two_moves_of_the_same_block_leave_one` (le dédoublonnage voit le doublon, les fils gardent leur bloc) ; aller-retour : l'état final rechargé dans deux éditeurs ne fait rien récrire (fixture relue par Vitest).
+- [ ] **Step 5 : les e2e** `test.fixme` de l'ordre réglé passent ; celui de l'ordre inverse reste, raison à jour.
+- [ ] **Step 6 : budgets.** `cargo test --release -p mementum-sync -- --ignored` : rien ne recule ; le coût d'un déplacement sur une page de 10 000 blocs est mesuré et consigné.
+- [ ] **Step 7 : commits** `crdt : reconnaître un bloc recréé sous le même identifiant`, `crdt : reporter sur la copie ce que l'auteur du déplacement n'avait pas vu (R221)`, `store : la table des déplacements, sans lecteur, est retirée`, `synchro : le report d'un déplacement est écrit et diffusé avec lui`.
+
+### Task 13c : la limite, écrite
+
+Avec la Task 14 : la limite du §5 du compte rendu de l'essai, telle quelle, dans le README, la conception (§11, §9) et `CLAUDE.md` (la note « Déplacements concurrents », et un piège neuf : le correctif de y-prosemirror, pourquoi il existe, comment le porter à une version suivante) ; R220 à R222 au registre.
