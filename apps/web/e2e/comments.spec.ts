@@ -55,11 +55,19 @@ async function openComments(p: Page): Promise<Locator> {
   return panel;
 }
 
+/**
+ * Le contenu propre d'un bloc : sous son conteneur, ou dans le cadre du repli d'un bloc
+ * repliable (où sont aussi ses enfants).
+ */
+const OWN_CONTENT =
+  ":scope > .bn-block > .bn-block-content, " +
+  ":scope > .bn-block > .bn-toggle-frame > .bn-toggle-slot > .bn-block-content";
+
 /** Un bloc de l'éditeur, par le texte qui lui est propre. */
 function blockOf(p: Page, text: string): Locator {
   return p
     .locator('.bn-editor [data-node-type="blockOuter"]')
-    .filter({ has: p.locator(":scope > .bn-block > .bn-block-content", { hasText: text }) });
+    .filter({ has: p.locator(OWN_CONTENT, { hasText: text }) });
 }
 
 async function blockIdOf(p: Page, text: string): Promise<string> {
@@ -68,10 +76,10 @@ async function blockIdOf(p: Page, text: string): Promise<string> {
   return id;
 }
 
-/** La pastille de la marge d'un bloc commenté. */
+/** La pastille de la marge d'un bloc commenté (le texte du bloc y est isolé, U+2068 et U+2069). */
 function markOf(p: Page, text: string): Locator {
   return p.getByRole("list", { name: "Blocs commentés" }).getByRole("button", {
-    name: new RegExp(`sur « ${text} »$`),
+    name: new RegExp(`sur « ⁨${text}⁩ »$`),
   });
 }
 
@@ -82,7 +90,7 @@ function threadOf(scope: Locator, body: string): Locator {
 
 /** Ouvre le menu de la poignée d'un bloc et y choisit `item`. */
 async function blockMenu(p: Page, text: string, item: string): Promise<void> {
-  await blockOf(p, text).locator(".bn-block-content").first().hover();
+  await blockOf(p, text).locator(OWN_CONTENT).hover();
   await p.getByRole("button", { name: "Ouvrir le menu du bloc" }).click();
   await p.getByRole("menuitem", { name: item }).click();
 }

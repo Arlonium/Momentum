@@ -415,3 +415,24 @@ test("the_lists_are_lists_of_items", async () => {
     for (const item of messages.children) expect(item.tagName).toBe("LI");
   }
 });
+
+test("names_and_emojis_in_attributes_are_isolated", async () => {
+  // Un caractère de retournement dans un nom ne retourne pas les noms qui le suivent.
+  const evil = author("bruno", "‮onurb");
+  const threads = [
+    thread("t", {
+      openedBy: evil,
+      comments: [
+        message("m", {
+          reactions: [{ emoji: "‮👍", users: [evil, author("carla", "Carla")] }],
+        }),
+      ],
+    }),
+  ];
+  await show(fakeComments(threads), { level: "comment" });
+  const article = host.querySelector("article")!;
+  expect(article.getAttribute("aria-label")).toBe("Fil ouvert par ⁨‮onurb⁩");
+  const chip = list("Réactions")!.querySelector<HTMLButtonElement>("button[aria-pressed]")!;
+  expect(chip.getAttribute("title")).toBe("⁨‮onurb⁩, ⁨Carla⁩");
+  expect(chip.getAttribute("aria-label")).toBe("⁨‮👍⁩ 2");
+});

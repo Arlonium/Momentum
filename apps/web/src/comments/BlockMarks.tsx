@@ -21,7 +21,7 @@
 // la sélection du document (R176).
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { CommentIcon } from "../icons";
-import { BLOCK, blockElement, blockOfSelection, blockText, shorten } from "./dom";
+import { BLOCK, blockElement, blockOfSelection, blockText, isolate, shorten, shown } from "./dom";
 import { isCommentShortcut } from "./shortcut";
 
 /** Plus de blocs que cela à chercher : un seul parcours de la page plutôt qu'une recherche par bloc. */
@@ -151,7 +151,9 @@ function sameOrder(a: string[] | null, b: string[] | null | undefined): boolean 
 
 function markLabel(count: number, text: string): string {
   const threads = `${count} fil${count > 1 ? "s" : ""} de commentaires`;
-  return text === "" ? `${threads} sur ce bloc` : `${threads} sur « ${shorten(text, LABEL_CHARS)} »`;
+  return text === ""
+    ? `${threads} sur ce bloc`
+    : `${threads} sur « ${isolate(shorten(text, LABEL_CHARS))} »`;
 }
 
 export function BlockMarks({
@@ -222,10 +224,14 @@ export function BlockMarks({
         order = BlockTracker.order(found);
       }
       tell(order);
-      const shown = order.filter((id) => (marks.get(id)?.length ?? 0) > 0);
+      // Un bloc caché (enfant d'un bloc repliable fermé) n'a pas de pastille : sa boîte ne dit rien
+      // de sa place. Son fil reste dans le panneau.
+      const marked = order.filter(
+        (id) => (marks.get(id)?.length ?? 0) > 0 && shown(found.get(id)!),
+      );
       // Aucune pastille : rien à mesurer (pas de mise en page forcée à l'ouverture de la page).
-      const origin = shown.length > 0 ? root.getBoundingClientRect().top : 0;
-      const next = shown.map((blockId) => {
+      const origin = marked.length > 0 ? root.getBoundingClientRect().top : 0;
+      const next = marked.map((blockId) => {
         const element = found.get(blockId)!;
         const threads = marks.get(blockId)!;
         return {
@@ -313,7 +319,12 @@ export function BlockMarks({
     const root = frame.current;
     if (highlight === null || root === null) return;
     const element = blockElement(root, highlight.blockId);
-    if (element === null) return;
+    // Un bloc caché (dans un bloc repliable fermé) n'a pas de boîte à mettre en évidence ; celle
+    // d'un bloc montré avant lui ne reste pas.
+    if (element === null || !shown(element)) {
+      setGlow(null);
+      return;
+    }
     const block = element.getBoundingClientRect();
     const origin = root.getBoundingClientRect();
     setGlow({

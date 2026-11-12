@@ -184,9 +184,10 @@ test("each_block_with_an_open_thread_has_a_mark_that_opens_it", async () => {
   expect(items.every((item) => item.tagName === "LI")).toBe(true);
   const buttons = [...list.querySelectorAll("button")];
   // Dans l'ordre de la page, nommées par le début de leur bloc.
+  // Le texte du bloc est isolé (U+2068, U+2069) : un caractère de format qu'il porte n'en sort pas.
   expect(buttons.map((b) => b.getAttribute("aria-label"))).toEqual([
-    "2 fils de commentaires sur « Premier »",
-    "1 fil de commentaires sur « Troisième »",
+    "2 fils de commentaires sur « ⁨Premier⁩ »",
+    "1 fil de commentaires sur « ⁨Troisième⁩ »",
   ]);
   await act(async () => buttons[0].click());
   expect(onOpenThread).toHaveBeenCalledWith("t1");
@@ -248,4 +249,58 @@ test("nothing_is_known_before_the_first_sync", async () => {
   await frameTick();
   expect(onOrder).not.toHaveBeenCalledWith(["un"]);
   expect(host.querySelector("button")).toBeNull();
+});
+
+/** Un bloc caché (enfant d'un bloc repliable fermé : `display: none` au-dessus de lui). */
+function hide(element: Element) {
+  Object.defineProperty(element, "checkVisibility", { value: () => false });
+}
+
+test("a_block_hidden_in_a_closed_toggle_gets_no_mark", async () => {
+  const caché = block("caché", "Dans le bloc replié");
+  const { frame } = editorWith([block("un", "Premier"), caché]);
+  hide(caché);
+  frame.append(host);
+  const onOrder = vi.fn();
+  await act(async () =>
+    root.render(
+      <BlockMarks
+        frame={{ current: frame }}
+        session={fakeSession()}
+        blockIds={["un", "caché"]}
+        marks={new Map([["un", ["t1"]], ["caché", ["t2"]]])}
+        onOrder={onOrder}
+        onOpenThread={() => {}}
+        highlight={null}
+        onComment={null}
+      />,
+    ),
+  );
+  await frameTick();
+  // Toujours dans la page (le fil reste à sa place dans le panneau), sans pastille.
+  expect(onOrder).toHaveBeenLastCalledWith(["un", "caché"]);
+  const labels = [...host.querySelectorAll(".mm-block-mark")].map((b) => b.getAttribute("aria-label"));
+  expect(labels).toEqual(["1 fil de commentaires sur « ⁨Premier⁩ »"]);
+});
+
+test("showing_a_hidden_block_draws_nothing", async () => {
+  const caché = block("caché");
+  const { frame } = editorWith([block("un"), caché]);
+  hide(caché);
+  frame.append(host);
+  const props = {
+    frame: { current: frame },
+    session: fakeSession(),
+    blockIds: ["caché"],
+    marks: new Map<string, string[]>(),
+    onOrder: () => {},
+    onOpenThread: () => {},
+    onComment: null,
+  };
+  await act(async () => root.render(<BlockMarks {...props} highlight={{ blockId: "un", seq: 1 }} />));
+  expect(host.querySelector(".mm-block-glow")).not.toBeNull();
+  await act(async () =>
+    root.render(<BlockMarks {...props} highlight={{ blockId: "caché", seq: 2 }} />),
+  );
+  expect(host.querySelector(".mm-block-glow")).toBeNull();
 });

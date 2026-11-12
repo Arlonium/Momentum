@@ -1,7 +1,7 @@
 // Ce que les commentaires lisent dans l'éditeur affiché : le bloc où est la sélection (pour
 // Ctrl+Alt+M dans un éditeur en lecture seule) et le texte propre d'un bloc.
 import { afterEach, expect, test } from "vitest";
-import { blockOfSelection } from "./dom";
+import { blockOfSelection, blockText, isolate } from "./dom";
 
 /** Un bloc tel que BlockNote le rend : `blockOuter` > `blockContainer` > contenu, puis ses enfants. */
 function block(id: string, content: Node, children: HTMLElement[] = []): HTMLElement {
@@ -103,4 +103,41 @@ test("no_selection_names_nothing", () => {
 test("a_selection_on_the_editor_itself_names_nothing", () => {
   const { editor } = scene();
   expect(blockOfSelection(editor, select(editor, 0))).toBeNull();
+});
+
+test("the_text_of_a_block_is_its_own", () => {
+  const { editor } = scene();
+  const parent = editor.querySelector('[data-id="parent"]')!;
+  expect(blockText(parent)).toBe("parent");
+});
+
+test("the_text_of_a_toggle_block_is_its_own", () => {
+  // Un bloc repliable : son contenu et ses enfants sont dans le cadre du repli
+  // (`.bn-block > .bn-toggle-frame > .bn-toggle-slot`).
+  const outer = document.createElement("div");
+  outer.setAttribute("data-node-type", "blockOuter");
+  outer.setAttribute("data-id", "repli");
+  const container = document.createElement("div");
+  container.className = "bn-block";
+  const frame = document.createElement("div");
+  frame.className = "bn-toggle-wrapper bn-toggle-frame";
+  const toggle = document.createElement("button");
+  toggle.className = "bn-toggle-button";
+  const slot = document.createElement("div");
+  slot.className = "bn-toggle-slot";
+  const content = document.createElement("div");
+  content.className = "bn-block-content";
+  content.textContent = "Titre du repli";
+  const group = document.createElement("div");
+  group.className = "bn-block-group";
+  group.append(block("dedans", text("enfant caché")));
+  slot.append(content, group);
+  frame.append(toggle, slot);
+  container.append(frame);
+  outer.append(container);
+  expect(blockText(outer)).toBe("Titre du repli");
+});
+
+test("isolate_wraps_text_in_first_strong_isolates", () => {
+  expect(isolate("‮abc")).toBe("⁨‮abc⁩");
 });

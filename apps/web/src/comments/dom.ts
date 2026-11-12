@@ -34,11 +34,34 @@ export function blockOfSelection(root: Element, selection: Selection | null): st
   return block.getAttribute("data-id");
 }
 
+/**
+ * Le contenu propre d'un bloc : sous son conteneur, ou, pour un bloc repliable, dans le cadre du
+ * repli (`.bn-toggle-frame > .bn-toggle-slot`, où sont aussi ses enfants).
+ */
+const OWN_CONTENT =
+  ":scope > .bn-block > .bn-block-content, " +
+  ":scope > .bn-block > .bn-toggle-frame > .bn-toggle-slot > .bn-block-content";
+
 /** Le texte propre d'un bloc (sans celui de ses blocs enfants). */
 export function blockText(element: Element): string {
-  return (
-    element.querySelector(":scope > .bn-block > .bn-block-content")?.textContent?.trim() ?? ""
-  );
+  return element.querySelector(OWN_CONTENT)?.textContent?.trim() ?? "";
+}
+
+/**
+ * Un texte venu d'ailleurs (un nom, un emoji, le texte d'un bloc) posé dans un attribut (une
+ * infobulle, un nom accessible) : entouré de U+2068 et U+2069, un caractère de format qu'il porte
+ * (U+202E…) ne déborde pas sur ce qui le suit.
+ */
+export function isolate(text: string): string {
+  return `\u2068${text}\u2069`;
+}
+
+/**
+ * L'élément est-il affiché ? Les enfants d'un bloc repliable fermé sont sous `display: none` :
+ * leur boîte ne dit rien de leur place. Sans `checkVisibility` (jsdom), tenu pour affiché.
+ */
+export function shown(element: Element): boolean {
+  return typeof element.checkVisibility !== "function" || element.checkVisibility();
 }
 
 /** Les premiers `max` caractères de `text`, suivis de « … » s'il en avait plus. */

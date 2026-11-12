@@ -28,6 +28,7 @@ import {
   type CommentRights,
 } from "./arrange";
 import { Composer } from "./Composer";
+import { isolate } from "./dom";
 import { DRAFT, type Drafts } from "./drafts";
 import { fullDate, relativeTime } from "./time";
 import type { Comments } from "./useComments";
@@ -120,7 +121,7 @@ export function ThreadView({
       className={`mm-thread${resolved ? " is-resolved" : ""}`}
       data-thread-id={thread.id}
       tabIndex={-1}
-      aria-label={`Fil ouvert par ${thread.openedBy.name}`}
+      aria-label={`Fil ouvert par ${isolate(thread.openedBy.name)}`}
       onClick={onClick}
     >
       <div className="mm-thread-context">
@@ -353,7 +354,7 @@ function Reactions({ comment, selfId, canReact, onToggle, onPicked, children }: 
               const mine = reaction.users.some((user) => user.id === selfId);
               const count = reaction.users.length;
               // Les noms en infobulle : un attribut de texte, jamais de style.
-              const names = reaction.users.map((user) => user.name).join(", ");
+              const names = reaction.users.map((user) => isolate(user.name)).join(", ");
               const content = (
                 <>
                   <span className="mm-reaction-emoji mm-isolate" dir="auto">
@@ -369,7 +370,7 @@ function Reactions({ comment, selfId, canReact, onToggle, onPicked, children }: 
                       type="button"
                       className="mm-reaction"
                       aria-pressed={mine}
-                      aria-label={`${reaction.emoji} ${count}${mine ? ", dont toi" : ""}`}
+                      aria-label={`${isolate(reaction.emoji)} ${count}${mine ? ", dont toi" : ""}`}
                       title={names}
                       onClick={() => onToggle(reaction.emoji, !mine)}
                     >
