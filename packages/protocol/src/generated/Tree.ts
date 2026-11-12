@@ -5,4 +5,11 @@ import type { PageNode } from "./PageNode";
  * Les pages d'un espace que le compte de la session voit, hors corbeille
  * (`GET /api/v1/spaces/{id}/tree`), triées par `(parentId, position)`, la racine d'abord.
  */
-export type Tree = { spaceId: string, nodes: Array<PageNode>, };
+export type Tree = { spaceId: string, 
+/**
+ * La version de l'espace (`spaces.lsn`), lue avant les droits et les pages : l'arbre est
+ * au moins aussi récent qu'elle (Ruling R141). Le client la compare aux trames du canal de
+ * l'espace (`/events/{spaceId}`) : au pire il relit une fois de trop, jamais il ne manque
+ * un changement.
+ */
+lsn: number, nodes: Array<PageNode>, };

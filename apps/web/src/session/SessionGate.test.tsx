@@ -81,7 +81,7 @@ beforeEach(() => {
   reload.mockClear();
   for (const mock of [getMe, logIn]) vi.mocked(mock).mockReset();
   vi.mocked(getTree).mockReset();
-  vi.mocked(getTree).mockImplementation(async (spaceId): Promise<Tree> => ({ spaceId, nodes: [] }));
+  vi.mocked(getTree).mockImplementation(async (spaceId): Promise<Tree> => ({ spaceId, lsn: 0, nodes: [] }));
   vi.mocked(onSessionLost).mockReset();
   vi.mocked(onSessionLost).mockImplementation((listener) => {
     sessionLost = listener;

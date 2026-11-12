@@ -16,7 +16,7 @@ const me = (...spaces: string[]): Me => ({
   spaces: spaces.map((id) => space(id, { role: "guest" })),
 });
 
-const tree = (...nodes: Tree["nodes"]): Tree => ({ spaceId: "pro", nodes });
+const tree = (...nodes: Tree["nodes"]): Tree => ({ spaceId: "pro", lsn: 0, nodes });
 
 beforeEach(() => {
   vi.mocked(getTree).mockReset();

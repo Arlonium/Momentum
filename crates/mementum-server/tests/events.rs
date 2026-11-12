@@ -704,3 +704,57 @@ async fn data_frames_from_the_client_close_the_channel() {
     );
     assert!(!channel.is_closed());
 }
+
+/// La version que porte l'arbre (`GET /api/v1/spaces/{id}/tree`), en nombre : sans elle, le
+/// test échoue.
+async fn tree_version(by: &Browser<'_>, space: Uuid) -> i64 {
+    let reply = by.get(&format!("/api/v1/spaces/{space}/tree")).await;
+    reply.assert_status(StatusCode::OK);
+    let tree = reply.json();
+    tree["lsn"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("l'arbre porte la version de l'espace, « lsn » : {tree}"))
+}
+
+/// Ruling R141 : l'arbre porte la version de l'espace, lue avant les droits et les pages. Après
+/// une écriture de structure, l'arbre relu porte une version au moins égale à celle que le canal
+/// a poussée pour elle : le client qui compare les deux ne manque aucun changement. Pour un
+/// invité comme pour une membre ; et sans écriture, c'est la version de la base.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tree_is_as_recent_as_the_version_pushed() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    team.page(None, "Pour Gina", &[user(&team.gina, Level::Read)])
+        .await;
+    for (who, by) in [("Mona", &team.mona.browser), ("Gina", &team.gina.browser)] {
+        assert_eq!(
+            tree_version(by, team.space).await,
+            lsn(&team).await,
+            "{who}"
+        );
+    }
+    let mona = opened(&team.mona.browser, addr, team.space).await;
+    let gina = opened(&team.gina.browser, addr, team.space).await;
+
+    let page = team.mona.create(in_team(&team, "Neuve")).await;
+    for (who, channel, by) in [
+        ("Mona", &mona, &team.mona.browser),
+        ("Gina", &gina, &team.gina.browser),
+    ] {
+        assert!(
+            channel.wait_until(|c| c.versions().len() == 2).await,
+            "{who} : {:?}",
+            channel.seen()
+        );
+        let pushed = channel.versions()[1];
+        let tree = tree_version(by, team.space).await;
+        assert!(tree >= pushed, "{who} : arbre {tree}, trame {pushed}");
+    }
+    assert!(
+        tree_nodes(&team.mona.browser, team.space)
+            .await
+            .iter()
+            .any(|node| node["id"] == page.id.as_str())
+    );
+}

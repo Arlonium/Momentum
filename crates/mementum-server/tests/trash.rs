@@ -110,7 +110,10 @@ async fn trash_takes_subtree_and_restore_brings_it_back() {
     let restored = reply.json();
     assert_eq!(restored["id"], page.id);
     assert!(restored["trashedAt"].is_null(), "{restored}");
-    assert_eq!(alice.tree().await, before);
+    // Les pages comme avant ; la version de l'espace, elle, a avancé (Ruling R141).
+    let back = alice.tree().await;
+    assert_eq!(back.nodes, before.nodes);
+    assert!(back.lsn > before.lsn, "{} puis {}", before.lsn, back.lsn);
     assert_eq!(
         trash_list(&alice.browser, alice.space).await,
         [] as [Value; 0]
@@ -119,11 +122,11 @@ async fn trash_takes_subtree_and_restore_brings_it_back() {
         .put_mmd(&first.id, "Autre\n")
         .await
         .assert_status(StatusCode::NO_CONTENT);
-    // Restaurer une page qui n'est pas à la corbeille est sans effet.
+    // Restaurer une page qui n'est pas à la corbeille est sans effet, version comprise.
     restore(&alice.browser, &page.id)
         .await
         .assert_status(StatusCode::OK);
-    assert_eq!(alice.tree().await, before);
+    assert_eq!(alice.tree().await, back);
 }
 
 /// Restaurer une page dont un ancêtre est à la corbeille est refusé : on restaure l'ancêtre.

@@ -41,7 +41,7 @@ beforeEach(() => {
   vi.mocked(getPage).mockImplementation(() => new Promise(() => {}));
   vi.mocked(getTree).mockReset();
   vi.mocked(getTree).mockImplementation(
-    async (spaceId): Promise<Tree> => ({ spaceId, nodes: [...server] }),
+    async (spaceId): Promise<Tree> => ({ spaceId, lsn: 0, nodes: [...server] }),
   );
 });
 
@@ -381,7 +381,7 @@ test("page_reread_with_another_level_updates_its_row_and_reloads_the_tree", asyn
   expect(treeReads()).toBeGreaterThan(reads);
   // L'arbre relu arrive : les sous-pages ont suivi.
   const after = [lowered, { ...child, level: "read" as const }, page("b")];
-  await settle(() => reread.resolve({ spaceId: "space", nodes: after }));
+  await settle(() => reread.resolve({ spaceId: "space", lsn: 0, nodes: after }));
   expect(app.current.nodes).toEqual(after);
 });
 

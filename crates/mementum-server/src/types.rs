@@ -51,6 +51,12 @@ pub struct PageNode {
 #[serde(rename_all = "camelCase")]
 pub struct Tree {
     pub space_id: String,
+    /// La version de l'espace (`spaces.lsn`), lue avant les droits et les pages : l'arbre est
+    /// au moins aussi récent qu'elle (Ruling R141). Le client la compare aux trames du canal de
+    /// l'espace (`/events/{spaceId}`) : au pire il relit une fois de trop, jamais il ne manque
+    /// un changement.
+    #[ts(type = "number")]
+    pub lsn: i64,
     pub nodes: Vec<PageNode>,
 }
 

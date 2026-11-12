@@ -642,8 +642,9 @@ async fn tree_shows_only_readable_nodes_with_sections() {
         [row("Partagée avec Gina", None, "comment", "shared")]
     );
 
-    // La forme : `spaceId` et `nodes` (plus de `vaultId`) ; chaque nœud avec ses champs ; triés
-    // par `(parentId, position)`, la racine d'abord.
+    // La forme : `spaceId`, `lsn` (la version de l'espace, Ruling R141) et `nodes` (plus de
+    // `vaultId`) ; chaque nœud avec ses champs ; triés par `(parentId, position)`, la racine
+    // d'abord.
     let uri = format!("/api/v1/spaces/{}/tree", team.space);
     let tree = team.mona.browser.get(&uri).await.json();
     let keys = |value: &Value| {
@@ -656,7 +657,7 @@ async fn tree_shows_only_readable_nodes_with_sections() {
         keys.sort();
         keys
     };
-    assert_eq!(keys(&tree), ["nodes", "spaceId"]);
+    assert_eq!(keys(&tree), ["lsn", "nodes", "spaceId"]);
     let nodes = tree["nodes"].as_array().expect("une liste");
     for node in nodes {
         assert_eq!(

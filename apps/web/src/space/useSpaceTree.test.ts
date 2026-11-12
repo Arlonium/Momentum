@@ -22,7 +22,7 @@ vi.mock("../api", async (original) => ({
 /** Les lectures de l'arbre, dans l'ordre : le test tient ou rompt chacune. */
 let reads: { spaceId: string; answer: Deferred<Tree> }[] = [];
 const answer = (index: number, spaceId: string, nodes: PageNode[]) =>
-  settle(() => reads[index].answer.resolve({ spaceId, nodes }));
+  settle(() => reads[index].answer.resolve({ spaceId, lsn: 0, nodes }));
 
 const onSessionLost = vi.fn();
 const onGone = vi.fn();

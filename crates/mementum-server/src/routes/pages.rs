@@ -86,13 +86,24 @@ const MARKDOWN: &str = "text/markdown; charset=utf-8";
 const MOVE_RETRIES: usize = 3;
 
 /// `GET /api/v1/spaces/{id}/tree` : les pages de l'espace que la personne voit, hors
-/// corbeille, chacune avec son niveau et sa section.
+/// corbeille, chacune avec son niveau et sa section, et la version de l'espace.
+///
+/// La version est lue **avant** les droits et les pages (Ruling R141) : une écriture qui passe
+/// entre les lectures donne un arbre plus récent que sa version, jamais l'inverse. Lue après,
+/// elle pourrait dater d'un changement que l'arbre ne montre pas, et le client, qui la compare
+/// au canal de l'espace, ne le relirait pas. Elle ne sort qu'avec l'arbre : sans rôle, la
+/// réponse est celle d'un espace introuvable.
 pub(crate) async fn tree(
     State(state): State<AppState>,
     user: AuthUser,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Tree>, ApiError> {
     let space_id = space_id(path)?;
+    let lsn = state
+        .store
+        .space_lsn(space_id)
+        .await?
+        .ok_or_else(ApiError::space_not_found)?;
     let access = state.space_access(&user, space_id).await?;
     let nodes = state.store.list_nodes(space_id).await?;
     let mut nodes: Vec<PageNode> = nodes
@@ -109,6 +120,7 @@ pub(crate) async fn tree(
     });
     Ok(Json(Tree {
         space_id: space_id.to_string(),
+        lsn,
         nodes,
     }))
 }
