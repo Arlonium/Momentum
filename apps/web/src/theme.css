@@ -2158,10 +2158,22 @@ button.tree-toggle:hover {
   margin-left: 26px;
 }
 
+/* Le pied d'un message : ses réactions, ses actions à droite, puis le choix des réactions. */
+.mm-comment-foot {
+  margin: 6px 0 0 26px;
+}
+
+.mm-comment-foot-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
 .mm-comment-actions {
   display: flex;
   gap: 2px;
-  margin: 2px 0 0 18px;
+  margin-left: auto;
 }
 
 .mm-comment-actions .mm-button-quiet:hover {
@@ -2178,10 +2190,6 @@ button.tree-toggle:hover {
 .mm-thread .mm-form-error,
 .mm-composer .mm-form-error {
   margin: 8px 0 0;
-}
-
-.mm-reactions-row {
-  margin: 6px 0 0 26px;
 }
 
 .mm-reactions {

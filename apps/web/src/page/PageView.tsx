@@ -244,22 +244,16 @@ export function PageView({
           ref={commentsButton}
           type="button"
           className="mm-button mm-comments-button"
+          // Le nombre, en toutes lettres pour les lecteurs d'écran ; le nom commence par ce
+          // qui se lit sur le bouton.
+          aria-label={count === null ? undefined : `Commentaires, ${openThreadsText(count)}`}
           aria-expanded={panelOpen}
           aria-controls={panelOpen ? panelId : undefined}
           onClick={() => (panelOpen ? closePanel() : openPanel(null))}
         >
           <CommentIcon />
           <span>Commentaires</span>
-          {count !== null && count > 0 && (
-            <span className="mm-count" aria-hidden="true">
-              {count}
-            </span>
-          )}
-          {count !== null && (
-            <span className="mm-visually-hidden">
-              , {openThreadsText(count)}
-            </span>
-          )}
+          {count !== null && count > 0 && <span className="mm-count">{count}</span>}
         </button>
         {/* Les accès ne se voient et ne se changent qu'avec l'accès complet, et rien ne s'y
             change à la corbeille, ni depuis un onglet qui n'écrit plus (R35). */}

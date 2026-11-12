@@ -13,7 +13,7 @@
 // sort pas). Les six réactions proposées sont des constantes exactes ; une réaction qu'un autre
 // client a posée s'affiche telle quelle, et se pose ou se retire comme les autres.
 import type { Comment, Thread } from "@mementum/protocol";
-import { useState, type MouseEvent } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { isSessionLost } from "../api";
 import { ReactIcon } from "../icons";
 import { inkOn } from "../page/avatarInk";
@@ -143,32 +143,33 @@ export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments
               onToggle={(emoji, on) =>
                 void run(() => comments.react(thread.id, comment.id, emoji, on))
               }
-            />
-            {editing !== comment.id &&
-              (canEditMessage(rights, comment) || canDeleteMessage(rights, comment)) && (
-                <div className="mm-comment-actions">
-                  {canEditMessage(rights, comment) && (
-                    <button
-                      type="button"
-                      className="mm-button mm-button-quiet"
-                      aria-label="Modifier ce message"
-                      onClick={() => setEditing(comment.id)}
-                    >
-                      Modifier
-                    </button>
-                  )}
-                  {canDeleteMessage(rights, comment) && (
-                    <button
-                      type="button"
-                      className="mm-button mm-button-quiet"
-                      aria-label="Supprimer ce message"
-                      onClick={() => setDeleting(comment)}
-                    >
-                      Supprimer
-                    </button>
-                  )}
-                </div>
-              )}
+            >
+              {editing !== comment.id &&
+                (canEditMessage(rights, comment) || canDeleteMessage(rights, comment)) && (
+                  <div className="mm-comment-actions">
+                    {canEditMessage(rights, comment) && (
+                      <button
+                        type="button"
+                        className="mm-button mm-button-quiet"
+                        aria-label="Modifier ce message"
+                        onClick={() => setEditing(comment.id)}
+                      >
+                        Modifier
+                      </button>
+                    )}
+                    {canDeleteMessage(rights, comment) && (
+                      <button
+                        type="button"
+                        className="mm-button mm-button-quiet"
+                        aria-label="Supprimer ce message"
+                        onClick={() => setDeleting(comment)}
+                      >
+                        Supprimer
+                      </button>
+                    )}
+                  </div>
+                )}
+            </Reactions>
           </li>
         ))}
       </ul>
@@ -273,66 +274,77 @@ type ReactionsProps = {
   /** Les réactions se posent et se retirent d'ici ; sinon, elles se lisent seulement. */
   canReact: boolean;
   onToggle: (emoji: string, on: boolean) => void;
+  /** Les actions du message (« Modifier », « Supprimer »), sur la même ligne. */
+  children?: ReactNode;
 };
 
-/** Les réactions d'un message ; pour qui peut réagir, le choix des six. */
-function Reactions({ comment, selfId, canReact, onToggle }: ReactionsProps) {
+/**
+ * Le pied d'un message : ses réactions, ses actions à droite, et dessous, pour qui peut réagir,
+ * le choix des six.
+ */
+function Reactions({ comment, selfId, canReact, onToggle, children }: ReactionsProps) {
   const [picking, setPicking] = useState(false);
   const shown = comment.reactions.filter((reaction) => reaction.users.length > 0);
-  if (shown.length === 0 && !canReact) return null;
+  const hasActions = children !== undefined && children !== null && children !== false;
+  if (shown.length === 0 && !canReact && !hasActions) return null;
   const mineOf = (emoji: string) =>
     comment.reactions.some((r) => r.emoji === emoji && r.users.some((u) => u.id === selfId));
   return (
-    <div className="mm-reactions-row">
-      <ul className="mm-reactions" aria-label="Réactions">
-        {shown.map((reaction) => {
-          const mine = reaction.users.some((user) => user.id === selfId);
-          const count = reaction.users.length;
-          // Les noms en infobulle : un attribut de texte, jamais de style.
-          const names = reaction.users.map((user) => user.name).join(", ");
-          const content = (
-            <>
-              <span className="mm-reaction-emoji mm-isolate" dir="auto">
-                {reaction.emoji}
-              </span>
-              <span className="mm-reaction-count">{count}</span>
-            </>
-          );
-          return (
-            <li key={reaction.emoji}>
-              {canReact ? (
+    <div className="mm-comment-foot">
+      <div className="mm-comment-foot-row">
+        {(shown.length > 0 || canReact) && (
+          <ul className="mm-reactions" aria-label="Réactions">
+            {shown.map((reaction) => {
+              const mine = reaction.users.some((user) => user.id === selfId);
+              const count = reaction.users.length;
+              // Les noms en infobulle : un attribut de texte, jamais de style.
+              const names = reaction.users.map((user) => user.name).join(", ");
+              const content = (
+                <>
+                  <span className="mm-reaction-emoji mm-isolate" dir="auto">
+                    {reaction.emoji}
+                  </span>
+                  <span className="mm-reaction-count">{count}</span>
+                </>
+              );
+              return (
+                <li key={reaction.emoji}>
+                  {canReact ? (
+                    <button
+                      type="button"
+                      className="mm-reaction"
+                      aria-pressed={mine}
+                      aria-label={`${reaction.emoji} ${count}${mine ? ", dont toi" : ""}`}
+                      title={names}
+                      onClick={() => onToggle(reaction.emoji, !mine)}
+                    >
+                      {content}
+                    </button>
+                  ) : (
+                    <span className="mm-reaction" title={names}>
+                      {content}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+            {canReact && (
+              <li>
                 <button
                   type="button"
-                  className="mm-reaction"
-                  aria-pressed={mine}
-                  aria-label={`${reaction.emoji} ${count}${mine ? ", dont toi" : ""}`}
-                  title={names}
-                  onClick={() => onToggle(reaction.emoji, !mine)}
+                  className="mm-reaction mm-reaction-add"
+                  aria-label="Ajouter une réaction"
+                  aria-expanded={picking}
+                  onClick={() => setPicking((was) => !was)}
                 >
-                  {content}
+                  <ReactIcon />
                 </button>
-              ) : (
-                <span className="mm-reaction" title={names}>
-                  {content}
-                </span>
-              )}
-            </li>
-          );
-        })}
-        {canReact && (
-          <li>
-            <button
-              type="button"
-              className="mm-reaction mm-reaction-add"
-              aria-label="Ajouter une réaction"
-              aria-expanded={picking}
-              onClick={() => setPicking((was) => !was)}
-            >
-              <ReactIcon />
-            </button>
-          </li>
+              </li>
+            )}
+          </ul>
         )}
-      </ul>
+        {children}
+      </div>
       {canReact && picking && (
         <div className="mm-reaction-picker" role="group" aria-label="Choisir une réaction">
           {REACTIONS.map((emoji) => {
