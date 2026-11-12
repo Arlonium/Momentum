@@ -58,7 +58,7 @@ Rien de ceci ne se décide à sa place.
    - un invité en accès complet peut inviter à son tour (R86) ;
    - un simple membre peut fermer une page d'équipe aux autres, après confirmation (R122, R127).
 3. **D'autres choix déjà pris, à confirmer** : le menu du compte dans le sélecteur d'espace (R80), une page sortie à la racine garde son accès d'équipe (R94), la barre latérale relue au retour sur l'onglet et toutes les dix secondes, et non en direct (R97, R128), une session de 30 jours au plus dans un navigateur (R117), les plafonds contre la surcharge reportés au lot 7 (R121), et deux décisions du lot 1 : `PUT /mmd` refuse une propriété inconnue (R41), deux avis de sécurité ouverts sans mise à jour possible (R44).
-4. **Pousser** : `main` a été poussé le 2026-11-12 à la demande de Lenny, lot en cours. Cet accord vaut pour cette poussée ; la suivante se demande de nouveau.
+4. **Pousser** : `main` a été poussé le 2026-11-12 à la demande de Lenny, lot en cours ; il a ajouté le même jour que les commits du lot 3 se poussent au fil du travail, sans redemander (« les commits tu peux les push seul »). Cet accord vaut pour l'exécution du lot 3, tant que l'état poussé tient (format, clippy, tests) et que ce document et le fichier d'avancement disent où on en est.
 
 Les espaces façon Notion, à la place des coffres façon Obsidian, sont confirmés par Lenny (2026-11-10).
 
@@ -182,6 +182,6 @@ Alex fait tourner une instance sur son poste pour regarder l'application et fair
 Elles sont dans [`CLAUDE.md`](../CLAUDE.md). Les quatre qui comptent le plus :
 
 - **Aucune ligne d'attribution d'outil** dans les commits ni les pull requests (ni `Co-Authored-By`, ni mention d'un assistant).
-- **Ne rien pousser sans une demande explicite** d'Alex ou de Lenny. Un accord donné pour une poussée ne vaut pas pour la suivante.
+- **Ne rien pousser sans une demande explicite** d'Alex ou de Lenny. Un accord donné pour un lot ne vaut pas pour le suivant. Pour le lot 3, Lenny a donné cet accord le 2026-11-12 : ses commits se poussent au fil du travail. Jamais de poussée forcée.
 - **Aucun secret** dans le dépôt, les journaux, la documentation.
 - **Tout sur `main`** : pas de branche durable. Les worktrees sont des ateliers, leurs commits sont repris sur `main`.
