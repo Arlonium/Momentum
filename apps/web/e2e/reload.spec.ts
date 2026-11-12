@@ -345,7 +345,8 @@ test("page_created_by_someone_else_appears_without_returning_to_the_tab", async 
   });
 
   // A crée une page dans « Espace ». B ne touche à rien : elle apparaît dans sa barre latérale
-  // en moins de quinze secondes (l'arbre est relu toutes les dix secondes, Ruling R128).
+  // en moins de quinze secondes (le canal de l'espace la pousse, R133 ; le minuteur de dix
+  // secondes, R128, ne sert que de repli).
   const before = new URL(a.url()).pathname;
   await sectionOf(a, "Espace")
     .getByRole("button", { name: "Ajouter une page dans « Espace »" })
