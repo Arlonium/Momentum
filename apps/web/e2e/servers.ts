@@ -123,11 +123,28 @@ export function defaultStorageState(): string {
 type WebServer = Exclude<NonNullable<PlaywrightTestConfig["webServer"]>, unknown[]>;
 
 /**
+ * Intervalle des versions d'une page pour la suite ordinaire (secondes) : une écriture qui suit
+ * de plus d'une seconde la première écriture non versionnée coupe une version (R135).
+ */
+export const E2E_VERSION_EVERY_SECS = 1;
+
+type ApiServerOptions = {
+  /** Compilé en release (les budgets, Ruling R38) plutôt qu'en debug. */
+  release: boolean;
+  /**
+   * Intervalle des versions d'une page (`MEMENTUM_VERSION_EVERY_SECS`, R135), en secondes.
+   * Absent : le réglage par défaut du serveur (dix minutes), celui des budgets, mesurés sur ce
+   * que les gens utiliseront (Ruling R144).
+   */
+  versionEverySecs?: number;
+};
+
+/**
  * Le serveur Mementum des tests, sur le dossier de données de cette exécution : compilé en
  * debug pour la suite ordinaire, en release pour les budgets (`release`, Ruling R38).
  * Inscriptions ouvertes (`MEMENTUM_SIGNUP=open`) : chaque test crée ses comptes.
  */
-export function apiServer({ release }: { release: boolean }): WebServer {
+export function apiServer({ release, versionEverySecs }: ApiServerOptions): WebServer {
   const dataDir = join(prepareServers(), "data");
   return {
     // La première compilation (en release surtout) peut être longue : délai généreux.
@@ -138,6 +155,12 @@ export function apiServer({ release }: { release: boolean }): WebServer {
     timeout: 900_000,
     stdout: "ignore",
     stderr: "pipe",
-    env: { ...env, MEMENTUM_SIGNUP: "open" },
+    env: {
+      ...env,
+      MEMENTUM_SIGNUP: "open",
+      ...(versionEverySecs === undefined
+        ? {}
+        : { MEMENTUM_VERSION_EVERY_SECS: String(versionEverySecs) }),
+    },
   };
 }

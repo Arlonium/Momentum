@@ -8,7 +8,15 @@
 // sur un build de production et un serveur `--release` (`playwright.budgets.config.ts`,
 // Ruling R38).
 import { defineConfig } from "@playwright/test";
-import { apiServer, BASE_URL, defaultStorageState, env, WEB, WEB_PORT } from "./e2e/servers";
+import {
+  apiServer,
+  BASE_URL,
+  defaultStorageState,
+  E2E_VERSION_EVERY_SECS,
+  env,
+  WEB,
+  WEB_PORT,
+} from "./e2e/servers";
 
 export default defineConfig({
   testDir: "./e2e",
@@ -28,7 +36,9 @@ export default defineConfig({
     trace: "off",
   },
   webServer: [
-    apiServer({ release: false }),
+    // Une version de page après une seconde d'écritures (R135), au lieu de dix minutes : les
+    // e2e de l'historique en voient une sans attendre. Pas les budgets (Ruling R144).
+    apiServer({ release: false, versionEverySecs: E2E_VERSION_EVERY_SECS }),
     {
       command: `node node_modules/vite/bin/vite.js --port ${WEB_PORT} --strictPort`,
       cwd: WEB,
