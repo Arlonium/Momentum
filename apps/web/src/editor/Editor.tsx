@@ -31,6 +31,7 @@ import * as Y from "yjs";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug } from "./debug";
 import { fixtureInput, replaceNewPage } from "./fixtures";
+import { guardedAwareness } from "./presenceGuard";
 import { schema } from "./schema";
 
 type Props = {
@@ -49,8 +50,13 @@ export function Editor({ session, fixture = null }: Props) {
       collaboration: {
         fragment: session.doc.getXmlFragment(FRAGMENT),
         user: session.user,
-        // En lecture seule, ni curseur ni présence : l'onglet ne fait que lire.
-        provider: session.readOnly ? undefined : session.provider,
+        // En lecture seule, ni curseur ni présence : l'onglet ne fait que lire. Sinon,
+        // l'éditeur ne lit des autres que les états de présence en règle : un curseur mal
+        // formé lève une exception dans y-prosemirror, et l'éditeur n'affiche alors plus ce
+        // qu'écrivent les autres (`presenceGuard.ts`).
+        provider: session.readOnly
+          ? undefined
+          : { awareness: guardedAwareness(session.provider.awareness) },
         showCursorLabels: "activity",
       },
     }),

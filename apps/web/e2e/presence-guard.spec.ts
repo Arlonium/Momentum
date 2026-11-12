@@ -10,6 +10,9 @@
 // Ces tests parlent au serveur par une WebSocket brute, avec la session d'un compte, comme le
 // ferait un client écrit pour l'occasion ; ce qu'ils vérifient se lit dans les navigateurs de
 // deux personnes qui ont la page ouverte et qui écrivent.
+//
+// Le navigateur a aussi sa propre garde (`src/editor/presenceGuard.ts`) : le premier test lui
+// fait recevoir un état mal formé sans passer par le serveur.
 import { expect, test, type APIRequestContext, type Browser, type Page } from "@playwright/test";
 // Le type de `window.__mementum`.
 import type {} from "../src/editor/debug";
@@ -207,6 +210,45 @@ async function editorsStillWork(scene: Awaited<ReturnType<typeof twoWriters>>): 
     expect.soft(mmd, `« ${text} » sur le serveur`).toContain(text);
   }
 }
+
+/**
+ * Fait recevoir `bytes` à l'onglet `p`, comme si le serveur les lui avait envoyés : le message
+ * est donné à y-websocket, sans passer par le serveur ni par ses règles. Dans une tâche à
+ * part, comme un vrai message : une exception levée en le traitant est alors une erreur de la
+ * page, pas un rejet de cet appel.
+ */
+async function receiveFromServer(p: Page, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
+  await p.evaluate((numbers) => {
+    const socket = window.__mementum!.provider.ws!;
+    const data = Uint8Array.from(numbers).buffer;
+    setTimeout(() => socket.onmessage!({ data } as MessageEvent), 0);
+  }, [...bytes]);
+}
+
+test("malformed_presence_that_reaches_a_browser_is_not_rendered", async ({ browser }) => {
+  // Le serveur ne relaie plus un état mal formé (les deux tests suivants). Ici, c'est le
+  // navigateur seul qui est mis à l'épreuve : un serveur plus ancien, ou une règle du serveur
+  // qui lirait un état autrement que le client, et l'état lui arrive quand même.
+  const scene = await twoWriters(browser, "invitée en lecture");
+  const user = { name: "Olga", color: "#B4462B" };
+  const forged = presence([
+    // Une couleur piégée, avec un curseur valide : il serait affiché, et la couleur posée
+    // telle quelle dans un attribut `style`.
+    entry(720_001, 1, { user: { name: "Olga", color: TRAPPED_COLOUR }, cursor: VALID_CURSOR }),
+    // Un curseur mal formé : sa lecture lève une exception dans y-prosemirror.
+    entry(720_002, 1, { user, cursor: { anchor: 7, head: 7 } }),
+    // Un `user` qui n'est pas un objet : y-prosemirror y écrit une couleur par défaut.
+    entry(720_003, 1, { user: "Olga", cursor: VALID_CURSOR }),
+    // Et un état en règle : lui s'affiche.
+    entry(720_004, 1, { user: { name: "Ève", color: EVE_COLOUR }, cursor: VALID_CURSOR }),
+  ]);
+  for (const p of [scene.monaPage, scene.tomPage]) await receiveFromServer(p, forged);
+
+  await editorsStillWork(scene);
+  for (const p of [scene.monaPage, scene.tomPage]) {
+    await expect(p.locator(`.bn-collaboration-cursor__caret[style*="${EVE_COLOUR}"]`)).toHaveCount(1);
+  }
+});
 
 test("presence_of_a_reader_reaches_no_editor", async ({ browser, baseURL }) => {
   // Gina, invitée en lecture sur la page.
