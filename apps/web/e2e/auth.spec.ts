@@ -383,12 +383,8 @@ test("login_as_someone_else_over_the_open_page_starts_afresh", async ({ browser 
 
   // La session d'A prend fin, puis la synchro se reconnecte. La relecture de la page est
   // retenue, le temps qu'A écrive encore : dans la page, puis dans son titre.
-  // La lecture de l'arbre est retenue aussi : sinon la barre latérale, qui se relit seule,
-  // pourrait demander la connexion avant que le titre soit refusé, et sa fenêtre recouvrirait
-  // la page où A écrit.
   await p.context().clearCookies();
   const reads = await holdPageReads(p, shared.id);
-  const tree = await holdTreeReads(p);
   await p.evaluate(() => {
     const { provider } = window.__mementum!;
     provider.disconnect();
@@ -402,7 +398,6 @@ test("login_as_someone_else_over_the_open_page_starts_afresh", async ({ browser 
   // Le titre est refusé : la connexion est demandée par-dessus la page, où tout cela attend.
   await expect(dialog).toBeVisible();
   reads.release();
-  tree.release();
   await expect(dialog.getByLabel("Adresse e-mail")).toHaveValue(alice.email);
 
   // C'est B qui se connecte. L'écran est le sien, avec la page telle que le serveur l'a.

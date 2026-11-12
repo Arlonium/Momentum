@@ -1,6 +1,6 @@
 // Qui regarde la page : les avatars de la barre du haut (liste des présents du serveur, R136),
 // le nom d'un curseur, et le retour de la présence après une coupure.
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Browser, type Locator, type Page } from "@playwright/test";
 // Le type de `window.__mementum`.
 import type {} from "../src/editor/debug";
 import {
@@ -12,9 +12,11 @@ import {
   holdPageReads,
   memberOf,
   openPage,
+  newUser,
   ownerAndMember,
   setPageLevel,
   unique,
+  waitSynced,
   type Account,
 } from "./helpers";
 import { rawSync, varUint } from "./raw-sync";
@@ -29,11 +31,17 @@ function avatars(p: Page): Locator {
 /** Ce que y-websocket écrit dans la console quand il reçoit un type de message qu'il ne connaît pas. */
 const UNKNOWN_MESSAGE = "Unable to compute message";
 
-/** Les messages de la console de `p`, à partir de maintenant. */
-function consoleOf(p: Page): string[] {
+/**
+ * Ouvre la page avec la session de `account`, en écoutant la console **avant** la navigation :
+ * la première trame de page arrive pendant l'ouverture, et c'est souvent la seule.
+ */
+async function openWatched(browser: Browser, id: string, account: Account) {
+  const p = await newUser(browser, account);
   const lines: string[] = [];
   p.on("console", (message) => lines.push(message.text()));
-  return lines;
+  await p.goto(`/p/${id}`);
+  await waitSynced(p);
+  return { page: p, lines };
 }
 
 /** Une page que Mona possède, où Tom (membre) écrit. */
@@ -54,12 +62,9 @@ test("everyone_on_the_page_is_shown_in_the_top_bar", async ({ browser }) => {
   const { mona, tom, page } = await scene();
   // Gina, invitée en lecture : elle lit la page, et figure aussi dans la liste.
   const gina = await guestOf(mona, page.id, `Gina ${unique()}`, "read");
-  const monaPage = await openPage(browser, page.id, mona);
-  const monaConsole = consoleOf(monaPage);
-  const tomPage = await openPage(browser, page.id, tom);
-  const tomConsole = consoleOf(tomPage);
-  const ginaPage = await openPage(browser, page.id, gina);
-  const ginaConsole = consoleOf(ginaPage);
+  const { page: monaPage, lines: monaConsole } = await openWatched(browser, page.id, mona);
+  const { page: tomPage, lines: tomConsole } = await openWatched(browser, page.id, tom);
+  const { page: ginaPage, lines: ginaConsole } = await openWatched(browser, page.id, gina);
 
   // Mona voit Tom et Gina (« lecture »), pas elle-même.
   await expect(avatars(monaPage)).toHaveCount(2);

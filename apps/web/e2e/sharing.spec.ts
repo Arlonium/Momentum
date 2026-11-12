@@ -207,10 +207,9 @@ test("revoked_user_loses_the_page", async ({ browser }) => {
   await expect(treeRow(b, shared.id)).toBeVisible();
 
   // Les lectures de la page par l'onglet de B sont retenues : le temps de taper entre le
-  // retrait et l'écran qui l'annonce. Celles de l'arbre aussi : relu, il ne porte plus la page
-  // (ou plus son niveau), et l'écran l'annoncerait avant l'heure.
+  // retrait et l'écran qui l'annonce. Pas celles de l'arbre : une page sortie de l'arbre reste
+  // affichée tant que sa propre lecture n'a pas répondu (`useOpenPage`), et celle-ci est retenue.
   const reads = await holdPageReads(b, shared.id);
-  const tree = await holdTreeReads(b);
   // A retire l'accès de B, par le menu Partager ; une fenêtre de la page le fait confirmer.
   const menu = await openShareMenu(a);
   await expect(levelOf(menu, bruno)).toHaveValue("edit");
@@ -234,7 +233,6 @@ test("revoked_user_loses_the_page", async ({ browser }) => {
   await expect(editor).toContainText("Avant le retrait, et après");
   const released = Date.now();
   reads.release();
-  tree.release();
   // En moins de 5 s (sans compter le temps de la frappe retenue), B sait qu'il a perdu la page.
   await expect(accessLost(b)).toBeVisible({ timeout: 5_000 });
   expect(reconnecting + (Date.now() - released)).toBeLessThan(5_000);
