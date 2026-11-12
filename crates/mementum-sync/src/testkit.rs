@@ -47,7 +47,7 @@ use yrs::{
 };
 
 use crate::ws::WsBytes;
-use crate::{ConnInfo, Hub};
+use crate::{ConnInfo, Hub, MESSAGE_PAGE_EVENT};
 
 /// Origine des transactions qui appliquent ce que le serveur envoie : elles
 /// ne repartent pas vers le serveur.
@@ -60,8 +60,8 @@ const REMOTE: &str = "remote";
 /// Petit serveur axum de test : `GET /sync/{id}?schema=N` monte
 /// [`Hub::serve_connection`]. Un `schema` absent ou illisible vaut 0 ;
 /// `write=false` retire le droit d'écrire ; `actor=<uuid>` nomme le compte
-/// de la connexion ; `space=<uuid>&rev=<n>` donne l'espace et la révision
-/// à contrôler à l'inscription.
+/// de la connexion, et `name=<texte>` son nom ; `space=<uuid>&rev=<n>` donne
+/// l'espace et la révision à contrôler à l'inscription.
 pub struct TestServer {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
@@ -119,6 +119,7 @@ impl TestServer {
                 client_schema: schema,
                 can_write: true,
                 actor: None,
+                name: None,
                 space: None,
             },
         )
@@ -135,6 +136,10 @@ impl TestServer {
         }
         if let Some(actor) = conn.actor {
             url.push_str(&format!("&actor={actor}"));
+        }
+        if let Some(name) = &conn.name {
+            url.push_str("&name=");
+            url.push_str(&percent_encoded(name));
         }
         if let Some((space, rev)) = conn.space {
             url.push_str(&format!("&space={space}&rev={rev}"));
@@ -173,6 +178,7 @@ async fn sync_route(
             .unwrap_or(0),
         can_write: query.get("write").is_none_or(|w| w != "false"),
         actor: query.get("actor").and_then(|a| Uuid::parse_str(a).ok()),
+        name: query.get("name").map(|name| Arc::from(name.as_str())),
         space: query
             .get("space")
             .and_then(|s| Uuid::parse_str(s).ok())
@@ -193,6 +199,21 @@ async fn sync_route(
             }
             drop(alive);
         })
+}
+
+/// `text` dans une URL : tout ce qui n'est pas une lettre, un chiffre ou l'un de `-._~` en
+/// `%XX`, octet par octet. Un nom de test peut porter des espaces, des accents ou des caractères
+/// de contrôle.
+fn percent_encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +292,8 @@ struct Shared {
     closed: AtomicBool,
     /// Awareness locale et reçue.
     awareness: Mutex<Awareness>,
+    /// Le JSON de chaque trame de page reçue du serveur (type 100, Ruling R136), dans l'ordre.
+    page_events: Mutex<Vec<String>>,
     /// Incrémenté après chaque message traité et à la fermeture.
     changes: watch::Sender<u64>,
 }
@@ -282,6 +305,12 @@ impl Shared {
 
     fn awareness(&self) -> MutexGuard<'_, Awareness> {
         self.awareness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn page_events(&self) -> MutexGuard<'_, Vec<String>> {
+        self.page_events
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
@@ -326,6 +355,7 @@ impl Client {
             step2: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             awareness: Mutex::new(Awareness::new(doc.clone())),
+            page_events: Mutex::new(Vec::new()),
             changes: changes_tx,
         });
         let (outbox, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -535,6 +565,13 @@ impl Client {
             .filter_map(|(id, state)| Some((id.get(), state.data?.to_string())))
             .collect()
     }
+
+    /// Le JSON de chaque trame de page reçue du serveur (type 100, Ruling R136), dans l'ordre
+    /// où elles sont arrivées. Un navigateur les retire avant y-websocket ; ce client les garde
+    /// ici, sans rien en faire.
+    pub fn page_events(&self) -> Vec<String> {
+        self.shared.page_events().clone()
+    }
 }
 
 /// Un document yrs comme ceux des navigateurs (`OffsetKind::Utf16`).
@@ -599,6 +636,12 @@ fn receive(
                 if shared.awareness().apply_update(update).is_err() {
                     return false;
                 }
+            }
+            Ok(Message::Custom(MESSAGE_PAGE_EVENT, json)) => {
+                let Ok(json) = String::from_utf8(json) else {
+                    return false;
+                };
+                shared.page_events().push(json);
             }
             Ok(_) => {}
             Err(_) => return false,

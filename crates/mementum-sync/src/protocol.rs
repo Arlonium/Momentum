@@ -8,7 +8,13 @@
 //! - `1`, awareness : `varUint8Array` (mise à jour d'awareness) ;
 //! - `2`, authentification : ignorée ;
 //! - `3`, demande d'awareness : sans contenu ;
+//! - `100`, trame de page ([`MESSAGE_PAGE_EVENT`]) : le serveur seul en écrit. Reçue d'un
+//!   client, elle rend tout le message illisible, et la connexion est fermée ;
 //! - tout autre type : `varUint8Array`, ignoré (comme yrs).
+//!
+//! Le serveur écrit aussi, de lui-même, des trames de page (Ruling R136) : `100`, puis un JSON
+//! en `varUint8Array`. Elles disent aux connexions de la page qui l'a ouverte (`roster`), ou
+//! qu'il y a du neuf à relire par l'API (`comments`, `versions`).
 //!
 //! Ce qui sera confié à yrs est vérifié avant : un vecteur d'état ou une
 //! awareness qui annonce plus d'entrées que ses octets n'en contiennent, un
@@ -51,19 +57,38 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
+use serde_json::json;
+use uuid::Uuid;
 use yrs::ClientID;
 use yrs::encoding::read::{Cursor, Read};
 use yrs::encoding::write::Write;
 use yrs::sync::AwarenessUpdate;
 use yrs::sync::awareness::AwarenessUpdateEntry;
 
+use crate::PageEvent;
 use crate::presence::MAX_PRESENCE_STATE;
 
 const MSG_SYNC: u8 = 0;
 const MSG_AWARENESS: u8 = 1;
 const MSG_AUTH: u8 = 2;
 const MSG_QUERY_AWARENESS: u8 = 3;
+
+/// Type des trames de page (Ruling R136) : ce qui ne doit aller qu'aux personnes qui lisent une
+/// page passe par sa connexion de synchro, dans une trame que le serveur écrit seul. `100`, puis
+/// un JSON en UTF-8, en `varUint8Array` (sa longueur en entier variable, puis ses octets) :
+/// - `{"type":"roster","users":[{"id","name","canWrite"}]}` : qui a la page ouverte, une ligne
+///   par compte ;
+/// - `{"type":"comments"}`, `{"type":"versions"}` : relire les fils de commentaires, ou
+///   l'historique, par l'API.
+///
+/// Une connexion de synchro n'existe que pour qui peut lire la page : rien de ce qui y passe ne
+/// sort vers quelqu'un qui ne la voit pas. Le client retire ces trames avant y-websocket, qui ne
+/// les connaît pas (un client plus ancien écrit « Unable to compute message » dans sa console,
+/// sans autre effet). Un client n'en envoie jamais : reçue d'un client, la trame rend son message
+/// illisible, et sa connexion est fermée ([`decode`]).
+pub const MESSAGE_PAGE_EVENT: u8 = 100;
 
 const SYNC_STEP_1: u8 = 0;
 const SYNC_STEP_2: u8 = 1;
@@ -214,6 +239,8 @@ pub(crate) fn decode(data: &[u8], keep_presence: bool) -> Result<Decoded, Protoc
                 }
             }
             MSG_QUERY_AWARENESS => messages.push(ClientMessage::AwarenessQuery),
+            // Ruling R136 : le serveur seul en écrit. Rien de ce message n'est traité.
+            MESSAGE_PAGE_EVENT => return Err(ProtocolError),
             _ => {
                 cursor.read_buf()?;
             }
@@ -354,6 +381,52 @@ pub(crate) fn awareness(update: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(update.len() + 6);
     out.write_var(MSG_AWARENESS);
     out.write_buf(update);
+    out
+}
+
+/// Une ligne de la trame `roster` : un compte qui a la page ouverte (Ruling R143).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RosterLine {
+    /// Le compte.
+    pub(crate) id: Uuid,
+    /// Son nom, tel que le montre le serveur (`display_name`).
+    pub(crate) name: Arc<str>,
+    /// L'une de ses connexions au moins peut écrire la page.
+    pub(crate) can_write: bool,
+}
+
+/// La trame `roster` : qui a la page ouverte, une ligne par compte, dans l'ordre donné. Elle ne
+/// porte de chaque compte que son identifiant, son nom et s'il peut écrire : ni son adresse, ni
+/// rien d'autre.
+pub(crate) fn roster(lines: &[RosterLine]) -> Vec<u8> {
+    let users: Vec<serde_json::Value> = lines
+        .iter()
+        .map(|line| {
+            json!({
+                "id": line.id.to_string(),
+                "name": &*line.name,
+                "canWrite": line.can_write,
+            })
+        })
+        .collect();
+    page_frame(&json!({ "type": "roster", "users": users }))
+}
+
+/// La trame qui dit aux connexions de la page qu'il y a du neuf à relire par l'API.
+pub(crate) fn page_event(event: PageEvent) -> Vec<u8> {
+    let kind = match event {
+        PageEvent::Comments => "comments",
+        PageEvent::Versions => "versions",
+    };
+    page_frame(&json!({ "type": kind }))
+}
+
+/// Une trame de page ([`MESSAGE_PAGE_EVENT`]) qui porte `json`.
+fn page_frame(json: &serde_json::Value) -> Vec<u8> {
+    let json = json.to_string();
+    let mut out = Vec::with_capacity(json.len() + 6);
+    out.write_var(MESSAGE_PAGE_EVENT);
+    out.write_buf(json.as_bytes());
     out
 }
 
@@ -824,6 +897,78 @@ mod tests {
         assert_eq!(messages(&mixed).len(), 1);
         mixed.extend(queries(1));
         assert_eq!(decode(&mixed), Err(ProtocolError));
+    }
+
+    /// Ruling R136 : une trame de page reçue d'un client rend tout son message illisible, seule
+    /// ou derrière des messages en règle. Les autres types inconnus restent ignorés, comme
+    /// avant (et comme yrs).
+    #[test]
+    fn page_frame_from_a_client_is_illegible() {
+        let frame = Message::Custom(MESSAGE_PAGE_EVENT, br#"{"type":"comments"}"#.to_vec());
+        assert_eq!(decode(&frame.encode_v1()), Err(ProtocolError));
+        let mut behind = keepalive();
+        behind.extend(Message::AwarenessQuery.encode_v1());
+        behind.extend(frame.encode_v1());
+        assert_eq!(decode(&behind), Err(ProtocolError));
+        // Vide, ou d'une longueur qui ne tient pas : illisible tout autant.
+        assert_eq!(decode(&[MESSAGE_PAGE_EVENT, 0]), Err(ProtocolError));
+        assert_eq!(decode(&[MESSAGE_PAGE_EVENT]), Err(ProtocolError));
+        // Un autre type inconnu, lui, est sauté.
+        for kind in [4, 99, 101, 127] {
+            let other = Message::Custom(kind, vec![1, 2, 3]).encode_v1();
+            assert_eq!(messages(&other), vec![], "type {kind}");
+        }
+    }
+
+    /// Ce que le serveur écrit d'une trame de page : `100`, puis le JSON en `varUint8Array`.
+    /// yrs le lit en message inconnu (`Custom`), comme y-websocket ; et le JSON a exactement la
+    /// forme de R136, sans rien d'autre.
+    #[test]
+    fn page_frames_carry_their_json() {
+        let read = |frame: &[u8]| -> serde_json::Value {
+            assert_eq!(frame[0], 100);
+            let mut decoder = DecoderV1::from(frame);
+            let mut read: Vec<Message> = MessageReader::new(&mut decoder)
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(read.len(), 1, "un seul message");
+            match read.remove(0) {
+                Message::Custom(MESSAGE_PAGE_EVENT, json) => serde_json::from_slice(&json).unwrap(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            read(&page_event(PageEvent::Comments)),
+            json!({ "type": "comments" })
+        );
+        assert_eq!(
+            read(&page_event(PageEvent::Versions)),
+            json!({ "type": "versions" })
+        );
+        let (mona, tom) = (Uuid::now_v7(), Uuid::now_v7());
+        let lines = [
+            RosterLine {
+                id: mona,
+                name: "Mona \"M\"".into(),
+                can_write: true,
+            },
+            RosterLine {
+                id: tom,
+                name: "Tom".into(),
+                can_write: false,
+            },
+        ];
+        assert_eq!(
+            read(&roster(&lines)),
+            json!({
+                "type": "roster",
+                "users": [
+                    { "id": mona.to_string(), "name": "Mona \"M\"", "canWrite": true },
+                    { "id": tom.to_string(), "name": "Tom", "canWrite": false },
+                ],
+            })
+        );
+        assert_eq!(read(&roster(&[])), json!({ "type": "roster", "users": [] }));
     }
 
     #[test]

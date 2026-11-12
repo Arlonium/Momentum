@@ -97,6 +97,7 @@ pub fn writing_conn() -> ConnInfo {
         client_schema: SCHEMA_VERSION,
         can_write: true,
         actor: None,
+        name: None,
         space: None,
     }
 }

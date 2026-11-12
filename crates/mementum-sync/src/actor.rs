@@ -23,7 +23,7 @@
 //! impossible à charger, compaction en échec, awareness refusée, trop de
 //! mises à jour retenues) est journalisée par `tracing`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -38,8 +38,8 @@ use yrs::sync::{Awareness, AwarenessUpdate};
 use yrs::updates::encoder::Encode;
 
 use crate::hub::Hub;
-use crate::protocol::{self, ClientMessage, EMPTY_UPDATE};
-use crate::{SyncConfig, SyncError, presence};
+use crate::protocol::{self, ClientMessage, EMPTY_UPDATE, RosterLine};
+use crate::{PageEvent, SyncConfig, SyncError, presence};
 
 /// Identifiant d'une connexion, propre à l'acteur.
 pub(crate) type ConnId = u64;
@@ -76,7 +76,10 @@ const MAX_HELD_BYTES: usize = 1 << 20;
 pub(crate) struct Broadcast {
     /// Connexion d'origine, qui ne le reçoit pas ; `None` : toutes le reçoivent.
     pub(crate) from: Option<ConnId>,
-    /// Message y-websocket.
+    /// La seule connexion qui le reçoit ; `None` : toutes (moins `from`). Il passe par la
+    /// diffusion, et pas à côté, pour arriver à sa place parmi les autres messages de la page.
+    pub(crate) to: Option<ConnId>,
+    /// Message y-websocket, ou trame de page.
     pub(crate) message: Vec<u8>,
 }
 
@@ -98,14 +101,21 @@ pub(crate) enum Command {
     /// Inscrire une connexion. `writable` est faux pour un autre schéma, ou
     /// sans le droit d'écrire ; `actor` est son compte : celui à qui
     /// attribuer ses mises à jour, et celui dont `KickUser` ferme les
-    /// connexions.
+    /// connexions ; `name` est le nom de ce compte (Ruling R136).
     Join {
         writable: bool,
         actor: Option<Uuid>,
+        name: Option<Arc<str>>,
         reply: oneshot::Sender<Result<Joined, SyncError>>,
     },
+    /// La connexion a passé les contrôles de son inscription (Rulings R71,
+    /// R88) : elle entre dans la liste des présents (trame `roster`).
+    Admit { conn: ConnId },
     /// Désinscrire une connexion (envoyé par [`Membership`]).
     Leave { conn: ConnId },
+    /// Dire aux connexions de la page qu'il y a du neuf à relire par l'API
+    /// (`Hub::page_event`).
+    PageEvent { event: PageEvent },
     /// Messages d'une connexion, dans l'ordre où elle les a envoyés.
     Messages {
         conn: ConnId,
@@ -161,6 +171,8 @@ impl Command {
             // Il n'y a ni connexion à fermer ni acteur à arrêter : la réponse
             // lâchée le dit au demandeur.
             Command::Leave { .. }
+            | Command::Admit { .. }
+            | Command::PageEvent { .. }
             | Command::Kick { .. }
             | Command::KickUser { .. }
             | Command::Forget { .. } => {}
@@ -172,7 +184,9 @@ impl Command {
 pub(crate) struct Joined {
     /// Diffusion de la page, abonnée au moment de l'inscription.
     pub(crate) events: broadcast::Receiver<Event>,
-    /// Accueil : l'étape 1 du serveur et les états d'awareness connus.
+    /// Accueil : l'étape 1 du serveur et les états d'awareness connus. La liste des présents
+    /// vient juste derrière, par la diffusion, quand la connexion est admise
+    /// ([`Command::Admit`]).
     pub(crate) hello: Vec<Vec<u8>>,
     pub(crate) membership: Membership,
 }
@@ -432,6 +446,12 @@ struct Conn {
     /// Son compte : celui à qui ses mises à jour sont attribuées, et dont
     /// `Hub::kick_user` ferme les connexions.
     actor: Option<Uuid>,
+    /// Le nom de son compte, tel que le serveur le montre (`display_name`, Ruling R136) ;
+    /// `None` : sans nom (tests du hub).
+    name: Option<Arc<str>>,
+    /// Elle a passé les contrôles de son inscription ([`Command::Admit`]) : elle compte dans la
+    /// liste des présents, jusqu'à son départ.
+    listed: bool,
     /// La connexion doit se fermer (panne du store, Ruling R21, fermeture à
     /// la demande, ou l'un de ses messages refusé) : ses messages ne sont plus
     /// traités. Posé par [`Conn::close`].
@@ -448,10 +468,12 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(writable: bool, actor: Option<Uuid>) -> Conn {
+    fn new(writable: bool, actor: Option<Uuid>, name: Option<&str>) -> Conn {
         Conn {
             writable,
             actor,
+            name: name.map(|name| presence::display_name(name).into()),
+            listed: false,
             closing: false,
             clients: HashSet::new(),
             held: VecDeque::new(),
@@ -558,6 +580,9 @@ struct Actor {
     events: broadcast::Sender<Event>,
     conns: HashMap<ConnId, Conn>,
     next_conn: ConnId,
+    /// La liste des présents que la page a diffusée en dernier ([`Actor::roster_changed`]) :
+    /// celle que chaque connexion admise tient du serveur.
+    roster: Vec<RosterLine>,
 }
 
 impl Actor {
@@ -576,6 +601,7 @@ impl Actor {
             events,
             conns: HashMap::new(),
             next_conn: 0,
+            roster: Vec::new(),
         }
     }
 
@@ -618,9 +644,15 @@ impl Actor {
             Command::Join {
                 writable,
                 actor,
+                name,
                 reply,
-            } => self.join(writable, actor, reply),
+            } => self.join(writable, actor, name.as_deref(), reply),
+            Command::Admit { conn } => self.admit(conn),
             Command::Leave { conn } => self.leave(conn),
+            Command::PageEvent { event } => {
+                // À toutes les connexions de la page, lecteurs compris.
+                self.broadcast(None, protocol::page_event(event));
+            }
             Command::Messages {
                 conn,
                 messages,
@@ -673,6 +705,7 @@ impl Actor {
         &mut self,
         writable: bool,
         actor: Option<Uuid>,
+        name: Option<&str>,
         reply: oneshot::Sender<Result<Joined, SyncError>>,
     ) {
         let Some(commands) = self.id.me.upgrade() else {
@@ -681,7 +714,7 @@ impl Actor {
         };
         let conn = self.next_conn;
         self.next_conn += 1;
-        self.conns.insert(conn, Conn::new(writable, actor));
+        self.conns.insert(conn, Conn::new(writable, actor, name));
         let mut hello = vec![protocol::sync_step1(&self.page.state_vector())];
         hello.extend(self.awareness_state());
         // Si le demandeur est déjà parti, la réponse lâchée lâche `Membership`,
@@ -693,12 +726,32 @@ impl Actor {
         }));
     }
 
+    /// La connexion `conn` a passé les contrôles de son inscription : elle compte désormais dans
+    /// la liste des présents (Ruling R136). Si la liste en change, toutes les connexions admises
+    /// la reçoivent, elle comprise (abonnée à la diffusion depuis son inscription) ; sinon (un
+    /// second onglet du même compte, une connexion sans compte), elle seule la reçoit. Dans les
+    /// deux cas, elle arrive derrière son accueil, et derrière ce que la page a diffusé depuis.
+    /// Une liste vide ne s'envoie pas à qui arrive : il n'en tient aucune autre.
+    fn admit(&mut self, conn: ConnId) {
+        // Partie entre-temps, ou déjà fermée à la demande : jamais nommée.
+        let Some(c) = self.conns.get_mut(&conn).filter(|c| !c.closing) else {
+            return;
+        };
+        c.listed = true;
+        if !self.roster_changed() && !self.roster.is_empty() {
+            self.send_to(conn, protocol::roster(&self.roster));
+        }
+    }
+
     fn leave(&mut self, conn: ConnId) {
         // La connexion n'est plus inscrite : les clients d'awareness qu'elle tenait sont
         // libérés avec elle (Ruling R101), et un autre compte peut désormais les annoncer.
         let Some(gone) = self.conns.remove(&conn) else {
             return;
         };
+        if gone.listed {
+            self.roster_changed();
+        }
         // Leurs états sont retirés ; un client que tient aussi une autre connexion (du même
         // compte : l'onglet est revenu entre-temps) reste annoncé.
         //
@@ -1194,10 +1247,67 @@ impl Actor {
         }
     }
 
+    /// La liste des présents d'après les connexions admises (Rulings R136, R143) : une ligne
+    /// par compte, dans l'ordre de leurs identifiants, qui ne bouge pas quand un onglet arrive
+    /// ou part. Une connexion sans compte n'y figure pas. Un compte peut écrire si l'une de ses
+    /// connexions le peut (droit et schéma : ce qu'elle peut faire, pas ce qu'elle a demandé).
+    /// Son nom est celui de sa connexion la plus récente, lu avec la session la plus récente.
+    fn roster(&self) -> Vec<RosterLine> {
+        // Par compte : la connexion la plus récente, son nom, et le droit d'écrire.
+        let mut accounts: BTreeMap<Uuid, (ConnId, Arc<str>, bool)> = BTreeMap::new();
+        for (conn, c) in self.conns.iter().filter(|(_, c)| c.listed) {
+            let Some(account) = c.actor else { continue };
+            let name = c
+                .name
+                .clone()
+                .unwrap_or_else(|| presence::display_name("").into());
+            let line = accounts
+                .entry(account)
+                .or_insert_with(|| (*conn, name.clone(), false));
+            if *conn > line.0 {
+                (line.0, line.1) = (*conn, name);
+            }
+            line.2 |= c.writable;
+        }
+        accounts
+            .into_iter()
+            .map(|(id, (_, name, can_write))| RosterLine {
+                id,
+                name,
+                can_write,
+            })
+            .collect()
+    }
+
+    /// Diffuse la liste des présents à toutes les connexions de la page, si elle a changé
+    /// depuis la dernière diffusion. Appelé à chaque arrivée et à chaque départ, et seulement
+    /// là : une frappe ne calcule ni n'envoie rien de plus. `true` : elle a changé, et elle est
+    /// partie.
+    fn roster_changed(&mut self) -> bool {
+        let roster = self.roster();
+        if roster == self.roster {
+            return false;
+        }
+        self.roster = roster;
+        self.broadcast(None, protocol::roster(&self.roster));
+        true
+    }
+
     fn broadcast(&self, from: Option<ConnId>, message: Vec<u8>) {
         // Sans abonné, il n'y a personne à prévenir.
-        let _ = self
-            .events
-            .send(Event::Message(Arc::new(Broadcast { from, message })));
+        let _ = self.events.send(Event::Message(Arc::new(Broadcast {
+            from,
+            to: None,
+            message,
+        })));
+    }
+
+    /// Un message pour la connexion `conn` seule, à sa place dans la diffusion de la page.
+    fn send_to(&self, conn: ConnId, message: Vec<u8>) {
+        let _ = self.events.send(Event::Message(Arc::new(Broadcast {
+            from: None,
+            to: Some(conn),
+            message,
+        })));
     }
 }

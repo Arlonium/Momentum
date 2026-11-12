@@ -83,6 +83,19 @@
 //!   regardée contre chaque connexion de la page, et un client honnête, qui
 //!   renvoie en un message les états d'une page pleine, annonce le sien dans
 //!   un message à part ;
+//! - **trame de page** (Ruling R136) : ce qui ne doit aller qu'aux personnes
+//!   qui lisent une page passe par sa connexion de synchro, dans une trame que
+//!   le serveur écrit seul ([`MESSAGE_PAGE_EVENT`] : type 100, puis un JSON).
+//!   La liste des présents (`roster` : une ligne par compte, son identifiant,
+//!   son nom par [`display_name`] et s'il peut écrire, rien d'autre ; une
+//!   connexion sans compte n'y figure pas, Ruling R143) part à toutes les
+//!   connexions de la page, lecteurs compris, à chaque arrivée et à chaque
+//!   départ qui la change. Une connexion n'y entre qu'une fois passés les
+//!   contrôles de son inscription (R71, R88) : fermée avant, elle n'a été
+//!   nommée à personne. Elle reçoit la liste juste derrière son accueil.
+//!   [`Hub::page_event`] dit aux connexions d'une page vivante qu'il y a du
+//!   neuf à relire par l'API (commentaires, historique). Reçue d'un client, une
+//!   trame de page rend son message illisible : la connexion est fermée ;
 //! - **entretien** (Ruling R107) : une connexion à qui rien n'a été envoyé
 //!   depuis [`SyncConfig::keepalive_after`] reçoit une mise à jour de présence
 //!   vide, sans passer par l'acteur. Sans elle, y-websocket, qui ferme sa
@@ -123,7 +136,9 @@ use mementum_crdt::CrdtError;
 use mementum_store::StoreError;
 use yrs::{Doc, OffsetKind, Options};
 
-pub use hub::{ConnInfo, Hub};
+pub use hub::{ConnInfo, Hub, PageEvent};
+pub use presence::display_name;
+pub use protocol::MESSAGE_PAGE_EVENT;
 
 /// Réglages de la synchronisation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

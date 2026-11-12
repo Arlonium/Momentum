@@ -274,6 +274,9 @@ async fn admit(state: &AppState, user: &AuthUser, id: Uuid, schema: u32) -> Opti
             // de `PUT /mmd`.
             can_write: permit(&access, Action::Edit).is_ok(),
             actor: Some(user.id),
+            // Lu avec la session : le nom que montrent la liste des présents et la présence de
+            // la connexion, quoi que le client annonce (Ruling R136).
+            name: Some(user.name.as_str().into()),
             space: Some((space_id, rev)),
         }),
         Err(refusal) => {

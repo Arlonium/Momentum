@@ -60,7 +60,7 @@ const ASK_WAIT: Duration = Duration::from_secs(2);
 /// Rien de secret n'y entre (le type s'affiche par `Debug`) : la session
 /// reste chez l'appelant, qui la relit par le contrôle qu'il passe à
 /// [`Hub::serve_connection_if`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnInfo {
     /// Version de schéma du client. Autre que [`SCHEMA_VERSION`], la
     /// connexion est en lecture seule.
@@ -72,12 +72,27 @@ pub struct ConnInfo {
     /// sont attribuées, et [`Hub::kick_user`] la ferme avec les autres
     /// connexions de ce compte.
     pub actor: Option<Uuid>,
+    /// Le nom du compte de la connexion, lu avec sa session (`None` : sans nom,
+    /// les tests du hub). C'est lui que montrent la liste des présents (trame
+    /// `roster`) et l'état de présence de la connexion, passé par
+    /// [`display_name`](crate::display_name) (Ruling R136).
+    pub name: Option<Arc<str>>,
     /// L'espace de la page, et la valeur de `spaces.rev` que l'appelant a
     /// lue **avant** les droits dont il a tiré `can_write` (ou dans la même
     /// lecture). Si elle a bougé quand la connexion est inscrite, celle-ci
     /// est fermée aussitôt (Ruling R71, voir [`Hub::serve_connection_if`]).
     /// `None` : pas de contrôle (tests du hub).
     pub space: Option<(Uuid, i64)>,
+}
+
+/// Ce qui a changé d'une page hors de son document, et que ses lecteurs relisent
+/// par l'API ([`Hub::page_event`], Ruling R136).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageEvent {
+    /// Ses fils de commentaires.
+    Comments,
+    /// Son historique.
+    Versions,
 }
 
 /// Le registre des acteurs de page.
@@ -282,6 +297,7 @@ impl Hub {
             .call(node_id, |reply| Command::Join {
                 writable,
                 actor,
+                name: conn.name.clone(),
                 reply,
             })
             .await??;
@@ -302,6 +318,12 @@ impl Hub {
             let _ = tokio::time::timeout(CLOSE_GRACE, socket.close()).await;
             return Ok(());
         }
+        // Elle entre maintenant dans la liste des présents (trame `roster`, Ruling R136), pas à
+        // son inscription : une connexion fermée ci-dessus n'a rien reçu, et n'a pas non plus été
+        // nommée aux autres. L'acteur lit cette demande avant tout message de la connexion, et
+        // lui envoie la liste juste derrière son accueil. Une boîte fermée : la connexion le
+        // verra, l'acteur est arrêté.
+        let _ = joined.membership.commands().send(Command::Admit { conn });
         match pump(socket, joined, node_id, writable, &self.cfg).await {
             // Fin normale, à la demande, ou fermeture dont l'acteur a
             // journalisé la raison.
@@ -362,6 +384,21 @@ impl Hub {
         let live = self.live_pages().await;
         self.ask_all(&live, |reply| Command::KickUser { user, reply })
             .await;
+    }
+
+    /// Dit aux connexions de la page qu'il y a du neuf à relire par l'API : ses
+    /// commentaires, ou son historique. Toutes reçoivent la trame de page
+    /// (Ruling R136), lecteurs compris, et celles d'aucune autre page.
+    ///
+    /// Sans acteur vivant (personne n'a la page ouverte), rien n'est fait, et
+    /// aucun acteur n'est lancé : il n'y a personne à prévenir, et qui ouvrira
+    /// la page lira l'état du moment. La page n'est jamais chargée pour cela.
+    /// L'appel n'attend pas que l'acteur ait traité la demande.
+    pub fn page_event(&self, node_id: Uuid, event: PageEvent) {
+        if let Some(commands) = self.live(node_id) {
+            // Boîte fermée à l'instant : l'acteur s'arrête, ses connexions avec lui.
+            let _ = commands.send(Command::PageEvent { event });
+        }
     }
 
     /// L'appelant de [`Hub::serve_connection_if`] reconnaît-il encore la
@@ -709,7 +746,9 @@ where
                 // client qui écrit vite.
                 biased;
                 event = events.recv() => match event {
-                    Ok(Event::Message(message)) if message.from == Some(conn) => {}
+                    // Ses propres messages, ou ceux d'une autre connexion seule.
+                    Ok(Event::Message(message))
+                        if message.from == Some(conn) || message.to.is_some_and(|to| to != conn) => {}
                     Ok(Event::Message(message)) => {
                         if !outbox.push(Outgoing::Shared(message)) {
                             return End::QueueFull;

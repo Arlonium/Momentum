@@ -41,6 +41,33 @@ pub(crate) const MAX_PRESENCE_STATE: usize = 2 * 1024;
 /// Longueur maximale du nom annoncé, en caractères : celle d'un nom de compte.
 const MAX_NAME_CHARS: usize = 100;
 
+/// Le nom montré pour un compte qui n'en a pas qu'on puisse montrer ([`display_name`]).
+const NO_NAME: &str = "Sans nom";
+
+/// Le nom montré pour le compte qui s'appelle `name` (Ruling R136) : sans ses caractères de
+/// contrôle, coupé à [`MAX_NAME_CHARS`] caractères, « Sans nom » s'il n'en reste rien.
+///
+/// Le serveur l'écrit dans la liste des présents (trame `roster`) et dans l'état de présence de
+/// chaque connexion qui a un compte. Il a donc toujours la forme d'un nom que la garde du client
+/// accepte (`apps/web/src/editor/presenceGuard.ts`) : de 1 à 100 caractères, comptés comme elle
+/// les compte, par point de code (`[...name].length`), pas par octet ni par unité UTF-16 ; aucun
+/// caractère de contrôle, la catégorie Cc pour l'une comme pour l'autre (`char::is_control` ici,
+/// `\p{Cc}` là-bas). Un nom de compte est déjà borné à l'inscription, mais pas ses caractères
+/// (Ruling R119 : un nom à caractère de contrôle privait son compte de présence), et un compte
+/// créé autrement que par l'inscription n'y passe pas.
+pub fn display_name(name: &str) -> String {
+    let shown: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_NAME_CHARS)
+        .collect();
+    if shown.is_empty() {
+        NO_NAME.to_string()
+    } else {
+        shown
+    }
+}
+
 /// L'état de présence `json`, réécrit, s'il a la forme connue ; `None` sinon : trop gros,
 /// illisible, ou d'une autre forme. L'état `null` (le retrait d'un état) n'en est pas un :
 /// l'appelant le traite à part.
@@ -338,6 +365,34 @@ mod tests {
             known_shape(spaced).as_deref(),
             Some(r#"{"user":{"name":"Mona"}}"#)
         );
+    }
+
+    /// Ruling R136 : le nom montré d'un compte a toujours la forme d'un nom que le vérificateur
+    /// (et la garde du client, qui suit la même règle) accepte, quel que soit le nom du compte.
+    #[test]
+    fn display_name_always_has_the_shape_of_a_name() {
+        let long = "é".repeat(150);
+        let rockets = "🚀".repeat(101);
+        let cases: Vec<(&str, String)> = vec![
+            ("Mona", "Mona".into()),
+            ("Zoé Lefèvre", "Zoé Lefèvre".into()),
+            // Les caractères de contrôle partent, où qu'ils soient ; le reste est gardé tel quel.
+            ("Mo\u{0}na\n", "Mona".into()),
+            ("\u{7}\u{1b}[31mMona\u{7f}\u{85}", "[31mMona".into()),
+            ("  Mona  ", "  Mona  ".into()),
+            // Coupé à cent points de code, pas à cent octets.
+            (&long, "é".repeat(100)),
+            (&rockets, "🚀".repeat(100)),
+            // Rien à montrer : « Sans nom ».
+            ("", "Sans nom".into()),
+            ("\u{0}\u{1}\n\t\u{9f}", "Sans nom".into()),
+        ];
+        for (account, expected) in cases {
+            let shown = display_name(account);
+            assert_eq!(shown, expected, "{account:?}");
+            let state = serde_json::json!({ "user": { "name": shown } }).to_string();
+            assert!(known_shape(&state).is_some(), "{account:?} : {state}");
+        }
     }
 
     #[test]

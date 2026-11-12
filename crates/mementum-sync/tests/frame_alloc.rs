@@ -148,7 +148,7 @@ async fn a_megabyte_of_presence_allocates_less_than_twice_its_size() {
     let mut over = Vec::new();
     for (who, conn) in [("lecture seule", reader), ("écriture", writing_conn())] {
         for (what, message) in &messages {
-            let mut socket = connected(&f, conn).await;
+            let mut socket = connected(&f, conn.clone()).await;
             assert!(message.len() >= MEGABYTE);
             // Le message lui-même est alloué avant la mesure.
             let message = message.clone();
