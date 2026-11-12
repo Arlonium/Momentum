@@ -26,7 +26,9 @@
 //! `404`, puis `403` sous `comment` ([`permit_level`]) ; `404` pour un fil qui n'est pas de la
 //! page, puis pour un message qui n'est pas du fil ; `403` de la règle de l'auteur
 //! ([`permit_own`]) ; enfin `409 trashed`. La corbeille reste le dernier refus de droit, et
-//! toujours après celui de la page.
+//! toujours après celui de la page. La restauration d'une version suit le même ordre (Ruling
+//! R186) : `404`, `403` sous `edit`, le `404` d'une version qui n'est pas de la page (le corps
+//! d'une page introuvable), puis `409 trashed`.
 //!
 //! **Cache** : la clé est `spaces.rev`, que le store incrémente dans la transaction de toute
 //! écriture qui change une entrée du calcul des accès. Deux étages, tous deux rangés sous elle :

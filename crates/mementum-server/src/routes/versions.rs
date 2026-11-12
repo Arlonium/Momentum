@@ -8,12 +8,13 @@
 //! | `GET …/versions/{versionId}/state` | `read` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) tel qu'il a été gardé |
 //! | `POST …/versions/{versionId}/restore` | `edit` | `204` ; `409 trashed` |
 //!
-//! **Refus**, dans l'ordre des pages (`access.rs`) : `401` sans session ; `404 not_found` pour
-//! une page que la personne ne voit pas ; `403 forbidden` sous le niveau ; `409 trashed` pour
-//! une restauration dans une page à la corbeille ; enfin le `404 not_found` d'une version qui
-//! n'est pas de cette page, qui n'existe pas, ou dont l'identifiant est mal formé, **exactement
-//! la réponse d'une page introuvable** : qui ne voit pas la page n'apprend pas qu'une version
-//! existe, et qui la voit n'apprend rien des versions d'une autre.
+//! **Refus**, dans l'ordre des commentaires (Rulings R168 et R186, écrit en tête de
+//! `access.rs`) : `401` sans session ; `404 not_found` pour une page que la personne ne voit pas ;
+//! `403 forbidden` sous le niveau ; le `404 not_found` d'une version qui n'est pas de cette page,
+//! qui n'existe pas, ou dont l'identifiant est mal formé, **exactement la réponse d'une page
+//! introuvable** ; enfin `409 trashed` pour une restauration dans une page à la corbeille. Qui ne
+//! voit pas la page n'apprend pas qu'une version existe, et qui la voit n'apprend rien des
+//! versions d'une autre.
 //!
 //! **Restaurer** suit l'ordre de `PUT /mmd` (Ruling R89) : premier contrôle, chargement de la
 //! page, second contrôle des droits, puis la commande à l'acteur, qui coupe la version
@@ -36,6 +37,7 @@ use mementum_acl::Action;
 use mementum_sync::display_name;
 use uuid::Uuid;
 
+use crate::access::{permit, permit_level};
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::routes::pages::page_id;
@@ -82,9 +84,18 @@ pub(crate) async fn restore(
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<StatusCode, ApiError> {
     let (id, raw) = version_path(path)?;
-    // Premier contrôle : les refus, avant de charger la page.
-    state.node_access(&user, id, Action::Edit).await?;
+    // Premier contrôle : les refus, avant de charger la page. La version est cherchée entre le
+    // niveau et la corbeille (Ruling R186).
+    let (_, access, _) = state
+        .seen_node(&user, id)
+        .await?
+        .ok_or_else(ApiError::page_not_found)?;
+    permit_level(&access, Action::Edit)?;
     let version = version_id(&raw)?;
+    if !state.store.has_version(id, version).await? {
+        return Err(ApiError::page_not_found());
+    }
+    permit(&access, Action::Edit)?;
     // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise
     // l'écriture (Ruling R89). Entre lui et la restauration, il ne reste que l'envoi d'une
     // commande à l'acteur déjà chargé.

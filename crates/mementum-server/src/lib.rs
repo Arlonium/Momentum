@@ -44,7 +44,7 @@
 //! | `PUT`, `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}/reactions/{emoji}` | `comment` | `Comment` : la réaction de la personne posée ou retirée (on ne retire que la sienne ; déjà dans cet état, rien ne change) ; `422 invalid_emoji` |
 //! | `GET /api/v1/pages/{id}/versions` | `read` (à la corbeille aussi) | `Version[]` : les versions de la page, la plus récente d'abord, cent au plus, chacune avec sa date, sa raison (`periodic`, `closing`, `before_restore`) et les comptes qui l'ont modifiée depuis la version d'avant (identifiant et nom, jamais l'adresse) (Ruling R135) |
 //! | `GET /api/v1/pages/{id}/versions/{versionId}/state` | `read` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) de la version, tel qu'il a été gardé ; une version qui n'est pas de cette page, inconnue ou mal nommée reçoit la réponse d'une page introuvable, comme sur la route suivante |
-//! | `POST /api/v1/pages/{id}/versions/{versionId}/restore` | `edit` | `204` : une version `before_restore` garde ce qui est remplacé, puis les blocs de la version sont écrits par-dessus le contenu, identifiants compris, comme une écriture ordinaire (la version que la page a déjà comme contenu ne change rien) ; `409 trashed` ; droits revérifiés une fois la page chargée (Ruling R89) ; `500 internal` pour un état gardé illisible, la page intacte |
+//! | `POST /api/v1/pages/{id}/versions/{versionId}/restore` | `edit` | `204` : une version `before_restore` garde ce qui est remplacé si aucune version ne le garde déjà (Ruling R190), puis les blocs de la version sont écrits par-dessus le contenu, identifiants compris, comme une écriture ordinaire (la version que la page a déjà comme contenu ne change rien) ; une version qui n'est pas de la page : `404`, avant `409 trashed` (Ruling R186) ; droits revérifiés une fois la page chargée (Ruling R89) ; `500 internal` pour un état gardé illisible, la page intacte |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
 //! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
@@ -100,10 +100,13 @@
 //! versions (`mementum-sync`) : l'état complet de la page, avec les comptes qui l'ont modifiée
 //! depuis la version d'avant, avant l'écriture qui suit de `MEMENTUM_VERSION_EVERY_SECS` (dix
 //! minutes par défaut) la première écriture non versionnée, à l'arrêt de l'acteur s'il en reste
-//! (page vide, arrêt du serveur), et avant chaque restauration ; une page garde ses cent
-//! dernières. Chaque version coupée envoie la trame `{"type":"versions"}` aux connexions de
-//! synchro de la page. Les routes suivent l'ordre des refus des pages ; la version vient
-//! ensuite, et une version qui n'est pas de la page reçoit la réponse d'une page introuvable.
+//! (page vide, arrêt du serveur), et avant une restauration qui remplace ce qu'aucune version ne
+//! garde (Ruling R190) ; une page garde ses cent dernières, dont vingt `before_restore` au plus
+//! (Ruling R189). Chaque version coupée envoie la trame `{"type":"versions"}` aux connexions de
+//! synchro de la page. L'ordre des refus est celui des commentaires (Rulings R168, R186) : la
+//! page, le niveau, puis la version (une version qui n'est pas de la page reçoit la réponse
+//! d'une page introuvable), enfin la corbeille. Restaurer remplace le contenu comme `PUT /mmd` :
+//! une édition faite en même temps sur le contenu remplacé est perdue (Ruling R188).
 //! L'historique se lit dès « Peut lire ».
 //!
 //! **Comptes** (`auth.rs`, `routes/auth.rs`) : comptes locaux, mot de passe

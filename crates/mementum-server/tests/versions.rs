@@ -258,3 +258,54 @@ async fn version_interval_setting_reaches_the_hub() {
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0]["reason"], "periodic");
 }
+
+/// Ruling R186 : sur une page à la corbeille, une version qui n'est pas de cette page, inconnue
+/// ou mal nommée reçoit le `404` d'une page introuvable avant le `409 trashed`, comme le fil
+/// d'un commentaire (R168) ; une version de la page reçoit `409`. Sous le niveau, `403` passe
+/// avant les deux.
+#[tokio::test]
+async fn missing_version_comes_before_trashed() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (mona, gina) = (&team.mona, &team.gina);
+    let binned = team
+        .page(
+            None,
+            "Jetée",
+            &[members(Level::Full), user(gina, Level::Read)],
+        )
+        .await;
+    let elsewhere = team.page(None, "Ailleurs", &[members(Level::Full)]).await;
+    let ours = team
+        .store
+        .put_version(binned, 0, &state_of("Ici\n"), &[], VersionReason::Closing)
+        .await
+        .unwrap();
+    let theirs = team
+        .store
+        .put_version(elsewhere, 0, &state_of("Là\n"), &[], VersionReason::Closing)
+        .await
+        .unwrap();
+    team.trash(binned).await;
+
+    for version in [
+        theirs.to_string(),
+        Uuid::now_v7().to_string(),
+        "pas-un-uuid".into(),
+    ] {
+        let reply = mona
+            .browser
+            .post_empty(&restore_uri(binned, &version))
+            .await;
+        let body = reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+        assert_eq!(body["message"], "page introuvable", "{version}");
+        // Une lectrice : le niveau d'abord.
+        let reply = gina
+            .browser
+            .post_empty(&restore_uri(binned, &version))
+            .await;
+        reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+    }
+    let reply = mona.browser.post_empty(&restore_uri(binned, ours)).await;
+    reply.assert_error(StatusCode::CONFLICT, "trashed");
+}

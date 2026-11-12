@@ -253,6 +253,17 @@ impl Store {
         Ok(next)
     }
 
+    /// La version `id` est-elle de cette page ? Sans lire son état : pour qui doit dire un refus
+    /// avant d'en faire autre chose.
+    pub async fn has_version(&self, node_id: Uuid, id: Uuid) -> Result<bool, StoreError> {
+        let row = sqlx::query("SELECT 1 FROM doc_versions WHERE id = ? AND node_id = ?")
+            .bind(id.to_string())
+            .bind(node_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
     /// L'état gardé de la version `id`, tel qu'il a été écrit, si elle est de cette page ;
     /// `None` si elle est d'une autre page, ou n'existe pas (la même réponse).
     pub async fn get_version(
