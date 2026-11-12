@@ -23,7 +23,10 @@ type Props = {
   initial?: string;
   /** Le brouillon de cette zone : repris à l'ouverture, tenu à jour à chaque frappe. */
   draft?: { store: Drafts; key: string };
+  /** Le champ prend le focus à son montage : seulement sur un geste de la personne. */
   autoFocus?: boolean;
+  /** Le champ a pris le focus à son montage : le geste qui l'a demandé est consommé. */
+  onAutoFocused?: () => void;
   /** Envoie le texte ; rejette avec l'erreur du serveur s'il refuse. */
   onSubmit: (body: string) => Promise<void>;
   /** Donné : un bouton « Annuler » referme la zone. */
@@ -39,6 +42,7 @@ export function Composer({
   initial = "",
   draft,
   autoFocus = false,
+  onAutoFocused,
   onSubmit,
   onCancel,
   clearOnSent = true,
@@ -64,6 +68,8 @@ export function Composer({
     element?.focus();
     // Un message qu'on modifie : le curseur à la fin du texte.
     element?.setSelectionRange(element.value.length, element.value.length);
+    // Le geste ne vaut que pour ce montage-ci : un montage plus tard ne prendra pas le focus.
+    onAutoFocused?.();
   }, [autoFocus]);
 
   const empty = text.trim() === "";

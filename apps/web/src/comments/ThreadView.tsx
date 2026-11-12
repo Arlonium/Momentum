@@ -77,11 +77,12 @@ export function ThreadView({
   onFocusMove,
 }: Props) {
   // Une réponse ou une modification qui a un brouillon reprend où elle en était, sans prendre
-  // le focus : un champ ne le prend que sur un geste (« Répondre », « Modifier »). Le fil est
-  // recréé quand il change de liste, sur un rendu venu du réseau ou de l'éditeur : le focus
-  // reste où la personne tape.
-  const [replying, setReplying] = useState<"gesture" | "draft" | null>(() =>
-    drafts.has(DRAFT.reply(thread.id)) ? "draft" : null,
+  // le focus : un champ ne le prend que sur un geste (« Répondre », « Modifier »), et seulement
+  // au montage que ce geste a provoqué (« gesture » devient « open » dès que le champ a pris le
+  // focus). Le fil est recréé quand il change de liste, et le champ remonté quand le droit
+  // d'écrire revient : le focus reste où la personne tape.
+  const [replying, setReplying] = useState<"gesture" | "open" | null>(() =>
+    drafts.has(DRAFT.reply(thread.id)) ? "open" : null,
   );
   const [editing, setEditing] = useState<{ id: string; gesture: boolean } | null>(() => {
     const drafted = thread.comments.find((c) => drafts.has(DRAFT.edit(c.id)));
@@ -164,6 +165,9 @@ export function ThreadView({
                 initial={comment.body}
                 draft={{ store: drafts, key: DRAFT.edit(comment.id) }}
                 autoFocus={editing.gesture}
+                onAutoFocused={() =>
+                  setEditing((current) => current && { ...current, gesture: false })
+                }
                 clearOnSent={false}
                 onSubmit={async (body) => {
                   await comments.edit(thread.id, comment.id, body);
@@ -260,6 +264,7 @@ export function ThreadView({
           submitName="Envoyer la réponse"
           draft={{ store: drafts, key: DRAFT.reply(thread.id) }}
           autoFocus={replying === "gesture"}
+          onAutoFocused={() => setReplying((current) => (current === "gesture" ? "open" : current))}
           onSubmit={async (body) => {
             await comments.reply(thread.id, body);
             setReplying(null);

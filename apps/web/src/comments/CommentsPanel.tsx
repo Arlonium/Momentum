@@ -170,7 +170,11 @@ export function CommentsPanel({
 
   /** L'élément du panneau qui a le focus, tant qu'aucun geste ne l'a emmené ailleurs. */
   const focused = useRef<HTMLElement | null>(null);
-  /** Où le filet (plus bas) a mis le focus, tant que rien d'autre ne l'a pris. */
+  /**
+   * Où le filet (plus bas) a mis le focus faute de mieux (un fil, le titre), tant que rien
+   * d'autre ne l'a pris : une demande plus précise peut l'y reprendre. Jamais un champ où l'on
+   * tape : une demande née d'une action passée ne prend pas le focus à qui écrit.
+   */
   const caught = useRef<HTMLElement | null>(null);
 
   /**
@@ -231,7 +235,8 @@ export function CommentsPanel({
       const at = lost instanceof HTMLTextAreaElement ? lost.selectionEnd : same.value.length;
       same.focus();
       same.setSelectionRange(at, at);
-      caught.current = same;
+      // La personne tapait là : ce n'est pas un repli, rien ne le lui reprend.
+      caught.current = null;
       return;
     }
     const threadId = lost.closest("[data-thread-id]")?.getAttribute("data-thread-id");

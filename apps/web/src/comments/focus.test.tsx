@@ -2,12 +2,12 @@
 // annulée, message modifié ou non, réaction choisie, fil résolu, message supprimé), l'élément qui
 // l'avait peut avoir quitté la page ; le focus va alors à un élément qui est encore là et qui a du
 // sens, jamais à `body`, et Échap ferme toujours le panneau.
-import type { Thread } from "@mementum/protocol";
-import { act } from "react";
+import type { Level, Thread } from "@mementum/protocol";
+import { act, useMemo } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { author, message, thread, useMemoryComments } from "../test/comments";
-import "../test/hooks";
+import { deferred } from "../test/hooks";
 import { CommentsPanel } from "./CommentsPanel";
 import { createDrafts, DRAFT, type Drafts } from "./drafts";
 
@@ -362,4 +362,94 @@ test("typing_in_a_reply_that_changes_list_keeps_the_focus_in_it", async () => {
   const field = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Répondre au fil"]')!;
   expect(field.value).toBe("je tape");
   expect(document.activeElement).toBe(field);
+});
+
+// Une demande de focus née d'une action passée (une requête qui aboutit) ne prend jamais le focus
+// à un champ où la personne est en train de taper.
+
+function Slow({
+  order,
+  absent,
+  level,
+  initial,
+  drafts,
+  reaction,
+}: {
+  order: string[];
+  absent: string[];
+  level: Level;
+  initial: Thread[];
+  drafts: Drafts;
+  reaction: Promise<void>;
+}) {
+  const base = useMemoryComments(initial);
+  const comments = useMemo(
+    () => ({ ...base, react: async () => (await reaction, message("m")) }),
+    [base, reaction],
+  );
+  return (
+    <CommentsPanel
+      id="panneau"
+      comments={comments}
+      order={order}
+      absent={absent}
+      level={level}
+      trashed={false}
+      readOnly={false}
+      selfId="alice"
+      target={null}
+      drafts={drafts}
+      composing={null}
+      excerpt={() => null}
+      onShowBlock={() => {}}
+      onTargetDone={() => {}}
+      onClose={onClose}
+    />
+  );
+}
+
+test("a_reaction_that_lands_late_does_not_take_the_focus_from_a_reply_being_typed", async () => {
+  // La sonde du re-relecteur : une réaction choisie sur le fil t (requête en vol), on clique
+  // « Répondre » sur le fil u et on tape, puis u change de liste ; la réaction arrive ensuite.
+  const reaction = deferred<void>();
+  const drafts = createDrafts();
+  const initial = [thread("t"), thread("u", { blockId: "b" })];
+  const props = { level: "full" as Level, initial, drafts, reaction: reaction.promise };
+  await act(async () => root.render(<Slow {...props} order={["b"]} absent={[]} />));
+  const t = host.querySelector('[data-thread-id="t"]')!;
+  await click(button(t, "Ajouter une réaction"));
+  await click(button(t, "Réagir avec 🎉"));
+  const u = host.querySelector('[data-thread-id="u"]')!;
+  await click(button(u, "Répondre"));
+  const typing = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Répondre au fil"]')!;
+  await type(typing, "je tape");
+  await act(async () => root.render(<Slow {...props} order={[]} absent={["b"]} />));
+  const field = () =>
+    host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Répondre au fil"]')!;
+  expect(document.activeElement).toBe(field());
+  await act(async () => reaction.resolve());
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Répondre au fil");
+  expect(document.activeElement).toBe(field());
+});
+
+test("a_reply_field_mounted_again_after_the_right_comes_back_does_not_take_the_focus", async () => {
+  // Le geste ne vaut que pour le montage qu'il a provoqué : le droit d'écrire part puis revient
+  // (comment → read → comment), le champ revient sans prendre le focus.
+  const drafts = createDrafts();
+  const initial = [thread("t")];
+  const props = { initial, drafts, order: [], absent: [], reaction: Promise.resolve() };
+  await act(async () => root.render(<Slow {...props} level="comment" />));
+  await click(button(host, "Répondre"));
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Répondre au fil");
+  const outside = document.createElement("div");
+  outside.contentEditable = "true";
+  outside.tabIndex = 0;
+  document.body.append(outside);
+  await act(async () => outside.focus());
+  await act(async () => root.render(<Slow {...props} level="read" />));
+  expect(host.querySelector('textarea[aria-label="Répondre au fil"]')).toBeNull();
+  await act(async () => root.render(<Slow {...props} level="comment" />));
+  expect(host.querySelector('textarea[aria-label="Répondre au fil"]')).not.toBeNull();
+  expect(document.activeElement).toBe(outside);
+  outside.remove();
 });
