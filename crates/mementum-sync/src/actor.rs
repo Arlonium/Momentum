@@ -670,8 +670,10 @@ impl Actor {
             } => {
                 let outcome = self.messages(conn, messages).await?;
                 if let (Outcome::Close, Some(c)) = (&outcome, self.conns.get_mut(&conn)) {
-                    // Le hub la ferme : rien de ce qu'elle retenait ne passera après elle.
+                    // Le hub la ferme : rien de ce qu'elle retenait ne passera après elle, et
+                    // elle n'est plus nommée.
                     c.close();
+                    self.roster_changed();
                 }
                 let _ = reply.send(outcome);
             }
@@ -1200,6 +1202,8 @@ impl Actor {
         }
         // Sans abonné, il n'y a personne à fermer.
         let _ = self.events.send(Event::Close);
+        // Plus personne n'est nommé : qui arrive avant leur départ ne voit que lui.
+        self.roster_changed();
     }
 
     /// Ferme la connexion `conn`, elle seule, comme
@@ -1209,6 +1213,7 @@ impl Actor {
             c.close();
         }
         let _ = self.events.send(Event::CloseSome(Arc::from([conn])));
+        self.roster_changed();
     }
 
     /// Ferme les connexions inscrites du compte `user`, comme
@@ -1230,6 +1235,8 @@ impl Actor {
         }
         tracing::debug!(node_id = %self.id.node_id, user_id = %user, connections = conns.len(), "connexions du compte fermées à la demande");
         let _ = self.events.send(Event::CloseSome(conns));
+        // Les autres apprennent tout de suite que le compte n'a plus la page ouverte.
+        self.roster_changed();
     }
 
     /// Compaction toutes les `snapshot_every` mises à jour écrites, ou dès que
@@ -1271,6 +1278,9 @@ impl Actor {
         // Les connexions voient la fin de l'ancienne diffusion et se ferment.
         let (events, _) = broadcast::channel(self.cfg.broadcast_capacity.max(1));
         self.events = events;
+        // Personne ne l'entend (la nouvelle diffusion n'a pas d'abonné) : la liste retenue
+        // devient vide, celle que la prochaine arrivée change.
+        self.roster_changed();
         Ok(())
     }
 
@@ -1287,15 +1297,19 @@ impl Actor {
         }
     }
 
-    /// La liste des présents d'après les connexions admises (Rulings R136, R143) : une ligne
-    /// par compte, dans l'ordre de leurs identifiants, qui ne bouge pas quand un onglet arrive
-    /// ou part. Une connexion sans compte n'y figure pas. Un compte peut écrire si l'une de ses
-    /// connexions le peut (droit et schéma : ce qu'elle peut faire, pas ce qu'elle a demandé).
-    /// Son nom est celui de sa connexion la plus récente, lu avec la session la plus récente.
+    /// La liste des présents d'après les connexions admises et pas en train de se fermer
+    /// (Rulings R136, R143) : une ligne par compte, dans l'ordre de leurs identifiants, qui ne
+    /// bouge pas quand un onglet arrive ou part. Une connexion qui se ferme (session fermée,
+    /// droits retirés, message refusé) n'y figure plus dès sa fermeture, sans attendre son
+    /// départ : un arrivant ne voit pas quelqu'un dont le droit vient d'être retiré. Une
+    /// connexion sans compte n'y figure pas. Un compte peut écrire si l'une de ses connexions le
+    /// peut (droit et schéma : ce qu'elle peut faire, pas ce qu'elle a demandé). Son nom est
+    /// celui de sa connexion la plus récente, lu avec la session la plus récente.
     fn roster(&self) -> Vec<RosterLine> {
         // Par compte : la connexion la plus récente, son nom, et le droit d'écrire.
         let mut accounts: BTreeMap<Uuid, (ConnId, Arc<str>, bool)> = BTreeMap::new();
-        for (conn, c) in self.conns.iter().filter(|(_, c)| c.listed) {
+        let named = |c: &&Conn| c.listed && !c.closing;
+        for (conn, c) in self.conns.iter().filter(|(_, c)| named(c)) {
             let Some(account) = c.actor else { continue };
             let name = c
                 .name
@@ -1320,9 +1334,10 @@ impl Actor {
     }
 
     /// Diffuse la liste des présents à toutes les connexions de la page, si elle a changé
-    /// depuis la dernière diffusion. Appelé à chaque arrivée et à chaque départ, et seulement
-    /// là : une frappe ne calcule ni n'envoie rien de plus. `true` : elle a changé, et elle est
-    /// partie.
+    /// depuis la dernière diffusion. Appelé à chaque arrivée, à chaque fermeture et à chaque
+    /// départ, et seulement là : une frappe ne calcule ni n'envoie rien de plus. Le départ d'une
+    /// connexion déjà fermée ne change plus rien, et n'envoie rien. `true` : elle a changé, et
+    /// elle est partie.
     fn roster_changed(&mut self) -> bool {
         let roster = self.roster();
         if roster == self.roster {
@@ -1349,5 +1364,153 @@ impl Actor {
             to: Some(conn),
             message,
         })));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Ce que les tests d'intégration ne voient pas : l'instant entre la fermeture d'une
+    //! connexion et son départ. Une connexion fermée part dès qu'elle lit la diffusion, trop
+    //! vite pour qu'un arrivant tombe à coup sûr entre les deux. Ici, l'acteur est mené à la
+    //! main, et le départ n'arrive que quand le test l'appelle.
+
+    use mementum_store::{NewNode, NodeKind};
+    use yrs::encoding::read::{Cursor, Read};
+    use yrs::sync::awareness::AwarenessUpdateEntry;
+
+    use super::*;
+
+    /// Un acteur sur une page neuve d'une base temporaire, sans hub. La boîte aux lettres est
+    /// rendue pour rester ouverte (`join` en a besoin) ; rien ne la lit.
+    async fn actor(dir: &tempfile::TempDir) -> (Actor, Commands, UnboundedReceiver<Command>) {
+        let store = Store::open(&dir.path().join("mementum.db")).await.unwrap();
+        let space = store.create_space("Essais", None).await.unwrap();
+        let node_id = store
+            .create_node(NewNode {
+                space_id: space.id,
+                parent_id: None,
+                after: None,
+                kind: NodeKind::Page,
+                title: "Page".into(),
+                created_by: None,
+                grants: Vec::new(),
+                doc: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let loaded = load(&store, node_id).await.unwrap();
+        let (commands, rx) = mpsc::unbounded_channel();
+        let id = Identity {
+            node_id,
+            generation: 0,
+            hub: Weak::new(),
+            me: commands.downgrade(),
+        };
+        let actor = Actor::new(id, store, SyncConfig::default(), loaded);
+        (actor, commands, rx)
+    }
+
+    /// Une connexion du compte `account`, qui s'appelle `name` et peut écrire : inscrite, puis
+    /// admise, comme le fait `Hub::serve_connection_if`.
+    fn joined(actor: &mut Actor, account: Uuid, name: &str) -> Joined {
+        let (reply, mut answer) = oneshot::channel();
+        actor.join(true, Some(account), Some(name), reply);
+        let joined = answer.try_recv().unwrap().unwrap();
+        actor.admit(joined.membership.conn());
+        joined
+    }
+
+    /// Les listes des présents que la connexion `joined` a reçues depuis la dernière lecture :
+    /// les noms de chacune, dans l'ordre.
+    fn rosters(joined: &mut Joined) -> Vec<Vec<String>> {
+        let conn = joined.membership.conn();
+        let mut received = Vec::new();
+        while let Ok(event) = joined.events.try_recv() {
+            let Event::Message(message) = event else {
+                continue;
+            };
+            let for_others = message.from == Some(conn) || message.to.is_some_and(|to| to != conn);
+            if for_others || message.message.first() != Some(&protocol::MESSAGE_PAGE_EVENT) {
+                continue;
+            }
+            let mut cursor = Cursor::new(&message.message[1..]);
+            let frame: serde_json::Value =
+                serde_json::from_slice(cursor.read_buf().unwrap()).unwrap();
+            if frame["type"] == "roster" {
+                let names = frame["users"].as_array().unwrap().iter();
+                received.push(
+                    names
+                        .map(|user| user["name"].as_str().unwrap().to_string())
+                        .collect(),
+                );
+            }
+        }
+        received
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// Une connexion qui se ferme (session fermée, droits retirés, message refusé) ne figure
+    /// plus dans la liste des présents dès sa fermeture, avant même son départ : les autres le
+    /// reçoivent tout de suite, et un arrivant ne la voit pas. Son départ, qui ne change plus
+    /// rien, n'envoie rien.
+    #[tokio::test]
+    async fn a_connection_being_closed_is_no_longer_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _commands, _mailbox) = actor(&dir).await;
+        // Dans l'ordre de leurs identifiants, celui de la liste.
+        let [alice, bob, mallory, carol, dave] = [1u128, 2, 3, 4, 5].map(Uuid::from_u128);
+        let mut alice_tab = joined(&mut actor, alice, "Alice");
+        let mallory_tab = joined(&mut actor, mallory, "Mallory");
+        assert_eq!(
+            rosters(&mut alice_tab).last(),
+            Some(&names(&["Alice", "Mallory"]))
+        );
+
+        // La session de Mallory se ferme (`Hub::kick_user`) : Alice l'apprend aussitôt.
+        actor.close_connections_of(mallory);
+        assert_eq!(rosters(&mut alice_tab), [names(&["Alice"])]);
+        // Carol arrive avant le départ de Mallory : la liste ne nomme pas Mallory.
+        let mut carol_tab = joined(&mut actor, carol, "Carol");
+        let both = names(&["Alice", "Carol"]);
+        assert_eq!(rosters(&mut alice_tab), vec![both.clone()]);
+        assert_eq!(rosters(&mut carol_tab), vec![both.clone()]);
+        // Son départ ne change plus rien : rien ne part.
+        actor.leave(mallory_tab.membership.conn());
+        assert!(rosters(&mut alice_tab).is_empty());
+
+        // Un message refusé (plus de huit clients de présence) ferme la connexion de Bob, par
+        // le chemin de toute commande : la liste suit tout de suite.
+        let bob_tab = joined(&mut actor, bob, "Bob");
+        assert_eq!(rosters(&mut alice_tab), [names(&["Alice", "Bob", "Carol"])]);
+        let clients = (100..109)
+            .map(|client| {
+                let entry = AwarenessUpdateEntry {
+                    clock: 1,
+                    json: "{}".into(),
+                };
+                (ClientID::new(client), entry)
+            })
+            .collect();
+        let (reply, mut outcome) = oneshot::channel();
+        let refused = Command::Messages {
+            conn: bob_tab.membership.conn(),
+            messages: vec![ClientMessage::Awareness(AwarenessUpdate { clients })],
+            reply,
+        };
+        assert!(actor.handle(refused).await.is_ok());
+        assert!(matches!(outcome.try_recv(), Ok(Outcome::Close)));
+        assert_eq!(rosters(&mut alice_tab), vec![both.clone()]);
+        actor.leave(bob_tab.membership.conn());
+        assert!(rosters(&mut alice_tab).is_empty());
+
+        // Toutes les connexions fermées (`Hub::kick`) : qui arrive avant leur départ n'y voit
+        // que lui.
+        actor.close_connections();
+        let mut dave_tab = joined(&mut actor, dave, "Dave");
+        assert_eq!(rosters(&mut dave_tab), [names(&["Dave"])]);
     }
 }
