@@ -223,3 +223,12 @@ export const ReactIcon = () => (
     <path d="M16.5 5.5h5" />
   </Icon>
 );
+
+/** L'historique d'une page : une horloge, et la flèche d'un retour en arrière. */
+export const HistoryIcon = () => (
+  <Icon>
+    <path d="M3.5 12a8.5 8.5 0 1 0 2.5-6" />
+    <path d="M3 4v4h4" />
+    <path d="M12 8v4l3 2" />
+  </Icon>
+);

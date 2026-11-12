@@ -1,6 +1,7 @@
 // Une page ouverte : barre du haut (titre, état de la connexion, présents, « Commentaires »,
-// « Partager » pour qui a l'accès complet), bandeaux (lecture seule, corbeille) si besoin,
-// titre, puis l'éditeur en direct ; à droite, le panneau des commentaires quand il est ouvert.
+// « Partager » pour qui a l'accès complet, puis le menu « … » et son « Historique »), bandeaux
+// (lecture seule, corbeille) si besoin, titre, puis l'éditeur en direct ; à droite, le panneau
+// des commentaires quand il est ouvert.
 //
 // Les commentaires (R134) n'écrivent rien dans le document : ils se lisent à tout niveau, et
 // s'écrivent avec « Peut commenter », même quand l'éditeur est en lecture seule. Le panneau
@@ -35,6 +36,7 @@ import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
 import { canComment, canEdit } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
+import { PageMenu } from "./PageMenu";
 import { Presence } from "./Presence";
 import { TitleInput } from "./TitleInput";
 import { usePageGate } from "./usePageGate";
@@ -145,10 +147,13 @@ export function PageView({
     };
   }, [id, locked, check, userId, userName]);
 
+  /** Relit la page : un refus du serveur dit qu'un droit, ou la page, ont changé entre-temps. */
+  const rereadPage = useCallback(() => void reread(), [reread]);
+
   // Les fils de commentaires, relus à chaque trame `comments` de la session de synchro. Un refus
   // du serveur (un droit, ou la page, ont changé entre-temps) fait aussi relire la page : son
   // niveau et la corbeille décident des boutons du panneau.
-  const comments = useComments(id, session, { onRefused: () => void reread() });
+  const comments = useComments(id, session, { onRefused: rereadPage });
   /** Autour de l'éditeur : les pastilles s'y placent, les blocs y sont cherchés. */
   const frame = useRef<HTMLDivElement>(null);
   const wiring = useCommentsPanel(comments, frame);
@@ -178,6 +183,15 @@ export function PageView({
         {node.level === "full" && !trashed && !readOnly && (
           <ShareMenu node={node} onChanged={onShared} onAccessLost={accessLost} />
         )}
+        {/* « Historique » et les autres actions : à tout niveau. La fenêtre n'est chargée qu'à
+            la demande ; un refus du serveur fait relire la page, comme pour les commentaires. */}
+        <PageMenu
+          node={node}
+          session={session}
+          readOnly={readOnly}
+          selfId={userId}
+          onRefused={rereadPage}
+        />
       </header>
       <div className="mm-page-body">
         <article className="mm-page">

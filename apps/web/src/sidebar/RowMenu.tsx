@@ -1,6 +1,8 @@
 // Le menu « … » d'une ligne de l'arbre : les actions sur la page, pour qui peut la modifier.
+// Le menu « … » de la barre du haut d'une page est le même (`page/PageMenu.tsx`).
 // Il s'ouvre sous son bouton, par-dessus la page (il est posé dans `body`, hors de la barre
-// latérale, qui le couperait), ou au-dessus quand la place manque en bas.
+// latérale, qui le couperait), ou au-dessus quand la place manque en bas, et jamais au-delà du
+// bord droit de la fenêtre.
 //
 // Au clavier, c'est un menu (`role="menu"`) : ouvert, il prend le focus sur sa première
 // action ; les flèches passent de l'une à l'autre, Début et Fin vont aux extrémités ; Échap et
