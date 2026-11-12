@@ -9,3 +9,5 @@ node_modules/
 /apps/web/playwright-report/
 /apps/web/blob-report/
 /apps/web/playwright/.cache/
+# Ateliers jetables (git worktree) des essais.
+/.claude/worktrees/
