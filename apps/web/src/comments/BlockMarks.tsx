@@ -21,8 +21,8 @@
 // la sélection du document (R176).
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { CommentIcon } from "../icons";
-import { BLOCK, blockElement, blockOfSelection, blockText, isolate, shorten, shown } from "./dom";
-import { isCommentShortcut } from "./shortcut";
+import { BLOCK, blockElement, blockText, isolate, shorten, shown } from "./dom";
+import { commentedBlock } from "./shortcut";
 
 /** Plus de blocs que cela à chercher : un seul parcours de la page plutôt qu'une recherche par bloc. */
 const FULL_SCAN_AT = 8;
@@ -303,11 +303,13 @@ export function BlockMarks({
     };
     const onLeave = () => setHover(null);
     // Au clavier : Ctrl+Alt+M commente le bloc où est la sélection du document (à la souris, ou
-    // par la navigation au curseur du navigateur, F7). Rien ne s'écrit dans le document.
+    // par la navigation au curseur du navigateur, F7). Rien ne s'écrit dans le document. Tapé
+    // dans un champ hors de l'éditeur, il ne fait rien et laisse la touche (`commentedBlock`).
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || !isCommentShortcut(event)) return;
+      if (event.defaultPrevented) return;
       const editor = tracker.root();
-      const blockId = editor === null ? null : blockOfSelection(editor, document.getSelection());
+      const blockId =
+        editor === null ? null : commentedBlock(event, editor, document.getSelection());
       if (blockId === null) return;
       event.preventDefault();
       onComment(blockId);

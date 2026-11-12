@@ -6,6 +6,7 @@
 // la touche se reconnaît à son code de touche, 77, comme le fait le keymap de ProseMirror
 // (`w3c-keyname`). Un caractère tapé avec AltGr (Ctrl+Alt sous Windows) n'est jamais pris : sur
 // un clavier allemand, AltGr+M écrit « µ ».
+import { blockOfSelection } from "./dom";
 
 /** Ce que la reconnaissance lit d'un événement clavier (du DOM, ou de React). */
 export type ShortcutEvent = {
@@ -30,4 +31,26 @@ export function isCommentShortcut(event: ShortcutEvent): boolean {
   // Une autre lettre ASCII : c'est elle qui a été tapée.
   if (/^[a-z]$/.test(typed)) return false;
   return event.keyCode === KEY_M;
+}
+
+/** Un champ où l'on tape : le raccourci n'y est pas pris. */
+const TYPING = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+
+/**
+ * Le bloc que vise Ctrl+Alt+M dans un éditeur en lecture seule : celui qui contient la sélection
+ * du document (`blockOfSelection`). `null` si l'événement n'est pas le raccourci, ou s'il est tapé
+ * dans un champ de saisie hors de l'éditeur (le panneau, la barre latérale) : la touche y garde
+ * son sens, même quand la sélection du document est restée dans l'éditeur.
+ */
+export function commentedBlock(
+  event: ShortcutEvent & { target: EventTarget | null },
+  editor: Element,
+  selection: Selection | null,
+): string | null {
+  if (!isCommentShortcut(event)) return null;
+  const { target } = event;
+  if (target instanceof Element && !editor.contains(target) && target.closest(TYPING) !== null) {
+    return null;
+  }
+  return blockOfSelection(editor, selection);
 }

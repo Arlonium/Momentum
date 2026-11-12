@@ -3,7 +3,7 @@
 // change le caractère, et la touche se reconnaît alors à son code (comme le keymap de
 // ProseMirror). Un caractère tapé avec AltGr n'est jamais pris.
 import { expect, test } from "vitest";
-import { isCommentShortcut, type ShortcutEvent } from "./shortcut";
+import { commentedBlock, isCommentShortcut, type ShortcutEvent } from "./shortcut";
 
 /** Un événement clavier construit : la touche, ses modificateurs, et AltGr s'il est tenu. */
 function key(init: Partial<Omit<ShortcutEvent, "getModifierState">> & { altGraph?: boolean }): ShortcutEvent {
@@ -58,4 +58,58 @@ test("ctrl_m_or_alt_m_alone_is_not_the_shortcut", () => {
 test("another_letter_with_the_code_of_m_is_not_taken", () => {
   // Une disposition où la touche de code 77 tape une autre lettre : la lettre fait foi.
   expect(isCommentShortcut(key({ key: "q", keyCode: 77, ctrlKey: true, altKey: true }))).toBe(false);
+});
+
+// Dans un éditeur en lecture seule, le raccourci vise le bloc de la sélection du document ; tapé
+// dans un champ de saisie hors de l'éditeur (le panneau, la barre latérale), il ne fait rien et
+// n'avale pas la touche, même si la sélection du document est restée dans l'éditeur (Firefox la
+// garde quand on passe dans un champ par Tab).
+
+function editorScene() {
+  const editor = document.createElement("div");
+  editor.className = "bn-editor";
+  const outer = document.createElement("div");
+  outer.setAttribute("data-node-type", "blockOuter");
+  outer.setAttribute("data-id", "bloc");
+  const content = document.createElement("p");
+  const words = document.createTextNode("du texte");
+  content.append(words);
+  outer.append(content);
+  editor.append(outer);
+  const field = document.createElement("textarea");
+  const input = document.createElement("input");
+  const editable = document.createElement("div");
+  editable.setAttribute("contenteditable", "true");
+  document.body.append(editor, field, input, editable);
+  const range = document.createRange();
+  range.setStart(words, 1);
+  range.setEnd(words, 4);
+  const selection = document.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return { editor, content, field, input, editable, selection };
+}
+
+const shortcut = (target: EventTarget | null) => ({
+  ...key({ key: "m", keyCode: 77, ctrlKey: true, altKey: true }),
+  target,
+});
+
+test("the_shortcut_names_the_block_of_the_selection", () => {
+  const { editor, content, selection } = editorScene();
+  expect(commentedBlock(shortcut(document.body), editor, selection)).toBe("bloc");
+  expect(commentedBlock(shortcut(content), editor, selection)).toBe("bloc");
+  // Une autre touche : rien.
+  expect(
+    commentedBlock({ ...key({ key: "k", keyCode: 75, ctrlKey: true, altKey: true }), target: document.body }, editor, selection),
+  ).toBeNull();
+  document.body.replaceChildren();
+});
+
+test("the_shortcut_is_silent_in_a_field_outside_the_editor", () => {
+  const { editor, field, input, editable, selection } = editorScene();
+  for (const target of [field, input, editable]) {
+    expect(commentedBlock(shortcut(target), editor, selection)).toBeNull();
+  }
+  document.body.replaceChildren();
 });

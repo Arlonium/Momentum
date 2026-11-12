@@ -4,7 +4,9 @@
 // blanc. Un refus du serveur s'affiche tel quel, sous le champ, et le texte reste pour un nouvel
 // essai ; une session perdue n'affiche rien : la connexion est demandée par-dessus la page. Le
 // texte tapé va dans son brouillon (`drafts.ts`), qui survit à la zone : il part quand le texte
-// est envoyé, ou annulé.
+// est envoyé, ou annulé. Pendant l'envoi, le champ est en lecture seule (pas désactivé : il
+// garde le focus) et le bouton inactif ; un second envoi ne part pas. À la réussite, le texte
+// envoyé est retiré ; à l'échec, tout est rendu tel quel.
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { isSessionLost } from "../api";
 import { messageOf } from "../session/forms";
@@ -46,6 +48,8 @@ export function Composer({
   const [error, setError] = useState<string | null>(null);
   const field = useRef<HTMLTextAreaElement>(null);
   const errorId = useId();
+  /** Un envoi est en route : vrai dès le premier, avant tout rendu (deux Ctrl+Entrée coup sur coup). */
+  const sending = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -65,7 +69,8 @@ export function Composer({
   const empty = text.trim() === "";
 
   const send = async () => {
-    if (empty || busy) return;
+    if (empty || sending.current) return;
+    sending.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -75,6 +80,7 @@ export function Composer({
     } catch (e) {
       if (mounted.current && !isSessionLost(e)) setError(messageOf(e));
     } finally {
+      sending.current = false;
       if (mounted.current) setBusy(false);
     }
   };
@@ -103,6 +109,7 @@ export function Composer({
         dir="auto"
         rows={2}
         value={text}
+        readOnly={busy}
         aria-describedby={error ? errorId : undefined}
         onChange={(event) => {
           setText(event.target.value);
