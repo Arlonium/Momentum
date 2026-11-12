@@ -359,7 +359,7 @@ impl Identity {
 async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedReceiver<Command>) {
     match load(&store, id.node_id).await {
         Ok(loaded) => {
-            let slice = Slice::read(&store, id.node_id, cfg.version_every).await;
+            let slice = Slice::read(&store, id.node_id, cfg.version_every, loaded.created).await;
             let mut actor = Actor::new(id, store, cfg, loaded, slice);
             // Un journal qui porte une grosse suppression (écrite avant une
             // panne, ou avant ce réglage) est compacté dès le chargement : il
@@ -388,6 +388,8 @@ struct Loaded {
     /// Ce qui est compté des transactions du document, à partir du journal
     /// (les suppressions de l'instantané sont déjà nettoyées).
     watch: Watch,
+    /// La page a reçu son document à ce chargement : aucune version ne le garde.
+    created: bool,
 }
 
 /// Relit l'instantané, puis les mises à jour dans l'ordre des `seq`.
@@ -407,6 +409,7 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
             last_seq: 0,
             since_snapshot: 0,
             watch,
+            created: true,
         });
     }
     let last_seq = updates
@@ -425,6 +428,7 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
         last_seq,
         since_snapshot: updates.len() as u64,
         watch,
+        created: false,
     })
 }
 

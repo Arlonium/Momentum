@@ -224,6 +224,7 @@ async fn unversioned_is_read_from_what_the_journal_keeps() {
         Unversioned {
             since: Some(first),
             authors: both,
+            versioned: false,
         }
     );
 
@@ -232,7 +233,11 @@ async fn unversioned_is_read_from_what_the_journal_keeps() {
         .put_version(id, 4, b"v", &[alice, bob], VersionReason::Periodic)
         .await
         .unwrap();
-    assert_eq!(store.unversioned(id).await.unwrap(), Unversioned::default());
+    let covered = Unversioned {
+        versioned: true,
+        ..Unversioned::default()
+    };
+    assert_eq!(store.unversioned(id).await.unwrap(), covered);
     store
         .append_updates(id, &[b"e"], Some(alice))
         .await
@@ -243,6 +248,7 @@ async fn unversioned_is_read_from_what_the_journal_keeps() {
         Unversioned {
             since: Some(fifth),
             authors: vec![alice],
+            versioned: true,
         }
     );
 
@@ -256,6 +262,7 @@ async fn unversioned_is_read_from_what_the_journal_keeps() {
         Unversioned {
             since: Some(snapshot),
             authors: Vec::new(),
+            versioned: true,
         }
     );
 }

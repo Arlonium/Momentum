@@ -93,6 +93,9 @@ pub struct Unversioned {
     pub since: Option<i64>,
     /// Les comptes de ces écritures, triés, pour ce qu'il en reste au journal.
     pub authors: Vec<Uuid>,
+    /// La page a au moins une version. Sans elle, son contenu (celui de sa création, une page
+    /// importée par exemple) n'est gardé par aucune.
+    pub versioned: bool,
 }
 
 impl Store {
@@ -278,12 +281,12 @@ impl Store {
     pub async fn unversioned(&self, node_id: Uuid) -> Result<Unversioned, StoreError> {
         let node = node_id.to_string();
         let mut tx = self.pool.begin().await?;
-        let versioned: i64 =
-            sqlx::query("SELECT COALESCE(MAX(seq), 0) FROM doc_versions WHERE node_id = ?")
-                .bind(&node)
-                .fetch_one(&mut *tx)
-                .await?
-                .get(0);
+        let row = sqlx::query("SELECT MAX(seq) FROM doc_versions WHERE node_id = ?")
+            .bind(&node)
+            .fetch_one(&mut *tx)
+            .await?;
+        let latest: Option<i64> = row.get(0);
+        let versioned = latest.unwrap_or(0);
         let snapshot = sqlx::query("SELECT seq, created_at FROM doc_snapshots WHERE node_id = ?")
             .bind(&node)
             .fetch_optional(&mut *tx)
@@ -315,6 +318,10 @@ impl Store {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        Ok(Unversioned { since, authors })
+        Ok(Unversioned {
+            since,
+            authors,
+            versioned: latest.is_some(),
+        })
     }
 }

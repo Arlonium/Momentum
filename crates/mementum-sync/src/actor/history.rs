@@ -108,6 +108,11 @@ pub(super) struct Slice {
     /// celui donné à une écriture du serveur. Une écriture sans compte n'ajoute
     /// personne.
     authors: BTreeSet<Uuid>,
+    /// Le contenu du document est celui d'une version gardée : la dernière
+    /// coupée, ou la dernière restaurée (Ruling R190). Faux tant qu'une écriture
+    /// l'a changé depuis, et pour une page qu'aucune version ne garde encore
+    /// (créée avec son contenu, jamais versionnée).
+    kept: bool,
 }
 
 impl Slice {
@@ -120,8 +125,14 @@ impl Slice {
     /// une tranche plus ancienne est due tout de suite, et l'instant de tokio
     /// ne remonte pas avant le démarrage de la machine. Illisible, la tranche
     /// est vide : la page est servie quand même, et la prochaine écriture en
-    /// ouvre une.
-    pub(super) async fn read(store: &Store, node_id: Uuid, version_every: Duration) -> Slice {
+    /// ouvre une. `created` : la page vient de recevoir son document, qu'aucune
+    /// version ne garde.
+    pub(super) async fn read(
+        store: &Store,
+        node_id: Uuid,
+        version_every: Duration,
+        created: bool,
+    ) -> Slice {
         match store.unversioned(node_id).await {
             Ok(found) => Slice {
                 since: found.since.map(|at| {
@@ -130,6 +141,7 @@ impl Slice {
                     Instant::now().checked_sub(ago).unwrap_or_else(Instant::now)
                 }),
                 authors: found.authors.into_iter().collect(),
+                kept: !created && found.since.is_none() && found.versioned,
             },
             Err(error) => {
                 tracing::warn!(node_id = %node_id, %error, "tranche en cours de l'historique illisible : elle repart de zéro");
@@ -161,6 +173,7 @@ impl Actor {
         }
         self.slice.since.get_or_insert_with(Instant::now);
         self.slice.authors.extend(actor);
+        self.slice.kept = false;
     }
 
     /// Ruling R135 : juste avant d'appliquer une écriture, une version
@@ -197,7 +210,10 @@ impl Actor {
         self.store
             .put_version(self.id.node_id, self.last_seq, &state, &authors, reason)
             .await?;
-        self.slice = Slice::default();
+        self.slice = Slice {
+            kept: true,
+            ..Slice::default()
+        };
         self.broadcast(None, protocol::page_event(PageEvent::Versions));
         Ok(())
     }
@@ -223,10 +239,12 @@ impl Actor {
     /// le contenu remplacé est perdue, comme sous `PUT /mmd` (Ruling R188).
     ///
     /// Ruling R190 : une version `before_restore` garde ce qui est remplacé,
-    /// dans la même commande (rien ne passe entre les deux), **si la page a
-    /// changé depuis sa dernière version** ; sinon ce qui est remplacé est déjà
-    /// le contenu d'une version gardée (la dernière coupée, ou la dernière
-    /// restaurée), et restaurable. Si le store la refuse, rien n'est restauré.
+    /// dans la même commande (rien ne passe entre les deux), **si aucune version
+    /// ne garde le contenu actuel** : la page a changé depuis sa dernière
+    /// version, ou n'en a jamais eu (créée avec son contenu) ; sinon ce qui est
+    /// remplacé est le contenu d'une version gardée (la dernière coupée, ou la
+    /// dernière restaurée), et restaurable. Si le store la refuse, rien n'est
+    /// restauré.
     /// L'écriture d'une restauration n'ouvre pas de tranche, son contenu étant
     /// celui de la version : des restaurations successives, sans écriture entre
     /// elles, ne coupent rien. Sauf quand la version restaurée est la prochaine
@@ -268,12 +286,17 @@ impl Actor {
             Ok(next) => next.contains(&version),
             Err(error) => return Ok(Err(error.into())),
         };
-        if self.slice.since.is_some()
+        if !self.slice.kept
             && let Err(error) = self.cut_version(VersionReason::BeforeRestore).await
         {
             tracing::warn!(node_id = %self.id.node_id, version_id = %version, %error, "version d'avant restauration impossible à écrire : rien n'est restauré");
             return Ok(Err(error.into()));
         }
-        self.server_write(blocks, actor, next_in_line).await
+        let written = self.server_write(blocks, actor, next_in_line).await?;
+        if written.is_ok() && !next_in_line {
+            // Le contenu est désormais celui de la version restaurée.
+            self.slice.kept = true;
+        }
+        Ok(written)
     }
 }
