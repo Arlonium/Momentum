@@ -301,15 +301,15 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         tracing::warn!(%error, "ligne d'écoute impossible à écrire sur la sortie standard ; le serveur continue");
     }
     tracing::info!(%addr, data_dir = %cfg.data_dir.display(), "serveur prêt");
-    axum::serve(listener, router)
+    let served = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("serveur HTTP")?;
+        .await;
     // Plus aucune requête : chaque page ouverte coupe sa version `closing` s'il lui reste des
     // écritures non versionnées (Ruling R135), et ferme ses connexions, avant que la base ferme.
+    // Aussi quand le serveur HTTP s'est arrêté sur une erreur, rendue ensuite.
     hub.shutdown().await;
     store.close().await;
-    Ok(())
+    served.context("serveur HTTP")
 }
 
 async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
