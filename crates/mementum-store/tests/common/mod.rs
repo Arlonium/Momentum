@@ -3,11 +3,51 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use mementum_store::{NewNode, NewUser, NodeKind, Sibling, Space, Store, User};
+use sqlx::migrate::Migrator;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+/// Les migrations d'une base du lot 2.
+pub const LOT2: &[&str] = &["0001_init.sql", "0002_spaces_accounts.sql"];
+
+/// Une base telle que le code d'un lot plus ancien la produit : les options de connexion de
+/// `Store::open`, et les seules migrations `files` du store, lancées par sqlx (qui écrit donc
+/// `_sqlx_migrations`, sommes de contrôle comprises). Avec [`LOT2`], une base du lot 2.
+pub async fn database_with(db: &Path, files: &[&str]) -> SqlitePool {
+    let migrations = tempfile::tempdir().unwrap();
+    for file in files {
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("migrations")
+                .join(file),
+            migrations.path().join(file),
+        )
+        .unwrap();
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(db)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Full)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_millis(5000));
+    let pool = SqlitePoolOptions::new()
+        .connect_with(options)
+        .await
+        .unwrap();
+    Migrator::new(migrations.path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    pool
+}
 
 /// Une base neuve dans un dossier temporaire, avec un espace sans membre.
 pub struct Fixture {

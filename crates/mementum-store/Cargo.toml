@@ -11,10 +11,11 @@ publish = false
 # `Grant`, `Level`, `Subject` : les accès posés sur les pages, dans leur forme texte.
 mementum-acl.workspace = true
 sqlx.workspace = true
+# `sync` : le canal qui annonce les espaces dont la version vient d'avancer (`Store::changes`) ;
+# dans les tests, aussi la barrière de départ des écritures simultanées.
+tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
-# `sync` : la barrière de départ des tests d'écritures simultanées.
-tokio = { workspace = true, features = ["sync"] }

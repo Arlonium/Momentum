@@ -13,7 +13,7 @@ use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
 use crate::acl::{read_chain, space_of};
-use crate::spaces::{Space, bump_rev, space_from_row};
+use crate::spaces::{Space, WriteTx, bump_rev, space_from_row};
 use crate::{Store, StoreError, now_ms, parse_uuid, unreadable};
 
 /// Une personne qui a un rôle dans un espace.
@@ -130,7 +130,7 @@ pub(crate) async fn raise_role(
 /// espaces, par date de création, à leur révision nouvelle. `NotFound` si le compte n'existe
 /// pas et qu'il y avait un espace à prendre.
 pub(crate) async fn adopt_orphans(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut WriteTx,
     user_id: Uuid,
 ) -> Result<Vec<Space>, StoreError> {
     let user = user_id.to_string();
@@ -139,7 +139,7 @@ pub(crate) async fn adopt_orphans(
          WHERE NOT EXISTS (SELECT 1 FROM members m WHERE m.space_id = s.id) \
          ORDER BY created_at, id",
     )
-    .fetch_all(&mut **tx)
+    .fetch_all(&mut ***tx)
     .await?
     .iter()
     .map(space_from_row)
@@ -153,7 +153,7 @@ pub(crate) async fn adopt_orphans(
         .bind(&id)
         .bind(&user)
         .bind(now)
-        .execute(&mut **tx)
+        .execute(&mut ***tx)
         .await
         .map_err(StoreError::from_fk)?;
         bump_rev(tx, &id).await?;
@@ -436,7 +436,7 @@ impl Store {
         role: Role,
     ) -> Result<(), StoreError> {
         let space = space_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         if raise_role(&mut tx, &space, &user_id.to_string(), role).await? {
             bump_rev(&mut tx, &space).await?;
             tx.commit().await?;
@@ -457,7 +457,7 @@ impl Store {
         expected: Expected,
     ) -> Result<Role, StoreError> {
         let (space, user) = (space_id.to_string(), user_id.to_string());
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let current = check_expected(&mut tx, &space, &user, expected).await?;
         if current == role {
             return Ok(current);
@@ -469,7 +469,7 @@ impl Store {
             .bind(role.as_str())
             .bind(&space)
             .bind(&user)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         bump_rev(&mut tx, &space).await?;
         tx.commit().await?;
@@ -499,7 +499,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         let (space, user) = (space_id.to_string(), user_id.to_string());
         let subject = Subject::User(user_id).to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let current = check_expected(&mut tx, &space, &user, expected).await?;
         if current == Role::Owner && owners(&mut tx, &space).await? == 1 {
             return Err(StoreError::LastOwner);
@@ -511,7 +511,7 @@ impl Store {
         )
         .bind(&space)
         .bind(&subject)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?
         .iter()
         .map(|r| r.get(0))
@@ -519,7 +519,7 @@ impl Store {
         sqlx::query("DELETE FROM members WHERE space_id = ? AND user_id = ?")
             .bind(&space)
             .bind(&user)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         drop_pending_invitations(&mut tx, &space, &user).await?;
         // `chain` : chaque page qui porte une ligne de la personne, avec elle-même et ses
@@ -544,7 +544,7 @@ impl Store {
         )
         .bind(&space)
         .bind(&subject)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         hand_over_full(&mut tx, &space, &had_full).await?;
         bump_rev(&mut tx, &space).await?;
@@ -561,7 +561,7 @@ impl Store {
     /// et rend ces espaces, par date de création, à leur révision nouvelle. `NotFound` (sans
     /// rien écrire) si le compte n'existe pas et qu'il y avait un espace à prendre.
     pub async fn adopt_orphan_spaces(&self, user_id: Uuid) -> Result<Vec<Space>, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let spaces = adopt_orphans(&mut tx, user_id).await?;
         tx.commit().await?;
         Ok(spaces)
@@ -576,12 +576,12 @@ impl Store {
     /// invitations en attente. `NotFound` si le nœud n'existe pas.
     pub async fn revoke_user_grant(&self, node_id: Uuid, user_id: Uuid) -> Result<(), StoreError> {
         let node = node_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let space = space_of(&mut tx, &node).await?;
         let removed = sqlx::query("DELETE FROM acl WHERE node_id = ? AND subject = ?")
             .bind(&node)
             .bind(Subject::User(user_id).to_string())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             > 0;

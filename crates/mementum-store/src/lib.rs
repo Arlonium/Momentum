@@ -5,7 +5,8 @@
 //!   appliqués à **chaque** connexion du pool) et lance les migrations.
 //! - `backup.rs` : la copie de la base, à côté d'elle, avant toute migration en attente.
 //! - `users.rs` : les comptes et les sessions (le store ne voit que des hachages).
-//! - `spaces.rs` : les espaces et leur révision.
+//! - `spaces.rs` : les espaces, leur révision et leur version ; la transaction d'écriture qui
+//!   annonce les versions avancées (`WriteTx`).
 //! - `members.rs` : les rôles dans un espace, le départ, l'adoption des espaces sans membre.
 //! - `invitations.rs` : les invitations dans un espace ou sur une page.
 //! - `signup.rs` : l'inscription (compte, espaces repris, invitation, premier espace), en une
@@ -27,6 +28,16 @@
 //! en cache. Ce qui ne change les droits de personne ne la touche pas (Ruling R83) : le titre
 //! d'un nœud, sa place sous le même parent, et le contenu d'une page (journal, instantanés).
 //! Sinon, chaque titre tapé viderait le cache de tout l'espace.
+//!
+//! **Règle de `lsn`** : `spaces.lsn` est la version de l'espace, que le serveur pousse aux
+//! navigateurs pour qu'ils relisent la barre latérale (Ruling R133). Elle avance, dans la même
+//! transaction, pour toute écriture qui change ce que la barre latérale montre : tout ce qui
+//! avance `rev` (`bump_rev` avance les deux), plus le titre d'un nœud, sa place sous le même
+//! parent et le nom de l'espace (`bump_lsn` ; Ruling R150 pour le nom). Le contenu d'une page ne
+//! la touche pas. Elle n'avance que par ces deux fonctions, qui demandent une transaction
+//! d'écriture du store (`WriteTx`, ouverte par `Store::write`) : validée, celle-ci annonce sur
+//! [`Store::changes`] les espaces qu'elle a avancés, après la validation ; abandonnée ou
+//! refusée, elle n'annonce rien. Aucune requête n'écrit `lsn` ailleurs.
 
 mod access_inputs;
 mod acl;
@@ -151,11 +162,13 @@ impl StoreError {
 /// Les migrations du store, embarquées dans le binaire.
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
-/// La base de Mementum. Se clone à bas coût (le pool est partagé).
+/// La base de Mementum. Se clone à bas coût (le pool et le canal des changements sont partagés).
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
     backup: Option<Arc<Backup>>,
+    /// Les espaces dont la version vient d'avancer ([`Store::changes`]).
+    changes: tokio::sync::broadcast::Sender<Uuid>,
 }
 
 impl Store {
@@ -184,6 +197,7 @@ impl Store {
             Ok(backup) => Ok(Store {
                 pool,
                 backup: backup.map(Arc::new),
+                changes: tokio::sync::broadcast::channel(spaces::CHANGES_CAPACITY).0,
             }),
             Err(e) => {
                 pool.close().await;

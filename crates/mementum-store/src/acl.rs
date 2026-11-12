@@ -373,7 +373,7 @@ impl Store {
     /// le nœud n'existe pas.
     pub async fn set_grant(&self, node_id: Uuid, grant: Grant) -> Result<(), StoreError> {
         let id = node_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let space = space_of(&mut tx, &id).await?;
         write_grant(&mut tx, &id, grant).await?;
         bump_rev(&mut tx, &space).await?;
@@ -390,12 +390,12 @@ impl Store {
     /// pas. `NotFound` si le nœud n'existe pas.
     pub async fn remove_grant(&self, node_id: Uuid, subject: Subject) -> Result<(), StoreError> {
         let id = node_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let space = space_of(&mut tx, &id).await?;
         let removed = sqlx::query("DELETE FROM acl WHERE node_id = ? AND subject = ?")
             .bind(&id)
             .bind(subject.to_string())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected();
         if removed > 0 {
@@ -445,7 +445,7 @@ impl Store {
         actor: Uuid,
     ) -> Result<AccessWritten, StoreError> {
         let node = node_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let general = matches!(change, AccessChange::Members(_));
         let (chain, role) = check_sharer(&mut tx, &node, actor, general).await?;
         let space_id = parse_uuid(&chain.space)?;
@@ -477,7 +477,7 @@ impl Store {
                 sqlx::query("DELETE FROM acl WHERE node_id = ? AND subject = ?")
                     .bind(&node)
                     .bind(subject.to_string())
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await?
                     .rows_affected()
                     > 0

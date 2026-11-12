@@ -9,12 +9,11 @@
 //! `invitations.rs` et `spaces.rs`.
 
 use mementum_acl::Role;
-use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
 use crate::invitations::{Invitation, accept, acceptable};
 use crate::members::{adopt_orphans, raise_role};
-use crate::spaces::{Space, bump_rev, insert_space};
+use crate::spaces::{Space, WriteTx, bump_rev, insert_space};
 use crate::users::{NewUser, User, insert_user};
 use crate::{Store, StoreError};
 
@@ -59,7 +58,7 @@ impl Store {
         first_space_name: &str,
         now: i64,
     ) -> Result<SignedUp, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let user = insert_user(&mut tx, user).await?;
         let adopted = if user.instance_admin {
             adopt_orphans(&mut tx, user.id).await?
@@ -93,11 +92,7 @@ impl Store {
 
 /// Crée, dans la transaction, un espace dont `owner` est le seul membre, au rôle `owner` ; sa
 /// révision passe à 1 (une écriture dans `members`), comme avec [`Store::create_space`].
-async fn own_space(
-    tx: &mut Transaction<'_, Sqlite>,
-    name: &str,
-    owner: Uuid,
-) -> Result<Space, StoreError> {
+async fn own_space(tx: &mut WriteTx, name: &str, owner: Uuid) -> Result<Space, StoreError> {
     let mut space = insert_space(tx, name, Some(owner)).await?;
     let id = space.id.to_string();
     raise_role(tx, &id, &owner.to_string(), Role::Owner).await?;

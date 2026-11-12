@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::acl::write_grant;
 use crate::members::{raise_role, role_from};
-use crate::spaces::bump_rev;
+use crate::spaces::{WriteTx, bump_rev};
 use crate::users::normalize_email;
 use crate::{Store, StoreError, now_ms, parse_uuid, unreadable};
 
@@ -188,7 +188,7 @@ pub(crate) async fn acceptable(
 /// transaction), sans rien abaisser, puis la marque acceptée ; la révision de l'espace bouge
 /// si un droit a été écrit. `NotFound` si le compte n'existe pas.
 pub(crate) async fn accept(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut WriteTx,
     invitation: &Invitation,
     user_id: Uuid,
     now: i64,
@@ -208,7 +208,7 @@ pub(crate) async fn accept(
         .bind(now)
         .bind(&user)
         .bind(invitation.id.to_string())
-        .execute(&mut **tx)
+        .execute(&mut ***tx)
         .await
         .map_err(StoreError::from_fk)?;
     if wrote {
@@ -303,7 +303,7 @@ impl Store {
         user_id: Uuid,
         now: i64,
     ) -> Result<Invitation, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let invitation = acceptable(&mut tx, token_hash, now)
             .await?
             .ok_or(StoreError::NotFound)?;

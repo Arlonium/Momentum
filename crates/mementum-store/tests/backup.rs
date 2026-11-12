@@ -7,12 +7,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{int, texts};
+use common::{LOT2, database_with, int, texts};
 use mementum_store::{Backup, Store, backup_path};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
+
+/// Le nombre de migrations du store : une base migrée les porte toutes.
+const MIGRATIONS: i64 = 3;
 
 /// Une base telle que le code du lot 1 la produit (comme dans `tests/migration.rs`) : les options
 /// de connexion de `Store::open`, et la seule migration `0001_init.sql`, lancée par sqlx.
@@ -235,7 +238,10 @@ async fn same_database_gives_the_same_copy() {
             without_hard_link: false,
         })
     );
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await,
+        MIGRATIONS
+    );
     store.close().await;
     assert_eq!(std::fs::read(&backup).unwrap(), bytes);
     assert_eq!(
@@ -287,14 +293,18 @@ async fn pending_migration_backs_up_first() {
             without_hard_link: false,
         })
     );
-    // Puis la migration a tourné.
+    // Puis les migrations ont tourné.
     assert_eq!(
         texts(
             &db,
             "SELECT CAST(version AS TEXT) FROM _sqlx_migrations ORDER BY version"
         )
         .await,
-        [Some("1".to_string()), Some("2".to_string())]
+        [
+            Some("1".to_string()),
+            Some("2".to_string()),
+            Some("3".to_string())
+        ]
     );
     store.close().await;
     pool.close().await;
@@ -324,6 +334,77 @@ async fn pending_migration_backs_up_first() {
         .map(|r| r.get(0))
         .collect();
     assert_eq!(versions, [1]);
+    copy.close().await;
+}
+
+/// Une base du lot 2 : la copie porte le nom de la migration `0003`, et c'est la base du lot 2,
+/// sans la version des espaces ni les tables de la collaboration.
+#[tokio::test]
+async fn lot2_database_is_backed_up_before_0003() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    let pool = database_with(&db, LOT2).await;
+    let space = Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO spaces (id, name, rev, created_at) VALUES (?, 'Équipe', 3, 1000)")
+        .bind(&space)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO nodes (id, space_id, kind, title, position, created_at, updated_at) \
+         VALUES (?, ?, 'page', 'Accueil', 'a0', 2000, 2000)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&space)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let store = Store::open(&db).await.unwrap();
+    let backup = backup_path(&db, 3);
+    assert_eq!(backup, dir.path().join("mementum.db.avant-0003.bak"));
+    assert_eq!(
+        store.backup(),
+        Some(&Backup {
+            path: backup.clone(),
+            bytes: std::fs::metadata(&backup).unwrap().len(),
+            kept: false,
+            without_hard_link: false,
+        })
+    );
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await,
+        MIGRATIONS
+    );
+    store.close().await;
+    assert_eq!(
+        entries(dir.path()),
+        BTreeSet::from([
+            "mementum.db".to_string(),
+            "mementum.db.avant-0003.bak".to_string()
+        ])
+    );
+
+    let (_elsewhere, copy) = open_alone(&backup).await;
+    assert_eq!(lot_tables(&copy).await, ["spaces"]);
+    assert_eq!(titles(&copy).await, ["Accueil"]);
+    let versions: Vec<i64> = sqlx::query("SELECT version FROM _sqlx_migrations ORDER BY version")
+        .fetch_all(&copy)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(versions, [1, 2]);
+    let lot3: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name = 'lsn') \
+              + (SELECT COUNT(*) FROM sqlite_master WHERE name = 'comment_threads')",
+    )
+    .fetch_one(&copy)
+    .await
+    .unwrap();
+    assert_eq!(lot3, 0);
     copy.close().await;
 }
 
@@ -404,7 +485,10 @@ async fn existing_backup_is_kept() {
         })
     );
     // L'ouverture a continué : la base est migrée.
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await,
+        MIGRATIONS
+    );
     store.close().await;
     assert_eq!(entries(dir.path()).len(), 3);
     assert!(!sibling(&backup, ".partiel").exists());
@@ -529,7 +613,10 @@ async fn changed_database_gets_a_fresh_dated_copy() {
             without_hard_link: false,
         })
     );
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await,
+        MIGRATIONS
+    );
     store.close().await;
     assert_eq!(std::fs::read(&backup).unwrap(), first);
     assert_eq!(entries(dir.path()).len(), 3);
@@ -605,7 +692,10 @@ async fn interrupted_backup_is_redone() {
             without_hard_link: false,
         })
     );
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 2);
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await,
+        MIGRATIONS
+    );
     store.close().await;
     assert!(!partial.exists());
     assert_eq!(

@@ -4,7 +4,7 @@
 //! Une écriture d'ici qui change ce dont dépendent les droits (un nœud créé ou supprimé, un
 //! changement de parent, la corbeille, un accès posé) incrémente la révision de l'espace dans sa
 //! transaction ; un renommage et un changement de place sous le même parent n'y touchent pas
-//! (règle de `rev`, en tête de la crate).
+//! (règle de `rev`, en tête de la crate). Toutes avancent sa version (règle de `lsn`).
 
 use mementum_acl::{Grant, Level, Role, Subject, chain_level};
 use sqlx::sqlite::SqliteRow;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::acl::{Chain, read_chain, write_grant};
 use crate::members::role_of;
-use crate::spaces::bump_rev;
+use crate::spaces::{bump_lsn, bump_rev};
 use crate::{Store, StoreError, now_ms, parse_uuid, position_between, unreadable};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,10 +460,10 @@ impl Store {
         let space = n.space_id.to_string();
         let parent = n.parent_id.map(|p| p.to_string());
         let author = n.created_by.map(|u| u.to_string());
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         sqlx::query("SELECT 1 FROM spaces WHERE id = ?")
             .bind(&space)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .ok_or(StoreError::NotFound)?;
         if let Some(p) = &parent {
@@ -490,7 +490,7 @@ impl Store {
         .bind(&position)
         .bind(&author)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?;
         if let Some(doc) = &n.doc {
@@ -500,7 +500,7 @@ impl Store {
             .bind(&id_s)
             .bind(doc.as_slice())
             .bind(now)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
         for grant in &n.grants {
@@ -597,7 +597,9 @@ impl Store {
     /// frères) sans titre à changer.
     ///
     /// La révision de l'espace n'est incrémentée que si le nœud change de parent : un titre et
-    /// une place sous le même parent ne changent les droits de personne (règle de `rev`).
+    /// une place sous le même parent ne changent les droits de personne (règle de `rev`). Sa
+    /// version avance dès que quelque chose est écrit : la barre latérale montre titres et places
+    /// (règle de `lsn`).
     ///
     /// Quand le nœud arrive à la racine (il avait un parent, il n'en a plus), il n'hérite plus
     /// de rien. Dans la même transaction, d'après son ancienne chaîne (voir `root_lines`) :
@@ -643,7 +645,7 @@ impl Store {
             return Ok(unchanged(node));
         }
         let id_s = id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let before = node_in(&mut tx, &id_s).await?;
         let space = before.space_id.to_string();
         // `Some((parent, position))` : le nœud change de place ; `None` : il garde la sienne.
@@ -675,7 +677,7 @@ impl Store {
                 )
                 .bind(p)
                 .bind(&id_s)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?;
                 if cycle.is_some() {
                     return Err(StoreError::Cycle);
@@ -721,7 +723,7 @@ impl Store {
         .bind(now_ms())
         .bind(by.map(|u| u.to_string()))
         .bind(&id_s)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
@@ -736,6 +738,10 @@ impl Store {
                 }
             }
             bump_rev(&mut tx, &space).await?;
+        } else {
+            // Un titre, une place parmi les mêmes frères : ce que montre la barre latérale
+            // change, pas les droits de personne (R83).
+            bump_lsn(&mut tx, &space).await?;
         }
         tx.commit().await?;
         let at_root = arrival.map(|arrival| AtRoot {
@@ -750,7 +756,7 @@ impl Store {
     /// `NotFound` si le nœud ou le compte n'existe pas.
     pub async fn trash_node(&self, id: Uuid, by: Uuid) -> Result<Node, StoreError> {
         let id_s = id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let node = node_in(&mut tx, &id_s).await?;
         if node.trashed_at.is_some() {
             return Ok(node);
@@ -762,7 +768,7 @@ impl Store {
         .bind(now_ms())
         .bind(by.to_string())
         .bind(&id_s)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
@@ -776,7 +782,7 @@ impl Store {
     /// n'y est pas.
     pub async fn restore_node(&self, id: Uuid) -> Result<Node, StoreError> {
         let id_s = id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let node = node_in(&mut tx, &id_s).await?;
         if ancestor_trashed(&mut tx, &id_s).await? {
             return Err(StoreError::ParentTrashed);
@@ -789,7 +795,7 @@ impl Store {
             node_columns!()
         ))
         .bind(&id_s)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         let node = node_from_row(&row)?;
         bump_rev(&mut tx, &node.space_id.to_string()).await?;
@@ -798,16 +804,17 @@ impl Store {
     }
 
     /// Supprime définitivement un nœud et tout son sous-arbre, avec leurs documents, leurs
-    /// accès et leurs invitations, et rend les ids supprimés (le nœud compris). `NotTrashed`
-    /// (sans rien écrire) si le nœud n'est pas à la corbeille, lui-même ou par un ancêtre.
+    /// accès, leurs invitations, leurs fils de commentaires, leurs versions et leurs
+    /// déplacements de blocs, et rend les ids supprimés (le nœud compris). `NotTrashed` (sans
+    /// rien écrire) si le nœud n'est pas à la corbeille, lui-même ou par un ancêtre.
     pub async fn delete_node(&self, id: Uuid) -> Result<Vec<Uuid>, StoreError> {
         let id_s = id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let node = node_in(&mut tx, &id_s).await?;
         if node.trashed_at.is_none() && !ancestor_trashed(&mut tx, &id_s).await? {
             return Err(StoreError::NotTrashed);
         }
-        let ids = subtree(&mut *tx, &id_s).await?;
+        let ids = subtree(&mut **tx, &id_s).await?;
         // Les ids en un seul paramètre, un tableau JSON : ce sont des UUID relus, sans rien à
         // échapper.
         let list = format!(
@@ -817,15 +824,17 @@ impl Store {
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        // Les documents d'abord (`nodes` est leur table mère) ; `acl` et `invitations` suivent
-        // les nœuds (`ON DELETE CASCADE`). Les nœuds partent en une instruction : la clé
-        // `parent_id` n'est vérifiée qu'à la fin, quand parents et enfants sont tous partis.
+        // Les documents d'abord (`nodes` est leur table mère) ; `acl`, `invitations`, les fils de
+        // commentaires (avec leurs messages et leurs réactions), les versions et les
+        // déplacements de blocs suivent les nœuds (`ON DELETE CASCADE`, migration `0003`). Les
+        // nœuds partent en une instruction : la clé `parent_id` n'est vérifiée qu'à la fin,
+        // quand parents et enfants sont tous partis.
         for sql in [
             "DELETE FROM doc_updates WHERE node_id IN (SELECT value FROM json_each(?))",
             "DELETE FROM doc_snapshots WHERE node_id IN (SELECT value FROM json_each(?))",
             "DELETE FROM nodes WHERE id IN (SELECT value FROM json_each(?))",
         ] {
-            sqlx::query(sql).bind(&list).execute(&mut *tx).await?;
+            sqlx::query(sql).bind(&list).execute(&mut **tx).await?;
         }
         bump_rev(&mut tx, &node.space_id.to_string()).await?;
         tx.commit().await?;
