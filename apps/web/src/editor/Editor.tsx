@@ -49,6 +49,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import * as Y from "yjs";
+import { blockOfSelection } from "../comments/dom";
 import { isCommentShortcut } from "../comments/shortcut";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug } from "./debug";
@@ -182,12 +183,14 @@ export function Editor({ session, fixture = null, onComment = null }: Props) {
 
   /**
    * Ctrl+Alt+M (Cmd+Option+M) : commenter le bloc où est le curseur. La lettre tapée fait foi,
-   * et AltGr garde ses caractères (`isCommentShortcut`).
+   * et AltGr garde ses caractères (`isCommentShortcut`). Le bloc est lu dans la sélection du
+   * document, que le navigateur pose dès le clic : celle de BlockNote peut la suivre d'un temps.
    */
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (onComment === null || !isCommentShortcut(event) || !editor.isFocused()) return;
     event.preventDefault();
-    onComment(editor.getTextCursorPosition().block.id);
+    const selected = blockOfSelection(event.currentTarget, document.getSelection());
+    onComment(selected ?? editor.getTextCursorPosition().block.id);
   };
 
   // `data-synced` (première synchro faite) et `data-editable` (éditeur modifiable) sur le
