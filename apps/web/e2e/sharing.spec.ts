@@ -654,7 +654,9 @@ test("share_menu_by_keyboard", async ({ browser }) => {
   await expect(button).toBeFocused();
   await button.click();
   await expect(menu).toBeVisible();
-  await titleOf(a).click();
+  // Au bord gauche du titre : le menu, ouvert sous son bouton, en couvre la droite depuis que le
+  // menu « … » de la page suit « Partager » (Task 11).
+  await titleOf(a).click({ position: { x: 5, y: 5 } });
   await expect(menu).toHaveCount(0);
   await expect(titleOf(a)).toBeFocused();
   // Le focus qui sort du menu par Tab le ferme.
