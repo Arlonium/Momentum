@@ -475,6 +475,7 @@ fn thread(thread: &mementum_store::Thread) -> Thread {
     Thread {
         id: thread.id.to_string(),
         block_id: thread.block_id.clone(),
+        opened_by: author(&thread.opened_by),
         created_at: thread.created_at,
         resolved_at: thread.resolved_at,
         resolved_by: thread.resolved_by.as_ref().map(author),

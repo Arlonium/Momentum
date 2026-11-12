@@ -324,6 +324,7 @@ async fn threads_read_back_with_their_authors_and_no_address() {
         json!({
             "id": thread.to_string(),
             "blockId": null,
+            "openedBy": author(mona, "Mona"),
             "createdAt": opened["createdAt"],
             "resolvedAt": resolved_at,
             "resolvedBy": author(mona, "Mona"),
@@ -365,6 +366,58 @@ async fn threads_read_back_with_their_authors_and_no_address() {
         .await;
     unreacted.assert_status(StatusCode::OK);
     assert_eq!(unreacted.json(), threads[0]["comments"][0]);
+}
+
+/// Un fil dit qui l'a ouvert (`openedBy`, identifiant et nom), dans la réponse qui le crée,
+/// dans celle qui le résout et à la lecture ; il le dit encore quand le premier message, celui
+/// de qui l'a ouvert, a été supprimé : c'est toujours elle qui peut le résoudre avec `comment`.
+#[tokio::test]
+async fn thread_says_who_opened_it() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (mona, tom) = (&team.mona, &team.tom);
+    let page = team
+        .page(
+            None,
+            "Commentée",
+            &[user(mona, Level::Comment), user(tom, Level::Comment)],
+        )
+        .await;
+    let opener = json!({ "id": mona.id.to_string(), "name": "Mona" });
+
+    let opened = mona
+        .browser
+        .post(&comments_uri(page), json!({ "body": "Ouvert par Mona" }))
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    let opened = opened.json();
+    assert_eq!(opened["openedBy"], opener);
+    let (thread, first) = (uuid(&opened["id"]), uuid(&opened["comments"][0]["id"]));
+    tom.browser
+        .post(
+            &format!("{}/replies", thread_uri(page, thread)),
+            json!({ "body": "Réponse de Tom" }),
+        )
+        .await
+        .assert_status(StatusCode::CREATED);
+    mona.browser
+        .delete(&message_uri(page, thread, first))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let read = mona.browser.get(&comments_uri(page)).await.json();
+    assert_eq!(read[0]["openedBy"], opener);
+    assert_eq!(read[0]["comments"][0]["author"]["name"], "Tom");
+    // Tom, seul auteur qui reste, ne résout pas le fil de Mona ; elle, oui.
+    let uri = thread_uri(page, thread);
+    tom.browser
+        .patch(&uri, json!({ "resolved": true }))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    let resolved = mona.browser.patch(&uri, json!({ "resolved": true })).await;
+    resolved.assert_status(StatusCode::OK);
+    assert_eq!(resolved.json()["openedBy"], opener);
+    assert_eq!(resolved.json()["resolvedBy"], opener);
 }
 
 /// Un fil attaché à un bloc lui survit : le bloc supprimé par `PUT /mmd`, le fil se lit

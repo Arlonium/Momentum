@@ -91,7 +91,10 @@ async fn thread_with_replies_and_reactions_reads_back_in_order() {
         thread_view(&first),
         (None, None, vec![view("alice", "Premier", false, &[])])
     );
-    assert_eq!(first.opened_by, alice.id);
+    assert_eq!(
+        (first.opened_by.id, first.opened_by.name.as_str()),
+        (alice.id, "alice")
+    );
     assert_eq!(first.resolved_at, None);
     assert_eq!(first.comments[0].created_at, first.created_at);
     let on_block = store

@@ -13,6 +13,11 @@ export type Thread = { id: string,
  */
 blockId: string | null, 
 /**
+ * Qui a ouvert le fil : il le reste quand son premier message est supprimé. C'est lui qui
+ * peut le résoudre ou le rouvrir avec « Peut commenter » (les autres : « Peut modifier »).
+ */
+openedBy: Author, 
+/**
  * Millisecondes Unix.
  */
 createdAt: number, 

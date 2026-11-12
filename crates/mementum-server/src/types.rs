@@ -584,6 +584,9 @@ pub struct Thread {
     /// L'identifiant du bloc auquel le fil est attaché ; `null` : un commentaire de la page.
     /// Il reste quand le bloc disparaît du document : le fil se lit toujours.
     pub block_id: Option<String>,
+    /// Qui a ouvert le fil : il le reste quand son premier message est supprimé. C'est lui qui
+    /// peut le résoudre ou le rouvrir avec « Peut commenter » (les autres : « Peut modifier »).
+    pub opened_by: Author,
     /// Millisecondes Unix.
     #[ts(type = "number")]
     pub created_at: i64,

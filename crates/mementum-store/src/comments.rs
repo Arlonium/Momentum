@@ -69,8 +69,8 @@ pub struct Thread {
     /// Le bloc auquel le fil est attaché ; `None` : un commentaire de la page. Il reste tel quel
     /// quand le bloc disparaît du document.
     pub block_id: Option<String>,
-    /// Qui l'a ouvert.
-    pub opened_by: Uuid,
+    /// Qui l'a ouvert : il le reste quand son premier message est supprimé.
+    pub opened_by: Author,
     /// Millisecondes Unix.
     pub created_at: i64,
     /// Millisecondes Unix ; `None` : le fil est ouvert.
@@ -101,13 +101,14 @@ pub enum Authorship {
     Any,
 }
 
-/// Colonnes d'un fil, avec le nom de qui l'a résolu. En littéral, pour que le SQL reste
-/// statique (`concat!`).
+/// Colonnes d'un fil, avec le nom de qui l'a ouvert et de qui l'a résolu. En littéral, pour que
+/// le SQL reste statique (`concat!`).
 macro_rules! thread_select {
     () => {
-        "SELECT t.id, t.block_id, t.created_by, t.created_at, t.resolved_at, t.resolved_by, \
-                u.name AS resolved_name \
-         FROM comment_threads t LEFT JOIN users u ON u.id = t.resolved_by "
+        "SELECT t.id, t.block_id, t.created_by, o.name AS opened_name, t.created_at, \
+                t.resolved_at, t.resolved_by, u.name AS resolved_name \
+         FROM comment_threads t JOIN users o ON o.id = t.created_by \
+         LEFT JOIN users u ON u.id = t.resolved_by "
     };
 }
 
@@ -144,7 +145,10 @@ fn thread_from_row(r: &SqliteRow) -> Result<Thread, StoreError> {
     Ok(Thread {
         id: parse_uuid(&r.get::<String, _>("id"))?,
         block_id: r.get("block_id"),
-        opened_by: parse_uuid(&r.get::<String, _>("created_by"))?,
+        opened_by: Author {
+            id: parse_uuid(&r.get::<String, _>("created_by"))?,
+            name: r.get("opened_name"),
+        },
         created_at: r.get("created_at"),
         resolved_at: r.get("resolved_at"),
         resolved_by,
