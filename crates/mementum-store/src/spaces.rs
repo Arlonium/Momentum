@@ -56,10 +56,15 @@ pub(crate) fn space_from_row(r: &SqliteRow) -> Result<Space, StoreError> {
 /// - avancer la version demande une `WriteTx` : une écriture neuve qui l'avance ne peut pas
 ///   oublier de l'annoncer ;
 /// - seul [`WriteTx::commit`] valide la transaction (la `Transaction` de sqlx n'est prêtée que
-///   par référence, et la valider la consomme), et il n'annonce qu'une fois la validation
-///   faite : un lecteur qui relit la version à l'annonce voit la nouvelle ;
-/// - une `WriteTx` abandonnée (un refus, une erreur, un `?`) est annulée par sqlx et n'annonce
-///   rien, même si elle avait avancé la version avant d'échouer.
+///   par référence, et la valider la consomme), et il annonce une fois la validation faite :
+///   un lecteur qui relit la version à l'annonce voit la nouvelle ;
+/// - toute transaction validée est annoncée, même si l'appel de `commit` est abandonné pendant
+///   qu'il attend la validation (sqlx la fait quand même) ; dans ce seul cas, l'annonce peut
+///   partir pour une validation qui n'a finalement pas abouti, jamais l'inverse (voir
+///   [`Announce`], Ruling R151) ;
+/// - une `WriteTx` abandonnée avant `commit` (un refus, une erreur, un `?`), ou dont la base
+///   refuse la validation, est annulée par sqlx et n'annonce rien, même si elle avait avancé la
+///   version avant d'échouer.
 ///
 /// Elle se prête comme la `Transaction` qu'elle tient : `&mut tx` pour les fonctions qui
 /// prennent une `&mut Transaction`, `&mut **tx` pour une requête (`&mut ***tx` quand on ne tient
@@ -73,13 +78,30 @@ pub(crate) struct WriteTx {
 
 impl WriteTx {
     /// Valide la transaction, puis annonce chaque espace dont elle a avancé la version. Si la
-    /// validation échoue, rien n'est annoncé.
+    /// base refuse la validation, rien n'est annoncé.
+    ///
+    /// Les annonces sont confiées, avant d'attendre la validation, à une garde ([`Announce`])
+    /// qui les envoie quand elle tombe : au retour de la validation, ou quand l'appel est
+    /// abandonné pendant qu'il l'attend (un gestionnaire HTTP dont le client coupe, un
+    /// `select!`, un `timeout`). sqlx valide alors quand même la transaction, dès que la
+    /// commande est partie, et ignore l'annulation qui suit : sans la garde, elle serait validée
+    /// sans être annoncée (Ruling R151).
     pub(crate) async fn commit(self) -> Result<(), StoreError> {
-        self.tx.commit().await?;
-        for space in self.advanced {
-            // Sans récepteur, personne n'est à prévenir : ce n'est pas une erreur.
-            let _ = self.changes.send(space);
+        let WriteTx {
+            tx,
+            advanced,
+            changes,
+        } = self;
+        let mut announce = Announce {
+            spaces: advanced,
+            changes,
+        };
+        if let Err(e) = tx.commit().await {
+            announce.spaces.clear();
+            return Err(e.into());
         }
+        // Après la validation : un lecteur qui relit la version à l'annonce voit la nouvelle.
+        drop(announce);
         Ok(())
     }
 
@@ -90,6 +112,28 @@ impl WriteTx {
             self.advanced.push(id);
         }
         Ok(())
+    }
+}
+
+/// Les annonces d'une transaction dont la validation a été demandée ([`WriteTx::commit`]) :
+/// envoyées quand la garde tombe, sauf si la base a refusé la validation (`spaces` vidé).
+///
+/// Abandonné pendant qu'il attend la validation, l'appel ne sait pas si elle a été faite. La
+/// garde annonce dans le doute : presque toujours, la commande est partie et sqlx valide la
+/// transaction. Une annonce de trop ne coûte qu'une relecture, puisque qui la reçoit relit la
+/// version et n'agit que si elle a monté ; une annonce qui manque laisserait une barre latérale
+/// périmée, sans rien qui le dise.
+struct Announce {
+    spaces: Vec<Uuid>,
+    changes: broadcast::Sender<Uuid>,
+}
+
+impl Drop for Announce {
+    fn drop(&mut self) {
+        for space in self.spaces.drain(..) {
+            // Sans récepteur, personne n'est à prévenir : ce n'est pas une erreur.
+            let _ = self.changes.send(space);
+        }
     }
 }
 
@@ -317,5 +361,109 @@ mod tests {
         bump_lsn(&mut tx, &space.to_string()).await.unwrap();
         tx.commit().await.unwrap();
         assert_eq!(store.space_lsn(space).await.unwrap(), Some(1));
+    }
+
+    /// Attend que la version de `space` vaille au moins `lsn`, lue par une autre connexion du
+    /// pool, avec une borne large (dix secondes) : une validation envoyée au fil de la
+    /// connexion finit par être faite, sans que le test compte sur un délai.
+    async fn wait_for_lsn(store: &Store, space: Uuid, lsn: i64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while store.space_lsn(space).await.unwrap().unwrap() < lsn {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "la validation n'est jamais arrivée"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// L'appel de `commit` abandonné après l'envoi de la validation, avant son acquittement
+    /// (un gestionnaire HTTP dont le client coupe, un `select!`, un `timeout`) : sqlx valide
+    /// quand même la transaction, et ignore l'annulation qui suit (`sqlx-sqlite`,
+    /// `connection/worker.rs`, `Command::Commit`). Ce qui est validé doit être annoncé.
+    ///
+    /// Interroger une fois le futur de `commit` envoie la commande au fil de la connexion, puis
+    /// attend l'acquittement : ce fil ne le rend qu'à qui le reçoit, donc rien ne peut le
+    /// rendre avant l'abandon. Si, par extraordinaire, la première interrogation aboutit déjà,
+    /// l'essai ne prouve rien, et un autre est fait.
+    #[tokio::test]
+    async fn commit_dropped_midway_still_announces_what_was_committed() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let (_dir, store, space) = store_with_space().await;
+        let mut changes = store.changes();
+        for attempt in 1..=100 {
+            let before = store.space_lsn(space).await.unwrap().unwrap();
+            let mut tx = store.write().await.unwrap();
+            bump_lsn(&mut tx, &space.to_string()).await.unwrap();
+            let mut commit = Box::pin(tx.commit());
+            let mut cx = Context::from_waker(Waker::noop());
+            match commit.as_mut().poll(&mut cx) {
+                Poll::Pending => {
+                    drop(commit);
+                    wait_for_lsn(&store, space, before + 1).await;
+                    assert_eq!(changes.try_recv(), Ok(space), "validée, donc annoncée");
+                    assert_eq!(changes.try_recv(), Err(TryRecvError::Empty));
+                    // La connexion rendue au pool sert encore : l'annulation que sqlx avait mise
+                    // en file derrière la validation est bien ignorée.
+                    let mut tx = store.write().await.unwrap();
+                    bump_lsn(&mut tx, &space.to_string()).await.unwrap();
+                    tx.commit().await.unwrap();
+                    assert_eq!(store.space_lsn(space).await.unwrap(), Some(before + 2));
+                    assert_eq!(changes.try_recv(), Ok(space));
+                    return;
+                }
+                Poll::Ready(done) => {
+                    done.unwrap();
+                    assert_eq!(changes.try_recv(), Ok(space), "essai {attempt}");
+                }
+            }
+        }
+        panic!("la validation a toujours abouti dès la première interrogation");
+    }
+
+    /// L'appel de `commit` abandonné avant d'avoir été interrogé : la validation n'est jamais
+    /// partie, la transaction est annulée, et la version n'a pas avancé.
+    #[tokio::test]
+    async fn commit_dropped_before_it_starts_commits_nothing() {
+        let (_dir, store, space) = store_with_space().await;
+        let mut changes = store.changes();
+        let mut tx = store.write().await.unwrap();
+        bump_lsn(&mut tx, &space.to_string()).await.unwrap();
+        drop(tx.commit());
+        // Une écriture suivante passe après l'annulation : sur la même connexion, si le pool la
+        // rend, ou derrière le verrou d'écriture qu'elle relâche.
+        let mut tx = store.write().await.unwrap();
+        bump_rev(&mut tx, &space.to_string()).await.unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(store.space_lsn(space).await.unwrap(), Some(1));
+        assert_eq!(store.space_rev(space).await.unwrap(), Some(1));
+        assert_eq!(changes.try_recv(), Ok(space));
+        assert_eq!(changes.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    /// Une validation que la base refuse (ici, une clé étrangère vérifiée à la validation)
+    /// n'annonce rien, et la version n'a pas avancé.
+    #[tokio::test]
+    async fn refused_commit_announces_nothing() {
+        let (_dir, store, space) = store_with_space().await;
+        let mut changes = store.changes();
+        let mut tx = store.write().await.unwrap();
+        sqlx::query("PRAGMA defer_foreign_keys = ON")
+            .execute(&mut **tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO nodes (id, space_id, kind, title, position, created_at, updated_at) \
+             VALUES ('n', 'espace-inconnu', 'page', 'x', 'a0', 1, 1)",
+        )
+        .execute(&mut **tx)
+        .await
+        .unwrap();
+        bump_lsn(&mut tx, &space.to_string()).await.unwrap();
+        assert!(tx.commit().await.is_err());
+        assert_eq!(changes.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(store.space_lsn(space).await.unwrap(), Some(0));
     }
 }

@@ -35,9 +35,13 @@
 //! avance `rev` (`bump_rev` avance les deux), plus le titre d'un nœud, sa place sous le même
 //! parent et le nom de l'espace (`bump_lsn` ; Ruling R150 pour le nom). Le contenu d'une page ne
 //! la touche pas. Elle n'avance que par ces deux fonctions, qui demandent une transaction
-//! d'écriture du store (`WriteTx`, ouverte par `Store::write`) : validée, celle-ci annonce sur
-//! [`Store::changes`] les espaces qu'elle a avancés, après la validation ; abandonnée ou
-//! refusée, elle n'annonce rien. Aucune requête n'écrit `lsn` ailleurs.
+//! d'écriture du store (`WriteTx`, ouverte par `Store::write`). Toute transaction validée
+//! annonce sur [`Store::changes`] les espaces qu'elle a avancés, après la validation, même si
+//! l'appel est abandonné pendant qu'il l'attend (sqlx valide quand même ; Ruling R151). Dans ce
+//! seul cas, une annonce peut partir pour une validation qui n'a finalement pas abouti, jamais
+//! l'inverse : sans effet, puisque qui la reçoit relit la version et n'agit que si elle a monté.
+//! Abandonnée avant sa validation, ou refusée, une transaction n'annonce rien. Aucune requête
+//! n'écrit `lsn` ailleurs.
 
 mod access_inputs;
 mod acl;
