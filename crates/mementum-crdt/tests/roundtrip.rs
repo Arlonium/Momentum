@@ -4,14 +4,14 @@
 use std::collections::BTreeSet;
 
 use mementum_crdt::{FRAGMENT, PageDoc};
-use mementum_md::{Block, Content, Inline, Styles, arb, normalize};
+use mementum_md::{Block, Cell, Content, Inline, Styles, arb, normalize};
 use proptest::prelude::*;
 use yrs::any::Number;
 use yrs::types::text::YChange;
 use yrs::updates::decoder::Decode;
 use yrs::{
     Any, Doc, OffsetKind, Options, Out, Text, Transact, Update, Xml, XmlElementPrelim, XmlFragment,
-    XmlOut,
+    XmlOut, XmlTextPrelim,
 };
 
 /// L'arbre canonique tel que Yjs le porte : une page vide n'existe pas
@@ -75,6 +75,156 @@ proptest! {
                 );
             }
         }
+    }
+}
+
+/// Une cellule telle qu'un client peut l'écrire dans Yjs, hors de toute
+/// grille : `tableHeader` ou `tableCell`, `colspan` et `rowspan` absents ou
+/// de 0 à 200, `colwidth` de longueur quelconque (`None` : `undefined`).
+#[derive(Debug, Clone)]
+struct ClientCell {
+    header: bool,
+    colspan: Option<i64>,
+    rowspan: Option<i64>,
+    colwidth: Option<Vec<Option<i64>>>,
+}
+
+fn client_span() -> impl Strategy<Value = Option<i64>> {
+    prop_oneof![
+        3 => Just(None),
+        3 => (0i64..=3).prop_map(Some),
+        1 => (0i64..=200).prop_map(Some),
+    ]
+}
+
+fn client_cell() -> impl Strategy<Value = ClientCell> {
+    (
+        any::<bool>(),
+        client_span(),
+        client_span(),
+        prop::option::of(prop::collection::vec(prop::option::of(50i64..300), 0..4)),
+    )
+        .prop_map(|(header, colspan, rowspan, colwidth)| ClientCell {
+            header,
+            colspan,
+            rowspan,
+            colwidth,
+        })
+}
+
+/// Un tableau écrit par un client : de 0 à 5 lignes, chacune de 0 à 4
+/// cellules ; lignes inégales, fusions qui sortent de la grille ou se
+/// recouvrent.
+fn client_table() -> impl Strategy<Value = Vec<Vec<ClientCell>>> {
+    prop::collection::vec(prop::collection::vec(client_cell(), 0..5), 0..6)
+}
+
+/// Texte de la cellule `i` de la ligne `r` : unique dans le tableau.
+fn cell_label(r: usize, i: usize) -> String {
+    format!("c{r}x{i}")
+}
+
+/// La page d'un seul tableau, écrit directement dans Yjs, élément par
+/// élément et attribut par attribut, comme le ferait un client.
+fn client_table_page(rows: &[Vec<ClientCell>]) -> PageDoc {
+    let doc = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let update = {
+        let mut txn = doc.transact_mut();
+        let root = fragment.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
+        let container = root.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(&mut txn, "id", "t");
+        let table = container.push_back(&mut txn, XmlElementPrelim::empty("table"));
+        for (r, cells) in rows.iter().enumerate() {
+            let row = table.push_back(&mut txn, XmlElementPrelim::empty("tableRow"));
+            for (i, c) in cells.iter().enumerate() {
+                let tag = if c.header { "tableHeader" } else { "tableCell" };
+                let cell = row.push_back(&mut txn, XmlElementPrelim::empty(tag));
+                for (name, value) in [("colspan", c.colspan), ("rowspan", c.rowspan)] {
+                    if let Some(v) = value {
+                        cell.insert_attribute(&mut txn, name, Any::Number(Number::Int(v)));
+                    }
+                }
+                if let Some(widths) = &c.colwidth {
+                    let values: Vec<Any> = widths
+                        .iter()
+                        .map(|w| w.map_or(Any::Undefined, |w| Any::Number(Number::Int(w))))
+                        .collect();
+                    cell.insert_attribute(&mut txn, "colwidth", Any::Array(values.into()));
+                }
+                let paragraph = cell.push_back(&mut txn, XmlElementPrelim::empty("tableParagraph"));
+                paragraph.push_back(&mut txn, XmlTextPrelim::new(cell_label(r, i)));
+            }
+        }
+        txn.encode_update_v1()
+    };
+    PageDoc::from_updates([update.as_slice()]).expect("mise à jour lisible")
+}
+
+/// Texte d'une cellule lue (le générateur n'y écrit qu'un texte sans marque).
+fn cell_plain(cell: &Cell) -> String {
+    cell.content
+        .iter()
+        .map(|inline| match inline {
+            Inline::Text { text, .. } => text.as_str(),
+            _ => "",
+        })
+        .collect()
+}
+
+/// Les blocs sans leurs ids, que le MMD sans ancres ne porte pas.
+fn without_ids(blocks: &[Block]) -> Vec<Block> {
+    let mut out = blocks.to_vec();
+    take_ids(&mut out, &mut Vec::new());
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+    /// Rulings R54 et R137 : quoi qu'un client écrive dans un tableau, la page
+    /// le lit en une grille que `parse` accepte, et le MMD rendu redonne
+    /// exactement les blocs lus. Aucune cellule n'est perdue ni répétée, le
+    /// bourrage ne fait au plus que doubler les cellules lues, et ce MMD,
+    /// écrit tel quel (`PUT /mmd`), se relit pareil.
+    #[test]
+    fn any_yjs_table_reads_as_mmd_that_parses(rows in client_table()) {
+        let page = client_table_page(&rows);
+        let blocks = page.read_blocks();
+        let markdown = mementum_md::render(&blocks, Default::default()).markdown;
+        let parsed = mementum_md::parse(&markdown);
+        prop_assert!(parsed.is_ok(), "{}\nMMD :\n{}", parsed.unwrap_err(), markdown);
+        let parsed = parsed.unwrap();
+        prop_assert_eq!(&parsed, &without_ids(&blocks), "MMD :\n{}", markdown);
+
+        let Content::Table(table) = &blocks[0].content else {
+            panic!("tableau attendu, lu {:?}", blocks[0]);
+        };
+        let written: Vec<String> = rows
+            .iter()
+            .enumerate()
+            .flat_map(|(r, cells)| (0..cells.len()).map(move |i| cell_label(r, i)))
+            .collect();
+        let read: Vec<String> = table
+            .rows
+            .iter()
+            .flatten()
+            .map(cell_plain)
+            .filter(|t| !t.is_empty())
+            .collect();
+        prop_assert_eq!(read, written, "MMD :\n{}", markdown);
+        // Cellules lues : celles du client, plus une par ligne sans cellule
+        // (une ligne s'il n'y en a pas).
+        let real = rows.iter().map(|r| r.len().max(1)).sum::<usize>().max(1);
+        let total: usize = table.rows.iter().map(Vec::len).sum();
+        prop_assert!(total <= 2 * real, "{} cellules pour {} lues\nMMD :\n{}", total, real, markdown);
+
+        let (fresh, _) = PageDoc::new_page();
+        fresh.write_blocks(&parsed).expect("écriture");
+        prop_assert_eq!(without_ids(&fresh.read_blocks()), parsed, "MMD :\n{}", markdown);
     }
 }
 

@@ -311,6 +311,162 @@ fn unwrapped_foreign_node_keeps_its_place_and_a_unique_id() {
     assert_eq!(fresh.read_blocks().len(), 2);
 }
 
+/// Une cellule écrite par un client : balise, texte, attributs entiers.
+struct Spec(&'static str, &'static str, Vec<(&'static str, i64)>);
+
+fn th(text: &'static str) -> Spec {
+    Spec("tableHeader", text, vec![])
+}
+
+fn td(text: &'static str) -> Spec {
+    Spec("tableCell", text, vec![])
+}
+
+impl Spec {
+    fn with(mut self, name: &'static str, value: i64) -> Self {
+        self.2.push((name, value));
+        self
+    }
+}
+
+/// Page d'un tableau écrit tel quel dans Yjs par un client, hors de toute
+/// grille : une ligne par vecteur, une cellule par [`Spec`].
+fn client_table(rows: Vec<Vec<Spec>>) -> PageDoc {
+    page_from(|txn, root| {
+        let container = root.push_back(txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(txn, "id", "t");
+        let table = container.push_back(txn, XmlElementPrelim::empty("table"));
+        for cells in &rows {
+            let row = table.push_back(txn, XmlElementPrelim::empty("tableRow"));
+            for Spec(tag, text, attrs) in cells {
+                let cell = row.push_back(txn, XmlElementPrelim::empty(*tag));
+                for (name, value) in attrs {
+                    cell.insert_attribute(txn, *name, Any::Number(Number::Int(*value)));
+                }
+                let paragraph = cell.push_back(txn, XmlElementPrelim::empty("tableParagraph"));
+                paragraph.push_back(txn, XmlTextPrelim::new(*text));
+            }
+        }
+    })
+}
+
+/// Le MMD de la page, une fois vérifié que `parse` le relit en les blocs lus
+/// (ids mis à part, que le MMD sans ancres ne porte pas).
+fn readable_mmd(page: &PageDoc) -> String {
+    let mut blocks = page.read_blocks();
+    let markdown = render(&blocks, RenderOpts::default()).markdown;
+    let parsed = parse(&markdown).unwrap_or_else(|e| panic!("{e}\nMMD :\n{markdown}"));
+    for block in &mut blocks {
+        block.id.clear();
+    }
+    assert_eq!(parsed, blocks, "MMD :\n{markdown}");
+    markdown
+}
+
+/// Ruling R137 : une ligne qui couvre moins de colonnes que la grille reçoit
+/// des cellules vides à droite, comme `fixTables` le ferait à la première
+/// frappe. Elles prennent la balise de la première cellule de leur ligne :
+/// une ligne d'en-tête trop courte le reste.
+#[test]
+fn short_row_is_read_padded() {
+    let page = client_table(vec![
+        vec![th("a"), th("b")],
+        vec![td("c"), td("d"), td("e")],
+        vec![td("f")],
+    ]);
+    assert_eq!(
+        readable_mmd(&page),
+        "| a | b |  |\n| --- | --- | --- |\n| c | d | e |\n| f |  |  |\n"
+    );
+}
+
+/// Ruling R137 : un `colspan` qui sort de la grille est ramené à ce qui
+/// reste de la ligne, un `rowspan` au nombre de lignes restantes.
+#[test]
+fn span_beyond_the_grid_is_read_clamped() {
+    let page = client_table(vec![
+        vec![th("a"), th("b"), th("c")],
+        vec![td("d").with("rowspan", 200), td("e").with("colspan", 200)],
+        vec![td("f"), td("g")],
+    ]);
+    assert_eq!(
+        readable_mmd(&page),
+        "| a | b | c |\n| --- | --- | --- |\n| d {rowspan=2} | e {colspan=2} |\n| f | g |\n"
+    );
+}
+
+/// Ruling R137 : une ligne entièrement couverte par des `rowspan` d'au-dessus
+/// garde ses cellules : le `rowspan` le plus à gauche qui la couvre s'arrête
+/// avant elle, autant qu'il faut pour leur faire de la place. Une ligne sans
+/// cellule en reçoit une vide, et la même place.
+#[test]
+fn row_covered_by_rowspans_is_read_with_its_cells() {
+    let page = client_table(vec![
+        vec![th("A").with("rowspan", 2), th("B").with("rowspan", 2)],
+        vec![td("C")],
+    ]);
+    assert_eq!(
+        readable_mmd(&page),
+        "| A | B {rowspan=2} |\n| --- | --- |\n| C |\n"
+    );
+
+    let page = client_table(vec![
+        vec![th("A").with("rowspan", 3), th("B").with("rowspan", 3)],
+        vec![],
+        vec![td("C")],
+    ]);
+    assert_eq!(
+        readable_mmd(&page),
+        "| A | B {rowspan=3} |\n| --- | --- |\n|  |\n| C |\n"
+    );
+}
+
+/// Ruling R147 : le bourrage ne dépasse jamais le nombre de cellules lues.
+/// Au-delà, le tableau se lit en une seule colonne, une cellule par ligne,
+/// dans l'ordre du document, sans fusion : aucune cellule n'est perdue, et
+/// la lecture reste proportionnelle à ce que le document porte, quelles que
+/// soient la forme des lignes et la taille des fusions.
+#[test]
+fn padding_never_exceeds_the_cells_read() {
+    // Six cellules lues, six de bourrage : en grille.
+    let page = client_table(vec![
+        vec![th("a"), th("b"), th("c"), th("d")],
+        vec![td("e")],
+        vec![td("f")],
+    ]);
+    assert_eq!(
+        readable_mmd(&page),
+        "| a | b | c | d |\n| --- | --- | --- | --- |\n| e |  |  |  |\n| f |  |  |  |\n"
+    );
+
+    // Sept lues, huit de bourrage : en une colonne.
+    let page = client_table(vec![
+        vec![th("a"), th("b"), th("c"), th("d"), th("e")],
+        vec![td("f")],
+        vec![td("g")],
+    ]);
+    assert_eq!(
+        readable_mmd(&page),
+        "| a |\n| --- |\n| b |\n| c |\n| d |\n| e |\n| f |\n| g |\n{header-rows=5}\n"
+    );
+
+    // Une ligne de 1 000 cellules, dont la première porte des fusions
+    // démesurées, puis 1 000 lignes d'une cellule : près d'un million de
+    // cellules de bourrage, refusées.
+    let mut first = vec![th("x").with("colspan", i64::MAX).with("rowspan", i64::MAX)];
+    first.extend((1..1000).map(|_| th("x")));
+    let mut rows = vec![first];
+    rows.extend((0..1000).map(|_| vec![td("y")]));
+    let page = client_table(rows);
+    let blocks = page.read_blocks();
+    let Content::Table(table) = &blocks[0].content else {
+        panic!("tableau attendu")
+    };
+    assert_eq!(table.rows.len(), 2000);
+    assert!(table.rows.iter().all(|row| row.len() == 1));
+    readable_mmd(&page);
+}
+
 /// M3 : un objet incorporé dans le texte d'un nœud étranger revient tel quel.
 #[test]
 fn foreign_text_embed_passes_through() {

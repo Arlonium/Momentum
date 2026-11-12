@@ -8,8 +8,19 @@
 //! pour une cellule fusionnée sur deux colonnes dont seule la première a une
 //! largeur. Les props de cellule sont des attributs du nœud de cellule,
 //! défauts compris.
+//!
+//! Un client Yjs écrit les cellules et les fusions qu'il veut : des lignes
+//! inégales, des `colspan` et `rowspan` qui sortent du tableau ou se
+//! recouvrent. Le serveur ne récrit pas un tel tableau (Ruling R137) : il le
+//! lit toujours en une grille que `mementum_md::parse` accepte (la règle de
+//! `check_grid`, Ruling R37), sans rien écrire dans le document. Voir
+//! [`read_table`].
 
-use mementum_md::{Cell, Inline, MAX_WIDTH_COLUMNS, Props, Table, cell_rowspan, cell_span};
+use std::collections::BTreeMap;
+
+use mementum_md::{
+    Cell, Inline, MAX_WIDTH_COLUMNS, PropValue, Props, Table, cell_rowspan, cell_span,
+};
 use mementum_schema::cell_props;
 use yrs::{Any, Out, ReadTxn, TransactionMut, Xml, XmlElementPrelim, XmlElementRef, XmlFragment};
 
@@ -26,46 +37,355 @@ fn empty_cell() -> Cell {
     }
 }
 
-/// Tableau : au moins une ligne, au moins une cellule par ligne. Les en-têtes
-/// sont lus sur les cellules `tableHeader` : lignes entières en tête du
-/// tableau, colonnes entières à gauche ; `normalize` les met ensuite sous
-/// leur forme canonique (Ruling R19). Les largeurs sont lues comme BlockNote
-/// lit `columnWidths` : les `colwidth` des cellules de la première ligne,
-/// mis bout à bout.
+/// Une cellule telle que le document la porte : la cellule, sa balise
+/// (`tableHeader`) et son `colwidth`, que seule la grille sait lire.
+struct ReadCell {
+    cell: Cell,
+    header: bool,
+    colwidth: Option<Out>,
+}
+
+impl ReadCell {
+    /// La cellule vide que reçoit une ligne qui n'en a pas.
+    fn empty() -> Self {
+        ReadCell {
+            cell: empty_cell(),
+            header: false,
+            colwidth: None,
+        }
+    }
+}
+
+/// Tableau : au moins une ligne, au moins une cellule par ligne (une ligne
+/// sans cellule en reçoit une vide, un tableau sans ligne une ligne), en une
+/// grille que `parse` accepte, quoi que porte le document (Ruling R137). Les
+/// cellules sont lues dans l'ordre, aucune n'est perdue ; voir [`grid`] pour
+/// la grille, et [`one_column`] quand il faudrait trop de cellules vides
+/// pour la fermer (Ruling R147).
+///
+/// Les en-têtes sont lus sur les balises des cellules de la grille obtenue :
+/// lignes entières en tête du tableau, colonnes entières à gauche ;
+/// `normalize` les met ensuite sous leur forme canonique (Ruling R19). Les
+/// largeurs sont celles des colonnes que couvre chaque cellule de la
+/// première ligne obtenue : les premières valeurs de son `colwidth`, une par
+/// colonne, comme prosemirror-tables les lit (Ruling R149).
 pub(crate) fn read_table<T: ReadTxn>(txn: &T, table: &XmlElementRef) -> Table {
-    let (mut rows, mut headers, mut column_widths) = (Vec::new(), Vec::new(), Vec::new());
+    let mut rows = Vec::new();
     for row in elements(txn, table) {
         if row.tag().as_ref() != "tableRow" {
             continue;
         }
-        let first = rows.is_empty();
-        let (mut cells, mut header) = (Vec::new(), Vec::new());
+        let mut cells = Vec::new();
         for cell in elements(txn, &row) {
             let tag = cell.tag().as_ref();
             if tag != "tableCell" && tag != "tableHeader" {
                 continue;
             }
-            header.push(tag == "tableHeader");
-            let read = Cell {
-                content: cell_inline(txn, &cell),
-                props: read_props(txn, &cell, cell_props(), &[COLWIDTH]),
-            };
-            if first {
-                push_widths(&mut column_widths, cell.get_attribute(txn, COLWIDTH), &read);
-            }
-            cells.push(read);
+            cells.push(ReadCell {
+                header: tag == "tableHeader",
+                colwidth: cell.get_attribute(txn, COLWIDTH),
+                cell: Cell {
+                    content: cell_inline(txn, &cell),
+                    props: read_props(txn, &cell, cell_props(), &[COLWIDTH]),
+                },
+            });
         }
         if cells.is_empty() {
-            cells.push(empty_cell());
-            header.push(false);
+            cells.push(ReadCell::empty());
         }
         rows.push(cells);
-        headers.push(header);
     }
     if rows.is_empty() {
-        rows.push(vec![empty_cell()]);
-        headers.push(vec![false]);
+        rows.push(vec![ReadCell::empty()]);
     }
+    let wanted: Vec<Vec<Span>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|c| Span {
+                    colspan: cell_span(&c.cell),
+                    rowspan: cell_rowspan(&c.cell),
+                })
+                .collect()
+        })
+        .collect();
+    match grid(&wanted) {
+        Some(grid) => in_grid(rows, &grid),
+        None => one_column(rows),
+    }
+}
+
+/// Fusions d'une cellule : colonnes et lignes de la grille qu'elle couvre.
+#[derive(Clone, Copy)]
+struct Span {
+    colspan: usize,
+    rowspan: usize,
+}
+
+/// La grille obtenue : les fusions de chaque cellule lue, et le nombre de
+/// cellules vides ajoutées au bout de chaque ligne.
+struct Grid {
+    spans: Vec<Vec<Span>>,
+    padding: Vec<usize>,
+}
+
+/// Grille d'un tableau dont `wanted` donne les fusions écrites, `colspan`
+/// déjà ramené entre 1 et [`MAX_WIDTH_COLUMNS`] et `rowspan` au moins 1
+/// ([`cell_span`], [`cell_rowspan`]). C'est la règle de `check_grid` (Ruling
+/// R37), lue à l'envers : ce qu'il refuserait est ramené à ce qu'il accepte.
+///
+/// - La largeur est celle de la ligne qui couvre le moins de colonnes,
+///   fusions et cellules d'au-dessus comptées, mais jamais moins que le
+///   nombre de cellules de la plus longue ligne : aucune cellule n'est
+///   perdue, et une fusion ne rend pas la grille plus large que ce que les
+///   autres lignes portent ([`grid_width`], Ruling R148). Pour une grille
+///   déjà valide, c'est sa largeur, et rien ne change.
+/// - Les lignes se lisent de haut en bas, chaque cellule à la première
+///   colonne libre après la précédente, comme dans prosemirror-tables.
+/// - Si les cellules d'une ligne n'ont pas chacune une colonne libre, les
+///   `rowspan` d'au-dessus qui la couvrent s'arrêtent avant elle, du plus à
+///   gauche au plus à droite, autant qu'il faut (Ruling R148).
+/// - Un `colspan` est ramené avant la colonne suivante prise par une cellule
+///   d'au-dessus, et à ce qui reste de la ligne une fois gardée une colonne
+///   pour chacune des cellules suivantes ; un `rowspan`, au nombre de lignes
+///   restantes, ligne courante comprise.
+/// - Une ligne qui couvre encore moins de colonnes que la grille reçoit des
+///   cellules vides au bout.
+///
+/// `None` si ces cellules vides seraient plus nombreuses que les cellules
+/// lues (Ruling R147) : le calcul s'arrête alors, sans rien allouer de plus.
+/// Sinon, le coût est en `O(n log n)` pour `n` cellules, quels que soient
+/// la largeur de la grille et les `colspan` ou `rowspan` écrits.
+fn grid(wanted: &[Vec<Span>]) -> Option<Grid> {
+    let height = wanted.len();
+    let width = grid_width(wanted);
+    let cells: usize = wanted.iter().map(Vec::len).sum();
+    let mut spans: Vec<Vec<Span>> = Vec::with_capacity(height);
+    let mut padding = Vec::with_capacity(height);
+    let mut padded = 0usize;
+    let mut taken = Taken::default();
+    // Cellules d'au-dessus qui couvrent encore la ligne, par colonne de
+    // début ; et, par ligne, celles dont le `rowspan` s'y arrête.
+    let mut covering: BTreeMap<usize, Cover> = BTreeMap::new();
+    let mut ending: Vec<Vec<usize>> = vec![Vec::new(); height + 1];
+    for (r, row) in wanted.iter().enumerate() {
+        for start in std::mem::take(&mut ending[r]) {
+            // Une cellule raccourcie plus haut n'est plus à libérer ici.
+            if covering.get(&start).is_some_and(|c| c.until == r) {
+                let cover = covering.remove(&start).expect("cellule qui couvre");
+                taken.release(start, cover.end);
+            }
+        }
+        while width.saturating_sub(taken.width) < row.len() {
+            // La largeur n'est jamais sous le nombre de cellules d'une ligne :
+            // libérer toutes les colonnes suffit toujours.
+            let Some((start, cover)) = covering.pop_first() else {
+                break;
+            };
+            taken.release(start, cover.end);
+            spans[cover.row][cover.index].rowspan = r - cover.row;
+        }
+        let mut placed = Vec::with_capacity(row.len());
+        let mut starts = Vec::with_capacity(row.len());
+        // `cursor` : fin de la cellule précédente ; `left` : colonnes prises
+        // par une cellule d'au-dessus avant `cursor`.
+        let (mut cursor, mut left) = (0usize, 0usize);
+        for (i, want) in row.iter().enumerate() {
+            let start = taken.first_free(cursor);
+            left += start - cursor;
+            let next = taken.next_start(start).unwrap_or(width);
+            let right = taken.width - left;
+            let later = row.len() - i - 1;
+            // Colonnes libres de `start` à la fin de la ligne, moins une par
+            // cellule suivante : au moins une, puisque chaque cellule de la
+            // ligne a une colonne libre.
+            let room = width
+                .saturating_sub(start)
+                .saturating_sub(right)
+                .saturating_sub(later)
+                .max(1);
+            let colspan = want
+                .colspan
+                .min(next.saturating_sub(start))
+                .min(room)
+                .max(1);
+            let rowspan = want.rowspan.min(height - r);
+            placed.push(Span { colspan, rowspan });
+            starts.push(start);
+            cursor = start + colspan;
+        }
+        let covered = taken.width + placed.iter().map(|s| s.colspan).sum::<usize>();
+        let pad = width.saturating_sub(covered);
+        padded = padded.saturating_add(pad);
+        if padded > cells {
+            return None;
+        }
+        for (index, (&start, span)) in starts.iter().zip(&placed).enumerate() {
+            if span.rowspan > 1 {
+                let end = start + span.colspan;
+                let until = r + span.rowspan;
+                taken.occupy(start, end);
+                covering.insert(
+                    start,
+                    Cover {
+                        end,
+                        until,
+                        row: r,
+                        index,
+                    },
+                );
+                ending[until].push(start);
+            }
+        }
+        spans.push(placed);
+        padding.push(pad);
+    }
+    Some(Grid { spans, padding })
+}
+
+/// Une cellule qui couvre des lignes sous la sienne : sa dernière colonne
+/// (exclue), la ligne où elle s'arrête (exclue), et sa place dans le tableau.
+struct Cover {
+    end: usize,
+    until: usize,
+    row: usize,
+    index: usize,
+}
+
+/// Largeur de la grille (voir [`grid`]) : la plus petite des largeurs que
+/// couvrent les lignes, chacune avec ses `colspan` et ceux des cellules
+/// d'au-dessus qui descendent jusqu'à elle (comptés comme prosemirror-tables
+/// les compte, même s'ils se recouvrent), et au moins le nombre de cellules
+/// de la plus longue ligne.
+fn grid_width(wanted: &[Vec<Span>]) -> usize {
+    let height = wanted.len();
+    let mut ending = vec![0usize; height + 1];
+    let (mut above, mut narrowest, mut longest) = (0usize, usize::MAX, 0usize);
+    for (r, row) in wanted.iter().enumerate() {
+        above -= ending[r];
+        let own = row.iter().map(|s| s.colspan).fold(0, usize::saturating_add);
+        narrowest = narrowest.min(above.saturating_add(own));
+        longest = longest.max(row.len());
+        for span in row.iter().filter(|s| s.rowspan > 1) {
+            let until = r.saturating_add(span.rowspan).min(height);
+            above += span.colspan;
+            ending[until] += span.colspan;
+        }
+    }
+    narrowest.max(longest)
+}
+
+/// Colonnes prises par une cellule d'au-dessus, en plages qui ne se touchent
+/// pas (début → fin exclue), et leur nombre : comme `check_grid`, chaque
+/// cellule se place en temps logarithmique, quelle que soit la largeur.
+#[derive(Default)]
+struct Taken {
+    ranges: BTreeMap<usize, usize>,
+    width: usize,
+}
+
+impl Taken {
+    /// Première colonne libre à partir de `column`.
+    fn first_free(&self, column: usize) -> usize {
+        match self.ranges.range(..=column).next_back() {
+            Some((_, &end)) if end > column => end,
+            _ => column,
+        }
+    }
+
+    /// Début de la première plage prise après la colonne libre `column`.
+    fn next_start(&self, column: usize) -> Option<usize> {
+        self.ranges.range(column..).next().map(|(&start, _)| start)
+    }
+
+    /// Prend les colonnes libres `[start, end)`.
+    fn occupy(&mut self, mut start: usize, mut end: usize) {
+        self.width += end - start;
+        if let Some((&before, &stop)) = self.ranges.range(..start).next_back()
+            && stop == start
+        {
+            self.ranges.remove(&before);
+            start = before;
+        }
+        if let Some(after) = self.ranges.remove(&end) {
+            end = after;
+        }
+        self.ranges.insert(start, end);
+    }
+
+    /// Libère les colonnes prises `[start, end)`.
+    fn release(&mut self, start: usize, end: usize) {
+        let Some((&from, &to)) = self.ranges.range(..=start).next_back() else {
+            return;
+        };
+        self.width -= end - start;
+        self.ranges.remove(&from);
+        if from < start {
+            self.ranges.insert(from, start);
+        }
+        if end < to {
+            self.ranges.insert(end, to);
+        }
+    }
+}
+
+/// Le tableau lu en grille : chaque cellule avec ses fusions obtenues, puis
+/// les cellules vides de sa ligne, à la balise de la première cellule de la
+/// ligne, comme les ajoute `fixTables` (Ruling R148).
+fn in_grid(rows: Vec<Vec<ReadCell>>, grid: &Grid) -> Table {
+    let mut column_widths = Vec::new();
+    let (mut out, mut headers) = (Vec::with_capacity(rows.len()), Vec::new());
+    for (r, row) in rows.into_iter().enumerate() {
+        let pad_header = row.first().is_some_and(|c| c.header);
+        let (mut cells, mut header) = (Vec::new(), Vec::new());
+        for (read, span) in row.into_iter().zip(&grid.spans[r]) {
+            if r == 0 {
+                let room = MAX_WIDTH_COLUMNS.saturating_sub(column_widths.len());
+                column_widths
+                    .extend(covered_widths(read.colwidth.as_ref(), span.colspan).take(room));
+            }
+            let mut cell = read.cell;
+            set_span(&mut cell.props, "colspan", span.colspan);
+            set_span(&mut cell.props, "rowspan", span.rowspan);
+            cells.push(cell);
+            header.push(read.header);
+        }
+        let pad = grid.padding[r];
+        cells.extend(std::iter::repeat_with(empty_cell).take(pad));
+        header.extend(std::iter::repeat_n(pad_header, pad));
+        out.push(cells);
+        headers.push(header);
+    }
+    with_headers(out, &headers, column_widths)
+}
+
+/// Le tableau lu en une colonne (Ruling R147) : une cellule par ligne, dans
+/// l'ordre du document, sans fusion. Sa grille vaut toujours, et sa taille
+/// est celle des cellules lues.
+fn one_column(rows: Vec<Vec<ReadCell>>) -> Table {
+    let mut column_widths = Vec::new();
+    let (mut out, mut headers) = (Vec::new(), Vec::new());
+    for read in rows.into_iter().flatten() {
+        if out.is_empty() {
+            column_widths.extend(covered_widths(read.colwidth.as_ref(), 1));
+        }
+        let mut cell = read.cell;
+        cell.props.remove("colspan");
+        cell.props.remove("rowspan");
+        out.push(vec![cell]);
+        headers.push(vec![read.header]);
+    }
+    with_headers(out, &headers, column_widths)
+}
+
+/// Lignes et colonnes d'en-tête lues sur les balises des cellules de la
+/// grille : lignes entières en tête du tableau, colonnes entières à gauche
+/// (indice de la cellule dans sa ligne, comme BlockNote).
+fn with_headers(
+    rows: Vec<Vec<Cell>>,
+    headers: &[Vec<bool>],
+    column_widths: Vec<Option<f64>>,
+) -> Table {
     let shortest = headers.iter().map(Vec::len).min().unwrap_or(0);
     let header_rows = headers.iter().take_while(|r| r.iter().all(|&h| h)).count();
     let header_cols = (0..shortest)
@@ -79,21 +399,24 @@ pub(crate) fn read_table<T: ReadTxn>(txn: &T, table: &XmlElementRef) -> Table {
     }
 }
 
-/// Ajoute les largeurs d'une cellule de la première ligne, comme BlockNote :
-/// les valeurs de son `colwidth`, ou sans `colwidth` une largeur automatique
-/// par colonne qu'elle couvre (`colspan`). Au plus [`MAX_WIDTH_COLUMNS`] en
-/// tout : `normalize` complète ensuite jusqu'à la largeur de la grille.
-fn push_widths(widths: &mut Vec<Option<f64>>, colwidth: Option<Out>, cell: &Cell) {
-    let room = MAX_WIDTH_COLUMNS.saturating_sub(widths.len());
-    match colwidth {
-        Some(Out::Any(Any::Array(values))) => {
-            widths.extend(values.iter().take(room).map(width));
-        }
-        Some(Out::Any(value @ Any::Number(_))) => {
-            widths.extend(std::iter::once(width(&value)).take(room));
-        }
-        _ => widths.extend(std::iter::repeat_n(None, cell_span(cell).min(room))),
+/// `colspan` ou `rowspan` obtenu : absent à 1, son défaut.
+fn set_span(props: &mut Props, name: &str, value: usize) {
+    if value > 1 {
+        props.insert(name.into(), PropValue::Int(value as i64));
+    } else {
+        props.remove(name);
     }
+}
+
+/// Largeurs des `span` colonnes qu'une cellule couvre, d'après son
+/// `colwidth` : sa valeur pour chaque colonne, automatique au-delà de ses
+/// valeurs ; un nombre seul vaut pour la première colonne.
+fn covered_widths(colwidth: Option<&Out>, span: usize) -> impl Iterator<Item = Option<f64>> + '_ {
+    (0..span).map(move |i| match colwidth {
+        Some(Out::Any(Any::Array(values))) => values.get(i).and_then(width),
+        Some(Out::Any(value @ Any::Number(_))) if i == 0 => width(value),
+        _ => None,
+    })
 }
 
 /// Une largeur : un nombre fini, dans les entiers sûrs (au-delà, `parse` ne
