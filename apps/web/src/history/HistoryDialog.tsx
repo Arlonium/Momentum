@@ -118,6 +118,22 @@ export function HistoryDialog({ node, session, readOnly, selfId, onRefused, onCl
   const trashed = node.trashedAt !== null;
   const canRestore = canEdit(node.level) && !trashed && !readOnly;
 
+  // La confirmation n'a plus d'objet : la version est sortie de l'historique, ou le droit de
+  // restaurer est parti (niveau baissé, page jetée ailleurs). Pas pendant l'envoi : la réponse
+  // du serveur le dira.
+  if (confirming && !restoring && (version === null || !canRestore)) setConfirming(false);
+  // Le bouton qui l'avait ouverte est parti avec elle : le focus ne tombe pas hors de la fenêtre.
+  useEffect(() => {
+    if (confirming) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    const list = listRef.current;
+    const target =
+      list?.querySelector<HTMLButtonElement>('button[aria-current="true"]') ??
+      list?.querySelector<HTMLButtonElement>("button");
+    target?.focus();
+  }, [confirming]);
+
   const choose = (id: string | null) => {
     setChosen(id);
     setRestoreError(null);

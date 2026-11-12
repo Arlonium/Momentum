@@ -318,6 +318,39 @@ test("a_purged_version_closes_its_preview_with_a_sentence", async () => {
   expect(items().some((item) => item.getAttribute("aria-current") === "true")).toBe(false);
 });
 
+test("a_confirmation_without_object_closes_and_focus_stays_in_the_window", async () => {
+  const { session } = await opened();
+  await click(items()[2]);
+  await click(restoreButton()!);
+  expect(confirmation()).not.toBeNull();
+  // La version sort de l'historique pendant qu'on hésite : rien à restaurer.
+  vi.mocked(getVersions).mockResolvedValue([{ ...v2, id: "v3" }, v2]);
+  await act(async () => session!.frame("versions"));
+  await until(() => confirmation() === null, "la confirmation fermée");
+  expect(restoreVersion).not.toHaveBeenCalled();
+  expect(dialog().contains(document.activeElement)).toBe(true);
+
+  // Le droit de restaurer part (niveau baissé ailleurs) : pareil.
+  await click(items()[1]);
+  await click(restoreButton()!);
+  expect(confirmation()).not.toBeNull();
+  await act(async () =>
+    root.render(
+      <HistoryDialog
+        node={page("p", { level: "read" })}
+        session={session}
+        readOnly={false}
+        selfId="alice"
+        onRefused={onRefused}
+        onClose={onClose}
+      />,
+    ),
+  );
+  expect(confirmation()).toBeNull();
+  expect(restoreButton()).toBeNull();
+  expect(dialog().contains(document.activeElement)).toBe(true);
+});
+
 test("focus_enters_the_window_stays_in_it_and_escape_closes_it", async () => {
   await opened();
   // Le focus entre dans la fenêtre, sur la version choisie.
