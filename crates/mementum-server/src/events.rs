@@ -8,13 +8,18 @@
 //! titre, ni compte, et la trame de fermeture n'a ni code ni raison. Le client relit alors
 //! l'arbre par `GET /api/v1/spaces/{id}/tree`, déjà filtré par `access.rs` : aucun second
 //! calcul de « qui voit quoi » n'est écrit pour ce canal. Ce que la personne en apprend, invitée
-//! comprise : que ce que montre la barre latérale de l'espace a changé pour quelqu'un, et quand
-//! (le coût accepté par R133). Le contenu d'une page n'avance pas la version.
+//! comprise : que ce que montre la barre latérale de l'espace a changé pour quelqu'un, quand, et
+//! combien de fois. La version avance d'un pas par écriture de structure (au moins un par
+//! transaction), pages privées comprises : l'écart entre deux numéros compte les écritures
+//! faites entre-temps dans tout l'espace, et le numéro lui-même leur total depuis la création de
+//! l'espace (le coût accepté par R133). Le contenu d'une page n'avance pas la version.
 //!
-//! **Ce qui y entre.** Rien : toute trame de données reçue, texte ou binaire, ferme la
-//! connexion. Les pings et les pongs du client passent (tungstenite répond seul aux pings). Un
-//! message reçu ne dépasse pas [`MAX_INCOMING_BYTES`] : au-delà, axum le refuse avant de le
-//! garder en entier, et la connexion se ferme.
+//! **Ce qui y entre.** Aucune donnée : toute trame de données reçue, texte ou binaire, ferme la
+//! connexion. Les pings du client passent (tungstenite y répond seul). Les pongs disent que le
+//! client vit (R153) : une connexion qui n'a répondu à aucun des [`MAX_MISSED_PONGS`] derniers
+//! pings est fermée au ping suivant ; un pong, sollicité ou non, remet le compte à zéro, et ne
+//! fait rien d'autre. Un message reçu ne dépasse pas [`MAX_INCOMING_BYTES`] : au-delà, axum le
+//! refuse avant de le garder en entier, et la connexion se ferme.
 //!
 //! **Quand la version avance.** Une tâche par connexion, celle qu'axum lance à la poignée de
 //! main, qui ne partage rien avec les autres que l'abonnement aux annonces du store
@@ -24,18 +29,30 @@
 //! (`Lagged`), elle relit la version, et n'écrit que si le numéro a monté : une annonce de trop
 //! n'envoie rien, et plusieurs écritures rapprochées peuvent ne faire qu'une trame.
 //!
-//! **Droits.** Avant chaque trame de version, la première comprise, et à chaque ping, elle
-//! revérifie que la session lue à la poignée de main vaut encore et que le compte a encore un
-//! rôle dans l'espace (`AppState::role_at_least`) ; sinon elle ferme, sans rien envoyer. La
-//! version est lue avant cette vérification : aucun numéro ne part qui ait été lu avant un
-//! retrait. Retirer quelqu'un de l'espace avance la version : son canal est fermé dès l'annonce.
-//! Une session fermée (déconnexion, changement de mot de passe) ou échue n'avance rien : le canal
-//! est fermé au ping suivant, ou à la trame suivante si elle vient avant, et ne reçoit rien
+//! **Droits.** Avant de mettre en file chaque trame de version, la première comprise, et chaque
+//! ping, elle revérifie que la session lue à la poignée de main vaut encore et que le compte a
+//! encore un rôle dans l'espace (`AppState::role_at_least`) ; sinon elle ferme, et ce qui
+//! attendait dans la file ne part pas. La version est lue avant cette vérification : aucun
+//! numéro lu après un retrait n'est mis en file. Un numéro lu, et vérifié, juste avant un retrait
+//! peut encore partir : c'est la trame déjà en file ou en cours d'envoi. Retirer quelqu'un de
+//! l'espace avance la version : son canal est fermé dès l'annonce. Une session fermée
+//! (déconnexion, changement de mot de passe) ou échue n'avance rien : le canal est fermé au ping
+//! suivant, ou à la trame suivante si elle vient avant, et rien n'est plus mis en file
 //! entre-temps.
 //!
-//! **File.** Une trame attend dans une file que la précédente soit partie. Une connexion qui ne
-//! lit plus la remplit : au-delà de [`QUEUE_FRAMES`] trames en attente, elle est fermée, elle
-//! seule.
+//! **Vie de la connexion.** Le critère est le pong (R153) : un pair qui ne répond plus aux pings,
+//! disparu ou qui ne lit plus, reçoit encore [`MAX_MISSED_PONGS`] pings, puis il est fermé à
+//! l'échéance du suivant, soit 80 s au plus après son dernier pong avec le défaut. Un navigateur
+//! répond aux pings sans que la page fasse rien, onglet en arrière-plan compris. Les pongs ne
+//! sont lus que quand rien ne part : pendant un envoi qui n'aboutit pas, les pings continuent
+//! d'être comptés, et le pair est fermé de même. Un pong ne donne rien d'autre que de rester en
+//! vie : les droits sont relus à chaque ping quoi qu'il arrive.
+//!
+//! **File.** Une trame attend dans une file que la précédente soit partie. Au-delà de
+//! [`QUEUE_FRAMES`] trames en attente, la connexion est fermée, elle seule. C'est un second
+//! garde-fou : avec des trames de quelques octets, l'envoi n'attend qu'une fois pleins les
+//! tampons du système, des centaines de kilo-octets ; il faudrait plus de 64 écritures de
+//! structure pendant un envoi bloqué, avant que les pings sans réponse ne ferment la connexion.
 //!
 //! [`Config::events_ping`]: crate::Config::events_ping
 
@@ -67,8 +84,17 @@ use crate::{AppState, now_ms};
 /// [`Config::events_ping`]: crate::Config::events_ping
 pub const EVENTS_PING: Duration = Duration::from_secs(20);
 
+/// Pings sans réponse qu'une connexion peut accumuler (Ruling R153) : au ping suivant, elle est
+/// fermée. Un pong reçu remet le compte à zéro.
+///
+/// Sans ce critère, un pair encore vivant en TCP mais qui ne lit plus garderait sa tâche et son
+/// abonnement pour toujours : la file ne se remplit pas avec des trames de quelques octets. Trois,
+/// et pas un : un pong peut tarder derrière un réseau lent ou un mandataire occupé.
+pub(crate) const MAX_MISSED_PONGS: u32 = 3;
+
 /// Trames qu'une connexion peut avoir en attente derrière celle qui part. Au-delà, elle est
-/// fermée : un client qui ne lit plus ne fait pas grossir la mémoire du serveur.
+/// fermée. Second garde-fou après les pongs ([`MAX_MISSED_PONGS`]) : la file ne grossit que si
+/// l'envoi attend, donc une fois pleins les tampons du système.
 pub(crate) const QUEUE_FRAMES: usize = 64;
 
 /// Taille maximale d'un message reçu d'un client (`WebSocketUpgrade::max_message_size`). Le
@@ -91,6 +117,8 @@ pub(crate) enum End {
     Revoked,
     /// L'espace n'existe plus.
     SpaceGone,
+    /// Aucun pong pour les [`MAX_MISSED_PONGS`] derniers pings.
+    Unresponsive,
     /// Plus de [`QUEUE_FRAMES`] trames en attente.
     QueueFull,
     /// Le store n'a pas répondu (journalisé là où c'est arrivé), ou ses annonces ont cessé.
@@ -104,6 +132,7 @@ impl End {
             End::DataReceived => "trame de données reçue du client",
             End::Revoked => "session fermée ou rôle retiré",
             End::SpaceGone => "espace supprimé",
+            End::Unresponsive => "pings restés sans réponse",
             End::QueueFull => "file vers le client pleine",
             End::Unavailable => "store indisponible",
         }
@@ -144,6 +173,7 @@ pub(crate) async fn serve<S: Socket>(
         session,
         space,
         sent: None,
+        unanswered: 0,
         queue: VecDeque::new(),
     };
     let Err(end) = run(&mut conn, &mut socket).await;
@@ -183,7 +213,7 @@ async fn run<S: Socket>(conn: &mut Conn<'_>, socket: &mut S) -> Result<Infallibl
             }
         } else {
             tokio::select! {
-                incoming = socket.next_frame() => on_incoming(incoming)?,
+                incoming = socket.next_frame() => conn.on_incoming(incoming)?,
                 change = changes.recv() => conn.on_change(change).await?,
                 () = &mut ping => {
                     ping.as_mut().reset(next_ping(every));
@@ -191,16 +221,6 @@ async fn run<S: Socket>(conn: &mut Conn<'_>, socket: &mut S) -> Result<Infallibl
                 }
             }
         }
-    }
-}
-
-/// Ce que le client envoie : un ping ou un pong passe ; une trame de données, une trame de
-/// fermeture ou une erreur termine la connexion.
-fn on_incoming(incoming: Option<Message>) -> Result<(), End> {
-    match incoming {
-        Some(Message::Ping(_) | Message::Pong(_)) => Ok(()),
-        Some(Message::Text(_) | Message::Binary(_)) => Err(End::DataReceived),
-        Some(Message::Close(_)) | None => Err(End::Left),
     }
 }
 
@@ -224,6 +244,8 @@ struct Conn<'a> {
     space: Uuid,
     /// La dernière version mise en file ; `None` avant la trame d'ouverture.
     sent: Option<i64>,
+    /// Pings mis en file depuis le dernier pong reçu (Ruling R153).
+    unanswered: u32,
     queue: VecDeque<Message>,
 }
 
@@ -238,10 +260,31 @@ impl Conn<'_> {
         }
     }
 
-    /// Le ping : les droits d'abord, puis le ping en file.
+    /// Ce que le client envoie : un pong remet à zéro le compte des pings sans réponse, et rien
+    /// d'autre ; un ping passe ; une trame de données, une trame de fermeture ou une erreur
+    /// termine la connexion.
+    fn on_incoming(&mut self, incoming: Option<Message>) -> Result<(), End> {
+        match incoming {
+            Some(Message::Pong(_)) => {
+                self.unanswered = 0;
+                Ok(())
+            }
+            Some(Message::Ping(_)) => Ok(()),
+            Some(Message::Text(_) | Message::Binary(_)) => Err(End::DataReceived),
+            Some(Message::Close(_)) | None => Err(End::Left),
+        }
+    }
+
+    /// Le ping : une connexion qui n'a répondu à aucun des derniers est fermée (Ruling R153) ;
+    /// sinon les droits, puis le ping en file.
     async fn on_ping(&mut self) -> Result<(), End> {
+        if self.unanswered >= MAX_MISSED_PONGS {
+            return Err(End::Unresponsive);
+        }
         self.check().await?;
-        self.push(Message::Ping(Bytes::new()))
+        self.push(Message::Ping(Bytes::new()))?;
+        self.unanswered += 1;
+        Ok(())
     }
 
     /// Relit la version ; si elle a monté depuis la dernière trame (ou s'il n'y en a pas eu),
@@ -309,14 +352,15 @@ impl Conn<'_> {
 
 #[cfg(test)]
 mod tests {
-    //! Ce que `tests/events.rs` ne peut pas montrer avec une vraie socket : une connexion qui ne
-    //! lit plus. Le système garde des centaines de kilo-octets pour elle avant que l'envoi
-    //! n'attende, soit des dizaines de milliers de trames ; une socket de test qui n'accepte
-    //! rien fait le même effet tout de suite.
+    //! Ce que `tests/events.rs` ne peut pas montrer avec une vraie socket : une connexion dont
+    //! l'envoi n'aboutit plus (le système garde des centaines de kilo-octets pour elle avant que
+    //! l'envoi n'attende, soit des dizaines de milliers de trames), et la fin exacte d'une
+    //! connexion (`End`). Une socket de test fait le même effet tout de suite.
 
     use std::sync::{Arc, Mutex, PoisonError};
 
     use axum::extract::ws::Message;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     use super::*;
@@ -328,35 +372,77 @@ mod tests {
     /// Délai maximal d'une attente.
     const WAIT: Duration = Duration::from_secs(10);
 
-    /// Une socket qui note ce qu'on lui donne. `accepts` : l'envoi aboutit aussitôt ; sinon il
-    /// n'aboutit jamais, comme vers un client qui ne lit plus. Elle ne reçoit rien.
+    /// Le client au bout d'une socket de test.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Peer {
+        /// L'envoi n'aboutit jamais : un client qui ne lit plus, dont la connexion est pleine.
+        Stuck,
+        /// L'envoi aboutit, et le client ne répond jamais aux pings.
+        Silent,
+        /// L'envoi aboutit, et le client répond à chaque ping par un pong, comme un navigateur.
+        Answering,
+    }
+
+    /// Une socket qui note ce qu'on lui donne, et se comporte comme `peer`.
     struct TestSocket {
-        accepts: bool,
+        peer: Peer,
         handed: Arc<Mutex<Vec<Message>>>,
+        /// Les pongs à rendre, un par ping envoyé quand `peer` répond.
+        pongs: (mpsc::UnboundedSender<()>, mpsc::UnboundedReceiver<()>),
+    }
+
+    impl TestSocket {
+        fn new(peer: Peer, handed: &Arc<Mutex<Vec<Message>>>) -> TestSocket {
+            TestSocket {
+                peer,
+                handed: handed.clone(),
+                pongs: mpsc::unbounded_channel(),
+            }
+        }
     }
 
     impl Socket for TestSocket {
         async fn send_frame(&mut self, message: Message) -> bool {
+            let ping = matches!(message, Message::Ping(_));
             self.handed
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(message);
-            if !self.accepts {
-                std::future::pending::<()>().await;
+            match self.peer {
+                Peer::Stuck => std::future::pending::<()>().await,
+                Peer::Silent => {}
+                Peer::Answering => {
+                    if ping {
+                        let _ = self.pongs.0.send(());
+                    }
+                }
             }
             true
         }
 
         async fn next_frame(&mut self) -> Option<Message> {
-            std::future::pending().await
+            // La socket garde l'émetteur : sans pong à rendre, l'attente ne finit jamais.
+            self.pongs.1.recv().await;
+            Some(Message::Pong(Bytes::new()))
         }
     }
 
-    /// Un état de serveur dont le canal envoie un ping toutes les millisecondes, un compte avec
-    /// sa session, et un espace dont il est propriétaire.
-    async fn pinging(dir: &tempfile::TempDir) -> (AppState, AuthUser, [u8; 32], Uuid) {
+    /// Ce qu'une socket de test a reçu.
+    fn handed(handed: &Arc<Mutex<Vec<Message>>>) -> Vec<Message> {
+        handed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Un état de serveur dont le canal envoie un ping tous les `every`, un compte avec sa
+    /// session, et un espace dont il est propriétaire.
+    async fn pinging(
+        dir: &tempfile::TempDir,
+        every: Duration,
+    ) -> (AppState, AuthUser, [u8; 32], Uuid) {
         let mut state = state(dir).await;
-        state.events_ping = Duration::from_millis(1);
+        state.events_ping = every;
         let alice = account(&state, "alice").await;
         let (_, session) = auth::new_token();
         state
@@ -378,48 +464,47 @@ mod tests {
         Message::text(format!("{{\"lsn\":{lsn}}}"))
     }
 
-    /// Une connexion dont l'envoi n'aboutit plus : la trame d'ouverture ne part pas, les pings
-    /// s'empilent derrière elle, et au-delà de 64 en attente la connexion est fermée. Elle seule
-    /// a reçu quelque chose : la trame d'ouverture, puis la trame de fermeture, sans raison.
+    /// R153 : un client à qui tout part mais qui ne répond à aucun ping est fermé après le
+    /// troisième resté sans réponse, au tick suivant. Il a reçu la trame d'ouverture, trois
+    /// pings, puis la trame de fermeture, sans raison.
     #[tokio::test]
-    async fn a_connection_that_does_not_read_is_closed_past_its_queue() {
-        assert_eq!(QUEUE_FRAMES, 64);
+    async fn a_connection_that_never_answers_pings_is_closed_after_the_third() {
+        assert_eq!(MAX_MISSED_PONGS, 3);
         let dir = tempfile::tempdir().unwrap();
-        let (state, alice, session, space) = pinging(&dir).await;
+        let (state, alice, session, space) = pinging(&dir, Duration::from_millis(1)).await;
         let lsn = state.store.space_lsn(space).await.unwrap().unwrap();
-        let handed = Arc::new(Mutex::new(Vec::new()));
-        let socket = TestSocket {
-            accepts: false,
-            handed: handed.clone(),
-        };
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let socket = TestSocket::new(Peer::Silent, &sent);
 
         let end = tokio::time::timeout(WAIT, serve(state.clone(), alice, session, space, socket))
             .await
             .expect("la connexion est fermée");
-        assert_eq!(end, End::QueueFull);
-        let handed = handed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        assert_eq!(handed, [version_frame(lsn), Message::Close(None)]);
+        assert_eq!(end, End::Unresponsive);
+        let ping = Message::Ping(Bytes::new());
+        assert_eq!(
+            handed(&sent),
+            [
+                version_frame(lsn),
+                ping.clone(),
+                ping.clone(),
+                ping,
+                Message::Close(None)
+            ]
+        );
     }
 
-    /// La même cadence de pings vers un client qui lit ne ferme rien : c'est la file qui compte,
-    /// pas le nombre de trames.
+    /// La même cadence de pings vers un client qui y répond ne ferme rien, bien au-delà de trois
+    /// pings et de la taille de la file : seuls comptent les pongs, et la file, qui se vide.
+    /// L'intervalle laisse au pong le temps d'être lu avant le ping suivant.
     #[tokio::test]
-    async fn a_connection_that_reads_is_kept_whatever_the_number_of_frames() {
+    async fn a_connection_that_answers_pings_is_kept_whatever_the_number_of_frames() {
         let dir = tempfile::tempdir().unwrap();
-        let (state, alice, session, space) = pinging(&dir).await;
+        let (state, alice, session, space) = pinging(&dir, Duration::from_millis(20)).await;
         let lsn = state.store.space_lsn(space).await.unwrap().unwrap();
-        let handed = Arc::new(Mutex::new(Vec::new()));
-        let socket = TestSocket {
-            accepts: true,
-            handed: handed.clone(),
-        };
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let socket = TestSocket::new(Peer::Answering, &sent);
         let pings = || {
-            handed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+            handed(&sent)
                 .iter()
                 .filter(|message| matches!(message, Message::Ping(_)))
                 .count()
@@ -427,25 +512,67 @@ mod tests {
 
         let served = serve(state.clone(), alice, session, space, socket);
         let enough = async {
-            while pings() < 4 * QUEUE_FRAMES {
+            while pings() <= QUEUE_FRAMES {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         };
         tokio::select! {
             end = served => panic!("connexion fermée : {end:?}"),
-            () = tokio::time::sleep(WAIT) => panic!("{} pings en {WAIT:?}", pings()),
+            () = tokio::time::sleep(4 * WAIT) => panic!("{} pings en {:?}", pings(), 4 * WAIT),
             () = enough => {}
         }
-        let handed = handed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        assert_eq!(handed[0], version_frame(lsn));
+        let sent = handed(&sent);
+        assert_eq!(sent[0], version_frame(lsn));
         assert!(
-            handed[1..]
+            sent[1..]
                 .iter()
                 .all(|message| matches!(message, Message::Ping(payload) if payload.is_empty())),
             "que des pings vides après la trame d'ouverture"
         );
+    }
+
+    /// Le second garde-fou : une connexion dont l'envoi n'aboutit plus, sans ping pendant le
+    /// test, est fermée quand plus de 64 trames de version attendent derrière la trame
+    /// d'ouverture, qui ne part jamais. Les écritures passent par le store de l'état, qui les
+    /// annonce ; plusieurs peuvent ne faire qu'une trame, d'où une écriture de plus tant que la
+    /// connexion vit. Elle n'a reçu que la trame d'ouverture, puis la trame de fermeture.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_whose_sending_is_stuck_is_closed_past_its_queue() {
+        assert_eq!(QUEUE_FRAMES, 64);
+        let dir = tempfile::tempdir().unwrap();
+        let (state, alice, session, space) = pinging(&dir, Duration::from_secs(3600)).await;
+        let lsn = state.store.space_lsn(space).await.unwrap().unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let socket = TestSocket::new(Peer::Stuck, &sent);
+        let served = tokio::spawn(serve(state.clone(), alice, session, space, socket));
+
+        let deadline = std::time::Instant::now() + WAIT;
+        while handed(&sent).is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pas de trame d'ouverture"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let mut writes = 0;
+        while !handed(&sent).contains(&Message::Close(None)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "toujours ouverte après {writes} écritures"
+            );
+            state
+                .store
+                .rename_space(space, &format!("Équipe {writes}"))
+                .await
+                .unwrap();
+            writes += 1;
+        }
+        let end = tokio::time::timeout(WAIT, served)
+            .await
+            .expect("la connexion est fermée")
+            .unwrap();
+        assert_eq!(end, End::QueueFull);
+        assert!(writes > QUEUE_FRAMES, "{writes} écritures");
+        assert_eq!(handed(&sent), [version_frame(lsn), Message::Close(None)]);
     }
 }

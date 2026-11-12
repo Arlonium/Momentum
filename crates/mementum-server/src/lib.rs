@@ -36,7 +36,7 @@
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
-//! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant chaque trame de version et à chaque ping, et la connexion est fermée sans rien recevoir s'ils ne valent plus ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
+//! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
 //! Toute erreur est en JSON : `{ "error": <code>, "message": <texte> }`
 //! ([`types::ErrorBody`]). Une route qui demande une session répond `401
@@ -99,7 +99,9 @@
 //! client relit l'arbre par `GET /api/v1/spaces/{id}/tree`, déjà filtré par
 //! `access.rs`. Aucun second calcul de « qui voit quoi » n'est écrit pour un
 //! flux poussé. Mêmes contrôles que `/sync` avant la poignée de main ; après,
-//! la session et le rôle sont revérifiés avant chaque trame et à chaque ping.
+//! la session et le rôle sont revérifiés avant de mettre en file chaque trame
+//! et chaque ping, et une connexion qui ne répond plus aux pings est fermée
+//! (Ruling R153).
 //!
 //! **Garde-fous réseau** (`guard.rs`). Une couche passe avant toute route.
 //! Sur la boucle locale, l'en-tête `Host` doit la nommer (DNS rebinding,

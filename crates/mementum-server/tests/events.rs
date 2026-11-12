@@ -5,7 +5,10 @@
 //! plus de rôle dans l'espace ou que sa session ne vaut plus.
 //!
 //! Le client de ces tests est celui de tungstenite, bloquant, sur un fil à lui ([`Channel`]) :
-//! il note dans l'ordre tout ce qu'il reçoit (trames de texte, pings, fermeture).
+//! il note dans l'ordre tout ce qu'il reçoit (trames de texte, pings, fermeture), et répond aux
+//! pings comme un navigateur (tungstenite renvoie le pong au `read` suivant). Pour un client qui
+//! ne répond pas aux pings, la poignée de main et les trames sont écrites à la main
+//! ([`Channel::connect_silent`]).
 //!
 //! Les écritures que le canal doit annoncer passent par les routes : le store de l'équipe
 //! (`Team::store`, `Team::page`) est une autre instance, sur la même base, qui annonce sur son
@@ -17,7 +20,7 @@
 
 mod common;
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
@@ -46,9 +49,8 @@ enum Seen {
     Closed,
 }
 
-/// Un client du canal de l'espace : tungstenite, sur un fil à lui, qui note ce qu'il reçoit et
-/// envoie ce qu'on lui donne. Le fil s'arrête quand la connexion se ferme ou que la valeur
-/// tombe.
+/// Un client du canal de l'espace, sur un fil à lui, qui note ce qu'il reçoit et envoie ce
+/// qu'on lui donne. Le fil s'arrête quand la connexion se ferme ou que la valeur tombe.
 struct Channel {
     seen: Arc<Mutex<Vec<(Instant, Seen)>>>,
     outgoing: mpsc::Sender<Message>,
@@ -82,18 +84,67 @@ impl Channel {
         // Non bloquante une fois ouverte : le fil lit sans attendre, et envoie entre deux
         // lectures.
         socket.get_mut().set_nonblocking(true).unwrap();
+        Ok(Channel::start(move |seen, to_send, stop| {
+            listen(socket, seen, to_send, stop);
+        }))
+    }
+
+    /// Comme [`Channel::connect`], pour un client qui lit tout et ne répond jamais aux pings :
+    /// la poignée de main et les trames passent à la main sur la socket, sans tungstenite, qui
+    /// répond de lui-même à chaque ping lu. Il ne sait envoyer qu'un pong vide
+    /// ([`Channel::send`] d'un `Message::Pong`). La poignée de main doit aboutir.
+    fn connect_silent(addr: SocketAddr, path: &str, cookie: Option<&str>) -> Channel {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let mut request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+        );
+        if let Some(cookie) = cookie {
+            request.push_str(&format!("Cookie: {cookie}\r\n"));
+        }
+        request.push_str("\r\n");
+        stream.write_all(request.as_bytes()).unwrap();
+        // La réponse jusqu'à la ligne vide ; ce qui la suit est déjà des trames.
+        let mut received = Vec::new();
+        let head_end = loop {
+            let mut chunk = [0; 1024];
+            let read = stream.read(&mut chunk).unwrap();
+            assert!(read > 0, "connexion fermée pendant la poignée de main");
+            received.extend_from_slice(&chunk[..read]);
+            if let Some(at) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&received[..head_end]).into_owned();
+        assert!(
+            head.starts_with("HTTP/1.1 101"),
+            "poignée de main refusée : {head}"
+        );
+        let pending = received.split_off(head_end);
+        stream.set_nonblocking(true).unwrap();
+        Channel::start(move |seen, to_send, stop| {
+            listen_silent(stream, pending, seen, to_send, stop);
+        })
+    }
+
+    /// Lance le fil d'un client.
+    fn start(
+        listen: impl FnOnce(&Mutex<Vec<(Instant, Seen)>>, &mpsc::Receiver<Message>, &AtomicBool)
+        + Send
+        + 'static,
+    ) -> Channel {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (outgoing, to_send) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         std::thread::spawn({
             let (seen, stop) = (seen.clone(), stop.clone());
-            move || listen(socket, &seen, &to_send, &stop)
+            move || listen(&seen, &to_send, &stop)
         });
-        Ok(Channel {
+        Channel {
             seen,
             outgoing,
             stop,
-        })
+        }
     }
 
     fn seen(&self) -> Vec<Seen> {
@@ -129,6 +180,14 @@ impl Channel {
 
     fn is_closed(&self) -> bool {
         self.seen().contains(&Seen::Closed)
+    }
+
+    /// Quand la connexion s'est fermée, si elle l'est.
+    fn closed_at(&self) -> Option<Instant> {
+        let seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.iter()
+            .find(|(_, what)| *what == Seen::Closed)
+            .map(|(at, _)| *at)
     }
 
     /// Envoie ce message au serveur.
@@ -191,6 +250,89 @@ fn listen(
     }
 }
 
+/// Le fil d'un client silencieux ([`Channel::connect_silent`]) : il lit les trames du serveur
+/// à la main, et n'envoie que les pongs qu'on lui donne. `pending` : ce qui suivait la réponse à
+/// la poignée de main.
+fn listen_silent(
+    mut stream: TcpStream,
+    mut pending: Vec<u8>,
+    seen: &Mutex<Vec<(Instant, Seen)>>,
+    to_send: &mpsc::Receiver<Message>,
+    stop: &AtomicBool,
+) {
+    let note = |what| {
+        seen.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((Instant::now(), what));
+    };
+    while !stop.load(Ordering::Relaxed) {
+        while let Ok(message) = to_send.try_recv() {
+            assert!(
+                matches!(message, Message::Pong(_)),
+                "un client silencieux n'envoie que des pongs : {message:?}"
+            );
+            // Un pong vide, masqué comme toute trame d'un client.
+            if stream
+                .write_all(&[0x8A, 0x80, 0x12, 0x34, 0x56, 0x78])
+                .is_err()
+            {
+                note(Seen::Closed);
+                return;
+            }
+        }
+        while let Some((opcode, payload, length)) = raw_frame(&pending) {
+            pending.drain(..length);
+            match opcode {
+                0x1 => note(Seen::Text(String::from_utf8(payload).unwrap())),
+                0x2 => note(Seen::Binary(payload)),
+                0x9 => note(Seen::Ping),
+                0x8 => {
+                    note(Seen::Closed);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let mut chunk = [0; 1024];
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                note(Seen::Closed);
+                return;
+            }
+            Ok(read) => pending.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => {
+                note(Seen::Closed);
+                return;
+            }
+        }
+    }
+}
+
+/// La première trame complète de `bytes`, si elle y est : son code d'opération, ses données et
+/// sa longueur totale. Les trames du serveur ne sont pas masquées.
+fn raw_frame(bytes: &[u8]) -> Option<(u8, Vec<u8>, usize)> {
+    let [first, second, ..] = *bytes else {
+        return None;
+    };
+    let (length, header) = match second & 0x7F {
+        126 => (
+            usize::from(u16::from_be_bytes([*bytes.get(2)?, *bytes.get(3)?])),
+            4,
+        ),
+        127 => {
+            let mut length = [0; 8];
+            length.copy_from_slice(bytes.get(2..10)?);
+            (usize::try_from(u64::from_be_bytes(length)).unwrap(), 10)
+        }
+        short => (usize::from(short), 2),
+    };
+    let payload = bytes.get(header..header + length)?;
+    Some((first & 0x0F, payload.to_vec(), header + length))
+}
+
 /// La version que porte une trame, qui doit être exactement `{"lsn":N}` : ni espace, ni autre
 /// champ, ni zéro en tête.
 fn version(frame: &str) -> i64 {
@@ -226,6 +368,24 @@ async fn opened(by: &Browser<'_>, addr: SocketAddr, space: impl std::fmt::Displa
     let channel = open(by, addr, space)
         .await
         .unwrap_or_else(|status| panic!("canal de l'espace refusé : {status}"));
+    assert!(
+        channel.wait_until(|c| !c.texts().is_empty()).await,
+        "pas de trame d'ouverture : {:?}",
+        channel.seen()
+    );
+    channel
+}
+
+/// Comme [`opened`], pour un client qui ne répond jamais aux pings
+/// ([`Channel::connect_silent`]).
+async fn silent(by: &Browser<'_>, addr: SocketAddr, space: impl std::fmt::Display) -> Channel {
+    let path = format!("/events/{space}");
+    let cookie = by.cookie();
+    let channel = tokio::task::spawn_blocking(move || {
+        Channel::connect_silent(addr, &path, cookie.as_deref())
+    })
+    .await
+    .unwrap();
     assert!(
         channel.wait_until(|c| !c.texts().is_empty()).await,
         "pas de trame d'ouverture : {:?}",
@@ -639,21 +799,22 @@ async fn events_refusals_match_sync() {
 }
 
 /// Un canal où rien ne se passe reçoit un ping toutes les `events_ping` (20 s par défaut), et
-/// reste ouvert. Le `k`-ième ping n'arrive jamais avant `k` intervalles après l'ouverture : une
-/// borne que la charge du poste ne peut pas faire manquer.
+/// reste ouvert tant qu'il y répond, bien au-delà de trois pings (R153). Le `k`-ième ping
+/// n'arrive jamais avant `k` intervalles après l'ouverture : une borne que la charge du poste ne
+/// peut pas faire manquer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_events_connection_is_kept_alive() {
     assert_eq!(EVENTS_PING, Duration::from_secs(20));
     assert_eq!(Config::default().events_ping, EVENTS_PING);
 
-    const PING: Duration = Duration::from_millis(300);
+    const PING: Duration = Duration::from_millis(100);
     let t = app_pinging_every(PING).await;
     let alice = t.account("Alice").await;
     let addr = t.listen().await;
     let started = Instant::now();
     let channel = opened(&alice.browser, addr, alice.space).await;
     assert!(
-        channel.wait_until(|c| c.ping_times().len() >= 3).await,
+        channel.wait_until(|c| c.ping_times().len() >= 12).await,
         "{:?}",
         channel.seen()
     );
@@ -757,4 +918,73 @@ async fn tree_is_as_recent_as_the_version_pushed() {
             .iter()
             .any(|node| node["id"] == page.id.as_str())
     );
+}
+
+/// R153 : un client qui lit tout mais ne répond à aucun ping est fermé après le troisième resté
+/// sans réponse : trois pings, puis la fermeture, au quatrième intervalle au plus tôt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unanswered_pings_close_the_channel() {
+    const PING: Duration = Duration::from_millis(100);
+    let t = app_pinging_every(PING).await;
+    let alice = t.account("Alice").await;
+    let addr = t.listen().await;
+    let started = Instant::now();
+    let channel = silent(&alice.browser, addr, alice.space).await;
+
+    assert!(
+        channel.wait_until(Channel::is_closed).await,
+        "{:?}",
+        channel.seen()
+    );
+    assert_eq!(channel.ping_times().len(), 3, "{:?}", channel.seen());
+    assert_eq!(channel.texts().len(), 1);
+    let closed = channel.closed_at().unwrap().duration_since(started);
+    assert!(closed >= PING * 4, "fermé après {closed:?}");
+}
+
+/// R153 : un pong, même tardif, remet le compte à zéro. Le client silencieux répond au deuxième
+/// ping seulement : il reçoit plus de trois pings avant d'être fermé, et il l'est quand même,
+/// trois pings sans réponse plus tard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pong_starts_the_count_again() {
+    const PING: Duration = Duration::from_millis(300);
+    let t = app_pinging_every(PING).await;
+    let alice = t.account("Alice").await;
+    let addr = t.listen().await;
+    let channel = silent(&alice.browser, addr, alice.space).await;
+
+    assert!(channel.wait_until(|c| c.ping_times().len() >= 2).await);
+    channel.send(Message::Pong(Vec::new().into()));
+    assert!(
+        channel.wait_until(Channel::is_closed).await,
+        "{:?}",
+        channel.seen()
+    );
+    let pings = channel.ping_times().len();
+    assert!(pings > 3, "{pings} pings : le pong n'a rien remis à zéro");
+}
+
+/// R153, vu comme une attaque : des pongs ne gardent en vie que le compte des pings sans
+/// réponse. Un client dont la session est fermée a beau en envoyer sans arrêt, le ping suivant
+/// relit sa session et ferme le canal, sans qu'il ait rien reçu de plus.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pongs_do_not_keep_a_closed_session_alive() {
+    const PING: Duration = Duration::from_millis(100);
+    let t = app_pinging_every(PING).await;
+    let alice = t.account("Alice").await;
+    let addr = t.listen().await;
+    let channel = silent(&alice.browser, addr, alice.space).await;
+
+    alice
+        .browser
+        .log_out()
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let deadline = Instant::now() + WAIT;
+    while !channel.is_closed() {
+        assert!(Instant::now() < deadline, "{:?}", channel.seen());
+        channel.send(Message::Pong(Vec::new().into()));
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(channel.texts().len(), 1);
 }
