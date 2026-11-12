@@ -2,16 +2,16 @@
 
 Ce document est fait pour quelqu'un, humain ou agent IA, qui ouvre ce dépôt sans rien savoir de son histoire. Il dit où en est le projet, ce qui reste à faire, et comment s'y prendre. Il renvoie aux sources plutôt que de les recopier.
 
-Écrit le 2026-11-10, à la clôture du lot 2 de la phase 1. Mis à jour le 2026-11-12, à l'ouverture du lot 3, puis le même jour **en cours d'exécution de sa partie A**, juste avant de pousser `main` à la demande de Lenny. À mettre à jour à chaque clôture de lot.
+Écrit le 2026-11-10, à la clôture du lot 2 de la phase 1. Mis à jour le 2026-11-12, à l'ouverture du lot 3, puis le même jour **en cours d'exécution de sa partie A**, et le soir quand Lenny a mis le travail en pause. À mettre à jour à chaque clôture de lot.
 
-> **Tu reprends en plein lot.** La partie A du lot 3 est exécutée aux onze quatorzièmes, et deux tâches étaient en cours au moment où `main` a été poussé. Lis d'abord [`docs/superpowers/logs/2026-11-12-p1-lot3-avancement.md`](superpowers/logs/2026-11-12-p1-lot3-avancement.md) : l'état tâche par tâche, ce qui était en cours, ce qui reste dans l'ordre, et la liste des reports à trier à la relecture finale.
+> **Tu reprends en plein lot, après une pause.** Douze des quatorze tâches de la partie A du lot 3 sont closes ; la relecture finale a rendu ses constats, et leur correction s'est arrêtée au début. Tout ce qui est fini est sur `main`, poussé ; rien n'est à moitié fait dans l'arbre. Lis d'abord [`docs/superpowers/logs/2026-11-12-p1-lot3-avancement.md`](superpowers/logs/2026-11-12-p1-lot3-avancement.md) (l'état tâche par tâche, ce qui était en cours à la pause, ce qui reste dans l'ordre, les reports), puis [`docs/superpowers/logs/2026-11-12-p1-lot3-relecture-finale.md`](superpowers/logs/2026-11-12-p1-lot3-relecture-finale.md) (chaque constat de la relecture finale, la décision, et où en est sa correction).
 
 ## En une minute
 
 - **Mementum** est un espace de travail open source façon Notion, auto-hébergeable, conçu pour que les agents IA lisent et écrivent les pages aussi proprement que les humains. Licence AGPL-3.0.
 - **Pile** : serveur Rust en un binaire (axum, sqlx sur SQLite, yrs), client React avec BlockNote dans `apps/web`, texte des pages en CRDT Yjs, format Markdown canonique « MMD » pour les agents.
 - **Deux personnes** : Lenny est le propriétaire du projet, ses décisions ne se remettent pas en cause sans lui (liste dans [`CLAUDE.md`](../CLAUDE.md)). Alex pilote le développement et fait la recette.
-- **Où on en est** : la phase 0 (essais) est finie. La phase 1 compte sept lots. Les lots 1 et 2 sont faits et poussés. Le lot 3 est ouvert : Lenny l'a choisi le 2026-11-12 et a validé le plan de sa partie A le même jour. **Onze de ses quatorze tâches sont closes et relues** (intégrité de la synchro, barre latérale et présents en direct, commentaires, historique des versions) ; la douzième est en correction, la treizième attend le verdict d'un essai, la quatorzième et la relecture finale restent à faire. Tout est sur `main`, poussé le 2026-11-12. Les lots 4 à 7 restent à faire.
+- **Où on en est** : la phase 0 (essais) est finie. La phase 1 compte sept lots. Les lots 1 et 2 sont faits et poussés. Le lot 3 est ouvert : Lenny l'a choisi le 2026-11-12 et a validé le plan de sa partie A le même jour. **Douze de ses quatorze tâches sont closes et relues** (intégrité de la synchro, barre latérale et présents en direct, commentaires, historique des versions, tests de ce que devient une frappe quand un bloc est déplacé) ; la treizième est récrite en trois parts d'après un essai, sans une ligne de code encore ; la quatorzième reste à faire ; la relecture finale a rendu seize constats, dont deux sont corrigés. Le plan de la partie B est écrit, pas relu. Tout est sur `main`, poussé le 2026-11-12 ; **le travail est en pause depuis ce soir-là**. Les lots 4 à 7 restent à faire.
 
 ## Dans quel ordre lire
 
@@ -32,8 +32,8 @@ Chaque décision prise en cours de route est un « Ruling », numéroté à la s
 | Phase 1, lot 2 : comptes, espaces, droits et corbeille | fini, poussé le 2026-11-10 (`main`, commit `7fb1b55` et suivants) | plan et registre datés du 2026-11-10 |
 | Recette du lot 2 | aucun défaut à corriger avant le lot 3 (réponse de Lenny, 2026-11-12) | [`docs/recette/2026-11-10-p1-lot2-recette.md`](recette/2026-11-10-p1-lot2-recette.md) |
 | Deux reports du lot 2 qui touchent à l'intégrité du contenu | faits le 2026-11-12 (R129, R130), poussés | registre du lot 3, « Avant le plan » |
-| Phase 1, lot 3, partie A « Collaboration » | **en cours, non close** : tâches 1 à 11 closes et relues ; tâche 12 en correction ; tâche 13 en attente d'un essai ; tâche 14, relecture finale et clone neuf à faire. Poussé tel quel le 2026-11-12, à la demande de Lenny | plan et registre datés du 2026-11-12 ; [avancement](superpowers/logs/2026-11-12-p1-lot3-avancement.md) |
-| Phase 1, lot 3, partie B « Blocs riches et organisation » | à faire, plan à écrire à la clôture de A (R132) | — |
+| Phase 1, lot 3, partie A « Collaboration » | **en pause, non close** : tâches 1 à 12 closes et relues ; tâche 13 récrite en 13a, 13b, 13c d'après un essai, rien d'écrit ; relecture finale : deux passes rendues, 2 constats corrigés sur 16 ; tâche 14, troisième passe et clone neuf à faire. Poussé tel quel le 2026-11-12 | plan et registre datés du 2026-11-12 ; [avancement](superpowers/logs/2026-11-12-p1-lot3-avancement.md) ; [relecture finale](superpowers/logs/2026-11-12-p1-lot3-relecture-finale.md) |
+| Phase 1, lot 3, partie B « Blocs riches et organisation » | plan écrit le 2026-11-12 (19 tâches, R240 à R257), **ni relu ni validé ni exécuté** | [plan](superpowers/plans/2026-11-12-p1-lot3b-blocs-riches-organisation.md) |
 | Phase 1, lots 4 à 7 | à faire, aucun plan écrit | voir plus bas |
 | Mesures ARM de la phase 0 | repoussées avant la phase 2 | `spike/RESULTS.md` |
 
@@ -45,13 +45,13 @@ Ce qu'elle ne fait pas encore : les bases de données et leurs vues, la recherch
 
 Vérification à la clôture du lot 2, sur un clone neuf, comme la CI : 548 tests Rust, 214 tests du client, 122 parcours de bout en bout, tous verts ; une page de 1 000 blocs s'ouvre en 134 ms (budget 300), une page de 10 000 blocs en 1,2 s (budget 3 s). Le détail est au registre.
 
-Au moment de pousser, le 2026-11-12, sur le poste de Lenny et **sans clone neuf** : `cargo fmt` et `cargo clippy -D warnings` propres, 681 tests Rust, 436 tests du client (et 12 scénarios du bloc déplacé marqués comme des échecs attendus), typecheck et licences npm propres ; la dernière suite complète de bout en bout (148 parcours verts, 2 marqués `fixme` exprès) date de la Task 11, et les budgets du navigateur aussi (142 ms et 1,2 s). La migration `0003` de ce lot a changé plusieurs fois et peut encore changer jusqu'à la clôture : **ne pas ouvrir `data/instance` avec un binaire de ce lot avant la clôture**.
+À la pause, le 2026-11-12, sur le poste de Lenny et **sans clone neuf** : `cargo fmt` et `cargo clippy -D warnings` propres, 681 tests Rust, 462 tests du client (et 12 scénarios du bloc déplacé marqués comme des échecs attendus), typecheck et licences npm propres ; la dernière suite complète de bout en bout (148 parcours verts, 2 marqués `fixme` exprès) date de la Task 11, donc d'avant les deux correctifs du client de la relecture finale, et les budgets du navigateur aussi (142 ms et 1,2 s). La migration `0003` de ce lot a changé plusieurs fois et peut encore changer jusqu'à la clôture : **ne pas ouvrir `data/instance` avec un binaire de ce lot avant la clôture**.
 
 ## Ce qui attend le propriétaire
 
 Rien de ceci ne se décide à sa place.
 
-1. **Le lot 3, partie A** : le plan ([`docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md`](superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md)) est validé (Lenny, 2026-11-12), et Lenny a demandé le même jour d'avancer sans validation intermédiaire, d'après la conception, puis de pousser l'état en cours. Ce qui l'attend est listé dans l'[avancement](superpowers/logs/2026-11-12-p1-lot3-avancement.md), « Ce qui attend le propriétaire » : le niveau qui lit l'historique (« Peut lire » dans le plan), la frappe perdue pendant une restauration (R188), la lenteur d'une restauration sur une très grande page, et le déplacement de blocs à plusieurs (Task 13). À la clôture : la recette de la partie A.
+1. **Le lot 3, partie A** : le plan ([`docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md`](superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md)) est validé (Lenny, 2026-11-12), et Lenny a demandé le même jour d'avancer sans validation intermédiaire, d'après la conception, puis de pousser l'état en cours. Ce qui l'attend est listé dans l'[avancement](superpowers/logs/2026-11-12-p1-lot3-avancement.md), « Ce qui attend le propriétaire » : l'historique réservé à « Peut modifier » (décidé à la relecture finale, pas encore dans le code, réversible), la façon de corriger le déplacement de blocs à plusieurs et ce qu'elle laisse (Task 13 : R220, R222), la frappe perdue pendant une restauration (R188), la lenteur d'une restauration sur une très grande page, et le plan de la partie B avec ses points ouverts. À la clôture : la recette de la partie A.
 2. **Quatre règles à valider**, parce qu'elles se voient à l'usage :
    - les membres ont l'accès complet aux pages d'équipe, comme dans Notion (R48) ;
    - les inscriptions sont sur invitation par défaut (R50) ;
@@ -94,11 +94,13 @@ Lenny a choisi le 2026-11-12 : **le lot 3, comme prévu**. Il lève les limites 
 
 La suite, dans l'ordre (le détail de chaque point est dans l'[avancement](superpowers/logs/2026-11-12-p1-lot3-avancement.md)) :
 
-1. finir la Task 12 (la preuve élargie de ce que devient une frappe quand un bloc est déplacé) et la faire relire ;
-2. trancher la Task 13 d'après le verdict de l'essai borné : la faire selon un découpage écrit et relu, ou appliquer la clause de sortie du plan (la limite reste, décrite exactement) ;
-3. la Task 14 : documentation relue contre le code, checklist de recette de la partie A ;
-4. la relecture finale de tout le lot en trois passes, sa vague de correction, puis toutes les suites sur un clone neuf et l'essai de migration sur une copie d'une base du lot 2 ;
-5. à la clôture : mettre ce document à jour, supprimer le fichier d'avancement, écrire le plan de la partie B.
+1. finir la vague de correction de la relecture finale, en deux pistes sans fichier commun : serveur (S2 d'abord, dont les tests sont gardés dans un fichier `.patch` à côté du registre, puis S1, S3, S5, S4, S6, S7) et client (C2, C3, C4, C6, C7, C8), puis les sept parcours de bout en bout (C9) ; faire re-relire chaque correction ;
+2. la Task 13a (le client écrit un déplacement comme « le bloc déplacé est recréé, les autres ne bougent pas », par un correctif de y-prosemirror), dans un atelier git à part, relue, puis reprise sur `main` ; elle peut se mener en même temps que le point 1 ;
+3. la Task 13b (le serveur reporte sur le bloc recréé ce qui a été tapé dans l'original), après la 13a et la piste serveur ;
+4. la Task 13c et la Task 14 : documentation relue contre le code, la limite qui reste écrite telle quelle, checklist de recette de la partie A ;
+5. la troisième passe de la relecture finale (documentation contre le code), puis toutes les suites sur un clone neuf, les budgets, et l'essai de migration sur une copie d'une base du lot 2 ;
+6. à la clôture : mettre ce document à jour, supprimer le fichier d'avancement et celui de la relecture finale ;
+7. la partie B : relire son plan, faire trancher ses points ouverts par le propriétaire, puis l'exécuter.
 
 ## Comment mener un lot
 
