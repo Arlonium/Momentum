@@ -5,7 +5,7 @@ import type { Tree } from "@mementum/protocol";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getTree } from "../api";
 import { renderHook, settle } from "../test/hooks";
-import { page } from "../test/pages";
+import { page, unauthenticated, unreachable } from "../test/pages";
 import { useSpaceEvents } from "./useSpaceEvents";
 import { useSpaceTree, useTreeReader } from "./useSpaceTree";
 
@@ -27,6 +27,9 @@ class FakeSocket {
   open(): void {
     this.onopen?.(new Event("open"));
   }
+  drop(): void {
+    this.onclose?.(new Event("close") as CloseEvent);
+  }
   frame(lsn: number): void {
     this.onmessage?.({ data: JSON.stringify({ lsn }) } as MessageEvent);
   }
@@ -37,6 +40,9 @@ const server = { lsn: 0 };
 let reads = 0;
 let readMs = 0;
 const onReturn = vi.fn();
+const onSessionLost = vi.fn();
+/** Ce que la lecture numéro `call` (de 1) rend en erreur ; `null` : elle aboutit. */
+let failing: (call: number) => Error | null = () => null;
 let visibility: DocumentVisibilityState = "visible";
 
 beforeEach(() => {
@@ -48,11 +54,18 @@ beforeEach(() => {
   server.lsn = 0;
   reads = 0;
   onReturn.mockClear();
+  onSessionLost.mockClear();
+  failing = () => null;
   vi.mocked(getTree).mockReset();
   vi.mocked(getTree).mockImplementation(
     (spaceId) =>
-      new Promise<Tree>((resolve) => {
+      new Promise<Tree>((resolve, reject) => {
         reads += 1;
+        const failure = failing(reads);
+        if (failure !== null) {
+          setTimeout(() => reject(failure), readMs);
+          return;
+        }
         const answer: Tree = { spaceId, lsn: server.lsn, nodes: [page("a")] };
         setTimeout(() => resolve(answer), readMs);
       }),
@@ -68,14 +81,14 @@ afterEach(() => {
 function composed({ spaceId }: { spaceId: string }) {
   const tree = useSpaceTree();
   const { live } = useSpaceEvents(spaceId, tree.channelChanged, () => tree.knownLsn(spaceId));
-  useTreeReader(tree, spaceId, {
+  const readError = useTreeReader(tree, spaceId, {
     retries: 0,
     live,
-    onSessionLost: vi.fn(),
+    onSessionLost,
     onGone: vi.fn(),
     onReturn,
   });
-  return tree;
+  return { ...tree, readError };
 }
 
 const pass = (ms: number) => settle(() => vi.advanceTimersByTime(ms));
@@ -111,7 +124,8 @@ test("first_frame_before_the_first_read_does_not_throw_it_away", async () => {
   expect(tree.current.knownLsn("perso")).toBe(5);
   await pass(10_000);
   expect(reads).toBe(1);
-  expect(onReturn).not.toHaveBeenCalled();
+  // Le compte est relu à la première trame (R150), une fois, avec sa limite.
+  expect(onReturn).toHaveBeenCalledTimes(1);
 });
 
 test("a_burst_of_writes_every_200_ms_still_reloads_about_every_second", async () => {
@@ -139,10 +153,11 @@ test("hidden_tab_waits_for_its_return_to_read_again", async () => {
   });
   for (let n = 0; n < 3; n++) {
     await write();
-    await pass(2_000);
+    await pass(1_000);
   }
   expect(reads).toBe(1);
-  // Au retour, une seule lecture, même moins de cinq secondes après la dernière.
+  // Au retour, trois secondes après la dernière lecture, donc moins de cinq : la seule raison
+  // de relire est ce que le canal a poussé, pas le retour sur l'onglet (R97).
   await settle(() => {
     visibility = "visible";
     document.dispatchEvent(new Event("visibilitychange"));
@@ -150,4 +165,98 @@ test("hidden_tab_waits_for_its_return_to_read_again", async () => {
   await pass(50);
   expect(reads).toBe(2);
   expect(tree.current.knownLsn("perso")).toBe(3);
+});
+
+test("a_restored_database_is_read_again_by_the_due_path_too", async () => {
+  readMs = 10;
+  server.lsn = 9;
+  const tree = await renderHook(composed, { spaceId: "perso" });
+  await settle(() => FakeSocket.instances[0].open());
+  await pass(50);
+  expect(tree.current.knownLsn("perso")).toBe(9);
+  await settle(() => {
+    visibility = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  // Le serveur relancé sur une base restaurée : sa version redescend, la connexion revient.
+  server.lsn = 3;
+  await settle(() => FakeSocket.instances[0].drop());
+  await pass(1_000);
+  await settle(() => FakeSocket.instances[1].open());
+  await settle(() => FakeSocket.instances[1].frame(3));
+  await pass(600);
+  expect(reads).toBe(1);
+  await settle(() => {
+    visibility = "visible";
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await pass(50);
+  expect(reads).toBe(2);
+  expect(tree.current.knownLsn("perso")).toBe(3);
+  // Les trames suivantes, plus basses ou égales, ne relisent plus.
+  await settle(() => FakeSocket.instances[1].frame(2));
+  await pass(5_000);
+  expect(reads).toBe(2);
+});
+
+test("account_is_read_again_when_a_read_in_flight_covers_the_version", async () => {
+  readMs = 10;
+  const tree = await renderHook(composed, { spaceId: "perso" });
+  await settle(() => FakeSocket.instances[0].open());
+  await pass(6_000);
+  onReturn.mockClear();
+  // Le serveur change (un espace renommé), puis une action d'ici relit l'arbre : sa lecture
+  // couvre la version, mais rien ne dit au client qu'elle précède celle du compte.
+  readMs = 1_500;
+  server.lsn = 1;
+  await settle(() => tree.current.reload());
+  await pass(100);
+  await settle(() => FakeSocket.instances[0].frame(1));
+  await pass(60_000);
+  expect(onReturn).toHaveBeenCalledTimes(1);
+  expect(tree.current.knownLsn("perso")).toBe(1);
+});
+
+test("what_was_pushed_for_a_space_does_not_follow_to_the_next", async () => {
+  readMs = 1_500;
+  const tree = await renderHook(composed, { spaceId: "a" });
+  await settle(() => FakeSocket.instances[0].open());
+  await pass(100);
+  // Une version haute de A est poussée pendant la lecture de A, puis on passe à B.
+  await settle(() => FakeSocket.instances[0].frame(50));
+  await pass(400);
+  server.lsn = 3;
+  await tree.rerender({ spaceId: "b" });
+  await pass(10_000);
+  expect(reads).toBe(2);
+  expect(tree.current.knownLsn("b")).toBe(3);
+});
+
+test("a_failed_read_with_a_read_due_is_not_read_again_at_once", async () => {
+  readMs = 1_500;
+  failing = () => unauthenticated();
+  await renderHook(composed, { spaceId: "perso" });
+  await settle(() => FakeSocket.instances[0].open());
+  await pass(100);
+  await settle(() => FakeSocket.instances[0].frame(1));
+  await pass(5_000);
+  expect(onSessionLost).toHaveBeenCalledTimes(1);
+  expect(reads).toBe(1);
+});
+
+test("a_failed_tree_read_is_tried_again_by_the_timer_even_with_the_channel_open", async () => {
+  readMs = 10;
+  failing = (call) => (call === 1 ? unreachable() : null);
+  const tree = await renderHook(composed, { spaceId: "perso" });
+  await settle(() => FakeSocket.instances[0].open());
+  await pass(50);
+  expect(tree.current.readError).not.toBeNull();
+  expect(reads).toBe(1);
+  await pass(10_050);
+  await pass(100);
+  expect(reads).toBe(2);
+  expect(tree.current.readError).toBeNull();
+  // Une lecture aboutie : le minuteur se tait de nouveau.
+  await pass(60_000);
+  expect(reads).toBe(2);
 });

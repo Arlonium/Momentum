@@ -51,14 +51,16 @@ function lsnOf(data: unknown): number | null {
 }
 
 /**
- * Ouvre le canal de l'espace `spaceId` (`null` : aucun). `onChange(lsn)` est appelé, avec la
- * plus haute version reçue, quand elle dépasse `known()`, la version de l'arbre affiché
+ * Ouvre le canal de l'espace `spaceId` (`null` : aucun). `onChange(lsn, forced)` est appelé,
+ * avec la plus haute version reçue, quand elle dépasse `known()`, la version de l'arbre affiché
  * (`null` : pas d'arbre encore ; c'est à l'appelant de ne pas jeter la lecture en route).
+ * `forced` : la première trame de la connexion diffère de cette version, plus basse comprise
+ * (R156) : l'arbre est à relire quelle que soit la version qu'il rend ensuite.
  * `live` : le canal est ouvert.
  */
 export function useSpaceEvents(
   spaceId: string | null,
-  onChange: (lsn: number) => void,
+  onChange: (lsn: number, forced: boolean) => void,
   known: () => number | null = () => null,
 ): { live: boolean } {
   const [live, setLive] = useState(false);
@@ -87,8 +89,9 @@ export function useSpaceEvents(
       waitingSince = null;
       const current = callbacks.current.known();
       const due = forced || current === null || seen > current;
+      const wasForced = forced;
       forced = false;
-      if (due) callbacks.current.onChange(seen);
+      if (due) callbacks.current.onChange(seen, wasForced);
     };
 
     const connect = () => {

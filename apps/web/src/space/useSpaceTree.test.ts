@@ -590,8 +590,8 @@ test("account_is_read_again_after_a_change_with_the_same_limit_and_replayed", as
   await answer(0, "perso", [page("a")]);
   // Le compte vient d'être lu, au chargement de l'application : trop tôt.
   await clock.pass(1_000);
-  await settle(() => tree.current.rereadAccount());
-  await settle(() => tree.current.rereadAccount());
+  await settle(() => tree.current.channelChanged(1, false));
+  await settle(() => tree.current.channelChanged(1, false));
   expect(onReturn).not.toHaveBeenCalled();
   await clock.pass(REFRESH_INTERVAL_MS - 1_000 - 1);
   expect(onReturn).not.toHaveBeenCalled();
@@ -599,10 +599,10 @@ test("account_is_read_again_after_a_change_with_the_same_limit_and_replayed", as
   expect(onReturn).toHaveBeenCalledTimes(1);
   // Hors limite : tout de suite, et la limite repart.
   await clock.pass(REFRESH_INTERVAL_MS);
-  await settle(() => tree.current.rereadAccount());
+  await settle(() => tree.current.channelChanged(1, false));
   expect(onReturn).toHaveBeenCalledTimes(2);
   await clock.pass(100);
-  await settle(() => tree.current.rereadAccount());
+  await settle(() => tree.current.channelChanged(1, false));
   expect(onReturn).toHaveBeenCalledTimes(2);
   await clock.pass(REFRESH_INTERVAL_MS - 100);
   expect(onReturn).toHaveBeenCalledTimes(3);
@@ -614,7 +614,7 @@ test("account_replay_is_cancelled_when_the_hook_unmounts", async () => {
   const clock = simulated();
   const tree = await renderHook(hook, { spaceId: "perso", live: true });
   await answer(0, "perso", [page("a")]);
-  await settle(() => tree.current.rereadAccount());
+  await settle(() => tree.current.channelChanged(1, false));
   await tree.unmount();
   await clock.pass(2 * REFRESH_INTERVAL_MS);
   expect(onReturn).not.toHaveBeenCalled();
