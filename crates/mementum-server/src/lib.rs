@@ -1,5 +1,5 @@
 //! Serveur HTTP de Mementum : comptes et sessions, API REST des pages, MMD,
-//! commentaires, WebSocket de synchronisation et canal de l'espace.
+//! commentaires, historique, WebSocket de synchronisation et canal de l'espace.
 //!
 //! | Route | Session | Réponse |
 //! |---|---|---|
@@ -42,6 +42,9 @@
 //! | `PATCH /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | `comment`, et en être l'auteur | `Comment` ; le même texte ne change rien, pas même `editedAt` ; `422 invalid_body` |
 //! | `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | en être l'auteur avec `comment`, ou `full` | `204` : le message part avec ses réactions, le fil avec son dernier message |
 //! | `PUT`, `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}/reactions/{emoji}` | `comment` | `Comment` : la réaction de la personne posée ou retirée (on ne retire que la sienne ; déjà dans cet état, rien ne change) ; `422 invalid_emoji` |
+//! | `GET /api/v1/pages/{id}/versions` | `read` (à la corbeille aussi) | `Version[]` : les versions de la page, la plus récente d'abord, cent au plus, chacune avec sa date, sa raison (`periodic`, `closing`, `before_restore`) et les comptes qui l'ont modifiée depuis la version d'avant (identifiant et nom, jamais l'adresse) (Ruling R135) |
+//! | `GET /api/v1/pages/{id}/versions/{versionId}/state` | `read` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) de la version, tel qu'il a été gardé ; une version qui n'est pas de cette page, inconnue ou mal nommée reçoit la réponse d'une page introuvable, comme sur la route suivante |
+//! | `POST /api/v1/pages/{id}/versions/{versionId}/restore` | `edit` | `204` : une version `before_restore` garde ce qui est remplacé, puis les blocs de la version sont écrits par-dessus le contenu, identifiants compris, comme une écriture ordinaire (la version que la page a déjà comme contenu ne change rien) ; `409 trashed` ; droits revérifiés une fois la page chargée (Ruling R89) ; `500 internal` pour un état gardé illisible, la page intacte |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
 //! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
@@ -51,8 +54,8 @@
 //! `invalid_request`), un corps de plus de 2 Mio `413 payload_too_large`, une
 //! route inconnue `404 not_found`, une méthode inconnue `405
 //! method_not_allowed`. Une page dont l'acteur ne répond plus reçoit `503
-//! unavailable`, sur `GET` et `PUT …/mmd` (Ruling R26), et sur `POST …/comments`
-//! avec un `blockId`. La base SQLite est le
+//! unavailable`, sur `GET` et `PUT …/mmd` (Ruling R26), sur `POST …/comments`
+//! avec un `blockId`, et sur la restauration d'une version. La base SQLite est le
 //! fichier [`config::DB_FILE`] du dossier des données.
 //!
 //! **Droits** (`access.rs`, le seul chemin par lequel les routes les calculent ;
@@ -92,6 +95,16 @@
 //! page (Ruling R136) ; une écriture sans effet (réaction déjà posée, fil déjà résolu, message
 //! modifié avec le même texte) n'écrit rien et n'envoie rien (Ruling R170). Aucune n'avance
 //! `spaces.rev` ni `spaces.lsn`.
+//!
+//! **Historique** (`routes/versions.rs`, Ruling R135). L'acteur de chaque page coupe ses
+//! versions (`mementum-sync`) : l'état complet de la page, avec les comptes qui l'ont modifiée
+//! depuis la version d'avant, avant l'écriture qui suit de `MEMENTUM_VERSION_EVERY_SECS` (dix
+//! minutes par défaut) la première écriture non versionnée, à l'arrêt de l'acteur s'il en reste
+//! (page vide, arrêt du serveur), et avant chaque restauration ; une page garde ses cent
+//! dernières. Chaque version coupée envoie la trame `{"type":"versions"}` aux connexions de
+//! synchro de la page. Les routes suivent l'ordre des refus des pages ; la version vient
+//! ensuite, et une version qui n'est pas de la page reçoit la réponse d'une page introuvable.
+//! L'historique se lit dès « Peut lire ».
 //!
 //! **Comptes** (`auth.rs`, `routes/auth.rs`) : comptes locaux, mot de passe
 //! haché en Argon2id, session par cookie. Le premier compte créé administre
@@ -156,6 +169,7 @@ mod routes {
     pub(crate) mod sharing;
     pub(crate) mod spaces;
     pub(crate) mod sync;
+    pub(crate) mod versions;
 }
 
 use std::future::Future;
@@ -184,7 +198,7 @@ pub use routes::pages::{MAX_TITLE_CHARS, UNTITLED};
 pub use types::{Info, Me, PageNode, SignupMode, Tree};
 
 use auth::LoginThrottle;
-use routes::{comments, info, invitations, pages, sharing, spaces, sync};
+use routes::{comments, info, invitations, pages, sharing, spaces, sync, versions};
 use types::ErrorCode;
 
 /// Taille maximale d'un corps de requête (celle d'axum par défaut, posée
@@ -266,9 +280,10 @@ pub async fn app(cfg: &Config) -> anyhow::Result<Router> {
 
 /// Lance le serveur sur `cfg.bind`, écrit sur la sortie standard la ligne
 /// `mementum écoute sur http://<adresse liée>`, puis sert jusqu'à Ctrl-C
-/// (ou `SIGTERM`).
+/// (ou `SIGTERM`). À l'arrêt, les pages ouvertes gardent leur dernière version
+/// avant que la base ferme ([`Hub::shutdown`]).
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
-    let (router, store) = build(&cfg).await?;
+    let (router, store, hub) = build(&cfg).await?;
     let listener = TcpListener::bind(cfg.bind)
         .await
         .with_context(|| format!("impossible d'écouter sur {}", cfg.bind))?;
@@ -287,11 +302,14 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serveur HTTP")?;
+    // Plus aucune requête : chaque page ouverte coupe sa version `closing` s'il lui reste des
+    // écritures non versionnées (Ruling R135), et ferme ses connexions, avant que la base ferme.
+    hub.shutdown().await;
     store.close().await;
     Ok(())
 }
 
-async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
+async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
     // Avant de toucher au disque : une adresse publique invalide arrête tout.
     let public_origin = cfg
         .public_url
@@ -329,7 +347,10 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
     if expired > 0 {
         tracing::info!(sessions = expired, "sessions échues supprimées");
     }
-    let hub = Hub::new(store.clone(), SyncConfig::default());
+    // Le réglage par défaut de la synchro, sauf l'intervalle des versions : l'e2e des budgets du
+    // navigateur suit son `idle_close` (`e2e_wait_follows_idle_close`, dans `mementum-sync`).
+    let sync = SyncConfig::default().with_version_every(cfg.version_every);
+    let hub = Hub::new(store.clone(), sync);
     let check_host = cfg.bind.ip().is_loopback();
     if !check_host {
         tracing::warn!(
@@ -348,7 +369,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
     }
     let state = AppState {
         store: store.clone(),
-        hub,
+        hub: hub.clone(),
         check_host,
         signup: cfg.signup,
         secure_cookies: public_origin
@@ -363,7 +384,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store)> {
         )),
         events_ping: cfg.events_ping,
     };
-    Ok((router(state), store))
+    Ok((router(state), store, hub))
 }
 
 fn router(state: AppState) -> Router {
@@ -431,6 +452,15 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/v1/pages/{id}/comments/{thread_id}/messages/{comment_id}/reactions/{emoji}",
             put(comments::react).delete(comments::unreact),
+        )
+        .route("/api/v1/pages/{id}/versions", get(versions::list))
+        .route(
+            "/api/v1/pages/{id}/versions/{version_id}/state",
+            get(versions::state),
+        )
+        .route(
+            "/api/v1/pages/{id}/versions/{version_id}/restore",
+            post(versions::restore),
         )
         .route("/sync/{id}", get(sync::sync))
         .route("/events/{id}", get(routes::events::events))

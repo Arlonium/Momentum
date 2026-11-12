@@ -427,3 +427,49 @@ fn signup_and_public_url_options() {
         );
     }
 }
+
+/// L'intervalle des versions (`--version-every-secs`, `MEMENTUM_VERSION_EVERY_SECS`) : une
+/// valeur refusée arrête le démarrage en nommant le réglage et la valeur, en français ; une
+/// option valide l'emporte sur une variable invalide.
+#[test]
+fn invalid_version_interval_stops_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("donnees");
+    /// Les options de `serve`, les variables d'environnement, et ce que l'erreur doit dire.
+    type Case<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)], &'a str);
+    let cases: [Case; 2] = [
+        (
+            &["--version-every-secs", "0"],
+            &[],
+            "--version-every-secs invalide (« 0 »)",
+        ),
+        (
+            &[],
+            &[("MEMENTUM_VERSION_EVERY_SECS", "dix")],
+            "MEMENTUM_VERSION_EVERY_SECS invalide (« dix »)",
+        ),
+    ];
+    for (args, vars, expected) in cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_mementum"))
+            .args(["serve", "--bind", "127.0.0.1:0", "--data-dir"])
+            .arg(&data)
+            .args(args)
+            .envs(vars.iter().copied())
+            .stdin(Stdio::null())
+            .output()
+            .expect("lancement de mementum");
+        let (stdout, stderr) = text(&output);
+        assert!(!output.status.success(), "{stdout}");
+        assert!(
+            stderr.contains(expected),
+            "« {expected} » attendu : {stderr}"
+        );
+        assert!(stderr.contains("1 au moins"), "{stderr}");
+    }
+    let server = Server::start_with_args(
+        &data,
+        &["--version-every-secs", "1"],
+        &[("MEMENTUM_VERSION_EVERY_SECS", "nimporte")],
+    );
+    assert_eq!(server.http("GET", "/health", None), (200, "ok".to_string()));
+}

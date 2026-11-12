@@ -13,13 +13,13 @@ use axum::http::{Method, StatusCode};
 use common::{
     Account, Browser, Logs, Reply, Team, TestApp, assert_french, comment_routes, exec_sql,
     json_request, outcome, overtaken, page_routes, query_i64, reprises, sync_url, synced_as, text,
-    trash_list, tree_nodes, uuid,
+    trash_list, tree_nodes, uuid, version_routes,
 };
 use mementum_acl::{Level, Role, Subject};
 use mementum_crdt::PageDoc;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
-use mementum_store::{Node, Store};
+use mementum_store::{Node, Store, VersionReason};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -516,6 +516,47 @@ async fn foreign_page_is_indistinguishable_from_missing() {
             for ((name, request), missing) in routes.into_iter().zip(&missing) {
                 let reply = browser.send(request).await;
                 assert_eq!(&outcome(&reply), missing, "{name}, fil caché, par {who}");
+            }
+        }
+    }
+    // De même pour l'historique d'une page qu'on ne voit pas, ses versions nommées par leurs vrais
+    // identifiants : rien ne dit qu'une version existe.
+    for page in [foreign, binned, private] {
+        let version = team
+            .store
+            .put_version(
+                page,
+                0,
+                b"etat cache",
+                &[team.tom.id],
+                VersionReason::Closing,
+            )
+            .await
+            .unwrap()
+            .to_string();
+        let missing = {
+            let mut replies = Vec::new();
+            for (name, request) in version_routes(&unknown, &version) {
+                let reply = zoe.browser.send(request).await;
+                let body = reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+                assert_eq!(body["message"], "page introuvable", "{name}");
+                replies.push(outcome(&reply));
+            }
+            replies
+        };
+        let mut askers = vec![("Zoé", &zoe.browser)];
+        if page == foreign {
+            askers.push(("une invitée", gina));
+        }
+        for (who, browser) in askers {
+            let routes = version_routes(&page.to_string(), &version);
+            for ((name, request), missing) in routes.into_iter().zip(&missing) {
+                let reply = browser.send(request).await;
+                assert_eq!(
+                    &outcome(&reply),
+                    missing,
+                    "{name}, version cachée, par {who}"
+                );
             }
         }
     }

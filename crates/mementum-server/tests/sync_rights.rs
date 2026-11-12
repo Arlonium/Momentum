@@ -892,6 +892,90 @@ async fn comment_on_a_block_checks_rights_again_once_the_page_is_loaded() {
     }
 }
 
+/// Ruling R89, pour la restauration d'une version (`POST …/versions/{versionId}/restore`,
+/// Ruling R135) : les droits sont contrôlés, puis de nouveau une fois la page chargée, juste
+/// avant que l'acteur coupe la version `before_restore` et restaure. Un droit retiré pendant le
+/// chargement ne restaure rien et ne coupe aucune version, et la réponse est celle du droit qui
+/// manque.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_checks_rights_again_once_the_page_is_loaded() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let count = async |table: &str, page: Uuid| {
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE node_id = '{page}'");
+        query_i64(&t.db_path(), &sql).await
+    };
+    let state = {
+        let (page, _) = PageDoc::new_page();
+        page.write_blocks(&mementum_md::parse("Restauré\n").unwrap())
+            .unwrap();
+        page.encode_state()
+    };
+    let cases = [
+        ("rien ne change", None, None),
+        (
+            "rétrogradée à la lecture",
+            Some(DEMOTED_TO_READ),
+            Some((StatusCode::FORBIDDEN, "forbidden")),
+        ),
+        (
+            "mise à la corbeille",
+            Some(TRASHED),
+            Some((StatusCode::CONFLICT, "trashed")),
+        ),
+        (
+            "accès retiré",
+            Some(ACCESS_REMOVED),
+            Some((StatusCode::NOT_FOUND, "not_found")),
+        ),
+    ];
+    for (what, change, refusal) in cases {
+        let grants = [user(&team.olga, Level::Full), user(&team.gina, Level::Edit)];
+        let page = team.page(None, what, &grants).await;
+        let version = team
+            .store
+            .put_version(page, 0, &state, &[], mementum_store::VersionReason::Closing)
+            .await
+            .unwrap();
+        let mut lock = WriteLock::take(&t).await;
+        let commit = async {
+            // Le temps que la route contrôle les droits et demande la page, dont le chargement
+            // attend le verrou : la même attente fixe que pour `PUT /mmd`, qui peut faire
+            // échouer le test à tort sur un poste chargé (l'assertion sur l'instantané le
+            // verrait), jamais passer.
+            tokio::time::sleep(HELD).await;
+            if let Some(change) = change {
+                write_rights_change(&mut lock, change, team.space, page, &team.gina).await;
+            }
+            lock.commit().await;
+        };
+        let uri = format!("/api/v1/pages/{page}/versions/{version}/restore");
+        let (reply, ()) = tokio::join!(team.gina.browser.post_empty(&uri), commit);
+
+        // La page a été chargée : un refus vient donc du second contrôle, pas du premier.
+        assert_eq!(count("doc_snapshots", page).await, 1, "{what}");
+        match refusal {
+            None => {
+                reply.assert_status(StatusCode::NO_CONTENT);
+                assert_eq!(mmd(&team.olga, page).await, "Restauré\n", "{what}");
+                assert_eq!(count("doc_versions", page).await, 2, "{what}");
+            }
+            Some((status, code)) => {
+                let body = reply.assert_error(status, code);
+                if status == StatusCode::NOT_FOUND {
+                    assert_eq!(body["message"], "page introuvable", "{what}");
+                }
+                assert_eq!(updates(&t, page).await, 0, "{what} : rien d'écrit");
+                assert_eq!(
+                    count("doc_versions", page).await,
+                    1,
+                    "{what} : aucune version coupée"
+                );
+            }
+        }
+    }
+}
+
 /// Le hachage de la session que porte ce navigateur, en hexadécimal, comme le rend
 /// `hex(token_hash)` en SQL.
 fn session_hex(browser: &Browser<'_>) -> String {

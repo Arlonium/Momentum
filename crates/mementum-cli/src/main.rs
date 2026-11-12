@@ -1,10 +1,13 @@
 //! Le binaire `mementum`.
 //!
 //! - `mementum serve [--bind <adresse>] [--data-dir <dossier>] [--signup
-//!   <open|invite>] [--public-url <url>]` lance le serveur. Les options
-//!   l'emportent sur `MEMENTUM_BIND`, `MEMENTUM_DATA_DIR`, `MEMENTUM_SIGNUP`
-//!   et `MEMENTUM_PUBLIC_URL`, qui l'emportent sur les défauts
-//!   (`127.0.0.1:8080`, `./data`, `invite`, pas d'adresse publique).
+//!   <open|invite>] [--public-url <url>] [--version-every-secs <secondes>]`
+//!   lance le serveur. Les options l'emportent sur `MEMENTUM_BIND`,
+//!   `MEMENTUM_DATA_DIR`, `MEMENTUM_SIGNUP`, `MEMENTUM_PUBLIC_URL` et
+//!   `MEMENTUM_VERSION_EVERY_SECS`, qui l'emportent sur les défauts
+//!   (`127.0.0.1:8080`, `./data`, `invite`, pas d'adresse publique, 600 s).
+//!   Arrêté par Ctrl-C (ou `SIGTERM`), le serveur laisse les pages ouvertes
+//!   garder leur dernière version avant de fermer la base.
 //! - `mementum user set-password --email <adresse> [--data-dir <dossier>]`
 //!   donne un nouveau mot de passe à un compte : l'issue d'un mot de passe
 //!   oublié, faute de SMTP. Le mot de passe est la première ligne de l'entrée
@@ -58,6 +61,12 @@ enum Command {
         /// le cookie de session porte `Secure`.
         #[arg(long, value_name = "URL")]
         public_url: Option<String>,
+        /// Intervalle des versions d'une page, en secondes, 1 au moins : une
+        /// version est gardée avant l'écriture qui suit de ce délai la
+        /// première écriture pas encore versionnée (défaut :
+        /// MEMENTUM_VERSION_EVERY_SECS, sinon 600, dix minutes).
+        #[arg(long, value_name = "SECONDES")]
+        version_every_secs: Option<String>,
     },
     /// Gère les comptes de l'instance.
     User {
@@ -104,9 +113,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             data_dir,
             signup,
             public_url,
+            version_every_secs,
         } => {
             // Les options d'abord : une variable n'est lue que si l'option manque.
-            let cfg = Config::from_args(bind, data_dir, signup, public_url)?;
+            let cfg = Config::from_args(bind, data_dir, signup, public_url, version_every_secs)?;
             mementum_server::serve(cfg).await
         }
         Command::User {

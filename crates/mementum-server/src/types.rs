@@ -629,6 +629,46 @@ pub struct ResolveThread {
     pub resolved: bool,
 }
 
+/// Pourquoi une version d'une page a été gardée (Ruling R135).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionReason {
+    /// Avant l'écriture qui suivait de l'intervalle du serveur (dix minutes par défaut) la
+    /// première écriture pas encore versionnée : l'état d'avant cette écriture.
+    Periodic,
+    /// Quand plus personne n'avait la page ouverte, ou que le serveur s'est arrêté.
+    Closing,
+    /// Juste avant une restauration : ce qu'elle a remplacé.
+    BeforeRestore,
+}
+
+impl From<mementum_store::VersionReason> for VersionReason {
+    fn from(reason: mementum_store::VersionReason) -> VersionReason {
+        match reason {
+            mementum_store::VersionReason::Periodic => VersionReason::Periodic,
+            mementum_store::VersionReason::Closing => VersionReason::Closing,
+            mementum_store::VersionReason::BeforeRestore => VersionReason::BeforeRestore,
+        }
+    }
+}
+
+/// Une version d'une page (`GET /api/v1/pages/{id}/versions`, Ruling R135) : l'état complet
+/// de la page à un instant, que `GET …/versions/{id}/state` rend en octets Yjs. Une page garde
+/// ses cent dernières.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Version {
+    pub id: String,
+    /// Millisecondes Unix.
+    #[ts(type = "number")]
+    pub created_at: i64,
+    pub reason: VersionReason,
+    /// Les comptes qui ont modifié la page depuis la version d'avant, dans l'ordre de leurs
+    /// identifiants, nommés comme dans les commentaires ; vide si aucune écriture n'avait de
+    /// compte. Un compte qui n'est plus dans l'espace reste nommé.
+    pub authors: Vec<Author>,
+}
+
 /// Code d'une erreur de l'API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -811,6 +851,8 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<UpdatePage>(&cfg),
         file::<UpdateSpace>(&cfg),
         file::<UserInfo>(&cfg),
+        file::<Version>(&cfg),
+        file::<VersionReason>(&cfg),
     ];
     let mut index = String::from(
         "// Généré par `mementum-server` (ts-rs) : ne pas modifier à la main.\n\
@@ -891,6 +933,16 @@ mod tests {
             assert_eq!(serde_json::to_value(root).unwrap(), section.as_str());
         }
         assert_eq!(RootSection::default(), RootSection::Private);
+    }
+
+    /// La raison d'une version s'écrit comme le store la garde, pour chacune des trois.
+    #[test]
+    fn version_reason_is_written_like_the_store_keeps_it() {
+        use mementum_store::VersionReason as Kept;
+        for reason in [Kept::Periodic, Kept::Closing, Kept::BeforeRestore] {
+            let written = serde_json::to_value(VersionReason::from(reason)).unwrap();
+            assert_eq!(written, reason.as_str());
+        }
     }
 
     #[test]

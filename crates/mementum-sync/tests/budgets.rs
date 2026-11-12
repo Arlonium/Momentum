@@ -291,7 +291,9 @@ async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
 /// les relise dans SQLite à leur ouverture. Ce test échoue, au lieu que l'e2e
 /// mesure sans bruit des pages encore en mémoire :
 /// - si `mementum serve` (crates `mementum-server` et `mementum-cli`) crée son
-///   hub avec autre chose que `SyncConfig::default()` ;
+///   hub avec autre chose que `SyncConfig::default()`, ou que ce réglage dont
+///   seul l'intervalle des versions change (`with_version_every`, qui ne
+///   touche à rien d'autre, Ruling R183) ;
 /// - si la constante de l'e2e ne vaut plus `idle_close` de ce réglage.
 #[test]
 fn e2e_wait_follows_idle_close() {
@@ -310,7 +312,7 @@ fn e2e_wait_follows_idle_close() {
                         source
                             .lines()
                             .filter(|line| line.contains("Hub::new("))
-                            .map(|line| (path.clone(), line.trim().to_string())),
+                            .map(|line| (path.clone(), source.clone(), line.trim().to_string())),
                     );
                 }
             }
@@ -320,13 +322,34 @@ fn e2e_wait_follows_idle_close() {
         !hubs.is_empty(),
         "aucun `Hub::new(` dans mementum-server ni mementum-cli"
     );
-    for (path, line) in &hubs {
-        // Le réglage par défaut tel quel : ni `SyncConfig { …, ..SyncConfig::default() }`,
+    for (path, source, line) in &hubs {
+        // Le réglage par défaut tel quel, ou une variable du même fichier qui le prend en ne
+        // changeant que l'intervalle des versions : ni `SyncConfig { …, ..SyncConfig::default() }`,
         // ni un appel réparti sur plusieurs lignes (refusé ici, à revoir à la main).
+        let config = line
+            .strip_suffix(");")
+            .and_then(|call| call.rsplit_once(", "))
+            .map(|(_, config)| config.trim());
+        let only_versions_change = |name: &str| {
+            source.lines().any(|other| {
+                other.trim()
+                    == format!(
+                        "let {name} = SyncConfig::default().with_version_every(cfg.version_every);"
+                    )
+            })
+        };
+        let kept = match config {
+            Some("SyncConfig::default()") => true,
+            Some(name) => {
+                name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && only_versions_change(name)
+            }
+            None => false,
+        };
         assert!(
-            line.ends_with(", SyncConfig::default());") && !line.contains(".."),
-            "`mementum serve` doit garder `SyncConfig::default()`, dont l'e2e suit `idle_close` : \
-             {} : {line}",
+            kept && !line.contains(".."),
+            "`mementum serve` doit garder `SyncConfig::default()` (seul l'intervalle des versions \
+             peut changer), dont l'e2e suit `idle_close` : {} : {line}",
             path.display()
         );
     }

@@ -828,7 +828,37 @@ pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
     .into_iter()
     // Les commentaires de la page (`routes/comments.rs`), sur un fil et un message quelconques.
     .chain(comment_routes(id, SOME_THREAD, SOME_MESSAGE))
+    // L'historique de la page (`routes/versions.rs`), sur une version quelconque.
+    .chain(version_routes(id, SOME_VERSION))
     .collect()
+}
+
+/// Une requête sur chaque route de l'historique de la page `id`, méthodes comprises, celles qui
+/// nomment une version sur `version` : `(nom, requête)`.
+pub fn version_routes(id: &str, version: &str) -> Vec<(&'static str, Request<Body>)> {
+    let versions = format!("/api/v1/pages/{id}/versions");
+    let bare = |method: Method, uri: String| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    };
+    vec![
+        ("GET versions", bare(Method::GET, versions.clone())),
+        (
+            "GET état d'une version",
+            bare(Method::GET, format!("{versions}/{version}/state")),
+        ),
+        (
+            "POST restauration",
+            bare(Method::POST, format!("{versions}/{version}/restore")),
+        ),
+        (
+            "POST restauration d'une version mal nommée",
+            bare(Method::POST, format!("{versions}/pas-une-version/restore")),
+        ),
+    ]
 }
 
 /// Une requête sur chaque route des commentaires de la page `id`, méthodes comprises, celles
@@ -916,6 +946,9 @@ const SOMEONE: &str = "01890000-0000-7000-8000-000000000001";
 /// Un fil et un message quelconques, visés par les routes des commentaires de [`page_routes`].
 const SOME_THREAD: &str = "01890000-0000-7000-8000-000000000002";
 const SOME_MESSAGE: &str = "01890000-0000-7000-8000-000000000003";
+
+/// Une version quelconque, visée par les routes de l'historique de [`page_routes`].
+const SOME_VERSION: &str = "01890000-0000-7000-8000-000000000004";
 
 /// Ce qui fait qu'une réponse est la même qu'une autre : statut, type de contenu, corps.
 pub fn outcome(reply: &Reply) -> (StatusCode, Option<String>, String) {

@@ -1,5 +1,5 @@
 //! Configuration du serveur : adresse d'écoute, dossier des données,
-//! inscriptions et adresse publique.
+//! inscriptions, adresse publique et intervalle des versions.
 //!
 //! | Réglage | Variable | Option de `mementum serve` | Défaut |
 //! |---|---|---|---|
@@ -7,6 +7,7 @@
 //! | dossier des données | `MEMENTUM_DATA_DIR` | `--data-dir` | `./data` |
 //! | inscriptions | `MEMENTUM_SIGNUP` | `--signup` | `invite` |
 //! | adresse publique | `MEMENTUM_PUBLIC_URL` | `--public-url` | aucune |
+//! | intervalle des versions d'une page, en secondes (1 au moins) | `MEMENTUM_VERSION_EVERY_SECS` | `--version-every-secs` | `600` |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
 //! l'emporte sur le défaut. Un dernier réglage n'a ni variable ni option :
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::http::Uri;
+use mementum_sync::VERSION_EVERY;
 
 use crate::events::EVENTS_PING;
 pub use crate::types::SignupMode;
@@ -47,6 +49,12 @@ pub const SIGNUP_VAR: &str = "MEMENTUM_SIGNUP";
 
 /// Variable d'environnement de l'adresse publique de l'instance.
 pub const PUBLIC_URL_VAR: &str = "MEMENTUM_PUBLIC_URL";
+
+/// Variable d'environnement de l'intervalle des versions d'une page, en secondes.
+pub const VERSION_EVERY_VAR: &str = "MEMENTUM_VERSION_EVERY_SECS";
+
+/// Option de `mementum serve` de l'intervalle des versions, telle que les messages la nomment.
+const VERSION_EVERY_OPTION: &str = "--version-every-secs";
 
 /// Ce qu'on attend d'une adresse publique, pour les messages d'erreur.
 const PUBLIC_URL_HINT: &str = "attendu une adresse comme https://notes.exemple.fr";
@@ -73,6 +81,10 @@ pub struct Config {
     /// défaut. Ni variable ni option : seuls les tests le raccourcissent, pour ne pas attendre
     /// 20 s.
     pub events_ping: Duration,
+    /// Intervalle des versions d'une page (Ruling R135) : une version est coupée avant
+    /// l'écriture qui suit de ce délai la première écriture non versionnée. Dix minutes par
+    /// défaut ([`VERSION_EVERY`]), une seconde au moins.
+    pub version_every: Duration,
 }
 
 impl Default for Config {
@@ -83,6 +95,7 @@ impl Default for Config {
             signup: SignupMode::default(),
             public_url: None,
             events_ping: EVENTS_PING,
+            version_every: VERSION_EVERY,
         }
     }
 }
@@ -91,22 +104,30 @@ impl Config {
     /// Les défauts, remplacés par les variables `MEMENTUM_*` qui sont posées
     /// (une variable vide compte comme absente).
     pub fn from_env() -> anyhow::Result<Config> {
-        Config::from_args(None, None, None, None)
+        Config::from_args(None, None, None, None, None)
     }
 
     /// Les options de la ligne de commande d'abord, puis les variables
     /// d'environnement, puis les défauts. Une variable n'est lue que si
     /// l'option manque : un `MEMENTUM_BIND` invalide n'empêche pas un
-    /// `--bind` valide.
+    /// `--bind` valide. `version_every_secs` est le texte de l'option
+    /// `--version-every-secs`, relu ici comme la variable, pour que les deux
+    /// soient refusés de la même façon.
     pub fn from_args(
         bind: Option<SocketAddr>,
         data_dir: Option<PathBuf>,
         signup: Option<SignupMode>,
         public_url: Option<String>,
+        version_every_secs: Option<String>,
     ) -> anyhow::Result<Config> {
-        Config::resolve(bind, data_dir, signup, public_url, |name| {
-            std::env::var_os(name)
-        })
+        Config::resolve(
+            bind,
+            data_dir,
+            signup,
+            public_url,
+            version_every_secs,
+            |name| std::env::var_os(name),
+        )
     }
 
     /// Comme [`Config::from_args`], avec `var` pour lire les variables.
@@ -115,6 +136,7 @@ impl Config {
         data_dir: Option<PathBuf>,
         signup: Option<SignupMode>,
         public_url: Option<String>,
+        version_every_secs: Option<String>,
         var: impl Fn(&str) -> Option<OsString>,
     ) -> anyhow::Result<Config> {
         let bind = match bind {
@@ -148,12 +170,20 @@ impl Config {
             // Refusée au démarrage, pas à la première requête.
             public_origin(url)?;
         }
+        let version_every = match version_every_secs {
+            Some(raw) => parse_version_every(OsStr::new(&raw), VERSION_EVERY_OPTION)?,
+            None => match set(&var, VERSION_EVERY_VAR) {
+                Some(raw) => parse_version_every(&raw, VERSION_EVERY_VAR)?,
+                None => VERSION_EVERY,
+            },
+        };
         Ok(Config {
             bind,
             data_dir: resolve_data_dir(data_dir, &var),
             signup,
             public_url,
             events_ping: EVENTS_PING,
+            version_every,
         })
     }
 
@@ -219,6 +249,22 @@ fn parse_bind(raw: &OsStr) -> anyhow::Result<SocketAddr> {
         })
 }
 
+/// L'intervalle des versions, lu dans la variable ou l'option `name` : un nombre entier de
+/// secondes, espaces de bord admises, une au moins.
+fn parse_version_every(raw: &OsStr, name: &str) -> anyhow::Result<Duration> {
+    raw.to_str()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|secs| *secs >= 1)
+        .map(Duration::from_secs)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{name} invalide (« {} ») : attendu un nombre entier de secondes, 1 au moins \
+                 (600 par défaut : une version toutes les dix minutes de frappe)",
+                raw.to_string_lossy()
+            )
+        })
+}
+
 /// `MEMENTUM_SIGNUP`.
 fn parse_signup(raw: &OsStr) -> anyhow::Result<SignupMode> {
     raw.to_str()
@@ -246,7 +292,7 @@ mod tests {
 
     #[test]
     fn defaults_listen_on_loopback_only() {
-        let cfg = Config::resolve(None, None, None, None, vars(&[])).unwrap();
+        let cfg = Config::resolve(None, None, None, None, None, vars(&[])).unwrap();
         assert_eq!(cfg, Config::default());
         assert_eq!(cfg.bind.to_string(), "127.0.0.1:8080");
         assert!(cfg.bind.ip().is_loopback());
@@ -260,6 +306,7 @@ mod tests {
     #[test]
     fn variables_replace_defaults() {
         let cfg = Config::resolve(
+            None,
             None,
             None,
             None,
@@ -285,7 +332,7 @@ mod tests {
             ("MEMENTUM_PUBLIC_URL", "  "),
         ]);
         assert_eq!(
-            Config::resolve(None, None, None, None, empty).unwrap(),
+            Config::resolve(None, None, None, None, None, empty).unwrap(),
             Config::default()
         );
     }
@@ -305,6 +352,7 @@ mod tests {
             Some(PathBuf::from("ici")),
             Some(SignupMode::Open),
             Some("http://192.168.1.10:8080".to_string()),
+            None,
             env,
         )
         .unwrap();
@@ -317,7 +365,7 @@ mod tests {
     #[test]
     fn invalid_bind_is_an_error_in_french() {
         let env = vars(&[("MEMENTUM_BIND", "localhost")]);
-        let err = Config::resolve(None, None, None, None, env).unwrap_err();
+        let err = Config::resolve(None, None, None, None, None, env).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("MEMENTUM_BIND invalide"), "{message}");
         assert!(message.contains("localhost"), "{message}");
@@ -328,7 +376,7 @@ mod tests {
     fn invalid_signup_is_an_error_in_french() {
         for raw in ["ouvert", "OPEN", "open,invite"] {
             let pairs = [("MEMENTUM_SIGNUP", raw)];
-            let err = Config::resolve(None, None, None, None, vars(&pairs)).unwrap_err();
+            let err = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap_err();
             let message = format!("{err:#}");
             assert!(message.contains("MEMENTUM_SIGNUP invalide"), "{message}");
             assert!(message.contains(raw), "{message}");
@@ -346,13 +394,13 @@ mod tests {
             "/chemin",
         ] {
             let pairs = [("MEMENTUM_PUBLIC_URL", raw)];
-            let err = Config::resolve(None, None, None, None, vars(&pairs)).unwrap_err();
+            let err = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap_err();
             let message = format!("{err:#}");
             assert!(message.contains("adresse publique invalide"), "{message}");
             assert!(message.contains("https://notes.exemple.fr"), "{message}");
             // La même adresse en option est refusée de même.
             let option = Some(raw.to_string());
-            assert!(Config::resolve(None, None, None, option, vars(&[])).is_err());
+            assert!(Config::resolve(None, None, None, option, None, vars(&[])).is_err());
         }
     }
 
@@ -380,6 +428,51 @@ mod tests {
         }
     }
 
+    /// L'intervalle des versions : dix minutes par défaut ; sinon l'option, puis la variable,
+    /// en secondes entières (espaces de bord admises), une au moins.
+    #[test]
+    fn version_interval_comes_from_the_option_then_the_variable() {
+        let none = Config::resolve(None, None, None, None, None, vars(&[])).unwrap();
+        assert_eq!(none.version_every, Duration::from_secs(600));
+        let pairs = [("MEMENTUM_VERSION_EVERY_SECS", " 30 ")];
+        let variable = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap();
+        assert_eq!(variable.version_every, Duration::from_secs(30));
+        // Vide : comme absente.
+        let pairs = [("MEMENTUM_VERSION_EVERY_SECS", " ")];
+        let empty = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap();
+        assert_eq!(empty.version_every, Duration::from_secs(600));
+        // L'option l'emporte, et une variable invalide ne l'empêche pas.
+        let pairs = [("MEMENTUM_VERSION_EVERY_SECS", "nimporte")];
+        let option = Some("1".to_string());
+        let cfg = Config::resolve(None, None, None, None, option, vars(&pairs)).unwrap();
+        assert_eq!(cfg.version_every, Duration::from_secs(1));
+    }
+
+    /// Une valeur qui n'est pas un nombre entier de secondes, une au moins, arrête le démarrage
+    /// en nommant le réglage et la valeur, en français.
+    #[test]
+    fn invalid_version_interval_is_refused_naming_it() {
+        for raw in ["0", "-5", "dix", "1.5", "600s", "99999999999999999999999"] {
+            let pairs = [("MEMENTUM_VERSION_EVERY_SECS", raw)];
+            let err = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("MEMENTUM_VERSION_EVERY_SECS invalide"),
+                "{message}"
+            );
+            assert!(message.contains(raw), "{message}");
+            assert!(message.contains("1 au moins"), "{message}");
+            let option = Some(raw.to_string());
+            let err = Config::resolve(None, None, None, None, option, vars(&[])).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("--version-every-secs invalide"),
+                "{message}"
+            );
+            assert!(message.contains(raw), "{message}");
+        }
+    }
+
     /// `MEMENTUM_DATA_DIR` se lit tel quel, même hors UTF-8.
     #[test]
     fn data_dir_is_read_without_loss() {
@@ -396,7 +489,7 @@ mod tests {
         };
         assert!(raw.to_str().is_none(), "pas de l'UTF-8");
         let expected = PathBuf::from(&raw);
-        let cfg = Config::resolve(None, None, None, None, move |name| {
+        let cfg = Config::resolve(None, None, None, None, None, move |name| {
             (name == DATA_DIR_VAR).then(|| raw.clone())
         })
         .unwrap();

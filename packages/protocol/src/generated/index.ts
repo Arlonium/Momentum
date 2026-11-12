@@ -42,3 +42,5 @@ export type { UpdateMember } from "./UpdateMember";
 export type { UpdatePage } from "./UpdatePage";
 export type { UpdateSpace } from "./UpdateSpace";
 export type { UserInfo } from "./UserInfo";
+export type { Version } from "./Version";
+export type { VersionReason } from "./VersionReason";
