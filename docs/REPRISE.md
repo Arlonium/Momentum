@@ -2,14 +2,16 @@
 
 Ce document est fait pour quelqu'un, humain ou agent IA, qui ouvre ce dépôt sans rien savoir de son histoire. Il dit où en est le projet, ce qui reste à faire, et comment s'y prendre. Il renvoie aux sources plutôt que de les recopier.
 
-Écrit le 2026-11-10, à la clôture du lot 2 de la phase 1. Mis à jour le 2026-11-12, à l'ouverture du lot 3. À mettre à jour à chaque clôture de lot.
+Écrit le 2026-11-10, à la clôture du lot 2 de la phase 1. Mis à jour le 2026-11-12, à l'ouverture du lot 3, puis le même jour **en cours d'exécution de sa partie A**, juste avant de pousser `main` à la demande de Lenny. À mettre à jour à chaque clôture de lot.
+
+> **Tu reprends en plein lot.** La partie A du lot 3 est exécutée aux onze quatorzièmes, et deux tâches étaient en cours au moment où `main` a été poussé. Lis d'abord [`docs/superpowers/logs/2026-11-12-p1-lot3-avancement.md`](superpowers/logs/2026-11-12-p1-lot3-avancement.md) : l'état tâche par tâche, ce qui était en cours, ce qui reste dans l'ordre, et la liste des reports à trier à la relecture finale.
 
 ## En une minute
 
 - **Mementum** est un espace de travail open source façon Notion, auto-hébergeable, conçu pour que les agents IA lisent et écrivent les pages aussi proprement que les humains. Licence AGPL-3.0.
 - **Pile** : serveur Rust en un binaire (axum, sqlx sur SQLite, yrs), client React avec BlockNote dans `apps/web`, texte des pages en CRDT Yjs, format Markdown canonique « MMD » pour les agents.
 - **Deux personnes** : Lenny est le propriétaire du projet, ses décisions ne se remettent pas en cause sans lui (liste dans [`CLAUDE.md`](../CLAUDE.md)). Alex pilote le développement et fait la recette.
-- **Où on en est** : la phase 0 (essais) est finie. La phase 1 compte sept lots. Les lots 1 et 2 sont faits et poussés. Le lot 3 est ouvert : Lenny l'a choisi le 2026-11-12 et a validé le plan de sa partie A le même jour ; elle est en cours d'exécution, tâche par tâche (avancement au registre du lot). Les lots 4 à 7 restent à faire.
+- **Où on en est** : la phase 0 (essais) est finie. La phase 1 compte sept lots. Les lots 1 et 2 sont faits et poussés. Le lot 3 est ouvert : Lenny l'a choisi le 2026-11-12 et a validé le plan de sa partie A le même jour. **Onze de ses quatorze tâches sont closes et relues** (intégrité de la synchro, barre latérale et présents en direct, commentaires, historique des versions) ; la douzième est en correction, la treizième attend le verdict d'un essai, la quatorzième et la relecture finale restent à faire. Tout est sur `main`, poussé le 2026-11-12. Les lots 4 à 7 restent à faire.
 
 ## Dans quel ordre lire
 
@@ -29,29 +31,34 @@ Chaque décision prise en cours de route est un « Ruling », numéroté à la s
 | Phase 1, lot 1 : socle et édition en direct | fini, poussé le 2026-11-09 | plan et registre datés du 2026-11-09 dans `docs/superpowers/` |
 | Phase 1, lot 2 : comptes, espaces, droits et corbeille | fini, poussé le 2026-11-10 (`main`, commit `7fb1b55` et suivants) | plan et registre datés du 2026-11-10 |
 | Recette du lot 2 | aucun défaut à corriger avant le lot 3 (réponse de Lenny, 2026-11-12) | [`docs/recette/2026-11-10-p1-lot2-recette.md`](recette/2026-11-10-p1-lot2-recette.md) |
-| Deux reports du lot 2 qui touchent à l'intégrité du contenu | faits le 2026-11-12 (R129, R130), pas encore poussés | registre du lot 3, « Avant le plan » |
-| Phase 1, lot 3 : collaboration et blocs riches | **en cours** : plan de la partie A validé par Lenny le 2026-11-12, exécution commencée (R140) | plan et registre datés du 2026-11-12 |
+| Deux reports du lot 2 qui touchent à l'intégrité du contenu | faits le 2026-11-12 (R129, R130), poussés | registre du lot 3, « Avant le plan » |
+| Phase 1, lot 3, partie A « Collaboration » | **en cours, non close** : tâches 1 à 11 closes et relues ; tâche 12 en correction ; tâche 13 en attente d'un essai ; tâche 14, relecture finale et clone neuf à faire. Poussé tel quel le 2026-11-12, à la demande de Lenny | plan et registre datés du 2026-11-12 ; [avancement](superpowers/logs/2026-11-12-p1-lot3-avancement.md) |
+| Phase 1, lot 3, partie B « Blocs riches et organisation » | à faire, plan à écrire à la clôture de A (R132) | — |
 | Phase 1, lots 4 à 7 | à faire, aucun plan écrit | voir plus bas |
 | Mesures ARM de la phase 0 | repoussées avant la phase 2 | `spike/RESULTS.md` |
 
 Ce que l'application fait aujourd'hui : des comptes avec mot de passe, des espaces (plusieurs par compte), des membres et des invités, des pages en blocs rangées en arbre et en trois sections (« Espace », « Partagé », « Privé »), l'édition à plusieurs en direct avec le curseur de chacun, le partage d'une page à quatre niveaux, les invitations par lien, la lecture seule selon le droit, la corbeille, et le format MMD en lecture et en écriture par l'API.
 
-Ce qu'elle ne fait pas encore : les bases de données et leurs vues, les commentaires, l'historique, la recherche, l'envoi d'e-mails, la connexion par Google ou OIDC, les jetons d'API et le serveur MCP, les imports et l'export, le binaire qui embarque l'application et l'image Docker.
+Ce que `main` y ajoute depuis le 2026-11-12, **dans un lot qui n'est pas clos** (ni relecture finale, ni recette) : la barre latérale qui suit en direct ce que font les autres ; les avatars de qui a la page ouverte, et le nom du curseur posé par le serveur d'après le compte ; les commentaires sur une page ou sur un bloc (réponses, réactions, résolution), ouverts dès le niveau « Peut commenter » ; l'historique des versions d'une page, avec aperçu et restauration ; et, pour l'intégrité, une mise à jour qui laisserait un trou d'horloge retenue jusqu'à sa suite (R131), un tableau mal formé toujours lu en grille (R54), une mise à jour sans effet ni écrite ni relayée (R181).
+
+Ce qu'elle ne fait pas encore : les bases de données et leurs vues, la recherche, l'envoi d'e-mails, la connexion par Google ou OIDC, les jetons d'API et le serveur MCP, les imports et l'export, le binaire qui embarque l'application et l'image Docker ; et, dans ce lot, les fichiers envoyés et les blocs riches depuis l'éditeur (partie B). **Déplacer un bloc pendant qu'un autre écrit abîme encore la page** : la frappe atterrit dans un bloc voisin ou se perd, selon le geste (mesuré le 2026-11-12, voir l'avancement).
 
 Vérification à la clôture du lot 2, sur un clone neuf, comme la CI : 548 tests Rust, 214 tests du client, 122 parcours de bout en bout, tous verts ; une page de 1 000 blocs s'ouvre en 134 ms (budget 300), une page de 10 000 blocs en 1,2 s (budget 3 s). Le détail est au registre.
+
+Au moment de pousser, le 2026-11-12, sur le poste de Lenny et **sans clone neuf** : `cargo fmt` et `cargo clippy -D warnings` propres, 681 tests Rust, 436 tests du client (et 12 scénarios du bloc déplacé marqués comme des échecs attendus), typecheck et licences npm propres ; la dernière suite complète de bout en bout (148 parcours verts, 2 marqués `fixme` exprès) date de la Task 11, et les budgets du navigateur aussi (142 ms et 1,2 s). La migration `0003` de ce lot a changé plusieurs fois et peut encore changer jusqu'à la clôture : **ne pas ouvrir `data/instance` avec un binaire de ce lot avant la clôture**.
 
 ## Ce qui attend le propriétaire
 
 Rien de ceci ne se décide à sa place.
 
-1. **Pousser ou non le lot 3** : le plan de la partie A ([`docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md`](superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md)) est validé (Lenny, 2026-11-12) et s'exécute sur `main`, sans rien pousser. À la clôture : la recette de la partie A, et le niveau qui lit l'historique (« Peut lire » dans le plan ; voir le registre du lot).
+1. **Le lot 3, partie A** : le plan ([`docs/superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md`](superpowers/plans/2026-11-12-p1-lot3-collaboration-blocs-riches.md)) est validé (Lenny, 2026-11-12), et Lenny a demandé le même jour d'avancer sans validation intermédiaire, d'après la conception, puis de pousser l'état en cours. Ce qui l'attend est listé dans l'[avancement](superpowers/logs/2026-11-12-p1-lot3-avancement.md), « Ce qui attend le propriétaire » : le niveau qui lit l'historique (« Peut lire » dans le plan), la frappe perdue pendant une restauration (R188), la lenteur d'une restauration sur une très grande page, et le déplacement de blocs à plusieurs (Task 13). À la clôture : la recette de la partie A.
 2. **Quatre règles à valider**, parce qu'elles se voient à l'usage :
    - les membres ont l'accès complet aux pages d'équipe, comme dans Notion (R48) ;
    - les inscriptions sont sur invitation par défaut (R50) ;
    - un invité en accès complet peut inviter à son tour (R86) ;
    - un simple membre peut fermer une page d'équipe aux autres, après confirmation (R122, R127).
 3. **D'autres choix déjà pris, à confirmer** : le menu du compte dans le sélecteur d'espace (R80), une page sortie à la racine garde son accès d'équipe (R94), la barre latérale relue au retour sur l'onglet et toutes les dix secondes, et non en direct (R97, R128), une session de 30 jours au plus dans un navigateur (R117), les plafonds contre la surcharge reportés au lot 7 (R121), et deux décisions du lot 1 : `PUT /mmd` refuse une propriété inconnue (R41), deux avis de sécurité ouverts sans mise à jour possible (R44).
-4. **Pousser ou non** les commits faits depuis le 2026-11-12 : rien n'est poussé sans sa demande.
+4. **Pousser** : `main` a été poussé le 2026-11-12 à la demande de Lenny, lot en cours. Cet accord vaut pour cette poussée ; la suivante se demande de nouveau.
 
 Les espaces façon Notion, à la place des coffres façon Obsidian, sont confirmés par Lenny (2026-11-10).
 
@@ -85,11 +92,13 @@ La liste complète est au registre du lot 2, section « Reportés au lot suivant
 
 Lenny a choisi le 2026-11-12 : **le lot 3, comme prévu**. Il lève les limites les plus visibles du lot 2 (barre latérale qui ne suit pas en direct, présence fragile) et apporte les commentaires et l'historique. Le lot 5 (agents, serveur MCP : Alex veut que Claude Code puisse verser du contenu dans un de ses espaces) vient ensuite, dans l'ordre de la conception.
 
-La suite, dans l'ordre :
+La suite, dans l'ordre (le détail de chaque point est dans l'[avancement](superpowers/logs/2026-11-12-p1-lot3-avancement.md)) :
 
-1. le propriétaire relit le plan du lot 3 ;
-2. l'exécution, tâche par tâche, comme décrit ci-dessous ;
-3. à la clôture, mettre ce document à jour.
+1. finir la Task 12 (la preuve élargie de ce que devient une frappe quand un bloc est déplacé) et la faire relire ;
+2. trancher la Task 13 d'après le verdict de l'essai borné : la faire selon un découpage écrit et relu, ou appliquer la clause de sortie du plan (la limite reste, décrite exactement) ;
+3. la Task 14 : documentation relue contre le code, checklist de recette de la partie A ;
+4. la relecture finale de tout le lot en trois passes, sa vague de correction, puis toutes les suites sur un clone neuf et l'essai de migration sur une copie d'une base du lot 2 ;
+5. à la clôture : mettre ce document à jour, supprimer le fichier d'avancement, écrire le plan de la partie B.
 
 ## Comment mener un lot
 
@@ -97,7 +106,7 @@ La méthode est écrite dans le README (« Méthode de travail ») et a été su
 
 1. **Un plan** pour le lot, dans `docs/superpowers/plans/`, écrit d'après la conception : des tâches petites, chacune avec ses fichiers, ses interfaces, ses tests nommés. Le propriétaire le relit avant qu'on commence.
 2. **Un registre** pour le lot, dans `docs/superpowers/logs/` : chaque écart au plan y devient un Ruling, au format `Ruling: <décision> — <pourquoi> — <coût si faux>`.
-3. **L'exécution tâche par tâche**, en TDD : le test qui échoue d'abord. Aux lots 1 et 2, chaque tâche a été confiée à un sous-agent dans un worktree à part, puis relue par un autre, puis reprise sur `main`.
+3. **L'exécution tâche par tâche**, en TDD : le test qui échoue d'abord. Aux lots 1 et 2, chaque tâche a été confiée à un sous-agent dans un worktree à part, puis relue par un autre, puis reprise sur `main`. Au lot 3, faute de disque, les tâches sont exécutées l'une après l'autre directement sur `main` (R140) : un sous-agent implémente, un autre relit en prouvant ses constats par des tests jetables, les constats importants repartent en tour de correction, puis une re-relecture ciblée vérifie le tour.
 4. **Une relecture finale de tout le lot**, en passes séparées (sécurité, intégration entre client et serveur, documentation contre le code), puis une vague de correction et des re-relectures ciblées.
 5. **Toutes les suites sur un clone neuf**, étape par étape comme la CI, avant de dire que c'est fini.
 6. **Une checklist de recette** pour le propriétaire, sur ce qu'un test ne juge pas.
@@ -155,8 +164,7 @@ Alex fait tourner une instance sur son poste pour regarder l'application et fair
 - **Pour tester à plusieurs par Tailscale** (adresse du PC d'Alex : `100.87.123.94`), le serveur reçoit en plus l'adresse publique de la page, et un second Vite écoute sur l'adresse Tailscale :
 
   ```
-  .	arget
-elease\mementum.exe serve --bind 127.0.0.1:8090 --data-dir data\instance --public-url http://100.87.123.94:5127
+  .\target\release\mementum.exe serve --bind 127.0.0.1:8090 --data-dir data\instance --public-url http://100.87.123.94:5127
   ```
 
   ```
@@ -174,6 +182,6 @@ elease\mementum.exe serve --bind 127.0.0.1:8090 --data-dir data\instance --publi
 Elles sont dans [`CLAUDE.md`](../CLAUDE.md). Les quatre qui comptent le plus :
 
 - **Aucune ligne d'attribution d'outil** dans les commits ni les pull requests (ni `Co-Authored-By`, ni mention d'un assistant).
-- **Ne rien pousser sans une demande explicite d'Alex.** Un accord donné pour un lot ne vaut pas pour le suivant.
+- **Ne rien pousser sans une demande explicite** d'Alex ou de Lenny. Un accord donné pour une poussée ne vaut pas pour la suivante.
 - **Aucun secret** dans le dépôt, les journaux, la documentation.
 - **Tout sur `main`** : pas de branche durable. Les worktrees sont des ateliers, leurs commits sont repris sur `main`.
