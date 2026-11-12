@@ -978,6 +978,107 @@ async fn thread_of_another_page_is_not_found() {
     }
 }
 
+/// Sur une page à la corbeille, un fil qui n'est pas de la page, ou un message qui n'est pas du
+/// fil, répond `404` avant `409 trashed` (Ruling R168) : la même réponse que sur une page
+/// vivante. Le fil et le message de la page, eux, reçoivent `409 trashed`.
+#[tokio::test]
+async fn missing_thread_comes_before_trashed() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+    let page = team.page(None, "Jetée", &[members(Level::Full)]).await;
+    let elsewhere = team.page(None, "Ailleurs", &[members(Level::Full)]).await;
+    let store = &team.store;
+    let here = store
+        .create_thread(page, None, mona.id, "Ici")
+        .await
+        .unwrap();
+    let there = store
+        .create_thread(elsewhere, None, mona.id, "Là")
+        .await
+        .unwrap();
+    team.trash(page).await;
+    let (thread, message) = (here.id.to_string(), here.comments[0].id.to_string());
+    let (foreign, foreign_msg) = (there.id.to_string(), there.comments[0].id.to_string());
+    let unknown = Uuid::now_v7().to_string();
+    // Les routes qui nomment un fil ; les trois dernières nomment aussi un de ses messages.
+    let requests = |thread: &str, message: &str| {
+        let message_at = message_uri(page, thread, message);
+        let reaction = format!("{message_at}/reactions/{}", encoded("👍"));
+        vec![
+            (
+                "POST réponse",
+                json_request(
+                    Method::POST,
+                    &format!("{}/replies", thread_uri(page, thread)),
+                    &json!({ "body": "x" }),
+                ),
+            ),
+            (
+                "PATCH fil",
+                json_request(
+                    Method::PATCH,
+                    &thread_uri(page, thread),
+                    &json!({ "resolved": true }),
+                ),
+            ),
+            (
+                "PATCH message",
+                json_request(Method::PATCH, &message_at, &json!({ "body": "x" })),
+            ),
+            (
+                "DELETE message",
+                Request::delete(&message_at).body(Body::empty()).unwrap(),
+            ),
+            (
+                "PUT réaction",
+                Request::put(&reaction).body(Body::empty()).unwrap(),
+            ),
+        ]
+    };
+    let cases = [
+        (
+            unknown.as_str(),
+            message.as_str(),
+            "fil de commentaires introuvable sur cette page",
+        ),
+        (
+            foreign.as_str(),
+            foreign_msg.as_str(),
+            "fil de commentaires introuvable sur cette page",
+        ),
+    ];
+    for (thread_id, message_id, why) in cases {
+        for (name, request) in requests(thread_id, message_id) {
+            let body = mona
+                .browser
+                .send(request)
+                .await
+                .assert_error(StatusCode::NOT_FOUND, "not_found");
+            assert_eq!(body["message"], why, "{name}, fil {thread_id}");
+        }
+    }
+    for message_id in [unknown.as_str(), foreign_msg.as_str()] {
+        for (name, request) in requests(&thread, message_id).into_iter().skip(2) {
+            let body = mona
+                .browser
+                .send(request)
+                .await
+                .assert_error(StatusCode::NOT_FOUND, "not_found");
+            assert_eq!(
+                body["message"], "message introuvable dans ce fil",
+                "{name}, message {message_id}"
+            );
+        }
+    }
+    for (name, request) in requests(&thread, &message) {
+        let reply = mona.browser.send(request).await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{name}");
+        reply.assert_error(StatusCode::CONFLICT, "trashed");
+    }
+    assert_eq!(store.comment_threads(page).await.unwrap(), [here]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Ce que reçoivent les connexions de synchro.
 
