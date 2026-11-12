@@ -9,12 +9,14 @@
 // - Un fil mène à son bloc : la page défile jusqu'à lui, qui est mis en évidence un instant.
 // - Les brouillons vivent ici, pour la page ouverte, hors du panneau qui se démonte ; le bloc dont
 //   on rédige le commentaire neuf aussi : une pastille, un second « Commenter » ou le panneau
-//   fermé puis rouvert les retrouvent (`drafts.ts`).
-import { useCallback, useId, useMemo, useRef, useState, type RefObject } from "react";
+//   fermé puis rouvert les retrouvent (`drafts.ts`). Le panneau fermé, un commentaire de bloc
+//   sans texte est oublié. Un brouillon dont le fil ou le message a disparu à une relecture
+//   est montré, avec son texte, jusqu'à ce qu'on l'écarte.
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type RefObject } from "react";
 import { openCount } from "./arrange";
 import type { PanelTarget } from "./CommentsPanel";
 import { blockElement, blockText, shorten } from "./dom";
-import { createDrafts, type Drafts } from "./drafts";
+import { createDrafts, DRAFT, type Drafts, type OrphanDraft } from "./drafts";
 import type { Comments } from "./useComments";
 
 /** Le début du texte d'un bloc, au-dessus de son commentaire neuf : au plus tant de caractères. */
@@ -46,6 +48,8 @@ export type CommentsPanelWiring = {
     target: PanelTarget | null;
     drafts: Drafts;
     composing: string | null;
+    orphans: OrphanDraft[];
+    onDismissOrphan: (key: string) => void;
     excerpt: (blockId: string) => string | null;
     onShowBlock: (blockId: string) => void;
     onTargetDone: () => void;
@@ -84,6 +88,8 @@ export function useCommentsPanel(
     const back = returnFocus.current;
     returnFocus.current = null;
     setPanel(null);
+    // Un commentaire de bloc sans texte est oublié ; avec du texte, il reviendra.
+    if (composing !== null && drafts.get(DRAFT.block(composing)) === "") setComposing(null);
     const panelElement = document.getElementById(panelId);
     if (back !== null && back.isConnected && !panelElement?.contains(back)) back.focus();
     else buttonRef.current?.focus();
@@ -98,6 +104,16 @@ export function useCommentsPanel(
   const commentBlock = useCallback((blockId: string) => commentBlockNow.current(blockId), []);
 
   const { threads } = comments;
+  // Après chaque relecture, les brouillons dont le fil ou le message n'est plus là deviennent
+  // orphelins : montrés, pas jetés.
+  const [orphans, setOrphans] = useState<OrphanDraft[]>([]);
+  useEffect(() => {
+    if (threads !== null && drafts.settle(threads)) setOrphans(drafts.orphans());
+  }, [threads, drafts]);
+  const dismissOrphan = (key: string) => {
+    drafts.dismiss(key);
+    setOrphans(drafts.orphans());
+  };
   const blockIds = useMemo(
     () => [...new Set(threads?.flatMap((t) => (t.blockId === null ? [] : [t.blockId])))],
     [threads],
@@ -153,6 +169,8 @@ export function useCommentsPanel(
       target: panel.target,
       drafts,
       composing,
+      orphans,
+      onDismissOrphan: dismissOrphan,
       excerpt,
       onShowBlock: showBlock,
       onTargetDone: () => {

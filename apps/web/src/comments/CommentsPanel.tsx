@@ -32,7 +32,7 @@ import { CloseIcon } from "../icons";
 import { arrangeThreads, canWrite, type CommentRights } from "./arrange";
 import { cssString } from "./dom";
 import { Composer } from "./Composer";
-import { createDrafts, DRAFT, type Drafts } from "./drafts";
+import { createDrafts, DRAFT, type Drafts, type OrphanDraft } from "./drafts";
 import { ThreadView } from "./ThreadView";
 import type { Comments } from "./useComments";
 
@@ -71,6 +71,12 @@ type Props = {
    * ferme, jusqu'à ce que le commentaire parte ou soit annulé. Absent : le bloc de `target`.
    */
   composing?: string | null;
+  /**
+   * Les brouillons dont le fil ou le message a disparu (supprimé entre-temps) : montrés une fois,
+   * en haut du panneau, avec leur texte, jusqu'à ce qu'on les écarte.
+   */
+  orphans?: OrphanDraft[];
+  onDismissOrphan?: (key: string) => void;
   /** Le début du texte d'un bloc, montré au-dessus de son commentaire neuf. */
   excerpt: (blockId: string) => string | null;
   /** Fait défiler la page jusqu'au bloc. */
@@ -104,6 +110,8 @@ export function CommentsPanel({
   target,
   drafts: givenDrafts,
   composing: givenComposing,
+  orphans = [],
+  onDismissOrphan = () => {},
   excerpt,
   onShowBlock,
   onTargetDone,
@@ -306,6 +314,32 @@ export function CommentsPanel({
           <CloseIcon />
         </button>
       </div>
+      {orphans.length > 0 && (
+        <section className="mm-comments-orphans" aria-label="Textes non envoyés">
+          <ul>
+            {orphans.map((orphan) => (
+              <li key={orphan.key}>
+                <p className="mm-comments-orphan-lead">
+                  {orphan.kind === "thread"
+                    ? "Ce fil a été supprimé. Ton texte :"
+                    : "Ce message a été supprimé. Ton texte :"}
+                </p>
+                <p className="mm-comments-orphan-text mm-isolate" dir="auto">
+                  {orphan.text}
+                </p>
+                <button
+                  type="button"
+                  className="mm-button mm-button-small"
+                  aria-label="Écarter ce texte"
+                  onClick={() => onDismissOrphan(orphan.key)}
+                >
+                  Écarter
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       {comments.state === "failed" && (
         <div className="mm-comments-failed">
           <p className="mm-form-error" role="alert">

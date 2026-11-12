@@ -2054,6 +2054,38 @@ button.tree-toggle:hover {
   overflow-wrap: anywhere;
 }
 
+/* Les textes non envoyés dont le fil ou le message a disparu : à copier, puis à écarter. */
+.mm-comments-orphans {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--mm-warning-border);
+  border-radius: 8px;
+  background: var(--mm-warning-soft);
+}
+
+.mm-comments-orphans ul {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-comments-orphan-lead {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--mm-warning);
+}
+
+.mm-comments-orphan-text {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--mm-text);
+  user-select: text;
+}
+
 /* Un texte venu d'un autre compte (un message, un nom, une réaction) : un caractère de format
    Unicode qu'il porte n'en sort pas (avec `dir="auto"` sur l'élément). */
 .mm-isolate {
