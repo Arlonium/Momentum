@@ -1,0 +1,360 @@
+// Un fil de commentaires dans le panneau : où il est attaché (un bloc, qu'un bouton fait voir
+// dans la page ; la page ; un bloc supprimé), ses messages (auteur, « il y a… », « modifié »),
+// leurs réactions, puis « Répondre » et « Résoudre » (ou « Rouvrir »).
+//
+// Chaque bouton suit le tableau des niveaux de R134 (`arrange.ts`) : celui que la personne ne
+// peut pas utiliser n'est pas montré. Si le serveur refuse quand même (un droit a changé
+// entre-temps), son message s'affiche tel quel dans le fil, et le panneau se relit
+// (`useComments`).
+//
+// Tout ce qui vient d'autres comptes (le corps d'un message, un nom, l'emoji d'une réaction) est
+// affiché comme du texte, jamais comme du HTML ni dans un attribut `style`, chacun dans son
+// élément isolé (`dir="auto"`, `unicode-bidi: isolate` : un caractère de format Unicode n'en
+// sort pas). Les six réactions proposées sont des constantes exactes ; une réaction qu'un autre
+// client a posée s'affiche telle quelle, et se pose ou se retire comme les autres.
+import type { Comment, Thread } from "@mementum/protocol";
+import { useState, type MouseEvent } from "react";
+import { isSessionLost } from "../api";
+import { ReactIcon } from "../icons";
+import { inkOn } from "../page/avatarInk";
+import { messageOf } from "../session/forms";
+import { colorOf } from "../session/session";
+import { Confirm } from "../ui/Confirm";
+import {
+  canDeleteMessage,
+  canEditMessage,
+  canResolve,
+  canWrite,
+  type CommentRights,
+} from "./arrange";
+import { Composer } from "./Composer";
+import { fullDate, relativeTime } from "./time";
+import type { Comments } from "./useComments";
+
+/**
+ * Les réactions proposées, telles quelles : pour le serveur, deux chaînes différentes sont deux
+ * réactions (❤️ porte son sélecteur de variante, U+FE0F).
+ */
+export const REACTIONS = ["👍", "❤️", "😄", "🎉", "👀", "✅"] as const;
+
+type Props = {
+  thread: Thread;
+  rights: CommentRights;
+  /** L'instant présent (millisecondes Unix), pour « il y a… ». */
+  now: number;
+  /** Le bloc du fil est dans la page : y mener. `null` : fil de la page, ou bloc supprimé. */
+  onShowBlock: (() => void) | null;
+  /** Le bloc du fil n'est plus dans la page. */
+  deleted: boolean;
+  comments: Pick<Comments, "reply" | "edit" | "remove" | "resolve" | "react">;
+};
+
+export function ThreadView({ thread, rights, now, onShowBlock, deleted, comments }: Props) {
+  const [replying, setReplying] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  /** Le message dont on confirme la suppression. */
+  const [deleting, setDeleting] = useState<Comment | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const resolved = thread.resolvedAt !== null;
+  const write = canWrite(rights);
+  const resolvable = canResolve(rights, thread);
+
+  /** Une action du fil : son refus s'affiche tel quel (sauf une session perdue). */
+  const run = async (action: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (e) {
+      if (!isSessionLost(e)) setError(messageOf(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Un clic dans le fil, hors de ses commandes et d'un texte qu'on sélectionne, mène au bloc.
+  const onClick = (event: MouseEvent<HTMLElement>) => {
+    if (onShowBlock === null) return;
+    const target = event.target as Element;
+    if (target.closest("button, a, textarea, input, form, [role='group'], dialog")) return;
+    if (!(window.getSelection()?.isCollapsed ?? true)) return;
+    onShowBlock();
+  };
+
+  return (
+    <article
+      className={`mm-thread${resolved ? " is-resolved" : ""}`}
+      data-thread-id={thread.id}
+      tabIndex={-1}
+      aria-label={`Fil ouvert par ${thread.openedBy.name}`}
+      onClick={onClick}
+    >
+      <div className="mm-thread-context">
+        {thread.blockId === null ? (
+          <span>Sur la page</span>
+        ) : deleted ? (
+          <span className="mm-tag">Bloc supprimé</span>
+        ) : onShowBlock !== null ? (
+          <button type="button" className="mm-link-button" onClick={onShowBlock}>
+            Aller au bloc
+          </button>
+        ) : (
+          <span>Sur un bloc</span>
+        )}
+        {resolved && thread.resolvedBy && (
+          <span className="mm-thread-resolved">
+            Résolu par{" "}
+            <span className="mm-isolate" dir="auto">
+              {thread.resolvedBy.name}
+            </span>
+            , {relativeTime(thread.resolvedAt!, now)}
+          </span>
+        )}
+      </div>
+      <ul className="mm-thread-messages" aria-label="Messages">
+        {thread.comments.map((comment) => (
+          <li key={comment.id} className="mm-comment">
+            <MessageHead comment={comment} now={now} />
+            {editing === comment.id ? (
+              <Composer
+                label="Modifier le message"
+                submitLabel="Enregistrer"
+                submitName="Enregistrer le message"
+                initial={comment.body}
+                autoFocus
+                clearOnSent={false}
+                onSubmit={async (body) => {
+                  await comments.edit(thread.id, comment.id, body);
+                  setEditing(null);
+                }}
+                onCancel={() => setEditing(null)}
+              />
+            ) : (
+              <p className="mm-comment-body mm-isolate" dir="auto">
+                {comment.body}
+              </p>
+            )}
+            <Reactions
+              comment={comment}
+              selfId={rights.selfId}
+              canReact={write}
+              onToggle={(emoji, on) =>
+                void run(() => comments.react(thread.id, comment.id, emoji, on))
+              }
+            />
+            {editing !== comment.id &&
+              (canEditMessage(rights, comment) || canDeleteMessage(rights, comment)) && (
+                <div className="mm-comment-actions">
+                  {canEditMessage(rights, comment) && (
+                    <button
+                      type="button"
+                      className="mm-button mm-button-quiet"
+                      aria-label="Modifier ce message"
+                      onClick={() => setEditing(comment.id)}
+                    >
+                      Modifier
+                    </button>
+                  )}
+                  {canDeleteMessage(rights, comment) && (
+                    <button
+                      type="button"
+                      className="mm-button mm-button-quiet"
+                      aria-label="Supprimer ce message"
+                      onClick={() => setDeleting(comment)}
+                    >
+                      Supprimer
+                    </button>
+                  )}
+                </div>
+              )}
+          </li>
+        ))}
+      </ul>
+      {error && (
+        <p className="mm-form-error" role="alert">
+          {error}
+        </p>
+      )}
+      {((write && !replying) || resolvable) && (
+        <div className="mm-thread-actions">
+          {write && !replying && (
+            <button
+              type="button"
+              className="mm-button mm-button-small"
+              onClick={() => setReplying(true)}
+            >
+              Répondre
+            </button>
+          )}
+          {resolvable && (
+            <button
+              type="button"
+              className="mm-button mm-button-small"
+              aria-disabled={busy || undefined}
+              onClick={() => void run(() => comments.resolve(thread.id, !resolved))}
+            >
+              {resolved ? "Rouvrir" : "Résoudre"}
+            </button>
+          )}
+        </div>
+      )}
+      {replying && write && (
+        <Composer
+          label="Répondre au fil"
+          submitLabel="Envoyer"
+          submitName="Envoyer la réponse"
+          autoFocus
+          onSubmit={async (body) => {
+            await comments.reply(thread.id, body);
+            setReplying(false);
+          }}
+          onCancel={() => setReplying(false)}
+        />
+      )}
+      {deleting && (
+        <Confirm
+          // Espace insécable : le « ? » ne passe pas seul à la ligne.
+          title={"Supprimer ce message ?"}
+          confirmLabel="Supprimer"
+          destructive
+          busy={busy}
+          onConfirm={() =>
+            void run(() => comments.remove(thread.id, deleting.id)).then(() => setDeleting(null))
+          }
+          onCancel={() => setDeleting(null)}
+        >
+          {thread.comments.length === 1
+            ? "Le message part pour tout le monde, et le fil avec lui."
+            : "Le message et ses réactions partent pour tout le monde."}
+        </Confirm>
+      )}
+    </article>
+  );
+}
+
+/** L'auteur d'un message, son âge et s'il a été modifié. */
+function MessageHead({ comment, now }: { comment: Comment; now: number }) {
+  const color = colorOf(comment.author.id);
+  // L'initiale : la première lettre ou le premier chiffre du nom, pas un caractère de format.
+  const initial = comment.author.name.match(/[\p{L}\p{N}]/u)?.[0]?.toLocaleUpperCase() ?? "?";
+  return (
+    <div className="mm-comment-head">
+      <span
+        className="mm-comment-avatar"
+        aria-hidden="true"
+        style={{ backgroundColor: color, color: inkOn(color) }}
+      >
+        {initial}
+      </span>
+      <span className="mm-comment-author mm-isolate" dir="auto">
+        {comment.author.name}
+      </span>
+      <time
+        className="mm-comment-time"
+        dateTime={new Date(comment.createdAt).toISOString()}
+        title={fullDate(comment.createdAt)}
+      >
+        {relativeTime(comment.createdAt, now)}
+      </time>
+      {comment.editedAt !== null && (
+        <span className="mm-comment-edited" title={`Modifié ${fullDate(comment.editedAt)}`}>
+          modifié
+        </span>
+      )}
+    </div>
+  );
+}
+
+type ReactionsProps = {
+  comment: Comment;
+  selfId: string;
+  /** Les réactions se posent et se retirent d'ici ; sinon, elles se lisent seulement. */
+  canReact: boolean;
+  onToggle: (emoji: string, on: boolean) => void;
+};
+
+/** Les réactions d'un message ; pour qui peut réagir, le choix des six. */
+function Reactions({ comment, selfId, canReact, onToggle }: ReactionsProps) {
+  const [picking, setPicking] = useState(false);
+  const shown = comment.reactions.filter((reaction) => reaction.users.length > 0);
+  if (shown.length === 0 && !canReact) return null;
+  const mineOf = (emoji: string) =>
+    comment.reactions.some((r) => r.emoji === emoji && r.users.some((u) => u.id === selfId));
+  return (
+    <div className="mm-reactions-row">
+      <ul className="mm-reactions" aria-label="Réactions">
+        {shown.map((reaction) => {
+          const mine = reaction.users.some((user) => user.id === selfId);
+          const count = reaction.users.length;
+          // Les noms en infobulle : un attribut de texte, jamais de style.
+          const names = reaction.users.map((user) => user.name).join(", ");
+          const content = (
+            <>
+              <span className="mm-reaction-emoji mm-isolate" dir="auto">
+                {reaction.emoji}
+              </span>
+              <span className="mm-reaction-count">{count}</span>
+            </>
+          );
+          return (
+            <li key={reaction.emoji}>
+              {canReact ? (
+                <button
+                  type="button"
+                  className="mm-reaction"
+                  aria-pressed={mine}
+                  aria-label={`${reaction.emoji} ${count}${mine ? ", dont toi" : ""}`}
+                  title={names}
+                  onClick={() => onToggle(reaction.emoji, !mine)}
+                >
+                  {content}
+                </button>
+              ) : (
+                <span className="mm-reaction" title={names}>
+                  {content}
+                </span>
+              )}
+            </li>
+          );
+        })}
+        {canReact && (
+          <li>
+            <button
+              type="button"
+              className="mm-reaction mm-reaction-add"
+              aria-label="Ajouter une réaction"
+              aria-expanded={picking}
+              onClick={() => setPicking((was) => !was)}
+            >
+              <ReactIcon />
+            </button>
+          </li>
+        )}
+      </ul>
+      {canReact && picking && (
+        <div className="mm-reaction-picker" role="group" aria-label="Choisir une réaction">
+          {REACTIONS.map((emoji) => {
+            const mine = mineOf(emoji);
+            return (
+              <button
+                key={emoji}
+                type="button"
+                className="mm-reaction"
+                aria-label={`Réagir avec ${emoji}`}
+                aria-pressed={mine}
+                onClick={() => {
+                  setPicking(false);
+                  onToggle(emoji, !mine);
+                }}
+              >
+                {emoji}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}

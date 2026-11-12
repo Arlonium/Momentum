@@ -1,6 +1,10 @@
-// Une page ouverte : barre du haut (titre, état de la connexion, « Partager » pour qui a
-// l'accès complet), bandeaux (lecture seule, corbeille) si besoin, titre, puis l'éditeur en
-// direct.
+// Une page ouverte : barre du haut (titre, état de la connexion, présents, « Commentaires »,
+// « Partager » pour qui a l'accès complet), bandeaux (lecture seule, corbeille) si besoin,
+// titre, puis l'éditeur en direct ; à droite, le panneau des commentaires quand il est ouvert.
+//
+// Les commentaires (R134) n'écrivent rien dans le document : ils se lisent à tout niveau, et
+// s'écrivent avec « Peut commenter », même quand l'éditeur est en lecture seule. Le panneau
+// rend le focus, en se fermant, à ce qui l'avait avant qu'il s'ouvre.
 //
 // Rien ne s'écrit quand le schéma du serveur n'est plus celui de l'onglet (R35), quand la page
 // est à la corbeille, ou quand le niveau du compte ne permet que de la lire : le titre et
@@ -13,14 +17,17 @@
 // encore partie de l'ouverture : la page s'ouvre avec le niveau que dit le serveur, pas avec
 // celui d'une barre latérale qui daterait d'avant.
 import type { PageNode } from "@mementum/protocol";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { isSessionLost } from "../api";
+import { openCount } from "../comments/arrange";
+import { CommentsPanel, cssString, type PanelTarget } from "../comments/CommentsPanel";
+import { useComments } from "../comments/useComments";
 import { CollabSession } from "../editor/collab";
 import { requestedFixture } from "../editor/fixtures";
 import { LazyEditor } from "../editor/LazyEditor";
 import { ReaderBanner, ReadOnlyBanner } from "../editor/ReadOnlyBanner";
 import type { SchemaCheck } from "../editor/schemaGate";
-import { TrashIcon } from "../icons";
+import { CommentIcon, TrashIcon } from "../icons";
 import { messageOf } from "../session/forms";
 import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
@@ -136,41 +143,137 @@ export function PageView({
     };
   }, [id, locked, check, userId, userName]);
 
+  // Les fils de commentaires, relus à chaque trame `comments` de la session de synchro. Un refus
+  // du serveur (un droit, ou la page, ont changé entre-temps) fait aussi relire la page : son
+  // niveau et la corbeille décident des boutons du panneau.
+  const comments = useComments(id, session, { onRefused: () => void reread() });
+  const panelId = useId();
+  const commentsButton = useRef<HTMLButtonElement>(null);
+  /** Autour de l'éditeur : les blocs de la page y sont cherchés par leur identifiant. */
+  const frame = useRef<HTMLDivElement>(null);
+  /** Le panneau des commentaires, et ce sur quoi il s'est ouvert ; `null` : fermé. */
+  const [panel, setPanel] = useState<{ target: PanelTarget | null } | null>(null);
+  /** Ce qui avait le focus avant que le panneau s'ouvre : il le retrouve à la fermeture. */
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const panelOpen = panel !== null;
+  const openPanel = (target: PanelTarget | null) => {
+    if (!panelOpen) {
+      const active = document.activeElement;
+      returnFocus.current = active instanceof HTMLElement ? active : null;
+    }
+    setPanel({ target });
+  };
+  const closePanel = () => {
+    const back = returnFocus.current;
+    returnFocus.current = null;
+    setPanel(null);
+    const panelElement = document.getElementById(panelId);
+    if (back !== null && back.isConnected && !panelElement?.contains(back)) back.focus();
+    else commentsButton.current?.focus();
+  };
+  /** L'élément d'un bloc de la page, cherché à la demande (un clic, pas une frappe). */
+  const blockElement = (blockId: string) =>
+    frame.current?.querySelector<HTMLElement>(
+      `[data-node-type="blockOuter"][data-id=${cssString(blockId)}]`,
+    ) ?? null;
+  const excerpt = (blockId: string) => {
+    const text = blockElement(blockId)
+      ?.querySelector(":scope > .bn-block > .bn-block-content")
+      ?.textContent?.trim();
+    if (!text) return null;
+    const chars = Array.from(text);
+    return chars.length > EXCERPT_CHARS ? `${chars.slice(0, EXCERPT_CHARS).join("")}…` : text;
+  };
+  const showBlock = (blockId: string) => {
+    blockElement(blockId)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+  const count = comments.threads === null ? null : openCount(comments.threads);
+
   return (
     <>
       <header className="mm-topbar">
         <span className="mm-topbar-title">{node.title}</span>
         {session && <SyncState session={session} />}
         {session && <Presence session={session} selfId={userId} />}
+        <button
+          ref={commentsButton}
+          type="button"
+          className="mm-button mm-comments-button"
+          aria-expanded={panelOpen}
+          aria-controls={panelOpen ? panelId : undefined}
+          onClick={() => (panelOpen ? closePanel() : openPanel(null))}
+        >
+          <CommentIcon />
+          <span>Commentaires</span>
+          {count !== null && count > 0 && (
+            <span className="mm-count" aria-hidden="true">
+              {count}
+            </span>
+          )}
+          {count !== null && (
+            <span className="mm-visually-hidden">
+              , {openThreadsText(count)}
+            </span>
+          )}
+        </button>
         {/* Les accès ne se voient et ne se changent qu'avec l'accès complet, et rien ne s'y
             change à la corbeille, ni depuis un onglet qui n'écrit plus (R35). */}
         {node.level === "full" && !trashed && !readOnly && (
           <ShareMenu node={node} onChanged={onShared} onAccessLost={accessLost} />
         )}
       </header>
-      <article className="mm-page">
-        {readOnly && <ReadOnlyBanner />}
-        {reader && !readOnly && !trashed && (
-          <ReaderBanner reopen={editable ? () => setReader(false) : null} />
-        )}
-        {trashed && (
-          <TrashBanner
-            // Restaurer demande de pouvoir modifier la page (et un onglet qui écrit encore).
-            restore={!readOnly && editable ? () => onRestore(id) : null}
+      <div className="mm-page-body">
+        <article className="mm-page">
+          {readOnly && <ReadOnlyBanner />}
+          {reader && !readOnly && !trashed && (
+            <ReaderBanner reopen={editable ? () => setReader(false) : null} />
+          )}
+          {trashed && (
+            <TrashBanner
+              // Restaurer demande de pouvoir modifier la page (et un onglet qui écrit encore).
+              restore={!readOnly && editable ? () => onRestore(id) : null}
+            />
+          )}
+          <TitleInput
+            node={node}
+            autoFocus={autoFocusTitle}
+            onAutoFocused={onTitleFocused}
+            readOnly={locked}
+            onSaved={onSaved}
+          />
+          <div ref={frame} className="mm-editor-frame">
+            {/* La session se connecte pendant que le code de l'éditeur se charge. */}
+            {session && <LazyEditor session={session} fixture={fixture} />}
+          </div>
+        </article>
+        {panel && (
+          <CommentsPanel
+            id={panelId}
+            comments={comments}
+            order={null}
+            level={node.level}
+            trashed={trashed}
+            readOnly={readOnly}
+            selfId={userId}
+            target={panel.target}
+            excerpt={excerpt}
+            onShowBlock={showBlock}
+            onTargetDone={() => setPanel((current) => current && { target: null })}
+            onClose={closePanel}
           />
         )}
-        <TitleInput
-          node={node}
-          autoFocus={autoFocusTitle}
-          onAutoFocused={onTitleFocused}
-          readOnly={locked}
-          onSaved={onSaved}
-        />
-        {/* La session se connecte pendant que le code de l'éditeur se charge. */}
-        {session && <LazyEditor session={session} fixture={fixture} />}
-      </article>
+      </div>
     </>
   );
+}
+
+/** Le début du texte d'un bloc, au-dessus de son commentaire neuf : au plus tant de caractères. */
+const EXCERPT_CHARS = 120;
+
+/** Le nombre de fils ouverts, en toutes lettres pour les lecteurs d'écran. */
+function openThreadsText(count: number): string {
+  if (count === 0) return "aucun fil ouvert";
+  return count === 1 ? "1 fil ouvert" : `${count} fils ouverts`;
 }
 
 /**

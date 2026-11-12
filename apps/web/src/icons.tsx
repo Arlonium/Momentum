@@ -196,3 +196,30 @@ export const UnnestIcon = () => (
     <path d="M9 11l-4 4 4 4" />
   </Icon>
 );
+
+/** Les commentaires : une bulle (bouton de la barre du haut, pastilles de la marge). */
+export const CommentIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M5 5h14a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-8l-4 3v-3H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" />
+  </Icon>
+);
+
+/** Fermer un panneau : une croix. */
+export const CloseIcon = () => (
+  <Icon>
+    <path d="M6 6l12 12" />
+    <path d="M18 6L6 18" />
+  </Icon>
+);
+
+/** Ajouter une réaction : un visage, et le « + » d'un ajout. */
+export const ReactIcon = () => (
+  <Icon>
+    <path d="M20 12a8 8 0 1 1-6-7.75" />
+    <path d="M9 14a4 4 0 0 0 6 0" />
+    <path d="M9.5 10h.01" />
+    <path d="M14.5 10h.01" />
+    <path d="M19 3v5" />
+    <path d="M16.5 5.5h5" />
+  </Icon>
+);
