@@ -16,7 +16,9 @@
 //! `debug_assert!`) ou un état d'awareness gardé qui n'est pas de l'UTF-8
 //! rendent le message illisible.
 //! Les mises à jour Yjs, elles, sont lues par `PageDoc::apply_client_update`,
-//! qui refuse aussi celles qui touchent aux métadonnées de la page.
+//! qui refuse aussi celles qui touchent aux métadonnées de la page, et rend
+//! ce qu'il a lu, réencodé : c'est cela que l'acteur écrit et relaie (Ruling
+//! R130).
 //!
 //! Un état d'awareness n'est pas lu ici : c'est une tranche d'octets, de la
 //! longueur annoncée. Qu'il soit du JSON, et de la forme connue, se juge

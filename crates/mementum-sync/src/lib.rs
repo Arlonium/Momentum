@@ -10,6 +10,13 @@
 //!   écrite dans SQLite (`append_updates` attendu), et ce qui a été diffusé
 //!   n'est donc jamais perdu ; chaque mise à jour écrite porte le compte qui
 //!   l'a faite, quand on le connaît ;
+//! - **écrire et diffuser ce qui a été lu** (Ruling R130) : d'une mise à jour
+//!   reçue d'un client, le journal et les autres connexions ne reçoivent pas
+//!   les octets reçus, mais ce que yrs en a lu, réencodé
+//!   (`PageDoc::apply_client_update`). yrs et Yjs ne lisent pas les mêmes
+//!   octets pareil (yrs laisse tomber les bits d'un entier au-delà de 32) :
+//!   relayée telle quelle, une suppression pouvait effacer un texte sur le
+//!   serveur et rien dans les navigateurs ;
 //! - **compaction sûre** : l'instantané est pris dans l'acteur, entre deux
 //!   commandes, si bien qu'il couvre exactement les mises à jour écrites
 //!   jusqu'à son `seq` ; elle a lieu toutes les `snapshot_every` mises à jour,
