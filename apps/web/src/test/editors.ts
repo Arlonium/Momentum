@@ -1,5 +1,10 @@
 // De vrais éditeurs BlockNote liés à des `Y.Doc`, pour les tests unitaires du document partagé
-// (`editor/blockMoves.test.ts`, `editor/keyedBlocks.test.ts`, `editor/followBlock.test.ts`).
+// (`editor/blockMoves.test.ts`, `editor/keyedBlocks.test.ts`, `editor/followBlock.test.ts`,
+// `editor/movesAtRandom.test.ts`, `editor/gestures.test.ts`).
+//
+// Le plan de la partie B du lot 3 (Task C1a) nomme ce banc `peer`, `seed`, `scene`, `exchange`,
+// `typeAtEnd`, `shown`, `stored` et `elementIds` : `seed` est ici `seedState`, et `scene`, `duo`
+// (R299). Les éléments Yjs d'un bloc se lisent par `elementIds`, ses props par `storedProps`.
 //
 // Chaque éditeur est lié par `withCollaboration` (le chemin Yjs 13 de l'application) à un
 // document dont l'identifiant de client est fixé : l'issue d'un conflit d'insertion se tranche
@@ -539,6 +544,61 @@ export function elements(doc: Y.Doc): Y.XmlElement[] {
     });
   walk(doc.getXmlFragment(FRAGMENT));
   return found;
+}
+
+/** L'identifiant Yjs d'un élément : le client et l'horloge de sa structure (`2:14`). */
+function yjsId(element: Y.XmlElement): string {
+  const id = element._item?.id;
+  return id ? `${id.client}:${id.clock}` : "sans structure";
+}
+
+/**
+ * Les nœuds qui portent l'id d'un bloc : le conteneur, et la liste de colonnes et la colonne, que
+ * BlockNote n'enveloppe pas dans un conteneur. Pas les contenus en ligne : une mention a un `id`,
+ * qui n'est pas celui d'un bloc.
+ */
+const BLOCK_NODES = new Set(["blockContainer", "columnList", "column"]);
+
+/**
+ * Pour chaque id de bloc du document `doc`, ses éléments Yjs : l'identifiant de son conteneur, puis
+ * le nom et l'identifiant de son élément de contenu (`1:52 paragraph 1:53`) ; une liste de colonnes
+ * ou une colonne, sans élément de contenu, n'a que le sien et son nom (`2:7 columnList`). Un id qui
+ * revient joint ses valeurs par « ; » : le double se voit. Deux lectures égales pour un id disent
+ * que ses éléments sont les mêmes : c'est ce qu'il faut comparer pour dire qu'un geste n'a pas
+ * touché un bloc, pas l'id, qu'un élément peut passer d'un bloc à un autre sans que rien ne bouge
+ * (R223).
+ */
+export function elementIds(doc: Y.Doc): Map<string, string> {
+  const found = new Map<string, string>();
+  for (const element of elements(doc)) {
+    if (!BLOCK_NODES.has(element.nodeName)) continue;
+    let value = `${yjsId(element)}`;
+    if (element.nodeName === "blockContainer") {
+      const content = element.get(0);
+      value += content instanceof Y.XmlElement ? ` ${content.nodeName} ${yjsId(content)}` : " sans contenu";
+    } else {
+      value += ` ${element.nodeName}`;
+    }
+    const id = String(element.getAttribute("id"));
+    const seen = found.get(id);
+    found.set(id, seen === undefined ? value : `${seen} ; ${value}`);
+  }
+  return found;
+}
+
+/**
+ * Les props du bloc `id` telles que le document Yjs `doc` les porte, lu sans éditeur : les
+ * attributs de son élément de contenu, typés comme BlockNote les écrit (`level: 2`,
+ * `checked: true`). Lève si le bloc n'y est pas une fois et une seule.
+ */
+export function storedProps(doc: Y.Doc, id: string): Record<string, unknown> {
+  const found = elements(doc).filter(
+    (element) => element.nodeName === "blockContainer" && element.getAttribute("id") === id,
+  );
+  if (found.length !== 1) throw new Error(`le bloc ${id} est ${found.length} fois dans le document`);
+  const content = found[0].get(0);
+  if (!(content instanceof Y.XmlElement)) throw new Error(`le bloc ${id} n'a pas d'élément de contenu`);
+  return content.getAttributes() as Record<string, unknown>;
 }
 
 /**
