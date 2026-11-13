@@ -8,6 +8,7 @@ import {
   apiAs,
   closeContexts,
   createPage,
+  defaultAccount,
   expectSignedInAs,
   firstSpace,
   getMmd,
@@ -74,6 +75,45 @@ test("signup_then_lands_in_the_app", async ({ page }) => {
   // La session tient au rechargement.
   await page.reload();
   await expectSignedInAs(page, name);
+});
+
+test("first_account_screen_gives_way_once_an_account_exists", async ({ page }) => {
+  // L'onglet a lu l'instance quand elle n'avait encore aucun compte : la première lecture de
+  // `/api/v1/info` dit `setup: true`. Pendant qu'on remplit l'écran, quelqu'un d'autre crée le
+  // premier compte (celui des tests, déjà là) ; les lectures suivantes passent au serveur.
+  let infoReads = 0;
+  await page.route("**/api/v1/info", async (route) => {
+    infoReads += 1;
+    if (infoReads > 1) return route.continue();
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), setup: true } });
+  });
+  const sent: string[] = [];
+  page.on("request", (req) => {
+    if (new URL(req.url()).pathname.startsWith("/api/v1/auth/")) sent.push(new URL(req.url()).pathname);
+  });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Bienvenue dans Mementum" })).toBeVisible();
+  // L'adresse du compte qui existe déjà : le serveur répond `409 email_taken`.
+  await page.getByLabel("Nom").fill("Camille");
+  await page.getByLabel("Adresse e-mail").fill(defaultAccount().email);
+  const password = page.getByLabel("Mot de passe", { exact: true });
+  await password.fill(PASSWORD);
+  await password.press("Enter");
+
+  // L'instance est relue, et l'écran devient celui de la connexion, qui dit pourquoi.
+  await expect(loginHeading(page)).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText(
+    "Un compte a déjà été créé sur cette instance. Connecte-toi, ou demande une invitation.",
+  );
+  expect(infoReads).toBe(2);
+  // Ce qui a été tapé n'est parti qu'à l'inscription : aucune connexion tentée, aucun champ
+  // rempli, et toujours pas de session.
+  expect(sent).toEqual(["/api/v1/auth/signup"]);
+  await expect(page.getByLabel("Adresse e-mail")).toHaveValue("");
+  await expect(page.getByLabel("Mot de passe", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Adresse e-mail")).toBeFocused();
+  expect((await page.request.get("/api/v1/me")).status()).toBe(401);
 });
 
 test("login_logout_roundtrip", async ({ page }) => {

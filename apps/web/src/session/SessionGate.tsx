@@ -46,11 +46,22 @@ import { LoginDialog, LoginPage } from "./LoginPage";
 import { SessionContext, type Session } from "./session";
 import { SignupPage } from "./SignupPage";
 
+/**
+ * Ce que dit la connexion quand l'écran du premier compte apprend qu'un compte existe déjà
+ * (R257, M5).
+ */
+const ACCOUNT_EXISTS =
+  "Un compte a déjà été créé sur cette instance. Connecte-toi, ou demande une invitation.";
+
 type State =
   | { name: "loading" }
   /** Le serveur ne répond pas, ou pas comme prévu. */
   | { name: "failed"; message: string }
-  | { name: "anonymous"; info: Info }
+  /**
+   * `accountExists` : l'écran du premier compte était affiché, et l'instance relue après une
+   * inscription qui a échoué a dit qu'un compte existe désormais.
+   */
+  | { name: "anonymous"; info: Info; accountExists?: boolean }
   /** `lost` : un appel a dit que la session n'est plus là. */
   | { name: "signedIn"; me: Me; lost: boolean };
 
@@ -144,6 +155,29 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /**
+   * L'inscription de l'écran du premier compte n'a pas créé de compte (refus, ou pas de
+   * réponse) : l'instance est relue (R257, M5). Quelqu'un d'autre a pu créer ce compte
+   * entre-temps ; il n'y a alors plus de premier compte à créer, et l'écran devient celui de la
+   * connexion, qui le dit. Ce qui a été tapé n'est envoyé nulle part d'autre, et ne passe pas
+   * dans la connexion. Une relecture qui échoue, ou une instance toujours sans compte, laisse
+   * l'écran tel quel, avec le message de l'inscription.
+   */
+  const firstAccountFailed = useCallback(async () => {
+    let info: Info;
+    try {
+      info = await getInfo();
+    } catch {
+      return;
+    }
+    if (info.setup) return;
+    // Inscriptions ouvertes, l'adresse `/signup` montrerait l'inscription ordinaire.
+    if (parseRoute(location.pathname).name === "signup") navigate("/login", { replace: true });
+    setState((current) =>
+      current.name === "anonymous" ? { name: "anonymous", info, accountExists: true } : current,
+    );
+  }, []);
 
   // Connecté sur `/login` ou `/signup` (après s'être connecté là, ou par « Précédent ») : à
   // la place de cette adresse, avant que rien ne s'affiche, la page de l'invitation qu'on
@@ -274,6 +308,7 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
           request={answering && invitation ? { ...answering, invitation } : {}}
           onSignedUp={signedUp}
           onLogin={showLogin}
+          onFailed={info.setup ? () => void firstAccountFailed() : undefined}
         />
       );
     }
@@ -281,6 +316,7 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
     return (
       <LoginPage
         signupOpen={signupAllowed}
+        notice={state.accountExists ? ACCOUNT_EXISTS : undefined}
         invitation={answering}
         onSignup={showSignup}
         onLoggedIn={enter}

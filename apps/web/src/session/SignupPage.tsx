@@ -3,6 +3,10 @@
 // l'instance (`setup`), les inscriptions ouvertes, ou l'arrivée par une invitation
 // (`InvitePage`), qui préremplit l'adresse et envoie son jeton avec l'inscription : le
 // serveur l'accepte dans la foulée, et le compte n'a pas d'espace à lui.
+//
+// L'écran du premier compte peut dater : quelqu'un d'autre a pu créer ce compte pendant qu'on
+// le remplissait. Après toute inscription qui échoue, `SessionGate` relit donc l'instance
+// (R257, M5), et passe à la connexion si un compte existe désormais.
 import type { Me } from "@mementum/protocol";
 import { useState, type FormEvent } from "react";
 import { signUp } from "../api";
@@ -24,9 +28,15 @@ type Props = {
   request: SignupRequest;
   onSignedUp: (me: Me) => void;
   onLogin: () => void;
+  /**
+   * L'inscription n'a pas créé de compte (refus du serveur, ou pas de réponse) : son message
+   * est affiché, les champs gardés, puis ceci est appelé. L'écran du premier compte s'en sert
+   * pour relire l'instance (`SessionGate`).
+   */
+  onFailed?: () => void;
 };
 
-export function SignupPage({ setup, request, onSignedUp, onLogin }: Props) {
+export function SignupPage({ setup, request, onSignedUp, onLogin, onFailed }: Props) {
   useDocumentTitle(setup ? "Premier compte" : "Créer un compte");
   const [name, setName] = useState("");
   const [email, setEmail] = useState(request.email ?? "");
@@ -51,6 +61,7 @@ export function SignupPage({ setup, request, onSignedUp, onLogin }: Props) {
     } catch (e) {
       setError(messageOf(e));
       setBusy(false);
+      onFailed?.();
     }
   };
 

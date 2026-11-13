@@ -2,24 +2,27 @@
 // (Ruling R115) : rouvert sous un autre compte par la fenêtre « Ta session a pris fin », ou
 // changé dans un autre onglet du même navigateur et appris à la relecture du compte. Dans les
 // deux cas l'application est démontée, puis l'onglet rechargé ; le même compte, lui, continue.
-// Et le compte relu au retour sur l'onglet, avec l'arbre (Ruling R126).
-import type { Me, Tree } from "@mementum/protocol";
+// Et le compte relu au retour sur l'onglet, avec l'arbre (Ruling R126). Et l'écran du premier
+// compte, qui suit l'état de l'instance (R257, M5).
+import type { Info, Me, Tree } from "@mementum/protocol";
 import { act, useCallback, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { getMe, getTree, logIn, onSessionLost } from "../api";
+import { ApiError, getInfo, getMe, getTree, logIn, onSessionLost, signUp } from "../api";
 import { REFRESH_INTERVAL_MS, useSpaceTree, useTreeReader } from "../space/useSpaceTree";
 import { deferred } from "../test/hooks";
-import { space, unreachable } from "../test/pages";
+import { space, unauthenticated, unreachable } from "../test/pages";
 import { useSession } from "./session";
 import { SessionGate } from "./SessionGate";
 
 vi.mock("../api", async (original) => ({
   ...(await original<typeof import("../api")>()),
+  getInfo: vi.fn(),
   getMe: vi.fn(),
   getTree: vi.fn(),
   logIn: vi.fn(),
   onSessionLost: vi.fn(),
+  signUp: vi.fn(),
 }));
 
 const account = (id: string, name: string): Me => ({
@@ -79,7 +82,7 @@ beforeEach(() => {
   events = [];
   shownFor = new Set();
   reload.mockClear();
-  for (const mock of [getMe, logIn]) vi.mocked(mock).mockReset();
+  for (const mock of [getMe, logIn, getInfo, signUp]) vi.mocked(mock).mockReset();
   vi.mocked(getTree).mockReset();
   vi.mocked(getTree).mockImplementation(async (spaceId): Promise<Tree> => ({ spaceId, lsn: 0, nodes: [] }));
   vi.mocked(onSessionLost).mockReset();
@@ -270,4 +273,100 @@ test("tab_coming_back_to_an_unreachable_server_changes_nothing", async () => {
   expect(host.textContent).toBe("Alice");
   expect(events).toEqual(["montée"]);
   expect(reload).not.toHaveBeenCalled();
+});
+
+const instance = (setup: boolean): Info => ({
+  version: "0.1.0",
+  schemaVersion: 1,
+  signup: "invite",
+  setup,
+});
+
+/** Un champ d'un écran de session, par son libellé. */
+function fieldOf(label: string): HTMLInputElement {
+  const found = [...host.querySelectorAll("label")].find((l) => l.textContent === label);
+  if (!found) throw new Error(`pas de champ « ${label} »`);
+  return document.getElementById(found.htmlFor) as HTMLInputElement;
+}
+
+async function fill(label: string, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    const input = fieldOf(label);
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+/** L'écran du premier compte, sans session, rempli ; `submit` l'envoie. */
+async function firstAccountScreen() {
+  vi.mocked(getMe).mockRejectedValue(unauthenticated());
+  vi.mocked(getInfo).mockResolvedValueOnce(instance(true));
+  await act(async () => root.render(<SessionGate reload={reload}><App /></SessionGate>));
+  expect(host.querySelector("h1")?.textContent).toBe("Bienvenue dans Mementum");
+  await fill("Nom", "Camille");
+  await fill("Adresse e-mail", "camille@exemple.fr");
+  await fill("Mot de passe", "mot-de-passe-de-test");
+  return () =>
+    act(async () => {
+      host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+}
+
+const ACCOUNT_EXISTS =
+  "Un compte a déjà été créé sur cette instance. Connecte-toi, ou demande une invitation.";
+
+for (const [name, failure] of [
+  [
+    "403",
+    new ApiError(
+      403,
+      "signup_closed",
+      "les inscriptions sont sur invitation : il faut le lien d'une invitation pour créer un compte",
+    ),
+  ],
+  ["409", new ApiError(409, "email_taken", "un compte porte déjà cette adresse e-mail")],
+  ["réseau", unreachable()],
+] as const) {
+  test(`first_account_screen_follows_the_instance (${name})`, async () => {
+    const submit = await firstAccountScreen();
+    // Quelqu'un d'autre a créé le premier compte pendant qu'elle remplissait l'écran.
+    vi.mocked(signUp).mockRejectedValueOnce(failure);
+    vi.mocked(getInfo).mockResolvedValueOnce(instance(false));
+    await submit();
+    // L'instance est relue, et l'écran devient celui de la connexion, qui dit pourquoi.
+    expect(getInfo).toHaveBeenCalledTimes(2);
+    expect(host.querySelector("h1")?.textContent).toBe("Se connecter");
+    expect(host.querySelector('[role="status"]')?.textContent).toBe(ACCOUNT_EXISTS);
+    // Ce qu'elle a tapé n'est parti qu'à l'inscription, et ne reste dans aucun champ.
+    expect(signUp).toHaveBeenCalledExactlyOnceWith({
+      email: "camille@exemple.fr",
+      name: "Camille",
+      password: "mot-de-passe-de-test",
+    });
+    expect(logIn).not.toHaveBeenCalled();
+    expect([...host.querySelectorAll("input")].map((input) => input.value)).toEqual(["", ""]);
+    // Le focus est sur l'adresse de la connexion, pas sur `body`.
+    expect(document.activeElement).toBe(fieldOf("Adresse e-mail"));
+  });
+}
+
+test("first_account_screen_stays_while_the_instance_has_no_account", async () => {
+  // Témoin : l'inscription échoue, et l'instance n'a toujours aucun compte (ou ne répond pas) :
+  // l'écran reste, avec le message et ce qui a été tapé.
+  for (const reread of [async () => instance(true), async () => Promise.reject(unreachable())]) {
+    const submit = await firstAccountScreen();
+    vi.mocked(signUp).mockRejectedValueOnce(unreachable());
+    vi.mocked(getInfo).mockImplementationOnce(reread);
+    await submit();
+    expect(getInfo).toHaveBeenCalledTimes(2);
+    expect(host.querySelector("h1")?.textContent).toBe("Bienvenue dans Mementum");
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe("Le serveur Mementum ne répond pas.");
+    expect(host.textContent).not.toContain(ACCOUNT_EXISTS);
+    expect(fieldOf("Adresse e-mail").value).toBe("camille@exemple.fr");
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    vi.mocked(getInfo).mockReset();
+    vi.mocked(signUp).mockReset();
+  }
 });

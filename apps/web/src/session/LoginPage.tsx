@@ -2,7 +2,7 @@
 // (`LoginPage`) ; ou par-dessus l'application quand la session a pris fin en cours de route
 // (`LoginDialog`), sans la démonter. Les messages d'erreur sont ceux du serveur, tels quels.
 import type { Me } from "@mementum/protocol";
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { logIn } from "../api";
 import { AuthScreen, Field, FormError, messageOf, ScreenLink, useDocumentTitle } from "./forms";
 
@@ -66,21 +66,26 @@ type LoginPageProps = {
    * ce que donne l'invitation, en mots. Une fois connecté, on revient l'accepter.
    */
   invitation?: { email: string; invitedTo: string };
+  /**
+   * Pourquoi on arrive ici, à la place de la phrase d'accueil : l'écran du premier compte vient
+   * d'apprendre qu'un compte existe déjà (`SessionGate`, R257).
+   */
+  notice?: string;
   onSignup: () => void;
   onLoggedIn: (me: Me) => void;
 };
 
 /** La connexion, en page : sans session. */
-export function LoginPage({ signupOpen, invitation, onSignup, onLoggedIn }: LoginPageProps) {
+export function LoginPage({ signupOpen, invitation, notice, onSignup, onLoggedIn }: LoginPageProps) {
   useDocumentTitle("Connexion");
+  let lead: ReactNode = invitation
+    ? `Connecte-toi pour rejoindre ${invitation.invitedTo}.`
+    : "Retrouve tes pages et les espaces où l'on t'a invité.";
+  if (notice) lead = <span role="status">{notice}</span>;
   return (
     <AuthScreen
       title="Se connecter"
-      lead={
-        invitation
-          ? `Connecte-toi pour rejoindre ${invitation.invitedTo}.`
-          : "Retrouve tes pages et les espaces où l'on t'a invité."
-      }
+      lead={lead}
       footer={
         signupOpen ? (
           <>
