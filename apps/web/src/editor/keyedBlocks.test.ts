@@ -6,9 +6,9 @@
 // l'ancienne place et la nouvelle, chacun prenant l'id et le texte de son voisin. Une frappe
 // faite au même moment dans l'un d'eux finissait chez un voisin, et deux déplacements abîmaient
 // la page (`blockMoves.test.ts`). Avec le correctif, quand des blocs présents avant et après ont
-// changé d'ordre, ils sont appariés par leur `id` : ceux qui gardent leur ordre restent les
-// mêmes éléments, sans rien y écrire ; les autres sont supprimés, et recréés à leur place avec le
-// même `id`.
+// changé d'ordre, ils sont appariés par leur `id` : ceux que le geste a déplacés sont supprimés,
+// et recréés à leur place avec le même `id` ; les autres restent les mêmes éléments, sans rien y
+// écrire (lesquels : R227, `the_blocks_of_the_gesture_are_the_ones_recreated`).
 //
 // Le correctif ne joue que là : sans bloc qui change d'ordre, ou dès qu'un `id` manque ou revient
 // deux fois, c'est le code d'origine, tel quel. `ordinary_gestures_write_what_they_wrote_before`
@@ -27,7 +27,9 @@
 // publiés (`PUBLISHED`). Cette suite dit si le portage est juste.
 //
 // Mêmes éditeurs que `blockMoves.test.ts` (`test/editors.ts`) : de vrais BlockNote 0.57, dans
-// jsdom. Le dépôt d'un vrai navigateur est dans `e2e/block-move.spec.ts`.
+// jsdom, sans `followBlock` : cette suite éprouve le correctif seul. L'essai au hasard avec
+// l'extension, la frappe au curseur, est dans `movesAtRandom.test.ts` ; le dépôt d'un vrai
+// navigateur, dans `e2e/block-move.spec.ts`.
 import * as pmState from "prosemirror-state";
 import { describe, expect, test, vi } from "vitest";
 import {
