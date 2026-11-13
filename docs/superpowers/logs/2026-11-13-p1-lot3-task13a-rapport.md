@@ -1,4 +1,4 @@
-> **Rapport de l'implémenteur de la Task 13a, recopié tel quel le 2026-11-13** (les chemins absolus du poste sont rendus relatifs à la racine du dépôt). Le code qu'il décrit n'est **pas sur `main`** : il est sur la branche locale `worktree-agent-acd5330e6b63d3097` (onze commits, base `ca29845`), jamais poussée, en attente de la fin de sa relecture. Voir l'[avancement](2026-11-12-p1-lot3-avancement.md).
+> **Rapport de la Task 13a, recopié de son atelier le 2026-11-13** (les chemins absolus du poste sont rendus relatifs à la racine du dépôt). Il porte le rapport de l'implémenteur d'origine, puis, en dernière section, celui du **tour de correction 1**. Le code qu'il décrit n'est **pas encore sur `main`** : il est sur la branche locale `worktree-agent-acd5330e6b63d3097` (vingt et un commits, rebasés sur `main`), jamais poussée, en re-relecture. Voir la [relecture](2026-11-13-p1-lot3-task13a-relecture.md) et l'[avancement](2026-11-12-p1-lot3-avancement.md).
 
 # Task 13a — client, la forme à clés (R220) : rapport
 
@@ -263,3 +263,193 @@ Ruling R229: hors de la liste des fichiers du plan : `prosemirror-state` 1.4.4 e
 8. **`followBlock` a déjà eu un faux positif** (le texte fusionné, corrigé en `b63932f`), pris par la suite e2e et non par mes tests : sa règle « l'élément qui portait le texte a été supprimé » repose sur ce que y-prosemirror fait de ses textes. Un relecteur devrait chercher d'autres cas où un paragraphe est supprimé sans que le bloc soit recréé ailleurs. Celui que je connais est tenu par un test (`65089b2`) : un autre change le type du bloc ; sans l'extension le curseur passait au début du bloc **suivant** (défaut antérieur), avec elle il reste à sa place.
 9. **Budget de 10 000 blocs** : médianes égales et coût mesuré de 2,3 ms, mais la mesure du plan est une seule ouverture, bruitée sur ce poste occupé ; à refaire au calme à la clôture (« toutes les suites sur un clone neuf »).
 10. **Le message de `996bb6c`** est inexact sur un point (voir « Commits »).
+
+---
+
+# Tour de correction 1 (2026-11-13)
+
+**Status : `DONE_WITH_CONCERNS`.** Les sept points sont faits, l'amendement de R227 est livré (critère d'arrêt tenu), la branche est rebasée sur `main` (`31a1fef`), HEAD `d6728bd`, 21 commits, rien de poussé. Les réserves sont dans « Doutes » : aucune ne bloque la reprise, deux demandent une décision (R232, R237).
+
+## Commits du tour (les dix derniers de `git log --oneline main..HEAD`)
+
+| SHA | Sujet |
+|---|---|
+| `f7931db` | web : le curseur reste avec son texte quand un autre coupe son bloc (I2) |
+| `e88d405` | web : une image sélectionnée par un clic le reste quand un autre la déplace (I1) |
+| `dd18419` | e2e : cliquer une image qu'un autre déplace, puis Suppr, retire l'image |
+| `9361bcd` | web : un curseur au-delà de ce que montre l'éditeur ne casse plus l'éditeur (m3) |
+| `12a17da` | tests : le glisser des tests fait les deux temps d'un vrai dépôt |
+| `2ee916c` | web : ce sont les blocs du geste qui sont recréés, pas ceux qu'il croise (R227 amendé, I4) |
+| `d50aee9` | tests : le même id sous une autre sorte de nœud n'est pas le même bloc (`matchNodeName`) |
+| `a1c25d0` | e2e : un groupe de blocs glissé ne fait rien perdre à ce qu'un autre tape dans les blocs qu'il croise |
+| `796f7c3` | tests : deux personnes déplacent et tapent au hasard, followBlock monté et la frappe au curseur |
+| `d6728bd` | tests : un bloc déposé par un autre entre ceux qu'on tient part avec eux |
+
+Les onze commits de l'implémenteur sont dessous, inchangés, sauf le message de `9aaf028` (ex-`996bb6c`), reformulé par `--fixup=reword` et `rebase --autosquash` (voir « Rebase »).
+
+## Point 1 — I1 et I2, `followBlock`
+
+**Rouge.** Sonde `p1` sur le livré : `Tom x@6, Entrée x@3` → `x « Blo! » | neuf « c X »` ; `x@5, Entrée x@3` → `x « Blo! »` (les deux lignes « faux »). Sonde `p2` dans un navigateur : après le déplacement par Tom, sélection de Mona `{"kind":"node","node":"blockContainer","nodeText":"Bloc Y"}`, et après Suppr `["paragraph:Bloc X","paragraph:Bloc Z","image:"]`. Mes tests, sur le livré : `vitest run src/editor/followBlock.test.ts` → `7 failed | 28 passed (35)` (cinq cas d'image, les deux lignes d'Entrée). L'e2e neuf, sur le `followBlock` livré : `Expected node "image" … Received node "blockContainer"`.
+
+**Fait.** La variante C, relue, avec quatre écarts que ma relecture a trouvés (chacun vu rouge avant) :
+1. le nœud sans id n'est cherché que dans son bloc (`place.offset < block.node.nodeSize`) : un bloc recréé plus court donnait le nœud de même type du bloc suivant (une mention) ;
+2. le repli est un curseur de **texte** (`Selection.findFrom(…, textOnly)`, après puis avant), pas `Selection.near` : celui-ci resélectionne l'image du bloc voisin quand deux images se suivent ;
+3. quand le nœud n'est plus là mais que son bloc existe encore (image changée en paragraphe, mention supprimée), le curseur est posé dans ce bloc ; sans cela la sélection partait à la fin de la page ;
+4. le même repli vaut pour un bloc sélectionné en entier qu'un autre supprime (la variante C ne le faisait que pour un nœud sans id).
+
+**Vert.** `followBlock.test.ts` : 46 tests (20 avant). Les six cas d'Entrée (`cursor_stays_with_its_text_when_someone_else_splits_its_block` ; x@3/Entrée@3 admet les deux côtés), l'image (déplacée, avec sous-blocs, dans une colonne, supprimée, changée de type, annulation), la mention, « rien n'est ajouté quand la sélection est déjà à sa place ». Les deux tests « un clic sur une image » qui passaient par `selectBlock` disent maintenant ce qu'ils font (un bloc entier), et `selectContent` sélectionne ce que sélectionne un clic. E2e `an_image_clicked_then_moved_by_someone_else_is_the_one_delete_removes` : vrai clic, vrai glisser de l'image par sa poignée chez l'autre, Suppr ; vert.
+
+Mutations de `followBlock.ts` (18, chacune appliquée puis remise) : 16 rouges. Deux restent vertes, sur des lignes du livré que je n'ai pas touchées : la position relative non lue à l'annulation (`isUndoRedoOperation ? null : …`) et `wanted.eq(selection) ? null : wanted`.
+
+## Point 2 — m3
+
+**Rouge.** Test `a_cursor_beyond_what_the_editor_shows_does_not_break_the_editor` (une seconde racine écrite par un autre client) : `RangeError: Position 41 out of range` à `restoreRelativeSelection`, `sync-plugin.js:285`.
+**Fait.** Quatrième région du correctif, dans les deux fichiers : `if (Math.max(anchor, head) > tr.doc.content.size) { return }`.
+**Vert.** `keyedBlocks.test.ts` 104 puis 111 ; mutation « sans la garde » : 2 rouges.
+
+## Point 3 — I4, R227 amendé : livré
+
+**Relevé d'abord, dans un navigateur** (sonde, puis e2e commité `a_drop_is_written_with_the_selection_on_what_it_drops`). Au moment où `updateYFragment` voit la transaction :
+
+| Geste | Sélection |
+|---|---|
+| dépôt d'un bloc | sélection de **nœud** sur le bloc déposé |
+| dépôt de plusieurs blocs | sélection de texte du début du premier déposé à la fin du dernier |
+| clavier, plusieurs blocs sélectionnés | la même sélection de texte, remise par BlockNote sur eux |
+| clavier, un bloc | curseur dans le bloc |
+
+L'instant d'après (même événement `drop`), BlockNote remplace la sélection du dépôt par un curseur de texte à la fin du (dernier) bloc déposé. Le rapport de l'implémenteur et le brief disaient « un dépôt laisse un curseur » : vrai après coup, faux au moment de l'écriture.
+
+**Décision.** La sélection couvre donc exactement les blocs du geste : pas besoin de deviner un groupe autour d'un curseur. Règle livrée (R234) : *quand les blocs que touche la sélection gardent leur ordre entre eux, et tous les autres le leur, ce sont ceux de la sélection qui sont recréés ; sinon la règle d'avant (le moins de blocs recréés, départage par la sélection)*. Dix lignes de plus (`inOrder`, une condition). Je n'ai pas ajouté « d'un seul tenant » : la sélection d'un dépôt ou du clavier l'est par construction, et la condition n'écarterait aucun cas que les deux ordres n'écartent pas déjà.
+
+**Rouge** (correctif d'avant) : `4 failed` — `a_group_dragged_past_fewer_blocks…` (reçu D, E recréés ; voulu A, B, C), `blocks_moved_together_with_the_keyboard…`, `typing_in_the_blocks_a_group_crosses_stays_in_place` dans les deux ordres (« Bloc D » au lieu de « Bloc D de Tom »). E2e `typing_in_the_blocks_a_dragged_group_crosses_stays_in_place` avec la règle d'avant : `- "Témoin A de Tom" + "Témoin A"`.
+**Vert** après. Tests : le cas du relecteur ; le même par l'autre geste (D, E remontés : D, E recréés) ; quatre blocs au-dessus d'un ; plusieurs blocs au clavier, descente et montée ; un seul bloc (tests existants, inchangés) ; la sélection qui ne dit rien (trois cas de repli) ; le départage à nombre égal.
+
+**Critère d'arrêt tenu** : les 21 gestes ordinaires identiques, octets des 136 fichiers de scènes inchangés, `a_big_move_writes_a_small_update` vert, aucune divergence au hasard (40 graines de `keyedBlocks`, 900 de `movesAtRandom`).
+
+Mutations du correctif, chacune **installée pour de bon** depuis le correctif du dépôt (`keyedBlocks` + `followBlock`, 156 tests) :
+
+| Mutation | Rouges |
+|---|---|
+| suppression d'un seul voisin (celle de la relecture) | 7 |
+| sans « les blocs du geste » | 4 |
+| sans le départage par la sélection | 1 |
+| sans l'ordre des autres blocs | 1 |
+| sans l'ordre des blocs de la sélection | 1 |
+| sans le nom du nœud (`matchNodeName`) | 1 |
+| sans la garde du curseur (m3) | 2 |
+| sans la règle R223 | 26 |
+| sélection inversée | 19 |
+
+## Point 4 — l'essai au hasard commité (`movesAtRandom.test.ts`)
+
+`followBlock` monté, frappe au curseur, glisser en deux temps (prise, dépôt, réceptions entre les deux), clavier, un bloc ou plusieurs voisins, annuler, rétablir, livraisons partielles dans l'ordre. 20 graines de 100 pas sur page plate, 20 sur page à sous-blocs, 10 « sans retenue » : 52 tests, une vingtaine de secondes seul, sans effet sur la durée de la suite (23 s avant comme après, les fichiers tournent en parallèle).
+
+Régime : chacun déplace **ses** blocs et reste chez soi (ne dépose que parmi les siens ou au premier niveau, n'entre pas au clavier sous le bloc d'un autre, lâche sans déposer si un autre a glissé son bloc entre ceux qu'il tient). Mesuré sur 300 graines de 100 pas :
+
+| | Jetons tapés | Présents | En double | Autre bloc | Blocs en double | Blocs perdus | Éditeur ≠ document | Documents ≠ | Exceptions |
+|---|---|---|---|---|---|---|---|---|---|
+| page plate, chez soi | 6 722 | 4 731 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| page à sous-blocs, chez soi | 6 816 | 4 828 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| page à sous-blocs, sans retenue | 6 805 | 3 958 | 34 (13 graines) | 96 (26) | 8 (8) | 543 (206) | 129 (38) | 0 | 0 |
+
+**Critères laissés** : aucun sur la forme imbriquée tant que chacun reste chez soi (tous tenus, zéro sur 300 graines). Sans retenue, seuls tiennent « documents égaux » et « aucune exception » ; les cinq autres tombent, et c'est la limite écrite (I3 : un bloc mis sous un bloc qu'un autre déplace ; I5 : le bloc d'un autre pris dans un déplacement). « Blocs perdus » y compte l'id de départ disparu : perdu, ou en double puis renommé.
+
+**L'essai mord** (100 graines, page plate) : sans `followBlock`, 231 jetons dans un autre bloc (58 graines) ; y-prosemirror d'origine, 395 en double et 1 187 dans un autre bloc (99 graines) ; correctif d'avant l'amendement de R227, 21 blocs en double (19 graines), 83 jetons dans un autre bloc.
+
+Trouvé par l'essai : un bloc qu'un autre dépose entre des blocs qu'on tient part avec eux au dépôt (R237, test `d6728bd`).
+
+## Point 5 — `matchNodeName`
+
+Pas inatteignable : sans la comparaison, un élément gardé pour un nœud d'un autre nom fait lever `updateYFragment` (« node name mismatch! ») au milieu de l'écriture. Test `le même id sous une autre sorte de nœud…` (un bloc devient une liste de colonnes du même id pendant que ses voisins s'échangent). Mutation : 1 rouge.
+
+## Comptes
+
+- **Vitest**, sur `31a1fef` : `64 passed`, `880 passed | 32 expected fail (912)`, 23 s. `main` a gagné des tests depuis le brief (558 | 12 alors) : il en rend 585 | 12 d'après ce compte (566 tests hors des fichiers de la branche, plus son `blockMoves`, 19 | 12, que j'ai compté en le lançant à part). La branche remplace `blockMoves` (19 | 12 → 105 | 32) et ajoute `keyedBlocks` (111), `followBlock` (46), `movesAtRandom` (52) : 585 − 19 + 105 + 111 + 46 + 52 = 880. Le tour ajoute 87 tests (`followBlock` 20 → 46, `keyedBlocks` 102 → 111, `movesAtRandom` 52) ; sans lui la branche rendrait 793 | 32.
+- **Types** : propre. **Licences** : 117 paquets, toutes permises.
+- **Rust** : `cargo test -p mementum-sync --test moves` → `0 passed; 4 ignored` ; avec `--ignored`, 1 vert, 3 rouges « le texte de Tom n'y est pas », aucun refus de la garde (R207 compris).
+- **E2e, suite entière** (ports 5176 et 8083, serveur compilé dans l'atelier) : `180 passed, 2 skipped, 0 failed` (182 tests ; les deux `test.fixme`), deux fois : sur `0bd5c92` (6,7 min) puis sur `bf0d593` (7,3 min). Après le dernier rebase (`31a1fef` : onze commits de plus sur `main`, le client des commentaires et des docs, serveur inchangé), seuls `block-move`, `collab`, `offline` et `presence` sont rejoués : `20 passed, 2 skipped`. `block-move.spec.ts` : 9 verts (6 avant le tour), 2 `fixme`.
+- **Budgets** (`corepack pnpm e2e:budgets`, release et build de production) : les cinq tests passent à chaque passage, budgets inchangés (300 ms, 3 s).
+
+| Passage | 1 000 blocs, p50 / p95 | 10 000 blocs | 1 000 blocs, arbre de 1 000 pages, p50 / p95 |
+|---|---|---|---|
+| branche sur `0bd5c92`, juste après la compilation | 182 / 202 ms | 1 677 ms | 156 / 166 ms |
+| branche sur `0bd5c92`, 2 | 147 / 165 | 1 435 | 151 / 157 |
+| branche sur `0bd5c92`, 3 | 144 / 160 | 1 502 | 149 / 155 |
+| **client de `main`**, même séance, 1 | 147 / 157 | 1 465 | 149 / 159 |
+| **client de `main`**, même séance, 2 | 145 / 151 | 1 401 | 149 / 152 |
+| branche sur `bf0d593`, 1 | 145 / 154 | 1 295 | 150 / 185 |
+| branche sur `bf0d593`, 2 | 148 / 166 | 1 280 | 152 / 164 |
+
+  « Client de `main` » : dans l'atelier, `Editor.tsx`, `package.json`, le verrou et `pnpm-workspace.yaml` de `main` (sans `followBlock`, y-prosemirror d'origine), même serveur. Médianes égales (144 à 148 ms contre 145 à 147) ; le p95 est la plus lente de cinq ouvertures, et l'ouverture de 10 000 blocs une seule mesure par passage (1 280 à 1 502 ms pour la branche hors du premier passage, 1 401 à 1 465 pour `main`). Je n'y vois pas de recul.
+- Installation à partir de rien (`node_modules` supprimés, `pnpm install --frozen-lockfile`) : 190 paquets, un seul y-prosemirror, corrigé, quatre régions par fichier.
+
+## Rebase
+
+Aucun conflit, trois fois (`main` a avancé pendant la vérification : `0bd5c92`, `bf0d593`, puis `31a1fef`). `main` n'a touché aucun fichier de la branche. Le message de `996bb6c` est reformulé (`9aaf028`) : la garde de la sélection de nœud vaut pour un nœud sélectionné (un bloc entier, une image cliquée), et un dépôt ne pose une sélection de nœud que le temps de sa transaction.
+
+## Rulings
+
+Ruling R230: `followBlock` ne suit un bout dont l'élément est toujours là, sous un autre id, que si sa place tient dans le bloc qui porte désormais cet id — sous R223, Entrée dans un bloc à sous-blocs donne l'élément au bloc neuf : « même id » ne dit plus « même texte », et le curseur d'après la coupure repartait dans la première moitié (I2) — coût si faux : au point exact de la coupure, le curseur va à la fin de la première moitié ; face à un onglet sans forme à clés, un curseur placé au-delà de la longueur du bloc recréé reste dans l'élément.
+
+Ruling R231: un nœud sélectionné sans id (image, mention) se retrouve à la même place dans le bloc de même id, dans ce bloc seulement et s'il est de même type ; rien n'est fait quand la sélection est déjà sur un nœud de ce type dans ce bloc — c'est ce que sélectionne un clic sur une image (I1) — coût si faux : deux mentions voisines dont la première est supprimée par un autre laissent la seconde sélectionnée (y-prosemirror l'y met, et rien ne les distingue).
+
+Ruling R232: quand le nœud sélectionné n'est plus là, aucun nœud ne reste sélectionné à sa place : curseur de texte dans son bloc s'il existe encore, sinon dans le texte le plus proche ; cela vaut aussi pour un bloc entier supprimé, ce que la variante C ne faisait pas — une sélection de nœud remise sur le voisin fait retirer ce voisin par Suppr — coût si faux : Suppr retire un caractère voisin au lieu d'un bloc ; sur une page sans aucun texte, la sélection du voisin reste.
+
+Ruling R233: quatrième région du correctif, la garde de la branche texte de `restoreRelativeSelection` (`Math.max(anchor, head) > tr.doc.content.size`) — `doc.resolve` levait dans l'observateur du document quand le document partagé porte plus que ce que l'éditeur montre (deux racines) ; antérieur, `main` lève aussi — coût si faux : une région de plus à porter ; la garde n'évite que l'exception, pas la page à deux racines.
+
+Ruling R234: R227 amendé : quand les blocs que touche la sélection gardent leur ordre entre eux, et tous les autres le leur, ce sont eux qui sont recréés ; sinon le moins de blocs recréés, départage par la sélection ; pas de condition « d'un seul tenant » — relevé dans un navigateur, la sélection à l'écriture couvre exactement ce que le geste déplace ; « perdu dans un bloc qu'un autre déplace » se comprend, « dans un bloc qu'un autre croise » non — coût si faux : déplacer n blocs d'un coup les récrit tous (poids, et frappe concurrente exposée dans chacun) ; si BlockNote cessait de poser la sélection sur ce qu'il déplace, la règle d'avant reprendrait seule, et `a_drop_is_written_with_the_selection_on_what_it_drops` rougirait.
+
+Ruling R235: les aides `drag` et `dragMany` rejouent les deux temps d'un vrai dépôt (sélection de nœud ou de texte dans la transaction écrite, puis curseur), et le message de `996bb6c` est reformulé — l'implémenteur n'avait relevé que le second temps — coût si faux : nul pour le code ; le second temps du dépôt d'une image n'est pas relevé (la sélection de nœud y est laissée).
+
+Ruling R236: l'essai au hasard commité tient tous les critères, page plate et page à sous-blocs, dans le régime « chacun déplace ses blocs et reste chez soi » ; sans cette retenue, seulement l'égalité des documents et l'absence d'exception — c'est le régime que vise R220, et hors de lui commencent I3 et I5 — coût si faux : 19 s de plus pour un fichier (durée de la suite inchangée) ; le régime est une restriction de l'essai, pas une garantie pour les gens.
+
+Ruling R237: un bloc qu'un autre dépose entre des blocs qu'on tient au bout de la souris part avec eux au dépôt ; laissé tel quel, écrit comme limite, tenu par un test — les blocs tenus sont une suite de voisins (R228), et l'en exclure demanderait un dépôt à nous — coût si faux : si son auteur le déplace au même moment, le bloc est en double (I5).
+
+Ruling R238: `matchNodeName` reste, tenu par un test — sans lui `updateYFragment` lève au milieu d'une écriture — coût si faux : nul.
+
+Ruling R239: une mutation du correctif s'installe depuis le correctif du dépôt (`git checkout` du correctif et du verrou, `pnpm install --frozen-lockfile`, puis `pnpm patch`) — `pnpm patch` part du correctif installé : sans remise, les mutations se cumulent, et mon premier passage rendait sept rouges identiques pour chacune — coût si faux : une minute par mutation.
+
+## Ce que la documentation devra dire (Task 13c), prêt à recopier
+
+### La limite (README ; conception §11 et §9)
+
+« Quand une personne déplace des blocs (glisser, clavier, Tab, Maj+Tab) pendant qu'une autre travaille sur la même page :
+
+- ce que l'autre tape au même moment dans un bloc déplacé, ou dans ses sous-blocs, peut être perdu. Quand plusieurs blocs sont déplacés d'un coup, ce sont eux qui sont en jeu, pas ceux qu'ils croisent : le texte des autres blocs n'est pas touché ;
+- un bloc que l'autre ajoute ou range au même moment sous un bloc déplacé peut disparaître en entier, avec ce qu'il contient ;
+- annuler un déplacement remet le bloc comme il était : ce que d'autres y ont écrit depuis est retiré, et les sous-blocs qu'ils ont mis dessous depuis disparaissent ;
+- deux personnes qui déplacent le même bloc en même temps le laissent en double. Les deux exemplaires reçoivent des identifiants neufs, et les fils de commentaires du bloc s'en détachent. Il en va de même d'un bloc qu'on dépose entre des blocs qu'une autre personne tient au bout de sa souris : il part avec eux ;
+- les lignes et colonnes de tableau déplacées ne sont pas protégées. »
+
+(Vrai avec la Task 13a seule. La Task 13b ramènera la première puce à « quand la frappe arrive au serveur après le déplacement », et dira ce que devient un bloc en double.)
+
+### `CLAUDE.md`, la note « Déplacements concurrents », récrite
+
+- **Déplacements concurrents** (R220, R223, R227 ; `apps/web/src/editor/keyedBlocks.test.ts`, `blockMoves.test.ts`, `movesAtRandom.test.ts`, `e2e/block-move.spec.ts`). Yjs n'a pas de déplacement. Un bloc déplacé au même niveau (glisser, clavier) est **supprimé et recréé au même `id`**, et les autres ne sont pas touchés : c'est le correctif de y-prosemirror, plus bas. Tab, Maj+Tab et un déplacement d'un niveau à l'autre écrivaient déjà une copie au même `id` et la suppression de l'original. Plus aucun bloc ne change d'`id` par un déplacement ; **un élément en change encore hors réordonnancement** (Entrée au milieu ou à la fin d'un bloc qui a des sous-blocs : l'élément passe au bloc neuf ; blocs remplacés) : ne jamais tenir « même id » pour « même élément » ni « même texte ». Ce qui est recréé est ce que le geste déplace, même si c'est plus que ce qu'il croise (R227) : le correctif le lit dans la sélection de l'éditeur au moment de l'écriture (un dépôt la pose sur ce qu'il dépose, le clavier la laisse sur ce qu'il déplace ; e2e `a_drop_is_written_with_the_selection_on_what_it_drops`). **Ce qui se perd** : une frappe faite en même temps dans un bloc déplacé ou ses sous-blocs ; un bloc qu'un autre met au même moment sous un bloc déplacé, ou y a mis avant que le déplacement soit annulé ; deux déplacements simultanés du même bloc le laissent en double, que BlockNote renomme chez chacun et **écrit** à la première transaction venue (les fils de commentaires se détachent, et le serveur n'y voit plus de doublon). Une déduplication ne récupère rien (R39).
+
+### Piège neuf : le correctif de y-prosemirror
+
+- **Correctif de y-prosemirror** (`patches/y-prosemirror@1.3.7.patch`, déclaré dans `pnpm-workspace.yaml`, `patchedDependencies` ; le verrou porte son empreinte). **Ne jamais modifier un fichier sous `node_modules` à la main** : ce sont des liens vers le magasin de pnpm, partagé par tous les projets du poste. Les deux fichiers du paquet portent les mêmes lignes (`src/plugins/sync-plugin.js`, que chargent Vite et Vitest ; `dist/y-prosemirror.cjs`), **par ajouts seuls**, en quatre régions, chacune entre `// mementum:moved-blocks:begin` et `:end` : la garde de la sélection de nœud et celle de la sélection de texte dans `restoreRelativeSelection` (R224, R233 : y-prosemirror levait dans l'observateur du document, et l'éditeur ne montrait plus ce qu'écrivent les autres) ; les fonctions (`blockKey`, `longestIncreasing`, `selectedBlockKeys`, `inOrder`, `updateMovedChildren`) ; leur appel en tête de la transaction de `updateYFragment`. Il ne joue que si un bloc présent avant et après a changé d'ordre (R223) : sinon, ou dès qu'un `id` manque, est vide ou revient deux fois, c'est le code d'origine, tel quel (`ordinary_gestures_write_what_they_wrote_before`). **Pour le changer ou le porter** : `corepack pnpm patch y-prosemirror@<v> --edit-dir <dossier hors du dépôt>`, éditer les deux fichiers (dans `dist`, `instanceof Y.` s'écrit `instanceof Y__namespace.`), `corepack pnpm patch-commit <dossier>` ; à une montée de version, mettre à jour les deux empreintes `PUBLISHED` de `keyedBlocks.test.ts`. `pnpm patch` part du correctif **installé** : avant d'éprouver une mutation, remettre celui du dépôt (`git checkout -- patches pnpm-lock.yaml`, `pnpm install --frozen-lockfile`), sinon les mutations se cumulent. Si le correctif ne s'applique plus, l'installation échoue (`ERR_PNPM_UNUSED_PATCH`, ou `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` en verrou figé). Suites qui disent si un portage est juste : `keyedBlocks.test.ts`, `followBlock.test.ts`, `blockMoves.test.ts`, `movesAtRandom.test.ts`, `e2e/block-move.spec.ts`.
+
+### Pièges à ajouter
+
+- **`followBlock`** (`apps/web/src/editor/followBlock.ts`, R228, R230 à R232). y-prosemirror remet la sélection de l'onglet par des positions relatives, qui pointent l'élément d'avant : après un déplacement, le curseur passait dans le bloc qui avait pris la place, et une image sélectionnée par un clic cédait la sélection au bloc voisin, que Suppr retirait. L'extension suit le bloc par son `id` (curseur, sélection de texte, nœud sélectionné, blocs tenus pendant un glisser), n'écrit rien dans le document, et ne suit un curseur dont l'élément est toujours là que si sa place tient dans le bloc de même `id`. Ne pas la retirer. Elle lit `binding.beforeTransactionSelection` de y-prosemirror, le nom `multiple-node` et `view.dragging` : à revérifier à chaque montée de version de BlockNote ou de y-prosemirror.
+- **Ce qu'un clic et un dépôt sélectionnent.** Un clic sur une image sélectionne le nœud `image`, qui n'a pas d'`id` (son conteneur le porte) : dans un test, `selectContent`, pas `selectBlock`. Pendant un glisser, la sélection est `multiple-node`. Le dépôt d'un bloc pose une sélection de nœud dans sa transaction, celui de plusieurs une sélection de texte du premier au dernier ; BlockNote la remplace aussitôt par un curseur à la fin du dernier bloc déposé. Les aides `drag`, `dragMany` et `keyboardMany` (`src/test/editors.ts`) rejouent ces deux temps.
+- **Un éditeur a son schéma** : `node.eq` entre un nœud bâti avec le schéma d'un autre éditeur et le document du sien est toujours faux (`yXmlFragmentToProseMirrorRootNode(fragment, p.editor.pmSchema)`).
+- **Essai au hasard** : `MEMENTUM_FUZZ_SEEDS=300 corepack pnpm -C apps/web exec vitest run src/editor/movesAtRandom.test.ts --reporter=verbose` élargit l'essai et écrit ses comptes.
+
+## Doutes
+
+1. **R232 et R237 vont au-delà de la liste du contrôleur.** R232 étend le repli de la variante C à un bloc entier supprimé ; R237 laisse une limite neuve, trouvée par le hasard (blocs tenus), écrite et tenue par un test, pas corrigée. À valider.
+2. **R234 repose sur ce que ProseMirror et BlockNote posent comme sélection.** C'est mesuré dans un navigateur et tenu par un e2e, pour la souris et le clavier. Pas vérifié : un dépôt sur écran tactile, un couper-coller (il ne réordonne pas : suppression puis insertion, deux transactions), un réordonnancement venu d'une API que l'application n'appelle pas aujourd'hui (aucun `moveBlocks` dans `apps/web/src`).
+3. **Coût de R234** : un groupe de n blocs déplacé d'une place pèse n blocs (avant : le bloc croisé). Non mesuré au-delà de quatre blocs.
+4. **Budgets** : pas de recul que je sache mesurer, mais l'ouverture de 10 000 blocs est une seule ouverture par passage, sur un poste occupé (voir « Comptes »).
+5. **L'annulation dans `followBlock`** : le commentaire du livré dit qu'une annulation « remet une autre sélection que celle d'avant ». Avec le câblage de BlockNote, je vois y-prosemirror garder la sélection du moment (sonde jetable). La ligne n'est tenue par aucun test (mutation verte) ; je ne l'ai pas touchée.
+6. **Le dépôt d'une image** : son second temps n'est pas relevé ; l'aide `drag` y laisse la sélection de nœud.
+7. **Non refait** : la composition (IME), l'aperçu d'une version, les opérations de tableau, le dépôt en colonne à la souris ; restent dans la liste « non vérifié » de la relecture.
+8. **`git stash`** : je m'en suis servi une fois, quelques secondes, avant de voir que la pile est commune aux ateliers ; elle ne contenait que mon entrée, reprise aussitôt. Aucun autre recours ensuite.
+
+## Ménage
+
+`target/` (2,5 Go), `apps/web/dist` et `apps/web/test-results` supprimés ; ports 5176 et 8083 libres ; aucun processus `mementum` ; `node_modules` réinstallé à partir de rien, correctif appliqué ; `git status --short` ne montre que ce rapport ; aucune sonde restée dans le dépôt.
