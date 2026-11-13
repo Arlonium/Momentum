@@ -58,7 +58,7 @@ const NONE: [Uuid; 0] = [];
 /// Pose le favori de `by` sur `page` : `204`, sans corps.
 ///
 /// Les favoris sont rangés par la date où ils ont été posés, à la milliseconde, puis par
-/// identifiant (le store, Ruling R268) : deux favoris posés dans la même milliseconde ne
+/// identifiant (le store, Ruling R282) : deux favoris posés dans la même milliseconde ne
 /// garderaient pas l'ordre de leurs requêtes. Aucune main ne va si vite ; un test le pourrait,
 /// sur un poste ou un build assez rapide. L'aide attend donc que l'horloge ait changé de
 /// milliseconde, pour que l'ordre affirmé ne tienne pas au minutage : une condition, pas une
