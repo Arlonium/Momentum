@@ -2,7 +2,8 @@
 // (`thread_limit`), 500 messages par fil (`message_limit`) et 32 emojis distincts par message
 // (`reaction_limit`). Le client montre le message du serveur tel quel, comme tout refus, et le
 // texte refusé reste : dans son champ, et dans son brouillon, qui survit au panneau. Rien n'est
-// renvoyé de soi-même. Ici, c'est le test qui joue le serveur ; `e2e/comments-limits.spec.ts` atteint le vrai.
+// renvoyé de soi-même. Ici, c'est le test qui joue le serveur ; l'e2e
+// `message_limit_is_read_and_the_reply_stays` (`comments.spec.ts`) atteint le vrai.
 import type { ErrorCode, Thread } from "@mementum/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
