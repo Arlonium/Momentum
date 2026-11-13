@@ -1,10 +1,10 @@
 // La barre latérale. En tête, collés à son bord haut : le sélecteur d'espace (avec le menu du
-// compte, Ruling R80) et « Nouvelle page ». Puis, qui défilent dessous : « Récents », les pages
-// que le compte a ouvertes dans l'espace, gardées dans le navigateur (R255, absente quand elle
-// est vide, rien n'est lu du serveur pour elle), et les sections de l'espace, chacune avec son
-// arbre de pages. En pied, collés à son bord bas : le message de la dernière action refusée (à
-// défaut, celui d'une lecture des pages qui a échoué), avec « Réessayer » tant que les pages
-// n'ont pas pu être lues, et « Corbeille ».
+// compte, Ruling R80) et « Nouvelle page ». Puis, qui défilent dessous : les sections de
+// l'espace, chacune avec son arbre de pages, et « Récents », les pages que le compte a ouvertes
+// dans l'espace, gardées dans le navigateur (R255, sous les sections depuis R296 ; absente quand
+// elle est vide, rien n'est lu du serveur pour elle). En pied, collés à son bord bas : le
+// message de la dernière action refusée (à défaut, celui d'une lecture des pages qui a échoué),
+// avec « Réessayer » tant que les pages n'ont pas pu être lues, et « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
@@ -85,7 +85,7 @@ export function Sidebar({
   const member = space !== null && space.role !== "guest";
   // Les pages récentes du compte dans l'espace, filtrées par son arbre (R255).
   const { me } = useSession();
-  const recents = useRecentPages(me.user.id, space?.id ?? null, nodes, activeId);
+  const recents = useRecentPages(me.user.id, space?.id ?? null, nodes);
   // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
   const readFailure =
     readError === null
@@ -117,19 +117,6 @@ export function Sidebar({
         )}
       </div>
       {space && (
-        <ShortList
-          // L'état replié est celui de cet espace. Une clé à elle : React rapproche par leur
-          // clé les enfants de la barre, et celle des sections est déjà l'id de l'espace (deux
-          // fois la même clé, la liste d'un espace restait à l'écran dans le suivant).
-          key={`recents:${space.id}`}
-          spaceId={space.id}
-          label="Récents"
-          group="recents"
-          pages={recents}
-          activeId={activeId}
-        />
-      )}
-      {space && (
         <SectionList
           // Les sections repliées sont celles de cet espace.
           key={space.id}
@@ -143,6 +130,21 @@ export function Sidebar({
           onCreate={onCreate}
           onTrash={onTrash}
           onMove={onMove}
+        />
+      )}
+      {space && (
+        <ShortList
+          // Sous les sections : elle grandit d'une ligne à chaque page ouverte, et ce qui grandit
+          // en bas ne déplace aucune ligne des arbres sous le pointeur (R296). L'état replié est
+          // celui de cet espace. Une clé à elle : React rapproche par leur clé les enfants de la
+          // barre, et celle des sections est déjà l'id de l'espace (deux fois la même clé, la
+          // liste d'un espace restait à l'écran dans le suivant).
+          key={`recents:${space.id}`}
+          spaceId={space.id}
+          label="Récents"
+          group="recents"
+          pages={recents}
+          activeId={activeId}
         />
       )}
       {(space || message) && (

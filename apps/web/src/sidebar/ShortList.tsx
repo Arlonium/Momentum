@@ -1,4 +1,4 @@
-// Une liste courte de la barre latérale, au-dessus des sections : « Récents » (R255), et
+// Une liste courte de la barre latérale : « Récents » (R255), sous les sections (R296), et
 // « Favoris » quand ils viendront. Une section repliable de liens vers des pages de l'arbre,
 // qui a l'allure de « Espace », « Partagé » et « Privé » : son titre la replie, et l'état est
 // gardé par espace avec le leur (`sections.ts`). Absente quand elle est vide. Ni menu, ni
@@ -10,8 +10,8 @@
 //
 // Une page qui quitte la liste (à la corbeille, plus dans l'arbre) emporte son lien. S'il avait
 // le focus, il va au lien qui prend sa place, sinon à celui d'avant ; si la liste disparaît, au
-// titre de ce qui la suit dans la barre latérale. Seulement s'il s'est perdu : on ne le reprend
-// pas à qui l'a posé ailleurs entre-temps.
+// premier lien ou bouton de ce qui la suit dans la barre latérale (son pied, sous « Récents »).
+// Seulement s'il s'est perdu : on ne le reprend pas à qui l'a posé ailleurs entre-temps.
 import type { PageNode } from "@mementum/protocol";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent } from "react";
 import { isolate } from "../comments/dom";
@@ -30,11 +30,14 @@ type Props = {
   activeId: string | null;
 };
 
-/** Le titre de section qu'est `element`, ou le premier qu'il contient, s'il est encore là. */
-function sectionTitle(element: Element | null): HTMLElement | null {
+/** Ce qui prend le focus au clavier : un lien ou un bouton actif. */
+const FOCUSABLE = "a[href], button:not(:disabled)";
+
+/** Le lien ou le bouton qu'est `element`, ou le premier qu'il contient, s'il est encore là. */
+function firstFocusable(element: Element | null): HTMLElement | null {
   if (element === null || !element.isConnected) return null;
-  if (element.matches(".mm-section-title")) return element as HTMLElement;
-  return element.querySelector<HTMLElement>(".mm-section-title");
+  if (element.matches(FOCUSABLE)) return element as HTMLElement;
+  return element.querySelector<HTMLElement>(FOCUSABLE);
 }
 
 export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
@@ -69,8 +72,8 @@ export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
     const target =
       links[Math.min(at, links.length - 1)] ??
       root.current?.querySelector<HTMLElement>(".mm-section-title") ??
-      sectionTitle(after.current) ??
-      sectionTitle(container.current);
+      firstFocusable(after.current) ??
+      firstFocusable(container.current);
     target?.focus();
   }, [pages]);
 

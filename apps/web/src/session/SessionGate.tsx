@@ -38,6 +38,7 @@ import {
 import { flushSync } from "react-dom";
 import { getInfo, getMe, isSessionLost, onSessionLost } from "../api";
 import { navigate, pagePath, parseRoute, usePathname } from "../router";
+import { forgetOtherRecents } from "../space/recents";
 import { AuthScreen, messageOf } from "./forms";
 import { invitationTarget, InvitePage, takeInvitationToken } from "./InvitePage";
 import { invitedPage } from "./landing";
@@ -100,7 +101,13 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
     if (!inInvitationFlow) forgetInvitation();
   }, [inInvitationFlow, forgetInvitation]);
 
-  const enter = useCallback((me: Me) => setState({ name: "signedIn", me, lost: false }), []);
+  // Toute entrée d'un compte passe ici (chargement, connexion, inscription, session rouverte) :
+  // les pages récentes des autres comptes quittent le navigateur, et les siennes s'écrivent
+  // (R297).
+  const enter = useCallback((me: Me) => {
+    forgetOtherRecents(me.user.id);
+    setState({ name: "signedIn", me, lost: false });
+  }, []);
 
   /** Où aller en quittant l'inscription, quand ce n'est pas l'accueil : la page de l'invitation. */
   const landing = useRef<string | null>(null);

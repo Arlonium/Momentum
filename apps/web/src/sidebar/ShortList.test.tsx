@@ -29,11 +29,12 @@ async function show(pages: PageNode[], activeId: string | null = null, after = f
     root.render(
       <>
         <ShortList spaceId="s1" label="Récents" group="recents" pages={pages} activeId={activeId} />
-        {/* Ce qui suit la liste dans la barre latérale : le titre d'une section. */}
+        {/* Ce qui suit la liste dans la barre latérale : son pied. */}
         {after && (
-          <button type="button" className="mm-section-title">
-            Espace
-          </button>
+          <div className="mm-side-footer">
+            <p>Un message</p>
+            <a href="/s/s1/trash">Corbeille</a>
+          </div>
         )}
       </>,
     ),
@@ -107,17 +108,20 @@ test("focus_of_a_page_that_leaves_the_list_goes_to_its_neighbour", async () => {
   // La dernière : à celle d'avant.
   await show([page("a")], null, true);
   expect(document.activeElement).toBe(links()[0]);
-  // La liste se vide et disparaît : au titre de ce qui la suit.
+  // La liste se vide et disparaît : au premier lien ou bouton de ce qui la suit (le pied).
   await show([], null, true);
   expect(group()).toBeNull();
-  expect(document.activeElement?.textContent).toBe("Espace");
+  expect(document.activeElement?.textContent).toBe("Corbeille");
 });
 
 test("focus_put_elsewhere_is_not_taken_back", async () => {
-  // Témoin : le focus posé ailleurs entre-temps n'est pas repris.
+  // Témoin : le focus posé ailleurs entre-temps n'est pas repris, même quand la liste n'a pas
+  // vu partir le focus (il l'a quittée pour `body`, sans élément d'arrivée, puis est allé
+  // ailleurs hors d'elle).
   await show([page("a"), page("b")], null, true);
   links()[1].focus();
-  const elsewhere = host.querySelector<HTMLElement>(".mm-section-title")!;
+  links()[1].blur();
+  const elsewhere = host.querySelector<HTMLElement>(".mm-side-footer a")!;
   elsewhere.focus();
   await show([page("a")], null, true);
   expect(document.activeElement).toBe(elsewhere);
