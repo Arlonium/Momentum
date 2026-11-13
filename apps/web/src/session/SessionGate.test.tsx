@@ -368,6 +368,33 @@ test("first_account_screen_on_the_signup_address_gives_way_to_the_login_too", as
   expect(history.length).toBe(entries);
 });
 
+test("first_account_screen_enters_the_application_when_the_browser_has_a_session", async () => {
+  // Deux onglets du même navigateur sur l'écran du premier compte. L'autre crée le compte : le
+  // navigateur porte désormais sa session. Ici, l'inscription est refusée (elle n'a rien fermé,
+  // R265) : l'onglet entre dans l'application sous ce compte, au lieu de demander une connexion
+  // qui fermerait la session de l'autre onglet (R73).
+  history.replaceState(null, "", "/signup");
+  const submit = await firstAccountScreen();
+  vi.mocked(signUp).mockRejectedValueOnce(
+    new ApiError(
+      403,
+      "signup_closed",
+      "les inscriptions sont sur invitation : il faut le lien d'une invitation pour créer un compte",
+    ),
+  );
+  vi.mocked(getInfo).mockResolvedValue(instance(false));
+  vi.mocked(getMe).mockReset();
+  vi.mocked(getMe).mockResolvedValue(account("alice", "Alice"));
+  await submit();
+  expect(host.textContent).toBe("Alice");
+  expect(events).toEqual(["montée"]);
+  // À l'accueil, pas sur l'adresse de l'inscription ; et rien de tapé n'est parti ailleurs.
+  expect(location.pathname).toBe("/");
+  expect(signUp).toHaveBeenCalledTimes(1);
+  expect(logIn).not.toHaveBeenCalled();
+  expect(reload).not.toHaveBeenCalled();
+});
+
 test("first_account_screen_stays_while_the_instance_has_no_account", async () => {
   // Témoin : l'inscription échoue, et l'instance n'a toujours aucun compte (ou ne répond pas) :
   // l'écran reste, avec le message et ce qui a été tapé.

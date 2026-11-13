@@ -116,6 +116,48 @@ test("first_account_screen_gives_way_once_an_account_exists", async ({ page }) =
   expect((await page.request.get("/api/v1/me")).status()).toBe(401);
 });
 
+test("first_account_screen_enters_the_app_once_another_tab_has_signed_up", async ({ page }) => {
+  // Deux onglets du même navigateur sur l'écran du premier compte (ici, la première lecture de
+  // `/api/v1/info` de celui-ci dit `setup: true`, comme plus haut).
+  let infoReads = 0;
+  await page.route("**/api/v1/info", async (route) => {
+    infoReads += 1;
+    if (infoReads > 1) return route.continue();
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...(await response.json()), setup: true } });
+  });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Bienvenue dans Mementum" })).toBeVisible();
+
+  // L'autre onglet crée son compte : le navigateur porte désormais sa session.
+  const name = `Camille ${unique()}`;
+  const other = await page.context().newPage();
+  await other.goto("/signup");
+  await other.getByLabel("Nom").fill(name);
+  await other.getByLabel("Adresse e-mail").fill(`camille-${unique()}@exemple.fr`);
+  await other.getByLabel("Mot de passe", { exact: true }).fill(PASSWORD);
+  await other.getByLabel("Mot de passe", { exact: true }).press("Enter");
+  await expect(other.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
+  const session = (await meOf(other)).user.id;
+
+  // Ici, l'inscription est refusée (`409 email_taken`), et ne ferme pas cette session : l'onglet
+  // entre dans l'application sous ce compte, au lieu de demander une connexion.
+  await page.getByLabel("Nom").fill("Dominique");
+  await page.getByLabel("Adresse e-mail").fill(defaultAccount().email);
+  const password = page.getByLabel("Mot de passe", { exact: true });
+  await password.fill(PASSWORD);
+  const refused = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/v1/auth/signup");
+  await password.press("Enter");
+  expect((await refused).status()).toBe(409);
+  await expect(page.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
+  await expect(loginHeading(page)).toHaveCount(0);
+  await expectSignedInAs(page, name);
+  // La session de l'autre onglet est toujours la même : rien ne l'a remplacée.
+  expect((await meOf(other)).user.id).toBe(session);
+  await other.reload();
+  await expectSignedInAs(other, name);
+});
+
 test("login_logout_roundtrip", async ({ page }) => {
   const account = await signUpAccount();
   const title = `Connexion ${unique()}`;

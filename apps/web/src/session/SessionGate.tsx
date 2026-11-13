@@ -163,8 +163,19 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
    * connexion, qui le dit. Ce qui a été tapé n'est envoyé nulle part d'autre, et ne passe pas
    * dans la connexion. Une relecture qui échoue, ou une instance toujours sans compte, laisse
    * l'écran tel quel, avec le message de l'inscription.
+   *
+   * Le compte est relu d'abord : si c'est un autre onglet de ce navigateur qui a créé le compte,
+   * le navigateur porte déjà sa session (une inscription refusée ne la ferme pas, R265), et
+   * l'onglet entre dans l'application. Demander la connexion fermerait cette session sous
+   * l'autre onglet (R73).
    */
   const firstAccountFailed = useCallback(async () => {
+    try {
+      enter(await getMe());
+      return;
+    } catch {
+      // Pas de session (ou pas de réponse) : l'instance dit ce qu'il en est.
+    }
     let info: Info;
     try {
       info = await getInfo();
@@ -177,7 +188,7 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
     setState((current) =>
       current.name === "anonymous" ? { name: "anonymous", info, accountExists: true } : current,
     );
-  }, []);
+  }, [enter]);
 
   // Connecté sur `/login` ou `/signup` (après s'être connecté là, ou par « Précédent ») : à
   // la place de cette adresse, avant que rien ne s'affiche, la page de l'invitation qu'on
