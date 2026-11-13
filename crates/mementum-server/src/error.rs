@@ -8,7 +8,10 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mementum_crdt::CrdtError;
 use mementum_md::MmdError;
-use mementum_store::{ShareRefusal, StoreError};
+use mementum_store::{
+    CommentLimit, MAX_MESSAGES_PER_THREAD, MAX_REACTIONS_PER_MESSAGE, MAX_THREADS_PER_PAGE,
+    ShareRefusal, StoreError,
+};
 use mementum_sync::SyncError;
 
 use crate::types::{ErrorBody, ErrorCode};
@@ -242,6 +245,35 @@ impl ApiError {
         )
     }
 
+    /// `409 thread_limit`, `message_limit` ou `reaction_limit` : un plafond des commentaires
+    /// (Ruling R204), dit avec ce qu'il faut faire.
+    pub fn comment_limit(limit: CommentLimit) -> ApiError {
+        let (code, message) = match limit {
+            CommentLimit::Threads => (
+                ErrorCode::ThreadLimit,
+                format!(
+                    "cette page a atteint {} fils de commentaires, résolus compris : supprime ceux                      qui ne servent plus, ou demande-le à quelqu'un qui a l'accès complet, avant                      d'en ouvrir un autre ; rien n'a été écrit",
+                    french_number(MAX_THREADS_PER_PAGE)
+                ),
+            ),
+            CommentLimit::Messages => (
+                ErrorCode::MessageLimit,
+                format!(
+                    "ce fil a atteint {} messages : ouvre un nouveau fil pour continuer ; rien n'a                      été écrit",
+                    french_number(MAX_MESSAGES_PER_THREAD)
+                ),
+            ),
+            CommentLimit::Reactions => (
+                ErrorCode::ReactionLimit,
+                format!(
+                    "ce message porte déjà {} emojis différents : réagis avec l'un d'eux ; rien                      n'a été écrit",
+                    french_number(MAX_REACTIONS_PER_MESSAGE)
+                ),
+            ),
+        };
+        ApiError::new(StatusCode::CONFLICT, code, message)
+    }
+
     /// `409 last_full_access` : la page n'aurait plus personne en accès complet (Ruling R70).
     pub fn last_full_access() -> ApiError {
         ApiError::new(
@@ -380,6 +412,19 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Un nombre écrit à la française, les milliers séparés d'une espace (« 2 000 »).
+fn french_number(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
 impl From<StoreError> for ApiError {
     /// Les cas où `NotFound` vise autre chose que la page (parent, `afterId`)
     /// sont traités par les routes avant cette conversion.
@@ -415,6 +460,7 @@ impl From<StoreError> for ApiError {
             StoreError::NotAuthor => ApiError::forbidden(
                 "ce message, ou ce fil, n'est pas le tien : rien n'a été modifié",
             ),
+            StoreError::CommentLimit(limit) => ApiError::comment_limit(limit),
             e @ StoreError::Sqlx(_) => ApiError::internal(&e),
         }
     }
@@ -643,6 +689,21 @@ mod tests {
                 StoreError::NotAuthor,
                 StatusCode::FORBIDDEN,
                 ErrorCode::Forbidden,
+            ),
+            (
+                StoreError::CommentLimit(CommentLimit::Threads),
+                StatusCode::CONFLICT,
+                ErrorCode::ThreadLimit,
+            ),
+            (
+                StoreError::CommentLimit(CommentLimit::Messages),
+                StatusCode::CONFLICT,
+                ErrorCode::MessageLimit,
+            ),
+            (
+                StoreError::CommentLimit(CommentLimit::Reactions),
+                StatusCode::CONFLICT,
+                ErrorCode::ReactionLimit,
             ),
         ];
         for (refusal, status, code) in cases {

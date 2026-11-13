@@ -37,9 +37,12 @@
 //! **Bornes.** Le texte d'un message : de 1 à [`MAX_COMMENT_CHARS`] caractères (des points de
 //! code, pas des octets) une fois les espaces de bord retirées, qui ne sont pas gardées ; aucun
 //! caractère de contrôle (`char::is_control`) autre que le saut de ligne. Un emoji : de 1 à
-//! [`MAX_EMOJI_BYTES`] octets, sans caractère de contrôle ni espace (`char::is_whitespace`). Ni
-//! le nombre de fils d'une page, ni celui des messages d'un fil, ni celui des emojis d'un
-//! message ne sont plafonnés ici : les plafonds sont au lot 7.
+//! [`MAX_EMOJI_BYTES`] octets, sans caractère de contrôle ni espace (`char::is_whitespace`).
+//!
+//! **Plafonds** (Ruling R204), comptés par le store dans la transaction qui écrirait : 2 000 fils
+//! par page, résolus compris (`409 thread_limit`), 500 messages par fil (`409 message_limit`), 32
+//! emojis différents par message (`409 reaction_limit`, pour un emoji neuf seulement). Ils
+//! viennent après tous les refus de droit et le corps.
 //!
 //! **Lecteurs prévenus.** Après chaque écriture validée qui change quelque chose, les
 //! connexions de synchro de la page reçoivent la trame `{"type":"comments"}` (`Hub::page_event`,

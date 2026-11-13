@@ -20,6 +20,11 @@
 //! égalité de date, l'identifiant départage les fils et les messages (UUIDv7, croissant dans le
 //! processus), l'ordre d'insertion les réactions (`rowid`).
 //!
+//! **Plafonds** (Ruling R204), comptés dans la transaction qui écrirait : une page porte au plus
+//! [`MAX_THREADS_PER_PAGE`] fils (résolus compris), un fil [`MAX_MESSAGES_PER_THREAD`] messages,
+//! un message [`MAX_REACTIONS_PER_MESSAGE`] emojis différents. Au-delà :
+//! [`StoreError::CommentLimit`], et rien n'est écrit.
+//!
 //! **Suppression.** Les réactions partent avec leur message, les messages avec leur fil, les
 //! fils avec leur page (`ON DELETE CASCADE`, migration `0003`) ; un fil part avec son dernier
 //! message, dans la même transaction.
@@ -31,6 +36,42 @@ use sqlx::{Row, SqliteConnection};
 use uuid::Uuid;
 
 use crate::{Store, StoreError, now_ms, parse_uuid};
+
+/// Fils qu'une page porte au plus, résolus compris (Ruling R204).
+pub const MAX_THREADS_PER_PAGE: u32 = 2_000;
+
+/// Messages qu'un fil porte au plus, le premier compris (Ruling R204).
+pub const MAX_MESSAGES_PER_THREAD: u32 = 500;
+
+/// Emojis différents qu'un message porte au plus (Ruling R204) ; chaque compte peut poser chacun
+/// d'eux.
+pub const MAX_REACTIONS_PER_MESSAGE: u32 = 32;
+
+/// Le plafond des commentaires qu'une écriture dépasserait ([`StoreError::CommentLimit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentLimit {
+    /// [`MAX_THREADS_PER_PAGE`] fils sur la page.
+    Threads,
+    /// [`MAX_MESSAGES_PER_THREAD`] messages dans le fil.
+    Messages,
+    /// [`MAX_REACTIONS_PER_MESSAGE`] emojis différents sur le message.
+    Reactions,
+}
+
+impl std::fmt::Display for CommentLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommentLimit::Threads => write!(f, "{MAX_THREADS_PER_PAGE} fils sur la page"),
+            CommentLimit::Messages => write!(f, "{MAX_MESSAGES_PER_THREAD} messages dans le fil"),
+            CommentLimit::Reactions => {
+                write!(
+                    f,
+                    "{MAX_REACTIONS_PER_MESSAGE} emojis différents sur le message"
+                )
+            }
+        }
+    }
+}
 
 /// Un compte, tel qu'un fil le nomme : son identifiant et son nom, jamais son adresse. Un
 /// compte qui n'est plus membre de l'espace reste l'auteur de ses messages.
@@ -386,6 +427,15 @@ impl Store {
     ) -> Result<Thread, StoreError> {
         let (thread_id, now) = (Uuid::now_v7().to_string(), now_ms());
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // Ruling R204 : le plafond se compte dans la transaction qui écrit, résolus compris.
+        let threads: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM comment_threads WHERE node_id = ?")
+                .bind(node_id.to_string())
+                .fetch_one(&mut *tx)
+                .await?;
+        if threads >= i64::from(MAX_THREADS_PER_PAGE) {
+            return Err(StoreError::CommentLimit(CommentLimit::Threads));
+        }
         sqlx::query(
             "INSERT INTO comment_threads (id, node_id, block_id, created_by, created_at) \
              VALUES (?, ?, ?, ?, ?)",
@@ -416,6 +466,13 @@ impl Store {
         let thread_id = thread_id.to_string();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         thread_opener(&mut tx, &node_id.to_string(), &thread_id).await?;
+        let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE thread_id = ?")
+            .bind(&thread_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if messages >= i64::from(MAX_MESSAGES_PER_THREAD) {
+            return Err(StoreError::CommentLimit(CommentLimit::Messages));
+        }
         let comment_id = insert_comment(&mut tx, &thread_id, author, body, now_ms()).await?;
         let comment = read_comment(&mut tx, &comment_id).await?;
         tx.commit().await?;
@@ -584,6 +641,19 @@ impl Store {
             &comment_id,
         )
         .await?;
+        // Un emoji neuf sur ce message compte dans le plafond ; un emoji déjà là, non (un autre
+        // compte le pose aussi), ni une réaction déjà posée, qui ne change rien (Ruling R170).
+        let (present, distinct): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE emoji = ?), COUNT(DISTINCT emoji) \
+             FROM comment_reactions WHERE comment_id = ?",
+        )
+        .bind(emoji)
+        .bind(&comment_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if present == 0 && distinct >= i64::from(MAX_REACTIONS_PER_MESSAGE) {
+            return Err(StoreError::CommentLimit(CommentLimit::Reactions));
+        }
         let added = sqlx::query(
             "INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
              VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",

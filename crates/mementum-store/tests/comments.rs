@@ -633,3 +633,173 @@ async fn threads_of_a_deleted_page_are_gone() {
         assert_eq!(count, left, "{table}");
     }
 }
+
+/// Écrit `count` fils sur la page, résolus, par du SQL direct : préparer une page pleine sans
+/// passer par 2 000 transactions.
+async fn fill_threads(f: &Fixture, page: Uuid, author: Uuid, count: u32) {
+    common::exec_sql(
+        &f.db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {count}) \
+             INSERT INTO comment_threads (id, node_id, created_by, created_at, resolved_at, \
+               resolved_by) \
+             SELECT printf('fil-%05d', i), '{page}', '{author}', i, i, '{author}' FROM n"
+        ),
+    )
+    .await;
+}
+
+/// Ruling R204 : une page porte au plus `MAX_THREADS_PER_PAGE` fils, résolus compris. Le
+/// suivant est refusé dans la transaction qui l'écrirait (`CommentLimit::Threads`), et rien
+/// n'est écrit ; une autre page n'en est pas gênée.
+#[tokio::test]
+async fn threads_of_a_page_are_capped() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let full = new_page(&f, "Pleine").await;
+    let other = new_page(&f, "Autre").await;
+    assert_eq!(mementum_store::MAX_THREADS_PER_PAGE, 2_000);
+    fill_threads(&f, full, alice.id, mementum_store::MAX_THREADS_PER_PAGE - 1).await;
+
+    store
+        .create_thread(full, None, alice.id, "Le dernier permis")
+        .await
+        .expect("la borne est permise");
+    let refused = store
+        .create_thread(full, Some("bloc"), alice.id, "Un de trop")
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(StoreError::CommentLimit(
+                mementum_store::CommentLimit::Threads
+            ))
+        ),
+        "{refused:?}"
+    );
+    let count = format!("SELECT COUNT(*) FROM comment_threads WHERE node_id = '{full}'");
+    assert_eq!(int(&f.db, &count).await, 2_000);
+    assert_eq!(
+        int(
+            &f.db,
+            "SELECT COUNT(*) FROM comments WHERE body = 'Un de trop'"
+        )
+        .await,
+        0
+    );
+    store
+        .create_thread(other, None, alice.id, "Ailleurs")
+        .await
+        .expect("une autre page");
+}
+
+/// Ruling R204 : un fil porte au plus `MAX_MESSAGES_PER_THREAD` messages, le premier compris ;
+/// la réponse suivante est refusée (`CommentLimit::Messages`), et passe de nouveau quand un
+/// message est supprimé.
+#[tokio::test]
+async fn messages_of_a_thread_are_capped() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let p = new_page(&f, "Page").await;
+    let thread = store
+        .create_thread(p, None, alice.id, "Premier")
+        .await
+        .unwrap();
+    assert_eq!(mementum_store::MAX_MESSAGES_PER_THREAD, 500);
+    let others = mementum_store::MAX_MESSAGES_PER_THREAD - 2;
+    common::exec_sql(
+        &f.db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {others}) \
+             INSERT INTO comments (id, thread_id, author_id, body, created_at) \
+             SELECT printf('message-%05d', i), '{}', '{}', 'Réponse', i FROM n",
+            thread.id, alice.id
+        ),
+    )
+    .await;
+
+    let last = store
+        .reply_to_thread(p, thread.id, alice.id, "La dernière permise")
+        .await
+        .expect("la borne est permise");
+    let refused = store
+        .reply_to_thread(p, thread.id, alice.id, "Une de trop")
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(StoreError::CommentLimit(
+                mementum_store::CommentLimit::Messages
+            ))
+        ),
+        "{refused:?}"
+    );
+    let count = format!(
+        "SELECT COUNT(*) FROM comments WHERE thread_id = '{}'",
+        thread.id
+    );
+    assert_eq!(int(&f.db, &count).await, 500);
+    store
+        .delete_comment(p, thread.id, last.id, Authorship::Any)
+        .await
+        .unwrap();
+    store
+        .reply_to_thread(p, thread.id, alice.id, "De nouveau")
+        .await
+        .expect("une place libérée");
+}
+
+/// Ruling R204 : un message porte au plus `MAX_REACTIONS_PER_MESSAGE` emojis différents. Un
+/// emoji de plus est refusé (`CommentLimit::Reactions`) ; un emoji déjà là se pose encore, par
+/// un autre compte ; une réaction déjà posée ne change rien, sans erreur, à la borne comme
+/// ailleurs.
+#[tokio::test]
+async fn reactions_of_a_message_are_capped() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let p = new_page(&f, "Page").await;
+    let thread = store.create_thread(p, None, alice.id, "Un").await.unwrap();
+    let message = thread.comments[0].id;
+    assert_eq!(mementum_store::MAX_REACTIONS_PER_MESSAGE, 32);
+    let emojis: Vec<String> = (0..=mementum_store::MAX_REACTIONS_PER_MESSAGE)
+        .map(|i| char::from_u32(0x1F600 + i).unwrap().to_string())
+        .collect();
+    for emoji in &emojis[..32] {
+        let (_, changed) = store
+            .add_reaction(p, thread.id, message, alice.id, emoji)
+            .await
+            .expect("sous la borne");
+        assert!(changed);
+    }
+    let refused = store
+        .add_reaction(p, thread.id, message, bob.id, &emojis[32])
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(StoreError::CommentLimit(
+                mementum_store::CommentLimit::Reactions
+            ))
+        ),
+        "{refused:?}"
+    );
+    let (_, changed) = store
+        .add_reaction(p, thread.id, message, bob.id, &emojis[0])
+        .await
+        .expect("un emoji déjà là");
+    assert!(changed);
+    let (comment, changed) = store
+        .add_reaction(p, thread.id, message, alice.id, &emojis[0])
+        .await
+        .expect("déjà posée");
+    assert!(!changed);
+    assert_eq!(comment.reactions.len(), 32);
+    assert_eq!(
+        int(&f.db, "SELECT COUNT(DISTINCT emoji) FROM comment_reactions").await,
+        32
+    );
+}

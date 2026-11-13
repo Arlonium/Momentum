@@ -73,7 +73,10 @@ use uuid::Uuid;
 pub use access_inputs::AccessInputs;
 pub use acl::{AccessChange, AccessWritten, ShareRefusal};
 pub use backup::{Backup, backup_path};
-pub use comments::{Author, Authorship, Comment, Reaction, Thread, ThreadAuthors};
+pub use comments::{
+    Author, Authorship, Comment, CommentLimit, MAX_MESSAGES_PER_THREAD, MAX_REACTIONS_PER_MESSAGE,
+    MAX_THREADS_PER_PAGE, Reaction, Thread, ThreadAuthors,
+};
 pub use docs::DocState;
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
 pub use members::{Expected, Member};
@@ -115,6 +118,9 @@ pub enum StoreError {
     /// Le message n'est pas de ce compte, ou le fil n'a pas été ouvert par lui, alors que
     /// l'appelant le demandait (`Authorship::Of`) : rien n'est écrit.
     NotAuthor,
+    /// Un plafond des commentaires est atteint (Ruling R204), vérifié dans la transaction qui
+    /// écrirait : rien n'est écrit.
+    CommentLimit(CommentLimit),
     /// Erreur de la base.
     Sqlx(sqlx::Error),
 }
@@ -137,6 +143,7 @@ impl fmt::Display for StoreError {
             StoreError::ParentTrashed => write!(f, "une page parente est à la corbeille"),
             StoreError::NotTrashed => write!(f, "le nœud n'est pas à la corbeille"),
             StoreError::NotAuthor => write!(f, "ce message, ou ce fil, est d'un autre compte"),
+            StoreError::CommentLimit(limit) => write!(f, "plafond des commentaires : {limit}"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),
         }
     }

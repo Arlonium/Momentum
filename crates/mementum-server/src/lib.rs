@@ -36,12 +36,12 @@
 //! | `DELETE /api/v1/pages/{id}/access/users/{userId}` | `full` | `PageAccess` (ou `204`) ; `404` si la page n'a pas de ligne propre pour ce compte ; `409 last_full_access` ; un invité sans plus aucun accès sort de l'espace, avec ses invitations en attente |
 //! | `POST /api/v1/pages/{id}/invitations` | `full` | `201`, `InvitationCreated`, la même réponse que l'adresse ait un compte ou non ; `422 invalid_email` |
 //! | `GET /api/v1/pages/{id}/comments` | `read` (à la corbeille aussi) | `Thread[]` : les fils de la page, résolus compris, du plus ancien au plus récent, chacun avec qui l'a ouvert (`openedBy`, qui le reste quand son premier message est supprimé) ; chaque message avec son auteur (identifiant et nom, jamais l'adresse) et ses réactions (Ruling R134) |
-//! | `POST /api/v1/pages/{id}/comments` | `comment` | `201`, `Thread` : un fil neuf et son premier message ; `422 invalid_body` ; `422 invalid_block` si `blockId` ne nomme aucun bloc du document vivant de la page, droits revérifiés une fois la page chargée (Ruling R89) ; sans `blockId`, la page n'est pas chargée |
-//! | `POST /api/v1/pages/{id}/comments/{threadId}/replies` | `comment` | `201`, `Comment` ; `422 invalid_body` |
+//! | `POST /api/v1/pages/{id}/comments` | `comment` | `201`, `Thread` : un fil neuf et son premier message ; `422 invalid_body` ; `422 invalid_block` si `blockId` ne nomme aucun bloc du document vivant de la page, droits revérifiés une fois la page chargée (Ruling R89) ; sans `blockId`, la page n'est pas chargée ; `409 thread_limit` si la page porte déjà 2 000 fils, résolus compris (Ruling R204) |
+//! | `POST /api/v1/pages/{id}/comments/{threadId}/replies` | `comment` | `201`, `Comment` ; `422 invalid_body` ; `409 message_limit` si le fil porte déjà 500 messages (Ruling R204) |
 //! | `PATCH /api/v1/pages/{id}/comments/{threadId}` | l'avoir ouvert avec `comment`, ou `edit` | `Thread` : résolu (`{"resolved": true}`) ou rouvert ; déjà dans cet état, rien ne change |
 //! | `PATCH /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | `comment`, et en être l'auteur | `Comment` ; le même texte ne change rien, pas même `editedAt` ; `422 invalid_body` |
 //! | `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | en être l'auteur avec `comment`, ou `full` | `204` : le message part avec ses réactions, le fil avec son dernier message |
-//! | `PUT`, `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}/reactions/{emoji}` | `comment` | `Comment` : la réaction de la personne posée ou retirée (on ne retire que la sienne ; déjà dans cet état, rien ne change) ; `422 invalid_emoji` |
+//! | `PUT`, `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}/reactions/{emoji}` | `comment` | `Comment` : la réaction de la personne posée ou retirée (on ne retire que la sienne ; déjà dans cet état, rien ne change) ; `422 invalid_emoji` ; `409 reaction_limit` pour un emoji neuf sur un message qui en porte déjà 32 différents (Ruling R204) |
 //! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi ; Ruling R203) | `Version[]` : les versions de la page, la plus récente d'abord, cent au plus, chacune avec sa date, sa raison (`periodic`, `closing`, `before_restore`) et les comptes qui l'ont modifiée depuis la version d'avant (identifiant et nom, jamais l'adresse) (Ruling R135) |
 //! | `GET /api/v1/pages/{id}/versions/{versionId}/state` | `edit` (à la corbeille aussi ; Ruling R203) | `application/octet-stream` : l'état Yjs (v1) de la version, tel qu'il a été gardé ; une version qui n'est pas de cette page, inconnue ou mal nommée reçoit la réponse d'une page introuvable, après le `403` de niveau, comme sur la route suivante |
 //! | `POST /api/v1/pages/{id}/versions/{versionId}/restore` | `edit` | `204` : une version `before_restore` garde ce qui est remplacé si aucune version ne le garde déjà (Ruling R190), puis les blocs de la version sont écrits par-dessus le contenu, identifiants compris, comme une écriture ordinaire (la version que la page a déjà comme contenu ne change rien) ; une version qui n'est pas de la page : `404`, avant `409 trashed` (Ruling R186) ; droits revérifiés une fois la page chargée (Ruling R89), une écriture du serveur à la fois par page, comme `PUT …/mmd` (Ruling R200) ; `500 internal` pour un état gardé illisible, la page intacte |
@@ -94,7 +94,10 @@
 //! change quelque chose envoie la trame `{"type":"comments"}` aux connexions de synchro de la
 //! page (Ruling R136) ; une écriture sans effet (réaction déjà posée, fil déjà résolu, message
 //! modifié avec le même texte) n'écrit rien et n'envoie rien (Ruling R170). Aucune n'avance
-//! `spaces.rev` ni `spaces.lsn`.
+//! `spaces.rev` ni `spaces.lsn`. Trois plafonds, comptés par le store dans la transaction qui
+//! écrirait (Ruling R204) : 2 000 fils par page, résolus compris ; 500 messages par fil ; 32
+//! emojis différents par message ; au-delà, `409 thread_limit`, `message_limit` ou
+//! `reaction_limit`, qui disent quoi faire.
 //!
 //! **Historique** (`routes/versions.rs`, Ruling R135). L'acteur de chaque page coupe ses
 //! versions (`mementum-sync`) : l'état complet de la page, avec les comptes qui l'ont modifiée

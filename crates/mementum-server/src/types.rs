@@ -764,6 +764,14 @@ pub enum ErrorCode {
     /// Emoji d'une réaction de plus de 16 octets, ou qui porte une espace ou un caractère de
     /// contrôle. Statut 422.
     InvalidEmoji,
+    /// La page porte déjà 2 000 fils de commentaires, résolus compris (Ruling R204) : rien
+    /// n'est écrit. Statut 409.
+    ThreadLimit,
+    /// Le fil porte déjà 500 messages (Ruling R204) : rien n'est écrit. Statut 409.
+    MessageLimit,
+    /// Le message porte déjà 32 emojis différents, et celui-ci n'en est pas (Ruling R204) :
+    /// rien n'est écrit. Statut 409.
+    ReactionLimit,
 }
 
 /// Corps de toute réponse d'erreur.

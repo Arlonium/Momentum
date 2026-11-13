@@ -1324,3 +1324,95 @@ async fn edited_mmd_keeps_threads_on_unchanged_blocks() {
     }
     assert!(!present(&id("Trois")), "le bloc retiré est encore là");
 }
+
+/// Ruling R204 : les plafonds des commentaires, par les routes. Au-delà de 2 000 fils sur la
+/// page (résolus compris), de 500 messages dans un fil ou de 32 emojis différents sur un
+/// message, l'écriture est refusée par un `409` au code propre (`thread_limit`,
+/// `message_limit`, `reaction_limit`), avec un message qui tutoie et dit quoi faire ; rien
+/// n'est écrit, et aucune trame ne part.
+#[tokio::test]
+async fn comment_limits_are_refused_by_the_routes() {
+    let t = TestApp::new().await;
+    let alice = t.account("Alice").await;
+    let page = alice.create(json!({ "title": "Page" })).await.id;
+    let opened = alice
+        .browser
+        .post(&comments_uri(&page), json!({ "body": "Premier" }))
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    let opened = opened.json();
+    let (thread, message) = (
+        opened["id"].as_str().unwrap().to_string(),
+        opened["comments"][0]["id"].as_str().unwrap().to_string(),
+    );
+    let db = t.db_path();
+    let fill = |sql: String| {
+        let db = db.clone();
+        async move { common::exec_sql(&db, &sql).await }
+    };
+    // 1 999 fils de plus, résolus ; 499 messages de plus dans le fil ; 32 emojis sur le message.
+    fill(format!(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1999) \
+         INSERT INTO comment_threads (id, node_id, created_by, created_at, resolved_at, \
+           resolved_by) \
+         SELECT printf('fil-%05d', i), '{page}', '{}', i, i, '{}' FROM n",
+        alice.id, alice.id
+    ))
+    .await;
+    fill(format!(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 499) \
+         INSERT INTO comments (id, thread_id, author_id, body, created_at) \
+         SELECT printf('message-%05d', i), '{thread}', '{}', 'Réponse', i FROM n",
+        alice.id
+    ))
+    .await;
+    fill(format!(
+        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 31) \
+         INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
+         SELECT '{message}', '{}', char(128512 + i), i FROM n",
+        alice.id
+    ))
+    .await;
+
+    let refusals = [
+        (
+            alice
+                .browser
+                .post(&comments_uri(&page), json!({ "body": "Un fil de trop" }))
+                .await,
+            "thread_limit",
+            "2 000",
+        ),
+        (
+            alice
+                .browser
+                .post(
+                    &format!("{}/replies", thread_uri(&page, &thread)),
+                    json!({ "body": "Une réponse de trop" }),
+                )
+                .await,
+            "message_limit",
+            "500",
+        ),
+        (
+            put_empty(
+                &alice.browser,
+                &reaction_uri(&page, &thread, &message, "🦊"),
+            )
+            .await,
+            "reaction_limit",
+            "32",
+        ),
+    ];
+    for (reply, code, bound) in refusals {
+        let body = reply.assert_error(StatusCode::CONFLICT, code);
+        assert_french(&body, &[bound]);
+    }
+    // Un emoji déjà là se pose encore.
+    put_empty(
+        &alice.browser,
+        &reaction_uri(&page, &thread, &message, "😀"),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+}
