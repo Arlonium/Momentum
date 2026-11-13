@@ -1,7 +1,7 @@
 // Réglages d'un espace et invitations par lien, depuis l'interface : inviter, copier le
 // lien, l'ouvrir sans compte ou avec, changer un rôle, retirer quelqu'un, révoquer, partir.
 // Le serveur fait foi pour les droits : ses messages s'affichent tels quels.
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Request } from "@playwright/test";
 import type { ErrorBody } from "@mementum/protocol";
 import {
   acceptInvitation,
@@ -738,17 +738,58 @@ test("lost_session_in_the_settings_only_asks_to_log_in", async ({ browser }) => 
   await expect(pendingRow(a, waiting)).toBeVisible();
   const dialog = a.getByRole("dialog", { name: "Ta session a pris fin" });
   const alerts = a.getByRole("main").getByRole("alert");
+  const pathOf = (url: string) => new URL(url).pathname;
+  /** Les appels de l'onglet à l'API qui n'ont pas encore leur réponse. */
+  const inFlight = new Set<Request>();
+  a.on("request", (request) => {
+    if (pathOf(request.url()).startsWith("/api/")) inFlight.add(request);
+  });
+  a.on("requestfinished", (request) => inFlight.delete(request));
+  a.on("requestfailed", (request) => inFlight.delete(request));
+  /** Une lecture des réglages a répondu `401` : les réglages la refont au retour du compte. */
+  let lostRead = false;
+  a.on("response", (response) => {
+    if (
+      response.status() === 401 &&
+      response.request().method() === "GET" &&
+      pathOf(response.url()) === `/api/v1/spaces/${space.id}/members`
+    ) {
+      lostRead = true;
+    }
+  });
   /**
    * La session prend fin, puis `act` demande quelque chose au serveur : la connexion est
    * demandée par-dessus les réglages, qui n'en disent rien de plus, ni alors ni une fois le
    * compte revenu.
    */
   const lostThen = async (act: () => Promise<unknown>) => {
+    lostRead = false;
     await a.context().clearCookies();
     await act();
     await expect(dialog).toBeVisible();
+    // Certaines actions refusées font relire les réglages aussitôt, sans session. Cette lecture
+    // a répondu avant la connexion : plus rien de parti sans session n'est en route quand la
+    // session est rouverte (un `401` revenu après la connexion rouvrirait la fenêtre : le défaut
+    // est dans l'application, au registre, R337).
+    await expect.poll(() => inFlight.size).toBe(0);
+    // Une lecture perdue est refaite au retour du compte : les membres, puis les invitations.
+    const reread = lostRead
+      ? a.waitForResponse(
+          (response) =>
+            response.status() === 200 &&
+            response.request().method() === "GET" &&
+            pathOf(response.url()) === `/api/v1/spaces/${space.id}/invitations`,
+        )
+      : null;
+    // Attendue plus bas : si une étape échoue d'ici là, son rejet n'est pas laissé sans personne.
+    reread?.catch(() => {});
     await logInWith(dialog, alice.email, alice.password);
     await expect(dialog).toHaveCount(0);
+    // Elle est finie avant que la session se reperde. Sinon son second appel partait après que
+    // le tour suivant a effacé le cookie : la connexion était demandée avant l'action, et sa
+    // fenêtre recouvrait le bouton que le test attend alors jusqu'à son délai (vu en CI, un
+    // passage sur deux).
+    await reread;
     await expect(memberRow(a, bruno.email)).toBeVisible();
     await expect(alerts).toHaveCount(0);
   };
