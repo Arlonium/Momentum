@@ -586,6 +586,21 @@ test("focus_goes_to_the_field_when_the_message_leaves_under_it", async () => {
   expect(document.activeElement).toBe(field());
 });
 
+test("a_render_that_keeps_the_focused_button_does_not_make_the_net_forget_it", async () => {
+  // Le filet ne tient pour parti qu'un élément retiré du document (`isConnected`). Un rendu
+  // passe pendant que le bouton a le focus, et le laisse là (un renommage fait ailleurs) : le
+  // filet ne l'oublie pas, et le focus va encore au champ quand le message part ensuite.
+  const answer = await sentThenReadOnly();
+  await act(async () => buttonNamed("Écarter")!.focus());
+  await render(page("p", { title: "Autre" }), me, true);
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Premier`);
+  expect(document.activeElement).toBe(buttonNamed("Écarter"));
+  // L'envoi en route aboutit : le message part, avec le bouton qui avait le focus.
+  await act(async () => answer.resolve(page("p", { title: "Premier" })));
+  expect(unsavedMessage()).toBeNull();
+  expect(document.activeElement).toBe(field());
+});
+
 /** Donne le focus à `target` dans le rendu même où la page passe en lecture seule. */
 function FocusOnReadOnly({ readOnly, target }: { readOnly: boolean; target: HTMLElement }) {
   useLayoutEffect(() => {
