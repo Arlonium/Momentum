@@ -76,6 +76,13 @@ pub const UNTITLED: &str = "Sans titre";
 /// en unités UTF-16).
 pub const MAX_TITLE_CHARS: usize = 500;
 
+/// Blocs qu'un `PUT /mmd` écrit au plus, à tous les niveaux, lignes de tableau comprises
+/// (Ruling R259). L'écriture complète d'une page est quadratique en nombre de frères d'une même
+/// liste (yrs retrouve chaque place d'insertion en reparcourant la liste) : mesurée en release,
+/// une récriture de 12 000 paragraphes occupe l'acteur 7,5 s au plus, contre 50 s pour 30 000.
+/// Pas moins de 10 000, la taille de page que couvrent les budgets.
+pub const MAX_MMD_BLOCKS: usize = 12_000;
+
 /// Type de contenu du MMD renvoyé.
 const MARKDOWN: &str = "text/markdown; charset=utf-8";
 
@@ -611,6 +618,8 @@ pub(crate) async fn put_mmd(
     let mut blocks = parse(text)?;
     registered_props_only(&blocks)?;
     unknown_not_foreign(&mut blocks);
+    // Ruling R259 : avant le verrou et avant de charger la page.
+    at_most_blocks(&blocks)?;
     // Ruling R200 : une écriture du serveur à la fois par page, comme la restauration d'une
     // version. Le verrou se prend une fois le corps lu, et ce qui suit va au bout, verrou
     // tenu, même si le client coupe.
@@ -628,6 +637,47 @@ pub(crate) async fn put_mmd(
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ruling R259 : au plus [`MAX_MMD_BLOCKS`] blocs, à tous les niveaux, lignes de tableau
+/// comprises (les lignes d'un tableau sont des frères d'une même liste, et coûtent comme des
+/// blocs) ; sinon `422 too_many_blocks`.
+fn at_most_blocks(blocks: &[Block]) -> Result<(), ApiError> {
+    let mut count = 0usize;
+    let mut stack: Vec<&Block> = blocks.iter().collect();
+    while let Some(block) = stack.pop() {
+        count += 1;
+        if let mementum_md::Content::Table(table) = &block.content {
+            count += table.rows.len();
+        }
+        stack.extend(block.children.iter());
+    }
+    if count > MAX_MMD_BLOCKS {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::TooManyBlocks,
+            format!(
+                "ce MMD porte {} blocs (lignes de tableau comprises) : une page s'écrit en {} \
+                 blocs au plus ; découpe-la en plusieurs pages ; rien n'a été écrit",
+                french_number(count),
+                french_number(MAX_MMD_BLOCKS)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Un nombre écrit à la française, les milliers séparés d'une espace (« 12 000 »).
+fn french_number(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Ruling R41 : au lot 1, `PUT /mmd` n'écrit que les props du registre
@@ -843,5 +893,31 @@ fn page_node(node: &Node, access: &NodeAccess, trashed_at: Option<i64>) -> PageN
         section: access.section.into(),
         updated_at: node.updated_at,
         trashed_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ruling R259 : la borne est permise, la borne plus un est refusée ; les blocs imbriqués et
+    /// les lignes d'un tableau comptent.
+    #[test]
+    fn block_count_bound() {
+        let paragraphs = |n: usize| parse(&(vec!["a"; n].join("\n\n") + "\n")).unwrap();
+        assert!(at_most_blocks(&paragraphs(MAX_MMD_BLOCKS)).is_ok());
+        let refused = format!("{:?}", at_most_blocks(&paragraphs(MAX_MMD_BLOCKS + 1)));
+        assert!(refused.contains("TooManyBlocks"), "{refused}");
+        assert!(!refused.contains("  "), "{refused}");
+
+        // Un parent et un enfant font deux blocs ; un tableau de trois lignes en fait quatre.
+        let nested = parse("- Parent\n  - Enfant\n").unwrap();
+        let table = parse("| a |\n| --- |\n| b |\n| c |\n").unwrap();
+        let mut blocks = paragraphs(MAX_MMD_BLOCKS - 6);
+        blocks.extend(nested);
+        blocks.extend(table);
+        assert!(at_most_blocks(&blocks).is_ok());
+        blocks.extend(paragraphs(1));
+        assert!(at_most_blocks(&blocks).is_err());
     }
 }

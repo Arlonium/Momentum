@@ -162,3 +162,32 @@ proptest! {
         prop_assert_eq!(ids(&page.read_blocks()), before);
     }
 }
+
+/// Mesure, à lancer en release (constat I3 de la relecture de la piste S) : l'écriture complète
+/// de `n` paragraphes d'un caractère, puis des récritures de la même page. `MEMENTUM_I3_SIZES`
+/// règle les tailles (par défaut, 10 000 et 30 000), `MEMENTUM_I3_ROUNDS` le nombre d'écritures
+/// (par défaut, quatre).
+#[test]
+#[ignore = "mesure, à lancer en --release"]
+fn measure_full_rewrites() {
+    let sizes: Vec<usize> = std::env::var("MEMENTUM_I3_SIZES")
+        .map(|s| s.split(',').map(|n| n.trim().parse().unwrap()).collect())
+        .unwrap_or_else(|_| vec![10_000, 30_000]);
+    for n in sizes {
+        let lines: Vec<String> = (0..n)
+            .map(|i| ((b'a' + (i % 26) as u8) as char).to_string())
+            .collect();
+        let blocks = parse(&(lines.join("\n\n") + "\n")).unwrap();
+        let (page, _) = PageDoc::new_page();
+        let mut times = Vec::new();
+        let rounds: usize = std::env::var("MEMENTUM_I3_ROUNDS")
+            .map(|r| r.parse().unwrap())
+            .unwrap_or(4);
+        for _ in 0..rounds {
+            let start = std::time::Instant::now();
+            page.rewrite_blocks(&blocks).unwrap();
+            times.push(start.elapsed());
+        }
+        println!("MESURE {n} paragraphes d'un caractère : écriture puis récritures {times:?}");
+    }
+}

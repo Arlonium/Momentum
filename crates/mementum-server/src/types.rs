@@ -764,6 +764,9 @@ pub enum ErrorCode {
     /// Emoji d'une réaction de plus de 16 octets, ou qui porte une espace ou un caractère de
     /// contrôle. Statut 422.
     InvalidEmoji,
+    /// `PUT /mmd` de plus de 12 000 blocs, à tous les niveaux, lignes de tableau comprises
+    /// (Ruling R259) : rien n'est écrit. Statut 422.
+    TooManyBlocks,
     /// La page porte déjà 2 000 fils de commentaires, résolus compris (Ruling R204) : rien
     /// n'est écrit. Statut 409.
     ThreadLimit,

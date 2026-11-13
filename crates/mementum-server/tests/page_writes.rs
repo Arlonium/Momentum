@@ -457,3 +457,33 @@ async fn writes_queued_before_the_session_ends_stop_with_it() {
         }
     }
 }
+
+/// Constat I3 de la relecture de la piste S (Ruling R259) : l'écriture complète d'une page est
+/// quadratique en nombre de blocs frères (30 000 paragraphes d'un caractère, 90 Ko : 50 s
+/// d'acteur en release). Un `PUT /mmd` de plus de `MAX_MMD_BLOCKS` blocs (tous niveaux, lignes de
+/// tableau comprises) est refusé avant le verrou et avant que la page soit chargée : `422
+/// too_many_blocks`, avec un message qui dit la borne ; rien n'est écrit.
+#[tokio::test]
+async fn too_many_blocks_are_refused_before_anything_is_written() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Trop", &[user(&team.olga, Level::Full)])
+        .await;
+    assert_eq!(mementum_server::MAX_MMD_BLOCKS, 12_000);
+    let lines: Vec<&str> = vec!["a"; mementum_server::MAX_MMD_BLOCKS + 1];
+    let reply = team
+        .olga
+        .put_mmd(&page.to_string(), lines.join("\n\n") + "\n")
+        .await;
+    let body = reply.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "too_many_blocks");
+    common::assert_french(&body, &["12 001", "12 000"]);
+    let sql = format!("SELECT COUNT(*) FROM doc_updates WHERE node_id = '{page}'");
+    assert_eq!(query_i64(&t.db_path(), &sql).await, 0, "rien d'écrit");
+    let sql = format!("SELECT COUNT(*) FROM doc_snapshots WHERE node_id = '{page}'");
+    assert_eq!(
+        query_i64(&t.db_path(), &sql).await,
+        0,
+        "la page n'est pas chargée"
+    );
+}
