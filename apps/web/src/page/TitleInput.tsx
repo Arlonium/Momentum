@@ -43,7 +43,8 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
    * Le champ porte une saisie qui n'est pas le titre de la page : seule elle part, et elle n'est
    * pas remplacée par un titre distant. Levé par une frappe qui écrit autre chose que le titre
    * enregistré (ou que celui qui part) ; retombé quand une frappe le redit, et quand la saisie
-   * est enregistrée.
+   * est enregistrée. Un envoi refusé le relève si le champ ne dit pas le titre enregistré : le
+   * texte refusé est une saisie, à garder et à renvoyer.
    */
   const typed = useRef(false);
   /** Le champ est en lecture seule : rien de ce qui y est ne peut partir. */
@@ -141,11 +142,15 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
       }
       onSaved(updated);
     } catch (e) {
+      // Le texte refusé n'est pas le titre de la page : c'est une saisie, à garder contre un
+      // renommage fait ailleurs et à renvoyer, même si une frappe l'avait ramené au texte en route.
+      typed.current = ref.current !== null && ref.current.value !== saved.current;
       setError(
         e instanceof ApiError ? capitalize(e.message) : "Le titre n'a pas pu être enregistré.",
       );
     } finally {
-      sending.current = null;
+      // Un envoi parti depuis tient encore `sending` : ce n'est pas à celui-ci de le rendre.
+      if (sending.current === title) sending.current = null;
     }
   };
 

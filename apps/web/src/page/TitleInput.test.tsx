@@ -7,10 +7,10 @@ import type { Me, PageNode } from "@mementum/protocol";
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { updatePage } from "../api";
+import { ApiError, updatePage } from "../api";
 import { SessionContext } from "../session/session";
 import { deferred } from "../test/hooks";
-import { page, space, unauthenticated } from "../test/pages";
+import { page, space, unauthenticated, unreachable } from "../test/pages";
 import { TitleInput } from "./TitleInput";
 
 vi.mock("../api", async (original) => ({
@@ -289,4 +289,89 @@ test("a_blur_between_a_remote_title_and_its_render_sends_nothing", async () => {
   await both(page("p", { title: "Titre de Bob" }));
   expect(updatePage).not.toHaveBeenCalled();
   expect(field().value).toBe("Titre de Bob");
+});
+
+for (const [name, failure] of [
+  ["network", unreachable()],
+  ["422", new ApiError(422, "title_too_long", "un titre a 500 caractères au plus")],
+] as const) {
+  test(`a_refused_title_typed_back_during_its_send_stays_and_leaves_again (${name})`, async () => {
+    // La sonde du relecteur : pendant l'envoi de « Premier », une lettre tapée puis effacée ramène
+    // le champ au texte qui part. L'envoi échoue : ce texte n'est pas le titre de la page, c'est
+    // une saisie, gardée contre un renommage fait ailleurs et renvoyée au blur.
+    const answer = deferred<PageNode>();
+    vi.mocked(updatePage).mockReturnValueOnce(answer.promise);
+    await render(page("p", { title: "Ancien" }));
+    await type("Premier");
+    await enter();
+    await type("Premierx");
+    await type("Premier");
+    await act(async () => answer.reject(failure));
+    await render(page("p", { title: "Titre de Bob" }));
+    const error = host.querySelector('[role="alert"]') !== null;
+    await blur();
+    expect(
+      `erreur=${error} champ_apres_renommage=${field().value} renvois_au_blur=${
+        vi.mocked(updatePage).mock.calls.length - 1
+      }`,
+    ).toBe("erreur=true champ_apres_renommage=Premier renvois_au_blur=1");
+    expect(updatePage).toHaveBeenLastCalledWith("p", { title: "Premier" });
+  });
+}
+
+test("a_title_typed_back_during_a_second_send_is_sent", async () => {
+  // « Premier » part, puis « Second » ; le premier aboutit pendant que le second est en route ;
+  // elle revient alors à « Premier », qu'elle a tapé en dernier : c'est lui qui part au blur.
+  const first = deferred<PageNode>();
+  const second = deferred<PageNode>();
+  vi.mocked(updatePage).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  await render(page("p", { title: "Ancien" }));
+  await type("Premier");
+  await enter();
+  await type("Second");
+  await enter();
+  await act(async () => first.resolve(page("p", { title: "Premier" })));
+  await render(page("p", { title: "Premier" }));
+  await type("Premier");
+  await act(async () => second.resolve(page("p", { title: "Second" })));
+  await render(page("p", { title: "Second" }));
+  expect(field().value).toBe("Premier");
+  await blur();
+  expect(`dernier_envoi=${JSON.stringify(vi.mocked(updatePage).mock.lastCall)}`).toBe(
+    'dernier_envoi=["p",{"title":"Premier"}]',
+  );
+});
+
+test("a_title_typed_while_a_send_waits_for_the_account_is_kept_and_sent", async () => {
+  // L'envoi de « Premier » attend le retour du compte (`401`) ; elle tape « Second » entre-temps.
+  vi.mocked(updatePage).mockRejectedValueOnce(unauthenticated());
+  await render(page("p", { title: "Ancien" }));
+  await type("Premier");
+  await enter();
+  await type("Second");
+  await render(page("p", { title: "Ancien" }), { ...me });
+  expect(updatePage).toHaveBeenLastCalledWith("p", { title: "Premier" });
+  await render(page("p", { title: "Premier" }));
+  await render(page("p", { title: "Titre de Bob" }));
+  expect(field().value).toBe("Second");
+  await blur();
+  expect(updatePage).toHaveBeenLastCalledWith("p", { title: "Second" });
+});
+
+test("a_send_refused_once_the_field_is_read_only_lets_the_remote_title_in", async () => {
+  // L'envoi est en route quand la page passe en lecture seule ; il est refusé. Rien de ce qui est
+  // dans le champ ne peut plus partir : il suit le titre distant (R210).
+  const answer = deferred<PageNode>();
+  vi.mocked(updatePage).mockReturnValueOnce(answer.promise);
+  await render(page("p", { title: "Ancien" }));
+  await type("Premier");
+  await enter();
+  await render(page("p", { title: "Ancien" }), me, true);
+  await act(async () =>
+    answer.reject(new ApiError(403, "forbidden", "niveau insuffisant sur cette page")),
+  );
+  await render(page("p", { title: "Titre de Bob" }), me, true);
+  expect(field().value).toBe("Titre de Bob");
+  await blur();
+  expect(updatePage).toHaveBeenCalledTimes(1);
 });
