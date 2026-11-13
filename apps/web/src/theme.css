@@ -1523,6 +1523,11 @@ button.tree-toggle:hover {
   margin-top: 8px;
 }
 
+/* Un nom ou un texte venu d'ailleurs, d'un seul mot très long, ne déborde pas de la fenêtre. */
+.mm-dialog-lead .mm-isolate {
+  overflow-wrap: anywhere;
+}
+
 /* Historique d'une page (R135) : une grande fenêtre, la liste des versions à gauche, sur le
    papier de la barre latérale, l'aperçu à droite, comme la page, et « Restaurer cette version »
    en bas. Le texte secondaire tient 4,7:1 sur la ligne choisie, 5,4:1 ailleurs. */

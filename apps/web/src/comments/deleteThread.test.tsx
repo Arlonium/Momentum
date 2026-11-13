@@ -1,6 +1,7 @@
 // « Supprimer le fil » (R352, R360 à R364) : pour qui a l'accès complet à la page et écrit d'ici,
 // tout le fil part, avec les messages de tous et leurs réactions (`DELETE …/comments/{threadId}`),
-// après une confirmation qui dit combien de messages partent. Ce que ces tests tiennent :
+// après une confirmation qui nomme le fil et dit combien de messages partent. Ce que ces tests
+// tiennent :
 // - le bouton n'est montré qu'avec l'accès complet, hors corbeille et depuis un onglet du schéma
 //   du serveur, sur un fil ouvert, résolu ou d'un bloc supprimé ;
 // - Échap et « Annuler » ne suppriment rien, laissent le panneau ouvert et rendent le focus au
@@ -220,6 +221,102 @@ test("cancelling_after_the_thread_changed_list_gives_the_focus_to_its_new_button
   await click(button(dialog()!, "Annuler"));
   expect(dialog()).toBeNull();
   expect(active()).toBe(button(threadOf("t")!, DELETE));
+});
+
+// La fenêtre nomme le fil qui part : qui l'a ouvert, et le début de son premier message, comme
+// des textes venus d'ailleurs (des nœuds de texte, isolés, jamais du HTML).
+
+/** Les paragraphes de la fenêtre ouverte sur le fil `id`. */
+async function leadOf(initial: Thread[], id: string) {
+  await act(async () => root.render(<Static initial={initial} />));
+  await click(button(threadOf(id)!, DELETE));
+  return [...dialog()!.querySelectorAll(".mm-dialog-lead p")];
+}
+
+/** Les textes venus d'ailleurs dans la fenêtre : chacun isolé, dans le sens de son écriture. */
+function foreignTexts() {
+  return [...dialog()!.querySelectorAll(".mm-dialog-lead [dir]")].map((element) => ({
+    text: element.textContent,
+    dir: element.getAttribute("dir"),
+    isolated: element.classList.contains("mm-isolate"),
+  }));
+}
+
+test("the_confirmation_names_the_thread_by_its_opener_and_first_message", async () => {
+  const bruno = author("bruno", "Bruno");
+  const lead = await leadOf(
+    [
+      thread("t", {
+        openedBy: bruno,
+        comments: [
+          message("m1", { author: bruno, body: "À revoir\navant vendredi" }),
+          message("m2", { createdAt: 2_000, body: "D'accord" }),
+        ],
+      }),
+    ],
+    "t",
+  );
+  expect(lead.map((p) => p.textContent)).toEqual([
+    "Le fil ouvert par Bruno : « À revoir avant vendredi »",
+    "Il part pour tout le monde, avec ses 2 messages et leurs réactions. Cela ne se défait pas.",
+  ]);
+  expect(foreignTexts()).toEqual([
+    { text: "Bruno", dir: "auto", isolated: true },
+    { text: "À revoir avant vendredi", dir: "auto", isolated: true },
+  ]);
+});
+
+test("the_confirmation_shows_arabic_and_markup_as_text", async () => {
+  const sara = author("sara", "سارة");
+  await leadOf(
+    [thread("ar", { openedBy: sara, comments: [message("m", { author: sara, body: "مرحبا، هذا تعليق" })] })],
+    "ar",
+  );
+  expect(foreignTexts()).toEqual([
+    { text: "سارة", dir: "auto", isolated: true },
+    { text: "مرحبا، هذا تعليق", dir: "auto", isolated: true },
+  ]);
+  await act(async () => root.render(null));
+  const evil = author("evil", "<i>Bruno</i>");
+  const body = '<b>gras</b><img src=x onerror="alert(1)">';
+  await leadOf([thread("html", { openedBy: evil, comments: [message("m", { author: evil, body })] })], "html");
+  // Rien n'est interprété : ni balise, ni image, et le texte se lit tel quel.
+  expect(dialog()!.querySelector("i, b, img")).toBeNull();
+  expect(foreignTexts().map((t) => t.text)).toEqual(["<i>Bruno</i>", body]);
+});
+
+test("the_confirmation_quotes_only_the_start_of_a_long_first_message", async () => {
+  const body = "Une remarque qui ne finit pas ".repeat(400);
+  await leadOf([thread("long", { comments: [message("m", { body })] })], "long");
+  const quote = foreignTexts()[1].text!;
+  expect(quote.endsWith("…")).toBe(true);
+  expect(Array.from(quote).length).toBeLessThanOrEqual(61);
+  // Coupé après un mot entier.
+  expect(body.startsWith(`${quote.slice(0, -1)} `)).toBe(true);
+});
+
+test("a_thread_whose_first_message_is_gone_is_named_by_its_opener", async () => {
+  // Le premier message, d'Alice, a été supprimé : il reste la réponse de Bruno (R173, R370).
+  const lead = await leadOf(
+    [
+      thread("t", {
+        comments: [message("r", { author: author("bruno"), createdAt: 2_000, body: "une réponse" })],
+      }),
+    ],
+    "t",
+  );
+  expect(lead.map((p) => p.textContent)).toEqual([
+    "Le fil ouvert par ALICE",
+    "Il part pour tout le monde, avec son message et ses réactions. Cela ne se défait pas.",
+  ]);
+  expect(dialog()!.textContent).not.toContain("une réponse");
+  // Même quand c'est une réponse de l'ouvreur qui reste : elle n'est pas le premier message.
+  await act(async () => root.render(null));
+  const own = await leadOf(
+    [thread("u", { comments: [message("r2", { createdAt: 2_000, body: "ma réponse" })] })],
+    "u",
+  );
+  expect(own[0].textContent).toBe("Le fil ouvert par ALICE");
 });
 
 // La suppression, avec le vrai hook des fils.

@@ -1,7 +1,7 @@
 // Ce que les commentaires lisent dans l'éditeur affiché : le bloc où est la sélection (pour
 // Ctrl+Alt+M dans un éditeur en lecture seule) et le texte propre d'un bloc.
 import { afterEach, expect, test } from "vitest";
-import { blockOfSelection, blockText, isolate } from "./dom";
+import { blockOfSelection, blockText, isolate, snippet } from "./dom";
 
 /** Un bloc tel que BlockNote le rend : `blockOuter` > `blockContainer` > contenu, puis ses enfants. */
 function block(id: string, content: Node, children: HTMLElement[] = []): HTMLElement {
@@ -140,4 +140,22 @@ test("the_text_of_a_toggle_block_is_its_own", () => {
 
 test("isolate_wraps_text_in_first_strong_isolates", () => {
   expect(isolate("‮abc")).toBe("⁨‮abc⁩");
+});
+
+test("a_snippet_is_one_line_cut_after_a_word", () => {
+  // Les sauts de ligne et les suites d'espaces deviennent une espace ; un texte court reste tel quel.
+  expect(snippet("  ligne un\n\n  ligne deux  ", 60)).toBe("ligne un ligne deux");
+  // Trop long : coupé à la fin du dernier mot entier, suivi de « … ».
+  expect(snippet("un deux trois quatre cinq", 16)).toBe("un deux trois…");
+  // Un seul mot trop long : coupé à la borne.
+  expect(snippet("anticonstitutionnellement", 10)).toBe("anticonsti…");
+});
+
+test("a_snippet_never_splits_a_character", () => {
+  // Une famille (quatre emojis joints) et une lettre suivie de son accent combinant comptent
+  // chacune pour un caractère, et ne sont jamais coupées en deux.
+  const family = "👨‍👩‍👧‍👦";
+  expect(snippet(family.repeat(5), 3)).toBe(`${family.repeat(3)}…`);
+  const accented = "e\u0301";
+  expect(snippet(accented.repeat(8), 4)).toBe(`${accented.repeat(4)}…`);
 });

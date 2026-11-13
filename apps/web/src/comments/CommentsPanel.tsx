@@ -19,9 +19,9 @@
 //
 // Avec l'accès complet (hors corbeille, depuis un onglet du schéma du serveur), « Supprimer le
 // fil » retire tout un fil, avec les messages de tous et leurs réactions (R352) : de quoi faire de
-// la place quand un plafond est atteint. Une confirmation dit d'abord combien de messages partent ;
-// elle est rendue à côté du panneau dans l'arbre de React, pas dedans, pour que son Échap ne le
-// ferme pas. Le fil parti, le focus va au fil voisin, ou au titre du panneau ; ses brouillons
+// la place quand un plafond est atteint. Une confirmation nomme d'abord le fil (qui l'a ouvert, le
+// début de son premier message) et dit combien de messages partent ; elle est rendue à côté du
+// panneau dans l'arbre de React, pas dedans, pour que son Échap ne le ferme pas. Le fil parti, le focus va au fil voisin, ou au titre du panneau ; ses brouillons
 // rejoignent « Textes non envoyés », comme ceux d'un fil supprimé par quelqu'un d'autre.
 //
 // Au clavier : le panneau prend le focus à son ouverture (sur le fil choisi, ou sur la zone du
@@ -30,7 +30,7 @@
 // ne tombe jamais sur `body` : l'élément qui l'avait (une zone de rédaction refermée, un bouton
 // de réaction parti, un fil qui change de liste) le rend à ce qui suit l'action dans le fil, au
 // fil lui-même, ou au titre du panneau.
-import type { Level, Thread } from "@mementum/protocol";
+import type { Comment, Level, Thread } from "@mementum/protocol";
 import {
   useCallback,
   useEffect,
@@ -47,7 +47,7 @@ import { CloseIcon } from "../icons";
 import { messageOf } from "../session/forms";
 import { Confirm } from "../ui/Confirm";
 import { arrangeThreads, canDeleteThread, canWrite, type CommentRights } from "./arrange";
-import { cssString } from "./dom";
+import { cssString, snippet } from "./dom";
 import { Composer } from "./Composer";
 import { createDrafts, DRAFT, type Drafts, type OrphanDraft } from "./drafts";
 import { FOCUS, ThreadView } from "./ThreadView";
@@ -564,19 +564,60 @@ export function CommentsPanel({
           onConfirm={() => void confirmDeletion()}
           onCancel={() => cancelDeletion(deletingThread.id)}
         >
-          {deletionText(deletingThread)}
+          <DeletionLead thread={deletingThread} />
         </Confirm>
       )}
     </>
   );
 }
 
-/** Ce que dit la confirmation : combien de messages partent, et que cela ne se défait pas. */
-function deletionText(thread: Thread): string {
+/** Le début du premier message d'un fil, dans la confirmation de sa suppression (caractères). */
+const QUOTE_CHARS = 60;
+
+/**
+ * Le premier message du fil, s'il est encore là : celui de son ouvreur, écrit à l'instant même
+ * où le fil a été ouvert (le serveur écrit les deux ensemble, R370). Supprimé, il n'a pas de
+ * remplaçant : une réponse ne dit pas de quoi parle le fil.
+ */
+function firstMessage(thread: Thread): Comment | null {
+  const first = thread.comments[0];
+  if (first === undefined) return null;
+  return first.author.id === thread.openedBy.id && first.createdAt === thread.createdAt
+    ? first
+    : null;
+}
+
+/**
+ * Ce que dit la confirmation : quel fil part (qui l'a ouvert, le début de son premier message),
+ * combien de messages avec lui, et que cela ne se défait pas. Le nom et le message viennent
+ * d'autres comptes : du texte, chacun isolé dans le sens de son écriture, jamais du HTML.
+ */
+function DeletionLead({ thread }: { thread: Thread }) {
+  const first = firstMessage(thread);
   const count = thread.comments.length;
   const going =
     count === 1
-      ? "Le fil et son message partent pour tout le monde, avec ses réactions."
-      : `Le fil et ses ${count} messages partent pour tout le monde, avec leurs réactions.`;
-  return `${going} Cela ne se défait pas.`;
+      ? "Il part pour tout le monde, avec son message et ses réactions."
+      : `Il part pour tout le monde, avec ses ${count} messages et leurs réactions.`;
+  return (
+    <>
+      <p>
+        {"Le fil ouvert par "}
+        <span className="mm-isolate" dir="auto">
+          {thread.openedBy.name}
+        </span>
+        {/* Espaces insécables autour des guillemets et avant les deux-points. */}
+        {first !== null && (
+          <>
+            {" : « "}
+            <span className="mm-isolate" dir="auto">
+              {snippet(first.body, QUOTE_CHARS)}
+            </span>
+            {" »"}
+          </>
+        )}
+      </p>
+      <p>{`${going} Cela ne se défait pas.`}</p>
+    </>
+  );
 }

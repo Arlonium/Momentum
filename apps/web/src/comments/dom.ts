@@ -64,6 +64,26 @@ export function shown(element: Element): boolean {
   return typeof element.checkVisibility !== "function" || element.checkVisibility();
 }
 
+/**
+ * Le début d'un texte venu d'ailleurs, sur une ligne (sauts de ligne et suites d'espaces
+ * deviennent une espace) : au plus `max` caractères tels qu'on les voit (un emoji joint, une
+ * lettre et son accent combinant comptent pour un et ne sont jamais coupés), arrêté après le
+ * dernier mot entier quand il en garde au moins la moitié, et suivi de « … » s'il était plus long.
+ */
+export function snippet(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  const graphemes = Array.from(segmenter.segment(flat), (part) => part.segment);
+  if (graphemes.length <= max) return flat;
+  const kept = graphemes.slice(0, max);
+  // La borne tombe dans un mot : on s'arrête à l'espace qui le précède.
+  if (graphemes[max] !== " ") {
+    const space = kept.lastIndexOf(" ");
+    if (space >= max / 2) kept.length = space;
+  }
+  return `${kept.join("").trimEnd()}…`;
+}
+
 /** Les premiers `max` caractères de `text`, suivis de « … » s'il en avait plus. */
 export function shorten(text: string, max: number): string {
   const chars = Array.from(text);
