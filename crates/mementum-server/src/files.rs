@@ -16,23 +16,26 @@
 //! revenue en arrière) reste, compté par [`FileStore::strangers`], et repris tel quel si on le
 //! renvoie. Un contenu ne quitte le disque que par [`FileStore::remove`].
 //!
-//! **Un contenu posé est entier.** Le fichier temporaire est vidé sur le disque
-//! ([`Upload::sync`] : `flush`, puis `sync_all`) avant de prendre sa place. Si un fichier y est
-//! déjà : de même taille, il est **tenu pour** le même contenu, sans être relu, et le temporaire
-//! est supprimé (un contenu abîmé à taille égale n'est donc ni vu ni réparé) ; d'une autre taille,
-//! ou s'il n'est pas un fichier ordinaire, il est abîmé, et le temporaire le remplace, ce que le
-//! journal dit. Une écriture ou un vidage interrompu, ou qui échoue, met l'envoi hors d'usage
-//! (R273) : le fichier ne porterait plus les octets que le hash a vus. Un envoi lâché sans
-//! `finish` supprime son temporaire.
+//! **Un contenu posé est entier, et il y reste** (R278). Le fichier temporaire est vidé sur le
+//! disque ([`Upload::sync`] : `flush`, puis `sync_all`) avant de prendre sa place, et, sous Unix,
+//! le dossier où il vient d'entrer est synchronisé à son tour, dans le même geste : quand `finish`
+//! rend, une coupure de courant ne reprend plus le contenu (sous Windows, rien ne synchronise un
+//! dossier : la fenêtre reste). Si un fichier
+//! est déjà à sa place : de même taille, il est **tenu pour** le même contenu, sans être relu, et
+//! le temporaire est supprimé (un contenu abîmé à taille égale n'est donc ni vu ni réparé) ; d'une
+//! autre taille, ou s'il n'est pas un fichier ordinaire, il est abîmé, et le temporaire le
+//! remplace, ce que le journal dit. Une écriture ou un vidage interrompu, ou qui échoue, met
+//! l'envoi hors d'usage (R273) : le fichier ne porterait plus les octets que le hash a vus. Un
+//! envoi lâché sans `finish` supprime son temporaire.
 //!
 //! **Deux verrous.** Celui du dépôt ([`FileStore::lock`]) est tenu par l'appelant : il ordonne
 //! « poser un contenu puis l'attacher » et le ménage. [`Upload::finish`] et [`FileStore::remove`]
 //! demandent son garde (d'un autre dépôt, il est refusé, R274) ; ainsi un ménage qui relit la base
 //! sous le verrou voit l'attache d'un envoi qui vient de poser le contenu qu'il allait retirer.
 //! Celui du geste est interne (R285) : chaque « regarder puis agir » sur le disque (`finish` : le
-//! dossier de préfixe, ce qui est à la place du contenu, le renommage ; `remove` : ce qui est à sa
-//! place, le retrait) se fait d'un seul tenant sur un fil bloquant, qui tient ce verrou jusqu'à sa
-//! fin.
+//! dossier de préfixe, ce qui est à la place du contenu, le renommage, la synchronisation du
+//! dossier ; `remove` : ce qui est à sa place, le retrait) se fait d'un seul tenant sur un fil
+//! bloquant, qui tient ce verrou jusqu'à sa fin.
 //!
 //! **Ce qui tient quand l'appelant est lâché en route** (une requête abandonnée, un `select!`, un
 //! `timeout`). Rien n'annule ce qu'un fil bloquant a commencé, et le garde de l'appelant est rendu
@@ -56,8 +59,8 @@
 //!
 //! Aucun appel bloquant sur les fils du serveur, qui relaient les frappes (R247) : l'écriture
 //! d'un envoi passe par `tokio::fs`, et tout autre geste sur le disque par un fil bloquant
-//! (`spawn_blocking`). Restent synchrones l'ouverture et le compte du démarrage, et le retrait du
-//! temporaire d'un envoi lâché (`Drop`, un `unlink`).
+//! (`spawn_blocking`). Restent synchrones l'ouverture et les comptes du démarrage, et le retrait
+//! du temporaire d'un envoi lâché (`Drop`, un `unlink`).
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -182,7 +185,7 @@ impl Dirs {
             None => {
                 std::fs::rename(&temp.path, &dest)?;
                 temp.placed();
-                Ok(Placed::Fresh)
+                Ok(Placed::Fresh { new_prefix })
             }
             // Tenu pour le même contenu, sans le relire : le hash le nomme, et sa taille est la
             // bonne. `temp`, lâché, est supprimé.
@@ -227,6 +230,17 @@ impl Dirs {
         }
     }
 
+    /// Les dossiers où le geste `placed` vient d'écrire une entrée, à rendre durables (R278) : le
+    /// dossier de préfixe, où le contenu est entré, puis `files/`, si ce dossier vient d'y être
+    /// créé. Aucun pour un contenu trouvé là.
+    fn written(&self, hash: &[u8; 32], placed: Placed) -> Vec<PathBuf> {
+        match placed {
+            Placed::Found => Vec::new(),
+            Placed::Replaced | Placed::Fresh { new_prefix: false } => vec![self.prefix_path(hash)],
+            Placed::Fresh { new_prefix: true } => vec![self.prefix_path(hash), self.root.clone()],
+        }
+    }
+
     /// Mène `work`, un geste qui regarde le dépôt puis y agit, d'un seul tenant sur un fil
     /// bloquant, sous le verrou du geste (R285). Le verrou entre dans la tâche, qui le rend à sa
     /// fin, et pas avant : si l'appelant est lâché en route, le geste va quand même au bout, et
@@ -261,8 +275,9 @@ impl Dirs {
 /// Ce qu'a fait le geste de [`Upload::finish`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Placed {
-    /// Le temporaire a pris sa place, où il n'y avait rien.
-    Fresh,
+    /// Le temporaire a pris sa place, où il n'y avait rien ; `new_prefix` : dans un dossier de
+    /// préfixe que ce geste vient de créer.
+    Fresh { new_prefix: bool },
     /// Le contenu y était déjà : le temporaire a été supprimé, rien n'a été écrit dans le dépôt.
     Found,
     /// Le temporaire a remplacé ce qui était à sa place, abîmé.
@@ -322,6 +337,37 @@ async fn blocking<T: Send + 'static>(
             "un geste sur le dépôt des fichiers n'a pas abouti : {error}"
         ))),
     }
+}
+
+/// Rend durables les entrées que ces dossiers viennent de recevoir (un contenu renommé, un
+/// dossier créé), sous Unix : une entrée n'y est sur le disque qu'une fois son dossier synchronisé
+/// à son tour (R278). Une synchronisation qui échoue est journalisée, sans faire échouer le
+/// geste : le contenu est à sa place, entier, et dire l'inverse serait faux ; SQLite fait de même
+/// pour le dossier de sa base.
+fn durable(dirs: &[PathBuf]) {
+    for dir in dirs {
+        if let Err(error) = sync_dir(dir) {
+            tracing::warn!(
+                dir = %dir.display(),
+                %error,
+                "dossier du dépôt des fichiers impossible à synchroniser : une coupure de \
+                 courant peut encore reprendre ce qui vient d'y entrer"
+            );
+        }
+    }
+}
+
+/// Synchronise le dossier `dir` lui-même (`fsync` sur le dossier ouvert), pas ce qu'il contient.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Hors d'Unix, rien : sous Windows un dossier ne s'ouvre pas ainsi, et la bibliothèque standard
+/// n'a pas d'autre appel.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// Retire le lien posé à `path`, jamais ce qu'il vise ; sous Windows, un lien vers un dossier (ou
@@ -384,6 +430,8 @@ impl FileStore {
                 tmp.display()
             )));
         }
+        // `files/` et `files/tmp/`, s'ils viennent d'être créés (R278).
+        durable(&[data_dir.to_path_buf(), root.clone()]);
         let mut removed = 0u64;
         for entry in std::fs::read_dir(&tmp)? {
             let entry = entry?;
@@ -587,12 +635,21 @@ impl Upload {
         // Fermé avant de changer de nom : plus aucune écriture n'est en route.
         drop(file);
         let hash: [u8; 32] = hasher.finalize().into();
-        let placed = dirs.act(move |dirs| dirs.place(temp, &hash, len)).await?;
+        let placed = dirs
+            .act(move |dirs| {
+                let placed = dirs.place(temp, &hash, len)?;
+                // Dans le même geste, avant de rendre son verrou : quand `finish` rend, le
+                // contenu est à sa place pour de bon, et c'est après seulement que l'appelant
+                // écrit son attache (R278).
+                durable(&dirs.written(&hash, placed));
+                Ok(placed)
+            })
+            .await?;
         Ok(Stored {
             hash,
             size: len,
             mime: sniff(&head),
-            fresh: placed == Placed::Fresh,
+            fresh: matches!(placed, Placed::Fresh { .. }),
         })
     }
 }
@@ -2288,6 +2345,60 @@ mod tests {
         file.read_to_end(&mut read).await.unwrap();
         assert!(read.is_empty());
         assert!(!put(&store, b"").await.fresh);
+        assert!(tmp_entries(dir.path()).is_empty());
+    }
+
+    /// Un envoi de `bytes` prêt à être posé : son temporaire, écrit, vidé sur le disque et fermé.
+    async fn ready_to_place(store: &FileStore, bytes: &[u8]) -> Temporary {
+        let mut upload = store.begin().await.unwrap();
+        upload.write(bytes).await.unwrap();
+        upload.sync().await.unwrap();
+        let Upload { file, temp, .. } = upload;
+        drop(file);
+        temp
+    }
+
+    /// Le geste de `finish` dit dans quels dossiers il vient d'écrire une entrée : ce sont eux
+    /// qu'il faut synchroniser pour que le contenu survive à une coupure de courant (R278). Le
+    /// dossier de préfixe, où le contenu est entré ; `files/` aussi, quand ce dossier vient d'y
+    /// être créé ; aucun pour un contenu trouvé là. (La synchronisation elle-même ne se fait que
+    /// sous Unix : ce test ne tient que le choix des dossiers.)
+    #[tokio::test]
+    async fn the_gesture_says_which_folders_it_wrote_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let root = dir.path().join(FILES_DIR);
+        // Deux contenus du même dossier de préfixe : le premier octet de leur hash est le même.
+        let first = b"contenu 0".to_vec();
+        let second = (1u32..)
+            .map(|i| format!("contenu {i}").into_bytes())
+            .find(|bytes| sha256(bytes)[0] == sha256(&first)[0])
+            .unwrap();
+        let (hash, other) = (sha256(&first), sha256(&second));
+        let prefix = root.join(&hex(&hash)[..2]);
+        let dirs = &store.dirs;
+
+        let temp = ready_to_place(&store, &first).await;
+        let placed = dirs.place(temp, &hash, first.len() as u64).unwrap();
+        assert_eq!(placed, Placed::Fresh { new_prefix: true });
+        assert_eq!(dirs.written(&hash, placed), [prefix.clone(), root.clone()]);
+
+        let temp = ready_to_place(&store, &second).await;
+        let placed = dirs.place(temp, &other, second.len() as u64).unwrap();
+        assert_eq!(placed, Placed::Fresh { new_prefix: false });
+        assert_eq!(dirs.written(&other, placed), std::slice::from_ref(&prefix));
+
+        let temp = ready_to_place(&store, &first).await;
+        let placed = dirs.place(temp, &hash, first.len() as u64).unwrap();
+        assert_eq!(placed, Placed::Found);
+        assert!(dirs.written(&hash, placed).is_empty());
+
+        std::fs::write(dirs.content_path(&hash), b"tronque").unwrap();
+        let temp = ready_to_place(&store, &first).await;
+        let placed = dirs.place(temp, &hash, first.len() as u64).unwrap();
+        assert_eq!(placed, Placed::Replaced);
+        assert_eq!(dirs.written(&hash, placed), [prefix]);
+        assert_eq!(std::fs::read(dirs.content_path(&hash)).unwrap(), first);
         assert!(tmp_entries(dir.path()).is_empty());
     }
 
