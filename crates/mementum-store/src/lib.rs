@@ -1,6 +1,6 @@
 //! Stockage SQLite de Mementum : comptes et sessions, espaces et leurs membres, invitations,
-//! arbre de pages, accès, fils de commentaires, fichiers des pages, journal Yjs, instantanés et
-//! versions.
+//! arbre de pages, accès, fils de commentaires, fichiers des pages, favoris, journal Yjs,
+//! instantanés et versions.
 //!
 //! - [`Store`] ouvre la base (WAL, `synchronous=FULL`, clés étrangères, délai d'attente de 5 s,
 //!   appliqués à **chaque** connexion du pool) et lance les migrations.
@@ -17,6 +17,7 @@
 //! - `access_inputs.rs` : ce que le calcul des accès lit d'un espace, en une transaction.
 //! - `comments.rs` : les fils de commentaires d'une page, leurs messages et leurs réactions.
 //! - `files.rs` : les fichiers d'une page, contenus rangés par leur hash et attaches ; le ménage.
+//! - `favorites.rs` : les favoris d'un compte, qui n'avancent ni `rev` ni `lsn`.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
 //! - `versions.rs` : les versions d'une page (état Yjs complet et auteurs), cent par page.
 //! - `position.rs` : l'index fractionnaire.
@@ -52,6 +53,7 @@ mod acl;
 mod backup;
 mod comments;
 mod docs;
+mod favorites;
 mod files;
 mod invitations;
 mod members;
