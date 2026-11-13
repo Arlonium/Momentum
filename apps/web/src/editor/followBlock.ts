@@ -173,15 +173,31 @@ function followed(change: Transaction, before: Selection, state: EditorState): S
   const anchor = placeOf(before.$anchor);
   const head = placeOf(before.$head);
   if (anchor === null || head === null) return null;
-  // Un bout a quitté son bloc. Ou il y est resté par hasard (le bloc recréé est là où
-  // y-prosemirror a remis la sélection), mais pas à sa place : sa position relative, celle que
-  // y-prosemirror avait prise avant un changement reçu, ne mène plus nulle part. Une annulation
-  // remet une autre sélection que celle d'avant : sa position relative n'est pas lue.
+  // Un bout est à suivre quand son texte n'est plus où y-prosemirror a remis la sélection :
+  //  - l'élément qui portait ce texte a été supprimé, avec son bloc ou seul : sa position
+  //    relative, celle que y-prosemirror avait prise avant le changement reçu, ne mène plus nulle
+  //    part. Le bout peut être resté dans son bloc par hasard (le bloc recréé est là où
+  //    y-prosemirror a remis la sélection), mais pas à sa place ;
+  //  - une annulation l'a sorti de son bloc. Elle remet une autre sélection que celle d'avant :
+  //    sa position relative n'est pas lue ;
+  //  - l'élément est toujours là, sous un autre id : y-prosemirror a récrit des blocs sur place
+  //    (Entrée dans un bloc qui a des sous-blocs : l'élément passe au bloc neuf, avec la fin du
+  //    texte ; un onglet sans la forme à clés qui déplace un bloc). « Même id » ne dit alors plus
+  //    « même texte » : le bout n'est suivi que si sa place tient dans le bloc qui porte
+  //    désormais son id, sans y être rabattue. Sinon son texte est resté dans l'élément (il est
+  //    après la coupure), et le bout avec lui.
   const { binding } = ySyncPluginKey.getState(state) as { binding: ProsemirrorBinding };
   const { isUndoRedoOperation } = change.getMeta(ySyncPluginKey) as SyncMeta;
   const relative = isUndoRedoOperation ? null : binding.beforeTransactionSelection;
-  const left = (place: Place, $now: ResolvedPos, was: Y.RelativePosition | undefined) =>
-    placeOf($now)?.id !== place.id || (was !== undefined && isGone(was, binding.doc));
+  const fits = (place: Place) => {
+    const content = find(doc, place.id)?.node.firstChild;
+    return content != null && place.offset <= content.nodeSize;
+  };
+  const left = (place: Place, $now: ResolvedPos, was: Y.RelativePosition | undefined) => {
+    if (was !== undefined && isGone(was, binding.doc)) return true;
+    if (placeOf($now)?.id === place.id) return false;
+    return was === undefined || fits(place);
+  };
   if (
     !left(anchor, selection.$anchor, relative?.anchor) &&
     !left(head, selection.$head, relative?.head)

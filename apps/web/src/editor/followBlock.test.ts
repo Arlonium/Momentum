@@ -16,7 +16,10 @@ import {
   drag,
   exchange,
   keyboardDown,
+  line,
+  PARENTED,
   peer,
+  pressAt,
   REMOTE,
   seedState,
   selectBlock,
@@ -180,6 +183,62 @@ describe("cursor_follows_its_block_when_someone_else_moves_it", () => {
       expect((selection as NodeSelection).node.attrs.id).toBe("x");
     }
     expect(shown(mona)).toEqual([Y_, X, Z, W]);
+  });
+});
+
+// Entrée au milieu ou à la fin d'un bloc qui a des sous-blocs : y-prosemirror garde l'élément du
+// bloc pour le bloc neuf, qui prend les sous-blocs et la fin du texte, et donne l'id d'avant à un
+// élément neuf, qui prend le début (`ordinary_gestures_write_what_they_wrote_before`,
+// `keyedBlocks.test.ts`). « Même id » ne dit donc pas « même texte » : le curseur de qui tapait
+// après la coupure est resté dans son texte, sous un autre id, et ne doit pas en sortir ; celui
+// de qui tapait avant la coupure a perdu son texte, et le retrouve dans le bloc de même id.
+describe("cursor_stays_with_its_text_when_someone_else_splits_its_block", () => {
+  /**
+   * Tom a son curseur dans X (qui a un sous-bloc), à `tomAt` caractères du début ; Mona presse
+   * Entrée dans X, à `enterAt` ; Tom tape « ! » sans recliquer. Rend la page du serveur, l'id du
+   * bloc neuf écrit `neuf`.
+   */
+  async function split(tomAt: number, enterAt: number, { plain = false } = {}): Promise<string> {
+    const base = await seedState(PARENTED);
+    const extensions = plain ? undefined : [followBlock];
+    const mona = await peer("Mona", 2, base, extensions);
+    const tom = await peer("Tom", 3, base, extensions);
+    const server = new Y.Doc();
+    Y.applyUpdate(server, base, REMOTE);
+    cursor(tom, "x", tomAt);
+    pressAt(mona, "x", enterAt, "Enter");
+    await exchange(server, [mona, tom]);
+    type(tom, "!");
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual(stored(server));
+    return line(stored(server)).replace(/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}/g, "neuf");
+  }
+
+  const rest = "[x1 « Enfant X1 »] | y « Bloc Y » | z « Bloc Z »";
+
+  test("témoin : sans l'extension, le curseur d'avant la coupure part dans le bloc neuf", async () => {
+    expect(await split(1, 3, { plain: true })).toBe(`x « Blo » | neuf « !c X » ${rest}`);
+    expect(await split(3, 6, { plain: true })).toBe(`x « Bloc X » | neuf « ! » ${rest}`);
+    // Celui d'après la coupure est juste : il est resté dans son texte.
+    expect(await split(6, 3, { plain: true })).toBe(`x « Blo » | neuf « c X! » ${rest}`);
+    expect(await split(5, 3, { plain: true })).toBe(`x « Blo » | neuf « c !X » ${rest}`);
+  });
+
+  test.each([
+    { tomAt: 6, enterAt: 3, page: `x « Blo » | neuf « c X! » ${rest}` },
+    { tomAt: 5, enterAt: 3, page: `x « Blo » | neuf « c !X » ${rest}` },
+    { tomAt: 1, enterAt: 3, page: `x « B!lo » | neuf « c X » ${rest}` },
+    { tomAt: 3, enterAt: 6, page: `x « Blo!c X » | neuf «  » ${rest}` },
+    { tomAt: 6, enterAt: 6, page: `x « Bloc X! » | neuf «  » ${rest}` },
+  ])("Tom en $tomAt, Entrée de Mona en $enterAt : $page", async ({ tomAt, enterAt, page }) => {
+    expect(await split(tomAt, enterAt)).toBe(page);
+  });
+
+  test("Tom juste à la coupure : sa frappe va d'un côté ou de l'autre, pas ailleurs", async () => {
+    // Les deux sont justes ; aujourd'hui, c'est la fin de la première moitié.
+    expect([`x « Blo! » | neuf « c X » ${rest}`, `x « Blo » | neuf « !c X » ${rest}`]).toContain(
+      await split(3, 3),
+    );
   });
 });
 
