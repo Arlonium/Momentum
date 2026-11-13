@@ -211,20 +211,33 @@ test("a_silent_channel_is_closed_and_the_sidebar_falls_back_on_its_timer", async
     // Ni serveur, ni trame : la connexion reste ouverte, muette.
     ws.onClose(() => (closedByPage += 1));
   });
+  // Les lectures de l'arbre que l'onglet envoie, quelle qu'en soit la raison.
+  let treeReads = 0;
+  b.on("request", (request) => {
+    const { pathname } = new URL(request.url());
+    if (request.method() === "GET" && /^\/api\/v1\/spaces\/[^/]+\/tree$/.test(pathname)) {
+      treeReads += 1;
+    }
+  });
   await b.clock.install();
   await b.goto(`/s/${space.id}`);
   const link = treeRow(b, page.id).getByRole("link");
   await expect(link).toHaveText(page.title);
   await expect.poll(() => attempts).toBe(1);
+  // La première lecture de l'arbre est faite (son résultat est affiché).
+  const firstReads = treeReads;
+  expect(firstReads).toBeGreaterThan(0);
 
   const renamed = await aliceApi.patch(`/api/v1/pages/${page.id}`, {
     data: { title: "Renommée ailleurs" },
   });
   expect(renamed.status(), await renamed.text()).toBe(200);
-  // 35 s de la page : le canal est tenu pour vivant, rien n'est relu.
+  // 35 s de la page : le canal est tenu pour vivant ; le minuteur de repli (dix secondes) se tait,
+  // aucune lecture de l'arbre n'est partie.
   await b.clock.fastForward(35_000);
   await expect(link).toHaveText(page.title);
   expect(closedByPage).toBe(0);
+  expect(treeReads, "l'arbre relu pendant que le canal était tenu pour vivant").toBe(firstReads);
   // Plus de 45 s sans trame : l'onglet ferme le canal de lui-même.
   await b.clock.fastForward(12_000);
   await expect.poll(() => closedByPage).toBe(1);
@@ -232,4 +245,8 @@ test("a_silent_channel_is_closed_and_the_sidebar_falls_back_on_its_timer", async
   await b.clock.fastForward(11_000);
   await expect(link).toHaveText("Renommée ailleurs", { timeout: 5_000 });
   expect(attempts).toBeGreaterThan(1);
+  // Une seule lecture depuis la première : celle du minuteur, qui vient d'apporter le nouveau
+  // titre. C'est aussi le témoin du compte plus haut : une lecture partie quand le canal vivait
+  // (la requête précède sa réponse) serait comptée ici.
+  expect(treeReads - firstReads, "lectures de l'arbre depuis la première").toBe(1);
 });
