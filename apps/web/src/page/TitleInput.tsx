@@ -40,8 +40,10 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
   const saved = useRef(node.title);
   const sending = useRef<string | null>(null);
   /**
-   * La personne a tapé dans le champ depuis que le titre y a été repris ou enregistré : seule
-   * cette saisie part, et elle n'est pas remplacée par un titre distant.
+   * Le champ porte une saisie qui n'est pas le titre de la page : seule elle part, et elle n'est
+   * pas remplacée par un titre distant. Levé par une frappe qui écrit autre chose que le titre
+   * enregistré (ou que celui qui part) ; retombé quand une frappe le redit, et quand la saisie
+   * est enregistrée.
    */
   const typed = useRef(false);
   /** Le champ est en lecture seule : rien de ce qui y est ne peut partir. */
@@ -108,6 +110,8 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
 
   const save = async () => {
     const title = value;
+    // Rien de tapé : rien ne part. Sans cette garde, un blur arrivé entre l'effet qui pose un
+    // titre distant et le rendu qui l'affiche enverrait l'ancien texte, que voit encore `value`.
     if (readOnly || !typed.current || title === sending.current) return;
     if (title === saved.current) {
       // Le champ dit de nouveau le titre de la page : plus rien à envoyer, il suit le distant.
@@ -165,8 +169,11 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
         readOnly={readOnly}
         value={value}
         onChange={(e) => {
-          typed.current = true;
-          setValue(e.target.value.replace(/[\r\n]+/g, " "));
+          const next = e.target.value.replace(/[\r\n]+/g, " ");
+          // Le champ redit le titre que la page a (ou aura : celui qui part) : plus rien de tapé à
+          // protéger, il suit le distant. Une lettre tapée puis effacée ne garde pas le champ.
+          typed.current = next !== (sending.current ?? saved.current);
+          setValue(next);
           setError(null);
         }}
         onBlur={() => void save()}

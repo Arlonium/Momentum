@@ -4,7 +4,7 @@
 // sous ses doigts. Un titre distant qui arrive pendant le focus ne fait sauter ni le curseur
 // ni la sélection.
 import type { Me, PageNode } from "@mementum/protocol";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { updatePage } from "../api";
@@ -222,5 +222,71 @@ test("a_read_only_field_follows_the_remote_title_even_after_typing", async () =>
 test("a_remote_title_replaces_the_field_out_of_focus", async () => {
   await render(page("p", { title: "Ancien" }));
   await render(page("p", { title: "Titre de Bob" }));
+  expect(field().value).toBe("Titre de Bob");
+});
+
+test("typing_undone_before_a_remote_rename_sends_nothing", async () => {
+  // La sonde du relecteur : une lettre tapée par mégarde, puis effacée ; le champ redit le titre
+  // enregistré. Bob renomme la page : le champ suit, et rien ne part au blur.
+  await render(page("p", { title: "Ancien" }));
+  await type("Ancienx");
+  await type("Ancien");
+  await render(page("p", { title: "Titre de Bob" }));
+  expect(field().value).toBe("Titre de Bob");
+  await blur();
+  expect(updatePage).not.toHaveBeenCalled();
+});
+
+test("the_same_title_typed_again_then_a_remote_rename_sends_nothing", async () => {
+  await render(page("p", { title: "Ancien" }));
+  // Tout sélectionné, et le même titre retapé.
+  await type("A");
+  await type("Ancien");
+  await render(page("p", { title: "Titre de Bob" }));
+  expect(field().value).toBe("Titre de Bob");
+  await blur();
+  expect(updatePage).not.toHaveBeenCalled();
+});
+
+test("a_title_typed_back_during_a_send_is_kept_and_sent", async () => {
+  // Elle envoie « Premier », puis, pendant l'envoi, revient à « Ancien » : c'est ce qu'elle a
+  // tapé en dernier, et cela part à son tour.
+  const answer = deferred<PageNode>();
+  vi.mocked(updatePage).mockReturnValueOnce(answer.promise);
+  await render(page("p", { title: "Ancien" }));
+  await type("Premier");
+  await enter();
+  await type("Ancien");
+  await act(async () => answer.resolve(page("p", { title: "Premier" })));
+  await render(page("p", { title: "Premier" }));
+  expect(field().value).toBe("Ancien");
+  await blur();
+  expect(updatePage).toHaveBeenLastCalledWith("p", { title: "Ancien" });
+});
+
+/** Quitte le champ dans l'effet qui suit celui du titre, avant le rendu que ce dernier demande. */
+function BlurAfter({ title }: { title: string }) {
+  useEffect(() => {
+    if (title !== "Ancien") field().blur();
+  }, [title]);
+  return null;
+}
+
+test("a_blur_between_a_remote_title_and_its_render_sends_nothing", async () => {
+  // Le titre distant est posé (l'effet du titre), le champ n'est pas encore rendu de nouveau :
+  // un blur à cet instant voit encore l'ancien texte. Rien n'a été tapé : rien ne part.
+  const both = (node: PageNode) =>
+    act(async () =>
+      root.render(
+        <SessionContext.Provider value={{ me, refresh: async () => {} }}>
+          <TitleInput node={node} autoFocus={false} onAutoFocused={() => {}} readOnly={false} onSaved={onSaved} />
+          <BlurAfter title={node.title} />
+        </SessionContext.Provider>,
+      ),
+    );
+  await both(page("p", { title: "Ancien" }));
+  await focus();
+  await both(page("p", { title: "Titre de Bob" }));
+  expect(updatePage).not.toHaveBeenCalled();
   expect(field().value).toBe("Titre de Bob");
 });
