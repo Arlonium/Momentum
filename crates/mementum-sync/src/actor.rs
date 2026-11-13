@@ -443,7 +443,16 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     // l'instantané sont déjà nettoyées par le ramasse-miettes.
     let page = PageDoc::from_updates(snapshot.iter().map(|(_, bytes)| bytes.as_slice()))?;
     let watch = Watch::on(&page);
+    let mut set_aside = false;
     for (seq, update) in &updates {
+        // Ruling R366 : après une entrée écartée, une entrée qui laisserait un trou (des blocs
+        // qui suivent, chez leur client, ceux de l'entrée écartée) est écartée aussi. yrs
+        // l'intégrerait en laissant le trou ; un navigateur la garde en attente (Ruling R131) :
+        // le serveur lirait un texte qu'aucun navigateur n'affiche.
+        if set_aside && matches!(page.stored_update_leaves_gap(update), Ok(true)) {
+            tracing::error!(%node_id, seq, "entrée du journal écartée à la relecture : elle suit une entrée écartée et laisserait un trou");
+            continue;
+        }
         match page.apply_update(update) {
             Ok(()) => {}
             // Ruling R258 : une entrée où un client paraît deux fois (une base d'avant R130
@@ -452,6 +461,7 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
             // en attente d'une dépendance, et la page serait refusée à elle.
             Err(error) if PageDoc::repeats_a_client(update) => {
                 tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : un client y paraît deux fois");
+                set_aside = true;
             }
             Err(error) => return Err(error.into()),
         }

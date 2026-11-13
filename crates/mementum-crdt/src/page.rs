@@ -204,6 +204,18 @@ impl PageDoc {
         Ok(shape.leaves_gap(&txn.state_vector(), &pending))
     }
 
+    /// Comme [`PageDoc::leaves_gap`], pour une entrée relue du stockage (Ruling R366) : lue
+    /// comme le stockage se lit (une plage de suppression vide y est admise, Ruling R208). La
+    /// relecture du journal s'en sert après une entrée écartée (Ruling R258) : une entrée qui
+    /// suivrait, chez son client, des blocs de l'entrée écartée laisserait un trou, que yrs
+    /// intègre et qu'un navigateur garde en attente.
+    pub fn stored_update_leaves_gap(&self, update: &[u8]) -> Result<bool, CrdtError> {
+        let shape = Shape::read(update)?;
+        let txn = self.doc.transact();
+        let pending = Pending::of(txn.store().pending_ds());
+        Ok(shape.leaves_gap(&txn.state_vector(), &pending))
+    }
+
     /// Ce qu'une mise à jour (v1) reçue d'un client attend encore de la page
     /// pour ne plus laisser de trou : `None` si elle n'en laisserait aucun
     /// ([`PageDoc::leaves_gap`]). Ce qui est rendu se compare ensuite à la

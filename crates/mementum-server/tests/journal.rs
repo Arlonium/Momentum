@@ -79,3 +79,53 @@ async fn journal_entry_with_a_repeated_client_is_set_aside() {
         "une ligne `error` qui dit l'entrée écartée : {journal}"
     );
 }
+
+/// Constat N1 de la re-relecture de la piste S (Ruling R366). L'entrée écartée portait des blocs
+/// d'un client C (« abc ») ; l'entrée suivante de C (« def », écrite en tête du paragraphe) n'en
+/// dépend pas, mais ses horloges les suivent : sans eux, elle laisse un trou. yrs l'intégrait
+/// en laissant le trou, et le serveur lisait « defUn » ; un navigateur (Yjs 13) la garde en
+/// attente et lit « Un » (vérifié par un script Node, voir le registre). Après une entrée écartée,
+/// une entrée qui laisserait un trou est écartée aussi, et journalisée : le serveur lit ce que
+/// lisent les navigateurs.
+#[tokio::test]
+async fn entry_left_with_a_gap_after_a_set_aside_one_is_set_aside_too() {
+    let logs = Logs::capture();
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Journal", &[user(&team.olga, Level::Full)])
+        .await;
+    let (created, creation) = PageDoc::new_page();
+    let paragraph = created.read_blocks()[0].id.clone();
+    let a = PageDoc::from_updates([creation.as_slice()]).unwrap();
+    let one = a.replace_text(&paragraph, 0, 0, "Un").unwrap();
+    let c = PageDoc::from_updates([creation.as_slice(), one.as_slice()]).unwrap();
+    let abc = c.replace_text(&paragraph, 2, 0, "abc").unwrap();
+    let def = c.replace_text(&paragraph, 0, 0, "def").unwrap();
+    // « abc » rendu hostile : une seconde entrée pour son client (un `Skip` d'une unité).
+    let mut at = 0;
+    assert_eq!(read_var(&abc, &mut at), 1, "un seul client");
+    let _structs = read_var(&abc, &mut at);
+    let client = read_var(&abc, &mut at);
+    assert_eq!(abc.last(), Some(&0), "aucune suppression");
+    let mut hostile = vec![2];
+    hostile.extend(&abc[1..abc.len() - 1]);
+    hostile.push(1);
+    var(&mut hostile, client);
+    var(&mut hostile, 100);
+    hostile.extend([10, 1, 0]);
+    assert!(PageDoc::repeats_a_client(&hostile));
+    team.store
+        .append_updates(page, &[&creation, &one, &hostile, &def], None)
+        .await
+        .unwrap();
+
+    let read = team.olga.get_mmd(&page.to_string()).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.text(), "Un\n");
+    let journal = logs.text();
+    assert!(
+        journal.matches("écartée").count() >= 2 && journal.contains("trou"),
+        "deux lignes `error`, la seconde pour le trou : {journal}"
+    );
+}
