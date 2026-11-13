@@ -58,6 +58,7 @@ import {
   REMOTE,
   repeatedIds,
   seedState,
+  selectBlock,
   settle,
   shiftTab,
   shown,
@@ -138,8 +139,8 @@ describe("un bloc déplacé est recréé, les autres ne sont pas touchés", () =
   // Tab, Maj+Tab) est dans `blockMoves.test.ts`, « ce que chaque geste écrit dans le document ».
 
   test("swapping_two_neighbours_recreates_the_block_that_was_moved", async () => {
-    // Deux voisins échangés : l'un ou l'autre peut rester. C'est celui qu'on a déplacé, celui
-    // que porte la sélection, qui est recréé ; la page finale est la même dans les quatre cas.
+    // Deux voisins échangés : l'un ou l'autre peut rester. C'est celui qu'on a déplacé, celui où
+    // le geste laisse le curseur, qui est recréé ; la page finale est la même dans les quatre cas.
     const down = await alone(XYZ);
     expect(written(down, () => keyboardDown(down, "x"))).toEqual(recreated("x"));
     expect(stored(down.doc)).toEqual([Y_, X, Z]);
@@ -230,41 +231,41 @@ describe.each(ORDERS)("pendant qu'un autre déplace un bloc ($label)", (order) =
   });
 });
 
-// Qui vient de déposer un bloc le garde sélectionné (une sélection de nœud). Si quelqu'un d'autre
+// Un bloc peut être sélectionné comme un nœud (un clic sur une image). Si quelqu'un d'autre
 // retire alors ce bloc, ou le déplace (il est recréé ailleurs), y-prosemirror 1.3.7 cherchait le
-// nœud à son ancienne place : quand plus rien ne la suivait, il levait dans l'observateur du
-// document, et l'éditeur ne montrait pas le changement. Avec la forme à clés, un bloc déplacé est
-// un bloc retiré : le correctif garde donc aussi cet endroit (`restoreRelativeSelection`).
+// nœud à son ancienne place : quand plus rien ne la suivait (le bloc était le dernier), il levait
+// dans l'observateur du document, et l'éditeur ne montrait pas le changement. Avec la forme à
+// clés, un bloc déplacé est un bloc retiré : le correctif garde donc aussi cet endroit
+// (`restoreRelativeSelection`).
 describe("a_selected_block_taken_away_by_someone_else_does_not_break_the_editor", () => {
-  /** Mona a déposé X tout en bas, et Tom l'a reçu : X est sélectionné chez Mona. */
-  async function dropped() {
+  /** Mona a sélectionné Z, le dernier bloc de la page. */
+  async function selected() {
     const s = await duo(XYZ, 2, 3);
-    drag(s.mona, "x", { under: "z" });
-    await exchange(s.server, [s.mona, s.tom]);
+    selectBlock(s.mona, "z");
     expect(s.mona.editor.prosemirrorState.selection).toBeInstanceOf(pmState.NodeSelection);
     return s;
   }
 
   test("supprimé par un autre", async () => {
-    const s = await dropped();
-    s.tom.editor.removeBlocks(["x"]);
+    const s = await selected();
+    s.tom.editor.removeBlocks(["z"]);
     await exchange(s.server, [s.tom, s.mona]);
-    expect(shown(s.mona)).toEqual([Y_, Z]);
+    expect(shown(s.mona)).toEqual([X, Y_]);
     // L'éditeur de Mona montre toujours ce que Tom écrit.
     typeAtEnd(s.tom, "y", " de Tom");
     await exchange(s.server, [s.tom, s.mona]);
-    expect(shown(s.mona)).toEqual([block("y", "Bloc Y de Tom"), Z]);
+    expect(shown(s.mona)).toEqual([X, block("y", "Bloc Y de Tom")]);
     expect(stored(s.server)).toEqual(shown(s.mona));
   });
 
   test("déplacé par un autre", async () => {
-    const s = await dropped();
-    drag(s.tom, "x", { above: "y" });
+    const s = await selected();
+    drag(s.tom, "z", { above: "x" });
     await exchange(s.server, [s.tom, s.mona]);
-    expect(shown(s.mona)).toEqual([X, Y_, Z]);
-    typeAtEnd(s.tom, "x", " de Tom");
+    expect(shown(s.mona)).toEqual([Z, X, Y_]);
+    typeAtEnd(s.tom, "z", " de Tom");
     await exchange(s.server, [s.tom, s.mona]);
-    expect(shown(s.mona)).toEqual([block("x", "Bloc X de Tom"), Y_, Z]);
+    expect(shown(s.mona)).toEqual([block("z", "Bloc Z de Tom"), X, Y_]);
     expect(stored(s.server)).toEqual(shown(s.mona));
   });
 });

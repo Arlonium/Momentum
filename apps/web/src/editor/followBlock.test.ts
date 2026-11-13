@@ -19,6 +19,7 @@ import {
   peer,
   REMOTE,
   seedState,
+  selectBlock,
   shown,
   stored,
   tab,
@@ -146,10 +147,11 @@ describe("cursor_follows_its_block_when_someone_else_moves_it", () => {
     expect(cursorOf(tom)).toEqual({ id: "x", offset: 6 });
   });
 
-  test("un bloc sélectionné (qu'on vient de déposer) reste sélectionné quand un autre le déplace", async () => {
+  test("un bloc sélectionné comme un nœud (un clic sur une image) reste sélectionné quand un autre le déplace", async () => {
     const { mona, tom, server } = await pair();
     drag(mona, "x", { under: "y" });
     await exchange(server, [mona, tom]);
+    selectBlock(mona, "x");
     expect(mona.editor.prosemirrorState.selection).toBeInstanceOf(NodeSelection);
     // Tom l'emmène tout en bas, puis au milieu : la sélection de Mona le suit, et n'est jamais
     // sur un voisin (Suppr retirerait alors un autre bloc que celui qu'elle voit sélectionné).
@@ -206,24 +208,24 @@ describe("cursor_is_left_alone_when_nothing_moved", () => {
 // L'annulation passe par l'observateur du document, comme un changement reçu : annuler un glisser
 // supprime le bloc déposé et le recrée à sa place d'avant.
 describe("annuler son propre déplacement", () => {
-  test("le bloc glissé reste sélectionné, revenu à sa place : pas son voisin", async () => {
+  test("le curseur que le dépôt a laissé dans le bloc glissé le suit à sa place d'avant", async () => {
+    const { mona } = await pair();
+    drag(mona, "y", { under: "w" });
+    expect(cursorOf(mona)).toEqual({ id: "y", offset: 6 });
+    expect(mona.editor.undo()).toBe(true);
+    expect(shown(mona)).toEqual([X, Y_, Z, W]);
+    expect(cursorOf(mona)).toEqual({ id: "y", offset: 6 });
+  });
+
+  test("le bloc glissé, sélectionné ensuite comme un nœud, le reste : pas son voisin", async () => {
     const { mona } = await pair();
     drag(mona, "x", { under: "z" });
-    expect(mona.editor.prosemirrorState.selection).toBeInstanceOf(NodeSelection);
+    selectBlock(mona, "x");
     expect(mona.editor.undo()).toBe(true);
     expect(shown(mona)).toEqual([X, Y_, Z, W]);
     const { selection } = mona.editor.prosemirrorState;
     expect(selection).toBeInstanceOf(NodeSelection);
     expect((selection as NodeSelection).node.attrs.id).toBe("x");
-  });
-
-  test("le curseur qu'on a remis dans le bloc glissé le suit à sa place d'avant", async () => {
-    const { mona } = await pair();
-    drag(mona, "y", { under: "w" });
-    cursor(mona, "y", 3);
-    expect(mona.editor.undo()).toBe(true);
-    expect(shown(mona)).toEqual([X, Y_, Z, W]);
-    expect(cursorOf(mona)).toEqual({ id: "y", offset: 3 });
   });
 
   test("le curseur de qui tapait dans le bloc le suit aussi au retour", async () => {
