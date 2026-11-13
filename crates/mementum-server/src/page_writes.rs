@@ -9,8 +9,9 @@
 //!
 //! Chaque page a donc un verrou asynchrone, que ces routes prennent **après** leur premier
 //! contrôle et la lecture de leur corps, et tiennent pendant « second contrôle, commande à
-//! l'acteur, réponse » : chaque requête relit ses droits après la précédente, et un droit retiré
-//! arrête la file. Ce qui suit l'obtention du verrou va au bout dans sa propre tâche
+//! l'acteur, réponse » : chaque requête relit sa session (Ruling R209) et ses droits après la
+//! précédente, et une déconnexion, un changement de mot de passe ou un droit retiré arrêtent la
+//! file. Ce qui suit l'obtention du verrou va au bout dans sa propre tâche
 //! (`to_completion`), même si le client coupe : sinon, couper chaque requête aussitôt envoyée
 //! relâcherait le verrou avant l'écriture, et la file se reformerait dans la boîte de l'acteur.
 //! Un client qui coupe pendant qu'il attend le verrou, lui, ne le garde pas.

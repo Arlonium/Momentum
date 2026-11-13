@@ -300,6 +300,41 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
+/// Le compte de la session, comme [`AuthUser`], avec le hachage de la session lue : pour une
+/// route qui doit relire **cette** session plus tard, sous le verrou de la page (Ruling R209 :
+/// `PUT /mmd` et la restauration d'une version), comme `/sync` la relit une fois la connexion
+/// inscrite (Ruling R88).
+#[derive(Debug, Clone)]
+pub(crate) struct SessionUser {
+    pub(crate) user: AuthUser,
+    pub(crate) session: [u8; 32],
+}
+
+impl FromRequestParts<AppState> for SessionUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<SessionUser, ApiError> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        let session = session_hash(&parts.headers).ok_or_else(ApiError::unauthenticated)?;
+        Ok(SessionUser { user, session })
+    }
+}
+
+impl AppState {
+    /// `401 unauthenticated` si la session `session` ne vaut plus : fermée (déconnexion,
+    /// changement de mot de passe, connexion par-dessus) ou échue (Ruling R209).
+    pub(crate) async fn session_still_live(&self, session: [u8; 32]) -> Result<(), ApiError> {
+        if self.store.session_is_live(session, now_ms()).await? {
+            Ok(())
+        } else {
+            Err(ApiError::unauthenticated())
+        }
+    }
+}
+
 /// Une tentative refusée par le frein des connexions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Throttled {

@@ -63,7 +63,7 @@ use mementum_store::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, StoreError
 use uuid::Uuid;
 
 use crate::access::{at_least, permit};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, SessionUser};
 use crate::error::ApiError;
 use crate::routes::spaces::space_id;
 use crate::types::{CreatePage, ErrorCode, PageNode, RootSection, Tree, UpdatePage};
@@ -588,10 +588,11 @@ pub(crate) async fn get_mmd(
 /// contrôle avant qu'un droit retiré les arrête.
 pub(crate) async fn put_mmd(
     State(state): State<AppState>,
-    user: AuthUser,
+    caller: SessionUser,
     path: Result<Path<String>, PathRejection>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<StatusCode, ApiError> {
+    let SessionUser { user, session } = caller;
     let id = page_id(path)?;
     // Premier contrôle : les refus, avant que le corps soit lu.
     state.node_access(&user, id, Action::Edit).await?;
@@ -619,6 +620,9 @@ pub(crate) async fn put_mmd(
         // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise
         // l'écriture.
         state.hub.load_page(id).await?;
+        // Ruling R209 : la session de la requête, relue sous le verrou. Une déconnexion ou un
+        // changement de mot de passe arrête la file, comme un droit retiré.
+        state.session_still_live(session).await?;
         state.node_access(&user, id, Action::Edit).await?;
         Ok(state.hub.write_blocks(id, blocks, Some(user.id)).await?)
     })

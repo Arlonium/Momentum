@@ -40,7 +40,7 @@ use mementum_sync::display_name;
 use uuid::Uuid;
 
 use crate::access::{permit, permit_level};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, SessionUser};
 use crate::error::ApiError;
 use crate::routes::pages::page_id;
 use crate::types::{Author, Version};
@@ -82,9 +82,10 @@ pub(crate) async fn state(
 /// par-dessus le contenu de la page, au nom du compte de la session.
 pub(crate) async fn restore(
     State(state): State<AppState>,
-    user: AuthUser,
+    caller: SessionUser,
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<StatusCode, ApiError> {
+    let SessionUser { user, session } = caller;
     let (id, raw) = version_path(path)?;
     // Premier contrôle : les refus, avant de charger la page. La version est cherchée entre le
     // niveau et la corbeille (Ruling R186).
@@ -108,6 +109,9 @@ pub(crate) async fn restore(
         // l'écriture (Ruling R89). Entre lui et la restauration, il ne reste que l'envoi
         // d'une commande à l'acteur déjà chargé.
         state.hub.load_page(id).await?;
+        // Ruling R209 : la session de la requête, relue sous le verrou. Une déconnexion ou un
+        // changement de mot de passe arrête la file, comme un droit retiré.
+        state.session_still_live(session).await?;
         state.node_access(&user, id, Action::Edit).await?;
         Ok(state
             .hub
