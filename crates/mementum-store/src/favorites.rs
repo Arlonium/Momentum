@@ -22,6 +22,14 @@ impl Store {
     /// changé ; un favori déjà posé, ou déjà absent, n'est pas récrit (ni sa date, ni sa place
     /// dans la liste) et rend `false`. `NotFound`, sans rien écrire, pour une page inconnue (et,
     /// pour poser, un compte inconnu). Ni `rev` ni `lsn` ne bougent, rien n'est annoncé (R254).
+    ///
+    /// **Il lit d'abord, et n'écrit que s'il y a quelque chose à changer** (Ruling R283, la règle
+    /// de R270). Le verrou d'écriture de SQLite est unique pour l'instance, et un appel sans effet
+    /// le prenait, le temps de ne rien écrire : un simple lecteur qui redemande ce qu'il a déjà
+    /// faisait attendre le journal des pages ouvertes. La lecture n'est qu'un raccourci, jamais
+    /// la preuve : l'écriture garde ses propres gardes, pour ce qui change entre les deux (le
+    /// conflit laisse tel quel un favori posé entre-temps ; un retrait qui ne retire rien relit
+    /// la page).
     pub async fn set_favorite(
         &self,
         user_id: Uuid,
@@ -30,9 +38,19 @@ impl Store {
         now: i64,
     ) -> Result<bool, StoreError> {
         let (user, node) = (user_id.to_string(), node_id.to_string());
+        let posed = sqlx::query("SELECT 1 FROM favorites WHERE user_id = ? AND node_id = ?")
+            .bind(&user)
+            .bind(&node)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some();
         if on {
-            // Une page ou un compte inconnu : la clé étrangère le dit ; un favori déjà posé :
-            // le conflit le laisse tel quel.
+            if posed {
+                // Sa ligne dit que la page et le compte existent.
+                return Ok(false);
+            }
+            // Une page ou un compte inconnu : la clé étrangère le dit ; un favori posé depuis
+            // la lecture : le conflit le laisse tel quel.
             let added = sqlx::query(
                 "INSERT INTO favorites (user_id, node_id, created_at) VALUES (?, ?, ?) \
                  ON CONFLICT (user_id, node_id) DO NOTHING",
@@ -46,16 +64,19 @@ impl Store {
             .rows_affected();
             return Ok(added > 0);
         }
-        let removed = sqlx::query("DELETE FROM favorites WHERE user_id = ? AND node_id = ?")
-            .bind(&user)
-            .bind(&node)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-        if removed > 0 {
-            return Ok(true);
+        if posed {
+            let removed = sqlx::query("DELETE FROM favorites WHERE user_id = ? AND node_id = ?")
+                .bind(&user)
+                .bind(&node)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+            if removed > 0 {
+                return Ok(true);
+            }
         }
-        // Rien de retiré : un favori absent d'une page qui existe, ou une page inconnue.
+        // Rien à retirer, ou rien de retiré (parti depuis la lecture, avec sa page peut-être) :
+        // un favori absent d'une page qui existe, ou une page inconnue.
         sqlx::query("SELECT 1 FROM nodes WHERE id = ?")
             .bind(&node)
             .fetch_optional(&self.pool)

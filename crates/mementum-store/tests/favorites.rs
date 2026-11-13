@@ -177,3 +177,57 @@ async fn favorite_of_an_unknown_page_is_not_found() {
     assert!(matches!(refused, Err(StoreError::NotFound)));
     assert_eq!(favorite_rows(&f).await, 0);
 }
+
+/// Poser un favori déjà posé, ou retirer un favori absent, ne prend pas le verrou d'écriture de
+/// SQLite, unique pour toute l'instance (Ruling R283, la règle de R270) : l'appel rend `false`
+/// pendant qu'une autre connexion tient ce verrou. Sinon un simple lecteur, en redemandant ce
+/// qu'il a déjà, ferait attendre le journal de chaque page ouverte. Témoin : sous le même verrou,
+/// un favori neuf attend, puis renonce au bout du délai de la connexion ; le verrou rendu, il se
+/// pose.
+#[tokio::test]
+async fn favorite_without_effect_takes_no_write_lock() {
+    let f = fresh().await;
+    let olga = account(&f.store, "olga").await.id;
+    let (a, b) = (new_page(&f, None, "A").await, new_page(&f, None, "B").await);
+    assert!(f.store.set_favorite(olga, a, true, 1_000).await.unwrap());
+
+    // Une autre connexion tient le verrou d'écriture.
+    let side = common::side_pool(&f.db).await;
+    let mut holder = side.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    // Sans effet : rendu sans attendre, et rien n'est écrit.
+    assert!(!f.store.set_favorite(olga, a, true, 2_000).await.unwrap());
+    assert!(!f.store.set_favorite(olga, b, false, 2_000).await.unwrap());
+    // Une page inconnue se dit toujours, sans verrou non plus.
+    let unknown = f
+        .store
+        .set_favorite(olga, Uuid::now_v7(), false, 2_000)
+        .await;
+    assert!(matches!(unknown, Err(StoreError::NotFound)));
+    // Témoin : ce verrou arrête bien une écriture. Un favori neuf l'attend, en vain.
+    let refused = f.store.set_favorite(olga, b, true, 2_000).await;
+    let why = format!("{refused:?}");
+    assert!(
+        matches!(refused, Err(StoreError::Sqlx(_))) && why.contains("database is locked"),
+        "{why}"
+    );
+    sqlx::query("ROLLBACK").execute(&mut *holder).await.unwrap();
+    drop(holder);
+    side.close().await;
+
+    // Le verrou rendu, il se pose ; le premier a gardé sa date.
+    assert!(f.store.set_favorite(olga, b, true, 3_000).await.unwrap());
+    assert_eq!(f.store.favorites(olga, f.space.id).await.unwrap(), [a, b]);
+    assert_eq!(
+        int(
+            &f.db,
+            &format!("SELECT created_at FROM favorites WHERE node_id = '{a}'")
+        )
+        .await,
+        1_000
+    );
+}
