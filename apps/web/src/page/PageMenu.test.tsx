@@ -247,3 +247,29 @@ test("an_open_menu_closes_when_its_entries_go", async () => {
   expect(menu()).toBeNull();
   expect(menuButton().getAttribute("aria-expanded")).toBe("false");
 });
+
+test("an_open_menu_that_loses_its_entries_gives_the_focus_to_the_page", async () => {
+  // Le menu est ouvert au clavier (le focus sur « Historique ») ; le niveau tombe : le menu et son
+  // bouton disparaissent, et le focus va à la page, pas sur `body`.
+  const title = document.createElement("textarea");
+  document.body.append(title);
+  const render = (level: "read" | "edit") =>
+    act(async () =>
+      root.render(
+        <PageMenu
+          node={page("p", { level })}
+          session={null}
+          readOnly={false}
+          selfId="alice"
+          focusFallback={() => title.focus()}
+          onRefused={() => {}}
+        />,
+      ),
+    );
+  await render("edit");
+  await click(menuButton());
+  await until(() => document.activeElement?.textContent === "Historique", "le focus dans le menu");
+  await render("read");
+  expect(menu()).toBeNull();
+  expect(document.activeElement).toBe(title);
+});

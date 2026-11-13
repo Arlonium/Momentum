@@ -7,7 +7,8 @@
 //
 // Le niveau peut tomber pendant que la fenêtre est ouverte : elle reste ouverte, avec le refus du
 // serveur tel quel, jusqu'à ce qu'on la ferme ; le focus revient alors à la page
-// (`focusFallback`) si le bouton du menu n'est plus là.
+// (`focusFallback`) si le bouton du menu n'est plus là. Un menu ouvert qui perd ses entrées se
+// ferme, et rend lui aussi le focus à la page.
 //
 // Au clavier, c'est le menu des lignes de l'arbre (`RowMenu`) : il prend le focus sur sa première
 // entrée, les flèches passent de l'une à l'autre, Échap et Tab le ferment. La fenêtre
@@ -51,8 +52,9 @@ type Props = {
   /** Tenue quand le compte revient, après une session perdue (`useAfterLogin`). */
   afterLogin?: () => Promise<void>;
   /**
-   * La fenêtre se ferme et le bouton du menu n'est plus là (plus aucune entrée pour ce niveau) :
-   * où rendre le focus, pour qu'il ne tombe pas sur `body`.
+   * Le bouton du menu n'est plus là (plus aucune entrée pour ce niveau) quand la fenêtre se ferme,
+   * ou quand le menu ouvert se ferme de lui-même : où rendre le focus, pour qu'il ne tombe pas sur
+   * `body`.
    */
   focusFallback?: () => void;
   /** Le serveur a refusé une action du menu : la page est à relire. */
@@ -93,10 +95,23 @@ export function PageMenu({
     else focusFallback?.();
   }, [history, focusFallback]);
 
+  /** Le menu ouvert vient de se fermer de lui-même : ses entrées et son bouton sont partis. */
+  const [dropped, setDropped] = useState(false);
   const actions: MenuAction[] = [];
   const historyOffered = canEdit(node.level);
   // Le niveau est tombé, menu ouvert : il n'a plus rien à proposer, il se ferme.
-  if (!historyOffered && anchor !== null) setAnchor(null);
+  if (!historyOffered && anchor !== null) {
+    setAnchor(null);
+    setDropped(true);
+  }
+  // L'entrée qui avait le focus est partie avec le menu, et le bouton avec elle : le focus va à
+  // la page plutôt que de tomber sur `body`.
+  useEffect(() => {
+    if (!dropped) return;
+    setDropped(false);
+    const active = document.activeElement;
+    if (active === null || active === document.body || !active.isConnected) focusFallback?.();
+  }, [dropped, focusFallback]);
   if (historyOffered) {
     actions.push({
       label: "Historique",
