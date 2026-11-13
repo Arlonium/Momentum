@@ -340,3 +340,24 @@ test("editor_reads_the_history_of_a_trashed_page_without_restoring", async ({ br
   await expect(dialog).toBeHidden();
   await expect(menuButton(b)).toBeFocused();
 });
+
+test("a_new_version_reaches_an_open_history_without_a_click", async ({ browser }) => {
+  // C9-5 : Alice a l'historique ouvert pendant que Bruno écrit ; la version neuve arrive dans la
+  // liste sans qu'elle fasse rien (trame `versions`, R185).
+  const { alice, aliceApi, brunoApi, brunoId, space } = await ownerAndMember();
+  const page = await createPage(aliceApi, {
+    spaceId: space.id,
+    section: "private",
+    title: `Suivi ${unique()}`,
+  });
+  await setPageLevel(aliceApi, page.id, brunoId, "edit");
+  await putMmd(aliceApi, page.id, `${OLD}\n`);
+  const first = await writeAfterTheInterval(aliceApi, page.id, `${NEW}\n`);
+
+  const a = await openPage(browser, page.id, alice);
+  const dialog = await openHistory(a);
+  await expect(versionItems(dialog)).toHaveCount(first.length + 1);
+  const next = await writeAfterTheInterval(brunoApi, page.id, `${NEW}, puis Bruno\n`);
+  expect(next.length).toBeGreaterThan(first.length);
+  await expect(versionItems(dialog)).toHaveCount(next.length + 1, { timeout: 5_000 });
+});

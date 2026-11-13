@@ -177,3 +177,22 @@ test("cursor_returns_at_once_after_a_reconnect", async ({ browser }) => {
   await expect(cursor).toHaveCount(1, { timeout: 3_000 });
   expect(await clock()).toBeGreaterThan(clockBefore);
 });
+
+test("an_avatar_follows_a_lowered_level", async ({ browser }) => {
+  // C9-7 : Mona voit Tom dans la barre du haut ; elle le baisse à « Peut lire » : son avatar le
+  // dit (« (lecture) »), d'après la liste des présents du serveur (`canWrite`, R159). La page est
+  // privée : dans « Espace », l'accès général lui donnerait plus.
+  const { alice: mona, aliceApi: monaApi, space, bruno: tom, brunoId: tomId } = await ownerAndMember();
+  const page = await createPage(monaApi, {
+    spaceId: space.id,
+    section: "private",
+    title: `Niveau ${unique()}`,
+  });
+  await setPageLevel(monaApi, page.id, tomId, "edit");
+  const m = await openPage(browser, page.id, mona);
+  await openPage(browser, page.id, tom);
+  await expect(avatars(m)).toHaveAttribute("aria-label", tom.name);
+  await setPageLevel(monaApi, page.id, tomId, "read");
+  await expect(avatars(m)).toHaveAttribute("aria-label", `${tom.name} (lecture)`);
+  await expect(avatars(m)).toHaveCount(1);
+});

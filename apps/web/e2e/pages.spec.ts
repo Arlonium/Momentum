@@ -7,13 +7,17 @@ import {
   closeContexts,
   createPage,
   getMmd,
+  getPage,
   getTree,
   newUser,
+  openPage,
+  ownerAndMember,
   pageIdOf,
   putMmd,
   sectionOf,
   sidebarOf,
   signUpAccount,
+  titleOf,
   treeRow,
   unique,
   waitSynced,
@@ -373,4 +377,34 @@ test("tree_below_a_long_section_follows_what_happens_above_it", async ({ browser
   await sidebar.evaluate((el) => el.scrollTo(0, el.scrollHeight));
   await expect(treeRow(p, mine.id)).toBeInViewport();
   expect(await rows.count()).toBeLessThan(50);
+});
+
+test("rename_elsewhere_while_the_title_has_the_focus_is_kept", async ({ browser }) => {
+  // C9-4 (C1, R210) : Alice a cliqué dans le titre sans rien taper ; Bruno renomme la page. Son
+  // champ suit le renommage sous le focus, et le quitter n'envoie rien : le titre de Bruno reste.
+  const { alice, aliceApi, brunoApi, space } = await ownerAndMember();
+  const page = await createPage(aliceApi, { spaceId: space.id, title: `Ancien titre ${unique()}` });
+  const a = await openPage(browser, page.id, alice);
+  const sent: string[] = [];
+  a.on("request", (request) => {
+    if (request.method() === "PATCH" && request.url().endsWith(`/api/v1/pages/${page.id}`)) {
+      sent.push(request.postData() ?? "");
+    }
+  });
+  const title = titleOf(a);
+  await title.click();
+  await expect(title).toBeFocused();
+  const renamed = await brunoApi.patch(`/api/v1/pages/${page.id}`, {
+    data: { title: "Titre de Bruno" },
+  });
+  expect(renamed.status(), await renamed.text()).toBe(200);
+  await expect(title).toHaveValue("Titre de Bruno");
+  await expect(title).toBeFocused();
+  // Alice quitte le champ et tape dans la page : quand sa frappe est au serveur, le blur est
+  // passé depuis longtemps.
+  await a.locator(".bn-editor").click();
+  await a.keyboard.type("Après le blur");
+  await expect.poll(() => getMmd(aliceApi, page.id)).toContain("Après le blur");
+  expect(sent).toEqual([]);
+  expect((await getPage(aliceApi, page.id)).title).toBe("Titre de Bruno");
 });
