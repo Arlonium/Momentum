@@ -13,6 +13,7 @@ import {
   openPage,
   ownerAndMember,
   sectionOf,
+  setPageLevel,
   shownRows,
   signUpAccount,
   treeRow,
@@ -148,4 +149,80 @@ test("tree_falls_back_to_polling_when_the_channel_is_down", async ({ browser }) 
   // Dix secondes de la page plus tard, le minuteur relit l'arbre.
   await b.clock.fastForward(10_000);
   await expect(treeRow(b, page.id)).toBeVisible({ timeout: 5_000 });
+});
+
+test("rights_changed_elsewhere_reach_the_sidebar", async ({ browser }) => {
+  // C9-6 : une page partagée avec Bruno paraît dans sa barre latérale, et disparaît quand son
+  // accès est retiré, par le canal (sous le minuteur) ; retiré de l'espace, il le voit.
+  const { aliceApi, space, bruno, brunoId } = await ownerAndMember();
+  const page = await createPage(aliceApi, {
+    spaceId: space.id,
+    section: "private",
+    title: `Partagée ${unique()}`,
+  });
+  const witness = await createPage(aliceApi, { spaceId: space.id, title: `Témoin ${unique()}` });
+  const b = await newUser(browser, bruno);
+  const channel = watchChannel(b);
+  await b.goto(`/s/${space.id}`);
+  await expect(treeRow(b, witness.id)).toBeVisible();
+  await channel();
+  await expect(treeRow(b, page.id)).toHaveCount(0);
+
+  await setPageLevel(aliceApi, page.id, brunoId, "read");
+  await expect(treeRow(b, page.id)).toBeVisible(AT_ONCE);
+  const revoked = await aliceApi.delete(`/api/v1/pages/${page.id}/access/users/${brunoId}`);
+  expect([200, 204], await revoked.text()).toContain(revoked.status());
+  await expect(treeRow(b, page.id)).toHaveCount(0, AT_ONCE);
+  await expect(treeRow(b, witness.id)).toBeVisible();
+
+  // Retiré de l'espace : le serveur ferme le canal (sans trame), la reconnexion est refusée, et le
+  // minuteur de repli relit l'arbre, que l'espace refuse aussi.
+  const removed = await aliceApi.delete(`/api/v1/spaces/${space.id}/members/${brunoId}`);
+  expect(removed.status(), await removed.text()).toBe(204);
+  await expect(b.getByRole("heading", { name: "Espace introuvable" })).toBeVisible({
+    timeout: 15_000,
+  });
+});
+
+test("a_silent_channel_is_closed_and_the_sidebar_falls_back_on_its_timer", async ({ browser }) => {
+  // C6 (R215) : le canal s'ouvre, puis ne dit plus rien et ne se ferme pas (une connexion à demi
+  // ouverte : le navigateur ne voit pas les pings). Tant qu'il est tenu pour vivant, ni le canal
+  // ni le minuteur ne relisent l'arbre ; 45 s sans trame, l'onglet le ferme de lui-même, et la
+  // barre latérale reprend par le minuteur (le canal ne revient pas : les tentatives suivantes
+  // sont refusées). L'horloge de la page est la nôtre : on n'attend pas 45 s pour de bon.
+  const { aliceApi, space, bruno } = await ownerAndMember();
+  const page = await createPage(aliceApi, { spaceId: space.id, title: `Avant ${unique()}` });
+  const b = await newUser(browser, bruno);
+  let attempts = 0;
+  let closedByPage = 0;
+  await b.routeWebSocket(/\/events\//, (ws) => {
+    attempts += 1;
+    if (attempts > 1) {
+      void ws.close();
+      return;
+    }
+    // Ni serveur, ni trame : la connexion reste ouverte, muette.
+    ws.onClose(() => (closedByPage += 1));
+  });
+  await b.clock.install();
+  await b.goto(`/s/${space.id}`);
+  const link = treeRow(b, page.id).getByRole("link");
+  await expect(link).toHaveText(page.title);
+  await expect.poll(() => attempts).toBe(1);
+
+  const renamed = await aliceApi.patch(`/api/v1/pages/${page.id}`, {
+    data: { title: "Renommée ailleurs" },
+  });
+  expect(renamed.status(), await renamed.text()).toBe(200);
+  // 44 s de la page : le canal est tenu pour vivant, rien n'est relu.
+  await b.clock.fastForward(44_000);
+  await expect(link).toHaveText(page.title);
+  expect(closedByPage).toBe(0);
+  // 45 s sans trame : l'onglet ferme le canal de lui-même.
+  await b.clock.fastForward(2_000);
+  await expect.poll(() => closedByPage).toBe(1);
+  // Le canal ne revient pas : le minuteur de dix secondes relit l'arbre.
+  await b.clock.fastForward(11_000);
+  await expect(link).toHaveText("Renommée ailleurs", { timeout: 5_000 });
+  expect(attempts).toBeGreaterThan(1);
 });
