@@ -385,6 +385,8 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
   const reads = await holdPageReads(p, id);
   const tree = await holdTreeReads(p);
   expect((await api.post("/api/v1/auth/logout")).status()).toBe(204);
+  // La synchro, fermée par la déconnexion, revient : sa relecture de la page est là, retenue.
+  await reads.asked;
 
   // Le prochain appel qui demande une session (le sélecteur d'espace, ouvert, relit le
   // compte) répond `401 unauthenticated` : la connexion est demandée par-dessus la page,
@@ -392,8 +394,18 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
   await spaceSwitcher(p).click();
   const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
   await expect(dialog).toBeVisible();
+  // La relecture relâchée répond `401` avant la connexion : plus rien de parti sans session
+  // n'est en route quand la session est rouverte. Sinon, relâchée avant d'exister, elle pouvait
+  // partir avec le cookie mort juste avant la connexion, et son `401`, revenu après, rouvrait
+  // la fenêtre (le défaut est dans l'application, au registre : R337).
+  const refused = p.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === `/api/v1/pages/${id}`,
+  );
   reads.release();
   tree.release();
+  expect((await refused).status()).toBe(401);
   await expect(editor).toContainText("Écrit avant la coupure");
   expect(await marked()).toBe(true);
   // L'adresse est déjà là : le mot de passe a le focus.
