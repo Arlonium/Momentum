@@ -221,7 +221,13 @@ Le relecteur d'origine a re-relu le tour : **neuf de ses onze constats sont lev�
 - **N1 (mineur, neuf ; base d'avant R130 seulement).** R258 peut laisser la page dans l'état que R131 interdit : une entrée écartée, puis une frappe du même client qui n'en dépend pas : le serveur lit `["Un", "defDeux"]`, Yjs lit `["Un", "Deux"]` et garde le bloc en attente. **Décision** : après une entrée écartée, toute entrée qui laisserait un trou est écartée aussi, et journalisée.
 - **N2 (mineur, neuf).** `POST …/comments` avec `blockId` ne relit pas la session après l'attente de l'acteur : 20 fils demandés pendant une longue écriture, la personne se déconnecte : 20 réponses `201` sans session. **Décision** : relire la session après le chargement de la page, comme R209.
 
-Numéros de Rulings du tour 2 : R357 à R359, puis R365 à R369.
+**Où en est le tour 2** (2026-11-13) : **I2, N1 et N2 sont faits et poussés** (`f95b68e`, `3b263e2`, `296f9ee` ; R357, R358, R365, R366 ; `cargo test --workspace` : 752 verts ; `comments.spec.ts` relancé sur `main` : 14 verts). Son implémenteur s'est arrêté, contexte épuisé, avant **I3, repris par un agent neuf** (R367 à R369).
+
+- I2, fait : 20 000 réactions par page (`409 reaction_limit`) ; la part d'un compte sur une page : 2 000 messages et 1 Mio de texte (`409 page_comment_limit`), 2 000 réactions (`409 reaction_limit`) ; les plafonds communs passent avant la part du compte. La sonde inversée passe : un compte prend toute sa part, un autre écrit encore. L'index de `0003` devient `comments_by_thread (thread_id, created_at, author_id, octet_length(body), id)`, couvrant pour les deux requêtes. **Lecture d'une page au pire cas accepté** (10 000 messages, 4 Mio, 20 000 réactions) : 10,1 Mio, 356 ms au p50, 378 ms au p95, en release ; écriture à la borne : 5,5 ms au p50 pour une réponse, 9,0 ms pour une réaction (la ramener à la milliseconde demanderait un `node_id` sur chaque réaction : non fait).
+- N2, fait : `POST …/comments` avec `blockId` relit la session après le chargement de la page (R365). Aucune autre route n'attend l'acteur avant d'écrire.
+- N1, fait : après une entrée du journal écartée, une entrée qui laisserait un trou est écartée aussi (R366) ; le serveur et Yjs 13.6.33 lisent la même page.
+
+Les refus neufs, tels que le serveur les écrit : « les commentaires de cette page portent déjà 20 000 réactions : retire celles qui ne servent plus, ou demande à quelqu'un qui a l'accès complet de supprimer des fils ; rien n'a été écrit » ; « tu as déjà écrit 2 000 messages sur cette page : c'est ta part, la même pour chaque compte ; supprime ceux des tiens qui ne servent plus avant d'en écrire un autre ; rien n'a été écrit » ; « tes messages sur cette page dépasseraient 1 Mio de texte : c'est ta part, la même pour chaque compte ; raccourcis ton message, ou supprime ceux des tiens qui ne servent plus ; rien n'a été écrit » ; « tu as déjà posé 2 000 réactions sur cette page : c'est ta part, la même pour chaque compte ; retire celles des tiennes qui ne servent plus avant d'en poser une autre ; rien n'a été écrit ».
 
 ## Ce que la documentation doit dire (pour la Task 14)
 
@@ -271,6 +277,12 @@ Fin du tour de correction 1 de la piste S (R350 à R356) :
 - `CLAUDE.md`, méthode : le test `no_string_of_the_server_has_a_run_of_spaces` refuse deux espaces de suite dans les chaînes du serveur.
 - README : les plafonds des commentaires ; la suppression d'un fil entier par qui a l'accès complet (le bouton reste à faire côté client) ; la lecture des fils n'est bornée qu'en messages et en texte.
 - Conception : les plafonds des commentaires, la route `DELETE`, le public de la trame `versions`.
+
+Tour de correction 2 de la piste S (R357, R358, R365, R366) :
+
+- `CLAUDE.md`, « Commentaires, côté serveur » : 20 000 réactions par page ; la part d'un compte sur une page (2 000 messages, 1 Mio de texte, 2 000 réactions), ses codes, l'ordre des refus (les plafonds communs d'abord) ; l'index étendu de `0003` ; un fil sur un bloc relit la session une fois la page chargée (R365).
+- `CLAUDE.md`, la puce de R258 : après une entrée écartée, une entrée qui laisserait un trou est écartée aussi (R366).
+- README et conception : les plafonds des commentaires et la part de chaque compte ; la lecture des fils d'une page est bornée à environ 10 Mio.
 
 Pour chaque constat fini ensuite, ajouter ici ce que la documentation doit en dire : la Task 14 part de cette liste. Sont déjà sûrs de changer : le README et `CLAUDE.md` pour l'historique (« Peut lire » lit l'historique sans restaurer : faux après S5 et C7), la puce R181 de `CLAUDE.md` (S2), le canal de l'espace (S6, C6), `PUT /mmd` et les identifiants (S3), les plafonds des commentaires (S4).
 
