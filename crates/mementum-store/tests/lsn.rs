@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use common::{account, break_table, page, repair};
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_store::{
-    AccessChange, Expected, InvitationGrant, NewInvitation, NewNode, NewUser, Node, Place,
-    ShareRefusal, Store, StoreError,
+    AccessChange, Expected, InvitationGrant, NewInvitation, NewNode, NewSession, NewUser, Node,
+    Place, ShareRefusal, Store, StoreError,
 };
 use tokio::sync::broadcast::error::TryRecvError;
 use uuid::Uuid;
@@ -281,7 +281,16 @@ async fn every_structural_write_advances_lsn() {
             password_hash: "pas-un-hachage".to_string(),
         };
         store
-            .sign_up(eve, Some([3; 32]), "Espace d'Eve", now())
+            .sign_up(
+                eve,
+                Some([3; 32]),
+                "Espace d'Eve",
+                NewSession {
+                    token_hash: [3; 32],
+                    expires_at: now() + 86_400_000,
+                },
+                now(),
+            )
             .await
             .unwrap()
     })

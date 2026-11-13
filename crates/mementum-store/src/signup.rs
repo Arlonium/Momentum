@@ -1,6 +1,7 @@
 //! Inscription : un compte et ce qui vient avec lui, en une seule transaction.
 //!
-//! Une inscription écrit dans `users`, puis dans `members`, `spaces`, `invitations` ou `acl`.
+//! Une inscription écrit dans `users`, puis dans `members`, `spaces`, `invitations` ou `acl`,
+//! et enfin dans `sessions`.
 //! En plusieurs transactions, un arrêt ou une erreur de la base au milieu laisserait un compte
 //! sans espace, dont l'adresse est prise ; et sur une base du lot 1, des pages sans propriétaire
 //! pour de bon, puisque seul le premier compte reprend les espaces sans membre, et à son
@@ -14,7 +15,7 @@ use uuid::Uuid;
 use crate::invitations::{Invitation, accept, acceptable};
 use crate::members::{adopt_orphans, raise_role};
 use crate::spaces::{Space, WriteTx, bump_rev, insert_space};
-use crate::users::{NewUser, User, insert_user};
+use crate::users::{NewSession, NewUser, User, insert_session, insert_user};
 use crate::{Store, StoreError};
 
 /// Ce qu'une inscription a écrit.
@@ -44,10 +45,14 @@ impl Store {
     /// 3. avec un jeton d'invitation (`invitation`, son SHA-256) : l'accepte si elle vaut
     ///    encore à `now`, comme [`Store::accept_invitation`]. Sinon le compte reste sans
     ///    espace (`invitation_withdrawn`) : il venait pour elle, pas pour un espace à lui ;
-    /// 4. sans jeton, s'il n'a aucun espace : crée `first_space_name`, dont il est `owner`.
+    /// 4. sans jeton, s'il n'a aucun espace : crée `first_space_name`, dont il est `owner` ;
+    /// 5. ouvre la session du compte (`session`).
     ///
     /// Tout est écrit, ou rien : sur une erreur (`EmailTaken` si l'adresse est prise), aucun
-    /// compte n'existe et l'adresse reste libre.
+    /// compte n'existe et l'adresse reste libre. La session en est (report m1 du lot 2) : ouverte
+    /// après la transaction, une panne entre les deux répondait par une erreur pour un compte
+    /// pourtant créé, sans session, adresse prise et invitation consommée ; qui recommençait se
+    /// voyait répondre que l'adresse était prise.
     ///
     /// Le store ne juge pas du droit de s'inscrire (inscriptions ouvertes ou non, jeton exigé
     /// ou non) : c'est l'affaire de l'appelant, avant.
@@ -56,6 +61,7 @@ impl Store {
         user: NewUser,
         invitation: Option<[u8; 32]>,
         first_space_name: &str,
+        session: NewSession,
         now: i64,
     ) -> Result<SignedUp, StoreError> {
         let mut tx = self.write().await?;
@@ -79,6 +85,7 @@ impl Store {
             }
             None => {}
         }
+        insert_session(&mut tx, user.id, session).await?;
         tx.commit().await?;
         Ok(SignedUp {
             user,

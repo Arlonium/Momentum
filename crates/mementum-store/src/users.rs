@@ -59,6 +59,44 @@ pub struct NewUser {
     pub password_hash: String,
 }
 
+/// Une session à ouvrir.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct NewSession {
+    /// SHA-256 du jeton : le jeton lui-même n'est jamais stocké.
+    pub token_hash: [u8; 32],
+    /// Millisecondes Unix : la session vaut tant que `now < expires_at`.
+    pub expires_at: i64,
+}
+
+/// `Debug` masque le hachage du jeton : une session écrite dans un journal ne le livre pas.
+impl fmt::Debug for NewSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewSession")
+            .field("token_hash", &"<masqué>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Écrit la session du compte dans la transaction. `NotFound` si le compte n'existe pas.
+pub(crate) async fn insert_session(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: Uuid,
+    session: NewSession,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&session.token_hash[..])
+    .bind(user_id.to_string())
+    .bind(now_ms())
+    .bind(session.expires_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(StoreError::from_fk)?;
+    Ok(())
+}
+
 /// La forme sous laquelle une adresse e-mail est gardée et cherchée.
 pub(crate) fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
@@ -284,8 +322,10 @@ impl Store {
     /// Ouvre une session : `token_hash` est le SHA-256 du jeton, `expires_at` son échéance
     /// (millisecondes Unix). `NotFound` si le compte n'existe pas.
     ///
-    /// Sans condition : pour un compte qui vient d'être créé (l'inscription). Après la
-    /// vérification d'un mot de passe, c'est [`Store::create_session_verified`].
+    /// **Réservée aux tests** : sans condition, elle ouvre une session à n'importe quel compte.
+    /// Aucune route ne l'appelle. L'inscription ouvre la sienne dans la transaction qui crée le
+    /// compte ([`Store::sign_up`], report m1 du lot 2) ; après la vérification d'un mot de passe,
+    /// c'est [`Store::create_session_verified`].
     pub async fn create_session(
         &self,
         user_id: Uuid,

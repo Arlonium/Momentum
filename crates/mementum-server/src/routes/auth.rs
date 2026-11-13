@@ -38,18 +38,20 @@
 //!   coupure.
 //!
 //! Le compte et ce qui vient avec lui (espaces repris, invitation, premier
-//! espace) s'écrivent en une transaction du store (`Store::sign_up`) : une
-//! panne au milieu ne laisse pas un compte sans espace. Ce qui suit une
-//! écriture et ne doit pas s'arrêter en route (la session, après le compte ou
-//! le nouveau mot de passe) tourne dans sa propre tâche : elle va au bout
-//! même si le client coupe la connexion.
+//! espace, session) s'écrivent en une transaction du store (`Store::sign_up`) :
+//! une panne au milieu ne laisse ni un compte sans espace, ni un compte sans
+//! session pour une inscription qui a répondu par une erreur (report m1 du
+//! lot 2). Ce qui suit une écriture et ne doit pas s'arrêter en route (la
+//! fermeture de la session portée, après le compte ; la session, avec le
+//! nouveau mot de passe) tourne dans sa propre tâche : elle va au bout même si
+//! le client coupe la connexion.
 
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use mementum_store::{NewUser, StoreError};
+use mementum_store::{NewSession, NewUser, StoreError};
 use uuid::Uuid;
 
 use crate::auth::{self, AuthUser, Guarded, SESSION_TTL_MS};
@@ -97,8 +99,8 @@ async fn sign_up(
         // La session que le cookie de la réponse va remplacer.
         carried: auth::session_hash(&headers),
     };
-    // Compte, fermeture de la session portée, session neuve : jusqu'au bout,
-    // même si le client coupe la connexion.
+    // Compte et session neuve, puis fermeture de la session portée : jusqu'au
+    // bout, même si le client coupe la connexion.
     let (me, token) = to_completion(register(state, account)).await?;
     Ok((
         StatusCode::CREATED,
@@ -120,8 +122,8 @@ struct NewAccount {
     carried: Option<[u8; 32]>,
 }
 
-/// Crée le compte, lui donne son espace, ferme la session que portait le
-/// navigateur et ouvre celle du compte. Rend le `Me` et le jeton de session.
+/// Crée le compte, son espace et sa session (une transaction), puis ferme la
+/// session que portait le navigateur. Rend le `Me` et le jeton de session.
 async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), ApiError> {
     let NewAccount {
         email,
@@ -158,16 +160,22 @@ async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), 
     }
     let password_hash = auth::hash_password(password).await.map_err(internal)?;
     // Le compte, les espaces que reprend le premier compte, l'invitation,
-    // sinon un espace à lui : tout, ou rien.
+    // sinon un espace à lui, et sa session : tout, ou rien. Le jeton est tiré
+    // avant : le store n'en voit que le hachage.
     let first_space = format!("Espace de {name}");
     let new_user = NewUser {
         email,
         name,
         password_hash,
     };
+    let (token, token_hash) = auth::new_token();
+    let session = NewSession {
+        token_hash,
+        expires_at: now_ms() + SESSION_TTL_MS,
+    };
     let signed_up = state
         .store
-        .sign_up(new_user, invitation, &first_space, now_ms())
+        .sign_up(new_user, invitation, &first_space, session, now_ms())
         .await
         .map_err(|e| match e {
             // Prise entre-temps.
@@ -204,12 +212,11 @@ async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), 
             "invitation retirée pendant l'inscription : compte créé sans elle"
         );
     }
-    // Le compte existe : le cookie que portait ce navigateur va être remplacé.
-    // Sa session ne doit plus rien valoir, pour personne, ni les connexions de
-    // synchro du compte qu'elle portait (Ruling R90, comme à la connexion).
-    // Pas avant : une inscription refusée ne ferme rien.
+    // Le compte existe, avec sa session : le cookie que portait ce navigateur
+    // va être remplacé. Sa session ne doit plus rien valoir, pour personne, ni
+    // les connexions de synchro du compte qu'elle portait (Ruling R90, comme à
+    // la connexion). Pas avant : une inscription refusée ne ferme rien.
     close_session(&state, carried).await?;
-    let token = open_session(&state, user.id).await?;
     let me = me_of(&state, user.into()).await?;
     Ok((me, token))
 }
@@ -526,19 +533,6 @@ async fn open_session_verified(
         .await
         .map_err(internal)?;
     Ok(opened.then_some(token))
-}
-
-/// Ouvre une session pour ce compte, qui vient d'être créé, et rend son jeton,
-/// à poser en cookie. Après la vérification d'un mot de passe, c'est
-/// [`open_session_verified`].
-async fn open_session(state: &AppState, user_id: Uuid) -> Result<String, ApiError> {
-    let (token, hash) = auth::new_token();
-    state
-        .store
-        .create_session(user_id, hash, now_ms() + SESSION_TTL_MS)
-        .await
-        .map_err(internal)?;
-    Ok(token)
 }
 
 async fn me_of(state: &AppState, user: AuthUser) -> Result<Me, ApiError> {
