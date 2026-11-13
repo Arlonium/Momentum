@@ -10,7 +10,8 @@
 //
 // Un titre refusé parce que la session est perdue (`401`) n'est pas une erreur à afficher : la
 // connexion est demandée par-dessus la page, le titre tapé reste dans le champ, et il repart
-// au serveur quand le compte revient, comme le texte de la page.
+// au serveur quand le compte revient, comme le texte de la page. Sauf si la page est alors en
+// lecture seule : il attend dans le message, comme tout titre non enregistré.
 //
 // Un titre tapé et pas encore enregistré quand la page passe en lecture seule (niveau baissé,
 // page à la corbeille) ne peut plus partir (R210) : il n'est pas montré comme le titre de la
@@ -165,6 +166,9 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
           // Session perdue : le titre attend le retour du compte, puis repart.
           if (!isSessionLost(e)) throw e;
           await afterLogin();
+          // La page est passée en lecture seule pendant l'attente : ce titre ne peut plus partir
+          // (R210). Il est dans le message, dit non enregistré, et ne repart que repris.
+          if (locked.current) return;
         }
       }
       saved.current = updated.title;

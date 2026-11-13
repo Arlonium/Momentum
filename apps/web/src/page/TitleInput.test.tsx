@@ -521,6 +521,33 @@ test("a_text_that_is_no_longer_flagged_as_typed_goes_to_the_message_too", async 
   expect(updatePage).toHaveBeenCalledTimes(1);
 });
 
+test("a_title_waiting_for_the_account_stays_in_the_message_once_the_page_is_read_only", async () => {
+  // Le titre attend le retour du compte (`401`), et la page passe en lecture seule entre-temps
+  // (niveau, corbeille, schéma) : il est dans le message, dit non enregistré.
+  vi.mocked(updatePage).mockRejectedValueOnce(unauthenticated());
+  await render(page("p", { title: "Ancien" }));
+  await type("Tapé sans session");
+  await enter();
+  expect(updatePage).toHaveBeenCalledTimes(1);
+  await render(page("p", { title: "Ancien" }), me, true);
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Tapé sans session`);
+  // Le compte revient (un autre objet `me`) : ce titre ne repart pas, le message disait vrai.
+  const back = { ...me };
+  await render(page("p", { title: "Ancien" }), back, true);
+  expect(updatePage).toHaveBeenCalledTimes(1);
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Tapé sans session`);
+  expect(field().value).toBe("Ancien");
+  // La page redevient modifiable : le texte est proposé, et ne part que repris.
+  await render(page("p", { title: "Ancien" }), back);
+  await focus();
+  await blur();
+  expect(updatePage).toHaveBeenCalledTimes(1);
+  await press("Reprendre ce titre");
+  await blur();
+  expect(updatePage).toHaveBeenCalledTimes(2);
+  expect(updatePage).toHaveBeenLastCalledWith("p", { title: "Tapé sans session" });
+});
+
 // Le focus ne tombe jamais sur `body` : un bouton du message qui part sous le focus (la page
 // repasse en lecture seule, le message n'a plus d'objet) le rend au champ du titre.
 
