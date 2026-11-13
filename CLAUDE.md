@@ -119,7 +119,7 @@ Le plan de la partie B (« Blocs riches et organisation ») est [`docs/superpowe
 
 ### Serveur
 
-Rien encore.
+- **Une invitation acceptée par qui l'a déjà n'est pas consommée** (Task S1, R257, R261). `Store::accept_invitation` rend `(Invitation, bool)`, et `POST /api/v1/invitations/accept` `changed` : faux, rien n'est écrit (ni ligne, ni acceptation, ni `rev`) et le lien reste valable. Pour une page, « déjà » se juge sur le **niveau effectif** (`chain_level`, dans la transaction : ligne à son nom, page parente, accès général, où propriétaire et admin ont `full`). Un test qui invite un compte de l'espace sur une page ouverte aux membres ne lui pose donc plus de ligne, et l'invitation attend toujours : pour prouver qu'une ligne s'écrit, inviter sur une page privée, ou plus haut que l'accès général. L'inscription ouvre sa session dans sa transaction (m1) : `Store::create_session` ne sert plus qu'aux tests.
 
 ### Client
 
