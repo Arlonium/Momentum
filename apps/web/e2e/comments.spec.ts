@@ -5,9 +5,12 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import type { ErrorBody, Thread } from "@mementum/protocol";
 import {
+  apiAs,
   closeContexts,
   createPage,
+  firstSpace,
   getMmd,
+  guestOf,
   holdPageReads,
   holdTreeReads,
   newUser,
@@ -16,6 +19,7 @@ import {
   putMmd,
   readerBanner,
   setPageLevel,
+  signUpAccount,
   trashBanner,
   unique,
   versionsOf,
@@ -587,4 +591,94 @@ test("a_restore_without_the_commented_block_moves_its_thread_apart_and_back", as
   await expect(threadOf(open, "Sur le troisième bloc")).toBeVisible();
   await expect(deleted).toHaveCount(0);
   await expect(markOf(a, "Troisième bloc")).toBeVisible();
+});
+
+/**
+ * Une page de trois blocs, qu'Alice possède, et Carla, invitée de l'espace sur cette page seule
+ * avec « Peut commenter ». Les droits sont posés avant qu'aucun onglet ne s'ouvre.
+ */
+async function guestScene() {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const page = await createPage(aliceApi, {
+    spaceId: space.id,
+    section: "private",
+    title: `Fils ${unique()}`,
+  });
+  await putMmd(aliceApi, page.id, CONTENT);
+  const carla = await guestOf(alice, page.id, `Carla ${unique()}`, "comment");
+  return { alice, aliceApi, carla, carlaApi: await apiAs(carla), page };
+}
+
+test("full_access_deletes_a_whole_thread_for_everyone", async ({ browser }) => {
+  // R352 : la propriétaire supprime d'un coup le fil qu'une invitée a ouvert et où elle a répondu.
+  const { alice, aliceApi, carla, carlaApi, page } = await guestScene();
+  const owner = await openPage(browser, page.id, alice);
+  const second = await blockIdOf(owner, "Deuxième bloc");
+  const gone = await openThread(carlaApi, page.id, second, "Fil de Carla");
+  const reply = await replyByApi(carlaApi, page.id, gone.id, "Et sa réponse");
+  expect(reply.status(), await reply.text()).toBe(201);
+  // Témoin : un autre fil, qui doit rester.
+  await openThread(aliceApi, page.id, await blockIdOf(owner, "Premier bloc"), "Fil qui reste");
+
+  const guest = await openPage(browser, page.id, carla);
+  const guestPanel = await openComments(guest);
+  await expect(threadOf(guestPanel, "Fil de Carla")).toContainText("Et sa réponse");
+  await expect(markOf(guest, "Deuxième bloc")).toBeVisible();
+  // Ce que porte la fenêtre de Carla survivra à la suppression : elle n'est pas rechargée.
+  await guest.evaluate(() => Object.assign(window, { notReloaded: true }));
+
+  const ownerPanel = await openComments(owner);
+  const doomed = threadOf(ownerPanel, "Fil de Carla");
+  await doomed.getByRole("button", { name: "Supprimer le fil" }).click();
+  const confirm = owner.getByRole("alertdialog", { name: "Supprimer ce fil ?" });
+  await expect(confirm).toContainText("ses 2 messages");
+  await expect(confirm).toContainText("Cela ne se défait pas.");
+  await confirm.getByRole("button", { name: "Supprimer", exact: true }).click();
+  await expect(confirm).toHaveCount(0);
+  await expect(doomed).toHaveCount(0);
+  // Le focus va au fil voisin.
+  await expect(threadOf(ownerPanel, "Fil qui reste")).toBeFocused();
+  await expect(markOf(owner, "Deuxième bloc")).toHaveCount(0);
+
+  // Chez Carla, panneau ouvert : le fil et sa pastille partent, sans recharger.
+  await expect(threadOf(guestPanel, "Fil de Carla")).toHaveCount(0, { timeout: 3_000 });
+  await expect(markOf(guest, "Deuxième bloc")).toHaveCount(0);
+  await expect(threadOf(guestPanel, "Fil qui reste")).toBeVisible();
+  await expect(markOf(guest, "Premier bloc")).toBeVisible();
+  expect(await guest.evaluate(() => (window as { notReloaded?: boolean }).notReloaded)).toBe(true);
+  // Sur le serveur, il ne reste que le témoin.
+  const left = await threadsOf(aliceApi, page.id);
+  expect(left.map((t) => t.comments.map((c) => c.body))).toEqual([["Fil qui reste"]]);
+});
+
+test("a_commenter_is_not_offered_to_delete_a_thread", async ({ browser }) => {
+  // Même le fil qu'elle a ouvert : supprimer tout un fil demande l'accès complet (R352).
+  const { alice, aliceApi, carla, carlaApi, page } = await guestScene();
+  const own = await openThread(carlaApi, page.id, null, "Fil ouvert par Carla");
+
+  const guest = await openPage(browser, page.id, carla);
+  const guestPanel = await openComments(guest);
+  const shown = threadOf(guestPanel, "Fil ouvert par Carla");
+  // Le fil est rendu avec ses actions : elle y répond, et le résout.
+  await expect(shown.getByRole("button", { name: "Répondre" })).toBeVisible();
+  await expect(shown.getByRole("button", { name: "Résoudre" })).toBeVisible();
+  await expect(guestPanel.getByRole("button", { name: "Supprimer le fil" })).toHaveCount(0);
+  // Témoin : la propriétaire a le bouton, sur le même fil.
+  const owner = await openPage(browser, page.id, alice);
+  const ownerPanel = await openComments(owner);
+  await expect(
+    threadOf(ownerPanel, "Fil ouvert par Carla").getByRole("button", { name: "Supprimer le fil" }),
+  ).toBeVisible();
+
+  // L'appel direct, par son compte : refusé, tel que le serveur le dit, et rien n'est parti.
+  const res = await carlaApi.delete(`/api/v1/pages/${page.id}/comments/${own.id}`);
+  expect(res.status()).toBe(403);
+  const refusal = (await res.json()) as ErrorBody;
+  expect(refusal.error).toBe("forbidden");
+  expect(refusal.message).toBe(
+    "niveau insuffisant sur cette page : il faut « Accès complet », tu as « Peut commenter »",
+  );
+  expect((await threadsOf(aliceApi, page.id)).map((t) => t.id)).toEqual([own.id]);
 });
