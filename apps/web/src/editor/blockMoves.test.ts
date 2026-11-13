@@ -1,85 +1,87 @@
 // Ce que chaque déplacement de bloc écrit dans le document partagé, et ce que devient une frappe
 // faite en même temps par quelqu'un d'autre (limite R39, Task 12 ; la Task 13 doit la lever).
 //
-// Deux vrais éditeurs BlockNote 0.57, liés par `withCollaboration` (le chemin Yjs 13 de
-// l'application) à deux `Y.Doc`, ceux de Mona et de Tom, aux identifiants de client fixes :
-// l'issue d'un conflit d'insertion se tranche par ces identifiants, et elle est ainsi la même à
-// chaque exécution. Chacun fait son geste depuis le même état ; leurs mises à jour s'échangent
-// ensuite à la main, et passent par un troisième document, celui du « serveur », dans un ordre
-// donné. Un glisser est joué comme le dépôt de ProseMirror : le bloc retiré, puis remis, relu du
-// presse-papiers (des nœuds neufs), en une transaction. Cela suffit : y-prosemirror ne regarde
-// que l'état final (`_prosemirrorChanged` passe tout le document à `updateYFragment`). Tab,
-// Maj+Tab et le déplacement au clavier passent par l'API de BlockNote qu'appellent leurs touches
-// (`nestBlock`, `unnestBlock`, `moveBlocksDown`).
+// Deux vrais éditeurs BlockNote 0.57, ceux de Mona et de Tom, liés à deux `Y.Doc` aux
+// identifiants de client fixes (`test/editors.ts`). Chacun fait son geste depuis le même état ;
+// leurs mises à jour s'échangent ensuite à la main, et passent par un troisième document, celui
+// du « serveur », dans un ordre donné. L'issue d'un conflit dépend de l'ordre des identifiants
+// de client : chaque scénario est joué deux fois, Mona avant Tom puis Tom avant Mona (`ORDERS`).
 //
-// Chaque scénario attend le comportement voulu : les blocs dans l'ordre, chaque id une seule
-// fois, chaque texte dans son bloc, rien en double, Mona, Tom et le serveur d'accord. Ceux qui
-// échouent aujourd'hui sont marqués `test.fails` : la suite reste verte, et le jour où l'un
-// passe, elle le dit. `MEMENTUM_SHOW_R39=1` les lance comme des tests ordinaires, pour voir leur
-// échec. Chaque geste a son témoin, vert : seul, il fait ce qu'on attend. Une dernière partie
-// relit ce que chaque geste, fait seul, écrit dans le document : les éléments Yjs gardés (et
-// l'id qu'ils portent ensuite), supprimés, créés. Ce que montre chaque scénario aujourd'hui est
-// au registre du lot 3, sous « Task 12 ».
+// Chaque scénario (`SCENARIOS`, S1 à S11 : les noms du registre du lot 3, « Task 12 ») attend le
+// comportement voulu : les blocs dans l'ordre, chaque id une seule fois, chaque texte dans son
+// bloc, types et enfants compris, rien en double, Mona, Tom et le serveur d'accord. Ceux qui
+// échouent aujourd'hui portent leur raison (`loss`) et sont marqués `test.fails` : la suite reste
+// verte, et le jour où l'un passe, elle le dit. `MEMENTUM_SHOW_R39=1` les lance comme des tests
+// ordinaires, pour voir leur échec. Seule l'exigence du scénario peut être cet échec : une
+// précondition manquée (un geste qui n'a pas fait chez son auteur ce que le scénario dit) ou une
+// exception d'un éditeur lève, et ne passe jamais pour la perte attendue (`outcomeOf`). Chaque
+// geste a son témoin, vert : seul, il fait ce qu'on attend. Une dernière partie relit ce que
+// chaque geste, fait seul, écrit dans le document : les éléments Yjs gardés (et l'id qu'ils
+// portent ensuite), supprimés, créés.
 //
 // Une correction faite par le serveur (R138) ne rendrait pas ces tests verts : il n'y a pas de
 // serveur ici. Ils disent ce que les clients écrivent et ce que donne leur fusion ; ce que le
 // serveur en fait se vérifie dans `crates/mementum-sync/tests/moves.rs`, avec des octets que cette
 // suite produit (fin du fichier), et dans un navigateur, dans `e2e/block-move.spec.ts`.
-import { BlockNoteEditor } from "@blocknote/core";
-import { withCollaboration } from "@blocknote/core/yjs";
 import { describe, expect, test } from "vitest";
-import * as Y from "yjs";
-import { FRAGMENT } from "./collab";
-import type { MementumEditor } from "./debug";
-import { schema } from "./schema";
-
-/** Origine des mises à jour reçues : elles ne repartent pas. */
-const REMOTE = "remote";
-
-/** Identifiants de client fixes : la page de départ, Mona, Tom. */
-const SEED = 1;
-const MONA = 2;
-const TOM = 3;
+import {
+  A,
+  block,
+  drag,
+  duo,
+  exchange,
+  keyboardDown,
+  line,
+  outgoing,
+  PARENTED,
+  peer,
+  repeatedIds,
+  shiftTab,
+  shown,
+  stored,
+  tab,
+  TITLE_Y,
+  TITLED,
+  typeAtEnd,
+  W,
+  W_FIRST,
+  W_PARENT,
+  written,
+  wWithChild,
+  X,
+  xml,
+  xWithChild,
+  XYZ,
+  XYZA,
+  XYZW,
+  Y_,
+  Z,
+  type Peer,
+  type Seed,
+  type Shown,
+} from "../test/editors";
+import { nodeModule, type Fs, type Path, type Url } from "../test/node";
 
 /** Ce que Tom tape. */
 const TYPED = " de Tom";
 
 /**
- * Un test du comportement voulu qui échoue aujourd'hui : `test.fails`, sauf avec
- * `MEMENTUM_SHOW_R39=1`, qui le lance comme un test ordinaire et montre son échec.
+ * Les deux ordres des identifiants de client de Mona et de Tom (la page de départ est écrite par
+ * l'identifiant 1). `dir` : le dossier des octets de cet ordre, pour le test de l'acteur.
  */
-const knownLoss = import.meta.env.MEMENTUM_SHOW_R39 ? test : test.fails;
-
-type Transaction = Parameters<Parameters<MementumEditor["transact"]>[0]>[0];
-type PmNode = Transaction["doc"];
-type Seed = Parameters<MementumEditor["replaceBlocks"]>[1];
-
-/** Un bloc : id, type, texte, enfants. */
-type Shown = { id: string; type: string; text: string; children: Shown[] };
-
-/** Un bloc attendu (paragraphe sans enfants par défaut). */
-function block(
-  id: string,
-  text: string,
-  { type = "paragraph", children = [] }: { type?: string; children?: Shown[] } = {},
-): Shown {
-  return { id, type, text, children };
-}
+const ORDERS = [
+  { label: "Mona avant Tom", dir: "mona-first", mona: 2, tom: 3 },
+  { label: "Tom avant Mona", dir: "tom-first", mona: 3, tom: 2 },
+] as const;
+type Order = (typeof ORDERS)[number];
 
 // ---------------------------------------------------------------------------
 // Les pages de départ
 // ---------------------------------------------------------------------------
 
-const XYZ: Seed = [
-  { id: "x", type: "paragraph", content: "Bloc X" },
-  { id: "y", type: "paragraph", content: "Bloc Y" },
-  { id: "z", type: "paragraph", content: "Bloc Z" },
-];
-const X = block("x", "Bloc X");
-const Y_ = block("y", "Bloc Y");
-const Z = block("z", "Bloc Z");
+// Les autres pages (« Bloc X, Bloc Y, Bloc Z » et ses variantes) sont dans `test/editors.ts`.
 
-/** Des textes qui n'ont rien en commun : le diff de y-prosemirror récrit tout le texte. */
+/** Des textes presque sans rien en commun : le diff de y-prosemirror récrit presque tout. */
 const CHORES: Seed = [
   { id: "x", type: "paragraph", content: "Acheter du pain" },
   { id: "y", type: "paragraph", content: "Rappeler Marc" },
@@ -89,300 +91,77 @@ const CHORE_X = block("x", "Acheter du pain");
 const CHORE_Y = block("y", "Rappeler Marc");
 const CHORE_Z = block("z", "Arroser les plantes");
 
-const XYZW: Seed = [...XYZ, { id: "w", type: "paragraph", content: "Bloc W" }];
-const W = block("w", "Bloc W");
-
-/** Y est un titre : un élément de contenu d'un autre type que ses voisins. */
-const TITLED: Seed = [
-  { id: "x", type: "paragraph", content: "Bloc X" },
-  { id: "y", type: "heading", props: { level: 2 }, content: "Titre Y" },
-  { id: "z", type: "paragraph", content: "Bloc Z" },
-];
-const TITLE_Y = block("y", "Titre Y", { type: "heading" });
-
-/** X a un enfant, X1. */
-const PARENTED: Seed = [
-  {
-    id: "x",
-    type: "paragraph",
-    content: "Bloc X",
-    children: [{ id: "x1", type: "paragraph", content: "Enfant X1" }],
-  },
-  { id: "y", type: "paragraph", content: "Bloc Y" },
-  { id: "z", type: "paragraph", content: "Bloc Z" },
-];
-const xWithChild = (text: string) => block("x", "Bloc X", { children: [block("x1", text)] });
-
-/** W, X, Y au même niveau : Tab dans X en fait l'enfant de W. */
-const W_FIRST: Seed = [
-  { id: "w", type: "paragraph", content: "Bloc W" },
-  { id: "x", type: "paragraph", content: "Bloc X" },
-  { id: "y", type: "paragraph", content: "Bloc Y" },
-];
-/** X enfant de W : Maj+Tab dans X le remonte au niveau de W. */
-const W_PARENT: Seed = [
-  {
-    id: "w",
-    type: "paragraph",
-    content: "Bloc W",
-    children: [{ id: "x", type: "paragraph", content: "Bloc X" }],
-  },
-  { id: "y", type: "paragraph", content: "Bloc Y" },
-];
-const wWithChild = (text: string) => block("w", "Bloc W", { children: [block("x", text)] });
-
-const XYZA: Seed = [...XYZ, { id: "a", type: "paragraph", content: "Bloc A" }];
-const A = block("a", "Bloc A");
-
 // ---------------------------------------------------------------------------
-// Les éditeurs, les gestes, l'échange
+// Une scène, ses préconditions, son exigence
 // ---------------------------------------------------------------------------
 
-/** Une personne : son document, son éditeur, et ce qu'il a écrit, pas encore envoyé. */
-type Peer = { name: string; doc: Y.Doc; editor: MementumEditor; writes: Uint8Array[] };
-
-/** Laisse passer les minuteurs de y-prosemirror (son premier rendu est différé). */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-/** Un éditeur monté, lié à un document neuf d'identifiant de client `clientID`, parti de `base`. */
-async function peer(name: string, clientID: number, base?: Uint8Array): Promise<Peer> {
-  const doc = new Y.Doc();
-  doc.clientID = clientID;
-  if (base) Y.applyUpdate(doc, base, REMOTE);
-  const writes: Uint8Array[] = [];
-  doc.on("update", (update: Uint8Array, origin: unknown) => {
-    if (origin !== REMOTE) writes.push(update);
-  });
-  const editor = BlockNoteEditor.create(
-    withCollaboration({
-      schema,
-      collaboration: {
-        fragment: doc.getXmlFragment(FRAGMENT),
-        user: { name, color: "#66655f" },
-        provider: undefined,
-      },
-    }),
-  ) as unknown as MementumEditor;
-  const host = document.createElement("div");
-  document.body.append(host);
-  editor.mount(host);
-  await settle();
-  return { name, doc, editor, writes };
-}
-
 /**
- * L'état d'une page de départ, écrit par un éditeur d'identifiant de client `SEED` dans un
- * document vide : les attributs que pose BlockNote, ceux qu'écrit aussi le serveur.
+ * Une scène : la page de départ, Mona et Tom qui l'ont ouverte, leurs identifiants de client
+ * dans l'ordre `order`, et le document du serveur. `quiet` : ni Mona ni Tom n'a rien écrit en
+ * ouvrant la page.
  */
-async function seed(blocks: Seed): Promise<Uint8Array> {
-  const writer = await peer("Départ", SEED);
-  writer.editor.replaceBlocks(writer.editor.document, blocks);
-  await settle();
-  return Y.encodeStateAsUpdate(writer.doc);
-}
-
-/** Les blocs que montre l'éditeur de `p`. */
-function shown(p: Peer): Shown[] {
-  const read = (blocks: MementumEditor["document"]): Shown[] =>
-    blocks.map((b) => ({
-      id: b.id,
-      type: b.type,
-      text: Array.isArray(b.content)
-        ? b.content.map((c) => ("text" in c ? String(c.text) : "")).join("")
-        : "",
-      children: read(b.children),
-    }));
-  return read(p.editor.document);
-}
-
-/**
- * Les blocs du document Yjs `doc`, lus sans éditeur : ce que le serveur garde et relit. Un
- * éditeur, lui, donne un id neuf à un bloc dont l'id revient (extension `UniqueID` de
- * BlockNote), sans l'écrire au document : seule cette lecture montre un id en double.
- */
-function stored(doc: Y.Doc): Shown[] {
-  const read = (group: Y.XmlElement | undefined): Shown[] =>
-    (group?.toArray() ?? []).map((node) => {
-      const container = node as Y.XmlElement;
-      const [content, children] = container.toArray() as Y.XmlElement[];
-      const text = content
-        .toArray()
-        .map((piece) =>
-          piece instanceof Y.XmlText
-            ? piece
-                .toDelta()
-                .map((d: { insert: unknown }) => String(d.insert))
-                .join("")
-            : "",
-        )
-        .join("");
-      return {
-        id: String(container.getAttribute("id")),
-        type: content.nodeName,
-        text,
-        children: read(children),
-      };
-    });
-  return read(doc.getXmlFragment(FRAGMENT).get(0) as Y.XmlElement | undefined);
-}
-
-/** Une page en une ligne, pour les messages : `y « Bloc Y » | x « Bloc X » [x1 « … »]`. */
-function line(page: Shown[]): string {
-  return page
-    .map((b) => {
-      const type = b.type === "paragraph" ? "" : ` (${b.type})`;
-      const children = b.children.length ? ` [${line(b.children)}]` : "";
-      return `${b.id}${type} « ${b.text} »${children}`;
-    })
-    .join(" | ");
-}
-
-/** Les ids qui reviennent plus d'une fois dans `blocks`, enfants compris. */
-function repeatedIds(blocks: Shown[]): string[] {
-  const seen = new Map<string, number>();
-  const walk = (list: Shown[]) =>
-    list.forEach((b) => {
-      seen.set(b.id, (seen.get(b.id) ?? 0) + 1);
-      walk(b.children);
-    });
-  walk(blocks);
-  return [...seen].filter(([, n]) => n > 1).map(([id]) => id);
-}
-
-/** Le `blockContainer` d'id `id` dans `doc`, et sa position (juste avant lui). */
-function containerOf(doc: PmNode, id: string): { pos: number; node: PmNode } {
-  let found: { pos: number; node: PmNode } | undefined;
-  doc.descendants((node, pos) => {
-    if (found) return false;
-    if (node.type.name === "blockContainer" && node.attrs.id === id) {
-      found = { pos, node };
-      return false;
-    }
-    return true;
-  });
-  if (!found) throw new Error(`aucun bloc ${id}`);
-  return found;
-}
-
-/**
- * Chez `p`, glisse le bloc `moved` sous le bloc `under`, ou au-dessus du bloc `above`, comme le
- * dépôt de ProseMirror : retiré, puis remis, relu du presse-papiers, en une transaction.
- */
-function drag(p: Peer, moved: string, place: { under: string } | { above: string }): void {
-  p.editor.transact((tr) => {
-    const { pos, node } = containerOf(tr.doc, moved);
-    const copy = p.editor.pmSchema.nodeFromJSON(node.toJSON());
-    tr.delete(pos, pos + node.nodeSize);
-    const target = containerOf(tr.doc, "under" in place ? place.under : place.above);
-    tr.insert("under" in place ? target.pos + target.node.nodeSize : target.pos, copy);
-  });
-}
-
-/** Chez `p`, tape `text` à la fin du texte du bloc `id`. */
-function typeAtEnd(p: Peer, id: string, text: string): void {
-  p.editor.transact((tr) => {
-    const { pos, node } = containerOf(tr.doc, id);
-    const content = node.firstChild!;
-    tr.insertText(text, pos + 2 + content.content.size);
-  });
-}
-
-/** Chez `p`, Tab dans le bloc `id` : il devient l'enfant du bloc d'au-dessus. */
-function tab(p: Peer, id: string): void {
-  p.editor.setTextCursorPosition(id, "end");
-  p.editor.nestBlock();
-}
-
-/** Chez `p`, Maj+Tab dans le bloc `id` : il remonte d'un niveau. */
-function shiftTab(p: Peer, id: string): void {
-  p.editor.setTextCursorPosition(id, "end");
-  p.editor.unnestBlock();
-}
-
-/** Chez `p`, le bloc `id` descend d'une place au clavier. */
-function keyboardDown(p: Peer, id: string): void {
-  p.editor.setTextCursorPosition(id, "end");
-  p.editor.moveBlocksDown();
-}
-
-/** Ce que `p` a écrit depuis le dernier envoi, en une mise à jour (rien : `null`). */
-function outgoing(p: Peer): Uint8Array | null {
-  const writes = p.writes.splice(0);
-  return writes.length === 0 ? null : Y.mergeUpdates(writes);
-}
-
-/**
- * Ce que chacun a écrit part chez l'autre et au serveur, dans l'ordre de `order`, jusqu'à ce que
- * plus personne n'écrive : un éditeur peut récrire en recevant.
- */
-async function exchange(server: Y.Doc, order: Peer[]): Promise<void> {
-  for (let round = 0; round < 5; round += 1) {
-    const sent = order.map((from) => ({ from, update: outgoing(from) }));
-    if (sent.every(({ update }) => update === null)) return;
-    for (const { from, update } of sent) {
-      if (update === null) continue;
-      Y.applyUpdate(server, update, REMOTE);
-      for (const to of order) if (to !== from) Y.applyUpdate(to.doc, update, REMOTE);
-    }
-    await settle();
-  }
-  throw new Error("les éditeurs écrivent encore après cinq échanges");
-}
-
-/**
- * Une scène : la page de départ, Mona et Tom qui l'ont ouverte, et le document du serveur.
- * `quiet` : ni Mona ni Tom n'a rien écrit en ouvrant la page.
- */
-async function scene(blocks: Seed) {
-  const base = await seed(blocks);
-  const mona = await peer("Mona", MONA, base);
-  const tom = await peer("Tom", TOM, base);
-  const server = new Y.Doc();
-  Y.applyUpdate(server, base, REMOTE);
-  const quiet = mona.writes.length === 0 && tom.writes.length === 0;
-  return { base, mona, tom, server, quiet };
+function scene(blocks: Seed, order: Order) {
+  return duo(blocks, order.mona, order.tom);
 }
 
 type Scene = Awaited<ReturnType<typeof scene>>;
 
+/** Une précondition manquée : le test prouverait autre chose que ce qu'il dit. */
+class Missed extends Error {}
+
+/** L'exigence d'un scénario n'est pas tenue : une ligne par manque. */
+class Unmet extends Error {}
+
 /**
- * Les gestes faits, chacun vérifié chez son auteur avant l'échange (`local`) : faux, et le test
- * prouverait autre chose. Dans un `test.fails`, une précondition qui manque ne doit pas passer
- * pour l'échec attendu : elle est écrite au journal, et le test rend la main sans échouer, ce que
- * `test.fails` signale.
+ * Les gestes sont faits, chacun vérifié chez son auteur avant l'échange (`local`), et personne
+ * n'a rien écrit en ouvrant la page. Sinon, lève `Missed` : dans un test ordinaire comme dans un
+ * `test.fails`, une précondition manquée n'est jamais un succès, ni la perte attendue.
  */
-function locallyDone(s: Scene, local: { mona: Shown[]; tom: Shown[] }): boolean {
+function requireLocallyDone(s: Scene, local: { mona: Shown[]; tom: Shown[] }): void {
   const same = (p: Peer, page: Shown[]) => JSON.stringify(shown(p)) === JSON.stringify(page);
-  if (s.quiet && same(s.mona, local.mona) && same(s.tom, local.tom)) return true;
-  console.error(
+  if (s.quiet && same(s.mona, local.mona) && same(s.tom, local.tom)) return;
+  throw new Missed(
     `précondition manquée : ouverture sans écriture ${s.quiet} ; ` +
-      `Mona ${line(shown(s.mona))} ; Tom ${line(shown(s.tom))}`,
+      `Mona ${line(shown(s.mona))} (attendu : ${line(local.mona)}) ; ` +
+      `Tom ${line(shown(s.tom))} (attendu : ${line(local.tom)})`,
   );
-  return false;
 }
 
 /**
- * Après l'échange, la page voulue partout : chez Mona et chez Tom (ce que montrent leurs
- * éditeurs) et au serveur (son document, relu sans éditeur) ; chaque id une seule fois ; les
- * trois documents identiques. `wanted` : une page, ou les pages admises quand deux issues sont
- * justes.
+ * Ce qui manque à la page voulue, après l'échange, une ligne par manque : chez Mona et chez Tom
+ * (ce que montrent leurs éditeurs) et au serveur (son document, relu sans éditeur), chaque id
+ * une seule fois et la page entière, types et enfants compris ; puis les trois documents
+ * identiques. `wanted` : une page, ou les pages admises quand deux issues sont justes.
  */
-function expectEverywhere(s: Scene, wanted: Shown[] | Shown[][]): void {
+function unmet(s: Scene, wanted: Shown[] | Shown[][]): string[] {
   const pages = Array.isArray(wanted[0]) ? (wanted as Shown[][]) : [wanted as Shown[]];
+  const admitted = pages.map((page) => JSON.stringify(page));
   const views: [string, Shown[]][] = [
     ["chez Mona", shown(s.mona)],
     ["chez Tom", shown(s.tom)],
     ["au serveur", stored(s.server)],
   ];
+  const lines: string[] = [];
   for (const [where, page] of views) {
-    expect
-      .soft(repeatedIds(page), `${where} : chaque id une seule fois (vu : ${line(page)})`)
-      .toEqual([]);
-    expect.soft(pages, `${where} : la page voulue (vu : ${line(page)})`).toContainEqual(page);
+    const repeated = repeatedIds(page);
+    if (repeated.length > 0) {
+      lines.push(`${where} : chaque id une seule fois (en double : ${repeated.join(", ")} ; vu : ${line(page)})`);
+    }
+    if (!admitted.includes(JSON.stringify(page))) {
+      lines.push(
+        `${where} : la page voulue (vu : ${line(page)} ; voulu : ${pages.map(line).join(" ou ")})`,
+      );
+    }
   }
-  const xml = (doc: Y.Doc) => doc.getXmlFragment(FRAGMENT).toString();
-  expect.soft(xml(s.tom.doc), "Mona et Tom ont le même document").toBe(xml(s.mona.doc));
-  expect.soft(xml(s.server), "le serveur a le même document").toBe(xml(s.mona.doc));
+  if (xml(s.tom.doc) !== xml(s.mona.doc)) lines.push("Mona et Tom n'ont pas le même document");
+  if (xml(s.server) !== xml(s.mona.doc)) lines.push("le serveur n'a pas le document de Mona");
+  return lines;
+}
+
+/** La page voulue partout (`unmet`) ; sinon, lève `Unmet`, avec tout ce qui manque. */
+function expectEverywhere(s: Scene, wanted: Shown[] | Shown[][]): void {
+  const lines = unmet(s, wanted);
+  if (lines.length > 0) throw new Unmet(lines.join("\n"));
 }
 
 /** Un témoin : les deux ouvertures n'ont rien écrit. */
@@ -390,233 +169,407 @@ function expectQuiet(s: Scene): void {
   expect(s.quiet, "Mona et Tom n'écrivent rien en ouvrant la page").toBe(true);
 }
 
+/**
+ * Ce que donne un scénario : `juste` (l'exigence est tenue), `perte` (elle ne l'est pas : `Unmet`),
+ * ou `accident` (toute autre exception : précondition manquée, erreur d'un éditeur, échange qui
+ * ne finit pas).
+ */
+type Outcome =
+  | { kind: "juste" }
+  | { kind: "perte"; error: Unmet }
+  | { kind: "accident"; error: unknown };
+
+async function outcomeOf(body: () => Promise<void>): Promise<Outcome> {
+  try {
+    await body();
+    return { kind: "juste" };
+  } catch (error) {
+    return error instanceof Unmet ? { kind: "perte", error } : { kind: "accident", error };
+  }
+}
+
+/**
+ * Un scénario dont l'exigence n'est pas tenue aujourd'hui, pour la raison `reason` : `test.fails`,
+ * sauf avec `MEMENTUM_SHOW_R39=1`, qui le lance comme un test ordinaire et montre son échec.
+ * `test.fails` tient toute exception pour l'échec attendu : seule l'exigence du scénario (`Unmet`)
+ * lui est donc rendue. Un accident est écrit au journal, et le test rend la main sans échouer, ce
+ * que `test.fails` signale en rouge, comme un scénario devenu juste (à repasser en `test`).
+ */
+function knownLoss(name: string, reason: string, body: () => Promise<void>): void {
+  const title = `${name} [perte connue : ${reason}]`;
+  if (import.meta.env.MEMENTUM_SHOW_R39) {
+    test(title, body);
+    return;
+  }
+  test.fails(title, async () => {
+    const outcome = await outcomeOf(body);
+    if (outcome.kind === "perte") throw outcome.error;
+    if (outcome.kind === "accident") {
+      console.error(`${name} : pas la perte attendue, un accident :`, outcome.error);
+    }
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Les scénarios
 // ---------------------------------------------------------------------------
 
-describe("glisser un bloc sous un autre, au même niveau", () => {
-  test("témoin : le glisser seul met X sous Z, partout", async () => {
-    const s = await scene(XYZ);
-    expectQuiet(s);
-    drag(s.mona, "x", { under: "z" });
-    expect(shown(s.mona)).toEqual([Y_, Z, X]);
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [Y_, Z, X]);
-  });
+/** Qui envoie le premier ce qu'il a écrit, au serveur et à l'autre. */
+type First = "mona" | "tom";
 
-  test("témoin : la frappe seule arrive partout", async () => {
-    const s = await scene(XYZ);
-    expectQuiet(s);
-    typeAtEnd(s.tom, "x", TYPED);
-    await exchange(s.server, [s.tom, s.mona]);
-    expectEverywhere(s, [block("x", "Bloc X de Tom"), Y_, Z]);
-  });
+type Scenario = {
+  /** Son nom au registre (`s1` à `s11`), et celui de son dossier d'octets. */
+  key: string;
+  title: string;
+  seed: Seed;
+  /** Le geste de Mona, puis celui de Tom, chacun chez soi, depuis la page de départ. */
+  mona: (p: Peer) => void;
+  tom: (p: Peer) => void;
+  /** Ce que chacun montre après son geste, avant l'échange. */
+  local: { mona: Shown[]; tom: Shown[] };
+  /** La page voulue, ou les pages admises quand deux issues sont justes. */
+  wanted: Shown[] | Shown[][];
+  /** Les ordres d'envoi joués (par défaut, Mona d'abord). */
+  firsts?: First[];
+  /**
+   * Pourquoi l'exigence n'est pas tenue aujourd'hui ; par ordre d'identifiants quand l'issue en
+   * dépend (un ordre absent passe). Absent : le scénario passe.
+   */
+  loss?: string | Partial<Record<Order["dir"], string>>;
+};
 
-  for (const [first, label] of [
-    ["mona", "le déplacement arrive d'abord au serveur"],
-    ["tom", "la frappe arrive d'abord au serveur"],
-  ] as const) {
-    knownLoss(`S1 : Tom tape dans X pendant que Mona glisse X sous Z ; ${label}`, async () => {
-      const s = await scene(XYZ);
-      drag(s.mona, "x", { under: "z" });
-      typeAtEnd(s.tom, "x", TYPED);
-      const typed = block("x", "Bloc X de Tom");
-      if (!locallyDone(s, { mona: [Y_, Z, X], tom: [typed, Y_, Z] })) return;
-      await exchange(s.server, first === "mona" ? [s.mona, s.tom] : [s.tom, s.mona]);
-      expectEverywhere(s, [Y_, Z, typed]);
-    });
-  }
+/** Limite R39 : ce que fait y-prosemirror 1.3.7 d'un déplacement, que la Task 13 doit lever. */
+const R39 = "limite R39, levée par la Task 13";
 
-  knownLoss("S4 : Tom tape dans Y, que personne ne déplace, pendant que Mona glisse X sous Z", async () => {
-    const s = await scene(XYZ);
-    drag(s.mona, "x", { under: "z" });
-    typeAtEnd(s.tom, "y", TYPED);
-    const typed = block("y", "Bloc Y de Tom");
-    if (!locallyDone(s, { mona: [Y_, Z, X], tom: [X, typed, Z] })) return;
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [typed, Z, X]);
-  });
+const typedIn = {
+  x: block("x", `Bloc X${TYPED}`),
+  y: block("y", `Bloc Y${TYPED}`),
+  z: block("z", `Bloc Z${TYPED}`),
+};
 
-  test("témoin : textes sans rien en commun, le glisser seul", async () => {
-    const s = await scene(CHORES);
-    expectQuiet(s);
-    drag(s.mona, "x", { under: "z" });
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [CHORE_Y, CHORE_Z, CHORE_X]);
-  });
-
-  knownLoss("S8 : textes sans rien en commun ; Tom tape dans X pendant que Mona glisse X sous Z", async () => {
-    const s = await scene(CHORES);
-    drag(s.mona, "x", { under: "z" });
-    typeAtEnd(s.tom, "x", TYPED);
-    const typed = block("x", `Acheter du pain${TYPED}`);
-    if (!locallyDone(s, { mona: [CHORE_Y, CHORE_Z, CHORE_X], tom: [typed, CHORE_Y, CHORE_Z] })) {
-      return;
-    }
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [CHORE_Y, CHORE_Z, typed]);
-  });
-});
-
-describe("glisser un bloc de plusieurs places, vers le haut", () => {
-  test("témoin : le glisser seul met W en tête, partout", async () => {
-    const s = await scene(XYZW);
-    expectQuiet(s);
-    drag(s.mona, "w", { above: "x" });
-    expect(shown(s.mona)).toEqual([W, X, Y_, Z]);
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [W, X, Y_, Z]);
-  });
-
-  knownLoss("S5 : Tom tape dans Z pendant que Mona glisse W tout en haut", async () => {
-    const s = await scene(XYZW);
-    drag(s.mona, "w", { above: "x" });
-    typeAtEnd(s.tom, "z", TYPED);
-    const typed = block("z", "Bloc Z de Tom");
-    if (!locallyDone(s, { mona: [W, X, Y_, Z], tom: [X, Y_, typed, W] })) return;
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [W, X, Y_, typed]);
-  });
-});
-
-describe("glisser un bloc par-dessus un bloc d'un autre type", () => {
-  test("témoin : le glisser seul met X sous Z, partout, le titre gardé", async () => {
-    const s = await scene(TITLED);
-    expectQuiet(s);
-    drag(s.mona, "x", { under: "z" });
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [TITLE_Y, Z, X]);
-  });
-
-  knownLoss("S2 : Y est un titre ; Tom tape dans X pendant que Mona glisse X sous Z", async () => {
-    const s = await scene(TITLED);
-    drag(s.mona, "x", { under: "z" });
-    typeAtEnd(s.tom, "x", TYPED);
-    const typed = block("x", "Bloc X de Tom");
-    if (!locallyDone(s, { mona: [TITLE_Y, Z, X], tom: [typed, TITLE_Y, Z] })) return;
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [TITLE_Y, Z, typed]);
-  });
-});
-
-describe("glisser un bloc qui a des enfants", () => {
-  test("témoin : le glisser seul met X et son enfant sous Z, partout", async () => {
-    const s = await scene(PARENTED);
-    expectQuiet(s);
-    drag(s.mona, "x", { under: "z" });
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [Y_, Z, xWithChild("Enfant X1")]);
-  });
-
-  test("témoin : la frappe seule dans l'enfant arrive partout", async () => {
-    const s = await scene(PARENTED);
-    expectQuiet(s);
-    typeAtEnd(s.tom, "x1", TYPED);
-    await exchange(s.server, [s.tom, s.mona]);
-    expectEverywhere(s, [xWithChild("Enfant X1 de Tom"), Y_, Z]);
-  });
-
-  knownLoss("S3 : Tom tape dans l'enfant de X pendant que Mona glisse X sous Z", async () => {
-    const s = await scene(PARENTED);
-    drag(s.mona, "x", { under: "z" });
-    typeAtEnd(s.tom, "x1", TYPED);
-    const typed = xWithChild("Enfant X1 de Tom");
-    if (!locallyDone(s, { mona: [Y_, Z, xWithChild("Enfant X1")], tom: [typed, Y_, Z] })) return;
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [Y_, Z, typed]);
-  });
-});
-
-describe("déplacer un bloc au clavier", () => {
-  test("témoin : X descend d'une place, partout", async () => {
-    const s = await scene(XYZ);
-    expectQuiet(s);
-    keyboardDown(s.mona, "x");
-    expect(shown(s.mona)).toEqual([Y_, X, Z]);
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [Y_, X, Z]);
-  });
-
-  knownLoss("S7 : Tom tape dans X pendant que Mona le descend d'une place au clavier", async () => {
-    const s = await scene(XYZ);
-    keyboardDown(s.mona, "x");
-    typeAtEnd(s.tom, "x", TYPED);
-    const typed = block("x", "Bloc X de Tom");
-    if (!locallyDone(s, { mona: [Y_, X, Z], tom: [typed, Y_, Z] })) return;
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [Y_, typed, Z]);
-  });
-});
-
-describe("changer un bloc de niveau (Tab, Maj+Tab)", () => {
-  test("témoin : Tab seul fait de X l'enfant de W, partout", async () => {
-    const s = await scene(W_FIRST);
-    expectQuiet(s);
-    tab(s.mona, "x");
-    expect(shown(s.mona)).toEqual([wWithChild("Bloc X"), Y_]);
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [wWithChild("Bloc X"), Y_]);
-  });
-
-  knownLoss("S9 : Tom tape dans X pendant que Mona en fait l'enfant de W (Tab)", async () => {
-    const s = await scene(W_FIRST);
-    tab(s.mona, "x");
-    typeAtEnd(s.tom, "x", TYPED);
-    if (!locallyDone(s, { mona: [wWithChild("Bloc X"), Y_], tom: [W, block("x", "Bloc X de Tom"), Y_] })) {
-      return;
-    }
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [wWithChild("Bloc X de Tom"), Y_]);
-  });
-
-  test("témoin : Maj+Tab seul remonte X au niveau de W, partout", async () => {
-    const s = await scene(W_PARENT);
-    expectQuiet(s);
-    shiftTab(s.mona, "x");
-    expect(shown(s.mona)).toEqual([W, X, Y_]);
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [W, X, Y_]);
-  });
-
-  knownLoss("S10 : Tom tape dans X pendant que Mona le remonte d'un niveau (Maj+Tab)", async () => {
-    const s = await scene(W_PARENT);
-    shiftTab(s.mona, "x");
-    typeAtEnd(s.tom, "x", TYPED);
-    if (!locallyDone(s, { mona: [W, X, Y_], tom: [wWithChild("Bloc X de Tom"), Y_] })) return;
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [W, block("x", "Bloc X de Tom"), Y_]);
-  });
-});
-
-describe("deux glissers en même temps, sans aucune frappe", () => {
-  knownLoss("S6 : Mona glisse X sous Z, Tom glisse X sous Y", async () => {
-    const s = await scene(XYZ);
-    drag(s.mona, "x", { under: "z" });
-    drag(s.tom, "x", { under: "y" });
-    if (!locallyDone(s, { mona: [Y_, Z, X], tom: [Y_, X, Z] })) return;
-    await exchange(s.server, [s.mona, s.tom]);
+const SCENARIOS: Scenario[] = [
+  {
+    key: "s1",
+    title: "Tom tape dans X pendant que Mona glisse X sous Z",
+    seed: XYZ,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => typeAtEnd(p, "x", TYPED),
+    local: { mona: [Y_, Z, X], tom: [typedIn.x, Y_, Z] },
+    wanted: [Y_, Z, typedIn.x],
+    firsts: ["mona", "tom"],
+    loss: R39,
+  },
+  {
+    key: "s2",
+    title: "Y est un titre ; Tom tape dans X pendant que Mona glisse X sous Z",
+    seed: TITLED,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => typeAtEnd(p, "x", TYPED),
+    local: { mona: [TITLE_Y, Z, X], tom: [typedIn.x, TITLE_Y, Z] },
+    wanted: [TITLE_Y, Z, typedIn.x],
+    loss: R39,
+  },
+  {
+    key: "s3",
+    title: "Tom tape dans l'enfant de X pendant que Mona glisse X sous Z",
+    seed: PARENTED,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => typeAtEnd(p, "x1", TYPED),
+    local: {
+      mona: [Y_, Z, xWithChild("Enfant X1")],
+      tom: [xWithChild(`Enfant X1${TYPED}`), Y_, Z],
+    },
+    wanted: [Y_, Z, xWithChild(`Enfant X1${TYPED}`)],
+    loss: R39,
+  },
+  {
+    key: "s4",
+    title: "Tom tape dans Y, que personne ne déplace, pendant que Mona glisse X sous Z",
+    seed: XYZ,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => typeAtEnd(p, "y", TYPED),
+    local: { mona: [Y_, Z, X], tom: [X, typedIn.y, Z] },
+    wanted: [typedIn.y, Z, X],
+    loss: R39,
+  },
+  {
+    key: "s5",
+    title: "Tom tape dans Z pendant que Mona glisse W tout en haut",
+    seed: XYZW,
+    mona: (p) => drag(p, "w", { above: "x" }),
+    tom: (p) => typeAtEnd(p, "z", TYPED),
+    local: { mona: [W, X, Y_, Z], tom: [X, Y_, typedIn.z, W] },
+    wanted: [W, X, Y_, typedIn.z],
+    loss: R39,
+  },
+  {
+    key: "s6",
+    title: "sans aucune frappe, Mona glisse X sous Z, Tom glisse X sous Y",
+    seed: XYZ,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => drag(p, "x", { under: "y" }),
+    local: { mona: [Y_, Z, X], tom: [Y_, X, Z] },
     // L'une ou l'autre place est juste ; pas les deux, et aucun texte ne change.
-    expectEverywhere(s, [
+    wanted: [
       [Y_, Z, X],
       [Y_, X, Z],
-    ]);
+    ],
+    loss: R39,
+  },
+  {
+    key: "s7",
+    title: "Tom tape dans X pendant que Mona le descend d'une place au clavier",
+    seed: XYZ,
+    mona: (p) => keyboardDown(p, "x"),
+    tom: (p) => typeAtEnd(p, "x", TYPED),
+    local: { mona: [Y_, X, Z], tom: [typedIn.x, Y_, Z] },
+    wanted: [Y_, typedIn.x, Z],
+    loss: R39,
+  },
+  {
+    key: "s8",
+    title: "textes différents ; Tom tape dans X pendant que Mona glisse X sous Z",
+    seed: CHORES,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => typeAtEnd(p, "x", TYPED),
+    local: {
+      mona: [CHORE_Y, CHORE_Z, CHORE_X],
+      tom: [block("x", `Acheter du pain${TYPED}`), CHORE_Y, CHORE_Z],
+    },
+    wanted: [CHORE_Y, CHORE_Z, block("x", `Acheter du pain${TYPED}`)],
+    loss: R39,
+  },
+  {
+    key: "s9",
+    title: "Tom tape dans X pendant que Mona en fait l'enfant de W (Tab)",
+    seed: W_FIRST,
+    mona: (p) => tab(p, "x"),
+    tom: (p) => typeAtEnd(p, "x", TYPED),
+    local: { mona: [wWithChild("Bloc X"), Y_], tom: [W, typedIn.x, Y_] },
+    wanted: [wWithChild(`Bloc X${TYPED}`), Y_],
+    loss: R39,
+  },
+  {
+    key: "s10",
+    title: "Tom tape dans X pendant que Mona le remonte d'un niveau (Maj+Tab)",
+    seed: W_PARENT,
+    mona: (p) => shiftTab(p, "x"),
+    tom: (p) => typeAtEnd(p, "x", TYPED),
+    local: { mona: [W, X, Y_], tom: [wWithChild(`Bloc X${TYPED}`), Y_] },
+    wanted: [W, typedIn.x, Y_],
+    loss: R39,
+  },
+  {
+    key: "s11",
+    title: "sans aucune frappe, Mona glisse X sous Z, Tom glisse Y sous A",
+    seed: XYZA,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => drag(p, "y", { under: "a" }),
+    local: { mona: [Y_, Z, X, A], tom: [X, Z, A, Y_] },
+    wanted: [Z, X, A, Y_],
+    loss: R39,
+  },
+];
+
+/**
+ * Joue `sc` : la scène, les deux gestes, leurs préconditions, puis l'échange, `first` envoyant le
+ * premier. Rend la scène, à comparer à la page voulue.
+ */
+async function play(sc: Scenario, order: Order, first: First): Promise<Scene> {
+  const s = await scene(sc.seed, order);
+  sc.mona(s.mona);
+  sc.tom(s.tom);
+  requireLocallyDone(s, sc.local);
+  await exchange(s.server, first === "mona" ? [s.mona, s.tom] : [s.tom, s.mona]);
+  return s;
+}
+
+/** Pourquoi `sc` n'est pas tenu dans l'ordre `order` ; `undefined` s'il passe. */
+function lossOf(sc: Scenario, order: Order): string | undefined {
+  return typeof sc.loss === "object" ? sc.loss[order.dir] : sc.loss;
+}
+
+const FIRST_LABEL: Record<First, string> = {
+  mona: "Mona envoie d'abord",
+  tom: "Tom envoie d'abord",
+};
+
+for (const order of ORDERS) {
+  describe(`${order.label} (identifiants de client ${order.mona} et ${order.tom})`, () => {
+    describe("témoins : chaque geste, fait seul", () => {
+      test("le glisser seul met X sous Z, partout", async () => {
+        const s = await scene(XYZ, order);
+        expectQuiet(s);
+        drag(s.mona, "x", { under: "z" });
+        expect(shown(s.mona)).toEqual([Y_, Z, X]);
+        await exchange(s.server, [s.mona, s.tom]);
+        expectEverywhere(s, [Y_, Z, X]);
+      });
+
+      test("le glisser de Tom seul met X sous Y, partout", async () => {
+        const s = await scene(XYZ, order);
+        expectQuiet(s);
+        drag(s.tom, "x", { under: "y" });
+        expect(shown(s.tom)).toEqual([Y_, X, Z]);
+        await exchange(s.server, [s.tom, s.mona]);
+        expectEverywhere(s, [Y_, X, Z]);
+      });
+
+      test("la frappe seule arrive partout", async () => {
+        const s = await scene(XYZ, order);
+        expectQuiet(s);
+        typeAtEnd(s.tom, "x", TYPED);
+        await exchange(s.server, [s.tom, s.mona]);
+        expectEverywhere(s, [typedIn.x, Y_, Z]);
+      });
+
+      test("textes différents, le glisser seul", async () => {
+        const s = await scene(CHORES, order);
+        expectQuiet(s);
+        drag(s.mona, "x", { under: "z" });
+        await exchange(s.server, [s.mona, s.tom]);
+        expectEverywhere(s, [CHORE_Y, CHORE_Z, CHORE_X]);
+      });
+
+      test("le glisser seul met W en tête, partout", async () => {
+        const s = await scene(XYZW, order);
+        expectQuiet(s);
+        drag(s.mona, "w", { above: "x" });
+        expect(shown(s.mona)).toEqual([W, X, Y_, Z]);
+        await exchange(s.server, [s.mona, s.tom]);
+        expectEverywhere(s, [W, X, Y_, Z]);
+      });
+
+      test("par-dessus un titre, le glisser seul met X sous Z, partout, le titre gardé", async () => {
+        const s = await scene(TITLED, order);
+        expectQuiet(s);
+        drag(s.mona, "x", { under: "z" });
+        await exchange(s.server, [s.mona, s.tom]);
+        expectEverywhere(s, [TITLE_Y, Z, X]);
+      });
+
+      test("le glisser seul met X et son enfant sous Z, partout", async () => {
+        const s = await scene(PARENTED, order);
+        expectQuiet(s);
+        drag(s.mona, "x", { under: "z" });
+        await exchange(s.server, [s.mona, s.tom]);
+        expectEverywhere(s, [Y_, Z, xWithChild("Enfant X1")]);
+      });
+
+      test("la frappe seule dans l'enfant arrive partout", async () => {
+        const s = await scene(PARENTED, order);
+        expectQuiet(s);
+        typeAtEnd(s.tom, "x1", TYPED);
+        await exchange(s.server, [s.tom, s.mona]);
+        expectEverywhere(s, [xWithChild(`Enfant X1${TYPED}`), Y_, Z]);
+      });
+
+      test("au clavier, X descend d'une place, partout", async () => {
+        const s = await scene(XYZ, order);
+        expectQuiet(s);
+        keyboardDown(s.mona, "x");
+        expect(shown(s.mona)).toEqual([Y_, X, Z]);
+        await exchange(s.server, [s.mona, s.tom]);
+        expectEverywhere(s, [Y_, X, Z]);
+      });
+
+      test("Tab seul fait de X l'enfant de W, partout", async () => {
+        const s = await scene(W_FIRST, order);
+        expectQuiet(s);
+        tab(s.mona, "x");
+        expect(shown(s.mona)).toEqual([wWithChild("Bloc X"), Y_]);
+        await exchange(s.server, [s.mona, s.tom]);
+        expectEverywhere(s, [wWithChild("Bloc X"), Y_]);
+      });
+
+      test("Maj+Tab seul remonte X au niveau de W, partout", async () => {
+        const s = await scene(W_PARENT, order);
+        expectQuiet(s);
+        shiftTab(s.mona, "x");
+        expect(shown(s.mona)).toEqual([W, X, Y_]);
+        await exchange(s.server, [s.mona, s.tom]);
+        expectEverywhere(s, [W, X, Y_]);
+      });
+
+      test("le glisser de Tom seul met Y sous A, partout", async () => {
+        const s = await scene(XYZA, order);
+        expectQuiet(s);
+        drag(s.tom, "y", { under: "a" });
+        await exchange(s.server, [s.tom, s.mona]);
+        expectEverywhere(s, [X, Z, A, Y_]);
+      });
+    });
+
+    describe("scénarios : deux gestes en même temps", () => {
+      for (const sc of SCENARIOS) {
+        for (const first of sc.firsts ?? (["mona"] as const)) {
+          const name = `${sc.key.toUpperCase()} : ${sc.title} ; ${FIRST_LABEL[first]}`;
+          const body = async () => expectEverywhere(await play(sc, order, first), sc.wanted);
+          const reason = lossOf(sc, order);
+          if (reason === undefined) test(name, body);
+          else knownLoss(name, reason, body);
+        }
+      }
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// La cible elle-même
+// ---------------------------------------------------------------------------
+
+// Ce sur quoi reposent les scénarios : une précondition manquée ou une exception ne passent
+// jamais pour la perte attendue, et la comparaison voit les types et les enfants.
+describe("la cible : ce qu'un scénario peut donner", () => {
+  const order = ORDERS[0];
+  const s4 = SCENARIOS.find((sc) => sc.key === "s4")!;
+
+  test("une précondition manquée est un accident, pas la perte attendue", async () => {
+    // Le scénario dit que Mona a mis X sous Z ; elle ne fait rien.
+    const idle: Scenario = { ...s4, mona: () => {} };
+    const outcome = await outcomeOf(async () => expectEverywhere(await play(idle, order, "mona"), idle.wanted));
+    expect(outcome.kind).toBe("accident");
+    expect((outcome as { error: unknown }).error).toBeInstanceOf(Missed);
   });
 
-  test("témoin : le glisser de Tom seul met Y sous A, partout", async () => {
-    const s = await scene(XYZA);
-    expectQuiet(s);
-    drag(s.tom, "y", { under: "a" });
-    await exchange(s.server, [s.tom, s.mona]);
-    expectEverywhere(s, [X, Z, A, Y_]);
+  test("une exception d'un geste est un accident, pas la perte attendue", async () => {
+    const broken: Scenario = { ...s4, tom: (p) => typeAtEnd(p, "aucun", TYPED) };
+    const outcome = await outcomeOf(async () => expectEverywhere(await play(broken, order, "mona"), broken.wanted));
+    expect(outcome.kind).toBe("accident");
+    expect(String((outcome as { error: unknown }).error)).toContain("aucun bloc aucun");
   });
 
-  knownLoss("S11 : Mona glisse X sous Z, Tom glisse Y sous A", async () => {
-    const s = await scene(XYZA);
-    drag(s.mona, "x", { under: "z" });
-    drag(s.tom, "y", { under: "a" });
-    if (!locallyDone(s, { mona: [Y_, Z, X, A], tom: [X, Z, A, Y_] })) return;
-    await exchange(s.server, [s.mona, s.tom]);
-    expectEverywhere(s, [Z, X, A, Y_]);
+  test("une exigence tenue est dite juste, une exigence manquée est dite perte", async () => {
+    // Un seul geste : la frappe de Tom dans Y arrive partout.
+    const typing: Scenario = {
+      ...s4,
+      mona: () => {},
+      local: { mona: [X, Y_, Z], tom: [X, typedIn.y, Z] },
+      wanted: [X, typedIn.y, Z],
+    };
+    const met = await outcomeOf(async () => expectEverywhere(await play(typing, order, "mona"), typing.wanted));
+    expect(met.kind).toBe("juste");
+    const wrong = [X, Y_, Z];
+    const lost = await outcomeOf(async () => expectEverywhere(await play(typing, order, "mona"), wrong));
+    expect(lost.kind).toBe("perte");
+    expect((lost as { error: Unmet }).error.message).toContain("chez Mona : la page voulue");
+    expect((lost as { error: Unmet }).error.message).toContain("au serveur : la page voulue");
+  });
+
+  test("la comparaison voit le type d'un bloc et ses enfants, chez chacun et au serveur", async () => {
+    const titled = await scene(TITLED, order);
+    expect(unmet(titled, [X, TITLE_Y, Z])).toEqual([]);
+    // Le même texte dans un paragraphe n'est pas la page.
+    const flat = unmet(titled, [X, block("y", "Titre Y"), Z]);
+    expect(flat.filter((l) => l.includes("la page voulue"))).toHaveLength(3);
+
+    const parented = await scene(PARENTED, order);
+    expect(unmet(parented, [xWithChild("Enfant X1"), Y_, Z])).toEqual([]);
+    // Ni sans l'enfant, ni avec un autre texte dans l'enfant.
+    expect(unmet(parented, [X, Y_, Z]).filter((l) => l.includes("la page voulue"))).toHaveLength(3);
+    expect(
+      unmet(parented, [xWithChild("Enfant"), Y_, Z]).filter((l) => l.includes("la page voulue")),
+    ).toHaveLength(3);
   });
 });
 
@@ -624,58 +577,14 @@ describe("deux glissers en même temps, sans aucune frappe", () => {
 // Ce que chaque geste écrit
 // ---------------------------------------------------------------------------
 
-/** Les éléments Yjs de la page, dans l'ordre du document. */
-function elements(doc: Y.Doc): Y.XmlElement[] {
-  const found: Y.XmlElement[] = [];
-  const walk = (parent: Y.XmlElement | Y.XmlFragment) =>
-    parent.toArray().forEach((child) => {
-      if (child instanceof Y.XmlElement) {
-        found.push(child);
-        walk(child);
-      }
-    });
-  walk(doc.getXmlFragment(FRAGMENT));
-  return found;
-}
-
-/**
- * Un élément nommé pour les messages : `blockContainer x` par son id, les autres par le bloc qui
- * les porte (`paragraph de x`, `blockGroup de w`, `blockGroup racine`).
- */
-function nameOf(element: Y.XmlElement): string {
-  if (element.nodeName === "blockContainer") return `blockContainer ${element.getAttribute("id")}`;
-  const parent = element.parent;
-  const owner = parent instanceof Y.XmlElement ? `de ${parent.getAttribute("id")}` : "racine";
-  return `${element.nodeName} ${owner}`;
-}
-
-/**
- * Ce qu'un geste fait des éléments Yjs du document de `p` : ceux qu'il supprime et ceux qu'il
- * crée (nommés avant et après lui), et l'id que porte désormais chaque `blockContainer` gardé
- * dont l'id a changé (par son id d'avant).
- */
-function written(p: Peer, gesture: () => void) {
-  const before = new Map(elements(p.doc).map((element) => [element, nameOf(element)]));
-  gesture();
-  const after = elements(p.doc);
-  const deleted = [...before].filter(([element]) => element._item?.deleted).map(([, n]) => n);
-  const created = after.filter((element) => !before.has(element)).map(nameOf);
-  const renamed: Record<string, string> = {};
-  for (const element of after) {
-    const was = before.get(element);
-    if (was?.startsWith("blockContainer ") && was !== nameOf(element)) {
-      renamed[was.slice("blockContainer ".length)] = String(element.getAttribute("id"));
-    }
-  }
-  return { deleted, created, renamed };
-}
-
 // Ce qu'écrivent y-prosemirror 1.3.7 et BlockNote 0.57 pour chaque geste, fait seul : ce sur
 // quoi repose le tableau du registre (Task 12). Une mise à jour de l'une ou de l'autre peut
 // changer ces formes ; ces tests le diront.
 describe("ce que chaque geste écrit dans le document", () => {
+  const order = ORDERS[0];
+
   test("glisser au même niveau : les blocs de la plage changent d'id sur place, rien n'est supprimé", async () => {
-    const s = await scene(XYZ);
+    const s = await scene(XYZ, order);
     expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
       deleted: [],
       created: [],
@@ -684,7 +593,7 @@ describe("ce que chaque geste écrit dans le document", () => {
   });
 
   test("glisser de plusieurs places vers le haut : tout bloc entre les deux places change d'id", async () => {
-    const s = await scene(XYZW);
+    const s = await scene(XYZW, order);
     expect(written(s.mona, () => drag(s.mona, "w", { above: "x" }))).toEqual({
       deleted: [],
       created: [],
@@ -693,7 +602,7 @@ describe("ce que chaque geste écrit dans le document", () => {
   });
 
   test("déplacer au clavier : la même récriture sur place que le glisser", async () => {
-    const s = await scene(XYZ);
+    const s = await scene(XYZ, order);
     expect(written(s.mona, () => keyboardDown(s.mona, "x"))).toEqual({
       deleted: [],
       created: [],
@@ -702,7 +611,7 @@ describe("ce que chaque geste écrit dans le document", () => {
   });
 
   test("glisser par-dessus un autre type : le contenu d'un autre type est supprimé et recréé", async () => {
-    const s = await scene(TITLED);
+    const s = await scene(TITLED, order);
     expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
       deleted: ["paragraph de x", "heading de y"],
       created: ["heading de y", "paragraph de z"],
@@ -711,7 +620,7 @@ describe("ce que chaque geste écrit dans le document", () => {
   });
 
   test("glisser un bloc qui a des enfants : les enfants sont copiés sous un autre élément", async () => {
-    const s = await scene(PARENTED);
+    const s = await scene(PARENTED, order);
     expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
       deleted: ["blockGroup de x", "blockContainer x1", "paragraph de x1"],
       created: ["blockGroup de x", "blockContainer x1", "paragraph de x1"],
@@ -720,7 +629,7 @@ describe("ce que chaque geste écrit dans le document", () => {
   });
 
   test("Tab : une copie au même id sous le bloc d'au-dessus, l'original supprimé", async () => {
-    const s = await scene(W_FIRST);
+    const s = await scene(W_FIRST, order);
     expect(written(s.mona, () => tab(s.mona, "x"))).toEqual({
       deleted: ["blockContainer x", "paragraph de x"],
       created: ["blockGroup de w", "blockContainer x", "paragraph de x"],
@@ -729,7 +638,7 @@ describe("ce que chaque geste écrit dans le document", () => {
   });
 
   test("Maj+Tab : une copie au même id un niveau plus haut, l'original supprimé", async () => {
-    const s = await scene(W_PARENT);
+    const s = await scene(W_PARENT, order);
     expect(written(s.mona, () => shiftTab(s.mona, "x"))).toEqual({
       deleted: ["blockGroup de w", "blockContainer x", "paragraph de x"],
       created: ["blockContainer x", "paragraph de x"],
@@ -747,12 +656,13 @@ const FIXTURES = "crates/mementum-sync/tests/fixtures/moves";
 
 /**
  * Ce que rejoue le test de l'acteur, écrit par y-prosemirror depuis la même page de départ
- * (« Bloc X, Bloc Y, Bloc Z », identifiant de client `SEED`) : le glisser de X sous Z fait par
- * Mona (identifiant `MONA`), et la frappe de Tom (identifiant `TOM`) à la fin de X, ou de Y.
+ * (« Bloc X, Bloc Y, Bloc Z », identifiant de client 1) : le glisser de X sous Z fait par Mona
+ * (identifiant 2), et la frappe de Tom (identifiant 3) à la fin de X, ou de Y.
  */
 async function fixtureBytes(): Promise<Record<string, Uint8Array>> {
-  const s = await scene(XYZ);
-  const tomInY = await peer("Tom", TOM, s.base);
+  const order = ORDERS[0];
+  const s = await scene(XYZ, order);
+  const tomInY = await peer("Tom", order.tom, s.base);
   expect(s.quiet && tomInY.writes.length === 0, "rien d'écrit à l'ouverture").toBe(true);
   drag(s.mona, "x", { under: "z" });
   typeAtEnd(s.tom, "x", TYPED);
@@ -763,22 +673,6 @@ async function fixtureBytes(): Promise<Record<string, Uint8Array>> {
     "tom-types-in-x.bin": outgoing(s.tom)!,
     "tom-types-in-y.bin": outgoing(tomInY)!,
   };
-}
-
-type Fs = {
-  readFile(path: string): Promise<Uint8Array>;
-  writeFile(path: string, data: Uint8Array): Promise<void>;
-  mkdir(path: string, options: { recursive: true }): Promise<unknown>;
-};
-type Path = { dirname(path: string): string; join(...parts: string[]): string };
-type Url = { fileURLToPath(url: string): string };
-
-/**
- * Un module de Node, chargé à l'exécution : Vitest tourne sous Node, mais le code de `src` est
- * typé sans les types de Node (`tsconfig.json`).
- */
-async function nodeModule<T>(name: string): Promise<T> {
-  return (await import(/* @vite-ignore */ name)) as T;
 }
 
 // `EXPORT_FIXTURES=1 corepack pnpm -C apps/web exec vitest run src/editor/blockMoves.test.ts`
@@ -796,6 +690,6 @@ test("les octets du test de l'acteur sont ceux qu'écrit y-prosemirror", async (
   }
   for (const [name, data] of Object.entries(bytes)) {
     const committed = await fs.readFile(path.join(dir, name));
-    expect([...committed], `${name} (EXPORT_FIXTURES=1 le réécrit)`).toEqual([...data]);
+    expect([...data], `${name} (EXPORT_FIXTURES=1 le réécrit)`).toEqual([...committed]);
   }
 });
