@@ -101,6 +101,19 @@ async fn heard(client: &Client, send: impl FnOnce()) {
     .await;
 }
 
+/// Attend que `client` voie le texte `expected` dans la page. Ce qu'un autre a écrit lui
+/// parvient par la diffusion, un peu après que le serveur l'a traité : rien ne dit qu'il l'a
+/// déjà quand l'auteur a reçu sa réponse. Or [`types`] tape à la fin du texte que le client
+/// voit : s'il lui manque la frappe d'un autre, les deux sont faites au même endroit, et leur
+/// ordre dans la page dépend alors des identifiants de client, tirés au hasard (Ruling R343).
+async fn sees(client: &Client, expected: &str) {
+    until(
+        &format!("le client n'a pas reçu « {expected} »"),
+        async || text(&client.blocks()) == expected,
+    )
+    .await;
+}
+
 async fn advance(by: Duration) {
     tokio::time::advance(by).await;
 }
@@ -185,9 +198,13 @@ async fn burst_shorter_than_the_interval_is_one_version_at_stop() {
     let f = Fixture::new(config()).await;
     let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
     let (a, b) = (connect(&f, alice).await, connect(&f, bob).await);
+    let mut typed_so_far = String::new();
     for i in 0..12 {
         let (client, typed) = if i % 2 == 0 { (&a, "a") } else { (&b, "b") };
+        // Chacun tape à la suite de ce que l'autre vient d'écrire : il l'a d'abord reçu.
+        sees(client, &typed_so_far).await;
         types(client, typed).await;
+        typed_so_far.push_str(typed);
         advance(Duration::from_secs(10)).await;
     }
     assert!(
@@ -222,7 +239,9 @@ async fn long_session_cuts_a_version_before_the_write_that_follows_the_interval(
     types(&a, "B").await;
     assert!(versions(&f).await.is_empty(), "neuf minutes : pas encore");
     advance(Duration::from_secs(120)).await;
-    // Onze minutes après la première écriture non versionnée.
+    // Onze minutes après la première écriture non versionnée. Bob tape à la suite de ce
+    // qu'Alice a écrit : il l'a d'abord reçu.
+    sees(&b, "AB").await;
     types(&b, "C").await;
 
     let kept = versions(&f).await;
@@ -408,8 +427,16 @@ async fn restore_cuts_a_version_of_what_it_replaces() {
     assert_eq!(version_blocks(&f, first).await, first_blocks);
 
     // Une écriture, puis une restauration : la page a changé, ce qu'elle remplace est gardé.
+    // L'observatrice tape dans le contenu restauré : elle l'a d'abord reçu (sinon sa frappe
+    // irait dans un bloc que la restauration a remplacé, et serait perdue).
+    until(
+        "le contenu restauré n'est pas arrivé par la synchro",
+        async || observer.blocks() == replaced,
+    )
+    .await;
     types(&observer, "Quatre").await;
     let changed = f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(text(&changed), "UnTroisQuatre\nDeux", "sa frappe y est");
     f.hub
         .restore_version(f.page, first, Some(bob))
         .await
@@ -580,7 +607,9 @@ async fn restoring_what_the_page_already_has_changes_nothing() {
 }
 
 /// La connexion est encore servie : une resynchronisation reçoit sa réponse. Elle passe
-/// derrière tout ce que l'acteur a diffusé avant.
+/// derrière tout ce que l'acteur avait diffusé avant qu'elle parte (ici, ce qu'aurait diffusé
+/// une demande du hub que le test a attendue) ; pas derrière ce qu'il diffuse pendant que la
+/// connexion attend sa réponse.
 async fn still_open(client: &Client) -> bool {
     heard(client, || {}).await;
     !client.is_closed()
