@@ -17,9 +17,21 @@
 // page à la corbeille) ne peut plus partir (R210) : il n'est pas montré comme le titre de la
 // page. Le champ revient au titre du serveur, et le texte tapé attend dans un message sous le
 // champ (R257, M9). Quand la page redevient modifiable, le message le propose (« Reprendre ce
-// titre ») : repris, il est dans le champ comme une saisie, et part comme elle ; jamais seul.
-// « Écarter » le jette. Le message part aussi quand la page prend ce titre (l'envoi en route a
-// abouti, ou quelqu'un d'autre l'a donné).
+// titre ») : repris, il est dans le champ comme une saisie, et part comme elle. « Écarter » le
+// jette. Le message part aussi quand la page prend ce titre (l'envoi en route a abouti, ou
+// quelqu'un d'autre l'a donné).
+//
+// Ce texte ne part donc que repris, à une limite près (R339) : l'envoi qui le portait peut
+// encore l'enregistrer. Un envoi en route sur le réseau aboutit quand il aboutit. Et un titre
+// qui attendait le retour du compte repart à ce retour si la page est alors modifiable, même
+// passée en lecture seule puis revenue pendant l'attente : il est enregistré sans avoir été
+// repris, et remplace un renommage fait ailleurs entre-temps. Ce composant, pris seul, le ferait
+// même après « Écarter ». Presque théorique : pendant toute l'attente, la fenêtre de connexion
+// rend la page inerte (on n'y clique ni « Écarter » ni « Rouvrir la page »), sa fermeture est ce
+// qui fait repartir l'envoi, et l'onglet n'apprend rien de la page sans session. Il faut que la
+// session soit rouverte depuis un autre onglet du navigateur, puis que la page aille à la
+// corbeille et en revienne (la seule lecture seule qui se défait sans geste d'ici), le tout
+// avant que le compte soit relu dans cet onglet.
 import type { PageNode } from "@mementum/protocol";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiError, isSessionLost, MAX_TITLE_CHARS, titleLength, updatePage } from "../api";
