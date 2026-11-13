@@ -16,8 +16,9 @@
 //! voit pas la page n'apprend pas qu'une version existe, et qui la voit n'apprend rien des
 //! versions d'une autre.
 //!
-//! **Restaurer** suit l'ordre de `PUT /mmd` (Ruling R89) : premier contrôle, chargement de la
-//! page, second contrôle des droits, puis la commande à l'acteur, qui coupe la version
+//! **Restaurer** suit l'ordre de `PUT /mmd` (Ruling R89) : premier contrôle, puis le verrou des
+//! écritures du serveur sur la page (Ruling R200, `page_writes.rs`), chargement de la page,
+//! second contrôle des droits, puis la commande à l'acteur, qui coupe la version
 //! `before_restore` et écrit les blocs de la version sans rien laisser passer entre les deux
 //! (`Hub::restore_version`). L'écriture est celle d'un client ou de `PUT /mmd` : journal,
 //! diffusion aux connexions, qui reçoivent aussi la trame `{"type":"versions"}` ; elle va au
@@ -96,13 +97,23 @@ pub(crate) async fn restore(
         return Err(ApiError::page_not_found());
     }
     permit(&access, Action::Edit)?;
-    // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise
-    // l'écriture (Ruling R89). Entre lui et la restauration, il ne reste que l'envoi d'une
-    // commande à l'acteur déjà chargé.
-    state.hub.load_page(id).await?;
-    state.node_access(&user, id, Action::Edit).await?;
-    let (hub, by) = (state.hub.clone(), user.id);
-    to_completion(async move { Ok(hub.restore_version(id, version, Some(by)).await?) }).await?;
+    // Ruling R200 : une écriture du serveur à la fois par page. Le verrou se prend après le
+    // premier contrôle, et ce qui suit va au bout, verrou tenu, même si le client coupe : la
+    // requête suivante ne relit ses droits qu'une fois celle-ci écrite.
+    let write = state.page_writes.lock(id).await;
+    to_completion(async move {
+        let _write = write;
+        // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise
+        // l'écriture (Ruling R89). Entre lui et la restauration, il ne reste que l'envoi
+        // d'une commande à l'acteur déjà chargé.
+        state.hub.load_page(id).await?;
+        state.node_access(&user, id, Action::Edit).await?;
+        Ok(state
+            .hub
+            .restore_version(id, version, Some(user.id))
+            .await?)
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

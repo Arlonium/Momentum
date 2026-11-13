@@ -440,6 +440,7 @@ pub(crate) mod tests {
             access: Arc::new(AccessCache::new(ACCESS_CACHE_NODES)),
             inputs: Arc::new(InputsCache::new(INPUTS_CACHE_UNITS)),
             events_ping: crate::EVENTS_PING,
+            page_writes: Arc::default(),
         }
     }
 

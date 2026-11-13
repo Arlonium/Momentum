@@ -579,7 +579,10 @@ pub(crate) async fn get_mmd(
 /// refus viennent d'abord ; puis une fois la page chargée, juste avant d'écrire. Charger une
 /// page que personne n'a ouverte peut durer : un droit retiré pendant ce temps n'écrit plus.
 /// Entre le second contrôle et l'écriture, il ne reste que l'envoi d'une commande à l'acteur
-/// déjà chargé (la fenêtre du Ruling R74).
+/// déjà chargé (la fenêtre du Ruling R74). Une écriture du serveur à la fois par page (Ruling
+/// R200, `page_writes.rs`) : le verrou se prend une fois le corps lu, et se rend une fois
+/// l'acteur revenu ; des requêtes envoyées d'un coup ne passent donc plus toutes leur second
+/// contrôle avant qu'un droit retiré les arrête.
 pub(crate) async fn put_mmd(
     State(state): State<AppState>,
     user: AuthUser,
@@ -604,11 +607,19 @@ pub(crate) async fn put_mmd(
     let mut blocks = parse(text)?;
     registered_props_only(&blocks)?;
     unknown_not_foreign(&mut blocks);
-    // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise
-    // l'écriture.
-    state.hub.load_page(id).await?;
-    state.node_access(&user, id, Action::Edit).await?;
-    state.hub.write_blocks(id, blocks, Some(user.id)).await?;
+    // Ruling R200 : une écriture du serveur à la fois par page, comme la restauration d'une
+    // version. Le verrou se prend une fois le corps lu, et ce qui suit va au bout, verrou
+    // tenu, même si le client coupe.
+    let write = state.page_writes.lock(id).await;
+    to_completion(async move {
+        let _write = write;
+        // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise
+        // l'écriture.
+        state.hub.load_page(id).await?;
+        state.node_access(&user, id, Action::Edit).await?;
+        Ok(state.hub.write_blocks(id, blocks, Some(user.id)).await?)
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

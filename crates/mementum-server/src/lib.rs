@@ -29,7 +29,7 @@
 //! | `POST /api/v1/pages/{id}/restore` | `edit` | [`PageNode`] : la page et son sous-arbre reviennent (sans effet hors corbeille) ; `409 parent_trashed` si une page parente y est |
 //! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon ; `409 not_trashed` si ni elle ni une page parente n'est à la corbeille (Ruling R65) |
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
-//! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait ; droits revérifiés une fois la page chargée (Ruling R89) |
+//! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` ; `422 invalid_mmd` (avec `line`) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait ; droits revérifiés une fois la page chargée (Ruling R89) ; une écriture du serveur à la fois par page, avec la restauration : chaque requête relit ses droits après la précédente, et va au bout même si le client coupe (Ruling R200) |
 //! | `GET /api/v1/pages/{id}/access` | `full` (à la corbeille aussi) | `PageAccess` : l'accès général effectif et son plancher (celui d'une page parente), les comptes nommés sur la page ou ses ancêtres, les invitations de la page |
 //! | `PUT /api/v1/pages/{id}/access/general` | `full`, et le rôle `member` ou plus (un invité : `403`, R85) | `PageAccess` (`204` seulement si un autre changement ôte `full` à l'appelant entre le commit et la relecture) ; `level: null` retire la ligne `members` de la page ; qui restreint l'accès général (ligne retirée, ou baissée) y garde `full` : sa ligne `(user:<lui>, full)` est posée dans la même transaction s'il ne le garde pas autrement, et il figure dans la réponse (R122) ; le plancher est l'accès qu'une page parente donne (R93) : au plancher, la ligne propre part : ce `PUT` n'en laisse pas de redondante ; `409 inherited_access` sous lui, ou pour `null` sur une page sans ligne propre qui a un plancher (sans plancher, `null` sans ligne propre ne change rien) |
 //! | `PUT /api/v1/pages/{id}/access/users/{userId}` | `full` (un invité aussi, R86) | `PageAccess` (`204` si l'appelant n'a plus `full`) ; `404` si le compte n'a aucun rôle dans l'espace ; `409 last_full_access` |
@@ -44,7 +44,7 @@
 //! | `PUT`, `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}/reactions/{emoji}` | `comment` | `Comment` : la réaction de la personne posée ou retirée (on ne retire que la sienne ; déjà dans cet état, rien ne change) ; `422 invalid_emoji` |
 //! | `GET /api/v1/pages/{id}/versions` | `read` (à la corbeille aussi) | `Version[]` : les versions de la page, la plus récente d'abord, cent au plus, chacune avec sa date, sa raison (`periodic`, `closing`, `before_restore`) et les comptes qui l'ont modifiée depuis la version d'avant (identifiant et nom, jamais l'adresse) (Ruling R135) |
 //! | `GET /api/v1/pages/{id}/versions/{versionId}/state` | `read` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) de la version, tel qu'il a été gardé ; une version qui n'est pas de cette page, inconnue ou mal nommée reçoit la réponse d'une page introuvable, comme sur la route suivante |
-//! | `POST /api/v1/pages/{id}/versions/{versionId}/restore` | `edit` | `204` : une version `before_restore` garde ce qui est remplacé si aucune version ne le garde déjà (Ruling R190), puis les blocs de la version sont écrits par-dessus le contenu, identifiants compris, comme une écriture ordinaire (la version que la page a déjà comme contenu ne change rien) ; une version qui n'est pas de la page : `404`, avant `409 trashed` (Ruling R186) ; droits revérifiés une fois la page chargée (Ruling R89) ; `500 internal` pour un état gardé illisible, la page intacte |
+//! | `POST /api/v1/pages/{id}/versions/{versionId}/restore` | `edit` | `204` : une version `before_restore` garde ce qui est remplacé si aucune version ne le garde déjà (Ruling R190), puis les blocs de la version sont écrits par-dessus le contenu, identifiants compris, comme une écriture ordinaire (la version que la page a déjà comme contenu ne change rien) ; une version qui n'est pas de la page : `404`, avant `409 trashed` (Ruling R186) ; droits revérifiés une fois la page chargée (Ruling R89), une écriture du serveur à la fois par page, comme `PUT …/mmd` (Ruling R200) ; `500 internal` pour un état gardé illisible, la page intacte |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
 //! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
@@ -160,6 +160,7 @@ mod error;
 mod events;
 mod guard;
 mod inputs_cache;
+mod page_writes;
 pub mod types;
 
 mod routes {
@@ -239,6 +240,9 @@ pub(crate) struct AppState {
     inputs: Arc<inputs_cache::InputsCache>,
     /// Intervalle des pings du canal de l'espace (`events.rs`).
     events_ping: Duration,
+    /// Une écriture du serveur à la fois par page : `PUT /mmd` et la restauration d'une
+    /// version (`page_writes.rs`, Ruling R200).
+    page_writes: Arc<page_writes::PageWrites>,
 }
 
 /// Millisecondes Unix.
@@ -386,6 +390,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
             inputs_cache::INPUTS_CACHE_UNITS,
         )),
         events_ping: cfg.events_ping,
+        page_writes: Arc::default(),
     };
     Ok((router(state), store, hub))
 }
