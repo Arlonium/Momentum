@@ -175,6 +175,10 @@ pub mod auth;
 pub mod config;
 mod error;
 mod events;
+// Le dépôt des fichiers (Task S3) n'a encore d'appelant que ses tests : la Task S4a le branche
+// sur les routes, et retire cet attribut.
+#[cfg_attr(not(test), allow(dead_code))]
+mod files;
 mod guard;
 mod inputs_cache;
 mod page_writes;

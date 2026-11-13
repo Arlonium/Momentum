@@ -33,8 +33,10 @@ serde_path_to_error.workspace = true
 # SHA-256 des jetons : la base ne garde que leur hachage.
 sha2.workspace = true
 # `sync` : une inscription à la fois, et les calculs Argon2 chacun leur tour. `time` : le délai
-# laissé à une connexion de synchro refusée pour recevoir sa trame de fermeture.
-tokio = { workspace = true, features = ["net", "signal", "sync", "time"] }
+# laissé à une connexion de synchro refusée pour recevoir sa trame de fermeture. `fs` et
+# `io-util` : le dépôt des fichiers s'écrit et se lit en `async`, sans appel bloquant sur les fils
+# qui relaient les frappes (Ruling R247).
+tokio = { workspace = true, features = ["fs", "io-util", "net", "signal", "sync", "time"] }
 tracing.workspace = true
 ts-rs.workspace = true
 uuid.workspace = true
