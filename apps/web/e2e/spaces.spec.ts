@@ -288,6 +288,11 @@ test("space_without_a_role_is_not_found", async ({ browser }) => {
   await expect(missing).toBeVisible();
   await expect(b).toHaveURL(`${BASE_URL}/s/${UNKNOWN_ID}`);
   await expect(spaceSwitcher(b, own.name)).toBeVisible();
+  // L'écran se compare une fois la barre latérale chargée : lu pendant qu'elle dit encore
+  // « Chargement… », le texte de référence différait des suivants, pris un peu plus tard
+  // (échec vu trois fois le 2026-11-13, sous la charge de plusieurs suites lancées de front).
+  const loading = b.locator(".mm-side-note", { hasText: "Chargement…" });
+  await expect(loading).toHaveCount(0);
   const unknown = await b.locator("body").innerText();
 
   // Un espace où B n'a aucun rôle : exactement le même écran, sans rien de cet espace, pour
@@ -296,6 +301,7 @@ test("space_without_a_role_is_not_found", async ({ browser }) => {
     await b.goto(path);
     await expect(missing).toBeVisible();
     await expect(b).toHaveURL(`${BASE_URL}${path}`);
+    await expect(loading).toHaveCount(0);
     expect(await b.locator("body").innerText()).toBe(unknown);
   }
   expect(unknown).not.toContain(foreign.name);
