@@ -4,8 +4,8 @@
 //!
 //! | Route | Il faut | Réponse |
 //! |---|---|---|
-//! | `GET /api/v1/pages/{id}/versions` | `read` (à la corbeille aussi) | [`Version`]`[]`, la plus récente d'abord ; cent au plus |
-//! | `GET …/versions/{versionId}/state` | `read` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) tel qu'il a été gardé |
+//! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi) | [`Version`]`[]`, la plus récente d'abord ; cent au plus |
+//! | `GET …/versions/{versionId}/state` | `edit` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) tel qu'il a été gardé |
 //! | `POST …/versions/{versionId}/restore` | `edit` | `204` ; `409 trashed` |
 //!
 //! **Refus**, dans l'ordre des commentaires (Rulings R168 et R186, écrit en tête de
@@ -26,8 +26,9 @@
 //! fait rien, et répond `204`. Un état gardé que le serveur ne relit plus (base abîmée) répond
 //! `500 internal`, sans toucher à la page.
 //!
-//! Le niveau de lecture est celui du plan : l'historique se lit dès « Peut lire », si bien que
-//! quelqu'un à qui l'on partage une page lit ce qu'elle portait avant le partage.
+//! L'historique se lit à partir de « Peut modifier » (Ruling R203 ; le plan disait « Peut
+//! lire ») : quelqu'un à qui l'on partage une page en lecture ne lit pas ce qu'elle portait
+//! avant le partage.
 
 use axum::Json;
 use axum::extract::rejection::PathRejection;
@@ -55,7 +56,7 @@ pub(crate) async fn list(
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Vec<Version>>, ApiError> {
     let id = page_id(path)?;
-    state.node_access(&user, id, Action::Read).await?;
+    may_read_history(&state, &user, id).await?;
     let versions = state.store.list_versions(id).await?;
     Ok(Json(versions.iter().map(version).collect()))
 }
@@ -67,7 +68,7 @@ pub(crate) async fn state(
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let (id, raw) = version_path(path)?;
-    state.node_access(&user, id, Action::Read).await?;
+    may_read_history(&state, &user, id).await?;
     let version = version_id(&raw)?;
     let kept = state
         .store
@@ -115,6 +116,19 @@ pub(crate) async fn restore(
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Lire l'historique demande « Peut modifier » (Ruling R203) : `404` pour une page qu'on ne voit
+/// pas, `403` en dessous du niveau ; la corbeille n'y change rien (`permit_level`), si bien que
+/// qui peut modifier la page lit encore son historique à la corbeille. Un lecteur ne lit pas ce
+/// que la page portait avant qu'on la lui partage : un texte effacé (un mot de passe collé par
+/// erreur) reste dans les versions, et rien ne permet d'en retirer une.
+async fn may_read_history(state: &AppState, user: &AuthUser, id: Uuid) -> Result<(), ApiError> {
+    let (_, access, _) = state
+        .seen_node(user, id)
+        .await?
+        .ok_or_else(ApiError::page_not_found)?;
+    permit_level(&access, Action::Edit)
 }
 
 /// La page et l'identifiant (encore à lire) de la version d'un chemin `…/versions/{versionId}…`.

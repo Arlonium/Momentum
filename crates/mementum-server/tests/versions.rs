@@ -43,10 +43,10 @@ fn blocks_of(state: &[u8]) -> Vec<Block> {
 /// Les niveaux d'accès, du plus bas au plus haut.
 const LEVELS: [Level; 4] = [Level::Read, Level::Comment, Level::Edit, Level::Full];
 
-/// Lire les versions et leur état se peut dès « Peut lire », corbeille comprise ; restaurer
-/// demande « Peut modifier » (`403` en dessous), et une page hors de la corbeille (`409
-/// trashed`, après le refus de niveau). Une version se lit sans l'adresse de personne : son
-/// identifiant, sa date, sa raison et ses auteurs (identifiant et nom).
+/// Lire les versions et leur état demande « Peut modifier » (Ruling R203 ; `403` en dessous,
+/// avant même de chercher la version), corbeille comprise ; restaurer aussi, et une page hors de
+/// la corbeille (`409 trashed`, après le refus de niveau). Une version se lit sans l'adresse de
+/// personne : son identifiant, sa date, sa raison et ses auteurs (identifiant et nom).
 #[tokio::test]
 async fn version_routes_follow_the_levels() {
     let t = open_app().await;
@@ -74,6 +74,19 @@ async fn version_routes_follow_the_levels() {
             }
 
             let listed = tom.browser.get(&versions_uri(page)).await;
+            if level < Level::Edit {
+                // Un lecteur ne lit pas ce que la page portait avant qu'on la lui partage.
+                listed.assert_error(StatusCode::FORBIDDEN, "forbidden");
+                for version in [version.to_string(), Uuid::now_v7().to_string()] {
+                    let kept = tom.browser.get(&state_uri(page, version)).await;
+                    kept.assert_error(StatusCode::FORBIDDEN, "forbidden");
+                }
+                let restored = tom.browser.post_empty(&restore_uri(page, version)).await;
+                restored.assert_error(StatusCode::FORBIDDEN, "forbidden");
+                let after = team.olga.browser.get(&versions_uri(page)).await.json();
+                assert_eq!(after.as_array().unwrap().len(), 1, "{what} : {after}");
+                continue;
+            }
             listed.assert_status(StatusCode::OK);
             let listed = listed.json();
             let mut authors = vec![
@@ -109,23 +122,16 @@ async fn version_routes_follow_the_levels() {
             assert_eq!(kept.headers["x-content-type-options"], "nosniff", "{what}");
 
             let restored = tom.browser.post_empty(&restore_uri(page, version)).await;
-            match (level >= Level::Edit, trashed) {
-                (false, _) => {
-                    restored.assert_error(StatusCode::FORBIDDEN, "forbidden");
-                }
-                (true, true) => {
-                    restored.assert_error(StatusCode::CONFLICT, "trashed");
-                }
-                (true, false) => {
-                    restored.assert_status(StatusCode::NO_CONTENT);
-                    let mmd = team.olga.get_mmd(&page.to_string()).await;
-                    assert_eq!(mmd.text(), "Avant\n", "{what}");
-                }
+            if trashed {
+                restored.assert_error(StatusCode::CONFLICT, "trashed");
+            } else {
+                restored.assert_status(StatusCode::NO_CONTENT);
+                let mmd = team.olga.get_mmd(&page.to_string()).await;
+                assert_eq!(mmd.text(), "Avant\n", "{what}");
             }
             let after = tom.browser.get(&versions_uri(page)).await.json();
             let count = after.as_array().unwrap().len();
-            let restored = level >= Level::Edit && !trashed;
-            assert_eq!(count, 1 + usize::from(restored), "{what} : {after}");
+            assert_eq!(count, 1 + usize::from(!trashed), "{what} : {after}");
         }
     }
 }
@@ -308,4 +314,57 @@ async fn missing_version_comes_before_trashed() {
     }
     let reply = mona.browser.post_empty(&restore_uri(binned, ours)).await;
     reply.assert_error(StatusCode::CONFLICT, "trashed");
+}
+
+/// Le scénario de la relecture finale (S5), par le vrai chemin : Olga écrit un secret dans une
+/// page privée, puis le récrit ; une version le garde. Elle partage la page en lecture avec
+/// Gina, une invitée : Gina ne lit ni la liste des versions ni leur état (`403`, Ruling R203).
+/// Olga, elle, les lit.
+#[tokio::test]
+async fn a_reader_does_not_read_what_was_erased_before_sharing() {
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = mementum_server::SignupMode::Open;
+        cfg.version_every = std::time::Duration::from_secs(1);
+    })
+    .await;
+    let team = Team::new(&t).await;
+    let (olga, gina) = (&team.olga, &team.gina);
+    let page = team.page(None, "Privée", &[user(olga, Level::Full)]).await;
+    let id = page.to_string();
+    olga.put_mmd(&id, "Mot de passe du coffre : hunter2\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    olga.put_mmd(&id, "Rien à voir\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let listed = olga.browser.get(&versions_uri(page)).await;
+    listed.assert_status(StatusCode::OK);
+    let version = uuid(&listed.json()[0]["id"]);
+    let kept = olga.browser.get(&state_uri(page, version)).await;
+    kept.assert_status(StatusCode::OK);
+    assert_eq!(
+        mementum_md::block_text(&blocks_of(&kept.body)[0]),
+        "Mot de passe du coffre : hunter2"
+    );
+
+    team.store
+        .set_grant(
+            page,
+            mementum_acl::Grant {
+                subject: mementum_acl::Subject::User(gina.id),
+                level: Level::Read,
+            },
+        )
+        .await
+        .unwrap();
+    gina.get_mmd(&id).await.assert_status(StatusCode::OK);
+    gina.browser
+        .get(&versions_uri(page))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    gina.browser
+        .get(&state_uri(page, version))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
 }
