@@ -8,7 +8,7 @@ Ce document est fait pour reprendre l'exécution du plan là où elle s'est arr�
 - Essai du bloc déplacé (Task 13) : [`2026-11-12-p1-lot3-essai-deplacement.md`](2026-11-12-p1-lot3-essai-deplacement.md).
 - Plan de la partie B, écrit, ni relu ni exécuté : [`docs/superpowers/plans/2026-11-12-p1-lot3b-blocs-riches-organisation.md`](../plans/2026-11-12-p1-lot3b-blocs-riches-organisation.md).
 
-**État écrit le 2026-11-12 au soir : Lenny a mis le travail en pause.** Tout ce qui était fini est commité et poussé ; ce qui était en cours est décrit ici et dans le fichier de la relecture finale. **Mettre ce fichier à jour à chaque tâche close, et le supprimer à la clôture de la partie A**, avec celui de la relecture finale (le registre et `docs/REPRISE.md` suffiront alors).
+**État écrit le 2026-11-12 au soir, à la pause demandée par Lenny, puis tenu à jour depuis la reprise du 2026-11-13** (section « Depuis la reprise », juste après le tableau des tâches). Ce qui était en cours à la pause est décrit plus bas et dans le fichier de la relecture finale. **Mettre ce fichier à jour à chaque tâche close, et le supprimer à la clôture de la partie A**, avec celui de la relecture finale (le registre et `docs/REPRISE.md` suffiront alors).
 
 ## Comment l'exécution est menée (R140)
 
@@ -21,7 +21,7 @@ Une session « contrôleur » exécute le plan tâche par tâche, directement su
 
 Les dossiers de travail du contrôleur (briefs, rapports, paquets de relecture) sont sous `.superpowers/sdd/`, ignoré par git : ils ne sont pas dans le dépôt. Tout ce qu'il faut pour reprendre est ici, dans le fichier de la relecture finale, au registre et dans l'historique git.
 
-**Numéros des Rulings.** Le registre va jusqu'à R211, mais des plages sont réservées, pour que des travaux menés de front ne se croisent pas : **R198 à R209** à la piste S de la relecture finale (aucun pris ; R198 et R199 prévus pour S2), **R210 à R219** à la piste C (R210 et R211 pris), **R220 à R239** à la Task 13 (R220 à R222 pris par son découpage, écrits dans le plan, pas encore au registre), **R240 à R257** au plan de la partie B. Une décision neuve hors de ces travaux prend R258 ou plus.
+**Numéros des Rulings.** Le registre va jusqu'à R211, mais des plages sont réservées, pour que des travaux menés de front ne se croisent pas : **R198 à R209** à la piste S de la relecture finale (aucun pris ; R198 et R199 prévus pour S2), **R210 à R219** à la piste C (R210 et R211 pris), **R220 à R239** à la Task 13 (R220 à R222 pris par son découpage, écrits dans le plan, pas encore au registre), **R240 à R257** au plan de la partie B, dont l'exécution prendra **R260 à R349**. Une décision neuve hors de ces travaux prend R258 ou R259, puis R350 et plus.
 
 Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du dépôt (`LnYkLl`), sans aucune ligne d'attribution d'outil ; `main` se pousse au fil du travail (accord de Lenny du 2026-11-12 pour le lot 3), après contrôle, jamais en force ; aucun test sur les ports 5175 et 8090 ni sur `data/instance` ; aucun budget relâché ; **la migration `0003` a changé plusieurs fois (R139, R191, R197) et changera encore (Task 13b : la table `block_moves` part ; partie B, R243) : aucun binaire de ce lot n'ouvre les données d'une instance que quelqu'un regarde avant la clôture** (une base ouverte par un binaire intermédiaire refuse de démarrer après un changement de `0003`).
 
@@ -46,6 +46,17 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 | Relecture finale | passes sécurité et intégration rendues ; **vague de correction arrêtée à 2 constats sur 16** ; passe documentation à faire | — | R210, R211 |
 
 Dernières mesures (poste de Lenny, 2026-11-12, à la tête poussée, **sans clone neuf**) : `cargo fmt` et `cargo clippy -D warnings` propres ; 681 tests Rust verts (les ignorés : les mesures en release et les tests de la limite R39) ; **462 tests du client verts et 12 marqués `test.fails`** (les scénarios du bloc déplacé), typecheck propre, relancés à la pause ; licences npm propres (aucun paquet ajouté depuis) ; la dernière suite complète de bout en bout date de la Task 11 : 148 parcours verts et 2 marqués `fixme` (ceux de la Task 12), **non relancée depuis les deux correctifs du client** (`8a8ced1`, `ddfaf93`) ; budgets du navigateur relancés à la Task 11 : page de 1 000 blocs à 142 ms au p95 (budget 300), page de 10 000 blocs en 1,2 s (budget 3 s) ; côté serveur, la frappe qui déclenche la coupe d'une version reste vue par un autre en 39 ms au p95 (budget 150). Le code Rust n'a pas changé depuis `2e03359`.
+
+## Depuis la reprise (2026-11-13)
+
+Quatre travaux ont été relancés de front, sans fichier commun. L'état constat par constat est tenu dans le [fichier de la relecture finale](2026-11-12-p1-lot3-relecture-finale.md).
+
+- **Piste C de la relecture finale** : C2, C3, C4 faits ; parts clientes de C6, C7, C8 faites contre un serveur simulé (`abdffee`, `9151e88`, `29ab75a`, `973b78e`, `b3a4c36`, `38149d4` ; R212 à R217). Vitest : 497 verts et les 12 échecs attendus. **En relecture indépendante.** Restent, après la piste S : les e2e de C6, C7, C8, puis C9.
+- **Piste S** : S2 fait (`414df88`, R198 et R199) ; S1 en cours ; puis S3, S5, S4, S6, S7.
+- **Task 13a** : en cours, dans un atelier git à part (un agent neuf ; ses Rulings, R223 à R229, viennent dans son rapport et seront portés au registre à la reprise sur `main`).
+- **Plan de la partie B** : relu par un relecteur indépendant (7 constats bloquants, 12 importants, 17 mineurs ; verdict « exécutable après corrections ») ; **en cours de correction** dans le fichier du plan. Décidé par le contrôleur à cette occasion, à confirmer par le propriétaire : les tables de la partie B vont dans une migration `0004` (pas dans `0003`) ; un favori n'avance pas la version de l'espace ; une invitation n'est pas consommée si le compte a déjà ce niveau par un autre chemin ; la copie d'une sous-page dont on ne peut pas modifier la page parente va dans « Privé » ; mentionner une page en montre le titre à qui lit la mention (forme de la conception) ; pas de quota de fichiers avant le lot 7.
+
+Règle ajoutée pour les agents qui commitent dans le même arbre : `git commit -m "…" -- <chemins>`, pour ne rien emporter de ce qu'un autre a mis à l'index.
 
 ## Ce qui était en cours à la pause
 

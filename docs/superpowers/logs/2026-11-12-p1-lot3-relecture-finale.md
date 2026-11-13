@@ -1,6 +1,6 @@
 # Lot 3, partie A : relecture finale, constats et vague de correction
 
-Ce document garde ce que la relecture finale de la partie A a trouvé, ce qui a été décidé pour chaque constat, et **où la vague de correction s'est arrêtée** quand Lenny a mis le travail en pause, le 2026-11-12 au soir. Il est fait pour reprendre la vague sans rien savoir de la session qui l'a lancée. À supprimer à la clôture de la partie A, avec le fichier d'[avancement](2026-11-12-p1-lot3-avancement.md) : le registre gardera les décisions.
+Ce document garde ce que la relecture finale de la partie A a trouvé, ce qui a été décidé pour chaque constat, et **où en est la vague de correction**. Lenny a mis le travail en pause le 2026-11-12 au soir ; il a repris le 2026-11-13, et le tableau d'état ci-dessous est tenu à jour depuis. Il est fait pour reprendre la vague sans rien savoir de la session qui l'a lancée. À supprimer à la clôture de la partie A, avec le fichier d'[avancement](2026-11-12-p1-lot3-avancement.md) : le registre gardera les décisions.
 
 ## Ce qui a été relu
 
@@ -8,30 +8,32 @@ Deux passes ont relu tout ce qui a changé depuis `6b6f104` (tâches 1 à 11) : 
 
 La troisième passe, **documentation contre le code**, n'est pas faite : elle vient après la Task 14.
 
-## État à la pause
+## État (mis à jour le 2026-11-13, en cours de vague)
 
 | Constat | Sujet | État |
 |---|---|---|
-| S1 | une écriture du serveur à la fois par page (restauration, `PUT /mmd`) | pas commencé |
-| S2 | suppression sur des horloges que la page n'a pas encore | **en cours** : tests écrits, jamais compilés ; correctif conçu, pas écrit (voir « Reprendre S2 ») |
+| S1 | une écriture du serveur à la fois par page (restauration, `PUT /mmd`) | en cours |
+| S2 | suppression sur des horloges que la page n'a pas encore | **fait**, `414df88`, R198 et R199 ; à relire |
 | S3 | `PUT /mmd` garde l'identifiant des blocs inchangés | pas commencé |
 | S4 | plafonds des commentaires | pas commencé |
 | S5 | l'historique se lit à partir de « Peut modifier » | pas commencé |
 | S6 | le canal de l'espace redit sa version à chaque ping | pas commencé |
 | S7 | savoir si un bloc existe sans relire la page | pas commencé |
-| C1 | le titre n'envoie que ce qui a été tapé | **fait**, `8a8ced1`, R210 ; pas encore re-relu |
-| C2 | relire la liste après le retour du compte | pas commencé ; conception décidée (voir « Reprendre C2 ») |
-| C3 | schéma relu pour qui commente | pas commencé |
-| C4 | raccourci muet sous une fenêtre modale | pas commencé |
-| C5 | le brouillon de qui perd le droit d'écrire reste montré | **fait**, `ddfaf93`, R211 ; pas encore re-relu |
-| C6 | chien de garde du canal de l'espace | pas commencé (attend S6 pour l'e2e) |
-| C7 | « Historique » à partir de « Peut modifier » | pas commencé (suit S5) |
-| C8 | plafonds affichés | pas commencé (suit S4) |
+| C1 | le titre n'envoie que ce qui a été tapé | **fait**, `8a8ced1`, R210 ; en relecture |
+| C2 | relire la liste après le retour du compte | **fait**, `abdffee`, R212 ; en relecture |
+| C3 | schéma relu pour qui commente | **fait**, `9151e88`, R213 ; en relecture |
+| C4 | raccourci muet sous une fenêtre modale | **fait**, `29ab75a`, R214 ; en relecture |
+| C5 | le brouillon de qui perd le droit d'écrire reste montré | **fait**, `ddfaf93`, R211 ; en relecture |
+| C6 | chien de garde du canal de l'espace | **part cliente faite**, `973b78e`, R215, contre un serveur simulé ; e2e après S6 |
+| C7 | « Historique » à partir de « Peut modifier » | **part cliente faite**, `b3a4c36`, R216 et R217 ; l'e2e du lecteur est en `test.fixme`, à inverser après S5 |
+| C8 | plafonds affichés | **test fait**, `38149d4`, contre un refus simulé ; la conversion des codes est à retirer quand S4 aura régénéré les types |
 | C9 | sept parcours de bout en bout | pas commencé (après la piste S) |
 
-Ordre de travail prévu pour la piste S : S2, S1, S3, S5, S4, S6, S7.
+Ordre de travail de la piste S : S2, S1, S3, S5, S4, S6, S7.
 
-**Rien de la piste S n'est commité.** La piste C a trois commits (`8a8ced1`, `ddfaf93`, `a1b970c`), poussés ; aucun e2e n'a été relancé après eux (ceux qui remplissent le titre tapent avant Entrée et devraient garder leur sens : à vérifier avec la suite complète).
+À la reprise du 2026-11-13, les deux pistes ont été relancées de front. La piste C a rendu sa première part (Vitest : 497 verts et les 12 échecs attendus du bloc déplacé ; e2e `pages`, `comments`, `history`, `live-tree`, `auth`, `reload`, `sharing`, `trash`, `presence`, `keepalive` verts) ; elle est en relecture indépendante. Restent pour elle, quand la piste S aura rendu : les e2e de C6, C7 et C8 contre le vrai serveur, C9, puis la suite complète et les budgets.
+
+**Dans l'intervalle** (tant que S6 n'est pas sur `main`) : un onglet sur un espace calme ferme et rouvre son canal toutes les 45 s (une poignée de main, rien de relu). Tant que S5 n'y est pas : le client ne propose plus l'historique à un lecteur, que le serveur lui servirait encore.
 
 ## Règles de la vague (les deux pistes)
 
@@ -164,49 +166,9 @@ Les relecteurs ont aussi nommé, sans qu'ils soient retenus dans cette liste : u
 
 ---
 
-## Reprendre S2
+## S2 et C2, repris
 
-Rien n'est écrit dans le code de production. Les tests de l'implémenteur sont gardés dans [`2026-11-12-p1-lot3-piste-s-s2-tests.patch`](2026-11-12-p1-lot3-piste-s-s2-tests.patch) : à la racine, `git apply docs/superpowers/logs/2026-11-12-p1-lot3-piste-s-s2-tests.patch` (vérifié applicable sur `a1b970c`). **Aucun de ces tests n'a encore été compilé ni lancé** : la première chose à faire est de les voir rouges, et de corriger ce qui ne compile pas. Supprimer le fichier `.patch` du dépôt une fois S2 commité.
-
-Le patch touche trois fichiers de test :
-
-- `crates/mementum-sync/tests/common/raw.rs` : `write_var` et `deletion(client, clock, len)` (une mise à jour sans bloc qui supprime une plage) y passent, depuis `wire.rs`, pour servir aux deux fichiers.
-- `crates/mementum-sync/tests/wire.rs` : **un test change de sens** : `pending_deletion_is_still_written_and_relayed` (R181) devient `pending_deletion_is_held_neither_written_nor_relayed`. La suppression `(4242, 10, 3)` est retenue : ni écrite, ni relayée, rien en attente dans le document rechargé, connexion servie.
-- `crates/mementum-sync/tests/deletions.rs` (neuf), cinq tests :
-  1. `deletion_of_clocks_still_to_come_is_held_and_leaves_with_its_connection` : la sonde du relecteur, avec l'attente inverse. Tom n'est pas fermé, rien n'est écrit ni relayé ; après « deux », tout le monde lit « Alpha un deux ». Puis une plage de 4 unités, Tom fermé par `kick_user`, et Mona tape « trois » : rien n'est supprimé, le journal ne porte que les deux frappes de Mona.
-  2. `honest_deletion_ahead_of_what_it_deletes_waits_behind_it` : on envoie « deux » (un trou), puis l'effacement de « deux », puis « un ». Les trois passent dans l'ordre ; texte final « Alpha un ». Rouge attendu aujourd'hui par l'ordre : l'effacement passait le premier.
-  3. `deletion_aimed_at_the_server_client_does_not_empty_its_writes` : la variante sur le client du serveur. Après `write_mmd("Bonjour")`, tout le monde lit « Bonjour ». Rouge attendu : observatrice, arrivant et page rechargée vides.
-  4. `step_2_deleting_what_the_page_collected_is_not_held` : avec `compact_after_deletions: 1`, le texte de Mona est effacé puis compacté, l'acteur oublié puis rechargé. L'étape 2 de Tom, qui revient avec ce qu'il a tapé hors ligne, passe aussitôt. Une garde, sans doute verte aujourd'hui ; elle rougirait avec une règle fondée sur la présence de l'élément plutôt que sur le vecteur d'état.
-  5. `deletion_already_pending_in_a_stored_page_holds_nothing` : une suppression en attente est écrite au journal, l'acteur oublié. L'écho dans l'étape 2 d'un onglet n'est pas écrit (rouge attendu : la branche `has_pending_deletions` l'écrit), et une étape 2 qui porte ce qui a été tapé hors ligne passe aussitôt.
-
-**Ce que l'implémenteur a lu dans les sources de yrs 0.28.1**, et qui change le correctif :
-
-- `TransactionMut::apply_delete` : une plage passe en attente dès que sa fin dépasse `blocks.clock()` du client (la fin de son dernier bloc), ou si le client est inconnu. `get_state_vector` s'arrête au début d'un `Skip`. Juger sur le vecteur d'état est donc au moins aussi strict que yrs.
-- Les suppressions en attente ne s'appliquent que dans `apply_update`, jamais dans une transaction locale. Une écriture du serveur sur son propre client visé n'est supprimée, chez lui, qu'à la mise à jour de client suivante ; chez les clients, elle l'est à l'arrivée.
-- `encode_state_as_update_v1` passe par `merge_pending_v1` : **les suppressions en attente vont dans chaque instantané et dans chaque étape 2 du serveur** ; Yjs 13 fait de même (`pendingDs` dans l'étape 2). Une suppression en attente déjà au journal d'une base existante y reste donc pour toujours, et chaque client la reçoit puis la renvoie.
-- `Update::decode` met bout à bout les entrées répétées d'un même client.
-
-**Le correctif conçu, pas écrit :**
-
-- `guard.rs` : `Shape` gagne `deletions: Vec<(u64, Vec<(u32, u32)>)>`. `read_delete_set` rend les plages, sans les plages vides et sans réserver de place d'après un compte lu (l'allocation reste bornée par les octets reçus).
-- Le besoin d'un client X, comparé à la page par `has_reached` comme pour R131 : pour ses blocs, le début de la dernière suite sans trou (comme aujourd'hui) ; pour ses suppressions, la fin de ce qui, dans ses plages, dépasse E (la plus grande fin de dernière suite parmi les entrées de X dans la mise à jour, 0 sans bloc) **et** n'est pas déjà en attente dans la page. La mise à jour est retenue si un besoin dépasse `state[X]`. Vérifié à la main équivalent à une simulation séquentielle (`leaves_gap` étendu aux suppressions, avec `covered_after = max(state, E)`) ; le test de propriétés `awaited_agrees_with_leaves_gap` est à étendre avec des plages supprimées et des plages en attente.
-- Un type `Pending`, bâti depuis `txn.store().pending_ds()` seulement s'il n'est pas vide ; `uncovered_end(start, end)` parcourt les plages en attente à rebours. `PageDoc::awaits` et `PageDoc::leaves_gap` le passent à `Shape`.
-- Acteur : retirer `&& !self.page.has_pending_deletions()` de `client_update` (plus aucune mise à jour de client ne peut laisser de suppression en attente qui ne l'était pas déjà). Mettre à jour le commentaire R181 de l'acteur et la puce R181 de `lib.rs`. Garder `PageDoc::has_pending_deletions` pour les tests, avec un commentaire neuf.
-- Mesures en release (`cargo test --release -p mementum-sync -- --ignored`) : à prendre avant et après.
-
-**Rulings prévus** (rien au registre encore) :
-
-- **R198**, la règle : une suppression retenue passe quand la page atteint ses horloges, tant que la connexion vit ; c'est alors une suppression ordinaire, visible de tous au même moment et écrite au journal à son compte ; elle est perdue à la fermeture et compte dans les 32 mises à jour et 1 Mio. **À dire dans son coût** : un éditeur peut ainsi supprimer d'avance un texte à venir, au moment où il arrive, tant que sa connexion vit ; c'est ce qu'il pouvait faire de toute façon en le supprimant après coup, et une version a pu le garder.
-- **R199**, la remise des plages déjà en attente dans la page : sans elle, sur une base qui garde une suppression en attente, l'étape 2 de chaque client serait retenue pour toujours, avec ce qu'il a tapé hors ligne, et la frappe suivante finirait par fermer sa connexion, en boucle. Cet ajout de l'implémenteur n'était pas dans les constats : **validé par le contrôleur à la pause**.
-- **Reste ouvert, à trancher en écrivant S2** : une suppression en attente déjà au journal d'une base existante continue de viser les horloges à venir de son client. Rien ne dit qu'une base en porte ; s'en débarrasser demanderait de récrire l'instantané sans elle. Le dire au registre, avec ce qui a été choisi.
-
-## Reprendre C2
-
-Rien n'est écrit. Ce que l'implémenteur avait lu et décidé :
-
-- `useComments` et `useVersions` ne lisent pas le contexte de session, et leurs tests ne posent pas de `SessionContext` : y appeler `useSession()` les casserait. Donc un paramètre facultatif `afterLogin` (`useComments(pageId, session, { onRefused, afterLogin })`, `useVersions(pageId, session, { afterLogin })`), absent des tests existants (comportement inchangé). `PageView` a déjà `afterLogin` (`useAfterLogin(me)`) ; pour l'historique, le passer par `PageMenu` puis `HistoryDialog` en props (vérifier d'abord que les tests de `HistoryDialog` ne posent pas de contexte).
-- La logique commune dans `apps/web/src/rereads.ts` : `scheduleRereads(read, afterLogin?)` ; la lecture rend une marque sur une session perdue au lieu de ne rien faire ; le planificateur passe alors en attente du compte : toute demande pendant l'attente est notée due, et au retour du compte (si pas arrêté) une lecture part aussitôt. Un `stop()` (démontage, changement de page) fait que la promesse tenue plus tard ne lance rien. Une seule attente à la fois. Si `afterLogin` rejette : sortir de l'attente sans relire (pas de boucle).
-- Tests à écrire : `the_list_is_read_again_once_the_account_is_back` dans `useVersions.test.ts` et `useComments.test.ts`, « l'attente ne survit pas au démontage ni au changement de page », et des tests de `rereads.test.ts`.
+Les deux sections « Reprendre S2 » et « Reprendre C2 » de ce fichier ont servi : S2 est fait (`414df88` ; R198 et R199 au registre, avec ce que l'implémenteur a lu dans yrs 0.28.1), C2 aussi (`abdffee`, R212). Le fichier `.patch` qui gardait les tests de S2 est retiré du dépôt.
 
 ## Ce que la documentation doit dire (pour la Task 14)
 
@@ -215,6 +177,11 @@ Pour les constats finis :
 - `CLAUDE.md`, puce neuve : le titre n'envoie que ce qui a été tapé (drapeau `typed`, `TitleInput.tsx`) ; sans saisie, il suit le titre distant même pendant le focus, curseur et sélection gardés ; un champ en lecture seule suit le titre distant (R210).
 - `CLAUDE.md`, « Commentaires, côté client » : sans le droit d'écrire, les zones disparaissent mais pas les brouillons, montrés dans « Textes non envoyés » avec le refus du serveur (`Drafts.refuse`, gardé même zone démontée) ou « Tu ne peux plus écrire ici. » ; le droit revenu, ils retrouvent leur zone sans rien envoyer ni prendre le focus ; le champ de modification d'un message suit `canEditMessage` (R211).
 - README, « Commentaires » : une phrase, « un texte qu'on ne peut plus envoyer (droit perdu, corbeille) reste affiché pour être copié ou écarté ».
+- `CLAUDE.md` : `SESSION_LOST` et `scheduleRereads(read, afterLogin)` dans `rereads.ts` : une liste dont la lecture répond `401` attend le retour du compte puis relit ; tout hook de liste neuf prend `afterLogin` (R212).
+- `CLAUDE.md`, « Vérification avant chaque connexion de synchro » : le schéma est relu aussi pour une session en lecture seule dès que la personne peut commenter ou restaurer depuis cet onglet (`writesOutsideEditor`, R213).
+- `CLAUDE.md`, « Commentaires, côté client » : Ctrl+Alt+M se tait, sans avaler la touche, sous une `dialog` ouverte ; la règle est dans `isCommentShortcut` (R214).
+- `CLAUDE.md`, « Barre latérale en direct » : un chien de garde de 45 s (`EVENTS_SILENCE_MS`) ferme un canal muet et rend la main au minuteur de repli ; reconnexion immédiate sur `online` ; cela suppose que le serveur écrit au moins toutes les 20 s (S6, R215).
+- `CLAUDE.md`, « Historique, côté client », README et conception : l'historique se lit à partir de « Peut modifier » ; le bouton « … » disparaît quand il n'a aucune entrée ; un refus de la liste s'affiche tel quel dans la fenêtre, qui ne se ferme pas d'elle-même ; le focus revient au titre de la page si le bouton n'est plus là (R216, R217).
 
 Pour chaque constat fini à la reprise, ajouter ici ce que la documentation doit en dire : la Task 14 part de cette liste. Sont déjà sûrs de changer : le README et `CLAUDE.md` pour l'historique (« Peut lire » lit l'historique sans restaurer : faux après S5 et C7), la puce R181 de `CLAUDE.md` (S2), le canal de l'espace (S6, C6), `PUT /mmd` et les identifiants (S3), les plafonds des commentaires (S4).
 
