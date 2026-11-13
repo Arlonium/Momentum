@@ -1,23 +1,30 @@
-// Un bloc déplacé pendant que quelqu'un d'autre y écrit (limite R39 du lot 1, que la Task 13
-// lève, R138). Yjs n'a pas de déplacement, et ce qu'une autre personne a tapé en même temps dans
-// le bloc ne le suit pas. Pour le glisser que font ces tests (un bloc sous un autre, au même
-// niveau, entre des blocs du même type et sans enfants), y-prosemirror n'écrit ni copie ni
-// suppression : il récrit sur place les éléments entre l'ancienne place et la nouvelle, chacun
-// prenant l'id et le texte de son voisin, et le texte de Tom finit dans le bloc Y. Ce n'est pas
-// général : selon les blocs touchés (un autre type, des enfants) et le geste (Tab, Maj+Tab), une
-// frappe concurrente est déplacée dans un voisin ou perdue. Ces cas, et les autres gestes, sont
-// dans `src/editor/blockMoves.test.ts` ; ces deux tests en sont la preuve dans un navigateur.
+// Un bloc déplacé pendant que quelqu'un d'autre écrit, dans un vrai navigateur : le glisser se
+// fait par la poignée de BlockNote, à la souris, et passe par le dépôt de ProseMirror.
 //
-// Ces tests disent ce qui est voulu, pas ce qui se passe aujourd'hui : après le scénario, le
-// bloc X est juste sous le bloc Z, une seule fois, et porte le texte que Tom y a tapé, chez
-// Mona, chez Tom et dans le MMD que relit le serveur. Deux ordres d'arrivée au serveur, un
-// test chacun : l'édition faite hors ligne arrive après le déplacement, puis le déplacement
-// fait hors ligne arrive après l'édition. Chaque test vérifie d'abord, sur des blocs témoins,
-// que le glisser par la poignée et le retour du réseau marchent seuls : un échec ne vient donc
-// pas d'un glisser manqué ni d'une page qui n'a pas resynchronisé.
+// Yjs n'a pas de déplacement. Depuis la forme à clés (R220, `patches/y-prosemirror@1.3.7.patch`,
+// `src/editor/keyedBlocks.test.ts`), le bloc glissé est supprimé et recréé à sa nouvelle place
+// avec le même id, et les blocs qu'il croise ne sont pas touchés. Avant, tous les blocs entre
+// l'ancienne place et la nouvelle étaient récrits sur place, chacun prenant l'id et le texte de
+// son voisin : ce qu'un autre tapait dans l'un d'eux finissait chez un voisin, et deux glissers
+// abîmaient la page.
 //
-// Ce qu'ils montrent aujourd'hui est au registre du lot 3, sous « Task 12 » : perte connue (R39),
-// d'où `test.fixme` jusqu'à la Task 13.
+// Les tests verts : ce qui est tapé dans un bloc voisin pendant qu'un autre glisse reste à sa
+// place ; deux personnes qui glissent deux blocs gardent la page ; le curseur de qui tape dans le
+// bloc qu'un autre glisse le suit (`followBlock`), comme celui que le dépôt laisse dans le bloc
+// déposé.
+//
+// Les deux `test.fixme` : ce qui est tapé dans le bloc glissé lui-même. Ils disent ce qui est
+// voulu, pas ce qui se passe : après le scénario, le bloc X est juste sous le bloc Z, une seule
+// fois, et porte le texte que Tom y a tapé, chez Mona, chez Tom et dans le MMD que relit le
+// serveur. Les clients seuls perdent ce texte, qui est dans l'élément que le glisser supprime
+// (plus personne ne le retrouve chez un voisin). Un test par ordre d'arrivée au serveur :
+//  - le déplacement fait hors ligne arrive après l'édition : le serveur a le texte quand le
+//    déplacement arrive, et le reportera sur le bloc recréé (R221, Task 13b) ;
+//  - l'édition faite hors ligne arrive après le déplacement : elle a été faite sans l'avoir vu,
+//    et reste perdue (limite R222, dite aux utilisateurs).
+// Chacun vérifie d'abord, sur des blocs témoins, que le glisser par la poignée et le retour du
+// réseau marchent seuls : un échec ne vient donc pas d'un glisser manqué ni d'une page qui n'a
+// pas resynchronisé.
 import {
   expect,
   test,
@@ -52,12 +59,19 @@ const TYPED = " de Tom";
 type Shown = { id: string; text: string };
 
 /**
+ * L'éditeur de la page. Pendant un glisser, BlockNote pose dans le document, hors de la page,
+ * une copie du bloc glissé (l'image que suit la souris), avec les classes de l'éditeur : elle
+ * n'est pas un bloc de la page.
+ */
+const EDITOR = ".mm-editor-frame .bn-editor";
+
+/**
  * Les blocs de premier niveau que montre l'éditeur de `p`, de haut en bas : id et texte. Le
  * curseur d'une autre personne, posé dans un bloc, y écrit son nom : il n'est pas compté.
  */
 function shownBlocks(p: Page): Promise<Shown[]> {
   return p
-    .locator('.bn-editor > [data-node-type="blockGroup"] > [data-node-type="blockOuter"]')
+    .locator(`${EDITOR} > [data-node-type="blockGroup"] > [data-node-type="blockOuter"]`)
     .evaluateAll((outers) =>
       outers.map((outer) => {
         const content = outer.querySelector(".bn-block-content")?.cloneNode(true) as
@@ -84,7 +98,7 @@ async function blockOf(p: Page, text: string): Promise<Locator> {
     const texts = JSON.stringify(blocks.map((b) => b.text));
     throw new Error(`${found.length} blocs « ${text} » dans ${texts}`);
   }
-  return p.locator(`.bn-editor [data-node-type="blockOuter"][data-id="${found[0].id}"]`);
+  return p.locator(`${EDITOR} [data-node-type="blockOuter"][data-id="${found[0].id}"]`);
 }
 
 /** `blocks`, où le bloc de texte `moved` est retiré, puis remis juste sous le bloc `under`. */
@@ -104,14 +118,33 @@ function movedUnder(blocks: Shown[], moved: string, under: string): Shown[] {
  * et que rien d'autre n'a bougé.
  */
 async function dragUnder(p: Page, moved: string, under: string): Promise<void> {
-  const before = await shownBlocks(p);
+  await grab(p, moved);
+  await dropUnder(p, moved, under);
+}
+
+/**
+ * Chez `p`, saisit par sa poignée le bloc de texte `moved`, et commence à le glisser : le bouton
+ * de la souris reste enfoncé, jusqu'à `dropUnder`.
+ */
+async function grab(p: Page, moved: string): Promise<void> {
   await (await blockOf(p, moved)).locator(OWN_CONTENT).hover();
   const handle = p.getByRole("button", { name: "Ouvrir le menu du bloc" });
   await expect(handle).toBeVisible();
   const grip = (await handle.boundingBox())!;
-  const target = (await (await blockOf(p, under)).locator(OWN_CONTENT).boundingBox())!;
   await p.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
   await p.mouse.down();
+  // Les premiers mouvements, bouton enfoncé, font partir le glisser du navigateur.
+  await p.mouse.move(grip.x + grip.width / 2 + 12, grip.y + grip.height / 2 + 12, { steps: 3 });
+}
+
+/**
+ * Chez `p`, lâche le bloc saisi (`grab`), de texte `moved`, sur le bas du bloc de texte `under`,
+ * tels qu'ils sont à cet instant. Vérifie que le bloc a changé de place chez `p`, avec son id et
+ * son texte, et que rien d'autre n'a bougé.
+ */
+async function dropUnder(p: Page, moved: string, under: string): Promise<void> {
+  const before = await shownBlocks(p);
+  const target = (await (await blockOf(p, under)).locator(OWN_CONTENT).boundingBox())!;
   await p.mouse.move(target.x + target.width / 2, target.y + target.height * 0.8, { steps: 8 });
   await p.mouse.up();
   await expect
@@ -181,13 +214,45 @@ async function scene(browser: Browser) {
     "Témoin C",
   ]);
   expect(await shownBlocks(tomPage)).toEqual(shown);
-  const [x, y, z] = shown.map((b) => b.id);
-  return { monaApi, id: page.id, mona: monaPage, tom: tomPage, ids: { x, y, z } };
+  const [x, y, z, a, b, c] = shown.map((block) => block.id);
+  // Une exception dans un éditeur (un changement reçu qu'il ne sait pas appliquer) le fige : les
+  // tests verts affirment qu'il n'y en a eu aucune.
+  const errors: string[] = [];
+  for (const [who, p] of [["Mona", monaPage], ["Tom", tomPage]] as const) {
+    p.on("pageerror", (error) => errors.push(`${who} : ${error.message}`));
+  }
+  return { monaApi, id: page.id, mona: monaPage, tom: tomPage, ids: { x, y, z, a, b, c }, errors };
 }
 
 type Scene = Awaited<ReturnType<typeof scene>>;
 
 type Ids = { x: string; y: string; z: string };
+
+/**
+ * La page `wanted` (ses blocs de premier niveau, ids et textes, de haut en bas) chez Mona, chez
+ * Tom et, pour les textes, dans le MMD du serveur : attendue 15 s au plus, puis affirmée. Chaque
+ * id n'y est qu'une fois, et aucun éditeur n'a levé d'exception.
+ */
+async function expectPageEverywhere(s: Scene, wanted: Shown[]): Promise<void> {
+  const texts = wanted.map((block) => block.text);
+  const same = (blocks: Shown[]) => JSON.stringify(blocks) === JSON.stringify(wanted);
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const [mona, tom, mmd] = await Promise.all([
+      shownBlocks(s.mona),
+      shownBlocks(s.tom),
+      mmdBlocks(s.monaApi, s.id),
+    ]);
+    if (same(mona) && same(tom) && JSON.stringify(mmd) === JSON.stringify(texts)) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  expect.soft(await shownBlocks(s.mona), "chez Mona").toEqual(wanted);
+  expect.soft(await shownBlocks(s.tom), "chez Tom").toEqual(wanted);
+  expect.soft(await mmdBlocks(s.monaApi, s.id), "dans le MMD du serveur").toEqual(texts);
+  expect.soft(new Set(wanted.map((block) => block.id)).size, "chaque id une seule fois").toBe(wanted.length);
+  expect.soft(await fragmentXml(s.tom), "Mona et Tom ont le même document").toBe(await fragmentXml(s.mona));
+  expect.soft(s.errors, "aucune exception dans un éditeur").toEqual([]);
+}
 
 /** Les textes de la page voulue, de haut en bas : Y, Z, X avec le texte de Tom, puis `rest`. */
 function wantedTexts(rest: string[]): string[] {
@@ -275,6 +340,128 @@ function expectWantedMmd(blocks: string[], rest: string[]): void {
     .toEqual(wantedTexts(rest));
 }
 
+/** Les six blocs de la page de départ, tels que `changed` les donne (id et texte). */
+function page(s: Scene, changed: Partial<Record<keyof Scene["ids"], string>> = {}): Record<keyof Scene["ids"], Shown> {
+  const base = {
+    x: "Bloc X",
+    y: "Bloc Y",
+    z: "Bloc Z",
+    a: "Témoin A",
+    b: "Témoin B",
+    c: "Témoin C",
+  };
+  const block = (key: keyof Scene["ids"]) => ({ id: s.ids[key], text: changed[key] ?? base[key] });
+  return { x: block("x"), y: block("y"), z: block("z"), a: block("a"), b: block("b"), c: block("c") };
+}
+
+// Y et Z sont entre l'ancienne place de X et la nouvelle. Trois façons d'y écrire pendant que
+// Mona glisse X sous Z : pendant qu'elle le tient au bout de sa souris ; hors ligne, de sorte
+// que les deux écritures se croisent à coup sûr ; ou en ligne pendant qu'elle glisse hors ligne.
+for (const mode of ["en ligne", "hors ligne", "glisser hors ligne"] as const) {
+  test(`typing_in_a_neighbour_while_someone_drags_stays_in_place (${mode})`, async ({ browser }) => {
+    const s = await scene(browser);
+    const { mona, tom, monaApi, id } = s;
+    const moved = ["Bloc Y", "Bloc Z", "Bloc X", "Témoin A", "Témoin B", "Témoin C"];
+    if (mode === "en ligne") {
+      await grab(mona, "Bloc X");
+      await typeAtEnd(tom, "Bloc Y", TYPED);
+      await typeAtEnd(tom, "Bloc Z", " aussi");
+      // Mona reçoit la frappe pendant qu'elle tient le bloc, puis le lâche.
+      await expect.poll(() => shownTexts(mona)).toContain("Bloc Z aussi");
+      await dropUnder(mona, "Bloc X", "Bloc Z aussi");
+    } else if (mode === "hors ligne") {
+      await goOffline(tom);
+      await typeAtEnd(tom, "Bloc Y", TYPED);
+      await typeAtEnd(tom, "Bloc Z", " aussi");
+      await dragUnder(mona, "Bloc X", "Bloc Z");
+      // Le déplacement est au serveur ; ce que Tom a tapé n'est encore que chez lui.
+      await expect.poll(() => mmdBlocks(monaApi, id)).toEqual(moved);
+      await comeBack(tom);
+      await converged(mona, tom);
+    } else {
+      await goOffline(mona);
+      await dragUnder(mona, "Bloc X", "Bloc Z");
+      await typeAtEnd(tom, "Bloc Y", TYPED);
+      await typeAtEnd(tom, "Bloc Z", " aussi");
+      // Ce que Tom a tapé est au serveur ; le déplacement n'est encore que chez Mona.
+      await expect
+        .poll(() => mmdBlocks(monaApi, id))
+        .toEqual(["Bloc X", `Bloc Y${TYPED}`, "Bloc Z aussi", "Témoin A", "Témoin B", "Témoin C"]);
+      await comeBack(mona);
+      await converged(mona, tom);
+    }
+    const { x, y, z, a, b, c } = page(s, { y: `Bloc Y${TYPED}`, z: "Bloc Z aussi" });
+    await expectPageEverywhere(s, [y, z, x, a, b, c]);
+  });
+}
+
+test("two_people_moving_two_blocks_keep_the_page", async ({ browser }) => {
+  const s = await scene(browser);
+  const { mona, tom, monaApi, id } = s;
+  // Mona, coupée du réseau, glisse X sous Z ; Tom, en ligne, glisse Y sous le premier témoin.
+  await goOffline(mona);
+  await dragUnder(mona, "Bloc X", "Bloc Z");
+  await dragUnder(tom, "Bloc Y", "Témoin A");
+  await expect
+    .poll(() => mmdBlocks(monaApi, id))
+    .toEqual(["Bloc X", "Bloc Z", "Témoin A", "Bloc Y", "Témoin B", "Témoin C"]);
+  await comeBack(mona);
+  await converged(mona, tom);
+  // Les deux déplacements sont faits : chaque bloc une fois, avec son id et son texte.
+  const { x, y, z, a, b, c } = page(s);
+  await expectPageEverywhere(s, [z, x, a, y, b, c]);
+});
+
+test("typing_goes_on_in_the_block_someone_else_just_moved", async ({ browser }) => {
+  const s = await scene(browser);
+  const { mona, tom } = s;
+  // Tom pose son curseur dans X, après « Blo ».
+  await (await blockOf(tom, "Bloc X")).locator(OWN_CONTENT).click();
+  await tom.keyboard.press("Home");
+  for (let i = 0; i < 3; i += 1) await tom.keyboard.press("ArrowRight");
+  // Mona glisse X sous Z, et Tom le voit partir.
+  await dragUnder(mona, "Bloc X", "Bloc Z");
+  await expect.poll(() => shownTexts(tom)).toEqual(["Bloc Y", "Bloc Z", "Bloc X", "Témoin A", "Témoin B", "Témoin C"]);
+  // Il continue de taper, sans recliquer : son curseur a suivi le bloc, à la même place.
+  await tom.keyboard.type("!");
+  const { x, y, z, a, b, c } = page(s, { x: "Blo!c X" });
+  await expectPageEverywhere(s, [y, z, x, a, b, c]);
+});
+
+test("the_cursor_left_in_a_dropped_block_follows_it_when_someone_else_moves_it", async ({ browser }) => {
+  const s = await scene(browser);
+  const { mona, tom } = s;
+  // Mona dépose X tout en bas : le dépôt laisse son curseur dans X, à la fin de son texte (c'est
+  // ce que suppose l'aide `drag` des tests unitaires, `src/test/editors.ts`).
+  await dragUnder(mona, "Bloc X", "Témoin C");
+  const selection = await mona.evaluate(() => {
+    const { selection, doc } = window.__mementum!.editor.prosemirrorState;
+    const { $anchor } = selection;
+    return {
+      type: (selection.toJSON() as { type: string }).type,
+      collapsed: selection.empty,
+      block: $anchor.node($anchor.depth - 1).attrs.id as string,
+      atEnd: $anchor.parentOffset === $anchor.parent.content.size,
+      lastBlock: selection.anchor > doc.content.size - 6,
+    };
+  });
+  expect(selection).toEqual({ type: "text", collapsed: true, block: s.ids.x, atEnd: true, lastBlock: true });
+  await expect
+    .poll(() => shownTexts(tom))
+    .toEqual(["Bloc Y", "Bloc Z", "Témoin A", "Témoin B", "Témoin C", "Bloc X"]);
+  // Tom le remonte sous Y. Mona tape sans recliquer : c'est dans X, pas dans le dernier bloc.
+  await dragUnder(tom, "Bloc X", "Bloc Y");
+  await expect
+    .poll(() => shownTexts(mona))
+    .toEqual(["Bloc Y", "Bloc X", "Bloc Z", "Témoin A", "Témoin B", "Témoin C"]);
+  await mona.keyboard.type(" de Mona");
+  const { x, y, z, a, b, c } = page(s, { x: "Bloc X de Mona" });
+  await expectPageEverywhere(s, [y, x, z, a, b, c]);
+});
+
+// Le déplacement arrive au serveur avant la frappe, faite sans l'avoir vu : limite R222. Les
+// clients seuls, et le serveur après la Task 13b, perdent ce texte ; la limite est dite aux
+// utilisateurs (Task 13c), et a son plan à part après le lot 3.
 test.fixme("text_typed_while_someone_else_moves_the_block_survives", async ({ browser }) => {
   const s = await scene(browser);
   const { monaApi, id, mona, tom } = s;
@@ -317,6 +504,8 @@ test.fixme("text_typed_while_someone_else_moves_the_block_survives", async ({ br
   await expectWantedEverywhere(s, ["Témoin B revenu", "Témoin C", "Témoin A"]);
 });
 
+// La frappe est au serveur quand le déplacement arrive : il la reportera sur le bloc recréé
+// (R221). Attend la Task 13b.
 test.fixme("block_moved_offline_keeps_the_text_typed_meanwhile", async ({ browser }) => {
   const s = await scene(browser);
   const { monaApi, id, mona, tom } = s;
