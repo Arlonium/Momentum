@@ -163,8 +163,11 @@ pub(crate) struct Upload {
     len: u64,
     /// Les premiers octets, pour [`sniff`].
     head: Vec<u8>,
-    /// Vrai pendant une écriture, et pour de bon si elle n'est pas allée au bout (R273).
+    /// Vrai pendant une écriture ou un vidage, et pour de bon s'il n'est pas allé au bout (R273).
     broken: bool,
+    /// Tout ce que l'envoi a reçu est sur le disque ([`Upload::sync`]) ; faux dès l'écriture
+    /// suivante.
+    synced: bool,
     /// Le temporaire a pris sa place, ou a été supprimé : `Drop` n'a plus rien à faire.
     settled: bool,
 }
@@ -279,6 +282,7 @@ impl FileStore {
             len: 0,
             head: Vec::with_capacity(SNIFF_LEN),
             broken: false,
+            synced: false,
             settled: false,
         })
     }
@@ -329,6 +333,7 @@ impl Upload {
             _ => return Err(broken()),
         };
         self.broken = true;
+        self.synced = false;
         file.write_all(chunk).await?;
         self.broken = false;
         self.hasher.update(chunk);
@@ -343,22 +348,41 @@ impl Upload {
         self.len
     }
 
-    /// Pose le contenu, sous le verrou du dépôt (`guard`) : le fichier temporaire est vidé sur le
-    /// disque (`sync_all`), puis mis à sa place s'il n'y a rien (`fresh`). S'il y a déjà un
-    /// fichier ordinaire de même taille, c'est ce contenu, et le temporaire est supprimé ;
+    /// Vide sur le disque ce que l'envoi a reçu (`flush`, puis `sync_all`). **À mener avant de
+    /// prendre le verrou du dépôt** : sinon c'est `finish` qui le fait, sous le verrou, et les
+    /// autres envois de l'instance attendent le vidage d'un gros fichier. Sans effet sur un
+    /// envoi déjà vidé. Un vidage qui n'est pas allé au bout (une erreur, dont celle d'une
+    /// écriture que tokio a laissée échouer en fond, ou le futur lâché en route) met l'envoi hors
+    /// d'usage, comme une écriture (R273).
+    pub(crate) async fn sync(&mut self) -> io::Result<()> {
+        let file = match (self.broken, self.file.as_mut()) {
+            (false, Some(file)) => file,
+            _ => return Err(broken()),
+        };
+        if self.synced {
+            return Ok(());
+        }
+        self.broken = true;
+        // Une écriture que tokio a laissée échouer en fond ne se dit qu'à l'opération suivante :
+        // `flush` la rend, alors que `sync_all` la garderait pour lui.
+        file.flush().await?;
+        file.sync_all().await?;
+        self.broken = false;
+        self.synced = true;
+        Ok(())
+    }
+
+    /// Pose le contenu, sous le verrou du dépôt (`guard`) : le fichier temporaire, vidé sur le
+    /// disque (par [`Upload::sync`], que l'appelant mène avant de prendre le verrou ; à défaut,
+    /// ici), est mis à sa place s'il n'y a rien (`fresh`). S'il y a déjà un fichier ordinaire de
+    /// même taille, il est tenu pour ce contenu, sans être relu, et le temporaire est supprimé ;
     /// autre chose (une autre taille, un lien, R272), il est abîmé : le temporaire le remplace, et
     /// le journal le dit. Sur une erreur, rien n'est posé et le temporaire part.
     pub(crate) async fn finish(mut self, guard: &MutexGuard<'_, ()>) -> io::Result<Stored> {
         self.dirs.check(guard)?;
-        let mut file = match (self.broken, self.file.take()) {
-            (false, Some(file)) => file,
-            _ => return Err(broken()),
-        };
-        // Une écriture que tokio a laissée échouer en fond ne se dit qu'à l'opération suivante :
-        // `flush` la rend, avant que le contenu ne soit vidé sur le disque.
-        file.flush().await?;
-        file.sync_all().await?;
-        drop(file);
+        // Le filet de qui n'a pas vidé son envoi avant de prendre le verrou.
+        self.sync().await?;
+        drop(self.file.take());
         let hash: [u8; 32] = std::mem::take(&mut self.hasher).finalize().into();
         let stored = Stored {
             hash,
@@ -611,8 +635,11 @@ fn parse_hex(head: &str, tail: &str) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::future::Future;
     use std::path::Component;
-    use std::sync::{Mutex as StdMutex, PoisonError};
+    use std::pin::Pin;
+    use std::sync::{Mutex as StdMutex, PoisonError, mpsc};
+    use std::task::Poll;
     use std::time::{Duration, Instant, SystemTime};
 
     use tokio::io::AsyncReadExt;
@@ -733,6 +760,32 @@ mod tests {
 
     fn sha256(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()
+    }
+
+    /// Mène `future` d'un seul tour.
+    async fn poll_once<F: Future + ?Sized>(future: &mut Pin<Box<F>>) -> Poll<F::Output> {
+        std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
+    }
+
+    /// Un runtime qui n'a qu'un fil bloquant, où les tâches passent dans l'ordre de leur envoi :
+    /// un test peut le retenir, et ce que le dépôt y envoie attend alors dans la file, comme sur
+    /// un serveur dont les fils bloquants sont pris.
+    fn one_blocking_thread() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Retient le seul fil bloquant du runtime courant, jusqu'à ce qu'on envoie un message à la
+    /// valeur rendue (ou qu'on la lâche).
+    fn hold_the_blocking_thread() -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel::<()>();
+        tokio::task::spawn_blocking(move || {
+            let _ = held.recv();
+        });
+        release
     }
 
     /// Pose à `at` un lien vers le dossier `target` : un lien symbolique sous Unix ; sous
@@ -1737,8 +1790,63 @@ mod tests {
         assert!(upload.finish(&guard).await.is_err());
         drop(guard);
         drop(failing);
+
+        // Et par `sync`, que l'appelant mène avant de prendre le verrou : l'envoi est alors hors
+        // d'usage, `finish` ne pose rien.
+        let mut upload = store.begin().await.unwrap();
+        let failing = fail_writes_of(&mut upload).await;
+        upload.write(b"abc").await.unwrap();
+        assert!(upload.sync().await.is_err());
+        let guard = store.lock().await;
+        let error = upload.finish(&guard).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
+        drop(guard);
+        drop(failing);
+
+        // Une écriture faite après un `sync` n'est pas tenue pour vidée : sa panne est dite.
+        let mut upload = store.begin().await.unwrap();
+        upload.sync().await.unwrap();
+        let failing = fail_writes_of(&mut upload).await;
+        upload.write(b"abc").await.unwrap();
+        let guard = store.lock().await;
+        assert!(upload.finish(&guard).await.is_err());
+        drop(guard);
+        drop(failing);
         assert!(tmp_entries(dir.path()).is_empty());
         assert!(listing(&dir.path().join(FILES_DIR)).is_empty());
+    }
+
+    /// `sync` ne rend la main qu'une fois sur le disque tout ce que l'envoi a reçu : `write`,
+    /// lui, la rend dès que tokio a pris les octets. L'appelant le mène avant de prendre le
+    /// verrou du dépôt, pour que les autres envois n'attendent pas le vidage d'un gros fichier.
+    #[test]
+    fn sync_waits_for_the_bytes_to_reach_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        one_blocking_thread().block_on(async {
+            let mut upload = store.begin().await.unwrap();
+            let path = upload.path.clone();
+            let release = hold_the_blocking_thread();
+            upload.write(b"abc").await.unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                0,
+                "témoin : rien n'est encore écrit"
+            );
+            let mut syncing = Box::pin(upload.sync());
+            assert!(poll_once(&mut syncing).await.is_pending());
+            release.send(()).unwrap();
+            syncing.await.unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), 3);
+            // Vidé deux fois, puis posé : le contenu est entier.
+            upload.sync().await.unwrap();
+            let guard = store.lock().await;
+            let stored = upload.finish(&guard).await.unwrap();
+            assert_eq!(
+                std::fs::read(store.dirs.content_path(&stored.hash)).unwrap(),
+                b"abc"
+            );
+        });
     }
 
     /// Fait échouer, en fond, les écritures de `upload` tant que la valeur rendue vit. Sous
