@@ -937,6 +937,10 @@ test("owner_who_tries_his_own_link_does_not_kill_it", async ({ browser }) => {
   await menu.getByRole("button", { name: "Inviter", exact: true }).click();
   const link = await menu.getByRole("textbox", { name: "Lien d'invitation" }).inputValue();
   const tab = await a.context().newPage();
+  // Depuis l'accueil de son espace : « Précédent » y ramènera, plus bas.
+  await tab.goto("/");
+  await expect(tab.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
+  const home = tab.url();
   await tab.goto(link);
   await tab.getByRole("button", { name: "Accepter" }).click();
 
@@ -953,6 +957,11 @@ test("owner_who_tries_his_own_link_does_not_kill_it", async ({ browser }) => {
   await tab.getByRole("link", { name: `Ouvrir la page « ${title} »` }).click();
   await expect(tab).toHaveURL(`${BASE_URL}/p/${plan.id}`);
   await expect(titleOf(tab)).toHaveValue(title);
+  // À la place de l'adresse de l'invitation : « Précédent » ramène d'où l'on venait, pas sur
+  // une page d'invitation qui a oublié son jeton (« Ce lien d'invitation est incomplet »).
+  await tab.goBack();
+  await expect(tab).toHaveURL(home);
+  await expect(tab.getByRole("heading", { name: "Aucune page ouverte" })).toBeVisible();
 
   // Bruno, à qui le lien était destiné, l'accepte ensuite, et arrive sur la page.
   const bruno = await signUpAccount(`Bruno ${unique()}`);

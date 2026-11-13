@@ -115,8 +115,12 @@ for (const [name, info, accepted, link] of [
     expect(anchor?.getAttribute("href")).toBe(link.href);
     const isolated = anchor?.querySelector('.mm-isolate[dir="auto"]');
     expect(isolated?.textContent).toBe(link.foreign);
+    // Le lien mène à la place de cette adresse : « Précédent » ne ramène pas sur une page
+    // d'invitation qui a oublié son jeton, et dirait le lien incomplet.
+    const entries = history.length;
     await act(async () => anchor!.click());
     expect(location.pathname).toBe(link.href);
+    expect(history.length).toBe(entries);
   });
 }
 

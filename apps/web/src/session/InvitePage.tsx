@@ -211,8 +211,10 @@ export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Pr
           </span>
         }
         footer={
-          // Le nom vient d'ailleurs : isolé.
-          <ScreenLink href={to} onClick={() => navigate(to)}>
+          // Le nom vient d'ailleurs : isolé. À la place de cette adresse, comme une invitation
+          // qui a servi : quitter l'écran oublie le jeton, et « Précédent » y trouverait « Ce lien
+          // d'invitation est incomplet ».
+          <ScreenLink href={to} onClick={() => navigate(to, { replace: true })}>
             {info.pageTitle === null ? "Ouvrir l'espace" : "Ouvrir la page"} «&nbsp;
             <span className="mm-isolate" dir="auto">
               {info.pageTitle === null ? info.spaceName : info.pageTitle || "Sans titre"}
