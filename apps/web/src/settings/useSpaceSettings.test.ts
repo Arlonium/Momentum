@@ -26,6 +26,7 @@ const pending = (id: string): PendingInvitation => ({
   role: "member",
   level: null,
   pageId: null,
+  pageTitle: null,
   expiresAt: 1_800_000_000_000,
 });
 

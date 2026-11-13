@@ -40,6 +40,7 @@ const pending = (id: string, email: string): PendingInvitation => ({
   role: null,
   level: "edit",
   pageId: "x",
+  pageTitle: "Projet",
   expiresAt: 1_800_000_000_000,
 });
 
