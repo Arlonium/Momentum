@@ -48,6 +48,68 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 
 Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête poussée, **sans clone neuf**) : `cargo fmt` et `cargo clippy -D warnings` propres ; `cargo test --workspace` : **723 verts**, 15 ignorés (les mesures en release et les tests de la limite R39) ; client : **516 verts et 12 marqués `test.fails`** (les scénarios du bloc déplacé), typecheck propre ; licences npm propres au dernier relevé (aucun paquet ajouté sur `main`) ; e2e : suite entière relancée sur `main` à la pause, correctif du défaut critique compris : **159 verts**, 2 `fixme` voulus (bloc déplacé), et 1 échec, `space_without_a_role_is_not_found` : une course du test lui-même, qui comparait l'écran pendant que la barre latérale disait encore « Chargement… » (reproduite à coup sûr en retardant la lecture de l'arbre) ; le test attend maintenant la fin du chargement, et passe dix fois de suite ; la suite entière n'a pas été relancée après cette correction d'un seul test ; budgets du navigateur, mesurés dans l'atelier de la part e2e sur un poste occupé : 1 000 blocs à 160 ms au p95 (budget 300), 10 000 blocs en 1,38 s (budget 3 s) ; côté serveur, en release : frappe vue par un autre à 2,0 à 2,3 ms au p95, 42,8 ms quand elle déclenche la coupe d'une version (budget 150).
 
+## État à la pause du 2026-11-13 (16 h 10) — c'est d'ici qu'on reprend
+
+**Lenny a mis le travail en pause le 2026-11-13 à 16 h 10** (troisième pause du lot ; les deux premières : le 12 à 18 h, le 13 à 3 h 40). Cette section prime sur tout ce qui la suit dans ce fichier, écrit plus tôt.
+
+### Ce qui est sur `main`, poussé (`origin/main`)
+
+- **Partie A** : les tâches 1 à 12 ; la **Task 13a** (le correctif de y-prosemirror, `followBlock`) ; la relecture finale, **piste C close** ; piste S : tours de correction 1 et 2.
+- **La CI** : ses corrections de tests (R340 à R344 : `#[ignore]` ne marque que des mesures, une limite connue est un test exécuté qui l'affirme par `known_limit` ; les mesures de `mementum-sync` passent une à la fois ; `Witness`, `sees` ; `TestDir` supprime les dossiers temporaires des tests).
+- **Partie B, six tâches sur vingt et une** : C6 (fil d'Ariane, récents), S1 (reports du lot 2, serveur), S2 (store : fichiers et favoris, migration `0004`), C1a (banc à deux éditeurs), **S5** (favoris, serveur ; R280 à R283), **X1** (reports du lot 2, client ; R330 à R339).
+- Mesures sur `main` : 812 tests Rust verts et 15 ignorés (tous des mesures) ; 933 tests du client et 40 échecs attendus ; la suite e2e entière a tourné sur `main` le matin (183 verts) ; format et clippy propres.
+
+### La CI de GitHub
+
+Rouge de l'ouverture du lot 3 (`9a4b886`, 2026-11-12) jusqu'au 2026-11-13 après-midi, sans avoir été lue (les suites tournaient sur le poste). **Premier passage vert : `c899f8c`.** Le dernier passage (`4532a63`) est **rouge sous Windows seulement**, sur deux tests du lot 1 de `crates/mementum-sync/tests/sync.rs` qui comptent sur le minutage : `two_clients_converge` (« frappe visible chez B en 246 ms (budget : 150 ms) », un budget tenu en debug dans un test non ignoré) et `lagged_client_is_disconnected` (un client arrive pendant une rafale, avec une file de diffusion de 4 : il voit 45 frappes sur 50). **À faire** : les corriger, cause prouvée, et mesurer si `TestDir` (R344) charge le disque sous Windows pendant les tests (hypothèse, non prouvée). Les journaux des passages rouges sont gardés sur le poste (`.superpowers/sdd/…/ci/`). **Règle prise** : lire `gh run list` après chaque poussée de `main`.
+
+### Ce qui n'est pas sur `main` : huit ateliers du poste, jamais poussés
+
+Tous sous `.claude/worktrees/` (ignoré par git), chacun sur sa branche locale. **Un clone neuf ne les a pas.** L'état de chaque agent au moment de la pause est écrit plus bas (« États rendus à la pause »).
+
+| Atelier (branche) | Tâche | Où elle en est |
+|---|---|---|
+| `lot3-relecture-s` (`lot3-s-tour3`) | **Piste S, tour de correction 3** (R380 à R387 ; R365, R366, R368 récrits) | **écrit, rebasé sur `main`** (dix commits), 806 tests verts ; **sa re-relecture venait de commencer** |
+| `lot3-13b` (`lot3-13b`) | **Task 13b** (le serveur reporte ce qui a été tapé dans un bloc déplacé ; R371 à R379) | **en cours d'écriture** |
+| `lot3b-serveur` (`lot3b-serveur`) | Partie B, **Task S3** (dépôt des fichiers ; R271 à R279) et son tour de correction 1 (R285 à R289) | écrite, relue, corrigée, **rebasée sur `main`** (onze commits), 829 tests verts ; **re-relecture ciblée en cours** (le schéma à deux verrous ; le code `#[cfg(unix)]`, que ce poste ne compile pas : la CI Linux le compilera à la reprise) |
+| `lot3b-c1b-relecture` (`relecture-c1b`) | Partie B, **Task C1b** (menu « / », callout, signet ; R306 à R314) : tour de correction 1 (R400 à R409, R346) | écrite, relue ; **tour de correction en cours** |
+| `lot3b-client` (`lot3b-client`) | Partie B, **Task C2** (équations ; R315 à R319), écrite **par-dessus C1b non corrigée** | écrite (cinq commits au-dessus de C1b), 1 028 tests du client ; **à rebaser sur C1b corrigée** |
+| `lot3b-c2-relecture` (`relecture-c2`) | relecture de C2 | **en cours** |
+| `lot3b-c7` (`lot3b-c7`) | Partie B, **Task C7** (favoris, client ; R410 à R419) | **en cours d'écriture** |
+| `lot3b-api401` (`lot3b-api401`) | le refus `401` parti avant la connexion et revenu après (`apps/web/src/api.ts` ; R347 à R349) | **en cours d'écriture** |
+
+`agent-a31f94a866585f811` porte les prototypes de l'essai du bloc déplacé, lus par la Task 13b : à garder jusqu'à sa clôture.
+
+**Ce que les relectures ont trouvé et qui est en correction** (les rapports entiers sont dans la transcription de la session et, pour la piste S, sous `.superpowers/sdd/…/final-track-s-review-tour2.md` ; les sondes des relecteurs sous `.superpowers/sdd/…/*-sondes/`) :
+
+- **C1b** : la fenêtre d'un bloc se ferme quand un autre recrée ou supprime le bloc, et la frappe qui suit part dans le document (décision : la fenêtre se tient par `id` de bloc) ; un signet dont `url` n'est pas une chaîne casse l'éditeur chez tous ; la fenêtre est coupée en bas de l'écran ; aucun chemin au clavier ne mène du bloc à son bouton (décision : un raccourci « régler ce bloc ») ; le test de « jamais un `style` venu du document » ne tient pas sa règle ; une dizaine de mineurs. Antérieur à la tâche (R346) : 1 000 callouts s'ouvrent en 900 ms (une page mixte ordinaire tient le budget) : une mesure consignée est ajoutée, le seuil et le remède se décident à la relecture finale de la partie B. R308 se récrit : on garde le geste de BlockNote (« / » dans un bloc vide le remplace).
+- **S3** : un `finish` ou un `remove` lâché en route rendait le verrou avant son geste (corrigé : un seul `spawn_blocking` par geste, sous un second verrou) ; trois promesses sans test ; la durabilité du renommage (corrigé : le dossier synchronisé sous Unix).
+- **Piste S, tour 3** : la lecture d'un MMD était plus que quadratique sur une forme de liens (défaut du lot 1 : 200 Ko, 18 à 44 s ; corrigé : 29 ms, et la lecture hors des fils du serveur, quatre de front) ; la pire écriture acceptée durait 11 à 12 s (corrigé : 7,1 s) ; la session relue avant une seconde attente de l'acteur (corrigé). Laissé ouvert, à juger par la re-relecture : le retrait d'une page énorme (R382), une page aux colonnes invalides imbriquées lue en 9 s (R385), la sonde du vrai Yjs pas gardée en test (R387).
+
+### Ce qui reste, dans l'ordre
+
+**Partie A :**
+
+1. Finir la **re-relecture du tour 3 de la piste S**, corriger s'il le faut, reprendre le tour sur `main` : la piste S est alors close.
+2. Finir la **Task 13b**, la faire relire, la reprendre.
+3. **Task 13c et Task 14** (documentation contre le code, d'après la liste de la [relecture finale](2026-11-12-p1-lot3-relecture-finale.md) ; la limite du bloc déplacé ; la recette `docs/recette/2026-11-12-p1-lot3a-recette.md`), la troisième passe de la relecture finale, les suites sur un clone neuf, les budgets au calme, l'essai de migration sur une copie d'une base du lot 2, la clôture (`docs/REPRISE.md`, README).
+
+**Partie B :**
+
+4. **S3** : finir la re-relecture, reprendre sur `main`, **lire la CI Linux** (le code `#[cfg(unix)]`). Puis S4a (envoyer et lire un fichier), S4b, S6.
+5. **C1b** : finir le tour de correction, le faire re-relire, reprendre sur `main` ; **rebaser `lot3b-client` (C2) dessus** (la fenêtre tenue par `id` de bloc et le raccourci « régler ce bloc » concernent l'équation) ; finir la relecture de C2, corriger, reprendre. Puis C3, C4, C5, C8 (après S4a), C9, C10.
+6. **C7** : finir, faire relire, reprendre.
+7. **Le refus `401` tardif** (`api.ts`) : finir, faire relire, reprendre.
+8. **À lancer** : une tâche serveur de robustesse — une **file d'écriture équitable dans le store** (la relecture de S5 a mesuré qu'une boucle d'écritures par un simple lecteur porte la frappe d'un autre de 4 ms à 876 ms au p95, et que huit boucles font échouer des écritures : « database is locked ») ; `TCP_NODELAY` sur le serveur (hypothèse à prouver : sous Linux, un petit segment attendrait jusqu'à 40 ms) ; `Witness` dans deux tests qui peuvent passer à tort (`tests/favorites.rs`, `roster.rs`). Et **les deux tests de synchro rouges sous Windows sur la CI** (plus haut).
+9. X2 (après C1b), D, la relecture finale de la partie B.
+
+### Ce qui attend le propriétaire (en plus de la liste plus bas)
+
+- **Le disque** : les tests laissaient leurs bases dans le dossier temporaire de Windows (39 Go le matin). L'agent ne balaie pas un dossier partagé : c'est à Lenny de le vider (la commande lui a été donnée). Depuis, chaque agent a son dossier temporaire sous `.claude/worktrees/tmp-agents/`.
+- **La limite d'usage du modèle** a coupé tous les agents de 11 h à 14 h 25 : combien d'agents mener de front.
+- **Choix de produit neufs à confirmer** : les favoris de qui quitte un espace restent en base, cachés, et reviennent s'il y revient (R280) ; une formule qui définit ses macros (`\def`, `\newcommand`) n'est pas rendue, parce qu'elle peut geler la page de tous (R316, en relecture) ; dans les invitations en attente, l'échéance passe en tête de la ligne (R336) ; les plus grands tableaux acceptés par `PUT /mmd` sont environ deux fois plus petits (R368 récrit).
+
+
 ## État à la pause du 2026-11-13 (3 h 40 du matin)
 
 > **Reprise le 2026-11-13 à 5 h 10** (« relance le travail »). Quatre travaux sont repartis de front, chacun dans son arbre, dans l'ordre de « Ce qui reste » : (1) la fin du tour de correction de la piste S, dans l'arbre principal, avec une décision de plus sur le doute de C1 (à la relecture du stockage, une entrée du journal où un client paraît deux fois est écartée et journalisée, et la page se charge sans elle) ; (2) la fin de la relecture de la Task 13a, dans son atelier, P1 et P3 d'abord ; (3) la fin du tour de la Task C6 de la partie B, dans son atelier, puis son rebase sur `main` ; (4) la relecture des e2e de la piste C, dans un atelier neuf (`.claude/worktrees/relecture-e2e`, branche `relecture-e2e`, ports `5178` et `8085`). Ce qui suit décrit l'état **à la pause** ; il est mis à jour à chaque travail clos.
