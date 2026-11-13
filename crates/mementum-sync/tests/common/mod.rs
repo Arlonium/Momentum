@@ -1,7 +1,8 @@
-//! Outils des tests d'intégration : base temporaire, page créée, hub et serveur de test, et une
-//! connexion lue octet par octet (`raw`).
+//! Outils des tests d'intégration : base temporaire, page créée, hub et serveur de test, une
+//! connexion lue octet par octet (`raw`), et l'affirmation d'une limite connue (`limit`).
 #![allow(dead_code)]
 
+pub mod limit;
 pub mod raw;
 
 use std::path::{Path, PathBuf};

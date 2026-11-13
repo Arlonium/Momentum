@@ -15,20 +15,32 @@
 //! - **le glisser tel qu'un navigateur l'écrit** : les octets de `tests/fixtures/moves/`, écrits
 //!   par y-prosemirror sous un vrai éditeur BlockNote 0.57, aux identifiants de client fixes, par
 //!   la suite Vitest `apps/web/src/editor/blockMoves.test.ts`, qui les compare à chaque exécution
-//!   et les réécrit avec `EXPORT_FIXTURES=1`. Les éléments entre l'ancienne place et la nouvelle
-//!   y sont récrits sur place (leurs `id` et leurs textes changent d'élément), sans copie ni
-//!   suppression d'élément. Pas bâtis avec yrs : une insertion placée après un caractère
-//!   supprimé change la fusion, et rien ne dit que yrs la place comme Yjs.
+//!   et les réécrit avec `EXPORT_FIXTURES=1`. Depuis le correctif de y-prosemirror (Rulings R220
+//!   et R223), le bloc glissé y est supprimé et recréé au même `id`, et les autres ne sont pas
+//!   touchés ; avant lui, les éléments entre l'ancienne place et la nouvelle étaient récrits sur
+//!   place. Pas bâtis avec yrs : une insertion placée après un caractère supprimé change la
+//!   fusion, et rien ne dit que yrs la place comme Yjs.
 //!
-//! Ces tests disent ce qui est voulu, pas ce qui se passe aujourd'hui : chaque bloc une seule
-//! fois, X juste sous Z, le texte de Tom dans le bloc où il l'a tapé et nulle part ailleurs, chez
-//! Mona, chez Tom, dans le document de l'acteur et dans le journal relu. Chacun vérifie d'abord,
-//! par le même chemin, que le déplacement seul et la frappe seule font ce qu'ils disent.
+//! Chaque test dit ce qui est voulu : chaque bloc une seule fois, X juste sous Z, le texte de Tom
+//! dans le bloc où il l'a tapé et nulle part ailleurs, chez Mona, chez Tom, dans le document de
+//! l'acteur et dans le journal relu. Chacun vérifie d'abord, par le même chemin, que le
+//! déplacement seul et la frappe seule font ce qu'ils disent.
 //!
-//! Ce qu'ils montrent aujourd'hui est au registre du lot 3, sous « Task 12 ».
+//! Ceux du module `known_limits` affirment une **limite connue** (Ruling R340,
+//! `common/limit.rs`) : ce qui est voulu n'est pas tenu aujourd'hui. Ils sont exécutés à chaque
+//! passage, et passent tant que la perte dite, mot pour mot, se voit aux quatre endroits ; ils
+//! échouent le jour où elle est levée (la Task 13b sort alors le test du module et lui fait
+//! affirmer la page voulue), et pour toute autre issue : une précondition manquée, une page qui
+//! ne converge pas, une autre perte. Aucun n'est `#[ignore]`, marque réservée aux mesures :
+//! ignorés, ils échouaient par construction dans le job `budgets` de la CI, qui lance tout ce qui
+//! l'est.
+//!
+//! Ce qu'ils montrent est au registre du lot 3, sous « Task 12 », puis sous « La CI remise au
+//! vert ».
 
 mod common;
 
+use common::limit::known_limit;
 use common::*;
 use mementum_md::{Block, block_text};
 use mementum_store::{NewNode, NodeKind, Store};
@@ -57,6 +69,28 @@ enum Step {
     /// Tom tape « de Tom ».
     Edit,
 }
+
+/// Une page telle qu'on la compare : `(id, texte)` de chaque bloc de premier niveau, dans l'ordre.
+type Page = Vec<(String, String)>;
+
+/// Les quatre endroits où la page est relue, dans l'ordre de [`Scene::play`].
+const PLACES: [&str; 4] = [
+    "chez Mona",
+    "chez Tom",
+    "dans le document de l'acteur",
+    "dans le journal relu",
+];
+
+/// Pourquoi la frappe se perd quand le déplacement est une copie au même id puis la suppression
+/// de l'original (Tab, Maj+Tab, les enfants d'un bloc glissé) : elle est faite dans l'original,
+/// qui part avec elle.
+const LOST_WITH_THE_ORIGINAL: &str = "R39 : la frappe faite dans un bloc qu'un autre copie puis \
+     supprime part avec l'original ; à lever par la Task 13b";
+
+/// Pourquoi la frappe se perd dans un bloc glissé par un navigateur : depuis le Ruling R220, il
+/// est supprimé et recréé au même id, et la frappe est faite dans l'élément supprimé.
+const LOST_WITH_THE_DRAGGED_BLOCK: &str = "R39 et R220 : la frappe faite dans un bloc qu'un autre \
+     glisse part avec l'élément supprimé ; à lever par la Task 13b";
 
 /// Les deux ordres d'arrivée, nommés pour les messages.
 const ORDERS: [(&str, [Step; 2]); 2] = [
@@ -169,8 +203,8 @@ impl Scene {
     /// serveur ne porte que ce que le serveur n'a pas). L'acteur traite chacune avant la
     /// suivante ; son auteur reçoit en retour l'état du serveur, comme à une reconnexion. Attend
     /// ensuite que Mona et Tom aient tout ce que le serveur a écrit, puis rend ce que voient
-    /// Mona, Tom, l'acteur et le journal relu.
-    async fn play(&self, steps: &[Step]) -> Vec<(&'static str, Vec<Block>)> {
+    /// Mona, Tom, l'acteur et le journal relu ([`PLACES`]).
+    async fn play(&self, steps: &[Step]) -> Vec<(&'static str, Page)> {
         for step in steps {
             let (author, update) = match step {
                 Step::Move => (&self.mona, &self.moved),
@@ -189,19 +223,20 @@ impl Scene {
                 "{who} n'a pas reçu tout ce que le serveur a écrit"
             );
         }
-        vec![
-            ("chez Mona", self.mona.blocks()),
-            ("chez Tom", self.tom.blocks()),
-            (
-                "dans le document de l'acteur",
-                self.f.hub.read_blocks(self.f.page).await.unwrap(),
-            ),
-            ("dans le journal relu", stored.read_blocks()),
-        ]
+        let seen = [
+            self.mona.blocks(),
+            self.tom.blocks(),
+            self.f.hub.read_blocks(self.f.page).await.unwrap(),
+            stored.read_blocks(),
+        ];
+        PLACES
+            .into_iter()
+            .zip(seen.iter().map(|blocks| summary(blocks)))
+            .collect()
     }
 
     /// `(id, texte)` attendus, dans l'ordre de la page.
-    fn expected(&self, wanted: [(&String, &str); 3]) -> Vec<(String, String)> {
+    fn expected(&self, wanted: [(&String, &str); 3]) -> Page {
         wanted
             .into_iter()
             .map(|(id, text)| (id.clone(), text.to_string()))
@@ -210,7 +245,7 @@ impl Scene {
 }
 
 /// Les blocs de premier niveau : `(id, texte)`, dans l'ordre de la page.
-fn summary(blocks: &[Block]) -> Vec<(String, String)> {
+fn summary(blocks: &[Block]) -> Page {
     blocks
         .iter()
         .map(|b| (b.id.clone(), block_text(b)))
@@ -228,8 +263,8 @@ where
     let s = scene().await;
     let Ids { x, y, z } = &s.ids;
     let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X")]);
-    for (who, blocks) in s.play(&[Step::Move]).await {
-        assert_eq!(summary(&blocks), wanted, "déplacement seul, {who}");
+    for (who, page) in s.play(&[Step::Move]).await {
+        assert_eq!(page, wanted, "déplacement seul, {who}");
     }
 
     let s = scene().await;
@@ -240,9 +275,18 @@ where
         .position(|(id, _)| id == typed(&s.ids))
         .unwrap();
     wanted[at].1.push_str(TYPED);
-    for (who, blocks) in s.play(&[Step::Edit]).await {
-        assert_eq!(summary(&blocks), wanted, "frappe seule, {who}");
+    for (who, page) in s.play(&[Step::Edit]).await {
+        assert_eq!(page, wanted, "frappe seule, {who}");
     }
+}
+
+/// La page `page` vue aux quatre endroits : ce que [`Scene::play`] rendrait si elle y était
+/// partout. Sert à dire la perte d'une limite connue avec les mots de [`check_wanted`].
+fn everywhere(page: &Page) -> Vec<(&'static str, Page)> {
+    PLACES
+        .into_iter()
+        .map(|place| (place, page.clone()))
+        .collect()
 }
 
 /// Ce que la Task 13 doit rendre vrai, partout (`seen`), après `order` : la page `wanted`, Tom
@@ -250,15 +294,14 @@ where
 fn check_wanted(
     s: &Scene,
     order: &str,
-    seen: &[(&str, Vec<Block>)],
+    seen: &[(&str, Page)],
     wanted: &[(String, String)],
     typed: &str,
     failures: &mut Vec<String>,
 ) {
     let Ids { x, z, .. } = &s.ids;
-    for (where_, blocks) in seen {
+    for (where_, page) in seen {
         let who = format!("{order}, {where_}");
-        let page = summary(blocks);
         let texts: Vec<&str> = page.iter().map(|(_, text)| text.as_str()).collect();
         for (id, text) in wanted {
             let found: Vec<&str> = page
@@ -301,7 +344,7 @@ fn check_wanted(
                 "{who} : le texte de Tom est dans un autre bloc : {elsewhere:?}"
             ));
         }
-        if page != wanted {
+        if page.as_slice() != wanted {
             failures.push(format!(
                 "{who} : la page n'est pas celle voulue (vu : {page:?}, voulu : {wanted:?})"
             ));
@@ -309,59 +352,12 @@ fn check_wanted(
     }
 }
 
-/// Le déplacement arrive d'abord, la frappe de Tom ensuite : Tom écrivait hors ligne, et revient
-/// après que Mona a déplacé le bloc. Copie et suppression, bâties avec yrs.
+/// Le glisser de X sous Z, et la frappe de Tom dans Y, que personne ne déplace, tels qu'un
+/// navigateur les écrit, dans les deux ordres d'arrivée : exactement
+/// `[y « Bloc Y de Tom », z « Bloc Z », x « Bloc X »]`. Une limite jusqu'au correctif de
+/// y-prosemirror (Ruling R220) : le glisser récrivait Y sur place, et le texte de Tom passait
+/// dans Z. Il ne touche plus aux blocs qu'il croise.
 #[tokio::test]
-#[ignore = "perte connue R39, levée par la Task 13"]
-async fn edit_arriving_after_the_move_survives() {
-    controls(Scene::built, |ids| &ids.x).await;
-    let s = Scene::built().await;
-    let Ids { x, y, z } = &s.ids;
-    let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
-    let seen = s.play(&[Step::Move, Step::Edit]).await;
-    let mut failures = Vec::new();
-    check_wanted(&s, ORDERS[0].0, &seen, &wanted, x, &mut failures);
-    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
-}
-
-/// La frappe de Tom arrive d'abord, le déplacement ensuite : Mona déplaçait hors ligne, et
-/// revient après que Tom a écrit dans le bloc. Copie et suppression, bâties avec yrs.
-#[tokio::test]
-#[ignore = "perte connue R39, levée par la Task 13"]
-async fn move_arriving_after_the_edit_keeps_the_edit() {
-    controls(Scene::built, |ids| &ids.x).await;
-    let s = Scene::built().await;
-    let Ids { x, y, z } = &s.ids;
-    let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
-    let seen = s.play(&[Step::Edit, Step::Move]).await;
-    let mut failures = Vec::new();
-    check_wanted(&s, ORDERS[1].0, &seen, &wanted, x, &mut failures);
-    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
-}
-
-/// Le glisser de X sous Z et la frappe de Tom dans X, tels qu'un navigateur les écrit, dans les
-/// deux ordres d'arrivée : exactement `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`.
-#[tokio::test]
-#[ignore = "perte connue R39, levée par la Task 13"]
-async fn browser_move_keeps_the_text_typed_in_the_moved_block() {
-    let scene = || Scene::browser(BROWSER_TYPED_IN_X);
-    controls(scene, |ids| &ids.x).await;
-    let mut failures = Vec::new();
-    for (order, steps) in ORDERS {
-        let s = scene().await;
-        let Ids { x, y, z } = &s.ids;
-        let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
-        let seen = s.play(&steps).await;
-        check_wanted(&s, order, &seen, &wanted, x, &mut failures);
-    }
-    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
-}
-
-/// Le glisser de X sous Z, et la frappe de Tom dans Y, que personne ne déplace mais que le
-/// glisser récrit, tels qu'un navigateur les écrit, dans les deux ordres d'arrivée : exactement
-/// `[y « Bloc Y de Tom », z « Bloc Z », x « Bloc X »]`.
-#[tokio::test]
-#[ignore = "perte connue R39, levée par la Task 13"]
 async fn browser_move_keeps_the_text_typed_in_a_block_it_shifts() {
     let scene = || Scene::browser(BROWSER_TYPED_IN_Y);
     controls(scene, |ids| &ids.y).await;
@@ -374,4 +370,133 @@ async fn browser_move_keeps_the_text_typed_in_a_block_it_shifts() {
         check_wanted(&s, order, &seen, &wanted, y, &mut failures);
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Les limites connues (Ruling R340) : ce que chaque test dit voulu n'est pas tenu, et il
+/// l'affirme. Il passe tant que la perte dite se voit aux quatre endroits, mot pour mot, et
+/// échoue le jour où elle est levée : le sortir alors de ce module, et remplacer `known_limit`
+/// par `assert!(failures.is_empty(), …)`.
+mod known_limits {
+    use super::*;
+
+    /// Le déplacement arrive d'abord, la frappe de Tom ensuite : Tom écrivait hors ligne, et
+    /// revient après que Mona a déplacé le bloc. Copie et suppression, bâties avec yrs.
+    ///
+    /// Voulu : `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`. Aujourd'hui, le texte de Tom
+    /// n'est nulle part : X est juste sous Z, sans lui.
+    #[tokio::test]
+    async fn edit_arriving_after_the_move_survives() {
+        controls(Scene::built, |ids| &ids.x).await;
+        let s = Scene::built().await;
+        let Ids { x, y, z } = &s.ids;
+        let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
+        let lost = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X")]);
+        let seen = s.play(&[Step::Move, Step::Edit]).await;
+        let (mut failures, mut loss) = (Vec::new(), Vec::new());
+        check_wanted(&s, ORDERS[0].0, &seen, &wanted, x, &mut failures);
+        check_wanted(&s, ORDERS[0].0, &everywhere(&lost), &wanted, x, &mut loss);
+        known_limit(LOST_WITH_THE_ORIGINAL, &failures, &loss);
+    }
+
+    /// La frappe de Tom arrive d'abord, le déplacement ensuite : Mona déplaçait hors ligne, et
+    /// revient après que Tom a écrit dans le bloc. Copie et suppression, bâties avec yrs.
+    ///
+    /// Voulu : `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`. Aujourd'hui, le texte de Tom
+    /// n'est nulle part : X est juste sous Z, sans lui.
+    #[tokio::test]
+    async fn move_arriving_after_the_edit_keeps_the_edit() {
+        controls(Scene::built, |ids| &ids.x).await;
+        let s = Scene::built().await;
+        let Ids { x, y, z } = &s.ids;
+        let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
+        let lost = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X")]);
+        let seen = s.play(&[Step::Edit, Step::Move]).await;
+        let (mut failures, mut loss) = (Vec::new(), Vec::new());
+        check_wanted(&s, ORDERS[1].0, &seen, &wanted, x, &mut failures);
+        check_wanted(&s, ORDERS[1].0, &everywhere(&lost), &wanted, x, &mut loss);
+        known_limit(LOST_WITH_THE_ORIGINAL, &failures, &loss);
+    }
+
+    /// Le glisser de X sous Z et la frappe de Tom dans X, tels qu'un navigateur les écrit, dans
+    /// les deux ordres d'arrivée.
+    ///
+    /// Voulu : exactement `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`. Aujourd'hui, dans
+    /// les deux ordres, le texte de Tom n'est nulle part : X est juste sous Z, sans lui (avant le
+    /// Ruling R220, il passait dans Y).
+    #[tokio::test]
+    async fn browser_move_keeps_the_text_typed_in_the_moved_block() {
+        let scene = || Scene::browser(BROWSER_TYPED_IN_X);
+        controls(scene, |ids| &ids.x).await;
+        let (mut failures, mut loss) = (Vec::new(), Vec::new());
+        for (order, steps) in ORDERS {
+            let s = scene().await;
+            let Ids { x, y, z } = &s.ids;
+            let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
+            let lost = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X")]);
+            let seen = s.play(&steps).await;
+            check_wanted(&s, order, &seen, &wanted, x, &mut failures);
+            check_wanted(&s, order, &everywhere(&lost), &wanted, x, &mut loss);
+        }
+        known_limit(LOST_WITH_THE_DRAGGED_BLOCK, &failures, &loss);
+    }
+}
+
+/// La cible elle-même : seule la perte dite, mot pour mot, passe pour une limite connue.
+mod the_limit_itself {
+    use super::known_limit;
+
+    fn lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| line.to_string()).collect()
+    }
+
+    /// La perte dite de ces essais : le texte de Tom manque, chez Mona et chez Tom.
+    fn loss() -> Vec<String> {
+        lines(&[
+            "chez Mona : le texte de Tom n'y est pas",
+            "chez Tom : le texte de Tom n'y est pas",
+        ])
+    }
+
+    #[test]
+    fn the_stated_loss_is_the_limit() {
+        known_limit("essai", &loss(), &loss());
+    }
+
+    #[test]
+    #[should_panic(expected = "limite levée (essai)")]
+    fn a_lifted_limit_fails() {
+        known_limit("essai", &[], &loss());
+    }
+
+    #[test]
+    #[should_panic(expected = "pas la perte dite (essai)")]
+    fn another_loss_fails() {
+        let unmet = lines(&[
+            "chez Mona : le texte de Tom est dans un autre bloc",
+            "chez Tom : le texte de Tom est dans un autre bloc",
+        ]);
+        known_limit("essai", &unmet, &loss());
+    }
+
+    /// Une perte levée à moitié (chez Mona, pas chez Tom) n'est plus la perte dite.
+    #[test]
+    #[should_panic(expected = "pas la perte dite (essai)")]
+    fn a_part_of_the_loss_fails() {
+        known_limit("essai", &loss()[1..], &loss());
+    }
+
+    /// Les mêmes manques dans un autre ordre : ce n'est pas mot pour mot.
+    #[test]
+    #[should_panic(expected = "pas la perte dite (essai)")]
+    fn the_loss_in_another_order_fails() {
+        let unmet: Vec<String> = loss().into_iter().rev().collect();
+        known_limit("essai", &unmet, &loss());
+    }
+
+    /// Un test dont la perte dite est vide (sa page perdue vaut sa page voulue) n'affirme rien.
+    #[test]
+    #[should_panic(expected = "limite sans perte dite (essai)")]
+    fn a_limit_without_a_loss_fails() {
+        known_limit("essai", &loss(), &[]);
+    }
 }
