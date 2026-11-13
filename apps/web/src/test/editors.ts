@@ -271,11 +271,15 @@ export function containerOf(doc: PmNode, id: string): { pos: number; node: PmNod
 
 /**
  * Chez `p`, glisse le bloc `moved` sous le bloc `under`, ou au-dessus du bloc `above`, comme le
- * dépôt de ProseMirror (`editHandlers.drop` de prosemirror-view) : en une transaction, le bloc
- * retiré, puis remis, relu du presse-papiers (des nœuds neufs), et le curseur laissé dans le bloc
- * déposé, à la fin de son texte. C'est ce que laisse un dépôt dans un navigateur
- * (`the_cursor_left_in_a_dropped_block…`, `e2e/block-move.spec.ts`). y-prosemirror ne regarde que
- * l'état final du document et la sélection (`_prosemirrorChanged`).
+ * dépôt de ProseMirror dans un navigateur (`editHandlers.drop` de prosemirror-view), relevé le
+ * 2026-11-13 :
+ *  - une transaction retire le bloc, puis le remet, relu du presse-papiers (des nœuds neufs), et
+ *    sélectionne le bloc déposé comme un nœud. C'est elle que y-prosemirror écrit : il ne regarde
+ *    que l'état final du document et la sélection (`_prosemirrorChanged` ;
+ *    `a_drop_is_written_with_the_selection_on_what_it_drops`, `e2e/block-move.spec.ts`) ;
+ *  - BlockNote remplace aussitôt cette sélection par un curseur de texte à la fin du bloc déposé
+ *    (`the_cursor_left_in_a_dropped_block…`, `e2e/block-move.spec.ts`). Pour un bloc sans texte
+ *    (une image), ce second temps n'a pas été relevé : la sélection de nœud est laissée.
  */
 export function drag(p: Peer, moved: string, place: { under: string } | { above: string }): void {
   p.editor.transact((tr) => {
@@ -285,7 +289,12 @@ export function drag(p: Peer, moved: string, place: { under: string } | { above:
     const target = containerOf(tr.doc, "under" in place ? place.under : place.above);
     const at = "under" in place ? target.pos + target.node.nodeSize : target.pos;
     tr.insert(at, copy);
-    tr.setSelection(TextSelection.create(tr.doc, at + 2 + copy.firstChild!.content.size));
+    tr.setSelection(NodeSelection.create(tr.doc, at));
+  });
+  p.editor.transact((tr) => {
+    const { pos, node } = containerOf(tr.doc, moved);
+    const content = node.firstChild!;
+    if (content.inlineContent) tr.setSelection(TextSelection.create(tr.doc, pos + 2 + content.content.size));
   });
 }
 
