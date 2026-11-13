@@ -830,7 +830,25 @@ pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
     .chain(comment_routes(id, SOME_THREAD, SOME_MESSAGE))
     // L'historique de la page (`routes/versions.rs`), sur une version quelconque.
     .chain(version_routes(id, SOME_VERSION))
+    // Le favori du compte sur la page (`routes/favorites.rs`).
+    .chain(favorite_routes(id))
     .collect()
+}
+
+/// Une requête sur chaque route du favori de la page `id`, sans corps : `(nom, requête)`.
+pub fn favorite_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
+    let favorite = format!("/api/v1/pages/{id}/favorite");
+    let bare = |method: Method| {
+        Request::builder()
+            .method(method)
+            .uri(&favorite)
+            .body(Body::empty())
+            .unwrap()
+    };
+    vec![
+        ("PUT favori", bare(Method::PUT)),
+        ("DELETE favori", bare(Method::DELETE)),
+    ]
 }
 
 /// Une requête sur chaque route de l'historique de la page `id`, méthodes comprises, celles qui

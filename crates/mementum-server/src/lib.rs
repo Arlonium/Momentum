@@ -22,12 +22,14 @@
 //! | `POST /api/v1/invitations/accept` | oui | `Accepted` (rien de ce qu'avait le compte ne baisse) ; `changed: false` si elle ne lui donne rien (un rôle au moins égal ; pour une page, un niveau effectif au moins égal) : rien n'est écrit, et elle reste valable (Ruling R257) ; `404 invalid_invitation` |
 //! | `GET /api/v1/spaces/{id}/tree` | un rôle | [`Tree`] : les pages de l'espace que la personne voit, hors corbeille, avec son niveau et sa section, et la version de l'espace (`lsn`), lue avant les droits et les pages : l'arbre est au moins aussi récent qu'elle (Ruling R141) |
 //! | `GET /api/v1/spaces/{id}/trash` | un rôle | [`PageNode`]`[]` : les pages mises elles-mêmes à la corbeille, là où son niveau permet de restaurer (`edit`), la plus récente d'abord ; si une page parente y est aussi, la restauration répond `409 parent_trashed` |
+//! | `GET /api/v1/spaces/{id}/favorites` | un rôle | `Favorites` : les pages favorites du compte dans l'espace, celles qu'il voit, hors corbeille, dans l'ordre où il les a ajoutées ; une page qu'il ne voit plus, ou à la corbeille, n'y est pas, et y revient à sa place avec l'accès, ou restaurée (Ruling R254) |
 //! | `POST /api/v1/pages` | racine : `member` (un invité : `403`) ; sous-page : `edit` sur le parent | `201`, [`PageNode`] : le nœud, ses accès et son document, écrits ensemble ; `404 not_found` pour un `spaceId` mal formé, inconnu ou d'un espace où l'on n'a aucun rôle ; `409 trashed` sous un parent à la corbeille ; `422 invalid_parent`, `invalid_after`, `title_too_long` ; `422 invalid_json` sans `spaceId` à la racine, ou avec `section` sous un parent |
 //! | `GET /api/v1/pages/{id}` | `read` | [`PageNode`] |
 //! | `PATCH /api/v1/pages/{id}` | titre, place sous le même parent : `edit` ; autre parent : `full`, et `edit` sur le nouveau parent (racine : `member`) | [`PageNode`] ; `409 cycle` ; `422 invalid_parent`, `invalid_after`, `title_too_long` ; `409 page_moved` si la page a changé de place, ou ce qu'on peut en faire, à chacune des quatre tentatives : rien n'est écrit (Ruling R91). À la racine, la page garde son accès général et qui la déplace y a `full` (Rulings R82 et R94) |
 //! | `POST /api/v1/pages/{id}/trash` | `edit` | [`PageNode`] : la page et son sous-arbre sont à la corbeille ; `409 trashed` si elle y est déjà, elle-même ou par une page parente |
 //! | `POST /api/v1/pages/{id}/restore` | `edit` | [`PageNode`] : la page et son sous-arbre reviennent (sans effet hors corbeille) ; `409 parent_trashed` si une page parente y est |
 //! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon ; `409 not_trashed` si ni elle ni une page parente n'est à la corbeille (Ruling R65) |
+//! | `PUT`, `DELETE /api/v1/pages/{id}/favorite` | `read` (à la corbeille aussi) | `204` : la page devient, ou n'est plus, un favori du compte ; déjà dans cet état : `204`, rien n'est écrit ; un favori n'avance ni `spaces.rev` ni `spaces.lsn`, et rien n'est annoncé sur le canal de l'espace (Ruling R254) |
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
 //! | `PUT /api/v1/pages/{id}/mmd` | `edit` | `204` : le contenu est remplacé, et un bloc écrit sans ancre garde l'identifiant du bloc courant qui lui correspond (même liste de frères, même contenu, ou même place et même type ; Ruling R201) ; `422 invalid_mmd` (avec `line`) ; `422 too_many_blocks` au-delà de 12 000 blocs, tous niveaux et lignes de tableau comprises, avant le verrou et le chargement de la page (Ruling R259) ; `422 too_long_to_write` si l'écriture est estimée au-delà de 8 s d'acteur (`mementum_crdt::write_cost` : une liste trop longue, frères, lignes ou cellules d'un tableau, morceaux du contenu en ligne d'un bloc, ou trop d'éléments), au même moment (Ruling R368) ; `422 invalid_blocks` : prop hors registre sur un bloc ou une cellule (Ruling R41), ou blocs que BlockNote refuserait ; session relue et droits revérifiés une fois la page chargée (Rulings R89, R365 : `401` si la session a pris fin pendant l'attente de l'acteur) ; une écriture du serveur à la fois par page, avec la restauration : chaque requête relit sa session (`401` si elle est fermée, Ruling R209) et ses droits après la précédente, et va au bout même si le client coupe (Ruling R200) |
 //! | `GET /api/v1/pages/{id}/access` | `full` (à la corbeille aussi) | `PageAccess` : l'accès général effectif et son plancher (celui d'une page parente), les comptes nommés sur la page ou ses ancêtres, les invitations de la page (avec son titre, `pageTitle`) |
@@ -103,6 +105,13 @@
 //! thread_limit`, `message_limit`, `reaction_limit` ou `page_comment_limit`, qui disent quoi
 //! faire, et quand c'est la part du compte. Les plafonds communs passent avant la part.
 //!
+//! **Favoris** (`routes/favorites.rs`, Ruling R254). Une ligne `(compte, page)`, à son auteur
+//! seul. Le store la garde quand la page devient invisible ou part à la corbeille ; la liste ne
+//! rend que ce que `access.rs` montre au compte, hors corbeille : elle ne nomme jamais une page
+//! qu'il ne voit plus, et rien n'y dit qu'elle existe encore. Poser ou retirer un favori
+//! n'avance ni `spaces.rev` ni `spaces.lsn` : il ne change ni les droits ni la barre latérale
+//! des autres, et le canal de l'espace n'en dit rien.
+//!
 //! **Historique** (`routes/versions.rs`, Ruling R135). L'acteur de chaque page coupe ses
 //! versions (`mementum-sync`) : l'état complet de la page, avec les comptes qui l'ont modifiée
 //! depuis la version d'avant, avant l'écriture qui suit de `MEMENTUM_VERSION_EVERY_SECS` (dix
@@ -175,6 +184,7 @@ mod routes {
     pub(crate) mod auth;
     pub(crate) mod comments;
     pub(crate) mod events;
+    pub(crate) mod favorites;
     pub(crate) mod info;
     pub(crate) mod invitations;
     pub(crate) mod pages;
@@ -428,6 +438,10 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/invitations/accept", post(invitations::accept))
         .route("/api/v1/spaces/{id}/tree", get(pages::tree))
         .route("/api/v1/spaces/{id}/trash", get(pages::trash_list))
+        .route(
+            "/api/v1/spaces/{id}/favorites",
+            get(routes::favorites::list),
+        )
         .route("/api/v1/pages", post(pages::create))
         .route(
             "/api/v1/pages/{id}",
@@ -435,6 +449,10 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/v1/pages/{id}/trash", post(pages::trash))
         .route("/api/v1/pages/{id}/restore", post(pages::restore))
+        .route(
+            "/api/v1/pages/{id}/favorite",
+            put(routes::favorites::add).delete(routes::favorites::remove),
+        )
         .route(
             "/api/v1/pages/{id}/mmd",
             get(pages::get_mmd).put(pages::put_mmd),

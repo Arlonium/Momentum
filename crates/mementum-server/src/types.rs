@@ -60,6 +60,18 @@ pub struct Tree {
     pub nodes: Vec<PageNode>,
 }
 
+/// Les pages favorites du compte de la session dans un espace
+/// (`GET /api/v1/spaces/{id}/favorites`, Ruling R254).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Favorites {
+    /// Les identifiants des pages, dans l'ordre où le compte les a ajoutées : seulement celles
+    /// qu'il voit, hors corbeille. Une page qu'il ne voit plus, ou à la corbeille, n'y est pas ;
+    /// elle y revient à sa place avec l'accès, ou restaurée. Titre et niveau se lisent dans
+    /// l'arbre de l'espace ([`Tree`]), qui montre les mêmes pages.
+    pub pages: Vec<String>,
+}
+
 /// Version du serveur et de son schéma de blocs (`GET /api/v1/info`). Un
 /// client d'un autre schéma passe en lecture seule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -852,6 +864,7 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<CreateSpace>(&cfg),
         file::<ErrorBody>(&cfg),
         file::<ErrorCode>(&cfg),
+        file::<Favorites>(&cfg),
         file::<Info>(&cfg),
         file::<InvitationCreated>(&cfg),
         file::<InvitationInfo>(&cfg),

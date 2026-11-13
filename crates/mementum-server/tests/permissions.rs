@@ -638,6 +638,11 @@ async fn foreign_page_is_indistinguishable_from_missing() {
 
     // Aucune de ces requêtes n'a rien écrit.
     assert_eq!((node_count(&t).await, zoe.tree().await), before);
+    // Pas même un favori sur une page qu'on ne voit pas.
+    assert_eq!(
+        query_i64(&t.db_path(), "SELECT COUNT(*) FROM favorites").await,
+        0
+    );
     let commune = team
         .store
         .get_node(foreign)

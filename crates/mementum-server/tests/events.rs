@@ -1047,3 +1047,68 @@ async fn each_ping_comes_with_the_version() {
     assert!(channel.versions().iter().all(|v| *v == opening), "{seen:?}");
     assert!(!channel.is_closed());
 }
+
+/// Ruling R254 : un favori ne change que la barre latérale de son auteur. Le poser, puis le
+/// retirer, n'avance pas la version de l'espace, et le canal ne pousse rien, ni à son auteur ni
+/// aux autres : sinon le compte le moins doté d'un espace (ici une invitée en « Peut lire »)
+/// ferait relire l'arbre à tous ses onglets, à volonté.
+///
+/// Une absence de trame ne s'attend pas : c'est le renommage fait ensuite qui la prouve. Sa
+/// trame porte exactement le numéro qui suit celui de l'ouverture, et rien n'est arrivé entre
+/// les deux. Aucun ping ne vient pendant le test ([`NO_PING`]) : un ping redit la version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn favoriting_is_not_pushed_to_the_space() {
+    let t = app_pinging_every(NO_PING).await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let page = team
+        .page(
+            None,
+            "Commune",
+            &[members(Level::Edit), user(&team.gina, Level::Read)],
+        )
+        .await;
+    let favorite = format!("/api/v1/pages/{page}/favorite");
+    let favorites = format!("/api/v1/spaces/{}/favorites", team.space);
+    let rev = async || team.store.space_rev(team.space).await.unwrap();
+    let gina = opened(&team.gina.browser, addr, team.space).await;
+    let tom = opened(&team.tom.browser, addr, team.space).await;
+    let (opening, rev_at_opening) = (lsn(&team).await, rev().await);
+    for channel in [&gina, &tom] {
+        assert_eq!(channel.versions(), [opening]);
+    }
+
+    // Posé, puis retiré : les deux écritures ont bien eu lieu (la liste de Gina le dit).
+    let put = Request::put(&favorite).body(Body::empty()).unwrap();
+    let reply = team.gina.browser.send(put).await;
+    reply.assert_status(StatusCode::NO_CONTENT);
+    let listed = team.gina.browser.get(&favorites).await;
+    assert_eq!(listed.json(), json!({ "pages": [page.to_string()] }));
+    let reply = team.gina.browser.delete(&favorite).await;
+    reply.assert_status(StatusCode::NO_CONTENT);
+    let listed = team.gina.browser.get(&favorites).await;
+    assert_eq!(listed.json(), json!({ "pages": [] }));
+    assert_eq!((lsn(&team).await, rev().await), (opening, rev_at_opening));
+
+    // Le témoin : un renommage, qui avance la version d'un pas (et pas la révision).
+    team.mona
+        .patched(&page.to_string(), json!({ "title": "Renommée" }))
+        .await;
+    let renamed = lsn(&team).await;
+    for (who, channel) in [("Gina", &gina), ("Tom", &tom)] {
+        assert!(
+            channel
+                .wait_until(|c| c.versions().last() == Some(&renamed))
+                .await,
+            "{who} : {:?}",
+            channel.seen()
+        );
+        assert_eq!(
+            channel.versions(),
+            [opening, opening + 1],
+            "{who} : la trame du renommage, seule, au numéro qui suit celui de l'ouverture"
+        );
+        assert!(!channel.is_closed(), "{who}");
+    }
+    assert_eq!(rev().await, rev_at_opening);
+}
