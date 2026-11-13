@@ -14,13 +14,14 @@
 //! **Rien n'est supprimé au démarrage hors de `tmp/`** (R245). [`FileStore::open`] vide `tmp/`, et
 //! rien d'autre : un contenu que la base ne connaît pas (arrêt entre la pose et l'attache, base
 //! revenue en arrière) reste, compté par [`FileStore::strangers`], et repris tel quel si on le
-//! renvoie. Un contenu ne quitte le disque que par [`FileStore::remove`].
+//! renvoie ; un contenu que la base connaît et que le dépôt n'a pas est compté par
+//! [`FileStore::missing`]. Un contenu ne quitte le disque que par [`FileStore::remove`].
 //!
 //! **Un contenu posé est entier, et il y reste** (R278). Le fichier temporaire est vidé sur le
 //! disque ([`Upload::sync`] : `flush`, puis `sync_all`) avant de prendre sa place, et, sous Unix,
 //! le dossier où il vient d'entrer est synchronisé à son tour, dans le même geste : quand `finish`
 //! rend, une coupure de courant ne reprend plus le contenu (sous Windows, rien ne synchronise un
-//! dossier : la fenêtre reste). Si un fichier
+//! dossier : la fenêtre reste, et `missing` dit au démarrage ce qu'elle a coûté). Si un fichier
 //! est déjà à sa place : de même taille, il est **tenu pour** le même contenu, sans être relu, et
 //! le temporaire est supprimé (un contenu abîmé à taille égale n'est donc ni vu ni réparé) ; d'une
 //! autre taille, ou s'il n'est pas un fichier ordinaire, il est abîmé, et le temporaire le
@@ -507,6 +508,19 @@ impl FileStore {
             }
         }
         Ok((count, bytes))
+    }
+
+    /// Le nombre des contenus que la base connaît (`known`) et que le dépôt ne peut pas servir,
+    /// pour le journal du démarrage : rien à leur place, ou autre chose qu'un fichier ordinaire
+    /// dans un vrai dossier de préfixe (ce que [`FileStore::open_file`] refuse). C'est ce que
+    /// laissent une coupure de courant entre une attache validée et un renommage qui n'était pas
+    /// encore sur le disque (R278), ou une base restaurée sans son dossier `files/`. Ne touche à
+    /// rien ; la taille n'est pas comparée à celle que la base garde.
+    pub(crate) fn missing(&self, known: &[[u8; 32]]) -> u64 {
+        known
+            .iter()
+            .filter(|hash| self.dirs.ordinary(hash).is_err())
+            .count() as u64
     }
 
     /// Commence un envoi : un fichier neuf, `files/tmp/<UUIDv7>`. Lâché en route, il ne laisse
@@ -2400,6 +2414,39 @@ mod tests {
         assert_eq!(dirs.written(&hash, placed), [prefix]);
         assert_eq!(std::fs::read(dirs.content_path(&hash)).unwrap(), first);
         assert!(tmp_entries(dir.path()).is_empty());
+    }
+
+    /// `missing` compte les contenus que la base connaît et que le dépôt ne peut pas servir : un
+    /// fichier parti, jamais venu, ou autre chose à sa place (un dossier, un lien, R272). C'est
+    /// ce que laisse une coupure de courant entre une attache validée et un renommage qui
+    /// n'était pas encore sur le disque, ou une base restaurée sans son dossier `files/`.
+    #[tokio::test]
+    async fn missing_counts_what_the_database_knows_and_the_disk_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("ailleurs");
+        std::fs::create_dir_all(&outside).unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let there = put(&store, b"toujours la").await;
+        let gone = put(&store, b"parti du disque").await;
+        std::fs::remove_file(store.dirs.content_path(&gone.hash)).unwrap();
+        let never = sha256(b"jamais venu");
+        let folder = sha256(b"un dossier a sa place");
+        std::fs::create_dir_all(store.dirs.content_path(&folder)).unwrap();
+        let link = sha256(b"un lien a sa place");
+        let at = store.dirs.content_path(&link);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        link_dir(&outside, &at);
+
+        assert_eq!(store.missing(&[]), 0);
+        assert_eq!(store.missing(&[there.hash]), 0, "témoin");
+        assert_eq!(
+            store.missing(&[there.hash, gone.hash, never, folder, link]),
+            4
+        );
+        // Rien n'a bougé : le compte ne touche à rien.
+        assert!(store.open_file(&there.hash).await.is_ok());
+        assert!(store.dirs.content_path(&folder).is_dir());
+        assert!(std::fs::symlink_metadata(&at).is_ok());
     }
 
     /// Ce qui est à la place d'un contenu sans être un fichier ordinaire n'est jamais tenu pour
