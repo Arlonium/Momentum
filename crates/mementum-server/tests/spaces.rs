@@ -813,7 +813,7 @@ async fn space_invitation_roundtrip() {
     reply.assert_status(StatusCode::OK);
     assert_eq!(
         reply.json(),
-        json!({ "spaceId": space.to_string(), "pageId": null })
+        json!({ "spaceId": space.to_string(), "pageId": null, "changed": true })
     );
     assert_eq!(
         role_of(&olga.browser, space, bob.id).await.as_deref(),
@@ -1137,7 +1137,8 @@ async fn page_invitations_are_hidden_from_who_cannot_share() {
     store.close().await;
 }
 
-/// Accepter une invitation ne baisse jamais un rôle ; elle peut en monter un.
+/// Accepter une invitation ne baisse jamais un rôle ; elle peut en monter un. `changed` dit si
+/// elle a donné quelque chose.
 #[tokio::test]
 async fn accept_never_downgrades_a_role() {
     let t = open_app().await;
@@ -1150,31 +1151,87 @@ async fn accept_never_downgrades_a_role() {
         ..
     } = team(&t).await;
 
-    for (who, asked, kept) in [
-        (&adam, "member", "admin"),
-        (&olga, "admin", "owner"),
-        (&olga, "member", "owner"),
-        (&mona, "member", "member"),
-        (&mona, "admin", "admin"),
-        (&gina, "member", "member"),
+    for (who, asked, kept, changed) in [
+        (&adam, "member", "admin", false),
+        (&olga, "admin", "owner", false),
+        (&olga, "member", "owner", false),
+        (&mona, "member", "member", false),
+        (&mona, "admin", "admin", true),
+        (&gina, "member", "member", true),
     ] {
         let (_, token) = invited(&olga.browser, space, "x@exemple.fr", asked).await;
         let reply = accept(&who.browser, &token).await;
         reply.assert_status(StatusCode::OK);
         assert_eq!(
             reply.json(),
-            json!({ "spaceId": space.to_string(), "pageId": null })
+            json!({ "spaceId": space.to_string(), "pageId": null, "changed": changed }),
+            "invitation {asked}"
         );
         assert_eq!(
             role_of(&olga.browser, space, who.id).await.as_deref(),
             Some(kept),
             "invitation {asked}"
         );
-        // Consommée, même sans effet.
-        accept(&who.browser, &token)
+    }
+}
+
+/// Ruling R257 (report M7 du lot 2), qui renverse `accept_never_downgrades_a_role` du lot 2
+/// (« Consommée, même sans effet ») : une invitation acceptée par qui avait déjà ce qu'elle
+/// donne répond `"changed": false`, n'écrit rien, et reste valable. Son destinataire l'accepte
+/// ensuite (`"changed": true`), une seule fois. Qui essayait son propre lien le tuait.
+#[tokio::test]
+async fn invitation_without_effect_stays_valid() {
+    let t = open_app().await;
+    let Team {
+        olga,
+        adam,
+        mona,
+        space,
+        ..
+    } = team(&t).await;
+    let (id, token) = invited(&olga.browser, space, "bob@exemple.fr", "member").await;
+    let rev = space_rev(&t, space).await;
+
+    // Olga (propriétaire), Adam (admin) et Mona (membre) l'essaient : rien ne change.
+    for who in [&olga, &adam, &mona] {
+        let reply = accept(&who.browser, &token).await;
+        reply.assert_status(StatusCode::OK);
+        assert_eq!(
+            reply.json(),
+            json!({ "spaceId": space.to_string(), "pageId": null, "changed": false }),
+            "{}",
+            who.id
+        );
+    }
+    assert_eq!(space_rev(&t, space).await, rev);
+    // Toujours en attente, et le lien se consulte encore.
+    let pending = olga.browser.get(&invitations_uri(space)).await.json();
+    assert_eq!(pending[0]["id"], id.to_string(), "{pending}");
+    lookup(&t.browser(), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    // Le destinataire l'accepte : elle donne, et ne sert plus.
+    let bob = person(&t, "bob@exemple.fr", "Bob").await;
+    let reply = accept(&bob.browser, &token).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(
+        reply.json(),
+        json!({ "spaceId": space.to_string(), "pageId": null, "changed": true })
+    );
+    assert_eq!(
+        role_of(&olga.browser, space, bob.id).await.as_deref(),
+        Some("member")
+    );
+    for who in [&bob.browser, &mona.browser] {
+        accept(who, &token)
             .await
             .assert_error(StatusCode::NOT_FOUND, "invalid_invitation");
     }
+    assert_eq!(
+        olga.browser.get(&invitations_uri(space)).await.json(),
+        json!([])
+    );
 }
 
 /// Le jeton d'une invitation n'est montré qu'une fois, dans la réponse qui la crée : ni dans

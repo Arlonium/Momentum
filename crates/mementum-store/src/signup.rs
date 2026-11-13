@@ -75,7 +75,10 @@ impl Store {
         match invitation {
             Some(token_hash) => match acceptable(&mut tx, token_hash, now).await? {
                 Some(invitation) => {
-                    accept(&mut tx, &invitation, user.id, now).await?;
+                    // Un compte neuf n'a aucun rôle : l'invitation lui donne toujours quelque
+                    // chose, et elle est consommée (R257 ne joue pas ici).
+                    let gave = accept(&mut tx, &invitation, user.id, now).await?;
+                    debug_assert!(gave, "une invitation donne toujours à un compte neuf");
                     accepted = Some(invitation);
                 }
                 None => invitation_withdrawn = true,

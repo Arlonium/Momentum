@@ -482,6 +482,11 @@ pub struct Accepted {
     pub space_id: String,
     /// La page ; `null` pour une invitation dans l'espace.
     pub page_id: Option<String>,
+    /// L'invitation a donné quelque chose au compte, et ne sert plus. `false` (Ruling R257) : il
+    /// avait déjà ce rôle ou plus, ou, pour une page, ce niveau ou plus (par une ligne à son
+    /// nom, une page parente ou l'accès général) ; rien n'a changé, et le lien reste valable
+    /// pour quelqu'un d'autre.
+    pub changed: bool,
 }
 
 /// Corps de `POST /api/v1/pages`. Il faut dire où va la page : `parentId` (une sous-page), ou

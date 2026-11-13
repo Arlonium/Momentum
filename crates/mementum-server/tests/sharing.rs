@@ -375,7 +375,11 @@ async fn page_invitation_makes_a_guest_not_a_member() {
     reply.assert_status(StatusCode::OK);
     assert_eq!(
         reply.json(),
-        json!({ "spaceId": team.space.to_string(), "pageId": project.to_string() })
+        json!({
+            "spaceId": team.space.to_string(),
+            "pageId": project.to_string(),
+            "changed": true,
+        })
     );
 
     // Invitée, pas membre.
@@ -468,6 +472,54 @@ async fn invited_member_gets_only_the_extra_level() {
     let access = access_of(&team.olga.browser, project).await;
     assert_eq!(access["general"], "read");
     assert_eq!(entries(&access), [entry(&team.tom, "edit", false)]);
+}
+
+/// Ruling R257 (report M7 du lot 2) : l'auteur d'une invitation sur une page d'« Espace », qui
+/// y a `full` par l'accès général et n'y a aucune ligne à son nom, essaie son propre lien. Rien
+/// ne change (`"changed": false`) : ni les accès de la page, ni sa ligne, ni l'invitation, qui
+/// attend toujours. Avant, il la consommait, et y gagnait une ligne à son nom. Son destinataire
+/// l'accepte ensuite, une fois.
+#[tokio::test]
+async fn page_invitation_tried_by_its_author_stays_valid() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let project = team.page(None, "Projet", &[members(Level::Full)]).await;
+    let mona = &team.mona;
+    let (id, token) = invited(&mona.browser, project, "zoe@exemple.fr", "edit").await;
+    let before = access_of(&mona.browser, project).await;
+    assert_eq!(entries(&before), []);
+
+    let reply = accept(&mona.browser, &token).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(
+        reply.json(),
+        json!({
+            "spaceId": team.space.to_string(),
+            "pageId": project.to_string(),
+            "changed": false,
+        })
+    );
+    // Les accès n'ont pas bougé, et l'invitation y attend toujours.
+    let after = access_of(&mona.browser, project).await;
+    assert_eq!(after, before);
+    assert_eq!(after["invitations"][0]["id"], id.to_string(), "{after}");
+    assert_eq!(team.grants(project).await, [members(Level::Full)]);
+
+    // Zoé, le destinataire, l'accepte : une fois.
+    let reply = accept(&team.zoe.browser, &token).await;
+    reply.assert_status(StatusCode::OK);
+    assert_eq!(reply.json()["changed"], true);
+    assert_eq!(
+        seen(&team.zoe.browser, team.space).await,
+        [page("Projet", "edit", "shared")]
+    );
+    accept(&team.zoe.browser, &token)
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "invalid_invitation");
+    assert_eq!(
+        access_of(&mona.browser, project).await["invitations"],
+        json!([])
+    );
 }
 
 /// Retirer son dernier accès à un invité le sort de l'espace ; tant qu'il en garde un, il reste.

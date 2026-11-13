@@ -5,8 +5,13 @@
 //! C'est le jeton qui fait foi, jamais l'adresse e-mail, qui n'est pas vérifiée (Ruling R47).
 //! Le jeton (32 octets aléatoires en base64url) n'est montré qu'une fois, dans la réponse qui
 //! crée l'invitation ; le serveur n'en garde que le SHA-256, et ne le journalise jamais. Une
-//! invitation dure [`INVITATION_TTL_MS`] et sert une fois. Un jeton inconnu, mal formé, échu,
-//! révoqué ou déjà accepté reçoit toujours la même réponse, `404 invalid_invitation`.
+//! invitation dure [`INVITATION_TTL_MS`] et sert une fois : une fois qu'elle a donné quelque
+//! chose à un compte. Acceptée par qui avait déjà ce qu'elle donne (un rôle au moins égal ;
+//! pour une page, un niveau effectif au moins égal, par une ligne à son nom, une page parente
+//! ou l'accès général), elle répond `changed: false`, n'écrit rien et reste valable (Ruling
+//! R257, qui renverse le lot 2 : qui essayait son propre lien le tuait). Un jeton inconnu, mal
+//! formé, échu, révoqué ou déjà accepté reçoit toujours la même réponse, `404
+//! invalid_invitation`.
 //!
 //! [`valid_invitation`] est le seul chemin par lequel le serveur consulte une invitation par
 //! son jeton, et toute acceptation passe d'abord par lui : [`accept_invitation`] pour un compte
@@ -231,7 +236,8 @@ pub(crate) async fn lookup(
 }
 
 /// `POST /api/v1/invitations/accept` : le compte de la session reçoit ce que donne
-/// l'invitation (sans que rien de ce qu'il avait ne baisse), puis elle ne sert plus.
+/// l'invitation (sans que rien de ce qu'il avait ne baisse), puis elle ne sert plus. Si elle ne
+/// lui donne rien, `changed: false`, et elle reste valable (Ruling R257).
 pub(crate) async fn accept(
     State(state): State<AppState>,
     user: AuthUser,
@@ -239,7 +245,7 @@ pub(crate) async fn accept(
 ) -> Result<Json<Accepted>, ApiError> {
     let Json(body) = body?;
     let hash = auth::token_hash(&body.token).ok_or_else(ApiError::invalid_invitation)?;
-    let invitation = accept_invitation(&state, hash, user.id)
+    let (invitation, changed) = accept_invitation(&state, hash, user.id)
         .await?
         .ok_or_else(ApiError::invalid_invitation)?;
     Ok(Json(Accepted {
@@ -248,6 +254,7 @@ pub(crate) async fn accept(
             InvitationGrant::Space(_) => None,
             InvitationGrant::Page { node_id, .. } => Some(node_id.to_string()),
         },
+        changed,
     }))
 }
 
@@ -297,9 +304,14 @@ pub(crate) async fn valid_invitation(
     Ok(author_can_share.then_some(invitation))
 }
 
-/// Accepte l'invitation de ce jeton pour le compte `user_id` : `None` si elle ne vaut plus
-/// (voir [`valid_invitation`], par où elle passe d'abord), ou si elle a cessé de valoir à
-/// l'instant de l'écriture, que le store revérifie dans sa transaction.
+/// Accepte l'invitation de ce jeton pour le compte `user_id` : l'invitation, et si elle lui a
+/// donné quelque chose ; `None` si elle ne vaut plus (voir [`valid_invitation`], par où elle
+/// passe d'abord), ou si elle a cessé de valoir à l'instant de l'écriture, que le store
+/// revérifie dans sa transaction.
+///
+/// Ruling R257 : ce qu'elle donnerait se juge dans la transaction du store, sur le rôle du
+/// compte et, pour une page, sur son niveau effectif. Elle ne donne rien : rien n'est écrit, et
+/// elle reste valable.
 ///
 /// Le chemin par lequel un compte qui existe accepte une invitation (`POST
 /// /api/v1/invitations/accept`). L'inscription, elle, consulte par
@@ -309,7 +321,7 @@ pub(crate) async fn accept_invitation(
     state: &AppState,
     token_hash: [u8; 32],
     user_id: Uuid,
-) -> Result<Option<Invitation>, ApiError> {
+) -> Result<Option<(Invitation, bool)>, ApiError> {
     if valid_invitation(state, token_hash).await?.is_none() {
         return Ok(None);
     }
@@ -318,14 +330,23 @@ pub(crate) async fn accept_invitation(
         .accept_invitation(token_hash, user_id, now_ms())
         .await
     {
-        Ok(invitation) => {
+        Ok((invitation, true)) => {
             tracing::info!(
                 invitation_id = %invitation.id,
                 space_id = %invitation.space_id,
                 user_id = %user_id,
                 "invitation acceptée"
             );
-            Ok(Some(invitation))
+            Ok(Some((invitation, true)))
+        }
+        Ok((invitation, false)) => {
+            tracing::info!(
+                invitation_id = %invitation.id,
+                space_id = %invitation.space_id,
+                user_id = %user_id,
+                "invitation sans effet pour ce compte : elle reste valable"
+            );
+            Ok(Some((invitation, false)))
         }
         Err(StoreError::NotFound) => Ok(None),
         Err(e) => Err(internal(e)),

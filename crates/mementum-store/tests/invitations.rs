@@ -66,12 +66,12 @@ fn to_page(node: &Node, level: Level) -> InvitationGrant {
     }
 }
 
-/// Crée l'invitation et l'accepte pour `user`.
+/// Crée l'invitation et l'accepte pour `user` : l'invitation, et si elle a donné quelque chose.
 async fn invite_and_accept(
     store: &Store,
     i: NewInvitation,
     user: Uuid,
-) -> Result<Invitation, StoreError> {
+) -> Result<(Invitation, bool), StoreError> {
     let token = i.token_hash;
     store.create_invitation(i).await.unwrap();
     store.accept_invitation(token, user, now()).await
@@ -221,7 +221,7 @@ async fn invitation_is_single_use_and_expires() {
     );
     assert_eq!(
         store.accept_invitation([1; 32], alice.id, t).await.unwrap(),
-        inv
+        (inv.clone(), true)
     );
     assert_eq!(
         store.role_in(space.id, alice.id).await.unwrap(),
@@ -340,7 +340,7 @@ async fn page_invitation_adds_a_guest_with_one_grant() {
             .accept_invitation([1; 32], gina.id, now())
             .await
             .unwrap(),
-        inv
+        (inv, true)
     );
     // Invitée dans l'espace, avec une seule ligne : celle de la page, au niveau donné.
     assert_eq!(
@@ -378,7 +378,12 @@ async fn page_invitation_keeps_a_member_a_member() {
         .add_member(space.id, mona.id, Role::Member)
         .await
         .unwrap();
-    let p = space_page(store, &space, None, "P").await;
+    // Une page privée, où personne n'a rien : ouverte aux membres, elle leur donnerait déjà
+    // tout, et l'invitation rien (R257).
+    let p = store
+        .create_node(page(&space, None, None, "P"))
+        .await
+        .unwrap();
 
     for (who, role, level, token) in [
         (&mona, Role::Member, Level::Read, 1),
@@ -418,8 +423,16 @@ async fn accept_never_lowers_level_or_role() {
         .add_member(space.id, gina.id, Role::Guest)
         .await
         .unwrap();
-    let p = space_page(store, &space, None, "P").await;
-    let q = space_page(store, &space, None, "Q").await;
+    // Des pages privées : Adam n'y a que ses lignes (ouvertes aux membres, elles lui
+    // donneraient `full`, à lui, admin).
+    let p = store
+        .create_node(page(&space, None, None, "P"))
+        .await
+        .unwrap();
+    let q = store
+        .create_node(page(&space, None, None, "Q"))
+        .await
+        .unwrap();
     let a = Subject::User(adam.id);
     store.set_grant(p.id, grant(a, Level::Full)).await.unwrap();
     store.set_grant(q.id, grant(a, Level::Read)).await.unwrap();
@@ -427,13 +440,14 @@ async fn accept_never_lowers_level_or_role() {
     // Rôles : rien ne baisse, sans rien écrire ; un invité devient membre.
     let before = rev(store, space.id).await;
     for (who, asked, token) in [(&adam, Role::Member, 1), (&olga, Role::Admin, 2)] {
-        invite_and_accept(
+        let (_, gave) = invite_and_accept(
             store,
             invitation(&space, to_space(asked), olga.id, token),
             who.id,
         )
         .await
         .unwrap();
+        assert!(!gave, "{}", who.name);
     }
     assert_eq!(
         store.role_in(space.id, adam.id).await.unwrap(),
@@ -444,13 +458,14 @@ async fn accept_never_lowers_level_or_role() {
         Some(Role::Owner)
     );
     assert_eq!(rev(store, space.id).await, before, "rien d'écrit");
-    invite_and_accept(
+    let (_, gave) = invite_and_accept(
         store,
         invitation(&space, to_space(Role::Member), olga.id, 3),
         gina.id,
     )
     .await
     .unwrap();
+    assert!(gave);
     assert_eq!(
         store.role_in(space.id, gina.id).await.unwrap(),
         Some(Role::Member)
@@ -458,36 +473,184 @@ async fn accept_never_lowers_level_or_role() {
 
     // Niveaux : `full` reste `full` ; `read` monte à `edit`.
     let before = rev(store, space.id).await;
-    invite_and_accept(
+    let (_, gave) = invite_and_accept(
         store,
         invitation(&space, to_page(&p, Level::Read), olga.id, 4),
         adam.id,
     )
     .await
     .unwrap();
+    assert!(!gave);
     assert_eq!(
         lines_of(store, &space, adam.id).await,
         [(p.id, Level::Full), (q.id, Level::Read)]
     );
     assert_eq!(rev(store, space.id).await, before, "rien d'écrit");
-    invite_and_accept(
+    let (_, gave) = invite_and_accept(
         store,
         invitation(&space, to_page(&q, Level::Edit), olga.id, 5),
         adam.id,
     )
     .await
     .unwrap();
+    assert!(gave);
     assert_eq!(
         lines_of(store, &space, adam.id).await,
         [(p.id, Level::Full), (q.id, Level::Edit)]
     );
     assert_eq!(rev(store, space.id).await, before + 1);
 
-    // Même sans effet, l'invitation est consommée.
+    // Sans effet, l'invitation n'est pas consommée (R257, qui renverse le lot 2) : elle vaut
+    // encore, pour quelqu'un d'autre. Voir `invitation_that_gives_nothing_is_not_consumed`.
     for token in [1, 2, 4] {
-        let r = store.accept_invitation([token; 32], adam.id, now()).await;
-        assert!(matches!(r, Err(StoreError::NotFound)), "{r:?}");
+        assert!(
+            store
+                .invitation_by_token([token; 32], now())
+                .await
+                .unwrap()
+                .is_some(),
+            "invitation {token}"
+        );
     }
+}
+
+/// Ruling R257 (report M7 du lot 2) : une invitation qui ne donnerait rien au compte qui
+/// l'accepte n'est pas consommée. Rien n'est écrit, ni ligne d'accès, ni acceptation, ni
+/// révision ; elle vaut encore, et le premier compte à qui elle donne quelque chose la prend.
+/// Pour une invitation de page, « rien » se juge sur le niveau effectif du compte, dans la
+/// transaction : par une ligne à son nom sur la page, par une page parente, ou par l'accès
+/// général des membres (un propriétaire y a `full`), pas sur sa seule ligne propre. Avant, qui
+/// essayait le lien d'une invitation qu'il avait déjà le tuait pour son destinataire, et
+/// l'auteur d'une invitation de page y gagnait une ligne à son nom.
+#[tokio::test]
+async fn invitation_that_gives_nothing_is_not_consumed() {
+    let f = fresh().await;
+    let (store, db) = (&f.store, &f.db);
+    let olga = account(store, "olga").await;
+    let mona = account(store, "mona").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    store
+        .add_member(space.id, mona.id, Role::Member)
+        .await
+        .unwrap();
+    let with = |title: &str, parent, grants| NewNode {
+        grants,
+        ..page(&space, parent, None, title)
+    };
+    let m = Subject::User(mona.id);
+    // Une ligne au nom de Mona ; une page parente où elle en a une ; une page ouverte aux
+    // membres, où personne n'est nommé.
+    let named = store
+        .create_node(with("Nommée", None, vec![grant(m, Level::Edit)]))
+        .await
+        .unwrap();
+    let parent = store
+        .create_node(with("Parente", None, vec![grant(m, Level::Edit)]))
+        .await
+        .unwrap();
+    let child = store
+        .create_node(with("Enfant", Some(parent.id), vec![]))
+        .await
+        .unwrap();
+    let general = vec![grant(Subject::Members, Level::Edit)];
+    let team = store
+        .create_node(with("D'équipe", None, general))
+        .await
+        .unwrap();
+
+    let cases = [
+        ("membre invité à son rôle", to_space(Role::Member), &mona),
+        ("membre invité plus bas", to_space(Role::Guest), &mona),
+        (
+            "à son nom, même niveau",
+            to_page(&named, Level::Edit),
+            &mona,
+        ),
+        ("à son nom, plus bas", to_page(&named, Level::Read), &mona),
+        ("page parente", to_page(&child, Level::Comment), &mona),
+        ("accès général, membre", to_page(&team, Level::Edit), &mona),
+        (
+            "accès général, propriétaire",
+            to_page(&team, Level::Full),
+            &olga,
+        ),
+    ];
+    for (i, (case, grant, who)) in cases.into_iter().enumerate() {
+        let tag = i as u8 + 1;
+        let token = [tag; 32];
+        let created = store
+            .create_invitation(invitation(&space, grant, olga.id, tag))
+            .await
+            .unwrap();
+        let acl = int(db, "SELECT COUNT(*) FROM acl").await;
+        let before = rev(store, space.id).await;
+        let r = store.accept_invitation(token, who.id, now()).await;
+        assert!(
+            matches!(&r, Ok((inv, false)) if *inv == created),
+            "{case} : {r:?}"
+        );
+        assert_eq!(int(db, "SELECT COUNT(*) FROM acl").await, acl, "{case}");
+        assert_eq!(rev(store, space.id).await, before, "{case}");
+        assert_eq!(
+            store.invitation_by_token(token, now()).await.unwrap(),
+            Some(created.clone()),
+            "{case} : l'invitation vaut encore"
+        );
+        // Le premier compte à qui elle donne quelque chose la prend, une fois.
+        let other = account(store, &format!("autre{tag}")).await;
+        assert_eq!(
+            store
+                .accept_invitation(token, other.id, now())
+                .await
+                .unwrap(),
+            (created, true),
+            "{case}"
+        );
+        assert_eq!(
+            store.invitation_by_token(token, now()).await.unwrap(),
+            None,
+            "{case}"
+        );
+        let again = store.accept_invitation(token, who.id, now()).await;
+        assert!(
+            matches!(again, Err(StoreError::NotFound)),
+            "{case} : {again:?}"
+        );
+    }
+    // Ni Mona ni Olga n'ont gagné une ligne ou un rôle.
+    assert_eq!(
+        lines_of(store, &space, mona.id).await,
+        [(named.id, Level::Edit), (parent.id, Level::Edit)]
+    );
+    assert_eq!(lines_of(store, &space, olga.id).await, []);
+    assert_eq!(
+        store.role_in(space.id, mona.id).await.unwrap(),
+        Some(Role::Member)
+    );
+
+    // Témoin : un niveau plus haut que le niveau effectif écrit sa ligne, et consomme.
+    let before = rev(store, space.id).await;
+    let (_, gave) = invite_and_accept(
+        store,
+        invitation(&space, to_page(&team, Level::Full), olga.id, 99),
+        mona.id,
+    )
+    .await
+    .unwrap();
+    assert!(gave);
+    assert_eq!(
+        lines_of(store, &space, mona.id).await,
+        [
+            (named.id, Level::Edit),
+            (parent.id, Level::Edit),
+            (team.id, Level::Full)
+        ]
+    );
+    assert_eq!(rev(store, space.id).await, before + 1);
+    assert_eq!(
+        store.invitation_by_token([99; 32], now()).await.unwrap(),
+        None
+    );
 }
 
 #[tokio::test]

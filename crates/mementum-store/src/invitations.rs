@@ -2,8 +2,10 @@
 //!
 //! C'est le jeton qui fait foi, jamais l'adresse e-mail, qui n'est pas vérifiée (Ruling R47) :
 //! l'adresse est gardée pour l'affichage, rognée et en minuscules. Le store ne voit que le
-//! SHA-256 du jeton. Une invitation sert une fois ; échue, révoquée (supprimée) ou déjà
-//! acceptée, elle n'existe plus pour personne (`NotFound`).
+//! SHA-256 du jeton. Une invitation sert une fois : une fois qu'elle a donné quelque chose à un
+//! compte (Ruling R257 : acceptée par qui avait déjà ce qu'elle donne, elle n'est pas
+//! consommée). Échue, révoquée (supprimée) ou déjà acceptée, elle n'existe plus pour personne
+//! (`NotFound`).
 //!
 //! Une invitation ne vaut que tant que son auteur a encore le droit de la faire (Ruling R69) :
 //! celles qu'il attendait encore partent avec lui quand il quitte l'espace (`remove_member`) ;
@@ -15,13 +17,13 @@
 
 use std::fmt;
 
-use mementum_acl::{Grant, Level, Role, Subject};
+use mementum_acl::{Grant, Level, Role, Subject, chain_level};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
-use crate::acl::write_grant;
-use crate::members::{raise_role, role_from};
+use crate::acl::{read_chain, write_grant};
+use crate::members::{raise_role, role_from, role_of};
 use crate::spaces::{WriteTx, bump_rev};
 use crate::users::normalize_email;
 use crate::{Store, StoreError, now_ms, parse_uuid, unreadable};
@@ -184,26 +186,65 @@ pub(crate) async fn acceptable(
     .transpose()
 }
 
+/// Le compte a-t-il déjà, sur la page `node_id`, au moins `level` ? Jugé dans la transaction,
+/// sur son niveau effectif : celui que lui donnent, avec son rôle dans l'espace, les lignes de
+/// la page et de ses ancêtres, par le calcul du partage ([`chain_level`], le même que celui de
+/// tout l'espace). Une ligne à son nom, une page parente, l'accès général des membres (où un
+/// propriétaire ou un admin a `full`) comptent tous. Sans rôle dans l'espace, non : il y
+/// entrerait. Une page dont la remontée tourne en rond n'est vue de personne (R58) : non plus.
+async fn already_has(
+    tx: &mut Transaction<'_, Sqlite>,
+    space: &str,
+    node_id: &str,
+    user_id: Uuid,
+    level: Level,
+) -> Result<bool, StoreError> {
+    let Some(role) = role_of(tx, space, &user_id.to_string()).await? else {
+        return Ok(false);
+    };
+    let Some(chain) = read_chain(tx, node_id).await? else {
+        return Ok(false);
+    };
+    let has = chain_level(chain.lines.iter().map(|(_, line)| line), user_id, role);
+    Ok(has.is_some_and(|has| has >= level))
+}
+
 /// Donne au compte ce que donne l'invitation (lue par [`acceptable`] dans la même
-/// transaction), sans rien abaisser, puis la marque acceptée ; la révision de l'espace bouge
-/// si un droit a été écrit. `NotFound` si le compte n'existe pas.
+/// transaction), sans rien abaisser, puis la marque acceptée et fait bouger la révision de
+/// l'espace. Rend vrai dans ce cas. `NotFound` si le compte n'existe pas.
+///
+/// Ruling R257 (report M7 du lot 2) : une invitation qui ne lui donnerait rien n'est pas
+/// consommée. Rend faux, sans rien écrire (ni droit, ni acceptation, ni révision) : elle vaut
+/// encore, pour qui elle donnerait quelque chose. « Rien » se juge d'abord, dans cette
+/// transaction : pour un rôle, un rôle au moins égal ; pour une page, un niveau effectif au
+/// moins égal ([`already_has`]), pas sa seule ligne propre. L'auteur d'une invitation de page y
+/// a `full` le plus souvent par l'accès général ou par une page parente, sans ligne à son nom :
+/// jugée sur cette ligne, son essai consommait le lien, et lui posait une ligne de plus.
 pub(crate) async fn accept(
     tx: &mut WriteTx,
     invitation: &Invitation,
     user_id: Uuid,
     now: i64,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let user = user_id.to_string();
     let space = invitation.space_id.to_string();
-    let wrote = match invitation.grant {
+    let gave = match invitation.grant {
         InvitationGrant::Space(role) => raise_role(tx, &space, &user, role).await?,
         InvitationGrant::Page { node_id, level } => {
-            let joined = raise_role(tx, &space, &user, Role::Guest).await?;
-            let raised =
-                raise_level(tx, &node_id.to_string(), Subject::User(user_id), level).await?;
-            joined || raised
+            let node = node_id.to_string();
+            if already_has(tx, &space, &node, user_id, level).await? {
+                false
+            } else {
+                let joined = raise_role(tx, &space, &user, Role::Guest).await?;
+                let raised = raise_level(tx, &node, Subject::User(user_id), level).await?;
+                joined || raised
+            }
         }
     };
+    // Rien n'a été écrit : l'invitation n'a rien donné, elle reste en attente.
+    if !gave {
+        return Ok(false);
+    }
     sqlx::query("UPDATE invitations SET accepted_at = ?, accepted_by = ? WHERE id = ?")
         .bind(now)
         .bind(&user)
@@ -211,10 +252,8 @@ pub(crate) async fn accept(
         .execute(&mut ***tx)
         .await
         .map_err(StoreError::from_fk)?;
-    if wrote {
-        bump_rev(tx, &space).await?;
-    }
-    Ok(())
+    bump_rev(tx, &space).await?;
+    Ok(true)
 }
 
 impl Store {
@@ -295,21 +334,26 @@ impl Store {
     /// jeton est inconnu, échu, révoqué ou déjà accepté, si son auteur n'a plus le rôle qu'elle
     /// demande (R69, lu dans la même transaction), ou si le compte n'existe pas. Une invitation
     /// d'espace donne son rôle ; une invitation de page pose `(user:<id>, level)` et fait de la
-    /// personne un `guest` si elle n'a pas de rôle dans l'espace. Rien n'est jamais abaissé, ni rôle ni niveau. Puis l'invitation est marquée
-    /// acceptée : elle ne sert plus.
+    /// personne un `guest` si elle n'a pas de rôle dans l'espace. Rien n'est jamais abaissé, ni
+    /// rôle ni niveau. Puis l'invitation est marquée acceptée : elle ne sert plus.
+    ///
+    /// Le booléen dit si l'invitation a donné quelque chose. Faux (Ruling R257) : le compte
+    /// avait déjà ce rôle ou plus, ou, pour une page, ce niveau effectif ou plus (par une ligne
+    /// à son nom, une page parente ou l'accès général) ; rien n'est écrit, et l'invitation
+    /// n'est **pas** marquée acceptée : elle vaut encore, pour quelqu'un d'autre.
     pub async fn accept_invitation(
         &self,
         token_hash: [u8; 32],
         user_id: Uuid,
         now: i64,
-    ) -> Result<Invitation, StoreError> {
+    ) -> Result<(Invitation, bool), StoreError> {
         let mut tx = self.write().await?;
         let invitation = acceptable(&mut tx, token_hash, now)
             .await?
             .ok_or(StoreError::NotFound)?;
-        accept(&mut tx, &invitation, user_id, now).await?;
+        let gave = accept(&mut tx, &invitation, user_id, now).await?;
         tx.commit().await?;
-        Ok(invitation)
+        Ok((invitation, gave))
     }
 
     /// L'invitation `id` si elle est en attente à `now` : `None` si elle est inconnue, échue,
