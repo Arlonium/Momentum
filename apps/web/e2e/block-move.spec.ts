@@ -11,7 +11,7 @@
 // Les tests verts : ce qui est tapé dans un bloc voisin pendant qu'un autre glisse reste à sa
 // place ; deux personnes qui glissent deux blocs gardent la page ; le curseur de qui tape dans le
 // bloc qu'un autre glisse le suit (`followBlock`), comme celui que le dépôt laisse dans le bloc
-// déposé.
+// déposé, et comme la sélection d'une image sur laquelle on a cliqué.
 //
 // Les deux `test.fixme` : ce qui est tapé dans le bloc glissé lui-même. Ils disent ce qui est
 // voulu, pas ce qui se passe : après le scénario, le bloc X est juste sous le bloc Z, une seule
@@ -190,8 +190,8 @@ async function mmdBlocks(api: APIRequestContext, id: string): Promise<string[]> 
   return (await getMmd(api, id)).trimEnd().split("\n\n");
 }
 
-/** Une page que Mona possède et où Tom écrit, ouverte chez les deux, avec les ids de X, Y et Z. */
-async function scene(browser: Browser) {
+/** Une page de contenu `mmd` que Mona possède et où Tom écrit, ouverte chez les deux. */
+async function opened(browser: Browser, mmd: string) {
   const {
     alice: mona,
     aliceApi: monaApi,
@@ -201,10 +201,24 @@ async function scene(browser: Browser) {
   } = await ownerAndMember();
   const page = await createPage(monaApi, { spaceId: space.id, title: `Bloc déplacé ${unique()}` });
   await setPageLevel(monaApi, page.id, tomId, "edit");
-  await putMmd(monaApi, page.id, START);
+  await putMmd(monaApi, page.id, mmd);
   const monaPage = await openPage(browser, page.id, mona);
   const tomPage = await openPage(browser, page.id, tom);
-  const shown = await shownBlocks(monaPage);
+  // Une exception dans un éditeur (un changement reçu qu'il ne sait pas appliquer) le fige : les
+  // tests verts affirment qu'il n'y en a eu aucune.
+  const errors: string[] = [];
+  for (const [who, p] of [["Mona", monaPage], ["Tom", tomPage]] as const) {
+    p.on("pageerror", (error) => errors.push(`${who} : ${error.message}`));
+  }
+  return { monaApi, id: page.id, mona: monaPage, tom: tomPage, errors };
+}
+
+type Opened = Awaited<ReturnType<typeof opened>>;
+
+/** La page de départ (`START`) ouverte chez Mona et chez Tom, avec les ids de ses six blocs. */
+async function scene(browser: Browser) {
+  const s = await opened(browser, START);
+  const shown = await shownBlocks(s.mona);
   expect(shown.map((b) => b.text)).toEqual([
     "Bloc X",
     "Bloc Y",
@@ -213,15 +227,9 @@ async function scene(browser: Browser) {
     "Témoin B",
     "Témoin C",
   ]);
-  expect(await shownBlocks(tomPage)).toEqual(shown);
+  expect(await shownBlocks(s.tom)).toEqual(shown);
   const [x, y, z, a, b, c] = shown.map((block) => block.id);
-  // Une exception dans un éditeur (un changement reçu qu'il ne sait pas appliquer) le fige : les
-  // tests verts affirment qu'il n'y en a eu aucune.
-  const errors: string[] = [];
-  for (const [who, p] of [["Mona", monaPage], ["Tom", tomPage]] as const) {
-    p.on("pageerror", (error) => errors.push(`${who} : ${error.message}`));
-  }
-  return { monaApi, id: page.id, mona: monaPage, tom: tomPage, ids: { x, y, z, a, b, c }, errors };
+  return { ...s, ids: { x, y, z, a, b, c } };
 }
 
 type Scene = Awaited<ReturnType<typeof scene>>;
@@ -233,7 +241,7 @@ type Ids = { x: string; y: string; z: string };
  * Tom et, pour les textes, dans le MMD du serveur : attendue 15 s au plus, puis affirmée. Chaque
  * id n'y est qu'une fois, et aucun éditeur n'a levé d'exception.
  */
-async function expectPageEverywhere(s: Scene, wanted: Shown[]): Promise<void> {
+async function expectPageEverywhere(s: Opened, wanted: Shown[]): Promise<void> {
   const texts = wanted.map((block) => block.text);
   const same = (blocks: Shown[]) => JSON.stringify(blocks) === JSON.stringify(wanted);
   const deadline = Date.now() + 15_000;
@@ -457,6 +465,63 @@ test("the_cursor_left_in_a_dropped_block_follows_it_when_someone_else_moves_it",
   await mona.keyboard.type(" de Mona");
   const { x, y, z, a, b, c } = page(s, { x: "Bloc X de Mona" });
   await expectPageEverywhere(s, [y, x, z, a, b, c]);
+});
+
+/** Un PNG d'un pixel, que `width` étire : de quoi cliquer. */
+const PIXEL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+/**
+ * Ce que désigne la sélection de l'éditeur de `p` : pour une sélection de nœud, le type du nœud
+ * et l'id du bloc qui le porte (le sien, si c'est un bloc entier).
+ */
+function selectionOf(p: Page): Promise<{ kind: string; node: string | null; block: string | null }> {
+  return p.evaluate(() => {
+    const { selection } = window.__mementum!.editor.prosemirrorState;
+    const { node } = selection as unknown as {
+      node?: { type: { name: string }; attrs: Record<string, unknown> };
+    };
+    const { $from } = selection;
+    let block = node?.type.name === "blockContainer" ? String(node.attrs.id) : null;
+    for (let depth = $from.depth; block === null && depth > 0; depth -= 1) {
+      const holder = $from.node(depth);
+      if (holder.type.name === "blockContainer") block = String(holder.attrs.id);
+    }
+    return {
+      kind: (selection.toJSON() as { type: string }).type,
+      node: node?.type.name ?? null,
+      block,
+    };
+  });
+}
+
+// Un clic sur une image sélectionne le nœud image, qui n'a pas d'id. Quand un autre déplace
+// l'image, y-prosemirror remettait la sélection à l'ancienne place, sur le bloc qui l'avait prise,
+// entier : Suppr retirait ce bloc, et l'image restait. `followBlock` la garde sur l'image.
+test("an_image_clicked_then_moved_by_someone_else_is_the_one_delete_removes", async ({ browser }) => {
+  const s = await opened(browser, `Bloc X\n\n![](${PIXEL}) {width=200}\n\nBloc Y\n\nBloc Z\n`);
+  const { mona, tom } = s;
+  const start = await shownBlocks(mona);
+  expect(start.map((b) => b.text)).toEqual(["Bloc X", "", "Bloc Y", "Bloc Z"]);
+  await expect.poll(() => shownBlocks(tom)).toEqual(start);
+  const [x, image, y, z] = start;
+
+  // Mona clique sur l'image : c'est elle qui est sélectionnée, pas son bloc.
+  const picture = mona.locator(`${EDITOR} [data-node-type="blockOuter"][data-id="${image.id}"] img`);
+  await expect(picture).toBeVisible();
+  await picture.click();
+  const onImage = { kind: "node", node: "image", block: image.id };
+  expect(await selectionOf(mona)).toEqual(onImage);
+
+  // Tom la glisse tout en bas, par sa poignée. Chez Mona, elle reste sélectionnée.
+  await dragUnder(tom, "", "Bloc Z");
+  await expect.poll(() => shownBlocks(mona)).toEqual([x, y, z, image]);
+  await converged(mona, tom);
+  expect(await selectionOf(mona)).toEqual(onImage);
+
+  // Mona presse Suppr sans recliquer : c'est l'image qui part, pas le bloc qui a pris sa place.
+  await mona.keyboard.press("Delete");
+  await expectPageEverywhere(s, [x, y, z]);
 });
 
 // Le déplacement arrive au serveur avant la frappe, faite sans l'avoir vu : limite R222. Les
