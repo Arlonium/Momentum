@@ -3,7 +3,12 @@
 // (R141). La WebSocket est simulée ; le client n'y envoie jamais rien.
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { renderHook, settle } from "../test/hooks";
-import { EVENTS_DEBOUNCE_MS, EVENTS_MAX_WAIT_MS, useSpaceEvents } from "./useSpaceEvents";
+import {
+  EVENTS_DEBOUNCE_MS,
+  EVENTS_MAX_WAIT_MS,
+  EVENTS_SILENCE_MS,
+  useSpaceEvents,
+} from "./useSpaceEvents";
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
@@ -229,4 +234,128 @@ test("no_channel_without_a_space", async () => {
   const events = await renderHook(hook, { spaceId: null });
   expect(FakeSocket.instances).toEqual([]);
   expect(events.current.live).toBe(false);
+});
+
+// Un canal à demi ouvert (une connexion morte sans bruit : le navigateur ne voit pas les pings)
+// laisserait la barre latérale périmée sans limite, le minuteur de repli étant arrêté tant que le
+// canal est tenu pour vivant. Le serveur redit la version (`{"lsn":N}`) à chaque ping, toutes les
+// 20 s : sans aucune trame pendant `EVENTS_SILENCE_MS`, le canal est fermé, `live` passe à faux,
+// et la reconnexion habituelle repart. Ici, c'est le test qui joue le serveur.
+
+/** Le serveur redit la version toutes les 20 s, pendant `ms`. */
+async function speakEvery20s(socket: FakeSocket, lsn: number, ms: number) {
+  for (let elapsed = 0; elapsed < ms; elapsed += 20_000) {
+    await advance(20_000);
+    await settle(() => socket.frame(lsn));
+  }
+}
+
+test("a_silent_channel_is_closed_and_falls_back", async () => {
+  expect(EVENTS_SILENCE_MS).toBe(45_000);
+  known = 1;
+  const events = await renderHook(hook, { spaceId: "perso" });
+  const socket = FakeSocket.instances[0];
+  await settle(() => socket.open());
+  await settle(() => socket.frame(1));
+  expect(events.current.live).toBe(true);
+  await advance(EVENTS_SILENCE_MS - 1);
+  expect(socket.closed).toBe(false);
+  expect(events.current.live).toBe(true);
+  // Plus rien depuis 45 s : le canal est fermé, sans attendre un événement de fermeture que la
+  // connexion morte ne donnerait peut-être jamais.
+  await advance(1);
+  expect(socket.closed).toBe(true);
+  expect(events.current.live).toBe(false);
+  // La reconnexion habituelle : une seconde (une trame avait remis le délai à une seconde).
+  await advance(999);
+  expect(FakeSocket.instances).toHaveLength(1);
+  await advance(1);
+  expect(FakeSocket.instances).toHaveLength(2);
+  // L'ancienne connexion ne parle plus, même si une trame en sortait encore.
+  await settle(() => socket.frame(9));
+  await settle(() => socket.drop());
+  await advance(EVENTS_DEBOUNCE_MS * 4);
+  expect(onChange).not.toHaveBeenCalled();
+  expect(FakeSocket.instances).toHaveLength(2);
+  expect(socket.sent).toEqual([]);
+});
+
+test("an_equal_version_keeps_the_channel_alive_without_a_reload", async () => {
+  known = 5;
+  const events = await renderHook(hook, { spaceId: "perso" });
+  const socket = FakeSocket.instances[0];
+  await settle(() => socket.open());
+  await settle(() => socket.frame(5));
+  await speakEvery20s(socket, 5, 3 * 60_000);
+  // Trois minutes d'un espace calme : le canal reste, et rien n'est relu (R156).
+  expect(socket.closed).toBe(false);
+  expect(events.current.live).toBe(true);
+  expect(FakeSocket.instances).toHaveLength(1);
+  expect(onChange).not.toHaveBeenCalled();
+  // Le serveur se tait : fermé 45 s après la dernière trame.
+  await advance(EVENTS_SILENCE_MS);
+  expect(socket.closed).toBe(true);
+});
+
+test("the_watchdog_is_armed_once_open_and_stops_with_the_channel", async () => {
+  const events = await renderHook(hook, { spaceId: "perso" });
+  const first = FakeSocket.instances[0];
+  // Poignée de main en cours : pas de chien de garde (le refus ou la coupure le diront).
+  await advance(EVENTS_SILENCE_MS * 2);
+  expect(first.closed).toBe(false);
+  await settle(() => first.open());
+  // Ouvert sans trame encore : 45 s de silence suffisent.
+  await advance(EVENTS_SILENCE_MS);
+  expect(first.closed).toBe(true);
+  // Tombé par une fermeture : le chien de garde de la connexion d'après ne part qu'à son ouverture.
+  await advance(1_000);
+  const second = FakeSocket.instances[1];
+  await settle(() => second.open());
+  await settle(() => second.frame(1));
+  await settle(() => second.drop());
+  await advance(EVENTS_SILENCE_MS * 2);
+  expect(second.closed).toBe(false);
+  // Un autre espace, puis le démontage : rien ne reste armé.
+  const third = FakeSocket.instances[2];
+  await settle(() => third.open());
+  await events.rerender({ spaceId: "autre" });
+  const fourth = FakeSocket.instances[3];
+  await settle(() => fourth.open());
+  await settle(() => fourth.frame(1));
+  await events.unmount();
+  const count = FakeSocket.instances.length;
+  await advance(EVENTS_SILENCE_MS * 4);
+  expect(FakeSocket.instances).toHaveLength(count);
+});
+
+test("coming_back_online_reopens_the_channel_at_once", async () => {
+  const events = await renderHook(hook, { spaceId: "perso" });
+  await settle(() => FakeSocket.instances[0].drop());
+  // Trois échecs : la prochaine tentative est dans huit secondes.
+  await advance(1_000);
+  await settle(() => FakeSocket.instances[1].drop());
+  await advance(2_000);
+  await settle(() => FakeSocket.instances[2].drop());
+  expect(FakeSocket.instances).toHaveLength(3);
+  // Le réseau revient : le canal est rouvert tout de suite, pas dans huit secondes.
+  await settle(() => window.dispatchEvent(new Event("online")));
+  await advance(0);
+  expect(FakeSocket.instances).toHaveLength(4);
+  await settle(() => FakeSocket.instances[3].open());
+  expect(events.current.live).toBe(true);
+  // La tentative prévue ne part pas en plus.
+  await advance(8_000);
+  expect(FakeSocket.instances).toHaveLength(4);
+  // Un canal tenu pour ouvert a pu mourir pendant la coupure : il est remplacé aussitôt.
+  await settle(() => window.dispatchEvent(new Event("online")));
+  expect(FakeSocket.instances[3].closed).toBe(true);
+  expect(FakeSocket.instances).toHaveLength(5);
+  // Tant que le nouveau n'est pas ouvert, le canal n'est pas tenu pour vivant.
+  expect(events.current.live).toBe(false);
+  await settle(() => FakeSocket.instances[4].open());
+  expect(events.current.live).toBe(true);
+  // Démonté, le hook n'écoute plus le réseau.
+  await events.unmount();
+  await settle(() => window.dispatchEvent(new Event("online")));
+  expect(FakeSocket.instances).toHaveLength(5);
 });

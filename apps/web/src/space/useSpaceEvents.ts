@@ -20,6 +20,15 @@
 // chaque échec, trente secondes au plus ; une trame reçue remet le délai à une seconde. Tant
 // qu'il est tombé, `live` est faux, et la barre latérale se rabat sur son minuteur de dix
 // secondes (R128) : ce sont les relectures existantes qui disent à l'écran ce qui se passe.
+//
+// Un canal peut aussi mourir sans bruit (connexion à demi ouverte : aucun événement de
+// fermeture, et le navigateur ne montre pas les pings du serveur). La barre latérale resterait
+// alors périmée sans limite, son minuteur arrêté. Le serveur redit donc la version à chaque
+// ping, et un chien de garde, armé à l'ouverture et remis à zéro par chaque trame, au numéro égal
+// compris, ferme un canal resté muet `EVENTS_SILENCE_MS`, sans attendre sa fermeture : `live`
+// passe à faux, et la reconnexion habituelle repart. Le retour du réseau (`online`) rouvre le
+// canal tout de suite, sans attendre le délai de reconnexion, et remplace celui qui était tenu
+// pour ouvert : il a pu mourir pendant la coupure.
 import { useEffect, useRef, useState } from "react";
 import { groupedDelay, REREAD_DEBOUNCE_MS, REREAD_MAX_WAIT_MS } from "../rereads";
 
@@ -35,6 +44,13 @@ export const EVENTS_MAX_WAIT_MS = REREAD_MAX_WAIT_MS;
 export const RECONNECT_FIRST_MS = 1_000;
 /** Le délai de reconnexion ne dépasse jamais cela. */
 export const RECONNECT_MAX_MS = 30_000;
+/**
+ * Un canal ouvert dont rien n'est arrivé depuis cette durée est tenu pour mort, et fermé. Le
+ * serveur redit `{"lsn":N}` à chaque ping, toutes les 20 s (`EVENTS_PING`,
+ * `crates/mementum-server/src/events.rs`) : 45 s laissent passer deux pings et une marge. Plus
+ * court que deux intervalles du serveur, un canal sain serait fermé à tort.
+ */
+export const EVENTS_SILENCE_MS = 45_000;
 
 /** `ws(s)://<hôte de la page>/events/<espace>` : le même hôte que l'API, par le mandataire. */
 function eventsUrl(spaceId: string): string {
@@ -76,6 +92,8 @@ export function useSpaceEvents(
     let socket: WebSocket | null = null;
     let debounce: ReturnType<typeof setTimeout> | undefined;
     let reconnect: ReturnType<typeof setTimeout> | undefined;
+    /** Le chien de garde du canal ouvert : tombe s'il ne reçoit rien. */
+    let silence: ReturnType<typeof setTimeout> | undefined;
     let delay = RECONNECT_FIRST_MS;
     /** Quand la première trame non traitée est arrivée ; `null` : aucune en attente. */
     let waitingSince: number | null = null;
@@ -96,16 +114,48 @@ export function useSpaceEvents(
       if (due) callbacks.current.onChange(seen, wasForced);
     };
 
+    /** Le canal `mine` est tombé : `live` à faux, et la reconnexion après le délai. */
+    const down = (mine: WebSocket) => {
+      if (stopped || socket !== mine) return;
+      clearTimeout(silence);
+      silence = undefined;
+      socket = null;
+      setLive(false);
+      reconnect = setTimeout(connect, delay);
+      delay = Math.min(delay * 2, RECONNECT_MAX_MS);
+    };
+
+    /** Ferme `mine` sans attendre son événement de fermeture, et le fait taire. */
+    const drop = (mine: WebSocket) => {
+      mine.onopen = mine.onmessage = mine.onclose = null;
+      mine.close();
+    };
+
+    /** (Ré)arme le chien de garde de `mine`, ouvert. */
+    const watch = (mine: WebSocket) => {
+      clearTimeout(silence);
+      silence = setTimeout(() => {
+        silence = undefined;
+        if (stopped || socket !== mine) return;
+        down(mine);
+        drop(mine);
+      }, EVENTS_SILENCE_MS);
+    };
+
     const connect = () => {
       reconnect = undefined;
       const mine = new WebSocket(eventsUrl(spaceId));
       socket = mine;
       first = true;
       mine.onopen = () => {
-        if (!stopped && socket === mine) setLive(true);
+        if (stopped || socket !== mine) return;
+        setLive(true);
+        watch(mine);
       };
       mine.onmessage = (event: MessageEvent) => {
         if (stopped || socket !== mine) return;
+        // Toute trame dit que le canal vit, au numéro égal compris.
+        watch(mine);
         const lsn = lsnOf(event.data);
         if (lsn === null) return;
         delay = RECONNECT_FIRST_MS;
@@ -123,24 +173,34 @@ export function useSpaceEvents(
         clearTimeout(debounce);
         debounce = setTimeout(fire, groupedDelay(waitingSince, now));
       };
-      mine.onclose = () => {
-        if (stopped || socket !== mine) return;
-        socket = null;
-        setLive(false);
-        reconnect = setTimeout(connect, delay);
-        delay = Math.min(delay * 2, RECONNECT_MAX_MS);
-      };
+      mine.onclose = () => down(mine);
     };
     connect();
 
+    // Le réseau revient : le canal est rouvert tout de suite, et celui qui était tenu pour
+    // ouvert est remplacé (il a pu mourir pendant la coupure sans rien dire).
+    const onOnline = () => {
+      if (stopped) return;
+      clearTimeout(reconnect);
+      clearTimeout(silence);
+      silence = undefined;
+      if (socket !== null) {
+        drop(socket);
+        setLive(false);
+      }
+      socket = null;
+      delay = RECONNECT_FIRST_MS;
+      connect();
+    };
+    window.addEventListener("online", onOnline);
+
     return () => {
       stopped = true;
+      window.removeEventListener("online", onOnline);
       clearTimeout(debounce);
       clearTimeout(reconnect);
-      if (socket !== null) {
-        socket.onopen = socket.onmessage = socket.onclose = null;
-        socket.close();
-      }
+      clearTimeout(silence);
+      if (socket !== null) drop(socket);
       setLive(false);
     };
   }, [spaceId]);
