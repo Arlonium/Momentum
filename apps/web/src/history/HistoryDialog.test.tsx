@@ -20,15 +20,29 @@ vi.mock("../api", async (original) => ({
   restoreVersion: vi.fn(),
 }));
 
+/** Ce que l'aperçu simulé a reçu à son dernier rendu. */
+const previewProbe = vi.hoisted(() => ({ onRefused: undefined as undefined | (() => void) }));
+
 // L'aperçu (BlockNote) est essayé dans son propre fichier : ici, il dit seulement ce qu'il montre.
 vi.mock("./VersionPreview", () => ({
-  VersionPreview: ({ versionId, current }: { versionId: string | null; current: unknown }) => (
-    <div
-      data-testid="preview"
-      data-version={versionId ?? "current"}
-      data-has-current={String(current !== null)}
-    />
-  ),
+  VersionPreview: ({
+    versionId,
+    current,
+    onRefused,
+  }: {
+    versionId: string | null;
+    current: unknown;
+    onRefused?: () => void;
+  }) => {
+    previewProbe.onRefused = onRefused;
+    return (
+      <div
+        data-testid="preview"
+        data-version={versionId ?? "current"}
+        data-has-current={String(current !== null)}
+      />
+    );
+  },
 }));
 
 const MINUTE = 60_000;
@@ -502,4 +516,13 @@ test("a_refused_list_is_shown_as_the_server_says_it_and_the_page_is_read_again",
   // La fenêtre se ferme comme toujours.
   await click(dialog().querySelector(`button[aria-label="Fermer l'historique"]`)!);
   expect(onClose).toHaveBeenCalledTimes(1);
+});
+
+test("a_refused_preview_has_the_page_read_again", async () => {
+  // L'état d'une version refusé par `403` : la fenêtre fait relire la page, comme pour la liste.
+  await opened();
+  await click(items()[1]);
+  expect(preview()?.getAttribute("data-version")).toBe("v2");
+  await act(async () => previewProbe.onRefused?.());
+  expect(onRefused).toHaveBeenCalledTimes(1);
 });

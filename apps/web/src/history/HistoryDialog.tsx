@@ -395,6 +395,7 @@ export function HistoryDialog({
                   current={current}
                   snapshot={snapshot}
                   onMissing={reload}
+                  onRefused={onRefused}
                 />
               )}
             </div>

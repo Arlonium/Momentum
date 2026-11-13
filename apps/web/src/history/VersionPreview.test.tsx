@@ -10,7 +10,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import * as Y from "yjs";
-import { getVersions, getVersionState } from "../api";
+import { ApiError, getVersions, getVersionState } from "../api";
 import { FRAGMENT, type PageEvent, type SyncStatus } from "../editor/collab";
 import { author } from "../test/comments";
 import { deferred, until, type Deferred } from "../test/hooks";
@@ -386,6 +386,32 @@ test("a_version_the_server_no_longer_has_is_reported", async () => {
   vi.mocked(getVersionState).mockRejectedValue(notFound());
   await render(<VersionPreview pageId="p" versionId="v1" current={null} onMissing={onMissing} />);
   await until(host, () => onMissing.mock.calls.length > 0, "le signalement");
+  expect(shown()).toBeNull();
+});
+
+test("a_refused_state_is_shown_as_the_server_says_it_and_tells_the_page", async () => {
+  // Le niveau est tombé sous « Peut modifier » entre la liste et le choix : le serveur refuse
+  // l'état (S5). Son message tel quel, sans « Réessayer » (le même refus reviendrait), et la page
+  // est à relire, comme pour un refus de la liste (R216).
+  const message =
+    "niveau insuffisant sur cette page : il faut « Peut modifier », tu as « Peut lire »";
+  const onRefused = vi.fn();
+  const onMissing = vi.fn();
+  vi.mocked(getVersionState).mockRejectedValue(new ApiError(403, "forbidden", message));
+  await render(
+    <VersionPreview
+      pageId="p"
+      versionId="v1"
+      current={null}
+      onMissing={onMissing}
+      onRefused={onRefused}
+    />,
+  );
+  await until(host, () => onRefused.mock.calls.length > 0, "la page prévenue");
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe(message);
+  expect([...host.querySelectorAll("button")].map((b) => b.textContent)).not.toContain("Réessayer");
+  expect(onRefused).toHaveBeenCalledTimes(1);
+  expect(onMissing).not.toHaveBeenCalled();
   expect(shown()).toBeNull();
 });
 

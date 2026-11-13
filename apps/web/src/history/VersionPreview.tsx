@@ -19,6 +19,10 @@
 //   ne s'en afficherait.
 // Chaque document d'aperçu est détruit quand on le quitte et à la fermeture, et le
 // téléchargement d'une version qu'on quitte avant son arrivée est annulé.
+//
+// Un état refusé par `403` (le niveau est tombé sous « Peut modifier » depuis que la liste a été
+// lue, S5) se dit tel que le serveur le dit, sans « Réessayer », qui redonnerait le même refus, et
+// la page est relue (`onRefused`), comme pour un refus de la liste (R216).
 import { Component, useEffect, useRef, useState, type ReactNode } from "react";
 import * as Y from "yjs";
 import { ApiError, getVersionState } from "../api";
@@ -39,6 +43,8 @@ type Props = {
   snapshot?: number;
   /** Le serveur ne trouve pas l'état de la version (`404`) : elle a pu sortir de l'historique. */
   onMissing?: () => void;
+  /** Le serveur refuse l'état (`403`) : un droit a changé, la page est à relire. */
+  onRefused?: () => void;
 };
 
 /** Ce que montre l'aperçu, rangé sous la demande qui l'a produit (`key`). */
@@ -46,6 +52,7 @@ type Shown =
   | { key: string; status: "loading" }
   | { key: string; status: "ready"; doc: Y.Doc }
   | { key: string; status: "failed"; message: string }
+  | { key: string; status: "refused"; message: string }
   | { key: string; status: "unreadable" };
 
 /** Un document neuf, rempli par l'état d'une version ; `null` si Yjs ne sait pas le lire. */
@@ -70,13 +77,22 @@ export function frozenCopy(source: Y.Doc): Y.Doc {
   return doc;
 }
 
-export function VersionPreview({ pageId, versionId, current, snapshot = 0, onMissing }: Props) {
+export function VersionPreview({
+  pageId,
+  versionId,
+  current,
+  snapshot = 0,
+  onMissing,
+  onRefused,
+}: Props) {
   const [shown, setShown] = useState<Shown | null>(null);
   /** Change à chaque « Réessayer » : l'état est relu. */
   const [attempt, setAttempt] = useState(0);
-  // Le rappel du dernier rendu : en changer ne relit rien.
+  // Les rappels du dernier rendu : en changer ne relit rien.
   const missing = useRef(onMissing);
   missing.current = onMissing;
+  const refused = useRef(onRefused);
+  refused.current = onRefused;
   /** La demande en cours ; `null` : la version actuelle, sans session pour la copier. */
   const key =
     versionId === null
@@ -107,6 +123,11 @@ export function VersionPreview({ pageId, versionId, current, snapshot = 0, onMis
       },
       (error: unknown) => {
         if (download.signal.aborted) return;
+        if (error instanceof ApiError && error.status === 403) {
+          setShown({ key, status: "refused", message: messageOf(error) });
+          refused.current?.();
+          return;
+        }
         setShown({ key, status: "failed", message: messageOf(error) });
         if (error instanceof ApiError && error.status === 404) missing.current?.();
       },
@@ -128,6 +149,13 @@ export function VersionPreview({ pageId, versionId, current, snapshot = 0, onMis
     );
   }
   switch (state.status) {
+    case "refused":
+      return (
+        <div className="mm-history-problem" role="alert">
+          <WarningIcon />
+          <p>{state.message}</p>
+        </div>
+      );
     case "unreadable":
       return <Problem>Cette version n'a pas pu être lue.</Problem>;
     case "failed":
