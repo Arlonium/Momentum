@@ -57,6 +57,7 @@ import { isCommentShortcut } from "../comments/shortcut";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug } from "./debug";
 import { fixtureInput, replaceNewPage } from "./fixtures";
+import { followBlock } from "./followBlock";
 import { guardedAwareness } from "./presenceGuard";
 import { schema } from "./schema";
 
@@ -74,12 +75,13 @@ type Props = {
 /**
  * Ce que partagent l'éditeur de la page et celui d'un aperçu de version : le schéma des blocs, la
  * langue, les extensions. Un aperçu montre donc une version comme la page la montrerait.
+ * `followBlock` : le curseur de l'onglet suit son bloc quand quelqu'un d'autre le déplace.
  */
 const EDITOR_OPTIONS = {
   schema,
   dictionary: { ...fr, multi_column: multiColumnLocales.fr },
   dropCursor: multiColumnDropCursor,
-  extensions: [syntaxHighlighter],
+  extensions: [syntaxHighlighter, followBlock],
 };
 
 export function Editor({ session, fixture = null, onComment = null }: Props) {
