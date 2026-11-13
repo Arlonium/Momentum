@@ -183,13 +183,15 @@ test("typed_special_characters_roundtrip", async ({ browser, request }) => {
   await expect.poll(async () => (await firstBlock(p)).text).toBe(SPECIAL);
   await expect.poll(() => getMmd(request, id)).toBe(SPECIAL_MMD);
 
-  // Le MMD relu (`GET`) puis réécrit tel quel (`PUT`, qui le relit par `parse`) : le
-  // serveur écrit un bloc neuf (nouvel id), et rien d'autre ne change.
+  // Le MMD relu (`GET`) puis réécrit tel quel (`PUT`, qui le relit par `parse`) : le bloc,
+  // inchangé, garde son identifiant (S3, R201), et rien d'autre ne change. Une seconde écriture,
+  // un bloc de plus, sert de témoin : quand il paraît, la première est arrivée aussi.
   const before = await firstBlock(p);
   const mmd = await getMmd(request, id);
   await putMmd(request, id, mmd);
-  await expect.poll(async () => (await firstBlock(p)).id).not.toBe(before.id);
-  expect(await firstBlock(p)).toMatchObject({ text: SPECIAL, blocks: 1 });
+  await putMmd(request, id, `${mmd}\nTémoin\n`);
+  await expect.poll(async () => (await firstBlock(p)).blocks).toBe(2);
+  expect(await firstBlock(p)).toMatchObject({ id: before.id, text: SPECIAL, blocks: 2 });
   await expect(p.locator(".bn-editor")).toContainText(SPECIAL);
-  expect(await getMmd(request, id)).toBe(mmd);
+  expect(await getMmd(request, id)).toBe(`${mmd}\nTémoin\n`);
 });
