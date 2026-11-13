@@ -139,7 +139,7 @@ fn cells_of_a_row_cost_their_square() {
     );
     // Dix fois plus étroit : cent fois moins par ligne, et c'est le volume qui pèse.
     let narrow = write_cost(&read(&table(100, 400)));
-    assert!(narrow.nanos < 2 * SECOND, "{narrow:?}");
+    assert!(narrow.nanos < 3 * SECOND, "{narrow:?}");
     assert!(matches!(narrow.cause, Cause::Volume { .. }), "{narrow:?}");
 }
 

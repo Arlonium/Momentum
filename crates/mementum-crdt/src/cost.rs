@@ -37,11 +37,14 @@ const CELL_PAIR_PS: u128 = 15_000;
 /// 40 000 textes et sauts de ligne alternés).
 const INLINE_PAIR_PS: u128 = 15_000;
 /// Picosecondes par paire d'éléments d'un même texte (5,2 ns mesurées à 20 000 plages alternées,
-/// grasses et maigres, 60 000 éléments comptés).
-const TEXT_PAIR_PS: u128 = 6_000;
+/// grasses et maigres, 60 000 éléments comptés ; à 6 ns, la récriture par `PUT /mmd` des 12 060
+/// plages que le budget acceptait prenait 7,0 s).
+const TEXT_PAIR_PS: u128 = 7_000;
 /// Picosecondes par élément écrit : bloc, ligne ou cellule de tableau, texte, élément en ligne
-/// (environ 12 µs mesurées, récriture d'un tableau de 150 000 cellules).
-const ELEMENT_PS: u128 = 15_000_000;
+/// (environ 12 µs mesurées pour la seule écriture, récriture d'un tableau de 150 000 cellules ;
+/// à 15 µs, la récriture par `PUT /mmd`, journal compris, des 222 100 cellules que le budget
+/// acceptait prenait 8,4 s).
+const ELEMENT_PS: u128 = 20_000_000;
 /// Picosecondes par élément d'un texte, chaîne ou marque (environ 2,8 µs mesurées, récriture de
 /// 10 000 paragraphes de 20 plages).
 const TEXT_ITEM_PS: u128 = 4_000_000;
