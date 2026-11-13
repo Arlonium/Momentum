@@ -16,11 +16,12 @@
 // correctif, et n'a pas le droit de changer.
 //
 // Un bloc déplacé étant désormais un bloc retiré, le correctif garde aussi l'endroit où
-// y-prosemirror remet une sélection de nœud (`restoreRelativeSelection`) : il levait quand le bloc
-// sélectionné n'était plus là, et l'éditeur ne montrait plus les changements des autres.
+// y-prosemirror remet la sélection (`restoreRelativeSelection`) : il levait quand le nœud
+// sélectionné n'était plus là, ou quand la place d'un curseur était au-delà de ce que montre
+// l'éditeur, et l'éditeur ne montrait plus les changements des autres.
 //
 // Pour porter le correctif à une autre version de y-prosemirror : `pnpm patch y-prosemirror@<v>`,
-// reporter dans `src/plugins/sync-plugin.js` et dans `dist/y-prosemirror.cjs` les trois ajouts,
+// reporter dans `src/plugins/sync-plugin.js` et dans `dist/y-prosemirror.cjs` les quatre ajouts,
 // chacun entre ses deux lignes `mementum:moved-blocks` (dans `dist`, `Y.` s'écrit
 // `Y__namespace.`), `pnpm patch-commit`, puis mettre à jour ici les empreintes des fichiers
 // publiés (`PUBLISHED`). Cette suite dit si le portage est juste.
@@ -267,6 +268,52 @@ describe("a_selected_block_taken_away_by_someone_else_does_not_break_the_editor"
     await exchange(s.server, [s.tom, s.mona]);
     expect(shown(s.mona)).toEqual([block("z", "Bloc Z de Tom"), X, Y_]);
     expect(stored(s.server)).toEqual(shown(s.mona));
+  });
+});
+
+// La même garde pour un curseur ou une sélection de texte. y-prosemirror retrouve sa place en
+// comptant dans le document partagé ; quand ce document porte plus que ce que l'éditeur en montre,
+// la place est au-delà du document de l'éditeur, et `doc.resolve` levait (« Position … out of
+// range »), là encore dans l'observateur du document. C'est le cas d'une page à deux racines (deux
+// clients ont chacun écrit la leur : ProseMirror n'en garde qu'une), et il s'en est vu avec des
+// colonnes (relecture de la Task 13a, m3). La sélection est alors laissée à ProseMirror.
+describe("a_cursor_beyond_what_the_editor_shows_does_not_break_the_editor", () => {
+  /** Une seconde racine, avec un bloc « Bloc W », écrite par un autre client devant la première. */
+  function secondRoot(base: Uint8Array): Uint8Array {
+    const doc = new Y.Doc();
+    doc.clientID = 9;
+    Y.applyUpdate(doc, base);
+    const text = new Y.XmlText();
+    text.insert(0, "Bloc W");
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [text]);
+    const container = new Y.XmlElement("blockContainer");
+    container.setAttribute("id", "w");
+    container.insert(0, [paragraph]);
+    const group = new Y.XmlElement("blockGroup");
+    group.insert(0, [container]);
+    const before = Y.encodeStateVector(doc);
+    doc.getXmlFragment(FRAGMENT).insert(0, [group]);
+    return Y.encodeStateAsUpdate(doc, before);
+  }
+
+  test.each([
+    { name: "un curseur à la fin de la page", from: "z", to: "z" },
+    { name: "une sélection de texte du premier bloc au dernier", from: "x", to: "z" },
+  ])("$name, une seconde racine arrive", async ({ from, to }) => {
+    const s = await duo(XYZ, 2, 3);
+    s.mona.editor.transact((tr) => {
+      const anchor = containerOf(tr.doc, from).pos + 2 + (from === to ? 6 : 0);
+      tr.setSelection(pmState.TextSelection.create(tr.doc, anchor, containerOf(tr.doc, to).pos + 2 + 6));
+    });
+    const update = secondRoot(s.base);
+    // Sans la garde, l'application de la mise à jour lève chez Mona (« Position 41 out of range »).
+    Y.applyUpdate(s.mona.doc, update, REMOTE);
+    await settle();
+    // Son éditeur ne montre que la racine arrivée, et sa sélection est dans ce qu'il montre.
+    expect(shown(s.mona)).toEqual([block("w", "Bloc W")]);
+    const { selection, doc } = s.mona.editor.prosemirrorState;
+    expect(selection.to).toBeLessThanOrEqual(doc.content.size);
   });
 });
 
@@ -788,8 +835,9 @@ test("the_patch_only_adds_and_adds_the_same_to_both_files", async () => {
   const { src, dist } = await installedFiles();
   // Hors des ajouts, chaque fichier est celui que y-prosemirror 1.3.7 publie.
   expect({ src: src.sha256, dist: dist.sha256 }).toEqual(PUBLISHED);
-  // Trois ajouts par fichier : la garde de la sélection de nœud, les fonctions, leur appel.
-  expect(src.added).toHaveLength(3);
+  // Quatre ajouts par fichier : la garde de la sélection de nœud, celle de la sélection de texte,
+  // les fonctions, leur appel.
+  expect(src.added).toHaveLength(4);
   // Le fichier de `dist` nomme Yjs autrement : à cela près, ce sont les mêmes lignes.
   expect(dist.added.map((lines) => lines.replaceAll("instanceof Y__namespace.", "instanceof Y."))).toEqual(
     src.added,
