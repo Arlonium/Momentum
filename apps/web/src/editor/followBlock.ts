@@ -124,13 +124,20 @@ function fromDocument(tr: Transaction): boolean {
 }
 
 /**
- * La position relative `relative` ne mène plus nulle part : le texte (ou le paragraphe vide)
- * qu'elle désignait a été supprimé. Lu pendant le changement, avant que Yjs ne ramasse ce qu'il
- * supprime.
+ * La position relative `relative` ne mène plus nulle part : l'élément qui portait le texte
+ * qu'elle désignait (le paragraphe d'un bloc) a été supprimé, avec son bloc ou seul. Lu pendant
+ * le changement, avant que Yjs ne ramasse ce qu'il supprime.
+ *
+ * Un texte supprimé dans un élément resté là n'en est pas : quand deux personnes écrivent en même
+ * temps dans un paragraphe vide, y-prosemirror verse l'un des deux textes dans l'autre et le
+ * supprime. Le curseur a alors changé de place dans son texte, et c'est y-prosemirror qui sait
+ * où il est.
  */
 function isGone(relative: Y.RelativePosition, doc: Y.Doc): boolean {
   const absolute = Y.createAbsolutePositionFromRelativePosition(relative, doc);
-  return absolute === null || absolute.type._item?.deleted === true;
+  if (absolute === null) return true;
+  const holder = absolute.type instanceof Y.XmlText ? absolute.type.parent : absolute.type;
+  return holder instanceof Y.XmlElement && holder._item?.deleted === true;
 }
 
 /**

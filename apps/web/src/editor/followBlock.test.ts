@@ -273,6 +273,29 @@ describe("cursor_is_left_alone_when_nothing_moved", () => {
     expect(stored(server)).toEqual([block("y", "Ah, Blo!c Y"), Z, block("x", "Bloc X de Mona"), W]);
   });
 
+  test("deux personnes tapent dans le même bloc vide : chaque curseur reste où y-prosemirror le met", async () => {
+    // Chacun crée son texte dans le paragraphe vide ; à la fusion, y-prosemirror verse l'un dans
+    // l'autre et supprime le second. Le bloc, lui, est toujours le même élément : la place d'un
+    // curseur dans son texte a changé, et c'est y-prosemirror qui la connaît (vu dans un
+    // navigateur : `offline_edits_merge_on_reconnect`, le curseur revenait au milieu du mot).
+    const cursors = async (plain: boolean) => {
+      const base = await seedState([{ id: "e", type: "paragraph", content: "" }]);
+      const extensions = plain ? undefined : [followBlock];
+      const mona = await peer("Mona", 2, base, extensions);
+      const tom = await peer("Tom", 3, base, extensions);
+      const server = new Y.Doc();
+      Y.applyUpdate(server, base, REMOTE);
+      cursor(mona, "e", 0);
+      type(mona, "A en ligne");
+      cursor(tom, "e", 0);
+      type(tom, "B hors ligne");
+      await exchange(server, [mona, tom]);
+      expect(stored(server).map((b) => b.text.length)).toEqual(["A en ligneB hors ligne".length]);
+      return { text: stored(server)[0].text, mona: cursorOf(mona), tom: cursorOf(tom) };
+    };
+    expect(await cursors(false)).toEqual(await cursors(true));
+  });
+
   test("le bloc du curseur est supprimé par un autre : rien n'est suivi, rien ne casse", async () => {
     const { mona, tom, server } = await pair();
     cursor(tom, "x", 3);
