@@ -48,6 +48,7 @@
 //! entre-temps, et le client réessaierait.
 
 use std::cmp::Reverse;
+use std::time::Duration;
 
 use axum::Json;
 use axum::body::Bytes;
@@ -56,7 +57,7 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mementum_acl::{Action, Grant, Level, NodeAccess, Role, SpaceAccess, Subject};
-use mementum_crdt::PageDoc;
+use mementum_crdt::{Cause, ListKind, PageDoc, WriteCost, write_cost};
 use mementum_md::{Block, Content, Props, RenderOpts, parse, render};
 use mementum_schema::PropSpec;
 use mementum_store::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, StoreError};
@@ -82,6 +83,12 @@ pub const MAX_TITLE_CHARS: usize = 500;
 /// une récriture de 12 000 paragraphes occupe l'acteur 7,5 s au plus, contre 50 s pour 30 000.
 /// Pas moins de 10 000, la taille de page que couvrent les budgets.
 pub const MAX_MMD_BLOCKS: usize = 12_000;
+
+/// Budget d'une écriture par `PUT /mmd`, en coût estimé (`mementum_crdt::write_cost`, Ruling
+/// R368) : au-delà, `422 too_long_to_write`. Mesurée en release (`measure_worst_accepted_writes`),
+/// la pire écriture que ce budget accepte prend 6,4 s, requête comprise, sous les dix visées ; la
+/// page des budgets (10 000 paragraphes) est estimée à moins de deux.
+pub const MMD_WRITE_BUDGET: Duration = Duration::from_secs(8);
 
 /// Type de contenu du MMD renvoyé.
 const MARKDOWN: &str = "text/markdown; charset=utf-8";
@@ -618,8 +625,9 @@ pub(crate) async fn put_mmd(
     let mut blocks = parse(text)?;
     registered_props_only(&blocks)?;
     unknown_not_foreign(&mut blocks);
-    // Ruling R259 : avant le verrou et avant de charger la page.
+    // Rulings R259 et R368 : avant le verrou et avant de charger la page.
     at_most_blocks(&blocks)?;
+    within_write_budget(&blocks)?;
     // Ruling R200 : une écriture du serveur à la fois par page, comme la restauration d'une
     // version. Le verrou se prend une fois le corps lu, et ce qui suit va au bout, verrou
     // tenu, même si le client coupe.
@@ -665,6 +673,70 @@ fn at_most_blocks(blocks: &[Block]) -> Result<(), ApiError> {
         ));
     }
     Ok(())
+}
+
+/// Ruling R368 : un MMD dont l'écriture est estimée au-delà de [`MMD_WRITE_BUDGET`] est refusé
+/// par `422 too_long_to_write`, avec ce qui pèse le plus dans l'estimation.
+fn within_write_budget(blocks: &[Block]) -> Result<(), ApiError> {
+    let cost = write_cost(blocks);
+    if u128::from(cost.nanos) <= MMD_WRITE_BUDGET.as_nanos() {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorCode::TooLongToWrite,
+        too_long_to_write(&cost),
+    ))
+}
+
+/// Le message de `422 too_long_to_write` : l'estimation, ce qui y pèse le plus, et quoi faire.
+fn too_long_to_write(cost: &WriteCost) -> String {
+    let cause = match cost.cause {
+        Cause::Lists {
+            kind: ListKind::Siblings,
+            longest,
+        } => format!(
+            "une même liste y compte jusqu'à {} blocs frères ; range-les sous des blocs \
+             parents, ou découpe la page en plusieurs pages",
+            french_number(longest)
+        ),
+        Cause::Lists {
+            kind: ListKind::Rows,
+            longest,
+        } => format!(
+            "un même tableau y compte jusqu'à {} lignes ; découpe-le en plusieurs tableaux",
+            french_number(longest)
+        ),
+        Cause::Lists {
+            kind: ListKind::Cells,
+            longest,
+        } => format!(
+            "une même ligne de tableau y compte jusqu'à {} cellules ; découpe le tableau en \
+             tableaux moins larges",
+            french_number(longest)
+        ),
+        Cause::Lists {
+            kind: ListKind::Inline,
+            longest,
+        } => format!(
+            "un même bloc y compte jusqu'à {} morceaux (plages de marques ou de liens \
+             différents, mentions, formules, sauts de ligne) ; découpe-le en plusieurs blocs, \
+             ou allège sa mise en forme",
+            french_number(longest)
+        ),
+        Cause::Volume { elements } => format!(
+            "il compte {} éléments (blocs, lignes et cellules de tableau, textes et éléments en \
+             ligne) ; découpe la page en plusieurs pages",
+            french_number(elements)
+        ),
+    };
+    let estimated = usize::try_from(cost.nanos.div_ceil(1_000_000_000)).unwrap_or(usize::MAX);
+    format!(
+        "ce MMD serait trop long à écrire (environ {} s estimées, pour {} s au plus) : {cause} ; \
+         rien n'a été écrit",
+        french_number(estimated),
+        MMD_WRITE_BUDGET.as_secs()
+    )
 }
 
 /// Un nombre écrit à la française, les milliers séparés d'une espace (« 12 000 »).
@@ -919,5 +991,53 @@ mod tests {
         assert!(at_most_blocks(&blocks).is_ok());
         blocks.extend(paragraphs(1));
         assert!(at_most_blocks(&blocks).is_err());
+    }
+
+    /// Ruling R368 : la page des budgets (10 000 paragraphes ordinaires), 12 000 paragraphes (le
+    /// plafond de blocs) et 10 000 paragraphes de six plages passent le budget d'écriture.
+    #[test]
+    fn write_budget_accepts_ordinary_pages() {
+        let page = |paragraph: &str, n: usize| {
+            parse(
+                &(vec![paragraph; n].join(
+                    "
+
+",
+                ) + "
+"),
+            )
+            .unwrap()
+        };
+        let ordinary = "Paragraphe de la page de mesure, avec un peu de texte ordinaire.";
+        assert!(within_write_budget(&page(ordinary, 10_000)).is_ok());
+        assert!(within_write_budget(&page(ordinary, MAX_MMD_BLOCKS)).is_ok());
+        let rich = "**du texte** ordinaire et **du texte** ordinaire et **du texte** fin";
+        assert!(within_write_budget(&page(rich, 10_000)).is_ok());
+    }
+
+    /// Ruling R368 : chaque refus dit ce qui pèse et quoi faire, sans espace double.
+    #[test]
+    fn too_long_to_write_says_what_and_what_to_do() {
+        let lists = |kind, longest| Cause::Lists { kind, longest };
+        for (cause, expected) in [
+            (lists(ListKind::Siblings, 12_000), "12 000 blocs frères"),
+            (lists(ListKind::Rows, 12_000), "12 000 lignes"),
+            (lists(ListKind::Cells, 4_000), "4 000 cellules"),
+            (lists(ListKind::Inline, 40_000), "40 000 morceaux"),
+            (Cause::Volume { elements: 800_101 }, "800 101 éléments"),
+        ] {
+            let message = too_long_to_write(&WriteCost {
+                nanos: 14_200_000_000,
+                cause,
+            });
+            assert!(message.contains(expected), "{message}");
+            assert!(
+                message.contains("environ 15 s estimées, pour 8 s au plus"),
+                "{message}"
+            );
+            assert!(message.contains("découpe"), "{message}");
+            assert!(message.ends_with(" ; rien n'a été écrit"), "{message}");
+            assert!(!message.contains("  "), "{message}");
+        }
     }
 }

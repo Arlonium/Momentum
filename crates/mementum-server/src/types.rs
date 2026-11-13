@@ -776,6 +776,11 @@ pub enum ErrorCode {
     /// `PUT /mmd` de plus de 12 000 blocs, à tous les niveaux, lignes de tableau comprises
     /// (Ruling R259) : rien n'est écrit. Statut 422.
     TooManyBlocks,
+    /// `PUT /mmd` dont l'écriture est estimée trop longue pour l'acteur de la page : une liste
+    /// trop longue (frères, lignes ou cellules d'un tableau, morceaux du contenu en ligne d'un
+    /// bloc) ou trop d'éléments (Ruling R368) ; le message dit lequel : rien n'est écrit. Statut
+    /// 422.
+    TooLongToWrite,
     /// La page porte déjà 2 000 fils de commentaires, résolus compris (Ruling R204), ou ce
     /// compte y en a déjà ouvert 200, sa part (Ruling R351) ; le message dit lequel : rien n'est
     /// écrit. Statut 409.

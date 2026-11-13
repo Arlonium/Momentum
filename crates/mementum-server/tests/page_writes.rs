@@ -488,6 +488,206 @@ async fn too_many_blocks_are_refused_before_anything_is_written() {
     );
 }
 
+/// Un tableau MMD de `rows` lignes sur `cols` colonnes, sans en-tête.
+fn table(rows: usize, cols: usize) -> String {
+    let row = format!(
+        "|{}
+",
+        " a |".repeat(cols)
+    );
+    let mut mmd = row.clone();
+    mmd.push_str(&format!(
+        "|{}
+",
+        " --- |".repeat(cols)
+    ));
+    for _ in 1..rows {
+        mmd.push_str(&row);
+    }
+    mmd
+}
+
+/// Constat I3 de la re-relecture de la piste S (Ruling R368) : sous le plafond de blocs, un
+/// paragraphe de 20 000 plages en gras (120 Ko), un de 40 000 sauts de ligne (240 Ko) et un
+/// tableau de 100 lignes sur 4 000 colonnes (1,6 Mo) occupaient l'acteur 91 s, 112 à 145 s et
+/// 20 à 25 s : chaque liste que l'écriture bâtit par insertions successives coûte le carré de sa
+/// longueur. Un `PUT /mmd` dont le coût estimé dépasse le budget est refusé avant le verrou et
+/// avant que la page soit chargée : `422 too_long_to_write`, avec un message qui dit ce qui est
+/// trop long et quoi faire ; rien n'est écrit.
+#[tokio::test]
+async fn mmd_too_long_to_write_is_refused_before_anything_is_written() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Trop long", &[user(&team.olga, Level::Full)])
+        .await;
+    let entries = [
+        (
+            "**a**b".repeat(20_000)
+                + "
+",
+            vec![
+                "un même bloc",
+                "40 000 morceaux",
+                "découpe-le en plusieurs blocs",
+            ],
+        ),
+        (
+            "a<br/>".repeat(40_000)
+                + "
+",
+            vec!["un même bloc", "80 000 morceaux", "sauts de ligne"],
+        ),
+        (
+            table(100, 4_000),
+            vec![
+                "une même ligne de tableau",
+                "4 000 cellules",
+                "tableaux moins larges",
+            ],
+        ),
+    ];
+    for (mmd, words) in entries {
+        let reply = team.olga.put_mmd(&page.to_string(), mmd).await;
+        let body = reply.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "too_long_to_write");
+        let mut words = words;
+        words.extend(["trop long à écrire", "8 s au plus", "rien n'a été écrit"]);
+        common::assert_french(&body, &words);
+    }
+    let sql = format!("SELECT COUNT(*) FROM doc_updates WHERE node_id = '{page}'");
+    assert_eq!(query_i64(&t.db_path(), &sql).await, 0, "rien d'écrit");
+    let sql = format!("SELECT COUNT(*) FROM doc_snapshots WHERE node_id = '{page}'");
+    assert_eq!(
+        query_i64(&t.db_path(), &sql).await,
+        0,
+        "la page n'est pas chargée"
+    );
+}
+
+/// Une forme de MMD, de taille `n`.
+type Shape = dyn Fn(usize) -> String;
+
+/// Le plus grand `n` pour lequel `shape(n)` passe les deux bornes de `PUT /mmd` (blocs et coût
+/// estimé), entre 1 et `cap`.
+fn largest_accepted(shape: &Shape, cap: usize) -> usize {
+    let accepted = |n: usize| {
+        let blocks = mementum_md::parse(&shape(n)).unwrap();
+        let count = {
+            let mut count = 0;
+            let mut stack: Vec<&mementum_md::Block> = blocks.iter().collect();
+            while let Some(block) = stack.pop() {
+                count += 1;
+                if let mementum_md::Content::Table(table) = &block.content {
+                    count += table.rows.len();
+                }
+                stack.extend(block.children.iter());
+            }
+            count
+        };
+        count <= mementum_server::MAX_MMD_BLOCKS
+            && u128::from(mementum_crdt::write_cost(&blocks).nanos)
+                <= mementum_server::MMD_WRITE_BUDGET.as_nanos()
+    };
+    let (mut low, mut high) = (1, cap);
+    if accepted(high) {
+        return high;
+    }
+    assert!(accepted(low));
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if accepted(middle) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
+/// Mesure, à lancer en release (Ruling R368) : la pire écriture que les bornes de `PUT /mmd`
+/// acceptent occupe l'acteur moins de dix secondes. Pour chaque forme, le plus grand MMD
+/// accepté, cherché sur l'estimation elle-même, est écrit deux fois de suite sur une page neuve
+/// d'un serveur neuf (la seconde récrit la première, et retire autant qu'elle écrit) ; chaque
+/// requête est chronométrée, acteur compris. Des poids trop bas laisseraient passer de plus grands MMD, plus
+/// lents : la mesure ne peut pas passer à tort.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure, à lancer en --release"]
+async fn measure_worst_accepted_writes() {
+    // Un `assert!` sur `cfg!` est refusé par clippy (`assertions_on_constants`).
+    if cfg!(debug_assertions) {
+        panic!("mesure sans valeur en debug : lancer `cargo test --release`");
+    }
+    let rich = "**du texte** ordinaire et **du texte** ordinaire et **du texte** fin";
+    let shapes: Vec<(&str, Box<Shape>)> = vec![
+        (
+            "plages grasses et maigres d'un paragraphe",
+            Box::new(|n| {
+                "**a**b".repeat(n)
+                    + "
+"
+            }),
+        ),
+        (
+            "lettres et sauts de ligne d'un paragraphe",
+            Box::new(|n| {
+                "a<br/>".repeat(n)
+                    + "
+"
+            }),
+        ),
+        ("cellules d'une ligne", Box::new(|n| table(1, n))),
+        ("lignes de 100 cellules", Box::new(|n| table(n, 100))),
+        (
+            "paragraphes de six plages",
+            Box::new(move |n| {
+                vec![rich; n].join(
+                    "
+
+",
+                ) + "
+"
+            }),
+        ),
+        (
+            "un paragraphe de plages et une ligne de cellules",
+            Box::new(|n| {
+                "**a**b".repeat(n)
+                    + "
+
+" + &table(1, 2 * n)
+            }),
+        ),
+    ];
+    // `MEMENTUM_I3_SHAPE` : ne mesurer que les formes dont le nom contient ce texte.
+    let only = std::env::var("MEMENTUM_I3_SHAPE").unwrap_or_default();
+    let mut worst = Duration::ZERO;
+    for (what, shape) in shapes.into_iter().filter(|(what, _)| what.contains(&only)) {
+        let n = largest_accepted(shape.as_ref(), 200_000);
+        let mmd = shape(n);
+        // Un serveur neuf par forme : les acteurs des pages d'avant (leur compactage, leur
+        // mémoire) ne pèsent pas sur la mesure.
+        let t = open_app().await;
+        let team = Team::new(&t).await;
+        let page = team
+            .page(None, what, &[user(&team.olga, Level::Full)])
+            .await;
+        let mut times = Vec::new();
+        for _ in 0..2 {
+            let start = std::time::Instant::now();
+            let reply = team.olga.put_mmd(&page.to_string(), mmd.clone()).await;
+            assert_eq!(reply.status, StatusCode::NO_CONTENT, "{what}, n = {n}");
+            times.push(start.elapsed());
+        }
+        println!(
+            "MESURE pire écriture acceptée, {what} (n = {n}, {} octets) : {times:?}",
+            mmd.len()
+        );
+        worst = worst.max(*times.iter().max().unwrap());
+    }
+    println!("MESURE pire écriture acceptée, toutes formes : {worst:?}");
+    assert!(worst < Duration::from_secs(10), "{worst:?}");
+}
+
 /// Constat N2 de la re-relecture de la piste S (Ruling R365), avec l'attente inverse. Pendant
 /// qu'Olga récrit une longue page, Tom demande d'un coup 20 fils sur un de ses blocs : chaque
 /// requête attend l'acteur de la page, occupé ; Tom se déconnecte pendant ce temps. Avant, la
