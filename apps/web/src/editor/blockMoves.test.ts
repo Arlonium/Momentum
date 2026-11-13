@@ -30,9 +30,11 @@
 // `crates/mementum-sync/tests/moves.rs`, avec des octets que cette suite produit (fin du
 // fichier), et dans un navigateur, dans `e2e/block-move.spec.ts`.
 import { describe, expect, test } from "vitest";
+import * as Y from "yjs";
 import {
   A,
   block,
+  containerOf,
   drag,
   duo,
   exchange,
@@ -48,6 +50,7 @@ import {
   tab,
   TITLE_Y,
   TITLED,
+  typeAt,
   typeAtEnd,
   W,
   W_FIRST,
@@ -682,11 +685,13 @@ describe("ce que chaque geste écrit dans le document", () => {
 const FIXTURES = "crates/mementum-sync/tests/fixtures/moves";
 
 /**
- * Ce que rejoue le test de l'acteur, écrit par y-prosemirror depuis la même page de départ
- * (« Bloc X, Bloc Y, Bloc Z », identifiant de client 1) : le glisser de X sous Z fait par Mona
- * (identifiant 2), et la frappe de Tom (identifiant 3) à la fin de X, ou de Y.
+ * Ce que rejoue le test de l'acteur depuis le lot 3, à la racine du dossier, écrit par
+ * y-prosemirror depuis la même page de départ (« Bloc X, Bloc Y, Bloc Z », identifiant de
+ * client 1) : le glisser de X sous Z fait par Mona (identifiant 2), et la frappe de Tom
+ * (identifiant 3) à la fin de X, ou de Y. Ce sont les octets des scénarios S1 et S4, Mona avant
+ * Tom, sous les noms que `moves.rs` inclut.
  */
-async function fixtureBytes(): Promise<Record<string, Uint8Array>> {
+async function legacyBytes(): Promise<Record<string, Uint8Array>> {
   const order = ORDERS[0];
   const s = await scene(XYZ, order);
   const tomInY = await peer("Tom", order.tom, s.base);
@@ -702,21 +707,263 @@ async function fixtureBytes(): Promise<Record<string, Uint8Array>> {
   };
 }
 
-// `EXPORT_FIXTURES=1 corepack pnpm -C apps/web exec vitest run src/editor/blockMoves.test.ts`
-// les réécrit ; sans la variable, le test les compare, octet pour octet.
-test("les octets du test de l'acteur sont ceux qu'écrit y-prosemirror", async () => {
+/**
+ * Des scènes de plus pour le report du serveur (Task 13b, R221) : seuls leurs octets servent, et
+ * ce que le serveur doit en faire se décide là-bas. `wanted` : la page qu'on voudrait, quand elle
+ * se dit sans choisir à sa place ; `note` : ce que le plan de la Task 13b en dit.
+ */
+type Extra = {
+  key: string;
+  title: string;
+  seed: Seed;
+  mona: (p: Peer) => void;
+  tom: (p: Peer) => void;
+  wanted?: Shown[];
+  note: string;
+};
+
+const EXTRAS: Extra[] = [
+  {
+    key: "start-middle-end",
+    title: "Tom tape au début, au milieu et à la fin de X pendant que Mona glisse X sous Z",
+    seed: XYZ,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => {
+      typeAt(p, "x", 0, "Début ");
+      typeAt(p, "x", 8, "[milieu]");
+      typeAtEnd(p, "x", TYPED);
+    },
+    wanted: [Y_, Z, block("x", `Début Bl[milieu]oc X${TYPED}`)],
+    note: "text_typed_before_the_move_arrives_is_carried : trois frappes, trois places.",
+  },
+  {
+    key: "bold",
+    title: "Tom tape en gras à la fin de X pendant que Mona glisse X sous Z",
+    seed: XYZ,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) =>
+      p.editor.transact((tr) => {
+        const { pos, node } = containerOf(tr.doc, "x");
+        const { pmSchema } = p.editor;
+        const bold = pmSchema.text(TYPED, [pmSchema.marks.bold.create()]);
+        tr.insert(pos + 2 + node.firstChild!.content.size, bold);
+      }),
+    wanted: [Y_, Z, typedIn.x],
+    note: "carried_text_keeps_its_marks : « de Tom » est en gras (marque `bold`).",
+  },
+  {
+    key: "child-added",
+    title: "Tom ajoute un sous-bloc sous X pendant que Mona glisse X sous Z",
+    seed: XYZ,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) =>
+      void p.editor.updateBlock("x", {
+        children: [{ id: "x1", type: "paragraph", content: "Enfant de Tom" }],
+      }),
+    wanted: [Y_, Z, block("x", "Bloc X", { children: [block("x1", "Enfant de Tom")] })],
+    note: "child_block_added_under_the_original_follows_it.",
+  },
+  {
+    key: "mover-typed-too",
+    title: "Mona tape dans X puis le glisse sous Z, sans que le serveur ait rien vu ; Tom tape dans X",
+    seed: XYZ,
+    mona: (p) => {
+      typeAtEnd(p, "x", " de Mona");
+      drag(p, "x", { under: "z" });
+    },
+    tom: (p) => typeAt(p, "x", 0, "Tom : "),
+    note:
+      "mover_own_offline_edits_are_not_doubled : la copie de Mona n'est pas le texte que le " +
+      "serveur avait ; le plan demande de s'abstenir (« Bloc X de Mona », sans doublon).",
+  },
+  {
+    key: "several-texts",
+    title: "X porte une mention (plusieurs textes en ligne) ; Tom tape à sa fin pendant que Mona le glisse sous Z",
+    seed: [
+      {
+        id: "x",
+        type: "paragraph",
+        content: [
+          { type: "text", text: "Voir ", styles: {} },
+          { type: "mention", props: { kind: "page", id: "p1", label: "Plan" } },
+          { type: "text", text: " ici", styles: {} },
+        ],
+      },
+      { id: "y", type: "paragraph", content: "Bloc Y" },
+      { id: "z", type: "paragraph", content: "Bloc Z" },
+    ],
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) =>
+      p.editor.transact((tr) => {
+        const { pos, node } = containerOf(tr.doc, "x");
+        tr.insertText(TYPED, pos + 2 + node.firstChild!.content.size);
+      }),
+    note: "inline_content_with_several_texts_is_left_alone : le plan demande de s'abstenir.",
+  },
+  {
+    key: "concurrent-delete",
+    title: "Tom efface « oc » dans X et tape à sa fin pendant que Mona glisse X sous Z",
+    seed: XYZ,
+    mona: (p) => drag(p, "x", { under: "z" }),
+    tom: (p) => {
+      p.editor.transact((tr) => {
+        const { pos } = containerOf(tr.doc, "x");
+        tr.delete(pos + 2 + 2, pos + 2 + 4);
+      });
+      typeAtEnd(p, "x", TYPED);
+    },
+    note:
+      "concurrent_delete_is_not_carried_and_removes_nothing_typed : la suppression de Tom n'est " +
+      "pas reportée (« Bloc X de Tom »), et rien de ce qu'il a tapé n'est retiré.",
+  },
+];
+
+/** Les blocs d'un état Yjs, lus sans éditeur. */
+function pageOf(...updates: Uint8Array[]): Shown[] {
+  const doc = new Y.Doc();
+  for (const update of updates) Y.applyUpdate(doc, update);
+  return stored(doc);
+}
+
+/**
+ * Les fichiers d'une scène, dans l'ordre d'identifiants `order` : la page de départ, ce qu'écrit
+ * Mona, ce qu'écrit Tom (chacun depuis la page de départ, sans avoir rien vu de l'autre), et sa
+ * description, pour qui écrit le test de l'acteur.
+ */
+async function sceneFiles(
+  sc: Scenario | Extra,
+  order: Order,
+): Promise<Record<string, Uint8Array | string>> {
+  const s = await scene(sc.seed, order);
+  expect(s.quiet, "rien d'écrit à l'ouverture").toBe(true);
+  sc.mona(s.mona);
+  sc.tom(s.tom);
+  if ("local" in sc) requireLocallyDone(s, sc.local);
+  const mona = outgoing(s.mona)!;
+  const tom = outgoing(s.tom)!;
+  const description = {
+    scenario: sc.key,
+    title: sc.title,
+    clients: { start: 1, mona: order.mona, tom: order.tom },
+    // Chaque page : ses blocs, chacun avec son id, son type, son texte et ses enfants.
+    start: pageOf(s.base),
+    monaAlone: pageOf(s.base, mona),
+    tomAlone: pageOf(s.base, tom),
+    ...("local" in sc
+      ? {
+          wanted: Array.isArray(sc.wanted[0]) ? sc.wanted : [sc.wanted],
+          // Ce que donnent les clients seuls, selon qui arrive le premier au serveur.
+          clientsAlone: {
+            monaFirst: sc.loss?.mona ?? "juste",
+            tomFirst: sc.loss?.tom ?? "juste",
+          },
+        }
+      : { ...(sc.wanted ? { wanted: [sc.wanted] } : {}), note: sc.note }),
+  };
+  return {
+    "base.bin": s.base,
+    "mona.bin": mona,
+    "tom.bin": tom,
+    "scenario.json": `${JSON.stringify(description, null, 2)}\n`,
+  };
+}
+
+/** Compare `files` à ceux du dossier `dir`, ou les y écrit avec `EXPORT_FIXTURES=1`. */
+async function checkOrExport(dir: string, files: Record<string, Uint8Array | string>): Promise<void> {
   const fs = await nodeModule<Fs>("node:fs/promises");
   const path = await nodeModule<Path>("node:path");
-  const url = await nodeModule<Url>("node:url");
-  const dir = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "../../../..", FIXTURES);
-  const bytes = await fixtureBytes();
   if (import.meta.env.EXPORT_FIXTURES) {
     await fs.mkdir(dir, { recursive: true });
-    for (const [name, data] of Object.entries(bytes)) await fs.writeFile(path.join(dir, name), data);
+    for (const [name, data] of Object.entries(files)) await fs.writeFile(path.join(dir, name), data);
     return;
   }
-  for (const [name, data] of Object.entries(bytes)) {
-    const committed = await fs.readFile(path.join(dir, name));
-    expect([...data], `${name} (EXPORT_FIXTURES=1 le réécrit)`).toEqual([...committed]);
+  for (const [name, data] of Object.entries(files)) {
+    const told = `${path.join(dir, name)} (EXPORT_FIXTURES=1 le réécrit)`;
+    if (typeof data === "string") {
+      expect(data, told).toBe(await fs.readFile(path.join(dir, name), "utf8"));
+    } else {
+      expect([...data], told).toEqual([...(await fs.readFile(path.join(dir, name)))]);
+    }
   }
+}
+
+/** Le dossier des octets, dans le dépôt. */
+async function fixturesDir(): Promise<string> {
+  const path = await nodeModule<Path>("node:path");
+  const url = await nodeModule<Url>("node:url");
+  return path.join(path.dirname(url.fileURLToPath(import.meta.url)), "../../../..", FIXTURES);
+}
+
+// `EXPORT_FIXTURES=1 corepack pnpm -C apps/web exec vitest run src/editor/blockMoves.test.ts`
+// les réécrit ; sans la variable, les tests les comparent, octet pour octet.
+describe("les octets du test de l'acteur sont ceux qu'écrit le client", () => {
+  test("les quatre fichiers que `moves.rs` inclut", async () => {
+    await checkOrExport(await fixturesDir(), await legacyBytes());
+  });
+
+  // Un dossier par ordre d'identifiants (`mona-first`, `tom-first`), puis un par scène : `s1` à
+  // `s11`, et les scènes de plus de la Task 13b.
+  for (const order of ORDERS) {
+    for (const sc of [...SCENARIOS, ...EXTRAS]) {
+      test(`${order.dir}/${sc.key} : ${sc.title}`, async () => {
+        const path = await nodeModule<Path>("node:path");
+        const files = await sceneFiles(sc, order);
+        await checkOrExport(path.join(await fixturesDir(), order.dir, sc.key), files);
+      });
+    }
+  }
+
+  test("les scènes de plus font chez chacun ce que leur titre dit", async () => {
+    const alone = async (key: string, who: "mona" | "tom") => {
+      const sc = EXTRAS.find((extra) => extra.key === key)!;
+      const s = await scene(sc.seed, ORDERS[0]);
+      sc[who](s[who]);
+      return line(shown(s[who]));
+    };
+    expect(await alone("start-middle-end", "tom")).toBe(
+      "x « Début Bl[milieu]oc X de Tom » | y « Bloc Y » | z « Bloc Z »",
+    );
+    expect(await alone("bold", "tom")).toBe("x « Bloc X de Tom » | y « Bloc Y » | z « Bloc Z »");
+    expect(await alone("child-added", "tom")).toBe(
+      "x « Bloc X » [x1 « Enfant de Tom »] | y « Bloc Y » | z « Bloc Z »",
+    );
+    expect(await alone("mover-typed-too", "mona")).toBe(
+      "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Mona »",
+    );
+    expect(await alone("mover-typed-too", "tom")).toBe(
+      "x « Tom : Bloc X » | y « Bloc Y » | z « Bloc Z »",
+    );
+    expect(await alone("several-texts", "tom")).toBe(
+      "x « Voir  ici de Tom » | y « Bloc Y » | z « Bloc Z »",
+    );
+    expect(await alone("concurrent-delete", "tom")).toBe(
+      "x « Bl X de Tom » | y « Bloc Y » | z « Bloc Z »",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L'état final, rouvert
+// ---------------------------------------------------------------------------
+
+// Ce que laisse chaque scénario, rouvert par deux éditeurs neufs : ils montrent la même page, et
+// n'écrivent rien en l'ouvrant. Un état qu'un éditeur récrirait à l'ouverture ferait écrire tous
+// les onglets à la fois, chacun à sa façon.
+describe.each(ORDERS)("l'état final de chaque scénario, rouvert ($label)", (order) => {
+  test.each(SCENARIOS)("$key : deux éditeurs le rouvrent sans rien écrire", async (sc) => {
+    const s = await play(sc, order, "mona");
+    const final = Y.encodeStateAsUpdate(s.server);
+    const first = await peer("Rouvre 1", 7, final);
+    const second = await peer("Rouvre 2", 8, final);
+    expect(first.writes.length + second.writes.length, "rien d'écrit à l'ouverture").toBe(0);
+    expect(xml(first.doc)).toBe(xml(s.server));
+    expect(xml(second.doc)).toBe(xml(s.server));
+    const page = stored(s.server);
+    for (const p of [first, second]) {
+      // Un bloc en double reçoit de chaque éditeur un id à lui, sans qu'il l'écrive (S6) : les
+      // textes sont alors ceux du serveur, dans l'ordre ; sinon, c'est sa page, ids compris.
+      if (repeatedIds(page).length === 0) expect(shown(p)).toEqual(page);
+      else expect(shown(p).map((b) => b.text)).toEqual(page.map((b) => b.text));
+    }
+  });
 });

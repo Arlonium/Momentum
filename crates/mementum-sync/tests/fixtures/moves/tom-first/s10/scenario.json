@@ -1,0 +1,97 @@
+{
+  "scenario": "s10",
+  "title": "Tom tape dans X pendant que Mona le remonte d'un niveau (Maj+Tab)",
+  "clients": {
+    "start": 1,
+    "mona": 3,
+    "tom": 2
+  },
+  "start": [
+    {
+      "id": "w",
+      "type": "paragraph",
+      "text": "Bloc W",
+      "children": [
+        {
+          "id": "x",
+          "type": "paragraph",
+          "text": "Bloc X",
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "w",
+      "type": "paragraph",
+      "text": "Bloc W",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "w",
+      "type": "paragraph",
+      "text": "Bloc W",
+      "children": [
+        {
+          "id": "x",
+          "type": "paragraph",
+          "text": "Bloc X de Tom",
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    }
+  ],
+  "wanted": [
+    [
+      {
+        "id": "w",
+        "type": "paragraph",
+        "text": "Bloc W",
+        "children": []
+      },
+      {
+        "id": "x",
+        "type": "paragraph",
+        "text": "Bloc X de Tom",
+        "children": []
+      },
+      {
+        "id": "y",
+        "type": "paragraph",
+        "text": "Bloc Y",
+        "children": []
+      }
+    ]
+  ],
+  "clientsAlone": {
+    "monaFirst": "limite R222 : la frappe arrive après le déplacement",
+    "tomFirst": "attend le report du serveur, Task 13b"
+  }
+}

@@ -1,0 +1,123 @@
+{
+  "scenario": "s3",
+  "title": "Tom tape dans l'enfant de X pendant que Mona glisse X sous Z",
+  "clients": {
+    "start": 1,
+    "mona": 3,
+    "tom": 2
+  },
+  "start": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": [
+        {
+          "id": "x1",
+          "type": "paragraph",
+          "text": "Enfant X1",
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": [
+        {
+          "id": "x1",
+          "type": "paragraph",
+          "text": "Enfant X1",
+          "children": []
+        }
+      ]
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": [
+        {
+          "id": "x1",
+          "type": "paragraph",
+          "text": "Enfant X1 de Tom",
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "wanted": [
+    [
+      {
+        "id": "y",
+        "type": "paragraph",
+        "text": "Bloc Y",
+        "children": []
+      },
+      {
+        "id": "z",
+        "type": "paragraph",
+        "text": "Bloc Z",
+        "children": []
+      },
+      {
+        "id": "x",
+        "type": "paragraph",
+        "text": "Bloc X",
+        "children": [
+          {
+            "id": "x1",
+            "type": "paragraph",
+            "text": "Enfant X1 de Tom",
+            "children": []
+          }
+        ]
+      }
+    ]
+  ],
+  "clientsAlone": {
+    "monaFirst": "limite R222 : la frappe arrive après le déplacement",
+    "tomFirst": "attend le report du serveur, Task 13b"
+  }
+}

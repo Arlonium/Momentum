@@ -1,0 +1,70 @@
+{
+  "scenario": "mover-typed-too",
+  "title": "Mona tape dans X puis le glisse sous Z, sans que le serveur ait rien vu ; Tom tape dans X",
+  "clients": {
+    "start": 1,
+    "mona": 3,
+    "tom": 2
+  },
+  "start": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X de Mona",
+      "children": []
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Tom : Bloc X",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "note": "mover_own_offline_edits_are_not_doubled : la copie de Mona n'est pas le texte que le serveur avait ; le plan demande de s'abstenir (« Bloc X de Mona », sans doublon)."
+}

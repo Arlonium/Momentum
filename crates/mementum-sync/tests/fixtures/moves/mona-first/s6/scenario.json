@@ -1,0 +1,115 @@
+{
+  "scenario": "s6",
+  "title": "sans aucune frappe, Mona glisse X sous Z, Tom glisse X sous Y",
+  "clients": {
+    "start": 1,
+    "mona": 2,
+    "tom": 3
+  },
+  "start": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "wanted": [
+    [
+      {
+        "id": "y",
+        "type": "paragraph",
+        "text": "Bloc Y",
+        "children": []
+      },
+      {
+        "id": "z",
+        "type": "paragraph",
+        "text": "Bloc Z",
+        "children": []
+      },
+      {
+        "id": "x",
+        "type": "paragraph",
+        "text": "Bloc X",
+        "children": []
+      }
+    ],
+    [
+      {
+        "id": "y",
+        "type": "paragraph",
+        "text": "Bloc Y",
+        "children": []
+      },
+      {
+        "id": "x",
+        "type": "paragraph",
+        "text": "Bloc X",
+        "children": []
+      },
+      {
+        "id": "z",
+        "type": "paragraph",
+        "text": "Bloc Z",
+        "children": []
+      }
+    ]
+  ],
+  "clientsAlone": {
+    "monaFirst": "attend le dédoublonnage du serveur, Task 13b",
+    "tomFirst": "attend le dédoublonnage du serveur, Task 13b"
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "scenario": "s11",
+  "title": "sans aucune frappe, Mona glisse X sous Z, Tom glisse Y sous A",
+  "clients": {
+    "start": 1,
+    "mona": 3,
+    "tom": 2
+  },
+  "start": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "a",
+      "type": "paragraph",
+      "text": "Bloc A",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "a",
+      "type": "paragraph",
+      "text": "Bloc A",
+      "children": []
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "a",
+      "type": "paragraph",
+      "text": "Bloc A",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    }
+  ],
+  "wanted": [
+    [
+      {
+        "id": "z",
+        "type": "paragraph",
+        "text": "Bloc Z",
+        "children": []
+      },
+      {
+        "id": "x",
+        "type": "paragraph",
+        "text": "Bloc X",
+        "children": []
+      },
+      {
+        "id": "a",
+        "type": "paragraph",
+        "text": "Bloc A",
+        "children": []
+      },
+      {
+        "id": "y",
+        "type": "paragraph",
+        "text": "Bloc Y",
+        "children": []
+      }
+    ]
+  ],
+  "clientsAlone": {
+    "monaFirst": "juste",
+    "tomFirst": "juste"
+  }
+}

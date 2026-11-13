@@ -1,0 +1,70 @@
+{
+  "scenario": "concurrent-delete",
+  "title": "Tom efface « oc » dans X et tape à sa fin pendant que Mona glisse X sous Z",
+  "clients": {
+    "start": 1,
+    "mona": 3,
+    "tom": 2
+  },
+  "start": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bl X de Tom",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "note": "concurrent_delete_is_not_carried_and_removes_nothing_typed : la suppression de Tom n'est pas reportée (« Bloc X de Tom »), et rien de ce qu'il a tapé n'est retiré."
+}

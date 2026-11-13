@@ -1,0 +1,92 @@
+{
+  "scenario": "bold",
+  "title": "Tom tape en gras à la fin de X pendant que Mona glisse X sous Z",
+  "clients": {
+    "start": 1,
+    "mona": 2,
+    "tom": 3
+  },
+  "start": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X de Tom",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "wanted": [
+    [
+      {
+        "id": "y",
+        "type": "paragraph",
+        "text": "Bloc Y",
+        "children": []
+      },
+      {
+        "id": "z",
+        "type": "paragraph",
+        "text": "Bloc Z",
+        "children": []
+      },
+      {
+        "id": "x",
+        "type": "paragraph",
+        "text": "Bloc X de Tom",
+        "children": []
+      }
+    ]
+  ],
+  "note": "carried_text_keeps_its_marks : « de Tom » est en gras (marque `bold`)."
+}

@@ -1,0 +1,106 @@
+{
+  "scenario": "child-added",
+  "title": "Tom ajoute un sous-bloc sous X pendant que Mona glisse X sous Z",
+  "clients": {
+    "start": 1,
+    "mona": 2,
+    "tom": 3
+  },
+  "start": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": []
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Bloc X",
+      "children": [
+        {
+          "id": "x1",
+          "type": "paragraph",
+          "text": "Enfant de Tom",
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Bloc Y",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Bloc Z",
+      "children": []
+    }
+  ],
+  "wanted": [
+    [
+      {
+        "id": "y",
+        "type": "paragraph",
+        "text": "Bloc Y",
+        "children": []
+      },
+      {
+        "id": "z",
+        "type": "paragraph",
+        "text": "Bloc Z",
+        "children": []
+      },
+      {
+        "id": "x",
+        "type": "paragraph",
+        "text": "Bloc X",
+        "children": [
+          {
+            "id": "x1",
+            "type": "paragraph",
+            "text": "Enfant de Tom",
+            "children": []
+          }
+        ]
+      }
+    ]
+  ],
+  "note": "child_block_added_under_the_original_follows_it."
+}

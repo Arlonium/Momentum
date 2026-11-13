@@ -1,0 +1,95 @@
+{
+  "scenario": "s8",
+  "title": "textes différents ; Tom tape dans X pendant que Mona glisse X sous Z",
+  "clients": {
+    "start": 1,
+    "mona": 3,
+    "tom": 2
+  },
+  "start": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Acheter du pain",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Rappeler Marc",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Arroser les plantes",
+      "children": []
+    }
+  ],
+  "monaAlone": [
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Rappeler Marc",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Arroser les plantes",
+      "children": []
+    },
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Acheter du pain",
+      "children": []
+    }
+  ],
+  "tomAlone": [
+    {
+      "id": "x",
+      "type": "paragraph",
+      "text": "Acheter du pain de Tom",
+      "children": []
+    },
+    {
+      "id": "y",
+      "type": "paragraph",
+      "text": "Rappeler Marc",
+      "children": []
+    },
+    {
+      "id": "z",
+      "type": "paragraph",
+      "text": "Arroser les plantes",
+      "children": []
+    }
+  ],
+  "wanted": [
+    [
+      {
+        "id": "y",
+        "type": "paragraph",
+        "text": "Rappeler Marc",
+        "children": []
+      },
+      {
+        "id": "z",
+        "type": "paragraph",
+        "text": "Arroser les plantes",
+        "children": []
+      },
+      {
+        "id": "x",
+        "type": "paragraph",
+        "text": "Acheter du pain de Tom",
+        "children": []
+      }
+    ]
+  ],
+  "clientsAlone": {
+    "monaFirst": "limite R222 : la frappe arrive après le déplacement",
+    "tomFirst": "attend le report du serveur, Task 13b"
+  }
+}
