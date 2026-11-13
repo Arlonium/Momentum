@@ -371,6 +371,63 @@ fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Retire de `tmp/` le reste d'un envoi interrompu : un dossier avec ce qu'il contient, un lien
+/// lui-même, jamais ce qu'il vise.
+fn remove_leftover(entry: &std::fs::DirEntry) -> io::Result<()> {
+    let path = entry.path();
+    let gone = entry.file_type().and_then(|kind| {
+        if kind.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else if kind.is_symlink() {
+            remove_link(&path)
+        } else {
+            std::fs::remove_file(&path)
+        }
+    });
+    gone.map_err(|error| at(&path, error))
+}
+
+/// `error`, avec le chemin où elle est arrivée : celles du système ne le disent pas, et le
+/// journal du démarrage doit nommer ce qui ne se lit pas ou ne part pas.
+fn at(path: &Path, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{} : {error}", path.display()))
+}
+
+/// Les contenus du dossier de préfixe `prefix` que la base ne connaît pas : leur nombre et leur
+/// poids. Rien pour une entrée de `files/` qui n'est pas un vrai dossier nommé de deux
+/// caractères hexadécimaux.
+fn strangers_under(
+    prefix: &std::fs::DirEntry,
+    known: &HashSet<&[u8; 32]>,
+) -> io::Result<(u64, u64)> {
+    let (mut count, mut bytes) = (0, 0);
+    let prefix_name = prefix.file_name();
+    let Some(head) = prefix_name.to_str().filter(|name| is_hex(name, 2)) else {
+        return Ok((0, 0));
+    };
+    if !prefix.file_type()?.is_dir() {
+        return Ok((0, 0));
+    }
+    for entry in std::fs::read_dir(prefix.path())? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(tail) = name.to_str().filter(|name| is_hex(name, 62)) else {
+            continue;
+        };
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some(hash) = parse_hex(head, tail) else {
+            continue;
+        };
+        if !known.contains(&hash) {
+            count += 1;
+            bytes += entry.metadata()?.len();
+        }
+    }
+    Ok((count, bytes))
+}
+
 /// Retire le lien posé à `path`, jamais ce qu'il vise ; sous Windows, un lien vers un dossier (ou
 /// une jonction) se retire comme un dossier.
 fn remove_link(path: &Path) -> io::Result<()> {
@@ -417,9 +474,11 @@ pub(crate) struct Upload {
 impl FileStore {
     /// Ouvre le dépôt de `data_dir` (au démarrage, donc synchrone) : crée `files/` et
     /// `files/tmp/`, vide `tmp/` des restes d'envois interrompus, **et rien d'autre** : aucun
-    /// contenu n'est supprimé au démarrage (R245). Une entrée de `tmp/` qui ne part pas est
-    /// journalisée et laissée là, pour le démarrage suivant. `tmp/` doit être un vrai dossier :
-    /// un lien ne serait pas vidé, mais ce qu'il vise (R272).
+    /// contenu n'est supprimé au démarrage (R245). Seul ce qui empêcherait le dépôt de servir
+    /// arrête l'ouverture : un dossier qui ne se crée pas, ou `tmp/` qui n'est pas un vrai
+    /// dossier (un lien ne serait pas vidé, mais ce qu'il vise, R272). Le vidage, lui, n'arrête
+    /// rien (R279) : une entrée de `tmp/` qui ne se lit pas ou ne part pas, ou `tmp/` qui ne se
+    /// liste pas, est journalisé et laissé là, pour le démarrage suivant.
     pub(crate) fn open(data_dir: &Path) -> io::Result<FileStore> {
         let root = data_dir.join(FILES_DIR);
         let tmp = root.join(TMP_DIR);
@@ -434,32 +493,25 @@ impl FileStore {
         // `files/` et `files/tmp/`, s'ils viennent d'être créés (R278).
         durable(&[data_dir.to_path_buf(), root.clone()]);
         let mut removed = 0u64;
-        for entry in std::fs::read_dir(&tmp)? {
-            let entry = entry?;
-            let path = entry.path();
-            let kind = entry.file_type()?;
-            // Un lien est retiré lui-même, jamais ce qu'il vise ; sous Windows, un lien vers un
-            // dossier (ou une jonction) se retire comme un dossier.
-            let gone = if kind.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path).or_else(|error| {
-                    if kind.is_symlink() {
-                        std::fs::remove_dir(&path)
-                    } else {
-                        Err(error)
+        match std::fs::read_dir(&tmp) {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry.and_then(|entry| remove_leftover(&entry)) {
+                        Ok(()) => removed += 1,
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "reste d'un envoi interrompu impossible à retirer de files/tmp ; le \
+                             prochain démarrage réessaiera"
+                        ),
                     }
-                })
-            };
-            match gone {
-                Ok(()) => removed += 1,
-                Err(error) => tracing::warn!(
-                    path = %path.display(),
-                    %error,
-                    "reste d'un envoi interrompu impossible à retirer ; le prochain démarrage \
-                     réessaiera"
-                ),
+                }
             }
+            Err(error) => tracing::warn!(
+                path = %tmp.display(),
+                %error,
+                "files/tmp impossible à lire : les restes d'envois interrompus y restent ; le \
+                 prochain démarrage réessaiera"
+            ),
         }
         if removed > 0 {
             tracing::info!(removed, "restes d'envois interrompus retirés de files/tmp");
@@ -476,35 +528,26 @@ impl FileStore {
 
     /// Le nombre et le poids des contenus du dépôt que la base ne connaît pas (`known`), pour
     /// le journal du démarrage. Ne lit que les entrées de la forme `<2 hex>/<62 hex>` qui sont des
-    /// fichiers ordinaires dans un vrai dossier (pas un lien), et ne touche à rien.
+    /// fichiers ordinaires dans un vrai dossier (pas un lien), et ne touche à rien. Un dossier de
+    /// préfixe qui ne se lit pas est journalisé et passé (R279) : le compte est alors un
+    /// minimum. Seul `files/` illisible est une erreur.
     pub(crate) fn strangers(&self, known: &[[u8; 32]]) -> io::Result<(u64, u64)> {
         let known: HashSet<&[u8; 32]> = known.iter().collect();
         let (mut count, mut bytes) = (0, 0);
         for prefix in std::fs::read_dir(&self.dirs.root)? {
-            let prefix = prefix?;
-            let prefix_name = prefix.file_name();
-            let Some(head) = prefix_name.to_str().filter(|name| is_hex(name, 2)) else {
-                continue;
-            };
-            if !prefix.file_type()?.is_dir() {
-                continue;
-            }
-            for entry in std::fs::read_dir(prefix.path())? {
-                let entry = entry?;
-                let name = entry.file_name();
-                let Some(tail) = name.to_str().filter(|name| is_hex(name, 62)) else {
-                    continue;
-                };
-                if !entry.file_type()?.is_file() {
-                    continue;
+            let read = prefix.and_then(|prefix| {
+                strangers_under(&prefix, &known).map_err(|error| at(&prefix.path(), error))
+            });
+            match read {
+                Ok((found, weight)) => {
+                    count += found;
+                    bytes += weight;
                 }
-                let Some(hash) = parse_hex(head, tail) else {
-                    continue;
-                };
-                if !known.contains(&hash) {
-                    count += 1;
-                    bytes += entry.metadata()?.len();
-                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "une partie du dépôt des fichiers n'a pas pu être lue : les contenus que la \
+                     base ne connaît pas y sont peut-être plus nombreux que comptés"
+                ),
             }
         }
         Ok((count, bytes))
@@ -2806,5 +2849,69 @@ mod tests {
         drop(store);
         FileStore::open(dir.path()).unwrap();
         assert!(tmp_entries(dir.path()).is_empty());
+    }
+
+    /// Tient le dossier `path` ouvert sans le partager, comme le ferait un autre programme : tant
+    /// que la valeur rendue vit, Windows refuse de lister ce dossier.
+    #[cfg(windows)]
+    fn hold_folder(path: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS : ce qu'il faut pour ouvrir un dossier.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .custom_flags(0x0200_0000)
+            .open(path)
+            .unwrap()
+    }
+
+    /// Ni le vidage de `tmp/` ni le compte des contenus inconnus n'arrêtent le démarrage pour ce
+    /// qu'ils ne peuvent pas lire (R279) : c'est journalisé, et le reste est fait. Sous Windows,
+    /// où un test peut rendre un dossier illisible sans changer ses droits.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn what_cannot_be_read_at_startup_is_logged_and_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let first = put(&store, b"abc").await;
+        let second = put(&store, b"un contenu d'un autre dossier").await;
+        assert_ne!(
+            hex(&first.hash)[..2],
+            hex(&second.hash)[..2],
+            "témoin : deux dossiers de préfixe"
+        );
+        let tmp = dir.path().join(FILES_DIR).join(TMP_DIR);
+        std::fs::write(tmp.join("reste"), b"d'un arret brutal").unwrap();
+        let logs = Logs::capture();
+
+        // `tmp/` illisible : le dépôt s'ouvre, le reste attend le démarrage suivant.
+        let held = hold_folder(&tmp);
+        assert!(
+            std::fs::read_dir(&tmp).is_err(),
+            "témoin : tmp/ ne se liste plus"
+        );
+        let store = FileStore::open(dir.path()).unwrap();
+        assert!(logs.text().contains("WARN"), "{}", logs.text());
+        // Et il sert : un envoi s'y écrit et se pose.
+        assert!(put(&store, b"un envoi quand meme").await.fresh);
+        drop(held);
+        assert_eq!(tmp_entries(dir.path()), ["reste"]);
+        let store = FileStore::open(dir.path()).unwrap();
+        assert!(tmp_entries(dir.path()).is_empty());
+
+        // Un dossier de préfixe illisible : les contenus des autres sont comptés.
+        let known = [sha256(b"un envoi quand meme")];
+        let held = hold_folder(&store.dirs.prefix_path(&first.hash));
+        assert_eq!(store.strangers(&known).unwrap(), (1, second.size));
+        assert!(
+            logs.text().contains("n'a pas pu être lue"),
+            "{}",
+            logs.text()
+        );
+        drop(held);
+        assert_eq!(
+            store.strangers(&known).unwrap(),
+            (2, first.size + second.size)
+        );
     }
 }
