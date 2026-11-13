@@ -5,7 +5,7 @@
 // le remet là où était le bloc, donc dans celui qui a pris sa place, ou à la fin de la page si le
 // bloc était le premier. La frappe suivante partait dans un autre bloc. Mêmes éditeurs que
 // `blockMoves.test.ts` (`test/editors.ts`), avec l'extension : de vrais BlockNote 0.57, dans jsdom.
-import { NodeSelection, TextSelection } from "prosemirror-state";
+import { NodeSelection, Selection, TextSelection } from "prosemirror-state";
 import { describe, expect, test } from "vitest";
 import * as Y from "yjs";
 import {
@@ -163,6 +163,93 @@ describe("cursor_follows_its_block_when_someone_else_moves_it", () => {
       expect((selection as NodeSelection).node.attrs.id).toBe("x");
     }
     expect(shown(mona)).toEqual([Y_, X, Z, W]);
+  });
+});
+
+// Pendant un glisser, BlockNote sélectionne en bloc ce qu'on tient au bout de la souris (sa
+// `MultipleNodeSelection`), et le dépôt de ProseMirror supprime la sélection avant d'insérer ce
+// qu'on tenait. y-prosemirror ne connaît pas cette sorte de sélection : au premier changement
+// reçu, il en faisait une sélection de texte, et le dépôt supprimait alors le texte du bloc au
+// lieu de le déplacer (vu dans un navigateur, `e2e/block-move.spec.ts`, « en ligne »).
+describe("held_blocks_stay_selected_while_someone_else_writes", () => {
+  /** Comme le début d'un glisser : le bloc `id` sélectionné en bloc, et tenu. */
+  function hold(p: Peer, id: string): void {
+    p.editor.transact((tr) => {
+      const { pos, node } = containerOf(tr.doc, id);
+      tr.setSelection(
+        Selection.fromJSON(tr.doc, { type: "multiple-node", anchor: pos, head: pos + node.nodeSize }),
+      );
+    });
+    const view = p.editor.prosemirrorView;
+    view.dragging = { slice: view.state.selection.content(), move: true };
+  }
+
+  /** Comme le dépôt de ProseMirror : la sélection supprimée, ce qu'on tenait inséré sous `under`. */
+  function dropUnder(p: Peer, under: string): void {
+    const view = p.editor.prosemirrorView;
+    const { slice } = view.dragging!;
+    p.editor.transact((tr) => {
+      tr.deleteSelection();
+      const target = containerOf(tr.doc, under);
+      tr.insert(target.pos + target.node.nodeSize, slice.content);
+    });
+    view.dragging = null;
+  }
+
+  const held = (p: Peer) => {
+    const { selection } = p.editor.prosemirrorState;
+    const blocks = (selection as unknown as { nodes?: { attrs: { id: string } }[] }).nodes ?? [];
+    return { type: (selection.toJSON() as { type: string }).type, ids: blocks.map((b) => b.attrs.id) };
+  };
+
+  test("témoin : sans l'extension, le dépôt vide le bloc au lieu de le déplacer", async () => {
+    const { mona, tom, server } = await pair({ plain: true });
+    hold(mona, "x");
+    typeAtEnd(tom, "y", " de Tom");
+    await exchange(server, [tom, mona]);
+    expect(held(mona).type).toBe("text");
+    dropUnder(mona, "z");
+    await exchange(server, [mona, tom]);
+    // Le bloc reste en tête, vidé de son texte ; ce qu'on tenait est inséré en plus.
+    expect(stored(server).map((b) => b.text)).toEqual(["", "Bloc Y de Tom", "Bloc Z", "Bloc X", "Bloc W"]);
+  });
+
+  test("un autre écrit dans un voisin pendant qu'on tient le bloc : il est déposé entier", async () => {
+    const { mona, tom, server } = await pair();
+    hold(mona, "x");
+    expect(held(mona)).toEqual({ type: "multiple-node", ids: ["x"] });
+    typeAtEnd(tom, "y", " de Tom");
+    await exchange(server, [tom, mona]);
+    expect(held(mona)).toEqual({ type: "multiple-node", ids: ["x"] });
+    dropUnder(mona, "z");
+    await exchange(server, [mona, tom]);
+    const wanted = [block("y", "Bloc Y de Tom"), Z, X, W];
+    expect(stored(server)).toEqual(wanted);
+    expect(shown(tom)).toEqual(wanted);
+  });
+
+  test("un autre écrit dans le bloc qu'on tient : on dépose ce qu'il est devenu", async () => {
+    const { mona, tom, server } = await pair();
+    hold(mona, "x");
+    typeAtEnd(tom, "x", " de Tom");
+    await exchange(server, [tom, mona]);
+    expect(held(mona)).toEqual({ type: "multiple-node", ids: ["x"] });
+    dropUnder(mona, "z");
+    await exchange(server, [mona, tom]);
+    const wanted = [Y_, Z, block("x", "Bloc X de Tom"), W];
+    expect(stored(server)).toEqual(wanted);
+    expect(shown(tom)).toEqual(wanted);
+  });
+
+  test("un autre déplace le bloc qu'on tient : il reste tenu, à sa nouvelle place", async () => {
+    const { mona, tom, server } = await pair();
+    hold(mona, "x");
+    drag(tom, "x", { under: "w" });
+    await exchange(server, [tom, mona]);
+    expect(held(mona)).toEqual({ type: "multiple-node", ids: ["x"] });
+    dropUnder(mona, "y");
+    await exchange(server, [mona, tom]);
+    expect(stored(server)).toEqual([Y_, X, Z, W]);
   });
 });
 

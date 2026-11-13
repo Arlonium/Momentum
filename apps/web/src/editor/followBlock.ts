@@ -8,6 +8,11 @@
 // premier. Qui tapait dans le bloc qu'un autre déplace écrivait donc la suite dans un autre
 // bloc ; et pour un bloc sélectionné (celui qu'on vient de déposer), Suppr retirait un voisin.
 //
+// De même pour les blocs qu'on tient au bout de la souris pendant un glisser : BlockNote les
+// sélectionne en bloc, y-prosemirror en fait une sélection de texte au premier changement reçu,
+// et le dépôt supprimait alors le texte du bloc au lieu de le déplacer (c'était déjà vrai avant
+// la forme à clés).
+//
 // Cette extension remet la sélection dans le bloc de même id qu'avant, à la même place dans son
 // texte. Elle n'écrit rien dans le document : la transaction qu'elle ajoute ne porte qu'une
 // sélection, et part dans le même envoi que le changement reçu, pendant que y-prosemirror tient
@@ -19,9 +24,9 @@ import {
   NodeSelection,
   Plugin,
   PluginKey,
+  Selection,
   TextSelection,
   type EditorState,
-  type Selection,
   type Transaction,
 } from "prosemirror-state";
 import { ySyncPluginKey, type ProsemirrorBinding } from "y-prosemirror";
@@ -78,6 +83,29 @@ function locate(doc: PmNode, place: Place): number | null {
   return Math.min(Math.max(block.pos + place.offset, first), last);
 }
 
+/**
+ * La sorte de sélection que BlockNote pose sur les blocs qu'on tient au bout de la souris, le
+ * temps d'un glisser (sa `MultipleNodeSelection`, des blocs entiers et voisins). Le dépôt de
+ * ProseMirror supprime la sélection, puis insère ce qu'on tenait : devenue une sélection de
+ * texte, comme y-prosemirror la remet après un changement reçu, c'est le texte du bloc qu'il
+ * supprimait.
+ */
+const HELD_BLOCKS = "multiple-node";
+
+/** La sorte d'une sélection, telle qu'elle s'écrit en JSON (`text`, `node`, `multiple-node`…). */
+function kindOf(selection: Selection): string {
+  return String((selection.toJSON() as { type?: unknown }).type);
+}
+
+/** Les ids du premier et du dernier des blocs tenus ; `null` si l'un n'en a pas. */
+function heldEnds(selection: Selection): { first: string; last: string } | null {
+  const { nodeAfter } = selection.$from;
+  const { nodeBefore } = selection.$to;
+  const first = nodeAfter === null ? null : blockId(nodeAfter);
+  const last = nodeBefore === null ? null : blockId(nodeBefore);
+  return first === null || last === null ? null : { first, last };
+}
+
 /** Ce que y-prosemirror dit d'une transaction qu'il fait (`ySyncPluginKey`). */
 type SyncMeta = {
   isChangeOrigin?: boolean;
@@ -119,6 +147,19 @@ function followed(change: Transaction, before: Selection, state: EditorState): S
     if (selection instanceof NodeSelection && blockId(selection.node) === id) return null;
     const block = find(doc, id);
     return block === null ? null : NodeSelection.create(doc, block.pos);
+  }
+
+  if (kindOf(before) === HELD_BLOCKS) {
+    const ends = heldEnds(before);
+    if (ends === null) return null;
+    const now = kindOf(selection) === HELD_BLOCKS ? heldEnds(selection) : null;
+    if (now !== null && now.first === ends.first && now.last === ends.last) return null;
+    const first = find(doc, ends.first);
+    const last = find(doc, ends.last);
+    if (first === null || last === null || first.pos > last.pos) return null;
+    const end = last.pos + last.node.nodeSize;
+    if (!doc.resolve(first.pos).sameParent(doc.resolve(end))) return null;
+    return Selection.fromJSON(doc, { type: HELD_BLOCKS, anchor: first.pos, head: end });
   }
 
   if (!(before instanceof TextSelection)) return null;
@@ -170,6 +211,17 @@ export const followBlock = createExtension({
           .setMeta(ySyncPluginKey, { isChangeOrigin: true, isUndoRedoOperation: isUndoRedoOperation === true })
           .setMeta("addToHistory", false);
       },
+      view: () => ({
+        // Ce qu'on tient au bout de la souris a été copié au début du glisser. Si le document
+        // change pendant qu'on le tient (un autre écrit dans le bloc), c'est ce que les blocs
+        // sont devenus qu'il faut déposer : sinon le dépôt remettrait le bloc d'avant.
+        update(view, previous) {
+          const { dragging, state } = view;
+          if (dragging === null || previous.doc === state.doc) return;
+          if (kindOf(state.selection) !== HELD_BLOCKS) return;
+          view.dragging = { slice: state.selection.content(), move: dragging.move };
+        },
+      }),
     }),
   ],
 });
