@@ -1,28 +1,34 @@
 // Ce que chaque déplacement de bloc écrit dans le document partagé, et ce que devient une frappe
-// faite en même temps par quelqu'un d'autre (limite R39, Task 12 ; la Task 13 doit la lever).
+// faite en même temps par quelqu'un d'autre (limite R39 ; Task 12, puis Task 13).
 //
 // Deux vrais éditeurs BlockNote 0.57, ceux de Mona et de Tom, liés à deux `Y.Doc` aux
 // identifiants de client fixes (`test/editors.ts`). Chacun fait son geste depuis le même état ;
 // leurs mises à jour s'échangent ensuite à la main, et passent par un troisième document, celui
 // du « serveur », dans un ordre donné. L'issue d'un conflit dépend de l'ordre des identifiants
-// de client : chaque scénario est joué deux fois, Mona avant Tom puis Tom avant Mona (`ORDERS`).
+// de client : chaque scénario est joué dans les deux (`ORDERS`), et dans les deux ordres d'envoi.
+//
+// Depuis la forme à clés (R220, `keyedBlocks.test.ts`), un bloc déplacé au même niveau est
+// supprimé et recréé avec le même id, et les autres ne sont pas touchés : ce qui est tapé dans un
+// bloc que personne ne déplace reste à sa place, et deux déplacements de blocs différents sont
+// justes. Reste ce qui est tapé dans le bloc déplacé lui-même, que les clients seuls perdent.
 //
 // Chaque scénario (`SCENARIOS`, S1 à S11 : les noms du registre du lot 3, « Task 12 ») attend le
 // comportement voulu : les blocs dans l'ordre, chaque id une seule fois, chaque texte dans son
 // bloc, types et enfants compris, rien en double, Mona, Tom et le serveur d'accord. Ceux qui
-// échouent aujourd'hui portent leur raison (`loss`) et sont marqués `test.fails` : la suite reste
-// verte, et le jour où l'un passe, elle le dit. `MEMENTUM_SHOW_R39=1` les lance comme des tests
-// ordinaires, pour voir leur échec. Seule l'exigence du scénario peut être cet échec : une
-// précondition manquée (un geste qui n'a pas fait chez son auteur ce que le scénario dit) ou une
-// exception d'un éditeur lève, et ne passe jamais pour la perte attendue (`outcomeOf`). Chaque
-// geste a son témoin, vert : seul, il fait ce qu'on attend. Une dernière partie relit ce que
-// chaque geste, fait seul, écrit dans le document : les éléments Yjs gardés (et l'id qu'ils
-// portent ensuite), supprimés, créés.
+// échouent encore portent leur raison (`loss`, par ordre d'envoi) et sont marqués `test.fails` :
+// la suite reste verte, et le jour où l'un passe, elle le dit. `MEMENTUM_SHOW_R39=1` les lance
+// comme des tests ordinaires, pour voir leur échec. Seule l'exigence du scénario peut être cet
+// échec : une précondition manquée (un geste qui n'a pas fait chez son auteur ce que le scénario
+// dit) ou une exception d'un éditeur lève, et ne passe jamais pour la perte attendue
+// (`outcomeOf`). Chaque geste a son témoin, vert : seul, il fait ce qu'on attend. Une dernière
+// partie relit ce que chaque geste, fait seul, écrit dans le document : les éléments Yjs gardés
+// (et l'id qu'ils portent ensuite), supprimés, créés.
 //
-// Une correction faite par le serveur (R138) ne rendrait pas ces tests verts : il n'y a pas de
-// serveur ici. Ils disent ce que les clients écrivent et ce que donne leur fusion ; ce que le
-// serveur en fait se vérifie dans `crates/mementum-sync/tests/moves.rs`, avec des octets que cette
-// suite produit (fin du fichier), et dans un navigateur, dans `e2e/block-move.spec.ts`.
+// Il n'y a pas de serveur ici : ces tests disent ce que les clients écrivent et ce que donne leur
+// fusion. Ce que le serveur en fait (reporter sur le bloc recréé ce que son auteur n'avait pas
+// vu, R221 ; ne garder qu'un exemplaire d'un bloc déplacé deux fois) se vérifie dans
+// `crates/mementum-sync/tests/moves.rs`, avec des octets que cette suite produit (fin du
+// fichier), et dans un navigateur, dans `e2e/block-move.spec.ts`.
 import { describe, expect, test } from "vitest";
 import {
   A,
@@ -229,17 +235,34 @@ type Scenario = {
   local: { mona: Shown[]; tom: Shown[] };
   /** La page voulue, ou les pages admises quand deux issues sont justes. */
   wanted: Shown[] | Shown[][];
-  /** Les ordres d'envoi joués (par défaut, Mona d'abord). */
-  firsts?: First[];
   /**
-   * Pourquoi l'exigence n'est pas tenue aujourd'hui ; par ordre d'identifiants quand l'issue en
-   * dépend (un ordre absent passe). Absent : le scénario passe.
+   * Pourquoi l'exigence n'est pas encore tenue, selon qui envoie le premier (un ordre d'envoi
+   * absent passe). Absent : le scénario passe dans les deux.
    */
-  loss?: string | Partial<Record<Order["dir"], string>>;
+  loss?: Partial<Record<First, string>>;
 };
 
-/** Limite R39 : ce que fait y-prosemirror 1.3.7 d'un déplacement, que la Task 13 doit lever. */
-const R39 = "limite R39, levée par la Task 13";
+/**
+ * Tom a tapé dans le bloc que Mona déplace, et les clients seuls perdent sa frappe (elle est dans
+ * l'élément que le déplacement supprime). Ce qu'il en advient dépend de l'ordre d'arrivée au
+ * serveur. La frappe d'abord : le serveur l'a quand le déplacement arrive, et la reportera sur le
+ * bloc recréé (R221, Task 13b). Le déplacement d'abord : la frappe, faite sans l'avoir vu, arrive
+ * après lui, et reste perdue (R222).
+ */
+const TYPED_IN_THE_MOVED_BLOCK = {
+  tom: "attend le report du serveur, Task 13b",
+  mona: "limite R222 : la frappe arrive après le déplacement",
+};
+
+/**
+ * Le même bloc déplacé par les deux : chacun le recrée à sa place, et il est deux fois dans la
+ * page, au même id. Le serveur n'en garde qu'un (son dédoublonnage voit enfin le doublon : la
+ * mise à jour insère des éléments ; test de l'acteur à la Task 13b).
+ */
+const MOVED_TWICE = {
+  mona: "attend le dédoublonnage du serveur, Task 13b",
+  tom: "attend le dédoublonnage du serveur, Task 13b",
+};
 
 const typedIn = {
   x: block("x", `Bloc X${TYPED}`),
@@ -256,8 +279,7 @@ const SCENARIOS: Scenario[] = [
     tom: (p) => typeAtEnd(p, "x", TYPED),
     local: { mona: [Y_, Z, X], tom: [typedIn.x, Y_, Z] },
     wanted: [Y_, Z, typedIn.x],
-    firsts: ["mona", "tom"],
-    loss: R39,
+    loss: TYPED_IN_THE_MOVED_BLOCK,
   },
   {
     key: "s2",
@@ -267,7 +289,7 @@ const SCENARIOS: Scenario[] = [
     tom: (p) => typeAtEnd(p, "x", TYPED),
     local: { mona: [TITLE_Y, Z, X], tom: [typedIn.x, TITLE_Y, Z] },
     wanted: [TITLE_Y, Z, typedIn.x],
-    loss: R39,
+    loss: TYPED_IN_THE_MOVED_BLOCK,
   },
   {
     key: "s3",
@@ -280,7 +302,8 @@ const SCENARIOS: Scenario[] = [
       tom: [xWithChild(`Enfant X1${TYPED}`), Y_, Z],
     },
     wanted: [Y_, Z, xWithChild(`Enfant X1${TYPED}`)],
-    loss: R39,
+    // L'enfant est recréé avec son parent.
+    loss: TYPED_IN_THE_MOVED_BLOCK,
   },
   {
     key: "s4",
@@ -290,7 +313,6 @@ const SCENARIOS: Scenario[] = [
     tom: (p) => typeAtEnd(p, "y", TYPED),
     local: { mona: [Y_, Z, X], tom: [X, typedIn.y, Z] },
     wanted: [typedIn.y, Z, X],
-    loss: R39,
   },
   {
     key: "s5",
@@ -300,7 +322,6 @@ const SCENARIOS: Scenario[] = [
     tom: (p) => typeAtEnd(p, "z", TYPED),
     local: { mona: [W, X, Y_, Z], tom: [X, Y_, typedIn.z, W] },
     wanted: [W, X, Y_, typedIn.z],
-    loss: R39,
   },
   {
     key: "s6",
@@ -314,7 +335,7 @@ const SCENARIOS: Scenario[] = [
       [Y_, Z, X],
       [Y_, X, Z],
     ],
-    loss: R39,
+    loss: MOVED_TWICE,
   },
   {
     key: "s7",
@@ -324,7 +345,7 @@ const SCENARIOS: Scenario[] = [
     tom: (p) => typeAtEnd(p, "x", TYPED),
     local: { mona: [Y_, X, Z], tom: [typedIn.x, Y_, Z] },
     wanted: [Y_, typedIn.x, Z],
-    loss: R39,
+    loss: TYPED_IN_THE_MOVED_BLOCK,
   },
   {
     key: "s8",
@@ -337,7 +358,7 @@ const SCENARIOS: Scenario[] = [
       tom: [block("x", `Acheter du pain${TYPED}`), CHORE_Y, CHORE_Z],
     },
     wanted: [CHORE_Y, CHORE_Z, block("x", `Acheter du pain${TYPED}`)],
-    loss: R39,
+    loss: TYPED_IN_THE_MOVED_BLOCK,
   },
   {
     key: "s9",
@@ -347,7 +368,8 @@ const SCENARIOS: Scenario[] = [
     tom: (p) => typeAtEnd(p, "x", TYPED),
     local: { mona: [wWithChild("Bloc X"), Y_], tom: [W, typedIn.x, Y_] },
     wanted: [wWithChild(`Bloc X${TYPED}`), Y_],
-    loss: R39,
+    // Tab écrivait déjà une copie et une suppression : la forme à clés n'y change rien.
+    loss: TYPED_IN_THE_MOVED_BLOCK,
   },
   {
     key: "s10",
@@ -357,7 +379,7 @@ const SCENARIOS: Scenario[] = [
     tom: (p) => typeAtEnd(p, "x", TYPED),
     local: { mona: [W, X, Y_], tom: [wWithChild(`Bloc X${TYPED}`), Y_] },
     wanted: [W, typedIn.x, Y_],
-    loss: R39,
+    loss: TYPED_IN_THE_MOVED_BLOCK,
   },
   {
     key: "s11",
@@ -367,7 +389,6 @@ const SCENARIOS: Scenario[] = [
     tom: (p) => drag(p, "y", { under: "a" }),
     local: { mona: [Y_, Z, X, A], tom: [X, Z, A, Y_] },
     wanted: [Z, X, A, Y_],
-    loss: R39,
   },
 ];
 
@@ -384,11 +405,7 @@ async function play(sc: Scenario, order: Order, first: First): Promise<Scene> {
   return s;
 }
 
-/** Pourquoi `sc` n'est pas tenu dans l'ordre `order` ; `undefined` s'il passe. */
-function lossOf(sc: Scenario, order: Order): string | undefined {
-  return typeof sc.loss === "object" ? sc.loss[order.dir] : sc.loss;
-}
-
+const FIRSTS = ["mona", "tom"] as const;
 const FIRST_LABEL: Record<First, string> = {
   mona: "Mona envoie d'abord",
   tom: "Tom envoie d'abord",
@@ -502,10 +519,10 @@ for (const order of ORDERS) {
 
     describe("scénarios : deux gestes en même temps", () => {
       for (const sc of SCENARIOS) {
-        for (const first of sc.firsts ?? (["mona"] as const)) {
+        for (const first of FIRSTS) {
           const name = `${sc.key.toUpperCase()} : ${sc.title} ; ${FIRST_LABEL[first]}`;
           const body = async () => expectEverywhere(await play(sc, order, first), sc.wanted);
-          const reason = lossOf(sc, order);
+          const reason = sc.loss?.[first];
           if (reason === undefined) test(name, body);
           else knownLoss(name, reason, body);
         }
@@ -577,54 +594,64 @@ describe("la cible : ce qu'un scénario peut donner", () => {
 // Ce que chaque geste écrit
 // ---------------------------------------------------------------------------
 
-// Ce qu'écrivent y-prosemirror 1.3.7 et BlockNote 0.57 pour chaque geste, fait seul : ce sur
-// quoi repose le tableau du registre (Task 12). Une mise à jour de l'une ou de l'autre peut
-// changer ces formes ; ces tests le diront.
+// Ce qu'écrivent y-prosemirror 1.3.7, corrigé (`patches/y-prosemirror@1.3.7.patch`, R220), et
+// BlockNote 0.57 pour chaque geste, fait seul : ce sur quoi reposent le tableau du registre et le
+// report du serveur (Task 13b). Avant le correctif, un bloc déplacé au même niveau n'était ni
+// supprimé ni créé : les éléments de la plage changeaient d'id sur place (x→y, y→z, z→x), et leur
+// texte était récrit. Une mise à jour de l'une ou de l'autre dépendance peut changer ces formes ;
+// ces tests le diront.
 describe("ce que chaque geste écrit dans le document", () => {
   const order = ORDERS[0];
 
-  test("glisser au même niveau : les blocs de la plage changent d'id sur place, rien n'est supprimé", async () => {
+  test("glisser au même niveau : le bloc glissé est supprimé et recréé, aucun autre n'est touché", async () => {
     const s = await scene(XYZ, order);
     expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
-      deleted: [],
-      created: [],
-      renamed: { x: "y", y: "z", z: "x" },
+      deleted: ["blockContainer x", "paragraph de x"],
+      created: ["blockContainer x", "paragraph de x"],
+      renamed: {},
     });
   });
 
-  test("glisser de plusieurs places vers le haut : tout bloc entre les deux places change d'id", async () => {
+  test("glisser de plusieurs places vers le haut : le bloc glissé seul est recréé", async () => {
     const s = await scene(XYZW, order);
     expect(written(s.mona, () => drag(s.mona, "w", { above: "x" }))).toEqual({
-      deleted: [],
-      created: [],
-      renamed: { x: "w", y: "x", z: "y", w: "z" },
+      deleted: ["blockContainer w", "paragraph de w"],
+      created: ["blockContainer w", "paragraph de w"],
+      renamed: {},
     });
   });
 
-  test("déplacer au clavier : la même récriture sur place que le glisser", async () => {
+  test("déplacer au clavier : le bloc déplacé est recréé, pas celui qu'il croise", async () => {
     const s = await scene(XYZ, order);
     expect(written(s.mona, () => keyboardDown(s.mona, "x"))).toEqual({
-      deleted: [],
-      created: [],
-      renamed: { x: "y", y: "x" },
+      deleted: ["blockContainer x", "paragraph de x"],
+      created: ["blockContainer x", "paragraph de x"],
+      renamed: {},
     });
   });
 
-  test("glisser par-dessus un autre type : le contenu d'un autre type est supprimé et recréé", async () => {
+  test("glisser par-dessus un autre type : le titre croisé n'est plus touché", async () => {
     const s = await scene(TITLED, order);
     expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
-      deleted: ["paragraph de x", "heading de y"],
-      created: ["heading de y", "paragraph de z"],
-      renamed: { x: "y", y: "z", z: "x" },
+      deleted: ["blockContainer x", "paragraph de x"],
+      created: ["blockContainer x", "paragraph de x"],
+      renamed: {},
     });
   });
 
-  test("glisser un bloc qui a des enfants : les enfants sont copiés sous un autre élément", async () => {
+  test("glisser un bloc qui a des enfants : le bloc est recréé avec ses enfants", async () => {
     const s = await scene(PARENTED, order);
+    const subtree = [
+      "blockContainer x",
+      "paragraph de x",
+      "blockGroup de x",
+      "blockContainer x1",
+      "paragraph de x1",
+    ];
     expect(written(s.mona, () => drag(s.mona, "x", { under: "z" }))).toEqual({
-      deleted: ["blockGroup de x", "blockContainer x1", "paragraph de x1"],
-      created: ["blockGroup de x", "blockContainer x1", "paragraph de x1"],
-      renamed: { x: "y", y: "z", z: "x" },
+      deleted: subtree,
+      created: subtree,
+      renamed: {},
     });
   });
 

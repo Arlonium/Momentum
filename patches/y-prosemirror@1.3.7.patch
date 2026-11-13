@@ -1,0 +1,504 @@
+diff --git a/dist/y-prosemirror.cjs b/dist/y-prosemirror.cjs
+index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..7a547622e1a1181af64f0340a2dece9d32fabca9 100644
+--- a/dist/y-prosemirror.cjs
++++ b/dist/y-prosemirror.cjs
+@@ -331,6 +331,16 @@ const restoreRelativeSelection = (tr, relSel, binding) => {
+         relSel.anchor,
+         binding.mapping
+       );
++      // mementum:moved-blocks:begin
++      // [Mementum] Le nœud sélectionné n'est plus là : un autre l'a supprimé, ou déplacé (il est
++      // alors recréé ailleurs, voir `updateMovedChildren`). Quand plus aucun nœud ne suit la
++      // position, `NodeSelection.create` lève, dans l'observateur du document : l'éditeur ne
++      // montrerait pas ce changement, et la frappe suivante l'effacerait chez tous. La sélection
++      // est alors laissée à ProseMirror.
++      if (anchor === null || anchor > tr.doc.content.size || tr.doc.resolve(anchor).nodeAfter === null) {
++        return
++      }
++      // mementum:moved-blocks:end
+       tr.setSelection(prosemirrorState.NodeSelection.create(tr.doc, anchor));
+     } else {
+       const anchor = relativePositionToAbsolutePosition(
+@@ -1203,6 +1213,215 @@ const marksToAttributes = (marks, meta) => {
+   return pattrs
+ };
+ 
++// mementum:moved-blocks:begin
++// [Mementum, R220] Un bloc déplacé est recréé, les autres ne sont pas touchés.
++//
++// `updateYFragment` apparie par position les enfants qui diffèrent : un bloc qui change de place
++// faisait récrire sur place tous les blocs entre son ancienne place et la nouvelle, chacun
++// prenant l'`id` et le texte de son voisin. Ce qu'une autre personne tapait au même moment dans
++// l'un d'eux finissait chez un voisin, et deux déplacements faits en même temps abîmaient la
++// page. `updateMovedChildren` passe avant ce code quand des blocs ont changé d'ordre, et
++// seulement alors : tout le reste (frappe, Entrée, suppression, collage…) s'écrit comme avant.
++//
++// Tout ce qui est ajouté au fichier est entre deux lignes `mementum:moved-blocks` ; rien d'autre
++// n'y change (`apps/web/src/editor/keyedBlocks.test.ts` le vérifie, et s'en sert pour retrouver
++// le code d'origine). `dist/y-prosemirror.cjs` porte les mêmes ajouts.
++
++/**
++ * La clé d'un bloc : son `id`, s'il en a un.
++ *
++ * @param {any} id
++ * @return {string|null}
++ */
++const blockKey = (id) => typeof id === 'string' && id !== '' ? id : null
++
++/**
++ * Les indices `i`, croissants, d'une plus longue suite où `target[i]` croît strictement, sans
++ * les indices dont `target[i]` est négatif ni ceux que `skipped` écarte. En O(n log n) : un
++ * grand glisser compare tous les blocs de la page.
++ *
++ * @param {Array<number>} target
++ * @param {null|function(number):boolean} skipped
++ * @return {Array<number>}
++ */
++const longestIncreasing = (target, skipped) => {
++  // tails[k] : l'indice où finit, au plus bas, une suite croissante de k + 1 indices
++  const tails = []
++  const previous = new Array(target.length)
++  for (let i = 0; i < target.length; i++) {
++    const t = target[i]
++    if (t < 0 || (skipped !== null && skipped(i))) {
++      continue
++    }
++    let low = 0
++    let high = tails.length
++    while (low < high) {
++      const middle = (low + high) >> 1
++      if (target[tails[middle]] < t) {
++        low = middle + 1
++      } else {
++        high = middle
++      }
++    }
++    previous[i] = low > 0 ? tails[low - 1] : -1
++    tails[low] = i
++  }
++  const kept = new Array(tails.length)
++  for (let k = tails.length - 1, i = k >= 0 ? tails[k] : -1; k >= 0; k--) {
++    kept[k] = i
++    i = previous[i]
++  }
++  return kept
++}
++
++/**
++ * Les clés des blocs que touche la sélection de l'éditeur : après un déplacement, le bloc
++ * déplacé (ProseMirror le sélectionne quand on le dépose, BlockNote y remet le curseur quand on
++ * le déplace au clavier). `null` sans éditeur (`prosemirrorToYXmlFragment`).
++ *
++ * @param {any} meta
++ * @return {Set<string>|null}
++ */
++const selectedBlockKeys = (meta) => {
++  const view = meta.prosemirrorView
++  if (view == null || view.state == null) {
++    return null
++  }
++  const selection = view.state.selection
++  const keys = new Set()
++  /**
++   * @param {any} node
++   */
++  const add = (node) => {
++    const key = blockKey(node.attrs.id)
++    if (key !== null) {
++      keys.add(key)
++    }
++  }
++  selection.$from.doc.nodesBetween(selection.from, selection.to, (/** @type {any} */ node) => {
++    add(node)
++  })
++  for (const $pos of [selection.$from, selection.$to]) {
++    for (let depth = $pos.depth; depth > 0; depth--) {
++      add($pos.node(depth))
++    }
++  }
++  return keys
++}
++
++/**
++ * Met à jour les enfants de `yParent` qui diffèrent de ceux du nœud ProseMirror (ceux du milieu,
++ * hors des `left` premiers et des `right` derniers) quand des blocs y ont changé d'ordre.
++ *
++ * Les enfants sont appariés par l'`id` de leur bloc. Ceux qui gardent leur ordre (une plus
++ * longue suite croissante) restent les mêmes éléments, mis à jour sur place s'ils ont changé ;
++ * les autres sont supprimés, et ceux qui manquent sont créés à leur place, un bloc déplacé avec
++ * le même `id`. Entre deux suites de même longueur (deux voisins échangés), on garde celle qui
++ * laisse recréer les blocs de la sélection : celui qu'on vient de déplacer.
++ *
++ * Rend `false` sans rien écrire, et le code d'origine fait alors comme avant : si un enfant du
++ * milieu n'est pas un bloc avec un `id` (du texte, un `id` absent ou vide), si un `id` revient
++ * deux fois d'un côté, ou si aucun bloc présent des deux côtés n'a changé d'ordre.
++ *
++ * @param {{transact: Function}} y
++ * @param {Y.XmlFragment} yParent
++ * @param {Array<any>} yChildren
++ * @param {Array<any>} pChildren
++ * @param {number} left
++ * @param {number} right
++ * @param {BindingMetadata} meta
++ * @return {boolean}
++ */
++const updateMovedChildren = (y, yParent, yChildren, pChildren, left, right, meta) => {
++  const yMid = yChildren.slice(left, yChildren.length - right)
++  const pMid = pChildren.slice(left, pChildren.length - right)
++  const pIndex = new Map()
++  for (let j = 0; j < pMid.length; j++) {
++    const pChild = pMid[j]
++    const key = pChild instanceof Array || !pChild.isBlock ? null : blockKey(pChild.attrs.id)
++    if (key === null || pIndex.has(key)) {
++      return false
++    }
++    pIndex.set(key, j)
++  }
++  // target[i] : la place, dans pMid, du nœud que devient yMid[i] ; -1 s'il n'y est plus
++  const target = new Array(yMid.length)
++  const yKeys = new Array(yMid.length)
++  const seen = new Set()
++  let common = 0
++  for (let i = 0; i < yMid.length; i++) {
++    const yChild = yMid[i]
++    const key = yChild instanceof Y__namespace.XmlElement ? blockKey(yChild.getAttribute('id')) : null
++    if (key === null || seen.has(key)) {
++      return false
++    }
++    seen.add(key)
++    yKeys[i] = key
++    const j = pIndex.get(key)
++    target[i] = j !== undefined && matchNodeName(yChild, pMid[j]) ? j : -1
++    if (target[i] >= 0) {
++      common++
++    }
++  }
++  let kept = longestIncreasing(target, null)
++  if (kept.length === common) {
++    // aucun bloc n'a changé d'ordre
++    return false
++  }
++  const selected = selectedBlockKeys(meta)
++  if (selected !== null && selected.size > 0) {
++    const others = longestIncreasing(target, (i) => selected.has(yKeys[i]))
++    if (others.length === kept.length) {
++      kept = others
++    }
++  }
++  // keptFor[j] : l'élément gardé pour pMid[j]
++  const keptFor = new Array(pMid.length).fill(null)
++  const isKept = new Array(yMid.length).fill(false)
++  for (const i of kept) {
++    isKept[i] = true
++    keptFor[target[i]] = yMid[i]
++  }
++  // les autres sont supprimés, de la fin vers le début, les voisins d'un seul appel
++  for (let i = yMid.length - 1; i >= 0; i--) {
++    if (isKept[i]) {
++      continue
++    }
++    let from = i
++    while (from > 0 && !isKept[from - 1]) {
++      from--
++    }
++    for (let k = from; k <= i; k++) {
++      meta.mapping.delete(yMid[k])
++    }
++    yParent.delete(left + from, i - from + 1)
++    i = from
++  }
++  // les éléments gardés sont maintenant dans l'ordre de pMid : chacun est mis à jour, et les
++  // nœuds qui manquent sont créés entre eux
++  let at = left
++  for (let j = 0; j < pMid.length; j++) {
++    const yChild = keptFor[j]
++    if (yChild !== null) {
++      if (!mappedIdentity(meta.mapping.get(yChild), pMid[j])) {
++        // n'écrit rien dans un élément dont le nœud n'a pas changé
++        updateYFragment(y, yChild, pMid[j], meta)
++      }
++      at++
++      continue
++    }
++    const created = []
++    for (; j < pMid.length && keptFor[j] === null; j++) {
++      created.push(createTypeFromTextOrElementNode(pMid[j], meta))
++    }
++    j--
++    yParent.insert(at, created)
++    at += created.length
++  }
++  return true
++}
++
++// mementum:moved-blocks:end
+ /**
+  * Update a yDom node by syncing the current content of the prosemirror node.
+  *
+@@ -1279,6 +1498,14 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+     }
+   }
+   y.transact(() => {
++    // mementum:moved-blocks:begin
++    if (
++      yChildCnt - left - right > 0 && pChildCnt - left - right > 0 &&
++      updateMovedChildren(y, yDomFragment, yChildren, pChildren, left, right, meta)
++    ) {
++      return
++    }
++    // mementum:moved-blocks:end
+     // try to compare and update
+     while (yChildCnt - left - right > 0 && pChildCnt - left - right > 0) {
+       const leftY = yChildren[left];
+diff --git a/src/plugins/sync-plugin.js b/src/plugins/sync-plugin.js
+index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..2fd9dd15052daa79830642eef8ea856c02ca0215 100644
+--- a/src/plugins/sync-plugin.js
++++ b/src/plugins/sync-plugin.js
+@@ -257,6 +257,16 @@ const restoreRelativeSelection = (tr, relSel, binding) => {
+         relSel.anchor,
+         binding.mapping
+       )
++      // mementum:moved-blocks:begin
++      // [Mementum] Le nœud sélectionné n'est plus là : un autre l'a supprimé, ou déplacé (il est
++      // alors recréé ailleurs, voir `updateMovedChildren`). Quand plus aucun nœud ne suit la
++      // position, `NodeSelection.create` lève, dans l'observateur du document : l'éditeur ne
++      // montrerait pas ce changement, et la frappe suivante l'effacerait chez tous. La sélection
++      // est alors laissée à ProseMirror.
++      if (anchor === null || anchor > tr.doc.content.size || tr.doc.resolve(anchor).nodeAfter === null) {
++        return
++      }
++      // mementum:moved-blocks:end
+       tr.setSelection(NodeSelection.create(tr.doc, anchor))
+     } else {
+       const anchor = relativePositionToAbsolutePosition(
+@@ -1129,6 +1139,215 @@ const marksToAttributes = (marks, meta) => {
+   return pattrs
+ }
+ 
++// mementum:moved-blocks:begin
++// [Mementum, R220] Un bloc déplacé est recréé, les autres ne sont pas touchés.
++//
++// `updateYFragment` apparie par position les enfants qui diffèrent : un bloc qui change de place
++// faisait récrire sur place tous les blocs entre son ancienne place et la nouvelle, chacun
++// prenant l'`id` et le texte de son voisin. Ce qu'une autre personne tapait au même moment dans
++// l'un d'eux finissait chez un voisin, et deux déplacements faits en même temps abîmaient la
++// page. `updateMovedChildren` passe avant ce code quand des blocs ont changé d'ordre, et
++// seulement alors : tout le reste (frappe, Entrée, suppression, collage…) s'écrit comme avant.
++//
++// Tout ce qui est ajouté au fichier est entre deux lignes `mementum:moved-blocks` ; rien d'autre
++// n'y change (`apps/web/src/editor/keyedBlocks.test.ts` le vérifie, et s'en sert pour retrouver
++// le code d'origine). `dist/y-prosemirror.cjs` porte les mêmes ajouts.
++
++/**
++ * La clé d'un bloc : son `id`, s'il en a un.
++ *
++ * @param {any} id
++ * @return {string|null}
++ */
++const blockKey = (id) => typeof id === 'string' && id !== '' ? id : null
++
++/**
++ * Les indices `i`, croissants, d'une plus longue suite où `target[i]` croît strictement, sans
++ * les indices dont `target[i]` est négatif ni ceux que `skipped` écarte. En O(n log n) : un
++ * grand glisser compare tous les blocs de la page.
++ *
++ * @param {Array<number>} target
++ * @param {null|function(number):boolean} skipped
++ * @return {Array<number>}
++ */
++const longestIncreasing = (target, skipped) => {
++  // tails[k] : l'indice où finit, au plus bas, une suite croissante de k + 1 indices
++  const tails = []
++  const previous = new Array(target.length)
++  for (let i = 0; i < target.length; i++) {
++    const t = target[i]
++    if (t < 0 || (skipped !== null && skipped(i))) {
++      continue
++    }
++    let low = 0
++    let high = tails.length
++    while (low < high) {
++      const middle = (low + high) >> 1
++      if (target[tails[middle]] < t) {
++        low = middle + 1
++      } else {
++        high = middle
++      }
++    }
++    previous[i] = low > 0 ? tails[low - 1] : -1
++    tails[low] = i
++  }
++  const kept = new Array(tails.length)
++  for (let k = tails.length - 1, i = k >= 0 ? tails[k] : -1; k >= 0; k--) {
++    kept[k] = i
++    i = previous[i]
++  }
++  return kept
++}
++
++/**
++ * Les clés des blocs que touche la sélection de l'éditeur : après un déplacement, le bloc
++ * déplacé (ProseMirror le sélectionne quand on le dépose, BlockNote y remet le curseur quand on
++ * le déplace au clavier). `null` sans éditeur (`prosemirrorToYXmlFragment`).
++ *
++ * @param {any} meta
++ * @return {Set<string>|null}
++ */
++const selectedBlockKeys = (meta) => {
++  const view = meta.prosemirrorView
++  if (view == null || view.state == null) {
++    return null
++  }
++  const selection = view.state.selection
++  const keys = new Set()
++  /**
++   * @param {any} node
++   */
++  const add = (node) => {
++    const key = blockKey(node.attrs.id)
++    if (key !== null) {
++      keys.add(key)
++    }
++  }
++  selection.$from.doc.nodesBetween(selection.from, selection.to, (/** @type {any} */ node) => {
++    add(node)
++  })
++  for (const $pos of [selection.$from, selection.$to]) {
++    for (let depth = $pos.depth; depth > 0; depth--) {
++      add($pos.node(depth))
++    }
++  }
++  return keys
++}
++
++/**
++ * Met à jour les enfants de `yParent` qui diffèrent de ceux du nœud ProseMirror (ceux du milieu,
++ * hors des `left` premiers et des `right` derniers) quand des blocs y ont changé d'ordre.
++ *
++ * Les enfants sont appariés par l'`id` de leur bloc. Ceux qui gardent leur ordre (une plus
++ * longue suite croissante) restent les mêmes éléments, mis à jour sur place s'ils ont changé ;
++ * les autres sont supprimés, et ceux qui manquent sont créés à leur place, un bloc déplacé avec
++ * le même `id`. Entre deux suites de même longueur (deux voisins échangés), on garde celle qui
++ * laisse recréer les blocs de la sélection : celui qu'on vient de déplacer.
++ *
++ * Rend `false` sans rien écrire, et le code d'origine fait alors comme avant : si un enfant du
++ * milieu n'est pas un bloc avec un `id` (du texte, un `id` absent ou vide), si un `id` revient
++ * deux fois d'un côté, ou si aucun bloc présent des deux côtés n'a changé d'ordre.
++ *
++ * @param {{transact: Function}} y
++ * @param {Y.XmlFragment} yParent
++ * @param {Array<any>} yChildren
++ * @param {Array<any>} pChildren
++ * @param {number} left
++ * @param {number} right
++ * @param {BindingMetadata} meta
++ * @return {boolean}
++ */
++const updateMovedChildren = (y, yParent, yChildren, pChildren, left, right, meta) => {
++  const yMid = yChildren.slice(left, yChildren.length - right)
++  const pMid = pChildren.slice(left, pChildren.length - right)
++  const pIndex = new Map()
++  for (let j = 0; j < pMid.length; j++) {
++    const pChild = pMid[j]
++    const key = pChild instanceof Array || !pChild.isBlock ? null : blockKey(pChild.attrs.id)
++    if (key === null || pIndex.has(key)) {
++      return false
++    }
++    pIndex.set(key, j)
++  }
++  // target[i] : la place, dans pMid, du nœud que devient yMid[i] ; -1 s'il n'y est plus
++  const target = new Array(yMid.length)
++  const yKeys = new Array(yMid.length)
++  const seen = new Set()
++  let common = 0
++  for (let i = 0; i < yMid.length; i++) {
++    const yChild = yMid[i]
++    const key = yChild instanceof Y.XmlElement ? blockKey(yChild.getAttribute('id')) : null
++    if (key === null || seen.has(key)) {
++      return false
++    }
++    seen.add(key)
++    yKeys[i] = key
++    const j = pIndex.get(key)
++    target[i] = j !== undefined && matchNodeName(yChild, pMid[j]) ? j : -1
++    if (target[i] >= 0) {
++      common++
++    }
++  }
++  let kept = longestIncreasing(target, null)
++  if (kept.length === common) {
++    // aucun bloc n'a changé d'ordre
++    return false
++  }
++  const selected = selectedBlockKeys(meta)
++  if (selected !== null && selected.size > 0) {
++    const others = longestIncreasing(target, (i) => selected.has(yKeys[i]))
++    if (others.length === kept.length) {
++      kept = others
++    }
++  }
++  // keptFor[j] : l'élément gardé pour pMid[j]
++  const keptFor = new Array(pMid.length).fill(null)
++  const isKept = new Array(yMid.length).fill(false)
++  for (const i of kept) {
++    isKept[i] = true
++    keptFor[target[i]] = yMid[i]
++  }
++  // les autres sont supprimés, de la fin vers le début, les voisins d'un seul appel
++  for (let i = yMid.length - 1; i >= 0; i--) {
++    if (isKept[i]) {
++      continue
++    }
++    let from = i
++    while (from > 0 && !isKept[from - 1]) {
++      from--
++    }
++    for (let k = from; k <= i; k++) {
++      meta.mapping.delete(yMid[k])
++    }
++    yParent.delete(left + from, i - from + 1)
++    i = from
++  }
++  // les éléments gardés sont maintenant dans l'ordre de pMid : chacun est mis à jour, et les
++  // nœuds qui manquent sont créés entre eux
++  let at = left
++  for (let j = 0; j < pMid.length; j++) {
++    const yChild = keptFor[j]
++    if (yChild !== null) {
++      if (!mappedIdentity(meta.mapping.get(yChild), pMid[j])) {
++        // n'écrit rien dans un élément dont le nœud n'a pas changé
++        updateYFragment(y, yChild, pMid[j], meta)
++      }
++      at++
++      continue
++    }
++    const created = []
++    for (; j < pMid.length && keptFor[j] === null; j++) {
++      created.push(createTypeFromTextOrElementNode(pMid[j], meta))
++    }
++    j--
++    yParent.insert(at, created)
++    at += created.length
++  }
++  return true
++}
++
++// mementum:moved-blocks:end
+ /**
+  * Update a yDom node by syncing the current content of the prosemirror node.
+  *
+@@ -1205,6 +1424,14 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+     }
+   }
+   y.transact(() => {
++    // mementum:moved-blocks:begin
++    if (
++      yChildCnt - left - right > 0 && pChildCnt - left - right > 0 &&
++      updateMovedChildren(y, yDomFragment, yChildren, pChildren, left, right, meta)
++    ) {
++      return
++    }
++    // mementum:moved-blocks:end
+     // try to compare and update
+     while (yChildCnt - left - right > 0 && pChildCnt - left - right > 0) {
+       const leftY = yChildren[left]

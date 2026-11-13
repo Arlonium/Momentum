@@ -3,3 +3,10 @@
 packages:
   - apps/*
   - packages/*
+
+# Correctif d'une dépendance, appliqué par pnpm à chaque installation (`pnpm patch`). Un bloc
+# déplacé est recréé au lieu de faire récrire tous les blocs qu'il croise (Ruling R220) : voir
+# l'en-tête de `apps/web/src/editor/keyedBlocks.test.ts`. Il est lié à la version exacte : à
+# une montée de version de y-prosemirror, l'installation échoue tant qu'il n'est pas porté.
+patchedDependencies:
+  y-prosemirror@1.3.7: patches/y-prosemirror@1.3.7.patch
