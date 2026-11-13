@@ -118,8 +118,10 @@ export function Sidebar({
       </div>
       {space && (
         <ShortList
-          // L'état replié est celui de cet espace.
-          key={space.id}
+          // L'état replié est celui de cet espace. Une clé à elle : React rapproche par leur
+          // clé les enfants de la barre, et celle des sections est déjà l'id de l'espace (deux
+          // fois la même clé, la liste d'un espace restait à l'écran dans le suivant).
+          key={`recents:${space.id}`}
           spaceId={space.id}
           label="Récents"
           group="recents"
