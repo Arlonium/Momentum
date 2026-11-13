@@ -1,6 +1,6 @@
 # Lot 3, partie A : relecture finale, constats et vague de correction
 
-Ce document garde ce que la relecture finale de la partie A a trouvé, ce qui a été décidé pour chaque constat, et **où en est la vague de correction**. Lenny a mis le travail en pause le 2026-11-12 au soir ; il a repris le 2026-11-13, et le tableau d'état ci-dessous est tenu à jour depuis. Il est fait pour reprendre la vague sans rien savoir de la session qui l'a lancée. À supprimer à la clôture de la partie A, avec le fichier d'[avancement](2026-11-12-p1-lot3-avancement.md) : le registre gardera les décisions.
+Ce document garde ce que la relecture finale de la partie A a trouvé, ce qui a été décidé pour chaque constat, et **où en est la vague de correction**. Lenny a mis le travail en pause le 2026-11-12 au soir, l'a repris dans la nuit, peu après minuit, et l'a remis en pause le 2026-11-13 vers 3 h 40 : **le tableau d'état ci-dessous est celui de cette seconde pause.** Il est fait pour reprendre la vague sans rien savoir de la session qui l'a lancée. À supprimer à la clôture de la partie A, avec le fichier d'[avancement](2026-11-12-p1-lot3-avancement.md) : le registre gardera les décisions.
 
 ## Ce qui a été relu
 
@@ -8,32 +8,29 @@ Deux passes ont relu tout ce qui a changé depuis `6b6f104` (tâches 1 à 11) : 
 
 La troisième passe, **documentation contre le code**, n'est pas faite : elle vient après la Task 14.
 
-## État (mis à jour le 2026-11-13, en cours de vague)
+## État à la pause du 2026-11-13 (3 h 40 du matin)
+
+**En une phrase** : la piste C est finie et relue ; la piste S a fait ses sept corrections, mais sa relecture y a trouvé un défaut critique (corrigé et poussé) et trois importants, dont **aucun n'est encore corrigé** ; tout le reste de ce fichier dit quoi faire.
 
 | Constat | Sujet | État |
 |---|---|---|
-| S1 | une écriture du serveur à la fois par page (restauration, `PUT /mmd`) | **fait**, `a859f04`, R200 ; en relecture |
-| S2 | suppression sur des horloges que la page n'a pas encore | **fait**, `414df88`, R198 et R199 ; en relecture |
-| S3 | `PUT /mmd` garde l'identifiant des blocs inchangés | **fait**, `9218fef`, R201 et R202 ; en relecture |
-| S4 | plafonds des commentaires | **fait**, `226496c`, R204 ; en relecture |
-| S5 | l'historique se lit à partir de « Peut modifier » | **fait**, `2ff3cdb`, R203 ; en relecture |
-| S6 | le canal de l'espace redit sa version à chaque ping | **fait**, `8dab2f5`, R205 ; en relecture |
-| S7 | savoir si un bloc existe sans relire la page | **fait**, `0de9b38`, R206 ; en relecture |
-| C1 | le titre n'envoie que ce qui a été tapé | **fait et relu** : `8a8ced1`, puis `73fa49a` et `79f90a9` après relecture ; R210, R218 |
-| C2 | relire la liste après le retour du compte | **fait et relu**, `abdffee`, R212 |
-| C3 | schéma relu pour qui commente | **fait et relu**, `9151e88`, R213 |
-| C4 | raccourci muet sous une fenêtre modale | **fait et relu**, `29ab75a`, R214 |
-| C5 | le brouillon de qui perd le droit d'écrire reste montré | **fait et relu**, `ddfaf93`, R211 |
-| C6 | chien de garde du canal de l'espace | **part cliente faite et relue**, `973b78e`, R215 ; e2e contre le vrai serveur en cours |
-| C7 | « Historique » à partir de « Peut modifier » | **fait et relu**, `b3a4c36`, `e81f821`, `e1b1758`, `4d36489`, `fb2f9ef` ; R216, R217 |
-| C8 | plafonds affichés | **test fait**, `38149d4` ; e2e contre le vrai serveur en cours |
-| C9 | sept parcours de bout en bout | en cours |
+| S1 | une écriture du serveur à la fois par page (restauration, `PUT /mmd`) | fait, `a859f04`, R200 ; **relu : incomplet, voir I1 plus bas** |
+| S2 | suppression sur des horloges que la page n'a pas encore | fait, `414df88`, R198 et R199 ; **relu : contournable, voir C1 plus bas, corrigé** (`869a0a0`, R207, R208) |
+| S3 | `PUT /mmd` garde l'identifiant des blocs inchangés | fait et relu, `9218fef`, R201 et R202 ; deux règles sans test (m2) |
+| S4 | plafonds des commentaires | fait, `226496c`, R204 ; **relu : insuffisant, voir I2 plus bas** |
+| S5 | l'historique se lit à partir de « Peut modifier » | **fait et relu, fermé**, `2ff3cdb`, R203 ; un mineur (m6) |
+| S6 | le canal de l'espace redit sa version à chaque ping | **fait et relu, fermé**, `8dab2f5`, R205 |
+| S7 | savoir si un bloc existe sans relire la page | fait et relu, `0de9b38`, R206 ; la route n'a pas de test (m1) |
+| C1 à C8 | les huit corrections du client | **faits et relus** (une relecture, deux tours de correction, une re-relecture) ; R210 à R218 |
+| C9 | sept parcours de bout en bout, et les e2e de C6 et C8 contre le vrai serveur | **faits**, repris sur `main` (`d5485cf`, `b0540e1`, `6c89e3a`, `21a753d` ; R219) ; **pas encore relus** |
 
-**Piste S** : les sept corrections sont commitées et poussées (`cargo test --workspace` : 717 verts ; fmt et clippy propres ; mesures en release sans recul : frappe 2,1 ms au p95, 42,8 ms avec la coupe d'une version). Elles sont **en relecture indépendante**, tournée vers la sécurité ; un tour de correction peut suivre. Ce que l'implémenteur signale lui-même : R202 ajoute une passe à la décision de S3 (un bloc identique ailleurs dans la même liste garde son identifiant, et « même position » se lit entre deux blocs gardés) ; une page récrite à l'identique par `PUT /mmd` vaut maintenant sa version d'avant, donc la restaurer ne fait rien (une mesure de restauration a été récrite pour écrire une page changée) ; une suppression en attente déjà au journal d'une base d'avant le lot n'est pas neutralisée (aucune donnée récrite ; rien ne dit qu'une base en porte) ; quatre tests du canal passent à `NO_PING`.
+**Piste C, close sauf relecture de ses e2e.** Dans l'atelier où ils ont été écrits (serveur d'avant C1) : suite e2e entière, 160 verts et 2 `fixme` voulus (bloc déplacé) ; budgets tenus (1 000 blocs : 160 ms au p95 ; 10 000 blocs : 1,38 s ; poste occupé). Chaque e2e a été vu rouge en défaisant provisoirement le correctif qu'il garde. Aucun défaut du serveur trouvé. Sur `main` après reprise : Vitest 516 verts et les 12 échecs attendus, typecheck propre ; la suite e2e entière, relancée sur `main` à la pause avec le correctif de C1 : 159 verts, 2 `fixme` voulus, et 1 échec, `space_without_a_role_is_not_found`, une course du test lui-même (il comparait l'écran pendant que la barre latérale chargeait encore), corrigée dans la foulée.
 
-**Piste C** : C1 à C8 sont faits côté client et **relus** (une relecture indépendante, puis deux tours de correction et une re-relecture : cinq constats levés, puis deux mineurs corrigés). Vitest : 516 verts et les 12 échecs attendus du bloc déplacé ; typecheck propre. La part e2e (C9, et les e2e de C6 et C8 contre le vrai serveur, puis la suite complète et les budgets) est **en cours, dans un atelier git à part** (`.claude/worktrees/piste-c-e2e`, branche `piste-c-e2e`), pour ne pas compiler le serveur pendant que le relecteur de la piste S y défait provisoirement des corrections.
+Ce que les e2e de C9 ont appris : quand un agent **modifie** par `PUT /mmd` le texte du bloc commenté (à sa place, même type), le bloc garde son identifiant et le fil le suit (R202) ; un membre retiré de l'espace ne le voit que par le minuteur de repli, jusqu'à dix secondes (le serveur ferme le canal sans trame, R152) ; l'e2e `typed_special_characters_roundtrip` attendait un identifiant neuf après une récriture identique : il prouve maintenant l'arrivée par une seconde écriture, avec un bloc de plus.
 
-Un implémenteur s'est vu refuser par l'outil l'écriture de son fichier de rapport ; ses comptes rendus sont passés par message, et ce fichier en garde l'essentiel.
+**Piste S : tour de correction 1 commencé, arrêté après le critique.** Voir la section « Relecture de la piste S », plus bas : c'est par là que la reprise commence.
+
+Un implémenteur et un relecteur se sont vu refuser par l'outil l'écriture de leur fichier de rapport ; leurs comptes rendus sont passés par message, et ce fichier en garde l'essentiel.
 
 ## Règles de la vague (les deux pistes)
 
@@ -166,9 +163,51 @@ Les relecteurs ont aussi nommé, sans qu'ils soient retenus dans cette liste : u
 
 ---
 
-## S2 et C2, repris
+## Relecture de la piste S (sécurité) : constats, décisions, où en est le tour de correction 1
 
-Les deux sections « Reprendre S2 » et « Reprendre C2 » de ce fichier ont servi : S2 est fait (`414df88` ; R198 et R199 au registre, avec ce que l'implémenteur a lu dans yrs 0.28.1), C2 aussi (`abdffee`, R212). Le fichier `.patch` qui gardait les tests de S2 est retiré du dépôt.
+La relecture indépendante de S1 à S7, tournée vers la sécurité, a rendu **1 critique, 3 importants, 7 mineurs**, chacun prouvé par une sonde jetable (sauf mention « lu »). S5 et S6 sont conformes et fermées ; S2 tient face à yrs sur 40 000 mises à jour aléatoires à un client par entrée. Le tour de correction 1 a été lancé avec les décisions ci-dessous, dans cet ordre ; **la pause l'a arrêté après C1**.
+
+| Constat | État à la pause |
+|---|---|
+| C1 (avec m4, m5) | **fait**, `869a0a0`, R207 et R208, poussé |
+| I1 | **en cours** : tests écrits, jamais vus rouges, gardés dans [`2026-11-13-p1-lot3-piste-s-i1-tests.patch`](2026-11-13-p1-lot3-piste-s-i1-tests.patch) ; correctif conçu, pas écrit |
+| I3 | pas commencé |
+| I2 (avec m7) | pas commencé |
+| m1, m2, m3, m6 | pas commencés (la cause de m3 est connue) |
+
+Numéros de Rulings pour la suite du tour : R209, puis R258, R259, puis R350 à R359.
+
+### C1 — Critique, antérieur au lot (présent depuis le lot 1) : un client répété dans une mise à jour détruit la page — **corrigé**
+
+- **Scénario** : quelqu'un qui peut modifier une page écrit sur sa connexion de synchro une mise à jour de 26 octets où un même client paraît deux fois dans la partie « blocs » (un `Skip` à l'horloge courante, puis une plage ramassée `[0, 1)` que la page connaît déjà). `Shape` n'y voyait ni trou ni refus ; yrs écrit la plage par-dessus le bloc connu (la racine). Chaque connexion reçoit une page vide à sa prochaine étape 2 ; au compactage suivant, l'instantané écrit est l'état abîmé : la page est vide pour de bon. Avec une plage plus longue : panique en debug, état illisible par le serveur lui-même en release. Le même moyen contournait R198.
+- **Corrigé** (`869a0a0`) : une mise à jour où un client paraît deux fois dans la partie « blocs » est refusée (`Decode`), qu'elle vienne d'un client ou du stockage (R207) ; en filet de R198, une mise à jour de client qui laisse une suppression en attente que la page n'avait pas est refusée, l'acteur recharge la page et ferme la connexion ; une plage de suppression vide est refusée quand elle vient d'un client, acceptée à la relecture du stockage (R208 : refusée à la relecture, une plage inoffensive déjà au journal aurait rendu sa page inchargeable ; **validé par le contrôleur**). Tests gardés : les deux sondes du relecteur inversées (crate et synchro, avec le compactage par défaut et à 2), et un test de propriétés de 4 096 mises à jour faites à la main (`hand_made_updates.rs`) : ce que la garde laisse passer ne panique pas et ne laisse rien en attente. Filet mesuré en release : frappe à 2,0 à 2,3 ms au p95 (2,07 avant).
+- **Vérifié par l'implémenteur** : aucun encodeur honnête n'écrit deux entrées pour un client ni de plage de suppression vide (Yjs 13.6.33 : `writeClientsStructs`, `mergeUpdatesV2`, `diffUpdateV2`, structures en attente, étape 2 ; yrs 0.28.1 : `write_blocks_from`, `Update::encode_diff`, `merge_updates`).
+- **Doute resté ouvert, à trancher à la reprise** : une mise à jour hostile de cette forme **déjà gardée au journal** avant ce correctif rendrait désormais sa page inchargeable (le refus vaut aussi à la relecture du stockage). Depuis R130 le journal ne garde que du réencodé ; avant (lots 1 et 2), il gardait les octets reçus. Aucune n'a été vue, aucune base d'instance n'a été relue. Piste : à la relecture du stockage, ignorer l'entrée fautive et le journaliser, au lieu de refuser la page.
+
+### I1 — Important (S1) : une session fermée n'arrête pas la file des écritures du serveur
+
+- **Scénario** : Tom envoie d'un coup 24 `PUT /mmd`, puis se déconnecte (ou la titulaire d'un compte volé change son mot de passe). Sous le verrou, le second contrôle relit les **droits** du compte, jamais la **session** : 23 écritures sur 24 passent encore. R200 écrit pourtant qu'une session fermée arrête la file.
+- **Décision** : sous le verrou de la page, après le chargement et avant le second contrôle des droits, la route relit la session de la requête (`Store::session_is_live`, comme `/sync` en R88 et le canal de l'espace) et répond `401` si elle ne vaut plus ; pour `PUT /mmd` **et** pour la restauration. Tests : la sonde inversée pour les deux routes, après une déconnexion et après un changement de mot de passe (au plus une écriture sans session, les autres `401`). Corriger R200.
+- **Où c'en est** : le fichier `.patch` nommé plus haut (à la racine : `git apply docs/superpowers/logs/2026-11-13-p1-lot3-piste-s-i1-tests.patch`, vérifié applicable sur `main`) ne contient que les tests de `crates/mementum-server/tests/page_writes.rs` : la rafale factorisée, un témoin sur la session, et la sonde pour les deux routes. **Ils n'ont jamais été vus rouges.** Correctif prévu : un extracteur `SessionUser` (l'`AuthUser` et le hachage de la session, comme `Caller` dans `routes/sync.rs`) ; le contrôle sous le verrou ; R209. Supprimer le fichier `.patch` du dépôt une fois I1 commité.
+
+### I3 — Important, antérieur : l'écriture complète d'une page est quadratique en nombre de blocs frères
+
+- **Scénario** : un `PUT /mmd` de 90 Ko (30 000 paragraphes d'un caractère) occupe l'acteur de la page 48 s en release, avec un pic de 98 Mio ; aucune frappe de cette page n'est traitée pendant ce temps, et depuis R200 la requête tient le verrou jusqu'au bout. 10 000 blocs : 5 s ; à l'inverse, 9 000 blocs rangés en 100 listes de 90 niveaux : 0,1 s. C'est donc le nombre de frères d'une même liste qui coûte (`write_all`, `crates/mementum-crdt/src/page.rs`), pas le rapprochement des identifiants de S3 (3 % au plus). La ligne en cause n'a pas été cherchée.
+- **Décision** : chercher la ligne (une insertion à un index qui reparcourt la liste ?). S'il existe un correctif simple et sûr, le faire : le document écrit doit rester lisible octet pour octet de la même façon (fidélité, fixtures, `revision_is_canonical`, mesures existantes inchangées), mesuré avant et après à 10 000 et 30 000 blocs (c'est aussi le coût d'une restauration, qui attend le propriétaire). **Dans tous les cas**, plafonner le nombre de blocs d'un `PUT /mmd` : une constante choisie d'après la mesure pour que la pire écriture acceptée occupe l'acteur moins de dix secondes en release, jamais sous 10 000 blocs ; refus `422 too_many_blocks`, avant de prendre le verrou si le compte se fait sur le MMD lu. La restauration d'une version n'est pas plafonnée ; le dire au registre.
+
+### I2 — Important (S4) : les plafonds ne bornent pas la lecture des fils, et un invité peut fermer les fils d'une page à tous
+
+- **(a)** Les plafonds de S4 permettent 2 000 × 500 messages de 10 000 caractères. Mesuré à 1 % du plafond des fils (21 fils, 10 001 messages) : `GET …/comments` rend 192 Mio, à chaque première synchro de chaque onglet puis à chaque trame `comments`. **(b)** Une invitée « Peut commenter » ouvre 2 000 fils en quelques secondes : plus personne n'ouvre de fil sur la page ; l'accès complet ne libère qu'une place par `DELETE` de message, qu'elle reprend aussitôt.
+- **Décision**, tout vérifié dans la transaction qui écrit, en constantes nommées : **par page**, 10 000 messages et 4 Mio de texte de messages au plus (refus `409 page_comment_limit`) ; **par compte et par page**, 200 fils ouverts par un même compte, résolus compris (`409 thread_limit`, avec un message qui dit que c'est sa part), et 8 emojis distincts posés par un même compte sur un message, sur les 32 (`409 reaction_limit` ; c'est aussi m7) ; **une route pour qui a l'accès complet**, `DELETE /api/v1/pages/{id}/comments/threads/{threadId}`, qui supprime le fil avec ses messages et ses réactions en une transaction, dans l'ordre des refus de R168 (page, accès complet, fil, corbeille), trame `comments` après la validation ; elle entre dans `comment_routes` et dans le tableau de `lib.rs`. Mesurer la lecture d'une page pleine et le coût d'une écriture à la borne (compte et somme lus dans la transaction ; un index s'il en faut un : la migration `0003` peut encore changer). **Côté client, ensuite** : un bouton « Supprimer le fil » pour l'accès complet, et les messages des refus neufs.
+
+### Mineurs
+
+- **m1** (S7) : rien ne garde la route : remettre `open_thread` sur `Hub::read_blocks` laisse les tests verts. À faire : un compteur des lectures de blocs de l'acteur, ou une mesure à la route.
+- **m2** (S3) : deux règles écrites sans test : « le bloc courant qui portait cet identifiant ne donne le sien à personne » (`kept_ids.rs`, `claimed`), et « seulement s'ils sont du même type » (R202 b). À faire : un bloc sans ancre identique à un bloc dont l'identifiant est pris en ancre plus bas ; un bloc qui change de type à sa place.
+- **m3** (S4) : les trois messages de refus des plafonds portent une suite de 22 espaces (`crates/mementum-server/src/error.rs`, vers les lignes 255 à 269) : les `\` de fin de ligne ont été mangés par un script. À remettre à la main, avec un test : aucun message de refus du serveur ne porte deux espaces de suite. **Attention** : `apps/web/src/comments/limits.test.tsx` et l'e2e `message_limit_is_read_and_the_reply_stays` citent ces messages tels que le serveur les écrit aujourd'hui ; ils sont à mettre d'accord dans le même pas.
+- **m4** (S2), **m5** (S2) : faits avec C1.
+- **m6** (S5) : la trame `versions` part encore aux lecteurs, qui apprennent qu'une version vient d'être coupée (ni contenu ni auteur). **Décision** : l'envoyer aux seules connexions qui peuvent écrire (`ConnInfo::can_write`), et le dire avec R203 ; vérifier qu'aucun test du client ni e2e ne compte sur elle pour un lecteur.
+- **m7** (S4) : avec I2.
 
 ## Ce que la documentation doit dire (pour la Task 14)
 
@@ -198,6 +237,12 @@ Piste C, après relecture :
 - `CLAUDE.md`, titre : le drapeau `typed` suit chaque frappe, comparé au titre de la page ou à celui en cours d'envoi ; un envoi refusé ou doublé ne perd pas la saisie (R210, R218).
 - `CLAUDE.md`, « Historique, côté client » : un menu « … » qui perd ses entrées rend le focus à la page ; un aperçu refusé par `403` se lit tel quel, sans « Réessayer », et fait relire la page (R216).
 - `CLAUDE.md`, « Tester » : une attente dans un test de composant passe par l'aide commune `until` (`apps/web/src/test/hooks.ts`), qui s'arrête quand l'hôte du test quitte le document ; tout branchement neuf de `PageView` prend son test dans `PageView.test.tsx`, qui rend le composant.
+
+Tour de correction 1 de la piste S, et part e2e de la piste C :
+
+- `CLAUDE.md` : un client répété dans une mise à jour est refusé, à l'arrivée comme à la relecture du stockage (R207) ; une plage de suppression vide venue d'un client aussi (R208) ; R198 vaut désormais plage vide comprise ; le filet (une mise à jour de client qui laisse une suppression en attente neuve : page rechargée, connexion fermée) ; le test différentiel `hand_made_updates.rs`. Conception §5 : les mêmes règles.
+- `CLAUDE.md`, pièges de méthode : un script qui écrit du Rust doit garder ses `\` de fin de ligne (m3) ; après une mutation d'un fichier Rust défaite en recopiant une sauvegarde, redonner une date au fichier (`touch`), sinon cargo garde le binaire faussé ; plusieurs agents qui commitent dans le même arbre nomment leurs chemins (`git commit -m … -- <chemins>`) ; le cache incrémental de `target/debug` a pesé 28 Go : `CARGO_INCREMENTAL=0` pour les agents.
+- `CLAUDE.md`, e2e : le repli d'un canal muet se prouve sous l'horloge simulée de la page, l'espace calme en temps réel (R219, `keepalive.spec.ts`) ; un e2e qui compare tout le texte de l'écran attend d'abord que la barre latérale ait fini de charger (`space_without_a_role_is_not_found` lisait sa référence pendant « Chargement… », et échouait de temps en temps) ; `general_access_makes_a_private_page_a_space_page` a échoué une fois sous la charge de plusieurs suites lancées de front, puis passé seul : à surveiller sur le clone neuf.
 
 Pour chaque constat fini ensuite, ajouter ici ce que la documentation doit en dire : la Task 14 part de cette liste. Sont déjà sûrs de changer : le README et `CLAUDE.md` pour l'historique (« Peut lire » lit l'historique sans restaurer : faux après S5 et C7), la puce R181 de `CLAUDE.md` (S2), le canal de l'espace (S6, C6), `PUT /mmd` et les identifiants (S3), les plafonds des commentaires (S4).
 
