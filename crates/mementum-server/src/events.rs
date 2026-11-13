@@ -549,7 +549,8 @@ mod tests {
                 .iter()
                 .all(|message| *message == version_frame(lsn)
                     || matches!(message, Message::Ping(payload) if payload.is_empty())),
-            "que des pings vides, et la version redite avec chacun (Ruling R205), après la trame              d'ouverture"
+            "que des pings vides, et la version redite avec chacun (Ruling R205), après la trame \
+             d'ouverture"
         );
     }
 

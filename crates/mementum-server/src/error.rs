@@ -255,21 +255,25 @@ impl ApiError {
             CommentLimit::Threads => (
                 ErrorCode::ThreadLimit,
                 format!(
-                    "cette page a atteint {} fils de commentaires, résolus compris : supprime ceux                      qui ne servent plus, ou demande-le à quelqu'un qui a l'accès complet, avant                      d'en ouvrir un autre ; rien n'a été écrit",
+                    "cette page a atteint {} fils de commentaires, résolus compris : supprime ceux \
+                     qui ne servent plus, ou demande-le à quelqu'un qui a l'accès complet, avant \
+                     d'en ouvrir un autre ; rien n'a été écrit",
                     french_number(MAX_THREADS_PER_PAGE)
                 ),
             ),
             CommentLimit::Messages => (
                 ErrorCode::MessageLimit,
                 format!(
-                    "ce fil a atteint {} messages : ouvre un nouveau fil pour continuer ; rien n'a                      été écrit",
+                    "ce fil a atteint {} messages : ouvre un nouveau fil pour continuer ; rien n'a \
+                     été écrit",
                     french_number(MAX_MESSAGES_PER_THREAD)
                 ),
             ),
             CommentLimit::Reactions => (
                 ErrorCode::ReactionLimit,
                 format!(
-                    "ce message porte déjà {} emojis différents : réagis avec l'un d'eux ; rien                      n'a été écrit",
+                    "ce message porte déjà {} emojis différents : réagis avec l'un d'eux ; rien \
+                     n'a été écrit",
                     french_number(MAX_REACTIONS_PER_MESSAGE)
                 ),
             ),
@@ -642,6 +646,192 @@ mod tests {
 
     use super::*;
 
+    /// Ruling R356 (constat m3 de la relecture de la piste S) : les messages des plafonds des
+    /// commentaires, tous, sans deux espaces de suite. Un script avait mangé les `\` de fin de
+    /// ligne de trois d'entre eux, qui portaient chacun une suite de 22 espaces ; l'application
+    /// les affiche tels quels.
+    #[test]
+    fn comment_limit_messages_have_no_run_of_spaces() {
+        for limit in [
+            CommentLimit::Threads,
+            CommentLimit::Messages,
+            CommentLimit::Reactions,
+            CommentLimit::PageMessages,
+            CommentLimit::PageText,
+            CommentLimit::OwnThreads,
+            CommentLimit::OwnReactions,
+        ] {
+            let message = ApiError::comment_limit(limit).body.message;
+            assert!(!message.contains("  "), "{limit} : « {message} »");
+        }
+    }
+
+    /// Les chaînes littérales du code d'un fichier source, hors de son module de tests
+    /// (`#[cfg(test)]` suivi de `mod tests`), telles que le compilateur les lit : `(ligne,
+    /// valeur)`. Une fin de ligne échappée (`\` puis saut de ligne) retire les blancs qui la
+    /// suivent ; les autres échappements sont gardés tels quels. Les commentaires (`//`) et les
+    /// caractères littéraux sont sautés, les chaînes brutes (`r"…"`, `r#"…"#`) lues.
+    fn string_literals(source: &str) -> Vec<(usize, String)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let end = lines
+            .windows(2)
+            .position(|w| w[0] == "#[cfg(test)]" && w[1].contains("mod tests"))
+            .unwrap_or(lines.len());
+        let code: Vec<char> = lines[..end].join("\n").chars().collect();
+        let at = |i: usize| code.get(i).copied().unwrap_or('\0');
+        let (mut found, mut i, mut line) = (Vec::new(), 0, 1);
+        while i < code.len() {
+            match code[i] {
+                '\n' => {
+                    line += 1;
+                    i += 1;
+                }
+                '/' if at(i + 1) == '/' => {
+                    while i < code.len() && code[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                '\'' if at(i + 1) == '\\' => {
+                    // `'\n'`, `'\''`, `'\u{…}'` : jusqu'à l'apostrophe qui ferme.
+                    i += 3;
+                    while i < code.len() && code[i] != '\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                // `'x'` ; sinon une durée de vie (`'a`), dont l'apostrophe seule est sautée.
+                '\'' if at(i + 2) == '\'' => i += 3,
+                'r' if (at(i + 1) == '"' || at(i + 1) == '#')
+                    && !(i > 0
+                        && (code[i - 1].is_alphanumeric() || code[i - 1] == '_')
+                        && code[i - 1] != 'b') =>
+                {
+                    let mut j = i + 1;
+                    let mut hashes = 0;
+                    while at(j) == '#' {
+                        hashes += 1;
+                        j += 1;
+                    }
+                    if at(j) != '"' {
+                        i += 1;
+                        continue;
+                    }
+                    let start = (line, j + 1);
+                    j += 1;
+                    let close: String = std::iter::once('"')
+                        .chain(std::iter::repeat_n('#', hashes))
+                        .collect();
+                    let mut value = String::new();
+                    while j < code.len()
+                        && !code[j..].starts_with(&close.chars().collect::<Vec<_>>())
+                    {
+                        if code[j] == '\n' {
+                            line += 1;
+                        }
+                        value.push(code[j]);
+                        j += 1;
+                    }
+                    found.push((start.0, value));
+                    i = j + close.chars().count();
+                }
+                '"' => {
+                    let start = line;
+                    let mut value = String::new();
+                    i += 1;
+                    while i < code.len() && code[i] != '"' {
+                        match code[i] {
+                            '\\' if at(i + 1) == '\n' => {
+                                i += 1;
+                                while at(i).is_whitespace() {
+                                    if code[i] == '\n' {
+                                        line += 1;
+                                    }
+                                    i += 1;
+                                }
+                            }
+                            '\\' => {
+                                value.push(code[i]);
+                                value.push(at(i + 1));
+                                i += 2;
+                            }
+                            c => {
+                                if c == '\n' {
+                                    line += 1;
+                                }
+                                value.push(c);
+                                i += 1;
+                            }
+                        }
+                    }
+                    found.push((start, value));
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        found
+    }
+
+    /// Les fichiers Rust de `dir`, à toute profondeur.
+    fn rust_files(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, into);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                into.push(path);
+            }
+        }
+    }
+
+    /// Ruling R356 : aucune chaîne du code du serveur, hors de ses tests, ne porte deux espaces de
+    /// suite : c'est là que sont écrits tous les messages de refus, que l'application affiche
+    /// tels quels. Une ligne mangée par un script (les `\` de fin de ligne perdus) y laisse
+    /// l'indentation de la suivante (constat m3).
+    #[test]
+    fn no_string_of_the_server_has_a_run_of_spaces() {
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(files.len() > 10, "{files:?}");
+        let mut found = Vec::new();
+        let mut seen = Vec::new();
+        for file in &files {
+            let source = std::fs::read_to_string(file).unwrap();
+            for (line, value) in string_literals(&source) {
+                if value.contains("  ") {
+                    found.push(format!("{}:{line} : « {value} »", file.display()));
+                }
+                seen.push(value);
+            }
+        }
+        // La lecture va au bout des fichiers : elle trouve des messages de plusieurs d'entre eux,
+        // dont un écrit sur deux lignes, et la fin d'un long module de routes.
+        for known in [
+            "page introuvable",
+            "réservé aux membres de l'espace : un invité ne voit que les pages partagées avec lui",
+            "un emoji ne porte aucune espace",
+            "le message porte un caractère de contrôle (tabulation, retour chariot…) : seul le saut \
+             de ligne est permis",
+        ] {
+            assert!(
+                seen.iter().any(|value| value == known),
+                "« {known} » non lu"
+            );
+        }
+        assert!(seen.len() > 300, "{} chaînes seulement", seen.len());
+        let sample = string_literals(
+            "fn f() {\n    let a = 'x';\n    g(\"un \\\n         deux\", r#\"trois\"#); // \"non\"\n}\n",
+        );
+        assert_eq!(
+            sample,
+            [(3, "un deux".to_string()), (4, "trois".to_string())]
+        );
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
     /// Ce que `work` journalise sur ce fil, avec ce qu'il rend.
     ///
     /// Un second abonné, inerte, est inscrit le temps de la lecture. Seul inscrit du
@@ -773,12 +963,28 @@ mod tests {
         }
     }
 
-    /// Rulings R350 et R351 : les messages des plafonds de la page et de la part d'un compte,
-    /// mot pour mot. Le client les montre tels quels, et ses tests les citent ainsi
+    /// Rulings R204, R350, R351 et R356 : les messages des plafonds des commentaires, mot pour
+    /// mot. Le client les montre tels quels, et ses tests les citent ainsi
     /// (`apps/web/src/comments/limits.test.tsx`) : qui change l'un change l'autre.
     #[test]
-    fn page_and_account_limit_messages_are_the_ones_the_client_cites() {
+    fn comment_limit_messages_are_the_ones_the_client_cites() {
         let cases = [
+            (
+                CommentLimit::Threads,
+                "cette page a atteint 2 000 fils de commentaires, résolus compris : supprime ceux \
+                 qui ne servent plus, ou demande-le à quelqu'un qui a l'accès complet, avant \
+                 d'en ouvrir un autre ; rien n'a été écrit",
+            ),
+            (
+                CommentLimit::Messages,
+                "ce fil a atteint 500 messages : ouvre un nouveau fil pour continuer ; rien n'a \
+                 été écrit",
+            ),
+            (
+                CommentLimit::Reactions,
+                "ce message porte déjà 32 emojis différents : réagis avec l'un d'eux ; rien n'a \
+                 été écrit",
+            ),
             (
                 CommentLimit::PageMessages,
                 "cette page a atteint 10 000 messages de commentaires, tous fils compris : \
