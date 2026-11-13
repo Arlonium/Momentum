@@ -207,16 +207,46 @@ impl Store {
         }))
     }
 
-    /// Le ménage (R245) : supprime, en une instruction, les lignes des contenus qu'aucune attache
-    /// ne nomme plus, et rend leurs hash, chacun une fois, pour que le serveur les retire du
-    /// disque. Il ne regarde ni les blocs ni les versions : un contenu attaché à une page reste,
-    /// même si plus aucun bloc ne le nomme.
+    /// Le ménage (R245) : supprime les lignes des contenus qu'aucune attache ne nomme plus, et
+    /// rend leurs hash, chacun une fois, pour que le serveur les retire du disque. Il ne regarde
+    /// ni les blocs ni les versions : un contenu attaché à une page reste, même si plus aucun
+    /// bloc ne le nomme.
+    ///
+    /// Il relit tous les contenus de l'instance (R270), d'abord sans écrire : une lecture ne
+    /// prend pas le verrou d'écriture de SQLite, unique pour toute l'instance, et le plus souvent
+    /// il n'y a rien à retirer. Seuls les candidats trouvés sont ensuite supprimés, en une
+    /// instruction qui revérifie qu'aucune attache ne les nomme : une attache écrite entre les
+    /// deux garde son contenu.
     pub async fn sweep_files(&self) -> Result<Vec<[u8; 32]>, StoreError> {
+        let candidates: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT hash FROM files \
+             WHERE NOT EXISTS (SELECT 1 FROM attachments a WHERE a.file_hash = files.hash)",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Les candidats en un seul paramètre, un tableau JSON de chaînes hexadécimales : des
+        // octets relus de la base, sans rien à échapper.
+        let list = format!(
+            "[{}]",
+            candidates
+                .iter()
+                .map(|hash| {
+                    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+                    format!("\"{hex}\"")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         sqlx::query(
             "DELETE FROM files \
-             WHERE NOT EXISTS (SELECT 1 FROM attachments a WHERE a.file_hash = files.hash) \
+             WHERE hash IN (SELECT unhex(value) FROM json_each(?)) \
+               AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.file_hash = files.hash) \
              RETURNING hash",
         )
+        .bind(list)
         .fetch_all(&self.pool)
         .await?
         .into_iter()

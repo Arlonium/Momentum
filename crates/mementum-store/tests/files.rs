@@ -308,3 +308,42 @@ async fn sweep_returns_only_what_no_page_keeps() {
     assert_eq!(f.store.sweep_files().await.unwrap(), Vec::<[u8; 32]>::new());
     assert_eq!((files(&f).await, attachments(&f).await), (1, 1));
 }
+
+/// Un ménage qui n'a rien à retirer ne prend pas le verrou d'écriture de SQLite, unique pour
+/// toute l'instance (R270) : il passe pendant qu'une autre connexion le tient. Le ménage relit
+/// tous les contenus (54 ms pour 100 000 en release) : sous le verrou, il ferait attendre le
+/// journal de chaque page ouverte, à chaque suppression définitive. Témoin : le verrou rendu, un
+/// ménage qui a un contenu à retirer le retire.
+#[tokio::test]
+async fn sweep_with_nothing_to_remove_takes_no_write_lock() {
+    let f = fresh().await;
+    let olga = account(&f.store, "olga").await.id;
+    let (a, b) = (new_page(&f, "A").await, new_page(&f, "B").await);
+    for (node, hash) in [(a, [6; 32]), (b, [7; 32])] {
+        f.store
+            .attach_file(
+                new_attachment(node, hash, 1, "image/png", "x.png", olga),
+                1_000,
+            )
+            .await
+            .unwrap();
+    }
+
+    // Une autre connexion tient le verrou d'écriture.
+    let side = common::side_pool(&f.db).await;
+    let mut holder = side.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    assert_eq!(f.store.sweep_files().await.unwrap(), Vec::<[u8; 32]>::new());
+    sqlx::query("ROLLBACK").execute(&mut *holder).await.unwrap();
+
+    drop(holder);
+    side.close().await;
+
+    // Témoin : le verrou rendu, le contenu de la page supprimée est retiré, l'autre reste.
+    delete_page(&f, b, olga).await;
+    assert_eq!(f.store.sweep_files().await.unwrap(), [[7; 32]]);
+    assert_eq!(f.store.known_files().await.unwrap(), [[6; 32]]);
+}
