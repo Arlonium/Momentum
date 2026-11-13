@@ -653,6 +653,99 @@ async fn invitation_that_gives_nothing_is_not_consumed() {
     );
 }
 
+/// Une membre partie de l'espace, sa page privée P et sa sous-page C, où sa ligne `full` de P
+/// est restée (`remove_member` garde les lignes des pages privées). Ses invitations, posées par
+/// le store (personne d'autre ne voit P) : `departed_member…` et `accept_never_lowers…`.
+async fn departed_with_a_leftover_line(store: &Store, space: &Space, olga: Uuid) -> (Uuid, Node) {
+    let mona = account(store, "mona").await;
+    store
+        .add_member(space.id, mona.id, Role::Member)
+        .await
+        .unwrap();
+    let p = store
+        .create_node(NewNode {
+            grants: vec![grant(Subject::User(mona.id), Level::Full)],
+            ..page(space, None, None, "P")
+        })
+        .await
+        .unwrap();
+    store
+        .remove_member(space.id, mona.id, seen(olga, Role::Owner, Role::Member))
+        .await
+        .unwrap();
+    assert_eq!(store.role_in(space.id, mona.id).await.unwrap(), None);
+    assert_eq!(lines_of(store, space, mona.id).await, [(p.id, Level::Full)]);
+    (mona.id, p)
+}
+
+/// Ruling R260 : sans rôle dans l'espace, un compte n'a jamais « déjà » ce que donne une
+/// invitation de page, même si une ligne restée à son nom lui donnerait le niveau : il y
+/// rentre, comme invité, et le lien est consommé. Jugée avec un rôle d'invité supposé, la
+/// ligne `full` restée sur P passerait pour un accès, et la personne resterait dehors.
+#[tokio::test]
+async fn departed_member_with_a_leftover_line_is_let_back_in() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    let (mona, p) = departed_with_a_leftover_line(store, &space, olga.id).await;
+    let c = store
+        .create_node(page(&space, Some(p.id), None, "C"))
+        .await
+        .unwrap();
+
+    let before = rev(store, space.id).await;
+    let (_, gave) = invite_and_accept(
+        store,
+        invitation(&space, to_page(&c, Level::Read), olga.id, 1),
+        mona,
+    )
+    .await
+    .unwrap();
+    assert!(gave);
+    assert_eq!(
+        store.role_in(space.id, mona).await.unwrap(),
+        Some(Role::Guest)
+    );
+    assert_eq!(
+        lines_of(store, &space, mona).await,
+        [(p.id, Level::Full), (c.id, Level::Read)]
+    );
+    assert_eq!(rev(store, space.id).await, before + 1);
+    assert_eq!(
+        store.invitation_by_token([1; 32], now()).await.unwrap(),
+        None
+    );
+}
+
+/// Accepter ne baisse jamais une ligne, pas même celle d'un compte sans rôle : sa ligne `full`
+/// restée sur P le reste, quand il revient par une invitation `read` sur P. Depuis R257,
+/// `accept_never_lowers_level_or_role` ne peut plus voir ce défaut (un compte qui a un rôle et
+/// déjà le niveau ne touche plus à sa ligne) : c'est ici qu'il se voit (R261).
+#[tokio::test]
+async fn accept_never_lowers_a_line_of_an_account_without_role() {
+    let f = fresh().await;
+    let store = &f.store;
+    let olga = account(store, "olga").await;
+    let space = store.create_space("Équipe", Some(olga.id)).await.unwrap();
+    let (mona, p) = departed_with_a_leftover_line(store, &space, olga.id).await;
+
+    let (_, gave) = invite_and_accept(
+        store,
+        invitation(&space, to_page(&p, Level::Read), olga.id, 1),
+        mona,
+    )
+    .await
+    .unwrap();
+    // Elle rentre dans l'espace : c'est ce que l'invitation lui donne.
+    assert!(gave);
+    assert_eq!(
+        store.role_in(space.id, mona).await.unwrap(),
+        Some(Role::Guest)
+    );
+    assert_eq!(lines_of(store, &space, mona).await, [(p.id, Level::Full)]);
+}
+
 #[tokio::test]
 async fn guest_leaves_with_last_grant() {
     let f = fresh().await;
