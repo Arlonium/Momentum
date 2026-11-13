@@ -3,7 +3,9 @@
 // (`reaction_limit`) ; au-delà de 10 000 messages ou de 4 Mio de texte par page
 // (`page_comment_limit`, R350) ; et au-delà de la part d'un compte, 200 fils ouverts sur la page
 // ou 8 emojis posés sur un message (`thread_limit`, `reaction_limit`, R351, avec un message à
-// elle). Le client montre le message du serveur tel quel, comme tout refus, et le
+// elle) ; au-delà de 20 000 réactions par page, ou de la part d'un compte sur la page (2 000
+// messages, 1 Mio de texte, 2 000 réactions ; R357, R358). Le client montre le message du serveur
+// tel quel, comme tout refus, et le
 // texte refusé reste : dans son champ, et dans son brouillon, qui survit au panneau. Rien n'est
 // renvoyé de soi-même. Ici, c'est le test qui joue le serveur ; l'e2e
 // `message_limit_is_read_and_the_reply_stays` (`comments.spec.ts`) atteint le vrai.
@@ -75,6 +77,28 @@ const OWN_REACTIONS = limit(
   "reaction_limit",
   "tu as déjà posé 8 emojis différents sur ce message : c'est ta part ; retire l'un des tiens " +
     "avant d'en poser un autre ; rien n'a été écrit",
+);
+// R357 et R358 : les réactions de la page, et la part d'un compte sur la page.
+const PAGE_REACTIONS = limit(
+  "reaction_limit",
+  "les commentaires de cette page portent déjà 20 000 réactions : retire celles qui ne servent " +
+    "plus, ou demande à quelqu'un qui a l'accès complet de supprimer des fils ; rien n'a été écrit",
+);
+const OWN_MESSAGES = limit(
+  "page_comment_limit",
+  "tu as déjà écrit 2 000 messages sur cette page : c'est ta part, la même pour chaque compte ; " +
+    "supprime ceux des tiens qui ne servent plus avant d'en écrire un autre ; rien n'a été écrit",
+);
+const OWN_TEXT = limit(
+  "page_comment_limit",
+  "tes messages sur cette page dépasseraient 1 Mio de texte : c'est ta part, la même pour chaque " +
+    "compte ; raccourcis ton message, ou supprime ceux des tiens qui ne servent plus ; rien n'a " +
+    "été écrit",
+);
+const OWN_PAGE_REACTIONS = limit(
+  "reaction_limit",
+  "tu as déjà posé 2 000 réactions sur cette page : c'est ta part, la même pour chaque compte ; " +
+    "retire celles des tiennes qui ne servent plus avant d'en poser une autre ; rien n'a été écrit",
 );
 
 function comments(threads: Thread[], overrides: Partial<Comments>): Comments {
@@ -190,7 +214,7 @@ test("a_message_at_its_reaction_limit_shows_the_refusal", async () => {
 });
 
 test("a_full_page_or_a_spent_part_refuses_a_new_thread_and_keeps_the_draft", async () => {
-  for (const refusal of [PAGE_MESSAGES, PAGE_TEXT, OWN_THREADS]) {
+  for (const refusal of [PAGE_MESSAGES, PAGE_TEXT, OWN_THREADS, OWN_MESSAGES, OWN_TEXT]) {
     const drafts = createDrafts();
     const given = comments([], { open: vi.fn(async () => Promise.reject(refusal)) });
     await show(given, drafts);
@@ -205,7 +229,7 @@ test("a_full_page_or_a_spent_part_refuses_a_new_thread_and_keeps_the_draft", asy
 });
 
 test("a_full_page_refuses_a_reply_and_keeps_it", async () => {
-  for (const refusal of [PAGE_MESSAGES, PAGE_TEXT]) {
+  for (const refusal of [PAGE_MESSAGES, PAGE_TEXT, OWN_MESSAGES, OWN_TEXT]) {
     const drafts = createDrafts();
     const given = comments([thread("t")], { reply: vi.fn(async () => Promise.reject(refusal)) });
     await show(given, drafts);
@@ -221,10 +245,13 @@ test("a_full_page_refuses_a_reply_and_keeps_it", async () => {
 });
 
 test("a_spent_reaction_part_shows_the_refusal", async () => {
-  const given = comments([thread("t")], { react: vi.fn(async () => Promise.reject(OWN_REACTIONS)) });
-  await show(given, createDrafts());
-  await click(button(host, "Ajouter une réaction"));
-  await click(button(host, "Réagir avec 🎉"));
-  expect(given.react).toHaveBeenCalledExactlyOnceWith("t", "t-1", "🎉", true);
-  expect(alerts()).toEqual([OWN_REACTIONS.message]);
+  for (const refusal of [OWN_REACTIONS, PAGE_REACTIONS, OWN_PAGE_REACTIONS]) {
+    const given = comments([thread("t")], { react: vi.fn(async () => Promise.reject(refusal)) });
+    await show(given, createDrafts());
+    await click(button(host, "Ajouter une réaction"));
+    await click(button(host, "Réagir avec 🎉"));
+    expect(given.react).toHaveBeenCalledExactlyOnceWith("t", "t-1", "🎉", true);
+    expect(alerts()).toEqual([refusal.message]);
+    await act(async () => root.render(null));
+  }
 });
