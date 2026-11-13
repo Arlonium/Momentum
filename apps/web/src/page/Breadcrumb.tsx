@@ -73,10 +73,11 @@ export function Breadcrumb({ node, ancestors }: Props) {
   // valent plus. Il se ferme, et le focus, qui y était, revient au bouton « … », ou à la page
   // si le fil ne se replie plus. Un titre renommé, lui, se met à jour dans le menu.
   const hiddenIds = hidden.map((page) => page.id).join(" ");
-  const shownIds = useRef(hiddenIds);
+  /** Les pages masquées du rendu d'avant. */
+  const lastHidden = useRef(hiddenIds);
   useEffect(() => {
-    if (shownIds.current === hiddenIds) return;
-    shownIds.current = hiddenIds;
+    if (lastHidden.current === hiddenIds) return;
+    lastHidden.current = hiddenIds;
     if (anchor === null) return;
     setAnchor(null);
     (anchor.isConnected ? anchor : current.current)?.focus();
