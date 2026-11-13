@@ -12,28 +12,28 @@ La troisième passe, **documentation contre le code**, n'est pas faite : elle vi
 
 | Constat | Sujet | État |
 |---|---|---|
-| S1 | une écriture du serveur à la fois par page (restauration, `PUT /mmd`) | en cours |
-| S2 | suppression sur des horloges que la page n'a pas encore | **fait**, `414df88`, R198 et R199 ; à relire |
-| S3 | `PUT /mmd` garde l'identifiant des blocs inchangés | pas commencé |
-| S4 | plafonds des commentaires | pas commencé |
-| S5 | l'historique se lit à partir de « Peut modifier » | pas commencé |
-| S6 | le canal de l'espace redit sa version à chaque ping | pas commencé |
-| S7 | savoir si un bloc existe sans relire la page | pas commencé |
-| C1 | le titre n'envoie que ce qui a été tapé | **fait**, `8a8ced1`, R210 ; en relecture |
-| C2 | relire la liste après le retour du compte | **fait**, `abdffee`, R212 ; en relecture |
-| C3 | schéma relu pour qui commente | **fait**, `9151e88`, R213 ; en relecture |
-| C4 | raccourci muet sous une fenêtre modale | **fait**, `29ab75a`, R214 ; en relecture |
-| C5 | le brouillon de qui perd le droit d'écrire reste montré | **fait**, `ddfaf93`, R211 ; en relecture |
-| C6 | chien de garde du canal de l'espace | **part cliente faite**, `973b78e`, R215, contre un serveur simulé ; e2e après S6 |
-| C7 | « Historique » à partir de « Peut modifier » | **part cliente faite**, `b3a4c36`, R216 et R217 ; l'e2e du lecteur est en `test.fixme`, à inverser après S5 |
-| C8 | plafonds affichés | **test fait**, `38149d4`, contre un refus simulé ; la conversion des codes est à retirer quand S4 aura régénéré les types |
-| C9 | sept parcours de bout en bout | pas commencé (après la piste S) |
+| S1 | une écriture du serveur à la fois par page (restauration, `PUT /mmd`) | **fait**, `a859f04`, R200 ; en relecture |
+| S2 | suppression sur des horloges que la page n'a pas encore | **fait**, `414df88`, R198 et R199 ; en relecture |
+| S3 | `PUT /mmd` garde l'identifiant des blocs inchangés | **fait**, `9218fef`, R201 et R202 ; en relecture |
+| S4 | plafonds des commentaires | **fait**, `226496c`, R204 ; en relecture |
+| S5 | l'historique se lit à partir de « Peut modifier » | **fait**, `2ff3cdb`, R203 ; en relecture |
+| S6 | le canal de l'espace redit sa version à chaque ping | **fait**, `8dab2f5`, R205 ; en relecture |
+| S7 | savoir si un bloc existe sans relire la page | **fait**, `0de9b38`, R206 ; en relecture |
+| C1 | le titre n'envoie que ce qui a été tapé | **fait et relu** : `8a8ced1`, puis `73fa49a` et `79f90a9` après relecture ; R210, R218 |
+| C2 | relire la liste après le retour du compte | **fait et relu**, `abdffee`, R212 |
+| C3 | schéma relu pour qui commente | **fait et relu**, `9151e88`, R213 |
+| C4 | raccourci muet sous une fenêtre modale | **fait et relu**, `29ab75a`, R214 |
+| C5 | le brouillon de qui perd le droit d'écrire reste montré | **fait et relu**, `ddfaf93`, R211 |
+| C6 | chien de garde du canal de l'espace | **part cliente faite et relue**, `973b78e`, R215 ; e2e contre le vrai serveur en cours |
+| C7 | « Historique » à partir de « Peut modifier » | **fait et relu**, `b3a4c36`, `e81f821`, `e1b1758`, `4d36489`, `fb2f9ef` ; R216, R217 |
+| C8 | plafonds affichés | **test fait**, `38149d4` ; e2e contre le vrai serveur en cours |
+| C9 | sept parcours de bout en bout | en cours |
 
-Ordre de travail de la piste S : S2, S1, S3, S5, S4, S6, S7.
+**Piste S** : les sept corrections sont commitées et poussées (`cargo test --workspace` : 717 verts ; fmt et clippy propres ; mesures en release sans recul : frappe 2,1 ms au p95, 42,8 ms avec la coupe d'une version). Elles sont **en relecture indépendante**, tournée vers la sécurité ; un tour de correction peut suivre. Ce que l'implémenteur signale lui-même : R202 ajoute une passe à la décision de S3 (un bloc identique ailleurs dans la même liste garde son identifiant, et « même position » se lit entre deux blocs gardés) ; une page récrite à l'identique par `PUT /mmd` vaut maintenant sa version d'avant, donc la restaurer ne fait rien (une mesure de restauration a été récrite pour écrire une page changée) ; une suppression en attente déjà au journal d'une base d'avant le lot n'est pas neutralisée (aucune donnée récrite ; rien ne dit qu'une base en porte) ; quatre tests du canal passent à `NO_PING`.
 
-À la reprise du 2026-11-13, les deux pistes ont été relancées de front. La piste C a rendu sa première part (Vitest : 497 verts et les 12 échecs attendus du bloc déplacé ; e2e `pages`, `comments`, `history`, `live-tree`, `auth`, `reload`, `sharing`, `trash`, `presence`, `keepalive` verts) ; elle est en relecture indépendante. Restent pour elle, quand la piste S aura rendu : les e2e de C6, C7 et C8 contre le vrai serveur, C9, puis la suite complète et les budgets.
+**Piste C** : C1 à C8 sont faits côté client et **relus** (une relecture indépendante, puis deux tours de correction et une re-relecture : cinq constats levés, puis deux mineurs corrigés). Vitest : 516 verts et les 12 échecs attendus du bloc déplacé ; typecheck propre. La part e2e (C9, et les e2e de C6 et C8 contre le vrai serveur, puis la suite complète et les budgets) est **en cours, dans un atelier git à part** (`.claude/worktrees/piste-c-e2e`, branche `piste-c-e2e`), pour ne pas compiler le serveur pendant que le relecteur de la piste S y défait provisoirement des corrections.
 
-**Dans l'intervalle** (tant que S6 n'est pas sur `main`) : un onglet sur un espace calme ferme et rouvre son canal toutes les 45 s (une poignée de main, rien de relu). Tant que S5 n'y est pas : le client ne propose plus l'historique à un lecteur, que le serveur lui servirait encore.
+Un implémenteur s'est vu refuser par l'outil l'écriture de son fichier de rapport ; ses comptes rendus sont passés par message, et ce fichier en garde l'essentiel.
 
 ## Règles de la vague (les deux pistes)
 
@@ -183,7 +183,23 @@ Pour les constats finis :
 - `CLAUDE.md`, « Barre latérale en direct » : un chien de garde de 45 s (`EVENTS_SILENCE_MS`) ferme un canal muet et rend la main au minuteur de repli ; reconnexion immédiate sur `online` ; cela suppose que le serveur écrit au moins toutes les 20 s (S6, R215).
 - `CLAUDE.md`, « Historique, côté client », README et conception : l'historique se lit à partir de « Peut modifier » ; le bouton « … » disparaît quand il n'a aucune entrée ; un refus de la liste s'affiche tel quel dans la fenêtre, qui ne se ferme pas d'elle-même ; le focus revient au titre de la page si le bouton n'est plus là (R216, R217).
 
-Pour chaque constat fini à la reprise, ajouter ici ce que la documentation doit en dire : la Task 14 part de cette liste. Sont déjà sûrs de changer : le README et `CLAUDE.md` pour l'historique (« Peut lire » lit l'historique sans restaurer : faux après S5 et C7), la puce R181 de `CLAUDE.md` (S2), le canal de l'espace (S6, C6), `PUT /mmd` et les identifiants (S3), les plafonds des commentaires (S4).
+Piste S (R198 à R206) :
+
+- `CLAUDE.md` : la puce des trous d'horloge (R131) s'étend aux suppressions : une suppression qui vise des horloges que la page n'a pas est retenue comme un trou, sauf les plages déjà en attente dans la page (R198, R199) ; nouvelles aides de test `deletion` et `write_var` (`crates/mementum-sync/tests/common/raw.rs`).
+- `CLAUDE.md`, « Historique, côté serveur » : retirer la phrase sur `has_pending_deletions` (la branche est partie avec S2) ; la lecture des versions demande « Peut modifier » (R203) ; `PUT /mmd` et la restauration passent par le verrou de la page, pris autour du second contrôle, de la commande et de la réponse (R200).
+- `CLAUDE.md` : `PUT /mmd` garde l'identifiant des blocs inchangés, et une page récrite à l'identique se restaure sans rien faire (R201, R202) ; il ne garde pas les éditions concurrentes (lot 5, R40).
+- `CLAUDE.md`, « Commentaires, côté serveur » : les plafonds (2 000 fils par page, 500 messages par fil, 32 emojis distincts par message), vérifiés dans la transaction, et leurs codes `409` (R204) ; un fil sur un bloc passe par `Hub::has_block`, sans relire la page (R206).
+- `CLAUDE.md`, « Canal de l'espace, côté serveur » : la version est redite à chaque ping (R205) ; un test qui compte des trames prend `NO_PING` ; le déclencheur témoin pour compter des écritures sans horloge.
+- README : limites connues (`PUT /mmd` garde les identifiants mais pas les éditions concurrentes), historique à partir de « Peut modifier », plafonds des commentaires, suppression en attente possible dans une base d'avant le lot.
+- Conception : synchro (R198, R199, R200, R206) ; §5.4, la version redite au ping (R205) ; §6.2, l'API MMD et les identifiants gardés (R201, R202) ; le niveau de l'historique (R203) ; les plafonds des commentaires (R204).
+
+Piste C, après relecture :
+
+- `CLAUDE.md`, titre : le drapeau `typed` suit chaque frappe, comparé au titre de la page ou à celui en cours d'envoi ; un envoi refusé ou doublé ne perd pas la saisie (R210, R218).
+- `CLAUDE.md`, « Historique, côté client » : un menu « … » qui perd ses entrées rend le focus à la page ; un aperçu refusé par `403` se lit tel quel, sans « Réessayer », et fait relire la page (R216).
+- `CLAUDE.md`, « Tester » : une attente dans un test de composant passe par l'aide commune `until` (`apps/web/src/test/hooks.ts`), qui s'arrête quand l'hôte du test quitte le document ; tout branchement neuf de `PageView` prend son test dans `PageView.test.tsx`, qui rend le composant.
+
+Pour chaque constat fini ensuite, ajouter ici ce que la documentation doit en dire : la Task 14 part de cette liste. Sont déjà sûrs de changer : le README et `CLAUDE.md` pour l'historique (« Peut lire » lit l'historique sans restaurer : faux après S5 et C7), la puce R181 de `CLAUDE.md` (S2), le canal de l'espace (S6, C6), `PUT /mmd` et les identifiants (S3), les plafonds des commentaires (S4).
 
 ## Doutes laissés par les implémenteurs
 
