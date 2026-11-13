@@ -82,9 +82,12 @@ test("opened_pages_are_listed_most_recent_first", async ({ browser }) => {
     .poll(() => recents(p))
     .toEqual([pages[5].title, pages[4].title, pages[3].title, pages[0].title, pages[2].title]);
 
-  // Un lien de « Récents » ouvre sa page.
+  // Un lien de « Récents » ouvre sa page ; elle y passe en tête une fois le pointeur et le focus
+  // sortis de la liste (R298).
   await recentsOf(p).getByRole("link", { name: pages[3].title }).click();
   await expect(titleOf(p)).toHaveValue(pages[3].title);
+  await p.mouse.move(600, 5);
+  await titleOf(p).focus();
   await expect.poll(() => recents(p)).toEqual([
     pages[3].title,
     pages[5].title,
@@ -92,6 +95,34 @@ test("opened_pages_are_listed_most_recent_first", async ({ browser }) => {
     pages[0].title,
     pages[2].title,
   ]);
+});
+
+test("clicking_a_recent_page_twice_opens_it_twice", async ({ browser }) => {
+  // Ouvrir une page récente la fait monter en tête : l'ordre montré ne change pas tant que le
+  // pointeur ou le focus est dans la liste (R298). Un second clic au même endroit (un double
+  // clic) rouvre la même page, pas sa voisine.
+  const { pages, p } = await accountWithPages(browser, 5);
+  for (const page of pages) await openFromTree(p, page.id, page.title);
+  const order = [...pages].reverse().map((page) => page.title);
+  await expect.poll(() => recents(p)).toEqual(order);
+
+  const target = pages[1];
+  const box = (await recentsOf(p).getByRole("link", { name: target.title }).boundingBox())!;
+  const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await p.mouse.click(at.x, at.y);
+  await expect(titleOf(p)).toHaveValue(target.title);
+  await p.mouse.click(at.x, at.y);
+  await expect(p).toHaveURL(new RegExp(`/p/${target.id}$`));
+  await expect(titleOf(p)).toHaveValue(target.title);
+  // Tant que le pointeur y est, la liste garde son ordre.
+  expect(await recents(p)).toEqual(order);
+
+  // Pointeur et focus sortis : la page ouverte passe en tête.
+  await p.mouse.move(box.x + box.width / 2, 5);
+  await titleOf(p).focus();
+  await expect
+    .poll(() => recents(p))
+    .toEqual([target.title, ...order.filter((title) => title !== target.title)]);
 });
 
 test("recents_belong_to_their_space", async ({ browser }) => {
