@@ -25,7 +25,10 @@
 //! messages et [`MAX_TEXT_BYTES_PER_PAGE`] octets de texte (ce qui borne une lecture de ses
 //! fils) ; un fil [`MAX_MESSAGES_PER_THREAD`] messages ; un message [`MAX_REACTIONS_PER_MESSAGE`]
 //! emojis différents. La part d'un compte : [`MAX_THREADS_PER_ACCOUNT`] fils ouverts sur une
-//! page, résolus compris, et [`MAX_REACTIONS_PER_ACCOUNT`] emojis posés sur un message ; sans
+//! page, résolus compris, [`MAX_REACTIONS_PER_ACCOUNT`] emojis posés sur un message, et sur une
+//! page [`MAX_MESSAGES_PER_ACCOUNT`] messages, [`MAX_TEXT_BYTES_PER_ACCOUNT`] octets de texte et
+//! [`MAX_PAGE_REACTIONS_PER_ACCOUNT`] réactions (Ruling R358) ; la page porte au plus
+//! [`MAX_REACTIONS_PER_PAGE`] réactions (Ruling R357) ; sans
 //! elle, un seul invité qui peut commenter fermait les fils d'une page à tous. Les plafonds
 //! communs (du fil, du message, de la page) sont vérifiés avant la part du compte ; une
 //! modification qui allonge un message compte dans le texte de la page, une qui le raccourcit
@@ -69,6 +72,22 @@ pub const MAX_THREADS_PER_ACCOUNT: u32 = 200;
 /// [`MAX_REACTIONS_PER_MESSAGE`].
 pub const MAX_REACTIONS_PER_ACCOUNT: u32 = 8;
 
+/// Réactions qu'une page porte au plus, tous messages et tous comptes compris (Ruling R357) :
+/// avec les messages et leur texte, ce qui borne une lecture des fils de la page.
+pub const MAX_REACTIONS_PER_PAGE: u32 = 20_000;
+
+/// Messages qu'un même compte écrit au plus sur une page, fils ouverts et réponses compris
+/// (Ruling R358) : sa part des [`MAX_MESSAGES_PER_PAGE`].
+pub const MAX_MESSAGES_PER_ACCOUNT: u32 = 2_000;
+
+/// Octets de texte (UTF-8) que les messages d'un même compte portent au plus sur une page
+/// (Ruling R358) : sa part des [`MAX_TEXT_BYTES_PER_PAGE`], 1 Mio.
+pub const MAX_TEXT_BYTES_PER_ACCOUNT: u32 = 1024 * 1024;
+
+/// Réactions qu'un même compte pose au plus sur une page (Ruling R358) : sa part des
+/// [`MAX_REACTIONS_PER_PAGE`].
+pub const MAX_PAGE_REACTIONS_PER_ACCOUNT: u32 = 2_000;
+
 /// Le plafond des commentaires qu'une écriture dépasserait ([`StoreError::CommentLimit`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentLimit {
@@ -86,6 +105,14 @@ pub enum CommentLimit {
     OwnThreads,
     /// [`MAX_REACTIONS_PER_ACCOUNT`] emojis posés par ce compte sur le message.
     OwnReactions,
+    /// [`MAX_REACTIONS_PER_PAGE`] réactions sur la page.
+    PageReactions,
+    /// [`MAX_MESSAGES_PER_ACCOUNT`] messages écrits par ce compte sur la page.
+    OwnMessages,
+    /// [`MAX_TEXT_BYTES_PER_ACCOUNT`] octets de texte écrits par ce compte sur la page.
+    OwnText,
+    /// [`MAX_PAGE_REACTIONS_PER_ACCOUNT`] réactions posées par ce compte sur la page.
+    OwnPageReactions,
 }
 
 impl std::fmt::Display for CommentLimit {
@@ -112,6 +139,21 @@ impl std::fmt::Display for CommentLimit {
             CommentLimit::OwnReactions => write!(
                 f,
                 "{MAX_REACTIONS_PER_ACCOUNT} emojis posés par ce compte sur le message"
+            ),
+            CommentLimit::PageReactions => {
+                write!(f, "{MAX_REACTIONS_PER_PAGE} réactions sur la page")
+            }
+            CommentLimit::OwnMessages => write!(
+                f,
+                "{MAX_MESSAGES_PER_ACCOUNT} messages écrits par ce compte sur la page"
+            ),
+            CommentLimit::OwnText => write!(
+                f,
+                "{MAX_TEXT_BYTES_PER_ACCOUNT} octets de texte écrits par ce compte sur la page"
+            ),
+            CommentLimit::OwnPageReactions => write!(
+                f,
+                "{MAX_PAGE_REACTIONS_PER_ACCOUNT} réactions posées par ce compte sur la page"
             ),
         }
     }
@@ -440,33 +482,52 @@ async fn thread_opener(
     parse_uuid(&row.get::<String, _>(0))
 }
 
-/// Les messages d'une page et la somme des octets de leur texte. `octet_length(c.body)` est
-/// l'expression même de l'index `comments_by_thread` (migration `0003`) : le compte et la somme
-/// se lisent dans l'index, sans charger les messages. Une autre écriture (une colonne générée,
-/// `length(CAST(… AS BLOB))`) relirait chaque ligne : 12 ms par écriture sur une page pleine au
-/// lieu de 3, en release (test `page_totals_are_read_from_the_index`).
-const PAGE_TOTALS: &str = "SELECT COUNT(*), COALESCE(SUM(octet_length(c.body)), 0) \
+/// Les messages d'une page et la somme des octets de leur texte, puis les mêmes pour un auteur
+/// (premier et deuxième paramètres) ; la page en troisième. `octet_length(c.body)` est
+/// l'expression même de l'index `comments_by_thread` (migration `0003`), qui porte aussi
+/// l'auteur : les quatre se lisent dans l'index, sans charger les messages. Une autre écriture
+/// (une colonne générée, `length(CAST(… AS BLOB))`) relirait chaque ligne : 12 ms par écriture
+/// sur une page pleine au lieu de 3, en release (test `page_totals_are_read_from_the_index`).
+const PAGE_TOTALS: &str = "SELECT COUNT(*), COALESCE(SUM(octet_length(c.body)), 0), \
+       COUNT(*) FILTER (WHERE c.author_id = ?), \
+       COALESCE(SUM(octet_length(c.body)) FILTER (WHERE c.author_id = ?), 0) \
      FROM comment_threads t JOIN comments c ON c.thread_id = t.id WHERE t.node_id = ?";
 
+/// Les réactions d'une page, puis celles d'un compte (premier paramètre) ; la page en second.
+/// Lues dans les index (`comments_by_thread`, qui porte l'identifiant du message, et la clé de
+/// `comment_reactions`), sans charger une ligne.
+const PAGE_REACTIONS: &str = "SELECT COUNT(*), COUNT(*) FILTER (WHERE r.user_id = ?) \
+     FROM comment_threads t JOIN comments c ON c.thread_id = t.id \
+     JOIN comment_reactions r ON r.comment_id = c.id WHERE t.node_id = ?";
+
 /// `Ok` si la page `node_id` peut recevoir `messages` messages et `bytes` octets de texte de plus
-/// (Ruling R350) : comptés sur la connexion de la transaction qui écrit, tous fils compris.
+/// de `author` : les plafonds de la page (Ruling R350), puis la part de l'auteur (Ruling R358),
+/// comptés sur la connexion de la transaction qui écrit, tous fils compris.
 async fn page_room(
     conn: &mut SqliteConnection,
     node_id: &str,
+    author: &str,
     messages: i64,
     bytes: i64,
 ) -> Result<(), StoreError> {
-    let (held, weight): (i64, i64) = sqlx::query_as(PAGE_TOTALS)
+    let (held, weight, own, own_weight): (i64, i64, i64, i64) = sqlx::query_as(PAGE_TOTALS)
+        .bind(author)
+        .bind(author)
         .bind(node_id)
         .fetch_one(&mut *conn)
         .await?;
-    if held + messages > i64::from(MAX_MESSAGES_PER_PAGE) {
-        return Err(StoreError::CommentLimit(CommentLimit::PageMessages));
-    }
-    if weight + bytes > i64::from(MAX_TEXT_BYTES_PER_PAGE) {
-        return Err(StoreError::CommentLimit(CommentLimit::PageText));
-    }
-    Ok(())
+    let refused = if held + messages > i64::from(MAX_MESSAGES_PER_PAGE) {
+        CommentLimit::PageMessages
+    } else if weight + bytes > i64::from(MAX_TEXT_BYTES_PER_PAGE) {
+        CommentLimit::PageText
+    } else if own + messages > i64::from(MAX_MESSAGES_PER_ACCOUNT) {
+        CommentLimit::OwnMessages
+    } else if own_weight + bytes > i64::from(MAX_TEXT_BYTES_PER_ACCOUNT) {
+        CommentLimit::OwnText
+    } else {
+        return Ok(());
+    };
+    Err(StoreError::CommentLimit(refused))
 }
 
 /// La longueur de `body` en octets, comme SQLite la compte (`octet_length`, UTF-8).
@@ -516,7 +577,7 @@ impl Store {
         if threads >= i64::from(MAX_THREADS_PER_PAGE) {
             return Err(StoreError::CommentLimit(CommentLimit::Threads));
         }
-        page_room(&mut tx, &node, 1, byte_len(body)).await?;
+        page_room(&mut tx, &node, &author.to_string(), 1, byte_len(body)).await?;
         let own: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM comment_threads WHERE node_id = ? AND created_by = ?",
         )
@@ -564,7 +625,7 @@ impl Store {
         if messages >= i64::from(MAX_MESSAGES_PER_THREAD) {
             return Err(StoreError::CommentLimit(CommentLimit::Messages));
         }
-        page_room(&mut tx, &node, 1, byte_len(body)).await?;
+        page_room(&mut tx, &node, &author.to_string(), 1, byte_len(body)).await?;
         let comment_id = insert_comment(&mut tx, &thread_id, author, body, now_ms()).await?;
         let comment = read_comment(&mut tx, &comment_id).await?;
         tx.commit().await?;
@@ -628,7 +689,7 @@ impl Store {
                 .await?;
         let grown = byte_len(body) - before;
         if grown > 0 {
-            page_room(&mut tx, &node, 0, grown).await?;
+            page_room(&mut tx, &node, &author.to_string(), 0, grown).await?;
         }
         // Textes comparés octet pour octet (collation `BINARY`, celle de SQLite par défaut).
         let changed = sqlx::query(
@@ -759,8 +820,9 @@ impl Store {
         .await?;
         // Un emoji neuf sur ce message compte dans le plafond du message ; un emoji déjà là, non
         // (un autre compte le pose aussi), ni une réaction déjà posée, qui ne change rien (Ruling
-        // R170). Un emoji neuf pour ce compte, déjà là ou non, compte dans sa part (Ruling R351).
-        // Le plafond du message avant la part du compte.
+        // R170). Une réaction neuve pour ce compte, emoji déjà là ou non, compte dans les
+        // réactions de la page (Ruling R357), dans sa part du message (Ruling R351) et dans sa
+        // part de la page (Ruling R358). Les plafonds communs avant la part du compte.
         let user_id = user.to_string();
         let (present, distinct, mine, already): (i64, i64, i64, i64) = sqlx::query_as(
             "SELECT COUNT(*) FILTER (WHERE emoji = ?), COUNT(DISTINCT emoji), \
@@ -775,11 +837,26 @@ impl Store {
         .bind(&comment_id)
         .fetch_one(&mut *tx)
         .await?;
-        if present == 0 && distinct >= i64::from(MAX_REACTIONS_PER_MESSAGE) {
-            return Err(StoreError::CommentLimit(CommentLimit::Reactions));
-        }
-        if already == 0 && mine >= i64::from(MAX_REACTIONS_PER_ACCOUNT) {
-            return Err(StoreError::CommentLimit(CommentLimit::OwnReactions));
+        if already == 0 {
+            let (on_page, own_on_page): (i64, i64) = sqlx::query_as(PAGE_REACTIONS)
+                .bind(&user_id)
+                .bind(node_id.to_string())
+                .fetch_one(&mut *tx)
+                .await?;
+            let refused = if present == 0 && distinct >= i64::from(MAX_REACTIONS_PER_MESSAGE) {
+                Some(CommentLimit::Reactions)
+            } else if on_page >= i64::from(MAX_REACTIONS_PER_PAGE) {
+                Some(CommentLimit::PageReactions)
+            } else if mine >= i64::from(MAX_REACTIONS_PER_ACCOUNT) {
+                Some(CommentLimit::OwnReactions)
+            } else if own_on_page >= i64::from(MAX_PAGE_REACTIONS_PER_ACCOUNT) {
+                Some(CommentLimit::OwnPageReactions)
+            } else {
+                None
+            };
+            if let Some(limit) = refused {
+                return Err(StoreError::CommentLimit(limit));
+            }
         }
         let added = sqlx::query(
             "INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
@@ -861,29 +938,46 @@ async fn insert_comment(
 mod tests {
     use super::*;
 
-    /// Ruling R350 : le compte des messages d'une page et la somme de leurs octets, refaits à
-    /// chaque écriture de commentaire, se lisent dans l'index `comments_by_thread`, sans charger
-    /// un message : la requête reprend l'expression de l'index telle quelle. Une requête qui
-    /// s'en écarte relit chaque ligne (12 ms par écriture sur une page pleine au lieu de 3).
+    /// Rulings R350, R357 et R358 : les comptes d'une page (messages, octets, réactions), en tout
+    /// et par auteur, refaits à chaque écriture de commentaire, se lisent dans les index, sans
+    /// charger un message ni une réaction : `comments_by_thread` porte l'auteur, l'expression
+    /// `octet_length(body)` (que la requête reprend telle quelle) et l'identifiant du message, et
+    /// la clé de `comment_reactions` porte le compte. Une requête qui s'en écarte relit chaque
+    /// ligne (12 ms par écriture sur une page pleine au lieu de 3).
     #[tokio::test]
     async fn page_totals_are_read_from_the_index() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("m.db")).await.unwrap();
-        // `EXPLAIN QUERY PLAN` rend une ligne par étape, son texte en quatrième colonne.
-        let plan: Vec<String> = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "EXPLAIN QUERY PLAN {PAGE_TOTALS}"
-        )))
-        .bind("une-page")
-        .fetch_all(&store.pool)
-        .await
-        .unwrap()
-        .iter()
-        .map(|step| step.get::<String, _>(3))
-        .collect();
-        assert!(
-            plan.iter()
-                .any(|step| step.contains("USING COVERING INDEX comments_by_thread")),
-            "{plan:?}"
-        );
+        for (sql, binds, expected) in [
+            (
+                PAGE_TOTALS,
+                3,
+                &["USING COVERING INDEX comments_by_thread"][..],
+            ),
+            (
+                PAGE_REACTIONS,
+                2,
+                &[
+                    "USING COVERING INDEX comments_by_thread",
+                    "USING COVERING INDEX sqlite_autoindex_comment_reactions_1",
+                ][..],
+            ),
+        ] {
+            // `EXPLAIN QUERY PLAN` rend une ligne par étape, son texte en quatrième colonne.
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")));
+            for _ in 0..binds {
+                query = query.bind("x");
+            }
+            let plan: Vec<String> = query
+                .fetch_all(&store.pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|step| step.get::<String, _>(3))
+                .collect();
+            for step in expected {
+                assert!(plan.iter().any(|s| s.contains(step)), "{step} : {plan:?}");
+            }
+        }
     }
 }

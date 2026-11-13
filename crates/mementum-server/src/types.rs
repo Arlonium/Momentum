@@ -774,12 +774,14 @@ pub enum ErrorCode {
     /// Le fil porte déjà 500 messages (Ruling R204) : rien n'est écrit. Statut 409.
     MessageLimit,
     /// Le message porte déjà 32 emojis différents, et celui-ci n'en est pas (Ruling R204), ou ce
-    /// compte y en a déjà posé 8, sa part (Ruling R351) ; le message dit lequel : rien n'est
-    /// écrit. Statut 409.
+    /// compte y en a déjà posé 8, sa part (Ruling R351), ou la page porte déjà 20 000 réactions
+    /// (Ruling R357), ou ce compte y en a déjà posé 2 000, sa part (Ruling R358) ; le message dit
+    /// lequel : rien n'est écrit. Statut 409.
     ReactionLimit,
     /// Les commentaires de la page portent déjà 10 000 messages, ou l'écriture ferait passer
-    /// leur texte au-delà de 4 Mio (Ruling R350) ; le message dit lequel : rien n'est écrit.
-    /// Statut 409.
+    /// leur texte au-delà de 4 Mio (Ruling R350), ou la part de ce compte au-delà de 2 000
+    /// messages ou de 1 Mio de texte sur la page (Ruling R358) ; le message dit lequel : rien
+    /// n'est écrit. Statut 409.
     PageCommentLimit,
 }
 

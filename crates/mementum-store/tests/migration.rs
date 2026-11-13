@@ -382,7 +382,7 @@ async fn migration_keeps_lot1_pages() {
         ("comment_threads_by_node", &["node_id", "created_at"][..]),
         (
             "comments_by_thread",
-            &["thread_id", "created_at", "(expression)"],
+            &["thread_id", "created_at", "author_id", "(expression)", "id"],
         ),
         ("doc_versions_by_node", &["node_id", "seq", "created_at"]),
         ("invitations_node_key", &["node_id"]),
@@ -412,7 +412,8 @@ async fn migration_keeps_lot1_pages() {
     assert_eq!(
         sql,
         [Some(
-            "CREATE INDEX comments_by_thread ON comments (thread_id, created_at, octet_length(body))"
+            "CREATE INDEX comments_by_thread ON comments \
+             (thread_id, created_at, author_id, octet_length(body), id)"
                 .to_string()
         )]
     );

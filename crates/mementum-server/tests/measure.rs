@@ -290,10 +290,10 @@ async fn measure_first_read_after_a_write() {
 
 /// Ruling R350 : ce que coûte `GET /api/v1/pages/{id}/comments` sur une page pleine, tant que la
 /// lecture n'est pas paginée. 10 000 messages de 419 octets (4 Mio de texte, le plafond), en 20
-/// fils de 500, écrits par un compte au nom de 100 caractères ; puis les mêmes avec la part
-/// d'un compte en réactions, 8 emojis sur chaque message (ce qu'un seul invité y ajoute au plus).
-/// Les fils sont écrits en SQL, en une transaction. Une ligne pour la durée de 20 lectures, une
-/// pour la taille de la réponse, dans chaque cas.
+/// fils de 500, écrits par un compte au nom de 100 caractères ; puis la même page au pire cas
+/// accepté (Ruling R357) : 20 000 réactions, la part de dix comptes au nom de 100 caractères
+/// (8 emojis sur chacun de 250 messages). Les fils sont écrits en SQL, en une transaction. Une
+/// ligne pour la durée de 20 lectures, une pour la taille de la réponse, dans chaque cas.
 #[tokio::test]
 #[ignore = "mesure, à lancer en --release avec --nocapture"]
 async fn measure_comments_of_a_full_page() {
@@ -367,22 +367,35 @@ async fn measure_comments_of_a_full_page() {
     read("sans réaction").await;
 
     let mut tx = side.begin().await.unwrap();
-    for comment in &comments {
-        for i in 0..8u32 {
-            sqlx::query(
-                "INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
-                 VALUES (?, ?, ?, ?)",
-            )
-            .bind(comment)
-            .bind(alice.id.to_string())
-            .bind(char::from_u32(0x1F600 + i).unwrap().to_string())
-            .bind(at)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
+    for user in 0..10usize {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO users (id, email, name, password_hash, created_at) \
+             VALUES (?, ?, ?, 'pas-un-hachage', 1)",
+        )
+        .bind(&id)
+        .bind(format!("reaction-{user}@exemple.test"))
+        .bind(format!("{user}{}", "R".repeat(99)))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        for comment in &comments[user * 250..(user + 1) * 250] {
+            for i in 0..8u32 {
+                sqlx::query(
+                    "INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(comment)
+                .bind(&id)
+                .bind(char::from_u32(0x1F600 + i).unwrap().to_string())
+                .bind(at)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            }
         }
     }
     tx.commit().await.unwrap();
     side.close().await;
-    read("8 réactions d'un compte sur chaque message").await;
+    read("20 000 réactions de dix comptes").await;
 }

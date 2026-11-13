@@ -47,7 +47,10 @@
 //! 10 000 messages et 4 Mio de texte par page (`409 page_comment_limit`, Ruling R350), qui
 //! bornent une lecture des fils (`GET`) ; la part d'un compte, 200 fils ouverts sur la page
 //! (`409 thread_limit`) et 8 emojis posés sur un message (`409 reaction_limit`), avec un message
-//! qui dit que c'est sa part (Ruling R351). Une modification qui allonge un message compte dans
+//! qui dit que c'est sa part (Ruling R351) ; 20 000 réactions par page (`409 reaction_limit`, Ruling
+//! R357) ; et, pour chaque compte sur une page, 2 000 messages, 1 Mio de texte (`409
+//! page_comment_limit`) et 2 000 réactions (`409 reaction_limit`), sa part (Ruling R358). Une
+//! modification qui allonge un message compte dans
 //! le texte de la page. Ils viennent après tous les refus de droit et le corps.
 //!
 //! **Lecteurs prévenus.** Après chaque écriture validée qui change quelque chose, les

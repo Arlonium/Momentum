@@ -17,7 +17,8 @@ use common::{
 };
 use mementum_acl::Level;
 use mementum_store::{
-    Authorship, MAX_MESSAGES_PER_PAGE, MAX_TEXT_BYTES_PER_PAGE, MAX_THREADS_PER_ACCOUNT,
+    Authorship, MAX_MESSAGES_PER_PAGE, MAX_REACTIONS_PER_PAGE, MAX_TEXT_BYTES_PER_ACCOUNT,
+    MAX_THREADS_PER_ACCOUNT,
 };
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
@@ -1848,24 +1849,40 @@ async fn deleting_a_thread_takes_everyone_s_messages() {
     }
 }
 
-/// Ce qu'une lecture des fils d'une page pleine rend au plus, sans réaction : le texte des
-/// messages (4 Mio) et ce qui les entoure (auteurs, dates, identifiants). Tant que la lecture
-/// n'est pas paginée, c'est le prix de la première synchro de chaque onglet.
-const FULL_PAGE_READ: usize = 8 * 1024 * 1024;
+/// Pose, par du SQL direct, `per` réactions de `user` (toujours les mêmes emojis) sur chacun des
+/// `messages` premiers messages de la page, rangés par identifiant.
+async fn fill_reactions(db: &std::path::Path, page: &str, user: &str, messages: u32, per: u32) {
+    common::exec_sql(
+        db,
+        &format!(
+            "WITH RECURSIVE e(k) AS (SELECT 0 UNION ALL SELECT k + 1 FROM e WHERE k < {per} - 1) \
+             INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
+             SELECT m.id, '{user}', char(128512 + k), 1 FROM \
+               (SELECT c.id FROM comments c JOIN comment_threads t ON t.id = c.thread_id \
+                WHERE t.node_id = '{page}' ORDER BY c.id LIMIT {messages}) m, e"
+        ),
+    )
+    .await;
+}
 
-/// La sonde (a) de la relecture de S4, inversée (Ruling R350) : une invitée qui peut commenter
-/// écrit des messages de 10 000 caractères tant qu'elle peut ; elle s'arrête aux 4 Mio de texte
-/// de la page (419 messages), et la lecture des fils reste sous [`FULL_PAGE_READ`]. Une page
-/// pleine de ses 10 000 messages aussi. Avant, à 1 % du plafond des fils, une lecture rendait
-/// 192 Mio.
+/// La sonde (b) de la re-relecture du tour 1, inversée (Ruling R358) : une invitée qui peut
+/// commenter prend toute sa part d'une page (le texte, par des messages de 10 000 caractères ;
+/// les messages ; les réactions), et Olga y écrit encore à chaque fois. Avant, Gina fermait les
+/// commentaires de la page à tous en 105 messages d'un fil.
 #[tokio::test]
-async fn reading_a_full_page_stays_under_a_bound() {
+async fn one_account_does_not_close_the_comments_of_a_page() {
     let t = open_app().await;
     let team = Team::new(&t).await;
-    let gina = &team.gina;
+    let (olga, gina) = (&team.olga, &team.gina);
+    let db = t.db_path();
     let grants = [members(Level::Full), user(gina, Level::Comment)];
-    let long = "x".repeat(10_000);
+    let her_part = |body: &Value, what: &str| {
+        assert_french(body, &[what, "c'est ta part", "rien n'a été écrit"]);
+    };
+
+    // Le texte : 104 messages de 10 000 « x », puis le refus de sa part.
     let heavy = team.page(None, "Lourde", &grants).await;
+    let long = "x".repeat(10_000);
     let opened = gina
         .browser
         .post(&comments_uri(heavy), json!({ "body": long }))
@@ -1879,37 +1896,124 @@ async fn reading_a_full_page_stays_under_a_bound() {
             break reply;
         }
         written += 1;
-        assert!(written <= 420, "le texte de la page n'est pas plafonné");
+        assert!(
+            written <= 110,
+            "la part de texte d'un compte n'est pas plafonnée"
+        );
     };
-    refused.assert_error(StatusCode::CONFLICT, "page_comment_limit");
-    assert_eq!(written, MAX_TEXT_BYTES_PER_PAGE as usize / 10_000);
-    let read = gina.browser.get(&comments_uri(heavy)).await;
-    read.assert_status(StatusCode::OK);
-    assert!(
-        read.body.len() < FULL_PAGE_READ,
-        "{} octets",
-        read.body.len()
+    her_part(
+        &refused.assert_error(StatusCode::CONFLICT, "page_comment_limit"),
+        "1 Mio",
     );
+    assert_eq!(written, MAX_TEXT_BYTES_PER_ACCOUNT as usize / 10_000);
+    olga.browser
+        .post(&comments_uri(heavy), json!({ "body": long }))
+        .await
+        .assert_status(StatusCode::CREATED);
 
-    let db = t.db_path();
-    let filler = filler_accounts(&db, 0, 1).await;
+    // Les messages : 2 000, en cinq fils de Gina.
     let crowded = team.page(None, "Pleine", &grants).await;
-    fill_threads(&db, &crowded.to_string(), &filler, (0, 25), (400, 400)).await;
-    gina.browser
+    let gina_id = gina.id.to_string();
+    fill_threads(
+        &db,
+        &crowded.to_string(),
+        std::slice::from_ref(&gina_id),
+        (0, 5),
+        (400, 1),
+    )
+    .await;
+    let refused = gina
+        .browser
         .post(&comments_uri(crowded), json!({ "body": "Un de trop" }))
+        .await;
+    her_part(
+        &refused.assert_error(StatusCode::CONFLICT, "page_comment_limit"),
+        "2 000 messages",
+    );
+    let opened = olga
+        .browser
+        .post(
+            &comments_uri(crowded),
+            json!({ "body": "Olga écrit encore" }),
+        )
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    let opened = opened.json();
+    let (thread, message) = (uuid(&opened["id"]), uuid(&opened["comments"][0]["id"]));
+
+    // Les réactions : 2 000, sur ses propres messages.
+    fill_reactions(&db, &crowded.to_string(), &gina_id, 250, 8).await;
+    let refused = put_empty(&gina.browser, &reaction_uri(crowded, thread, message, "👍")).await;
+    her_part(
+        &refused.assert_error(StatusCode::CONFLICT, "reaction_limit"),
+        "2 000 réactions",
+    );
+    put_empty(&olga.browser, &reaction_uri(crowded, thread, message, "👍"))
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+/// Ce qu'une lecture des fils d'une page rend au plus quand elle est au pire cas accepté : le
+/// texte des messages (4 Mio), ce qui les entoure (auteurs, dates, identifiants) et 20 000
+/// réactions. Tant que la lecture n'est pas paginée, c'est le prix de la première synchro de
+/// chaque onglet (mesuré : `measure_comments_of_a_full_page`, `tests/measure.rs`).
+const FULL_PAGE_READ: usize = 12 * 1024 * 1024;
+
+/// La sonde (a) de la relecture de S4 et celle de la re-relecture, inversées (Rulings R350,
+/// R357) : une page pleine de tout ce qu'elle accepte (10 000 messages, 4 Mio de texte, 20 000
+/// réactions, chaque compte dans sa part) refuse un message et une réaction de plus, et la lecture
+/// de ses fils reste sous [`FULL_PAGE_READ`]. Avant, à 1 % du plafond des fils, une lecture
+/// rendait 192 Mio ; avec les réactions sans plafond, chaque compte y ajoutait 14 Mio.
+#[tokio::test]
+async fn reading_a_full_page_stays_under_a_bound() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let gina = &team.gina;
+    let db = t.db_path();
+    let grants = [members(Level::Full), user(gina, Level::Comment)];
+    let full = team.page(None, "Pleine", &grants).await;
+    // 25 fils de 400 messages de 419 octets, cinq comptes : 2 000 messages et 838 000 octets
+    // chacun, 4 190 000 en tout. Puis dix comptes posent chacun 2 000 réactions.
+    let writers = filler_accounts(&db, 0, 5).await;
+    fill_threads(&db, &full.to_string(), &writers, (0, 25), (400, 419)).await;
+    for filler in filler_accounts(&db, 5, 10).await {
+        fill_reactions(&db, &full.to_string(), &filler, 250, 8).await;
+    }
+    let reactions = common::query_i64(&db, "SELECT COUNT(*) FROM comment_reactions").await;
+    assert_eq!(reactions, i64::from(MAX_REACTIONS_PER_PAGE));
+    gina.browser
+        .post(&comments_uri(full), json!({ "body": "Un de trop" }))
         .await
         .assert_error(StatusCode::CONFLICT, "page_comment_limit");
-    let read = gina.browser.get(&comments_uri(crowded)).await;
-    read.assert_status(StatusCode::OK);
-    assert_eq!(
-        read.json()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["comments"].as_array().unwrap().len())
-            .sum::<usize>(),
-        MAX_MESSAGES_PER_PAGE as usize
+    let (thread, message) = (
+        "01890000-0000-7000-a001-000000000000",
+        "01890000-0000-7000-a002-000000000000",
     );
+    let refused = put_empty(&gina.browser, &reaction_uri(full, thread, message, "🦊")).await;
+    let body = refused.assert_error(StatusCode::CONFLICT, "reaction_limit");
+    assert_french(&body, &["20 000 réactions"]);
+
+    let read = gina.browser.get(&comments_uri(full)).await;
+    read.assert_status(StatusCode::OK);
+    let threads = read.json();
+    let threads = threads.as_array().unwrap();
+    let count = |key: &str| -> usize {
+        threads
+            .iter()
+            .flat_map(|t| t["comments"].as_array().unwrap())
+            .map(|c| match key {
+                "comments" => 1,
+                _ => c["reactions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["users"].as_array().unwrap().len())
+                    .sum(),
+            })
+            .sum()
+    };
+    assert_eq!(count("comments"), MAX_MESSAGES_PER_PAGE as usize);
+    assert_eq!(count("reactions"), MAX_REACTIONS_PER_PAGE as usize);
     assert!(
         read.body.len() < FULL_PAGE_READ,
         "{} octets",
