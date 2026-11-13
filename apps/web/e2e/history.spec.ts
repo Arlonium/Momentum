@@ -1,5 +1,5 @@
 // L'historique d'une page (R135) : le menu « … » de la barre du haut ouvre la fenêtre
-// « Historique », qui liste les versions (« Version actuelle », puis la plus récente d'abord,
+// « Historique », à partir de « Peut modifier » (R216), à la corbeille aussi ; elle liste les versions (« Version actuelle », puis la plus récente d'abord,
 // avec leurs auteurs) et montre celle qu'on choisit dans le même éditeur que la page, en lecture
 // seule. L'aperçu n'écrit jamais : ni dans le document de la page, ni sur le réseau. « Restaurer
 // cette version », dès « Peut modifier », remplace le contenu pour tout le monde ; ce qui est
@@ -21,6 +21,7 @@ import {
   putMmd,
   readerBanner,
   setPageLevel,
+  trashBanner,
   unique,
   waitSynced,
   watchWrites,
@@ -283,10 +284,10 @@ test("restored_content_is_itself_in_the_history", async ({ browser, request }) =
   await expect(dialog).toBeVisible();
 });
 
-// À inverser avec S5 (C7) : le client ne propose plus « Historique » sous « Peut modifier », ce
-// parcours ne peut donc plus passer tel quel ; il deviendra « un lecteur ne voit pas
-// l'historique » quand le serveur exigera « Peut modifier » pour les versions (S5).
-test.fixme("reader_sees_the_history_and_cannot_restore", async ({ browser }) => {
+test("reader_is_not_offered_the_history_and_cannot_restore", async ({ browser }) => {
+  // Sous « Peut modifier », l'historique n'est pas proposé (R216) : un lecteur ne lit pas ce qui a
+  // été effacé avant qu'on partage la page avec lui. Son menu « … » n'a aucune entrée : il n'est
+  // pas là.
   const { aliceApi, bruno, brunoApi, brunoId, space } = await ownerAndMember();
   const page = await createPage(aliceApi, {
     spaceId: space.id,
@@ -294,18 +295,48 @@ test.fixme("reader_sees_the_history_and_cannot_restore", async ({ browser }) => 
     title: `Lecture ${unique()}`,
   });
   await setPageLevel(aliceApi, page.id, brunoId, "read");
-  await putMmd(aliceApi, page.id, `${OLD}\n`);
-  const versions = await writeAfterTheInterval(aliceApi, page.id, `${NEW}\n`);
+  await putMmd(aliceApi, page.id, `${OLD}
+`);
+  const versions = await writeAfterTheInterval(aliceApi, page.id, `${NEW}
+`);
 
   const b = await openPage(browser, page.id, bruno);
   await expect(readerBanner(b)).toBeVisible();
+  // La barre du haut est là (les commentaires se lisent à tout niveau), sans menu « … ».
+  await expect(b.getByRole("button", { name: /^Commentaires/ })).toBeVisible();
+  await expect(menuButton(b)).toHaveCount(0);
+  // Le serveur refuse la restauration. (Avec S5, il refusera aussi la lecture des versions :
+  // `GET …/versions` répondra `403` ; l'assertion viendra avec lui.)
+  const res = await brunoApi.post(`/api/v1/pages/${page.id}/versions/${versions[0].id}/restore`);
+  expect(res.status()).toBe(403);
+  expect(await getMmd(aliceApi, page.id)).toContain(NEW);
+});
+
+test("editor_reads_the_history_of_a_trashed_page_without_restoring", async ({ browser }) => {
+  // « Peut modifier », page à la corbeille : l'historique se lit, rien ne se restaure.
+  const { aliceApi, bruno, brunoId, space } = await ownerAndMember();
+  const page = await createPage(aliceApi, {
+    spaceId: space.id,
+    section: "private",
+    title: `Corbeille ${unique()}`,
+  });
+  await setPageLevel(aliceApi, page.id, brunoId, "edit");
+  await putMmd(aliceApi, page.id, `${OLD}
+`);
+  const versions = await writeAfterTheInterval(aliceApi, page.id, `${NEW}
+`);
+  expect((await aliceApi.post(`/api/v1/pages/${page.id}/trash`)).status()).toBe(200);
+
+  const b = await openPage(browser, page.id, bruno);
+  await expect(trashBanner(b)).toBeVisible();
   const dialog = await openHistory(b);
   await expect(versionItems(dialog)).toHaveCount(versions.length + 1);
   await versionItems(dialog).nth(1).getByRole("button").click();
   await expect(preview(dialog)).toContainText(OLD);
   await expect(dialog.getByRole("button", { name: "Restaurer cette version" })).toHaveCount(0);
-  // Le serveur refuse aussi.
-  const res = await brunoApi.post(`/api/v1/pages/${page.id}/versions/${versions[0].id}/restore`);
-  expect(res.status()).toBe(403);
-  expect(await getMmd(aliceApi, page.id)).toContain(NEW);
+  await expect(dialog).toContainText("La page est à la corbeille : aucune version ne s'y restaure.");
+  // Fermée, la fenêtre rend le focus au bouton du menu.
+  await dialog.getByRole("button", { name: "Fermer l'historique" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(menuButton(b)).toBeFocused();
 });
