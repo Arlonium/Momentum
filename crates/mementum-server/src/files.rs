@@ -41,8 +41,8 @@
 //!   fin** : l'envoi suivant du même contenu attend le retrait en vol, puis pose le contenu
 //!   lui-même ; il attend la pose en vol, puis trouve le contenu ;
 //! - un contenu est à sa place entier, ou n'y est pas : il y arrive par un renommage ;
-//! - le temporaire d'un `write`, d'un `sync` ou d'un `finish` lâché part avec lui, ou avec le geste
-//!   qui le tenait.
+//! - aucun temporaire ne reste sans propriétaire : celui d'un `begin`, d'un `write`, d'un `sync` ou
+//!   d'un `finish` lâché part avec lui, ou avec le geste qui le tenait.
 //!
 //! Et il ne garantit pas ceci : **la suite de l'appelant**. Lâché entre `finish` et l'écriture de
 //! son attache, il laisse un contenu que la base ne connaît pas ; lâché pendant `finish` ou
@@ -461,19 +461,26 @@ impl FileStore {
         Ok((count, bytes))
     }
 
-    /// Commence un envoi : un fichier neuf, `files/tmp/<UUIDv7>`.
+    /// Commence un envoi : un fichier neuf, `files/tmp/<UUIDv7>`. Lâché en route, il ne laisse
+    /// pas de temporaire : le fichier et son propriétaire naissent dans le même geste, et ce que
+    /// rend un geste que plus personne n'attend est lâché, le fichier fermé puis supprimé.
     pub(crate) async fn begin(&self) -> io::Result<Upload> {
         let path = self.dirs.tmp.join(Uuid::now_v7().to_string());
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await?;
+        let (file, temp) = blocking(move || {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            // Le fichier d'abord : lâchés ensemble, il est fermé avant d'être supprimé.
+            Ok((file, Temporary { path, there: true }))
+        })
+        .await?;
+        let mut file = tokio::fs::File::from_std(file);
         file.set_max_buf_size(WRITE_BUFFER);
         Ok(Upload {
             dirs: self.dirs.clone(),
             file,
-            temp: Temporary { path, there: true },
+            temp,
             hasher: Sha256::new(),
             len: 0,
             head: Vec::with_capacity(SNIFF_LEN),
@@ -1481,6 +1488,36 @@ mod tests {
         drop(upload);
         assert!(tmp_entries(dir.path()).is_empty());
         assert!(listing(&dir.path().join(FILES_DIR)).is_empty());
+    }
+
+    /// Un `begin` lâché en route ne laisse pas de temporaire : la création, déjà partie vers un
+    /// fil bloquant, se fait quand même, et le fichier est supprimé aussitôt, faute de
+    /// propriétaire. Sans cela, il restait dans `tmp/` jusqu'au démarrage suivant.
+    #[test]
+    fn a_cancelled_begin_leaves_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        one_blocking_thread().block_on(async {
+            // Témoin : mené au bout, `begin` crée un temporaire.
+            let upload = store.begin().await.unwrap();
+            assert_eq!(tmp_entries(dir.path()).len(), 1);
+            drop(upload);
+            assert!(tmp_entries(dir.path()).is_empty());
+
+            let release = hold_the_blocking_thread();
+            let mut beginning = Box::pin(store.begin());
+            assert!(poll_once(&mut beginning).await.is_pending());
+            drop(beginning);
+            release.send(()).unwrap();
+            // Le fil bloquant prend ses tâches dans l'ordre : celle-ci faite, la création en vol
+            // l'est aussi, et ce qu'elle a rendu est lâché.
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            assert!(
+                tmp_entries(dir.path()).is_empty(),
+                "un temporaire sans envoi reste dans files/tmp : {:?}",
+                tmp_entries(dir.path())
+            );
+        });
     }
 
     /// Une écriture interrompue en route (le futur lâché pendant que tokio écrit) ou qui échoue
