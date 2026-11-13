@@ -12,8 +12,21 @@
 // le focus, il va au lien qui prend sa place, sinon à celui d'avant ; si la liste disparaît, au
 // premier lien ou bouton de ce qui la suit dans la barre latérale (son pied, sous « Récents »).
 // Seulement s'il s'est perdu : on ne le reprend pas à qui l'a posé ailleurs entre-temps.
+//
+// Rien ne bouge sous le pointeur (R298) : l'ordre montré est figé tant que le pointeur ou le
+// focus est dans la liste. Ouvrir une page récente la fait monter en tête de ce qui est gardé ;
+// la liste se remet dans cet ordre quand le pointeur et le focus en sont sortis. Un second clic
+// au même endroit (un double clic, Entrée encore) rouvre donc la même page.
 import type { PageNode } from "@mementum/protocol";
-import { useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FocusEvent,
+} from "react";
 import { isolate } from "../comments/dom";
 import { ChevronIcon, PageIcon } from "../icons";
 import { pagePath } from "../router";
@@ -50,8 +63,39 @@ export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
   const container = useRef<Element | null>(null);
   /** La page dont le lien a le focus. */
   const focused = useRef<string | null>(null);
-  /** Les pages au rendu d'avant : la place d'un lien parti s'y lit. */
-  const before = useRef(pages);
+
+  /**
+   * L'ordre montré, figé tant que le pointeur ou le focus est dans la liste (R298) ; `null` :
+   * l'ordre reçu. Une page partie de la liste part quand même ; une page arrivée se range après
+   * les autres : rien ne bouge au-dessus d'elle.
+   */
+  const [frozen, setFrozen] = useState<string[] | null>(null);
+  const pointerIn = useRef(false);
+  const focusIn = useRef(false);
+  const shown = useMemo(() => {
+    if (frozen === null) return pages;
+    const byId = new Map(pages.map((page) => [page.id, page]));
+    const kept = frozen.flatMap((id) => byId.get(id) ?? []);
+    return [...kept, ...pages.filter((page) => !frozen.includes(page.id))];
+  }, [frozen, pages]);
+  /** L'ordre montré à l'instant : celui que le gel garde. */
+  const shownNow = useRef(shown);
+  shownNow.current = shown;
+  const freeze = () => setFrozen((current) => current ?? shownNow.current.map((page) => page.id));
+  const thaw = () => {
+    if (!pointerIn.current && !focusIn.current) setFrozen(null);
+  };
+  // La liste vide n'est plus dans le document : ni pointeur ni focus n'y sont plus.
+  const empty = pages.length === 0;
+  useEffect(() => {
+    if (!empty) return;
+    pointerIn.current = false;
+    focusIn.current = false;
+    setFrozen(null);
+  }, [empty]);
+
+  /** Les pages montrées au rendu d'avant : la place d'un lien parti s'y lit. */
+  const before = useRef(shown);
 
   useLayoutEffect(() => {
     if (root.current === null) return;
@@ -61,9 +105,9 @@ export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
 
   useEffect(() => {
     const previous = before.current;
-    before.current = pages;
+    before.current = shown;
     const id = focused.current;
-    if (id === null || pages.some((page) => page.id === id)) return;
+    if (id === null || shown.some((page) => page.id === id)) return;
     focused.current = null;
     const active = document.activeElement;
     if (active !== null && active !== document.body) return;
@@ -75,7 +119,7 @@ export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
       firstFocusable(after.current) ??
       firstFocusable(container.current);
     target?.focus();
-  }, [pages]);
+  }, [shown]);
 
   /** La page du lien où est `target`, dans cette liste ; `null` : ce n'en est pas un. */
   const linkOf = (target: EventTarget | null): string | null => {
@@ -84,11 +128,25 @@ export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
   };
   const onFocus = (event: FocusEvent<HTMLDivElement>) => {
     focused.current = linkOf(event.target);
+    focusIn.current = true;
+    freeze();
   };
   const onBlur = (event: FocusEvent<HTMLDivElement>) => {
     // Le focus va ailleurs : le lien ne l'a plus. S'il ne va nulle part, c'est peut-être que
     // le lien vient de quitter le document : l'effet ci-dessus tranche.
     if (event.relatedTarget !== null) focused.current = linkOf(event.relatedTarget);
+    const related = event.relatedTarget;
+    if (related instanceof Node && root.current?.contains(related)) return;
+    focusIn.current = false;
+    thaw();
+  };
+  const onPointerEnter = () => {
+    pointerIn.current = true;
+    freeze();
+  };
+  const onPointerLeave = () => {
+    pointerIn.current = false;
+    thaw();
   };
 
   const toggle = () => {
@@ -96,7 +154,7 @@ export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
     writeCollapsedGroup(spaceId, group, open);
   };
 
-  if (pages.length === 0) return null;
+  if (empty) return null;
   return (
     <div
       ref={root}
@@ -106,6 +164,8 @@ export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
       data-group={group}
       onFocus={onFocus}
       onBlur={onBlur}
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
     >
       <div className="mm-section-head">
         <button
@@ -122,7 +182,7 @@ export function ShortList({ spaceId, label, group, pages, activeId }: Props) {
       </div>
       {open && (
         <ul id={bodyId} className="mm-short-list">
-          {pages.map((page) => {
+          {shown.map((page) => {
             const title = page.title || "Sans titre";
             return (
               <li key={page.id}>

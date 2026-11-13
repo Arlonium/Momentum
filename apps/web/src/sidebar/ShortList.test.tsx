@@ -126,3 +126,104 @@ test("focus_put_elsewhere_is_not_taken_back", async () => {
   await show([page("a")], null, true);
   expect(document.activeElement).toBe(elsewhere);
 });
+
+// L'ordre montré est figé tant que le pointeur ou le focus est dans la liste (R298) : ouvrir
+// une page récente la fait monter en tête du stockage, pas sous le pointeur.
+
+const pages = (...ids: string[]) => ids.map((id) => page(id));
+const titles = () => links().map((link) => link.textContent);
+/** Ce qui suit la liste : où vont le pointeur et le focus qui en sortent. */
+const outside = () => host.querySelector<HTMLElement>(".mm-side-footer a")!;
+/**
+ * Le pointeur passe de `from` à `to`. React tire l'entrée et la sortie d'un élément du seul
+ * `pointerout` quand les deux sont dans son arbre (le `pointerover` qui suit est ignoré).
+ */
+const move = (from: Element, to: Element) =>
+  act(async () => {
+    from.dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: to }));
+  });
+const focus = (element: HTMLElement) => act(async () => element.focus());
+
+test("order_stays_put_under_the_pointer", async () => {
+  await show(pages("p5", "p4", "p3", "p2", "p1"), null, true);
+  await move(outside(), links()[3]);
+  // P2 ouverte d'un clic : elle passe en tête de ce qui est gardé, la liste ne bouge pas.
+  await show(pages("p2", "p5", "p4", "p3", "p1"), "p2", true);
+  expect(titles()).toEqual(["P5", "P4", "P3", "P2", "P1"]);
+  expect(links()[3].getAttribute("aria-current")).toBe("page");
+  // Le pointeur sort : l'ordre se remet à jour.
+  await move(links()[3], outside());
+  expect(titles()).toEqual(["P2", "P5", "P4", "P3", "P1"]);
+});
+
+test("order_stays_put_under_the_keyboard_focus", async () => {
+  await show(pages("p5", "p4", "p3", "p2", "p1"), null, true);
+  // Entrée sur le lien de P2 : la page s'ouvre, le focus reste sur le lien.
+  await focus(links()[3]);
+  await show(pages("p2", "p5", "p4", "p3", "p1"), "p2", true);
+  expect(titles()).toEqual(["P5", "P4", "P3", "P2", "P1"]);
+  // Entrée encore : la même page.
+  expect(document.activeElement).toBe(links()[3]);
+  expect(links()[3].getAttribute("href")).toBe("/p/p2");
+  // Le focus sort : l'ordre se remet à jour, et le focus reste où il est allé.
+  await focus(outside());
+  expect(titles()).toEqual(["P2", "P5", "P4", "P3", "P1"]);
+  expect(document.activeElement).toBe(outside());
+});
+
+test("order_is_put_back_once_pointer_and_focus_are_both_out", async () => {
+  await show(pages("p5", "p4", "p3", "p2", "p1"), null, true);
+  await focus(links()[3]);
+  await move(outside(), links()[3]);
+  await show(pages("p2", "p5", "p4", "p3", "p1"), "p2", true);
+  // Le pointeur sort, le focus reste : figé.
+  await move(links()[3], outside());
+  expect(titles()).toEqual(["P5", "P4", "P3", "P2", "P1"]);
+  // Le focus sort aussi : à jour.
+  await focus(outside());
+  expect(titles()).toEqual(["P2", "P5", "P4", "P3", "P1"]);
+});
+
+test("a_page_that_leaves_the_tree_goes_even_while_the_order_is_frozen", async () => {
+  await show(pages("p5", "p4", "p3", "p2", "p1"), null, true);
+  await focus(links()[2]);
+  // P3 quitte l'arbre (à la corbeille) pendant que l'ordre est figé : elle part quand même, et
+  // le focus va à celle qui prend sa place, jamais à `body`.
+  await show(pages("p2", "p5", "p4", "p1"), "p2", true);
+  expect(titles()).toEqual(["P5", "P4", "P2", "P1"]);
+  expect(document.activeElement).toBe(links()[2]);
+  // Une page qui arrive pendant le gel se range après les autres : rien ne bouge au-dessus.
+  await show(pages("p6", "p2", "p5", "p4", "p1"), "p2", true);
+  expect(titles()).toEqual(["P5", "P4", "P2", "P1", "P6"]);
+});
+
+test("freezing_renders_nothing_outside_the_list", async () => {
+  // Le gel est un état de la liste seule : ni la barre latérale (un glisser dans l'arbre), ni la
+  // page ouverte ne sont rendues de nouveau.
+  let renders = 0;
+  function Neighbour() {
+    renders += 1;
+    return <a href="/s/s1/trash">Corbeille</a>;
+  }
+  await act(async () =>
+    root.render(
+      <>
+        <ShortList
+          spaceId="s1"
+          label="Récents"
+          group="recents"
+          pages={pages("p2", "p1")}
+          activeId={null}
+        />
+        <Neighbour />
+      </>,
+    ),
+  );
+  const before = renders;
+  const away = host.querySelector<HTMLElement>('a[href="/s/s1/trash"]')!;
+  await move(away, links()[0]);
+  await focus(links()[0]);
+  await move(links()[0], away);
+  await focus(away);
+  expect(renders).toBe(before);
+});
