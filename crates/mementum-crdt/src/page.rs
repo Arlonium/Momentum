@@ -121,7 +121,7 @@ impl PageDoc {
     /// tous ; l'appelant n'a pas à les distinguer).
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
         let mut txn = self.doc.transact_mut();
-        let (shape, decoded) = self.read(&txn, update)?;
+        let (shape, decoded) = self.read(&txn, update, false)?;
         self.integrate(&mut txn, &shape, decoded)
     }
 
@@ -130,7 +130,10 @@ impl PageDoc {
     /// donner, et refusée en plus (`Structure`) si elle touche à la `Y.Map`
     /// des métadonnées [`META`], qui porte `schemaVersion` : une entrée
     /// écrite, écrasée ou supprimée (report M7 du lot 1). Seul le serveur y
-    /// écrit.
+    /// écrit. Refusée aussi (`Decode`) pour une plage de suppressions de
+    /// longueur nulle (Ruling R208), et (`Structure`) si elle laisse une
+    /// suppression en attente que la page n'avait pas (Ruling R207, filet de
+    /// R198 : `PageDoc::awaits` retient d'abord ce qu'un client honnête envoie).
     ///
     /// Ce refus n'est connu qu'après l'application (voir le module `guard`) :
     /// comme après toute erreur, le `PageDoc` est à jeter.
@@ -148,7 +151,9 @@ impl PageDoc {
     /// serveur qui crée la page pose `schemaVersion`, et y serait refusée.
     pub fn apply_client_update(&self, update: &[u8]) -> Result<Vec<u8>, CrdtError> {
         let mut txn = self.doc.transact_mut();
-        let (shape, decoded) = self.read(&txn, update)?;
+        let (shape, decoded) = self.read(&txn, update, true)?;
+        // Ce que la page gardait en attente de suppression avant (d'ordinaire rien).
+        let pending_before = Pending::of(txn.store().pending_ds());
         // Avant l'application, qui consomme la mise à jour lue.
         let read = decoded.encode_v1();
         self.integrate(&mut txn, &shape, decoded)?;
@@ -157,6 +162,14 @@ impl PageDoc {
         if touched(&txn, &self.meta) {
             return Err(CrdtError::Structure(
                 "la mise à jour d'un client écrit dans les métadonnées de la page".to_string(),
+            ));
+        }
+        // Ruling R207, en filet de R198 : une suppression laissée en attente que la page
+        // n'avait pas. `awaits` retient celles qu'un client honnête envoie ; si une autre forme
+        // de mise à jour en laissait une, elle n'agirait que dans le document du serveur.
+        if pending_before.lacks(txn.store().pending_ds()) {
+            return Err(CrdtError::Structure(
+                "la mise à jour laisserait une suppression en attente".to_string(),
             ));
         }
         Ok(read)
@@ -177,7 +190,7 @@ impl PageDoc {
     /// La mise à jour est lue sans être appliquée : la page ne change pas.
     /// `Decode` si elle est illisible.
     pub fn leaves_gap(&self, update: &[u8]) -> Result<bool, CrdtError> {
-        let shape = Shape::read(update)?;
+        let shape = Shape::read_from_client(update)?;
         let txn = self.doc.transact();
         let pending = Pending::of(txn.store().pending_ds());
         Ok(shape.leaves_gap(&txn.state_vector(), &pending))
@@ -191,7 +204,7 @@ impl PageDoc {
     /// La mise à jour est lue sans être appliquée : la page ne change pas.
     /// `Decode` si elle est illisible.
     pub fn awaits(&self, update: &[u8]) -> Result<Option<Awaited>, CrdtError> {
-        let shape = Shape::read(update)?;
+        let shape = Shape::read_from_client(update)?;
         let txn = self.doc.transact();
         let pending = Pending::of(txn.store().pending_ds());
         let awaited = shape.awaited(&txn.state_vector(), &pending);
@@ -212,8 +225,17 @@ impl PageDoc {
 
     /// Lit la mise à jour, par la garde puis par yrs, et la vérifie contre
     /// l'état de `txn`, sans rien appliquer (voir [`PageDoc::apply_update`]).
-    fn read(&self, txn: &TransactionMut, update: &[u8]) -> Result<(Shape, Update), CrdtError> {
-        let shape = Shape::read(update)?;
+    fn read(
+        &self,
+        txn: &TransactionMut,
+        update: &[u8],
+        from_client: bool,
+    ) -> Result<(Shape, Update), CrdtError> {
+        let shape = if from_client {
+            Shape::read_from_client(update)?
+        } else {
+            Shape::read(update)?
+        };
         let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
         shape.check(&txn.state_vector())?;
         Ok((shape, decoded))

@@ -313,3 +313,72 @@ async fn deletion_already_pending_in_a_stored_page_holds_nothing() {
     assert_eq!(served_text(&f).await, "Alpha hors ligne");
     assert_eq!(journal(&f).await.len(), before + 1);
 }
+
+/// Constat C1 de la relecture de la piste S (Ruling R207), avec l'attente inverse. Tom écrit sur
+/// sa connexion une mise à jour de 26 octets, sans suppression : deux entrées pour le client qui
+/// a écrit la racine de la page, un `Skip` d'une unité à son horloge courante, puis une plage
+/// ramassée `[0, 1)`, que la page connaît déjà. yrs écrivait la plage par-dessus la racine :
+/// Tom n'était pas fermé, la page se vidait chez chaque connexion à sa prochaine étape 2, chez
+/// chaque arrivant, puis pour de bon au compactage. La garde refuse la mise à jour : Tom est
+/// fermé, rien n'est écrit ni relayé, et la page reste entière partout, avec le compactage le
+/// plus serré comme sans.
+#[tokio::test]
+async fn repeated_client_in_an_update_closes_its_connection_and_harms_nothing() {
+    for snapshot_every in [SyncConfig::default().snapshot_every, 2] {
+        let f = Fixture::new(SyncConfig {
+            snapshot_every,
+            ..SyncConfig::default()
+        })
+        .await;
+        f.write_mmd("Alpha\n\nBeta\n").await;
+        let tom = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+        let mona = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
+        let mut observer = Raw::connect(&f, writing_conn()).await;
+        assert_eq!(observer.updates_so_far().await, Some(vec![]));
+        let before = journal(&f).await;
+
+        // Le client qui a écrit la racine : le seul que porte l'instantané de la page neuve.
+        let snapshot = f.store.load_doc(f.page).await.unwrap().snapshot.unwrap().1;
+        let created = Update::decode_v1(&snapshot).unwrap().insertions(true);
+        let root = created
+            .iter()
+            .next()
+            .map(|(client, _)| client.get())
+            .unwrap();
+        let clock = u64::from(tom.state_vector().get(&ClientID::new(root)));
+        let mut forged = vec![2, 1];
+        common::raw::write_var(&mut forged, root);
+        common::raw::write_var(&mut forged, clock);
+        forged.extend([10, 1, 1]);
+        common::raw::write_var(&mut forged, root);
+        forged.extend([0, 0, 1, 0]);
+        tom.send_update(&forged);
+
+        let what = format!("compactage toutes les {snapshot_every} écritures");
+        assert!(
+            tom.wait_until(WAIT, |c| c.is_closed()).await,
+            "{what} : Tom n'est pas fermé"
+        );
+        assert_eq!(journal(&f).await, before, "{what} : écrite");
+        assert_eq!(
+            observer.updates_so_far().await,
+            Some(vec![]),
+            "{what} : relayée"
+        );
+        processed(&mona).await;
+        let newcomer = f.client().await;
+        let texts = [
+            ("serveur", served_text(&f).await),
+            ("Mona", text(&mona.blocks())),
+            ("arrivant", text(&newcomer.blocks())),
+            (
+                "rechargé du store",
+                text(&stored_page(&f.store, f.page).await.read_blocks()),
+            ),
+        ];
+        assert!(
+            texts.iter().all(|(_, t)| t == "Alpha\nBeta"),
+            "{what} : {texts:?}"
+        );
+    }
+}

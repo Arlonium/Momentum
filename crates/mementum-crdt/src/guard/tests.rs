@@ -396,7 +396,11 @@ fn shape_of(entries: &[Entry], deleted: &[Deleted]) -> Shape {
             (*client, structs)
         })
         .collect();
-    Shape { clients, deletions }
+    Shape {
+        clients,
+        deletions,
+        empty_deletion: false,
+    }
 }
 
 /// Les plages qu'une page garde en attente, rangées comme yrs les range (triées, fusionnées).
@@ -486,4 +490,27 @@ proptest! {
         assert_accepted(&peer, &diff);
         prop_assert_eq!(peer.read_blocks(), page.read_blocks());
     }
+}
+
+/// Ruling R207, le filet de R198 : une plage non vide en attente après l'écriture, que celles
+/// d'avant ne couvrent pas, est une suppression laissée en attente que la page n'avait pas ; une
+/// plage qui a rétréci ne l'est pas, ni une plage vide.
+#[test]
+fn pending_lacks_only_what_is_new() {
+    let set = |ranges: &[Deleted]| {
+        let mut set = yrs::IdSet::new();
+        for &(client, clock, len) in ranges {
+            set.insert(yrs::ID::new(yrs::block::ClientID::new(client), clock), len);
+        }
+        set
+    };
+    let none = Pending::of(None);
+    assert!(!none.lacks(None));
+    assert!(none.lacks(Some(&set(&[(1, 5, 3)]))));
+    assert!(!none.lacks(Some(&set(&[(1, 5, 0)]))), "une plage vide");
+    let before = pending_of(&[(1, 0, 10)]);
+    assert!(!before.lacks(Some(&set(&[(1, 5, 3)]))), "rétrécie");
+    assert!(!before.lacks(Some(&set(&[(1, 0, 10)]))), "la même");
+    assert!(before.lacks(Some(&set(&[(1, 8, 4)]))), "plus loin");
+    assert!(before.lacks(Some(&set(&[(2, 0, 1)]))), "un autre client");
 }

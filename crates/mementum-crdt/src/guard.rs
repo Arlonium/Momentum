@@ -59,6 +59,18 @@
 //! comme Yjs les mettent dans l'état complet et dans l'étape 2, et chaque client
 //! les renvoie dans la sienne ([`Pending`], Ruling R199).
 //!
+//! # Clients répétés (Ruling R207)
+//!
+//! yrs met bout à bout les entrées d'un même client, et écrit un bloc qui ne prolonge pas le
+//! précédent par-dessus le bloc connu à sa place (`BlockStore::push`, qui croit remplacer un
+//! `Skip`) : deux entrées pour le client qui a écrit la racine faisaient de la racine une plage
+//! ramassée, la page se vidait chez tous puis pour de bon au compactage, et une plage plus longue
+//! faisait paniquer yrs en debug. Aucun encodeur honnête n'écrit deux entrées pour un client :
+//! Yjs et yrs en écrivent une, rangées par client décroissant, et leurs fusions aussi.
+//! [`Shape::read`] les refuse, pour ce qui vient d'un client comme pour ce qui est relu. En
+//! filet de R198, `PageDoc::apply_client_update` refuse aussi une mise à jour qui laisse une
+//! suppression en attente que la page n'avait pas ([`Pending::lacks`]).
+//!
 //! # Métadonnées (report M7 du lot 1)
 //!
 //! La `Y.Map` [`META`] porte `schemaVersion`, que seul le serveur écrit, à la
@@ -72,7 +84,7 @@
 //! et une suppression ne nomme que des identifiants. [`touched`] demande donc
 //! à yrs, la transaction validée, quels types elle a changés.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mementum_md::MAX_DEPTH;
 use yrs::block::{
@@ -152,6 +164,8 @@ struct Insert {
 pub(crate) struct Shape {
     clients: Vec<(u64, Vec<Struct>)>,
     deletions: Deletions,
+    /// Le jeu de suppressions porte une plage de longueur nulle (Ruling R208).
+    empty_deletion: bool,
 }
 
 /// Le jeu de suppressions d'une mise à jour : par client, ses plages `[début,
@@ -181,6 +195,20 @@ impl Pending {
                 })
                 .collect(),
         )
+    }
+
+    /// Vrai si `after` (les suppressions en attente d'une page, après une écriture) porte une
+    /// plage non vide que celles-ci ne couvrent pas : une suppression laissée en attente que la
+    /// page n'avait pas (Ruling R207). Celles d'avant peuvent avoir rétréci (leurs éléments sont
+    /// arrivés), jamais grandi.
+    pub(crate) fn lacks(&self, after: Option<&IdSet>) -> bool {
+        after.is_some_and(|after| {
+            after.iter().any(|(client, ranges)| {
+                ranges.iter().any(|r| {
+                    r.start < r.end && self.uncovered_end(client.get(), r.start, r.end).is_some()
+                })
+            })
+        })
     }
 
     /// La fin de ce qui, dans `[start, end)`, n'est pas déjà en attente pour
@@ -213,11 +241,20 @@ impl Shape {
         let mut c = Cursor::new(update);
         let n_clients: u32 = c.read_var().map_err(decode_error)?;
         let mut clients = Vec::new();
+        let mut seen = HashSet::new();
         for _ in 0..n_clients {
             let n_structs: u32 = c.read_var().map_err(decode_error)?;
             let client: u64 = c.read_var().map_err(decode_error)?;
             if client > MAX_CLIENT {
                 return Err(decode_error("identifiant de client hors de 53 bits"));
+            }
+            // Ruling R207 : yrs met bout à bout les entrées d'un même client, et écrit par-dessus
+            // un bloc connu celui qui ne prolonge pas le précédent. Aucun encodeur honnête n'écrit
+            // deux entrées pour un client (Yjs et yrs en écrivent une, fusions comprises).
+            if !seen.insert(client) {
+                return Err(decode_error(
+                    "un client paraît deux fois dans la mise à jour",
+                ));
             }
             let mut clock: u32 = c.read_var().map_err(decode_error)?;
             let mut structs = Vec::new();
@@ -234,8 +271,27 @@ impl Shape {
             }
             clients.push((client, structs));
         }
-        let deletions = read_delete_set(&mut c)?;
-        Ok(Shape { clients, deletions })
+        let (deletions, empty_deletion) = read_delete_set(&mut c)?;
+        Ok(Shape {
+            clients,
+            deletions,
+            empty_deletion,
+        })
+    }
+
+    /// [`Shape::read`], pour une mise à jour reçue d'un client : refusée aussi (`Decode`) si son
+    /// jeu de suppressions porte une plage de longueur nulle (Ruling R208). Elle ne supprime rien,
+    /// mais yrs la garde en attente ; aucun encodeur honnête n'en écrit. Ce qui est relu du
+    /// stockage passe par [`Shape::read`] seul : une telle plage, écrite au journal avant cette
+    /// règle, ne rend pas la page illisible.
+    pub(crate) fn read_from_client(update: &[u8]) -> Result<Shape, CrdtError> {
+        let shape = Shape::read(update)?;
+        if shape.empty_deletion {
+            return Err(decode_error(
+                "plage de suppressions de longueur nulle dans la mise à jour",
+            ));
+        }
+        Ok(shape)
     }
 
     /// Vrai si la mise à jour insère des éléments XML (un bloc, un nœud de
@@ -543,11 +599,12 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
 /// addition qui déborde en debug : les deux paniquent en debug (Ruling R25).
 ///
 /// Rend les plages `[horloge, horloge + longueur)`, sans les plages vides, qui
-/// ne suppriment rien. Rien n'est réservé d'après un compte lu : ce qui est
-/// alloué reste borné par les octets reçus.
-fn read_delete_set(c: &mut Cursor) -> Result<Deletions, CrdtError> {
+/// ne suppriment rien, et s'il y en avait une (Ruling R208). Rien n'est réservé
+/// d'après un compte lu : ce qui est alloué reste borné par les octets reçus.
+fn read_delete_set(c: &mut Cursor) -> Result<(Deletions, bool), CrdtError> {
     let n_clients: u32 = c.read_var().map_err(decode_error)?;
     let mut deletions = Vec::new();
+    let mut empty = false;
     for _ in 0..n_clients {
         let client: u64 = c.read_var().map_err(decode_error)?;
         if client > MAX_CLIENT {
@@ -565,13 +622,15 @@ fn read_delete_set(c: &mut Cursor) -> Result<Deletions, CrdtError> {
             };
             if len > 0 {
                 ranges.push((clock, end));
+            } else {
+                empty = true;
             }
         }
         if !ranges.is_empty() {
             deletions.push((client, ranges));
         }
     }
-    Ok(deletions)
+    Ok((deletions, empty))
 }
 
 fn read_id(c: &mut Cursor) -> Result<Id, yrs::encoding::read::Error> {
