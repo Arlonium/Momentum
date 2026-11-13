@@ -16,7 +16,9 @@ use common::{
     uuid,
 };
 use mementum_acl::Level;
-use mementum_store::Authorship;
+use mementum_store::{
+    Authorship, MAX_MESSAGES_PER_PAGE, MAX_TEXT_BYTES_PER_PAGE, MAX_THREADS_PER_ACCOUNT,
+};
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -1325,11 +1327,77 @@ async fn edited_mmd_keeps_threads_on_unchanged_blocks() {
     assert!(!present(&id("Trois")), "le bloc retiré est encore là");
 }
 
+/// `count` comptes de remplissage, écrits par du SQL direct (« Remplissage i »), aux
+/// identifiants `01890000-0000-7000-a003-…` à partir de `base` : ils écrivent les fils et les
+/// réactions de départ, sans atteindre chacun sa part (Ruling R351). Rend leurs identifiants.
+async fn filler_accounts(db: &std::path::Path, base: u32, count: u32) -> Vec<String> {
+    common::exec_sql(
+        db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {count} - 1) \
+             INSERT INTO users (id, email, name, password_hash, created_at) \
+             SELECT printf('01890000-0000-7000-a003-%012d', {base} + i), \
+                    printf('remplissage-%d@exemple.test', {base} + i), \
+                    printf('Remplissage %d', {base} + i), 'pas-un-hachage', 1 FROM n"
+        ),
+    )
+    .await;
+    (base..base + count)
+        .map(|i| format!("01890000-0000-7000-a003-{i:012}"))
+        .collect()
+}
+
+/// Écrit `count` fils sur la page, résolus, par du SQL direct, le fil `i` ouvert par
+/// `authors[i % authors.len()]`, chacun avec `per_thread` messages de son auteur, de `bytes` « x »
+/// chacun ; identifiants `01890000-0000-7000-a001-…` (fils, à partir de `base`) et `…-a002-…`
+/// (messages), valides pour la lecture des fils. Deux appels sur une même base prennent des
+/// `base` écartés d'au moins `count`.
+async fn fill_threads(
+    db: &std::path::Path,
+    page: &str,
+    authors: &[String],
+    (base, count): (u32, u32),
+    (per_thread, bytes): (u32, u32),
+) {
+    let names: Vec<String> = authors.iter().map(|a| format!("\"{a}\"")).collect();
+    let (names, n) = (names.join(","), authors.len());
+    common::exec_sql(
+        db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {count} - 1) \
+             INSERT INTO comment_threads (id, node_id, created_by, created_at, resolved_at, \
+               resolved_by) \
+             SELECT printf('01890000-0000-7000-a001-%012d', {base} + i), '{page}', a, i, i, a \
+             FROM (SELECT i, json_extract('[{names}]', printf('$[%d]', i % {n})) AS a FROM n)"
+        ),
+    )
+    .await;
+    if per_thread > 0 {
+        common::exec_sql(
+            db,
+            &format!(
+                "WITH RECURSIVE m(j) AS \
+                   (SELECT 0 UNION ALL SELECT j + 1 FROM m WHERE j < {per_thread} - 1) \
+                 INSERT INTO comments (id, thread_id, author_id, body, created_at) \
+                 SELECT printf('01890000-0000-7000-a002-%012d', \
+                          CAST(substr(t.id, 25) AS INTEGER) * 1000 + j), \
+                        t.id, t.created_by, replace(hex(zeroblob({bytes})), '00', 'x'), \
+                        t.created_at * 1000 + j \
+                 FROM comment_threads t, m WHERE t.node_id = '{page}' \
+                   AND t.id LIKE '01890000-0000-7000-a001-%'"
+            ),
+        )
+        .await;
+    }
+}
+
 /// Ruling R204 : les plafonds des commentaires, par les routes. Au-delà de 2 000 fils sur la
 /// page (résolus compris), de 500 messages dans un fil ou de 32 emojis différents sur un
 /// message, l'écriture est refusée par un `409` au code propre (`thread_limit`,
 /// `message_limit`, `reaction_limit`), avec un message qui tutoie et dit quoi faire ; rien
-/// n'est écrit, et aucune trame ne part.
+/// n'est écrit, et aucune trame ne part. Les fils et les emojis de départ sont ceux de comptes
+/// de remplissage, dont aucun n'atteint sa part (Ruling R351) : ce sont bien les plafonds
+/// communs qui refusent.
 #[tokio::test]
 async fn comment_limits_are_refused_by_the_routes() {
     let t = TestApp::new().await;
@@ -1346,32 +1414,31 @@ async fn comment_limits_are_refused_by_the_routes() {
         opened["comments"][0]["id"].as_str().unwrap().to_string(),
     );
     let db = t.db_path();
-    let fill = |sql: String| {
-        let db = db.clone();
-        async move { common::exec_sql(&db, &sql).await }
-    };
-    // 1 999 fils de plus, résolus ; 499 messages de plus dans le fil ; 32 emojis sur le message.
-    fill(format!(
-        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1999) \
-         INSERT INTO comment_threads (id, node_id, created_by, created_at, resolved_at, \
-           resolved_by) \
-         SELECT printf('fil-%05d', i), '{page}', '{}', i, i, '{}' FROM n",
-        alice.id, alice.id
-    ))
+    let fillers = filler_accounts(&db, 0, 10).await;
+    // 1 999 fils de plus, résolus ; 499 messages de plus dans le fil ; 32 emojis sur le message,
+    // huit par compte.
+    fill_threads(&db, &page, &fillers, (0, 1999), (0, 0)).await;
+    common::exec_sql(
+        &db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 31) \
+             INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
+             SELECT '{message}', json_extract('[\"{}\",\"{}\",\"{}\",\"{}\"]', \
+                      printf('$[%d]', i / 8)), char(128512 + i), i FROM n",
+            fillers[0], fillers[1], fillers[2], fillers[3]
+        ),
+    )
     .await;
-    fill(format!(
-        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 499) \
-         INSERT INTO comments (id, thread_id, author_id, body, created_at) \
-         SELECT printf('message-%05d', i), '{thread}', '{}', 'Réponse', i FROM n",
-        alice.id
-    ))
-    .await;
-    fill(format!(
-        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 31) \
-         INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
-         SELECT '{message}', '{}', char(128512 + i), i FROM n",
-        alice.id
-    ))
+    common::exec_sql(
+        &db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 499) \
+             INSERT INTO comments (id, thread_id, author_id, body, created_at) \
+             SELECT printf('01890000-0000-7000-b002-%012d', i), '{thread}', '{}', 'Réponse', i \
+             FROM n",
+            alice.id
+        ),
+    )
     .await;
 
     let refusals = [
@@ -1415,4 +1482,281 @@ async fn comment_limits_are_refused_by_the_routes() {
     )
     .await
     .assert_status(StatusCode::OK);
+}
+
+/// Rulings R350 et R351 : les plafonds de la page (10 000 messages, 4 Mio de texte : `409
+/// page_comment_limit`) et la part d'un compte (200 fils ouverts sur la page : `409
+/// thread_limit` ; 8 emojis posés sur un message : `409 reaction_limit`), par les routes, avec un
+/// message qui tutoie, dit la borne, dit quand c'est sa part, et ce qu'il faut faire. Ils viennent
+/// après tous les refus de droit et le corps, dans l'ordre de R168 : une lectrice reçoit `403`,
+/// un corps vide `422`, un fil inconnu `404`, une page à la corbeille `409 trashed`, même sur une
+/// page pleine. Rien n'est écrit.
+#[tokio::test]
+async fn page_and_account_limits_are_refused_by_the_routes() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (mona, tom, gina) = (&team.mona, &team.tom, &team.gina);
+    let db = t.db_path();
+    let filler = filler_accounts(&db, 0, 1).await;
+    let grants = [members(Level::Full), user(gina, Level::Read)];
+    let messages_of = async |page: Uuid| {
+        common::query_i64(
+            &db,
+            &format!(
+                "SELECT COUNT(*) FROM comments c JOIN comment_threads t ON t.id = c.thread_id \
+                 WHERE t.node_id = '{page}'"
+            ),
+        )
+        .await
+    };
+
+    // 10 000 messages : 25 fils de 400.
+    let crowded = team.page(None, "Pleine", &grants).await;
+    fill_threads(&db, &crowded.to_string(), &filler, (0, 25), (400, 7)).await;
+    let filled = "01890000-0000-7000-a001-000000000000";
+    let reply_uri = format!("{}/replies", thread_uri(crowded, filled));
+    let refused = mona
+        .browser
+        .post(&comments_uri(crowded), json!({ "body": "Un fil de trop" }))
+        .await;
+    let page_full = refused.assert_error(StatusCode::CONFLICT, "page_comment_limit");
+    assert_french(
+        &page_full,
+        &["10 000", "accès complet", "rien n'a été écrit"],
+    );
+    let refused = mona
+        .browser
+        .post(&reply_uri, json!({ "body": "Une réponse de trop" }))
+        .await;
+    assert_eq!(
+        refused.assert_error(StatusCode::CONFLICT, "page_comment_limit"),
+        page_full
+    );
+    // Avant le plafond : le niveau, le fil, le corps.
+    gina.browser
+        .post(&comments_uri(crowded), json!({ "body": "Lectrice" }))
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    let unknown = Uuid::now_v7();
+    mona.browser
+        .post(
+            &format!("{}/replies", thread_uri(crowded, unknown)),
+            json!({ "body": "Ailleurs" }),
+        )
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+    mona.browser
+        .post(&reply_uri, json!({ "body": "  " }))
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_body");
+    assert_eq!(messages_of(crowded).await, 10_000);
+
+    // 4 190 000 octets : 419 messages de 10 000 « x ». Il reste 4 304 octets.
+    let heavy = team.page(None, "Lourde", &grants).await;
+    fill_threads(&db, &heavy.to_string(), &filler, (100, 1), (419, 10_000)).await;
+    let refused = mona
+        .browser
+        .post(&comments_uri(heavy), json!({ "body": "é".repeat(2_153) }))
+        .await;
+    let text_full = refused.assert_error(StatusCode::CONFLICT, "page_comment_limit");
+    assert_french(&text_full, &["4 Mio", "raccourcis", "rien n'a été écrit"]);
+    assert_ne!(text_full["message"], page_full["message"]);
+    let opened = mona
+        .browser
+        .post(&comments_uri(heavy), json!({ "body": "é".repeat(2_150) }))
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    let opened = opened.json();
+    let (thread, message) = (uuid(&opened["id"]), uuid(&opened["comments"][0]["id"]));
+    let refused = mona
+        .browser
+        .patch(
+            &message_uri(heavy, thread, message),
+            json!({ "body": "é".repeat(2_153) }),
+        )
+        .await;
+    assert_eq!(
+        refused.assert_error(StatusCode::CONFLICT, "page_comment_limit"),
+        text_full
+    );
+    mona.browser
+        .patch(
+            &message_uri(heavy, thread, message),
+            json!({ "body": "Court" }),
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    // Mona a ouvert 200 fils sur une page : sa part.
+    let own = team.page(None, "Partagée", &grants).await;
+    fill_threads(
+        &db,
+        &own.to_string(),
+        &[mona.id.to_string()],
+        (200, 200),
+        (1, 3),
+    )
+    .await;
+    let refused = mona
+        .browser
+        .post(&comments_uri(own), json!({ "body": "Un de trop" }))
+        .await;
+    let her_part = refused.assert_error(StatusCode::CONFLICT, "thread_limit");
+    assert_french(
+        &her_part,
+        &[
+            "tu as déjà ouvert 200 fils",
+            "ta part",
+            "rien n'a été écrit",
+        ],
+    );
+    let opened = tom
+        .browser
+        .post(&comments_uri(own), json!({ "body": "La part de Tom" }))
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    let opened = opened.json();
+    let (thread, message) = (uuid(&opened["id"]), uuid(&opened["comments"][0]["id"]));
+    mona.browser
+        .post(
+            &format!("{}/replies", thread_uri(own, thread)),
+            json!({ "body": "Répondre n'ouvre pas de fil" }),
+        )
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    // Mona pose 8 emojis sur le message de Tom : sa part.
+    for i in 0..8 {
+        let emoji = char::from_u32(0x1F600 + i).unwrap().to_string();
+        put_empty(&mona.browser, &reaction_uri(own, thread, message, &emoji))
+            .await
+            .assert_status(StatusCode::OK);
+    }
+    let refused = put_empty(&mona.browser, &reaction_uri(own, thread, message, "🦊")).await;
+    let her_emojis = refused.assert_error(StatusCode::CONFLICT, "reaction_limit");
+    assert_french(
+        &her_emojis,
+        &["tu as déjà posé 8 emojis", "ta part", "rien n'a été écrit"],
+    );
+    put_empty(&tom.browser, &reaction_uri(own, thread, message, "🦊"))
+        .await
+        .assert_status(StatusCode::OK);
+
+    // Le message d'un plafond ne porte jamais deux espaces de suite.
+    for body in [&page_full, &text_full, &her_part, &her_emojis] {
+        let message = body["message"].as_str().unwrap();
+        assert!(!message.contains("  "), "« {message} »");
+    }
+
+    // À la corbeille, c'est la corbeille qui refuse, avant le plafond.
+    team.trash(crowded).await;
+    mona.browser
+        .post(&comments_uri(crowded), json!({ "body": "Jetée" }))
+        .await
+        .assert_error(StatusCode::CONFLICT, "trashed");
+    assert_eq!(messages_of(crowded).await, 10_000);
+}
+
+/// La sonde (b) de la relecture de S4, inversée (Ruling R351) : une invitée qui peut commenter
+/// ouvre des fils tant qu'elle peut ; elle s'arrête à sa part, 200, avec un message qui le dit,
+/// et la page garde ses fils pour les autres : Olga en ouvre encore.
+#[tokio::test]
+async fn one_account_does_not_fill_the_threads_of_a_page() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, gina) = (&team.olga, &team.gina);
+    let page = team
+        .page(
+            None,
+            "Commentée",
+            &[members(Level::Full), user(gina, Level::Comment)],
+        )
+        .await;
+    for i in 0..MAX_THREADS_PER_ACCOUNT {
+        gina.browser
+            .post(&comments_uri(page), json!({ "body": format!("Fil {i}") }))
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+    let refused = gina
+        .browser
+        .post(&comments_uri(page), json!({ "body": "Un de plus" }))
+        .await;
+    let body = refused.assert_error(StatusCode::CONFLICT, "thread_limit");
+    assert_french(&body, &["200", "ta part"]);
+    olga.browser
+        .post(&comments_uri(page), json!({ "body": "Olga ouvre encore" }))
+        .await
+        .assert_status(StatusCode::CREATED);
+    let threads = gina.browser.get(&comments_uri(page)).await.json();
+    assert_eq!(threads.as_array().map(Vec::len), Some(201));
+}
+
+/// Ce qu'une lecture des fils d'une page pleine rend au plus, sans réaction : le texte des
+/// messages (4 Mio) et ce qui les entoure (auteurs, dates, identifiants). Tant que la lecture
+/// n'est pas paginée, c'est le prix de la première synchro de chaque onglet.
+const FULL_PAGE_READ: usize = 8 * 1024 * 1024;
+
+/// La sonde (a) de la relecture de S4, inversée (Ruling R350) : une invitée qui peut commenter
+/// écrit des messages de 10 000 caractères tant qu'elle peut ; elle s'arrête aux 4 Mio de texte
+/// de la page (419 messages), et la lecture des fils reste sous [`FULL_PAGE_READ`]. Une page
+/// pleine de ses 10 000 messages aussi. Avant, à 1 % du plafond des fils, une lecture rendait
+/// 192 Mio.
+#[tokio::test]
+async fn reading_a_full_page_stays_under_a_bound() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let gina = &team.gina;
+    let grants = [members(Level::Full), user(gina, Level::Comment)];
+    let long = "x".repeat(10_000);
+    let heavy = team.page(None, "Lourde", &grants).await;
+    let opened = gina
+        .browser
+        .post(&comments_uri(heavy), json!({ "body": long }))
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    let replies = format!("{}/replies", thread_uri(heavy, uuid(&opened.json()["id"])));
+    let mut written = 1;
+    let refused = loop {
+        let reply = gina.browser.post(&replies, json!({ "body": long })).await;
+        if reply.status != StatusCode::CREATED {
+            break reply;
+        }
+        written += 1;
+        assert!(written <= 420, "le texte de la page n'est pas plafonné");
+    };
+    refused.assert_error(StatusCode::CONFLICT, "page_comment_limit");
+    assert_eq!(written, MAX_TEXT_BYTES_PER_PAGE as usize / 10_000);
+    let read = gina.browser.get(&comments_uri(heavy)).await;
+    read.assert_status(StatusCode::OK);
+    assert!(
+        read.body.len() < FULL_PAGE_READ,
+        "{} octets",
+        read.body.len()
+    );
+
+    let db = t.db_path();
+    let filler = filler_accounts(&db, 0, 1).await;
+    let crowded = team.page(None, "Pleine", &grants).await;
+    fill_threads(&db, &crowded.to_string(), &filler, (0, 25), (400, 400)).await;
+    gina.browser
+        .post(&comments_uri(crowded), json!({ "body": "Un de trop" }))
+        .await
+        .assert_error(StatusCode::CONFLICT, "page_comment_limit");
+    let read = gina.browser.get(&comments_uri(crowded)).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(
+        read.json()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["comments"].as_array().unwrap().len())
+            .sum::<usize>(),
+        MAX_MESSAGES_PER_PAGE as usize
+    );
+    assert!(
+        read.body.len() < FULL_PAGE_READ,
+        "{} octets",
+        read.body.len()
+    );
 }

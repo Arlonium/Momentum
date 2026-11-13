@@ -27,6 +27,12 @@ CREATE TABLE comment_threads (
 );
 CREATE INDEX comment_threads_by_node ON comment_threads (node_id, created_at);
 
+-- `octet_length(body)` est rangée dans l'index des messages : le plafond d'une page (Ruling
+-- R350) compte ses messages et la somme de leurs octets à chaque écriture, et les lit ainsi dans
+-- l'index, sans charger les lignes, dont le texte pèse jusqu'à 4 Mio par page (12 ms par
+-- écriture sur une page pleine sans elle, 3 ms avec, en release). La requête doit reprendre
+-- l'expression telle quelle (`octet_length(c.body)`) : une colonne générée ne vaudrait pas,
+-- SQLite tenant alors toute la ligne pour lue.
 CREATE TABLE comments (
     id TEXT PRIMARY KEY NOT NULL,
     thread_id TEXT NOT NULL REFERENCES comment_threads(id) ON DELETE CASCADE,
@@ -35,7 +41,7 @@ CREATE TABLE comments (
     created_at INTEGER NOT NULL,
     edited_at INTEGER
 );
-CREATE INDEX comments_by_thread ON comments (thread_id, created_at);
+CREATE INDEX comments_by_thread ON comments (thread_id, created_at, octet_length(body));
 
 CREATE TABLE comment_reactions (
     comment_id TEXT NOT NULL REFERENCES comments(id) ON DELETE CASCADE,

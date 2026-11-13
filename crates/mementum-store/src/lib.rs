@@ -74,8 +74,9 @@ pub use access_inputs::AccessInputs;
 pub use acl::{AccessChange, AccessWritten, ShareRefusal};
 pub use backup::{Backup, backup_path};
 pub use comments::{
-    Author, Authorship, Comment, CommentLimit, MAX_MESSAGES_PER_THREAD, MAX_REACTIONS_PER_MESSAGE,
-    MAX_THREADS_PER_PAGE, Reaction, Thread, ThreadAuthors,
+    Author, Authorship, Comment, CommentLimit, MAX_MESSAGES_PER_PAGE, MAX_MESSAGES_PER_THREAD,
+    MAX_REACTIONS_PER_ACCOUNT, MAX_REACTIONS_PER_MESSAGE, MAX_TEXT_BYTES_PER_PAGE,
+    MAX_THREADS_PER_ACCOUNT, MAX_THREADS_PER_PAGE, Reaction, Thread, ThreadAuthors,
 };
 pub use docs::DocState;
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};

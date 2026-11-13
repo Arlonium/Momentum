@@ -767,14 +767,20 @@ pub enum ErrorCode {
     /// `PUT /mmd` de plus de 12 000 blocs, à tous les niveaux, lignes de tableau comprises
     /// (Ruling R259) : rien n'est écrit. Statut 422.
     TooManyBlocks,
-    /// La page porte déjà 2 000 fils de commentaires, résolus compris (Ruling R204) : rien
-    /// n'est écrit. Statut 409.
+    /// La page porte déjà 2 000 fils de commentaires, résolus compris (Ruling R204), ou ce
+    /// compte y en a déjà ouvert 200, sa part (Ruling R351) ; le message dit lequel : rien n'est
+    /// écrit. Statut 409.
     ThreadLimit,
     /// Le fil porte déjà 500 messages (Ruling R204) : rien n'est écrit. Statut 409.
     MessageLimit,
-    /// Le message porte déjà 32 emojis différents, et celui-ci n'en est pas (Ruling R204) :
-    /// rien n'est écrit. Statut 409.
+    /// Le message porte déjà 32 emojis différents, et celui-ci n'en est pas (Ruling R204), ou ce
+    /// compte y en a déjà posé 8, sa part (Ruling R351) ; le message dit lequel : rien n'est
+    /// écrit. Statut 409.
     ReactionLimit,
+    /// Les commentaires de la page portent déjà 10 000 messages, ou l'écriture ferait passer
+    /// leur texte au-delà de 4 Mio (Ruling R350) ; le message dit lequel : rien n'est écrit.
+    /// Statut 409.
+    PageCommentLimit,
 }
 
 /// Corps de toute réponse d'erreur.

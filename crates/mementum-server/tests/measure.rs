@@ -287,3 +287,102 @@ async fn measure_first_read_after_a_write() {
         again,
     );
 }
+
+/// Ruling R350 : ce que coûte `GET /api/v1/pages/{id}/comments` sur une page pleine, tant que la
+/// lecture n'est pas paginée. 10 000 messages de 419 octets (4 Mio de texte, le plafond), en 20
+/// fils de 500, écrits par un compte au nom de 100 caractères ; puis les mêmes avec la part
+/// d'un compte en réactions, 8 emojis sur chaque message (ce qu'un seul invité y ajoute au plus).
+/// Les fils sont écrits en SQL, en une transaction. Une ligne pour la durée de 20 lectures, une
+/// pour la taille de la réponse, dans chaque cas.
+#[tokio::test]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_comments_of_a_full_page() {
+    let t = TestApp::new().await;
+    let alice = t.account("Alice").await;
+    let page = alice.create(json!({ "title": "Pleine" })).await.id;
+    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
+        .await
+        .unwrap();
+    let long_name = "N".repeat(100);
+    sqlx::query("UPDATE users SET name = ? WHERE id = ?")
+        .bind(&long_name)
+        .bind(alice.id.to_string())
+        .execute(&side)
+        .await
+        .unwrap();
+    let body = "x".repeat(419);
+    let mut tx = side.begin().await.unwrap();
+    let mut at = 1_000_000_i64;
+    let mut comments = Vec::new();
+    for _ in 0..20 {
+        let thread = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO comment_threads (id, node_id, block_id, created_by, created_at) \
+             VALUES (?, ?, NULL, ?, ?)",
+        )
+        .bind(&thread)
+        .bind(&page)
+        .bind(alice.id.to_string())
+        .bind(at)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        for _ in 0..500 {
+            at += 1;
+            let comment = uuid::Uuid::now_v7().to_string();
+            sqlx::query(
+                "INSERT INTO comments (id, thread_id, author_id, body, created_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&comment)
+            .bind(&thread)
+            .bind(alice.id.to_string())
+            .bind(&body)
+            .bind(at)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            comments.push(comment);
+        }
+    }
+    tx.commit().await.unwrap();
+
+    let uri = format!("/api/v1/pages/{page}/comments");
+    let read = async |what: &str| {
+        let mut times = Vec::new();
+        let mut bytes = 0;
+        for _ in 0..20 {
+            let start = Instant::now();
+            let reply = alice.browser.get(&uri).await;
+            times.push(start.elapsed());
+            reply.assert_status(StatusCode::OK);
+            bytes = reply.body.len();
+        }
+        report(&format!("GET …/comments, page pleine, {what}"), times);
+        println!(
+            "MESURE taille de la réponse, {what} : {bytes} octets ({:.1} Mio)",
+            bytes as f64 / (1024.0 * 1024.0)
+        );
+    };
+    read("sans réaction").await;
+
+    let mut tx = side.begin().await.unwrap();
+    for comment in &comments {
+        for i in 0..8u32 {
+            sqlx::query(
+                "INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(comment)
+            .bind(alice.id.to_string())
+            .bind(char::from_u32(0x1F600 + i).unwrap().to_string())
+            .bind(at)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+    }
+    tx.commit().await.unwrap();
+    side.close().await;
+    read("8 réactions d'un compte sur chaque message").await;
+}

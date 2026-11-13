@@ -380,7 +380,10 @@ async fn migration_keeps_lot1_pages() {
     );
     for (index, columns) in [
         ("comment_threads_by_node", &["node_id", "created_at"][..]),
-        ("comments_by_thread", &["thread_id", "created_at"]),
+        (
+            "comments_by_thread",
+            &["thread_id", "created_at", "(expression)"],
+        ),
         ("doc_versions_by_node", &["node_id", "seq", "created_at"]),
         ("invitations_node_key", &["node_id"]),
         ("nodes_by_parent", &["space_id", "parent_id", "position"]),
@@ -388,7 +391,10 @@ async fn migration_keeps_lot1_pages() {
     ] {
         let found: Vec<String> = texts(
             &db,
-            &format!("SELECT name FROM pragma_index_info('{index}') ORDER BY seqno"),
+            &format!(
+                "SELECT coalesce(name, '(expression)') FROM pragma_index_info('{index}') \
+                 ORDER BY seqno"
+            ),
         )
         .await
         .into_iter()
@@ -396,6 +402,20 @@ async fn migration_keeps_lot1_pages() {
         .collect();
         assert_eq!(found, columns, "{index}");
     }
+    // L'expression de `comments_by_thread`, que le plafond du texte d'une page reprend telle
+    // quelle pour lire sa somme dans l'index (Ruling R350).
+    let sql = texts(
+        &db,
+        "SELECT sql FROM sqlite_master WHERE name = 'comments_by_thread'",
+    )
+    .await;
+    assert_eq!(
+        sql,
+        [Some(
+            "CREATE INDEX comments_by_thread ON comments (thread_id, created_at, octet_length(body))"
+                .to_string()
+        )]
+    );
 
     // Les clés étrangères tiennent, et celles des tables recréées visent les nouvelles tables.
     assert_eq!(

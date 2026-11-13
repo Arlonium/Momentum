@@ -6,7 +6,11 @@
 mod common;
 
 use common::{Fixture, account, fresh, int, page};
-use mementum_store::{Authorship, Comment, StoreError, Thread};
+use mementum_store::{
+    Authorship, Comment, CommentLimit, MAX_MESSAGES_PER_PAGE, MAX_MESSAGES_PER_THREAD,
+    MAX_REACTIONS_PER_ACCOUNT, MAX_REACTIONS_PER_MESSAGE, MAX_TEXT_BYTES_PER_PAGE,
+    MAX_THREADS_PER_ACCOUNT, MAX_THREADS_PER_PAGE, StoreError, Thread,
+};
 use tokio::sync::broadcast::error::TryRecvError;
 use uuid::Uuid;
 
@@ -635,39 +639,87 @@ async fn threads_of_a_deleted_page_are_gone() {
 }
 
 /// Écrit `count` fils sur la page, résolus, par du SQL direct : préparer une page pleine sans
-/// passer par 2 000 transactions.
-async fn fill_threads(f: &Fixture, page: Uuid, author: Uuid, count: u32) {
+/// passer par 2 000 transactions. Le fil `i` (de 1 à `count`) est ouvert par
+/// `authors[i % authors.len()]`. Leurs identifiants ne sont pas des UUID : on ne les nomme pas.
+async fn fill_threads(f: &Fixture, page: Uuid, authors: &[Uuid], count: u32) {
+    let names: Vec<String> = authors.iter().map(|a| format!("\"{a}\"")).collect();
+    let (names, n) = (names.join(","), authors.len());
     common::exec_sql(
         &f.db,
         &format!(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {count}) \
              INSERT INTO comment_threads (id, node_id, created_by, created_at, resolved_at, \
                resolved_by) \
-             SELECT printf('fil-%05d', i), '{page}', '{author}', i, i, '{author}' FROM n"
+             SELECT printf('fil-{page}-%05d', i), '{page}', a, i, i, a \
+             FROM (SELECT i, json_extract('[{names}]', printf('$[%d]', i % {n})) AS a FROM n)"
         ),
     )
     .await;
 }
 
+/// Écrit `count` messages de `author` sur la page, par du SQL direct, répartis dans `threads`
+/// fils neufs qu'il ouvre ; chaque message porte `body`, une expression SQL. Les identifiants
+/// ne sont pas des UUID : on ne les nomme pas.
+async fn fill_messages(
+    f: &Fixture,
+    page: Uuid,
+    author: Uuid,
+    threads: u32,
+    count: u32,
+    body: &str,
+) {
+    common::exec_sql(
+        &f.db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {threads}) \
+             INSERT INTO comment_threads (id, node_id, created_by, created_at) \
+             SELECT printf('plein-{page}-%05d', i), '{page}', '{author}', i FROM n"
+        ),
+    )
+    .await;
+    common::exec_sql(
+        &f.db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {count} - 1) \
+             INSERT INTO comments (id, thread_id, author_id, body, created_at) \
+             SELECT printf('message-{page}-%06d', i), \
+                    printf('plein-{page}-%05d', i % {threads} + 1), '{author}', {body}, i FROM n"
+        ),
+    )
+    .await;
+}
+
+/// Le refus attendu d'un plafond, et rien d'autre.
+fn limited<T: std::fmt::Debug>(result: Result<T, StoreError>, limit: CommentLimit) -> bool {
+    matches!(result, Err(StoreError::CommentLimit(l)) if l == limit)
+}
+
 /// Ruling R204 : une page porte au plus `MAX_THREADS_PER_PAGE` fils, résolus compris. Le
 /// suivant est refusé dans la transaction qui l'écrirait (`CommentLimit::Threads`), et rien
-/// n'est écrit ; une autre page n'en est pas gênée.
+/// n'est écrit ; une autre page n'en est pas gênée. Les fils de départ sont ouverts par dix
+/// comptes, dont aucun n'a atteint sa part (`MAX_THREADS_PER_ACCOUNT`) : c'est bien le
+/// plafond de la page qui refuse.
 #[tokio::test]
 async fn threads_of_a_page_are_capped() {
     let f = fresh().await;
     let store = &f.store;
-    let alice = account(store, "alice").await;
+    let mut authors = Vec::new();
+    for i in 0..10 {
+        authors.push(account(store, &format!("compte-{i}")).await.id);
+    }
+    let zed = account(store, "zed").await;
     let full = new_page(&f, "Pleine").await;
     let other = new_page(&f, "Autre").await;
-    assert_eq!(mementum_store::MAX_THREADS_PER_PAGE, 2_000);
-    fill_threads(&f, full, alice.id, mementum_store::MAX_THREADS_PER_PAGE - 1).await;
+    assert_eq!(MAX_THREADS_PER_PAGE, 2_000);
+    // Le premier compte en ouvre 199, les neuf autres 200.
+    fill_threads(&f, full, &authors, MAX_THREADS_PER_PAGE - 1).await;
 
     store
-        .create_thread(full, None, alice.id, "Le dernier permis")
+        .create_thread(full, None, authors[0], "Le dernier permis")
         .await
         .expect("la borne est permise");
     let refused = store
-        .create_thread(full, Some("bloc"), alice.id, "Un de trop")
+        .create_thread(full, Some("bloc"), zed.id, "Un de trop")
         .await;
     assert!(
         matches!(
@@ -689,7 +741,7 @@ async fn threads_of_a_page_are_capped() {
         0
     );
     store
-        .create_thread(other, None, alice.id, "Ailleurs")
+        .create_thread(other, None, zed.id, "Ailleurs")
         .await
         .expect("une autre page");
 }
@@ -707,8 +759,8 @@ async fn messages_of_a_thread_are_capped() {
         .create_thread(p, None, alice.id, "Premier")
         .await
         .unwrap();
-    assert_eq!(mementum_store::MAX_MESSAGES_PER_THREAD, 500);
-    let others = mementum_store::MAX_MESSAGES_PER_THREAD - 2;
+    assert_eq!(MAX_MESSAGES_PER_THREAD, 500);
+    let others = MAX_MESSAGES_PER_THREAD - 2;
     common::exec_sql(
         &f.db,
         &format!(
@@ -754,23 +806,29 @@ async fn messages_of_a_thread_are_capped() {
 /// Ruling R204 : un message porte au plus `MAX_REACTIONS_PER_MESSAGE` emojis différents. Un
 /// emoji de plus est refusé (`CommentLimit::Reactions`) ; un emoji déjà là se pose encore, par
 /// un autre compte ; une réaction déjà posée ne change rien, sans erreur, à la borne comme
-/// ailleurs.
+/// ailleurs. Les 32 emojis sont posés par quatre comptes, huit chacun (leur part,
+/// `MAX_REACTIONS_PER_ACCOUNT`) ; Bob, qui n'en a posé aucun, est refusé par le plafond du
+/// message.
 #[tokio::test]
 async fn reactions_of_a_message_are_capped() {
     let f = fresh().await;
     let store = &f.store;
     let alice = account(store, "alice").await;
     let bob = account(store, "bob").await;
+    let mut posers = vec![alice.id];
+    for i in 1..4 {
+        posers.push(account(store, &format!("compte-{i}")).await.id);
+    }
     let p = new_page(&f, "Page").await;
     let thread = store.create_thread(p, None, alice.id, "Un").await.unwrap();
     let message = thread.comments[0].id;
-    assert_eq!(mementum_store::MAX_REACTIONS_PER_MESSAGE, 32);
-    let emojis: Vec<String> = (0..=mementum_store::MAX_REACTIONS_PER_MESSAGE)
+    assert_eq!(MAX_REACTIONS_PER_MESSAGE, 32);
+    let emojis: Vec<String> = (0..=MAX_REACTIONS_PER_MESSAGE)
         .map(|i| char::from_u32(0x1F600 + i).unwrap().to_string())
         .collect();
-    for emoji in &emojis[..32] {
+    for (i, emoji) in emojis[..32].iter().enumerate() {
         let (_, changed) = store
-            .add_reaction(p, thread.id, message, alice.id, emoji)
+            .add_reaction(p, thread.id, message, posers[i / 8], emoji)
             .await
             .expect("sous la borne");
         assert!(changed);
@@ -802,4 +860,408 @@ async fn reactions_of_a_message_are_capped() {
         int(&f.db, "SELECT COUNT(DISTINCT emoji) FROM comment_reactions").await,
         32
     );
+}
+
+/// Ruling R350 : une page porte au plus `MAX_MESSAGES_PER_PAGE` messages, tous fils compris.
+/// Le suivant est refusé dans la transaction qui l'écrirait (`CommentLimit::PageMessages`), en
+/// réponse comme en fil neuf, même quand le fil a encore de la place ; rien n'est écrit ;
+/// modifier un message passe encore ; une autre page n'en est pas gênée ; un message supprimé
+/// rend sa place.
+#[tokio::test]
+async fn messages_of_a_page_are_capped() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let full = new_page(&f, "Pleine").await;
+    let other = new_page(&f, "Autre").await;
+    assert_eq!(MAX_MESSAGES_PER_PAGE, 10_000);
+    let thread = store
+        .create_thread(full, None, alice.id, "Premier")
+        .await
+        .unwrap();
+    // 9 998 messages de plus, dans 21 fils : aucun fil n'atteint ses 500 messages.
+    fill_messages(&f, full, bob.id, 21, MAX_MESSAGES_PER_PAGE - 2, "'Message'").await;
+    let count = format!(
+        "SELECT COUNT(*) FROM comments c JOIN comment_threads t ON t.id = c.thread_id \
+         WHERE t.node_id = '{full}'"
+    );
+    assert_eq!(int(&f.db, &count).await, 9_999);
+
+    let last = store
+        .reply_to_thread(full, thread.id, alice.id, "La dernière permise")
+        .await
+        .expect("la borne est permise");
+    let refused = store
+        .reply_to_thread(full, thread.id, alice.id, "Une de trop")
+        .await;
+    assert!(limited(refused, CommentLimit::PageMessages));
+    let refused = store
+        .create_thread(full, Some("bloc"), alice.id, "Un fil de trop")
+        .await;
+    assert!(limited(refused, CommentLimit::PageMessages));
+    assert_eq!(int(&f.db, &count).await, 10_000);
+    let threads = format!("SELECT COUNT(*) FROM comment_threads WHERE node_id = '{full}'");
+    assert_eq!(int(&f.db, &threads).await, 22);
+    let (edited, changed) = store
+        .edit_comment(full, thread.id, last.id, alice.id, "Modifiée")
+        .await
+        .expect("modifier ne compte pas un message de plus");
+    assert!(changed);
+    assert_eq!(edited.body, "Modifiée");
+    store
+        .create_thread(other, None, alice.id, "Ailleurs")
+        .await
+        .expect("une autre page");
+
+    store
+        .delete_comment(full, thread.id, last.id, Authorship::Any)
+        .await
+        .unwrap();
+    store
+        .reply_to_thread(full, thread.id, alice.id, "De nouveau")
+        .await
+        .expect("une place libérée");
+}
+
+/// Ruling R350 : les messages d'une page portent au plus `MAX_TEXT_BYTES_PER_PAGE` octets de
+/// texte, comptés en UTF-8 (un « é » en vaut deux). L'écriture qui les dépasserait d'un octet
+/// est refusée (`CommentLimit::PageText`), réponse, fil neuf ou modification qui allonge un
+/// message ; une modification qui garde ou réduit la longueur passe ; rien n'est écrit.
+#[tokio::test]
+async fn text_of_a_page_is_capped() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let full = new_page(&f, "Pleine").await;
+    let other = new_page(&f, "Autre").await;
+    assert_eq!(MAX_TEXT_BYTES_PER_PAGE, 4 * 1024 * 1024);
+    let thread = store
+        .create_thread(full, None, alice.id, "Premier")
+        .await
+        .unwrap();
+    // 419 messages de 10 000 « x » : avec « Premier », 4 190 007 octets.
+    fill_messages(
+        &f,
+        full,
+        bob.id,
+        1,
+        419,
+        "replace(hex(zeroblob(10000)), '00', 'x')",
+    )
+    .await;
+    let used = 7 + 419 * 10_000;
+    let left = MAX_TEXT_BYTES_PER_PAGE as usize - used;
+    // Exactement ce qui reste, en octets : des « é » et un « x ». En caractères, c'est moitié
+    // moins : un compte en caractères laisserait passer la suite.
+    let exact = format!("{}x", "é".repeat((left - 1) / 2));
+    assert_eq!(exact.len(), left);
+    let bytes = format!(
+        "SELECT SUM(length(CAST(c.body AS BLOB))) FROM comments c \
+         JOIN comment_threads t ON t.id = c.thread_id WHERE t.node_id = '{full}'"
+    );
+
+    let last = store
+        .reply_to_thread(full, thread.id, alice.id, &exact)
+        .await
+        .expect("la borne est permise");
+    assert_eq!(int(&f.db, &bytes).await, i64::from(MAX_TEXT_BYTES_PER_PAGE));
+    let refused = store.reply_to_thread(full, thread.id, alice.id, "a").await;
+    assert!(limited(refused, CommentLimit::PageText));
+    let refused = store.create_thread(full, None, alice.id, "a").await;
+    assert!(limited(refused, CommentLimit::PageText));
+    let longer = format!("{exact}a");
+    let refused = store
+        .edit_comment(full, thread.id, last.id, alice.id, &longer)
+        .await;
+    assert!(limited(refused, CommentLimit::PageText));
+    assert_eq!(int(&f.db, &bytes).await, i64::from(MAX_TEXT_BYTES_PER_PAGE));
+    let stored = format!("SELECT body FROM comments WHERE id = '{}'", last.id);
+    assert_eq!(
+        common::texts(&f.db, &stored).await,
+        [Some(exact.clone())],
+        "le message refusé n'a pas changé"
+    );
+
+    let same_length = format!("{}y", "é".repeat((left - 1) / 2));
+    store
+        .edit_comment(full, thread.id, last.id, alice.id, &same_length)
+        .await
+        .expect("même longueur");
+    store
+        .edit_comment(full, thread.id, last.id, alice.id, "court")
+        .await
+        .expect("plus court");
+    store
+        .reply_to_thread(full, thread.id, alice.id, "a")
+        .await
+        .expect("de la place libérée");
+    store
+        .create_thread(other, None, alice.id, &exact)
+        .await
+        .expect("une autre page");
+}
+
+/// Ruling R351 : un compte ouvre au plus `MAX_THREADS_PER_ACCOUNT` fils sur une page, résolus
+/// compris (`CommentLimit::OwnThreads`) : répondre n'en ouvre pas ; sa part ne gêne ni les
+/// autres comptes sur la page, ni lui sur une autre page ; un de ses fils supprimé lui rend une
+/// place.
+#[tokio::test]
+async fn threads_of_an_account_are_capped() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let p = new_page(&f, "Page").await;
+    let other = new_page(&f, "Autre").await;
+    assert_eq!(MAX_THREADS_PER_ACCOUNT, 200);
+    fill_threads(&f, p, &[alice.id], MAX_THREADS_PER_ACCOUNT - 1).await;
+
+    let last = store
+        .create_thread(p, None, alice.id, "Le dernier permis")
+        .await
+        .expect("la borne est permise");
+    let refused = store
+        .create_thread(p, Some("bloc"), alice.id, "Un de trop")
+        .await;
+    assert!(limited(refused, CommentLimit::OwnThreads));
+    let hers = format!(
+        "SELECT COUNT(*) FROM comment_threads WHERE node_id = '{p}' AND created_by = '{}'",
+        alice.id
+    );
+    assert_eq!(int(&f.db, &hers).await, 200);
+    assert_eq!(
+        int(
+            &f.db,
+            "SELECT COUNT(*) FROM comments WHERE body = 'Un de trop'"
+        )
+        .await,
+        0
+    );
+    // Répondre n'ouvre pas de fil : Alice répond encore, chez elle comme chez Bob.
+    let answer = store
+        .reply_to_thread(p, last.id, alice.id, "Une réponse")
+        .await
+        .expect("une réponse");
+    let bobs = store
+        .create_thread(p, None, bob.id, "La part de Bob")
+        .await
+        .expect("un autre compte");
+    store
+        .reply_to_thread(p, bobs.id, alice.id, "Chez Bob")
+        .await
+        .expect("une réponse");
+    store
+        .create_thread(other, None, alice.id, "Ailleurs")
+        .await
+        .expect("une autre page");
+
+    // Un fil part avec son dernier message : la place revient.
+    for comment in [last.comments[0].id, answer.id] {
+        store
+            .delete_comment(p, last.id, comment, Authorship::Any)
+            .await
+            .unwrap();
+    }
+    store
+        .create_thread(p, None, alice.id, "De nouveau")
+        .await
+        .expect("une place libérée");
+}
+
+/// Ruling R351 : un compte pose au plus `MAX_REACTIONS_PER_ACCOUNT` emojis différents sur un
+/// message (`CommentLimit::OwnReactions`), y compris un emoji qu'un autre y a déjà posé ; une
+/// réaction qu'il a déjà posée ne change rien, sans erreur ; sa part ne gêne pas les autres ;
+/// une réaction retirée lui rend une place.
+#[tokio::test]
+async fn reactions_of_an_account_are_capped() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let p = new_page(&f, "Page").await;
+    let thread = store.create_thread(p, None, alice.id, "Un").await.unwrap();
+    let message = thread.comments[0].id;
+    assert_eq!(MAX_REACTIONS_PER_ACCOUNT, 8);
+    let emojis: Vec<String> = (0..=MAX_REACTIONS_PER_ACCOUNT)
+        .map(|i| char::from_u32(0x1F600 + i).unwrap().to_string())
+        .collect();
+    let react =
+        async |who: Uuid, emoji: &str| store.add_reaction(p, thread.id, message, who, emoji).await;
+    react(bob.id, &emojis[8]).await.expect("Bob");
+    for emoji in &emojis[..8] {
+        let (_, changed) = react(alice.id, emoji).await.expect("sous la borne");
+        assert!(changed);
+    }
+
+    assert!(limited(
+        react(alice.id, &emojis[8]).await,
+        CommentLimit::OwnReactions
+    ));
+    let (_, changed) = react(alice.id, &emojis[0]).await.expect("déjà posée");
+    assert!(!changed);
+    let hers = format!(
+        "SELECT COUNT(*) FROM comment_reactions WHERE user_id = '{}'",
+        alice.id
+    );
+    assert_eq!(int(&f.db, &hers).await, 8);
+    for emoji in &emojis[..7] {
+        let (_, changed) = react(bob.id, emoji).await.expect("la part de Bob");
+        assert!(changed);
+    }
+
+    store
+        .remove_reaction(p, thread.id, message, alice.id, &emojis[0])
+        .await
+        .unwrap();
+    let (comment, changed) = react(alice.id, &emojis[8])
+        .await
+        .expect("une place libérée");
+    assert!(changed);
+    assert_eq!(comment.reactions.len(), 9);
+}
+
+/// Ruling R350 et R351 : des écritures de front à la borne, chacune dans sa transaction ; une
+/// seule passe. Le dernier message d'une page (des réponses et des fils neufs mêlés), puis le
+/// dernier fil d'un compte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn writes_side_by_side_at_the_bound_let_one_through() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let full = new_page(&f, "Pleine").await;
+    let thread = store
+        .create_thread(full, None, alice.id, "Premier")
+        .await
+        .unwrap();
+    fill_messages(&f, full, bob.id, 21, MAX_MESSAGES_PER_PAGE - 2, "'Message'").await;
+
+    let writes: Vec<_> = (0..8)
+        .map(|i| {
+            let store = store.clone();
+            let (alice, thread) = (alice.id, thread.id);
+            tokio::spawn(async move {
+                if i % 2 == 0 {
+                    store
+                        .reply_to_thread(full, thread, alice, "De front")
+                        .await
+                        .map(|_| ())
+                } else {
+                    store
+                        .create_thread(full, None, alice, "De front")
+                        .await
+                        .map(|_| ())
+                }
+            })
+        })
+        .collect();
+    let mut passed = 0;
+    for write in writes {
+        match write.await.unwrap() {
+            Ok(()) => passed += 1,
+            refused => assert!(limited(refused, CommentLimit::PageMessages)),
+        }
+    }
+    assert_eq!(passed, 1);
+    let count = format!(
+        "SELECT COUNT(*) FROM comments c JOIN comment_threads t ON t.id = c.thread_id \
+         WHERE t.node_id = '{full}'"
+    );
+    assert_eq!(int(&f.db, &count).await, 10_000);
+
+    let p = new_page(&f, "Page").await;
+    fill_threads(&f, p, &[bob.id], MAX_THREADS_PER_ACCOUNT - 1).await;
+    let writes: Vec<_> = (0..8)
+        .map(|_| {
+            let store = store.clone();
+            let bob = bob.id;
+            tokio::spawn(async move {
+                store
+                    .create_thread(p, None, bob, "De front")
+                    .await
+                    .map(|_| ())
+            })
+        })
+        .collect();
+    let mut passed = 0;
+    for write in writes {
+        match write.await.unwrap() {
+            Ok(()) => passed += 1,
+            refused => assert!(limited(refused, CommentLimit::OwnThreads)),
+        }
+    }
+    assert_eq!(passed, 1);
+}
+
+/// Mesure, pas un test (Ruling R350) : ce que coûtent les plafonds de la page à une écriture
+/// sur une page pleine, en release. 10 000 messages de 419 octets (4 Mio de texte, le plus de
+/// lignes à compter pour la somme des octets) ; cent réponses acceptées juste sous la borne
+/// (chacune supprimée ensuite), puis cent refusées à la borne.
+///
+/// `cargo test --release -p mementum-store --test comments -- --ignored --nocapture measure_writes_on_a_full_page`
+#[tokio::test]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_writes_on_a_full_page() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let full = new_page(&f, "Pleine").await;
+    let thread = store
+        .create_thread(full, None, alice.id, "Premier")
+        .await
+        .unwrap();
+    fill_messages(
+        &f,
+        full,
+        bob.id,
+        21,
+        MAX_MESSAGES_PER_PAGE - 2,
+        "replace(hex(zeroblob(419)), '00', 'x')",
+    )
+    .await;
+    let centile = |times: &mut Vec<std::time::Duration>, percent: usize| {
+        times.sort();
+        let rank = (times.len() * percent).div_ceil(100).max(1);
+        times[rank - 1].as_secs_f64() * 1000.0
+    };
+    let mut accepted = Vec::new();
+    for _ in 0..100 {
+        let start = std::time::Instant::now();
+        let reply = store
+            .reply_to_thread(full, thread.id, alice.id, "Sous la borne")
+            .await
+            .unwrap();
+        accepted.push(start.elapsed());
+        store
+            .delete_comment(full, thread.id, reply.id, Authorship::Any)
+            .await
+            .unwrap();
+    }
+    store
+        .reply_to_thread(full, thread.id, alice.id, "La dernière")
+        .await
+        .unwrap();
+    let mut refused = Vec::new();
+    for _ in 0..100 {
+        let start = std::time::Instant::now();
+        let result = store
+            .reply_to_thread(full, thread.id, alice.id, "De trop")
+            .await;
+        refused.push(start.elapsed());
+        assert!(limited(result, CommentLimit::PageMessages));
+    }
+    for (what, times) in [
+        ("réponse acceptée, 9 999 messages", &mut accepted),
+        ("réponse refusée, 10 000 messages", &mut refused),
+    ] {
+        println!(
+            "MESURE {what} (4 Mio de texte) : p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms",
+            centile(times, 50),
+            centile(times, 95),
+            centile(times, 100)
+        );
+    }
 }

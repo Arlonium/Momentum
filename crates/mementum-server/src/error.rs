@@ -9,8 +9,9 @@ use axum::response::{IntoResponse, Response};
 use mementum_crdt::CrdtError;
 use mementum_md::MmdError;
 use mementum_store::{
-    CommentLimit, MAX_MESSAGES_PER_THREAD, MAX_REACTIONS_PER_MESSAGE, MAX_THREADS_PER_PAGE,
-    ShareRefusal, StoreError,
+    CommentLimit, MAX_MESSAGES_PER_PAGE, MAX_MESSAGES_PER_THREAD, MAX_REACTIONS_PER_ACCOUNT,
+    MAX_REACTIONS_PER_MESSAGE, MAX_TEXT_BYTES_PER_PAGE, MAX_THREADS_PER_ACCOUNT,
+    MAX_THREADS_PER_PAGE, ShareRefusal, StoreError,
 };
 use mementum_sync::SyncError;
 
@@ -245,8 +246,10 @@ impl ApiError {
         )
     }
 
-    /// `409 thread_limit`, `message_limit` ou `reaction_limit` : un plafond des commentaires
-    /// (Ruling R204), dit avec ce qu'il faut faire.
+    /// `409 thread_limit`, `message_limit`, `reaction_limit` ou `page_comment_limit` : un plafond
+    /// des commentaires (Rulings R204, R350, R351), dit avec ce qu'il faut faire. La part d'un
+    /// compte garde le code du plafond commun qu'elle partage (`thread_limit`, `reaction_limit`),
+    /// avec un message à elle, qui dit que c'est sa part.
     pub fn comment_limit(limit: CommentLimit) -> ApiError {
         let (code, message) = match limit {
             CommentLimit::Threads => (
@@ -268,6 +271,42 @@ impl ApiError {
                 format!(
                     "ce message porte déjà {} emojis différents : réagis avec l'un d'eux ; rien                      n'a été écrit",
                     french_number(MAX_REACTIONS_PER_MESSAGE)
+                ),
+            ),
+            CommentLimit::PageMessages => (
+                ErrorCode::PageCommentLimit,
+                format!(
+                    "cette page a atteint {} messages de commentaires, tous fils compris : \
+                     supprime des fils ou des messages qui ne servent plus, ou demande-le à \
+                     quelqu'un qui a l'accès complet ; rien n'a été écrit",
+                    french_number(MAX_MESSAGES_PER_PAGE)
+                ),
+            ),
+            CommentLimit::PageText => (
+                ErrorCode::PageCommentLimit,
+                format!(
+                    "les commentaires de cette page dépasseraient {} Mio de texte : raccourcis \
+                     ton message, ou supprime des fils qui ne servent plus (ou demande-le à \
+                     quelqu'un qui a l'accès complet) ; rien n'a été écrit",
+                    MAX_TEXT_BYTES_PER_PAGE / (1024 * 1024)
+                ),
+            ),
+            CommentLimit::OwnThreads => (
+                ErrorCode::ThreadLimit,
+                format!(
+                    "tu as déjà ouvert {} fils de commentaires sur cette page, résolus compris : \
+                     c'est ta part, la même pour chaque compte ; réponds dans un fil déjà ouvert, \
+                     ou demande à quelqu'un qui a l'accès complet de supprimer ceux qui ne \
+                     servent plus ; rien n'a été écrit",
+                    french_number(MAX_THREADS_PER_ACCOUNT)
+                ),
+            ),
+            CommentLimit::OwnReactions => (
+                ErrorCode::ReactionLimit,
+                format!(
+                    "tu as déjà posé {} emojis différents sur ce message : c'est ta part ; retire \
+                     l'un des tiens avant d'en poser un autre ; rien n'a été écrit",
+                    french_number(MAX_REACTIONS_PER_ACCOUNT)
                 ),
             ),
         };
@@ -705,12 +744,70 @@ mod tests {
                 StatusCode::CONFLICT,
                 ErrorCode::ReactionLimit,
             ),
+            (
+                StoreError::CommentLimit(CommentLimit::PageMessages),
+                StatusCode::CONFLICT,
+                ErrorCode::PageCommentLimit,
+            ),
+            (
+                StoreError::CommentLimit(CommentLimit::PageText),
+                StatusCode::CONFLICT,
+                ErrorCode::PageCommentLimit,
+            ),
+            (
+                StoreError::CommentLimit(CommentLimit::OwnThreads),
+                StatusCode::CONFLICT,
+                ErrorCode::ThreadLimit,
+            ),
+            (
+                StoreError::CommentLimit(CommentLimit::OwnReactions),
+                StatusCode::CONFLICT,
+                ErrorCode::ReactionLimit,
+            ),
         ];
         for (refusal, status, code) in cases {
             let what = refusal.to_string();
             let (error, journal) = logged(|| ApiError::from(refusal));
             assert_eq!((error.status, error.body.error), (status, code), "{what}");
             assert_eq!(journal, "", "{what} : rien au journal");
+        }
+    }
+
+    /// Rulings R350 et R351 : les messages des plafonds de la page et de la part d'un compte,
+    /// mot pour mot. Le client les montre tels quels, et ses tests les citent ainsi
+    /// (`apps/web/src/comments/limits.test.tsx`) : qui change l'un change l'autre.
+    #[test]
+    fn page_and_account_limit_messages_are_the_ones_the_client_cites() {
+        let cases = [
+            (
+                CommentLimit::PageMessages,
+                "cette page a atteint 10 000 messages de commentaires, tous fils compris : \
+                 supprime des fils ou des messages qui ne servent plus, ou demande-le à \
+                 quelqu'un qui a l'accès complet ; rien n'a été écrit",
+            ),
+            (
+                CommentLimit::PageText,
+                "les commentaires de cette page dépasseraient 4 Mio de texte : raccourcis ton \
+                 message, ou supprime des fils qui ne servent plus (ou demande-le à quelqu'un \
+                 qui a l'accès complet) ; rien n'a été écrit",
+            ),
+            (
+                CommentLimit::OwnThreads,
+                "tu as déjà ouvert 200 fils de commentaires sur cette page, résolus compris : \
+                 c'est ta part, la même pour chaque compte ; réponds dans un fil déjà ouvert, ou \
+                 demande à quelqu'un qui a l'accès complet de supprimer ceux qui ne servent plus \
+                 ; rien n'a été écrit",
+            ),
+            (
+                CommentLimit::OwnReactions,
+                "tu as déjà posé 8 emojis différents sur ce message : c'est ta part ; retire \
+                 l'un des tiens avant d'en poser un autre ; rien n'a été écrit",
+            ),
+        ];
+        for (limit, said) in cases {
+            let error = ApiError::comment_limit(limit);
+            assert_eq!(error.status, StatusCode::CONFLICT, "{limit}");
+            assert_eq!(error.body.message, said, "{limit}");
         }
     }
 

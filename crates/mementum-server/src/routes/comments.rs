@@ -39,10 +39,14 @@
 //! caractère de contrôle (`char::is_control`) autre que le saut de ligne. Un emoji : de 1 à
 //! [`MAX_EMOJI_BYTES`] octets, sans caractère de contrôle ni espace (`char::is_whitespace`).
 //!
-//! **Plafonds** (Ruling R204), comptés par le store dans la transaction qui écrirait : 2 000 fils
-//! par page, résolus compris (`409 thread_limit`), 500 messages par fil (`409 message_limit`), 32
-//! emojis différents par message (`409 reaction_limit`, pour un emoji neuf seulement). Ils
-//! viennent après tous les refus de droit et le corps.
+//! **Plafonds**, comptés par le store dans la transaction qui écrirait : 2 000 fils par page,
+//! résolus compris (`409 thread_limit`), 500 messages par fil (`409 message_limit`), 32 emojis
+//! différents par message (`409 reaction_limit`, pour un emoji neuf seulement), Ruling R204 ;
+//! 10 000 messages et 4 Mio de texte par page (`409 page_comment_limit`, Ruling R350), qui
+//! bornent une lecture des fils (`GET`) ; la part d'un compte, 200 fils ouverts sur la page
+//! (`409 thread_limit`) et 8 emojis posés sur un message (`409 reaction_limit`), avec un message
+//! qui dit que c'est sa part (Ruling R351). Une modification qui allonge un message compte dans
+//! le texte de la page. Ils viennent après tous les refus de droit et le corps.
 //!
 //! **Lecteurs prévenus.** Après chaque écriture validée qui change quelque chose, les
 //! connexions de synchro de la page reçoivent la trame `{"type":"comments"}` (`Hub::page_event`,
