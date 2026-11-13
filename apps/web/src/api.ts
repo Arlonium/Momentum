@@ -394,6 +394,15 @@ export function deleteComment(pageId: string, threadId: string, commentId: strin
 }
 
 /**
+ * `DELETE /api/v1/pages/{id}/comments/{threadId}` : tout le fil part, avec les messages de tous
+ * et leurs réactions, en une écriture (R352). Il faut l'accès complet (`403` en dessous) ; un fil
+ * qui n'est plus là répond `404`.
+ */
+export function deleteThread(pageId: string, threadId: string): Promise<void> {
+  return call("DELETE", thread(pageId, threadId));
+}
+
+/**
  * `PUT` (`on`) ou `DELETE …/messages/{commentId}/reactions/{emoji}` : la réaction de la
  * personne, posée ou retirée. L'emoji va dans le chemin, encodé en UTF-8.
  */

@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   deleteComment,
+  deleteThread,
   editComment,
   getComments,
   isSessionLost,
@@ -64,6 +65,11 @@ export type Comments = {
   reply(threadId: string, body: string): Promise<Comment>;
   edit(threadId: string, commentId: string, body: string): Promise<Comment>;
   remove(threadId: string, commentId: string): Promise<void>;
+  /**
+   * Supprime tout le fil, avec les messages de tous (accès complet, R352). Un fil déjà parti
+   * (`404`) n'est pas un refus : c'est ce que la personne voulait.
+   */
+  removeThread(threadId: string): Promise<void>;
   resolve(threadId: string, resolved: boolean): Promise<Thread>;
   /** Pose (`on`) ou retire la réaction de la personne. */
   react(threadId: string, commentId: string, emoji: string, on: boolean): Promise<Comment>;
@@ -260,6 +266,23 @@ export function useComments(
       ),
     [pageId, write],
   );
+  const removeThread = useCallback(
+    (threadId: string) =>
+      write(
+        async () => {
+          try {
+            await deleteThread(pageId, threadId);
+          } catch (e) {
+            // Supprimé ailleurs entre-temps : il est parti, comme voulu. Rien à dire, ni la page à
+            // relire ; la liste l'est, comme après toute écriture (R362).
+            if (e instanceof ApiError && e.status === 404) return;
+            throw e;
+          }
+        },
+        (threads) => threads.filter((t) => t.id !== threadId),
+      ),
+    [pageId, write],
+  );
   const resolve = useCallback(
     (threadId: string, resolved: boolean) =>
       write(
@@ -283,7 +306,7 @@ export function useComments(
   const state = current?.state ?? "loading";
   const error = current?.error ?? null;
   return useMemo(
-    () => ({ threads, state, error, open, reply, edit, remove, resolve, react, reload }),
-    [threads, state, error, open, reply, edit, remove, resolve, react, reload],
+    () => ({ threads, state, error, open, reply, edit, remove, removeThread, resolve, react, reload }),
+    [threads, state, error, open, reply, edit, remove, removeThread, resolve, react, reload],
   );
 }

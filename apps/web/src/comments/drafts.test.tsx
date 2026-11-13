@@ -213,6 +213,7 @@ function Relu({ initial }: { initial: Thread[] }) {
     reply: async () => message("x"),
     edit: async () => message("x"),
     remove: async () => {},
+    removeThread: async () => {},
     resolve: async () => thread("x"),
     react: async () => message("x"),
     reload: () => {},

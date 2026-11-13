@@ -41,6 +41,7 @@ function fakeComments(threads: Thread[] | null, overrides: Partial<Comments> = {
     reply: vi.fn(async () => message("réponse")),
     edit: vi.fn(async () => message("modifié")),
     remove: vi.fn(async () => {}),
+    removeThread: vi.fn(async () => {}),
     resolve: vi.fn(async () => thread("résolu")),
     react: vi.fn(async () => message("réaction")),
     reload: vi.fn(),

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   ApiError,
   deleteComment,
+  deleteThread,
   editComment,
   getComments,
   openThread,
@@ -28,6 +29,7 @@ vi.mock("../api", async (original) => ({
   resolveThread: vi.fn(),
   editComment: vi.fn(),
   deleteComment: vi.fn(),
+  deleteThread: vi.fn(),
   setReaction: vi.fn(),
 }));
 
@@ -68,7 +70,15 @@ beforeEach(() => {
   vi.useFakeTimers();
   reads = [];
   onRefused.mockClear();
-  for (const mock of [openThread, replyToThread, resolveThread, editComment, deleteComment, setReaction]) {
+  for (const mock of [
+    openThread,
+    replyToThread,
+    resolveThread,
+    editComment,
+    deleteComment,
+    deleteThread,
+    setReaction,
+  ]) {
     vi.mocked(mock).mockReset();
   }
   vi.mocked(getComments).mockReset();
@@ -351,6 +361,45 @@ test("a_refused_write_is_rethrown_tells_the_page_and_rereads", async () => {
   expect(rendered.current.threads?.[0].comments).toHaveLength(1);
   await advance(0);
   expect(reads).toHaveLength(2);
+});
+
+test("a_thread_deletion_reaches_its_route_and_rereads", async () => {
+  const { rendered } = await loaded([thread("t1"), thread("t2")]);
+  vi.mocked(deleteThread).mockResolvedValue(undefined);
+  await settle(() => rendered.current.removeThread("t1"));
+  expect(vi.mocked(deleteThread)).toHaveBeenCalledExactlyOnceWith("p", "t1");
+  // Tout le fil part aussitôt, avec ses messages.
+  expect(rendered.current.threads?.map((t) => t.id)).toEqual(["t2"]);
+  await advance(0);
+  expect(reads).toHaveLength(2);
+  expect(onRefused).not.toHaveBeenCalled();
+});
+
+test("a_thread_already_gone_is_no_refusal", async () => {
+  // Supprimé ailleurs entre-temps : la route répond `404`, et c'est ce que la personne voulait.
+  const { rendered } = await loaded([thread("t1"), thread("t2")]);
+  vi.mocked(deleteThread).mockRejectedValue(
+    new ApiError(404, "not_found", "fil de commentaires introuvable sur cette page"),
+  );
+  await settle(() => rendered.current.removeThread("t1"));
+  expect(rendered.current.threads?.map((t) => t.id)).toEqual(["t2"]);
+  expect(onRefused).not.toHaveBeenCalled();
+  await advance(0);
+  expect(reads).toHaveLength(2);
+  // Un autre refus reste un refus : rendu à l'appelant, et la page est relue.
+  const refusal = new ApiError(409, "trashed", "la page est à la corbeille");
+  vi.mocked(deleteThread).mockRejectedValue(refusal);
+  let caught: unknown;
+  await settle(async () => {
+    try {
+      await rendered.current.removeThread("t2");
+    } catch (error) {
+      caught = error;
+    }
+  });
+  expect(caught).toBe(refusal);
+  expect(onRefused).toHaveBeenCalledExactlyOnceWith(refusal);
+  expect(rendered.current.threads?.map((t) => t.id)).toEqual(["t2"]);
 });
 
 test("a_write_that_does_not_reach_the_server_does_not_tell_the_page", async () => {

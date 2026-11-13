@@ -79,6 +79,9 @@ export function useMemoryComments(initial: Thread[], selfId = "alice"): Comments
           }),
         );
       },
+      removeThread: async (threadId) => {
+        setThreads((all) => all.filter((t) => t.id !== threadId));
+      },
       resolve: async (threadId, resolved) => {
         setThreads((all) =>
           all.map((t) =>
