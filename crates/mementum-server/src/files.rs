@@ -718,20 +718,26 @@ pub(crate) fn sniff(head: &[u8]) -> &'static str {
     }
 }
 
-/// Le nom d'affichage d'un fichier (R247) : un libellé, jamais un chemin. Sans caractère de
-/// contrôle ni de direction (U+061C, U+200E, U+200F, U+202A à U+202E, U+2066 à U+2069), `/` et
-/// `\` remplacés par `_`, espaces de bord retirées, 255 caractères au plus, « fichier » s'il n'en
-/// reste rien.
+/// Le nom d'affichage d'un fichier (R247, R287) : un libellé, jamais un chemin. Sans caractère
+/// de contrôle, de direction (U+061C, U+200E, U+200F, U+202A à U+202E, U+2066 à U+2069) ni de
+/// séparation de ligne (U+2028, U+2029), `/` et `\` remplacés par `_`, espaces de bord retirées,
+/// 255 caractères au plus, l'extension gardée quand il faut couper ([`shorten`]), et « fichier »
+/// s'il ne reste rien à montrer : rien, ou seulement des points, des espaces et des caractères
+/// sans dessin. Les noms que Windows réserve (`CON`, `NUL.txt`) restent tels quels : aucun nom
+/// n'entre dans un chemin du serveur.
 pub(crate) fn display_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
-        .filter(|&c| !c.is_control() && !is_direction_mark(c))
+        .filter(|&c| !c.is_control() && !is_direction_mark(c) && !is_line_break(c))
         .map(|c| if c == '/' || c == '\\' { '_' } else { c })
         .collect();
-    let kept: String = cleaned.trim().chars().take(MAX_NAME_CHARS).collect();
-    match kept.trim_end() {
-        "" => DEFAULT_NAME.to_string(),
-        kept => kept.to_string(),
+    let kept = shorten(cleaned.trim(), MAX_NAME_CHARS, |_| 1);
+    // Jugé sur ce qui est gardé, pas sur le nom reçu : la coupe peut n'avoir laissé que des
+    // caractères sans dessin.
+    if kept.chars().all(|c| c == '.' || is_blank(c)) {
+        DEFAULT_NAME.to_string()
+    } else {
+        kept.into_owned()
     }
 }
 
@@ -742,14 +748,53 @@ fn is_direction_mark(c: char) -> bool {
     )
 }
 
+/// Les séparateurs de ligne et de paragraphe d'Unicode : des sauts de ligne que `is_control` ne
+/// connaît pas.
+fn is_line_break(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// Un caractère qui ne montre rien : une espace, ou l'un des caractères sans largeur ni dessin
+/// (les « ignorables par défaut » d'Unicode, et le braille vide). Ils restent dans un nom qui a
+/// autre chose à montrer (le liant U+200D tient ensemble les émojis composés, l'antiliant
+/// U+200C s'écrit en persan) ; un nom qui n'a qu'eux ne se verrait pas à l'écran.
+fn is_blank(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{17B4}'
+                | '\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200D}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{206A}'..='\u{206F}'
+                | '\u{2800}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E0FFF}'
+        )
+}
+
 /// `Content-Disposition` d'un fichier servi, pour un nom déjà nettoyé ([`display_name`]) : toujours
 /// `attachment` (R246), et le nom sous deux formes : `filename="…"`, où tout caractère hors de
 /// l'ASCII imprimable, `"`, `\` et `%` devient `_` ; `filename*=UTF-8''…`, encodé en pour-cent
 /// hors des `attr-char` de la RFC 5987. Un nom qui ferait passer `filename*` au-delà de 1,5 Kio
-/// est raccourci, son extension gardée, pour que l'en-tête reste sous 2 Kio (R271) ; un nom vide
-/// devient « fichier ».
+/// est raccourci, son extension gardée, pour que l'en-tête reste sous 2 Kio (R271) ; un nom
+/// vide, ou dont la coupe ne laisse rien, devient « fichier ».
 pub(crate) fn content_disposition(name: &str) -> HeaderValue {
-    let name = shorten_for_header(if name.is_empty() { DEFAULT_NAME } else { name });
+    let name = shorten(name, MAX_ENCODED_NAME, encoded_len);
+    let name = if name.is_empty() {
+        DEFAULT_NAME
+    } else {
+        &*name
+    };
     let fallback: String = name
         .chars()
         .map(|c| match c {
@@ -786,10 +831,13 @@ fn encoded_len(c: char) -> usize {
     if is_attr_char(c) { 1 } else { 3 * c.len_utf8() }
 }
 
-/// `name`, raccourci par la fin de ce qui précède son extension s'il ferait passer `filename*`
-/// au-delà de [`MAX_ENCODED_NAME`] (R271).
-fn shorten_for_header(name: &str) -> Cow<'_, str> {
-    if name.chars().map(encoded_len).sum::<usize>() <= MAX_ENCODED_NAME {
+/// `name`, raccourci s'il coûte plus que `budget`, à `cost` par caractère : par la fin de ce qui
+/// précède son extension, gardée si elle fait au plus [`MAX_KEPT_EXTENSION`] caractères, point
+/// compris (R271). La même règle pour les 255 caractères du nom gardé et pour les octets de
+/// l'en-tête (R287). La coupe ne laisse au bord ni espace, ni liant U+200D, qui attendrait le
+/// caractère suivant.
+fn shorten(name: &str, budget: usize, cost: impl Fn(char) -> usize) -> Cow<'_, str> {
+    if name.chars().map(&cost).sum::<usize>() <= budget {
         return Cow::Borrowed(name);
     }
     let (stem, extension) = match name.rfind('.') {
@@ -798,18 +846,18 @@ fn shorten_for_header(name: &str) -> Cow<'_, str> {
         }
         _ => (name, ""),
     };
-    let mut budget = MAX_ENCODED_NAME - extension.chars().map(encoded_len).sum::<usize>();
-    let mut shortened = String::new();
-    for c in stem.chars() {
-        let cost = encoded_len(c);
-        if cost > budget {
+    let mut left = budget.saturating_sub(extension.chars().map(&cost).sum());
+    let mut end = 0;
+    for (at, c) in stem.char_indices() {
+        let cost = cost(c);
+        if cost > left {
             break;
         }
-        budget -= cost;
-        shortened.push(c);
+        left -= cost;
+        end = at + c.len_utf8();
     }
-    shortened.push_str(extension);
-    Cow::Owned(shortened)
+    let stem = stem[..end].trim_end_matches(|c: char| c.is_whitespace() || c == '\u{200D}');
+    Cow::Owned(format!("{stem}{extension}"))
 }
 
 /// Un hash en hexadécimal, en minuscules : 64 caractères.
@@ -1263,6 +1311,94 @@ mod tests {
         assert_eq!(display_name(&spaced), "a".repeat(254));
     }
 
+    /// Un nom raccourci garde son extension, par la règle de l'en-tête (R271) ; un nom qui ne
+    /// montre rien (des points, des espaces, des caractères sans dessin) devient « fichier » ;
+    /// les séparateurs de ligne et de paragraphe d'Unicode partent comme les caractères de
+    /// contrôle. Les noms réservés de Windows restent tels quels : aucun nom n'entre dans un
+    /// chemin du serveur.
+    #[test]
+    fn display_name_keeps_the_extension_and_shows_something() {
+        // 255 caractères au plus, l'extension gardée.
+        let long = format!("{}.pdf", "a".repeat(300));
+        assert_eq!(display_name(&long), format!("{}.pdf", "a".repeat(251)));
+        let accents = format!("{}.tar.gz", "é".repeat(300));
+        assert_eq!(display_name(&accents), format!("{}.gz", "é".repeat(252)));
+        // Une « extension » de plus de seize caractères n'en est pas une : le nom est coupé par
+        // la fin.
+        let odd = format!("a.{}", "b".repeat(300));
+        assert_eq!(display_name(&odd), format!("a.{}", "b".repeat(253)));
+        // La coupe ne laisse au bord ni espace, ni liant U+200D, qui attendrait le caractère
+        // suivant.
+        let spaced = format!("{} b.txt", "a".repeat(250));
+        assert_eq!(display_name(&spaced), format!("{}.txt", "a".repeat(250)));
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let joined = format!("a{}", family.repeat(60));
+        let kept = display_name(&joined);
+        assert!(joined.starts_with(&kept));
+        assert_eq!(kept.chars().count(), 254);
+        assert!(kept.ends_with('\u{1f469}'), "{:?}", kept.chars().last());
+
+        // Rien à montrer : des points, des espaces, des caractères sans dessin.
+        for raw in [
+            ".",
+            "..",
+            "....",
+            ". .",
+            " . ",
+            "\u{200b}",
+            "\u{feff}",
+            "\u{2060}\u{ad}",
+            "\u{3164}",
+            "\u{200b}.\u{feff}",
+            "\u{2800}\u{2800}",
+            "\u{200d}",
+            "\u{2028}",
+        ] {
+            assert_eq!(display_name(raw), "fichier", "{raw:?}");
+        }
+        // Rien à montrer non plus dans ce que la coupe garde.
+        let hidden = format!("{}a", "\u{200b}".repeat(300));
+        assert_eq!(display_name(&hidden), "fichier");
+
+        assert_eq!(display_name("a\u{2028}b\u{2029}c.txt"), "abc.txt");
+        // Ce qui reste tel quel.
+        for raw in [
+            "CON",
+            "NUL.txt",
+            "a:b",
+            "rapport.pdf.",
+            ".htaccess",
+            "~",
+            "a.b",
+            "\u{200b}.txt",
+            "caf\u{e9} \u{1f468}\u{200d}\u{1f469}.png",
+        ] {
+            assert_eq!(display_name(raw), raw, "{raw:?}");
+        }
+    }
+
+    /// La coupe de l'en-tête ne finit pas sur un liant U+200D ; et s'il ne reste rien du nom
+    /// une fois coupé, c'est « fichier ».
+    #[test]
+    fn the_header_is_not_cut_on_a_joiner() {
+        let header = |name: &str| content_disposition(name).to_str().unwrap().to_string();
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        // Quarante familles : 2 160 octets encodés. Le budget s'arrête après vingt-huit
+        // familles, un homme et un liant.
+        let name = family.repeat(40);
+        let value = header(&name);
+        let decoded = percent_decode(value.split_once("UTF-8''").unwrap().1);
+        assert!(name.starts_with(&decoded), "{decoded:?}");
+        assert_eq!(decoded.chars().count(), 28 * 5 + 1);
+        assert!(
+            decoded.ends_with('\u{1f468}'),
+            "{:?}",
+            decoded.chars().last()
+        );
+        // Que des liants : rien ne reste de la coupe.
+        assert_eq!(header(&"\u{200d}".repeat(200)), header("fichier"));
+    }
+
     /// Une « extension » de plus de seize caractères n'est pas gardée : c'est le nom entier qui
     /// est raccourci (R271). Sans cette borne, le budget de ce qui précède l'extension passait
     /// sous zéro, et l'en-tête ne se construisait plus.
@@ -1372,12 +1508,26 @@ mod tests {
             assert!(name.chars().count() <= MAX_NAME_CHARS, "{raw:?}");
             assert_eq!(name, name.trim(), "{raw:?}");
             assert!(
-                !name
-                    .chars()
-                    .any(|c| c.is_control() || is_direction_mark(c) || c == '/' || c == '\\'),
+                !name.chars().any(|c| c.is_control()
+                    || is_direction_mark(c)
+                    || matches!(c, '/' | '\\' | '\u{2028}' | '\u{2029}')),
                 "{name:?}"
             );
+            assert!(
+                name.chars().any(|c| c != '.' && !is_blank(c)),
+                "rien à montrer : {name:?}"
+            );
             assert_eq!(display_name(&name), name, "nettoyé deux fois : {raw:?}");
+            // Coupé, il garde l'extension qu'il avait, si elle est courte.
+            let cleaned = display_name(&raw.chars().take(MAX_NAME_CHARS / 2).collect::<String>());
+            if let Some(dot) = cleaned.rfind('.').filter(|&dot| dot > 0)
+                && cleaned[dot..].chars().count() <= MAX_KEPT_EXTENSION
+            {
+                let long = format!("{}{cleaned}", "a".repeat(MAX_NAME_CHARS));
+                let kept = display_name(&long);
+                assert_eq!(kept.chars().count(), MAX_NAME_CHARS, "{long:?}");
+                assert!(kept.ends_with(&cleaned[dot..]), "{kept:?} de {long:?}");
+            }
 
             for subject in [name.as_str(), raw.as_str()] {
                 let header = content_disposition(subject);
@@ -1396,17 +1546,37 @@ mod tests {
                     assert_eq!(decoded, DEFAULT_NAME);
                 } else if whole <= MAX_ENCODED_NAME {
                     assert_eq!(decoded, subject);
+                } else if decoded == DEFAULT_NAME {
+                    // Il ne restait rien de la coupe : le début du nom, sur plus que ce que
+                    // l'en-tête peut porter, n'était fait que d'espaces et de liants.
+                    shortened += 1;
+                    assert!(
+                        subject
+                            .chars()
+                            .take(MAX_ENCODED_NAME / 12)
+                            .all(|c| c.is_whitespace() || c == '\u{200d}'),
+                        "{subject:?}"
+                    );
                 } else {
                     shortened += 1;
-                    // Un début du nom, puis une fin du nom (l'extension), rien d'autre.
-                    let common = decoded
-                        .chars()
-                        .zip(subject.chars())
-                        .take_while(|(a, b)| a == b)
-                        .count();
-                    let tail: String = decoded.chars().skip(common).collect();
-                    assert!(subject.ends_with(&tail), "{decoded:?} de {subject:?}");
-                    assert!(tail.chars().count() <= MAX_KEPT_EXTENSION);
+                    // Un début du nom, puis son extension si elle est courte, rien d'autre ; et
+                    // la coupe ne laisse au bord ni espace, ni liant.
+                    let extension = match subject.rfind('.') {
+                        Some(dot)
+                            if dot > 0 && subject[dot..].chars().count() <= MAX_KEPT_EXTENSION =>
+                        {
+                            &subject[dot..]
+                        }
+                        _ => "",
+                    };
+                    let stem = decoded
+                        .strip_suffix(extension)
+                        .unwrap_or_else(|| panic!("{decoded:?} de {subject:?}"));
+                    assert!(subject.starts_with(stem), "{decoded:?} de {subject:?}");
+                    assert!(
+                        !stem.ends_with(|c: char| c.is_whitespace() || c == '\u{200d}'),
+                        "{decoded:?}"
+                    );
                 }
                 if subject.chars().count() <= MAX_NAME_CHARS {
                     assert!(value.len() < 2048, "{} octets", value.len());
