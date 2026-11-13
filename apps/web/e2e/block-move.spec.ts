@@ -152,6 +152,83 @@ async function dropUnder(p: Page, moved: string, under: string): Promise<void> {
     .toEqual(movedUnder(before, moved, under));
 }
 
+/**
+ * Chez `p`, sélectionne à la souris du début du bloc de texte `first` à la fin du bloc de texte
+ * `last` : un clic, puis Maj+clic.
+ */
+async function selectBlocks(p: Page, first: string, last: string): Promise<void> {
+  await (await blockOf(p, first)).locator(OWN_CONTENT).click();
+  await p.keyboard.press("Home");
+  const end = (await (await blockOf(p, last)).locator(OWN_CONTENT).boundingBox())!;
+  await p.keyboard.down("Shift");
+  await p.mouse.click(end.x + end.width - 4, end.y + end.height / 2);
+  await p.keyboard.up("Shift");
+  await p.keyboard.press("Shift+End");
+  // L'éditeur lit la sélection du navigateur un instant plus tard.
+  await expect
+    .poll(() => p.evaluate(() => window.__mementum!.editor.getSelection()?.blocks.length ?? 0))
+    .toBeGreaterThan(1);
+}
+
+/**
+ * Chez `p`, glisse d'un bloc les blocs de textes `moved`, voisins et sélectionnés
+ * (`selectBlocks`), par la poignée du premier, sous le bloc de texte `under`. Vérifie qu'ils ont
+ * changé de place ensemble, avec leurs ids, et que rien d'autre n'a bougé.
+ */
+async function dragManyUnder(p: Page, moved: string[], under: string): Promise<void> {
+  const before = await shownBlocks(p);
+  const group = before.filter((b) => moved.includes(b.text));
+  expect(group.map((b) => b.text)).toEqual(moved);
+  await grab(p, moved[0]);
+  const target = (await (await blockOf(p, under)).locator(OWN_CONTENT).boundingBox())!;
+  await p.mouse.move(target.x + target.width / 2, target.y + target.height * 0.8, { steps: 8 });
+  await p.mouse.up();
+  const rest = before.filter((b) => !group.includes(b));
+  const at = rest.findIndex((b) => b.text === under);
+  await expect
+    .poll(() => shownBlocks(p), { message: `le glisser de ${JSON.stringify(moved)} sous « ${under} »` })
+    .toEqual([...rest.slice(0, at + 1), ...group, ...rest.slice(at + 1)]);
+}
+
+/** La sélection de l'éditeur au moment d'une écriture : sa sorte, et les blocs qu'elle touche. */
+type WrittenWith = { type: string; empty: boolean; blocks: string[] };
+
+/**
+ * Note chez `p`, à chaque écriture de y-prosemirror qui change le document, la sélection que
+ * l'éditeur a alors : c'est elle que lit le correctif de y-prosemirror pour savoir quels blocs le
+ * geste a déplacés (`selectedBlockKeys`). `writtenWith` rend ce qui a été noté, et le vide.
+ */
+async function noteSelectionAtEachWrite(p: Page): Promise<void> {
+  await p.evaluate(() => {
+    const { editor } = window.__mementum!;
+    const state = editor.prosemirrorState;
+    const plugin = state.plugins.find((x) => (x as unknown as { key: string }).key === "y-sync$")!;
+    const { binding } = plugin.getState(state) as {
+      binding: { _prosemirrorChanged: (doc: unknown) => void; prosemirrorView: typeof editor.prosemirrorView };
+    };
+    const write = binding._prosemirrorChanged.bind(binding);
+    const noted: unknown[] = [];
+    (window as unknown as { __writtenWith: unknown[] }).__writtenWith = noted;
+    let last: unknown = state.doc;
+    binding._prosemirrorChanged = (doc) => {
+      if (doc !== last) {
+        last = doc;
+        const { selection } = binding.prosemirrorView.state;
+        const blocks: string[] = [];
+        selection.$from.doc.nodesBetween(selection.from, selection.to, (node) => {
+          if (node.type.name === "blockContainer") blocks.push(String(node.attrs.id));
+        });
+        noted.push({ type: (selection.toJSON() as { type: string }).type, empty: selection.empty, blocks });
+      }
+      write(doc);
+    };
+  });
+}
+
+function writtenWith(p: Page): Promise<WrittenWith[]> {
+  return p.evaluate(() => (window as unknown as { __writtenWith: WrittenWith[] }).__writtenWith.splice(0));
+}
+
 /** Tape `typed` à la fin du bloc de texte `text`, chez `p`, et attend que l'éditeur le montre. */
 async function typeAtEnd(p: Page, text: string, typed: string): Promise<void> {
   await (await blockOf(p, text)).locator(OWN_CONTENT).click();
@@ -465,6 +542,66 @@ test("the_cursor_left_in_a_dropped_block_follows_it_when_someone_else_moves_it",
   await mona.keyboard.type(" de Mona");
   const { x, y, z, a, b, c } = page(s, { x: "Bloc X de Mona" });
   await expectPageEverywhere(s, [y, x, z, a, b, c]);
+});
+
+// Ce que le correctif de y-prosemirror lit pour savoir quels blocs un geste a déplacés (R227) :
+// la sélection de l'éditeur au moment où le déplacement s'écrit. Elle est sur ce que le geste
+// déplace, et sur rien d'autre ; l'instant d'après, BlockNote la remplace par un curseur. Les
+// aides `drag`, `dragMany` et `keyboardMany` des tests unitaires (`src/test/editors.ts`) rejouent
+// ce qui est relevé ici.
+test("a_drop_is_written_with_the_selection_on_what_it_drops", async ({ browser }) => {
+  const s = await scene(browser);
+  const { mona, ids } = s;
+  await noteSelectionAtEachWrite(mona);
+
+  // Un bloc déposé : il est sélectionné comme un nœud.
+  await dragUnder(mona, "Témoin A", "Témoin C");
+  expect(await writtenWith(mona)).toEqual([{ type: "node", empty: false, blocks: [ids.a] }]);
+
+  // Trois blocs déposés d'un coup : une sélection de texte, du premier au dernier.
+  await selectBlocks(mona, "Bloc X", "Bloc Z");
+  await dragManyUnder(mona, ["Bloc X", "Bloc Y", "Bloc Z"], "Témoin B");
+  expect(await writtenWith(mona)).toEqual([{ type: "text", empty: false, blocks: [ids.x, ids.y, ids.z] }]);
+  expect(await shownTexts(mona)).toEqual(["Témoin B", "Bloc X", "Bloc Y", "Bloc Z", "Témoin C", "Témoin A"]);
+
+  // Deux blocs remontés d'une place au clavier : la sélection est restée sur eux.
+  await selectBlocks(mona, "Bloc Y", "Bloc Z");
+  await mona.keyboard.press("Control+Shift+ArrowUp");
+  await expect
+    .poll(() => shownTexts(mona))
+    .toEqual(["Témoin B", "Bloc Y", "Bloc Z", "Bloc X", "Témoin C", "Témoin A"]);
+  expect(await writtenWith(mona)).toEqual([{ type: "text", empty: false, blocks: [ids.y, ids.z] }]);
+
+  // Un bloc descendu d'une place au clavier : le curseur est resté dedans.
+  await (await blockOf(mona, "Bloc X")).locator(OWN_CONTENT).click();
+  await mona.keyboard.press("Control+Shift+ArrowDown");
+  await expect
+    .poll(() => shownTexts(mona))
+    .toEqual(["Témoin B", "Bloc Y", "Bloc Z", "Témoin C", "Bloc X", "Témoin A"]);
+  expect(await writtenWith(mona)).toEqual([{ type: "text", empty: true, blocks: [ids.x] }]);
+  expect(s.errors).toEqual([]);
+});
+
+// Trois blocs glissés d'un coup sous deux autres. Ce sont les trois blocs glissés qui sont
+// recréés, pas les deux qu'ils croisent (R227) : ce que Tom tape au même moment dans ces deux-là,
+// que personne n'a déplacés, reste à sa place. Avec la règle d'avant (le moins de blocs recréés),
+// c'étaient eux qui étaient recréés, et sa frappe était perdue.
+test("typing_in_the_blocks_a_dragged_group_crosses_stays_in_place", async ({ browser }) => {
+  const s = await scene(browser);
+  const { mona, tom, monaApi, id } = s;
+  await goOffline(tom);
+  await typeAtEnd(tom, "Témoin A", TYPED);
+  await typeAtEnd(tom, "Témoin B", " aussi");
+  await selectBlocks(mona, "Bloc X", "Bloc Z");
+  await dragManyUnder(mona, ["Bloc X", "Bloc Y", "Bloc Z"], "Témoin B");
+  // Le déplacement est au serveur ; ce que Tom a tapé n'est encore que chez lui.
+  await expect
+    .poll(() => mmdBlocks(monaApi, id))
+    .toEqual(["Témoin A", "Témoin B", "Bloc X", "Bloc Y", "Bloc Z", "Témoin C"]);
+  await comeBack(tom);
+  await converged(mona, tom);
+  const { x, y, z, a, b, c } = page(s, { a: `Témoin A${TYPED}`, b: "Témoin B aussi" });
+  await expectPageEverywhere(s, [a, b, x, y, z, c]);
 });
 
 /** Un PNG d'un pixel, que `width` étire : de quoi cliquer. */
