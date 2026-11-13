@@ -43,6 +43,15 @@ export function canComment(level: Level): boolean {
   return level !== "read";
 }
 
+/**
+ * Depuis une page ouverte, la personne écrit-elle hors de l'éditeur ? Elle commente (hors
+ * corbeille), ou restaure une version ou la page de la corbeille (« Peut modifier »). Pour elle,
+ * le schéma du serveur compte même quand l'éditeur est en lecture seule (R35, R177).
+ */
+export function writesOutsideEditor(level: Level, trashed: boolean): boolean {
+  return trashed ? canEdit(level) : canComment(level);
+}
+
 /** L'accès général d'une page, tel que le menu Partager le montre et le laisse régler. */
 export type GeneralAccess = {
   /**

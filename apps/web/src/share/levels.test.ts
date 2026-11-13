@@ -11,6 +11,7 @@ import {
   LEVEL_LABELS,
   LEVELS,
   ROLE_LABELS,
+  writesOutsideEditor,
 } from "./levels";
 
 /** Un jeton de la forme de ceux du serveur : 32 octets aléatoires en base64url, sans `=`. */
@@ -134,4 +135,10 @@ test("every_level_but_read_can_comment", () => {
   expect(canComment("comment")).toBe(true);
   expect(canComment("edit")).toBe(true);
   expect(canComment("full")).toBe(true);
+});
+
+test("who_writes_outside_the_editor", () => {
+  // Commenter hors corbeille ; à la corbeille, seulement restaurer, qui demande « Peut modifier ».
+  expect(LEVELS.map((level) => writesOutsideEditor(level, false))).toEqual([false, true, true, true]);
+  expect(LEVELS.map((level) => writesOutsideEditor(level, true))).toEqual([false, false, true, true]);
 });

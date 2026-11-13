@@ -262,3 +262,58 @@ test("answers_arriving_once_unmounted_say_nothing", async () => {
   expect(onGone).not.toHaveBeenCalled();
   expect([first.verdict, second.verdict]).toEqual([false, false]);
 });
+
+// Une session en lecture seule ne fait que recevoir ; mais qui peut commenter, ou restaurer (une
+// version, une page de la corbeille), écrit depuis cet onglet hors de l'éditeur. Pour lui, le
+// schéma est relu aussi avant chaque connexion (R177) : un serveur mis à jour fait passer les
+// commentaires et la restauration en lecture seule, sans rien changer à l'éditeur. Un simple
+// lecteur n'a rien de plus sur le chemin de l'ouverture.
+
+const outside = ({ writable, writesOutsideEditor }: { writable: boolean; writesOutsideEditor: boolean }) =>
+  usePageGate({ id: "x", writable, writesOutsideEditor, checkSchema, onPage, onGone, afterLogin });
+
+test("read_only_session_of_someone_who_writes_outside_the_editor_rereads_the_schema", async () => {
+  sameSchema = false;
+  const gate = await renderHook(outside, { writable: false, writesOutsideEditor: true });
+  const state = connecting(gate.current.check);
+  // Les deux relectures partent ensemble : l'ouverture n'attend pas l'une après l'autre.
+  await settle();
+  expect(checkSchema).toHaveBeenCalledTimes(1);
+  expect(asked).toHaveLength(1);
+  // Un autre schéma (`checkSchema` l'a dit à l'application) ne ferme pas la session : elle ne
+  // fait que recevoir, l'éditeur reste tel quel.
+  await settle(() => asked[0].answer.resolve(page("x", { level: "comment" })));
+  expect(state.verdict).toBe(true);
+});
+
+test("a_schema_that_cannot_be_read_does_not_block_a_read_only_session", async () => {
+  checkSchema.mockRejectedValueOnce(unreachable());
+  const gate = await renderHook(outside, { writable: false, writesOutsideEditor: true });
+  const state = connecting(gate.current.check);
+  await settle(() => asked[0].answer.resolve(page("x", { level: "comment" })));
+  // Comme avant pour cette session : seule la page décide ; le schéma sera relu à la
+  // connexion suivante.
+  expect(state.verdict).toBe(true);
+  expect(state.error).toBeUndefined();
+});
+
+test("a_reader_reads_nothing_more_before_connecting", async () => {
+  const gate = await renderHook(outside, { writable: false, writesOutsideEditor: false });
+  const state = connecting(gate.current.check);
+  await settle(() => asked[0].answer.resolve(page("x", { level: "read" })));
+  expect(state.verdict).toBe(true);
+  expect(checkSchema).not.toHaveBeenCalled();
+});
+
+test("what_one_may_write_outside_the_editor_does_not_change_the_check", async () => {
+  const gate = await renderHook(outside, { writable: false, writesOutsideEditor: false });
+  const { check } = gate.current;
+  // Le niveau qui change (lecteur devenu commentateur) ne recrée pas la session de synchro :
+  // la connexion suivante relit le schéma.
+  await gate.rerender({ writable: false, writesOutsideEditor: true });
+  expect(gate.current.check).toBe(check);
+  const state = connecting(gate.current.check);
+  await settle(() => asked[0].answer.resolve(page("x", { level: "comment" })));
+  expect(checkSchema).toHaveBeenCalledTimes(1);
+  expect(state.verdict).toBe(true);
+});

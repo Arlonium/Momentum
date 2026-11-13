@@ -17,6 +17,12 @@
 // Sans cela, le serveur servirait en lecture seule une connexion ouverte pour écrire, et
 // ignorerait en silence tout ce que tape l'onglet.
 //
+// Le schéma compte aussi pour une session en lecture seule quand la personne écrit depuis cet
+// onglet hors de l'éditeur : elle commente, ou restaure (une version, une page de la corbeille).
+// Il est alors relu avec la page, et un autre schéma fait passer les commentaires et la
+// restauration en lecture seule (R177), sans fermer la session ni rien changer à l'éditeur.
+// Un simple lecteur ne relit rien de plus.
+//
 // Deux lectures de la page peuvent être en route (une connexion de synchro, et le menu
 // Partager qui vient de perdre l'accès complet) : une réponse plus ancienne qu'une autre déjà
 // retenue ne dit plus rien. C'est le rang de la demande qui compte, et seulement parmi les
@@ -33,6 +39,12 @@ type Inputs = {
   id: string;
   /** La session de synchro écrit : elle ne se connecte que si le serveur le permet encore. */
   writable: boolean;
+  /**
+   * La personne écrit depuis cet onglet hors de l'éditeur (commenter, restaurer) : le schéma
+   * est relu même pour une session en lecture seule. Lu à chaque connexion, sans recréer la
+   * session quand il change.
+   */
+  writesOutsideEditor?: boolean;
   /** Relit la version de schéma du serveur ; `false` met l'application en lecture seule. */
   checkSchema: SchemaCheck;
   /** Ce que le serveur dit de la page, à chaque relecture. */
@@ -99,11 +111,18 @@ export function usePageGate(inputs: Inputs): PageGate {
   }, [id, keep]);
 
   const check = useCallback(async () => {
-    // Le schéma ne compte que pour qui écrit : une session en lecture seule ne fait que
-    // recevoir. Les deux relectures partent ensemble : l'ouverture d'une page n'attend pas
-    // l'une après l'autre.
+    // Le schéma ne compte que pour qui écrit : dans l'éditeur, ou hors de lui (commentaires,
+    // restauration) depuis une session en lecture seule, qui ne fait que recevoir et se connecte
+    // quoi qu'il dise (`checkSchema` dit à l'application de tout mettre en lecture seule). Les
+    // deux relectures partent ensemble : l'ouverture d'une page n'attend pas l'une après l'autre.
+    const { checkSchema, writesOutsideEditor } = latest.current;
     const [sameSchema, node] = await Promise.all([
-      writable ? latest.current.checkSchema() : true,
+      writable
+        ? checkSchema()
+        : writesOutsideEditor
+          ? // Illisible : la connexion suivante le relira ; la page seule décide.
+            checkSchema().catch(() => true)
+          : true,
       read(),
     ]);
     // `node` : ce qu'on sait de plus récent de la page, que ce soit ou non la réponse de cette

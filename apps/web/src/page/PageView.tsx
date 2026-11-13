@@ -34,7 +34,7 @@ import { TrashIcon } from "../icons";
 import { messageOf } from "../session/forms";
 import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
-import { canComment, canEdit } from "../share/levels";
+import { canComment, canEdit, writesOutsideEditor } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
 import { PageMenu } from "./PageMenu";
 import { Presence } from "./Presence";
@@ -115,6 +115,9 @@ export function PageView({
   const { check, reread } = usePageGate({
     id,
     writable: !locked,
+    // Commenter ou restaurer depuis une session en lecture seule : le schéma compte aussi (R177).
+    // Déjà sous un autre schéma, rien de plus à relire.
+    writesOutsideEditor: !readOnly && writesOutsideEditor(node.level, trashed),
     checkSchema,
     onPage,
     onGone,
