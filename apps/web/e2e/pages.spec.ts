@@ -6,6 +6,7 @@ import {
   apiAs,
   closeContexts,
   createPage,
+  firstSpace,
   getMmd,
   getPage,
   getTree,
@@ -242,6 +243,15 @@ test("active_row_is_shown_clear_of_the_sidebar_edges", async ({ browser }) => {
   const pages: PageNode[] = [];
   for (let i = 0; i < 40; i++) pages.push(await createPage(api, { title: `Ligne ${i + 1}` }));
   const p = await newUser(browser, account);
+  // « Récents », au-dessus des arbres, grandit d'une ligne à chaque page ouverte, jusqu'à cinq
+  // (R255), et le navigateur ancre le défilement sur ce qu'il montre : les mesures exactes de
+  // ce test veulent une liste repliée, dont la hauteur (son titre) ne bouge pas quand une page
+  // s'ouvre. Ce que fait la liste quand elle grandit : `recents.spec.ts`.
+  const { id: spaceId } = await firstSpace(api);
+  await p.addInitScript(
+    (key) => localStorage.setItem(key, JSON.stringify(["recents"])),
+    `mementum.sections.${spaceId}`,
+  );
   const sidebar = sidebarOf(p);
   /** La ligne est-elle visible en entier, sans rien par-dessus ? */
   const clear = (id: string) =>
