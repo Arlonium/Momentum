@@ -4,7 +4,8 @@
 //
 // Accessible (`alertdialog`, nommée par son titre et décrite par son texte) :
 // - le focus reste dans la fenêtre, Tab et Maj+Tab tournent entre ses boutons ;
-// - Échap annule, comme un clic sur le voile ;
+// - Échap annule, comme un clic sur le voile (mais pas le second clic d'un double clic, qui a
+//   commencé sur le bouton qui l'a ouverte) ;
 // - le focus part sur « Annuler » : Entrée, tapée par réflexe ou restée enfoncée depuis le
 //   bouton qui a ouvert la fenêtre, n'exécute jamais l'action. La confirmer demande d'aller
 //   sur son bouton ;
@@ -94,9 +95,12 @@ export function Confirm({
     }
   };
 
-  // Un clic sur le voile (hors du cadre de la fenêtre) annule.
+  // Un clic sur le voile (hors du cadre de la fenêtre) annule ; pas le second clic d'un double
+  // clic (`detail` 2 et plus) : il a commencé sur le bouton qui a ouvert la fenêtre, et tombe sur
+  // le voile qui le couvre maintenant.
   const onClick = (event: MouseEvent<HTMLDialogElement>) => {
     if (event.target !== event.currentTarget) return;
+    if (event.detail > 1) return;
     const box = event.currentTarget.getBoundingClientRect();
     const inside =
       event.clientX >= box.left &&
