@@ -4,7 +4,10 @@
 //!
 //! **Ce qui en sort.** Des trames texte `{"lsn":N}`, écrites par le serveur : une à l'ouverture,
 //! la version courante, puis une chaque fois qu'elle avance ; et un ping WebSocket, vide, toutes
-//! les [`Config::events_ping`] ([`EVENTS_PING`] par défaut). Rien d'autre : ni identifiant, ni
+//! les [`Config::events_ping`] ([`EVENTS_PING`] par défaut), précédé de la version courante
+//! redite, même égale (Ruling R205) : le client ne voit pas les pings, et un canal à demi ouvert
+//! laissait sa barre latérale périmée sans limite ; il ne relit rien pour un numéro égal (R156),
+//! et s'en sert comme signe de vie. Rien d'autre : ni identifiant, ni
 //! titre, ni compte, et la trame de fermeture n'a ni code ni raison. Le client relit alors
 //! l'arbre par `GET /api/v1/spaces/{id}/tree`, déjà filtré par `access.rs` : aucun second
 //! calcul de « qui voit quoi » n'est écrit pour ce canal. Ce que la personne en apprend, invitée
@@ -30,7 +33,7 @@
 //! n'envoie rien, et plusieurs écritures rapprochées peuvent ne faire qu'une trame.
 //!
 //! **Droits.** Avant de mettre en file chaque trame de version, la première comprise, et chaque
-//! ping, elle revérifie que la session lue à la poignée de main vaut encore et que le compte a
+//! ping avec la version qu'il redit, elle revérifie que la session lue à la poignée de main vaut encore et que le compte a
 //! encore un rôle dans l'espace (`AppState::role_at_least`) ; sinon elle ferme, et ce qui
 //! attendait dans la file ne part pas. La version est lue avant cette vérification : aucun
 //! numéro lu après un retrait n'est mis en file. Un numéro lu, et vérifié, juste avant un retrait
@@ -276,12 +279,16 @@ impl Conn<'_> {
     }
 
     /// Le ping : une connexion qui n'a répondu à aucun des derniers est fermée (Ruling R153) ;
-    /// sinon les droits, puis le ping en file.
+    /// sinon la version relue, les droits, puis la version et le ping en file (Ruling R205). Le
+    /// client ne voit pas les pings : la version redite, même égale, lui dit que le canal vit,
+    /// et il ne relit rien pour un numéro égal (R156).
     async fn on_ping(&mut self) -> Result<(), End> {
         if self.unanswered >= MAX_MISSED_PONGS {
             return Err(End::Unresponsive);
         }
+        let lsn = self.read_lsn().await?;
         self.check().await?;
+        self.push_version(lsn)?;
         self.push(Message::Ping(Bytes::new()))?;
         self.unanswered += 1;
         Ok(())
@@ -290,20 +297,30 @@ impl Conn<'_> {
     /// Relit la version ; si elle a monté depuis la dernière trame (ou s'il n'y en a pas eu),
     /// revérifie les droits, puis met sa trame en file.
     async fn refresh(&mut self) -> Result<(), End> {
-        let lsn = match self.state.store.space_lsn(self.space).await {
-            Ok(Some(lsn)) => lsn,
-            Ok(None) => return Err(End::SpaceGone),
-            Err(error) => {
-                tracing::warn!(space_id = %self.space, %error, "version de l'espace illisible : canal de l'espace fermé");
-                return Err(End::Unavailable);
-            }
-        };
+        let lsn = self.read_lsn().await?;
         if self.sent.is_some_and(|sent| lsn <= sent) {
             return Ok(());
         }
         self.check().await?;
+        self.push_version(lsn)
+    }
+
+    /// La version de l'espace, lue dans la base.
+    async fn read_lsn(&self) -> Result<i64, End> {
+        match self.state.store.space_lsn(self.space).await {
+            Ok(Some(lsn)) => Ok(lsn),
+            Ok(None) => Err(End::SpaceGone),
+            Err(error) => {
+                tracing::warn!(space_id = %self.space, %error, "version de l'espace illisible : canal de l'espace fermé");
+                Err(End::Unavailable)
+            }
+        }
+    }
+
+    /// Met en file la trame `{"lsn":N}`, les droits déjà revérifiés.
+    fn push_version(&mut self, lsn: i64) -> Result<(), End> {
         self.push(Message::text(format!("{{\"lsn\":{lsn}}}")))?;
-        self.sent = Some(lsn);
+        self.sent = Some(self.sent.map_or(lsn, |sent| sent.max(lsn)));
         Ok(())
     }
 
@@ -466,7 +483,8 @@ mod tests {
 
     /// R153 : un client à qui tout part mais qui ne répond à aucun ping est fermé après le
     /// troisième resté sans réponse, au tick suivant. Il a reçu la trame d'ouverture, trois
-    /// pings, puis la trame de fermeture, sans raison.
+    /// pings précédés chacun de la version redite (Ruling R205), puis la trame de fermeture, sans
+    /// raison.
     #[tokio::test]
     async fn a_connection_that_never_answers_pings_is_closed_after_the_third() {
         assert_eq!(MAX_MISSED_PONGS, 3);
@@ -485,8 +503,11 @@ mod tests {
             handed(&sent),
             [
                 version_frame(lsn),
+                version_frame(lsn),
                 ping.clone(),
+                version_frame(lsn),
                 ping.clone(),
+                version_frame(lsn),
                 ping,
                 Message::Close(None)
             ]
@@ -526,8 +547,9 @@ mod tests {
         assert!(
             sent[1..]
                 .iter()
-                .all(|message| matches!(message, Message::Ping(payload) if payload.is_empty())),
-            "que des pings vides après la trame d'ouverture"
+                .all(|message| *message == version_frame(lsn)
+                    || matches!(message, Message::Ping(payload) if payload.is_empty())),
+            "que des pings vides, et la version redite avec chacun (Ruling R205), après la trame              d'ouverture"
         );
     }
 

@@ -345,6 +345,16 @@ fn version(frame: &str) -> i64 {
     lsn
 }
 
+/// Toutes les trames texte du canal portent la même version : celle de l'ouverture, redite à
+/// chaque ping (Ruling R205), dans un espace où rien ne s'écrit.
+fn assert_one_version(channel: &Channel) {
+    let versions = channel.versions();
+    assert!(
+        versions.windows(2).all(|pair| pair[0] == pair[1]),
+        "{versions:?}"
+    );
+}
+
 fn events_url(addr: SocketAddr, space: impl std::fmt::Display) -> String {
     format!("ws://{addr}/events/{space}")
 }
@@ -430,7 +440,8 @@ fn member_uri(team: &Team<'_>, member: Uuid) -> String {
 /// l'écriture suivante, et la porte.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn first_frame_is_the_current_version() {
-    let t = open_app().await;
+    // Sans ping pendant le test : un ping redit la version (Ruling R205).
+    let t = app_pinging_every(NO_PING).await;
     let team = Team::new(&t).await;
     let addr = t.listen().await;
     // Des écritures avant l'ouverture : la version n'est plus celle d'un espace neuf.
@@ -460,7 +471,8 @@ async fn first_frame_is_the_current_version() {
 /// porte l'identifiant ni le titre de la page. L'invité ne voit toujours que sa page.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn space_events_carry_only_the_version() {
-    let t = open_app().await;
+    // Sans ping pendant le test : un ping redit la version (Ruling R205).
+    let t = app_pinging_every(NO_PING).await;
     let team = Team::new(&t).await;
     let addr = t.listen().await;
     let shared = team
@@ -640,7 +652,15 @@ async fn events_stop_when_the_session_ends() {
             "{who} : {:?}",
             channel.seen()
         );
-        assert_eq!(channel.texts().len(), 1, "{who} : rien après l'ouverture");
+        // Rien après l'ouverture que la version redite avec chaque ping passé avant la fin de
+        // la session (Ruling R205) : le ping qui la trouve fermée ne part pas, ni sa version.
+        assert_eq!(
+            channel.texts().len(),
+            1 + channel.ping_times().len(),
+            "{who} : {:?}",
+            channel.seen()
+        );
+        assert_one_version(channel);
     }
 }
 
@@ -831,18 +851,22 @@ async fn idle_events_connection_is_kept_alive() {
         );
     }
     assert!(!channel.is_closed());
-    assert_eq!(
-        channel.texts().len(),
-        1,
-        "rien d'autre que la trame d'ouverture"
-    );
+    // Rien d'autre que la version, redite juste avant chaque ping (Ruling R205).
+    let seen = channel.seen();
+    for (at, what) in seen.iter().enumerate() {
+        if *what == Seen::Ping {
+            assert!(matches!(seen[at - 1], Seen::Text(_)), "{seen:?}");
+        }
+    }
+    assert_one_version(&channel);
 }
 
 /// Le canal ne lit rien : une trame de données du client, texte ou binaire, le ferme. Un ping
 /// du client, lui, ne ferme rien.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn data_frames_from_the_client_close_the_channel() {
-    let t = open_app().await;
+    // Sans ping pendant le test : un ping redit la version (Ruling R205).
+    let t = app_pinging_every(NO_PING).await;
     let team = Team::new(&t).await;
     let addr = t.listen().await;
     for message in [Message::text("{\"lsn\":1}"), Message::binary(vec![0, 1, 2])] {
@@ -887,7 +911,8 @@ async fn tree_version(by: &Browser<'_>, space: Uuid) -> i64 {
 /// invité comme pour une membre ; et sans écriture, c'est la version de la base.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tree_is_as_recent_as_the_version_pushed() {
-    let t = open_app().await;
+    // Sans ping pendant le test : un ping redit la version (Ruling R205).
+    let t = app_pinging_every(NO_PING).await;
     let team = Team::new(&t).await;
     let addr = t.listen().await;
     team.page(None, "Pour Gina", &[user(&team.gina, Level::Read)])
@@ -941,7 +966,9 @@ async fn unanswered_pings_close_the_channel() {
         channel.seen()
     );
     assert_eq!(channel.ping_times().len(), 3, "{:?}", channel.seen());
-    assert_eq!(channel.texts().len(), 1);
+    // La trame d'ouverture, puis la version redite avec chaque ping (Ruling R205), rien d'autre.
+    assert_eq!(channel.texts().len(), 1 + 3, "{:?}", channel.seen());
+    assert_one_version(&channel);
     let closed = channel.closed_at().unwrap().duration_since(started);
     assert!(closed >= PING * 4, "fermé après {closed:?}");
 }
@@ -991,4 +1018,32 @@ async fn pongs_do_not_keep_a_closed_session_alive() {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     assert_eq!(channel.texts().len(), 1);
+}
+
+/// Ruling R205 : sans aucune écriture dans l'espace, la version arrive de nouveau à chaque ping,
+/// le même numéro, juste avant lui. Le client ne voit pas les pings (un navigateur y répond sans
+/// rien dire à la page) : il se sert de ces trames comme signe de vie, et ne relit rien pour un
+/// numéro égal (R156). Rien d'autre qu'un numéro ne sort.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_ping_comes_with_the_version() {
+    const PING: Duration = Duration::from_millis(100);
+    let t = app_pinging_every(PING).await;
+    let alice = t.account("Alice").await;
+    let addr = t.listen().await;
+    let channel = opened(&alice.browser, addr, alice.space).await;
+    assert!(
+        channel.wait_until(|c| c.ping_times().len() >= 4).await,
+        "{:?}",
+        channel.seen()
+    );
+    let seen = channel.seen();
+    let opening = channel.versions()[0];
+    let expected = Seen::Text(format!("{{\"lsn\":{opening}}}"));
+    for (at, what) in seen.iter().enumerate() {
+        if *what == Seen::Ping {
+            assert_eq!(seen[at - 1], expected, "avant le ping {at} : {seen:?}");
+        }
+    }
+    assert!(channel.versions().iter().all(|v| *v == opening), "{seen:?}");
+    assert!(!channel.is_closed());
 }
