@@ -20,11 +20,16 @@
 // révoqué ou déjà utilisé, ou dont l'auteur a perdu son rôle : « Cette invitation n'est plus
 // valable », sans autre détail, comme le serveur.
 //
+// Une invitation qui ne donne rien au compte qui l'accepte (il a déjà ce rôle, ou ce niveau sur
+// la page, par une ligne à son nom, une page parente ou l'accès général) n'est pas consommée
+// (R257, M7 : `changed` faux) : l'écran le dit, et offre un lien vers ce qu'elle donne, sans y
+// aller d'office. Le jeton reste en mémoire tant qu'on est sur cet écran.
+//
 // Sans jeton dans l'adresse (la page rechargée, puisqu'il en a été effacé, ou un lien
 // tronqué), l'écran ne sait rien de l'invitation, qui vaut peut-être encore : il dit le lien
 // incomplet et demande de le rouvrir, sans rien demander au serveur.
-import type { InvitationInfo } from "@mementum/protocol";
-import { useCallback, useEffect, useState } from "react";
+import type { Accepted, InvitationInfo } from "@mementum/protocol";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiError, acceptInvitation, isSessionLost, lookupInvitation } from "../api";
 import { navigate, pagePath, parseRoute, spacePath } from "../router";
 import { invitationToken } from "../share/levels";
@@ -72,12 +77,16 @@ type State =
   | { name: "incomplete" }
   | { name: "invalid" }
   | { name: "failed"; message: string }
-  | { name: "ready"; info: InvitationInfo };
+  | { name: "ready"; info: InvitationInfo }
+  /** Acceptée sans effet : le compte avait déjà ce qu'elle donne, et le lien vaut encore. */
+  | { name: "kept"; info: InvitationInfo; accepted: Accepted };
 
 export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Props) {
   const [state, setState] = useState<State>(token ? { name: "loading" } : { name: "incomplete" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Le message d'une invitation sans effet : il prend le focus d'« Accepter », qui part. */
+  const kept = useRef<HTMLSpanElement>(null);
   useDocumentTitle(
     state.name === "invalid"
       ? "Invitation non valable"
@@ -110,6 +119,14 @@ export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Pr
     setError(null);
     try {
       const accepted = await acceptInvitation(token);
+      if (!accepted.changed) {
+        // Rien n'a été écrit : rien à relire, et le lien vaut encore pour quelqu'un d'autre.
+        setBusy(false);
+        setState((current) =>
+          current.name === "ready" ? { name: "kept", info: current.info, accepted } : current,
+        );
+        return;
+      }
       // L'espace rejoint, dans la liste du compte. En cas d'échec, l'application la relira.
       await session.refresh().catch(() => {});
       // La page ou l'espace rejoint, à la place de cette adresse : Précédent ne revient pas
@@ -125,6 +142,11 @@ export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Pr
       else if (!isSessionLost(e)) setError(messageOf(e));
     }
   };
+
+  const keptShown = state.name === "kept";
+  useLayoutEffect(() => {
+    if (keptShown) kept.current?.focus();
+  }, [keptShown]);
 
   const home = session ? (
     <ScreenLink href="/" onClick={() => navigate("/")}>
@@ -176,6 +198,31 @@ export function InvitePage({ token, session, onSignup, onLogin, onAccepted }: Pr
   const title = `${info.invitedBy} t'invite ${info.pageTitle === null ? "dans" : "sur"} ${invitationTarget(info)}`;
   const where =
     info.pageTitle === null ? null : <>Elle est dans l'espace «&nbsp;{info.spaceName}&nbsp;». </>;
+
+  if (state.name === "kept") {
+    const { pageId, spaceId } = state.accepted;
+    const to = pageId ? pagePath(pageId) : spacePath(spaceId);
+    return (
+      <AuthScreen
+        title={title}
+        lead={
+          <span ref={kept} role="status" tabIndex={-1}>
+            Tu as déjà cet accès. Le lien reste valable pour quelqu'un d'autre.
+          </span>
+        }
+        footer={
+          // Le nom vient d'ailleurs : isolé.
+          <ScreenLink href={to} onClick={() => navigate(to)}>
+            {info.pageTitle === null ? "Ouvrir l'espace" : "Ouvrir la page"} «&nbsp;
+            <span className="mm-isolate" dir="auto">
+              {info.pageTitle === null ? info.spaceName : info.pageTitle || "Sans titre"}
+            </span>
+            &nbsp;»
+          </ScreenLink>
+        }
+      />
+    );
+  }
 
   if (session) {
     const { user } = session.me;

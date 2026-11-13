@@ -863,6 +863,51 @@ test("pending_page_invitation_is_revoked_from_the_menu", async ({ browser, page 
   await expect(page.getByRole("heading", { name: "Cette invitation n'est plus valable" })).toBeVisible();
 });
 
+test("owner_who_tries_his_own_link_does_not_kill_it", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const title = `Plan ${unique()}`;
+  // Une page d'« Espace » : Alice y a l'accès complet en propriétaire, sans ligne à son nom.
+  const plan = await createPage(aliceApi, { title });
+  const before = await getAccess(aliceApi, plan.id);
+  expect(before.entries.filter((entry) => entry.email === alice.email)).toEqual([]);
+
+  // Elle invite une adresse depuis le menu Partager, puis essaie le lien dans un autre onglet.
+  const a = await openPage(browser, plan.id, alice);
+  const email = `bruno-${unique()}@exemple.fr`;
+  const menu = await openShareMenu(a);
+  await menu.getByLabel("Adresse e-mail").fill(email);
+  await menu.getByLabel("Niveau de l'invitation").selectOption("edit");
+  await menu.getByRole("button", { name: "Inviter", exact: true }).click();
+  const link = await menu.getByRole("textbox", { name: "Lien d'invitation" }).inputValue();
+  const tab = await a.context().newPage();
+  await tab.goto(link);
+  await tab.getByRole("button", { name: "Accepter" }).click();
+
+  // L'invitation ne lui donne rien : l'écran le dit, sans l'emmener nulle part.
+  const kept = tab.getByRole("status").filter({ hasText: "Tu as déjà cet accès" });
+  await expect(kept).toHaveText("Tu as déjà cet accès. Le lien reste valable pour quelqu'un d'autre.");
+  await expect(kept).toBeFocused();
+  expect(new URL(tab.url()).pathname).toBe("/invite");
+  // Rien n'a été écrit : aucune ligne de plus, et l'invitation attend encore.
+  const after = await getAccess(aliceApi, plan.id);
+  expect(after.entries).toEqual(before.entries);
+  expect(after.invitations.map((invitation) => invitation.email)).toEqual([email]);
+  // Le lien de l'écran mène à la page.
+  await tab.getByRole("link", { name: `Ouvrir la page « ${title} »` }).click();
+  await expect(tab).toHaveURL(`${BASE_URL}/p/${plan.id}`);
+  await expect(titleOf(tab)).toHaveValue(title);
+
+  // Bruno, à qui le lien était destiné, l'accepte ensuite, et arrive sur la page.
+  const bruno = await signUpAccount(`Bruno ${unique()}`);
+  const b = await newUser(browser, bruno);
+  await b.goto(link);
+  await b.getByRole("button", { name: "Accepter" }).click();
+  await expect(b).toHaveURL(`${BASE_URL}/p/${plan.id}`);
+  await expect(titleOf(b)).toHaveValue(title);
+  expect((await getAccess(aliceApi, plan.id)).invitations).toEqual([]);
+});
+
 test("invitation_link_is_shown_until_the_page_is_closed", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const aliceApi = await apiAs(alice);
