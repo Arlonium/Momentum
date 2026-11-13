@@ -1,8 +1,9 @@
 // Le menu Partager, pour l'accès général d'une page ouverte aux membres par sa propre ligne :
 // la fermer aux membres (« Seulement les invités ») la retire de la section « Espace » de tous
 // les autres, et demande donc une confirmation (Ruling R127). Baisser le niveau des membres,
-// ou leur ouvrir une page, n'en demande pas.
-import type { AccessEntry, Me, PageAccess } from "@mementum/protocol";
+// ou leur ouvrir une page, n'en demande pas. Et une invitation en attente nomme sa page (R257,
+// M11).
+import type { AccessEntry, Me, PageAccess, PendingInvitation } from "@mementum/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -196,4 +197,29 @@ test("opening_a_page_to_members_asks_nothing", async () => {
   expect(confirmation()).toBeNull();
   expect(setGeneralAccess).toHaveBeenCalledExactlyOnceWith("x", "read");
   expect(members().checked).toBe(true);
+});
+
+/** Une invitation de la page `x` qui attend, en modification. */
+const pendingOn = (id: string, pageTitle: string): PendingInvitation => ({
+  id,
+  email: `${id}@exemple.fr`,
+  role: null,
+  level: "edit",
+  pageId: "x",
+  pageTitle,
+  expiresAt: 1_800_000_000_000,
+});
+
+test("a_pending_page_invitation_names_its_page", async () => {
+  await opened(access({ invitations: [pendingOn("i1", "Plan"), pendingOn("i2", "")] }));
+  const details = [
+    ...host.querySelectorAll('[aria-label="Invitations en attente"] .mm-person-detail'),
+  ];
+  // Le niveau, puis la page, son titre isolé ; « Sans titre » pour une page qui n'en a pas.
+  expect(details.map((detail) => detail.textContent!.split(" · ")[0])).toEqual([
+    "Peut modifier sur « Plan »",
+    "Peut modifier sur « Sans titre »",
+  ]);
+  expect(details[0].querySelector('.mm-isolate[dir="auto"]')?.textContent).toBe("Plan");
+  expect(details[0].textContent).toContain(" · expire le ");
 });

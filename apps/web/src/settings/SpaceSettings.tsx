@@ -22,7 +22,16 @@
 // Le lien d'une invitation n'est montré qu'à sa création : le serveur ne garde que le
 // hachage de son jeton.
 import type { InviteRole, Member, PendingInvitation, Role } from "@mementum/protocol";
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   ApiError,
   inviteToSpace,
@@ -57,10 +66,24 @@ const expiry = new Intl.DateTimeFormat("fr-FR", {
   minute: "2-digit",
 });
 
-/** Ce que donne une invitation en attente : un rôle dans l'espace, ou un niveau sur une page. */
-function grantOf(invitation: PendingInvitation): string {
+/**
+ * Ce que donne une invitation en attente : un rôle dans l'espace, ou un niveau sur une page,
+ * qu'elle nomme (R257, M11). Le titre vient d'ailleurs : isolé ; « Sans titre » s'il est vide.
+ */
+function grantOf(invitation: PendingInvitation): ReactNode {
   if (invitation.role) return ROLE_LABELS[invitation.role];
-  return invitation.level ? `${LEVEL_LABELS[invitation.level]} sur une page` : "Sur une page";
+  if (!invitation.level) return "Sur une page";
+  const level = LEVEL_LABELS[invitation.level];
+  if (invitation.pageTitle === null) return `${level} sur une page`;
+  return (
+    <>
+      {level} sur «&nbsp;
+      <span className="mm-isolate" dir="auto">
+        {invitation.pageTitle || "Sans titre"}
+      </span>
+      &nbsp;»
+    </>
+  );
 }
 
 const roleOf = (members: Member[], self: string) => members.find((m) => m.userId === self)?.role;

@@ -7,6 +7,7 @@ import {
   acceptInvitation,
   apiAs,
   closeContexts,
+  createPage,
   expectSignedInAs,
   expectUnder,
   firstSpace,
@@ -14,11 +15,13 @@ import {
   getMe,
   getMembers,
   getSpaceInvitations,
+  inviteToPage,
   inviteToSpace,
   joinSpace,
   logInWith,
   newUser,
   NO_SESSION,
+  openShareMenu,
   PASSWORD,
   sidebarOf,
   signUpAccount,
@@ -330,6 +333,35 @@ test("member_sees_members_without_actions", async ({ browser }) => {
   await expect(b.getByRole("main")).toContainText(space.name);
   // Partir reste possible : c'est une action pour soi.
   await expect(b.getByRole("button", { name: "Quitter l'espace" })).toBeVisible();
+});
+
+test("pending_page_invitation_shows_the_page_title", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const title = `Plan ${unique()}`;
+  const plan = await createPage(aliceApi, { section: "private", title });
+  const onPage = `page-${unique()}@exemple.fr`;
+  const inSpace = `espace-${unique()}@exemple.fr`;
+  await inviteToPage(aliceApi, plan.id, { email: onPage, level: "edit" });
+  await inviteToSpace(aliceApi, space.id, { email: inSpace, role: "member" });
+
+  // Dans les réglages de l'espace, l'invitation de page nomme sa page ; celle de l'espace dit
+  // son rôle, comme avant.
+  const a = await newUser(browser, alice);
+  await a.goto(settingsPath(space.id));
+  await expect(pendingRow(a, onPage)).toContainText(`Peut modifier sur « ${title} » · expire le`);
+  await expect(pendingRow(a, inSpace)).toContainText("Membre · expire le");
+
+  // Dans le menu Partager de la page, de même.
+  await a.goto(`/p/${plan.id}`);
+  const menu = await openShareMenu(a);
+  await expect(
+    menu
+      .getByRole("list", { name: "Invitations en attente" })
+      .getByRole("listitem")
+      .filter({ hasText: onPage }),
+  ).toContainText(`Peut modifier sur « ${title} » · expire le`);
 });
 
 test("guest_is_sent_home", async ({ browser }) => {

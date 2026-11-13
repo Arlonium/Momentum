@@ -451,8 +451,24 @@ function Pending({ invitations, share }: { invitations: PendingInvitation[]; sha
           <span className="mm-person-names">
             <span className="mm-person-name">{invitation.email}</span>
             <span className="mm-person-detail">
-              {invitation.level ? `${LEVEL_LABELS[invitation.level]} · ` : ""}expire le{" "}
-              {expiry.format(new Date(invitation.expiresAt))}
+              {invitation.level && (
+                <>
+                  {LEVEL_LABELS[invitation.level]}
+                  {invitation.pageTitle !== null && (
+                    // La page qu'elle nomme (R257, M11) : son titre vient d'ailleurs, isolé.
+                    <>
+                      {" "}
+                      sur «&nbsp;
+                      <span className="mm-isolate" dir="auto">
+                        {invitation.pageTitle || "Sans titre"}
+                      </span>
+                      &nbsp;»
+                    </>
+                  )}
+                  {" · "}
+                </>
+              )}
+              expire le {expiry.format(new Date(invitation.expiresAt))}
             </span>
           </span>
           <span className="mm-person-action">
