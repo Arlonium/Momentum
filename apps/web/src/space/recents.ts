@@ -125,9 +125,13 @@ export function useRecentPages(
     if (stored === null || activeId === null) return stored ?? [];
     return [activeId, ...stored.filter((id) => id !== activeId)];
   }, [userId, spaceId, activeId, seen]);
+  // Indexées quand l'arbre change, pas à chaque page ouverte.
+  const byId = useMemo(
+    () => (nodes === null ? null : new Map(nodes.map((node) => [node.id, node]))),
+    [nodes],
+  );
   return useMemo(() => {
-    if (nodes === null || ids.length === 0) return NONE;
-    const byId = new Map(nodes.map((node) => [node.id, node]));
+    if (byId === null || ids.length === 0) return NONE;
     const pages: PageNode[] = [];
     for (const id of ids) {
       const node = byId.get(id);
@@ -136,5 +140,5 @@ export function useRecentPages(
       if (pages.length === RECENTS_SHOWN) break;
     }
     return pages.length === 0 ? NONE : pages;
-  }, [ids, nodes]);
+  }, [ids, byId]);
 }
