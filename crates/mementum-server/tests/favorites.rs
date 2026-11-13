@@ -14,14 +14,19 @@
 
 mod common;
 
+use std::cell::Cell;
 use std::fmt::Display;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use common::sync::{members, open_app, user};
-use common::{Browser, Reply, Team, TestApp, favorite_routes, outcome, query_i64, uuid};
+use common::sync::{members, open_app, still_served, user};
+use common::{
+    Browser, HELD, Reply, Team, TestApp, WAIT, favorite_routes, outcome, overtaken, query_i64,
+    sync_url, synced_as, uuid,
+};
 use mementum_acl::{Level, Role};
+use mementum_sync::testkit::Client;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -578,4 +583,104 @@ async fn favorites_of_who_left_the_space_come_back_with_the_role() {
     assert!(reply.status.is_success(), "{}", reply.text());
     assert_eq!(favorites(gina, team.space).await, [only]);
     assert_eq!(rows(&t).await, 3);
+}
+
+/// Un favori ne retire aucun droit : il ne ferme aucune connexion de synchro de la page, ni
+/// celle de son auteur ni celle d'un autre, et n'y envoie aucune trame de page. Posé, posé
+/// encore, retiré, retiré encore, par une invitée en « Peut lire » puis par un membre : chacun
+/// reste servi.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn favoriting_closes_no_sync_connection() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let page = team
+        .page(
+            None,
+            "Commune",
+            &[members(Level::Edit), user(&team.gina, Level::Read)],
+        )
+        .await;
+    let url = sync_url(addr, page);
+    let tom = synced_as(&team.tom.browser, &url).await;
+    let gina = synced_as(&team.gina.browser, &url).await;
+    // La liste des présents part à chaque arrivée : chacun a reçu celle qui nomme les deux
+    // comptes avant qu'on compte les trames de page.
+    let (tom_id, gina_id) = (team.tom.id.to_string(), team.gina.id.to_string());
+    for client in [&tom, &gina] {
+        let names_both = |c: &Client| {
+            let last = c.page_events().last().cloned();
+            last.is_some_and(|frame| frame.contains(&tom_id) && frame.contains(&gina_id))
+        };
+        assert!(
+            client.wait_until(WAIT, names_both).await,
+            "la liste des présents : {:?}",
+            client.page_events()
+        );
+    }
+    let frames = |tom: &Client, gina: &Client| (tom.page_events().len(), gina.page_events().len());
+    let before = frames(&tom, &gina);
+
+    for by in [&team.gina.browser, &team.tom.browser] {
+        for method in [Method::PUT, Method::PUT, Method::DELETE, Method::DELETE] {
+            let reply = send(by, method, page).await;
+            reply.assert_status(StatusCode::NO_CONTENT);
+        }
+    }
+
+    // Servie : une resynchronisation reçoit sa réponse, qui vient après toute trame envoyée
+    // avant elle.
+    assert!(still_served(&tom).await, "la connexion de Tom");
+    assert!(still_served(&gina).await, "la connexion de Gina");
+    assert_eq!(frames(&tom, &gina), before, "aucune trame de page");
+}
+
+/// Une page supprimée pour de bon entre le contrôle d'accès et l'écriture du favori : la requête
+/// lit la base d'avant (elle voit la page), puis attend pour écrire le verrou que le test tient ;
+/// la page est supprimée, le verrou rendu. La réponse est exactement celle d'une page inconnue,
+/// pour poser comme pour retirer, sans erreur au journal, et rien n'est écrit.
+#[tokio::test]
+async fn page_deleted_between_the_check_and_the_write_is_not_found() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona.browser;
+    for method in [Method::PUT, Method::DELETE] {
+        let page = team.page(None, "Éphémère", &[members(Level::Read)]).await;
+        // Pour retirer : un favori déjà posé, que la page emporte avec elle. Sans lui, le
+        // retrait n'aurait rien à écrire, et n'attendrait aucun verrou.
+        if method == Method::DELETE {
+            add(mona, page).await;
+        }
+        // Elle voit bien la page, juste avant.
+        let reply = mona.get(&format!("/api/v1/pages/{page}")).await;
+        reply.assert_status(StatusCode::OK);
+
+        let started = Instant::now();
+        let answered_after = Cell::new(Duration::ZERO);
+        let request = async {
+            let reply = send(mona, method.clone(), page).await;
+            answered_after.set(started.elapsed());
+            reply
+        };
+        let delete = format!("DELETE FROM nodes WHERE id = '{page}'");
+        let gone = overtaken(&t, team.space, request, &[delete]).await;
+
+        // Témoin : la requête n'a répondu qu'une fois le verrou rendu. Elle l'attendait pour
+        // écrire : elle avait donc passé le contrôle d'accès sur la base d'avant.
+        assert!(
+            answered_after.get() >= HELD,
+            "{method} : réponse en {:?}, sans attendre le verrou",
+            answered_after.get()
+        );
+        let missing = send(mona, method.clone(), Uuid::now_v7()).await;
+        let body = missing.assert_error(StatusCode::NOT_FOUND, "not_found");
+        assert_eq!(body["message"], "page introuvable", "{method}");
+        assert_eq!(outcome(&gone.reply), outcome(&missing), "{method}");
+        assert!(
+            !gone.journal.contains("ERROR"),
+            "{method} : une erreur au journal : {}",
+            gone.journal
+        );
+        assert_eq!(rows(&t).await, 0, "{method}");
+    }
 }
