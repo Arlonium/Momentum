@@ -13,7 +13,7 @@ import * as Y from "yjs";
 import { getVersions, getVersionState } from "../api";
 import { FRAGMENT, type PageEvent, type SyncStatus } from "../editor/collab";
 import { author } from "../test/comments";
-import { deferred, type Deferred } from "../test/hooks";
+import { deferred, until, type Deferred } from "../test/hooks";
 import { notFound, page, unreachable } from "../test/pages";
 import { HistoryDialog } from "./HistoryDialog";
 import { VersionPreview } from "./VersionPreview";
@@ -129,17 +129,6 @@ afterEach(async () => {
 
 const render = (element: React.ReactElement) => act(async () => root.render(element));
 
-/** Attend que `check` soit vrai, en laissant React et les promesses suivre (borne large). */
-async function until(check: () => boolean, what: string): Promise<void> {
-  const end = Date.now() + 5_000;
-  while (!check()) {
-    if (Date.now() > end) throw new Error(`toujours pas : ${what}`);
-    await act(async () => {
-      await new Promise((done) => setTimeout(done, 10));
-    });
-  }
-}
-
 const shown = () => host.querySelector<HTMLElement>(".mm-preview-editor .bn-editor");
 
 test("preview_never_writes", async () => {
@@ -158,7 +147,7 @@ test("preview_never_writes", async () => {
   );
 
   await render(<VersionPreview pageId="p" versionId="v1" current={live} />);
-  await until(() => shown()?.textContent?.includes("Le texte d'hier") ?? false, "l'aperçu");
+  await until(host, () => shown()?.textContent?.includes("Le texte d'hier") ?? false, "l'aperçu");
 
   expect(vi.mocked(getVersionState)).toHaveBeenCalledWith("p", "v1", expect.any(AbortSignal));
   // Le même éditeur que la page, non modifiable.
@@ -193,7 +182,7 @@ test("current_version_is_a_copy_taken_when_chosen_that_writes_nothing", async ()
   });
 
   await render(<VersionPreview pageId="p" versionId={null} current={live} snapshot={1} />);
-  await until(
+  await until(host, 
     () => shown()?.textContent?.includes("Le texte d'aujourd'hui") ?? false,
     "la version actuelle",
   );
@@ -209,7 +198,11 @@ test("current_version_is_a_copy_taken_when_chosen_that_writes_nothing", async ()
   expect(shown()!.textContent).not.toContain("Une phrase de plus");
   // … jusqu'à ce qu'on choisisse de nouveau la version actuelle : une copie neuve est prise.
   await render(<VersionPreview pageId="p" versionId={null} current={live} snapshot={2} />);
-  await until(() => shown()?.textContent?.includes("Une phrase de plus") ?? false, "la copie neuve");
+  await until(
+    host,
+    () => shown()?.textContent?.includes("Une phrase de plus") ?? false,
+    "la copie neuve",
+  );
   expect(previewDocs()).toHaveLength(2);
   expect(previewDocs()[0].isDestroyed).toBe(true);
 
@@ -224,7 +217,7 @@ test("current_version_is_a_copy_taken_when_chosen_that_writes_nothing", async ()
 test("an_exception_in_the_preview_never_blocks_the_page_document", async () => {
   const live = pageDoc(["Le texte d'aujourd'hui"]);
   await render(<VersionPreview pageId="p" versionId={null} current={live} snapshot={1} />);
-  await until(() => previewDocs().length === 1 && shown() !== null, "la version actuelle");
+  await until(host, () => previewDocs().length === 1 && shown() !== null, "la version actuelle");
   // Un observateur de l'aperçu qui lève : ce que ferait y-prosemirror sur un changement qu'il ne
   // sait pas montrer.
   previewDocs()[0].getXmlFragment(FRAGMENT).observeDeep(() => {
@@ -310,14 +303,22 @@ test("the_history_leaves_no_listener_on_the_page_document", async () => {
       onClose={() => {}}
     />,
   );
-  await until(() => shown()?.textContent?.includes("Le texte d'aujourd'hui") ?? false, "l'ouverture");
+  await until(
+    host,
+    () => shown()?.textContent?.includes("Le texte d'aujourd'hui") ?? false,
+    "l'ouverture",
+  );
   expect(listenersOn(live)).toBe(before);
   // Parcourir : une version, puis la version actuelle de nouveau.
   await act(async () => item(1).click());
-  await until(() => shown()?.textContent?.includes("Le texte d'hier") ?? false, "la version");
+  await until(host, () => shown()?.textContent?.includes("Le texte d'hier") ?? false, "la version");
   expect(listenersOn(live)).toBe(before);
   await act(async () => item(0).click());
-  await until(() => shown()?.textContent?.includes("Le texte d'aujourd'hui") ?? false, "le retour");
+  await until(
+    host,
+    () => shown()?.textContent?.includes("Le texte d'aujourd'hui") ?? false,
+    "le retour",
+  );
   expect(listenersOn(live)).toBe(before);
   // Fermer.
   await act(async () => root.unmount());
@@ -336,10 +337,10 @@ test("a_state_that_arrives_after_another_choice_is_not_shown_and_its_download_is
     return answer.promise;
   });
   await render(<VersionPreview pageId="p" versionId="v1" current={null} />);
-  await until(() => answers.length === 1, "la première lecture");
+  await until(host, () => answers.length === 1, "la première lecture");
   // On choisit une autre version avant que la première n'arrive : son téléchargement est annulé.
   await render(<VersionPreview pageId="p" versionId="v2" current={null} />);
-  await until(() => answers.length === 2, "la seconde lecture");
+  await until(host, () => answers.length === 2, "la seconde lecture");
   expect(answers[0].signal?.aborted).toBe(true);
   expect(answers[1].signal?.aborted).toBe(false);
   // La réponse de la première arrive quand même : elle n'est pas montrée, ni gardée.
@@ -350,7 +351,7 @@ test("a_state_that_arrives_after_another_choice_is_not_shown_and_its_download_is
   expect(shown()).toBeNull();
   expect(host.textContent).toContain("Chargement de la version…");
   await act(async () => answers[1].answer.resolve(Y.encodeStateAsUpdate(pageDoc(["Seconde"]))));
-  await until(() => shown()?.textContent?.includes("Seconde") ?? false, "la seconde version");
+  await until(host, () => shown()?.textContent?.includes("Seconde") ?? false, "la seconde version");
   expect(shown()!.textContent).not.toContain("Première");
   expect(previewDocs()).toHaveLength(1);
 });
@@ -358,21 +359,25 @@ test("a_state_that_arrives_after_another_choice_is_not_shown_and_its_download_is
 test("a_version_whose_state_cannot_be_read_says_so", async () => {
   vi.mocked(getVersionState).mockResolvedValue(new Uint8Array([0xff, 0xff, 0xff]));
   await render(<VersionPreview pageId="p" versionId="v1" current={null} />);
-  await until(() => host.textContent?.includes("Cette version n'a pas pu être lue.") ?? false, "le refus");
+  await until(
+    host,
+    () => host.textContent?.includes("Cette version n'a pas pu être lue.") ?? false,
+    "le refus",
+  );
   expect(shown()).toBeNull();
 });
 
 test("a_failed_state_read_says_why_and_is_done_again_on_request", async () => {
   vi.mocked(getVersionState).mockRejectedValueOnce(unreachable());
   await render(<VersionPreview pageId="p" versionId="v1" current={null} />);
-  await until(() => host.querySelector('[role="alert"]') !== null, "l'erreur");
+  await until(host, () => host.querySelector('[role="alert"]') !== null, "l'erreur");
   expect(host.querySelector('[role="alert"]')!.textContent).toContain(
     "Le serveur Mementum ne répond pas.",
   );
   vi.mocked(getVersionState).mockResolvedValue(Y.encodeStateAsUpdate(pageDoc(["Revenue"])));
   const retry = [...host.querySelectorAll("button")].find((b) => b.textContent === "Réessayer")!;
   await act(async () => retry.click());
-  await until(() => shown()?.textContent?.includes("Revenue") ?? false, "l'aperçu");
+  await until(host, () => shown()?.textContent?.includes("Revenue") ?? false, "l'aperçu");
   expect(vi.mocked(getVersionState)).toHaveBeenCalledTimes(2);
 });
 
@@ -380,7 +385,7 @@ test("a_version_the_server_no_longer_has_is_reported", async () => {
   const onMissing = vi.fn();
   vi.mocked(getVersionState).mockRejectedValue(notFound());
   await render(<VersionPreview pageId="p" versionId="v1" current={null} onMissing={onMissing} />);
-  await until(() => onMissing.mock.calls.length > 0, "le signalement");
+  await until(host, () => onMissing.mock.calls.length > 0, "le signalement");
   expect(shown()).toBeNull();
 });
 
@@ -444,7 +449,11 @@ test("current_version_waits_for_the_first_sync", async () => {
   expect(waiting()).toBe(true);
   // La synchro arrive : la copie est prise, avec le contenu de la page.
   await act(async () => session.sync(Y.encodeStateAsUpdate(pageDoc(["Le texte du serveur"]))));
-  await until(() => shown()?.textContent?.includes("Le texte du serveur") ?? false, "la copie");
+  await until(
+    host,
+    () => shown()?.textContent?.includes("Le texte du serveur") ?? false,
+    "la copie",
+  );
   expect(previewDocs()).toHaveLength(1);
 });
 
@@ -453,7 +462,11 @@ test("current_version_never_shows_the_empty_document_of_a_new_session", async ()
   const first = syncingSession(new Y.Doc(), false);
   first.sync(Y.encodeStateAsUpdate(pageDoc(["Avant la corbeille"])));
   await render(historyOf(first));
-  await until(() => shown()?.textContent?.includes("Avant la corbeille") ?? false, "la première copie");
+  await until(
+    host,
+    () => shown()?.textContent?.includes("Avant la corbeille") ?? false,
+    "la première copie",
+  );
   // La session est remplacée (page mise à la corbeille ailleurs, niveau baissé) : la neuve, sur
   // un document neuf, n'a pas encore fait sa première synchro. L'aperçu attend, sans page vide.
   const next = syncingSession(new Y.Doc(), false);
@@ -465,7 +478,11 @@ test("current_version_never_shows_the_empty_document_of_a_new_session", async ()
   expect(waiting()).toBe(true);
   // La synchro de la session neuve : sa copie montre la page.
   await act(async () => next.sync(Y.encodeStateAsUpdate(pageDoc(["Dans la corbeille"]))));
-  await until(() => shown()?.textContent?.includes("Dans la corbeille") ?? false, "la copie neuve");
+  await until(
+    host,
+    () => shown()?.textContent?.includes("Dans la corbeille") ?? false,
+    "la copie neuve",
+  );
   // Aucune copie d'un document vide n'a été montrée : deux copies, chacune d'une page synchronisée.
   expect(previewDocs()).toHaveLength(2);
   expect(previewDocs()[0].isDestroyed).toBe(true);
