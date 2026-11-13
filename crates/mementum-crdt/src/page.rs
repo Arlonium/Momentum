@@ -54,10 +54,14 @@ const _: fn() = || {
 
 impl PageDoc {
     fn empty() -> PageDoc {
-        let doc = Doc::with_options(Options {
+        PageDoc::with_options(Options {
             offset_kind: OffsetKind::Utf16,
             ..Options::default()
-        });
+        })
+    }
+
+    fn with_options(options: Options) -> PageDoc {
+        let doc = Doc::with_options(options);
         // Avant toute transaction : avec la feature `sync`, l'appel attendrait
         // le verrou d'une transaction ouverte.
         let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
@@ -79,7 +83,7 @@ impl PageDoc {
         let page = PageDoc::empty();
         let update = {
             let mut txn = page.doc.transact_mut();
-            page.write_all(&mut txn, &[empty_paragraph()]);
+            page.fill(&mut txn, &[empty_paragraph()]);
             page.meta.insert(
                 &mut txn,
                 SCHEMA_KEY,
@@ -352,9 +356,7 @@ impl PageDoc {
     /// [`MAX_YJS_DEPTH`](crate::MAX_YJS_DEPTH) (`TooDeep`).
     pub fn write_blocks(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
         let blocks = writable(blocks)?;
-        let mut txn = self.doc.transact_mut();
-        self.write_all(&mut txn, &blocks);
-        Ok(txn.encode_update_v1())
+        Ok(self.write_all(&blocks))
     }
 
     /// Comme [`PageDoc::write_blocks`], pour `PUT /mmd` (Ruling R201) : avant d'écrire, un bloc
@@ -371,9 +373,7 @@ impl PageDoc {
         // Avant la transaction d'écriture : `read_blocks` en ouvre une de lecture.
         let current = self.read_blocks();
         keep_ids(&current, &mut blocks);
-        let mut txn = self.doc.transact_mut();
-        self.write_all(&mut txn, &blocks);
-        Ok(txn.encode_update_v1())
+        Ok(self.write_all(&blocks))
     }
 
     /// Les refus de [`PageDoc::write_blocks`], sans rien écrire : pour qui doit
@@ -383,8 +383,49 @@ impl PageDoc {
         writable(blocks).map(|_| ())
     }
 
-    /// Écrit des blocs normalisés et vérifiés à la place de tout le contenu.
-    fn write_all(&self, txn: &mut TransactionMut, blocks: &[Block]) {
+    /// Écrit des blocs normalisés et vérifiés à la place de tout le contenu, et rend la mise à
+    /// jour (v1) qui fait les deux.
+    ///
+    /// Le retrait du contenu courant et l'écriture du nouveau se font dans deux transactions,
+    /// dont les mises à jour sont mises bout à bout en une (Ruling R367). En une seule
+    /// transaction, le ramasse-miettes de yrs, qui passe à sa validation sur ce qu'elle a
+    /// supprimé, coûtait en proportion du contenu retiré multiplié par le contenu écrit du même
+    /// client : récrire une page de 10 000 paragraphes de six plages occupait l'acteur 10 à 11 s,
+    /// contre 0,8 à 1,4 s pour la première écriture. Les suppressions ne prennent pas d'horloge :
+    /// les éléments écrits ont les mêmes identifiants et les mêmes origines qu'en une transaction,
+    /// et la mise à jour est la même, octet pour octet (tests de ce module).
+    fn write_all(&self, blocks: &[Block]) -> Vec<u8> {
+        let (cleared, wrote_nothing) = {
+            let mut txn = self.doc.transact_mut();
+            self.clear(&mut txn);
+            (txn.encode_update_v1(), txn.insert_set().is_empty())
+        };
+        let (filled, removed_nothing) = {
+            let mut txn = self.doc.transact_mut();
+            self.fill(&mut txn, blocks);
+            (txn.encode_update_v1(), txn.delete_set().is_empty())
+        };
+        // Une mise à jour v1 est la suite des éléments écrits, puis l'ensemble des suppressions.
+        // `fill` ne supprime rien et `clear` n'écrit rien : chacune de ces deux parties vides
+        // tient en un octet nul. Les éléments de l'une suivis des suppressions de l'autre sont,
+        // octet pour octet, la mise à jour qu'aurait encodée une seule transaction ; la fusion
+        // de yrs (`merge_updates_v1`), qui relit et récrit tout, coûtait 3 s sur un tableau de
+        // 300 000 cellules.
+        assert!(
+            wrote_nothing
+                && removed_nothing
+                && filled.last() == Some(&0)
+                && cleared.first() == Some(&0),
+            "écriture complète : une transaction a écrit dans la part de l'autre"
+        );
+        let mut update = filled;
+        update.pop();
+        update.extend_from_slice(&cleared[1..]);
+        update
+    }
+
+    /// Retire tout le contenu, sauf la première racine `blockGroup`, vidée.
+    fn clear(&self, txn: &mut TransactionMut) {
         match self.root_index(txn) {
             Some(i) => {
                 let len = self.fragment.len(txn);
@@ -402,16 +443,23 @@ impl PageDoc {
                 }
             }
         }
+        if let Some(XmlOut::Element(root)) = self.fragment.get(txn, 0) {
+            let len = root.len(txn);
+            if len > 0 {
+                root.remove_range(txn, 0, len);
+            }
+        }
+    }
+
+    /// Écrit des blocs dans la racine vide laissée par [`PageDoc::clear`] (ou dans une page
+    /// neuve), qu'il crée s'il n'y en a pas.
+    fn fill(&self, txn: &mut TransactionMut, blocks: &[Block]) {
         let root = match self.fragment.get(txn, 0) {
             Some(XmlOut::Element(root)) => root,
             _ => self
                 .fragment
                 .insert(txn, 0, XmlElementPrelim::empty(BLOCK_GROUP)),
         };
-        let len = root.len(txn);
-        if len > 0 {
-            root.remove_range(txn, 0, len);
-        }
         write_nodes(txn, &root, 0, blocks, &mut Ids::default());
     }
 
@@ -449,4 +497,140 @@ fn writable(blocks: &[Block]) -> Result<Vec<Block>, CrdtError> {
     };
     check_blocks(&blocks, Slot::Group, 2)?;
     Ok(blocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use mementum_md::{Content, Inline, Styles, arb};
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// Une page vide, à l'identifiant de client fixé : deux telles pages qui reçoivent les mêmes
+    /// écritures encodent les mêmes octets.
+    fn page(client: u64) -> PageDoc {
+        PageDoc::with_options(Options {
+            client_id: ClientID::new(client),
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        })
+    }
+
+    /// L'écriture complète d'avant le Ruling R367 : retrait et écriture dans une transaction.
+    fn write_in_one_transaction(page: &PageDoc, blocks: &[Block]) -> Vec<u8> {
+        let mut txn = page.doc.transact_mut();
+        page.clear(&mut txn);
+        page.fill(&mut txn, blocks);
+        txn.encode_update_v1()
+    }
+
+    /// Des blocs dont l'écriture ne dépend que d'eux : un identifiant pour chacun (sinon
+    /// `write_nodes` en tire un neuf), et des plages qui n'ouvrent jamais deux marques à la fois
+    /// (voir `one_mark`). yrs ouvre les marques d'une plage dans l'ordre d'une `HashMap` propre à
+    /// chaque appel : deux écritures de ces plages ne rangent pas leurs marques dans le même
+    /// ordre, en une transaction comme en deux.
+    fn deterministic(blocks: &mut [Block], next: &mut usize) {
+        for block in blocks {
+            *next += 1;
+            block.id = format!("bloc-{next}");
+            match &mut block.content {
+                Content::Inline(content) => one_mark(content),
+                Content::Table(table) => {
+                    for cell in table.rows.iter_mut().flatten() {
+                        one_mark(&mut cell.content);
+                    }
+                }
+                Content::None => {}
+            }
+            deterministic(&mut block.children, next);
+        }
+    }
+
+    /// Un identifiant pour chaque bloc, rien d'autre.
+    fn numbered(mut blocks: Vec<Block>) -> Vec<Block> {
+        let mut next = 0;
+        let mut stack: Vec<&mut Block> = blocks.iter_mut().collect();
+        while let Some(block) = stack.pop() {
+            next += 1;
+            block.id = format!("bloc-{next}");
+            stack.extend(block.children.iter_mut());
+        }
+        blocks
+    }
+
+    /// Les liens défaits en leurs plages, et au plus une marque par plage, le gras ou
+    /// l'italique : même avec une marque par plage, des liens qui se suivent laissent derrière
+    /// eux des marques qui en rétablissent d'autres, et la plage suivante en ouvre alors deux.
+    fn one_mark(content: &mut Vec<Inline>) {
+        let mut out = Vec::with_capacity(content.len());
+        for inline in std::mem::take(content) {
+            match inline {
+                Inline::Link { mut children, .. } => {
+                    one_mark(&mut children);
+                    out.extend(children);
+                }
+                Inline::Text { text, styles } => out.push(Inline::Text {
+                    text,
+                    styles: Styles {
+                        bold: styles.bold,
+                        italic: styles.italic && !styles.bold,
+                        ..Styles::default()
+                    },
+                }),
+                other => out.push(other),
+            }
+        }
+        *content = out;
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Ruling R367 : en deux transactions, l'écriture complète rend, octet pour octet, la mise
+        /// à jour d'une seule transaction, et laisse la page dans le même état.
+        #[test]
+        fn split_write_is_the_single_transaction_byte_for_byte(
+            before in arb::tree(),
+            after in arb::tree(),
+        ) {
+            let (Ok(mut before), Ok(mut after)) = (writable(&before), writable(&after)) else {
+                return Ok(());
+            };
+            deterministic(&mut before, &mut 0);
+            deterministic(&mut after, &mut 0);
+            let (split, single) = (page(7), page(7));
+            for page in [&split, &single] {
+                write_in_one_transaction(page, &before);
+            }
+            prop_assert!(split.encode_state() == single.encode_state(), "première écriture");
+            let written = split.write_all(&after);
+            prop_assert!(written == write_in_one_transaction(&single, &after), "mise à jour");
+            prop_assert!(split.encode_state() == single.encode_state(), "état");
+            prop_assert_eq!(split.read_blocks(), single.read_blocks());
+        }
+
+        /// Sur des blocs quelconques : la même page lue, et la mise à jour rendue, appliquée à une
+        /// copie de la page d'avant, la mène au même contenu (ses éléments et ses suppressions y
+        /// sont). Les octets ne se comparent pas : yrs range les marques d'une plage qui en ouvre
+        /// plusieurs dans l'ordre d'une `HashMap`, et deux écritures en une transaction de ces
+        /// mêmes blocs n'ont déjà pas les mêmes horloges.
+        #[test]
+        fn split_write_reads_as_the_single_transaction(
+            before in arb::tree(),
+            after in arb::tree(),
+        ) {
+            let (split, single) = (page(7), page(7));
+            let before = numbered(writable(&before).unwrap());
+            for page in [&split, &single] {
+                write_in_one_transaction(page, &before);
+            }
+            let replica = PageDoc::from_updates([split.encode_state().as_slice()]).unwrap();
+            let after = numbered(writable(&after).unwrap());
+            let written = split.write_all(&after);
+            write_in_one_transaction(&single, &after);
+            prop_assert_eq!(split.read_blocks(), single.read_blocks());
+            replica.apply_update(&written).unwrap();
+            prop_assert_eq!(replica.read_blocks(), split.read_blocks());
+        }
+    }
 }

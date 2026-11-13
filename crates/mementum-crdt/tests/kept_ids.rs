@@ -237,3 +237,30 @@ fn measure_full_rewrites() {
         println!("MESURE {n} paragraphes d'un caractère : écriture puis récritures {times:?}");
     }
 }
+
+/// Mesure, à lancer en release (Ruling R367) : trois écritures complètes successives, par
+/// `rewrite_blocks` comme `PUT /mmd`, d'une page de 10 000 paragraphes de six plages ; la pire
+/// reste sous quatre secondes. Le retrait et l'écriture tenaient dans une transaction, dont le
+/// ramasse-miettes de yrs coûtait le contenu retiré multiplié par le contenu écrit : 1,4 s pour
+/// la première écriture, 11,4 s pour les suivantes.
+#[test]
+#[ignore = "mesure, à lancer en --release"]
+fn measure_rewrites_of_a_rich_page() {
+    // Un `assert!` sur `cfg!` est refusé par clippy (`assertions_on_constants`).
+    if cfg!(debug_assertions) {
+        panic!("mesure sans valeur en debug : lancer `cargo test --release`");
+    }
+    let paragraph = "**du texte** ordinaire et **du texte** ordinaire et **du texte** fin";
+    let blocks = parse(&(vec![paragraph; 10_000].join("\n\n") + "\n")).unwrap();
+    assert_eq!(blocks.len(), 10_000);
+    let (page, _) = PageDoc::new_page();
+    let mut times = Vec::new();
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        page.rewrite_blocks(&blocks).unwrap();
+        times.push(start.elapsed());
+    }
+    println!("MESURE 10 000 paragraphes de six plages, trois écritures : {times:?}");
+    let worst = times.iter().max().unwrap();
+    assert!(worst.as_secs_f64() < 4.0, "{times:?}");
+}
