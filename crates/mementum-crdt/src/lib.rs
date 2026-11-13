@@ -7,6 +7,7 @@
 //! révision canonique.
 
 mod blocknote;
+mod cost;
 mod dedupe;
 mod edit;
 mod foreign;
@@ -19,6 +20,7 @@ mod table;
 
 use std::fmt;
 
+pub use cost::{Cause, ListKind, WriteCost, write_cost};
 pub use guard::MAX_YJS_DEPTH;
 pub use page::{Awaited, PageDoc};
 
