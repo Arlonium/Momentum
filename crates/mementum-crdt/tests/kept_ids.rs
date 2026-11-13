@@ -139,6 +139,52 @@ fn explicit_ids_win() {
     assert_unique(&page);
 }
 
+/// Ruling R354 (constat m2 de la relecture de la piste S) : l'identifiant qu'une ancre prend
+/// plus bas n'est donné à aucun bloc sans ancre, même identique au bloc courant qui le portait
+/// (`claimed`). Sans cette règle, le bloc du haut le recevait, et l'ancre, écrite après lui,
+/// perdait le sien. (Quand l'ancre est plus haut, `explicit_ids_win`, l'écriture le garde déjà
+/// au premier qui le porte : la règle ne s'y voit pas.)
+#[test]
+fn an_id_claimed_lower_down_goes_to_no_one_else() {
+    let page = page_with("Premier\n\nSecond\n");
+    let before = ids(&page.read_blocks());
+    let first = before[0].1.clone();
+    page.rewrite_blocks(&parse(&format!("Premier\n\nSecond ^{first}\n")).unwrap())
+        .unwrap();
+    let after = ids(&page.read_blocks());
+    assert_eq!(after[1], ("Second".to_string(), first.clone()), "{after:?}");
+    assert_eq!(after[0].0, "Premier");
+    assert!(
+        before.iter().all(|(_, old)| *old != after[0].1),
+        "le bloc sans ancre a reçu un identifiant d'avant : {after:?}"
+    );
+    assert_unique(&page);
+}
+
+/// Ruling R354 (constat m2, R202 b) : à la passe 3, un bloc à la même place entre deux blocs
+/// gardés ne reçoit l'identifiant de l'ancien que s'il est du même type : un paragraphe devenu
+/// titre à sa place, même texte, en reçoit un neuf ; un paragraphe modifié à sa place garde le
+/// sien.
+#[test]
+fn a_block_that_changes_type_in_place_gets_a_new_id() {
+    let page = page_with("Un\n\nDeux\n\nTrois\n\nQuatre\n\nCinq\n");
+    let before = ids(&page.read_blocks());
+    let id = |text: &str| before.iter().find(|(t, _)| t == text).unwrap().1.clone();
+    page.rewrite_blocks(&parse("Un\n\n# Deux\n\nTrois\n\nQuatre bis\n\nCinq\n").unwrap())
+        .unwrap();
+    let after = ids(&page.read_blocks());
+    let got = |text: &str| after.iter().find(|(t, _)| t == text).unwrap().1.clone();
+    assert!(
+        before.iter().all(|(_, old)| *old != got("Deux")),
+        "le titre a reçu un identifiant d'avant : {after:?}"
+    );
+    assert_eq!(got("Quatre bis"), id("Quatre"));
+    for text in ["Un", "Trois", "Cinq"] {
+        assert_eq!(got(text), id(text), "{text}");
+    }
+    assert_unique(&page);
+}
+
 /// Une restauration écrit les identifiants de sa version : `write_blocks` ne rapproche rien.
 #[test]
 fn write_blocks_matches_nothing() {
