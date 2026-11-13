@@ -136,6 +136,23 @@ describe("cursor_follows_its_block_when_someone_else_moves_it", () => {
     expect(stored(server)).toEqual([Y_, Z, block("x", "B… X"), W]);
   });
 
+  test("un autre change le type du bloc (son contenu est recréé, pas le bloc) : le curseur garde sa place", async () => {
+    // Sans l'extension, le curseur passe au début du bloc suivant (c'était déjà vrai avant la
+    // forme à clés : un paragraphe devenu titre est un élément supprimé et un élément créé).
+    const plain = await pair({ plain: true });
+    cursor(plain.tom, "y", 3);
+    plain.mona.editor.updateBlock("y", { type: "heading", props: { level: 2 } });
+    await exchange(plain.server, [plain.mona, plain.tom]);
+    expect(cursorOf(plain.tom)).toEqual({ id: "z", offset: 0 });
+
+    const { mona, tom, server } = await pair();
+    cursor(tom, "y", 3);
+    mona.editor.updateBlock("y", { type: "heading", props: { level: 2 } });
+    await exchange(server, [mona, tom]);
+    expect(shown(tom)).toEqual([X, block("y", "Bloc Y", { type: "heading" }), Z, W]);
+    expect(cursorOf(tom)).toEqual({ id: "y", offset: 3 });
+  });
+
   test("le bloc recréé est plus court que la place du curseur : le curseur va à sa fin", async () => {
     const { mona, tom, server } = await pair();
     // Tom vient de taper à la fin de X, et Mona déplace X sans l'avoir vu : sa copie ne l'a pas.
