@@ -1854,3 +1854,30 @@ async fn pragmas_apply_to_every_connection() {
         assert_eq!(busy, 5000);
     }
 }
+
+/// Les titres de plusieurs nœuds, en une lecture (Ruling R262) : un titre vide se rend vide,
+/// un id inconnu n'y est pas, une liste vide ne lit rien.
+#[tokio::test]
+async fn node_titles_reads_titles_by_id() {
+    let f = fresh().await;
+    let a = f
+        .store
+        .create_node(page(&f.space, None, None, "A"))
+        .await
+        .unwrap();
+    let blank = f
+        .store
+        .create_node(page(&f.space, None, None, ""))
+        .await
+        .unwrap();
+    let unknown = Uuid::now_v7();
+    let titles = f
+        .store
+        .node_titles(&[a.id, blank.id, unknown, a.id])
+        .await
+        .unwrap();
+    assert_eq!(titles.len(), 2);
+    assert_eq!(titles.get(&a.id).map(String::as_str), Some("A"));
+    assert_eq!(titles.get(&blank.id).map(String::as_str), Some(""));
+    assert!(f.store.node_titles(&[]).await.unwrap().is_empty());
+}

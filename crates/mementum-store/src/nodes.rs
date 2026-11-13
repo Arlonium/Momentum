@@ -537,6 +537,32 @@ impl Store {
         .transpose()
     }
 
+    /// Les titres de ces nœuds, en une lecture, par id ; un nœud inconnu n'y est pas. Pour une
+    /// liste qui nomme beaucoup de pages, sans une lecture par page (Ruling R262).
+    pub async fn node_titles(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, String>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        // Les ids en un seul paramètre, un tableau JSON : des UUID, sans rien à échapper.
+        let list = format!(
+            "[{}]",
+            ids.iter()
+                .map(|id| format!("\"{id}\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        sqlx::query("SELECT id, title FROM nodes WHERE id IN (SELECT value FROM json_each(?))")
+            .bind(list)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| Ok((parse_uuid(&r.get::<String, _>("id"))?, r.get("title"))))
+            .collect()
+    }
+
     /// Tous les nœuds de l'espace, corbeille comprise, triés par `(parent_id, position)`.
     pub async fn list_nodes(&self, space_id: Uuid) -> Result<Vec<Node>, StoreError> {
         sqlx::query(concat!(

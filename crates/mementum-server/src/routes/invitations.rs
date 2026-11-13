@@ -122,6 +122,7 @@ pub(crate) async fn create(
 /// sans leur jeton (`admin`). Celles des pages que la personne ne peut pas partager n'y sont
 /// pas ; les autres portent le titre de leur page (report M11 du lot 2), lu une fois le droit
 /// vérifié : le titre d'une page qu'on ne peut pas partager n'est jamais lu pour cette réponse.
+/// Les titres de toutes ces pages se lisent en une fois (Ruling R262).
 pub(crate) async fn space_invitations(
     State(state): State<AppState>,
     user: AuthUser,
@@ -130,26 +131,36 @@ pub(crate) async fn space_invitations(
     let space_id = space_id(path)?;
     let access = state.space_access(&user, space_id).await?;
     at_least(&access, Role::Admin)?;
-    let pending = state
+    let pending: Vec<Invitation> = state
         .store
         .pending_invitations(space_id)
         .await
-        .map_err(internal)?;
-    let mut listed = Vec::new();
-    for invitation in pending.into_iter().filter(|i| may_manage(&access, i)) {
-        let page_title = match invitation.grant {
+        .map_err(internal)?
+        .into_iter()
+        .filter(|i| may_manage(&access, i))
+        .collect();
+    let mut pages: Vec<Uuid> = pending
+        .iter()
+        .filter_map(|i| match i.grant {
+            InvitationGrant::Page { node_id, .. } => Some(node_id),
             InvitationGrant::Space(_) => None,
-            // Une page supprimée depuis la lecture emporte ses invitations (clé étrangère) :
-            // celle-ci n'existe plus, elle n'est pas listée.
-            InvitationGrant::Page { node_id, .. } => {
-                match state.store.get_node(node_id).await.map_err(internal)? {
-                    Some(node) => Some(node.title),
-                    None => continue,
-                }
-            }
-        };
-        listed.push(pending_invitation(invitation, page_title));
-    }
+        })
+        .collect();
+    pages.sort_unstable();
+    pages.dedup();
+    let titles = state.store.node_titles(&pages).await.map_err(internal)?;
+    let listed = pending
+        .into_iter()
+        .filter_map(|invitation| {
+            let page_title = match invitation.grant {
+                InvitationGrant::Space(_) => None,
+                // Une page supprimée depuis la lecture emporte ses invitations (clé
+                // étrangère) : celle-ci n'existe plus, elle n'est pas listée.
+                InvitationGrant::Page { node_id, .. } => Some(titles.get(&node_id)?.clone()),
+            };
+            Some(pending_invitation(invitation, page_title))
+        })
+        .collect();
     Ok(Json(listed))
 }
 
