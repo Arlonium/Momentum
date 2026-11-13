@@ -1,5 +1,5 @@
 diff --git a/dist/y-prosemirror.cjs b/dist/y-prosemirror.cjs
-index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..7a547622e1a1181af64f0340a2dece9d32fabca9 100644
+index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..4195914fdfd8bf67d82c5e3ca701652957351d46 100644
 --- a/dist/y-prosemirror.cjs
 +++ b/dist/y-prosemirror.cjs
 @@ -331,6 +331,16 @@ const restoreRelativeSelection = (tr, relSel, binding) => {
@@ -86,8 +86,8 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..7a547622e1a1181af64f0340a2dece9d
 +
 +/**
 + * Les clés des blocs que touche la sélection de l'éditeur : après un déplacement, le bloc
-+ * déplacé (ProseMirror le sélectionne quand on le dépose, BlockNote y remet le curseur quand on
-+ * le déplace au clavier). `null` sans éditeur (`prosemirrorToYXmlFragment`).
++ * déplacé (le dépôt d'un glisser y laisse le curseur, et BlockNote l'y remet quand on déplace
++ * le bloc au clavier). `null` sans éditeur (`prosemirrorToYXmlFragment`).
 + *
 + * @param {any} meta
 + * @return {Set<string>|null}
@@ -251,7 +251,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..7a547622e1a1181af64f0340a2dece9d
      while (yChildCnt - left - right > 0 && pChildCnt - left - right > 0) {
        const leftY = yChildren[left];
 diff --git a/src/plugins/sync-plugin.js b/src/plugins/sync-plugin.js
-index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..2fd9dd15052daa79830642eef8ea856c02ca0215 100644
+index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..3934feb3cc416e303ec0faa764fe35451c5bd86f 100644
 --- a/src/plugins/sync-plugin.js
 +++ b/src/plugins/sync-plugin.js
 @@ -257,6 +257,16 @@ const restoreRelativeSelection = (tr, relSel, binding) => {
@@ -338,8 +338,8 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..2fd9dd15052daa79830642eef8ea856c
 +
 +/**
 + * Les clés des blocs que touche la sélection de l'éditeur : après un déplacement, le bloc
-+ * déplacé (ProseMirror le sélectionne quand on le dépose, BlockNote y remet le curseur quand on
-+ * le déplace au clavier). `null` sans éditeur (`prosemirrorToYXmlFragment`).
++ * déplacé (le dépôt d'un glisser y laisse le curseur, et BlockNote l'y remet quand on déplace
++ * le bloc au clavier). `null` sans éditeur (`prosemirrorToYXmlFragment`).
 + *
 + * @param {any} meta
 + * @return {Set<string>|null}
