@@ -15,7 +15,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 /// Le nombre de migrations du store : une base migrée les porte toutes.
-const MIGRATIONS: i64 = 3;
+const MIGRATIONS: i64 = 4;
 
 /// Une base telle que le code du lot 1 la produit (comme dans `tests/migration.rs`) : les options
 /// de connexion de `Store::open`, et la seule migration `0001_init.sql`, lancée par sqlx.
@@ -303,7 +303,8 @@ async fn pending_migration_backs_up_first() {
         [
             Some("1".to_string()),
             Some("2".to_string()),
-            Some("3".to_string())
+            Some("3".to_string()),
+            Some("4".to_string())
         ]
     );
     store.close().await;

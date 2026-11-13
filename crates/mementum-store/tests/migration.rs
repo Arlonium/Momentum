@@ -1,5 +1,6 @@
-//! Migrations `0002` et `0003` : une base du lot 1 garde ses pages, une base du lot 2 gagne les
-//! tables de la collaboration sans rien perdre, une base neuve n'a pas d'espace.
+//! Migrations `0002` à `0004` : une base du lot 1 garde ses pages, une base du lot 2 gagne les
+//! tables de la collaboration sans rien perdre, une base de la partie A du lot 3 gagne celles des
+//! fichiers et des favoris sans rien perdre, une base neuve n'a pas d'espace.
 
 mod common;
 
@@ -7,9 +8,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{LOT2, database_with, int, side_pool, texts};
+use common::{LOT2, LOT3A, database_with, int, side_pool, texts};
 use mementum_acl::{Grant, Level, Subject};
-use mementum_store::{NodeKind, Store, StoreError};
+use mementum_store::{NodeKind, Store, StoreError, backup_path};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
@@ -94,9 +95,10 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 }
 
 /// Les tables d'une base à jour, par nom.
-const ALL_TABLES: [&str; 16] = [
+const ALL_TABLES: [&str; 19] = [
     "_sqlx_migrations",
     "acl",
+    "attachments",
     "block_moves",
     "comment_reactions",
     "comment_threads",
@@ -104,6 +106,8 @@ const ALL_TABLES: [&str; 16] = [
     "doc_snapshots",
     "doc_updates",
     "doc_versions",
+    "favorites",
+    "files",
     "instance_settings",
     "invitations",
     "members",
@@ -112,6 +116,9 @@ const ALL_TABLES: [&str; 16] = [
     "spaces",
     "users",
 ];
+
+/// Les tables des fichiers et des favoris, que la migration `0004` crée (Ruling R243).
+const FILES_AND_FAVORITES_TABLES: [&str; 3] = ["files", "attachments", "favorites"];
 
 /// Les tables de la collaboration, que la migration `0003` crée et que les tâches suivantes du
 /// lot remplissent.
@@ -245,7 +252,7 @@ async fn migration_keeps_lot1_pages() {
     pool.close().await;
 
     // Le code d'aujourd'hui ouvre cette base : `0001` est reconnue (même somme de contrôle),
-    // `0002` et `0003` sont appliquées.
+    // `0002` à `0004` sont appliquées.
     let store = Store::open(&db).await.unwrap();
     assert_eq!(
         texts(
@@ -256,7 +263,8 @@ async fn migration_keeps_lot1_pages() {
         [
             Some("1".to_string()),
             Some("2".to_string()),
-            Some("3".to_string())
+            Some("3".to_string()),
+            Some("4".to_string())
         ]
     );
 
@@ -356,9 +364,9 @@ async fn migration_keeps_lot1_pages() {
     .flatten()
     .collect();
     assert_eq!(tables, ALL_TABLES);
-    // Les index : celui de l'arbre, ceux des clés que suit la suppression d'un nœud, et ceux des
-    // tables de la collaboration ; l'index de passage de la migration `0002` est parti avec
-    // l'ancienne table.
+    // Les index : celui de l'arbre, ceux des clés que suit la suppression d'un nœud, ceux des
+    // tables de la collaboration, et ceux des fichiers et des favoris ; l'index de passage de la
+    // migration `0002` est parti avec l'ancienne table.
     let indexes: Vec<String> = texts(
         &db,
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -370,21 +378,27 @@ async fn migration_keeps_lot1_pages() {
     assert_eq!(
         indexes,
         [
+            "attachments_by_file",
+            "attachments_by_node",
             "comment_threads_by_node",
             "comments_by_thread",
             "doc_versions_by_node",
+            "favorites_by_node",
             "invitations_node_key",
             "nodes_by_parent",
             "nodes_parent_key"
         ]
     );
     for (index, columns) in [
-        ("comment_threads_by_node", &["node_id", "created_at"][..]),
+        ("attachments_by_file", &["file_hash"][..]),
+        ("attachments_by_node", &["node_id", "created_at"]),
+        ("comment_threads_by_node", &["node_id", "created_at"]),
         (
             "comments_by_thread",
             &["thread_id", "created_at", "author_id", "(expression)", "id"],
         ),
         ("doc_versions_by_node", &["node_id", "seq", "created_at"]),
+        ("favorites_by_node", &["node_id"]),
         ("invitations_node_key", &["node_id"]),
         ("nodes_by_parent", &["space_id", "parent_id", "position"]),
         ("nodes_parent_key", &["parent_id"]),
@@ -694,9 +708,10 @@ async fn lot2_data(pool: &SqlitePool) -> (Uuid, Uuid) {
     (team, own)
 }
 
-/// La migration `0003` sur une base du lot 2 : tout ce qui y était reste à l'identique, valeur
-/// pour valeur ; chaque espace gagne sa version, à 0 ; les cinq tables de la collaboration
-/// existent, vides, et leurs clés étrangères visent ce qu'il faut.
+/// Les migrations `0003` et `0004` sur une base du lot 2 : tout ce qui y était reste à
+/// l'identique, valeur pour valeur ; chaque espace gagne sa version, à 0 ; les cinq tables de la
+/// collaboration et les trois des fichiers et des favoris existent, vides, et les clés étrangères
+/// des premières visent ce qu'il faut (celles des secondes : `lot3a_database_gains_files_and_favorites`).
 #[tokio::test]
 async fn lot2_database_gains_the_collaboration_tables() {
     let dir = tempfile::tempdir().unwrap();
@@ -724,12 +739,13 @@ async fn lot2_database_gains_the_collaboration_tables() {
         [
             Some("1".to_string()),
             Some("2".to_string()),
-            Some("3".to_string())
+            Some("3".to_string()),
+            Some("4".to_string())
         ]
     );
 
-    // Rien n'a changé dans ce qui était là, `_sqlx_migrations` mise à part (elle gagne la ligne
-    // de `0003`) ; `spaces` gagne une colonne, et ses autres colonnes n'ont pas bougé.
+    // Rien n'a changé dans ce qui était là, `_sqlx_migrations` mise à part (elle gagne les lignes
+    // de `0003` et `0004`) ; `spaces` gagne une colonne, et ses autres colonnes n'ont pas bougé.
     for (table, columns_before, rows_before) in &before {
         if table == "_sqlx_migrations" {
             continue;
@@ -762,9 +778,13 @@ async fn lot2_database_gains_the_collaboration_tables() {
     }
     assert_eq!(store.space_lsn(Uuid::now_v7()).await.unwrap(), None);
 
-    // Les cinq tables de la collaboration, vides, et rien d'autre de neuf.
+    // Les cinq tables de la collaboration et les trois des fichiers et des favoris, vides, et
+    // rien d'autre de neuf.
     assert_eq!(table_names(&db).await, ALL_TABLES);
-    for table in COLLABORATION_TABLES {
+    for table in COLLABORATION_TABLES
+        .into_iter()
+        .chain(FILES_AND_FAVORITES_TABLES)
+    {
         assert!(!lot2_tables.iter().any(|t| t == table), "{table}");
         assert_eq!(
             int(&db, &format!("SELECT COUNT(*) FROM {table}")).await,
@@ -795,13 +815,189 @@ async fn lot2_database_gains_the_collaboration_tables() {
     // Une seconde ouverture ne migre plus rien.
     let store = Store::open(&db).await.unwrap();
     assert_eq!(store.backup(), None);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 3);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 4);
+    store.close().await;
+}
+
+/// Ce qu'une base de la partie A du lot 3 porte en plus d'une base du lot 2, écrit en SQL comme
+/// le code de la partie A l'écrit : la version d'un espace, un fil de commentaires résolu sur un
+/// bloc, avec un message modifié et une réaction, et une version de page aux octets qui ne sont
+/// pas de l'UTF-8. Rien dans `block_moves`, que la Task 13b retire de `0003`.
+async fn lot3a_data(pool: &SqlitePool, space: Uuid) {
+    let space = space.to_string();
+    let olga: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'olga@exemple.test'")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let page: String = sqlx::query_scalar("SELECT id FROM nodes WHERE title = 'Accueil'")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let (thread, comment) = (Uuid::now_v7().to_string(), Uuid::now_v7().to_string());
+    exec(pool, "UPDATE spaces SET lsn = 12 WHERE id = ?1", &[&space]).await;
+    exec(
+        pool,
+        "INSERT INTO comment_threads (id, node_id, block_id, created_by, created_at, \
+                                      resolved_at, resolved_by) \
+         VALUES (?1, ?2, 'bloc-1', ?3, 4000, 4100, ?3)",
+        &[&thread, &page, &olga],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO comments (id, thread_id, author_id, body, created_at, edited_at) \
+         VALUES (?1, ?2, ?3, 'Relu, c''est bon', 4001, 4002)",
+        &[&comment, &thread, &olga],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at) \
+         VALUES (?1, ?2, '👍', 4003)",
+        &[&comment, &olga],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO doc_versions \
+         (id, node_id, seq, covers_seq, reason, authors, created_at, state_blob) \
+         VALUES (?1, ?2, 3, 3, 'before_restore', json_array(?3), 4200, x'00ff01fe800a0d')",
+        &[&Uuid::now_v7().to_string(), &page, &olga],
+    )
+    .await;
+}
+
+/// La migration `0004` sur une base de la partie A du lot 3 (Ruling R243) : tout ce qui y était
+/// reste à l'identique, valeur pour valeur, fils de commentaires et versions compris ; les trois
+/// tables des fichiers et des favoris existent, vides, et leurs clés étrangères visent ce qu'il
+/// faut ; la copie d'avant migration porte le nom de `0004` ; une seconde ouverture ne migre plus
+/// rien.
+#[tokio::test]
+async fn lot3a_database_gains_files_and_favorites() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    let pool = database_with(&db, LOT3A).await;
+    let (team, _own) = lot2_data(&pool).await;
+    lot3a_data(&pool, team).await;
+    pool.close().await;
+
+    // Ce que porte la base de la partie A, table par table, colonne par colonne.
+    let lot3a_tables = table_names(&db).await;
+    let mut before = Vec::new();
+    for table in &lot3a_tables {
+        let columns = columns(&db, table).await;
+        let rows = rows(&db, table, &columns).await;
+        before.push((table.clone(), columns, rows));
+    }
+    for (table, count) in [
+        ("comment_threads", 1),
+        ("comments", 1),
+        ("comment_reactions", 1),
+        ("doc_versions", 1),
+    ] {
+        assert!(
+            before
+                .iter()
+                .any(|(t, _, rows)| t == table && rows.len() == count),
+            "{table}"
+        );
+    }
+
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(
+        texts(
+            &db,
+            "SELECT CAST(version AS TEXT) FROM _sqlx_migrations WHERE success ORDER BY version"
+        )
+        .await,
+        [
+            Some("1".to_string()),
+            Some("2".to_string()),
+            Some("3".to_string()),
+            Some("4".to_string())
+        ]
+    );
+    // La copie d'avant migration : la base de la partie A, sous le nom de `0004`.
+    let backup = store.backup().expect("une copie avant la migration");
+    assert_eq!(backup.path, backup_path(&db, 4));
+    assert_eq!(backup.path, dir.path().join("mementum.db.avant-0004.bak"));
+    assert!(backup.path.is_file());
+
+    // Rien n'a changé dans ce qui était là, `_sqlx_migrations` mise à part (elle gagne la ligne
+    // de `0004`) : ni une colonne, ni une valeur.
+    for (table, columns_before, rows_before) in &before {
+        if table == "_sqlx_migrations" {
+            continue;
+        }
+        assert_eq!(&columns(&db, table).await, columns_before, "{table}");
+        assert_eq!(
+            &rows(&db, table, columns_before).await,
+            rows_before,
+            "{table}"
+        );
+    }
+    assert_eq!(store.space_lsn(team).await.unwrap(), Some(12));
+    assert_eq!(store.space_rev(team).await.unwrap(), Some(7));
+
+    // Les trois tables neuves, vides, et rien d'autre de neuf.
+    assert_eq!(table_names(&db).await, ALL_TABLES);
+    for table in FILES_AND_FAVORITES_TABLES {
+        assert!(!lot3a_tables.iter().any(|t| t == table), "{table}");
+        assert_eq!(
+            int(&db, &format!("SELECT COUNT(*) FROM {table}")).await,
+            0,
+            "{table}"
+        );
+    }
+    assert_eq!(foreign_tables(&db, "files").await, set(&[]));
+    assert_eq!(
+        foreign_tables(&db, "attachments").await,
+        set(&["files", "nodes", "users"])
+    );
+    assert_eq!(
+        foreign_tables(&db, "favorites").await,
+        set(&["nodes", "users"])
+    );
+    // Chaque clé étrangère est vérifiée : un contenu connu, puis une attache ou un favori qui
+    // nomme une page, un contenu ou un compte inconnu.
+    common::exec_sql(
+        &db,
+        "INSERT INTO files (hash, size, mime, created_at) \
+         VALUES (zeroblob(32), 0, 'application/octet-stream', 5000)",
+    )
+    .await;
+    for faulty in [
+        "INSERT INTO attachments (id, node_id, file_hash, name, created_by, created_at) \
+         SELECT 'a', 'nœud-inconnu', zeroblob(32), 'x', id, 1 FROM users LIMIT 1",
+        "INSERT INTO attachments (id, node_id, file_hash, name, created_by, created_at) \
+         SELECT 'a', n.id, x'01', 'x', n.created_by, 1 FROM nodes n \
+         WHERE n.created_by IS NOT NULL LIMIT 1",
+        "INSERT INTO attachments (id, node_id, file_hash, name, created_by, created_at) \
+         SELECT 'a', id, zeroblob(32), 'x', 'compte-inconnu', 1 FROM nodes LIMIT 1",
+        "INSERT INTO favorites (user_id, node_id, created_at) \
+         SELECT id, 'nœud-inconnu', 1 FROM users LIMIT 1",
+        "INSERT INTO favorites (user_id, node_id, created_at) \
+         SELECT 'compte-inconnu', id, 1 FROM nodes LIMIT 1",
+    ] {
+        assert!(refused_by_foreign_key(&db, faulty).await, "{faulty}");
+    }
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0
+    );
+    store.close().await;
+
+    // Une seconde ouverture ne migre plus rien.
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(store.backup(), None);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 4);
     store.close().await;
 }
 
 /// Supprimer une page supprime, avec elle et son sous-arbre, leurs fils de commentaires (et leurs
-/// messages et réactions), leurs versions et leurs déplacements de blocs, par les clés étrangères
-/// (`ON DELETE CASCADE`) ; ceux d'une autre page restent.
+/// messages et réactions), leurs versions, leurs déplacements de blocs, leurs attaches et les
+/// favoris qui les nomment, par les clés étrangères (`ON DELETE CASCADE`) ; ceux d'une autre page
+/// restent. Les contenus (`files`) restent tous : c'est au ménage de les retirer (Ruling R245).
 #[tokio::test]
 async fn deleting_a_page_deletes_its_threads_versions_and_moves() {
     let f = common::fresh().await;
@@ -861,9 +1057,34 @@ async fn deleting_a_page_deletes_its_threads_versions_and_moves() {
             &[&node, &(n + 1).to_string()],
         )
         .await;
+        // Un contenu par page, attaché à elle, et la page en favori.
+        let hash = format!("{:064x}", n + 1);
+        exec(
+            &pool,
+            "INSERT INTO files (hash, size, mime, created_at) \
+             VALUES (unhex(?1), 1, 'application/octet-stream', 1)",
+            &[&hash],
+        )
+        .await;
+        exec(
+            &pool,
+            "INSERT INTO attachments (id, node_id, file_hash, name, created_by, created_at) \
+             VALUES (?1, ?2, unhex(?3), 'image.png', ?4, 1)",
+            &[&Uuid::now_v7().to_string(), &node, &hash, &author],
+        )
+        .await;
+        exec(
+            &pool,
+            "INSERT INTO favorites (user_id, node_id, created_at) VALUES (?1, ?2, 1)",
+            &[&author, &node],
+        )
+        .await;
     }
     pool.close().await;
-    for table in COLLABORATION_TABLES {
+    for table in COLLABORATION_TABLES
+        .into_iter()
+        .chain(FILES_AND_FAVORITES_TABLES)
+    {
         assert_eq!(
             int(&f.db, &format!("SELECT COUNT(*) FROM {table}")).await,
             3,
@@ -910,6 +1131,14 @@ async fn deleting_a_page_deletes_its_threads_versions_and_moves() {
             "block_moves",
             format!("SELECT COUNT(*) FROM block_moves WHERE node_id = '{other}'"),
         ),
+        (
+            "attachments",
+            format!("SELECT COUNT(*) FROM attachments WHERE node_id = '{other}'"),
+        ),
+        (
+            "favorites",
+            format!("SELECT COUNT(*) FROM favorites WHERE node_id = '{other}'"),
+        ),
     ] {
         assert_eq!(
             int(&f.db, &format!("SELECT COUNT(*) FROM {table}")).await,
@@ -918,6 +1147,8 @@ async fn deleting_a_page_deletes_its_threads_versions_and_moves() {
         );
         assert_eq!(int(&f.db, &of_other).await, 1, "{table}");
     }
+    // Les contenus restent, ceux des pages supprimées compris : c'est au ménage.
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM files").await, 3);
     assert_eq!(
         int(&f.db, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
         0

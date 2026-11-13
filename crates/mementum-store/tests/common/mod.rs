@@ -15,9 +15,18 @@ use uuid::Uuid;
 /// Les migrations d'une base du lot 2.
 pub const LOT2: &[&str] = &["0001_init.sql", "0002_spaces_accounts.sql"];
 
+/// Les migrations d'une base de la partie A du lot 3 (Ruling R243 : la partie B a la sienne,
+/// `0004`).
+pub const LOT3A: &[&str] = &[
+    "0001_init.sql",
+    "0002_spaces_accounts.sql",
+    "0003_collaboration.sql",
+];
+
 /// Une base telle que le code d'un lot plus ancien la produit : les options de connexion de
 /// `Store::open`, et les seules migrations `files` du store, lancées par sqlx (qui écrit donc
-/// `_sqlx_migrations`, sommes de contrôle comprises). Avec [`LOT2`], une base du lot 2.
+/// `_sqlx_migrations`, sommes de contrôle comprises). Avec [`LOT2`], une base du lot 2 ; avec
+/// [`LOT3A`], une base de la partie A du lot 3.
 pub async fn database_with(db: &Path, files: &[&str]) -> SqlitePool {
     let migrations = tempfile::tempdir().unwrap();
     for file in files {
