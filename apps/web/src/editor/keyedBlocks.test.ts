@@ -231,12 +231,12 @@ describe.each(ORDERS)("pendant qu'un autre déplace un bloc ($label)", (order) =
   });
 });
 
-// Un bloc peut être sélectionné comme un nœud (un clic sur une image). Si quelqu'un d'autre
-// retire alors ce bloc, ou le déplace (il est recréé ailleurs), y-prosemirror 1.3.7 cherchait le
-// nœud à son ancienne place : quand plus rien ne la suivait (le bloc était le dernier), il levait
-// dans l'observateur du document, et l'éditeur ne montrait pas le changement. Avec la forme à
-// clés, un bloc déplacé est un bloc retiré : le correctif garde donc aussi cet endroit
-// (`restoreRelativeSelection`).
+// Un nœud peut être sélectionné : un bloc entier (ici), ou l'image d'un bloc image, par un clic
+// (`followBlock.test.ts`). Si quelqu'un d'autre retire alors ce bloc, ou le déplace (il est recréé
+// ailleurs), y-prosemirror 1.3.7 cherchait le nœud à son ancienne place : quand plus rien ne la
+// suivait (le bloc était le dernier), il levait dans l'observateur du document, et l'éditeur ne
+// montrait pas le changement. Avec la forme à clés, un bloc déplacé est un bloc retiré : le
+// correctif garde donc aussi cet endroit (`restoreRelativeSelection`).
 describe("a_selected_block_taken_away_by_someone_else_does_not_break_the_editor", () => {
   /** Mona a sélectionné Z, le dernier bloc de la page. */
   async function selected() {

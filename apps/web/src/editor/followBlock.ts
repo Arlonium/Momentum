@@ -6,7 +6,7 @@
 // relatives : elles pointent l'élément d'avant, qui n'est plus là. Il la remet alors où était le
 // bloc, c'est-à-dire dans celui qui a pris sa place, ou à la fin de la page si le bloc était le
 // premier. Qui tapait dans le bloc qu'un autre déplace écrivait donc la suite dans un autre
-// bloc ; et pour un bloc sélectionné (celui qu'on vient de déposer), Suppr retirait un voisin.
+// bloc ; et pour une image sélectionnée par un clic, Suppr retirait le bloc voisin.
 //
 // De même pour les blocs qu'on tient au bout de la souris pendant un glisser : BlockNote les
 // sélectionne en bloc, y-prosemirror en fait une sélection de texte au premier changement reçu,
@@ -74,13 +74,17 @@ function find(doc: PmNode, id: string): { pos: number; node: PmNode } | null {
  */
 function locate(doc: PmNode, place: Place): number | null {
   const block = find(doc, place.id);
-  if (block === null) return null;
+  return block === null ? null : within(block, place.offset);
+}
+
+/** La position du contenu propre du bloc `block` la plus proche de son décalage `offset`. */
+function within(block: { pos: number; node: PmNode }, offset: number): number {
   const content = block.node.firstChild;
   const start = block.pos + 1;
   if (content === null) return start;
   const last = start + Math.max(content.nodeSize - 1, 0);
   const first = Math.min(start + 1, last);
-  return Math.min(Math.max(block.pos + place.offset, first), last);
+  return Math.min(Math.max(block.pos + offset, first), last);
 }
 
 /**
@@ -141,6 +145,47 @@ function isGone(relative: Y.RelativePosition, doc: Y.Doc): boolean {
 }
 
 /**
+ * Ce que devient la sélection de nœud `before` : le même nœud, là où il est maintenant.
+ *
+ * Un bloc entier se retrouve par son id. Un nœud qui n'en a pas (l'image d'un bloc image, ce que
+ * sélectionne un clic ; une mention) se retrouve à la même place dans le bloc de même id que
+ * celui qui le portait. Rien à faire si la sélection est déjà sur lui : y-prosemirror sait suivre
+ * un nœud dont l'élément est toujours là.
+ *
+ * S'il n'est plus là (un autre l'a supprimé, ou remplacé : une image devenue paragraphe), aucun
+ * nœud ne reste sélectionné à sa place, que Suppr retirerait. Son bloc est encore là : la
+ * sélection devient un curseur de texte dans ce bloc. Sinon, la sélection de nœud que
+ * y-prosemirror a remise à l'ancienne place, sur ce qui s'y trouve désormais (le bloc voisin),
+ * devient un curseur dans le texte le plus proche, s'il y en a un.
+ */
+function followedNode(before: NodeSelection, state: EditorState): Selection | null {
+  const { doc, selection } = state;
+  const now = selection instanceof NodeSelection ? selection : null;
+  const id = blockId(before.node);
+  if (id !== null) {
+    if (now !== null && blockId(now.node) === id) return null;
+    const block = find(doc, id);
+    if (block !== null) return NodeSelection.create(doc, block.pos);
+  } else {
+    const place = placeOf(before.$from);
+    if (place === null) return null;
+    if (now?.node.type === before.node.type && placeOf(now.$from)?.id === place.id) return null;
+    const block = find(doc, place.id);
+    if (block !== null) {
+      // Dans le bloc, pas au-delà : un bloc recréé plus court ne donne pas le nœud d'un voisin.
+      const at = block.pos + place.offset;
+      if (place.offset < block.node.nodeSize && doc.nodeAt(at)?.type === before.node.type) {
+        return NodeSelection.create(doc, at);
+      }
+      const inside = doc.resolve(within(block, place.offset));
+      return TextSelection.between(inside, inside);
+    }
+  }
+  if (now === null) return null;
+  return Selection.findFrom(now.$from, 1, true) ?? Selection.findFrom(now.$from, -1, true);
+}
+
+/**
  * La sélection à remettre après le changement `change`, ou `null` s'il n'y a rien à faire : la
  * sélection d'avant (`before`) désignait un bloc, le changement l'en a sortie, et ce bloc existe
  * encore.
@@ -148,13 +193,7 @@ function isGone(relative: Y.RelativePosition, doc: Y.Doc): boolean {
 function followed(change: Transaction, before: Selection, state: EditorState): Selection | null {
   const { doc, selection } = state;
 
-  if (before instanceof NodeSelection) {
-    const id = blockId(before.node);
-    if (id === null) return null;
-    if (selection instanceof NodeSelection && blockId(selection.node) === id) return null;
-    const block = find(doc, id);
-    return block === null ? null : NodeSelection.create(doc, block.pos);
-  }
+  if (before instanceof NodeSelection) return followedNode(before, state);
 
   if (kindOf(before) === HELD_BLOCKS) {
     const ends = heldEnds(before);

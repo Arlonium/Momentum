@@ -289,10 +289,24 @@ export function drag(p: Peer, moved: string, place: { under: string } | { above:
   });
 }
 
-/** `p` sélectionne le bloc `id` comme un nœud : ce que donne un clic sur une image. */
+/**
+ * `p` sélectionne le bloc `id` entier, comme un nœud : son conteneur. Ce n'est pas ce que donne un
+ * clic sur une image (`selectContent`).
+ */
 export function selectBlock(p: Peer, id: string): void {
   p.editor.transact((tr) => {
     tr.setSelection(NodeSelection.create(tr.doc, containerOf(tr.doc, id).pos));
+  });
+}
+
+/**
+ * `p` sélectionne, comme un nœud, le contenu du bloc `id` : ce que donne un clic sur une image
+ * dans un navigateur (`e2e/block-move.spec.ts`). Le nœud sélectionné est l'image, qui n'a pas
+ * d'id ; c'est son conteneur qui le porte.
+ */
+export function selectContent(p: Peer, id: string): void {
+  p.editor.transact((tr) => {
+    tr.setSelection(NodeSelection.create(tr.doc, containerOf(tr.doc, id).pos + 1));
   });
 }
 

@@ -5,7 +5,8 @@
 // le remet là où était le bloc, donc dans celui qui a pris sa place, ou à la fin de la page si le
 // bloc était le premier. La frappe suivante partait dans un autre bloc. Mêmes éditeurs que
 // `blockMoves.test.ts` (`test/editors.ts`), avec l'extension : de vrais BlockNote 0.57, dans jsdom.
-import { NodeSelection, Selection, TextSelection } from "prosemirror-state";
+import { createExtension } from "@blocknote/core";
+import { NodeSelection, Plugin, Selection, TextSelection } from "prosemirror-state";
 import { describe, expect, test } from "vitest";
 import * as Y from "yjs";
 import {
@@ -19,10 +20,12 @@ import {
   line,
   PARENTED,
   peer,
+  press,
   pressAt,
   REMOTE,
   seedState,
   selectBlock,
+  selectContent,
   shown,
   stored,
   tab,
@@ -34,6 +37,7 @@ import {
   Y_,
   Z,
   type Peer,
+  type Seed,
 } from "../test/editors";
 import { followBlock } from "./followBlock";
 
@@ -167,7 +171,9 @@ describe("cursor_follows_its_block_when_someone_else_moves_it", () => {
     expect(cursorOf(tom)).toEqual({ id: "x", offset: 6 });
   });
 
-  test("un bloc sélectionné comme un nœud (un clic sur une image) reste sélectionné quand un autre le déplace", async () => {
+  test("un bloc sélectionné en entier, comme un nœud, reste sélectionné quand un autre le déplace", async () => {
+    // Le conteneur du bloc, qui porte l'id. Un clic sur une image sélectionne autre chose, le
+    // nœud image : `a_clicked_image_stays_selected_when_someone_else_moves_it`, plus bas.
     const { mona, tom, server } = await pair();
     drag(mona, "x", { under: "y" });
     await exchange(server, [mona, tom]);
@@ -183,6 +189,342 @@ describe("cursor_follows_its_block_when_someone_else_moves_it", () => {
       expect((selection as NodeSelection).node.attrs.id).toBe("x");
     }
     expect(shown(mona)).toEqual([Y_, X, Z, W]);
+  });
+});
+
+// Un clic sur une image sélectionne le nœud `image`, pas son conteneur (vu dans un navigateur,
+// `an_image_clicked_then_moved_by_someone_else…`, `e2e/block-move.spec.ts`). Ce nœud n'a pas
+// d'id : c'est son conteneur qui le porte. Quand un autre déplace l'image, y-prosemirror remet
+// une sélection de nœud à l'ancienne place, donc sur ce qui s'y trouve désormais : le bloc
+// voisin, entier. Suppr retirait alors ce voisin, et l'image restait.
+describe("a_clicked_image_stays_selected_when_someone_else_moves_it", () => {
+  const IMAGE = { id: "img", type: "image", props: { url: "https://example.org/a.png" } } as const;
+  const IMG = block("img", "", { type: "image" });
+  /** Bloc X, l'image, Bloc Y, Bloc Z. */
+  const WITH_IMAGE: Seed = [XYZW[0], IMAGE, XYZW[1], XYZW[2]];
+
+  /** La page `blocks` chez Mona et chez Tom, avec ou sans l'extension, et le document du serveur. */
+  async function open(blocks: Seed, { plain = false } = {}) {
+    const base = await seedState(blocks);
+    const extensions = plain ? undefined : [followBlock];
+    const mona = await peer("Mona", 2, base, extensions);
+    const tom = await peer("Tom", 3, base, extensions);
+    const server = new Y.Doc();
+    Y.applyUpdate(server, base, REMOTE);
+    expect(mona.writes.length + tom.writes.length, "rien d'écrit à l'ouverture").toBe(0);
+    return { mona, tom, server };
+  }
+
+  /**
+   * Ce que désigne la sélection de `p` : un nœud (son type, et l'id du bloc qui le porte, ou le
+   * sien si c'est un bloc entier), ou un curseur de texte.
+   */
+  function selected(p: Peer) {
+    const { selection } = p.editor.prosemirrorState;
+    if (!(selection instanceof NodeSelection)) return { cursor: cursorOf(p) };
+    const { node, $from } = selection;
+    if (node.type.name === "blockContainer") return { node: node.type.name, block: String(node.attrs.id) };
+    for (let depth = $from.depth; depth > 0; depth -= 1) {
+      const holder = $from.node(depth);
+      if (holder.type.name === "blockContainer") return { node: node.type.name, block: String(holder.attrs.id) };
+    }
+    return { node: node.type.name, block: null };
+  }
+
+  /** `p` presse Suppr : ce qui est sélectionné est retiré. */
+  function pressDelete(p: Peer): void {
+    if (!press(p, "Delete")) throw new Error("la touche Suppr n'a rien fait");
+  }
+
+  test("témoin : sans l'extension, la sélection passe sur le bloc voisin, et Suppr le retire", async () => {
+    const { mona, tom, server } = await open(WITH_IMAGE, { plain: true });
+    selectContent(mona, "img");
+    expect(selected(mona)).toEqual({ node: "image", block: "img" });
+    drag(tom, "img", { under: "z" });
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([X, Y_, Z, IMG]);
+    expect(selected(mona)).toEqual({ node: "blockContainer", block: "y" });
+    pressDelete(mona);
+    await exchange(server, [mona, tom]);
+    expect(stored(server)).toEqual([X, Z, IMG]);
+  });
+
+  test("l'image reste le nœud sélectionné, et c'est elle que Suppr retire", async () => {
+    const { mona, tom, server } = await open(WITH_IMAGE);
+    selectContent(mona, "img");
+    // Tom l'emmène tout en bas, puis la remonte au milieu.
+    for (const [place, page] of [
+      [{ under: "z" }, [X, Y_, Z, IMG]],
+      [{ above: "y" }, [X, IMG, Y_, Z]],
+      [{ above: "x" }, [IMG, X, Y_, Z]],
+    ] as const) {
+      drag(tom, "img", place);
+      await exchange(server, [tom, mona]);
+      expect(shown(mona)).toEqual(page);
+      expect(selected(mona)).toEqual({ node: "image", block: "img" });
+    }
+    expect(mona.writes, "suivre l'image n'écrit rien").toHaveLength(0);
+    pressDelete(mona);
+    await exchange(server, [mona, tom]);
+    expect(stored(server)).toEqual([X, Y_, Z]);
+    expect(shown(tom)).toEqual([X, Y_, Z]);
+  });
+
+  test("une image qui a des sous-blocs, déplacée avec eux", async () => {
+    const child = { id: "c", type: "paragraph", content: "Enfant" } as const;
+    const { mona, tom, server } = await open([XYZW[0], { ...IMAGE, children: [child] }, XYZW[1], XYZW[2]]);
+    selectContent(mona, "img");
+    drag(tom, "img", { under: "z" });
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([X, Y_, Z, block("img", "", { type: "image", children: [block("c", "Enfant")] })]);
+    expect(selected(mona)).toEqual({ node: "image", block: "img" });
+  });
+
+  test("une image dans une colonne, quand un autre déplace toutes les colonnes", async () => {
+    const columns = {
+      id: "cols",
+      type: "columnList",
+      children: [
+        { id: "left", type: "column", children: [IMAGE] },
+        { id: "right", type: "column", children: [{ id: "r", type: "paragraph", content: "Droite" }] },
+      ],
+    } as const;
+    const { mona, tom, server } = await open([XYZW[0], columns, XYZW[1], XYZW[2]] as Seed);
+    selectContent(mona, "img");
+    // Les colonnes n'ont pas de contenu propre : elles se déplacent par leurs nœuds.
+    tom.editor.transact((tr) => {
+      let found: { pos: number; node: typeof tr.doc } | undefined;
+      tr.doc.descendants((node, pos) => {
+        if (node.attrs.id === "cols") found = { pos, node };
+        return found === undefined;
+      });
+      const copy = tom.editor.pmSchema.nodeFromJSON(found!.node.toJSON());
+      tr.delete(found!.pos, found!.pos + found!.node.nodeSize);
+      const z = containerOf(tr.doc, "z");
+      tr.insert(z.pos + z.node.nodeSize, copy);
+    });
+    await exchange(server, [tom, mona]);
+    expect(shown(mona).map((b) => b.id)).toEqual(["x", "y", "z", "cols"]);
+    expect(selected(mona)).toEqual({ node: "image", block: "img" });
+  });
+
+  test("un autre déplace un voisin par-dessus l'image : elle reste sélectionnée, sans rien suivre", async () => {
+    const { mona, tom, server } = await open(WITH_IMAGE);
+    selectContent(mona, "img");
+    drag(tom, "x", { under: "y" });
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([IMG, Y_, X, Z]);
+    expect(selected(mona)).toEqual({ node: "image", block: "img" });
+  });
+
+  test("l'image supprimée par un autre : plus aucun nœud n'est sélectionné, et Suppr ne retire aucun bloc", async () => {
+    // Sans l'extension, le bloc voisin se retrouve sélectionné en entier.
+    const plain = await open(WITH_IMAGE, { plain: true });
+    selectContent(plain.mona, "img");
+    plain.tom.editor.removeBlocks(["img"]);
+    await exchange(plain.server, [plain.tom, plain.mona]);
+    expect(selected(plain.mona)).toEqual({ node: "blockContainer", block: "y" });
+
+    const { mona, tom, server } = await open(WITH_IMAGE);
+    selectContent(mona, "img");
+    tom.editor.removeBlocks(["img"]);
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([X, Y_, Z]);
+    expect(mona.editor.prosemirrorState.selection).toBeInstanceOf(TextSelection);
+    press(mona, "Delete");
+    await exchange(server, [mona, tom]);
+    expect(stored(server).map((b) => b.id)).toEqual(["x", "y", "z"]);
+  });
+
+  test("le dernier bloc, une image, supprimé par un autre : rien ne casse", async () => {
+    const { mona, tom, server } = await open([XYZW[0], XYZW[1], IMAGE]);
+    selectContent(mona, "img");
+    tom.editor.removeBlocks(["img"]);
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([X, Y_]);
+    typeAtEnd(tom, "y", " de Tom");
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([X, block("y", "Bloc Y de Tom")]);
+  });
+
+  test("l'image supprimée, une autre image juste dessous : ce n'est pas elle qui se retrouve sélectionnée", async () => {
+    const second = { ...IMAGE, id: "img2" };
+    // Le curseur va au texte le plus proche : après, sinon avant.
+    const cases: [Seed, { id: string; offset: number }][] = [
+      [[XYZW[0], IMAGE, second, XYZW[1]], { id: "y", offset: 0 }],
+      [[XYZW[0], IMAGE, second], { id: "x", offset: 6 }],
+    ];
+    for (const [page, at] of cases) {
+      const { mona, tom, server } = await open(page);
+      selectContent(mona, "img");
+      tom.editor.removeBlocks(["img"]);
+      await exchange(server, [tom, mona]);
+      expect(selected(mona)).toEqual({ cursor: at });
+    }
+  });
+
+  test("un bloc sélectionné en entier, supprimé par un autre : le voisin n'est pas sélectionné à sa place", async () => {
+    const plain = await open(WITH_IMAGE, { plain: true });
+    selectBlock(plain.mona, "x");
+    plain.tom.editor.removeBlocks(["x"]);
+    await exchange(plain.server, [plain.tom, plain.mona]);
+    expect(selected(plain.mona)).toEqual({ node: "blockContainer", block: "img" });
+
+    const { mona, tom, server } = await open(WITH_IMAGE);
+    selectBlock(mona, "x");
+    tom.editor.removeBlocks(["x"]);
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([IMG, Y_, Z]);
+    expect(selected(mona)).toEqual({ cursor: { id: "y", offset: 0 } });
+  });
+
+  // Une mention se sélectionne aussi comme un nœud, et n'a pas non plus d'id de bloc (le sien
+  // nomme la page citée).
+  describe("une mention sélectionnée", () => {
+    const mention = { type: "mention", props: { kind: "page", id: "p1", label: "Plan" } } as const;
+    const text = (t: string) => ({ type: "text", text: t, styles: {} }) as const;
+    /** X : « Voir @Plan ici » ; Y : « @Plan suite ». */
+    const MENTIONS = [
+      { id: "x", type: "paragraph", content: [text("Voir "), mention, text(" ici")] },
+      { id: "y", type: "paragraph", content: [mention, text(" suite")] },
+      XYZW[2],
+    ] as Seed;
+
+    /** `p` sélectionne la mention du bloc X, après « Voir ». */
+    function selectMention(p: Peer): void {
+      p.editor.transact((tr) => {
+        tr.setSelection(NodeSelection.create(tr.doc, containerOf(tr.doc, "x").pos + 2 + 5));
+      });
+      expect(selected(p)).toEqual({ node: "mention", block: "x" });
+    }
+
+    /** La place de la mention sélectionnée par `p` dans le texte de son bloc. */
+    const offsetOf = (p: Peer) => p.editor.prosemirrorState.selection.$from.parentOffset;
+
+    test("son bloc déplacé par un autre : elle reste sélectionnée", async () => {
+      const { mona, tom, server } = await open(MENTIONS);
+      selectMention(mona);
+      drag(tom, "x", { under: "z" });
+      await exchange(server, [tom, mona]);
+      expect(shown(mona).map((b) => b.id)).toEqual(["y", "z", "x"]);
+      expect(selected(mona)).toEqual({ node: "mention", block: "x" });
+      expect(offsetOf(mona)).toBe(5);
+    });
+
+    test("un autre tape avant elle : elle reste sélectionnée, à sa nouvelle place", async () => {
+      const { mona, tom, server } = await open(MENTIONS);
+      selectMention(mona);
+      typeAt(tom, "x", 0, "Ah, ");
+      await exchange(server, [tom, mona]);
+      expect(selected(mona)).toEqual({ node: "mention", block: "x" });
+      expect(offsetOf(mona)).toBe(9);
+    });
+
+    test("supprimée par un autre : le texte qui la suivait n'est pas sélectionné à sa place", async () => {
+      /** Tom retire la mention de X, et rien d'autre. */
+      const remove = (tom: Peer) =>
+        tom.editor.transact((tr) => {
+          const at = containerOf(tr.doc, "x").pos + 2 + 5;
+          tr.delete(at, at + 1);
+        });
+      // Sans l'extension, la sélection part à la fin de la page.
+      const plain = await open(MENTIONS, { plain: true });
+      selectMention(plain.mona);
+      remove(plain.tom);
+      await exchange(plain.server, [plain.tom, plain.mona]);
+      expect(selected(plain.mona)).toEqual({ cursor: { id: "z", offset: 6 } });
+
+      const { mona, tom, server } = await open(MENTIONS);
+      selectMention(mona);
+      remove(tom);
+      await exchange(server, [tom, mona]);
+      expect(shown(mona)[0]).toEqual(block("x", "Voir  ici"));
+      expect(selected(mona)).toEqual({ cursor: { id: "x", offset: 5 } });
+    });
+
+    test("supprimée par un autre, une formule juste après : ce n'est pas elle qui se retrouve sélectionnée", async () => {
+      const math = { type: "math", props: { latex: "x^2" } } as const;
+      const page = [{ id: "x", type: "paragraph", content: [text("Voir "), mention, math] }, XYZW[1], XYZW[2]] as Seed;
+      /** Tom retire la mention de X, et rien d'autre. */
+      const remove = (tom: Peer) =>
+        tom.editor.transact((tr) => {
+          const at = containerOf(tr.doc, "x").pos + 2 + 5;
+          tr.delete(at, at + 1);
+        });
+      // Sans l'extension, y-prosemirror sélectionne le nœud qui a pris la place de la mention.
+      const plain = await open(page, { plain: true });
+      selectMention(plain.mona);
+      remove(plain.tom);
+      await exchange(plain.server, [plain.tom, plain.mona]);
+      expect(selected(plain.mona)).toEqual({ node: "math", block: "x" });
+
+      const { mona, tom, server } = await open(page);
+      selectMention(mona);
+      remove(tom);
+      await exchange(server, [tom, mona]);
+      expect(selected(mona)).toEqual({ cursor: { id: "x", offset: 5 } });
+    });
+
+    test("un autre récrit son bloc, plus court : la mention du bloc suivant n'est pas sélectionnée à sa place", async () => {
+      const { mona, tom, server } = await open(MENTIONS);
+      selectMention(mona);
+      // Le bloc est recréé (il change de type) avec un texte d'une lettre : la place d'avant
+      // tomberait, deux positions après sa fin, sur la mention qui ouvre le bloc Y.
+      tom.editor.updateBlock("x", { type: "heading", props: { level: 2 }, content: "V" });
+      await exchange(server, [tom, mona]);
+      expect(shown(mona)[0]).toEqual(block("x", "V", { type: "heading" }));
+      expect(mona.editor.prosemirrorState.selection).not.toBeInstanceOf(NodeSelection);
+    });
+  });
+
+  test("l'image changée en paragraphe par un autre : ce paragraphe n'est pas sélectionné comme un nœud", async () => {
+    // Le bloc garde son id, son contenu est un autre nœud. Sans l'extension, la sélection part à
+    // la fin de la page.
+    const plain = await open(WITH_IMAGE, { plain: true });
+    selectContent(plain.mona, "img");
+    plain.tom.editor.updateBlock("img", { type: "paragraph", content: "Texte" });
+    await exchange(plain.server, [plain.tom, plain.mona]);
+    expect(selected(plain.mona)).toEqual({ cursor: { id: "z", offset: 6 } });
+
+    const { mona, tom, server } = await open(WITH_IMAGE);
+    selectContent(mona, "img");
+    tom.editor.updateBlock("img", { type: "paragraph", content: "Texte" });
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([X, block("img", "Texte"), Y_, Z]);
+    expect(selected(mona)).toEqual({ cursor: { id: "img", offset: 0 } });
+  });
+
+  test("l'image était la dernière de ses sous-blocs, une autre image finit la page : c'est la sienne qui reste sélectionnée", async () => {
+    // Plus rien ne suit l'ancienne place de l'image : la sélection est laissée à ProseMirror
+    // (`restoreRelativeSelection`, dans le correctif), qui prend le dernier nœud de la page, une
+    // autre image.
+    const second = { ...IMAGE, id: "img2" };
+    const page = [{ ...XYZW[0], children: [IMAGE] }, XYZW[1], second] as Seed;
+    const plain = await open(page, { plain: true });
+    selectContent(plain.mona, "img");
+    drag(plain.tom, "img", { above: "x" });
+    await exchange(plain.server, [plain.tom, plain.mona]);
+    expect(selected(plain.mona)).toEqual({ node: "image", block: "img2" });
+
+    const { mona, tom, server } = await open(page);
+    selectContent(mona, "img");
+    drag(tom, "img", { above: "x" });
+    await exchange(server, [tom, mona]);
+    expect(shown(mona).map((b) => b.id)).toEqual(["img", "x", "y", "img2"]);
+    expect(selected(mona)).toEqual({ node: "image", block: "img" });
+  });
+
+  test("annuler le déplacement de l'image, chez qui l'a déplacée comme chez l'autre", async () => {
+    const { mona, tom, server } = await open(WITH_IMAGE);
+    drag(tom, "img", { under: "z" });
+    await exchange(server, [tom, mona]);
+    selectContent(mona, "img");
+    selectContent(tom, "img");
+    expect(tom.editor.undo()).toBe(true);
+    await exchange(server, [tom, mona]);
+    expect(shown(mona)).toEqual([X, IMG, Y_, Z]);
+    expect(selected(mona)).toEqual({ node: "image", block: "img" });
+    expect(selected(tom)).toEqual({ node: "image", block: "img" });
   });
 });
 
@@ -423,6 +765,53 @@ describe("annuler son propre déplacement", () => {
     await exchange(server, [mona, tom]);
     expect(shown(tom)).toEqual([X, Y_, Z, W]);
     expect(cursorOf(tom)).toEqual({ id: "x", offset: 3 });
+  });
+});
+
+describe("nothing_is_added_when_the_selection_is_already_in_place", () => {
+  /** Compte les transactions que les extensions placées avant elle ajoutent à celles de l'éditeur. */
+  function counter() {
+    const count = { appended: 0 };
+    const extension = createExtension({
+      key: "countAppended",
+      prosemirrorPlugins: [
+        new Plugin({
+          appendTransaction(transactions) {
+            // Rappelé avec les seules transactions ajoutées depuis son dernier passage.
+            count.appended += transactions.filter((tr) => tr.getMeta("appendedTransaction")).length;
+            return null;
+          },
+        }),
+      ],
+    });
+    return { count, extension };
+  }
+
+  test("un curseur, un bloc entier, une image : ce qu'un autre tape ailleurs n'ajoute aucune transaction", async () => {
+    const image = { id: "img", type: "image", props: { url: "https://example.org/a.png" } } as const;
+    // L'image en tête, et Tom tape dans le dernier bloc : aucune position de Mona ne bouge.
+    const base = await seedState([image, ...XYZW] as Seed);
+    const { count, extension } = counter();
+    const mona = await peer("Mona", 2, base, [followBlock, extension]);
+    const tom = await peer("Tom", 3, base, [followBlock]);
+    const server = new Y.Doc();
+    Y.applyUpdate(server, base, REMOTE);
+    for (const select of [
+      () => cursor(mona, "x", 3),
+      () => selectBlock(mona, "x"),
+      () => selectContent(mona, "img"),
+    ]) {
+      select();
+      const { selection } = mona.editor.prosemirrorState;
+      typeAtEnd(tom, "w", "!");
+      await exchange(server, [tom, mona]);
+      expect(mona.editor.prosemirrorState.selection.toJSON()).toEqual(selection.toJSON());
+    }
+    expect(count.appended).toBe(0);
+    // Témoin : quand le bloc sélectionné est déplacé, l'extension ajoute bien la sienne.
+    drag(tom, "img", { under: "x" });
+    await exchange(server, [tom, mona]);
+    expect(count.appended).toBe(1);
   });
 });
 
