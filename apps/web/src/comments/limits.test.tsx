@@ -37,7 +37,7 @@ const limit = (code: ErrorCode, said: string) => new ApiError(409, code, said);
 // Les messages du serveur (S4, `crates/mementum-server/src/error.rs`).
 const THREADS = limit(
   "thread_limit",
-  "cette page a atteint 2\u202f000 fils de commentaires, résolus compris : supprime ceux qui ne " +
+  "cette page a atteint 2 000 fils de commentaires, résolus compris : supprime ceux qui ne " +
     "servent plus, ou demande-le à quelqu'un qui a l'accès complet, avant d'en ouvrir un autre ; " +
     "rien n'a été écrit",
 );
