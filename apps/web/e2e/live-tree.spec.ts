@@ -190,6 +190,13 @@ test("a_silent_channel_is_closed_and_the_sidebar_falls_back_on_its_timer", async
   // ni le minuteur ne relisent l'arbre ; 45 s sans trame, l'onglet le ferme de lui-même, et la
   // barre latérale reprend par le minuteur (le canal ne revient pas : les tentatives suivantes
   // sont refusées). L'horloge de la page est la nôtre : on n'attend pas 45 s pour de bon.
+  //
+  // Mais après `clock.install()`, elle avance aussi d'elle-même, en temps réel : chaque seconde
+  // réelle passée depuis l'ouverture du canal (un poste chargé, la requête qui renomme) rapproche
+  // le chien de garde. Le contrôle « encore ouvert » se fait donc à 35 s de la page, dix secondes
+  // avant lui, et la fermeture se demande à 47 s : le temps réel ne fait qu'avancer l'horloge, il
+  // ne peut retarder la fermeture. La valeur exacte (45 s) est gardée par le Vitest
+  // `a_silent_channel_is_closed_and_falls_back` (`useSpaceEvents.test.ts`).
   const { aliceApi, space, bruno } = await ownerAndMember();
   const page = await createPage(aliceApi, { spaceId: space.id, title: `Avant ${unique()}` });
   const b = await newUser(browser, bruno);
@@ -214,12 +221,12 @@ test("a_silent_channel_is_closed_and_the_sidebar_falls_back_on_its_timer", async
     data: { title: "Renommée ailleurs" },
   });
   expect(renamed.status(), await renamed.text()).toBe(200);
-  // 44 s de la page : le canal est tenu pour vivant, rien n'est relu.
-  await b.clock.fastForward(44_000);
+  // 35 s de la page : le canal est tenu pour vivant, rien n'est relu.
+  await b.clock.fastForward(35_000);
   await expect(link).toHaveText(page.title);
   expect(closedByPage).toBe(0);
-  // 45 s sans trame : l'onglet ferme le canal de lui-même.
-  await b.clock.fastForward(2_000);
+  // Plus de 45 s sans trame : l'onglet ferme le canal de lui-même.
+  await b.clock.fastForward(12_000);
   await expect.poll(() => closedByPage).toBe(1);
   // Le canal ne revient pas : le minuteur de dix secondes relit l'arbre.
   await b.clock.fastForward(11_000);
