@@ -830,9 +830,12 @@ impl Store {
     }
 
     /// Supprime définitivement un nœud et tout son sous-arbre, avec leurs documents, leurs
-    /// accès, leurs invitations, leurs fils de commentaires, leurs versions et leurs
-    /// déplacements de blocs, et rend les ids supprimés (le nœud compris). `NotTrashed` (sans
-    /// rien écrire) si le nœud n'est pas à la corbeille, lui-même ou par un ancêtre.
+    /// accès, leurs invitations, leurs fils de commentaires, leurs versions, leurs
+    /// déplacements de blocs, leurs attaches et les favoris qui les nomment, et rend les ids
+    /// supprimés (le nœud compris). Les contenus attachés restent (`files`) : c'est au ménage
+    /// ([`Store::sweep_files`]) de retirer ceux qu'aucune page n'attache plus (Ruling R245).
+    /// `NotTrashed` (sans rien écrire) si le nœud n'est pas à la corbeille, lui-même ou par un
+    /// ancêtre.
     pub async fn delete_node(&self, id: Uuid) -> Result<Vec<Uuid>, StoreError> {
         let id_s = id.to_string();
         let mut tx = self.write().await?;
@@ -851,10 +854,10 @@ impl Store {
                 .join(",")
         );
         // Les documents d'abord (`nodes` est leur table mère) ; `acl`, `invitations`, les fils de
-        // commentaires (avec leurs messages et leurs réactions), les versions et les
-        // déplacements de blocs suivent les nœuds (`ON DELETE CASCADE`, migration `0003`). Les
-        // nœuds partent en une instruction : la clé `parent_id` n'est vérifiée qu'à la fin,
-        // quand parents et enfants sont tous partis.
+        // commentaires (avec leurs messages et leurs réactions), les versions, les
+        // déplacements de blocs (migration `0003`), les attaches et les favoris (`0004`)
+        // suivent les nœuds (`ON DELETE CASCADE`). Les nœuds partent en une instruction : la
+        // clé `parent_id` n'est vérifiée qu'à la fin, quand parents et enfants sont tous partis.
         for sql in [
             "DELETE FROM doc_updates WHERE node_id IN (SELECT value FROM json_each(?))",
             "DELETE FROM doc_snapshots WHERE node_id IN (SELECT value FROM json_each(?))",
