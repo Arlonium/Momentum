@@ -485,6 +485,14 @@ test("a_draft_outlives_a_lowered_level_and_comes_back_with_it", async ({ browser
   // (« Textes non envoyés », R211), et retrouve son champ quand le droit revient, sans partir.
   const { aliceApi, bruno, brunoId, page } = await scene("comment");
   const b = await openPage(browser, page.id, bruno);
+  // Les fils que l'onglet ouvre (`POST …/comments`), envoyés par lui ou partis d'eux-mêmes.
+  const sends: string[] = [];
+  b.on("request", (request) => {
+    const { pathname } = new URL(request.url());
+    if (request.method() === "POST" && pathname === `/api/v1/pages/${page.id}/comments`) {
+      sends.push(request.postData() ?? "");
+    }
+  });
   const panel = await openComments(b);
   await panel.getByRole("textbox", { name: "Commenter la page" }).fill("Mon brouillon");
   await setPageLevel(aliceApi, page.id, brunoId, "read");
@@ -499,6 +507,18 @@ test("a_draft_outlives_a_lowered_level_and_comes_back_with_it", async ({ browser
   );
   await expect(unsent).toHaveCount(0);
   expect(await threadsOf(aliceApi, page.id)).toEqual([]);
+  // Témoin : c'est Bruno qui envoie. Son envoi part après le retour du champ ; un envoi parti
+  // de lui-même à ce retour l'aurait précédé (la requête précède sa réponse, et le fil
+  // affiché la suit), et serait compté avec le sien.
+  const send = panel.getByRole("button", { name: "Commenter", exact: true });
+  await expect(send).toBeEnabled();
+  await send.click();
+  await expect(threadOf(panel, "Mon brouillon")).toBeVisible();
+  expect(sends, "fils ouverts par l'onglet").toHaveLength(1);
+  const threads = await threadsOf(aliceApi, page.id);
+  expect(threads.map((thread) => thread.comments.map((comment) => comment.body))).toEqual([
+    ["Mon brouillon"],
+  ]);
 });
 
 test("a_draft_refused_by_a_trash_shows_the_server_message", async ({ browser }) => {
