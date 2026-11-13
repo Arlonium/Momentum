@@ -439,8 +439,18 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     // l'instantané sont déjà nettoyées par le ramasse-miettes.
     let page = PageDoc::from_updates(snapshot.iter().map(|(_, bytes)| bytes.as_slice()))?;
     let watch = Watch::on(&page);
-    for (_, update) in &updates {
-        page.apply_update(update)?;
+    for (seq, update) in &updates {
+        match page.apply_update(update) {
+            Ok(()) => {}
+            // Ruling R258 : une entrée où un client paraît deux fois (une base d'avant R130
+            // gardait les octets reçus d'un client) est refusée avant que yrs la lise ; la page
+            // est intacte, et se charge sans elle. Une entrée suivante qui en dépendrait resterait
+            // en attente d'une dépendance, et la page serait refusée à elle.
+            Err(error) if PageDoc::repeats_a_client(update) => {
+                tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : un client y paraît deux fois");
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(Loaded {
         page,

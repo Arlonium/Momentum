@@ -14,7 +14,7 @@ use yrs::{
 };
 
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
-use crate::guard::{Pending, Shape, missing, touched};
+use crate::guard::{Pending, REPEATED_CLIENT, Shape, missing, touched};
 use crate::kept_ids::keep_ids;
 use crate::structure::{Slot, check_blocks};
 use crate::{CrdtError, FRAGMENT, META};
@@ -173,6 +173,14 @@ impl PageDoc {
             ));
         }
         Ok(read)
+    }
+
+    /// Vrai si la mise à jour (v1) est refusée parce qu'un client y paraît deux fois (Ruling
+    /// R207). Une telle mise à jour est refusée avant que yrs la lise : la page est intacte. La
+    /// relecture du journal s'en sert pour écarter l'entrée au lieu de refuser la page (Ruling
+    /// R258).
+    pub fn repeats_a_client(update: &[u8]) -> bool {
+        matches!(Shape::read(update), Err(CrdtError::Decode(m)) if m == REPEATED_CLIENT)
     }
 
     /// Vrai si la mise à jour (v1), reçue d'un client, laisserait un trou

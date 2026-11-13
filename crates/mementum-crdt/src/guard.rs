@@ -102,6 +102,10 @@ use yrs::{ID, IdSet, MapRef, ReadTxn, StateVector, TransactionMut, XmlOut};
 use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
 
+/// Le refus d'une mise à jour où un client paraît deux fois (Ruling R207) : reconnu à la
+/// relecture du journal, qui écarte l'entrée au lieu de refuser la page (Ruling R258).
+pub(crate) const REPEATED_CLIENT: &str = "un client paraît deux fois dans la mise à jour";
+
 /// Profondeur maximale d'un élément Yjs dans une page (la racine `blockGroup`
 /// est à la profondeur 1).
 ///
@@ -252,9 +256,7 @@ impl Shape {
             // un bloc connu celui qui ne prolonge pas le précédent. Aucun encodeur honnête n'écrit
             // deux entrées pour un client (Yjs et yrs en écrivent une, fusions comprises).
             if !seen.insert(client) {
-                return Err(decode_error(
-                    "un client paraît deux fois dans la mise à jour",
-                ));
+                return Err(decode_error(REPEATED_CLIENT));
             }
             let mut clock: u32 = c.read_var().map_err(decode_error)?;
             let mut structs = Vec::new();
