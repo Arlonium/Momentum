@@ -590,12 +590,13 @@ describe("cursor_stays_with_its_text_when_someone_else_splits_its_block", () => 
 // reçu, il en faisait une sélection de texte, et le dépôt supprimait alors le texte du bloc au
 // lieu de le déplacer (vu dans un navigateur, `e2e/block-move.spec.ts`, « en ligne »).
 describe("held_blocks_stay_selected_while_someone_else_writes", () => {
-  /** Comme le début d'un glisser : le bloc `id` sélectionné en bloc, et tenu. */
-  function hold(p: Peer, id: string): void {
+  /** Comme le début d'un glisser : les blocs de `id` à `last` sélectionnés en bloc, et tenus. */
+  function hold(p: Peer, id: string, last = id): void {
     p.editor.transact((tr) => {
-      const { pos, node } = containerOf(tr.doc, id);
+      const { pos } = containerOf(tr.doc, id);
+      const end = containerOf(tr.doc, last);
       tr.setSelection(
-        Selection.fromJSON(tr.doc, { type: "multiple-node", anchor: pos, head: pos + node.nodeSize }),
+        Selection.fromJSON(tr.doc, { type: "multiple-node", anchor: pos, head: end.pos + end.node.nodeSize }),
       );
     });
     const view = p.editor.prosemirrorView;
@@ -657,6 +658,21 @@ describe("held_blocks_stay_selected_while_someone_else_writes", () => {
     const wanted = [Y_, Z, block("x", "Bloc X de Tom"), W];
     expect(stored(server)).toEqual(wanted);
     expect(shown(tom)).toEqual(wanted);
+  });
+
+  test("un autre dépose son bloc entre ceux qu'on tient : il part avec eux au dépôt (limite écrite)", async () => {
+    // Les blocs tenus sont une suite de voisins, du premier au dernier : ce qui arrive entre eux
+    // en fait partie. Si son auteur le déplace au même moment, le bloc est en double.
+    const { mona, tom, server } = await pair();
+    hold(mona, "x", "y");
+    expect(held(mona)).toEqual({ type: "multiple-node", ids: ["x", "y"] });
+    drag(tom, "w", { under: "x" });
+    await exchange(server, [tom, mona]);
+    expect(held(mona)).toEqual({ type: "multiple-node", ids: ["x", "w", "y"] });
+    dropUnder(mona, "z");
+    await exchange(server, [mona, tom]);
+    expect(stored(server)).toEqual([Z, X, W, Y_]);
+    expect(shown(tom)).toEqual([Z, X, W, Y_]);
   });
 
   test("un autre déplace le bloc qu'on tient : il reste tenu, à sa nouvelle place", async () => {
