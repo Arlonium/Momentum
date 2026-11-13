@@ -1,7 +1,8 @@
 // L'historique d'une page (R135) : le menu « … » de la barre du haut ouvre la fenêtre
-// « Historique », à partir de « Peut modifier » (R216), à la corbeille aussi ; elle liste les versions (« Version actuelle », puis la plus récente d'abord,
-// avec leurs auteurs) et montre celle qu'on choisit dans le même éditeur que la page, en lecture
-// seule. L'aperçu n'écrit jamais : ni dans le document de la page, ni sur le réseau. « Restaurer
+// « Historique », à partir de « Peut modifier » (R216, S5), à la corbeille aussi. Elle liste les
+// versions (« Version actuelle », puis la plus récente d'abord, avec leurs auteurs) et montre
+// celle qu'on choisit dans le même éditeur que la page, en lecture seule. L'aperçu n'écrit
+// jamais : ni dans le document de la page, ni sur le réseau. « Restaurer
 // cette version », dès « Peut modifier », remplace le contenu pour tout le monde ; ce qui est
 // remplacé reste dans l'historique.
 //
@@ -295,18 +296,19 @@ test("reader_is_not_offered_the_history_and_cannot_restore", async ({ browser })
     title: `Lecture ${unique()}`,
   });
   await setPageLevel(aliceApi, page.id, brunoId, "read");
-  await putMmd(aliceApi, page.id, `${OLD}
-`);
-  const versions = await writeAfterTheInterval(aliceApi, page.id, `${NEW}
-`);
+  await putMmd(aliceApi, page.id, `${OLD}\n`);
+  const versions = await writeAfterTheInterval(aliceApi, page.id, `${NEW}\n`);
 
   const b = await openPage(browser, page.id, bruno);
   await expect(readerBanner(b)).toBeVisible();
   // La barre du haut est là (les commentaires se lisent à tout niveau), sans menu « … ».
   await expect(b.getByRole("button", { name: /^Commentaires/ })).toBeVisible();
   await expect(menuButton(b)).toHaveCount(0);
-  // Le serveur refuse la restauration. (Avec S5, il refusera aussi la lecture des versions :
-  // `GET …/versions` répondra `403` ; l'assertion viendra avec lui.)
+  // Le serveur lui refuse la liste et l'état des versions (S5), et la restauration.
+  const list = await brunoApi.get(`/api/v1/pages/${page.id}/versions`);
+  expect(list.status(), await list.text()).toBe(403);
+  const state = await brunoApi.get(`/api/v1/pages/${page.id}/versions/${versions[0].id}/state`);
+  expect(state.status(), await state.text()).toBe(403);
   const res = await brunoApi.post(`/api/v1/pages/${page.id}/versions/${versions[0].id}/restore`);
   expect(res.status()).toBe(403);
   expect(await getMmd(aliceApi, page.id)).toContain(NEW);
@@ -321,10 +323,8 @@ test("editor_reads_the_history_of_a_trashed_page_without_restoring", async ({ br
     title: `Corbeille ${unique()}`,
   });
   await setPageLevel(aliceApi, page.id, brunoId, "edit");
-  await putMmd(aliceApi, page.id, `${OLD}
-`);
-  const versions = await writeAfterTheInterval(aliceApi, page.id, `${NEW}
-`);
+  await putMmd(aliceApi, page.id, `${OLD}\n`);
+  const versions = await writeAfterTheInterval(aliceApi, page.id, `${NEW}\n`);
   expect((await aliceApi.post(`/api/v1/pages/${page.id}/trash`)).status()).toBe(200);
 
   const b = await openPage(browser, page.id, bruno);
