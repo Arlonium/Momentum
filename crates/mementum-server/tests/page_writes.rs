@@ -487,3 +487,107 @@ async fn too_many_blocks_are_refused_before_anything_is_written() {
         "la page n'est pas chargée"
     );
 }
+
+/// Constat N2 de la re-relecture de la piste S (Ruling R365), avec l'attente inverse. Pendant
+/// qu'Olga récrit une longue page, Tom demande d'un coup 20 fils sur un de ses blocs : chaque
+/// requête attend l'acteur de la page, occupé ; Tom se déconnecte pendant ce temps. Avant, la
+/// route relisait ses droits une fois la page chargée, jamais la session : 20 fils écrits sans
+/// elle. Elle relit maintenant la session aussi (comme R209) : aucun fil écrit sans session, et
+/// chaque requête répond `401`. Le minutage peut faire échouer ce test à tort (une déconnexion
+/// qui arriverait après les écritures), jamais le faire passer à tort : le témoin compte, dans
+/// la transaction de chaque fil écrit, si la session était encore en base.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn threads_queued_behind_the_actor_stop_with_the_session() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, tom) = (&team.olga, &team.tom);
+    let doc = PageDoc::new_page().0;
+    doc.write_blocks(&mementum_md::parse("Bloc ^bloc-fixe\n").unwrap())
+        .unwrap();
+    let page = team
+        .store
+        .create_node(mementum_store::NewNode {
+            space_id: team.space,
+            parent_id: None,
+            after: None,
+            kind: mementum_store::NodeKind::Page,
+            title: "Longue".to_string(),
+            created_by: Some(olga.id),
+            grants: [user(olga, Level::Full), user(tom, Level::Comment)]
+                .iter()
+                .map(|&(subject, level)| mementum_acl::Grant { subject, level })
+                .collect(),
+            doc: Some(doc.encode_state()),
+        })
+        .await
+        .unwrap()
+        .id;
+    let cookie = tom.browser.session().expect("une session");
+    let session = mementum_server::auth::token_hash(&cookie).unwrap();
+    let hex: String = session.iter().map(|b| format!("{b:02x}")).collect();
+    exec_sql(
+        &t.db_path(),
+        &format!(
+            "CREATE TABLE witness (granted INTEGER NOT NULL); \
+             CREATE TRIGGER witness_threads AFTER INSERT ON comment_threads \
+             WHEN NEW.node_id = '{page}' AND NEW.created_by = '{}' \
+             BEGIN INSERT INTO witness VALUES \
+               ((SELECT COUNT(*) FROM sessions WHERE token_hash = x'{hex}')); \
+             END;",
+            tom.id
+        ),
+    )
+    .await;
+
+    // La longue écriture d'Olga occupe l'acteur ; elle garde le bloc (son ancre).
+    let long = format!("Bloc ^bloc-fixe\n\n{}", many_paragraphs("Longue", 11_000));
+    let write = request(
+        olga,
+        Request::put(format!("/api/v1/pages/{page}/mmd"))
+            .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+        Body::from(long),
+    );
+    let router = t.router.clone();
+    let olga_write = tokio::spawn(async move { router.oneshot(write).await.unwrap().status() });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut burst = JoinSet::new();
+    for i in 0..20 {
+        let body = serde_json::json!({ "blockId": "bloc-fixe", "body": format!("Fil {i}") });
+        let req = request(
+            tom,
+            Request::post(format!("/api/v1/pages/{page}/comments"))
+                .header(header::CONTENT_TYPE, "application/json"),
+            Body::from(body.to_string()),
+        );
+        let router = t.router.clone();
+        burst.spawn(async move { router.oneshot(req).await.unwrap().status() });
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !olga_write.is_finished(),
+        "l'écriture d'Olga était trop courte"
+    );
+    tom.browser
+        .log_out()
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let mut statuses = Vec::new();
+    while let Some(status) = burst.join_next().await {
+        statuses.push(status.unwrap());
+    }
+    assert_eq!(olga_write.await.unwrap(), StatusCode::NO_CONTENT);
+    let without = query_i64(
+        &t.db_path(),
+        "SELECT COUNT(*) FROM witness WHERE granted = 0",
+    )
+    .await;
+    let with = query_i64(
+        &t.db_path(),
+        "SELECT COUNT(*) FROM witness WHERE granted = 1",
+    )
+    .await;
+    assert!(
+        without == 0 && statuses.iter().all(|s| *s == StatusCode::UNAUTHORIZED),
+        "fils écrits sans la session : {without}, avec : {with} ; statuts : {statuses:?}"
+    );
+}

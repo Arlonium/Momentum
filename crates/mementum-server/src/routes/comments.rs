@@ -26,9 +26,9 @@
 //! 5. `403 forbidden` si la règle de l'auteur l'interdit (`access::permit_own`) ;
 //! 6. `409 trashed` pour une écriture dans une page à la corbeille, dont les fils se lisent ;
 //! 7. `422` pour le corps (`invalid_json`, `invalid_body`) ou l'emoji (`invalid_emoji`) ;
-//! 8. pour un fil sur un bloc : la page chargée, les droits revérifiés (2, 3 et 6, Ruling
-//!    R89), puis `422 invalid_block` si le document vivant n'a pas ce bloc. Un commentaire de
-//!    la page ne la charge pas.
+//! 8. pour un fil sur un bloc : la page chargée, la session relue (`401`, Ruling R365), les
+//!    droits revérifiés (2, 3 et 6, Ruling R89), puis `422 invalid_block` si le document vivant
+//!    n'a pas ce bloc. Un commentaire de la page ne la charge pas.
 //!
 //! **Ce qui fait foi est la transaction.** Les droits sont ceux lus juste avant l'écriture (la
 //! fenêtre de quelques millisecondes que le projet accepte pour les écritures de page) ; mais
@@ -73,7 +73,7 @@ use mementum_sync::{PageEvent, display_name};
 use uuid::Uuid;
 
 use crate::access::{OwnWork, permit, permit_level, permit_own, permit_thread_deletion};
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, SessionUser};
 use crate::error::ApiError;
 use crate::routes::pages::page_id;
 use crate::types::{Author, Comment, NewComment, NewThread, Reaction, ResolveThread, Thread};
@@ -102,15 +102,15 @@ pub(crate) async fn list(
 /// son premier message.
 pub(crate) async fn open(
     State(state): State<AppState>,
-    user: AuthUser,
+    caller: SessionUser,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<NewThread>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Thread>), ApiError> {
     let id = page_id(path)?;
     // Premier contrôle : les refus, avant que le corps soit lu.
-    state.node_access(&user, id, Action::Comment).await?;
+    state.node_access(&caller.user, id, Action::Comment).await?;
     let Json(body) = body?;
-    let opened = open_thread(&state, &user, id, body).await?;
+    let opened = open_thread(&state, &caller, id, body).await?;
     Ok((StatusCode::CREATED, Json(opened)))
 }
 
@@ -123,13 +123,18 @@ pub(crate) async fn open(
 /// pas chargée : le fil ne touche pas au document.
 async fn open_thread(
     state: &AppState,
-    user: &AuthUser,
+    caller: &SessionUser,
     id: Uuid,
     body: NewThread,
 ) -> Result<Thread, ApiError> {
+    let user = &caller.user;
     let text = comment_body(&body.body)?;
     if let Some(block) = &body.block_id {
         state.hub.load_page(id).await?;
+        // Ruling R365 : l'attente de l'acteur peut être longue (une écriture de la page en
+        // cours) ; la session de la requête est relue avec les droits, comme sous le verrou de
+        // `PUT /mmd` (Ruling R209).
+        state.session_still_live(caller.session).await?;
         state.node_access(user, id, Action::Comment).await?;
         // Ruling R206 : l'acteur dit si le bloc existe, sans bâtir la liste des blocs.
         if !state.hub.has_block(id, block).await? {
@@ -513,6 +518,17 @@ mod tests {
     use super::*;
     use crate::access::tests::{account, state};
 
+    /// `user`, avec une session ouverte en base : ce que la route reçoit de l'extracteur.
+    async fn with_session(state: &AppState, user: AuthUser) -> SessionUser {
+        let (_, session) = crate::auth::new_token();
+        state
+            .store
+            .create_session(user.id, session, i64::MAX)
+            .await
+            .unwrap();
+        SessionUser { user, session }
+    }
+
     /// Un commentaire de la page ne la charge pas : son acteur ne démarre pas. Un fil sur un
     /// bloc la charge, pour chercher le bloc dans son document, même quand il n'y est pas.
     #[tokio::test]
@@ -548,6 +564,7 @@ mod tests {
             body: "Un".to_string(),
         };
 
+        let olga = with_session(&state, olga).await;
         let opened = open_thread(&state, &olga, page, new(None)).await.unwrap();
         assert_eq!(opened.block_id, None);
         assert!(state.hub.live_pages().await.is_empty());
@@ -603,6 +620,7 @@ mod tests {
             body: "Sur un bloc".to_string(),
         };
 
+        let olga = with_session(&state, olga).await;
         let opened = open_thread(&state, &olga, page, new(&block)).await.unwrap();
         assert_eq!(opened.block_id.as_deref(), Some(block.as_str()));
         assert!(
