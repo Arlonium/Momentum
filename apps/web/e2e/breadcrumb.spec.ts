@@ -55,6 +55,10 @@ test("breadcrumb_follows_a_move_made_by_someone_else", async ({ browser }) => {
   expect(await b.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBe(true);
 });
 
+// Une garde : ce test ne peut pas rougir par le client, puisque le serveur n'envoie jamais à un
+// invité le titre d'une page qu'il ne voit pas. Ce que le client fait d'une page parente absente
+// de l'arbre (le fil commence à la page) est prouvé par le Vitest
+// `a_parent_outside_the_tree_starts_the_trail_at_the_page` (`src/page/ancestors.test.ts`).
 test("guest_breadcrumb_starts_at_the_page_he_sees", async ({ browser }) => {
   const alice = await signUpAccount(`Alice ${unique()}`);
   const aliceApi = await apiAs(alice);

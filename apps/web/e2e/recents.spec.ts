@@ -135,7 +135,7 @@ test("recents_survive_a_reload_and_forget_a_trashed_page", async ({ browser }) =
   await openFromTree(p, b.id, b.title);
   await expect.poll(() => recents(p)).toEqual([b.title, a.title]);
 
-  // Rechargée : la liste est la même, sans rien demander au serveur pour elle.
+  // Rechargée : la liste est la même.
   await p.reload();
   await waitSynced(p);
   await expect.poll(() => recents(p)).toEqual([b.title, a.title]);
