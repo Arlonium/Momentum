@@ -283,7 +283,10 @@ test("restored_content_is_itself_in_the_history", async ({ browser, request }) =
   await expect(dialog).toBeVisible();
 });
 
-test("reader_sees_the_history_and_cannot_restore", async ({ browser }) => {
+// À inverser avec S5 (C7) : le client ne propose plus « Historique » sous « Peut modifier », ce
+// parcours ne peut donc plus passer tel quel ; il deviendra « un lecteur ne voit pas
+// l'historique » quand le serveur exigera « Peut modifier » pour les versions (S5).
+test.fixme("reader_sees_the_history_and_cannot_restore", async ({ browser }) => {
   const { aliceApi, bruno, brunoApi, brunoId, space } = await ownerAndMember();
   const page = await createPage(aliceApi, {
     spaceId: space.id,

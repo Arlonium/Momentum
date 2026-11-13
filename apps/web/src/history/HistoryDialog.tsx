@@ -71,7 +71,10 @@ type Props = {
    * refusée par `401` est alors relue.
    */
   afterLogin?: () => Promise<void>;
-  /** Le serveur a refusé une restauration (`403`, `404`, `409`) : la page est à relire. */
+  /**
+   * Le serveur a refusé une restauration (`403`, `404`, `409`) ou la liste (`403`, `404`) : la
+   * page est à relire.
+   */
   onRefused: () => void;
   /** Une version vient d'être restaurée : la page l'annonce (la fenêtre se ferme ensuite). */
   onRestored: () => void;
@@ -127,7 +130,12 @@ export function HistoryDialog({
   const listRef = useRef<HTMLUListElement>(null);
   const titleId = useId();
   const previewTitleId = useId();
-  const { versions, state, error, reload } = useVersions(node.id, session, { afterLogin });
+  // Un refus de la liste (niveau tombé sous « Peut modifier ») fait relire la page, comme un
+  // refus de restauration.
+  const { versions, state, error, refused, reload } = useVersions(node.id, session, {
+    afterLogin,
+    onRefused,
+  });
   /** La version choisie ; `null` : la version actuelle. */
   const [chosen, setChosen] = useState<string | null>(null);
   /**
@@ -349,7 +357,13 @@ export function HistoryDialog({
                 quand plus personne n'a la page ouverte.
               </p>
             )}
-            {state === "failed" && (
+            {state === "failed" && refused && (
+              // Le refus tel que le serveur le dit, sans « Réessayer » : le même reviendrait.
+              <div className="mm-history-read-error">
+                <FormError message={error} />
+              </div>
+            )}
+            {state === "failed" && !refused && (
               <div className="mm-history-read-error">
                 <FormError
                   message={`L'historique n'a pas pu être ${versions === null ? "lu" : "relu"}. ${error ?? ""}`}

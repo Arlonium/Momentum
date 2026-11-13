@@ -1,7 +1,13 @@
 // Le menu « … » de la barre du haut d'une page : les actions sur la page qui n'ont pas de bouton
-// à elles. Pour l'instant « Historique » (R135), à tout niveau : on lit l'historique dès « Peut
-// lire », à la corbeille aussi, et depuis un onglet d'un autre schéma que le serveur (R35) ; c'est
-// la fenêtre qui décide si l'on peut restaurer. D'autres entrées s'y ajouteront.
+// à elles. Pour l'instant « Historique » (R135), à partir de « Peut modifier » : le serveur
+// l'exige, pour qu'un lecteur ne lise pas ce qui a été effacé avant qu'on partage la page avec
+// lui (S5). À la corbeille aussi, et depuis un onglet d'un autre schéma que le serveur (R35) ;
+// c'est la fenêtre qui décide si l'on peut restaurer. Sans entrée pour le niveau de la personne,
+// pas de bouton. D'autres entrées s'y ajouteront.
+//
+// Le niveau peut tomber pendant que la fenêtre est ouverte : elle reste ouverte, avec le refus du
+// serveur tel quel, jusqu'à ce qu'on la ferme ; le focus revient alors à la page
+// (`focusFallback`) si le bouton du menu n'est plus là.
 //
 // Au clavier, c'est le menu des lignes de l'arbre (`RowMenu`) : il prend le focus sur sa première
 // entrée, les flèches passent de l'une à l'autre, Échap et Tab le ferment. La fenêtre
@@ -22,7 +28,8 @@ import {
 } from "react";
 import type { HistorySession } from "../history/HistoryDialog";
 import { HistoryIcon, MoreIcon } from "../icons";
-import { RowMenu } from "../sidebar/RowMenu";
+import { canEdit } from "../share/levels";
+import { RowMenu, type MenuAction } from "../sidebar/RowMenu";
 
 /** Charge le module de la fenêtre « Historique » (le navigateur ne le charge qu'une fois). */
 function loadHistory() {
@@ -43,11 +50,24 @@ type Props = {
   selfId: string;
   /** Tenue quand le compte revient, après une session perdue (`useAfterLogin`). */
   afterLogin?: () => Promise<void>;
+  /**
+   * La fenêtre se ferme et le bouton du menu n'est plus là (plus aucune entrée pour ce niveau) :
+   * où rendre le focus, pour qu'il ne tombe pas sur `body`.
+   */
+  focusFallback?: () => void;
   /** Le serveur a refusé une action du menu : la page est à relire. */
   onRefused: () => void;
 };
 
-export function PageMenu({ node, session, readOnly, selfId, afterLogin, onRefused }: Props) {
+export function PageMenu({
+  node,
+  session,
+  readOnly,
+  selfId,
+  afterLogin,
+  focusFallback,
+  onRefused,
+}: Props) {
   /** Le bouton du menu ouvert ; `null` : fermé. */
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [history, setHistory] = useState(false);
@@ -70,51 +90,55 @@ export function PageMenu({ node, session, readOnly, selfId, afterLogin, onRefuse
     if (history || !closed.current) return;
     closed.current = false;
     if (buttonRef.current?.isConnected) buttonRef.current.focus();
-  }, [history]);
+    else focusFallback?.();
+  }, [history, focusFallback]);
+
+  const actions: MenuAction[] = [];
+  const historyOffered = canEdit(node.level);
+  // Le niveau est tombé, menu ouvert : il n'a plus rien à proposer, il se ferme.
+  if (!historyOffered && anchor !== null) setAnchor(null);
+  if (historyOffered) {
+    actions.push({
+      label: "Historique",
+      icon: <HistoryIcon />,
+      onSelect: () => {
+        setAnnounced("");
+        setHistory(true);
+      },
+    });
+  }
 
   return (
     <>
       <p className="mm-visually-hidden" role="status">
         {announced}
       </p>
-      <button
-        ref={buttonRef}
-        type="button"
-        className="mm-icon-button"
-        aria-label={LABEL}
-        aria-haspopup="menu"
-        aria-expanded={anchor !== null}
-        title={LABEL}
-        onClick={(event) => {
-          // Un clic sur le bouton d'un menu ouvert le ferme (`RowMenu` le laisse passer).
-          if (anchor !== null) {
-            setAnchor(null);
-            return;
-          }
-          // Le code de la fenêtre est demandé tout de suite, pour être là au clic. Un échec se
-          // redira au clic, dans la fenêtre d'erreur.
-          void loadHistory().catch(() => {});
-          setAnchor(event.currentTarget);
-        }}
-      >
-        <MoreIcon />
-      </button>
-      {anchor && (
-        <RowMenu
-          label={LABEL}
-          anchor={anchor}
-          actions={[
-            {
-              label: "Historique",
-              icon: <HistoryIcon />,
-              onSelect: () => {
-                setAnnounced("");
-                setHistory(true);
-              },
-            },
-          ]}
-          onClose={closeMenu}
-        />
+      {actions.length > 0 && (
+        <button
+          ref={buttonRef}
+          type="button"
+          className="mm-icon-button"
+          aria-label={LABEL}
+          aria-haspopup="menu"
+          aria-expanded={anchor !== null}
+          title={LABEL}
+          onClick={(event) => {
+            // Un clic sur le bouton d'un menu ouvert le ferme (`RowMenu` le laisse passer).
+            if (anchor !== null) {
+              setAnchor(null);
+              return;
+            }
+            // Le code de la fenêtre est demandé tout de suite, pour être là au clic. Un échec se
+            // redira au clic, dans la fenêtre d'erreur.
+            void loadHistory().catch(() => {});
+            setAnchor(event.currentTarget);
+          }}
+        >
+          <MoreIcon />
+        </button>
+      )}
+      {anchor && actions.length > 0 && (
+        <RowMenu label={LABEL} anchor={anchor} actions={actions} onClose={closeMenu} />
       )}
       {history && (
         <HistoryBoundary onClose={closeHistory}>

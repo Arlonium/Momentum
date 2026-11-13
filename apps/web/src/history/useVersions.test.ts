@@ -4,7 +4,7 @@
 // autre en route ; une lecture qui échoue garde ce qui était affiché.
 import type { Version } from "@mementum/protocol";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { getVersions } from "../api";
+import { ApiError, getVersions } from "../api";
 import type { PageEvent, SyncStatus } from "../editor/collab";
 import { author } from "../test/comments";
 import { deferred, renderHook, settle, type Deferred } from "../test/hooks";
@@ -313,4 +313,36 @@ test("nothing_is_read_after_unmount", async () => {
   await settle(() => reads[1].resolve([version("v2")]));
   await advance(VERSIONS_MAX_WAIT_MS * 2);
   expect(reads).toHaveLength(2);
+});
+
+test("a_refused_read_says_so_and_tells_the_page", async () => {
+  // Le niveau a baissé sous « Peut modifier » pendant que la fenêtre est ouverte : le serveur
+  // refuse la liste. Le message est rendu tel quel, et la page est à relire.
+  const onRefused = vi.fn();
+  const session = fakeSession();
+  const rendered = await renderHook(
+    ({ pageId, session }: Props) => useVersions(pageId, session, { onRefused }),
+    { pageId: "p", session },
+  );
+  await advance(0);
+  await settle(() => reads[0].resolve([version("v1")]));
+  expect(rendered.current.refused).toBe(false);
+  await settle(() => session.frame());
+  await advance(VERSIONS_DEBOUNCE_MS);
+  const refusal = new ApiError(
+    403,
+    "forbidden",
+    "niveau insuffisant sur cette page : il faut « Peut modifier », tu as « Peut lire »",
+  );
+  await settle(() => reads[1].reject(refusal));
+  expect(rendered.current.state).toBe("failed");
+  expect(rendered.current.refused).toBe(true);
+  expect(rendered.current.error).toBe(refusal.message);
+  expect(onRefused).toHaveBeenCalledExactlyOnceWith(refusal);
+  // Un autre échec (le serveur ne répond pas) n'est pas un refus, et ne fait rien relire.
+  await settle(() => session.frame());
+  await advance(VERSIONS_DEBOUNCE_MS);
+  await settle(() => reads[2].reject(unreachable()));
+  expect(rendered.current.refused).toBe(false);
+  expect(onRefused).toHaveBeenCalledTimes(1);
 });

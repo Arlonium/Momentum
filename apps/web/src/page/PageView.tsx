@@ -160,6 +160,13 @@ export function PageView({
   const comments = useComments(id, session, { onRefused: rereadPage, afterLogin });
   /** Autour de l'éditeur : les pastilles s'y placent, les blocs y sont cherchés. */
   const frame = useRef<HTMLDivElement>(null);
+  /** La page (bandeaux, titre, éditeur). */
+  const article = useRef<HTMLElement>(null);
+  /** Le menu « … » n'est plus là quand sa fenêtre se ferme : le focus va au titre de la page. */
+  const focusTitle = useCallback(
+    () => article.current?.querySelector<HTMLElement>(".mm-title-input")?.focus(),
+    [],
+  );
   const wiring = useCommentsPanel(comments, frame);
   /** Commenter d'ici : le niveau, hors corbeille, depuis un onglet du schéma du serveur (R177). */
   const commentsWritable = canComment(node.level) && !trashed && !readOnly;
@@ -187,19 +194,21 @@ export function PageView({
         {node.level === "full" && !trashed && !readOnly && (
           <ShareMenu node={node} onChanged={onShared} onAccessLost={accessLost} />
         )}
-        {/* « Historique » et les autres actions : à tout niveau. La fenêtre n'est chargée qu'à
-            la demande ; un refus du serveur fait relire la page, comme pour les commentaires. */}
+        {/* « Historique » (à partir de « Peut modifier ») et les autres actions. La fenêtre
+            n'est chargée qu'à la demande ; un refus du serveur fait relire la page, comme pour
+            les commentaires. */}
         <PageMenu
           node={node}
           session={session}
           readOnly={readOnly}
           selfId={userId}
           afterLogin={afterLogin}
+          focusFallback={focusTitle}
           onRefused={rereadPage}
         />
       </header>
       <div className="mm-page-body">
-        <article className="mm-page">
+        <article ref={article} className="mm-page">
           {readOnly && <ReadOnlyBanner />}
           {reader && !readOnly && !trashed && (
             <ReaderBanner reopen={editable ? () => setReader(false) : null} />

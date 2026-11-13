@@ -14,12 +14,14 @@
 // la première. Une relecture demandée pendant une lecture ne l'annule pas : elle est faite une
 // fois, à sa fin. Une lecture qui échoue garde ce qui était affiché, dit pourquoi, et ne se
 // refait pas d'elle-même : la prochaine trame, le retour de la connexion ou « Réessayer » la
-// refont. Une lecture qui trouve la session perdue (`401`) est refaite au retour du compte
+// refont. Un refus du serveur (`403` : le niveau est tombé sous « Peut modifier » pendant que la
+// fenêtre est ouverte ; `404`) le dit (`refused`), et la page est à relire (`onRefused`) : la
+// relire ici n'y changerait rien. Une lecture qui trouve la session perdue (`401`) est refaite au retour du compte
 // (`afterLogin`), même si la connexion de synchro est restée ouverte. Tout est lié à la page, et
 // plus rien n'est appelé après le démontage, ni au retour d'un compte attendu avant lui.
 import type { Version } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getVersions, isSessionLost } from "../api";
+import { ApiError, getVersions, isSessionLost } from "../api";
 import type { CollabSession } from "../editor/collab";
 import {
   REREAD_DEBOUNCE_MS,
@@ -44,6 +46,11 @@ export type Versions = {
   state: VersionsState;
   /** Le message de la dernière lecture si elle a échoué, tel que le serveur le dit. */
   error: string | null;
+  /**
+   * La dernière lecture a été refusée par le serveur (`403`, `404`) : un droit, ou la page, ont
+   * changé ; « Réessayer » n'y ferait rien.
+   */
+  refused: boolean;
   /** Relit la liste tout de suite (« Réessayer », version introuvable, restauration refusée). */
   reload(): void;
 };
@@ -56,6 +63,7 @@ type Loaded = {
   versions: Version[] | null;
   state: VersionsState;
   error: string | null;
+  refused: boolean;
 };
 
 type Options = {
@@ -64,6 +72,8 @@ type Options = {
    * alors relue. Sans elle, une lecture refusée par `401` attend la trame suivante.
    */
   afterLogin?: () => Promise<void>;
+  /** Le serveur a refusé la liste (`403`, `404`) : un droit, ou la page, ont pu changer. */
+  onRefused?: (error: ApiError) => void;
 };
 
 export function useVersions(
@@ -76,6 +86,7 @@ export function useVersions(
     versions: null,
     state: "loading",
     error: null,
+    refused: false,
   }));
   /** Demande une relecture : tout de suite (`true`), ou groupée avec les trames qui suivent. */
   const request = useRef<(immediate: boolean) => void>(() => {});
@@ -89,18 +100,21 @@ export function useVersions(
       try {
         const versions = await getVersions(pageId);
         if (rereads.stopped) return;
-        setLoaded({ pageId, versions, state: "ready", error: null });
+        setLoaded({ pageId, versions, state: "ready", error: null, refused: false });
       } catch (e) {
         if (rereads.stopped) return;
         // Session perdue : la connexion est demandée par-dessus la page (`api.ts`), et la liste
         // est relue au retour du compte.
         if (isSessionLost(e)) return SESSION_LOST;
+        const refused = e instanceof ApiError && [403, 404].includes(e.status);
         setLoaded((current) => ({
           pageId,
           versions: current.pageId === pageId ? current.versions : null,
           state: "failed",
           error: messageOf(e),
+          refused,
         }));
+        if (refused) latest.current.onRefused?.(e);
       }
     }, waitForAccount(latest));
     request.current = rereads.request;
@@ -145,5 +159,9 @@ export function useVersions(
   const versions = current?.versions ?? null;
   const state = current?.state ?? "loading";
   const error = current?.error ?? null;
-  return useMemo(() => ({ versions, state, error, reload }), [versions, state, error, reload]);
+  const refused = current?.refused ?? false;
+  return useMemo(
+    () => ({ versions, state, error, refused, reload }),
+    [versions, state, error, refused, reload],
+  );
 }

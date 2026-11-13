@@ -488,3 +488,30 @@ test("the_list_is_read_again_once_the_account_is_back", async () => {
   expect(items()).toHaveLength(2);
   expect(vi.mocked(getVersions)).toHaveBeenCalledTimes(2);
 });
+
+test("a_refused_list_is_shown_as_the_server_says_it_and_the_page_is_read_again", async () => {
+  const message =
+    "niveau insuffisant sur cette page : il faut « Peut modifier », tu as « Peut lire »";
+  vi.mocked(getVersions).mockRejectedValue(new ApiError(403, "forbidden", message));
+  await act(async () =>
+    root.render(
+      <HistoryDialog
+        node={page("p")}
+        session={fakeSession()}
+        readOnly={false}
+        selfId="alice"
+        onRefused={onRefused}
+        onRestored={onRestored}
+        onClose={onClose}
+      />,
+    ),
+  );
+  await until(() => onRefused.mock.calls.length === 1, "la page relue");
+  const alert = dialog().querySelector('[role="alert"]');
+  // Le refus tel que le serveur le dit, sans « Réessayer » : le même refus reviendrait.
+  expect(alert?.textContent).toBe(message);
+  expect(buttonNamed(dialog(), "Réessayer")).toBeNull();
+  // La fenêtre se ferme comme toujours.
+  await click(dialog().querySelector(`button[aria-label="Fermer l'historique"]`)!);
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
