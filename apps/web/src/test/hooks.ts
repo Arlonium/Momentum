@@ -65,6 +65,32 @@ export async function settle(work: () => unknown = () => {}): Promise<void> {
   });
 }
 
+/**
+ * Attend que `check` soit vrai, en laissant React et les promesses suivre (toutes les 10 ms, en
+ * temps réel : pas sous des minuteurs simulés). `host` : l'élément du test qui porte ce qu'il rend.
+ * Dès qu'il a quitté le document, l'attente s'arrête, avant de relire `check` : un test coupé par le
+ * délai de Vitest (son `afterEach` a retiré l'hôte) ne peut pas être satisfait par le test suivant,
+ * qui réaffecte les variables du module, ni rendre ensuite dans sa racine. `bound` (ms, mesurée par
+ * `performance.now`, que les tests qui figent `Date` laissent courir) reste sous le délai d'un test
+ * de Vitest (5 s), pour que l'échec dise ce qu'on attendait.
+ */
+export async function until(
+  host: Element,
+  check: () => boolean,
+  what: string,
+  bound = 4_000,
+): Promise<void> {
+  const end = performance.now() + bound;
+  for (;;) {
+    if (!host.isConnected) throw new Error(`test fini : ${what}`);
+    if (check()) return;
+    if (performance.now() > end) throw new Error(`toujours pas : ${what}`);
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 10));
+    });
+  }
+}
+
 /** Une promesse que le test tient ou rompt quand il veut : une réponse du serveur. */
 export type Deferred<T> = {
   promise: Promise<T>;

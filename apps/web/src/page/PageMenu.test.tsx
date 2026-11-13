@@ -6,7 +6,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import "../test/hooks";
+import { until } from "../test/hooks";
 import { page } from "../test/pages";
 import { PageMenu } from "./PageMenu";
 
@@ -69,17 +69,6 @@ const menuButtonIfAny = () =>
   host.querySelector<HTMLButtonElement>('button[aria-label="Actions de la page"]');
 const menu = () => document.querySelector<HTMLElement>('[role="menu"]');
 
-/** Attend que `check` soit vrai, en laissant React et les promesses suivre (borne large). */
-async function until(check: () => boolean, what: string): Promise<void> {
-  const end = Date.now() + 5_000;
-  while (!check()) {
-    if (Date.now() > end) throw new Error(`toujours pas : ${what}`);
-    await act(async () => {
-      await new Promise((done) => setTimeout(done, 10));
-    });
-  }
-}
-
 test("history_is_in_the_page_menu_from_edit_level_and_loaded_on_demand", async () => {
   await act(async () =>
     root.render(
@@ -103,11 +92,19 @@ test("history_is_in_the_page_menu_from_edit_level_and_loaded_on_demand", async (
   const entries = [...menu()!.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
   expect(entries).toEqual(["Historique"]);
   // Le menu prend le focus sur sa première entrée.
-  await until(() => document.activeElement?.textContent === "Historique", "le focus dans le menu");
+  await until(
+    host,
+    () => document.activeElement?.textContent === "Historique",
+    "le focus dans le menu",
+  );
 
   await click(menu()!.querySelector('[role="menuitem"]')!);
   expect(menu()).toBeNull();
-  await until(() => host.querySelector('[role="dialog"][aria-label="Historique"]') !== null, "la fenêtre");
+  await until(
+    host,
+    () => host.querySelector('[role="dialog"][aria-label="Historique"]') !== null,
+    "la fenêtre",
+  );
   expect(probe.loaded).toBe(true);
   expect(document.activeElement?.textContent).toBe("Fermer");
 
@@ -135,7 +132,7 @@ test("a_restored_version_is_announced", async () => {
   expect(region()!.textContent).toBe("");
   await click(menuButton());
   await click(menu()!.querySelector('[role="menuitem"]')!);
-  await until(() => host.querySelector('[role="dialog"]') !== null, "la fenêtre");
+  await until(host, () => host.querySelector('[role="dialog"]') !== null, "la fenêtre");
   const restore = [...host.querySelectorAll('[role="dialog"] button')].find(
     (button) => button.textContent === "Restaurer",
   )!;
@@ -166,7 +163,7 @@ test("the_window_waits_for_the_account_given_by_the_page", async () => {
   );
   await click(menuButton());
   await click([...menu()!.querySelectorAll('[role="menuitem"]')][0]);
-  await until(() => document.querySelector('[role="dialog"]') !== null, "la fenêtre");
+  await until(host, () => document.querySelector('[role="dialog"]') !== null, "la fenêtre");
   expect(probe.afterLogin).toBe(afterLogin);
 });
 
@@ -221,7 +218,7 @@ test("a_window_whose_right_is_gone_stays_readable_and_closes_onto_the_page", asy
   await render("edit");
   await click(menuButton());
   await click(menu()!.querySelector('[role="menuitem"]')!);
-  await until(() => host.querySelector('[role="dialog"]') !== null, "la fenêtre");
+  await until(host, () => host.querySelector('[role="dialog"]') !== null, "la fenêtre");
   await render("read");
   expect(host.querySelector('[role="dialog"]')).not.toBeNull();
   await click(host.querySelector('[role="dialog"] button')!);
@@ -268,7 +265,11 @@ test("an_open_menu_that_loses_its_entries_gives_the_focus_to_the_page", async ()
     );
   await render("edit");
   await click(menuButton());
-  await until(() => document.activeElement?.textContent === "Historique", "le focus dans le menu");
+  await until(
+    host,
+    () => document.activeElement?.textContent === "Historique",
+    "le focus dans le menu",
+  );
   await render("read");
   expect(menu()).toBeNull();
   expect(document.activeElement).toBe(title);

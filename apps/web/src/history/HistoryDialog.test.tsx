@@ -10,7 +10,7 @@ import * as Y from "yjs";
 import { ApiError, getVersions, restoreVersion } from "../api";
 import type { PageEvent, RosterUser, SyncStatus } from "../editor/collab";
 import { author } from "../test/comments";
-import { deferred } from "../test/hooks";
+import { deferred, until } from "../test/hooks";
 import { page, unauthenticated } from "../test/pages";
 import { HistoryDialog } from "./HistoryDialog";
 
@@ -138,20 +138,8 @@ async function opened({
     ),
   );
   // La liste est lue au tour suivant (`setTimeout`) : on attend qu'elle soit là.
-  await until(() => list().getAttribute("aria-busy") === "false", "la liste");
+  await until(host, () => list().getAttribute("aria-busy") === "false", "la liste");
   return { session };
-}
-
-/** Attend que `check` soit vrai, en laissant React et les promesses suivre (borne large). */
-async function until(check: () => boolean, what: string): Promise<void> {
-  // `Date` est figée par le test : la borne se mesure autrement.
-  const end = performance.now() + 5_000;
-  while (!check()) {
-    if (performance.now() > end) throw new Error(`toujours pas : ${what}`);
-    await act(async () => {
-      await new Promise((done) => setTimeout(done, 10));
-    });
-  }
 }
 
 const dialog = () => host.querySelector<HTMLDialogElement>("dialog.mm-history")!;
@@ -344,7 +332,7 @@ test("a_purged_version_closes_its_preview_with_a_sentence", async () => {
   // Une version de plus : la plus ancienne sort des cent gardées.
   vi.mocked(getVersions).mockResolvedValue([{ ...v2, id: "v3" }, v2]);
   await act(async () => session!.frame("versions"));
-  await until(() => preview() === null, "l'aperçu fermé");
+  await until(host, () => preview() === null, "l'aperçu fermé");
   expect(items()).toHaveLength(3);
   expect(preview()).toBeNull();
   expect(restoreButton()).toBeNull();
@@ -360,7 +348,7 @@ test("a_confirmation_without_object_closes_and_focus_stays_in_the_window", async
   // La version sort de l'historique pendant qu'on hésite : rien à restaurer.
   vi.mocked(getVersions).mockResolvedValue([{ ...v2, id: "v3" }, v2]);
   await act(async () => session!.frame("versions"));
-  await until(() => confirmation() === null, "la confirmation fermée");
+  await until(host, () => confirmation() === null, "la confirmation fermée");
   expect(restoreVersion).not.toHaveBeenCalled();
   expect(dialog().contains(document.activeElement)).toBe(true);
 
@@ -481,10 +469,10 @@ test("the_list_is_read_again_once_the_account_is_back", async () => {
       />,
     ),
   );
-  await until(() => waiting.length === 1, "l'attente du compte");
+  await until(host, () => waiting.length === 1, "l'attente du compte");
   expect(list().getAttribute("aria-busy")).toBe("true");
   await act(async () => waiting.splice(0).forEach((resume) => resume()));
-  await until(() => list().getAttribute("aria-busy") === "false", "la liste relue");
+  await until(host, () => list().getAttribute("aria-busy") === "false", "la liste relue");
   expect(items()).toHaveLength(2);
   expect(vi.mocked(getVersions)).toHaveBeenCalledTimes(2);
 });
@@ -506,7 +494,7 @@ test("a_refused_list_is_shown_as_the_server_says_it_and_the_page_is_read_again",
       />,
     ),
   );
-  await until(() => onRefused.mock.calls.length === 1, "la page relue");
+  await until(host, () => onRefused.mock.calls.length === 1, "la page relue");
   const alert = dialog().querySelector('[role="alert"]');
   // Le refus tel que le serveur le dit, sans « Réessayer » : le même refus reviendrait.
   expect(alert?.textContent).toBe(message);

@@ -11,7 +11,7 @@ import { getComments, getInfo, getPage } from "../api";
 import { useServerSchema } from "../editor/useServerSchema";
 import { CLIENT_SCHEMA_VERSION } from "../editor/version";
 import { SessionContext } from "../session/session";
-import "../test/hooks";
+import { until } from "../test/hooks";
 import { page, space, unauthenticated } from "../test/pages";
 import { PageView } from "./PageView";
 
@@ -131,21 +131,6 @@ async function show(node: PageNode, me: Me = account()) {
   );
 }
 
-/**
- * Attend que `check` soit vrai, en laissant React et les promesses suivre. La borne reste sous le
- * délai d'un test de Vitest (5 s) : un test qui attend en vain échoue par elle et s'arrête, au lieu
- * d'être coupé par Vitest et de continuer à rendre dans la racine du test suivant.
- */
-async function until(check: () => boolean, what: string): Promise<void> {
-  const end = Date.now() + 3_000;
-  while (!check()) {
-    if (Date.now() > end) throw new Error(`toujours pas : ${what}`);
-    await act(async () => {
-      await new Promise((done) => setTimeout(done, 10));
-    });
-  }
-}
-
 const session = () => probe.sessions[probe.sessions.length - 1];
 const click = (element: Element) =>
   act(async () => {
@@ -182,13 +167,17 @@ test("page_view_rereads_the_comments_once_the_account_is_back", async () => {
   vi.mocked(getComments).mockRejectedValueOnce(unauthenticated()).mockResolvedValue([]);
   const node = page("x", { level: "comment" });
   await show(node);
-  await until(() => vi.mocked(getComments).mock.calls.length === 1, "la première lecture des fils");
+  await until(
+    host,
+    () => vi.mocked(getComments).mock.calls.length === 1,
+    "la première lecture des fils",
+  );
   await act(async () => {
     await new Promise((done) => setTimeout(done, 50));
   });
   expect(getComments).toHaveBeenCalledTimes(1);
   await show(node, account());
-  await until(() => vi.mocked(getComments).mock.calls.length === 2, "les fils relus");
+  await until(host, () => vi.mocked(getComments).mock.calls.length === 2, "les fils relus");
 });
 
 test("page_view_gives_the_account_wait_to_the_history", async () => {
@@ -196,19 +185,19 @@ test("page_view_gives_the_account_wait_to_the_history", async () => {
   await show(node);
   await click(host.querySelector('button[aria-label="Actions de la page"]')!);
   await click(document.querySelector('[role="menuitem"]')!);
-  await until(() => probe.history !== null, "la fenêtre");
+  await until(host, () => probe.history !== null, "la fenêtre");
   // C'est l'attente du compte de la page : tenue quand le compte revient.
   let back = false;
   void probe.history!.afterLogin!().then(() => (back = true));
   await show(node, account());
-  await until(() => back, "le compte revenu");
+  await until(host, () => back, "le compte revenu");
 });
 
 test("page_view_gives_the_focus_to_the_title_when_the_history_closes_without_its_button", async () => {
   await show(page("x", { level: "edit" }));
   await click(host.querySelector('button[aria-label="Actions de la page"]')!);
   await click(document.querySelector('[role="menuitem"]')!);
-  await until(() => probe.history !== null, "la fenêtre");
+  await until(host, () => probe.history !== null, "la fenêtre");
   // Le niveau tombe pendant que la fenêtre est ouverte : le bouton « … » n'a plus d'entrée.
   await show(page("x", { level: "read" }));
   expect(host.querySelector('button[aria-label="Actions de la page"]')).toBeNull();
@@ -258,7 +247,11 @@ test("page_view_hides_the_comment_fields_once_a_commenter_learns_a_new_schema", 
     b.textContent?.startsWith("Commentaires"),
   )!;
   await click(commentsButton);
-  await until(() => host.querySelector('textarea[aria-label="Commenter la page"]') !== null, "le champ");
+  await until(
+    host,
+    () => host.querySelector('textarea[aria-label="Commenter la page"]') !== null,
+    "le champ",
+  );
   vi.mocked(getInfo).mockResolvedValue(info(CLIENT_SCHEMA_VERSION + 1));
   let verdict: boolean | undefined;
   await act(async () => {
