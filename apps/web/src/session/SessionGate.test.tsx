@@ -351,10 +351,29 @@ for (const [name, failure] of [
   });
 }
 
+test("first_account_screen_on_the_signup_address_gives_way_to_the_login_too", async () => {
+  // Inscriptions ouvertes, l'adresse `/signup` montrerait l'inscription ordinaire : elle est
+  // remplacée par `/login`, sans entrée de plus dans l'historique.
+  history.replaceState(null, "", "/signup");
+  const submit = await firstAccountScreen();
+  const entries = history.length;
+  vi.mocked(signUp).mockRejectedValueOnce(
+    new ApiError(409, "email_taken", "un compte porte déjà cette adresse e-mail"),
+  );
+  vi.mocked(getInfo).mockResolvedValueOnce({ ...instance(false), signup: "open" });
+  await submit();
+  expect(host.querySelector("h1")?.textContent).toBe("Se connecter");
+  expect(host.querySelector('[role="status"]')?.textContent).toBe(ACCOUNT_EXISTS);
+  expect(location.pathname).toBe("/login");
+  expect(history.length).toBe(entries);
+});
+
 test("first_account_screen_stays_while_the_instance_has_no_account", async () => {
   // Témoin : l'inscription échoue, et l'instance n'a toujours aucun compte (ou ne répond pas) :
   // l'écran reste, avec le message et ce qui a été tapé.
   for (const reread of [async () => instance(true), async () => Promise.reject(unreachable())]) {
+    // Sur `/signup` : l'adresse ne passe pas à `/login` sous un écran resté celui de l'inscription.
+    history.replaceState(null, "", "/signup");
     const submit = await firstAccountScreen();
     vi.mocked(signUp).mockRejectedValueOnce(unreachable());
     vi.mocked(getInfo).mockImplementationOnce(reread);
@@ -364,6 +383,7 @@ test("first_account_screen_stays_while_the_instance_has_no_account", async () =>
     expect(host.querySelector('[role="alert"]')?.textContent).toBe("Le serveur Mementum ne répond pas.");
     expect(host.textContent).not.toContain(ACCOUNT_EXISTS);
     expect(fieldOf("Adresse e-mail").value).toBe("camille@exemple.fr");
+    expect(location.pathname).toBe("/signup");
     await act(async () => root.unmount());
     root = createRoot(host);
     vi.mocked(getInfo).mockReset();
