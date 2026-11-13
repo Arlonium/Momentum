@@ -31,6 +31,7 @@ import type {
   SignUp,
   SpaceInfo,
   Tree,
+  Version,
 } from "@mementum/protocol";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -38,7 +39,7 @@ import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 // Déclare `window.__mementum` pour les fonctions passées à `page.evaluate`.
 import type {} from "../src/editor/debug";
-import { accountsDir, BASE_URL } from "./servers";
+import { accountsDir, BASE_URL, E2E_VERSION_EVERY_SECS } from "./servers";
 
 /** Version du registre des blocs (`spec/schema/blocks.json`), celle du client et du serveur. */
 export const REGISTRY_VERSION: number = JSON.parse(
@@ -84,6 +85,31 @@ export async function putMmd(request: APIRequestContext, id: string, mmd: string
     headers: { "content-type": "text/markdown" },
   });
   expect(res.status(), await res.text()).toBe(204);
+}
+
+/** Les versions de la page, la plus récente d'abord (`GET …/versions`). */
+export async function versionsOf(api: APIRequestContext, pageId: string): Promise<Version[]> {
+  const res = await api.get(`/api/v1/pages/${pageId}/versions`);
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as Version[];
+}
+
+/**
+ * Écrit `mmd` plus d'un intervalle de versions après l'écriture d'avant : le serveur des e2e
+ * coupe une version juste avant cette écriture, qui garde le contenu d'avant
+ * (`E2E_VERSION_EVERY_SECS`). Rend les versions.
+ */
+export async function writeAfterTheInterval(
+  api: APIRequestContext,
+  pageId: string,
+  mmd: string,
+): Promise<Version[]> {
+  const before = (await versionsOf(api, pageId)).length;
+  // Un temps réel écoulé d'au moins l'intervalle : plus long ne change rien.
+  await new Promise((done) => setTimeout(done, E2E_VERSION_EVERY_SECS * 1_000 + 200));
+  await putMmd(api, pageId, mmd);
+  await expect.poll(async () => (await versionsOf(api, pageId)).length).toBeGreaterThan(before);
+  return versionsOf(api, pageId);
 }
 
 /**

@@ -3,7 +3,7 @@
 // le MMD de la page ne change pas, et quelqu'un qui peut commenter sans pouvoir modifier
 // commente.
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
-import type { ErrorBody, Thread, Version } from "@mementum/protocol";
+import type { ErrorBody, Thread } from "@mementum/protocol";
 import {
   closeContexts,
   createPage,
@@ -18,10 +18,11 @@ import {
   setPageLevel,
   trashBanner,
   unique,
+  versionsOf,
   waitSynced,
   watchWrites,
+  writeAfterTheInterval,
 } from "./helpers";
-import { E2E_VERSION_EVERY_SECS } from "./servers";
 
 test.afterEach(closeContexts);
 
@@ -393,25 +394,6 @@ async function threadsOf(api: APIRequestContext, pageId: string): Promise<Thread
   const res = await api.get(`/api/v1/pages/${pageId}/comments`);
   expect(res.status(), await res.text()).toBe(200);
   return (await res.json()) as Thread[];
-}
-
-/** Les versions de la page, la plus récente d'abord. */
-async function versionsOf(api: APIRequestContext, pageId: string): Promise<Version[]> {
-  const res = await api.get(`/api/v1/pages/${pageId}/versions`);
-  expect(res.status(), await res.text()).toBe(200);
-  return (await res.json()) as Version[];
-}
-
-/**
- * Écrit `mmd` plus d'un intervalle de versions après l'écriture d'avant : le serveur coupe une
- * version, qui garde le contenu d'avant (`E2E_VERSION_EVERY_SECS`). Rend les versions.
- */
-async function writeAfterTheInterval(api: APIRequestContext, pageId: string, mmd: string) {
-  const before = (await versionsOf(api, pageId)).length;
-  await new Promise((done) => setTimeout(done, E2E_VERSION_EVERY_SECS * 1_000 + 200));
-  await putMmd(api, pageId, mmd);
-  await expect.poll(async () => (await versionsOf(api, pageId)).length).toBeGreaterThan(before);
-  return versionsOf(api, pageId);
 }
 
 /** L'encart des textes qu'on ne peut plus envoyer (R211). */

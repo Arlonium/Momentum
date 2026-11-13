@@ -8,8 +8,7 @@
 //
 // Le serveur des e2e coupe une version quand une écriture suit de plus d'une seconde la première
 // écriture non versionnée (`E2E_VERSION_EVERY_SECS`, `playwright.config.ts`).
-import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
-import type { Version } from "@mementum/protocol";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   closeContexts,
   createPage,
@@ -24,10 +23,11 @@ import {
   setPageLevel,
   trashBanner,
   unique,
+  versionsOf,
   waitSynced,
   watchWrites,
+  writeAfterTheInterval,
 } from "./helpers";
-import { E2E_VERSION_EVERY_SECS } from "./servers";
 
 test.afterEach(closeContexts);
 
@@ -35,26 +35,6 @@ const OLD = "Le texte d'hier";
 const NEW = "Le texte d'aujourd'hui";
 const REPLACED = "Le contenu actuel sera remplacé. Il restera dans l'historique.";
 const OTHERS = "D'autres personnes ont cette page ouverte";
-
-/** Les versions de la page, la plus récente d'abord (`GET …/versions`). */
-async function listVersions(api: APIRequestContext, id: string): Promise<Version[]> {
-  const res = await api.get(`/api/v1/pages/${id}/versions`);
-  expect(res.status(), await res.text()).toBe(200);
-  return (await res.json()) as Version[];
-}
-
-/**
- * Écrit `mmd` plus d'un intervalle après l'écriture d'avant : le serveur coupe une version, juste
- * avant cette écriture, qui garde le contenu d'avant. Rend les versions.
- */
-async function writeAfterTheInterval(api: APIRequestContext, id: string, mmd: string): Promise<Version[]> {
-  const before = (await listVersions(api, id)).length;
-  // Un temps réel écoulé d'au moins l'intervalle : plus long ne change rien.
-  await new Promise((done) => setTimeout(done, E2E_VERSION_EVERY_SECS * 1_000 + 200));
-  await putMmd(api, id, mmd);
-  await expect.poll(async () => (await listVersions(api, id)).length).toBeGreaterThan(before);
-  return listVersions(api, id);
-}
 
 function menuButton(p: Page): Locator {
   return p.getByRole("button", { name: "Actions de la page", exact: true });
@@ -260,7 +240,7 @@ test("restored_content_is_itself_in_the_history", async ({ browser, request }) =
   await expect(pageEditor(p)).not.toContainText(NEW);
 
   // Ce qui a été remplacé est resté dans l'historique : « avant une restauration ».
-  const afterFirst = await listVersions(request, id);
+  const afterFirst = await versionsOf(request, id);
   expect(afterFirst.map((v) => v.reason)).toEqual(["before_restore", "periodic"]);
   dialog = await openHistory(p);
   await expect(versionItems(dialog)).toHaveCount(afterFirst.length + 1);
@@ -276,7 +256,7 @@ test("restored_content_is_itself_in_the_history", async ({ browser, request }) =
 
   // Le contenu restauré la première fois est lui-même une version gardée (celle d'hier) : la
   // seconde restauration ne coupe rien de plus (R190), et il se retrouve dans la liste.
-  expect((await listVersions(request, id)).map((v) => v.id)).toEqual(afterFirst.map((v) => v.id));
+  expect((await versionsOf(request, id)).map((v) => v.id)).toEqual(afterFirst.map((v) => v.id));
   dialog = await openHistory(p);
   await expect(versionItems(dialog)).toHaveCount(afterFirst.length + 1);
   const yesterday = versionItems(dialog).nth(2);
