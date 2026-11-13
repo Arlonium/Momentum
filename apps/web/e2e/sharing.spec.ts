@@ -350,6 +350,42 @@ test("title_typed_while_losing_the_right_is_not_shown_as_saved", async ({ browse
   expect(renames).toHaveLength(1);
 });
 
+test("focus_goes_to_the_title_when_the_offer_to_resume_it_leaves", async ({ browser }) => {
+  const { aliceApi, bruno, brunoId } = await ownerAndMember();
+  const title = `Notes ${unique()}`;
+  const shared = await createPage(aliceApi, { section: "private", title });
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  const b = await openPage(browser, shared.id, bruno);
+  await waitSynced(b);
+
+  // Un titre tapé pendant que le droit baisse (lectures de la page et de l'arbre retenues),
+  // puis le droit revient : le texte est proposé.
+  const reads = await holdPageReads(b, shared.id);
+  const tree = await holdTreeReads(b);
+  await setPageLevel(aliceApi, shared.id, brunoId, "read");
+  await reads.asked;
+  await titleOf(b).click();
+  await b.keyboard.press("End");
+  await b.keyboard.type(", revu par Bruno");
+  reads.release();
+  tree.release();
+  await expect(readerBanner(b)).toBeVisible({ timeout: 5_000 });
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  await raisedBanner(b).getByRole("button", { name: "Rouvrir la page" }).click();
+  const resume = b.getByRole("button", { name: "Reprendre ce titre" });
+  await resume.focus();
+  await expect(resume).toBeFocused();
+
+  // Le droit rebaisse : le bouton part sous le focus, qui va au champ du titre, pas sur `body`.
+  await setPageLevel(aliceApi, shared.id, brunoId, "read");
+  await expect(resume).toHaveCount(0, { timeout: 10_000 });
+  await expect(titleOf(b)).toBeFocused();
+  await expect(titleOf(b)).toHaveValue(title);
+  await expect(
+    b.getByRole("status").filter({ hasText: "Ce titre n'a pas été enregistré" }),
+  ).toHaveText(`Ce titre n'a pas été enregistré : ${title}, revu par Bruno`);
+});
+
 test("two_tabs_of_one_account_exchange_only_through_the_server", async ({ browser }) => {
   const { aliceApi, bruno, brunoId } = await ownerAndMember();
   const shared = await createPage(aliceApi, { section: "private", title: `Onglets ${unique()}` });
