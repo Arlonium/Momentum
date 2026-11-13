@@ -172,10 +172,10 @@ La relecture indépendante de S1 à S7, tournée vers la sécurité, a rendu **1
 | C1 (avec m4, m5) | **fait**, `869a0a0`, R207 et R208 ; puis `6b4370e`, R258 (une entrée du journal à client répété est écartée à la relecture) ; poussé |
 | I1 | **fait**, `4dc342d`, R209, poussé |
 | I3 | **plafond fait**, `b005adc`, R259 (12 000 blocs par `PUT /mmd`), poussé ; la cause est trouvée, le correctif de fond n'est pas fait |
-| I2 (avec m7) | en cours (un agent neuf a repris le tour le 2026-11-13 vers 6 h) |
-| m1, m2, m3, m6 | à faire, par le même agent, après I2 (m3 en dernier) |
+| I2 (avec m7) | **fait**, `12a45a9` et `1035ee7`, R350 à R352, poussé : plafonds par page (10 000 messages, 4 Mio de texte, `409 page_comment_limit`), part de chaque compte (200 fils par page, 8 emojis par message), et `DELETE …/comments/{threadId}` pour l'accès complet |
+| m1, m2, m3, m6 | **faits**, `00de298`, `2f0a5ac`, `aa6efe5`, `609645c`, R353 à R356, poussés |
 
-Numéros de Rulings pour la suite du tour : R350 à R359 (R209, R258 et R259 sont pris). L'implémenteur d'origine s'est arrêté, contexte épuisé, après I3 : `cargo test --workspace`, 727 verts, 16 ignorés ; fmt et clippy propres.
+**Le tour de correction 1 est fini** (deux implémenteurs successifs) : `cargo test --workspace`, 744 verts, 18 ignorés ; fmt et clippy propres ; Vitest 561 verts ; `comments`, `history`, `keepalive` et `live-tree` relancés en e2e sur `main` : 27 verts. **Sa re-relecture ciblée est en cours** (le relecteur d'origine). Ce que les implémenteurs laissent ouvert, et que la re-relecture doit trancher : **les réactions ne sont pas bornées par page** (8 réactions d'un seul compte sur chacun des 10 000 messages : 20,5 Mio et 1,5 s de lecture ; environ 14 Mio de plus par commentateur) ; **un seul compte peut encore remplir à lui seul** les 10 000 messages ou les 4 Mio d'une page (l'accès complet les libère en 200 `DELETE` au plus) ; le correctif de fond de l'écriture quadratique n'est pas fait. Mesures : une écriture sur une page pleine de commentaires, 3,4 ms (1,8 ms sur une page vide ; 12 ms sans l'index d'expression ajouté à `0003`) ; la lecture d'une page pleine, 6,6 Mio et 78 ms. Prochains numéros de Rulings libres pour la piste S : R357 à R359.
 
 ### C1 — Critique, antérieur au lot (présent depuis le lot 1) : un client répété dans une mise à jour détruit la page — **corrigé**
 
@@ -250,6 +250,14 @@ Suite du tour de correction 1 de la piste S (R258, R209, R259) :
 - `CLAUDE.md` : à la relecture du stockage, une entrée du journal où un client paraît deux fois est écartée et journalisée, la page se charge sans elle (R258) ; `PUT /mmd` et la restauration relisent la session sous le verrou de la page, `401` sinon (R209, extracteur `SessionUser`) ; un `PUT /mmd` porte 12 000 blocs au plus, et l'écriture complète d'une page est quadratique en nombre de blocs frères (R259 : `write_nodes` insère à un index croissant, yrs reparcourt la liste).
 - README : la limite de 12 000 blocs par `PUT /mmd` ; une grande page est lente à récrire et à restaurer (5 s pour 10 000 blocs).
 - Conception : §5 pour R207, R208 et R258 ; l'API MMD pour R259 ; l'ordre des refus (`401` de session sous le verrou, R209).
+
+Fin du tour de correction 1 de la piste S (R350 à R356) :
+
+- `CLAUDE.md`, « Commentaires, côté serveur » : les plafonds par page (10 000 messages, 4 Mio de texte : `409 page_comment_limit`) et la part de chaque compte (200 fils par page, 8 emojis par message), leurs codes et leur ordre (les plafonds communs avant la part du compte ; une modification qui allonge un message compte dans le texte de la page) ; la route `DELETE …/comments/{threadId}` (accès complet, ordre R168, trame après validation, `404` sans trame pour un fil déjà parti) ; l'index d'expression de `0003` : la requête reprend `octet_length(c.body)` telle quelle, une colonne générée casse l'index couvrant (test `page_totals_are_read_from_the_index`) ; `Hub::block_reads`, le compteur qui garde qu'un fil sur un bloc ne fait pas bâtir la liste des blocs.
+- `CLAUDE.md`, « Trame de page » : `versions` ne va qu'aux connexions qui ont `can_write` (`Broadcast::editors_only`), onglet d'un autre schéma compris.
+- `CLAUDE.md`, méthode : le test `no_string_of_the_server_has_a_run_of_spaces` refuse deux espaces de suite dans les chaînes du serveur.
+- README : les plafonds des commentaires ; la suppression d'un fil entier par qui a l'accès complet (le bouton reste à faire côté client) ; la lecture des fils n'est bornée qu'en messages et en texte.
+- Conception : les plafonds des commentaires, la route `DELETE`, le public de la trame `versions`.
 
 Pour chaque constat fini ensuite, ajouter ici ce que la documentation doit en dire : la Task 14 part de cette liste. Sont déjà sûrs de changer : le README et `CLAUDE.md` pour l'historique (« Peut lire » lit l'historique sans restaurer : faux après S5 et C7), la puce R181 de `CLAUDE.md` (S2), le canal de l'espace (S6, C6), `PUT /mmd` et les identifiants (S3), les plafonds des commentaires (S4).
 
