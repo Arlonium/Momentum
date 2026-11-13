@@ -97,6 +97,7 @@ async fn first_sign_up_adopts_orphan_spaces_and_gets_no_other() {
             None,
             &space_of("alice"),
             session(),
+            None,
             now(),
         )
         .await
@@ -135,6 +136,7 @@ async fn sign_up_without_a_space_creates_one() {
             None,
             &space_of("alice"),
             session(),
+            None,
             now(),
         )
         .await
@@ -154,7 +156,14 @@ async fn sign_up_without_a_space_creates_one() {
     // Un espace sans membre apparu ensuite n'est pas pour le compte suivant.
     let orphan = store.create_space("Orphelin", None).await.unwrap();
     let bob = store
-        .sign_up(new_user("bob"), None, &space_of("bob"), session(), now())
+        .sign_up(
+            new_user("bob"),
+            None,
+            &space_of("bob"),
+            session(),
+            None,
+            now(),
+        )
         .await
         .unwrap();
     assert!(!bob.user.instance_admin);
@@ -180,6 +189,7 @@ async fn sign_up_accepts_its_invitation() {
             None,
             &space_of("alice"),
             session(),
+            None,
             now(),
         )
         .await
@@ -203,6 +213,7 @@ async fn sign_up_accepts_its_invitation() {
             Some(token),
             &space_of("bob"),
             session(),
+            None,
             now(),
         )
         .await
@@ -252,6 +263,7 @@ async fn sign_up_accepts_its_invitation() {
             Some(token),
             &space_of("carol"),
             session(),
+            None,
             now(),
         )
         .await
@@ -284,12 +296,20 @@ async fn sign_up_with_a_withdrawn_invitation_makes_an_account_without_space() {
             None,
             &space_of("alice"),
             session(),
+            None,
             now(),
         )
         .await
         .unwrap();
     let dan = store
-        .sign_up(new_user("dan"), None, &space_of("dan"), session(), now())
+        .sign_up(
+            new_user("dan"),
+            None,
+            &space_of("dan"),
+            session(),
+            None,
+            now(),
+        )
         .await
         .unwrap();
     let space = alice.space.unwrap();
@@ -328,6 +348,7 @@ async fn sign_up_with_a_withdrawn_invitation_makes_an_account_without_space() {
                 Some(token),
                 &space_of(&tag),
                 session(),
+                None,
                 now(),
             )
             .await
@@ -363,6 +384,7 @@ async fn sign_up_is_one_transaction() {
             None,
             &space_of("alice"),
             session(),
+            None,
             now(),
         )
         .await;
@@ -382,6 +404,7 @@ async fn sign_up_is_one_transaction() {
             None,
             &space_of("alice"),
             session(),
+            None,
             now(),
         )
         .await
@@ -396,7 +419,14 @@ async fn sign_up_is_one_transaction() {
         break_table(&f.db, event, table, "1").await;
         let failed = f
             .store
-            .sign_up(new_user("bob"), None, &space_of("bob"), session(), now())
+            .sign_up(
+                new_user("bob"),
+                None,
+                &space_of("bob"),
+                session(),
+                None,
+                now(),
+            )
             .await;
         assert!(matches!(failed, Err(StoreError::Sqlx(_))), "{failed:?}");
         assert_eq!(int(&f.db, users).await, 1, "panne sur {table}");
@@ -409,7 +439,14 @@ async fn sign_up_is_one_transaction() {
     }
     let bob = f
         .store
-        .sign_up(new_user("bob"), None, &space_of("bob"), session(), now())
+        .sign_up(
+            new_user("bob"),
+            None,
+            &space_of("bob"),
+            session(),
+            None,
+            now(),
+        )
         .await
         .unwrap();
     assert!(bob.space.is_some());
@@ -434,6 +471,7 @@ async fn sign_up_is_one_transaction() {
             Some(token),
             &space_of("carol"),
             session(),
+            None,
             now(),
         )
         .await;
@@ -457,6 +495,7 @@ async fn sign_up_is_one_transaction() {
             Some(token),
             &space_of("carol"),
             session(),
+            None,
             now(),
         )
         .await
@@ -471,7 +510,14 @@ async fn sign_up_is_one_transaction() {
     let spaces = int(&f.db, "SELECT COUNT(*) FROM spaces").await;
     let taken = f
         .store
-        .sign_up(new_user(" Alice"), None, "Espace en trop", session(), now())
+        .sign_up(
+            new_user(" Alice"),
+            None,
+            "Espace en trop",
+            session(),
+            None,
+            now(),
+        )
         .await;
     assert!(matches!(taken, Err(StoreError::EmailTaken)), "{taken:?}");
     assert_eq!(int(&f.db, users).await, 3);
@@ -485,7 +531,14 @@ async fn sign_up_opens_its_session() {
     let (_dir, _db, store) = empty().await;
     let opened = session();
     let alice = store
-        .sign_up(new_user("alice"), None, &space_of("alice"), opened, now())
+        .sign_up(
+            new_user("alice"),
+            None,
+            &space_of("alice"),
+            opened,
+            None,
+            now(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -503,6 +556,79 @@ async fn sign_up_opens_its_session() {
         None,
         "échue à son échéance"
     );
+    // L'inscription rend les espaces du compte, lus dans sa transaction.
+    assert_eq!(alice.spaces, store.spaces_of(alice.user.id).await.unwrap());
+    assert_eq!(alice.replaced, None);
+}
+
+/// Ruling R265 : la session que portait le navigateur (`replaces`) est supprimée dans la
+/// transaction de l'inscription, qui rend son compte, pour que l'appelant ferme ses connexions.
+/// Si elle ne peut pas l'être, rien n'est écrit, et elle vit encore. Un jeton inconnu ne
+/// remplace rien.
+#[tokio::test]
+async fn sign_up_closes_the_session_it_replaces() {
+    let (_dir, db, store) = empty().await;
+    let carried = session();
+    let alice = store
+        .sign_up(
+            new_user("alice"),
+            None,
+            &space_of("alice"),
+            carried,
+            None,
+            now(),
+        )
+        .await
+        .unwrap();
+    let alice_is_served = async || {
+        store
+            .session_user(carried.token_hash, now(), TTL)
+            .await
+            .unwrap()
+            .map(|u| u.id)
+    };
+
+    break_table(&db, "DELETE", "sessions", "1").await;
+    let failed = store
+        .sign_up(
+            new_user("bob"),
+            None,
+            &space_of("bob"),
+            session(),
+            Some(carried.token_hash),
+            now(),
+        )
+        .await;
+    assert!(matches!(failed, Err(StoreError::Sqlx(_))), "{failed:?}");
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM users").await, 1);
+    assert_eq!(alice_is_served().await, Some(alice.user.id));
+    repair(&db).await;
+
+    let bob = store
+        .sign_up(
+            new_user("bob"),
+            None,
+            &space_of("bob"),
+            session(),
+            Some(carried.token_hash),
+            now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bob.replaced, Some(alice.user.id));
+    assert_eq!(alice_is_served().await, None);
+    let carol = store
+        .sign_up(
+            new_user("carol"),
+            None,
+            &space_of("carol"),
+            session(),
+            Some([7; 32]),
+            now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(carol.replaced, None);
 }
 
 /// Report m1 du lot 2 : la session s'ouvre dans la transaction qui crée le compte. Si elle ne
@@ -519,6 +645,7 @@ async fn sign_up_that_cannot_open_its_session_creates_nothing() {
             None,
             &space_of("alice"),
             session(),
+            None,
             now(),
         )
         .await
@@ -542,7 +669,14 @@ async fn sign_up_that_cannot_open_its_session_creates_nothing() {
     // Avec une invitation, puis sans (le compte recevrait un espace à lui).
     for (tag, invitation) in [("bob", Some(token)), ("carol", None)] {
         let failed = store
-            .sign_up(new_user(tag), invitation, &space_of(tag), session(), now())
+            .sign_up(
+                new_user(tag),
+                invitation,
+                &space_of(tag),
+                session(),
+                None,
+                now(),
+            )
             .await;
         assert!(matches!(failed, Err(StoreError::Sqlx(_))), "{failed:?}");
         assert_eq!(int(&db, users).await, 1, "{tag}");
@@ -577,6 +711,7 @@ async fn sign_up_that_cannot_open_its_session_creates_nothing() {
             Some(token),
             &space_of("bob"),
             opened,
+            None,
             now(),
         )
         .await
@@ -603,7 +738,14 @@ async fn concurrent_sign_ups_make_one_first_account() {
         set.spawn(async move {
             let tag = format!("c{i}");
             store
-                .sign_up(new_user(&tag), None, &space_of(&tag), session(), now())
+                .sign_up(
+                    new_user(&tag),
+                    None,
+                    &space_of(&tag),
+                    session(),
+                    None,
+                    now(),
+                )
                 .await
         });
     }

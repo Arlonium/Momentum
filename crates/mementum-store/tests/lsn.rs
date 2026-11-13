@@ -289,6 +289,7 @@ async fn every_structural_write_advances_lsn() {
                     token_hash: [3; 32],
                     expires_at: now() + 86_400_000,
                 },
+                None,
                 now(),
             )
             .await

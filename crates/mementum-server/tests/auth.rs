@@ -1786,6 +1786,53 @@ async fn login_closes_the_session_the_browser_carried() {
     assert_eq!(query_i64(&t.db_path(), sessions).await, 3);
 }
 
+/// Report m1 du lot 2, jusqu'au bout : une inscription par-dessus une session
+/// ferme cette session dans la transaction qui crée le compte. Si elle ne peut
+/// pas la fermer, l'inscription échoue en entier : aucun compte, l'adresse
+/// reste libre, et la session portée vit encore. Avant, la fermeture venait
+/// après le commit : `500` pour un compte pourtant créé, avec une session dont
+/// personne n'avait le jeton, puis `409 email_taken` à l'essai suivant. Le
+/// témoin de la fermeture réussie, connexions de synchro comprises, est
+/// `signup_over_a_session_closes_the_previous_account_connections`
+/// (`tests/sync_rights.rs`).
+#[tokio::test]
+async fn signup_that_cannot_close_the_carried_session_creates_nothing() {
+    let t = open_app().await;
+    let (shared, me) = t.signed_up("alice@exemple.fr", "Alice").await;
+    let alice = shared.session().expect("session de l'inscription");
+    let bob = "SELECT COUNT(*) FROM users WHERE email = 'bob@exemple.fr'";
+    exec_sql(
+        &t.db_path(),
+        "CREATE TRIGGER panne BEFORE DELETE ON sessions \
+         BEGIN SELECT RAISE(ABORT, 'panne simulée'); END",
+    )
+    .await;
+
+    shared
+        .sign_up("bob@exemple.fr", "Bob", PASSWORD, None)
+        .await
+        .assert_error(StatusCode::INTERNAL_SERVER_ERROR, "internal");
+    assert_eq!(query_i64(&t.db_path(), bob).await, 0, "compte de Bob créé");
+    assert_eq!(shared.session().as_deref(), Some(alice.as_str()));
+    assert_eq!(shared.me().await.json(), me, "session d'Alice fermée");
+
+    // La panne passée, la même adresse s'inscrit, et la session d'Alice que
+    // portait le navigateur ne vaut plus rien.
+    exec_sql(&t.db_path(), "DROP TRIGGER panne").await;
+    let reply = shared
+        .sign_up("bob@exemple.fr", "Bob", PASSWORD, None)
+        .await;
+    reply.assert_status(StatusCode::CREATED);
+    assert_eq!(reply.json()["user"]["email"], "bob@exemple.fr");
+    assert_eq!(shared.me().await.json()["user"]["email"], "bob@exemple.fr");
+    let replay = t.browser();
+    replay.set_session(Some(&alice));
+    replay
+        .me()
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+}
+
 /// Ruling R78 : derrière un tunnel qui garde l'en-tête `Host` publique, le
 /// serveur n'écoute que sur la boucle locale. L'hôte de
 /// `MEMENTUM_PUBLIC_URL` est alors admis par le contrôle de `Host`, et lui

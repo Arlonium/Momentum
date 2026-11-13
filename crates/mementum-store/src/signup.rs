@@ -1,7 +1,7 @@
 //! Inscription : un compte et ce qui vient avec lui, en une seule transaction.
 //!
 //! Une inscription écrit dans `users`, puis dans `members`, `spaces`, `invitations` ou `acl`,
-//! et enfin dans `sessions`.
+//! et enfin dans `sessions` (la sienne, et celle qu'elle remplace).
 //! En plusieurs transactions, un arrêt ou une erreur de la base au milieu laisserait un compte
 //! sans espace, dont l'adresse est prise ; et sur une base du lot 1, des pages sans propriétaire
 //! pour de bon, puisque seul le premier compte reprend les espaces sans membre, et à son
@@ -13,9 +13,9 @@ use mementum_acl::Role;
 use uuid::Uuid;
 
 use crate::invitations::{Invitation, accept, acceptable};
-use crate::members::{adopt_orphans, raise_role};
+use crate::members::{adopt_orphans, raise_role, spaces_of_in};
 use crate::spaces::{Space, WriteTx, bump_rev, insert_space};
-use crate::users::{NewSession, NewUser, User, insert_session, insert_user};
+use crate::users::{NewSession, NewUser, User, insert_session, insert_user, remove_session};
 use crate::{Store, StoreError};
 
 /// Ce qu'une inscription a écrit.
@@ -36,6 +36,13 @@ pub struct SignedUp {
     /// L'espace créé pour le compte, dont il est `owner` : sans jeton, quand il n'a repris
     /// aucun espace.
     pub space: Option<Space>,
+    /// Les espaces où le compte a un rôle, avec ce rôle, par date de création, lus dans la
+    /// transaction : de quoi répondre sans rien relire après elle.
+    pub spaces: Vec<(Space, Role)>,
+    /// Le compte de la session remplacée (`replaces`), supprimée dans la transaction : à
+    /// l'appelant de fermer ses connexions. `None` : aucune session donnée, ou un jeton
+    /// inconnu.
+    pub replaced: Option<Uuid>,
 }
 
 impl Store {
@@ -46,13 +53,15 @@ impl Store {
     ///    encore à `now`, comme [`Store::accept_invitation`]. Sinon le compte reste sans
     ///    espace (`invitation_withdrawn`) : il venait pour elle, pas pour un espace à lui ;
     /// 4. sans jeton, s'il n'a aucun espace : crée `first_space_name`, dont il est `owner` ;
-    /// 5. ouvre la session du compte (`session`).
+    /// 5. ouvre la session du compte (`session`) et supprime celle qu'elle remplace
+    ///    (`replaces`, la session que portait déjà le navigateur, échue ou non).
     ///
     /// Tout est écrit, ou rien : sur une erreur (`EmailTaken` si l'adresse est prise), aucun
     /// compte n'existe et l'adresse reste libre. La session en est (report m1 du lot 2) : ouverte
     /// après la transaction, une panne entre les deux répondait par une erreur pour un compte
     /// pourtant créé, sans session, adresse prise et invitation consommée ; qui recommençait se
-    /// voyait répondre que l'adresse était prise.
+    /// voyait répondre que l'adresse était prise. La session remplacée aussi, pour la même raison
+    /// (Ruling R265) : rien de ce qui suit le commit ne peut plus échouer.
     ///
     /// Le store ne juge pas du droit de s'inscrire (inscriptions ouvertes ou non, jeton exigé
     /// ou non) : c'est l'affaire de l'appelant, avant.
@@ -62,6 +71,7 @@ impl Store {
         invitation: Option<[u8; 32]>,
         first_space_name: &str,
         session: NewSession,
+        replaces: Option<[u8; 32]>,
         now: i64,
     ) -> Result<SignedUp, StoreError> {
         let mut tx = self.write().await?;
@@ -89,6 +99,11 @@ impl Store {
             None => {}
         }
         insert_session(&mut tx, user.id, session).await?;
+        let replaced = match replaces {
+            Some(token_hash) => remove_session(&mut tx, token_hash).await?,
+            None => None,
+        };
+        let spaces = spaces_of_in(&mut tx, user.id).await?;
         tx.commit().await?;
         Ok(SignedUp {
             user,
@@ -96,6 +111,8 @@ impl Store {
             accepted,
             invitation_withdrawn,
             space,
+            spaces,
+            replaced,
         })
     }
 }

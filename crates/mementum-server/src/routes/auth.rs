@@ -38,20 +38,23 @@
 //!   coupure.
 //!
 //! Le compte et ce qui vient avec lui (espaces repris, invitation, premier
-//! espace, session) s'écrivent en une transaction du store (`Store::sign_up`) :
-//! une panne au milieu ne laisse ni un compte sans espace, ni un compte sans
-//! session pour une inscription qui a répondu par une erreur (report m1 du
-//! lot 2). Ce qui suit une écriture et ne doit pas s'arrêter en route (la
-//! fermeture de la session portée, après le compte ; la session, avec le
-//! nouveau mot de passe) tourne dans sa propre tâche : elle va au bout même si
-//! le client coupe la connexion.
+//! espace, sa session, et la suppression de la session que portait le
+//! navigateur) s'écrivent en une transaction du store (`Store::sign_up`), qui
+//! rend aussi les espaces du compte : une panne ne laisse ni un compte sans
+//! espace, ni un compte créé derrière une inscription qui a répondu par une
+//! erreur (report m1 du lot 2, Ruling R265). Après le commit, il ne reste que
+//! la fermeture des connexions de synchro (`Hub::kick_user`), qui ne peut pas
+//! échouer. Ce qui suit une écriture et ne doit pas s'arrêter en route (ces
+//! fermetures ; la session, avec le nouveau mot de passe) tourne dans sa
+//! propre tâche : elle va au bout même si le client coupe la connexion.
 
 use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use mementum_store::{NewSession, NewUser, StoreError};
+use mementum_acl::Role;
+use mementum_store::{NewSession, NewUser, Space, StoreError};
 use uuid::Uuid;
 
 use crate::auth::{self, AuthUser, Guarded, SESSION_TTL_MS};
@@ -99,8 +102,8 @@ async fn sign_up(
         // La session que le cookie de la réponse va remplacer.
         carried: auth::session_hash(&headers),
     };
-    // Compte et session neuve, puis fermeture de la session portée : jusqu'au
-    // bout, même si le client coupe la connexion.
+    // Compte, session neuve et session portée supprimée, puis fermeture de ses
+    // connexions : jusqu'au bout, même si le client coupe la connexion.
     let (me, token) = to_completion(register(state, account)).await?;
     Ok((
         StatusCode::CREATED,
@@ -118,12 +121,13 @@ struct NewAccount {
     /// Le hachage du jeton d'invitation, s'il y en a un.
     invitation: Option<[u8; 32]>,
     /// Le hachage de la session que portait déjà le navigateur, s'il y en a
-    /// une : fermée une fois le compte créé (Ruling R90).
+    /// une : supprimée avec la création du compte (Ruling R90, R265).
     carried: Option<[u8; 32]>,
 }
 
-/// Crée le compte, son espace et sa session (une transaction), puis ferme la
-/// session que portait le navigateur. Rend le `Me` et le jeton de session.
+/// Crée le compte, son espace et sa session, et supprime la session que
+/// portait le navigateur (une transaction), puis ferme les connexions de
+/// synchro du compte de celle-ci. Rend le `Me` et le jeton de session.
 async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), ApiError> {
     let NewAccount {
         email,
@@ -160,8 +164,10 @@ async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), 
     }
     let password_hash = auth::hash_password(password).await.map_err(internal)?;
     // Le compte, les espaces que reprend le premier compte, l'invitation,
-    // sinon un espace à lui, et sa session : tout, ou rien. Le jeton est tiré
-    // avant : le store n'en voit que le hachage.
+    // sinon un espace à lui, sa session et la suppression de celle que
+    // portait le navigateur : tout, ou rien. Le jeton est tiré avant : le
+    // store n'en voit que le hachage. Une inscription refusée, avant ou par
+    // le store, ne ferme donc rien (Ruling R90).
     let first_space = format!("Espace de {name}");
     let new_user = NewUser {
         email,
@@ -175,16 +181,23 @@ async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), 
     };
     let signed_up = state
         .store
-        .sign_up(new_user, invitation, &first_space, session, now_ms())
+        .sign_up(
+            new_user,
+            invitation,
+            &first_space,
+            session,
+            carried,
+            now_ms(),
+        )
         .await
         .map_err(|e| match e {
             // Prise entre-temps.
             StoreError::EmailTaken => ApiError::email_taken(),
             e => internal(e),
         })?;
-    // Le compte est créé : le tour est rendu avant de fermer la session
-    // portée, ce qui peut attendre des acteurs de pages occupés
-    // (`Hub::kick_user`, deux secondes au plus).
+    // Le compte est créé : le tour est rendu avant de fermer les connexions de
+    // la session portée, ce qui peut attendre des acteurs de pages occupés
+    // (`Hub::kick_user`, deux secondes au plus). Plus rien ne peut échouer.
     drop(turn);
     let user = signed_up.user;
     tracing::info!(user_id = %user.id, instance_admin = user.instance_admin, "compte créé");
@@ -212,13 +225,15 @@ async fn register(state: AppState, account: NewAccount) -> Result<(Me, String), 
             "invitation retirée pendant l'inscription : compte créé sans elle"
         );
     }
-    // Le compte existe, avec sa session : le cookie que portait ce navigateur
-    // va être remplacé. Sa session ne doit plus rien valoir, pour personne, ni
-    // les connexions de synchro du compte qu'elle portait (Ruling R90, comme à
-    // la connexion). Pas avant : une inscription refusée ne ferme rien.
-    close_session(&state, carried).await?;
-    let me = me_of(&state, user.into()).await?;
-    Ok((me, token))
+    // La session que portait ce navigateur ne vaut plus rien, pour personne :
+    // les connexions de synchro du compte qu'elle portait non plus (Ruling
+    // R90, comme à la connexion).
+    if let Some(replaced) = signed_up.replaced {
+        state.hub.kick_user(replaced).await;
+    }
+    // La réponse se fait de ce que la transaction a lu : aucune lecture après
+    // le commit, qui pourrait échouer sur un compte créé.
+    Ok((me_with(user.into(), signed_up.spaces), token))
 }
 
 /// `POST /api/v1/auth/login` : `200` et le compte, session ouverte. La
@@ -537,7 +552,12 @@ async fn open_session_verified(
 
 async fn me_of(state: &AppState, user: AuthUser) -> Result<Me, ApiError> {
     let spaces = state.store.spaces_of(user.id).await.map_err(internal)?;
-    Ok(Me {
+    Ok(me_with(user, spaces))
+}
+
+/// Le `Me` d'un compte dont les espaces sont déjà lus.
+fn me_with(user: AuthUser, spaces: Vec<(Space, Role)>) -> Me {
+    Me {
         user: UserInfo {
             id: user.id.to_string(),
             email: user.email,
@@ -552,5 +572,5 @@ async fn me_of(state: &AppState, user: AuthUser) -> Result<Me, ApiError> {
                 role: role.into(),
             })
             .collect(),
-    })
+    }
 }

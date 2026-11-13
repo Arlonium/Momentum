@@ -368,21 +368,36 @@ async fn hand_over_full(
     Ok(())
 }
 
-impl Store {
-    /// Les espaces où le compte a un rôle (invité compris), avec ce rôle, par date de création.
-    pub async fn spaces_of(&self, user_id: Uuid) -> Result<Vec<(Space, Role)>, StoreError> {
-        sqlx::query(
-            "SELECT s.id AS id, s.name AS name, s.rev AS rev, s.created_at AS created_at, \
-                    m.role AS role \
-             FROM members m JOIN spaces s ON s.id = m.space_id \
-             WHERE m.user_id = ? ORDER BY s.created_at, s.id",
-        )
+/// Les espaces où un compte (lié en paramètre) a un rôle, avec ce rôle, par date de création.
+const SPACES_OF: &str = "SELECT s.id AS id, s.name AS name, s.rev AS rev, \
+                         s.created_at AS created_at, m.role AS role \
+                         FROM members m JOIN spaces s ON s.id = m.space_id \
+                         WHERE m.user_id = ? ORDER BY s.created_at, s.id";
+
+/// [`Store::spaces_of`], lu dans la transaction : ce qu'elle a écrit compris.
+pub(crate) async fn spaces_of_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: Uuid,
+) -> Result<Vec<(Space, Role)>, StoreError> {
+    sqlx::query(SPACES_OF)
         .bind(user_id.to_string())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut **tx)
         .await?
         .iter()
         .map(|r| Ok((space_from_row(r)?, role_from_row(r)?)))
         .collect()
+}
+
+impl Store {
+    /// Les espaces où le compte a un rôle (invité compris), avec ce rôle, par date de création.
+    pub async fn spaces_of(&self, user_id: Uuid) -> Result<Vec<(Space, Role)>, StoreError> {
+        sqlx::query(SPACES_OF)
+            .bind(user_id.to_string())
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| Ok((space_from_row(r)?, role_from_row(r)?)))
+            .collect()
     }
 
     /// Le rôle du compte dans l'espace ; `None` s'il n'en a pas (ou si l'un des deux n'existe

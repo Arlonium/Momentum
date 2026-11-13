@@ -97,6 +97,20 @@ pub(crate) async fn insert_session(
     Ok(())
 }
 
+/// Supprime la session de ce jeton dans la transaction, échue ou non, et rend le compte qu'elle
+/// portait ; `None`, sans rien écrire, pour un jeton inconnu.
+pub(crate) async fn remove_session(
+    tx: &mut Transaction<'_, Sqlite>,
+    token_hash: [u8; 32],
+) -> Result<Option<Uuid>, StoreError> {
+    sqlx::query("DELETE FROM sessions WHERE token_hash = ? RETURNING user_id")
+        .bind(&token_hash[..])
+        .fetch_optional(&mut **tx)
+        .await?
+        .map(|row| parse_uuid(&row.get::<String, _>(0)))
+        .transpose()
+}
+
 /// La forme sous laquelle une adresse e-mail est gardée et cherchée.
 pub(crate) fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
