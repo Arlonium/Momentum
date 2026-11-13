@@ -11,9 +11,11 @@
 // - `useCurrentSpace` : l'espace affiché, d'après l'adresse et la page ouverte ;
 // - `usePageActions` : créer, renommer, jeter, restaurer, déplacer, et ce que la page
 //   ouverte devient quand ses droits changent ailleurs.
-import { useCallback, useEffect, useState } from "react";
+import type { PageNode } from "@mementum/protocol";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { useServerSchema } from "./editor/useServerSchema";
+import { ancestorsOf } from "./page/ancestors";
 import { PageView } from "./page/PageView";
 import { useOpenPage } from "./page/useOpenPage";
 import { parseRoute, useLinkInterception, usePathname } from "./router";
@@ -32,6 +34,9 @@ import { useSpaceTree, useTreeCatchUp, useTreeReader } from "./space/useSpaceTre
 import { TrashView } from "./trash/TrashView";
 import { firstClick } from "./ui/firstClick";
 import { Message, Retry } from "./ui/Message";
+
+/** Une page sans page parente visible, ou hors de l'arbre : toujours le même tableau. */
+const NO_ANCESTORS: PageNode[] = [];
 
 export function App() {
   useLinkInterception();
@@ -81,6 +86,13 @@ export function App() {
   const nodes = tree.loaded !== null && tree.loaded.spaceId === spaceId ? tree.loaded.nodes : null;
   const found = page.looked?.state === "found" ? page.looked.node : null;
   const caughtUp = useTreeCatchUp(tree, nodes, activeId, found);
+  // Le fil d'Ariane de la page ouverte, lu dans l'arbre déjà chargé (R256) : recalculé quand
+  // l'arbre change (une page déplacée ou renommée ailleurs), jamais à la frappe.
+  const ancestors = useMemo(() => {
+    if (activeId === null || nodes === null) return NO_ANCESTORS;
+    const chain = ancestorsOf(nodes, activeId);
+    return chain.length === 0 ? NO_ANCESTORS : chain;
+  }, [nodes, activeId]);
 
   const actions = usePageActions({
     tree,
@@ -194,6 +206,7 @@ export function App() {
       <PageView
         key={active.id}
         node={active}
+        ancestors={ancestors}
         readOnly={stale}
         checkSchema={schema.check}
         autoFocusTitle={actions.created === active.id}

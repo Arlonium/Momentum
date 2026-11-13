@@ -776,6 +776,16 @@ button.tree-toggle:hover {
   color: var(--mm-text-secondary);
 }
 
+/* Un libellé venu d'ailleurs (un titre de page, dans le menu du fil d'Ariane) : coupé à
+   l'affichage, entier dans l'infobulle. */
+.mm-menu-text {
+  min-width: 0;
+  max-width: 320px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 /* L'action qui a le focus au clavier garde le contour de tout ce qui se focalise (`:focus-visible`,
    en tête de ce fichier), comme dans le menu du sélecteur d'espace : le fond seul ne se voit
    pas assez sur du blanc. */
@@ -834,6 +844,85 @@ button.tree-toggle:hover {
 
 .mm-topbar-crumb {
   color: var(--mm-text-secondary);
+}
+
+/* Fil d'Ariane d'une page (R256) : les pages parentes, discrètes (texte secondaire), puis la
+   page (texte). Chaque titre est coupé à l'affichage, entier dans son infobulle ; les pages
+   parentes cèdent leur place avant la page. */
+.mm-breadcrumb {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mm-breadcrumb-list {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-crumb {
+  display: flex;
+  align-items: center;
+  flex: 0 2 auto;
+  min-width: 0;
+}
+
+.mm-crumb.is-current {
+  flex-shrink: 1;
+}
+
+.mm-crumb-separator {
+  flex: none;
+  padding: 0 2px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-crumb-link,
+.mm-crumb-page {
+  display: block;
+  min-width: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mm-crumb-link {
+  max-width: 220px;
+  color: var(--mm-text-secondary);
+  text-decoration: none;
+}
+
+.mm-crumb-link:hover {
+  background: var(--mm-sidebar-hover);
+  color: var(--mm-text);
+}
+
+.mm-crumb-page {
+  color: var(--mm-text);
+}
+
+.mm-crumb-more {
+  flex: none;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mm-text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.mm-crumb-more:hover,
+.mm-crumb-more[aria-expanded="true"] {
+  background: var(--mm-sidebar-hover);
+  color: var(--mm-text);
 }
 
 /* Les présents sur la page : pastilles de 24 px au bord blanc de 2 px, qui se chevauchent de

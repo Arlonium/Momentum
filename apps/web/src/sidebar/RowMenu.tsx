@@ -1,5 +1,6 @@
 // Le menu « … » d'une ligne de l'arbre : les actions sur la page, pour qui peut la modifier.
-// Le menu « … » de la barre du haut d'une page est le même (`page/PageMenu.tsx`).
+// Le menu « … » de la barre du haut d'une page est le même (`page/PageMenu.tsx`), comme celui
+// des pages parentes que le fil d'Ariane replie (`page/Breadcrumb.tsx`).
 // Il s'ouvre sous son bouton, par-dessus la page (il est posé dans `body`, hors de la barre
 // latérale, qui le couperait), ou au-dessus quand la place manque en bas, et jamais au-delà du
 // bord droit de la fenêtre.
@@ -18,10 +19,19 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { isolate } from "../comments/dom";
 
 export type MenuAction = {
+  /** Distingue l'action quand deux libellés peuvent se ressembler (deux pages du même titre). */
+  key?: string;
   label: string;
   icon: ReactNode;
+  /**
+   * Le libellé vient d'ailleurs (un titre de page, fil d'Ariane) : un texte isolé (`dir="auto"`,
+   * `unicode-bidi: isolate`), coupé à l'affichage, et entier dans l'infobulle, entre U+2068 et
+   * U+2069.
+   */
+  foreign?: boolean;
   /** L'action n'a pas d'effet ici (la première page ne monte pas plus haut) : grisée. */
   disabled?: boolean;
   /** Une action qui retire quelque chose : rouge au survol. */
@@ -142,13 +152,14 @@ export function RowMenu({ label, anchor, actions, onClose }: Props) {
     >
       {actions.map((action) => (
         <button
-          key={action.label}
+          key={action.key ?? action.label}
           type="button"
           role="menuitem"
           // Focalisable par le menu seulement (les flèches), pas par Tab.
           tabIndex={-1}
           className={action.destructive ? "mm-menu-item is-destructive" : "mm-menu-item"}
           aria-disabled={action.disabled || undefined}
+          title={action.foreign ? isolate(action.label) : undefined}
           onClick={() => {
             if (action.disabled) return;
             dismiss();
@@ -156,7 +167,13 @@ export function RowMenu({ label, anchor, actions, onClose }: Props) {
           }}
         >
           {action.icon}
-          <span>{action.label}</span>
+          {action.foreign ? (
+            <span className="mm-menu-text mm-isolate" dir="auto">
+              {action.label}
+            </span>
+          ) : (
+            <span>{action.label}</span>
+          )}
         </button>
       ))}
     </div>,

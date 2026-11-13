@@ -1,4 +1,4 @@
-// Une page ouverte : barre du haut (titre, état de la connexion, présents, « Commentaires »,
+// Une page ouverte : barre du haut (fil d'Ariane, état de la connexion, présents, « Commentaires »,
 // « Partager » pour qui a l'accès complet, puis le menu « … » et son « Historique »), bandeaux
 // (lecture seule, corbeille) si besoin, titre, puis l'éditeur en direct ; à droite, le panneau
 // des commentaires quand il est ouvert.
@@ -36,6 +36,7 @@ import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
 import { canComment, canEdit, writesOutsideEditor } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
+import { Breadcrumb } from "./Breadcrumb";
 import { PageMenu } from "./PageMenu";
 import { Presence } from "./Presence";
 import { TitleInput } from "./TitleInput";
@@ -43,6 +44,8 @@ import { usePageGate } from "./usePageGate";
 
 type Props = {
   node: PageNode;
+  /** Ses pages parentes que le compte voit, de la plus haute à la page parente (`ancestorsOf`). */
+  ancestors: PageNode[];
   /**
    * Le serveur n'a pas le schéma de ce client (lu au chargement, puis relu avant chaque
    * connexion, R35) : lecture seule pour de bon.
@@ -67,6 +70,7 @@ type Props = {
 
 export function PageView({
   node,
+  ancestors,
   readOnly,
   checkSchema,
   autoFocusTitle,
@@ -185,7 +189,7 @@ export function PageView({
   return (
     <>
       <header className="mm-topbar">
-        <span className="mm-topbar-title">{node.title}</span>
+        <Breadcrumb node={node} ancestors={ancestors} />
         {session && <SyncState session={session} />}
         {session && <Presence session={session} selfId={userId} />}
         <CommentsButton {...wiring.button} />

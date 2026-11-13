@@ -108,13 +108,17 @@ const account = (): Me => ({
   spaces: [space("space")],
 });
 
-/** Rend la page `node` sous le compte `me` (un autre objet : le compte revenu). */
-async function show(node: PageNode, me: Me = account()) {
+/**
+ * Rend la page `node` sous le compte `me` (un autre objet : le compte revenu), avec ses pages
+ * parentes `ancestors`.
+ */
+async function show(node: PageNode, me: Me = account(), ancestors: PageNode[] = []) {
   await act(async () =>
     root.render(
       <SessionContext.Provider value={{ me, refresh: async () => {} }}>
         <PageView
           node={node}
+          ancestors={ancestors}
           readOnly={false}
           checkSchema={checkSchema}
           autoFocusTitle={false}
@@ -206,12 +210,33 @@ test("page_view_gives_the_focus_to_the_title_when_the_history_closes_without_its
   expect(document.activeElement).toBe(host.querySelector(".mm-title-input"));
 });
 
+test("page_view_shows_the_breadcrumb_of_its_ancestors_and_follows_them", async () => {
+  // Le fil d'Ariane de la barre du haut (R256) : les pages parentes que donne `App`, puis la page.
+  const [a, b] = [page("a"), page("b", { parentId: "a" })];
+  const node = page("c", { parentId: "b" });
+  await show(node, account(), [a, b]);
+  const trail = `nav[aria-label="Fil d'Ariane"]`;
+  const crumbs = () =>
+    [...host.querySelectorAll(`${trail} li`)].map(
+      (item) => item.querySelector("a, [aria-current]")?.textContent,
+    );
+  expect(crumbs()).toEqual(["A", "B", "C"]);
+  expect(host.querySelector(`${trail} a`)?.getAttribute("href")).toBe("/p/a");
+  expect(host.querySelector(`${trail} [aria-current="page"]`)?.textContent).toBe("C");
+  // La page déplacée ailleurs : le fil suit, sans recréer la session de synchro.
+  const sessions = probe.sessions.length;
+  await show({ ...node, parentId: "a" }, account(), [a]);
+  expect(crumbs()).toEqual(["A", "C"]);
+  expect(probe.sessions.length).toBe(sessions);
+});
+
 /** La page sous le vrai schéma du serveur de l'application : `readOnly` et `checkSchema` viennent de lui. */
 function WithServerSchema({ node }: { node: PageNode }) {
   const schema = useServerSchema();
   return (
     <PageView
       node={node}
+      ancestors={[]}
       readOnly={schema.stale}
       checkSchema={schema.check}
       autoFocusTitle={false}
