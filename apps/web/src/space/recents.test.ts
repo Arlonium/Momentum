@@ -46,7 +46,7 @@ test("recents_show_only_pages_of_the_tree", async () => {
   // `z` n'est pas (ou plus) dans l'arbre : ni montrée, ni retirée du stockage.
   const tree = ["a", "b", "c", "w", "x", "y"].map((id) => page(id));
   const shown = await renderHook(
-    ({ nodes }: { nodes: PageNode[] | null }) => useRecentPages("u1", "s1", nodes),
+    ({ nodes }: { nodes: PageNode[] | null }) => useRecentPages("u1", "s1", nodes, null),
     { nodes: tree },
   );
   expect(shown.current.map((node) => node.id)).toEqual(["c", "b", "a", "x", "y"]);
@@ -63,7 +63,7 @@ test("recents_show_only_pages_of_the_tree", async () => {
 
 test("a_visit_shows_at_once_in_the_list", async () => {
   const tree = ["a", "b"].map((id) => page(id));
-  const shown = await renderHook(() => useRecentPages("u1", "s1", tree), undefined);
+  const shown = await renderHook(() => useRecentPages("u1", "s1", tree, null), undefined);
   expect(shown.current).toEqual([]);
   await settle(() => visit("u1", "s1", "a"));
   expect(shown.current.map((node) => node.id)).toEqual(["a"]);
@@ -71,9 +71,29 @@ test("a_visit_shows_at_once_in_the_list", async () => {
   expect(shown.current.map((node) => node.id)).toEqual(["b", "a"]);
 });
 
+test("the_open_page_is_first_from_the_render_that_opens_it", async () => {
+  // La visite s'écrit après le rendu qui ouvre la page (effet d'`App`) ; la liste, elle, la
+  // montre en tête dès ce rendu : elle grandit dans le même rendu que l'arbre montre la page,
+  // et la ligne de l'arbre que la barre fait défiler pour la montrer ne bouge plus après.
+  visit("u1", "s1", "a");
+  const tree = ["a", "b"].map((id) => page(id));
+  const shown = await renderHook(
+    ({ activeId }: { activeId: string | null }) => useRecentPages("u1", "s1", tree, activeId),
+    { activeId: "b" },
+  );
+  expect(shown.current.map((node) => node.id)).toEqual(["b", "a"]);
+  // Rien n'est écrit pour autant : c'est la visite qui l'écrit.
+  expect(readRecents("u1", "s1")).toEqual(["a"]);
+  // Déjà en tête, ou hors de l'arbre : la liste gardée, telle quelle.
+  await shown.rerender({ activeId: "a" });
+  expect(shown.current.map((node) => node.id)).toEqual(["a"]);
+  await shown.rerender({ activeId: "z" });
+  expect(shown.current.map((node) => node.id)).toEqual(["a"]);
+});
+
 test("a_visit_in_another_tab_shows_here", async () => {
   const tree = ["a", "b"].map((id) => page(id));
-  const shown = await renderHook(() => useRecentPages("u1", "s1", tree), undefined);
+  const shown = await renderHook(() => useRecentPages("u1", "s1", tree, null), undefined);
   // Un autre onglet du navigateur écrit dans le stockage : celui-ci l'apprend par `storage`.
   localStorage.setItem(recentsKey("u1", "s1"), JSON.stringify(["b"]));
   await settle(() =>
@@ -86,10 +106,10 @@ test("recents_of_another_account_are_not_read", async () => {
   visit("u1", "s1", "a");
   expect(readRecents("u2", "s1")).toEqual([]);
   const tree = [page("a")];
-  const other = await renderHook(() => useRecentPages("u2", "s1", tree), undefined);
+  const other = await renderHook(() => useRecentPages("u2", "s1", tree, null), undefined);
   expect(other.current).toEqual([]);
   // Témoin : le compte qui l'a ouverte la voit.
-  const mine = await renderHook(() => useRecentPages("u1", "s1", tree), undefined);
+  const mine = await renderHook(() => useRecentPages("u1", "s1", tree, null), undefined);
   expect(mine.current.map((node) => node.id)).toEqual(["a"]);
 });
 
@@ -100,7 +120,7 @@ test("logging_out_forgets_the_recents_of_the_account", async () => {
   visit("u2", "s1", "d");
   localStorage.setItem("mementum.sections.s1", JSON.stringify(["shared"]));
   const tree = [page("a")];
-  const shown = await renderHook(() => useRecentPages("u1", "s1", tree), undefined);
+  const shown = await renderHook(() => useRecentPages("u1", "s1", tree, null), undefined);
   expect(shown.current.map((node) => node.id)).toEqual(["a"]);
 
   await settle(() => forgetRecents("u1"));
@@ -129,7 +149,9 @@ test("storage_that_throws_shows_no_recents", async () => {
   expect(() => visit("u1", "s1", "a")).not.toThrow();
   expect(readRecents("u1", "s1")).toEqual([]);
   expect(() => forgetRecents("u1")).not.toThrow();
-  const shown = await renderHook(() => useRecentPages("u1", "s1", [page("a")]), undefined);
+  // Pas même la page ouverte : rien n'est gardé, rien n'est montré.
+  const tree = [page("a")];
+  const shown = await renderHook(() => useRecentPages("u1", "s1", tree, "a"), undefined);
   expect(shown.current).toEqual([]);
 });
 

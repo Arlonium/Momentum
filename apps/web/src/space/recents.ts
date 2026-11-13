@@ -44,17 +44,31 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
-/** Les pages récentes du compte dans l'espace, la plus récente d'abord. */
-export function readRecents(userId: string, spaceId: string): string[] {
+/**
+ * Les pages récentes gardées, la plus récente d'abord ; `null` : le stockage est refusé (rien
+ * n'y est gardé). Une valeur illisible n'en donne aucune.
+ */
+function readStored(userId: string, spaceId: string): string[] | null {
+  let raw: string | null;
   try {
-    const stored: unknown = JSON.parse(localStorage.getItem(recentsKey(userId, spaceId)) ?? "[]");
+    raw = localStorage.getItem(recentsKey(userId, spaceId));
+  } catch {
+    return null;
+  }
+  try {
+    const stored: unknown = JSON.parse(raw ?? "[]");
     if (!Array.isArray(stored)) return [];
     const ids = stored.filter((id): id is string => typeof id === "string");
     return [...new Set(ids)].slice(0, RECENTS_KEPT);
   } catch {
-    // stockage refusé, ou valeur illisible : aucune
+    // valeur illisible : aucune
     return [];
   }
+}
+
+/** Les pages récentes du compte dans l'espace, la plus récente d'abord. */
+export function readRecents(userId: string, spaceId: string): string[] {
+  return readStored(userId, spaceId) ?? [];
 }
 
 /** La page vient d'être ouverte : elle passe en tête des pages récentes du compte. */
@@ -91,18 +105,26 @@ const NONE: PageNode[] = [];
 /**
  * Les pages récentes du compte dans l'espace que l'arbre `nodes` contient (`null` : pas encore
  * lu), cinq au plus, la plus récente d'abord. Suit les visites d'ici et des autres onglets.
+ *
+ * La page ouverte (`activeId`) est en tête dès le rendu qui l'ouvre, avant que sa visite ne
+ * s'écrive (l'effet d'`App` la suit) : la liste grandit dans le même rendu que l'arbre montre
+ * la page et fait défiler la barre jusqu'à elle, et rien ne la déplace après. Stockage refusé :
+ * rien n'est gardé, et rien n'est montré, pas même elle.
  */
 export function useRecentPages(
   userId: string,
   spaceId: string | null,
   nodes: PageNode[] | null,
+  activeId: string | null,
 ): PageNode[] {
   const seen = useSyncExternalStore(subscribe, () => version);
   // `seen` n'est lu que comme dépendance : les identifiants sont relus à chaque visite.
-  const ids = useMemo(
-    () => (spaceId === null ? [] : readRecents(userId, spaceId)),
-    [userId, spaceId, seen],
-  );
+  const ids = useMemo(() => {
+    if (spaceId === null) return [];
+    const stored = readStored(userId, spaceId);
+    if (stored === null || activeId === null) return stored ?? [];
+    return [activeId, ...stored.filter((id) => id !== activeId)];
+  }, [userId, spaceId, activeId, seen]);
   return useMemo(() => {
     if (nodes === null || ids.length === 0) return NONE;
     const byId = new Map(nodes.map((node) => [node.id, node]));

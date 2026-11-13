@@ -85,7 +85,7 @@ export function Sidebar({
   const member = space !== null && space.role !== "guest";
   // Les pages récentes du compte dans l'espace, filtrées par son arbre (R255).
   const { me } = useSession();
-  const recents = useRecentPages(me.user.id, space?.id ?? null, nodes);
+  const recents = useRecentPages(me.user.id, space?.id ?? null, nodes, activeId);
   // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
   const readFailure =
     readError === null
