@@ -6,6 +6,12 @@
 // la touche se reconnaît à son code de touche, 77, comme le fait le keymap de ProseMirror
 // (`w3c-keyname`). Un caractère tapé avec AltGr (Ctrl+Alt sous Windows) n'est jamais pris : sur
 // un clavier allemand, AltGr+M écrit « µ ».
+//
+// Sous une fenêtre modale (« Historique », une confirmation, la connexion), le reste de la page
+// est inerte : le raccourci n'y vaut rien, et la touche n'est pas avalée. C'est dit ici, dans la
+// reconnaissance, pour les deux éditeurs (le modifiable, `Editor.tsx`, et celui en lecture
+// seule, `BlockMarks.tsx`). Toutes les fenêtres de l'application s'ouvrent par `showModal` : une
+// `dialog` ouverte est une fenêtre modale.
 import { blockOfSelection } from "./dom";
 
 /** Ce que la reconnaissance lit d'un événement clavier (du DOM, ou de React). */
@@ -23,8 +29,14 @@ export type ShortcutEvent = {
 /** Le code de touche de « M ». */
 const KEY_M = 77;
 
+/** Une fenêtre modale est ouverte : le reste de la page est inerte. */
+function underModal(): boolean {
+  return globalThis.document?.querySelector("dialog[open]") != null;
+}
+
 export function isCommentShortcut(event: ShortcutEvent): boolean {
   if (!event.altKey || !(event.ctrlKey || event.metaKey)) return false;
+  if (underModal()) return false;
   if (event.getModifierState("AltGraph")) return false;
   const typed = event.key.length === 1 ? event.key.toLowerCase() : "";
   if (typed === "m") return true;

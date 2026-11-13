@@ -304,3 +304,55 @@ test("showing_a_hidden_block_draws_nothing", async () => {
   );
   expect(host.querySelector(".mm-block-glow")).toBeNull();
 });
+
+test("ctrl_alt_m_under_a_modal_window_does_nothing_and_keeps_the_key", async () => {
+  // Éditeur en lecture seule, sélection restée dans la page, fenêtre « Historique » ouverte.
+  const { frame } = editorWith([block("un", "Premier")]);
+  frame.append(host);
+  const onComment = vi.fn();
+  await act(async () =>
+    root.render(
+      <BlockMarks
+        frame={{ current: frame }}
+        session={fakeSession()}
+        blockIds={[]}
+        marks={new Map()}
+        onOrder={() => {}}
+        onOpenThread={() => {}}
+        highlight={null}
+        onComment={onComment}
+      />,
+    ),
+  );
+  const text = frame.querySelector(".bn-block-content")!.firstChild!;
+  const range = document.createRange();
+  range.setStart(text, 1);
+  range.setEnd(text, 3);
+  document.getSelection()!.removeAllRanges();
+  document.getSelection()!.addRange(range);
+  const press = (target: EventTarget) => {
+    const event = new KeyboardEvent("keydown", {
+      key: "m",
+      keyCode: 77,
+      ctrlKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    target.dispatchEvent(event);
+    return event;
+  };
+  // Sans fenêtre, le raccourci commente le bloc de la sélection.
+  expect(press(document.body).defaultPrevented).toBe(true);
+  expect(onComment).toHaveBeenCalledExactlyOnceWith("un");
+  onComment.mockClear();
+  const modal = document.createElement("dialog");
+  modal.setAttribute("open", "");
+  const inside = document.createElement("button");
+  modal.append(inside);
+  document.body.append(modal);
+  for (const target of [inside, document.body]) {
+    expect(press(target).defaultPrevented).toBe(false);
+  }
+  expect(onComment).not.toHaveBeenCalled();
+});

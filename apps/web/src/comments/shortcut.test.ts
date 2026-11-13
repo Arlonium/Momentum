@@ -113,3 +113,24 @@ test("the_shortcut_is_silent_in_a_field_outside_the_editor", () => {
   }
   document.body.replaceChildren();
 });
+
+// Sous une fenêtre modale (« Historique », une confirmation, la connexion), le reste de la page
+// est inerte : le raccourci n'y fait rien et n'avale pas la touche, dans l'éditeur en lecture
+// seule (la sélection du document peut y être restée) comme dans l'éditeur modifiable.
+
+test("the_shortcut_is_silent_under_a_modal_window", () => {
+  const { editor, content, selection } = editorScene();
+  const modal = document.createElement("dialog");
+  modal.setAttribute("open", "");
+  document.body.append(modal);
+  const event = key({ key: "m", keyCode: 77, ctrlKey: true, altKey: true });
+  // L'éditeur modifiable ne lit que la reconnaissance ; l'éditeur en lecture seule, le bloc visé.
+  expect(isCommentShortcut(event)).toBe(false);
+  expect(commentedBlock(shortcut(content), editor, selection)).toBeNull();
+  expect(commentedBlock(shortcut(document.body), editor, selection)).toBeNull();
+  // Fermée, la fenêtre ne compte plus.
+  modal.removeAttribute("open");
+  expect(isCommentShortcut(event)).toBe(true);
+  expect(commentedBlock(shortcut(content), editor, selection)).toBe("bloc");
+  document.body.replaceChildren();
+});
