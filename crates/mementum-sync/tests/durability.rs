@@ -255,7 +255,7 @@ async fn failed_compaction_keeps_the_journal_and_retries_later() {
 #[tokio::test]
 async fn page_without_document_gets_one_on_first_load() {
     // Un nœud dont `create_page_doc` n'a pas abouti (Ruling R28).
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tmp::TestDir::new();
     let store = Store::open(&dir.path().join("mementum.db")).await.unwrap();
     let page = new_page(&store).await;
     let hub = Hub::new(store.clone(), SyncConfig::default());

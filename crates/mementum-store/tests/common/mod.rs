@@ -2,6 +2,8 @@
 //! connexion annexe (comptes de test, pannes simulées, lectures de contrôle).
 #![allow(dead_code)]
 
+pub mod tmp;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,7 +11,7 @@ use mementum_store::{NewNode, NewUser, NodeKind, Sibling, Space, Store, User};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
-use tempfile::TempDir;
+use tmp::TestDir;
 use uuid::Uuid;
 
 /// Les migrations d'une base du lot 2.
@@ -60,14 +62,14 @@ pub async fn database_with(db: &Path, files: &[&str]) -> SqlitePool {
 
 /// Une base neuve dans un dossier temporaire, avec un espace sans membre.
 pub struct Fixture {
-    pub dir: TempDir,
+    pub dir: TestDir,
     pub db: PathBuf,
     pub store: Store,
     pub space: Space,
 }
 
 pub async fn fresh() -> Fixture {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = TestDir::new();
     let db = dir.path().join("sous-dossier").join("m.db");
     let store = Store::open(&db).await.unwrap();
     let space = store.create_space("Essais", None).await.unwrap();

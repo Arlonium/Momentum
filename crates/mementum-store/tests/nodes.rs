@@ -1809,7 +1809,7 @@ async fn create_node_writes_grants_and_doc_atomically() {
 
 #[tokio::test]
 async fn reopen_keeps_everything() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = common::tmp::TestDir::new();
     let path = dir.path().join("m.db");
     let store = Store::open(&path).await.unwrap();
     let space = store.create_space("Essais", None).await.unwrap();

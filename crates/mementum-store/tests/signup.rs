@@ -8,12 +8,12 @@ mod common;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use common::tmp::TestDir;
 use common::{break_table, fresh, int, page, repair};
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_store::{
     Expected, InvitationGrant, NewInvitation, NewSession, NewUser, Store, StoreError,
 };
-use tempfile::TempDir;
 use uuid::Uuid;
 
 const DAY: i64 = 86_400_000;
@@ -52,8 +52,8 @@ fn space_of(tag: &str) -> String {
 }
 
 /// Une base neuve, sans aucun espace.
-async fn empty() -> (TempDir, PathBuf, Store) {
-    let dir = tempfile::tempdir().unwrap();
+async fn empty() -> (TestDir, PathBuf, Store) {
+    let dir = TestDir::new();
     let db = dir.path().join("m.db");
     let store = Store::open(&db).await.unwrap();
     (dir, db, store)

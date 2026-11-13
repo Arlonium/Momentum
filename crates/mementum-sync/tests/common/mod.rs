@@ -4,6 +4,9 @@
 
 pub mod limit;
 pub mod raw;
+/// Le dossier temporaire d'un test, supprimé après lui : l'aide des tests de `mementum-store`.
+#[path = "../../../mementum-store/tests/common/tmp.rs"]
+pub mod tmp;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,7 +18,7 @@ use mementum_schema::SCHEMA_VERSION;
 use mementum_store::{NewNode, NodeKind, Store};
 use mementum_sync::{ConnInfo, Hub, SyncConfig};
 use sqlx::Row;
-use tempfile::TempDir;
+use tmp::TestDir;
 use uuid::Uuid;
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, Transact, Update, XmlElementRef, XmlFragment, XmlOut};
@@ -28,7 +31,7 @@ pub const WAIT: Duration = Duration::from_secs(10);
 /// Une base dans un dossier temporaire, une page créée (avec son document),
 /// un hub et un serveur de test.
 pub struct Fixture {
-    pub dir: TempDir,
+    pub dir: TestDir,
     pub db: PathBuf,
     pub store: Store,
     pub hub: Arc<Hub>,
@@ -38,7 +41,7 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn new(cfg: SyncConfig) -> Fixture {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TestDir::new();
         let db = dir.path().join("mementum.db");
         let store = Store::open(&db).await.unwrap();
         let page = new_page(&store).await;

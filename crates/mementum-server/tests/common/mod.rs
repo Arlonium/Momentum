@@ -18,6 +18,9 @@
 #![allow(dead_code)]
 
 pub mod sync;
+/// Le dossier temporaire d'un test, supprimé après lui : l'aide des tests de `mementum-store`.
+#[path = "../../../mementum-store/tests/common/tmp.rs"]
+pub mod tmp;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -32,7 +35,7 @@ use mementum_server::{Config, PageNode, Tree};
 use mementum_store::{NewNode, NodeKind, Store};
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
-use tempfile::TempDir;
+use tmp::TestDir;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -46,7 +49,7 @@ pub const SESSION_COOKIE: &str = "mementum_session";
 pub const PASSWORD: &str = "mot-de-passe-de-test";
 
 pub struct TestApp {
-    _dir: TempDir,
+    _dir: TestDir,
     pub cfg: Config,
     pub router: Router,
 }
@@ -138,7 +141,7 @@ impl TestApp {
     /// par défaut (boucle locale, inscriptions sur invitation) retouchée par
     /// `adjust`.
     pub async fn with_config(adjust: impl FnOnce(&mut Config)) -> TestApp {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TestDir::new();
         let mut cfg = Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             // Un dossier qui n'existe pas encore : `app` le crée.
@@ -157,7 +160,7 @@ impl TestApp {
     /// Une application démarrée sur une base du lot 1 ([`lot1_database`]),
     /// que son ouverture migre. Rend aussi ce que la base contenait.
     pub async fn on_lot1_database() -> (TestApp, Lot1) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TestDir::new();
         let cfg = Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.path().join("donnees"),

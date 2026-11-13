@@ -153,7 +153,7 @@ impl Scene {
     /// Les octets du navigateur : la page de départ, écrite telle quelle comme document de la
     /// page, le glisser de Mona, et la frappe de Tom `typed`.
     async fn browser(typed: &[u8]) -> Scene {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tmp::TestDir::new();
         let db = dir.path().join("mementum.db");
         let store = Store::open(&db).await.unwrap();
         let space = store.create_space("Essais", None).await.unwrap();
