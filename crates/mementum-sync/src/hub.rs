@@ -111,6 +111,8 @@ pub struct Hub {
     generations: AtomicU64,
     /// Le serveur s'arrête ([`Hub::shutdown`]) : plus aucun acteur ne démarre.
     closed: AtomicBool,
+    /// Les listes de blocs demandées ([`Hub::read_blocks`]) depuis le démarrage.
+    block_reads: AtomicU64,
     /// Le hub lui-même, sans le garder en vie : les acteurs s'en servent pour
     /// quitter le registre.
     me: Weak<Hub>,
@@ -129,6 +131,7 @@ impl Hub {
             actors: Mutex::new(HashMap::new()),
             generations: AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            block_reads: AtomicU64::new(0),
             me: me.clone(),
         })
     }
@@ -163,7 +166,15 @@ impl Hub {
 
     /// Les blocs de la page, lus par son acteur.
     pub async fn read_blocks(&self, node_id: Uuid) -> Result<Vec<Block>, SyncError> {
+        self.block_reads.fetch_add(1, Ordering::Relaxed);
         self.call(node_id, |reply| Command::Read { reply }).await?
+    }
+
+    /// Combien de listes de blocs ont été demandées à un acteur ([`Hub::read_blocks`]) depuis
+    /// le démarrage. Bâtir celle d'une page de 10 000 blocs occupe son acteur une vingtaine de
+    /// millisecondes : ce compte garde les routes qui ne doivent pas la demander (Ruling R353).
+    pub fn block_reads(&self) -> u64 {
+        self.block_reads.load(Ordering::Relaxed)
     }
 
     /// Vrai si un bloc de la page, à toute profondeur, porte l'identifiant `id` : ce que dirait

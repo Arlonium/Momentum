@@ -555,6 +555,65 @@ mod tests {
         assert_eq!(state.store.comment_threads(page).await.unwrap().len(), 1);
     }
 
+    /// Ruling R353 (constat m1 de la relecture de la piste S) : ouvrir un fil sur un bloc
+    /// demande à l'acteur si le bloc existe (`Hub::has_block`, Ruling R206), sans lui faire bâtir
+    /// la liste des blocs de la page : `Hub::block_reads` ne bouge pas, que le bloc existe ou non.
+    /// Remettre la route sur `Hub::read_blocks` fait rougir ce test.
+    #[tokio::test]
+    async fn a_comment_on_a_block_does_not_read_the_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let space = state
+            .store
+            .create_space("Équipe", Some(olga.id))
+            .await
+            .unwrap();
+        let page = state
+            .store
+            .create_node(NewNode {
+                space_id: space.id,
+                parent_id: None,
+                after: None,
+                kind: NodeKind::Page,
+                title: "P".to_string(),
+                created_by: Some(olga.id),
+                grants: vec![Grant {
+                    subject: Subject::Members,
+                    level: Level::Full,
+                }],
+                doc: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let blocks = mementum_md::parse("Un\n\nDeux\n").unwrap();
+        state
+            .hub
+            .write_blocks(page, blocks, Some(olga.id))
+            .await
+            .unwrap();
+        let block = state.hub.read_blocks(page).await.unwrap()[1].id.clone();
+        let reads = state.hub.block_reads();
+        let new = |block_id: &str| NewThread {
+            block_id: Some(block_id.to_string()),
+            body: "Sur un bloc".to_string(),
+        };
+
+        let opened = open_thread(&state, &olga, page, new(&block)).await.unwrap();
+        assert_eq!(opened.block_id.as_deref(), Some(block.as_str()));
+        assert!(
+            open_thread(&state, &olga, page, new("inexistant"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.hub.block_reads(),
+            reads,
+            "la liste des blocs a été bâtie"
+        );
+    }
+
     /// Les bornes du texte se comptent en caractères, espaces de bord retirées ; celles d'un
     /// emoji en octets.
     #[test]
