@@ -81,6 +81,8 @@ function pageEditor(p: Page): Locator {
 
 /** Ouvre l'historique par le menu « … », et attend que la liste soit lue. */
 async function openHistory(p: Page): Promise<Locator> {
+  // Un menu sans entrée n'est pas là : sans cette attente, le clic attendrait le délai du test.
+  await expect(menuButton(p), "le menu « … » de la page, qui porte « Historique »").toBeVisible();
   await menuButton(p).click();
   await p.getByRole("menuitem", { name: "Historique" }).click();
   const dialog = p.getByRole("dialog", { name: "Historique" });
