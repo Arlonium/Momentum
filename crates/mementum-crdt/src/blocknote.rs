@@ -122,6 +122,140 @@ fn read_nodes<T: ReadTxn>(
     }
 }
 
+/// Vrai si un bloc que [`read_page`] lirait porte l'identifiant `id` (constat S7, Ruling
+/// R206) : le même parcours que [`read_nodes`], [`column_list`] et [`flatten`], qui ne lit que
+/// les identifiants et la forme de l'arbre, sans le texte ni les props d'aucun bloc. Un fil de
+/// commentaires sur un bloc le demande à chaque ouverture : bâtir la liste des blocs d'une page
+/// de 10 000 blocs occupait son acteur environ 39 ms, pendant lesquelles ses frappes attendaient.
+pub(crate) fn page_has_block<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef, id: &str) -> bool {
+    !id.is_empty()
+        && fragment.children(txn).any(|child| {
+            matches!(child, XmlOut::Element(group)
+                if group.tag().as_ref() == BLOCK_GROUP && nodes_have(txn, &group, 1, false, id))
+        })
+}
+
+/// [`read_nodes`], pour les identifiants seulement.
+fn nodes_have<T: ReadTxn>(
+    txn: &T,
+    parent: &XmlElementRef,
+    level: usize,
+    in_column: bool,
+    id: &str,
+) -> bool {
+    elements(txn, parent)
+        .iter()
+        .any(|element| match element.tag().as_ref() {
+            BLOCK_GROUP => false,
+            COLUMN => nodes_have(txn, element, level, in_column, id),
+            COLUMN_LIST if is_column_list(txn, element, level, in_column) => {
+                id_is(txn, element, id)
+                    || elements(txn, element).iter().any(|column| {
+                        id_is(txn, column, id) || nodes_have(txn, column, level + 2, true, id)
+                    })
+            }
+            COLUMN_LIST => nodes_have(txn, element, level, in_column, id),
+            BLOCK_CONTAINER => {
+                id_is(txn, element, id)
+                    || container_group(txn, element).is_some_and(|group| {
+                        if level < MAX_DEPTH {
+                            nodes_have(txn, &group, level + 1, false, id)
+                        } else {
+                            flattened_have(txn, &group, id)
+                        }
+                    })
+            }
+            // Nœud étranger hors `blockContainer` : son propre identifiant.
+            _ => id_is(txn, element, id),
+        })
+}
+
+/// [`column_list`] rendrait-il une liste ? Ses conditions, sans lire ses blocs.
+fn is_column_list<T: ReadTxn>(
+    txn: &T,
+    list: &XmlElementRef,
+    level: usize,
+    in_column: bool,
+) -> bool {
+    if in_column || level + 2 > MAX_DEPTH {
+        return false;
+    }
+    let columns = elements(txn, list);
+    columns.len() >= 2
+        && columns.iter().all(|column| {
+            column.tag().as_ref() == COLUMN && yields_blocks(txn, column, level + 2, true)
+        })
+}
+
+/// [`read_nodes`] rendrait-il au moins un bloc pour les enfants de `parent` ?
+fn yields_blocks<T: ReadTxn>(
+    txn: &T,
+    parent: &XmlElementRef,
+    level: usize,
+    in_column: bool,
+) -> bool {
+    elements(txn, parent)
+        .iter()
+        .any(|element| match element.tag().as_ref() {
+            BLOCK_GROUP => false,
+            // Une liste valide est un bloc ; défaite, elle rend ce que rendent ses colonnes.
+            COLUMN | COLUMN_LIST => {
+                (element.tag().as_ref() == COLUMN_LIST
+                    && is_column_list(txn, element, level, in_column))
+                    || yields_blocks(txn, element, level, in_column)
+            }
+            _ => true,
+        })
+}
+
+/// Le `blockGroup` qui porte les enfants d'un `blockContainer`, comme [`read_container`] le
+/// trouve.
+fn container_group<T: ReadTxn>(txn: &T, container: &XmlElementRef) -> Option<XmlElementRef> {
+    container.children(txn).find_map(|child| match child {
+        XmlOut::Element(element) if element.tag().as_ref() == BLOCK_GROUP => Some(element),
+        _ => None,
+    })
+}
+
+/// L'attribut `id` de l'élément vaut-il `id`, lu comme [`attr_string`] le lit, sans allouer pour
+/// le cas ordinaire (une chaîne) ?
+fn id_is<T: ReadTxn>(txn: &T, element: &XmlElementRef, id: &str) -> bool {
+    match element.get_attribute(txn, "id") {
+        Some(Out::Any(Any::String(s))) => s.as_ref() == id,
+        None => false,
+        Some(_) => attr_string(txn, element, "id") == id,
+    }
+}
+
+/// [`flatten`], pour les identifiants seulement.
+fn flattened_have<T: ReadTxn>(txn: &T, source: &XmlElementRef, id: &str) -> bool {
+    let mut stack = vec![elements(txn, source).into_iter()];
+    while let Some(top) = stack.last_mut() {
+        let Some(element) = top.next() else {
+            stack.pop();
+            continue;
+        };
+        match element.tag().as_ref() {
+            BLOCK_GROUP => {}
+            COLUMN | COLUMN_LIST => stack.push(elements(txn, &element).into_iter()),
+            BLOCK_CONTAINER => {
+                if id_is(txn, &element, id) {
+                    return true;
+                }
+                if let Some(group) = container_group(txn, &element) {
+                    stack.push(elements(txn, &group).into_iter());
+                }
+            }
+            _ => {
+                if id_is(txn, &element, id) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Une liste de colonnes, si elle respecte le schéma de BlockNote.
 fn column_list<T: ReadTxn>(
     txn: &T,

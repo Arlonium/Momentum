@@ -155,6 +155,11 @@ pub(crate) enum Command {
     Read {
         reply: oneshot::Sender<Result<Vec<Block>, SyncError>>,
     },
+    /// Dire si un bloc porte cet identifiant, sans lire la liste des blocs (Ruling R206).
+    HasBlock {
+        id: String,
+        reply: oneshot::Sender<Result<bool, SyncError>>,
+    },
     /// Remplacer les blocs (écriture serveur), au nom du compte `actor`.
     Write {
         blocks: Vec<Block>,
@@ -199,6 +204,9 @@ impl Command {
                 let _ = reply.send(Err(error));
             }
             Command::Read { reply } => {
+                let _ = reply.send(Err(error));
+            }
+            Command::HasBlock { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Command::Messages { reply, .. } => {
@@ -705,6 +713,9 @@ impl Actor {
             }
             Command::Read { reply } => {
                 let _ = reply.send(Ok(self.page.read_blocks()));
+            }
+            Command::HasBlock { id, reply } => {
+                let _ = reply.send(Ok(self.page.has_block(&id)));
             }
             Command::Write {
                 blocks,

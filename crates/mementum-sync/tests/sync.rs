@@ -1439,3 +1439,22 @@ async fn held_update_refused_on_retry_closes_only_its_connection() {
     let newcomer = f.client().await;
     assert_eq!(text(&newcomer.blocks()), "Alpha\nBêta deux");
 }
+
+/// Ruling R206 : le hub dit si un bloc existe, à toute profondeur, comme une recherche dans
+/// `read_blocks`, sans que l'acteur bâtisse la liste des blocs ; une page inconnue répond
+/// `NotFound`, comme `read_blocks`.
+#[tokio::test]
+async fn has_block_answers_like_read_blocks() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("- Parent\n  - Enfant\n\nAutre\n").await;
+    let blocks = f.hub.read_blocks(f.page).await.unwrap();
+    let child = blocks[0].children[0].id.clone();
+    assert!(f.hub.has_block(f.page, &blocks[0].id).await.unwrap());
+    assert!(f.hub.has_block(f.page, &child).await.unwrap(), "imbriqué");
+    assert!(!f.hub.has_block(f.page, "absent").await.unwrap());
+    assert!(!f.hub.has_block(f.page, "").await.unwrap());
+    assert!(matches!(
+        f.hub.has_block(Uuid::now_v7(), &child).await,
+        Err(SyncError::NotFound)
+    ));
+}

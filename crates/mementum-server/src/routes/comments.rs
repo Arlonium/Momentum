@@ -59,7 +59,6 @@ use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use mementum_acl::{Action, NodeAccess};
-use mementum_md::Block;
 use mementum_store::StoreError;
 use mementum_sync::{PageEvent, display_name};
 use uuid::Uuid;
@@ -108,10 +107,11 @@ pub(crate) async fn open(
 
 /// La suite de [`open`], une fois le premier contrôle passé et le corps lu.
 ///
-/// Un fil sur un bloc suit l'ordre de `PUT /mmd` (Ruling R89) : la page est chargée (sa lecture
-/// la charge), les droits relus, puis le bloc cherché dans ses blocs, juste avant d'écrire. Un
-/// droit retiré pendant le chargement d'une page froide n'écrit donc plus, et n'apprend rien de
-/// ses blocs. Sans bloc, la page n'est pas chargée : le fil ne touche pas au document.
+/// Un fil sur un bloc suit l'ordre de `PUT /mmd` (Ruling R89) : la page est chargée, les droits
+/// relus, puis le bloc cherché dans son document par son acteur (`Hub::has_block`, Ruling R206,
+/// sans bâtir la liste des blocs), juste avant d'écrire. Un droit retiré pendant le chargement
+/// d'une page froide n'écrit donc plus, et n'apprend rien de ses blocs. Sans bloc, la page n'est
+/// pas chargée : le fil ne touche pas au document.
 async fn open_thread(
     state: &AppState,
     user: &AuthUser,
@@ -120,9 +120,10 @@ async fn open_thread(
 ) -> Result<Thread, ApiError> {
     let text = comment_body(&body.body)?;
     if let Some(block) = &body.block_id {
-        let blocks = state.hub.read_blocks(id).await?;
+        state.hub.load_page(id).await?;
         state.node_access(user, id, Action::Comment).await?;
-        if block.is_empty() || !has_block(&blocks, block) {
+        // Ruling R206 : l'acteur dit si le bloc existe, sans bâtir la liste des blocs.
+        if !state.hub.has_block(id, block).await? {
             return Err(ApiError::invalid_block());
         }
     }
@@ -399,22 +400,6 @@ fn emoji(raw: &str) -> Result<&str, ApiError> {
         return Err(ApiError::invalid_emoji("un emoji ne porte aucune espace"));
     }
     Ok(raw)
-}
-
-/// Le bloc `id` est-il parmi `blocks`, à n'importe quelle profondeur ?
-fn has_block(blocks: &[Block], id: &str) -> bool {
-    let mut stack = vec![blocks.iter()];
-    while let Some(level) = stack.last_mut() {
-        let Some(block) = level.next() else {
-            stack.pop();
-            continue;
-        };
-        if block.id == id {
-            return true;
-        }
-        stack.push(block.children.iter());
-    }
-    false
 }
 
 /// La page et le fil d'un chemin `…/pages/{id}/comments/{threadId}…`. Une page illisible

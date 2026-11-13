@@ -13,7 +13,7 @@ use yrs::{
     TransactionMut, Update, XmlElementPrelim, XmlElementRef, XmlFragment, XmlFragmentRef, XmlOut,
 };
 
-use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, read_page, write_nodes};
+use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
 use crate::guard::{Pending, Shape, missing, touched};
 use crate::kept_ids::keep_ids;
 use crate::structure::{Slot, check_blocks};
@@ -289,6 +289,13 @@ impl PageDoc {
     /// écrit toujours en MMD relisible (Ruling R10).
     pub fn read_blocks(&self) -> Vec<Block> {
         read_page(&self.doc.transact(), &self.fragment)
+    }
+
+    /// Vrai si un bloc de la page porte l'identifiant `id`, à toute profondeur : ce que dirait
+    /// une recherche dans [`PageDoc::read_blocks`], sans bâtir la liste des blocs ni lire leur
+    /// texte (Ruling R206). Un identifiant vide n'est jamais un bloc.
+    pub fn has_block(&self, id: &str) -> bool {
+        page_has_block(&self.doc.transact(), &self.fragment, id)
     }
 
     /// Remplace tout le contenu par `blocks` (normalisés au passage), en

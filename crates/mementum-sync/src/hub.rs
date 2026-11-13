@@ -166,6 +166,18 @@ impl Hub {
         self.call(node_id, |reply| Command::Read { reply }).await?
     }
 
+    /// Vrai si un bloc de la page, à toute profondeur, porte l'identifiant `id` : ce que dirait
+    /// une recherche dans [`Hub::read_blocks`], sans que l'acteur bâtisse la liste des blocs
+    /// (Ruling R206). Ouvrir un fil de commentaires sur un bloc le demande ; relire toute une
+    /// page de 10 000 blocs occupait son acteur environ 39 ms, et ses frappes attendaient.
+    pub async fn has_block(&self, node_id: Uuid, id: &str) -> Result<bool, SyncError> {
+        self.call(node_id, |reply| Command::HasBlock {
+            id: id.to_string(),
+            reply,
+        })
+        .await?
+    }
+
     /// Remplace les blocs de la page, au nom de `actor` (le compte qui demande
     /// l'écriture ; `None` : inconnu, ou le serveur). L'écriture est persistée,
     /// puis diffusée à toutes les connexions.
