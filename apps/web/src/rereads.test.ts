@@ -7,6 +7,8 @@ import {
   REREAD_DEBOUNCE_MS,
   REREAD_MAX_WAIT_MS,
   scheduleRereads,
+  SESSION_LOST,
+  type ReadOutcome,
   type Rereads,
 } from "./rereads";
 import { deferred, type Deferred } from "./test/hooks";
@@ -153,3 +155,112 @@ async function settled(index: number, again?: boolean): Promise<void> {
   reads[index].resolve(again);
   await advance(0);
 }
+
+// Une lecture qui trouve la session perdue (`401`) le dit (`SESSION_LOST`) : elle est refaite
+// quand le compte revient (`afterLogin`), même si rien d'autre ne la redemande (la connexion de
+// synchro, restée ouverte, ne revient pas). Pendant l'attente, rien ne part : les demandes sont
+// servies par cette lecture-là. Rien après l'arrêt, même au retour du compte.
+
+/** Les lectures d'un planificateur qui sait attendre le compte, et ce compte. */
+function withAccount() {
+  const answers: Deferred<ReadOutcome>[] = [];
+  const waiting: { resume: () => void; give: (error: unknown) => void }[] = [];
+  const afterLogin = vi.fn(
+    () => new Promise<void>((resume, give) => waiting.push({ resume, give })),
+  );
+  const scheduled = scheduleRereads(() => {
+    const answer = deferred<ReadOutcome>();
+    answers.push(answer);
+    return answer.promise;
+  }, afterLogin);
+  return {
+    answers,
+    afterLogin,
+    scheduled,
+    /** Le compte revient. */
+    back: async () => {
+      for (const { resume } of waiting.splice(0)) resume();
+      await advance(0);
+    },
+    /** L'attente échoue (ce que `useAfterLogin` ne fait jamais). */
+    giveUp: async () => {
+      for (const { give } of waiting.splice(0)) give(new Error("abandon"));
+      await advance(0);
+    },
+  };
+}
+
+test("a_read_that_lost_the_session_is_done_again_once_the_account_is_back", async () => {
+  const { answers, afterLogin, scheduled, back } = withAccount();
+  scheduled.request(true);
+  await advance(0);
+  answers[0].resolve(SESSION_LOST);
+  await advance(60_000);
+  expect(answers).toHaveLength(1);
+  expect(afterLogin).toHaveBeenCalledTimes(1);
+  await back();
+  expect(answers).toHaveLength(2);
+  answers[1].resolve();
+  await advance(REREAD_MAX_WAIT_MS * 2);
+  expect(answers).toHaveLength(2);
+  scheduled.stop();
+});
+
+test("requests_during_the_wait_for_the_account_are_served_by_one_read", async () => {
+  const { answers, afterLogin, scheduled, back } = withAccount();
+  scheduled.request(true);
+  await advance(0);
+  answers[0].resolve(SESSION_LOST);
+  await advance(0);
+  scheduled.request(false);
+  scheduled.request(true);
+  await advance(REREAD_MAX_WAIT_MS * 2);
+  expect(answers).toHaveLength(1);
+  // Une seule attente du compte, pas une par demande.
+  expect(afterLogin).toHaveBeenCalledTimes(1);
+  await back();
+  expect(answers).toHaveLength(2);
+  answers[1].resolve();
+  await advance(REREAD_MAX_WAIT_MS * 2);
+  expect(answers).toHaveLength(2);
+  scheduled.stop();
+});
+
+test("nothing_is_read_after_stop_even_when_the_account_comes_back", async () => {
+  const { answers, scheduled, back } = withAccount();
+  scheduled.request(true);
+  await advance(0);
+  answers[0].resolve(SESSION_LOST);
+  await advance(0);
+  scheduled.stop();
+  await back();
+  await advance(REREAD_MAX_WAIT_MS * 2);
+  expect(answers).toHaveLength(1);
+});
+
+test("a_wait_for_the_account_that_fails_reads_nothing_and_ends", async () => {
+  const { answers, scheduled, giveUp } = withAccount();
+  scheduled.request(true);
+  await advance(0);
+  answers[0].resolve(SESSION_LOST);
+  await advance(0);
+  await giveUp();
+  await advance(60_000);
+  expect(answers).toHaveLength(1);
+  // L'attente est finie : la demande suivante relit.
+  scheduled.request(true);
+  await advance(0);
+  expect(answers).toHaveLength(2);
+  scheduled.stop();
+});
+
+test("without_after_login_a_lost_session_waits_for_the_next_request", async () => {
+  rereads.request(true);
+  await advance(0);
+  reads[0].resolve(SESSION_LOST as unknown as boolean);
+  await advance(60_000);
+  expect(reads).toHaveLength(1);
+  rereads.request(true);
+  await advance(0);
+  expect(reads).toHaveLength(2);
+});

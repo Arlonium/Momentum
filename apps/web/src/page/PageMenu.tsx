@@ -41,11 +41,13 @@ type Props = {
   readOnly: boolean;
   /** Le compte de la session. */
   selfId: string;
+  /** Tenue quand le compte revient, après une session perdue (`useAfterLogin`). */
+  afterLogin?: () => Promise<void>;
   /** Le serveur a refusé une action du menu : la page est à relire. */
   onRefused: () => void;
 };
 
-export function PageMenu({ node, session, readOnly, selfId, onRefused }: Props) {
+export function PageMenu({ node, session, readOnly, selfId, afterLogin, onRefused }: Props) {
   /** Le bouton du menu ouvert ; `null` : fermé. */
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const [history, setHistory] = useState(false);
@@ -122,6 +124,7 @@ export function PageMenu({ node, session, readOnly, selfId, onRefused }: Props) 
               session={session}
               readOnly={readOnly}
               selfId={selfId}
+              afterLogin={afterLogin}
               onRefused={onRefused}
               onRestored={announceRestored}
               onClose={closeHistory}

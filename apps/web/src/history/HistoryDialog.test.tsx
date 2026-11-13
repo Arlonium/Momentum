@@ -11,7 +11,7 @@ import { ApiError, getVersions, restoreVersion } from "../api";
 import type { PageEvent, RosterUser, SyncStatus } from "../editor/collab";
 import { author } from "../test/comments";
 import { deferred } from "../test/hooks";
-import { page } from "../test/pages";
+import { page, unauthenticated } from "../test/pages";
 import { HistoryDialog } from "./HistoryDialog";
 
 vi.mock("../api", async (original) => ({
@@ -460,4 +460,31 @@ test("names_from_elsewhere_are_isolated_and_an_absurd_date_breaks_nothing", asyn
   expect(item.querySelector(".mm-history-authors")?.getAttribute("title")).toBe(
     "⁨‮evE⁩, ⁨Zoé⁩",
   );
+});
+
+test("the_list_is_read_again_once_the_account_is_back", async () => {
+  // La session est échue, la synchro reste ouverte : la liste répond `401`, puis le compte revient.
+  const waiting: (() => void)[] = [];
+  const afterLogin = () => new Promise<void>((resume) => waiting.push(resume));
+  vi.mocked(getVersions).mockRejectedValueOnce(unauthenticated()).mockResolvedValue([v1]);
+  await act(async () =>
+    root.render(
+      <HistoryDialog
+        node={page("p")}
+        session={fakeSession()}
+        readOnly={false}
+        selfId="alice"
+        afterLogin={afterLogin}
+        onRefused={onRefused}
+        onRestored={onRestored}
+        onClose={onClose}
+      />,
+    ),
+  );
+  await until(() => waiting.length === 1, "l'attente du compte");
+  expect(list().getAttribute("aria-busy")).toBe("true");
+  await act(async () => waiting.splice(0).forEach((resume) => resume()));
+  await until(() => list().getAttribute("aria-busy") === "false", "la liste relue");
+  expect(items()).toHaveLength(2);
+  expect(vi.mocked(getVersions)).toHaveBeenCalledTimes(2);
 });

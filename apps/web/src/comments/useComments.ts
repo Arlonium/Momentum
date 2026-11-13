@@ -18,8 +18,10 @@
 // lecture partie avant une écriture d'ici qui a abouti peut dater d'avant elle ; sa réponse est
 // laissée, et la lecture refaite. Une lecture qui échoue garde ce qui était affiché, dit
 // pourquoi, et ne se refait pas d'elle-même : la prochaine trame, le retour de la connexion ou
-// « Réessayer » la refont. Tout est lié à la page : rien ne passe d'une page à l'autre, et plus
-// rien n'est appelé après le démontage.
+// « Réessayer » la refont. Une lecture qui trouve la session perdue (`401`) est refaite au retour
+// du compte (`afterLogin`), même si la connexion de synchro est restée ouverte. Tout est lié à la
+// page : rien ne passe d'une page à l'autre, et plus rien n'est appelé après le démontage, ni au
+// retour d'un compte attendu avant lui.
 import type { Comment, Thread } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -34,7 +36,13 @@ import {
   setReaction,
 } from "../api";
 import type { CollabSession } from "../editor/collab";
-import { REREAD_DEBOUNCE_MS, REREAD_MAX_WAIT_MS, scheduleRereads } from "../rereads";
+import {
+  REREAD_DEBOUNCE_MS,
+  REREAD_MAX_WAIT_MS,
+  scheduleRereads,
+  SESSION_LOST,
+  waitForAccount,
+} from "../rereads";
 import { messageOf } from "../session/forms";
 
 /** Plusieurs trames qui se suivent ne font qu'une relecture, cette durée après la dernière. */
@@ -73,6 +81,11 @@ type Options = {
    * l'appelant, qui l'affiche telle quelle.
    */
   onRefused?: (error: ApiError) => void;
+  /**
+   * Tenue quand le compte revient, après une session perdue (`useAfterLogin`) : les fils sont
+   * alors relus. Sans elle, une lecture refusée par `401` attend la trame suivante.
+   */
+  afterLogin?: () => Promise<void>;
 };
 
 type Loaded = {
@@ -133,18 +146,17 @@ export function useComments(
         setLoaded({ pageId, threads, state: "ready", error: null });
       } catch (e) {
         if (rereads.stopped) return;
-        // Session perdue : la connexion est demandée par-dessus la page (`api.ts`), et la
-        // connexion de synchro qui revient ensuite fait relire.
-        if (!isSessionLost(e)) {
-          setLoaded((current) => ({
-            pageId,
-            threads: current.pageId === pageId ? current.threads : null,
-            state: "failed",
-            error: messageOf(e),
-          }));
-        }
+        // Session perdue : la connexion est demandée par-dessus la page (`api.ts`), et les fils
+        // sont relus au retour du compte.
+        if (isSessionLost(e)) return SESSION_LOST;
+        setLoaded((current) => ({
+          pageId,
+          threads: current.pageId === pageId ? current.threads : null,
+          state: "failed",
+          error: messageOf(e),
+        }));
       }
-    });
+    }, waitForAccount(callbacks));
     request.current = rereads.request;
 
     return () => {

@@ -17,7 +17,7 @@ import {
 import type { PageEvent, SyncStatus } from "../editor/collab";
 import { author, message, thread } from "../test/comments";
 import { deferred, renderHook, settle, type Deferred } from "../test/hooks";
-import { unreachable } from "../test/pages";
+import { unauthenticated, unreachable } from "../test/pages";
 import { COMMENTS_DEBOUNCE_MS, COMMENTS_MAX_WAIT_MS, useComments } from "./useComments";
 
 vi.mock("../api", async (original) => ({
@@ -358,4 +358,82 @@ test("a_write_that_does_not_reach_the_server_does_not_tell_the_page", async () =
   vi.mocked(replyToThread).mockRejectedValue(unreachable());
   await settle(() => rendered.current.reply("t1", "non").catch(() => {}));
   expect(onRefused).not.toHaveBeenCalled();
+});
+
+/**
+ * Le compte de la session, perdu puis revenu : `afterLogin()` est tenue au retour du compte
+ * (`useAfterLogin`).
+ */
+function account() {
+  const waiting: (() => void)[] = [];
+  return {
+    afterLogin: () => new Promise<void>((resume) => waiting.push(resume)),
+    back: () => settle(() => waiting.splice(0).forEach((resume) => resume())),
+  };
+}
+
+type WithLogin = Props & { afterLogin: () => Promise<void> };
+const withLogin = ({ pageId, session, afterLogin }: WithLogin) =>
+  useComments(pageId, session, { onRefused, afterLogin });
+
+test("the_list_is_read_again_once_the_account_is_back", async () => {
+  // La session est échue, la connexion de synchro reste ouverte (rien ne la fait revenir), et la
+  // première lecture des fils répond `401`.
+  const login = account();
+  const session = fakeSession();
+  const rendered = await renderHook(withLogin, { pageId: "p", session, afterLogin: login.afterLogin });
+  await advance(0);
+  await settle(() => reads[0].reject(unauthenticated()));
+  await advance(60_000);
+  expect(
+    `reads: ${reads.length} state: ${rendered.current.state} threads: ${rendered.current.threads}`,
+  ).toBe("reads: 1 state: loading threads: null");
+  // Le compte revient : les fils sont relus, une fois.
+  await login.back();
+  await advance(0);
+  expect(reads).toHaveLength(2);
+  await settle(() => reads[1].resolve([thread("t1")]));
+  expect(rendered.current.state).toBe("ready");
+  expect(rendered.current.threads?.map((t) => t.id)).toEqual(["t1"]);
+  await advance(COMMENTS_MAX_WAIT_MS * 2);
+  expect(reads).toHaveLength(2);
+});
+
+test("frames_during_the_wait_for_the_account_are_served_by_one_read", async () => {
+  const login = account();
+  const session = fakeSession();
+  const rendered = await renderHook(withLogin, { pageId: "p", session, afterLogin: login.afterLogin });
+  await advance(0);
+  await settle(() => reads[0].reject(unauthenticated()));
+  // Des trames pendant l'attente : rien ne part, elles répondraient `401` aussi.
+  await settle(() => session.frame());
+  await advance(COMMENTS_MAX_WAIT_MS * 2);
+  await settle(() => rendered.current.reload());
+  await advance(COMMENTS_MAX_WAIT_MS * 2);
+  expect(reads).toHaveLength(1);
+  // Le compte revient : une seule lecture les sert toutes.
+  await login.back();
+  await advance(0);
+  expect(reads).toHaveLength(2);
+  await settle(() => reads[1].resolve([thread("t1")]));
+  await advance(COMMENTS_MAX_WAIT_MS * 2);
+  expect(reads).toHaveLength(2);
+});
+
+test("the_wait_for_the_account_does_not_outlive_the_unmount_or_the_page", async () => {
+  const login = account();
+  const session = fakeSession();
+  const rendered = await renderHook(withLogin, { pageId: "p", session, afterLogin: login.afterLogin });
+  await advance(0);
+  await settle(() => reads[0].reject(unauthenticated()));
+  // Une autre page : ses fils sont lus ; ceux de la première ne le seront plus.
+  await rendered.rerender({ pageId: "q", session: fakeSession(), afterLogin: login.afterLogin });
+  await advance(0);
+  expect(vi.mocked(getComments).mock.calls.map(([id]) => id)).toEqual(["p", "q"]);
+  await settle(() => reads[1].reject(unauthenticated()));
+  // La page se ferme pendant l'attente : le compte revenu, rien n'est relu.
+  await rendered.unmount();
+  await login.back();
+  await advance(COMMENTS_MAX_WAIT_MS * 2);
+  expect(vi.mocked(getComments).mock.calls.map(([id]) => id)).toEqual(["p", "q"]);
 });

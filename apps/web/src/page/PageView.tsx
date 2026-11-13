@@ -150,10 +150,11 @@ export function PageView({
   /** Relit la page : un refus du serveur dit qu'un droit, ou la page, ont changé entre-temps. */
   const rereadPage = useCallback(() => void reread(), [reread]);
 
-  // Les fils de commentaires, relus à chaque trame `comments` de la session de synchro. Un refus
-  // du serveur (un droit, ou la page, ont changé entre-temps) fait aussi relire la page : son
-  // niveau et la corbeille décident des boutons du panneau.
-  const comments = useComments(id, session, { onRefused: rereadPage });
+  // Les fils de commentaires, relus à chaque trame `comments` de la session de synchro, et au
+  // retour du compte après une session perdue. Un refus du serveur (un droit, ou la page, ont
+  // changé entre-temps) fait aussi relire la page : son niveau et la corbeille décident des
+  // boutons du panneau.
+  const comments = useComments(id, session, { onRefused: rereadPage, afterLogin });
   /** Autour de l'éditeur : les pastilles s'y placent, les blocs y sont cherchés. */
   const frame = useRef<HTMLDivElement>(null);
   const wiring = useCommentsPanel(comments, frame);
@@ -190,6 +191,7 @@ export function PageView({
           session={session}
           readOnly={readOnly}
           selfId={userId}
+          afterLogin={afterLogin}
           onRefused={rereadPage}
         />
       </header>

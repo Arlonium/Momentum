@@ -8,7 +8,7 @@ import { getVersions } from "../api";
 import type { PageEvent, SyncStatus } from "../editor/collab";
 import { author } from "../test/comments";
 import { deferred, renderHook, settle, type Deferred } from "../test/hooks";
-import { unreachable } from "../test/pages";
+import { unauthenticated, unreachable } from "../test/pages";
 import { useVersions, VERSIONS_DEBOUNCE_MS, VERSIONS_MAX_WAIT_MS } from "./useVersions";
 
 vi.mock("../api", async (original) => ({
@@ -220,6 +220,87 @@ test("a_new_session_of_the_same_page_rereads_once_synced", async () => {
   await settle(() => next.frame("versions"));
   await advance(VERSIONS_MAX_WAIT_MS);
   expect(reads).toHaveLength(3);
+});
+
+/**
+ * Le compte de la session, perdu puis revenu : `afterLogin()` est tenue au retour du compte
+ * (`useAfterLogin`). `waiting` compte ceux qui l'attendent encore.
+ */
+function account() {
+  const waiting: (() => void)[] = [];
+  return {
+    afterLogin: () => new Promise<void>((resume) => waiting.push(resume)),
+    back: () => settle(() => waiting.splice(0).forEach((resume) => resume())),
+    get waiting() {
+      return waiting.length;
+    },
+  };
+}
+
+type WithLogin = Props & { afterLogin: () => Promise<void> };
+const withLogin = ({ pageId, session, afterLogin }: WithLogin) =>
+  useVersions(pageId, session, { afterLogin });
+
+test("the_list_is_read_again_once_the_account_is_back", async () => {
+  // La sonde du relecteur : la session est échue, la connexion de synchro reste ouverte (rien ne
+  // la fait revenir), et la liste répond `401` à l'ouverture de la fenêtre.
+  const login = account();
+  const session = fakeSession();
+  const rendered = await renderHook(withLogin, { pageId: "p", session, afterLogin: login.afterLogin });
+  await advance(0);
+  await settle(() => reads[0].reject(unauthenticated()));
+  await advance(60_000);
+  expect(
+    `reads: ${reads.length} state: ${rendered.current.state} versions: ${rendered.current.versions}`,
+  ).toBe("reads: 1 state: loading versions: null");
+  // Le compte revient : la liste est relue, une fois.
+  await login.back();
+  await advance(0);
+  expect(reads).toHaveLength(2);
+  await settle(() => reads[1].resolve([version("v1")]));
+  expect(rendered.current.state).toBe("ready");
+  expect(rendered.current.versions?.map((v) => v.id)).toEqual(["v1"]);
+  await advance(VERSIONS_MAX_WAIT_MS * 2);
+  expect(reads).toHaveLength(2);
+});
+
+test("frames_during_the_wait_for_the_account_are_served_by_one_read", async () => {
+  const login = account();
+  const session = fakeSession();
+  const rendered = await renderHook(withLogin, { pageId: "p", session, afterLogin: login.afterLogin });
+  await advance(0);
+  await settle(() => reads[0].reject(unauthenticated()));
+  // Des trames pendant l'attente : rien ne part, elles répondraient `401` aussi.
+  await settle(() => session.frame());
+  await advance(VERSIONS_MAX_WAIT_MS * 2);
+  await settle(() => rendered.current.reload());
+  await advance(VERSIONS_MAX_WAIT_MS * 2);
+  expect(reads).toHaveLength(1);
+  // Le compte revient : une seule lecture les sert toutes.
+  await login.back();
+  await advance(0);
+  expect(reads).toHaveLength(2);
+  await settle(() => reads[1].resolve([version("v1")]));
+  await advance(VERSIONS_MAX_WAIT_MS * 2);
+  expect(reads).toHaveLength(2);
+});
+
+test("the_wait_for_the_account_does_not_outlive_the_unmount_or_the_page", async () => {
+  const login = account();
+  const session = fakeSession();
+  const rendered = await renderHook(withLogin, { pageId: "p", session, afterLogin: login.afterLogin });
+  await advance(0);
+  await settle(() => reads[0].reject(unauthenticated()));
+  // Une autre page : sa liste est lue ; celle de la première ne le sera plus.
+  await rendered.rerender({ pageId: "q", session, afterLogin: login.afterLogin });
+  await advance(0);
+  expect(vi.mocked(getVersions).mock.calls.map(([id]) => id)).toEqual(["p", "q"]);
+  await settle(() => reads[1].reject(unauthenticated()));
+  // La fenêtre se ferme pendant l'attente : le compte revenu, rien n'est relu.
+  await rendered.unmount();
+  await login.back();
+  await advance(VERSIONS_MAX_WAIT_MS * 2);
+  expect(vi.mocked(getVersions).mock.calls.map(([id]) => id)).toEqual(["p", "q"]);
 });
 
 test("nothing_is_read_after_unmount", async () => {

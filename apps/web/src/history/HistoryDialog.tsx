@@ -66,6 +66,11 @@ type Props = {
   readOnly: boolean;
   /** Le compte de la session. */
   selfId: string;
+  /**
+   * Tenue quand le compte revient, après une session perdue (`useAfterLogin`) : une liste
+   * refusée par `401` est alors relue.
+   */
+  afterLogin?: () => Promise<void>;
   /** Le serveur a refusé une restauration (`403`, `404`, `409`) : la page est à relire. */
   onRefused: () => void;
   /** Une version vient d'être restaurée : la page l'annonce (la fenêtre se ferme ensuite). */
@@ -113,6 +118,7 @@ export function HistoryDialog({
   session,
   readOnly,
   selfId,
+  afterLogin,
   onRefused,
   onRestored,
   onClose,
@@ -121,7 +127,7 @@ export function HistoryDialog({
   const listRef = useRef<HTMLUListElement>(null);
   const titleId = useId();
   const previewTitleId = useId();
-  const { versions, state, error, reload } = useVersions(node.id, session);
+  const { versions, state, error, reload } = useVersions(node.id, session, { afterLogin });
   /** La version choisie ; `null` : la version actuelle. */
   const [chosen, setChosen] = useState<string | null>(null);
   /**

@@ -11,7 +11,13 @@
 //   fois, à sa fin ; la lecture elle-même peut demander à être refaite (sa réponse peut dater
 //   d'avant une écriture d'ici), en rendant `true` ;
 // - une lecture qui échoue ne se refait pas d'elle-même : c'est à la demande suivante ;
-// - après `stop`, plus rien ne part, ni demande, ni relecture due.
+// - une lecture qui trouve la session perdue (`401`) le dit (`SESSION_LOST`) : la connexion est
+//   demandée par-dessus la page, et elle est refaite quand le compte revient (`afterLogin`), même
+//   si rien d'autre ne la redemande (une connexion de synchro restée ouverte ne revient pas, R125).
+//   Pendant l'attente, rien ne part (tout répondrait `401`) : les demandes sont servies par cette
+//   lecture-là, et une seule attente est posée ;
+// - après `stop`, plus rien ne part, ni demande, ni relecture due, ni relecture au retour du
+//   compte.
 //
 // La lecture traite elle-même ses erreurs et ses réponses ; après `stop`, elle n'en fait rien
 // (`stopped`).
@@ -32,6 +38,29 @@ export function groupedDelay(waitingSince: number, now: number): number {
   return Math.max(0, Math.min(REREAD_DEBOUNCE_MS, waitingSince + REREAD_MAX_WAIT_MS - now));
 }
 
+/** Ce que rend une lecture qui a trouvé la session perdue : elle attend le retour du compte. */
+export const SESSION_LOST = "session-lost";
+
+/**
+ * Ce que rend une lecture : `true`, à refaire tout de suite (sa réponse peut dater d'avant une
+ * écriture d'ici) ; `SESSION_LOST`, à refaire au retour du compte ; sinon, rien à refaire.
+ */
+export type ReadOutcome = boolean | typeof SESSION_LOST | void;
+
+/**
+ * L'attente du compte d'un hook, lue dans ses options du dernier rendu (`options.current`) : à
+ * donner à `scheduleRereads`. Sans `afterLogin` au moment de planifier, aucune attente : une
+ * lecture qui a perdu la session attend la demande suivante, comme avant.
+ */
+export function waitForAccount(options: {
+  readonly current: { afterLogin?: () => Promise<void> };
+}): (() => Promise<void>) | undefined {
+  if (!options.current.afterLogin) return undefined;
+  // Retirée depuis : on n'attend plus rien (jamais une promesse tenue tout de suite, qui ferait
+  // relire en boucle une session perdue).
+  return () => options.current.afterLogin?.() ?? new Promise<void>(() => {});
+}
+
 export type Rereads = {
   /** Demande une lecture : tout de suite (`true`, au tour suivant), ou groupée. */
   request(immediate: boolean): void;
@@ -41,11 +70,19 @@ export type Rereads = {
   readonly stopped: boolean;
 };
 
-/** Ordonne les lectures `read` (voir l'en-tête) ; `read` rend `true` pour être refaite. */
-export function scheduleRereads(read: () => Promise<boolean | void>): Rereads {
+/**
+ * Ordonne les lectures `read` (voir l'en-tête). `afterLogin` : tenue quand le compte revient
+ * (`useAfterLogin`) ; sans elle, une lecture qui a perdu la session attend la demande suivante.
+ */
+export function scheduleRereads(
+  read: () => Promise<ReadOutcome>,
+  afterLogin?: () => Promise<void>,
+): Rereads {
   let stopped = false;
   /** Une lecture est en route. */
   let reading = false;
+  /** La session est perdue : la prochaine lecture attend le retour du compte. */
+  let awaitingLogin = false;
   /** Une lecture a été demandée pendant la lecture en route : elle sera faite à sa fin. */
   let due = false;
   /** Une lecture immédiate est prévue : une demande groupée ne la repousse pas. */
@@ -54,6 +91,22 @@ export function scheduleRereads(read: () => Promise<boolean | void>): Rereads {
   /** Quand la première demande non traitée est arrivée ; `null` : aucune en attente. */
   let waitingSince: number | null = null;
 
+  /** Attend le retour du compte, puis relit (une seule attente à la fois). */
+  const waitForLogin = (wait: () => Promise<void>) => {
+    awaitingLogin = true;
+    due = false;
+    wait().then(
+      () => {
+        awaitingLogin = false;
+        if (!stopped) void run();
+      },
+      () => {
+        // `useAfterLogin` ne rompt jamais ; si cela arrivait, la demande suivante relirait.
+        awaitingLogin = false;
+      },
+    );
+  };
+
   const run = async () => {
     clearTimeout(timer);
     timer = undefined;
@@ -61,20 +114,25 @@ export function scheduleRereads(read: () => Promise<boolean | void>): Rereads {
     urgent = false;
     reading = true;
     due = false;
+    let outcome: ReadOutcome = undefined;
     try {
-      if ((await read()) === true) due = true;
+      outcome = await read();
+      if (outcome === true) due = true;
     } catch {
       // La lecture dit elle-même ce qui a échoué ; rien ne se refait sans une demande.
     } finally {
       reading = false;
-      if (!stopped && due) void run();
+      if (!stopped) {
+        if (outcome === SESSION_LOST && afterLogin) waitForLogin(afterLogin);
+        else if (due) void run();
+      }
     }
   };
 
   return {
     request(immediate) {
       if (stopped) return;
-      if (reading) {
+      if (reading || awaitingLogin) {
         due = true;
         return;
       }

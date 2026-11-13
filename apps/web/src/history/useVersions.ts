@@ -14,12 +14,20 @@
 // la première. Une relecture demandée pendant une lecture ne l'annule pas : elle est faite une
 // fois, à sa fin. Une lecture qui échoue garde ce qui était affiché, dit pourquoi, et ne se
 // refait pas d'elle-même : la prochaine trame, le retour de la connexion ou « Réessayer » la
-// refont. Tout est lié à la page, et plus rien n'est appelé après le démontage.
+// refont. Une lecture qui trouve la session perdue (`401`) est refaite au retour du compte
+// (`afterLogin`), même si la connexion de synchro est restée ouverte. Tout est lié à la page, et
+// plus rien n'est appelé après le démontage, ni au retour d'un compte attendu avant lui.
 import type { Version } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getVersions, isSessionLost } from "../api";
 import type { CollabSession } from "../editor/collab";
-import { REREAD_DEBOUNCE_MS, REREAD_MAX_WAIT_MS, scheduleRereads } from "../rereads";
+import {
+  REREAD_DEBOUNCE_MS,
+  REREAD_MAX_WAIT_MS,
+  scheduleRereads,
+  SESSION_LOST,
+  waitForAccount,
+} from "../rereads";
 import { messageOf } from "../session/forms";
 
 /** Plusieurs trames qui se suivent ne font qu'une relecture, cette durée après la dernière. */
@@ -50,7 +58,19 @@ type Loaded = {
   error: string | null;
 };
 
-export function useVersions(pageId: string, session: VersionsSession | null): Versions {
+type Options = {
+  /**
+   * Tenue quand le compte revient, après une session perdue (`useAfterLogin`) : la liste est
+   * alors relue. Sans elle, une lecture refusée par `401` attend la trame suivante.
+   */
+  afterLogin?: () => Promise<void>;
+};
+
+export function useVersions(
+  pageId: string,
+  session: VersionsSession | null,
+  options: Options = {},
+): Versions {
   const [loaded, setLoaded] = useState<Loaded>(() => ({
     pageId,
     versions: null,
@@ -59,6 +79,9 @@ export function useVersions(pageId: string, session: VersionsSession | null): Ve
   }));
   /** Demande une relecture : tout de suite (`true`), ou groupée avec les trames qui suivent. */
   const request = useRef<(immediate: boolean) => void>(() => {});
+  // Le rappel du dernier rendu : en changer ne relance rien.
+  const latest = useRef(options);
+  latest.current = options;
 
   useEffect(() => {
     // Groupées, jamais annulées en route, rien après l'arrêt (`rereads.ts`).
@@ -69,18 +92,17 @@ export function useVersions(pageId: string, session: VersionsSession | null): Ve
         setLoaded({ pageId, versions, state: "ready", error: null });
       } catch (e) {
         if (rereads.stopped) return;
-        // Session perdue : la connexion est demandée par-dessus la page (`api.ts`), et la
-        // connexion de synchro qui revient ensuite fait relire.
-        if (!isSessionLost(e)) {
-          setLoaded((current) => ({
-            pageId,
-            versions: current.pageId === pageId ? current.versions : null,
-            state: "failed",
-            error: messageOf(e),
-          }));
-        }
+        // Session perdue : la connexion est demandée par-dessus la page (`api.ts`), et la liste
+        // est relue au retour du compte.
+        if (isSessionLost(e)) return SESSION_LOST;
+        setLoaded((current) => ({
+          pageId,
+          versions: current.pageId === pageId ? current.versions : null,
+          state: "failed",
+          error: messageOf(e),
+        }));
       }
-    });
+    }, waitForAccount(latest));
     request.current = rereads.request;
     // La fenêtre vient de s'ouvrir : la liste est lue tout de suite, sans attendre la synchro.
     rereads.request(true);

@@ -8,14 +8,22 @@ import "../test/hooks";
 import { page } from "../test/pages";
 import { PageMenu } from "./PageMenu";
 
-const probe = vi.hoisted(() => ({ loaded: false }));
+const probe = vi.hoisted(() => ({ loaded: false, afterLogin: undefined as unknown }));
 
 // La fenêtre elle-même est essayée à part : ici, elle prend le focus comme elle, et se ferme.
 vi.mock("../history/HistoryDialog", () => {
   probe.loaded = true;
   return {
-    HistoryDialog: ({ onClose, onRestored }: { onClose: () => void; onRestored: () => void }) => (
-      <div role="dialog" aria-label="Historique">
+    HistoryDialog: ({
+      onClose,
+      onRestored,
+      afterLogin,
+    }: {
+      onClose: () => void;
+      onRestored: () => void;
+      afterLogin?: () => Promise<void>;
+    }) => (
+      <div role="dialog" aria-label="Historique" ref={() => void (probe.afterLogin = afterLogin)}>
         <button type="button" autoFocus onClick={onClose}>
           Fermer
         </button>
@@ -134,4 +142,25 @@ test("a_restored_version_is_announced", async () => {
   await click(menuButton());
   await click(menu()!.querySelector('[role="menuitem"]')!);
   expect(region()!.textContent).toBe("");
+});
+
+test("the_window_waits_for_the_account_given_by_the_page", async () => {
+  // Une liste refusée par `401` se relit au retour du compte : la fenêtre l'attend par la page.
+  const afterLogin = () => new Promise<void>(() => {});
+  await act(async () =>
+    root.render(
+      <PageMenu
+        node={page("p")}
+        session={null}
+        readOnly={false}
+        selfId="alice"
+        afterLogin={afterLogin}
+        onRefused={() => {}}
+      />,
+    ),
+  );
+  await click(menuButton());
+  await click([...menu()!.querySelectorAll('[role="menuitem"]')][0]);
+  await until(() => document.querySelector('[role="dialog"]') !== null, "la fenêtre");
+  expect(probe.afterLogin).toBe(afterLogin);
 });
