@@ -303,3 +303,60 @@ fn what_an_update_awaits_is_reached_once_its_gap_is_filled() {
     page.apply_client_update(&a3).unwrap();
     assert!(page.has_reached(&after_a1) && page.has_reached(&after_a2));
 }
+
+/// Ruling R198 : une suppression qui vise des horloges que la page n'a pas attend comme un trou.
+/// yrs la garderait en attente, et supprimerait à leur arrivée les éléments que son client y
+/// écrirait. Les blocs de la même mise à jour comptent : une mise à jour qui écrit puis supprime
+/// ses propres éléments n'attend rien. Une fois la page arrivée à ces horloges, la suppression
+/// s'applique sans rien laisser en attente.
+#[test]
+fn deletion_ahead_of_the_page_awaits_its_clocks() {
+    let Edits { state, a1, .. } = three_edits();
+    let page = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let id = page.read_blocks()[0].id.clone();
+    let client = PageDoc::from_updates([state.as_slice(), a1.as_slice()]).unwrap();
+    let erase = client.replace_text(&id, 5, 3, "").unwrap();
+    let both = yrs::merge_updates_v1([a1.as_slice(), erase.as_slice()]).unwrap();
+
+    assert_eq!(
+        page.leaves_gap(&erase),
+        Ok(true),
+        "l'effacement avant le texte"
+    );
+    let awaited = page.awaits(&erase).unwrap().expect("il attend le texte");
+    assert_eq!(page.awaits(&both), Ok(None), "le texte et son effacement");
+    assert_eq!(page.leaves_gap(&both), Ok(false));
+
+    page.apply_client_update(&a1).unwrap();
+    assert!(page.has_reached(&awaited));
+    assert_eq!(page.awaits(&erase), Ok(None));
+    page.apply_client_update(&erase).unwrap();
+    assert!(!page.has_pending_deletions());
+    assert_eq!(block_text(&page.read_blocks()[0]), "Alpha");
+}
+
+/// Ruling R199 : une page relue d'une base d'avant R198 peut garder une suppression en attente.
+/// La renvoyer n'attend rien (chaque client la renvoie dans son étape 2) ; ce qui la dépasse
+/// attend, comme ailleurs.
+#[test]
+fn deletion_already_pending_awaits_nothing() {
+    let Edits { state, .. } = three_edits();
+    let pending = deletion(4242, 10, 5);
+    let page = PageDoc::from_updates([state.as_slice(), pending.as_slice()]).unwrap();
+    assert!(page.has_pending_deletions());
+    assert_eq!(page.awaits(&pending), Ok(None), "le renvoi");
+    assert_eq!(page.awaits(&deletion(4242, 11, 2)), Ok(None), "une partie");
+    assert_eq!(page.leaves_gap(&pending), Ok(false));
+    assert!(
+        page.awaits(&deletion(4242, 10, 6)).unwrap().is_some(),
+        "au-delà"
+    );
+    assert!(
+        page.awaits(&deletion(4242, 8, 3)).unwrap().is_some(),
+        "en deçà"
+    );
+    assert!(
+        page.awaits(&deletion(4243, 10, 5)).unwrap().is_some(),
+        "un autre client"
+    );
+}

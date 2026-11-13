@@ -18,22 +18,26 @@
 //!   relayée telle quelle, une suppression pouvait effacer un texte sur le
 //!   serveur et rien dans les navigateurs ;
 //! - **rien de neuf, rien d'écrit** (Ruling R181) : une mise à jour d'un
-//!   client qui ne change rien à la page (rien d'inséré, rien de supprimé,
-//!   aucune suppression laissée en attente) n'est ni écrite ni relayée ; elle
-//!   répond à son expéditeur comme une autre. Yjs met tout son jeu de
-//!   suppressions dans l'étape 2 : un onglet qui revient sans rien de neuf en
-//!   envoie une à chaque reconnexion, que le rechargement de l'acteur relisait
-//!   comme une écriture de son compte ;
-//! - **retenir ce qui laisserait un trou** (Ruling R131) : la mise à jour
-//!   d'un client dont un bloc commence au-delà de ce que la page connaît de
-//!   son client n'est ni appliquée, ni écrite, ni relayée. Elle attend, dans
-//!   la file de sa connexion, que le trou soit comblé, par elle ou par une
-//!   autre, puis passe comme si elle venait d'arriver. yrs l'intégrait en
-//!   laissant le trou ; un navigateur la garde en attente : le serveur,
-//!   l'API MMD et les agents lisaient un texte qu'aucun navigateur
-//!   n'affichait. Une connexion retient au plus 32 mises à jour et 1 Mio,
-//!   au-delà de quoi elle est fermée ; ce qu'elle retenait part avec elle, et
-//!   ne passe plus dès qu'elle est fermée, à la demande ou pour un refus ;
+//!   client qui ne change rien à la page (rien d'inséré, rien de supprimé)
+//!   n'est ni écrite ni relayée ; elle répond à son expéditeur comme une
+//!   autre. Yjs met tout son jeu de suppressions dans l'étape 2 : un onglet
+//!   qui revient sans rien de neuf en envoie une à chaque reconnexion, que le
+//!   rechargement de l'acteur relisait comme une écriture de son compte ;
+//! - **retenir ce qui laisserait un trou** (Rulings R131, R198) : la mise à
+//!   jour d'un client dont un bloc commence au-delà de ce que la page connaît
+//!   de son client, ou qui supprime des horloges que la page n'aura pas une
+//!   fois ses blocs intégrés, n'est ni appliquée, ni écrite, ni relayée. Elle
+//!   attend, dans la file de sa connexion, que le trou soit comblé, par elle
+//!   ou par une autre, puis passe comme si elle venait d'arriver. yrs
+//!   intégrait le bloc en laissant le trou ; un navigateur le garde en
+//!   attente : le serveur, l'API MMD et les agents lisaient un texte qu'aucun
+//!   navigateur n'affichait. yrs gardait la suppression en attente, et
+//!   effaçait à l'arrivée, chez tous, ce que le client visé tapait ensuite.
+//!   Les plages que la page garde déjà en attente (une base d'avant R198)
+//!   n'attendent rien (Ruling R199). Une connexion retient au plus 32 mises à
+//!   jour et 1 Mio, au-delà de quoi elle est fermée ; ce qu'elle retenait part
+//!   avec elle, et ne passe plus dès qu'elle est fermée, à la demande ou pour
+//!   un refus ;
 //! - **compaction sûre** : l'instantané est pris dans l'acteur, entre deux
 //!   commandes, si bien qu'il couvre exactement les mises à jour écrites
 //!   jusqu'à son `seq` ; elle a lieu toutes les `snapshot_every` mises à jour,

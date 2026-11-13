@@ -18,7 +18,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::raw::{Raw, read_var};
+use common::raw::{Raw, deletion, read_var, write_var};
 use common::*;
 use mementum_sync::{ConnInfo, SyncConfig};
 use uuid::Uuid;
@@ -34,15 +34,6 @@ fn of(account: Uuid) -> ConnInfo {
 /// L'état de présence de quelqu'un qui s'appelle `name`, tel que le serveur le réécrit.
 fn named(name: &str) -> String {
     format!(r#"{{"user":{{"name":"{name}"}}}}"#)
-}
-
-/// Écrit un entier variable de lib0 : 7 bits par octet, poids faibles d'abord.
-fn write_var(out: &mut Vec<u8>, mut value: u64) {
-    while value > 0x7F {
-        out.push(0x80 | (value & 0x7F) as u8);
-        value >>= 7;
-    }
-    out.push(value as u8);
 }
 
 /// Une entrée de présence : client, horloge, état.
@@ -571,17 +562,6 @@ async fn websocket_message_with_more_than_32_messages_closes_the_connection() {
     assert!(still_served(&other).await && still_served(&at_limit).await);
 }
 
-/// Une mise à jour sans bloc, qui supprime une plage : `(client, horloge, longueur)`, écrits
-/// tels quels.
-fn deletion(client: u64, clock: u64, len: u64) -> Vec<u8> {
-    let mut update = vec![0, 1];
-    write_var(&mut update, client);
-    update.push(1);
-    write_var(&mut update, clock);
-    write_var(&mut update, len);
-    update
-}
-
 /// La seule plage qu'une mise à jour sans bloc supprime, lue à la manière de lib0, jusqu'au
 /// dernier octet.
 fn deletion_of(update: &[u8]) -> (u128, u128, u128) {
@@ -718,12 +698,13 @@ async fn update_that_changes_nothing_is_neither_written_nor_relayed() {
 }
 
 /// Une mise à jour qui supprime ce que la page ne connaît pas encore ne change rien sur le
-/// moment : yrs garde la suppression en attente, et l'applique à l'arrivée des éléments, dans
-/// une autre transaction. Elle reste écrite au journal et relayée, comme avant le Ruling R181 :
-/// sinon, la suppression passerait plus tard dans le document du serveur sans être au journal
-/// (un rechargement la perdrait) ni chez les autres (ils garderaient le texte).
+/// moment : yrs garderait la suppression en attente, et l'appliquerait à l'arrivée des éléments.
+/// Le Ruling R181 l'écrivait et la relayait. Depuis le Ruling R198, elle attend comme un trou
+/// (R131), dans la file de sa connexion : ni appliquée, ni écrite, ni relayée, et rien n'est en
+/// attente dans le document du serveur. Ce test changeait de sens avec R198 : il s'appelait
+/// `pending_deletion_is_still_written_and_relayed`.
 #[tokio::test]
-async fn pending_deletion_is_still_written_and_relayed() {
+async fn pending_deletion_is_held_neither_written_nor_relayed() {
     let f = Fixture::new(SyncConfig::default()).await;
     f.write_mmd("Bonjour\n").await;
     let tab = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
@@ -740,14 +721,20 @@ async fn pending_deletion_is_still_written_and_relayed() {
     // Un client que la page ne connaît pas, des éléments qu'elle n'a jamais reçus.
     let pending = deletion(4242, 10, 3);
     tab.send_update(&pending);
-    assert!(still_served(&tab).await);
-    let relayed = observer
-        .updates_so_far()
-        .await
-        .expect("observatrice servie");
-    assert_eq!(relayed.len(), 1, "{relayed:?}");
-    assert_eq!(deletion_of(&relayed[0]), (4242, 10, 3));
+    assert!(still_served(&tab).await, "retenue, pas refusée");
+    assert_eq!(
+        observer
+            .updates_so_far()
+            .await
+            .expect("observatrice servie"),
+        Vec::<Vec<u8>>::new(),
+        "relayée"
+    );
     let stored = f.store.load_doc(f.page).await.unwrap();
-    assert_eq!(stored.updates.len(), journal + 1);
+    assert_eq!(stored.updates.len(), journal, "écrite");
+    assert!(
+        !stored_page(&f.store, f.page).await.has_pending_deletions(),
+        "une suppression en attente au journal"
+    );
     assert_eq!(text(&f.hub.read_blocks(f.page).await.unwrap()), "Bonjour");
 }

@@ -14,7 +14,7 @@ use yrs::{
 };
 
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, read_page, write_nodes};
-use crate::guard::{Shape, missing, touched};
+use crate::guard::{Pending, Shape, missing, touched};
 use crate::structure::{Slot, check_blocks};
 use crate::{CrdtError, FRAGMENT, META};
 
@@ -22,8 +22,8 @@ use crate::{CrdtError, FRAGMENT, META};
 const SCHEMA_KEY: &str = "schemaVersion";
 
 /// Ce qu'une mise à jour qui laisserait un trou attend de la page (Ruling
-/// R131) : pour chaque client en cause, l'horloge que la page doit avoir
-/// atteinte. Rendu par [`PageDoc::awaits`], comparé à la page par
+/// R131), ou qui supprimerait des horloges qu'elle n'a pas (Ruling R198) :
+/// pour chaque client en cause, l'horloge que la page doit avoir atteinte. Rendu par [`PageDoc::awaits`], comparé à la page par
 /// [`PageDoc::has_reached`] : qui retient une mise à jour sait quand la
 /// réessayer sans la relire.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,11 +168,18 @@ impl PageDoc {
     /// navigateur la garde en attente tant que le trou n'est pas comblé, et le
     /// serveur lirait un texte qu'aucun navigateur n'affiche.
     ///
+    /// Ou une suppression qui vise des horloges que la page n'aura pas, ses
+    /// blocs intégrés, et qu'elle ne garde pas déjà en attente (Rulings R198,
+    /// R199) : yrs la garderait en attente, et supprimerait à leur arrivée les
+    /// éléments que le client visé écrirait dans la plage.
+    ///
     /// La mise à jour est lue sans être appliquée : la page ne change pas.
     /// `Decode` si elle est illisible.
     pub fn leaves_gap(&self, update: &[u8]) -> Result<bool, CrdtError> {
         let shape = Shape::read(update)?;
-        Ok(shape.leaves_gap(&self.doc.transact().state_vector()))
+        let txn = self.doc.transact();
+        let pending = Pending::of(txn.store().pending_ds());
+        Ok(shape.leaves_gap(&txn.state_vector(), &pending))
     }
 
     /// Ce qu'une mise à jour (v1) reçue d'un client attend encore de la page
@@ -184,7 +191,9 @@ impl PageDoc {
     /// `Decode` si elle est illisible.
     pub fn awaits(&self, update: &[u8]) -> Result<Option<Awaited>, CrdtError> {
         let shape = Shape::read(update)?;
-        let awaited = shape.awaited(&self.doc.transact().state_vector());
+        let txn = self.doc.transact();
+        let pending = Pending::of(txn.store().pending_ds());
+        let awaited = shape.awaited(&txn.state_vector(), &pending);
         Ok((!awaited.is_empty()).then_some(Awaited(awaited)))
     }
 
@@ -233,11 +242,12 @@ impl PageDoc {
 
     /// Vrai si le document garde des suppressions en attente : des plages
     /// qu'une mise à jour supprimait et que la page ne connaît pas encore. yrs
-    /// les applique à l'arrivée des éléments, dans une autre transaction. Une
-    /// mise à jour qui en laisse ne « change rien » sur le moment, mais doit
-    /// être écrite et relayée comme une autre (Ruling R181) : sinon la
-    /// suppression passerait plus tard dans le document du serveur, sans être
-    /// au journal ni chez les autres.
+    /// les applique à l'arrivée des éléments, dans une autre transaction.
+    ///
+    /// Depuis le Ruling R198, une mise à jour de client n'en laisse plus : elle
+    /// attend que la page ait ces horloges (`PageDoc::awaits`). Un document
+    /// n'en a donc que s'il a été relu d'une base d'avant, ou s'il est la copie
+    /// d'un client qui les a reçues du serveur (tests).
     pub fn has_pending_deletions(&self) -> bool {
         self.doc
             .transact()

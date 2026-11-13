@@ -14,8 +14,9 @@
 //! connexion (report M3 du lot 1).
 //!
 //! La mise à jour d'un client qui laisserait un trou dans les horloges de
-//! son client n'est ni appliquée, ni écrite, ni relayée : elle attend dans la
-//! file de sa connexion que le trou soit comblé (Ruling R131, voir
+//! son client, ou qui supprimerait des horloges que la page n'a pas encore,
+//! n'est ni appliquée, ni écrite, ni relayée : elle attend dans la file de sa
+//! connexion que le trou soit comblé (Rulings R131, R198, voir
 //! [`Actor::receive_update`]). Elle n'est donc jamais dans le document vivant
 //! sans être au journal : l'invariant tient.
 //!
@@ -918,6 +919,14 @@ impl Actor {
     /// porte ce qu'il avait tapé hors ligne ; un refus fermerait sa connexion
     /// à chaque retour.
     ///
+    /// Ruling R198 : une suppression qui vise des horloges que la page n'aura
+    /// pas, les blocs de la même mise à jour intégrés, est un trou comme un
+    /// autre. yrs la garderait en attente, et supprimerait à l'arrivée ce que le
+    /// client visé écrirait dans la plage : dix octets suffisaient à effacer,
+    /// sur le serveur et chez tous, tout ce qu'une autre personne tapait
+    /// ensuite. Retenue, elle passe quand la page a ces horloges, comme une
+    /// suppression ordinaire, ou part avec sa connexion.
+    ///
     /// Sinon, elle est appliquée ([`Actor::client_update`]), même si sa
     /// connexion en retient d'autres : c'est d'ordinaire celle qui comble leur
     /// trou. Puis les mises à jour retenues dont le trou est comblé passent
@@ -1072,13 +1081,14 @@ impl Actor {
         // Après des déplacements concurrents, un bloc peut exister en double.
         let fix = self.page.dedupe_blocks();
         // Ruling R181 : une mise à jour qui ne change rien à la page (rien d'inséré, rien de
-        // supprimé, aucune suppression laissée en attente) n'est ni écrite ni relayée. Tout ce
-        // qu'elle porte est déjà dans le document, donc déjà au journal et chez les autres :
-        // c'est l'étape 2 d'un onglet qui revient sans rien de neuf (Yjs y met tout son jeu de
-        // suppressions), ou une mise à jour retenue que l'étape 2 couvrait déjà. Écrite, le
-        // rechargement la relisait comme une écriture de son compte. Elle répond à son
-        // expéditeur comme une autre.
-        if !self.watch.changed_since(changes) && !self.page.has_pending_deletions() {
+        // supprimé) n'est ni écrite ni relayée. Tout ce qu'elle porte est déjà dans le document,
+        // donc déjà au journal et chez les autres : c'est l'étape 2 d'un onglet qui revient sans
+        // rien de neuf (Yjs y met tout son jeu de suppressions), ou une mise à jour retenue que
+        // l'étape 2 couvrait déjà. Écrite, le rechargement la relisait comme une écriture de son
+        // compte. Elle répond à son expéditeur comme une autre. Elle ne laisse pas non plus de
+        // suppression en attente qui ne l'était pas déjà : une telle mise à jour attend que la
+        // page ait ces horloges (Ruling R198), et ce qui l'était déjà vient du journal (R199).
+        if !self.watch.changed_since(changes) {
             return Ok(true);
         }
         // La mise à jour et son correctif en une écriture, tous deux ou aucun

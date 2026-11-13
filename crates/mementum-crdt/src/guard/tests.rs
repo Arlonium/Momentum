@@ -18,7 +18,7 @@ use yrs::{
     XmlElementPrelim, XmlFragment, XmlTextPrelim, merge_updates_v1,
 };
 
-use super::{Insert, Kind, Parent, Shape, Struct};
+use super::{Insert, Kind, Parent, Pending, Shape, Struct};
 use crate::{CrdtError, FRAGMENT, META, PageDoc};
 
 /// Ce qu'une mise à jour contient, vu par l'API publique de yrs : plages
@@ -359,8 +359,16 @@ fn first_text(blocks: &[Block]) -> Option<(String, usize)> {
 /// élément, 1 : plage ramassée, 2 : `Skip`) et sa longueur.
 type Entry = (u64, u32, Vec<(u8, u32)>);
 
-/// Une mise à jour lue, faite à la main, les horloges se suivant comme dans [`Shape::read`].
-fn shape_of(entries: &[Entry]) -> Shape {
+/// Une plage supprimée : le client, l'horloge et la longueur.
+type Deleted = (u64, u32, u32);
+
+/// Une mise à jour lue, faite à la main, les horloges se suivant comme dans [`Shape::read`],
+/// avec ses plages supprimées (un client peut s'y répéter).
+fn shape_of(entries: &[Entry], deleted: &[Deleted]) -> Shape {
+    let deletions = deleted
+        .iter()
+        .map(|&(client, clock, len)| (client, vec![(clock, clock + len)]))
+        .collect();
     let clients = entries
         .iter()
         .map(|(client, start, blocks)| {
@@ -388,7 +396,16 @@ fn shape_of(entries: &[Entry]) -> Shape {
             (*client, structs)
         })
         .collect();
-    Shape { clients }
+    Shape { clients, deletions }
+}
+
+/// Les plages qu'une page garde en attente, rangées comme yrs les range (triées, fusionnées).
+fn pending_of(ranges: &[Deleted]) -> Pending {
+    let mut set = yrs::IdSet::new();
+    for &(client, clock, len) in ranges {
+        set.insert(yrs::ID::new(yrs::block::ClientID::new(client), clock), len);
+    }
+    Pending::of(Some(&set))
 }
 
 /// Un vecteur d'état pour les clients 1, 2 et 3.
@@ -403,29 +420,34 @@ fn state_of(clocks: &[u32]) -> yrs::StateVector {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
 
-    /// Ruling R131 : ce qu'une mise à jour attend d'une page ([`Shape::awaited`]), comparé à un
-    /// vecteur d'état atteint plus tard, dit la même chose que [`Shape::leaves_gap`] relu sur ce
-    /// vecteur : l'appelant peut réessayer une mise à jour retenue sans la relire. Les entrées
-    /// d'un même client peuvent se répéter, comme dans une mise à jour écrite à la main.
+    /// Rulings R131, R198 et R199 : ce qu'une mise à jour attend d'une page
+    /// ([`Shape::awaited`]), comparé à un vecteur d'état atteint plus tard, dit la même chose que
+    /// [`Shape::leaves_gap`] relu sur ce vecteur : l'appelant peut réessayer une mise à jour
+    /// retenue sans la relire. Les entrées d'un même client peuvent se répéter, comme dans une
+    /// mise à jour écrite à la main ; ses plages supprimées tombent avant, dans, ou au-delà de ses
+    /// blocs, et en partie dans ce que la page garde déjà en attente.
     #[test]
     fn awaited_agrees_with_leaves_gap(
         entries in prop::collection::vec(
             (1u64..4, 0u32..20, prop::collection::vec((0u8..3, 1u32..5), 0..6)),
             0..4,
         ),
+        deleted in prop::collection::vec((1u64..4, 0u32..40, 1u32..8), 0..4),
+        pending in prop::collection::vec((1u64..4, 0u32..40, 1u32..8), 0..3),
         now in prop::collection::vec(0u32..40, 3),
         later in prop::collection::vec(0u32..20, 3),
     ) {
-        let shape = shape_of(&entries);
+        let shape = shape_of(&entries, &deleted);
+        let pending = pending_of(&pending);
         let state = state_of(&now);
-        let awaited = shape.awaited(&state);
-        prop_assert_eq!(awaited.is_empty(), !shape.leaves_gap(&state));
+        let awaited = shape.awaited(&state, &pending);
+        prop_assert_eq!(awaited.is_empty(), !shape.leaves_gap(&state, &pending));
         let grown: Vec<u32> = now.iter().zip(&later).map(|(n, l)| n + l).collect();
         let grown = state_of(&grown);
         let reached = awaited
             .iter()
             .all(|(client, clock)| grown.get(&yrs::block::ClientID::new(*client)) >= *clock);
-        prop_assert_eq!(reached, !shape.leaves_gap(&grown));
+        prop_assert_eq!(reached, !shape.leaves_gap(&grown, &pending));
     }
 }
 

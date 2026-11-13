@@ -26,6 +26,26 @@ pub fn read_var(bytes: &[u8], at: &mut usize) -> u128 {
     }
 }
 
+/// Écrit un entier variable de lib0 : 7 bits par octet, poids faibles d'abord.
+pub fn write_var(out: &mut Vec<u8>, mut value: u64) {
+    while value > 0x7F {
+        out.push(0x80 | (value & 0x7F) as u8);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// Une mise à jour sans bloc, qui supprime une plage : `(client, horloge, longueur)`, écrits
+/// tels quels.
+pub fn deletion(client: u64, clock: u64, len: u64) -> Vec<u8> {
+    let mut update = vec![0, 1];
+    write_var(&mut update, client);
+    update.push(1);
+    write_var(&mut update, clock);
+    write_var(&mut update, len);
+    update
+}
+
 /// Une connexion par une socket en mémoire : ses messages sont lus tels que le serveur les
 /// écrit.
 pub struct Raw {

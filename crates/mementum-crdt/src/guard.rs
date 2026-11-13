@@ -46,6 +46,19 @@
 //! stockage, accepte toujours un tel bloc, comme yrs : ce qui est écrit doit
 //! se relire, dans n'importe quel ordre (test `revision_is_canonical`).
 //!
+//! # Suppressions à venir (Rulings R198, R199)
+//!
+//! Une suppression qui vise des horloges que la page n'a pas encore, yrs la
+//! garde en attente, et l'applique à l'arrivée des éléments : dix octets sans
+//! bloc, `{client de Mona : [son horloge, + 1 000 000)}`, supprimaient tout ce
+//! que Mona tapait ensuite, sur le serveur et chez tous, sans que rien en reste
+//! dans aucune version. Elle est donc un trou comme un autre : [`Shape::awaited`]
+//! rend aussi, par client, la fin de ce qu'elle supprime au-delà de ce que la
+//! page aura une fois les blocs de la même mise à jour intégrés. Les plages que
+//! la page garde déjà en attente (une base d'avant R198) n'attendent rien : yrs
+//! comme Yjs les mettent dans l'état complet et dans l'étape 2, et chaque client
+//! les renvoie dans la sienne ([`Pending`], Ruling R199).
+//!
 //! # Métadonnées (report M7 du lot 1)
 //!
 //! La `Y.Map` [`META`] porte `schemaVersion`, que seul le serveur écrit, à la
@@ -72,7 +85,7 @@ use yrs::block::{
 use yrs::branch::{BranchID, BranchPtr};
 use yrs::encoding::read::{Cursor, Read};
 use yrs::types::{TYPE_REFS_XML_ELEMENT, TYPE_REFS_XML_TEXT};
-use yrs::{ID, MapRef, ReadTxn, StateVector, TransactionMut, XmlOut};
+use yrs::{ID, IdSet, MapRef, ReadTxn, StateVector, TransactionMut, XmlOut};
 
 use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
@@ -138,6 +151,59 @@ struct Insert {
 /// Ce que contient une mise à jour, lu sans l'appliquer.
 pub(crate) struct Shape {
     clients: Vec<(u64, Vec<Struct>)>,
+    deletions: Deletions,
+}
+
+/// Le jeu de suppressions d'une mise à jour : par client, ses plages `[début,
+/// fin)`, sans les plages vides.
+type Deletions = Vec<(u64, Vec<(u32, u32)>)>;
+
+/// Les plages qu'une page garde déjà en attente de suppression, par client,
+/// triées et disjointes (Ruling R199). Une page n'en a que si elle a été relue
+/// d'une base d'avant le Ruling R198 : yrs les y garde, les met dans chaque
+/// état complet et chaque étape 2 qu'il encode, et chaque client qui les a
+/// reçues les renvoie dans son étape 2. Ce renvoi n'apporte rien à la page :
+/// il n'attend rien pour elles.
+#[derive(Default)]
+pub(crate) struct Pending(HashMap<u64, Vec<(u32, u32)>>);
+
+impl Pending {
+    /// Les plages en attente d'un document (`Store::pending_ds` de yrs).
+    pub(crate) fn of(set: Option<&IdSet>) -> Pending {
+        let Some(set) = set.filter(|set| !set.is_empty()) else {
+            return Pending::default();
+        };
+        Pending(
+            set.iter()
+                .map(|(client, ranges)| {
+                    let ranges = ranges.iter().map(|r| (r.start, r.end)).collect();
+                    (client.get(), ranges)
+                })
+                .collect(),
+        )
+    }
+
+    /// La fin de ce qui, dans `[start, end)`, n'est pas déjà en attente pour
+    /// `client` : `None` si rien n'en reste (ou si la plage est vide).
+    fn uncovered_end(&self, client: u64, start: u32, end: u32) -> Option<u32> {
+        // `[e, end)` est couvert ; on recule tant que des plages en attente le prolongent.
+        let mut e = end;
+        if let Some(ranges) = self.0.get(&client) {
+            for &(r_start, r_end) in ranges.iter().rev() {
+                if e <= start {
+                    return None;
+                }
+                if r_start >= e {
+                    continue;
+                }
+                if r_end < e {
+                    return Some(e);
+                }
+                e = r_start;
+            }
+        }
+        (e > start).then_some(e)
+    }
 }
 
 impl Shape {
@@ -168,8 +234,8 @@ impl Shape {
             }
             clients.push((client, structs));
         }
-        read_delete_set(&mut c)?;
-        Ok(Shape { clients })
+        let deletions = read_delete_set(&mut c)?;
+        Ok(Shape { clients, deletions })
     }
 
     /// Vrai si la mise à jour insère des éléments XML (un bloc, un nœud de
@@ -241,8 +307,15 @@ impl Shape {
     /// part de son horloge dans `state` ; un bloc (élément ou plage ramassée)
     /// qui commence au-delà est un trou ; sinon il étend ce qui est couvert.
     /// Un `Skip` n'avance rien : c'est un trou de la mise à jour elle-même.
-    pub(crate) fn leaves_gap(&self, state: &StateVector) -> bool {
-        self.clients.iter().any(|(client, structs)| {
+    ///
+    /// Une suppression laisse aussi un trou (Ruling R198) quand une partie de
+    /// ses plages dépasse ce que la page couvre une fois les blocs de la mise à
+    /// jour intégrés, sans être déjà en attente dans la page (`pending`, Ruling
+    /// R199) : yrs la garderait en attente, et supprimerait à l'arrivée ce que
+    /// le client visé écrirait dans la plage.
+    pub(crate) fn leaves_gap(&self, state: &StateVector, pending: &Pending) -> bool {
+        let mut covered_after: HashMap<u64, u32> = HashMap::new();
+        for (client, structs) in &self.clients {
             let mut covered = state.get(&ClientID::new(*client));
             for s in structs {
                 if matches!(s.kind, Kind::Skip) {
@@ -254,39 +327,76 @@ impl Shape {
                 // Sans débordement : `read` a vérifié chaque fin de bloc.
                 covered = covered.max(s.id.1 + s.len);
             }
-            false
+            let after = covered_after.entry(*client).or_insert(covered);
+            *after = (*after).max(covered);
+        }
+        self.deletions.iter().any(|(client, ranges)| {
+            let covered = covered_after
+                .get(client)
+                .copied()
+                .unwrap_or_else(|| state.get(&ClientID::new(*client)));
+            ranges.iter().any(|&(start, end)| {
+                pending
+                    .uncovered_end(*client, start.max(covered), end)
+                    .is_some()
+            })
         })
     }
 
     /// Ce que la mise à jour attend encore d'une page dont le vecteur d'état
-    /// est `state` : chaque client pour lequel [`Shape::leaves_gap`] voit un
-    /// trou, avec l'horloge que la page doit atteindre pour qu'il n'y en ait
-    /// plus. Vide si elle n'en laisserait aucun.
+    /// est `state` et les suppressions en attente `pending` : chaque client
+    /// pour lequel [`Shape::leaves_gap`] voit un trou, avec l'horloge que la
+    /// page doit atteindre pour qu'il n'y en ait plus. Vide si elle n'en
+    /// laisserait aucun.
     ///
-    /// Cette horloge ne dépend que de la mise à jour : c'est le début de son
-    /// dernier bloc qui ne prolonge pas le précédent (un `Skip` les sépare, ou
-    /// c'est le premier). Une suite de blocs sans trou est couverte dès que son
-    /// début l'est, et ces débuts croissent. Comme un vecteur d'état ne fait
-    /// que croître, une page qui a atteint cette horloge ne voit plus de trou
-    /// pour ce client, ni plus tard : l'appelant compare sans relire la mise à
-    /// jour. Le test `awaited_agrees_with_leaves_gap` le vérifie contre
-    /// [`Shape::leaves_gap`].
-    pub(crate) fn awaited(&self, state: &StateVector) -> Vec<(u64, u32)> {
-        self.clients
-            .iter()
-            .filter_map(|(client, structs)| {
-                let mut start = None;
-                let mut end = None;
-                for s in structs.iter().filter(|s| !matches!(s.kind, Kind::Skip)) {
-                    if end != Some(s.id.1) {
-                        start = Some(s.id.1);
-                    }
-                    end = Some(s.id.1 + s.len);
+    /// Pour des blocs, cette horloge ne dépend que de la mise à jour : c'est le
+    /// début de son dernier bloc qui ne prolonge pas le précédent (un `Skip` les
+    /// sépare, ou c'est le premier). Une suite de blocs sans trou est couverte
+    /// dès que son début l'est, et ces débuts croissent. Pour des suppressions
+    /// (Ruling R198), c'est la fin de ce que ses plages visent au-delà de la
+    /// dernière suite de blocs du même client dans la mise à jour, hormis ce que
+    /// la page garde déjà en attente (Ruling R199) : en deçà, les blocs de la
+    /// mise à jour l'apportent. Ce qui est en attente le reste, ou devient connu
+    /// quand ses éléments arrivent ; et un vecteur d'état ne fait que croître :
+    /// une page qui a atteint ces horloges ne voit plus de trou pour ce client,
+    /// ni plus tard. L'appelant compare donc sans relire la mise à jour. Le test
+    /// `awaited_agrees_with_leaves_gap` le vérifie contre [`Shape::leaves_gap`].
+    pub(crate) fn awaited(&self, state: &StateVector, pending: &Pending) -> Vec<(u64, u32)> {
+        let mut awaited = Vec::new();
+        // Par client, la fin de la dernière suite de blocs de chaque entrée : ce
+        // que la page aura, ses blocs intégrés.
+        let mut ends: HashMap<u64, u32> = HashMap::new();
+        for (client, structs) in &self.clients {
+            let mut start = None;
+            let mut end = None;
+            for s in structs.iter().filter(|s| !matches!(s.kind, Kind::Skip)) {
+                if end != Some(s.id.1) {
+                    start = Some(s.id.1);
                 }
-                let clock = start?;
-                (clock > state.get(&ClientID::new(*client))).then_some((*client, clock))
-            })
-            .collect()
+                end = Some(s.id.1 + s.len);
+            }
+            let (Some(start), Some(end)) = (start, end) else {
+                continue;
+            };
+            let last = ends.entry(*client).or_insert(end);
+            *last = (*last).max(end);
+            if start > state.get(&ClientID::new(*client)) {
+                awaited.push((*client, start));
+            }
+        }
+        for (client, ranges) in &self.deletions {
+            let brought = ends.get(client).copied().unwrap_or(0);
+            let needed = ranges
+                .iter()
+                .filter_map(|&(start, end)| pending.uncovered_end(*client, start.max(brought), end))
+                .max();
+            if let Some(clock) = needed
+                && clock > state.get(&ClientID::new(*client))
+            {
+                awaited.push((*client, clock));
+            }
+        }
+        awaited
     }
 
     /// Plus longue chaîne de types imbriqués entre eux dans la mise à jour
@@ -431,8 +541,13 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
 /// `varUint(horloge) varUint(longueur)`. yrs ne refuse un client hors de
 /// 53 bits que par un `debug_assert!`, et calcule `horloge + longueur` par une
 /// addition qui déborde en debug : les deux paniquent en debug (Ruling R25).
-fn read_delete_set(c: &mut Cursor) -> Result<(), CrdtError> {
+///
+/// Rend les plages `[horloge, horloge + longueur)`, sans les plages vides, qui
+/// ne suppriment rien. Rien n'est réservé d'après un compte lu : ce qui est
+/// alloué reste borné par les octets reçus.
+fn read_delete_set(c: &mut Cursor) -> Result<Deletions, CrdtError> {
     let n_clients: u32 = c.read_var().map_err(decode_error)?;
+    let mut deletions = Vec::new();
     for _ in 0..n_clients {
         let client: u64 = c.read_var().map_err(decode_error)?;
         if client > MAX_CLIENT {
@@ -441,15 +556,22 @@ fn read_delete_set(c: &mut Cursor) -> Result<(), CrdtError> {
             ));
         }
         let n_ranges: u32 = c.read_var().map_err(decode_error)?;
+        let mut ranges = Vec::new();
         for _ in 0..n_ranges {
             let clock: u32 = c.read_var().map_err(decode_error)?;
             let len: u32 = c.read_var().map_err(decode_error)?;
-            if clock.checked_add(len).is_none() {
+            let Some(end) = clock.checked_add(len) else {
                 return Err(decode_error("plage de suppressions hors limites"));
+            };
+            if len > 0 {
+                ranges.push((clock, end));
             }
         }
+        if !ranges.is_empty() {
+            deletions.push((client, ranges));
+        }
     }
-    Ok(())
+    Ok(deletions)
 }
 
 fn read_id(c: &mut Cursor) -> Result<Id, yrs::encoding::read::Error> {
