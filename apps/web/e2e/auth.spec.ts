@@ -113,6 +113,10 @@ test("first_account_screen_gives_way_once_an_account_exists", async ({ page }) =
   await expect(page.getByLabel("Adresse e-mail")).toHaveValue("");
   await expect(page.getByLabel("Mot de passe", { exact: true })).toHaveValue("");
   await expect(page.getByLabel("Adresse e-mail")).toBeFocused();
+  // Le message est relié au champ qui a le focus : un lecteur d'écran le lit avec lui.
+  await expect(page.getByLabel("Adresse e-mail")).toHaveAccessibleDescription(
+    "Un compte a déjà été créé sur cette instance. Connecte-toi, ou demande une invitation.",
+  );
   expect((await page.request.get("/api/v1/me")).status()).toBe(401);
 });
 

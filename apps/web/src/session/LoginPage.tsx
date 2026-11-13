@@ -6,8 +6,16 @@ import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } fr
 import { logIn } from "../api";
 import { AuthScreen, Field, FormError, messageOf, ScreenLink, useDocumentTitle } from "./forms";
 
-/** Le formulaire de connexion. `email` : l'adresse à préremplir. */
-function LoginForm({ email: initialEmail = "", onLoggedIn }: { email?: string; onLoggedIn: (me: Me) => void }) {
+type LoginFormProps = {
+  /** L'adresse à préremplir. */
+  email?: string;
+  /** L'`id` d'un message de l'écran que l'adresse reprend à son compte (`aria-describedby`). */
+  describedBy?: string;
+  onLoggedIn: (me: Me) => void;
+};
+
+/** Le formulaire de connexion. */
+function LoginForm({ email: initialEmail = "", describedBy, onLoggedIn }: LoginFormProps) {
   const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +45,7 @@ function LoginForm({ email: initialEmail = "", onLoggedIn }: { email?: string; o
         name="email"
         autoComplete="email"
         autoFocus={!initialEmail}
+        aria-describedby={describedBy}
         value={email}
         onChange={(e) => setEmail(e.target.value)}
       />
@@ -78,10 +87,19 @@ type LoginPageProps = {
 /** La connexion, en page : sans session. */
 export function LoginPage({ signupOpen, invitation, notice, onSignup, onLoggedIn }: LoginPageProps) {
   useDocumentTitle("Connexion");
+  const noticeId = useId();
   let lead: ReactNode = invitation
     ? `Connecte-toi pour rejoindre ${invitation.invitedTo}.`
     : "Retrouve tes pages et les espaces où l'on t'a invité.";
-  if (notice) lead = <span role="status">{notice}</span>;
+  // Le message arrive déjà rempli avec l'écran : une zone `status` ne l'annonce pas alors de
+  // façon sûre. Il est donc aussi relié à l'adresse, qui prend le focus, et lu avec elle.
+  if (notice) {
+    lead = (
+      <span id={noticeId} role="status">
+        {notice}
+      </span>
+    );
+  }
   return (
     <AuthScreen
       title="Se connecter"
@@ -99,7 +117,11 @@ export function LoginPage({ signupOpen, invitation, notice, onSignup, onLoggedIn
         )
       }
     >
-      <LoginForm email={invitation?.email} onLoggedIn={onLoggedIn} />
+      <LoginForm
+        email={invitation?.email}
+        describedBy={notice ? noticeId : undefined}
+        onLoggedIn={onLoggedIn}
+      />
     </AuthScreen>
   );
 }

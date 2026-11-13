@@ -348,8 +348,22 @@ for (const [name, failure] of [
     expect([...host.querySelectorAll("input")].map((input) => input.value)).toEqual(["", ""]);
     // Le focus est sur l'adresse de la connexion, pas sur `body`.
     expect(document.activeElement).toBe(fieldOf("Adresse e-mail"));
+    // Le message, inséré déjà rempli, est relié à ce champ : il est lu avec lui.
+    const status = host.querySelector('[role="status"]')!;
+    expect(status.id).not.toBe("");
+    expect(fieldOf("Adresse e-mail").getAttribute("aria-describedby")).toBe(status.id);
   });
 }
+
+test("login_address_is_described_by_nothing_without_a_notice", async () => {
+  // Témoin : la connexion ordinaire n'a pas de message, et son adresse n'est reliée à rien.
+  vi.mocked(getMe).mockRejectedValue(unauthenticated());
+  vi.mocked(getInfo).mockResolvedValueOnce(instance(false));
+  await act(async () => root.render(<SessionGate reload={reload}><App /></SessionGate>));
+  expect(host.querySelector("h1")?.textContent).toBe("Se connecter");
+  expect(host.querySelector('[role="status"]')).toBeNull();
+  expect(fieldOf("Adresse e-mail").hasAttribute("aria-describedby")).toBe(false);
+});
 
 test("first_account_screen_on_the_signup_address_gives_way_to_the_login_too", async () => {
   // Inscriptions ouvertes, l'adresse `/signup` montrerait l'inscription ordinaire : elle est
