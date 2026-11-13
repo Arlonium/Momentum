@@ -208,6 +208,20 @@ test("the_confirmation_says_how_many_messages_go_and_that_it_cannot_be_undone", 
   expect(dialog()!.textContent).not.toContain("messages");
 });
 
+test("cancelling_after_the_thread_changed_list_gives_the_focus_to_its_new_button", async () => {
+  // La fenêtre est ouverte quand le bloc du fil est supprimé dans l'éditeur : le fil passe sous
+  // « Bloc supprimé », et son élément est recréé, bouton compris.
+  const initial = [thread("t", { blockId: "b" })];
+  await act(async () => root.render(<Static initial={initial} order={["b"]} absent={[]} />));
+  await click(button(threadOf("t")!, DELETE));
+  await act(async () => root.render(<Static initial={initial} order={[]} absent={["b"]} />));
+  const moved = host.querySelector('ul[aria-label="Fils d\'un bloc supprimé"] [data-thread-id="t"]');
+  expect(moved).not.toBeNull();
+  await click(button(dialog()!, "Annuler"));
+  expect(dialog()).toBeNull();
+  expect(active()).toBe(button(threadOf("t")!, DELETE));
+});
+
 // La suppression, avec le vrai hook des fils.
 
 /** Une session de synchro réduite à ce que lit `useComments` : synchronisée, et ses trames. */
