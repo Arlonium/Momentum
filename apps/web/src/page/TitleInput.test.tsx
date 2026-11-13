@@ -4,7 +4,7 @@
 // sous ses doigts. Un titre distant qui arrive pendant le focus ne fait sauter ni le curseur
 // ni la sélection.
 import type { Me, PageNode } from "@mementum/protocol";
-import { act, useEffect } from "react";
+import { act, useEffect, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError, updatePage } from "../api";
@@ -486,4 +486,106 @@ test("a_send_that_lands_after_the_page_turned_read_only_takes_the_message_away",
   await render(page("p", { title: "Premier" }), me, true);
   expect(field().value).toBe("Premier");
   expect(unsavedMessage()).toBeNull();
+});
+
+// Le focus ne tombe jamais sur `body` : un bouton du message qui part sous le focus (la page
+// repasse en lecture seule, le message n'a plus d'objet) le rend au champ du titre.
+
+test("focus_goes_to_the_field_when_the_resume_button_leaves_under_it", async () => {
+  await typedThenReadOnly();
+  await blur();
+  await render(page("p", { title: "Ancien" }));
+  await act(async () => buttonNamed("Reprendre ce titre")!.focus());
+  expect(document.activeElement).toBe(buttonNamed("Reprendre ce titre"));
+  // La page repasse en lecture seule : le bouton part, le message reste.
+  await render(page("p", { title: "Ancien" }), me, true);
+  expect(buttonNamed("Reprendre ce titre")).toBeNull();
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Titre d'Alice`);
+  expect(document.activeElement).toBe(field());
+});
+
+/** « Premier » part, la page passe en lecture seule pendant l'envoi : le message le garde. */
+async function sentThenReadOnly() {
+  const answer = deferred<PageNode>();
+  vi.mocked(updatePage).mockReturnValueOnce(answer.promise);
+  await render(page("p", { title: "Ancien" }));
+  await type("Premier");
+  await enter();
+  await render(page("p", { title: "Ancien" }), me, true);
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Premier`);
+  return answer;
+}
+
+test("focus_goes_to_the_field_when_the_message_leaves_under_it", async () => {
+  const answer = await sentThenReadOnly();
+  await act(async () => buttonNamed("Écarter")!.focus());
+  expect(document.activeElement).toBe(buttonNamed("Écarter"));
+  // L'envoi en route aboutit : le message part, avec le bouton qui avait le focus.
+  await act(async () => answer.resolve(page("p", { title: "Premier" })));
+  expect(unsavedMessage()).toBeNull();
+  expect(document.activeElement).toBe(field());
+});
+
+/** Donne le focus à `target` dans le rendu même où la page passe en lecture seule. */
+function FocusOnReadOnly({ readOnly, target }: { readOnly: boolean; target: HTMLElement }) {
+  useLayoutEffect(() => {
+    if (readOnly) target.focus();
+  }, [readOnly, target]);
+  return null;
+}
+
+test("focus_taken_out_of_the_message_is_not_brought_back_when_it_leaves", async () => {
+  // Témoin : le focus a quitté le message par un geste, avant qu'il parte. Il n'est pas repris.
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  try {
+    // Vers un autre élément de la page.
+    let answer = await sentThenReadOnly();
+    await act(async () => buttonNamed("Écarter")!.focus());
+    await act(async () => elsewhere.focus());
+    await act(async () => answer.resolve(page("p", { title: "Premier" })));
+    expect(unsavedMessage()).toBeNull();
+    expect(document.activeElement).toBe(elsewhere);
+
+    // Vers rien (un clic dans le vide) : le focus est sur `body` par ce geste, et y reste.
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    answer = await sentThenReadOnly();
+    await act(async () => buttonNamed("Écarter")!.focus());
+    await act(async () => buttonNamed("Écarter")!.blur());
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => answer.resolve(page("p", { title: "Premier" })));
+    expect(unsavedMessage()).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+
+    // Le bouton part, et le même rendu pose le focus ailleurs (un effet d'un autre composant) :
+    // il n'est plus perdu, et n'est pas repris.
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    const withFocusTaken = (readOnly: boolean) =>
+      act(async () =>
+        root.render(
+          <SessionContext.Provider value={{ me, refresh: async () => {} }}>
+            <FocusOnReadOnly readOnly={readOnly} target={elsewhere} />
+            <TitleInput
+              node={page("p", { title: "Ancien" })}
+              autoFocus={false}
+              onAutoFocused={() => {}}
+              readOnly={readOnly}
+              onSaved={onSaved}
+            />
+          </SessionContext.Provider>,
+        ),
+      );
+    await withFocusTaken(false);
+    await type("Titre d'Alice");
+    await withFocusTaken(true);
+    await withFocusTaken(false);
+    await act(async () => buttonNamed("Reprendre ce titre")!.focus());
+    await withFocusTaken(true);
+    expect(buttonNamed("Reprendre ce titre")).toBeNull();
+    expect(document.activeElement).toBe(elsewhere);
+  } finally {
+    elsewhere.remove();
+  }
 });

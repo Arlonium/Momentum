@@ -61,6 +61,8 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
   const keep = useRef<Selection | null>(null);
   /** Le texte tapé, pas enregistré, quand la page est passée en lecture seule (M9). */
   const [unsaved, setUnsaved] = useState<string | null>(null);
+  /** L'élément du message qui a le focus, tant qu'aucun geste ne l'a emmené ailleurs. */
+  const focused = useRef<HTMLElement | null>(null);
   const afterLogin = useAfterLogin(useSession().me);
 
   /**
@@ -105,6 +107,19 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
     // `show` ne lit que des références : l'effet ne dépend que du titre.
     show(node.title);
   }, [node.title]);
+
+  // Filet : un rendu a retiré l'élément du message qui avait le focus (« Reprendre ce titre »
+  // quand la page repasse en lecture seule ; le message entier quand la page prend le titre
+  // gardé), sans qu'un geste l'ait emmené ailleurs (un `blur` l'aurait dit). Le focus ne tombe
+  // pas sur `body` : il va au champ du titre.
+  useLayoutEffect(() => {
+    const lost = focused.current;
+    if (lost === null || lost.isConnected) return;
+    focused.current = null;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    ref.current?.focus();
+  });
 
   useEffect(() => {
     if (autoFocus && ref.current) {
@@ -240,7 +255,19 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
       </div>
       {unsaved !== null && (
         // Sous le champ, pas au-dessus : il ne le déplace pas sous le curseur.
-        <div className="mm-banner mm-banner-reader">
+        <div
+          className="mm-banner mm-banner-reader"
+          onFocus={(event) => {
+            focused.current = event.target;
+          }}
+          onBlur={(event) => {
+            // Le focus part par un geste, hors du message : ce n'est pas un élément retiré.
+            const next = event.relatedTarget;
+            if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+              focused.current = null;
+            }
+          }}
+        >
           <p role="status">
             Ce titre n'a pas été enregistré :{" "}
             {/* Texte tapé ici, mais montré comme venu d'ailleurs : isolé. */}
