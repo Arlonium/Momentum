@@ -32,6 +32,12 @@ jobs:
   # sens qu'en release (chargement d'une page de 10 000 blocs depuis SQLite). Les budgets
   # du navigateur tournent dans le job `web`, après les autres tests e2e, sur un build de
   # production et un serveur `--release` (Ruling R38).
+  #
+  # Ce job lance tout ce qui est `#[ignore]` dans `mementum-sync` : la marque est réservée aux
+  # mesures (Ruling R340). Une limite connue s'écrit en test exécuté, qui l'affirme
+  # (`known_limit`), et tourne dans le job `rust`. Les mesures passent une à la fois, par un
+  # verrou dans `tests/budgets.rs` (Ruling R341). `--nocapture` : leurs lignes `MESURE` sont au
+  # journal de chaque passage, vert ou rouge.
   budgets:
     name: budgets
     runs-on: ubuntu-latest
@@ -39,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --release -p mementum-sync -- --ignored
+      - run: cargo test --release -p mementum-sync -- --ignored --nocapture
 
   web:
     name: web
