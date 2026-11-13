@@ -116,6 +116,35 @@ test("deep_breadcrumb_folds_its_middle_into_a_menu", async () => {
   expect(menu()).toBeNull();
 });
 
+test("menu_closes_when_the_hidden_pages_change_under_it", async () => {
+  // Une page déplacée ailleurs pendant que le menu est ouvert : ses entrées ne valent plus. Il
+  // se ferme, et le focus ne tombe pas sur `body`.
+  const [a, b, c, d, e, f] = chain("a", "b", "c", "d", "e", "f");
+  await show(f, [a, b, c, d, e]);
+  await act(async () => more()!.click());
+  expect(document.activeElement?.getAttribute("role")).toBe("menuitem");
+  // Toujours replié, d'autres pages masquées : le focus revient au bouton « … ».
+  const x = page("x", { parentId: "a" });
+  await show(f, [a, x, c, d, e]);
+  expect(menu()).toBeNull();
+  expect(document.activeElement).toBe(more());
+
+  // Le fil n'est plus replié : le focus va à la page.
+  await act(async () => more()!.click());
+  expect(menu()).not.toBeNull();
+  await show(f, [a, e]);
+  expect(menu()).toBeNull();
+  expect(more()).toBeNull();
+  expect(document.activeElement).toBe(items()[2].querySelector('[aria-current="page"]'));
+
+  // Témoin : un titre renommé ne ferme pas le menu, il le met à jour.
+  await show(f, [a, b, c, d, e]);
+  await act(async () => more()!.click());
+  await show(f, [a, { ...b, title: "B2" }, c, d, e]);
+  expect(menu()).not.toBeNull();
+  expect(menu()!.querySelector('[role="menuitem"]')!.textContent).toBe("B2");
+});
+
 test("five_levels_fold_two_pages", async () => {
   const [a, b, c, d, e] = chain("a", "b", "c", "d", "e");
   await show(e, [a, b, c, d]);

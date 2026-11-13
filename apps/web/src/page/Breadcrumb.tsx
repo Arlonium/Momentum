@@ -17,7 +17,7 @@
 // rendu sous la clé de sa page) : le lien quitte le document. Le focus ne tombe pas sur `body` :
 // il va à la page atteinte, dans le fil de sa barre du haut.
 import type { PageNode } from "@mementum/protocol";
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { isolate } from "../comments/dom";
 import { PageIcon } from "../icons";
 import { navigate, pagePath } from "../router";
@@ -68,6 +68,20 @@ export function Breadcrumb({ node, ancestors }: Props) {
   /** Les pages parentes que le fil replie dans son menu. */
   const hidden = folded ? trail.slice(1, -2) : [];
   const shown: (PageNode | null)[] = folded ? [trail[0], null, ...trail.slice(-2)] : trail;
+
+  // D'autres pages masquées sous un menu ouvert (une page déplacée ailleurs) : ses entrées ne
+  // valent plus. Il se ferme, et le focus, qui y était, revient au bouton « … », ou à la page
+  // si le fil ne se replie plus. Un titre renommé, lui, se met à jour dans le menu.
+  const hiddenIds = hidden.map((page) => page.id).join(" ");
+  const shownIds = useRef(hiddenIds);
+  useEffect(() => {
+    if (shownIds.current === hiddenIds) return;
+    shownIds.current = hiddenIds;
+    if (anchor === null) return;
+    setAnchor(null);
+    (anchor.isConnected ? anchor : current.current)?.focus();
+  }, [hiddenIds, anchor]);
+  const closeMenu = useCallback(() => setAnchor(null), []);
 
   const actions: MenuAction[] = hidden.map((page) => ({
     key: page.id,
@@ -138,7 +152,7 @@ export function Breadcrumb({ node, ancestors }: Props) {
         ))}
       </ol>
       {anchor && (
-        <RowMenu label={MORE} anchor={anchor} actions={actions} onClose={() => setAnchor(null)} />
+        <RowMenu label={MORE} anchor={anchor} actions={actions} onClose={closeMenu} />
       )}
     </nav>
   );
