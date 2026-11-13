@@ -14,7 +14,11 @@
 //!
 //! Ignorés par défaut, car la mesure n'a de sens qu'en `--release` :
 //! `cargo test --release -p mementum-sync -- --ignored` (job `budgets` de la
-//! CI).
+//! CI). Ils se mesurent **un à la fois** ([`alone`], Ruling R341) : libtest
+//! lance en parallèle les tests d'un même binaire, et quatre mesures sur des
+//! pages de 10 000 blocs se disputaient le disque et les cœurs (sur deux
+//! cœurs, la frappe précédée d'une version coûtait le double ; chiffres au
+//! registre du lot 3, « La CI remise au vert »).
 //!
 //! S'y ajoute un garde-fou, lancé avec les autres tests : l'attente de l'e2e
 //! `budgets.spec.ts`, qui laisse le serveur fermer l'acteur des pages avant
@@ -29,6 +33,7 @@ use common::*;
 use mementum_md::parse;
 use mementum_store::{Store, VersionReason};
 use mementum_sync::SyncConfig;
+use tokio::sync::{Mutex, MutexGuard};
 use yrs::ClientID;
 
 /// Blocs de la page.
@@ -61,6 +66,19 @@ fn release_only() {
             "mesure sans valeur en debug : lancer `cargo test --release -p mementum-sync -- --ignored`"
         );
     }
+}
+
+/// Le tour des mesures : une seule à la fois dans ce binaire (Ruling R341).
+static ONE_AT_A_TIME: Mutex<()> = Mutex::const_new(());
+
+/// À tenir pendant toute une mesure, depuis sa première ligne : elle attend que les autres
+/// mesures de ce binaire aient fini, quel que soit le nombre de fils de libtest. Ce qu'une
+/// mesure chronomètre est son propre coût, pas celui d'une autre qui écrit en même temps cent
+/// versions de 3 Mo sur le même disque. Le verrou est celui de tokio : il se tient d'un `await`
+/// à l'autre, et une mesure qui échoue (elle panique) ne le laisse pas empoisonné aux suivantes.
+async fn alone() -> MutexGuard<'static, ()> {
+    release_only();
+    ONE_AT_A_TIME.lock().await
 }
 
 /// La page de mesure : `BLOCKS` paragraphes, en MMD sans ancres (chaque
@@ -123,7 +141,7 @@ async fn loads_over_budget(f: &Fixture, blocks: usize, what: &str) -> Option<Str
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 async fn load_10000_block_page_from_store_under_300ms() {
-    release_only();
+    let _alone = alone().await;
     let cfg = SyncConfig::default();
     let f = Fixture::new(cfg).await;
     f.write_mmd(&page_mmd()).await;
@@ -155,7 +173,7 @@ async fn load_10000_block_page_from_store_under_300ms() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 async fn load_10000_block_page_after_full_rewrite_under_300ms() {
-    release_only();
+    let _alone = alone().await;
     let mmd = page_mmd();
 
     // (a) Réécriture complète par le serveur, comme `PUT /mmd` : tous les
@@ -232,7 +250,7 @@ async fn keystrokes_seen_by_another(f: &Fixture) -> Vec<Duration> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
-    release_only();
+    let _alone = alone().await;
     let mmd = page_mmd();
 
     // Ce que coûte une version, à part : l'état encodé depuis le document de l'acteur, puis
@@ -294,7 +312,7 @@ async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 async fn restore_and_cut_with_a_full_history_of_10000_block_page() {
-    release_only();
+    let _alone = alone().await;
     let mmd = page_mmd();
     let f = Fixture::new(SyncConfig::default()).await;
     f.write_mmd(&mmd).await;
