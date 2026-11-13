@@ -3,11 +3,13 @@
 // le MMD de la page ne change pas, et quelqu'un qui peut commenter sans pouvoir modifier
 // commente.
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
-import type { Thread } from "@mementum/protocol";
+import type { ErrorBody, Thread, Version } from "@mementum/protocol";
 import {
   closeContexts,
   createPage,
   getMmd,
+  holdPageReads,
+  holdTreeReads,
   newUser,
   openPage,
   ownerAndMember,
@@ -19,6 +21,7 @@ import {
   waitSynced,
   watchWrites,
 } from "./helpers";
+import { E2E_VERSION_EVERY_SECS } from "./servers";
 
 test.afterEach(closeContexts);
 
@@ -378,4 +381,208 @@ test("ctrl_alt_m_comments_the_block_of_the_cursor", async ({ browser }) => {
   // Rien n'est parti dans le document, ni par le menu ni par le raccourci.
   expect(writes).toEqual([]);
   expect(await getMmd(aliceApi, page.id)).toBe(before);
+});
+
+/** `POST …/comments/{threadId}/replies` par l'API. */
+async function replyByApi(api: APIRequestContext, pageId: string, threadId: string, body: string) {
+  return api.post(`/api/v1/pages/${pageId}/comments/${threadId}/replies`, { data: { body } });
+}
+
+/** Les fils de la page, tels que l'API les rend. */
+async function threadsOf(api: APIRequestContext, pageId: string): Promise<Thread[]> {
+  const res = await api.get(`/api/v1/pages/${pageId}/comments`);
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as Thread[];
+}
+
+/** Les versions de la page, la plus récente d'abord. */
+async function versionsOf(api: APIRequestContext, pageId: string): Promise<Version[]> {
+  const res = await api.get(`/api/v1/pages/${pageId}/versions`);
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as Version[];
+}
+
+/**
+ * Écrit `mmd` plus d'un intervalle de versions après l'écriture d'avant : le serveur coupe une
+ * version, qui garde le contenu d'avant (`E2E_VERSION_EVERY_SECS`). Rend les versions.
+ */
+async function writeAfterTheInterval(api: APIRequestContext, pageId: string, mmd: string) {
+  const before = (await versionsOf(api, pageId)).length;
+  await new Promise((done) => setTimeout(done, E2E_VERSION_EVERY_SECS * 1_000 + 200));
+  await putMmd(api, pageId, mmd);
+  await expect.poll(async () => (await versionsOf(api, pageId)).length).toBeGreaterThan(before);
+  return versionsOf(api, pageId);
+}
+
+/** L'encart des textes qu'on ne peut plus envoyer (R211). */
+function unsentOf(panel: Locator): Locator {
+  return panel.getByRole("region", { name: "Textes non envoyés" });
+}
+
+test("message_limit_is_read_and_the_reply_stays", async ({ browser }) => {
+  // Le plafond le moins cher à atteindre qui touche un texte tapé : 500 messages dans un fil (S4).
+  test.setTimeout(120_000);
+  const { alice, aliceApi, page } = await scene("comment");
+  const thread = await openThread(aliceApi, page.id, null, "Message 1");
+  for (let from = 2; from <= 500; from += 25) {
+    const batch = [];
+    for (let n = from; n < from + 25 && n <= 500; n += 1) {
+      batch.push(replyByApi(aliceApi, page.id, thread.id, `Message ${n}`));
+    }
+    for (const res of await Promise.all(batch)) expect(res.status()).toBe(201);
+  }
+  // Témoin : le serveur refuse le 501e, et dit pourquoi.
+  const over = await replyByApi(aliceApi, page.id, thread.id, "Par l'API, de trop");
+  expect(over.status()).toBe(409);
+  const refusal = (await over.json()) as ErrorBody;
+  expect(refusal.error).toBe("message_limit");
+
+  const p = await openPage(browser, page.id, alice);
+  const panel = await openComments(p);
+  const shown = threadOf(panel, "Message 1");
+  await expect(shown.getByRole("listitem").filter({ hasText: "Message 500" })).toHaveCount(1);
+  await shown.getByRole("button", { name: "Répondre" }).click();
+  const field = panel.getByRole("textbox", { name: "Répondre au fil" });
+  await field.fill("Une réponse de trop");
+  await panel.getByRole("button", { name: "Envoyer la réponse" }).click();
+  // Le refus tel que le serveur le dit, et le texte reste dans son champ.
+  await expect(panel.getByRole("alert")).toHaveText(refusal.message);
+  await expect(field).toHaveValue("Une réponse de trop");
+  // Fermé puis rouvert, le panneau le retrouve ; rien n'est parti.
+  await commentsButton(p).click();
+  await expect(panel).toBeHidden();
+  await openComments(p);
+  await expect(panel.getByRole("textbox", { name: "Répondre au fil" })).toHaveValue(
+    "Une réponse de trop",
+  );
+  const [stored] = await threadsOf(aliceApi, page.id);
+  expect(stored.comments).toHaveLength(500);
+});
+
+test("agent_rewrite_keeps_the_thread_on_its_block", async ({ browser }) => {
+  // C9-1 : un agent relit la page (`GET /mmd`, sans ancres) et la récrit par `PUT /mmd`, pendant
+  // qu'un fil est ouvert sur un bloc. Un bloc inchangé garde son identifiant (S3, R201) : le fil
+  // reste sur son bloc, et la pastille aussi.
+  const { alice, aliceApi, page } = await scene("comment");
+  const a = await openPage(browser, page.id, alice);
+  const second = await blockIdOf(a, "Deuxième bloc");
+  await openThread(aliceApi, page.id, second, "Sur le deuxième bloc");
+  const panel = await openComments(a);
+  const thread = threadOf(panel, "Sur le deuxième bloc");
+  await expect(thread.getByRole("button", { name: "Aller au bloc" })).toBeVisible();
+  await expect(markOf(a, "Deuxième bloc")).toBeVisible();
+
+  // Récrite telle quelle, puis avec un bloc de plus : quand celui-ci paraît, la récriture
+  // identique, partie avant lui, est arrivée aussi.
+  const read = await getMmd(aliceApi, page.id);
+  expect(read).toBe(CONTENT);
+  await putMmd(aliceApi, page.id, read);
+  await putMmd(aliceApi, page.id, `${CONTENT}\nQuatrième bloc\n`);
+  await expect(blockOf(a, "Quatrième bloc")).toHaveCount(1);
+  expect(await blockIdOf(a, "Deuxième bloc")).toBe(second);
+  await expect(markOf(a, "Deuxième bloc")).toBeVisible();
+  await expect(thread.getByRole("button", { name: "Aller au bloc" })).toBeVisible();
+  await expect(panel.getByRole("heading", { name: "Bloc supprimé" })).toHaveCount(0);
+
+  // L'agent modifie le bloc commenté lui-même. Il reste à sa place, entre deux blocs gardés, et
+  // garde son type : il garde aussi son identifiant (R201), et le fil le suit.
+  await putMmd(
+    aliceApi,
+    page.id,
+    "Premier bloc\n\nDeuxième bloc, revu par l'agent\n\nTroisième bloc\n\nQuatrième bloc\n",
+  );
+  await expect(blockOf(a, "Deuxième bloc, revu par l'agent")).toHaveCount(1);
+  expect(await blockIdOf(a, "Deuxième bloc, revu par l'agent")).toBe(second);
+  await expect(markOf(a, "Deuxième bloc, revu par l'agent")).toBeVisible();
+  await expect(thread.getByRole("button", { name: "Aller au bloc" })).toBeVisible();
+  await expect(panel.getByRole("heading", { name: "Bloc supprimé" })).toHaveCount(0);
+});
+
+test("a_draft_outlives_a_lowered_level_and_comes_back_with_it", async ({ browser }) => {
+  // C9-2 : un commentateur rédige ; son niveau tombe à « Peut lire ». Son texte reste montré
+  // (« Textes non envoyés », R211), et retrouve son champ quand le droit revient, sans partir.
+  const { aliceApi, bruno, brunoId, page } = await scene("comment");
+  const b = await openPage(browser, page.id, bruno);
+  const panel = await openComments(b);
+  await panel.getByRole("textbox", { name: "Commenter la page" }).fill("Mon brouillon");
+  await setPageLevel(aliceApi, page.id, brunoId, "read");
+  const unsent = unsentOf(panel);
+  await expect(unsent).toContainText("Mon brouillon");
+  await expect(unsent).toContainText("Tu ne peux plus écrire ici.");
+  await expect(panel.getByRole("textbox")).toHaveCount(0);
+  // Le droit revient : le texte retrouve son champ, et rien n'est parti tout seul.
+  await setPageLevel(aliceApi, page.id, brunoId, "comment");
+  await expect(panel.getByRole("textbox", { name: "Commenter la page" })).toHaveValue(
+    "Mon brouillon",
+  );
+  await expect(unsent).toHaveCount(0);
+  expect(await threadsOf(aliceApi, page.id)).toEqual([]);
+});
+
+test("a_draft_refused_by_a_trash_shows_the_server_message", async ({ browser }) => {
+  // C9-2 : la page part à la corbeille pendant qu'il rédige ; son onglet ne le sait pas encore
+  // (lectures de la page et de l'arbre retenues). Il envoie : le serveur refuse, et quand la page
+  // relue dit la corbeille, le texte reste montré avec le refus du serveur tel quel.
+  const { aliceApi, bruno, page } = await scene("comment");
+  const b = await openPage(browser, page.id, bruno);
+  const panel = await openComments(b);
+  const field = panel.getByRole("textbox", { name: "Commenter la page" });
+  await field.fill("Envoyé trop tard");
+  const pageReads = await holdPageReads(b, page.id);
+  const treeReads = await holdTreeReads(b);
+  const trashed = await aliceApi.post(`/api/v1/pages/${page.id}/trash`);
+  expect(trashed.status()).toBe(200);
+  await panel.getByRole("button", { name: "Commenter", exact: true }).click();
+  const refusal = panel.getByRole("alert");
+  await expect(refusal).toContainText("la page est à la corbeille");
+  const said = await refusal.textContent();
+  pageReads.release();
+  treeReads.release();
+  await expect(trashBanner(b)).toBeVisible();
+  const unsent = unsentOf(panel);
+  await expect(unsent).toContainText("Envoyé trop tard");
+  await expect(unsent).toContainText(said!);
+  await expect(panel.getByRole("textbox")).toHaveCount(0);
+  expect(await threadsOf(aliceApi, page.id)).toEqual([]);
+});
+
+test("a_restore_without_the_commented_block_moves_its_thread_apart_and_back", async ({ browser }) => {
+  // C9-3 : Bruno restaure une version où le bloc commenté n'existe pas, pendant qu'Alice a le
+  // panneau ouvert : le fil passe sous « Bloc supprimé ». Bruno restaure ensuite la version
+  // « avant une restauration » : le bloc revient avec son identifiant, et le fil sur lui.
+  const { alice, aliceApi, brunoApi, brunoId, space } = await ownerAndMember();
+  const page = await createPage(aliceApi, {
+    spaceId: space.id,
+    section: "private",
+    title: `Restaurations ${unique()}`,
+  });
+  await setPageLevel(aliceApi, page.id, brunoId, "edit");
+  await putMmd(aliceApi, page.id, "Premier bloc\n\nDeuxième bloc\n");
+  const [withoutThird] = await writeAfterTheInterval(aliceApi, page.id, CONTENT);
+
+  const a = await openPage(browser, page.id, alice);
+  const third = await blockIdOf(a, "Troisième bloc");
+  await openThread(aliceApi, page.id, third, "Sur le troisième bloc");
+  const panel = await openComments(a);
+  const open = panel.getByRole("list", { name: "Fils ouverts" });
+  await expect(threadOf(open, "Sur le troisième bloc")).toBeVisible();
+  await expect(markOf(a, "Troisième bloc")).toBeVisible();
+
+  const restore = (versionId: string) =>
+    brunoApi.post(`/api/v1/pages/${page.id}/versions/${versionId}/restore`);
+  expect((await restore(withoutThird.id)).status()).toBe(204);
+  await expect(blockOf(a, "Troisième bloc")).toHaveCount(0);
+  const deleted = panel.getByRole("list", { name: "Fils d'un bloc supprimé" });
+  await expect(threadOf(deleted, "Sur le troisième bloc")).toBeVisible();
+  await expect(markOf(a, "Troisième bloc")).toHaveCount(0);
+
+  // La restauration a gardé ce qu'elle remplaçait : la version « avant une restauration ».
+  const [beforeRestore] = await versionsOf(aliceApi, page.id);
+  expect(beforeRestore.reason).toBe("before_restore");
+  expect((await restore(beforeRestore.id)).status()).toBe(204);
+  await expect(blockOf(a, "Troisième bloc")).toHaveCount(1);
+  expect(await blockIdOf(a, "Troisième bloc")).toBe(third);
+  await expect(threadOf(open, "Sur le troisième bloc")).toBeVisible();
+  await expect(deleted).toHaveCount(0);
+  await expect(markOf(a, "Troisième bloc")).toBeVisible();
 });
