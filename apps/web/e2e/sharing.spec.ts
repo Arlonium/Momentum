@@ -294,6 +294,62 @@ test("downgrade_to_read_makes_the_open_editor_read_only", async ({ browser }) =>
   expect(await getMmd(aliceApi, shared.id)).toBe("Écrit par Bruno, puis par Alice\n");
 });
 
+test("title_typed_while_losing_the_right_is_not_shown_as_saved", async ({ browser }) => {
+  const { aliceApi, bruno, brunoId } = await ownerAndMember();
+  const title = `Notes ${unique()}`;
+  const typed = `${title}, revu par Bruno`;
+  const shared = await createPage(aliceApi, { section: "private", title });
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  const b = await openPage(browser, shared.id, bruno);
+  await waitSynced(b);
+  const renames: string[] = [];
+  b.on("request", (req) => {
+    if (req.method() === "PATCH" && new URL(req.url()).pathname === `/api/v1/pages/${shared.id}`) {
+      renames.push(req.postData() ?? "");
+    }
+  });
+
+  // A le passe en lecture. Les relectures de la page et de l'arbre sont retenues : le temps de
+  // taper un titre dans un onglet qui se croit encore en écriture, sans quitter le champ.
+  const reads = await holdPageReads(b, shared.id);
+  const tree = await holdTreeReads(b);
+  await setPageLevel(aliceApi, shared.id, brunoId, "read");
+  await reads.asked;
+  await titleOf(b).click();
+  await b.keyboard.press("End");
+  await b.keyboard.type(", revu par Bruno");
+  await expect(titleOf(b)).toHaveValue(typed);
+
+  // L'onglet apprend la baisse, le champ encore en édition : il montre le titre du serveur, et
+  // le texte tapé attend dans un message.
+  reads.release();
+  tree.release();
+  await expect(readerBanner(b)).toBeVisible({ timeout: 5_000 });
+  await expect(titleOf(b)).toHaveAttribute("readonly", "");
+  await expect(titleOf(b)).toHaveValue(title);
+  const unsaved = b.getByRole("status").filter({ hasText: "Ce titre n'a pas été enregistré" });
+  await expect(unsaved).toHaveText(`Ce titre n'a pas été enregistré : ${typed}`);
+  await expect(b.getByRole("button", { name: "Reprendre ce titre" })).toHaveCount(0);
+  // Rien ne part, même en quittant le champ.
+  await titleOf(b).blur();
+  expect(renames).toEqual([]);
+  expect((await getPage(aliceApi, shared.id)).title).toBe(title);
+
+  // Le droit revient, la page est rouverte : le texte est proposé, et ne part que repris.
+  await setPageLevel(aliceApi, shared.id, brunoId, "edit");
+  await raisedBanner(b).getByRole("button", { name: "Rouvrir la page" }).click();
+  await expect(titleOf(b)).not.toHaveAttribute("readonly", "");
+  await expect(titleOf(b)).toHaveValue(title);
+  await b.getByRole("button", { name: "Reprendre ce titre" }).click();
+  await expect(titleOf(b)).toBeFocused();
+  await expect(titleOf(b)).toHaveValue(typed);
+  await expect(unsaved).toHaveCount(0);
+  expect(renames).toEqual([]);
+  await b.keyboard.press("Enter");
+  await expect.poll(async () => (await getPage(aliceApi, shared.id)).title).toBe(typed);
+  expect(renames).toHaveLength(1);
+});
+
 test("two_tabs_of_one_account_exchange_only_through_the_server", async ({ browser }) => {
   const { aliceApi, bruno, brunoId } = await ownerAndMember();
   const shared = await createPage(aliceApi, { section: "private", title: `Onglets ${unique()}` });

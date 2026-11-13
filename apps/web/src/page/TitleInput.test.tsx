@@ -204,9 +204,10 @@ test("a_read_only_field_follows_the_remote_title_even_after_typing", async () =>
   await render(page("p", { title: "Ancien" }));
   await type("Titre d'Alice");
   // Son niveau baisse (ou la page part à la corbeille) avant qu'elle ait quitté le champ : ce
-  // qu'elle a tapé reste affiché, mais ne partira plus.
+  // qu'elle a tapé ne partira plus. Ce test disait que le texte restait affiché dans le champ ;
+  // depuis R257 (M9), le champ dit le titre de la page, et le texte attend dans un message.
   await render(page("p", { title: "Ancien" }), me, true);
-  expect(field().value).toBe("Titre d'Alice");
+  expect(field().value).toBe("Ancien");
   await blur();
   expect(updatePage).not.toHaveBeenCalled();
   // Un renommage fait ailleurs le remplace alors, plutôt qu'un titre qui n'est pas celui de
@@ -374,4 +375,115 @@ test("a_send_refused_once_the_field_is_read_only_lets_the_remote_title_in", asyn
   expect(field().value).toBe("Titre de Bob");
   await blur();
   expect(updatePage).toHaveBeenCalledTimes(1);
+});
+
+// Un titre tapé, pas encore enregistré, quand la page passe en lecture seule (R257, M9) : le
+// champ revient au titre du serveur, et le texte tapé est gardé dans un message. Il est proposé
+// quand la page redevient modifiable, sans rentrer seul dans le champ (R210 tient).
+
+const UNSAVED = "Ce titre n'a pas été enregistré : ";
+const unsavedMessage = () => host.querySelector('[role="status"]');
+const buttonNamed = (name: string) =>
+  [...host.querySelectorAll("button")].find((b) => b.textContent === name) ?? null;
+const press = (name: string) =>
+  act(async () => {
+    buttonNamed(name)!.click();
+  });
+
+/** Le titre « Ancien », puis « Titre d'Alice » tapé, puis la page en lecture seule. */
+async function typedThenReadOnly() {
+  await render(page("p", { title: "Ancien" }));
+  await type("Titre d'Alice");
+  await render(page("p", { title: "Ancien" }), me, true);
+}
+
+test("unsaved_title_is_not_shown_as_the_title_once_read_only", async () => {
+  await typedThenReadOnly();
+  // Le champ dit le titre de la page ; le texte tapé est dans un message, isolé.
+  expect(field().value).toBe("Ancien");
+  const message = unsavedMessage();
+  expect(message?.textContent).toBe(`${UNSAVED}Titre d'Alice`);
+  expect(message?.querySelector('.mm-isolate[dir="auto"]')?.textContent).toBe("Titre d'Alice");
+  // Rien à reprendre tant que la page est en lecture seule, et rien ne part.
+  expect(buttonNamed("Reprendre ce titre")).toBeNull();
+  await blur();
+  expect(updatePage).not.toHaveBeenCalled();
+});
+
+test("unsaved_title_is_offered_again_when_the_page_can_be_edited_again", async () => {
+  await typedThenReadOnly();
+  await blur();
+  await render(page("p", { title: "Ancien" }));
+  // Le message reste, et propose le texte ; le champ garde le titre du serveur, et rien ne part.
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Titre d'Alice`);
+  expect(buttonNamed("Reprendre ce titre")).not.toBeNull();
+  expect(field().value).toBe("Ancien");
+  await focus();
+  await blur();
+  expect(updatePage).not.toHaveBeenCalled();
+  // Repris : le texte est dans le champ comme une saisie, le focus aussi, et le message part.
+  await press("Reprendre ce titre");
+  expect(field().value).toBe("Titre d'Alice");
+  expect(document.activeElement).toBe(field());
+  expect(unsavedMessage()).toBeNull();
+  expect(updatePage).not.toHaveBeenCalled();
+  await blur();
+  expect(updatePage).toHaveBeenCalledExactlyOnceWith("p", { title: "Titre d'Alice" });
+
+  // Une seconde fois, écarté : le message part, le champ garde le titre, et le focus va au
+  // champ plutôt que sur `body`.
+  await render(page("p", { title: "Titre d'Alice" }));
+  await type("Autre titre");
+  await render(page("p", { title: "Titre d'Alice" }), me, true);
+  await blur();
+  await render(page("p", { title: "Titre d'Alice" }));
+  await press("Écarter");
+  expect(unsavedMessage()).toBeNull();
+  expect(field().value).toBe("Titre d'Alice");
+  expect(document.activeElement).toBe(field());
+  await blur();
+  expect(updatePage).toHaveBeenCalledTimes(1);
+});
+
+test("a_remote_rename_while_read_only_keeps_the_offered_text", async () => {
+  await typedThenReadOnly();
+  await render(page("p", { title: "Titre de Bob" }), me, true);
+  // Le champ suit le titre distant ; le texte gardé reste proposé.
+  expect(field().value).toBe("Titre de Bob");
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Titre d'Alice`);
+  await render(page("p", { title: "Titre de Bob" }));
+  expect(field().value).toBe("Titre de Bob");
+  expect(buttonNamed("Reprendre ce titre")).not.toBeNull();
+  expect(updatePage).not.toHaveBeenCalled();
+});
+
+test("a_saved_title_shows_no_message", async () => {
+  // Témoin : un titre tapé et enregistré, puis la page en lecture seule : aucun message.
+  await render(page("p", { title: "Ancien" }));
+  await type("Titre d'Alice");
+  await enter();
+  await render(page("p", { title: "Titre d'Alice" }), me, true);
+  expect(field().value).toBe("Titre d'Alice");
+  expect(unsavedMessage()).toBeNull();
+  // Ni pour un champ où rien n'a été tapé.
+  await render(page("p", { title: "Titre de Bob" }), me, false);
+  await render(page("p", { title: "Titre de Bob" }), me, true);
+  expect(unsavedMessage()).toBeNull();
+});
+
+test("a_send_that_lands_after_the_page_turned_read_only_takes_the_message_away", async () => {
+  // L'envoi est en route quand la page passe en lecture seule ; il aboutit (le serveur l'a
+  // reçu avant la baisse) : le texte est le titre de la page, plus rien à proposer.
+  const answer = deferred<PageNode>();
+  vi.mocked(updatePage).mockReturnValueOnce(answer.promise);
+  await render(page("p", { title: "Ancien" }));
+  await type("Premier");
+  await enter();
+  await render(page("p", { title: "Ancien" }), me, true);
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Premier`);
+  await act(async () => answer.resolve(page("p", { title: "Premier" })));
+  expect(unsavedMessage()).toBeNull();
+  await render(page("p", { title: "Premier" }), me, true);
+  expect(field().value).toBe("Premier");
+  expect(unsavedMessage()).toBeNull();
 });

@@ -11,6 +11,14 @@
 // Un titre refusé parce que la session est perdue (`401`) n'est pas une erreur à afficher : la
 // connexion est demandée par-dessus la page, le titre tapé reste dans le champ, et il repart
 // au serveur quand le compte revient, comme le texte de la page.
+//
+// Un titre tapé et pas encore enregistré quand la page passe en lecture seule (niveau baissé,
+// page à la corbeille) ne peut plus partir (R210) : il n'est pas montré comme le titre de la
+// page. Le champ revient au titre du serveur, et le texte tapé attend dans un message sous le
+// champ (R257, M9). Quand la page redevient modifiable, le message le propose (« Reprendre ce
+// titre ») : repris, il est dans le champ comme une saisie, et part comme elle ; jamais seul.
+// « Écarter » le jette. Le message part aussi quand la page prend ce titre (l'envoi en route a
+// abouti, ou quelqu'un d'autre l'a donné).
 import type { PageNode } from "@mementum/protocol";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiError, isSessionLost, MAX_TITLE_CHARS, titleLength, updatePage } from "../api";
@@ -51,12 +59,9 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
   const locked = useRef(readOnly);
   /** Sélection à remettre en place une fois le texte posé (champ qui a le focus). */
   const keep = useRef<Selection | null>(null);
+  /** Le texte tapé, pas enregistré, quand la page est passée en lecture seule (M9). */
+  const [unsaved, setUnsaved] = useState<string | null>(null);
   const afterLogin = useAfterLogin(useSession().me);
-
-  // Lu par l'effet du titre distant, qui ne doit pas repartir quand seul ce drapeau change.
-  useLayoutEffect(() => {
-    locked.current = readOnly;
-  }, [readOnly]);
 
   /**
    * Pose `title` dans le champ. Le navigateur met le curseur à la fin quand on change la
@@ -75,11 +80,26 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
     setValue(title);
   };
 
+  // Lu par l'effet du titre distant, qui ne doit pas repartir quand seul ce drapeau change. La
+  // page passe en lecture seule : un texte qui n'est pas son titre (tapé, ou en route) ne peut
+  // plus partir ; il quitte le champ, qui reprend le titre de la page, pour le message (M9).
+  // Avant l'affichage : il n'est jamais montré, en lecture seule, comme le titre.
+  useLayoutEffect(() => {
+    locked.current = readOnly;
+    const el = ref.current;
+    if (!readOnly || !el || el.value === saved.current) return;
+    typed.current = false;
+    setUnsaved(el.value);
+    show(saved.current);
+  }, [readOnly]);
+
   // Un titre changé ailleurs (renommage apporté par la barre latérale, réponse du serveur) : le
   // champ le reprend tant que rien n'y a été tapé, même pendant le focus. Un champ en lecture
   // seule le reprend aussi : ce qui y a été tapé ne partira plus.
   useEffect(() => {
     saved.current = node.title;
+    // La page a désormais le titre gardé : plus rien à proposer.
+    setUnsaved((kept) => (kept === node.title ? null : kept));
     if (typed.current && !locked.current) return;
     typed.current = false;
     // `show` ne lit que des références : l'effet ne dépend que du titre.
@@ -134,6 +154,8 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
       }
       saved.current = updated.title;
       setError(null);
+      // Un envoi parti avant la lecture seule a abouti : son texte n'est plus à proposer.
+      setUnsaved((kept) => (kept === title || kept === updated.title ? null : kept));
       // La saisie n'a pas changé pendant l'envoi : elle est enregistrée, et on affiche le titre
       // normalisé. Sinon, ce qui a été tapé depuis reste à envoyer.
       if (ref.current?.value === title) {
@@ -154,6 +176,25 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
     }
   };
 
+  /**
+   * « Reprendre ce titre » : le texte gardé passe dans le champ comme une saisie d'ici, avec le
+   * focus ; il part comme elle, à la sortie du champ ou sur Entrée.
+   */
+  const resume = () => {
+    if (unsaved === null || readOnly) return;
+    ref.current?.focus();
+    typed.current = unsaved !== (sending.current ?? saved.current);
+    setValue(unsaved);
+    setError(null);
+    setUnsaved(null);
+  };
+
+  /** « Écarter » : le texte gardé est jeté ; le focus va au champ, pas sur `body`. */
+  const dismiss = () => {
+    setUnsaved(null);
+    ref.current?.focus();
+  };
+
   const length = titleLength(value);
   const tooLong = length > MAX_TITLE_CHARS;
   const message =
@@ -161,39 +202,62 @@ export function TitleInput({ node, autoFocus, onAutoFocused, readOnly, onSaved }
     (tooLong ? `Un titre a ${MAX_TITLE_CHARS} caractères au plus (celui-ci en a ${length}).` : null);
 
   return (
-    <div className="mm-title">
-      <textarea
-        ref={ref}
-        className="mm-title-input"
-        aria-label="Titre de la page"
-        aria-invalid={message ? true : undefined}
-        aria-describedby={message ? "mm-title-error" : undefined}
-        placeholder="Sans titre"
-        rows={1}
-        spellCheck
-        readOnly={readOnly}
-        value={value}
-        onChange={(e) => {
-          const next = e.target.value.replace(/[\r\n]+/g, " ");
-          // Le champ redit le titre que la page a (ou aura : celui qui part) : plus rien de tapé à
-          // protéger, il suit le distant. Une lettre tapée puis effacée ne garde pas le champ.
-          typed.current = next !== (sending.current ?? saved.current);
-          setValue(next);
-          setError(null);
-        }}
-        onBlur={() => void save()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-            e.preventDefault();
-            void save();
-          }
-        }}
-      />
-      {message && (
-        <p id="mm-title-error" className="mm-title-error" role="alert">
-          {message}
-        </p>
+    <>
+      <div className="mm-title">
+        <textarea
+          ref={ref}
+          className="mm-title-input"
+          aria-label="Titre de la page"
+          aria-invalid={message ? true : undefined}
+          aria-describedby={message ? "mm-title-error" : undefined}
+          placeholder="Sans titre"
+          rows={1}
+          spellCheck
+          readOnly={readOnly}
+          value={value}
+          onChange={(e) => {
+            const next = e.target.value.replace(/[\r\n]+/g, " ");
+            // Le champ redit le titre que la page a (ou aura : celui qui part) : plus rien de
+            // tapé à protéger, il suit le distant. Une lettre tapée puis effacée ne garde pas le
+            // champ.
+            typed.current = next !== (sending.current ?? saved.current);
+            setValue(next);
+            setError(null);
+          }}
+          onBlur={() => void save()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void save();
+            }
+          }}
+        />
+        {message && (
+          <p id="mm-title-error" className="mm-title-error" role="alert">
+            {message}
+          </p>
+        )}
+      </div>
+      {unsaved !== null && (
+        // Sous le champ, pas au-dessus : il ne le déplace pas sous le curseur.
+        <div className="mm-banner mm-banner-reader">
+          <p role="status">
+            Ce titre n'a pas été enregistré :{" "}
+            {/* Texte tapé ici, mais montré comme venu d'ailleurs : isolé. */}
+            <span className="mm-isolate" dir="auto">
+              {unsaved}
+            </span>
+          </p>
+          {!readOnly && (
+            <button type="button" className="mm-button" onClick={resume}>
+              Reprendre ce titre
+            </button>
+          )}
+          <button type="button" className="mm-button mm-button-quiet" onClick={dismiss}>
+            Écarter
+          </button>
+        </div>
       )}
-    </div>
+    </>
   );
 }
