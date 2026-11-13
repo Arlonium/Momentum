@@ -1,7 +1,7 @@
-// Une page ouverte : barre du haut (fil d'Ariane, état de la connexion, présents, « Commentaires »,
-// « Partager » pour qui a l'accès complet, puis le menu « … » et son « Historique »), bandeaux
-// (lecture seule, corbeille) si besoin, titre, puis l'éditeur en direct ; à droite, le panneau
-// des commentaires quand il est ouvert.
+// Une page ouverte : barre du haut (fil d'Ariane, état de la connexion, présents,
+// « Commentaires », « Partager » pour qui a l'accès complet, puis le menu « … » et son
+// « Historique »), bandeaux (lecture seule, corbeille) si besoin, titre, puis l'éditeur en
+// direct ; à droite, le panneau des commentaires quand il est ouvert.
 //
 // Les commentaires (R134) n'écrivent rien dans le document : ils se lisent à tout niveau, et
 // s'écrivent avec « Peut commenter », même quand l'éditeur est en lecture seule. Le panneau
