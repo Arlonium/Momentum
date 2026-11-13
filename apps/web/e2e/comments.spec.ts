@@ -326,6 +326,7 @@ test("comments_are_read_only_in_the_trash", async ({ browser }) => {
     "Ajouter une réaction",
     "Modifier ce message",
     "Supprimer ce message",
+    "Supprimer le fil",
   ]) {
     await expect(panel.getByRole("button", { name })).toHaveCount(0);
   }
