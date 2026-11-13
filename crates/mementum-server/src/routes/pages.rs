@@ -573,7 +573,10 @@ pub(crate) async fn get_mmd(
 
 /// `PUT /api/v1/pages/{id}/mmd` : remplace le contenu de la page, au nom du compte de la
 /// session. L'écriture est persistée, puis diffusée aux connexions ouvertes. Une prop hors
-/// registre est refusée (`422 invalid_blocks`, Ruling R41).
+/// registre est refusée (`422 invalid_blocks`, Ruling R41). Le MMD de `GET /mmd` ne porte pas
+/// d'ancres : un bloc écrit sans identifiant reçoit celui du bloc courant qui lui correspond
+/// (`PageDoc::rewrite_blocks`, Ruling R201), et une page récrite telle quelle garde ses
+/// identifiants, donc ses fils de commentaires attachés à leurs blocs.
 ///
 /// Les droits sont contrôlés deux fois (Ruling R89) : avant la lecture du corps, pour que les
 /// refus viennent d'abord ; puis une fois la page chargée, juste avant d'écrire. Charger une

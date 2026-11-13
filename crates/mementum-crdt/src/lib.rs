@@ -11,6 +11,7 @@ mod dedupe;
 mod edit;
 mod foreign;
 mod guard;
+mod kept_ids;
 mod page;
 mod revision;
 mod structure;

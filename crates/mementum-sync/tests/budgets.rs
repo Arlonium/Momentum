@@ -318,13 +318,16 @@ async fn restore_and_cut_with_a_full_history_of_10000_block_page() {
         state.len()
     );
 
-    // Une restauration : la page a changé depuis (réécrite), une version d'avant restauration
-    // est coupée, puis les blocs de la version sont écrits par-dessus.
+    // Une restauration : la page a changé depuis (réécrite, un paragraphe de plus), une version
+    // d'avant restauration est coupée, puis les blocs de la version sont écrits par-dessus.
+    // Depuis le Ruling R201, `PUT /mmd` garde l'identifiant des blocs inchangés : récrite à
+    // l'identique, la page vaudrait la version, et la restauration ne ferait rien (R180).
     let version = f.store.list_versions(f.page).await.unwrap()[0].id;
-    f.write_mmd(&mmd).await;
+    let changed = format!("{mmd}\nChangée\n");
+    f.write_mmd(&changed).await;
     let mut restores = Vec::new();
     for _ in 0..3 {
-        f.write_mmd(&mmd).await;
+        f.write_mmd(&changed).await;
         let start = Instant::now();
         f.hub.restore_version(f.page, version, None).await.unwrap();
         restores.push(start.elapsed());

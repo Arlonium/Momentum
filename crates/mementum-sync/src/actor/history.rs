@@ -18,7 +18,7 @@ use mementum_store::{Store, StoreError, VersionReason};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::{Actor, Broken};
+use super::{Actor, Broken, Ids};
 use crate::protocol;
 use crate::{PageEvent, SyncError};
 
@@ -341,6 +341,7 @@ impl Actor {
         } else {
             History::Kept(version)
         };
-        self.server_write(blocks, actor, history).await
+        self.server_write(blocks, actor, history, Ids::AsGiven)
+            .await
     }
 }

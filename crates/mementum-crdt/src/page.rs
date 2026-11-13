@@ -15,6 +15,7 @@ use yrs::{
 
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, read_page, write_nodes};
 use crate::guard::{Pending, Shape, missing, touched};
+use crate::kept_ids::keep_ids;
 use crate::structure::{Slot, check_blocks};
 use crate::{CrdtError, FRAGMENT, META};
 
@@ -302,6 +303,25 @@ impl PageDoc {
     /// [`MAX_YJS_DEPTH`](crate::MAX_YJS_DEPTH) (`TooDeep`).
     pub fn write_blocks(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
         let blocks = writable(blocks)?;
+        let mut txn = self.doc.transact_mut();
+        self.write_all(&mut txn, &blocks);
+        Ok(txn.encode_update_v1())
+    }
+
+    /// Comme [`PageDoc::write_blocks`], pour `PUT /mmd` (Ruling R201) : avant d'écrire, un bloc
+    /// sans identifiant reçoit celui du bloc courant qui lui correspond (même liste de frères,
+    /// mêmes type, contenu et props, ou même place entre deux blocs gardés et même type ; voir
+    /// le module `kept_ids`). Le MMD que rend `GET /mmd` ne porte pas d'ancres : sans cela, un
+    /// agent qui récrivait une page telle quelle donnait un identifiant neuf à chaque bloc, et
+    /// les fils de commentaires perdaient le leur. Un bloc qui porte un identifiant le garde.
+    ///
+    /// Comme `write_blocks`, l'écriture remplace tout le contenu : une édition faite en même
+    /// temps sur le contenu remplacé est perdue (Ruling R188).
+    pub fn rewrite_blocks(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
+        let mut blocks = writable(blocks)?;
+        // Avant la transaction d'écriture : `read_blocks` en ouvre une de lecture.
+        let current = self.read_blocks();
+        keep_ids(&current, &mut blocks);
         let mut txn = self.doc.transact_mut();
         self.write_all(&mut txn, &blocks);
         Ok(txn.encode_update_v1())

@@ -86,6 +86,16 @@ const MAX_HELD_UPDATES: usize = 32;
 /// retenues comptées ensemble : au-delà, elle est fermée.
 const MAX_HELD_BYTES: usize = 1 << 20;
 
+/// Ce qu'une écriture du serveur fait des identifiants des blocs qu'elle écrit.
+#[derive(Debug, Clone, Copy)]
+enum Ids {
+    /// `PUT /mmd` : un bloc sans identifiant reçoit celui du bloc courant qui lui correspond
+    /// (`PageDoc::rewrite_blocks`, Ruling R201). Le MMD lu ne porte pas d'ancres.
+    Matched,
+    /// Une restauration : les blocs de la version portent les leurs, écrits tels quels.
+    AsGiven,
+}
+
 /// Message diffusé aux connexions de la page.
 pub(crate) struct Broadcast {
     /// Connexion d'origine, qui ne le reçoit pas ; `None` : toutes le reçoivent.
@@ -1224,21 +1234,28 @@ impl Actor {
         blocks: Vec<Block>,
         actor: Option<Uuid>,
     ) -> Result<Result<(), SyncError>, Broken> {
-        self.server_write(blocks, actor, History::Slice).await
+        self.server_write(blocks, actor, History::Slice, Ids::Matched)
+            .await
     }
 
     /// Une écriture du serveur, au nom de `actor` : `PUT /mmd`, ou une
-    /// restauration ; `history` dit ce qu'elle fait de l'historique.
+    /// restauration ; `history` dit ce qu'elle fait de l'historique, `ids` des
+    /// identifiants des blocs.
     async fn server_write(
         &mut self,
         blocks: Vec<Block>,
         actor: Option<Uuid>,
         history: History,
+        ids: Ids,
     ) -> Result<Result<(), SyncError>, Broken> {
         self.version_if_due().await;
         let changes = self.watch.changes();
         // Refusée sans rien écrire : le document reste intact.
-        let update = match self.page.write_blocks(&blocks) {
+        let written = match ids {
+            Ids::Matched => self.page.rewrite_blocks(&blocks),
+            Ids::AsGiven => self.page.write_blocks(&blocks),
+        };
+        let update = match written {
             Ok(update) => update,
             Err(e) => return Ok(Err(e.into())),
         };

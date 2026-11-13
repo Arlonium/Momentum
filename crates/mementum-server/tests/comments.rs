@@ -1203,3 +1203,124 @@ async fn comment_write_tells_the_page() {
     assert!(still_served(&other).await);
     assert_eq!(events(&other), [] as [Value; 0]);
 }
+
+/// Les identifiants des blocs de la page, lus par une connexion de synchro neuve : `(texte,
+/// identifiant)`, dans l'ordre.
+async fn blocks_of(
+    by: &Browser<'_>,
+    addr: std::net::SocketAddr,
+    page: &str,
+) -> Vec<(String, String)> {
+    let client = synced_as(by, &sync_url(addr, page)).await;
+    client
+        .blocks()
+        .iter()
+        .map(|b| (mementum_md::block_text(b), b.id.clone()))
+        .collect()
+}
+
+/// Ouvre un fil sur le bloc `block` : `201`, rend le fil.
+async fn thread_on(by: &Browser<'_>, page: &str, block: &str, body: &str) -> Value {
+    let opened = by
+        .post(
+            &comments_uri(page),
+            json!({ "blockId": block, "body": body }),
+        )
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    opened.json()
+}
+
+/// La sonde de la relecture finale (S3), avec l'attente inverse. Alice ouvre un fil sur le
+/// bloc « Second » ; un agent relit la page (`GET /mmd`, sans ancres) et la récrit telle quelle.
+/// Chaque bloc recevait un identifiant neuf, et le fil passait sous « Bloc supprimé ». Les
+/// blocs gardent leur identifiant (Ruling R201), et un fil neuf s'attache toujours au bloc.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identical_mmd_rewrite_keeps_threads_on_their_blocks() {
+    let t = TestApp::new().await;
+    let alice = t.account("Alice").await;
+    let addr = t.listen().await;
+    let page = alice.create(json!({ "title": "Page" })).await.id;
+    alice
+        .put_mmd(&page, "Premier\n\nSecond\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let before = blocks_of(&alice.browser, addr, &page).await;
+    let second = before[1].1.clone();
+    thread_on(&alice.browser, &page, &second, "Sur le second").await;
+
+    let read = alice.get_mmd(&page).await;
+    read.assert_status(StatusCode::OK);
+    let mmd = read.text();
+    alice
+        .put_mmd(&page, mmd.clone())
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let after = blocks_of(&alice.browser, addr, &page).await;
+    let identical = alice.get_mmd(&page).await.text() == mmd;
+    assert_eq!(
+        after, before,
+        "MMD lu : {mmd:?} ; bloc commenté {second} ; blocs après la récriture : {after:?} ; MMD \
+         identique : {identical}"
+    );
+    thread_on(&alice.browser, &page, &second, "Encore sur le second").await;
+}
+
+/// Une récriture qui change la page : un bloc modifié, un inséré, un retiré, deux échangés.
+/// Les blocs inchangés gardent leur identifiant, échangés compris, et leurs fils restent
+/// attachés ; le bloc modifié garde le sien (il est à la même place, entre les mêmes blocs
+/// inchangés, du même type) ; le bloc retiré n'est plus là, son fil se lit sous « Bloc
+/// supprimé » ; le bloc inséré reçoit un identifiant neuf.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn edited_mmd_keeps_threads_on_unchanged_blocks() {
+    let t = TestApp::new().await;
+    let alice = t.account("Alice").await;
+    let addr = t.listen().await;
+    let page = alice.create(json!({ "title": "Page" })).await.id;
+    alice
+        .put_mmd(&page, "Un\n\nDeux\n\nTrois\n\nQuatre\n\nCinq\n\nSix\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let before = blocks_of(&alice.browser, addr, &page).await;
+    let id = |text: &str| {
+        before
+            .iter()
+            .find(|(t, _)| t == text)
+            .map(|(_, id)| id.clone())
+            .unwrap()
+    };
+    for text in ["Trois", "Quatre", "Cinq", "Six"] {
+        thread_on(&alice.browser, &page, &id(text), text).await;
+    }
+
+    alice
+        .put_mmd(
+            &page,
+            "Nouveau\n\nUn\n\nDeux bis\n\nCinq\n\nQuatre\n\nSix\n",
+        )
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let after = blocks_of(&alice.browser, addr, &page).await;
+    let expected: Vec<(String, Option<String>)> = vec![
+        ("Nouveau".into(), None),
+        ("Un".into(), Some(id("Un"))),
+        ("Deux bis".into(), Some(id("Deux"))),
+        ("Cinq".into(), Some(id("Cinq"))),
+        ("Quatre".into(), Some(id("Quatre"))),
+        ("Six".into(), Some(id("Six"))),
+    ];
+    let got: Vec<(String, Option<String>)> = after
+        .iter()
+        .map(|(text, block)| {
+            let kept = before.iter().any(|(_, old)| old == block);
+            (text.clone(), kept.then(|| block.clone()))
+        })
+        .collect();
+    assert_eq!(got, expected, "avant : {before:?} ; après : {after:?}");
+    let ids: Vec<&String> = after.iter().map(|(_, id)| id).collect();
+    let present = |block: &str| ids.iter().any(|id| *id == block);
+    for text in ["Quatre", "Cinq", "Six"] {
+        assert!(present(&id(text)), "le fil de « {text} » a perdu son bloc");
+    }
+    assert!(!present(&id("Trois")), "le bloc retiré est encore là");
+}
