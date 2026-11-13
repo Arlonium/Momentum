@@ -421,13 +421,17 @@ notifications(id, user_id, kind, payload_json, read_at)
 ops_log(space_id, lsn, actor_id, run_id?, op_json, created_at)        -- tout changement structurel
 agent_runs(id, agent_id, on_behalf_of?, trigger, model, status, cost, started_at, ended_at)
 audit_log(id, space_id, actor_id, action, object, details_json, created_at)
-files(hash, size, mime, storage_key) · attachments(node_id, file_hash)
+files(hash, size, mime, created_at)                                   -- un contenu, sous son SHA-256 (§5.8)
+attachments(id, node_id, file_hash, name, created_by, created_at)     -- une page porte un contenu, sous un nom
+favorites(user_id, node_id, created_at)                               -- les favoris d'un compte
 api_tokens(id, user_or_agent_id, space_id?, scopes, expires_at, hash) -- portée : un espace (ou tous), ou des pages (acl)
 automations(id, database_id, trigger_json, actions_json) · webhooks(id, space_id, url, events, secret_hash)
 jobs(id, kind, payload_json, status, run_at, attempts)                -- file de tâches intégrée
 ```
 
 Identifiants : **UUIDv7** (triables par date). Côté utilisateur et agent, on montre des alias courts (`pg_7Hq2Lm`), traduits par le serveur.
+
+Fichiers et favoris, tels que livrés au lot 3 (migration `0004`, Rulings R243, R244, R254) : `files` n'a pas de `storage_key`, le chemin d'un contenu sur le disque se calcule de son hash (§5.8) ; une attache (`attachments`, un UUIDv7) dit qu'une page porte un contenu, sous un nom d'affichage, et c'est elle que nomme l'adresse d'un fichier ; elle part avec sa page, un contenu quand plus aucune attache ne le nomme. Un favori est une ligne `(compte, page)`, qui part avec sa page.
 
 ### 5.4 Synchronisation temps réel (hybride)
 Le client ouvre **une seule WebSocket**, multiplexée, encodée en MessagePack :
@@ -504,6 +508,7 @@ Le client ouvre **une seule WebSocket**, multiplexée, encodée en MessagePack :
 ### 5.8 Fichiers
 - Stockage adressé par contenu (hash SHA-256), donc dédoublonné. Miniatures générées en tâche de fond.
 - URL signées à durée limitée. Quotas par espace. Antivirus ClamAV en option.
+- **Le dépôt, livré au lot 3** (`crates/mementum-server/src/files.rs` ; Rulings R244 à R247, R271 à R279). Un contenu est gardé sous `<data_dir>/files/<2 premiers caractères hexadécimaux du hash>/<les 62 autres>` ; un envoi s'écrit d'abord dans `files/tmp/<UUIDv7>`, en calculant son hash au fil de l'eau, puis prend sa place une fois vidé sur le disque. Aucun nom venu d'un client n'entre dans un chemin : le nom d'un fichier n'est qu'un libellé, nettoyé, rendu dans `Content-Disposition`. Le type est lu dans les premiers octets, par une table fermée (image PNG, JPEG, GIF, WebP ; son WAV, MP3, Ogg, MP4 ; vidéo MP4, WebM ; PDF), tout le reste en `application/octet-stream` ; le type déclaré par le client n'est jamais lu. Au démarrage, seul `files/tmp/` est vidé : un contenu que la base ne connaît pas reste, compté au journal. Un verrou ordonne « poser un contenu puis l'attacher » et le ménage. Les liens ne sont pas suivis dans le dépôt, sauf `files/` lui-même (un autre disque). La copie d'avant migration (§7.4) ne contient que la base : une sauvegarde prend la base et `files/` ensemble.
 
 ### 5.9 Client : vitesse et hors ligne
 - **Rendu d'abord depuis le local**, synchronisation ensuite. Un seul onglet écrit dans SQLite (worker partagé), les autres lisent.
