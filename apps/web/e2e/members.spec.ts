@@ -771,7 +771,18 @@ test("lost_session_in_the_settings_only_asks_to_log_in", async ({ browser }) => 
     // a répondu avant la connexion : plus rien de parti sans session n'est en route quand la
     // session est rouverte (un `401` revenu après la connexion rouvrirait la fenêtre : le défaut
     // est dans l'application, au registre, R337).
+    //
+    // L'ordre dont ce test dépend : l'événement `request` de cette relecture arrive ici avant le
+    // résultat de `toBeVisible`. Elle est donc déjà dans `inFlight` quand on le lit, et son `401`
+    // dans `lostRead`, lu juste après. C'est vrai par construction : l'application lance la
+    // relecture dans la suite du refus, avant de rendre la fenêtre, et Playwright émet `request`
+    // dès que le navigateur l'annonce, tant que l'onglet n'a aucun `page.route`. Un `page.route`
+    // ajouté à ce test (l'événement attendrait alors l'interception), ou une relecture que
+    // l'application différerait, le ferait échouer par délai au tour suivant, la fenêtre de
+    // connexion sur le bouton à cliquer ; jamais passer à tort.
     await expect.poll(() => inFlight.size).toBe(0);
+    // « Ni alors » : sous la fenêtre, les réglages ne disent rien de la lecture faite sans session.
+    await expect(alerts).toHaveCount(0);
     // Une lecture perdue est refaite au retour du compte : les membres, puis les invitations.
     const reread = lostRead
       ? a.waitForResponse(
