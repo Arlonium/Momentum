@@ -488,6 +488,39 @@ test("a_send_that_lands_after_the_page_turned_read_only_takes_the_message_away",
   expect(unsavedMessage()).toBeNull();
 });
 
+test("a_remote_rename_that_gives_the_kept_text_takes_the_message_away", async () => {
+  await typedThenReadOnly();
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Titre d'Alice`);
+  // Quelqu'un d'autre donne à la page le titre gardé : il n'y a plus rien à proposer (R332).
+  await render(page("p", { title: "Titre d'Alice" }), me, true);
+  expect(field().value).toBe("Titre d'Alice");
+  expect(unsavedMessage()).toBeNull();
+  expect(updatePage).not.toHaveBeenCalled();
+});
+
+test("a_text_that_is_no_longer_flagged_as_typed_goes_to_the_message_too", async () => {
+  // Le cas de R218 : pendant l'envoi de « Premier », une lettre tapée puis effacée ramène le
+  // champ au texte qui part, et le drapeau « saisi » retombe. La page passe en lecture seule : ce
+  // texte n'est pas encore le titre de la page, il va au message, drapeau levé ou non (R332).
+  const answer = deferred<PageNode>();
+  vi.mocked(updatePage).mockReturnValueOnce(answer.promise);
+  await render(page("p", { title: "Ancien" }));
+  await type("Premier");
+  await enter();
+  await type("Premierx");
+  await type("Premier");
+  await render(page("p", { title: "Ancien" }), me, true);
+  expect(field().value).toBe("Ancien");
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Premier`);
+  // L'envoi est refusé : le texte n'est pas devenu le titre de la page, le message reste.
+  await act(async () =>
+    answer.reject(new ApiError(403, "forbidden", "niveau insuffisant sur cette page")),
+  );
+  expect(field().value).toBe("Ancien");
+  expect(unsavedMessage()?.textContent).toBe(`${UNSAVED}Premier`);
+  expect(updatePage).toHaveBeenCalledTimes(1);
+});
+
 // Le focus ne tombe jamais sur `body` : un bouton du message qui part sous le focus (la page
 // repasse en lecture seule, le message n'a plus d'objet) le rend au champ du titre.
 
