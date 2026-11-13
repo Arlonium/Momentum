@@ -683,3 +683,37 @@ test("a_commenter_is_not_offered_to_delete_a_thread", async ({ browser }) => {
   );
   expect((await threadsOf(aliceApi, page.id)).map((t) => t.id)).toEqual([own.id]);
 });
+
+test("a_double_click_on_delete_thread_keeps_the_confirmation_open", async ({ browser }) => {
+  // Un vrai double clic, au rythme d'une main : le premier clic ouvre la confirmation, le second
+  // tombe sur son voile, qui couvre maintenant le bouton. La fenêtre reste ouverte, et rien ne part.
+  const { alice, aliceApi, page } = await guestScene();
+  const kept = await openThread(aliceApi, page.id, null, "Fil gardé");
+  const owner = await openPage(browser, page.id, alice);
+  const deletions: string[] = [];
+  owner.on("request", (request) => {
+    if (request.method() === "DELETE") deletions.push(new URL(request.url()).pathname);
+  });
+  const panel = await openComments(owner);
+  const asked = threadOf(panel, "Fil gardé").getByRole("button", { name: "Supprimer le fil" });
+  const box = await asked.boundingBox();
+  if (!box) throw new Error("« Supprimer le fil » n'a pas de boîte");
+  await asked.click();
+  const confirm = owner.getByRole("alertdialog", { name: "Supprimer ce fil ?" });
+  await expect(confirm).toBeVisible();
+  // Le second clic du double clic, seul, au même endroit : `detail` vaut 2.
+  await owner.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await owner.mouse.down({ clickCount: 2 });
+  await owner.mouse.up({ clickCount: 2 });
+  // Deux images rendues : une annulation aurait eu le temps de retirer la fenêtre.
+  await owner.evaluate(
+    () => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))),
+  );
+  await expect(confirm).toBeVisible();
+  // Témoin : un clic simple sur le voile, lui, annule toujours.
+  await owner.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(confirm).toHaveCount(0);
+  await expect(threadOf(panel, "Fil gardé")).toBeVisible();
+  expect(deletions).toEqual([]);
+  expect((await threadsOf(aliceApi, page.id)).map((t) => t.id)).toEqual([kept.id]);
+});
