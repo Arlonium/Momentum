@@ -46,9 +46,11 @@ import {
   counts,
   cursor,
   drag,
+  dragMany,
   duo,
   exchange,
   keyboardDown,
+  keyboardMany,
   keyboardUp,
   line,
   outgoing,
@@ -104,6 +106,8 @@ async function alone(blocks: Seed): Promise<Peer> {
   expect(p.writes, "rien d'écrit à l'ouverture").toHaveLength(0);
   return p;
 }
+
+const paragraph = (id: string, content: string) => ({ id, type: "paragraph" as const, content });
 
 /** Un bloc recréé : son conteneur et son contenu, supprimés puis créés, et rien d'autre. */
 const recreated = (id: string, content = "paragraph") => ({
@@ -175,6 +179,141 @@ describe("un bloc déplacé est recréé, les autres ne sont pas touchés", () =
     expect([page[0].id, page[count - 2].id, page[count - 1].id]).toEqual(["b1", `b${count - 1}`, "b0"]);
     expect(outgoing(mona)!.length).toBeLessThan(2_048);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// Quels blocs sont recréés (R227)
+// ---------------------------------------------------------------------------
+
+// Une même page d'arrivée peut s'écrire de plusieurs façons : A, B, C descendus sous D et E, ou D
+// et E remontés au-dessus de A, B, C. Ce qui est tapé au même moment dans un bloc recréé peut se
+// perdre : ce sont donc les blocs du geste qui sont recréés, pas ceux qu'il croise, même s'ils
+// sont plus nombreux. La sélection dit lesquels : un dépôt la pose sur ce qu'il dépose, et le
+// clavier la laisse sur ce qu'il déplace (relevé dans un navigateur, `drag` et `dragMany` de
+// `test/editors.ts`). Quand elle ne le dit pas, le moins de blocs possible est recréé.
+describe("the_blocks_of_the_gesture_are_the_ones_recreated", () => {
+  const LETTERS: Seed = ["a", "b", "c", "d", "e", "f"].map((id) => paragraph(id, `Bloc ${id.toUpperCase()}`));
+  const page = (...ids: string[]) => ids.map((id) => block(id, `Bloc ${id.toUpperCase()}`));
+  /** Les blocs `ids` recréés, chacun avec son conteneur et son paragraphe, et rien d'autre. */
+  const recreatedAll = (...ids: string[]) => {
+    const names = ids.flatMap((id) => [`blockContainer ${id}`, `paragraph de ${id}`]);
+    return { deleted: names, created: names, renamed: {} };
+  };
+
+  /**
+   * Chez `p`, en une transaction, les blocs de la page dans l'ordre `order`, et la sélection du
+   * début du bloc `from` à la fin du bloc `to` : un réordonnancement qu'aucun geste de BlockNote
+   * ne fait, pour les cas où la sélection ne dit pas ce qui a bougé.
+   */
+  function rearrange(p: Peer, order: string[], [from, to]: [string, string]): void {
+    p.editor.transact((tr) => {
+      const group = tr.doc.firstChild!;
+      const nodes = new Map<string, PmNode>();
+      group.forEach((node) => nodes.set(String(node.attrs.id), node));
+      tr.replaceWith(1, 1 + group.content.size, order.map((id) => nodes.get(id)!));
+      const end = containerOf(tr.doc, to);
+      tr.setSelection(
+        pmState.TextSelection.create(
+          tr.doc,
+          containerOf(tr.doc, from).pos + 2,
+          end.pos + 2 + end.node.firstChild!.content.size,
+        ),
+      );
+    });
+  }
+
+  test("a_group_dragged_past_fewer_blocks_is_recreated_not_the_blocks_it_crosses", async () => {
+    // Trois blocs déposés sous deux : les trois blocs glissés sont recréés.
+    const down = await alone(LETTERS);
+    expect(written(down, () => dragMany(down, "a", "c", { under: "e" }))).toEqual(recreatedAll("a", "b", "c"));
+    expect(stored(down.doc)).toEqual(page("d", "e", "a", "b", "c", "f"));
+    expect(shown(down)).toEqual(stored(down.doc));
+
+    // La même page, par l'autre geste : deux blocs remontés au-dessus de trois.
+    const up = await alone(LETTERS);
+    expect(written(up, () => dragMany(up, "d", "e", { above: "a" }))).toEqual(recreatedAll("d", "e"));
+    expect(stored(up.doc)).toEqual(page("d", "e", "a", "b", "c", "f"));
+
+    // Quatre blocs remontés au-dessus d'un seul.
+    const most = await alone(LETTERS);
+    expect(written(most, () => dragMany(most, "b", "e", { above: "a" }))).toEqual(
+      recreatedAll("b", "c", "d", "e"),
+    );
+    expect(stored(most.doc)).toEqual(page("b", "c", "d", "e", "a", "f"));
+  });
+
+  test("blocks_moved_together_with_the_keyboard_are_recreated_not_the_block_they_cross", async () => {
+    const mona = await alone(LETTERS);
+    expect(written(mona, () => keyboardMany(mona, "a", "c", "down"))).toEqual(recreatedAll("a", "b", "c"));
+    expect(stored(mona.doc)).toEqual(page("d", "a", "b", "c", "e", "f"));
+    expect(written(mona, () => keyboardMany(mona, "a", "c", "up"))).toEqual(recreatedAll("a", "b", "c"));
+    expect(stored(mona.doc)).toEqual(page("a", "b", "c", "d", "e", "f"));
+    expect(shown(mona)).toEqual(stored(mona.doc));
+  });
+
+  test.each(ORDERS)("typing_in_the_blocks_a_group_crosses_stays_in_place ($label)", async (order) => {
+    // Le cas de la relecture (I4) : Tom tape dans D et E, que personne n'a déplacés.
+    const s = await duo(LETTERS, order.mona, order.tom);
+    expect(s.quiet).toBe(true);
+    dragMany(s.mona, "a", "c", { under: "e" });
+    typeAtEnd(s.tom, "d", " de Tom");
+    typeAt(s.tom, "e", 0, "Aussi : ");
+    typeAtEnd(s.tom, "f", " enfin");
+    await exchange(s.server, [s.mona, s.tom]);
+    const wanted = [
+      block("d", "Bloc D de Tom"),
+      block("e", "Aussi : Bloc E"),
+      ...page("a", "b", "c"),
+      block("f", "Bloc F enfin"),
+    ];
+    expect(stored(s.server)).toEqual(wanted);
+    expect(shown(s.mona)).toEqual(wanted);
+    expect(shown(s.tom)).toEqual(wanted);
+  });
+
+  test("a_selection_that_does_not_tell_falls_back_to_the_fewest_blocks", async () => {
+    // A, B, C passent sous E, la sélection restée ailleurs, dans F : D et E, les moins nombreux,
+    // sont recréés.
+    const elsewhere = await alone(LETTERS);
+    const order = ["d", "e", "a", "b", "c", "f"];
+    expect(written(elsewhere, () => rearrange(elsewhere, order, ["f", "f"]))).toEqual(recreatedAll("d", "e"));
+    expect(stored(elsewhere.doc)).toEqual(page(...order));
+
+    // La sélection sur A et B, qui ne bougent pas, pendant que C et D s'échangent derrière un E
+    // remonté : les autres blocs ne gardent pas leur ordre, ce n'est pas elle qui a bougé.
+    const still = await alone(LETTERS);
+    const mixed = ["e", "d", "c", "a", "b", "f"];
+    const wrote = written(still, () => rearrange(still, mixed, ["a", "b"]));
+    expect(wrote.created).toEqual(["blockContainer e", "paragraph de e", "blockContainer d", "paragraph de d", "blockContainer c", "paragraph de c"]);
+    expect(stored(still.doc)).toEqual(page(...mixed));
+
+    // La sélection sur A, B, C, D, dont deux s'échangent, pendant que E remonte : ils ne gardent
+    // pas leur ordre entre eux, ce n'est pas un groupe déplacé d'un bloc.
+    const shuffled = await alone(LETTERS);
+    const swapped = ["e", "a", "c", "b", "d", "f"];
+    const moved = written(shuffled, () => rearrange(shuffled, swapped, ["a", "d"]));
+    expect(moved.created).toHaveLength(4);
+    expect(moved.created).toContain("blockContainer e");
+    expect(stored(shuffled.doc)).toEqual(page(...swapped));
+  });
+
+  test("between_two_ways_of_recreating_as_few_blocks_the_selected_ones_are_recreated", async () => {
+    // Deux échanges de voisins en une transaction, A avec B et C avec D : un bloc de chaque paire
+    // est recréé. La sélection est dans B : c'est lui, pas A.
+    const mona = await alone(LETTERS);
+    const order = ["b", "a", "d", "c", "e", "f"];
+    const wrote = written(mona, () => rearrange(mona, order, ["b", "b"]));
+    expect(wrote.created).toHaveLength(4);
+    expect(wrote.created).toContain("blockContainer b");
+    expect(wrote.created).not.toContain("blockContainer a");
+    expect(stored(mona.doc)).toEqual(page(...order));
+
+    // La même transaction, la sélection dans A : c'est A.
+    const other = await alone(LETTERS);
+    const again = written(other, () => rearrange(other, order, ["a", "a"]));
+    expect(again.created).toContain("blockContainer a");
+    expect(again.created).not.toContain("blockContainer b");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -329,8 +468,6 @@ type Trace = {
   renamed: number;
   page: string;
 };
-
-const paragraph = (id: string, content: string) => ({ id, type: "paragraph" as const, content });
 
 /** Les attributs que BlockNote pose sur un conteneur neuf et sur son paragraphe. */
 const NEW_BLOCK = {

@@ -12,7 +12,7 @@
 // et le déplacement au clavier passent par la touche, que l'éditeur reçoit comme d'un clavier.
 import { BlockNoteEditor } from "@blocknote/core";
 import { withCollaboration } from "@blocknote/core/yjs";
-import { NodeSelection, TextSelection } from "prosemirror-state";
+import { NodeSelection, Selection, TextSelection } from "prosemirror-state";
 import { afterEach } from "vitest";
 import * as Y from "yjs";
 import { FRAGMENT } from "../editor/collab";
@@ -298,6 +298,53 @@ export function drag(p: Peer, moved: string, place: { under: string } | { above:
   });
 }
 
+/** `p` sélectionne du début du texte du bloc `first` à la fin de celui du bloc `last`. */
+export function selectFrom(p: Peer, first: string, last: string): void {
+  p.editor.transact((tr) => {
+    const from = containerOf(tr.doc, first);
+    const to = containerOf(tr.doc, last);
+    tr.setSelection(
+      TextSelection.create(tr.doc, from.pos + 2, to.pos + 2 + to.node.firstChild!.content.size),
+    );
+  });
+}
+
+/**
+ * Chez `p`, glisse d'un bloc les blocs voisins de `first` à `last`, sous le bloc `under` ou
+ * au-dessus du bloc `above`, comme dans un navigateur (relevé le 2026-11-13,
+ * `a_drop_is_written_with_the_selection_on_what_it_drops`, `e2e/block-move.spec.ts`) :
+ *  - les blocs sont sélectionnés, et la poignée de l'un d'eux saisie : BlockNote les sélectionne
+ *    en bloc (sa `MultipleNodeSelection`) ;
+ *  - le dépôt de ProseMirror supprime la sélection, insère ce qu'on tenait, et pose une sélection
+ *    de texte du début du premier bloc déposé à la fin du dernier : c'est ce que y-prosemirror
+ *    écrit ;
+ *  - BlockNote laisse ensuite un curseur de texte à la fin du dernier bloc déposé.
+ */
+export function dragMany(
+  p: Peer,
+  first: string,
+  last: string,
+  place: { under: string } | { above: string },
+): void {
+  p.editor.transact((tr) => {
+    const from = containerOf(tr.doc, first);
+    const to = containerOf(tr.doc, last);
+    tr.setSelection(
+      Selection.fromJSON(tr.doc, { type: "multiple-node", anchor: from.pos, head: to.pos + to.node.nodeSize }),
+    );
+  });
+  const held = p.editor.prosemirrorState.selection.content();
+  p.editor.transact((tr) => {
+    const target = containerOf(tr.doc, "under" in place ? place.under : place.above);
+    const drop = "under" in place ? target.pos + target.node.nodeSize : target.pos;
+    tr.deleteSelection();
+    const at = tr.mapping.map(drop);
+    tr.insert(at, held.content);
+    tr.setSelection(TextSelection.between(tr.doc.resolve(at), tr.doc.resolve(at + held.content.size)));
+  });
+  p.editor.transact((tr) => tr.setSelection(TextSelection.create(tr.doc, tr.selection.to)));
+}
+
 /**
  * `p` sélectionne le bloc `id` entier, comme un nœud : son conteneur. Ce n'est pas ce que donne un
  * clic sur une image (`selectContent`).
@@ -405,6 +452,18 @@ export function keyboardDown(p: Peer, id: string): void {
 /** Chez `p`, le bloc `id` monte d'une place au clavier (Ctrl+Maj+↑). */
 export function keyboardUp(p: Peer, id: string): void {
   pressIn(p, id, "ArrowUp", { ctrlKey: true, shiftKey: true });
+}
+
+/**
+ * Chez `p`, les blocs voisins de `first` à `last`, sélectionnés, descendent (`down`) ou montent
+ * (`up`) d'une place au clavier. BlockNote remet ensuite la sélection sur eux, par leurs ids.
+ */
+export function keyboardMany(p: Peer, first: string, last: string, way: "down" | "up"): void {
+  selectFrom(p, first, last);
+  const key = way === "down" ? "ArrowDown" : "ArrowUp";
+  if (!press(p, key, { ctrlKey: true, shiftKey: true })) {
+    throw new Error(`la touche ${key} n'a rien fait pour les blocs ${first} à ${last}`);
+  }
 }
 
 /** Ce que `p` a écrit depuis le dernier envoi, en une mise à jour (rien : `null`). */

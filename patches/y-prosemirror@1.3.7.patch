@@ -1,5 +1,5 @@
 diff --git a/dist/y-prosemirror.cjs b/dist/y-prosemirror.cjs
-index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..49549f0577c440c8fea29b71715ae95330273e26 100644
+index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..8b887dcdc77302825c6d6bef8d0e9a6dcdac370d 100644
 --- a/dist/y-prosemirror.cjs
 +++ b/dist/y-prosemirror.cjs
 @@ -331,6 +331,16 @@ const restoreRelativeSelection = (tr, relSel, binding) => {
@@ -35,7 +35,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..49549f0577c440c8fea29b71715ae953
          const sel = prosemirrorState.TextSelection.between(tr.doc.resolve(anchor), tr.doc.resolve(head));
          tr.setSelection(sel);
        }
-@@ -1203,6 +1222,215 @@ const marksToAttributes = (marks, meta) => {
+@@ -1203,6 +1222,254 @@ const marksToAttributes = (marks, meta) => {
    return pattrs
  };
  
@@ -101,9 +101,11 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..49549f0577c440c8fea29b71715ae953
 +}
 +
 +/**
-+ * Les clés des blocs que touche la sélection de l'éditeur : après un déplacement, le bloc
-+ * déplacé (le dépôt d'un glisser y laisse le curseur, et BlockNote l'y remet quand on déplace
-+ * le bloc au clavier). `null` sans éditeur (`prosemirrorToYXmlFragment`).
++ * Les clés des blocs que touche la sélection de l'éditeur : après un déplacement, les blocs
++ * déplacés. Le dépôt d'un glisser pose la sélection sur ce qu'il dépose (un bloc : sélectionné
++ * comme un nœud ; plusieurs : une sélection de texte du premier au dernier), et BlockNote la
++ * remet sur les blocs qu'on déplace au clavier, par leurs `id`. Relevé dans un navigateur :
++ * `apps/web/e2e/block-move.spec.ts`. `null` sans éditeur (`prosemirrorToYXmlFragment`).
 + *
 + * @param {any} meta
 + * @return {Set<string>|null}
@@ -136,14 +138,45 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..49549f0577c440c8fea29b71715ae953
 +}
 +
 +/**
++ * Combien de blocs d'avant `picked` retient, s'ils gardent leur ordre entre eux ; `-1` sinon.
++ * `target[i]` : la place d'après du bloc `i` d'avant, négative s'il n'y est plus (il n'est alors
++ * pas compté).
++ *
++ * @param {Array<number>} target
++ * @param {function(number):boolean} picked
++ * @return {number}
++ */
++const inOrder = (target, picked) => {
++  let count = 0
++  let last = -1
++  for (let i = 0; i < target.length; i++) {
++    const t = target[i]
++    if (t < 0 || !picked(i)) {
++      continue
++    }
++    if (t < last) {
++      return -1
++    }
++    last = t
++    count++
++  }
++  return count
++}
++
++/**
 + * Met à jour les enfants de `yParent` qui diffèrent de ceux du nœud ProseMirror (ceux du milieu,
 + * hors des `left` premiers et des `right` derniers) quand des blocs y ont changé d'ordre.
 + *
-+ * Les enfants sont appariés par l'`id` de leur bloc. Ceux qui gardent leur ordre (une plus
-+ * longue suite croissante) restent les mêmes éléments, mis à jour sur place s'ils ont changé ;
-+ * les autres sont supprimés, et ceux qui manquent sont créés à leur place, un bloc déplacé avec
-+ * le même `id`. Entre deux suites de même longueur (deux voisins échangés), on garde celle qui
-+ * laisse recréer les blocs de la sélection : celui qu'on vient de déplacer.
++ * Les enfants sont appariés par l'`id` de leur bloc. Ceux qui gardent leur place restent les
++ * mêmes éléments, mis à jour sur place s'ils ont changé ; les autres sont supprimés, et ceux qui
++ * manquent sont créés à leur place, un bloc déplacé avec le même `id`.
++ *
++ * Lesquels gardent leur place (R227). Ce qu'un autre tape au même moment dans un bloc recréé
++ * peut se perdre : ce sont donc les blocs du geste qui sont recréés, pas ceux qu'il croise, même
++ * s'ils sont plus nombreux. La sélection dit lesquels : quand les blocs qu'elle touche gardent
++ * leur ordre entre eux, et tous les autres le leur, ce sont eux qui ont bougé, d'un bloc. Quand
++ * elle ne le dit pas, le moins de blocs possible est recréé (les autres : une plus longue suite
++ * croissante) et, entre deux suites de même longueur, ceux de la sélection.
 + *
 + * Rend `false` sans rien écrire, et le code d'origine fait alors comme avant : si un enfant du
 + * milieu n'est pas un bloc avec un `id` (du texte, un `id` absent ou vide), si un `id` revient
@@ -196,8 +229,14 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..49549f0577c440c8fea29b71715ae953
 +  }
 +  const selected = selectedBlockKeys(meta)
 +  if (selected !== null && selected.size > 0) {
-+    const others = longestIncreasing(target, (i) => selected.has(yKeys[i]))
-+    if (others.length === kept.length) {
++    /**
++     * @param {number} i
++     */
++    const isSelected = (i) => selected.has(yKeys[i])
++    const others = longestIncreasing(target, isSelected)
++    // les blocs de la sélection gardent leur ordre entre eux, et tous les autres le leur
++    const together = others.length + inOrder(target, isSelected) === common
++    if (together || others.length === kept.length) {
 +      kept = others
 +    }
 +  }
@@ -251,7 +290,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..49549f0577c440c8fea29b71715ae953
  /**
   * Update a yDom node by syncing the current content of the prosemirror node.
   *
-@@ -1279,6 +1507,14 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1279,6 +1546,14 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
      }
    }
    y.transact(() => {
@@ -267,7 +306,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..49549f0577c440c8fea29b71715ae953
      while (yChildCnt - left - right > 0 && pChildCnt - left - right > 0) {
        const leftY = yChildren[left];
 diff --git a/src/plugins/sync-plugin.js b/src/plugins/sync-plugin.js
-index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..f385269625c8543d89498a27b68aa966415f4463 100644
+index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..98f7725b62409fe47f83bb44af2482da47694e85 100644
 --- a/src/plugins/sync-plugin.js
 +++ b/src/plugins/sync-plugin.js
 @@ -257,6 +257,16 @@ const restoreRelativeSelection = (tr, relSel, binding) => {
@@ -303,7 +342,7 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..f385269625c8543d89498a27b68aa966
          const sel = TextSelection.between(tr.doc.resolve(anchor), tr.doc.resolve(head))
          tr.setSelection(sel)
        }
-@@ -1129,6 +1148,215 @@ const marksToAttributes = (marks, meta) => {
+@@ -1129,6 +1148,254 @@ const marksToAttributes = (marks, meta) => {
    return pattrs
  }
  
@@ -369,9 +408,11 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..f385269625c8543d89498a27b68aa966
 +}
 +
 +/**
-+ * Les clés des blocs que touche la sélection de l'éditeur : après un déplacement, le bloc
-+ * déplacé (le dépôt d'un glisser y laisse le curseur, et BlockNote l'y remet quand on déplace
-+ * le bloc au clavier). `null` sans éditeur (`prosemirrorToYXmlFragment`).
++ * Les clés des blocs que touche la sélection de l'éditeur : après un déplacement, les blocs
++ * déplacés. Le dépôt d'un glisser pose la sélection sur ce qu'il dépose (un bloc : sélectionné
++ * comme un nœud ; plusieurs : une sélection de texte du premier au dernier), et BlockNote la
++ * remet sur les blocs qu'on déplace au clavier, par leurs `id`. Relevé dans un navigateur :
++ * `apps/web/e2e/block-move.spec.ts`. `null` sans éditeur (`prosemirrorToYXmlFragment`).
 + *
 + * @param {any} meta
 + * @return {Set<string>|null}
@@ -404,14 +445,45 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..f385269625c8543d89498a27b68aa966
 +}
 +
 +/**
++ * Combien de blocs d'avant `picked` retient, s'ils gardent leur ordre entre eux ; `-1` sinon.
++ * `target[i]` : la place d'après du bloc `i` d'avant, négative s'il n'y est plus (il n'est alors
++ * pas compté).
++ *
++ * @param {Array<number>} target
++ * @param {function(number):boolean} picked
++ * @return {number}
++ */
++const inOrder = (target, picked) => {
++  let count = 0
++  let last = -1
++  for (let i = 0; i < target.length; i++) {
++    const t = target[i]
++    if (t < 0 || !picked(i)) {
++      continue
++    }
++    if (t < last) {
++      return -1
++    }
++    last = t
++    count++
++  }
++  return count
++}
++
++/**
 + * Met à jour les enfants de `yParent` qui diffèrent de ceux du nœud ProseMirror (ceux du milieu,
 + * hors des `left` premiers et des `right` derniers) quand des blocs y ont changé d'ordre.
 + *
-+ * Les enfants sont appariés par l'`id` de leur bloc. Ceux qui gardent leur ordre (une plus
-+ * longue suite croissante) restent les mêmes éléments, mis à jour sur place s'ils ont changé ;
-+ * les autres sont supprimés, et ceux qui manquent sont créés à leur place, un bloc déplacé avec
-+ * le même `id`. Entre deux suites de même longueur (deux voisins échangés), on garde celle qui
-+ * laisse recréer les blocs de la sélection : celui qu'on vient de déplacer.
++ * Les enfants sont appariés par l'`id` de leur bloc. Ceux qui gardent leur place restent les
++ * mêmes éléments, mis à jour sur place s'ils ont changé ; les autres sont supprimés, et ceux qui
++ * manquent sont créés à leur place, un bloc déplacé avec le même `id`.
++ *
++ * Lesquels gardent leur place (R227). Ce qu'un autre tape au même moment dans un bloc recréé
++ * peut se perdre : ce sont donc les blocs du geste qui sont recréés, pas ceux qu'il croise, même
++ * s'ils sont plus nombreux. La sélection dit lesquels : quand les blocs qu'elle touche gardent
++ * leur ordre entre eux, et tous les autres le leur, ce sont eux qui ont bougé, d'un bloc. Quand
++ * elle ne le dit pas, le moins de blocs possible est recréé (les autres : une plus longue suite
++ * croissante) et, entre deux suites de même longueur, ceux de la sélection.
 + *
 + * Rend `false` sans rien écrire, et le code d'origine fait alors comme avant : si un enfant du
 + * milieu n'est pas un bloc avec un `id` (du texte, un `id` absent ou vide), si un `id` revient
@@ -464,8 +536,14 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..f385269625c8543d89498a27b68aa966
 +  }
 +  const selected = selectedBlockKeys(meta)
 +  if (selected !== null && selected.size > 0) {
-+    const others = longestIncreasing(target, (i) => selected.has(yKeys[i]))
-+    if (others.length === kept.length) {
++    /**
++     * @param {number} i
++     */
++    const isSelected = (i) => selected.has(yKeys[i])
++    const others = longestIncreasing(target, isSelected)
++    // les blocs de la sélection gardent leur ordre entre eux, et tous les autres le leur
++    const together = others.length + inOrder(target, isSelected) === common
++    if (together || others.length === kept.length) {
 +      kept = others
 +    }
 +  }
@@ -519,7 +597,7 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..f385269625c8543d89498a27b68aa966
  /**
   * Update a yDom node by syncing the current content of the prosemirror node.
   *
-@@ -1205,6 +1433,14 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1205,6 +1472,14 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
      }
    }
    y.transact(() => {
