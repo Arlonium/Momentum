@@ -237,3 +237,54 @@ test("a_page_opened_otherwise_leaves_the_focus_where_it_is", async () => {
   await act(async () => root.render(<Breadcrumb key="a" node={a} ancestors={[]} />));
   expect(document.activeElement).toBe(elsewhere);
 });
+
+test("a_crumb_opened_elsewhere_does_not_take_the_focus_later", async () => {
+  // Un clic que le routeur ne suit pas (Ctrl, Maj, Cmd ou Alt : un autre onglet, une autre
+  // fenêtre, un téléchargement ; le bouton du milieu) ne marque pas la page : quand elle
+  // s'ouvre plus tard autrement (la barre latérale), sa barre du haut ne vole pas le focus.
+  const [a, b, c] = chain("a", "b", "c");
+  await show(c, [a, b]);
+  // Le navigateur ne suit pas ces liens ici (jsdom ne navigue pas).
+  host.addEventListener("click", (event) => event.preventDefault(), { capture: true });
+  const link = items()[1].querySelector<HTMLElement>("a")!;
+  const clicks: MouseEventInit[] = [
+    { ctrlKey: true },
+    { shiftKey: true },
+    { metaKey: true },
+    { altKey: true },
+    { button: 1 },
+  ];
+  for (const init of clicks) {
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, ...init }));
+    });
+  }
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  elsewhere.focus();
+  await act(async () => root.render(<Breadcrumb key="b" node={b} ancestors={[a]} />));
+  expect(document.activeElement).toBe(elsewhere);
+});
+
+test("hidden_pages_with_the_same_title_keep_their_entries", async () => {
+  // Deux pages masquées du même titre, puis l'une renommée : chaque entrée reste celle de sa
+  // page, sans clé en double pour React.
+  const errors: unknown[][] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => errors.push(args);
+  try {
+    const [a, b, c, d, e, f] = chain("a", "b", "c", "d", "e", "f");
+    const same = (node: PageNode, title: string) => ({ ...node, title });
+    await show(f, [a, same(b, "Même"), same(c, "Même"), d, e]);
+    await act(async () => more()!.click());
+    const entries = () => [...menu()!.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    expect(entries().map((entry) => entry.textContent)).toEqual(["Même", "Même", "D"]);
+    await show(f, [a, same(b, "Même"), same(c, "Autre"), d, e]);
+    expect(entries().map((entry) => entry.textContent)).toEqual(["Même", "Autre", "D"]);
+    await act(async () => entries()[1].click());
+    expect(location.pathname).toBe("/p/c");
+    expect(errors.filter((args) => String(args[0]).includes("same key"))).toEqual([]);
+  } finally {
+    console.error = original;
+  }
+});
