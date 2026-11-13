@@ -451,8 +451,12 @@ function Pending({ invitations, share }: { invitations: PendingInvitation[]; sha
           <span className="mm-person-names">
             <span className="mm-person-name">{invitation.email}</span>
             <span className="mm-person-detail">
+              {/* L'échéance d'abord : la ligne ne passe pas à la ligne, et ce qu'un titre long
+                  fait couper est alors le titre, jamais elle. */}
+              expire le {expiry.format(new Date(invitation.expiresAt))}
               {invitation.level && (
                 <>
+                  {" · "}
                   {LEVEL_LABELS[invitation.level]}
                   {invitation.pageTitle !== null && (
                     // La page qu'elle nomme (R257, M11) : son titre vient d'ailleurs, isolé.
@@ -465,10 +469,8 @@ function Pending({ invitations, share }: { invitations: PendingInvitation[]; sha
                       &nbsp;»
                     </>
                   )}
-                  {" · "}
                 </>
               )}
-              expire le {expiry.format(new Date(invitation.expiresAt))}
             </span>
           </span>
           <span className="mm-person-action">

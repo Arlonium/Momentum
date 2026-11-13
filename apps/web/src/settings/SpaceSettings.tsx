@@ -602,7 +602,9 @@ function InvitationsSection({ spaceId, invitations, reload, onRefused }: Invitat
               <span className="mm-person-names">
                 <span className="mm-person-name">{invitation.email}</span>
                 <span className="mm-person-detail">
-                  {grantOf(invitation)} · expire le {expiry.format(new Date(invitation.expiresAt))}
+                  {/* L'échéance d'abord, sur toutes les lignes : la ligne ne passe pas à la
+                      ligne, et ce qu'un titre long fait couper est alors le titre, jamais elle. */}
+                  expire le {expiry.format(new Date(invitation.expiresAt))} · {grantOf(invitation)}
                 </span>
               </span>
               <span className="mm-person-action">

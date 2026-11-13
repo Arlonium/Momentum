@@ -66,12 +66,15 @@ test("a_pending_page_invitation_names_its_page", async () => {
   const details = [
     ...host.querySelectorAll('[aria-label="Invitations en attente"] .mm-person-detail'),
   ];
-  // Le rôle d'une invitation dans l'espace ; le niveau et la page, son titre isolé, pour une
-  // invitation de page ; « Sans titre » pour une page qui n'en a pas.
-  expect(details.map((detail) => detail.textContent!.split(" · ")[0])).toEqual([
-    "Membre",
-    "Peut modifier sur « Plan »",
-    "Peut lire sur « Sans titre »",
+  // L'échéance d'abord, sur toutes les lignes : la ligne ne passe pas à la ligne, et ce qu'un
+  // titre long fait couper est alors le titre, jamais elle. Puis le rôle d'une invitation dans
+  // l'espace ; le niveau et la page, son titre isolé, pour une invitation de page ; « Sans
+  // titre » pour une page qui n'en a pas.
+  const expires = expect.stringMatching(/^expire le \S/);
+  expect(details.map((detail) => detail.textContent!.split(" · "))).toEqual([
+    [expires, "Membre"],
+    [expires, "Peut modifier sur « Plan »"],
+    [expires, "Peut lire sur « Sans titre »"],
   ]);
   expect(details[1].querySelector('.mm-isolate[dir="auto"]')?.textContent).toBe("Plan");
   expect(details[0].querySelector(".mm-isolate")).toBeNull();

@@ -1,7 +1,7 @@
 // Réglages d'un espace et invitations par lien, depuis l'interface : inviter, copier le
 // lien, l'ouvrir sans compte ou avec, changer un rôle, retirer quelqu'un, révoquer, partir.
 // Le serveur fait foi pour les droits : ses messages s'affichent tels quels.
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { ErrorBody } from "@mementum/protocol";
 import {
   acceptInvitation,
@@ -347,21 +347,95 @@ test("pending_page_invitation_shows_the_page_title", async ({ browser }) => {
   await inviteToSpace(aliceApi, space.id, { email: inSpace, role: "member" });
 
   // Dans les réglages de l'espace, l'invitation de page nomme sa page ; celle de l'espace dit
-  // son rôle, comme avant.
+  // son rôle, comme avant. L'échéance vient d'abord, sur les deux lignes.
   const a = await newUser(browser, alice);
   await a.goto(settingsPath(space.id));
-  await expect(pendingRow(a, onPage)).toContainText(`Peut modifier sur « ${title} » · expire le`);
-  await expect(pendingRow(a, inSpace)).toContainText("Membre · expire le");
+  const detailOf = (row: Locator) => row.locator(".mm-person-detail");
+  const pageInSettings = detailOf(pendingRow(a, onPage));
+  await expect(pageInSettings).toHaveText(/^expire le /);
+  await expect(pageInSettings).toContainText(` · Peut modifier sur « ${title} »`);
+  const spaceInSettings = detailOf(pendingRow(a, inSpace));
+  await expect(spaceInSettings).toHaveText(/^expire le /);
+  await expect(spaceInSettings).toContainText(" · Membre");
 
   // Dans le menu Partager de la page, de même.
   await a.goto(`/p/${plan.id}`);
   const menu = await openShareMenu(a);
-  await expect(
+  const pageInMenu = detailOf(
     menu
       .getByRole("list", { name: "Invitations en attente" })
       .getByRole("listitem")
       .filter({ hasText: onPage }),
-  ).toContainText(`Peut modifier sur « ${title} » · expire le`);
+  );
+  await expect(pageInMenu).toHaveText(/^expire le /);
+  await expect(pageInMenu).toContainText(` · Peut modifier sur « ${title} »`);
+});
+
+/**
+ * L'échéance d'une invitation en attente (« expire le … », jusqu'au séparateur ou à la fin) dans
+ * sa ligne de détail, qui ne passe pas à la ligne et se coupe par des points de suspension :
+ * `cut`, quelque chose y est coupé ; `whole`, l'échéance y tient en entier.
+ */
+async function expiryIn(detail: Locator): Promise<{ cut: boolean; whole: boolean } | null> {
+  return detail.evaluate((el) => {
+    const text = el.textContent ?? "";
+    const start = text.indexOf("expire le");
+    if (start < 0) return null;
+    const separator = text.indexOf(" · ", start);
+    const end = separator < 0 ? text.length : separator;
+    /** La place d'un caractère de la ligne : son nœud de texte, et sa position dedans. */
+    const at = (offset: number): [Node, number] => {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let seen = 0;
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const length = node.textContent?.length ?? 0;
+        if (offset <= seen + length) return [node, offset - seen];
+        seen += length;
+      }
+      throw new Error("hors de la ligne");
+    };
+    const range = document.createRange();
+    range.setStart(...at(start));
+    range.setEnd(...at(end));
+    const expiry = range.getBoundingClientRect();
+    const box = el.getBoundingClientRect();
+    return {
+      cut: el.scrollWidth > el.clientWidth,
+      // Un demi-pixel de marge : les rectangles ne tombent pas sur des pixels entiers.
+      whole: expiry.width > 0 && expiry.left >= box.left - 0.5 && expiry.right <= box.right + 0.5,
+    };
+  });
+}
+
+test("long_page_title_never_hides_the_expiry_of_a_pending_invitation", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  // Un titre de 90 caractères : la ligne de l'invitation ne le montre pas en entier.
+  const title = `${`Plan ${unique()} ${"très long titre ".repeat(6)}`.slice(0, 89)}.`;
+  expect(title).toHaveLength(90);
+  const plan = await createPage(aliceApi, { section: "private", title });
+  const email = `long-${unique()}@exemple.fr`;
+  await inviteToPage(aliceApi, plan.id, { email, level: "edit" });
+  const a = await newUser(browser, alice);
+  await a.setViewportSize({ width: 1280, height: 800 });
+
+  // Dans les réglages de l'espace : ce qui est coupé est le titre, jamais l'échéance.
+  await a.goto(settingsPath(space.id));
+  const inSettings = pendingRow(a, email).locator(".mm-person-detail");
+  await expect(inSettings).toContainText("Peut modifier sur « Plan");
+  expect(await expiryIn(inSettings)).toEqual({ cut: true, whole: true });
+
+  // Dans le menu Partager de la page, de même.
+  await a.goto(`/p/${plan.id}`);
+  const menu = await openShareMenu(a);
+  const inMenu = menu
+    .getByRole("list", { name: "Invitations en attente" })
+    .getByRole("listitem")
+    .filter({ hasText: email })
+    .locator(".mm-person-detail");
+  await expect(inMenu).toContainText("Peut modifier sur « Plan");
+  expect(await expiryIn(inMenu)).toEqual({ cut: true, whole: true });
 });
 
 test("guest_is_sent_home", async ({ browser }) => {
