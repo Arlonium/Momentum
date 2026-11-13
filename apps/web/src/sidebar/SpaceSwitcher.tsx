@@ -2,7 +2,8 @@
 // (Ruling R80) : l'espace ouvert (une tuile à son initiale, et son nom), et au clic un menu.
 // De haut en bas : les espaces du compte, chacun avec le rôle qu'il y a ; « Créer un espace »
 // et « Réglages de l'espace » (pour tout membre, pas pour un invité) ; puis le compte (nom,
-// adresse), « Changer le mot de passe » et « Se déconnecter ».
+// adresse), « Changer le mot de passe » et « Se déconnecter », qui efface aussi les pages
+// récentes du compte gardées dans le navigateur (R255).
 //
 // Ouvrir le menu relit le compte (`refresh`) : la liste des espaces est à jour, et c'est
 // aussi ce qui s'aperçoit d'une session fermée ailleurs, et fait demander la connexion.
@@ -19,6 +20,7 @@ import { Field, FormError, messageOf } from "../session/forms";
 import { PasswordDialog } from "../session/PasswordDialog";
 import { useSession } from "../session/session";
 import { ROLE_LABELS } from "../share/levels";
+import { forgetRecents } from "../space/recents";
 import { Avatar } from "../ui/Avatar";
 
 type Props = {
@@ -109,6 +111,8 @@ export function SpaceSwitcher({ space, settingsOpen }: Props) {
       setError(`La déconnexion a échoué. ${messageOf(e)}`);
       return;
     }
+    // Les pages récentes du compte qui part ne restent pas dans le navigateur (R255).
+    forgetRecents(user.id);
     // Un onglet neuf : plus rien du compte en mémoire, ni page, ni connexion de synchro. À la
     // place de l'entrée courante : Précédent ne revient pas sur l'application connectée (et
     // un document gardé par le cache arrière-avant se recharge, `main.tsx`).

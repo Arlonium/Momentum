@@ -1,7 +1,9 @@
 // Les trois sections de la barre latérale d'un espace, comme dans Notion (conception, §4.4) :
 // « Espace » (ce que voient tous les membres), « Partagé » (avec des personnes précises) et
 // « Privé » (soi seul). Le serveur calcule la section de chaque page pour la personne
-// connectée, d'après ses accès : rien ne se range à la main.
+// connectée, d'après ses accès : rien ne se range à la main. Au-dessus d'elles, les listes
+// courtes (« Favoris », « Récents ») se replient de même, et l'état de tout ce qui est replié
+// est gardé ensemble, par espace.
 import type { PageNode, Role, Section } from "@mementum/protocol";
 
 /** Les sections, dans l'ordre de la barre latérale. */
@@ -65,26 +67,69 @@ export function canCreateIn(section: Section): section is "space" | "private" {
   return section !== "shared";
 }
 
+/**
+ * Les listes courtes, au-dessus des sections : « Favoris » et « Récents » (`ShortList`). Elles
+ * se replient comme les sections, et leur état est gardé avec le leur.
+ */
+export type ShortGroup = "favorites" | "recents";
+
+/** Tout ce qui se replie dans la barre latérale d'un espace. */
+type Group = Section | ShortGroup;
+
+const GROUPS: readonly Group[] = ["favorites", "recents", ...SECTIONS];
+
 const collapsedKey = (spaceId: string) => `mementum.sections.${spaceId}`;
 
-/** Les sections repliées de cet espace, gardées dans le navigateur. */
-export function readCollapsedSections(spaceId: string): Section[] {
+/** Ce qui est replié dans cet espace, gardé dans le navigateur. */
+function readCollapsed(spaceId: string): Group[] {
   try {
     const stored: unknown = JSON.parse(localStorage.getItem(collapsedKey(spaceId)) ?? "[]");
     if (!Array.isArray(stored)) return [];
-    return SECTIONS.filter((section) => stored.includes(section));
+    return GROUPS.filter((group) => stored.includes(group));
   } catch {
     // stockage refusé, ou valeur illisible : tout est déplié
     return [];
   }
 }
 
-/** Garde les sections repliées de cet espace, pour la prochaine visite. */
-export function writeCollapsedSections(spaceId: string, collapsed: readonly Section[]): void {
+function writeCollapsed(spaceId: string, collapsed: readonly Group[]): void {
   try {
     if (collapsed.length === 0) localStorage.removeItem(collapsedKey(spaceId));
     else localStorage.setItem(collapsedKey(spaceId), JSON.stringify(collapsed));
   } catch {
     // stockage refusé : l'état ne vaut que pour cette visite
   }
+}
+
+const isSection = (group: Group): group is Section => (SECTIONS as Group[]).includes(group);
+
+/** Les sections repliées de cet espace, gardées dans le navigateur. */
+export function readCollapsedSections(spaceId: string): Section[] {
+  return readCollapsed(spaceId).filter(isSection);
+}
+
+/**
+ * Garde les sections repliées de cet espace, pour la prochaine visite. Les listes courtes
+ * repliées le restent : chacun n'écrit que sa part.
+ */
+export function writeCollapsedSections(spaceId: string, collapsed: readonly Section[]): void {
+  const others: Group[] = readCollapsed(spaceId).filter((group) => !isSection(group));
+  writeCollapsed(
+    spaceId,
+    GROUPS.filter((group) => others.includes(group) || (collapsed as Group[]).includes(group)),
+  );
+}
+
+/** La liste courte `group` est-elle repliée dans cet espace ? */
+export function readCollapsedGroup(spaceId: string, group: ShortGroup): boolean {
+  return readCollapsed(spaceId).includes(group);
+}
+
+/** Replie ou déplie la liste courte `group` de cet espace, sans toucher au reste. */
+export function writeCollapsedGroup(spaceId: string, group: ShortGroup, collapsed: boolean): void {
+  const rest = readCollapsed(spaceId).filter((other) => other !== group);
+  writeCollapsed(
+    spaceId,
+    GROUPS.filter((other) => rest.includes(other) || (collapsed && other === group)),
+  );
 }

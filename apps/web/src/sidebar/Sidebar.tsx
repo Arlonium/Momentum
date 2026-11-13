@@ -1,15 +1,20 @@
 // La barre latérale. En tête, collés à son bord haut : le sélecteur d'espace (avec le menu du
-// compte, Ruling R80) et « Nouvelle page ». Puis les sections de l'espace, chacune avec son
-// arbre de pages, qui défilent dessous. En pied, collés à son bord bas : le message de la
-// dernière action refusée (à défaut, celui d'une lecture des pages qui a échoué), avec
-// « Réessayer » tant que les pages n'ont pas pu être lues, et « Corbeille ».
+// compte, Ruling R80) et « Nouvelle page ». Puis, qui défilent dessous : « Récents », les pages
+// que le compte a ouvertes dans l'espace, gardées dans le navigateur (R255, absente quand elle
+// est vide, rien n'est lu du serveur pour elle), et les sections de l'espace, chacune avec son
+// arbre de pages. En pied, collés à son bord bas : le message de la dernière action refusée (à
+// défaut, celui d'une lecture des pages qui a échoué), avec « Réessayer » tant que les pages
+// n'ont pas pu être lues, et « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
 import { trashPath } from "../router";
+import { useSession } from "../session/session";
+import { useRecentPages } from "../space/recents";
 import { firstClick } from "../ui/firstClick";
 import type { Drop } from "./drag";
 import { SectionList, type CreateTarget } from "./SectionList";
+import { ShortList } from "./ShortList";
 import { SpaceSwitcher } from "./SpaceSwitcher";
 import type { Viewport } from "./treeWindow";
 
@@ -78,6 +83,9 @@ export function Sidebar({
   }, [scroller, head, footer]);
   // Un invité ne crée pas de page à la racine d'un espace.
   const member = space !== null && space.role !== "guest";
+  // Les pages récentes du compte dans l'espace, filtrées par son arbre (R255).
+  const { me } = useSession();
+  const recents = useRecentPages(me.user.id, space?.id ?? null, nodes);
   // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
   const readFailure =
     readError === null
@@ -108,6 +116,17 @@ export function Sidebar({
           </button>
         )}
       </div>
+      {space && (
+        <ShortList
+          // L'état replié est celui de cet espace.
+          key={space.id}
+          spaceId={space.id}
+          label="Récents"
+          group="recents"
+          pages={recents}
+          activeId={activeId}
+        />
+      )}
       {space && (
         <SectionList
           // Les sections repliées sont celles de cet espace.

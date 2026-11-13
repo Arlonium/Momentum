@@ -113,7 +113,8 @@ a:hover {
    pied, dont `Sidebar` donne les hauteurs. Une marge sur ce qui se focalise, et pas un
    `scroll-padding` sur la barre : avec lui, poser le focus dans la tête ou le pied, toujours
    visibles, ferait défiler la barre de leur hauteur. */
-.mm-sections :is(a, button) {
+.mm-sections :is(a, button),
+.mm-short :is(a, button) {
   scroll-margin-top: var(--mm-side-head-height, 0px);
   scroll-margin-bottom: var(--mm-side-footer-height, 0px);
 }
@@ -539,6 +540,57 @@ a:hover {
 .mm-section-add:hover {
   background: var(--mm-border);
   color: var(--mm-text);
+}
+
+/* Listes courtes (« Récents », R255) : au-dessus des sections, avec leur titre ; des liens
+   de la hauteur et des couleurs des lignes de l'arbre. */
+.mm-short {
+  flex: none;
+}
+
+.mm-short-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-short-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 30px;
+  /* L'icône s'aligne sur celle d'une page à la racine de l'arbre (repli de 18 px compris). */
+  padding: 0 8px 0 26px;
+  border-radius: 6px;
+  color: var(--mm-text-sidebar);
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.mm-short-link:hover {
+  background: var(--mm-sidebar-hover);
+  color: var(--mm-text-sidebar);
+}
+
+.mm-short-link[aria-current="page"] {
+  background: var(--mm-sidebar-active);
+  color: var(--mm-text);
+  font-weight: 500;
+}
+
+.mm-short-link svg {
+  flex: none;
+}
+
+.mm-short-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* Pied, collé au bas de la barre latérale, qui défile au-dessus de lui : poussé en bas quand

@@ -1,12 +1,14 @@
 // Les sections de la barre latérale (« Espace », « Partagé », « Privé ») : la répartition
 // des pages, les sections montrées à chacun, et celles où l'on crée une page.
 import type { PageNode, Section } from "@mementum/protocol";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
   bySection,
   canCreateIn,
+  readCollapsedGroup,
   readCollapsedSections,
   visibleSections,
+  writeCollapsedGroup,
   writeCollapsedSections,
 } from "./sections";
 
@@ -115,4 +117,44 @@ test("collapsed_sections_are_kept_per_space", () => {
   expect(readCollapsedSections("perso")).toEqual([]);
   localStorage.setItem("mementum.sections.perso", JSON.stringify(["shared", "autre", 3]));
   expect(readCollapsedSections("perso")).toEqual(["shared"]);
+});
+
+test("collapsed_short_lists_are_kept_with_the_sections", () => {
+  // « Favoris » et « Récents » se replient comme les sections, sous la même clé de l'espace :
+  // replier l'un ne déplie pas les autres.
+  expect(readCollapsedGroup("perso", "recents")).toBe(false);
+  writeCollapsedSections("perso", ["shared"]);
+  writeCollapsedGroup("perso", "recents", true);
+  expect(readCollapsedGroup("perso", "recents")).toBe(true);
+  expect(readCollapsedGroup("perso", "favorites")).toBe(false);
+  expect(readCollapsedSections("perso")).toEqual(["shared"]);
+  expect(readCollapsedGroup("pro", "recents")).toBe(false);
+
+  // Une section dépliée ou repliée garde les listes courtes repliées.
+  writeCollapsedSections("perso", []);
+  expect(readCollapsedGroup("perso", "recents")).toBe(true);
+  writeCollapsedSections("perso", ["private"]);
+  writeCollapsedGroup("perso", "favorites", true);
+  writeCollapsedGroup("perso", "recents", false);
+  expect(readCollapsedSections("perso")).toEqual(["private"]);
+  expect(readCollapsedGroup("perso", "favorites")).toBe(true);
+  expect(readCollapsedGroup("perso", "recents")).toBe(false);
+
+  // Tout déplié : plus rien n'est gardé.
+  writeCollapsedGroup("perso", "favorites", false);
+  writeCollapsedSections("perso", []);
+  expect(localStorage.length).toBe(0);
+});
+
+test("collapsed_short_lists_survive_a_refused_storage", () => {
+  // Stockage refusé : rien ne lève, tout est déplié.
+  const refused = () => {
+    throw new DOMException("stockage refusé", "SecurityError");
+  };
+  const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(refused);
+  const set = vi.spyOn(Storage.prototype, "setItem").mockImplementation(refused);
+  expect(() => writeCollapsedGroup("perso", "recents", true)).not.toThrow();
+  expect(readCollapsedGroup("perso", "recents")).toBe(false);
+  get.mockRestore();
+  set.mockRestore();
 });

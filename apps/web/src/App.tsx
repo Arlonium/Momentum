@@ -27,6 +27,7 @@ import type { CreateTarget } from "./sidebar/SectionList";
 import { Sidebar } from "./sidebar/Sidebar";
 import { CreateSpaceDialog } from "./sidebar/SpaceSwitcher";
 import { SpaceNotFound } from "./space/SpaceNotFound";
+import { visit } from "./space/recents";
 import { useCurrentSpace } from "./space/useCurrentSpace";
 import { usePageActions } from "./space/usePageActions";
 import { useSpaceEvents } from "./space/useSpaceEvents";
@@ -86,6 +87,16 @@ export function App() {
   const nodes = tree.loaded !== null && tree.loaded.spaceId === spaceId ? tree.loaded.nodes : null;
   const found = page.looked?.state === "found" ? page.looked.node : null;
   const caughtUp = useTreeCatchUp(tree, nodes, activeId, found);
+  // La page ouverte, connue et hors corbeille, passe en tête des pages récentes du compte dans
+  // son espace (R255), une fois par ouverture : gardées dans le navigateur, rien n'est écrit
+  // sur le serveur.
+  const userId = me.user.id;
+  const visited = active !== undefined && active.trashedAt === null ? active : null;
+  const visitedId = visited?.id ?? null;
+  const visitedSpace = visited?.spaceId ?? null;
+  useEffect(() => {
+    if (visitedId !== null && visitedSpace !== null) visit(userId, visitedSpace, visitedId);
+  }, [userId, visitedSpace, visitedId]);
   // Le fil d'Ariane de la page ouverte, lu dans l'arbre déjà chargé (R256) : recalculé quand
   // l'arbre change (une page déplacée ou renommée ailleurs), jamais à la frappe.
   const ancestors = useMemo(() => {
