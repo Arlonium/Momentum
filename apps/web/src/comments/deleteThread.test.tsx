@@ -244,7 +244,14 @@ function fakeSession() {
 
 let wiring: CommentsPanelWiring;
 
-function Live({ session, level = "full" }: { session: CommentsSession; level?: Level }) {
+type Rights = { level?: Level; trashed?: boolean; readOnly?: boolean };
+
+function Live({
+  session,
+  level = "full",
+  trashed = false,
+  readOnly = false,
+}: { session: CommentsSession } & Rights) {
   const comments = useComments("p", session, { onRefused });
   const frame = useRef<HTMLElement>(null);
   wiring = useCommentsPanel(comments, frame);
@@ -254,8 +261,8 @@ function Live({ session, level = "full" }: { session: CommentsSession; level?: L
         {...wiring.panel}
         comments={comments}
         level={level}
-        trashed={false}
-        readOnly={false}
+        trashed={trashed}
+        readOnly={readOnly}
         selfId="alice"
       />
     )
@@ -430,4 +437,34 @@ test("the_confirmation_closes_when_the_thread_is_deleted_elsewhere", async () =>
   expect(dialog()).toBeNull();
   expect(vi.mocked(deleteThread)).not.toHaveBeenCalled();
   focusIsInThePanel();
+});
+
+test("the_confirmation_closes_when_the_right_goes", async () => {
+  // La fenêtre est ouverte quand la page relue (un refus ailleurs, la vérification avant une
+  // connexion de synchro) dit que le droit est parti : elle se ferme, et rien ne part, même par
+  // son bouton s'il était resté.
+  const cases: Record<string, Rights> = {
+    "niveau baissé": { level: "edit" },
+    corbeille: { trashed: true },
+    "autre schéma": { readOnly: true },
+  };
+  const seen: Record<string, string> = {};
+  for (const [name, rights] of Object.entries(cases)) {
+    await act(async () => root.render(null));
+    const session = await live([thread("a"), thread("b")]);
+    await click(button(threadOf("b")!, DELETE));
+    expect(dialog()).not.toBeNull();
+    await act(async () => root.render(<Live session={session} {...rights} />));
+    const open = dialog();
+    const focus = active() === threadOf("b") ? "le fil" : active().tagName;
+    seen[name] = `fenêtre ${open === null ? "fermée" : "ouverte"}, focus : ${focus}`;
+    const left = open === null ? [] : buttons(open, "Supprimer");
+    for (const confirm of left) await click(confirm);
+  }
+  expect(seen).toEqual({
+    "niveau baissé": "fenêtre fermée, focus : le fil",
+    corbeille: "fenêtre fermée, focus : le fil",
+    "autre schéma": "fenêtre fermée, focus : le fil",
+  });
+  expect(vi.mocked(deleteThread)).not.toHaveBeenCalled();
 });
