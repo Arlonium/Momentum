@@ -819,6 +819,10 @@ mod tests {
             // Une marque coupée.
             b"\x00\x00\x00\x20ftypis".to_vec(),
             b"PK\x03\x04".to_vec(),
+            // Presque une signature : un PDF sans son tiret, un MP3 d'un autre en-tête de trame.
+            b"%PDF".to_vec(),
+            b"%PDF1.7\n%\xe2\xe3".to_vec(),
+            b"\xff\xfa\x90\x64".to_vec(),
         ] {
             cases.push((others, OCTET_STREAM));
         }
@@ -872,6 +876,20 @@ mod tests {
             header("A-z_0.9!#$&+^`|~"),
             "attachment; filename=\"A-z_0.9!#$&+^`|~\"; filename*=UTF-8''A-z_0.9!#$&+^`|~"
         );
+        // L'apostrophe, les parenthèses et l'astérisque n'en sont pas (RFC 5987) : l'apostrophe
+        // sépare le jeu de caractères, la langue et la valeur de `filename*`.
+        assert_eq!(
+            header("photo (1).png"),
+            "attachment; filename=\"photo (1).png\"; filename*=UTF-8''photo%20%281%29.png"
+        );
+        assert_eq!(
+            header("l'été.png"),
+            "attachment; filename=\"l'_t_.png\"; filename*=UTF-8''l%27%C3%A9t%C3%A9.png"
+        );
+        assert_eq!(
+            header("a*b.txt"),
+            "attachment; filename=\"a*b.txt\"; filename*=UTF-8''a%2Ab.txt"
+        );
 
         // 255 caractères hors ASCII, de deux, trois et quatre octets : l'en-tête se construit et
         // reste sous 2 Kio ; s'il faut raccourcir, l'extension reste (R271).
@@ -918,6 +936,11 @@ mod tests {
         while let Some((&first, tail)) = rest.split_first() {
             if first == b'%' {
                 let pair = std::str::from_utf8(&tail[..2]).unwrap();
+                assert!(
+                    pair.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b)),
+                    "%{pair}"
+                );
                 bytes.push(u8::from_str_radix(pair, 16).unwrap());
                 rest = &tail[2..];
             } else {
@@ -964,6 +987,252 @@ mod tests {
         // Une coupure qui tombe sur une espace ne la laisse pas au bord.
         let spaced = format!("{} b", "a".repeat(254));
         assert_eq!(display_name(&spaced), "a".repeat(254));
+    }
+
+    /// Une « extension » de plus de seize caractères n'est pas gardée : c'est le nom entier qui
+    /// est raccourci (R271). Sans cette borne, le budget de ce qui précède l'extension passait
+    /// sous zéro, et l'en-tête ne se construisait plus.
+    #[test]
+    fn a_long_extension_does_not_break_the_header() {
+        for c in ['é', '漢', '😀'] {
+            let name = format!("a.{}", std::iter::repeat_n(c, 253).collect::<String>());
+            assert_eq!(name.chars().count(), 255);
+            let header = content_disposition(&name);
+            let value = header.to_str().unwrap();
+            assert!(value.len() < 2048, "{}", value.len());
+            assert!(value.starts_with("attachment; filename=\"a."), "{value}");
+        }
+    }
+
+    /// Une suite de nombres fixe (xorshift) : les essais « au hasard » sont les mêmes à chaque
+    /// lancement.
+    fn sequence(seed: u64) -> impl FnMut() -> u64 {
+        let mut x = seed;
+        move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        }
+    }
+
+    /// Sur deux mille noms faits de caractères hostiles, le nom nettoyé et l'en-tête tiennent
+    /// leurs règles, octet par octet ; l'en-tête les tient aussi pour un nom qui n'est pas passé
+    /// par `display_name`.
+    #[test]
+    fn names_and_headers_hold_their_rules_for_hostile_names() {
+        const ALPHABET: &[char] = &[
+            'a',
+            'Z',
+            '0',
+            ' ',
+            ' ',
+            '.',
+            '.',
+            '/',
+            '\\',
+            '"',
+            '%',
+            ';',
+            '=',
+            '\'',
+            '*',
+            '(',
+            ')',
+            ',',
+            ':',
+            '<',
+            '>',
+            '?',
+            '|',
+            '~',
+            '\r',
+            '\n',
+            '\t',
+            '\0',
+            '\u{7f}',
+            '\u{85}',
+            '\u{9f}',
+            '\u{a0}',
+            '\u{ad}',
+            'é',
+            '\u{301}',
+            '\u{61c}',
+            '\u{200b}',
+            '\u{200d}',
+            '\u{200e}',
+            '\u{200f}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{202a}',
+            '\u{202e}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{feff}',
+            '漢',
+            '😀',
+            '\u{1f468}',
+            '\u{e0001}',
+            '\u{10ffff}',
+            '\u{3000}',
+        ];
+        let mut next = sequence(0x2545_F491_4F6C_DD1D);
+        let mut shortened = 0;
+        for round in 0..2_000 {
+            let len = (next() % 400) as usize;
+            // Une fois sur quatre, un seul caractère répété, puis une extension.
+            let raw: String = if round % 4 == 0 {
+                let c = ALPHABET[(next() % ALPHABET.len() as u64) as usize];
+                let mut repeated: String = std::iter::repeat_n(c, len).collect();
+                repeated.push_str(
+                    [".pdf", ".tar.gz", ".", "", ".été", ".😀😀😀"][(next() % 6) as usize],
+                );
+                repeated
+            } else {
+                (0..len)
+                    .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                    .collect()
+            };
+            let name = display_name(&raw);
+            assert!(!name.is_empty(), "{raw:?}");
+            assert!(name.chars().count() <= MAX_NAME_CHARS, "{raw:?}");
+            assert_eq!(name, name.trim(), "{raw:?}");
+            assert!(
+                !name
+                    .chars()
+                    .any(|c| c.is_control() || is_direction_mark(c) || c == '/' || c == '\\'),
+                "{name:?}"
+            );
+            assert_eq!(display_name(&name), name, "nettoyé deux fois : {raw:?}");
+
+            for subject in [name.as_str(), raw.as_str()] {
+                let header = content_disposition(subject);
+                let value = header.to_str().unwrap();
+                assert!(value.bytes().all(|b| (0x20..=0x7e).contains(&b)), "{value}");
+                let (fallback, encoded) = value
+                    .strip_prefix("attachment; filename=\"")
+                    .and_then(|rest| rest.split_once("\"; filename*=UTF-8''"))
+                    .unwrap_or_else(|| panic!("forme inattendue : {value}"));
+                assert!(!fallback.contains(['"', '\\', '%']), "{fallback}");
+                assert!(encoded.len() <= MAX_ENCODED_NAME, "{}", encoded.len());
+                let decoded = percent_decode(encoded);
+                assert_eq!(fallback.chars().count(), decoded.chars().count());
+                let whole: usize = subject.chars().map(encoded_len).sum();
+                if subject.is_empty() {
+                    assert_eq!(decoded, DEFAULT_NAME);
+                } else if whole <= MAX_ENCODED_NAME {
+                    assert_eq!(decoded, subject);
+                } else {
+                    shortened += 1;
+                    // Un début du nom, puis une fin du nom (l'extension), rien d'autre.
+                    let common = decoded
+                        .chars()
+                        .zip(subject.chars())
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    let tail: String = decoded.chars().skip(common).collect();
+                    assert!(subject.ends_with(&tail), "{decoded:?} de {subject:?}");
+                    assert!(tail.chars().count() <= MAX_KEPT_EXTENSION);
+                }
+                if subject.chars().count() <= MAX_NAME_CHARS {
+                    assert!(value.len() < 2048, "{} octets", value.len());
+                }
+            }
+        }
+        assert!(
+            shortened > 100,
+            "témoin : des noms ont été raccourcis ({shortened})"
+        );
+    }
+
+    /// La table ne lit que les premiers octets, là où elle les attend : un fichier à deux
+    /// lectures (une image, un son ou un PDF qui porte aussi du HTML ou du script) a le type de
+    /// sa signature, et ce qui ne commence pas par une signature n'en a aucun. Sur trois cent
+    /// mille débuts tirés autour des signatures, aucun type ne sort des onze de R246, ni rien qui
+    /// s'ouvrirait comme un document.
+    #[test]
+    fn the_table_is_closed_and_reads_only_the_first_bytes() {
+        let cases: [(&[u8], &str); 22] = [
+            (
+                b"\x89PNG\r\n\x1a\n<html><script>alert(1)</script>",
+                "image/png",
+            ),
+            (b"GIF89a=1;alert(1)//", "image/gif"),
+            (b"GIF89a<svg onload=alert(1)>", "image/gif"),
+            (b"\xff\xd8\xff<script>", "image/jpeg"),
+            (b"%PDF-1.7<script>alert(1)</script>", "application/pdf"),
+            (b"ID3<html><body onload=alert(1)>", "audio/mpeg"),
+            (b"OggS<html>", "audio/ogg"),
+            (b"RIFF<htmWEBP<script>", "image/webp"),
+            (b"<htmftypisom<script>", "video/mp4"),
+            (b" %PDF-1.7", OCTET_STREAM),
+            (b"\n%PDF-1.7", OCTET_STREAM),
+            (b"\xef\xbb\xbf<!doctype html>", OCTET_STREAM),
+            (b"  <html>", OCTET_STREAM),
+            (b"<?xml version=\"1.0\"?><svg", OCTET_STREAM),
+            (b"<svg", OCTET_STREAM),
+            (b"<HTML>", OCTET_STREAM),
+            (b"<!--", OCTET_STREAM),
+            (b"{\"a\":1}", OCTET_STREAM),
+            (b"#!/bin/sh\n", OCTET_STREAM),
+            (b"MZ\x90\x00", OCTET_STREAM),
+            (b"\x89PNG\r\n\x1a", OCTET_STREAM),
+            (b"%PDF", OCTET_STREAM),
+        ];
+        for (head, expected) in cases {
+            let head = &head[..head.len().min(SNIFF_LEN)];
+            assert_eq!(sniff(head), expected, "{:?}", String::from_utf8_lossy(head));
+        }
+        const TABLE: [&str; 12] = [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp",
+            "audio/wav",
+            "video/mp4",
+            "audio/mp4",
+            "video/webm",
+            "audio/mpeg",
+            "audio/ogg",
+            "application/pdf",
+            OCTET_STREAM,
+        ];
+        const SEEDS: [&[u8]; 12] = [
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d",
+            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01",
+            b"GIF89a\x01\x00\x01\x00\x00\x00",
+            b"RIFF\x24\x00\x00\x00WEBP",
+            b"RIFF\x24\x00\x00\x00WAVE",
+            b"\x00\x00\x00\x20ftypisom",
+            b"\x00\x00\x00\x20ftypM4A ",
+            b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\xf7\x81",
+            b"ID3\x04\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"OggS\x00\x02\x00\x00\x00\x00\x00\x00",
+            b"%PDF-1.7\n%\xe2\xe3",
+            b"<!doctype ht",
+        ];
+        let mut next = sequence(0x9E37_79B9_7F4A_7C15);
+        let mut seen = HashSet::new();
+        for _ in 0..300_000 {
+            let mut head = SEEDS[(next() % 12) as usize].to_vec();
+            for _ in 0..next() % 3 {
+                let at = (next() % head.len() as u64) as usize;
+                head[at] = next() as u8;
+            }
+            head.truncate((next() % 13) as usize);
+            let kind = sniff(&head);
+            assert!(TABLE.contains(&kind), "{kind}");
+            assert!(
+                !kind.contains("html") && !kind.contains("xml") && !kind.contains("script"),
+                "{kind}"
+            );
+            seen.insert(kind);
+        }
+        assert_eq!(
+            seen.len(),
+            TABLE.len(),
+            "témoin : tous les types ont été vus"
+        );
     }
 
     /// « abc » envoyé deux fois : un seul fichier, sous son hash, et rien d'autre dans le dépôt.
@@ -1409,5 +1678,351 @@ mod tests {
             "{error}"
         );
         assert_eq!(listing(&outside), ["precieux.txt"]);
+    }
+
+    /// Un lien au fond d'un dossier laissé dans `tmp/` n'est pas suivi par le vidage du
+    /// démarrage : le dossier part, ce que le lien visait reste.
+    #[test]
+    fn a_link_deep_in_tmp_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("ailleurs");
+        std::fs::create_dir_all(outside.join("sous")).unwrap();
+        std::fs::write(outside.join("precieux.txt"), b"a garder").unwrap();
+        std::fs::write(outside.join("sous").join("aussi.txt"), b"a garder").unwrap();
+        FileStore::open(dir.path()).unwrap();
+        let tmp = dir.path().join(FILES_DIR).join(TMP_DIR);
+        std::fs::create_dir_all(tmp.join("dossier").join("plus-bas")).unwrap();
+        link_dir(&outside, &tmp.join("dossier").join("plus-bas").join("lien"));
+        FileStore::open(dir.path()).unwrap();
+        assert!(tmp_entries(dir.path()).is_empty());
+        assert_eq!(listing(&outside), ["precieux.txt", "sous/aussi.txt"]);
+    }
+
+    /// Une écriture que tokio a laissée échouer en fond (il rend la main à `write` avant d'avoir
+    /// écrit) est dite par `finish`, qui ne pose rien : sans cela, un fichier vide prenait la
+    /// place du contenu, sous le hash des octets qu'il n'a pas reçus. L'écriture suivante la dit
+    /// aussi, et met l'envoi hors d'usage.
+    #[tokio::test]
+    async fn a_background_write_that_fails_is_told_and_nothing_is_placed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+
+        let mut upload = store.begin().await.unwrap();
+        let failing = fail_writes_of(&mut upload).await;
+        // tokio rend la main avant d'avoir écrit : `write` réussit.
+        upload.write(b"abc").await.unwrap();
+        let guard = store.lock().await;
+        let result = upload.finish(&guard).await;
+        drop(guard);
+        let placed = std::fs::metadata(store.dirs.content_path(&sha256(b"abc")));
+        assert!(
+            result.is_err(),
+            "finish a rendu {result:?} alors que l'écriture a échoué ; à la place de « abc » : \
+             {:?} octets",
+            placed.map(|meta| meta.len())
+        );
+        assert!(placed.is_err(), "rien n'est posé");
+        drop(failing);
+        assert!(
+            tmp_entries(dir.path()).is_empty(),
+            "le temporaire est parti"
+        );
+
+        // La même panne, vue par l'écriture suivante.
+        let mut upload = store.begin().await.unwrap();
+        let failing = fail_writes_of(&mut upload).await;
+        upload.write(b"abc").await.unwrap();
+        assert!(upload.write(b"def").await.is_err());
+        let guard = store.lock().await;
+        assert!(upload.finish(&guard).await.is_err());
+        drop(guard);
+        drop(failing);
+        assert!(tmp_entries(dir.path()).is_empty());
+        assert!(listing(&dir.path().join(FILES_DIR)).is_empty());
+    }
+
+    /// Fait échouer, en fond, les écritures de `upload` tant que la valeur rendue vit. Sous
+    /// Windows, un autre descripteur verrouille le fichier (`LockFileEx`) ; sous Unix, où un tel
+    /// verrou n'empêche pas d'écrire, le fichier de l'envoi est remplacé par un descripteur en
+    /// lecture seule.
+    async fn fail_writes_of(upload: &mut Upload) -> Option<std::fs::File> {
+        #[cfg(windows)]
+        {
+            let blocker = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&upload.path)
+                .unwrap();
+            blocker.lock().unwrap();
+            Some(blocker)
+        }
+        #[cfg(unix)]
+        {
+            upload.file = Some(tokio::fs::File::open(&upload.path).await.unwrap());
+            None
+        }
+    }
+
+    /// Le hash, la taille et le type sont ceux de tous les octets, quelle que soit la façon dont
+    /// ils arrivent : par morceaux d'un octet, de part et d'autre des douze premiers, autour du
+    /// tampon de 64 Kio, avec des morceaux vides. Et un fichier de zéro octet se pose et se
+    /// relit.
+    #[tokio::test]
+    async fn hash_size_and_type_hold_however_the_bytes_are_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let mut content = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
+        let mut next = sequence(0x9E37_79B9);
+        while content.len() < 70_007 {
+            content.push(next() as u8);
+        }
+        let expected = sha256(&content);
+        // Les premiers morceaux font ces tailles ; ce qui reste arrive d'un coup.
+        for sizes in [
+            vec![1usize; 24],
+            vec![7, 7],
+            vec![11, 1],
+            vec![12],
+            vec![13],
+            vec![65_535],
+            vec![65_536],
+            vec![65_537, 3],
+            vec![0, 5, 0, 30_000],
+            vec![],
+        ] {
+            let mut upload = store.begin().await.unwrap();
+            let mut rest = &content[..];
+            for n in sizes.iter().copied().chain([usize::MAX]) {
+                let n = n.min(rest.len());
+                upload.write(&rest[..n]).await.unwrap();
+                rest = &rest[n..];
+            }
+            assert!(rest.is_empty());
+            assert_eq!(upload.len(), content.len() as u64, "{sizes:?}");
+            let guard = store.lock().await;
+            let stored = upload.finish(&guard).await.unwrap();
+            assert_eq!(hex(&stored.hash), hex(&expected), "hash, découpe {sizes:?}");
+            assert_eq!(
+                stored.size,
+                content.len() as u64,
+                "taille, découpe {sizes:?}"
+            );
+            assert_eq!(stored.mime, "image/png", "type, découpe {sizes:?}");
+            assert!(stored.fresh);
+            let mut read = Vec::new();
+            let mut file = store.open_file(&stored.hash).await.unwrap();
+            file.read_to_end(&mut read).await.unwrap();
+            drop(file);
+            assert!(read == content, "octets relus, découpe {sizes:?}");
+            store.remove(&guard, &stored.hash).await.unwrap();
+        }
+        // Zéro octet : aucun `write`.
+        let upload = store.begin().await.unwrap();
+        let guard = store.lock().await;
+        let empty = upload.finish(&guard).await.unwrap();
+        drop(guard);
+        assert_eq!(
+            hex(&empty.hash),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            (empty.size, empty.mime, empty.fresh),
+            (0, OCTET_STREAM, true)
+        );
+        let mut read = Vec::new();
+        let mut file = store.open_file(&empty.hash).await.unwrap();
+        file.read_to_end(&mut read).await.unwrap();
+        assert!(read.is_empty());
+        assert!(!put(&store, b"").await.fresh);
+        assert!(tmp_entries(dir.path()).is_empty());
+    }
+
+    /// Ce qui est à la place d'un contenu sans être un fichier ordinaire n'est jamais tenu pour
+    /// lui, même s'il pèse autant que lui : l'envoi le remplace par le vrai contenu (R272).
+    #[tokio::test]
+    async fn something_else_of_the_same_size_is_not_the_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("ailleurs");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precieux.txt"), b"a garder").unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        // Le poids que le système donne à un lien : zéro pour une jonction de Windows, la
+        // longueur du chemin visé pour un lien symbolique d'Unix. Le contenu envoyé pèse autant.
+        let probe = dir.path().join("sonde");
+        link_dir(&outside, &probe);
+        let weight = std::fs::symlink_metadata(&probe).unwrap().len();
+        let content = vec![b'x'; usize::try_from(weight).unwrap()];
+        let hash = sha256(&content);
+        let path = store.dirs.content_path(&hash);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        link_dir(&outside, &path);
+        assert_eq!(
+            std::fs::symlink_metadata(&path).unwrap().len(),
+            content.len() as u64,
+            "témoin : le lien pèse autant que le contenu"
+        );
+
+        let stored = put(&store, &content).await;
+        assert_eq!(stored.hash, hash);
+        assert!(
+            std::fs::symlink_metadata(&path).unwrap().is_file(),
+            "le lien est resté à la place du contenu"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+        assert_eq!(listing(&outside), ["precieux.txt"]);
+        assert!(tmp_entries(dir.path()).is_empty());
+    }
+
+    /// Un contenu abîmé **à taille égale** est tenu pour le même, sans être relu : il n'est ni
+    /// vu ni réparé par un nouvel envoi, et se relit abîmé (limite écrite au registre). Témoin :
+    /// d'une autre taille, il est remplacé (`a_truncated_content_is_replaced_by_the_next_upload`).
+    #[tokio::test]
+    async fn a_damage_of_the_same_size_is_neither_seen_nor_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let content: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let stored = put(&store, &content).await;
+        let path = store.dirs.content_path(&stored.hash);
+        let mut damaged = content.clone();
+        damaged[500] ^= 0xff;
+        std::fs::write(&path, &damaged).unwrap();
+
+        let again = put(&store, &content).await;
+        assert!(!again.fresh);
+        assert_eq!(again.hash, stored.hash);
+        let mut read = Vec::new();
+        let mut file = store.open_file(&stored.hash).await.unwrap();
+        file.read_to_end(&mut read).await.unwrap();
+        assert!(read == damaged, "le contenu abîmé est resté tel quel");
+        assert!(tmp_entries(dir.path()).is_empty());
+    }
+
+    /// Un téléchargement en cours ne gêne ni le retrait du contenu, ni l'envoi suivant du même
+    /// contenu, ni le remplacement d'un contenu abîmé ; et le lecteur finit sa lecture.
+    #[tokio::test]
+    async fn a_download_in_progress_blocks_neither_remove_nor_the_next_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let content: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let stored = put(&store, &content).await;
+        let path = store.dirs.content_path(&stored.hash);
+        let mut reader = store.open_file(&stored.hash).await.unwrap();
+        let guard = store.lock().await;
+        store.remove(&guard, &stored.hash).await.unwrap();
+        drop(guard);
+        assert!(!path.exists(), "retiré sous un lecteur");
+        let again = put(&store, &content).await;
+        assert!(again.fresh, "reposé pendant que l'ancien est encore lu");
+        let mut read = Vec::new();
+        reader.read_to_end(&mut read).await.unwrap();
+        assert!(read == content, "le lecteur finit sa lecture");
+        // Un contenu abîmé, remplacé pendant qu'un lecteur le tient.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(3)
+            .unwrap();
+        let _reader = store.open_file(&stored.hash).await.unwrap();
+        let third = put(&store, &content).await;
+        assert!(!third.fresh);
+        assert!(std::fs::read(&path).unwrap() == content);
+        assert!(tmp_entries(dir.path()).is_empty());
+    }
+
+    /// La forme que la Task S4a donnera à l'envoi : dans une tâche détachée de la requête, le
+    /// verrou pris sur un dépôt partagé, `finish`, puis le retrait du contenu qu'on vient de
+    /// poser si l'attache échoue. Elle doit compiler (`Send + 'static`), et ne rien laisser.
+    #[tokio::test]
+    async fn the_upload_of_a_route_runs_in_a_task_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = Arc::new(FileStore::open(dir.path()).unwrap());
+        let mut upload = files.begin().await.unwrap();
+        upload.write(b"abc").await.unwrap();
+        let task = tokio::spawn({
+            let files = files.clone();
+            async move {
+                let guard = files.lock().await;
+                let stored = upload.finish(&guard).await?;
+                if stored.fresh {
+                    files.remove(&guard, &stored.hash).await?;
+                }
+                io::Result::Ok(stored)
+            }
+        });
+        assert!(task.await.unwrap().unwrap().fresh);
+        assert!(listing(&dir.path().join(FILES_DIR)).is_empty());
+    }
+
+    /// Un fichier à la place d'un dossier de préfixe : rien ne s'y pose, ne s'y lit ni ne s'y
+    /// retire, rien ne panique, et l'envoi ne laisse pas son temporaire.
+    #[tokio::test]
+    async fn a_prefix_that_cannot_be_made_fails_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let root = dir.path().join(FILES_DIR);
+        std::fs::write(root.join("ba"), b"pas un dossier").unwrap();
+        let mut upload = store.begin().await.unwrap();
+        upload.write(b"abc").await.unwrap();
+        let guard = store.lock().await;
+        assert!(upload.finish(&guard).await.is_err());
+        assert!(store.remove(&guard, &sha256(b"abc")).await.is_err());
+        drop(guard);
+        assert!(tmp_entries(dir.path()).is_empty());
+        assert_eq!(listing(&root), ["ba"]);
+        assert_eq!(
+            store.open_file(&sha256(b"abc")).await.unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(store.strangers(&[]).unwrap(), (0, 0));
+    }
+
+    /// Sous Windows, un temporaire qu'un autre programme tient sans partager sa suppression (un
+    /// antivirus, un indexeur) : rien ne panique ; un contenu neuf n'est pas posé (une erreur),
+    /// un contenu déjà là est rendu ; le temporaire reste, et le démarrage suivant le retire
+    /// (R279).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_temporary_held_by_another_program_waits_for_the_next_opening() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        // Lecture et écriture partagées, pas la suppression (FILE_SHARE_READ | FILE_SHARE_WRITE).
+        let hold = |path: &Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(path)
+                .unwrap()
+        };
+        // Contenu neuf : le renommage échoue.
+        let mut upload = store.begin().await.unwrap();
+        upload.write(b"contenu neuf").await.unwrap();
+        let held = hold(&upload.path);
+        let guard = store.lock().await;
+        assert!(upload.finish(&guard).await.is_err());
+        drop(guard);
+        assert!(store.open_file(&sha256(b"contenu neuf")).await.is_err());
+        assert_eq!(tmp_entries(dir.path()).len(), 1, "le temporaire reste");
+        drop(held);
+        // Contenu déjà là : il est rendu, le temporaire reste.
+        let first = put(&store, b"deja la").await;
+        let mut upload = store.begin().await.unwrap();
+        upload.write(b"deja la").await.unwrap();
+        let held = hold(&upload.path);
+        let guard = store.lock().await;
+        let again = upload.finish(&guard).await.unwrap();
+        drop(guard);
+        assert_eq!((again.hash, again.fresh), (first.hash, false));
+        assert_eq!(
+            tmp_entries(dir.path()).len(),
+            2,
+            "les deux temporaires restent"
+        );
+        drop(held);
+        // Le démarrage suivant les retire.
+        drop(store);
+        FileStore::open(dir.path()).unwrap();
+        assert!(tmp_entries(dir.path()).is_empty());
     }
 }
