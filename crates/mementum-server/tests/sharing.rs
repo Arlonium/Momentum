@@ -871,6 +871,70 @@ async fn page_invitation_answer_does_not_reveal_accounts() {
         .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_email");
 }
 
+/// Report M11 du lot 2 : une invitation de page en attente porte le titre de sa page
+/// (`pageTitle`), dans la liste de l'espace comme dans les accès de la page ; un titre vide
+/// reste `""` ; une invitation d'espace porte `null`. Garde, déjà vraie et réaffirmée : le titre
+/// ne sort que vers qui voit l'invitation, c'est-à-dire qui peut partager la page ; un admin ou
+/// une propriétaire qui ne le peut pas ne voit ni l'invitation, ni le titre.
+#[tokio::test]
+async fn pending_page_invitation_names_its_page() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, adam, mona) = (&team.olga, &team.adam, &team.mona);
+    let plan = team.page(None, "Plan", &[members(Level::Full)]).await;
+    let untitled = team.page(None, "", &[members(Level::Full)]).await;
+    let secret = team
+        .page(None, "Secret de Mona", &[user(mona, Level::Full)])
+        .await;
+    let (on_plan, _) = invited(&olga.browser, plan, "a@exemple.fr", "edit").await;
+    let (on_untitled, _) = invited(&olga.browser, untitled, "b@exemple.fr", "read").await;
+    let (on_secret, _) = invited(&mona.browser, secret, "c@exemple.fr", "read").await;
+    let reply = olga
+        .browser
+        .post(
+            &format!("/api/v1/spaces/{}/invitations", team.space),
+            json!({ "email": "d@exemple.fr", "role": "member" }),
+        )
+        .await;
+    reply.assert_status(StatusCode::CREATED);
+    let on_space = text(&reply.json(), "id").to_string();
+
+    // La liste de l'espace, pour la propriétaire et pour l'admin, qui peuvent partager « Plan »
+    // et la page sans titre, pas la page privée de Mona.
+    for who in [olga, adam] {
+        let reply = who
+            .browser
+            .get(&format!("/api/v1/spaces/{}/invitations", team.space))
+            .await;
+        reply.assert_status(StatusCode::OK);
+        let titles: Vec<(String, Value)> = reply
+            .json()
+            .as_array()
+            .expect("une liste")
+            .iter()
+            .map(|i| (text(i, "id").to_string(), i["pageTitle"].clone()))
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                (on_plan.to_string(), json!("Plan")),
+                (on_untitled.to_string(), json!("")),
+                (on_space.clone(), Value::Null),
+            ]
+        );
+        assert!(!reply.text().contains("Secret de Mona"), "{}", reply.text());
+        assert!(!reply.text().contains(&on_secret.to_string()));
+    }
+    // Les accès de la page : ses invitations, avec son titre.
+    let access = access_of(&olga.browser, plan).await;
+    assert_eq!(access["invitations"][0]["pageTitle"], "Plan", "{access}");
+    let access = access_of(&mona.browser, secret).await;
+    assert_eq!(
+        access["invitations"][0]["pageTitle"], "Secret de Mona",
+        "{access}"
+    );
+}
+
 /// Ruling R69 : une invitation de page ne vaut que tant que son auteur peut partager la page.
 /// Mona perd `full` : son lien ne se consulte plus, ne s'accepte plus et ne sert plus à
 /// s'inscrire, comme un lien inconnu. Elle le retrouve : le lien revaut.

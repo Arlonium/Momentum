@@ -20,6 +20,12 @@ level: Level | null,
  */
 pageId: string | null, 
 /**
+ * Le titre de la page, tel qu'il est à la lecture (vide pour une page sans titre) ;
+ * `null` pour une invitation dans l'espace. Il ne sort que vers qui voit l'invitation :
+ * qui peut partager la page.
+ */
+pageTitle: string | null, 
+/**
  * Millisecondes Unix : l'invitation vaut jusqu'à cet instant, exclu.
  */
 expiresAt: number, };

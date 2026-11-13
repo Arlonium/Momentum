@@ -799,6 +799,7 @@ async fn space_invitation_roundtrip() {
             "role": "member",
             "level": null,
             "pageId": null,
+            "pageTitle": null,
             "expiresAt": expires_at,
         }])
     );
@@ -1081,11 +1082,16 @@ async fn page_invitations_are_hidden_from_who_cannot_share() {
                 "role": null,
                 "level": "edit",
                 "pageId": team_id.to_string(),
+                "pageTitle": "Équipe",
                 "expiresAt": listed[0]["expiresAt"],
             }])
         );
         for hidden in [on_private, on_read_only] {
             assert!(!reply.text().contains(&hidden.to_string()));
+        }
+        // Ni le titre de ces pages (report M11 : la liste porte celui des pages qu'elle montre).
+        for title in ["Privée", "Lue"] {
+            assert!(!reply.text().contains(title), "{}", reply.text());
         }
     }
 

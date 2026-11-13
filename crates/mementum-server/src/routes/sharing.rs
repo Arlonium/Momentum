@@ -276,7 +276,7 @@ fn log_change(user: &AuthUser, id: Uuid, change: AccessChange, written: AccessWr
 /// effectif (`general`, la plus forte ligne `members` de la chaîne) et son plancher
 /// (`inheritedGeneral`, la plus forte de celles des ancêtres, Ruling R93) ; les comptes nommés
 /// (une fois chacun, à leur niveau le plus fort, hérité ou non) ; les invitations sur la page
-/// qui attendent encore.
+/// qui attendent encore, avec son titre (report M11 du lot 2).
 /// Seuls les comptes qui ont un rôle dans l'espace y figurent : une ligne restée à quelqu'un
 /// qui n'en a plus ne donne rien.
 async fn page_access(state: &AppState, node: &Node) -> Result<PageAccess, ApiError> {
@@ -325,7 +325,7 @@ async fn page_access(state: &AppState, node: &Node) -> Result<PageAccess, ApiErr
         .await?
         .into_iter()
         .filter(|i| matches!(i.grant, InvitationGrant::Page { node_id, .. } if node_id == node.id))
-        .map(pending_invitation)
+        .map(|i| pending_invitation(i, Some(node.title.clone())))
         .collect();
     Ok(PageAccess {
         general: own_general.max(above_general).map(Into::into),

@@ -120,7 +120,8 @@ pub(crate) async fn create(
 
 /// `GET /api/v1/spaces/{id}/invitations` : les invitations de l'espace qui attendent encore,
 /// sans leur jeton (`admin`). Celles des pages que la personne ne peut pas partager n'y sont
-/// pas.
+/// pas ; les autres portent le titre de leur page (report M11 du lot 2), lu une fois le droit
+/// vérifié : le titre d'une page qu'on ne peut pas partager n'est jamais lu pour cette réponse.
 pub(crate) async fn space_invitations(
     State(state): State<AppState>,
     user: AuthUser,
@@ -134,13 +135,22 @@ pub(crate) async fn space_invitations(
         .pending_invitations(space_id)
         .await
         .map_err(internal)?;
-    Ok(Json(
-        pending
-            .into_iter()
-            .filter(|i| may_manage(&access, i))
-            .map(pending_invitation)
-            .collect(),
-    ))
+    let mut listed = Vec::new();
+    for invitation in pending.into_iter().filter(|i| may_manage(&access, i)) {
+        let page_title = match invitation.grant {
+            InvitationGrant::Space(_) => None,
+            // Une page supprimée depuis la lecture emporte ses invitations (clé étrangère) :
+            // celle-ci n'existe plus, elle n'est pas listée.
+            InvitationGrant::Page { node_id, .. } => {
+                match state.store.get_node(node_id).await.map_err(internal)? {
+                    Some(node) => Some(node.title),
+                    None => continue,
+                }
+            }
+        };
+        listed.push(pending_invitation(invitation, page_title));
+    }
+    Ok(Json(listed))
 }
 
 /// `DELETE /api/v1/invitations/{id}` : `204`, l'invitation est supprimée, par qui peut la
@@ -363,8 +373,13 @@ fn may_manage(access: &SpaceAccess, invitation: &Invitation) -> bool {
     }
 }
 
-/// Une invitation en attente, telle que la liste la rend : sans jeton.
-pub(crate) fn pending_invitation(invitation: Invitation) -> PendingInvitation {
+/// Une invitation en attente, telle que la liste la rend : sans jeton. `page_title` est le titre
+/// de sa page, que l'appelant a lu (`None` pour une invitation d'espace) : il ne la rend qu'à
+/// qui peut partager la page.
+pub(crate) fn pending_invitation(
+    invitation: Invitation,
+    page_title: Option<String>,
+) -> PendingInvitation {
     let (role, level, page_id) = match invitation.grant {
         InvitationGrant::Space(role) => (Some(role.into()), None, None),
         InvitationGrant::Page { node_id, level } => {
@@ -377,6 +392,7 @@ pub(crate) fn pending_invitation(invitation: Invitation) -> PendingInvitation {
         role,
         level,
         page_id,
+        page_title,
         expires_at: invitation.expires_at,
     }
 }

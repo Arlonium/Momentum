@@ -380,6 +380,10 @@ pub struct PendingInvitation {
     pub level: Option<Level>,
     /// La page ; `null` pour une invitation dans l'espace.
     pub page_id: Option<String>,
+    /// Le titre de la page, tel qu'il est à la lecture (vide pour une page sans titre) ;
+    /// `null` pour une invitation dans l'espace. Il ne sort que vers qui voit l'invitation :
+    /// qui peut partager la page.
+    pub page_title: Option<String>,
     /// Millisecondes Unix : l'invitation vaut jusqu'à cet instant, exclu.
     #[ts(type = "number")]
     pub expires_at: i64,
