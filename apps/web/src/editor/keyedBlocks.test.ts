@@ -868,6 +868,38 @@ describe("missing_or_duplicate_ids_fall_back_to_positions", () => {
     expect(writtenIn(doc, () => sync(doc, target))).toMatchObject({ deleted: [], created: [] });
     expect(yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment(FRAGMENT), pmSchema).eq(target)).toBe(true);
   });
+
+  test("le même id sous une autre sorte de nœud n'est pas le même bloc : l'élément n'est pas gardé", async () => {
+    // Le bloc A devient une liste de colonnes du même id, pendant que B et C s'échangent. Un
+    // élément ne change pas de nom : gardé pour ce nœud, `updateYFragment` lèverait (« node name
+    // mismatch! ») au milieu de l'écriture. Il est supprimé, et la liste de colonnes créée.
+    const { pmSchema } = (await peer("Schéma", 9)).editor;
+    const container = (id: string, text: string) => ({
+      type: "blockContainer",
+      attrs: { id },
+      content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+    });
+    const column = (id: string, text: string) => ({
+      type: "column",
+      attrs: { id, width: 1 },
+      content: [container(`${id}-bloc`, text)],
+    });
+    const columns = {
+      type: "columnList",
+      attrs: { id: "a" },
+      content: [column("gauche", "Gauche"), column("droite", "Droite")],
+    };
+    const page = (nodes: unknown[]) =>
+      pmSchema.nodeFromJSON({ type: "doc", content: [{ type: "blockGroup", content: nodes }] });
+    const [a, b, c] = [container("a", "Un"), container("b", "Deux"), container("c", "Trois")];
+    const target = page([columns, c, b]);
+    const doc = yDocOf(page([a, b, c]));
+    const wrote = writtenIn(doc, () => sync(doc, target));
+    expect(wrote.deleted).toContain("blockContainer a");
+    expect(wrote.created.filter((name) => name.startsWith("columnList "))).toHaveLength(1);
+    expect(wrote.renamed).toEqual({});
+    expect(yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment(FRAGMENT), pmSchema).eq(target)).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
