@@ -10,7 +10,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
-use common::sync::{members, open_app, still_served, user};
+use common::sync::{Witness, members, open_app, user};
 use common::{
     Browser, Reply, Team, TestApp, WAIT, assert_french, json_request, outcome, sync_url, synced_as,
     uuid,
@@ -1126,13 +1126,19 @@ async fn comment_write_tells_the_page() {
         synced_as(&gina.browser, &sync_url(addr, page)).await,
     ];
     let other = synced_as(&mona.browser, &sync_url(addr, elsewhere)).await;
+    // Un témoin par page (Tom y écrit) : sa marque, posée après la réponse d'une route, passe
+    // derrière la trame que cette route a demandée.
+    let witness = Witness::join(&team.tom.browser, &sync_url(addr, page)).await;
+    let witness_elsewhere = Witness::join(&team.tom.browser, &sync_url(addr, elsewhere)).await;
     let comments = json!({ "type": "comments" });
     // Après une écriture : chaque connexion de la page a reçu `count` trames, toutes `comments`,
-    // et pas une de plus (la resynchronisation passe derrière tout ce que l'acteur a diffusé
-    // avant elle).
+    // et pas une de plus. La route demande la trame à l'acteur sans l'attendre : c'est la
+    // marque du témoin qui dit que la trame est arrivée, ou qu'il n'y en a pas eu. Une
+    // resynchronisation ne le dit pas : sa réponse passe devant une trame diffusée pendant
+    // que la connexion l'attend (Ruling R342).
     let heard = async |count: usize| {
+        witness.seen_by(&[&on_page[0], &on_page[1]]).await;
         for client in &on_page {
-            assert!(still_served(client).await, "connexion fermée");
             let frames = events(client);
             assert_eq!(frames.len(), count, "{frames:?}");
             assert!(frames.iter().all(|frame| frame == &comments), "{frames:?}");
@@ -1248,7 +1254,7 @@ async fn comment_write_tells_the_page() {
     heard(12).await;
 
     // L'autre page n'a rien reçu.
-    assert!(still_served(&other).await);
+    witness_elsewhere.seen_by(&[&other]).await;
     assert_eq!(events(&other), [] as [Value; 0]);
 }
 
