@@ -19,7 +19,6 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::{Actor, Broken, Ids};
-use crate::protocol;
 use crate::{PageEvent, SyncError};
 
 /// Ce que l'acteur compte des transactions validées dans son document, d'après
@@ -237,7 +236,8 @@ impl Actor {
     /// des octets reçus d'un client), le `seq` du journal qu'il couvre (entre
     /// deux commandes, le document est exactement ce que le journal a écrit) et
     /// les comptes de la tranche. Une fois écrite, la tranche est vide, et les
-    /// connexions de la page reçoivent la trame `versions` (Ruling R136).
+    /// connexions de la page qui peuvent écrire reçoivent la trame `versions` (Rulings R136,
+    /// R355).
     async fn cut_version(&mut self, reason: VersionReason) -> Result<(), StoreError> {
         let state = self.page.encode_state();
         let authors: Vec<Uuid> = self.slice.authors.iter().copied().collect();
@@ -248,7 +248,7 @@ impl Actor {
             kept: true,
             ..Slice::default()
         };
-        self.broadcast(None, protocol::page_event(PageEvent::Versions));
+        self.page_event(PageEvent::Versions);
         Ok(())
     }
 

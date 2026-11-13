@@ -103,6 +103,10 @@ pub(crate) struct Broadcast {
     /// La seule connexion qui le reçoit ; `None` : toutes (moins `from`). Il passe par la
     /// diffusion, et pas à côté, pour arriver à sa place parmi les autres messages de la page.
     pub(crate) to: Option<ConnId>,
+    /// Seulement aux connexions dont le compte a le droit d'écrire la page (`ConnInfo::can_write`),
+    /// quel que soit leur schéma : la trame `versions` (Ruling R355). Un onglet d'un autre schéma,
+    /// en lecture seule, lit encore l'historique.
+    pub(crate) editors_only: bool,
     /// Message y-websocket, ou trame de page.
     pub(crate) message: Vec<u8>,
 }
@@ -699,10 +703,7 @@ impl Actor {
             } => self.join(writable, actor, name.as_deref(), reply),
             Command::Admit { conn } => self.admit(conn),
             Command::Leave { conn } => self.leave(conn),
-            Command::PageEvent { event } => {
-                // À toutes les connexions de la page, lecteurs compris.
-                self.broadcast(None, protocol::page_event(event));
-            }
+            Command::PageEvent { event } => self.page_event(event),
             Command::Messages {
                 conn,
                 messages,
@@ -1485,7 +1486,22 @@ impl Actor {
         let _ = self.events.send(Event::Message(Arc::new(Broadcast {
             from,
             to: None,
+            editors_only: false,
             message,
+        })));
+    }
+
+    /// La trame de page `event`, à qui peut relire ce qui a changé : `comments` à toutes les
+    /// connexions de la page, lecteurs compris ; `versions` aux seules connexions dont le compte
+    /// a le droit d'écrire (`ConnInfo::can_write`, Ruling R355) : l'historique se lit à partir de
+    /// « Peut modifier » (Ruling R203), et un lecteur n'a pas à apprendre qu'une version vient
+    /// d'être coupée, ni combien.
+    pub(crate) fn page_event(&self, event: PageEvent) {
+        let _ = self.events.send(Event::Message(Arc::new(Broadcast {
+            from: None,
+            to: None,
+            editors_only: event == PageEvent::Versions,
+            message: protocol::page_event(event),
         })));
     }
 
@@ -1494,6 +1510,7 @@ impl Actor {
         let _ = self.events.send(Event::Message(Arc::new(Broadcast {
             from: None,
             to: Some(conn),
+            editors_only: false,
             message,
         })));
     }

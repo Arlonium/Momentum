@@ -111,7 +111,8 @@
 //!   contrôles de son inscription (R71, R88) : fermée avant, elle n'a été
 //!   nommée à personne. Elle reçoit la liste juste derrière son accueil.
 //!   [`Hub::page_event`] dit aux connexions d'une page vivante qu'il y a du
-//!   neuf à relire par l'API (commentaires, historique). Reçue d'un client, une
+//!   neuf à relire par l'API (commentaires, à toutes ; historique, à celles
+//!   dont le compte a le droit d'écrire, Ruling R355). Reçue d'un client, une
 //!   trame de page rend son message illisible : la connexion est fermée ;
 //! - **entretien** (Ruling R107) : une connexion à qui rien n'a été envoyé
 //!   depuis [`SyncConfig::keepalive_after`] reçoit une mise à jour de présence

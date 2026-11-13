@@ -206,19 +206,27 @@ async fn connection_closed_at_its_registration_is_never_named() {
     );
 }
 
-/// Les trames `comments` et `versions` parviennent à toutes les connexions de la page, lecteurs
-/// et connexions sans compte compris, et à celles d'aucune autre page. Sans acteur vivant, rien
-/// n'est fait : la page n'est pas chargée pour autant.
+/// La trame `comments` parvient à toutes les connexions de la page, lecteurs et connexions sans
+/// compte compris ; la trame `versions`, aux seules connexions dont le compte a le droit d'écrire
+/// (`ConnInfo::can_write`, Ruling R355 : l'historique se lit à partir de « Peut modifier »,
+/// R203), onglet d'un autre schéma compris (en lecture seule, il lit encore l'historique), pas à
+/// une lectrice ; ni l'une ni l'autre à une autre page. Sans acteur vivant, rien n'est
+/// fait : la page n'est pas chargée pour autant.
 #[tokio::test]
-async fn page_event_reaches_every_connection_of_the_page() {
+async fn page_event_reaches_the_connections_that_may_read_it() {
     let f = Fixture::new(SyncConfig::default()).await;
     let (alice, bob, gina) = three_accounts(&f).await;
     let elsewhere_page = new_page(&f.store).await;
-    let on_page = [
+    let stale = ConnInfo {
+        client_schema: mementum_schema::SCHEMA_VERSION - 1,
+        ..of(bob, "Bob")
+    };
+    let writers = [
         Client::connect_synced(&f.url_for(of(alice, "Alice"))).await,
-        Client::connect_synced(&f.url_for(reading(gina, "Gina"))).await,
         f.client().await,
+        Client::connect_synced(&f.url_for(stale)).await,
     ];
+    let readers = [Client::connect_synced(&f.url_for(reading(gina, "Gina"))).await];
     let elsewhere = Client::connect_synced(&f.server.url_for(elsewhere_page, of(bob, "Bob"))).await;
     // Les trames autres que la liste des présents.
     let events = |client: &Client| -> Vec<Value> {
@@ -232,22 +240,32 @@ async fn page_event_reaches_every_connection_of_the_page() {
             .wait_until(WAIT, |c| events(c).as_slice() == expected)
             .await
     };
-    let both = [json!({ "type": "comments" }), json!({ "type": "versions" })];
-    let (comments, versions) = (&both[..1], &both[1..]);
+    let (comments, versions) = (json!({ "type": "comments" }), json!({ "type": "versions" }));
 
     f.hub.page_event(f.page, PageEvent::Comments);
-    for client in &on_page {
-        assert!(became(client, comments).await, "{:?}", client.page_events());
+    for client in writers.iter().chain(&readers) {
+        assert!(
+            became(client, std::slice::from_ref(&comments)).await,
+            "{:?}",
+            client.page_events()
+        );
     }
     f.hub.page_event(elsewhere_page, PageEvent::Versions);
-    assert!(became(&elsewhere, versions).await);
-    // Une seconde trame pour la page : elle arrive seule, derrière la première ; celle de
-    // l'autre page n'est pas passée entre les deux.
+    assert!(became(&elsewhere, std::slice::from_ref(&versions)).await);
+    // `versions` pour la page, puis `comments` : chez qui écrit, les deux, dans l'ordre ; chez
+    // qui lit, la seconde arrive seule derrière la première `comments` (la diffusion est
+    // ordonnée : `versions` serait passée avant).
     f.hub.page_event(f.page, PageEvent::Versions);
-    for client in &on_page {
-        assert!(became(client, &both).await, "{:?}", client.page_events());
+    f.hub.page_event(f.page, PageEvent::Comments);
+    let written = [comments.clone(), versions.clone(), comments.clone()];
+    for client in &writers {
+        assert!(became(client, &written).await, "{:?}", client.page_events());
     }
-    assert_eq!(events(&elsewhere), versions);
+    for client in &readers {
+        let read = [comments.clone(), comments.clone()];
+        assert!(became(client, &read).await, "{:?}", client.page_events());
+    }
+    assert_eq!(events(&elsewhere), [versions]);
 
     // Une page que personne n'a ouverte, une page qui n'existe pas : rien, et aucun acteur
     // n'est lancé.

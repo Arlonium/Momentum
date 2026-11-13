@@ -21,7 +21,8 @@
 //! second contrôle des droits, puis la commande à l'acteur, qui coupe la version
 //! `before_restore` et écrit les blocs de la version sans rien laisser passer entre les deux
 //! (`Hub::restore_version`). L'écriture est celle d'un client ou de `PUT /mmd` : journal,
-//! diffusion aux connexions, qui reçoivent aussi la trame `{"type":"versions"}` ; elle va au
+//! diffusion aux connexions ; celles qui peuvent écrire reçoivent aussi la trame
+//! `{"type":"versions"}` (Ruling R355) ; elle va au
 //! bout même si le client coupe la connexion. Restaurer ce que la page a déjà comme contenu ne
 //! fait rien, et répond `204`. Un état gardé que le serveur ne relit plus (base abîmée) répond
 //! `500 internal`, sans toucher à la page.

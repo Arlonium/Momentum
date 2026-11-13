@@ -353,6 +353,7 @@ impl Hub {
         C: Future<Output = bool> + Send,
     {
         let writable = conn.client_schema == SCHEMA_VERSION && conn.can_write;
+        let may_edit = conn.can_write;
         let actor = conn.actor;
         let joined = self
             .call(node_id, |reply| Command::Join {
@@ -385,7 +386,8 @@ impl Hub {
         // lui envoie la liste juste derrière son accueil. Une boîte fermée : la connexion le
         // verra, l'acteur est arrêté.
         let _ = joined.membership.commands().send(Command::Admit { conn });
-        match pump(socket, joined, node_id, writable, &self.cfg).await {
+        let access = Access { writable, may_edit };
+        match pump(socket, joined, node_id, access, &self.cfg).await {
             // Fin normale, à la demande, ou fermeture dont l'acteur a
             // journalisé la raison.
             end @ (End::Left | End::Refused | End::Kicked) => {
@@ -448,8 +450,10 @@ impl Hub {
     }
 
     /// Dit aux connexions de la page qu'il y a du neuf à relire par l'API : ses
-    /// commentaires, ou son historique. Toutes reçoivent la trame de page
-    /// (Ruling R136), lecteurs compris, et celles d'aucune autre page.
+    /// commentaires, ou son historique. La trame `comments` va à toutes
+    /// (Ruling R136), lecteurs compris ; la trame `versions`, aux seules
+    /// connexions dont le compte a le droit d'écrire (Ruling R355) ; aucune
+    /// à celles d'une autre page.
     ///
     /// Sans acteur vivant (personne n'a la page ouverte), rien n'est fait, et
     /// aucun acteur n'est lancé : il n'y a personne à prévenir, et qui ouvrira
@@ -757,10 +761,20 @@ impl Outbox {
     }
 }
 
+/// Ce qu'une connexion peut faire, pour [`pump`].
+#[derive(Clone, Copy)]
+struct Access {
+    /// Elle écrit (droit et schéma) ; sinon, sa présence n'est pas même décodée.
+    writable: bool,
+    /// Son compte a le droit d'écrire la page (`ConnInfo::can_write`), quel que soit son schéma :
+    /// elle reçoit la trame `versions` (Ruling R355).
+    may_edit: bool,
+}
+
 /// Fait passer les messages entre la socket et l'acteur jusqu'à la fin de la
 /// connexion, et en rend la raison. `node_id`, la page, ne sert qu'au journal.
-/// `writable` : la connexion écrit ; sinon, sa présence n'est pas même décodée
-/// (Ruling R118).
+/// `access` : ce qu'elle peut faire ([`Access`]) ; une connexion qui n'écrit pas
+/// ne voit pas même sa présence décodée (Ruling R118).
 ///
 /// Un écrivain vide une file bornée vers la socket ; le lecteur traite les
 /// messages du client (par l'acteur, un lot à la fois, dans l'ordre) et
@@ -786,10 +800,11 @@ impl Outbox {
 /// l'acteur : il n'est ni appliqué, ni écrit, ni relayé à personne. Il passe
 /// par la file, comme les autres ; l'écrivain ne l'y met que quand il attend,
 /// la file vide : une connexion qui ne lit plus n'en accumule pas.
-async fn pump<S>(socket: S, joined: Joined, node_id: Uuid, writable: bool, cfg: &SyncConfig) -> End
+async fn pump<S>(socket: S, joined: Joined, node_id: Uuid, access: Access, cfg: &SyncConfig) -> End
 where
     S: Stream<Item = Vec<u8>> + Sink<Vec<u8>> + Unpin + Send + 'static,
 {
+    let Access { writable, may_edit } = access;
     let Joined {
         mut events,
         hello,
@@ -847,9 +862,12 @@ where
                 // client qui écrit vite.
                 biased;
                 event = events.recv() => match event {
-                    // Ses propres messages, ou ceux d'une autre connexion seule.
+                    // Ses propres messages, ceux d'une autre connexion seule, ou ceux des seules
+                    // connexions dont le compte a le droit d'écrire (Ruling R355).
                     Ok(Event::Message(message))
-                        if message.from == Some(conn) || message.to.is_some_and(|to| to != conn) => {}
+                        if message.from == Some(conn)
+                            || message.to.is_some_and(|to| to != conn)
+                            || (message.editors_only && !may_edit) => {}
                     Ok(Event::Message(message)) => {
                         if !outbox.push(Outgoing::Shared(message)) {
                             return End::QueueFull;
