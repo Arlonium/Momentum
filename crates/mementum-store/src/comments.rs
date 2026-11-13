@@ -678,6 +678,24 @@ impl Store {
         Ok(emptied > 0)
     }
 
+    /// Supprime le fil, avec ses messages et leurs réactions, en une écriture (Ruling R352) :
+    /// celle de qui a l'accès complet, que la route a vérifié. `NotFound` si le fil n'est pas,
+    /// ou plus, de cette page : rien n'est supprimé.
+    pub async fn delete_thread(&self, node_id: Uuid, thread_id: Uuid) -> Result<(), StoreError> {
+        // Les messages et leurs réactions suivent leur fil (`ON DELETE CASCADE`), dans la même
+        // instruction.
+        let deleted = sqlx::query("DELETE FROM comment_threads WHERE id = ? AND node_id = ?")
+            .bind(thread_id.to_string())
+            .bind(node_id.to_string())
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if deleted == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     /// Résout le fil au nom de `by` (`resolved`), ou le rouvre. Un fil déjà dans cet état ne
     /// change pas, pas même qui l'a résolu : rend le fil, et s'il a changé. `NotFound` si le fil
     /// n'est pas de cette page ; `NotAuthor` si `who` demande qu'il ait été ouvert par un autre.

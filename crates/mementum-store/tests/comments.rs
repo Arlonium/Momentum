@@ -1265,3 +1265,54 @@ async fn measure_writes_on_a_full_page() {
         );
     }
 }
+
+/// Ruling R352 : supprimer un fil emporte ses messages et leurs réactions, en une écriture ;
+/// rien d'une autre page ni d'un autre fil. Un fil qui n'est pas de cette page, ou qui n'est
+/// plus, rend `NotFound` sans rien supprimer.
+#[tokio::test]
+async fn deleting_a_thread_takes_its_messages_and_reactions() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let p = new_page(&f, "Page").await;
+    let other = new_page(&f, "Autre").await;
+    let doomed = store.create_thread(p, None, alice.id, "Un").await.unwrap();
+    let reply = store
+        .reply_to_thread(p, doomed.id, bob.id, "Deux")
+        .await
+        .unwrap();
+    store
+        .add_reaction(p, doomed.id, reply.id, alice.id, "👍")
+        .await
+        .unwrap();
+    let kept = store
+        .create_thread(p, Some("bloc"), bob.id, "Gardé")
+        .await
+        .unwrap();
+    let elsewhere = store
+        .create_thread(other, None, alice.id, "Ailleurs")
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        store.delete_thread(other, doomed.id).await,
+        Err(StoreError::NotFound)
+    ));
+    assert_eq!(store.comment_threads(p).await.unwrap().len(), 2);
+    store.delete_thread(p, doomed.id).await.unwrap();
+    assert_eq!(store.comment_threads(p).await.unwrap(), [kept]);
+    assert_eq!(store.comment_threads(other).await.unwrap(), [elsewhere]);
+    for (table, left) in [
+        ("comment_threads", 2),
+        ("comments", 2),
+        ("comment_reactions", 0),
+    ] {
+        let count = int(&f.db, &format!("SELECT COUNT(*) FROM {table}")).await;
+        assert_eq!(count, left, "{table}");
+    }
+    assert!(matches!(
+        store.delete_thread(p, doomed.id).await,
+        Err(StoreError::NotFound)
+    ));
+}

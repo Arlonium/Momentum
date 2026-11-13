@@ -117,9 +117,11 @@ enum Act {
     Delete,
     React,
     Unreact,
+    /// Supprimer tout le fil (Ruling R352).
+    DeleteThread,
 }
 
-const ACTS: [Act; 9] = [
+const ACTS: [Act; 10] = [
     Act::List,
     Act::Open,
     Act::Reply,
@@ -129,6 +131,7 @@ const ACTS: [Act; 9] = [
     Act::Delete,
     Act::React,
     Act::Unreact,
+    Act::DeleteThread,
 ];
 
 /// Qui a ouvert le fil, et qui a écrit le message que vise la requête : Mona (qui demande) ou
@@ -209,6 +212,8 @@ fn expected(
         ),
         // Résoudre ou rouvrir un fil : l'avoir ouvert avec `comment`, ou `edit`.
         Act::Resolve | Act::Reopen => (StatusCode::OK, commenter && (opened || level >= Lvl::Edit)),
+        // Supprimer tout le fil, avec les messages de tous : `full`, qu'on l'ait ouvert ou non.
+        Act::DeleteThread => (StatusCode::NO_CONTENT, level >= Lvl::Full),
     };
     if !allowed {
         return (StatusCode::FORBIDDEN, Some("forbidden"));
@@ -246,6 +251,7 @@ async fn attempt(by: &Browser<'_>, act: Act, page: Uuid, thread: Uuid, message: 
         Act::Delete => by.delete(&message_uri(page, thread, message)).await,
         Act::React => put_empty(by, &reaction_uri(page, thread, message, "🎉")).await,
         Act::Unreact => by.delete(&reaction_uri(page, thread, message, "👍")).await,
+        Act::DeleteThread => by.delete(&thread_uri(page, thread)).await,
     }
 }
 
@@ -323,6 +329,9 @@ async fn comment_routes_follow_the_levels() {
                             // Le refus de niveau nomme le niveau qu'il faut ; celui de l'auteur
                             // dit à qui est le message ou le fil.
                             let why = match (code, level) {
+                                ("forbidden", _) if act == Act::DeleteThread => {
+                                    "il faut « Accès complet »"
+                                }
                                 ("forbidden", Lvl::Read) => "il faut « Peut commenter »",
                                 ("forbidden", _) => "n'est pas le tien",
                                 _ => "corbeille",
@@ -342,7 +351,7 @@ async fn comment_routes_follow_the_levels() {
             }
         }
     }
-    assert_eq!(cells, 4 * 6 * 2 * 9, "toutes les cases ont été jouées");
+    assert_eq!(cells, 4 * 6 * 2 * 10, "toutes les cases ont été jouées");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -897,6 +906,10 @@ async fn thread_of_another_page_is_not_found() {
                 "PATCH fil",
                 json_request(Method::PATCH, &thread_at, &json!({ "resolved": true })),
             ),
+            (
+                "DELETE fil",
+                Request::delete(&thread_at).body(Body::empty()).unwrap(),
+            ),
         ]
     };
     // Celles qui nomment un fil et un de ses messages.
@@ -1003,7 +1016,7 @@ async fn missing_thread_comes_before_trashed() {
     let (thread, message) = (here.id.to_string(), here.comments[0].id.to_string());
     let (foreign, foreign_msg) = (there.id.to_string(), there.comments[0].id.to_string());
     let unknown = Uuid::now_v7().to_string();
-    // Les routes qui nomment un fil ; les trois dernières nomment aussi un de ses messages.
+    // Les routes qui nomment un fil ; les quatre dernières nomment aussi un de ses messages.
     let requests = |thread: &str, message: &str| {
         let message_at = message_uri(page, thread, message);
         let reaction = format!("{message_at}/reactions/{}", encoded("👍"));
@@ -1023,6 +1036,12 @@ async fn missing_thread_comes_before_trashed() {
                     &thread_uri(page, thread),
                     &json!({ "resolved": true }),
                 ),
+            ),
+            (
+                "DELETE fil",
+                Request::delete(thread_uri(page, thread))
+                    .body(Body::empty())
+                    .unwrap(),
             ),
             (
                 "PATCH message",
@@ -1061,7 +1080,7 @@ async fn missing_thread_comes_before_trashed() {
         }
     }
     for message_id in [unknown.as_str(), foreign_msg.as_str()] {
-        for (name, request) in requests(&thread, message_id).into_iter().skip(2) {
+        for (name, request) in requests(&thread, message_id).into_iter().skip(3) {
             let body = mona
                 .browser
                 .send(request)
@@ -1200,6 +1219,32 @@ async fn comment_write_tells_the_page() {
             .assert_status(StatusCode::NO_CONTENT);
     }
     heard(9).await;
+    // Un fil supprimé tout entier, avec sa réponse : une trame. Supprimé de nouveau, il n'est
+    // plus là : `404`, et rien n'est envoyé (Ruling R352).
+    let opened = mona
+        .browser
+        .post(&comments_uri(page), json!({ "body": "Trois" }))
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    let thread = uuid(&opened.json()["id"]);
+    mona.browser
+        .post(
+            &format!("{}/replies", thread_uri(page, thread)),
+            json!({ "body": "Quatre" }),
+        )
+        .await
+        .assert_status(StatusCode::CREATED);
+    heard(11).await;
+    mona.browser
+        .delete(&thread_uri(page, thread))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    heard(12).await;
+    mona.browser
+        .delete(&thread_uri(page, thread))
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+    heard(12).await;
 
     // L'autre page n'a rien reçu.
     assert!(still_served(&other).await);
@@ -1690,6 +1735,117 @@ async fn one_account_does_not_fill_the_threads_of_a_page() {
         .assert_status(StatusCode::CREATED);
     let threads = gina.browser.get(&comments_uri(page)).await.json();
     assert_eq!(threads.as_array().map(Vec::len), Some(201));
+
+    // Olga supprime un fil de Gina, réponses comprises, en une requête (Ruling R352) ; avant,
+    // elle supprimait message par message.
+    let hers = uuid(&threads[0]["id"]);
+    for i in 0..3 {
+        gina.browser
+            .post(
+                &format!("{}/replies", thread_uri(page, hers)),
+                json!({ "body": format!("Réponse {i}") }),
+            )
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+    olga.browser
+        .delete(&thread_uri(page, hers))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let threads = gina.browser.get(&comments_uri(page)).await.json();
+    assert_eq!(threads.as_array().map(Vec::len), Some(200));
+    assert!(
+        threads
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["id"] != hers.to_string())
+    );
+}
+
+/// Ruling R352 : `DELETE …/comments/{threadId}`, pour qui a l'accès complet, supprime tout le fil,
+/// avec les messages de tous et leurs réactions, en une requête ; le reste de la page n'est pas
+/// touché. Qui a moins, « Peut modifier » ou l'auteur du fil avec « Peut commenter », reçoit
+/// `403`, qui dit le niveau qu'il faut, avant que le fil soit cherché (Ruling R168) : un fil
+/// inconnu lui répond le même `403`.
+#[tokio::test]
+async fn deleting_a_thread_takes_everyone_s_messages() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, mona, tom) = (&team.olga, &team.mona, &team.tom);
+    let page = team
+        .page(
+            None,
+            "Commentée",
+            &[
+                user(olga, Level::Full),
+                user(mona, Level::Edit),
+                user(tom, Level::Comment),
+            ],
+        )
+        .await;
+    let opened = tom
+        .browser
+        .post(&comments_uri(page), json!({ "body": "Le fil de Tom" }))
+        .await;
+    opened.assert_status(StatusCode::CREATED);
+    let thread = uuid(&opened.json()["id"]);
+    let replied = mona
+        .browser
+        .post(
+            &format!("{}/replies", thread_uri(page, thread)),
+            json!({ "body": "La réponse de Mona" }),
+        )
+        .await;
+    replied.assert_status(StatusCode::CREATED);
+    put_empty(
+        &tom.browser,
+        &reaction_uri(page, thread, uuid(&replied.json()["id"]), "👍"),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+    let kept = mona
+        .browser
+        .post(&comments_uri(page), json!({ "body": "Le fil de Mona" }))
+        .await;
+    kept.assert_status(StatusCode::CREATED);
+    let kept = kept.json();
+    let before = olga.browser.get(&comments_uri(page)).await.json();
+
+    // Tom, qui l'a ouvert, puis Mona.
+    for (browser, held) in [
+        (&tom.browser, "Peut commenter"),
+        (&mona.browser, "Peut modifier"),
+    ] {
+        for target in [thread, Uuid::now_v7()] {
+            let body = browser
+                .delete(&thread_uri(page, target))
+                .await
+                .assert_error(StatusCode::FORBIDDEN, "forbidden");
+            assert_french(&body, &["il faut « Accès complet »", held]);
+        }
+    }
+    assert_eq!(olga.browser.get(&comments_uri(page)).await.json(), before);
+
+    olga.browser
+        .delete(&thread_uri(page, thread))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let after = olga.browser.get(&comments_uri(page)).await.json();
+    assert_eq!(after, json!([kept]));
+    let db = t.db_path();
+    for (table, sql) in [
+        (
+            "comments",
+            format!("SELECT COUNT(*) FROM comments WHERE thread_id = '{thread}'"),
+        ),
+        (
+            "comment_reactions",
+            "SELECT COUNT(*) FROM comment_reactions".to_string(),
+        ),
+    ] {
+        assert_eq!(common::query_i64(&db, &sql).await, 0, "{table}");
+    }
 }
 
 /// Ce qu'une lecture des fils d'une page pleine rend au plus, sans réaction : le texte des

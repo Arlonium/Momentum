@@ -9,7 +9,8 @@
 //! - [`AppState::node_access`] : une page et ce qu'elle peut en faire ([`AppState::seen_node`]
 //!   pour qui vérifie plusieurs actions, avec [`permit`]) ;
 //! - [`permit_level`] puis [`permit_own`] : pour un message ou un fil de commentaires, le niveau
-//!   seul, puis la règle de son auteur et la corbeille (Ruling R134) ;
+//!   seul, puis la règle de son auteur et la corbeille (Ruling R134) ; [`permit_thread_deletion`]
+//!   pour supprimer tout un fil, « Accès complet » (Ruling R352) ;
 //! - [`AppState::rights_changed`] : à appeler après toute écriture qui change des droits, pour
 //!   fermer les connexions de synchro qui les avaient lus.
 //!
@@ -127,14 +128,31 @@ pub(crate) fn permit(access: &NodeAccess, action: Action) -> Result<(), ApiError
             .into_iter()
             .find(|level| level.allows(action))
             .unwrap_or(Level::Full);
-        return Err(ApiError::forbidden(format!(
-            "niveau insuffisant sur cette page : il faut « {} », tu as « {} »",
-            level_name(needed),
-            level_name(access.level)
-        )));
+        return Err(below(needed, access.level));
     }
     if access.in_trash && writes(action) {
         return Err(ApiError::trashed());
+    }
+    Ok(())
+}
+
+/// `403 forbidden` : il faut `needed` sur la page, la personne a `held`.
+fn below(needed: Level, held: Level) -> ApiError {
+    ApiError::forbidden(format!(
+        "niveau insuffisant sur cette page : il faut « {} », tu as « {} »",
+        level_name(needed),
+        level_name(held)
+    ))
+}
+
+/// Supprimer tout un fil de commentaires, avec les messages de tous (Ruling R352) : il faut
+/// « Accès complet », le niveau qui supprime le message d'un autre ([`OwnWork::DeleteMessage`]),
+/// qu'on ait ouvert le fil ou non. Le niveau seul, comme [`permit_level`] : `403 forbidden` en
+/// dessous, sans regarder la corbeille ; la route cherche ensuite le fil (son `404`), puis
+/// [`permit`] dit la corbeille.
+pub(crate) fn permit_thread_deletion(access: &NodeAccess) -> Result<(), ApiError> {
+    if access.level < Level::Full {
+        return Err(below(Level::Full, access.level));
     }
     Ok(())
 }

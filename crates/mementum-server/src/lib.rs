@@ -41,6 +41,7 @@
 //! | `PATCH /api/v1/pages/{id}/comments/{threadId}` | l'avoir ouvert avec `comment`, ou `edit` | `Thread` : résolu (`{"resolved": true}`) ou rouvert ; déjà dans cet état, rien ne change |
 //! | `PATCH /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | `comment`, et en être l'auteur | `Comment` ; le même texte ne change rien, pas même `editedAt` ; `422 invalid_body` ; `409 page_comment_limit` si le texte, plus long, ferait passer celui de la page au-delà de 4 Mio (Ruling R350) |
 //! | `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}` | en être l'auteur avec `comment`, ou `full` | `204` : le message part avec ses réactions, le fil avec son dernier message |
+//! | `DELETE /api/v1/pages/{id}/comments/{threadId}` | `full` | `204` : tout le fil part, avec les messages de tous et leurs réactions, en une écriture ; refus dans l'ordre de R168 (page, niveau, fil, corbeille) ; un fil qui n'est pas, ou plus, de la page : `404`, et aucune trame (Ruling R352) |
 //! | `PUT`, `DELETE /api/v1/pages/{id}/comments/{threadId}/messages/{commentId}/reactions/{emoji}` | `comment` | `Comment` : la réaction de la personne posée ou retirée (on ne retire que la sienne ; déjà dans cet état, rien ne change) ; `422 invalid_emoji` ; `409 reaction_limit` pour un emoji neuf sur un message qui en porte déjà 32 différents (Ruling R204), ou pour un emoji neuf pour la personne quand elle en a déjà posé 8 sur ce message, sa part (Ruling R351) |
 //! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi ; Ruling R203) | `Version[]` : les versions de la page, la plus récente d'abord, cent au plus, chacune avec sa date, sa raison (`periodic`, `closing`, `before_restore`) et les comptes qui l'ont modifiée depuis la version d'avant (identifiant et nom, jamais l'adresse) (Ruling R135) |
 //! | `GET /api/v1/pages/{id}/versions/{versionId}/state` | `edit` (à la corbeille aussi ; Ruling R203) | `application/octet-stream` : l'état Yjs (v1) de la version, tel qu'il a été gardé ; une version qui n'est pas de cette page, inconnue ou mal nommée reçoit la réponse d'une page introuvable, après le `403` de niveau, comme sur la route suivante |
@@ -454,7 +455,7 @@ fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/pages/{id}/comments/{thread_id}",
-            patch(comments::resolve),
+            patch(comments::resolve).delete(comments::delete_thread),
         )
         .route(
             "/api/v1/pages/{id}/comments/{thread_id}/replies",

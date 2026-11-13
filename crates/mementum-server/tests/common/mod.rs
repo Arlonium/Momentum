@@ -918,6 +918,7 @@ pub fn comment_routes(id: &str, thread: &str, message: &str) -> Vec<(&'static st
             "PATCH fil sans rien",
             json_request(Method::PATCH, &thread_at, &json!({})),
         ),
+        ("DELETE fil", bare(Method::DELETE, &thread_at)),
         (
             "PATCH message",
             json_request(Method::PATCH, &message_at, &json!({ "body": "Modifié" })),

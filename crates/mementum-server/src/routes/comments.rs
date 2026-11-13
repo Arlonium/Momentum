@@ -10,6 +10,7 @@
 //! | `PATCH …/comments/{threadId}` ([`ResolveThread`]) | l'avoir ouvert avec `comment`, ou `edit` | [`Thread`] |
 //! | `PATCH …/comments/{threadId}/messages/{commentId}` ([`NewComment`]) | `comment`, et en être l'auteur | [`Comment`] ; `422 invalid_body` |
 //! | `DELETE …/comments/{threadId}/messages/{commentId}` | en être l'auteur avec `comment`, ou `full` | `204` ; le fil part avec son dernier message |
+//! | `DELETE …/comments/{threadId}` | `full` | `204` : tout le fil part, avec les messages de tous et leurs réactions (Ruling R352) |
 //! | `PUT`, `DELETE …/messages/{commentId}/reactions/{emoji}` | `comment` | [`Comment`] ; `422 invalid_emoji` |
 //!
 //! **Refus**, dans cet ordre (Ruling R168 : celui des pages, écrit en tête de `access.rs`, où
@@ -17,7 +18,8 @@
 //! 1. `401` sans session ;
 //! 2. `404 not_found` pour une page que la personne ne voit pas, la réponse d'une page qui
 //!    n'existe pas, quels que soient le fil, le message ou le corps nommés ;
-//! 3. `403 forbidden` sous le niveau de la route (`comment` pour toute écriture) ;
+//! 3. `403 forbidden` sous le niveau de la route (`comment` pour toute écriture, `full` pour
+//!    supprimer tout un fil) ;
 //! 4. `404 not_found` pour un fil qui n'est pas de cette page, puis un message qui n'est pas de
 //!    ce fil : la même réponse que l'identifiant existe ailleurs, nulle part, ou qu'il soit mal
 //!    formé. Rien ne dit à personne qu'un fil existe sur une page qu'il ne voit pas ;
@@ -67,7 +69,7 @@ use mementum_store::StoreError;
 use mementum_sync::{PageEvent, display_name};
 use uuid::Uuid;
 
-use crate::access::{OwnWork, permit, permit_level, permit_own};
+use crate::access::{OwnWork, permit, permit_level, permit_own, permit_thread_deletion};
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::routes::pages::page_id;
@@ -226,6 +228,32 @@ pub(crate) async fn delete(
     let (store, thread_id) = (state.store.clone(), found.thread);
     written(&state, id, ApiError::comment_not_found, async move {
         store.delete_comment(id, thread_id, message, who).await?;
+        Ok(((), true))
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/v1/pages/{id}/comments/{threadId}` : supprime tout le fil, avec les messages de
+/// tous et leurs réactions (Ruling R352). Il faut l'accès complet : c'est ce qui libère, en une
+/// requête, ce qu'un compte a pris des plafonds de la page. Refus dans l'ordre de R168 : la
+/// page, le niveau, le fil, la corbeille. Un fil parti entre-temps : `404`, rien d'envoyé.
+pub(crate) async fn delete_thread(
+    State(state): State<AppState>,
+    user: AuthUser,
+    path: Result<Path<(String, String)>, PathRejection>,
+) -> Result<StatusCode, ApiError> {
+    let (id, thread_id) = thread_path(path)?;
+    let (_, access, _) = state
+        .seen_node(&user, id)
+        .await?
+        .ok_or_else(ApiError::page_not_found)?;
+    permit_thread_deletion(&access)?;
+    let found = located(&state, id, &thread_id, None).await?;
+    permit(&access, Action::Comment)?;
+    let (store, thread_id) = (state.store.clone(), found.thread);
+    written(&state, id, ApiError::thread_not_found, async move {
+        store.delete_thread(id, thread_id).await?;
         Ok(((), true))
     })
     .await?;
