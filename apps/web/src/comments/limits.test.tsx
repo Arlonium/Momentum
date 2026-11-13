@@ -2,7 +2,7 @@
 // (`thread_limit`), 500 messages par fil (`message_limit`) et 32 emojis distincts par message
 // (`reaction_limit`). Le client montre le message du serveur tel quel, comme tout refus, et le
 // texte refusé reste : dans son champ, et dans son brouillon, qui survit au panneau. Rien n'est
-// renvoyé de soi-même. Ici, c'est le test qui joue le serveur.
+// renvoyé de soi-même. Ici, c'est le test qui joue le serveur ; `e2e/comments-limits.spec.ts` atteint le vrai.
 import type { ErrorCode, Thread } from "@mementum/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -30,24 +30,23 @@ afterEach(async () => {
   host.remove();
 });
 
-/**
- * Un refus d'un plafond, tel que `api.ts` le lève. Les trois codes viennent de S4 et ne sont pas
- * encore dans les types générés (`packages/protocol`) : la conversion tombera avec eux. Le client
- * ne lit pas le code, seulement le message.
- */
-const limit = (code: string, said: string) => new ApiError(409, code as ErrorCode, said);
+/** Un refus d'un plafond, tel que `api.ts` le lève. Le client ne lit que le message. */
+const limit = (code: ErrorCode, said: string) => new ApiError(409, code, said);
 
+// Les messages du serveur (S4, `crates/mementum-server/src/error.rs`).
 const THREADS = limit(
   "thread_limit",
-  "cette page a déjà 2 000 fils : résous ou supprime des fils pour en ouvrir un autre",
+  "cette page a atteint 2\u202f000 fils de commentaires, résolus compris : supprime ceux qui ne " +
+    "servent plus, ou demande-le à quelqu'un qui a l'accès complet, avant d'en ouvrir un autre ; " +
+    "rien n'a été écrit",
 );
 const MESSAGES = limit(
   "message_limit",
-  "ce fil a déjà 500 messages : ouvre un autre fil pour continuer",
+  "ce fil a atteint 500 messages : ouvre un nouveau fil pour continuer ; rien n'a été écrit",
 );
 const REACTIONS_FULL = limit(
   "reaction_limit",
-  "ce message a déjà 32 réactions différentes : ajoute-toi à l'une d'elles",
+  "ce message porte déjà 32 emojis différents : réagis avec l'un d'eux ; rien n'a été écrit",
 );
 
 function comments(threads: Thread[], overrides: Partial<Comments>): Comments {
