@@ -3,41 +3,61 @@
 //! autres>`. Un envoi s'écrit d'abord dans `files/tmp/<UUIDv7>`, en calculant son hash au fil de
 //! l'eau, puis prend sa place. **Aucun nom venu d'un client n'entre dans un chemin** : le hash et
 //! l'UUID sont les seuls noms que le dépôt écrit ou lit. Le nom d'un fichier n'est qu'un libellé
-//! ([`display_name`]), gardé en base et rendu dans `Content-Disposition`
-//! ([`content_disposition`]). Le dépôt ne sait rien des pages ni des droits : c'est le store qui
-//! dit quelle page porte quel contenu, et `access.rs` qui juge qui le lit.
+//! ([`display_name`]), que [`content_disposition`] met en forme pour l'en-tête d'un fichier servi.
+//! Le dépôt ne sait rien des pages ni des droits : c'est le store qui dit quelle page porte quel
+//! contenu, et `access.rs` qui juge qui le lit. Ce module n'a pas de route : envoyer et lire un
+//! fichier est la Task S4a, le ménage la Task S4b.
 //!
 //! Le type d'un contenu est lu dans ses premiers octets, à l'envoi, par une table fermée
 //! ([`sniff`]) ; le type que déclare le client n'est jamais lu (R246).
 //!
 //! **Rien n'est supprimé au démarrage hors de `tmp/`** (R245). [`FileStore::open`] vide `tmp/`, et
 //! rien d'autre : un contenu que la base ne connaît pas (arrêt entre la pose et l'attache, base
-//! revenue en arrière) reste, compté par [`FileStore::strangers`] pour le journal du démarrage, et
-//! repris tel quel si on le renvoie. Un contenu ne quitte le disque que par [`FileStore::remove`],
-//! qu'appellent l'envoi dont l'attache a échoué (pour le seul contenu qu'il vient de poser,
-//! [`Stored::fresh`]) et le ménage qui suit la suppression d'une page.
+//! revenue en arrière) reste, compté par [`FileStore::strangers`], et repris tel quel si on le
+//! renvoie. Un contenu ne quitte le disque que par [`FileStore::remove`].
 //!
-//! **Un contenu posé est entier.** [`Upload::finish`] vide le fichier temporaire sur le disque
-//! (`sync_all`) avant de le mettre à sa place. Si un fichier y est déjà : de même taille, c'est le
-//! même contenu (le hash le nomme), et le temporaire est supprimé ; d'une autre taille, ou s'il
-//! n'est pas un fichier ordinaire, il est abîmé, et le temporaire le remplace, ce que le journal
-//! dit. Une écriture interrompue ou qui échoue met l'envoi hors d'usage (R273) : le fichier ne
-//! porterait plus les octets que le hash a vus. Un envoi lâché sans `finish` supprime son
-//! temporaire.
+//! **Un contenu posé est entier.** Le fichier temporaire est vidé sur le disque
+//! ([`Upload::sync`] : `flush`, puis `sync_all`) avant de prendre sa place. Si un fichier y est
+//! déjà : de même taille, il est **tenu pour** le même contenu, sans être relu, et le temporaire
+//! est supprimé (un contenu abîmé à taille égale n'est donc ni vu ni réparé) ; d'une autre taille,
+//! ou s'il n'est pas un fichier ordinaire, il est abîmé, et le temporaire le remplace, ce que le
+//! journal dit. Une écriture ou un vidage interrompu, ou qui échoue, met l'envoi hors d'usage
+//! (R273) : le fichier ne porterait plus les octets que le hash a vus. Un envoi lâché sans
+//! `finish` supprime son temporaire.
 //!
-//! **Un verrou** ([`FileStore::lock`]) ordonne « poser un contenu puis l'attacher » et le ménage :
-//! [`Upload::finish`] et [`FileStore::remove`] demandent son garde (d'un autre dépôt, il est
-//! refusé, R274). Ainsi un ménage qui relit la base sous le verrou voit l'attache d'un envoi qui
-//! vient de poser le contenu qu'il allait retirer.
+//! **Deux verrous.** Celui du dépôt ([`FileStore::lock`]) est tenu par l'appelant : il ordonne
+//! « poser un contenu puis l'attacher » et le ménage. [`Upload::finish`] et [`FileStore::remove`]
+//! demandent son garde (d'un autre dépôt, il est refusé, R274) ; ainsi un ménage qui relit la base
+//! sous le verrou voit l'attache d'un envoi qui vient de poser le contenu qu'il allait retirer.
+//! Celui du geste est interne (R285) : chaque « regarder puis agir » sur le disque (`finish` : le
+//! dossier de préfixe, ce qui est à la place du contenu, le renommage ; `remove` : ce qui est à sa
+//! place, le retrait) se fait d'un seul tenant sur un fil bloquant, qui tient ce verrou jusqu'à sa
+//! fin.
+//!
+//! **Ce qui tient quand l'appelant est lâché en route** (une requête abandonnée, un `select!`, un
+//! `timeout`). Rien n'annule ce qu'un fil bloquant a commencé, et le garde de l'appelant est rendu
+//! avec son futur. Le dépôt garantit ceci :
+//! - un geste parti va au bout, et **aucun autre geste ne regarde ni ne touche le dépôt avant sa
+//!   fin** : l'envoi suivant du même contenu attend le retrait en vol, puis pose le contenu
+//!   lui-même ; il attend la pose en vol, puis trouve le contenu ;
+//! - un contenu est à sa place entier, ou n'y est pas : il y arrive par un renommage ;
+//! - le temporaire d'un `write`, d'un `sync` ou d'un `finish` lâché part avec lui, ou avec le geste
+//!   qui le tenait.
+//!
+//! Et il ne garantit pas ceci : **la suite de l'appelant**. Lâché entre `finish` et l'écriture de
+//! son attache, il laisse un contenu que la base ne connaît pas ; lâché pendant `finish` ou
+//! `remove`, il ne sait pas si le geste a eu lieu. Qui pose puis attache, ou lit la base puis
+//! retire, le fait donc dans une tâche que l'abandon de la requête n'arrête pas (`to_completion`).
 //!
 //! **Les liens ne sont jamais suivis dans le dépôt** (R272) : un contenu n'est lu, gardé ou
-//! retiré que s'il est un fichier ordinaire dans un vrai dossier de préfixe, et `tmp/`, vidé à
-//! chaque démarrage, doit être un vrai dossier. Seul `files/` lui-même peut être un lien, vers
-//! un autre disque.
+//! compté que s'il est un fichier ordinaire dans un vrai dossier de préfixe ; un lien à la place
+//! d'un contenu est retiré lui-même, jamais ce qu'il vise ; et `tmp/`, vidé à chaque démarrage,
+//! doit être un vrai dossier. Seul `files/` lui-même peut être un lien, vers un autre disque.
 //!
-//! Tout est en `async` (`tokio::fs`), sauf l'ouverture et le compte des contenus inconnus (au
-//! démarrage) et le retrait du temporaire d'un envoi lâché (`Drop`) : aucune écriture bloquante de
-//! 100 Mio sur les fils du serveur, qui relaient les frappes (R247).
+//! Aucun appel bloquant sur les fils du serveur, qui relaient les frappes (R247) : l'écriture
+//! d'un envoi passe par `tokio::fs`, et tout autre geste sur le disque par un fil bloquant
+//! (`spawn_blocking`). Restent synchrones l'ouverture et le compte du démarrage, et le retrait du
+//! temporaire d'un envoi lâché (`Drop`, un `unlink`).
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -82,43 +102,147 @@ const MAX_ENCODED_NAME: usize = 1536;
 /// raccourci pour l'en-tête (R271).
 const MAX_KEPT_EXTENSION: usize = 16;
 
-/// Les chemins du dépôt et son verrou, partagés avec les envois en cours.
+/// Les chemins du dépôt et ses verrous, partagés avec les envois en cours et les gestes en vol.
 struct Dirs {
     /// `<data_dir>/files`.
     root: PathBuf,
     /// `<data_dir>/files/tmp`.
     tmp: PathBuf,
+    /// Le verrou du dépôt, que tient l'appelant ([`FileStore::lock`]).
     lock: Mutex<()>,
+    /// Le verrou du geste (R285) : tenu par le fil bloquant qui regarde le dépôt puis y agit,
+    /// jusqu'à la fin de son geste. L'appelant lâché en route ne peut pas le rendre à sa place.
+    gesture: Arc<Mutex<()>>,
 }
 
 impl Dirs {
+    /// Le dossier de préfixe du contenu `hash` : `files/<2 hex>`.
+    fn prefix_path(&self, hash: &[u8; 32]) -> PathBuf {
+        self.root.join(&hex(hash)[..2])
+    }
+
     /// Le chemin du contenu `hash` : `files/<2 hex>/<62 hex>`. Le hash, écrit en hexadécimal,
     /// est le seul nom qui y entre.
     fn content_path(&self, hash: &[u8; 32]) -> PathBuf {
-        let hex = hex(hash);
-        self.root.join(&hex[..2]).join(&hex[2..])
+        self.prefix_path(hash).join(&hex(hash)[2..])
     }
 
-    /// Le chemin du contenu `hash`, une fois vérifié que son dossier de préfixe, s'il existe, est
-    /// un vrai dossier et non un lien (R272).
-    async fn checked_path(&self, hash: &[u8; 32]) -> io::Result<PathBuf> {
+    /// Le dossier de préfixe du contenu `hash` est-il là ? Il doit alors être un vrai dossier :
+    /// un lien n'y est pas suivi (R272).
+    fn prefix_is_there(&self, hash: &[u8; 32]) -> io::Result<bool> {
+        let prefix = self.prefix_path(hash);
+        match std::fs::symlink_metadata(&prefix) {
+            Ok(meta) if meta.is_dir() => Ok(true),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{} n'est pas un dossier du dépôt (un lien n'y est pas suivi)",
+                    prefix.display()
+                ),
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Le chemin du contenu `hash`, s'il y est un fichier ordinaire, dans un vrai dossier de
+    /// préfixe ; `NotFound` s'il n'est pas là, ou si ce qui est à sa place est autre chose (un
+    /// lien n'est pas suivi, R272).
+    fn ordinary(&self, hash: &[u8; 32]) -> io::Result<PathBuf> {
+        self.prefix_is_there(hash)?;
         let path = self.content_path(hash);
-        if let Some(prefix) = path.parent() {
-            match tokio::fs::symlink_metadata(prefix).await {
-                Ok(meta) if !meta.is_dir() => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "{} n'est pas un dossier du dépôt (un lien n'y est pas suivi)",
-                            prefix.display()
-                        ),
-                    ));
+        if std::fs::symlink_metadata(&path)?.is_file() {
+            Ok(path)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{} n'est pas un fichier ordinaire (un lien n'y est pas suivi)",
+                    path.display()
+                ),
+            ))
+        }
+    }
+
+    /// Le geste de [`Upload::finish`] : regarder ce qui est à la place du contenu `hash`, de
+    /// `len` octets, puis y mettre `temp`, ou le supprimer si le contenu y est déjà. Sur une
+    /// erreur, rien n'est posé, et `temp` part.
+    fn place(&self, temp: Temporary, hash: &[u8; 32], len: u64) -> io::Result<Placed> {
+        let new_prefix = !self.prefix_is_there(hash)?;
+        if new_prefix {
+            std::fs::create_dir_all(self.prefix_path(hash))?;
+        }
+        let dest = self.content_path(hash);
+        let found = match std::fs::symlink_metadata(&dest) {
+            Ok(meta) => Some(meta),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        match found {
+            None => {
+                std::fs::rename(&temp.path, &dest)?;
+                temp.placed();
+                Ok(Placed::Fresh)
+            }
+            // Tenu pour le même contenu, sans le relire : le hash le nomme, et sa taille est la
+            // bonne. `temp`, lâché, est supprimé.
+            Some(meta) if meta.is_file() && meta.len() == len => Ok(Placed::Found),
+            Some(meta) => {
+                // Un lien se retire lui-même, jamais ce qu'il vise. Un vrai dossier reste, et le
+                // renommage échoue.
+                if meta.file_type().is_symlink() {
+                    remove_link(&dest)?;
                 }
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-                _ => {}
+                std::fs::rename(&temp.path, &dest)?;
+                temp.placed();
+                tracing::warn!(
+                    hash = %hex(hash),
+                    found_bytes = meta.len(),
+                    link = meta.file_type().is_symlink(),
+                    size = len,
+                    "contenu abîmé (une autre taille, ou autre chose qu'un fichier) remplacé par \
+                     le même contenu, renvoyé"
+                );
+                Ok(Placed::Replaced)
             }
         }
-        Ok(path)
+    }
+
+    /// Le geste de [`FileStore::remove`] : regarder ce qui est à la place du contenu `hash`,
+    /// puis le retirer. Un lien est retiré lui-même, jamais ce qu'il vise (R272) ; un contenu
+    /// absent n'est pas une erreur (R275).
+    fn unlink(&self, hash: &[u8; 32]) -> io::Result<()> {
+        if !self.prefix_is_there(hash)? {
+            return Ok(());
+        }
+        let path = self.content_path(hash);
+        let gone = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => remove_link(&path),
+            Ok(_) => std::fs::remove_file(&path),
+            Err(error) => Err(error),
+        };
+        match gone {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            done => done,
+        }
+    }
+
+    /// Mène `work`, un geste qui regarde le dépôt puis y agit, d'un seul tenant sur un fil
+    /// bloquant, sous le verrou du geste (R285). Le verrou entre dans la tâche, qui le rend à sa
+    /// fin, et pas avant : si l'appelant est lâché en route, le geste va quand même au bout, et
+    /// aucun autre ne regarde ni ne touche le dépôt d'ici là.
+    async fn act<T: Send + 'static>(
+        self: &Arc<Self>,
+        work: impl FnOnce(&Dirs) -> io::Result<T> + Send + 'static,
+    ) -> io::Result<T> {
+        let held = self.gesture.clone().lock_owned().await;
+        let dirs = self.clone();
+        blocking(move || {
+            let done = work(&dirs);
+            drop(held);
+            done
+        })
+        .await
     }
 
     /// Le garde doit être celui de ce dépôt : celui d'un autre n'ordonne rien ici (R274).
@@ -132,6 +256,78 @@ impl Dirs {
             ))
         }
     }
+}
+
+/// Ce qu'a fait le geste de [`Upload::finish`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    /// Le temporaire a pris sa place, où il n'y avait rien.
+    Fresh,
+    /// Le contenu y était déjà : le temporaire a été supprimé, rien n'a été écrit dans le dépôt.
+    Found,
+    /// Le temporaire a remplacé ce qui était à sa place, abîmé.
+    Replaced,
+}
+
+/// Le fichier temporaire d'un envoi, `files/tmp/<UUIDv7>`. Il n'a jamais qu'un propriétaire :
+/// l'envoi, puis le geste qui le pose. Lâché sans avoir pris la place d'un contenu
+/// ([`Temporary::placed`]), il est supprimé : par un `unlink`, le seul appel bloquant que le dépôt
+/// fait, hors du démarrage, sur le fil qui lâche un envoi.
+struct Temporary {
+    path: PathBuf,
+    /// Le fichier est encore dans `tmp/`.
+    there: bool,
+}
+
+impl Temporary {
+    /// Le fichier a pris la place d'un contenu : il n'y a plus rien à supprimer.
+    fn placed(mut self) {
+        self.there = false;
+    }
+}
+
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        if !self.there {
+            return;
+        }
+        match std::fs::remove_file(&self.path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "temporaire d'un envoi impossible à supprimer ; le prochain démarrage videra \
+                 files/tmp"
+            ),
+            _ => {}
+        }
+    }
+}
+
+/// Mène `work` sur un fil bloquant, dans le contexte de journal de qui l'appelle (son abonné, sa
+/// portée) : ce que le geste journalise est dit comme si l'appelant l'avait dit, même parti.
+/// **Rien n'annule `work` une fois commencé** : si le futur est lâché, `work` va au bout, et ce
+/// qu'il rend est lâché à son tour.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let span = tracing::Span::current();
+    let task = tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || span.in_scope(work))
+    });
+    match task.await {
+        Ok(done) => done,
+        // Le runtime s'arrête, ou `work` a paniqué.
+        Err(error) => Err(io::Error::other(format!(
+            "un geste sur le dépôt des fichiers n'a pas abouti : {error}"
+        ))),
+    }
+}
+
+/// Retire le lien posé à `path`, jamais ce qu'il vise ; sous Windows, un lien vers un dossier (ou
+/// une jonction) se retire comme un dossier.
+fn remove_link(path: &Path) -> io::Result<()> {
+    std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))
 }
 
 /// Le dépôt des fichiers, sous `<data_dir>/files`.
@@ -152,13 +348,14 @@ pub(crate) struct Stored {
     pub fresh: bool,
 }
 
-/// Un envoi en cours : un fichier de `files/tmp/`, et le hash de ce qui y a été écrit.
+/// Un envoi en cours : un fichier de `files/tmp/`, et le hash de ce qui y a été écrit. Lâché sans
+/// `finish`, il supprime son temporaire ([`Temporary`]).
 pub(crate) struct Upload {
     dirs: Arc<Dirs>,
-    /// `files/tmp/<UUIDv7>`.
-    path: PathBuf,
-    /// Lâché avant que le fichier ne prenne sa place.
-    file: Option<tokio::fs::File>,
+    /// Déclaré avant `temp`, donc fermé avant lui : sous Windows, un fichier ne quitte son
+    /// dossier qu'une fois fermé (tokio le ferme dès qu'aucune écriture n'est plus en route).
+    file: tokio::fs::File,
+    temp: Temporary,
     hasher: Sha256,
     len: u64,
     /// Les premiers octets, pour [`sniff`].
@@ -168,8 +365,6 @@ pub(crate) struct Upload {
     /// Tout ce que l'envoi a reçu est sur le disque ([`Upload::sync`]) ; faux dès l'écriture
     /// suivante.
     synced: bool,
-    /// Le temporaire a pris sa place, ou a été supprimé : `Drop` n'a plus rien à faire.
-    settled: bool,
 }
 
 impl FileStore {
@@ -225,6 +420,7 @@ impl FileStore {
                 root,
                 tmp,
                 lock: Mutex::new(()),
+                gesture: Arc::default(),
             }),
         })
     }
@@ -276,14 +472,13 @@ impl FileStore {
         file.set_max_buf_size(WRITE_BUFFER);
         Ok(Upload {
             dirs: self.dirs.clone(),
-            path,
-            file: Some(file),
+            file,
+            temp: Temporary { path, there: true },
             hasher: Sha256::new(),
             len: 0,
             head: Vec::with_capacity(SNIFF_LEN),
             broken: false,
             synced: false,
-            settled: false,
         })
     }
 
@@ -295,32 +490,23 @@ impl FileStore {
     /// Ouvre le contenu `hash` pour le lire. `NotFound` s'il n'est pas là, ou si ce qui est à sa
     /// place n'est pas un fichier ordinaire (un lien n'est pas suivi, R272).
     pub(crate) async fn open_file(&self, hash: &[u8; 32]) -> io::Result<tokio::fs::File> {
-        let path = self.dirs.checked_path(hash).await?;
-        if !tokio::fs::symlink_metadata(&path).await?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "{} n'est pas un fichier ordinaire (un lien n'y est pas suivi)",
-                    path.display()
-                ),
-            ));
-        }
-        tokio::fs::File::open(&path).await
+        let (dirs, hash) = (self.dirs.clone(), *hash);
+        let file = blocking(move || std::fs::File::open(dirs.ordinary(&hash)?)).await?;
+        Ok(tokio::fs::File::from_std(file))
     }
 
     /// Retire le contenu `hash` du disque, sous le verrou du dépôt. Un contenu absent n'est pas
-    /// une erreur : le ménage peut repasser (R275).
+    /// une erreur : le ménage peut repasser (R275). Un lien posé à sa place est retiré lui-même,
+    /// jamais ce qu'il vise (R272). Lâché en route, le retrait parti va au bout, et aucun autre
+    /// geste ne touche le dépôt avant sa fin (R285).
     pub(crate) async fn remove(
         &self,
         guard: &MutexGuard<'_, ()>,
         hash: &[u8; 32],
     ) -> io::Result<()> {
         self.dirs.check(guard)?;
-        let path = self.dirs.checked_path(hash).await?;
-        match tokio::fs::remove_file(&path).await {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            done => done,
-        }
+        let hash = *hash;
+        self.dirs.act(move |dirs| dirs.unlink(&hash)).await
     }
 }
 
@@ -328,13 +514,12 @@ impl Upload {
     /// Ajoute `chunk` au fichier, et à son hash. Une écriture qui n'est pas allée au bout (une
     /// erreur, ou le futur lâché en route) met l'envoi hors d'usage (R273).
     pub(crate) async fn write(&mut self, chunk: &[u8]) -> io::Result<()> {
-        let file = match (self.broken, self.file.as_mut()) {
-            (false, Some(file)) => file,
-            _ => return Err(broken()),
-        };
+        if self.broken {
+            return Err(broken());
+        }
         self.broken = true;
         self.synced = false;
-        file.write_all(chunk).await?;
+        self.file.write_all(chunk).await?;
         self.broken = false;
         self.hasher.update(chunk);
         self.len += chunk.len() as u64;
@@ -355,18 +540,17 @@ impl Upload {
     /// écriture que tokio a laissée échouer en fond, ou le futur lâché en route) met l'envoi hors
     /// d'usage, comme une écriture (R273).
     pub(crate) async fn sync(&mut self) -> io::Result<()> {
-        let file = match (self.broken, self.file.as_mut()) {
-            (false, Some(file)) => file,
-            _ => return Err(broken()),
-        };
+        if self.broken {
+            return Err(broken());
+        }
         if self.synced {
             return Ok(());
         }
         self.broken = true;
         // Une écriture que tokio a laissée échouer en fond ne se dit qu'à l'opération suivante :
         // `flush` la rend, alors que `sync_all` la garderait pour lui.
-        file.flush().await?;
-        file.sync_all().await?;
+        self.file.flush().await?;
+        self.file.sync_all().await?;
         self.broken = false;
         self.synced = true;
         Ok(())
@@ -377,88 +561,32 @@ impl Upload {
     /// ici), est mis à sa place s'il n'y a rien (`fresh`). S'il y a déjà un fichier ordinaire de
     /// même taille, il est tenu pour ce contenu, sans être relu, et le temporaire est supprimé ;
     /// autre chose (une autre taille, un lien, R272), il est abîmé : le temporaire le remplace, et
-    /// le journal le dit. Sur une erreur, rien n'est posé et le temporaire part.
+    /// le journal le dit. Sur une erreur, rien n'est posé et le temporaire part. Lâché en route,
+    /// le geste parti va au bout, avec son temporaire, et aucun autre geste ne touche le dépôt
+    /// avant sa fin (R285) ; l'appelant, lui, ne sait pas si le contenu est posé.
     pub(crate) async fn finish(mut self, guard: &MutexGuard<'_, ()>) -> io::Result<Stored> {
         self.dirs.check(guard)?;
         // Le filet de qui n'a pas vidé son envoi avant de prendre le verrou.
         self.sync().await?;
-        drop(self.file.take());
-        let hash: [u8; 32] = std::mem::take(&mut self.hasher).finalize().into();
-        let stored = Stored {
+        let Upload {
+            dirs,
+            file,
+            temp,
+            hasher,
+            len,
+            head,
+            ..
+        } = self;
+        // Fermé avant de changer de nom : plus aucune écriture n'est en route.
+        drop(file);
+        let hash: [u8; 32] = hasher.finalize().into();
+        let placed = dirs.act(move |dirs| dirs.place(temp, &hash, len)).await?;
+        Ok(Stored {
             hash,
-            size: self.len,
-            mime: sniff(&self.head),
-            fresh: false,
-        };
-        if let Some(prefix) = self.dirs.content_path(&hash).parent() {
-            tokio::fs::create_dir_all(prefix).await?;
-        }
-        // Un lien à la place du dossier de préfixe a été suivi par `create_dir_all` : il est
-        // refusé ici, avant que rien ne soit posé à travers lui (R272).
-        let dest = self.dirs.checked_path(&hash).await?;
-        match tokio::fs::symlink_metadata(&dest).await {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                tokio::fs::rename(&self.path, &dest).await?;
-                self.settled = true;
-                Ok(Stored {
-                    fresh: true,
-                    ..stored
-                })
-            }
-            Err(error) => Err(error),
-            Ok(meta) if meta.is_file() && meta.len() == self.len => {
-                match tokio::fs::remove_file(&self.path).await {
-                    Ok(()) => self.settled = true,
-                    // `Drop` réessaiera, et le prochain démarrage vide `tmp/`.
-                    Err(error) => tracing::warn!(
-                        path = %self.path.display(),
-                        %error,
-                        "temporaire d'un contenu déjà gardé impossible à supprimer"
-                    ),
-                }
-                Ok(stored)
-            }
-            Ok(meta) => {
-                // Un lien se retire lui-même, jamais ce qu'il vise ; sous Windows, un lien vers un
-                // dossier se retire comme un dossier. Un vrai dossier reste, et le renommage échoue.
-                if meta.file_type().is_symlink() && tokio::fs::remove_file(&dest).await.is_err() {
-                    tokio::fs::remove_dir(&dest).await?;
-                }
-                tokio::fs::rename(&self.path, &dest).await?;
-                self.settled = true;
-                tracing::warn!(
-                    hash = %hex(&hash),
-                    found_bytes = meta.len(),
-                    link = meta.file_type().is_symlink(),
-                    size = self.len,
-                    "contenu abîmé (une autre taille, ou autre chose qu'un fichier) remplacé par \
-                     le même contenu, renvoyé"
-                );
-                Ok(stored)
-            }
-        }
-    }
-}
-
-impl Drop for Upload {
-    /// Un envoi lâché sans avoir posé son contenu supprime son temporaire : le seul appel
-    /// bloquant du dépôt hors du démarrage, un `unlink`.
-    fn drop(&mut self) {
-        if self.settled {
-            return;
-        }
-        // Le fichier d'abord : sous Windows, il ne part qu'une fois fermé (tokio le ferme dès
-        // qu'aucune écriture n'est plus en route).
-        drop(self.file.take());
-        match std::fs::remove_file(&self.path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => tracing::warn!(
-                path = %self.path.display(),
-                %error,
-                "temporaire d'un envoi abandonné impossible à supprimer ; le prochain démarrage \
-                 videra files/tmp"
-            ),
-            _ => {}
-        }
+            size: len,
+            mime: sniff(&head),
+            fresh: placed == Placed::Fresh,
+        })
     }
 }
 
@@ -776,6 +904,21 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    /// Mène `future` aussi loin qu'il va sans ce qu'un autre retient, sur un runtime à un seul fil
+    /// bloquant ([`one_blocking_thread`]) dont le fil est libre : un tour, puis le temps que ce
+    /// fil ait fait ce que le tour lui a envoyé (il prend ses tâches dans l'ordre : quand une
+    /// tâche vide envoyée après est faite, celles d'avant le sont), et ainsi de suite. Rend sa
+    /// valeur s'il finit ; `None` s'il attend autre chose que ce fil. Rien n'y dépend d'un délai.
+    async fn as_far_as_it_goes<F: Future + ?Sized>(future: &mut Pin<Box<F>>) -> Option<F::Output> {
+        for _ in 0..32 {
+            if let Poll::Ready(done) = poll_once(future).await {
+                return Some(done);
+            }
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+        }
+        None
     }
 
     /// Retient le seul fil bloquant du runtime courant, jusqu'à ce qu'on envoie un message à la
@@ -1596,7 +1739,7 @@ mod tests {
         assert_eq!(std::fs::read(&db).unwrap(), b"la base");
         // Le temporaire d'un envoi : un UUID, dans `tmp/`.
         let upload = store.begin().await.unwrap();
-        let name = upload.path.strip_prefix(root.join(TMP_DIR)).unwrap();
+        let name = upload.temp.path.strip_prefix(root.join(TMP_DIR)).unwrap();
         assert_eq!(name.components().count(), 1);
         Uuid::parse_str(name.to_str().unwrap()).unwrap();
     }
@@ -1633,6 +1776,28 @@ mod tests {
         store.remove(&guard, &stored.hash).await.unwrap();
         assert!(listing(&dir.path().join(FILES_DIR)).is_empty());
         store.remove(&guard, &stored.hash).await.unwrap();
+    }
+
+    /// `remove` retire un lien posé à la place d'un contenu : le lien lui-même, sans le suivre.
+    /// Ce qu'il visait reste (R272).
+    #[tokio::test]
+    async fn removing_a_link_removes_the_link_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("ailleurs");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("precieux.txt"), b"a garder").unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let hash = sha256(b"abc");
+        let path = store.dirs.content_path(&hash);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        link_dir(&outside, &path);
+        let guard = store.lock().await;
+        store.remove(&guard, &hash).await.unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path).is_err(),
+            "le lien est resté à la place du contenu"
+        );
+        assert_eq!(listing(&outside), ["precieux.txt"]);
     }
 
     /// Un lien posé dans le dépôt n'est jamais suivi (R272) : à la place d'un contenu, il n'est
@@ -1825,7 +1990,7 @@ mod tests {
         let store = FileStore::open(dir.path()).unwrap();
         one_blocking_thread().block_on(async {
             let mut upload = store.begin().await.unwrap();
-            let path = upload.path.clone();
+            let path = upload.temp.path.clone();
             let release = hold_the_blocking_thread();
             upload.write(b"abc").await.unwrap();
             assert_eq!(
@@ -1849,6 +2014,33 @@ mod tests {
         });
     }
 
+    /// Un envoi déjà vidé sur le disque arrive à son geste sans rien demander d'autre au disque :
+    /// sous le verrou du dépôt, `finish` ne fait plus que regarder et renommer. Le seul fil
+    /// bloquant est retenu : un `finish` qui viderait encore le fichier attendrait ce vidage,
+    /// sans avoir pris le verrou du geste.
+    #[test]
+    fn a_synced_upload_goes_straight_to_its_gesture() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        one_blocking_thread().block_on(async {
+            let mut upload = store.begin().await.unwrap();
+            upload.write(b"abc").await.unwrap();
+            upload.sync().await.unwrap();
+            let release = hold_the_blocking_thread();
+            let guard = store.lock().await;
+            let mut finishing = Box::pin(upload.finish(&guard));
+            assert!(poll_once(&mut finishing).await.is_pending());
+            assert!(
+                store.dirs.gesture.try_lock().is_err(),
+                "le geste n'est pas parti : `finish` attend autre chose du disque"
+            );
+            release.send(()).unwrap();
+            assert!(finishing.await.unwrap().fresh);
+            // Témoin : le geste fini, son verrou est rendu.
+            assert!(store.dirs.gesture.try_lock().is_ok());
+        });
+    }
+
     /// Fait échouer, en fond, les écritures de `upload` tant que la valeur rendue vit. Sous
     /// Windows, un autre descripteur verrouille le fichier (`LockFileEx`) ; sous Unix, où un tel
     /// verrou n'empêche pas d'écrire, le fichier de l'envoi est remplacé par un descripteur en
@@ -1859,16 +2051,133 @@ mod tests {
             let blocker = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(&upload.path)
+                .open(&upload.temp.path)
                 .unwrap();
             blocker.lock().unwrap();
             Some(blocker)
         }
         #[cfg(unix)]
         {
-            upload.file = Some(tokio::fs::File::open(&upload.path).await.unwrap());
+            upload.file = tokio::fs::File::open(&upload.temp.path).await.unwrap();
             None
         }
+    }
+
+    /// Un `remove` lâché en route (une requête que son client abandonne) a déjà envoyé son geste
+    /// à un fil bloquant, où rien ne l'annule, et le garde de son appelant est rendu avec lui. Le
+    /// geste tient pourtant le dépôt jusqu'à sa fin : l'envoi du même contenu, qui prend le
+    /// verrou juste après, ne regarde ni ne pose rien avant que le retrait soit fait, puis pose
+    /// le contenu lui-même. Sans cela, il trouvait le contenu « déjà là » et écrivait son
+    /// attache, puis le retrait en vol emportait le fichier : une attache sans contenu.
+    #[test]
+    fn a_cancelled_remove_lands_before_the_next_gesture() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let (slow, fast) = (one_blocking_thread(), one_blocking_thread());
+        let content = b"contenu que le menage croit sans attache";
+        let (first, upload) = fast.block_on(async {
+            let first = put(&store, content).await;
+            let mut upload = store.begin().await.unwrap();
+            upload.write(content).await.unwrap();
+            upload.sync().await.unwrap();
+            (first, upload)
+        });
+        let path = store.dirs.content_path(&first.hash);
+
+        // Le ménage, dans une requête que son client abandonne : le seul fil bloquant est pris,
+        // ce que `remove` y envoie attend dans la file.
+        let release = slow.block_on(async {
+            let release = hold_the_blocking_thread();
+            let guard = store.lock().await;
+            let mut removal = Box::pin(store.remove(&guard, &first.hash));
+            assert!(poll_once(&mut removal).await.is_pending());
+            drop(removal);
+            drop(guard);
+            release
+        });
+        assert!(path.exists(), "témoin : le retrait n'est pas encore fait");
+
+        fast.block_on(async {
+            // Le verrou est libre : la requête abandonnée l'a rendu.
+            let guard = store.lock().await;
+            let mut finishing = Box::pin(upload.finish(&guard));
+            assert!(
+                as_far_as_it_goes(&mut finishing).await.is_none(),
+                "l'envoi a regardé le dépôt pendant que le retrait d'une requête abandonnée \
+                 était encore en vol"
+            );
+            assert_eq!(tmp_entries(dir.path()).len(), 1);
+            // Le fil bloquant de la requête abandonnée reprend : le retrait se fait.
+            release.send(()).unwrap();
+            let stored = finishing.await.unwrap();
+            // Ici la route écrit l'attache : le contenu est là, et y reste.
+            assert!(
+                stored.fresh,
+                "le retrait est passé d'abord, puis l'envoi a posé le contenu lui-même"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), content);
+            drop(guard);
+        });
+        assert!(tmp_entries(dir.path()).is_empty());
+    }
+
+    /// Un `finish` lâché en route, son geste déjà parti : le geste va au bout, d'un seul tenant.
+    /// Son temporaire ne part pas avec l'envoi lâché (le geste le tient), le contenu est posé
+    /// entier, et l'envoi suivant du même contenu ne regarde rien avant, puis le trouve.
+    #[test]
+    fn a_cancelled_finish_lands_whole_before_the_next_gesture() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let (slow, fast) = (one_blocking_thread(), one_blocking_thread());
+        let content = b"contenu d'une requete abandonnee pendant sa pose";
+        let path = store.dirs.content_path(&sha256(content));
+        let (abandoned, upload) = fast.block_on(async {
+            let mut uploads = Vec::new();
+            for _ in 0..2 {
+                let mut upload = store.begin().await.unwrap();
+                upload.write(content).await.unwrap();
+                upload.sync().await.unwrap();
+                uploads.push(upload);
+            }
+            let upload = uploads.pop().unwrap();
+            (uploads.pop().unwrap(), upload)
+        });
+
+        let release = slow.block_on(async {
+            let release = hold_the_blocking_thread();
+            let guard = store.lock().await;
+            let mut finishing = Box::pin(abandoned.finish(&guard));
+            assert!(poll_once(&mut finishing).await.is_pending());
+            drop(finishing);
+            drop(guard);
+            release
+        });
+        assert!(!path.exists(), "témoin : rien n'est encore posé");
+        assert_eq!(
+            tmp_entries(dir.path()).len(),
+            2,
+            "le temporaire de l'envoi lâché est à son geste, qui n'a pas encore eu lieu"
+        );
+
+        fast.block_on(async {
+            let guard = store.lock().await;
+            let mut finishing = Box::pin(upload.finish(&guard));
+            assert!(
+                as_far_as_it_goes(&mut finishing).await.is_none(),
+                "l'envoi a regardé le dépôt pendant que la pose d'une requête abandonnée était \
+                 encore en vol"
+            );
+            assert!(!path.exists());
+            release.send(()).unwrap();
+            let stored = finishing.await.unwrap();
+            assert!(
+                !stored.fresh,
+                "la pose abandonnée est passée d'abord : l'envoi trouve le contenu"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), content);
+            drop(guard);
+        });
+        assert!(tmp_entries(dir.path()).is_empty());
     }
 
     /// Le hash, la taille et le type sont ceux de tous les octets, quelle que soit la façon dont
@@ -2106,7 +2415,7 @@ mod tests {
         // Contenu neuf : le renommage échoue.
         let mut upload = store.begin().await.unwrap();
         upload.write(b"contenu neuf").await.unwrap();
-        let held = hold(&upload.path);
+        let held = hold(&upload.temp.path);
         let guard = store.lock().await;
         assert!(upload.finish(&guard).await.is_err());
         drop(guard);
@@ -2117,7 +2426,7 @@ mod tests {
         let first = put(&store, b"deja la").await;
         let mut upload = store.begin().await.unwrap();
         upload.write(b"deja la").await.unwrap();
-        let held = hold(&upload.path);
+        let held = hold(&upload.temp.path);
         let guard = store.lock().await;
         let again = upload.finish(&guard).await.unwrap();
         drop(guard);
