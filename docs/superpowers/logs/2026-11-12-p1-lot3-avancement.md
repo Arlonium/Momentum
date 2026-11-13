@@ -50,6 +50,8 @@ Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête 
 
 ## État à la pause du 2026-11-13 (3 h 40 du matin)
 
+> **Reprise le 2026-11-13 à 5 h 10** (« relance le travail »). Quatre travaux sont repartis de front, chacun dans son arbre, dans l'ordre de « Ce qui reste » : (1) la fin du tour de correction de la piste S, dans l'arbre principal, avec une décision de plus sur le doute de C1 (à la relecture du stockage, une entrée du journal où un client paraît deux fois est écartée et journalisée, et la page se charge sans elle) ; (2) la fin de la relecture de la Task 13a, dans son atelier, P1 et P3 d'abord ; (3) la fin du tour de la Task C6 de la partie B, dans son atelier, puis son rebase sur `main` ; (4) la relecture des e2e de la piste C, dans un atelier neuf (`.claude/worktrees/relecture-e2e`, branche `relecture-e2e`, ports `5178` et `8085`). Ce qui suit décrit l'état **à la pause** ; il est mis à jour à chaque travail clos.
+
 ### Ce qui est sur `main`, poussé
 
 - **Tâches 1 à 12** de la partie A, closes et relues.
