@@ -92,6 +92,14 @@ export function canDeleteMessage(rights: CommentRights, comment: Comment): boole
   );
 }
 
+/**
+ * Supprimer tout un fil, avec les messages de tous (R352) : `full`, hors corbeille et depuis un
+ * onglet du schéma du serveur, qu'on ait ouvert le fil ou non.
+ */
+export function canDeleteThread(rights: CommentRights): boolean {
+  return !rights.locked && rights.level === "full";
+}
+
 /** Résoudre ou rouvrir : avoir ouvert le fil avec `comment`, ou `edit`. */
 export function canResolve(rights: CommentRights, thread: Thread): boolean {
   if (rights.locked) return false;

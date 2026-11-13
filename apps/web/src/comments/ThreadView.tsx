@@ -1,6 +1,8 @@
 // Un fil de commentaires dans le panneau : où il est attaché (un bloc, qu'un bouton fait voir
 // dans la page ; la page ; un bloc supprimé), ses messages (auteur, « il y a… », « modifié »),
-// leurs réactions, puis « Répondre » et « Résoudre » (ou « Rouvrir »).
+// leurs réactions, puis « Répondre », « Résoudre » (ou « Rouvrir ») et, avec l'accès complet,
+// « Supprimer le fil » : sa confirmation et l'envoi sont au panneau (`CommentsPanel`), qui sait où
+// mettre le focus quand le fil part.
 //
 // Chaque bouton suit le tableau des niveaux de R134 (`arrange.ts`) : celui que la personne ne
 // peut pas utiliser n'est pas montré. Si le serveur refuse quand même (un droit a changé
@@ -51,6 +53,10 @@ type Props = {
   comments: Pick<Comments, "reply" | "edit" | "remove" | "resolve" | "react">;
   /** Les brouillons de la page : une réponse ou une modification en cours se retrouvent. */
   drafts: Drafts;
+  /** « Supprimer le fil » demande sa confirmation au panneau ; `null` : pas le droit (R352). */
+  onDelete: (() => void) | null;
+  /** Le refus de la dernière suppression du fil, tel que le serveur le dit. */
+  refusal: string | null;
   /**
    * Après une action, l'élément qui avait le focus a pu quitter la page : le panneau le rend à
    * l'élément du fil marqué `data-focus="<within>"`, sinon au fil, sinon à son titre (le fil
@@ -64,6 +70,7 @@ export const FOCUS = {
   reply: "reply",
   edit: (commentId: string) => `edit:${commentId}`,
   react: (commentId: string) => `react:${commentId}`,
+  deleteThread: "delete-thread",
 };
 
 export function ThreadView({
@@ -74,6 +81,8 @@ export function ThreadView({
   deleted,
   comments,
   drafts,
+  onDelete,
+  refusal,
   onFocusMove,
 }: Props) {
   // Une réponse ou une modification qui a un brouillon reprend où elle en était, sans prendre
@@ -228,12 +237,12 @@ export function ThreadView({
           </li>
         ))}
       </ul>
-      {error && (
+      {(error ?? refusal) && (
         <p className="mm-form-error" role="alert">
-          {error}
+          {error ?? refusal}
         </p>
       )}
-      {((write && !replying) || resolvable) && (
+      {((write && !replying) || resolvable || onDelete !== null) && (
         <div className="mm-thread-actions">
           {write && !replying && (
             <button
@@ -255,6 +264,18 @@ export function ThreadView({
               onClick={() => void run(() => comments.resolve(thread.id, !resolved), null)}
             >
               {resolved ? "Rouvrir" : "Résoudre"}
+            </button>
+          )}
+          {onDelete !== null && (
+            <button
+              type="button"
+              className="mm-button mm-button-small mm-button-danger-quiet mm-thread-delete"
+              data-focus={FOCUS.deleteThread}
+              // Le double clic ne supprime rien de plus : la confirmation s'ouvre au premier, et
+              // seul son bouton envoie.
+              onClick={onDelete}
+            >
+              Supprimer le fil
             </button>
           )}
         </div>

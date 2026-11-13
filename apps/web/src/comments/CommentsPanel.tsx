@@ -17,13 +17,20 @@
 // « Tu ne peux plus écrire ici. ») et « Écarter » ; si le droit revient, chacun retrouve sa
 // zone, sans rien envoyer de lui-même ni prendre le focus.
 //
+// Avec l'accès complet (hors corbeille, depuis un onglet du schéma du serveur), « Supprimer le
+// fil » retire tout un fil, avec les messages de tous et leurs réactions (R352) : de quoi faire de
+// la place quand un plafond est atteint. Une confirmation dit d'abord combien de messages partent ;
+// elle est rendue à côté du panneau dans l'arbre de React, pas dedans, pour que son Échap ne le
+// ferme pas. Le fil parti, le focus va au fil voisin, ou au titre du panneau ; ses brouillons
+// rejoignent « Textes non envoyés », comme ceux d'un fil supprimé par quelqu'un d'autre.
+//
 // Au clavier : le panneau prend le focus à son ouverture (sur le fil choisi, ou sur la zone du
 // bloc à commenter) ; Échap le ferme, sauf depuis une fenêtre de confirmation, qui a le sien.
 // C'est la page qui rend le focus où il était (`useCommentsPanel`). Après chaque action, le focus
 // ne tombe jamais sur `body` : l'élément qui l'avait (une zone de rédaction refermée, un bouton
 // de réaction parti, un fil qui change de liste) le rend à ce qui suit l'action dans le fil, au
 // fil lui-même, ou au titre du panneau.
-import type { Level } from "@mementum/protocol";
+import type { Level, Thread } from "@mementum/protocol";
 import {
   useCallback,
   useEffect,
@@ -35,12 +42,15 @@ import {
   useSyncExternalStore,
   type KeyboardEvent,
 } from "react";
+import { isSessionLost } from "../api";
 import { CloseIcon } from "../icons";
-import { arrangeThreads, canWrite, type CommentRights } from "./arrange";
+import { messageOf } from "../session/forms";
+import { Confirm } from "../ui/Confirm";
+import { arrangeThreads, canDeleteThread, canWrite, type CommentRights } from "./arrange";
 import { cssString } from "./dom";
 import { Composer } from "./Composer";
 import { createDrafts, DRAFT, type Drafts, type OrphanDraft } from "./drafts";
-import { ThreadView } from "./ThreadView";
+import { FOCUS, ThreadView } from "./ThreadView";
 import { useNow } from "./time";
 import type { Comments } from "./useComments";
 
@@ -126,6 +136,7 @@ export function CommentsPanel({
   const targetBlock = target?.kind === "block" ? target.blockId : null;
   const composing = givenComposing === undefined ? targetBlock : givenComposing;
   const write = canWrite(rights);
+  const deletable = canDeleteThread(rights);
   // Un refus qui arrive, un brouillon écarté : l'encart des textes non envoyés suit.
   const draftsChanged = useCallback((listener: () => void) => drafts.subscribe(listener), [drafts]);
   useSyncExternalStore(draftsChanged, drafts.version);
@@ -250,6 +261,79 @@ export function CommentsPanel({
     caught.current = target;
   });
 
+  /**
+   * Le fil dont on confirme la suppression, par son identifiant : la fenêtre suit le fil relu (le
+   * nombre de ses messages), et se ferme s'il part.
+   */
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  /**
+   * Une suppression est partie : posé avant tout rendu, pour qu'un second clic coup sur coup sur
+   * « Supprimer » n'en envoie pas une autre.
+   */
+  const deleteSending = useRef(false);
+  /** Le refus de la dernière suppression, montré dans son fil, tel que le serveur le dit. */
+  const [deleteRefusal, setDeleteRefusal] = useState<{ threadId: string; message: string } | null>(
+    null,
+  );
+  const deletingThread =
+    deleting === null ? null : (threads?.find((t) => t.id === deleting) ?? null);
+  // La confirmation n'a plus d'objet : le fil est parti (supprimé ailleurs), ou le droit avec le
+  // niveau, la corbeille ou le schéma. Pas pendant l'envoi : la réponse du serveur le dira.
+  const stale = deleting !== null && !deleteBusy && (deletingThread === null || !deletable);
+  useEffect(() => {
+    if (!stale || deleting === null) return;
+    setDeleting(null);
+    moveFocus(deleting, FOCUS.deleteThread);
+  }, [stale, deleting, moveFocus]);
+
+  /** Les fils affichés, dans l'ordre du panneau : les résolus, s'ils sont montrés. */
+  const shown =
+    arranged === null
+      ? []
+      : [...arranged.open, ...arranged.orphans, ...(showResolved ? arranged.resolved : [])];
+  /** Le fil qui suit `threadId` dans le panneau, sinon celui d'avant ; `null` : il était seul. */
+  const neighborOf = (threadId: string) => {
+    const at = shown.findIndex((t) => t.id === threadId);
+    if (at === -1) return null;
+    return (shown[at + 1] ?? shown[at - 1])?.id ?? null;
+  };
+
+  const askDeletion = (threadId: string) => {
+    setDeleteRefusal(null);
+    setDeleting(threadId);
+  };
+  const cancelDeletion = (threadId: string) => {
+    setDeleting(null);
+    // La fenêtre rend le focus au bouton qui l'a ouverte ; s'il a été recréé entre-temps (le fil
+    // a changé de liste), au même bouton, dans le fil.
+    moveFocus(threadId, FOCUS.deleteThread);
+  };
+  const confirmDeletion = async () => {
+    const threadId = deleting;
+    if (threadId === null || stale || deleteSending.current) return;
+    deleteSending.current = true;
+    setDeleteBusy(true);
+    const neighbor = neighborOf(threadId);
+    let deleted = false;
+    try {
+      await comments.removeThread(threadId);
+      deleted = true;
+    } catch (e) {
+      // Session perdue : la connexion est demandée par-dessus la page ; rien à dire ici. Un refus
+      // a fait relire la page (`useComments`) : le bouton part si le droit est parti.
+      if (!isSessionLost(e)) setDeleteRefusal({ threadId, message: messageOf(e) });
+    } finally {
+      deleteSending.current = false;
+      setDeleteBusy(false);
+      setDeleting(null);
+      // Le fil parti, le focus va au fil voisin, sinon au titre ; refusé, il revient au bouton,
+      // ou au fil si le bouton est parti avec le droit.
+      if (deleted) moveFocus(neighbor, null);
+      else moveFocus(threadId, FOCUS.deleteThread);
+    }
+  };
+
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== "Escape") return;
     // Une fenêtre de confirmation (suppression d'un message) a son propre Échap.
@@ -280,6 +364,8 @@ export function CommentsPanel({
           onShowBlock={show(thread.blockId, deleted)}
           comments={comments}
           drafts={drafts}
+          onDelete={deletable ? () => askDeletion(thread.id) : null}
+          refusal={deleteRefusal?.threadId === thread.id ? deleteRefusal.message : null}
           onFocusMove={(within) => moveFocus(thread.id, within)}
         />
       </li>
@@ -289,177 +375,208 @@ export function CommentsPanel({
   const quote = composing === null ? null : excerpt(composing);
 
   return (
-    <aside
-      ref={panelRef}
-      id={id}
-      className="mm-comments"
-      aria-labelledby={titleId}
-      tabIndex={-1}
-      onKeyDown={onKeyDown}
-      onFocus={(event) => {
-        focused.current = event.target as HTMLElement;
-        if (event.target !== caught.current) caught.current = null;
-      }}
-      onBlur={(event) => {
-        // Le focus part par un geste, hors du panneau : ce n'est pas un élément retiré.
-        const next = event.relatedTarget;
-        if (!(next instanceof Node) || !event.currentTarget.contains(next)) focused.current = null;
-      }}
-    >
-      <div className="mm-comments-head">
-        <h2 ref={titleRef} id={titleId} className="mm-comments-title" tabIndex={-1}>
-          Commentaires
-        </h2>
-        <button
-          type="button"
-          className="mm-icon-button"
-          aria-label="Fermer les commentaires"
-          title="Fermer (Échap)"
-          onClick={onClose}
-        >
-          <CloseIcon />
-        </button>
-      </div>
-      {(orphans.length > 0 || unsent.length > 0) && (
-        <section className="mm-comments-orphans" aria-label="Textes non envoyés">
-          <ul>
-            {orphans.map((orphan) => (
-              <li key={orphan.key}>
-                <p className="mm-comments-orphan-lead">
-                  {orphan.kind === "thread"
-                    ? "Ce fil a été supprimé. Ton texte :"
-                    : "Ce message a été supprimé. Ton texte :"}
-                </p>
-                <p className="mm-comments-orphan-text mm-isolate" dir="auto">
-                  {orphan.text}
-                </p>
-                <button
-                  type="button"
-                  className="mm-button mm-button-small"
-                  aria-label="Écarter ce texte"
-                  onClick={() => onDismissOrphan(orphan.key)}
-                >
-                  Écarter
-                </button>
-              </li>
-            ))}
-            {unsent.map((draft) => (
-              <li key={draft.key}>
-                {/* Le refus du serveur tel qu'il le dit, comme sous la zone qui a envoyé. */}
-                <p className="mm-comments-orphan-lead">
-                  {drafts.refusal(draft.key) ?? "Tu ne peux plus écrire ici."}
-                </p>
-                <p className="mm-comments-orphan-text mm-isolate" dir="auto">
-                  {draft.text}
-                </p>
-                <button
-                  type="button"
-                  className="mm-button mm-button-small"
-                  aria-label="Écarter ce texte"
-                  onClick={() => {
-                    drafts.drop(draft.key);
-                    // Le commentaire neuf d'un bloc, sans texte : sa zone ne reviendra pas.
-                    if (composing !== null && draft.key === DRAFT.block(composing)) onTargetDone();
-                  }}
-                >
-                  Écarter
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      {comments.state === "failed" && (
-        <div className="mm-comments-failed">
-          <p className="mm-form-error" role="alert">
-            {comments.error}
-          </p>
-          <button type="button" className="mm-button mm-button-small" onClick={comments.reload}>
-            Réessayer
+    <>
+      <aside
+        ref={panelRef}
+        id={id}
+        className="mm-comments"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+        onFocus={(event) => {
+          focused.current = event.target as HTMLElement;
+          if (event.target !== caught.current) caught.current = null;
+        }}
+        onBlur={(event) => {
+          // Le focus part par un geste, hors du panneau : ce n'est pas un élément retiré.
+          const next = event.relatedTarget;
+          if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+            focused.current = null;
+          }
+        }}
+      >
+        <div className="mm-comments-head">
+          <h2 ref={titleRef} id={titleId} className="mm-comments-title" tabIndex={-1}>
+            Commentaires
+          </h2>
+          <button
+            type="button"
+            className="mm-icon-button"
+            aria-label="Fermer les commentaires"
+            title="Fermer (Échap)"
+            onClick={onClose}
+          >
+            <CloseIcon />
           </button>
         </div>
-      )}
-      {write && composing !== null && (
-        <div className="mm-comments-new">
-          <p className="mm-comments-quote-label">Sur le bloc :</p>
-          {quote && (
-            <blockquote className="mm-comments-quote mm-isolate" dir="auto">
-              {quote}
-            </blockquote>
-          )}
-          <Composer
-            // Un champ par bloc : le même bloc garde le sien, et son brouillon.
-            key={composing}
-            label="Commenter le bloc"
-            submitLabel="Commenter"
-            submitName="Commenter le bloc"
-            draft={{ store: drafts, key: DRAFT.block(composing) }}
-            onSubmit={async (body) => {
-              const created = await comments.open(composing, body);
-              onTargetDone();
-              moveFocus(created.id, null);
-            }}
-            onCancel={() => {
-              onTargetDone();
-              moveFocus(null, null);
-            }}
-          />
-        </div>
-      )}
-      {write && (
-        <div className="mm-comments-page">
-          <Composer
-            label="Commenter la page"
-            submitLabel="Commenter"
-            draft={{ store: drafts, key: DRAFT.page }}
-            onSubmit={async (body) => {
-              await comments.open(null, body);
-            }}
-          />
-        </div>
-      )}
-      {arranged === null ? (
-        <p className="mm-comments-empty">Chargement…</p>
-      ) : (
-        <>
-          {arranged.open.length === 0 && arranged.orphans.length === 0 && (
-            <p className="mm-comments-empty">Aucun fil ouvert.</p>
-          )}
-          {arranged.open.length > 0 && (
-            <ul className="mm-threads" aria-label="Fils ouverts">
-              {arranged.open.map(threadView)}
+        {(orphans.length > 0 || unsent.length > 0) && (
+          <section className="mm-comments-orphans" aria-label="Textes non envoyés">
+            <ul>
+              {orphans.map((orphan) => (
+                <li key={orphan.key}>
+                  <p className="mm-comments-orphan-lead">
+                    {orphan.kind === "thread"
+                      ? "Ce fil a été supprimé. Ton texte :"
+                      : "Ce message a été supprimé. Ton texte :"}
+                  </p>
+                  <p className="mm-comments-orphan-text mm-isolate" dir="auto">
+                    {orphan.text}
+                  </p>
+                  <button
+                    type="button"
+                    className="mm-button mm-button-small"
+                    aria-label="Écarter ce texte"
+                    onClick={() => onDismissOrphan(orphan.key)}
+                  >
+                    Écarter
+                  </button>
+                </li>
+              ))}
+              {unsent.map((draft) => (
+                <li key={draft.key}>
+                  {/* Le refus du serveur tel qu'il le dit, comme sous la zone qui a envoyé. */}
+                  <p className="mm-comments-orphan-lead">
+                    {drafts.refusal(draft.key) ?? "Tu ne peux plus écrire ici."}
+                  </p>
+                  <p className="mm-comments-orphan-text mm-isolate" dir="auto">
+                    {draft.text}
+                  </p>
+                  <button
+                    type="button"
+                    className="mm-button mm-button-small"
+                    aria-label="Écarter ce texte"
+                    onClick={() => {
+                      drafts.drop(draft.key);
+                      // Le commentaire neuf d'un bloc, sans texte : sa zone ne reviendra pas.
+                      if (composing !== null && draft.key === DRAFT.block(composing)) {
+                        onTargetDone();
+                      }
+                    }}
+                  >
+                    Écarter
+                  </button>
+                </li>
+              ))}
             </ul>
-          )}
-          {arranged.orphans.length > 0 && (
-            <section className="mm-comments-section" aria-labelledby={deletedId}>
-              <h3 id={deletedId} className="mm-comments-subtitle">
-                Bloc supprimé
-              </h3>
-              <ul className="mm-threads" aria-label="Fils d'un bloc supprimé">
-                {arranged.orphans.map(threadView)}
+          </section>
+        )}
+        {comments.state === "failed" && (
+          <div className="mm-comments-failed">
+            <p className="mm-form-error" role="alert">
+              {comments.error}
+            </p>
+            <button type="button" className="mm-button mm-button-small" onClick={comments.reload}>
+              Réessayer
+            </button>
+          </div>
+        )}
+        {write && composing !== null && (
+          <div className="mm-comments-new">
+            <p className="mm-comments-quote-label">Sur le bloc :</p>
+            {quote && (
+              <blockquote className="mm-comments-quote mm-isolate" dir="auto">
+                {quote}
+              </blockquote>
+            )}
+            <Composer
+              // Un champ par bloc : le même bloc garde le sien, et son brouillon.
+              key={composing}
+              label="Commenter le bloc"
+              submitLabel="Commenter"
+              submitName="Commenter le bloc"
+              draft={{ store: drafts, key: DRAFT.block(composing) }}
+              onSubmit={async (body) => {
+                const created = await comments.open(composing, body);
+                onTargetDone();
+                moveFocus(created.id, null);
+              }}
+              onCancel={() => {
+                onTargetDone();
+                moveFocus(null, null);
+              }}
+            />
+          </div>
+        )}
+        {write && (
+          <div className="mm-comments-page">
+            <Composer
+              label="Commenter la page"
+              submitLabel="Commenter"
+              draft={{ store: drafts, key: DRAFT.page }}
+              onSubmit={async (body) => {
+                await comments.open(null, body);
+              }}
+            />
+          </div>
+        )}
+        {arranged === null ? (
+          <p className="mm-comments-empty">Chargement…</p>
+        ) : (
+          <>
+            {arranged.open.length === 0 && arranged.orphans.length === 0 && (
+              <p className="mm-comments-empty">Aucun fil ouvert.</p>
+            )}
+            {arranged.open.length > 0 && (
+              <ul className="mm-threads" aria-label="Fils ouverts">
+                {arranged.open.map(threadView)}
               </ul>
-            </section>
-          )}
-          {arranged.resolved.length > 0 && (
-            <div className="mm-comments-section">
-              <button
-                type="button"
-                className="mm-link-button"
-                aria-expanded={showResolved}
-                aria-controls={showResolved ? resolvedId : undefined}
-                onClick={() => setShowResolved((was) => !was)}
-              >
-                Fils résolus ({arranged.resolved.length})
-              </button>
-              {showResolved && (
-                <ul id={resolvedId} className="mm-threads" aria-label="Fils résolus">
-                  {arranged.resolved.map(threadView)}
+            )}
+            {arranged.orphans.length > 0 && (
+              <section className="mm-comments-section" aria-labelledby={deletedId}>
+                <h3 id={deletedId} className="mm-comments-subtitle">
+                  Bloc supprimé
+                </h3>
+                <ul className="mm-threads" aria-label="Fils d'un bloc supprimé">
+                  {arranged.orphans.map(threadView)}
                 </ul>
-              )}
-            </div>
-          )}
-        </>
+              </section>
+            )}
+            {arranged.resolved.length > 0 && (
+              <div className="mm-comments-section">
+                <button
+                  type="button"
+                  className="mm-link-button"
+                  aria-expanded={showResolved}
+                  aria-controls={showResolved ? resolvedId : undefined}
+                  onClick={() => setShowResolved((was) => !was)}
+                >
+                  Fils résolus ({arranged.resolved.length})
+                </button>
+                {showResolved && (
+                  <ul id={resolvedId} className="mm-threads" aria-label="Fils résolus">
+                    {arranged.resolved.map(threadView)}
+                  </ul>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </aside>
+      {/* Hors du panneau dans l'arbre de React : son Échap et ses événements `cancel` et `close`
+          ne remontent pas jusqu'à lui. */}
+      {deletingThread !== null && (
+        <Confirm
+          // Espace insécable : le « ? » ne passe pas seul à la ligne.
+          title={"Supprimer ce fil ?"}
+          confirmLabel="Supprimer"
+          destructive
+          busy={deleteBusy}
+          onConfirm={() => void confirmDeletion()}
+          onCancel={() => cancelDeletion(deletingThread.id)}
+        >
+          {deletionText(deletingThread)}
+        </Confirm>
       )}
-    </aside>
+    </>
   );
+}
+
+/** Ce que dit la confirmation : combien de messages partent, et que cela ne se défait pas. */
+function deletionText(thread: Thread): string {
+  const count = thread.comments.length;
+  const going =
+    count === 1
+      ? "Le fil et son message partent pour tout le monde, avec ses réactions."
+      : `Le fil et ses ${count} messages partent pour tout le monde, avec leurs réactions.`;
+  return `${going} Cela ne se défait pas.`;
 }

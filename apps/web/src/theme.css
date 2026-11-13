@@ -2613,6 +2613,11 @@ button.tree-toggle:hover {
   margin-top: 10px;
 }
 
+/* À l'écart des actions qui ne détruisent rien, au bout de la ligne. */
+.mm-thread-delete {
+  margin-left: auto;
+}
+
 .mm-thread .mm-form-error,
 .mm-composer .mm-form-error {
   margin: 8px 0 0;
