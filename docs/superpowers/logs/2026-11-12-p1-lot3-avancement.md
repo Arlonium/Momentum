@@ -48,6 +48,30 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 
 Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête poussée, **sans clone neuf**) : `cargo fmt` et `cargo clippy -D warnings` propres ; `cargo test --workspace` : **723 verts**, 15 ignorés (les mesures en release et les tests de la limite R39) ; client : **516 verts et 12 marqués `test.fails`** (les scénarios du bloc déplacé), typecheck propre ; licences npm propres au dernier relevé (aucun paquet ajouté sur `main`) ; e2e : suite entière relancée sur `main` à la pause, correctif du défaut critique compris : **159 verts**, 2 `fixme` voulus (bloc déplacé), et 1 échec, `space_without_a_role_is_not_found` : une course du test lui-même, qui comparait l'écran pendant que la barre latérale disait encore « Chargement… » (reproduite à coup sûr en retardant la lecture de l'arbre) ; le test attend maintenant la fin du chargement, et passe dix fois de suite ; la suite entière n'a pas été relancée après cette correction d'un seul test ; budgets du navigateur, mesurés dans l'atelier de la part e2e sur un poste occupé : 1 000 blocs à 160 ms au p95 (budget 300), 10 000 blocs en 1,38 s (budget 3 s) ; côté serveur, en release : frappe vue par un autre à 2,0 à 2,3 ms au p95, 42,8 ms quand elle déclenche la coupe d'une version (budget 150).
 
+## Depuis la reprise du 2026-11-14 (tenu à jour ; prime sur la section de la pause, qui suit)
+
+**Le travail a repris le 2026-11-14 à 0 h 55** (« continue le travail »). Rien n'avait bougé pendant la pause ; le dossier temporaire du système a été vidé par le propriétaire (111 Go libres). Les agents arrêtés à la pause ont été repris là où ils en étaient.
+
+**Sur `main`, poussé, depuis la pause :**
+
+- **Partie B, Task S3 (dépôt des fichiers) : close** (treize commits, jusqu'à `a5ae598` ; R271 à R279, R285 à R289) : relue, corrigée, re-relue (pas de second tour : quarante-cinq mutations, trente-huit mortes, les sept autres dites ; le schéma à deux verrous jugé sain ; 854 tests Rust). **La CI est verte sur `a5ae598`** : le code `#[cfg(unix)]` que ce poste ne compile pas (la synchronisation du dossier après le renommage) compile et passe sous Linux. La partie B a donc **sept tâches sur vingt et une sur `main`**.
+
+**Écrit et vérifié, prêt pour sa relecture ou en relecture (dans les ateliers) :**
+
+- **Task 13b** (`lot3-13b`, onze commits rebasés sur `main`, `adec445` à `240fdec`) : terminée par son implémenteur (854 tests Rust ; la frappe vue par un autre ne recule pas : médianes de 2,27 puis 2,30 ms au p95, mesurées avec un dossier de compilation par arbre — une première comparaison mesurait deux fois le même binaire). **En relecture indépendante.**
+- **Task C7** (favoris, client ; `lot3b-c7`, six commits rebasés, `a7fe7bb` à `06c61d1`) : les vérifications qui manquaient sont faites (suite e2e entière : 194 verts et les 2 `fixme` voulus ; budgets tenus : 1 000 blocs ouverts en 208 ms au p95, 10 000 en 1,35 s). **En relecture.**
+- **Le refus `401` tardif** (`lot3b-api401`, sept commits rebasés, jusqu'à `80c0019` ; R347 à R349) : terminé par son implémenteur (958 tests du client ; les e2e de session perdue 80 sur 80). **En relecture** (elle porte d'abord sur le rejeu des écritures et sur « jamais sous un autre compte »).
+
+**En cours :**
+
+- **Piste S** : la re-relecture du tour 3 a repris (elle éprouve d'abord ses deux pistes : R385 peut-être exponentiel, la couleur recopiée à la lecture d'une page de la synchro), avant le **tour 4** (R430 à R439 lui sont réservés).
+- **C1b** : un agent finit le tour de correction (l'échec e2e isolé de `refused_restore_reads_the_page_again`, la suite entière, les budgets, la documentation).
+- **C2** : le **tour de correction** est lancé (R420 à R429), sur C1b corrigée (`git rebase --onto 40cfe35 3f70afa lot3b-client`) : ce que KaTeX produit est mesuré (profondeur, nombre de nœuds) avant d'être attaché ; le refus des définitions par occurrence, plus par relecture des lexèmes ; seules les formules visibles sont rendues, étalées ; pas de Worker dans ce tour (une évaluation est demandée, pour le propriétaire).
+- **Partie B, Task S4a** (envoyer et lire un fichier ; `lot3b-serveur`, R390 à R399) : lancée ; son brief, avec les notes que S3 lui laisse, est gardé sous `.superpowers/sdd/…/task-s4a-brief.md`.
+
+**En file, pas lancé :** une tâche « CI, suite » (R440 à R444) : les deux tests de synchro sensibles au minutage sous Windows (`two_clients_converge`, `lagged_client_is_disconnected`), le coût de `TestDir` sous Windows, et **deux e2e qui supposent que la barre latérale n'a pas encore appris un changement fait par l'API**, alors que le canal de l'espace le lui pousse en 300 ms (`refused_move_comes_back_with_the_server_message`, `moves.spec.ts`, vu rouge une fois ; son frère de `reload.spec.ts` est chez l'agent de C1b) ; la tâche serveur de robustesse (R445 à R449 : la file d'écriture équitable, `TCP_NODELAY`, `Witness`).
+
+
 ## État à la pause du 2026-11-13 (16 h 10) — c'est d'ici qu'on reprend
 
 **Lenny a mis le travail en pause le 2026-11-13 à 16 h 10** (troisième pause du lot ; les deux premières : le 12 à 18 h, le 13 à 3 h 40). Cette section prime sur tout ce qui la suit dans ce fichier, écrit plus tôt.
