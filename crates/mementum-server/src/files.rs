@@ -2501,6 +2501,108 @@ mod tests {
         assert!(tmp_entries(dir.path()).is_empty());
     }
 
+    /// Le verrou du geste est tenu **pendant** le geste, pas seulement jusqu'à son départ (R285) :
+    /// c'est le geste lui-même qui regarde son verrou, sans course. Rendu avant le geste, il
+    /// laisserait un autre geste regarder le dépôt pendant que celui-ci y agit ; les deux tests
+    /// d'annulation, plus haut, ne le voient que selon l'ordre où passent les fils.
+    #[tokio::test]
+    async fn the_gesture_lock_is_held_until_the_gesture_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let held = store
+            .dirs
+            .act(|dirs| Ok(dirs.gesture.try_lock().is_err()))
+            .await
+            .unwrap();
+        assert!(held, "le verrou du geste est rendu avant la fin du geste");
+        // Témoin : le geste fini, son verrou est rendu.
+        assert!(store.dirs.gesture.try_lock().is_ok());
+    }
+
+    /// Un geste déjà dans la file d'un runtime qui s'arrête, son appelant lâché : le dépôt n'en
+    /// garde rien de travers (R285). Le contenu est à sa place entier, ou n'y est pas ; aucun
+    /// temporaire ne reste ; le verrou du geste est rendu. Avec tokio 1.54, le fil bloquant mène
+    /// ce qui attendait dans sa file avant de regarder l'arrêt : le geste a lieu, et le contenu
+    /// est posé. Le test ne fige pas ce choix de tokio, seulement ce que le dépôt garantit.
+    #[test]
+    fn a_gesture_queued_on_a_runtime_that_stops_leaves_nothing_halfway() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let slow = one_blocking_thread();
+        let content = b"geste dans la file d'un runtime qui s'arrete";
+        let path = store.dirs.content_path(&sha256(content));
+        let release = slow.block_on(async {
+            let mut upload = store.begin().await.unwrap();
+            upload.write(content).await.unwrap();
+            upload.sync().await.unwrap();
+            let release = hold_the_blocking_thread();
+            let guard = store.lock().await;
+            let mut finishing = Box::pin(upload.finish(&guard));
+            assert!(poll_once(&mut finishing).await.is_pending());
+            drop(finishing);
+            drop(guard);
+            release
+        });
+        // Témoin : le geste attend dans la file, avec son temporaire et son verrou.
+        assert_eq!(tmp_entries(dir.path()).len(), 1);
+        assert!(store.dirs.gesture.try_lock().is_err());
+        slow.shutdown_background();
+        drop(release);
+        // Le fil bloquant, rendu, finit seul : attendre ce qu'il laisse, borne large.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while store.dirs.gesture.try_lock().is_err() || !tmp_entries(dir.path()).is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "le verrou du geste ou le temporaire est resté : {:?}",
+                tmp_entries(dir.path())
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if let Ok(placed) = std::fs::read(&path) {
+            assert_eq!(placed, content, "un contenu posé l'est en entier");
+        }
+    }
+
+    /// Un geste que le runtime refuse (il s'arrête déjà quand le geste part) : `finish` le dit
+    /// par une erreur, rien n'est posé, le temporaire part avec le geste qui ne s'est pas fait,
+    /// et le verrou du geste est rendu (R285). Un runtime arrêté ne mène plus rien : le futur
+    /// est mené à la main, dans son contexte.
+    #[test]
+    fn a_gesture_refused_by_a_stopped_runtime_is_told_and_places_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::open(dir.path()).unwrap();
+        let runtime = one_blocking_thread();
+        let content = b"geste refuse par un runtime arrete";
+        let upload = runtime.block_on(async {
+            let mut upload = store.begin().await.unwrap();
+            upload.write(content).await.unwrap();
+            upload.sync().await.unwrap();
+            upload
+        });
+        let guard = runtime.block_on(store.lock());
+        let handle = runtime.handle().clone();
+        runtime.shutdown_background();
+        let _context = handle.enter();
+        let mut finishing = Box::pin(upload.finish(&guard));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let done = loop {
+            if let Poll::Ready(done) = finishing.as_mut().poll(&mut cx) {
+                break done;
+            }
+            assert!(Instant::now() < deadline, "finish n'a jamais fini");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let error = done.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
+        assert!(
+            tmp_entries(dir.path()).is_empty(),
+            "le temporaire est resté"
+        );
+        assert!(store.dirs.gesture.try_lock().is_ok());
+        assert!(!store.dirs.content_path(&sha256(content)).exists());
+    }
+
     /// Le hash, la taille et le type sont ceux de tous les octets, quelle que soit la façon dont
     /// ils arrivent : par morceaux d'un octet, de part et d'autre des douze premiers, autour du
     /// tampon de 64 Kio, avec des morceaux vides. Et un fichier de zéro octet se pose et se
