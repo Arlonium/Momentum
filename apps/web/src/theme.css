@@ -2907,6 +2907,251 @@ button.mm-reaction:hover {
   min-width: 0;
 }
 
+/* Blocs riches (Task C1b) : callout, signet, et la fenêtre où ils se règlent. */
+
+/* Le fond d'un callout, par couleur (une classe d'une liste fermée, jamais un attribut `style`
+   venu du document) : le texte (#2F2E2B) y tient 4,5:1 au moins (`Callout.test.tsx`, qui relit
+   ces lignes). Les pastilles de la fenêtre prennent les mêmes. */
+.mm-callout-default {
+  background: #F4F3EF;
+}
+.mm-callout-gray {
+  background: #F1F1EF;
+}
+.mm-callout-brown {
+  background: #F4EEEE;
+}
+.mm-callout-red {
+  background: #FBE4E4;
+}
+.mm-callout-orange {
+  background: #FBEEDB;
+}
+.mm-callout-yellow {
+  background: #FBF3DB;
+}
+.mm-callout-green {
+  background: #EDF3EC;
+}
+.mm-callout-blue {
+  background: #E7F3F8;
+}
+.mm-callout-purple {
+  background: #F6F3F9;
+}
+.mm-callout-pink {
+  background: #FAF1F5;
+}
+
+/* L'icône d'un callout, pour qui peut modifier : le bouton qui ouvre sa fenêtre. */
+.mm-callout-button {
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  margin-top: -2px;
+  padding: 0 3px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.mm-callout-button:hover {
+  background: rgba(31, 30, 28, 0.08);
+}
+
+/* Une icône venue du document : du texte, isolé, coupé s'il est long (la coupe est faite avant,
+   `Callout.tsx` ; ceci n'est qu'un second garde-fou). */
+.mm-callout-glyph {
+  display: inline-block;
+  max-width: 4em;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 17px;
+  line-height: 22px;
+  color: var(--mm-text);
+  unicode-bidi: isolate;
+}
+
+/* Le signet : l'hôte, puis l'adresse, coupée sur une ligne ; « Modifier » à droite. */
+.mm-bookmark-body {
+  flex: 1 1 auto;
+}
+
+.mm-bookmark-link {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.mm-bookmark-link:hover .mm-bookmark-host {
+  text-decoration: underline;
+}
+
+.mm-bookmark-host {
+  color: var(--mm-text);
+  font-weight: 500;
+  unicode-bidi: isolate;
+}
+
+.mm-bookmark-url,
+.mm-bookmark-raw {
+  color: var(--mm-text-secondary);
+  font-size: 13px;
+  unicode-bidi: isolate;
+}
+
+.mm-bookmark-url {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mm-bookmark-raw {
+  overflow-wrap: anywhere;
+}
+
+.mm-bookmark-edit {
+  flex: none;
+  margin-left: auto;
+}
+
+/* La fenêtre de réglage d'un bloc (`BlockPopover`) : posée près du bloc, dans l'écran ; sa place
+   est calculée (`placeWindow`), elle défile en dedans si l'écran est trop bas. */
+.mm-block-window {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 50;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--mm-popover-border);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: var(--mm-popover-shadow);
+  color: var(--mm-text);
+  font-size: 14px;
+}
+
+.mm-block-window:focus {
+  outline: none;
+}
+
+.mm-block-window-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mm-block-window-heading {
+  margin: 0;
+  color: var(--mm-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mm-block-window-error {
+  margin: 0;
+  color: var(--mm-danger);
+  font-size: 13px;
+}
+
+/* Le bloc n'est plus là : la fenêtre le dit, au-dessus de ce qu'on y a tapé. */
+.mm-block-window-gone {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--mm-warning-border);
+  border-radius: 6px;
+  background: var(--mm-warning-soft);
+  color: var(--mm-warning);
+  font-size: 13px;
+}
+
+.mm-block-window-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.mm-icon-choices,
+.mm-color-choices {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-icon-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mm-icon-choices li {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.mm-color-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+}
+
+.mm-color-choices li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.mm-icon-choices li:hover,
+.mm-color-choices li:hover {
+  background: var(--mm-surface);
+}
+
+.mm-icon-choices li[aria-selected="true"],
+.mm-color-choices li[aria-selected="true"] {
+  border-color: var(--mm-accent);
+  background: var(--mm-accent-soft);
+}
+
+.mm-icon-choices li:focus-visible,
+.mm-color-choices li:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: 1px;
+}
+
+/* Le bloc n'est plus là : les choix restent (le focus avec eux), sans plus rien écrire. */
+.mm-icon-choices[aria-disabled="true"] li,
+.mm-color-choices[aria-disabled="true"] li {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.mm-swatch {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--mm-border);
+  border-radius: 4px;
+}
+
 .mm-equation {
   width: 100%;
   padding: 8px 0;

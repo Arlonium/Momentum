@@ -246,3 +246,15 @@ export const StarOffIcon = () => (
     <path d="M4 4l16 16" />
   </Icon>
 );
+
+// Blocs riches (Task C1b).
+
+/** Le callout : un encadré et sa marque, dans le menu « / » et le choix du type de bloc. */
+export const CalloutIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="M7 10v4" />
+    <path d="M11 10h6" />
+    <path d="M11 14h4" />
+  </Icon>
+);

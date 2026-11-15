@@ -8,5 +8,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}"],
+    // Vitest rend vide toute feuille de style, même lue en texte (`?raw`). Celle du thème est
+    // lue par les tests qui vérifient ce qu'elle affiche (le contraste des callouts).
+    css: { include: [/theme\.css/] },
   },
 });

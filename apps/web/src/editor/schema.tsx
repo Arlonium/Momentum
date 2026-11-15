@@ -12,11 +12,12 @@ import {
 import { createReactBlockSpec, createReactInlineContentSpec } from "@blocknote/react";
 import { withMultiColumn } from "@blocknote/xl-multi-column";
 import katex from "katex";
+import { Bookmark } from "./blocks/Bookmark";
+import { Callout } from "./blocks/Callout";
+import { textProp } from "./blocks/props";
 import type { ReactNode } from "react";
 import {
-  BookmarkIcon,
   DatabaseIcon,
-  InfoIcon,
   PageIcon,
   SyncIcon,
   TocIcon,
@@ -25,23 +26,6 @@ import {
 
 /** Version du schéma de blocs de ce client (`version.ts`), celle de `blocks.json`. */
 export { CLIENT_SCHEMA_VERSION } from "./version";
-
-/** Icône par défaut d'un callout (défaut du registre), affichée en icône vectorielle. */
-const DEFAULT_CALLOUT_ICON = "💡";
-
-/** Fonds des callouts, par couleur BlockNote. */
-const CALLOUT_BACKGROUNDS: Record<string, string> = {
-  default: "#F4F3EF",
-  gray: "#F1F1EF",
-  brown: "#F4EEEE",
-  red: "#FBE4E4",
-  orange: "#FBEEDB",
-  yellow: "#FBF3DB",
-  green: "#EDF3EC",
-  blue: "#E7F3F8",
-  purple: "#F6F3F9",
-  pink: "#FAF1F5",
-};
 
 /**
  * Langues du menu des blocs de code (celles de `@blocknote/code-block`). BlockNote refuse
@@ -98,16 +82,6 @@ function Tex({ latex, display }: { latex: string; display: boolean }) {
   return <span className="mm-tex" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
-/** URL web (http ou https) sûre pour un lien, sinon `null` (pas de `javascript:`). */
-function webUrl(raw: string): string | null {
-  try {
-    const url = new URL(raw);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch {
-    return null;
-  }
-}
-
 /** Cadre commun des blocs sans contenu modifiable. */
 function Frame({ icon, children, muted }: { icon: ReactNode; children: ReactNode; muted?: boolean }) {
   return (
@@ -120,60 +94,19 @@ function Frame({ icon, children, muted }: { icon: ReactNode; children: ReactNode
   );
 }
 
-const Callout = createReactBlockSpec(
-  {
-    type: "callout",
-    propSchema: { icon: { default: DEFAULT_CALLOUT_ICON }, color: { default: "default" } },
-    content: "inline",
-  },
-  {
-    render: ({ block, contentRef }) => (
-      <div
-        className="mm-callout"
-        style={{ background: CALLOUT_BACKGROUNDS[block.props.color] ?? CALLOUT_BACKGROUNDS.default }}
-      >
-        <span className="mm-callout-icon" contentEditable={false}>
-          {block.props.icon === DEFAULT_CALLOUT_ICON ? <InfoIcon /> : block.props.icon}
-        </span>
-        <div className="mm-callout-content" ref={contentRef} />
-      </div>
-    ),
-  },
-);
-
 const Equation = createReactBlockSpec(
   { type: "equation", propSchema: { latex: { default: "" } }, content: "none" },
   {
     render: ({ block }) =>
-      block.props.latex.trim() === "" ? (
+      textProp(block.props, "latex").trim() === "" ? (
         <div className="mm-equation mm-placeholder" contentEditable={false}>
           Équation vide
         </div>
       ) : (
         <div className="mm-equation" contentEditable={false}>
-          <Tex latex={block.props.latex} display />
+          <Tex latex={textProp(block.props, "latex")} display />
         </div>
       ),
-  },
-);
-
-const Bookmark = createReactBlockSpec(
-  { type: "bookmark", propSchema: { url: { default: "" } }, content: "none" },
-  {
-    render: ({ block }) => {
-      const href = webUrl(block.props.url);
-      return (
-        <Frame icon={<BookmarkIcon />}>
-          {href ? (
-            <a href={href} target="_blank" rel="noopener noreferrer">
-              {block.props.url}
-            </a>
-          ) : (
-            block.props.url || "Signet sans adresse"
-          )}
-        </Frame>
-      );
-    },
   },
 );
 
@@ -184,17 +117,15 @@ const PageLink = createReactBlockSpec(
     content: "none",
   },
   {
-    render: ({ block }) => (
-      <Frame icon={<PageIcon />}>
-        {block.props.pageId ? (
-          <a href={`/p/${encodeURIComponent(block.props.pageId)}`}>
-            {block.props.title || "Sans titre"}
-          </a>
-        ) : (
-          block.props.title || "Sans titre"
-        )}
-      </Frame>
-    ),
+    render: ({ block }) => {
+      const pageId = textProp(block.props, "pageId");
+      const title = textProp(block.props, "title") || "Sans titre";
+      return (
+        <Frame icon={<PageIcon />}>
+          {pageId ? <a href={`/p/${encodeURIComponent(pageId)}`}>{title}</a> : title}
+        </Frame>
+      );
+    },
   },
 );
 
@@ -207,8 +138,8 @@ const DatabaseRef = createReactBlockSpec(
   {
     render: ({ block }) => (
       <Frame icon={<DatabaseIcon />} muted>
-        Base de données {block.props.databaseId}
-        {block.props.view ? ` · vue ${block.props.view}` : ""} (bientôt disponible)
+        Base de données {textProp(block.props, "databaseId")}
+        {textProp(block.props, "view") ? ` · vue ${textProp(block.props, "view")}` : ""} (bientôt disponible)
       </Frame>
     ),
   },
@@ -219,7 +150,7 @@ const SyncedBlock = createReactBlockSpec(
   {
     render: ({ block }) => (
       <Frame icon={<SyncIcon />} muted>
-        Bloc synchronisé {block.props.ref} (bientôt disponible)
+        Bloc synchronisé {textProp(block.props, "ref")} (bientôt disponible)
       </Frame>
     ),
   },
@@ -256,7 +187,7 @@ const Unknown = createReactBlockSpec(
         <WarningIcon />
         <span>
           Bloc non pris en charge
-          {block.props.originalType ? ` (${block.props.originalType})` : ""}
+          {textProp(block.props, "originalType") ? ` (${textProp(block.props, "originalType")})` : ""}
         </span>
       </div>
     ),
@@ -270,13 +201,13 @@ const Mention = createReactInlineContentSpec(
     content: "none",
   },
   {
-    render: ({ inlineContent }) => <span className="mm-mention">@{inlineContent.props.label}</span>,
+    render: ({ inlineContent }) => <span className="mm-mention">@{textProp(inlineContent.props, "label")}</span>,
   },
 );
 
 const MathInline = createReactInlineContentSpec(
   { type: "math", propSchema: { latex: { default: "" } }, content: "none" },
-  { render: ({ inlineContent }) => <Tex latex={inlineContent.props.latex} display={false} /> },
+  { render: ({ inlineContent }) => <Tex latex={textProp(inlineContent.props, "latex")} display={false} /> },
 );
 
 export const schema = withMultiColumn(

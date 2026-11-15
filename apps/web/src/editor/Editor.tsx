@@ -22,6 +22,7 @@ import { BlockNoteView } from "@blocknote/mantine";
 import {
   BlockColorsItem,
   DragHandleMenu,
+  FormattingToolbarController,
   getDefaultReactSlashMenuItems,
   RemoveBlockItem,
   SideMenu,
@@ -53,13 +54,15 @@ import {
 } from "react";
 import * as Y from "yjs";
 import { blockOfSelection } from "../comments/dom";
+import { BlockWindowHost, isBlockWindowShortcut, openWindowAtCursor } from "./blocks/BlockWindowHost";
 import { isCommentShortcut } from "../comments/shortcut";
 import { FRAGMENT, type CollabSession } from "./collab";
-import type { MementumDebug } from "./debug";
+import type { MementumDebug, MementumEditor } from "./debug";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
 import { guardedAwareness } from "./presenceGuard";
 import { schema } from "./schema";
+import { MementumFormattingToolbar } from "./Toolbar";
 
 type Props = {
   session: CollabSession;
@@ -77,7 +80,7 @@ type Props = {
  * langue, les extensions. Un aperçu montre donc une version comme la page la montrerait.
  * `followBlock` : le curseur de l'onglet suit son bloc quand quelqu'un d'autre le déplace.
  */
-const EDITOR_OPTIONS = {
+export const EDITOR_OPTIONS = {
   schema,
   dictionary: { ...fr, multi_column: multiColumnLocales.fr },
   dropCursor: multiColumnDropCursor,
@@ -178,6 +181,38 @@ export function Editor({ session, fixture = null, onComment = null }: Props) {
     };
   }, [fixture, synced, editor, session]);
 
+  // `data-synced` (première synchro faite) et `data-editable` (éditeur modifiable) sur le
+  // conteneur, en développement comme en production : les e2e s'y fient (`waitSynced`, et
+  // les budgets du navigateur, mesurés sur un build de production, R38), là où
+  // `window.__mementum` n'existe qu'en développement.
+  return (
+    <EditorView
+      editor={editor}
+      editable={mountEditable}
+      onComment={onComment}
+      className="mm-editor"
+      data-synced={String(synced)}
+      data-editable={String(editable)}
+    />
+  );
+}
+
+type ViewProps = {
+  editor: MementumEditor;
+  /** L'état de l'éditeur au montage de sa vue (voir `Editor`) ; il suit ensuite par `isEditable`. */
+  editable: boolean;
+  onComment?: ((blockId: string) => void) | null;
+  className?: string;
+  "data-synced"?: string;
+  "data-editable"?: string;
+};
+
+/**
+ * La vue de l'éditeur d'une page, et ce que l'application pose autour de lui : le menu « / », le
+ * menu de la poignée, Ctrl+Alt+M. Rendue par `Editor`, liée à sa session, et par les tests des
+ * blocs (`test/richEditor.tsx`), liée à un document sans fournisseur.
+ */
+export function EditorView({ editor, editable, onComment = null, ...attributes }: ViewProps) {
   const slashItems = useMemo(
     () => combineByGroup(getDefaultReactSlashMenuItems(editor), getMultiColumnSlashMenuItems(editor)),
     [editor],
@@ -200,34 +235,40 @@ export function Editor({ session, fixture = null, onComment = null }: Props) {
    * document, que le navigateur pose dès le clic : celle de BlockNote peut la suivre d'un temps.
    */
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // Ctrl+Alt+Entrée : régler le bloc riche où est le curseur (`BlockWindowHost`).
+    if (isBlockWindowShortcut(event)) {
+      if (editor.isFocused() && openWindowAtCursor(editor)) event.preventDefault();
+      return;
+    }
     if (onComment === null || !isCommentShortcut(event) || !editor.isFocused()) return;
     event.preventDefault();
     const selected = blockOfSelection(event.currentTarget, document.getSelection());
     onComment(selected ?? editor.getTextCursorPosition().block.id);
   };
 
-  // `data-synced` (première synchro faite) et `data-editable` (éditeur modifiable) sur le
-  // conteneur, en développement comme en production : les e2e s'y fient (`waitSynced`, et
-  // les budgets du navigateur, mesurés sur un build de production, R38), là où
-  // `window.__mementum` n'existe qu'en développement.
+  // La fenêtre de réglage d'un bloc riche est rendue à côté de la vue, hors du document : la vue
+  // d'un bloc se recrée quand un autre le touche, et la fenêtre partait avec elle.
   return (
-    <BlockNoteView
-      editor={editor}
-      editable={mountEditable}
-      theme="light"
-      slashMenu={false}
-      sideMenu={sideMenu === undefined}
-      className="mm-editor"
-      data-synced={String(synced)}
-      data-editable={String(editable)}
-      onKeyDown={onKeyDown}
-    >
-      <SuggestionMenuController
-        triggerCharacter="/"
-        getItems={async (query) => filterSuggestionItems(slashItems, query)}
-      />
-      {sideMenu && <SideMenuController sideMenu={sideMenu} />}
-    </BlockNoteView>
+    <>
+      <BlockNoteView
+        editor={editor}
+        editable={editable}
+        theme="light"
+        slashMenu={false}
+        formattingToolbar={false}
+        sideMenu={sideMenu === undefined}
+        onKeyDown={onKeyDown}
+        {...attributes}
+      >
+        <SuggestionMenuController
+          triggerCharacter="/"
+          getItems={async (query) => filterSuggestionItems(slashItems, query)}
+        />
+        <FormattingToolbarController formattingToolbar={MementumFormattingToolbar} />
+        {sideMenu && <SideMenuController sideMenu={sideMenu} />}
+      </BlockNoteView>
+      <BlockWindowHost editor={editor} />
+    </>
   );
 }
 
