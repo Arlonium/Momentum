@@ -182,9 +182,9 @@ async function openFromTree(browser: Browser, target: Target): Promise<Opening> 
  * Ouvre, chacune dans un onglet neuf, les pages de 1 000 blocs, et consigne les durées
  * (`what` : ce qui distingue la mesure dans la ligne `MESURE`). Renvoie le p95 (ms).
  */
-async function openSmallPages(browser: Browser, what: string): Promise<number> {
+async function openSmallPages(browser: Browser, what: string, targets: Target[] = small): Promise<number> {
   const totals: number[] = [];
-  for (const target of small) {
+  for (const target of targets) {
     const { total, longestFrame } = await openFromTree(browser, target);
     console.log(
       `  ouverture 1 000 blocs : ${Math.round(total)} ms (image la plus longue ${Math.round(longestFrame)} ms)`,
@@ -203,6 +203,63 @@ async function openSmallPages(browser: Browser, what: string): Promise<number> {
 
 test("open_1000_block_page_under_300ms", async ({ browser }) => {
   expect(await openSmallPages(browser, "")).toBeLessThan(300);
+});
+
+/**
+ * Pages de blocs riches (Task C1b, R346) : une page « mêlée » de 1 000 blocs, dont 100 blocs riches
+ * (un bloc sur dix : un callout, puis un signet), tient le budget des 1 000 blocs ; une page de
+ * 1 000 callouts est mesurée et consignée, sans budget à elle (la relecture finale de la partie B
+ * en décide).
+ */
+test.describe("blocs riches", () => {
+  let mixed: Target[] = [];
+  let callouts: Target | null = null;
+
+  /** Une page de 1 000 blocs, dont le bloc `n` est `rich(n)` s'il en rend un, sinon un paragraphe. */
+  async function richPage(request: APIRequestContext, rich: (n: number) => string | null): Promise<Target> {
+    const tag = unique();
+    const { id } = await createPage(request, { title: `Mesure blocs riches ${tag}` });
+    const blocks = Array.from({ length: 1_000 }, (_, i) => rich(i + 1) ?? blockText(tag, i + 1));
+    await putMmd(request, id, `${blocks.join("\n\n")}\n`);
+    return { id, first: blockText(tag, 1) };
+  }
+
+  test.beforeAll(async ({ playwright }) => {
+    test.setTimeout(180_000);
+    const request = await playwright.request.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      mixed = [];
+      for (let i = 0; i < OPENINGS; i++) {
+        mixed.push(
+          await richPage(request, (n) =>
+            n % 10 !== 0
+              ? null
+              : n % 20 === 0
+                ? `<bookmark url="https://exemple.fr/page/${n}"/>`
+                : `<callout icon="⚠️" color="blue">\nCallout ${n} : un texte à faire ressortir.\n</callout>`,
+          ),
+        );
+      }
+      // Le premier bloc est un callout aussi : son texte est celui que l'ouverture attend.
+      const page = await richPage(request, (n) => `<callout icon="💡" color="default">\nCallout ${n}\n</callout>`);
+      callouts = { id: page.id, first: "Callout 1" };
+    } finally {
+      await request.dispose();
+    }
+    await new Promise((done) => setTimeout(done, SERVER_IDLE_CLOSE_MS + 2_000));
+  });
+
+  test("open_1000_block_page_with_100_rich_blocks_under_300ms", async ({ browser }) => {
+    expect(await openSmallPages(browser, " dont 100 blocs riches", mixed)).toBeLessThan(300);
+  });
+
+  test("measure_open_1000_callout_page", async ({ browser }) => {
+    const { total, longestFrame } = await openFromTree(browser, callouts!);
+    console.log(
+      `MESURE ouverture d'une page jamais vue de 1 000 callouts : ${Math.round(total)} ms ` +
+        `(image la plus longue ${Math.round(longestFrame)} ms)`,
+    );
+  });
 });
 
 test("open_10000_block_page_under_3s", async ({ browser }) => {

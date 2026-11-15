@@ -9,6 +9,11 @@
 // commentaire part par l'API (R134). BlockNote ne montre pas la poignée d'un éditeur en
 // lecture seule : pour qui commente sans modifier, c'est la marge qui l'offre (`BlockMarks`).
 //
+// Autour de la vue (`EditorView`) : le menu « / » et ses blocs riches (`slashItems.tsx`), la barre
+// de mise en forme (`Toolbar.tsx`), et la fenêtre de réglage d'un bloc riche, rendue hors du
+// document et tenue par l'id du bloc (`blocks/BlockWindowHost.tsx`) ; Ctrl+Alt+Entrée
+// (Cmd+Option+Entrée) ouvre celle du bloc où est le curseur.
+//
 // `PreviewEditor` est le même éditeur, lié à un document local sans fournisseur : l'aperçu d'une
 // version dans la fenêtre « Historique » (R135).
 import "@blocknote/mantine/style.css";
