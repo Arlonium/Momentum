@@ -34,6 +34,12 @@
 // l'espace le relit aussi, aussitôt (Ruling R150) : le nom de l'espace et les rôles ne
 // sont pas dans l'arbre. Avec la même limite ; un appel qu'elle retient est rejoué à son
 // échéance, pour que le dernier changement finisse toujours par arriver.
+//
+// Chaque lecture qui aboutit est dite à qui l'écoute (`onRead`), même quand elle rend le même
+// arbre : les favoris se relisent alors (R254). Un favori n'avance pas la version de l'espace, et
+// c'est la lecture de l'arbre (retour sur l'onglet, changement dans l'espace) qui l'apporte aux
+// autres onglets du compte ; l'arbre rendu est alors souvent le même objet, et rien d'autre ne le
+// dirait.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ApiError, getTree, isSessionLost } from "../api";
@@ -84,6 +90,13 @@ export type SpaceTree = {
   /** Demande une nouvelle lecture de l'arbre. */
   reload(): void;
   /**
+   * Appelle `listener` à la fin de chaque lecture de l'arbre qui a abouti, avec l'espace lu, même
+   * quand elle rend le même arbre (`sameNodes` garde alors l'objet chargé). Ni une lecture qui
+   * échoue, ni une lecture abandonnée (un autre espace, une relecture qui la remplace, un
+   * changement d'ici qui la fait refaire). Rend la fonction qui le retire. Garde son identité.
+   */
+  onRead(listener: (spaceId: string) => void): () => void;
+  /**
    * La version de l'espace que le serveur a donnée avec l'arbre affiché de `spaceId` (R141) ;
    * `null` : pas d'arbre lu pour cet espace. Le canal de l'espace la compare à ses trames.
    */
@@ -100,6 +113,8 @@ export type SpaceTree = {
   channelChanged(lsn: number, forced: boolean): void;
   /** Pour `useTreeReader` : le compte des changements, celui des relectures, la pose. */
   changes: RefObject<number>;
+  /** Pour `useTreeReader` : ceux qui écoutent la fin des lectures (`onRead`). */
+  readers: RefObject<Set<(spaceId: string) => void>>;
   reloads: number;
   set(tree: LoadedTree): void;
   lsn: RefObject<{ spaceId: string; lsn: number } | null>;
@@ -116,6 +131,15 @@ export function useSpaceTree(): SpaceTree {
   const lsn = useRef<{ spaceId: string; lsn: number } | null>(null);
   const account = useRef<() => void>(() => {});
   const channel = useRef<(lsn: number, forced: boolean) => void>(() => {});
+  const readers = useRef(new Set<(spaceId: string) => void>());
+  const onRead = useCallback((listener: (spaceId: string) => void) => {
+    // Une fonction à elle : le même écouteur inscrit deux fois se retire deux fois.
+    const entry = (spaceId: string) => listener(spaceId);
+    readers.current.add(entry);
+    return () => {
+      readers.current.delete(entry);
+    };
+  }, []);
 
   const change = useCallback((update: (nodes: PageNode[], spaceId: string) => PageNode[]) => {
     changes.current += 1;
@@ -144,16 +168,18 @@ export function useSpaceTree(): SpaceTree {
       change,
       touch,
       reload,
+      onRead,
       knownLsn,
       channelChanged,
       changes,
+      readers,
       reloads,
       set: setLoaded,
       lsn,
       account,
       channel,
     }),
-    [loaded, read, change, touch, reload, knownLsn, channelChanged, reloads],
+    [loaded, read, change, touch, reload, onRead, knownLsn, channelChanged, reloads],
   );
 }
 
@@ -180,7 +206,7 @@ export function useTreeReader(
   spaceId: string | null,
   reading: Reading,
 ): string | null {
-  const { changes, reloads, set, reload, latest, lsn, account, channel } = tree;
+  const { changes, reloads, set, reload, latest, lsn, account, channel, readers } = tree;
   const { retries } = reading;
   const live = reading.live === true;
   // Les rappels du dernier rendu : en changer ne relance pas la lecture.
@@ -294,6 +320,8 @@ export function useTreeReader(
           loaded !== null && loaded.spaceId === spaceId && sameNodes(loaded.nodes, fetched.nodes);
         if (!unchanged) set({ spaceId, nodes: fetched.nodes });
         setError(null);
+        // Même quand rien n'a changé : un favori posé ailleurs n'avance pas la version (R254).
+        for (const listener of [...readers.current]) listener(spaceId);
         return;
       }
     };
@@ -316,7 +344,7 @@ export function useTreeReader(
       cancelled = true;
       settled();
     };
-  }, [spaceId, reloads, retries, changes, set, latest, lsn]);
+  }, [spaceId, reloads, retries, changes, set, latest, lsn, readers]);
 
   // Une lecture a échoué : elle repart quand le navigateur retrouve le réseau.
   const failed = error !== null;

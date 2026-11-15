@@ -629,3 +629,48 @@ test("known_version_follows_the_last_read_even_when_it_goes_down", async () => {
   await answer(1, "perso", [page("a")], 4);
   expect(tree.current.knownLsn("perso")).toBe(4);
 });
+
+test("every_read_that_succeeds_is_told_even_when_the_tree_is_the_same", async () => {
+  // Les favoris se relisent après chaque lecture de l'arbre (R254) : un favori posé dans un autre
+  // onglet n'avance pas la version de l'espace, et l'arbre relu est alors le même objet. Seule la
+  // fin d'une lecture qui a abouti le dit, avec l'espace lu.
+  const tree = await renderHook(hook, { spaceId: "perso" });
+  const told: string[] = [];
+  const off = tree.current.onRead((spaceId) => told.push(spaceId));
+  expect(told).toEqual([]);
+  const a = page("a");
+  await answer(0, "perso", [a], 3);
+  expect(told).toEqual(["perso"]);
+  const loaded = tree.current.loaded;
+  // La même réponse, même version : l'arbre chargé reste le même objet, et la lecture est dite.
+  await settle(() => tree.current.reload());
+  await answer(1, "perso", [{ ...a }], 3);
+  expect(tree.current.loaded).toBe(loaded);
+  expect(told).toEqual(["perso", "perso"]);
+  // Une lecture qui échoue, ou qui trouve la session perdue, n'est pas dite.
+  await settle(() => tree.current.reload());
+  await settle(() => reads[2].answer.reject(unreachable()));
+  await settle(() => tree.current.reload());
+  await settle(() => reads[3].answer.reject(unauthenticated()));
+  expect(told).toEqual(["perso", "perso"]);
+  // Celle d'un espace quitté entre-temps non plus ; celle de l'espace où l'on arrive, oui.
+  await settle(() => tree.current.reload());
+  expect(reads[4].spaceId).toBe("perso");
+  await tree.rerender({ spaceId: "pro" });
+  await answer(4, "perso", [a]);
+  expect(told).toEqual(["perso", "perso"]);
+  await answer(5, "pro", [page("b", { spaceId: "pro" })]);
+  expect(told).toEqual(["perso", "perso", "pro"]);
+  // Une lecture dépassée par un changement d'ici est refaite : seule la seconde est dite.
+  await settle(() => tree.current.reload());
+  await settle(() => tree.current.change((nodes) => nodes));
+  await answer(6, "pro", [page("b", { spaceId: "pro" })]);
+  expect(told).toEqual(["perso", "perso", "pro"]);
+  await answer(7, "pro", [page("b", { spaceId: "pro" })]);
+  expect(told).toEqual(["perso", "perso", "pro", "pro"]);
+  // Retiré, l'écouteur n'apprend plus rien.
+  off();
+  await settle(() => tree.current.reload());
+  await answer(8, "pro", [page("b", { spaceId: "pro" })]);
+  expect(told).toEqual(["perso", "perso", "pro", "pro"]);
+});

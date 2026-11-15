@@ -14,6 +14,7 @@ import type {
   CreateSpace,
   ErrorBody,
   ErrorCode,
+  Favorites,
   Info,
   InvitationCreated,
   InvitationInfo,
@@ -458,6 +459,26 @@ export async function getVersionState(
  */
 export function restoreVersion(pageId: string, versionId: string): Promise<void> {
   return call("POST", `${version(pageId, versionId)}/restore`);
+}
+
+// Favoris (R254) : à chaque compte les siens, par espace. Poser ou retirer un favori demande de
+// voir la page (`read`, à la corbeille aussi), et n'avance pas la version de l'espace : la barre
+// latérale des autres n'en sait rien, et l'onglet qui le pose relit sa liste lui-même.
+
+/**
+ * `GET /api/v1/spaces/{id}/favorites` : les pages favorites du compte dans l'espace, dans l'ordre
+ * où il les a ajoutées ; seulement celles qu'il voit, hors corbeille.
+ */
+export function getFavorites(spaceId: string): Promise<Favorites> {
+  return call("GET", `${space(spaceId)}/favorites`);
+}
+
+/**
+ * `PUT` (`on`) ou `DELETE …/pages/{id}/favorite` : pose ou retire le favori, `204`, sans effet
+ * s'il est déjà dans cet état ; une page qu'on ne voit plus répond `404`, comme une page inconnue.
+ */
+export function setFavorite(pageId: string, on: boolean): Promise<void> {
+  return call(on ? "PUT" : "DELETE", `${page(pageId)}/favorite`);
 }
 
 /** Longueur maximale d'un titre, en caractères Unicode (le serveur fait foi, R30). */
