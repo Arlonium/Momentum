@@ -14,7 +14,7 @@
 import "@blocknote/mantine/style.css";
 import "katex/dist/katex.min.css";
 import { syntaxHighlighter } from "@blocknote/code-block";
-import { combineByGroup, filterSuggestionItems } from "@blocknote/core";
+import { filterSuggestionItems } from "@blocknote/core";
 import { SideMenuExtension } from "@blocknote/core/extensions";
 import { fr } from "@blocknote/core/locales";
 import { withCollaboration } from "@blocknote/core/yjs";
@@ -23,7 +23,6 @@ import {
   BlockColorsItem,
   DragHandleMenu,
   FormattingToolbarController,
-  getDefaultReactSlashMenuItems,
   RemoveBlockItem,
   SideMenu,
   SideMenuController,
@@ -37,11 +36,7 @@ import {
   useExtensionState,
   type SideMenuProps,
 } from "@blocknote/react";
-import {
-  getMultiColumnSlashMenuItems,
-  locales as multiColumnLocales,
-  multiColumnDropCursor,
-} from "@blocknote/xl-multi-column";
+import { locales as multiColumnLocales, multiColumnDropCursor } from "@blocknote/xl-multi-column";
 import {
   useCallback,
   useEffect,
@@ -62,6 +57,7 @@ import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
 import { guardedAwareness } from "./presenceGuard";
 import { schema } from "./schema";
+import { slashMenuItems } from "./slashItems";
 import { MementumFormattingToolbar } from "./Toolbar";
 
 type Props = {
@@ -213,10 +209,7 @@ type ViewProps = {
  * blocs (`test/richEditor.tsx`), liée à un document sans fournisseur.
  */
 export function EditorView({ editor, editable, onComment = null, ...attributes }: ViewProps) {
-  const slashItems = useMemo(
-    () => combineByGroup(getDefaultReactSlashMenuItems(editor), getMultiColumnSlashMenuItems(editor)),
-    [editor],
-  );
+  const slashItems = useMemo(() => slashMenuItems(editor), [editor]);
 
   // Le menu de la poignée : celui de BlockNote, et « Commenter » pour qui peut commenter.
   const sideMenu = useMemo(() => {
