@@ -301,7 +301,8 @@ fn canonical_headers(t: &Table) -> (u32, u32) {
     (rows as u32, cols as u32)
 }
 
-/// Forme canonique d'un contenu en ligne (voir [`normalize`]).
+/// Forme canonique d'un contenu en ligne (voir [`normalize`]), en une passe : le temps et la
+/// mémoire suivent la taille du contenu (Ruling R380).
 pub(crate) fn normalize_inline(content: Vec<Inline>) -> Vec<Inline> {
     let mut out: Vec<Inline> = Vec::with_capacity(content.len());
     for inline in content {
@@ -313,28 +314,46 @@ pub(crate) fn normalize_inline(content: Vec<Inline>) -> Vec<Inline> {
             Inline::Text { text, .. } if text.is_empty() => continue,
             other => other,
         };
-        match (out.last_mut(), inline) {
-            (
-                Some(Inline::Text {
-                    text: prev,
-                    styles: prev_styles,
-                }),
-                Inline::Text { text, styles },
-            ) if *prev_styles == styles => prev.push_str(&text),
-            (
-                Some(Inline::Link {
-                    href: prev,
-                    children: kept,
-                }),
-                Inline::Link { href, children },
-            ) if *prev == href => {
-                kept.extend(children);
-                *kept = normalize_inline(std::mem::take(kept));
-            }
-            (_, inline) => out.push(inline),
-        }
+        push_normalized(&mut out, inline);
     }
     out
+}
+
+/// Ajoute à un contenu normalisé un élément normalisé (un lien, ses enfants), et rend le tout
+/// normalisé.
+///
+/// Deux contenus normalisés mis bout à bout ne diffèrent de leur forme canonique qu'à leur
+/// jointure : le dernier élément du premier et le premier du second, fusionnés s'ils sont deux
+/// textes de mêmes styles ou deux liens de même `href` ; deux liens fusionnés se rejoignent de
+/// même, en descendant au plus de la profondeur des liens. Le résultat d'une fusion garde la sorte
+/// et la clé (styles, `href`) de ses deux parts : il ne se fusionne pas plus avec ses voisins
+/// qu'elles ne le faisaient. Avant, chaque lien fusionné renormalisait tout le lien accumulé : des
+/// liens contigus au même `href` coûtaient le carré de leur nombre, et plus encore avec des styles
+/// alternés (200 Ko : 44 s en release).
+fn push_normalized(out: &mut Vec<Inline>, inline: Inline) {
+    match (out.last_mut(), inline) {
+        (
+            Some(Inline::Text {
+                text: prev,
+                styles: prev_styles,
+            }),
+            Inline::Text { text, styles },
+        ) if *prev_styles == styles => prev.push_str(&text),
+        (
+            Some(Inline::Link {
+                href: prev,
+                children: kept,
+            }),
+            Inline::Link { href, children },
+        ) if *prev == href => {
+            let mut children = children.into_iter();
+            if let Some(first) = children.next() {
+                push_normalized(kept, first);
+            }
+            kept.extend(children);
+        }
+        (_, inline) => out.push(inline),
+    }
 }
 
 /// Texte brut d'un bloc : `U+FFFC` pour une mention ou une formule, `\n`
@@ -354,6 +373,91 @@ fn push_text(content: &[Inline], out: &mut String) {
             Inline::Link { children, .. } => push_text(children, out),
             Inline::Mention { .. } | Inline::Math { .. } => out.push('\u{FFFC}'),
             Inline::HardBreak => out.push('\n'),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// La normalisation d'avant le Ruling R380 : chaque lien fusionné renormalisait tout le lien
+    /// accumulé. Elle sert de référence : la normalisation en une passe rend la même chose.
+    fn reference(content: Vec<Inline>) -> Vec<Inline> {
+        let mut out: Vec<Inline> = Vec::with_capacity(content.len());
+        for inline in content {
+            let inline = match inline {
+                Inline::Link { href, children } => Inline::Link {
+                    href,
+                    children: reference(children),
+                },
+                Inline::Text { text, .. } if text.is_empty() => continue,
+                other => other,
+            };
+            match (out.last_mut(), inline) {
+                (
+                    Some(Inline::Text {
+                        text: prev,
+                        styles: prev_styles,
+                    }),
+                    Inline::Text { text, styles },
+                ) if *prev_styles == styles => prev.push_str(&text),
+                (
+                    Some(Inline::Link {
+                        href: prev,
+                        children: kept,
+                    }),
+                    Inline::Link { href, children },
+                ) if *prev == href => {
+                    kept.extend(children);
+                    *kept = reference(std::mem::take(kept));
+                }
+                (_, inline) => out.push(inline),
+            }
+        }
+        out
+    }
+
+    /// Des contenus où tout se fusionne : deux adresses, deux styles, des textes vides, des
+    /// liens imbriqués et vides.
+    fn content() -> impl Strategy<Value = Vec<Inline>> {
+        let leaf = prop_oneof![
+            4 => (prop::sample::select(vec!["", "a", "b"]), any::<bool>()).prop_map(
+                |(text, bold)| Inline::Text {
+                    text: text.to_string(),
+                    styles: Styles {
+                        bold,
+                        ..Styles::default()
+                    },
+                }
+            ),
+            1 => Just(Inline::HardBreak),
+        ];
+        let item = leaf.prop_recursive(4, 64, 6, |inner| {
+            (
+                prop::sample::select(vec!["u", "v"]),
+                prop::collection::vec(inner, 0..6),
+            )
+                .prop_map(|(href, children)| Inline::Link {
+                    href: href.to_string(),
+                    children,
+                })
+        });
+        prop::collection::vec(item, 0..12)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2048))]
+
+        /// Ruling R380 : la normalisation en une passe rend ce que rendait l'ancienne, et elle
+        /// ne change plus ce qu'elle a rendu.
+        #[test]
+        fn one_pass_normalization_is_the_former_one(content in content()) {
+            let normalized = normalize_inline(content.clone());
+            prop_assert_eq!(&normalized, &reference(content));
+            prop_assert_eq!(normalize_inline(normalized.clone()), normalized);
         }
     }
 }
