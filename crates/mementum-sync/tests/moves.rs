@@ -1,5 +1,6 @@
-//! Édition faite pendant le déplacement d'un bloc (limite R39 du lot 1, que la Task 13 lève,
-//! Ruling R138), vue par l'acteur d'une page. Mona déplace le bloc X juste sous le bloc Z ; Tom
+//! Édition faite pendant le déplacement d'un bloc (limite R39 du lot 1, levée par la Task 13b
+//! pour l'ordre « le déplacement arrive après la frappe », Rulings R221 et R371 à R379), vue par
+//! l'acteur d'une page. Mona déplace le bloc X juste sous le bloc Z ; Tom
 //! tape « de Tom », chacun depuis le même état. Chaque mise à jour part par la connexion de son
 //! auteur, telle qu'un client qui revient en ligne l'envoie, et l'acteur la traite avant la
 //! suivante, dans les deux ordres d'arrivée.
@@ -26,17 +27,22 @@
 //! l'acteur et dans le journal relu. Chacun vérifie d'abord, par le même chemin, que le
 //! déplacement seul et la frappe seule font ce qu'ils disent.
 //!
+//! Depuis la Task 13b, l'acteur reporte sur le bloc recréé ce que l'auteur du déplacement n'avait
+//! pas vu, quand le déplacement arrive après la frappe : le report est écrit au journal avec le
+//! déplacement, et diffusé à tous, l'expéditeur compris. Les scènes des octets du navigateur
+//! (`fixtures/moves/<ordre>/<scène>/`, dans les deux ordres des identifiants de client) sont
+//! rejouées par l'acteur, chacune relue aux quatre endroits.
+//!
 //! Ceux du module `known_limits` affirment une **limite connue** (Ruling R340,
 //! `common/limit.rs`) : ce qui est voulu n'est pas tenu aujourd'hui. Ils sont exécutés à chaque
 //! passage, et passent tant que la perte dite, mot pour mot, se voit aux quatre endroits ; ils
-//! échouent le jour où elle est levée (la Task 13b sort alors le test du module et lui fait
-//! affirmer la page voulue), et pour toute autre issue : une précondition manquée, une page qui
-//! ne converge pas, une autre perte. Aucun n'est `#[ignore]`, marque réservée aux mesures :
-//! ignorés, ils échouaient par construction dans le job `budgets` de la CI, qui lance tout ce qui
-//! l'est.
+//! échouent le jour où elle est levée, et pour toute autre issue : une précondition manquée, une
+//! page qui ne converge pas, une autre perte. Il en reste un ordre : la frappe faite sans avoir vu
+//! le déplacement et arrivée après lui (Ruling R222). Aucun n'est `#[ignore]`, marque réservée
+//! aux mesures.
 //!
-//! Ce qu'ils montrent est au registre du lot 3, sous « Task 12 », puis sous « La CI remise au
-//! vert ».
+//! Ce qu'ils montrent est au registre du lot 3, sous « Task 12 », « La CI remise au vert » et
+//! « Task 13b ».
 
 mod common;
 
@@ -81,16 +87,12 @@ const PLACES: [&str; 4] = [
     "dans le journal relu",
 ];
 
-/// Pourquoi la frappe se perd quand le déplacement est une copie au même id puis la suppression
-/// de l'original (Tab, Maj+Tab, les enfants d'un bloc glissé) : elle est faite dans l'original,
-/// qui part avec elle.
-const LOST_WITH_THE_ORIGINAL: &str = "R39 : la frappe faite dans un bloc qu'un autre copie puis \
-     supprime part avec l'original ; à lever par la Task 13b";
-
-/// Pourquoi la frappe se perd dans un bloc glissé par un navigateur : depuis le Ruling R220, il
-/// est supprimé et recréé au même id, et la frappe est faite dans l'élément supprimé.
-const LOST_WITH_THE_DRAGGED_BLOCK: &str = "R39 et R220 : la frappe faite dans un bloc qu'un autre \
-     glisse part avec l'élément supprimé ; à lever par la Task 13b";
+/// Pourquoi la frappe se perd quand elle arrive après le déplacement (copie au même id puis
+/// suppression de l'original : Tab, Maj+Tab, un bloc glissé depuis le Ruling R220) : elle est
+/// faite dans l'original sans que son auteur ait vu le déplacement, et part avec lui. La
+/// reconnaître demande de lire les éléments supprimés de l'original, ce que yrs n'offre pas.
+const LOST_AFTER_THE_MOVE: &str = "R222 : la frappe faite sans avoir vu le déplacement, arrivée \
+     après lui, part avec l'original ; seul l'ordre inverse est reporté (Task 13b)";
 
 /// Les deux ordres d'arrivée, nommés pour les messages.
 const ORDERS: [(&str, [Step; 2]); 2] = [
@@ -153,6 +155,22 @@ impl Scene {
     /// Les octets du navigateur : la page de départ, écrite telle quelle comme document de la
     /// page, le glisser de Mona, et la frappe de Tom `typed`.
     async fn browser(typed: &[u8]) -> Scene {
+        Scene::from_bytes(BROWSER_BASE, BROWSER_MOVE, typed).await
+    }
+
+    /// Une scène des octets du navigateur rangés par ordre d'identifiants et par scène
+    /// (`fixtures/moves/<ordre>/<scène>/` : `base.bin`, `mona.bin`, `tom.bin`). Les ids de
+    /// [`Scene::ids`] y sont ceux de la scène d'origine, sans rôle ici.
+    async fn fixture(order: &str, scene: &str) -> Scene {
+        let base = scene_file(order, scene, "base.bin");
+        let mona = scene_file(order, scene, "mona.bin");
+        let tom = scene_file(order, scene, "tom.bin");
+        Scene::from_bytes(&base, &mona, &tom).await
+    }
+
+    /// La page de départ `base`, écrite telle quelle comme document de la page, la mise à jour
+    /// de Mona `moved` et celle de Tom `typed`.
+    async fn from_bytes(base: &[u8], moved: &[u8], typed: &[u8]) -> Scene {
         let dir = tmp::TestDir::new();
         let db = dir.path().join("mementum.db");
         let store = Store::open(&db).await.unwrap();
@@ -166,7 +184,7 @@ impl Scene {
                 title: "Page".into(),
                 created_by: None,
                 grants: Vec::new(),
-                doc: Some(BROWSER_BASE.to_vec()),
+                doc: Some(base.to_vec()),
             })
             .await
             .unwrap()
@@ -193,7 +211,7 @@ impl Scene {
             mona,
             tom,
             ids,
-            moved: BROWSER_MOVE.to_vec(),
+            moved: moved.to_vec(),
             edited: typed.to_vec(),
         }
     }
@@ -205,6 +223,16 @@ impl Scene {
     /// ensuite que Mona et Tom aient tout ce que le serveur a écrit, puis rend ce que voient
     /// Mona, Tom, l'acteur et le journal relu ([`PLACES`]).
     async fn play(&self, steps: &[Step]) -> Vec<(&'static str, Page)> {
+        let (seen, _) = self.play_blocks(steps).await;
+        PLACES
+            .into_iter()
+            .zip(seen.iter().map(|blocks| summary(blocks)))
+            .collect()
+    }
+
+    /// Comme [`Scene::play`], en rendant les blocs vus aux quatre endroits, et l'état complet du
+    /// journal relu.
+    async fn play_blocks(&self, steps: &[Step]) -> ([Vec<Block>; 4], Vec<u8>) {
         for step in steps {
             let (author, update) = match step {
                 Step::Move => (&self.mona, &self.moved),
@@ -229,10 +257,7 @@ impl Scene {
             self.f.hub.read_blocks(self.f.page).await.unwrap(),
             stored.read_blocks(),
         ];
-        PLACES
-            .into_iter()
-            .zip(seen.iter().map(|blocks| summary(blocks)))
-            .collect()
+        (seen, stored.encode_state())
     }
 
     /// `(id, texte)` attendus, dans l'ordre de la page.
@@ -242,6 +267,47 @@ impl Scene {
             .map(|(id, text)| (id.clone(), text.to_string()))
             .collect()
     }
+}
+
+/// Un fichier d'une scène des octets du navigateur.
+fn scene_file(order: &str, scene: &str, file: &str) -> Vec<u8> {
+    let path = scene_dir(order, scene).join(file);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{} : {e}", path.display()))
+}
+
+/// Le dossier d'une scène des octets du navigateur.
+fn scene_dir(order: &str, scene: &str) -> std::path::PathBuf {
+    [
+        env!("CARGO_MANIFEST_DIR"),
+        "tests",
+        "fixtures",
+        "moves",
+        order,
+        scene,
+    ]
+    .iter()
+    .collect()
+}
+
+/// Une page en une ligne : `id « texte »` par bloc, le type s'il n'est pas un paragraphe, les
+/// sous-blocs entre crochets (la forme de `line` dans `apps/web/src/test/editors.ts`).
+fn line(blocks: &[Block]) -> String {
+    blocks
+        .iter()
+        .map(|b| {
+            let kind = if b.kind == "paragraph" {
+                String::new()
+            } else {
+                format!(" ({})", b.kind)
+            };
+            let mut out = format!("{}{kind} « {} »", b.id, block_text(b));
+            if !b.children.is_empty() {
+                out.push_str(&format!(" [{}]", line(&b.children)));
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 /// Les blocs de premier niveau : `(id, texte)`, dans l'ordre de la page.
@@ -372,6 +438,162 @@ async fn browser_move_keeps_the_text_typed_in_a_block_it_shifts() {
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
+/// La frappe de Tom arrive d'abord, le déplacement ensuite : Mona déplaçait hors ligne, et
+/// revient après que Tom a écrit dans le bloc. Copie et suppression, bâties avec yrs. Le texte de
+/// Tom est reporté sur la copie (Task 13b) : `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`,
+/// partout. Une limite connue jusqu'à la Task 13b.
+#[tokio::test]
+async fn move_arriving_after_the_edit_keeps_the_edit() {
+    controls(Scene::built, |ids| &ids.x).await;
+    let s = Scene::built().await;
+    let Ids { x, y, z } = &s.ids;
+    let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
+    let seen = s.play(&[Step::Edit, Step::Move]).await;
+    let mut failures = Vec::new();
+    check_wanted(&s, ORDERS[1].0, &seen, &wanted, x, &mut failures);
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Le glisser de X sous Z et la frappe de Tom dans X, tels qu'un navigateur les écrit, la frappe
+/// arrivant d'abord : exactement `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`, partout.
+/// Une limite connue jusqu'à la Task 13b (le texte de Tom n'était nulle part).
+#[tokio::test]
+async fn browser_move_arriving_after_the_edit_keeps_it() {
+    let scene = || Scene::browser(BROWSER_TYPED_IN_X);
+    controls(scene, |ids| &ids.x).await;
+    let s = scene().await;
+    let Ids { x, y, z } = &s.ids;
+    let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
+    let (order, steps) = ORDERS[1];
+    let seen = s.play(&steps).await;
+    let mut failures = Vec::new();
+    check_wanted(&s, order, &seen, &wanted, x, &mut failures);
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Les deux ordres des identifiants de client des scènes du navigateur.
+const ID_ORDERS: [&str; 2] = ["mona-first", "tom-first"];
+
+/// Chaque scène des octets du navigateur où Tom tape (ou ajoute un sous-bloc) dans un bloc que
+/// Mona déplace, et la page voulue quand le déplacement arrive après : l'acteur la donne aux
+/// quatre endroits (Task 13b), dans les deux ordres des identifiants de client.
+const CARRIED_SCENES: [(&str, &str); 12] = [
+    ("s1", "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »"),
+    (
+        "s2",
+        "y (heading) « Titre Y » | z « Bloc Z » | x « Bloc X de Tom »",
+    ),
+    (
+        "s3",
+        "y « Bloc Y » | z « Bloc Z » | x « Bloc X » [x1 « Enfant X1 de Tom »]",
+    ),
+    ("s7", "y « Bloc Y » | x « Bloc X de Tom » | z « Bloc Z »"),
+    (
+        "s8",
+        "y « Rappeler Marc » | z « Arroser les plantes » | x « Acheter du pain de Tom »",
+    ),
+    ("s9", "w « Bloc W » [x « Bloc X de Tom »] | y « Bloc Y »"),
+    ("s10", "w « Bloc W » | x « Bloc X de Tom » | y « Bloc Y »"),
+    (
+        "start-middle-end",
+        "y « Bloc Y » | z « Bloc Z » | x « Début Bl[milieu]oc X de Tom »",
+    ),
+    ("bold", "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »"),
+    (
+        "child-added",
+        "y « Bloc Y » | z « Bloc Z » | x « Bloc X » [x1 « Enfant de Tom »]",
+    ),
+    (
+        "mover-typed-too",
+        "y « Bloc Y » | z « Bloc Z » | x « Tom : Bloc X de Mona »",
+    ),
+    (
+        "concurrent-delete",
+        "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »",
+    ),
+];
+
+/// Les scènes de [`CARRIED_SCENES`], la frappe arrivant d'abord : la page voulue chez Mona, chez
+/// Tom, dans le document de l'acteur et dans le journal relu.
+#[tokio::test]
+async fn every_browser_scene_moved_after_the_edit_is_carried_everywhere() {
+    let mut failures = Vec::new();
+    for order in ID_ORDERS {
+        for (scene, wanted) in CARRIED_SCENES {
+            let s = Scene::fixture(order, scene).await;
+            let (seen, _) = s.play_blocks(&[Step::Edit, Step::Move]).await;
+            for (place, blocks) in PLACES.iter().zip(seen.iter()) {
+                let shown = line(blocks);
+                if shown != wanted {
+                    failures.push(format!("{order}/{scene}, {place} : {shown}"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Deux glissers du même bloc, sans frappe (S6), dans les deux ordres d'arrivée : le
+/// dédoublonnage voit le doublon (la mise à jour insère un élément) et n'en garde qu'un, sous son
+/// identifiant, aux quatre endroits. Les fils de commentaires du bloc, qui le nomment par cet
+/// identifiant, le gardent donc pour le serveur ; ce que promet le navigateur est dit au registre
+/// (Ruling R376).
+#[tokio::test]
+async fn two_moves_of_the_same_block_leave_one() {
+    let mut failures = Vec::new();
+    for order in ID_ORDERS {
+        for steps in [[Step::Move, Step::Edit], [Step::Edit, Step::Move]] {
+            let s = Scene::fixture(order, "s6").await;
+            let (seen, _) = s.play_blocks(&steps).await;
+            let first = line(&seen[0]);
+            for (place, blocks) in PLACES.iter().zip(seen.iter()) {
+                let shown = line(blocks);
+                let one = shown == "y « Bloc Y » | z « Bloc Z » | x « Bloc X »"
+                    || shown == "y « Bloc Y » | x « Bloc X » | z « Bloc Z »";
+                if !one || shown != first {
+                    failures.push(format!("{order}, {place} : {shown}"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Les scènes dont l'état final, écrit par l'acteur, est relu par deux éditeurs BlockNote neufs
+/// (`apps/web/src/editor/blockMoves.test.ts`, « l'état reporté par le serveur, rouvert ») : ils
+/// ne doivent rien récrire en l'ouvrant.
+const REOPENED_SCENES: [&str; 5] = ["s1", "s3", "s9", "bold", "child-added"];
+
+/// L'état final de chaque scène de [`REOPENED_SCENES`], la frappe arrivant d'abord, tel que
+/// l'acteur l'écrit au journal : `carried.bin` dans le dossier de la scène. Les octets ne se
+/// comparent pas (le serveur écrit le report sous un identifiant de client tiré au hasard) :
+/// le fichier gardé doit se lire comme la page que l'acteur donne aujourd'hui.
+/// `EXPORT_FIXTURES=1` le réécrit.
+#[tokio::test]
+async fn carried_final_states_are_kept_for_the_client() {
+    let export = std::env::var_os("EXPORT_FIXTURES").is_some();
+    for order in ID_ORDERS {
+        for scene in REOPENED_SCENES {
+            let s = Scene::fixture(order, scene).await;
+            let (seen, state) = s.play_blocks(&[Step::Edit, Step::Move]).await;
+            let path = scene_dir(order, scene).join("carried.bin");
+            if export {
+                std::fs::write(&path, &state).unwrap();
+                continue;
+            }
+            let kept = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("{} : {e} (EXPORT_FIXTURES=1 l'écrit)", path.display()));
+            let kept = mementum_crdt::PageDoc::from_updates([kept.as_slice()]).unwrap();
+            assert_eq!(
+                line(&kept.read_blocks()),
+                line(&seen[3]),
+                "{order}/{scene} : {} (EXPORT_FIXTURES=1 le réécrit)",
+                path.display()
+            );
+        }
+    }
+}
+
 /// Les limites connues (Ruling R340) : ce que chaque test dit voulu n'est pas tenu, et il
 /// l'affirme. Il passe tant que la perte dite se voit aux quatre endroits, mot pour mot, et
 /// échoue le jour où elle est levée : le sortir alors de ce module, et remplacer `known_limit`
@@ -395,49 +617,29 @@ mod known_limits {
         let (mut failures, mut loss) = (Vec::new(), Vec::new());
         check_wanted(&s, ORDERS[0].0, &seen, &wanted, x, &mut failures);
         check_wanted(&s, ORDERS[0].0, &everywhere(&lost), &wanted, x, &mut loss);
-        known_limit(LOST_WITH_THE_ORIGINAL, &failures, &loss);
+        known_limit(LOST_AFTER_THE_MOVE, &failures, &loss);
     }
 
-    /// La frappe de Tom arrive d'abord, le déplacement ensuite : Mona déplaçait hors ligne, et
-    /// revient après que Tom a écrit dans le bloc. Copie et suppression, bâties avec yrs.
+    /// Le glisser de X sous Z et la frappe de Tom dans X, tels qu'un navigateur les écrit, le
+    /// glisser arrivant d'abord (Tom tapait hors ligne).
     ///
-    /// Voulu : `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`. Aujourd'hui, le texte de Tom
-    /// n'est nulle part : X est juste sous Z, sans lui.
+    /// Voulu : exactement `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`. Aujourd'hui, le
+    /// texte de Tom n'est nulle part : X est juste sous Z, sans lui (avant le Ruling R220, il
+    /// passait dans Y).
     #[tokio::test]
-    async fn move_arriving_after_the_edit_keeps_the_edit() {
-        controls(Scene::built, |ids| &ids.x).await;
-        let s = Scene::built().await;
+    async fn browser_edit_arriving_after_the_move_survives() {
+        let scene = || Scene::browser(BROWSER_TYPED_IN_X);
+        controls(scene, |ids| &ids.x).await;
+        let s = scene().await;
         let Ids { x, y, z } = &s.ids;
         let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
         let lost = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X")]);
-        let seen = s.play(&[Step::Edit, Step::Move]).await;
+        let (order, steps) = ORDERS[0];
+        let seen = s.play(&steps).await;
         let (mut failures, mut loss) = (Vec::new(), Vec::new());
-        check_wanted(&s, ORDERS[1].0, &seen, &wanted, x, &mut failures);
-        check_wanted(&s, ORDERS[1].0, &everywhere(&lost), &wanted, x, &mut loss);
-        known_limit(LOST_WITH_THE_ORIGINAL, &failures, &loss);
-    }
-
-    /// Le glisser de X sous Z et la frappe de Tom dans X, tels qu'un navigateur les écrit, dans
-    /// les deux ordres d'arrivée.
-    ///
-    /// Voulu : exactement `[y « Bloc Y », z « Bloc Z », x « Bloc X de Tom »]`. Aujourd'hui, dans
-    /// les deux ordres, le texte de Tom n'est nulle part : X est juste sous Z, sans lui (avant le
-    /// Ruling R220, il passait dans Y).
-    #[tokio::test]
-    async fn browser_move_keeps_the_text_typed_in_the_moved_block() {
-        let scene = || Scene::browser(BROWSER_TYPED_IN_X);
-        controls(scene, |ids| &ids.x).await;
-        let (mut failures, mut loss) = (Vec::new(), Vec::new());
-        for (order, steps) in ORDERS {
-            let s = scene().await;
-            let Ids { x, y, z } = &s.ids;
-            let wanted = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X de Tom")]);
-            let lost = s.expected([(y, "Bloc Y"), (z, "Bloc Z"), (x, "Bloc X")]);
-            let seen = s.play(&steps).await;
-            check_wanted(&s, order, &seen, &wanted, x, &mut failures);
-            check_wanted(&s, order, &everywhere(&lost), &wanted, x, &mut loss);
-        }
-        known_limit(LOST_WITH_THE_DRAGGED_BLOCK, &failures, &loss);
+        check_wanted(&s, order, &seen, &wanted, x, &mut failures);
+        check_wanted(&s, order, &everywhere(&lost), &wanted, x, &mut loss);
+        known_limit(LOST_AFTER_THE_MOVE, &failures, &loss);
     }
 }
 
