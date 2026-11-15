@@ -10,7 +10,9 @@
 // - `useOpenPage` : la page ouverte, celle de l'arbre ou celle que le serveur rend ;
 // - `useCurrentSpace` : l'espace affiché, d'après l'adresse et la page ouverte ;
 // - `usePageActions` : créer, renommer, jeter, restaurer, déplacer, et ce que la page
-//   ouverte devient quand ses droits changent ailleurs.
+//   ouverte devient quand ses droits changent ailleurs ;
+// - `useFavorites` : les favoris du compte dans l'espace affiché, lus après chaque lecture de
+//   l'arbre (R254).
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
@@ -20,6 +22,7 @@ import { PageView } from "./page/PageView";
 import { useOpenPage } from "./page/useOpenPage";
 import { parseRoute, useLinkInterception, usePathname } from "./router";
 import { useSession } from "./session/session";
+import { useAfterLogin } from "./session/useAfterLogin";
 import { useRetryAfterLogin } from "./session/useRetryAfterLogin";
 import { SpaceSettings } from "./settings/SpaceSettings";
 import type { Drop } from "./sidebar/drag";
@@ -29,6 +32,7 @@ import { CreateSpaceDialog } from "./sidebar/SpaceSwitcher";
 import { SpaceNotFound } from "./space/SpaceNotFound";
 import { visit } from "./space/recents";
 import { useCurrentSpace } from "./space/useCurrentSpace";
+import { useFavorites } from "./space/useFavorites";
 import { usePageActions } from "./space/usePageActions";
 import { useSpaceEvents } from "./space/useSpaceEvents";
 import { useSpaceTree, useTreeCatchUp, useTreeReader } from "./space/useSpaceTree";
@@ -115,6 +119,16 @@ export function App() {
     caughtUp,
   });
   const { create, trash, move } = actions;
+  // Les favoris du compte dans l'espace affiché (R254) : lus à la fin de chaque lecture de son
+  // arbre, jamais avant (rien sur le chemin de l'ouverture d'une page), et au retour du compte. Un
+  // refus se dit en pied de barre latérale, et la fait relire.
+  const afterLogin = useAfterLogin(me);
+  const favorites = useFavorites(spaceId, tree.onRead, {
+    afterLogin,
+    onRefused: actions.favoriteRefused,
+  });
+  const { toggle } = favorites;
+  const favorite = useCallback((id: string) => void toggle(id), [toggle]);
   // Stables : les lignes de l'arbre, mémoïsées, ne se rendent pas à chaque navigation (R43).
   const createFromTree = useCallback((target: CreateTarget) => void create(target), [create]);
   const trashFromTree = useCallback((id: string) => void trash(id), [trash]);
@@ -228,6 +242,8 @@ export function App() {
         onLost={actions.lost}
         onShared={actions.shared}
         onShareRefused={actions.shareRefused}
+        favorite={favorites.pages.includes(active.id)}
+        onFavorite={favorite}
       />
     );
   } else if (looked?.state === "gone") {
@@ -271,6 +287,8 @@ export function App() {
         notice={actions.notice}
         readError={treeError}
         onRetry={tree.reload}
+        favorites={favorites}
+        onFavorite={favorite}
       />
       <main className="mm-main">{content}</main>
       {creatingSpace && <CreateSpaceDialog onClose={() => setCreatingSpace(false)} />}

@@ -52,6 +52,11 @@ export type FavoriteList = {
    * gestes d'ici pas encore relus ; `[]` tant que la liste n'est pas lue.
    */
   pages: string[];
+  /**
+   * La liste de l'espace affiché a été lue au moins une fois : `pages` dit ce que le serveur en
+   * sait, pas seulement qu'on attend (la barre latérale ne gèle « Favoris » qu'à partir de là).
+   */
+  loaded: boolean;
   /** Pose le favori de la page s'il n'y est pas, le retire sinon ; tenue une fois la réponse là. */
   toggle(pageId: string): Promise<void>;
   /** Le refus du dernier geste, tel que le serveur le dit ; `null` : aucun. */
@@ -225,5 +230,6 @@ export function useFavorites(
   }, []);
 
   const { error } = current;
-  return useMemo(() => ({ pages, toggle, error }), [pages, toggle, error]);
+  const loaded = current.read !== null;
+  return useMemo(() => ({ pages, loaded, toggle, error }), [pages, loaded, toggle, error]);
 }

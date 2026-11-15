@@ -85,12 +85,14 @@ test("favorites_are_read_after_the_tree_never_before", async () => {
   await advance(60_000);
   expect(reads).toEqual([]);
   expect(rendered.current.pages).toEqual([]);
+  expect(rendered.current.loaded).toBe(false);
   // L'arbre de l'espace est là : la liste est lue, une fois.
   await treeRead("perso");
   await advance(0);
   expect(reads.map((r) => r.spaceId)).toEqual(["perso"]);
   await answer(0, ["a", "b"]);
   expect(rendered.current.pages).toEqual(["a", "b"]);
+  expect(rendered.current.loaded).toBe(true);
   await advance(60_000);
   expect(reads).toHaveLength(1);
 });
@@ -203,6 +205,7 @@ test("favorites_of_the_previous_space_are_not_shown", async () => {
   // Un autre espace : plus rien de « perso » n'est montré, avant même sa lecture.
   await rendered.rerender({ spaceId: "pro" });
   expect(rendered.current.pages).toEqual([]);
+  expect(rendered.current.loaded).toBe(false);
   // La réponse de « perso », arrivée après, ne se montre pas ; la liste de « pro » attend son arbre.
   await answer(1, ["a", "b"]);
   expect(rendered.current.pages).toEqual([]);
@@ -216,6 +219,7 @@ test("favorites_of_the_previous_space_are_not_shown", async () => {
   expect(reads.map((r) => r.spaceId)).toEqual(["perso", "perso", "pro"]);
   await answer(2, ["x"]);
   expect(rendered.current.pages).toEqual(["x"]);
+  expect(rendered.current.loaded).toBe(true);
   // Un favori posé dans « pro », dont la réponse arrive une fois revenu dans « perso » : il ne se
   // montre pas dans « perso », dont la liste repart de rien.
   await settle(() => void rendered.current.toggle("y"));

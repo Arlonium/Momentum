@@ -1,5 +1,6 @@
 // Les actions sur les pages d'un espace, depuis la barre latérale et la page ouverte : créer,
-// renommer, mettre à la corbeille, restaurer, déplacer. Le serveur fait foi. Une page ne
+// renommer, mettre à la corbeille, restaurer, déplacer ; et ce que dit un favori refusé (R254 :
+// `useFavorites` le pose et le défait, le refus se dit ici). Le serveur fait foi. Une page ne
 // change à l'écran qu'une fois le serveur d'accord ; sur son refus, rien n'a bougé, et son
 // message s'affiche en pied de barre latérale (`notice`), jusqu'à la navigation suivante.
 //
@@ -115,6 +116,11 @@ export type PageActions = {
    * le menu Partager s'est fermé, et son message se dit ici.
    */
   shareRefused: (message: string) => void;
+  /**
+   * Le serveur a refusé de poser (`on`) ou de retirer un favori : son message se dit ici, et la
+   * barre latérale est relue (la page n'est plus visible, ou n'existe plus). Garde son identité.
+   */
+  favoriteRefused: (error: unknown, pageId: string, on: boolean) => void;
   /** Change quand une page est jetée ou restaurée d'ici : la vue de la corbeille se relit. */
   trashChanges: number;
 };
@@ -306,6 +312,14 @@ export function usePageActions({
     setNotice(`Le partage n'a pas pu être modifié. ${capitalize(message)}`);
   }, []);
 
+  const favoriteRefused = useCallback(
+    (error: unknown, _pageId: string, on: boolean) => {
+      setNotice(`Le favori n'a pas pu être ${on ? "ajouté" : "retiré"}. ${sentence(error)}`);
+      reload();
+    },
+    [reload],
+  );
+
   return {
     notice,
     created,
@@ -321,5 +335,6 @@ export function usePageActions({
     lost,
     shared,
     shareRefused,
+    favoriteRefused,
   };
 }

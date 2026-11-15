@@ -472,3 +472,21 @@ test("refusal_from_the_share_menu_is_said_in_the_sidebar", async () => {
   await app.rerender({ activeId: "a", pathname: "/s/space/trash" });
   expect(app.current.actions.notice).toBeNull();
 });
+
+test("refused_favorite_is_said_in_the_sidebar_and_rereads_the_tree", async () => {
+  // Le favori d'une page qu'on ne voit plus (R254) : le serveur répond comme pour une page
+  // inconnue. Le refus se dit en pied de barre latérale, jusqu'à la navigation suivante, et
+  // l'arbre est relu : la page doit en partir.
+  const app = await withTree([page("a"), page("b")]);
+  const reads = treeReads();
+  server = [page("a")];
+  await settle(() => app.current.actions.favoriteRefused(notFound(), "b", true));
+  expect(app.current.actions.notice).toBe("Le favori n'a pas pu être ajouté. Page introuvable");
+  await settle();
+  expect(treeReads()).toBe(reads + 1);
+  expect(ids(app.current.nodes)).toEqual(["a"]);
+  await settle(() => app.current.actions.favoriteRefused(notFound(), "a", false));
+  expect(app.current.actions.notice).toBe("Le favori n'a pas pu être retiré. Page introuvable");
+  await app.rerender({ pathname: "/p/a" });
+  expect(app.current.actions.notice).toBeNull();
+});

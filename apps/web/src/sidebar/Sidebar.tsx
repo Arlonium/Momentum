@@ -1,18 +1,24 @@
 // La barre latérale. En tête, collés à son bord haut : le sélecteur d'espace (avec le menu du
-// compte, Ruling R80) et « Nouvelle page ». Puis, qui défilent dessous : les sections de
+// compte, Ruling R80) et « Nouvelle page ». Puis, qui défilent dessous : « Favoris », les pages
+// favorites du compte dans l'espace (R254, absente quand elle est vide), les sections de
 // l'espace, chacune avec son arbre de pages, et « Récents », les pages que le compte a ouvertes
 // dans l'espace, gardées dans le navigateur (R255, sous les sections depuis R296 ; absente quand
-// elle est vide, rien n'est lu du serveur pour elle). En pied, collés à son bord bas : le
+// elle est vide, rien n'est lu du serveur pour elle). « Favoris » est au-dessus des arbres : tant
+// que le pointeur est dans la barre, une relecture ne la fait ni grandir, ni rapetisser, ni
+// changer d'ordre (`heldPages.ts`, R411) ; un favori posé ou retiré d'ici, par le menu d'une
+// ligne, se voit tout de suite. En pied, collés à son bord bas : le
 // message de la dernière action refusée (à défaut, celui d'une lecture des pages qui a échoué),
 // avec « Réessayer » tant que les pages n'ont pas pu être lues, et « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
-import { useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
 import { trashPath } from "../router";
 import { useSession } from "../session/session";
 import { useRecentPages } from "../space/recents";
+import { favoritePages } from "../space/useFavorites";
 import { firstClick } from "../ui/firstClick";
 import type { Drop } from "./drag";
+import { useHeldPages } from "./heldPages";
 import { SectionList, type CreateTarget } from "./SectionList";
 import { ShortList } from "./ShortList";
 import { SpaceSwitcher } from "./SpaceSwitcher";
@@ -40,7 +46,14 @@ type Props = {
   readError: string | null;
   /** Relit les pages de l'espace. */
   onRetry: () => void;
+  /** Les pages favorites du compte dans l'espace (`useFavorites`), et si leur liste est lue. */
+  favorites: { pages: string[]; loaded: boolean };
+  /** Pose ou retire le favori d'une page (R254). */
+  onFavorite: (id: string) => void;
 };
+
+/** Aucun favori posé d'ici : toujours le même ensemble. */
+const NO_IDS: ReadonlySet<string> = new Set();
 
 export function Sidebar({
   space,
@@ -55,6 +68,8 @@ export function Sidebar({
   notice,
   readError,
   onRetry,
+  favorites,
+  onFavorite,
 }: Props) {
   // La barre latérale défile ; sa tête et son pied restent collés à ses bords, par-dessus les
   // arbres, qui en tiennent compte pour montrer la page active (`treeWindow.ts`).
@@ -86,6 +101,25 @@ export function Sidebar({
   // Les pages récentes du compte dans l'espace, filtrées par son arbre (R255).
   const { me } = useSession();
   const recents = useRecentPages(me.user.id, space?.id ?? null, nodes);
+  // Les favoris, filtrés par l'arbre, et gelés tant que le pointeur est dans la barre (R411), à
+  // partir du moment où la liste de l'espace est lue (sinon le gel garderait une liste vide).
+  const favoriteNodes = useMemo(() => favoritePages(favorites.pages, nodes), [favorites.pages, nodes]);
+  const [pointerIn, setPointerIn] = useState(false);
+  /** Les favoris posés ou retirés d'ici pendant que le pointeur est dans la barre. */
+  const [mine, setMine] = useState<ReadonlySet<string>>(NO_IDS);
+  const shownFavorites = useHeldPages(
+    space?.id ?? "",
+    favoriteNodes,
+    pointerIn && favorites.loaded,
+    mine,
+  );
+  const favoriteFromRow = useCallback(
+    (id: string) => {
+      setMine((current) => new Set(current).add(id));
+      onFavorite(id);
+    },
+    [onFavorite],
+  );
   // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
   const readFailure =
     readError === null
@@ -96,7 +130,18 @@ export function Sidebar({
   // lecture, qui revient quand le refus n'est plus dit.
   const retryable = notice === null && readFailure !== null;
   return (
-    <nav ref={setScroller} className="mm-sidebar" aria-label="Barre latérale">
+    <nav
+      ref={setScroller}
+      className="mm-sidebar"
+      aria-label="Barre latérale"
+      // Le menu d'une ligne, posé dans `body`, est un enfant de la barre pour React : le pointeur
+      // qui y passe ne la quitte pas.
+      onPointerEnter={() => setPointerIn(true)}
+      onPointerLeave={() => {
+        setPointerIn(false);
+        setMine(NO_IDS);
+      }}
+    >
       <div ref={setHead} className="mm-side-head">
         <SpaceSwitcher space={space} settingsOpen={settingsOpen} />
         {member && (
@@ -117,6 +162,17 @@ export function Sidebar({
         )}
       </div>
       {space && (
+        <ShortList
+          // Une clé à elle, comme « Récents » (R290) ; l'état replié est celui de cet espace.
+          key={`favorites:${space.id}`}
+          spaceId={space.id}
+          label="Favoris"
+          group="favorites"
+          pages={shownFavorites}
+          activeId={activeId}
+        />
+      )}
+      {space && (
         <SectionList
           // Les sections repliées sont celles de cet espace.
           key={space.id}
@@ -130,6 +186,8 @@ export function Sidebar({
           onCreate={onCreate}
           onTrash={onTrash}
           onMove={onMove}
+          favorites={favorites.pages}
+          onFavorite={favoriteFromRow}
         />
       )}
       {space && (

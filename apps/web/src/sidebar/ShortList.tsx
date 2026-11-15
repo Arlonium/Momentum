@@ -1,5 +1,5 @@
-// Une liste courte de la barre latérale : « Récents » (R255), sous les sections (R296), et
-// « Favoris » quand ils viendront. Une section repliable de liens vers des pages de l'arbre,
+// Une liste courte de la barre latérale : « Favoris » (R254), au-dessus des sections, et
+// « Récents » (R255), sous elles (R296). Une section repliable de liens vers des pages de l'arbre,
 // qui a l'allure de « Espace », « Partagé » et « Privé » : son titre la replie, et l'état est
 // gardé par espace avec le leur (`sections.ts`). Absente quand elle est vide. Ni menu, ni
 // glisser : ce sont des raccourcis, la page se range dans son arbre.
@@ -10,7 +10,8 @@
 //
 // Une page qui quitte la liste (à la corbeille, plus dans l'arbre) emporte son lien. S'il avait
 // le focus, il va au lien qui prend sa place, sinon à celui d'avant ; si la liste disparaît, au
-// premier lien ou bouton de ce qui la suit dans la barre latérale (son pied, sous « Récents »).
+// premier lien ou bouton de ce qui la suit dans la barre latérale (son pied, sous « Récents » ; le
+// titre de la première section, sous « Favoris »).
 // Seulement s'il s'est perdu : on ne le reprend pas à qui l'a posé ailleurs entre-temps.
 //
 // Rien ne bouge sous le pointeur (R298) : l'ordre montré est figé tant que le pointeur ou le
