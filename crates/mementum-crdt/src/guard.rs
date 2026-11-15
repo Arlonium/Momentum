@@ -99,6 +99,7 @@ use yrs::encoding::read::{Cursor, Read};
 use yrs::types::{TYPE_REFS_XML_ELEMENT, TYPE_REFS_XML_TEXT};
 use yrs::{ID, IdSet, MapRef, ReadTxn, StateVector, TransactionMut, XmlOut};
 
+use crate::blocknote::BLOCK_CONTAINER;
 use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
 
@@ -162,6 +163,12 @@ struct Insert {
     parent: Parent,
     /// Référence de type Yjs, pour un élément qui porte un type.
     type_ref: Option<u8>,
+    /// La balise d'un élément XML (`blockContainer`…), pour reconnaître un bloc recréé (Task
+    /// 13b, voir le module `moves`).
+    tag: Option<String>,
+    /// La valeur d'une entrée `id` posée sur un type désigné par son id (l'attribut `id` d'un
+    /// élément XML), quand c'est une seule chaîne : l'identifiant de bloc qu'il prend.
+    block_id: Option<String>,
 }
 
 /// Ce que contient une mise à jour, lu sans l'appliquer.
@@ -294,6 +301,76 @@ impl Shape {
             ));
         }
         Ok(shape)
+    }
+
+    /// Le jeu de suppressions de la mise à jour : par client, ses plages `[début, fin)`, sans
+    /// les plages vides.
+    pub(crate) fn deletions(&self) -> &[(u64, Vec<(u32, u32)>)] {
+        &self.deletions
+    }
+
+    /// Les `blockContainer` que la mise à jour insère et que la page n'a pas (`state`), avec
+    /// l'identifiant de bloc que leur donne l'attribut `id` écrit dans la même mise à jour : les
+    /// candidats d'un bloc recréé (Task 13b, module `moves`). Un élément dont l'attribut est
+    /// écrit deux fois, ou un identifiant porté par deux éléments, n'en est pas un : la
+    /// correspondance ne serait pas sûre. Rangés par identifiant de bloc.
+    pub(crate) fn inserted_blocks(&self, state: &StateVector) -> Vec<(ID, String)> {
+        let mut containers: HashMap<Id, Option<String>> = HashMap::new();
+        let mut doubtful: HashSet<Id> = HashSet::new();
+        for (s, i) in self.inserts() {
+            if i.type_ref == Some(TYPE_REFS_XML_ELEMENT)
+                && i.tag.as_deref() == Some(BLOCK_CONTAINER)
+                && s.id.1 >= state.get(&ClientID::new(s.id.0))
+            {
+                containers.insert(s.id, None);
+            }
+        }
+        if containers.is_empty() {
+            return Vec::new();
+        }
+        // Les entrées `id` de ces éléments, par l'id de leur élément Yjs : une entrée qui en
+        // écrase une autre ne nomme pas son élément (elle le tient de l'entrée écrasée, son
+        // origine), et l'élément devient douteux.
+        let mut entries: HashMap<Id, Id> = HashMap::new();
+        for (s, i) in self.inserts() {
+            match (&i.block_id, &i.parent) {
+                (Some(value), Parent::Id(parent)) => {
+                    if let Some(slot) = containers.get_mut(parent) {
+                        if slot.is_some() {
+                            doubtful.insert(*parent);
+                        }
+                        *slot = Some(value.clone());
+                        entries.insert(s.id, *parent);
+                    }
+                }
+                (_, Parent::Sibling(origin)) => {
+                    if let Some(parent) = entries.get(origin).copied() {
+                        doubtful.insert(parent);
+                        entries.insert((s.id.0, s.id.1 + s.len - 1), parent);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut by_value: HashMap<&str, Vec<Id>> = HashMap::new();
+        for (id, value) in &containers {
+            if let Some(value) = value
+                && !value.is_empty()
+                && !doubtful.contains(id)
+            {
+                by_value.entry(value.as_str()).or_default().push(*id);
+            }
+        }
+        let mut found: Vec<(ID, String)> = by_value
+            .into_iter()
+            .filter(|(_, ids)| ids.len() == 1)
+            .map(|(value, ids)| {
+                let (client, clock) = ids[0];
+                (ID::new(ClientID::new(client), clock), value.to_string())
+            })
+            .collect();
+        found.sort_by(|a, b| a.1.cmp(&b.1));
+        found
     }
 
     /// Vrai si la mise à jour insère des éléments XML (un bloc, un nœud de
@@ -562,6 +639,8 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
             let right = (info & HAS_RIGHT_ORIGIN != 0)
                 .then(|| read_id(c))
                 .transpose()?;
+            // Une entrée `id` posée sur un type désigné par son id : l'attribut `id` d'un élément.
+            let mut id_entry = false;
             let parent = if cant_copy_parent {
                 let named = c.read_var::<u32>()? == 1;
                 if named {
@@ -574,21 +653,26 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                 } else {
                     let p = read_id(c)?;
                     if info & HAS_PARENT_SUB != 0 {
-                        c.read_string()?;
+                        id_entry = c.read_string()? == "id";
                     }
                     Parent::Id(p)
                 }
             } else {
                 Parent::Sibling(origin.or(right).ok_or(Error::UnexpectedValue)?)
             };
-            let (len, type_ref) = read_content(c, info)?;
-            if len == 0 {
+            let content = read_content(c, info, id_entry)?;
+            if content.len == 0 {
                 return Ok(None);
             }
             Ok(Some(Struct {
                 id,
-                len,
-                kind: Kind::Insert(Insert { parent, type_ref }),
+                len: content.len,
+                kind: Kind::Insert(Insert {
+                    parent,
+                    type_ref: content.type_ref,
+                    tag: content.tag,
+                    block_id: content.string,
+                }),
             }))
         }
     }
@@ -643,12 +727,35 @@ fn read_id(c: &mut Cursor) -> Result<Id, yrs::encoding::read::Error> {
     Ok((client, c.read_var()?))
 }
 
+/// Ce que [`read_content`] retient d'un contenu.
+struct Content {
+    /// Longueur Yjs.
+    len: u32,
+    /// Pour un type, sa référence.
+    type_ref: Option<u8>,
+    /// Pour un élément XML, sa balise.
+    tag: Option<String>,
+    /// Pour un contenu `Any` d'une seule chaîne, quand on l'a demandée.
+    string: Option<String>,
+}
+
 /// Contenu d'un élément, lu comme `ItemContent::decode` de yrs : sa longueur
-/// Yjs et, pour un type, sa référence.
-fn read_content(c: &mut Cursor, info: u8) -> Result<(u32, Option<u8>), yrs::encoding::read::Error> {
+/// Yjs et, pour un type, sa référence (et sa balise pour un élément XML). Avec
+/// `want_string`, un contenu `Any` fait d'une seule chaîne est rendu aussi.
+fn read_content(
+    c: &mut Cursor,
+    info: u8,
+    want_string: bool,
+) -> Result<Content, yrs::encoding::read::Error> {
     use yrs::encoding::read::Error;
-    Ok(match info & 0b1111 {
-        BLOCK_ITEM_DELETED_REF_NUMBER => (c.read_var()?, None),
+    let mut content = Content {
+        len: 0,
+        type_ref: None,
+        tag: None,
+        string: None,
+    };
+    content.len = match info & 0b1111 {
+        BLOCK_ITEM_DELETED_REF_NUMBER => c.read_var()?,
         BLOCK_ITEM_JSON_REF_NUMBER => {
             // yrs lit `len + 1` chaînes (et aucune si `len` dépasse i32).
             let remaining = c.read_var::<u32>()? as i32;
@@ -660,47 +767,56 @@ fn read_content(c: &mut Cursor, info: u8) -> Result<(u32, Option<u8>), yrs::enco
             for _ in 0..count {
                 c.read_string()?;
             }
-            (count, None)
+            count
         }
         BLOCK_ITEM_BINARY_REF_NUMBER => {
             c.read_buf()?;
-            (1, None)
+            1
         }
-        BLOCK_ITEM_STRING_REF_NUMBER => (c.read_string()?.encode_utf16().count() as u32, None),
+        BLOCK_ITEM_STRING_REF_NUMBER => c.read_string()?.encode_utf16().count() as u32,
         BLOCK_ITEM_EMBED_REF_NUMBER => {
             c.read_string()?;
-            (1, None)
+            1
         }
         BLOCK_ITEM_FORMAT_REF_NUMBER => {
             c.read_string()?;
             c.read_string()?;
-            (1, None)
+            1
         }
         BLOCK_ITEM_TYPE_REF_NUMBER => {
             let type_ref = c.read_u8()?;
             match type_ref {
                 TYPE_REFS_XML_ELEMENT => {
-                    c.read_string()?;
+                    content.tag = Some(c.read_string()?.to_string());
                 }
                 0 | 1 | 2 | 4 | 5 | 6 | 9 | 15 => {}
                 _ => return Err(Error::UnexpectedValue),
             }
-            (1, Some(type_ref))
+            content.type_ref = Some(type_ref);
+            1
         }
         BLOCK_ITEM_ANY_REF_NUMBER => {
             let len: u32 = c.read_var()?;
-            for _ in 0..len {
-                skip_any(c)?;
+            // Une seule chaîne (marque `119` de lib0), quand on la demande : la valeur d'un
+            // attribut `id`. Sinon, comme yrs, chaque valeur est sautée.
+            if want_string && len == 1 && c.buf.get(c.next) == Some(&119) {
+                c.read_u8()?;
+                content.string = Some(c.read_string()?.to_string());
+            } else {
+                for _ in 0..len {
+                    skip_any(c)?;
+                }
             }
-            (len, None)
+            len
         }
         BLOCK_ITEM_DOC_REF_NUMBER => {
             c.read_string()?;
             skip_any(c)?;
-            (1, None)
+            1
         }
         _ => return Err(Error::UnexpectedValue),
-    })
+    };
+    Ok(content)
 }
 
 /// Saute une valeur `Any` (encodage lib0) sans récursion.

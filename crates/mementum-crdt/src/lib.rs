@@ -13,6 +13,7 @@ mod edit;
 mod foreign;
 mod guard;
 mod kept_ids;
+mod moves;
 mod page;
 mod revision;
 mod structure;
@@ -22,7 +23,7 @@ use std::fmt;
 
 pub use cost::{Cause, ListKind, WriteCost, write_cost};
 pub use guard::MAX_YJS_DEPTH;
-pub use page::{Awaited, PageDoc};
+pub use page::{Applied, Awaited, PageDoc};
 
 /// Nom du fragment XML partagé avec BlockNote.
 pub const FRAGMENT: &str = "document-store";

@@ -72,7 +72,10 @@ fn blocknote_state_is_returned_with_the_same_tree() {
         ("non-default", NON_DEFAULT_YJS),
     ] {
         let page = PageDoc::from_updates([state]).expect("fixture lisible");
-        let read = page.apply_client_update(state).expect("un état déjà connu");
+        let read = page
+            .apply_client_update(state)
+            .expect("un état déjà connu")
+            .read;
         let theirs = dump(state, &everything);
         assert!(theirs.len() > 50, "{what} : fixture lue en entier");
         assert_eq!(dump(&read, &everything), theirs, "{what}");

@@ -380,6 +380,8 @@ fn shape_of(entries: &[Entry], deleted: &[Deleted]) -> Shape {
                         0 => Kind::Insert(Insert {
                             parent: Parent::Named(FRAGMENT.to_string(), false),
                             type_ref: None,
+                            tag: None,
+                            block_id: None,
                         }),
                         1 => Kind::Gc,
                         _ => Kind::Skip,
@@ -513,4 +515,45 @@ fn pending_lacks_only_what_is_new() {
     assert!(!before.lacks(Some(&set(&[(1, 0, 10)]))), "la même");
     assert!(before.lacks(Some(&set(&[(1, 8, 4)]))), "plus loin");
     assert!(before.lacks(Some(&set(&[(2, 0, 1)]))), "un autre client");
+}
+
+/// Task 13b : les `blockContainer` neufs dont l'attribut `id` est écrit une fois, dans la même
+/// mise à jour, et porté par eux seuls. Un id porté par deux éléments, un attribut écrit deux
+/// fois, un élément qui n'est pas un `blockContainer` ou que la page a déjà n'en sont pas.
+#[test]
+fn inserted_blocks_are_new_containers_with_one_sure_id() {
+    use yrs::{Doc, Transact, Xml, XmlElementPrelim, XmlFragment};
+    let doc = Doc::new();
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let update = {
+        let mut txn = doc.transact_mut();
+        let root = fragment.insert(&mut txn, 0, XmlElementPrelim::empty("blockGroup"));
+        let container = |txn: &mut yrs::TransactionMut, ids: &[&str]| {
+            let e = root.push_back(txn, XmlElementPrelim::empty("blockContainer"));
+            for id in ids {
+                e.insert_attribute(txn, "id", *id);
+            }
+            e
+        };
+        let a = container(&mut txn, &["a"]);
+        container(&mut txn, &["b"]);
+        container(&mut txn, &["b"]);
+        container(&mut txn, &["c", "c2"]);
+        container(&mut txn, &["d", "d2", "d3"]);
+        let paragraph = a.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        paragraph.insert_attribute(&mut txn, "id", "p");
+        txn.encode_update_v1()
+    };
+    let shape = Shape::read(&update).unwrap();
+    let found: Vec<String> = shape
+        .inserted_blocks(&yrs::StateVector::default())
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect();
+    assert_eq!(found, vec!["a".to_string()]);
+    let known = doc.transact().state_vector();
+    assert!(
+        shape.inserted_blocks(&known).is_empty(),
+        "déjà dans la page"
+    );
 }

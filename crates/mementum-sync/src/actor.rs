@@ -9,9 +9,10 @@
 //! entre deux commandes couvre exactement les mises à jour écrites jusqu'à
 //! son `seq`.
 //!
-//! La mise à jour d'un client et le correctif de dédoublonnage qui la suit
-//! sont écrits ensemble, tous deux ou aucun, au nom du compte de la
-//! connexion (report M3 du lot 1).
+//! La mise à jour d'un client, le report d'un bloc qu'elle recrée (Task 13b,
+//! `PageDoc::apply_client_update`) et le correctif de dédoublonnage qui la
+//! suit sont écrits ensemble, tous ou aucun, au nom du compte de la connexion
+//! (report M3 du lot 1).
 //!
 //! La mise à jour d'un client qui laisserait un trou dans les horloges de
 //! son client, ou qui supprimerait des horloges que la page n'a pas encore,
@@ -32,7 +33,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
-use mementum_crdt::{Awaited, PageDoc};
+use mementum_crdt::{Applied, Awaited, PageDoc};
 use mementum_md::Block;
 use mementum_store::{DocState, Store, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
@@ -1085,9 +1086,9 @@ impl Actor {
         Some((held.update, c.actor))
     }
 
-    /// Mise à jour d'un client : appliquer, dédoublonner, écrire au nom de
-    /// `actor` (le compte de la connexion), puis diffuser. `false` : la
-    /// connexion est à fermer.
+    /// Mise à jour d'un client : appliquer (avec le report d'un bloc recréé,
+    /// Task 13b), dédoublonner, écrire au nom de `actor` (le compte de la
+    /// connexion), puis diffuser. `false` : la connexion est à fermer.
     ///
     /// Ruling R130 : ce qui est écrit et diffusé est la mise à jour telle que
     /// la page l'a lue, réencodée, jamais les octets reçus. Ce que les clients
@@ -1107,8 +1108,8 @@ impl Actor {
         let changes = self.watch.changes();
         // Ce qui vient d'un client ne touche pas aux métadonnées de la page
         // (report M7 du lot 1) ; ce que `load` relit du store, si.
-        let read = match self.page.apply_client_update(update) {
-            Ok(read) => read,
+        let Applied { read, carried } = match self.page.apply_client_update(update) {
+            Ok(applied) => applied,
             Err(error) => {
                 // Rulings R17 et R22 : ni écrite ni diffusée ; le document,
                 // peut-être entamé (yrs garde en attente une mise à jour à
@@ -1133,21 +1134,25 @@ impl Actor {
         if !self.watch.changed_since(changes) {
             return Ok(true);
         }
-        // La mise à jour et son correctif en une écriture, tous deux ou aucun
-        // (report M3 du lot 1) : sans le correctif, le store garderait le
-        // doublon, que le rechargement servirait.
-        let written = match &fix {
-            Some(fix) => self.persist(&[&read, fix], actor).await,
-            None => self.persist(&[&read], actor).await,
-        };
-        if let Err(error) = written {
+        // La mise à jour, son report et son correctif en une écriture, tous ou aucun (report M3
+        // du lot 1, Task 13b) : sans le correctif, le store garderait le doublon, que le
+        // rechargement servirait ; sans le report, un rechargement perdrait ce qu'il a repris
+        // de l'original.
+        let mut updates: Vec<&[u8]> = vec![&read];
+        updates.extend(carried.as_deref());
+        updates.extend(fix.as_deref());
+        if let Err(error) = self.persist(&updates, actor).await {
             self.store_failed(&error).await?;
             return Ok(false);
         }
         self.wrote(changes, actor);
         self.broadcast(Some(conn), protocol::update(&read));
+        // Le report et le correctif, à toutes les connexions, l'expéditeur compris : il n'a ni
+        // l'un ni l'autre.
+        if let Some(carried) = carried {
+            self.broadcast(None, protocol::update(&carried));
+        }
         if let Some(fix) = fix {
-            // À toutes les connexions, l'expéditeur compris.
             self.broadcast(None, protocol::update(&fix));
         }
         self.compact_if_due().await;

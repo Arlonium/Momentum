@@ -138,7 +138,10 @@ fn client_update_is_returned_as_the_page_read_it() {
 
     let forged = deletion(client as u64, clock as u64 + (1 << 32), len as u64);
     assert_eq!(read_deletion(&forged), (client, clock + (1 << 32), len));
-    let read = page.apply_client_update(&forged).expect("lisible par yrs");
+    let read = page
+        .apply_client_update(&forged)
+        .expect("lisible par yrs")
+        .read;
     assert_eq!(
         block_text(&page.read_blocks()[0]),
         "",
@@ -176,7 +179,8 @@ Un **gras**, un [lien](https://exemple.fr).
     for update in [written, edited] {
         let read = page
             .apply_client_update(&update)
-            .expect("mise à jour honnête");
+            .expect("mise à jour honnête")
+            .read;
         mirror
             .apply_update(&read)
             .expect("réencodée, elle se relit");

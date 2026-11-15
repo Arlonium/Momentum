@@ -16,6 +16,7 @@ use yrs::{
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
 use crate::guard::{Pending, REPEATED_CLIENT, Shape, missing, touched};
 use crate::kept_ids::keep_ids;
+use crate::moves::{self, Recreated};
 use crate::structure::{Slot, check_blocks};
 use crate::{CrdtError, FRAGMENT, META};
 
@@ -29,6 +30,19 @@ const SCHEMA_KEY: &str = "schemaVersion";
 /// réessayer sans la relire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Awaited(Vec<(u64, u32)>);
+
+/// Ce que [`PageDoc::apply_client_update`] a fait d'une mise à jour d'un client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Applied {
+    /// La mise à jour telle que la page l'a lue, réencodée (v1) : c'est elle qu'on écrit au
+    /// journal et qu'on relaie aux autres clients, jamais les octets reçus (Ruling R130).
+    pub read: Vec<u8>,
+    /// L'écriture du serveur qui reporte sur les blocs que la mise à jour recrée ce que son
+    /// auteur n'en avait pas vu (Task 13b, module `moves`), déjà appliquée à la page : à écrire
+    /// au journal avec `read`, dans la même écriture, puis à diffuser à toutes les connexions,
+    /// l'expéditeur compris. `None` s'il n'y a rien à reporter.
+    pub carried: Option<Vec<u8>>,
+}
 
 /// Document Yjs d'une page, au format de BlockNote.
 ///
@@ -153,13 +167,27 @@ impl PageDoc {
     ///
     /// À ne pas employer pour ce qui est relu du stockage : la mise à jour du
     /// serveur qui crée la page pose `schemaVersion`, et y serait refusée.
-    pub fn apply_client_update(&self, update: &[u8]) -> Result<Vec<u8>, CrdtError> {
+    ///
+    /// Une mise à jour qui recrée un bloc (elle insère un `blockContainer` à l'`id` d'un bloc
+    /// vivant, dont elle supprime l'élément : un déplacement, Ruling R220) fait reporter sur la
+    /// copie ce que son auteur n'avait pas vu de l'original (Task 13b, Ruling R221, module
+    /// `moves`) : relevé avant l'application, écrit après, dans une transaction du serveur, et
+    /// rendu dans [`Applied::carried`]. Rien de cela ne s'exécute pour une mise à jour qui
+    /// n'insère aucun élément : le chemin d'une frappe ne change pas.
+    pub fn apply_client_update(&self, update: &[u8]) -> Result<Applied, CrdtError> {
         let mut txn = self.doc.transact_mut();
         let (shape, decoded) = self.read(&txn, update, true)?;
         // Ce que la page gardait en attente de suppression avant (d'ordinaire rien).
         let pending_before = Pending::of(txn.store().pending_ds());
         // Avant l'application, qui consomme la mise à jour lue.
         let read = decoded.encode_v1();
+        // Avant l'application, qui supprime l'original de chaque bloc recréé et tout ce qu'il
+        // porte.
+        let recreated = if shape.inserts_elements() {
+            moves::capture(&mut txn, &self.fragment, &shape)
+        } else {
+            Vec::new()
+        };
         self.integrate(&mut txn, &shape, decoded)?;
         // yrs ne dresse la liste des types changés qu'à la validation.
         txn.commit();
@@ -176,7 +204,21 @@ impl PageDoc {
                 "la mise à jour laisserait une suppression en attente".to_string(),
             ));
         }
-        Ok(read)
+        drop(txn);
+        let carried = if recreated.is_empty() {
+            None
+        } else {
+            self.carry(&recreated)
+        };
+        Ok(Applied { read, carried })
+    }
+
+    /// Écrit dans les copies ce que [`moves::capture`] a relevé, et rend la mise à jour (v1) de
+    /// cette écriture, s'il y a eu quelque chose à écrire.
+    fn carry(&self, recreated: &[Recreated]) -> Option<Vec<u8>> {
+        let mut txn = self.doc.transact_mut();
+        moves::carry(&mut txn, recreated);
+        (!txn.insert_set().is_empty()).then(|| txn.encode_update_v1())
     }
 
     /// Vrai si la mise à jour (v1) est refusée parce qu'un client y paraît deux fois (Ruling
