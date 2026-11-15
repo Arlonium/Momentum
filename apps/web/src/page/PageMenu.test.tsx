@@ -274,3 +274,114 @@ test("an_open_menu_that_loses_its_entries_gives_the_focus_to_the_page", async ()
   expect(menu()).toBeNull();
   expect(document.activeElement).toBe(title);
 });
+
+// Favoris (R254) : « Ajouter aux favoris » ou « Retirer des favoris », en tête du menu, à tout
+// niveau, hors corbeille. Sans favori donné par la page, le menu reste celui de l'historique.
+
+type Favorite = { favorite: boolean; onFavorite: () => void };
+
+/** Rend le menu de la page `p` au niveau `level`, avec son favori. */
+const renderWithFavorite = (
+  level: "read" | "comment" | "edit" | "full",
+  { favorite, onFavorite }: Favorite,
+  { trashed = false, readOnly = false, focusFallback }: { trashed?: boolean; readOnly?: boolean; focusFallback?: () => void } = {},
+) =>
+  act(async () =>
+    root.render(
+      <PageMenu
+        node={page("p", { level, trashedAt: trashed ? 1 : null })}
+        session={null}
+        readOnly={readOnly}
+        selfId="alice"
+        favorite={favorite}
+        onFavorite={onFavorite}
+        focusFallback={focusFallback}
+        onRefused={() => {}}
+      />,
+    ),
+  );
+
+/** Les entrées du menu ouvert. */
+const entries = () =>
+  [...(menu()?.querySelectorAll('[role="menuitem"]') ?? [])].map((item) => item.textContent);
+
+test("favorite_is_offered_at_every_level_out_of_the_trash", async () => {
+  const shown = async (
+    level: "read" | "comment" | "edit" | "full",
+    options: { trashed?: boolean; readOnly?: boolean } = {},
+  ) => {
+    await renderWithFavorite(level, { favorite: false, onFavorite: () => {} }, options);
+    if (menuButtonIfAny() === null) return [];
+    await click(menuButton());
+    const shownEntries = entries();
+    await click(menuButton());
+    return shownEntries;
+  };
+  // Dès qu'on voit la page : le lecteur a donc un menu, avec le seul favori.
+  expect(await shown("read")).toEqual(["Ajouter aux favoris"]);
+  expect(await shown("comment")).toEqual(["Ajouter aux favoris"]);
+  expect(await shown("edit")).toEqual(["Ajouter aux favoris", "Historique"]);
+  expect(await shown("full")).toEqual(["Ajouter aux favoris", "Historique"]);
+  // Un favori ne s'écrit pas dans le document : il est offert depuis un onglet d'un autre schéma.
+  expect(await shown("read", { readOnly: true })).toEqual(["Ajouter aux favoris"]);
+  // À la corbeille, une page n'est pas listée dans les favoris : on ne l'y ajoute pas, et le
+  // lecteur n'a plus de menu.
+  expect(await shown("edit", { trashed: true })).toEqual(["Historique"]);
+  expect(await shown("read", { trashed: true })).toEqual([]);
+});
+
+test("favorite_entry_says_what_it_does_and_gives_the_focus_back_to_the_menu_button", async () => {
+  const onFavorite = vi.fn();
+  await renderWithFavorite("read", { favorite: false, onFavorite });
+  await click(menuButton());
+  await until(
+    host,
+    () => document.activeElement?.textContent === "Ajouter aux favoris",
+    "le focus sur le favori",
+  );
+  await click(menu()!.querySelector('[role="menuitem"]')!);
+  expect(onFavorite).toHaveBeenCalledTimes(1);
+  expect(menu()).toBeNull();
+  expect(document.activeElement).toBe(menuButton());
+  // Dans les favoris : l'entrée les en retire.
+  await renderWithFavorite("read", { favorite: true, onFavorite });
+  await click(menuButton());
+  expect(entries()).toEqual(["Retirer des favoris"]);
+  await click(menu()!.querySelector('[role="menuitem"]')!);
+  expect(onFavorite).toHaveBeenCalledTimes(2);
+});
+
+test("the_favorite_changing_while_the_menu_is_open_keeps_it_open_and_focused", async () => {
+  // Une relecture des favoris (un autre onglet du compte) change l'entrée sous les yeux : le menu
+  // reste ouvert, et le focus sur elle.
+  await renderWithFavorite("edit", { favorite: false, onFavorite: () => {} });
+  await click(menuButton());
+  await until(
+    host,
+    () => document.activeElement?.textContent === "Ajouter aux favoris",
+    "le focus sur le favori",
+  );
+  await renderWithFavorite("edit", { favorite: true, onFavorite: () => {} });
+  expect(entries()).toEqual(["Retirer des favoris", "Historique"]);
+  expect(document.activeElement?.textContent).toBe("Retirer des favoris");
+});
+
+test("an_open_menu_that_loses_an_entry_closes_and_gives_the_focus_to_its_button", async () => {
+  // Le niveau tombe sous « Peut modifier », menu ouvert, le focus sur « Historique » : l'entrée
+  // part, le menu se ferme, et le focus revient à son bouton, toujours là pour le favori.
+  const title = document.createElement("textarea");
+  document.body.append(title);
+  const favorite = { favorite: false, onFavorite: () => {} };
+  await renderWithFavorite("edit", favorite, { focusFallback: () => title.focus() });
+  await click(menuButton());
+  await until(host, () => menu() !== null, "le menu");
+  (menu()!.querySelectorAll<HTMLElement>('[role="menuitem"]')[1]).focus();
+  expect(document.activeElement?.textContent).toBe("Historique");
+  await renderWithFavorite("read", favorite, { focusFallback: () => title.focus() });
+  expect(menu()).toBeNull();
+  expect(menuButton().getAttribute("aria-expanded")).toBe("false");
+  expect(document.activeElement).toBe(menuButton());
+  // Le niveau revient : le menu ne se rouvre pas de lui-même.
+  await renderWithFavorite("edit", favorite, { focusFallback: () => title.focus() });
+  expect(menu()).toBeNull();
+});

@@ -232,3 +232,17 @@ export const HistoryIcon = () => (
     <path d="M12 8v4l3 2" />
   </Icon>
 );
+
+// Favoris (R254) : l'étoile de « Ajouter aux favoris », barrée pour « Retirer des favoris ».
+export const StarIcon = () => (
+  <Icon>
+    <path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
+  </Icon>
+);
+
+export const StarOffIcon = () => (
+  <Icon>
+    <path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
+    <path d="M4 4l16 16" />
+  </Icon>
+);

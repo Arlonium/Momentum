@@ -1,14 +1,19 @@
 // Le menu « … » de la barre du haut d'une page : les actions sur la page qui n'ont pas de bouton
-// à elles. Pour l'instant « Historique » (R135), à partir de « Peut modifier » : le serveur
-// l'exige, pour qu'un lecteur ne lise pas ce qui a été effacé avant qu'on partage la page avec
-// lui (S5). À la corbeille aussi, et depuis un onglet d'un autre schéma que le serveur (R35) ;
-// c'est la fenêtre qui décide si l'on peut restaurer. Sans entrée pour le niveau de la personne,
-// pas de bouton. D'autres entrées s'y ajouteront.
+// à elles. D'abord « Ajouter aux favoris » ou « Retirer des favoris » (R254), à tout niveau (voir
+// la page suffit), hors corbeille (une page à la corbeille n'est pas listée dans les favoris), et
+// depuis un onglet d'un autre schéma que le serveur (R35 : un favori ne s'écrit pas dans le
+// document) ; la page le donne (`favorite`, `onFavorite`). Puis « Historique » (R135), à partir de
+// « Peut modifier » : le serveur l'exige, pour qu'un lecteur ne lise pas ce qui a été effacé avant
+// qu'on partage la page avec lui (S5). À la corbeille aussi, et depuis un onglet d'un autre
+// schéma ; c'est la fenêtre qui décide si l'on peut restaurer. Sans entrée pour le niveau de la
+// personne, pas de bouton.
 //
 // Le niveau peut tomber pendant que la fenêtre est ouverte : elle reste ouverte, avec le refus du
 // serveur tel quel, jusqu'à ce qu'on la ferme ; le focus revient alors à la page
-// (`focusFallback`) si le bouton du menu n'est plus là. Un menu ouvert qui perd ses entrées se
-// ferme, et rend lui aussi le focus à la page.
+// (`focusFallback`) si le bouton du menu n'est plus là. Un menu ouvert qui perd une entrée se
+// ferme (une entrée partie sous le focus le laisserait sur `body`), et rend le focus à son bouton,
+// ou à la page s'il n'est plus là. Une entrée qui change de libellé (le favori relu) ne le ferme
+// pas : elle garde sa place et le focus.
 //
 // Au clavier, c'est le menu des lignes de l'arbre (`RowMenu`) : il prend le focus sur sa première
 // entrée, les flèches passent de l'une à l'autre, Échap et Tab le ferment. La fenêtre
@@ -28,7 +33,7 @@ import {
   type ReactNode,
 } from "react";
 import type { HistorySession } from "../history/HistoryDialog";
-import { HistoryIcon, MoreIcon } from "../icons";
+import { HistoryIcon, MoreIcon, StarIcon, StarOffIcon } from "../icons";
 import { canEdit } from "../share/levels";
 import { RowMenu, type MenuAction } from "../sidebar/RowMenu";
 
@@ -47,6 +52,10 @@ type Props = {
   session: HistorySession | null;
   /** L'onglet n'a plus le schéma du serveur (R35) : rien ne s'écrit d'ici. */
   readOnly: boolean;
+  /** La page est dans les favoris du compte ; sans `onFavorite`, le favori n'est pas proposé. */
+  favorite?: boolean;
+  /** Pose ou retire le favori de la page (R254). */
+  onFavorite?: () => void;
   /** Le compte de la session. */
   selfId: string;
   /** Tenue quand le compte revient, après une session perdue (`useAfterLogin`). */
@@ -65,6 +74,8 @@ export function PageMenu({
   node,
   session,
   readOnly,
+  favorite = false,
+  onFavorite,
   selfId,
   afterLogin,
   focusFallback,
@@ -95,25 +106,21 @@ export function PageMenu({
     else focusFallback?.();
   }, [history, focusFallback]);
 
-  /** Le menu ouvert vient de se fermer de lui-même : ses entrées et son bouton sont partis. */
+  /** Le menu ouvert vient de se fermer de lui-même : une de ses entrées est partie. */
   const [dropped, setDropped] = useState(false);
   const actions: MenuAction[] = [];
-  const historyOffered = canEdit(node.level);
-  // Le niveau est tombé, menu ouvert : il n'a plus rien à proposer, il se ferme.
-  if (!historyOffered && anchor !== null) {
-    setAnchor(null);
-    setDropped(true);
-  }
-  // L'entrée qui avait le focus est partie avec le menu, et le bouton avec elle : le focus va à
-  // la page plutôt que de tomber sur `body`.
-  useEffect(() => {
-    if (!dropped) return;
-    setDropped(false);
-    const active = document.activeElement;
-    if (active === null || active === document.body || !active.isConnected) focusFallback?.();
-  }, [dropped, focusFallback]);
-  if (historyOffered) {
+  if (onFavorite !== undefined && node.trashedAt === null) {
     actions.push({
+      // Une clé à elle : le libellé change quand le favori est relu, l'entrée garde sa place.
+      key: "favorite",
+      label: favorite ? "Retirer des favoris" : "Ajouter aux favoris",
+      icon: favorite ? <StarOffIcon /> : <StarIcon />,
+      onSelect: onFavorite,
+    });
+  }
+  if (canEdit(node.level)) {
+    actions.push({
+      key: "history",
       label: "Historique",
       icon: <HistoryIcon />,
       onSelect: () => {
@@ -122,6 +129,23 @@ export function PageMenu({
       },
     });
   }
+  /** Les entrées proposées, par leur clé : le menu ouvert se ferme quand l'une d'elles part. */
+  const entries = actions.map((action) => action.key).join(" ");
+  const [opened, setOpened] = useState(entries);
+  if (anchor !== null && entries !== opened) {
+    setAnchor(null);
+    setDropped(true);
+  }
+  // L'entrée qui avait le focus est partie avec le menu : il revient à son bouton, ou à la page si
+  // le bouton est parti aussi, plutôt que de tomber sur `body`.
+  useEffect(() => {
+    if (!dropped) return;
+    setDropped(false);
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active.isConnected) return;
+    if (buttonRef.current?.isConnected) buttonRef.current.focus();
+    else focusFallback?.();
+  }, [dropped, focusFallback]);
 
   return (
     <>
@@ -145,7 +169,8 @@ export function PageMenu({
             }
             // Le code de la fenêtre est demandé tout de suite, pour être là au clic. Un échec se
             // redira au clic, dans la fenêtre d'erreur.
-            void loadHistory().catch(() => {});
+            if (canEdit(node.level)) void loadHistory().catch(() => {});
+            setOpened(entries);
             setAnchor(event.currentTarget);
           }}
         >

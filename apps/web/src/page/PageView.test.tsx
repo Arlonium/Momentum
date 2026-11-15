@@ -112,13 +112,20 @@ const account = (): Me => ({
  * Rend la page `node` sous le compte `me` (un autre objet : le compte revenu), avec ses pages
  * parentes `ancestors`.
  */
-async function show(node: PageNode, me: Me = account(), ancestors: PageNode[] = []) {
+async function show(
+  node: PageNode,
+  me: Me = account(),
+  ancestors: PageNode[] = [],
+  favorite?: { favorite: boolean; onFavorite: (id: string) => void },
+) {
   await act(async () =>
     root.render(
       <SessionContext.Provider value={{ me, refresh: async () => {} }}>
         <PageView
           node={node}
           ancestors={ancestors}
+          favorite={favorite?.favorite}
+          onFavorite={favorite?.onFavorite}
           readOnly={false}
           checkSchema={checkSchema}
           autoFocusTitle={false}
@@ -285,4 +292,20 @@ test("page_view_hides_the_comment_fields_once_a_commenter_learns_a_new_schema", 
   expect(verdict).toBe(true);
   expect(host.querySelector('textarea[aria-label="Commenter la page"]')).toBeNull();
   expect(host.querySelectorAll("textarea.mm-composer-field")).toHaveLength(0);
+});
+
+test("page_view_offers_the_favorite_of_its_page_in_its_menu", async () => {
+  // Le favori de la page, que donne `App` (R254) : en tête du menu « … », à tout niveau, et il
+  // nomme la page ouverte.
+  const onFavorite = vi.fn();
+  const node = page("x", { level: "read" });
+  await show(node, account(), [], { favorite: false, onFavorite });
+  await click(host.querySelector('button[aria-label="Actions de la page"]')!);
+  const items = () => [...document.querySelectorAll('[role="menuitem"]')];
+  expect(items().map((item) => item.textContent)).toEqual(["Ajouter aux favoris"]);
+  await click(items()[0]);
+  expect(onFavorite.mock.calls).toEqual([["x"]]);
+  await show(node, account(), [], { favorite: true, onFavorite });
+  await click(host.querySelector('button[aria-label="Actions de la page"]')!);
+  expect(items().map((item) => item.textContent)).toEqual(["Retirer des favoris"]);
 });
