@@ -353,6 +353,76 @@ async fn restore_and_cut_with_a_full_history_of_10000_block_page() {
     println!("MESURE restauration d'une page de {BLOCKS} blocs (acteur occupé) : {restores:?}");
 }
 
+/// Ce que coûte, dans le document d'une page de `BLOCKS` blocs, la reconnaissance d'un bloc
+/// recréé et son report (Task 13b) : `apply_client_update` puis `dedupe_blocks`, comme l'acteur.
+/// Quatre mises à jour faites depuis le même état, chacune reçue `LOADS` fois par une page
+/// fraîche : une frappe (aucun élément inséré : rien ne s'exécute de neuf) ; une Entrée au milieu
+/// d'un bloc (un bloc neuf, sans original : la recherche des originaux tourne et ne trouve rien) ;
+/// le premier bloc déplacé tout en bas, seul (rien à reporter) ; le même déplacement, arrivé après
+/// une frappe dans ce bloc (reportée). Mesuré et consigné au registre ; le budget du §5.10 qui
+/// porte sur une frappe est mesuré par `keystroke_that_cuts_a_version_of_10000_block_page_under_150ms`.
+#[tokio::test]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn move_of_a_block_in_10000_block_page() {
+    let _alone = alone().await;
+    let (base, _) = mementum_crdt::PageDoc::new_page();
+    base.write_blocks(&parse(&page_mmd()).unwrap()).unwrap();
+    let state = base.encode_state();
+    let ids: Vec<String> = base.read_blocks().into_iter().map(|b| b.id).collect();
+    let (first, middle, last) = (&ids[0], &ids[BLOCKS / 2], &ids[BLOCKS - 1]);
+    let from_state = || mementum_crdt::PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = from_state().replace_text(first, 0, 0, "de Tom ").unwrap();
+    let entered = {
+        let doc = from_state();
+        doc.replace_text(middle, 10, 50, "").unwrap();
+        let tail = parse("de la page de mesure, avec un peu de texte ordinaire.\n").unwrap();
+        doc.insert_blocks_after(Some(middle), &tail).unwrap();
+        doc.encode_diff(&from_state().state_vector()).unwrap()
+    };
+    let moved = from_state().move_block(first, Some(last)).unwrap();
+
+    let mut lines = Vec::new();
+    for (what, before, update) in [
+        ("frappe", None, &typed),
+        ("Entrée au milieu d'un bloc", None, &entered),
+        ("déplacement, rien à reporter", None, &moved),
+        (
+            "déplacement arrivé après une frappe, reportée",
+            Some(&typed),
+            &moved,
+        ),
+    ] {
+        let mut times = Vec::with_capacity(LOADS);
+        let mut carried = 0;
+        for _ in 0..LOADS {
+            let page = from_state();
+            if let Some(before) = before {
+                page.apply_client_update(before).unwrap();
+                page.dedupe_blocks();
+            }
+            let start = Instant::now();
+            let applied = page.apply_client_update(update).unwrap();
+            page.dedupe_blocks();
+            times.push(start.elapsed());
+            carried += usize::from(applied.carried.is_some());
+        }
+        lines.push(format!(
+            "MESURE {what}, page de {BLOCKS} blocs, appliquée et dédoublonnée : p50 {:?}, \
+             p95 {:?} ({carried} reports sur {LOADS})",
+            percentile(&times, 0.5),
+            percentile(&times, 0.95)
+        ));
+        if before.is_some() {
+            assert_eq!(carried, LOADS, "{what} : la frappe est reportée");
+        } else {
+            assert_eq!(carried, 0, "{what} : rien à reporter");
+        }
+    }
+    for line in lines {
+        println!("{line}");
+    }
+}
+
 /// L'e2e `apps/web/e2e/budgets.spec.ts` attend `SERVER_IDLE_CLOSE_MS` (plus une
 /// marge) pour que le serveur ferme l'acteur des pages qu'il vient d'écrire, et
 /// les relise dans SQLite à leur ouverture. Ce test échoue, au lieu que l'e2e
