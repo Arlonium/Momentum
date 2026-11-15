@@ -7,16 +7,19 @@
 // `SessionGate`, qui demande la connexion. Les autres `401` (`invalid_credentials` : mot de
 // passe faux) ne disent rien de la session.
 //
-// Sauf un refus qui vise une session que l'onglet a remplacée depuis (Rulings R347, R348).
+// Sauf un refus qui vise une session que l'onglet a remplacée depuis (Rulings R347, R348, R460).
 // Chaque appel part daté de la génération de session de l'onglet, qui avance à chaque session
 // qu'il ouvre (connexion, inscription, changement de mot de passe : le cookie change) ou ferme
 // (déconnexion). Un appel parti avant, dont le `401` revient après, ne dit rien de la session en
-// cours : il ne demande pas la connexion, et il repart une fois, tel quel, sous la session en
-// cours, aux conditions de `judge` : jamais une route de session, jamais sous un autre compte
-// que celui sous lequel il est parti (le compte est relu juste avant), jamais s'il est parti
-// avant une déconnexion de l'onglet, ou pendant. Un `401 unauthenticated` est le premier refus du
-// serveur, avant toute lecture ou écriture : l'appel refusé n'a rien fait, et son rejeu le fait
-// une fois. Un refus reçu pendant qu'une session s'ouvre ou se ferme attend son issue.
+// cours : il ne demande pas la connexion, et il repart une fois, tel quel, écritures comprises,
+// sous la session en cours, aux conditions de `judge` : jamais une route de session, jamais pour
+// un autre compte que celui de l'application, pour qui il est parti (le compte de la session est
+// relu juste avant), jamais s'il est parti avant une déconnexion de l'onglet, ou pendant. Un `401
+// unauthenticated` est le premier refus du serveur, avant toute lecture ou écriture : l'appel
+// refusé n'a rien fait, et son rejeu le fait une fois. Un refus reçu pendant qu'une session
+// s'ouvre ou se ferme attend son issue. Ce que la page ne peut pas empêcher : un autre onglet du
+// navigateur qui se connecte sous un autre compte pendant la relecture du compte (le cookie est
+// commun) fait partir le rejeu sous ce compte (R460).
 import type {
   Accepted,
   ChangePassword,
