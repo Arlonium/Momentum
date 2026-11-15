@@ -2,11 +2,11 @@
 // « Privé » (`sections.ts`), chacune avec son titre et son arbre de pages. Un titre replie sa
 // section, comme dans Notion ; l'état est gardé par espace, dans le navigateur. Le « + » d'un
 // titre crée une page à la racine de la section (« Espace » et « Privé » seulement) ; le « + »
-// d'une ligne, une sous-page ; son « … », le menu de ses actions (`RowMenu`) : « Ajouter aux
-// favoris » ou « Retirer des favoris » (R254), pour toute page qu'on voit, puis, pour qui peut la
+// d'une ligne, une sous-page ; son « … », le menu de ses actions (`RowMenu`) : pour qui peut la
 // modifier, « Déplacer vers le haut », « Déplacer vers le bas », « Imbriquer dans la page
 // précédente », « Sortir de la page parente » (ce que la souris fait en glissant, au clavier,
-// R95), « Mettre à la corbeille ». Un menu ouvert qui perd une entrée (le niveau de sa page est
+// R95) ; pour toute page qu'on voit, « Ajouter aux favoris » ou « Retirer des favoris » (R254) ;
+// pour qui peut la modifier, « Mettre à la corbeille », en dernier (R412). Un menu ouvert qui perd une entrée (le niveau de sa page est
 // tombé) se ferme, et rend le focus à son bouton ; le favori relu change de libellé sans le
 // fermer. Une page qui quitte l'arbre (mise à la corbeille ici, ou retirée par une
 // relecture : jetée, supprimée ou plus partagée ailleurs) emporte sa ligne : si elle avait le
@@ -296,18 +296,9 @@ export function SectionList({
   }
 
   const actions: MenuAction[] = [];
-  if (menu !== null && menuNode !== undefined && onFavorite !== undefined) {
-    const { id } = menuNode;
-    const favorite = favorites?.includes(id) ?? false;
-    actions.push({
-      // Une clé à elle : le libellé change quand les favoris sont relus, l'entrée garde sa place.
-      key: "favorite",
-      label: favorite ? "Retirer des favoris" : "Ajouter aux favoris",
-      icon: favorite ? <StarOffIcon /> : <StarIcon />,
-      onSelect: () => onFavorite(id),
-    });
-  }
-  if (menu !== null && menuNode !== undefined && !readOnly && canEdit(menuNode.level)) {
+  /** Qui peut modifier la page la déplace et la jette d'ici ; le favori est à tout niveau. */
+  const editable = menuNode !== undefined && !readOnly && canEdit(menuNode.level);
+  if (menu !== null && menuNode !== undefined && editable) {
     const { id } = menuNode;
     // Au clavier, ce que la souris fait en glissant : un cran parmi ses sœurs, sous la sœur
     // qui précède, ou hors de sa page parente. Un geste refusé (niveau, section) est grisé.
@@ -326,15 +317,29 @@ export function SectionList({
         onSelect: () => drop !== null && move(id, drop),
       });
     }
-    actions.push(
-      {
-        key: "trash",
-        label: "Mettre à la corbeille",
-        icon: <TrashIcon />,
-        destructive: true,
-        onSelect: () => onTrash(id),
-      },
-    );
+  }
+  if (menu !== null && menuNode !== undefined && onFavorite !== undefined) {
+    const { id } = menuNode;
+    const favorite = favorites?.includes(id) ?? false;
+    // Après les déplacements, qui restent en tête (le premier geste au clavier, R95), avant la
+    // corbeille, qui reste la dernière (R412).
+    actions.push({
+      // Une clé à elle : le libellé change quand les favoris sont relus, l'entrée garde sa place.
+      key: "favorite",
+      label: favorite ? "Retirer des favoris" : "Ajouter aux favoris",
+      icon: favorite ? <StarOffIcon /> : <StarIcon />,
+      onSelect: () => onFavorite(id),
+    });
+  }
+  if (menu !== null && menuNode !== undefined && editable) {
+    const { id } = menuNode;
+    actions.push({
+      key: "trash",
+      label: "Mettre à la corbeille",
+      icon: <TrashIcon />,
+      destructive: true,
+      onSelect: () => onTrash(id),
+    });
   }
   // Une entrée partie, menu ouvert (le niveau de sa page est tombé) : le menu se ferme, plutôt que
   // de laisser le focus tomber sur `body` avec l'entrée qui l'avait.

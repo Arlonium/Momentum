@@ -1,5 +1,5 @@
-// Le menu « … » d'une ligne de l'arbre : le favori de la page (R254) pour toute page qu'on voit,
-// puis, pour qui peut la modifier, les déplacements et la corbeille. Un menu ouvert qui perd une
+// Le menu « … » d'une ligne de l'arbre : pour qui peut modifier la page, les déplacements, puis le
+// favori (R254), à tout niveau, puis la corbeille, en dernier (R412). Un menu ouvert qui perd une
 // entrée se ferme, et rend le focus à son bouton.
 import type { PageNode } from "@mementum/protocol";
 import { act } from "react";
@@ -86,19 +86,19 @@ async function entriesOf(title: string): Promise<string[] | null> {
   return shown;
 }
 
-const MOVES_AND_TRASH = [
+const MOVES = [
   "Déplacer vers le haut",
   "Déplacer vers le bas",
   "Imbriquer dans la page précédente",
   "Sortir de la page parente",
-  "Mettre à la corbeille",
 ];
 
 test("every_row_offers_its_favorite_and_only_editors_the_rest", async () => {
   const nodes = [page("a", { level: "full" }), page("r", { level: "read", position: "a1" })];
   await show(nodes, { favorites: [], onFavorite: () => {} });
-  // Qui modifie : le favori en tête, puis ce qu'il faisait déjà ; et le « + » d'une sous-page.
-  expect(await entriesOf("A")).toEqual(["Ajouter aux favoris", ...MOVES_AND_TRASH]);
+  // Qui modifie : les déplacements en tête (le premier geste au clavier), le favori, puis la
+  // corbeille, en dernier ; et le « + » d'une sous-page.
+  expect(await entriesOf("A")).toEqual([...MOVES, "Ajouter aux favoris", "Mettre à la corbeille"]);
   expect(addUnder("A")).not.toBeNull();
   // Qui lit : le seul favori, ni « + », ni saisie pour glisser.
   expect(await entriesOf("R")).toEqual(["Ajouter aux favoris"]);
@@ -111,7 +111,7 @@ test("every_row_offers_its_favorite_and_only_editors_the_rest", async () => {
   // Sans favori donné, la ligne d'un lecteur n'a pas de menu, comme avant.
   await show(nodes);
   expect(moreOf("R")).toBeNull();
-  expect(await entriesOf("A")).toEqual(MOVES_AND_TRASH);
+  expect(await entriesOf("A")).toEqual([...MOVES, "Mettre à la corbeille"]);
 });
 
 test("row_favorite_says_what_it_does_and_names_its_page", async () => {

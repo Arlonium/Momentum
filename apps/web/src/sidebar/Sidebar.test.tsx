@@ -124,7 +124,10 @@ test("a_favorite_set_from_a_row_shows_at_once_under_the_pointer", async () => {
   await pointer(true);
   // Par le menu de la ligne de « c » : c'est le geste de la personne, il se voit tout de suite.
   await act(async () => host.querySelector<HTMLElement>('button[aria-label="Actions de « C »"]')!.click());
-  await act(async () => document.querySelector<HTMLElement>('[role="menuitem"]')!.click());
+  const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (entry) => entry.textContent === "Ajouter aux favoris",
+  )!;
+  await act(async () => item.click());
   expect(onFavorite.mock.calls).toEqual([["c"]]);
   await show(["a", "c"], { onFavorite });
   expect(shown()).toEqual(["A", "C"]);
