@@ -1,6 +1,6 @@
 //! La lecture d'un MMD (et le rendu qu'elle refait pour vérifier la forme canonique) croît comme
-//! son entrée, en temps et en mémoire (constats critiques du tour 3 de la piste S, Ruling R380).
-//! La méthode et ce qui la garde de passer à tort sont dans `common/linear.rs`.
+//! son entrée, en temps et en mémoire (constats critiques du tour 3 de la piste S, Rulings R380
+//! et R381). La méthode et ce qui la garde de passer à tort sont dans `common/linear.rs`.
 
 #[path = "common/linear.rs"]
 mod linear;
@@ -22,6 +22,43 @@ fn forms() -> Vec<(&'static str, Build)> {
         }),
         ("liens contigus au même href, imbriqués", |n| {
             "[[**a**](v)](u)[[b](v)](u)".repeat(n) + "\n"
+        }),
+        // Constat critique de la re-relecture du tour 3 : la couleur recopiée à chaque texte lu
+        // (131 Ko : 4,5 Gio).
+        ("couleur longue sur des plages alternées", |n| {
+            format!(
+                "<span color=\"{}\">{}</span>\n",
+                "c".repeat(4 * n),
+                "a*b*".repeat(n)
+            )
+        }),
+        ("surlignage long sur des plages alternées", |n| {
+            format!(
+                "<span bg=\"{}\">{}</span>\n",
+                "c".repeat(4 * n),
+                "a*b*".repeat(n)
+            )
+        }),
+        ("balises span ouvertes sous une couleur longue", |n| {
+            format!(
+                "<span color=\"{}\">{}a\n",
+                "c".repeat(n),
+                "<span>".repeat(n)
+            )
+        }),
+        ("balises span ouvertes sous une couleur permise", |n| {
+            format!(
+                "<span color=\"{}\">{}a\n",
+                "c".repeat(mementum_md::MAX_COLOR_BYTES),
+                "<span>".repeat(n)
+            )
+        }),
+        ("plages alternées sous une couleur permise", |n| {
+            format!(
+                "<span color=\"{}\">{}</span>\n",
+                "c".repeat(mementum_md::MAX_COLOR_BYTES),
+                "a*b*".repeat(n)
+            )
         }),
         ("liens ouverts au-delà de la profondeur", |n| {
             format!("{}a{}\n", "<a href=\"u\">".repeat(n), "</a>".repeat(n))

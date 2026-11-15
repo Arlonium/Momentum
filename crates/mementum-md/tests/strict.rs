@@ -215,3 +215,29 @@ fn a_number_too_large_for_a_float_says_so() {
         "« width » : nombre trop grand",
     );
 }
+
+/// Ruling R381 : une couleur de plage s'écrit en `MAX_COLOR_BYTES` octets au plus, dans un
+/// paragraphe, une cellule, le titre d'un toggle ou un callout ; à la borne, elle se relit.
+#[test]
+fn a_color_longer_than_the_bound_is_refused() {
+    use mementum_md::{MAX_COLOR_BYTES, RenderOpts, render};
+    let at_bound = "c".repeat(MAX_COLOR_BYTES);
+    let over = "c".repeat(MAX_COLOR_BYTES + 1);
+    for attr in ["color", "bg"] {
+        let ok = format!("Texte <span {attr}=\"{at_bound}\">a</span>\n");
+        let blocks = parse(&ok).unwrap_or_else(|e| panic!("{ok:?} : {e}"));
+        assert_eq!(render(&blocks, RenderOpts::default()).markdown, ok);
+        let hint = format!("{MAX_COLOR_BYTES} octets au plus");
+        let span = format!("<span {attr}=\"{over}\">a</span>");
+        rejected(&format!("Texte {span}\n"), 1, &hint);
+        rejected(&format!("Un\n\n- {span} b\n"), 3, &hint);
+        rejected(&format!("| a |\n| --- |\n| {span} |\n"), 3, &hint);
+        let title = span.replace('"', "&quot;");
+        rejected(
+            &format!("<toggle title=\"{title}\">\n</toggle>\n"),
+            1,
+            &hint,
+        );
+        rejected(&format!("<callout>\n{span}\n</callout>\n"), 2, &hint);
+    }
+}

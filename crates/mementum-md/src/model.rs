@@ -120,6 +120,14 @@ pub enum Inline {
     HardBreak,
 }
 
+/// Longueur maximale, en octets, d'une couleur de texte ou de surlignage d'une plage (Ruling
+/// R381) : `<span color="…">` et `<span bg="…">` en MMD, `textColor` et `backgroundColor` dans
+/// Yjs. BlockNote n'en écrit que des noms courts (`red`, `blue`…). Chaque plage porte sa couleur,
+/// et le MMD la récrit à chaque plage : une couleur longue sur des plages alternées coûtait le
+/// produit de sa longueur par leur nombre (131 Ko de MMD lus en 4,5 Gio). [`crate::parse`] refuse
+/// une couleur plus longue ; `mementum-crdt` la lit absente.
+pub const MAX_COLOR_BYTES: usize = 100;
+
 /// Marques d'un texte.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Styles {

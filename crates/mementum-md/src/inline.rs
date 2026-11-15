@@ -2,11 +2,12 @@
 //! pulldown-cmark.
 
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use pulldown_cmark::{Event, Options, Parser, Tag as MdTag, TagEnd};
 
 use crate::attrs::{Raw, Tag, escape_attr, parse_tag, quoted};
-use crate::model::{Inline, Styles, normalize_inline};
+use crate::model::{Inline, MAX_COLOR_BYTES, Styles, normalize_inline};
 use crate::parse::MAX_DEPTH;
 
 const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_MATH);
@@ -65,8 +66,8 @@ pub(crate) fn math_fits(latex: &str) -> bool {
     !latex.is_empty()
         && !latex.contains(['\n', '\r'])
         && matches!(
-            parse_inline(&format!("${latex}$")).as_slice(),
-            [Inline::Math { latex: read }] if read == latex
+            parse_inline(&format!("${latex}$")).as_deref(),
+            Ok([Inline::Math { latex: read }]) if read == latex
         )
 }
 
@@ -227,6 +228,9 @@ pub(crate) fn render_inline(content: &[Inline]) -> String {
 
 // ----------------------------------------------------------------- lecture
 
+/// Une couleur en vigueur, partagée par les `<span>` qui l'héritent.
+type Color = Option<Rc<str>>;
+
 #[derive(Default)]
 struct State {
     bold: u32,
@@ -235,13 +239,26 @@ struct State {
     code: u32,
     underline: u32,
     /// Une entrée par `<span>` ouvert : (couleur, surlignage) en vigueur
-    /// après ce `<span>`, pour lire les styles sans parcourir la pile.
-    spans: Vec<(Option<String>, Option<String>)>,
+    /// après ce `<span>`, pour lire les styles sans parcourir la pile. Partagées
+    /// d'une entrée à l'autre : un `<span>` ouvert ne recopie pas les couleurs
+    /// qu'il hérite (Ruling R381).
+    spans: Vec<(Color, Color)>,
 }
 
 impl State {
+    /// Les styles en vigueur. Chaque texte lu reçoit sa copie des couleurs :
+    /// [`MAX_COLOR_BYTES`] octets au plus chacune.
     fn styles(&self) -> Styles {
-        let (text_color, background_color) = self.spans.last().cloned().unwrap_or_default();
+        let (text_color, background_color) = self
+            .spans
+            .last()
+            .map(|(color, bg)| {
+                (
+                    color.as_deref().map(str::to_string),
+                    bg.as_deref().map(str::to_string),
+                )
+            })
+            .unwrap_or_default();
         Styles {
             bold: self.bold > 0,
             italic: self.italic > 0,
@@ -255,7 +272,10 @@ impl State {
 
     fn open_span(&mut self, color: Option<String>, bg: Option<String>) {
         let (cur_color, cur_bg) = self.spans.last().cloned().unwrap_or_default();
-        self.spans.push((color.or(cur_color), bg.or(cur_bg)));
+        self.spans.push((
+            color.map(Rc::from).or(cur_color),
+            bg.map(Rc::from).or(cur_bg),
+        ));
     }
 }
 
@@ -274,9 +294,28 @@ struct Reader {
     /// bâtir un arbre plus profond (l'entrée, non canonique, est refusée).
     excess_links: usize,
     mention: Option<(String, String, String)>,
+    /// La première erreur de la lecture : la lecture va au bout, sans elle.
+    error: Option<String>,
 }
 
 impl Reader {
+    /// L'attribut `key` (`color` ou `bg`) d'un `<span>` : refusé au-delà de
+    /// [`MAX_COLOR_BYTES`] (Ruling R381), et lu absent pour la suite.
+    fn color(&mut self, tag: &Tag<'_>, key: &str) -> Option<String> {
+        let color = attr(tag, key)?;
+        if color.len() <= MAX_COLOR_BYTES {
+            return Some(color);
+        }
+        self.error.get_or_insert_with(|| {
+            format!(
+                "couleur « {key} » de {} octets dans « <span> » : une couleur s'écrit en \
+                 {MAX_COLOR_BYTES} octets au plus (« red », « blue »…)",
+                color.len()
+            )
+        });
+        None
+    }
+
     fn push(&mut self, inline: Inline) {
         if let Some(frame) = self.frames.last_mut() {
             frame.1.push(inline);
@@ -352,7 +391,10 @@ impl Reader {
             ("em", false) => self.st.italic += 1,
             ("s", false) => self.st.strike += 1,
             ("code", false) => self.st.code += 1,
-            ("span", false) => self.st.open_span(attr(&tag, "color"), attr(&tag, "bg")),
+            ("span", false) => {
+                let (color, bg) = (self.color(&tag, "color"), self.color(&tag, "bg"));
+                self.st.open_span(color, bg);
+            }
             ("a", false) => self.open_link(attr(&tag, "href").unwrap_or_default()),
             ("mention", false) => {
                 self.mention = Some((
@@ -367,13 +409,15 @@ impl Reader {
 }
 
 /// Lit un contenu en ligne MMD. Une écriture non canonique est lue au mieux :
-/// la vérification finale de [`crate::parse`] la refuse.
-pub(crate) fn parse_inline(src: &str) -> Vec<Inline> {
+/// la vérification finale de [`crate::parse`] la refuse. Une couleur trop
+/// longue est refusée ici (Ruling R381) : le message dit quoi écrire.
+pub(crate) fn parse_inline(src: &str) -> Result<Vec<Inline>, String> {
     let mut r = Reader {
         st: State::default(),
         frames: vec![(String::new(), Vec::new())],
         excess_links: 0,
         mention: None,
+        error: None,
     };
     for event in Parser::new_ext(src, OPTIONS) {
         match event {
@@ -405,7 +449,12 @@ pub(crate) fn parse_inline(src: &str) -> Vec<Inline> {
     while r.frames.len() > 1 {
         r.close_link();
     }
-    normalize_inline(r.frames.pop().map(|f| f.1).unwrap_or_default())
+    match r.error {
+        Some(error) => Err(error),
+        None => Ok(normalize_inline(
+            r.frames.pop().map(|f| f.1).unwrap_or_default(),
+        )),
+    }
 }
 
 /// Lit `![légende](adresse)` seul : (adresse, légende en texte brut).

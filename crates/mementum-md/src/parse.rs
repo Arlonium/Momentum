@@ -568,7 +568,7 @@ fn read_block(
     if let Some(list) = list {
         apply(&mut props, spec.props, list, line.no)?;
     }
-    let content = Content::Inline(parse_inline(src));
+    let content = Content::Inline(parse_inline(src).map_err(|m| err(line.no, m))?);
     let (children, next) = read_children(lines, i + 1, width, depth + 1)?;
     Ok((new_block(kind, props, content, children, id), next, number))
 }
@@ -703,7 +703,7 @@ fn read_cell(seg: &str, line: usize) -> Result<Cell, MmdError> {
         apply(&mut props, cell_props(), list, line)?;
     }
     Ok(Cell {
-        content: parse_inline(src),
+        content: parse_inline(src).map_err(|m| err(line, m))?,
         props,
     })
 }
@@ -1021,7 +1021,7 @@ fn read_tag(
             let inner = &lines[i + 1..];
             // Le titre d'un toggle est du MMD en ligne, déjà désechappé.
             let (content, skip) = if titled {
-                (parse_inline(&title), 0)
+                (parse_inline(&title).map_err(|m| err(line.no, m))?, 0)
             } else if spec.content == ContentKind::Inline {
                 callout_content(inner, &term)?
             } else {
@@ -1117,5 +1117,5 @@ fn callout_content(inner: &[Line<'_>], term: &str) -> Result<(Vec<Inline>, usize
             "contenu d'un callout : ni liste {…} ni ancre (elles vont sur la balise)",
         ));
     }
-    Ok((parse_inline(src), 1))
+    Ok((parse_inline(src).map_err(|m| err(first.no, m))?, 1))
 }

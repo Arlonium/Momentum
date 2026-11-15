@@ -19,12 +19,15 @@ use crate::model::{
 /// - les props connues du registre sont du type qu'il déclare ;
 /// - les flottants sont finis ;
 /// - un tableau a au moins une ligne ;
-/// - l'imbrication ne dépasse pas [`crate::MAX_DEPTH`] niveaux.
+/// - l'imbrication ne dépasse pas [`crate::MAX_DEPTH`] niveaux ;
+/// - une couleur de plage fait au plus [`crate::MAX_COLOR_BYTES`] octets
+///   (Ruling R381).
 ///
 /// Sinon, `render` ne panique pas mais écrit un MMD que [`crate::parse`]
 /// refuse : une prop mal typée s'écrit selon le type de sa valeur ; un
 /// flottant non fini s'écrit `NaN` ou `inf` ; un tableau sans ligne n'écrit
-/// aucune ligne de tableau ; un arbre trop profond s'écrit en entier (le
+/// aucune ligne de tableau ; une couleur trop longue s'écrit telle quelle ;
+/// un arbre trop profond s'écrit en entier (le
 /// rendu est récursif : des milliers de niveaux peuvent épuiser la pile).
 /// Un type hors registre s'écrit `<block type="…"/>` et se relit en
 /// `unknown`.
