@@ -78,8 +78,11 @@ export function calloutColor(raw: string): CalloutColor {
 const MAX_ICON_GRAPHEMES = 3;
 
 /** L'icône à afficher : ses trois premiers caractères visibles, suivis de « … » si elle est plus longue. */
+let segmenter: Intl.Segmenter | null = null;
+
 function shownIcon(icon: string): { text: string; cut: boolean } {
-  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  // Un seul découpeur pour tous les callouts de la page (une page peut en porter mille).
+  segmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
   const graphemes = Array.from(segmenter.segment(icon), (part) => part.segment);
   if (graphemes.length <= MAX_ICON_GRAPHEMES) return { text: icon, cut: false };
   return { text: `${graphemes.slice(0, MAX_ICON_GRAPHEMES).join("")}…`, cut: true };
@@ -118,7 +121,12 @@ function CalloutView({ block, editor, contentRef }: ViewProps) {
           aria-haspopup="dialog"
           aria-expanded={open}
           data-block-window-anchor=""
-          onClick={() => toggleBlockWindow(editor, block.id)}
+          onClick={(event) => {
+            // Un clic ne donne pas le focus à un bouton partout (Safari) : la fenêtre qu'il ferme
+            // l'avait, il le garde.
+            event.currentTarget.focus();
+            toggleBlockWindow(editor, block.id);
+          }}
         >
           <CalloutGlyph icon={icon} />
         </button>

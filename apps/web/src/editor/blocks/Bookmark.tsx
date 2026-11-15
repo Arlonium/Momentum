@@ -64,7 +64,12 @@ function BookmarkView({ block, editor }: ViewProps) {
           aria-haspopup="dialog"
           aria-expanded={open}
           data-block-window-anchor=""
-          onClick={() => toggleBlockWindow(editor, block.id)}
+          onClick={(event) => {
+            // Un clic ne donne pas le focus à un bouton partout (Safari) : la fenêtre qu'il ferme
+            // l'avait, il le garde.
+            event.currentTarget.focus();
+            toggleBlockWindow(editor, block.id);
+          }}
         >
           Modifier
         </button>

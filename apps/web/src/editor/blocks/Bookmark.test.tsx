@@ -3,6 +3,7 @@
 // adresse web entière (`webUrl`) ; ce que le document porte d'autre (MMD, un autre client) se montre
 // en texte, jamais en lien.
 import { expect, test } from "vitest";
+import { contrast } from "../../page/avatarInk";
 import { storedProps } from "../../test/editors";
 import { blockOf, blockWindow, fill, flush, foreignStyles, mountEditor, press } from "../../test/richEditor";
 
@@ -123,4 +124,26 @@ test("bookmark_has_no_modify_button_for_a_reader", async () => {
   // Témoin : modifiable, le bouton est là.
   const writer = await mountEditor({ blocks: page("https://mementum.dev/") });
   expect(blockOf(writer, "s").querySelector(MODIFY)).not.toBeNull();
+});
+
+test("the_button_that_closes_the_window_keeps_the_focus", async () => {
+  // Un clic ne donne pas le focus à un bouton dans tous les navigateurs (Safari, jsdom) : la fenêtre
+  // qui avait le focus partie, il tombait sur `body`.
+  const m = await mountEditor({ blocks: page("https://mementum.dev/") });
+  await openWindow(m);
+  const button = blockOf(m, "s").querySelector<HTMLButtonElement>(MODIFY)!;
+  button.click();
+  await flush();
+  expect(blockWindow(WINDOW)).toBeNull();
+  expect(document.activeElement).toBe(blockOf(m, "s").querySelector(MODIFY));
+});
+
+test("the_colours_of_the_rich_blocks_are_readable", () => {
+  // Le texte secondaire du signet sur son cadre, et les textes de la fenêtre sur leur fond.
+  expect(contrast("#66655F", "#FAFAF8")).toBeGreaterThanOrEqual(4.5);
+  expect(contrast("#66655F", "#FFFFFF")).toBeGreaterThanOrEqual(4.5);
+  expect(contrast("#B4462B", "#FFFFFF")).toBeGreaterThanOrEqual(4.5);
+  expect(contrast("#8A5A0B", "#FCF4E3")).toBeGreaterThanOrEqual(4.5);
+  // Le texte d'un choix retenu, sur le fond d'accent (#23704F à 13 %, posé sur du blanc).
+  expect(contrast("#2F2E2B", "#E1ECE7")).toBeGreaterThanOrEqual(4.5);
 });

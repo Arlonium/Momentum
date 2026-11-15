@@ -217,4 +217,11 @@ test("ctrl_alt_enter_opens_nothing_for_a_reader", async () => {
   expect(shortcut(m).defaultPrevented).toBe(false);
   await flush();
   expect(document.querySelector('[role="dialog"]')).toBeNull();
+  // Témoin : le même geste, dans un éditeur modifiable, l'ouvre.
+  m.editor.isEditable = true;
+  await flush();
+  select(m, "s");
+  expect(shortcut(m).defaultPrevented).toBe(true);
+  await flush();
+  expect(blockWindow("Adresse du signet")).not.toBeNull();
 });
