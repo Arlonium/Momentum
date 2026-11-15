@@ -49,6 +49,8 @@ type Props = {
   drag: TreeDrag | null;
   /** Schéma du serveur différent (R35) : ni action, ni création de sous-page, ni déplacement. */
   readOnly: boolean;
+  /** Le menu « … » de chaque ligne a une entrée à tout niveau (le favori, R254). */
+  menus: boolean;
   /** Ces rappels gardent leur identité d'un rendu à l'autre : les lignes sont mémoïsées. */
   onToggle: (id: string) => void;
   onCreate: (parentId: string) => void;
@@ -82,6 +84,7 @@ export function PageTree({
   menuFor,
   drag,
   readOnly,
+  menus,
   onToggle,
   onCreate,
   onMenu,
@@ -223,6 +226,7 @@ export function PageTree({
           dragging={row.node.id === dragged}
           dropInside={over !== null && over.zone === "inside" && over.id === row.node.id}
           readOnly={readOnly}
+          menu={menus}
           onToggle={onToggle}
           onCreate={onCreate}
           onMenu={onMenu}

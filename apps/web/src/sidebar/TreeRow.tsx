@@ -1,6 +1,7 @@
-// Une ligne de l'arbre des pages : repli, lien vers la page, puis, au survol et pour qui peut
-// modifier la page, « … » (ses actions) et « + » (une sous-page). Qui peut la modifier peut
-// aussi la saisir pour la déplacer (`PageTree`). Mémoïsée (Ruling R43) : d'une navigation à
+// Une ligne de l'arbre des pages : repli, lien vers la page, puis, au survol, « … » (ses
+// actions : le favori pour toute page qu'on voit, R254, et le reste pour qui peut la modifier)
+// et, pour qui peut la modifier, « + » (une sous-page). Qui peut la modifier peut aussi la
+// saisir pour la déplacer (`PageTree`). Mémoïsée (Ruling R43) : d'une navigation à
 // l'autre, seules les lignes dont `active` change se rendent de nouveau. Ses autres props
 // gardent donc leur identité : la ligne vient de `flattenRows`, les rappels sont stables.
 import { memo, type CSSProperties } from "react";
@@ -21,8 +22,10 @@ type Props = {
   dragging: boolean;
   /** La page déplacée, lâchée ici, deviendrait une sous-page de celle-ci. */
   dropInside: boolean;
-  /** Schéma du serveur différent (R35) : ni action, ni création de sous-page. */
+  /** Schéma du serveur différent (R35) : ni action sur la page, ni création de sous-page. */
   readOnly: boolean;
+  /** Le menu « … » a une entrée à tout niveau (le favori) : il est là même sans modifier. */
+  menu: boolean;
   onToggle: (id: string) => void;
   onCreate: (parentId: string) => void;
   /** Ouvre ou ferme le menu « … » de la page ; `anchor` : son bouton. */
@@ -37,12 +40,14 @@ export const TreeRow = memo(function TreeRow({
   dragging,
   dropInside,
   readOnly,
+  menu,
   onToggle,
   onCreate,
   onMenu,
 }: Props) {
   const { node, depth, hasChildren, open } = row;
   const editable = !readOnly && canEdit(node.level);
+  const actions = editable || menu;
   // `--depth` : le retrait, dans `theme.css`.
   const style = { top: index * ROW_HEIGHT, height: ROW_HEIGHT, "--depth": depth } as CSSProperties;
   const classes = [
@@ -79,7 +84,7 @@ export const TreeRow = memo(function TreeRow({
         <PageIcon />
         <span className="tree-title">{node.title}</span>
       </a>
-      {editable && (
+      {actions && (
         // Posées sur le bord droit de la ligne : invisibles, elles ne prennent pas de place au
         // titre.
         <span className="tree-actions">
@@ -94,15 +99,17 @@ export const TreeRow = memo(function TreeRow({
           >
             <MoreIcon />
           </button>
-          <button
-            type="button"
-            className="tree-action"
-            aria-label={`Ajouter une sous-page à « ${node.title} »`}
-            title="Ajouter une sous-page"
-            onClick={firstClick(() => onCreate(node.id))}
-          >
-            <PlusIcon />
-          </button>
+          {editable && (
+            <button
+              type="button"
+              className="tree-action"
+              aria-label={`Ajouter une sous-page à « ${node.title} »`}
+              title="Ajouter une sous-page"
+              onClick={firstClick(() => onCreate(node.id))}
+            >
+              <PlusIcon />
+            </button>
+          )}
         </span>
       )}
     </div>
