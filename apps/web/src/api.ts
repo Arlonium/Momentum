@@ -6,6 +6,17 @@
 // répond `401 unauthenticated` dit qu'elle est perdue : `onSessionLost` prévient
 // `SessionGate`, qui demande la connexion. Les autres `401` (`invalid_credentials` : mot de
 // passe faux) ne disent rien de la session.
+//
+// Sauf un refus qui vise une session que l'onglet a remplacée depuis (Rulings R347, R348).
+// Chaque appel part daté de la génération de session de l'onglet, qui avance à chaque session
+// qu'il ouvre (connexion, inscription, changement de mot de passe : le cookie change) ou ferme
+// (déconnexion). Un appel parti avant, dont le `401` revient après, ne dit rien de la session en
+// cours : il ne demande pas la connexion, et il repart une fois, tel quel, sous la session en
+// cours, aux conditions de `judge` : jamais une route de session, jamais sous un autre compte
+// que celui sous lequel il est parti (le compte est relu juste avant), jamais s'il est parti
+// avant une déconnexion de l'onglet, ou pendant. Un `401 unauthenticated` est le premier refus du
+// serveur, avant toute lecture ou écriture : l'appel refusé n'a rien fait, et son rejeu le fait
+// une fois. Un refus reçu pendant qu'une session s'ouvre ou se ferme attend son issue.
 import type {
   Accepted,
   ChangePassword,
@@ -62,8 +73,10 @@ const UNREACHABLE = "Le serveur Mementum ne répond pas. Vérifie qu'il est lanc
 const sessionLost = new Set<() => void>();
 
 /**
- * Appelle `listener` chaque fois qu'un appel répond `401 unauthenticated` (session absente,
- * échue ou fermée ailleurs). Rend la fonction qui le retire.
+ * Appelle `listener` chaque fois qu'un appel parti sous la session en cours répond `401
+ * unauthenticated` (session absente, échue ou fermée ailleurs). Pas pour un appel parti avant
+ * que l'onglet ouvre ou ferme une session, que ce refus ne concerne plus (voir l'en-tête). Rend
+ * la fonction qui le retire.
  */
 export function onSessionLost(listener: () => void): () => void {
   sessionLost.add(listener);
@@ -75,6 +88,104 @@ export function isSessionLost(error: unknown): boolean {
   return error instanceof ApiError && error.code === "unauthenticated";
 }
 
+const ME = "/api/v1/me";
+const SIGNUP = "/api/v1/auth/signup";
+const LOGIN = "/api/v1/auth/login";
+const LOGOUT = "/api/v1/auth/logout";
+const PASSWORD = "/api/v1/auth/password";
+/** Les routes qui ouvrent ou ferment la session : jamais rejouées. */
+const SESSION_ROUTES: ReadonlySet<string> = new Set([SIGNUP, LOGIN, LOGOUT, PASSWORD]);
+
+/** La session de l'onglet au moment où un appel part (Ruling R347). */
+type Stamp = {
+  generation: number;
+  account: string | null;
+  epoch: number;
+};
+
+/**
+ * La génération de session de l'onglet : avance à chaque session qu'il ouvre (connexion,
+ * inscription, changement de mot de passe) ou ferme (déconnexion, réussie ou non).
+ */
+let generation = 0;
+/**
+ * Le compte de la session, tel que le serveur l'a dit en dernier pour la génération en cours ;
+ * `null` : pas encore dit, ou déconnexion demandée.
+ */
+let account: string | null = null;
+/** Avance chaque fois que `account` change : un autre compte, ou la déconnexion. */
+let epoch = 0;
+/** Les sessions qui s'ouvrent ou se ferment en ce moment : un refus de session attend leur issue. */
+const changing = new Set<Promise<void>>();
+
+const stamp = (): Stamp => ({ generation, account, epoch });
+
+function noteAccount(id: string | null) {
+  if (id === account) return;
+  account = id;
+  epoch += 1;
+}
+
+/** L'onglet vient d'ouvrir une session pour le compte `id`. */
+function opened(id: string) {
+  generation += 1;
+  noteAccount(id);
+}
+
+/** Mène `run`, qui ouvre ou ferme la session de l'onglet : un refus de session attend son issue. */
+async function changeSession<T>(run: () => Promise<T>): Promise<T> {
+  const done = run();
+  const settled = done.then(
+    () => undefined,
+    () => undefined,
+  );
+  changing.add(settled);
+  try {
+    return await done;
+  } finally {
+    changing.delete(settled);
+  }
+}
+
+/**
+ * Ce que dit le `401 unauthenticated` d'un appel parti sous `sent` (Rulings R347, R348) :
+ * - `lost` : la session en cours est perdue, la connexion est demandée ;
+ * - `stale` : le refus vise une session que l'onglet a remplacée ou fermée depuis, et ne dit
+ *   rien de la session en cours ; l'appel ne repart pas ;
+ * - `replay` : de même, et l'appel repart une fois sous la session en cours. Il faut qu'il ne
+ *   soit pas déjà reparti, que ce ne soit pas une route de session, qu'il soit parti sous un
+ *   compte connu, que l'onglet n'ait vu depuis ni un autre compte ni une déconnexion, et que le
+ *   compte relu à l'instant (`GET /api/v1/me`) soit celui sous lequel il est parti.
+ * Un échec de cette relecture est levé à la place du refus : l'appel le dit (un refus de session
+ * de la relecture a été jugé par elle, et a demandé la connexion s'il le fallait).
+ */
+async function judge(
+  sent: Stamp,
+  path: string,
+  replays: number,
+): Promise<"lost" | "stale" | "replay"> {
+  const sessionRoute = SESSION_ROUTES.has(path);
+  // Une session qui s'ouvre ou se ferme a pu causer ce refus : il attend de savoir. Pas une route
+  // de session, qui attendrait sa propre issue.
+  while (!sessionRoute && sent.generation === generation && changing.size > 0) {
+    await Promise.all(changing);
+  }
+  if (sent.generation === generation) return "lost";
+  if (sessionRoute || replays > 0 || sent.account === null || sent.epoch !== epoch) return "stale";
+  const verified = await sessionAccount();
+  // Le compte a pu changer pendant la relecture (une connexion de l'onglet sous un autre) : sa
+  // réponse, partie avant, ne dit plus rien.
+  return verified === sent.account && sent.epoch === epoch ? "replay" : "stale";
+}
+
+/** Le compte de la session, relu, sans rejeu : celui que le navigateur porte à l'instant. */
+async function sessionAccount(): Promise<string> {
+  const at = generation;
+  const me = (await (await send("GET", ME, undefined, undefined, 1)).json()) as Me;
+  if (at === generation) noteAccount(me.user.id);
+  return me.user.id;
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await send(method, path, body);
   // `204` : pas de corps.
@@ -83,60 +194,92 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
 /**
  * Une réponse réussie, sinon l'erreur du serveur (ou `UNREACHABLE`), levée en `ApiError`.
- * Une requête annulée par `signal` rejette avec l'erreur de l'annulation, telle quelle.
+ * Une requête annulée par `signal` rejette avec l'erreur de l'annulation, telle quelle. Un
+ * refus de session est jugé par `judge` ; `replays` : combien de fois l'appel est déjà reparti
+ * (1 : il ne repartira pas).
  */
 async function send(
   method: string,
   path: string,
   body?: unknown,
   signal?: AbortSignal,
+  replays = 0,
 ): Promise<Response> {
-  let res: Response;
-  try {
-    res = await fetch(path, {
-      method,
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal,
-    });
-  } catch (e) {
-    if (signal?.aborted) throw e;
-    throw new ApiError(0, null, UNREACHABLE);
+  for (; ; replays += 1) {
+    const sent = stamp();
+    let res: Response;
+    try {
+      res = await fetch(path, {
+        method,
+        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal,
+      });
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      throw new ApiError(0, null, UNREACHABLE);
+    }
+    if (res.ok) return res;
+    let error: Partial<ErrorBody> = {};
+    try {
+      error = (await res.json()) as ErrorBody;
+    } catch {
+      // corps illisible (mandataire, page d'erreur) : message générique ci-dessous
+    }
+    const failure = new ApiError(
+      res.status,
+      error.error ?? null,
+      error.message ?? (res.status >= 500 ? UNREACHABLE : `Erreur ${res.status} du serveur.`),
+    );
+    if (!isSessionLost(failure)) throw failure;
+    const verdict = await judge(sent, path, replays);
+    if (verdict === "replay") continue;
+    if (verdict === "lost") for (const listener of [...sessionLost]) listener();
+    throw failure;
   }
-  if (res.ok) return res;
-  let error: Partial<ErrorBody> = {};
-  try {
-    error = (await res.json()) as ErrorBody;
-  } catch {
-    // corps illisible (mandataire, page d'erreur) : message générique ci-dessous
-  }
-  const failure = new ApiError(
-    res.status,
-    error.error ?? null,
-    error.message ?? (res.status >= 500 ? UNREACHABLE : `Erreur ${res.status} du serveur.`),
-  );
-  if (isSessionLost(failure)) for (const listener of [...sessionLost]) listener();
-  throw failure;
 }
 
 /** `GET /api/v1/me` : le compte de la session et ses espaces ; sans session, `401`. */
-export function getMe(): Promise<Me> {
-  return call("GET", "/api/v1/me");
+export async function getMe(): Promise<Me> {
+  const at = generation;
+  const me = await call<Me>("GET", ME);
+  // Une réponse d'une session remplacée depuis ne dit pas le compte de la session en cours.
+  if (at === generation) noteAccount(me.user.id);
+  return me;
 }
 
 /** `POST /api/v1/auth/signup` : crée le compte et ouvre sa session (cookie). */
 export function signUp(body: SignUp): Promise<Me> {
-  return call("POST", "/api/v1/auth/signup", body);
+  return changeSession(async () => {
+    const me = await call<Me>("POST", SIGNUP, body);
+    opened(me.user.id);
+    return me;
+  });
 }
 
 /** `POST /api/v1/auth/login` : ouvre une session (cookie) ; `401 invalid_credentials`. */
 export function logIn(body: LogIn): Promise<Me> {
-  return call("POST", "/api/v1/auth/login", body);
+  return changeSession(async () => {
+    const me = await call<Me>("POST", LOGIN, body);
+    opened(me.user.id);
+    return me;
+  });
 }
 
 /** `POST /api/v1/auth/logout` : supprime la session sur le serveur et efface le cookie. */
 export function logOut(): Promise<void> {
-  return call("POST", "/api/v1/auth/logout");
+  // Rien de ce qui est parti avant, ou part pendant, ne sera rejoué : ni sous ce compte, même
+  // reconnecté, ni sous un autre.
+  noteAccount(null);
+  return changeSession(async () => {
+    try {
+      await call<void>("POST", LOGOUT);
+    } finally {
+      // Échouée, elle a pu fermer la session quand même (réponse perdue) : les refus de ce qui
+      // était parti avant ne disent rien de plus.
+      generation += 1;
+    }
+  });
 }
 
 /**
@@ -144,7 +287,11 @@ export function logOut(): Promise<void> {
  * repart avec un cookie neuf. Mot de passe actuel faux : `401 invalid_credentials`.
  */
 export function changePassword(body: ChangePassword): Promise<void> {
-  return call("POST", "/api/v1/auth/password", body);
+  return changeSession(async () => {
+    await call<void>("POST", PASSWORD, body);
+    // Le même compte, sous une session neuve : ce qui était parti sous l'ancienne est refusé.
+    generation += 1;
+  });
 }
 
 // Espaces, membres et invitations. Dans un espace où l'on n'a aucun rôle, toute route répond
