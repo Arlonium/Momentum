@@ -13,15 +13,16 @@
 // bloc qu'un autre glisse le suit (`followBlock`), comme celui que le dépôt laisse dans le bloc
 // déposé, et comme la sélection d'une image sur laquelle on a cliqué.
 //
-// Les deux `test.fixme` : ce qui est tapé dans le bloc glissé lui-même. Ils disent ce qui est
-// voulu, pas ce qui se passe : après le scénario, le bloc X est juste sous le bloc Z, une seule
-// fois, et porte le texte que Tom y a tapé, chez Mona, chez Tom et dans le MMD que relit le
-// serveur. Les clients seuls perdent ce texte, qui est dans l'élément que le glisser supprime
-// (plus personne ne le retrouve chez un voisin). Un test par ordre d'arrivée au serveur :
+// Ce qui est tapé dans le bloc glissé lui-même : après le scénario, le bloc X est juste sous le
+// bloc Z, une seule fois, et porte le texte que Tom y a tapé, chez Mona, chez Tom et dans le MMD
+// que relit le serveur. Les clients seuls perdent ce texte, qui est dans l'élément que le glisser
+// supprime (plus personne ne le retrouve chez un voisin). Un test par ordre d'arrivée au
+// serveur :
 //  - le déplacement fait hors ligne arrive après l'édition : le serveur a le texte quand le
-//    déplacement arrive, et le reportera sur le bloc recréé (R221, Task 13b) ;
+//    déplacement arrive, et le reporte sur le bloc recréé (R221, Task 13b) : vert ;
 //  - l'édition faite hors ligne arrive après le déplacement : elle a été faite sans l'avoir vu,
-//    et reste perdue (limite R222, dite aux utilisateurs).
+//    et reste perdue (limite R222, dite aux utilisateurs) : `test.fixme`, qui dit ce qui est
+//    voulu, pas ce qui se passe.
 // Chacun vérifie d'abord, sur des blocs témoins, que le glisser par la poignée et le retour du
 // réseau marchent seuls : un échec ne vient donc pas d'un glisser manqué ni d'une page qui n'a
 // pas resynchronisé.
@@ -662,8 +663,9 @@ test("an_image_clicked_then_moved_by_someone_else_is_the_one_delete_removes", as
 });
 
 // Le déplacement arrive au serveur avant la frappe, faite sans l'avoir vu : limite R222. Les
-// clients seuls, et le serveur après la Task 13b, perdent ce texte ; la limite est dite aux
-// utilisateurs (Task 13c), et a son plan à part après le lot 3.
+// clients seuls, et le serveur depuis la Task 13b (qui ne reporte que l'ordre inverse), perdent ce
+// texte : le reconnaître demande de lire les éléments supprimés de l'original, ce que yrs n'offre
+// pas. La limite est dite aux utilisateurs (Task 13c), et a son plan à part après le lot 3.
 test.fixme("text_typed_while_someone_else_moves_the_block_survives", async ({ browser }) => {
   const s = await scene(browser);
   const { monaApi, id, mona, tom } = s;
@@ -706,9 +708,9 @@ test.fixme("text_typed_while_someone_else_moves_the_block_survives", async ({ br
   await expectWantedEverywhere(s, ["Témoin B revenu", "Témoin C", "Témoin A"]);
 });
 
-// La frappe est au serveur quand le déplacement arrive : il la reportera sur le bloc recréé
-// (R221). Attend la Task 13b.
-test.fixme("block_moved_offline_keeps_the_text_typed_meanwhile", async ({ browser }) => {
+// La frappe est au serveur quand le déplacement arrive : il la reporte sur le bloc recréé (R221,
+// Task 13b), écrit le report au journal avec le déplacement et le diffuse à tous, Mona comprise.
+test("block_moved_offline_keeps_the_text_typed_meanwhile", async ({ browser }) => {
   const s = await scene(browser);
   const { monaApi, id, mona, tom } = s;
 
