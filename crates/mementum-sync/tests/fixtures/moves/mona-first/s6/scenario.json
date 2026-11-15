@@ -109,7 +109,7 @@
     ]
   ],
   "clientsAlone": {
-    "monaFirst": "attend le dédoublonnage du serveur, Task 13b",
-    "tomFirst": "attend le dédoublonnage du serveur, Task 13b"
+    "monaFirst": "dédoublonné par le serveur Rust (Task 13b), que ce banc n'a pas",
+    "tomFirst": "dédoublonné par le serveur Rust (Task 13b), que ce banc n'a pas"
   }
 }

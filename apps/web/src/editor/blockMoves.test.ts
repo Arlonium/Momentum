@@ -248,23 +248,25 @@ type Scenario = {
 /**
  * Tom a tapé dans le bloc que Mona déplace, et les clients seuls perdent sa frappe (elle est dans
  * l'élément que le déplacement supprime). Ce qu'il en advient dépend de l'ordre d'arrivée au
- * serveur. La frappe d'abord : le serveur l'a quand le déplacement arrive, et la reportera sur le
- * bloc recréé (R221, Task 13b). Le déplacement d'abord : la frappe, faite sans l'avoir vu, arrive
- * après lui, et reste perdue (R222).
+ * serveur. La frappe d'abord : le serveur l'a quand le déplacement arrive, et la reporte sur le
+ * bloc recréé (R221, Task 13b) ; le serveur de ce banc est un `Y.Doc` sans ce report, qui se
+ * prouve par l'acteur (`crates/mementum-sync/tests/moves.rs`, les mêmes octets). Le déplacement
+ * d'abord : la frappe, faite sans l'avoir vu, arrive après lui, et reste perdue (R222).
  */
 const TYPED_IN_THE_MOVED_BLOCK = {
-  tom: "attend le report du serveur, Task 13b",
+  tom: "reporté par le serveur Rust (Task 13b), que ce banc n'a pas",
   mona: "limite R222 : la frappe arrive après le déplacement",
 };
 
 /**
  * Le même bloc déplacé par les deux : chacun le recrée à sa place, et il est deux fois dans la
- * page, au même id. Le serveur n'en garde qu'un (son dédoublonnage voit enfin le doublon : la
- * mise à jour insère des éléments ; test de l'acteur à la Task 13b).
+ * page, au même id. Le serveur n'en garde qu'un (son dédoublonnage voit le doublon : la mise à
+ * jour insère des éléments ; `two_moves_of_the_same_block_leave_one`,
+ * `crates/mementum-sync/tests/moves.rs`) ; le serveur de ce banc ne dédoublonne pas.
  */
 const MOVED_TWICE = {
-  mona: "attend le dédoublonnage du serveur, Task 13b",
-  tom: "attend le dédoublonnage du serveur, Task 13b",
+  mona: "dédoublonné par le serveur Rust (Task 13b), que ce banc n'a pas",
+  tom: "dédoublonné par le serveur Rust (Task 13b), que ce banc n'a pas",
 };
 
 const typedIn = {
@@ -965,5 +967,41 @@ describe.each(ORDERS)("l'état final de chaque scénario, rouvert ($label)", (or
       if (repeatedIds(page).length === 0) expect(shown(p)).toEqual(page);
       else expect(shown(p).map((b) => b.text)).toEqual(page.map((b) => b.text));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L'état reporté par le serveur, rouvert
+// ---------------------------------------------------------------------------
+
+// Le serveur reporte sur un bloc recréé ce que l'auteur du déplacement n'avait pas vu (Task 13b) :
+// une écriture à lui, que les éditeurs n'ont jamais faite. L'état final de quelques scènes, tel que
+// l'acteur l'écrit au journal, est gardé par `carried_final_states_are_kept_for_the_client`
+// (`crates/mementum-sync/tests/moves.rs`, `carried.bin`). Deux éditeurs neufs le rouvrent : ils
+// montrent la même page que le document, et n'écrivent rien en l'ouvrant.
+const REOPENED = [
+  { key: "s1", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »" },
+  { key: "s3", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X » [x1 « Enfant X1 de Tom »]" },
+  { key: "s9", page: "w « Bloc W » [x « Bloc X de Tom »] | y « Bloc Y »" },
+  { key: "bold", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »" },
+  { key: "child-added", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X » [x1 « Enfant de Tom »]" },
+] as const;
+
+describe.each(ORDERS)("l'état reporté par le serveur, rouvert ($label)", (order) => {
+  test.each(REOPENED)("$key : deux éditeurs le rouvrent sans rien écrire", async ({ key, page }) => {
+    const fs = await nodeModule<Fs>("node:fs/promises");
+    const path = await nodeModule<Path>("node:path");
+    const file = path.join(await fixturesDir(), order.dir, key, "carried.bin");
+    const state = new Uint8Array(await fs.readFile(file));
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, state);
+    expect(line(stored(doc)), "le document gardé").toBe(page);
+    const first = await peer("Rouvre 1", 7, state);
+    const second = await peer("Rouvre 2", 8, state);
+    expect(first.writes.length + second.writes.length, "rien d'écrit à l'ouverture").toBe(0);
+    expect(xml(first.doc)).toBe(xml(doc));
+    expect(xml(second.doc)).toBe(xml(doc));
+    expect(line(shown(first))).toBe(page);
+    expect(line(shown(second))).toBe(page);
   });
 });

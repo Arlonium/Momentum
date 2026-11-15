@@ -92,6 +92,6 @@
   ],
   "clientsAlone": {
     "monaFirst": "limite R222 : la frappe arrive après le déplacement",
-    "tomFirst": "attend le report du serveur, Task 13b"
+    "tomFirst": "reporté par le serveur Rust (Task 13b), que ce banc n'a pas"
   }
 }
