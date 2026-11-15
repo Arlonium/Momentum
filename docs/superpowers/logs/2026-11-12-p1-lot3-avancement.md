@@ -48,6 +48,25 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 
 Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête poussée, **sans clone neuf**) : `cargo fmt` et `cargo clippy -D warnings` propres ; `cargo test --workspace` : **723 verts**, 15 ignorés (les mesures en release et les tests de la limite R39) ; client : **516 verts et 12 marqués `test.fails`** (les scénarios du bloc déplacé), typecheck propre ; licences npm propres au dernier relevé (aucun paquet ajouté sur `main`) ; e2e : suite entière relancée sur `main` à la pause, correctif du défaut critique compris : **159 verts**, 2 `fixme` voulus (bloc déplacé), et 1 échec, `space_without_a_role_is_not_found` : une course du test lui-même, qui comparait l'écran pendant que la barre latérale disait encore « Chargement… » (reproduite à coup sûr en retardant la lecture de l'arbre) ; le test attend maintenant la fin du chargement, et passe dix fois de suite ; la suite entière n'a pas été relancée après cette correction d'un seul test ; budgets du navigateur, mesurés dans l'atelier de la part e2e sur un poste occupé : 1 000 blocs à 160 ms au p95 (budget 300), 10 000 blocs en 1,38 s (budget 3 s) ; côté serveur, en release : frappe vue par un autre à 2,0 à 2,3 ms au p95, 42,8 ms quand elle déclenche la coupe d'une version (budget 150).
 
+## Poste neuf du 2026-11-15 : les ateliers du 14 sont perdus (prime sur tout ce qui suit)
+
+**Le 2026-11-15, le travail reprend sur un poste réinstallé**, depuis un clone neuf de `origin/main` (`8921417`). Lenny confirme que l'ancien poste n'est plus accessible : **tout ce qui n'était pas poussé est perdu**, c'est-à-dire les ateliers de la section suivante (« Depuis la reprise du 2026-11-14 ») et de celle de la pause du 13 qui n'avaient pas été repris : le tour 3 de la piste S (et ce que sa re-relecture avait trouvé, gardé sous `.superpowers/`), la Task 13b, C1b et son tour de correction, C2, C7, le refus `401` tardif, S4a commencée, ainsi que les prototypes de l'essai du bloc déplacé et tous les rapports et sondes de `.superpowers/sdd/`. `data/instance` (l'instance d'Alex) n'existe pas sur ce poste. Ce que ces travaux avaient trouvé reste décrit dans ce fichier et dans la [relecture finale](2026-11-12-p1-lot3-relecture-finale.md) : c'est de là qu'ils sont refaits, chaque résultat étant reprouvé par un test.
+
+**Les Rulings de ces ateliers n'ont jamais été au registre** : leurs plages sont reprises par les travaux refaits (R306 à R314 et R400 à R409 pour C1b, R346 pour sa mesure ; R315 à R319 et R420 à R429 pour C2 ; R347, R348 pour le refus `401` ; R371 à R379 pour la 13b ; R380 à R389 et R430 à R439 pour la piste S ; R390 à R399 pour S4a ; R410 à R419 pour C7). Un numéro cité plus bas dans ce fichier pour l'un de ces travaux désigne la décision perdue, pas celle du travail refait.
+
+**Vérifié sur le poste neuf, à `8921417`** (outils installés le jour même : Visual Studio Build Tools 2022, Rust 1.100 par rustup, Node 24.22.3, Python 3.15, gh 2.104) : `cargo fmt` et `cargo clippy -D warnings` propres sous Rust 1.100 ; `cargo test --workspace` : **854 verts, 15 ignorés** (des mesures), en 3 min 22 ; client : **933 verts et 40 échecs attendus**, typecheck propre, licences npm propres ; la CI de GitHub est verte sur `8921417`.
+
+**Relancé le 2026-11-15, quatre ateliers de front** (sous `.claude/worktrees/`, jamais poussés : Lenny a décidé le 2026-11-15 de ne pas les pousser comme sauvegarde) :
+
+| Atelier (branche) | Travail | Ports e2e | Rulings |
+|---|---|---|---|
+| `lot3-s-tour3` | piste S, tour de correction 3, fondu avec le tour 4 (mémoire quadratique d'un `<span>` à couleur longue ; R385 peut-être exponentielle) | 5178, 8085 | R380 à R389, R430 à R439 |
+| `lot3-13b` | Task 13b, le report sur le bloc recréé | 5180, 8087 | R371 à R379, R450 à R459 |
+| `lot3b-client` | Task C1b, refaite avec les exigences de sa relecture perdue (fenêtre tenue par l'`id` du bloc, props lues par type, Ctrl+Alt+Entrée, R308 récrit) ; puis C2 dans le même atelier | 5177, 8084 | R306 à R314, R400 à R409, R346 |
+| `lot3b-c7` | Task C7, favoris côté client | 5179, 8086 | R410 à R419 |
+
+**En file :** le refus `401` tardif (`api.ts`, R347, R348) ; S4a (R390 à R399) ; C2 après C1b ; la tâche « CI, suite » (R440 à R444 : les deux tests de synchro sensibles au minutage sous Windows, et les deux e2e qui supposent que la barre latérale n'a pas encore appris un changement fait par l'API) ; la tâche serveur de robustesse (R445 à R449).
+
 ## Depuis la reprise du 2026-11-14 (tenu à jour ; prime sur la section de la pause, qui suit)
 
 **Le travail a repris le 2026-11-14 à 0 h 55** (« continue le travail »). Rien n'avait bougé pendant la pause ; le dossier temporaire du système a été vidé par le propriétaire (111 Go libres). Les agents arrêtés à la pause ont été repris là où ils en étaient.
