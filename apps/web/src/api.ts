@@ -99,6 +99,7 @@ const SESSION_ROUTES: ReadonlySet<string> = new Set([SIGNUP, LOGIN, LOGOUT, PASS
 /** La session de l'onglet au moment où un appel part (Ruling R347). */
 type Stamp = {
   generation: number;
+  /** `acting` : le compte pour lequel l'appel part, s'il est sûr ; sinon `null`. */
   account: string | null;
   epoch: number;
 };
@@ -109,27 +110,53 @@ type Stamp = {
  */
 let generation = 0;
 /**
- * Le compte de la session, tel que le serveur l'a dit en dernier pour la génération en cours ;
- * `null` : pas encore dit, ou déconnexion demandée.
+ * Le compte de l'application : celui qu'elle a chargé (premier `GET /api/v1/me` qui répond),
+ * ou celui de la session que l'onglet a ouverte ; `null` : aucun, ou déconnexion demandée. Une
+ * relecture qui dit un autre compte ne le change pas : l'application va repartir de zéro (R115),
+ * et elle agit jusque-là pour celui-ci.
  */
-let account: string | null = null;
-/** Avance chaque fois que `account` change : un autre compte, ou la déconnexion. */
+let appAccount: string | null = null;
+/**
+ * Le compte de la session, tel que le serveur l'a dit en dernier pour la génération en cours
+ * (un autre onglet du navigateur a pu s'y connecter sous un autre) ; `null` : pas encore dit.
+ */
+let sessionAccount: string | null = null;
+/**
+ * Le compte pour lequel un appel part, quand l'application et la session s'accordent ; `null`
+ * sinon : un appel parti alors n'est jamais rejoué (R348).
+ */
+let acting: string | null = null;
+/** Avance chaque fois que `acting` change : un autre compte, ou la déconnexion. */
 let epoch = 0;
 /** Les sessions qui s'ouvrent ou se ferment en ce moment : un refus de session attend leur issue. */
 const changing = new Set<Promise<void>>();
 
-const stamp = (): Stamp => ({ generation, account, epoch });
+const stamp = (): Stamp => ({ generation, account: acting, epoch });
 
-function noteAccount(id: string | null) {
-  if (id === account) return;
-  account = id;
+/** Recalcule `acting`, et avance `epoch` s'il change. */
+function settleAccounts() {
+  const now = sessionAccount !== null && sessionAccount === appAccount ? appAccount : null;
+  if (now === acting) return;
+  acting = now;
   epoch += 1;
 }
 
-/** L'onglet vient d'ouvrir une session pour le compte `id`. */
+/**
+ * Le serveur vient de dire le compte de la session en cours. `loads` : c'est une lecture de
+ * l'application (`getMe`), qui la charge sous ce compte si elle ne l'est pas encore.
+ */
+function sessionIs(id: string, loads: boolean) {
+  if (loads && appAccount === null) appAccount = id;
+  sessionAccount = id;
+  settleAccounts();
+}
+
+/** L'onglet vient d'ouvrir une session pour le compte `id` : l'application est à lui. */
 function opened(id: string) {
   generation += 1;
-  noteAccount(id);
+  appAccount = id;
+  sessionAccount = id;
+  settleAccounts();
 }
 
 /** Mène `run`, qui ouvre ou ferme la session de l'onglet : un refus de session attend son issue. */
@@ -153,9 +180,10 @@ async function changeSession<T>(run: () => Promise<T>): Promise<T> {
  * - `stale` : le refus vise une session que l'onglet a remplacée ou fermée depuis, et ne dit
  *   rien de la session en cours ; l'appel ne repart pas ;
  * - `replay` : de même, et l'appel repart une fois sous la session en cours. Il faut qu'il ne
- *   soit pas déjà reparti, que ce ne soit pas une route de session, qu'il soit parti sous un
- *   compte connu, que l'onglet n'ait vu depuis ni un autre compte ni une déconnexion, et que le
- *   compte relu à l'instant (`GET /api/v1/me`) soit celui sous lequel il est parti.
+ *   soit pas déjà reparti, que ce ne soit pas une route de session, qu'il soit parti pour un
+ *   compte sûr (`acting` : celui de l'application, quand la session était à lui), que ce compte
+ *   n'ait pas changé depuis (ni un autre, ni la déconnexion), et que le compte relu à l'instant
+ *   (`GET /api/v1/me`) soit le sien.
  * Un échec de cette relecture est levé à la place du refus : l'appel le dit (un refus de session
  * de la relecture a été jugé par elle, et a demandé la connexion s'il le fallait).
  */
@@ -172,17 +200,17 @@ async function judge(
   }
   if (sent.generation === generation) return "lost";
   if (sessionRoute || replays > 0 || sent.account === null || sent.epoch !== epoch) return "stale";
-  const verified = await sessionAccount();
+  const verified = await readSessionAccount();
   // Le compte a pu changer pendant la relecture (une connexion de l'onglet sous un autre) : sa
   // réponse, partie avant, ne dit plus rien.
   return verified === sent.account && sent.epoch === epoch ? "replay" : "stale";
 }
 
 /** Le compte de la session, relu, sans rejeu : celui que le navigateur porte à l'instant. */
-async function sessionAccount(): Promise<string> {
+async function readSessionAccount(): Promise<string> {
   const at = generation;
   const me = (await (await send("GET", ME, undefined, undefined, 1)).json()) as Me;
-  if (at === generation) noteAccount(me.user.id);
+  if (at === generation) sessionIs(me.user.id, false);
   return me.user.id;
 }
 
@@ -244,7 +272,7 @@ export async function getMe(): Promise<Me> {
   const at = generation;
   const me = await call<Me>("GET", ME);
   // Une réponse d'une session remplacée depuis ne dit pas le compte de la session en cours.
-  if (at === generation) noteAccount(me.user.id);
+  if (at === generation) sessionIs(me.user.id, true);
   return me;
 }
 
@@ -270,7 +298,9 @@ export function logIn(body: LogIn): Promise<Me> {
 export function logOut(): Promise<void> {
   // Rien de ce qui est parti avant, ou part pendant, ne sera rejoué : ni sous ce compte, même
   // reconnecté, ni sous un autre.
-  noteAccount(null);
+  appAccount = null;
+  sessionAccount = null;
+  settleAccounts();
   return changeSession(async () => {
     try {
       await call<void>("POST", LOGOUT);

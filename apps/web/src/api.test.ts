@@ -253,6 +253,48 @@ test("a_call_is_not_sent_again_when_the_session_has_passed_to_another_account", 
   expect(count("GET", "/api/v1/pages/p2")).toBe(1);
 });
 
+test("a_call_sent_once_the_session_is_known_to_be_another_account_is_never_sent_again", async () => {
+  // Trouvé par `sessionReplaysAtRandom.test.ts` (graine 169).
+  await loadedAs("alice");
+  const first = api.getPage("p1").catch(() => {});
+  const sent = await waiting("GET", "/api/v1/pages/p1");
+  await logIn("alice");
+  sent.answer(401, UNAUTHENTICATED);
+  // La relecture d'avant le rejeu apprend que la session est à Bruno (un autre onglet).
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
+  await first;
+  // L'application d'Alice, qui ne le sait pas encore, écrit : l'appel part avec le cookie de
+  // Bruno, sans qu'on y puisse rien. Puis Bruno se connecte dans l'onglet ; le refus revient.
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const refused = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("bruno");
+  refused.answer(401, UNAUTHENTICATED);
+  await flush();
+  // Le titre d'Alice ne repart pas sous la session de Bruno, et le compte n'est pas relu pour cela.
+  expect(count("GET", "/api/v1/me")).toBe(2);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("a_call_sent_once_the_account_read_again_is_another_is_never_sent_again", async () => {
+  await loadedAs("alice");
+  // La relecture du compte (retour sur l'onglet) dit Bruno : l'application va repartir de zéro
+  // (R115), mais ce qu'elle a envoyé entre-temps n'est pas à Bruno.
+  const reading = api.getMe();
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
+  await reading;
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const refused = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("bruno");
+  refused.answer(401, UNAUTHENTICATED);
+  await flush();
+  expect(count("GET", "/api/v1/me")).toBe(2);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
 test("a_call_that_left_before_a_logout_is_never_sent_again", async () => {
   await loadedAs("alice");
   const write = api.updatePage("p1", { title: "Titre d'Alice" });

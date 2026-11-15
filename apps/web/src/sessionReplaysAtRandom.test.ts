@@ -10,20 +10,29 @@
 // Ce qui doit toujours tenir :
 // - un appel repart au plus une fois ;
 // - jamais une route de session ;
-// - jamais sous un autre compte que celui sous lequel il est parti : le cookie que porte le rejeu
-//   est celui d'une session d'Alice, ou d'aucune ;
+// - jamais sous un autre compte que celui de l'application (Alice), qui l'a envoyé : le rejeu
+//   porte le cookie d'une session d'Alice, ou d'aucune ; sauf dans la fenêtre dite plus bas ;
 // - jamais s'il est parti avant que l'onglet commence à se déconnecter.
 //
-// Le modèle ne joue un événement qu'entre deux tours de la boucle (`flush`), comme le navigateur
-// entre deux réponses du réseau : il ne voit pas l'intervalle de quelques millisecondes entre la
-// relecture du compte et le rejeu, où un autre onglet pourrait se connecter (R348, coût si faux).
+// La fenêtre (R348, coût si faux). Le rejeu ne part que si la relecture du compte qui le précède a
+// dit Alice ; mais cette relecture part avec le cookie du moment, et le rejeu avec celui de sa
+// réponse. Si un autre onglet se connecte sous Bruno pendant la relecture, le rejeu part avec le
+// cookie de Bruno : la page ne lit pas son cookie (`HttpOnly`), seul le serveur pourrait l'empêcher.
+// L'essai l'affirme donc là où il se peut : un rejeu qui porte le cookie qu'a porté sa relecture
+// est sous Alice, toujours ; un rejeu qui porte un autre cookie est compté (`window`), pas
+// reproché. Le modèle ne joue un événement qu'entre deux tours de la boucle (`flush`), comme le
+// navigateur entre deux réponses du réseau : le rejeu part dans le tour de la réponse de sa
+// relecture.
 //
-// `MEMENTUM_FUZZ_SEEDS=500` (et `MEMENTUM_FUZZ_STEPS`) élargit l'essai.
+// Trouvé par cet essai, et corrigé : un appel parti quand l'onglet avait appris que la session
+// était à Bruno (graine 169), daté de Bruno, repartait sous Bruno (`acting`, `api.ts`).
+//
+// `MEMENTUM_FUZZ_SEEDS=5000` (et `MEMENTUM_FUZZ_STEPS`) élargit l'essai.
 import type { Me } from "@mementum/protocol";
 import { afterEach, expect, test, vi } from "vitest";
 import { page } from "./test/pages";
 
-const SEEDS = Number(import.meta.env.MEMENTUM_FUZZ_SEEDS ?? 60);
+const SEEDS = Number(import.meta.env.MEMENTUM_FUZZ_SEEDS ?? 1000);
 const STEPS = Number(import.meta.env.MEMENTUM_FUZZ_STEPS ?? 40);
 
 const ALICE = "alice";
@@ -77,7 +86,7 @@ type InFlight = {
 };
 
 /** Ce que l'essai a vu passer, toutes graines confondues : il n'est pas vide de sens. */
-const seen = { replays: 0, refusedOtherAccount: 0, sessionCalls: 0 };
+const seen = { replays: 0, refusedOtherAccount: 0, sessionCalls: 0, window: 0 };
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -135,6 +144,8 @@ async function play(seed: number): Promise<void> {
   let sessionFetches = 0;
   /** L'essai relit lui-même le compte : l'appel qui part n'est pas une relecture d'`api.ts`. */
   let reading = false;
+  /** Le cookie qu'a porté la dernière relecture d'`api.ts` à laquelle le serveur a répondu. */
+  let readWith: number | null | undefined;
 
   vi.stubGlobal("fetch", (path: string, init: RequestInit = {}) => {
     const method = init.method ?? "GET";
@@ -152,7 +163,11 @@ async function play(seed: number): Promise<void> {
         if (write.sends > 2) breach(`${key} repart une deuxième fois`);
         if (logouts !== write.logoutsAtSend) breach(`${key}, parti avant une déconnexion, repart`);
         const owner = ownerOf(token);
-        if (owner !== null && owner !== ALICE) breach(`${key}, parti sous Alice, repart sous ${owner}`);
+        if (owner !== null && owner !== ALICE) {
+          // La relecture qui l'a permis portait un autre cookie : la fenêtre de l'en-tête.
+          if (token === readWith) breach(`${key}, parti sous Alice, repart sous ${owner}`);
+          else seen.window += 1;
+        }
       }
     }
     const verification = method === "GET" && path === "/api/v1/me" && !reading;
@@ -164,6 +179,8 @@ async function play(seed: number): Promise<void> {
         token,
         verification,
         respond() {
+          // Le rejeu qu'elle permet part dans ce tour, avant tout autre événement.
+          if (verification) readWith = token;
           // Le serveur juge la session quand il répond ; un cookie neuf est posé avant que la page
           // lise la réponse.
           if (path === "/api/v1/auth/login") {
