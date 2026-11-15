@@ -464,6 +464,7 @@ pub(crate) mod tests {
             files: Arc::new(crate::files::FileStore::open(dir.path()).unwrap()),
             max_file_bytes: crate::config::DEFAULT_MAX_FILE_MB << 20,
             upload_idle: crate::config::UPLOAD_IDLE,
+            mmd_reads: Arc::default(),
         }
     }
 

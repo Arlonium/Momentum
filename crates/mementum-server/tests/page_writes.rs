@@ -810,3 +810,53 @@ async fn threads_queued_behind_the_actor_stop_with_the_session() {
         "fils écrits sans la session : {without}, avec : {with} ; statuts : {statuses:?}"
     );
 }
+
+/// Ruling R383 : la lecture d'un MMD et l'estimation de son écriture se font hors des fils du
+/// serveur. Sur un seul fil (le moteur de ce test), un `PUT /mmd` long à lire (600 Ko de plages
+/// alternées, refusé ensuite comme trop long à écrire) laissait toute autre requête attendre la
+/// fin de sa lecture. Les lectures de page faites pendant ce temps répondent maintenant chacune
+/// bien avant. Le test ne peut pas passer à tort : une lecture faite sur le fil du serveur
+/// arrêterait celle des pages en cours (le seul fil est pris, et la boucle n'a pas d'autre
+/// attente que ses requêtes) ; il vérifie que la lecture du MMD a assez duré pour le voir.
+#[tokio::test]
+async fn mmd_is_read_off_the_server_threads() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Lue à part", &[user(&team.olga, Level::Full)])
+        .await;
+    let mmd = "a*b*".repeat(150_000) + "\n";
+    let put = request(
+        &team.olga,
+        Request::put(format!("/api/v1/pages/{page}/mmd"))
+            .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+        Body::from(mmd),
+    );
+    let router = t.router.clone();
+    let start = std::time::Instant::now();
+    let writing = tokio::spawn(async move { router.oneshot(put).await.unwrap().status() });
+    let (mut worst, mut reads) = (Duration::ZERO, 0);
+    while !writing.is_finished() {
+        let get = request(
+            &team.olga,
+            Request::get(format!("/api/v1/pages/{page}")),
+            Body::empty(),
+        );
+        let begin = std::time::Instant::now();
+        let status = t.router.clone().oneshot(get).await.unwrap().status();
+        assert_eq!(status, StatusCode::OK);
+        worst = worst.max(begin.elapsed());
+        reads += 1;
+    }
+    let took = start.elapsed();
+    assert_eq!(writing.await.unwrap(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        took >= Duration::from_millis(300),
+        "la lecture du MMD a pris {took:?} : trop peu pour rien prouver"
+    );
+    assert!(
+        worst < took / 4,
+        "une lecture de page a attendu {worst:?} pendant les {took:?} du PUT /mmd ({reads} \
+         lectures)"
+    );
+}

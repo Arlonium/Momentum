@@ -611,23 +611,8 @@ pub(crate) async fn put_mmd(
     // Premier contrôle : les refus, avant que le corps soit lu.
     state.node_access(&user, id, Action::Edit).await?;
     let body = body?;
-    let text = std::str::from_utf8(&body).map_err(|e| {
-        let line = body[..e.valid_up_to()]
-            .iter()
-            .filter(|&&b| b == b'\n')
-            .count()
-            + 1;
-        ApiError::from(mementum_md::MmdError {
-            line,
-            message: "le texte n'est pas de l'UTF-8 valide".to_string(),
-        })
-    })?;
-    let mut blocks = parse(text)?;
-    registered_props_only(&blocks)?;
-    unknown_not_foreign(&mut blocks);
-    // Rulings R259 et R368 : avant le verrou et avant de charger la page.
-    at_most_blocks(&blocks)?;
-    within_write_budget(&blocks)?;
+    // Ruling R383 : la lecture et l'estimation, hors des fils du serveur, à leur tour.
+    let blocks = state.mmd_reads.run(move || read_mmd(&body)).await??;
     // Ruling R200 : une écriture du serveur à la fois par page, comme la restauration d'une
     // version. Le verrou se prend une fois le corps lu, et ce qui suit va au bout, verrou
     // tenu, même si le client coupe.
@@ -645,6 +630,30 @@ pub(crate) async fn put_mmd(
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Le corps d'un `PUT /mmd`, lu et vérifié : UTF-8, MMD canonique, props du registre (Ruling
+/// R41), puis les deux bornes de l'écriture (Rulings R259 et R368), avant le verrou et avant de
+/// charger la page. Un calcul qui ne touche ni à la base ni à la page : il tourne sur le fil
+/// bloquant (Ruling R383).
+fn read_mmd(body: &[u8]) -> Result<Vec<Block>, ApiError> {
+    let text = std::str::from_utf8(body).map_err(|e| {
+        let line = body[..e.valid_up_to()]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count()
+            + 1;
+        ApiError::from(mementum_md::MmdError {
+            line,
+            message: "le texte n'est pas de l'UTF-8 valide".to_string(),
+        })
+    })?;
+    let mut blocks = parse(text)?;
+    registered_props_only(&blocks)?;
+    unknown_not_foreign(&mut blocks);
+    at_most_blocks(&blocks)?;
+    within_write_budget(&blocks)?;
+    Ok(blocks)
 }
 
 /// Ruling R259 : au plus [`MAX_MMD_BLOCKS`] blocs, à tous les niveaux, lignes de tableau
