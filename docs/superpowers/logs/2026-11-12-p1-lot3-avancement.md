@@ -64,8 +64,9 @@ Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête 
 | `lot3-13b` | Task 13b, le report sur le bloc recréé | 5180, 8087 | R371 à R379, R450 à R459 |
 | `lot3b-client` | Task C1b, refaite avec les exigences de sa relecture perdue (fenêtre tenue par l'`id` du bloc, props lues par type, Ctrl+Alt+Entrée, R308 récrit) ; puis C2 dans le même atelier | 5177, 8084 | R306 à R314, R400 à R409, R346 |
 | `lot3b-c7` | Task C7, favoris côté client | 5179, 8086 | R410 à R419 |
+| `lot3b-api401` | le refus `401` parti avant la connexion et revenu après (`api.ts`) ; à trancher : le rejeu d'une écriture | 5181, 8088 | R347, R348, R460 à R464 |
 
-**En file :** le refus `401` tardif (`api.ts`, R347, R348) ; S4a (R390 à R399) ; C2 après C1b ; la tâche « CI, suite » (R440 à R444 : les deux tests de synchro sensibles au minutage sous Windows, et les deux e2e qui supposent que la barre latérale n'a pas encore appris un changement fait par l'API) ; la tâche serveur de robustesse (R445 à R449).
+**En file :** S4a (R390 à R399) ; C2 après C1b ; la tâche « CI, suite » (R440 à R444 : les deux tests de synchro sensibles au minutage sous Windows, et les deux e2e qui supposent que la barre latérale n'a pas encore appris un changement fait par l'API) ; la tâche serveur de robustesse (R445 à R449).
 
 ## Depuis la reprise du 2026-11-14 (tenu à jour ; prime sur la section de la pause, qui suit)
 
