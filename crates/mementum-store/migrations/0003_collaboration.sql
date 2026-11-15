@@ -1,5 +1,6 @@
--- Lot 3 : la version de l'espace (`spaces.lsn`, Ruling R133), les commentaires (R134), les
--- versions de page (R135) et les déplacements de blocs (R138).
+-- Lot 3 : la version de l'espace (`spaces.lsn`, Ruling R133), les commentaires (R134) et les
+-- versions de page (R135). La table des déplacements de blocs que prévoyait R138 est retirée :
+-- le report d'un bloc recréé se fait sans état, à l'arrivée du déplacement (Task 13b, R221).
 --
 -- Une seule migration pour le lot, qui peut changer jusqu'à sa clôture (Ruling R139) : aucun
 -- binaire du lot n'ouvre d'ici là les données d'une instance que quelqu'un regarde.
@@ -10,9 +11,9 @@
 -- l'arbre.
 --
 -- Les tables neuves suivent leur page (`ON DELETE CASCADE`) : supprimer un nœud supprime ses fils
--- de commentaires (et, de proche en proche, leurs messages et leurs réactions), ses versions et
--- ses déplacements de blocs. Chaque clé suivie a un index qui commence par elle : sans lui,
--- SQLite relirait toute la table fille pour chaque ligne supprimée (voir `0002`).
+-- de commentaires (et, de proche en proche, leurs messages et leurs réactions) et ses versions.
+-- Chaque clé suivie a un index qui commence par elle : sans lui, SQLite relirait toute la table
+-- fille pour chaque ligne supprimée (voir `0002`).
 
 ALTER TABLE spaces ADD COLUMN lsn INTEGER NOT NULL DEFAULT 0;
 
@@ -71,11 +72,3 @@ CREATE TABLE doc_versions (
     state_blob BLOB NOT NULL
 );
 CREATE INDEX doc_versions_by_node ON doc_versions (node_id, seq, created_at);
-
-CREATE TABLE block_moves (
-    node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-    seq INTEGER NOT NULL,           -- seq de la mise à jour qui a déplacé
-    record BLOB NOT NULL,           -- écrit par `mementum-crdt` (Task 13)
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (node_id, seq)
-);

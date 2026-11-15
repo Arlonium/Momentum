@@ -95,11 +95,10 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 }
 
 /// Les tables d'une base à jour, par nom.
-const ALL_TABLES: [&str; 19] = [
+const ALL_TABLES: [&str; 18] = [
     "_sqlx_migrations",
     "acl",
     "attachments",
-    "block_moves",
     "comment_reactions",
     "comment_threads",
     "comments",
@@ -122,12 +121,11 @@ const FILES_AND_FAVORITES_TABLES: [&str; 3] = ["files", "attachments", "favorite
 
 /// Les tables de la collaboration, que la migration `0003` crée et que les tâches suivantes du
 /// lot remplissent.
-const COLLABORATION_TABLES: [&str; 5] = [
+const COLLABORATION_TABLES: [&str; 4] = [
     "comment_threads",
     "comments",
     "comment_reactions",
     "doc_versions",
-    "block_moves",
 ];
 
 /// Les noms des tables de la base, hors tables internes de SQLite.
@@ -805,7 +803,6 @@ async fn lot2_database_gains_the_collaboration_tables() {
         set(&["comments", "users"])
     );
     assert_eq!(foreign_tables(&db, "doc_versions").await, set(&["nodes"]));
-    assert_eq!(foreign_tables(&db, "block_moves").await, set(&["nodes"]));
     assert_eq!(
         int(&db, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
         0
@@ -822,7 +819,7 @@ async fn lot2_database_gains_the_collaboration_tables() {
 /// Ce qu'une base de la partie A du lot 3 porte en plus d'une base du lot 2, écrit en SQL comme
 /// le code de la partie A l'écrit : la version d'un espace, un fil de commentaires résolu sur un
 /// bloc, avec un message modifié et une réaction, et une version de page aux octets qui ne sont
-/// pas de l'UTF-8. Rien dans `block_moves`, que la Task 13b retire de `0003`.
+/// pas de l'UTF-8.
 async fn lot3a_data(pool: &SqlitePool, space: Uuid) {
     let space = space.to_string();
     let olga: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'olga@exemple.test'")
@@ -995,11 +992,11 @@ async fn lot3a_database_gains_files_and_favorites() {
 }
 
 /// Supprimer une page supprime, avec elle et son sous-arbre, leurs fils de commentaires (et leurs
-/// messages et réactions), leurs versions, leurs déplacements de blocs, leurs attaches et les
+/// messages et réactions), leurs versions, leurs attaches et les
 /// favoris qui les nomment, par les clés étrangères (`ON DELETE CASCADE`) ; ceux d'une autre page
 /// restent. Les contenus (`files`) restent tous : c'est au ménage de les retirer (Ruling R245).
 #[tokio::test]
-async fn deleting_a_page_deletes_its_threads_versions_and_moves() {
+async fn deleting_a_page_deletes_its_threads_versions_and_attachments() {
     let f = common::fresh().await;
     let author = common::new_user(&f.db).await.to_string();
     let parent = f
@@ -1049,12 +1046,6 @@ async fn deleting_a_page_deletes_its_threads_versions_and_moves() {
              (id, node_id, seq, covers_seq, state_blob, reason, authors, created_at) \
              VALUES (?1, ?2, 3, 3, x'00ff', 'periodic', '[]', 1)",
             &[&Uuid::now_v7().to_string(), &node],
-        )
-        .await;
-        exec(
-            &pool,
-            "INSERT INTO block_moves (node_id, seq, record, created_at) VALUES (?1, ?2, x'01', 1)",
-            &[&node, &(n + 1).to_string()],
         )
         .await;
         // Un contenu par page, attaché à elle, et la page en favori.
@@ -1126,10 +1117,6 @@ async fn deleting_a_page_deletes_its_threads_versions_and_moves() {
         (
             "doc_versions",
             format!("SELECT COUNT(*) FROM doc_versions WHERE node_id = '{other}'"),
-        ),
-        (
-            "block_moves",
-            format!("SELECT COUNT(*) FROM block_moves WHERE node_id = '{other}'"),
         ),
         (
             "attachments",
