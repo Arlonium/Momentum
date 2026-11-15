@@ -283,3 +283,56 @@ test("favorites_hold_still_under_the_pointer_until_it_leaves", async ({ browser 
   await expect.poll(() => favorites(p)).toEqual([renamed]);
   expect((await treeRow(p, second.id).boundingBox())!.y).toBeGreaterThan(before.y);
 });
+
+test("a_favorite_set_from_the_page_menu_shows_at_once_with_the_mouse_on_the_sidebar", async ({
+  browser,
+}) => {
+  // La souris repose sur la barre latérale, et la personne travaille au clavier : le favori posé
+  // par le menu de la page est son geste, il se voit tout de suite (R411).
+  const account = await signUpAccount(`Lou ${unique()}`);
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const other = await createPage(api, { section: "private", title: `Autre ${unique()}` });
+  const page = await createPage(api, { section: "private", title: `Au clavier ${unique()}` });
+  const p = await openPage(browser, page.id, account);
+  await expect.poll(() => serverFavorites(api, space.id)).toEqual([]);
+  await treeRow(p, other.id).hover();
+  await pageMenuButton(p).focus();
+  await p.keyboard.press("Enter");
+  await expect(p.getByRole("menuitem", { name: "Ajouter aux favoris" })).toBeFocused();
+  await p.keyboard.press("Enter");
+  await expect.poll(() => favorites(p)).toEqual([page.title]);
+  await expect.poll(() => serverFavorites(api, space.id)).toEqual([page.id]);
+});
+
+test("favorites_are_read_after_the_tree_on_a_cold_open", async ({ browser }) => {
+  // Rien sur le chemin de l'ouverture d'une page : la liste des favoris part une fois l'arbre de
+  // l'espace reçu, jamais avant, et la page est demandée avant l'un et l'autre.
+  const account = await signUpAccount(`Cole ${unique()}`);
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const page = await createPage(api, { section: "private", title: `À froid ${unique()}` });
+  expect((await api.put(`/api/v1/pages/${page.id}/favorite`)).status()).toBe(204);
+  const p = await newUser(browser, account);
+  const events: string[] = [];
+  p.on("request", (request) => {
+    const { pathname } = new URL(request.url());
+    if (pathname.startsWith("/api/")) events.push(`-> ${pathname}`);
+  });
+  p.on("requestfinished", (request) => {
+    const { pathname } = new URL(request.url());
+    if (pathname.startsWith("/api/")) events.push(`<- ${pathname}`);
+  });
+  await p.goto(`/p/${page.id}`);
+  await waitSynced(p);
+  await expect.poll(() => favorites(p)).toEqual([page.title]);
+  const at = (event: string) => {
+    const index = events.indexOf(event);
+    expect(index, `${event} dans ${events.join(", ")}`).toBeGreaterThanOrEqual(0);
+    return index;
+  };
+  const tree = `/api/v1/spaces/${space.id}/tree`;
+  const list = `/api/v1/spaces/${space.id}/favorites`;
+  expect(at(`<- ${tree}`), events.join(", ")).toBeLessThan(at(`-> ${list}`));
+  expect(at(`-> /api/v1/pages/${page.id}`)).toBeLessThan(at(`-> ${list}`));
+});
