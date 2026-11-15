@@ -452,7 +452,8 @@ test("page_one_can_only_read_offers_no_action", async ({ browser }) => {
   const shared = sectionOf(b, "Partagé");
   await expect(shared.getByRole("treeitem")).toHaveCount(3);
 
-  // En lecture, et sa sous-page avec elle : ni « … », ni « + », ni saisie pour la glisser.
+  // En lecture, et sa sous-page avec elle : ni « + », ni saisie pour la glisser ; un « … » qui
+  // n'offre que le favori de la page (R254, à tout niveau), qui ne change rien à la page.
   for (const [id, title] of [
     [read.id, "À lire"],
     [sub.id, "Annexe"],
@@ -460,13 +461,16 @@ test("page_one_can_only_read_offers_no_action", async ({ browser }) => {
     const row = treeRow(b, id);
     await row.hover();
     await expect(row.getByRole("link")).toHaveText(title);
-    await expect(row.getByRole("button", { name: /^Actions de/ })).toHaveCount(0);
+    const menu = await openRowMenu(b, id, title);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Ajouter aux favoris"]);
+    await b.keyboard.press("Escape");
     await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toHaveCount(0);
     await expect(row).not.toHaveAttribute("draggable", "true");
   }
-  // Seul le repli d'une page qui a des sous-pages reste : il ne change rien sur le serveur.
-  await expect(treeRow(b, read.id).getByRole("button")).toHaveCount(1);
-  await expect(treeRow(b, sub.id).getByRole("button")).toHaveCount(0);
+  // Restent le repli d'une page qui a des sous-pages et le « … » : ni l'un ni l'autre ne change la
+  // page sur le serveur.
+  await expect(treeRow(b, read.id).getByRole("button")).toHaveCount(2);
+  await expect(treeRow(b, sub.id).getByRole("button")).toHaveCount(1);
 
   // En modification : les deux boutons, et la ligne se saisit.
   const editable = treeRow(b, edit.id);

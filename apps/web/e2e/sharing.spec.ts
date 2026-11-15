@@ -261,10 +261,11 @@ test("downgrade_to_read_makes_the_open_editor_read_only", async ({ browser }) =>
   await b.keyboard.type("Écrit par Bruno");
   await expect.poll(() => getMmd(aliceApi, shared.id)).toBe("Écrit par Bruno\n");
   expect(await b.evaluate(() => window.__mementum!.readOnly)).toBe(false);
-  // Sa ligne de la barre latérale offre ses actions.
+  // Sa ligne de la barre latérale offre les actions de qui modifie (le « + » d'une sous-page ; le
+  // « … » est là à tout niveau, pour le favori, R254).
   const row = treeRow(b, shared.id);
   await row.hover();
-  await expect(row.getByRole("button", { name: /^Actions de/ })).toBeVisible();
+  await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toBeVisible();
 
   // A le fait passer en lecture, par le menu Partager.
   const writes = watchWrites(b);
@@ -280,9 +281,9 @@ test("downgrade_to_read_makes_the_open_editor_read_only", async ({ browser }) =>
   await expect(editor).toHaveAttribute("contenteditable", "false");
   await expect(editor).toContainText("Écrit par Bruno");
   await expect(titleOf(b)).toHaveAttribute("readonly", "");
-  // La ligne de la barre latérale suit : plus d'actions.
+  // La ligne de la barre latérale suit : plus d'actions de qui modifie.
   await row.hover();
-  await expect(row.getByRole("button", { name: /^Actions de/ })).toHaveCount(0);
+  await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toHaveCount(0);
   await expect(row).not.toHaveAttribute("draggable", "true");
 
   // Ce que B tape ne part plus ; ce qu'écrit A lui arrive toujours.
@@ -500,10 +501,10 @@ test("page_raised_before_it_is_opened_opens_for_editing", async ({ browser }) =>
   await expect(row).toBeVisible();
 
   // A lui donne « Peut modifier ». Rien ne le dit à l'onglet de B, qui n'a pas la page ouverte :
-  // sa barre latérale date d'avant, et la ligne n'offre toujours aucune action.
+  // sa barre latérale date d'avant, et la ligne n'offre toujours aucune action de qui modifie.
   await setPageLevel(aliceApi, shared.id, brunoId, "edit");
   await row.hover();
-  await expect(row.getByRole("button", { name: /^Actions de/ })).toHaveCount(0);
+  await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toHaveCount(0);
 
   // B ouvre la page. C'est une ouverture : elle se modifie d'emblée, sans demander à être
   // rouverte.
@@ -518,7 +519,7 @@ test("page_raised_before_it_is_opened_opens_for_editing", async ({ browser }) =>
   await expect.poll(() => getMmd(aliceApi, shared.id)).toBe("Écrit par Alice, puis par Bruno\n");
   // La barre latérale a suivi.
   await row.hover();
-  await expect(row.getByRole("button", { name: /^Actions de/ })).toBeVisible();
+  await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toBeVisible();
 });
 
 test("member_invited_to_the_space_sees_space_pages", async ({ browser, page }) => {

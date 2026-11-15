@@ -159,12 +159,17 @@ test("row_menu_by_keyboard", async ({ browser }) => {
   await expect(item("Imbriquer dans la page précédente")).toBeFocused();
   // « Sortir de la page parente » n'a pas de sens à la racine : grisée, les flèches la passent.
   await expect(item("Sortir de la page parente")).toHaveAttribute("aria-disabled", "true");
+  // Puis le favori de la page (R254), avant la corbeille, qui reste la dernière (R412).
+  await p.keyboard.press("ArrowDown");
+  await expect(item("Ajouter aux favoris")).toBeFocused();
   await p.keyboard.press("ArrowDown");
   await expect(item("Mettre à la corbeille")).toBeFocused();
   await p.keyboard.press("ArrowDown");
   await expect(item("Déplacer vers le haut")).toBeFocused();
   await p.keyboard.press("End");
   await expect(item("Mettre à la corbeille")).toBeFocused();
+  await p.keyboard.press("ArrowUp");
+  await expect(item("Ajouter aux favoris")).toBeFocused();
   await p.keyboard.press("ArrowUp");
   await expect(item("Imbriquer dans la page précédente")).toBeFocused();
   await p.keyboard.press("Home");
