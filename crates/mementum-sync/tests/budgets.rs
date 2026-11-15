@@ -423,6 +423,58 @@ async fn move_of_a_block_in_10000_block_page() {
     }
 }
 
+/// Un grand groupe de blocs recréés d'un coup (R234 : un groupe glissé est recréé en entier) :
+/// les 2 000 premiers blocs d'une page de `BLOCKS` blocs, dont chaque texte est découpé par une
+/// frappe, déplacés tout en bas, seuls puis après une frappe dans chacun d'eux (toutes
+/// reportées). Le relevé du texte découpe les blocs de yrs une fois pour tous (R371) : le coût
+/// suit le groupe, pas le groupe multiplié par ce qu'il supprime (4 s avant ce découpage unique,
+/// contre 0,36 s pour la même mise à jour appliquée sans report, sonde du registre).
+#[tokio::test]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn group_of_2000_blocks_moved_in_10000_block_page() {
+    const MOVED: usize = 2_000;
+    let _alone = alone().await;
+    let (base, _) = mementum_crdt::PageDoc::new_page();
+    base.write_blocks(&parse(&page_mmd()).unwrap()).unwrap();
+    let ids: Vec<String> = base.read_blocks().into_iter().map(|b| b.id).collect();
+    let fragmented =
+        mementum_crdt::PageDoc::from_updates([base.encode_state().as_slice()]).unwrap();
+    for id in &ids {
+        fragmented.replace_text(id, 5, 0, "x").unwrap();
+    }
+    let state = fragmented.encode_state();
+    let fresh = || mementum_crdt::PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typist = fresh();
+    for id in &ids[..MOVED] {
+        typist.replace_text(id, 0, 0, "T").unwrap();
+    }
+    let typed = typist.encode_diff(&fresh().state_vector()).unwrap();
+    let mover = fresh();
+    let mut after = ids[BLOCKS - 1].clone();
+    for id in &ids[..MOVED] {
+        mover.move_block(id, Some(&after)).unwrap();
+        after = id.clone();
+    }
+    let moved = mover.encode_diff(&fresh().state_vector()).unwrap();
+    for (what, before) in [("rien à reporter", None), ("tout reporté", Some(&typed))] {
+        let page = fresh();
+        if let Some(before) = before {
+            page.apply_client_update(before).unwrap();
+        }
+        let start = Instant::now();
+        let applied = page.apply_client_update(&moved).unwrap();
+        page.dedupe_blocks();
+        let took = start.elapsed();
+        assert_eq!(applied.carried.is_some(), before.is_some(), "{what}");
+        println!(
+            "MESURE groupe de {MOVED} blocs recréés, page de {BLOCKS} blocs, {what} : {took:?} \
+             (mise à jour {} octets, report {} octets)",
+            moved.len(),
+            applied.carried.map_or(0, |c| c.len())
+        );
+    }
+}
+
 /// L'e2e `apps/web/e2e/budgets.spec.ts` attend `SERVER_IDLE_CLOSE_MS` (plus une
 /// marge) pour que le serveur ferme l'acteur des pages qu'il vient d'écrire, et
 /// les relise dans SQLite à leur ouverture. Ce test échoue, au lieu que l'e2e

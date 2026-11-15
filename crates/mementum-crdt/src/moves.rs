@@ -94,8 +94,8 @@ struct ChildCarry {
 /// l'auteur avait tout vu.
 ///
 /// `txn` est la transaction qui l'appliquera, encore intacte : la lecture du texte y découpe
-/// des blocs de yrs aux bornes du jeu de suppressions, ce que l'application ferait de toute
-/// façon, sans rien changer au contenu.
+/// des blocs de yrs aux bornes du jeu de suppressions, une fois pour tous les blocs recréés
+/// ([`Items`]), ce que l'application ferait de toute façon, sans rien changer au contenu.
 pub(crate) fn capture(
     txn: &mut TransactionMut,
     fragment: &XmlFragmentRef,
@@ -119,8 +119,7 @@ pub(crate) fn capture(
     } else {
         originals_in_page(txn, fragment, &deleted, &wanted)
     };
-    let hi = Snapshot::new(state.clone(), IdSet::new());
-    let lo = Snapshot::new(state, deleted.clone());
+    let mut items = Items::new(state, &deleted);
     let mut found = Vec::new();
     for (copy, block_id) in candidates {
         let Some([original]) = originals.get(block_id.as_str()).map(Vec::as_slice) else {
@@ -132,7 +131,9 @@ pub(crate) fn capture(
         let group = parts.iter().find(|e| e.tag().as_ref() == BLOCK_GROUP);
         let text = match content {
             // Un nœud de contenu que l'auteur n'avait pas vu : le type a changé.
-            Some(content) if covered(content, &deleted) => capture_text(txn, content, &hi, &lo),
+            Some(content) if covered(content, &deleted) => {
+                capture_text(txn, content, &mut items, &deleted)
+            }
             _ => None,
         };
         let (seen_children, children) = match group {
@@ -262,20 +263,69 @@ fn covered<B: AsRef<yrs::branch::Branch>>(node: &B, deleted: &IdSet) -> bool {
     }
 }
 
-/// Le texte du nœud de contenu d'un original, partagé entre ce que l'auteur avait vu et ce
-/// qu'il n'avait pas vu. `None` s'il n'y a rien à reporter, ou si le contenu en ligne est fait
-/// de plusieurs textes (mention, formule, saut de ligne) ou porte un objet incorporé.
+/// La lecture d'un texte élément par élément, chacun avec son identifiant (Ruling R371).
 ///
-/// La lecture passe par `diff_range` de yrs, entre deux instantanés de même vecteur d'état :
-/// `hi` sans suppression, où tout est visible, et `lo`, où ce que le jeu de suppressions couvre
-/// ne l'est pas. Un caractère vu sort marqué « ajouté », un caractère non vu sans marque ; un
-/// caractère que la page a déjà supprimé ne sort pas (son contenu est ramassé). Un seul passage
-/// sur les éléments du texte, sans aucune lecture des éléments supprimés (Ruling R371).
+/// Elle passe par `diff_range` de yrs, entre deux instantanés : `all`, au vecteur d'état de la
+/// page et sans suppression, où tout est visible, et `none`, au vecteur d'état vide, où rien ne
+/// l'est. Chaque élément de texte vivant sort alors seul, marqué « ajouté », avec l'identifiant
+/// de son premier caractère ; un élément que la page a déjà supprimé ne sort pas (son contenu
+/// est ramassé). Un élément peut porter des caractères vus et d'autres non (des horloges qui se
+/// suivent, du même client) : la première lecture découpe donc d'abord les blocs de yrs aux
+/// bornes du jeu de suppressions, une fois pour toute la page, par un `diff_range` dont
+/// l'instantané porte ce jeu. Chaque lecture ne parcourt ensuite que les éléments de son texte :
+/// découper à chaque texte parcourait chaque fois tous les éléments supprimés (un groupe de 2 000
+/// blocs déplacés sur une page de 10 000 : 4 s au lieu de 0,4 s).
+struct Items {
+    all: Snapshot,
+    none: Snapshot,
+    /// Le découpage aux bornes du jeu de suppressions, tant qu'il reste à faire.
+    split: Option<Snapshot>,
+}
+
+impl Items {
+    fn new(state: StateVector, deleted: &IdSet) -> Items {
+        Items {
+            all: Snapshot::new(state.clone(), IdSet::new()),
+            none: Snapshot::new(StateVector::default(), IdSet::new()),
+            split: Some(Snapshot::new(state, deleted.clone())),
+        }
+    }
+
+    /// Les éléments vivants de `text`, dans l'ordre : leur identifiant, leur contenu et leurs
+    /// marques.
+    fn of(&mut self, txn: &mut TransactionMut, text: &XmlTextRef) -> Vec<(Option<ID>, Out, Attrs)> {
+        if let Some(split) = self.split.take() {
+            text.diff_range(txn, Some(&split), None, YChange::identity);
+        }
+        text.diff_range(txn, Some(&self.all), Some(&self.none), YChange::identity)
+            .into_iter()
+            .map(|diff| {
+                let id = match diff.ychange {
+                    Some(YChange {
+                        kind: ChangeKind::Added,
+                        id,
+                    }) => Some(id),
+                    _ => None,
+                };
+                (
+                    id,
+                    diff.insert,
+                    diff.attributes.map(|a| *a).unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Le texte du nœud de contenu d'un original, partagé entre ce que l'auteur avait vu (ce que
+/// le jeu de suppressions `deleted` couvre) et ce qu'il n'avait pas vu. `None` s'il n'y a rien à
+/// reporter, ou si le contenu en ligne est fait de plusieurs textes (mention, formule, saut de
+/// ligne) ou porte un objet incorporé.
 fn capture_text(
     txn: &mut TransactionMut,
     content: &XmlElementRef,
-    hi: &Snapshot,
-    lo: &Snapshot,
+    items: &mut Items,
+    deleted: &IdSet,
 ) -> Option<TextCarry> {
     let children: Vec<XmlOut> = content.children(txn).collect();
     let text = match children.as_slice() {
@@ -284,22 +334,23 @@ fn capture_text(
         _ => return None,
     };
     let mut seen = Vec::new();
-    let mut unseen = Vec::new();
-    for diff in text.diff_range(txn, Some(hi), Some(lo), YChange::identity) {
-        let Out::Any(Any::String(s)) = diff.insert else {
+    let mut unseen: Vec<Unseen> = Vec::new();
+    for (id, insert, attrs) in items.of(txn, &text) {
+        let (Some(id), Out::Any(Any::String(s))) = (id, insert) else {
             return None;
         };
-        match diff.ychange {
-            Some(YChange {
-                kind: ChangeKind::Added,
-                ..
-            }) => seen.extend(s.chars()),
-            None => unseen.push(Unseen {
+        if deleted.contains(&id) {
+            seen.extend(s.chars());
+            continue;
+        }
+        // Deux éléments non vus qui se suivent, aux mêmes marques, font un seul morceau.
+        match unseen.last_mut() {
+            Some(last) if last.after == seen.len() && last.attrs == attrs => last.text.push_str(&s),
+            _ => unseen.push(Unseen {
                 after: seen.len(),
                 text: s.to_string(),
-                attrs: diff.attributes.map(|a| *a).unwrap_or_default(),
+                attrs,
             }),
-            Some(_) => return None,
         }
     }
     (!unseen.is_empty()).then(|| TextCarry {

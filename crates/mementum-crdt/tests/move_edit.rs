@@ -455,6 +455,28 @@ fn a_place_that_is_not_sure_is_left_alone() {
     assert_eq!(blocks[2].id, x);
 }
 
+/// Tom tape « d », que Mona reçoit, puis « e » juste après, qu'elle ne voit pas avant de
+/// déplacer X : sur le serveur, les deux lettres de Tom, aux horloges qui se suivent, tiennent
+/// dans un seul élément de yrs. Seul « e » est reporté, à sa place (Ruling R371 : les blocs de
+/// yrs sont d'abord découpés aux bornes du jeu de suppressions).
+#[test]
+fn characters_seen_and_unseen_in_one_element_are_told_apart() {
+    let (state, [x, _, z]) = yrs_page();
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let d = tom.replace_text(&x, 6, 0, " d").unwrap();
+    let e = tom.replace_text(&x, 8, 0, "e").unwrap();
+    let mona = PageDoc::from_updates([state.as_slice(), d.as_slice()]).unwrap();
+    let before = PageDoc::from_updates([state.as_slice(), d.as_slice()]).unwrap();
+    mona.move_block(&x, Some(&z)).unwrap();
+    let moved = mona.encode_diff(&before.state_vector()).unwrap();
+    let both = PageDoc::from_updates([state.as_slice(), d.as_slice(), e.as_slice()]).unwrap();
+    let played = play_updates(&both.encode_state(), &moved, &e, &[Who::Mona]);
+    assert_eq!(played.carried.len(), 1, "un report");
+    let blocks = played.server.read_blocks();
+    assert_eq!(blocks[2].id, x);
+    assert_eq!(block_text(&blocks[2]), "Bloc X de");
+}
+
 /// Bâti avec yrs (`move_block` écrit une copie au même id puis supprime l'original) : la frappe
 /// arrivée avant le déplacement est sur la copie.
 #[test]
