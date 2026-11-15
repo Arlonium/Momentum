@@ -31,9 +31,15 @@ test("own_gestures_show_at_once_while_held", () => {
   expect(ids(heldPages([a, b], [b, a], new Set(["a"])))).toEqual(["a", "b"]);
 });
 
-type Props = { spaceId: string; incoming: PageNode[]; held: boolean; mine?: ReadonlySet<string> };
-const hook = ({ spaceId, incoming, held, mine = NONE }: Props) =>
-  useHeldPages(spaceId, incoming, held, mine);
+type Props = {
+  spaceId: string;
+  incoming: PageNode[];
+  held: boolean;
+  toggles?: ReadonlyMap<string, number>;
+};
+const NO_TOGGLES: ReadonlyMap<string, number> = new Map();
+const hook = ({ spaceId, incoming, held, toggles = NO_TOGGLES }: Props) =>
+  useHeldPages(spaceId, incoming, held, toggles);
 
 test("favorites_are_held_while_the_pointer_is_in_and_thaw_once_it_leaves", async () => {
   const [a, b, c] = [page("a"), page("b"), page("c")];
@@ -67,4 +73,29 @@ test("the_favorites_of_another_space_are_not_held_in_this_one", async () => {
   expect(ids(rendered.current)).toEqual(["x"]);
   await rendered.rerender({ spaceId: "pro", incoming: [x, y], held: false });
   expect(ids(rendered.current)).toEqual(["x", "y"]);
+});
+
+test("gestures_made_here_since_the_hold_began_show_at_once", async () => {
+  // Les gestes de l'onglet (menu d'une ligne ou de la page), par leur rang : ceux d'après le début
+  // du gel se voient tout de suite ; ceux d'avant n'exemptent rien de ce qu'une relecture change.
+  const [a, b, c] = [page("a"), page("b"), page("c")];
+  const before = new Map([["a", 1]]);
+  const rendered = await renderHook(hook, { spaceId: "s", incoming: [a], held: true, toggles: before });
+  // « a », posé avant le gel, est retiré ailleurs : le départ attend.
+  await rendered.rerender({ spaceId: "s", incoming: [], held: true, toggles: before });
+  expect(ids(rendered.current)).toEqual(["a"]);
+  // « b », posé d'ici pendant le gel : il se voit ; « c », arrivé d'ailleurs, attend.
+  const after = new Map([["a", 1], ["b", 2]]);
+  await rendered.rerender({ spaceId: "s", incoming: [b, c], held: true, toggles: after });
+  expect(ids(rendered.current)).toEqual(["a", "b"]);
+  // « a », retiré d'ici à son tour : il part.
+  const again = new Map([["a", 3], ["b", 2]]);
+  await rendered.rerender({ spaceId: "s", incoming: [b, c], held: true, toggles: again });
+  expect(ids(rendered.current)).toEqual(["b"]);
+  await rendered.rerender({ spaceId: "s", incoming: [b, c], held: false, toggles: again });
+  expect(ids(rendered.current)).toEqual(["b", "c"]);
+  // Le gel suivant repart du rang atteint : un geste d'avant lui n'exempte plus rien.
+  await rendered.rerender({ spaceId: "s", incoming: [b, c], held: true, toggles: again });
+  await rendered.rerender({ spaceId: "s", incoming: [c], held: true, toggles: again });
+  expect(ids(rendered.current)).toEqual(["b", "c"]);
 });

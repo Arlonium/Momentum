@@ -5,12 +5,12 @@
 // dans l'espace, gardées dans le navigateur (R255, sous les sections depuis R296 ; absente quand
 // elle est vide, rien n'est lu du serveur pour elle). « Favoris » est au-dessus des arbres : tant
 // que le pointeur est dans la barre, une relecture ne la fait ni grandir, ni rapetisser, ni
-// changer d'ordre (`heldPages.ts`, R411) ; un favori posé ou retiré d'ici, par le menu d'une
-// ligne, se voit tout de suite. En pied, collés à son bord bas : le
+// changer d'ordre (`heldPages.ts`, R411) ; un favori posé ou retiré dans l'onglet (menu d'une
+// ligne ou de la page) se voit tout de suite. En pied, collés à son bord bas : le
 // message de la dernière action refusée (à défaut, celui d'une lecture des pages qui a échoué),
 // avec « Réessayer » tant que les pages n'ont pas pu être lues, et « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
-import { useCallback, useLayoutEffect, useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
 import { trashPath } from "../router";
 import { useSession } from "../session/session";
@@ -46,14 +46,15 @@ type Props = {
   readError: string | null;
   /** Relit les pages de l'espace. */
   onRetry: () => void;
-  /** Les pages favorites du compte dans l'espace (`useFavorites`), et si leur liste est lue. */
-  favorites: { pages: string[]; loaded: boolean };
+  /**
+   * Les pages favorites du compte dans l'espace (`useFavorites`), si leur liste est lue, et le rang
+   * du dernier geste fait dans l'onglet sur chaque page.
+   */
+  favorites: { pages: string[]; loaded: boolean; toggles: ReadonlyMap<string, number> };
   /** Pose ou retire le favori d'une page (R254). */
   onFavorite: (id: string) => void;
 };
 
-/** Aucun favori posé d'ici : toujours le même ensemble. */
-const NO_IDS: ReadonlySet<string> = new Set();
 
 export function Sidebar({
   space,
@@ -105,20 +106,11 @@ export function Sidebar({
   // partir du moment où la liste de l'espace est lue (sinon le gel garderait une liste vide).
   const favoriteNodes = useMemo(() => favoritePages(favorites.pages, nodes), [favorites.pages, nodes]);
   const [pointerIn, setPointerIn] = useState(false);
-  /** Les favoris posés ou retirés d'ici pendant que le pointeur est dans la barre. */
-  const [mine, setMine] = useState<ReadonlySet<string>>(NO_IDS);
   const shownFavorites = useHeldPages(
     space?.id ?? "",
     favoriteNodes,
     pointerIn && favorites.loaded,
-    mine,
-  );
-  const favoriteFromRow = useCallback(
-    (id: string) => {
-      setMine((current) => new Set(current).add(id));
-      onFavorite(id);
-    },
-    [onFavorite],
+    favorites.toggles,
   );
   // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
   const readFailure =
@@ -137,10 +129,7 @@ export function Sidebar({
       // Le menu d'une ligne, posé dans `body`, est un enfant de la barre pour React : le pointeur
       // qui y passe ne la quitte pas.
       onPointerEnter={() => setPointerIn(true)}
-      onPointerLeave={() => {
-        setPointerIn(false);
-        setMine(NO_IDS);
-      }}
+      onPointerLeave={() => setPointerIn(false)}
     >
       <div ref={setHead} className="mm-side-head">
         <SpaceSwitcher space={space} settingsOpen={settingsOpen} />
@@ -187,7 +176,7 @@ export function Sidebar({
           onTrash={onTrash}
           onMove={onMove}
           favorites={favorites.pages}
-          onFavorite={favoriteFromRow}
+          onFavorite={onFavorite}
         />
       )}
       {space && (

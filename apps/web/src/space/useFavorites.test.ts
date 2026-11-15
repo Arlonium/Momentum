@@ -323,3 +323,23 @@ test("nothing_is_read_or_sent_after_unmount", async () => {
   await settle(() => void toggled("c"));
   expect(writes).toHaveLength(1);
 });
+
+test("every_gesture_made_here_is_ranked_for_the_sidebar", async () => {
+  // La barre latérale ne gèle pas ce que la personne fait elle-même (R411), d'où que vienne le
+  // geste (menu d'une ligne, menu de la page) : le hook dit le rang du dernier geste de chaque page.
+  const rendered = await loaded(["a"]);
+  expect([...rendered.current.toggles]).toEqual([]);
+  await settle(() => void rendered.current.toggle("b"));
+  await settle(() => void rendered.current.toggle("a"));
+  const first = rendered.current.toggles;
+  expect([...first.keys()]).toEqual(["b", "a"]);
+  expect(first.get("a")!).toBeGreaterThan(first.get("b")!);
+  // Un geste refusé compte aussi : c'est un geste d'ici, que la barre ne doit pas geler.
+  await settle(() => writes[0].answer.reject(notFound()));
+  await settle(() => writes[1].answer.resolve());
+  await settle(() => void rendered.current.toggle("b"));
+  expect(rendered.current.toggles.get("b")!).toBeGreaterThan(first.get("a")!);
+  // Un autre espace repart de rien.
+  await rendered.rerender({ spaceId: "pro" });
+  expect([...rendered.current.toggles]).toEqual([]);
+});

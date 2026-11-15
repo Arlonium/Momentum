@@ -48,7 +48,13 @@ async function show(
     nodes = NODES,
     onFavorite = () => {},
     loaded = true,
-  }: { nodes?: PageNode[]; onFavorite?: (id: string) => void; loaded?: boolean } = {},
+    toggles = new Map(),
+  }: {
+    nodes?: PageNode[];
+    onFavorite?: (id: string) => void;
+    loaded?: boolean;
+    toggles?: ReadonlyMap<string, number>;
+  } = {},
 ) {
   await act(async () =>
     root.render(
@@ -66,7 +72,7 @@ async function show(
           notice={null}
           readError={null}
           onRetry={() => {}}
-          favorites={{ pages: favorites, loaded }}
+          favorites={{ pages: favorites, loaded, toggles }}
           onFavorite={onFavorite}
         />
       </SessionContext.Provider>,
@@ -129,10 +135,12 @@ test("a_favorite_set_from_a_row_shows_at_once_under_the_pointer", async () => {
   )!;
   await act(async () => item.click());
   expect(onFavorite.mock.calls).toEqual([["c"]]);
-  await show(["a", "c"], { onFavorite });
+  // `App` pose le favori (`useFavorites`), qui dit le rang du geste.
+  const toggles = new Map([["c", 1]]);
+  await show(["a", "c"], { onFavorite, toggles });
   expect(shown()).toEqual(["A", "C"]);
   // Une arrivée d'ailleurs, elle, attend toujours que le pointeur sorte.
-  await show(["a", "c", "b"], { onFavorite });
+  await show(["a", "c", "b"], { onFavorite, toggles });
   expect(shown()).toEqual(["A", "C"]);
   await pointer(false);
   expect(shown()).toEqual(["A", "C", "B"]);
@@ -147,4 +155,16 @@ test("favorites_are_not_held_before_their_first_read", async () => {
   expect(shown()).toEqual(["A"]);
   await show(["a", "b"]);
   expect(shown()).toEqual(["A"]);
+});
+
+test("a_favorite_set_from_the_page_menu_shows_at_once_under_the_pointer", async () => {
+  // La souris repose sur la barre ; au clavier, le menu « … » de la page pose un favori. C'est
+  // aussi le geste de la personne : il se voit tout de suite.
+  await show(["a"]);
+  await pointer(true);
+  await show(["a", "b"], { toggles: new Map([["b", 1]]) });
+  expect(shown()).toEqual(["A", "B"]);
+  // Témoin : sans geste d'ici, la même arrivée attend.
+  await show(["a", "b", "c"], { toggles: new Map([["b", 1]]) });
+  expect(shown()).toEqual(["A", "B"]);
 });

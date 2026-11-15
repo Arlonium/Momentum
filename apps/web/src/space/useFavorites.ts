@@ -57,6 +57,11 @@ export type FavoriteList = {
    * sait, pas seulement qu'on attend (la barre latérale ne gèle « Favoris » qu'à partir de là).
    */
   loaded: boolean;
+  /**
+   * Le rang du dernier geste fait d'ici sur chaque page de l'espace affiché (refusé compris) : la
+   * barre latérale ne gèle pas ce que la personne fait elle-même (R411), d'où que vienne le geste.
+   */
+  toggles: ReadonlyMap<string, number>;
   /** Pose le favori de la page s'il n'y est pas, le retire sinon ; tenue une fois la réponse là. */
   toggle(pageId: string): Promise<void>;
   /** Le refus du dernier geste, tel que le serveur le dit ; `null` : aucun. */
@@ -92,6 +97,8 @@ type State = {
   read: string[] | null;
   /** Les gestes d'ici pas encore relus, par page. */
   gestures: ReadonlyMap<string, Gesture>;
+  /** Le rang du dernier geste d'ici, par page, depuis qu'on montre cet espace. */
+  toggles: ReadonlyMap<string, number>;
   error: string | null;
 };
 
@@ -99,6 +106,7 @@ const empty = (spaceId: string | null): State => ({
   spaceId,
   read: null,
   gestures: new Map(),
+  toggles: new Map(),
   error: null,
 });
 
@@ -195,7 +203,12 @@ export function useFavorites(
     setState((s) =>
       s.spaceId !== space
         ? s
-        : { ...s, error: null, gestures: new Map(s.gestures).set(pageId, { on, rank, confirmed: null }) },
+        : {
+            ...s,
+            error: null,
+            gestures: new Map(s.gestures).set(pageId, { on, rank, confirmed: null }),
+            toggles: new Map(s.toggles).set(pageId, rank),
+          },
     );
     const sent = chain.current.then(async () => {
       if (!mounted.current) return;
@@ -229,7 +242,10 @@ export function useFavorites(
     return sent;
   }, []);
 
-  const { error } = current;
+  const { error, toggles } = current;
   const loaded = current.read !== null;
-  return useMemo(() => ({ pages, loaded, toggle, error }), [pages, loaded, toggle, error]);
+  return useMemo(
+    () => ({ pages, loaded, toggles, toggle, error }),
+    [pages, loaded, toggles, toggle, error],
+  );
 }
