@@ -492,6 +492,75 @@ export async function holdTreeReads(p: Page): Promise<{ release: () => void }> {
 }
 
 /**
+ * Retient la réponse du premier appel `method path` de l'onglet, jusqu'à `release()`. L'appel
+ * part tout de suite, avec le cookie du moment, et le serveur y répond : c'est sa réponse qui
+ * attend (`answered` : son statut, une fois reçue). Les appels suivants passent, dont le rejeu
+ * qu'`api.ts` fait d'un `401` revenu après une session rouverte (R347) ; `calls()` les compte,
+ * le premier compris. Pour retenir l'appel lui-même, qui part alors au `release()` avec le cookie
+ * qu'il portait : `holdPageReads`.
+ */
+export async function holdFirstResponse(
+  p: Page,
+  method: string,
+  path: string,
+): Promise<{ answered: Promise<number>; release: () => void; calls: () => number }> {
+  let calls = 0;
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let answer = (_status: number) => {};
+  const answered = new Promise<number>((resolve) => (answer = resolve));
+  await p.route(
+    (url) => url.pathname === path,
+    async (route) => {
+      if (route.request().method() !== method) return route.fallback();
+      calls += 1;
+      if (calls > 1) return route.continue();
+      const response = await route.fetch();
+      answer(response.status());
+      await released;
+      await route.fulfill({ response });
+    },
+  );
+  return { answered, release, calls: () => calls };
+}
+
+/**
+ * Retient la première lecture de la page (`GET /api/v1/pages/{id}`) de l'onglet, et la fait partir
+ * au `release()` avec le cookie de session de l'onglet au moment où elle a été retenue, par un
+ * client de l'API qui n'en porte pas d'autre : le serveur juge cette session-là, même si l'onglet
+ * en a changé entre-temps (relâchée par `route.continue()`, comme `holdPageReads`, elle partirait
+ * avec le cookie du moment : Chromium le joint après). La réponse du serveur est rendue à l'onglet
+ * (`answered` : son statut). Les lectures suivantes passent, dont un rejeu d'`api.ts` (R347).
+ */
+export async function holdPageReadWithItsCookie(
+  p: Page,
+  id: string,
+): Promise<{ asked: Promise<void>; answered: Promise<number>; release: () => void }> {
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let seen = () => {};
+  const asked = new Promise<void>((resolve) => (seen = resolve));
+  let answer = (_status: number) => {};
+  const answered = new Promise<number>((resolve) => (answer = resolve));
+  let held = false;
+  await p.route(`**/api/v1/pages/${id}`, async (route) => {
+    if (route.request().method() !== "GET" || held) return route.continue();
+    held = true;
+    const session = (await p.context().cookies()).find((cookie) => cookie.name === SESSION_COOKIE);
+    seen();
+    await released;
+    const api = await request.newContext({ baseURL: BASE_URL });
+    apis.push(api);
+    const response = await api.get(`/api/v1/pages/${id}`, {
+      headers: session ? { cookie: `${session.name}=${session.value}` } : {},
+    });
+    answer(response.status());
+    await route.fulfill({ response });
+  });
+  return { asked, answered, release };
+}
+
+/**
  * Ferme le canal de l'espace (`/events/…`) de l'onglet dès qu'il s'ouvre, à appeler avant
  * `goto` : la barre latérale ne se relit plus que par son minuteur de repli (R128) et au
  * retour sur l'onglet (R97). Pour un test de ces relectures, ou d'un onglet qui ne doit rien

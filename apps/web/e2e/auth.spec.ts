@@ -13,6 +13,8 @@ import {
   firstSpace,
   getMmd,
   getPage,
+  holdFirstResponse,
+  holdPageReadWithItsCookie,
   holdPageReads,
   holdTreeReads,
   inviteToSpace,
@@ -20,6 +22,7 @@ import {
   newUser,
   NO_SESSION,
   openPage,
+  openRowMenu,
   ownerAndMember,
   PASSWORD,
   setPageLevel,
@@ -28,6 +31,7 @@ import {
   spaceSwitcher,
   titleOf,
   trashItem,
+  treeRow,
   unique,
   waitSynced,
 } from "./helpers";
@@ -426,6 +430,163 @@ test("lost_session_asks_login_over_the_open_page", async ({ browser }) => {
   // demandent une.
   await expect.poll(() => getMmd(p.request, id)).toBe("Écrit avant la coupure, et après\n");
   expect((await meOf(p)).user.email).toBe(account.email);
+});
+
+/** La synchro de l'onglet est ouverte. */
+const syncConnected = (p: Page) => p.evaluate(() => window.__mementum!.provider.wsconnected);
+
+/**
+ * Ce qui arrive le premier : la fenêtre « Ta session a pris fin » ou `other` (nommé `name`).
+ * L'attente perdante est abandonnée sans erreur.
+ */
+async function windowOr(p: Page, other: Promise<unknown>, name: string): Promise<string> {
+  const lost = p.getByRole("dialog", { name: "Ta session a pris fin" });
+  return Promise.race([
+    lost.waitFor({ state: "visible" }).then(
+      () => "la fenêtre revient",
+      () => "fini",
+    ),
+    other.then(
+      () => name,
+      () => "fini",
+    ),
+  ]);
+}
+
+test("a_401_sent_before_the_login_and_answered_after_it_does_not_reopen_the_window", async ({
+  browser,
+}) => {
+  // La sonde de la relecture de X1 (`probe_a_401_sent_before_the_login_and_answered_after_it_
+  // reopens_the_window`, R337), retournée : un appel parti sans session avant la connexion, et
+  // dont le refus revient après elle, rouvrait la fenêtre sur une session qui vaut. Il repart
+  // maintenant, une fois, sous la session rouverte (R347).
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const { id } = await createPage(api, { title: `Refus tardif ${unique()}` });
+  const p = await openPage(browser, id, account);
+  await p.locator(".bn-editor").click();
+  await p.keyboard.type("Écrit avant la coupure");
+  await expect.poll(() => getMmd(api, id)).toBe("Écrit avant la coupure\n");
+  const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
+
+  // La session prend fin ailleurs. La synchro, fermée, revient, et relit d'abord la page : le
+  // serveur refuse cette relecture, partie sans session, et son refus est retenu jusqu'après la
+  // connexion. L'arbre, que la barre latérale relit seule, est retenu aussi : c'est le sélecteur
+  // d'espace qui découvre la session perdue.
+  const read = await holdFirstResponse(p, "GET", `/api/v1/pages/${id}`);
+  const tree = await holdTreeReads(p);
+  expect((await api.post("/api/v1/auth/logout")).status()).toBe(204);
+  expect(await read.answered).toBe(401);
+  expect(await syncConnected(p)).toBe(false);
+  await spaceSwitcher(p).click();
+  await expect(dialog).toBeVisible();
+  await logInWith(dialog, account.email, account.password);
+  await expect(dialog).toHaveCount(0);
+
+  // Le refus arrive après la connexion : la relecture repart, et la synchro revient, sans que la
+  // fenêtre revienne.
+  read.release();
+  tree.release();
+  const connected = p.waitForFunction(() => window.__mementum?.provider.wsconnected === true);
+  expect(await windowOr(p, connected, "la synchro revient")).toBe("la synchro revient");
+  expect(read.calls()).toBe(2);
+  await expect(dialog).toHaveCount(0);
+  await p.locator('[data-content-type="paragraph"] .bn-inline-content').first().click();
+  await p.keyboard.press("End");
+  await p.keyboard.type(", et après");
+  await expect.poll(() => getMmd(p.request, id)).toBe("Écrit avant la coupure, et après\n");
+  await expect(dialog).toHaveCount(0);
+
+  // Témoin : une session perdue pour de bon demande toujours la connexion.
+  await p.context().clearCookies();
+  await p.evaluate(() => {
+    const { provider } = window.__mementum!;
+    provider.disconnect();
+    provider.connect();
+  });
+  await expect(dialog).toBeVisible();
+});
+
+test("a_write_refused_before_the_login_is_done_once_after_it", async ({ browser }) => {
+  // Une écriture partie sans session, refusée, et dont le refus revient après la connexion, est
+  // faite à ce moment, une fois (R348) : avant, la fenêtre revenait, et le geste était perdu.
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const open = await createPage(api, { title: `Ouverte ${unique()}` });
+  const thrown = await createPage(api, { title: `Jetée ${unique()}` });
+  const p = await openPage(browser, open.id, account);
+  await expect(treeRow(p, thrown.id)).toBeVisible();
+  const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
+
+  // La session prend fin (le cookie de l'onglet est effacé), puis la page part à la corbeille par
+  // le menu de sa ligne. Le serveur refuse avant tout ; son refus est retenu.
+  const trash = await holdFirstResponse(p, "POST", `/api/v1/pages/${thrown.id}/trash`);
+  const tree = await holdTreeReads(p);
+  await p.context().clearCookies();
+  await (await openRowMenu(p, thrown.id, thrown.title))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  expect(await trash.answered).toBe(401);
+  expect((await getPage(api, thrown.id)).trashedAt).toBeNull();
+  await spaceSwitcher(p).click();
+  await expect(dialog).toBeVisible();
+  await logInWith(dialog, account.email, account.password);
+  await expect(dialog).toHaveCount(0);
+
+  // Le refus revient après la connexion : la page part à la corbeille, une fois.
+  const done = p.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === `/api/v1/pages/${thrown.id}/trash` &&
+      response.status() === 200,
+  );
+  trash.release();
+  tree.release();
+  expect(await windowOr(p, done, "la page est jetée")).toBe("la page est jetée");
+  expect(trash.calls()).toBe(2);
+  expect((await getPage(api, thrown.id)).trashedAt).not.toBeNull();
+  await expect(treeRow(p, thrown.id)).toHaveCount(0);
+  await expect(dialog).toHaveCount(0);
+});
+
+test("a_call_in_flight_during_a_password_change_does_not_ask_to_log_in", async ({ browser }) => {
+  // Le changement de mot de passe ferme toutes les sessions du compte, dont celle sous laquelle
+  // un appel en route est parti, et rouvre celle de l'onglet (cookie neuf). Le refus de cet appel
+  // demandait la connexion, mot de passe neuf à peine choisi ; il repart maintenant (R347).
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const { id } = await createPage(api, { title: `Mot de passe ${unique()}` });
+  const p = await openPage(browser, id, account);
+  const lost = p.getByRole("dialog", { name: "Ta session a pris fin" });
+
+  // La synchro se reconnecte ; sa relecture de la page est retenue avant de partir : elle partira
+  // avec le cookie qu'elle portait, celui d'avant le changement.
+  const reads = await holdPageReadWithItsCookie(p, id);
+  await p.evaluate(() => {
+    const { provider } = window.__mementum!;
+    provider.disconnect();
+    provider.connect();
+  });
+  await reads.asked;
+  await spaceSwitcher(p).click();
+  await p.getByRole("button", { name: "Changer le mot de passe" }).click();
+  const dialog = p.getByRole("dialog", { name: "Changer le mot de passe" });
+  await dialog.getByLabel("Mot de passe actuel").fill(account.password);
+  await dialog.getByLabel("Nouveau mot de passe").fill(NEW_PASSWORD);
+  await dialog.getByLabel("Nouveau mot de passe").press("Enter");
+  await expect(dialog.getByText("Mot de passe changé.")).toBeVisible();
+  expect(await syncConnected(p)).toBe(false);
+
+  // La relecture part : le serveur la refuse, sa session est fermée. Elle repart avec le cookie
+  // neuf, et la synchro revient, sans fenêtre de connexion.
+  reads.release();
+  expect(await reads.answered).toBe(401);
+  const connected = p.waitForFunction(() => window.__mementum?.provider.wsconnected === true);
+  expect(await windowOr(p, connected, "la synchro revient")).toBe("la synchro revient");
+  await expect(lost).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Fermer" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(lost).toHaveCount(0);
 });
 
 test("trash_and_settings_are_read_once_logged_in_again", async ({ browser }) => {
