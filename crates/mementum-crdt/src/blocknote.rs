@@ -30,6 +30,7 @@ use mementum_md::{
 use mementum_schema::{ContentKind, PropDefault, PropSpec, PropType, block};
 use uuid::Uuid;
 use yrs::any::Number;
+use yrs::branch::{Branch, BranchID};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
@@ -73,11 +74,17 @@ pub(crate) fn read_page<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef) -> Vec<B
         if let XmlOut::Element(group) = child
             && group.tag().as_ref() == BLOCK_GROUP
         {
-            read_nodes(txn, &group, 1, false, &mut out);
+            read_nodes(txn, &group, 1, false, &mut out, &mut Yields::default());
         }
     }
     normalize(out)
 }
+
+/// Ce que [`yields_blocks`] a déjà répondu, par colonne ou liste de colonnes, le temps d'un
+/// parcours (Ruling R385) : chacune n'est examinée qu'une fois, quelle que soit la profondeur
+/// des listes défaites qui la contiennent.
+#[derive(Default)]
+struct Yields(HashMap<BranchID, bool>);
 
 /// Lit les blocs enfants de `parent`, de niveau `level` (1 au premier
 /// niveau). `in_column` : `parent` est une colonne.
@@ -89,26 +96,34 @@ pub(crate) fn read_page<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef) -> Vec<B
 ///   colonne vide, directement dans une colonne, ou trop profonde pour que
 ///   ses blocs restent sous [`MAX_DEPTH`]), est défaite : ses blocs prennent
 ///   sa place, au même niveau.
+///
+/// Une liste est jugée avant d'être lue ([`is_column_list`]), puis lue une
+/// seule fois, en liste ou défaite (Ruling R385). Avant, ses colonnes étaient
+/// lues pour la juger, puis relues une fois la liste défaite : des listes d'une
+/// seule colonne imbriquées faisaient lire chaque niveau deux fois plus que le
+/// précédent (vingt niveaux : 2,2 s en release ; une page en porte cinquante).
 fn read_nodes<T: ReadTxn>(
     txn: &T,
     parent: &XmlElementRef,
     level: usize,
     in_column: bool,
     out: &mut Vec<Block>,
+    yields: &mut Yields,
 ) {
     for element in elements(txn, parent) {
         match element.tag().as_ref() {
             BLOCK_GROUP => {}
-            COLUMN => read_nodes(txn, &element, level, in_column, out),
-            COLUMN_LIST => match column_list(txn, &element, level, in_column) {
-                Some(list) => out.push(list),
-                None => read_nodes(txn, &element, level, in_column, out),
-            },
+            COLUMN => read_nodes(txn, &element, level, in_column, out, yields),
+            COLUMN_LIST if is_column_list(txn, &element, level, in_column, yields) => {
+                out.push(column_list(txn, &element, level, yields));
+            }
+            COLUMN_LIST => read_nodes(txn, &element, level, in_column, out, yields),
             BLOCK_CONTAINER => {
                 let (mut block, group) = read_container(txn, &element);
                 match group {
                     Some(group) if level < MAX_DEPTH => {
-                        read_nodes(txn, &group, level + 1, false, &mut block.children);
+                        let children = &mut block.children;
+                        read_nodes(txn, &group, level + 1, false, children, yields);
                         out.push(block);
                     }
                     Some(group) => {
@@ -133,7 +148,8 @@ pub(crate) fn page_has_block<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef, id:
     !id.is_empty()
         && fragment.children(txn).any(|child| {
             matches!(child, XmlOut::Element(group)
-                if group.tag().as_ref() == BLOCK_GROUP && nodes_have(txn, &group, 1, false, id))
+                if group.tag().as_ref() == BLOCK_GROUP
+                    && nodes_have(txn, &group, 1, false, id, &mut Yields::default()))
         })
 }
 
@@ -144,24 +160,26 @@ fn nodes_have<T: ReadTxn>(
     level: usize,
     in_column: bool,
     id: &str,
+    yields: &mut Yields,
 ) -> bool {
     elements(txn, parent)
         .iter()
         .any(|element| match element.tag().as_ref() {
             BLOCK_GROUP => false,
-            COLUMN => nodes_have(txn, element, level, in_column, id),
-            COLUMN_LIST if is_column_list(txn, element, level, in_column) => {
+            COLUMN => nodes_have(txn, element, level, in_column, id, yields),
+            COLUMN_LIST if is_column_list(txn, element, level, in_column, yields) => {
                 id_is(txn, element, id)
                     || elements(txn, element).iter().any(|column| {
-                        id_is(txn, column, id) || nodes_have(txn, column, level + 2, true, id)
+                        id_is(txn, column, id)
+                            || nodes_have(txn, column, level + 2, true, id, yields)
                     })
             }
-            COLUMN_LIST => nodes_have(txn, element, level, in_column, id),
+            COLUMN_LIST => nodes_have(txn, element, level, in_column, id, yields),
             BLOCK_CONTAINER => {
                 id_is(txn, element, id)
                     || container_group(txn, element).is_some_and(|group| {
                         if level < MAX_DEPTH {
-                            nodes_have(txn, &group, level + 1, false, id)
+                            nodes_have(txn, &group, level + 1, false, id, yields)
                         } else {
                             flattened_have(txn, &group, id)
                         }
@@ -172,42 +190,44 @@ fn nodes_have<T: ReadTxn>(
         })
 }
 
-/// [`column_list`] rendrait-il une liste ? Ses conditions, sans lire ses blocs.
+/// La liste de colonnes respecte-t-elle le schéma de BlockNote (voir [`read_nodes`]) ? Ses
+/// conditions, sans lire ses blocs : hors d'une colonne, assez haut, au moins deux enfants, tous
+/// des colonnes, dont chacune rend au moins un bloc ([`yields_blocks`]).
 fn is_column_list<T: ReadTxn>(
     txn: &T,
     list: &XmlElementRef,
     level: usize,
     in_column: bool,
+    yields: &mut Yields,
 ) -> bool {
     if in_column || level + 2 > MAX_DEPTH {
         return false;
     }
     let columns = elements(txn, list);
     columns.len() >= 2
-        && columns.iter().all(|column| {
-            column.tag().as_ref() == COLUMN && yields_blocks(txn, column, level + 2, true)
-        })
+        && columns
+            .iter()
+            .all(|column| column.tag().as_ref() == COLUMN && yields_blocks(txn, column, yields))
 }
 
-/// [`read_nodes`] rendrait-il au moins un bloc pour les enfants de `parent` ?
-fn yields_blocks<T: ReadTxn>(
-    txn: &T,
-    parent: &XmlElementRef,
-    level: usize,
-    in_column: bool,
-) -> bool {
-    elements(txn, parent)
+/// [`read_nodes`] rendrait-il au moins un bloc pour les enfants de `parent`, une colonne ou une
+/// liste de colonnes d'une colonne ? Dans une colonne, aucune liste n'est valide : elle rend ce
+/// que rendent ses colonnes, et la réponse ne dépend pas du niveau. Elle est gardée dans `yields`
+/// pour tout le parcours (Ruling R385).
+fn yields_blocks<T: ReadTxn>(txn: &T, parent: &XmlElementRef, yields: &mut Yields) -> bool {
+    let key = AsRef::<Branch>::as_ref(parent).id();
+    if let Some(&known) = yields.0.get(&key) {
+        return known;
+    }
+    let answer = elements(txn, parent)
         .iter()
         .any(|element| match element.tag().as_ref() {
             BLOCK_GROUP => false,
-            // Une liste valide est un bloc ; défaite, elle rend ce que rendent ses colonnes.
-            COLUMN | COLUMN_LIST => {
-                (element.tag().as_ref() == COLUMN_LIST
-                    && is_column_list(txn, element, level, in_column))
-                    || yields_blocks(txn, element, level, in_column)
-            }
+            COLUMN | COLUMN_LIST => yields_blocks(txn, element, yields),
             _ => true,
-        })
+        });
+    yields.0.insert(key, answer);
+    answer
 }
 
 /// Le `blockGroup` qui porte les enfants d'un `blockContainer`, comme [`read_container`] le
@@ -258,27 +278,18 @@ fn flattened_have<T: ReadTxn>(txn: &T, source: &XmlElementRef, id: &str) -> bool
     false
 }
 
-/// Une liste de colonnes, si elle respecte le schéma de BlockNote.
+/// Une liste de colonnes qui respecte le schéma de BlockNote ([`is_column_list`]).
 fn column_list<T: ReadTxn>(
     txn: &T,
     list: &XmlElementRef,
     level: usize,
-    in_column: bool,
-) -> Option<Block> {
-    if in_column || level + 2 > MAX_DEPTH {
-        return None;
-    }
+    yields: &mut Yields,
+) -> Block {
     let spec = block(COLUMN).expect("colonne dans le registre");
     let mut columns = Vec::new();
     for column in elements(txn, list) {
-        if column.tag().as_ref() != COLUMN {
-            return None;
-        }
         let mut children = Vec::new();
-        read_nodes(txn, &column, level + 2, true, &mut children);
-        if children.is_empty() {
-            return None;
-        }
+        read_nodes(txn, &column, level + 2, true, &mut children, yields);
         columns.push(Block {
             id: attr_string(txn, &column, "id"),
             kind: COLUMN.into(),
@@ -287,17 +298,14 @@ fn column_list<T: ReadTxn>(
             children,
         });
     }
-    if columns.len() < 2 {
-        return None;
-    }
     let spec = block(COLUMN_LIST).expect("liste de colonnes dans le registre");
-    Some(Block {
+    Block {
         id: attr_string(txn, list, "id"),
         kind: COLUMN_LIST.into(),
         props: read_props(txn, list, spec.props, &["id"]),
         content: Content::None,
         children: columns,
-    })
+    }
 }
 
 /// Descendants de `source`, sans enfants, dans l'ordre du document (sans
