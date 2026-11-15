@@ -24,7 +24,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use mementum_md::{Block, Content, Inline, MAX_DEPTH, PropValue, Props, Styles, normalize};
+use mementum_md::{
+    Block, Content, Inline, MAX_COLOR_BYTES, MAX_DEPTH, PropValue, Props, Styles, normalize,
+};
 use mementum_schema::{ContentKind, PropDefault, PropSpec, PropType, block};
 use uuid::Uuid;
 use yrs::any::Number;
@@ -463,32 +465,54 @@ pub(crate) fn read_inline<T: ReadTxn>(txn: &T, element: &XmlElementRef) -> Vec<I
 
 /// Plages d'un `XmlText` (texte brut de `diff`, jamais `get_string`). Les
 /// plages voisines d'un même lien forment un seul lien.
+///
+/// Chaque plage porte ses marques : rien de ce qu'elles portent n'est recopié
+/// ni comparé sans borne d'une plage à l'autre (Ruling R381). L'adresse d'un
+/// lien est lue en place et copiée une fois par lien ; une plage sous la même
+/// marque de lien que la précédente (le même objet du document) va dans son
+/// lien sans comparer les adresses ; une couleur plus longue que
+/// [`MAX_COLOR_BYTES`] est lue absente, comme `mementum_md::parse` la refuse.
+/// Avant, chaque plage recopiait l'une et l'autre, et comparait l'adresse :
+/// une couleur ou une adresse longue sur des plages alternées coûtait le
+/// produit de sa longueur par leur nombre, en mémoire ou en temps.
 fn read_runs<T: ReadTxn>(txn: &T, text: &XmlTextRef, out: &mut Vec<Inline>) {
+    // La marque de lien de la plage précédente, si elle en avait une.
+    let mut previous: Option<Any> = None;
     for run in text.diff(txn, YChange::identity) {
         let Out::Any(Any::String(s)) = &run.insert else {
             continue;
         };
-        let (styles, link) = styles_of(run.attributes.as_deref());
+        let attrs = run.attributes.as_deref();
+        let (styles, link) = styles_of(attrs);
         let text = Inline::Text {
             text: s.to_string(),
             styles,
         };
+        let mark = link.and(attrs.and_then(|a| a.get("link")));
+        let same_mark = matches!(
+            (&previous, mark),
+            (Some(Any::Map(before)), Some(Any::Map(now))) if Arc::ptr_eq(before, now)
+        );
         match link {
             None => out.push(text),
             Some(href) => match out.last_mut() {
-                Some(Inline::Link { href: h, children }) if *h == href => children.push(text),
+                Some(Inline::Link { href: h, children }) if same_mark || h == href => {
+                    children.push(text)
+                }
                 _ => out.push(Inline::Link {
-                    href,
+                    href: href.to_string(),
                     children: vec![text],
                 }),
             },
         }
+        previous = mark.cloned();
     }
 }
 
-fn styles_of(attrs: Option<&Attrs>) -> (Styles, Option<String>) {
+fn styles_of(attrs: Option<&Attrs>) -> (Styles, Option<&str>) {
     let mut styles = Styles::default();
     let mut link = None;
+    let color = |value| map_str(value, "stringValue").filter(|c| c.len() <= MAX_COLOR_BYTES);
     for (key, value) in attrs.into_iter().flatten() {
         let on = !matches!(value, Any::Null | Any::Undefined | Any::Bool(false));
         match key.as_ref() {
@@ -497,23 +521,23 @@ fn styles_of(attrs: Option<&Attrs>) -> (Styles, Option<String>) {
             "underline" => styles.underline = on,
             "strike" => styles.strike = on,
             "code" => styles.code = on,
-            "textColor" => styles.text_color = map_string(value, "stringValue"),
-            "backgroundColor" => styles.background_color = map_string(value, "stringValue"),
-            "link" => link = map_string(value, "href"),
+            "textColor" => styles.text_color = color(value).map(str::to_string),
+            "backgroundColor" => styles.background_color = color(value).map(str::to_string),
+            "link" => link = map_str(value, "href"),
             _ => {}
         }
     }
     (styles, link)
 }
 
-/// `{key: "…"}` → `"…"` (une chaîne nue est aussi acceptée).
-fn map_string(value: &Any, key: &str) -> Option<String> {
+/// `{key: "…"}` → `"…"` (une chaîne nue est aussi acceptée), lu en place.
+fn map_str<'a>(value: &'a Any, key: &str) -> Option<&'a str> {
     match value {
         Any::Map(m) => match m.get(key) {
-            Some(Any::String(s)) => Some(s.to_string()),
+            Some(Any::String(s)) => Some(s),
             _ => None,
         },
-        Any::String(s) => Some(s.to_string()),
+        Any::String(s) => Some(s),
         _ => None,
     }
 }
