@@ -324,6 +324,8 @@ Le relecteur a re-relu le tour 6 (rapport `re-relecture-tour6.md`, sondes `sonde
 
 **Vérifications du tour** : fmt et clippy propres ; `cargo test --workspace --no-fail-fast` : 898 verts, 15 ignorés ; typecheck du client propre ; budgets de la synchro en release sans recul (frappe à 2,0 ms au p95, 34,6 ms avec la coupe d'une version ; 499 frappes relues en 70,4 ms).
 
+**Mise à niveau sur main** (au registre, « Mise à niveau sur main, après le tour 7 », R536) : la branche est rebasée sur `main` (Task 13b, S4a, compte attendu compris). Le report d'un bloc recréé de la 13b passe désormais les gardes de la piste S (marques, contenus sans type, listes lues en entier), et le test de propriétés « page rechargée = page vivante » mêle des reports. À éprouver aussi par la re-relecture : la composition de R491 (l'encodage de la transaction) avec le relevé des blocs recréés, fait avant l'intégration dans la même transaction.
+
 ## Ce que la documentation doit dire (pour la Task 14)
 
 Pour les constats finis :
