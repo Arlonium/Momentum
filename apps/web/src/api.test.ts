@@ -22,6 +22,11 @@ type Received = {
   answer(status: number, body?: unknown): void;
   /** Pas de réponse : le réseau est coupé. */
   fail(): void;
+  /**
+   * Les en-têtes arrivent (le navigateur pose le cookie, et `fetch` est résolu), puis la connexion
+   * se coupe pendant le corps : sa lecture échoue.
+   */
+  answerLostBody(status: number): void;
 };
 
 let api: Api;
@@ -61,6 +66,14 @@ beforeEach(async () => {
           fail() {
             call.answered = true;
             reject(new TypeError("Failed to fetch"));
+          },
+          answerLostBody(status) {
+            call.answered = true;
+            resolve({
+              ok: status >= 200 && status < 300,
+              status,
+              json: () => Promise.reject(new TypeError("network error")),
+            } as unknown as Response);
           },
         };
         received.push(call);
@@ -823,6 +836,125 @@ test("a_login_whose_answer_is_lost_keeps_what_left_before_it_from_being_sent_aga
   (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
   (await waiting("GET", "/api/v1/pages/p2")).answer(200, page("p2"));
   await expect(read).resolves.toEqual(page("p2"));
+});
+
+test("a_login_whose_body_is_lost_after_its_headers_keeps_the_replay_from_going", async () => {
+  // Re-relecture, N1 : la forme qu'a, dans un navigateur, « une réponse perdue après son cookie ».
+  // Les en-têtes de la connexion de Bruno sont arrivés (cookie posé, `fetch` résolu) ; la connexion
+  // se coupe pendant le corps, dont la lecture lève une `TypeError`, pas une `ApiError` de statut 0.
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  const login = api.logIn({ email: "bruno@exemple.fr", password: "mot-de-passe" });
+  login.catch(() => {});
+  (await waiting("POST", "/api/v1/auth/login")).answerLostBody(200);
+  await expect(login).rejects.toBeInstanceOf(TypeError);
+  // La relecture, partie avec le cookie d'Alice avant la connexion, dit Alice ; le titre ne repart
+  // pas (il porterait le cookie de Bruno).
+  reading.answer(200, me("alice"));
+  await flush();
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+  expect(count("GET", "/api/v1/me")).toBe(2);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+});
+
+test("another_account_is_not_told_while_a_login_of_the_tab_is_in_course", async () => {
+  // Re-relecture, N2 : la relecture, traitée quand un autre onglet tenait la session sous Bruno,
+  // répond Bruno ; mais l'onglet se reconnecte sous Alice (sa connexion ferme la session de Bruno,
+  // R73). Annoncer tout de suite ferait recharger l'onglet en pleine reconnexion sous son compte.
+  const told: string[] = [];
+  api.onOtherAccount((other) => told.push(other.user.id));
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  const login = api.logIn({ email: "alice@exemple.fr", password: "mot-de-passe" });
+  const sent = await waiting("POST", "/api/v1/auth/login");
+  reading.answer(200, me("bruno"));
+  await flush();
+  expect(told).toEqual([]);
+  sent.answer(200, me("alice"));
+  await login;
+  await flush();
+  // La session est revenue à Alice : rien à dire.
+  expect(told).toEqual([]);
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("another_account_found_during_a_password_change_of_the_tab_is_told_once_it_settles", async () => {
+  // Témoin du précédent : la session de l'onglet qui s'est changée reste à Bruno (son mot de passe
+  // a changé sous la session de Bruno, que portait le cookie) ; l'annonce part à son issue.
+  const told: string[] = [];
+  api.onOtherAccount((other) => told.push(other.user.id));
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  const change = api.changePassword(PASSWORDS);
+  const sent = await waiting("POST", "/api/v1/auth/password");
+  reading.answer(200, me("bruno"));
+  await flush();
+  expect(told).toEqual([]);
+  sent.answer(204);
+  await change;
+  await flush();
+  expect(told).toEqual(["bruno"]);
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("an_old_refusal_at_the_bound_does_not_ask_to_log_in", async () => {
+  // Re-relecture, N3 (mutation C14b) : à la borne, un refus d'une génération ancienne ne repart pas
+  // et ne demande pas la connexion ; seul celui de la génération en cours la demande.
+  await loadedAs("alice");
+  const read = api.getPage("p1");
+  read.catch(() => {});
+  const first = await waiting("GET", "/api/v1/pages/p1");
+  await changePassword();
+  // Un second changement, resté sans réponse, est en route quand le refus revient.
+  void api.changePassword(PASSWORDS).catch(() => {});
+  await waiting("POST", "/api/v1/auth/password");
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    first.answer(401, UNAUTHENTICATED);
+    await vi.advanceTimersByTimeAsync(10_100);
+    await expect(read).rejects.toMatchObject({ code: "unauthenticated" });
+    expect(asked).toBe(0);
+    expect(count("GET", "/api/v1/pages/p1")).toBe(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a_reading_is_not_shared_across_a_session_change_of_the_tab", async () => {
+  // Re-relecture, N4 (mutation C17) : une relecture partie avant un changement de session de
+  // l'onglet ne sert pas à un refus jugé après lui ; la partager élargirait la fenêtre de R460 de
+  // toute la durée du changement (R463).
+  await loadedAs("alice");
+  const y = api.getPage("p1");
+  const x = api.getPage("p2");
+  y.catch(() => {});
+  x.catch(() => {});
+  const sentY = await waiting("GET", "/api/v1/pages/p1");
+  const sentX = await waiting("GET", "/api/v1/pages/p2");
+  await changePassword();
+  sentY.answer(401, UNAUTHENTICATED);
+  await waiting("GET", "/api/v1/me");
+  // Le mot de passe change encore pendant cette relecture.
+  await changePassword();
+  sentX.answer(401, UNAUTHENTICATED);
+  await flush();
+  const readings = received.filter((c) => !c.answered && c.method === "GET" && c.path === "/api/v1/me");
+  expect(readings.length).toBe(2);
 });
 
 test("a_login_refused_for_its_password_changes_nothing", async () => {

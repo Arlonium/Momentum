@@ -196,10 +196,10 @@ function opened(id: string) {
 }
 
 /**
- * Une ouverture de session de l'onglet est restée sans réponse : le serveur a pu l'ouvrir, et le
- * navigateur poser son cookie, sans que la page le sache. Le compte de la session n'est plus sûr
- * jusqu'à la prochaine relecture de l'application, et rien de ce qui était parti avant ne repart
- * (R480).
+ * Une ouverture de session de l'onglet est restée sans réponse lisible : le serveur a pu l'ouvrir,
+ * et le navigateur poser son cookie, sans que la page le sache. Le compte de la session n'est plus
+ * sûr jusqu'à la prochaine relecture de l'application, et rien de ce qui était parti avant ne
+ * repart (R480).
  */
 function sessionUncertain() {
   generation += 1;
@@ -207,12 +207,17 @@ function sessionUncertain() {
   settleAccounts();
 }
 
-/** Mène `run`, qui ouvre une session ; sans réponse, la session n'est plus sûre. */
+/**
+ * Mène `run`, qui ouvre une session. Seul un refus du serveur (une `ApiError` d'un statut, comme un
+ * mot de passe faux) laisse la session sûre ; toute autre issue la rend incertaine : pas de
+ * réponse (statut 0), ou une réponse dont les en-têtes sont arrivés, cookie compris, et le corps
+ * non (la lecture du corps lève une `TypeError`).
+ */
 async function opening<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (e) {
-    if (e instanceof ApiError && e.status === 0) sessionUncertain();
+    if (!(e instanceof ApiError) || e.status === 0) sessionUncertain();
     throw e;
   }
 }
@@ -296,7 +301,8 @@ async function judge(
 /**
  * Le compte de la session, relu, sans rejeu : celui que le navigateur porte à l'instant. Une
  * relecture déjà en route pour la génération en cours est partagée (R463). Si elle trouve un
- * autre compte que celui de l'application, `onOtherAccount` le dit (R464).
+ * autre compte que celui de l'application, `onOtherAccount` le dit (R464), à l'issue des sessions
+ * de l'onglet en route : une connexion de l'onglet peut rendre la session à l'application (R73).
  */
 function readSessionAccount(): Promise<string> {
   if (reading?.generation === generation) return reading.account;
@@ -305,9 +311,7 @@ function readSessionAccount(): Promise<string> {
     const me = (await (await send("GET", ME, undefined, undefined, 1)).json()) as Me;
     if (at === generation) {
       sessionIs(me.user.id, false);
-      if (appAccount !== null && me.user.id !== appAccount) {
-        for (const listener of [...otherAccount]) listener(me);
-      }
+      if (appAccount !== null && me.user.id !== appAccount) tellOtherAccount(me);
     }
     return me.user.id;
   })();
@@ -322,6 +326,26 @@ function readSessionAccount(): Promise<string> {
       if (reading === entry) reading = null;
     });
   return account;
+}
+
+/**
+ * Dit `me` à `onOtherAccount`, aussitôt si aucune session de l'onglet n'est en route ; sinon à leur
+ * issue, si la session est toujours à ce compte et que ce n'est pas celui de l'application. À la
+ * borne de l'attente, rien n'est dit : l'application l'apprendra en relisant le compte (R126).
+ */
+function tellOtherAccount(me: Me) {
+  const tell = () => {
+    for (const listener of [...otherAccount]) listener(me);
+  };
+  if (changing.size === 0) {
+    tell();
+    return;
+  }
+  void sessionChangesSettle().then((settled) => {
+    if (settled && sessionAccount === me.user.id && appAccount !== null && appAccount !== me.user.id) {
+      tell();
+    }
+  });
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
