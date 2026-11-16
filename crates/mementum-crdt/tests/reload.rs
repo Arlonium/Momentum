@@ -257,12 +257,12 @@ fn the_journal_keeps_only_what_the_page_integrated() {
     let read = served.page.apply_client_update(&attack).unwrap().read;
     let decoded = Update::decode_v1(&read).unwrap();
     assert!(decoded.insertions(true).is_empty(), "aucun élément");
-    let deleted: Vec<(u64, Vec<std::ops::Range<u32>>)> = decoded
+    let deleted: Vec<(u64, u32, u32)> = decoded
         .delete_set()
         .iter()
-        .map(|(c, r)| (c.get(), r.iter().cloned().collect()))
+        .flat_map(|(c, r)| r.iter().map(move |r| (c.get(), r.start, r.end)))
         .collect();
-    assert_eq!(deleted, [(1234, vec![7..8])]);
+    assert_eq!(deleted, [(1234, 7, 8)]);
 }
 
 /// Ruling R490 : une entrée déjà au journal (écrite avant R491) qui porte une marque hors du schéma
