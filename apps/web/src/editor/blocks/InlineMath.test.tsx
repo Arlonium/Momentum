@@ -172,6 +172,44 @@ test("the_window_of_a_formula_whose_paragraph_another_moves_stays_on_it", async 
   expect(tom.editor.document.map((block) => block.id)).toEqual(["z", "x"]);
 });
 
+for (const [opened, other] of [
+  ["A", "B"],
+  ["B", "A"],
+] as const) {
+  test(`in_a_table_moved_by_another_the_window_of_cell_${opened}_stays_on_it`, async () => {
+    // Deux cellules d'un tableau portent la même formule : le rang se compte dans tout le bloc (le
+    // tableau), pas dans le seul paragraphe de la cellule, sinon la fenêtre se rattachait à l'autre
+    // cellule et « Terminer » y écrivait (re-relecture de C2, N1).
+    const math = { type: "math", props: { latex: "x" } };
+    const { mona, tom, server } = await duo({
+      id: "x",
+      type: "table",
+      content: { type: "tableContent", rows: [{ cells: [["A ", math], ["B ", math]] }] },
+    } as never);
+    const buttons = blockOf(mona, "x").querySelectorAll<HTMLButtonElement>(FORMULA);
+    expect(buttons).toHaveLength(2);
+    buttons[opened === "A" ? 0 : 1]!.click();
+    await flush();
+    const typed = await field(mona);
+    fill(typed, "y^2");
+    tom.editor.setTextCursorPosition("x");
+    tom.editor.moveBlocksDown();
+    await exchange(server, [tom, mona]);
+    await flush();
+    expect(mona.editor.document.map((block) => block.id)).toEqual(["z", "x"]);
+    await until(mona.host, () => blockOf(mona, "x").querySelectorAll(FORMULA).length === 2, "les formules recréées");
+    await flush();
+    press(typed, "Enter", { ctrlKey: true });
+    await flush();
+    expect(blockWindow(WINDOW)).toBeNull();
+    await exchange(server, [mona, tom]);
+    const cells = [...server.getXmlFragment(FRAGMENT).toString().matchAll(/(A|B) <math latex="([^"]*)"/g)].map(
+      (match) => `${match[1]}:${match[2]}`,
+    );
+    expect(cells.sort()).toEqual([`${opened}:y^2`, `${other}:x`].sort());
+  });
+}
+
 test("a_formula_deleted_by_another_is_not_taken_for_the_next_one", async () => {
   // Tom supprime la formule dont Mona remplit le champ : la suivante prend son rang, mais ce n'est
   // pas elle (sa formule diffère) ; la fenêtre la dit partie, et n'écrit rien.

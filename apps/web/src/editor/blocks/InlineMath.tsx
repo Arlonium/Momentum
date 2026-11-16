@@ -222,9 +222,13 @@ function placeAt(editor: MementumEditor, pos: number | undefined): Place | null 
     for (let depth = at.depth; depth >= 0; depth -= 1) {
       const node = at.node(depth);
       if (node.type.name !== "blockContainer") continue;
+      // Le rang parmi toutes les formules en ligne du bloc, de son début jusqu'à elle : un tableau
+      // porte des formules dans plusieurs cellules, chacune dans son paragraphe (re-relecture de C2, N1).
+      const start = at.before(depth) + 1;
       let rank = 0;
-      at.parent.forEach((child, offset) => {
-        if (offset < at.parentOffset && child.type.name === "math") rank += 1;
+      node.descendants((child, offset) => {
+        if (child.type.name === "math" && start + offset < pos) rank += 1;
+        return start + offset < pos;
       });
       return { blockId: String(node.attrs.id), rank };
     }
