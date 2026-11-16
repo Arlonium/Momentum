@@ -600,6 +600,14 @@ fn make_room(unknown: &mut HashMap<[u8; 32], Window>, now: i64) {
 /// caractère de contrôle (octet nul compris) est refusé : il vient d'une
 /// saisie abîmée, et personne ne le retaperait.
 ///
+/// Pendant que le serveur tourne, la commande est un autre processus : elle
+/// n'a pas de place dans la file d'écriture du serveur, et attend le verrou de
+/// SQLite par le délai d'attente de sa connexion (5 s), qu'elle partage avec
+/// la seule connexion du serveur qui écrit, laquelle le reprend après chaque
+/// validation (Ruling R519 : jusqu'à 2,65 s d'attente mesurée sous douze
+/// boucles d'écriture du serveur). Au-delà, elle échoue (`database is
+/// locked`) sans avoir rien écrit : la relancer, ou la lancer serveur arrêté.
+///
 /// Ouvrir la base la migre si une migration est en attente : la commande
 /// peut être la première à ouvrir une base d'une version plus ancienne. Une
 /// copie de la base est alors écrite d'abord (`Store::open`), et `on_backup`
