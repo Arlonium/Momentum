@@ -24,7 +24,7 @@
 // Les premières mesures se font avec un petit arbre (les pages de mesure). Les dernières,
 // avec 1 000 pages de plus dans l'arbre (Ruling R43) : l'ouverture ne doit pas suivre le
 // nombre de pages de la barre latérale.
-import { expect, test, type APIRequestContext, type Browser } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Browser, type Page } from "@playwright/test";
 import {
   closeContexts,
   createPage,
@@ -263,27 +263,59 @@ test.describe("blocs riches", () => {
 });
 
 /**
- * Une page de formules (Task C2, R423) : cinquante équations de 10 000 caractères, sans macro,
- * après un paragraphe. Leur mise en forme figeait l'ouverture 22 s ; une formule n'est plus mise en
- * forme qu'à l'écran, l'une après l'autre, quelques millisecondes par image : l'ouverture tient le
- * budget des 1 000 blocs, et l'image la plus longue est consignée.
+ * Une page de formules (Task C2, R423, R526) : cinquante équations, sans macro, après un paragraphe,
+ * chacune de 200 fractions (11 800 éléments, près de la borne `MAX_TEX_NODES` : une plus grande
+ * n'est plus mise en forme). Leur mise en forme figeait l'ouverture 22 s ; une formule n'est plus
+ * mise en forme qu'à l'écran, l'une après l'autre, quelques milliers d'éléments par image :
+ * l'ouverture tient le budget des 1 000 blocs, et l'image la plus longue est consignée.
+ *
+ * L'image la plus longue avec des formules (R526) : l'ouverture s'arrête au premier bloc, la mise en
+ * page des formules vient après, et revenir sur une page dont les formules sont déjà calculées
+ * figeait l'onglet 7 s (50 formules) à 28 s (150). Mesurée du clic dans l'arbre à la fin de la mise
+ * en page des formules à l'écran, à l'ouverture puis au retour sur la page dans le même onglet, et en
+ * faisant défiler des formules toutes différentes jusqu'en bas de la page.
  */
 test.describe("formules", () => {
+  /**
+   * L'image la plus longue à l'ouverture et au retour sur la page, au plus (ms) : une formule de
+   * 11 800 éléments s'attache seule dans son image (mesuré : 133 à 147 ms ; avant R526, 2,5 à 23 s).
+   */
+  const FORMULA_FRAME_MS = 300;
+
+  /**
+   * L'image la plus longue en faisant défiler cinquante formules différentes, au plus (ms) : la mise
+   * en page d'une formule coûte d'autant plus que la page en porte déjà (mesuré : 280 ms vers la fin,
+   * une pointe à 433 ms ; avant R526, 767 ms avec des formules de 23 600 éléments).
+   */
+  const SCROLL_FRAME_MS = 600;
+
+  /** Une formule de 200 fractions (4 687 caractères, 11 800 éléments). */
+  const longFormula = (power: number) =>
+    Array.from({ length: 200 }, (_, k) => `\\frac{a_{${k}}}{b^{${power}}}`).join(" + ");
+
   let heavy: Target[] = [];
+  let heavy150: Target | null = null;
+  let distinct: Target | null = null;
+  let quiet: Target | null = null;
+
+  /** Une page dont le premier bloc est un paragraphe, suivi des équations `formulas`. */
+  async function formulaPage(request: APIRequestContext, formulas: string[]): Promise<Target> {
+    const tag = unique();
+    const { id } = await createPage(request, { title: `Mesure formules ${tag}` });
+    const blocks = [blockText(tag, 1), ...formulas.map((formula) => `$$\n${formula}\n$$`)];
+    await putMmd(request, id, `${blocks.join("\n\n")}\n`);
+    return { id, first: blockText(tag, 1) };
+  }
 
   test.beforeAll(async ({ playwright }) => {
     test.setTimeout(180_000);
     const request = await playwright.request.newContext({ baseURL: test.info().project.use.baseURL });
     try {
       heavy = [];
-      for (let i = 0; i < OPENINGS; i++) {
-        const tag = unique();
-        const { id } = await createPage(request, { title: `Mesure formules ${tag}` });
-        const formula = Array.from({ length: 400 }, (_, k) => `\\frac{a_{${k}}}{b^{2}}`).join(" + ");
-        const blocks = [blockText(tag, 1), ...Array.from({ length: 50 }, () => `$$\n${formula}\n$$`)];
-        await putMmd(request, id, `${blocks.join("\n\n")}\n`);
-        heavy.push({ id, first: blockText(tag, 1) });
-      }
+      for (let i = 0; i < OPENINGS; i++) heavy.push(await formulaPage(request, Array.from({ length: 50 }, () => longFormula(2))));
+      heavy150 = await formulaPage(request, Array.from({ length: 150 }, () => longFormula(2)));
+      distinct = await formulaPage(request, Array.from({ length: 50 }, (_, i) => longFormula(i + 3)));
+      quiet = await formulaPage(request, []);
     } finally {
       await request.dispose();
     }
@@ -291,7 +323,122 @@ test.describe("formules", () => {
   });
 
   test("open_page_of_50_long_formulas_under_300ms", async ({ browser }) => {
-    expect(await openSmallPages(browser, " : cinquante formules de 10 000 caractères", heavy)).toBeLessThan(300);
+    expect(await openSmallPages(browser, " : cinquante formules de 11 800 éléments", heavy)).toBeLessThan(300);
+  });
+
+  /** Suit les images de l'onglet : l'intervalle le plus long entre deux, depuis `reset`. */
+  async function watchFrames(p: Page): Promise<void> {
+    await p.evaluate(() => {
+      const w = window as unknown as { __frames: { longest: number; last: number } };
+      w.__frames = { longest: 0, last: performance.now() };
+      const frame = (now: number) => {
+        w.__frames.longest = Math.max(w.__frames.longest, now - w.__frames.last);
+        w.__frames.last = now;
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    });
+  }
+
+  /** L'image la plus longue depuis le dernier appel (ms). */
+  async function longestFrame(p: Page): Promise<number> {
+    return p.evaluate(() => {
+      const w = window as unknown as { __frames: { longest: number; last: number } };
+      // L'image en cours compte aussi : elle peut être la plus longue.
+      const longest = Math.max(w.__frames.longest, performance.now() - w.__frames.last);
+      w.__frames.longest = 0;
+      return longest;
+    });
+  }
+
+  /** Les formules à l'écran ou près (400 px, la marge de l'observateur) sont toutes attachées. */
+  async function formulasSettled(p: Page): Promise<void> {
+    await p.waitForFunction(
+      () => {
+        for (const pending of document.querySelectorAll(".mm-editor .mm-tex-pending")) {
+          const box = pending.getBoundingClientRect();
+          if (box.bottom >= -400 && box.top <= innerHeight + 400) return false;
+        }
+        return true;
+      },
+      null,
+      { timeout: 120_000, polling: "raf" },
+    );
+    // L'image qui met en page la dernière attache.
+    await p.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  }
+
+  /** Ouvre `target` d'un clic dans l'arbre ; rend l'image la plus longue, jusqu'aux formules à l'écran attachées. */
+  async function openAndSettle(p: Page, target: Target): Promise<number> {
+    await longestFrame(p);
+    await p.locator(`[data-page-id="${target.id}"] .tree-link`).click();
+    await p.waitForFunction(
+      (first) => {
+        const container = document.querySelector(".mm-editor");
+        return (
+          container?.getAttribute("data-synced") === "true" &&
+          container.querySelector(".bn-block-content")?.textContent === first
+        );
+      },
+      target.first,
+      { timeout: 120_000 },
+    );
+    await formulasSettled(p);
+    return longestFrame(p);
+  }
+
+  for (const [count, page] of [
+    ["50", () => heavy[0]!],
+    ["150", () => heavy150!],
+  ] as const) {
+    test(`longest_frame_with_${count}_identical_long_formulas_opened_then_reopened_under_${FORMULA_FRAME_MS}ms`, async ({
+      browser,
+    }) => {
+      test.setTimeout(240_000);
+      const p = await newUser(browser);
+      await p.goto(`/p/${landing}`);
+      await waitSynced(p);
+      await p.evaluate(() => new Promise((done) => requestIdleCallback(done, { timeout: 2_000 })));
+      await watchFrames(p);
+      const opening = await openAndSettle(p, page());
+      await openAndSettle(p, quiet!);
+      // De retour sur la page : ses formules sont dans le cache de l'onglet.
+      const returning = await openAndSettle(p, page());
+      console.log(
+        `MESURE image la plus longue, ${count} fois la même formule de 11 800 éléments : ouverture ` +
+          `${Math.round(opening)} ms, retour sur la page ${Math.round(returning)} ms`,
+      );
+      expect(await p.locator(".mm-editor .mm-equation .katex").count()).toBeGreaterThan(5);
+      expect(opening).toBeLessThan(FORMULA_FRAME_MS);
+      expect(returning).toBeLessThan(FORMULA_FRAME_MS);
+    });
+  }
+
+  test(`longest_frame_scrolling_through_50_distinct_long_formulas_under_${SCROLL_FRAME_MS}ms`, async ({ browser }) => {
+    test.setTimeout(240_000);
+    const p = await newUser(browser);
+    await p.goto(`/p/${landing}`);
+    await waitSynced(p);
+    await p.evaluate(() => new Promise((done) => requestIdleCallback(done, { timeout: 2_000 })));
+    await watchFrames(p);
+    const opening = await openAndSettle(p, distinct!);
+    // Un écran à la fois, jusqu'à la dernière formule, attachée.
+    let steps = 0;
+    const last = p.locator(".mm-editor .mm-equation").last();
+    while (!(await last.evaluate((element) => element.getBoundingClientRect().bottom <= innerHeight))) {
+      expect(++steps, "la dernière formule jamais atteinte").toBeLessThan(200);
+      await p.mouse.move(600, 400);
+      await p.mouse.wheel(0, 700);
+      await formulasSettled(p);
+    }
+    await expect(last.locator(".katex")).toBeVisible();
+    const scrolling = await longestFrame(p);
+    console.log(
+      `MESURE image la plus longue, 50 formules différentes de 11 800 éléments : ouverture ` +
+        `${Math.round(opening)} ms, en défilant jusqu'en bas ${Math.round(scrolling)} ms (${steps} écrans)`,
+    );
+    expect(opening).toBeLessThan(FORMULA_FRAME_MS);
+    expect(scrolling).toBeLessThan(SCROLL_FRAME_MS);
   });
 });
 
