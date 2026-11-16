@@ -108,6 +108,37 @@ test("a_long_inline_formula_scrolls_instead_of_being_cut", async ({ browser, req
   expect(box.client).toBeLessThanOrEqual(box.editor);
 });
 
+test("a_formula_of_huge_sizes_leaves_the_rest_of_the_page_within_reach", async ({ browser, request }) => {
+  // Une formule de 24 caractères faisait un bloc de 33 millions de pixels, et la suite de la page
+  // devenait inaccessible (relecture de C2, I3) : les tailles écrites sont bornées, et une hauteur
+  // négative, que KaTeX ne borne pas, défile dans la formule.
+  const page = await createPage(request, { title: `Tailles ${unique()}` });
+  await putMmd(
+    request,
+    page.id,
+    `$$\n\\rule{1em}{2000000em}\n$$\n\nAvant $\\raisebox{-100000em}{x}$ milieu $\\rule{1em}{100000em}$ après\n\n$$\n\\frac{a}{b} + \\sqrt{2}\n$$\n\nOrdinaire $a^2 + \\frac{1}{2}$ ici\n\nFin\n`,
+  );
+  const p = await openPage(browser, page.id);
+  await expect(p.locator(".mm-editor .mm-equation .katex")).toHaveCount(2);
+  await expect(p.locator(".mm-editor .mm-math .katex")).toHaveCount(3);
+  const end = p.locator(".mm-editor .bn-block-content").filter({ hasText: /^Fin$/ });
+  const top = await end.evaluate(
+    (element) => element.getBoundingClientRect().top - document.querySelector(".mm-editor")!.getBoundingClientRect().top,
+  );
+  expect(top).toBeLessThan(2_000);
+  // Plus hautes que leur borne, elles défilent en dedans, en bloc comme en ligne.
+  for (const tall of [p.locator(".mm-editor .mm-equation .mm-tex").first(), p.locator(".mm-editor .mm-math").first()]) {
+    const box = await tall.evaluate((element) => ({ scroll: element.scrollHeight, client: element.clientHeight }));
+    expect(box.scroll).toBeGreaterThan(box.client);
+    expect(box.client).toBeLessThan(800);
+  }
+  // Une formule ordinaire ne défile pas : rien ne dépasse de sa hauteur, en bloc ni en ligne.
+  for (const ordinary of [p.locator(".mm-editor .mm-equation .mm-tex").last(), p.locator(".mm-editor .mm-math").last()]) {
+    const box = await ordinary.evaluate((element) => ({ scroll: element.scrollHeight, client: element.clientHeight }));
+    expect(box.scroll).toBeLessThanOrEqual(box.client);
+  }
+});
+
 /** Ouvre la page et dit si l'onglet a planté avant la fin de la première synchro. */
 async function openWatchingCrash(browser: Parameters<typeof openPage>[0], id: string) {
   const context = await browser.newContext({ storageState: test.info().project.use.storageState as string });
