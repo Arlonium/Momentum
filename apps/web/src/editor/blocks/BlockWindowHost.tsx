@@ -26,6 +26,7 @@ import type { MementumEditor } from "../debug";
 import { BookmarkWindow } from "./Bookmark";
 import { CalloutWindow } from "./Callout";
 import {
+  blockDraft,
   closeBlockWindow,
   openBlockWindow,
   useOpenBlockWindow,
@@ -79,13 +80,14 @@ export function isBlockWindowShortcut(event: ShortcutEvent): boolean {
 
 /**
  * Ouvre la fenêtre du bloc riche où est le curseur de `editor` (un callout où l'on tape, un signet
- * sélectionné), s'il en a une et si l'éditeur est modifiable ; rend vrai si elle s'est ouverte. Le
- * focus reviendra à l'éditeur.
+ * sélectionné), s'il en a une ; rend vrai si elle s'est ouverte. L'éditeur en lecture seule ne
+ * l'ouvre que si un texte tapé avant la perte du droit l'y attend, à copier (R472). Le focus
+ * reviendra à l'éditeur.
  */
 export function openWindowAtCursor(editor: MementumEditor): boolean {
-  if (!editor.isEditable) return false;
   const block = editor.getTextCursorPosition().block;
   if (windowOf(block.type) === null) return false;
+  if (!editor.isEditable && blockDraft(editor, block.id, block.type) === undefined) return false;
   openBlockWindow(editor, block, "editor");
   return true;
 }
@@ -159,12 +161,22 @@ function OpenBlockWindow({ editor, open }: { editor: MementumEditor; open: OpenW
 
   if (spec === null) return null;
 
-  // Le bouton n'existe que pour qui peut modifier (`useEditable`) : sans lui, l'éditeur.
+  // Le bouton n'existe que pour qui peut modifier (`useEditable`), ou a un texte tapé à copier :
+  // sans lui, l'éditeur. Ouverte par le bouton, la fenêtre ne sait pas où était le curseur de
+  // l'éditeur (peut-être loin) : si le bloc est encore là (changé en autre chose), il va à sa fin, où
+  // la frappe reprend ; sinon, là où il était (R470).
   const focusBack = () => {
     const anchor = returnTo === "anchor" ? anchorOf(editor, blockId) : null;
     anchor?.focus();
-    // Le bouton ne prend pas toujours le focus (parti entre-temps) : on le vérifie.
-    if (anchor === null || document.activeElement !== anchor) focusEditor(editor);
+    if (anchor !== null && document.activeElement === anchor) return;
+    if (returnTo === "anchor" && editor.getBlock(blockId) !== undefined) {
+      try {
+        editor.setTextCursorPosition(blockId, "end");
+      } catch {
+        // Un bloc qu'on ne sait pas désigner : le curseur reste où il était.
+      }
+    }
+    focusEditor(editor);
   };
   const close = (how: "escape" | "outside" | "done") => {
     closeBlockWindow(editor);

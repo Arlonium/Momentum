@@ -96,8 +96,13 @@ function shownIcon(icon: string): { text: string; cut: boolean } {
   return { text: `${graphemes.slice(0, MAX_ICON_GRAPHEMES).join("")}…`, cut: true };
 }
 
-/** Ce qui ne se voit pas : espaces, caractères de contrôle et de format (U+202E, U+200B…). */
-const INVISIBLE = /[\p{Z}\p{Cc}\p{Cf}\s]/gu;
+/**
+ * Ce qui ne se voit pas : espaces, caractères de contrôle et de format (U+202E, U+200B…), points de
+ * code ignorables (remplissages hangûl U+3164 et U+115F, sélecteurs de variante, U+034F), marques
+ * combinantes seules, et la cellule Braille vide (U+2800). Une icône qui n'en a pas d'autres est
+ * vide à l'œil (R476).
+ */
+const INVISIBLE = /[\p{Z}\p{Cc}\p{Cf}\p{M}\p{Default_Ignorable_Code_Point}\u2800\s]/gu;
 
 /**
  * L'icône d'un callout : l'icône vectorielle pour celle par défaut, et pour une icône qui ne montre

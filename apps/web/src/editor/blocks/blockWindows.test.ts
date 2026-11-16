@@ -13,6 +13,7 @@ import {
   toggleBlockWindow,
   useBlockWindow,
   useBlockWindowPage,
+  useHasBlockDraft,
   useOpenBlockWindow,
 } from "./blockWindows";
 
@@ -96,4 +97,16 @@ test("editors_of_one_page_share_its_window_and_drafts_until_the_page_is_left", a
   await renderHook((editor: object) => useBlockWindowPage(editor, "page-x"), later);
   expect(openWindowOf(later)).toBeNull();
   expect(blockDraft(later, "a", "bookmark")).toBeUndefined();
+});
+
+test("the_button_of_a_block_learns_when_a_draft_appears_or_goes", async () => {
+  // Le bouton d'un signet reste pour un lecteur qui y a un texte non enregistré (R472) : il suit la
+  // naissance et le départ du brouillon, sans être rendu de nouveau à chaque frappe.
+  const editor = {};
+  const has = await renderHook(() => useHasBlockDraft(editor, "a", "bookmark"), undefined);
+  expect(has.current).toBe(false);
+  await settle(() => setBlockDraft(editor, "a", "bookmark", "h"));
+  expect(has.current).toBe(true);
+  await settle(() => setBlockDraft(editor, "a", "bookmark", undefined));
+  expect(has.current).toBe(false);
 });

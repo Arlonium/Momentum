@@ -190,10 +190,21 @@ test("an_icon_that_shows_nothing_falls_back_to_the_default_icon", async () => {
       { id: "v", type: "callout", props: { icon: "" }, content: "Vide" },
       { id: "f", type: "callout", props: { icon: "\u202E\u202E\u202E" }, content: "Format" },
       { id: "w", type: "callout", props: { icon: "  \u200B " }, content: "Blanc" },
+      // Sondes de la re-relecture : remplissage hangûl, Braille vide, sélecteur de variante seul,
+      // graphème combinant, remplissage de l'initiale hangûl.
+      { id: "h", type: "callout", props: { icon: "\u3164\u3164" }, content: "Hangûl" },
+      { id: "b", type: "callout", props: { icon: "\u2800" }, content: "Braille" },
+      { id: "s", type: "callout", props: { icon: "\uFE0F" }, content: "Sélecteur" },
+      { id: "g", type: "callout", props: { icon: "\u034F\u034F" }, content: "Combinant" },
+      { id: "i", type: "callout", props: { icon: "\u115F" }, content: "Initiale" },
+      { id: "m", type: "callout", props: { icon: "\u0301\u0301" }, content: "Marques" },
       { id: "e", type: "callout", props: { icon: "⚠️" }, content: "Témoin" },
+      // Témoin : une lettre et son accent combinant se voient.
+      { id: "a", type: "callout", props: { icon: "e\u0301" }, content: "Accent" },
     ],
   });
-  for (const id of ["v", "f", "w"]) {
+  expect(blockOf(m, "a").querySelector(".mm-callout-glyph")?.textContent).toBe("e\u0301");
+  for (const id of ["v", "f", "w", "h", "b", "s", "g", "i", "m"]) {
     expect(blockOf(m, id).querySelector(".mm-callout-glyph"), id).toBeNull();
     expect(blockOf(m, id).querySelector(".mm-callout-icon svg"), id).not.toBeNull();
   }

@@ -166,9 +166,25 @@ export function blockDraft(editor: object, blockId: string, kind: string): strin
   return stateOf(editor).drafts.get(draftKey(blockId, kind));
 }
 
-/** Garde (ou, avec `undefined`, oublie) le brouillon de la fenêtre `kind` du bloc `blockId`. */
+/**
+ * Garde (ou, avec `undefined`, oublie) le brouillon de la fenêtre `kind` du bloc `blockId`. Les vues
+ * ne sont prévenues que quand un brouillon naît ou part (`useHasBlockDraft`), pas à chaque frappe.
+ */
 export function setBlockDraft(editor: object, blockId: string, kind: string, text: string | undefined): void {
-  const { drafts } = stateOf(editor);
-  if (text === undefined) drafts.delete(draftKey(blockId, kind));
-  else drafts.set(draftKey(blockId, kind), text);
+  const state = stateOf(editor);
+  const key = draftKey(blockId, kind);
+  const had = state.drafts.has(key);
+  if (text === undefined) state.drafts.delete(key);
+  else state.drafts.set(key, text);
+  if (had !== state.drafts.has(key)) for (const listener of [...state.listeners]) listener();
+}
+
+/**
+ * Le bloc `blockId` a-t-il un brouillon de sa fenêtre `kind` ? Suivi par le bouton du bloc : pour un
+ * lecteur qui a tapé un texte avant de perdre le droit d'écrire, le bouton reste, qui rouvre la
+ * fenêtre en lecture seule, le texte à copier (R472).
+ */
+export function useHasBlockDraft(editor: object, blockId: string, kind: string): boolean {
+  const listen = useCallback((listener: () => void) => subscribe(editor, listener), [editor]);
+  return useSyncExternalStore(listen, () => blockDraft(editor, blockId, kind) !== undefined);
 }

@@ -295,6 +295,9 @@ test("escape_after_another_changed_the_bookmark_into_a_paragraph_leaves_the_focu
   expect(blockWindow("Adresse du signet")).toBeNull();
   expect(document.activeElement).toBe(mona.editor.prosemirrorView.dom);
   expect(unsent(mona)).toBe(0);
+  // Le curseur est dans le bloc changé (à sa fin), pas à la dernière sélection de l'éditeur, qui peut
+  // être loin de lui : la frappe y entre.
+  expect(mona.editor.getTextCursorPosition().block.id).toBe("s");
 });
 
 test("escape_after_another_changed_the_callout_into_a_heading_leaves_the_focus_in_the_editor", async () => {
@@ -314,6 +317,9 @@ test("escape_after_another_changed_the_callout_into_a_heading_leaves_the_focus_i
   press(document.activeElement!, "Escape");
   await flush();
   expect(document.activeElement).toBe(mona.editor.prosemirrorView.dom);
+  const cursor = mona.editor.getTextCursorPosition();
+  expect(cursor.block.id).toBe("c");
+  expect(mona.editor.prosemirrorState.selection.$head.parentOffset).toBe("Attention".length);
 });
 
 test("the_focus_never_goes_to_the_button_of_a_child_block", async () => {
@@ -459,9 +465,10 @@ test("a_choice_for_a_callout_another_deleted_writes_nothing_and_raises_nothing",
   expect(mona.errors.filter((error) => !error.includes("not wrapped in act"))).toEqual([]);
 });
 
-test("escape_in_a_read_only_session_leaves_the_focus_in_the_editor", async () => {
-  // Une session en lecture seule monte son éditeur sans `tabindex` : il ne prend pas le focus de
-  // lui-même, et le focus tombait sur `body` (R470).
+test("escape_in_a_read_only_session_leaves_the_focus_on_the_block_or_in_the_editor", async () => {
+  // Ouverte par le bouton, la fenêtre d'un lecteur qui a un texte non enregistré rend le focus à ce
+  // bouton, qui reste pour lui (R472) ; ouverte depuis le texte, à l'éditeur en lecture seule, que
+  // `view.focus()` de ProseMirror ne focalise pas : le focus tombait sur `body` (R470).
   const m = await mountEditor({ blocks: PAGE, pageId: "page-5" });
   fill(await openBookmarkWindow(m), "https://mementum.dev/tapé");
   const reader = await renewSession(m, { editable: false, pageId: "page-5" });
@@ -469,5 +476,56 @@ test("escape_in_a_read_only_session_leaves_the_focus_in_the_editor", async () =>
   press(document.activeElement!, "Escape");
   await flush();
   expect(blockWindow("Adresse du signet")).toBeNull();
+  expect(document.activeElement).toBe(blockOf(m, "s").querySelector('button[aria-label="Texte non enregistré du signet"]'));
+  // Depuis le texte : le signet sélectionné, Ctrl+Alt+Entrée, puis Échap.
+  reader.editor.prosemirrorView.dom.focus();
+  reader.editor.transact((tr) => tr.setSelection(NodeSelection.create(tr.doc, containerOf(tr.doc, "s").pos + 1)));
+  reader.editor.prosemirrorView.dom.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, altKey: true, bubbles: true, cancelable: true }),
+  );
+  await flush();
+  expect(blockWindow("Adresse du signet")!.contains(document.activeElement)).toBe(true);
+  press(document.activeElement!, "Escape");
+  await flush();
   expect(document.activeElement).toBe(reader.editor.prosemirrorView.dom);
+});
+
+test("in_read_only_the_typed_text_can_be_reached_again_after_escape", async () => {
+  // La session recréée en lecture seule, Échap ferme la fenêtre : le texte « à copier » doit rester
+  // atteignable, par le bouton du bloc et par Ctrl+Alt+Entrée, sans que rien ne s'écrive.
+  const m = await mountEditor({ blocks: PAGE, pageId: "page-6" });
+  fill(await openBookmarkWindow(m), "https://tapé.example/");
+  const reader = await renewSession(m, { editable: false, pageId: "page-6" });
+  press(document.activeElement!, "Escape");
+  await flush();
+  expect(blockWindow("Adresse du signet")).toBeNull();
+
+  // Le bouton du signet, pour un lecteur qui y a un texte non enregistré.
+  const button = blockOf(m, "s").querySelector<HTMLButtonElement>("button[data-block-window-anchor]");
+  expect(button, "un bouton vers le texte tapé").not.toBeNull();
+  expect(button!.getAttribute("aria-label")).toBe("Texte non enregistré du signet");
+  button!.click();
+  await flush();
+  let dialog = blockWindow("Adresse du signet")!;
+  expect(dialog).not.toBeNull();
+  const field = dialog.querySelector("input")!;
+  expect(field.value).toBe("https://tapé.example/");
+  expect(field.readOnly).toBe(true);
+  expect(document.activeElement).toBe(field);
+  press(field, "Escape");
+  await flush();
+  expect(document.activeElement).toBe(blockOf(m, "s").querySelector("button[data-block-window-anchor]"));
+
+  // Ctrl+Alt+Entrée, le signet sélectionné dans l'éditeur en lecture seule (un clic, ou Tab, lui
+  // donne le focus ; `view.focus()` de ProseMirror ne le fait pas en lecture seule).
+  reader.editor.prosemirrorView.dom.focus();
+  reader.editor.transact((tr) => tr.setSelection(NodeSelection.create(tr.doc, containerOf(tr.doc, "s").pos + 1)));
+  const event = new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, altKey: true, bubbles: true, cancelable: true });
+  reader.editor.prosemirrorView.dom.dispatchEvent(event);
+  await flush();
+  expect(event.defaultPrevented).toBe(true);
+  dialog = blockWindow("Adresse du signet")!;
+  expect(dialog).not.toBeNull();
+  expect(dialog.querySelector('[role="status"]')?.textContent).toBe(READ_ONLY_NOTICE);
+  expect(reader.writes).toEqual([]);
 });

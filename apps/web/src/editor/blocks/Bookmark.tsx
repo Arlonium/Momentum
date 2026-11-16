@@ -17,7 +17,14 @@ import { useId, useRef, useState, type FormEvent } from "react";
 import { shorten } from "../../comments/dom";
 import { BookmarkIcon } from "../../icons";
 import type { MementumEditor } from "../debug";
-import { blockDraft, setBlockDraft, toggleBlockWindow, useBlockWindow, type BlockWindowProps } from "./blockWindows";
+import {
+  blockDraft,
+  setBlockDraft,
+  toggleBlockWindow,
+  useBlockWindow,
+  useHasBlockDraft,
+  type BlockWindowProps,
+} from "./blockWindows";
 import { textProp } from "./props";
 import { hostOf, webUrl } from "./urls";
 import { useEditable } from "./useEditable";
@@ -38,6 +45,8 @@ function BookmarkView({ block, editor }: ViewProps) {
   const href = webUrl(url);
   const editable = useEditable(editor);
   const open = useBlockWindow(editor, block.id);
+  // Un texte tapé avant de perdre le droit d'écrire reste atteignable (R472).
+  const unsaved = useHasBlockDraft(editor, block.id, "bookmark");
   return (
     <div className="mm-frame mm-bookmark" contentEditable={false}>
       <span className="mm-frame-icon" aria-hidden="true">
@@ -61,11 +70,11 @@ function BookmarkView({ block, editor }: ViewProps) {
           </span>
         )}
       </span>
-      {editable && (
+      {(editable || unsaved) && (
         <button
           type="button"
           className="mm-button mm-button-small mm-bookmark-edit"
-          aria-label="Modifier le signet"
+          aria-label={editable ? "Modifier le signet" : "Texte non enregistré du signet"}
           aria-haspopup="dialog"
           aria-expanded={open}
           data-block-window-anchor=""
@@ -76,7 +85,7 @@ function BookmarkView({ block, editor }: ViewProps) {
             toggleBlockWindow(editor, block);
           }}
         >
-          Modifier
+          {editable ? "Modifier" : "Texte non enregistré"}
         </button>
       )}
     </div>

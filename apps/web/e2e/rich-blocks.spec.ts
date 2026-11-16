@@ -251,10 +251,17 @@ test("block_window_and_its_text_survive_the_page_turning_read_only", async ({ br
   await bruno.keyboard.type("xyz");
   await bruno.keyboard.press("Enter");
   await expect(field).toHaveValue("https://mementum.dev/doc-en-cours");
-  // Échap : le focus va à l'éditeur, en lecture seule, jamais à `body`.
+  // Échap : le focus va au bouton du signet, qui reste pour le lecteur tant qu'un texte non
+  // enregistré l'attend, et rouvre la fenêtre, le texte à copier (R472).
   await bruno.keyboard.press("Escape");
   await expect(settings).toBeHidden();
-  expect(await focused(bruno)).toContain("bn-editor");
+  const unsaved = bruno.getByRole("button", { name: "Texte non enregistré du signet" });
+  await expect(unsaved).toBeFocused();
+  await bruno.keyboard.press("Enter");
+  await expect(field).toHaveValue("https://mementum.dev/doc-en-cours");
+  await expect(field).toHaveAttribute("readonly", "");
+  await bruno.keyboard.press("Escape");
+  await expect(settings).toBeHidden();
   expect(await getMmd(team.aliceApi, page.id)).toBe('Avant\n\n<bookmark url="https://mementum.dev/"/>\n\nAprès\n');
 
   // Le droit revient ; Bruno rouvre la page (le bandeau le lui offre) : la fenêtre rouverte retrouve
@@ -291,8 +298,9 @@ test("escape_after_someone_else_changed_the_block_gives_the_focus_to_the_text", 
   await expect(settings.getByRole("status")).toContainText("n'est plus dans la page");
   await mona.keyboard.press("Escape");
   await expect(settings).toBeHidden();
-  // Le focus est dans l'éditeur, et la frappe y va.
+  // Le focus est dans l'éditeur, le curseur à la fin du bloc changé (pas à la dernière sélection,
+  // ici le haut de la page), et la frappe y entre.
   expect(await focused(mona)).toContain("bn-editor");
   await mona.keyboard.type("repris");
-  await expect.poll(() => getMmd(aliceApi, page.id)).toContain("repris");
+  await expect.poll(() => getMmd(aliceApi, page.id)).toBe("Avant\n\nrepris\n\nAprès\n");
 });
