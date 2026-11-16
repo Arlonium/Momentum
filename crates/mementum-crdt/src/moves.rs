@@ -508,8 +508,46 @@ fn format_cost_of(key: &str, value: &Any) -> Cost {
     }
 }
 
+/// Vrai si `deleted` couvre toutes les horloges `[start, end)` de `client`.
+fn covers(deleted: &IdSet, client: ClientID, start: u32, end: u32) -> bool {
+    let mut ranges: Vec<(u32, u32)> = deleted
+        .iter()
+        .filter(|(c, _)| **c == client)
+        .flat_map(|(_, ranges)| ranges.iter().map(|r| (r.start, r.end)))
+        .collect();
+    ranges.sort_unstable();
+    let mut reached = start;
+    for (from, to) in ranges {
+        if from > reached {
+            break;
+        }
+        reached = reached.max(to);
+        if reached >= end {
+            return true;
+        }
+    }
+    reached >= end
+}
+
+/// Une borne haute de la longueur d'une valeur encodée en `Any` de lib0 (une marque de type, la
+/// longueur en tête, le contenu), pour un attribut d'élément (Ruling R504).
+fn any_bytes(value: &Any) -> usize {
+    match value {
+        Any::String(s) => s.len() + 6,
+        Any::Buffer(b) => b.len() + 6,
+        Any::Array(values) => values.iter().map(any_bytes).sum::<usize>() + 6,
+        Any::Map(map) => {
+            map.iter()
+                .map(|(k, v)| k.len() + 5 + any_bytes(v))
+                .sum::<usize>()
+                + 6
+        }
+        _ => 10,
+    }
+}
+
 /// Une borne haute de la longueur d'une valeur écrite en JSON (une chaîne peut voir chaque
-/// caractère échappé en six), qui borne aussi son encodage `Any`.
+/// caractère échappé en six) : une valeur de marque, un objet incorporé.
 fn json_bytes(value: &Any) -> usize {
     match value {
         Any::String(s) => 6 * s.len() + 7,
@@ -696,8 +734,19 @@ fn capture_text(
             return None;
         };
         if deleted.contains(&id) {
+            // Ruling R503 : un trou d'horloges entre deux caractères vus du même client n'est
+            // tenu pour « supprimé par un autre pendant le déplacement » que si le jeu de
+            // suppressions de la mise à jour en couvre toutes les horloges : l'auteur du
+            // déplacement les avait vues vivantes. Une horloge qui manque parce que l'auteur du
+            // texte a tapé ailleurs, ou parce qu'elle a été supprimée avant ce que l'auteur du
+            // déplacement a vu, n'est pas dans ce jeu (sauf dans une étape 2, qui porte toutes
+            // ses suppressions : limite affirmée).
             let gap = match after_seen {
-                Some((client, clock)) if client == id.client && id.clock > clock => {
+                Some((client, clock))
+                    if client == id.client
+                        && id.clock > clock
+                        && covers(deleted, client, clock, id.clock) =>
+                {
                     id.clock - clock
                 }
                 _ => 0,
@@ -962,7 +1011,7 @@ impl Tree {
             for (key, value) in &n.attrs {
                 cost = cost.add(Cost {
                     items: 1,
-                    payload: 5 + key.len() + 1 + json_bytes(value),
+                    payload: 5 + key.len() + 1 + any_bytes(value),
                 });
             }
             for part in &n.parts {
@@ -975,7 +1024,12 @@ impl Tree {
                     cost = cost
                         .add(Cost {
                             items: 1,
-                            payload: json_bytes(value),
+                            // Ruling R504 : une plage de texte s'écrit en chaîne (sa longueur en
+                            // tête), un objet incorporé en JSON.
+                            payload: match value {
+                                Any::String(s) => s.len() + 5,
+                                other => json_bytes(other),
+                            },
                         })
                         .add(format_cost(attrs).times(4));
                 }

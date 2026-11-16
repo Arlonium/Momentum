@@ -1169,6 +1169,181 @@ fn a_carry_whose_encoding_would_pass_the_bound_is_withheld_before_writing() {
     assert!(applied.withheld.is_some(), "retenu avant d'écrire");
 }
 
+/// La scène « chatt » (Mona corrige « chatt » en « chat », ajoute « est » avant « le chien »,
+/// déplace X ; Tom tape « , pas » après « et ») sur une page dont le texte de X a un trou
+/// d'horloges entre le « e » et le « t » de « et » : `history` le fait. Rend le texte de X chez
+/// le serveur, Mona et Tom ayant les mêmes, et vrai si un report a été écrit. Sans `step_2`, Mona
+/// envoie ses transactions mises bout à bout, chacune avec ses seules suppressions (ce qu'envoie un
+/// onglet en ligne) ; avec, tout son état depuis la page de départ, que yrs et Yjs encodent avec
+/// **tout** son jeu de suppressions (l'étape 2 d'un onglet qui revient en ligne).
+fn chatt_scene_with_a_gap(history: fn(&PageDoc, &str, &str), step_2: bool) -> (String, bool) {
+    let (state0, ids) = page_of(&[
+        para("Bloc X", vec![]),
+        para("Bloc Y", vec![]),
+        para("Bloc Z", vec![]),
+    ]);
+    let (x, y, z) = (&ids[0], &ids[1], &ids[2]);
+    let author = PageDoc::from_updates([state0.as_slice()]).unwrap();
+    history(&author, x, y);
+    assert_eq!(block_text(&author.read_blocks()[0]), "le chatt et le chien");
+    let state = author.encode_state();
+    let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let transactions = [
+        mona.replace_text(x, 7, 1, "").unwrap(),
+        mona.replace_text(x, 11, 0, "est ").unwrap(),
+        mona.move_block(x, Some(z)).unwrap(),
+    ];
+    let moved = if step_2 {
+        mona.encode_state()
+    } else {
+        yrs::merge_updates_v1(transactions.iter().map(Vec::as_slice)).unwrap()
+    };
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(x, 11, 0, ", pas").unwrap();
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    played.line();
+    let text = block_text(find(&played.server.read_blocks(), x).unwrap());
+    (text, !played.carried.is_empty())
+}
+
+/// Le texte « le chatt est le chien », d'un seul client, dont le « s » de « est » a été effacé
+/// bien avant la scène : un trou d'une horloge, que Mona n'a jamais vu vivant.
+fn old_deletion(author: &PageDoc, x: &str, _: &str) {
+    author
+        .replace_text(x, 0, 6, "le chatt est le chien")
+        .unwrap();
+    author.replace_text(x, 10, 1, "").unwrap();
+}
+
+/// « le chatt e » tapé dans X, puis « ! » dans Y, puis « t le chien » à la fin de X : un trou
+/// d'une horloge entre le « e » et le « t » de « et », sans aucune suppression.
+fn typed_elsewhere(author: &PageDoc, x: &str, y: &str) {
+    author.replace_text(x, 0, 6, "le chatt e").unwrap();
+    author.replace_text(y, 6, 0, "!").unwrap();
+    author.replace_text(x, 10, 0, "t le chien").unwrap();
+}
+
+/// Relecture du tour 2, T1 (Ruling R503) : un trou d'horloges entre deux voisins vus n'est
+/// toléré que si le jeu de suppressions de la mise à jour en couvre toutes les horloges (l'auteur
+/// du déplacement les avait vues vivantes, un autre les a effacées entre-temps). Ni une
+/// suppression antérieure à ce que Mona a vu, ni une frappe de l'auteur du texte ailleurs, ne
+/// rouvrent la place fausse : le serveur s'abstient (rouge sur `2ff830b` : « le chat et est, pas
+/// le chien », chez tous).
+#[test]
+fn a_gap_mona_did_not_see_deleted_is_not_tolerated() {
+    for (what, history) in [
+        (
+            "suppression ancienne",
+            old_deletion as fn(&PageDoc, &str, &str),
+        ),
+        ("frappe ailleurs", typed_elsewhere),
+    ] {
+        let (text, carried) = chatt_scene_with_a_gap(history, false);
+        assert!(
+            !text.contains("est, pas"),
+            "{what} : place fausse chez tous : {text}"
+        );
+        assert!(!carried, "{what} : {text}");
+        assert_eq!(text, "le chat et est le chien", "{what}");
+    }
+}
+
+/// Relecture du tour 2, T2 (Ruling R504) : 60 sous-blocs d'environ 600 caractères, que personne
+/// n'avait vus, sont reportés : la borne compte une plage de texte en chaîne, pas en JSON (rouge
+/// sur `2ff830b` : 258 084 o estimés pour environ 50 Ko encodés, report retenu).
+#[test]
+fn sixty_sub_blocks_of_600_characters_are_carried() {
+    let text = "y".repeat(600);
+    let (server, update, x) = empty_copy_of_a_parent_with(60, &text);
+    let applied = server.apply_client_update(&update).expect("acceptée");
+    assert!(
+        applied.carried.is_some(),
+        "reporté : {:?}",
+        applied.withheld
+    );
+    let blocks = server.read_blocks();
+    assert_eq!(find(&blocks, &x).expect("la copie").children.len(), 60);
+}
+
+/// Relecture du tour 2 (mutation B2) : la valeur d'une marque s'écrit en JSON, où un caractère de
+/// contrôle s'échappe en six octets. Tom tape dans X un lien dont l'adresse en est faite ; la
+/// borne haute le compte (l'assertion de débogage de `PageDoc::apply_client_update` le vérifie).
+#[test]
+fn an_escaped_mark_value_is_counted_in_the_bound() {
+    let (state, ids) = yrs_page();
+    let x = &ids[0];
+    let doc = raw::doc(&state);
+    let frag = raw::fragment(&doc);
+    let before = {
+        use yrs::{ReadTxn, Transact};
+        doc.transact().state_vector()
+    };
+    {
+        use yrs::{Text, Transact, XmlFragment, XmlOut};
+        let mut txn = doc.transact_mut();
+        let (c, _) = raw::top_block(&frag, &txn, x);
+        let content = raw::element(c.get(&txn, 0));
+        let Some(XmlOut::Text(text)) = content.get(&txn, 0) else {
+            panic!("le texte de X");
+        };
+        let mut link = yrs::types::Attrs::new();
+        let mut href = std::collections::HashMap::new();
+        href.insert("href".to_string(), yrs::Any::from("\u{1}".repeat(2_000)));
+        link.insert("link".into(), yrs::Any::from(href));
+        text.insert_with_attributes(&mut txn, 6, " de Tom", link);
+    }
+    let typed = raw::update_with(&doc, &before, &[]);
+    let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let moved = mona.move_block(x, Some(&ids[2])).unwrap();
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    assert!(!played.carried.is_empty(), "reporté");
+    assert_eq!(
+        block_text(find(&played.server.read_blocks(), x).unwrap()),
+        "Bloc X de Tom"
+    );
+}
+
+/// Relecture du tour 2, T3 (mutation B4) : la copie de Mona porte trente marques sur tout son
+/// texte ; Tom avait tapé au milieu de X un texte sans marque. Le morceau reporté défait puis
+/// rétablit les trente marques de la copie autour de lui, et la borne haute le compte
+/// (l'assertion de débogage le vérifie).
+#[test]
+fn a_plain_piece_amid_the_copy_marks_is_counted_in_the_bound() {
+    let (state, ids) = yrs_page();
+    let x = &ids[0];
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(x, 4, 0, " de Tom").unwrap();
+    let doc = raw::doc(&state);
+    let frag = raw::fragment(&doc);
+    let before = {
+        use yrs::{ReadTxn, Transact};
+        doc.transact().state_vector()
+    };
+    {
+        use yrs::{Text, Transact, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+        let mut txn = doc.transact_mut();
+        let root = raw::root(&frag, &txn);
+        let len = root.len(&txn);
+        let copy = root.insert(&mut txn, len, XmlElementPrelim::empty("blockContainer"));
+        yrs::Xml::insert_attribute(&copy, &mut txn, "id", x.clone());
+        let paragraph = copy.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+        let mut marks = yrs::types::Attrs::new();
+        for k in 0..30 {
+            marks.insert(format!("m{k}").into(), yrs::Any::from("v".repeat(50)));
+        }
+        text.insert_with_attributes(&mut txn, 0, "Bloc X", marks);
+        root.remove_range(&mut txn, 0, 1);
+    }
+    let moved = raw::update_with(&doc, &before, &[]);
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    assert!(!played.carried.is_empty(), "reporté");
+    assert_eq!(
+        block_text(find(&played.server.read_blocks(), x).unwrap()),
+        "Bloc de Tom X"
+    );
+}
+
 /// I2 : Tom tape dans X ; Mona puis Léa déplacent X, sans rien voir des autres. La frappe est
 /// reportée dans la copie de Mona ; le dédoublonnage garde cette copie, quelle que soit la place
 /// des deux exemplaires.
@@ -1488,6 +1663,30 @@ mod known_limits {
         known_limit(
             "R222 : une frappe faite sans avoir vu le déplacement, arrivée après lui, part avec \
              l'original ; la reconnaître demande de lire les éléments supprimés de l'original",
+            &missing,
+            &loss,
+        );
+    }
+
+    /// Voulu : X sans la frappe de Tom (« le chat et est le chien », le serveur s'abstient) ou
+    /// avec elle à sa place (« le chat et, pas est le chien »). La scène « chatt » (voir
+    /// `chatt_scene_with_a_gap`), X ayant un trou d'horloges laissé par une suppression bien
+    /// antérieure à la scène, et Mona envoyant tout son état (un onglet qui revient en ligne) :
+    /// son jeu de suppressions couvre aussi ce trou, que rien ne distingue alors d'une suppression
+    /// faite par un autre pendant le déplacement. Aujourd'hui (Ruling R503) : « le chat et est,
+    /// pas le chien », chez les trois.
+    #[test]
+    fn a_gap_left_by_an_old_deletion_is_tolerated_in_a_step_2() {
+        let (text, _) = chatt_scene_with_a_gap(old_deletion, true);
+        let wanted = ["le chat et est le chien", "le chat et, pas est le chien"];
+        let missing: Vec<String> = (!wanted.contains(&text.as_str()))
+            .then(|| format!("vu {text:?}"))
+            .into_iter()
+            .collect();
+        let loss = vec![format!("vu {:?}", "le chat et est, pas le chien")];
+        known_limit(
+            "R503 : dans une étape 2, le jeu de suppressions couvre aussi les suppressions \
+             anciennes ; un trou qu'elles laissent entre deux voisins vus est toléré",
             &missing,
             &loss,
         );
