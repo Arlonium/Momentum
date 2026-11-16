@@ -290,13 +290,59 @@ impl FromRequestParts<AppState> for AuthUser {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<AuthUser, ApiError> {
         let hash = session_hash(&parts.headers).ok_or_else(ApiError::unauthenticated)?;
-        state
+        let user = state
             .store
             .session_user(hash, now_ms(), SESSION_TTL_MS)
             .await
             .map_err(|e| ApiError::internal(&e))?
             .map(AuthUser::from)
-            .ok_or_else(ApiError::unauthenticated)
+            .ok_or_else(ApiError::unauthenticated)?;
+        // Ruling R540 : avant tout le reste de la route.
+        check_named_account(
+            parts
+                .headers
+                .get_all(ACCOUNT_HEADER)
+                .iter()
+                .map(|v| v.to_str().ok()),
+            user.id,
+            "en-tête X-Mementum-Account",
+        )?;
+        Ok(user)
+    }
+}
+
+/// L'en-tête par lequel un client nomme le compte sous lequel il a fait l'appel : celui que
+/// l'application a chargé, pas celui que porte le cookie à l'instant (Ruling R540).
+pub const ACCOUNT_HEADER: &str = "x-mementum-account";
+
+/// Le paramètre d'adresse qui en tient lieu pour une WebSocket (`/sync`, `/events`), à qui un
+/// navigateur ne laisse poser aucun en-tête (Ruling R541).
+pub const ACCOUNT_PARAM: &str = "account";
+
+/// Le compte que la requête nomme (`named` : chaque valeur de l'en-tête ou du paramètre, `None`
+/// pour une valeur qui n'est pas du texte) est-il celui de sa session, `user` ? Rien de nommé :
+/// rien à vérifier (agents, outils, tests). Plusieurs valeurs, ou une qui n'est pas un
+/// identifiant : `400 invalid_request`. Un autre compte, ou un compte qui n'existe pas : `409
+/// account_changed` (Ruling R540). Une session n'appartient qu'à un compte, pour toujours : ce
+/// qui est vérifié ici vaut pour toute la requête.
+pub(crate) fn check_named_account<'a>(
+    mut named: impl Iterator<Item = Option<&'a str>>,
+    user: Uuid,
+    what: &str,
+) -> Result<(), ApiError> {
+    let Some(first) = named.next() else {
+        return Ok(());
+    };
+    if named.next().is_some() {
+        return Err(ApiError::invalid_account(what));
+    }
+    let account = first
+        .and_then(|value| Uuid::try_parse(value).ok())
+        .ok_or_else(|| ApiError::invalid_account(what))?;
+    if account == user {
+        Ok(())
+    } else {
+        Err(ApiError::account_changed())
     }
 }
 

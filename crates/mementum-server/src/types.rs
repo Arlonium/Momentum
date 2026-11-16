@@ -764,6 +764,10 @@ pub enum ErrorCode {
     BadOrigin,
     /// Pas de session : cookie absent, inconnu ou échu. Statut 401.
     Unauthenticated,
+    /// La requête nomme un compte (en-tête `X-Mementum-Account`, ou paramètre `account` d'une
+    /// WebSocket) qui n'est pas celui de sa session : un autre compte s'est connecté dans ce
+    /// navigateur depuis. Rien n'est lu ni écrit (Ruling R540). Statut 409.
+    AccountChanged,
     /// Adresse inconnue, mot de passe faux ou compte sans mot de passe : la
     /// même réponse dans les trois cas. Statut 401.
     InvalidCredentials,

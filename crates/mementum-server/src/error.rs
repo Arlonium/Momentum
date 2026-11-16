@@ -40,6 +40,11 @@ impl ApiError {
         }
     }
 
+    /// Le code de l'erreur.
+    pub(crate) fn code(&self) -> ErrorCode {
+        self.body.error
+    }
+
     /// `404 not_found` : la page n'existe pas, **ou** la personne ne la voit pas. Les deux
     /// cas reçoivent exactement cette réponse, comme un id mal formé : qui ne peut pas lire
     /// une page n'apprend rien d'elle, pas même qu'elle existe.
@@ -105,6 +110,27 @@ impl ApiError {
             StatusCode::UNAUTHORIZED,
             ErrorCode::Unauthenticated,
             "session absente ou échue : se connecter",
+        )
+    }
+
+    /// `409 account_changed` : la requête nomme un autre compte que celui de sa session (Ruling
+    /// R540). Jamais `401` : la session vaut, c'est celle d'un autre compte, et le client ne doit
+    /// pas la tenir pour perdue.
+    pub fn account_changed() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::AccountChanged,
+            "tu t'es connecté sous un autre compte dans un autre onglet ; rien n'a été fait",
+        )
+    }
+
+    /// `400 invalid_request` : l'en-tête `X-Mementum-Account` (ou le paramètre `account`) ne nomme
+    /// pas un compte, ou est donné plusieurs fois.
+    pub fn invalid_account(what: &str) -> ApiError {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            format!("{what} illisible : un seul identifiant de compte"),
         )
     }
 

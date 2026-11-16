@@ -7,10 +7,16 @@
 //!    de la boucle locale, du serveur ou de son adresse publique (Rulings R31
 //!    et R51 : une WebSocket échappe à CORS) ;
 //! 2. `401 unauthenticated` sans session ;
-//! 3. `404 not_found` pour une page que la personne ne lit pas : inconnue,
+//! 3. `409 account_changed` si le paramètre `account` (ou l'en-tête
+//!    `X-Mementum-Account`, pour un client hors navigateur) nomme un autre
+//!    compte que celui de la session, `400 invalid_request` s'il ne se lit pas
+//!    (Rulings R540, R541) : le client de l'application le donne, pour qu'une
+//!    connexion ne s'ouvre jamais sous le compte qu'un autre onglet vient de
+//!    connecter, avec ce que l'onglet a tapé ;
+//! 4. `404 not_found` pour une page que la personne ne lit pas : inconnue,
 //!    mal formée, d'un espace où elle n'a aucun rôle, ou hors de ses accès.
 //!    La réponse est la même dans tous ces cas, et aucun acteur n'est lancé ;
-//! 4. `400 invalid_request` sans demande de WebSocket.
+//! 5. `400 invalid_request` sans demande de WebSocket.
 //!
 //! Le canal de l'espace (`routes/events.rs`) passe par les mêmes contrôles, dans le même ordre
 //! ([`caller`], puis son propre `404`, puis [`websocket`]).
@@ -99,6 +105,9 @@ use crate::{AppState, now_ms};
 /// recevoir sa trame de fermeture.
 const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
+/// Le paramètre `account`, nommé dans un refus.
+const ACCOUNT_PARAM_LABEL: &str = "paramètre account";
+
 /// Qui demande une WebSocket (`/sync`, `/events`), une fois passés les deux premiers refus
 /// ([`caller`]).
 pub(crate) struct Caller {
@@ -108,9 +117,11 @@ pub(crate) struct Caller {
     pub(crate) session: [u8; 32],
 }
 
-/// Les deux premiers refus d'avant la poignée de main, communs à `/sync` et à `/events` :
-/// `403 bad_origin` pour une en-tête `Origin` d'un autre site (une WebSocket échappe à CORS, et
-/// la couche de `guard.rs` ne regarde pas l'`Origin` d'un `GET`), puis `401` sans session.
+/// Les premiers refus d'avant la poignée de main, communs à `/sync` et à `/events` : `403
+/// bad_origin` pour une en-tête `Origin` d'un autre site (une WebSocket échappe à CORS, et la
+/// couche de `guard.rs` ne regarde pas l'`Origin` d'un `GET`), puis `401` sans session, puis `409
+/// account_changed` (ou `400`) pour un compte nommé qui n'est pas celui de la session (Ruling
+/// R541).
 pub(crate) fn caller(
     state: &AppState,
     headers: &HeaderMap,
@@ -125,6 +136,19 @@ pub(crate) fn caller(
         return Err(guard::bad_origin());
     }
     let user = user?;
+    // Ruling R541 : le paramètre `account` tient lieu de l'en-tête, que l'extracteur a déjà
+    // vérifié s'il est là ; même règle, juste après le `401`.
+    // Noms et valeurs décodés : un nom écrit en `%xx` est vu.
+    let Query(pairs) = Query::<Vec<(String, String)>>::try_from_uri(uri)
+        .map_err(|_| ApiError::invalid_account(ACCOUNT_PARAM_LABEL))?;
+    auth::check_named_account(
+        pairs
+            .iter()
+            .filter(|(name, _)| name == auth::ACCOUNT_PARAM)
+            .map(|(_, value)| Some(value.as_str())),
+        user.id,
+        ACCOUNT_PARAM_LABEL,
+    )?;
     let session = auth::session_hash(headers).ok_or_else(ApiError::unauthenticated)?;
     Ok(Caller { user, session })
 }

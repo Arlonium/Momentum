@@ -1239,6 +1239,54 @@ async fn early_refusals_reach_a_client_that_keeps_sending() {
     assert_eq!(attachments(&t).await, 0);
 }
 
+/// Le refus d'un en-tête qui nomme un autre compte que celui de la session (`409
+/// account_changed`, Ruling R540) est fait à un compte : comme ceux de R505, il arrive à un client
+/// qui pousse son corps sans attendre (sinon le client qui envoie un fichier ne verrait qu'une
+/// erreur réseau, et n'apprendrait pas que la session a changé de compte). Rien n'est gardé.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_refusal_reaches_a_client_that_keeps_sending() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let page = team
+        .page(None, "Envois", &[user(&team.mona, Level::Edit)])
+        .await;
+    for (what, value, status, code) in [
+        (
+            "un autre compte",
+            team.olga.id.to_string(),
+            409,
+            "account_changed",
+        ),
+        (
+            "illisible",
+            "pas-un-compte".to_string(),
+            400,
+            "invalid_request",
+        ),
+    ] {
+        let received = push_then_read(
+            addr,
+            team.mona.browser.cookie(),
+            &upload_uri(page, "x.bin"),
+            8 << 20,
+            &format!(
+                "X-Mementum-Account: {value}
+"
+            ),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&received);
+        assert_eq!(
+            status_line(&received),
+            Some(status),
+            "{what} : reçu {text:?}"
+        );
+        assert!(text.contains(code), "{what} : {text}");
+    }
+    assert_eq!(attachments(&t).await, 0);
+}
+
 /// Envoie la tête de `POST <path>` avec `Content-Length: length`, **sans corps**, et rend ce que
 /// le serveur écrit jusqu'à fermer la connexion, [`common::WAIT`] au plus : une réponse qui
 /// attendrait le corps n'arrive pas dans ce délai (`upload_idle` vaut 30 s).

@@ -5,11 +5,13 @@
 //! par ses contrôles (`routes/sync.rs`) :
 //! 1. `403 bad_origin` pour une en-tête `Origin` d'un autre site ;
 //! 2. `401 unauthenticated` sans session ;
-//! 3. `404 not_found` pour un espace où la personne n'a aucun rôle : inconnu, mal nommé, ou dont
+//! 3. `409 account_changed` (ou `400 invalid_request`) pour un paramètre `account` qui ne nomme
+//!    pas le compte de la session (Ruling R541) ;
+//! 4. `404 not_found` pour un espace où la personne n'a aucun rôle : inconnu, mal nommé, ou dont
 //!    elle n'est ni membre ni invitée, admin de l'instance compris. La réponse est celle de toute
 //!    route d'un espace introuvable (Ruling R152), la même dans tous ces cas ; pour qui n'a aucun
 //!    rôle, l'espace n'est pas lu (Ruling R99) ;
-//! 4. `400 invalid_request` sans demande de WebSocket.
+//! 5. `400 invalid_request` sans demande de WebSocket.
 //!
 //! Un invité ouvre le canal comme un membre : il n'y apprend que des numéros.
 //!

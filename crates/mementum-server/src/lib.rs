@@ -52,8 +52,8 @@
 //! | `GET /api/v1/files/limits` | oui | `FileLimits` : la taille la plus grande d'un fichier envoyé (`MEMENTUM_MAX_FILE_MB`, 100 Mio par défaut) |
 //! | `POST /api/v1/pages/{id}/files?name=…` | `edit` | `201`, `FileInfo` (son `url`, `/api/v1/pages/{id}/files/{fileId}`, est l'adresse du fichier) : le corps est le fichier brut, lu par trames et écrit dans le dépôt sans être gardé en mémoire, hors de la borne de 2 Mio des autres corps ; `409 trashed` ; `422 invalid_request` pour un paramètre `name` illisible (absent : « fichier ») ; ces refus faits à un compte (`403`, `404`, `409`, `422`) lisent et jettent d'abord un corps annoncé sous la borne, pour arriver au navigateur (Ruling R505) ; `413 file_too_large` sur `Content-Length`, avant de rien lire (comme le `401`, il peut être perdu pour un client qui envoie son corps sans attendre : lire `GET /api/v1/files/limits` avant d'envoyer), puis en cours de lecture ; un corps qui ne reçoit plus rien pendant 30 s : la connexion est fermée sans réponse (Ruling R391, en HTTP/1) ; vidé sur le disque, puis session et droits revérifiés, le corps reçu (Rulings R89, R390, R507) ; le contenu est posé puis attaché sous le verrou du dépôt, et va au bout même si le client coupe ; un contenu posé par l'envoi que l'attache n'a pas pris repart (Ruling R395) |
 //! | `GET /api/v1/pages/{id}/files/{fileId}` | `read` (à la corbeille aussi) | les octets, toujours en téléchargement (`Content-Disposition: attachment`, `nosniff`, CSP `sandbox`, `Cross-Origin-Resource-Policy: same-origin`), sous le type que le serveur a lu à l'envoi (Ruling R246) ; `Cache-Control: private, no-cache` et `ETag` ; `304` si `If-None-Match` nomme l'`ETag`, jugé avant `Range` ; `206` pour une plage simple, `416` si elle commence après la fin ; `If-Range` qui ne nomme pas l'`ETag`, deux plages ou une plage illisible : le fichier entier (Ruling R392) ; un fichier qui n'est pas de la page, inconnu ou mal nommé : la réponse d'une page introuvable, après celle de la page ; `404` « fichier indisponible » si le dépôt n'a plus son contenu, ou plus entier (Ruling R393) |
-//! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
-//! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s, précédé de la version courante redite, même égale (Ruling R205 : le client, qui ne voit pas les pings, s'en sert comme signe de vie) ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
+//! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `409 account_changed` (paramètre `account`, Ruling R541), `404` ; `400 invalid_request` sans demande de WebSocket |
+//! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s, précédé de la version courante redite, même égale (Ruling R205 : le client, qui ne voit pas les pings, s'en sert comme signe de vie) ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `409 account_changed` (paramètre `account`, Ruling R541), `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
 //! Toute erreur est en JSON : `{ "error": <code>, "message": <texte> }`
 //! ([`types::ErrorBody`]). Une route qui demande une session répond `401
@@ -65,6 +65,23 @@
 //! (Ruling R26), sur `POST …/comments` avec un `blockId`, et sur la restauration
 //! d'une version. La base SQLite est le fichier [`config::DB_FILE`] du dossier
 //! des données, et les fichiers envoyés sont dans son dossier `files/`.
+//!
+//! **Compte attendu** (`auth.rs`, Rulings R540 à R542). Une requête peut nommer le compte sous
+//! lequel elle part : l'en-tête `X-Mementum-Account: <id>`, ou, pour `/sync` et `/events`, à qui
+//! un navigateur ne laisse poser aucun en-tête, le paramètre d'adresse `account=<id>`. Le client
+//! de l'application le pose sur ses appels, sauf `GET /api/v1/me` (qui sert à apprendre le
+//! compte), la connexion, l'inscription et la déconnexion : un autre onglet du même navigateur a pu
+//! se connecter sous un autre compte, et le cookie, commun, est alors le sien. Toute route qui lit
+//! une session le vérifie dans l'extracteur de la session, juste après le `401` et avant tout le
+//! reste (page, rôle, niveau, corbeille, corps) : un autre compte, ou un compte qui n'existe pas,
+//! reçoit `409 account_changed`, jamais `401` (la session vaut ; le client ne doit pas la tenir
+//! pour perdue) ; donné plusieurs fois, ou qui ne se lit pas comme un identifiant, `400
+//! invalid_request`. Rien de ce que la route ferait n'est lu ni écrit ; seule la session l'est,
+//! comme pour toute requête qui la porte. Sans en-tête ni paramètre, rien ne change (agents,
+//! outils, tests). La connexion, l'inscription et la déconnexion ne lisent pas de session :
+//! l'en-tête n'y change rien, et se déconnecter ferme toujours la session que porte le navigateur
+//! (Ruling R542). L'envoi d'un fichier lit et jette son corps avant ce refus, comme avant les
+//! autres refus faits à un compte (Ruling R505).
 //!
 //! **Droits** (`access.rs`, le seul chemin par lequel les routes les calculent ;
 //! le store revérifie lui-même, dans ses transactions, ce qu'il écrit) :

@@ -9,11 +9,13 @@
 //! | `POST /api/v1/pages/{id}/files?name=…` | `edit` | `201`, [`FileInfo`] ; `409 trashed` ; `413 file_too_large` ; droits et session revérifiés une fois le corps reçu |
 //! | `GET /api/v1/pages/{id}/files/{fileId}` | `read` (à la corbeille aussi) | les octets, en téléchargement (en-têtes ci-dessous) ; `304`, `206`, `416` ; un fichier qui n'est pas de la page, inconnu ou mal nommé : la réponse d'une page introuvable |
 //!
-//! **Envoyer** (Ruling R247), dans cet ordre : `401` ; `404` pour une page qu'on ne voit pas ;
-//! `403` sous « Peut modifier » ; `409 trashed` ; `422 invalid_request` pour un paramètre `name`
-//! illisible (donné deux fois ; absent, le nom est « fichier ») ; `413 file_too_large` sur
-//! `Content-Length`, avant de rien lire. **Un refus fait à un compte** (`403`, `404`, `409`,
-//! `422`), pour un corps annoncé sous la borne, ne part qu'une fois ce corps lu et jeté (au plus la
+//! **Envoyer** (Ruling R247), dans cet ordre : `401` ; `409 account_changed` (ou `400`) pour un
+//! en-tête `X-Mementum-Account` qui ne nomme pas le compte de la session (Ruling R540) ; `404`
+//! pour une page qu'on ne voit pas ; `403` sous « Peut modifier » ; `409 trashed` ; `422
+//! invalid_request` pour un paramètre `name` illisible (donné deux fois ; absent, le nom est
+//! « fichier ») ; `413 file_too_large` sur `Content-Length`, avant de rien lire. **Un refus fait
+//! à un compte** (`400` ou `409` de l'en-tête, `403`, `404`, `409`, `422`), pour un corps annoncé
+//! sous la borne, ne part qu'une fois ce corps lu et jeté (au plus la
 //! borne, et jamais plus de `upload_idle` sans un octet) : sinon le serveur fermerait sur des
 //! octets non lus, le système couperait la connexion, et le navigateur, qui envoie son corps sans
 //! attendre, perdrait la réponse (Ruling R505). Le `401` (aucun compte) et le `413` sur
@@ -88,7 +90,7 @@ use crate::error::ApiError;
 use crate::files;
 use crate::guard::FileResponse;
 use crate::routes::pages::page_id;
-use crate::types::{FileInfo, FileLimits};
+use crate::types::{ErrorCode, FileInfo, FileLimits};
 use crate::{AppState, now_ms, to_completion};
 
 /// Octets lus sur le disque à chaque morceau d'un fichier servi.
@@ -120,28 +122,38 @@ pub(crate) async fn limits(State(state): State<AppState>, _user: AuthUser) -> Js
 /// `POST /api/v1/pages/{id}/files?name=<nom>` : le corps est le fichier, brut.
 pub(crate) async fn upload(
     State(state): State<AppState>,
-    caller: SessionUser,
+    caller: Result<SessionUser, ApiError>,
     path: Result<Path<String>, PathRejection>,
     query: Result<Query<UploadQuery>, QueryRejection>,
     headers: HeaderMap,
     mut body: Body,
 ) -> Result<Response, ApiError> {
-    let SessionUser { user, session } = caller;
+    // Sans compte (`401`), la réponse part sans rien lire du corps (Ruling R505). Les autres
+    // refus de l'extracteur sont faits à un compte (un en-tête qui en nomme un autre, R540) : ils
+    // passent par le premier contrôle, comme les suivants.
+    let caller = match caller {
+        Err(refusal) if refusal.code() == ErrorCode::Unauthenticated => return Err(refusal),
+        caller => caller,
+    };
     let max = state.max_file_bytes;
     let declared = declared_length(&headers);
-    // La page nommée, pour le journal d'une lecture jetée : `None` si le chemin ne se lit pas.
+    // Le compte et la page nommée, pour le journal d'une lecture jetée : `None` si l'extracteur a
+    // refusé, ou si le chemin ne se lit pas.
+    let account = caller.as_ref().ok().map(|caller| caller.user.id);
     let named = path
         .as_ref()
         .ok()
         .and_then(|Path(raw)| Uuid::parse_str(raw).ok());
     // Premier contrôle : les refus, avant de rien garder.
     let first = async {
+        let SessionUser { user, session } = caller?;
         let id = page_id(path)?;
         state.node_access(&user, id, Action::Edit).await?;
         let Query(query) = query.map_err(|_| ApiError::invalid_file_name())?;
-        Ok::<_, ApiError>((id, files::display_name(query.name.as_deref().unwrap_or(""))))
+        let name = files::display_name(query.name.as_deref().unwrap_or(""));
+        Ok::<_, ApiError>((user, session, id, name))
     };
-    let (id, name) = match first.await {
+    let (user, session, id, name) = match first.await {
         Ok(checked) => checked,
         Err(refusal) => {
             // Ruling R505 : un refus fait à un compte (`403`, `404`, `409`, `422`) n'arrive à
@@ -153,7 +165,7 @@ pub(crate) async fn upload(
                 // à chaque requête, avant les plafonds du lot 7 : l'exploitant le voit ici.
                 if discarded > LOGGED_DISCARD {
                     tracing::info!(
-                        user = %user.id,
+                        user = ?account,
                         page = ?named,
                         discarded,
                         "corps d'un envoi refusé lu et jeté, pour que le refus arrive au client"
