@@ -20,7 +20,8 @@ import {
 } from "../../test/richEditor";
 import { until } from "../../test/hooks";
 import { FRAME_NODES, resetQueueForTests, setClockForTests } from "./Formula";
-import { typeset } from "./tex";
+import { PAUSE_ABOVE_CHARS } from "./LatexField";
+import { MAX_LATEX_CHARS, typeset } from "./tex";
 
 const MODIFY = 'button[aria-label="Modifier l\'équation"]';
 const WINDOW = "Formule de l'équation";
@@ -101,6 +102,31 @@ test("invalid_latex_is_shown_in_red_and_kept", async () => {
   const shown = blockOf(m, "q");
   expect(shown.querySelector(".mm-tex-invalid .mm-tex-source")?.textContent).toBe("\\frac{1}{");
   expect(shown.querySelector(".katex")).toBeNull();
+});
+
+test("the_field_takes_at_most_ten_thousand_characters", async () => {
+  const m = await mountEditor({ blocks: page("x") });
+  const field = await openWindow(m);
+  expect(field.maxLength).toBe(MAX_LATEX_CHARS);
+});
+
+test("the_preview_of_a_long_formula_waits_for_a_pause_in_typing", async () => {
+  // Chaque frappe refaisait la mise en forme de toute la formule : 150 ms par frappe à 10 000
+  // caractères (relecture de C2, M3). Au-delà de quelques milliers, l'aperçu attend une pause.
+  const long = "x".repeat(PAUSE_ABOVE_CHARS + 1);
+  const m = await mountEditor({ blocks: page(long) });
+  const field = await openWindow(m);
+  const previewed = () =>
+    blockWindow(WINDOW)!.querySelector('.mm-latex-preview annotation[encoding="application/x-tex"]')?.textContent;
+  await until(m.host, () => previewed() === long, "l'aperçu de la formule");
+  fill(field, `${long}+y`);
+  await flush();
+  expect(previewed(), "l'aperçu n'a pas attendu la pause").toBe(long);
+  await until(m.host, () => previewed() === `${long}+y`, "l'aperçu après la pause");
+  // Témoin : une formule courte suit la frappe.
+  fill(field, "a+b");
+  await flush();
+  expect(previewed()).toBe("a+b");
 });
 
 test("katex_never_follows_a_link", async () => {

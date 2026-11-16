@@ -1,14 +1,39 @@
 // Le champ où l'on écrit une formule (une équation en bloc, une formule en ligne) : le texte LaTeX,
 // 10 000 caractères au plus, l'aperçu au-dessous (KaTeX à `trust: false`, mis en forme par
-// `typeset`, qui refuse les définitions et mesure l'imbrication), « Terminer ». Rien ne s'écrit dans
+// `typeset`, qui refuse les définitions et mesure la profondeur), « Terminer ». Rien ne s'écrit dans
 // le document tant qu'on tape : « Terminer », ou Ctrl+Entrée (Cmd+Entrée), applique, par
 // `onApply`. Le champ est tenu par qui l'appelle (`value`, `onChange`) : le brouillon d'une équation
 // vit par id de bloc, rangé par page (`blockDraft`), celui d'une formule en ligne dans la fenêtre
 // de l'éditeur (`InlineMath.tsx`). Une formule invalide se montre en rouge, avec ce que KaTeX en
 // dit, et reste dans le champ.
-import { useDeferredValue, useId, type KeyboardEvent, type ReactNode } from "react";
+//
+// L'aperçu suit la frappe ; au-delà de `PAUSE_ABOVE_CHARS` caractères, il attend une pause de la
+// frappe (`PAUSE_MS`) : la mise en forme d'une formule de 10 000 caractères prenait 150 ms à
+// chaque frappe (relecture de C2, M3).
+import { useDeferredValue, useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Formula } from "./Formula";
 import { MAX_LATEX_CHARS, refusal, typeset } from "./tex";
+
+/** Au-delà, l'aperçu attend une pause de la frappe. */
+export const PAUSE_ABOVE_CHARS = 2_000;
+
+/** La pause de la frappe qu'attend l'aperçu d'une formule longue (ms). */
+const PAUSE_MS = 300;
+
+/** Ce que montre l'aperçu : la formule tapée, après une pause de la frappe si elle est longue. */
+function usePreviewed(value: string): string {
+  const deferred = useDeferredValue(value);
+  const [paused, setPaused] = useState(value);
+  useEffect(() => {
+    if (value.length <= PAUSE_ABOVE_CHARS) {
+      setPaused(value);
+      return;
+    }
+    const timer = setTimeout(() => setPaused(value), PAUSE_MS);
+    return () => clearTimeout(timer);
+  }, [value]);
+  return value.length <= PAUSE_ABOVE_CHARS ? deferred : paused;
+}
 
 type Props = {
   value: string;
@@ -24,8 +49,8 @@ type Props = {
 
 export function LatexField({ value, onChange, display, onApply, readOnly = false, note }: Props) {
   const id = useId();
-  // L'aperçu suit la frappe sans la retenir : une formule longue se met en forme après.
-  const shown = useDeferredValue(value);
+  // L'aperçu suit la frappe sans la retenir ; une formule longue attend une pause de la frappe.
+  const shown = usePreviewed(value);
   const outcome = typeset(shown, display);
   const why = refusal(outcome);
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
