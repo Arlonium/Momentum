@@ -108,16 +108,18 @@ fn assert_accepted(page: &PageDoc, update: &[u8]) {
         .expect("acceptée par apply_update");
 }
 
-/// Mises à jour d'un vrai client BlockNote 0.57 : la fixture de la P0, et
+/// Mises à jour d'un vrai client BlockNote 0.57 : la fixture de la P0,
 /// celles de la Task 8 (tous les types de blocs, props hors défaut, cellules
-/// fusionnées dont `colwidth` porte `undefined`). Chacune est l'état complet
-/// d'un navigateur, racine écrite par le serveur comprise.
+/// fusionnées dont `colwidth` porte `undefined`) et celle de la Task X2 (blocs
+/// riches, mentions et formules en ligne). Chacune est l'état complet d'un
+/// navigateur, racine écrite par le serveur comprise.
 #[test]
 fn blocknote_fixtures_read_like_yrs() {
     for update in [
         &include_bytes!("../../../../spec/mmd/fixtures/yjs/p0-all-blocks.bin")[..],
         &include_bytes!("../../../../spec/mmd/fixtures/yjs/all-blocks.bin")[..],
         &include_bytes!("../../../../spec/mmd/fixtures/yjs/non-default.bin")[..],
+        &include_bytes!("../../../../spec/mmd/fixtures/yjs/rich-blocks.bin")[..],
     ] {
         assert_same_blocks(update);
         let (page, _) = PageDoc::new_page();
@@ -288,7 +290,7 @@ fn client_cannot_overwrite_schema_version() {
 fn stored_pages_still_load_after_the_guard_tightens() {
     let (new_page, created) = PageDoc::new_page();
     let snapshot = new_page.encode_state();
-    let stored: [(&str, &[u8]); 5] = [
+    let stored: [(&str, &[u8]); 6] = [
         (
             "fixture p0-all-blocks",
             include_bytes!("../../../../spec/mmd/fixtures/yjs/p0-all-blocks.bin"),
@@ -300,6 +302,10 @@ fn stored_pages_still_load_after_the_guard_tightens() {
         (
             "fixture non-default",
             include_bytes!("../../../../spec/mmd/fixtures/yjs/non-default.bin"),
+        ),
+        (
+            "fixture rich-blocks",
+            include_bytes!("../../../../spec/mmd/fixtures/yjs/rich-blocks.bin"),
         ),
         ("page neuve, mise à jour du serveur", &created),
         ("page neuve, instantané", &snapshot),

@@ -1,0 +1,148 @@
+[
+  { "type": "heading", "content": "Blocs riches" },
+  { "type": "paragraph", "content": "Ce que les écrans de la partie B savent poser." },
+  {
+    "type": "callout",
+    "content": "Une idée, à l’icône et à la couleur par défaut.",
+    "children": [{ "type": "paragraph", "content": "Enfant du callout par défaut." }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "⚠️", "color": "gray" },
+    "content": "Attention, sur fond gris.",
+    "children": [{ "type": "paragraph", "content": "Enfant du callout gris." }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "❗", "color": "brown" },
+    "content": "Important, sur fond marron.",
+    "children": [{ "type": "paragraph", "content": "Enfant du callout marron." }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "✅", "color": "red" },
+    "content": "Fait, sur fond rouge.",
+    "children": [{ "type": "paragraph", "content": "Enfant du callout rouge." }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "❓", "color": "orange" },
+    "content": "Question, sur fond orange.",
+    "children": [{ "type": "paragraph", "content": "Enfant du callout orange." }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "📌", "color": "yellow" },
+    "content": "Épinglé, sur fond jaune.",
+    "children": [{ "type": "paragraph", "content": "Enfant du callout jaune." }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "🔥", "color": "green" },
+    "content": "Urgent, sur fond vert.",
+    "children": [{ "type": "paragraph", "content": "Enfant du callout vert." }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "📝", "color": "blue" },
+    "content": "Note, sur fond bleu.",
+    "children": [
+      { "type": "paragraph", "content": "Premier enfant du callout bleu." },
+      { "type": "paragraph", "content": "Second enfant du callout bleu." }
+    ]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "💡", "color": "purple" },
+    "children": [{ "type": "paragraph", "content": "Enfant d’un callout violet sans texte." }]
+  },
+  {
+    "type": "callout",
+    "props": { "icon": "⚠️", "color": "pink" },
+    "content": "Rose, avec une liste.",
+    "children": [
+      { "type": "bulletListItem", "content": "Premier point du callout rose" },
+      { "type": "bulletListItem", "content": "Second point du callout rose" }
+    ]
+  },
+  { "type": "heading", "props": { "level": 2 }, "content": "Formules" },
+  {
+    "type": "equation",
+    "props": { "latex": "\\begin{aligned}\na &= b + c \\\\\nd &= e\n\\end{aligned}" }
+  },
+  { "type": "equation", "props": { "latex": "a\n$$\nb" } },
+  { "type": "equation" },
+  {
+    "type": "paragraph",
+    "content": [
+      { "type": "math", "props": { "latex": "a^2 + b^2 = c^2" } },
+      { "type": "text", "text": " en tête, ", "styles": {} },
+      { "type": "math", "props": { "latex": "\\frac{1}{2}" } },
+      { "type": "text", "text": " au milieu, et à la fin ", "styles": {} },
+      { "type": "math", "props": { "latex": "\\sqrt{2}" } }
+    ]
+  },
+  {
+    "type": "paragraph",
+    "content": [
+      { "type": "math", "props": { "latex": "\\text{aire $x^{2}$}" } },
+      { "type": "text", "text": " porte une formule dans son texte, et ", "styles": {} },
+      { "type": "math", "props": { "latex": "x\\" } },
+      { "type": "text", "text": " finit par une barre oblique.", "styles": {} }
+    ]
+  },
+  { "type": "heading", "props": { "level": 2 }, "content": "Liens et mentions" },
+  { "type": "bookmark", "props": { "url": "https://exemple.org/recherche?q=blocs&tri=date#resultats" } },
+  { "type": "toc" },
+  {
+    "type": "pageLink",
+    "props": { "pageId": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b", "title": "Plan & budget <2027>" }
+  },
+  {
+    "type": "paragraph",
+    "content": [
+      {
+        "type": "mention",
+        "props": { "kind": "page", "id": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b", "label": "Plan & budget <2027>" }
+      },
+      { "type": "text", "text": " est relu par ", "styles": {} },
+      {
+        "type": "mention",
+        "props": { "kind": "user", "id": "0193a7e1-2b3c-7d4e-8f50-61728394a5b6", "label": "Léa Martin" }
+      },
+      { "type": "text", "text": " avant le ", "styles": {} },
+      { "type": "mention", "props": { "kind": "date", "id": "2026-12-01", "label": "1 déc. 2026" } },
+      { "type": "text", "text": ".", "styles": {} }
+    ]
+  },
+  { "type": "heading", "props": { "level": 2 }, "content": "Fichiers de l’instance" },
+  {
+    "type": "image",
+    "props": {
+      "url": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "caption": "Le schéma « été »",
+      "name": "schéma \"été\".png"
+    }
+  },
+  {
+    "type": "video",
+    "props": {
+      "url": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-1b2c-7d3e-8f40-5162738495a6",
+      "name": "démo \"finale\".webm"
+    }
+  },
+  {
+    "type": "audio",
+    "props": {
+      "url": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-2c3d-7e4f-8051-62738495a6b7",
+      "name": "entretien \"Léa\".ogg"
+    }
+  },
+  {
+    "type": "file",
+    "props": {
+      "url": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-3d4e-7f50-8162-738495a6b7c8",
+      "name": "Rapport \"été\" 2026.pdf"
+    }
+  }
+]

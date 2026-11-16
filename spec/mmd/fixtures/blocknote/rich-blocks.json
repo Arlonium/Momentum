@@ -1,0 +1,684 @@
+[
+  {
+    "id": "4e1dc275-7a83-4f13-be94-57ff2572c5b0",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 1,
+      "isToggleable": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Blocs riches",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "1a7da39a-66cd-438d-bfc3-73623b424694",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Ce que les écrans de la partie B savent poser.",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "809df503-c702-4a8b-b4ff-d7fc65836d1a",
+    "type": "callout",
+    "props": {
+      "icon": "💡",
+      "color": "default"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Une idée, à l’icône et à la couleur par défaut.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "b73ae046-c125-47c5-88e0-be3e2fdda0c4",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant du callout par défaut.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "d90fefdb-7015-45ae-b059-ffd58687947b",
+    "type": "callout",
+    "props": {
+      "icon": "⚠️",
+      "color": "gray"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Attention, sur fond gris.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "1e1afac7-a383-4157-8f3f-7c2730333a06",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant du callout gris.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "bdf2052d-d373-4281-93aa-fb3a7dab2964",
+    "type": "callout",
+    "props": {
+      "icon": "❗",
+      "color": "brown"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Important, sur fond marron.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "c80b40ce-a929-4bdc-8d55-499b1d6ad6b7",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant du callout marron.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "e2a87fec-9a28-43c1-9415-4dd945728cb4",
+    "type": "callout",
+    "props": {
+      "icon": "✅",
+      "color": "red"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Fait, sur fond rouge.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "06085f8a-f3fb-4680-be59-d0fd1f31ba77",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant du callout rouge.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "ef55a7c3-b506-4451-a051-b02572fa4d10",
+    "type": "callout",
+    "props": {
+      "icon": "❓",
+      "color": "orange"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Question, sur fond orange.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "4ab53ad4-1375-43df-aca7-789579bfbdd5",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant du callout orange.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "c6d16fa9-54b9-431f-99da-fc88cabe792c",
+    "type": "callout",
+    "props": {
+      "icon": "📌",
+      "color": "yellow"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Épinglé, sur fond jaune.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "35752237-2709-4475-ae8b-89004c3a02da",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant du callout jaune.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "eb409225-8391-43dc-bbdf-6c55c15157c2",
+    "type": "callout",
+    "props": {
+      "icon": "🔥",
+      "color": "green"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Urgent, sur fond vert.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "f70429bc-1ae4-49d2-869c-d95a68daf65f",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant du callout vert.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "43b5ddc5-89d8-4b38-990c-b7b6cfebdcc3",
+    "type": "callout",
+    "props": {
+      "icon": "📝",
+      "color": "blue"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Note, sur fond bleu.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "443f4b82-b6be-4681-be86-6cbb423e9dc6",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Premier enfant du callout bleu.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      },
+      {
+        "id": "9bcbf1aa-e5df-4784-8502-432e043ae6ba",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Second enfant du callout bleu.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "47a304f8-8e21-4ab9-b16c-d4d975305e1b",
+    "type": "callout",
+    "props": {
+      "icon": "💡",
+      "color": "purple"
+    },
+    "content": [],
+    "children": [
+      {
+        "id": "e135c6b5-6f2d-4549-ac63-d4d19961181a",
+        "type": "paragraph",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Enfant d’un callout violet sans texte.",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "95207605-210d-4203-b95c-2b67d4f69c94",
+    "type": "callout",
+    "props": {
+      "icon": "⚠️",
+      "color": "pink"
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Rose, avec une liste.",
+        "styles": {}
+      }
+    ],
+    "children": [
+      {
+        "id": "84c3eb08-96b7-4d75-a88b-18c026a78208",
+        "type": "bulletListItem",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Premier point du callout rose",
+            "styles": {}
+          }
+        ],
+        "children": []
+      },
+      {
+        "id": "bf90ab0a-d675-44ef-b88a-6ae2c560c843",
+        "type": "bulletListItem",
+        "props": {
+          "backgroundColor": "default",
+          "textColor": "default",
+          "textAlignment": "left"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Second point du callout rose",
+            "styles": {}
+          }
+        ],
+        "children": []
+      }
+    ]
+  },
+  {
+    "id": "406f94df-8335-476a-a75f-d89bc26d2658",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 2,
+      "isToggleable": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Formules",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "de424303-94b7-4bc4-9c16-c99968b94438",
+    "type": "equation",
+    "props": {
+      "latex": "\\begin{aligned}\na &= b + c \\\\\nd &= e\n\\end{aligned}"
+    },
+    "children": []
+  },
+  {
+    "id": "cbce0847-636e-4a74-a6c7-042b1a5f4ef0",
+    "type": "equation",
+    "props": {
+      "latex": "a\n$$\nb"
+    },
+    "children": []
+  },
+  {
+    "id": "bd3872ab-71a5-4f67-80e8-c391cb122fbe",
+    "type": "equation",
+    "props": {
+      "latex": ""
+    },
+    "children": []
+  },
+  {
+    "id": "96333be7-1bd5-4a48-b2ea-1656155f30f0",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "math",
+        "props": {
+          "latex": "a^2 + b^2 = c^2"
+        }
+      },
+      {
+        "type": "text",
+        "text": " en tête, ",
+        "styles": {}
+      },
+      {
+        "type": "math",
+        "props": {
+          "latex": "\\frac{1}{2}"
+        }
+      },
+      {
+        "type": "text",
+        "text": " au milieu, et à la fin ",
+        "styles": {}
+      },
+      {
+        "type": "math",
+        "props": {
+          "latex": "\\sqrt{2}"
+        }
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "e6fe4ecf-b158-4be0-85e2-d5649ce0d37f",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "math",
+        "props": {
+          "latex": "\\text{aire $x^{2}$}"
+        }
+      },
+      {
+        "type": "text",
+        "text": " porte une formule dans son texte, et ",
+        "styles": {}
+      },
+      {
+        "type": "math",
+        "props": {
+          "latex": "x\\"
+        }
+      },
+      {
+        "type": "text",
+        "text": " finit par une barre oblique.",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "685f6654-41a2-40be-8166-21f68769aea0",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 2,
+      "isToggleable": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Liens et mentions",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "a8305e9f-abb1-4335-8102-0770763f7f56",
+    "type": "bookmark",
+    "props": {
+      "url": "https://exemple.org/recherche?q=blocs&tri=date#resultats"
+    },
+    "children": []
+  },
+  {
+    "id": "f848c6ae-2f8b-4258-a3e2-d62832390523",
+    "type": "toc",
+    "props": {},
+    "children": []
+  },
+  {
+    "id": "d1ed328d-bb37-46d9-a5e0-a6adbee335ab",
+    "type": "pageLink",
+    "props": {
+      "pageId": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "title": "Plan & budget <2027>"
+    },
+    "children": []
+  },
+  {
+    "id": "21334078-1edd-4032-952a-d7a7cfcae71b",
+    "type": "paragraph",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left"
+    },
+    "content": [
+      {
+        "type": "mention",
+        "props": {
+          "kind": "page",
+          "id": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+          "label": "Plan & budget <2027>"
+        }
+      },
+      {
+        "type": "text",
+        "text": " est relu par ",
+        "styles": {}
+      },
+      {
+        "type": "mention",
+        "props": {
+          "kind": "user",
+          "id": "0193a7e1-2b3c-7d4e-8f50-61728394a5b6",
+          "label": "Léa Martin"
+        }
+      },
+      {
+        "type": "text",
+        "text": " avant le ",
+        "styles": {}
+      },
+      {
+        "type": "mention",
+        "props": {
+          "kind": "date",
+          "id": "2026-12-01",
+          "label": "1 déc. 2026"
+        }
+      },
+      {
+        "type": "text",
+        "text": ".",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "2b714644-ac7f-411d-a1f6-5975e3463f71",
+    "type": "heading",
+    "props": {
+      "backgroundColor": "default",
+      "textColor": "default",
+      "textAlignment": "left",
+      "level": 2,
+      "isToggleable": false
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "Fichiers de l’instance",
+        "styles": {}
+      }
+    ],
+    "children": []
+  },
+  {
+    "id": "9e263ae8-e35a-4989-b77a-a5e6d44d389a",
+    "type": "image",
+    "props": {
+      "textAlignment": "left",
+      "backgroundColor": "default",
+      "name": "schéma \"été\".png",
+      "url": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "caption": "Le schéma « été »",
+      "showPreview": true
+    },
+    "children": []
+  },
+  {
+    "id": "92fdef61-5090-4b23-b1bf-4c25d0c0f950",
+    "type": "video",
+    "props": {
+      "textAlignment": "left",
+      "backgroundColor": "default",
+      "name": "démo \"finale\".webm",
+      "url": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-1b2c-7d3e-8f40-5162738495a6",
+      "caption": "",
+      "showPreview": true
+    },
+    "children": []
+  },
+  {
+    "id": "da7824ca-19ce-421d-be16-51f2d8755fb8",
+    "type": "audio",
+    "props": {
+      "backgroundColor": "default",
+      "name": "entretien \"Léa\".ogg",
+      "url": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-2c3d-7e4f-8051-62738495a6b7",
+      "caption": "",
+      "showPreview": true
+    },
+    "children": []
+  },
+  {
+    "id": "25ed661b-d644-47c8-9536-80b803486921",
+    "type": "file",
+    "props": {
+      "backgroundColor": "default",
+      "name": "Rapport \"été\" 2026.pdf",
+      "url": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-3d4e-7f50-8162-738495a6b7c8",
+      "caption": ""
+    },
+    "children": []
+  }
+]

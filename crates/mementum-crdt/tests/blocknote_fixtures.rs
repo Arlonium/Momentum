@@ -18,6 +18,8 @@ const ALL_BLOCKS_YJS: &[u8] = include_bytes!("../../../spec/mmd/fixtures/yjs/all
 const ALL_BLOCKS_MMD: &str = include_str!("../../../spec/mmd/fixtures/all-blocks.mmd");
 const NON_DEFAULT_YJS: &[u8] = include_bytes!("../../../spec/mmd/fixtures/yjs/non-default.bin");
 const NON_DEFAULT_MMD: &str = include_str!("../../../spec/mmd/fixtures/non-default.mmd");
+const RICH_BLOCKS_YJS: &[u8] = include_bytes!("../../../spec/mmd/fixtures/yjs/rich-blocks.bin");
+const RICH_BLOCKS_MMD: &str = include_str!("../../../spec/mmd/fixtures/rich-blocks.mmd");
 
 /// Le MMD de la page dont `state` est l'état Yjs complet.
 fn mmd_of(state: &[u8]) -> String {
@@ -51,6 +53,15 @@ fn reads_blocknote_fixture_non_default() {
     assert_eq!(mmd_of(NON_DEFAULT_YJS), NON_DEFAULT_MMD);
 }
 
+/// Task X2 : les blocs riches que posent les écrans de la partie B (callouts de chaque couleur
+/// et de chaque icône proposées, équations de plusieurs lignes, à ligne `$$` et vide, formules en
+/// ligne dont une que `$…$` ne porte pas, signet, table des matières, lien de page, mentions,
+/// fichiers de l'instance aux noms à guillemets et à accents).
+#[test]
+fn reads_blocknote_fixture_rich_blocks() {
+    assert_eq!(mmd_of(RICH_BLOCKS_YJS), RICH_BLOCKS_MMD);
+}
+
 #[test]
 fn writes_like_blocknote_all_blocks() {
     assert_writes_like_blocknote(ALL_BLOCKS_MMD, ALL_BLOCKS_YJS);
@@ -59,6 +70,11 @@ fn writes_like_blocknote_all_blocks() {
 #[test]
 fn writes_like_blocknote_non_default() {
     assert_writes_like_blocknote(NON_DEFAULT_MMD, NON_DEFAULT_YJS);
+}
+
+#[test]
+fn writes_like_blocknote_rich_blocks() {
+    assert_writes_like_blocknote(RICH_BLOCKS_MMD, RICH_BLOCKS_YJS);
 }
 
 /// Ce que la page donne à un client est ce qu'elle a intégré, encodé par
@@ -73,6 +89,7 @@ fn blocknote_state_is_returned_with_the_same_tree() {
     for (what, state) in [
         ("all-blocks", ALL_BLOCKS_YJS),
         ("non-default", NON_DEFAULT_YJS),
+        ("rich-blocks", RICH_BLOCKS_YJS),
     ] {
         let page = PageDoc::from_updates([state]).expect("fixture lisible");
         let returned = page.encode_state();
