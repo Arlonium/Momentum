@@ -579,8 +579,9 @@ export async function closeEventsChannel(p: Page): Promise<() => number> {
  * Cache à l'onglet que le serveur ferme ses connexions de synchro, à appeler avant `goto` : ce
  * qui passe dans chacune passe encore, mais **toute** fermeture venue du serveur (page mise à la
  * corbeille, restaurée ou supprimée, accès changé, `kick`, `kick_user`, message refusé) n'arrive
- * pas à l'onglet, qui se croit toujours connecté. Pas plus de 30 s : y-websocket ferme de
- * lui-même une connexion qui n'a rien reçu depuis 30 s, puis se reconnecte par la même route, et
+ * pas à l'onglet, qui se croit toujours connecté. Une trentaine de secondes au plus (33 s
+ * mesurées) : y-websocket ferme de lui-même une connexion qui n'a rien reçu depuis 30 s (il ne
+ * le vérifie que toutes les 3 s), puis se reconnecte par la même route, et
  * la reconnexion relit la page avant de s'ouvrir (`usePageGate`). Ce que l'onglet écrit entre-
  * temps n'arrive au serveur qu'après cette reconnexion, une trentaine de secondes plus tard.
  * Pour un test d'un onglet qui ne doit pas apprendre par là ce qui change ailleurs, et qui
