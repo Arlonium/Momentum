@@ -56,6 +56,10 @@ type Props = {
   favorites: { pages: string[]; loaded: boolean; toggles: ReadonlyMap<string, number> };
   /** Pose ou retire le favori d'une page (R254). */
   onFavorite: (id: string) => void;
+  /** Duplique une page (R252), depuis le menu de sa ligne. */
+  onDuplicate?: (id: string) => void;
+  /** Une duplication est en route : « Dupliquer » est grisé. */
+  duplicating?: boolean;
 };
 
 
@@ -74,6 +78,8 @@ export function Sidebar({
   onRetry,
   favorites,
   onFavorite,
+  onDuplicate,
+  duplicating,
 }: Props) {
   // La barre latérale défile ; sa tête et son pied restent collés à ses bords, par-dessus les
   // arbres, qui en tiennent compte pour montrer la page active (`treeWindow.ts`).
@@ -211,6 +217,8 @@ export function Sidebar({
           onMove={onMove}
           favorites={favorites.pages}
           onFavorite={onFavorite}
+          onDuplicate={onDuplicate}
+          duplicating={duplicating}
         />
       )}
       {space && (

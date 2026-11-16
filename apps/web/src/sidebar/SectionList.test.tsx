@@ -1,7 +1,7 @@
 // Le menu « … » d'une ligne de l'arbre : pour qui peut modifier la page, les déplacements, puis le
 // favori (R254), à tout niveau, puis la corbeille, en dernier (R412). Un menu ouvert qui perd une
 // entrée se ferme, et rend le focus à son bouton.
-import type { PageNode } from "@mementum/protocol";
+import type { PageNode, Role } from "@mementum/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -42,14 +42,28 @@ type Options = {
   onFavorite?: (id: string) => void;
   readOnly?: boolean;
   onTrash?: (id: string) => void;
+  role?: Role;
+  onDuplicate?: (id: string) => void;
+  duplicating?: boolean;
 };
 
-async function show(nodes: PageNode[], { favorites, onFavorite, readOnly = false, onTrash = () => {} }: Options = {}) {
+async function show(
+  nodes: PageNode[],
+  {
+    favorites,
+    onFavorite,
+    readOnly = false,
+    onTrash = () => {},
+    role = "member",
+    onDuplicate,
+    duplicating,
+  }: Options = {},
+) {
   await act(async () =>
     root.render(
       <SectionList
         spaceId="space"
-        role="member"
+        role={role}
         nodes={nodes}
         unavailable={false}
         viewport={{ scroller, top: null, bottom: null }}
@@ -60,6 +74,8 @@ async function show(nodes: PageNode[], { favorites, onFavorite, readOnly = false
         onMove={() => {}}
         favorites={favorites}
         onFavorite={onFavorite}
+        onDuplicate={onDuplicate}
+        duplicating={duplicating}
       />,
     ),
   );
@@ -165,4 +181,76 @@ test("an_open_row_menu_never_moves_its_entries_under_the_pointer", async () => {
   expect(document.activeElement).toBe(moreOf("A"));
   await click(moreOf("A")!);
   expect(entries()).toEqual([...MOVES, "Ajouter aux favoris", "Mettre à la corbeille"]);
+});
+
+test("row_menu_offers_duplicate_where_the_server_allows_it", async () => {
+  // « Dupliquer » (R252), après le favori, avant la corbeille, qui reste la dernière (R412).
+  const onDuplicate = vi.fn();
+  const onFavorite = () => {};
+  const nodes = [
+    page("a", { level: "full" }),
+    page("r", { level: "read", position: "a1" }),
+    page("r1", { level: "read", parentId: "r" }),
+    page("e", { level: "edit", position: "a2" }),
+    page("e1", { level: "edit", parentId: "e" }),
+  ];
+  // Un membre : à tout niveau, la copie allant au pire dans son « Privé ».
+  await show(nodes, { favorites: [], onFavorite, onDuplicate });
+  expect(await entriesOf("A")).toEqual([
+    ...MOVES,
+    "Ajouter aux favoris",
+    "Dupliquer",
+    "Mettre à la corbeille",
+  ]);
+  expect(await entriesOf("R")).toEqual(["Ajouter aux favoris", "Dupliquer"]);
+  expect(await entriesOf("R1")).toEqual(["Ajouter aux favoris", "Dupliquer"]);
+  // Choisie, l'entrée demande la copie de sa page ; le menu se ferme et rend le focus à son bouton.
+  await click(moreOf("R")!);
+  const duplicate = [...menu()!.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (item) => item.textContent === "Dupliquer",
+  )!;
+  await click(duplicate);
+  expect(onDuplicate.mock.calls).toEqual([["r"]]);
+  expect(menu()).toBeNull();
+  expect(document.activeElement).toBe(moreOf("R"));
+
+  // Un invité : seulement sous une page parente qu'il voit et peut modifier ; ni pour une page
+  // partagée à la racine, ni sous une page qu'il ne fait que lire.
+  const shared = nodes.map((node) => ({ ...node, section: "shared" as const }));
+  await show(shared, { favorites: [], onFavorite, onDuplicate, role: "guest" });
+  expect(await entriesOf("E1")).toEqual([...MOVES, "Ajouter aux favoris", "Dupliquer", "Mettre à la corbeille"]);
+  expect(await entriesOf("E")).toEqual([...MOVES, "Ajouter aux favoris", "Mettre à la corbeille"]);
+  expect(await entriesOf("R1")).toEqual(["Ajouter aux favoris"]);
+
+  // Depuis un onglet d'un autre schéma (R35) : aucune création, une copie pas plus.
+  await show(nodes, { favorites: [], onFavorite, onDuplicate, readOnly: true });
+  expect(await entriesOf("A")).toEqual(["Ajouter aux favoris"]);
+  // Sans `onDuplicate`, rien, comme avant.
+  await show(nodes, { favorites: [], onFavorite });
+  expect(await entriesOf("R")).toEqual(["Ajouter aux favoris"]);
+  // Sans favori, une ligne en lecture a quand même son menu, pour la copie.
+  await show(nodes, { onDuplicate });
+  expect(await entriesOf("R")).toEqual(["Dupliquer"]);
+});
+
+test("duplicate_entry_is_inactive_while_a_duplication_runs", async () => {
+  // Pendant la requête (une duplication à la fois par compte, R605), l'entrée est grisée : un clic
+  // n'en demande pas d'autre. Quand elle a répondu, l'entrée revient, menu ouvert, à sa place.
+  const onDuplicate = vi.fn();
+  const nodes = [page("r", { level: "read" })];
+  await show(nodes, { favorites: [], onFavorite: () => {}, onDuplicate, duplicating: true });
+  await click(moreOf("R")!);
+  const item = () =>
+    [...menu()!.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (entry) => entry.textContent === "Dupliquer",
+    )!;
+  expect(item().getAttribute("aria-disabled")).toBe("true");
+  await click(item());
+  expect(onDuplicate).not.toHaveBeenCalled();
+  expect(menu()).not.toBeNull();
+  await show(nodes, { favorites: [], onFavorite: () => {}, onDuplicate, duplicating: false });
+  expect(entries()).toEqual(["Ajouter aux favoris", "Dupliquer"]);
+  expect(item().getAttribute("aria-disabled")).toBeNull();
+  await click(item());
+  expect(onDuplicate.mock.calls).toEqual([["r"]]);
 });

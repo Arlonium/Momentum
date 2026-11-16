@@ -2,7 +2,10 @@
 // à elles. D'abord « Ajouter aux favoris » ou « Retirer des favoris » (R254), à tout niveau (voir
 // la page suffit), hors corbeille (une page à la corbeille n'est pas listée dans les favoris), et
 // depuis un onglet d'un autre schéma que le serveur (R35 : un favori ne s'écrit pas dans le
-// document) ; la page le donne (`favorite`, `onFavorite`). Puis « Historique » (R135), à partir de
+// document) ; la page le donne (`favorite`, `onFavorite`). Puis « Dupliquer » (R252), là où le
+// serveur le permet (la page le donne, `onDuplicate`), grisé pendant une duplication (une à la fois
+// par compte, R605) : avant « Historique », qui s'ajoute après lui quand le niveau monte, sans
+// décaler les entrées montrées (R466). Puis « Historique » (R135), à partir de
 // « Peut modifier » : le serveur l'exige, pour qu'un lecteur ne lise pas ce qui a été effacé avant
 // qu'on partage la page avec lui (S5). À la corbeille aussi, et depuis un onglet d'un autre
 // schéma ; c'est la fenêtre qui décide si l'on peut restaurer. Sans entrée pour le niveau de la
@@ -33,7 +36,7 @@ import {
   type ReactNode,
 } from "react";
 import type { HistorySession } from "../history/HistoryDialog";
-import { HistoryIcon, MoreIcon, StarIcon, StarOffIcon } from "../icons";
+import { DuplicatePageIcon, HistoryIcon, MoreIcon, StarIcon, StarOffIcon } from "../icons";
 import { canEdit } from "../share/levels";
 import { RowMenu, type MenuAction } from "../sidebar/RowMenu";
 import { loadHistory } from "../history/loadHistory";
@@ -52,6 +55,10 @@ type Props = {
   favorite?: boolean;
   /** Pose ou retire le favori de la page (R254). */
   onFavorite?: () => void;
+  /** Duplique la page (R252) ; absent là où le serveur ne le permet pas (`canDuplicate`). */
+  onDuplicate?: () => void;
+  /** Une duplication est en route : « Dupliquer » est grisé. */
+  duplicating?: boolean;
   /** Le compte de la session. */
   selfId: string;
   /** Tenue quand le compte revient, après une session perdue (`useAfterLogin`). */
@@ -72,6 +79,8 @@ export function PageMenu({
   readOnly,
   favorite = false,
   onFavorite,
+  onDuplicate,
+  duplicating = false,
   selfId,
   afterLogin,
   focusFallback,
@@ -112,6 +121,16 @@ export function PageMenu({
       label: favorite ? "Retirer des favoris" : "Ajouter aux favoris",
       icon: favorite ? <StarOffIcon /> : <StarIcon />,
       onSelect: onFavorite,
+    });
+  }
+  if (onDuplicate !== undefined) {
+    actions.push({
+      key: "duplicate",
+      label: "Dupliquer",
+      icon: <DuplicatePageIcon />,
+      // Grisé, pas retiré : les entrées gardent leur rang sous le pointeur (R466).
+      disabled: duplicating,
+      onSelect: onDuplicate,
     });
   }
   if (canEdit(node.level)) {

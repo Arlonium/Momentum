@@ -9,7 +9,7 @@
 // - `useSpaceEvents` : le canal de l'espace, qui le fait relire quand d'autres le changent ;
 // - `useOpenPage` : la page ouverte, celle de l'arbre ou celle que le serveur rend ;
 // - `useCurrentSpace` : l'espace affiché, d'après l'adresse et la page ouverte ;
-// - `usePageActions` : créer, renommer, jeter, restaurer, déplacer, et ce que la page
+// - `usePageActions` : créer, dupliquer, renommer, jeter, restaurer, déplacer, et ce que la page
 //   ouverte devient quand ses droits changent ailleurs ;
 // - `useFavorites` : les favoris du compte dans l'espace affiché, lus après chaque lecture de
 //   l'arbre (R254) ;
@@ -27,6 +27,7 @@ import { useAfterLogin } from "./session/useAfterLogin";
 import { useRetryAfterLogin } from "./session/useRetryAfterLogin";
 import { SpaceSettings } from "./settings/SpaceSettings";
 import type { Drop } from "./sidebar/drag";
+import { canDuplicate, parentOf } from "./sidebar/rows";
 import type { CreateTarget } from "./sidebar/SectionList";
 import { Sidebar } from "./sidebar/Sidebar";
 import { CreateSpaceDialog } from "./sidebar/SpaceSwitcher";
@@ -124,7 +125,7 @@ export function App() {
     isStale: schema.isStale,
     caughtUp,
   });
-  const { create, trash, move } = actions;
+  const { create, trash, move, duplicate } = actions;
   // Les favoris du compte dans l'espace affiché (R254) : lus à la fin de chaque lecture de son
   // arbre, jamais avant (rien sur le chemin de l'ouverture d'une page), et au retour du compte. Un
   // refus se dit en pied de barre latérale, et la fait relire.
@@ -147,6 +148,7 @@ export function App() {
   const createFromTree = useCallback((target: CreateTarget) => void create(target), [create]);
   const trashFromTree = useCallback((id: string) => void trash(id), [trash]);
   const moveFromTree = useCallback((id: string, drop: Drop) => void move(id, drop), [move]);
+  const duplicateFromMenu = useCallback((id: string) => void duplicate(id), [duplicate]);
 
   const { stale } = schema;
   const settingsOf = route.name === "spaceSettings" ? route.spaceId : null;
@@ -161,6 +163,13 @@ export function App() {
 
   /** Créer une page à la racine : pas pour un invité, ni en lecture seule. */
   const mayCreate = !stale && space !== null && space.role !== "guest";
+  // Dupliquer la page ouverte (R252), là où le serveur le permet : sa page parente est lue dans
+  // l'arbre (celle que le compte voit) ; jamais en lecture seule (R35 : aucune création).
+  const duplicable =
+    active !== undefined &&
+    space !== null &&
+    !stale &&
+    canDuplicate(active, nodes === null ? undefined : parentOf(nodes, active), space.role);
   const [creatingSpace, setCreatingSpace] = useState(false);
   const { looked } = page;
 
@@ -258,6 +267,8 @@ export function App() {
         onShareRefused={actions.shareRefused}
         favorite={favorites.pages.includes(active.id)}
         onFavorite={favorite}
+        onDuplicate={duplicable ? duplicateFromMenu : undefined}
+        duplicating={actions.duplicating}
       />
     );
   } else if (looked?.state === "gone") {
@@ -303,6 +314,8 @@ export function App() {
         onRetry={tree.reload}
         favorites={favorites}
         onFavorite={favorite}
+        onDuplicate={duplicateFromMenu}
+        duplicating={actions.duplicating}
       />
       <main className="mm-main">{content}</main>
       {creatingSpace && <CreateSpaceDialog onClose={() => setCreatingSpace(false)} />}

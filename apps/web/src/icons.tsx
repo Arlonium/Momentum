@@ -273,3 +273,13 @@ export const InlineEquationIcon = ({ size = 18 }: { size?: number }) => (
     <path d="M5 11l2-1 2 5 4-11h6" />
   </Icon>
 );
+
+// Dupliquer une page (Task C10, R252).
+
+/** « Dupliquer » : deux pages, l'une sur l'autre, dans le menu d'une ligne et celui de la page. */
+export const DuplicatePageIcon = () => (
+  <Icon>
+    <rect x="8" y="8" width="12" height="13" rx="1.5" />
+    <path d="M16 8V4.5A1.5 1.5 0 0 0 14.5 3h-9A1.5 1.5 0 0 0 4 4.5v11A1.5 1.5 0 0 0 5.5 17H8" />
+  </Icon>
+);

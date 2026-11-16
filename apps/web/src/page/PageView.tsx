@@ -1,6 +1,6 @@
 // Une page ouverte : barre du haut (fil d'Ariane, état de la connexion, présents,
-// « Commentaires », « Partager » pour qui a l'accès complet, puis le menu « … », son favori et son
-// « Historique »), bandeaux (lecture seule, corbeille) si besoin, titre, puis l'éditeur en
+// « Commentaires », « Partager » pour qui a l'accès complet, puis le menu « … », son favori, son
+// « Dupliquer » et son « Historique »), bandeaux (lecture seule, corbeille) si besoin, titre, puis l'éditeur en
 // direct ; à droite, le panneau des commentaires quand il est ouvert.
 //
 // Les commentaires (R134) n'écrivent rien dans le document : ils se lisent à tout niveau, et
@@ -71,6 +71,10 @@ type Props = {
   favorite?: boolean;
   /** Pose ou retire le favori d'une page ; sans lui, le menu « … » ne le propose pas. */
   onFavorite?: (id: string) => void;
+  /** Duplique la page (R252) ; absent là où le serveur ne le permet pas. */
+  onDuplicate?: (id: string) => void;
+  /** Une duplication est en route : « Dupliquer » est grisé. */
+  duplicating?: boolean;
 };
 
 export function PageView({
@@ -88,6 +92,8 @@ export function PageView({
   onShareRefused,
   favorite,
   onFavorite,
+  onDuplicate,
+  duplicating,
 }: Props) {
   const [session, setSession] = useState<CollabSession | null>(null);
   // `?fixture=<nom>`, en développement seulement : la fixture est chargée dans la page neuve.
@@ -179,6 +185,7 @@ export function PageView({
     [],
   );
   const favoriteThis = useMemo(() => onFavorite && (() => onFavorite(id)), [onFavorite, id]);
+  const duplicateThis = useMemo(() => onDuplicate && (() => onDuplicate(id)), [onDuplicate, id]);
   const wiring = useCommentsPanel(comments, frame);
   /** Commenter d'ici : le niveau, hors corbeille, depuis un onglet du schéma du serveur (R177). */
   const commentsWritable = canComment(node.level) && !trashed && !readOnly;
@@ -245,15 +252,17 @@ export function PageView({
         {node.level === "full" && !trashed && !readOnly && (
           <ShareMenu node={node} onChanged={onShared} onAccessLost={accessLost} />
         )}
-        {/* Le favori (à tout niveau), « Historique » (à partir de « Peut modifier ») et les
-            autres actions. La fenêtre n'est chargée qu'à la demande ; un refus du serveur fait
-            relire la page, comme pour les commentaires. */}
+        {/* Le favori (à tout niveau), « Dupliquer » (là où le serveur le permet), « Historique »
+            (à partir de « Peut modifier ») et les autres actions. La fenêtre n'est chargée qu'à
+            la demande ; un refus du serveur fait relire la page, comme pour les commentaires. */}
         <PageMenu
           node={node}
           session={session}
           readOnly={readOnly}
           favorite={favorite}
           onFavorite={favoriteThis}
+          onDuplicate={duplicateThis}
+          duplicating={duplicating}
           selfId={userId}
           afterLogin={afterLogin}
           focusFallback={focusTitle}

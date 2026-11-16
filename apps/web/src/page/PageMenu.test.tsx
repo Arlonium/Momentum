@@ -436,3 +436,65 @@ test("a_reader_opening_the_menu_does_not_load_the_history", async () => {
   await click(menuButton());
   expect(loadHistory).toHaveBeenCalledTimes(1);
 });
+
+/** Le menu de la page avec le favori et « Dupliquer » (R252), tels que la page les donne. */
+const renderWithDuplicate = (
+  level: "read" | "edit",
+  { onDuplicate, duplicating = false }: { onDuplicate?: () => void; duplicating?: boolean },
+) =>
+  act(async () =>
+    root.render(
+      <PageMenu
+        node={page("p", { level })}
+        session={null}
+        readOnly={false}
+        selfId="alice"
+        favorite={false}
+        onFavorite={() => {}}
+        onDuplicate={onDuplicate}
+        duplicating={duplicating}
+        onRefused={() => {}}
+      />,
+    ),
+  );
+
+const entry = (label: string) =>
+  [...(menu()?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])].find(
+    (item) => item.textContent === label,
+  );
+
+test("duplicate_is_in_the_page_menu_after_the_favorite_and_before_the_history", async () => {
+  // « Dupliquer », là où la page le donne (la règle du serveur, `canDuplicate`) : après le favori,
+  // avant « Historique », qui n'arrive qu'à partir de « Peut modifier » : un lecteur promu voit
+  // l'historique s'ajouter après les entrées qu'il voyait, sans les décaler (R466).
+  const onDuplicate = vi.fn();
+  await renderWithDuplicate("read", { onDuplicate });
+  await click(menuButton());
+  expect(entries()).toEqual(["Ajouter aux favoris", "Dupliquer"]);
+  await renderWithDuplicate("edit", { onDuplicate });
+  expect(entries()).toEqual(["Ajouter aux favoris", "Dupliquer", "Historique"]);
+  // Choisie, elle demande la copie ; le menu se ferme et rend le focus à son bouton.
+  await click(entry("Dupliquer")!);
+  expect(onDuplicate).toHaveBeenCalledTimes(1);
+  expect(menu()).toBeNull();
+  expect(document.activeElement).toBe(menuButton());
+  // Sans `onDuplicate` (la page ne le permet pas), rien.
+  await renderWithDuplicate("edit", {});
+  await click(menuButton());
+  expect(entries()).toEqual(["Ajouter aux favoris", "Historique"]);
+});
+
+test("duplicate_in_the_page_menu_is_inactive_while_a_duplication_runs", async () => {
+  const onDuplicate = vi.fn();
+  await renderWithDuplicate("read", { onDuplicate, duplicating: true });
+  await click(menuButton());
+  expect(entry("Dupliquer")?.getAttribute("aria-disabled")).toBe("true");
+  await click(entry("Dupliquer")!);
+  expect(onDuplicate).not.toHaveBeenCalled();
+  // Elle a répondu : l'entrée revient, à sa place, le menu ouvert.
+  await renderWithDuplicate("read", { onDuplicate, duplicating: false });
+  expect(entries()).toEqual(["Ajouter aux favoris", "Dupliquer"]);
+  expect(entry("Dupliquer")?.getAttribute("aria-disabled")).toBeNull();
+  await click(entry("Dupliquer")!);
+  expect(onDuplicate).toHaveBeenCalledTimes(1);
+});

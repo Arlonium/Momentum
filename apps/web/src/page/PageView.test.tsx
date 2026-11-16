@@ -126,6 +126,7 @@ async function show(
   me: Me = account(),
   ancestors: PageNode[] = [],
   favorite?: { favorite: boolean; onFavorite: (id: string) => void },
+  duplicate?: { onDuplicate: (id: string) => void; duplicating?: boolean },
 ) {
   await act(async () =>
     root.render(
@@ -135,6 +136,8 @@ async function show(
           ancestors={ancestors}
           favorite={favorite?.favorite}
           onFavorite={favorite?.onFavorite}
+          onDuplicate={duplicate?.onDuplicate}
+          duplicating={duplicate?.duplicating}
           readOnly={false}
           checkSchema={checkSchema}
           autoFocusTitle={false}
@@ -317,6 +320,30 @@ test("page_view_offers_the_favorite_of_its_page_in_its_menu", async () => {
   await show(node, account(), [], { favorite: true, onFavorite });
   await click(host.querySelector('button[aria-label="Actions de la page"]')!);
   expect(items().map((item) => item.textContent)).toEqual(["Retirer des favoris"]);
+});
+
+test("page_view_offers_the_duplicate_of_its_page_in_its_menu", async () => {
+  // « Dupliquer », que donne `App` là où le serveur le permet (R252) : il nomme la page ouverte, et
+  // reste grisé pendant une duplication.
+  const onDuplicate = vi.fn();
+  const node = page("x", { level: "read" });
+  const favorite = { favorite: false, onFavorite: () => {} };
+  await show(node, account(), [], favorite, { onDuplicate, duplicating: true });
+  await click(host.querySelector('button[aria-label="Actions de la page"]')!);
+  const item = () =>
+    [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+      (entry) => entry.textContent === "Dupliquer",
+    )!;
+  expect(item().getAttribute("aria-disabled")).toBe("true");
+  await show(node, account(), [], favorite, { onDuplicate });
+  await click(item());
+  expect(onDuplicate.mock.calls).toEqual([["x"]]);
+  // Sans `onDuplicate`, rien.
+  await show(node, account(), [], favorite);
+  await click(host.querySelector('button[aria-label="Actions de la page"]')!);
+  expect([...document.querySelectorAll('[role="menuitem"]')].map((e) => e.textContent)).toEqual([
+    "Ajouter aux favoris",
+  ]);
 });
 
 test("page_view_gives_the_editor_what_mentions_need", async () => {

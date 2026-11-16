@@ -6,7 +6,9 @@
 // modifier, « Déplacer vers le haut », « Déplacer vers le bas », « Imbriquer dans la page
 // précédente », « Sortir de la page parente » (ce que la souris fait en glissant, au clavier,
 // R95) ; pour toute page qu'on voit, « Ajouter aux favoris » ou « Retirer des favoris » (R254) ;
-// pour qui peut la modifier, « Mettre à la corbeille », en dernier (R412). Un menu ouvert qui perd une entrée (le niveau de sa page est
+// « Dupliquer » là où le serveur le permet (R252 : tout membre, un invité sous une page parente
+// qu'il peut modifier ; grisée pendant une duplication) ; pour qui peut la modifier, « Mettre à la
+// corbeille », en dernier (R412). Un menu ouvert qui perd une entrée (le niveau de sa page est
 // tombé) se ferme, et rend le focus à son bouton ; le favori relu change de libellé sans le
 // fermer. Une page qui quitte l'arbre (mise à la corbeille ici, ou retirée par une
 // relecture : jetée, supprimée ou plus partagée ailleurs) emporte sa ligne : si elle avait le
@@ -33,6 +35,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   ChevronIcon,
+  DuplicatePageIcon,
   NestIcon,
   PlusIcon,
   StarIcon,
@@ -45,7 +48,7 @@ import { firstClick } from "../ui/firstClick";
 import { nestTarget, stepTarget, unnestTarget, type Drop } from "./drag";
 import { PageTree, type DropAt, type TreeDrag } from "./PageTree";
 import { RowMenu, type MenuAction } from "./RowMenu";
-import { flattenRows, neighbourOf, NONE } from "./rows";
+import { canDuplicate, flattenRows, neighbourOf, NONE, parentOf } from "./rows";
 import {
   bySection,
   canCreateIn,
@@ -83,6 +86,10 @@ type Props = {
   favorites?: readonly string[];
   /** Pose ou retire le favori d'une page (R254) ; sans lui, les lignes ne le proposent pas. */
   onFavorite?: (id: string) => void;
+  /** Duplique une page (R252) ; sans lui, les lignes ne le proposent pas. */
+  onDuplicate?: (id: string) => void;
+  /** Une duplication est en route : « Dupliquer » est grisée (une à la fois par compte, R605). */
+  duplicating?: boolean;
 };
 
 /** Le menu « … » ouvert : sa page, et le bouton qui l'a ouvert. */
@@ -115,6 +122,8 @@ export function SectionList({
   onMove,
   favorites,
   onFavorite,
+  onDuplicate,
+  duplicating = false,
 }: Props) {
   /** Les sections repliées. */
   const [closed, setClosed] = useState<readonly Section[]>(() => readCollapsedSections(spaceId));
@@ -331,6 +340,24 @@ export function SectionList({
       onSelect: () => onFavorite(id),
     });
   }
+  if (
+    menu !== null &&
+    menuNode !== undefined &&
+    onDuplicate !== undefined &&
+    !readOnly &&
+    canDuplicate(menuNode, parentOf(nodes, menuNode), role)
+  ) {
+    const { id } = menuNode;
+    // Après le favori, avant la corbeille (R412). Grisée, pas retirée, pendant une duplication :
+    // les entrées gardent leur rang sous le pointeur (R466).
+    actions.push({
+      key: "duplicate",
+      label: "Dupliquer",
+      icon: <DuplicatePageIcon />,
+      disabled: duplicating,
+      onSelect: () => onDuplicate(id),
+    });
+  }
   if (menu !== null && menuNode !== undefined && editable) {
     const { id } = menuNode;
     actions.push({
@@ -374,7 +401,7 @@ export function SectionList({
           // Seul l'arbre d'où vient la page saisie connaît le glisser-déposer.
           drag={drag !== null && groups[section].some((n) => n.id === drag.id) ? drag : null}
           readOnly={readOnly}
-          menus={onFavorite !== undefined}
+          menus={onFavorite !== undefined || onDuplicate !== undefined}
           onOpen={openSection}
           onToggle={togglePage}
           onCreateUnder={createUnder}
