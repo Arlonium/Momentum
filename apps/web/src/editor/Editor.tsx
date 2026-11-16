@@ -12,7 +12,8 @@
 // Autour de la vue (`EditorView`) : le menu « / » et ses blocs riches (`slashItems.tsx`), la barre
 // de mise en forme (`Toolbar.tsx`), et la fenêtre de réglage d'un bloc riche, rendue hors du
 // document et tenue par l'id du bloc (`blocks/BlockWindowHost.tsx`) ; Ctrl+Alt+Entrée
-// (Cmd+Option+Entrée) ouvre celle du bloc où est le curseur.
+// (Cmd+Option+Entrée) ouvre celle du bloc où est le curseur. Le sélecteur du lien de page est rendu
+// de même (`blocks/PageLink.tsx`).
 //
 // `PreviewEditor` est le même éditeur, lié à un document local sans fournisseur : l'aperçu d'une
 // version dans la fenêtre « Historique » (R135).
@@ -57,6 +58,7 @@ import { blockOfSelection } from "../comments/dom";
 import { BlockWindowHost, isBlockWindowShortcut, openWindowAtCursor } from "./blocks/BlockWindowHost";
 import { useBlockWindowPage } from "./blocks/blockWindows";
 import { InlineMathHost, openInlineMathAtSelection } from "./blocks/InlineMath";
+import { PageLinkHost } from "./blocks/PageLink";
 import { focusBlockLinks } from "./blocks/Toc";
 import { isCommentShortcut } from "../comments/shortcut";
 import { FRAGMENT, type CollabSession } from "./collab";
@@ -284,6 +286,7 @@ export function EditorView({ editor, editable, onComment = null, pageId, ...attr
       </BlockNoteView>
       <BlockWindowHost editor={editor} />
       <InlineMathHost editor={editor} />
+      <PageLinkHost editor={editor} />
     </>
   );
 }

@@ -17,7 +17,7 @@ test("slash_menu_offers_the_rich_blocks_in_order", async () => {
   const m = await mountEditor({ blocks: PAGE });
   const all = slashMenuItems(m.editor);
   const rich = all.filter((item) => item.group === RICH_GROUP);
-  const order = ["Callout", "Équation", "Équation en ligne", "Signet", "Table des matières"];
+  const order = ["Callout", "Équation", "Équation en ligne", "Signet", "Table des matières", "Lien vers une page"];
   expect(rich.map((item) => item.title)).toEqual(order);
   expect(richSlashItems(m.editor).map((item) => item.title)).toEqual(order);
   // Le groupe vient après ceux de BlockNote, d'un seul tenant.
@@ -33,6 +33,9 @@ test("slash_menu_offers_the_rich_blocks_in_order", async () => {
   for (const query of ["en ligne", "inline", "formule en ligne"]) expect(found(query), query).toContain("Équation en ligne");
   for (const query of ["table des matières", "matieres", "sommaire", "toc", "contents", "outline"]) {
     expect(found(query), query).toContain("Table des matières");
+  }
+  for (const query of ["lien vers une page", "page", "sous-page", "lien", "link"]) {
+    expect(found(query), query).toContain("Lien vers une page");
   }
   // Chaque élément a son icône et sa ligne d'explication.
   for (const item of rich) {

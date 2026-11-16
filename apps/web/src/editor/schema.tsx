@@ -15,12 +15,12 @@ import { Bookmark } from "./blocks/Bookmark";
 import { Callout } from "./blocks/Callout";
 import { Equation } from "./blocks/Equation";
 import { MathInline } from "./blocks/InlineMath";
+import { PageLink } from "./blocks/PageLink";
 import { Toc } from "./blocks/Toc";
 import { textProp } from "./blocks/props";
 import type { ReactNode } from "react";
 import {
   DatabaseIcon,
-  PageIcon,
   SyncIcon,
   WarningIcon,
 } from "../icons";
@@ -87,25 +87,6 @@ function Frame({ icon, children, muted }: { icon: ReactNode; children: ReactNode
     </div>
   );
 }
-
-const PageLink = createReactBlockSpec(
-  {
-    type: "pageLink",
-    propSchema: { pageId: { default: "" }, title: { default: "" } },
-    content: "none",
-  },
-  {
-    render: ({ block }) => {
-      const pageId = textProp(block.props, "pageId");
-      const title = textProp(block.props, "title") || "Sans titre";
-      return (
-        <Frame icon={<PageIcon />}>
-          {pageId ? <a href={`/p/${encodeURIComponent(pageId)}`}>{title}</a> : title}
-        </Frame>
-      );
-    },
-  },
-);
 
 const DatabaseRef = createReactBlockSpec(
   {

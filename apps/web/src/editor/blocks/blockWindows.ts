@@ -105,6 +105,16 @@ export function useBlockWindowPage(editor: object, pageId: string | undefined): 
   }, [editor, pageId]);
 }
 
+/**
+ * L'objet propre à la page de `editor` (ou à l'éditeur seul, s'il n'est rattaché à aucune page), qui
+ * vit tant qu'une vue d'éditeur de la page est affichée. Une autre fenêtre de la page y range son
+ * état (le sélecteur du lien de page, `PageLink.tsx`), qui passe ainsi, comme celle d'un bloc, à
+ * l'éditeur neuf d'une session recréée.
+ */
+export function pageScope(editor: object): object {
+  return stateOf(editor);
+}
+
 function setOpen(editor: object, open: OpenWindow | null): void {
   const state = stateOf(editor);
   state.open = open;

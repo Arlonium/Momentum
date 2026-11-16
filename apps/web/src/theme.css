@@ -3379,3 +3379,58 @@ button.mm-reaction:hover {
   padding: 3px 6px;
   color: var(--mm-text-secondary);
 }
+
+/* Lien vers une page (Task C3) : le cadre d'un bloc, le titre en lien ; et le sélecteur de page. */
+
+.mm-page-link-title {
+  unicode-bidi: isolate;
+}
+
+.mm-page-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mm-page-picker-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-page-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  color: var(--mm-text);
+  cursor: pointer;
+}
+
+.mm-page-picker-option svg {
+  flex: none;
+  color: var(--mm-text-secondary);
+}
+
+.mm-page-picker-option:hover,
+.mm-page-picker-option[aria-selected="true"] {
+  background: var(--mm-surface);
+}
+
+.mm-page-picker-option[aria-disabled="true"] {
+  cursor: default;
+}
+
+.mm-page-picker-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  unicode-bidi: isolate;
+}
+
+.mm-page-picker-empty {
+  margin: 0;
+  color: var(--mm-text-secondary);
+}

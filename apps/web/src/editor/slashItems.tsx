@@ -4,6 +4,8 @@
 // (C3). Chaque élément a ses noms en français et en anglais.
 //
 // La table des matières se pose comme un signet, par le geste de BlockNote ; elle n'a pas de fenêtre.
+// « Lien vers une page » ouvre un sélecteur, et le bloc n'est posé qu'au choix d'une page
+// (`blocks/PageLink.tsx`) : fermé sans choix, rien n'est écrit.
 //
 // Choisir un bloc riche fait le geste de BlockNote (R308, récrit) : dans un bloc vide, ou qui ne
 // porte que « / », ce bloc devient celui qu'on a choisi (il garde son id ; une frappe faite au même
@@ -13,9 +15,10 @@
 import { combineByGroup, insertOrUpdateBlockForSlashMenu } from "@blocknote/core";
 import { getDefaultReactSlashMenuItems, type DefaultReactSuggestionItem } from "@blocknote/react";
 import { getMultiColumnSlashMenuItems } from "@blocknote/xl-multi-column";
-import { BookmarkIcon, CalloutIcon, EquationIcon, InlineEquationIcon, TocIcon } from "../icons";
+import { BookmarkIcon, CalloutIcon, EquationIcon, InlineEquationIcon, PageIcon, TocIcon } from "../icons";
 import { openBlockWindow } from "./blocks/blockWindows";
 import { openInlineMath } from "./blocks/InlineMath";
+import { openPageLinkPicker } from "./blocks/PageLink";
 import type { MementumEditor } from "./debug";
 
 /** Le groupe des blocs riches, le dernier du menu. */
@@ -79,6 +82,14 @@ export function richSlashItems(editor: MementumEditor): DefaultReactSuggestionIt
       onItemClick: () => {
         insertOrUpdateBlockForSlashMenu(editor, { type: "toc" });
       },
+    },
+    {
+      title: "Lien vers une page",
+      subtext: "Une page de l'espace, choisie par son titre",
+      aliases: ["lien", "page", "sous-page", "lier", "page link", "link to page"],
+      group: RICH_GROUP,
+      icon: <PageIcon size={18} />,
+      onItemClick: () => openPageLinkPicker(editor),
     },
   ];
 }
