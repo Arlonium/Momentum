@@ -549,6 +549,39 @@ test("a_write_refused_before_the_login_is_done_once_after_it", async ({ browser 
   await expect(dialog).toHaveCount(0);
 });
 
+test("a_write_refused_before_the_login_is_not_done_after_it", async ({ browser }) => {
+  // Ce que le rejeu ne couvre pas (constat I3 de la relecture, R348) : le cas ordinaire, où le
+  // refus revient tout de suite, avant la connexion. Le geste reste perdu ; seul un refus revenu
+  // après la reconnexion repart. Témoin de ce que dit le README, et pendant de
+  // `a_write_refused_before_the_login_is_done_once_after_it`.
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const open = await createPage(api, { title: `Ouverte ${unique()}` });
+  const thrown = await createPage(api, { title: `Jetée ${unique()}` });
+  const p = await openPage(browser, open.id, account);
+  await expect(treeRow(p, thrown.id)).toBeVisible();
+  const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
+  let trashes = 0;
+  p.on("request", (request) => {
+    const { pathname } = new URL(request.url());
+    if (request.method() === "POST" && pathname === `/api/v1/pages/${thrown.id}/trash`) trashes += 1;
+  });
+  // L'arbre, que la barre latérale relit seule, est retenu : seul le refus du geste peut demander
+  // la connexion. Quand la fenêtre est là, ce refus a donc été jugé : il ne repartira jamais.
+  const tree = await holdTreeReads(p);
+  await p.context().clearCookies();
+  await (await openRowMenu(p, thrown.id, thrown.title))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  await expect(dialog).toBeVisible();
+  await logInWith(dialog, account.email, account.password);
+  await expect(dialog).toHaveCount(0);
+  tree.release();
+  expect(trashes).toBe(1);
+  expect((await getPage(api, thrown.id)).trashedAt).toBeNull();
+  await expect(treeRow(p, thrown.id)).toBeVisible();
+});
+
 test("a_call_in_flight_during_a_password_change_does_not_ask_to_log_in", async ({ browser }) => {
   // Le changement de mot de passe ferme toutes les sessions du compte, dont celle sous laquelle
   // un appel en route est parti, et rouvre celle de l'onglet (cookie neuf). Le refus de cet appel
