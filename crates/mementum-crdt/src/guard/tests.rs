@@ -18,7 +18,10 @@ use yrs::{
     XmlElementPrelim, XmlFragment, XmlTextPrelim, merge_updates_v1,
 };
 
-use super::{Insert, Kind, Parent, Pending, Shape, Struct};
+use super::{
+    Insert, Kind, MARK_VALUE_SLACK, MAX_HREF_BYTES, Parent, Pending, Shape, Struct, known_mark,
+    value_refusal,
+};
 use crate::{CrdtError, FRAGMENT, META, PageDoc};
 
 /// Ce qu'une mise à jour contient, vu par l'API publique de yrs : plages
@@ -559,4 +562,35 @@ fn inserted_blocks_are_new_containers_with_one_sure_id() {
         shape.inserted_blocks(&known).is_empty(),
         "déjà dans la page"
     );
+}
+
+/// Ruling R537 : avant de lire la chaîne d'une valeur de marque, la garde borne son JSON brut à six
+/// fois la borne plus la marge (le pire échappement fait six octets d'un : `\u0061`). Une adresse
+/// de 16 Kio écrite toute en `\u0061` passe, un octet de plus est refusé sur la chaîne ; un JSON
+/// plus long que la borne brute est refusé sans être lu, la chaîne qu'il porte serait-elle courte.
+/// Une marque simple garde sa borne de 32 octets.
+#[test]
+fn a_mark_value_is_bounded_raw_at_the_worst_escape_before_it_is_read() {
+    let link = known_mark("link").ok().unwrap();
+    let href = |s: &str| format!("{{\"href\":\"{s}\"}}");
+    let verdict = |value: &str| value_refusal(link, value).map(|r| r.to_string());
+    assert_eq!(verdict(&href(&"\\u0061".repeat(MAX_HREF_BYTES))), None);
+    let over = verdict(&href(&"\\u0061".repeat(MAX_HREF_BYTES + 1)));
+    assert!(
+        over.as_deref()
+            .is_some_and(|why| why.contains(&format!("{} octets", MAX_HREF_BYTES + 1))),
+        "{over:?}"
+    );
+    let raw = 6 * MAX_HREF_BYTES + MARK_VALUE_SLACK;
+    let junk = format!("{{\"href\":\"x\",\"junk\":\"{}\"}}", "y".repeat(raw));
+    let refused = verdict(&junk);
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|why| why.contains(&format!("{} octets, pour {raw} au plus", junk.len()))),
+        "{refused:?}"
+    );
+    let bold = known_mark("bold").ok().unwrap();
+    assert!(value_refusal(bold, "{}").is_none());
+    assert!(value_refusal(bold, &format!("{{\"x\":\"{}\"}}", "y".repeat(30))).is_some());
 }

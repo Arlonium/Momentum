@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mementum_crdt::{CrdtError, FRAGMENT, PageDoc};
-use mementum_md::{Content, Inline, MAX_COLOR_BYTES, MAX_HREF_BYTES};
+use mementum_md::{Block, Content, Inline, MAX_COLOR_BYTES, MAX_HREF_BYTES, RenderOpts, render};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::updates::decoder::Decode;
@@ -237,4 +237,123 @@ fn a_stored_mark_of_the_schema_stays() {
         runs_of(&fresh),
         [("Any(String(\"abc\"))".to_string(), vec!["link".to_string()])]
     );
+}
+
+/// Une chaîne de `n` octets faite de ce que le JSON allonge en l'échappant : guillemets (`\"`),
+/// barres obliques inverses (`\\`), un caractère de contrôle (`\u0001`), et une lettre.
+fn escaped(n: usize) -> String {
+    "\"\\\u{1}u".chars().cycle().take(n).collect()
+}
+
+/// Ruling R537 (constat E1 de la re-relecture du tour 7) : la borne d'une valeur de marque se juge
+/// sur la chaîne qu'elle porte, désechappée, comme `parse` et l'éditeur la jugent, pas sur son
+/// JSON, que l'échappement allonge (près de trois fois ici). À la borne, la marque passe, sous
+/// une map comme en chaîne seule ; un octet de plus, elle est refusée.
+#[test]
+fn a_mark_value_is_bounded_on_its_unescaped_string() {
+    let at = |key: &str, field: &str, n: usize| {
+        let value = escaped(n);
+        [
+            (key.to_string(), map(field, &value)),
+            (key.to_string(), Any::from(value)),
+        ]
+    };
+    let accepted = [
+        at("textColor", "stringValue", MAX_COLOR_BYTES),
+        at("backgroundColor", "stringValue", MAX_COLOR_BYTES),
+        at("link", "href", MAX_HREF_BYTES),
+    ];
+    for (key, value) in accepted.into_iter().flatten() {
+        let (page, root) = PageDoc::new_page();
+        let (_, update) = marked(&root, &key, value);
+        page.apply_client_update(&update)
+            .unwrap_or_else(|e| panic!("{key} à la borne : {e}"));
+        let blocks = page.read_blocks();
+        let Content::Inline(content) = &blocks[0].content else {
+            panic!("contenu en ligne attendu");
+        };
+        assert_eq!(content.len(), 1, "{key} : {content:?}");
+    }
+    let refused = [
+        at("textColor", "stringValue", MAX_COLOR_BYTES + 1),
+        at("backgroundColor", "stringValue", MAX_COLOR_BYTES + 1),
+        at("link", "href", MAX_HREF_BYTES + 1),
+    ];
+    for (key, value) in refused.into_iter().flatten() {
+        let (page, root) = PageDoc::new_page();
+        let (_, update) = marked(&root, &key, value);
+        let refused = page.apply_client_update(&update);
+        assert!(
+            matches!(&refused, Err(CrdtError::Structure(why)) if why.contains(key.as_str())),
+            "{key} : {refused:?}"
+        );
+    }
+}
+
+/// Ruling R537 (la sonde du relecteur, `zz_probe_escaped.rs`) : une marque que `parse` accepte,
+/// écrite par le serveur comme `PUT /mmd` l'écrit, survit à la relecture du stockage. Un lien de
+/// 16 000 octets dont 1 000 guillemets, une couleur de 100 octets dont 40 guillemets, et l'un et
+/// l'autre à la borne, guillemets, barres obliques inverses et caractères de contrôle compris,
+/// étaient présents dans la page vivante et absents de la page relue de son état.
+#[test]
+fn a_mark_accepted_by_parse_survives_a_reload_once_escaped() {
+    let with_href = |href: String| {
+        let mut blocks = mementum_md::parse("Un [lien](x) ici\n").unwrap();
+        let Content::Inline(content) = &mut blocks[0].content else {
+            panic!("contenu en ligne attendu");
+        };
+        let Some(Inline::Link { href: h, .. }) = content.get_mut(1) else {
+            panic!("un lien");
+        };
+        *h = href;
+        blocks
+    };
+    let with_color = |color: String| {
+        let mut blocks = mementum_md::parse("Un <span color=\"red\">mot</span> ici\n").unwrap();
+        let Content::Inline(content) = &mut blocks[0].content else {
+            panic!("contenu en ligne attendu");
+        };
+        let Some(Inline::Text { styles, .. }) = content.get_mut(1) else {
+            panic!("un texte");
+        };
+        styles.text_color = Some(color);
+        blocks
+    };
+    let cases: [(&str, Vec<Block>); 4] = [
+        (
+            "un lien de 16 000 octets dont 1 000 guillemets",
+            with_href(format!(
+                "https://ex.com/{}{}",
+                "a".repeat(14_985),
+                "\"".repeat(1_000)
+            )),
+        ),
+        ("un lien à la borne", with_href(escaped(MAX_HREF_BYTES))),
+        (
+            "une couleur de 100 octets dont 40 guillemets",
+            with_color(format!("{}{}", "c".repeat(60), "\"".repeat(40))),
+        ),
+        (
+            "une couleur à la borne",
+            with_color(escaped(MAX_COLOR_BYTES)),
+        ),
+    ];
+    for (what, blocks) in cases {
+        let mmd = render(&blocks, RenderOpts::default()).markdown;
+        let blocks = mementum_md::parse(&mmd).unwrap_or_else(|e| panic!("{what} : {e}"));
+        let (page, _) = PageDoc::new_page();
+        page.write_blocks(&blocks).unwrap();
+        let live = page.read_blocks();
+        let Content::Inline(content) = &live[0].content else {
+            panic!("contenu en ligne attendu");
+        };
+        let marked = match &content[1] {
+            Inline::Link { .. } => true,
+            Inline::Text { styles, .. } => styles.text_color.is_some(),
+            _ => false,
+        };
+        assert!(marked, "{what} : la marque dans la page vivante");
+        let again = PageDoc::from_updates([page.encode_state().as_slice()]).unwrap();
+        assert_eq!(again.read_blocks(), live, "{what} : la page relue");
+    }
 }

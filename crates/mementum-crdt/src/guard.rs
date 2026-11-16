@@ -240,6 +240,11 @@ pub(crate) const MARKS: &[(&str, Carried)] = &[
 /// qu'elle porte : `{"stringValue":""}` (18 octets), `{"href":""}` (11), `{}`, `null`.
 const MARK_VALUE_SLACK: usize = 32;
 
+/// Octets de JSON au plus par octet de la chaîne qu'une valeur de marque porte : le pire
+/// échappement (`\u0061` pour `a`, `\u0001` pour un caractère de contrôle), dont la garde se sert
+/// pour borner le JSON brut avant de le lire (Ruling R537).
+const WORST_ESCAPE: usize = 6;
+
 /// Caractères d'une clé inconnue cités dans un refus.
 const QUOTED_KEY_CHARS: usize = 40;
 
@@ -261,7 +266,14 @@ fn known_mark(key: &str) -> Result<(&'static str, Carried), MarkRefusal> {
 
 /// Pourquoi la page ne garde pas une marque du schéma de valeur `value` (JSON), ou `None` si elle
 /// la garde (Ruling R431) : une valeur plus longue que sa borne. Une valeur illisible est laissée à
-/// yrs, qui refuse alors la mise à jour.
+/// yrs, qui la lit avec le même `serde_json`, et refuse alors la mise à jour.
+///
+/// La borne se juge sur la chaîne que la valeur porte, désechappée, comme `parse` et l'éditeur la
+/// jugent (Ruling R537) : l'échappement JSON allonge une chaîne (`\"`, `\\`, `\u0001`), et une
+/// adresse de 16 000 octets dont 1 000 guillemets, acceptée par `PUT /mmd`, disparaissait au
+/// rechargement suivant. Le JSON brut est borné d'abord, avant d'être lu, à
+/// [`WORST_ESCAPE`] fois la borne plus [`MARK_VALUE_SLACK`] ; une marque qui ne porte rien (le
+/// gras…) garde ainsi sa borne de 32 octets.
 pub(crate) fn value_refusal(
     (name, carried): (&'static str, Carried),
     value: &str,
@@ -271,11 +283,12 @@ pub(crate) fn value_refusal(
         Carried::Color => (Some("stringValue"), MAX_COLOR_BYTES),
         Carried::Href => (Some("href"), MAX_HREF_BYTES),
     };
-    if value.len() > bound + MARK_VALUE_SLACK {
+    let raw = bound * WORST_ESCAPE + MARK_VALUE_SLACK;
+    if value.len() > raw {
         return Some(MarkRefusal::TooLong {
             key: name,
             bytes: value.len(),
-            bound: bound + MARK_VALUE_SLACK,
+            bound: raw,
         });
     }
     // Ce que porte la valeur : la chaîne sous `field`, ou la valeur elle-même si c'est une chaîne
