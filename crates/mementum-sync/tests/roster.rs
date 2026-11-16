@@ -265,6 +265,22 @@ async fn page_event_reaches_the_connections_that_may_read_it() {
         let read = [comments.clone(), comments.clone()];
         assert!(became(client, &read).await, "{:?}", client.page_events());
     }
+    // L'autre page n'a rien reçu de celles-ci, lu derrière la marque d'un témoin sur elle
+    // (Ruling R342) : sa diffusion n'a pas d'ordre avec celle de la page, et une trame égarée
+    // vers son acteur, demandée avant que le témoin n'arrive, lui serait parvenue avant la marque.
+    let witness =
+        Client::connect_synced(&f.server.url_for(elsewhere_page, of(alice, "Alice"))).await;
+    witness.set_awareness(r##"{"user":{"name":"Témoin","color":"#00aa00"}}"##);
+    let id = witness.client_id();
+    let marked = |c: &Client| {
+        c.awareness_states()
+            .get(&id)
+            .is_some_and(|state| state.contains("#00aa00"))
+    };
+    assert!(
+        elsewhere.wait_until(WAIT, marked).await,
+        "la marque du témoin"
+    );
     assert_eq!(events(&elsewhere), [versions]);
 
     // Une page que personne n'a ouverte, une page qui n'existe pas : rien, et aucun acteur

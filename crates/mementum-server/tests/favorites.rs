@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use common::sync::{members, open_app, still_served, user};
+use common::sync::{Witness, members, open_app, still_served, user};
 use common::{
     Browser, HELD, Reply, Team, TestApp, WAIT, favorite_routes, outcome, overtaken, query_i64,
     sync_url, synced_as, uuid,
@@ -589,6 +589,11 @@ async fn favorites_of_who_left_the_space_come_back_with_the_role() {
 /// celle de son auteur ni celle d'un autre, et n'y envoie aucune trame de page. Posé, posé
 /// encore, retiré, retiré encore, par une invitée en « Peut lire » puis par un membre : chacun
 /// reste servi.
+///
+/// « Aucune trame » se lit derrière la marque d'un témoin (Mona, qui peut écrire la page ;
+/// Ruling R342) : une trame qu'une route demande sans attendre l'acteur (`Hub::page_event`) peut
+/// arriver après la réponse à une resynchronisation, jamais après une marque posée une fois la
+/// route répondue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn favoriting_closes_no_sync_connection() {
     let t = open_app().await;
@@ -604,16 +609,17 @@ async fn favoriting_closes_no_sync_connection() {
     let url = sync_url(addr, page);
     let tom = synced_as(&team.tom.browser, &url).await;
     let gina = synced_as(&team.gina.browser, &url).await;
-    // La liste des présents part à chaque arrivée : chacun a reçu celle qui nomme les deux
+    let witness = Witness::join(&team.mona.browser, &url).await;
+    // La liste des présents part à chaque arrivée : chacun a reçu celle qui nomme les trois
     // comptes avant qu'on compte les trames de page.
-    let (tom_id, gina_id) = (team.tom.id.to_string(), team.gina.id.to_string());
+    let ids = [team.tom.id, team.gina.id, team.mona.id].map(|id| id.to_string());
     for client in [&tom, &gina] {
-        let names_both = |c: &Client| {
+        let names_all = |c: &Client| {
             let last = c.page_events().last().cloned();
-            last.is_some_and(|frame| frame.contains(&tom_id) && frame.contains(&gina_id))
+            last.is_some_and(|frame| ids.iter().all(|id| frame.contains(id)))
         };
         assert!(
-            client.wait_until(WAIT, names_both).await,
+            client.wait_until(WAIT, names_all).await,
             "la liste des présents : {:?}",
             client.page_events()
         );
@@ -628,10 +634,11 @@ async fn favoriting_closes_no_sync_connection() {
         }
     }
 
-    // Servie : une resynchronisation reçoit sa réponse, qui vient après toute trame envoyée
-    // avant elle.
+    // Servie : une resynchronisation reçoit sa réponse.
     assert!(still_served(&tom).await, "la connexion de Tom");
     assert!(still_served(&gina).await, "la connexion de Gina");
+    // Ce que l'acteur a diffusé pour une demande d'avant la marque est arrivé chez eux.
+    witness.seen_by(&[&tom, &gina]).await;
     assert_eq!(frames(&tom, &gina), before, "aucune trame de page");
 }
 
