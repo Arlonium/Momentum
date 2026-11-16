@@ -983,7 +983,7 @@ async fn startup_counts_strangers_and_missing_contents_and_removes_none() {
     uploaded(&alice.browser, page, "rapport.pdf", PDF).await;
     let restart = async || {
         let logs = Logs::capture();
-        mementum_server::app(&t.cfg).await.unwrap();
+        let _restarted = mementum_server::app(&t.cfg).await.unwrap();
         logs.text()
     };
     let quiet = restart().await;
