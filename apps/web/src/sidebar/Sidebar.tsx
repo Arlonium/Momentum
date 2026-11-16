@@ -6,11 +6,14 @@
 // elle est vide, rien n'est lu du serveur pour elle). « Favoris » est au-dessus des arbres : tant
 // que le pointeur est dans la barre, une relecture ne la fait ni grandir, ni rapetisser, ni
 // changer d'ordre (`heldPages.ts`, R411) ; un favori posé ou retiré dans l'onglet (menu d'une
-// ligne ou de la page) se voit tout de suite. En pied, collés à son bord bas : le
+// ligne ou de la page) se voit tout de suite. Le pointeur est suivi au niveau du document (R419) :
+// le menu d'une ligne, posé dans `body`, compte pour la barre, et il disparaît sous le pointeur
+// sans que rien n'annonce de sortie ; pendant un glisser, plus aucun événement de pointeur
+// n'arrive, et la page tenue garde la liste gelée. En pied, collés à son bord bas : le
 // message de la dernière action refusée (à défaut, celui d'une lecture des pages qui a échoué),
 // avec « Réessayer » tant que les pages n'ont pas pu être lues, et « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
-import { useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
 import { trashPath } from "../router";
 import { useSession } from "../session/session";
@@ -106,10 +109,49 @@ export function Sidebar({
   // partir du moment où la liste de l'espace est lue (sinon le gel garderait une liste vide).
   const favoriteNodes = useMemo(() => favoritePages(favorites.pages, nodes), [favorites.pages, nodes]);
   const [pointerIn, setPointerIn] = useState(false);
+  /** Une page de la barre est tenue au bout de la souris (glisser-déposer). */
+  const [dragging, setDragging] = useState(false);
+  // Le pointeur, suivi au niveau du document (R419), pas par `pointerenter`/`pointerleave` de la
+  // barre : le menu d'une ligne est un portail dans `body`, et quand il disparaît sous le pointeur
+  // (une entrée cliquée là où il déborde sur le contenu, Échap, Entrée), Chromium n'envoie aucun
+  // `pointerout` depuis lui, seulement `pointerover` à ce qui est dessous. Chaque `pointerover` dit
+  // donc où il est : dans la barre, ou sur un menu qu'elle a ouvert (`data-sidebar-menu`). Un
+  // `pointerout` sans élément d'arrivée : il a quitté la fenêtre. Un glisser commence par
+  // `pointercancel` et n'envoie plus rien jusqu'à sa fin (`dragend`, `drop`, ou le premier
+  // `pointerover` d'après, si la ligne tenue a quitté le document et ne dit pas la fin).
+  useEffect(() => {
+    if (!scroller) return;
+    const inside = (target: EventTarget | null) =>
+      target instanceof Element &&
+      (scroller.contains(target) || target.closest("[data-sidebar-menu]") !== null);
+    const over = (event: PointerEvent) => {
+      setPointerIn(inside(event.target));
+      setDragging(false);
+    };
+    const out = (event: PointerEvent) => {
+      if (event.relatedTarget === null) setPointerIn(false);
+    };
+    const dragStart = (event: DragEvent) => {
+      if (inside(event.target)) setDragging(true);
+    };
+    const dragEnd = () => setDragging(false);
+    document.addEventListener("pointerover", over, true);
+    document.addEventListener("pointerout", out, true);
+    document.addEventListener("dragstart", dragStart, true);
+    document.addEventListener("dragend", dragEnd, true);
+    document.addEventListener("drop", dragEnd, true);
+    return () => {
+      document.removeEventListener("pointerover", over, true);
+      document.removeEventListener("pointerout", out, true);
+      document.removeEventListener("dragstart", dragStart, true);
+      document.removeEventListener("dragend", dragEnd, true);
+      document.removeEventListener("drop", dragEnd, true);
+    };
+  }, [scroller]);
   const shownFavorites = useHeldPages(
     space?.id ?? "",
     favoriteNodes,
-    pointerIn && favorites.loaded,
+    (pointerIn || dragging) && favorites.loaded,
     favorites.toggles,
   );
   // Le refus d'une action dit déjà ce qui ne va pas ; sinon, la lecture qui a échoué.
@@ -122,15 +164,7 @@ export function Sidebar({
   // lecture, qui revient quand le refus n'est plus dit.
   const retryable = notice === null && readFailure !== null;
   return (
-    <nav
-      ref={setScroller}
-      className="mm-sidebar"
-      aria-label="Barre latérale"
-      // Le menu d'une ligne, posé dans `body`, est un enfant de la barre pour React : le pointeur
-      // qui y passe ne la quitte pas.
-      onPointerEnter={() => setPointerIn(true)}
-      onPointerLeave={() => setPointerIn(false)}
-    >
+    <nav ref={setScroller} className="mm-sidebar" aria-label="Barre latérale">
       <div ref={setHead} className="mm-side-head">
         <SpaceSwitcher space={space} settingsOpen={settingsOpen} />
         {member && (

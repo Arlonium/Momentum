@@ -168,3 +168,76 @@ test("a_favorite_set_from_the_page_menu_shows_at_once_under_the_pointer", async 
   await show(["a", "b", "c"], { toggles: new Map([["b", 1]]) });
   expect(shown()).toEqual(["A", "B"]);
 });
+
+/** Le menu de la ligne `title`, ouvert. */
+async function openRowMenuOf(title: string) {
+  await act(async () =>
+    host.querySelector<HTMLElement>(`button[aria-label="Actions de « ${title} »"]`)!.click(),
+  );
+  return document.querySelector<HTMLElement>('[role="menu"]')!;
+}
+/** Le pointeur passe sur `target`, venu de `from` (Chromium : `pointerout` puis `pointerover`). */
+const moveOnto = (target: Element, from: Element | null) =>
+  act(async () => {
+    from?.dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: target }));
+    target.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: from }));
+  });
+
+test("favorites_thaw_once_a_row_menu_closes_under_the_pointer_over_the_content", async () => {
+  // I1 : le menu d'une ligne, posé dans `body`, déborde sur le contenu. On y clique une entrée là
+  // où il déborde : il disparaît sous le pointeur, et Chromium n'envoie aucun `pointerout` depuis
+  // lui, seulement `pointerover` à ce qui est dessous (`body`, puis le contenu).
+  await show(["a"]);
+  await pointer(true);
+  const menu = await openRowMenuOf("C");
+  const item = [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+    (entry) => entry.textContent === "Ajouter aux favoris",
+  )!;
+  await moveOnto(item, nav());
+  // Sur le menu, le pointeur est encore dans la barre : une arrivée d'ailleurs attend.
+  await show(["a", "b"]);
+  expect(shown()).toEqual(["A"]);
+  await act(async () => item.click());
+  expect(document.querySelector('[role="menu"]')).toBeNull();
+  const content = document.createElement("main");
+  document.body.append(content);
+  await act(async () => {
+    document.body.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: null }));
+    content.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+  });
+  // Le pointeur est sur le contenu : la liste reçue se montre.
+  expect(shown()).toEqual(["A", "B"]);
+});
+
+test("favorites_thaw_once_the_pointer_leaves_the_window_from_the_sidebar", async () => {
+  await show(["a"]);
+  await pointer(true);
+  await show(["a", "b"]);
+  expect(shown()).toEqual(["A"]);
+  // Hors de la fenêtre : `pointerout` sans élément d'arrivée.
+  await act(async () => {
+    nav().dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: null }));
+  });
+  expect(shown()).toEqual(["A", "B"]);
+});
+
+test("favorites_hold_still_while_a_page_is_dragged_in_the_tree", async () => {
+  // I2 : au début d'un glisser HTML5, Chromium envoie `pointercancel`, puis `pointerout` et
+  // `pointerleave` ; plus aucun événement de pointeur jusqu'à la fin du glisser. Le pointeur tient
+  // une ligne : rien ne doit bouger sous lui.
+  await show(["a"]);
+  await pointer(true);
+  const title = host.querySelector(".mm-sections .mm-section-title")!;
+  await act(async () => {
+    title.dispatchEvent(new Event("dragstart", { bubbles: true }));
+    nav().dispatchEvent(new MouseEvent("pointercancel", { bubbles: true }));
+    nav().dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: null }));
+  });
+  await show(["a", "b"]);
+  expect(shown()).toEqual(["A"]);
+  // Le glisser finit (lâché hors de la barre) : la liste reçue arrive.
+  await act(async () => {
+    title.dispatchEvent(new Event("dragend", { bubbles: true }));
+  });
+  expect(shown()).toEqual(["A", "B"]);
+});

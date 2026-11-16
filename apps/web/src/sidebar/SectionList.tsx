@@ -385,6 +385,7 @@ export function SectionList({
           anchor={menu.anchor}
           actions={actions}
           onClose={closeMenu}
+          inSidebar
         />
       )}
     </div>

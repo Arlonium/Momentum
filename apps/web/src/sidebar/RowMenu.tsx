@@ -47,13 +47,18 @@ type Props = {
   actions: MenuAction[];
   /** Ferme le menu (le parent le retire). */
   onClose: () => void;
+  /**
+   * Le menu est celui d'une ligne de la barre latérale : marqué `data-sidebar-menu`, il compte pour
+   * la barre quand on suit le pointeur (« Favoris » ne bouge pas sous lui, R411, R419).
+   */
+  inSidebar?: boolean;
 };
 
 /** Écart entre le menu et son bouton, et marge gardée avec les bords de la fenêtre (px). */
 const GAP = 4;
 const MARGIN = 8;
 
-export function RowMenu({ label, anchor, actions, onClose }: Props) {
+export function RowMenu({ label, anchor, actions, onClose, inSidebar = false }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   /** Où poser le menu ; `null` : pas encore mesuré, il est rendu sans être montré. */
   const [place, setPlace] = useState<{ top: number; left: number } | null>(null);
@@ -147,6 +152,7 @@ export function RowMenu({ label, anchor, actions, onClose }: Props) {
       role="menu"
       aria-label={label}
       className="mm-menu"
+      data-sidebar-menu={inSidebar || undefined}
       style={style}
       onKeyDown={onKeyDown}
     >
