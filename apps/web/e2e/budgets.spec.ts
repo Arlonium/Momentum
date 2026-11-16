@@ -125,6 +125,20 @@ type Opening = {
   longestFrame: number;
 };
 
+/** Ce qui suit l'ouverture d'une page, pendant deux secondes (`afterOpening`). */
+type AfterOpening = {
+  /** Les images de plus de 50 ms (ms). */
+  longFrames: number[];
+  /** Les entrées de la table des matières, et quand la dernière est arrivée (ms après l'ouverture). */
+  entries: number;
+  filledAfter: number;
+};
+
+/** Attend la fin de ce que `openFromTree` regarde après l'ouverture. */
+function afterOpening(p: Page): Promise<AfterOpening> {
+  return p.evaluate(() => (window as unknown as { afterOpening: Promise<AfterOpening> }).afterOpening);
+}
+
 /**
  * Charge l'application sur la page d'accueil dans un onglet neuf, puis ouvre `target` d'un
  * clic dans l'arbre et mesure l'ouverture dans la page, avec `performance.now()`.
@@ -177,6 +191,28 @@ async function openFromTree(browser: Browser, target: Target): Promise<Opening &
           const end = performance.now();
           gap(end);
           rendered.port1.close();
+          // Ce qui suit l'ouverture, regardé depuis cette tâche même (un `evaluate` de plus n'arriverait
+          // qu'après les tâches longues) : pendant deux secondes, les images de plus de 50 ms, et quand la
+          // table des matières a reçu sa dernière entrée.
+          (window as unknown as { afterOpening: Promise<AfterOpening> }).afterOpening = new Promise((settle) => {
+            const longFrames: number[] = [];
+            let entries = 0;
+            let filledAfter = 0;
+            let before = end;
+            const watch = () => {
+              const now = performance.now();
+              if (now - before > 50) longFrames.push(Math.round(now - before));
+              before = now;
+              const count = document.querySelectorAll(".mm-editor .mm-toc li").length;
+              if (count !== entries) {
+                entries = count;
+                filledAfter = now - end;
+              }
+              if (now - end > 2_000) settle({ longFrames, entries, filledAfter });
+              else requestAnimationFrame(watch);
+            };
+            requestAnimationFrame(watch);
+          });
           resolve({ total: end - t0, longestFrame });
         };
         const frame = () => {
@@ -473,8 +509,9 @@ test("open_10000_block_page_under_3s", async ({ browser }) => {
  * Une page de 10 000 blocs avec une table des matières (Task C3) : un paragraphe, la table, puis un
  * titre tous les vingt blocs (500 titres, niveaux 1 à 4). Les titres sont lus à l'ouverture, dans le
  * document de l'éditeur, puis groupés à chaque changement. Mesurée et consignée, sans budget à elle :
- * l'ouverture (jusqu'au premier bloc, comme les autres), puis le temps jusqu'à la table remplie ; et,
- * en témoin, la même page sans la table.
+ * l'ouverture (jusqu'au premier bloc, comme les autres), puis ce qui la suit pendant deux secondes
+ * (les images longues, et quand la table est remplie : elle l'est par lots, R566) ; et, en témoin, la
+ * même page sans la table.
  */
 test.describe("table des matières", () => {
   const HEADINGS = 500;
@@ -508,29 +545,23 @@ test.describe("table des matières", () => {
       `MESURE ouverture d'une page jamais vue de 10 000 blocs avec une table des matières (500 titres) : ` +
         `${Math.round(total)} ms (image la plus longue ${Math.round(longestFrame)} ms)`,
     );
-    // Puis la table remplie : ses 500 entrées.
-    const filled = await p.evaluate(
-      (count) =>
-        new Promise<number>((resolve) => {
-          const t0 = performance.now();
-          const check = () => {
-            if (document.querySelectorAll(".mm-editor .mm-toc li").length === count) resolve(performance.now() - t0);
-            else requestAnimationFrame(check);
-          };
-          check();
-        }),
-      HEADINGS,
+    // Puis la table remplie : ses 500 entrées, par lots, sans image longue de plus que le témoin.
+    const after = await afterOpening(p);
+    console.log(
+      `MESURE après l'ouverture, avec la table : ${after.entries} entrées, la dernière ${Math.round(after.filledAfter)} ms ` +
+        `après ; images de plus de 50 ms : ${JSON.stringify(after.longFrames)}`,
     );
-    console.log(`MESURE table des matières de 500 titres remplie ${Math.round(filled)} ms après l'ouverture`);
     expect(await p.locator(".mm-editor .mm-toc li").count()).toBe(HEADINGS);
   });
 
   test("measure_open_10000_block_page_with_the_same_headings_without_a_toc", async ({ browser }) => {
-    const { total, longestFrame } = await openFromTree(browser, withoutToc!);
+    const { total, longestFrame, page: p } = await openFromTree(browser, withoutToc!);
     console.log(
       `MESURE ouverture d'une page jamais vue de 10 000 blocs, les mêmes 500 titres, sans table : ` +
         `${Math.round(total)} ms (image la plus longue ${Math.round(longestFrame)} ms)`,
     );
+    const after = await afterOpening(p);
+    console.log(`MESURE après l'ouverture, sans table : images de plus de 50 ms : ${JSON.stringify(after.longFrames)}`);
   });
 });
 
