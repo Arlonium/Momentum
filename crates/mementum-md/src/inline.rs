@@ -7,7 +7,7 @@ use std::rc::Rc;
 use pulldown_cmark::{Event, Options, Parser, Tag as MdTag, TagEnd};
 
 use crate::attrs::{Raw, Tag, escape_attr, parse_tag, quoted};
-use crate::model::{Inline, MAX_COLOR_BYTES, Styles, normalize_inline};
+use crate::model::{Inline, MAX_COLOR_BYTES, MAX_HREF_BYTES, Styles, normalize_inline};
 use crate::parse::MAX_DEPTH;
 
 const OPTIONS: Options = Options::ENABLE_STRIKETHROUGH.union(Options::ENABLE_MATH);
@@ -334,7 +334,18 @@ impl Reader {
         }
     }
 
+    /// Ouvre un lien. Une adresse de plus de [`MAX_HREF_BYTES`] octets est refusée (Ruling R431),
+    /// comme la garde des mises à jour la refuse dans Yjs.
     fn open_link(&mut self, href: String) {
+        if href.len() > MAX_HREF_BYTES {
+            self.error.get_or_insert_with(|| {
+                format!(
+                    "adresse de lien de {} octets : une adresse s'écrit en {MAX_HREF_BYTES} \
+                     octets au plus",
+                    href.len()
+                )
+            });
+        }
         if self.frames.len() > MAX_DEPTH {
             self.excess_links += 1;
         } else {

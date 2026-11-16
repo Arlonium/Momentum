@@ -241,3 +241,25 @@ fn a_color_longer_than_the_bound_is_refused() {
         rejected(&format!("<callout>\n{span}\n</callout>\n"), 2, &hint);
     }
 }
+
+/// Ruling R431 : l'adresse d'un lien s'écrit en `MAX_HREF_BYTES` octets au plus, en Markdown
+/// comme en balise, comme la garde des mises à jour la borne dans Yjs ; à la borne, elle se relit.
+#[test]
+fn an_href_longer_than_the_bound_is_refused() {
+    use mementum_md::{MAX_HREF_BYTES, RenderOpts, render};
+    let at_bound = "u".repeat(MAX_HREF_BYTES);
+    let over = "u".repeat(MAX_HREF_BYTES + 1);
+    // Une espace finale : l'adresse ne s'écrit plus `[…](…)`, mais en balise.
+    let spaced = "u".repeat(MAX_HREF_BYTES - 1);
+    for ok in [
+        format!("Texte [a]({at_bound})\n"),
+        format!("Texte <a href=\"{spaced} \">a</a>\n"),
+    ] {
+        let blocks = parse(&ok).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(render(&blocks, RenderOpts::default()).markdown, ok);
+    }
+    let hint = format!("{MAX_HREF_BYTES} octets au plus");
+    rejected(&format!("Texte [a]({over})\n"), 1, &hint);
+    rejected(&format!("Un\n\n<a href=\"{over} \">a</a>\n"), 3, &hint);
+    rejected(&format!("| a |\n| --- |\n| [b]({over}) |\n"), 3, &hint);
+}

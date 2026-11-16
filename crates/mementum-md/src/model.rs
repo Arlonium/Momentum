@@ -128,6 +128,14 @@ pub enum Inline {
 /// une couleur plus longue ; `mementum-crdt` la lit absente.
 pub const MAX_COLOR_BYTES: usize = 100;
 
+/// Longueur maximale, en octets, de l'adresse d'un lien (Ruling R431) : `[…](…)` et
+/// `<a href="…">` en MMD, la marque `link` dans Yjs. Une adresse plus longue dépasse ce que les
+/// serveurs HTTP courants acceptent dans une requête (8 Kio par défaut pour Apache et nginx) : elle
+/// ne mène nulle part. La garde des mises à jour de `mementum-crdt` refuse une marque `link` plus
+/// longue, et la relit supprimée du stockage ; [`crate::parse`] refuse une adresse plus longue,
+/// sans quoi un navigateur qui écrirait autour d'un tel lien verrait sa mise à jour refusée.
+pub const MAX_HREF_BYTES: usize = 16 << 10;
+
 /// Marques d'un texte.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Styles {
