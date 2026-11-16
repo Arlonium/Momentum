@@ -374,3 +374,37 @@ test("a_click_that_opens_elsewhere_is_left_to_the_browser", async () => {
     history.replaceState(null, "", location.pathname + location.search + hash);
   }
 });
+
+test("a_long_toc_is_filled_a_few_entries_per_frame", async () => {
+  // Les images sont menées à la main.
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+  vi.stubGlobal("cancelAnimationFrame", (handle: number) => void (frames[handle - 1] = () => {}));
+  const nextFrame = () => act(() => frames.splice(0).forEach((callback) => callback(0)));
+  try {
+    const m = await mountEditor({
+      blocks: [
+        TOC,
+        ...Array.from({ length: 120 }, (_, i) => ({
+          id: `h${i}`,
+          type: "heading" as const,
+          props: { level: 1 as const },
+          content: `Titre ${i}`,
+        })),
+      ],
+    });
+    expect(entries(m)).toHaveLength(50);
+    expect(tocOf(m)!.getAttribute("aria-busy")).toBe("true");
+    nextFrame();
+    expect(entries(m)).toHaveLength(100);
+    nextFrame();
+    expect(texts(m).at(-1)).toBe("Titre 119");
+    expect(entries(m)).toHaveLength(120);
+    expect(tocOf(m)!.getAttribute("aria-busy")).toBe("false");
+    // Remplie, elle n'attend plus d'image.
+    nextFrame();
+    expect(entries(m)).toHaveLength(120);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

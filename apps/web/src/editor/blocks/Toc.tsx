@@ -37,6 +37,9 @@ import { readHeadings, type Heading } from "./headings";
 /** Ce qu'une entrée montre d'un titre très long (le titre entier reste dans la page). */
 const MAX_ENTRY_CHARS = 200;
 
+/** Les entrées qu'une image ajoute à une table qui se remplit. */
+export const ENTRIES_PER_FRAME = 50;
+
 type TocState = {
   /** Les titres lus ; `null` : pas lus depuis que plus aucune table n'est affichée. */
   headings: readonly Heading[] | null;
@@ -182,6 +185,15 @@ function TocView({ editor }: { editor: MementumEditor }) {
   const listed = useDeferredValue<readonly Heading[] | null>(shown, null);
   // Ce qu'elle montre : les entrées rendues (elles suivent les titres lus d'un tour de React).
   const hold = () => setHeld((was) => was ?? listed ?? headings);
+  // Une longue table se remplit par lots, un par image : rendus d'un coup, cinq cents liens en tête
+  // d'une page de 10 000 blocs figeaient l'onglet 280 ms (le calcul de style de Chromium, R566).
+  const [count, setCount] = useState(ENTRIES_PER_FRAME);
+  const total = listed?.length ?? 0;
+  useEffect(() => {
+    if (count >= total) return;
+    const frame = requestAnimationFrame(() => setCount((was) => was + ENTRIES_PER_FRAME));
+    return () => cancelAnimationFrame(frame);
+  }, [count, total]);
   const onFocus = () => {
     inside.current.focus = true;
     hold();
@@ -202,7 +214,7 @@ function TocView({ editor }: { editor: MementumEditor }) {
       ref={nav}
       className="mm-toc"
       aria-label="Table des matières"
-      aria-busy={listed === null}
+      aria-busy={listed === null || count < total}
       contentEditable={false}
       onFocus={onFocus}
       onBlur={onBlur}
@@ -219,7 +231,7 @@ function TocView({ editor }: { editor: MementumEditor }) {
         <p className="mm-toc-empty">Aucun titre dans la page.</p>
       ) : (
         <ol className="mm-toc-list">
-          {listed.map((heading) => (
+          {(count < total ? listed.slice(0, count) : listed).map((heading) => (
             <li key={heading.id} className={`mm-toc-entry mm-toc-level-${heading.level}`} data-level={heading.level}>
               <a className="mm-toc-link" href={`#${heading.id}`} dir="auto" onClick={(event) => follow(event, heading.id)}>
                 {shorten(heading.text, MAX_ENTRY_CHARS)}
