@@ -12,13 +12,23 @@
 //! **Envoyer** (Ruling R247), dans cet ordre : `401` ; `404` pour une page qu'on ne voit pas ;
 //! `403` sous « Peut modifier » ; `409 trashed` ; `422 invalid_request` pour un paramètre `name`
 //! illisible (donné deux fois ; absent, le nom est « fichier ») ; `413 file_too_large` sur
-//! `Content-Length`, avant de rien lire. Puis le corps, brut, lu trame par trame et écrit dans le
+//! `Content-Length`, avant de rien lire. **Un refus fait à un compte** (`403`, `404`, `409`,
+//! `422`), pour un corps annoncé sous la borne, ne part qu'une fois ce corps lu et jeté (au plus la
+//! borne, et jamais plus de `upload_idle` sans un octet) : sinon le serveur fermerait sur des
+//! octets non lus, le système couperait la connexion, et le navigateur, qui envoie son corps sans
+//! attendre, perdrait la réponse (Ruling R505). Le `401` (aucun compte) et le `413` sur
+//! `Content-Length` coupent sans lire : le client doit lire la borne avant d'envoyer, et tenir une
+//! erreur réseau pendant un envoi pour un refus qu'il n'a pas reçu. Sous `Expect: 100-continue`,
+//! rien n'est lu : le refus arrive seul. Puis le corps, brut, lu trame par trame et écrit dans le
 //! dépôt en calculant son hash, jamais gardé en mémoire : `413` dès qu'il dépasse la borne
 //! (`MEMENTUM_MAX_FILE_MB`, 100 Mio par défaut) ; un corps qui ne reçoit plus rien pendant
 //! `upload_idle` (30 s) est abandonné, la connexion fermée **sans réponse**, et c'est journalisé
-//! (Ruling R391). Le corps reçu, la session et les droits sont relus (Rulings R89, R390) : c'est
-//! ce second contrôle qui autorise l'écriture. Le contenu est vidé sur le disque hors de tout
-//! verrou (R286), puis, sous le verrou du dépôt et dans une tâche que l'abandon de la requête
+//! (Ruling R391, en HTTP/1, le seul protocole du serveur : R509). Ce délai borne l'inactivité,
+//! pas la durée : un envoi qui reçoit un octet de temps en temps tient sa connexion (débit et
+//! envois simultanés au lot 7, R247). Le contenu est vidé sur le disque hors de tout verrou
+//! (R286) ; puis, la session et les droits sont relus (Rulings R89, R390) : c'est ce second
+//! contrôle qui autorise l'écriture, et il ne reste après lui que l'attente des verrous (R507).
+//! Puis, sous le verrou du dépôt et dans une tâche que l'abandon de la requête
 //! n'arrête pas (`to_completion`, R285) : il prend sa place (`finish`), puis son attache est
 //! écrite. Si l'attache échoue (la page supprimée entre le second contrôle et l'écriture), un
 //! contenu que cet envoi vient de poser lui-même est retiré aussitôt, sous le même verrou ; un
@@ -36,11 +46,12 @@
 //! montre un fichier « en ligne » que comme sous-ressource d'un bloc image, vidéo ou son. Cache :
 //! `Cache-Control: private, no-cache` et `ETag: "<hash>"`, donc une revalidation, et un contrôle
 //! des droits, à chaque usage ; ces réponses portent la marque [`FileResponse`], seule à échapper
-//! au `no-store` du reste de l'API. `If-None-Match` est jugé avant `Range` (RFC 9110, §13.2.2) :
-//! s'il nomme l'`ETag`, `304`, quelle que soit la plage ; un `If-Range` qui ne nomme pas l'`ETag`
-//! fait ignorer `Range` ; une plage simple est servie (`206`), une plage qui commence après la
-//! fin reçoit `416` et `Content-Range: bytes */<taille>`, deux plages ou un en-tête illisible le
-//! fichier entier (Ruling R392). Le `304` et le `206` portent les mêmes en-têtes que le `200`.
+//! au `no-store` du reste de l'API. `If-None-Match`, toutes ses lignes lues (R508), est jugé
+//! avant `Range` (RFC 9110, §13.2.2) : s'il nomme l'`ETag`, `304`, quelle que soit la plage ; un
+//! `If-Range` qui ne nomme pas l'`ETag` fait ignorer `Range` ; une plage simple est servie
+//! (`206`), une plage qui commence après la fin reçoit `416` et `Content-Range: bytes
+//! */<taille>`, deux plages (sur une ligne ou sur deux, R508) ou un en-tête illisible le fichier
+//! entier (Ruling R392). Le `304` et le `206` portent les mêmes en-têtes que le `200`.
 //! Un contenu que le dépôt n'a plus, ou dont la taille n'est plus celle que la base garde, est
 //! dit « fichier indisponible » (`404`, Ruling R393) : la route n'annonce jamais une taille
 //! qu'elle n'a pas lue sur le fichier ouvert. Le fichier est servi par morceaux de 64 Kio, sans
