@@ -129,13 +129,13 @@ type Opening = {
  * Charge l'application sur la page d'accueil dans un onglet neuf, puis ouvre `target` d'un
  * clic dans l'arbre et mesure l'ouverture dans la page, avec `performance.now()`.
  */
-async function openFromTree(browser: Browser, target: Target): Promise<Opening> {
+async function openFromTree(browser: Browser, target: Target): Promise<Opening & { page: Page }> {
   const p = await budgetTab(browser);
   await p.goto(`/p/${landing}`);
   await waitSynced(p);
   // Application chargée et au repos : seule l'ouverture de la page est mesurée.
   await p.evaluate(() => new Promise((done) => requestIdleCallback(done, { timeout: 2_000 })));
-  return p.evaluate(
+  const opening = await p.evaluate(
     ({ id, first, timeout }) =>
       new Promise<Opening>((resolve, reject) => {
         const link = document.querySelector<HTMLAnchorElement>(`[data-page-id="${id}"] .tree-link`);
@@ -193,6 +193,7 @@ async function openFromTree(browser: Browser, target: Target): Promise<Opening> 
       }),
     { ...target, timeout: 30_000 },
   );
+  return { ...opening, page: p };
 }
 
 /**
@@ -466,6 +467,71 @@ test("open_10000_block_page_under_3s", async ({ browser }) => {
       `(image la plus longue ${Math.round(longestFrame)} ms)`,
   );
   expect(total).toBeLessThan(3_000);
+});
+
+/**
+ * Une page de 10 000 blocs avec une table des matières (Task C3) : un paragraphe, la table, puis un
+ * titre tous les vingt blocs (500 titres, niveaux 1 à 4). Les titres sont lus à l'ouverture, dans le
+ * document de l'éditeur, puis groupés à chaque changement. Mesurée et consignée, sans budget à elle :
+ * l'ouverture (jusqu'au premier bloc, comme les autres), puis le temps jusqu'à la table remplie ; et,
+ * en témoin, la même page sans la table.
+ */
+test.describe("table des matières", () => {
+  const HEADINGS = 500;
+  let withToc: Target | null = null;
+  let withoutToc: Target | null = null;
+
+  test.beforeAll(async ({ playwright }) => {
+    test.setTimeout(180_000);
+    const request = await playwright.request.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      for (const toc of [true, false]) {
+        const tag = unique();
+        const { id } = await createPage(request, { title: `Mesure table des matières ${tag}` });
+        const blocks = Array.from({ length: 10_000 }, (_, i) =>
+          i % 20 === 0 ? `${"#".repeat(((i / 20) % 4) + 1)} Titre ${i / 20 + 1}` : blockText(tag, i + 1),
+        );
+        const head = toc ? [blockText(tag, 0), "<toc/>"] : [blockText(tag, 0)];
+        await putMmd(request, id, `${[...head, ...blocks].join("\n\n")}\n`);
+        if (toc) withToc = { id, first: blockText(tag, 0) };
+        else withoutToc = { id, first: blockText(tag, 0) };
+      }
+    } finally {
+      await request.dispose();
+    }
+    await new Promise((done) => setTimeout(done, SERVER_IDLE_CLOSE_MS + 2_000));
+  });
+
+  test("measure_open_10000_block_page_with_a_toc", async ({ browser }) => {
+    const { total, longestFrame, page: p } = await openFromTree(browser, withToc!);
+    console.log(
+      `MESURE ouverture d'une page jamais vue de 10 000 blocs avec une table des matières (500 titres) : ` +
+        `${Math.round(total)} ms (image la plus longue ${Math.round(longestFrame)} ms)`,
+    );
+    // Puis la table remplie : ses 500 entrées.
+    const filled = await p.evaluate(
+      (count) =>
+        new Promise<number>((resolve) => {
+          const t0 = performance.now();
+          const check = () => {
+            if (document.querySelectorAll(".mm-editor .mm-toc li").length === count) resolve(performance.now() - t0);
+            else requestAnimationFrame(check);
+          };
+          check();
+        }),
+      HEADINGS,
+    );
+    console.log(`MESURE table des matières de 500 titres remplie ${Math.round(filled)} ms après l'ouverture`);
+    expect(await p.locator(".mm-editor .mm-toc li").count()).toBe(HEADINGS);
+  });
+
+  test("measure_open_10000_block_page_with_the_same_headings_without_a_toc", async ({ browser }) => {
+    const { total, longestFrame } = await openFromTree(browser, withoutToc!);
+    console.log(
+      `MESURE ouverture d'une page jamais vue de 10 000 blocs, les mêmes 500 titres, sans table : ` +
+        `${Math.round(total)} ms (image la plus longue ${Math.round(longestFrame)} ms)`,
+    );
+  });
 });
 
 test.describe("arbre de 1 000 pages", () => {
