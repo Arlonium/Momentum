@@ -399,3 +399,107 @@ async fn measure_comments_of_a_full_page() {
     side.close().await;
     read("20 000 réactions de dix comptes").await;
 }
+
+/// Un morceau du corps de l'envoi mesuré : statique, il n'est jamais alloué.
+static UPLOAD_CHUNK: [u8; 64 * 1024] = [42; 64 * 1024];
+
+/// Un corps sans longueur, fait de `left` fois [`UPLOAD_CHUNK`], produit au fil de la lecture.
+struct GeneratedBody {
+    left: usize,
+}
+
+impl http_body::Body for GeneratedBody {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<axum::body::Bytes>, Self::Error>>> {
+        if self.left == 0 {
+            return std::task::Poll::Ready(None);
+        }
+        self.left -= 1;
+        let chunk = axum::body::Bytes::from_static(&UPLOAD_CHUNK);
+        std::task::Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+    }
+}
+
+/// Le budget d'une frappe vue chez un autre (conception §5.10), au p95.
+const TYPING_BUDGET: Duration = Duration::from_millis(150);
+
+/// Task S4a (Ruling R247 : le dépôt s'écrit en `async`, sans appel bloquant sur les fils qui
+/// relaient les frappes) : pendant l'envoi d'un fichier de 100 Mio dans une page (la borne par
+/// défaut), un client tape dans une autre page, et chaque frappe est chronométrée jusqu'à ce
+/// qu'un autre client de cette page l'ait reçue ; p95 sous 150 ms. La durée de l'envoi est
+/// consignée. L'envoi passe par l'application en mémoire, la synchro par une vraie connexion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_keystrokes_during_a_100_mib_upload() {
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use common::sync::text;
+    use common::{sync_url, synced_as, upload_uri};
+    use tower::ServiceExt;
+
+    let t = TestApp::with_config(|cfg| cfg.signup = SignupMode::Open).await;
+    let addr = t.listen().await;
+    let alice = t.account("Alice").await;
+    let typed = alice.create(json!({ "title": "Frappes" })).await.id;
+    alice
+        .put_mmd(&typed, "Texte\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let url = sync_url(addr, &typed);
+    let (author, other) = (
+        synced_as(&alice.browser, &url).await,
+        synced_as(&alice.browser, &url).await,
+    );
+    let block = author.blocks()[0].id.clone();
+    let target = alice.create(json!({ "title": "Fichier" })).await.id;
+    let target = uuid::Uuid::parse_str(&target).unwrap();
+    let chunks = (100 << 20) / UPLOAD_CHUNK.len();
+    let request = Request::post(upload_uri(target, "gros.bin"))
+        .header(header::HOST, "localhost")
+        .header(header::COOKIE, alice.browser.cookie().unwrap())
+        .body(Body::new(GeneratedBody { left: chunks }))
+        .unwrap();
+    let router = t.router.clone();
+    let upload = tokio::spawn(async move {
+        let start = Instant::now();
+        let response = router.oneshot(request).await.unwrap();
+        (response.status(), start.elapsed())
+    });
+
+    let mut times = Vec::new();
+    while !upload.is_finished() {
+        let start = Instant::now();
+        author.type_text(&block, "x");
+        let expected = text(&author);
+        assert!(
+            other
+                .wait_until(Duration::from_secs(60), |c| text(c) == expected)
+                .await,
+            "la frappe n'est pas arrivée"
+        );
+        times.push(start.elapsed());
+    }
+    let (status, took) = upload.await.unwrap();
+    assert_eq!(status, StatusCode::CREATED);
+    println!(
+        "MESURE envoi d'un fichier de 100 Mio : {:.0} ms",
+        took.as_secs_f64() * 1000.0
+    );
+    assert!(!times.is_empty(), "aucune frappe pendant l'envoi");
+    let mut sorted = times.clone();
+    sorted.sort();
+    let p95 = sorted[(sorted.len() * 95).div_ceil(100).max(1) - 1];
+    report(
+        "frappe vue par un autre client pendant l'envoi de 100 Mio",
+        times,
+    );
+    assert!(
+        p95 < TYPING_BUDGET,
+        "frappe pendant l'envoi : p95 {p95:?} (budget {TYPING_BUDGET:?})"
+    );
+}

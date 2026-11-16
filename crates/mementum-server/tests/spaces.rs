@@ -1302,10 +1302,7 @@ async fn invitation_token_is_shown_once() {
         .await,
         1
     );
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(&t.cfg.data_dir).unwrap() {
-        files.extend(std::fs::read(entry.unwrap().path()).unwrap());
-    }
+    let files = common::data_bytes(&t.cfg.data_dir);
     assert!(
         !files
             .windows(token.len())

@@ -11,6 +11,8 @@ export type { CreateSpace } from "./CreateSpace";
 export type { ErrorBody } from "./ErrorBody";
 export type { ErrorCode } from "./ErrorCode";
 export type { Favorites } from "./Favorites";
+export type { FileInfo } from "./FileInfo";
+export type { FileLimits } from "./FileLimits";
 export type { Info } from "./Info";
 export type { InvitationCreated } from "./InvitationCreated";
 export type { InvitationInfo } from "./InvitationInfo";

@@ -175,9 +175,6 @@ pub mod auth;
 pub mod config;
 mod error;
 mod events;
-// Le dépôt des fichiers (Task S3) n'a encore d'appelant que ses tests : la Task S4a le branche
-// sur les routes, et retire cet attribut.
-#[cfg_attr(not(test), allow(dead_code))]
 mod files;
 mod guard;
 mod inputs_cache;
@@ -189,6 +186,7 @@ mod routes {
     pub(crate) mod comments;
     pub(crate) mod events;
     pub(crate) mod favorites;
+    pub(crate) mod files;
     pub(crate) mod info;
     pub(crate) mod invitations;
     pub(crate) mod pages;
@@ -265,6 +263,12 @@ pub(crate) struct AppState {
     /// Une écriture du serveur à la fois par page : `PUT /mmd` et la restauration d'une
     /// version (`page_writes.rs`, Ruling R200).
     page_writes: Arc<page_writes::PageWrites>,
+    /// Le dépôt des fichiers envoyés dans les pages (`files.rs`, Ruling R244).
+    files: Arc<files::FileStore>,
+    /// Octets au plus par fichier envoyé (`MEMENTUM_MAX_FILE_MB`, Ruling R247).
+    max_file_bytes: u64,
+    /// Un envoi qui ne reçoit plus rien pendant ce délai est abandonné (Ruling R247).
+    upload_idle: Duration,
 }
 
 /// Millisecondes Unix.
@@ -369,6 +373,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
             tracing::warn!(path = %backup.path.display(), "{warning}");
         }
     }
+    let files = open_files(cfg, &store).await?;
     let expired = store
         .purge_sessions(now_ms())
         .await
@@ -413,8 +418,56 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
         )),
         events_ping: cfg.events_ping,
         page_writes: Arc::default(),
+        files: Arc::new(files),
+        max_file_bytes: cfg.max_file_bytes,
+        upload_idle: cfg.upload_idle,
     };
     Ok((router(state), store, hub))
+}
+
+/// Ouvre le dépôt des fichiers du dossier des données, ce que seul le démarrage du serveur fait :
+/// il vide `files/tmp`, où un serveur qui tourne écrit ses envois en cours. Puis le journal dit,
+/// en avertissement, les contenus du dépôt que la base ne connaît pas, **sans en supprimer
+/// aucun** (Ruling R245 : une base revenue en arrière les nomme peut-être encore), et les
+/// contenus que la base connaît et que le dépôt n'a plus. Un dépôt qui ne s'ouvre pas arrête le
+/// démarrage ; un compte qui ne se fait pas, non (R279).
+async fn open_files(cfg: &Config, store: &Store) -> anyhow::Result<files::FileStore> {
+    let files = files::FileStore::open(&cfg.data_dir).with_context(|| {
+        format!(
+            "impossible d'ouvrir le dépôt des fichiers {}",
+            cfg.data_dir.join(files::FILES_DIR).display()
+        )
+    })?;
+    let known = store
+        .known_files()
+        .await
+        .context("lecture des fichiers que la base connaît")?;
+    match files.strangers(&known) {
+        Ok((0, _)) => {}
+        Ok((count, bytes)) => tracing::warn!(
+            count,
+            bytes,
+            "contenus du dépôt des fichiers que la base ne connaît pas : ils restent sur le \
+             disque, aucun n'est supprimé au démarrage (un envoi coupé entre la pose et \
+             l'attache, ou une base revenue en arrière qui les nommait) ; renvoyé, un tel contenu \
+             est repris tel quel"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            "dépôt des fichiers illisible : les contenus que la base ne connaît pas n'ont pas été \
+             comptés"
+        ),
+    }
+    let missing = files.missing(&known);
+    if missing > 0 {
+        tracing::warn!(
+            missing,
+            "fichiers que la base connaît et que le dépôt n'a plus : ils sont dits indisponibles \
+             à qui les ouvre (base restaurée sans son dossier files/, ou coupure de courant juste \
+             après un envoi)"
+        );
+    }
+    Ok(files)
 }
 
 fn router(state: AppState) -> Router {
@@ -490,6 +543,17 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/v1/pages/{id}/comments/{thread_id}/messages/{comment_id}/reactions/{emoji}",
             put(comments::react).delete(comments::unreact),
+        )
+        .route("/api/v1/files/limits", get(routes::files::limits))
+        .route(
+            "/api/v1/pages/{id}/files",
+            // Le corps est le fichier : la borne de 2 Mio des autres corps n'y vaut pas (la route
+            // lit le corps elle-même, sous la sienne, `MEMENTUM_MAX_FILE_MB`).
+            post(routes::files::upload).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/v1/pages/{id}/files/{file_id}",
+            get(routes::files::download),
         )
         .route("/api/v1/pages/{id}/versions", get(versions::list))
         .route(

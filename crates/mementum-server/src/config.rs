@@ -1,5 +1,6 @@
 //! Configuration du serveur : adresse d'écoute, dossier des données,
-//! inscriptions, adresse publique et intervalle des versions.
+//! inscriptions, adresse publique, intervalle des versions et taille d'un
+//! fichier envoyé.
 //!
 //! | Réglage | Variable | Option de `mementum serve` | Défaut |
 //! |---|---|---|---|
@@ -8,11 +9,13 @@
 //! | inscriptions | `MEMENTUM_SIGNUP` | `--signup` | `invite` |
 //! | adresse publique | `MEMENTUM_PUBLIC_URL` | `--public-url` | aucune |
 //! | intervalle des versions d'une page, en secondes (1 au moins) | `MEMENTUM_VERSION_EVERY_SECS` | `--version-every-secs` | `600` |
+//! | taille la plus grande d'un fichier envoyé, en Mio (de 1 à 4 096) | `MEMENTUM_MAX_FILE_MB` | `--max-file-mb` | `100` |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
-//! l'emporte sur le défaut. Un dernier réglage n'a ni variable ni option :
-//! l'intervalle des pings du canal de l'espace ([`Config::events_ping`]), que
-//! seuls les tests raccourcissent.
+//! l'emporte sur le défaut. Deux derniers réglages n'ont ni variable ni
+//! option : l'intervalle des pings du canal de l'espace
+//! ([`Config::events_ping`]) et le délai d'un envoi de fichier qui stagne
+//! ([`Config::upload_idle`]), que seuls les tests raccourcissent.
 //!
 //! Le serveur n'écoute jamais par défaut sur une autre interface que la
 //! boucle locale, et les inscriptions sont par défaut sur invitation (Ruling
@@ -56,6 +59,21 @@ pub const VERSION_EVERY_VAR: &str = "MEMENTUM_VERSION_EVERY_SECS";
 /// Option de `mementum serve` de l'intervalle des versions, telle que les messages la nomment.
 const VERSION_EVERY_OPTION: &str = "--version-every-secs";
 
+/// Variable d'environnement de la borne d'un fichier envoyé, en Mio.
+pub const MAX_FILE_MB_VAR: &str = "MEMENTUM_MAX_FILE_MB";
+
+/// Option de `mementum serve` de la borne d'un fichier, telle que les messages la nomment.
+const MAX_FILE_MB_OPTION: &str = "--max-file-mb";
+
+/// La borne d'un fichier envoyé par défaut, en Mio (Ruling R247).
+pub const DEFAULT_MAX_FILE_MB: u64 = 100;
+
+/// La plus haute borne qu'on peut donner à un fichier, en Mio (Ruling R247).
+pub const MAX_MAX_FILE_MB: u64 = 4096;
+
+/// Le délai au-delà duquel un envoi qui ne reçoit plus rien est abandonné (Ruling R247).
+pub const UPLOAD_IDLE: Duration = Duration::from_secs(30);
+
 /// Ce qu'on attend d'une adresse publique, pour les messages d'erreur.
 const PUBLIC_URL_HINT: &str = "attendu une adresse comme https://notes.exemple.fr";
 
@@ -85,6 +103,13 @@ pub struct Config {
     /// l'écriture qui suit de ce délai la première écriture non versionnée. Dix minutes par
     /// défaut ([`VERSION_EVERY`]), une seconde au moins.
     pub version_every: Duration,
+    /// Octets au plus par fichier envoyé (Ruling R247) : [`DEFAULT_MAX_FILE_MB`] Mio par défaut,
+    /// de 1 à [`MAX_MAX_FILE_MB`] Mio.
+    pub max_file_bytes: u64,
+    /// Un envoi de fichier qui ne reçoit aucun octet pendant ce délai est abandonné, sa
+    /// connexion fermée sans réponse (Ruling R247) : [`UPLOAD_IDLE`] par défaut. Ni variable ni
+    /// option : seuls les tests le raccourcissent.
+    pub upload_idle: Duration,
 }
 
 impl Default for Config {
@@ -96,6 +121,8 @@ impl Default for Config {
             public_url: None,
             events_ping: EVENTS_PING,
             version_every: VERSION_EVERY,
+            max_file_bytes: DEFAULT_MAX_FILE_MB << 20,
+            upload_idle: UPLOAD_IDLE,
         }
     }
 }
@@ -104,21 +131,22 @@ impl Config {
     /// Les défauts, remplacés par les variables `MEMENTUM_*` qui sont posées
     /// (une variable vide compte comme absente).
     pub fn from_env() -> anyhow::Result<Config> {
-        Config::from_args(None, None, None, None, None)
+        Config::from_args(None, None, None, None, None, None)
     }
 
     /// Les options de la ligne de commande d'abord, puis les variables
     /// d'environnement, puis les défauts. Une variable n'est lue que si
     /// l'option manque : un `MEMENTUM_BIND` invalide n'empêche pas un
-    /// `--bind` valide. `version_every_secs` est le texte de l'option
-    /// `--version-every-secs`, relu ici comme la variable, pour que les deux
-    /// soient refusés de la même façon.
+    /// `--bind` valide. `version_every_secs` et `max_file_mb` sont les textes
+    /// des options `--version-every-secs` et `--max-file-mb`, relus ici comme
+    /// leurs variables, pour que les deux soient refusés de la même façon.
     pub fn from_args(
         bind: Option<SocketAddr>,
         data_dir: Option<PathBuf>,
         signup: Option<SignupMode>,
         public_url: Option<String>,
         version_every_secs: Option<String>,
+        max_file_mb: Option<String>,
     ) -> anyhow::Result<Config> {
         Config::resolve(
             bind,
@@ -126,6 +154,7 @@ impl Config {
             signup,
             public_url,
             version_every_secs,
+            max_file_mb,
             |name| std::env::var_os(name),
         )
     }
@@ -137,6 +166,7 @@ impl Config {
         signup: Option<SignupMode>,
         public_url: Option<String>,
         version_every_secs: Option<String>,
+        max_file_mb: Option<String>,
         var: impl Fn(&str) -> Option<OsString>,
     ) -> anyhow::Result<Config> {
         let bind = match bind {
@@ -177,6 +207,13 @@ impl Config {
                 None => VERSION_EVERY,
             },
         };
+        let max_file_mb = match max_file_mb {
+            Some(raw) => parse_max_file_mb(OsStr::new(&raw), MAX_FILE_MB_OPTION)?,
+            None => match set(&var, MAX_FILE_MB_VAR) {
+                Some(raw) => parse_max_file_mb(&raw, MAX_FILE_MB_VAR)?,
+                None => DEFAULT_MAX_FILE_MB,
+            },
+        };
         Ok(Config {
             bind,
             data_dir: resolve_data_dir(data_dir, &var),
@@ -184,6 +221,8 @@ impl Config {
             public_url,
             events_ping: EVENTS_PING,
             version_every,
+            max_file_bytes: max_file_mb << 20,
+            upload_idle: UPLOAD_IDLE,
         })
     }
 
@@ -265,6 +304,22 @@ fn parse_version_every(raw: &OsStr, name: &str) -> anyhow::Result<Duration> {
         })
 }
 
+/// La borne d'un fichier, lue dans la variable ou l'option `name` : un nombre entier de Mio,
+/// espaces de bord admises, de 1 à [`MAX_MAX_FILE_MB`].
+fn parse_max_file_mb(raw: &OsStr, name: &str) -> anyhow::Result<u64> {
+    raw.to_str()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|mb| (1..=MAX_MAX_FILE_MB).contains(mb))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{name} invalide (« {} ») : attendu un nombre entier de Mio, de 1 à \
+                 {MAX_MAX_FILE_MB} ({DEFAULT_MAX_FILE_MB} par défaut : la taille la plus grande \
+                 d'un fichier envoyé dans une page)",
+                raw.to_string_lossy()
+            )
+        })
+}
+
 /// `MEMENTUM_SIGNUP`.
 fn parse_signup(raw: &OsStr) -> anyhow::Result<SignupMode> {
     raw.to_str()
@@ -292,7 +347,7 @@ mod tests {
 
     #[test]
     fn defaults_listen_on_loopback_only() {
-        let cfg = Config::resolve(None, None, None, None, None, vars(&[])).unwrap();
+        let cfg = Config::resolve(None, None, None, None, None, None, vars(&[])).unwrap();
         assert_eq!(cfg, Config::default());
         assert_eq!(cfg.bind.to_string(), "127.0.0.1:8080");
         assert!(cfg.bind.ip().is_loopback());
@@ -306,6 +361,7 @@ mod tests {
     #[test]
     fn variables_replace_defaults() {
         let cfg = Config::resolve(
+            None,
             None,
             None,
             None,
@@ -332,7 +388,7 @@ mod tests {
             ("MEMENTUM_PUBLIC_URL", "  "),
         ]);
         assert_eq!(
-            Config::resolve(None, None, None, None, None, empty).unwrap(),
+            Config::resolve(None, None, None, None, None, None, empty).unwrap(),
             Config::default()
         );
     }
@@ -353,6 +409,7 @@ mod tests {
             Some(SignupMode::Open),
             Some("http://192.168.1.10:8080".to_string()),
             None,
+            None,
             env,
         )
         .unwrap();
@@ -365,7 +422,7 @@ mod tests {
     #[test]
     fn invalid_bind_is_an_error_in_french() {
         let env = vars(&[("MEMENTUM_BIND", "localhost")]);
-        let err = Config::resolve(None, None, None, None, None, env).unwrap_err();
+        let err = Config::resolve(None, None, None, None, None, None, env).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("MEMENTUM_BIND invalide"), "{message}");
         assert!(message.contains("localhost"), "{message}");
@@ -376,7 +433,8 @@ mod tests {
     fn invalid_signup_is_an_error_in_french() {
         for raw in ["ouvert", "OPEN", "open,invite"] {
             let pairs = [("MEMENTUM_SIGNUP", raw)];
-            let err = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap_err();
+            let err =
+                Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap_err();
             let message = format!("{err:#}");
             assert!(message.contains("MEMENTUM_SIGNUP invalide"), "{message}");
             assert!(message.contains(raw), "{message}");
@@ -394,13 +452,14 @@ mod tests {
             "/chemin",
         ] {
             let pairs = [("MEMENTUM_PUBLIC_URL", raw)];
-            let err = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap_err();
+            let err =
+                Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap_err();
             let message = format!("{err:#}");
             assert!(message.contains("adresse publique invalide"), "{message}");
             assert!(message.contains("https://notes.exemple.fr"), "{message}");
             // La même adresse en option est refusée de même.
             let option = Some(raw.to_string());
-            assert!(Config::resolve(None, None, None, option, None, vars(&[])).is_err());
+            assert!(Config::resolve(None, None, None, option, None, None, vars(&[])).is_err());
         }
     }
 
@@ -432,19 +491,19 @@ mod tests {
     /// en secondes entières (espaces de bord admises), une au moins.
     #[test]
     fn version_interval_comes_from_the_option_then_the_variable() {
-        let none = Config::resolve(None, None, None, None, None, vars(&[])).unwrap();
+        let none = Config::resolve(None, None, None, None, None, None, vars(&[])).unwrap();
         assert_eq!(none.version_every, Duration::from_secs(600));
         let pairs = [("MEMENTUM_VERSION_EVERY_SECS", " 30 ")];
-        let variable = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap();
+        let variable = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
         assert_eq!(variable.version_every, Duration::from_secs(30));
         // Vide : comme absente.
         let pairs = [("MEMENTUM_VERSION_EVERY_SECS", " ")];
-        let empty = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap();
+        let empty = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
         assert_eq!(empty.version_every, Duration::from_secs(600));
         // L'option l'emporte, et une variable invalide ne l'empêche pas.
         let pairs = [("MEMENTUM_VERSION_EVERY_SECS", "nimporte")];
         let option = Some("1".to_string());
-        let cfg = Config::resolve(None, None, None, None, option, vars(&pairs)).unwrap();
+        let cfg = Config::resolve(None, None, None, None, option, None, vars(&pairs)).unwrap();
         assert_eq!(cfg.version_every, Duration::from_secs(1));
     }
 
@@ -454,7 +513,8 @@ mod tests {
     fn invalid_version_interval_is_refused_naming_it() {
         for raw in ["0", "-5", "dix", "1.5", "600s", "99999999999999999999999"] {
             let pairs = [("MEMENTUM_VERSION_EVERY_SECS", raw)];
-            let err = Config::resolve(None, None, None, None, None, vars(&pairs)).unwrap_err();
+            let err =
+                Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap_err();
             let message = format!("{err:#}");
             assert!(
                 message.contains("MEMENTUM_VERSION_EVERY_SECS invalide"),
@@ -463,13 +523,70 @@ mod tests {
             assert!(message.contains(raw), "{message}");
             assert!(message.contains("1 au moins"), "{message}");
             let option = Some(raw.to_string());
-            let err = Config::resolve(None, None, None, None, option, vars(&[])).unwrap_err();
+            let err = Config::resolve(None, None, None, None, option, None, vars(&[])).unwrap_err();
             let message = format!("{err:#}");
             assert!(
                 message.contains("--version-every-secs invalide"),
                 "{message}"
             );
             assert!(message.contains(raw), "{message}");
+        }
+    }
+
+    /// La borne d'un fichier : 100 Mio par défaut ; sinon l'option, puis la variable, en Mio
+    /// entiers (espaces de bord admises), de 1 à 4 096. Le délai d'un envoi qui stagne n'a ni
+    /// variable ni option : 30 s.
+    #[test]
+    fn file_bound_comes_from_the_option_then_the_variable() {
+        let none = Config::resolve(None, None, None, None, None, None, vars(&[])).unwrap();
+        assert_eq!(none.max_file_bytes, 100 << 20);
+        assert_eq!(none.upload_idle, Duration::from_secs(30));
+        let pairs = [("MEMENTUM_MAX_FILE_MB", " 1 ")];
+        let variable = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
+        assert_eq!(variable.max_file_bytes, 1 << 20);
+        let pairs = [("MEMENTUM_MAX_FILE_MB", "4096")];
+        let most = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
+        assert_eq!(most.max_file_bytes, 4096 << 20);
+        // Vide : comme absente.
+        let pairs = [("MEMENTUM_MAX_FILE_MB", " ")];
+        let empty = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
+        assert_eq!(empty.max_file_bytes, 100 << 20);
+        // L'option l'emporte, et une variable invalide ne l'empêche pas.
+        let pairs = [("MEMENTUM_MAX_FILE_MB", "nimporte")];
+        let option = Some("2".to_string());
+        let cfg = Config::resolve(None, None, None, None, None, option, vars(&pairs)).unwrap();
+        assert_eq!(cfg.max_file_bytes, 2 << 20);
+    }
+
+    /// Une borne qui n'est pas un nombre entier de Mio, de 1 à 4 096, arrête le démarrage en
+    /// nommant le réglage et la valeur, en français.
+    #[test]
+    fn invalid_file_bound_is_refused_naming_it() {
+        for raw in [
+            "0",
+            "4097",
+            "nimporte",
+            "-1",
+            "1.5",
+            "100M",
+            "99999999999999999999999",
+        ] {
+            let pairs = [("MEMENTUM_MAX_FILE_MB", raw)];
+            let err =
+                Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&format!("MEMENTUM_MAX_FILE_MB invalide (« {raw} »)")),
+                "{message}"
+            );
+            assert!(message.contains("de 1 à 4096"), "{message}");
+            let option = Some(raw.to_string());
+            let err = Config::resolve(None, None, None, None, None, option, vars(&[])).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&format!("--max-file-mb invalide (« {raw} »)")),
+                "{message}"
+            );
         }
     }
 
@@ -489,7 +606,7 @@ mod tests {
         };
         assert!(raw.to_str().is_none(), "pas de l'UTF-8");
         let expected = PathBuf::from(&raw);
-        let cfg = Config::resolve(None, None, None, None, None, move |name| {
+        let cfg = Config::resolve(None, None, None, None, None, None, move |name| {
             (name == DATA_DIR_VAR).then(|| raw.clone())
         })
         .unwrap();

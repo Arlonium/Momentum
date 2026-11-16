@@ -72,6 +72,38 @@ pub struct Favorites {
     pub pages: Vec<String>,
 }
 
+/// Un fichier envoyé dans une page (`POST /api/v1/pages/{id}/files`, Rulings R245 à R247) : une
+/// attache de la page, qui nomme un contenu gardé sous son SHA-256.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileInfo {
+    /// L'identifiant de l'attache.
+    pub id: String,
+    /// L'adresse du fichier, relative à l'instance : `/api/v1/pages/<page>/files/<id>`, à mettre
+    /// dans la prop `url` du bloc (Ruling R248). Elle se lit avec « Peut lire » sur la page.
+    pub url: String,
+    /// Le nom d'affichage, nettoyé par le serveur : un libellé, jamais un chemin (255 caractères
+    /// au plus, l'extension gardée, « fichier » s'il ne montre rien).
+    pub name: String,
+    /// Octets du contenu.
+    #[ts(type = "number")]
+    pub size: i64,
+    /// Le type du contenu, lu par le serveur dans ses premiers octets (Ruling R246) :
+    /// `image/png`, `video/mp4`… ou `application/octet-stream` pour tout ce que sa table ne
+    /// connaît pas. Le type que le navigateur déclare n'est jamais lu.
+    pub mime: String,
+}
+
+/// Les bornes d'un envoi de fichier (`GET /api/v1/files/limits`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileLimits {
+    /// Octets au plus par fichier (`MEMENTUM_MAX_FILE_MB`, 100 Mio par défaut) : au-delà,
+    /// l'envoi est refusé (`413 file_too_large`).
+    #[ts(type = "number")]
+    pub max_file_bytes: u64,
+}
+
 /// Version du serveur et de son schéma de blocs (`GET /api/v1/info`). Un
 /// client d'un autre schéma passe en lecture seule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -809,6 +841,13 @@ pub enum ErrorCode {
     /// messages ou de 1 Mio de texte sur la page (Ruling R358) ; le message dit lequel : rien
     /// n'est écrit. Statut 409.
     PageCommentLimit,
+    /// Fichier plus gros que la borne de l'instance (`MEMENTUM_MAX_FILE_MB`, 100 Mio par défaut),
+    /// refusé sur `Content-Length` avant d'être lu, ou en cours de lecture : rien n'est gardé.
+    /// Statut 413.
+    FileTooLarge,
+    /// Plage (`Range`) qui commence au-delà de la fin du fichier ; l'en-tête `Content-Range`
+    /// donne sa taille (`bytes */<taille>`). Statut 416.
+    RangeNotSatisfiable,
 }
 
 /// Corps de toute réponse d'erreur.
@@ -865,6 +904,8 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<ErrorBody>(&cfg),
         file::<ErrorCode>(&cfg),
         file::<Favorites>(&cfg),
+        file::<FileInfo>(&cfg),
+        file::<FileLimits>(&cfg),
         file::<Info>(&cfg),
         file::<InvitationCreated>(&cfg),
         file::<InvitationInfo>(&cfg),

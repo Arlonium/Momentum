@@ -462,6 +462,65 @@ impl ApiError {
         )
     }
 
+    /// `413 file_too_large` : un fichier de plus de `max` octets (la borne de l'instance,
+    /// `MEMENTUM_MAX_FILE_MB`), refusé sur `Content-Length` ou en cours de lecture.
+    pub fn file_too_large(max: u64) -> ApiError {
+        const MEBIBYTE: u64 = 1 << 20;
+        let bound = if max.is_multiple_of(MEBIBYTE) {
+            format!("{} Mio", max / MEBIBYTE)
+        } else {
+            format!("{max} octets")
+        };
+        ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorCode::FileTooLarge,
+            format!(
+                "fichier trop gros : {bound} au plus sur cette instance (réglage \
+                 MEMENTUM_MAX_FILE_MB) ; rien n'a été gardé"
+            ),
+        )
+    }
+
+    /// `416 range_not_satisfiable` : la plage demandée commence après la fin du fichier. La
+    /// route y joint `Content-Range: bytes */<taille>`.
+    pub fn range_not_satisfiable() -> ApiError {
+        ApiError::new(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            ErrorCode::RangeNotSatisfiable,
+            "plage hors du fichier : sa taille est dans l'en-tête Content-Range",
+        )
+    }
+
+    /// `404 not_found` : le fichier est bien de la page, mais le serveur n'a plus son contenu, ou
+    /// pas entier (Ruling R393). Pour qui lit la page seulement : les autres reçoivent la réponse
+    /// d'une page introuvable. Rien du serveur n'y est nommé.
+    pub fn file_unavailable() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "fichier indisponible : son contenu n'est plus sur le serveur, ou plus entier ; il \
+             faut l'envoyer de nouveau",
+        )
+    }
+
+    /// `422 invalid_request` : le paramètre `name` d'un envoi ne se lit pas (donné deux fois).
+    pub fn invalid_file_name() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "paramètre name illisible : un seul nom de fichier, encodé dans l'adresse",
+        )
+    }
+
+    /// `400 invalid_request` : le corps d'un envoi s'est interrompu avant sa fin.
+    pub fn interrupted_upload() -> ApiError {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "envoi interrompu avant la fin du fichier : rien n'a été gardé",
+        )
+    }
+
     /// `500 internal` : le détail va dans le journal, pas dans la réponse.
     pub fn internal(error: &dyn std::fmt::Display) -> ApiError {
         tracing::error!(%error, "erreur interne");

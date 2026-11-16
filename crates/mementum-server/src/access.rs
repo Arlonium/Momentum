@@ -461,6 +461,9 @@ pub(crate) mod tests {
             inputs: Arc::new(InputsCache::new(INPUTS_CACHE_UNITS)),
             events_ping: crate::EVENTS_PING,
             page_writes: Arc::default(),
+            files: Arc::new(crate::files::FileStore::open(dir.path()).unwrap()),
+            max_file_bytes: crate::config::DEFAULT_MAX_FILE_MB << 20,
+            upload_idle: crate::config::UPLOAD_IDLE,
         }
     }
 

@@ -490,3 +490,46 @@ fn invalid_version_interval_stops_startup() {
     );
     assert_eq!(server.http("GET", "/health", None), (200, "ok".to_string()));
 }
+
+/// La taille la plus grande d'un fichier envoyé (`--max-file-mb`, `MEMENTUM_MAX_FILE_MB`) : une
+/// valeur refusée arrête le démarrage en nommant le réglage et la valeur, en français ; une option
+/// valide l'emporte sur une variable invalide, et la route des bornes la dit.
+#[test]
+fn file_bound_option_sets_the_limit_and_refuses_what_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("donnees");
+    /// Les options de `serve`, les variables d'environnement, et ce que l'erreur doit dire.
+    type Case<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)], &'a str);
+    let cases: [Case; 2] = [
+        (
+            &["--max-file-mb", "0"],
+            &[],
+            "--max-file-mb invalide (« 0 »)",
+        ),
+        (
+            &[],
+            &[("MEMENTUM_MAX_FILE_MB", "4097")],
+            "MEMENTUM_MAX_FILE_MB invalide (« 4097 »)",
+        ),
+    ];
+    for (args, vars, expected) in cases {
+        let stderr = refused_start(&data, args, vars);
+        assert!(
+            stderr.contains(expected),
+            "« {expected} » attendu : {stderr}"
+        );
+        assert!(stderr.contains("de 1 à 4096"), "{stderr}");
+    }
+    let server = Server::start_with_args(
+        &data,
+        &["--max-file-mb", "1"],
+        &[("MEMENTUM_MAX_FILE_MB", "nimporte")],
+    );
+    let cookie = sign_up_alice(&server);
+    let reply = server.request("GET", "/api/v1/files/limits", None, &[("Cookie", &cookie)]);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reply.body).unwrap(),
+        json!({ "maxFileBytes": 1_048_576 })
+    );
+}

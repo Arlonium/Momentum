@@ -145,17 +145,29 @@ pub(crate) async fn check(State(state): State<AppState>, request: Request, next:
     next.run(request).await
 }
 
+/// La marque d'un fichier servi (`routes/files.rs` : un `200`, un `206` ou un `304`), posée dans
+/// les extensions de sa réponse : [`api_headers`] lui laisse son `Cache-Control`
+/// (`private, no-cache`, Ruling R246). C'est la marque qui décide, jamais la présence d'un
+/// `Cache-Control` : une autre route qui en poserait un par mégarde repart en `no-store`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FileResponse;
+
 /// Couche la plus extérieure : toute réponse de l'API (`/api/…`), réussite ou refus, ceux de
 /// [`check`] compris, porte `Cache-Control: no-store` et `X-Content-Type-Options: nosniff`.
 /// Défense en profondeur : une réponse peut porter un jeton d'invitation, des adresses ou le
 /// contenu d'une page, qu'aucun cache ne doit garder, et dont aucun navigateur ne doit deviner
-/// un autre type que celui annoncé.
+/// un autre type que celui annoncé. Seul un fichier servi, marqué [`FileResponse`], garde son
+/// propre `Cache-Control` (`private, no-cache` : revalidé à chaque usage, donc jugé sur les
+/// droits du moment, Ruling R246) ; ses refus, eux, ne sont pas marqués.
 pub(crate) async fn api_headers(request: Request, next: Next) -> Response {
     let api = request.uri().path().starts_with("/api/");
     let mut response = next.run(request).await;
     if api {
+        let served_file = response.extensions().get::<FileResponse>().is_some();
         let headers = response.headers_mut();
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        if !served_file {
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        }
         headers.insert(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -203,6 +215,53 @@ pub(crate) fn bad_origin() -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Seule une réponse marquée [`FileResponse`] (un fichier servi) garde le `Cache-Control`
+    /// qu'elle pose ; toute autre réponse de l'API repart en `no-store`, même si sa route en
+    /// posait un par mégarde. Les deux portent `nosniff`.
+    #[tokio::test]
+    async fn only_a_served_file_escapes_no_store() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route(
+                "/api/v1/fichier",
+                get(async || {
+                    let mut response =
+                        ([(header::CACHE_CONTROL, "private, no-cache")], "octets").into_response();
+                    response.extensions_mut().insert(FileResponse);
+                    response
+                }),
+            )
+            .route(
+                "/api/v1/autre",
+                get(async || ([(header::CACHE_CONTROL, "max-age=60")], "{}")),
+            )
+            .layer(axum::middleware::from_fn(api_headers));
+        for (uri, cache) in [
+            ("/api/v1/fichier", "private, no-cache"),
+            ("/api/v1/autre", "no-store"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let values: Vec<_> = response
+                .headers()
+                .get_all(header::CACHE_CONTROL)
+                .iter()
+                .collect();
+            assert_eq!(values, [cache], "{uri}");
+            assert_eq!(
+                response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+        }
+    }
 
     #[test]
     fn loopback_authorities() {

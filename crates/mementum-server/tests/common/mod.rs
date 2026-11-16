@@ -835,6 +835,8 @@ pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
     .chain(version_routes(id, SOME_VERSION))
     // Le favori du compte sur la page (`routes/favorites.rs`).
     .chain(favorite_routes(id))
+    // Les fichiers de la page (`routes/files.rs`), sur un fichier quelconque.
+    .chain(file_routes(id, SOME_FILE))
     .collect()
 }
 
@@ -851,6 +853,46 @@ pub fn favorite_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
     vec![
         ("PUT favori", bare(Method::PUT)),
         ("DELETE favori", bare(Method::DELETE)),
+    ]
+}
+
+/// Une requête sur chaque route des fichiers de la page `id`, celles qui nomment un fichier sur
+/// `file` : l'envoi (avec et sans nom, annoncé trop gros), la lecture (simple, d'une plage, une
+/// revalidation) et un fichier mal nommé : `(nom, requête)`.
+pub fn file_routes(id: &str, file: &str) -> Vec<(&'static str, Request<Body>)> {
+    let files = format!("/api/v1/pages/{id}/files");
+    let post = |uri: String| Request::post(uri).body(Body::from("abc")).unwrap();
+    let get = |uri: String, header: Option<(header::HeaderName, &str)>| {
+        let mut request = Request::get(uri);
+        if let Some((name, value)) = header {
+            request = request.header(name, value);
+        }
+        request.body(Body::empty()).unwrap()
+    };
+    let at = format!("{files}/{file}");
+    vec![
+        ("POST fichier", post(format!("{files}?name=photo.png"))),
+        ("POST fichier sans nom", post(files.clone())),
+        (
+            "POST fichier annoncé trop gros",
+            Request::post(format!("{files}?name=gros.bin"))
+                .header(header::CONTENT_LENGTH, "1099511627776")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+        ("GET fichier", get(at.clone(), None)),
+        (
+            "GET fichier, une plage",
+            get(at.clone(), Some((header::RANGE, "bytes=0-0"))),
+        ),
+        (
+            "GET fichier, revalidation",
+            get(at, Some((header::IF_NONE_MATCH, "*"))),
+        ),
+        (
+            "GET fichier mal nommé",
+            get(format!("{files}/pas-un-fichier"), None),
+        ),
     ]
 }
 
@@ -971,6 +1013,9 @@ const SOME_MESSAGE: &str = "01890000-0000-7000-8000-000000000003";
 
 /// Une version quelconque, visée par les routes de l'historique de [`page_routes`].
 const SOME_VERSION: &str = "01890000-0000-7000-8000-000000000004";
+
+/// Un fichier quelconque, visé par les routes des fichiers de [`page_routes`].
+const SOME_FILE: &str = "01890000-0000-7000-8000-000000000005";
 
 /// Ce qui fait qu'une réponse est la même qu'une autre : statut, type de contenu, corps.
 pub fn outcome(reply: &Reply) -> (StatusCode, Option<String>, String) {
@@ -1236,5 +1281,185 @@ pub fn assert_french(body: &Value, expected: &[&str]) {
             !message.contains(english),
             "message pas en français : « {message} »"
         );
+    }
+}
+
+/// Les octets de tous les fichiers du dossier `dir`, sous-dossiers compris (le dépôt des
+/// fichiers, `files/`, est un dossier du dossier des données) : pour vérifier qu'un secret n'est
+/// écrit en clair nulle part.
+pub fn data_bytes(dir: &Path) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            bytes.extend(data_bytes(&path));
+        } else {
+            bytes.extend(std::fs::read(&path).unwrap());
+        }
+    }
+    bytes
+}
+
+/// Un nom écrit dans la requête d'un envoi (`?name=…`) : tout octet hors des caractères non
+/// réservés de l'URL est encodé en pour-cent.
+pub fn query_value(raw: &str) -> String {
+    let mut encoded = String::new();
+    for byte in raw.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+/// L'adresse d'envoi d'un fichier nommé `name` dans la page `page`.
+pub fn upload_uri(page: impl std::fmt::Display, name: &str) -> String {
+    format!("/api/v1/pages/{page}/files?name={}", query_value(name))
+}
+
+/// Les fichiers de `files/tmp` du dossier des données de l'application, avec leur taille : les
+/// envois en cours. La taille est lue sur le fichier, pas dans le dossier : sous Windows, celle
+/// que donne la liste d'un dossier n'est mise à jour qu'à la fermeture du fichier. Un fichier
+/// qui part entre la liste et la lecture n'est pas compté.
+pub fn temporaries(t: &TestApp) -> Vec<u64> {
+    let tmp = t.cfg.data_dir.join("files").join("tmp");
+    std::fs::read_dir(&tmp)
+        .unwrap_or_else(|e| panic!("{} illisible : {e}", tmp.display()))
+        .filter_map(|entry| std::fs::metadata(entry.unwrap().path()).ok())
+        .map(|metadata| metadata.len())
+        .collect()
+}
+
+/// Attend que `check` vaille, [`WAIT`] au plus, en le relisant toutes les 5 ms : pour un état du
+/// disque, que rien ne signale. La borne peut faire échouer le test à tort sur un poste très
+/// chargé, jamais le faire passer.
+pub async fn eventually(what: &str, check: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !check() {
+        assert!(tokio::time::Instant::now() < deadline, "jamais vu : {what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Un envoi de fichier par une connexion TCP brute, sur l'adresse rendue par
+/// [`TestApp::listen`] : le corps part par morceaux, quand le test le décide.
+pub struct RawUpload {
+    stream: tokio::net::TcpStream,
+}
+
+/// Une réponse lue sur une connexion brute.
+#[derive(Debug)]
+pub struct RawReply {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl RawReply {
+    pub fn json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or_else(|e| {
+            panic!(
+                "réponse {} illisible en JSON ({e}) : {:?}",
+                self.status,
+                String::from_utf8_lossy(&self.body)
+            )
+        })
+    }
+}
+
+impl RawUpload {
+    /// Ouvre la connexion et envoie la tête de `POST /api/v1/pages/{page}/files?name=<name>`, avec
+    /// la session de `by`, et `Content-Length: length` s'il est donné. `Connection: close` : la
+    /// réponse se lit jusqu'à la fin de la connexion.
+    pub async fn start(
+        addr: std::net::SocketAddr,
+        by: &Browser<'_>,
+        page: Uuid,
+        name: &str,
+        length: Option<u64>,
+    ) -> RawUpload {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut head = format!(
+            "POST {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Type: application/octet-stream\r\n",
+            upload_uri(page, name)
+        );
+        if let Some(cookie) = by.cookie() {
+            head.push_str(&format!("Cookie: {cookie}\r\n"));
+        }
+        if let Some(length) = length {
+            head.push_str(&format!("Content-Length: {length}\r\n"));
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).await.unwrap();
+        RawUpload { stream }
+    }
+
+    /// Envoie un morceau du corps.
+    pub async fn send(&mut self, bytes: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        self.stream.write_all(bytes).await.unwrap();
+        self.stream.flush().await.unwrap();
+    }
+
+    /// Tout ce que le serveur écrit jusqu'à fermer la connexion ([`WAIT`] au plus). Une
+    /// connexion coupée par le serveur (`RST`) compte comme fermée.
+    async fn received(mut self) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        let mut received = Vec::new();
+        let mut buffer = [0u8; 8192];
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let read = tokio::time::timeout_at(deadline, self.stream.read(&mut buffer))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "le serveur n'a pas fermé la connexion ; reçu : {:?}",
+                        String::from_utf8_lossy(&received)
+                    )
+                });
+            match read {
+                Ok(0) | Err(_) => return received,
+                Ok(n) => received.extend_from_slice(&buffer[..n]),
+            }
+        }
+    }
+
+    /// La réponse du serveur, lue jusqu'à la fin de la connexion.
+    pub async fn response(self) -> RawReply {
+        let received = self.received().await;
+        let end = received
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap_or_else(|| {
+                panic!(
+                    "pas de réponse HTTP : {:?}",
+                    String::from_utf8_lossy(&received)
+                )
+            });
+        let head = String::from_utf8(received[..end].to_vec()).unwrap();
+        let mut lines = head.split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|line| line.split(' ').nth(1))
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("ligne d'état illisible : {head}"));
+        let headers = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        RawReply {
+            status,
+            headers,
+            body: received[end + 4..].to_vec(),
+        }
+    }
+
+    /// Ce que le serveur a écrit avant de fermer la connexion : rien, pour un envoi abandonné.
+    pub async fn closed(self) -> Vec<u8> {
+        self.received().await
     }
 }

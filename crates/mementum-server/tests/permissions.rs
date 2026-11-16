@@ -12,14 +12,14 @@ mod common;
 use axum::http::{Method, StatusCode};
 use common::{
     Account, Browser, Logs, Reply, Team, TestApp, assert_french, comment_routes, exec_sql,
-    json_request, outcome, overtaken, page_routes, query_i64, reprises, sync_url, synced_as, text,
-    trash_list, tree_nodes, uuid, version_routes,
+    file_routes, json_request, outcome, overtaken, page_routes, query_i64, reprises, sync_url,
+    synced_as, text, trash_list, tree_nodes, uuid, version_routes,
 };
 use mementum_acl::{Level, Role, Subject};
 use mementum_crdt::PageDoc;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
-use mementum_store::{Node, Store, VersionReason};
+use mementum_store::{NewAttachment, Node, Store, VersionReason};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -560,6 +560,55 @@ async fn foreign_page_is_indistinguishable_from_missing() {
             }
         }
     }
+    // De même pour les fichiers d'une page qu'on ne voit pas, nommés par leurs vrais
+    // identifiants : rien ne dit qu'un fichier existe, ni qu'on aurait pu en envoyer un.
+    for page in [foreign, binned, private] {
+        let file = team
+            .store
+            .attach_file(
+                NewAttachment {
+                    id: Uuid::now_v7(),
+                    node_id: page,
+                    hash: [7; 32],
+                    size: 3,
+                    mime: "image/png",
+                    name: "caché.png",
+                    created_by: team.tom.id,
+                },
+                0,
+            )
+            .await
+            .unwrap()
+            .id
+            .to_string();
+        let missing = {
+            let mut replies = Vec::new();
+            for (name, request) in file_routes(&unknown, &file) {
+                let reply = zoe.browser.send(request).await;
+                let body = reply.assert_error(StatusCode::NOT_FOUND, "not_found");
+                assert_eq!(body["message"], "page introuvable", "{name}");
+                replies.push(outcome(&reply));
+            }
+            replies
+        };
+        let mut askers = vec![("Zoé", &zoe.browser)];
+        if page == foreign {
+            askers.push(("une invitée", gina));
+        }
+        for (who, browser) in askers {
+            let routes = file_routes(&page.to_string(), &file);
+            for ((name, request), missing) in routes.into_iter().zip(&missing) {
+                let reply = browser.send(request).await;
+                assert_eq!(
+                    &outcome(&reply),
+                    missing,
+                    "{name}, fichier caché, par {who}"
+                );
+            }
+        }
+    }
+    let attached = "SELECT COUNT(*) FROM attachments";
+    assert_eq!(query_i64(&t.db_path(), attached).await, 3, "rien d'envoyé");
 
     // L'id dans le corps : le parent d'une page neuve, le nouveau parent d'une page, le frère
     // après lequel se placer. `(nom, code attendu, requête)`.

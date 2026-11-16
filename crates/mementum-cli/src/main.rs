@@ -1,11 +1,12 @@
 //! Le binaire `mementum`.
 //!
 //! - `mementum serve [--bind <adresse>] [--data-dir <dossier>] [--signup
-//!   <open|invite>] [--public-url <url>] [--version-every-secs <secondes>]`
-//!   lance le serveur. Les options l'emportent sur `MEMENTUM_BIND`,
-//!   `MEMENTUM_DATA_DIR`, `MEMENTUM_SIGNUP`, `MEMENTUM_PUBLIC_URL` et
-//!   `MEMENTUM_VERSION_EVERY_SECS`, qui l'emportent sur les défauts
-//!   (`127.0.0.1:8080`, `./data`, `invite`, pas d'adresse publique, 600 s).
+//!   <open|invite>] [--public-url <url>] [--version-every-secs <secondes>]
+//!   [--max-file-mb <Mio>]` lance le serveur. Les options l'emportent sur
+//!   `MEMENTUM_BIND`, `MEMENTUM_DATA_DIR`, `MEMENTUM_SIGNUP`,
+//!   `MEMENTUM_PUBLIC_URL`, `MEMENTUM_VERSION_EVERY_SECS` et
+//!   `MEMENTUM_MAX_FILE_MB`, qui l'emportent sur les défauts (`127.0.0.1:8080`,
+//!   `./data`, `invite`, pas d'adresse publique, 600 s, 100 Mio).
 //!   Arrêté par Ctrl-C (ou `SIGTERM`), le serveur laisse les pages ouvertes
 //!   garder leur dernière version avant de fermer la base.
 //! - `mementum user set-password --email <adresse> [--data-dir <dossier>]`
@@ -67,6 +68,10 @@ enum Command {
         /// MEMENTUM_VERSION_EVERY_SECS, sinon 600, dix minutes).
         #[arg(long, value_name = "SECONDES")]
         version_every_secs: Option<String>,
+        /// Taille la plus grande d'un fichier envoyé dans une page, en Mio, de 1 à 4096 (défaut :
+        /// MEMENTUM_MAX_FILE_MB, sinon 100). Au-delà, l'envoi est refusé.
+        #[arg(long, value_name = "MIO")]
+        max_file_mb: Option<String>,
     },
     /// Gère les comptes de l'instance.
     User {
@@ -114,9 +119,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             signup,
             public_url,
             version_every_secs,
+            max_file_mb,
         } => {
             // Les options d'abord : une variable n'est lue que si l'option manque.
-            let cfg = Config::from_args(bind, data_dir, signup, public_url, version_every_secs)?;
+            let cfg = Config::from_args(
+                bind,
+                data_dir,
+                signup,
+                public_url,
+                version_every_secs,
+                max_file_mb,
+            )?;
             mementum_server::serve(cfg).await
         }
         Command::User {

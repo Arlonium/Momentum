@@ -16,12 +16,17 @@ argon2 = "0.6"
 # Sans fonctions par défaut : chaque crate choisit les siennes.
 axum = { version = "0.8.9", default-features = false }
 base64 = "0.22"
+# Octets d'un corps de réponse servi par morceaux (le fichier d'une page, Ruling R247).
+bytes = "1.12"
 clap = { version = "4.6.1", features = ["derive"] }
 # Lecture et écriture du cookie de session.
 cookie = "0.18"
 futures = "0.3.34"
 # Octets aléatoires du système : jetons de session et d'invitation.
 getrandom = "0.4"
+# Lire le corps d'un envoi trame par trame, et servir un fichier par morceaux (Ruling R247).
+http-body = "1.1"
+http-body-util = "0.1.5"
 mementum-acl = { path = "crates/mementum-acl" }
 mementum-crdt = { path = "crates/mementum-crdt" }
 mementum-md = { path = "crates/mementum-md" }

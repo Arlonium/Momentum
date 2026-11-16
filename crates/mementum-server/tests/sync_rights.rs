@@ -823,6 +823,89 @@ async fn put_mmd_checks_rights_again_once_the_page_is_loaded() {
     }
 }
 
+/// Ruling R89, pour l'envoi d'un fichier (`POST …/files`, preuve 2 du plan de la partie B) : les
+/// droits sont contrôlés avant de lire le corps, puis de nouveau une fois le corps reçu, avec la
+/// session (Ruling R390). Le corps part en deux morceaux par une connexion brute, et le droit
+/// change entre les deux : rétrogradée à la lecture `403`, page mise à la corbeille `409`, accès
+/// retiré `404`, session fermée `401`. Rien n'est attaché, rien ne reste dans le dépôt. Témoin :
+/// sans changement, `201`.
+///
+/// Le test sait que le premier contrôle est passé quand le temporaire de l'envoi porte le premier
+/// morceau : le dépôt n'ouvre un envoi qu'après lui.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upload_checks_rights_again_once_the_body_is_received() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let session_closed = "DELETE FROM sessions WHERE user_id = '{id}'";
+    let cases = [
+        ("rien ne change", None, None),
+        (
+            "rétrogradée à la lecture",
+            Some(DEMOTED_TO_READ),
+            Some((403, "forbidden")),
+        ),
+        ("mise à la corbeille", Some(TRASHED), Some((409, "trashed"))),
+        (
+            "accès retiré",
+            Some(ACCESS_REMOVED),
+            Some((404, "not_found")),
+        ),
+        (
+            "session fermée",
+            Some(session_closed),
+            Some((401, "unauthenticated")),
+        ),
+    ];
+    let temporaries = || common::temporaries(&t);
+    let files = t.cfg.data_dir.join("files");
+    let contents = || {
+        std::fs::read_dir(&files)
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_name() != "tmp")
+            .count()
+    };
+    for (i, (what, change, refusal)) in cases.into_iter().enumerate() {
+        // Un compte neuf à chaque cas : la session fermée ne gêne pas les suivants.
+        let gina = t.account(&format!("Guest{i}")).await;
+        team.store
+            .add_member(team.space, gina.id, mementum_acl::Role::Guest)
+            .await
+            .unwrap();
+        let grants = [user(&team.olga, Level::Full), user(&gina, Level::Edit)];
+        let page = team.page(None, what, &grants).await;
+        let body = format!("le contenu de « {what} »");
+        let (first, second) = body.as_bytes().split_at(4);
+        let length = Some(body.len() as u64);
+        let mut raw = common::RawUpload::start(addr, &gina.browser, page, "x.txt", length).await;
+        raw.send(first).await;
+        common::eventually("le premier morceau", || temporaries() == [4]).await;
+        if let Some(change) = change {
+            let mut lock = WriteLock::take(&t).await;
+            let change = change.replace("{id}", &gina.id.to_string());
+            write_rights_change(&mut lock, &change, team.space, page, &gina).await;
+            lock.commit().await;
+        }
+        raw.send(second).await;
+        let reply = raw.response().await;
+        let attached = format!("SELECT COUNT(*) FROM attachments WHERE node_id = '{page}'");
+        match refusal {
+            None => {
+                assert_eq!(reply.status, 201, "{what} : {reply:?}");
+                assert_eq!(query_i64(&t.db_path(), &attached).await, 1, "{what}");
+            }
+            Some((status, code)) => {
+                assert_eq!(reply.status, status, "{what} : {reply:?}");
+                assert_eq!(reply.json()["error"], code, "{what}");
+                assert_eq!(query_i64(&t.db_path(), &attached).await, 0, "{what}");
+                common::eventually("files/tmp vide", || temporaries().is_empty()).await;
+            }
+        }
+    }
+    // Seul le témoin a posé un contenu.
+    assert_eq!(contents(), 1);
+}
+
 /// Ruling R89, pour un fil sur un bloc (`POST …/comments` avec `blockId`, Ruling R134) : les
 /// droits sont contrôlés avant la lecture du corps, puis de nouveau une fois la page chargée,
 /// avant de chercher le bloc et d'écrire. Un droit retiré pendant le chargement n'écrit aucun
