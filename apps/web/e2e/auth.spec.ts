@@ -909,8 +909,13 @@ test("session_reopened_in_another_tab_closes_the_login_window_on_return", async 
   const first = await newUser(browser, account);
   // L'horloge de l'onglet est la nôtre : on n'attend pas cinq secondes pour de bon.
   await first.clock.install();
+  // Ce que l'écran lit en s'ouvrant finit par les favoris, demandés après l'arbre (R254) : on
+  // attend leur réponse avant de perdre la session. Partis sans cookie, ils répondraient `401`,
+  // et la fenêtre de connexion recouvrirait le lien « Corbeille » avant le clic (R589).
+  const opened = first.waitForResponse((r) => new URL(r.url()).pathname.endsWith("/favorites"));
   await first.goto(`/s/${space.id}`);
   await expectSignedInAs(first, account.name);
+  await opened;
   const dialog = first.getByRole("dialog", { name: "Ta session a pris fin" });
 
   // La session prend fin. Le premier onglet l'apprend en ouvrant la corbeille, qui ne peut
