@@ -6,7 +6,7 @@
 //! ([`display_name`]), que [`content_disposition`] met en forme pour l'en-tête d'un fichier servi.
 //! Le dépôt ne sait rien des pages ni des droits : c'est le store qui dit quelle page porte quel
 //! contenu, et `access.rs` qui juge qui le lit. Ce module n'a pas de route : envoyer et lire un
-//! fichier est la Task S4a, le ménage la Task S4b.
+//! fichier sont dans `routes/files.rs` (Task S4a), le ménage viendra avec la Task S4b.
 //!
 //! Le type d'un contenu est lu dans ses premiers octets, à l'envoi, par une table fermée
 //! ([`sniff`]) ; le type que déclare le client n'est jamais lu (R246).

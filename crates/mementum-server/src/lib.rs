@@ -1,5 +1,6 @@
 //! Serveur HTTP de Mementum : comptes et sessions, API REST des pages, MMD,
-//! commentaires, historique, WebSocket de synchronisation et canal de l'espace.
+//! commentaires, historique, fichiers, WebSocket de synchronisation et canal de
+//! l'espace.
 //!
 //! | Route | Session | Réponse |
 //! |---|---|---|
@@ -48,18 +49,22 @@
 //! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi ; Ruling R203) | `Version[]` : les versions de la page, la plus récente d'abord, cent au plus, chacune avec sa date, sa raison (`periodic`, `closing`, `before_restore`) et les comptes qui l'ont modifiée depuis la version d'avant (identifiant et nom, jamais l'adresse) (Ruling R135) |
 //! | `GET /api/v1/pages/{id}/versions/{versionId}/state` | `edit` (à la corbeille aussi ; Ruling R203) | `application/octet-stream` : l'état Yjs (v1) de la version, tel qu'il a été gardé ; une version qui n'est pas de cette page, inconnue ou mal nommée reçoit la réponse d'une page introuvable, après le `403` de niveau, comme sur la route suivante |
 //! | `POST /api/v1/pages/{id}/versions/{versionId}/restore` | `edit` | `204` : une version `before_restore` garde ce qui est remplacé si aucune version ne le garde déjà (Ruling R190), puis les blocs de la version sont écrits par-dessus le contenu, identifiants compris, comme une écriture ordinaire (la version que la page a déjà comme contenu ne change rien) ; une version qui n'est pas de la page : `404`, avant `409 trashed` (Ruling R186) ; droits revérifiés une fois la page chargée (Ruling R89), une écriture du serveur à la fois par page, la session relue sous le verrou, comme `PUT …/mmd` (Rulings R200, R209) ; `500 internal` pour un état gardé illisible, la page intacte |
+//! | `GET /api/v1/files/limits` | oui | `FileLimits` : la taille la plus grande d'un fichier envoyé (`MEMENTUM_MAX_FILE_MB`, 100 Mio par défaut) |
+//! | `POST /api/v1/pages/{id}/files?name=…` | `edit` | `201`, `FileInfo` (son `url`, `/api/v1/pages/{id}/files/{fileId}`, est l'adresse du fichier) : le corps est le fichier brut, lu par trames et écrit dans le dépôt sans être gardé en mémoire, hors de la borne de 2 Mio des autres corps ; `409 trashed` ; `422 invalid_request` pour un paramètre `name` illisible (absent : « fichier ») ; `413 file_too_large` sur `Content-Length`, avant de rien lire, puis en cours de lecture ; un corps qui ne reçoit plus rien pendant 30 s : la connexion est fermée sans réponse (Ruling R391) ; session et droits revérifiés une fois le corps reçu (Rulings R89, R390) ; le contenu est posé puis attaché sous le verrou du dépôt, et va au bout même si le client coupe ; un contenu posé par l'envoi que l'attache n'a pas pris repart (Ruling R395) |
+//! | `GET /api/v1/pages/{id}/files/{fileId}` | `read` (à la corbeille aussi) | les octets, toujours en téléchargement (`Content-Disposition: attachment`, `nosniff`, CSP `sandbox`, `Cross-Origin-Resource-Policy: same-origin`), sous le type que le serveur a lu à l'envoi (Ruling R246) ; `Cache-Control: private, no-cache` et `ETag` ; `304` si `If-None-Match` nomme l'`ETag`, jugé avant `Range` ; `206` pour une plage simple, `416` si elle commence après la fin ; `If-Range` qui ne nomme pas l'`ETag`, deux plages ou une plage illisible : le fichier entier (Ruling R392) ; un fichier qui n'est pas de la page, inconnu ou mal nommé : la réponse d'une page introuvable, après celle de la page ; `404` « fichier indisponible » si le dépôt n'a plus son contenu, ou plus entier (Ruling R393) |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `404` ; `400 invalid_request` sans demande de WebSocket |
 //! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s, précédé de la version courante redite, même égale (Ruling R205 : le client, qui ne voit pas les pings, s'en sert comme signe de vie) ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
 //! Toute erreur est en JSON : `{ "error": <code>, "message": <texte> }`
 //! ([`types::ErrorBody`]). Une route qui demande une session répond `401
 //! unauthenticated` sans elle. Un corps illisible reçoit `invalid_json` (ou
-//! `invalid_request`), un corps de plus de 2 Mio `413 payload_too_large`, une
-//! route inconnue `404 not_found`, une méthode inconnue `405
-//! method_not_allowed`. Une page dont l'acteur ne répond plus reçoit `503
-//! unavailable`, sur `GET` et `PUT …/mmd` (Ruling R26), sur `POST …/comments`
-//! avec un `blockId`, et sur la restauration d'une version. La base SQLite est le
-//! fichier [`config::DB_FILE`] du dossier des données.
+//! `invalid_request`), un corps de plus de 2 Mio `413 payload_too_large` (hors
+//! de l'envoi d'un fichier, qui a sa borne), une route inconnue `404
+//! not_found`, une méthode inconnue `405 method_not_allowed`. Une page dont
+//! l'acteur ne répond plus reçoit `503 unavailable`, sur `GET` et `PUT …/mmd`
+//! (Ruling R26), sur `POST …/comments` avec un `blockId`, et sur la restauration
+//! d'une version. La base SQLite est le fichier [`config::DB_FILE`] du dossier
+//! des données, et les fichiers envoyés sont dans son dossier `files/`.
 //!
 //! **Droits** (`access.rs`, le seul chemin par lequel les routes les calculent ;
 //! le store revérifie lui-même, dans ses transactions, ce qu'il écrit) :
@@ -111,6 +116,15 @@
 //! qu'il ne voit plus, et rien n'y dit qu'elle existe encore. Poser ou retirer un favori
 //! n'avance ni `spaces.rev` ni `spaces.lsn` : il ne change ni les droits ni la barre latérale
 //! des autres, et le canal de l'espace n'en dit rien.
+//!
+//! **Fichiers** (`files.rs`, `routes/files.rs`, Rulings R244 à R247, R390 à R399). Un fichier
+//! appartient à la page où il a été envoyé : son adresse la nomme, et chaque lecture est jugée sur
+//! les droits du moment. Le contenu est gardé sous son SHA-256 dans `<data_dir>/files/` ; aucun
+//! nom venu d'un client n'entre dans un chemin. Toute réponse qui porte un fichier est un
+//! téléchargement, sous le type lu dans les octets : rien n'y est jamais un document ouvert
+//! depuis l'origine de l'application. Au démarrage, le journal compte les contenus que la base ne
+//! connaît pas, sans en supprimer aucun, et ceux qu'elle connaît et que le dépôt n'a plus. Pas de
+//! quota avant le lot 7 : qui peut modifier une page peut remplir le disque (Ruling R247).
 //!
 //! **Historique** (`routes/versions.rs`, Ruling R135). L'acteur de chaque page coupe ses
 //! versions (`mementum-sync`) : l'état complet de la page, avec les comptes qui l'ont modifiée
@@ -168,7 +182,8 @@
 //! contrôle, avant tout le reste, par la même règle (`routes/sync.rs`). Une
 //! seconde couche, par-dessus, pose `Cache-Control: no-store` et
 //! `X-Content-Type-Options: nosniff` sur toute réponse de l'API (`/api/…`),
-//! refus compris ; ni `/sync` ni `/events` n'en sont.
+//! refus compris ; ni `/sync` ni `/events` n'en sont. Seul un fichier servi,
+//! marqué `guard::FileResponse`, garde son `Cache-Control: private, no-cache`.
 
 mod access;
 pub mod auth;
