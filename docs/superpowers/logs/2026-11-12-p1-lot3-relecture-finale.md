@@ -307,6 +307,23 @@ Le relecteur a re-relu le tour 5 (rapport `re-relecture-tour5.md`, sondes `sonde
 
 **Vérifications du tour** : fmt et clippy propres ; `cargo test --workspace --no-fail-fast` : 895 verts, 15 ignorés ; Vitest : 937 verts ; e2e `fidelity`, `collab`, `relay-guard`, `offline`, `history` : 21 verts ; budgets de la synchro en release sans recul (frappe à 2,2 ms au p95, 41 ms avec la coupe d'une version).
 
+### Re-relecture du tour 6, et tour de correction 7 (2026-11-16)
+
+Le relecteur a re-relu le tour 6 (rapport `re-relecture-tour6.md`, sondes `sondes/tour6/`, sous `.claude/worktrees/tmp-agents/relecture-s-tour3/`). **N1, N3, N4 et R437 sont levés.** **Pas levé pour autant** : la piste que l'implémenteur signalait est un critique, prouvé par les routes (M1), et N2 reste ouvert par la restauration (M2). Le tour 7 les corrige, avec les deux mineurs (même atelier ; au registre, « Tour de correction 7 (2026-11-16) », R496 à R499 et R535) ; sa re-relecture reste à faire.
+
+| Constat | Fait | Mesures |
+|---|---|---|
+| Critique M1 : un contenu qui n'est pas un nœud XML (chaîne, `Any`, JSON, binaire, embed) en tête de la racine ou d'un élément cachait tout ce qui le suit à la lecture du serveur (`children()` de yrs s'y arrête) : `GET /mmd` rendait `""`, et un agent qui récrivait la page l'effaçait | **fait**, R496 à R498 (`e75b25a`, `8c19101`) : la garde refuse un tel contenu dont le parent est nommé ; après l'intégration, chaque liste changée et chaque élément inséré doivent se lire en entier ; relu du journal, un tel contenu intégré par l'entrée est supprimé ; test de propriétés étendu aux contenus sans type sous tous les parents, avec « autant d'enfants que de longueur » | sondes du relecteur : mises à jour refusées, `GET /mmd` intact, la récriture de l'agent garde la page ; frappe à 2,0 ms au p95 (5,2 au premier jet, qui recomptait les ancêtres) |
+| Important M2 : des restaurations sans effet d'un compte tenaient pleine la file d'une page | **fait**, R535 (`85afc3d`, `7763323`) : la restauration prend sa place sur la part de deux places du compte, comme `PUT /mmd` ; le verrou sans borne part ; les rafales de restaurations des tests de R200 et R209 passent en tests de route | Mona, en 10 s : aucune écriture et 93 `429` avant, 59 écritures et aucun `429` après |
+| Mineur R494 : trois `PUT /mmd` de front d'un agent, le troisième reçoit `429` | **fait** (`6eb0890`) : dit dans le tableau des routes et la conception, §6.4 | |
+| Mineur R495 : le filtre des liens du client ne voit pas une coupure de paragraphe dans un lien trop long déjà présent | **écrit**, R499 (`6eb0890`) : limite gardée, dite en tête de `linkBound.ts` (plus atteignable depuis la relecture du stockage) | |
+
+**Sens changés, dits au registre** : les rafales de restaurations d'un même compte des tests d'intégration de R200 et R209, passées en tests de route (R535) ; l'aide `honest` du test de propriétés, qui ne tape pas dans un texte portant une valeur `Any` faite à la main (R497).
+
+**À éprouver en premier par la re-relecture** : les contenus sans type sous un parent nommé par une forme que la garde ne lit pas (une chaîne d'origines qui mène hors d'un texte à travers plusieurs structures de la même mise à jour) ; le filtre des ancêtres de `lists_are_whole` contre une transaction qui change un type et son parent ; le raccourci `untyped_in_texts` contre un instantané fait à la main ; ce qu'un navigateur affiche après une telle mise à jour (non éprouvé ici au-delà de l'exception de y-prosemirror) ; la part de deux places contre un agent qui écrit puis restaure.
+
+**Vérifications du tour** : fmt et clippy propres ; `cargo test --workspace --no-fail-fast` : 898 verts, 15 ignorés ; typecheck du client propre ; budgets de la synchro en release sans recul (frappe à 2,0 ms au p95, 34,6 ms avec la coupe d'une version ; 499 frappes relues en 70,4 ms).
+
 ## Ce que la documentation doit dire (pour la Task 14)
 
 Pour les constats finis :
