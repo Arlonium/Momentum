@@ -62,6 +62,7 @@ import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
+import { linkBound } from "./linkBound";
 import { guardedAwareness } from "./presenceGuard";
 import { schema } from "./schema";
 import { slashMenuItems } from "./slashItems";
@@ -82,12 +83,13 @@ type Props = {
  * Ce que partagent l'éditeur de la page et celui d'un aperçu de version : le schéma des blocs, la
  * langue, les extensions. Un aperçu montre donc une version comme la page la montrerait.
  * `followBlock` : le curseur de l'onglet suit son bloc quand quelqu'un d'autre le déplace.
+ * `linkBound` : un lien de plus de 16 Kio, que le serveur refuserait, n'est pas posé (R495).
  */
 export const EDITOR_OPTIONS = {
   schema,
   dictionary: { ...fr, multi_column: multiColumnLocales.fr },
   dropCursor: multiColumnDropCursor,
-  extensions: [syntaxHighlighter, followBlock],
+  extensions: [syntaxHighlighter, followBlock, linkBound],
 };
 
 export function Editor({ session, fixture = null, onComment = null }: Props) {
