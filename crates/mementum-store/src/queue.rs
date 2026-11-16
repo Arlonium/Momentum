@@ -25,6 +25,11 @@
 //!   jamais toute la rafale d'un compte ; et les écritures d'un même compte gardent leur ordre
 //!   d'arrivée.
 //!
+//! Un tour tenu à tort gèlerait toutes les écritures, sans erreur : une écriture qui attend son
+//! tour plus de [`crate::StoreOptions::slow_write`], ou un tour tenu plus longtemps, se
+//! journalise (avertissement) ; et, en debug, une tâche qui redemande un tour en tenant déjà un
+//! panique, au lieu de s'attendre elle-même (Ruling R518).
+//!
 //! Ce que la file ne fait pas : borner le nombre d'écritures qui attendent (une requête qui
 //! attend garde son corps ; les plafonds de débit sont au lot 7, Ruling R121), ni départager deux
 //! comptes qui en ouvrent beaucoup d'autres (un compte qui écrit dans cent pages a cent voies
@@ -35,6 +40,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use sqlx::pool::PoolConnection;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
@@ -95,26 +101,49 @@ pub(crate) struct Writer {
     /// Un pool d'une seule connexion. Seul ce module le voit : on n'y écrit qu'avec un tour.
     pool: SqlitePool,
     queue: Arc<Mutex<Queue>>,
+    /// Au-delà, une attente ou un tour tenu se journalise.
+    slow: Duration,
 }
 
 impl Writer {
-    /// L'écrivain de ce pool, qui ne doit avoir qu'une connexion, migrations déjà passées.
-    pub(crate) fn new(pool: SqlitePool) -> Writer {
+    /// L'écrivain de ce pool, qui ne doit avoir qu'une connexion, migrations déjà passées. Une
+    /// attente ou un tour tenu plus de `slow` se journalise.
+    pub(crate) fn new(pool: SqlitePool, slow: Duration) -> Writer {
         Writer {
             pool,
             queue: Arc::default(),
+            slow,
         }
     }
 
-    /// Attend le tour de la voie `lane`, sans délai et sans tenir de connexion.
+    /// Attend le tour de la voie `lane`, sans délai et sans tenir de connexion. Une attente plus
+    /// longue que `slow` se journalise, une fois, et continue.
+    ///
+    /// En debug, panique si la tâche tient déjà le tour : elle s'attendrait elle-même.
     pub(crate) async fn turn(&self, lane: Lane) -> Turn {
-        let (id, wake) = match lock(&self.queue).enter(lane) {
-            Ok(()) => {
-                return Turn {
-                    queue: self.queue.clone(),
-                };
+        let me = tokio::task::try_id();
+        let entered = {
+            let mut queue = lock(&self.queue);
+            let again = me.is_some() && queue.holder == me;
+            if again {
+                Err(None)
+            } else {
+                queue.enter(lane).map(|()| queue.holder = me).map_err(Some)
             }
-            Err(waiting) => waiting,
+        };
+        let (id, wake) = match entered {
+            Ok(()) => return self.held(),
+            Err(None) => {
+                if cfg!(debug_assertions) {
+                    panic!(
+                        "une tâche qui tient son tour d'écriture en redemande un : elle \
+                         s'attendrait elle-même (interblocage)"
+                    );
+                }
+                // En release : la file, comme toute autre écriture, et le journal le dira.
+                lock(&self.queue).enter(lane).unwrap_err()
+            }
+            Err(Some(waiting)) => waiting,
         };
         let mut waiting = Waiting {
             queue: self.queue.clone(),
@@ -123,12 +152,32 @@ impl Writer {
             wake: Some(wake),
         };
         let wake = waiting.wake.as_mut().expect("posé juste avant");
-        wake.await
-            .expect("la file ne lâche une écriture en attente qu'en lui donnant son tour");
+        let given = match tokio::time::timeout(self.slow, &mut *wake).await {
+            Ok(given) => given,
+            Err(_) => {
+                tracing::warn!(
+                    ?lane,
+                    queued = self.queued(),
+                    "une écriture attend son tour depuis plus de {:?} : un tour tenu trop \
+                     longtemps fait attendre toutes les écritures du store",
+                    self.slow
+                );
+                wake.await
+            }
+        };
+        given.expect("la file ne lâche une écriture en attente qu'en lui donnant son tour");
         // Le tour est à nous : `Waiting` n'a plus rien à rendre.
         waiting.wake = None;
+        lock(&self.queue).holder = me;
+        self.held()
+    }
+
+    /// Le tour qu'on vient de prendre.
+    fn held(&self) -> Turn {
         Turn {
             queue: self.queue.clone(),
+            since: Instant::now(),
+            slow: self.slow,
         }
     }
 
@@ -167,13 +216,25 @@ impl Writer {
     }
 }
 
-/// Le tour d'écrire : un seul à la fois. Le lâcher le donne à l'écriture suivante.
+/// Le tour d'écrire : un seul à la fois. Le lâcher le donne à l'écriture suivante ; tenu plus
+/// que `slow`, il se journalise en tombant.
 pub(crate) struct Turn {
     queue: Arc<Mutex<Queue>>,
+    since: Instant,
+    slow: Duration,
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
+        let held = self.since.elapsed();
+        if held > self.slow {
+            tracing::warn!(
+                held_ms = held.as_millis() as u64,
+                "tour d'écriture tenu {held:?}, plus que {:?} : les autres écritures du store \
+                 l'ont attendu",
+                self.slow
+            );
+        }
         lock(&self.queue).release();
     }
 }
@@ -213,6 +274,8 @@ struct Queue {
     /// Les écritures en file, toutes voies confondues.
     queued: usize,
     next: u64,
+    /// La tâche qui a pris le tour, si elle est connue (la garde de réentrance).
+    holder: Option<tokio::task::Id>,
 }
 
 struct Waiter {
@@ -244,6 +307,7 @@ impl Queue {
     /// voie repasse en queue de la ronde s'il lui en reste.
     fn release(&mut self) {
         self.taken = false;
+        self.holder = None;
         while let Some(lane) = self.turns.pop_front() {
             let Some(list) = self.waiting.get_mut(&lane) else {
                 continue;
@@ -384,11 +448,32 @@ mod tests {
         assert_eq!(order, [(tom, 1), (mona, 1), (tom, 2), (mona, 2)]);
     }
 
+    /// Un écrivain sans base : `turn` ne touche pas à SQLite.
+    fn writer() -> Arc<Writer> {
+        let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap();
+        Arc::new(Writer::new(pool, Duration::from_secs(5)))
+    }
+
+    /// Un tour pris et tenu par une autre tâche, jusqu'à ce que `release` soit lâché.
+    async fn held_elsewhere(writer: &Arc<Writer>) -> oneshot::Sender<()> {
+        let (release, released) = oneshot::channel::<()>();
+        let (taken, took) = oneshot::channel::<()>();
+        let writer = writer.clone();
+        tokio::spawn(async move {
+            let turn = writer.turn(Lane::Common).await;
+            let _ = taken.send(());
+            let _ = released.await;
+            drop(turn);
+        });
+        took.await.unwrap();
+        release
+    }
+
     /// Une tâche qui a reçu le tour mais part sans l'avoir pris le rend : il va à la suivante.
     #[tokio::test]
     async fn a_turn_given_to_a_task_that_left_goes_to_the_next() {
-        let writer = Writer::new(sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap());
-        let first = writer.turn(Lane::Common).await;
+        let writer = writer();
+        let first = held_elsewhere(&writer).await;
         let mut cx = Context::from_waker(Waker::noop());
         let mut second = Box::pin(writer.turn(account(1)));
         assert!(second.as_mut().poll(&mut cx).is_pending());
@@ -397,6 +482,9 @@ mod tests {
         assert_eq!(writer.queued(), 2);
         // Le tour va à la deuxième, réveillée ; elle part sans l'avoir pris.
         drop(first);
+        while lock(&writer.queue).queued != 1 {
+            tokio::task::yield_now().await;
+        }
         drop(second);
         assert_eq!(writer.queued(), 0);
         let Poll::Ready(turn) = third.as_mut().poll(&mut cx) else {
@@ -409,15 +497,49 @@ mod tests {
     /// Une tâche abandonnée pendant qu'elle attend ne garde rien : le tour libre se prend aussitôt.
     #[tokio::test]
     async fn a_task_dropped_while_waiting_keeps_nothing() {
-        let writer = Writer::new(sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap());
-        let first = writer.turn(Lane::Common).await;
+        let writer = writer();
+        let first = held_elsewhere(&writer).await;
         let mut cx = Context::from_waker(Waker::noop());
         let mut second = Box::pin(writer.turn(account(1)));
         assert!(second.as_mut().poll(&mut cx).is_pending());
         drop(second);
         assert_eq!(writer.queued(), 0);
         drop(first);
+        while lock(&writer.queue).taken {
+            tokio::task::yield_now().await;
+        }
         let mut third = pin!(writer.turn(account(2)));
         assert!(matches!(third.as_mut().poll(&mut cx), Poll::Ready(_)));
+    }
+
+    /// En debug, une tâche qui redemande un tour en tenant déjà un panique, au lieu de s'attendre
+    /// elle-même sans fin (Ruling R518) ; une autre tâche, elle, attend son tour.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn a_task_asking_a_second_turn_panics() {
+        let writer = writer();
+        let again = tokio::spawn({
+            let writer = writer.clone();
+            async move {
+                let _first = writer.turn(Lane::Common).await;
+                let _second = writer.turn(account(1)).await;
+            }
+        });
+        let panic = tokio::time::timeout(Duration::from_secs(10), again)
+            .await
+            .expect("la seconde demande attend sans fin")
+            .unwrap_err()
+            .into_panic();
+        let message = panic.downcast_ref::<&str>().copied().unwrap_or_default();
+        assert!(message.contains("en redemande un"), "{message}");
+        // Le tour de la tâche partie est rendu : une autre le prend.
+        let other = tokio::spawn({
+            let writer = writer.clone();
+            async move { drop(writer.turn(account(2)).await) }
+        });
+        tokio::time::timeout(Duration::from_secs(10), other)
+            .await
+            .expect("le tour rendu")
+            .unwrap();
     }
 }

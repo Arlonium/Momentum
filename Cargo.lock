@@ -1242,10 +1242,12 @@ name = "mementum-store"
 version = "0.1.0"
 dependencies = [
  "mementum-acl",
+ "mementum-store",
  "proptest",
  "sqlx",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

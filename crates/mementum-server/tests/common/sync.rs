@@ -36,6 +36,7 @@ pub async fn open_app() -> TestApp {
 pub const SLOW_DISK: StoreOptions = StoreOptions {
     busy_timeout: Duration::from_millis(100),
     write_delay: Duration::from_millis(50),
+    slow_write: mementum_store::SLOW_WRITE,
 };
 
 /// [`open_app`], dont la base a ces réglages ([`SLOW_DISK`], par exemple).

@@ -14,9 +14,19 @@ sqlx.workspace = true
 # `sync` : le canal qui annonce les espaces dont la version vient d'avancer (`Store::changes`), et
 # le réveil d'une écriture dont le tour vient ; dans les tests, aussi la barrière de départ des
 # écritures simultanées. `rt` : le compte auquel une tâche attribue ses écritures (`task_local!`).
-tokio = { workspace = true, features = ["rt", "sync"] }
+# `time` : l'avertissement d'une écriture qui attend son tour trop longtemps.
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+# L'avertissement d'une attente ou d'un tour trop long (Ruling R518).
+tracing.workspace = true
 uuid.workspace = true
 
+[features]
+# Pour les tests seulement : tenir un tour de la file d'écriture (`Store::hold_writes`) et compter
+# les écritures en file (`Store::queued_writes`), pour prouver un ordre de service.
+test-hooks = []
+
 [dev-dependencies]
+# Les tests d'intégration tiennent des tours de la file (fonction `test-hooks`).
+mementum-store = { path = ".", features = ["test-hooks"] }
 proptest.workspace = true
 tempfile.workspace = true

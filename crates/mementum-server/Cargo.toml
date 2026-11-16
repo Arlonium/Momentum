@@ -48,6 +48,8 @@ ts-rs.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# Tenir un tour de la file d'écriture du store (`Store::hold_writes`).
+mementum-store = { workspace = true, features = ["test-hooks"] }
 # Client Yjs de test (Ruling R6) pour la route `/sync/{id}`.
 mementum-sync = { workspace = true, features = ["testkit"] }
 serde_json.workspace = true

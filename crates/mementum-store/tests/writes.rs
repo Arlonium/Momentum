@@ -41,6 +41,7 @@ async fn slow_store(dir: &TestDir) -> Store {
     let options = StoreOptions {
         busy_timeout: SHORT_WAIT,
         write_delay: SLOW,
+        ..StoreOptions::default()
     };
     Store::open_with(&dir.path().join("m.db"), options)
         .await

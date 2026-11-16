@@ -202,6 +202,9 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 /// Le délai d'attente d'une connexion sur un verrou de SQLite, par défaut.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Au-delà, par défaut, une écriture qui attend encore son tour, ou un tour tenu, se journalise.
+pub const SLOW_WRITE: Duration = Duration::from_secs(5);
+
 /// Les réglages d'ouverture du store ([`Store::open_with`]). Aucun n'a de variable ni d'option :
 /// [`Store::open`] prend les défauts, et seuls les tests en changent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +217,9 @@ pub struct StoreOptions {
     /// connexion). Nul par défaut : seuls les tests le posent, pour rendre sûre une attente qui ne
     /// se voyait que sur un disque lent (la CI sous Windows, Ruling R485).
     pub write_delay: Duration,
+    /// Au-delà ([`SLOW_WRITE`] par défaut), une écriture qui attend encore son tour dans la file,
+    /// ou un tour tenu, se journalise (avertissement, Ruling R518).
+    pub slow_write: Duration,
 }
 
 impl Default for StoreOptions {
@@ -221,6 +227,7 @@ impl Default for StoreOptions {
         StoreOptions {
             busy_timeout: BUSY_TIMEOUT,
             write_delay: Duration::ZERO,
+            slow_write: SLOW_WRITE,
         }
     }
 }
@@ -292,7 +299,7 @@ impl Store {
         };
         Ok(Store {
             pool: reads,
-            writer: Arc::new(queue::Writer::new(writes)),
+            writer: Arc::new(queue::Writer::new(writes, settings.slow_write)),
             backup: backup.map(Arc::new),
             changes: tokio::sync::broadcast::channel(spaces::CHANGES_CAPACITY).0,
         })
@@ -335,23 +342,24 @@ impl Store {
         Ok(all)
     }
 
-    /// Les écritures qui attendent leur tour dans la file. Sert aux tests.
-    #[doc(hidden)]
+    /// Les écritures qui attendent leur tour dans la file. Pour les tests seulement (fonction
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
     pub fn queued_writes(&self) -> usize {
         self.writer.queued()
     }
 
     /// Prend un tour de la file, dans la voie de la tâche, et le garde tant que la garde vit :
-    /// aucune autre écriture du store ne passe pendant ce temps. Sert aux tests, pour mettre
-    /// des écritures en file dans un ordre connu.
-    #[doc(hidden)]
+    /// aucune autre écriture du store ne passe pendant ce temps. Pour les tests seulement
+    /// (fonction `test-hooks`), qui mettent ainsi des écritures en file dans un ordre connu.
+    #[cfg(feature = "test-hooks")]
     pub async fn hold_writes(&self) -> WritesHeld {
         WritesHeld(self.writer.turn(queue::Lane::caller()).await)
     }
 }
 
 /// Un tour de la file tenu par un test ([`Store::hold_writes`]) : le lâcher le rend.
-#[doc(hidden)]
+#[cfg(feature = "test-hooks")]
 pub struct WritesHeld(#[allow(dead_code)] queue::Turn);
 
 /// `(journal_mode, synchronous, foreign_keys, busy_timeout, query_only)` de la connexion.

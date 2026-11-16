@@ -177,6 +177,43 @@ async fn eight_write_loops_of_a_reader_fail_nobody_and_let_typing_through() {
     );
 }
 
+/// Un tour tenu trop longtemps se journalise (Ruling R518) : l'écriture qui l'attend, une fois
+/// le seuil passé (`StoreOptions::slow_write`), puis le tour, en tombant. Sans cela, un tour tenu
+/// à tort gèlerait toutes les écritures sans rien dire.
+#[tokio::test]
+async fn a_turn_held_too_long_is_logged() {
+    let logs = common::Logs::capture();
+    let dir = common::tmp::TestDir::new();
+    let options = mementum_store::StoreOptions {
+        slow_write: std::time::Duration::from_millis(50),
+        ..Default::default()
+    };
+    let store = mementum_store::Store::open_with(&dir.path().join("m.db"), options)
+        .await
+        .unwrap();
+    let held = store.hold_writes().await;
+    let write = tokio::spawn({
+        let store = store.clone();
+        async move { store.create_space("Après", None).await }
+    });
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !logs
+        .text()
+        .contains("une écriture attend son tour depuis plus de")
+    {
+        assert!(tokio::time::Instant::now() < deadline, "{}", logs.text());
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    drop(held);
+    write.await.unwrap().unwrap();
+    assert!(
+        logs.text().contains("tour d'écriture tenu"),
+        "{}",
+        logs.text()
+    );
+    store.close().await;
+}
+
 /// Une requête du routeur, avec l'hôte et, s'il y en a un, ce cookie : son statut, si elle répond
 /// avant [`WAIT`] ; `None` sinon.
 async fn answer(
@@ -205,7 +242,7 @@ async fn anonymous_requests_write_nothing() {
     use base64::Engine;
     let t = open_app_with(mementum_store::StoreOptions {
         busy_timeout: std::time::Duration::from_secs(60),
-        write_delay: std::time::Duration::ZERO,
+        ..Default::default()
     })
     .await;
     let _olga = t.signed_up("olga@exemple.fr", "Olga").await;
