@@ -611,8 +611,12 @@ pub(crate) async fn put_mmd(
     // Premier contrôle : les refus, avant que le corps soit lu.
     state.node_access(&user, id, Action::Edit).await?;
     let body = body?;
-    // Ruling R383 : la lecture et l'estimation, hors des fils du serveur, à leur tour.
-    let blocks = state.mmd_reads.run(move || read_mmd(&body)).await??;
+    // Ruling R383 : la lecture et l'estimation, hors des fils du serveur, à leur tour, les
+    // comptes tour à tour (Ruling R436).
+    let blocks = state
+        .mmd_reads
+        .run(user.id, move || read_mmd(&body))
+        .await??;
     // Ruling R200 : une écriture du serveur à la fois par page, comme la restauration d'une
     // version. Le verrou se prend une fois le corps lu, et ce qui suit va au bout, verrou
     // tenu, même si le client coupe.
