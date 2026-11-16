@@ -131,8 +131,14 @@ fn measure<R>(read: impl FnOnce() -> R, answer: impl Fn(&R) -> usize) -> Cost {
     }
 }
 
-/// Le coût d'une lecture : octets alloués, pic et réponse de la première, meilleur temps de trois
-/// (une seule si elle dépasse [`LONG_READ`]).
+/// Le coût d'une lecture : octets alloués et pic de la première, meilleur temps de trois (une
+/// seule si elle dépasse [`LONG_READ`]). Pour les sondes des relecteurs.
+#[allow(dead_code)]
+pub fn cost<R>(read: impl Fn() -> R) -> Cost {
+    cost_answering(read, |_| 0)
+}
+
+/// Comme [`cost`], avec la taille de la réponse de la première lecture.
 fn cost_answering<R>(read: impl Fn() -> R, answer: impl Fn(&R) -> usize) -> Cost {
     let mut cost = measure(&read, &answer);
     for _ in 0..2 {
