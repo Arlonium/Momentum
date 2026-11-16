@@ -356,6 +356,24 @@ test("a_formula_computed_past_the_time_of_a_frame_is_attached_at_the_next_one", 
   expect(blockOf(m, "f").querySelector(".katex")).not.toBeNull();
 });
 
+test("formulas_never_shown_are_attached_before_printing", async () => {
+  // À l'impression, une formule jamais venue à l'écran s'imprimait en texte source (re-relecture de
+  // C2, N3) : toutes s'attachent dans l'événement même, avant la mise en page de l'impression.
+  stubObserver();
+  const m = await mountEditor({
+    blocks: [
+      { id: "a", type: "equation", props: { latex: "\\sum_{i=1}^{3} i" } },
+      { id: "b", type: "paragraph", content: ["Avec ", { type: "math", props: { latex: "\\sqrt{3}" } }] },
+    ],
+  });
+  await flush();
+  expect(m.host.querySelectorAll(".katex")).toHaveLength(0);
+  window.dispatchEvent(new Event("beforeprint"));
+  expect(blockOf(m, "a").querySelector(".katex")).not.toBeNull();
+  expect(blockOf(m, "b").querySelector(".katex")).not.toBeNull();
+  expect(m.host.querySelector(".mm-tex-pending")).toBeNull();
+});
+
 test("a_formula_from_the_cache_waits_for_the_screen", async () => {
   // Au retour sur une page, ses formules sont dans le cache : elles attendent l'écran comme les
   // autres (relecture de C2 : 150 formules s'attachaient d'un coup, 28 s d'onglet figé).

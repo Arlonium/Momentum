@@ -14,6 +14,7 @@
 // Une formule refusée ou invalide se montre en texte (`dir="ltr"`, jamais du HTML), avec ce qui
 // l'empêche (`refusal`).
 import { useLayoutEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { depthAllowance, isTypeset, refusal, TOO_NESTED, typeset, type TexOutcome } from "./tex";
 
 /**
@@ -107,8 +108,43 @@ function enqueue(element: Element, measure: Job["measure"], attach: () => void):
 const waiting = new Map<Element, () => void>();
 let observer: IntersectionObserver | null = null;
 
+/**
+ * À l'impression, toutes les formules de la page, même celles qui ne sont jamais venues à l'écran
+ * (elles s'imprimaient en texte source : re-relecture de C2, N3), attachées dans l'événement même,
+ * avant que le navigateur mette la page en forme pour l'impression, quoi qu'en coûte la mise en page.
+ */
+function attachAll(): void {
+  for (const [element, shown] of [...waiting]) {
+    waiting.delete(element);
+    observer?.unobserve(element);
+    shown();
+  }
+  flushSync(() => {
+    for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
+      if (job.cancelled) continue;
+      job.measure();
+      job.attach();
+    }
+  });
+}
+
+let printWatched = false;
+function watchPrinting(): void {
+  if (printWatched || typeof window === "undefined") return;
+  printWatched = true;
+  window.addEventListener("beforeprint", attachAll);
+  try {
+    window.matchMedia("print").addEventListener("change", (event) => {
+      if (event.matches) attachAll();
+    });
+  } catch {
+    // Sans `matchMedia` (un test), `beforeprint` suffit.
+  }
+}
+
 /** Appelle `onShown` quand `element` est à l'écran ou près (400 px) ; tout de suite sans observateur. */
 function whenShown(element: Element, onShown: () => void): () => void {
+  watchPrinting();
   if (typeof IntersectionObserver !== "function") {
     onShown();
     return () => {};
