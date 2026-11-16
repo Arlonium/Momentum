@@ -7,6 +7,14 @@
 // ce que l'onglet tape ensuite reste local. L'éditeur refuse donc lui-même toute transaction qui
 // pose un tel lien (la barre du lien, un collage, un lien reconnu en tapant), et le dit. Ce qui
 // arrive du document partagé (y-prosemirror) n'est jamais refusé : le serveur l'a déjà jugé.
+//
+// Limite connue (re-relecture du tour 6, écrite au registre du lot 3, tour de correction 7) : le
+// filtre juge les marques ajoutées et les contenus insérés, pas une coupure de paragraphe (Entrée)
+// au milieu d'un lien trop long déjà présent. ProseMirror n'y ajoute aucune marque et n'insère
+// aucun contenu marqué, mais y-prosemirror écrit le texte d'après la coupure dans un texte neuf,
+// marque comprise : le serveur la refuse, et l'onglet reste dans la boucle dite plus haut. Ce
+// chemin ne s'atteint plus que par un lien trop long reçu avant la relecture du stockage qui le
+// retire (Rulings R431, R490, R493) : une page servie n'en porte plus.
 import { createExtension } from "@blocknote/core";
 import { Plugin, PluginKey, type Transaction } from "prosemirror-state";
 import { ySyncPluginKey } from "y-prosemirror";

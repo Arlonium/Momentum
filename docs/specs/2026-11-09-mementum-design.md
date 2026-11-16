@@ -706,6 +706,7 @@ Un seul outil `update_page` accepte une liste d'opérations, **atomique** (jusqu
 - **Le contenu IA en attente est inerte** : pas de chargement d'image ou d'embed externe, pas d'aperçu de lien, pas de mention ni de notification, pas de déclenchement d'automatisation tant qu'il n'est pas accepté. C'est la leçon de l'exfiltration PromptArmor chez Notion, corrigée le 07/01/2026.
 - **« Annuler l'exécution »** retire toutes les transactions d'un `run_id`. Le contenu IA porte un badge visible et apparaît dans l'historique (agent, modèle, humain responsable).
 - **Contre-pression** : écriture bloc par bloc, débit limité par agent, présence de l'agent regroupée (~300 ms) et affichée « 🤖 Agent X écrit… ».
+  - *En P1* (Rulings R200, R435, R494, R535) : le serveur écrit une page une requête à la fois (`PUT /mmd`, restauration d'une version). La file d'une page tient 8 requêtes au plus, dont 2 d'un même compte (celle qui écrit et celle qui attend) ; au-delà, la requête est refusée sur-le-champ, `429 page_busy` avec `Retry-After: 1`. **Un agent qui envoie trois `PUT /mmd` de front sur une même page reçoit donc un `429` pour le troisième** : c'est voulu (un compte ne ferme jamais la page aux autres rédacteurs). Un agent écrit une page une requête à la fois (il attend la réponse avant d'envoyer la suivante), ou réessaie après `Retry-After`.
 
 ### 6.5 Serveur MCP intégré
 - **Transport** : Streamable HTTP sur `/mcp`, sans état, cible spec MCP **2026-07-28** et rétrocompatible avec la 2025-11-25. `/mcp/readonly` expose seulement la lecture.
