@@ -86,7 +86,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use mementum_md::MAX_DEPTH;
+use mementum_md::{MAX_COLOR_BYTES, MAX_DEPTH, MAX_HREF_BYTES};
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_BINARY_REF_NUMBER,
     BLOCK_ITEM_DELETED_REF_NUMBER, BLOCK_ITEM_DOC_REF_NUMBER, BLOCK_ITEM_EMBED_REF_NUMBER,
@@ -169,6 +169,117 @@ struct Insert {
     /// La valeur d'une entrée `id` posée sur un type désigné par son id (l'attribut `id` d'un
     /// élément XML), quand c'est une seule chaîne : l'identifiant de bloc qu'il prend.
     block_id: Option<String>,
+    /// Pour une marque de texte que la page ne garde pas (Ruling R431) : pourquoi.
+    mark: Option<MarkRefusal>,
+}
+
+/// Une marque de texte (`ItemContent::Format`) que la page ne garde pas (Ruling R431).
+enum MarkRefusal {
+    /// Une clé hors du schéma des blocs (ses premiers caractères, pour le message).
+    Unknown(String),
+    /// Une valeur plus longue que sa borne.
+    TooLong {
+        key: &'static str,
+        bytes: usize,
+        bound: usize,
+    },
+}
+
+impl std::fmt::Display for MarkRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MarkRefusal::Unknown(key) => write!(
+                f,
+                "la mise à jour pose une marque de texte hors du schéma des blocs (« {key} »)"
+            ),
+            MarkRefusal::TooLong { key, bytes, bound } => write!(
+                f,
+                "la mise à jour pose une marque « {key} » trop longue ({bytes} octets, pour \
+                 {bound} au plus)"
+            ),
+        }
+    }
+}
+
+/// Ce que porte la valeur d'une marque de texte du schéma.
+#[derive(Clone, Copy)]
+enum Carried {
+    /// Rien : `{}` (ou `null`, qui retire la marque).
+    Nothing,
+    /// Une couleur, `{"stringValue": "…"}` : [`MAX_COLOR_BYTES`] octets au plus.
+    Color,
+    /// Une adresse, `{"href": "…"}` : [`MAX_HREF_BYTES`] octets au plus.
+    Href,
+}
+
+/// Les marques de texte qu'une page garde (Ruling R431) : celles que BlockNote 0.57 écrit, les
+/// styles du registre (`mementum_schema::STYLES`) et le lien. y-prosemirror écrit chacune sous le
+/// nom de son type (aucune ne se recouvre : test `marks_are_those_of_the_server` du client).
+const MARKS: &[(&str, Carried)] = &[
+    ("bold", Carried::Nothing),
+    ("italic", Carried::Nothing),
+    ("underline", Carried::Nothing),
+    ("strike", Carried::Nothing),
+    ("code", Carried::Nothing),
+    ("textColor", Carried::Color),
+    ("backgroundColor", Carried::Color),
+    ("link", Carried::Href),
+];
+
+/// Ce qu'une valeur de marque, en JSON tel que la mise à jour l'écrit, peut prendre au-delà de ce
+/// qu'elle porte : `{"stringValue":""}` (18 octets), `{"href":""}` (11), `{}`, `null`.
+const MARK_VALUE_SLACK: usize = 32;
+
+/// Caractères d'une clé inconnue cités dans un refus.
+const QUOTED_KEY_CHARS: usize = 40;
+
+/// La marque de texte du schéma de clé `key` ([`MARKS`]), ou le refus d'une clé inconnue (Ruling
+/// R431), qui n'en cite que les premiers caractères.
+fn known_mark(key: &str) -> Result<(&'static str, Carried), MarkRefusal> {
+    match MARKS.iter().find(|(k, _)| *k == key) {
+        Some(&mark) => Ok(mark),
+        None => {
+            let end = key
+                .char_indices()
+                .nth(QUOTED_KEY_CHARS)
+                .map_or(key.len(), |(i, _)| i);
+            let cut = if end < key.len() { "…" } else { "" };
+            Err(MarkRefusal::Unknown(format!("{}{cut}", &key[..end])))
+        }
+    }
+}
+
+/// Pourquoi la page ne garde pas une marque du schéma de valeur `value` (JSON), ou `None` si elle
+/// la garde (Ruling R431) : une valeur plus longue que sa borne. Une valeur illisible est laissée à
+/// yrs, qui refuse alors la mise à jour.
+fn value_refusal((name, carried): (&'static str, Carried), value: &str) -> Option<MarkRefusal> {
+    let (field, bound) = match carried {
+        Carried::Nothing => (None, 0),
+        Carried::Color => (Some("stringValue"), MAX_COLOR_BYTES),
+        Carried::Href => (Some("href"), MAX_HREF_BYTES),
+    };
+    if value.len() > bound + MARK_VALUE_SLACK {
+        return Some(MarkRefusal::TooLong {
+            key: name,
+            bytes: value.len(),
+            bound: bound + MARK_VALUE_SLACK,
+        });
+    }
+    // Ce que porte la valeur : la chaîne sous `field`, ou la valeur elle-même si c'est une chaîne
+    // (`mementum-crdt` lit l'une et l'autre).
+    let carried = match (field, serde_json::from_str::<serde_json::Value>(value)) {
+        (Some(_), Ok(serde_json::Value::String(s))) => s.len(),
+        (Some(field), Ok(serde_json::Value::Object(map))) => match map.get(field) {
+            Some(serde_json::Value::String(s)) => s.len(),
+            _ => 0,
+        },
+        _ => 0,
+    };
+    (carried > bound).then_some(MarkRefusal::TooLong {
+        key: name,
+        bytes: carried,
+        bound,
+    })
 }
 
 /// Ce que contient une mise à jour, lu sans l'appliquer.
@@ -430,6 +541,38 @@ impl Shape {
         Ok(())
     }
 
+    /// Refuse (`Structure`), sans rien appliquer, une mise à jour de client qui pose une marque de
+    /// texte que la page ne garde pas (Ruling R431, voir [`MARKS`]). Une marque déjà connue de la
+    /// page (yrs l'ignore) n'y compte pas.
+    pub(crate) fn check_marks(&self, state: &StateVector) -> Result<(), CrdtError> {
+        for (client, structs) in &self.clients {
+            let floor = state.get(&ClientID::new(*client));
+            for s in structs {
+                if let Kind::Insert(Insert {
+                    mark: Some(refusal),
+                    ..
+                }) = &s.kind
+                    && s.id.1 + s.len > floor
+                {
+                    return Err(CrdtError::Structure(refusal.to_string()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Les marques de texte de la mise à jour que la page ne garde pas (Ruling R431) : relue du
+    /// stockage, la page les supprime (`PageDoc::apply_update`).
+    pub(crate) fn outside_marks(&self) -> IdSet {
+        let mut set = IdSet::new();
+        for (s, insert) in self.inserts() {
+            if insert.mark.is_some() {
+                set.insert(ID::new(ClientID::new(s.id.0), s.id.1), s.len);
+            }
+        }
+        set
+    }
+
     /// Vrai si la mise à jour, donnée à une page dont le vecteur d'état est
     /// `state`, laisserait un trou dans les horloges d'un de ses clients
     /// (Ruling R131). yrs intégrerait ses blocs en laissant le trou, quand
@@ -688,6 +831,7 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     type_ref: content.type_ref,
                     tag: content.tag,
                     block_id: content.string,
+                    mark: content.mark,
                 }),
             }))
         }
@@ -753,11 +897,14 @@ struct Content {
     tag: Option<String>,
     /// Pour un contenu `Any` d'une seule chaîne, quand on l'a demandée.
     string: Option<String>,
+    /// Pour une marque de texte que la page ne garde pas, pourquoi (Ruling R431).
+    mark: Option<MarkRefusal>,
 }
 
 /// Contenu d'un élément, lu comme `ItemContent::decode` de yrs : sa longueur
 /// Yjs et, pour un type, sa référence (et sa balise pour un élément XML). Avec
-/// `want_string`, un contenu `Any` fait d'une seule chaîne est rendu aussi.
+/// `want_string`, un contenu `Any` fait d'une seule chaîne est rendu aussi. Pour une marque de
+/// texte que la page ne garde pas, pourquoi (Ruling R431).
 fn read_content(
     c: &mut Cursor,
     info: u8,
@@ -769,6 +916,7 @@ fn read_content(
         type_ref: None,
         tag: None,
         string: None,
+        mark: None,
     };
     content.len = match info & 0b1111 {
         BLOCK_ITEM_DELETED_REF_NUMBER => c.read_var()?,
@@ -795,8 +943,12 @@ fn read_content(
             1
         }
         BLOCK_ITEM_FORMAT_REF_NUMBER => {
-            c.read_string()?;
-            c.read_string()?;
+            let mark = known_mark(c.read_string()?);
+            let value = c.read_string()?;
+            content.mark = match mark {
+                Ok(mark) => value_refusal(mark, value),
+                Err(refusal) => Some(refusal),
+            };
             1
         }
         BLOCK_ITEM_TYPE_REF_NUMBER => {

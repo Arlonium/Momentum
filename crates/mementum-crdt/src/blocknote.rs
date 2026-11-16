@@ -25,7 +25,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use mementum_md::{
-    Block, Content, Inline, MAX_COLOR_BYTES, MAX_DEPTH, PropValue, Props, Styles, normalize,
+    Block, Content, Inline, MAX_COLOR_BYTES, MAX_DEPTH, MAX_HREF_BYTES, PropValue, Props, Styles,
+    normalize,
 };
 use mementum_schema::{ContentKind, PropDefault, PropSpec, PropType, block};
 use uuid::Uuid;
@@ -479,7 +480,16 @@ pub(crate) fn read_inline<T: ReadTxn>(txn: &T, element: &XmlElementRef) -> Vec<I
 /// lien est lue en place et copiée une fois par lien ; une plage sous la même
 /// marque de lien que la précédente (le même objet du document) va dans son
 /// lien sans comparer les adresses ; une couleur plus longue que
-/// [`MAX_COLOR_BYTES`] est lue absente, comme `mementum_md::parse` la refuse.
+/// [`MAX_COLOR_BYTES`], ou une adresse plus longue que [`MAX_HREF_BYTES`]
+/// (Ruling R431), est lue absente, comme `mementum_md::parse` la refuse. La
+/// page n'en garde d'ailleurs pas : relue du stockage, une telle marque est
+/// supprimée (`PageDoc::apply_update`), et la garde la refuse d'un client.
+///
+/// `diff` est la seule lecture du contenu d'un texte que yrs 0.28 rende publique
+/// (les champs d'un élément sont privés à yrs) : il recopie les marques en
+/// vigueur à chaque plage. Une page ne portant que les huit marques du schéma
+/// (Ruling R431), la copie d'une plage est bornée : huit entrées au plus, dont
+/// les valeurs sont partagées (`Arc`), jamais recopiées.
 /// Avant, chaque plage recopiait l'une et l'autre, et comparait l'adresse :
 /// une couleur ou une adresse longue sur des plages alternées coûtait le
 /// produit de sa longueur par leur nombre, en mémoire ou en temps.
@@ -531,7 +541,7 @@ fn styles_of(attrs: Option<&Attrs>) -> (Styles, Option<&str>) {
             "code" => styles.code = on,
             "textColor" => styles.text_color = color(value).map(str::to_string),
             "backgroundColor" => styles.background_color = color(value).map(str::to_string),
-            "link" => link = map_str(value, "href"),
+            "link" => link = map_str(value, "href").filter(|h| h.len() <= MAX_HREF_BYTES),
             _ => {}
         }
     }

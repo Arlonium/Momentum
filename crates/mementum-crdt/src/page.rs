@@ -153,10 +153,30 @@ impl PageDoc {
     /// `PageDoc` est à jeter : l'appelant le recharge depuis ses mises à jour
     /// stockées (la plupart des refus laissent le document intact, mais pas
     /// tous ; l'appelant n'a pas à les distinguer).
+    ///
+    /// Une marque de texte que la garde refuserait d'un client (Ruling R431 : une clé hors du
+    /// schéma des blocs, une valeur trop longue), écrite au journal avant cette règle, est
+    /// supprimée du document dans la même transaction : le serveur ne garde jamais une marque
+    /// qu'il refuserait d'un client, et ce qu'il donne aux clients (l'état complet, ce qui leur
+    /// manque) porte cette suppression, qu'ils appliquent à leur tour. La relecture du journal
+    /// la refait chaque fois, de la même façon, dans n'importe quel ordre.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
         let mut txn = self.doc.transact_mut();
         let (shape, decoded) = self.read(&txn, update, false)?;
-        self.integrate(&mut txn, &shape, decoded)
+        self.integrate(&mut txn, &shape, decoded)?;
+        let outside = shape.outside_marks();
+        if !outside.is_empty() {
+            // Une mise à jour sans bloc, qui ne porte que ces suppressions : aucun client (`0`),
+            // puis le jeu de suppressions. Les marques sont dans la page (intégrées à l'instant,
+            // ou déjà là) : rien ne reste en attente.
+            let mut deletions = vec![0];
+            deletions.extend(outside.encode_v1());
+            let deletions =
+                Update::decode_v1(&deletions).map_err(|e| CrdtError::Decode(e.to_string()))?;
+            txn.apply_update(deletions)
+                .map_err(|e| CrdtError::Decode(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Intègre une mise à jour (v1) reçue d'un client : comme
@@ -168,6 +188,11 @@ impl PageDoc {
     /// longueur nulle (Ruling R208), et (`Structure`) si elle laisse une
     /// suppression en attente que la page n'avait pas (Ruling R207, filet de
     /// R198 : `PageDoc::awaits` retient d'abord ce qu'un client honnête envoie).
+    /// Refusée enfin (`Structure`, Ruling R431) si elle pose une marque de texte
+    /// hors du schéma des blocs, ou d'une valeur plus longue que sa borne : un
+    /// client du schéma de la page n'en écrit pas (un client d'un autre schéma est
+    /// en lecture seule), et y-prosemirror supprimerait chez tous le texte qui la
+    /// porte.
     ///
     /// Ce refus n'est connu qu'après l'application (voir le module `guard`) :
     /// comme après toute erreur, le `PageDoc` est à jeter.
@@ -372,7 +397,12 @@ impl PageDoc {
             Shape::read(update)?
         };
         let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
-        shape.check(&txn.state_vector())?;
+        let state = txn.state_vector();
+        shape.check(&state)?;
+        if from_client {
+            // Ruling R431 : une marque de texte hors du schéma, ou trop longue.
+            shape.check_marks(&state)?;
+        }
         Ok((shape, decoded))
     }
 

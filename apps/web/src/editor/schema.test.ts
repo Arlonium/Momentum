@@ -114,6 +114,22 @@ describe("registry_matches_blocknote", () => {
     expect(Object.keys(editor.schema.styleSchema).sort()).toEqual([...registry.styles].sort());
   });
 
+  // Ruling R431 : la garde des mises à jour (`mementum-crdt`, `guard.rs`, `MARKS`) refuse toute
+  // marque de texte hors des styles du registre et du lien, et borne leurs valeurs. y-prosemirror
+  // écrit chaque marque sous le nom de son type, sauf une marque qui ne s'exclut pas elle-même,
+  // écrite `nom--empreinte` : la garde refuserait alors toute frappe sous elle.
+  test("les marques sont celles que garde le serveur, chacune sous son nom", () => {
+    const marks = editor.pmSchema.marks;
+    expect(Object.keys(marks).sort()).toEqual([...registry.styles, "link"].sort());
+    for (const [name, type] of Object.entries(marks)) {
+      expect(type.excludes(type), `${name} s'exclut lui-même`).toBe(true);
+    }
+    // Ce que portent leurs valeurs, que la garde borne : une couleur, une adresse.
+    expect(Object.keys(marks.textColor.spec.attrs ?? {})).toEqual(["stringValue"]);
+    expect(Object.keys(marks.backgroundColor.spec.attrs ?? {})).toEqual(["stringValue"]);
+    expect(Object.keys(marks.link.spec.attrs ?? {})).toEqual(["href"]);
+  });
+
   test("les contenus en ligne sont ceux du registre", () => {
     // `text` est le texte stylé lui-même ; `hardBreak` est un nœud ProseMirror de BlockNote,
     // pas un contenu en ligne déclaré.
