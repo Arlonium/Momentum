@@ -148,6 +148,70 @@ test("a_nested_formula_never_crashes_the_tab", async ({ browser, request }) => {
   await opened.close();
 });
 
+const B = String.fromCharCode(92);
+/** `@` pour la barre oblique inverse. */
+const tex = (s: string) => s.replace(/@/g, B);
+const nest = (open: string, close: string, n: number, core = "x") => tex(open).repeat(n) + tex(core) + tex(close).repeat(n);
+/** Une liste imbriquée de `levels` niveaux, puis un élément au fond qui porte `latex` en ligne. */
+const deepList = (levels: number, latex: string) =>
+  `${Array.from({ length: levels }, (_, i) => `${"  ".repeat(i)}- niveau ${i}`).join("\n")}\n${"  ".repeat(levels)}- en ligne $${latex}$\n`;
+
+/**
+ * Des formules imbriquées sans table (ou presque) : la garde ne comptait que les tables de KaTeX, et
+ * chacune faisait planter l'onglet de qui ouvrait la page (relecture de C2, C1). Chacune est prise un
+ * peu au-dessus du seuil de plantage mesuré dans le Chromium de Playwright (registre, R525), à sa place.
+ */
+const CRASHING: [string, string][] = [
+  // 86 caractères au fond d'une liste de 25 niveaux.
+  ["mathllap_deep_in_a_list", deepList(25, nest("@mathllap{", "}", 8))],
+  ["mathllap_inline", `Avant $${nest("@mathllap{", "}", 16)}$ après\n`],
+  ["braces", `$$\n${nest("{", "a}", 300)}\n$$\n`],
+  ["smash_inline", `Avant $${nest("a@smash{", "}", 100)}$ après\n`],
+  ["vphantom", `$$\n${nest("a@vphantom{", "}", 38)}\n$$\n`],
+  ["mathreflectbox", `$$\n${nest("@mathreflectbox{", "}", 34)}\n$$\n`],
+  ["color", `$$\n${nest("@color{red}{a", "}", 145)}\n$$\n`],
+];
+
+for (const [form, mmd] of CRASHING) {
+  test(`a_formula_nested_without_tables_never_crashes_the_tab__${form}`, async ({ browser, request }) => {
+    const page = await createPage(request, { title: `Imbriquée ${form} ${unique()}` });
+    // Une formule ordinaire d'abord, qui doit s'afficher : la page est vivante, et la garde ne
+    // refuse que la formule trop profonde.
+    await putMmd(request, page.id, `$$\n\\frac{a}{b} + \\sqrt{2}\n$$\n\n${mmd}`);
+    const opened = await openWatchingCrash(browser, page.id);
+    const { p } = opened;
+    await p.locator(".mm-editor .mm-tex-why").scrollIntoViewIfNeeded();
+    await expect(p.locator(".mm-editor .mm-tex-why")).toHaveText("Formule trop imbriquée pour être affichée ici.");
+    await expect(p.locator(".mm-editor .mm-equation").first().locator(".katex")).toBeVisible();
+    expect(opened.crashed()).toBe(false);
+    await opened.close();
+  });
+}
+
+test("a_formula_allowed_at_the_top_is_text_deep_in_a_list", async ({ browser, request }) => {
+  // La part « profondeur de la page » de la garde (relecture de C2, I2) : la même formule est mise en
+  // forme en haut de la page, et montrée en texte au fond d'une liste de 25 niveaux, où elle ferait
+  // planter l'onglet si la profondeur de la page n'était pas comptée.
+  const formula = nest("@mathreflectbox{", "}", 18);
+  const page = await createPage(request, { title: `Profondeur ${unique()}` });
+  await putMmd(request, page.id, `$$\n${formula}\n$$\n\n${deepList(25, formula)}`);
+  const opened = await openWatchingCrash(browser, page.id);
+  const { p } = opened;
+  await expect(p.locator(".mm-editor .mm-equation .katex")).toBeVisible();
+  const deep = p.locator(".mm-editor .mm-math");
+  await deep.scrollIntoViewIfNeeded();
+  await expect(deep.locator(".mm-tex-why")).toHaveText("Formule trop imbriquée pour être affichée ici.");
+  // Elle est bien au fond de la page : plus de 90 éléments au-dessus d'elle.
+  const depth = await deep.locator(".mm-tex-refused").evaluate((element) => {
+    let count = 0;
+    for (let at: Element | null = element; at !== null; at = at.parentElement) count += 1;
+    return count;
+  });
+  expect(depth).toBeGreaterThan(90);
+  expect(opened.crashed()).toBe(false);
+  await opened.close();
+});
+
 test("a_formula_that_defines_never_freezes_the_tab", async ({ browser, request }) => {
   const page = await createPage(request, { title: `Définitions ${unique()}` });
   // Dix fois dix appels d'une macro qui tape 3 000 caractères : 300 000 lettres à mettre en page ; et
