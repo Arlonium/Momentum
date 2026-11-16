@@ -602,10 +602,32 @@ impl FileStore {
 
     /// Le verrou du dépôt : un seul pour « poser un contenu puis l'attacher » et pour le ménage.
     /// Il sert ceux qui l'attendent dans leur ordre d'arrivée (`tokio::sync::Mutex` est équitable).
+    #[cfg(not(test))]
     pub(crate) async fn lock(&self) -> MutexGuard<'_, ()> {
-        #[cfg(test)]
-        let _waiting = Waiting::enter(&self.dirs.waiting);
         self.dirs.lock.lock().await
+    }
+
+    /// Le verrou du dépôt, comme hors des tests, et compté (Rulings R561, R578) : une tâche ne
+    /// compte parmi celles qui l'attendent qu'à son premier `Pending`, une fois inscrite dans la
+    /// file du verrou ; elle n'y compte plus dès qu'elle l'a. Un test qui voit `n` attentes sait
+    /// donc les `n` tâches rangées, dans leur ordre d'arrivée.
+    #[cfg(test)]
+    pub(crate) async fn lock(&self) -> MutexGuard<'_, ()> {
+        use std::future::Future;
+        use std::task::Poll;
+        let mut acquire = std::pin::pin!(self.dirs.lock.lock());
+        let mut waiting = None;
+        std::future::poll_fn(|cx| match acquire.as_mut().poll(cx) {
+            Poll::Ready(guard) => {
+                waiting = None;
+                Poll::Ready(guard)
+            }
+            Poll::Pending => {
+                waiting.get_or_insert_with(|| Waiting::enter(&self.dirs.waiting));
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     /// Les tâches qui attendent le verrou du dépôt (Ruling R561, tests seulement).

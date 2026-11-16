@@ -992,15 +992,29 @@ mod tests {
 
         /// Les attaches de la page `page`, lues par une connexion à côté du serveur.
         async fn attachments_of(&self, page: Uuid) -> i64 {
-            let url = format!("sqlite:{}", self.dir.path().join("m.db").display());
-            let mut side = <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
-                .await
-                .unwrap();
-            sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE node_id = ?")
+            let mut side = self.side().await;
+            let count = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE node_id = ?")
                 .bind(page.to_string())
                 .fetch_one(&mut side)
                 .await
+                .unwrap();
+            sqlx::Connection::close(side).await.unwrap();
+            count
+        }
+
+        /// Une connexion à la base, à côté du serveur : à fermer avant [`Bench::finish`].
+        async fn side(&self) -> sqlx::SqliteConnection {
+            let url = format!("sqlite:{}", self.dir.path().join("m.db").display());
+            <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
+                .await
                 .unwrap()
+        }
+
+        /// Ferme la base, puis lâche le dossier (Ruling R344) : sous Windows, une base ouverte
+        /// ne se supprime pas, et le dossier d'un banc lâché sans cela restait dans le dossier
+        /// temporaire du système (constat m6 de la relecture).
+        async fn finish(self) {
+            self.state.store.close().await;
         }
 
         /// Attend que `n` tâches attendent le verrou du dépôt ([`WAIT`] au plus).
@@ -1063,6 +1077,7 @@ mod tests {
                 .await;
             assert_eq!(status, StatusCode::OK, "{what} : {served:?}");
             assert_eq!(served.as_ref(), CONTENT, "{what}");
+            bench.finish().await;
         }
 
         // Témoin : seule, la suppression attend au verrou, puis retire le contenu du disque.
@@ -1080,6 +1095,37 @@ mod tests {
         drop(guard);
         assert_eq!(delete.await.unwrap().0, StatusCode::NO_CONTENT);
         assert!(!bench.content_path(CONTENT).exists());
+        bench.finish().await;
+    }
+
+    /// Un client qui coupe ne lâche pas le ménage en route (Ruling R557 ; sonde 1 de la
+    /// relecture) : la requête de suppression est abandonnée (sa tâche annulée) pendant que son
+    /// ménage attend le verrou du dépôt, que le test tient ; le verrou rendu, le contenu quitte
+    /// quand même le disque, parce que le ménage est mené dans la tâche de la suppression
+    /// (`to_completion`), pas dans celle de la requête.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_sweep_goes_on_when_its_deletion_is_abandoned() {
+        const CONTENT: &[u8] = b"un contenu dont la suppression est abandonnee";
+        let bench = Bench::new().await;
+        let doomed = bench.page("Supprimée").await;
+        let (status, _) = bench.upload(doomed, "x.txt", CONTENT).await.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        bench.trash(doomed).await;
+        let guard = bench.state.files.lock().await;
+        let delete = bench.delete(doomed);
+        bench.waiting_for_the_lock(1).await;
+        delete.abort();
+        assert!(delete.await.unwrap_err().is_cancelled());
+        drop(guard);
+        let deadline = Instant::now() + WAIT;
+        while bench.content_path(CONTENT).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "le contenu est resté sur le disque : le ménage a été lâché avec la requête"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        bench.finish().await;
     }
 
     /// Le ménage n'affame pas les envois (Ruling R556) : il retire au plus [`SWEEP_BATCH`]
@@ -1109,10 +1155,7 @@ mod tests {
             };
             bench.state.store.attach_file(new, now_ms()).await.unwrap();
         }
-        let url = format!("sqlite:{}", bench.dir.path().join("m.db").display());
-        let mut side = <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
-            .await
-            .unwrap();
+        let mut side = bench.side().await;
         sqlx::raw_sql(
             "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
              CREATE TRIGGER witness_sweep AFTER DELETE ON files \
@@ -1145,6 +1188,8 @@ mod tests {
             before, SWEEP_BATCH,
             "contenus retirés avant l'envoi : {before}"
         );
+        sqlx::Connection::close(side).await.unwrap();
+        bench.finish().await;
     }
     /// Le ménage d'une suppression n'attend pas la rafale de qui supprime (Ruling R522 ; constat
     /// C de la re-relecture 1 de la robustesse), sur le modèle de
@@ -1161,10 +1206,7 @@ mod tests {
         let (status, _) = bench.upload(doomed, "x.txt", b"orphelin").await.unwrap();
         assert_eq!(status, StatusCode::CREATED);
         bench.trash(doomed).await;
-        let url = format!("sqlite:{}", bench.dir.path().join("m.db").display());
-        let mut side = <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
-            .await
-            .unwrap();
+        let mut side = bench.side().await;
         sqlx::raw_sql(
             "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
              CREATE TRIGGER witness_burst AFTER INSERT ON spaces \
@@ -1218,6 +1260,8 @@ mod tests {
             .unwrap();
         assert_eq!(order.len(), BURST + 1, "{order:?}");
         assert_eq!(order[0], "ménage", "{order:?}");
+        sqlx::Connection::close(side).await.unwrap();
+        bench.finish().await;
     }
 
     /// La fenêtre d'une recopie est la file d'écriture de son compte (Ruling R577 ; sonde 6 de la
@@ -1291,5 +1335,6 @@ mod tests {
             StatusCode::CREATED
         );
         assert_eq!(bench.attachments_of(target).await, 1);
+        bench.finish().await;
     }
 }
