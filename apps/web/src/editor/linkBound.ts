@@ -18,6 +18,7 @@
 import { createExtension } from "@blocknote/core";
 import { Plugin, PluginKey, type Transaction } from "prosemirror-state";
 import { ySyncPluginKey } from "y-prosemirror";
+import { announce, dismissNotice } from "./editorNotice";
 
 /** Longueur maximale, en octets, de l'adresse d'un lien : `MAX_HREF_BYTES` du serveur. */
 export const MAX_HREF_BYTES = 16 * 1024;
@@ -26,8 +27,8 @@ export const MAX_HREF_BYTES = 16 * 1024;
 export const LINK_TOO_LONG =
   "Lien trop long : une adresse s'écrit en 16 Kio au plus. Le lien n'a pas été posé.";
 
-/** Durée d'affichage du message, en millisecondes. */
-const NOTICE_MS = 6_000;
+/** La zone d'alerte du message (`editorNotice.ts`). */
+const LINK_REFUSED = "mm-link-refused";
 
 const encoder = new TextEncoder();
 
@@ -65,34 +66,6 @@ function fromDocument(tr: Transaction): boolean {
   return meta?.isChangeOrigin === true;
 }
 
-/** Le message, dans une zone d'alerte posée sur la page (hors de l'arbre de React). */
-let notice: { element: HTMLElement; timer: ReturnType<typeof setTimeout> } | null = null;
-
-function announce(): void {
-  if (typeof document === "undefined") return;
-  if (notice === null) {
-    const element = document.createElement("div");
-    element.className = "mm-link-refused";
-    element.setAttribute("role", "alert");
-    element.style.cssText =
-      "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:1000;" +
-      "padding:8px 14px;border-radius:6px;background:#2f2e2b;color:#fff;font-size:14px;";
-    element.textContent = LINK_TOO_LONG;
-    document.body.append(element);
-    notice = { element, timer: setTimeout(dismiss, NOTICE_MS) };
-  } else {
-    clearTimeout(notice.timer);
-    notice.timer = setTimeout(dismiss, NOTICE_MS);
-  }
-}
-
-function dismiss(): void {
-  if (notice === null) return;
-  clearTimeout(notice.timer);
-  notice.element.remove();
-  notice = null;
-}
-
 const linkBoundKey = new PluginKey("mementum-link-bound");
 
 /** L'extension de l'éditeur de la page. */
@@ -103,10 +76,10 @@ export const linkBound = createExtension({
       key: linkBoundKey,
       filterTransaction(tr) {
         if (!tr.docChanged || fromDocument(tr) || !addsTooLongLink(tr)) return true;
-        announce();
+        announce(LINK_REFUSED, LINK_TOO_LONG);
         return false;
       },
-      view: () => ({ destroy: dismiss }),
+      view: () => ({ destroy: () => dismissNotice(LINK_REFUSED) }),
     }),
   ],
 });
