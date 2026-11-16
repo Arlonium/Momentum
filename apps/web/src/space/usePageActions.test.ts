@@ -729,6 +729,84 @@ test("a_copy_ready_after_the_person_moved_on_does_not_take_her_away", async () =
   }
 });
 
+test("writing_by_any_way_during_the_copy_keeps_the_person_where_she_is", async () => {
+  // Re-relecture, N1 : un texte déposé depuis une autre application (sur le titre, dans un
+  // commentaire), collé par le menu du navigateur, dicté ou validé par un IME, n'envoie ni appui ni
+  // touche dans la page. Chacun de ces chemins compte pour un geste (R646 complété) : la copie ne
+  // s'ouvre pas par-dessus le texte, que l'ouverture de la page emporterait.
+  const app = await withTree([page("a")]);
+  let answer = deferred<PageNode>();
+  vi.mocked(duplicatePage).mockImplementation(() => answer.promise);
+  const copy = (id: string) => page(id, { section: "private", title: `${id.toUpperCase()} (copie)` });
+  const ways: [string, () => Event][] = [
+    ["beforeinput", () => new InputEvent("beforeinput", { inputType: "insertFromDrop", bubbles: true })],
+    ["drop", () => new Event("drop", { bubbles: true })],
+    ["paste", () => new Event("paste", { bubbles: true })],
+    ["compositionstart", () => new CompositionEvent("compositionstart", { bubbles: true })],
+  ];
+  for (const [n, [name, event]] of ways.entries()) {
+    answer = deferred<PageNode>();
+    await settle(() => void app.current.actions.duplicate("a"));
+    document.body.dispatchEvent(event());
+    const id = `c${n}`;
+    server = [...server, copy(id)];
+    await settle(() => answer.resolve(copy(id)));
+    expect(location.pathname, name).toBe("/s/space");
+    expect(app.current.actions.created, name).toBeNull();
+    expect(app.current.actions.info, name).not.toBeNull();
+  }
+
+  // Second filet : le focus dans un champ à la réponse, sans qu'aucun événement l'ait dit (un
+  // chemin qu'on n'aurait pas prévu) : la personne écrit, la copie ne s'ouvre pas.
+  const field = document.createElement("textarea");
+  document.body.append(field);
+  try {
+    answer = deferred<PageNode>();
+    await settle(() => void app.current.actions.duplicate("a"));
+    field.focus();
+    server = [...server, copy("d")];
+    await settle(() => answer.resolve(copy("d")));
+    expect(location.pathname).toBe("/s/space");
+    expect(app.current.actions.created).toBeNull();
+    // Témoin : le focus rendu, sans geste, la copie s'ouvre.
+    field.blur();
+    answer = deferred<PageNode>();
+    await settle(() => void app.current.actions.duplicate("a"));
+    server = [...server, copy("e")];
+    await settle(() => answer.resolve(copy("e")));
+    expect(location.pathname).toBe("/p/e");
+  } finally {
+    field.remove();
+  }
+});
+
+test("a_refusal_that_arrives_during_the_copy_stays_said_beside_the_news", async () => {
+  // Re-relecture, N2 : pendant la requête, un favori posé est refusé ; son message s'affiche. La
+  // copie répond ensuite, et ne s'ouvre pas (le clic du favori est un geste) : le refus reste dit, et
+  // la nouvelle de la copie prête s'affiche à côté de lui, sans le remplacer.
+  const app = await withTree([page("a"), page("b")]);
+  const answer = deferred<PageNode>();
+  vi.mocked(duplicatePage).mockImplementation(() => answer.promise);
+  await settle(() => void app.current.actions.duplicate("a"));
+  document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+  await settle(() => app.current.actions.favoriteRefused(notFound(), "b", true));
+  const refused = "Le favori n'a pas pu être ajouté. Page introuvable";
+  expect(app.current.actions.notice).toBe(refused);
+  const copy = page("c", { section: "private", title: "A (copie)" });
+  server = [...server, copy];
+  await settle(() => answer.resolve(copy));
+  expect(app.current.actions.notice).toBe(refused);
+  expect(app.current.actions.info).toBe("La copie « \u2068A (copie)\u2069 » est prête, dans « Privé ».");
+  // Un refus qui arrive après la nouvelle la remplace, comme avant : il dit ce qui ne va pas.
+  await settle(() => app.current.actions.favoriteRefused(notFound(), "b", false));
+  expect(app.current.actions.notice).toBe("Le favori n'a pas pu être retiré. Page introuvable");
+  expect(app.current.actions.info).toBeNull();
+  // Et la navigation suivante emporte les deux.
+  await app.rerender({ pathname: "/p/a" });
+  expect(app.current.actions.notice).toBeNull();
+  expect(app.current.actions.info).toBeNull();
+});
+
 test("a_lost_answer_says_the_copy_may_have_been_made", async () => {
   // La réponse s'est perdue en route (réseau coupé, mise en veille, mandataire) : le serveur mène
   // la copie au bout même si la requête est abandonnée (S6). Ne pas dire qu'elle a échoué, ni

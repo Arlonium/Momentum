@@ -73,10 +73,18 @@ function creationRefusal(error: unknown): string {
 }
 
 /**
- * Suit, à partir de maintenant, les gestes de la personne : un appui (`pointerdown`) ou une touche
- * (`keydown`, hors de la répétition d'une touche déjà tenue), n'importe où dans le document, en
- * capture. Le relâchement du clic ou de la touche qui vient de demander l'action (`pointerup`,
- * `keyup`) n'en est pas un. `moved()` dit s'il y en a eu un ; `stop()` retire les écouteurs (R646).
+ * Ce qui compte pour un geste de la personne (R646) : un appui, une touche (hors de la répétition
+ * d'une touche déjà tenue), et tout ce qui écrit sans eux, un texte déposé depuis une autre
+ * application, collé par le menu du navigateur, dicté ou composé par un IME (`beforeinput`, `drop`,
+ * `paste`, `compositionstart`). Ni ProseMirror ni les champs n'en émettent pour un changement venu
+ * du réseau. Le relâchement du clic ou de la touche qui vient de demander l'action (`pointerup`,
+ * `keyup`) n'en est pas un.
+ */
+const GESTURES = ["pointerdown", "keydown", "beforeinput", "drop", "paste", "compositionstart"];
+
+/**
+ * Suit, à partir de maintenant, les gestes de la personne (`GESTURES`), n'importe où dans le
+ * document, en capture. `moved()` dit s'il y en a eu un ; `stop()` retire les écouteurs.
  */
 function watchGestures(): { moved: () => boolean; stop: () => void } {
   let moved = false;
@@ -84,15 +92,29 @@ function watchGestures(): { moved: () => boolean; stop: () => void } {
     if (event instanceof KeyboardEvent && event.repeat) return;
     moved = true;
   };
-  document.addEventListener("pointerdown", gesture, true);
-  document.addEventListener("keydown", gesture, true);
+  for (const type of GESTURES) document.addEventListener(type, gesture, true);
   return {
     moved: () => moved,
     stop: () => {
-      document.removeEventListener("pointerdown", gesture, true);
-      document.removeEventListener("keydown", gesture, true);
+      for (const type of GESTURES) document.removeEventListener(type, gesture, true);
     },
   };
+}
+
+/**
+ * La personne écrit-elle quelque part (un champ, un texte modifiable : le titre, l'éditeur, un
+ * commentaire) ? Second filet de R646, regardé à la réponse : le focus dans un champ dit qu'un
+ * texte est peut-être en cours, par un chemin qu'aucun écouteur n'aurait vu.
+ */
+function typing(): boolean {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return false;
+  return (
+    active.isContentEditable ||
+    active instanceof HTMLInputElement ||
+    active instanceof HTMLTextAreaElement ||
+    active instanceof HTMLSelectElement
+  );
 }
 
 /**
@@ -204,16 +226,18 @@ export function usePageActions({
   isStale,
   caughtUp,
 }: Inputs): PageActions {
-  /** Le message du pied de la barre latérale : un refus (`error`), ou une nouvelle (`info`). */
-  const [message, setMessage] = useState<{ text: string; tone: "error" | "info" } | null>(null);
-  /** Pose un refus, ou efface le message (`null`), quel qu'il soit. */
-  const setNotice = useCallback(
-    (text: string | null) => setMessage(text === null ? null : { text, tone: "error" }),
-    [],
-  );
-  useEffect(() => setMessage(null), [pathname]);
-  const notice = message?.tone === "error" ? message.text : null;
-  const info = message?.tone === "info" ? message.text : null;
+  /** Le refus de la dernière action, et la nouvelle d'une copie prête (R646), chacun à sa place. */
+  const [notice, setRefusal] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  /**
+   * Pose un refus, ou efface (`null`) les deux messages au départ d'une action. Un refus remplace la
+   * nouvelle : il dit ce qui ne va pas ; la nouvelle, elle, ne remplace jamais un refus.
+   */
+  const setNotice = useCallback((text: string | null) => {
+    setRefusal(text);
+    setInfo(null);
+  }, []);
+  useEffect(() => setNotice(null), [pathname, setNotice]);
   const [created, setCreated] = useState<string | null>(null);
   const titleFocused = useCallback(() => setCreated(null), []);
   const open = useRef(activeId);
@@ -284,11 +308,12 @@ export function usePageActions({
         // Ses sous-pages ne sont pas dans la réponse : l'arbre est relu (le canal de l'espace le
         // ferait aussi, mais il peut être tombé).
         reload();
-        // Un geste depuis la demande (un brouillon tapé, un menu ouvert, un clic ailleurs) : ouvrir
-        // la copie démonterait la page, avec ses brouillons, ou prendrait le focus sous les doigts.
-        if (location.pathname !== from || gestures.moved()) {
-          const text = `La copie « ${isolate(copy.title)} » est prête, ${placeOf(copy)}.`;
-          setMessage({ text, tone: "info" });
+        // Un geste depuis la demande (un brouillon tapé ou déposé, un menu ouvert, un clic
+        // ailleurs), ou le focus dans un champ : ouvrir la copie démonterait la page, avec ses
+        // brouillons et son titre pas encore enregistré, ou prendrait le focus sous les doigts. Un
+        // refus arrivé pendant la requête reste dit : la nouvelle se pose à côté.
+        if (location.pathname !== from || gestures.moved() || typing()) {
+          setInfo(`La copie « ${isolate(copy.title)} » est prête, ${placeOf(copy)}.`);
           return;
         }
         setCreated(copy.id);
