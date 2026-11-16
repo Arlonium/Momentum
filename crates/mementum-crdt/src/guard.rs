@@ -203,7 +203,7 @@ impl std::fmt::Display for MarkRefusal {
 
 /// Ce que porte la valeur d'une marque de texte du schéma.
 #[derive(Clone, Copy)]
-enum Carried {
+pub(crate) enum Carried {
     /// Rien : `{}` (ou `null`, qui retire la marque).
     Nothing,
     /// Une couleur, `{"stringValue": "…"}` : [`MAX_COLOR_BYTES`] octets au plus.
@@ -215,7 +215,7 @@ enum Carried {
 /// Les marques de texte qu'une page garde (Ruling R431) : celles que BlockNote 0.57 écrit, les
 /// styles du registre (`mementum_schema::STYLES`) et le lien. y-prosemirror écrit chacune sous le
 /// nom de son type (aucune ne se recouvre : test `marks_are_those_of_the_server` du client).
-const MARKS: &[(&str, Carried)] = &[
+pub(crate) const MARKS: &[(&str, Carried)] = &[
     ("bold", Carried::Nothing),
     ("italic", Carried::Nothing),
     ("underline", Carried::Nothing),

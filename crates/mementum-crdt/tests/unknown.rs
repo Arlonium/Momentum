@@ -522,3 +522,70 @@ fn foreign_text_embed_passes_through() {
         ]
     );
 }
+
+/// Les plages du texte d'un nœud étranger : (texte, marques triées).
+fn foreign_runs<T: ReadTxn>(txn: &T) -> Vec<(String, Vec<(String, String)>)> {
+    let widget = find_element(txn, "futureWidget").expect("futureWidget");
+    let Some(XmlOut::Text(text)) = widget.get(txn, 0) else {
+        panic!("texte attendu")
+    };
+    text.diff(txn, YChange::identity)
+        .into_iter()
+        .map(|d| {
+            let mut marks: Vec<(String, String)> = d
+                .attributes
+                .iter()
+                .flat_map(|a| a.iter())
+                .map(|(k, v)| (k.to_string(), format!("{v:?}")))
+                .collect();
+            marks.sort();
+            (format!("{:?}", d.insert), marks)
+        })
+        .collect()
+}
+
+/// Ruling R432 : le JSON d'un nœud étranger n'écrit une marque de son texte qu'à la plage où elle
+/// change, et la réécriture la recrée sur chaque plage. Avant, chaque plage portait toutes ses
+/// marques : une adresse longue sur des plages alternées coûtait le produit de sa longueur par
+/// leur nombre (86 Mo de MMD pour 188 Ko envoyés, à la re-relecture du tour 3).
+#[test]
+fn foreign_text_marks_are_written_where_they_change() {
+    let href = "https://exemple.fr/une-adresse-qu-on-reconnait";
+    let page = page_from(|txn, root| {
+        let container = root.push_back(txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(txn, "id", "f");
+        let widget = container.push_back(txn, XmlElementPrelim::empty("futureWidget"));
+        let text = widget.push_back(txn, XmlTextPrelim::new("abcdef"));
+        let mark = |key: &str, value: Any| {
+            let mut attrs = yrs::types::Attrs::new();
+            attrs.insert(key.into(), value);
+            attrs
+        };
+        let link = Any::Map(std::sync::Arc::new(HashMap::from([(
+            "href".to_string(),
+            Any::from(href),
+        )])));
+        let bold = Any::Map(std::sync::Arc::new(HashMap::new()));
+        text.format(txn, 0, 5, mark("link", link));
+        for at in [1, 3, 5] {
+            text.format(txn, at, 1, mark("bold", bold.clone()));
+        }
+    });
+    let blocks = page.read_blocks();
+    let Some(PropValue::Str(data)) = blocks[0].props.get("data") else {
+        panic!("data attendu")
+    };
+    use base64::Engine;
+    let json = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(json.matches(href).count(), 1, "{json}");
+
+    let original = foreign_runs(&decode(&page).transact());
+    assert_eq!(original.len(), 6, "{original:?}");
+    let (_, raw) = rewritten(&page);
+    assert_eq!(foreign_runs(&raw.transact()), original);
+}

@@ -6,9 +6,12 @@
 //! un nœud posé directement dans un `blockGroup` (hors `blockContainer`) :
 //! - `attrs` : ses attributs, clés triées, types gardés (un entier reste un
 //!   entier, un flottant un flottant) ;
-//! - `content` : ses nœuds XML, `{"text": [{"insert", "attributes"?}]}` pour
-//!   un texte (`{"embed", "attributes"?}` pour un objet incorporé) et
-//!   `{"tag", "attrs", "content"}` pour un élément ;
+//! - `content` : ses nœuds XML, `{"text": [{"insert", "marks"?}]}` pour
+//!   un texte (`{"embed", "marks"?}` pour un objet incorporé) et
+//!   `{"tag", "attrs", "content"}` pour un élément. `marks` ne porte que les
+//!   marques du schéma qui changent à cette plage, avec leur valeur neuve
+//!   (`null` : retirée) ; les autres valent ce qu'elles valaient à la plage
+//!   précédente (Ruling R432) ;
 //! - `children` : toujours vide à la lecture ; les blocs imbriqués d'un nœud
 //!   dans un `blockContainer` restent des enfants du bloc. À l'écriture, ses
 //!   nœuds s'ajoutent à la suite de `content`.
@@ -16,6 +19,8 @@
 //! Limites : une valeur `Buffer` devient un tableau d'octets, un flottant non
 //! fini et un `undefined` dans un tableau deviennent `null`, un type
 //! incorporé dans un texte est perdu, une chaîne incorporée devient du texte.
+//! Seules les marques du schéma sont gardées : la page n'en porte pas d'autre
+//! (Ruling R431).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,16 +31,17 @@ use mementum_md::{Block, Content, PropValue, Props};
 use mementum_schema::block;
 use serde_json::{Map, Value};
 use yrs::any::Number;
-use yrs::types::Attrs;
 use yrs::types::text::YChange;
+use yrs::types::{Attrs, Delta};
 use yrs::{
     Any, Out, ReadTxn, Text, TransactionMut, Xml, XmlElementPrelim, XmlElementRef, XmlFragment,
-    XmlOut, XmlTextPrelim,
+    XmlOut, XmlTextPrelim, XmlTextRef,
 };
 
 use crate::blocknote::{
     BLOCK_CONTAINER, Ids, attr_string, valid_name, write_children, write_nodes,
 };
+use crate::guard::MARKS;
 
 /// Éléments XML imbriqués gardés dans `data`. Avec au plus 2 niveaux JSON par
 /// élément, 4 pour une plage de texte et [`MAX_VALUE_NESTING`] pour une
@@ -118,33 +124,8 @@ fn nodes_json<T: ReadTxn>(txn: &T, element: &XmlElementRef, depth: usize) -> Vec
     for child in element.children(txn) {
         match child {
             XmlOut::Text(text) => {
-                let runs: Vec<Value> = text
-                    .diff(txn, YChange::identity)
-                    .into_iter()
-                    .filter_map(|run| {
-                        let mut item = Map::new();
-                        match run.insert {
-                            Out::Any(Any::String(s)) => {
-                                item.insert("insert".into(), Value::String(s.to_string()))
-                            }
-                            Out::Any(other) => item.insert("embed".into(), any_json(&other, 0)),
-                            _ => return None,
-                        };
-                        if let Some(attrs) = run.attributes.filter(|a| !a.is_empty()) {
-                            let sorted: BTreeMap<String, Value> = attrs
-                                .iter()
-                                .map(|(k, v)| (k.to_string(), any_json(v, 0)))
-                                .collect();
-                            item.insert(
-                                "attributes".into(),
-                                Value::Object(sorted.into_iter().collect()),
-                            );
-                        }
-                        Some(Value::Object(item))
-                    })
-                    .collect();
                 let mut node = Map::new();
-                node.insert("text".into(), Value::Array(runs));
+                node.insert("text".into(), Value::Array(runs_json(txn, &text)));
                 out.push(Value::Object(node));
             }
             XmlOut::Element(e) => {
@@ -161,6 +142,57 @@ fn nodes_json<T: ReadTxn>(txn: &T, element: &XmlElementRef, depth: usize) -> Vec
         }
     }
     out
+}
+
+/// Les plages d'un texte en JSON (Ruling R432) : `{"insert"}` ou `{"embed"}`, et `"marks"` à la
+/// plage où une marque change, avec sa valeur neuve (`null` : retirée) ; une marque qui ne change
+/// pas n'est pas récrite, et [`write_json_nodes`] la reporte sur la plage suivante. Écrire toutes
+/// les marques de chaque plage coûtait, pour une adresse longue sur des plages alternées, le produit
+/// de sa longueur par leur nombre. Seules les marques du schéma sont suivies : la page n'en garde
+/// pas d'autre (Ruling R431).
+fn runs_json<T: ReadTxn>(txn: &T, text: &XmlTextRef) -> Vec<Value> {
+    // La valeur de chaque marque du schéma à la plage précédente.
+    let mut previous: Vec<Option<Any>> = vec![None; MARKS.len()];
+    text.diff(txn, YChange::identity)
+        .into_iter()
+        .filter_map(|run| {
+            let mut item = Map::new();
+            match run.insert {
+                Out::Any(Any::String(s)) => {
+                    item.insert("insert".into(), Value::String(s.to_string()))
+                }
+                Out::Any(other) => item.insert("embed".into(), any_json(&other, 0)),
+                _ => return None,
+            };
+            let mut marks = Map::new();
+            for ((name, _), before) in MARKS.iter().zip(previous.iter_mut()) {
+                let now = run.attributes.as_deref().and_then(|a| a.get(*name));
+                if !same_value(before.as_ref(), now) {
+                    marks.insert(
+                        name.to_string(),
+                        now.map_or(Value::Null, |v| any_json(v, 0)),
+                    );
+                    *before = now.cloned();
+                }
+            }
+            if !marks.is_empty() {
+                item.insert("marks".into(), Value::Object(marks));
+            }
+            Some(Value::Object(item))
+        })
+        .collect()
+}
+
+/// Vrai si deux valeurs de marque sont les mêmes : le même objet du document d'abord (une marque
+/// posée sur plusieurs plages), sans comparer son contenu.
+fn same_value(a: Option<&Any>, b: Option<&Any>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(Any::Map(a)), Some(Any::Map(b))) => Arc::ptr_eq(a, b) || a == b,
+        (Some(Any::String(a)), Some(Any::String(b))) => Arc::ptr_eq(a, b) || a == b,
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// Valeur yrs en JSON, types gardés (entier, flottant, chaîne…), clés triées.
@@ -342,16 +374,6 @@ fn write_json_attrs(txn: &mut TransactionMut, element: &XmlElementRef, attrs: &M
     }
 }
 
-fn json_attrs(value: Option<&Value>) -> Attrs {
-    match value {
-        Some(Value::Object(m)) => m
-            .iter()
-            .map(|(k, v)| (Arc::from(k.as_str()), json_any(v)))
-            .collect(),
-        _ => Attrs::new(),
-    }
-}
-
 /// Recrée des nœuds XML décrits par [`nodes_json`] (profondeur bornée par la
 /// limite de récursion de `serde_json`, qui a lu ce JSON).
 fn write_json_nodes(txn: &mut TransactionMut, element: &XmlElementRef, nodes: &[Value]) {
@@ -359,19 +381,31 @@ fn write_json_nodes(txn: &mut TransactionMut, element: &XmlElementRef, nodes: &[
         let Value::Object(node) = node else { continue };
         if let Some(Value::Array(runs)) = node.get("text") {
             let text = element.push_back(txn, XmlTextPrelim::new(""));
+            // Les marques en vigueur, reportées d'une plage à l'autre (Ruling R432), puis tout le
+            // texte d'une passe : insérer plage par plage à la fin reparcourait le texte à chaque
+            // plage.
+            let mut current = Attrs::new();
+            let mut delta = Vec::with_capacity(runs.len());
             for run in runs {
-                let attrs = json_attrs(run.get("attributes"));
-                let at = text.len(txn);
-                match (run.get("insert"), run.get("embed")) {
-                    (Some(Value::String(s)), _) if !s.is_empty() => {
-                        text.insert_with_attributes(txn, at, s, attrs);
+                if let Some(Value::Object(marks)) = run.get("marks") {
+                    for (key, value) in marks {
+                        let Some((name, _)) = MARKS.iter().find(|(n, _)| *n == key.as_str()) else {
+                            continue;
+                        };
+                        match value {
+                            Value::Null => current.remove(*name),
+                            value => current.insert(Arc::from(*name), json_any(value)),
+                        };
                     }
-                    (None, Some(embed)) => {
-                        text.insert_embed_with_attributes(txn, at, json_any(embed), attrs);
-                    }
-                    _ => {}
                 }
+                let value = match (run.get("insert"), run.get("embed")) {
+                    (Some(Value::String(s)), _) if !s.is_empty() => Any::from(s.as_str()),
+                    (None, Some(embed)) => json_any(embed),
+                    _ => continue,
+                };
+                delta.push(Delta::Inserted(value, Some(Box::new(current.clone()))));
             }
+            text.apply_delta(txn, delta);
         } else if let Some(Value::String(tag)) = node.get("tag")
             && !tag.is_empty()
         {
