@@ -182,6 +182,21 @@ test("a_formula_too_big_is_refused", () => {
   }
 });
 
+test("sizes_written_in_a_formula_are_capped", () => {
+  // Une formule de 24 caractères faisait un bloc de 33 millions de pixels (relecture de C2, I3).
+  for (const raw of ["@rule{1em}{2000000em}", "@kern3000em x", "x @@[3000em] y", "@hspace{3000em} x", "@raisebox{3000em}{x}"]) {
+    const outcome = typeset(t(raw), true);
+    expect(outcome.kind, raw).toBe("formula");
+    if (outcome.kind !== "formula") continue;
+    const box = document.createElement("div");
+    box.innerHTML = outcome.html;
+    const shown = box.querySelector(".katex-html")!.outerHTML;
+    const sizes = [...shown.matchAll(/(-?\d+(?:\.\d+)?)em/g)].map((m) => Number(m[1]));
+    // 50 em, plus la hauteur d'une lettre au-dessus d'une boîte haussée de 50 em.
+    expect(Math.max(...sizes), raw).toBeLessThanOrEqual(51);
+  }
+});
+
 test("an_invalid_formula_says_why", () => {
   const outcome = typeset("\\frac{1}{", true);
   expect(outcome.kind).toBe("invalid");

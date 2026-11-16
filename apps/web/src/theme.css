@@ -3180,25 +3180,38 @@ button.mm-reaction:hover {
   background: var(--mm-surface);
 }
 
-/* Une formule plus large que la page défile en dedans, jamais coupée. */
+/* Une formule plus large que la page défile en dedans, jamais coupée ; plus haute que l'écran aussi
+   (une hauteur négative, `\raisebox{-100000em}`, n'est pas bornée par KaTeX : la suite de la page
+   devenait inaccessible). */
 .mm-equation .mm-tex {
   display: block;
   max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  max-height: 80vh;
+  overflow: auto;
 }
 
 .mm-equation .katex-display {
   margin: 0;
 }
 
+/* Les espaceurs de KaTeX dépassent de quelques pixels la boîte d'une formule ordinaire : coupés là,
+   sans barre de défilement, comme avant ; seule une formule plus haute que sa borne défile. */
+.mm-equation .mm-tex > .katex-display,
+.mm-math .mm-tex {
+  overflow: visible clip;
+}
+
+.mm-math .mm-tex {
+  display: inline-block;
+}
+
 /* La formule en ligne : dans la ligne, et, plus large qu'elle, elle défile en dedans (elle était
-   coupée sans rien dire). */
+   coupée sans rien dire) ; plus haute que 20 lignes de même. */
 .mm-math {
   display: inline-block;
   max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  max-height: 20em;
+  overflow: auto;
   padding: 1px 2px;
   vertical-align: middle;
 }

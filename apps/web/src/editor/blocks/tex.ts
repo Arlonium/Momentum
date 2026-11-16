@@ -18,7 +18,8 @@
 //   que si sa profondeur tient dans ce que la profondeur de la page autour d'elle laisse
 //   (`depthAllowance`) ; sinon, elle est montrée en texte, avec un message (`Formula`).
 // - Une formule de plus de `MAX_LATEX_CHARS` caractères, ou dont KaTeX produirait plus de
-//   `MAX_TEX_NODES` éléments, n'est pas mise en forme.
+//   `MAX_TEX_NODES` éléments, n'est pas mise en forme. Les tailles écrites (`\rule`, `\kern`,
+//   `\\[…]`) sont bornées à `MAX_SIZE_EM`.
 //
 // KaTeX reste à `trust: false` : ni lien, ni image, ni attribut. Le résultat est gardé, par formule,
 // dans un cache borné : une formule déjà vue s'affiche sans être recalculée.
@@ -29,6 +30,9 @@ export const MAX_LATEX_CHARS = 10_000;
 
 /** Au-delà, ce que KaTeX produirait est trop grand pour la page (en éléments). */
 export const MAX_TEX_NODES = 60_000;
+
+/** Les tailles écrites dans une formule, au plus (en em) : `\rule{1em}{2000000em}` faisait 33 millions de pixels. */
+const MAX_SIZE_EM = 50;
 
 /**
  * La mise en page de Chromium plante quand la profondeur de la page autour de la formule, plus
@@ -133,6 +137,7 @@ function compute(latex: string, display: boolean): TexOutcome {
       trust: false,
       strict: "ignore",
       output: "htmlAndMathml",
+      maxSize: MAX_SIZE_EM,
       macros: guardedMacros(),
     }).toMarkup();
   } catch (error) {
