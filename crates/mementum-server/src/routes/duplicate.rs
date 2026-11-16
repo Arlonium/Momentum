@@ -76,7 +76,9 @@ pub const MAX_DUPLICATED_PAGES: usize = 100;
 /// pour l'instance : pendant elle, chaque frappe de chaque page attend. Mesuré en release : 6 ms
 /// par mébioctet sur le poste de mesure. À 16 Mio, la frappe qui tombe pendant la transaction
 /// l'attend une centaine de millisecondes, sous son budget de 150 ms ; à 64 Mio, la première
-/// borne, elle attendait 0,25 à 0,47 s, et quatre à dix fois plus sur un disque lent.
+/// borne, elle attendait 0,25 à 0,47 s, et quatre à dix fois plus sur un disque lent. C'est le
+/// p95 de la frappe qui tient, pas son maximum : sous une rafale de copies de plusieurs comptes,
+/// la frappe qui tombe pendant une copie de 15 Mio a attendu 160 à 199 ms (re-relecture).
 pub const MAX_DUPLICATED_BYTES: usize = 16 << 20;
 
 /// Ce qui suit le titre de la page dans celui de sa copie.
@@ -370,7 +372,9 @@ pub(crate) async fn duplicate(
     // Rulings R605, R606 : une duplication à la fois par compte, sous son budget de la minute ;
     // sinon refusée tout de suite. La place est tenue jusqu'à la fin de l'écriture, et ce qui
     // est bâti d'ici là est compté au budget, écrit ou non.
-    let mut running = state.duplications.begin(user.id).map_err(busy)?;
+    // La garde est partagée avec chaque calcul (constat N1) : une requête abandonnée pendant une
+    // construction garde sa place, et compte le document, jusqu'à la fin de ce calcul.
+    let running = Arc::new(state.duplications.begin(user.id).map_err(busy)?);
     let space_id = first.node.space_id;
     let nodes = state.store.list_nodes(space_id).await?;
     let sources = seen_subtree(&first.space, &nodes, id, MAX_DUPLICATED_PAGES);
@@ -406,10 +410,18 @@ pub(crate) async fn duplicate(
         let (from, to) = (source.id, Uuid::now_v7());
         let doc = state
             .mmd_reads
-            .run(user.id, move || copied_doc(blocks, from, to, &files))
+            .run(user.id, {
+                let running = Arc::clone(&running);
+                move || {
+                    let doc = copied_doc(blocks, from, to, &files);
+                    if let Ok(doc) = &doc {
+                        running.built(doc.len());
+                    }
+                    doc
+                }
+            })
             .await?
             .map_err(SyncError::Crdt)?;
-        running.built(doc.len());
         // Ruling R592 : refusée dès que le poids passe la borne, sans lire les pages suivantes.
         weigh(&mut weight, doc.len(), state.max_duplicated_bytes)?;
         built.push(Built {
@@ -1479,6 +1491,74 @@ mod tests {
             .collect();
         assert_eq!(under, [("Page", NodeKind::Page)]);
         let _ = kept;
+        bench.finish().await;
+    }
+
+    /// Constat N1 de la re-relecture : une duplication abandonnée pendant la construction d'un
+    /// document garde sa place, et compte ce document, tant que le calcul n'a pas fini. Le calcul
+    /// va au bout sur son fil, client parti ou non : sans cela, une boucle de requêtes
+    /// abandonnées tenait les places de calcul sans rien dépenser. Ici, une page assez grosse
+    /// pour que sa construction dure ; la requête est abandonnée pendant elle ; la demande
+    /// suivante du compte est refusée (`429`) ; et, le calcul fini, le budget (dix octets par
+    /// minute) a compté le document : la suivante est refusée pour la minute.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_abandoned_duplication_keeps_its_place_until_its_build_ends() {
+        use crate::duplications::Duplications;
+        let bench = Bench::with(|state| {
+            let minute = std::time::Duration::from_secs(60);
+            state.duplications = Arc::new(Duplications::new(10, minute));
+        })
+        .await;
+        // Le document est écrit avec le nœud : un `PUT /mmd` de cette taille durerait.
+        let blocks: Vec<Block> = mementum_md::parse(
+            &(0..4_000)
+                .map(|i| format!("Bloc {i} : du texte **en gras**, pour durer.\n"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let doc = PageDoc::new_page().0;
+        doc.write_blocks(&blocks).unwrap();
+        let page = bench
+            .state
+            .store
+            .create_node(NewNode {
+                space_id: bench.space,
+                parent_id: None,
+                after: None,
+                kind: NodeKind::Page,
+                title: "Grosse".to_string(),
+                created_by: Some(bench.olga.0),
+                grants: vec![members(Level::Full)],
+                doc: Some(doc.encode_state()),
+            })
+            .await
+            .unwrap()
+            .id;
+        let before = bench.nodes().await;
+        let reads = bench.state.mmd_reads.clone();
+
+        let abandoned = bench.duplicate(&bench.mona.1, page);
+        wait_until("le document se bâtit", || reads.counts().0 == 1).await;
+        // Le client part pendant la construction.
+        abandoned.abort();
+        let _ = abandoned.await;
+        let refused = async |what: &str| {
+            let post = Request::post(format!("/api/v1/pages/{page}/duplicate"));
+            let (status, _, body) = bench.send(&bench.mona.1, post, Vec::new()).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{what}");
+            assert_eq!(error_of(&body), "duplication_busy", "{what}");
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            body["message"].as_str().unwrap().to_string()
+        };
+        refused("pendant le calcul abandonné").await;
+        wait_until("le calcul abandonné va au bout", || reads.counts().0 == 0).await;
+        let message = refused("le calcul fini").await;
+        assert!(
+            message.contains("réessaie dans"),
+            "le document bâti est compté au budget : {message}"
+        );
+        assert_eq!(bench.nodes().await, before, "rien d'écrit");
         bench.finish().await;
     }
 }

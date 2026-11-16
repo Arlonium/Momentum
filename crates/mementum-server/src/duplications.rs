@@ -17,6 +17,7 @@
 //! comptes qui ont dupliqué pendant la dernière fenêtre.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -105,7 +106,7 @@ impl Duplications {
         Ok(Running {
             all: Arc::clone(self),
             account,
-            built: 0,
+            built: AtomicUsize::new(0),
         })
     }
 
@@ -144,22 +145,28 @@ fn forget_old(entry: &mut Account, now: Instant, window: Duration) {
 
 /// Une duplication admise, en cours : la place de son compte. La lâcher rend la place, et compte
 /// au budget du compte ce que la duplication a bâti.
+///
+/// Elle se partage (`Arc`) entre la requête et chacun de ses calculs (constat N1 de la
+/// re-relecture) : un calcul lancé va au bout sur son fil, même si la requête est abandonnée, et
+/// la place n'est rendue que quand le dernier des deux l'a lâchée. Sinon une boucle de requêtes
+/// abandonnées pendant la construction tenait les places de calcul sans rien dépenser.
 pub(crate) struct Running {
     all: Arc<Duplications>,
     account: Uuid,
-    built: usize,
+    built: AtomicUsize,
 }
 
 impl Running {
     /// La duplication vient de bâtir `bytes` octets de document.
-    pub(crate) fn built(&mut self, bytes: usize) {
-        self.built = self.built.saturating_add(bytes);
+    pub(crate) fn built(&self, bytes: usize) {
+        self.built.fetch_add(bytes, Ordering::Relaxed);
     }
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.all.end_at(self.account, self.built, Instant::now());
+        let built = self.built.load(Ordering::Relaxed);
+        self.all.end_at(self.account, built, Instant::now());
     }
 }
 
@@ -240,7 +247,7 @@ mod tests {
     fn a_dropped_guard_charges_what_it_built() {
         let all = Arc::new(Duplications::new(10, MINUTE));
         let mona = Uuid::from_u128(1);
-        let mut running = all.begin(mona).unwrap();
+        let running = all.begin(mona).unwrap();
         running.built(6);
         running.built(6);
         drop(running);
