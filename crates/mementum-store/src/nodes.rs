@@ -257,6 +257,22 @@ async fn slot(
     )))
 }
 
+/// La position d'un nœud neuf parmi les enfants de `parent`, après `after` (`None` = en tête).
+/// `NotFound` si `after` n'est pas, dans cet espace, un enfant de `parent`.
+pub(crate) async fn new_slot(
+    tx: &mut Transaction<'_, Sqlite>,
+    space_id: &str,
+    parent: Option<&str>,
+    after: Option<Sibling>,
+) -> Result<String, StoreError> {
+    match slot(tx, space_id, parent, after, None, None).await? {
+        Slot::Set(position) => Ok(position),
+        Slot::Keep => {
+            unreachable!("aucun nœud déplacé : le calcul de place donne toujours une position")
+        }
+    }
+}
+
 /// Qui passe un nœud à la racine, tel que la transaction l'a relu ([`checked_mover`]) : son
 /// rôle dans l'espace, et le niveau qu'il doit avoir sur le nœud une fois celui-ci à la racine
 /// (Ruling R82).
@@ -469,11 +485,7 @@ impl Store {
         if let Some(p) = &parent {
             parent_in_space(&mut tx, p, &space).await?;
         }
-        let Slot::Set(position) =
-            slot(&mut tx, &space, parent.as_deref(), n.after, None, None).await?
-        else {
-            unreachable!("aucun nœud déplacé : le calcul de place donne toujours une position");
-        };
+        let position = new_slot(&mut tx, &space, parent.as_deref(), n.after).await?;
         let id = Uuid::now_v7();
         let id_s = id.to_string();
         let now = now_ms();

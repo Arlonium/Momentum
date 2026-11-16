@@ -23,6 +23,7 @@
 //! - `comments.rs` : les fils de commentaires d'une page, leurs messages et leurs réactions.
 //! - `files.rs` : les fichiers d'une page, contenus rangés par leur hash et attaches ; le ménage.
 //! - `favorites.rs` : les favoris d'un compte, qui n'avancent ni `rev` ni `lsn`.
+//! - `duplicate.rs` : la copie d'un sous-arbre de pages, en une transaction.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
 //! - `versions.rs` : les versions d'une page (état Yjs complet et auteurs), cent par page.
 //! - `position.rs` : l'index fractionnaire.
@@ -58,6 +59,7 @@ mod acl;
 mod backup;
 mod comments;
 mod docs;
+mod duplicate;
 mod favorites;
 mod files;
 mod invitations;
@@ -92,6 +94,7 @@ pub use comments::{
     ThreadAuthors,
 };
 pub use docs::DocState;
+pub use duplicate::{CopiedAttachment, CopiedPage, NewCopy};
 pub use files::{Attachment, NewAttachment};
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
 pub use members::{Expected, Member};
