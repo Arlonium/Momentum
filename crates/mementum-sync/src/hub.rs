@@ -206,10 +206,11 @@ impl Hub {
         self.calls.load(Ordering::Relaxed)
     }
 
-    /// Combien de demandes sont dans la boîte d'un acteur sans réponse encore : comptées une fois
-    /// envoyées (l'acteur les traite dans l'ordre d'arrivée), plus celles d'un appel abandonné en
-    /// route. Pour les tests : il dit, sans minutage, que des requêtes attendent derrière une
-    /// demande longue (Ruling R384).
+    /// Combien d'appels attendent la réponse d'un acteur : comptés une fois leur demande envoyée
+    /// (l'acteur les traite dans l'ordre d'arrivée), décomptés à la réponse, ou dès que l'appel est
+    /// abandonné (une requête qui part) ; sa demande, elle, reste dans la boîte, et l'acteur la
+    /// traite quand même. Pour les tests : il dit, sans minutage, que des requêtes attendent
+    /// derrière une demande longue (Ruling R384).
     pub fn calls_waiting(&self) -> u64 {
         self.calls_waiting.load(Ordering::Relaxed)
     }
