@@ -7,6 +7,7 @@ import {
   apiAs,
   byPosition,
   closeContexts,
+  closeEventsChannel,
   createPage,
   firstSpace,
   getMe,
@@ -104,7 +105,11 @@ test("refused_move_comes_back_with_the_server_message", async ({ browser }) => {
   const a = await createPage(api, { title: "Alpha" });
   const b = await createPage(api, { title: "Bravo" });
 
+  // Le canal de l'espace est fermé : la barre latérale ne se relit que par une relecture que
+  // l'onglet décide (sinon le canal lui pousse la mise à la corbeille qui suit, et la relit en
+  // 300 ms : la ligne de « Bravo » partirait avant le dépôt, R442).
   const p = await newUser(browser, alice);
+  await closeEventsChannel(p);
   await p.goto(`/s/${space.id}`);
   await expect.poll(() => shownRows(p)).toEqual(["1 Alpha", "1 Bravo"]);
 
