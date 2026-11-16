@@ -775,3 +775,33 @@ async fn mmd_is_read_off_the_server_threads() {
          lectures)"
     );
 }
+
+/// Constat C2 de la re-relecture du tour 4 (Ruling R434) : 2 Mio de plages alternées sous deux
+/// couleurs permises, refusés comme non canoniques, coûtaient 1,2 Gio à lire, et le message du
+/// refus recopiait la ligne attendue : une réponse de 249 Mo pour 2 Mio envoyés. Le refus vient
+/// maintenant dès le deuxième texte sous le `<span>`, et son message ne cite qu'un extrait.
+#[tokio::test]
+async fn a_refused_mmd_answers_in_a_few_hundred_bytes() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Refus bref", &[user(&team.olga, Level::Full)])
+        .await;
+    let open = format!(
+        "<span bg=\"{}\" color=\"{}\">",
+        "b".repeat(mementum_md::MAX_COLOR_BYTES),
+        "c".repeat(mementum_md::MAX_COLOR_BYTES)
+    );
+    let n = ((2 << 20) - open.len() - 10) / 4;
+    let body = format!("{open}{}</span>\n", "a*b*".repeat(n));
+    assert!(body.len() <= 2 << 20);
+    let reply = team.olga.put_mmd(&page.to_string(), body).await;
+    let refusal = reply.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_mmd");
+    let text = refusal.to_string();
+    let start: String = text.chars().take(200).collect();
+    assert!(
+        text.len() < 1 << 10,
+        "réponse de {} octets : {start}…",
+        text.len()
+    );
+}
