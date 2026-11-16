@@ -61,6 +61,31 @@ describe("link_bound", () => {
     expect(alert()).toBe(LINK_TOO_LONG);
   });
 
+  // Ruling R537 (constat E1 de la re-relecture du tour 7) : la borne se juge sur l'adresse
+  // elle-même, comme la garde du serveur la juge désormais, pas sur le JSON que Yjs en écrit, que
+  // l'échappement allonge (`\"`, `\\`, `\u0001`) : à la borne, l'adresse passe, même quand son JSON
+  // dépasse de loin la borne ; un octet de plus, elle est refusée.
+  test("un lien à la borne, échappements compris, est posé ; un octet de plus est refusé", async () => {
+    const base = await seedState(XYZ);
+    const mona = await peer("Mona", 2, base, extensions);
+    const tail = Array.from({ length: MAX_HREF_BYTES - 13 }, (_, i) => '"\\\u0001u'[i % 4]).join("");
+    const atBound = `https://e.fr/${tail}`;
+    expect(new TextEncoder().encode(atBound).length).toBe(MAX_HREF_BYTES);
+    expect(JSON.stringify({ href: atBound }).length).toBeGreaterThan(2 * MAX_HREF_BYTES);
+    mona.editor.setTextCursorPosition("x", "end");
+    mona.editor.createLink(atBound, "lien");
+    await settle();
+    expect(links(mona, "x")).toEqual([atBound]);
+    expect(storedLinks(mona.doc)).toEqual([atBound]);
+    expect(alert()).toBeNull();
+
+    mona.editor.setTextCursorPosition("y", "end");
+    mona.editor.createLink(`${atBound}"`, "trop");
+    await settle();
+    expect(links(mona, "y")).toEqual([]);
+    expect(alert()).toBe(LINK_TOO_LONG);
+  });
+
   test("un contenu inséré qui porte un lien trop long est refusé (collage)", async () => {
     const base = await seedState(XYZ);
     const mona = await peer("Mona", 2, base, extensions);

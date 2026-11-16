@@ -264,6 +264,56 @@ fn an_href_longer_than_the_bound_is_refused() {
     rejected(&format!("| a |\n| --- |\n| [b]({over}) |\n"), 3, &hint);
 }
 
+/// Ruling R537 (constat E1 de la re-relecture du tour 7) : la borne d'une adresse et d'une couleur
+/// se juge sur la chaîne elle-même, comme la garde des mises à jour la juge désormais, pas sur ce
+/// que l'échappement en fait (`&quot;` dans le MMD, `\"` ou `\u0001` dans le JSON de Yjs) : à la
+/// borne, guillemets, barres obliques inverses et caractères de contrôle compris, la valeur se lit
+/// et se relit ; un octet de plus, elle est refusée.
+#[test]
+fn an_href_and_a_color_are_bounded_on_the_string_escapes_included() {
+    use mementum_md::{Content, Inline, MAX_COLOR_BYTES, MAX_HREF_BYTES, RenderOpts, render};
+    let escaped = |n: usize| -> String { "\"\\\u{1}u".chars().cycle().take(n).collect() };
+    let link = |href: String| {
+        let mut blocks = parse("Un [lien](x) ici\n").unwrap();
+        let Content::Inline(content) = &mut blocks[0].content else {
+            panic!("contenu en ligne attendu");
+        };
+        let Some(Inline::Link { href: h, .. }) = content.get_mut(1) else {
+            panic!("un lien");
+        };
+        *h = href;
+        render(&blocks, RenderOpts::default()).markdown
+    };
+    let color = |color: String| {
+        let mut blocks = parse("Un <span color=\"red\">mot</span> ici\n").unwrap();
+        let Content::Inline(content) = &mut blocks[0].content else {
+            panic!("contenu en ligne attendu");
+        };
+        let Some(Inline::Text { styles, .. }) = content.get_mut(1) else {
+            panic!("un texte");
+        };
+        styles.text_color = Some(color);
+        render(&blocks, RenderOpts::default()).markdown
+    };
+    for ok in [
+        link(escaped(MAX_HREF_BYTES)),
+        color(escaped(MAX_COLOR_BYTES)),
+    ] {
+        let blocks = parse(&ok).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(render(&blocks, RenderOpts::default()).markdown, ok);
+    }
+    rejected(
+        &link(escaped(MAX_HREF_BYTES + 1)),
+        1,
+        &format!("{MAX_HREF_BYTES} octets au plus"),
+    );
+    rejected(
+        &color(escaped(MAX_COLOR_BYTES + 1)),
+        1,
+        &format!("{MAX_COLOR_BYTES} octets au plus"),
+    );
+}
+
 /// Ruling R434 : sous un `<span>`, la forme canonique n'a qu'un texte, d'une seule mise en forme
 /// (le rendu écrit une balise par texte). Le reste est refusé dès sa lecture, avec ce qu'il faut
 /// écrire ; la forme canonique se relit.
