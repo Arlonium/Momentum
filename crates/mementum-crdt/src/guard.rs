@@ -448,6 +448,22 @@ impl Shape {
     /// jour intégrés, sans être déjà en attente dans la page (`pending`, Ruling
     /// R199) : yrs la garderait en attente, et supprimerait à l'arrivée ce que
     /// le client visé écrirait dans la plage.
+    /// Comme [`Shape::leaves_gap`], pour les blocs seuls (Ruling R388) : une suppression qui vise
+    /// des horloges que la page n'a pas n'y compte pas.
+    pub(crate) fn structs_leave_gap(&self, state: &StateVector) -> bool {
+        self.clients.iter().any(|(client, structs)| {
+            let mut covered = state.get(&ClientID::new(*client));
+            structs
+                .iter()
+                .filter(|s| !matches!(s.kind, Kind::Skip))
+                .any(|s| {
+                    let gap = s.id.1 > covered;
+                    covered = covered.max(s.id.1 + s.len);
+                    gap
+                })
+        })
+    }
+
     pub(crate) fn leaves_gap(&self, state: &StateVector, pending: &Pending) -> bool {
         let mut covered_after: HashMap<u64, u32> = HashMap::new();
         for (client, structs) in &self.clients {

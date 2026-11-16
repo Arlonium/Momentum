@@ -129,3 +129,57 @@ async fn entry_left_with_a_gap_after_a_set_aside_one_is_set_aside_too() {
         "deux lignes `error`, la seconde pour le trou : {journal}"
     );
 }
+
+/// Ruling R388 (mineur de la re-relecture du tour 2) : après une entrée écartée, seules les
+/// entrées dont les blocs laissent un trou sont écartées, pas celles dont des suppressions visent
+/// les éléments de l'entrée écartée. Ici, une écriture complète du serveur, faite quand « abc »
+/// (l'entrée devenue hostile) était dans la page, retire tout et écrit « Nouveau » : ses blocs ne
+/// dépendent que de la page neuve, mais ses suppressions visent « abc ». Écartée pour elles, la page
+/// revenait à « Un » ; elle est gardée, et ses suppressions sans objet restent en attente.
+#[tokio::test]
+async fn full_write_after_a_set_aside_entry_is_kept() {
+    let logs = Logs::capture();
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Journal", &[user(&team.olga, Level::Full)])
+        .await;
+    let (created, creation) = PageDoc::new_page();
+    let paragraph = created.read_blocks()[0].id.clone();
+    let a = PageDoc::from_updates([creation.as_slice()]).unwrap();
+    let one = a.replace_text(&paragraph, 0, 0, "Un").unwrap();
+    let c = PageDoc::from_updates([creation.as_slice(), one.as_slice()]).unwrap();
+    let abc = c.replace_text(&paragraph, 2, 0, "abc").unwrap();
+    // L'écriture complète, faite sur la page qui portait « abc ».
+    let server =
+        PageDoc::from_updates([creation.as_slice(), one.as_slice(), abc.as_slice()]).unwrap();
+    let full = server
+        .write_blocks(&mementum_md::parse("Nouveau\n").unwrap())
+        .unwrap();
+    // « abc » rendu hostile, comme dans le test précédent.
+    let mut at = 0;
+    assert_eq!(read_var(&abc, &mut at), 1, "un seul client");
+    let _structs = read_var(&abc, &mut at);
+    let client = read_var(&abc, &mut at);
+    let mut hostile = vec![2];
+    hostile.extend(&abc[1..abc.len() - 1]);
+    hostile.push(1);
+    var(&mut hostile, client);
+    var(&mut hostile, 100);
+    hostile.extend([10, 1, 0]);
+    assert!(PageDoc::repeats_a_client(&hostile));
+    team.store
+        .append_updates(page, &[&creation, &one, &hostile, &full], None)
+        .await
+        .unwrap();
+
+    let read = team.olga.get_mmd(&page.to_string()).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.text(), "Nouveau\n");
+    let journal = logs.text();
+    assert_eq!(
+        journal.matches("écartée").count(),
+        1,
+        "seule l'entrée hostile est écartée : {journal}"
+    );
+}
