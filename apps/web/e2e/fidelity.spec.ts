@@ -28,7 +28,7 @@ import {
 
 test.afterEach(closeContexts);
 
-const FIXTURES = ["all-blocks", "non-default"] as const;
+const FIXTURES = ["all-blocks", "non-default", "rich-blocks"] as const;
 type Fixture = (typeof FIXTURES)[number];
 
 const EXPORT = process.env.EXPORT_FIXTURES === "1";
@@ -38,6 +38,7 @@ const SPEC = new URL("../../../spec/mmd/fixtures/", import.meta.url);
 const FIRST_PARAGRAPH: Record<Fixture, string> = {
   "all-blocks": "Chaque type de bloc, une fois.",
   "non-default": "Paragraphe coloré et centré",
+  "rich-blocks": "Ce que les écrans de la partie B savent poser.",
 };
 
 function expectedMmd(name: Fixture): string {
