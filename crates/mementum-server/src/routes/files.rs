@@ -361,7 +361,12 @@ pub(crate) async fn sweep(state: &AppState) {
     let mut removed = 0usize;
     for batch in candidates.chunks(SWEEP_BATCH) {
         let guard = state.files.lock().await;
-        let gone = match state.store.forget_unattached(batch).await {
+        // Le dépôt mène le paquet, et lui seul retire des lignes `files` (Ruling R576).
+        let gone = match state
+            .files
+            .forget_and_remove(&guard, &state.store, batch)
+            .await
+        {
             Ok(gone) => gone,
             Err(error) => {
                 tracing::warn!(
@@ -372,19 +377,19 @@ pub(crate) async fn sweep(state: &AppState) {
                 break;
             }
         };
-        for hash in &gone {
-            match state.files.remove(&guard, hash).await {
+        drop(guard);
+        for (hash, done) in gone {
+            match done {
                 Ok(()) => removed += 1,
                 // Le chemin du serveur est dans l'erreur : elle va au journal, jamais ailleurs.
                 Err(error) => tracing::error!(
-                    hash = %files::hex(hash),
+                    hash = %files::hex(&hash),
                     %error,
                     "contenu qu'aucune page n'attache plus, impossible à retirer du disque : il y \
                      reste, inconnu de la base, compté au prochain démarrage"
                 ),
             }
         }
-        drop(guard);
     }
     if removed > 0 {
         tracing::info!(

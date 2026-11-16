@@ -622,6 +622,34 @@ impl FileStore {
         Ok(tokio::fs::File::from_std(file))
     }
 
+    /// Un paquet du ménage (Rulings R555, R576), sous le verrou du dépôt, dont le garde est
+    /// vérifié **avant** de rien retirer (R274) : la base retire ceux de `batch` qu'aucune attache
+    /// ne nomme encore (`Store::forget_unattached`, dans la voie du dépôt), puis le disque ceux-là,
+    /// et eux seuls. Rend chaque hash retiré de la base, avec l'issue de son retrait du disque.
+    /// C'est le seul chemin du serveur qui retire des lignes `files` : entre la ligne retirée et le
+    /// fichier retiré, aucun envoi ne peut trouver le contenu « déjà là » et l'attacher.
+    ///
+    /// Une erreur rendue (un garde d'un autre verrou, `InvalidInput` ; la base qui refuse) n'a rien
+    /// retiré du disque ; les lignes, elles, restent si la base a refusé.
+    pub(crate) async fn forget_and_remove(
+        &self,
+        guard: &MutexGuard<'_, ()>,
+        store: &mementum_store::Store,
+        batch: &[[u8; 32]],
+    ) -> io::Result<Vec<([u8; 32], io::Result<()>)>> {
+        self.dirs.check(guard)?;
+        let gone = store
+            .forget_unattached(batch)
+            .await
+            .map_err(io::Error::other)?;
+        let mut removed = Vec::with_capacity(gone.len());
+        for hash in gone {
+            let done = self.remove(guard, &hash).await;
+            removed.push((hash, done));
+        }
+        Ok(removed)
+    }
+
     /// Retire le contenu `hash` du disque, sous le verrou du dépôt. Un contenu absent n'est pas
     /// une erreur : le ménage peut repasser (R275). Un lien posé à sa place est retiré lui-même,
     /// jamais ce qu'il vise (R272). Lâché en route, le retrait parti va au bout, et aucun autre
@@ -2120,6 +2148,128 @@ mod tests {
             listing(&here.path().join(FILES_DIR)),
             [hex(&kept.hash)[..2].to_owned() + "/" + &hex(&kept.hash)[2..]]
         );
+    }
+
+    /// Un paquet du ménage ne se mène que sous le verrou du dépôt (Ruling R576) :
+    /// `forget_and_remove` vérifie le garde avant de rien retirer de la base. Le garde d'un autre
+    /// dépôt est refusé (`InvalidInput`), et la ligne du contenu reste, comme son fichier ; sous
+    /// le bon garde, la ligne et le fichier partent, et seul ce qu'aucune attache ne nomme part.
+    #[tokio::test]
+    async fn forget_and_remove_needs_the_guard_of_the_depot() {
+        let (here, there) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let depot = FileStore::open(here.path()).unwrap();
+        let other = FileStore::open(there.path()).unwrap();
+        let store = mementum_store::Store::open(&here.path().join("m.db"))
+            .await
+            .unwrap();
+        let olga = store
+            .create_user(mementum_store::NewUser {
+                email: "olga@exemple.fr".into(),
+                name: "Olga".into(),
+                password_hash: "pas-un-hachage".into(),
+            })
+            .await
+            .unwrap()
+            .id;
+        let space = store.create_space("Essais", Some(olga)).await.unwrap().id;
+        let page = |title: &str| mementum_store::NewNode {
+            space_id: space,
+            parent_id: None,
+            after: None,
+            kind: mementum_store::NodeKind::Page,
+            title: title.to_string(),
+            created_by: Some(olga),
+            grants: Vec::new(),
+            doc: None,
+        };
+        let (doomed, kept) = (
+            store.create_node(page("Supprimée")).await.unwrap().id,
+            store.create_node(page("Gardée")).await.unwrap().id,
+        );
+        let mut hashes = Vec::new();
+        for (node, bytes) in [(doomed, &b"orphelin"[..]), (kept, &b"garde"[..])] {
+            let stored = put(&depot, bytes).await;
+            let new = mementum_store::NewAttachment {
+                id: Uuid::now_v7(),
+                node_id: node,
+                hash: stored.hash,
+                size: stored.size as i64,
+                mime: stored.mime,
+                name: "f.txt",
+                created_by: olga,
+            };
+            store.attach_file(new, 1).await.unwrap();
+            hashes.push(stored.hash);
+        }
+        let (orphan, attached) = (hashes[0], hashes[1]);
+        store.trash_node(doomed, olga).await.unwrap();
+        store.delete_node(doomed).await.unwrap();
+
+        let foreign = other.lock().await;
+        let error = depot
+            .forget_and_remove(&foreign, &store, &hashes)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        drop(foreign);
+        assert_eq!(store.unattached_files().await.unwrap(), [orphan]);
+        assert!(depot.open_file(&orphan).await.is_ok());
+
+        let guard = depot.lock().await;
+        let removed = depot
+            .forget_and_remove(&guard, &store, &hashes)
+            .await
+            .unwrap();
+        drop(guard);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, orphan);
+        assert!(removed[0].1.is_ok());
+        assert!(store.unattached_files().await.unwrap().is_empty());
+        let error = depot.open_file(&orphan).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(depot.open_file(&attached).await.is_ok());
+        store.close().await;
+    }
+
+    /// Le dépôt est le seul à retirer des lignes `files` (Ruling R576) : dans les sources des
+    /// crates de l'atelier, hors du store qui la définit, `Store::forget_unattached` n'est appelée
+    /// qu'une fois, par `FileStore::forget_and_remove`, qui vérifie le garde du verrou du dépôt
+    /// avant. Un appelant neuf (un ménage périodique, une commande) fait rougir ce test : qu'il
+    /// passe par `forget_and_remove`, sous le verrou.
+    #[test]
+    fn only_the_depot_forgets_files() {
+        fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let needle = [".forget_", "unattached("].concat();
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut sources = Vec::new();
+        for entry in std::fs::read_dir(crates).unwrap() {
+            let dir = entry.unwrap().path();
+            if dir.file_name().is_some_and(|name| name == "mementum-store") {
+                continue;
+            }
+            if dir.join("src").is_dir() {
+                walk(&dir.join("src"), &mut sources);
+            }
+        }
+        assert!(sources.len() > 20, "les sources de l'atelier : {sources:?}");
+        let mut calls = Vec::new();
+        for path in sources {
+            let text = std::fs::read_to_string(&path).unwrap();
+            for _ in text.matches(&needle) {
+                let relative = path.strip_prefix(crates).unwrap();
+                calls.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        assert_eq!(calls, ["mementum-server/src/files.rs"]);
     }
 
     /// Retirer un contenu absent n'est pas une erreur (R275) : le ménage peut repasser.

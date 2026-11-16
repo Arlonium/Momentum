@@ -833,7 +833,8 @@ impl Store {
     /// accès, leurs invitations, leurs fils de commentaires, leurs versions, leurs
     /// déplacements de blocs, leurs attaches et les favoris qui les nomment, et rend les ids
     /// supprimés (le nœud compris). Les contenus attachés restent (`files`) : c'est au ménage
-    /// ([`Store::sweep_files`]) de retirer ceux qu'aucune page n'attache plus (Ruling R245).
+    /// ([`Store::forget_unattached`], que mène le dépôt du serveur) de retirer ceux qu'aucune page
+    /// n'attache plus (Ruling R245).
     /// `NotTrashed` (sans rien écrire) si le nœud n'est pas à la corbeille, lui-même ou par un
     /// ancêtre.
     pub async fn delete_node(&self, id: Uuid) -> Result<Vec<Uuid>, StoreError> {

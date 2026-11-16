@@ -266,6 +266,13 @@ impl Store {
     /// deux garde son contenu. C'est [`Store::unattached_files`] puis
     /// [`Store::forget_unattached`] ; le serveur mène les deux temps à part, pour ne prendre le
     /// verrou du dépôt qu'au second (Ruling R555).
+    ///
+    /// **Réservé aux tests** (fonction `test-hooks`, Ruling R576) : il retire des lignes sans le
+    /// verrou du dépôt, et un appelant qui retirerait ensuite les contenus du disque sous un garde
+    /// pris après perdrait le fichier d'un envoi du même contenu. Le serveur passe par
+    /// `FileStore::forget_and_remove`.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
     pub async fn sweep_files(&self) -> Result<Vec<[u8; 32]>, StoreError> {
         let candidates = self.unattached_files().await?;
         self.forget_unattached(&candidates).await
@@ -294,6 +301,12 @@ impl Store {
     /// Il s'écrit dans la voie du dépôt (Ruling R522) : le serveur le mène sous le verrou du
     /// dépôt, commun à l'instance, que tous les envois attendent ; dans la voie du compte qui
     /// supprime la page, il attendrait toutes les écritures que ce compte a en file.
+    ///
+    /// **Réservé au dépôt du serveur** (Ruling R576) : `FileStore::forget_and_remove`, qui vérifie
+    /// le garde du verrou du dépôt avant de l'appeler, est son seul appelant hors des tests (un test
+    /// du serveur le tient, `only_the_depot_forgets_files`). Mené hors de ce verrou, il laisserait
+    /// un envoi trouver « déjà là » un contenu dont la ligne vient de partir.
+    #[doc(hidden)]
     pub async fn forget_unattached(
         &self,
         candidates: &[[u8; 32]],
