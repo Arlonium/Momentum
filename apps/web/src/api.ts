@@ -122,7 +122,7 @@ const PASSWORD = "/api/v1/auth/password";
 const SESSION_ROUTES: ReadonlySet<string> = new Set([SIGNUP, LOGIN, LOGOUT, PASSWORD]);
 
 /** L'en-tête qui nomme le compte sous lequel l'appel part (R540). */
-export const ACCOUNT_HEADER = "x-mementum-account";
+const ACCOUNT_HEADER = "x-mementum-account";
 /**
  * Les routes qui ne nomment pas de compte : la relecture du compte (elle sert à l'apprendre), et
  * celles qui ouvrent ou ferment une session sans en lire (le serveur n'y regarde pas l'en-tête ;
