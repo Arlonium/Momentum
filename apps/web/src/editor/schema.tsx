@@ -11,9 +11,10 @@ import {
 } from "@blocknote/core";
 import { createReactBlockSpec, createReactInlineContentSpec } from "@blocknote/react";
 import { withMultiColumn } from "@blocknote/xl-multi-column";
-import katex from "katex";
 import { Bookmark } from "./blocks/Bookmark";
 import { Callout } from "./blocks/Callout";
+import { Equation } from "./blocks/Equation";
+import { MathInline } from "./blocks/InlineMath";
 import { textProp } from "./blocks/props";
 import type { ReactNode } from "react";
 import {
@@ -75,13 +76,6 @@ function codeBlockSpec() {
   };
 }
 
-/** Formule LaTeX rendue par KaTeX ; une formule invalide s'affiche en rouge, sans erreur. */
-function Tex({ latex, display }: { latex: string; display: boolean }) {
-  const html = katex.renderToString(latex, { displayMode: display, throwOnError: false });
-  // KaTeX échappe son entrée (`trust: false` par défaut) : sa sortie est sûre.
-  return <span className="mm-tex" dangerouslySetInnerHTML={{ __html: html }} />;
-}
-
 /** Cadre commun des blocs sans contenu modifiable. */
 function Frame({ icon, children, muted }: { icon: ReactNode; children: ReactNode; muted?: boolean }) {
   return (
@@ -93,22 +87,6 @@ function Frame({ icon, children, muted }: { icon: ReactNode; children: ReactNode
     </div>
   );
 }
-
-const Equation = createReactBlockSpec(
-  { type: "equation", propSchema: { latex: { default: "" } }, content: "none" },
-  {
-    render: ({ block }) =>
-      textProp(block.props, "latex").trim() === "" ? (
-        <div className="mm-equation mm-placeholder" contentEditable={false}>
-          Équation vide
-        </div>
-      ) : (
-        <div className="mm-equation" contentEditable={false}>
-          <Tex latex={textProp(block.props, "latex")} display />
-        </div>
-      ),
-  },
-);
 
 const PageLink = createReactBlockSpec(
   {
@@ -203,11 +181,6 @@ const Mention = createReactInlineContentSpec(
   {
     render: ({ inlineContent }) => <span className="mm-mention">@{textProp(inlineContent.props, "label")}</span>,
   },
-);
-
-const MathInline = createReactInlineContentSpec(
-  { type: "math", propSchema: { latex: { default: "" } }, content: "none" },
-  { render: ({ inlineContent }) => <Tex latex={textProp(inlineContent.props, "latex")} display={false} /> },
 );
 
 export const schema = withMultiColumn(

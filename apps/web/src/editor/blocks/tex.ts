@@ -62,13 +62,13 @@ const isDefinition = (value: unknown) =>
   typeof value === "object" && value !== null && Array.isArray((value as { tokens?: unknown }).tokens);
 
 /** Les macros de la formule : KaTeX y range toute définition, qui est refusée là. */
-function guardedMacros(): Record<string, unknown> {
-  return new Proxy<Record<string, unknown>>(
+function guardedMacros(): NonNullable<katex.KatexOptions["macros"]> {
+  return new Proxy<NonNullable<katex.KatexOptions["macros"]>>(
     {},
     {
       set(target, name, value) {
         if (isDefinition(value)) throw new DefinitionRefused(String(name));
-        target[name as string] = value;
+        target[name as string] = value as string;
         return true;
       },
       defineProperty() {

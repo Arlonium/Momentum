@@ -25,6 +25,7 @@ import { blockElement } from "../../comments/dom";
 import type { MementumEditor } from "../debug";
 import { BookmarkWindow } from "./Bookmark";
 import { CalloutWindow } from "./Callout";
+import { EquationWindow } from "./Equation";
 import {
   blockDraft,
   closeBlockWindow,
@@ -52,6 +53,11 @@ export const BLOCK_WINDOWS: Readonly<Record<string, BlockWindowSpec>> = {
     label: "Icône et couleur du callout",
     gone: "Ce callout n'est plus dans la page : quelqu'un l'a supprimé ou changé.",
     Window: CalloutWindow,
+  },
+  equation: {
+    label: "Formule de l'équation",
+    gone: "Cette équation n'est plus dans la page : quelqu'un l'a supprimée ou changée. Ton texte reste ici, à copier.",
+    Window: EquationWindow,
   },
   bookmark: {
     label: "Adresse du signet",

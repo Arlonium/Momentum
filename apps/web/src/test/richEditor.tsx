@@ -15,7 +15,7 @@ import { FRAGMENT } from "../editor/collab";
 import type { MementumEditor } from "../editor/debug";
 import { EDITOR_OPTIONS, EditorView } from "../editor/Editor";
 import { REMOTE, seedState, type Peer, type Seed } from "./editors";
-import "./hooks";
+import { until } from "./hooks";
 
 /**
  * Ce que jsdom n'a pas : `matchMedia` (Mantine lit le thème du système), et la géométrie d'un
@@ -209,4 +209,12 @@ export async function renewSession(
   await act(async () => m.root.render(<EditorView editor={editor} editable={editable} pageId={pageId} />));
   await flush();
   return { editor, doc, writes };
+}
+
+/**
+ * Attend que toutes les formules affichées de `m` soient mises en forme : elles le sont à l'écran,
+ * l'une après l'autre, quelques millisecondes par image (`Formula`).
+ */
+export async function formulasShown(m: Mounted): Promise<void> {
+  await until(m.host, () => m.host.querySelector(".mm-tex-pending") === null, "formules mises en forme");
 }

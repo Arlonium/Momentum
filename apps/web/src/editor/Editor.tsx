@@ -56,6 +56,7 @@ import * as Y from "yjs";
 import { blockOfSelection } from "../comments/dom";
 import { BlockWindowHost, isBlockWindowShortcut, openWindowAtCursor } from "./blocks/BlockWindowHost";
 import { useBlockWindowPage } from "./blocks/blockWindows";
+import { InlineMathHost, openInlineMathAtSelection } from "./blocks/InlineMath";
 import { isCommentShortcut } from "../comments/shortcut";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
@@ -239,9 +240,12 @@ export function EditorView({ editor, editable, onComment = null, pageId, ...attr
    * document, que le navigateur pose dès le clic : celle de BlockNote peut la suivre d'un temps.
    */
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    // Ctrl+Alt+Entrée : régler le bloc riche où est le curseur (`BlockWindowHost`).
+    // Ctrl+Alt+Entrée : régler la formule en ligne sélectionnée, ou le bloc riche où est le curseur
+    // (`BlockWindowHost`).
     if (isBlockWindowShortcut(event)) {
-      if (editor.isFocused() && openWindowAtCursor(editor)) event.preventDefault();
+      if (editor.isFocused() && (openInlineMathAtSelection(editor) || openWindowAtCursor(editor))) {
+        event.preventDefault();
+      }
       return;
     }
     if (onComment === null || !isCommentShortcut(event) || !editor.isFocused()) return;
@@ -272,6 +276,7 @@ export function EditorView({ editor, editable, onComment = null, pageId, ...attr
         {sideMenu && <SideMenuController sideMenu={sideMenu} />}
       </BlockNoteView>
       <BlockWindowHost editor={editor} />
+      <InlineMathHost editor={editor} />
     </>
   );
 }

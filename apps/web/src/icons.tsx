@@ -258,3 +258,18 @@ export const CalloutIcon = ({ size = 16 }: { size?: number }) => (
     <path d="M11 14h4" />
   </Icon>
 );
+
+/** L'équation en bloc : la racine carrée, dans le menu « / ». */
+export const EquationIcon = ({ size = 18 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M3 13l3-1 3 7 5-15h7" />
+  </Icon>
+);
+
+/** L'équation en ligne : la racine dans une ligne de texte. */
+export const InlineEquationIcon = ({ size = 18 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M3 20h18" />
+    <path d="M5 11l2-1 2 5 4-11h6" />
+  </Icon>
+);

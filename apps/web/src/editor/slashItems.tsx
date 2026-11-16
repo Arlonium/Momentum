@@ -1,7 +1,7 @@
 // Le menu « / » de l'éditeur de la page : celui de BlockNote (titres, listes, code, tableau,
 // médias…), les colonnes, puis le groupe « Blocs riches », dans cet ordre au fil des tâches :
-// Callout, Signet (C1b) ; Équation, Équation en ligne (C2, entre les deux) ; Table des matières,
-// Lien vers une page (C3). Chaque élément a ses noms en français et en anglais.
+// Callout, Équation, Équation en ligne, Signet (C1b, C2) ; Table des matières, Lien vers une page
+// (C3). Chaque élément a ses noms en français et en anglais.
 //
 // Choisir un bloc riche fait le geste de BlockNote (R308, récrit) : dans un bloc vide, ou qui ne
 // porte que « / », ce bloc devient celui qu'on a choisi (il garde son id ; une frappe faite au même
@@ -11,8 +11,9 @@
 import { combineByGroup, insertOrUpdateBlockForSlashMenu } from "@blocknote/core";
 import { getDefaultReactSlashMenuItems, type DefaultReactSuggestionItem } from "@blocknote/react";
 import { getMultiColumnSlashMenuItems } from "@blocknote/xl-multi-column";
-import { BookmarkIcon, CalloutIcon } from "../icons";
+import { BookmarkIcon, CalloutIcon, EquationIcon, InlineEquationIcon } from "../icons";
 import { openBlockWindow } from "./blocks/blockWindows";
+import { openInlineMath } from "./blocks/InlineMath";
 import type { MementumEditor } from "./debug";
 
 /** Le groupe des blocs riches, le dernier du menu. */
@@ -29,6 +30,30 @@ export function richSlashItems(editor: MementumEditor): DefaultReactSuggestionIt
       icon: <CalloutIcon size={18} />,
       onItemClick: () => {
         insertOrUpdateBlockForSlashMenu(editor, { type: "callout" });
+      },
+    },
+    {
+      title: "Équation",
+      subtext: "Une formule mathématique, centrée sur sa ligne (LaTeX)",
+      aliases: ["equation", "formule", "maths", "math", "latex", "katex", "tex"],
+      group: RICH_GROUP,
+      icon: <EquationIcon />,
+      onItemClick: () => {
+        const block = insertOrUpdateBlockForSlashMenu(editor, { type: "equation" });
+        // Posée depuis le texte : le focus y revient, à la fermeture de sa fenêtre (R474).
+        openBlockWindow(editor, block, "editor");
+      },
+    },
+    {
+      title: "Équation en ligne",
+      subtext: "Une formule dans le texte (LaTeX)",
+      aliases: ["equation en ligne", "formule en ligne", "inline", "math", "latex", "katex", "tex"],
+      group: RICH_GROUP,
+      icon: <InlineEquationIcon />,
+      onItemClick: () => {
+        editor.insertInlineContent([{ type: "math", props: { latex: "" } }]);
+        // Le curseur est juste après la formule posée ; sa vue arrive au rendu suivant.
+        openInlineMath(editor, { pos: editor.prosemirrorState.selection.from - 1 }, "editor");
       },
     },
     {

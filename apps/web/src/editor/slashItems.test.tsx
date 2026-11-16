@@ -4,7 +4,7 @@
 import { filterSuggestionItems } from "@blocknote/core";
 import { expect, test } from "vitest";
 import { cursor, storedProps, stored } from "../test/editors";
-import { blockWindow, fill, flush, mountEditor } from "../test/richEditor";
+import { blockWindow, fill, flush, mountEditor, press } from "../test/richEditor";
 import { RICH_GROUP, richSlashItems, slashMenuItems } from "./slashItems";
 
 const PAGE = [
@@ -17,8 +17,9 @@ test("slash_menu_offers_the_rich_blocks_in_order", async () => {
   const m = await mountEditor({ blocks: PAGE });
   const all = slashMenuItems(m.editor);
   const rich = all.filter((item) => item.group === RICH_GROUP);
-  expect(rich.map((item) => item.title)).toEqual(["Callout", "Signet"]);
-  expect(richSlashItems(m.editor).map((item) => item.title)).toEqual(["Callout", "Signet"]);
+  const order = ["Callout", "Équation", "Équation en ligne", "Signet"];
+  expect(rich.map((item) => item.title)).toEqual(order);
+  expect(richSlashItems(m.editor).map((item) => item.title)).toEqual(order);
   // Le groupe vient après ceux de BlockNote, d'un seul tenant.
   const groups = [...new Set(all.map((item) => item.group))];
   expect(groups[groups.length - 1]).toBe(RICH_GROUP);
@@ -28,6 +29,8 @@ test("slash_menu_offers_the_rich_blocks_in_order", async () => {
   const found = (query: string) => filterSuggestionItems(rich, query).map((item) => item.title);
   for (const query of ["callout", "encadré", "encadre", "note", "astuce"]) expect(found(query), query).toContain("Callout");
   for (const query of ["signet", "bookmark", "lien", "link", "url"]) expect(found(query), query).toContain("Signet");
+  for (const query of ["équation", "equation", "formule", "latex", "math"]) expect(found(query), query).toContain("Équation");
+  for (const query of ["en ligne", "inline", "formule en ligne"]) expect(found(query), query).toContain("Équation en ligne");
   // Chaque élément a son icône et sa ligne d'explication.
   for (const item of rich) {
     expect(item.icon, item.title).toBeTruthy();
@@ -84,4 +87,23 @@ test("a_bookmark_set_from_the_slash_menu_gives_the_focus_back_to_the_text", asyn
   const blocks = stored(m.doc);
   expect(blocks[1].type).toBe("bookmark");
   expect(m.editor.getTextCursorPosition().block.id).toBe(blocks[2].id);
+});
+
+test("an_equation_is_inserted_empty_and_opens_its_field_at_once", async () => {
+  const m = await mountEditor({ blocks: PAGE });
+  cursor(m, "x", 3);
+  richSlashItems(m.editor).find((item) => item.title === "Équation")!.onItemClick();
+  await flush();
+  const blocks = stored(m.doc);
+  expect(blocks.map((b) => b.type)).toEqual(["paragraph", "equation", "paragraph", "paragraph"]);
+  expect(storedProps(m.doc, blocks[1].id).latex ?? "").toBe("");
+  const dialog = blockWindow("Formule de l'équation");
+  expect(dialog, "la fenêtre de l'équation insérée").not.toBeNull();
+  expect(document.activeElement).toBe(dialog!.querySelector("textarea"));
+  // Fermée, elle rend le focus au texte (R474).
+  fill(dialog!.querySelector("textarea")!, "x^2");
+  press(dialog!.querySelector("textarea")!, "Enter", { ctrlKey: true });
+  await flush();
+  expect(storedProps(m.doc, blocks[1].id).latex).toBe("x^2");
+  expect(document.activeElement).toBe(m.editor.prosemirrorView.dom);
 });
