@@ -589,3 +589,54 @@ fn foreign_text_marks_are_written_where_they_change() {
     let (_, raw) = rewritten(&page);
     assert_eq!(foreign_runs(&raw.transact()), original);
 }
+
+/// Ruling R493, constat N4 de la re-relecture du tour 5 : un bloc `unknown` à `foreign = true`,
+/// écrit par un client, porte une prop `data` (une chaîne, que la garde ne lit pas) qui décrit un
+/// nœud étranger dont le texte porte un lien de 20 000 octets. La restauration (relire les blocs,
+/// les récrire) recréait ce nœud, lien compris : le serveur écrivait une marque que la garde
+/// refuse d'un client. Une marque trop longue y est sautée ; une marque à sa borne reste.
+#[test]
+fn a_rewrite_never_writes_a_mark_the_guard_refuses() {
+    use base64::Engine;
+    for (len, kept) in [(mementum_md::MAX_HREF_BYTES, true), (20_000, false)] {
+        let data = serde_json::json!({
+            "attrs": {},
+            "content": [{"text": [
+                {"insert": "lien", "marks": {"link": {"href": "u".repeat(len)}, "bold": {}}},
+                {"insert": " fin", "marks": {"link": null}},
+            ]}],
+            "children": [],
+        });
+        let block = mementum_md::Block {
+            id: "f".into(),
+            kind: "unknown".into(),
+            props: mementum_md::Props::from([
+                (
+                    "originalType".to_string(),
+                    PropValue::Str("futureWidget".into()),
+                ),
+                (
+                    "data".to_string(),
+                    PropValue::Str(
+                        base64::engine::general_purpose::STANDARD.encode(data.to_string()),
+                    ),
+                ),
+                ("foreign".to_string(), PropValue::Bool(true)),
+            ]),
+            content: Content::None,
+            children: vec![],
+        };
+        let (page, _) = PageDoc::new_page();
+        page.write_blocks(&[block]).unwrap();
+        let runs = foreign_runs(&decode(&page).transact());
+        let linked = runs
+            .iter()
+            .any(|(_, marks)| marks.iter().any(|(key, _)| key == "link"));
+        assert_eq!(linked, kept, "{len} octets : {runs:?}");
+        // Les autres marques de la plage restent.
+        assert!(
+            runs[0].1.iter().any(|(key, _)| key == "bold"),
+            "{len} octets : {runs:?}"
+        );
+    }
+}

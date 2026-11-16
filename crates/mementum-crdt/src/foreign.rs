@@ -41,7 +41,7 @@ use yrs::{
 use crate::blocknote::{
     BLOCK_CONTAINER, Ids, attr_string, valid_name, write_children, write_nodes,
 };
-use crate::guard::MARKS;
+use crate::guard::{MARKS, value_refusal};
 
 /// Éléments XML imbriqués gardés dans `data`. Avec au plus 2 niveaux JSON par
 /// élément, 4 pour une plage de texte et [`MAX_VALUE_NESTING`] pour une
@@ -389,12 +389,19 @@ fn write_json_nodes(txn: &mut TransactionMut, element: &XmlElementRef, nodes: &[
             for run in runs {
                 if let Some(Value::Object(marks)) = run.get("marks") {
                     for (key, value) in marks {
-                        let Some((name, _)) = MARKS.iter().find(|(n, _)| *n == key.as_str()) else {
+                        let Some(&mark) = MARKS.iter().find(|(n, _)| *n == key.as_str()) else {
                             continue;
                         };
+                        let name = mark.0;
+                        // Ruling R493 : une valeur que la garde refuserait d'un client (une adresse
+                        // de plus de 16 Kio, une couleur de plus de 100 octets) n'est pas écrite ;
+                        // la marque est alors retirée, comme `null`.
                         match value {
-                            Value::Null => current.remove(*name),
-                            value => current.insert(Arc::from(*name), json_any(value)),
+                            Value::Null => current.remove(name),
+                            value if value_refusal(mark, &value.to_string()).is_some() => {
+                                current.remove(name)
+                            }
+                            value => current.insert(Arc::from(name), json_any(value)),
                         };
                     }
                 }

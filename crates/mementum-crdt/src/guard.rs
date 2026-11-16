@@ -174,7 +174,7 @@ struct Insert {
 }
 
 /// Une marque de texte (`ItemContent::Format`) que la page ne garde pas (Ruling R431).
-enum MarkRefusal {
+pub(crate) enum MarkRefusal {
     /// Une clé hors du schéma des blocs (ses premiers caractères, pour le message).
     Unknown(String),
     /// Une valeur plus longue que sa borne.
@@ -252,7 +252,10 @@ fn known_mark(key: &str) -> Result<(&'static str, Carried), MarkRefusal> {
 /// Pourquoi la page ne garde pas une marque du schéma de valeur `value` (JSON), ou `None` si elle
 /// la garde (Ruling R431) : une valeur plus longue que sa borne. Une valeur illisible est laissée à
 /// yrs, qui refuse alors la mise à jour.
-fn value_refusal((name, carried): (&'static str, Carried), value: &str) -> Option<MarkRefusal> {
+pub(crate) fn value_refusal(
+    (name, carried): (&'static str, Carried),
+    value: &str,
+) -> Option<MarkRefusal> {
     let (field, bound) = match carried {
         Carried::Nothing => (None, 0),
         Carried::Color => (Some("stringValue"), MAX_COLOR_BYTES),
