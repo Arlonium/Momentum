@@ -10,10 +10,9 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use axum::http::{Method, StatusCode, header};
+use axum::http::{Method, StatusCode};
+use common::sync::{Loops, SLOW_DISK, open_app_with};
 use common::{
     Account, Browser, Logs, Reply, SESSION_COOKIE, Team, TestApp, WAIT, exec_sql, json_request,
     outcome, overtaken, page_routes, query_i64, text, tree_nodes,
@@ -23,7 +22,6 @@ use mementum_schema::SCHEMA_VERSION;
 use mementum_server::SignupMode;
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
-use tower::ServiceExt;
 use uuid::Uuid;
 
 /// Une application où tout le monde peut s'inscrire : les comptes de ces tests reçoivent leur
@@ -1194,33 +1192,29 @@ async fn guest_with_full_cannot_change_general_access() {
 /// transaction. Mona, qui crée des sous-pages sans arrêt ailleurs dans l'espace (chacune fait
 /// bouger `spaces.rev`), ne le bloque pas : l'ancien contrôle, sur la révision de tout
 /// l'espace, finissait en `409 access_changed`.
+///
+/// Sur un disque lent (`SLOW_DISK`, Ruling R485) : avec six boucles de création et celle
+/// d'Olga, sept écritures se disputent le verrou de SQLite, et l'une d'elles l'attendait plus
+/// que le délai d'attente de sa connexion (`500 internal`, `database is locked`, vu sur la CI
+/// sous Windows avec deux boucles et le délai ordinaire). Avec la file d'écriture du store,
+/// aucune n'échoue, et les changements d'Olga passent entre les créations de Mona. Une boucle
+/// de création qui échoue arrête le test tout de suite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_is_not_blocked_by_writes_elsewhere_in_the_space() {
-    let t = open_app().await;
+    let t = open_app_with(SLOW_DISK).await;
     let team = Team::new(&t).await;
     let project = team.page(None, "Projet", &[members(Level::Full)]).await;
     let busy = team.page(None, "Agitée", &[members(Level::Edit)]).await;
-    let stop = Arc::new(AtomicBool::new(false));
-    let created = Arc::new(AtomicUsize::new(0));
-    let cookie = team.mona.browser.cookie().expect("la session de Mona");
-    let writers: Vec<_> = (0..2)
-        .map(|_| {
-            let (router, cookie, stop) = (t.router.clone(), cookie.clone(), stop.clone());
-            let created = created.clone();
-            tokio::spawn(async move {
-                while !stop.load(Ordering::Relaxed) {
-                    let body = json!({ "parentId": busy.to_string(), "title": "Encore" });
-                    let mut request = json_request(Method::POST, "/api/v1/pages", &body);
-                    let headers = request.headers_mut();
-                    headers.insert(header::HOST, "localhost".parse().unwrap());
-                    headers.insert(header::COOKIE, cookie.parse().unwrap());
-                    let reply = router.clone().oneshot(request).await.unwrap();
-                    assert_eq!(reply.status(), StatusCode::CREATED);
-                    created.fetch_add(1, Ordering::Relaxed);
-                }
-            })
-        })
-        .collect();
+    let creations = Loops::start(
+        &t,
+        &team.mona.browser,
+        6,
+        StatusCode::CREATED,
+        move |_, _| {
+            let body = json!({ "parentId": busy.to_string(), "title": "Encore" });
+            json_request(Method::POST, "/api/v1/pages", &body)
+        },
+    );
 
     // Au moins trente changements, et autant qu'il en faut pour que dix pages aient été créées
     // pendant qu'ils passaient. Un nombre fixe de changements ne suffit pas : sur un poste
@@ -1229,11 +1223,11 @@ async fn sharing_is_not_blocked_by_writes_elsewhere_in_the_space() {
     let olga = &team.olga.browser;
     let mut steps = 0;
     let mut last = "";
-    while steps < 30 || created.load(Ordering::Relaxed) < 10 {
+    while (steps < 30 || creations.done() < 10) && !creations.failed() {
         assert!(
             steps < 5_000,
             "les créations n'avancent pas : {} en {steps} changements",
-            created.load(Ordering::Relaxed)
+            creations.done()
         );
         last = if steps % 2 == 0 { "read" } else { "edit" };
         let reply = set_level(olga, project, team.tom.id, last).await;
@@ -1245,10 +1239,11 @@ async fn sharing_is_not_blocked_by_writes_elsewhere_in_the_space() {
         );
         steps += 1;
     }
-    stop.store(true, Ordering::Relaxed);
-    for writer in writers {
-        writer.await.unwrap();
-    }
+    let refused = creations.stop().await;
+    assert!(
+        refused.is_empty(),
+        "créations refusées après {steps} changements : {refused:?}"
+    );
     assert!(entries(&access_of(olga, project).await).contains(&entry(&team.tom, last, false)));
 }
 

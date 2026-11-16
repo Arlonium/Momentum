@@ -5,11 +5,18 @@
 //! L'URL, la connexion avec une session (`sync_url`, `sync_as`, `synced_as`) et la poignée de
 //! main nue (`handshake`) sont dans `common/mod.rs`.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
 use mementum_acl::{Level, Subject};
 use mementum_server::SignupMode;
+use mementum_store::StoreOptions;
 use mementum_sync::testkit::Client;
+
+use tower::ServiceExt;
 
 use super::{Account, Browser, TestApp, WAIT, synced_as};
 
@@ -17,6 +24,101 @@ use super::{Account, Browser, TestApp, WAIT, synced_as};
 /// rôle par le store.
 pub async fn open_app() -> TestApp {
     TestApp::with_config(|cfg| cfg.signup = SignupMode::Open).await
+}
+
+/// Un disque lent et un délai d'attente court sur le verrou de SQLite : chaque validation tient
+/// le verrou 50 ms de plus, et une connexion n'attend le verrou que 100 ms (jusqu'à 250 ms sous
+/// Windows, où chaque pause de SQLite dure au moins 15 ms). Dès que plus de six écritures se
+/// disputent le verrou, l'une d'elles l'attend plus que ce délai, quel que soit l'ordre où il
+/// les sert : sans la file d'écriture du store, elle échoue (`database is locked`, une route
+/// répond `500`). Ce qui ne se voyait que par moments sur la CI sous Windows (Ruling R485)
+/// devient sûr.
+pub const SLOW_DISK: StoreOptions = StoreOptions {
+    busy_timeout: Duration::from_millis(100),
+    write_delay: Duration::from_millis(50),
+};
+
+/// [`open_app`], dont la base a ces réglages ([`SLOW_DISK`], par exemple).
+pub async fn open_app_with(store: StoreOptions) -> TestApp {
+    TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        cfg.store = store;
+    })
+    .await
+}
+
+/// Des boucles de requêtes d'un même compte, sans relâche : chacune renvoie sa requête dès sa
+/// réponse reçue. La première réponse qui n'a pas le statut attendu les arrête toutes.
+pub struct Loops {
+    stop: Arc<AtomicBool>,
+    done: Arc<AtomicUsize>,
+    tasks: Vec<tokio::task::JoinHandle<Option<(StatusCode, String)>>>,
+}
+
+impl Loops {
+    /// Lance `n` boucles de `by` ; chaque tour de la boucle `k` envoie `request(k, tour)` (avec
+    /// l'hôte et le cookie de `by`, le tour compté de 0 dans la boucle), et attend `expected`.
+    pub fn start(
+        t: &TestApp,
+        by: &Browser<'_>,
+        n: usize,
+        expected: StatusCode,
+        request: impl Fn(usize, usize) -> Request<Body> + Send + Sync + 'static,
+    ) -> Loops {
+        let cookie = by.cookie().expect("une session");
+        let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicUsize::new(0));
+        let request = Arc::new(request);
+        let tasks = (0..n)
+            .map(|k| {
+                let (router, cookie, request) = (t.router.clone(), cookie.clone(), request.clone());
+                let (stop, done) = (stop.clone(), done.clone());
+                tokio::spawn(async move {
+                    let mut round = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        let mut req = request(k, round);
+                        round += 1;
+                        let headers = req.headers_mut();
+                        headers.insert(header::HOST, "localhost".parse().unwrap());
+                        headers.insert(header::COOKIE, cookie.parse().unwrap());
+                        let reply = router.clone().oneshot(req).await.unwrap();
+                        let status = reply.status();
+                        if status != expected {
+                            stop.store(true, Ordering::Relaxed);
+                            let body = axum::body::to_bytes(reply.into_body(), usize::MAX)
+                                .await
+                                .unwrap_or_default();
+                            return Some((status, String::from_utf8_lossy(&body).into_owned()));
+                        }
+                        done.fetch_add(1, Ordering::Relaxed);
+                    }
+                    None
+                })
+            })
+            .collect();
+        Loops { stop, done, tasks }
+    }
+
+    /// Les réponses attendues reçues jusqu'ici.
+    pub fn done(&self) -> usize {
+        self.done.load(Ordering::Relaxed)
+    }
+
+    /// Une réponse inattendue a arrêté les boucles.
+    pub fn failed(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Arrête les boucles, attend la fin de leur tour en cours, et rend les réponses inattendues
+    /// (statut, corps).
+    pub async fn stop(self) -> Vec<(StatusCode, String)> {
+        self.stop.store(true, Ordering::Relaxed);
+        let mut refused = Vec::new();
+        for task in self.tasks {
+            refused.extend(task.await.unwrap());
+        }
+        refused
+    }
 }
 
 /// L'accès de tous les membres de l'espace, à ce niveau.

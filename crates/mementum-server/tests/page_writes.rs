@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use common::sync::{open_app, user};
-use common::{Account, Team, TestApp, WAIT, exec_sql, query_i64};
+use common::sync::{Loops, SLOW_DISK, members, open_app, open_app_with, user};
+use common::{Account, Team, TestApp, WAIT, exec_sql, json_request, query_i64};
 use mementum_acl::Level;
 use mementum_crdt::PageDoc;
 use tokio::task::JoinSet;
@@ -200,12 +200,19 @@ async fn restores_queued_before_a_revocation_stop_with_it() {
 
 /// Le même constat pour `PUT /mmd` (antérieur au lot) : des récritures envoyées d'un coup, en
 /// alternance ; après le retrait, au plus une est encore écrite.
+///
+/// Sur un disque lent (`SLOW_DISK`, Ruling R485), pendant que Mona crée des pages ailleurs dans
+/// l'espace, en six boucles : l'écriture de l'acteur, le retrait d'Olga et les créations de Mona
+/// se disputent le verrou de SQLite, et l'une d'elles l'attendait plus que le délai d'attente de
+/// sa connexion (`500 internal`, `database is locked`, vu sur la CI sous Windows sans les
+/// boucles de Mona, par moments). Avec la file d'écriture du store, aucune n'échoue.
 #[tokio::test]
 async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
-    let t = open_app().await;
+    let t = open_app_with(SLOW_DISK).await;
     let team = Team::new(&t).await;
     let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Edit)];
     let page = team.page(None, "Récritures", &grants).await;
+    let busy = team.page(None, "Agitée", &[members(Level::Edit)]).await;
     witness(&t, page, team.tom.id).await;
     let contents = [paragraphs("Alpha"), paragraphs("Bêta")];
 
@@ -219,7 +226,19 @@ async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
             )
         })
         .collect();
+    let creations = Loops::start(
+        &t,
+        &team.mona.browser,
+        6,
+        StatusCode::CREATED,
+        move |_, _| {
+            let body = serde_json::json!({ "parentId": busy.to_string(), "title": "Encore" });
+            json_request(axum::http::Method::POST, "/api/v1/pages", &body)
+        },
+    );
     let statuses = burst_then_revoke(&t, &team, page, requests).await;
+    let refused = creations.stop().await;
+    assert!(refused.is_empty(), "créations refusées : {refused:?}");
     assert_the_burst_stopped(&t, "PUT /mmd", &statuses).await;
 }
 
