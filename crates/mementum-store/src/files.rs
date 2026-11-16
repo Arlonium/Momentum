@@ -190,6 +190,11 @@ impl Store {
     /// La source est lue et la copie écrite dans la même transaction d'écriture : un ménage ne
     /// passe pas entre les deux. `None`, sans rien écrire, si la source n'est pas de `from_node` ;
     /// `NotFound`, sans rien écrire, si `to_node` ou le compte `by` n'existe pas.
+    ///
+    /// Elle s'écrit dans la voie du compte de la tâche, pas dans celle du dépôt (Ruling R522) :
+    /// elle ne se fait pas sous le verrou du dépôt, et la voie du dépôt, qui passe en priorité, n'a
+    /// jamais qu'une écriture à la fois ; des recopies y passeraient devant toutes les voies, et
+    /// devant les attaches des envois (`copies_wait_in_the_lane_of_their_account`).
     pub async fn copy_attachment(
         &self,
         from_node: Uuid,
@@ -221,19 +226,46 @@ impl Store {
     /// prend pas le verrou d'écriture de SQLite, unique pour toute l'instance, et le plus souvent
     /// il n'y a rien à retirer. Seuls les candidats trouvés sont ensuite supprimés, en une
     /// instruction qui revérifie qu'aucune attache ne les nomme : une attache écrite entre les
-    /// deux garde son contenu.
+    /// deux garde son contenu. C'est [`Store::unattached_files`] puis
+    /// [`Store::forget_unattached`] ; le serveur mène les deux temps à part, pour ne prendre le
+    /// verrou du dépôt qu'au second (Ruling R555).
     pub async fn sweep_files(&self) -> Result<Vec<[u8; 32]>, StoreError> {
+        let candidates = self.unattached_files().await?;
+        self.forget_unattached(&candidates).await
+    }
+
+    /// Le premier temps du ménage : les hash des contenus qu'aucune attache ne nomme, lus sans
+    /// rien écrire ni attendre aucun tour (R270 : tous les contenus de l'instance sont relus, par
+    /// l'index `attachments_by_file`). Une liste de candidats, déjà peut-être périmée quand elle
+    /// rend : seul [`Store::forget_unattached`] décide, dans la transaction qui écrit.
+    pub async fn unattached_files(&self) -> Result<Vec<[u8; 32]>, StoreError> {
         let candidates: Vec<Vec<u8>> = sqlx::query_scalar(
             "SELECT hash FROM files \
              WHERE NOT EXISTS (SELECT 1 FROM attachments a WHERE a.file_hash = files.hash)",
         )
         .fetch_all(&self.pool)
         .await?;
+        candidates.into_iter().map(hash_from).collect()
+    }
+
+    /// Le second temps du ménage : supprime, parmi `candidates`, les lignes des contenus
+    /// qu'aucune attache ne nomme **encore**, en une instruction qui le revérifie, et rend leurs
+    /// hash, chacun une fois : ceux-là, et eux seuls, sont à retirer du disque. Un contenu attaché
+    /// depuis la lecture des candidats reste ; un contenu absent de la liste n'est pas regardé.
+    /// Une liste vide n'écrit rien, et n'attend aucun tour (R270).
+    ///
+    /// Il s'écrit dans la voie du dépôt (Ruling R522) : le serveur le mène sous le verrou du
+    /// dépôt, commun à l'instance, que tous les envois attendent ; dans la voie du compte qui
+    /// supprime la page, il attendrait toutes les écritures que ce compte a en file.
+    pub async fn forget_unattached(
+        &self,
+        candidates: &[[u8; 32]],
+    ) -> Result<Vec<[u8; 32]>, StoreError> {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
         // Les candidats en un seul paramètre, un tableau JSON de chaînes hexadécimales : des
-        // octets relus de la base, sans rien à échapper.
+        // octets de 32, sans rien à échapper.
         let list = format!(
             "[{}]",
             candidates
@@ -252,7 +284,6 @@ impl Store {
              RETURNING hash",
         )
         .bind(list)
-        // La voie du dépôt : le ménage se fait sous son verrou (Ruling R522).
         .fetch_all(&mut *self.write_conn_in(Lane::Files).await?)
         .await?
         .into_iter()

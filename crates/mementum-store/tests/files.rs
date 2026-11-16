@@ -53,6 +53,54 @@ async fn attachments(f: &Fixture) -> i64 {
     int(&f.db, "SELECT COUNT(*) FROM attachments").await
 }
 
+/// Le ménage en deux temps, comme le serveur le mène à la suppression d'une page (Ruling R555) :
+/// les contenus qu'aucune attache ne nomme se lisent sans écrire (`unattached_files`), puis seuls
+/// ceux de cette liste qui ne sont toujours attachés à aucune page sont retirés de la base
+/// (`forget_unattached`), qui rend leurs hash. Un contenu attaché de nouveau entre les deux reste ;
+/// un contenu devenu orphelin entre les deux, absent de la liste, reste aussi : le ménage suivant
+/// le prendra. Témoins : une liste vide ne retire rien ; un contenu déjà retiré ne se retire pas
+/// deux fois.
+#[tokio::test]
+async fn forgetting_keeps_what_was_attached_since_the_reading() {
+    let f = fresh().await;
+    let olga = account(&f.store, "olga").await.id;
+    let attach = async |page: Uuid, hash: [u8; 32]| {
+        f.store
+            .attach_file(
+                new_attachment(page, hash, 3, "text/plain", "f.txt", olga),
+                1,
+            )
+            .await
+            .unwrap();
+    };
+    let (x, y, z) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+    let (a, b) = (new_page(&f, "A").await, new_page(&f, "B").await);
+    attach(a, x).await;
+    attach(b, y).await;
+    delete_page(&f, a, olga).await;
+    delete_page(&f, b, olga).await;
+    let mut read = f.store.unattached_files().await.unwrap();
+    read.sort();
+    assert_eq!(read, [x, y]);
+
+    // Après la lecture : `y` est attaché de nouveau, `z` devient orphelin.
+    let c = new_page(&f, "C").await;
+    attach(c, y).await;
+    let d = new_page(&f, "D").await;
+    attach(d, z).await;
+    delete_page(&f, d, olga).await;
+
+    assert_eq!(f.store.forget_unattached(&read).await.unwrap(), [x]);
+    assert_eq!(files(&f).await, 2, "y, attaché, et z, hors de la liste");
+    assert_eq!(f.store.unattached_files().await.unwrap(), [z]);
+    assert_eq!(attachments(&f).await, 1);
+
+    let nothing: Vec<[u8; 32]> = Vec::new();
+    assert_eq!(f.store.forget_unattached(&[]).await.unwrap(), nothing);
+    assert_eq!(f.store.forget_unattached(&[x]).await.unwrap(), nothing);
+    assert_eq!(files(&f).await, 2);
+}
+
 /// Le même contenu attaché à deux pages : une ligne `files`, deux attaches, chacune avec son nom
 /// et son identifiant. La ligne `files` déjà là n'est pas récrite : la seconde attache rend la
 /// taille et le type gardés, pas ceux qu'on lui donne (R267). Attacher un fichier n'avance ni la

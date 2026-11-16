@@ -395,3 +395,149 @@ async fn the_file_store_lane_goes_first_but_never_twice_in_a_row() {
         .collect();
     assert_eq!(order[..3], ["première", "frappe", "seconde"], "{order:?}");
 }
+
+/// Une page neuve de l'espace de départ, avec une attache de `hash`, puis supprimée pour de bon :
+/// le contenu `hash` n'est plus attaché nulle part.
+async fn orphan(f: &common::Fixture, by: Uuid, hash: [u8; 32]) {
+    let node = f
+        .store
+        .create_node(page(&f.space, None, None, "Supprimée"))
+        .await
+        .unwrap()
+        .id;
+    let new = mementum_store::NewAttachment {
+        id: Uuid::now_v7(),
+        node_id: node,
+        hash,
+        size: 1,
+        mime: "text/plain",
+        name: "orphelin.txt",
+        created_by: by,
+    };
+    f.store.attach_file(new, 1).await.unwrap();
+    f.store.trash_node(node, by).await.unwrap();
+    f.store.delete_node(node).await.unwrap();
+}
+
+/// Le ménage écrit dans la voie du dépôt (Ruling R522 ; constat C de la re-relecture 1 de la
+/// robustesse) : le serveur le mène sous le verrou du dépôt, commun à l'instance, au nom du compte
+/// qui supprime une page. Tom a vingt écritures en file quand son ménage demande son tour : il
+/// passe le premier, au lieu d'attendre la rafale de Tom, et tous les envois de l'instance avec
+/// lui. Dans la voie de Tom, il passerait après les vingt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_sweep_writes_in_the_file_store_lane() {
+    const BURST: usize = 20;
+    let f = fresh().await;
+    let tom = f.store.create_user(new_user("tom")).await.unwrap().id;
+    orphan(&f, tom, [9; 32]).await;
+    exec_sql(
+        &f.db,
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_space AFTER INSERT ON spaces \
+         BEGIN INSERT INTO witness (what) VALUES ('Tom'); END; \
+         CREATE TRIGGER witness_sweep AFTER DELETE ON files \
+         BEGIN INSERT INTO witness (what) VALUES ('ménage'); END;",
+    )
+    .await;
+    let held = f.store.hold_writes().await;
+    let mut burst = Vec::new();
+    for i in 0..BURST {
+        burst.push(create_as(&f.store, Some(tom), format!("Tom {i:02}")));
+        queued(&f.store, i + 1).await;
+    }
+    // La lecture des candidats n'attend aucun tour : elle passe, tour tenu.
+    let candidates = f.store.unattached_files().await.unwrap();
+    assert_eq!(candidates, [[9; 32]]);
+    let sweep = tokio::spawn(writes_by(Some(tom), {
+        let store = f.store.clone();
+        async move { store.forget_unattached(&candidates).await }
+    }));
+    queued(&f.store, BURST + 1).await;
+    drop(held);
+    assert_eq!(sweep.await.unwrap().unwrap(), [[9; 32]]);
+    for write in burst {
+        write.await.unwrap().unwrap();
+    }
+    let order: Vec<String> = texts(&f.db, "SELECT what FROM witness ORDER BY n")
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(order.len(), BURST + 1, "{order:?}");
+    assert_eq!(order[0], "ménage", "{order:?}");
+}
+
+/// Une recopie s'écrit dans la voie de son compte, pas dans celle du dépôt (Ruling R522) : elle
+/// ne se fait pas sous le verrou du dépôt, et dans la voie du dépôt, qui passe en priorité, les
+/// recopies d'un compte passeraient devant toutes les autres voies, et devant les attaches des
+/// envois. Tom a dix recopies en file quand une attache arrive : elle passe la première. Dans la
+/// voie du dépôt, elle attendrait les dix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn copies_wait_in_the_lane_of_their_account() {
+    const COPIES: usize = 10;
+    let f = fresh().await;
+    let tom = f.store.create_user(new_user("tom")).await.unwrap().id;
+    let mut pages = Vec::new();
+    for title in ["Source", "Cible"] {
+        let node = page(&f.space, None, None, title);
+        pages.push(f.store.create_node(node).await.unwrap().id);
+    }
+    let (source, target) = (pages[0], pages[1]);
+    let attachment = |hash: [u8; 32], name: &'static str| mementum_store::NewAttachment {
+        id: Uuid::now_v7(),
+        node_id: target,
+        hash,
+        size: 1,
+        mime: "text/plain",
+        name,
+        created_by: tom,
+    };
+    let original = f
+        .store
+        .attach_file(
+            mementum_store::NewAttachment {
+                node_id: source,
+                ..attachment([1; 32], "recopie")
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    exec_sql(
+        &f.db,
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_attachment AFTER INSERT ON attachments \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.name); END;",
+    )
+    .await;
+    let held = f.store.hold_writes().await;
+    let mut copies = Vec::new();
+    for i in 0..COPIES {
+        let store = f.store.clone();
+        let from = original.id;
+        copies.push(tokio::spawn(writes_by(Some(tom), async move {
+            store
+                .copy_attachment(source, from, Uuid::now_v7(), target, tom, 1)
+                .await
+        })));
+        queued(&f.store, i + 1).await;
+    }
+    let attach = tokio::spawn(writes_by(Some(tom), {
+        let store = f.store.clone();
+        let new = attachment([2; 32], "envoi");
+        async move { store.attach_file(new, 1).await }
+    }));
+    queued(&f.store, COPIES + 1).await;
+    drop(held);
+    attach.await.unwrap().unwrap();
+    for copy in copies {
+        assert!(copy.await.unwrap().unwrap().is_some());
+    }
+    let order: Vec<String> = texts(&f.db, "SELECT what FROM witness ORDER BY n")
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(order.len(), COPIES + 1, "{order:?}");
+    assert_eq!(order[0], "envoi", "{order:?}");
+}
