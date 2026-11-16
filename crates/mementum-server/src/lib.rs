@@ -350,10 +350,7 @@ pub async fn app(cfg: &Config) -> anyhow::Result<Router> {
 /// avant que la base ferme ([`Hub::shutdown`]).
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let (router, store, hub) = build(&cfg).await?;
-    let listener = TcpListener::bind(cfg.bind)
-        .await
-        .with_context(|| format!("impossible d'écouter sur {}", cfg.bind))?;
-    let addr = listener.local_addr()?;
+    let (listener, addr) = listen(cfg.bind).await?;
     // Une sortie standard fermée n'arrête pas le serveur : l'adresse est
     // aussi dans le journal « serveur prêt ».
     let announced = {
@@ -364,7 +361,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         tracing::warn!(%error, "ligne d'écoute impossible à écrire sur la sortie standard ; le serveur continue");
     }
     tracing::info!(%addr, data_dir = %cfg.data_dir.display(), "serveur prêt");
-    let served = axum::serve(without_nagle(listener), router)
+    let served = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await;
     // Plus aucune requête : chaque page ouverte coupe sa version `closing` s'il lui reste des
@@ -373,6 +370,21 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     hub.shutdown().await;
     store.close().await;
     served.context("serveur HTTP")
+}
+
+/// L'écoute de `mementum serve` : liée à `bind`, ses connexions sans l'algorithme de Nagle
+/// ([`without_nagle`]). Rend aussi l'adresse réellement liée.
+async fn listen(
+    bind: std::net::SocketAddr,
+) -> anyhow::Result<(
+    impl axum::serve::Listener<Io = tokio::net::TcpStream, Addr = std::net::SocketAddr>,
+    std::net::SocketAddr,
+)> {
+    let listener = TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("impossible d'écouter sur {bind}"))?;
+    let addr = listener.local_addr()?;
+    Ok((without_nagle(listener), addr))
 }
 
 /// Les connexions que `listener` accepte écrivent sans l'algorithme de Nagle (`TCP_NODELAY`,
@@ -689,13 +701,12 @@ mod tests {
         }
     }
 
-    /// Une connexion acceptée par le serveur écrit sans l'algorithme de Nagle (Ruling R445).
+    /// Une connexion acceptée par l'écoute de `serve` écrit sans l'algorithme de Nagle (Ruling
+    /// R445).
     #[tokio::test]
     async fn accepted_connections_have_no_nagle() {
         use axum::serve::Listener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut listener = without_nagle(listener);
+        let (mut listener, addr) = listen("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (accepted, _) = listener.accept().await;
         assert!(accepted.nodelay().unwrap());
