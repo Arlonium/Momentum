@@ -59,6 +59,23 @@ const MAX_TREE_ROWS = 100;
 
 type Target = { id: string; first: string };
 
+/**
+ * Ralentissement du processeur, en option (`MEMENTUM_BUDGETS_CPU_SLOWDOWN`, par exemple `1.7`) :
+ * il reproduit sur un poste rapide le coureur de la CI, plus lent (R580). La CI ne le pose pas : les
+ * budgets s'y mesurent tels quels, et leurs bornes ne dépendent pas de lui.
+ */
+const CPU_SLOWDOWN = Number(process.env.MEMENTUM_BUDGETS_CPU_SLOWDOWN ?? "1");
+
+/** Un onglet neuf du compte par défaut, ralenti si `CPU_SLOWDOWN` le demande. */
+async function budgetTab(browser: Browser): Promise<Page> {
+  const p = await newUser(browser);
+  if (CPU_SLOWDOWN > 1) {
+    const cdp = await p.context().newCDPSession(p);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: CPU_SLOWDOWN });
+  }
+  return p;
+}
+
 let landing = "";
 let small: Target[] = [];
 let large: Target | null = null;
@@ -113,7 +130,7 @@ type Opening = {
  * clic dans l'arbre et mesure l'ouverture dans la page, avec `performance.now()`.
  */
 async function openFromTree(browser: Browser, target: Target): Promise<Opening> {
-  const p = await newUser(browser);
+  const p = await budgetTab(browser);
   await p.goto(`/p/${landing}`);
   await waitSynced(p);
   // Application chargée et au repos : seule l'ouverture de la page est mesurée.
@@ -395,7 +412,7 @@ test.describe("formules", () => {
       browser,
     }) => {
       test.setTimeout(240_000);
-      const p = await newUser(browser);
+      const p = await budgetTab(browser);
       await p.goto(`/p/${landing}`);
       await waitSynced(p);
       await p.evaluate(() => new Promise((done) => requestIdleCallback(done, { timeout: 2_000 })));
@@ -416,7 +433,7 @@ test.describe("formules", () => {
 
   test(`longest_frame_scrolling_through_50_distinct_long_formulas_under_${SCROLL_FRAME_MS}ms`, async ({ browser }) => {
     test.setTimeout(240_000);
-    const p = await newUser(browser);
+    const p = await budgetTab(browser);
     await p.goto(`/p/${landing}`);
     await waitSynced(p);
     await p.evaluate(() => new Promise((done) => requestIdleCallback(done, { timeout: 2_000 })));
@@ -491,7 +508,7 @@ test.describe("arbre de 1 000 pages", () => {
   });
 
   test("tree_renders_only_visible_rows", async ({ browser }) => {
-    const p = await newUser(browser);
+    const p = await budgetTab(browser);
     await p.goto(`/p/${landing}`);
     await waitSynced(p);
     const sidebar = p.getByRole("navigation", { name: "Barre latérale" });
@@ -517,7 +534,7 @@ test.describe("arbre de 1 000 pages", () => {
   test("active_page_far_down_the_tree_is_shown", async ({ browser }) => {
     // Lien direct vers une page hors de la partie visible au chargement : l'arbre défile
     // jusqu'à elle.
-    const p = await newUser(browser);
+    const p = await budgetTab(browser);
     await p.goto(`/p/${last.id}`);
     await waitSynced(p);
     const sidebar = p.getByRole("navigation", { name: "Barre latérale" });
