@@ -77,20 +77,34 @@ export function calloutColor(raw: string): CalloutColor {
 /** Au-delà, l'icône est coupée à l'affichage (caractères tels qu'on les voit). */
 const MAX_ICON_GRAPHEMES = 3;
 
-/** L'icône à afficher : ses trois premiers caractères visibles, suivis de « … » si elle est plus longue. */
 let segmenter: Intl.Segmenter | null = null;
 
+/**
+ * L'icône à afficher : ses trois premiers caractères visibles, suivis de « … » si elle est plus
+ * longue. La découpe s'arrête au quatrième : une icône de MMD peut porter des centaines de milliers
+ * de caractères.
+ */
 function shownIcon(icon: string): { text: string; cut: boolean } {
   // Un seul découpeur pour tous les callouts de la page (une page peut en porter mille).
   segmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
-  const graphemes = Array.from(segmenter.segment(icon), (part) => part.segment);
+  const graphemes: string[] = [];
+  for (const part of segmenter.segment(icon)) {
+    graphemes.push(part.segment);
+    if (graphemes.length > MAX_ICON_GRAPHEMES) break;
+  }
   if (graphemes.length <= MAX_ICON_GRAPHEMES) return { text: icon, cut: false };
   return { text: `${graphemes.slice(0, MAX_ICON_GRAPHEMES).join("")}…`, cut: true };
 }
 
-/** L'icône d'un callout : l'icône vectorielle pour celle par défaut, sinon son texte. */
+/** Ce qui ne se voit pas : espaces, caractères de contrôle et de format (U+202E, U+200B…). */
+const INVISIBLE = /[\p{Z}\p{Cc}\p{Cf}\s]/gu;
+
+/**
+ * L'icône d'un callout : l'icône vectorielle pour celle par défaut, et pour une icône qui ne montre
+ * rien (vide, faite d'espaces ou de caractères de format) ; sinon son texte.
+ */
 function CalloutGlyph({ icon }: { icon: string }) {
-  if (icon === DEFAULT_CALLOUT_ICON) return <InfoIcon />;
+  if (icon === DEFAULT_CALLOUT_ICON || icon.replace(INVISIBLE, "") === "") return <InfoIcon />;
   const { text, cut } = shownIcon(icon);
   return (
     <span className="mm-callout-glyph" dir="auto" title={cut ? isolate(icon) : undefined}>
@@ -100,7 +114,7 @@ function CalloutGlyph({ icon }: { icon: string }) {
 }
 
 type ViewProps = {
-  block: { id: string; props: Readonly<Record<string, unknown>> };
+  block: { id: string; type: string; props: Readonly<Record<string, unknown>> };
   editor: MementumEditor;
   contentRef: (node: HTMLElement | null) => void;
 };
@@ -125,7 +139,7 @@ function CalloutView({ block, editor, contentRef }: ViewProps) {
             // Un clic ne donne pas le focus à un bouton partout (Safari) : la fenêtre qu'il ferme
             // l'avait, il le garde.
             event.currentTarget.focus();
-            toggleBlockWindow(editor, block.id);
+            toggleBlockWindow(editor, block);
           }}
         >
           <CalloutGlyph icon={icon} />
@@ -252,8 +266,8 @@ export function CalloutWindow({ editor, blockId, block, editable }: BlockWindowP
   const icon = textProp(props, "icon", DEFAULT_CALLOUT_ICON);
   const color = calloutColor(textProp(props, "color", "default"));
   const disabled = block === null || !editable;
+  // `ChoiceList` n'appelle rien quand `disabled` est vrai (le bloc parti, l'éditeur en lecture seule).
   const write = (change: { icon: string } | { color: string }) => {
-    if (disabled) return;
     editor.updateBlock(blockId, { props: change });
   };
   return (

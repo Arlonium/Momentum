@@ -2,16 +2,18 @@
 // (`target="_blank"`, `rel="noopener noreferrer"`). Pas d'aperçu distant (titre, image) : le serveur
 // ne va chercher aucune adresse (R250).
 //
-// Son adresse ne s'écrit que par sa fenêtre (`BookmarkWindow`, « Modifier le signet », ou
+// Dans l'éditeur, son adresse s'écrit par sa fenêtre (`BookmarkWindow`, « Modifier le signet », ou
 // Ctrl+Alt+Entrée quand le signet est sélectionné), et seulement si c'est une adresse web entière ;
 // l'adresse écrite est celle que rend `webUrl` (`https://mementum.dev` devient
 // `https://mementum.dev/`). La barre de mise en forme n'offre rien sur un signet (`Toolbar.tsx`) :
 // BlockNote y mettait « Remplacer le fichier », qui écrivait l'adresse sans la vérifier.
 //
-// Ce que le document porte d'autre (MMD, un agent, un autre client) se montre en texte, isolé,
-// jamais en lien ; une prop qui n'est pas une chaîne est une adresse vide.
+// D'autres chemins écrivent une adresse sans passer par cette fenêtre (R477) : le collage d'un bloc
+// copié dans BlockNote (son HTML porte l'adresse telle quelle), MMD, un agent, un autre client. La
+// sûreté est donc dans la vue : ce qui n'est pas une adresse web se montre en texte, isolé, jamais
+// en lien ; une prop qui n'est pas une chaîne est une adresse vide.
 import { createReactBlockSpec } from "@blocknote/react";
-import { useId, useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
 import { shorten } from "../../comments/dom";
 import { BookmarkIcon } from "../../icons";
 import type { MementumEditor } from "../debug";
@@ -26,7 +28,10 @@ export const ADDRESS_REFUSED = "Une adresse commence par http:// ou https://";
 /** Une adresse qui n'est pas une adresse web n'est montrée qu'en partie. */
 const MAX_RAW_CHARS = 200;
 
-type ViewProps = { block: { id: string; props: Readonly<Record<string, unknown>> }; editor: MementumEditor };
+type ViewProps = {
+  block: { id: string; type: string; props: Readonly<Record<string, unknown>> };
+  editor: MementumEditor;
+};
 
 function BookmarkView({ block, editor }: ViewProps) {
   const url = textProp(block.props, "url");
@@ -68,7 +73,7 @@ function BookmarkView({ block, editor }: ViewProps) {
             // Un clic ne donne pas le focus à un bouton partout (Safari) : la fenêtre qu'il ferme
             // l'avait, il le garde.
             event.currentTarget.focus();
-            toggleBlockWindow(editor, block.id);
+            toggleBlockWindow(editor, block);
           }}
         >
           Modifier
@@ -86,22 +91,32 @@ export const Bookmark = createReactBlockSpec(
 );
 
 /**
- * La fenêtre d'un signet : un champ d'adresse. Rien ne s'écrit tant qu'on tape ; « Enregistrer » (ou
- * Entrée) écrit l'adresse que rend `webUrl`, ou dit pourquoi elle est refusée, sans rien écrire. Ce
- * qu'on tape vit en brouillon, par id de bloc (`setBlockDraft`) : Échap ferme la fenêtre sans le
- * perdre, et la rouvrir le retrouve, tant que la page est ouverte. Le bloc parti (supprimé, ou
- * changé en autre chose par un autre), le champ reste, en lecture seule, avec ce qu'on y a tapé.
+ * La fenêtre d'un signet : un champ d'adresse. Tant qu'on n'y a rien tapé, il suit l'adresse du bloc,
+ * relue par son id (un autre peut la changer pendant que la fenêtre est ouverte), et « Enregistrer »
+ * ferme sans rien écrire (R473). Ce qu'on tape vit en brouillon, rangé par page et par id de bloc
+ * (`setBlockDraft`), et n'est jamais remplacé par ce qui arrive d'ailleurs ; « Enregistrer » (ou
+ * Entrée) écrit alors l'adresse que rend `webUrl`, ou dit pourquoi elle est refusée, sans rien écrire.
+ * Échap ferme la fenêtre sans perdre le brouillon, que la rouvrir retrouve, tant que la page est
+ * ouverte. Le bloc parti (supprimé, ou changé en autre chose par un autre), ou l'éditeur en lecture
+ * seule, le champ reste, en lecture seule, avec ce qu'on y a tapé, ou la dernière adresse vue.
  */
 export function BookmarkWindow({ editor, blockId, block, editable, close }: BlockWindowProps) {
   const id = useId();
-  const [draft, setDraft] = useState(
-    () => blockDraft(editor, blockId, "bookmark") ?? textProp(block?.props ?? {}, "url"),
-  );
+  const [draft, setDraft] = useState(() => blockDraft(editor, blockId, "bookmark"));
   const [refused, setRefused] = useState(false);
+  // La dernière adresse vue du bloc, gardée quand il part.
+  const seen = useRef("");
+  if (block !== null) seen.current = textProp(block.props, "url");
+  const shown = draft ?? seen.current;
   const writable = block !== null && editable;
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!writable) return;
+    // Rien de tapé : rien à écrire, l'adresse du bloc reste telle qu'un autre a pu la laisser.
+    if (draft === undefined) {
+      close("done");
+      return;
+    }
     const href = webUrl(draft);
     if (href === null) {
       setRefused(true);
@@ -125,7 +140,7 @@ export function BookmarkWindow({ editor, blockId, block, editable, close }: Bloc
         spellCheck={false}
         placeholder="https://…"
         dir="ltr"
-        value={draft}
+        value={shown}
         readOnly={!writable}
         aria-invalid={refused || undefined}
         aria-describedby={refused ? `${id}-error` : undefined}

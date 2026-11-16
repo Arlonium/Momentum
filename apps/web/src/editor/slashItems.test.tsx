@@ -4,7 +4,7 @@
 import { filterSuggestionItems } from "@blocknote/core";
 import { expect, test } from "vitest";
 import { cursor, storedProps, stored } from "../test/editors";
-import { blockWindow, flush, mountEditor } from "../test/richEditor";
+import { blockWindow, fill, flush, mountEditor } from "../test/richEditor";
 import { RICH_GROUP, richSlashItems, slashMenuItems } from "./slashItems";
 
 const PAGE = [
@@ -66,4 +66,22 @@ test("a_bookmark_is_inserted_empty_and_opens_its_window", async () => {
   const dialog = blockWindow("Adresse du signet");
   expect(dialog, "la fenêtre du signet inséré").not.toBeNull();
   expect(document.activeElement).toBe(dialog!.querySelector("input"));
+});
+
+test("a_bookmark_set_from_the_slash_menu_gives_the_focus_back_to_the_text", async () => {
+  // Posé depuis le texte, le signet rend le focus au texte, dans le paragraphe qui le suit : la
+  // frappe reprend (R474).
+  const m = await mountEditor({ blocks: PAGE });
+  cursor(m, "x", 3);
+  richSlashItems(m.editor).find((item) => item.title === "Signet")!.onItemClick();
+  await flush();
+  const field = blockWindow("Adresse du signet")!.querySelector("input")!;
+  fill(field, "https://mementum.dev");
+  field.form!.requestSubmit();
+  await flush();
+  expect(blockWindow("Adresse du signet")).toBeNull();
+  expect(document.activeElement).toBe(m.editor.prosemirrorView.dom);
+  const blocks = stored(m.doc);
+  expect(blocks[1].type).toBe("bookmark");
+  expect(m.editor.getTextCursorPosition().block.id).toBe(blocks[2].id);
 });

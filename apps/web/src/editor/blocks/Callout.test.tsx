@@ -183,3 +183,20 @@ test("an_editor_that_becomes_editable_shows_the_icon_button", async () => {
   await flush();
   expect(blockOf(m, "c").querySelector(ICON_BUTTON)).not.toBeNull();
 });
+
+test("an_icon_that_shows_nothing_falls_back_to_the_default_icon", async () => {
+  const m = await mountEditor({
+    blocks: [
+      { id: "v", type: "callout", props: { icon: "" }, content: "Vide" },
+      { id: "f", type: "callout", props: { icon: "\u202E\u202E\u202E" }, content: "Format" },
+      { id: "w", type: "callout", props: { icon: "  \u200B " }, content: "Blanc" },
+      { id: "e", type: "callout", props: { icon: "⚠️" }, content: "Témoin" },
+    ],
+  });
+  for (const id of ["v", "f", "w"]) {
+    expect(blockOf(m, id).querySelector(".mm-callout-glyph"), id).toBeNull();
+    expect(blockOf(m, id).querySelector(".mm-callout-icon svg"), id).not.toBeNull();
+  }
+  // Témoin : une vraie icône se montre en texte.
+  expect(blockOf(m, "e").querySelector(".mm-callout-glyph")?.textContent).toBe("⚠️");
+});

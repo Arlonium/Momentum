@@ -50,6 +50,8 @@ test("bookmark_is_not_a_file_block_for_the_toolbar", async () => {
   await selectNode(m, "s");
   expect(m.editor.getTextCursorPosition().block.id, "le signet est sélectionné").toBe("s");
   expect(toolbarButtons().filter((name) => FILE_BUTTON.test(name))).toEqual([]);
+  // Il n'en reste aucun : la barre n'est pas montrée du tout (pas de cadre vide).
+  expect(document.querySelector(".bn-formatting-toolbar")).toBeNull();
 });
 
 /** Ce que dit le choix du type de bloc de la barre affichée (`null` : il n'y est pas). */

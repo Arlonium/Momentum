@@ -66,6 +66,8 @@ type Options = {
   doc?: Y.Doc;
   clientID?: number;
   editable?: boolean;
+  /** La page de l'éditeur, comme `Editor` la donne à sa vue (`session.pageId`). */
+  pageId?: string;
   /** Ce que React rend : par défaut, la vue de l'éditeur de la page. */
   view?: (editor: MementumEditor) => ReactElement;
 };
@@ -77,7 +79,8 @@ export async function mountEditor({
   doc = new Y.Doc(),
   clientID = 7,
   editable = true,
-  view = (editor) => <EditorView editor={editor} editable={editable} />,
+  pageId,
+  view = (editor) => <EditorView editor={editor} editable={editable} pageId={pageId} />,
 }: Options = {}): Promise<Mounted> {
   stubMatchMedia();
   if (restoreConsole === null) {
@@ -98,16 +101,7 @@ export async function mountEditor({
   doc.on("update", (update: Uint8Array, origin: unknown) => {
     if (origin !== REMOTE) writes.push(update);
   });
-  const editor = BlockNoteEditor.create(
-    withCollaboration({
-      ...EDITOR_OPTIONS,
-      collaboration: {
-        fragment: doc.getXmlFragment(FRAGMENT),
-        user: { name: "Mona", color: "#66655f" },
-        provider: undefined,
-      },
-    }),
-  ) as unknown as MementumEditor;
+  const editor = createEditor(doc);
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -179,4 +173,40 @@ export function press(target: Element, key: string, init: KeyboardEventInit = {}
 /** La fenêtre de réglage ouverte, par son nom, ou `null`. */
 export function blockWindow(label: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`[role="dialog"][aria-label="${label}"]`);
+}
+
+/** Un éditeur de la page, lié à `doc`, sans fournisseur. */
+function createEditor(doc: Y.Doc): MementumEditor {
+  return BlockNoteEditor.create(
+    withCollaboration({
+      ...EDITOR_OPTIONS,
+      collaboration: {
+        fragment: doc.getXmlFragment(FRAGMENT),
+        user: { name: "Mona", color: "#66655f" },
+        provider: undefined,
+      },
+    }),
+  ) as unknown as MementumEditor;
+}
+
+/**
+ * La session de la page de `m` est recréée (une baisse de droits, la corbeille, un schéma changé ;
+ * ou le droit qui revient) : comme `Editor`, un éditeur neuf, lié à un document neuf qui a reçu la
+ * page, prend la place de l'ancien dans la même vue. Rend le nouvel éditeur et son document ; ce que
+ * l'éditeur y écrit est dans `writes`.
+ */
+export async function renewSession(
+  m: Mounted,
+  { editable, pageId }: { editable: boolean; pageId: string },
+): Promise<{ editor: MementumEditor; doc: Y.Doc; writes: Uint8Array[] }> {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, Y.encodeStateAsUpdate(m.doc), REMOTE);
+  const writes: Uint8Array[] = [];
+  doc.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== REMOTE) writes.push(update);
+  });
+  const editor = createEditor(doc);
+  await act(async () => m.root.render(<EditorView editor={editor} editable={editable} pageId={pageId} />));
+  await flush();
+  return { editor, doc, writes };
 }

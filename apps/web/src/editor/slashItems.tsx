@@ -6,7 +6,8 @@
 // Choisir un bloc riche fait le geste de BlockNote (R308, récrit) : dans un bloc vide, ou qui ne
 // porte que « / », ce bloc devient celui qu'on a choisi (il garde son id ; une frappe faite au même
 // instant dans ce bloc par quelqu'un d'autre est perdue, R303) ; ailleurs, il est inséré après.
-// Un signet s'insère vide et ouvre sa fenêtre, sur son champ d'adresse.
+// Un signet s'insère vide et ouvre sa fenêtre, sur son champ d'adresse ; fermée, elle rend le focus
+// au texte, dans le paragraphe qui suit le signet, où la frappe reprend.
 import { combineByGroup, insertOrUpdateBlockForSlashMenu } from "@blocknote/core";
 import { getDefaultReactSlashMenuItems, type DefaultReactSuggestionItem } from "@blocknote/react";
 import { getMultiColumnSlashMenuItems } from "@blocknote/xl-multi-column";
@@ -38,7 +39,8 @@ export function richSlashItems(editor: MementumEditor): DefaultReactSuggestionIt
       icon: <BookmarkIcon />,
       onItemClick: () => {
         const block = insertOrUpdateBlockForSlashMenu(editor, { type: "bookmark" });
-        openBlockWindow(editor, block.id);
+        // Posé depuis le texte : le focus y revient, dans le paragraphe qui suit le signet (R474).
+        openBlockWindow(editor, block, "editor");
       },
     },
   ];

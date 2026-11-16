@@ -4,7 +4,8 @@
 // en texte, jamais en lien.
 import { expect, test } from "vitest";
 import { contrast } from "../../page/avatarInk";
-import { storedProps } from "../../test/editors";
+import * as Y from "yjs";
+import { exchange, peer, REMOTE, seedState, storedProps } from "../../test/editors";
 import { blockOf, blockWindow, fill, flush, foreignStyles, mountEditor, press } from "../../test/richEditor";
 
 const MODIFY = 'button[aria-label="Modifier le signet"]';
@@ -146,4 +147,44 @@ test("the_colours_of_the_rich_blocks_are_readable", () => {
   expect(contrast("#8A5A0B", "#FCF4E3")).toBeGreaterThanOrEqual(4.5);
   // Le texte d'un choix retenu, sur le fond d'accent (#23704F à 13 %, posé sur du blanc).
   expect(contrast("#2F2E2B", "#E1ECE7")).toBeGreaterThanOrEqual(4.5);
+});
+
+test("an_untouched_field_follows_the_address_and_saving_it_writes_nothing", async () => {
+  // Mona ouvre la fenêtre et ne tape rien ; Tom change l'adresse ; Mona fait Entrée.
+  const base = await seedState(page("https://mementum.dev/"));
+  const mona = await mountEditor({ base, clientID: 2 });
+  const tom = await peer("Tom", 3, base);
+  const server = new Y.Doc();
+  Y.applyUpdate(server, base, REMOTE);
+  const field = await openWindow(mona);
+  // Tom écrit une adresse telle que MMD l'écrit, que `webUrl` récrirait (`…/` en plus).
+  tom.editor.updateBlock("s", { props: { url: "https://tom.example" } });
+  await exchange(server, [tom, mona]);
+  await flush();
+  // Le champ suit l'adresse du bloc tant qu'on n'y a rien tapé.
+  expect(field.value).toBe("https://tom.example");
+  await submit(field);
+  expect(blockWindow(WINDOW)).toBeNull();
+  // Rien n'est écrit : l'adresse de Tom reste, telle quelle, chez tous.
+  expect(mona.writes).toEqual([]);
+  await exchange(server, [mona, tom]);
+  expect(storedProps(server, "s").url).toBe("https://tom.example");
+});
+
+test("a_touched_field_keeps_what_was_typed_when_another_changes_the_address", async () => {
+  const base = await seedState(page("https://mementum.dev/"));
+  const mona = await mountEditor({ base, clientID: 2 });
+  const tom = await peer("Tom", 3, base);
+  const server = new Y.Doc();
+  Y.applyUpdate(server, base, REMOTE);
+  const field = await openWindow(mona);
+  fill(field, "https://mona.example/");
+  tom.editor.updateBlock("s", { props: { url: "https://tom.example/" } });
+  await exchange(server, [tom, mona]);
+  await flush();
+  // Ce qu'on a tapé n'est jamais remplacé ; l'enregistrer est un choix.
+  expect(field.value).toBe("https://mona.example/");
+  await submit(field);
+  await exchange(server, [mona, tom]);
+  expect(storedProps(server, "s").url).toBe("https://mona.example/");
 });

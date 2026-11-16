@@ -55,6 +55,7 @@ import {
 import * as Y from "yjs";
 import { blockOfSelection } from "../comments/dom";
 import { BlockWindowHost, isBlockWindowShortcut, openWindowAtCursor } from "./blocks/BlockWindowHost";
+import { useBlockWindowPage } from "./blocks/blockWindows";
 import { isCommentShortcut } from "../comments/shortcut";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
@@ -191,6 +192,7 @@ export function Editor({ session, fixture = null, onComment = null }: Props) {
       editor={editor}
       editable={mountEditable}
       onComment={onComment}
+      pageId={session.pageId}
       className="mm-editor"
       data-synced={String(synced)}
       data-editable={String(editable)}
@@ -203,6 +205,8 @@ type ViewProps = {
   /** L'état de l'éditeur au montage de sa vue (voir `Editor`) ; il suit ensuite par `isEditable`. */
   editable: boolean;
   onComment?: ((blockId: string) => void) | null;
+  /** La page de l'éditeur : les fenêtres des blocs et leurs brouillons sont rangés par page. */
+  pageId?: string;
   className?: string;
   "data-synced"?: string;
   "data-editable"?: string;
@@ -213,7 +217,9 @@ type ViewProps = {
  * menu de la poignée, Ctrl+Alt+M. Rendue par `Editor`, liée à sa session, et par les tests des
  * blocs (`test/richEditor.tsx`), liée à un document sans fournisseur.
  */
-export function EditorView({ editor, editable, onComment = null, ...attributes }: ViewProps) {
+export function EditorView({ editor, editable, onComment = null, pageId, ...attributes }: ViewProps) {
+  // Avant tout enfant : la fenêtre d'un bloc et ses brouillons sont ceux de la page (R471).
+  useBlockWindowPage(editor, pageId);
   const slashItems = useMemo(() => slashMenuItems(editor), [editor]);
 
   // Le menu de la poignée : celui de BlockNote, et « Commenter » pour qui peut commenter.
