@@ -10,7 +10,7 @@ import { cursor, elements, exchange, peer, REMOTE, seedState, type Seed } from "
 import { blockOf, blockWindow, fill, flush, mountEditor, press, type Mounted } from "../../test/richEditor";
 import { FRAGMENT } from "../collab";
 import { richSlashItems } from "../slashItems";
-import { INLINE_DRAFT_NOTE, INLINE_GONE } from "./InlineMath";
+import { INLINE_DRAFT_NOTE, INLINE_GONE, openInlineMath } from "./InlineMath";
 
 const WINDOW = "Formule en ligne";
 const FORMULA = 'button[aria-label="Modifier la formule"]';
@@ -126,4 +126,101 @@ test("the_window_of_a_formula_another_deletes_keeps_the_text_and_the_focus", asy
   await flush();
   expect(document.activeElement).toBe(mona.editor.prosemirrorView.dom);
   expect(server.getXmlFragment(FRAGMENT).toString()).not.toContain("a + b");
+});
+
+/** Mona et Tom sur une page dont le paragraphe `x` (`first`) porte des formules en ligne. */
+async function duo(first: Seed[number]) {
+  const seed: Seed = [first, { id: "z", type: "paragraph", content: "Après" }];
+  const base = await seedState(seed);
+  const mona = await mountEditor({ base, clientID: 2 });
+  const tom = await peer("Tom", 3, base);
+  const server = new Y.Doc();
+  Y.applyUpdate(server, base, REMOTE);
+  return { mona, tom, server };
+}
+
+/** Le message de la fenêtre ouverte, s'il y en a un. */
+const status = () => blockWindow(WINDOW)?.querySelector('[role="status"]')?.textContent ?? null;
+
+test("the_window_of_a_formula_whose_paragraph_another_moves_stays_on_it", async () => {
+  // Un déplacement supprime et recrée le paragraphe au même id (R220) : la vue de la formule part,
+  // la formule reste. La fenêtre la retrouve par l'id de son bloc et son rang (relecture de C2, M1).
+  const { mona, tom, server } = await duo({
+    id: "x",
+    type: "paragraph",
+    content: ["Avec ", { type: "math", props: { latex: "a" } }, " fin"],
+  });
+  blockOf(mona, "x").querySelector<HTMLButtonElement>(FORMULA)!.click();
+  await flush();
+  const typed = await field(mona);
+  fill(typed, "a + b");
+  tom.editor.setTextCursorPosition("x");
+  tom.editor.moveBlocksDown();
+  await exchange(server, [tom, mona]);
+  await flush();
+  expect(mona.editor.document.map((block) => block.id)).toEqual(["z", "x"]);
+  await until(mona.host, () => blockOf(mona, "x").querySelector(FORMULA) !== null, "la formule recréée");
+  await flush();
+  expect(status()).toBeNull();
+  expect(typed.readOnly).toBe(false);
+  expect(document.activeElement).toBe(typed);
+  press(typed, "Enter", { ctrlKey: true });
+  await flush();
+  expect(blockWindow(WINDOW)).toBeNull();
+  await exchange(server, [mona, tom]);
+  expect(storedFormulas(server)).toEqual(["a + b"]);
+  expect(tom.editor.document.map((block) => block.id)).toEqual(["z", "x"]);
+});
+
+test("a_formula_deleted_by_another_is_not_taken_for_the_next_one", async () => {
+  // Tom supprime la formule dont Mona remplit le champ : la suivante prend son rang, mais ce n'est
+  // pas elle (sa formule diffère) ; la fenêtre la dit partie, et n'écrit rien.
+  const { mona, tom, server } = await duo({
+    id: "x",
+    type: "paragraph",
+    content: ["Avec ", { type: "math", props: { latex: "a" } }, " et ", { type: "math", props: { latex: "b" } }, " fin"],
+  });
+  blockOf(mona, "x").querySelector<HTMLButtonElement>(FORMULA)!.click();
+  await flush();
+  const typed = await field(mona);
+  fill(typed, "a + 1");
+  tom.editor.transact((tr) => {
+    let at = -1;
+    tr.doc.descendants((node, pos) => {
+      if (at === -1 && node.type.name === "math") at = pos;
+    });
+    tr.delete(at, at + 1);
+  });
+  await exchange(server, [tom, mona]);
+  await flush();
+  await until(mona.host, () => status() === INLINE_GONE, "la fenêtre le dit");
+  expect(typed.value).toBe("a + 1");
+  expect(typed.readOnly).toBe(true);
+  press(typed, "Enter", { ctrlKey: true });
+  await flush();
+  expect(mona.writes).toEqual([]);
+  expect(storedFormulas(mona.doc)).toEqual(["b"]);
+});
+
+test("a_posed_formula_whose_view_never_comes_says_so_and_keeps_the_text", async () => {
+  // Une fenêtre ouverte pour une place où aucune formule n'arrive (relecture de C2, M2) : elle le
+  // dit, passe en lecture seule, et le texte tapé reste, même fermée par Échap.
+  const m = await mountEditor({ blocks: [{ id: "x", type: "paragraph", content: "Du texte" }] });
+  m.editor.focus();
+  openInlineMath(m.editor, { pos: 3 }, "editor");
+  await flush();
+  const typed = await field(m);
+  fill(typed, "E = mc^2");
+  await flush();
+  await until(m.host, () => status() === INLINE_GONE, "la fenêtre le dit");
+  expect(typed.readOnly).toBe(true);
+  const finish = [...blockWindow(WINDOW)!.querySelectorAll("button")].find((b) => b.textContent === "Terminer")!;
+  expect(finish.getAttribute("aria-disabled")).toBe("true");
+  press(typed, "Escape");
+  await flush();
+  expect(blockWindow(WINDOW)).toBeNull();
+  openInlineMath(m.editor, { pos: 3 }, "editor");
+  await flush();
+  expect((await field(m)).value).toBe("E = mc^2");
+  expect(m.writes).toEqual([]);
 });

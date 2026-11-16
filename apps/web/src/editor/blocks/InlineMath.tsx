@@ -205,50 +205,99 @@ export const INLINE_DRAFT_NOTE = "Ce texte n'est gardé que tant que la page est
 /** Ce que dit la fenêtre d'une formule partie. */
 export const INLINE_GONE = "Cette formule n'est plus dans la page : quelqu'un l'a supprimée ou changée. Ton texte reste ici, à copier.";
 
-/** Combien d'images on attend, au plus, la vue d'une formule qu'on vient de poser. */
+/** Combien d'images on attend, au plus, la vue d'une formule qu'on vient de poser ou dont la vue est partie. */
 const MAX_WAIT_FRAMES = 60;
+
+/** Où est une formule en ligne : l'id de son bloc et son rang parmi les formules en ligne du bloc. */
+type Place = { blockId: string; rank: number };
+
+/** La place de la formule en ligne qui est à la place `pos` du document de `editor`. */
+function placeAt(editor: MementumEditor, pos: number | undefined): Place | null {
+  if (pos === undefined) return null;
+  try {
+    const at = editor.prosemirrorState.doc.resolve(pos);
+    for (let depth = at.depth; depth >= 0; depth -= 1) {
+      const node = at.node(depth);
+      if (node.type.name !== "blockContainer") continue;
+      let rank = 0;
+      at.parent.forEach((child, offset) => {
+        if (offset < at.parentOffset && child.type.name === "math") rank += 1;
+      });
+      return { blockId: String(node.attrs.id), rank };
+    }
+  } catch {
+    // La place ne tient plus dans le document.
+  }
+  return null;
+}
+
+/**
+ * La vue vivante de la formule qui a la place `place` et la formule `latex` : celle dont la vue est
+ * partie quand un autre a déplacé son bloc (supprimé et recréé au même id, R220). Une autre formule
+ * qui aurait pris son rang (la sienne supprimée) n'a pas la même formule : elle n'est pas prise.
+ */
+function sameFormula(editor: MementumEditor, place: Place | null, latex: string): InlineMathTarget | undefined {
+  if (place === null) return undefined;
+  for (const target of targets(editor)) {
+    if (!target.alive || target.latex() !== latex) continue;
+    const there = placeAt(editor, target.getPos());
+    if (there !== null && there.blockId === place.blockId && there.rank === place.rank) return target;
+  }
+  return undefined;
+}
+
+/** Les brouillons d'un éditeur : par vue de formule, et, pour une formule pas encore arrivée, par place. */
+type Drafts = { byTarget: WeakMap<InlineMathTarget, string>; early: Map<number, string> };
 
 /** La fenêtre ouverte d'une formule en ligne de `editor`, s'il y en a une. */
 export function InlineMathHost({ editor }: { editor: MementumEditor }) {
   const open = useOpenInlineMath(editor);
-  // Les brouillons, par vue de formule : ils vivent tant que cet hôte (la vue de l'éditeur) vit.
-  const drafts = useRef(new WeakMap<InlineMathTarget, string>()).current;
+  // Les brouillons vivent tant que cet hôte (la vue de l'éditeur) vit, fenêtre fermée comprise.
+  const drafts = useRef<Drafts>({ byTarget: new WeakMap(), early: new Map() }).current;
   if (open === null) return null;
   return <OpenInlineMath key={open.id} editor={editor} open={open} drafts={drafts} />;
 }
 
-function OpenInlineMath({
-  editor,
-  open,
-  drafts,
-}: {
-  editor: MementumEditor;
-  open: OpenInline;
-  drafts: WeakMap<InlineMathTarget, string>;
-}) {
+function OpenInlineMath({ editor, open, drafts }: { editor: MementumEditor; open: OpenInline; drafts: Drafts }) {
   const [target, setTarget] = useState<InlineMathTarget | null>(open.target);
-  const [early, setEarly] = useState<string | undefined>(undefined);
-  const [, refresh] = useState(0);
+  const [gaveUp, setGaveUp] = useState(false);
+  const [version, refresh] = useState(0);
   const editable = useEditable(editor);
 
-  // Une formule qu'on vient de poser : sa vue arrive au rendu suivant ; on la cherche à sa place.
+  const alive = target !== null && target.alive;
+  // La dernière formule vue, et sa place : de quoi la retrouver quand sa vue part.
+  const seen = useRef("");
+  const place = useRef<Place | null>(null);
+  if (alive) {
+    seen.current = target.latex();
+    place.current = placeAt(editor, target.getPos()) ?? place.current;
+  }
+
+  // Une formule qu'on vient de poser : sa vue arrive au rendu suivant, on la cherche à sa place. Une
+  // formule dont la vue est partie : on la cherche par sa place et sa formule. Au bout de l'attente,
+  // la fenêtre la dit partie ; elle la cherche encore à chaque changement du document (une annulation).
   useEffect(() => {
-    if (target !== null) return;
+    if (alive) return;
     let frames = 0;
     let handle = 0;
     const look = () => {
-      const found = inlineMathAt(editor, open.pos);
+      const found = target === null ? inlineMathAt(editor, open.pos) : sameFormula(editor, place.current, seen.current);
       if (found !== undefined) {
-        if (early !== undefined) drafts.set(found, early);
+        const typed = target === null ? drafts.early.get(open.pos) : drafts.byTarget.get(target);
+        if (typed !== undefined) drafts.byTarget.set(found, typed);
+        if (target === null) drafts.early.delete(open.pos);
+        setGaveUp(false);
         setTarget(found);
         return;
       }
       frames += 1;
+      if (gaveUp) return;
       if (frames < MAX_WAIT_FRAMES) handle = window.setTimeout(look, 16);
+      else setGaveUp(true);
     };
     look();
     return () => window.clearTimeout(handle);
-  }, [editor, open.pos, target, early, drafts]);
+  }, [editor, open.pos, target, alive, gaveUp, drafts, version]);
 
   // La formule peut changer ou partir : relue à chaque changement du document, et quand sa vue part.
   useEffect(() => editor.onChange(() => refresh((n) => n + 1)), [editor]);
@@ -260,10 +309,8 @@ function OpenInlineMath({
     };
   }, [target]);
 
-  const alive = target !== null && target.alive;
-  const draft = target !== null ? drafts.get(target) : early;
-  const seen = useRef("");
-  if (alive) seen.current = target.latex();
+  const draft = target !== null ? drafts.byTarget.get(target) : drafts.early.get(open.pos);
+  const searching = !alive && !gaveUp;
   const writable = alive && editable;
 
   const focusBack = () => {
@@ -300,14 +347,13 @@ function OpenInlineMath({
     if (!writable) return;
     if (draft !== undefined) {
       target.apply(draft);
-      drafts.delete(target);
+      drafts.byTarget.delete(target);
     }
     close("done");
   };
-  const waiting = target === null;
   return (
     <BlockPopover label="Formule en ligne" anchor={() => (alive ? target.element : null)} onClose={close}>
-      {!waiting && !alive && (
+      {!alive && gaveUp && (
         <p className="mm-block-window-gone" role="status">
           {INLINE_GONE}
         </p>
@@ -315,13 +361,12 @@ function OpenInlineMath({
       <LatexField
         value={draft ?? seen.current}
         display={false}
-        readOnly={!waiting && !writable}
+        readOnly={!searching && !writable}
         onApply={apply}
         onChange={(value) => {
-          if (target !== null) {
-            drafts.set(target, value);
-            refresh((n) => n + 1);
-          } else setEarly(value);
+          if (target !== null) drafts.byTarget.set(target, value);
+          else drafts.early.set(open.pos, value);
+          refresh((n) => n + 1);
         }}
         note={INLINE_DRAFT_NOTE}
       />
