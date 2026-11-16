@@ -10,7 +10,7 @@ import { cursor, elements, exchange, peer, REMOTE, seedState, type Seed } from "
 import { blockOf, blockWindow, fill, flush, mountEditor, press, type Mounted } from "../../test/richEditor";
 import { FRAGMENT } from "../collab";
 import { richSlashItems } from "../slashItems";
-import { INLINE_DRAFT_NOTE, INLINE_GONE, openInlineMath } from "./InlineMath";
+import { INLINE_DRAFT_NOTE, INLINE_GONE, openInlineMath, placeAt } from "./InlineMath";
 
 const WINDOW = "Formule en ligne";
 const FORMULA = 'button[aria-label="Modifier la formule"]';
@@ -170,6 +170,23 @@ test("the_window_of_a_formula_whose_paragraph_another_moves_stays_on_it", async 
   await exchange(server, [mona, tom]);
   expect(storedFormulas(server)).toEqual(["a + b"]);
   expect(tom.editor.document.map((block) => block.id)).toEqual(["z", "x"]);
+});
+
+test("two_formulas_of_a_table_have_two_places", async () => {
+  // Le rang d'une formule se compte dans tout son bloc, de son début jusqu'à elle : deux cellules
+  // d'un tableau avaient la même place (re-relecture de C2, N1).
+  const math = { type: "math", props: { latex: "x" } };
+  const m = await mountEditor({
+    blocks: [{ id: "x", type: "table", content: { type: "tableContent", rows: [{ cells: [["A ", math], ["B ", math]] }] } } as never],
+  });
+  const positions: number[] = [];
+  m.editor.prosemirrorState.doc.descendants((node, pos) => {
+    if (node.type.name === "math") positions.push(pos);
+  });
+  expect(positions.map((pos) => placeAt(m.editor, pos))).toEqual([
+    { blockId: "x", rank: 0 },
+    { blockId: "x", rank: 1 },
+  ]);
 });
 
 for (const [opened, other] of [

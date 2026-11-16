@@ -214,8 +214,8 @@ const MAX_WAIT_FRAMES = 60;
 /** Où est une formule en ligne : l'id de son bloc et son rang parmi les formules en ligne du bloc. */
 type Place = { blockId: string; rank: number };
 
-/** La place de la formule en ligne qui est à la place `pos` du document de `editor`. */
-function placeAt(editor: MementumEditor, pos: number | undefined): Place | null {
+/** La place de la formule en ligne qui est à la place `pos` du document de `editor` (exportée pour les tests). */
+export function placeAt(editor: MementumEditor, pos: number | undefined): Place | null {
   if (pos === undefined) return null;
   try {
     const at = editor.prosemirrorState.doc.resolve(pos);
