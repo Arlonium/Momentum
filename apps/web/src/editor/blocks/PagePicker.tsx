@@ -3,7 +3,7 @@
 // titres qui commencent par la requête d'abord, sans accents ni casse. Une page qui n'est pas dans
 // l'arbre (qu'on ne voit pas, d'un autre espace, à la corbeille) n'y est jamais (R251).
 //
-// Un combobox : le champ garde le focus, les flèches haut et bas choisissent la page active
+// Un combobox (R572) : le champ garde le focus, les flèches haut et bas choisissent la page active
 // (`aria-activedescendant`), Entrée la prend ; un clic aussi. Le champ est tenu par qui le rend
 // (`query`, `onQuery`) : la fenêtre du lien de page garde ce qu'on y a tapé quand on la ferme.
 //

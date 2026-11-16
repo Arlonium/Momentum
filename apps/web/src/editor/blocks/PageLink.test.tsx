@@ -229,3 +229,32 @@ test("the_picker_survives_a_new_session_and_writes_nothing_in_read_only", async 
   await flush();
   expect(stored(writer.doc).map((b) => b.type)).toEqual(["paragraph", "pageLink", "paragraph", "paragraph"]);
 });
+
+test("a_link_picked_once_its_block_is_gone_goes_after_the_selected_block_and_the_typing_goes_on_after_it", async () => {
+  await publish("space", [page(PLAN, { title: "Plan" })]);
+  for (const after of [true, false]) {
+    const m = await mountEditor({
+      blocks: [
+        { id: "x", type: "paragraph", content: "Du texte" },
+        { id: "s", type: "bookmark", props: { url: "https://mementum.dev/" } },
+        ...(after ? [{ id: "z", type: "paragraph" as const, content: "Après" }] : []),
+      ],
+    });
+    cursor(m, "x", 3);
+    const field = openPicker(m);
+    // Le bloc d'où l'on a ouvert le sélecteur part (un autre l'a supprimé), et le curseur est sur le
+    // signet, sélectionné.
+    act(() => {
+      m.editor.removeBlocks(["x"]);
+      selectBlock(m, "s");
+    });
+    await act(async () => void press(field, "Enter"));
+    await flush();
+    // Le lien va après le signet ; le curseur passe au texte qui suit (un paragraphe neuf s'il n'y en a
+    // pas) : la frappe ne remplace ni le lien, ni le signet.
+    const blocks = stored(m.doc);
+    expect(blocks.map((b) => b.type), after ? "un texte après" : "rien après").toEqual(["bookmark", "pageLink", "paragraph"]);
+    expect(m.editor.getTextCursorPosition().block.id).toBe(blocks[2].id);
+    if (after) expect(blocks[2].id).toBe("z");
+  }
+});

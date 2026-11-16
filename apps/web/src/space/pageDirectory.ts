@@ -1,5 +1,5 @@
 // Les pages que le compte voit dans l'espace affiché, pour l'éditeur (Task C3, R251) : le titre à
-// jour d'un lien de page (et des mentions, Task C4), et les pages qu'un sélecteur propose.
+// jour d'un lien de page (et des mentions, Task C4), et les pages qu'un sélecteur propose (R570).
 //
 // Elles viennent de l'arbre de l'espace, que le serveur a déjà filtré par les droits (`App` les
 // publie à chaque arbre lu, `publishPages`). Une page qui n'y est pas (qu'on ne voit pas, d'un autre

@@ -1,5 +1,5 @@
 // Le lien vers une page (registre : `pageLink`, props `pageId` et `title` ; MMD
-// `<page id="…">titre</page>`). Le titre est copié dans le document quand on pose le lien (R251) :
+// `<page id="…">titre</page>`). Le titre est copié dans le document quand on pose le lien (R251, R571) :
 // qui voit la page (elle est dans l'arbre de l'espace affiché, `pageDirectory.ts`) lit son titre à
 // jour ; qui ne la voit pas ne lit que ce titre copié, jamais un titre venu d'ailleurs (preuve 4 du
 // plan). Rien ne se lit au serveur pour un lien : l'arbre est déjà là.
@@ -10,7 +10,7 @@
 // sélectionné y met le focus (`focusBlockLinks`, `Toc.tsx`), et Entrée le suit. Le titre est un nœud
 // de texte, isolé (`dir="auto"`).
 //
-// « Lien vers une page » du menu « / » ouvre un sélecteur (`PagePicker`) dans une fenêtre non
+// « Lien vers une page » du menu « / » ouvre un sélecteur (`PagePicker`, R572, R573) dans une fenêtre non
 // modale, hors du document, près du bloc où était le curseur (`PageLinkHost`). Le bloc n'est inséré
 // qu'au choix d'une page, par le geste de BlockNote (R308) : dans un bloc vide, il le devient ; après
 // un texte, il est inséré après, et le curseur passe au bloc qui suit. Fermée sans choix (Échap, un
@@ -130,10 +130,12 @@ function insertPageLink(editor: MementumEditor, at: string | null, page: FoundPa
     insertOrUpdateBlockForSlashMenu(editor, link);
     return;
   }
-  // Le curseur est sur un bloc sans texte (un signet sélectionné) : le lien va après lui.
+  // Le curseur est sur un bloc sans texte (un signet sélectionné) : le lien va après lui, et le
+  // curseur au texte qui suit, un paragraphe neuf s'il n'y en a pas : la frappe ne remplace rien.
   const [inserted] = editor.insertBlocks([link], cursor, "after");
-  const next = editor.getTextCursorPosition().nextBlock;
-  editor.setTextCursorPosition(next?.content !== undefined && next.id !== inserted.id ? next : inserted, "start");
+  const next = editor.getNextBlock(inserted);
+  const text = next?.content !== undefined ? next : editor.insertBlocks([{ type: "paragraph" }], inserted, "after")[0];
+  editor.setTextCursorPosition(text, "start");
 }
 
 /** Le sélecteur du lien de page ouvert dans la page de `editor`, s'il l'est. */

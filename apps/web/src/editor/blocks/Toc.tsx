@@ -1,18 +1,19 @@
 // La table des matières (registre : `toc`, sans prop) : les titres de niveau 1 à 4 de la page, dans
 // l'ordre du document, chacun un lien à sa profondeur. Un lien fait défiler la page jusqu'à son titre,
-// et y met le curseur et le focus ; il n'est pas suivi (l'adresse ne change pas). La même pour qui
-// lit et qui modifie : c'est une navigation, elle n'écrit rien.
+// et y met le curseur et le focus (R567) ; il n'est pas suivi (l'adresse ne change pas). La même pour
+// qui lit et qui modifie : c'est une navigation, elle n'écrit rien.
 //
-// Rien sur le chemin de la frappe (R5xx) : les titres sont lus dans le document de l'éditeur
+// Rien sur le chemin de la frappe (R565, R566) : les titres sont lus dans le document de l'éditeur
 // (`headings.ts`, environ 1 ms pour 10 000 blocs), une fois au montage de la première table de la
 // page, puis à chaque changement du document, groupés comme les relectures du serveur (`groupedDelay`
 // de `rereads.ts` : 250 ms après le dernier changement, une seconde au plus après le premier). Une
 // seule lecture par éditeur, quel que soit le nombre de tables ; une page sans table n'en fait
-// aucune : l'éditeur n'est écouté que tant qu'une table est affichée.
+// aucune : l'éditeur n'est écouté que tant qu'une table est affichée. Les entrées sont rendues au
+// tour suivant de React : avec la page, cinq cents liens retardaient son ouverture.
 //
-// Rien ne bouge sous le pointeur ni sous le focus : tant que l'un ou l'autre est dans la table, elle
-// garde ce qu'elle montrait (un titre supprimé reste, son lien ne mène plus nulle part), et suit la
-// page quand ils en sont sortis. La table supprimée par un autre pendant qu'une de ses entrées a le
+// Rien ne bouge sous le pointeur ni sous le focus (R568) : tant que l'un ou l'autre est dans la table,
+// elle garde ce qu'elle montrait (un titre supprimé reste, son lien ne mène plus nulle part), et suit
+// la page quand ils en sont sortis. La table supprimée par un autre pendant qu'une de ses entrées a le
 // focus, le focus va à l'éditeur, jamais sur `body`.
 //
 // Le texte des titres vient du document : un nœud de texte, isolé (`dir="auto"`), jamais du HTML.
@@ -239,7 +240,7 @@ export const Toc = createReactBlockSpec(
 );
 
 /**
- * Ctrl+Alt+Entrée sur une table des matières ou un lien de page sélectionné (les flèches les
+ * Ctrl+Alt+Entrée (R569) sur une table des matières ou un lien de page sélectionné (les flèches les
  * sélectionnent) : le focus va à son premier lien, d'où Tab parcourt les autres et Entrée suit.
  * Dans le texte de l'éditeur, Tab imbrique les blocs : sans cela, aucun chemin au clavier n'y
  * menait pour qui modifie. Rend vrai si le focus y est allé.
