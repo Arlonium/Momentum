@@ -221,7 +221,9 @@ impl TestApp {
         let addr = listener.local_addr().unwrap();
         let router = self.router.clone();
         tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
+            axum::serve(mementum_server::without_nagle(listener), router)
+                .await
+                .unwrap();
         });
         addr
     }

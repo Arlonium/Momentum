@@ -94,6 +94,10 @@ impl TestServer {
                 shutdown: shutdown_rx,
                 alive: alive_tx,
             });
+        // Sans l'algorithme de Nagle, comme `mementum serve` (Ruling R445).
+        let listener = axum::serve::ListenerExt::tap_io(listener, |tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });

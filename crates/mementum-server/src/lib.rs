@@ -364,7 +364,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         tracing::warn!(%error, "ligne d'écoute impossible à écrire sur la sortie standard ; le serveur continue");
     }
     tracing::info!(%addr, data_dir = %cfg.data_dir.display(), "serveur prêt");
-    let served = axum::serve(listener, router)
+    let served = axum::serve(without_nagle(listener), router)
         .with_graceful_shutdown(shutdown_signal())
         .await;
     // Plus aucune requête : chaque page ouverte coupe sa version `closing` s'il lui reste des
@@ -373,6 +373,22 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     hub.shutdown().await;
     store.close().await;
     served.context("serveur HTTP")
+}
+
+/// Les connexions que `listener` accepte écrivent sans l'algorithme de Nagle (`TCP_NODELAY`,
+/// Ruling R445) : une petite trame (une frappe relayée, une marque de présence, une trame de page)
+/// part tout de suite, au lieu d'attendre l'accusé de réception de la précédente, qu'un client
+/// qui n'a rien à envoyer retarde (jusqu'à 40 ms sous Linux). Une option refusée par le système
+/// laisse la connexion telle quelle.
+pub fn without_nagle(
+    listener: TcpListener,
+) -> impl axum::serve::Listener<Io = tokio::net::TcpStream, Addr = std::net::SocketAddr> {
+    use axum::serve::ListenerExt;
+    listener.tap_io(|tcp| {
+        if let Err(error) = tcp.set_nodelay(true) {
+            tracing::debug!(%error, "TCP_NODELAY refusé sur une connexion acceptée");
+        }
+    })
 }
 
 async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
@@ -671,6 +687,19 @@ mod tests {
         for part in ["renommage", "liens physiques", "rien n'a été écrasé"] {
             assert!(warning.contains(part), "« {part} » absent de : {warning}");
         }
+    }
+
+    /// Une connexion acceptée par le serveur écrit sans l'algorithme de Nagle (Ruling R445).
+    #[tokio::test]
+    async fn accepted_connections_have_no_nagle() {
+        use axum::serve::Listener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut listener = without_nagle(listener);
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (accepted, _) = listener.accept().await;
+        assert!(accepted.nodelay().unwrap());
+        drop(client);
     }
 
     /// Ce que `to_completion` mène dans sa propre tâche garde le compte auquel la requête
