@@ -382,7 +382,6 @@ fn shape_of(entries: &[Entry], deleted: &[Deleted]) -> Shape {
                             type_ref: None,
                             tag: None,
                             block_id: None,
-                            deleted: false,
                         }),
                         1 => Kind::Gc,
                         _ => Kind::Skip,

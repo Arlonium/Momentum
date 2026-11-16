@@ -476,8 +476,7 @@ const ID_ORDERS: [&str; 2] = ["mona-first", "tom-first"];
 
 /// Chaque scène des octets du navigateur où Tom tape (ou ajoute un sous-bloc) dans un bloc que
 /// Mona déplace, et la page voulue quand le déplacement arrive après : l'acteur la donne aux
-/// quatre endroits (Task 13b), dans les deux ordres des identifiants de client. Pour
-/// `concurrent-delete`, la page voulue est celle où le serveur s'abstient (Ruling R450).
+/// quatre endroits (Task 13b), dans les deux ordres des identifiants de client.
 const CARRIED_SCENES: [(&str, &str); 12] = [
     ("s1", "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »"),
     (
@@ -508,10 +507,9 @@ const CARRIED_SCENES: [(&str, &str); 12] = [
         "mover-typed-too",
         "y « Bloc Y » | z « Bloc Z » | x « Tom : Bloc X de Mona »",
     ),
-    // Le serveur s'abstient : la copie de Mona porte « oc », que Tom a effacé (Ruling R450).
     (
         "concurrent-delete",
-        "y « Bloc Y » | z « Bloc Z » | x « Bloc X »",
+        "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »",
     ),
 ];
 
@@ -734,6 +732,143 @@ async fn a_witness_never_sees_two_copies_of_a_block_moved_twice() {
             assert_eq!(page.matches("x «").count(), 1, "{order} : {page}");
         }
     }
+}
+
+/// Relecture du tour 1, R2 (Rulings R458, R459) : l'original de X est une seule plage en gras
+/// « abab… » de 1 500 paires, écrite d'un coup par un client ; un client hostile recrée X en ne
+/// gardant que les « a » (les « b » sont non vus). Chaque « b » à reporter demande un texte et deux
+/// éléments de marque : la borne haute retient le report avant d'écrire. La mise à jour est écrite
+/// sans report, la connexion hostile reste ouverte (un report refusé après écriture la fermerait),
+/// et un témoin a la page du serveur.
+#[tokio::test]
+async fn a_bold_range_whose_carry_would_pass_the_bound_is_withheld_before_writing() {
+    use mementum_crdt::FRAGMENT;
+    use yrs::branch::{Branch, BranchID};
+    use yrs::updates::decoder::Decode;
+    use yrs::{
+        Any, Doc, ID, OffsetKind, Options, ReadTxn, Text, Transact, Update, Xml, XmlElementPrelim,
+        XmlElementRef, XmlFragment, XmlOut, XmlTextPrelim,
+    };
+
+    fn element(out: Option<XmlOut>) -> XmlElementRef {
+        match out {
+            Some(XmlOut::Element(e)) => e,
+            other => panic!("pas un élément : {other:?}"),
+        }
+    }
+    fn id_of<B: AsRef<Branch>>(node: &B) -> ID {
+        match node.as_ref().id() {
+            BranchID::Nested(id) => id,
+            BranchID::Root(_) => panic!("racine"),
+        }
+    }
+    fn var(out: &mut Vec<u8>, mut n: u64) {
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    }
+    fn raw(state: &[u8]) -> Doc {
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(state).unwrap())
+            .unwrap();
+        doc
+    }
+
+    const PAIRS: u32 = 1_500;
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Bloc X\n\nBloc Y\n").await;
+    let x = f.ids().await[0].clone();
+    let writer = f.client().await;
+    let witness = f.client().await;
+
+    // L'original : une plage en gras « abab… », écrite d'un coup.
+    let doc = raw(&writer.page().unwrap().encode_state());
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let before = doc.transact().state_vector();
+    let mut seen = Vec::new();
+    {
+        let mut txn = doc.transact_mut();
+        let container = element(element(fragment.get(&txn, 0)).get(&txn, 0));
+        let Some(XmlOut::Text(text)) = element(container.get(&txn, 0)).get(&txn, 0) else {
+            panic!("le texte de X");
+        };
+        let len = text.len(&txn);
+        text.remove_range(&mut txn, 0, len);
+        let client = doc.client_id();
+        for i in 0..PAIRS {
+            seen.push(ID::new(client, txn.state_vector().get(&client)));
+            text.insert(&mut txn, 2 * i, "a");
+            text.insert(&mut txn, 2 * i + 1, "b");
+        }
+        let mut bold = yrs::types::Attrs::new();
+        bold.insert("bold".into(), Any::Map(Default::default()));
+        text.format(&mut txn, 0, 2 * PAIRS, bold);
+    }
+    writer.apply_local(&doc.transact().encode_diff_v1(&before));
+    processed(&writer).await;
+
+    // La copie hostile : les seuls « a ».
+    let hostile = f.client().await;
+    let doc = raw(&hostile.page().unwrap().encode_state());
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let (container, content) = {
+        let txn = doc.transact();
+        let c = element(element(fragment.get(&txn, 0)).get(&txn, 0));
+        let p = element(c.get(&txn, 0));
+        (id_of(&c), id_of(&p))
+    };
+    let before = doc.transact().state_vector();
+    {
+        let mut txn = doc.transact_mut();
+        let root = element(fragment.get(&txn, 0));
+        let len = root.len(&txn);
+        let copy = root.insert(&mut txn, len, XmlElementPrelim::empty("blockContainer"));
+        copy.insert_attribute(&mut txn, "id", x.clone());
+        let p = copy.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        p.push_back(&mut txn, XmlTextPrelim::new("a".repeat(PAIRS as usize)));
+    }
+    let inserted = doc.transact().encode_diff_v1(&before);
+    let mut by_client: std::collections::BTreeMap<u64, Vec<u32>> = Default::default();
+    for id in [container, content].into_iter().chain(seen) {
+        by_client.entry(id.client.get()).or_default().push(id.clock);
+    }
+    let mut deleted = Vec::new();
+    var(&mut deleted, 0);
+    var(&mut deleted, by_client.len() as u64);
+    for (client, mut clocks) in by_client {
+        clocks.sort_unstable();
+        var(&mut deleted, client);
+        var(&mut deleted, clocks.len() as u64);
+        for clock in clocks {
+            var(&mut deleted, u64::from(clock));
+            var(&mut deleted, 1);
+        }
+    }
+    let update = yrs::merge_updates_v1([inserted.as_slice(), deleted.as_slice()]).unwrap();
+    hostile.send_update(&update);
+    processed(&hostile).await;
+    assert!(!hostile.is_closed(), "la connexion hostile reste ouverte");
+
+    let wanted = "a".repeat(PAIRS as usize);
+    let server = f.hub.read_blocks(f.page).await.unwrap();
+    let copy = server.iter().find(|b| b.id == x).expect("la copie");
+    assert_eq!(block_text(copy), wanted, "rien de reporté");
+    assert!(
+        witness
+            .wait_until(WAIT, |c| line(&c.blocks()) == line(&server))
+            .await,
+        "le témoin a la page du serveur"
+    );
 }
 
 /// C1 de la relecture : une mise à jour de quelques kilo-octets recrée X tout au fond de la page,

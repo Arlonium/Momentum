@@ -191,21 +191,12 @@ impl PageDoc {
     /// rendu dans [`Applied::carried`]. Rien de cela ne s'exécute pour une mise à jour qui
     /// n'insère aucun élément : le chemin d'une frappe ne change pas.
     ///
-    /// Le report écrit est relu comme une entrée du journal (la garde, la profondeur) et mesuré
-    /// (`MAX_CARRIED_BYTES`) avant d'être rendu (Ruling R452) : s'il n'y passe pas, l'erreur est
-    /// [`CrdtError::CarryRefused`], la page est à jeter, et l'appelant la recharge puis reprend
-    /// la mise à jour par [`PageDoc::apply_client_update_alone`], sans report.
+    /// Le report est retenu avant d'écrire s'il dépasse ses bornes, estimées par le haut
+    /// ([`Applied::withheld`], Rulings R451, R458). Écrit, il est relu comme une entrée du journal
+    /// (la garde, la profondeur, la taille, Ruling R452) : s'il n'y passe pas, ce qui ne devrait
+    /// jamais arriver, l'erreur est [`CrdtError::CarryRefused`], et comme après toute erreur la
+    /// page est à jeter (R459).
     pub fn apply_client_update(&self, update: &[u8]) -> Result<Applied, CrdtError> {
-        self.apply_client(update, true)
-    }
-
-    /// [`PageDoc::apply_client_update`] sans report d'un bloc recréé : pour l'appelant dont le
-    /// report a été refusé ([`CrdtError::CarryRefused`]), sur la page rechargée.
-    pub fn apply_client_update_alone(&self, update: &[u8]) -> Result<Applied, CrdtError> {
-        self.apply_client(update, false)
-    }
-
-    fn apply_client(&self, update: &[u8], carry: bool) -> Result<Applied, CrdtError> {
         let mut txn = self.doc.transact_mut();
         let (shape, decoded) = self.read(&txn, update, true)?;
         // Ce que la page gardait en attente de suppression avant (d'ordinaire rien).
@@ -214,16 +205,10 @@ impl PageDoc {
         let read = decoded.encode_v1();
         // Avant l'application, qui supprime l'original de chaque bloc recréé et tout ce qu'il
         // porte.
-        let recreated = if carry && shape.inserts_elements() {
+        let recreated = if shape.inserts_elements() {
             moves::capture(&mut txn, &self.fragment, &shape, &self.original_walks)
         } else {
             Vec::new()
-        };
-        // Ce que l'auteur a créé puis supprimé dans la même mise à jour (Ruling R450).
-        let created_and_deleted = if recreated.is_empty() {
-            0
-        } else {
-            shape.created_and_deleted(&txn.state_vector())
         };
         self.integrate(&mut txn, &shape, decoded)?;
         // yrs ne dresse la liste des types changés qu'à la validation.
@@ -245,7 +230,7 @@ impl PageDoc {
         let (carried, withheld) = if recreated.is_empty() {
             (None, None)
         } else {
-            self.carry(&recreated, created_and_deleted)?
+            self.carry(&recreated)?
         };
         Ok(Applied {
             read,
@@ -263,29 +248,24 @@ impl PageDoc {
     fn carry(
         &self,
         recreated: &[Recreated],
-        created_and_deleted: u64,
     ) -> Result<(Option<Vec<u8>>, Option<String>), CrdtError> {
         let mut txn = self.doc.transact_mut();
         let before = txn.state_vector();
-        let written = match moves::carry(&mut txn, recreated, created_and_deleted) {
+        let (written, bound) = match moves::carry(&mut txn, recreated) {
             Carried::Nothing => return Ok((None, None)),
             Carried::Withheld(why) => return Ok((None, Some(why))),
-            Carried::Written(written) => written,
+            Carried::Written(written, bound) => (written, bound),
         };
         let update = txn.encode_update_v1();
-        let refused = |why: String| Err(CrdtError::CarryRefused(why));
-        if update.len() > MAX_CARRIED_BYTES {
-            return refused(format!(
-                "{} octets, au-delà de {MAX_CARRIED_BYTES}",
-                update.len()
-            ));
-        }
-        let shape = Shape::read(&update)?;
-        if let Err(error) = shape.check(&before) {
-            return refused(error.to_string());
-        }
-        if shape.deeper_than_bound(&txn) {
-            return refused(CrdtError::TooDeep.to_string());
+        // Ruling R458 : l'estimation est une borne haute ; la dépasser est un défaut, que les
+        // tests voient.
+        debug_assert!(
+            update.len() <= bound,
+            "report de {} octets, au-delà de sa borne haute ({bound})",
+            update.len()
+        );
+        if let Err(why) = verify_carried(&update, &before, &txn) {
+            return Err(CrdtError::CarryRefused(why));
         }
         drop(txn);
         let mut copies = self
@@ -615,6 +595,24 @@ impl PageDoc {
     }
 }
 
+/// Relit le report `update`, écrit dans `txn` sur une page dont le vecteur d'état était `before`,
+/// comme une entrée du journal (Ruling R452) : sa taille ([`MAX_CARRIED_BYTES`]), la garde, la
+/// profondeur de ce qu'il insère. `Err` dit ce qui ne passe pas.
+fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> Result<(), String> {
+    if update.len() > MAX_CARRIED_BYTES {
+        return Err(format!(
+            "{} octets, au-delà de {MAX_CARRIED_BYTES}",
+            update.len()
+        ));
+    }
+    let shape = Shape::read(update).map_err(|e| e.to_string())?;
+    shape.check(before).map_err(|e| e.to_string())?;
+    if shape.deeper_than_bound(txn) {
+        return Err(CrdtError::TooDeep.to_string());
+    }
+    Ok(())
+}
+
 /// Les blocs que [`PageDoc::write_blocks`] écrit : normalisés, un paragraphe vide pour un
 /// arbre vide (Ruling R16), et refusés si BlockNote les refuserait (`Structure`, `TooDeep`).
 fn writable(blocks: &[Block]) -> Result<Vec<Block>, CrdtError> {
@@ -708,6 +706,59 @@ mod tests {
             }
         }
         *content = out;
+    }
+
+    /// Ruling R452 (mutations C1c à C1e de la re-relecture) : la relecture d'un report refuse
+    /// une mise à jour trop lourde, une qui écrit hors de la page, et une qui insère plus profond
+    /// que la borne ; elle laisse passer une écriture ordinaire.
+    #[test]
+    fn verify_carried_refuses_what_a_stored_entry_would_refuse() {
+        use yrs::{Text, XmlTextPrelim};
+
+        // Une écriture ordinaire.
+        let page = page(7);
+        page.fill(&mut page.doc.transact_mut(), &[empty_paragraph()]);
+        let before = page.doc.transact().state_vector();
+        let mut txn = page.doc.transact_mut();
+        let root = page.root(&txn).unwrap();
+        let text = root.push_back(&mut txn, XmlTextPrelim::new(""));
+        text.insert(&mut txn, 0, "texte");
+        let update = txn.encode_update_v1();
+        assert_eq!(verify_carried(&update, &before, &txn), Ok(()));
+        drop(txn);
+
+        // Trop lourde (C1e).
+        let mut txn = page.doc.transact_mut();
+        let before = txn.state_vector();
+        text.insert(&mut txn, 0, &"x".repeat(MAX_CARRIED_BYTES + 1));
+        let update = txn.encode_update_v1();
+        assert!(verify_carried(&update, &before, &txn).is_err());
+        drop(txn);
+
+        // Hors de la page (C1d) : une racine que la garde refuse.
+        let other = page.doc.get_or_insert_xml_fragment("autre");
+        let mut txn = page.doc.transact_mut();
+        let before = txn.state_vector();
+        other.push_back(&mut txn, XmlTextPrelim::new("hors de la page"));
+        let update = txn.encode_update_v1();
+        assert!(verify_carried(&update, &before, &txn).is_err());
+        drop(txn);
+
+        // Plus profond que la borne (C1c).
+        let mut txn = page.doc.transact_mut();
+        let mut parent = page.root(&txn).unwrap();
+        for _ in 1..crate::MAX_YJS_DEPTH {
+            parent = parent.push_back(&mut txn, XmlElementPrelim::empty(BLOCK_GROUP));
+        }
+        drop(txn);
+        let mut txn = page.doc.transact_mut();
+        let before = txn.state_vector();
+        parent.push_back(&mut txn, XmlTextPrelim::new("trop profond"));
+        let update = txn.encode_update_v1();
+        assert_eq!(
+            verify_carried(&update, &before, &txn),
+            Err(CrdtError::TooDeep.to_string())
+        );
     }
 
     proptest! {

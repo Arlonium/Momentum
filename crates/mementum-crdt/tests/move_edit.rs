@@ -373,21 +373,23 @@ fn the_same_move_received_twice_carries_once() {
     }
 }
 
-/// Tom efface « oc » dans X et tape à sa fin pendant que Mona glisse X. La copie de Mona porte
-/// encore « oc » : deux caractères de plus que ce que le serveur a de vivant, que Mona n'a pas
-/// tapés. Le serveur ne sait pas les distinguer d'un effacement de Mona retapé ailleurs : il
-/// s'abstient (Ruling R450). La suppression de Tom n'est pas reportée (« oc » revient), sa frappe
-/// part avec l'original, et rien n'est retiré par un report.
+/// Tom efface « oc » dans X et tape à sa fin pendant que Mona glisse X. La suppression n'est
+/// pas reportée (Mona avait vu « oc » en place : sa copie le porte), et rien de ce que Tom a
+/// tapé n'est retiré. Les voisins de la frappe, dans la copie, sont séparés par « oc » à l'endroit
+/// même où le serveur a effacé deux caractères : ils comptent pour contigus (Ruling R457).
 #[test]
-fn concurrent_delete_is_not_carried_and_the_server_abstains() {
+fn concurrent_delete_is_not_carried_and_removes_nothing_typed() {
     controls(
         "concurrent-delete",
         YZX,
         "x « Bl X de Tom » | y « Bloc Y » | z « Bloc Z »",
     );
     for (order, played) in both_orders("concurrent-delete", MOVE_AFTER_EDIT) {
-        assert!(played.carried.is_empty(), "{order}");
-        assert_eq!(played.line(), YZX, "{order}");
+        assert_eq!(
+            played.line(),
+            "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »",
+            "{order}"
+        );
     }
 }
 
@@ -859,17 +861,18 @@ fn a_sub_block_too_deep_is_left_out_but_the_text_is_carried() {
 /// au même id, qui ne supprime de l'original que son élément et son paragraphe (le groupe de
 /// sous-blocs est « non vu »).
 fn empty_copy_of_a_parent(n: usize) -> (PageDoc, Vec<u8>, String) {
+    let text = if n <= 65 {
+        String::new()
+    } else {
+        "Sous-bloc numéro N avec un peu de texte".to_string()
+    };
+    empty_copy_of_a_parent_with(n, &text)
+}
+
+/// Comme [`empty_copy_of_a_parent`], chaque sous-bloc portant son numéro suivi de `text`.
+fn empty_copy_of_a_parent_with(n: usize, text: &str) -> (PageDoc, Vec<u8>, String) {
     let children: Vec<Block> = (0..n)
-        .map(|i| {
-            para(
-                &if n <= 65 {
-                    format!("{i}")
-                } else {
-                    format!("Sous-bloc numéro {i} avec un peu de texte")
-                },
-                vec![],
-            )
-        })
+        .map(|i| para(&format!("{i}{text}"), vec![]))
         .collect();
     let (state, ids) = page_of(&[para("Parent", children), para("Autre", vec![])]);
     let x = ids[0].clone();
@@ -951,9 +954,9 @@ fn a_carried_text_beyond_64_kib_is_withheld() {
     }
 }
 
-/// I1 : Mona corrige « chatt » en « chat » et ajoute « est » avant « le chien », hors ligne, puis
-/// déplace X ; Tom tape « , pas » juste après « et ». La copie de Mona n'est pas le texte vu
-/// avec des insertions seulement (un caractère vu a été effacé) : le serveur s'abstient, plutôt
+/// Mona corrige « chatt » en « chat » et ajoute « est » avant « le chien », hors ligne, puis
+/// déplace X ; Tom tape « , pas » juste après « et ». Dans la copie, le « s » de « est » sépare
+/// deux des trois voisins vus de la frappe à droite : le serveur s'abstient (Ruling R457), plutôt
 /// que de mettre « , pas » après « est » (sonde de la relecture : « le chat et est, pas le
 /// chien »).
 #[test]
@@ -975,8 +978,9 @@ fn a_typo_fixed_then_a_word_added_by_the_mover_carries_nothing() {
     played.line();
 }
 
-/// I1 : un effacement de Mona n'importe où dans le bloc (ici au début, la frappe de Tom à la
-/// fin) fait s'abstenir le serveur.
+/// Un effacement de Mona au début du bloc, la frappe de Tom à la fin : le caractère vu effacé
+/// manque à la copie, et le serveur s'abstient (Ruling R373 : les caractères vus doivent tous se
+/// retrouver dans la copie).
 #[test]
 fn a_deletion_by_the_mover_anywhere_in_the_block_carries_nothing() {
     let (state, [x, _, z]) = yrs_page();
@@ -990,6 +994,179 @@ fn a_deletion_by_the_mover_anywhere_in_the_block_carries_nothing() {
     let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
     assert!(played.carried.is_empty());
     assert_eq!(block_text(&played.server.read_blocks()[2]), "loc X");
+}
+
+/// Relecture du tour 1, R1 : trois frappes honnêtes de Mona que R450 faisait perdre à Tom. Mona
+/// tape « de Mona » à la fin de X, puis le déplace (la scène `mover-typed-too`) ; ou le déplace,
+/// puis tape ; ou tape « de Mona » en gras ; ou tape et efface un mot dans Y dans la même mise à
+/// jour. Tom tape « Tom : » au début de X. Chaque fois : « Tom : Bloc X de Mona ».
+#[test]
+fn honest_edits_of_the_mover_keep_the_report() {
+    let bold = || {
+        let mut attrs = yrs::types::Attrs::new();
+        attrs.insert("bold".into(), yrs::Any::Map(Default::default()));
+        attrs
+    };
+    type Edit = fn(&PageDoc, &[String; 3], &[u8], &dyn Fn() -> yrs::types::Attrs);
+    let cases: [(&str, Edit); 3] = [
+        ("tape après le déplacement", |mona, [x, _, z], _, _| {
+            mona.move_block(x, Some(z)).unwrap();
+            mona.replace_text(x, 6, 0, " de Mona").unwrap();
+        }),
+        (
+            "tape en gras avant le déplacement",
+            |mona, [x, _, z], state, bold| {
+                let doc = raw::doc(state);
+                let frag = raw::fragment(&doc);
+                let before = {
+                    use yrs::{ReadTxn, Transact};
+                    doc.transact().state_vector()
+                };
+                {
+                    use yrs::{Text, Transact, XmlFragment, XmlOut};
+                    let mut txn = doc.transact_mut();
+                    let (c, _) = raw::top_block(&frag, &txn, x);
+                    let content = raw::element(c.get(&txn, 0));
+                    let Some(XmlOut::Text(text)) = content.get(&txn, 0) else {
+                        panic!("le texte de X");
+                    };
+                    text.insert_with_attributes(&mut txn, 6, " de Mona", bold());
+                }
+                mona.apply_update(&raw::update_with(&doc, &before, &[]))
+                    .unwrap();
+                mona.move_block(x, Some(z)).unwrap();
+            },
+        ),
+        ("tape et efface un mot dans Y", |mona, [x, y, z], _, _| {
+            mona.replace_text(y, 6, 0, " bref").unwrap();
+            mona.replace_text(y, 6, 5, "").unwrap();
+            mona.replace_text(x, 6, 0, " de Mona").unwrap();
+            mona.move_block(x, Some(z)).unwrap();
+        }),
+    ];
+    for (what, edit) in cases {
+        let (state, ids) = yrs_page();
+        let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let before = PageDoc::from_updates([state.as_slice()]).unwrap();
+        edit(&mona, &ids, &state, &bold);
+        let moved = mona.encode_diff(&before.state_vector()).unwrap();
+        let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let typed = tom.replace_text(&ids[0], 0, 0, "Tom : ").unwrap();
+        let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+        let text = block_text(find(&played.server.read_blocks(), &ids[0]).unwrap());
+        assert_eq!(text, "Tom : Bloc X de Mona", "{what}");
+        played.line();
+    }
+}
+
+/// Relecture du tour 1, R1 : les deux formes où R450 laissait passer une place fausse (Mona
+/// corrige « chatt », ajoute « est », déplace X ; Tom tape « , pas » après « et »), avec en plus
+/// un effacement concurrent de Tom dans « chien », ou une frappe de Mona dans la copie après le
+/// déplacement. Le serveur s'abstient (Ruling R457) : jamais « est, pas ».
+#[test]
+fn a_typo_fix_compensated_otherwise_carries_nothing() {
+    let (state, ids) = page_of(&[para("le chatt et le chien", vec![]), para("Bloc Y", vec![])]);
+    let x = &ids[0];
+    for after_the_move in [false, true] {
+        let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let before = PageDoc::from_updates([state.as_slice()]).unwrap();
+        mona.replace_text(x, 7, 1, "").unwrap();
+        mona.replace_text(x, 11, 0, "est ").unwrap();
+        mona.move_block(x, Some(&ids[1])).unwrap();
+        if after_the_move {
+            mona.replace_text(x, 23, 0, ".").unwrap();
+        }
+        let moved = mona.encode_diff(&before.state_vector()).unwrap();
+        let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let typed = tom.replace_text(x, 11, 0, ", pas").unwrap();
+        let typed = if after_the_move {
+            typed
+        } else {
+            let base = PageDoc::from_updates([state.as_slice()]).unwrap();
+            tom.replace_text(x, 22, 1, "").unwrap();
+            tom.encode_diff(&base.state_vector()).unwrap()
+        };
+        let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+        let text = block_text(find(&played.server.read_blocks(), x).unwrap());
+        assert!(!text.contains("est, pas"), "{after_the_move} : {text}");
+        assert!(played.carried.is_empty(), "{after_the_move} : {text}");
+        played.line();
+    }
+}
+
+/// Relecture du tour 1, R2 : l'original est une seule plage en gras « abab… », écrite d'un coup ;
+/// la copie hostile ne garde que les « a » (les « b » sont non vus). Chaque « b » reporté demande
+/// un texte et deux éléments de marque : l'estimation, borne haute, retient le report avant
+/// d'écrire (au lieu de 124 Ko encodés, puis `CarryRefused`). Puis un cas honnête : 60 sous-blocs
+/// d'environ 900 caractères (68 Ko encodés), retenus aussi avant d'écrire (Ruling R458).
+#[test]
+fn a_carry_whose_encoding_would_pass_the_bound_is_withheld_before_writing() {
+    use yrs::{ReadTxn, Text, Transact, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim};
+    let n = 1_500u32;
+    let (state, ids) = page_of(&[para("Bloc X", vec![]), para("Bloc Y", vec![])]);
+    let x = &ids[0];
+    let server = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let writer = raw::doc(&state);
+    let frag = raw::fragment(&writer);
+    let before = writer.transact().state_vector();
+    let mut seen = Vec::new();
+    {
+        let mut txn = writer.transact_mut();
+        let (c, _) = raw::top_block(&frag, &txn, x);
+        let content = raw::element(c.get(&txn, 0));
+        let Some(XmlOut::Text(text)) = content.get(&txn, 0) else {
+            panic!("le texte de X");
+        };
+        let len = text.len(&txn);
+        text.remove_range(&mut txn, 0, len);
+        let client = writer.client_id();
+        for i in 0..n {
+            seen.push(yrs::ID::new(client, txn.state_vector().get(&client)));
+            text.insert(&mut txn, 2 * i, "a");
+            text.insert(&mut txn, 2 * i + 1, "b");
+        }
+        let mut bold = yrs::types::Attrs::new();
+        bold.insert("bold".into(), yrs::Any::Map(Default::default()));
+        text.format(&mut txn, 0, 2 * n, bold);
+    }
+    let written = raw::update_with(&writer, &before, &[]);
+    server.apply_client_update(&written).unwrap();
+    let now = server.encode_state();
+    let hostile = raw::doc(&now);
+    let frag = raw::fragment(&hostile);
+    let (original, content) = {
+        let txn = hostile.transact();
+        let (c, _) = raw::top_block(&frag, &txn, x);
+        (raw::id_of(&c), raw::id_of(&raw::element(c.get(&txn, 0))))
+    };
+    let before = hostile.transact().state_vector();
+    {
+        let mut txn = hostile.transact_mut();
+        let root = raw::root(&frag, &txn);
+        let len = root.len(&txn);
+        let copy = root.insert(&mut txn, len, XmlElementPrelim::empty("blockContainer"));
+        yrs::Xml::insert_attribute(&copy, &mut txn, "id", x.clone());
+        let p = copy.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        p.push_back(&mut txn, XmlTextPrelim::new("a".repeat(n as usize)));
+    }
+    let mut deleted = vec![original, content];
+    deleted.extend(seen);
+    let update = raw::update_with(&hostile, &before, &deleted);
+    let applied = server.apply_client_update(&update);
+    assert!(
+        matches!(&applied, Ok(a) if a.carried.is_none() && a.withheld.is_some()),
+        "retenu avant d'écrire : {:?}",
+        applied.map(|a| (a.carried.map(|c| c.len()), a.withheld))
+    );
+
+    // Le cas honnête : 60 sous-blocs non vus d'environ 900 caractères.
+    let long = "x".repeat(900);
+    let (server, update, _) = empty_copy_of_a_parent_with(60, &long);
+    let applied = server
+        .apply_client_update(&update)
+        .expect("acceptée, sans report refusé");
+    assert!(applied.carried.is_none(), "rien d'écrit");
+    assert!(applied.withheld.is_some(), "retenu avant d'écrire");
 }
 
 /// I2 : Tom tape dans X ; Mona puis Léa déplacent X, sans rien voir des autres. La frappe est
@@ -1074,6 +1251,11 @@ fn an_unseen_sub_block_goes_after_the_seen_one_before_it() {
 /// Un double de X (même id), posé à la fin de la page par une mise à jour relue du stockage,
 /// sans dédoublonnage : rend la page avec le double.
 fn with_a_double_of_x(state: &[u8], x: &str) -> Vec<u8> {
+    with_a_double_of(state, x, "Leurre")
+}
+
+/// Comme [`with_a_double_of_x`], le double portant le texte `text`.
+fn with_a_double_of(state: &[u8], x: &str, text: &str) -> Vec<u8> {
     use yrs::{ReadTxn, Transact, XmlFragment};
     let doc = raw::doc(state);
     let frag = raw::fragment(&doc);
@@ -1081,21 +1263,44 @@ fn with_a_double_of_x(state: &[u8], x: &str) -> Vec<u8> {
         let mut txn = doc.transact_mut();
         let root = raw::root(&frag, &txn);
         let len = root.len(&txn);
-        raw::container(&mut txn, &root, len, x, "paragraph", "Leurre");
+        raw::container(&mut txn, &root, len, x, "paragraph", text);
     }
     doc.transact()
         .encode_state_as_update_v1(&yrs::StateVector::default())
 }
 
-/// I3 (M7) : deux originaux vivants de X, que la mise à jour de Mona supprime tous deux en
-/// recréant X : la correspondance n'est pas sûre, rien n'est reporté.
+/// I3 (M7) : deux originaux vivants de X, de même texte, où Tom a tapé tous deux, que la mise à
+/// jour de Mona supprime tous deux en recréant X : la correspondance n'est pas sûre, rien n'est
+/// reporté. Le report, s'il prenait l'un des deux, prendrait la frappe de Tom, quel que soit
+/// l'ordre dans lequel le serveur les trouve (relecture du tour 1, R3).
 #[test]
 fn two_originals_of_one_id_carry_nothing() {
     let (state, ids) = page_of(&[para("Bloc X", vec![]), para("Bloc Y", vec![])]);
     let x = &ids[0];
-    let state = with_a_double_of_x(&state, x);
-    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
-    let typed = tom.replace_text(x, 6, 0, " de Tom").unwrap();
+    let state = with_a_double_of(&state, x, "Bloc X");
+    let typed = {
+        let doc = raw::doc(&state);
+        let frag = raw::fragment(&doc);
+        let before = {
+            use yrs::{ReadTxn, Transact};
+            doc.transact().state_vector()
+        };
+        {
+            use yrs::{GetString, Text, Transact, XmlFragment, XmlOut};
+            let mut txn = doc.transact_mut();
+            let root = raw::root(&frag, &txn);
+            for index in [0, 2] {
+                let container = raw::element(root.get(&txn, index));
+                let content = raw::element(container.get(&txn, 0));
+                let Some(XmlOut::Text(text)) = content.get(&txn, 0) else {
+                    panic!("le texte d'un exemplaire de X");
+                };
+                assert_eq!(text.get_string(&txn), "Bloc X");
+                text.insert(&mut txn, 6, " de Tom");
+            }
+        }
+        raw::update_with(&doc, &before, &[])
+    };
     let doc = raw::doc(&state);
     let frag = raw::fragment(&doc);
     let before = {
@@ -1283,6 +1488,44 @@ mod known_limits {
         known_limit(
             "R222 : une frappe faite sans avoir vu le déplacement, arrivée après lui, part avec \
              l'original ; la reconnaître demande de lire les éléments supprimés de l'original",
+            &missing,
+            &loss,
+        );
+    }
+
+    /// Voulu : « le chat et, pas et le chien ». Mona corrige « chatt » en « chat » (un caractère
+    /// vu effacé) et ajoute « et » juste après « et », hors ligne, puis déplace X ; Tom tape
+    /// « , pas » juste après « et ». Dans la copie, « le chat et et le chien », les caractères vus
+    /// se retrouvent d'une seule façon, contiguës autour de la frappe, et c'est la fausse : le
+    /// « t » effacé est lu sur celui du second « et ». Aujourd'hui (Ruling R457) : « le chat et
+    /// et, pas le chien », chez les trois. Le serveur ne voit pas l'effacement de Mona.
+    #[test]
+    fn a_typo_fixed_then_the_same_word_added_puts_the_report_one_word_off() {
+        let (state, ids) = page_of(&[para("le chatt et le chien", vec![]), para("Bloc Y", vec![])]);
+        let x = &ids[0];
+        let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let before = PageDoc::from_updates([state.as_slice()]).unwrap();
+        mona.replace_text(x, 7, 1, "").unwrap();
+        mona.replace_text(x, 11, 0, "et ").unwrap();
+        mona.move_block(x, Some(&ids[1])).unwrap();
+        let moved = mona.encode_diff(&before.state_vector()).unwrap();
+        let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let typed = tom.replace_text(x, 11, 0, ", pas").unwrap();
+        let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+        let text = block_text(find(&played.server.read_blocks(), x).unwrap());
+        played.line();
+        let wanted = "le chat et, pas et le chien";
+        let missing: Vec<String> = (text != wanted)
+            .then(|| format!("vu {text:?}, voulu {wanted:?}"))
+            .into_iter()
+            .collect();
+        let loss = vec![format!(
+            "vu {:?}, voulu {wanted:?}",
+            "le chat et et, pas le chien"
+        )];
+        known_limit(
+            "R457 : une faute corrigée (un caractère vu effacé) puis un mot pareil à ses voisins \
+             ajouté par l'auteur du déplacement : la place se lit sur le mauvais mot",
             &missing,
             &loss,
         );

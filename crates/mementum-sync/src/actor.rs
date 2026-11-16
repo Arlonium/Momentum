@@ -33,7 +33,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
-use mementum_crdt::{Applied, Awaited, CrdtError, PageDoc};
+use mementum_crdt::{Applied, Awaited, PageDoc};
 use mementum_md::Block;
 use mementum_store::{DocState, Store, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
@@ -1105,27 +1105,15 @@ impl Actor {
         update: &[u8],
     ) -> Result<bool, Broken> {
         self.version_if_due().await;
-        let mut changes = self.watch.changes();
+        let changes = self.watch.changes();
         // Ce qui vient d'un client ne touche pas aux métadonnées de la page
-        // (report M7 du lot 1) ; ce que `load` relit du store, si.
-        let applied = match self.page.apply_client_update(update) {
-            Ok(applied) => Ok(applied),
-            // Ruling R452 : le report d'un bloc recréé, déjà écrit dans le document, ne passe
-            // pas la relecture d'une entrée du journal. Rien n'en est écrit ni diffusé : le
-            // document est rechargé, et la mise à jour reprise sans report.
-            Err(CrdtError::CarryRefused(why)) => {
-                tracing::warn!(node_id = %self.id.node_id, conn, why, "report d'un bloc recréé refusé : document rechargé, mise à jour reprise sans report");
-                self.reload().await?;
-                changes = self.watch.changes();
-                self.page.apply_client_update_alone(update)
-            }
-            Err(error) => Err(error),
-        };
+        // (report M7 du lot 1) ; ce que `load` relit du store, si. Un report refusé
+        // (`CrdtError::CarryRefused`, Rulings R452, R459) suit le chemin de tout refus.
         let Applied {
             read,
             carried,
             withheld,
-        } = match applied {
+        } = match self.page.apply_client_update(update) {
             Ok(applied) => applied,
             Err(error) => {
                 // Rulings R17 et R22 : ni écrite ni diffusée ; le document,

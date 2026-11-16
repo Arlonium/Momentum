@@ -63,12 +63,62 @@ pub(crate) const MAX_CARRIED_BLOCKS: usize = 64;
 /// d'écrire, puis mesuré sur la mise à jour encodée (`PageDoc::apply_client_update`).
 pub(crate) const MAX_CARRIED_BYTES: usize = 64 * 1024;
 
+/// Les voisins vus que la place d'un morceau reporté demande de chaque côté, chacun à une seule
+/// place possible dans la copie et contigus (Ruling R457).
+const CONTEXT: usize = 3;
+
+/// Ce qu'ajoute au plus une écriture encodée (v1), hors de ses éléments : l'en-tête de son client
+/// (nombre d'éléments, client, première horloge), le nombre de clients, le jeu de suppressions
+/// vide (Ruling R458).
+const UPDATE_BYTES: usize = 32;
+
+/// Le coût d'une écriture en éléments de yrs et en octets de contenu ; ce qu'elle pèse encodée
+/// au plus vaut `items × en-tête + payload` ([`item_bytes`], Ruling R458).
+#[derive(Clone, Copy, Default)]
+struct Cost {
+    items: usize,
+    payload: usize,
+}
+
+impl Cost {
+    fn add(self, other: Cost) -> Cost {
+        Cost {
+            items: self.items + other.items,
+            payload: self.payload + other.payload,
+        }
+    }
+
+    fn times(self, n: usize) -> Cost {
+        Cost {
+            items: self.items * n,
+            payload: self.payload * n,
+        }
+    }
+
+    fn bytes(self, item: usize) -> usize {
+        self.items * item + self.payload
+    }
+}
+
+/// Le plus que pèse, encodé (v1), l'en-tête d'un élément écrit par le serveur dans une page dont
+/// le vecteur d'état est `state` (Ruling R458) : la marque (1 octet), une origine et une origine
+/// droite, chacune un client (au plus 8 octets, 53 bits) et une horloge (au plus ce que demande
+/// la plus grande horloge de la page, plus ce que le report peut ajouter), et la longueur du
+/// contenu (5 octets). Sans origine, le parent tient dans la même place.
+fn item_bytes(state: &StateVector) -> usize {
+    let clock = state.iter().map(|(_, clock)| *clock).max().unwrap_or(0);
+    let clock = u64::from(clock) + MAX_CARRIED_BYTES as u64;
+    let clock_bytes = (64 - clock.leading_zeros() as usize).div_ceil(7).max(1);
+    1 + 2 * (8 + clock_bytes) + 5
+}
+
 /// Ce que [`carry`] a fait.
 pub(crate) enum Carried {
     /// Rien à écrire.
     Nothing,
-    /// Écrit dans ces copies : `(identifiant de bloc, élément de la copie)`.
-    Written(Vec<(String, ID)>),
+    /// Écrit dans ces copies : `(identifiant de bloc, élément de la copie)`, et la borne haute de
+    /// ce que l'écriture pèse encodée (Ruling R458).
+    Written(Vec<(String, ID)>, usize),
     /// Rien d'écrit : le report dépasserait ses bornes (Ruling R451). La raison, pour le journal.
     Withheld(String),
 }
@@ -93,6 +143,10 @@ struct TextCarry {
     tag: String,
     /// Les caractères que l'auteur avait vus, dans l'ordre.
     seen: Vec<char>,
+    /// Pour chaque caractère vu, les horloges qui manquent entre lui et le caractère vu d'avant,
+    /// quand tous deux viennent du même client (sinon 0) : des caractères que la page a supprimés
+    /// entre eux, que la copie peut encore porter (Ruling R457).
+    gaps: Vec<u32>,
     /// Ce qu'il n'avait pas vu, dans l'ordre.
     unseen: Vec<Unseen>,
 }
@@ -185,18 +239,11 @@ pub(crate) fn capture(
 /// - Une copie absente, supprimée, qui n'est plus ce qu'elle était, ou qui n'est pas posée dans
 ///   un groupe de blocs ou une colonne (Ruling R452), ne reçoit rien.
 /// - Rien ne s'écrit au-delà de [`MAX_YJS_DEPTH`] : ni un texte neuf, ni un sous-bloc (R452).
-/// - Le texte d'une copie qui a plus de caractères que ce que l'auteur avait vu n'est reporté que
-///   si ces caractères en plus sont exactement ce qu'il a créé puis supprimé dans la même mise
-///   à jour (`created_and_deleted` : sa frappe dans l'original, partie avec lui), dans une seule
-///   copie. Sinon l'auteur a pu effacer un caractère vu, et en retaper un pareil ailleurs : la
-///   place se lirait sur lui, et le texte reporté tomberait ailleurs, chez tous (Ruling R450).
-/// - Au-delà de [`MAX_CARRIED_BLOCKS`] sous-blocs ou d'environ [`MAX_CARRIED_BYTES`] octets, rien
-///   ne s'écrit (Ruling R451).
-pub(crate) fn carry(
-    txn: &mut TransactionMut,
-    recreated: &[Recreated],
-    created_and_deleted: u64,
-) -> Carried {
+/// - Un morceau de texte n'est reporté qu'à une place sûre, entourée de voisins vus contigus
+///   (Rulings R373, R457).
+/// - Au-delà de [`MAX_CARRIED_BLOCKS`] sous-blocs, ou si la borne haute de ce que l'écriture pèse
+///   dépasse [`MAX_CARRIED_BYTES`] octets, rien ne s'écrit (Rulings R451, R458).
+pub(crate) fn carry(txn: &mut TransactionMut, recreated: &[Recreated]) -> Carried {
     let mut plans: Vec<Plan> = Vec::new();
     for r in recreated {
         let Some(copy) = copy_of(txn, r) else {
@@ -213,31 +260,12 @@ pub(crate) fn carry(
             });
         }
     }
-    let grown: Vec<usize> = plans
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| p.text.as_ref().is_some_and(|t| t.extra > 0))
-        .map(|(i, _)| i)
-        .collect();
-    let insertions_only = match grown.as_slice() {
-        [] => true,
-        [one] => plans[*one]
-            .text
-            .as_ref()
-            .is_some_and(|t| t.extra == created_and_deleted),
-        _ => false,
-    };
-    if !insertions_only {
-        for i in grown {
-            plans[i].text = None;
-        }
-    }
-    plans.retain(|p| p.text.is_some() || !p.children.trees.is_empty());
     let blocks: usize = plans.iter().map(|p| p.children.blocks()).sum();
-    let bytes: usize = plans.iter().map(Plan::bytes).sum();
+    let item = item_bytes(&txn.state_vector());
+    let bytes: usize = UPDATE_BYTES + plans.iter().map(|p| p.cost().bytes(item)).sum::<usize>();
     if blocks > MAX_CARRIED_BLOCKS || bytes > MAX_CARRIED_BYTES {
         return Carried::Withheld(format!(
-            "report de {blocks} sous-blocs et d'environ {bytes} octets, au-delà de \
+            "report de {blocks} sous-blocs et d'au plus {bytes} octets, au-delà de \
              {MAX_CARRIED_BLOCKS} sous-blocs ou {MAX_CARRIED_BYTES} octets"
         ));
     }
@@ -251,7 +279,7 @@ pub(crate) fn carry(
     if written.is_empty() {
         Carried::Nothing
     } else {
-        Carried::Written(written)
+        Carried::Written(written, bytes)
     }
 }
 
@@ -280,20 +308,40 @@ struct Plan<'a> {
 }
 
 impl Plan<'_> {
-    /// Une estimation de ce que l'écriture pèse, en octets.
-    fn bytes(&self) -> usize {
-        let text: usize = self.text.as_ref().map_or(0, |t| {
-            t.inserts
-                .iter()
-                .map(|(_, piece)| piece.text.len() + attrs_bytes(&piece.attrs) + 16)
-                .sum()
-        });
-        text + self
-            .children
+    /// Le coût de l'écriture, par le haut (Ruling R458) : par morceau, un élément de texte et,
+    /// par marque, deux éléments de marque (l'ouverture et la fermeture), ceux du morceau et ceux
+    /// qui défont puis rétablissent les marques de la copie autour de lui ; un texte ou un groupe
+    /// à créer ; les sous-blocs ([`Tree::cost`]).
+    fn cost(&self) -> Cost {
+        let element = Cost {
+            items: 1,
+            payload: 6,
+        };
+        let mut cost = Cost::default();
+        if let Some(t) = &self.text {
+            if t.node.is_none() {
+                cost = cost.add(element);
+            }
+            for (_, piece) in &t.inserts {
+                cost = cost
+                    .add(Cost {
+                        items: 1,
+                        payload: piece.text.len(),
+                    })
+                    .add(format_cost(&piece.attrs).times(2))
+                    .add(t.copy_marks.times(2));
+            }
+        }
+        if self.children.group.is_none() && !self.children.trees.is_empty() {
+            cost = cost.add(element).add(Cost {
+                items: 0,
+                payload: BLOCK_GROUP.len(),
+            });
+        }
+        self.children
             .trees
             .iter()
-            .map(|c| c.tree.bytes)
-            .sum::<usize>()
+            .fold(cost, |cost, c| cost.add(c.tree.cost))
     }
 
     /// L'écrit ; vrai si quelque chose l'a été.
@@ -340,8 +388,9 @@ struct TextPlan {
     node: Option<XmlTextRef>,
     /// Chaque morceau dont la place est sûre, à sa place en UTF-16.
     inserts: Vec<(u32, Unseen)>,
-    /// Ce que la copie a de plus que ce que l'auteur avait vu, en UTF-16.
-    extra: u64,
+    /// Le coût d'un élément de marque par marque du texte de la copie : un morceau inséré au
+    /// milieu d'elles peut devoir les défaire puis les rétablir (Ruling R458).
+    copy_marks: Cost,
 }
 
 /// Le texte non vu dont la place est sûre dans la copie, et ce qui s'écrirait. `None` si rien ne
@@ -356,6 +405,7 @@ fn plan_text(txn: &TransactionMut, copy: &XmlElementRef, text: &TextCarry) -> Op
         return None;
     }
     let children: Vec<XmlOut> = content.children(txn).collect();
+    let mut marks: HashMap<String, Cost> = HashMap::new();
     let (node, chars): (Option<XmlTextRef>, Vec<char>) = match children.as_slice() {
         [] => (None, Vec::new()),
         [XmlOut::Text(node)] => {
@@ -364,6 +414,12 @@ fn plan_text(txn: &TransactionMut, copy: &XmlElementRef, text: &TextCarry) -> Op
                 match diff.insert {
                     Out::Any(Any::String(s)) => chars.extend(s.chars()),
                     _ => return None,
+                }
+                for (key, value) in diff.attributes.iter().flat_map(|a| a.iter()) {
+                    let cost = format_cost_of(key, value);
+                    let known = marks.entry(key.to_string()).or_default();
+                    known.items = 1;
+                    known.payload = known.payload.max(cost.payload);
                 }
             }
             (Some(node.clone()), chars)
@@ -378,7 +434,7 @@ fn plan_text(txn: &TransactionMut, copy: &XmlElementRef, text: &TextCarry) -> Op
         .unseen
         .iter()
         .filter_map(|piece| {
-            let at = places.sure(piece.after)?;
+            let at = places.sure_in_context(piece.after, CONTEXT, &text.gaps, &chars)?;
             let utf16 = chars[..at].iter().map(|c| c.len_utf16() as u32).sum();
             Some((
                 utf16,
@@ -393,12 +449,11 @@ fn plan_text(txn: &TransactionMut, copy: &XmlElementRef, text: &TextCarry) -> Op
     if inserts.is_empty() {
         return None;
     }
-    let utf16 = |chars: &[char]| chars.iter().map(|c| c.len_utf16() as u64).sum::<u64>();
     Some(TextPlan {
         content,
         node,
         inserts,
-        extra: utf16(&chars).saturating_sub(utf16(&text.seen)),
+        copy_marks: marks.values().fold(Cost::default(), |a, b| a.add(*b)),
     })
 }
 
@@ -436,24 +491,37 @@ fn plan_children<'a>(
     ChildrenPlan { group, trees }
 }
 
-/// Une estimation du poids de marques, en octets.
-fn attrs_bytes(attrs: &Attrs) -> usize {
-    attrs.iter().map(|(k, v)| k.len() + any_bytes(v)).sum()
+/// Le coût des éléments de marque d'un jeu de marques, par le haut : un élément par marque
+/// (Ruling R458).
+fn format_cost(attrs: &Attrs) -> Cost {
+    attrs.iter().fold(Cost::default(), |cost, (k, v)| {
+        cost.add(format_cost_of(k, v))
+    })
 }
 
-/// Une estimation du poids d'une valeur, en octets.
-fn any_bytes(value: &Any) -> usize {
+/// Le coût d'un élément de marque `key` = `value` : la clé et la valeur en JSON, chacune avec sa
+/// longueur.
+fn format_cost_of(key: &str, value: &Any) -> Cost {
+    Cost {
+        items: 1,
+        payload: 5 + key.len() + 5 + json_bytes(value),
+    }
+}
+
+/// Une borne haute de la longueur d'une valeur écrite en JSON (une chaîne peut voir chaque
+/// caractère échappé en six), qui borne aussi son encodage `Any`.
+fn json_bytes(value: &Any) -> usize {
     match value {
-        Any::String(s) => s.len() + 2,
-        Any::Buffer(b) => b.len() + 2,
-        Any::Array(values) => values.iter().map(any_bytes).sum::<usize>() + 2,
+        Any::String(s) => 6 * s.len() + 7,
+        Any::Buffer(b) => 6 * b.len() + 7,
+        Any::Array(values) => values.iter().map(|v| json_bytes(v) + 1).sum::<usize>() + 7,
         Any::Map(map) => {
             map.iter()
-                .map(|(k, v)| k.len() + any_bytes(v))
+                .map(|(k, v)| 6 * k.len() + 8 + json_bytes(v))
                 .sum::<usize>()
-                + 2
+                + 7
         }
-        _ => 9,
+        _ => 32,
     }
 }
 
@@ -619,13 +687,27 @@ fn capture_text(
         _ => return None,
     };
     let mut seen = Vec::new();
+    let mut gaps = Vec::new();
     let mut unseen: Vec<Unseen> = Vec::new();
+    // Le client et l'horloge qui suivent le dernier caractère vu.
+    let mut after_seen: Option<(ClientID, u32)> = None;
     for (id, insert, attrs) in items.of(txn, &text) {
         let (Some(id), Out::Any(Any::String(s))) = (id, insert) else {
             return None;
         };
         if deleted.contains(&id) {
-            seen.extend(s.chars());
+            let gap = match after_seen {
+                Some((client, clock)) if client == id.client && id.clock > clock => {
+                    id.clock - clock
+                }
+                _ => 0,
+            };
+            for (k, c) in s.chars().enumerate() {
+                seen.push(c);
+                gaps.push(if k == 0 { gap } else { 0 });
+            }
+            let len: u32 = s.encode_utf16().count() as u32;
+            after_seen = Some((id.client, id.clock + len));
             continue;
         }
         // Deux éléments non vus qui se suivent, aux mêmes marques, font un seul morceau.
@@ -641,6 +723,7 @@ fn capture_text(
     (!unseen.is_empty()).then(|| TextCarry {
         tag: content.tag().to_string(),
         seen,
+        gaps,
         unseen,
     })
 }
@@ -755,6 +838,42 @@ impl Places {
             && self.left[b] == self.left[a] + 1)
             .then_some(self.left[b])
     }
+
+    /// [`Places::sure`], durcie (Ruling R457) : les `k` voisins vus de chaque côté du morceau
+    /// (moins au bord du texte) ont chacun une seule place possible dans la copie, et s'y suivent
+    /// sans rien entre eux, sauf, entre deux voisins, exactement ce que la page a supprimé entre
+    /// eux (`gaps`, en UTF-16) : la copie de l'auteur porte encore ce qu'un autre a effacé pendant
+    /// le déplacement. Les deux voisins immédiats, eux, se suivent sans rien entre eux.
+    /// Une faute corrigée (un caractère vu effacé) puis un mot ajouté par l'auteur du déplacement
+    /// faisaient lire la place sur un caractère pareil plus loin : ce contexte en écarte la plupart.
+    fn sure_in_context(
+        &self,
+        after: usize,
+        k: usize,
+        gaps: &[u32],
+        copy: &[char],
+    ) -> Option<usize> {
+        let at = self.sure(after)?;
+        let n = self.left.len();
+        let (lo, hi) = (after.saturating_sub(k), (after + k).min(n));
+        if (lo..hi).any(|i| self.left[i] != self.right[i]) {
+            return None;
+        }
+        for i in lo..hi.saturating_sub(1) {
+            let (from, to) = (self.left[i], self.left[i + 1]);
+            if to == from + 1 {
+                continue;
+            }
+            let between: u32 = copy[from + 1..to]
+                .iter()
+                .map(|c| c.len_utf16() as u32)
+                .sum();
+            if gaps.get(i + 1) != Some(&between) {
+                return None;
+            }
+        }
+        Some(at)
+    }
 }
 
 /// Un sous-arbre recopié, relevé avant que l'application de la mise à jour ne le supprime.
@@ -764,8 +883,8 @@ struct Tree {
     height: usize,
     /// Le nombre de blocs (`blockContainer`) qu'il porte.
     blocks: usize,
-    /// Une estimation de son poids écrit, en octets.
-    bytes: usize,
+    /// Le coût de son écriture, par le haut (Ruling R458).
+    cost: Cost,
 }
 
 struct Node {
@@ -831,29 +950,42 @@ impl Tree {
             }
         }
         let blocks = nodes.iter().filter(|n| n.tag == BLOCK_CONTAINER).count();
-        let bytes = nodes
-            .iter()
-            .map(|n| {
-                let attrs: usize = n.attrs.iter().map(|(k, v)| k.len() + any_bytes(v)).sum();
-                let parts: usize = n
-                    .parts
-                    .iter()
-                    .map(|part| match part {
-                        Part::Element(_) => 0,
-                        Part::Text(runs) => runs
-                            .iter()
-                            .map(|(value, attrs)| any_bytes(value) + attrs_bytes(attrs) + 16)
-                            .sum(),
-                    })
-                    .sum();
-                n.tag.len() + attrs + parts + 16
-            })
-            .sum();
+        // Une borne haute (Ruling R458) : un élément par nœud et par attribut ; par texte, un
+        // élément, puis par plage un élément et, par marque, de quoi l'ouvrir et la fermer, et
+        // défaire celles de la plage d'avant.
+        let mut cost = Cost::default();
+        for n in &nodes {
+            cost = cost.add(Cost {
+                items: 1,
+                payload: 6 + n.tag.len(),
+            });
+            for (key, value) in &n.attrs {
+                cost = cost.add(Cost {
+                    items: 1,
+                    payload: 5 + key.len() + 1 + json_bytes(value),
+                });
+            }
+            for part in &n.parts {
+                let Part::Text(runs) = part else { continue };
+                cost = cost.add(Cost {
+                    items: 1,
+                    payload: 1,
+                });
+                for (value, attrs) in runs {
+                    cost = cost
+                        .add(Cost {
+                            items: 1,
+                            payload: json_bytes(value),
+                        })
+                        .add(format_cost(attrs).times(4));
+                }
+            }
+        }
         Tree {
             nodes,
             height,
             blocks,
-            bytes,
+            cost,
         }
     }
 

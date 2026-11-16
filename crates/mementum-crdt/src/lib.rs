@@ -46,8 +46,9 @@ pub enum CrdtError {
     /// la casse.
     Structure(String),
     /// Le report d'un bloc recréé, écrit dans la page, ne passe pas la relecture d'une entrée du
-    /// journal (Ruling R452) : la page est à jeter, et la mise à jour d'un client se reprend sans
-    /// report (`PageDoc::apply_client_update_alone`).
+    /// journal (Ruling R452). L'estimation qui le retient avant d'écrire est une borne haute
+    /// (R458) : cela ne devrait jamais arriver. Comme après toute erreur, la page est à jeter, et
+    /// l'acteur ferme la connexion qui l'a envoyée (R459).
     CarryRefused(String),
 }
 

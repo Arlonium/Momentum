@@ -256,3 +256,69 @@ fn children<T: ReadTxn>(txn: &T, element: &XmlElementRef) -> Vec<(u32, XmlElemen
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use yrs::branch::{Branch, BranchID};
+    use yrs::{Text, Xml, XmlElementPrelim, XmlTextPrelim};
+
+    use super::*;
+    use crate::blocknote::BLOCK_CONTAINER;
+
+    /// Un `blockContainer` d'`id` donné, avec un paragraphe et son texte, à la fin de `parent`.
+    fn container(
+        txn: &mut TransactionMut,
+        parent: &XmlElementRef,
+        id: &str,
+        text: &str,
+    ) -> XmlElementRef {
+        let c = parent.push_back(txn, XmlElementPrelim::empty(BLOCK_CONTAINER));
+        c.insert_attribute(txn, "id", id.to_string());
+        let p = c.push_back(txn, XmlElementPrelim::empty("paragraph"));
+        let t = p.push_back(txn, XmlTextPrelim::new(""));
+        t.insert(txn, 0, text);
+        c
+    }
+
+    /// Ruling R453, relecture du tour 1 (I2b) : la copie reportée de `x` est dans un exemplaire de
+    /// `b` que le dédoublonnage retire (le second dans l'ordre du document). La préférence tombe,
+    /// et `x` suit la règle ordinaire : l'exemplaire qui reste, hors de `b`, n'est pas retiré ;
+    /// sans ce repli, tous les exemplaires de `x` partiraient.
+    #[test]
+    fn a_preferred_copy_removed_with_its_parent_falls_back_to_the_first() {
+        let (page, _) = PageDoc::new_page();
+        let preferred = {
+            let mut txn = page.doc.transact_mut();
+            let root = page.root(&txn).unwrap();
+            let len = root.len(&txn);
+            root.remove_range(&mut txn, 0, len);
+            container(&mut txn, &root, "b", "B1");
+            let b2 = container(&mut txn, &root, "b", "B2");
+            let group = b2.push_back(&mut txn, XmlElementPrelim::empty(BLOCK_GROUP));
+            let c1 = container(&mut txn, &group, "x", "dans B2");
+            container(&mut txn, &root, "x", "dehors");
+            match AsRef::<Branch>::as_ref(&c1).id() {
+                BranchID::Nested(id) => id,
+                BranchID::Root(_) => unreachable!(),
+            }
+        };
+        page.carried_copies
+            .lock()
+            .unwrap()
+            .insert("x".to_string(), preferred);
+        page.inserted_elements.store(true, Ordering::SeqCst);
+        assert!(page.dedupe_blocks().is_some());
+        let blocks: Vec<(String, String)> = page
+            .read_blocks()
+            .iter()
+            .map(|b| (b.id.clone(), mementum_md::block_text(b)))
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                ("b".to_string(), "B1".to_string()),
+                ("x".to_string(), "dehors".to_string())
+            ]
+        );
+    }
+}
