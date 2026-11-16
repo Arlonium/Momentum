@@ -116,11 +116,13 @@ pub(crate) async fn open(
 
 /// La suite de [`open`], une fois le premier contrôle passé et le corps lu.
 ///
-/// Un fil sur un bloc suit l'ordre de `PUT /mmd` (Ruling R89) : la page est chargée, les droits
-/// relus, puis le bloc cherché dans son document par son acteur (`Hub::has_block`, Ruling R206,
-/// sans bâtir la liste des blocs), juste avant d'écrire. Un droit retiré pendant le chargement
-/// d'une page froide n'écrit donc plus, et n'apprend rien de ses blocs. Sans bloc, la page n'est
-/// pas chargée : le fil ne touche pas au document.
+/// Un fil sur un bloc suit l'ordre de `PUT /mmd` (Ruling R89) : l'acteur de la page dit si le
+/// bloc existe (`Hub::has_block`, Ruling R206, sans bâtir la liste des blocs ; il charge la page
+/// au besoin), puis la session et les droits sont relus, et la réponse sur le bloc ne vient
+/// qu'après eux : un droit retiré pendant le chargement d'une page froide n'écrit donc plus, et
+/// n'apprend rien de ses blocs. Une seule attente de l'acteur, avant les contrôles (Ruling R384) :
+/// une requête qui attendait l'acteur quand la session a pris fin n'écrit pas. Sans bloc, la page
+/// n'est pas chargée : le fil ne touche pas au document.
 async fn open_thread(
     state: &AppState,
     caller: &SessionUser,
@@ -130,14 +132,14 @@ async fn open_thread(
     let user = &caller.user;
     let text = comment_body(&body.body)?;
     if let Some(block) = &body.block_id {
-        state.hub.load_page(id).await?;
-        // Ruling R365 : l'attente de l'acteur peut être longue (une écriture de la page en
-        // cours) ; la session de la requête est relue avec les droits, comme sous le verrou de
-        // `PUT /mmd` (Ruling R209).
+        // Ruling R384 (R365 récrit) : l'attente de l'acteur peut être longue (une écriture de la
+        // page en cours). Elle vient d'abord, et seule : relire la session avant elle, puis
+        // attendre de nouveau l'acteur, laissait écrire une requête dont la session prenait fin
+        // pendant la seconde attente.
+        let exists = state.hub.has_block(id, block).await?;
         state.session_still_live(caller.session).await?;
         state.node_access(user, id, Action::Comment).await?;
-        // Ruling R206 : l'acteur dit si le bloc existe, sans bâtir la liste des blocs.
-        if !state.hub.has_block(id, block).await? {
+        if !exists {
             return Err(ApiError::invalid_block());
         }
     }
@@ -632,6 +634,146 @@ mod tests {
             state.hub.block_reads(),
             reads,
             "la liste des blocs a été bâtie"
+        );
+    }
+
+    /// Une page d'Olga, ouverte aux membres, dont le document porte `mmd` (écrit par son acteur,
+    /// identifiants des ancres gardés).
+    async fn page_with(state: &AppState, olga: &AuthUser, mmd: &str) -> Uuid {
+        let space = state
+            .store
+            .create_space("Équipe", Some(olga.id))
+            .await
+            .unwrap();
+        let page = state
+            .store
+            .create_node(NewNode {
+                space_id: space.id,
+                parent_id: None,
+                after: None,
+                kind: NodeKind::Page,
+                title: "P".to_string(),
+                created_by: Some(olga.id),
+                grants: vec![Grant {
+                    subject: Subject::Members,
+                    level: Level::Full,
+                }],
+                doc: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let blocks = mementum_md::parse(mmd).unwrap();
+        state
+            .hub
+            .write_blocks(page, blocks, Some(olga.id))
+            .await
+            .unwrap();
+        page
+    }
+
+    fn on_block(i: usize) -> NewThread {
+        NewThread {
+            block_id: Some("bloc-fixe".to_string()),
+            body: format!("Fil {i}"),
+        }
+    }
+
+    /// Ruling R384 (R365 récrit) : un fil sur un bloc n'attend l'acteur de la page qu'une fois,
+    /// avant de relire la session et les droits. La route chargeait la page, relisait la session,
+    /// puis attendait l'acteur de nouveau pour chercher le bloc : une session prise fin pendant
+    /// cette seconde attente (une longue écriture arrivée entre les deux) n'arrêtait plus rien.
+    /// Le compte des demandes aux acteurs le dit sans minutage : une par fil, bloc présent ou
+    /// absent (deux avant).
+    #[tokio::test]
+    async fn a_thread_on_a_block_waits_for_the_actor_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let page = page_with(&state, &olga, "Bloc ^bloc-fixe\n").await;
+        let olga = with_session(&state, olga).await;
+        for block in ["bloc-fixe", "absent"] {
+            let before = state.hub.calls();
+            let body = NewThread {
+                block_id: Some(block.to_string()),
+                body: "Un".to_string(),
+            };
+            let _ = open_thread(&state, &olga, page, body).await;
+            assert_eq!(state.hub.calls() - before, 1, "bloc « {block} »");
+        }
+    }
+
+    /// Ruling R384 (R365 récrit), constat N2 de la re-relecture de la piste S : pendant une longue
+    /// écriture de la page, vingt fils demandés sur un de ses blocs attendent son acteur ; la
+    /// session prend fin pendant ce temps. Aucun n'est écrit, chacun répond `401`. Les vingt
+    /// attentes sont observées (`Hub::calls_waiting` : l'écriture et les vingt recherches du bloc
+    /// attendent leur réponse), jamais supposées après un délai ; le test vérifie que l'écriture
+    /// a duré au-delà de la fin de la session, et échoue sinon, à tort, plutôt que de passer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn threads_waiting_for_the_actor_stop_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let page = page_with(&state, &olga, "Bloc ^bloc-fixe\n").await;
+        let olga = with_session(&state, olga).await;
+        let long: String = (0..11_000).map(|i| format!("\n\nLongue {i}")).collect();
+        let long = mementum_md::parse(&format!("Bloc ^bloc-fixe{long}\n")).unwrap();
+        let waiting = state.hub.calls_waiting();
+        let hub = state.hub.clone();
+        let writing = tokio::spawn(async move {
+            let written = hub.write_blocks(page, long, None).await;
+            (written, std::time::Instant::now())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            done()
+        };
+        while !until("l'écriture n'attend pas l'acteur", &|| {
+            state.hub.calls_waiting() > waiting
+        }) {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        // Chaque demande sur son propre fil : l'acteur occupe un fil du moteur pendant son écriture,
+        // et une tâche rangée derrière lui pourrait ne partir qu'après.
+        let runtime = tokio::runtime::Handle::current();
+        let threads: Vec<_> = (0..20)
+            .map(|i| {
+                let (state, olga, runtime) = (state.clone(), olga.clone(), runtime.clone());
+                std::thread::spawn(move || {
+                    runtime.block_on(open_thread(&state, &olga, page, on_block(i)))
+                })
+            })
+            .collect();
+        while !until("les fils n'attendent pas l'acteur", &|| {
+            state.hub.calls_waiting() >= waiting + 21
+        }) {
+            assert!(!writing.is_finished(), "l'écriture était trop courte");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        state.store.delete_session(olga.session).await.unwrap();
+        let ended = std::time::Instant::now();
+        let mut statuses = Vec::new();
+        for thread in threads {
+            let opened = tokio::task::spawn_blocking(move || thread.join().unwrap())
+                .await
+                .unwrap();
+            statuses.push(match opened {
+                Ok(_) => StatusCode::CREATED,
+                Err(e) => axum::response::IntoResponse::into_response(e).status(),
+            });
+        }
+        let (written, finished) = writing.await.unwrap();
+        written.unwrap();
+        assert!(
+            finished > ended,
+            "l'écriture a fini avant la fin de la session : le test ne prouve rien"
+        );
+        let threads = state.store.comment_threads(page).await.unwrap();
+        assert!(
+            threads.is_empty() && statuses.iter().all(|s| *s == StatusCode::UNAUTHORIZED),
+            "fils écrits : {} ; statuts : {statuses:?}",
+            threads.len()
         );
     }
 

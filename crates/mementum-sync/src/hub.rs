@@ -103,6 +103,22 @@ pub enum PageEvent {
     Versions,
 }
 
+/// Une demande envoyée à un acteur, qui attend sa réponse : comptée tant que l'appel l'attend.
+struct Waiting(Arc<AtomicU64>);
+
+impl Waiting {
+    fn new(count: &Arc<AtomicU64>) -> Waiting {
+        count.fetch_add(1, Ordering::Relaxed);
+        Waiting(count.clone())
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Le registre des acteurs de page.
 pub struct Hub {
     store: Store,
@@ -113,6 +129,10 @@ pub struct Hub {
     closed: AtomicBool,
     /// Les listes de blocs demandées ([`Hub::read_blocks`]) depuis le démarrage.
     block_reads: AtomicU64,
+    /// Les demandes faites aux acteurs depuis le démarrage, et celles qui attendent encore leur
+    /// réponse ([`Hub::calls`], [`Hub::calls_waiting`]).
+    calls: AtomicU64,
+    calls_waiting: Arc<AtomicU64>,
     /// Le hub lui-même, sans le garder en vie : les acteurs s'en servent pour
     /// quitter le registre.
     me: Weak<Hub>,
@@ -132,6 +152,8 @@ impl Hub {
             generations: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             block_reads: AtomicU64::new(0),
+            calls: AtomicU64::new(0),
+            calls_waiting: Arc::new(AtomicU64::new(0)),
             me: me.clone(),
         })
     }
@@ -175,6 +197,21 @@ impl Hub {
     /// millisecondes : ce compte garde les routes qui ne doivent pas la demander (Ruling R353).
     pub fn block_reads(&self) -> u64 {
         self.block_reads.load(Ordering::Relaxed)
+    }
+
+    /// Combien de demandes ont été faites aux acteurs (chargement, lecture, recherche d'un
+    /// bloc, écriture, restauration…) depuis le démarrage. Pour les tests : une route qui ne doit
+    /// attendre un acteur qu'une fois s'y compte (Ruling R384).
+    pub fn calls(&self) -> u64 {
+        self.calls.load(Ordering::Relaxed)
+    }
+
+    /// Combien de demandes sont dans la boîte d'un acteur sans réponse encore : comptées une fois
+    /// envoyées (l'acteur les traite dans l'ordre d'arrivée), plus celles d'un appel abandonné en
+    /// route. Pour les tests : il dit, sans minutage, que des requêtes attendent derrière une
+    /// demande longue (Ruling R384).
+    pub fn calls_waiting(&self) -> u64 {
+        self.calls_waiting.load(Ordering::Relaxed)
     }
 
     /// Vrai si un bloc de la page, à toute profondeur, porte l'identifiant `id` : ce que dirait
@@ -589,12 +626,15 @@ impl Hub {
         node_id: Uuid,
         make: impl Fn(oneshot::Sender<T>) -> Command,
     ) -> Result<T, SyncError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         for _ in 0..ATTEMPTS {
             let commands = self.actor(node_id).await?;
             let (reply, answer) = oneshot::channel();
             if commands.send(make(reply)).is_err() {
                 continue;
             }
+            // Comptée une fois dans la boîte de l'acteur, qui les traite dans l'ordre.
+            let _waiting = Waiting::new(&self.calls_waiting);
             if let Ok(value) = answer.await {
                 return Ok(value);
             }
