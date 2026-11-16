@@ -715,6 +715,52 @@ test("a_stale_refusal_waits_for_a_login_of_the_tab_in_course_before_reading_the_
   expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
 });
 
+test("a_login_whose_answer_is_lost_keeps_what_left_before_it_from_being_sent_again", async () => {
+  // Trouvé par l'essai au hasard rendu fidèle (réponses perdues) : le cookie d'une connexion de
+  // Bruno a pu être posé alors que sa réponse s'est perdue ; la page ne sait pas que la session a
+  // changé, et la relecture du compte, partie avant, dit Alice.
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  const login = api.logIn({ email: "bruno@exemple.fr", password: "mot-de-passe" });
+  (await waiting("POST", "/api/v1/auth/login")).fail();
+  await expect(login).rejects.toMatchObject({ status: 0 });
+  reading.answer(200, me("alice"));
+  await flush();
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(asked).toBe(0);
+  // Le compte relu par l'application rend le rejeu possible de nouveau.
+  await loadedAs("alice");
+  const read = api.getPage("p2");
+  const sent = await waiting("GET", "/api/v1/pages/p2");
+  await changePassword();
+  sent.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  (await waiting("GET", "/api/v1/pages/p2")).answer(200, page("p2"));
+  await expect(read).resolves.toEqual(page("p2"));
+});
+
+test("a_login_refused_for_its_password_changes_nothing", async () => {
+  // Témoin du précédent : un mot de passe faux est une réponse ; la session n'a pas changé.
+  await loadedAs("alice");
+  const read = api.getPage("p1");
+  const first = await waiting("GET", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  const login = api.logIn({ email: "alice@exemple.fr", password: "faux" });
+  (await waiting("POST", "/api/v1/auth/login")).answer(401, INVALID_CREDENTIALS);
+  await expect(login).rejects.toMatchObject({ code: "invalid_credentials" });
+  reading.answer(200, me("alice"));
+  (await waiting("GET", "/api/v1/pages/p1")).answer(200, page("p1"));
+  await expect(read).resolves.toEqual(page("p1"));
+});
+
 test("the_replay_sends_the_body_as_it_was_first_sent", async () => {
   // Sonde du mineur 2 : un objet changé par l'appelant après l'envoi ne change pas le rejeu.
   await loadedAs("alice");

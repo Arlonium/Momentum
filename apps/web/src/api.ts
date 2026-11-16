@@ -196,6 +196,28 @@ function opened(id: string) {
   settleAccounts();
 }
 
+/**
+ * Une ouverture de session de l'onglet est restée sans réponse : le serveur a pu l'ouvrir, et le
+ * navigateur poser son cookie, sans que la page le sache. Le compte de la session n'est plus sûr
+ * jusqu'à la prochaine relecture de l'application, et rien de ce qui était parti avant ne repart
+ * (R480).
+ */
+function sessionUncertain() {
+  generation += 1;
+  sessionAccount = null;
+  settleAccounts();
+}
+
+/** Mène `run`, qui ouvre une session ; sans réponse, la session n'est plus sûre. */
+async function opening<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 0) sessionUncertain();
+    throw e;
+  }
+}
+
 /** Mène `run`, qui ouvre ou ferme la session de l'onglet : un refus de session attend son issue. */
 async function changeSession<T>(run: () => Promise<T>): Promise<T> {
   const done = run();
@@ -365,20 +387,24 @@ export async function getMe(): Promise<Me> {
 
 /** `POST /api/v1/auth/signup` : crée le compte et ouvre sa session (cookie). */
 export function signUp(body: SignUp): Promise<Me> {
-  return changeSession(async () => {
-    const me = await call<Me>("POST", SIGNUP, body);
-    opened(me.user.id);
-    return me;
-  });
+  return changeSession(() =>
+    opening(async () => {
+      const me = await call<Me>("POST", SIGNUP, body);
+      opened(me.user.id);
+      return me;
+    }),
+  );
 }
 
 /** `POST /api/v1/auth/login` : ouvre une session (cookie) ; `401 invalid_credentials`. */
 export function logIn(body: LogIn): Promise<Me> {
-  return changeSession(async () => {
-    const me = await call<Me>("POST", LOGIN, body);
-    opened(me.user.id);
-    return me;
-  });
+  return changeSession(() =>
+    opening(async () => {
+      const me = await call<Me>("POST", LOGIN, body);
+      opened(me.user.id);
+      return me;
+    }),
+  );
 }
 
 /** `POST /api/v1/auth/logout` : supprime la session sur le serveur et efface le cookie. */
@@ -406,11 +432,13 @@ export function logOut(): Promise<void> {
  * repart avec un cookie neuf. Mot de passe actuel faux : `401 invalid_credentials`.
  */
 export function changePassword(body: ChangePassword): Promise<void> {
-  return changeSession(async () => {
-    await call<void>("POST", PASSWORD, body);
-    // Le même compte, sous une session neuve : ce qui était parti sous l'ancienne est refusé.
-    generation += 1;
-  });
+  return changeSession(() =>
+    opening(async () => {
+      await call<void>("POST", PASSWORD, body);
+      // Le même compte, sous une session neuve : ce qui était parti sous l'ancienne est refusé.
+      generation += 1;
+    }),
+  );
 }
 
 // Espaces, membres et invitations. Dans un espace où l'on n'a aucun rôle, toute route répond
