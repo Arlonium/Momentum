@@ -21,21 +21,20 @@
 // ses en-têtes, et la perte du corps d'une session de l'onglet. Sans eux et sans le régime calme,
 // retirer R480 survivait à 30 000 graines ; il échoue maintenant quelques graines sur 30 000.
 //
+// Le serveur du modèle vérifie aussi le compte attendu (R540) : un appel qui nomme un compte
+// (`X-Mementum-Account`) autre que celui de la session est refusé par `409 account_changed`, sans
+// rien faire, juste après le `401`.
+//
 // Ce qui doit toujours tenir :
 // - un appel repart au plus une fois ;
 // - jamais une route de session ;
 // - jamais s'il est parti avant que l'onglet commence à se déconnecter, ni pendant ;
-// - jamais sous un autre compte que celui de l'application (Alice), qui l'a envoyé, sauf dans la
-//   fenêtre que voici.
-//
-// La fenêtre (R460, coût si faux). Le rejeu ne part que si la relecture du compte qui le précède a
-// dit Alice ; mais cette relecture part avec le cookie du moment, et le rejeu avec celui de sa
-// réponse. Si un autre onglet se connecte sous Bruno pendant la relecture, le rejeu part avec le
-// cookie de Bruno : la page ne lit pas son cookie (`HttpOnly`), seul le serveur pourrait l'empêcher.
-// L'essai l'affirme donc là où il se peut : un rejeu qui porte le cookie d'une session de Bruno est
-// reproché, sauf si cette session a été ouverte par un autre onglet après le départ de la dernière
-// relecture du compte (compté, `window`). Une session ouverte par l'onglet lui-même n'y entre pas :
-// `api.ts` attend son issue (R462), et une ouverture sans réponse rend le compte incertain (R480).
+// - chaque écriture de l'application nomme Alice, son compte, au premier envoi comme au rejeu ;
+// - aucune écriture n'est jamais faite sous un autre compte qu'Alice, rejeu ou non. Avant l'en-tête,
+//   un rejeu partait sous Bruno si un autre onglet s'y connectait pendant la relecture du compte qui
+//   le précède (la fenêtre de R460, que l'essai comptait à part), et tout appel parti avant que
+//   l'application apprenne l'autre compte était fait sous lui (R115) : le serveur les refuse
+//   désormais (comptés, `refusedByHeader` ; les rejeux parmi eux, `replaysRefusedByHeader`).
 // Le modèle ne joue un événement qu'entre deux tours de la boucle (`flush`), comme le navigateur
 // entre deux réponses du réseau.
 //
@@ -63,6 +62,7 @@ const SESSION_PATHS = new Set([
   "/api/v1/auth/password",
 ]);
 const UNAUTHENTICATED = { error: "unauthenticated", message: "session absente ou échue" };
+const ACCOUNT_CHANGED = { error: "account_changed", message: "rien n'a été fait" };
 
 /** Des nombres au hasard, les mêmes à chaque exécution pour une même graine (mulberry32). */
 function random(seed: number): () => number {
@@ -94,7 +94,7 @@ function response(status: number, body?: unknown): Response {
 }
 
 /** Une session du serveur : son compte, si elle vaut encore, qui l'a ouverte, et quand. */
-type Session = { owner: string; alive: boolean; origin: "load" | "tab" | "other"; openedAt: number };
+type Session = { owner: string; alive: boolean; origin: "load" | "tab" | "other" };
 
 /** Un appel en route : parti avec le cookie `token`, il passe par les trois temps de l'en-tête. */
 type InFlight = {
@@ -102,6 +102,8 @@ type InFlight = {
   path: string;
   body: Record<string, unknown> | undefined;
   token: number | null;
+  /** Le compte que l'appel nomme (`X-Mementum-Account`) ; `null` : aucun. */
+  named: string | null;
   /** Une relecture du compte faite par `api.ts` avant un rejeu, pas par l'essai. */
   verification: boolean;
   /** Le pas de l'essai où il est parti. */
@@ -121,7 +123,8 @@ const seen = {
   replays: 0,
   refusedOtherAccount: 0,
   sessionCalls: 0,
-  window: 0,
+  refusedByHeader: 0,
+  replaysRefusedByHeader: 0,
   writesDuringLogout: 0,
   lostAnswers: 0,
   lostBodies: 0,
@@ -168,7 +171,8 @@ async function play(seed: number): Promise<void> {
   let cookie: number | null = null;
   const open = (owner: string, origin: Session["origin"]) => {
     tokens += 1;
-    sessions.set(tokens, { owner, alive: true, origin, openedAt: tick });
+    sessions.set(tokens, { owner, alive: true, origin });
+    journal.push(`⇢ serveur : session ${tokens} ouverte, ${owner} (${origin})`);
     return tokens;
   };
   const close = (token: number | null) => {
@@ -190,8 +194,6 @@ async function play(seed: number): Promise<void> {
   let changing = 0;
   /** L'essai relit lui-même le compte : l'appel qui part n'est pas une relecture d'`api.ts`. */
   let reading = false;
-  /** Le pas où est partie la dernière relecture d'`api.ts` dont la page a lu la réponse. */
-  let lastReadingSentAt: number | undefined;
   /** L'appel qui part maintenant perdra son corps après ses en-têtes. */
   let nextLosesBody = false;
 
@@ -200,26 +202,21 @@ async function play(seed: number): Promise<void> {
     const body =
       typeof init.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
     const token = cookie;
-    journal.push(`→ ${method} ${path} ${body ? JSON.stringify(body) : ""} (cookie ${token})`);
+    const named = new Headers(init.headers).get("x-mementum-account");
+    journal.push(
+      `→ ${method} ${path} ${body ? JSON.stringify(body) : ""} (cookie ${token}, nomme ${named})`,
+    );
     if (SESSION_PATHS.has(path)) sessionFetches += 1;
     if (method === "PATCH") {
       const key = String(body?.title);
       const write = writes.get(key)!;
       write.sends += 1;
+      if (named !== ALICE) breach(`${key} nomme ${named}, pas Alice`);
       if (write.sends > 1) {
         seen.replays += 1;
         if (write.sends > 2) breach(`${key} repart une deuxième fois`);
         if (logouts !== write.logoutsAtSend) breach(`${key}, parti avant une déconnexion, repart`);
         if (write.duringLogout) breach(`${key}, parti pendant une déconnexion, repart`);
-        const session = token === null ? null : sessions.get(token)!;
-        if (session && session.owner !== ALICE) {
-          const later =
-            session.origin === "other" &&
-            lastReadingSentAt !== undefined &&
-            session.openedAt > lastReadingSentAt;
-          if (later) seen.window += 1;
-          else breach(`${key}, parti sous Alice, repart sous ${session.owner} (session ${token})`);
-        }
       }
     }
     const verification = method === "GET" && path === "/api/v1/me" && !reading;
@@ -229,6 +226,7 @@ async function play(seed: number): Promise<void> {
         path,
         body,
         token,
+        named,
         verification,
         sentAt: tick,
         phase: 0,
@@ -254,6 +252,13 @@ async function play(seed: number): Promise<void> {
       call.outcome = { status: 204, setCookie: null };
     } else if (!alive(token)) {
       call.outcome = { status: 401, body: UNAUTHENTICATED };
+    } else if (call.named !== null && call.named !== ownerOf(token)) {
+      // Le compte attendu (R540) : rien n'est fait.
+      seen.refusedByHeader += 1;
+      if (call.method === "PATCH" && writes.get(String(call.body?.title))!.sends > 1) {
+        seen.replaysRefusedByHeader += 1;
+      }
+      call.outcome = { status: 409, body: ACCOUNT_CHANGED };
     } else if (path === "/api/v1/auth/password") {
       const owner = ownerOf(token)!;
       for (const session of sessions.values()) if (session.owner === owner) session.alive = false;
@@ -263,6 +268,9 @@ async function play(seed: number): Promise<void> {
       if (call.verification && owner !== ALICE) seen.refusedOtherAccount += 1;
       call.outcome = { status: 200, body: me(owner) };
     } else {
+      if (call.method === "PATCH" && ownerOf(token) !== ALICE) {
+        breach(`${String(call.body?.title)} fait sous ${ownerOf(token)} (session ${token})`);
+      }
       call.outcome = { status: 200, body: page("p") };
     }
   };
@@ -276,7 +284,6 @@ async function play(seed: number): Promise<void> {
   const deliver = (call: InFlight) => {
     inFlight.splice(inFlight.indexOf(call), 1);
     journal.push(`← ${call.method} ${call.path} (${call.outcome!.status})`);
-    if (call.verification) lastReadingSentAt = call.sentAt;
     call.resolve(response(call.outcome!.status, call.outcome!.body));
   };
   /** Mène l'appel d'un temps. */
@@ -538,7 +545,8 @@ test.each(seeds)("graine %i", async (seed) => {
 test("the_random_runs_did_meet_what_they_test", () => {
   // Les graines ont tourné avant (même fichier, dans l'ordre) : l'essai a bien vu des rejeux, des
   // relectures du compte qui disaient un autre compte, des écritures parties pendant une
-  // déconnexion, des réponses perdues et des sessions de l'onglet qui se croisent.
+  // déconnexion, des réponses perdues, des sessions de l'onglet qui se croisent, et des écritures que
+  // le serveur a refusées parce qu'elles nommaient Alice sous la session de Bruno.
   if (import.meta.env.MEMENTUM_FUZZ_SEEDS) console.log("essai au hasard :", JSON.stringify(seen));
   expect(seen, JSON.stringify(seen)).toBeDefined();
   expect(seen.replays).toBeGreaterThan(0);
@@ -549,4 +557,5 @@ test("the_random_runs_did_meet_what_they_test", () => {
   expect(seen.crossedSessions).toBeGreaterThan(0);
   expect(seen.lostBodies).toBeGreaterThan(0);
   expect(seen.loginsDuringReading).toBeGreaterThan(0);
+  expect(seen.refusedByHeader).toBeGreaterThan(0);
 });
