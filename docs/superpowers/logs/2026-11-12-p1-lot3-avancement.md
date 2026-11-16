@@ -54,9 +54,9 @@ Les agents (Opus 5.5) ont atteint la limite d'usage hebdomadaire du compte, qui 
 
 | Atelier (branche) | Agent coupé | État de l'atelier | À la reprise |
 |---|---|---|---|
-| `lot3-s-tour3` | implémenteur de la piste S (tours 5 à 7) | **rebasé sur `main` `21d04b5`** (45 commits au-dessus), le report de la 13b passe ses gardes (R536) ; **documentation non commitée** (`CLAUDE.md`, registre, relecture finale) | lui demander de finir sa vérification de fin (fmt, clippy, `cargo test --workspace` deux fois, mesures, Vitest, e2e) et de commiter la doc ; puis la **re-relecture du tour 7** (relecteur de la piste S) |
+| `lot3-s-tour3` | implémenteur de la piste S (tours 5 à 7) | **rebasé sur `main` `21d04b5`**, le report de la 13b passe ses gardes (R536) ; vérification de fin faite par le contrôleur (1 013 tests Rust deux fois, mesures release vertes, Vitest 2 119, e2e de la synchro 39 verts) et doc commitée (`7d3e693`) | la **re-relecture du tour 7** (relecteur de la piste S, Opus) |
 | `lot3b-client` | relecteur de C2 (re-relecture ciblée de R551, le poids à deux niveaux) | rien de suivi modifié ; des sondes non suivies (`zz-probe-*`) | lui demander de finir ; puis C2 sur `main` |
-| `lot3b-s4b` | implémenteur de S4b | propre, aucun commit | lui demander de reprendre depuis le début de sa tâche |
+| `lot3b-s4b` | implémenteur de S4b | relancée le 2026-11-16 avec un agent **Sonnet 5.5** (la limite ne touchait que les agents Opus) | sa relecture, par un agent Opus, à la réouverture : rien n'entre sur `main` sans relecture du niveau des précédentes |
 
 ## Reprise du 2026-11-16 (tenu à jour ; prime sur la section de la pause, qui suit)
 
