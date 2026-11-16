@@ -123,3 +123,56 @@ test("ctrl_d_outside_the_editor_is_left_to_the_browser", async ({ browser }) => 
   await expect.poll(() => textsOf(mona)).toEqual(["Un bloc", "Un bloc"]);
   await expect.poll(() => getMmd(aliceApi, page.id)).toBe("Un bloc\n\nUn bloc\n");
 });
+
+test("a_selection_leaving_a_column_is_duplicated_by_ctrl_d_and_by_the_menu", async ({ browser }) => {
+  const columns = "<columns>\n<column>\nGauche\n</column>\n<column>\nDroite\n</column>\n</columns>";
+  const { mona, tom, aliceApi, page } = await duo(browser, `Avant\n\n${columns}\n\nAprès\n`);
+  const errors: string[] = [];
+  mona.on("pageerror", (error) => errors.push(String(error)));
+  await mona.evaluate(() => {
+    const seen: boolean[] = [];
+    (window as unknown as { ctrlD: boolean[] }).ctrlD = seen;
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "d" && event.ctrlKey) seen.push(event.defaultPrevented);
+    });
+  });
+  /** Sélectionne le texte, de la colonne de gauche à celle de droite de la liste de rang `at`. */
+  const selectAcrossColumns = (at: number) =>
+    mona.evaluate((index) => {
+      const editor = window.__mementum!.editor;
+      const list = editor.document[index];
+      editor.setSelection(list.children[0].children[0].id, list.children[1].children[0].id);
+      editor.focus();
+    }, at);
+  const types = async (p: Page) => p.evaluate(() => window.__mementum!.editor.document.map((b) => b.type));
+
+  // Ctrl+D : la sélection sort d'une colonne ; la copie remonte à la liste de colonnes entière.
+  await selectAcrossColumns(1);
+  await mona.keyboard.press("Control+d");
+  await expect.poll(() => mona.evaluate(() => (window as unknown as { ctrlD: boolean[] }).ctrlD)).toEqual([true]);
+  await expect.poll(() => types(tom)).toEqual(["paragraph", "columnList", "columnList", "paragraph"]);
+  await expect.poll(() => getMmd(aliceApi, page.id)).toBe(`Avant\n\n${columns}\n\n${columns}\n\nAprès\n`);
+
+  // « Dupliquer » du menu de la poignée de « Gauche », la même sélection gardée : une troisième liste,
+  // le menu se ferme, le focus est au texte.
+  await selectAcrossColumns(1);
+  await blockContent(mona, "Gauche").hover();
+  await mona.getByRole("button", { name: "Ouvrir le menu du bloc" }).click();
+  await mona.getByRole("menuitem", { name: "Dupliquer" }).click();
+  await expect(mona.getByRole("menu")).toBeHidden();
+  await expect(mona.locator(".mm-editor .bn-editor")).toBeFocused();
+  await expect.poll(() => types(tom)).toEqual(["paragraph", "columnList", "columnList", "columnList", "paragraph"]);
+  expect(errors).toEqual([]);
+});
+
+test("escape_on_the_handle_menu_gives_the_focus_back_to_the_text", async ({ browser }) => {
+  const { mona } = await duo(browser, "Premier bloc\n\nDeuxième bloc\n");
+  await blockContent(mona, "Premier bloc").hover();
+  await mona.getByRole("button", { name: "Ouvrir le menu du bloc" }).click();
+  await expect(mona.getByRole("menuitem", { name: "Dupliquer" })).toBeVisible();
+  await mona.keyboard.press("Escape");
+  await expect(mona.getByRole("menu")).toBeHidden();
+  // Jamais sur `body` : au texte de l'éditeur, où la frappe reprend.
+  await expect(mona.locator(".mm-editor .bn-editor")).toBeFocused();
+  await expect.poll(() => textsOf(mona)).toEqual(["Premier bloc", "Deuxième bloc"]);
+});
