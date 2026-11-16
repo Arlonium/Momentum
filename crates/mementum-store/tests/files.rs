@@ -395,3 +395,69 @@ async fn sweep_with_nothing_to_remove_takes_no_write_lock() {
     assert_eq!(f.store.sweep_files().await.unwrap(), [[7; 32]]);
     assert_eq!(f.store.known_files().await.unwrap(), [[6; 32]]);
 }
+
+/// Une recopie relit sa page cible dans la transaction qui écrit (Ruling R577) : à la corbeille,
+/// elle-même ou par une page parente, `Trashed`, et rien n'est écrit ; supprimée, `NotFound`, avant
+/// même que la source soit regardée. Une source qui n'est pas de la page nommée passe après :
+/// `None`. Témoin : la même recopie, la page cible restaurée, écrit son attache.
+#[tokio::test]
+async fn copy_into_a_trashed_page_writes_nothing() {
+    let f = fresh().await;
+    let olga = account(&f.store, "olga").await.id;
+    let source_page = new_page(&f, "Source").await;
+    let source = f
+        .store
+        .attach_file(
+            new_attachment(source_page, [4; 32], 2, "text/plain", "a.txt", olga),
+            1,
+        )
+        .await
+        .unwrap();
+    let parent = new_page(&f, "Parente").await;
+    let child = f
+        .store
+        .create_node(page(&f.space, Some(parent), None, "Sous-page"))
+        .await
+        .unwrap()
+        .id;
+    let alone = new_page(&f, "Seule").await;
+    f.store.trash_node(alone, olga).await.unwrap();
+    f.store.trash_node(parent, olga).await.unwrap();
+    for (what, target) in [("jetée", alone), ("sous une page jetée", child)] {
+        let copied = f
+            .store
+            .copy_attachment(source_page, source.id, Uuid::now_v7(), target, olga, 2)
+            .await;
+        assert!(
+            matches!(copied, Err(StoreError::Trashed)),
+            "{what} : {copied:?}"
+        );
+        // La corbeille passe avant la source.
+        let unknown = f
+            .store
+            .copy_attachment(source_page, Uuid::now_v7(), Uuid::now_v7(), target, olga, 2)
+            .await;
+        assert!(
+            matches!(unknown, Err(StoreError::Trashed)),
+            "{what} : {unknown:?}"
+        );
+    }
+    assert_eq!(attachments(&f).await, 1, "rien d'écrit");
+    let gone = new_page(&f, "Supprimée").await;
+    delete_page(&f, gone, olga).await;
+    let missing = f
+        .store
+        .copy_attachment(source_page, Uuid::now_v7(), Uuid::now_v7(), gone, olga, 2)
+        .await;
+    assert!(matches!(missing, Err(StoreError::NotFound)), "{missing:?}");
+
+    // Témoin.
+    f.store.restore_node(alone).await.unwrap();
+    let copied = f
+        .store
+        .copy_attachment(source_page, source.id, Uuid::now_v7(), alone, olga, 3)
+        .await
+        .unwrap();
+    assert!(copied.is_some());
+    assert_eq!(attachments(&f).await, 2);
+}

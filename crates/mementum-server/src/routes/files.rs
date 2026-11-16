@@ -19,9 +19,12 @@
 //! le corps, [`CopyFile`] : `invalid_json` (`400` illisible, `422` d'une autre forme, un champ de
 //! plus compris), puis `422 invalid_source` pour une page d'origine qu'on ne voit pas, inconnue ou
 //! mal nommée, et pour un fichier qui n'est pas d'elle, inconnu ou mal nommé : **la même
-//! réponse**, jamais `403` ni `404` (Ruling R558). La source est relue dans la transaction qui
-//! écrit la copie, dans la voie du compte (Ruling R522) ; entre le contrôle de la source et
-//! l'écriture, quelques millisecondes : une fenêtre acceptée (conception §5.6).
+//! réponse**, jamais `403` ni `404` (Ruling R558). La transaction qui écrit la copie, dans la
+//! voie du compte (Ruling R522), relit la page d'ici (supprimée : page introuvable ; à la
+//! corbeille : `409 trashed`, Ruling R577) et la source (le fichier est encore de sa page). Les
+//! droits, eux, ne sont pas relus : entre leur contrôle et l'écriture, il ne reste que l'attente du
+//! tour de la voie du compte, que ses propres écritures en file allongent ; un droit retiré pendant
+//! cette attente n'est pas vu (une fenêtre acceptée, conception §5.6).
 //!
 //! **Envoyer** (Ruling R247), dans cet ordre : `401` ; `409 account_changed` (ou `400`) pour un
 //! en-tête `X-Mementum-Account` qui ne nomme pas le compte de la session (Ruling R540) ; `404`
@@ -308,10 +311,11 @@ pub(crate) async fn copy(
         return Err(ApiError::invalid_source());
     };
     permit(&access, Action::Read).map_err(|_| ApiError::invalid_source())?;
-    // Une seule transaction, dans la voie du compte (Ruling R522) : la source y est relue
-    // (`None` : le fichier n'est pas, ou plus, de cette page), et la page d'ici, partie entre le
-    // contrôle et l'écriture, rend `NotFound`, la réponse d'une page introuvable. Entre le
-    // contrôle de la source et l'écriture, quelques millisecondes : une fenêtre acceptée (R249).
+    // Une seule transaction, dans la voie du compte (Ruling R522), qui relit la page d'ici
+    // (partie : `NotFound`, la réponse d'une page introuvable ; à la corbeille : `Trashed`, `409
+    // trashed`, Ruling R577), puis la source (`None` : le fichier n'est pas, ou plus, de cette
+    // page). Les droits ne sont pas relus : entre leur contrôle et l'écriture, il ne reste que
+    // l'attente du tour de la voie du compte, que ses propres écritures allongent (R249, R577).
     let copied = state
         .store
         .copy_attachment(from, file, Uuid::now_v7(), id, user.id, now_ms())
@@ -981,6 +985,19 @@ mod tests {
                 .join(&hex[2..])
         }
 
+        /// Les attaches de la page `page`, lues par une connexion à côté du serveur.
+        async fn attachments_of(&self, page: Uuid) -> i64 {
+            let url = format!("sqlite:{}", self.dir.path().join("m.db").display());
+            let mut side = <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
+                .await
+                .unwrap();
+            sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE node_id = ?")
+                .bind(page.to_string())
+                .fetch_one(&mut side)
+                .await
+                .unwrap()
+        }
+
         /// Attend que `n` tâches attendent le verrou du dépôt ([`WAIT`] au plus).
         async fn waiting_for_the_lock(&self, n: usize) {
             let deadline = Instant::now() + WAIT;
@@ -1196,5 +1213,78 @@ mod tests {
             .unwrap();
         assert_eq!(order.len(), BURST + 1, "{order:?}");
         assert_eq!(order[0], "ménage", "{order:?}");
+    }
+
+    /// La fenêtre d'une recopie est la file d'écriture de son compte (Ruling R577 ; sonde 6 de la
+    /// relecture) : Mona a trois écritures en file quand sa recopie, ses contrôles passés,
+    /// demande son tour ; pendant qu'elle attend, la page cible est mise à la corbeille par une
+    /// autre voie. La recopie relit la corbeille dans sa transaction : `409 trashed`, et la page à
+    /// la corbeille ne prend aucune attache. Témoin : la page restaurée, la même recopie passe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_page_trashed_while_its_copy_waits_its_turn_takes_nothing() {
+        const CONTENT: &[u8] = b"un fichier a recopier";
+        let bench = Bench::new().await;
+        let (source, target) = (bench.page("Source").await, bench.page("Cible").await);
+        let (status, body) = bench.upload(source, "f.txt", CONTENT).await.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let info: Value = serde_json::from_slice(&body).unwrap();
+        let file = info["id"].as_str().unwrap().to_string();
+        let copy_body = json!({ "pageId": source.to_string(), "fileId": file })
+            .to_string()
+            .into_bytes();
+        let copies = format!("/api/v1/pages/{target}/files/copies");
+        let store = bench.state.store.clone();
+        let queued = async |n: usize| {
+            let deadline = Instant::now() + WAIT;
+            while store.queued_writes() != n {
+                assert!(
+                    Instant::now() < deadline,
+                    "{} écritures en file, {n} attendues",
+                    store.queued_writes()
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        let held = store.hold_writes().await;
+        let mut burst = Vec::new();
+        for i in 0..3 {
+            let store = store.clone();
+            let name = format!("Rafale {i}");
+            burst.push(tokio::spawn(mementum_store::writes_by(
+                Some(bench.user),
+                async move { store.create_space(&name, None).await },
+            )));
+            queued(i + 1).await;
+        }
+        let copy = bench.spawn("POST", copies.clone(), copy_body.clone());
+        queued(4).await;
+        let trash = tokio::spawn(mementum_store::writes_by(None, {
+            let store = store.clone();
+            let by = bench.user;
+            async move { store.trash_node(target, by).await }
+        }));
+        queued(5).await;
+        drop(held);
+        trash.await.unwrap().unwrap();
+        for write in burst {
+            write.await.unwrap().unwrap();
+        }
+        let (status, body) = copy.await.unwrap();
+        assert_eq!(status, StatusCode::CONFLICT, "{body:?}");
+        let refusal: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(refusal["error"], "trashed");
+        assert_eq!(bench.attachments_of(target).await, 0, "rien d'attaché");
+
+        // Témoin.
+        let restore = format!("/api/v1/pages/{target}/restore");
+        assert_eq!(
+            bench.send("POST", restore, Vec::new()).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            bench.send("POST", copies, copy_body).await.0,
+            StatusCode::CREATED
+        );
+        assert_eq!(bench.attachments_of(target).await, 1);
     }
 }

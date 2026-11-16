@@ -131,6 +131,9 @@ pub enum StoreError {
     ParentTrashed,
     /// Le nœud n'est pas à la corbeille : on ne supprime définitivement que ce qui y est.
     NotTrashed,
+    /// La page où l'on écrirait est à la corbeille, elle-même ou par une page parente, vu dans la
+    /// transaction qui écrirait (une recopie de fichier, Ruling R577) : rien n'est écrit.
+    Trashed,
     /// Le message n'est pas de ce compte, ou le fil n'a pas été ouvert par lui, alors que
     /// l'appelant le demandait (`Authorship::Of`) : rien n'est écrit.
     NotAuthor,
@@ -158,6 +161,7 @@ impl fmt::Display for StoreError {
             StoreError::Refused(why) => write!(f, "changement d'accès refusé : {why}"),
             StoreError::ParentTrashed => write!(f, "une page parente est à la corbeille"),
             StoreError::NotTrashed => write!(f, "le nœud n'est pas à la corbeille"),
+            StoreError::Trashed => write!(f, "la page est à la corbeille"),
             StoreError::NotAuthor => write!(f, "ce message, ou ce fil, est d'un autre compte"),
             StoreError::CommentLimit(limit) => write!(f, "plafond des commentaires : {limit}"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),

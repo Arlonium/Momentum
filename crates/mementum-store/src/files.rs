@@ -104,6 +104,33 @@ async fn read_attachment(
     .transpose()
 }
 
+/// La page `id` est-elle à la corbeille, elle-même ou par une page parente ? `None` si elle
+/// n'existe pas. La remontée va de parent en parent et s'arrête à la première page à la corbeille
+/// (`UNION` : aussi si des parents tournaient en rond), comme `Store::trashed_since`.
+async fn in_trash(conn: &mut SqliteConnection, id: Uuid) -> Result<Option<bool>, StoreError> {
+    let id = id.to_string();
+    let exists = sqlx::query("SELECT 1 FROM nodes WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+    let trashed = sqlx::query(
+        "WITH RECURSIVE anc(id, parent_id, trashed_at) AS ( \
+             SELECT id, parent_id, trashed_at FROM nodes WHERE id = ?1 \
+             UNION \
+             SELECT n.id, n.parent_id, n.trashed_at FROM nodes n \
+             JOIN anc ON n.id = anc.parent_id \
+             WHERE anc.trashed_at IS NULL \
+         ) SELECT 1 FROM anc WHERE trashed_at IS NOT NULL LIMIT 1",
+    )
+    .bind(&id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(Some(trashed.is_some()))
+}
+
 /// Écrit une attache de `hash` sur la page `node_id`, dans la transaction de l'appelant (la
 /// duplication d'une page s'en sert dans la sienne). `NotFound` si la page, le compte ou la ligne
 /// du contenu n'existe pas : c'est la base qui le dit, par ses clés étrangères.
@@ -188,8 +215,13 @@ impl Store {
     /// Recopie l'attache `from_id` de la page `from_node` dans la page `to_node` : une attache
     /// neuve, d'identifiant `id`, au même contenu et au même nom, sans un octet renvoyé (R249).
     /// La source est lue et la copie écrite dans la même transaction d'écriture : un ménage ne
-    /// passe pas entre les deux. `None`, sans rien écrire, si la source n'est pas de `from_node` ;
-    /// `NotFound`, sans rien écrire, si `to_node` ou le compte `by` n'existe pas.
+    /// passe pas entre les deux. Dans cette transaction, et dans cet ordre, comme les refus de la
+    /// route : `NotFound` si `to_node` n'existe plus ; `Trashed` si `to_node` est à la corbeille,
+    /// elle-même ou par une page parente (Ruling R577 : la route l'a vu hors de la corbeille, mais
+    /// la recopie a pu attendre son tour longtemps) ; `None` si la source n'est pas de
+    /// `from_node` ; `NotFound` encore si le compte `by` n'existe pas. Aucun de ces cas n'écrit
+    /// rien. Elle ne crée jamais de ligne `files` : la source attachée, relue ici, garde la
+    /// sienne, et la clé étrangère refuserait l'attache d'un contenu sans ligne.
     ///
     /// Elle s'écrit dans la voie du compte de la tâche, pas dans celle du dépôt (Ruling R522) :
     /// elle ne se fait pas sous le verrou du dépôt, et la voie du dépôt, qui passe en priorité, n'a
@@ -205,6 +237,11 @@ impl Store {
         now: i64,
     ) -> Result<Option<Attachment>, StoreError> {
         let mut tx = self.write().await?;
+        match in_trash(&mut tx, to_node).await? {
+            None => return Err(StoreError::NotFound),
+            Some(true) => return Err(StoreError::Trashed),
+            Some(false) => {}
+        }
         let Some(source) = read_attachment(&mut tx, from_node, from_id).await? else {
             return Ok(None);
         };

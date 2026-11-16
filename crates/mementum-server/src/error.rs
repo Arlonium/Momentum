@@ -645,6 +645,7 @@ impl From<StoreError> for ApiError {
             StoreError::Refused(why) => ApiError::share_refused(why),
             StoreError::ParentTrashed => ApiError::parent_trashed(),
             StoreError::NotTrashed => ApiError::not_trashed(),
+            StoreError::Trashed => ApiError::trashed(),
             // Les routes des commentaires disent elles-mêmes à qui est le message ou le fil,
             // avant d'écrire : ce refus-ci vient de la transaction.
             StoreError::NotAuthor => ApiError::forbidden(
@@ -1064,6 +1065,11 @@ mod tests {
                 StoreError::NotTrashed,
                 StatusCode::CONFLICT,
                 ErrorCode::NotTrashed,
+            ),
+            (
+                StoreError::Trashed,
+                StatusCode::CONFLICT,
+                ErrorCode::Trashed,
             ),
             (
                 StoreError::NotAuthor,
