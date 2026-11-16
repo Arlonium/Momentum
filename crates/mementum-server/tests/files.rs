@@ -750,12 +750,13 @@ async fn file_too_large_is_refused_before_and_while_reading() {
 
 /// Un envoi qui ne reçoit plus rien pendant `upload_idle` est abandonné : la connexion est
 /// fermée sans un octet de réponse, son temporaire part, rien n'est attaché, et le journal le
-/// dit.
+/// dit. Le délai est d'une seconde : le test doit voir le temporaire de l'envoi avant qu'il parte
+/// (une borne qui peut le faire échouer à tort sur un poste très chargé, jamais passer).
 #[tokio::test]
 async fn stalled_upload_is_abandoned() {
     let t = TestApp::with_config(|cfg| {
         cfg.signup = SignupMode::Open;
-        cfg.upload_idle = Duration::from_millis(200);
+        cfg.upload_idle = Duration::from_secs(1);
     })
     .await;
     let logs = Logs::capture();
