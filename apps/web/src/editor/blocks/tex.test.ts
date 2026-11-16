@@ -6,7 +6,7 @@
 // ce que KaTeX produit.
 import katex from "katex";
 import { afterEach, expect, test, vi } from "vitest";
-import { depthAllowance, MAX_LATEX_CHARS, MAX_TEX_NODES, refusal, typeset } from "./tex";
+import { CHEAP_COST, MAX_LATEX_CHARS, MAX_TEX_NODES, refusal, typeset, weightAllowance } from "./tex";
 
 const B = String.fromCharCode(92);
 /** `@` pour la barre oblique inverse, plus lisible dans une chaîne de JavaScript. */
@@ -143,29 +143,60 @@ test("element_depth_is_counted_in_what_katex_produces", () => {
 test("a_formula_that_crashed_the_tab_never_fits_at_the_top_of_a_page", () => {
   for (const [name, latex] of CRASHED_AT_THE_TOP) {
     const outcome = typeset(latex, true);
-    expect(outcome.kind === "formula" && outcome.depth > depthAllowance(20), name).toBe(true);
+    expect(outcome.kind === "formula" && outcome.weight > weightAllowance(20), name).toBe(true);
   }
 });
 
-test("the_depth_allowed_shrinks_with_the_depth_of_the_page_around_the_formula", () => {
-  // Mesuré dans Chromium : l'onglet plante quand profondeur de la page + 2,64 × profondeur
-  // d'éléments de la formule dépasse 187 environ ; on compte 3 par élément et on s'arrête à 150.
-  expect(depthAllowance(0)).toBe(50);
-  expect(depthAllowance(20)).toBe(43);
-  expect(depthAllowance(49)).toBe(33);
-  expect(depthAllowance(94)).toBe(18);
-  expect(depthAllowance(150)).toBe(0);
-  expect(depthAllowance(400)).toBe(0);
-  // Les formules ordinaires tiennent en haut d'une page : la plus profonde mesurée, une fraction
-  // continue de quatre niveaux, a 35 éléments de profondeur.
+test("an_element_weighs_three_under_what_costs_dear_and_less_elsewhere", () => {
+  // Deux poids (re-relecture de C2, N4) : les fractions, matrices, exposants et délimiteurs coûtent
+  // 1,76 par élément au plus, les boîtes de `\mathreflectbox`, des `\…lap`, de `\raisebox`, de
+  // `\vcenter`, des accents et des racines jusqu'à 2,64 ; une classe inconnue, le MathML et tout ce
+  // qui est sous un élément cher comptent comme lui. Les quatre enveloppes d'une équation (`katex`,
+  // `katex-display`, `katex-html`, `katex-base`) pèsent 3, sans rendre cher ce qui est sous elles.
+  const weight = (latex: string) => {
+    const outcome = typeset(latex, true);
+    return outcome.kind === "formula" ? outcome : null;
+  };
+  for (const latex of [frac(6), t("x_{a}^{b}"), t("@sum_{i=1}^{n} x_i"), t("@begin{matrix} @frac{a}{b} & c @@ d & e @end{matrix}")]) {
+    const outcome = weight(latex)!;
+    expect(outcome.weight, latex).toBeCloseTo(3 * 4 + CHEAP_COST * (outcome.depth - 4), 5);
+  }
+  for (const [name, latex] of [
+    ["mathreflectbox", wrap("@mathreflectbox{", "}", 6)],
+    ["mathllap", wrap("@mathllap{", "}", 6)],
+    ["raisebox", wrap("@raisebox{1pt}{$", "$}", 6)],
+    ["vcenter", wrap("@vcenter{", "}", 6)],
+    ["hat", wrap("@hat{", "}", 6)],
+    ["sqrt", sqrt(6)],
+    ["overline (classe inconnue)", wrap("@overline{", "}", 6)],
+    // Vingt `\color` imbriqués : le MathML (des `mstyle`) est plus profond que le HTML.
+    ["color (MathML)", wrap("@color{red}{a", "}", 20)],
+  ]) {
+    const outcome = weight(latex)!;
+    // Au plus un élément bon marché au-dessus (`katex-mathml`, sous les enveloppes).
+    expect(outcome.weight, name).toBeGreaterThanOrEqual(3 * outcome.depth - 0.7);
+  }
+});
+
+test("the_weight_allowed_shrinks_with_the_depth_of_the_page_around_the_formula", () => {
+  // Mesuré dans Chromium : l'onglet plante quand profondeur de la page + coût de la formule dépasse
+  // 187 environ ; on s'arrête à 150.
+  expect(weightAllowance(0)).toBe(150);
+  expect(weightAllowance(20)).toBe(130);
+  expect(weightAllowance(94)).toBe(56);
+  expect(weightAllowance(150)).toBe(0);
+  expect(weightAllowance(400)).toBe(0);
+  // Les formules ordinaires tiennent en haut d'une page, et six fractions imbriquées, qui
+  // s'affichaient avant la Task C2 (le plantage est à treize).
   for (const raw of [
     "@frac{1}{1+@frac{1}{1+@frac{1}{1+@frac{1}{x}}}}",
     "@sqrt{@frac{a^{2^{n}}}{b_{i_{j}}}}",
     "x = @frac{-b @pm @sqrt{b^2-4ac}}{2a}",
     "@begin{bmatrix} @frac{1}{2} & @sqrt{2} @@ @alpha & @beta @end{bmatrix}",
+    frac(6).replace(/\\/g, "@"),
   ]) {
     const outcome = typeset(t(raw), true);
-    expect(outcome.kind === "formula" && outcome.depth <= depthAllowance(20), raw).toBe(true);
+    expect(outcome.kind === "formula" && outcome.weight <= weightAllowance(20), raw).toBe(true);
   }
 });
 

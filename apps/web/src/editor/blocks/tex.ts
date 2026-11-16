@@ -11,12 +11,14 @@
 //   deux définitions à lui, `\df@tag` (`\tag`) et `\@eqnsw` (`\nonumber`, `\notag`), seules acceptées
 //   par leur nom. Une commande dont le nom porte `@` n'est écrite que par KaTeX : écrite dans la
 //   formule, elle est refusée (sinon mille `\df@tag` copieraient mille fois un `\tag`).
-// - **La profondeur d'éléments est comptée dans ce que KaTeX produit** (HTML et MathML, balises
+// - **La profondeur pondérée est comptée dans ce que KaTeX produit** (HTML et MathML, balises
 //   comptées dans le HTML écrit) : la mise en page de Chromium déborde sa pile sur des boîtes
 //   imbriquées, tables ou non (`\frac`, `\mathllap`, `\mathreflectbox`, des accolades…), et l'onglet
-//   plantait d'autant plus tôt que la formule était profonde dans la page. La formule ne s'attache
-//   que si sa profondeur tient dans ce que la profondeur de la page autour d'elle laisse
-//   (`depthAllowance`) ; sinon, elle est montrée en texte, avec un message (`Formula`).
+//   plantait d'autant plus tôt que la formule était profonde dans la page. Un élément pèse
+//   `CHEAP_COST` sous les seules classes connues pour coûter peu (fractions, matrices, exposants,
+//   délimiteurs), `DEAR_COST` ailleurs (R525, R551). La formule ne s'attache que si son poids tient
+//   dans ce que la profondeur de la page autour d'elle laisse (`weightAllowance`) ; sinon, elle est
+//   montrée en texte, avec un message (`Formula`).
 // - Une formule de plus de `MAX_LATEX_CHARS` caractères, ou dont KaTeX produirait plus de
 //   `MAX_TEX_NODES` éléments, n'est pas mise en forme. Les tailles écrites (`\rule`, `\kern`,
 //   `\\[…]`) sont bornées à `MAX_SIZE_EM` ; les expansions de macros, à `MAX_EXPAND`.
@@ -43,28 +45,63 @@ const MAX_SIZE_EM = 50;
 const MAX_EXPAND = 1_000;
 
 /**
- * La mise en page de Chromium plante quand la profondeur de la page autour de la formule, plus
- * 2,64 fois sa profondeur d'éléments (au pire des formes mesurées, `\mathreflectbox`), dépasse 187
- * environ (mesuré : registre, R525). On compte `ELEMENT_COST` par élément, et on s'arrête à
- * `DEPTH_BUDGET`.
+ * La mise en page de Chromium plante quand la profondeur de la page autour de la formule, plus le
+ * coût de sa profondeur d'éléments, dépasse 187 environ (mesuré : registre, R525, R551) : 2,64 par
+ * élément au pire des boîtes (`\mathreflectbox`, les `\…lap`, `\raisebox`, `\vcenter`, les accents,
+ * les racines), 1,76 au pire des fractions, matrices, exposants et délimiteurs. Un élément pèse
+ * `DEAR_COST`, ou `CHEAP_COST` s'il n'a que des classes de `CHEAP_CLASSES` et n'est sous aucun
+ * élément cher ; les enveloppes de KaTeX (`WRAPPERS`) pèsent `DEAR_COST` sans rendre cher ce qui est
+ * sous elles. Au pire des boîtes, la marge est celle d'avant les deux poids ; les fractions et leurs
+ * voisines n'en ont jamais moins (R551). On s'arrête à `DEPTH_BUDGET`.
  */
 const DEPTH_BUDGET = 150;
-const ELEMENT_COST = 3;
+const DEAR_COST = 3;
+export const CHEAP_COST = 2.3;
+
+/**
+ * Les classes de KaTeX qui coûtent peu à la mise en page : celles des fractions, des matrices, des
+ * exposants, des grands opérateurs, des délimiteurs et des polices. Toute autre classe, le MathML,
+ * le SVG, et une table d'une seule ligne (`\raisebox`, `\vcenter`, les accents) coûtent cher.
+ */
+const CHEAP_CLASSES = new Set(
+  (
+    "katex katex-display katex-html katex-mathml katex-base katex-strut katex-sizing katex-root " +
+    "mord mopen mclose mbin mrel mpunct minner mop mspace mtight mfrac frac-line nulldelimiter " +
+    "mathnormal mathrm mathbf mathit mathbb mathcal mathfrak mathsf mathtt boldsymbol text textbf " +
+    "pstrut vlist vlist-r vlist-s vlist-t vlist-t2 msupsub mtable arraycolsep vertical-separator " +
+    "delimcenter delimsizing large-op op-symbol op-limits"
+  ).split(" "),
+);
+const cheapClass = (name: string) =>
+  CHEAP_CLASSES.has(name) || /^(reset-)?size\d+$/.test(name) || /^col-align-[lcr]$/.test(name);
+
+/** Les enveloppes de chaque formule : au-dessus de tout, elles pèsent comme un élément cher. */
+const WRAPPERS = new Set(["katex", "katex-display", "katex-html", "katex-base"]);
+
+/** Ce que coûte l'élément de la balise ouvrante `tag` : cher (lui et ce qui est sous lui), une enveloppe, ou peu. */
+function costOf(tag: string): "dear" | "wrapper" | "cheap" {
+  if (!tag.startsWith("<span")) return "dear";
+  const found = /class="([^"]*)"/.exec(tag);
+  const classes = found === null ? [] : found[1]!.split(" ").filter((name) => name !== "");
+  if (!classes.every(cheapClass)) return "dear";
+  if (classes.includes("vlist-t") && !classes.includes("vlist-t2")) return "dear";
+  return classes.some((name) => WRAPPERS.has(name)) ? "wrapper" : "cheap";
+}
 
 /** Ce qu'une formule donne. */
 export type TexOutcome =
-  | { kind: "formula"; html: string; depth: number; nodes: number }
+  | { kind: "formula"; html: string; depth: number; weight: number; nodes: number }
   | { kind: "empty" }
   | { kind: "invalid"; message: string }
   | { kind: "refused"; why: "definition" | "internal" | "length" | "size" };
 
 /**
- * La profondeur d'éléments qu'une formule peut avoir, à `depth` éléments du haut du document : 43
- * en haut d'une page (une équation y est à 20), moins dans une liste imbriquée, aucune au-delà de
- * 147 (une page aussi profonde plante déjà sans formule, vers 180 : registre).
+ * Le poids qu'une formule peut avoir, à `depth` éléments du haut du document : 130 en haut d'une
+ * page (une équation y est à 20 ; six fractions imbriquées pèsent 103), moins dans une liste
+ * imbriquée, rien au-delà de 150 (une page aussi profonde plante déjà sans formule, vers 180).
  */
-export function depthAllowance(depth: number): number {
-  return Math.max(0, Math.floor((DEPTH_BUDGET - Math.max(0, depth)) / ELEMENT_COST));
+export function weightAllowance(depth: number): number {
+  return Math.max(0, DEPTH_BUDGET - Math.max(0, depth));
 }
 
 /** Une définition de la formule, refusée pendant l'analyse. */
@@ -132,26 +169,36 @@ const renderToDomTree = (
 ).__renderToDomTree;
 
 /**
- * La profondeur d'éléments et le nombre d'éléments du HTML de KaTeX, tels que l'analyseur de la page
- * les construira : KaTeX échappe `<` et `>` dans le texte et les attributs, et ferme tout élément,
- * sauf ceux qu'il écrit `<… />` (les chemins d'un SVG).
+ * La profondeur d'éléments, le poids (la profondeur pondérée la plus lourde) et le nombre d'éléments
+ * du HTML de KaTeX, tels que l'analyseur de la page les construira : KaTeX échappe `<` et `>` dans
+ * le texte et les attributs, et ferme tout élément, sauf ceux qu'il écrit `<… />` (les chemins d'un
+ * SVG).
  */
-function shape(html: string): { depth: number; nodes: number } {
+function shape(html: string): { depth: number; weight: number; nodes: number } {
   let depth = 0;
   let deepest = 0;
+  let heaviest = 0;
   let nodes = 0;
+  const above: { weight: number; dear: boolean }[] = [{ weight: 0, dear: false }];
   for (let at = html.indexOf("<"); at !== -1; at = html.indexOf("<", at + 1)) {
     if (html.charCodeAt(at + 1) === 47 /* "/" */) {
       depth -= 1;
+      above.pop();
       continue;
     }
     nodes += 1;
     depth += 1;
     if (depth > deepest) deepest = depth;
     const end = html.indexOf(">", at);
+    const parent = above[above.length - 1]!;
+    const cost = parent.dear ? "dear" : costOf(html.slice(at, end + 1));
+    const dear = cost === "dear";
+    const weight = parent.weight + (cost === "cheap" ? CHEAP_COST : DEAR_COST);
+    if (weight > heaviest) heaviest = weight;
     if (html.charCodeAt(end - 1) === 47) depth -= 1;
+    else above.push({ weight, dear });
   }
-  return { depth: deepest, nodes };
+  return { depth: deepest, weight: Math.round(heaviest * 10) / 10, nodes };
 }
 
 function compute(latex: string, display: boolean): TexOutcome {
@@ -175,9 +222,9 @@ function compute(latex: string, display: boolean): TexOutcome {
     if (error instanceof katex.ParseError) return { kind: "invalid", message: error.rawMessage ?? error.message };
     return { kind: "invalid", message: String(error) };
   }
-  const { depth, nodes } = shape(html);
+  const { depth, weight, nodes } = shape(html);
   if (nodes > MAX_TEX_NODES) return { kind: "refused", why: "size" };
-  return { kind: "formula", html, depth, nodes };
+  return { kind: "formula", html, depth, weight, nodes };
 }
 
 /** Le cache : par formule et par mode, borné en entrées et en taille de HTML. */

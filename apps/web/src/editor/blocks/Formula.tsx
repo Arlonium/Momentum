@@ -7,7 +7,7 @@
 // page (relecture de C2).
 //
 // Avant d'attacher le HTML de KaTeX, la profondeur de la page autour de la formule est mesurée, et
-// la profondeur d'éléments de la formule comparée à ce qu'elle laisse (`depthAllowance`, R525) :
+// le poids de la formule comparé à ce qu'elle laisse (`weightAllowance`, R525, R551) :
 // trop profonde pour sa place, la formule se montre en texte, avec un message, et l'onglet ne plante
 // pas. La profondeur se relit à chaque montage : un bloc déplacé ou imbriqué est recréé (R223).
 //
@@ -15,7 +15,7 @@
 // l'empêche (`refusal`).
 import { useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
-import { depthAllowance, isTypeset, refusal, TOO_NESTED, typeset, type TexOutcome } from "./tex";
+import { isTypeset, refusal, TOO_NESTED, typeset, weightAllowance, type TexOutcome } from "./tex";
 
 /**
  * Éléments attachés par image, au plus : au-delà, la suite attend l'image suivante. Une formule
@@ -234,7 +234,7 @@ export function Formula({ latex, display, eager = false }: Props) {
     );
   }
   if (current.kind === "empty") return <span ref={ref} className="mm-tex-empty" />;
-  if (current.kind === "formula" && current.depth <= depthAllowance(pageDepth)) {
+  if (current.kind === "formula" && current.weight <= weightAllowance(pageDepth)) {
     // KaTeX à `trust: false` échappe ce qu'il reçoit : son HTML n'a ni lien, ni image, ni attribut
     // venu de la formule.
     return <span ref={ref} className="mm-tex" dangerouslySetInnerHTML={{ __html: current.html }} />;
