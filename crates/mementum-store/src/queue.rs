@@ -61,7 +61,9 @@ pub(crate) enum Lane {
     Account(Uuid),
     /// Le dépôt des fichiers : les écritures faites sous son verrou, commun à toute l'instance
     /// (l'attache d'un envoi, le ménage ; Ruling R522). Sous ce verrou, elles passent une à une :
-    /// la voie n'a jamais d'arriéré, et le verrou n'attend jamais la rafale d'un compte.
+    /// la voie n'a jamais d'arriéré, et le verrou n'attend jamais la rafale d'un compte. Elle
+    /// passe en priorité, sans jamais prendre deux tours de suite quand d'autres attendent : le
+    /// verrou du dépôt n'est tenu que le temps de l'écriture en cours, pas d'un tour de la file.
     Files,
     /// Les écritures dont personne n'est nommé : inscription, ménage, commandes, tests.
     Common,
@@ -280,6 +282,8 @@ struct Queue {
     next: u64,
     /// La tâche qui a pris le tour, si elle est connue (la garde de réentrance).
     holder: Option<tokio::task::Id>,
+    /// Le dernier tour donné l'a été à la voie du dépôt : le suivant n'y va pas en priorité.
+    files_served: bool,
 }
 
 struct Waiter {
@@ -307,12 +311,13 @@ impl Queue {
         Err((id, woken))
     }
 
-    /// Le tour rendu : il va à la voie en tête de la ronde, à sa plus ancienne écriture, et la
-    /// voie repasse en queue de la ronde s'il lui en reste.
+    /// Le tour rendu : il va à la voie du dépôt si elle attend et n'a pas eu le tour d'avant
+    /// (Ruling R522), sinon à la voie en tête de la ronde ; dans la voie, à sa plus ancienne
+    /// écriture, et la voie repasse en queue de la ronde s'il lui en reste.
     fn release(&mut self) {
         self.taken = false;
         self.holder = None;
-        while let Some(lane) = self.turns.pop_front() {
+        while let Some(lane) = self.next_lane() {
             let Some(list) = self.waiting.get_mut(&lane) else {
                 continue;
             };
@@ -330,9 +335,21 @@ impl Queue {
             // réveil ne peut pas se perdre ; s'il se perdait, le tour irait au suivant.
             if waiter.wake.send(()).is_ok() {
                 self.taken = true;
+                self.files_served = lane == Lane::Files;
                 return;
             }
         }
+    }
+
+    /// La voie à qui revient le tour : celle du dépôt d'abord, si elle attend et n'a pas eu le
+    /// tour d'avant ; sinon la tête de la ronde.
+    fn next_lane(&mut self) -> Option<Lane> {
+        if !self.files_served
+            && let Some(at) = self.turns.iter().position(|lane| *lane == Lane::Files)
+        {
+            return self.turns.remove(at);
+        }
+        self.turns.pop_front()
     }
 
     /// Retire de la file l'écriture `id` de la voie `lane`, si elle y est encore.

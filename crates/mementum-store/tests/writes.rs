@@ -321,3 +321,77 @@ async fn closing_a_session_never_fills_the_common_lane() {
         "sorties écrites avant l'inscription : {at} (sur {K})"
     );
 }
+
+/// La voie du dépôt passe en priorité (Ruling R522) : l'envoi d'un fichier tient le verrou du
+/// dépôt, commun à l'instance, jusqu'à son attache. Quatre-vingts voies d'acteur ont chacune une
+/// frappe en file quand une attache arrive : elle passe la première au tour suivant, au lieu
+/// d'attendre une écriture de chaque voie (tous les envois de l'instance avec elle) ; et la voie
+/// du dépôt ne prend jamais deux tours de suite quand d'autres attendent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_file_store_lane_goes_first_but_never_twice_in_a_row() {
+    const LANES: usize = 80;
+    let f = fresh().await;
+    let tom = f.store.create_user(new_user("tom")).await.unwrap().id;
+    let target = f
+        .store
+        .create_node(page(&f.space, None, None, "Fichiers"))
+        .await
+        .unwrap()
+        .id;
+    let mut pages = Vec::new();
+    for i in 0..LANES {
+        let node = page(&f.space, None, None, &format!("P{i}"));
+        pages.push(f.store.create_node(node).await.unwrap().id);
+    }
+    exec_sql(
+        &f.db,
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_keystroke AFTER INSERT ON doc_updates \
+         BEGIN INSERT INTO witness (what) VALUES ('frappe'); END; \
+         CREATE TRIGGER witness_attachment AFTER INSERT ON attachments \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.name); END;",
+    )
+    .await;
+    let attach = |name: &'static str, byte: u8| {
+        let store = f.store.clone();
+        tokio::spawn(writes_by(Some(tom), async move {
+            let new = mementum_store::NewAttachment {
+                id: Uuid::now_v7(),
+                node_id: target,
+                hash: [byte; 32],
+                size: 1,
+                mime: "text/plain",
+                name,
+                created_by: tom,
+            };
+            store.attach_file(new, 1).await
+        }))
+    };
+    let held = f.store.hold_writes().await;
+    let mut typing = Vec::new();
+    for (i, page) in pages.iter().copied().enumerate() {
+        let store = f.store.clone();
+        typing.push(tokio::spawn(async move {
+            store.append_updates(page, &[b"x"], None).await
+        }));
+        queued(&f.store, i + 1).await;
+    }
+    // Deux attaches en file (un cas qui ne se produit pas sous le verrou du dépôt, qui n'en laisse
+    // passer qu'une à la fois) : la première passe en tête, la seconde après une autre voie.
+    let first = attach("première", 1);
+    queued(&f.store, LANES + 1).await;
+    let second = attach("seconde", 2);
+    queued(&f.store, LANES + 2).await;
+    drop(held);
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    for write in typing {
+        write.await.unwrap().unwrap();
+    }
+    let order: Vec<String> = texts(&f.db, "SELECT what FROM witness ORDER BY n")
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(order[..3], ["première", "frappe", "seconde"], "{order:?}");
+}
