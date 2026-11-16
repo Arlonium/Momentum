@@ -265,6 +265,8 @@ Un relecteur neuf a re-relu le tour 2 dans un atelier à part. **La piste S n'es
 | Mineurs : deux règles sans test | **faits** : `page_message_cap_comes_before_the_account_part` (`9ad0c38`), `rows_of_a_table_cost_their_square` (R386) | — |
 | R387 : la sonde du vrai Yjs | **pas gardée en test**, dit pourquoi au registre (Node et paquets npm absents du job `rust` ; une proposition pour le job `web`) | — |
 
+**Vérifications du tour** (poste neuf, partagé avec d'autres agents) : `cargo fmt --all -- --check` et `cargo clippy --workspace --all-targets -- -D warnings` propres ; `cargo test --workspace --no-fail-fast` : 871 verts, 15 ignorés (des mesures) ; `corepack pnpm -C apps/web typecheck` propre. Budgets de la synchro en release, sans recul : frappe vue par un autre à 1,88 ms au p95 (sans version), 36,3 ms quand elle coupe une version (budget 150) ; chargements d'une page de 10 000 blocs à 66 à 73 ms au p95 ; récriture complète de 10 000 blocs dans l'acteur, 0,74 s ; restauration, 0,82 à 0,88 s.
+
 **À éprouver en premier par la re-relecture** : `requests_cut_by_the_client_keep_the_lock_until_written` garde moins depuis R383 (R430 : sous sa mutation, rouge quatre fois sur cinq, contre cinq sur cinq sur `main`) ; la file des calculs de MMD, sans part par compte (R383) ; le poids de 35 µs d'une cellule vide, pris sur la mesure de la re-relecture (l'ancien poste), pas sur ce poste où une cellule coûte moins.
 
 ## Ce que la documentation doit dire (pour la Task 14)
