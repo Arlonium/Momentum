@@ -2963,12 +2963,15 @@ button.mm-reaction:hover {
 }
 
 /* Une icône venue du document : du texte, isolé, coupé s'il est long (la coupe est faite avant,
-   `Callout.tsx` ; ceci n'est qu'un second garde-fou). */
+   `Callout.tsx` ; ceci n'est qu'un second garde-fou). Le plus souvent un emoji : ses polices sont
+   nommées après celles du texte, sans quoi Chromium les cherche dans celles du système à chaque
+   ouverture d'une page (R629). */
 .mm-callout-glyph {
   display: inline-block;
   max-width: 4em;
   overflow: hidden;
   white-space: nowrap;
+  font-family: var(--mm-font), "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
   font-size: 17px;
   line-height: 22px;
   color: var(--mm-text);

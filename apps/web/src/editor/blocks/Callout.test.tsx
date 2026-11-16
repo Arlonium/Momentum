@@ -109,6 +109,16 @@ test("the_backgrounds_of_the_contrast_test_are_those_of_the_theme", () => {
   }
 });
 
+test("the_icon_names_the_emoji_fonts_after_those_of_the_text", () => {
+  // Une icône est le plus souvent un emoji : nommer les polices d'emoji évite à Chromium de les
+  // chercher dans celles du système à chaque ouverture (R629) ; après celles du texte, pour qu'une
+  // lettre garde la police de l'application.
+  const rule = themeCss.match(/\.mm-callout-glyph\s*\{([^}]*)\}/)?.[1] ?? "";
+  expect(rule).toMatch(
+    /font-family:\s*var\(--mm-font\),\s*"Apple Color Emoji",\s*"Segoe UI Emoji",\s*"Noto Color Emoji";/,
+  );
+});
+
 test("an_icon_from_elsewhere_is_shown_as_text", async () => {
   const tag = '<img src="x" onerror="alert(1)">';
   const long = "Une icône bien trop longue, écrite par MMD.";
