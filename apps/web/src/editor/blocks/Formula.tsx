@@ -70,8 +70,10 @@ function drain(): void {
       queue.shift();
       continue;
     }
-    // Au moins une par image, puis tant que le temps et les éléments de l'image tiennent.
-    if (any && now() - start >= FRAME_BUDGET_MS) break;
+    // Au moins une par image, puis tant que le temps et les éléments de l'image tiennent. Une image
+    // pleine ne calcule pas la suivante : son calcul s'ajouterait à la mise en page de ce qu'elle a
+    // attaché, qui vient après elle (R582).
+    if (any && (now() - start >= FRAME_BUDGET_MS || attached >= FRAME_NODES)) break;
     const { nodes, computed } = job.measure();
     // Calculée à l'instant, au-delà du temps de l'image : sa mise en page attend l'image suivante,
     // pour ne pas s'ajouter au calcul.

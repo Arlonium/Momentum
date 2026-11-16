@@ -21,7 +21,7 @@ import {
 import { until } from "../../test/hooks";
 import { FRAME_NODES, resetQueueForTests, setClockForTests } from "./Formula";
 import { PAUSE_ABOVE_CHARS } from "./LatexField";
-import { MAX_LATEX_CHARS, typeset } from "./tex";
+import { isTypeset, MAX_LATEX_CHARS, typeset } from "./tex";
 
 const MODIFY = 'button[aria-label="Modifier l\'équation"]';
 const WINDOW = "Formule de l'équation";
@@ -342,6 +342,28 @@ test("formulas_are_attached_a_few_thousand_elements_per_frame", async () => {
   await nextFrame(frames, "la troisième image");
   expect(attached()).toEqual([true, true, true, true, true]);
   expect(frames).toHaveLength(0);
+});
+
+test("a_full_frame_computes_nothing_more", async () => {
+  // Une image qui a attaché ses éléments ne calcule pas la formule suivante : son calcul s'ajoutait
+  // à la mise en page de la précédente, après l'image (R582 ; en défilant, sur un processeur lent,
+  // l'image la plus longue en était la somme).
+  setClockForTests(() => 0);
+  const big = "x".repeat(FRAME_NODES + 100);
+  typeset(big, true);
+  const next = "\\xi_{582} + \\omega";
+  const frames = stubFrames();
+  const m = await mountEditor({
+    blocks: [
+      { id: "big", type: "equation", props: { latex: big } },
+      { id: "next", type: "equation", props: { latex: next } },
+    ],
+  });
+  await nextFrame(frames, "l'image de la grande formule");
+  expect(blockOf(m, "big").querySelector(".katex")).not.toBeNull();
+  expect(isTypeset(next, true), "la formule suivante calculée dans une image pleine").toBe(false);
+  await nextFrame(frames, "l'image suivante");
+  expect(blockOf(m, "next").querySelector(".katex")).not.toBeNull();
 });
 
 test("a_formula_computed_past_the_time_of_a_frame_is_attached_at_the_next_one", async () => {
