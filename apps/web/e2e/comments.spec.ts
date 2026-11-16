@@ -343,10 +343,14 @@ test("the_panel_closes_with_escape_and_gives_the_focus_back", async ({ browser }
   // Au clavier, jusqu'au commentaire de la page, envoyé par Ctrl+Entrée.
   await owner.keyboard.press("Tab");
   await owner.keyboard.press("Tab");
-  await expect(panel.getByRole("textbox", { name: "Commenter la page" })).toBeFocused();
+  const field = panel.getByRole("textbox", { name: "Commenter la page" });
+  await expect(field).toBeFocused();
   await owner.keyboard.type("Écrit au clavier");
   await owner.keyboard.press("Control+Enter");
   await expect(threadOf(panel, "Écrit au clavier")).toBeVisible();
+  // Le fil se montre un rendu ou deux avant que le champ soit vidé ; tant qu'il porte le texte,
+  // Échap sort du champ sans fermer le panneau (il ne détruit jamais un texte tapé, R588).
+  await expect(field).toHaveValue("");
   await owner.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);
   await expect(button).toBeFocused();
