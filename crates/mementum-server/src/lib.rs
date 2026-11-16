@@ -314,11 +314,12 @@ pub(crate) fn now_ms() -> i64 {
 /// Mène `work` au bout dans sa propre tâche, même si la requête est
 /// abandonnée en route (client parti) : pour une suite d'écritures qui ne doit
 /// pas s'arrêter au milieu, ou une écriture de droits suivie de la fermeture
-/// des connexions qui les avaient lus.
+/// des connexions qui les avaient lus. Ses écritures restent dans la voie du
+/// compte de la requête, dans la file d'écriture du store (Ruling R512).
 pub(crate) async fn to_completion<T: Send + 'static>(
     work: impl Future<Output = Result<T, ApiError>> + Send + 'static,
 ) -> Result<T, ApiError> {
-    tokio::spawn(work)
+    tokio::spawn(mementum_store::writes_by(mementum_store::writer(), work))
         .await
         .map_err(|e| ApiError::internal(&e))?
 }
@@ -609,6 +610,8 @@ fn router(state: AppState) -> Router {
             )
         })
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Les écritures de chaque requête, dans la voie de son compte (Ruling R512).
+        .layer(middleware::from_fn(auth::writes_of_the_request))
         // Avant toute route, fallbacks compris (Rulings R31 et R51).
         .layer(middleware::from_fn_with_state(state.clone(), guard::check))
         // Par-dessus tout, refus de la couche précédente compris.
@@ -668,5 +671,18 @@ mod tests {
         for part in ["renommage", "liens physiques", "rien n'a été écrasé"] {
             assert!(warning.contains(part), "« {part} » absent de : {warning}");
         }
+    }
+
+    /// Ce que `to_completion` mène dans sa propre tâche garde le compte auquel la requête
+    /// attribue ses écritures (Ruling R512) : une tâche lancée n'hérite pas de la portée.
+    #[tokio::test]
+    async fn work_carried_to_completion_keeps_the_writer_of_the_request() {
+        let tom = uuid::Uuid::now_v7();
+        let seen = mementum_store::writes_by(Some(tom), async {
+            to_completion(async { Ok(mementum_store::writer()) }).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen, Some(tom));
     }
 }

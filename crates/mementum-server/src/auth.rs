@@ -12,7 +12,9 @@
 //! - **Session** : le cookie [`SESSION_COOKIE`] (`HttpOnly`, `SameSite=Lax`,
 //!   `Path=/`, 30 jours, `Secure` quand l'adresse publique est en `https`)
 //!   porte le jeton. [`AuthUser`] en tire le compte, sinon `401
-//!   unauthenticated`.
+//!   unauthenticated`, et lui attribue les écritures de la requête : elles
+//!   attendent leur tour dans la voie de ce compte, dans la file d'écriture du
+//!   store ([`writes_of_the_request`], Ruling R512).
 //! - **Frein des connexions** ([`LoginThrottle`]) : après
 //!   [`LOGIN_MAX_FAILURES`] échecs pour une même adresse en
 //!   [`LOGIN_WINDOW_MS`], tout est refusé jusqu'à la fin de la fenêtre. La
@@ -29,9 +31,11 @@ use std::sync::{Mutex, PoisonError};
 use anyhow::Context;
 use argon2::Argon2;
 use argon2::password_hash::{self, PasswordHasher, PasswordVerifier};
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, Request};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cookie::time::Duration;
@@ -307,6 +311,10 @@ impl FromRequestParts<AppState> for AuthUser {
             user.id,
             "en-tête X-Mementum-Account",
         )?;
+        // Le compte vérifié : les écritures de la requête attendent dans sa voie (Ruling R512).
+        // Un refus d'avant n'a rien écrit, pas même un tour de la file (seule la session qui
+        // glisse a pu s'écrire, dans `session_user`, R540).
+        mementum_store::attribute_writes_to(user.id);
         Ok(user)
     }
 }
@@ -344,6 +352,14 @@ pub(crate) fn check_named_account<'a>(
     } else {
         Err(ApiError::account_changed())
     }
+}
+
+/// Couche de toutes les routes : les écritures que la requête fait dans le store attendent leur
+/// tour dans la voie du compte de sa session, une fois [`AuthUser`] lu (Ruling R512) ; avant, ou
+/// sans session, dans la voie commune. Le compte n'est nommé que par le serveur, d'après la
+/// session : une requête ne choisit pas sa voie.
+pub(crate) async fn writes_of_the_request(request: Request, next: Next) -> Response {
+    mementum_store::writes_by(None, next.run(request)).await
 }
 
 /// Le compte de la session, comme [`AuthUser`], avec le hachage de la session lue : pour une
