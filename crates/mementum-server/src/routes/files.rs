@@ -53,6 +53,7 @@
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
@@ -110,13 +111,29 @@ pub(crate) async fn upload(
     mut body: Body,
 ) -> Result<Response, ApiError> {
     let SessionUser { user, session } = caller;
-    let id = page_id(path)?;
-    // Premier contrôle : les refus, avant de rien lire.
-    state.node_access(&user, id, Action::Edit).await?;
-    let Query(query) = query.map_err(|_| ApiError::invalid_file_name())?;
-    let name = files::display_name(query.name.as_deref().unwrap_or(""));
     let max = state.max_file_bytes;
-    if declared_length(&headers).is_some_and(|length| length > max) {
+    let declared = declared_length(&headers);
+    // Premier contrôle : les refus, avant de rien garder.
+    let first = async {
+        let id = page_id(path)?;
+        state.node_access(&user, id, Action::Edit).await?;
+        let Query(query) = query.map_err(|_| ApiError::invalid_file_name())?;
+        Ok::<_, ApiError>((id, files::display_name(query.name.as_deref().unwrap_or(""))))
+    };
+    let (id, name) = match first.await {
+        Ok(checked) => checked,
+        Err(refusal) => {
+            // Ruling R505 : un refus fait à un compte (`403`, `404`, `409`, `422`) n'arrive à
+            // un client qui pousse son corps que si ce corps est lu ; sinon le serveur ferme sur
+            // des octets non lus, le système coupe, et la réponse est perdue.
+            if declared.is_none_or(|length| length <= max) && !expects_continue(&headers) {
+                discard(&mut body, max, state.upload_idle).await;
+            }
+            return Err(refusal);
+        }
+    };
+    // Annoncé plus gros que la borne : refusé sans rien lire (R247).
+    if declared.is_some_and(|length| length > max) {
         return Err(ApiError::file_too_large(max));
     }
 
@@ -166,12 +183,13 @@ pub(crate) async fn upload(
             .map_err(|e| ApiError::internal(&e))?;
     }
 
+    // Vidé sur le disque avant le second contrôle, et donc avant de prendre le verrou du dépôt,
+    // que les autres envois attendent (R286) : entre le contrôle et l'écriture, il ne reste que
+    // l'attente des verrous du dépôt et de SQLite (Ruling R507).
+    upload.sync().await.map_err(|e| ApiError::internal(&e))?;
     // Second contrôle, le corps reçu (Rulings R89, R390) : c'est lui qui autorise l'écriture.
     state.session_still_live(session).await?;
     state.node_access(&user, id, Action::Edit).await?;
-    // Vidé sur le disque avant de prendre le verrou du dépôt, que les autres envois attendent
-    // (R286).
-    upload.sync().await.map_err(|e| ApiError::internal(&e))?;
     let (store, files) = (state.store.clone(), state.files.clone());
     let attachment = to_completion(async move {
         let guard = files.lock().await;
@@ -228,9 +246,11 @@ pub(crate) async fn download(
         .await?
         .ok_or_else(ApiError::page_not_found)?;
     let etag = format!("\"{}\"", files::hex(&attachment.hash));
+    // Toutes les lignes de l'en-tête : une liste peut être coupée sur plusieurs (Ruling R508).
     if headers
-        .get(header::IF_NONE_MATCH)
-        .is_some_and(|value| none_match(value, &etag))
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .any(|value| none_match(value, &etag))
     {
         return Ok(served(
             StatusCode::NOT_MODIFIED,
@@ -294,6 +314,30 @@ pub(crate) async fn download(
                 ApiError::range_not_satisfiable(),
             )
                 .into_response())
+        }
+    }
+}
+
+/// Le client attend une réponse intermédiaire avant d'envoyer son corps (`Expect:
+/// 100-continue`) : un refus lui arrive sans qu'on lise rien, et lire le corps ferait d'abord
+/// partir cette réponse intermédiaire, qui l'inviterait à l'envoyer.
+fn expects_continue(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::EXPECT)
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"100-continue"))
+}
+
+/// Lit et jette le corps d'un envoi refusé (Ruling R505), pour que la réponse arrive : au plus
+/// `max` octets, et jamais plus de `idle` sans en recevoir. Au-delà, ou sur une erreur, la
+/// lecture s'arrête, et le refus part quand même (il peut alors être perdu, comme avant).
+async fn discard(body: &mut Body, max: u64, idle: Duration) {
+    let mut read = 0u64;
+    while let Ok(Some(Ok(frame))) = tokio::time::timeout(idle, body.frame()).await {
+        if let Ok(data) = frame.into_data() {
+            read += data.len() as u64;
+            if read > max {
+                return;
+            }
         }
     }
 }
@@ -407,9 +451,15 @@ enum Wanted {
 /// `bytes=a-` ou `bytes=-n`, sans espace ; sa fin est ramenée à celle du fichier. Un fichier vide
 /// n'a aucun octet à donner : `Range` y est ignoré (RFC 9110, §14.2 : un serveur peut l'ignorer).
 fn wanted(headers: &HeaderMap, etag: &str, size: u64) -> Wanted {
-    let Some(range) = headers.get(header::RANGE) else {
+    let mut ranges = headers.get_all(header::RANGE).iter();
+    let Some(range) = ranges.next() else {
         return Wanted::Whole;
     };
+    // `Range` n'est pas une liste : sur deux lignes, c'est deux plages, et le fichier entier
+    // (Ruling R508).
+    if ranges.next().is_some() {
+        return Wanted::Whole;
+    }
     if size == 0 {
         return Wanted::Whole;
     }

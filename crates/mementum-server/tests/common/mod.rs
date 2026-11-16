@@ -1380,13 +1380,29 @@ impl RawUpload {
         name: &str,
         length: Option<u64>,
     ) -> RawUpload {
+        RawUpload::start_with(addr, by, page, name, length, &["Connection: close"]).await
+    }
+
+    /// Comme [`RawUpload::start`], avec ces lignes d'en-tête au lieu de `Connection: close`
+    /// (aucune : une connexion qui reste ouverte ; `Expect: 100-continue`…).
+    pub async fn start_with(
+        addr: std::net::SocketAddr,
+        by: &Browser<'_>,
+        page: Uuid,
+        name: &str,
+        length: Option<u64>,
+        extra: &[&str],
+    ) -> RawUpload {
         use tokio::io::AsyncWriteExt;
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let mut head = format!(
-            "POST {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+            "POST {} HTTP/1.1\r\nHost: localhost\r\n\
              Content-Type: application/octet-stream\r\n",
             upload_uri(page, name)
         );
+        for line in extra {
+            head.push_str(&format!("{line}\r\n"));
+        }
         if let Some(cookie) = by.cookie() {
             head.push_str(&format!("Cookie: {cookie}\r\n"));
         }
@@ -1403,6 +1419,18 @@ impl RawUpload {
         use tokio::io::AsyncWriteExt;
         self.stream.write_all(bytes).await.unwrap();
         self.stream.flush().await.unwrap();
+    }
+
+    /// Ce que le serveur a écrit jusqu'ici, sans attendre qu'il ferme : une lecture, [`WAIT`] au
+    /// plus (une réponse intermédiaire, `100 Continue`).
+    pub async fn interim(&mut self) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = [0u8; 1024];
+        let read = tokio::time::timeout(WAIT, self.stream.read(&mut buffer))
+            .await
+            .expect("rien reçu du serveur")
+            .expect("connexion coupée");
+        buffer[..read].to_vec()
     }
 
     /// Tout ce que le serveur écrit jusqu'à fermer la connexion ([`WAIT`] au plus). Une

@@ -265,6 +265,18 @@ async fn revalidation_is_checked_like_a_read() {
     let stale = read(&tom.browser, url, &[(header::IF_NONE_MATCH, "\"autre\"")]).await;
     stale.assert_status(StatusCode::OK);
     assert_eq!(stale.body.as_ref(), PNG);
+    // `If-None-Match` coupé sur deux lignes se lit en entier (Ruling R508, constat M3 du tour 1) :
+    // l'`ETag` sur la seconde rend `304`.
+    let split = read(
+        &tom.browser,
+        url,
+        &[
+            (header::IF_NONE_MATCH, "\"autre\""),
+            (header::IF_NONE_MATCH, &etag(PNG)),
+        ],
+    )
+    .await;
+    split.assert_status(StatusCode::NOT_MODIFIED);
 
     // L'accès retiré, la revalidation ne dit plus rien du fichier.
     let removed = team
@@ -522,6 +534,16 @@ async fn range_requests_serve_a_part() {
             range,
         );
     }
+    // Deux lignes `Range` : comme deux plages, le fichier entier (Ruling R508).
+    let two = read(
+        &alice.browser,
+        url,
+        &[(header::RANGE, "bytes=0-0"), (header::RANGE, "bytes=5-5")],
+    )
+    .await;
+    two.assert_status(StatusCode::OK);
+    assert_eq!(two.body.as_ref(), bytes);
+    assert!(two.headers.get("content-range").is_none());
 }
 
 /// `If-None-Match` est jugé avant `Range` (RFC 9110, §13.2.2), comme Chromium les envoie
@@ -746,12 +768,28 @@ async fn file_too_large_is_refused_before_and_while_reading() {
     exact.assert_status(StatusCode::CREATED);
     assert_eq!(exact.json()["size"], max);
     assert_eq!(attachments(&t).await, 1);
+    // La borne juste, annoncée par `Content-Length` (constat M2 du tour 1).
+    let announced_exact = alice
+        .browser
+        .send(
+            Request::post(upload_uri(page, "juste-annoncé.bin"))
+                .header(header::CONTENT_LENGTH, max.to_string())
+                .body(Body::from(vec![2u8; max]))
+                .unwrap(),
+        )
+        .await;
+    announced_exact.assert_status(StatusCode::CREATED);
+    assert_eq!(announced_exact.json()["size"], max);
+    assert_eq!(attachments(&t).await, 2);
 }
 
 /// Un envoi qui ne reçoit plus rien pendant `upload_idle` est abandonné : la connexion est
 /// fermée sans un octet de réponse, son temporaire part, rien n'est attaché, et le journal le
 /// dit. Le délai est d'une seconde : le test doit voir le temporaire de l'envoi avant qu'il parte
-/// (une borne qui peut le faire échouer à tort sur un poste très chargé, jamais passer).
+/// (une borne qui peut le faire échouer à tort sur un poste très chargé, jamais passer). Trois
+/// formes de la requête (Ruling R509, constat M4 du tour 1) : `Connection: close`, une connexion
+/// qui reste ouverte, et `Expect: 100-continue`, où seule la réponse intermédiaire sort ; toutes
+/// en HTTP/1.1, le seul protocole que le serveur parle (R391 n'a pas été éprouvé en HTTP/2).
 #[tokio::test]
 async fn stalled_upload_is_abandoned() {
     let t = TestApp::with_config(|cfg| {
@@ -761,25 +799,41 @@ async fn stalled_upload_is_abandoned() {
     .await;
     let logs = Logs::capture();
     let alice = t.account("Alice").await;
-    let page = Uuid::parse_str(&alice.create(json!({ "title": "P" })).await.id).unwrap();
     let addr = t.listen().await;
-    let mut raw = RawUpload::start(addr, &alice.browser, page, "lent.bin", Some(1000)).await;
-    raw.send(&[5u8; 100]).await;
-    // L'envoi a commencé : son temporaire porte ce qui a été reçu.
-    common::eventually("le temporaire de l'envoi", || temporaries(&t) == [100]).await;
-    let received = raw.closed().await;
-    assert!(
-        received.is_empty(),
-        "réponse reçue : {:?}",
-        String::from_utf8_lossy(&received)
-    );
-    common::eventually("files/tmp vide", || temporaries(&t).is_empty()).await;
-    assert_eq!(attachments(&t).await, 0);
-    let journal = logs.text();
-    assert!(
-        journal.contains("envoi abandonné") && journal.contains(&page.to_string()),
-        "{journal}"
-    );
+    let forms: [(&str, &[&str], &str); 3] = [
+        ("fermée après la réponse", &["Connection: close"], ""),
+        ("qui reste ouverte", &[], ""),
+        (
+            "Expect: 100-continue",
+            &["Expect: 100-continue"],
+            "HTTP/1.1 100 Continue\r\n\r\n",
+        ),
+    ];
+    for (what, extra, interim) in forms {
+        let page = Uuid::parse_str(&alice.create(json!({ "title": what })).await.id).unwrap();
+        let mut raw =
+            RawUpload::start_with(addr, &alice.browser, page, "lent.bin", Some(1000), extra).await;
+        if !interim.is_empty() {
+            let first = raw.interim().await;
+            assert_eq!(String::from_utf8_lossy(&first), interim, "{what}");
+        }
+        raw.send(&[5u8; 100]).await;
+        // L'envoi a commencé : son temporaire porte ce qui a été reçu.
+        common::eventually("le temporaire de l'envoi", || temporaries(&t) == [100]).await;
+        let received = raw.closed().await;
+        assert!(
+            received.is_empty(),
+            "{what} : réponse reçue : {:?}",
+            String::from_utf8_lossy(&received)
+        );
+        common::eventually("files/tmp vide", || temporaries(&t).is_empty()).await;
+        assert_eq!(attachments(&t).await, 0, "{what}");
+        let journal = logs.text();
+        assert!(
+            journal.contains("envoi abandonné") && journal.contains(&page.to_string()),
+            "{what} : {journal}"
+        );
+    }
 }
 
 /// Un envoi que le navigateur coupe au milieu ne laisse rien : ni temporaire ni attache.
@@ -1026,4 +1080,307 @@ async fn startup_counts_strangers_and_missing_contents_and_removes_none() {
     );
     assert!(content_path(&t, PNG).exists());
     assert!(!leftover.exists(), "files/tmp est vidé");
+}
+
+/// Le statut de la réponse HTTP que porte `received`, s'il y en a une entière : sa tête, et
+/// autant d'octets de corps que dit son `Content-Length`.
+fn status_line(received: &[u8]) -> Option<u16> {
+    let end = received.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = String::from_utf8_lossy(&received[..end]);
+    let length: usize = head
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+        .map_or(Some(0), |(_, value)| value.trim().parse().ok())?;
+    (received.len() >= end + 4 + length).then_some(())?;
+    head.split(' ').nth(1)?.parse().ok()
+}
+
+/// Envoie à `addr` la tête de `POST <path>` (avec `cookie` s'il est donné, `Content-Length:
+/// length` et les lignes `extra`, connexion gardée ouverte), pousse les `length` octets du corps
+/// sans attendre de réponse intermédiaire, puis lit la réponse : comme un client qui envoie toute
+/// sa requête avant de lire, la forme la plus simple d'un client HTTP/1. Le corps s'arrête plus
+/// tôt si le serveur refuse de le recevoir (connexion coupée), ou au bout de [`common::WAIT`].
+/// Rend ce qui a été lu jusqu'à une réponse entière, la fermeture de la connexion (une coupure par
+/// `RST` compte comme une fermeture), ou [`common::WAIT`].
+async fn push_then_read(
+    addr: std::net::SocketAddr,
+    cookie: Option<String>,
+    path: &str,
+    length: usize,
+    extra: &str,
+) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let cookie = cookie
+        .map(|c| format!("Cookie: {c}\r\n"))
+        .unwrap_or_default();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\n{cookie}Content-Length: {length}\r\n{extra}\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let pushing = async {
+        let block = vec![3u8; 64 * 1024];
+        let mut sent = 0;
+        while sent < length {
+            let size = block.len().min(length - sent);
+            if stream.write_all(&block[..size]).await.is_err() {
+                return;
+            }
+            sent += size;
+        }
+    };
+    let _ = tokio::time::timeout(common::WAIT, pushing).await;
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let deadline = tokio::time::Instant::now() + common::WAIT;
+    while status_line(&received).is_none() {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buffer)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => received.extend_from_slice(&buffer[..n]),
+        }
+    }
+    received
+}
+
+/// Constat I1 du tour 1 (Ruling R505) : un refus rendu avant de lire le corps arrive à un client
+/// qui envoie un corps de plusieurs Mio sans attendre de réponse intermédiaire. Sans le lire, le
+/// serveur fermait en laissant des octets non lus, le système coupait par `RST`, et la réponse
+/// était perdue : « Failed to fetch » dans Chromium (sonde de la relecture), rien du tout pour ce
+/// client, qui envoie toute sa requête avant de lire, de façon reproductible. Pour un compte,
+/// sous la borne, le corps est lu et jeté avant de répondre : `403`, `404`, `409`, `422`. Sans
+/// compte (`401`), ou annoncé plus gros que la borne (`413`), il ne l'est pas : la réponse part
+/// sans attendre le corps, dont le serveur ne lit rien (sinon ce test attendrait `upload_idle`,
+/// 30 s, au-delà de sa borne). De même pour `Expect: 100-continue` : la réponse finale vient
+/// sans la réponse intermédiaire, et sans le corps.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn early_refusals_reach_a_client_that_keeps_sending() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let addr = t.listen().await;
+    let grants = [
+        user(&team.olga, Level::Full),
+        user(&team.tom, Level::Read),
+        user(&team.mona, Level::Edit),
+    ];
+    let page = team.page(None, "Refus", &grants).await;
+    let trashed = team.page(None, "Jetée", &grants).await;
+    team.trash(trashed).await;
+    let files = |page: Uuid| format!("/api/v1/pages/{page}/files");
+    let eight_mib = 8 << 20;
+    let pushed = [
+        ("sous le niveau", &team.tom, upload_uri(page, "x.bin"), 403),
+        (
+            "page qu'on ne voit pas",
+            &team.zoe,
+            upload_uri(page, "x.bin"),
+            404,
+        ),
+        (
+            "page à la corbeille",
+            &team.mona,
+            upload_uri(trashed, "x.bin"),
+            409,
+        ),
+        (
+            "nom donné deux fois",
+            &team.mona,
+            format!("{}?name=a&name=b", files(page)),
+            422,
+        ),
+    ];
+    for (what, who, path, status) in pushed {
+        let received = push_then_read(addr, who.browser.cookie(), &path, eight_mib, "").await;
+        assert_eq!(
+            status_line(&received),
+            Some(status),
+            "{what} : reçu {:?}",
+            String::from_utf8_lossy(&received)
+        );
+    }
+    // Sans compte, ou annoncé plus gros que la borne (que l'envoi soit refusé pour sa taille ou
+    // pour un droit) : la réponse part sans rien lire du corps (aucun octet n'est envoyé ici).
+    let too_large = (100 << 20) + 1;
+    for (what, cookie, length, status) in [
+        ("sans session", None, eight_mib, 401u16),
+        (
+            "annoncé trop gros",
+            team.mona.browser.cookie(),
+            too_large,
+            413,
+        ),
+        (
+            "sous le niveau, annoncé trop gros",
+            team.tom.browser.cookie(),
+            too_large,
+            403,
+        ),
+    ] {
+        let received = announce_only(addr, cookie, &upload_uri(page, "x.bin"), length, "").await;
+        assert_eq!(
+            status_line(&received),
+            Some(status),
+            "{what} : reçu {:?}",
+            String::from_utf8_lossy(&received)
+        );
+    }
+    // `Expect: 100-continue` : le refus vient seul, sans réponse intermédiaire ni corps lu.
+    let received = announce_only(
+        addr,
+        team.tom.browser.cookie(),
+        &upload_uri(page, "x.bin"),
+        eight_mib,
+        "Expect: 100-continue\r\n",
+    )
+    .await;
+    let text = String::from_utf8_lossy(&received);
+    assert!(text.starts_with("HTTP/1.1 403"), "{text}");
+    assert!(!text.contains("100 Continue"), "{text}");
+    assert_eq!(attachments(&t).await, 0);
+}
+
+/// Envoie la tête de `POST <path>` avec `Content-Length: length`, **sans corps**, et rend ce que
+/// le serveur écrit jusqu'à fermer la connexion, [`common::WAIT`] au plus : une réponse qui
+/// attendrait le corps n'arrive pas dans ce délai (`upload_idle` vaut 30 s).
+async fn announce_only(
+    addr: std::net::SocketAddr,
+    cookie: Option<String>,
+    path: &str,
+    length: usize,
+    extra: &str,
+) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let cookie = cookie
+        .map(|c| format!("Cookie: {c}\r\n"))
+        .unwrap_or_default();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{cookie}\
+         Content-Length: {length}\r\n{extra}\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let deadline = tokio::time::Instant::now() + common::WAIT;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buffer)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(n)) => received.extend_from_slice(&buffer[..n]),
+        }
+    }
+    received
+}
+
+/// Un écouteur qui compte les connexions que le serveur a lâchées : quand un client coupe
+/// pendant une requête, le serveur lâche la connexion, et avec elle, dans le même geste, le futur
+/// de la route (hyper les tient ensemble).
+struct CountingListener {
+    inner: tokio::net::TcpListener,
+    dropped: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Une connexion de [`CountingListener`] : elle se compte quand le serveur la lâche.
+struct CountedIo {
+    inner: tokio::net::TcpStream,
+    dropped: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for CountedIo {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl tokio::io::AsyncRead for CountedIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for CountedIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+impl axum::serve::Listener for CountingListener {
+    type Io = CountedIo;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (CountedIo, std::net::SocketAddr) {
+        loop {
+            if let Ok((inner, addr)) = self.inner.accept().await {
+                let dropped = self.dropped.clone();
+                return (CountedIo { inner, dropped }, addr);
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.inner.local_addr()
+    }
+}
+
+/// Constat I2 du tour 1 (Ruling R506) : « poser puis attacher » va au bout même si le client
+/// coupe pendant l'attente (`to_completion`, R285). Le test tient le verrou d'écriture de SQLite ;
+/// le corps arrive, le temporaire quitte `files/tmp` (le contenu est posé, l'attache attend) ; le
+/// client coupe ; le test attend que le serveur ait lâché la connexion, donc le futur de la route ;
+/// puis il rend le verrou : l'attache s'écrit, et le contenu a son attache.
+#[tokio::test]
+async fn client_gone_while_the_attachment_waits_still_attaches() {
+    let t = open_app().await;
+    let alice = t.account("Alice").await;
+    let page = Uuid::parse_str(&alice.create(json!({ "title": "P" })).await.id).unwrap();
+    let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = CountingListener {
+        inner: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        dropped: dropped.clone(),
+    };
+    let addr = listener.inner.local_addr().unwrap();
+    let router = t.router.clone();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let bytes = b"le client coupe pendant que l'attache attend";
+    let length = Some(bytes.len() as u64);
+    let mut raw = RawUpload::start(addr, &alice.browser, page, "x.txt", length).await;
+    raw.send(&bytes[..1]).await;
+    common::eventually("le temporaire de l'envoi", || temporaries(&t) == [1]).await;
+    let mut lock = WriteLock::take(&t.db_path()).await;
+    raw.send(&bytes[1..]).await;
+    common::eventually("files/tmp vide", || temporaries(&t).is_empty()).await;
+    assert!(content_path(&t, bytes).exists(), "le contenu est posé");
+    // Le client part ; le serveur lâche la connexion, et le futur de la route avec elle.
+    drop(raw);
+    common::eventually("la connexion lâchée par le serveur", || {
+        dropped.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    lock.run("ROLLBACK").await;
+    drop(lock);
+    let sql = format!("SELECT COUNT(*) FROM attachments WHERE node_id = '{page}'");
+    let deadline = tokio::time::Instant::now() + common::WAIT;
+    while query_i64(&t.db_path(), &sql).await == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "l'attache n'est pas allée au bout : un contenu sans attache reste"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(content_path(&t, bytes).exists());
 }
