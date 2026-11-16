@@ -406,6 +406,22 @@ test("an_open_menu_that_gains_an_entry_stays_open", async () => {
   expect(menu()).toBeNull();
 });
 
+test("an_open_menu_whose_entries_would_move_closes_and_gives_the_focus_to_its_button", async () => {
+  // N1 : la page sort de la corbeille, menu ouvert, le focus sur « Historique » : le favori
+  // s'insérerait avant lui, et l'entrée sous le pointeur changerait. Le menu se ferme, et rend le
+  // focus à son bouton (R466 complété).
+  const favorite = { favorite: false, onFavorite: () => {} };
+  await renderWithFavorite("edit", favorite, { trashed: true });
+  await click(menuButton());
+  expect(entries()).toEqual(["Historique"]);
+  await until(host, () => document.activeElement?.textContent === "Historique", "le focus");
+  await renderWithFavorite("edit", favorite);
+  expect(menu()).toBeNull();
+  expect(document.activeElement).toBe(menuButton());
+  await click(menuButton());
+  expect(entries()).toEqual(["Ajouter aux favoris", "Historique"]);
+});
+
 test("a_reader_opening_the_menu_does_not_load_the_history", async () => {
   // Le menu d'un lecteur n'a que le favori : le code de la fenêtre « Historique » n'est pas
   // demandé à son ouverture (R135 : rien de plus à charger pour lui).

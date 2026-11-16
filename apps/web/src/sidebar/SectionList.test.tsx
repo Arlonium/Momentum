@@ -147,15 +147,22 @@ test("an_open_row_menu_that_loses_an_entry_closes_and_gives_the_focus_to_its_but
   expect(entries()).toEqual(["Retirer des favoris"]);
 });
 
-test("an_open_row_menu_that_gains_an_entry_stays_open", async () => {
-  // Le niveau monte pendant que le menu d'un lecteur est ouvert : il gagne ses déplacements et la
-  // corbeille, et reste ouvert ; il se ferme quand il en perd une.
+test("an_open_row_menu_never_moves_its_entries_under_the_pointer", async () => {
+  // N1 : le niveau monte pendant que le menu d'un lecteur est ouvert, le pointeur sur « Ajouter aux
+  // favoris ». Les déplacements s'inséreraient avant lui : « Déplacer vers le haut » prendrait sa
+  // place, et un clic au même endroit déplacerait la page. Le menu se ferme (R466 complété), et
+  // rend le focus à son bouton ; rouvert, il offre tout.
   const onFavorite = () => {};
   await show([page("a", { level: "read" })], { favorites: [], onFavorite });
   await click(moreOf("A")!);
-  expect(entries()).toEqual(["Ajouter aux favoris"]);
+  const under = 0;
+  expect(entries()[under]).toBe("Ajouter aux favoris");
+  (menu()!.querySelectorAll<HTMLElement>('[role="menuitem"]')[under]).focus();
   await show([page("a", { level: "edit" })], { favorites: [], onFavorite });
-  expect(entries()).toEqual([...MOVES, "Ajouter aux favoris", "Mettre à la corbeille"]);
-  await show([page("a", { level: "read" })], { favorites: [], onFavorite });
+  // Ce qui est sous le pointeur est toujours l'entrée qu'il visait, ou plus rien.
+  expect(entries()[under] ?? null).not.toBe("Déplacer vers le haut");
   expect(menu()).toBeNull();
+  expect(document.activeElement).toBe(moreOf("A"));
+  await click(moreOf("A")!);
+  expect(entries()).toEqual([...MOVES, "Ajouter aux favoris", "Mettre à la corbeille"]);
 });

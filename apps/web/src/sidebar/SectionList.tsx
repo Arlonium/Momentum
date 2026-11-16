@@ -343,14 +343,17 @@ export function SectionList({
   }
   // Une entrée partie, menu ouvert (le niveau de sa page est tombé) : le menu se ferme, plutôt que
   // de laisser le focus tomber sur `body` avec l'entrée qui l'avait.
-  // Une entrée qui arrive (le niveau monte) s'ajoute au menu ouvert, qui reste.
+  // Et une arrivée qui décalerait les entrées montrées sous le pointeur (le niveau monte : les
+  // déplacements s'insèrent avant le favori) le ferme aussi ; une arrivée après elles s'ajoute
+  // (R466).
   const entries = actions.map((action) => action.key ?? action.label);
+  const kept = (shown: string[]) => shown.every((key, index) => entries[index] === key);
   if (menu !== null && opened?.menu !== menu) setOpened({ menu, entries });
-  else if (menu !== null && opened !== null && opened.entries.some((key) => !entries.includes(key))) {
+  else if (menu !== null && opened !== null && !kept(opened.entries)) {
     setMenu(null);
     setOpened(null);
     setDropped(menu.anchor);
-  } else if (menu !== null && opened !== null && opened.entries.join(" ") !== entries.join(" ")) {
+  } else if (menu !== null && opened !== null && opened.entries.length !== entries.length) {
     setOpened({ menu, entries });
   }
 

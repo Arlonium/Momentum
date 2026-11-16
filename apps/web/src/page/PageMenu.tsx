@@ -126,15 +126,17 @@ export function PageMenu({
     });
   }
   /**
-   * Les entrées proposées, par leur clé : le menu ouvert se ferme quand l'une de celles qu'il
-   * montrait part ; une entrée qui arrive (le niveau monte, la page sort de la corbeille) s'ajoute.
+   * Les entrées proposées, par leur clé : le menu ouvert ne reste ouvert que si celles qu'il
+   * montrait gardent leur rang (une entrée qui arrive après elles s'ajoute : « Historique » donné à
+   * un lecteur promu) ; une entrée partie, ou une arrivée qui les décalerait sous le pointeur (le
+   * favori d'une page qui sort de la corbeille), le ferment (R417, R466).
    */
   const entries = actions.map((action) => action.key ?? action.label);
   const [opened, setOpened] = useState(entries);
-  if (anchor !== null && opened.some((key) => !entries.includes(key))) {
+  if (anchor !== null && !opened.every((key, index) => entries[index] === key)) {
     setAnchor(null);
     setDropped(true);
-  } else if (anchor !== null && opened.join(" ") !== entries.join(" ")) {
+  } else if (anchor !== null && opened.length !== entries.length) {
     setOpened(entries);
   }
   // L'entrée qui avait le focus est partie avec le menu : il revient à son bouton, ou à la page si
