@@ -3323,3 +3323,59 @@ button.mm-reaction:hover {
   color: var(--mm-accent);
   font-weight: 500;
 }
+
+/* Table des matières (Task C3) : les titres de la page, chacun à sa profondeur, en liens. Leur texte
+   vient du document : isolé, coupé sur sa ligne s'il est long. */
+
+.mm-toc {
+  width: 100%;
+  padding: 4px 0;
+  font-size: 14px;
+}
+
+.mm-toc-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-toc-entry {
+  margin: 0;
+}
+
+.mm-toc-level-2 {
+  padding-left: 18px;
+}
+
+.mm-toc-level-3 {
+  padding-left: 36px;
+}
+
+.mm-toc-level-4 {
+  padding-left: 54px;
+}
+
+.mm-toc-link {
+  display: block;
+  overflow: hidden;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--mm-text-secondary);
+  text-decoration: underline;
+  text-decoration-color: var(--mm-border);
+  text-underline-offset: 3px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  unicode-bidi: isolate;
+}
+
+.mm-toc-link:hover {
+  background: var(--mm-surface);
+  color: var(--mm-text);
+}
+
+.mm-toc-empty {
+  margin: 0;
+  padding: 3px 6px;
+  color: var(--mm-text-secondary);
+}

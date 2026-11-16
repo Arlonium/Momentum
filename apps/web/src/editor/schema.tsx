@@ -15,13 +15,13 @@ import { Bookmark } from "./blocks/Bookmark";
 import { Callout } from "./blocks/Callout";
 import { Equation } from "./blocks/Equation";
 import { MathInline } from "./blocks/InlineMath";
+import { Toc } from "./blocks/Toc";
 import { textProp } from "./blocks/props";
 import type { ReactNode } from "react";
 import {
   DatabaseIcon,
   PageIcon,
   SyncIcon,
-  TocIcon,
   WarningIcon,
 } from "../icons";
 
@@ -129,17 +129,6 @@ const SyncedBlock = createReactBlockSpec(
     render: ({ block }) => (
       <Frame icon={<SyncIcon />} muted>
         Bloc synchronisé {textProp(block.props, "ref")} (bientôt disponible)
-      </Frame>
-    ),
-  },
-);
-
-const Toc = createReactBlockSpec(
-  { type: "toc", propSchema: {}, content: "none" },
-  {
-    render: () => (
-      <Frame icon={<TocIcon />} muted>
-        Table des matières
       </Frame>
     ),
   },

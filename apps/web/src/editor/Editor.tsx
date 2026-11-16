@@ -57,6 +57,7 @@ import { blockOfSelection } from "../comments/dom";
 import { BlockWindowHost, isBlockWindowShortcut, openWindowAtCursor } from "./blocks/BlockWindowHost";
 import { useBlockWindowPage } from "./blocks/blockWindows";
 import { InlineMathHost, openInlineMathAtSelection } from "./blocks/InlineMath";
+import { focusBlockLinks } from "./blocks/Toc";
 import { isCommentShortcut } from "../comments/shortcut";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
@@ -243,9 +244,13 @@ export function EditorView({ editor, editable, onComment = null, pageId, ...attr
    */
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     // Ctrl+Alt+Entrée : régler la formule en ligne sélectionnée, ou le bloc riche où est le curseur
-    // (`BlockWindowHost`).
+    // (`BlockWindowHost`) ; sur une table des matières ou un lien de page, aller à son premier lien
+    // (`Toc.tsx`).
     if (isBlockWindowShortcut(event)) {
-      if (editor.isFocused() && (openInlineMathAtSelection(editor) || openWindowAtCursor(editor))) {
+      if (
+        editor.isFocused() &&
+        (openInlineMathAtSelection(editor) || openWindowAtCursor(editor) || focusBlockLinks(editor))
+      ) {
         event.preventDefault();
       }
       return;

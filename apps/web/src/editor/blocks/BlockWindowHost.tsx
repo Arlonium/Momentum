@@ -125,15 +125,14 @@ function placeOf(editor: MementumEditor, blockId: string): HTMLElement | null {
 /**
  * Donne le focus à l'éditeur. ProseMirror ne le prend pas pour un éditeur en lecture seule
  * (`view.focus()` ne focalise que s'il est modifiable) : on le donne alors à son élément, qui garde
- * son `tabindex`, plutôt que de le laisser tomber sur `body` (R470).
+ * son `tabindex`, plutôt que de le laisser tomber sur `body` (R470). La table des matières s'en sert
+ * aussi (`Toc.tsx`).
  */
-function focusEditor(editor: MementumEditor): void {
+export function focusEditor(editor: MementumEditor): void {
   editor.focus();
   const dom = editor.domElement;
   if (dom !== undefined && !dom.contains(document.activeElement)) dom.focus({ preventScroll: true });
 }
-
-
 
 /** La fenêtre ouverte de `editor`, s'il y en a une. */
 export function BlockWindowHost({ editor }: { editor: MementumEditor }) {

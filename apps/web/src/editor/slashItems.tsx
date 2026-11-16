@@ -3,6 +3,8 @@
 // Callout, Équation, Équation en ligne, Signet (C1b, C2) ; Table des matières, Lien vers une page
 // (C3). Chaque élément a ses noms en français et en anglais.
 //
+// La table des matières se pose comme un signet, par le geste de BlockNote ; elle n'a pas de fenêtre.
+//
 // Choisir un bloc riche fait le geste de BlockNote (R308, récrit) : dans un bloc vide, ou qui ne
 // porte que « / », ce bloc devient celui qu'on a choisi (il garde son id ; une frappe faite au même
 // instant dans ce bloc par quelqu'un d'autre est perdue, R303) ; ailleurs, il est inséré après.
@@ -11,7 +13,7 @@
 import { combineByGroup, insertOrUpdateBlockForSlashMenu } from "@blocknote/core";
 import { getDefaultReactSlashMenuItems, type DefaultReactSuggestionItem } from "@blocknote/react";
 import { getMultiColumnSlashMenuItems } from "@blocknote/xl-multi-column";
-import { BookmarkIcon, CalloutIcon, EquationIcon, InlineEquationIcon } from "../icons";
+import { BookmarkIcon, CalloutIcon, EquationIcon, InlineEquationIcon, TocIcon } from "../icons";
 import { openBlockWindow } from "./blocks/blockWindows";
 import { openInlineMath } from "./blocks/InlineMath";
 import type { MementumEditor } from "./debug";
@@ -66,6 +68,16 @@ export function richSlashItems(editor: MementumEditor): DefaultReactSuggestionIt
         const block = insertOrUpdateBlockForSlashMenu(editor, { type: "bookmark" });
         // Posé depuis le texte : le focus y revient, dans le paragraphe qui suit le signet (R474).
         openBlockWindow(editor, block, "editor");
+      },
+    },
+    {
+      title: "Table des matières",
+      subtext: "Les titres de la page, en liens",
+      aliases: ["table des matieres", "sommaire", "titres", "plan", "toc", "table of contents", "contents", "outline"],
+      group: RICH_GROUP,
+      icon: <TocIcon />,
+      onItemClick: () => {
+        insertOrUpdateBlockForSlashMenu(editor, { type: "toc" });
       },
     },
   ];

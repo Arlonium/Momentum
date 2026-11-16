@@ -17,7 +17,7 @@ test("slash_menu_offers_the_rich_blocks_in_order", async () => {
   const m = await mountEditor({ blocks: PAGE });
   const all = slashMenuItems(m.editor);
   const rich = all.filter((item) => item.group === RICH_GROUP);
-  const order = ["Callout", "Équation", "Équation en ligne", "Signet"];
+  const order = ["Callout", "Équation", "Équation en ligne", "Signet", "Table des matières"];
   expect(rich.map((item) => item.title)).toEqual(order);
   expect(richSlashItems(m.editor).map((item) => item.title)).toEqual(order);
   // Le groupe vient après ceux de BlockNote, d'un seul tenant.
@@ -31,6 +31,9 @@ test("slash_menu_offers_the_rich_blocks_in_order", async () => {
   for (const query of ["signet", "bookmark", "lien", "link", "url"]) expect(found(query), query).toContain("Signet");
   for (const query of ["équation", "equation", "formule", "latex", "math"]) expect(found(query), query).toContain("Équation");
   for (const query of ["en ligne", "inline", "formule en ligne"]) expect(found(query), query).toContain("Équation en ligne");
+  for (const query of ["table des matières", "matieres", "sommaire", "toc", "contents", "outline"]) {
+    expect(found(query), query).toContain("Table des matières");
+  }
   // Chaque élément a son icône et sa ligne d'explication.
   for (const item of rich) {
     expect(item.icon, item.title).toBeTruthy();
@@ -106,4 +109,25 @@ test("an_equation_is_inserted_empty_and_opens_its_field_at_once", async () => {
   await flush();
   expect(storedProps(m.doc, blocks[1].id).latex).toBe("x^2");
   expect(document.activeElement).toBe(m.editor.prosemirrorView.dom);
+});
+
+test("a_toc_is_inserted_by_the_slash_menu_and_the_typing_goes_on_after_it", async () => {
+  const m = await mountEditor({ blocks: PAGE });
+  const toc = () => richSlashItems(m.editor).find((item) => item.title === "Table des matières")!;
+  // Après un texte : insérée après lui ; le curseur passe au bloc qui la suit (R308).
+  cursor(m, "x", 3);
+  toc().onItemClick();
+  await flush();
+  expect(stored(m.doc).map((b) => b.type)).toEqual(["paragraph", "toc", "paragraph", "paragraph"]);
+  expect(m.editor.getTextCursorPosition().block.id).toBe("e");
+  // Dans un bloc vide : il la devient, au même id.
+  toc().onItemClick();
+  await flush();
+  expect(stored(m.doc).map((b) => `${b.type}${b.id === "e" ? " e" : ""}`)).toEqual([
+    "paragraph",
+    "toc",
+    "toc e",
+    "paragraph",
+  ]);
+  expect(m.host.querySelectorAll('nav[aria-label="Table des matières"]')).toHaveLength(2);
 });
