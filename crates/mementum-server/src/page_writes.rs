@@ -23,13 +23,16 @@
 //! et seule une requête qui a passé le premier contrôle (le droit de modifier la page) en crée
 //! une. Les lectures, la synchro et les commentaires ne le prennent pas.
 //!
-//! La file d'une page est bornée pour `PUT /mmd` (Ruling R435) : une requête y prend sa place
-//! ([`PageWrites::reserve`]) avant de lire son MMD, et la garde jusqu'à la fin de son écriture.
-//! Une fois lue, elle garde l'arbre de son MMD jusqu'à son tour (31 Mio pour un MMD accepté de
+//! La file d'une page est bornée pour `PUT /mmd` (Rulings R435, R494) : une requête y prend sa
+//! place ([`PageWrites::reserve`]) une fois son MMD lu et validé, et la garde jusqu'à la fin de
+//! son écriture. Elle garde l'arbre de son MMD jusqu'à son tour (31 Mio pour un MMD accepté de
 //! 789 Kio, à la re-relecture du tour 4 ; 64 requêtes vers une page : 2,2 Gio) : au-delà de
-//! [`MAX_PAGE_WRITES`] requêtes dans la file de la page (lectures, attentes et écriture en cours,
-//! restaurations comprises), un `PUT /mmd` est refusé sur-le-champ (`429 page_busy`), sans que son
-//! corps soit lu.
+//! [`MAX_PAGE_WRITES`] requêtes dans la file de la page (attentes et écriture en cours,
+//! restaurations comprises), ou de [`MAX_ACCOUNT_WRITES`] pour le compte qui écrit, un `PUT /mmd`
+//! est refusé sur-le-champ (`429 page_busy`). Une requête refusée à sa lecture (un MMD illisible,
+//! trop long à écrire) n'a jamais de place : prise avant la lecture, elle laissait un compte tenir
+//! la file pleine sans rien écrire (huit boucles de `PUT /mmd` refusés : quatre écritures et
+//! quatre-vingt-un refus pour un autre rédacteur en dix secondes, à la re-relecture du tour 5).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -38,11 +41,14 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 /// Requêtes au plus dans la file d'une page quand un `PUT /mmd` y prend sa place (Ruling R435) :
-/// celle qui écrit, celles qui attendent le verrou et celles qui lisent leur MMD. Au pire, autant
-/// d'arbres de MMD acceptés gardés en mémoire pour la page (environ 31 Mio chacun pour les plus
-/// lourds relevés : 250 Mio), et une écriture qui attend derrière sept autres (8 s d'acteur au
-/// plus chacune).
+/// celle qui écrit et celles qui attendent le verrou. Au pire, autant d'arbres de MMD acceptés
+/// gardés en mémoire pour la page (environ 31 Mio chacun pour les plus lourds relevés : 250 Mio),
+/// et une écriture qui attend derrière sept autres (8 s d'acteur au plus chacune).
 pub const MAX_PAGE_WRITES: usize = 8;
+
+/// Places au plus d'un même compte dans la file d'une page (Ruling R494) : une qui écrit, une qui
+/// attend. Un compte n'en tient jamais assez pour fermer la page aux autres rédacteurs.
+pub const MAX_ACCOUNT_WRITES: usize = 2;
 
 /// Les verrous des pages dont une écriture du serveur est en cours ou attend.
 #[derive(Default)]
@@ -50,8 +56,14 @@ pub(crate) struct PageWrites {
     locks: Mutex<HashMap<Uuid, Entry>>,
 }
 
-/// Le verrou d'une page, et le nombre de requêtes qui le tiennent ou l'attendent.
-type Entry = (Arc<tokio::sync::Mutex<()>>, usize);
+/// Le verrou d'une page, le nombre de requêtes qui le tiennent ou l'attendent, et ce nombre par
+/// compte pour les `PUT /mmd` (Ruling R494).
+#[derive(Default)]
+struct Entry {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    users: usize,
+    accounts: HashMap<Uuid, usize>,
+}
 
 /// Le verrou d'une page, tenu : le lâcher le rend.
 pub(crate) struct PageWrite {
@@ -64,6 +76,8 @@ pub(crate) struct PageWrite {
 struct Ticket {
     writes: Arc<PageWrites>,
     page: Uuid,
+    /// Le compte de la requête, compté dans sa part (`PUT /mmd`) ; `None` : une restauration.
+    account: Option<Uuid>,
 }
 
 impl Drop for Ticket {
@@ -73,9 +87,17 @@ impl Drop for Ticket {
             .locks
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Some((_, users)) = locks.get_mut(&self.page) {
-            *users -= 1;
-            if *users == 0 {
+        if let Some(entry) = locks.get_mut(&self.page) {
+            entry.users -= 1;
+            if let Some(account) = self.account
+                && let Some(places) = entry.accounts.get_mut(&account)
+            {
+                *places -= 1;
+                if *places == 0 {
+                    entry.accounts.remove(&account);
+                }
+            }
+            if entry.users == 0 {
                 locks.remove(&self.page);
             }
         }
@@ -105,28 +127,57 @@ impl PageWrites {
     /// Attend le verrou de `page`, puis le rend tenu. Abandonné en route, l'appel ne garde
     /// rien : sa place dans la table est libérée. Sans borne : la restauration d'une version.
     pub(crate) async fn lock(self: &Arc<Self>, page: Uuid) -> PageWrite {
-        self.reserve(page, usize::MAX)
+        self.place(page, None, usize::MAX, usize::MAX)
             .expect("une file sans borne a toujours une place")
             .lock()
             .await
     }
 
-    /// Une place dans la file de `page`, s'il y a moins de `limit` requêtes qui la tiennent,
-    /// l'attendent ou y ont une place ; sinon `None`, et rien n'est pris (Ruling R435).
-    pub(crate) fn reserve(self: &Arc<Self>, page: Uuid, limit: usize) -> Option<Place> {
+    /// Une place dans la file de `page` pour un `PUT /mmd` de `account`, s'il y a moins de
+    /// [`MAX_PAGE_WRITES`] requêtes qui la tiennent ou y attendent, et moins de
+    /// [`MAX_ACCOUNT_WRITES`] de ce compte ; sinon `None`, et rien n'est pris (Rulings R435, R494).
+    pub(crate) fn reserve(self: &Arc<Self>, page: Uuid, account: Uuid) -> Option<Place> {
+        self.place(page, Some(account), MAX_PAGE_WRITES, MAX_ACCOUNT_WRITES)
+    }
+
+    fn place(
+        self: &Arc<Self>,
+        page: Uuid,
+        account: Option<Uuid>,
+        limit: usize,
+        account_limit: usize,
+    ) -> Option<Place> {
         let mut locks = self.locks.lock().unwrap_or_else(PoisonError::into_inner);
-        let (lock, users) = locks.entry(page).or_default();
-        if *users >= limit {
+        let entry = locks.entry(page).or_default();
+        let held = account.map_or(0, |a| entry.accounts.get(&a).copied().unwrap_or(0));
+        if entry.users >= limit || held >= account_limit {
+            if entry.users == 0 {
+                locks.remove(&page);
+            }
             return None;
         }
-        *users += 1;
+        entry.users += 1;
+        if let Some(account) = account {
+            *entry.accounts.entry(account).or_default() += 1;
+        }
         Some(Place {
-            lock: lock.clone(),
+            lock: entry.lock.clone(),
             ticket: Ticket {
                 writes: self.clone(),
                 page,
+                account,
             },
         })
+    }
+
+    /// Les requêtes qui tiennent le verrou de `page` ou y ont une place (pour les tests).
+    #[cfg(test)]
+    pub(crate) fn places(&self, page: Uuid) -> usize {
+        self.locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&page)
+            .map_or(0, |entry| entry.users)
     }
 
     /// Les pages qui ont une entrée (pour les tests).
@@ -196,23 +247,49 @@ mod tests {
         assert_eq!(writes.len(), 0);
     }
 
-    /// Ruling R435 : une page n'admet que `limit` requêtes dans sa file, celle qui tient le
-    /// verrou comprise ; une de plus est refusée sans rien prendre, une place rendue se reprend,
-    /// et une autre page n'en est pas touchée.
+    /// Ruling R435 : une page n'admet que `MAX_PAGE_WRITES` requêtes dans sa file, celle qui
+    /// tient le verrou comprise ; une de plus est refusée sans rien prendre, une place rendue se
+    /// reprend, et une autre page n'en est pas touchée. Ruling R494 : un compte n'y a que
+    /// `MAX_ACCOUNT_WRITES` places, et une restauration compte dans la file, pas dans sa part.
     #[tokio::test]
-    async fn a_page_queue_is_bounded() {
+    async fn a_page_queue_is_bounded_and_shared() {
         let writes = Arc::new(PageWrites::default());
         let (page, other) = (Uuid::now_v7(), Uuid::now_v7());
-        let held = writes.reserve(page, 3).unwrap().lock().await;
-        let places: Vec<Place> = (0..2).map(|_| writes.reserve(page, 3).unwrap()).collect();
-        assert!(writes.reserve(page, 3).is_none(), "une de trop");
-        assert!(writes.reserve(other, 3).is_some(), "une autre page");
+        let accounts: Vec<Uuid> = (0..MAX_PAGE_WRITES).map(|_| Uuid::now_v7()).collect();
+        let (tom, mona) = (accounts[0], accounts[1]);
+        let held = writes.reserve(page, tom).unwrap().lock().await;
+        let second = writes.reserve(page, tom).unwrap();
+        assert!(
+            writes.reserve(page, tom).is_none(),
+            "la part de Tom est prise"
+        );
+        assert!(
+            writes.reserve(page, mona).is_some(),
+            "Mona a encore une place"
+        );
+        assert!(writes.reserve(other, tom).is_some(), "une autre page");
+        let places: Vec<Place> = accounts[1..MAX_PAGE_WRITES - 1]
+            .iter()
+            .map(|a| writes.reserve(page, *a).unwrap())
+            .collect();
+        assert!(
+            writes
+                .reserve(page, accounts[MAX_PAGE_WRITES - 1])
+                .is_none(),
+            "la file est pleine"
+        );
         drop(places);
-        let again = writes.reserve(page, 3);
+        drop(second);
+        let again = writes.reserve(page, tom);
         assert!(again.is_some(), "une place rendue se reprend");
-        // Le verrou tenu, la place prise : la page en compte deux.
-        assert!(writes.reserve(page, 2).is_none());
         drop((held, again));
+        assert_eq!(writes.len(), 0);
+        // Une place refusée ne laisse pas d'entrée.
+        let full: Vec<Place> = (0..MAX_ACCOUNT_WRITES)
+            .map(|_| writes.reserve(page, tom).unwrap())
+            .collect();
+        assert!(writes.reserve(page, tom).is_none());
+        drop(full);
         assert_eq!(writes.len(), 0);
     }
 }

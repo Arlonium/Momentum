@@ -19,9 +19,8 @@
 //! au-delà, ou attendre derrière ses propres calculs) changeait cet ordre.
 //!
 //! Ce que la file ne borne pas : le nombre de requêtes qui attendent. Une requête qui attend garde
-//! son corps (2 Mio au plus) ; `PUT /mmd` en admet [`crate::page_writes::MAX_PAGE_WRITES`] au plus
-//! par page (Ruling R435), lecture comprise, mais un compte qui peut modifier plusieurs pages en
-//! fait attendre autant par page. Les plafonds de débit, par compte, sont au lot 7 (Ruling R121).
+//! son corps (2 Mio au plus) ; la file d'écriture d'une page, elle, ne prend une requête qu'une fois
+//! son MMD lu (Rulings R435, R494). Les plafonds de débit, par compte, sont au lot 7 (Ruling R121).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};

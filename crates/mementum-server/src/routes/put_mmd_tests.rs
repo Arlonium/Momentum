@@ -292,3 +292,192 @@ async fn one_account_does_not_hold_back_another_ones_mmd() {
         assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
+
+/// L'équipe d'un test de file : une page de l'espace d'Olga, où chacun de `editors` peut modifier.
+async fn team(state: &AppState, editors: &[&str]) -> (Uuid, Uuid, Vec<SessionUser>) {
+    let olga = account(state, "olga").await;
+    let space = state
+        .store
+        .create_space("Équipe", Some(olga.id))
+        .await
+        .unwrap();
+    let mut users = Vec::new();
+    for name in editors {
+        let user = account(state, name).await;
+        state
+            .store
+            .add_member(space.id, user.id, Role::Member)
+            .await
+            .unwrap();
+        users.push(user);
+    }
+    let refs: Vec<&AuthUser> = users.iter().collect();
+    let page = page(state, space.id, &olga, &refs).await;
+    let mut sessions = Vec::new();
+    for user in users {
+        sessions.push(with_session(state, user).await);
+    }
+    (page, space.id, sessions)
+}
+
+/// Le statut de la réponse d'une requête.
+async fn status(request: JoinHandle<Result<StatusCode, ApiError>>) -> StatusCode {
+    match request.await.unwrap() {
+        Ok(status) => status,
+        Err(error) => error.into_response().status(),
+    }
+}
+
+/// Ruling R494, constat N2 de la re-relecture du tour 5 : un `PUT /mmd` refusé à sa lecture ne
+/// tient jamais de place dans la file de la page. Quatre rédacteurs envoient chacun deux `PUT
+/// /mmd` lents à lire, puis refusés (trop longs à écrire) ; pendant qu'ils sont lus ou attendent de
+/// l'être, Mona écrit. Avant, la place se prenait avant la lecture : les huit tenaient la file
+/// pleine, et Mona recevait `429 page_busy` sans que rien ne fût écrit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_mmd_never_holds_a_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(&dir).await;
+    let (page, _, users) = team(&state, &["tom", "ugo", "vera", "wes", "mona"]).await;
+    let (readers, mona) = users.split_at(4);
+    let slow = "a*b*".repeat(150_000) + "\n";
+    let mut burst = Vec::new();
+    for reader in readers {
+        for _ in 0..2 {
+            burst.push(put(&state, reader, page, slow.clone()));
+        }
+    }
+    until("la rafale n'est pas en lecture", async || {
+        state.mmd_reads.counts() == (MAX_MMD_READS, burst.len() - MAX_MMD_READS)
+    })
+    .await;
+    let reply = status(put(&state, &mona[0], page, "Mona\n".to_string())).await;
+    assert_eq!(reply, StatusCode::NO_CONTENT, "Mona n'a pas pu écrire");
+    for request in burst {
+        assert_eq!(status(request).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
+
+/// Ruling R494 : un compte n'a que deux places dans la file d'une page. Tom écrit longuement, une
+/// deuxième écriture attend derrière : sa troisième est refusée sur-le-champ (`429 page_busy`),
+/// pendant que Mona prend une place et écrit à son tour.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_account_holds_at_most_two_places_on_a_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(&dir).await;
+    let (page, _, users) = team(&state, &["tom", "mona"]).await;
+    let (tom, mona) = (&users[0], &users[1]);
+    state.hub.load_page(page).await.unwrap();
+    let base = state.hub.calls();
+    let first = put(&state, tom, page, paragraphs("Alpha", 4_000));
+    until("l'écriture longue n'arrive pas à l'acteur", async || {
+        state.hub.calls() >= base + 2
+    })
+    .await;
+    let second = put(&state, tom, page, paragraphs("Bêta", 10));
+    until("la deuxième écriture n'a pas de place", async || {
+        state.page_writes.places(page) == 2
+    })
+    .await;
+    let third = status(put(&state, tom, page, "Tom\n".to_string())).await;
+    assert_eq!(third, StatusCode::TOO_MANY_REQUESTS, "la troisième de Tom");
+    let monas = put(&state, mona, page, "Mona\n".to_string());
+    until("Mona n'a pas de place", async || {
+        state.page_writes.places(page) == 3 || monas.is_finished()
+    })
+    .await;
+    for request in [first, second, monas] {
+        assert_eq!(status(request).await, StatusCode::NO_CONTENT);
+    }
+}
+
+/// Ce qui arrête la file des écritures de Tom.
+#[derive(Debug, Clone, Copy)]
+enum Ending {
+    /// Olga lui retire l'accès à la page.
+    Revoked,
+    /// Sa session prend fin (déconnexion, mot de passe changé).
+    SessionEnded,
+}
+
+/// Rulings R200, R209 et R494 : une écriture longue de Tom est dans l'acteur, une deuxième attend
+/// le verrou ; ses six suivantes sont refusées sur-le-champ (sa part est prise). Puis son accès
+/// est retiré, ou sa session prend fin : la deuxième relit ses droits et sa session sous le
+/// verrou, et n'écrit pas (`404`, `401`) ; seule la première est au journal. Ces tests
+/// remplacent, pour `PUT /mmd`, les rafales des tests d'intégration de R200 et R209, que la part
+/// de deux places par compte réduit à une requête qui attend : sans voir l'acteur, ils ne
+/// savaient plus faire tomber le retrait pendant qu'elle attend.
+async fn queued_writes_stop_with(ending: Ending) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("m.db");
+    let state = state(&dir).await;
+    let (page, space, users) = team(&state, &["tom"]).await;
+    let tom = &users[0];
+    let tom_id = tom.user.id;
+    sql(
+        &db,
+        &format!(
+            "CREATE TABLE witness (seq INTEGER NOT NULL);; \
+             CREATE TRIGGER witness_writes AFTER INSERT ON doc_updates \
+             WHEN NEW.node_id = '{page}' AND NEW.actor_id = '{tom_id}' \
+             BEGIN INSERT INTO witness VALUES (NEW.seq); END"
+        ),
+    )
+    .await;
+    state.hub.load_page(page).await.unwrap();
+    let base = state.hub.calls();
+    let first = put(&state, tom, page, paragraphs("Alpha", 4_000));
+    until("l'écriture longue n'arrive pas à l'acteur", async || {
+        state.hub.calls() >= base + 2
+    })
+    .await;
+    let second = put(&state, tom, page, "Tom 1\n".to_string());
+    until("la deuxième écriture n'a pas de place", async || {
+        state.page_writes.places(page) == 2
+    })
+    .await;
+    for i in 0..6 {
+        let extra = status(put(&state, tom, page, format!("Tom {}\n", i + 2))).await;
+        assert_eq!(
+            extra,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{ending:?} : la requête {i} de trop"
+        );
+    }
+    match ending {
+        Ending::Revoked => {
+            sql(
+                &db,
+                &format!(
+                    "DELETE FROM acl WHERE node_id = '{page}' AND subject = 'user:{tom_id}';; \
+                     UPDATE spaces SET rev = rev + 1, lsn = lsn + 1 WHERE id = '{space}'"
+                ),
+            )
+            .await;
+        }
+        Ending::SessionEnded => {
+            state.store.delete_session(tom.session).await.unwrap();
+        }
+    }
+    assert_eq!(
+        status(first).await,
+        StatusCode::NO_CONTENT,
+        "{ending:?} : la première"
+    );
+    let expected = match ending {
+        Ending::Revoked => StatusCode::NOT_FOUND,
+        Ending::SessionEnded => StatusCode::UNAUTHORIZED,
+    };
+    assert_eq!(status(second).await, expected, "{ending:?} : la deuxième");
+    let written = sql(&db, "SELECT COUNT(*) FROM witness").await;
+    assert_eq!(written, 1, "{ending:?} : écritures de Tom au journal");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
+    queued_writes_stop_with(Ending::Revoked).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mmd_writes_queued_before_the_session_ends_stop_with_it() {
+    queued_writes_stop_with(Ending::SessionEnded).await;
+}

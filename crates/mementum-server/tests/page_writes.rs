@@ -32,21 +32,6 @@ use uuid::Uuid;
 /// Requêtes envoyées d'un coup.
 const BURST: usize = 24;
 
-/// `PUT /mmd` envoyés d'un coup : autant que la file d'une page en admet (Ruling R435). Au-delà,
-/// les requêtes de trop sont refusées sur-le-champ (`429 page_busy`, voir
-/// `a_full_page_queue_refuses_at_once`).
-const MMD_BURST: usize = mementum_server::MAX_PAGE_WRITES;
-
-/// Les deux contenus d'une rafale de `PUT /mmd`, en alternance : trois fois plus longs que ceux
-/// des restaurations, pour que la rafale de [`MMD_BURST`] requêtes occupe la page aussi longtemps
-/// que les [`BURST`] d'avant le Ruling R435 (sinon elle pouvait finir avant la fin de la session).
-fn mmd_burst_contents() -> [String; 2] {
-    [
-        many_paragraphs("Alpha", 3 * PARAGRAPHS),
-        many_paragraphs("Bêta", 3 * PARAGRAPHS),
-    ]
-}
-
 /// Paragraphes de chaque contenu : assez pour qu'une écriture prenne du temps dans l'acteur.
 const PARAGRAPHS: usize = 200;
 
@@ -213,25 +198,33 @@ async fn restores_queued_before_a_revocation_stop_with_it() {
     assert_the_burst_stopped(&t, "restaurations", &statuses).await;
 }
 
-/// Le même constat pour `PUT /mmd` (antérieur au lot) : des récritures envoyées d'un coup, en
-/// alternance ; après le retrait, au plus une est encore écrite.
-///
-/// Sur un disque lent (`SLOW_DISK`, Ruling R485), pendant que Mona crée des pages ailleurs dans
-/// l'espace, en six boucles : l'écriture de l'acteur, le retrait d'Olga et les créations de Mona
-/// se disputent le verrou de SQLite, et l'une d'elles l'attendait plus que le délai d'attente de
-/// sa connexion (`500 internal`, `database is locked`, vu sur la CI sous Windows sans les
-/// boucles de Mona, par moments). Avec la file d'écriture du store, aucune n'échoue.
+// Le même constat pour `PUT /mmd`, la deuxième écriture en attente relisant ses droits sous le
+// verrou : `mmd_writes_queued_before_a_revocation_stop_with_it`, dans `src/routes/put_mmd_tests.rs`
+// (Ruling R494 : un compte n'a plus que deux places dans la file d'une page, une qui écrit, une
+// qui attend ; seul un test qui voit l'acteur sait faire tomber le retrait pendant que la deuxième
+// attend).
+
+/// Ruling R485, après R494 : sur un disque lent (`SLOW_DISK`), pendant que Mona crée des pages
+/// ailleurs dans l'espace, en six boucles, Tom récrit la page par deux `PUT /mmd` de front (ses
+/// deux places dans la file de la page), et Olga lui retire l'accès dès que le premier a abouti.
+/// L'écriture de l'acteur, le retrait d'Olga et les créations de Mona se disputent le verrou de
+/// SQLite, et l'une d'elles l'attendait plus que le délai d'attente de sa connexion (`500
+/// internal`, `database is locked`, vu sur la CI sous Windows sans les boucles de Mona, par
+/// moments). Avec la file d'écriture du store, aucune n'échoue : chaque réponse de Tom est `204`
+/// (avant le retrait) ou `404` (après), au plus une écriture sans l'accès, aucune création
+/// refusée. Avant R494, ce test envoyait vingt-quatre `PUT /mmd` de Tom : vingt-deux y
+/// recevraient `429`.
 #[tokio::test]
-async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
+async fn mmd_writes_amid_other_writes_on_a_slow_disk_never_fail() {
     let t = open_app_with(SLOW_DISK).await;
     let team = Team::new(&t).await;
     let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Edit)];
     let page = team.page(None, "Récritures", &grants).await;
     let busy = team.page(None, "Agitée", &[members(Level::Edit)]).await;
     witness(&t, page, team.tom.id).await;
-    let contents = mmd_burst_contents();
+    let contents = [paragraphs("Alpha"), paragraphs("Bêta")];
 
-    let requests = (0..MMD_BURST)
+    let requests = (0..mementum_server::MAX_ACCOUNT_WRITES)
         .map(|i| {
             request(
                 &team.tom,
@@ -254,7 +247,15 @@ async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
     let statuses = burst_then_revoke(&t, &team, page, requests).await;
     let refused = creations.stop().await;
     assert!(refused.is_empty(), "créations refusées : {refused:?}");
-    assert_the_burst_stopped(&t, "PUT /mmd", &statuses).await;
+    let (with, without) = (witnessed(&t, true).await, witnessed(&t, false).await);
+    assert!(
+        statuses
+            .iter()
+            .all(|s| *s == StatusCode::NO_CONTENT || *s == StatusCode::NOT_FOUND)
+            && without <= 1,
+        "statuts de Tom : {statuses:?} ; écritures au journal avec l'accès : {with}, sans l'accès : \
+         {without}"
+    );
 }
 
 /// Un client qui coupe chaque requête peu après l'avoir envoyée ne relâche pas le verrou avant
@@ -399,20 +400,17 @@ enum Ending {
 }
 
 /// Constat I1 de la relecture de la piste S (Ruling R209), avec l'attente inverse. Tom envoie
-/// d'un coup 8 `PUT /mmd` (ce que la file d'une page admet, R435), ou 24 restaurations, puis sa
-/// session prend fin : déconnexion, ou
-/// changement du mot de passe par la titulaire du compte. Chaque requête prenait le verrou à son
-/// tour, relisait des droits que le compte a toujours, et écrivait : 23 écritures sur 24 après la
-/// déconnexion. La session est relue sous le verrou : au plus une écriture sans elle, les autres
-/// répondent `401`.
+/// d'un coup 24 restaurations, puis sa session prend fin : déconnexion, ou changement du mot de
+/// passe par la titulaire du compte. Chaque requête prenait le verrou à son tour, relisait des
+/// droits que le compte a toujours, et écrivait : 23 écritures sur 24 après la déconnexion. La
+/// session est relue sous le verrou : au plus une écriture sans elle, les autres répondent `401`.
+/// Pour `PUT /mmd` : `mmd_writes_queued_before_the_session_ends_stop_with_it`, dans
+/// `src/routes/put_mmd_tests.rs` (Ruling R494).
 #[tokio::test]
 async fn writes_queued_before_the_session_ends_stop_with_it() {
-    for restore in [false, true] {
+    {
         for ending in [Ending::LogOut, Ending::PasswordChanged] {
-            let what = format!(
-                "{} ; {ending:?}",
-                if restore { "restaurations" } else { "PUT /mmd" }
-            );
+            let what = format!("restaurations ; {ending:?}");
             let t = open_app().await;
             let team = Team::new(&t).await;
             let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Edit)];
@@ -420,37 +418,22 @@ async fn writes_queued_before_the_session_ends_stop_with_it() {
             let cookie = team.tom.browser.session().expect("une session");
             let session = mementum_server::auth::token_hash(&cookie).unwrap();
             session_witness(&t, page, team.tom.id, session).await;
-            let requests: Vec<Request<Body>> = if restore {
-                let mut versions = Vec::new();
-                for tag in ["Alpha", "Bêta"] {
-                    let state = state_of(&paragraphs(tag));
-                    let version = team
-                        .store
-                        .put_version(page, 0, &state, &[], mementum_store::VersionReason::Closing)
-                        .await
-                        .unwrap();
-                    versions.push(version);
-                }
-                (0..BURST)
-                    .map(|i| {
-                        let uri =
-                            format!("/api/v1/pages/{page}/versions/{}/restore", versions[i % 2]);
-                        request(&team.tom, Request::post(uri), Body::empty())
-                    })
-                    .collect()
-            } else {
-                let contents = mmd_burst_contents();
-                (0..MMD_BURST)
-                    .map(|i| {
-                        request(
-                            &team.tom,
-                            Request::put(format!("/api/v1/pages/{page}/mmd"))
-                                .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
-                            Body::from(contents[i % 2].clone()),
-                        )
-                    })
-                    .collect()
-            };
+            let mut versions = Vec::new();
+            for tag in ["Alpha", "Bêta"] {
+                let state = state_of(&paragraphs(tag));
+                let version = team
+                    .store
+                    .put_version(page, 0, &state, &[], mementum_store::VersionReason::Closing)
+                    .await
+                    .unwrap();
+                versions.push(version);
+            }
+            let requests: Vec<Request<Body>> = (0..BURST)
+                .map(|i| {
+                    let uri = format!("/api/v1/pages/{page}/versions/{}/restore", versions[i % 2]);
+                    request(&team.tom, Request::post(uri), Body::empty())
+                })
+                .collect();
             let statuses = burst_then(&t, requests, async {
                 match ending {
                     Ending::LogOut => {
@@ -824,10 +807,11 @@ async fn a_refused_mmd_answers_in_a_few_hundred_bytes() {
 
 /// Constat I1 de la re-relecture du tour 4 (Ruling R435) : chaque `PUT /mmd` accepté gardait
 /// l'arbre lu de son MMD jusqu'à son tour au verrou de la page, sans borne du nombre d'attentes
-/// (64 requêtes vers une page : 2,2 Gio). La file d'une page admet `MAX_PAGE_WRITES` requêtes ; les
-/// suivantes répondent `429 page_busy` sur-le-champ, avec `Retry-After`, sans rien écrire, et la
-/// page reprend des écritures une fois la file vidée. L'ordre des refus : les droits d'abord (un
-/// compte sans accès reçoit `404`, même la file pleine).
+/// (64 requêtes vers une page : 2,2 Gio). La file d'une page admet `MAX_PAGE_WRITES` requêtes, et
+/// `MAX_ACCOUNT_WRITES` d'un même compte (R494) ; une fois son MMD lu, une requête de plus répond
+/// `429 page_busy` sur-le-champ, avec `Retry-After`, sans rien écrire, et la page reprend des
+/// écritures une fois la file vidée. L'ordre des refus : les droits d'abord (un compte sans accès
+/// reçoit `404`, même la file pleine).
 #[tokio::test]
 async fn a_full_page_queue_refuses_at_once() {
     let t = open_app().await;
