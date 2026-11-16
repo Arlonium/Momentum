@@ -772,3 +772,94 @@ proptest! {
         }
     }
 }
+
+/// Les limites connues (Ruling R340) : ce que le test dit voulu n'est pas tenu, et il l'affirme.
+/// Le jour où la perte est levée, il échoue : le sortir de ce module, et lui faire affirmer la page
+/// voulue.
+mod known_limits {
+    use super::*;
+
+    #[path = "../../../mementum-sync/tests/common/limit.rs"]
+    mod limit;
+    use limit::known_limit;
+
+    /// L'alignement du premier paragraphe, tel que la page le lit.
+    fn alignment(page: &PageDoc) -> Option<String> {
+        page.read_blocks()[0]
+            .props
+            .get("textAlignment")
+            .map(|v| format!("{v:?}"))
+    }
+
+    /// Ruling R539 (mineur de la re-relecture du tour 7) : une entrée du journal écrite avant
+    /// R496, qui récrit un attribut d'un élément (une entrée de map placée par son origine, la
+    /// valeur d'avant) et pose aussi une chaîne en tête de la racine. À la relecture, R498 supprime
+    /// le contenu sans type que l'entrée a intégré hors d'un texte : la chaîne, et avec elle la
+    /// valeur neuve de l'attribut, une valeur `Any` dont le parent est l'élément.
+    ///
+    /// Voulu : la chaîne seule part, l'alignement reste « center ». Aujourd'hui : il part aussi.
+    /// Seule une entrée hostile d'avant le tour 7 le permet : la garde refuse la chaîne d'un client.
+    #[test]
+    fn a_stored_untyped_child_takes_an_attribute_overwrite_with_it() {
+        let mut served = Served::new();
+        let olga = client(10, &served);
+        assert!(served.receive(&honest(&olga, |txn, t| t.insert(txn, 0, "abc"))));
+        let first_paragraph = |doc: &Doc| {
+            let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+            let txn = doc.transact();
+            let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+                panic!("la racine");
+            };
+            let Some(XmlOut::Element(container)) = group.get(&txn, 0) else {
+                panic!("le bloc");
+            };
+            let Some(XmlOut::Element(paragraph)) = container.get(&txn, 0) else {
+                panic!("le paragraphe");
+            };
+            paragraph
+        };
+        let aligned = |doc: &Doc, value: &str| {
+            let paragraph = first_paragraph(doc);
+            let mut txn = doc.transact_mut();
+            paragraph.insert_attribute(&mut txn, "textAlignment", value.to_string());
+            txn.encode_update_v1()
+        };
+        catch_up(&olga, &served);
+        assert!(served.receive(&aligned(&olga, "right")));
+        let str_of = |v: &str| Some(format!("{:?}", mementum_md::PropValue::Str(v.to_string())));
+        assert_eq!(alignment(&served.page), str_of("right"), "avant l'entrée");
+        let hostile = client(4242, &served);
+        let overwrite = aligned(&hostile, "center");
+        // Seule, la valeur neuve reste : R498 ne joue que si une liste ne se lit plus en entier.
+        let alone = PageDoc::from_updates(
+            served
+                .journal
+                .iter()
+                .map(Vec::as_slice)
+                .chain([overwrite.as_slice()]),
+        )
+        .unwrap();
+        assert_eq!(alignment(&alone), str_of("center"), "la valeur neuve seule");
+        let entry = yrs::merge_updates_v1(&[
+            overwrite.as_slice(),
+            hand_made(Some((4242, 1, Place::Root, Item::Text("x"))), &[]).as_slice(),
+        ])
+        .unwrap();
+        served.journal.push(entry);
+        let reloaded = served.reloaded();
+        assert_eq!(texts(&reloaded), ["abc"], "la chaîne partie");
+        let seen = alignment(&reloaded);
+        let wanted = str_of("center");
+        let unmet: Vec<String> = (seen != wanted)
+            .then(|| format!("alignement relu : {seen:?}"))
+            .into_iter()
+            .collect();
+        known_limit(
+            "R539 : la relecture d'une entrée d'avant R496 supprime toute valeur sans type \
+             intégrée hors d'un texte, dont la valeur neuve d'un attribut placée par son origine ; \
+             le lever demande de ne juger que les enfants d'une liste (pas les entrées de map)",
+            &unmet,
+            &["alignement relu : None".to_string()],
+        );
+    }
+}

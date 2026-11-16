@@ -1502,3 +1502,68 @@ async fn has_block_answers_like_read_blocks() {
         Err(SyncError::NotFound)
     ));
 }
+
+/// Les limites connues (Ruling R340) : ce que le test dit voulu n'est pas tenu, et il l'affirme.
+/// Le jour où la perte est levée, il échoue : le sortir de ce module, et lui faire affirmer le
+/// comportement voulu.
+mod known_limits {
+    use super::*;
+    use common::limit::known_limit;
+
+    /// Ruling R538 (mineur de la re-relecture du tour 7) : une mise à jour refusée après son
+    /// application (ici une dépendance absente, que yrs garde en attente ; de même un contenu sans
+    /// type placé par l'origine d'un voisin, R497) recharge la page, comme après toute erreur
+    /// (R17, R22). R492 n'a levé ce coût que pour les refus d'avant l'application.
+    ///
+    /// Voulu : la même mise à jour, renvoyée par trois connexions l'une après l'autre (un compte
+    /// hostile, ou un onglet qui la renvoie à chaque reconnexion), ne recharge la page qu'une
+    /// fois. Aujourd'hui : un rechargement par envoi (70 ms au p95 pour une page de 10 000 blocs).
+    #[tokio::test]
+    async fn an_update_refused_after_it_is_applied_reloads_the_page_once() {
+        let f = Fixture::new(SyncConfig::default()).await;
+        let writer = f.client().await;
+        // u2 dépend de u1, qu'aucune connexion n'envoie (comme `refused_update_is_never_served`).
+        let doc = detached(&writer);
+        let paragraph = first_content(&doc);
+        let u1 = {
+            let mut txn = doc.transact_mut();
+            paragraph.insert(&mut txn, 0, XmlTextPrelim::new("a"));
+            txn.encode_update_v1()
+        };
+        let other = detached(&writer);
+        other
+            .transact_mut()
+            .apply_update(Update::decode_v1(&u1).unwrap())
+            .unwrap();
+        let paragraph = first_content(&other);
+        let typed = match paragraph.get(&other.transact(), 0) {
+            Some(XmlOut::Text(typed)) => typed,
+            _ => panic!("le texte de u1 attendu"),
+        };
+        let u2 = {
+            let mut txn = other.transact_mut();
+            typed.insert(&mut txn, 1, "b");
+            txn.encode_update_v1()
+        };
+        let before = f.hub.reloads();
+        for _ in 0..3 {
+            let hostile = f.client().await;
+            hostile.send_update(&u2);
+            assert!(hostile.wait_until(WAIT, |c| c.is_closed()).await, "refusée");
+            // Une demande de plus à l'acteur : il a traité la mise à jour refusée avant elle.
+            f.hub.read_blocks(f.page).await.unwrap();
+        }
+        let reloads = f.hub.reloads() - before;
+        let unmet: Vec<String> = (reloads != 1)
+            .then(|| format!("{reloads} rechargements pour trois envois (voulu : un)"))
+            .into_iter()
+            .collect();
+        known_limit(
+            "R538 : un refus d'après l'application recharge la page à chaque envoi ; le lever \
+             demande de reconnaître une mise à jour déjà refusée, ou de la juger avant de \
+             l'appliquer",
+            &unmet,
+            &["3 rechargements pour trois envois (voulu : un)".to_string()],
+        );
+    }
+}
