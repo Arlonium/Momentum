@@ -547,22 +547,26 @@ async fn measure_page_duplication() {
     );
     let block = author.blocks()[0].id.clone();
 
-    // Le dernier cas dépasse la borne de poids : la route le refuse, et seule sa transaction est
-    // mesurée.
-    for (pages, blocks) in [
+    // Les deux derniers cas dépassent la borne de poids : la route les refuse, et seule leur
+    // transaction est mesurée. Un compte neuf par cas : le budget de la minute est par compte.
+    for (case, (pages, blocks)) in [
         (1usize, 10_000usize),
+        (35, 1_000),
+        (3, 10_000),
         (100, 1_000),
         (10, 10_000),
-        (14, 10_000),
-        (100, 10_000),
-    ] {
-        let refused = pages * blocks > 150_000;
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let refused = pages * blocks > 40_000;
+        let alice = t.account(&format!("Compte {case}")).await;
         let what = format!("{pages} pages de {blocks} blocs");
         let content = paragraphs(blocks);
         let root = alice.create(json!({ "title": what })).await.id;
         let mut all = vec![root.clone()];
-        // Refusée, la copie n'a pas besoin de cent pages pleines : vingt suffisent à peser trop.
-        for i in 1..if refused { 20 } else { pages } {
+        // Refusée, la copie n'a pas besoin de cent pages pleines : cinquante pèsent déjà trop.
+        for i in 1..pages.min(50) {
             let body = json!({ "title": format!("Sous-page {i}"), "parentId": root });
             all.push(alice.create(body).await.id);
         }
@@ -694,4 +698,161 @@ fn copy_with_fresh_ids(copy: &mementum_store::NewCopy) -> mementum_store::NewCop
         page.id = uuid::Uuid::now_v7();
     }
     again
+}
+
+/// La taille de la base et de son journal, en Mio.
+fn database_mib(t: &TestApp) -> f64 {
+    let db = t.db_path();
+    let size = |path: &std::path::Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    (size(&db) + size(&db.with_extension("db-wal"))) as f64 / f64::from(1 << 20)
+}
+
+/// Constat C1 de la relecture de la Task S6 (Rulings R605 à R608) : un compte qui duplique sans
+/// relâche, à 1, 4 puis 16 requêtes de front, pendant vingt secondes, des sous-arbres juste sous
+/// la borne de poids. Pendant ce temps, un autre compte tape dans sa page (chaque frappe
+/// chronométrée jusqu'à ce qu'un autre client l'ait reçue) et récrit une note d'une ligne par
+/// `PUT /mmd`. La mesure affirme ce que le débit des duplications doit tenir : la frappe et le
+/// `PUT /mmd` de l'autre sous 150 ms au p95, et une base qui ne grossit pas plus que le budget
+/// d'une minute et une copie (80 Mio de documents ; 160 Mio admis, journal compris).
+///
+/// Chaque ligne prend un compte neuf pour l'attaque : son budget est entier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_one_account_duplicating_without_pause() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use common::sync::text;
+    use common::{sync_url, synced_as};
+    use tower::ServiceExt;
+
+    const ATTACK: Duration = Duration::from_secs(20);
+    let t = TestApp::with_config(|cfg| cfg.signup = SignupMode::Open).await;
+    let addr = t.listen().await;
+    let alice = t.account("Alice").await;
+    let typed = alice.create(json!({ "title": "Frappes" })).await.id;
+    alice
+        .put_mmd(&typed, "Texte\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let noted = alice.create(json!({ "title": "Notes" })).await.id;
+    let url = sync_url(addr, &typed);
+    let (author, other) = (
+        synced_as(&alice.browser, &url).await,
+        synced_as(&alice.browser, &url).await,
+    );
+    let block = author.blocks()[0].id.clone();
+
+    let cases = [
+        (
+            "25 pages d'un paragraphe de 600 Ko",
+            25,
+            format!("{}\n", "a".repeat(600_000)),
+        ),
+        ("35 pages de 1 000 blocs", 35, paragraphs(1_000)),
+        ("3 pages de 10 000 blocs", 3, paragraphs(10_000)),
+    ];
+    let mut attackers = 0;
+    for (what, pages, content) in cases {
+        for streams in [1usize, 4, 16] {
+            attackers += 1;
+            let mallory = t.account(&format!("Mallory {attackers}")).await;
+            let root = mallory.create(json!({ "title": what })).await.id;
+            let mut all = vec![root.clone()];
+            for i in 1..pages {
+                let body = json!({ "title": format!("Sous-page {i}"), "parentId": root });
+                all.push(mallory.create(body).await.id);
+            }
+            for page in &all {
+                mallory
+                    .put_mmd(page, content.clone())
+                    .await
+                    .assert_status(StatusCode::NO_CONTENT);
+            }
+            // Le temps que les écritures de la mise en place se posent.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let (copied, busy) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let before = database_mib(&t);
+            let mut loops = Vec::new();
+            for _ in 0..streams {
+                let (stop, copied, busy) = (stop.clone(), copied.clone(), busy.clone());
+                let router = t.router.clone();
+                let cookie = mallory.browser.cookie().unwrap();
+                let uri = format!("/api/v1/pages/{root}/duplicate");
+                loops.push(tokio::spawn(async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        let request = Request::post(&uri)
+                            .header(header::HOST, "localhost")
+                            .header(header::COOKIE, &cookie)
+                            .body(Body::empty())
+                            .unwrap();
+                        let status = router.clone().oneshot(request).await.unwrap().status();
+                        match status {
+                            StatusCode::CREATED => copied.fetch_add(1, Ordering::Relaxed),
+                            StatusCode::TOO_MANY_REQUESTS => busy.fetch_add(1, Ordering::Relaxed),
+                            other => panic!("réponse inattendue à une duplication : {other}"),
+                        };
+                        // Un refus revient tout de suite : la boucle ne tourne pas à vide.
+                        tokio::task::yield_now().await;
+                    }
+                }));
+            }
+            let begin = Instant::now();
+            let (mut keys, mut puts) = (Vec::new(), Vec::new());
+            while begin.elapsed() < ATTACK {
+                let start = Instant::now();
+                author.type_text(&block, "x");
+                let expected = text(&author);
+                assert!(
+                    other
+                        .wait_until(Duration::from_secs(120), |c| text(c) == expected)
+                        .await,
+                    "la frappe n'est pas arrivée"
+                );
+                keys.push(start.elapsed());
+                let start = Instant::now();
+                alice
+                    .put_mmd(&noted, format!("note {}\n", keys.len()))
+                    .await
+                    .assert_status(StatusCode::NO_CONTENT);
+                puts.push(start.elapsed());
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            stop.store(true, Ordering::Relaxed);
+            for task in loops {
+                task.await.unwrap();
+            }
+            let grown = database_mib(&t) - before;
+            let p95 = |times: &[Duration]| {
+                let mut sorted = times.to_vec();
+                sorted.sort();
+                sorted[(sorted.len() * 95).div_ceil(100).max(1) - 1]
+            };
+            let (key_p95, put_p95) = (p95(&keys), p95(&puts));
+            println!(
+                "MESURE {what}, {streams} duplication(s) de front, 20 s : {} copies, {} refus \
+                 `429` ; base +{grown:.0} Mio",
+                copied.load(Ordering::Relaxed),
+                busy.load(Ordering::Relaxed),
+            );
+            report("  frappe d'un autre compte, vue par un autre client", keys);
+            report("  `PUT /mmd` d'une ligne par un autre compte", puts);
+            assert!(
+                key_p95 < TYPING_BUDGET,
+                "{what}, {streams} de front : frappe au p95 {key_p95:?}"
+            );
+            assert!(
+                put_p95 < TYPING_BUDGET,
+                "{what}, {streams} de front : `PUT /mmd` au p95 {put_p95:?}"
+            );
+            assert!(
+                grown < 160.0,
+                "{what}, {streams} de front : base +{grown:.0} Mio"
+            );
+        }
+    }
 }
