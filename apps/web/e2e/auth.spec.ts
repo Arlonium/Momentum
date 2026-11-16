@@ -1,7 +1,7 @@
 // Comptes, depuis l'interface : inscription, connexion et déconnexion, mot de passe faux ou
 // changé, menu du compte au clavier (il est dans le sélecteur d'espace, en tête de barre
 // latérale), présence au nom du compte, et session perdue pendant qu'une page est ouverte.
-import { expect, request as apiRequest, test, type Page } from "@playwright/test";
+import { expect, request as apiRequest, test, type Page, type Request } from "@playwright/test";
 import type { ErrorBody, Me } from "@mementum/protocol";
 import { colorOf } from "../src/session/session";
 import {
@@ -11,6 +11,7 @@ import {
   defaultAccount,
   expectSignedInAs,
   firstSpace,
+  getMe,
   getMmd,
   getPage,
   holdFirstResponse,
@@ -620,6 +621,125 @@ test("a_call_in_flight_during_a_password_change_does_not_ask_to_log_in", async (
   await dialog.getByRole("button", { name: "Fermer" }).click();
   await expect(dialog).toHaveCount(0);
   await expect(lost).toHaveCount(0);
+});
+
+/** Le `POST /api/v1/pages/{id}/trash` de la page `id`. */
+const isTrash = (id: string) => (request: Request) =>
+  request.method() === "POST" && new URL(request.url()).pathname === `/api/v1/pages/${id}/trash`;
+
+test("another_tab_logging_in_during_the_reading_before_a_replay_gets_nothing_done", async ({
+  browser,
+}) => {
+  // La fenêtre de R460, que seul le serveur pouvait fermer (R540) : la relecture du compte d'avant
+  // un rejeu dit Alice, puis, avant que la réponse arrive, un autre onglet du navigateur se
+  // connecte sous Bruno. Le rejeu part avec le cookie de Bruno, mais nomme Alice : le serveur le
+  // refuse sans rien faire, et l'onglet repart de zéro sous Bruno (R115). Sans l'en-tête, la page
+  // d'Alice partait à la corbeille sous la session de Bruno (sonde de la relecture).
+  const { alice, aliceApi, bruno, brunoId } = await ownerAndMember();
+  const aliceId = (await getMe(aliceApi)).user.id;
+  const open = await createPage(aliceApi, { title: `Ouverte ${unique()}` });
+  const thrown = await createPage(aliceApi, { title: `Jetée ${unique()}` });
+  // Bruno peut, lui aussi, mettre la page à la corbeille : sous son nom, le rejeu aboutirait.
+  await setPageLevel(aliceApi, thrown.id, brunoId, "full");
+  const p = await openPage(browser, open.id, alice);
+  await expect(treeRow(p, thrown.id)).toBeVisible();
+  const dialog = p.getByRole("dialog", { name: "Ta session a pris fin" });
+  // Le geste d'Alice, refusé sans session ; son refus retenu jusqu'après la connexion d'Alice.
+  const trash = await holdFirstResponse(p, "POST", `/api/v1/pages/${thrown.id}/trash`);
+  const tree = await holdTreeReads(p);
+  await p.context().clearCookies();
+  await (await openRowMenu(p, thrown.id, thrown.title))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  expect(await trash.answered).toBe(401);
+  await spaceSwitcher(p).click();
+  await expect(dialog).toBeVisible();
+  await logInWith(dialog, alice.email, alice.password);
+  await expect(dialog).toHaveCount(0);
+
+  // La relecture d'avant le rejeu : le serveur répond Alice ; avant que la réponse arrive, Bruno se
+  // connecte par le même navigateur.
+  let readings = 0;
+  await p.route(
+    (url) => url.pathname === "/api/v1/me",
+    async (route) => {
+      if (route.request().method() !== "GET" || readings++ > 0) return route.fallback();
+      const response = await route.fetch();
+      const other = await p.context().request.post("/api/v1/auth/login", {
+        data: { email: bruno.email, password: bruno.password },
+      });
+      expect(other.status()).toBe(200);
+      await route.fulfill({ response });
+    },
+  );
+  const replay = p.waitForRequest(isTrash(thrown.id));
+  const reloaded = p.waitForEvent("load");
+  trash.release();
+  tree.release();
+  const sent = await replay;
+  const response = await sent.response();
+  expect(response?.status()).toBe(409);
+  expect(((await response!.json()) as ErrorBody).error).toBe("account_changed");
+  expect((await sent.allHeaders())["x-mementum-account"]).toBe(aliceId);
+  // L'onglet apprend l'autre compte, et repart de zéro : sous Bruno.
+  await reloaded;
+  await expectSignedInAs(p, bruno.name);
+  expect(readings).toBeGreaterThanOrEqual(1);
+  expect(trash.calls()).toBe(2);
+  // Rien n'a été fait, sous aucun nom.
+  expect((await getPage(aliceApi, thrown.id)).trashedAt).toBeNull();
+});
+
+test("a_gesture_made_after_another_tab_logged_in_is_refused_and_reloads_the_tab", async ({
+  browser,
+}) => {
+  // R115, fermée par le serveur (R540) : un autre onglet du navigateur se connecte sous Bruno, et
+  // l'onglet d'Alice, qui ne le sait pas encore (il n'a pas relu le compte), met une page à la
+  // corbeille. L'appel part avec le cookie de Bruno, mais nomme Alice : refusé, sans rien faire.
+  const { alice, aliceApi, space, bruno, brunoApi, brunoId } = await ownerAndMember();
+  const aliceId = (await getMe(aliceApi)).user.id;
+  const thrown = await createPage(aliceApi, { title: `Jetée ${unique()}` });
+  await setPageLevel(aliceApi, thrown.id, brunoId, "full");
+  const first = await newUser(browser, alice);
+  await first.goto(`/s/${space.id}`);
+  await expect(treeRow(first, thrown.id)).toBeVisible();
+  const other = await first.context().request.post("/api/v1/auth/login", {
+    data: { email: bruno.email, password: bruno.password },
+  });
+  expect(other.status()).toBe(200);
+
+  const answered = first.waitForResponse((response) => isTrash(thrown.id)(response.request()));
+  const reloaded = first.waitForEvent("load");
+  await (await openRowMenu(first, thrown.id, thrown.title))
+    .getByRole("menuitem", { name: "Mettre à la corbeille" })
+    .click();
+  const response = await answered;
+  expect(response.status()).toBe(409);
+  expect(response.request().headers()["x-mementum-account"]).toBe(aliceId);
+  await reloaded;
+  await expectSignedInAs(first, bruno.name);
+  // La session d'Alice, celle de l'onglet, a été fermée par la connexion de Bruno (R90) : la page
+  // est relue par Bruno, qui la voit.
+  expect((await getPage(brunoApi, thrown.id)).trashedAt).toBeNull();
+});
+
+test("the_sync_and_space_channels_name_the_account_of_the_application", async ({ browser }) => {
+  // Une WebSocket ne porte pas d'en-tête : le compte va dans l'adresse (R541), et le serveur
+  // l'accepte quand c'est celui de la session (la synchro aboutit).
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const id = (await getMe(api)).user.id;
+  const opened = await createPage(api, { title: `Ouverte ${unique()}` });
+  const p = await newUser(browser, account);
+  const sockets: string[] = [];
+  p.on("websocket", (socket) => sockets.push(socket.url()));
+  await p.goto(`/p/${opened.id}`);
+  await waitSynced(p);
+  // Celles de l'application : pas celle du rechargement à chaud de Vite.
+  const ours = () => sockets.filter((url) => /^\/(sync|events)\//.test(new URL(url).pathname));
+  const paths = () => ours().map((url) => new URL(url).pathname.split("/")[1]);
+  await expect.poll(paths).toEqual(expect.arrayContaining(["sync", "events"]));
+  for (const url of ours()) expect(new URL(url).searchParams.get("account"), url).toBe(id);
 });
 
 test("trash_and_settings_are_read_once_logged_in_again", async ({ browser }) => {
