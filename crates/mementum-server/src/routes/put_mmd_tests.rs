@@ -1,5 +1,6 @@
-//! Tests de `PUT /mmd` qui ont besoin de l'état du serveur (le hub, la file des lectures), en
-//! appelant la route elle-même : Rulings R430 (récrit) et R436.
+//! Tests de `PUT /mmd` et de la restauration d'une version qui ont besoin de l'état du serveur
+//! (le hub, la file des lectures, la file des écritures), en appelant la route elle-même :
+//! Rulings R430 (récrit), R436, R494 et R535.
 
 use std::time::{Duration, Instant};
 
@@ -293,6 +294,47 @@ async fn one_account_does_not_hold_back_another_ones_mmd() {
     }
 }
 
+/// Une version de `page` qui porte `mmd`, gardée par le store ; rend son identifiant.
+async fn version(state: &AppState, page: Uuid, mmd: &str) -> Uuid {
+    let (doc, _) = mementum_crdt::PageDoc::new_page();
+    doc.write_blocks(&mementum_md::parse(mmd).unwrap()).unwrap();
+    state
+        .store
+        .put_version(
+            page,
+            0,
+            &doc.encode_state(),
+            &[],
+            mementum_store::VersionReason::Closing,
+        )
+        .await
+        .unwrap()
+}
+
+/// La restauration de `version` par `who` sur `page`, dans sa propre tâche.
+fn restore(
+    state: &AppState,
+    who: &SessionUser,
+    page: Uuid,
+    version: Uuid,
+) -> JoinHandle<Result<StatusCode, ApiError>> {
+    let (state, who) = (
+        state.clone(),
+        SessionUser {
+            user: who.user.clone(),
+            session: who.session,
+        },
+    );
+    tokio::spawn(async move {
+        crate::routes::versions::restore(
+            State(state),
+            who,
+            Ok(Path((page.to_string(), version.to_string()))),
+        )
+        .await
+    })
+}
+
 /// L'équipe d'un test de file : une page de l'espace d'Olga, où chacun de `editors` peut modifier.
 async fn team(state: &AppState, editors: &[&str]) -> (Uuid, Uuid, Vec<SessionUser>) {
     let olga = account(state, "olga").await;
@@ -399,14 +441,22 @@ enum Ending {
     SessionEnded,
 }
 
-/// Rulings R200, R209 et R494 : une écriture longue de Tom est dans l'acteur, une deuxième attend
-/// le verrou ; ses six suivantes sont refusées sur-le-champ (sa part est prise). Puis son accès
-/// est retiré, ou sa session prend fin : la deuxième relit ses droits et sa session sous le
-/// verrou, et n'écrit pas (`404`, `401`) ; seule la première est au journal. Ces tests
-/// remplacent, pour `PUT /mmd`, les rafales des tests d'intégration de R200 et R209, que la part
-/// de deux places par compte réduit à une requête qui attend : sans voir l'acteur, ils ne
-/// savaient plus faire tomber le retrait pendant qu'elle attend.
-async fn queued_writes_stop_with(ending: Ending) {
+/// Les écritures de Tom dans la file : des `PUT /mmd`, ou des restaurations de version.
+#[derive(Debug, Clone, Copy)]
+enum Kind {
+    Mmd,
+    Restore,
+}
+
+/// Rulings R200, R209, R494 et R535 : une écriture longue de Tom est dans l'acteur, une deuxième
+/// attend le verrou ; ses six suivantes sont refusées sur-le-champ (sa part est prise). Puis son
+/// accès est retiré, ou sa session prend fin : la deuxième relit ses droits et sa session sous le
+/// verrou, et n'écrit pas (`404`, `401`) ; seule la première est au journal. Ces tests remplacent
+/// les rafales des tests d'intégration de R200 et R209, que la part de deux places par compte
+/// réduit à une requête qui attend (pour `PUT /mmd` depuis R494, pour la restauration depuis
+/// R535) : sans voir l'acteur, ils ne savaient plus faire tomber le retrait pendant qu'elle
+/// attend.
+async fn queued_writes_stop_with(kind: Kind, ending: Ending) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("m.db");
     let state = state(&dir).await;
@@ -423,24 +473,36 @@ async fn queued_writes_stop_with(ending: Ending) {
         ),
     )
     .await;
+    // Pour les restaurations : une version longue, et une courte.
+    let versions = match kind {
+        Kind::Mmd => None,
+        Kind::Restore => Some((
+            version(&state, page, &paragraphs("Alpha", 4_000)).await,
+            version(&state, page, "Tom\n").await,
+        )),
+    };
+    let send = |long: bool, mmd: String| match versions {
+        Some((alpha, short)) => restore(&state, tom, page, if long { alpha } else { short }),
+        None => put(&state, tom, page, mmd),
+    };
     state.hub.load_page(page).await.unwrap();
     let base = state.hub.calls();
-    let first = put(&state, tom, page, paragraphs("Alpha", 4_000));
+    let first = send(true, paragraphs("Alpha", 4_000));
     until("l'écriture longue n'arrive pas à l'acteur", async || {
         state.hub.calls() >= base + 2
     })
     .await;
-    let second = put(&state, tom, page, "Tom 1\n".to_string());
+    let second = send(false, "Tom 1\n".to_string());
     until("la deuxième écriture n'a pas de place", async || {
         state.page_writes.places(page) == 2
     })
     .await;
     for i in 0..6 {
-        let extra = status(put(&state, tom, page, format!("Tom {}\n", i + 2))).await;
+        let extra = status(send(false, format!("Tom {}\n", i + 2))).await;
         assert_eq!(
             extra,
             StatusCode::TOO_MANY_REQUESTS,
-            "{ending:?} : la requête {i} de trop"
+            "{kind:?}, {ending:?} : la requête {i} de trop"
         );
     }
     match ending {
@@ -461,25 +523,45 @@ async fn queued_writes_stop_with(ending: Ending) {
     assert_eq!(
         status(first).await,
         StatusCode::NO_CONTENT,
-        "{ending:?} : la première"
+        "{kind:?}, {ending:?} : la première"
     );
     let expected = match ending {
         Ending::Revoked => StatusCode::NOT_FOUND,
         Ending::SessionEnded => StatusCode::UNAUTHORIZED,
     };
-    assert_eq!(status(second).await, expected, "{ending:?} : la deuxième");
+    assert_eq!(
+        status(second).await,
+        expected,
+        "{kind:?}, {ending:?} : la deuxième"
+    );
     let written = sql(&db, "SELECT COUNT(*) FROM witness").await;
-    assert_eq!(written, 1, "{ending:?} : écritures de Tom au journal");
+    assert_eq!(
+        written, 1,
+        "{kind:?}, {ending:?} : écritures de Tom au journal"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
-    queued_writes_stop_with(Ending::Revoked).await;
+    queued_writes_stop_with(Kind::Mmd, Ending::Revoked).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mmd_writes_queued_before_the_session_ends_stop_with_it() {
-    queued_writes_stop_with(Ending::SessionEnded).await;
+    queued_writes_stop_with(Kind::Mmd, Ending::SessionEnded).await;
+}
+
+/// Pour la restauration : `restores_queued_before_a_revocation_stop_with_it` et les
+/// restaurations de `writes_queued_before_the_session_ends_stop_with_it`, tests d'intégration
+/// de R200 et R209 (`tests/page_writes.rs`), passés ici avec R535.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restores_queued_before_a_revocation_stop_with_it() {
+    queued_writes_stop_with(Kind::Restore, Ending::Revoked).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restores_queued_before_the_session_ends_stop_with_it() {
+    queued_writes_stop_with(Kind::Restore, Ending::SessionEnded).await;
 }
 
 /// Ruling R535, constat M2 de la re-relecture du tour 6 : une restauration prend sa place dans la
@@ -494,60 +576,66 @@ async fn a_restore_takes_a_place_of_the_account() {
     let state = state(&dir).await;
     let (page, _, users) = team(&state, &["tom", "mona"]).await;
     let (tom, mona) = (&users[0], &users[1]);
-    let version = {
-        let (doc, _) = mementum_crdt::PageDoc::new_page();
-        doc.write_blocks(&mementum_md::parse("Version\n").unwrap())
-            .unwrap();
-        state
-            .store
-            .put_version(
-                page,
-                0,
-                &doc.encode_state(),
-                &[],
-                mementum_store::VersionReason::Closing,
-            )
-            .await
-            .unwrap()
-    };
-    let restore = |who: &SessionUser| {
-        let (state, who) = (
-            state.clone(),
-            SessionUser {
-                user: who.user.clone(),
-                session: who.session,
-            },
-        );
-        tokio::spawn(async move {
-            crate::routes::versions::restore(
-                State(state),
-                who,
-                Ok(Path((page.to_string(), version.to_string()))),
-            )
-            .await
-        })
-    };
+    let version = version(&state, page, "Version\n").await;
     // Les deux places de Tom, prises (deux de ses écritures en attente).
     let held: Vec<_> = (0..2)
         .map(|_| state.page_writes.reserve(page, tom.user.id).unwrap())
         .collect();
-    let refused = status(restore(tom)).await;
+    let refused = status(restore(&state, tom, page, version)).await;
     assert_eq!(
         refused,
         StatusCode::TOO_MANY_REQUESTS,
         "la restauration de Tom"
     );
-    assert_eq!(
-        status(restore(mona)).await,
-        StatusCode::NO_CONTENT,
-        "celle de Mona"
-    );
+    let monas = status(restore(&state, mona, page, version)).await;
+    assert_eq!(monas, StatusCode::NO_CONTENT, "celle de Mona");
     let monas = status(put(&state, mona, page, "Mona\n".to_string())).await;
     assert_eq!(monas, StatusCode::NO_CONTENT, "le PUT /mmd de Mona");
     drop(held);
-    assert_eq!(
-        status(restore(tom)).await,
-        StatusCode::NO_CONTENT,
-        "Tom, ses places rendues"
+    let again = status(restore(&state, tom, page, version)).await;
+    assert_eq!(again, StatusCode::NO_CONTENT, "Tom, ses places rendues");
+}
+
+/// Ruling R200 : le verrou est par page. Pendant que la file d'une page est tenue (son verrou
+/// pris), un `PUT /mmd` et une restauration sur une autre page aboutissent, et une restauration
+/// sur la page tenue attend. Remplace le test d'intégration du même nom (`tests/page_writes.rs`),
+/// qui envoyait une rafale de vingt-quatre restaurations d'un même compte : depuis R535, vingt-deux
+/// y reçoivent `429`. Si le verrou était commun aux pages, l'écriture de l'autre page attendrait
+/// sans fin : le test échoue au bout d'une minute plutôt que de se bloquer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_pages_never_wait_for_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(&dir).await;
+    let (busy, space, users) = team(&state, &["tom"]).await;
+    let tom = &users[0];
+    let other = page(&state, space, &tom.user, &[]).await;
+    let (busy_version, other_version) = (
+        version(&state, busy, "Occupée\n").await,
+        version(&state, other, "Autre\n").await,
     );
+    let held = state
+        .page_writes
+        .reserve(busy, Uuid::now_v7())
+        .unwrap()
+        .lock()
+        .await;
+    let waiting = restore(&state, tom, busy, busy_version);
+    until(
+        "la restauration de la page tenue n'a pas de place",
+        async || state.page_writes.places(busy) == 2,
+    )
+    .await;
+    let bound = Duration::from_secs(60);
+    let elsewhere =
+        tokio::time::timeout(bound, status(put(&state, tom, other, "Ailleurs\n".into())))
+            .await
+            .expect("le PUT /mmd de l'autre page a attendu la page tenue");
+    assert_eq!(elsewhere, StatusCode::NO_CONTENT);
+    let elsewhere = tokio::time::timeout(bound, status(restore(&state, tom, other, other_version)))
+        .await
+        .expect("la restauration de l'autre page a attendu la page tenue");
+    assert_eq!(elsewhere, StatusCode::NO_CONTENT);
+    assert!(!waiting.is_finished(), "la page tenue n'a pas attendu");
+    drop(held);
+    assert_eq!(status(waiting).await, StatusCode::NO_CONTENT);
 }

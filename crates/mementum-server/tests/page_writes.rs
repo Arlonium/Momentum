@@ -24,7 +24,6 @@ use axum::http::{Request, StatusCode, header};
 use common::sync::{Loops, SLOW_DISK, members, open_app, open_app_with, user};
 use common::{Account, Team, TestApp, WAIT, exec_sql, json_request, query_i64};
 use mementum_acl::Level;
-use mementum_crdt::PageDoc;
 use tokio::task::JoinSet;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -35,23 +34,10 @@ const BURST: usize = 24;
 /// Paragraphes de chaque contenu : assez pour qu'une écriture prenne du temps dans l'acteur.
 const PARAGRAPHS: usize = 200;
 
-/// Un MMD de [`PARAGRAPHS`] paragraphes marqués de `tag`.
-fn paragraphs(tag: &str) -> String {
-    many_paragraphs(tag, PARAGRAPHS)
-}
-
 /// Un MMD de `n` paragraphes marqués de `tag`.
 fn many_paragraphs(tag: &str, n: usize) -> String {
     let lines: Vec<String> = (0..n).map(|i| format!("{tag} {i}")).collect();
     lines.join("\n\n") + "\n"
-}
-
-/// L'état Yjs d'une page qui porte `mmd`.
-fn state_of(mmd: &str) -> Vec<u8> {
-    let (page, _) = PageDoc::new_page();
-    page.write_blocks(&mementum_md::parse(mmd).unwrap())
-        .unwrap();
-    page.encode_state()
 }
 
 /// Une requête de `by`, telle qu'un navigateur l'envoie.
@@ -145,64 +131,13 @@ async fn burst_then(
     statuses
 }
 
-/// Ce qu'on attend d'une rafale, une fois l'accès retiré : au plus une écriture faite sans
-/// l'accès (celle qui avait passé son second contrôle juste avant le retrait), et toutes les
-/// autres réponses sont un `204` (avant le retrait) ou un `404` (après), jamais autre chose.
-async fn assert_the_burst_stopped(t: &TestApp, what: &str, statuses: &[StatusCode]) {
-    let written = statuses
-        .iter()
-        .filter(|s| **s == StatusCode::NO_CONTENT)
-        .count();
-    let refused = statuses
-        .iter()
-        .filter(|s| **s == StatusCode::NOT_FOUND)
-        .count();
-    let (with, without) = (witnessed(t, true).await, witnessed(t, false).await);
-    assert!(
-        without <= 1 && written + refused == statuses.len() && refused > 0,
-        "{what} : {written} réponses 204, {refused} 404, sur {} ; écritures au journal avec \
-         l'accès : {with}, sans l'accès : {without} ; statuts : {statuses:?}",
-        statuses.len()
-    );
-}
-
-/// Le constat S1 pour la restauration, avec l'attente inverse. Tom (« Peut modifier ») envoie
-/// d'un coup des restaurations de deux versions en alternance ; Olga retire son accès dès que la
-/// première a abouti. Après le retrait, au plus une restauration est encore écrite ; les autres
-/// répondent `404`.
-#[tokio::test]
-async fn restores_queued_before_a_revocation_stop_with_it() {
-    let t = open_app().await;
-    let team = Team::new(&t).await;
-    let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Edit)];
-    let page = team.page(None, "Restaurations", &grants).await;
-    let mut versions = Vec::new();
-    for tag in ["Alpha", "Bêta"] {
-        let state = state_of(&paragraphs(tag));
-        let version = team
-            .store
-            .put_version(page, 0, &state, &[], mementum_store::VersionReason::Closing)
-            .await
-            .unwrap();
-        versions.push(version);
-    }
-    witness(&t, page, team.tom.id).await;
-
-    let requests = (0..BURST)
-        .map(|i| {
-            let uri = format!("/api/v1/pages/{page}/versions/{}/restore", versions[i % 2]);
-            request(&team.tom, Request::post(uri), Body::empty())
-        })
-        .collect();
-    let statuses = burst_then_revoke(&t, &team, page, requests).await;
-    assert_the_burst_stopped(&t, "restaurations", &statuses).await;
-}
-
-// Le même constat pour `PUT /mmd`, la deuxième écriture en attente relisant ses droits sous le
-// verrou : `mmd_writes_queued_before_a_revocation_stop_with_it`, dans `src/routes/put_mmd_tests.rs`
-// (Ruling R494 : un compte n'a plus que deux places dans la file d'une page, une qui écrit, une
-// qui attend ; seul un test qui voit l'acteur sait faire tomber le retrait pendant que la deuxième
-// attend).
+// Les rafales de R200 (le retrait de l'accès) et de R209 (la fin de la session) vivent dans
+// `src/routes/put_mmd_tests.rs`, en tests de route qui voient l'acteur : pour `PUT /mmd` depuis
+// R494, pour la restauration depuis R535 (`mmd_writes_queued_before_a_revocation_stop_with_it`,
+// `restores_queued_before_a_revocation_stop_with_it`, et leurs pendants pour la fin de la
+// session). Un compte n'a plus que deux places dans la file d'une page, une qui écrit, une qui
+// attend : une rafale d'un compte n'y laisse qu'une requête en attente, et seul un test qui voit
+// l'acteur sait faire tomber le retrait pendant qu'elle attend.
 
 /// Ruling R485, après R494 : sur un disque lent (`SLOW_DISK`), pendant que Mona crée des pages
 /// ailleurs dans l'espace, en six boucles, Tom récrit la page par deux `PUT /mmd` de front (ses
@@ -222,7 +157,10 @@ async fn mmd_writes_amid_other_writes_on_a_slow_disk_never_fail() {
     let page = team.page(None, "Récritures", &grants).await;
     let busy = team.page(None, "Agitée", &[members(Level::Edit)]).await;
     witness(&t, page, team.tom.id).await;
-    let contents = [paragraphs("Alpha"), paragraphs("Bêta")];
+    let contents = [
+        many_paragraphs("Alpha", PARAGRAPHS),
+        many_paragraphs("Bêta", PARAGRAPHS),
+    ];
 
     let requests = (0..mementum_server::MAX_ACCOUNT_WRITES)
         .map(|i| {
@@ -319,162 +257,9 @@ async fn requests_cut_by_the_client_keep_the_lock_until_written() {
     );
 }
 
-/// Le verrou est par page : pendant qu'une page écrit une rafale de restaurations, une écriture
-/// sur une autre page aboutit sans attendre la fin de la rafale.
-#[tokio::test]
-async fn two_pages_never_wait_for_each_other() {
-    let t = open_app().await;
-    let team = Team::new(&t).await;
-    let grants = [user(&team.olga, Level::Full)];
-    let busy = team.page(None, "Occupée", &grants).await;
-    let other = team.page(None, "Autre", &grants).await;
-    let mut versions = Vec::new();
-    for tag in ["Alpha", "Bêta"] {
-        let state = state_of(&paragraphs(tag));
-        let version = team
-            .store
-            .put_version(busy, 0, &state, &[], mementum_store::VersionReason::Closing)
-            .await
-            .unwrap();
-        versions.push(version);
-    }
-
-    let done = Arc::new(AtomicUsize::new(0));
-    let mut burst = JoinSet::new();
-    for i in 0..BURST {
-        let uri = format!("/api/v1/pages/{busy}/versions/{}/restore", versions[i % 2]);
-        let req = request(&team.olga, Request::post(uri), Body::empty());
-        let (router, done) = (t.router.clone(), done.clone());
-        burst.spawn(async move {
-            let status = router.oneshot(req).await.unwrap().status();
-            done.fetch_add(1, Ordering::SeqCst);
-            status
-        });
-    }
-    // La rafale est en route : une restauration a abouti.
-    let deadline = tokio::time::Instant::now() + WAIT;
-    while done.load(Ordering::SeqCst) == 0 {
-        assert!(tokio::time::Instant::now() < deadline, "rafale bloquée");
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    team.olga
-        .put_mmd(&other.to_string(), "Ailleurs\n")
-        .await
-        .assert_status(StatusCode::NO_CONTENT);
-    let finished = done.load(Ordering::SeqCst);
-    assert!(
-        finished < BURST,
-        "l'écriture de l'autre page a attendu la fin de la rafale ({finished} sur {BURST})"
-    );
-    while let Some(status) = burst.join_next().await {
-        assert_eq!(status.unwrap(), StatusCode::NO_CONTENT);
-    }
-}
-
-/// Pose le témoin d'une session : chaque mise à jour que `who` écrit au journal de `page` y note,
-/// dans la transaction qui l'écrit, si la session `session` (son hachage) est encore en base.
-async fn session_witness(t: &TestApp, page: Uuid, who: Uuid, session: [u8; 32]) {
-    let hex: String = session.iter().map(|b| format!("{b:02x}")).collect();
-    exec_sql(
-        &t.db_path(),
-        &format!(
-            "CREATE TABLE witness (seq INTEGER NOT NULL, granted INTEGER NOT NULL); \
-             CREATE TRIGGER witness_writes AFTER INSERT ON doc_updates \
-             WHEN NEW.node_id = '{page}' AND NEW.actor_id = '{who}' \
-             BEGIN INSERT INTO witness VALUES (NEW.seq, \
-               (SELECT COUNT(*) FROM sessions WHERE token_hash = x'{hex}')); \
-             END;"
-        ),
-    )
-    .await;
-}
-
-/// Comment la session de Tom prend fin, pendant que ses écritures attendent.
-#[derive(Debug, Clone, Copy)]
-enum Ending {
-    /// Il se déconnecte.
-    LogOut,
-    /// La titulaire du compte, d'un autre navigateur, change son mot de passe : toutes les
-    /// sessions du compte sont fermées.
-    PasswordChanged,
-}
-
-/// Constat I1 de la relecture de la piste S (Ruling R209), avec l'attente inverse. Tom envoie
-/// d'un coup 24 restaurations, puis sa session prend fin : déconnexion, ou changement du mot de
-/// passe par la titulaire du compte. Chaque requête prenait le verrou à son tour, relisait des
-/// droits que le compte a toujours, et écrivait : 23 écritures sur 24 après la déconnexion. La
-/// session est relue sous le verrou : au plus une écriture sans elle, les autres répondent `401`.
-/// Pour `PUT /mmd` : `mmd_writes_queued_before_the_session_ends_stop_with_it`, dans
-/// `src/routes/put_mmd_tests.rs` (Ruling R494).
-#[tokio::test]
-async fn writes_queued_before_the_session_ends_stop_with_it() {
-    {
-        for ending in [Ending::LogOut, Ending::PasswordChanged] {
-            let what = format!("restaurations ; {ending:?}");
-            let t = open_app().await;
-            let team = Team::new(&t).await;
-            let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Edit)];
-            let page = team.page(None, &what, &grants).await;
-            let cookie = team.tom.browser.session().expect("une session");
-            let session = mementum_server::auth::token_hash(&cookie).unwrap();
-            session_witness(&t, page, team.tom.id, session).await;
-            let mut versions = Vec::new();
-            for tag in ["Alpha", "Bêta"] {
-                let state = state_of(&paragraphs(tag));
-                let version = team
-                    .store
-                    .put_version(page, 0, &state, &[], mementum_store::VersionReason::Closing)
-                    .await
-                    .unwrap();
-                versions.push(version);
-            }
-            let requests: Vec<Request<Body>> = (0..BURST)
-                .map(|i| {
-                    let uri = format!("/api/v1/pages/{page}/versions/{}/restore", versions[i % 2]);
-                    request(&team.tom, Request::post(uri), Body::empty())
-                })
-                .collect();
-            let statuses = burst_then(&t, requests, async {
-                match ending {
-                    Ending::LogOut => {
-                        team.tom
-                            .browser
-                            .log_out()
-                            .await
-                            .assert_status(StatusCode::NO_CONTENT);
-                    }
-                    Ending::PasswordChanged => {
-                        let owner = t.browser();
-                        owner
-                            .log_in("tom@exemple.fr", common::PASSWORD)
-                            .await
-                            .assert_status(StatusCode::OK);
-                        owner
-                            .change_password(common::PASSWORD, "un-autre-mot-de-passe")
-                            .await
-                            .assert_status(StatusCode::NO_CONTENT);
-                    }
-                }
-            })
-            .await;
-            let written = statuses
-                .iter()
-                .filter(|s| **s == StatusCode::NO_CONTENT)
-                .count();
-            let refused = statuses
-                .iter()
-                .filter(|s| **s == StatusCode::UNAUTHORIZED)
-                .count();
-            let (with, without) = (witnessed(&t, true).await, witnessed(&t, false).await);
-            assert!(
-                without <= 1 && written + refused == statuses.len() && refused > 0,
-                "{what} : {written} réponses 204, {refused} 401, sur {} ; écritures au journal \
-                 avec la session : {with}, sans elle : {without} ; statuts : {statuses:?}",
-                statuses.len()
-            );
-        }
-    }
-}
+// Le verrou par page (R200) : `two_pages_never_wait_for_each_other`, dans
+// `src/routes/put_mmd_tests.rs` (R535 : une rafale de restaurations d'un même compte y reçoit
+// `429` au-delà de deux).
 
 /// Constat I3 de la relecture de la piste S (Ruling R259) : l'écriture complète d'une page est
 /// quadratique en nombre de blocs frères (30 000 paragraphes d'un caractère, 90 Ko : 50 s
