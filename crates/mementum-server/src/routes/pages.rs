@@ -831,8 +831,10 @@ fn unregistered_prop(name: &str, place: String, target: &str, known: &[PropSpec]
         StatusCode::UNPROCESSABLE_ENTITY,
         ErrorCode::InvalidBlocks,
         format!(
-            "prop « {name} » hors registre sur {place} : la retirer ({allowed}). PUT /mmd ne \
-             l'écrit pas, car un navigateur l'effacerait du document dès qu'il modifie le bloc"
+            "prop « {} » hors registre sur {place} : la retirer ({allowed}). PUT /mmd ne \
+             l'écrit pas, car un navigateur l'effacerait du document dès qu'il modifie le bloc",
+            // Ruling R434 : un extrait du nom, jamais tout le nom (il vient du corps).
+            mementum_md::excerpt(name)
         ),
     )
 }

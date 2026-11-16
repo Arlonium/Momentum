@@ -294,9 +294,16 @@ struct Reader {
     /// bâtir un arbre plus profond (l'entrée, non canonique, est refusée).
     excess_links: usize,
     mention: Option<(String, String, String)>,
-    /// La première erreur de la lecture : la lecture va au bout, sans elle.
+    /// Les styles du texte lu sous le `<span>` ouvert, s'il y en a un (Ruling R434).
+    span_text: Option<Styles>,
+    /// La première erreur de la lecture, qui l'arrête.
     error: Option<String>,
 }
+
+/// Le refus d'un `<span>` non canonique (Ruling R434).
+const SPAN_REFUSED: &str = "« <span> » non canonique : une balise « <span> » ne porte qu'un \
+     texte, d'une seule mise en forme, sans lien, mention, formule, saut de ligne ni autre \
+     « <span> » ; écrire une balise par texte";
 
 impl Reader {
     /// L'attribut `key` (`color` ou `bg`) d'un `<span>` : refusé au-delà de
@@ -318,8 +325,52 @@ impl Reader {
 
     fn push(&mut self, inline: Inline) {
         if let Some(frame) = self.frames.last_mut() {
+            // Un texte qui suit un texte de mêmes styles s'y ajoute, comme la normalisation les
+            // fondrait : un `Inline` par événement de pulldown-cmark coûtait près de 200 octets par
+            // octet d'entrée (une suite de crochets ouvrants, un événement chacun ; Ruling R434).
+            if let (
+                Inline::Text { text, styles },
+                Some(Inline::Text {
+                    text: last,
+                    styles: before,
+                }),
+            ) = (&inline, frame.1.last_mut())
+                && styles == before
+            {
+                last.push_str(text);
+                return;
+            }
             frame.1.push(inline);
         }
+    }
+
+    /// Ruling R434 : sous un `<span>`, la forme canonique n'a qu'un texte, d'une seule mise en
+    /// forme (le rendu écrit une balise par texte). Toute autre chose sous un `<span>` (un autre
+    /// texte, un lien, une mention, une formule, un saut de ligne, un autre `<span>`) est refusée
+    /// sur-le-champ : chaque texte lu sous un `<span>` recevait sa copie des couleurs, et le rendu
+    /// de vérification en récrivait une balise, si bien que 2 Mio de plages alternées sous deux
+    /// couleurs coûtaient 1,2 Gio avant d'être refusés.
+    fn refuse_in_span(&mut self) -> bool {
+        if self.st.spans.is_empty() {
+            return false;
+        }
+        self.error.get_or_insert_with(|| SPAN_REFUSED.to_string());
+        true
+    }
+
+    /// Un texte de styles `styles` : sous un `<span>`, le premier, ou un morceau du même.
+    fn styled_text(&mut self, text: String, styles: Styles) {
+        if !self.st.spans.is_empty() {
+            match &self.span_text {
+                None => self.span_text = Some(styles.clone()),
+                Some(first) if *first == styles => {}
+                Some(_) => {
+                    self.refuse_in_span();
+                    return;
+                }
+            }
+        }
+        self.push(Inline::Text { text, styles });
     }
 
     fn text(&mut self, text: &str) {
@@ -327,16 +378,16 @@ impl Reader {
             m.2.push_str(text);
         } else {
             let styles = self.st.styles();
-            self.push(Inline::Text {
-                text: text.into(),
-                styles,
-            });
+            self.styled_text(text.into(), styles);
         }
     }
 
     /// Ouvre un lien. Une adresse de plus de [`MAX_HREF_BYTES`] octets est refusée (Ruling R431),
     /// comme la garde des mises à jour la refuse dans Yjs.
     fn open_link(&mut self, href: String) {
+        if self.refuse_in_span() {
+            return;
+        }
         if href.len() > MAX_HREF_BYTES {
             self.error.get_or_insert_with(|| {
                 format!(
@@ -354,6 +405,9 @@ impl Reader {
     }
 
     fn close_link(&mut self) {
+        if self.refuse_in_span() {
+            return;
+        }
         if self.excess_links > 0 {
             self.excess_links -= 1;
         } else if self.frames.len() > 1
@@ -375,10 +429,13 @@ impl Reader {
                 "code" => dec(&mut self.st.code),
                 "span" => {
                     self.st.spans.pop();
+                    self.span_text = None;
                 }
                 "a" => self.close_link(),
                 "mention" => {
-                    if let Some((kind, id, label)) = self.mention.take() {
+                    if let Some((kind, id, label)) = self.mention.take()
+                        && !self.refuse_in_span()
+                    {
                         self.push(Inline::Mention { kind, id, label });
                     }
                 }
@@ -393,6 +450,7 @@ impl Reader {
             return self.text(h);
         }
         match (tag.name, tag.self_closing) {
+            ("br" | "math" | "span" | "mention", _) if self.refuse_in_span() => {}
             ("br", true) => self.push(Inline::HardBreak),
             ("math", true) => self.push(Inline::Math {
                 latex: attr(&tag, "latex").unwrap_or_default(),
@@ -405,6 +463,7 @@ impl Reader {
             ("span", false) => {
                 let (color, bg) = (self.color(&tag, "color"), self.color(&tag, "bg"));
                 self.st.open_span(color, bg);
+                self.span_text = None;
             }
             ("a", false) => self.open_link(attr(&tag, "href").unwrap_or_default()),
             ("mention", false) => {
@@ -428,22 +487,29 @@ pub(crate) fn parse_inline(src: &str) -> Result<Vec<Inline>, String> {
         frames: vec![(String::new(), Vec::new())],
         excess_links: 0,
         mention: None,
+        span_text: None,
         error: None,
     };
     for event in Parser::new_ext(src, OPTIONS) {
+        // La première erreur arrête la lecture (Ruling R434) : la suite ne changerait rien au
+        // refus, et coûterait autant que l'entrée.
+        if r.error.is_some() {
+            break;
+        }
         match event {
             Event::Text(t) => r.text(&t),
             Event::Code(t) => {
                 let mut styles = r.st.styles();
                 styles.code = true;
-                r.push(Inline::Text {
-                    text: t.to_string(),
-                    styles,
-                });
+                r.styled_text(t.to_string(), styles);
             }
-            Event::InlineMath(t) | Event::DisplayMath(t) => r.push(Inline::Math {
-                latex: t.to_string(),
-            }),
+            Event::InlineMath(t) | Event::DisplayMath(t) => {
+                if !r.refuse_in_span() {
+                    r.push(Inline::Math {
+                        latex: t.to_string(),
+                    });
+                }
+            }
             Event::SoftBreak | Event::HardBreak => r.text("\n"),
             Event::Start(MdTag::Emphasis) => r.st.italic += 1,
             Event::End(TagEnd::Emphasis) => r.st.italic = r.st.italic.saturating_sub(1),
@@ -457,6 +523,9 @@ pub(crate) fn parse_inline(src: &str) -> Result<Vec<Inline>, String> {
             _ => {}
         }
     }
+    // Un `<span>` resté ouvert n'empêche pas de refermer les liens : l'entrée, non canonique, est
+    // refusée par la vérification de `parse`.
+    r.st.spans.clear();
     while r.frames.len() > 1 {
         r.close_link();
     }

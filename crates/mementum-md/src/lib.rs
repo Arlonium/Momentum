@@ -20,5 +20,5 @@ pub use model::{
     PropValue, Props, RenderOpts, Rendered, Styles, Table, block_text, cell_rowspan, cell_span,
     normalize,
 };
-pub use parse::{MAX_DEPTH, parse};
+pub use parse::{EXCERPT_CHARS, MAX_DEPTH, excerpt, parse};
 pub use render::render;

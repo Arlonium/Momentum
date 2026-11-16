@@ -263,3 +263,50 @@ fn an_href_longer_than_the_bound_is_refused() {
     rejected(&format!("Un\n\n<a href=\"{over} \">a</a>\n"), 3, &hint);
     rejected(&format!("| a |\n| --- |\n| [b]({over}) |\n"), 3, &hint);
 }
+
+/// Ruling R434 : sous un `<span>`, la forme canonique n'a qu'un texte, d'une seule mise en forme
+/// (le rendu écrit une balise par texte). Le reste est refusé dès sa lecture, avec ce qu'il faut
+/// écrire ; la forme canonique se relit.
+#[test]
+fn a_span_holds_a_single_text() {
+    use mementum_md::{RenderOpts, render};
+    let hint = "une balise par texte";
+    for refused in [
+        "<span color=\"red\">a<em>b</em></span>\n",
+        "<span color=\"red\">a*b*</span>\n",
+        "<span color=\"red\">[a](u)</span>\n",
+        "<span color=\"red\"><span bg=\"blue\">a</span></span>\n",
+        "<span color=\"red\">a<br/>b</span>\n",
+        "<span color=\"red\"><mention type=\"user\" id=\"u\">a</mention></span>\n",
+        "<span color=\"red\">$x$</span>\n",
+    ] {
+        rejected(refused, 1, hint);
+    }
+    let canonical = "<span color=\"red\">a</span><span color=\"red\"><em>b</em></span> \
+                     [<span bg=\"blue\">c</span>](u) <span color=\"red\">`d`</span>\n";
+    let blocks = parse(canonical).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(render(&blocks, RenderOpts::default()).markdown, canonical);
+}
+
+/// Ruling R434 : le message d'une erreur ne recopie jamais une longue part de l'entrée : un extrait
+/// pris autour du premier écart, avec sa colonne, pour une ligne non canonique ; un extrait coupé
+/// pour toute citation.
+#[test]
+fn an_error_quotes_an_excerpt_of_the_input() {
+    use mementum_md::EXCERPT_CHARS;
+    // Non canonique à la colonne 9 : l'extrait commence avant, et s'arrête bien avant la fin.
+    let line = format!("<u>a</u>~~b~~{}\n", "x".repeat(100_000));
+    let error = parse(&line).unwrap_err();
+    assert!(error.message.len() < 400, "{}", error.message);
+    assert!(error.message.contains("colonne"), "{}", error.message);
+    assert!(error.message.contains("<u>a</u>"), "{}", error.message);
+    // Une citation longue de l'entrée (une largeur de tableau illisible) est coupée.
+    let widths = format!("| a |\n| --- |\n{{widths=\"{}\"}}\n", "y".repeat(100_000));
+    let error = parse(&widths).unwrap_err();
+    assert!(error.message.contains("largeur"), "{}", error.message);
+    assert!(
+        error.message.chars().count() <= EXCERPT_CHARS + 40,
+        "{}",
+        error.message
+    );
+}

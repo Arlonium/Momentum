@@ -60,10 +60,54 @@ impl<'a> Line<'a> {
     }
 }
 
+/// Caractères d'un extrait de l'entrée cité dans un message d'erreur (Ruling R434).
+pub const EXCERPT_CHARS: usize = 60;
+
+/// Caractères d'un message d'erreur, au plus (Ruling R434).
+const MAX_MESSAGE_CHARS: usize = 400;
+
+/// Les [`EXCERPT_CHARS`] premiers caractères de `text`, suivis de « … » s'il en avait plus.
+pub fn excerpt(text: &str) -> String {
+    match text.char_indices().nth(EXCERPT_CHARS) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_string(),
+    }
+}
+
+/// Une erreur de lecture. Son message cite des extraits de l'entrée, entre « et » : chacun est
+/// coupé à [`EXCERPT_CHARS`] caractères, et le message à [`MAX_MESSAGE_CHARS`] (Ruling R434). Le
+/// serveur rend le message tel quel dans le corps du refus : recopier une ligne de 2 Mio faisait
+/// une réponse de 249 Mo.
 fn err(line: usize, message: impl Into<String>) -> MmdError {
     MmdError {
         line,
-        message: message.into(),
+        message: cut_quotes(&message.into()),
+    }
+}
+
+/// Coupe les extraits cités d'un message, puis le message (voir [`err`]).
+fn cut_quotes(message: &str) -> String {
+    let mut out = String::new();
+    let mut rest = message;
+    while let Some(open) = rest.find('«') {
+        let after = open + '«'.len_utf8();
+        out.push_str(&rest[..after]);
+        rest = &rest[after..];
+        let close = rest.find('»').unwrap_or(rest.len());
+        let quoted = &rest[..close];
+        match quoted.char_indices().nth(EXCERPT_CHARS) {
+            Some((end, _)) => {
+                out.push_str(&quoted[..end]);
+                out.push_str("… ");
+            }
+            None => out.push_str(quoted),
+        }
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    match out.char_indices().nth(MAX_MESSAGE_CHARS) {
+        Some((end, _)) => format!("{}…", &out[..end]),
+        None => out,
     }
 }
 
@@ -98,11 +142,45 @@ fn verify(mmd: &str, blocks: &[Block]) -> Result<(), MmdError> {
     let message = match (got.get(k), want.get(k)) {
         (Some(&""), Some(_)) => "ligne vide en trop".to_string(),
         (Some(_), Some(&"")) => "ligne vide attendue".to_string(),
-        (Some(_), Some(w)) => format!("forme non canonique : écrire « {w} »"),
+        (Some(g), Some(w)) => non_canonical(g, w),
         (Some(_), None) => "texte en trop".to_string(),
         (None, _) => "texte incomplet".to_string(),
     };
     Err(err(k + 1, message))
+}
+
+/// Le message d'une ligne non canonique : la ligne attendue, ou, si elle est longue, un extrait
+/// pris autour du premier écart, avec sa colonne (Ruling R434).
+fn non_canonical(got: &str, want: &str) -> String {
+    if want.chars().count() <= EXCERPT_CHARS {
+        return format!("forme non canonique : écrire « {want} »");
+    }
+    // Le premier caractère qui diffère, et l'extrait qui commence un peu avant.
+    let (column, at) = got
+        .char_indices()
+        .zip(want.char_indices())
+        .enumerate()
+        .find(|(_, ((_, a), (_, b)))| a != b)
+        .map(|(column, (_, (at, _)))| (column, at))
+        .unwrap_or_else(|| {
+            let common = got.chars().count().min(want.chars().count());
+            let at = want
+                .char_indices()
+                .nth(common)
+                .map_or(want.len(), |(i, _)| i);
+            (common, at)
+        });
+    let start = want[..at]
+        .char_indices()
+        .rev()
+        .nth(EXCERPT_CHARS / 3)
+        .map_or(0, |(i, _)| i);
+    let lead = if start > 0 { "…" } else { "" };
+    format!(
+        "forme non canonique à la colonne {} : écrire « {lead}{} »",
+        column + 1,
+        excerpt(&want[start..])
+    )
 }
 
 // ------------------------------------------------------------- les formes
