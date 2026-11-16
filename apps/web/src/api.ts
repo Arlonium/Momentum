@@ -243,9 +243,10 @@ async function sessionChangesSettle(): Promise<boolean> {
  *   compte sûr (`acting` : celui de l'application, quand la session était à lui, hors d'une
  *   déconnexion), que ce compte n'ait pas changé depuis (ni un autre, ni la déconnexion), et que
  *   le compte relu à l'instant (`GET /api/v1/me`) soit le sien.
- * Hors des routes de session, une session qui s'ouvre ou se ferme est attendue avant de juger, et
- * encore après la relecture : sa réponse peut rendre le refus ancien, ou changer le compte de la
- * session ; à la borne, le refus est jugé sans elle, et ne repart pas. Un échec de la relecture
+ * Hors des routes de session, une session qui s'ouvre ou se ferme est attendue avant de juger : sa
+ * réponse peut rendre le refus ancien, ou changer le compte ; à la borne, le refus est jugé sans
+ * elle, et ne repart pas. Une session qui s'ouvre pendant la relecture est attendue de même, puis
+ * le compte est relu une seconde fois (R462). Un échec de la relecture
  * est levé à la place du refus : l'appel le dit (un refus de session de la relecture a été jugé
  * par elle, et a demandé la connexion s'il le fallait).
  */
@@ -259,10 +260,15 @@ async function judge(
   if (!(await sessionChangesSettle())) return sent.generation === generation ? "lost" : "stale";
   if (sent.generation === generation) return "lost";
   if (replays > 0 || sent.account === null || sent.epoch !== epoch) return "stale";
-  const verified = await readSessionAccount();
-  // Une session de l'onglet qui s'ouvre pendant la relecture : le serveur a pu poser son cookie
-  // avant que la page lise sa réponse. On attend son issue, puis le compte dit si l'on repart.
-  if (!(await sessionChangesSettle())) return "stale";
+  let verified = await readSessionAccount();
+  if (changing.size > 0) {
+    // Une session de l'onglet s'ouvre ou se ferme pendant la relecture : le serveur a pu poser son
+    // cookie avant que la page lise sa réponse, et la relecture, partie avant, ne le dit pas. On
+    // attend son issue, puis on relit : le rejeu suit toujours de près la relecture qui le permet.
+    if (!(await sessionChangesSettle()) || sent.epoch !== epoch) return "stale";
+    verified = await readSessionAccount();
+    if (changing.size > 0) return "stale";
+  }
   return verified === sent.account && sent.epoch === epoch ? "replay" : "stale";
 }
 

@@ -665,12 +665,34 @@ test("a_replay_waits_for_a_login_of_the_tab_in_course_and_goes_if_it_is_the_same
   reading.answer(200, me("alice"));
   await flush();
   expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
-  // C'est encore Alice : le titre part, sous la session qu'elle vient d'ouvrir.
+  // C'est encore Alice : le compte est relu sous la session qu'elle vient d'ouvrir (la première
+  // relecture est partie avant elle), puis le titre part.
   opening.answer(200, me("alice"));
   await login;
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
   (await waiting("PATCH", "/api/v1/pages/p1")).answer(200, page("p1", { title: "Titre d'Alice" }));
   await expect(write).resolves.toMatchObject({ title: "Titre d'Alice" });
   expect(count("PATCH", "/api/v1/pages/p1")).toBe(2);
+  expect(count("GET", "/api/v1/me")).toBe(3);
+});
+
+test("a_replay_reads_the_account_again_after_a_login_of_the_tab_that_crossed_the_reading", async () => {
+  // Si la seconde relecture, sous la session neuve, trouve Bruno (un autre onglet), rien ne part.
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  const login = api.logIn({ email: "alice@exemple.fr", password: "mot-de-passe" });
+  const opening = await waiting("POST", "/api/v1/auth/login");
+  reading.answer(200, me("alice"));
+  opening.answer(200, me("alice"));
+  await login;
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
 });
 
 test("a_stale_refusal_waits_for_a_login_of_the_tab_in_course_before_reading_the_account", async () => {
