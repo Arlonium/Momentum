@@ -13,7 +13,7 @@
 // La formule s'affiche dans la ligne ; plus large que la ligne, elle défile en dedans (elle était
 // coupée sans rien dire).
 import { createReactInlineContentSpec } from "@blocknote/react";
-import { NodeSelection } from "prosemirror-state";
+import { NodeSelection, TextSelection } from "prosemirror-state";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { MementumEditor } from "../debug";
 import { BlockPopover } from "./BlockPopover";
@@ -270,11 +270,12 @@ function OpenInlineMath({
     const anchor = open.returnTo === "anchor" && alive ? target.element : null;
     anchor?.focus();
     if (anchor !== null && document.activeElement === anchor) return;
+    // Le curseur juste après la formule, où la frappe reprend.
     if (alive) {
       const pos = target.getPos();
       if (pos !== undefined) {
         try {
-          editor.transact((tr) => tr.setSelection(NodeSelection.create(tr.doc, pos)));
+          editor.transact((tr) => tr.setSelection(TextSelection.create(tr.doc, pos + 1)));
         } catch {
           // La place ne tient plus : le curseur reste où il était.
         }

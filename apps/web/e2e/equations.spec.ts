@@ -1,0 +1,170 @@
+// Les équations de la partie B du lot 3 (Task C2) : en bloc et en ligne, posées par le menu « / »,
+// écrites dans leur fenêtre, vues par l'autre personne de la page et relues en MMD. Et ce qu'une
+// formule venue d'ailleurs ne peut pas faire à l'onglet de qui ouvre la page : une formule
+// imbriquée le faisait planter (la mise en page de Chromium déborde sa pile sur des tables
+// imbriquées), une définition le figer.
+import { expect, test, type Page } from "@playwright/test";
+import { closeContexts, createPage, getMmd, openPage, ownerAndMember, putMmd, unique } from "./helpers";
+
+test.afterEach(closeContexts);
+
+async function duo(browser: Parameters<typeof openPage>[0], title: string) {
+  const team = await ownerAndMember();
+  const page = await createPage(team.aliceApi, { spaceId: team.space.id, title: `${title} ${unique()}` });
+  const mona = await openPage(browser, page.id, team.alice);
+  const tom = await openPage(browser, page.id, team.bruno);
+  return { ...team, page, mona, tom };
+}
+
+async function slash(p: Page, query: string, title: string): Promise<void> {
+  await p.keyboard.type(`/${query}`);
+  await expect(p.locator(".bn-suggestion-menu-item").first()).toContainText(title);
+  await p.keyboard.press("Enter");
+}
+
+function latexField(p: Page, label: string) {
+  return p.getByRole("dialog", { name: label }).getByRole("textbox", { name: "Formule (LaTeX)" });
+}
+
+test("equation_block_is_typed_and_read_back", async ({ browser }) => {
+  const { mona, tom, aliceApi, page } = await duo(browser, "Équation");
+  await mona.locator(".mm-editor .bn-block-content").first().click();
+  await slash(mona, "équation", "Équation");
+  // Insérée vide, elle ouvre son champ ; la frappe va au champ, pas au document.
+  const field = latexField(mona, "Formule de l'équation");
+  await expect(field).toBeFocused();
+  await mona.keyboard.type("E = mc^2");
+  await expect(mona.getByRole("dialog", { name: "Formule de l'équation" }).locator(".mm-latex-preview .katex")).toBeVisible();
+  // Rien n'est écrit dans la page tant qu'on tape.
+  expect(await getMmd(aliceApi, page.id)).not.toContain("mc^2");
+  await mona.keyboard.press("Control+Enter");
+  await expect(field).toBeHidden();
+  // Posée depuis le texte : la frappe reprend dans le paragraphe qui la suit.
+  await expect(mona.locator(".mm-editor .bn-editor")).toBeFocused();
+  await mona.keyboard.type("Suite");
+  await expect.poll(() => getMmd(aliceApi, page.id)).toBe("$$\nE = mc^2\n$$\n\nSuite\n");
+  await expect(tom.locator(".mm-editor .mm-equation .katex")).toBeVisible();
+});
+
+test("inline_math_is_typed_and_read_back", async ({ browser }) => {
+  const { mona, tom, aliceApi, page } = await duo(browser, "En ligne");
+  await mona.locator(".mm-editor .bn-block-content").first().click();
+  await mona.keyboard.type("Masse et énergie : ");
+  await slash(mona, "équation en ligne", "Équation en ligne");
+  const field = latexField(mona, "Formule en ligne");
+  await expect(field).toBeFocused();
+  await mona.keyboard.type("E = mc^2");
+  await mona.keyboard.press("Control+Enter");
+  await expect(field).toBeHidden();
+  await mona.keyboard.press("End");
+  await mona.keyboard.type(" fin");
+  await expect.poll(() => getMmd(aliceApi, page.id)).toBe("Masse et énergie : $E = mc^2$ fin\n");
+  await expect(tom.locator(".mm-editor .mm-math .katex")).toBeVisible();
+});
+
+test("formula_that_dollars_cannot_carry_is_read_back", async ({ browser, request }) => {
+  const page = await createPage(request, { title: `Barre finale ${unique()}` });
+  await putMmd(request, page.id, "Avant $a$ après\n");
+  const p = await openPage(browser, page.id);
+  await p.getByRole("button", { name: "Modifier la formule" }).click();
+  const field = latexField(p, "Formule en ligne");
+  await expect(field).toBeFocused();
+  await field.fill("x\\");
+  await p.keyboard.press("Control+Enter");
+  await expect(field).toBeHidden();
+  await expect.poll(() => getMmd(request, page.id)).toBe('Avant <math latex="x\\"/> après\n');
+});
+
+test("typing_right_after_choosing_an_equation_goes_to_its_field", async ({ browser, request }) => {
+  const page = await createPage(request, { title: `Aussitôt ${unique()}` });
+  const p = await openPage(browser, page.id);
+  await p.locator(".mm-editor .bn-block-content").first().click();
+  await p.keyboard.type("/équation");
+  await expect(p.locator(".bn-suggestion-menu-item").first()).toContainText("Équation");
+  // Entrée, puis la formule aussitôt, sans attendre la fenêtre.
+  await p.keyboard.press("Enter");
+  await p.keyboard.type("\\alpha");
+  await expect(latexField(p, "Formule de l'équation")).toHaveValue("\\alpha");
+  // Rien n'est entré dans la page.
+  expect(await getMmd(request, page.id)).not.toContain("alpha");
+});
+
+test("a_long_inline_formula_scrolls_instead_of_being_cut", async ({ browser, request }) => {
+  const page = await createPage(request, { title: `Longue ${unique()}` });
+  // Sans point de coupure (ni opérateur ni relation) : KaTeX ne la coupe pas en lignes.
+  await putMmd(request, page.id, `Une formule $${"x_{1}".repeat(200)}$ dans la ligne\n`);
+  const p = await openPage(browser, page.id);
+  const formula = p.locator(".mm-editor .mm-math");
+  await expect(formula.locator(".katex")).toBeVisible();
+  const box = await formula.evaluate((element) => ({
+    overflow: getComputedStyle(element).overflowX,
+    scroll: element.scrollWidth,
+    client: element.clientWidth,
+    editor: document.querySelector(".mm-editor .bn-editor")!.clientWidth,
+  }));
+  // Plus large que la ligne : elle défile en dedans, sans dépasser l'éditeur.
+  expect(box.scroll).toBeGreaterThan(box.client);
+  expect(box.overflow).toBe("auto");
+  expect(box.client).toBeLessThanOrEqual(box.editor);
+});
+
+/** Ouvre la page et dit si l'onglet a planté avant la fin de la première synchro. */
+async function openWatchingCrash(browser: Parameters<typeof openPage>[0], id: string) {
+  const context = await browser.newContext({ storageState: test.info().project.use.storageState as string });
+  const p = await context.newPage();
+  let crashed = false;
+  p.on("crash", () => {
+    crashed = true;
+  });
+  await p.goto(`/p/${id}`);
+  await p.waitForFunction(() => document.querySelector(".mm-editor")?.getAttribute("data-synced") === "true", null, {
+    timeout: 20_000,
+  });
+  return { p, crashed: () => crashed, close: () => context.close() };
+}
+
+const frac = (n: number) => "\\frac{1}{".repeat(n) + "x" + "}".repeat(n);
+const sqrt = (n: number) => "\\sqrt{".repeat(n) + "x" + "}".repeat(n);
+
+test("a_nested_formula_never_crashes_the_tab", async ({ browser, request }) => {
+  const page = await createPage(request, { title: `Imbriquée ${unique()}` });
+  // Sans macro : 150 racines (1 051 caractères), 200 fractions, et 13 fractions dans une liste
+  // imbriquée de dix niveaux ; puis une formule ordinaire, qui doit s'afficher.
+  const list = Array.from({ length: 10 }, (_, i) => `${"  ".repeat(i)}- niveau ${i}`).join("\n");
+  await putMmd(
+    request,
+    page.id,
+    `$$\n${sqrt(150)}\n$$\n\n$$\n${frac(200)}\n$$\n\n${list}\n${"  ".repeat(10)}- en ligne $${frac(13)}$\n\n$$\n\\frac{a}{b} + \\sqrt{2}\n$$\n`,
+  );
+  const opened = await openWatchingCrash(browser, page.id);
+  const { p } = opened;
+  await expect(p.locator(".mm-editor .mm-equation").last().locator(".katex")).toBeVisible();
+  await expect(p.locator(".mm-editor .mm-tex-why")).toHaveCount(3);
+  await expect(p.locator(".mm-editor .mm-tex-why").first()).toHaveText("Formule trop imbriquée pour être affichée ici.");
+  expect(opened.crashed()).toBe(false);
+  // La page reste vivante : on y tape.
+  await p.locator(".mm-editor .mm-equation").last().click();
+  await expect(p.getByRole("dialog", { name: "Formule de l'équation" })).toBeVisible();
+  await opened.close();
+});
+
+test("a_formula_that_defines_never_freezes_the_tab", async ({ browser, request }) => {
+  const page = await createPage(request, { title: `Définitions ${unique()}` });
+  // Dix fois dix appels d'une macro qui tape 3 000 caractères : 300 000 lettres à mettre en page ; et
+  // la même cachée derrière `\verb`.
+  const bomb = `\\def\\z{${"a".repeat(3000)}}\\def\\y{${"\\z".repeat(10)}}\\def\\x{${"\\y".repeat(10)}}\\x`;
+  await putMmd(request, page.id, `$$\n${bomb}\n$$\n\n$$\n\\verb|x|${bomb}\n$$\n\nAprès\n`);
+  const started = Date.now();
+  const opened = await openWatchingCrash(browser, page.id);
+  const { p } = opened;
+  await expect(p.locator(".mm-editor .mm-tex-why")).toHaveCount(2);
+  await expect(p.locator(".mm-editor .mm-tex-why").first()).toHaveText(
+    "Les définitions (\\def, \\newcommand…) ne sont pas permises dans une formule.",
+  );
+  expect(Date.now() - started).toBeLessThan(10_000);
+  // L'onglet répond : un aller-retour de la page prend moins d'une seconde.
+  const t0 = Date.now();
+  await p.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(null))));
+  expect(Date.now() - t0).toBeLessThan(1_000);
+  await opened.close();
+});
