@@ -269,6 +269,27 @@ Un relecteur neuf a re-relu le tour 2 dans un atelier à part. **La piste S n'es
 
 **À éprouver en premier par la re-relecture** : `requests_cut_by_the_client_keep_the_lock_until_written` garde moins depuis R383 (R430 : sous sa mutation, rouge quatre fois sur cinq, contre cinq sur cinq sur `main`) ; la file des calculs de MMD, sans part par compte (R383) ; le poids de 35 µs d'une cellule vide, pris sur la mesure de la re-relecture (l'ancien poste), pas sur ce poste où une cellule coûte moins.
 
+### Re-relecture du tour 3 refait, et tour de correction 5 (2026-11-16)
+
+Un relecteur neuf a re-relu les tours 3 et 4 (atelier `lot3-s-tour3`, tête `4458060`) ; rapport et sondes sous `.claude/worktrees/tmp-agents/relecture-s-tour3/`. **Pas levé : un tour de plus.** Ce que le tour 3 avait corrigé tient (R380, R381 pour les marques connues, R384 vert à un et deux cœurs, R385, R386, R388, R389) ; deux critiques neufs et trois importants, dans la règle « toute lecture d'une entrée venue d'un client croît comme elle ». **Le tour 5 les corrige** (même atelier, à la suite ; au registre, « Tour de correction 5 (2026-11-16) », R431 à R438) ; sa re-relecture reste à faire.
+
+| Constat | Fait | Mesures |
+|---|---|---|
+| Critique C1 : des marques de texte inconnues rendaient la lecture d'une page quadratique (serveur et navigateurs), par un message de synchro de moins de 1 Mio | **fait**, R431 (`04ca682`, `f15d40d`) : seules les huit marques du schéma passent la garde, d'une valeur bornée (couleur 100 octets, adresse 16 Kio, `parse` aussi) ; relue du journal, une marque refusée est supprimée du document ; R438 : la lecture reste sur `diff` (yrs 0.28 n'a pas d'autre lecture publique), bornée par R431 ; R432 (`0be0f4f`) : le JSON d'un nœud étranger n'écrit une marque qu'à la plage où elle change | 701 Ko envoyés : 3,1 s et +5 Gio par lecture avant ; refusés après ; relus du journal, 6,6 ms et 1 Mio ; nœud étranger, 86 Mo de MMD puis 192 Ko |
+| Critique C2 : un `PUT /mmd` refusé de 2 Mio coûtait 1,2 Gio et renvoyait 249 Mo | **fait**, R434 (`a7e3c65`, `c52af3f`) : un `<span>` ne porte qu'un texte (refus dès le deuxième), la lecture s'arrête à la première erreur, un message ne cite qu'un extrait de 60 caractères (autour du premier écart, avec la colonne) et tient en 400 ; R433 (`4ba221c`) : les tests de linéarité bornent le pic par octet d'entrée et la réponse | 1 214 Mio et 2,2 s puis 96 Mio et 107 ms ; réponse de 249 Mo puis 242 octets |
+| Important I1 : la file du verrou d'une page gardait l'arbre de chaque requête | **fait**, R435 (`d466bad`, `9dc7057`) : huit requêtes au plus dans la file d'une page, place prise avant la lecture ; au-delà, `429 page_busy` sur-le-champ, après les droits | 64 requêtes vers une page : +2,2 Gio et croissant, puis +518 Mio au plus, 56 refusées |
+| Important I2 : un compte retardait les `PUT /mmd` de tous (R383) | **fait**, R436 (`63fd9ca`) : la file des lectures sert les comptes tour à tour, une rafale d'un compte dans son ordre | derrière 32 `PUT` lents de Tom : 13,5 s avant, une lecture après (555 ms) |
+| Important I3 : R430 gardait trop peu | **fait**, R437 (R430 récrit, `22f0b8e`) : le test du relecteur, sans minutage ni crochet | rouge cinq fois sur cinq sous sa mutation (dix écritures sans l'accès), vert cinq fois sur cinq |
+| Mineurs | **faits** : les formes manquantes des tests de linéarité, le plancher de temps (R433), la documentation de `Hub::calls_waiting` (`52dbf66`) | — |
+
+**Sens changés, dits au registre** : les rafales de `PUT /mmd` des tests de R200 et R209 passent de 24 à 8 requêtes (ce que la file admet), trois fois plus longues ; deux formes longues des tests de linéarité de `mementum-crdt` passent par la suppression de R431.
+
+**À éprouver en premier par la re-relecture** : la suppression à la relecture (R431) contre la convergence des clients (un client qui portait la marque la retire-t-il toujours ?) et contre `revision_is_canonical` ; une marque hors du schéma qui entrerait par un autre chemin que la garde et la relecture (R438 en dépend) ; le refus sous `<span>` (R434) contre des formes canoniques que l'aller-retour n'aurait pas tirées ; la file équitable (R436), abandons compris (une place donnée à une requête partie est-elle toujours rendue ?) ; la borne de huit (R435) contre un rédacteur légitime d'une page qu'un autre tient pleine.
+
+**Vérifications du tour** : fmt et clippy propres ; `cargo test --workspace --no-fail-fast` : 886 verts, 15 ignorés ; Vitest : 934 verts ; e2e `fidelity`, `collab`, `relay-guard`, `history` : 20 verts ; budgets de la synchro en release sans recul (frappe à 2,0 ms au p95, 39 ms avec la coupe d'une version, comparés au code d'avant sur le même poste).
+
+**Restent, dits** : une version coupée avant ce tour qui porte des marques hors du schéma est rendue telle quelle à l'aperçu (`GET …/versions/{id}/state`) : un navigateur la lit en K × C ; R382 ; R387.
+
 ## Ce que la documentation doit dire (pour la Task 14)
 
 Pour les constats finis :
