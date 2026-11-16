@@ -34,6 +34,7 @@ import { TrashIcon } from "../icons";
 import { messageOf } from "../session/forms";
 import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
+import { MentionNotices } from "../mentions/notice";
 import { canComment, canEdit, writesOutsideEditor } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
 import { Breadcrumb } from "./Breadcrumb";
@@ -192,9 +193,18 @@ export function PageView({
   const role = me.spaces.find((space) => space.id === node.spaceId)?.role ?? "guest";
   const canCreate = editable && !trashed && !readOnly;
   const mentions = useMemo(
-    () => ({ spaceId: node.spaceId, role, canCreate, onRefused: rereadPage }),
-    [node.spaceId, role, canCreate, rereadPage],
+    () => ({ spaceId: node.spaceId, role, canCreate, onRefused: rereadPage, afterLogin }),
+    [node.spaceId, role, canCreate, rereadPage, afterLogin],
   );
+  /**
+   * Un message de `[[` « Créer la page » fermé pendant qu'il avait le focus : il revient au texte de
+   * la page, au titre s'il n'y a pas d'éditeur ; jamais à `body`.
+   */
+  const focusText = useCallback(() => {
+    const text = article.current?.querySelector<HTMLElement>(".mm-editor .bn-editor");
+    if (text) text.focus();
+    else focusTitle();
+  }, [focusTitle]);
   // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.
   const editor = useMemo(
     () =>
@@ -229,6 +239,8 @@ export function PageView({
           onRefused={rereadPage}
         />
       </header>
+      {/* Les messages d'une création par `[[` : ceux de la page, que la session soit recréée ou non. */}
+      <MentionNotices focusBack={focusText} />
       <div className="mm-page-body">
         <article ref={article} className="mm-page">
           {readOnly && <ReadOnlyBanner />}

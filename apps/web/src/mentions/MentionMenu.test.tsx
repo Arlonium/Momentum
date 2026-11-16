@@ -7,13 +7,15 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import * as Y from "yjs";
 import { ApiError, createPage, getMembers } from "../api";
 import type { RosterUser } from "../editor/collab";
+import { focusEditor } from "../editor/blocks/BlockWindowHost";
 import { EditorView } from "../editor/Editor";
 import { publishPages } from "../space/pageDirectory";
 import { cursor, exchange, peer, shownInline, typeAt, typeAtEnd, type Seed } from "../test/editors";
 import { deferred, until } from "../test/hooks";
 import { page, unauthenticated } from "../test/pages";
 import { flush, mountEditor, press, type Mounted } from "../test/richEditor";
-import { createdNotPlaced, createRefused, type MentionContext } from "./MentionMenu";
+import { createdNotPlaced, createRefused, createWaits, type MentionContext } from "./MentionMenu";
+import { clearNotices, MentionNotices } from "./notice";
 import { forgetPeople } from "./people";
 
 vi.mock("../api", async (original) => ({
@@ -64,26 +66,33 @@ afterEach(() => {
   vi.useRealTimers();
   forgetPeople();
   publishPages(null, null);
+  clearNotices();
 });
 
 const publish = (nodes: PageNode[]) => act(async () => publishPages("space", nodes));
 
 type Context = Partial<MentionContext>;
 
+const contextOf = (context: Context = {}): MentionContext => ({
+  spaceId: "space",
+  role: "member",
+  pageId: HERE,
+  roster: () => ROSTER,
+  canCreate: true,
+  ...context,
+});
+
+/** La page autour de l'éditeur : ses messages (comme `PageView` les rend), puis l'éditeur et ses menus. */
+const pageOf = (editor: Mounted["editor"], context: Context = {}) => (
+  <>
+    <MentionNotices focusBack={() => focusEditor(editor)} />
+    <EditorView editor={editor} editable mentions={contextOf(context)} />
+  </>
+);
+
 /** L'éditeur de la page `HERE`, avec ses menus de mention, le curseur à la fin du bloc `y`. */
 async function mount(context: Context = {}, blocks: Seed = PAGE): Promise<Mounted> {
-  const mentions: MentionContext = {
-    spaceId: "space",
-    role: "member",
-    pageId: HERE,
-    roster: () => ROSTER,
-    canCreate: true,
-    ...context,
-  };
-  const m = await mountEditor({
-    blocks,
-    view: (editor) => <EditorView editor={editor} editable mentions={mentions} />,
-  });
+  const m = await mountEditor({ blocks, view: (editor) => pageOf(editor, context) });
   act(() => {
     m.editor.focus();
     cursor(m, "y", "Voir ".length);
@@ -326,10 +335,7 @@ test("creating_from_double_bracket_creates_a_subpage_once", async () => {
   expect(creates.mock.calls).toEqual([[{ parentId: HERE, title: "Compte rendu" }]]);
   expect(menu()).toBeNull();
   expect(textOfY(m)).toBe("Voir ");
-  // En attendant le serveur : une autre demande ne crée pas une seconde page, et la frappe continue.
-  await type(m, "[[Autre");
-  await key(m, "Enter");
-  expect(creates).toHaveBeenCalledTimes(1);
+  // En attendant le serveur, la frappe continue.
   await type(m, "la suite");
   expect(textOfY(m)).toBe("Voir la suite");
   // La page créée : sa mention va là où l'on avait tapé `[[`, avec le titre que le serveur a gardé.
@@ -337,8 +343,44 @@ test("creating_from_double_bracket_creates_a_subpage_once", async () => {
   await flush();
   expect(textOfY(m)).toBe("Voir ⟦@Compte rendu⟧ la suite");
   expect(mentions(m)).toEqual([{ kind: "page", id: pageId(9), label: "Compte rendu" }]);
+  expect(creates).toHaveBeenCalledTimes(1);
   expect(document.querySelector('[role="alert"]')).toBeNull();
   expect(m.errors).toEqual([]);
+});
+
+/** Les messages de la page (ceux de son premier hôte : un test qui monte deux éditeurs en a deux). */
+const alerts = () => [...(document.querySelector('[role="alert"]')?.querySelectorAll("p") ?? [])].map((p) => p.textContent);
+
+test("a_second_page_asked_while_the_first_is_being_created_is_created_too", async () => {
+  await publish([]);
+  const m = await mount();
+  const first = deferred<PageNode>();
+  const second = deferred<PageNode>();
+  creates.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  await type(m, "[[Un");
+  await key(m, "Enter");
+  // Réseau lent : la première n'a pas répondu, on en demande une autre, d'un autre titre.
+  await type(m, "et [[Deux");
+  await key(m, "Enter");
+  expect(creates.mock.calls).toEqual([[{ parentId: HERE, title: "Un" }], [{ parentId: HERE, title: "Deux" }]]);
+  await type(m, "puis");
+  // La seconde répond la première : chacune va à sa place.
+  await act(async () => second.resolve(page(pageId(8), { title: "Deux" })));
+  await flush();
+  expect(textOfY(m)).toBe("Voir et ⟦@Deux⟧ puis");
+  await act(async () => first.resolve(page(pageId(7), { title: "Un" })));
+  await flush();
+  expect(textOfY(m)).toBe("Voir ⟦@Un⟧ et ⟦@Deux⟧ puis");
+  expect(alerts()).toEqual([]);
+  // Deux refus à la suite : les deux titres sont dits.
+  creates.mockReset();
+  creates.mockRejectedValue(new ApiError(403, "forbidden", "Non."));
+  await type(m, " [[Trois");
+  await key(m, "Enter");
+  await type(m, "[[Quatre");
+  await key(m, "Enter");
+  await flush();
+  expect(alerts()).toEqual([createRefused("Trois", "Non."), createRefused("Quatre", "Non.")]);
 });
 
 test("a_refused_creation_is_said_as_the_server_says_it_and_nothing_is_inserted", async () => {
@@ -361,20 +403,156 @@ test("a_refused_creation_is_said_as_the_server_says_it_and_nothing_is_inserted",
   await key(m, "Escape");
   expect(document.querySelector('[role="alert"]')).toBeNull();
 
-  // Une session perdue : la connexion est demandée ailleurs, rien n'est dit ici, la page n'est pas relue.
-  creates.mockRejectedValue(unauthenticated());
-  await type(m, "[[Compte rendu");
-  await key(m, "Enter");
-  await flush();
-  expect(document.querySelector('[role="alert"]')).toBeNull();
-  expect(onRefused).toHaveBeenCalledTimes(1);
   // Après un refus, on peut redemander.
   creates.mockResolvedValue(page(pageId(9), { title: "Compte rendu" }));
   await type(m, "[[Compte rendu");
   await key(m, "Enter");
   await flush();
-  expect(creates).toHaveBeenCalledTimes(3);
+  expect(creates).toHaveBeenCalledTimes(2);
   expect(textOfY(m)).toBe("Voir ⟦@Compte rendu⟧ ");
+});
+
+test("a_creation_refused_for_a_lost_session_names_the_title_and_is_asked_again_once_the_account_is_back", async () => {
+  await publish([]);
+  const back = deferred<void>();
+  const onRefused = vi.fn();
+  const m = await mount({ afterLogin: () => back.promise, onRefused });
+  creates.mockRejectedValueOnce(unauthenticated());
+  creates.mockResolvedValue(page(pageId(9), { title: "Compte rendu" }));
+  await type(m, "[[Compte rendu");
+  await key(m, "Enter");
+  await flush();
+  // Le `401` n'a rien créé. Le titre tapé a quitté le texte : un message le nomme, sous la fenêtre de connexion.
+  expect(textOfY(m)).toBe("Voir ");
+  expect(alerts()).toEqual([createWaits("Compte rendu")]);
+  expect(creates).toHaveBeenCalledTimes(1);
+  expect(onRefused).not.toHaveBeenCalled();
+  await type(m, "la suite");
+  // Le compte revenu : la création est redemandée, la mention posée à sa place, le message retiré.
+  await act(async () => back.resolve());
+  await flush();
+  expect(creates.mock.calls).toEqual([[{ parentId: HERE, title: "Compte rendu" }], [{ parentId: HERE, title: "Compte rendu" }]]);
+  expect(textOfY(m)).toBe("Voir ⟦@Compte rendu⟧ la suite");
+  expect(alerts()).toEqual([]);
+});
+
+test("a_creation_that_fails_again_or_whose_account_never_returns_keeps_a_message_naming_the_title", async () => {
+  await publish([]);
+  const back = deferred<void>();
+  const m = await mount({ afterLogin: () => back.promise });
+  // Refusée encore au retour du compte : le refus du serveur remplace l'attente.
+  creates.mockRejectedValueOnce(unauthenticated());
+  creates.mockRejectedValueOnce(new ApiError(403, "forbidden", "Tu ne peux plus modifier cette page."));
+  await type(m, "[[Un");
+  await key(m, "Enter");
+  await flush();
+  expect(alerts()).toEqual([createWaits("Un")]);
+  await act(async () => back.resolve());
+  await flush();
+  expect(alerts()).toEqual([createRefused("Un", "Tu ne peux plus modifier cette page.")]);
+  expect(mentions(m)).toEqual([]);
+  // Le compte ne revient pas (ou rien ne dit qu'il revient) : le message reste, avec le titre.
+  act(() => clearNotices());
+  const alone = await mount({ afterLogin: undefined });
+  creates.mockRejectedValueOnce(unauthenticated());
+  await type(alone, "[[Deux");
+  await key(alone, "Enter");
+  await flush();
+  expect(alerts()).toEqual([createWaits("Deux")]);
+  expect(creates).toHaveBeenCalledTimes(3);
+});
+
+test("escape_on_the_message_button_closes_it_and_gives_the_focus_back_to_the_text", async () => {
+  await publish([]);
+  const m = await mount();
+  creates.mockRejectedValue(new ApiError(403, "forbidden", "Tu ne peux pas."));
+  await type(m, "[[Compte rendu");
+  await key(m, "Enter");
+  await flush();
+  const close = document.querySelector<HTMLElement>('[role="alert"] button')!;
+  close.focus();
+  expect(document.activeElement).toBe(close);
+  await act(async () => {
+    press(close, "Escape");
+  });
+  await flush();
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(m.editor.prosemirrorView.dom.contains(document.activeElement)).toBe(true);
+  // Témoin : Échap tapé ailleurs (le titre de la page) ferme le message sans déplacer le focus.
+  await type(m, "[[Compte rendu");
+  await key(m, "Enter");
+  await flush();
+  expect(alerts().length).toBe(1);
+  const elsewhere = document.createElement("input");
+  document.body.append(elsewhere);
+  elsewhere.focus();
+  await act(async () => {
+    press(elsewhere, "Escape");
+  });
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(document.activeElement).toBe(elsewhere);
+  elsewhere.remove();
+});
+
+test("a_page_created_once_its_editor_is_gone_is_said_by_the_page", async () => {
+  await publish([]);
+  const m = await mount();
+  const answer = deferred<PageNode>();
+  creates.mockReturnValue(answer.promise);
+  await type(m, "[[Orpheline");
+  await key(m, "Enter");
+  // La session est recréée (ou une autre page ouverte) : l'éditeur et ses menus partent, la page reste.
+  await act(async () => m.root.render(<MentionNotices focusBack={() => {}} />));
+  await act(async () => answer.resolve(page(pageId(9), { title: "Orpheline" })));
+  await flush();
+  expect(alerts()).toEqual([createdNotPlaced("Orpheline")]);
+  expect(m.errors).toEqual([]);
+});
+
+for (const kind of ["heading", "quote", "codeBlock"] as const) {
+  const outcome = kind === "codeBlock" ? "gets_a_message" : "keeps_its_mention";
+  test(`a_block_turned_into_${kind}_during_the_creation_${outcome}`, async () => {
+    await publish([]);
+    const m = await mount();
+    const answer = deferred<PageNode>();
+    creates.mockReturnValue(answer.promise);
+    await type(m, "[[Notes");
+    await key(m, "Enter");
+    // Changer le type d'un bloc recrée son élément de contenu : la place tenue n'y est plus.
+    act(() => void m.editor.updateBlock("y", { type: kind }));
+    await act(async () => answer.resolve(page(pageId(9), { title: "Notes" })));
+    await flush();
+    if (kind === "codeBlock") {
+      // Un bloc de code ne porte pas de mention : rien n'est posé, et c'est dit.
+      expect(mentions(m)).toEqual([]);
+      expect(alerts()).toEqual([createdNotPlaced("Notes")]);
+    } else {
+      // Le bloc est retrouvé par son id : la mention va à la fin de son texte.
+      expect(textOfY(m)).toBe("Voir ⟦@Notes⟧ ");
+      expect(shownInline(m).find((b) => b.id === "y")!.type).toBe(kind);
+      expect(alerts()).toEqual([]);
+    }
+    expect(m.errors).toEqual([]);
+  });
+}
+
+test("the_list_is_not_read_again_under_the_active_line_when_the_context_changes", async () => {
+  await publish([page(pageId(1), { title: "Plan A" }), page(pageId(2), { title: "Plan B" })]);
+  const m = await mount();
+  await type(m, "[[Plan");
+  await key(m, "ArrowDown");
+  expect(active()).toBe("Plan B");
+  // Une page arrive dans l'arbre, puis le compte est relu avec un autre rôle : `PageView` donne aux
+  // menus un contexte neuf. La liste ne bouge pas, et Entrée pose la page choisie.
+  await publish([page(pageId(3), { title: "Plan 0" }), page(pageId(1), { title: "Plan A" }), page(pageId(2), { title: "Plan B" })]);
+  await act(async () => m.root.render(pageOf(m.editor, { role: "admin", canCreate: false })));
+  await flush();
+  expect(active()).toBe("Plan B");
+  await key(m, "Enter");
+  expect(mentions(m).map((x) => x.label)).toEqual(["Plan B"]);
+  // Le contexte neuf sert à la frappe suivante : sans le droit de créer, « Créer la page » n'est plus offert.
+  await type(m, "[[Plan Z");
+  expect(offered()).toEqual({});
 });
 
 test("a_page_created_whose_place_is_gone_is_said_and_written_nowhere_else", async () => {

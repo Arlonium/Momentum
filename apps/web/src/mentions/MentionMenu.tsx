@@ -7,30 +7,35 @@
 //   ouverte pour un invité ; lues à l'ouverture du menu, jamais avant) et une date (`suggestDates`) ;
 //   huit lignes au plus par groupe.
 // - `[[` propose des pages, et, en dernier, « Créer la page « … » » : une sous-page de la page ouverte,
-//   créée une seule fois, puis mentionnée là où l'on avait tapé.
+//   créée une fois par geste, puis mentionnée là où l'on avait tapé.
 //
 // Ce qui est posé : une mention (`kind`, `id`, et le libellé copié : le titre de la page à cet
 // instant, le nom, la date), suivie d'une espace. Choisir retire du texte le déclencheur et ce qu'on
 // avait tapé après lui ; Échap ferme le menu et laisse ce texte. Les menus restent fermés dans un
 // bloc de code. Une mention ne prévient personne et ne donne aucun droit.
 //
-// Un refus du serveur à la création se dit tel quel, dans un message hors du document, qui nomme le
-// titre tapé ; rien n'est posé, et la page est relue.
+// Choisir « Créer la page » retire aussi du texte `[[` et le titre : tant que la mention n'est pas
+// posée, un message de la page nomme ce titre (`notice.tsx`, R619 revu). Un refus du serveur s'y dit
+// tel quel, et la page est relue ; une session perdue fait attendre le compte, puis redemander ; une
+// page créée dont la place n'est plus là (ou dont l'éditeur est parti) y est dite, sans être liée.
+//
+// Ce que les menus savent de la page (`MentionContext`) est lu dans une référence : BlockNote relit
+// les lignes dès que `getItems` change d'identité, sous la ligne active, tenue par son rang (R618).
 import type { Role } from "@mementum/protocol";
 import { trackPosition } from "@blocknote/core";
 import { SuggestionMenu } from "@blocknote/core/extensions";
 import { SuggestionMenuController, type SuggestionMenuProps } from "@blocknote/react";
 import type { Transaction } from "prosemirror-state";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { createPage, isSessionLost } from "../api";
-import { focusEditor } from "../editor/blocks/BlockWindowHost";
 import type { RosterUser } from "../editor/collab";
 import type { MementumEditor } from "../editor/debug";
-import { CloseIcon, PageIcon, PlusIcon } from "../icons";
+import { PageIcon, PlusIcon } from "../icons";
 import { messageOf } from "../session/forms";
 import { findPages, pageTitle } from "../space/pageDirectory";
 import { firstClick } from "../ui/firstClick";
 import { dateId, dateLabel, suggestDates } from "./dates";
+import { postNotice, replaceNotice } from "./notice";
 import { loadPeople } from "./people";
 
 /** Ce que les menus savent de la page ouverte et de qui la lit. */
@@ -46,6 +51,8 @@ export type MentionContext = {
   canCreate: boolean;
   /** Le serveur a refusé une création : un droit, ou la page, ont changé ; elle est à relire. */
   onRefused?: () => void;
+  /** Tenue quand le compte revient après une session perdue (`useAfterLogin`) : la création repart. */
+  afterLogin?: () => Promise<void>;
 };
 
 /** Combien de lignes par groupe, au plus. */
@@ -123,8 +130,13 @@ export function bracketItems(query: string, context: MentionContext): MentionIte
   return items;
 }
 
-/** Ce que dit un refus de création, et une page créée dont la mention n'a pas trouvé sa place. */
+/**
+ * Ce que disent un refus de création, une création qui attend le compte, et une page créée dont la
+ * mention n'a pas trouvé sa place. Chacun nomme le titre.
+ */
 export const createRefused = (title: string, message: string) => `La page « ${title} » n'a pas pu être créée. ${message}`;
+export const createWaits = (title: string) =>
+  `La page « ${title} » n'est pas encore créée : ta session a pris fin. Elle sera créée et liée ici dès que tu te seras reconnecté.`;
 export const createdNotPlaced = (title: string) =>
   `La page « ${title} » est créée, mais sa mention n'a pas pu être posée : l'endroit où tu l'avais demandée n'est plus là, ou la page n'est plus modifiable.`;
 
@@ -153,17 +165,75 @@ function insertMention(editor: MementumEditor, mention: MentionProps): void {
   editor.insertInlineContent([{ type: "mention", props: mention }, " "]);
 }
 
+type PmNode = Transaction["doc"];
+type ResolvedPos = ReturnType<PmNode["resolve"]>;
+
+/** Un texte s'écrit-il dans `parent`, et une mention y tient-elle ? */
+function takesMentions(parent: PmNode): boolean {
+  return parent.inlineContent && !parent.type.spec.code;
+}
+
+/** L'id du bloc qui porte la place `$pos`, ou `null`. */
+function blockIdAt($pos: ResolvedPos): string | null {
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    const node = $pos.node(depth);
+    if (node.type.name === "blockContainer") return String(node.attrs.id);
+  }
+  return null;
+}
+
+/** La fin du texte du bloc `id` de `doc`, si un texte s'y écrit ; sinon `null`. */
+function endOfBlock(doc: PmNode, id: string): number | null {
+  let end: number | null = null;
+  doc.descendants((node, pos) => {
+    if (end !== null) return false;
+    if (node.type.name !== "blockContainer" || node.attrs.id !== id) return true;
+    const content = node.firstChild;
+    if (content !== null && takesMentions(content)) end = pos + 2 + content.content.size;
+    return false;
+  });
+  return end;
+}
+
+/** Une place retenue dans le document : celle que suit BlockNote, et le bloc où elle était. */
+type Place = { at: () => number; blockId: string | null };
+
+/** Retient la place du curseur de `editor`, le temps d'un aller-retour au serveur. */
+function holdPlace(editor: MementumEditor): Place {
+  const { selection } = editor.prosemirrorState;
+  // À gauche : ce qu'on tape en attendant vient après la mention.
+  return { at: trackPosition(editor, selection.from, "left"), blockId: blockIdAt(selection.$from) };
+}
+
 /**
- * Pose `mention` à la place `pos` du document de `editor`, suivie d'une espace, si un texte s'écrit
- * encore là ; rend faux sinon (la place est partie, ou l'éditeur n'est plus modifiable).
+ * Pose `mention`, suivie d'une espace, à la place retenue `place`, si elle est encore dans son bloc
+ * et qu'un texte s'y écrit ; à défaut (le bloc a changé de type : son contenu a été recréé, et la
+ * place suivie n'y est plus), à la fin du texte de ce bloc, retrouvé par son id. Rend faux si rien
+ * n'a pu être posé : le bloc est parti, c'est un bloc de code, ou l'éditeur n'est plus là ou plus
+ * modifiable.
  */
-function insertMentionAt(editor: MementumEditor, pos: number, mention: MentionProps): boolean {
-  if (!editor.isEditable || editor.prosemirrorView === undefined) return false;
+function insertMentionAt(editor: MementumEditor, place: Place, mention: MentionProps): boolean {
   try {
+    // Un éditeur retiré de la page (session recréée, autre page ouverte) n'écrit plus pour personne.
+    if (!editor.isEditable || editor.domElement?.isConnected !== true) return false;
+    let held: number | null = null;
+    try {
+      held = place.at();
+    } catch {
+      // La place suivie ne tient plus dans le document.
+    }
     return editor.transact((tr) => {
-      const parent = tr.doc.resolve(pos).parent;
       const node = tr.doc.type.schema.nodes.mention;
-      if (!parent.inlineContent || parent.type.spec.code || node === undefined) return false;
+      if (node === undefined) return false;
+      let pos: number | null = null;
+      try {
+        const $held = held === null ? null : tr.doc.resolve(held);
+        if ($held !== null && takesMentions($held.parent) && blockIdAt($held) === place.blockId) pos = $held.pos;
+      } catch {
+        // Elle est hors du document.
+      }
+      if (pos === null && place.blockId !== null) pos = endOfBlock(tr.doc, place.blockId);
+      if (pos === null) return false;
       tr.insert(pos, [node.create(mention), tr.doc.type.schema.text(" ")]);
       return true;
     });
@@ -172,75 +242,72 @@ function insertMentionAt(editor: MementumEditor, pos: number, mention: MentionPr
   }
 }
 
+/**
+ * Crée la sous-page `title` de la page de `context`, puis pose sa mention à `place` dans `editor`.
+ * Tant que la mention n'est pas posée, un message nomme le titre (`notice.tsx`) : il ne dépend ni de
+ * l'éditeur ni de ses menus, que l'aller-retour peut voir partir.
+ */
+async function createAndMention(editor: MementumEditor, context: MentionContext, title: string, place: Place): Promise<void> {
+  const ask = () => createPage({ parentId: context.pageId, title });
+  /** Le message d'attente du compte, s'il est posé. */
+  let waiting: number | null = null;
+  try {
+    let node;
+    try {
+      node = await ask();
+    } catch (error) {
+      if (!isSessionLost(error)) throw error;
+      // Le `401` n'a rien créé : la connexion est demandée par-dessus la page, et la création
+      // repart au retour du compte. D'ici là, et s'il ne revient pas, le message garde le titre.
+      waiting = postNotice(createWaits(title));
+      await (context.afterLogin?.() ?? new Promise<never>(() => {}));
+      node = await ask();
+    }
+    const placed = insertMentionAt(editor, place, { kind: "page", id: node.id, label: node.title });
+    const said = placed ? null : createdNotPlaced(node.title);
+    if (waiting !== null) replaceNotice(waiting, said);
+    else if (said !== null) postNotice(said);
+  } catch (error) {
+    const said = createRefused(title, messageOf(error));
+    if (waiting !== null) replaceNotice(waiting, said);
+    else postNotice(said);
+    // Un droit, ou la page, ont changé : elle est à relire. Pas pour une session perdue.
+    if (!isSessionLost(error)) context.onRefused?.();
+  }
+}
+
 type Props = { editor: MementumEditor; context: MentionContext };
 
-/** Les menus `@` et `[[` de l'éditeur `editor`, et le message d'une création refusée. */
+/** Les menus `@` et `[[` de l'éditeur `editor`. */
 export function MentionMenus({ editor, context }: Props) {
-  const [notice, setNotice] = useState<string | null>(null);
-  const mounted = useRef(true);
+  // Le contexte du moment, lu à chaque demande : `getItems` garde son identité quand il change
+  // (un rôle relu), sinon BlockNote relirait les lignes sous la ligne active.
+  const latest = useRef(context);
   useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  /** Une création à la fois. */
-  const creating = useRef(false);
+    latest.current = context;
+  }, [context]);
 
-  const getAtItems = useCallback((query: string) => atItems(query, context, new Date()), [context]);
-  const getBracketItems = useCallback(async (query: string) => bracketItems(query, context), [context]);
-
-  const create = useCallback(
-    async (title: string) => {
-      if (creating.current) return;
-      creating.current = true;
-      setNotice(null);
-      // Là où l'on avait tapé `[[` : ce qu'on tape en attendant le serveur vient après la mention.
-      const place = trackPosition(editor, editor.prosemirrorState.selection.from, "left");
-      try {
-        const node = await createPage({ parentId: context.pageId, title });
-        const placed = insertMentionAt(editor, place(), { kind: "page", id: node.id, label: node.title });
-        if (!placed && mounted.current) setNotice(createdNotPlaced(node.title));
-      } catch (error) {
-        // Session perdue : la connexion est demandée par-dessus la page, rien d'autre à dire.
-        if (isSessionLost(error)) return;
-        if (mounted.current) setNotice(createRefused(title, messageOf(error)));
-        context.onRefused?.();
-      } finally {
-        creating.current = false;
-      }
-    },
-    [editor, context],
-  );
+  const getAtItems = useCallback((query: string) => atItems(query, latest.current, new Date()), []);
+  const getBracketItems = useCallback(async (query: string) => bracketItems(query, latest.current), []);
 
   const pick = useCallback(
     (item: MentionItem) => {
       if ("create" in item) {
-        void create(item.create);
+        // BlockNote vient de retirer `[[` et le titre : le curseur est là où va la mention.
+        void createAndMention(editor, latest.current, item.create, holdPlace(editor));
         return;
       }
-      setNotice(null);
       const { mention } = item;
       // Le titre du moment, si la page a été renommée depuis que le menu l'a listée.
       const label = mention.kind === "page" ? (pageTitle(mention.id) ?? mention.label) : mention.label;
       insertMention(editor, { ...mention, label });
     },
-    [editor, create],
+    [editor],
   );
-
-  // Échap ferme le message, où que soit le focus.
-  useEffect(() => {
-    if (notice === null) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setNotice(null);
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [notice]);
 
   const shouldOpen = useCallback((tr: Transaction) => outsideCode(tr) && !mentionMenuOpen(editor), [editor]);
 
-  const menus = useMemo(
+  return useMemo(
     () => (
       <>
         <SuggestionMenuController
@@ -260,29 +327,6 @@ export function MentionMenus({ editor, context }: Props) {
       </>
     ),
     [getAtItems, getBracketItems, pick, shouldOpen],
-  );
-
-  return (
-    <>
-      {menus}
-      {notice !== null && (
-        <div className="mm-mention-notice" role="alert">
-          <p dir="auto">{notice}</p>
-          <button
-            type="button"
-            className="mm-icon-button"
-            aria-label="Fermer le message"
-            onClick={() => {
-              setNotice(null);
-              // Le bouton part avec le message : le focus revient au texte, pas à `body`.
-              focusEditor(editor);
-            }}
-          >
-            <CloseIcon />
-          </button>
-        </div>
-      )}
-    </>
   );
 }
 

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getComments, getInfo, getPage } from "../api";
 import { useServerSchema } from "../editor/useServerSchema";
 import { CLIENT_SCHEMA_VERSION } from "../editor/version";
+import { clearNotices, postNotice } from "../mentions/notice";
 import { SessionContext } from "../session/session";
 import { until } from "../test/hooks";
 import { page, space, unauthenticated } from "../test/pages";
@@ -345,4 +346,30 @@ test("page_view_gives_the_editor_what_mentions_need", async () => {
   expect(mentioned()).toMatchObject({ role: "member", canCreate: false });
   await show(page("x", { level: "full", trashedAt: 1 }), member);
   expect(mentioned()).toMatchObject({ canCreate: false });
+});
+
+test("page_view_shows_the_messages_of_a_page_creation_and_gives_the_focus_back", async () => {
+  // Le message d'une création par `[[` est celui de la page, pas de l'éditeur (C4, R631) : il se dit
+  // encore quand la session de la page a été recréée, et sa fermeture ne laisse pas le focus sur `body`.
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  // L'éditeur reçoit de quoi attendre le compte après une session perdue.
+  const mentioned = probe.mentions[probe.mentions.length - 1] as { afterLogin?: unknown };
+  expect(typeof mentioned.afterLogin).toBe("function");
+  try {
+    await act(async () => void postNotice("La page « Compte rendu » n'a pas pu être créée. Non."));
+    const close = document.querySelector<HTMLElement>('[role="alert"] button')!;
+    expect(document.querySelector('[role="alert"] p')?.textContent).toContain("Compte rendu");
+    close.focus();
+    await act(async () => {
+      close.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    // Sans éditeur affiché (il est simulé ici), le focus va au titre de la page.
+    expect(document.activeElement).toBe(host.querySelector(".mm-title-input"));
+  } finally {
+    clearNotices();
+  }
 });

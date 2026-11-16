@@ -3437,6 +3437,13 @@ button.mm-reaction:hover {
   transform: translateX(-50%);
 }
 
+.mm-mention-notice-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
 .mm-mention-notice p {
   margin: 0;
   overflow-wrap: anywhere;
