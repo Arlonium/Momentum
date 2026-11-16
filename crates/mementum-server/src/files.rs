@@ -117,6 +117,10 @@ struct Dirs {
     /// Le verrou du geste (R285) : tenu par le fil bloquant qui regarde le dépôt puis y agit,
     /// jusqu'à la fin de son geste. L'appelant lâché en route ne peut pas le rendre à sa place.
     gesture: Arc<Mutex<()>>,
+    /// Les tâches qui attendent le verrou du dépôt, pour les tests de la course entre un envoi et
+    /// le ménage (Ruling R561) : `tokio::sync::Mutex` ne le dit pas.
+    #[cfg(test)]
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 impl Dirs {
@@ -522,6 +526,8 @@ impl FileStore {
                 tmp,
                 lock: Mutex::new(()),
                 gesture: Arc::default(),
+                #[cfg(test)]
+                waiting: Default::default(),
             }),
         })
     }
@@ -595,8 +601,17 @@ impl FileStore {
     }
 
     /// Le verrou du dépôt : un seul pour « poser un contenu puis l'attacher » et pour le ménage.
+    /// Il sert ceux qui l'attendent dans leur ordre d'arrivée (`tokio::sync::Mutex` est équitable).
     pub(crate) async fn lock(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        let _waiting = Waiting::enter(&self.dirs.waiting);
         self.dirs.lock.lock().await
+    }
+
+    /// Les tâches qui attendent le verrou du dépôt (Ruling R561, tests seulement).
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.dirs.waiting.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Ouvre le contenu `hash` pour le lire. `NotFound` s'il n'est pas là, ou si ce qui est à sa
@@ -619,6 +634,26 @@ impl FileStore {
         self.dirs.check(guard)?;
         let hash = *hash;
         self.dirs.act(move |dirs| dirs.unlink(&hash)).await
+    }
+}
+
+/// Une tâche qui attend le verrou du dépôt, comptée tant que dure son attente (Ruling R561) : le
+/// compte baisse quand elle a le verrou, ou quand son attente est lâchée en route.
+#[cfg(test)]
+struct Waiting<'a>(&'a std::sync::atomic::AtomicUsize);
+
+#[cfg(test)]
+impl<'a> Waiting<'a> {
+    fn enter(count: &'a std::sync::atomic::AtomicUsize) -> Waiting<'a> {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Waiting(count)
+    }
+}
+
+#[cfg(test)]
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

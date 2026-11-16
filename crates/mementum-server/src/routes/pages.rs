@@ -36,8 +36,10 @@
 //! **Connexions de synchro.** Mettre à la corbeille, restaurer et changer de parent changent
 //! ce que chacun peut faire de la page et de ses sous-pages : après le commit, les connexions
 //! de synchro du sous-arbre sont fermées (`rights_changed`), et se rouvrent en relisant leurs
-//! droits. Une suppression définitive arrête les acteurs des pages supprimées (`Hub::forget`).
-//! L'écriture et cette suite vont au bout même si le client coupe la connexion.
+//! droits. Une suppression définitive arrête les acteurs des pages supprimées (`Hub::forget`),
+//! puis fait le ménage des fichiers (`routes/files.rs`, Ruling R557) : les contenus que plus
+//! aucune page n'attache quittent le disque, avant la réponse. L'écriture et cette suite vont au
+//! bout même si le client coupe la connexion.
 //!
 //! **Réponse d'une écriture.** Créer une page et la changer de parent changent les droits de
 //! l'espace. La réponse n'est pas relue pour autant : elle se compose de ce que l'écriture a
@@ -542,8 +544,9 @@ pub(crate) async fn restore(
 }
 
 /// `DELETE /api/v1/pages/{id}` : supprime définitivement la page et tout son sous-arbre, avec
-/// leurs documents, leurs accès et leurs invitations ; `409 not_trashed` si la page n'est pas à
-/// la corbeille (elle-même, ou par un ancêtre).
+/// leurs documents, leurs accès, leurs invitations et leurs attaches de fichiers, puis fait le
+/// ménage des fichiers ; `409 not_trashed` si la page n'est pas à la corbeille (elle-même, ou par
+/// un ancêtre).
 pub(crate) async fn delete(
     State(state): State<AppState>,
     user: AuthUser,
@@ -559,6 +562,9 @@ pub(crate) async fn delete(
         let deleted = writer.store.delete_node(id).await?;
         // Après la suppression en base : qui revient ne trouve plus la page.
         writer.hub.forget(&deleted).await;
+        // Le ménage des fichiers (Ruling R557) : les attaches sont parties avec les pages ; les
+        // contenus que plus rien n'attache quittent le disque. Il n'échoue jamais la suppression.
+        crate::routes::files::sweep(&writer).await;
         Ok(deleted.len())
     })
     .await?;

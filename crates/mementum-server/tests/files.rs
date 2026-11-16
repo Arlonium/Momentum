@@ -1839,3 +1839,218 @@ async fn get_on_the_copy_address_is_the_same_405_for_every_page() {
         assert_eq!(outcome(&reply), outcome(&first), "{page}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// La durée de vie d'un fichier (Task S4b, Ruling R245) : il vit autant que sa page, et seul le
+// ménage d'une page supprimée le retire du disque.
+
+/// Met la page à la corbeille, puis la supprime pour de bon, avec la session de `by`.
+async fn delete_for_good(by: &Browser<'_>, page: Uuid) {
+    by.post_empty(&format!("/api/v1/pages/{page}/trash"))
+        .await
+        .assert_status(StatusCode::OK);
+    by.delete(&format!("/api/v1/pages/{page}"))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+}
+
+/// Les lignes `files` de la base.
+async fn contents(t: &TestApp) -> i64 {
+    query_i64(&t.db_path(), "SELECT COUNT(*) FROM files").await
+}
+
+/// Preuve 3 du plan, pour un bloc qui part puis revient : un bloc image nomme le fichier ; une
+/// version le garde ; `PUT /mmd` retire le bloc : le fichier se lit toujours, rien ne l'a
+/// retiré, pas même le ménage d'une autre page supprimée entre-temps ; la version restaurée, le
+/// bloc revient avec son adresse, et le fichier se lit encore. (Rien ne lie un bloc à un fichier :
+/// ce test tient la promesse de R245 contre un ménage qui jugerait sur les blocs.)
+/// Les versions se coupent ici à chaque écriture qui en suit une autre (`version_every` nul) : la
+/// seconde écriture coupe, juste avant elle, la version qui porte l'image.
+#[tokio::test]
+async fn file_survives_its_block_and_comes_back_with_a_restored_version() {
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        cfg.version_every = Duration::ZERO;
+    })
+    .await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+    let page = team.page(None, "Album", &[members(Level::Full)]).await;
+    let id = page.to_string();
+    let file = uploaded(&mona.browser, page, "photo.png", PNG).await;
+    let url = file["url"].as_str().unwrap();
+    let with_image = format!("![Une photo]({url})\n");
+    mona.put_mmd(&id, with_image.clone())
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    mona.put_mmd(&id, "Plus d'image\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let without = mona.get_mmd(&id).await.text();
+    assert!(!without.contains(url), "le bloc est parti : {without}");
+    let served = read(&mona.browser, url, &[]).await;
+    served.assert_status(StatusCode::OK);
+    assert_eq!(served.body.as_ref(), PNG, "le bloc parti, le fichier reste");
+    // Un ménage passe pendant que le bloc est parti (une autre page supprimée, dont le contenu,
+    // lui, quitte le disque) : le fichier de l'album, encore attaché à sa page, reste.
+    let other = team.page(None, "Autre", &[members(Level::Full)]).await;
+    uploaded(&mona.browser, other, "plan.pdf", PDF).await;
+    delete_for_good(&mona.browser, other).await;
+    assert!(
+        !content_path(&t, PDF).exists(),
+        "témoin : le ménage a eu lieu"
+    );
+    let served = read(&mona.browser, url, &[]).await;
+    served.assert_status(StatusCode::OK);
+    assert_eq!(
+        served.body.as_ref(),
+        PNG,
+        "le ménage passé, le fichier reste"
+    );
+
+    let listed = mona
+        .browser
+        .get(&format!("/api/v1/pages/{page}/versions"))
+        .await
+        .json();
+    let version = listed[0]["id"].as_str().expect("une version").to_string();
+    mona.browser
+        .post_empty(&format!("/api/v1/pages/{page}/versions/{version}/restore"))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let restored = mona.get_mmd(&id).await.text();
+    assert_eq!(restored, with_image, "le bloc revient, avec son adresse");
+    let served = read(&mona.browser, url, &[]).await;
+    served.assert_status(StatusCode::OK);
+    assert_eq!(served.body.as_ref(), PNG, "et le fichier avec lui");
+}
+
+/// Une page à la corbeille sert ses fichiers, et n'en prend aucun : ni par un envoi, ni par une
+/// recopie (`409 trashed`) ; on recopie encore ses fichiers ailleurs.
+#[tokio::test]
+async fn trashed_page_serves_its_files_and_takes_none() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona.browser;
+    let binned = team.page(None, "Jetée", &[members(Level::Full)]).await;
+    let other = team.page(None, "Autre", &[members(Level::Full)]).await;
+    let kept = uploaded(mona, binned, "photo.png", PNG).await;
+    let theirs = uploaded(mona, other, "plan.pdf", PDF).await;
+    team.trash(binned).await;
+
+    let served = read(mona, kept["url"].as_str().unwrap(), &[]).await;
+    served.assert_status(StatusCode::OK);
+    assert_eq!(served.body.as_ref(), PNG);
+    upload(mona, binned, "autre.png", PNG.to_vec())
+        .await
+        .assert_error(StatusCode::CONFLICT, "trashed");
+    copy(
+        mona,
+        binned,
+        &other.to_string(),
+        theirs["id"].as_str().unwrap(),
+    )
+    .await
+    .assert_error(StatusCode::CONFLICT, "trashed");
+    let sql = format!("SELECT COUNT(*) FROM attachments WHERE node_id = '{binned}'");
+    assert_eq!(query_i64(&t.db_path(), &sql).await, 1, "rien de pris");
+    // Témoin : ses fichiers se recopient ailleurs.
+    copy(
+        mona,
+        other,
+        &binned.to_string(),
+        kept["id"].as_str().unwrap(),
+    )
+    .await
+    .assert_status(StatusCode::CREATED);
+}
+
+/// Le ménage d'une page supprimée pour de bon (Ruling R557) : le même contenu sur A et B, et un
+/// contenu sur A seule ; A supprimée, le contenu partagé reste (il se lit par B), celui de A seule
+/// quitte le disque et la base ; B supprimée, le partagé part à son tour. La suppression ne répond
+/// qu'une fois le ménage fait : tout se voit dès sa réponse.
+#[tokio::test]
+async fn deleting_a_page_removes_its_files_from_disk_once_no_page_keeps_them() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona.browser;
+    let a = team.page(None, "A", &[members(Level::Full)]).await;
+    let b = team.page(None, "B", &[members(Level::Full)]).await;
+    uploaded(mona, a, "photo.png", PNG).await;
+    uploaded(mona, a, "plan.pdf", PDF).await;
+    let shared = uploaded(mona, b, "même photo.png", PNG).await;
+    assert_eq!(contents(&t).await, 2);
+
+    delete_for_good(mona, a).await;
+    assert!(
+        content_path(&t, PNG).exists(),
+        "B l'attache : il reste sur le disque"
+    );
+    assert!(
+        !content_path(&t, PDF).exists(),
+        "A seule l'attachait : il quitte le disque"
+    );
+    assert_eq!(contents(&t).await, 1);
+    let served = read(mona, shared["url"].as_str().unwrap(), &[]).await;
+    served.assert_status(StatusCode::OK);
+    assert_eq!(served.body.as_ref(), PNG);
+
+    delete_for_good(mona, b).await;
+    assert!(!content_path(&t, PNG).exists());
+    assert_eq!(contents(&t).await, 0);
+}
+
+/// Preuve 3 du plan, pour une base revenue en arrière : le ménage ne regarde que les contenus
+/// que la base connaît. Un contenu du dépôt qu'elle ne connaît pas (ce qu'une base restaurée
+/// laisse des envois faits depuis) reste quand une page est supprimée ; témoin, le contenu de la
+/// page supprimée, lui, part.
+#[tokio::test]
+async fn the_sweep_never_touches_what_the_database_does_not_know() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona.browser;
+    let page = team.page(None, "Supprimée", &[members(Level::Full)]).await;
+    uploaded(mona, page, "plan.pdf", PDF).await;
+    let stranger = b"un contenu envoye apres la copie de la base";
+    let stranger_path = content_path(&t, stranger);
+    std::fs::create_dir_all(stranger_path.parent().unwrap()).unwrap();
+    std::fs::write(&stranger_path, stranger).unwrap();
+
+    delete_for_good(mona, page).await;
+    assert!(
+        !content_path(&t, PDF).exists(),
+        "témoin : le ménage a eu lieu"
+    );
+    assert_eq!(std::fs::read(&stranger_path).unwrap(), stranger);
+}
+
+/// Un ménage qui échoue est journalisé, et n'échoue pas la suppression (Ruling R557) : à la
+/// place du contenu, un dossier, que le dépôt ne retire pas ; la page est supprimée (`204`, puis
+/// introuvable), et le journal dit le contenu resté, par son hash, sans chemin du serveur dans
+/// la réponse.
+#[tokio::test]
+async fn a_sweep_that_fails_is_logged_and_the_deletion_stands() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona.browser;
+    let page = team.page(None, "Supprimée", &[members(Level::Full)]).await;
+    uploaded(mona, page, "plan.pdf", PDF).await;
+    let path = content_path(&t, PDF);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let logs = Logs::capture();
+
+    delete_for_good(mona, page).await;
+    mona.get(&format!("/api/v1/pages/{page}"))
+        .await
+        .assert_error(StatusCode::NOT_FOUND, "not_found");
+    let journal = logs.text();
+    let hash = etag(PDF).trim_matches('"').to_string();
+    let line = journal
+        .lines()
+        .find(|line| line.contains("impossible à retirer du disque"))
+        .unwrap_or_else(|| panic!("aucune ligne pour le contenu resté : {journal}"));
+    assert!(line.contains("ERROR"), "{line}");
+    assert!(line.contains(&hash), "{line}");
+    assert!(path.is_dir(), "ce qui était à sa place y reste");
+}

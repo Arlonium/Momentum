@@ -320,6 +320,76 @@ pub(crate) async fn copy(
     Ok((StatusCode::CREATED, Json(file_info(&copied))))
 }
 
+/// Contenus que le ménage retire au plus sous une même prise du verrou du dépôt (Ruling R556) :
+/// entre deux paquets, il rend le verrou, et les envois qui l'attendaient passent avant le
+/// paquet suivant.
+pub(crate) const SWEEP_BATCH: usize = 64;
+
+/// Le ménage des fichiers, à la suppression définitive d'une page (Rulings R245, R555 à R557) :
+/// retire de la base, puis du disque, les contenus qu'aucune attache ne nomme plus, **et eux
+/// seuls**. Un contenu que la base ne connaît pas (une base revenue en arrière, un envoi coupé
+/// entre la pose et l'attache) n'est jamais regardé ; un contenu encore attaché à une page, même
+/// si aucun bloc ne le nomme, reste.
+///
+/// Deux temps. Les candidats se lisent d'abord, sans verrou ni tour (`unattached_files`, une
+/// lecture de tous les contenus de l'instance, R270). Puis, paquet par paquet, sous le verrou du
+/// dépôt qui ordonne aussi « poser un contenu puis l'attacher » : la base retire ceux du paquet
+/// qu'aucune attache ne nomme **encore** (`forget_unattached`, dans la voie du dépôt, R522), et le
+/// disque, ceux-là. Un envoi qui a posé ou trouvé un contenu sous ce verrou l'a donc attaché avant
+/// que le ménage le regarde, ou le pose de nouveau après qu'il est parti : son fichier est
+/// toujours là (`upload_of_a_content_being_swept_keeps_its_file`).
+///
+/// Rien n'y échoue la suppression : une erreur est journalisée, et ce qui reste attend le ménage
+/// suivant (une ligne que la base n'a pas pu retirer), ou est compté au démarrage (un contenu que
+/// le disque n'a pas pu retirer, inconnu de la base, R285).
+pub(crate) async fn sweep(state: &AppState) {
+    let candidates = match state.store.unattached_files().await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "ménage des fichiers impossible : la base ne se lit pas ; la prochaine \
+                 suppression définitive le refera"
+            );
+            return;
+        }
+    };
+    let mut removed = 0usize;
+    for batch in candidates.chunks(SWEEP_BATCH) {
+        let guard = state.files.lock().await;
+        let gone = match state.store.forget_unattached(batch).await {
+            Ok(gone) => gone,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "ménage des fichiers interrompu : la base n'a pas retiré ses contenus sans \
+                     attache ; la prochaine suppression définitive le refera"
+                );
+                break;
+            }
+        };
+        for hash in &gone {
+            match state.files.remove(&guard, hash).await {
+                Ok(()) => removed += 1,
+                // Le chemin du serveur est dans l'erreur : elle va au journal, jamais ailleurs.
+                Err(error) => tracing::error!(
+                    hash = %files::hex(hash),
+                    %error,
+                    "contenu qu'aucune page n'attache plus, impossible à retirer du disque : il y \
+                     reste, inconnu de la base, compté au prochain démarrage"
+                ),
+            }
+        }
+        drop(guard);
+    }
+    if removed > 0 {
+        tracing::info!(
+            removed,
+            "ménage des fichiers : contenus qu'aucune page n'attachait plus, retirés du disque"
+        );
+    }
+}
+
 /// `GET /api/v1/pages/{id}/files/{fileId}` : le fichier, en téléchargement.
 pub(crate) async fn download(
     State(state): State<AppState>,
@@ -768,5 +838,363 @@ mod tests {
         for no in ["\"abcd\"", "abc", "\"ab\"c", "", "W/abc"] {
             assert!(!matches(no), "{no}");
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Le ménage et les envois, sous le verrou du dépôt (Task S4b).
+
+    use std::time::Instant;
+
+    use axum::Router;
+    use axum::http::Request;
+    use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+    use tower::ServiceExt;
+
+    use crate::access::tests::state;
+
+    /// Délai maximal d'une attente de condition.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    /// Un serveur sur un état neuf (celui des tests de `access.rs`), monté par le vrai routeur,
+    /// et la session d'un compte qui y a son espace.
+    struct Bench {
+        state: AppState,
+        router: Router,
+        cookie: String,
+        user: Uuid,
+        space: String,
+        dir: tempfile::TempDir,
+    }
+
+    impl Bench {
+        async fn new() -> Bench {
+            let dir = tempfile::tempdir().unwrap();
+            let state = state(&dir).await;
+            let router = crate::router(state.clone());
+            let signup = Request::post("/api/v1/auth/signup")
+                .header(header::HOST, "localhost")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": "mona@exemple.fr",
+                        "name": "Mona",
+                        "password": "mot-de-passe-de-test",
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = router.clone().oneshot(signup).await.unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let cookie = response
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_string();
+            let me: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            Bench {
+                state,
+                router,
+                cookie,
+                user: Uuid::parse_str(me["user"]["id"].as_str().unwrap()).unwrap(),
+                space: me["spaces"][0]["id"].as_str().unwrap().to_string(),
+                dir,
+            }
+        }
+
+        /// Une requête de Mona, menée dans une tâche à elle : son statut et son corps.
+        fn spawn(
+            &self,
+            method: &str,
+            uri: String,
+            body: Vec<u8>,
+        ) -> tokio::task::JoinHandle<(StatusCode, Bytes)> {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::HOST, "localhost")
+                .header(header::COOKIE, &self.cookie)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let router = self.router.clone();
+            tokio::spawn(async move {
+                let response = router.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (status, body)
+            })
+        }
+
+        async fn send(&self, method: &str, uri: String, body: Vec<u8>) -> (StatusCode, Bytes) {
+            self.spawn(method, uri, body).await.unwrap()
+        }
+
+        /// Une page neuve, à la racine de l'espace de Mona.
+        async fn page(&self, title: &str) -> Uuid {
+            let body = json!({ "spaceId": self.space, "title": title }).to_string();
+            let (status, body) = self.send("POST", "/api/v1/pages".into(), body.into()).await;
+            assert_eq!(status, StatusCode::CREATED);
+            let node: Value = serde_json::from_slice(&body).unwrap();
+            Uuid::parse_str(node["id"].as_str().unwrap()).unwrap()
+        }
+
+        fn upload(
+            &self,
+            page: Uuid,
+            name: &str,
+            bytes: &[u8],
+        ) -> tokio::task::JoinHandle<(StatusCode, Bytes)> {
+            let uri = format!("/api/v1/pages/{page}/files?name={name}");
+            self.spawn("POST", uri, bytes.to_vec())
+        }
+
+        async fn trash(&self, page: Uuid) {
+            let uri = format!("/api/v1/pages/{page}/trash");
+            assert_eq!(self.send("POST", uri, Vec::new()).await.0, StatusCode::OK);
+        }
+
+        fn delete(&self, page: Uuid) -> tokio::task::JoinHandle<(StatusCode, Bytes)> {
+            self.spawn("DELETE", format!("/api/v1/pages/{page}"), Vec::new())
+        }
+
+        /// Le chemin du contenu `bytes` dans le dépôt.
+        fn content_path(&self, bytes: &[u8]) -> std::path::PathBuf {
+            let hash: [u8; 32] = Sha256::digest(bytes).into();
+            let hex = files::hex(&hash);
+            self.dir
+                .path()
+                .join(files::FILES_DIR)
+                .join(&hex[..2])
+                .join(&hex[2..])
+        }
+
+        /// Attend que `n` tâches attendent le verrou du dépôt ([`WAIT`] au plus).
+        async fn waiting_for_the_lock(&self, n: usize) {
+            let deadline = Instant::now() + WAIT;
+            while self.state.files.waiting() != n {
+                assert!(
+                    Instant::now() < deadline,
+                    "{} tâches attendent le verrou du dépôt, {n} attendues",
+                    self.state.files.waiting()
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    /// Preuve 3 du plan, la course (Ruling R555) : la suppression de la seule page qui porte un
+    /// contenu, et l'envoi du même contenu vers une autre page. Le test tient le verrou du dépôt ;
+    /// il fait attendre au verrou l'un, puis l'autre (le verrou les sert dans cet ordre), puis le
+    /// rend. Dans les deux ordres, l'attache neuve se lit, avec les bons octets : l'envoi d'abord,
+    /// il trouve le contenu et l'attache, et le ménage, qui a lu ce contenu sans attache avant le
+    /// verrou, le revoit attaché et le laisse ; le ménage d'abord, le contenu quitte le disque, et
+    /// l'envoi le pose de nouveau. Témoin : sans le second envoi, le fichier quitte le disque.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn upload_of_a_content_being_swept_keeps_its_file() {
+        const CONTENT: &[u8] = b"un contenu en sursis";
+        for upload_first in [true, false] {
+            let what = if upload_first {
+                "l'envoi d'abord"
+            } else {
+                "le ménage d'abord"
+            };
+            let bench = Bench::new().await;
+            let (doomed, kept) = (bench.page("Supprimée").await, bench.page("Gardée").await);
+            let (status, _) = bench.upload(doomed, "x.txt", CONTENT).await.unwrap();
+            assert_eq!(status, StatusCode::CREATED);
+            bench.trash(doomed).await;
+
+            let guard = bench.state.files.lock().await;
+            let (upload, delete) = if upload_first {
+                let upload = bench.upload(kept, "y.txt", CONTENT);
+                bench.waiting_for_the_lock(1).await;
+                let delete = bench.delete(doomed);
+                bench.waiting_for_the_lock(2).await;
+                (upload, delete)
+            } else {
+                let delete = bench.delete(doomed);
+                bench.waiting_for_the_lock(1).await;
+                let upload = bench.upload(kept, "y.txt", CONTENT);
+                bench.waiting_for_the_lock(2).await;
+                (upload, delete)
+            };
+            drop(guard);
+            assert_eq!(delete.await.unwrap().0, StatusCode::NO_CONTENT, "{what}");
+            let (status, body) = upload.await.unwrap();
+            assert_eq!(status, StatusCode::CREATED, "{what}");
+            let info: Value = serde_json::from_slice(&body).unwrap();
+            let (status, served) = bench
+                .send("GET", info["url"].as_str().unwrap().into(), Vec::new())
+                .await;
+            assert_eq!(status, StatusCode::OK, "{what} : {served:?}");
+            assert_eq!(served.as_ref(), CONTENT, "{what}");
+        }
+
+        // Témoin : seule, la suppression attend au verrou, puis retire le contenu du disque.
+        let bench = Bench::new().await;
+        let doomed = bench.page("Supprimée").await;
+        assert_eq!(
+            bench.upload(doomed, "x.txt", CONTENT).await.unwrap().0,
+            StatusCode::CREATED
+        );
+        bench.trash(doomed).await;
+        assert!(bench.content_path(CONTENT).exists());
+        let guard = bench.state.files.lock().await;
+        let delete = bench.delete(doomed);
+        bench.waiting_for_the_lock(1).await;
+        drop(guard);
+        assert_eq!(delete.await.unwrap().0, StatusCode::NO_CONTENT);
+        assert!(!bench.content_path(CONTENT).exists());
+    }
+
+    /// Le ménage n'affame pas les envois (Ruling R556) : il retire au plus [`SWEEP_BATCH`]
+    /// contenus sous une même prise du verrou du dépôt, et un envoi qui attend le verrou passe
+    /// entre deux paquets. La page supprimée porte deux paquets et un contenu ; un envoi attend
+    /// le verrou derrière le ménage : un déclencheur témoin numérote, dans l'ordre de leur
+    /// validation, chaque contenu retiré de la base et l'attache de l'envoi. Exactement un paquet
+    /// passe avant elle ; d'un seul tenant, le ménage les ferait tous passer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_large_sweep_lets_uploads_through_between_batches() {
+        const CONTENTS: usize = 2 * SWEEP_BATCH + 1;
+        let bench = Bench::new().await;
+        let (doomed, other) = (bench.page("Supprimée").await, bench.page("Autre").await);
+        // Des contenus attachés par le store, sans fichier sur le disque : le ménage retire de la
+        // base ce qu'il trouve, et un contenu absent du disque se retire sans erreur (R275).
+        for i in 0..CONTENTS {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            let new = NewAttachment {
+                id: Uuid::now_v7(),
+                node_id: doomed,
+                hash,
+                size: 1,
+                mime: "text/plain",
+                name: "petit.txt",
+                created_by: bench.user,
+            };
+            bench.state.store.attach_file(new, now_ms()).await.unwrap();
+        }
+        let url = format!("sqlite:{}", bench.dir.path().join("m.db").display());
+        let mut side = <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+             CREATE TRIGGER witness_sweep AFTER DELETE ON files \
+             BEGIN INSERT INTO witness (what) VALUES ('ménage'); END; \
+             CREATE TRIGGER witness_upload AFTER INSERT ON attachments \
+             WHEN NEW.name = 'envoi.txt' \
+             BEGIN INSERT INTO witness (what) VALUES ('envoi'); END;",
+        )
+        .execute(&mut side)
+        .await
+        .unwrap();
+        bench.trash(doomed).await;
+
+        let guard = bench.state.files.lock().await;
+        let delete = bench.delete(doomed);
+        bench.waiting_for_the_lock(1).await;
+        let upload = bench.upload(other, "envoi.txt", b"un envoi qui attend");
+        bench.waiting_for_the_lock(2).await;
+        drop(guard);
+        assert_eq!(delete.await.unwrap().0, StatusCode::NO_CONTENT);
+        assert_eq!(upload.await.unwrap().0, StatusCode::CREATED);
+
+        let order: Vec<String> = sqlx::query_scalar("SELECT what FROM witness ORDER BY n")
+            .fetch_all(&mut side)
+            .await
+            .unwrap();
+        assert_eq!(order.len(), CONTENTS + 1, "{order:?}");
+        let before = order.iter().position(|what| what == "envoi").unwrap();
+        assert_eq!(
+            before, SWEEP_BATCH,
+            "contenus retirés avant l'envoi : {before}"
+        );
+    }
+    /// Le ménage d'une suppression n'attend pas la rafale de qui supprime (Ruling R522 ; constat
+    /// C de la re-relecture 1 de la robustesse), sur le modèle de
+    /// `the_file_store_lock_never_waits_for_an_account_burst` : il tient le verrou du dépôt, que
+    /// tous les envois de l'instance attendent, pendant qu'il attend son tour. Mona a vingt
+    /// écritures en file quand le ménage de sa suppression, verrou pris, demande le sien : il passe
+    /// le premier. Dans la voie de Mona, que la requête nomme (`to_completion` garde la portée),
+    /// il passerait après les vingt, verrou tenu.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_sweep_of_a_deletion_never_waits_for_the_burst_of_who_deletes() {
+        const BURST: usize = 20;
+        let bench = Bench::new().await;
+        let doomed = bench.page("Supprimée").await;
+        let (status, _) = bench.upload(doomed, "x.txt", b"orphelin").await.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        bench.trash(doomed).await;
+        let url = format!("sqlite:{}", bench.dir.path().join("m.db").display());
+        let mut side = <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+             CREATE TRIGGER witness_burst AFTER INSERT ON spaces \
+             BEGIN INSERT INTO witness (what) VALUES ('rafale'); END; \
+             CREATE TRIGGER witness_sweep AFTER DELETE ON files \
+             BEGIN INSERT INTO witness (what) VALUES ('ménage'); END;",
+        )
+        .execute(&mut side)
+        .await
+        .unwrap();
+        let store = bench.state.store.clone();
+        let queued = async |n: usize| {
+            let deadline = Instant::now() + WAIT;
+            while store.queued_writes() != n {
+                assert!(
+                    Instant::now() < deadline,
+                    "{} écritures en file, {n} attendues",
+                    store.queued_writes()
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+
+        // La suppression passe, et son ménage attend le verrou du dépôt, que le test tient.
+        let guard = bench.state.files.lock().await;
+        let delete = bench.delete(doomed);
+        bench.waiting_for_the_lock(1).await;
+        // La rafale de Mona, en file.
+        let held = store.hold_writes().await;
+        let mut burst = Vec::new();
+        for i in 0..BURST {
+            let store = store.clone();
+            let name = format!("Rafale {i:02}");
+            burst.push(tokio::spawn(mementum_store::writes_by(
+                Some(bench.user),
+                async move { store.create_space(&name, None).await },
+            )));
+            queued(i + 1).await;
+        }
+        // Le ménage prend le verrou du dépôt, et demande son tour.
+        drop(guard);
+        queued(BURST + 1).await;
+        drop(held);
+        assert_eq!(delete.await.unwrap().0, StatusCode::NO_CONTENT);
+        for write in burst {
+            write.await.unwrap().unwrap();
+        }
+        let order: Vec<String> = sqlx::query_scalar("SELECT what FROM witness ORDER BY n")
+            .fetch_all(&mut side)
+            .await
+            .unwrap();
+        assert_eq!(order.len(), BURST + 1, "{order:?}");
+        assert_eq!(order[0], "ménage", "{order:?}");
     }
 }
