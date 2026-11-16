@@ -9,9 +9,17 @@
 // cookies sont effacés. Chaque appel passe par trois temps, que l'essai mène un par un et dans
 // n'importe quel ordre d'un appel à l'autre : le serveur le traite (il juge la session, l'ouvre ou
 // la ferme), puis ses en-têtes arrivent (le navigateur pose le cookie), puis la page lit la
-// réponse ; une réponse peut aussi se perdre une fois l'appel traité (le cookie n'est posé que si
-// les en-têtes étaient arrivés). Rien n'est donc atomique : « le serveur a changé la session, la
-// page ne le sait pas encore » se produit.
+// réponse. Une réponse peut aussi se perdre une fois l'appel traité : avant ses en-têtes, `fetch`
+// rejette ; après eux, comme dans un navigateur, le cookie est posé, `fetch` est résolu, et c'est la
+// lecture du corps qui échoue (re-relecture, N1). Rien n'est donc atomique : « le serveur a changé
+// la session, la page ne le sait pas encore » se produit.
+//
+// Deux régimes. Une graine sur deux est agitée (autres onglets, sessions perdues, déconnexions,
+// sessions de l'onglet qui se croisent) ; l'autre est calme, et les enchaînements longs s'y déroulent
+// jusqu'au bout. Deux pas sont menés plus souvent que le hasard seul ne le ferait : une connexion de
+// l'onglet pendant une relecture du compte d'`api.ts`, dont le corps se perd une fois sur deux après
+// ses en-têtes, et la perte du corps d'une session de l'onglet. Sans eux et sans le régime calme,
+// retirer R480 survivait à 30 000 graines ; il échoue maintenant quelques graines sur 30 000.
 //
 // Ce qui doit toujours tenir :
 // - un appel repart au plus une fois ;
@@ -35,7 +43,8 @@
 // à Bruno, daté de Bruno, repartait sous Bruno (graine 169 du premier modèle ; `acting`) ; une
 // relecture répondue pendant une déconnexion rechargeait le compte de l'application (relecture, I1 ;
 // R461) ; une connexion de Bruno dont la réponse se perdait après son cookie laissait repartir un
-// appel sous lui (R480).
+// appel sous lui (R480, que la forme réelle de la perte, le corps après les en-têtes, met en défaut
+// sans la correction N1).
 //
 // `MEMENTUM_FUZZ_SEEDS=30000` (et `MEMENTUM_FUZZ_STEPS`) élargit l'essai.
 import type { Me } from "@mementum/protocol";
@@ -101,6 +110,8 @@ type InFlight = {
   phase: 0 | 1 | 2;
   /** Ce que le serveur a répondu, et le cookie que posent ses en-têtes (`undefined` : aucun). */
   outcome?: { status: number; body?: unknown; setCookie?: number | null };
+  /** Son corps se perdra après ses en-têtes : quand vient sa lecture, il est perdu. */
+  losesBody: boolean;
   resolve(res: Response): void;
   reject(error: unknown): void;
 };
@@ -113,7 +124,9 @@ const seen = {
   window: 0,
   writesDuringLogout: 0,
   lostAnswers: 0,
+  lostBodies: 0,
   crossedSessions: 0,
+  loginsDuringReading: 0,
 };
 
 afterEach(() => {
@@ -179,6 +192,8 @@ async function play(seed: number): Promise<void> {
   let reading = false;
   /** Le pas où est partie la dernière relecture d'`api.ts` dont la page a lu la réponse. */
   let lastReadingSentAt: number | undefined;
+  /** L'appel qui part maintenant perdra son corps après ses en-têtes. */
+  let nextLosesBody = false;
 
   vi.stubGlobal("fetch", (path: string, init: RequestInit = {}) => {
     const method = init.method ?? "GET";
@@ -209,7 +224,18 @@ async function play(seed: number): Promise<void> {
     }
     const verification = method === "GET" && path === "/api/v1/me" && !reading;
     return new Promise<Response>((resolve, reject) => {
-      inFlight.push({ method, path, body, token, verification, sentAt: tick, phase: 0, resolve, reject });
+      inFlight.push({
+        method,
+        path,
+        body,
+        token,
+        verification,
+        sentAt: tick,
+        phase: 0,
+        losesBody: nextLosesBody,
+        resolve,
+        reject,
+      });
     });
   });
 
@@ -257,7 +283,35 @@ async function play(seed: number): Promise<void> {
   const advance = (call: InFlight) => {
     if (call.phase === 0) process(call);
     else if (call.phase === 1) headers(call);
+    else if (call.losesBody) lose(call);
     else deliver(call);
+  };
+  /**
+   * La réponse de l'appel se perd, une fois l'appel traité par le serveur. Avant ses en-têtes,
+   * `fetch` rejette, et le cookie n'est pas posé. Après eux, comme dans un navigateur, le cookie est
+   * posé et `fetch` résolu ; c'est la lecture du corps qui échoue (re-relecture, N1). Une réponse
+   * sans corps (`204`) est alors entière : elle est lue.
+   */
+  const lose = (call: InFlight) => {
+    if (call.phase === 2 && call.outcome!.body === undefined) {
+      deliver(call);
+      return;
+    }
+    inFlight.splice(inFlight.indexOf(call), 1);
+    seen.lostAnswers += 1;
+    if (call.phase === 2) {
+      journal.push(`✗ ${call.method} ${call.path} (corps perdu après les en-têtes)`);
+      seen.lostBodies += 1;
+      const { status } = call.outcome!;
+      call.resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        json: () => Promise.reject(new TypeError("network error")),
+      } as unknown as Response);
+    } else {
+      journal.push(`✗ ${call.method} ${call.path} (réponse perdue)`);
+      call.reject(new TypeError("Failed to fetch"));
+    }
   };
   const ofPhase = (phase: number) => inFlight.filter((call) => call.phase === phase);
 
@@ -296,6 +350,10 @@ async function play(seed: number): Promise<void> {
       .finally(() => (changing -= 1));
   };
 
+  // Une graine sur deux est calme : peu d'autres onglets, de pertes et de déconnexions, et des
+  // connexions de l'onglet pendant les relectures. Les enchaînements longs qu'y gardent R462 et R480
+  // s'y déroulent jusqu'au bout ; dans les graines agitées, ils sont presque toujours dérangés.
+  const calm = seed % 2 === 0;
   const steps: [number, () => void][] = [
     [
       14,
@@ -315,21 +373,46 @@ async function play(seed: number): Promise<void> {
       14,
       () => {
         const calls = ofPhase(2);
-        if (calls.length > 0) deliver(pick(calls));
+        if (calls.length === 0) return;
+        const call = pick(calls);
+        if (call.losesBody) lose(call);
+        else deliver(call);
       },
     ],
     [
-      2,
+      calm ? 1 : 2,
       () => {
-        // Une réponse se perd, l'appel une fois traité ; le cookie n'est posé que si les en-têtes
-        // étaient arrivés.
+        // Une réponse se perd, l'appel une fois traité.
         const calls = inFlight.filter((call) => call.phase > 0);
-        if (calls.length === 0) return;
-        const call = pick(calls);
-        inFlight.splice(inFlight.indexOf(call), 1);
-        journal.push(`✗ ${call.method} ${call.path} (réponse perdue)`);
-        seen.lostAnswers += 1;
-        call.reject(new TypeError("Failed to fetch"));
+        if (calls.length > 0) lose(pick(calls));
+      },
+    ],
+    [
+      calm ? 4 : 3,
+      () => {
+        // Une session de l'onglet perd son corps, ses en-têtes (son cookie) arrivés : ce qui rend
+        // R480 nécessaire, mené plus souvent que le hasard seul ne le ferait.
+        const calls = inFlight.filter((call) => call.phase === 2 && SESSION_PATHS.has(call.path));
+        if (calls.length > 0) lose(pick(calls));
+      },
+    ],
+    [
+      calm ? 12 : 8,
+      () => {
+        // L'onglet se connecte pendant qu'une relecture d'`api.ts` est en route : la connexion
+        // croise la relecture, ce que R462 et R480 gardent. Une fois sur deux, son corps se perdra
+        // après ses en-têtes (son cookie posé) : la forme réelle d'une réponse perdue (N1).
+        if (!running || !inFlight.some((call) => call.verification)) return;
+        const account = pick([ALICE, BRUNO]);
+        const losesBody = next() < 0.5;
+        seen.loginsDuringReading += 1;
+        sessionCall(`connexion de ${account}, pendant une relecture${losesBody ? ", corps perdu" : ""}`, async () => {
+          nextLosesBody = losesBody;
+          const login = api.logIn({ email: `${account}@exemple.fr`, password: "x" });
+          nextLosesBody = false;
+          const opened = await login;
+          if (opened.user.id !== ALICE) running = false;
+        });
       },
     ],
     [
@@ -344,7 +427,7 @@ async function play(seed: number): Promise<void> {
       },
     ],
     [
-      4,
+      calm ? 2 : 4,
       () => {
         if (!running) return;
         const account = pick([ALICE, ALICE, BRUNO]);
@@ -356,7 +439,7 @@ async function play(seed: number): Promise<void> {
       },
     ],
     [
-      3,
+      calm ? 4 : 3,
       () => {
         if (!running) return;
         sessionCall("changement du mot de passe", () =>
@@ -365,7 +448,7 @@ async function play(seed: number): Promise<void> {
       },
     ],
     [
-      2,
+      calm ? 0 : 2,
       () => {
         if (!running) return;
         // L'application reste montée jusqu'à la réponse, et après un échec (`SpaceSwitcher`).
@@ -382,7 +465,7 @@ async function play(seed: number): Promise<void> {
       },
     ],
     [
-      5,
+      calm ? 2 : 5,
       () => {
         if (!running) return;
         journal.push("onglet : relit le compte");
@@ -397,7 +480,7 @@ async function play(seed: number): Promise<void> {
       },
     ],
     [
-      7,
+      calm ? 1 : 7,
       () => {
         const account = pick([ALICE, BRUNO]);
         journal.push(`autre onglet : connexion de ${account}`);
@@ -406,14 +489,14 @@ async function play(seed: number): Promise<void> {
       },
     ],
     [
-      7,
+      calm ? 1 : 7,
       () => {
         journal.push("la session est perdue (déconnexion ailleurs, échéance)");
         close(cookie);
       },
     ],
     [
-      2,
+      calm ? 0 : 2,
       () => {
         journal.push("cookies effacés");
         cookie = null;
@@ -464,4 +547,6 @@ test("the_random_runs_did_meet_what_they_test", () => {
   expect(seen.writesDuringLogout).toBeGreaterThan(0);
   expect(seen.lostAnswers).toBeGreaterThan(0);
   expect(seen.crossedSessions).toBeGreaterThan(0);
+  expect(seen.lostBodies).toBeGreaterThan(0);
+  expect(seen.loginsDuringReading).toBeGreaterThan(0);
 });
