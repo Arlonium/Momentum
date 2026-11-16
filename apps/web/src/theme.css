@@ -3159,6 +3159,144 @@ button.mm-reaction:hover {
   user-select: none;
 }
 
+/* Équations (Task C2) : en bloc, en ligne, et le champ où on les écrit. */
+
+/* L'équation, pour qui peut la modifier : toute la formule est le bouton qui ouvre sa fenêtre. */
+.mm-equation-button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+}
+
+.mm-equation-button:hover {
+  background: var(--mm-surface);
+}
+
+/* Une formule plus large que la page défile en dedans, jamais coupée. */
+.mm-equation .mm-tex {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.mm-equation .katex-display {
+  margin: 0;
+}
+
+/* La formule en ligne : dans la ligne, et, plus large qu'elle, elle défile en dedans (elle était
+   coupée sans rien dire). */
+.mm-math {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 1px 2px;
+  vertical-align: middle;
+}
+
+.mm-math-button {
+  margin: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.mm-math-button:hover {
+  background: var(--mm-surface);
+}
+
+/* Le texte d'une formule : en attendant sa mise en forme, ou à sa place quand elle est refusée. */
+.mm-tex-source {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  unicode-bidi: isolate;
+}
+
+.mm-tex-pending .mm-tex-source {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--mm-text-secondary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.mm-tex-invalid .mm-tex-source,
+.mm-tex-source.mm-tex-invalid {
+  color: var(--mm-danger);
+}
+
+.mm-tex-why {
+  margin-left: 6px;
+  color: var(--mm-text-secondary);
+  font-size: 12px;
+}
+
+.mm-equation .mm-tex-refused {
+  display: block;
+}
+
+.mm-equation .mm-tex-why {
+  display: block;
+  margin: 4px 0 0;
+}
+
+/* La fenêtre d'une formule : plus large, pour l'aperçu. */
+.mm-block-window:has(.mm-latex) {
+  width: 440px;
+}
+
+.mm-latex-field {
+  min-height: 72px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.mm-latex-preview {
+  min-height: 44px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px dashed var(--mm-border);
+  border-radius: 6px;
+  text-align: center;
+}
+
+.mm-latex-preview.mm-latex-inline {
+  text-align: left;
+}
+
+.mm-latex-preview .katex-display {
+  margin: 0;
+}
+
+.mm-latex-note,
+.mm-latex-hint {
+  margin: 0;
+  color: var(--mm-text-secondary);
+  font-size: 12px;
+}
+
+.mm-latex-hint {
+  align-self: center;
+  margin-right: auto;
+}
+
 .mm-placeholder {
   color: var(--mm-text-secondary);
   font-style: italic;

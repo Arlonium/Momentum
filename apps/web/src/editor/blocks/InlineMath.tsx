@@ -30,6 +30,8 @@ export type InlineMathTarget = {
   getPos: () => number | undefined;
   latex: () => string;
   apply: (latex: string) => void;
+  /** Prévient la fenêtre qui la tient quand la vue part (posé par la fenêtre). */
+  onGone: (() => void) | null;
 };
 
 /** Les vues de formule en ligne de chaque éditeur, pour retrouver celle qu'on vient de poser. */
@@ -139,6 +141,7 @@ function InlineMathView({ latex, editor, getPos, update }: ViewProps) {
     getPos,
     latex: () => latex,
     apply: update,
+    onGone: null,
   }).current;
   target.getPos = getPos;
   target.latex = () => latex;
@@ -149,6 +152,8 @@ function InlineMathView({ latex, editor, getPos, update }: ViewProps) {
     return () => {
       target.alive = false;
       targets(editor).delete(target);
+      // La vue part après le changement du document qui l'a supprimée : la fenêtre l'apprend ici.
+      target.onGone?.();
     };
   }, [editor, target]);
   const shown =
@@ -245,8 +250,15 @@ function OpenInlineMath({
     return () => window.clearTimeout(handle);
   }, [editor, open.pos, target, early, drafts]);
 
-  // La formule peut changer ou partir : relue à chaque changement du document, tant qu'ouverte.
+  // La formule peut changer ou partir : relue à chaque changement du document, et quand sa vue part.
   useEffect(() => editor.onChange(() => refresh((n) => n + 1)), [editor]);
+  useEffect(() => {
+    if (target === null) return;
+    target.onGone = () => refresh((n) => n + 1);
+    return () => {
+      if (target.onGone !== null) target.onGone = null;
+    };
+  }, [target]);
 
   const alive = target !== null && target.alive;
   const draft = target !== null ? drafts.get(target) : early;
