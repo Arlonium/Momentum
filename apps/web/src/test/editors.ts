@@ -236,6 +236,55 @@ export function stored(doc: Y.Doc): Shown[] {
   return read(doc.getXmlFragment(FRAGMENT).get(0) as Y.XmlElement | undefined);
 }
 
+/**
+ * Comme `shown`, avec les contenus en ligne dans le texte : une formule `⟦latex⟧`, une mention
+ * `⟦@libellé⟧` (C2, C4 : ce qu'un geste dans le texte fait d'une formule et de la frappe voisine).
+ */
+export function shownInline(p: Peer): Shown[] {
+  const piece = (c: unknown): string => {
+    const item = c as { type: string; text?: string; props?: Record<string, unknown> };
+    if (item.type === "text") return String(item.text ?? "");
+    if (item.type === "math") return `⟦${String(item.props?.latex ?? "")}⟧`;
+    if (item.type === "mention") return `⟦@${String(item.props?.label ?? "")}⟧`;
+    return "";
+  };
+  const read = (blocks: MementumEditor["document"]): Shown[] =>
+    blocks.map((b) => ({
+      id: b.id,
+      type: b.type,
+      text: Array.isArray(b.content) ? b.content.map(piece).join("") : "",
+      children: read(b.children),
+    }));
+  return read(p.editor.document);
+}
+
+/** Comme `stored`, avec les contenus en ligne dans le texte (`shownInline`), lu sans éditeur. */
+export function storedInline(doc: Y.Doc): Shown[] {
+  const read = (group: Y.XmlElement | undefined): Shown[] =>
+    (group?.toArray() ?? []).map((node) => {
+      const container = node as Y.XmlElement;
+      const [content, children] = container.toArray() as Y.XmlElement[];
+      const text = content
+        .toArray()
+        .map((piece) => {
+          if (piece instanceof Y.XmlText) {
+            return piece
+              .toDelta()
+              .map((d: { insert: unknown }) => String(d.insert))
+              .join("");
+          }
+          if (piece instanceof Y.XmlElement && piece.nodeName === "math") return `⟦${String(piece.getAttribute("latex"))}⟧`;
+          if (piece instanceof Y.XmlElement && piece.nodeName === "mention") {
+            return `⟦@${String(piece.getAttribute("label"))}⟧`;
+          }
+          return "";
+        })
+        .join("");
+      return { id: String(container.getAttribute("id")), type: content.nodeName, text, children: read(children) };
+    });
+  return read(doc.getXmlFragment(FRAGMENT).get(0) as Y.XmlElement | undefined);
+}
+
 /** Une page en une ligne, pour les messages : `y « Bloc Y » | x « Bloc X » [x1 « … »]`. */
 export function line(page: Shown[]): string {
   return page

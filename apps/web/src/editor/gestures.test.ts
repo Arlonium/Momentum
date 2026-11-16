@@ -33,6 +33,7 @@ import * as Y from "yjs";
 import {
   block,
   counts,
+  cursor,
   drag,
   duo,
   elementIds,
@@ -41,8 +42,11 @@ import {
   PARENTED,
   repeatedIds,
   shown,
+  shownInline,
   stored,
+  storedInline,
   storedProps,
+  typeAt,
   typeAtEnd,
   written,
   X,
@@ -612,4 +616,146 @@ describe("changer le type d'un bloc", () => {
       }
     });
   }
+});
+
+
+// ---------------------------------------------------------------------------
+// Poser une formule en ligne, en changer la formule (C2)
+// ---------------------------------------------------------------------------
+
+// Les pages se lisent ici avec les contenus en ligne dans le texte : une formule s'écrit `⟦latex⟧`
+// (`shownInline`, `storedInline`). Ce qui est relu : la page chez Mona, chez Tom et au serveur, et
+// les trois documents égaux ; le texte voisin d'une formule est un texte Yjs, pas un élément (`written`
+// ne le voit pas) : `counts` dit ce qui est écrit.
+
+/** Ce qui manque, avec les contenus en ligne : la page `wanted` partout, les documents égaux. */
+function unmetInline(s: Scene, wanted: Shown[]): string[] {
+  const lines: string[] = [];
+  const views: [string, Shown[]][] = [
+    ["chez Mona", shownInline(s.mona)],
+    ["chez Tom", shownInline(s.tom)],
+    ["au serveur", storedInline(s.server)],
+  ];
+  for (const [where, page] of views) {
+    if (JSON.stringify(page) !== JSON.stringify(wanted)) lines.push(pageLine(where, page, wanted));
+  }
+  if (xml(s.tom.doc) !== xml(s.mona.doc)) lines.push("Mona et Tom n'ont pas le même document");
+  if (xml(s.server) !== xml(s.mona.doc)) lines.push("le serveur n'a pas le document de Mona");
+  return lines;
+}
+
+function expectEverywhereInline(s: Scene, wanted: Shown[]): void {
+  const lines = unmetInline(s, wanted);
+  if (lines.length > 0) throw new Unmet(lines.join("\n"));
+}
+
+/** Chacun montre, après son geste et avant l'échange, la page `local` dit (contenus en ligne compris). */
+function requireLocallyDoneInline(s: Scene, local: { mona: Shown[]; tom: Shown[] }): void {
+  const same = (p: Peer, page: Shown[]) => JSON.stringify(shownInline(p)) === JSON.stringify(page);
+  if (s.quiet && same(s.mona, local.mona) && same(s.tom, local.tom)) return;
+  throw new Missed(
+    `précondition manquée : Mona ${line(shownInline(s.mona))} (attendu : ${line(local.mona)}) ; ` +
+      `Tom ${line(shownInline(s.tom))} (attendu : ${line(local.tom)})`,
+  );
+}
+
+/** La page XYZ, le bloc Y portant `text`. */
+const withY = (text: string) => [X, block("y", text), Z];
+
+/** Mona pose la formule `latex` dans Y, à `offset` caractères du début, comme « Équation en ligne ». */
+function insertFormula(p: Peer, offset: number, latex: string): void {
+  cursor(p, "y", offset);
+  p.editor.insertInlineContent([{ type: "math", props: { latex } }]);
+}
+
+describe("poser une formule en ligne", () => {
+  for (const { order, first, label } of PLAYS) {
+    for (const [where, offset, wanted] of [
+      ["au début", 0, "⟦x⟧Bloc Y de Tom"],
+      ["à la fin", "Bloc Y".length, "Bloc Y de Tom⟦x⟧"],
+    ] as const) {
+      test(`inline_math_inserted_at_the_cursor_keeps_what_another_types, ${where} (${label})`, async () => {
+        const s = await scene(XYZ, order);
+        const before = elementIds(s.server);
+        insertFormula(s.mona, offset, "x");
+        // Tom tape à la fin de Y pendant que Mona pose sa formule.
+        typeAtEnd(s.tom, "y", TYPED);
+        const local = offset === 0 ? "⟦x⟧Bloc Y" : "Bloc Y⟦x⟧";
+        requireLocallyDoneInline(s, { mona: withY(local), tom: withY(`Bloc Y${TYPED}`) });
+        // Ce que le geste écrit : un élément de plus ; aucun caractère supprimé.
+        expect(counts(pending(s.mona))).toMatchObject({ made: { "<math>": 1, "@latex": 1 }, deleted: 0 });
+        await send(s, first);
+        // À la fin, la formule et la frappe sont au même point : la frappe reste dans le texte, la
+        // formule le suit, dans les deux ordres.
+        expectEverywhereInline(s, withY(wanted));
+        for (const [w, doc] of docs(s)) expect(changedElements(doc, before), w).toEqual([]);
+      });
+    }
+
+    knownLimit(
+      `inline_math_inserted_at_the_cursor_keeps_what_another_types, au milieu (${label})`,
+      "le texte d'après la formule est supprimé et recréé dans un texte neuf : la frappe d'un autre, ancrée au bout du texte supprimé, reste avant la formule",
+      { wanted: withY("Blo⟦x⟧c Y de Tom"), lost: withY("Blo de Tom⟦x⟧c Y") },
+      async () => {
+        const s = await scene(XYZ, order);
+        insertFormula(s.mona, 3, "x");
+        typeAtEnd(s.tom, "y", TYPED);
+        requireLocallyDoneInline(s, { mona: withY("Blo⟦x⟧c Y"), tom: withY(`Bloc Y${TYPED}`) });
+        await send(s, first);
+        expectEverywhereInline(s, withY("Blo⟦x⟧c Y de Tom"));
+      },
+    );
+
+    knownLimit(
+      `two_inline_formulas_posed_at_once_in_a_text_keep_the_text_once (${label})`,
+      "chacun supprime le texte d'après sa formule et le recrée dans un texte neuf : les deux textes neufs restent",
+      {
+        wanted: withY(order.mona < order.tom ? "Blo⟦a⟧⟦b⟧c Y" : "Blo⟦b⟧⟦a⟧c Y"),
+        lost: withY(order.mona < order.tom ? "Blo⟦a⟧c Y⟦b⟧c Y" : "Blo⟦b⟧c Y⟦a⟧c Y"),
+      },
+      async () => {
+        const s = await scene(XYZ, order);
+        insertFormula(s.mona, 3, "a");
+        insertFormula(s.tom, 3, "b");
+        requireLocallyDoneInline(s, { mona: withY("Blo⟦a⟧c Y"), tom: withY("Blo⟦b⟧c Y") });
+        await send(s, first);
+        expectEverywhereInline(s, withY(order.mona < order.tom ? "Blo⟦a⟧⟦b⟧c Y" : "Blo⟦b⟧⟦a⟧c Y"));
+      },
+    );
+  }
+});
+
+/** Y porte une formule entre deux textes. */
+const WITH_FORMULA: Seed = [
+  { id: "x", type: "paragraph", content: "Bloc X" },
+  { id: "y", type: "paragraph", content: ["Avant ", { type: "math", props: { latex: "x" } }, " après"] },
+  { id: "z", type: "paragraph", content: "Bloc Z" },
+];
+
+describe("changer la formule d'un contenu en ligne", () => {
+  test.each(PLAYS)("applying_the_latex_of_an_inline_formula_keeps_what_another_types ($label)", async ({ order, first }) => {
+    const s = await scene(WITH_FORMULA, order);
+    const before = elementIds(s.server);
+    // « Terminer » : `updateInlineContent` de BlockNote, un `setNodeMarkup` du nœud de la formule.
+    const wrote = written(s.mona, () =>
+      s.mona.editor.transact((tr) => {
+        let at = -1;
+        tr.doc.descendants((node, pos) => {
+          if (node.type.name === "math") at = pos;
+        });
+        tr.setNodeMarkup(at, undefined, { latex: "y" });
+      }),
+    );
+    // Tom tape avant et après la formule.
+    typeAt(s.tom, "y", 0, "Tom ");
+    typeAtEnd(s.tom, "y", " Tom");
+    requireLocallyDoneInline(s, { mona: withY("Avant ⟦y⟧ après"), tom: withY("Tom Avant ⟦x⟧ après Tom") });
+    // Ce que le geste écrit : l'attribut de l'élément de la formule, récrit ; ni élément ni texte
+    // créé ou supprimé.
+    expect(wrote).toEqual({ deleted: [], created: [], renamed: {} });
+    expect(counts(pending(s.mona))).toMatchObject({ made: { "attribut récrit": 1 }, deleted: 1 });
+    await send(s, first);
+    expectEverywhereInline(s, withY("Tom Avant ⟦y⟧ après Tom"));
+    for (const [w, doc] of docs(s)) expect(changedElements(doc, before), w).toEqual([]);
+  });
 });
