@@ -7,19 +7,29 @@
 import { SideMenuExtension } from "@blocknote/core/extensions";
 import { NodeSelection } from "prosemirror-state";
 import { act, createElement } from "react";
-import { expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import * as Y from "yjs";
-import { cursorOf, elementIds, peer, seedState, selectContent, selectFrom, shown, X, XYZ, Y_, Z, block, type Peer, type Seed } from "../test/editors";
+import { cursorOf, elementIds, peer, seedState, selectBlock, selectContent, selectFrom, shown, X, XYZ, Y_, Z, block, type Peer, type Seed } from "../test/editors";
 import { until } from "../test/hooks";
 import { flush, mountEditor, type Mounted } from "../test/richEditor";
 import { FRAGMENT } from "./collab";
 import type { MementumEditor } from "./debug";
-import { duplicateBlocks, isDuplicateShortcut, selectedBlockIds, type DuplicateKey } from "./duplicate";
+import {
+  duplicateBlocks,
+  isDuplicateShortcut,
+  MAX_DUPLICATED_BLOCKS,
+  selectedBlockIds,
+  TOO_MANY_BLOCKS,
+  type DuplicateKey,
+} from "./duplicate";
+import { dismissNotice } from "./editorNotice";
 import { EditorView } from "./Editor";
 import allBlocks from "./fixtures/all-blocks.input.json";
 import nonDefault from "./fixtures/non-default.input.json";
 
 type Block = MementumEditor["document"][number];
+
+afterEach(() => dismissNotice("mm-copy-refused"));
 
 /** Une page de départ ouverte par Mona, seule. */
 async function alone(blocks: Seed): Promise<Peer> {
@@ -394,4 +404,217 @@ test("duplicate_from_the_handle_copies_the_selection_that_holds_its_block", asyn
   act(() => menuItem("Dupliquer").click());
   await flush();
   expect(shown(m).map((b) => b.text)).toEqual(["Bloc X", "Bloc Y", "Bloc X", "Bloc Y", "Bloc Z", "Bloc Z"]);
+});
+
+// ---------------------------------------------------------------------------
+// Des blocs qui ne sont pas frères : la copie remonte à leur parent commun (R640)
+// ---------------------------------------------------------------------------
+
+/** X, une liste de deux colonnes (C1, C2), Z. */
+const COLUMNS: Seed = [
+  { id: "x", type: "paragraph", content: "Bloc X" },
+  {
+    id: "cols",
+    type: "columnList",
+    children: [
+      { id: "col1", type: "column", children: [{ id: "c1", type: "paragraph", content: "Colonne 1" }] },
+      { id: "col2", type: "column", children: [{ id: "c2", type: "paragraph", content: "Colonne 2" }] },
+    ],
+  },
+  { id: "z", type: "paragraph", content: "Bloc Z" },
+] as Seed;
+
+test.each([
+  {
+    what: "de la colonne 1 à la colonne 2",
+    last: "c2",
+    // BlockNote rend le bloc de départ, puis la colonne voisine.
+    selected: ["c1", "col2"],
+    // Une colonne devient sa liste de colonnes : la liste entière est copiée.
+    copied: ["cols"],
+    page: (made: string[]) => ["x", "cols", made[0], "z"],
+  },
+  {
+    what: "de la colonne 1 au paragraphe qui suit",
+    last: "z",
+    selected: ["c1", "col2", "z"],
+    copied: ["cols", "z"],
+    page: (made: string[]) => ["x", "cols", "z", made[0], made[1]],
+  },
+])("a_selection_leaving_a_column_is_duplicated ($what)", async ({ last, selected, copied, page }) => {
+  const mona = await alone(COLUMNS);
+  selectFrom(mona, "c1", last);
+  expect(selectedBlockIds(mona.editor), "ce que rend la sélection de BlockNote").toEqual(selected);
+  const made = duplicateBlocks(mona.editor, selectedBlockIds(mona.editor));
+  expect(made).toHaveLength(copied.length);
+  expect(mona.editor.document.map((b) => b.id)).toEqual(page(made));
+  copied.forEach((id, i) => {
+    expect(stripped(mona.editor.getBlock(made[i])!), `la copie de ${id}`).toEqual(stripped(mona.editor.getBlock(id)!));
+  });
+  expect(repeatedInDoc(mona.doc)).toEqual([]);
+});
+
+test("a_block_in_a_column_or_under_another_is_copied_where_it_is", async () => {
+  // Témoin de R640 : des frères ne remontent pas. Un bloc d'une colonne est copié dans sa colonne ;
+  // un sous-bloc, sous son bloc parent.
+  const mona = await alone([
+    ...COLUMNS,
+    { id: "p", type: "paragraph", content: "Parent", children: [{ id: "p1", type: "paragraph", content: "Enfant" }] },
+  ] as Seed);
+  const [c1b] = duplicateBlocks(mona.editor, ["c1"]);
+  expect(mona.editor.getBlock("col1")!.children.map((b) => b.id)).toEqual(["c1", c1b]);
+  const [p1b] = duplicateBlocks(mona.editor, ["p1"]);
+  expect(mona.editor.getBlock("p")!.children.map((b) => b.id)).toEqual(["p1", p1b]);
+  expect(mona.editor.document.map((b) => b.id)).toEqual(["x", "cols", "z", "p"]);
+});
+
+test("a_selection_from_a_child_to_a_later_block_copies_from_their_common_parent", async () => {
+  const mona = await alone([
+    { id: "x", type: "paragraph", content: "Bloc X", children: [{ id: "x1", type: "paragraph", content: "Enfant X1" }] },
+    { id: "y", type: "paragraph", content: "Bloc Y" },
+    { id: "z", type: "paragraph", content: "Bloc Z" },
+  ] as Seed);
+  selectFrom(mona, "x1", "y");
+  expect(selectedBlockIds(mona.editor)).toEqual(["x1", "y"]);
+  // X1 remonte à X, l'enfant direct du parent commun (la page) : X, son enfant compris, puis Y.
+  const [x2, y2] = duplicateBlocks(mona.editor, selectedBlockIds(mona.editor));
+  expect(mona.editor.document.map((b) => b.id)).toEqual(["x", "y", x2, y2, "z"]);
+  expect(stripped(mona.editor.getBlock(x2)!)).toEqual(stripped(mona.editor.getBlock("x")!));
+  expect(repeatedInDoc(mona.doc)).toEqual([]);
+});
+
+test("a_copy_that_blocknote_refuses_leaves_the_key_to_the_browser_and_closes_the_menu", async () => {
+  const m = await mountEditor({ blocks: XYZ });
+  m.editor.focus();
+  m.editor.setTextCursorPosition("y", "end");
+  const refuse = vi.spyOn(m.editor, "insertBlocks").mockImplementation(() => {
+    throw new Error("copie refusée pour le test");
+  });
+  const writes = m.writes.length;
+  // Ctrl+D : rien n'est copié, la touche n'est pas annulée, et l'erreur est dite, pas levée.
+  expect(ctrlD(m).defaultPrevented).toBe(false);
+  expect(m.editor.document).toHaveLength(3);
+  expect(m.writes).toHaveLength(writes);
+  expect(m.errors.some((line) => line.includes("copie refusée pour le test"))).toBe(true);
+  // « Dupliquer » du menu de la poignée : le menu se ferme, et le focus revient au texte.
+  await openHandleMenu(m, "y");
+  act(() => menuItem("Dupliquer").click());
+  await until(m.host, () => menuItems().length === 0, "le menu fermé");
+  expect(document.activeElement).toBe(m.editor.prosemirrorView.dom);
+  expect(m.editor.document).toHaveLength(3);
+  refuse.mockRestore();
+});
+
+// ---------------------------------------------------------------------------
+// Le coût : un parcours de la page, et au plus 1 000 blocs par geste (R641)
+// ---------------------------------------------------------------------------
+
+test("a_copy_reads_the_page_in_one_walk", async () => {
+  // Garde : relire chaque bloc par son id (`getBlock`, `getParentBlock`) reparcourt la page à chaque
+  // fois, et la copie de toute une page de 10 000 blocs figeait l'onglet 6 s de plus.
+  const mona = await alone(DEEP);
+  const getBlock = vi.spyOn(mona.editor, "getBlock");
+  const getParentBlock = vi.spyOn(mona.editor, "getParentBlock");
+  expect(duplicateBlocks(mona.editor, ["a", "cols", "t", "z"])).toHaveLength(4);
+  expect(getBlock).not.toHaveBeenCalled();
+  expect(getParentBlock).not.toHaveBeenCalled();
+});
+
+/** `n` blocs, chacun avec un enfant : `2 × n` blocs. */
+function parents(n: number): Seed {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `p${i}`,
+    type: "paragraph",
+    content: `Bloc ${i}`,
+    children: [{ id: `e${i}`, type: "paragraph", content: `Enfant ${i}` }],
+  })) as Seed;
+}
+
+/** Le message d'une copie refusée, ou `null`. */
+function copyRefused(): string | null {
+  return document.querySelector(".mm-copy-refused[role=alert]")?.textContent ?? null;
+}
+
+test(
+  "more_than_1000_blocks_are_not_copied_and_it_is_said",
+  async () => {
+    expect(MAX_DUPLICATED_BLOCKS).toBe(1_000);
+    const mona = await alone([...parents(MAX_DUPLICATED_BLOCKS / 2), { id: "z", type: "paragraph", content: "Bloc Z" }] as Seed);
+    const all = mona.editor.document.map((b) => b.id);
+    // 1 001 blocs, sous-blocs compris : rien n'est copié ni écrit, et le message le dit.
+    const writes = mona.writes.length;
+    expect(duplicateBlocks(mona.editor, all)).toEqual([]);
+    expect(mona.writes).toHaveLength(writes);
+    expect(mona.editor.document).toHaveLength(all.length);
+    expect(copyRefused()).toBe(TOO_MANY_BLOCKS);
+    dismissNotice("mm-copy-refused");
+    // Témoin : 1 000 blocs (500 et leurs enfants) sont copiés, sans message.
+    expect(duplicateBlocks(mona.editor, all.slice(0, -1))).toHaveLength(MAX_DUPLICATED_BLOCKS / 2);
+    expect(copyRefused()).toBeNull();
+  },
+  60_000,
+);
+
+test(
+  "ctrl_d_on_too_many_blocks_takes_the_key_and_says_why_nothing_is_copied",
+  async () => {
+    const m = await mountEditor({ blocks: [...parents(MAX_DUPLICATED_BLOCKS / 2), { id: "z", type: "paragraph", content: "Bloc Z" }] as Seed });
+    m.editor.focus();
+    m.editor.setSelection("p0", "z");
+    const writes = m.writes.length;
+    expect(ctrlD(m).defaultPrevented).toBe(true);
+    expect(m.writes).toHaveLength(writes);
+    expect(copyRefused()).toBe(TOO_MANY_BLOCKS);
+    dismissNotice("mm-copy-refused");
+  },
+  60_000,
+);
+
+// Les ids de la sélection sont lus sans convertir ses blocs : `getSelection()` de BlockNote convertit
+// chaque bloc choisi, sous-blocs compris (une page de 10 000 blocs sélectionnée : près d'une demi-
+// seconde avant même de compter). Ce sont les mêmes ids que les siens.
+test("selected_ids_are_those_of_the_blocknote_selection_read_without_converting_blocks", async () => {
+  const mona = await alone([
+    { id: "x", type: "paragraph", content: "Bloc X", children: [{ id: "x1", type: "paragraph", content: "Enfant X1" }, { id: "x2", type: "paragraph", content: "Enfant X2" }] },
+    ...COLUMNS.slice(1, 2),
+    { id: "y", type: "paragraph", content: "Bloc Y" },
+    { id: "t", type: "table", content: { type: "tableContent", rows: [{ cells: ["A", "B"] }] } },
+    { id: "i", type: "image", props: { url: "https://exemple.fr/a.png" } },
+    { id: "z", type: "paragraph", content: "Bloc Z" },
+  ] as Seed);
+  const blockNote = () => mona.editor.getSelection()?.blocks.map((b) => b.id) ?? [mona.editor.getTextCursorPosition().block.id];
+  const ours = () => {
+    const getSelection = vi.spyOn(mona.editor, "getSelection");
+    try {
+      return selectedBlockIds(mona.editor);
+    } finally {
+      expect(getSelection, "lu sans `getSelection`").not.toHaveBeenCalled();
+      getSelection.mockRestore();
+    }
+  };
+  const pairs: [string, string][] = [
+    ["x", "y"],
+    ["x1", "y"],
+    ["x", "x1"],
+    ["x1", "x2"],
+    ["x2", "c1"],
+    ["c1", "c2"],
+    ["c1", "y"],
+    ["c2", "z"],
+    ["y", "z"],
+  ];
+  for (const [first, last] of pairs) {
+    selectFrom(mona, first, last);
+    expect(ours(), `de ${first} à ${last}`).toEqual(blockNote());
+  }
+  // Un curseur, une image cliquée, un curseur dans un tableau : le bloc du curseur.
+  mona.editor.setTextCursorPosition("x1", "end");
+  expect(ours()).toEqual(["x1"]);
+  selectContent(mona, "i");
+  expect(ours()).toEqual(blockNote());
+  // Un bloc entier sélectionné comme un nœud (son conteneur) : celui du curseur, comme pour BlockNote.
+  selectBlock(mona, "y");
+  expect(ours()).toEqual(blockNote());
+  mona.editor.setTextCursorPosition("t", "start");
+  expect(ours()).toEqual(["t"]);
 });

@@ -68,7 +68,7 @@ import { focusMentionLink } from "../mentions/Mention";
 import { mentionMenuOpen, MentionMenus, type MentionContext } from "../mentions/MentionMenu";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
-import { duplicateBlocks, handleBlockIds, isDuplicateShortcut, selectedBlockIds } from "./duplicate";
+import { duplicateFromGesture, handleBlockIds, isDuplicateShortcut, selectedBlockIds } from "./duplicate";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
 import { linkBound } from "./linkBound";
@@ -266,13 +266,13 @@ export function EditorView({ editor, editable, onComment = null, mentions = null
    * et AltGr garde ses caractères (`isCommentShortcut`). Le bloc est lu dans la sélection du
    * document, que le navigateur pose dès le clic : celle de BlockNote peut la suivre d'un temps.
    * Ctrl+D (Cmd+D) : dupliquer (`isDuplicateShortcut`) ; la touche n'est prise que le focus dans le
-   * texte d'un éditeur modifiable (pas dans un bouton ou un champ posé dans sa vue, R634).
+   * texte d'un éditeur modifiable (pas dans un bouton ou un champ posé dans sa vue, R634), et
+   * seulement si BlockNote n'a pas refusé la copie (`duplicateFromGesture`, R640).
    */
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (isDuplicateShortcut(event)) {
-      if (editor.isEditable && editor.isFocused()) {
+      if (editor.isEditable && editor.isFocused() && duplicateFromGesture(editor, () => selectedBlockIds(editor))) {
         event.preventDefault();
-        duplicateBlocks(editor, selectedBlockIds(editor));
       }
       return;
     }
@@ -405,7 +405,8 @@ function useHandleBlock() {
 /**
  * « Dupliquer » : les blocs de la sélection si elle contient celui de la poignée, sinon lui seul (la
  * règle de « Supprimer » de BlockNote). Le curseur va dans la première copie ; BlockNote rend le
- * focus à l'éditeur quand le menu se ferme (`unfreezeMenu`).
+ * focus à l'éditeur quand le menu se ferme sur un clic (`unfreezeMenu`). Une copie refusée par
+ * BlockNote ne lève pas : le menu se ferme (`duplicateFromGesture`).
  */
 function DuplicateItem() {
   const Components = useComponentsContext()!;
@@ -415,7 +416,7 @@ function DuplicateItem() {
   return (
     <Components.Generic.Menu.Item
       className="bn-menu-item"
-      onClick={() => duplicateBlocks(editor, handleBlockIds(editor, block.id))}
+      onClick={() => duplicateFromGesture(editor, () => handleBlockIds(editor, block.id))}
     >
       Dupliquer
     </Components.Generic.Menu.Item>
