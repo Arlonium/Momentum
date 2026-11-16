@@ -33,7 +33,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
-use mementum_crdt::{Applied, Awaited, PageDoc};
+use mementum_crdt::{Applied, Awaited, CrdtError, PageDoc};
 use mementum_md::Block;
 use mementum_store::{DocState, Store, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
@@ -1325,6 +1325,12 @@ impl Actor {
         };
         let update = match written {
             Ok(update) => update,
+            // Ruling R389 : le retrait est fait dans le document vivant, pas au journal.
+            Err(e @ CrdtError::HalfWritten) => {
+                tracing::error!(node_id = %self.id.node_id, "écriture complète faite à moitié : le document est rechargé");
+                self.reload().await?;
+                return Ok(Err(e.into()));
+            }
             Err(e) => return Ok(Err(e.into())),
         };
         let written = match history {

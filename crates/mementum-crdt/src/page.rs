@@ -467,7 +467,7 @@ impl PageDoc {
     /// [`MAX_YJS_DEPTH`](crate::MAX_YJS_DEPTH) (`TooDeep`).
     pub fn write_blocks(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
         let blocks = writable(blocks)?;
-        Ok(self.write_all(&blocks))
+        self.write_all(&blocks)
     }
 
     /// Comme [`PageDoc::write_blocks`], pour `PUT /mmd` (Ruling R201) : avant d'écrire, un bloc
@@ -484,7 +484,7 @@ impl PageDoc {
         // Avant la transaction d'écriture : `read_blocks` en ouvre une de lecture.
         let current = self.read_blocks();
         keep_ids(&current, &mut blocks);
-        Ok(self.write_all(&blocks))
+        self.write_all(&blocks)
     }
 
     /// Les refus de [`PageDoc::write_blocks`], sans rien écrire : pour qui doit
@@ -505,7 +505,13 @@ impl PageDoc {
     /// contre 0,8 à 1,4 s pour la première écriture. Les suppressions ne prennent pas d'horloge :
     /// les éléments écrits ont les mêmes identifiants et les mêmes origines qu'en une transaction,
     /// et la mise à jour est la même, octet pour octet (tests de ce module).
-    fn write_all(&self, blocks: &[Block]) -> Vec<u8> {
+    ///
+    /// Si l'une des deux transactions a écrit dans la part de l'autre (une écriture qui
+    /// supprimerait, en récrivant un attribut déjà posé), `HalfWritten` (Ruling R389) : le retrait
+    /// est fait, le document est à recharger. Aucune écriture du serveur n'en fait aujourd'hui
+    /// (la prop `colwidth` d'une cellule, que l'écriture posait deux fois, est sautée) ; c'était
+    /// une assertion, qui arrêtait l'acteur.
+    fn write_all(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
         let (cleared, wrote_nothing) = {
             let mut txn = self.doc.transact_mut();
             self.clear(&mut txn);
@@ -522,17 +528,17 @@ impl PageDoc {
         // octet pour octet, la mise à jour qu'aurait encodée une seule transaction ; la fusion
         // de yrs (`merge_updates_v1`), qui relit et récrit tout, coûtait 3 s sur un tableau de
         // 300 000 cellules.
-        assert!(
-            wrote_nothing
-                && removed_nothing
-                && filled.last() == Some(&0)
-                && cleared.first() == Some(&0),
-            "écriture complète : une transaction a écrit dans la part de l'autre"
-        );
+        if !(wrote_nothing
+            && removed_nothing
+            && filled.last() == Some(&0)
+            && cleared.first() == Some(&0))
+        {
+            return Err(CrdtError::HalfWritten);
+        }
         let mut update = filled;
         update.pop();
         update.extend_from_slice(&cleared[1..]);
-        update
+        Ok(update)
     }
 
     /// Retire tout le contenu, sauf la première racine `blockGroup`, vidée.
@@ -765,6 +771,43 @@ mod tests {
         );
     }
 
+    /// Ruling R389 : la prop `colwidth` d'une cellule, dans un tableau à largeurs, était posée
+    /// deux fois par l'écriture, et l'assertion de `write_all` arrêtait l'acteur. Elle est sautée :
+    /// la largeur vient de celles du tableau. Une écriture qui écrirait encore dans la part du
+    /// retrait (un attribut posé deux fois, ici l'identifiant d'une colonne) rend `HalfWritten`
+    /// au lieu de paniquer.
+    #[test]
+    fn a_cell_colwidth_is_skipped_and_a_half_write_is_an_error() {
+        let mut blocks =
+            mementum_md::parse("| a | b |\n| --- | --- |\n{widths=\"120,\"}\n").unwrap();
+        let Content::Table(table) = &mut blocks[0].content else {
+            panic!("un tableau");
+        };
+        table.rows[0][0]
+            .props
+            .insert("colwidth".to_string(), mementum_md::PropValue::Int(7));
+        let (page, _) = PageDoc::new_page();
+        page.write_blocks(&blocks).unwrap();
+        let Content::Table(read) = &page.read_blocks()[0].content else {
+            panic!("un tableau relu");
+        };
+        assert_eq!(read.column_widths, [Some(120.0), None]);
+        assert!(!read.rows[0][0].props.contains_key("colwidth"));
+
+        let mut columns = mementum_md::parse(
+            "<columns>\n<column>\nUn\n</column>\n<column>\nDeux\n</column>\n</columns>\n",
+        )
+        .unwrap();
+        columns[0].children[0].props.insert(
+            "id".to_string(),
+            mementum_md::PropValue::Str("x".to_string()),
+        );
+        assert!(matches!(
+            page.write_blocks(&columns),
+            Err(CrdtError::HalfWritten)
+        ));
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -785,7 +828,7 @@ mod tests {
                 write_in_one_transaction(page, &before);
             }
             prop_assert!(split.encode_state() == single.encode_state(), "première écriture");
-            let written = split.write_all(&after);
+            let written = split.write_all(&after).unwrap();
             prop_assert!(written == write_in_one_transaction(&single, &after), "mise à jour");
             prop_assert!(split.encode_state() == single.encode_state(), "état");
             prop_assert_eq!(split.read_blocks(), single.read_blocks());
@@ -808,7 +851,7 @@ mod tests {
             }
             let replica = PageDoc::from_updates([split.encode_state().as_slice()]).unwrap();
             let after = numbered(writable(&after).unwrap());
-            let written = split.write_all(&after);
+            let written = split.write_all(&after).unwrap();
             write_in_one_transaction(&single, &after);
             prop_assert_eq!(split.read_blocks(), single.read_blocks());
             replica.apply_update(&written).unwrap();

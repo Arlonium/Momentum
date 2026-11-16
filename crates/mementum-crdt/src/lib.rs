@@ -50,6 +50,9 @@ pub enum CrdtError {
     /// (R458) : cela ne devrait jamais arriver. Comme après toute erreur, la page est à jeter, et
     /// l'acteur ferme la connexion qui l'a envoyée (R459).
     CarryRefused(String),
+    /// Une écriture complète faite à moitié (Ruling R389) : le retrait du contenu est fait, et
+    /// l'écriture du nouveau a touché à la part du retrait. Le document est à recharger.
+    HalfWritten,
 }
 
 impl fmt::Display for CrdtError {
@@ -66,6 +69,11 @@ impl fmt::Display for CrdtError {
             ),
             CrdtError::Structure(why) => write!(f, "structure refusée par BlockNote : {why}"),
             CrdtError::CarryRefused(why) => write!(f, "report d'un bloc recréé refusé : {why}"),
+            CrdtError::HalfWritten => write!(
+                f,
+                "écriture complète faite à moitié : l'écriture a touché à la part du retrait ; \
+                 le document est à recharger"
+            ),
         }
     }
 }

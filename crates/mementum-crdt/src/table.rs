@@ -497,7 +497,16 @@ pub(crate) fn write_table(
             let header = r < header_rows || c < header_cols;
             let tag = if header { "tableHeader" } else { "tableCell" };
             let td = tr.push_back(txn, XmlElementPrelim::empty(tag));
-            write_props(txn, &td, &cell.props, cell_props());
+            // Ruling R389 : la largeur d'une cellule vient des largeurs du tableau ; une prop
+            // `colwidth` (que `PUT /mmd` refuse, R41) serait posée deux fois, et la seconde
+            // supprimerait la première dans la transaction qui ne doit rien supprimer.
+            if cell.props.contains_key(COLWIDTH) {
+                let mut props = cell.props.clone();
+                props.remove(COLWIDTH);
+                write_props(txn, &td, &props, cell_props());
+            } else {
+                write_props(txn, &td, &cell.props, cell_props());
+            }
             if let Some(value) = columns[r][c].and_then(|at| colwidth(widths, at, cell)) {
                 td.insert_attribute(txn, COLWIDTH, value);
             }
