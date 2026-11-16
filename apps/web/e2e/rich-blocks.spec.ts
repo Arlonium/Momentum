@@ -164,6 +164,29 @@ test("ctrl_alt_enter_sets_the_rich_block_at_the_cursor", async ({ browser, reque
   await expect(p.locator(".mm-editor .mm-callout")).toContainText("Astuce du jour");
 });
 
+test("typing_after_a_click_under_the_icon_of_a_callout_is_never_lost", async ({ browser, request }) => {
+  // L'icône d'un callout est un îlot non modifiable (R653). Modifiable, un clic sous elle y posait le
+  // curseur du navigateur : la frappe qui suivait n'arrivait pas tout entière au document (« K5 »
+  // tapé, le « K » écrit nulle part).
+  const page = await createPage(request, { title: `Icône ${unique()}` });
+  await putMmd(request, page.id, 'Avant\n\n<callout icon="⚠️" color="blue">\nAstuce du jour\n</callout>\n\nAprès\n');
+  const p = await openPage(browser, page.id);
+  const callout = (await p.locator(".mm-editor .mm-callout").boundingBox())!;
+  const icon = (await p.locator(".mm-editor .mm-callout-icon").boundingBox())!;
+  await p.mouse.click(icon.x + icon.width / 2, callout.y + callout.height - 2);
+  await p.keyboard.type("K5");
+  await expect.poll(() => getMmd(request, page.id)).toContain("K5");
+  // Rien n'est montré hors du texte du callout, et l'icône est restée elle-même.
+  await expect(p.locator(".mm-editor .mm-callout-icon")).toHaveText("⚠️");
+  const stray = await p.evaluate(() => {
+    const copy = document.querySelector(".mm-editor .mm-callout")!.cloneNode(true) as HTMLElement;
+    copy.querySelector(".mm-callout-icon")?.remove();
+    copy.querySelector(".mm-callout-content")?.remove();
+    return copy.textContent;
+  });
+  expect(stray).toBe("");
+});
+
 test("block_window_stays_inside_the_screen", async ({ browser, request }) => {
   const page = await createPage(request, { title: `Écran ${unique()}` });
   const filler = Array.from({ length: 40 }, (_, i) => `Paragraphe ${i + 1}`).join("\n\n");
