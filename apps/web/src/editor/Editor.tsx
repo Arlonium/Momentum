@@ -386,6 +386,7 @@ function BlockMenu({ onComment }: { onComment: ((blockId: string) => void) | nul
   const dictionary = useDictionary();
   return (
     <DragHandleMenu>
+      <FocusBackOnClose />
       {onComment && <CommentItem onComment={onComment} />}
       <DuplicateItem />
       <RemoveBlockItem>{dictionary.drag_handle.delete_menuitem}</RemoveBlockItem>
@@ -394,6 +395,28 @@ function BlockMenu({ onComment }: { onComment: ((blockId: string) => void) | nul
       <TableColumnHeaderItem>{dictionary.drag_handle.header_column_menuitem}</TableColumnHeaderItem>
     </DragHandleMenu>
   );
+}
+
+/**
+ * Rendu dans le menu ouvert seulement : quand il se ferme, un focus tombé sur `body` revient au texte
+ * de l'éditeur (R642). Échap l'y laissait : Mantine rend le focus à la poignée, que BlockNote retire
+ * en dégelant son menu, et `unfreezeMenu` ne rend le focus à l'éditeur que s'il est déjà sur `body`
+ * ou dans le menu. Un clic qui a donné le focus à un autre élément (un champ, le panneau des
+ * commentaires) le lui laisse.
+ */
+function FocusBackOnClose() {
+  const editor = useBlockNoteEditor();
+  useEffect(
+    () => () => {
+      setTimeout(() => {
+        const active = document.activeElement;
+        if (active !== null && active !== document.body) return;
+        if (editor.isEditable && editor.domElement?.isConnected) editor.focus();
+      }, 0);
+    },
+    [editor],
+  );
+  return null;
 }
 
 /** Le bloc dont la poignée a ouvert le menu (`undefined` : aucun). */

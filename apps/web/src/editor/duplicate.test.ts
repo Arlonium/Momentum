@@ -570,6 +570,26 @@ test(
   60_000,
 );
 
+// ---------------------------------------------------------------------------
+// Échap sur le menu de la poignée (R642)
+// ---------------------------------------------------------------------------
+
+test("escape_on_the_handle_menu_gives_the_focus_back_to_the_text", async () => {
+  const m = await mountEditor({ blocks: XYZ });
+  m.editor.focus();
+  m.editor.setTextCursorPosition("y", "end");
+  await openHandleMenu(m, "y");
+  const item = menuItem("Dupliquer");
+  act(() => item.focus());
+  act(() => {
+    item.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  });
+  await until(m.host, () => menuItems().length === 0, "le menu fermé");
+  await until(m.host, () => document.activeElement !== document.body, "le focus quitte `body`");
+  expect(document.activeElement).toBe(m.editor.prosemirrorView.dom);
+  expect(m.editor.document).toHaveLength(3);
+});
+
 // Les ids de la sélection sont lus sans convertir ses blocs : `getSelection()` de BlockNote convertit
 // chaque bloc choisi, sous-blocs compris (une page de 10 000 blocs sélectionnée : près d'une demi-
 // seconde avant même de compter). Ce sont les mêmes ids que les siens.
