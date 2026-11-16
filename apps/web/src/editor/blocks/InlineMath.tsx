@@ -8,10 +8,13 @@
 // document, par `InlineMathHost`, à côté de la vue de l'éditeur, comme celle d'un bloc : la vue de
 // la formule recréée ou supprimée par un autre ne la ferme pas, le focus reste dans son champ, et
 // la frappe ne part jamais dans le document. Son brouillon vit dans l'hôte, tant que l'éditeur et
-// la formule sont là : fermer la page le perd, et la fenêtre le dit (R424).
+// la formule sont là : fermer la page le perd, et la fenêtre le dit (R424). Quand la vue part et
+// que la formule reste (un autre a déplacé son bloc, recréé au même id), la fenêtre la retrouve par
+// l'id du bloc, son rang parmi les formules en ligne du bloc et sa formule ; une vue qui n'arrive
+// jamais, ou une formule qui ne se retrouve pas, fait dire la formule partie (R529).
 //
-// La formule s'affiche dans la ligne ; plus large que la ligne, elle défile en dedans (elle était
-// coupée sans rien dire).
+// La formule s'affiche dans la ligne ; plus large que la ligne, ou plus haute que vingt lignes,
+// elle défile en dedans (elle était coupée sans rien dire).
 import { createReactInlineContentSpec } from "@blocknote/react";
 import { NodeSelection, TextSelection } from "prosemirror-state";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
