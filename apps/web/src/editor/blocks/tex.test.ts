@@ -171,6 +171,11 @@ test("an_element_weighs_three_under_what_costs_dear_and_less_elsewhere", () => {
     ["overline (classe inconnue)", wrap("@overline{", "}", 6)],
     // Vingt `\color` imbriqués : le MathML (des `mstyle`) est plus profond que le HTML.
     ["color (MathML)", wrap("@color{red}{a", "}", 20)],
+    // Un contenu qui descend sous la ligne de base, ou une boîte baissée, donne à leur table une
+    // seconde ligne (`vlist-t2`) : elle n'en coûte pas moins (re-relecture de C2, R1).
+    ["vcenter, une profondeur", wrap("@vcenter{y", "}", 6)],
+    ["raisebox vers le bas", wrap("@raisebox{-1pt}{$", "$}", 6)],
+    ["raisebox, une profondeur", wrap("@raisebox{1pt}{$y", "$}", 6)],
   ]) {
     const outcome = weight(latex)!;
     // Au plus un élément bon marché au-dessus (`katex-mathml`, sous les enveloppes).

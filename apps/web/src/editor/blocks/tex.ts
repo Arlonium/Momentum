@@ -61,7 +61,8 @@ export const CHEAP_COST = 2.3;
 /**
  * Les classes de KaTeX qui coûtent peu à la mise en page : celles des fractions, des matrices, des
  * exposants, des grands opérateurs, des délimiteurs et des polices. Toute autre classe, le MathML,
- * le SVG, et une table d'une seule ligne (`\raisebox`, `\vcenter`, les accents) coûtent cher.
+ * le SVG, et une table (`vlist-t`) qui n'est pas celle d'une fraction, d'un exposant, de limites ou
+ * d'une colonne de matrice (`\raisebox`, `\vcenter`, les accents) coûtent cher.
  */
 const CHEAP_CLASSES = new Set(
   (
@@ -78,13 +79,30 @@ const cheapClass = (name: string) =>
 /** Les enveloppes de chaque formule : au-dessus de tout, elles pèsent comme un élément cher. */
 const WRAPPERS = new Set(["katex", "katex-display", "katex-html", "katex-base"]);
 
-/** Ce que coûte l'élément de la balise ouvrante `tag` : cher (lui et ce qui est sous lui), une enveloppe, ou peu. */
-function costOf(tag: string): "dear" | "wrapper" | "cheap" {
-  if (!tag.startsWith("<span")) return "dear";
+/** Les classes de la balise ouvrante `tag`. */
+function classesOf(tag: string): string[] {
   const found = /class="([^"]*)"/.exec(tag);
-  const classes = found === null ? [] : found[1]!.split(" ").filter((name) => name !== "");
+  return found === null ? [] : found[1]!.split(" ").filter((name) => name !== "");
+}
+
+/**
+ * Les parents sous lesquels une table de KaTeX (`vlist-t`) coûte peu : une fraction, un exposant,
+ * des limites, une colonne de matrice. Celle de `\raisebox` ou de `\vcenter` coûte cher, une ou deux
+ * lignes (KaTeX ajoute `vlist-t2` dès que le contenu descend sous la ligne de base : re-relecture
+ * de C2, R1).
+ */
+const tableParent = (name: string) =>
+  name === "mfrac" || name === "msupsub" || name === "op-limits" || /^col-align-[lcr]$/.test(name);
+
+/**
+ * Ce que coûte l'élément de la balise ouvrante `tag`, sous un parent qui a les classes `parent` :
+ * cher (lui et ce qui est sous lui), une enveloppe, ou peu.
+ */
+function costOf(tag: string, parent: string[]): "dear" | "wrapper" | "cheap" {
+  if (!tag.startsWith("<span")) return "dear";
+  const classes = classesOf(tag);
   if (!classes.every(cheapClass)) return "dear";
-  if (classes.includes("vlist-t") && !classes.includes("vlist-t2")) return "dear";
+  if (classes.includes("vlist-t") && !parent.some(tableParent)) return "dear";
   return classes.some((name) => WRAPPERS.has(name)) ? "wrapper" : "cheap";
 }
 
@@ -179,7 +197,7 @@ function shape(html: string): { depth: number; weight: number; nodes: number } {
   let deepest = 0;
   let heaviest = 0;
   let nodes = 0;
-  const above: { weight: number; dear: boolean }[] = [{ weight: 0, dear: false }];
+  const above: { weight: number; dear: boolean; classes: string[] }[] = [{ weight: 0, dear: false, classes: [] }];
   for (let at = html.indexOf("<"); at !== -1; at = html.indexOf("<", at + 1)) {
     if (html.charCodeAt(at + 1) === 47 /* "/" */) {
       depth -= 1;
@@ -191,12 +209,13 @@ function shape(html: string): { depth: number; weight: number; nodes: number } {
     if (depth > deepest) deepest = depth;
     const end = html.indexOf(">", at);
     const parent = above[above.length - 1]!;
-    const cost = parent.dear ? "dear" : costOf(html.slice(at, end + 1));
+    const tag = html.slice(at, end + 1);
+    const cost = parent.dear ? "dear" : costOf(tag, parent.classes);
     const dear = cost === "dear";
     const weight = parent.weight + (cost === "cheap" ? CHEAP_COST : DEAR_COST);
     if (weight > heaviest) heaviest = weight;
     if (html.charCodeAt(end - 1) === 47) depth -= 1;
-    else above.push({ weight, dear });
+    else above.push({ weight, dear, classes: dear ? [] : classesOf(tag) });
   }
   return { depth: deepest, weight: Math.round(heaviest * 10) / 10, nodes };
 }
