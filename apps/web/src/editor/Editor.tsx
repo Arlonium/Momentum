@@ -13,7 +13,7 @@
 // de mise en forme (`Toolbar.tsx`), et la fenêtre de réglage d'un bloc riche, rendue hors du
 // document et tenue par l'id du bloc (`blocks/BlockWindowHost.tsx`) ; Ctrl+Alt+Entrée
 // (Cmd+Option+Entrée) ouvre celle du bloc où est le curseur. Le sélecteur du lien de page est rendu
-// de même (`blocks/PageLink.tsx`).
+// de même (`blocks/PageLink.tsx`). Les menus `@` et `[[` posent une mention (`mentions/MentionMenu.tsx`).
 //
 // `PreviewEditor` est le même éditeur, lié à un document local sans fournisseur : l'aperçu d'une
 // version dans la fenêtre « Historique » (R135).
@@ -28,6 +28,7 @@ import { BlockNoteView } from "@blocknote/mantine";
 import {
   BlockColorsItem,
   DragHandleMenu,
+  EmojiPickerController,
   FormattingToolbarController,
   RemoveBlockItem,
   SideMenu,
@@ -61,6 +62,8 @@ import { InlineMathHost, openInlineMathAtSelection } from "./blocks/InlineMath";
 import { PageLinkHost } from "./blocks/PageLink";
 import { focusBlockLinks } from "./blocks/Toc";
 import { isCommentShortcut } from "../comments/shortcut";
+import { focusMentionLink } from "../mentions/Mention";
+import { mentionMenuOpen, MentionMenus, type MentionContext } from "../mentions/MentionMenu";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
 import { fixtureInput, replaceNewPage } from "./fixtures";
@@ -80,6 +83,11 @@ type Props = {
    * « Commenter », et Ctrl+Alt+M commente le bloc du curseur. `null` : ni l'un ni l'autre.
    */
   onComment?: ((blockId: string) => void) | null;
+  /**
+   * De quoi mentionner depuis cette page (`@`, `[[`) : son espace, le rôle du compte, s'il peut y
+   * créer une sous-page. `null` : pas de menus (un test, une page qu'on ne modifie pas).
+   */
+  mentions?: Omit<MentionContext, "pageId" | "roster"> | null;
 };
 
 /**
@@ -95,7 +103,7 @@ export const EDITOR_OPTIONS = {
   extensions: [syntaxHighlighter, followBlock, linkBound],
 };
 
-export function Editor({ session, fixture = null, onComment = null }: Props) {
+export function Editor({ session, fixture = null, onComment = null, mentions = null }: Props) {
   const editor = useCreateBlockNote(
     withCollaboration({
       ...EDITOR_OPTIONS,
@@ -149,6 +157,12 @@ export function Editor({ session, fixture = null, onComment = null }: Props) {
     });
   }, [editor, session]);
 
+  // Les menus `@` et `[[` lisent la page et qui la regarde dans la session, au moment de s'ouvrir.
+  const mentionContext = useMemo<MentionContext | null>(
+    () => mentions && { ...mentions, pageId: session.pageId, roster: () => session.roster },
+    [mentions, session],
+  );
+
   const debug = useRef<MementumDebug | null>(null);
   useEffect(() => {
     if (!import.meta.env.DEV) return;
@@ -198,6 +212,7 @@ export function Editor({ session, fixture = null, onComment = null }: Props) {
       editor={editor}
       editable={mountEditable}
       onComment={onComment}
+      mentions={mentionContext}
       pageId={session.pageId}
       className="mm-editor"
       data-synced={String(synced)}
@@ -211,6 +226,8 @@ type ViewProps = {
   /** L'état de l'éditeur au montage de sa vue (voir `Editor`) ; il suit ensuite par `isEditable`. */
   editable: boolean;
   onComment?: ((blockId: string) => void) | null;
+  /** De quoi mentionner (`mentions/MentionMenu.tsx`) ; `null` : ni `@` ni `[[`. */
+  mentions?: MentionContext | null;
   /** La page de l'éditeur : les fenêtres des blocs et leurs brouillons sont rangés par page. */
   pageId?: string;
   className?: string;
@@ -223,10 +240,12 @@ type ViewProps = {
  * menu de la poignée, Ctrl+Alt+M. Rendue par `Editor`, liée à sa session, et par les tests des
  * blocs (`test/richEditor.tsx`), liée à un document sans fournisseur.
  */
-export function EditorView({ editor, editable, onComment = null, pageId, ...attributes }: ViewProps) {
+export function EditorView({ editor, editable, onComment = null, mentions = null, pageId, ...attributes }: ViewProps) {
   // Avant tout enfant : la fenêtre d'un bloc et ses brouillons sont ceux de la page (R471).
   useBlockWindowPage(editor, pageId);
   const slashItems = useMemo(() => slashMenuItems(editor), [editor]);
+  // « / » et « : » tapés dans un menu de mention ouvert (une date, un titre) lui appartiennent (R620).
+  const noMentionMenu = useCallback(() => !mentionMenuOpen(editor), [editor]);
 
   // Le menu de la poignée : celui de BlockNote, et « Commenter » pour qui peut commenter.
   const sideMenu = useMemo(() => {
@@ -247,11 +266,14 @@ export function EditorView({ editor, editable, onComment = null, pageId, ...attr
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     // Ctrl+Alt+Entrée : régler la formule en ligne sélectionnée, ou le bloc riche où est le curseur
     // (`BlockWindowHost`) ; sur une table des matières ou un lien de page, aller à son premier lien
-    // (`Toc.tsx`).
+    // (`Toc.tsx`) ; sur une mention de page sélectionnée, à son lien (`mentions/Mention.tsx`).
     if (isBlockWindowShortcut(event)) {
       if (
         editor.isFocused() &&
-        (openInlineMathAtSelection(editor) || openWindowAtCursor(editor) || focusBlockLinks(editor))
+        (openInlineMathAtSelection(editor) ||
+          focusMentionLink(editor) ||
+          openWindowAtCursor(editor) ||
+          focusBlockLinks(editor))
       ) {
         event.preventDefault();
       }
@@ -272,6 +294,7 @@ export function EditorView({ editor, editable, onComment = null, pageId, ...attr
         editable={editable}
         theme="light"
         slashMenu={false}
+        emojiPicker={false}
         formattingToolbar={false}
         sideMenu={sideMenu === undefined}
         onKeyDown={onKeyDown}
@@ -279,10 +302,14 @@ export function EditorView({ editor, editable, onComment = null, pageId, ...attr
       >
         <SuggestionMenuController
           triggerCharacter="/"
+          shouldOpen={noMentionMenu}
           getItems={async (query) => filterSuggestionItems(slashItems, query)}
         />
+        {/* Le sélecteur d'emoji de BlockNote, tel quel, sous la même règle. */}
+        <EmojiPickerController triggerCharacter=":" shouldOpen={noMentionMenu} />
         <FormattingToolbarController formattingToolbar={MementumFormattingToolbar} />
         {sideMenu && <SideMenuController sideMenu={sideMenu} />}
+        {mentions && <MentionMenus editor={editor} context={mentions} />}
       </BlockNoteView>
       <BlockWindowHost editor={editor} />
       <InlineMathHost editor={editor} />

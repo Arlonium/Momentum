@@ -187,10 +187,19 @@ export function PageView({
    */
   const hoverComment = commentsWritable && locked ? wiring.commentBlock : null;
   const menuComment = commentsWritable && !locked ? wiring.commentBlock : null;
+  // Mentionner depuis cette page (`@`, `[[`, R251) : son espace, le rôle du compte dans cet espace
+  // (un invité ne se voit proposer que qui a la page ouverte), et s'il peut y créer une sous-page.
+  const role = me.spaces.find((space) => space.id === node.spaceId)?.role ?? "guest";
+  const canCreate = editable && !trashed && !readOnly;
+  const mentions = useMemo(
+    () => ({ spaceId: node.spaceId, role, canCreate, onRefused: rereadPage }),
+    [node.spaceId, role, canCreate, rereadPage],
+  );
   // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.
   const editor = useMemo(
-    () => session && <LazyEditor session={session} fixture={fixture} onComment={menuComment} />,
-    [session, fixture, menuComment],
+    () =>
+      session && <LazyEditor session={session} fixture={fixture} onComment={menuComment} mentions={mentions} />,
+    [session, fixture, menuComment, mentions],
   );
 
   return (

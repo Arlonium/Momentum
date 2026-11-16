@@ -9,8 +9,9 @@ import {
   defaultBlockSpecs,
   defaultInlineContentSpecs,
 } from "@blocknote/core";
-import { createReactBlockSpec, createReactInlineContentSpec } from "@blocknote/react";
+import { createReactBlockSpec } from "@blocknote/react";
 import { withMultiColumn } from "@blocknote/xl-multi-column";
+import { Mention } from "../mentions/Mention";
 import { Bookmark } from "./blocks/Bookmark";
 import { Callout } from "./blocks/Callout";
 import { Equation } from "./blocks/Equation";
@@ -139,17 +140,6 @@ const Unknown = createReactBlockSpec(
         </span>
       </div>
     ),
-  },
-);
-
-const Mention = createReactInlineContentSpec(
-  {
-    type: "mention",
-    propSchema: { kind: { default: "page" }, id: { default: "" }, label: { default: "" } },
-    content: "none",
-  },
-  {
-    render: ({ inlineContent }) => <span className="mm-mention">@{textProp(inlineContent.props, "label")}</span>,
   },
 );
 

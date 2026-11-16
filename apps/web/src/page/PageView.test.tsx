@@ -23,6 +23,8 @@ const probe = vi.hoisted(() => ({
     destroyed: boolean;
   }[],
   history: null as null | { afterLogin?: () => Promise<void>; onClose: () => void },
+  /** Ce que l'éditeur a reçu pour mentionner, à chacun de ses rendus. */
+  mentions: [] as unknown[],
 }));
 
 vi.mock("../editor/collab", async () => {
@@ -57,7 +59,12 @@ vi.mock("../editor/collab", async () => {
   return { CollabSession };
 });
 
-vi.mock("../editor/LazyEditor", () => ({ LazyEditor: () => <div className="mm-editor" /> }));
+vi.mock("../editor/LazyEditor", () => ({
+  LazyEditor: (props: { mentions?: unknown }) => {
+    probe.mentions.push(props.mentions);
+    return <div className="mm-editor" />;
+  },
+}));
 
 vi.mock("../history/HistoryDialog", () => ({
   HistoryDialog: (props: { afterLogin?: () => Promise<void>; onClose: () => void }) => {
@@ -90,6 +97,7 @@ beforeEach(() => {
   root = createRoot(host);
   probe.sessions = [];
   probe.history = null;
+  probe.mentions = [];
   checkSchema.mockClear();
   vi.mocked(getPage).mockReset();
   vi.mocked(getComments).mockReset();
@@ -308,4 +316,33 @@ test("page_view_offers_the_favorite_of_its_page_in_its_menu", async () => {
   await show(node, account(), [], { favorite: true, onFavorite });
   await click(host.querySelector('button[aria-label="Actions de la page"]')!);
   expect(items().map((item) => item.textContent)).toEqual(["Retirer des favoris"]);
+});
+
+test("page_view_gives_the_editor_what_mentions_need", async () => {
+  // Le rôle du compte dans l'espace de la page, et le droit d'y créer une sous-page (C4, R251).
+  const mentioned = () => probe.mentions[probe.mentions.length - 1] as Record<string, unknown>;
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  const member: Me = { ...account(), spaces: [space("autre", { role: "guest" }), space("space", { role: "member" })] };
+  await show(node, member);
+  expect(mentioned()).toMatchObject({ spaceId: "space", role: "member", canCreate: true });
+  // Un refus de création fait relire la page.
+  const reads = vi.mocked(getPage).mock.calls.length;
+  await act(async () => (mentioned().onRefused as () => void)());
+  expect(vi.mocked(getPage).mock.calls.length).toBe(reads + 1);
+  // Un rendu qui ne change rien de cela ne rend pas l'éditeur de nouveau.
+  const renders = probe.mentions.length;
+  await show({ ...node, title: "Autre titre" }, member);
+  expect(probe.mentions.length).toBe(renders);
+  // Invité de l'espace : c'est dit à l'éditeur, qui ne lui proposera que qui a la page ouverte.
+  await show(node, { ...account(), spaces: [space("space", { role: "guest" })] });
+  expect(mentioned()).toMatchObject({ role: "guest", canCreate: true });
+  // Un espace que le compte n'a pas (ou plus) : comme un invité.
+  await show(node, { ...account(), spaces: [] });
+  expect(mentioned()).toMatchObject({ role: "guest" });
+  // Qui ne peut pas modifier la page ne peut pas y créer de sous-page ; ni personne à la corbeille.
+  await show(page("x", { level: "comment" }), member);
+  expect(mentioned()).toMatchObject({ role: "member", canCreate: false });
+  await show(page("x", { level: "full", trashedAt: 1 }), member);
+  expect(mentioned()).toMatchObject({ canCreate: false });
 });
