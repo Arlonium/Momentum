@@ -3188,6 +3188,10 @@ button.mm-reaction:hover {
   max-width: 100%;
   max-height: 80vh;
   overflow: auto;
+  /* Chaque équation mise en forme a sa couche : en attacher une, ou décaler celles d'en dessous, ne
+     repeint pas les autres (R581 ; en défilant cinquante formules de 11 800 éléments, l'image la
+     plus longue passait de 700 à 420 ms sous un processeur ralenti). */
+  will-change: transform;
 }
 
 .mm-equation .katex-display {
