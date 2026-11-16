@@ -36,8 +36,8 @@ pub struct Awaited(Vec<(u64, u32)>);
 /// Ce que [`PageDoc::apply_client_update`] a fait d'une mise à jour d'un client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Applied {
-    /// La mise à jour telle que la page l'a lue, réencodée (v1) : c'est elle qu'on écrit au
-    /// journal et qu'on relaie aux autres clients, jamais les octets reçus (Ruling R130).
+    /// Ce que la page a intégré de la mise à jour, encodé par elle (v1) : c'est ce qu'on écrit au
+    /// journal et qu'on relaie aux autres clients, jamais les octets reçus (Rulings R130, R491).
     pub read: Vec<u8>,
     /// L'écriture du serveur qui reporte sur les blocs que la mise à jour recrée ce que son
     /// auteur n'en avait pas vu (Task 13b, module `moves`), déjà appliquée à la page : à écrire
@@ -52,6 +52,14 @@ pub struct Applied {
 /// Au plus tant de copies reportées dont la page se souvient pour le dédoublonnage (Ruling
 /// R453) ; au-delà, elle les oublie toutes.
 const MAX_REMEMBERED_COPIES: usize = 1_024;
+
+/// Le refus d'une mise à jour de client ([`PageDoc::try_client_update`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    pub error: CrdtError,
+    /// Refusée avant d'être appliquée : le document est intact (Ruling R492).
+    pub intact: bool,
+}
 
 /// Document Yjs d'une page, au format de BlockNote.
 ///
@@ -160,11 +168,17 @@ impl PageDoc {
     /// qu'il refuserait d'un client, et ce qu'il donne aux clients (l'état complet, ce qui leur
     /// manque) porte cette suppression, qu'ils appliquent à leur tour. La relecture du journal
     /// la refait chaque fois, de la même façon, dans n'importe quel ordre.
+    ///
+    /// Seules les marques que la mise à jour a intégrées sont supprimées (Ruling R490) : celles
+    /// dont l'horloge dépasse ce que la page avait de leur client avant elle. Une structure à une
+    /// horloge que la page connaît déjà, yrs l'ignore ; supprimer son identifiant retirait
+    /// l'élément que la page porte à cette horloge (une lettre d'un autre client).
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
         let mut txn = self.doc.transact_mut();
         let (shape, decoded) = self.read(&txn, update, false)?;
+        let before = txn.state_vector();
         self.integrate(&mut txn, &shape, decoded)?;
-        let outside = shape.outside_marks();
+        let outside = shape.outside_marks(&before);
         if !outside.is_empty() {
             // Une mise à jour sans bloc, qui ne porte que ces suppressions : aucun client (`0`),
             // puis le jeu de suppressions. Les marques sont dans la page (intégrées à l'instant,
@@ -194,17 +208,19 @@ impl PageDoc {
     /// en lecture seule), et y-prosemirror supprimerait chez tous le texte qui la
     /// porte.
     ///
-    /// Ce refus n'est connu qu'après l'application (voir le module `guard`) :
-    /// comme après toute erreur, le `PageDoc` est à jeter.
+    /// Certains de ces refus ne sont connus qu'après l'application (voir le module `guard`) :
+    /// comme après toute erreur, le `PageDoc` est à jeter. [`PageDoc::try_client_update`] dit
+    /// lesquels laissent le document intact.
     ///
-    /// Rend la mise à jour telle que la page l'a lue, réencodée (v1) : **c'est
-    /// elle qu'on écrit au journal et qu'on relaie aux autres clients, jamais
-    /// les octets reçus** (Ruling R130). yrs et Yjs ne lisent pas les mêmes
-    /// octets pareil : yrs laisse tomber les bits d'un entier au-delà de 32,
-    /// Yjs lit l'entier en entier. Relayée telle quelle, une suppression dont
-    /// l'horloge est écrite avec 2^32 de plus efface un texte sur le serveur,
-    /// et rien dans les navigateurs, où l'on continue d'y écrire à perte.
-    /// Réencodée, elle dit à tous ce que la page a fait.
+    /// Rend ce que la page a intégré de la mise à jour, encodé par elle (v1) : **c'est ce qu'on
+    /// écrit au journal et qu'on relaie aux autres clients, jamais les octets reçus** (Ruling
+    /// R130). yrs et Yjs ne lisent pas les mêmes octets pareil : yrs laisse tomber les bits d'un
+    /// entier au-delà de 32, Yjs lit l'entier en entier. Relayée telle quelle, une suppression
+    /// dont l'horloge est écrite avec 2^32 de plus efface un texte sur le serveur, et rien dans les
+    /// navigateurs, où l'on continue d'y écrire à perte. Encodée par la page, elle dit à tous ce
+    /// que la page a fait, et seulement cela (Ruling R491) : une structure à une horloge que la
+    /// page connaît déjà, yrs l'ignore ; réencodée de la mise à jour lue, elle allait au journal,
+    /// et la relecture lisait une autre page que la page vivante.
     ///
     /// À ne pas employer pour ce qui est relu du stockage : la mise à jour du
     /// serveur qui crée la page pose `schemaVersion`, et y serait refusée.
@@ -222,40 +238,60 @@ impl PageDoc {
     /// jamais arriver, l'erreur est [`CrdtError::CarryRefused`], et comme après toute erreur la
     /// page est à jeter (R459).
     pub fn apply_client_update(&self, update: &[u8]) -> Result<Applied, CrdtError> {
+        self.try_client_update(update)
+            .map_err(|refused| refused.error)
+    }
+
+    /// [`PageDoc::apply_client_update`], dont le refus dit aussi si la mise à jour a été refusée
+    /// avant d'être appliquée (`intact`, Ruling R492) : illisible, hors du schéma, trop profonde à
+    /// elle seule, une marque refusée. Le document est alors intact, et l'appelant n'a pas à le
+    /// recharger. Sinon (une dépendance absente, un élément trop profond une fois intégré, les
+    /// métadonnées touchées, une suppression laissée en attente, un report refusé), il est à
+    /// jeter.
+    pub fn try_client_update(&self, update: &[u8]) -> Result<Applied, Refused> {
+        let applied = |error| Refused {
+            error,
+            intact: false,
+        };
         let mut txn = self.doc.transact_mut();
-        let (shape, decoded) = self.read(&txn, update, true)?;
+        let (shape, decoded) = self.read(&txn, update, true).map_err(|error| Refused {
+            error,
+            intact: true,
+        })?;
         // Ce que la page gardait en attente de suppression avant (d'ordinaire rien).
         let pending_before = Pending::of(txn.store().pending_ds());
-        // Avant l'application, qui consomme la mise à jour lue.
-        let read = decoded.encode_v1();
         // Avant l'application, qui supprime l'original de chaque bloc recréé et tout ce qu'il
-        // porte.
+        // porte. La lecture du texte y découpe des blocs de yrs sans rien changer au contenu :
+        // l'encodage de la transaction, plus bas, n'en porte rien.
         let recreated = if shape.inserts_elements() {
             moves::capture(&mut txn, &self.fragment, &shape, &self.original_walks)
         } else {
             Vec::new()
         };
-        self.integrate(&mut txn, &shape, decoded)?;
+        self.integrate(&mut txn, &shape, decoded).map_err(applied)?;
+        // Ce que la transaction a intégré, encodé avant sa validation (où passe le
+        // ramasse-miettes).
+        let read = txn.encode_update_v1();
         // yrs ne dresse la liste des types changés qu'à la validation.
         txn.commit();
         if touched(&txn, &self.meta) {
-            return Err(CrdtError::Structure(
+            return Err(applied(CrdtError::Structure(
                 "la mise à jour d'un client écrit dans les métadonnées de la page".to_string(),
-            ));
+            )));
         }
         // Ruling R207, en filet de R198 : une suppression laissée en attente que la page
         // n'avait pas. `awaits` retient celles qu'un client honnête envoie ; si une autre forme
         // de mise à jour en laissait une, elle n'agirait que dans le document du serveur.
         if pending_before.lacks(txn.store().pending_ds()) {
-            return Err(CrdtError::Structure(
+            return Err(applied(CrdtError::Structure(
                 "la mise à jour laisserait une suppression en attente".to_string(),
-            ));
+            )));
         }
         drop(txn);
         let (carried, withheld) = if recreated.is_empty() {
             (None, None)
         } else {
-            self.carry(&recreated)?
+            self.carry(&recreated).map_err(applied)?
         };
         Ok(Applied {
             read,

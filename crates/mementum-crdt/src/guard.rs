@@ -562,11 +562,14 @@ impl Shape {
     }
 
     /// Les marques de texte de la mise à jour que la page ne garde pas (Ruling R431) : relue du
-    /// stockage, la page les supprime (`PageDoc::apply_update`).
-    pub(crate) fn outside_marks(&self) -> IdSet {
+    /// stockage, la page les supprime (`PageDoc::apply_update`). Seulement celles que la mise à
+    /// jour intègre (Ruling R490) : au-dessus de `floor`, ce que la page avait de leur client
+    /// avant elle ; yrs ignore une structure à une horloge connue, et l'élément qui porte cette
+    /// horloge dans la page en est un autre.
+    pub(crate) fn outside_marks(&self, floor: &StateVector) -> IdSet {
         let mut set = IdSet::new();
         for (s, insert) in self.inserts() {
-            if insert.mark.is_some() {
+            if insert.mark.is_some() && s.id.1 >= floor.get(&ClientID::new(s.id.0)) {
                 set.insert(ID::new(ClientID::new(s.id.0), s.id.1), s.len);
             }
         }

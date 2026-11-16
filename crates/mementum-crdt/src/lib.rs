@@ -23,7 +23,7 @@ use std::fmt;
 
 pub use cost::{Cause, ListKind, WriteCost, write_cost};
 pub use guard::MAX_YJS_DEPTH;
-pub use page::{Applied, Awaited, PageDoc};
+pub use page::{Applied, Awaited, PageDoc, Refused};
 
 /// Nom du fragment XML partagé avec BlockNote.
 pub const FRAGMENT: &str = "document-store";

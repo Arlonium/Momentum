@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a67cafe36a20cd17ff5a41316a3794fe80bd77af52b92d6d1f63281d36b8ab8c # shrinks to ops = [Hostile { item: Some((0, 0, true, 0)), delete: None }]

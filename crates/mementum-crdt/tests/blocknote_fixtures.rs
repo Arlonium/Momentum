@@ -12,6 +12,7 @@ mod common;
 use common::dump;
 use mementum_crdt::PageDoc;
 use mementum_md::{RenderOpts, parse, render};
+use yrs::updates::decoder::Decode;
 
 const ALL_BLOCKS_YJS: &[u8] = include_bytes!("../../../spec/mmd/fixtures/yjs/all-blocks.bin");
 const ALL_BLOCKS_MMD: &str = include_str!("../../../spec/mmd/fixtures/all-blocks.mmd");
@@ -60,10 +61,12 @@ fn writes_like_blocknote_non_default() {
     assert_writes_like_blocknote(NON_DEFAULT_MMD, NON_DEFAULT_YJS);
 }
 
-/// Ce qui est relayé et écrit d'un client est ce que la page a lu, réencodé
-/// par yrs (Ruling R130). Pour ce qu'écrit un vrai navigateur, cela ne doit
+/// Ce que la page donne à un client est ce qu'elle a intégré, encodé par
+/// yrs (Rulings R130, R491). Pour ce qu'écrit un vrai navigateur, cela ne doit
 /// rien changer : l'état complet d'une page de BlockNote, rendu par la page
-/// qui le connaît déjà, redonne le même arbre, attribut par attribut.
+/// qui l'a lu, redonne le même arbre, attribut par attribut. Renvoyé par un
+/// client, cet état n'apporte rien : la page n'en écrit ni n'en relaie aucun
+/// élément (avant R491, elle en réencodait tout, et le journal l'aurait gardé).
 #[test]
 fn blocknote_state_is_returned_with_the_same_tree() {
     let everything = |_: &str, _: &str, _: &yrs::Any| false;
@@ -72,13 +75,17 @@ fn blocknote_state_is_returned_with_the_same_tree() {
         ("non-default", NON_DEFAULT_YJS),
     ] {
         let page = PageDoc::from_updates([state]).expect("fixture lisible");
+        let returned = page.encode_state();
+        let theirs = dump(state, &everything);
+        assert!(theirs.len() > 50, "{what} : fixture lue en entier");
+        assert_eq!(dump(&returned, &everything), theirs, "{what}");
+        assert_eq!(mmd_of(&returned), mmd_of(state), "{what}");
         let read = page
             .apply_client_update(state)
             .expect("un état déjà connu")
             .read;
-        let theirs = dump(state, &everything);
-        assert!(theirs.len() > 50, "{what} : fixture lue en entier");
-        assert_eq!(dump(&read, &everything), theirs, "{what}");
-        assert_eq!(mmd_of(&read), mmd_of(state), "{what}");
+        let read = yrs::Update::decode_v1(&read).unwrap();
+        assert!(read.insertions(true).is_empty(), "{what} : rien de neuf");
+        assert!(read.delete_set().is_empty(), "{what} : rien de supprimé");
     }
 }
