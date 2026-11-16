@@ -198,9 +198,9 @@ test("favorite_disappears_with_the_access_and_names_nothing", async ({ browser }
   const firstTree = b.waitForResponse((r) => isTreeRead(r.url(), space.id));
   await b.goto(`/s/${space.id}`);
   expect(await (await firstTree).text()).toContain(secret.title);
-  // En lecture, sa ligne offre le favori.
+  // En lecture, sa ligne offre le favori (et la copie, qu'un membre pose dans son « Privé », R252).
   const menu = await openRowMenu(b, secret.id, secret.title);
-  await expect(menu.getByRole("menuitem")).toHaveText(["Ajouter aux favoris"]);
+  await expect(menu.getByRole("menuitem")).toHaveText(["Ajouter aux favoris", "Dupliquer"]);
   await menu.getByRole("menuitem", { name: "Ajouter aux favoris" }).click();
   await expect.poll(() => favorites(b)).toEqual([secret.title]);
   await b.mouse.move(AWAY.x, AWAY.y);
@@ -247,7 +247,11 @@ test("favorite_from_the_page_menu_by_keyboard", async ({ browser }) => {
   await button.focus();
   await p.keyboard.press("Enter");
   await expect(p.getByRole("menuitem", { name: "Ajouter aux favoris" })).toBeFocused();
-  await expect(p.getByRole("menu").getByRole("menuitem")).toHaveText(["Ajouter aux favoris", "Historique"]);
+  await expect(p.getByRole("menu").getByRole("menuitem")).toHaveText([
+    "Ajouter aux favoris",
+    "Dupliquer",
+    "Historique",
+  ]);
   await p.keyboard.press("Enter");
   // Le menu se ferme, le focus revient à son bouton, et la page est en tête de la barre latérale.
   await expect(p.getByRole("menu")).toHaveCount(0);
