@@ -222,6 +222,22 @@ test("a_rich_view_listens_only_while_it_is_shown", async () => {
   expect(watchersForTests()).toBe(pagesBefore);
 });
 
+test("rich_blocks_copied_come_back_whole", async () => {
+  // La copie passe par le rendu hors de l'éditeur (`renderType` « dom ») : ce qu'il écrit se relit.
+  const blocks = [
+    { id: "c", type: "callout" as const, props: { icon: "⚠️", color: "blue" }, content: "Attention" },
+    { id: "b", type: "bookmark" as const, props: { url: "https://exemple.fr/" } },
+    { id: "l", type: "pageLink" as const, props: { pageId: PLAN, title: "Plan" } },
+  ];
+  const m = await mountEditor({ blocks });
+  const html = await m.editor.blocksToFullHTML(m.editor.document.slice(0, 3));
+  const back = await m.editor.tryParseHTMLToBlocks(html);
+  expect(back.map(({ type, props, content }) => ({ type, props, content }))).toEqual(
+    m.editor.document.slice(0, 3).map(({ type, props, content }) => ({ type, props, content })),
+  );
+  expect(back.map((block) => block.type)).toEqual(["callout", "bookmark", "pageLink"]);
+});
+
 test("the_icons_drawn_without_react_are_those_of_the_interface", async () => {
   const drawn = (svg: Element) => [
     svg.tagName.toLowerCase(),
