@@ -314,6 +314,78 @@ async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
     assert!(over.is_empty(), "{}", over.join("\n"));
 }
 
+/// Boucles d'écritures d'un simple lecteur, pendant les frappes de
+/// [`keystroke_during_write_loops_of_a_reader_under_150ms`].
+const READER_LOOPS: usize = 8;
+
+/// La part du serveur dans « frappe visible chez un autre < 150 ms » (§5.10) pendant que
+/// [`READER_LOOPS`] boucles d'un simple lecteur posent et retirent des favoris sans relâche,
+/// chaque boucle sur sa page (la boucle de la relecture de la Task S5 : la frappe passait de
+/// 4 ms à 876 ms au p95). Les frappes sont mesurées sans boucle, puis avec : la file
+/// d'écriture du store (Rulings R510 à R516) donne son tour à l'acteur de la page après une
+/// écriture du lecteur, pas après toutes celles qu'il a en file, et la frappe sans boucle ne
+/// doit pas en payer le prix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn keystroke_during_write_loops_of_a_reader_under_150ms() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let _alone = alone().await;
+    let mmd = page_mmd();
+    let mut over = Vec::new();
+    for loops in [0, READER_LOOPS] {
+        let f = Fixture::new(SyncConfig::default()).await;
+        f.write_mmd(&mmd).await;
+        let reader = new_user(&f.db).await;
+        let stop = Arc::new(AtomicBool::new(false));
+        let written = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..loops {
+            let page = new_page(&f.store).await;
+            let (store, stop, written) = (f.store.clone(), stop.clone(), written.clone());
+            tasks.push(tokio::spawn(mementum_store::writes_by(
+                Some(reader),
+                async move {
+                    let mut on = true;
+                    while !stop.load(Ordering::Relaxed) {
+                        let changed = store.set_favorite(reader, page, on, 1).await.unwrap();
+                        assert!(changed, "chaque tour écrit");
+                        on = !on;
+                        written.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+            )));
+        }
+        // Chaque boucle a écrit avant la première frappe.
+        while written.load(Ordering::Relaxed) < 2 * loops {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let start = Instant::now();
+        let before = written.load(Ordering::Relaxed);
+        let times = keystrokes_seen_by_another(&f).await;
+        let favorites = written.load(Ordering::Relaxed) - before;
+        let elapsed = start.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let (p50, p95) = (percentile(&times, 0.5), percentile(&times, 0.95));
+        println!(
+            "MESURE frappe vue par un autre client, page de {BLOCKS} blocs, pendant {loops} \
+             boucles d'écritures d'un lecteur ({favorites} favoris écrits en {elapsed:?}) : \
+             p50 {p50:?}, p95 {p95:?}, max {:?} ({KEYSTROKES} frappes)",
+            times.iter().max().unwrap()
+        );
+        if p95 >= TYPING_BUDGET {
+            over.push(format!(
+                "frappe, {loops} boucles : p95 {p95:?} (budget {TYPING_BUDGET:?}), mesures {times:?}"
+            ));
+        }
+    }
+    assert!(over.is_empty(), "{}", over.join("\n"));
+}
+
 /// Ce que coûtent, sur une page de `BLOCKS` blocs, une restauration (le temps pendant lequel
 /// l'acteur de la page est occupé : version `before_restore` coupée, puis tout le contenu
 /// réécrit) et une version coupée quand la page en garde déjà cent (la purge en efface une dans
