@@ -625,6 +625,69 @@ impl Shape {
             .collect()
     }
 
+    /// Vrai si chaque contenu compté sans type de la mise à jour est, d'après elle seule, dans un
+    /// texte : son parent est un `XmlText` qu'elle insère, ou son origine un tel contenu (ou une
+    /// marque) qu'elle porte et qui l'est. Alors aucun élément qu'elle insère n'a d'enfant qui ne
+    /// soit un nœud XML, et la relecture de tout un instantané (où le premier caractère de chaque
+    /// texte nomme son texte, et chaque suivant a le précédent pour origine) n'a pas à recompter
+    /// les enfants de chacun de ses éléments (Ruling R497).
+    pub(crate) fn untyped_in_texts(&self) -> bool {
+        let inserts: Vec<(&Struct, &Insert)> = self.inserts().collect();
+        let mut by_client: HashMap<u64, Vec<(u32, u32, usize)>> = HashMap::new();
+        for (k, (s, _)) in inserts.iter().enumerate() {
+            by_client
+                .entry(s.id.0)
+                .or_default()
+                .push((s.id.1, s.id.1 + s.len, k));
+        }
+        for ranges in by_client.values_mut() {
+            ranges.sort_unstable();
+        }
+        let find = |(client, clock): Id| -> Option<usize> {
+            let ranges = by_client.get(&client)?;
+            let at = ranges.partition_point(|r| r.1 <= clock);
+            ranges.get(at).filter(|r| r.0 <= clock).map(|&(_, _, k)| k)
+        };
+        // Pour chaque élément de la mise à jour : dans un texte, d'après elle seule ?
+        let mut known: Vec<Option<bool>> = vec![None; inserts.len()];
+        for start in 0..inserts.len() {
+            let (_, insert) = inserts[start];
+            if !insert.untyped || insert.keyed {
+                continue;
+            }
+            let mut path = Vec::new();
+            let mut k = start;
+            let in_text = loop {
+                if let Some(answer) = known[k] {
+                    break answer;
+                }
+                let (_, insert) = inserts[k];
+                if insert.type_ref.is_some() || path.len() > inserts.len() {
+                    break false;
+                }
+                path.push(k);
+                match &insert.parent {
+                    Parent::Named(..) => break false,
+                    Parent::Id(parent) => {
+                        break find(*parent)
+                            .is_some_and(|p| inserts[p].1.type_ref == Some(TYPE_REFS_XML_TEXT));
+                    }
+                    Parent::Sibling(origin) => match find(*origin) {
+                        Some(next) if next != k => k = next,
+                        _ => break false,
+                    },
+                }
+            };
+            for k in path {
+                known[k] = Some(in_text);
+            }
+            if !in_text {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Les éléments XML que la mise à jour insère, retrouvés dans la page (déjà appliquée).
     pub(crate) fn inserted_elements<'a, T: ReadTxn>(
         &'a self,

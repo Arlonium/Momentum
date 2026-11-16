@@ -8,14 +8,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use mementum_md::{Block, normalize};
 use mementum_schema::SCHEMA_VERSION;
 use yrs::any::Number;
-use yrs::branch::BranchID;
+use yrs::branch::{Branch, BranchID, BranchPtr};
 use yrs::types::TypeRef;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
     Any, Assoc, ClientID, Doc, ID, IdSet, Map, MapRef, OffsetKind, Options, Out, ReadTxn,
-    StateVector, StickyIndex, Transact, TransactionMut, Update, XmlElementPrelim, XmlElementRef,
-    XmlFragment, XmlFragmentRef, XmlOut,
+    StateVector, StickyIndex, Transact, TransactionMut, Update, Xml, XmlElementPrelim,
+    XmlElementRef, XmlFragment, XmlFragmentRef, XmlOut,
 };
 
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
@@ -731,16 +731,30 @@ fn delete(txn: &mut TransactionMut, ids: &IdSet) -> Result<(), CrdtError> {
         .map_err(|e| CrdtError::Decode(e.to_string()))
 }
 
-/// Vrai si chaque liste que la transaction (validée) a changée, et chaque élément que la mise à
-/// jour insère, se lit en entier : autant d'enfants (`children`, qui s'arrête au premier qui
-/// n'est pas un nœud XML) que de longueur (Ruling R497). Les types changés comprennent leurs
-/// ancêtres jusqu'à la racine : chaque frappe recompte les enfants du `blockGroup` racine.
+/// Vrai si chaque liste que la transaction (validée) a changée elle-même, et chaque élément que la
+/// mise à jour insère, se lit en entier : autant d'enfants (`children`, qui s'arrête au premier
+/// qui n'est pas un nœud XML) que de longueur (Ruling R497).
+///
+/// yrs donne les types changés suivis chacun de ses ancêtres jusqu'à la racine
+/// (`changed_parent_types`) : un type est changé lui-même s'il n'est pas le parent de celui qui le
+/// précède. Seuls ceux-là sont recomptés ; recompter les ancêtres faisait recompter le `blockGroup`
+/// racine à chaque frappe (frappe vue par un autre à 5,2 ms au p95 sur 10 000 blocs, et la
+/// relecture de 499 frappes à 216 ms). Une liste ne change que si un enfant y entre ou en sort :
+/// elle est alors elle-même changée.
 fn lists_are_whole(txn: &TransactionMut, shape: &Shape) -> bool {
+    let changed = txn.changed_parent_types();
     let mut seen = HashSet::new();
-    txn.changed_parent_types()
+    changed
         .iter()
-        .copied()
-        .chain(shape.inserted_elements(txn))
+        .enumerate()
+        .filter(|&(i, branch)| i == 0 || parent_of(changed[i - 1]) != Some(*branch))
+        .map(|(_, branch)| *branch)
+        .chain(
+            (!shape.untyped_in_texts())
+                .then(|| shape.inserted_elements(txn))
+                .into_iter()
+                .flatten(),
+        )
         .filter(|branch| seen.insert(*branch))
         .all(|branch| match branch.type_ref() {
             TypeRef::XmlElement(_) => {
@@ -753,6 +767,17 @@ fn lists_are_whole(txn: &TransactionMut, shape: &Shape) -> bool {
             }
             _ => true,
         })
+}
+
+/// Le type parent d'un type (`None` pour une racine, ou un parent qui n'est pas XML).
+fn parent_of(branch: BranchPtr) -> Option<BranchPtr> {
+    let parent = XmlElementRef::from(branch).parent()?;
+    let parent: &Branch = match &parent {
+        XmlOut::Element(e) => e.as_ref(),
+        XmlOut::Fragment(f) => f.as_ref(),
+        XmlOut::Text(t) => t.as_ref(),
+    };
+    Some(BranchPtr::from(parent))
 }
 
 /// Les blocs que [`PageDoc::write_blocks`] écrit : normalisés, un paragraphe vide pour un
