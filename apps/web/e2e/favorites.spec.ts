@@ -57,9 +57,10 @@ const isFavoritesRead = (url: string, spaceId: string) =>
 const AWAY = { x: 900, y: 420 };
 
 /**
- * Barrière : `id` est renommée par l'API, et l'onglet le montre dans son arbre. La lecture de
- * l'arbre qui l'apporte part au moins 250 ms après le changement (le canal de l'espace) : tout ce
- * que l'onglet avait reçu avant (une lecture des favoris) est alors rendu. C'est ce qui permet
+ * Barrière : `id` est renommée par l'API, et l'onglet le montre dans son arbre. Elle s'appelle
+ * une fois lu par le test le corps de la lecture des favoris qu'elle doit couvrir : le navigateur
+ * l'a donc reçu avant que parte la lecture de l'arbre qui apporte ce renommage, et l'onglet traite
+ * ses réponses dans cet ordre (les favoris sont rendus avant l'arbre renommé). C'est ce qui permet
  * d'affirmer qu'une liste n'a **pas** changé, sans attente fixe.
  */
 async function renamedInTree(p: Page, api: APIRequestContext, id: string): Promise<string> {
