@@ -171,14 +171,16 @@ async fn lagged_client_is_disconnected() {
         .unwrap();
     assert!(served.is_ok(), "{served:?}");
 
-    // Un client qui se reconnecte reçoit l'état complet.
+    // Il est déconnecté dès que sa file déborde, au bout de quelques frappes : la rafale n'est
+    // pas finie (un client connecté à cet instant en trouvait neuf d'écrites sur cinquante).
+    // Chaque frappe est validée sur le disque avant d'être relayée : on attend que le serveur
+    // les ait toutes écrites, sans borne tant que l'écriture avance (Ruling R441).
     let full = "x".repeat(50);
+    assert_eq!(written(&f, &full).await, full, "le serveur a tout écrit");
+
+    // Un client qui se reconnecte reçoit l'état complet, à sa synchronisation.
     let again = f.client().await;
-    assert!(
-        again.wait_until(WAIT, |c| text(&c.blocks()) == full).await,
-        "{:?}",
-        text(&again.blocks())
-    );
+    assert_eq!(text(&again.blocks()), full);
     assert!(!writer.is_closed());
 }
 
@@ -1216,6 +1218,23 @@ async fn journal(f: &Fixture) -> Vec<Vec<u8>> {
 /// Le texte de la page, lu par le hub.
 async fn served_text(f: &Fixture) -> String {
     text(&f.hub.read_blocks(f.page).await.unwrap())
+}
+
+/// Attend que le hub lise `want` dans la page. Une rafale prend le temps du disque (chaque
+/// écriture y est validée avant d'être relayée) : pas de borne tant que le texte lu change,
+/// [`WAIT`] au plus sans qu'il change. Renvoie le dernier texte lu.
+async fn written(f: &Fixture, want: &str) -> String {
+    let mut seen = served_text(f).await;
+    let mut deadline = tokio::time::Instant::now() + WAIT;
+    while seen != want && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let now = served_text(f).await;
+        if now != seen {
+            seen = now;
+            deadline = tokio::time::Instant::now() + WAIT;
+        }
+    }
+    seen
 }
 
 /// Un client fait deux éditions, a1 puis a2, qui ne dépendent pas l'une de l'autre ; a2 arrive
