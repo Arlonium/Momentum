@@ -862,7 +862,11 @@ fn empty_copy_of_a_parent(n: usize) -> (PageDoc, Vec<u8>, String) {
     let children: Vec<Block> = (0..n)
         .map(|i| {
             para(
-                &format!("Sous-bloc numéro {i} avec un peu de texte"),
+                &if n <= 65 {
+                    format!("{i}")
+                } else {
+                    format!("Sous-bloc numéro {i} avec un peu de texte")
+                },
                 vec![],
             )
         })
@@ -896,20 +900,28 @@ fn empty_copy_of_a_parent(n: usize) -> (PageDoc, Vec<u8>, String) {
     )
 }
 
-/// C2 : 1 000 sous-blocs « non vus » d'un coup. Au-delà de la borne du report (64 sous-blocs,
-/// 64 Kio), le serveur n'écrit rien de plus que la mise à jour : aucun sous-bloc recopié.
+/// C2 : des sous-blocs « non vus » d'un coup, au-delà de la borne du report. 65 sous-blocs de
+/// quelques octets (la borne des 64 sous-blocs, sous celle des 64 Kio), puis 1 000 (la sonde de la
+/// relecture : 280 Ko reportés pour 136 o reçus). Le serveur n'écrit rien de plus que la mise à
+/// jour, aucun sous-bloc recopié, et dit pourquoi.
 #[test]
 fn a_carry_beyond_the_bound_is_withheld() {
-    let (server, update, x) = empty_copy_of_a_parent(1_000);
-    let applied = server.apply_client_update(&update).expect("acceptée");
-    assert!(
-        applied.carried.is_none(),
-        "{} o reportés",
-        applied.carried.map_or(0, |c| c.len())
-    );
-    let blocks = server.read_blocks();
-    let copy = find(&blocks, &x).expect("la copie");
-    assert!(copy.children.is_empty());
+    for n in [65, 1_000] {
+        let (server, update, x) = empty_copy_of_a_parent(n);
+        let applied = server.apply_client_update(&update).expect("acceptée");
+        assert!(
+            applied.carried.is_none(),
+            "{n} : {} o reportés",
+            applied.carried.map_or(0, |c| c.len())
+        );
+        assert!(
+            applied.withheld.is_some(),
+            "{n} : la raison, pour le journal"
+        );
+        let blocks = server.read_blocks();
+        let copy = find(&blocks, &x).expect("la copie");
+        assert!(copy.children.is_empty(), "{n}");
+    }
 }
 
 /// Le témoin de C2 : 64 sous-blocs non vus, juste à la borne, sont recopiés.
