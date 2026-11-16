@@ -194,7 +194,7 @@ impl MmdReads {
 
     /// Places prises, et requêtes qui attendent (pour les tests).
     #[cfg(test)]
-    fn counts(&self) -> (usize, usize) {
+    pub(crate) fn counts(&self) -> (usize, usize) {
         let queue = lock(&self.queue);
         (
             queue.running,

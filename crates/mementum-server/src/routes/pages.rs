@@ -991,6 +991,10 @@ fn page_node(node: &Node, access: &NodeAccess, trashed_at: Option<i64>) -> PageN
 }
 
 #[cfg(test)]
+#[path = "put_mmd_tests.rs"]
+mod put_mmd_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
