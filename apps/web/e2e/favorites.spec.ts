@@ -462,3 +462,34 @@ test("favorites_hold_still_during_a_drag_in_the_tree", async ({ browser }) => {
   await expect.poll(() => favorites(p)).toHaveLength(1);
   await expect(treeRow(p, gamma.id)).not.toHaveClass(/is-dragging/);
 });
+
+test("a_refused_favorite_is_said_in_the_sidebar_until_the_next_gesture", async ({ browser }) => {
+  // Le refus se dit en pied de barre latérale, tel que le serveur le dit (R410), et le geste
+  // suivant l'efface, comme toute action (R468). Le premier envoi reçoit la réponse d'une page
+  // qu'on ne voit plus.
+  const account = await signUpAccount(`Refus ${unique()}`);
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const lost = await createPage(api, { section: "private", title: `Perdue ${unique()}` });
+  const kept = await createPage(api, { section: "private", title: `Gardée ${unique()}` });
+  const p = await newUser(browser, account);
+  let refused = false;
+  await p.route(`**/api/v1/pages/${lost.id}/favorite`, async (route) => {
+    if (refused) return route.continue();
+    refused = true;
+    await route.fulfill({ status: 404, json: { error: "not_found", message: "page introuvable" } });
+  });
+  await p.goto(`/s/${space.id}`);
+  const alert = sidebarOf(p).getByRole("alert");
+  const menu = await openRowMenu(p, lost.id, lost.title);
+  await menu.getByRole("menuitem", { name: "Ajouter aux favoris" }).click();
+  await expect(alert).toHaveText("Le favori n'a pas pu être ajouté. Page introuvable");
+  // Défait : la section n'a pas paru (une seule page, refusée).
+  await expect(favoritesOf(p)).toHaveCount(0);
+  // Le geste suivant, sur une autre page : le refus d'avant part, le favori se pose.
+  const next = await openRowMenu(p, kept.id, kept.title);
+  await next.getByRole("menuitem", { name: "Ajouter aux favoris" }).click();
+  await expect(alert).toHaveCount(0);
+  await expect.poll(() => favorites(p)).toEqual([kept.title]);
+  await expect.poll(() => serverFavorites(api, space.id)).toEqual([kept.id]);
+});
