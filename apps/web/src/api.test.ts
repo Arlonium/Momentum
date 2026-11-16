@@ -1288,3 +1288,32 @@ test("a_password_change_refused_for_another_account_settles_at_once", async () =
   // suite.
   expect(asked).toBe(1);
 });
+
+test("a_call_refused_for_another_account_reads_the_account_afresh", async () => {
+  // Relecture de la relecture (point 2) : une relecture d'avant un rejeu part avec le cookie
+  // d'Alice ; Bruno se connecte ailleurs, ce qui ferme la session d'Alice (R73) ; un appel de
+  // l'onglet reçoit `409`. Partager la relecture en route (R463), partie avant le changement de
+  // cookie, ne dit rien de lui : refusée sans session, elle demandait la connexion au nom d'Alice,
+  // et l'autre compte n'était jamais dit. Le `409` fait donc relire le compte à neuf.
+  const others: string[] = [];
+  api.onOtherAccount((found) => others.push(found.user.id));
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  // Bruno se connecte ailleurs ; un appel de l'onglet part avec son cookie, et nomme Alice.
+  const read = api.getPage("p2");
+  read.catch(() => {});
+  (await waiting("GET", "/api/v1/pages/p2")).answer(409, ACCOUNT_CHANGED);
+  await flush();
+  // Deux relectures en route : celle d'avant le rejeu, et une neuve, partie après le `409`.
+  expect(received.filter((c) => !c.answered && c.path === "/api/v1/me")).toHaveLength(2);
+  reading.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
+  await flush();
+  expect(others).toEqual(["bruno"]);
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});

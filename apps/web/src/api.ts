@@ -331,12 +331,14 @@ async function judge(
 
 /**
  * Le compte de la session, relu, sans rejeu : celui que le navigateur porte à l'instant. Une
- * relecture déjà en route pour la génération en cours est partagée (R463). Si elle trouve un
- * autre compte que celui de l'application, `onOtherAccount` le dit (R464), à l'issue des sessions
- * de l'onglet en route : une connexion de l'onglet peut rendre la session à l'application (R73).
+ * relecture déjà en route pour la génération en cours est partagée (R463), sauf `fresh` : après
+ * un `409 account_changed`, qui prouve que le cookie a changé depuis qu'elle est partie (R543).
+ * Si elle trouve un autre compte que celui de l'application, `onOtherAccount` le dit (R464), à
+ * l'issue des sessions de l'onglet en route : une connexion de l'onglet peut rendre la session à
+ * l'application (R73).
  */
-function readSessionAccount(): Promise<string> {
-  if (reading?.generation === generation) return reading.account;
+function readSessionAccount(fresh = false): Promise<string> {
+  if (!fresh && reading?.generation === generation) return reading.account;
   const at = generation;
   const account = (async () => {
     const me = (await (await send("GET", ME, undefined, undefined, 1)).json()) as Me;
@@ -428,10 +430,11 @@ async function send(
     );
     if (failure.code === "account_changed") {
       // La session est celle d'un autre compte : l'appel n'a rien fait, et ne repart jamais. Le
-      // compte est relu ; si c'est bien un autre, `onOtherAccount` le dit (R464, R543). Sans
-      // l'attendre : l'appel peut être un changement de mot de passe, une session de l'onglet en
-      // route, et une relecture refusée sans session attend l'issue de ces sessions (R462).
-      void readSessionAccount().catch(() => {});
+      // compte est relu ; si c'est bien un autre, `onOtherAccount` le dit (R464, R543). À neuf :
+      // une relecture déjà en route a pu partir avec le cookie d'avant. Sans l'attendre : l'appel
+      // peut être un changement de mot de passe, une session de l'onglet en route, et une relecture
+      // refusée sans session attend l'issue de ces sessions (R462).
+      void readSessionAccount(true).catch(() => {});
       throw failure;
     }
     if (!isSessionLost(failure)) throw failure;
