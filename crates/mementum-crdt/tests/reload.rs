@@ -528,10 +528,14 @@ enum Op {
     /// `below`) d'un client de la page, à la place `place` (la racine, en tête d'un type de la page,
     /// ou après un élément connu), et une suppression d'un élément connu.
     Hostile {
-        item: Option<(usize, u32, bool, usize, (usize, usize))>,
+        item: Option<HostileItem>,
         delete: Option<(usize, u32)>,
     },
 }
+
+/// L'élément d'une mise à jour faite à la main : le client, l'horloge, vrai pour la ramener sous
+/// le plancher, l'élément (parmi `ITEMS`) et sa place (le genre, puis le type ou l'élément visé).
+type HostileItem = (usize, u32, bool, usize, (usize, usize));
 
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
