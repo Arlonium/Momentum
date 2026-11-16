@@ -128,7 +128,15 @@ export function App() {
     onRefused: actions.favoriteRefused,
   });
   const { toggle } = favorites;
-  const favorite = useCallback((id: string) => void toggle(id), [toggle]);
+  const { favoriteStarted } = actions;
+  // Comme toute action, un geste efface le refus affiché d'avant (R468).
+  const favorite = useCallback(
+    (id: string) => {
+      favoriteStarted();
+      void toggle(id);
+    },
+    [favoriteStarted, toggle],
+  );
   // Stables : les lignes de l'arbre, mémoïsées, ne se rendent pas à chaque navigation (R43).
   const createFromTree = useCallback((target: CreateTarget) => void create(target), [create]);
   const trashFromTree = useCallback((id: string) => void trash(id), [trash]);

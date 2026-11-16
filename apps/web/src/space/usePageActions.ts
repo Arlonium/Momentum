@@ -121,6 +121,11 @@ export type PageActions = {
    * barre latérale est relue (la page n'est plus visible, ou n'existe plus). Garde son identité.
    */
   favoriteRefused: (error: unknown, pageId: string, on: boolean) => void;
+  /**
+   * Un favori est posé ou retiré d'ici : comme toute action, il efface le refus d'avant (R468).
+   * Garde son identité.
+   */
+  favoriteStarted: () => void;
   /** Change quand une page est jetée ou restaurée d'ici : la vue de la corbeille se relit. */
   trashChanges: number;
 };
@@ -320,6 +325,8 @@ export function usePageActions({
     [reload],
   );
 
+  const favoriteStarted = useCallback(() => setNotice(null), []);
+
   return {
     notice,
     created,
@@ -336,5 +343,6 @@ export function usePageActions({
     shared,
     shareRefused,
     favoriteRefused,
+    favoriteStarted,
   };
 }

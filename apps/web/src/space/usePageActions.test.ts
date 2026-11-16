@@ -490,3 +490,16 @@ test("refused_favorite_is_said_in_the_sidebar_and_rereads_the_tree", async () =>
   await app.rerender({ pathname: "/p/a" });
   expect(app.current.actions.notice).toBeNull();
 });
+
+test("a_new_favorite_gesture_takes_the_last_refusal_away", async () => {
+  // Comme créer, jeter ou déplacer (R410) : un nouveau geste efface le refus d'avant, le sien
+  // comme celui d'une autre action.
+  const app = await withTree([page("a")]);
+  await settle(() => app.current.actions.favoriteRefused(notFound(), "a", true));
+  expect(app.current.actions.notice).not.toBeNull();
+  await settle(() => app.current.actions.favoriteStarted());
+  expect(app.current.actions.notice).toBeNull();
+  await settle(() => app.current.actions.shareRefused("accès complet requis sur cette page"));
+  await settle(() => app.current.actions.favoriteStarted());
+  expect(app.current.actions.notice).toBeNull();
+});
