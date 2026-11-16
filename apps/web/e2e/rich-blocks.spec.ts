@@ -1,18 +1,26 @@
 // Les blocs riches de la partie B du lot 3 (Task C1b) : le callout et le signet, posés par le menu
 // « / », réglés dans leur fenêtre (tenue par l'id du bloc, rendue hors du document), vus par
 // l'autre personne de la page, et relus en MMD par le serveur. Un lecteur les voit sans pouvoir
-// les régler.
+// les régler. Puis (Task C3) la table des matières, qui suit les titres tapés par l'autre, et le
+// lien vers une page, posé par un sélecteur, dont le titre suit la page pour qui la voit, et reste
+// le titre copié pour qui ne la voit pas.
 import { expect, test, type Page } from "@playwright/test";
 import {
+  apiAs,
   closeContexts,
   createPage,
   getMmd,
+  guestOf,
+  newUser,
   openPage,
   ownerAndMember,
   putMmd,
   readerBanner,
   setPageLevel,
+  signUpAccount,
+  titleOf,
   unique,
+  waitSynced,
 } from "./helpers";
 
 test.afterEach(closeContexts);
@@ -303,4 +311,139 @@ test("escape_after_someone_else_changed_the_block_gives_the_focus_to_the_text", 
   expect(await focused(mona)).toContain("bn-editor");
   await mona.keyboard.type("repris");
   await expect.poll(() => getMmd(aliceApi, page.id)).toBe("Avant\n\nrepris\n\nAprès\n");
+});
+
+// Task C3 : table des matières et lien vers une page.
+
+/** Les entrées de la table des matières de la page ouverte. */
+function tocEntries(p: Page) {
+  return p.locator(".mm-editor").getByRole("navigation", { name: "Table des matières" }).getByRole("link");
+}
+
+/** Le lien de page de l'éditeur. */
+function pageLinkOf(p: Page) {
+  return p.locator(".mm-editor .mm-page-link");
+}
+
+test("toc_follows_headings_typed_by_someone_else", async ({ browser }) => {
+  const { mona, tom, aliceApi, page } = await duo(browser, "Sommaire");
+  await putMmd(aliceApi, page.id, "<toc/>\n\n# Introduction\n\n<p/>\n");
+  await expect(tocEntries(mona)).toHaveText(["Introduction"]);
+  await expect(tocEntries(tom)).toHaveText(["Introduction"]);
+
+  // Tom tape un titre de niveau 2 sous l'introduction : la table de Mona le suit, à sa profondeur.
+  await tom.locator(".mm-editor .bn-block-content").last().click();
+  await tom.keyboard.type("## Contexte");
+  await expect(tocEntries(mona)).toHaveText(["Introduction", "Contexte"]);
+  const levels = mona.locator(".mm-editor .mm-toc li");
+  expect(await levels.evaluateAll((items) => items.map((li) => (li as HTMLElement).dataset.level))).toEqual(["1", "2"]);
+
+  // Un lien de la table met le curseur au début de son titre : la frappe y entre.
+  await tocEntries(mona).filter({ hasText: "Contexte" }).click();
+  await expect(mona.locator(".mm-editor .bn-editor")).toBeFocused();
+  await mona.keyboard.type("Le ");
+  await expect.poll(() => getMmd(aliceApi, page.id)).toBe("<toc/>\n\n# Introduction\n\n## Le Contexte\n");
+  await expect(tocEntries(tom)).toHaveText(["Introduction", "Le Contexte"]);
+});
+
+test("page_link_opens_the_page_and_reads_back", async ({ browser, request }) => {
+  const tag = unique();
+  const plan = await createPage(request, { title: `Plan ${tag}` });
+  const notes = await createPage(request, { title: `Notes ${tag}` });
+  const p = await openPage(browser, notes.id);
+  await typeInFirstBlock(p, "");
+  await slash(p, "lien vers", "Lien vers une page");
+
+  // Le sélecteur prend le focus ; rien n'est écrit tant qu'on cherche.
+  const picker = blockWindow(p, "Lien vers une page");
+  const field = picker.getByRole("combobox", { name: "Chercher une page" });
+  await expect(field).toBeFocused();
+  await p.keyboard.type(`Plan ${tag}`);
+  await expect(picker.getByRole("option")).toHaveText([`Plan ${tag}`]);
+  expect(await getMmd(request, notes.id)).toBe("<p/>\n");
+  await p.keyboard.press("Enter");
+  await expect(picker).toBeHidden();
+
+  // Le lien est posé, avec l'id de la page et son titre ; la frappe reprend dans le texte qui suit.
+  await expect(pageLinkOf(p).getByRole("link")).toHaveText(`Plan ${tag}`);
+  await expect(p.locator(".mm-editor .bn-editor")).toBeFocused();
+  await p.keyboard.type("La suite");
+  await expect.poll(() => getMmd(request, notes.id)).toBe(`<page id="${plan.id}">Plan ${tag}</page>\n\nLa suite\n`);
+
+  // Un clic ouvre la page, sans recharger l'application.
+  await p.evaluate(() => ((window as unknown as { kept: boolean }).kept = true));
+  await pageLinkOf(p).getByRole("link").click();
+  await expect(p).toHaveURL(new RegExp(`/p/${plan.id}$`));
+  await expect(titleOf(p)).toHaveValue(`Plan ${tag}`);
+  expect(await p.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBe(true);
+});
+
+test("renamed_page_shows_its_new_title_in_the_link", async ({ browser, request }) => {
+  const tag = unique();
+  const plan = await createPage(request, { title: `Plan ${tag}` });
+  const notes = await createPage(request, { title: `Notes ${tag}` });
+  await putMmd(request, notes.id, `<page id="${plan.id}">Plan ${tag}</page>\n`);
+  const p = await openPage(browser, notes.id);
+  await expect(pageLinkOf(p).getByRole("link")).toHaveText(`Plan ${tag}`);
+  // Renommée ailleurs : le lien suit (l'arbre relu par le canal de l'espace) ; le document garde le
+  // titre copié.
+  const res = await request.patch(`/api/v1/pages/${plan.id}`, { data: { title: `Plan 2027 ${tag}` } });
+  expect(res.status(), await res.text()).toBe(200);
+  await expect(pageLinkOf(p).getByRole("link")).toHaveText(`Plan 2027 ${tag}`);
+  expect(await getMmd(request, notes.id)).toBe(`<page id="${plan.id}">Plan ${tag}</page>\n`);
+});
+
+test("guest_reads_the_link_label_of_a_page_he_cannot_see", async ({ browser }) => {
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const tag = unique();
+  const plan = await createPage(aliceApi, { title: `Plan ${tag}` });
+  const notes = await createPage(aliceApi, { title: `Notes ${tag}` });
+  await putMmd(aliceApi, notes.id, `Voir :\n\n<page id="${plan.id}">Plan ${tag}</page>\n`);
+  // Gina n'est invitée que sur « Notes » ; « Plan » est ensuite renommé.
+  const gina = await guestOf(alice, notes.id, `Gina ${unique()}`, "read");
+  const secret = `Plan secret ${tag}`;
+  const renamed = await aliceApi.patch(`/api/v1/pages/${plan.id}`, { data: { title: secret } });
+  expect(renamed.status(), await renamed.text()).toBe(200);
+
+  /** Tout ce que reçoit un onglet : les réponses de l'API et les trames de ses WebSocket. */
+  const listen = (p: Page) => {
+    const received: string[] = [];
+    p.on("response", (response) => {
+      if (!response.url().includes("/api/")) return;
+      void response.text().then(
+        (text) => received.push(text),
+        () => {},
+      );
+    });
+    p.on("websocket", (socket) => {
+      socket.on("framereceived", ({ payload }) =>
+        received.push(typeof payload === "string" ? payload : payload.toString("utf8")),
+      );
+    });
+    return received;
+  };
+
+  // Témoin : Alice, qui voit « Plan », lit son titre à jour dans le lien, et l'a reçu.
+  const a = await newUser(browser, alice);
+  const toAlice = listen(a);
+  await a.goto(`/p/${notes.id}`);
+  await waitSynced(a);
+  await expect(pageLinkOf(a).getByRole("link")).toHaveText(secret);
+  await expect.poll(() => toAlice.some((text) => text.includes(secret))).toBe(true);
+
+  // Gina lit le libellé copié, et rien de ce qu'elle reçoit ne porte le titre à jour.
+  const g = await newUser(browser, gina);
+  const toGina = listen(g);
+  await g.goto(`/p/${notes.id}`);
+  await waitSynced(g);
+  await expect(pageLinkOf(g).getByRole("link")).toHaveText(`Plan ${tag}`);
+  // Témoin de l'écoute : ce qu'elle voit est bien passé par là (le libellé copié, dans le document).
+  await expect.poll(() => toGina.some((text) => text.includes(`Plan ${tag}`))).toBe(true);
+  // Le lien mène à « Page introuvable » : la page ne lui est pas montrée.
+  await pageLinkOf(g).getByRole("link").click();
+  await expect(g).toHaveURL(new RegExp(`/p/${plan.id}$`));
+  await expect(g.getByRole("heading", { name: "Page introuvable" })).toBeVisible();
+  expect(await g.content()).not.toContain(secret);
+  expect(toGina.filter((text) => text.includes(secret))).toEqual([]);
 });
