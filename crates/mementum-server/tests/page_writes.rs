@@ -196,66 +196,11 @@ async fn mmd_writes_amid_other_writes_on_a_slow_disk_never_fail() {
     );
 }
 
-/// Un client qui coupe chaque requête peu après l'avoir envoyée ne relâche pas le verrou avant
-/// l'écriture : ce qui suit l'obtention du verrou va au bout dans sa propre tâche, verrou tenu.
-/// Sinon, la requête suivante passait aussitôt ses contrôles, et la file se reformait dans la
-/// boîte de l'acteur. Les requêtes coupées pendant qu'elles attendent le verrou ne le gardent
-/// pas, et n'écrivent rien. Une écriture d'Olga, qui prend le même verrou, sert de borne : quand
-/// elle a répondu, tout ce qui l'avait avant elle est écrit.
-#[tokio::test]
-async fn requests_cut_by_the_client_keep_the_lock_until_written() {
-    let t = open_app().await;
-    let team = Team::new(&t).await;
-    let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Edit)];
-    let page = team.page(None, "Coupées", &grants).await;
-    witness(&t, page, team.tom.id).await;
-    // Une écriture bien plus longue que l'écart entre deux coupures : sans le verrou tenu par
-    // la tâche, chaque coupure laisserait la suivante passer ses contrôles pendant l'écriture.
-    let contents = [
-        many_paragraphs("Alpha", 10 * PARAGRAPHS),
-        many_paragraphs("Bêta", 10 * PARAGRAPHS),
-    ];
-
-    let mut burst = JoinSet::new();
-    for i in 0..BURST {
-        let req = request(
-            &team.tom,
-            Request::put(format!("/api/v1/pages/{page}/mmd"))
-                .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
-            Body::from(contents[i % 2].clone()),
-        );
-        let router = t.router.clone();
-        // Chacune coupée un peu plus tard que la précédente.
-        let cut_after = Duration::from_millis(5 * (i as u64 + 1));
-        burst.spawn(async move { tokio::time::timeout(cut_after, router.oneshot(req)).await });
-    }
-    let deadline = tokio::time::Instant::now() + WAIT;
-    while witnessed(&t, true).await == 0 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "aucune écriture n'a abouti"
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    team.olga
-        .browser
-        .delete(&format!(
-            "/api/v1/pages/{page}/access/users/{}",
-            team.tom.id
-        ))
-        .await
-        .assert_status(StatusCode::OK);
-    while burst.join_next().await.is_some() {}
-    team.olga
-        .put_mmd(&page.to_string(), "Olga\n")
-        .await
-        .assert_status(StatusCode::NO_CONTENT);
-    let (with, without) = (witnessed(&t, true).await, witnessed(&t, false).await);
-    assert!(
-        without <= 1,
-        "écritures de Tom avec l'accès : {with}, sans l'accès : {without}"
-    );
-}
+// Une requête coupée par le client une fois le verrou tenu ne le rend qu'après son écriture :
+// `requests_cut_while_holding_the_lock_write_after_the_revocation_at_most_once`, dans
+// `src/routes/put_mmd_tests.rs` (R437). Le scénario qui était ici, une rafale coupée à 5 ms
+// d'intervalle, ne gardait plus rien depuis les deux places par compte de R435 : vert sous la
+// mutation qu'il visait, rouge à tort sur un coureur lent (Ruling R587).
 
 // Le verrou par page (R200) : `two_pages_never_wait_for_each_other`, dans
 // `src/routes/put_mmd_tests.rs` (R535 : une rafale de restaurations d'un même compte y reçoit
