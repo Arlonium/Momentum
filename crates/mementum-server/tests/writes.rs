@@ -9,9 +9,9 @@
 mod common;
 
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use common::sync::{Loops, SLOW_DISK, open_app_with, text, types_unheard, user};
-use common::{TestApp, WAIT, exec_sql, query_i64, sync_url, synced_as};
+use common::{TestApp, WAIT, exec_sql, json_request, query_i64, sync_url, synced_as};
 use mementum_acl::Level;
 use uuid::Uuid;
 
@@ -175,4 +175,92 @@ async fn eight_write_loops_of_a_reader_fail_nobody_and_let_typing_through() {
         "favoris de Tom validés pendant chaque création d'Olga : {olga_waited:?} (au plus \
          {READER_WRITES_AT_MOST}) ; {done} favoris en tout"
     );
+}
+
+/// Une requête du routeur, avec l'hôte et, s'il y en a un, ce cookie : son statut, si elle répond
+/// avant [`WAIT`] ; `None` sinon.
+async fn answer(
+    t: &TestApp,
+    mut request: Request<Body>,
+    cookie: Option<&str>,
+) -> Option<StatusCode> {
+    use tower::ServiceExt;
+    let headers = request.headers_mut();
+    headers.insert(header::HOST, "localhost".parse().unwrap());
+    if let Some(cookie) = cookie {
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+    }
+    let reply = tokio::time::timeout(WAIT, t.router.clone().oneshot(request)).await;
+    reply.ok().map(|reply| reply.unwrap().status())
+}
+
+/// Ce qu'un anonyme peut demander n'écrit rien (Ruling R517) : une connexion annexe tient le
+/// verrou d'écriture de SQLite, et le délai d'attente du store est d'une minute ; une requête qui
+/// écrirait ne répondrait pas, toutes répondent. Une déconnexion à cookie bidon (avant, elle
+/// prenait un tour de la voie commune, et cent par seconde y faisaient attendre toute
+/// inscription), sans cookie, une connexion au mauvais mot de passe, une inscription à une
+/// adresse prise, `/me` à cookie bidon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn anonymous_requests_write_nothing() {
+    use base64::Engine;
+    let t = open_app_with(mementum_store::StoreOptions {
+        busy_timeout: std::time::Duration::from_secs(60),
+        write_delay: std::time::Duration::ZERO,
+    })
+    .await;
+    let _olga = t.signed_up("olga@exemple.fr", "Olga").await;
+    let bogus = format!(
+        "{}={}",
+        common::SESSION_COOKIE,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32])
+    );
+    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
+        .await
+        .unwrap();
+    let mut lock = side.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let logout = || {
+        Request::post("/api/v1/auth/logout")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let login = json_request(
+        Method::POST,
+        "/api/v1/auth/login",
+        &serde_json::json!({ "email": "olga@exemple.fr", "password": "faux-faux-faux" }),
+    );
+    let signup = json_request(
+        Method::POST,
+        "/api/v1/auth/signup",
+        &serde_json::json!({ "email": "olga@exemple.fr", "name": "X", "password": common::PASSWORD }),
+    );
+    let me = Request::get("/api/v1/me").body(Body::empty()).unwrap();
+    let answers = [
+        (
+            "déconnexion à cookie bidon",
+            answer(&t, logout(), Some(&bogus)).await,
+        ),
+        ("déconnexion sans cookie", answer(&t, logout(), None).await),
+        ("mauvais mot de passe", answer(&t, login, None).await),
+        ("adresse prise", answer(&t, signup, None).await),
+        ("/me à cookie bidon", answer(&t, me, Some(&bogus)).await),
+    ];
+    sqlx::query("ROLLBACK").execute(&mut *lock).await.unwrap();
+    let expected = [
+        StatusCode::NO_CONTENT,
+        StatusCode::NO_CONTENT,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::CONFLICT,
+        StatusCode::UNAUTHORIZED,
+    ];
+    for ((what, status), expected) in answers.into_iter().zip(expected) {
+        assert_eq!(
+            status,
+            Some(expected),
+            "{what} (None : elle attend d'écrire)"
+        );
+    }
 }

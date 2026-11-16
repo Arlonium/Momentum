@@ -241,3 +241,82 @@ async fn no_write_bypasses_the_queue() {
     assert_eq!(writes.len(), 1);
     assert_eq!(writes[0].4, 0, "la connexion qui écrit");
 }
+
+/// Un jeton de session au hasard, que la base ne connaît pas.
+fn unknown_token() -> [u8; 32] {
+    let mut token = [0u8; 32];
+    token[..16].copy_from_slice(Uuid::now_v7().as_bytes());
+    token[16..].copy_from_slice(Uuid::now_v7().as_bytes());
+    token
+}
+
+/// Un anonyme ne remplit pas la voie commune (Ruling R517) : fermer une session inconnue (une
+/// déconnexion à cookie bidon, `close_session` d'une connexion) ne prend aucun tour, et rend
+/// `None` même pendant qu'un tour est tenu ; fermer une vraie session écrit dans la voie de son
+/// compte, pas dans la voie commune. Cent déconnexions de vraies sessions d'un même compte,
+/// demandées hors de toute session : une inscription, voie commune, passe après une seule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_a_session_never_fills_the_common_lane() {
+    const K: usize = 100;
+    let f = fresh().await;
+    let olga = f.store.create_user(new_user("olga")).await.unwrap().id;
+    let mut tokens = Vec::new();
+    for _ in 0..K {
+        let token = unknown_token();
+        f.store.create_session(olga, token, i64::MAX).await.unwrap();
+        tokens.push(token);
+    }
+    exec_sql(
+        &f.db,
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_out AFTER DELETE ON sessions \
+         BEGIN INSERT INTO witness (what) VALUES ('sortie'); END; \
+         CREATE TRIGGER witness_user AFTER INSERT ON users \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.name); END;",
+    )
+    .await;
+    let held = f.store.hold_writes().await;
+    // Inconnues : aucun tour, réponse tout de suite.
+    for _ in 0..20 {
+        let closed = writes_by(None, f.store.delete_session(unknown_token()));
+        let closed = tokio::time::timeout(WAIT, closed).await;
+        assert_eq!(closed.expect("sans tour").unwrap(), None);
+    }
+    assert_eq!(f.store.queued_writes(), 0);
+    // Connues : en file, dans la voie du compte.
+    let mut logouts = Vec::new();
+    for (i, token) in tokens.into_iter().enumerate() {
+        let store = f.store.clone();
+        logouts.push(tokio::spawn(writes_by(None, async move {
+            store.delete_session(token).await
+        })));
+        queued(&f.store, i + 1).await;
+    }
+    let signup = {
+        let store = f.store.clone();
+        tokio::spawn(writes_by(None, async move {
+            let session = mementum_store::NewSession {
+                token_hash: unknown_token(),
+                expires_at: i64::MAX,
+            };
+            store
+                .sign_up(new_user("neuve"), None, "Espace", session, None, 1)
+                .await
+        }))
+    };
+    queued(&f.store, K + 1).await;
+    drop(held);
+    signup.await.unwrap().unwrap();
+    for logout in logouts {
+        assert_eq!(logout.await.unwrap().unwrap(), Some(olga));
+    }
+    let order = texts(&f.db, "SELECT what FROM witness ORDER BY n").await;
+    let at = order
+        .iter()
+        .position(|what| what.as_deref() == Some("neuve"))
+        .unwrap();
+    assert_eq!(
+        at, 1,
+        "sorties écrites avant l'inscription : {at} (sur {K})"
+    );
+}

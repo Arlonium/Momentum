@@ -417,11 +417,27 @@ impl Store {
 
     /// Ferme une session, et rend le compte qu'elle portait, qu'elle soit échue ou non : à
     /// l'appelant de fermer ce qu'elle avait ouvert. `None`, sans rien écrire, pour un jeton
-    /// inconnu.
+    /// inconnu, ou une session fermée depuis par un autre.
+    ///
+    /// **Elle lit d'abord, et n'écrit que pour une session connue, dans la voie de son compte**
+    /// (Ruling R517). Une déconnexion n'a pas de session lue par le serveur : sans cela, chaque
+    /// déconnexion à cookie bidon d'un anonyme prenait un tour de la voie commune, et cent par
+    /// seconde y faisaient attendre toute inscription des secondes (`to_completion` les menait au
+    /// bout, même abandonnées par leur client). Le compte de la session est celui qui l'a
+    /// ouverte : seul qui tient son jeton peut la fermer.
     pub async fn delete_session(&self, token_hash: [u8; 32]) -> Result<Option<Uuid>, StoreError> {
+        let Some(owner) = sqlx::query("SELECT user_id FROM sessions WHERE token_hash = ?")
+            .bind(&token_hash[..])
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|row| parse_uuid(&row.get::<String, _>(0)))
+            .transpose()?
+        else {
+            return Ok(None);
+        };
         sqlx::query("DELETE FROM sessions WHERE token_hash = ? RETURNING user_id")
             .bind(&token_hash[..])
-            .fetch_optional(&mut *self.write_conn().await?)
+            .fetch_optional(&mut *self.write_conn_in(Lane::Account(owner)).await?)
             .await?
             .map(|row| parse_uuid(&row.get::<String, _>(0)))
             .transpose()
