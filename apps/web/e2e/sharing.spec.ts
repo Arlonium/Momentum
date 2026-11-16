@@ -52,15 +52,22 @@ import {
 } from "./helpers";
 import { BASE_URL } from "./servers";
 
-/** Les entrées du menu d'une ligne pour qui peut modifier sa page (R412). */
+/** Les entrées du menu d'une ligne pour qui peut modifier sa page (R412), membre de l'espace. */
 const EDITOR_ROW_ENTRIES = [
   "Déplacer vers le haut",
   "Déplacer vers le bas",
   "Imbriquer dans la page précédente",
   "Sortir de la page parente",
   "Ajouter aux favoris",
+  "Dupliquer",
   "Mettre à la corbeille",
 ];
+
+/**
+ * Les entrées du menu d'une ligne pour un membre qui ne fait que lire sa page : le favori (R254)
+ * et « Dupliquer », la copie allant dans son « Privé » (R252) ; aucune action de qui modifie.
+ */
+const READER_ROW_ENTRIES = ["Ajouter aux favoris", "Dupliquer"];
 
 /** Les entrées du menu de la ligne `id`, ouvert puis refermé par Échap. */
 async function rowEntries(p: Page, id: string, title: string): Promise<string[]> {
@@ -304,10 +311,10 @@ test("downgrade_to_read_makes_the_open_editor_read_only", async ({ browser }) =>
   await expect(editor).toContainText("Écrit par Bruno");
   await expect(titleOf(b)).toHaveAttribute("readonly", "");
   // La ligne de la barre latérale suit : plus d'actions de qui modifie ; son menu n'offre que le
-  // favori.
+  // favori et la copie.
   await row.hover();
   await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toHaveCount(0);
-  expect(await rowEntries(b, shared.id, shared.title)).toEqual(["Ajouter aux favoris"]);
+  expect(await rowEntries(b, shared.id, shared.title)).toEqual(READER_ROW_ENTRIES);
   await expect(row).not.toHaveAttribute("draggable", "true");
 
   // Ce que B tape ne part plus ; ce qu'écrit A lui arrive toujours.
@@ -531,11 +538,11 @@ test("page_raised_before_it_is_opened_opens_for_editing", async ({ browser }) =>
 
   // A lui donne « Peut modifier ». Rien ne le dit à l'onglet de B, qui n'a pas la page ouverte :
   // sa barre latérale date d'avant, et la ligne n'offre toujours aucune action de qui modifie, son
-  // menu que le favori.
+  // menu que le favori et la copie.
   await setPageLevel(aliceApi, shared.id, brunoId, "edit");
   await row.hover();
   await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toHaveCount(0);
-  expect(await rowEntries(b, shared.id, shared.title)).toEqual(["Ajouter aux favoris"]);
+  expect(await rowEntries(b, shared.id, shared.title)).toEqual(READER_ROW_ENTRIES);
 
   // B ouvre la page. C'est une ouverture : elle se modifie d'emblée, sans demander à être
   // rouverte.

@@ -453,7 +453,8 @@ test("page_one_can_only_read_offers_no_action", async ({ browser }) => {
   await expect(shared.getByRole("treeitem")).toHaveCount(3);
 
   // En lecture, et sa sous-page avec elle : ni « + », ni saisie pour la glisser ; un « … » qui
-  // n'offre que le favori de la page (R254, à tout niveau), qui ne change rien à la page.
+  // n'offre que le favori de la page (R254, à tout niveau) et sa copie (R252 : un membre la pose
+  // dans son « Privé »), qui ne changent rien à la page.
   for (const [id, title] of [
     [read.id, "À lire"],
     [sub.id, "Annexe"],
@@ -462,7 +463,7 @@ test("page_one_can_only_read_offers_no_action", async ({ browser }) => {
     await row.hover();
     await expect(row.getByRole("link")).toHaveText(title);
     const menu = await openRowMenu(b, id, title);
-    await expect(menu.getByRole("menuitem")).toHaveText(["Ajouter aux favoris"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Ajouter aux favoris", "Dupliquer"]);
     await b.keyboard.press("Escape");
     await expect(row.getByRole("button", { name: /^Ajouter une sous-page/ })).toHaveCount(0);
     await expect(row).not.toHaveAttribute("draggable", "true");

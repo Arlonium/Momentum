@@ -270,7 +270,7 @@ test("restored_content_is_itself_in_the_history", async ({ browser, request }) =
 test("reader_is_not_offered_the_history_and_cannot_restore", async ({ browser }) => {
   // Sous « Peut modifier », l'historique n'est pas proposé (R216) : un lecteur ne lit pas ce qui a
   // été effacé avant qu'on partage la page avec lui. Son menu « … » n'a que le favori de la page
-  // (R254, à tout niveau).
+  // (R254, à tout niveau) et sa copie (R252 : un membre la pose dans son « Privé »).
   const { aliceApi, bruno, brunoApi, brunoId, space } = await ownerAndMember();
   const page = await createPage(aliceApi, {
     spaceId: space.id,
@@ -287,7 +287,10 @@ test("reader_is_not_offered_the_history_and_cannot_restore", async ({ browser })
   // pas l'historique.
   await expect(b.getByRole("button", { name: /^Commentaires/ })).toBeVisible();
   await menuButton(b).click();
-  await expect(b.getByRole("menu").getByRole("menuitem")).toHaveText(["Ajouter aux favoris"]);
+  await expect(b.getByRole("menu").getByRole("menuitem")).toHaveText([
+    "Ajouter aux favoris",
+    "Dupliquer",
+  ]);
   await b.keyboard.press("Escape");
   // Le serveur lui refuse la liste et l'état des versions (S5), et la restauration.
   const list = await brunoApi.get(`/api/v1/pages/${page.id}/versions`);
