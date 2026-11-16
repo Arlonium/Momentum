@@ -26,9 +26,11 @@
 //! 5. `403 forbidden` si la règle de l'auteur l'interdit (`access::permit_own`) ;
 //! 6. `409 trashed` pour une écriture dans une page à la corbeille, dont les fils se lisent ;
 //! 7. `422` pour le corps (`invalid_json`, `invalid_body`) ou l'emoji (`invalid_emoji`) ;
-//! 8. pour un fil sur un bloc : la page chargée, la session relue (`401`, Ruling R365), les
-//!    droits revérifiés (2, 3 et 6, Ruling R89), puis `422 invalid_block` si le document vivant
-//!    n'a pas ce bloc. Un commentaire de la page ne la charge pas.
+//! 8. pour un fil sur un bloc : une seule attente de l'acteur, qui dit si le bloc existe
+//!    (`Hub::has_block`, qui charge la page au besoin), puis la session relue (`401`, Ruling
+//!    R384, qui récrit R365), les droits revérifiés (2, 3 et 6, Ruling R89), puis
+//!    `422 invalid_block` si le document vivant n'a pas ce bloc. Un commentaire de la page ne la
+//!    charge pas.
 //!
 //! **Ce qui fait foi est la transaction.** Les droits sont ceux lus juste avant l'écriture (la
 //! fenêtre de quelques millisecondes que le projet accepte pour les écritures de page) ; mais
