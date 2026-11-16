@@ -1,6 +1,7 @@
 // Ce que les commentaires lisent dans l'éditeur affiché : le bloc où est la sélection (pour
 // Ctrl+Alt+M dans un éditeur en lecture seule) et le texte propre d'un bloc.
 import { afterEach, expect, test } from "vitest";
+import { blockOf, mountEditor } from "../test/richEditor";
 import { blockOfSelection, blockText, isolate, snippet } from "./dom";
 
 /** Un bloc tel que BlockNote le rend : `blockOuter` > `blockContainer` > contenu, puis ses enfants. */
@@ -136,6 +137,42 @@ test("the_text_of_a_toggle_block_is_its_own", () => {
   container.append(frame);
   outer.append(container);
   expect(blockText(outer)).toBe("Titre du repli");
+});
+
+/** Un callout, un signet et un lien de page, dessinés par leurs vues (`editor/blocks/richView.ts`). */
+const RICH_BLOCKS = [
+  { id: "p", type: "paragraph" as const, content: "Avant" },
+  { id: "c", type: "callout" as const, props: { icon: "⚠️", color: "blue" }, content: "Attention" },
+  { id: "b", type: "bookmark" as const, props: { url: "https://exemple.fr/" } },
+  { id: "l", type: "pageLink" as const, props: { pageId: "0190f5a0-0000-7000-8000-0000000000a1", title: "Plan" } },
+];
+
+test("the_text_of_a_rich_block_read_by_the_comments_is_its_own_text", async () => {
+  // Ce que lisent l'extrait d'un fil et le nom d'une pastille (`blockText`) : le texte du callout,
+  // sans son icône ; l'hôte et l'adresse du signet, sans son bouton ; le titre du lien de page.
+  const m = await mountEditor({ blocks: RICH_BLOCKS });
+  expect(blockText(blockOf(m, "p"))).toBe("Avant");
+  expect(blockText(blockOf(m, "c"))).toBe("Attention");
+  expect(blockText(blockOf(m, "b"))).toBe("exemple.fr https://exemple.fr/");
+  expect(blockText(blockOf(m, "l"))).toBe("Plan");
+  // Pour un lecteur (l'icône n'est plus dans un bouton), même texte.
+  const reader = await mountEditor({ blocks: RICH_BLOCKS, editable: false });
+  expect(blockText(blockOf(reader, "c"))).toBe("Attention");
+  expect(blockText(blockOf(reader, "b"))).toBe("exemple.fr https://exemple.fr/");
+  // Un texte coupé par une marque se lit d'un seul tenant.
+  const styled = await mountEditor({
+    blocks: [
+      {
+        id: "s",
+        type: "paragraph",
+        content: [
+          { type: "text", text: "Mot", styles: {} },
+          { type: "text", text: "gras", styles: { bold: true } },
+        ],
+      },
+    ],
+  });
+  expect(blockText(blockOf(styled, "s"))).toBe("Motgras");
 });
 
 test("isolate_wraps_text_in_first_strong_isolates", () => {

@@ -42,9 +42,23 @@ const OWN_CONTENT =
   ":scope > .bn-block > .bn-block-content, " +
   ":scope > .bn-block > .bn-toggle-frame > .bn-toggle-slot > .bn-block-content";
 
-/** Le texte propre d'un bloc (sans celui de ses blocs enfants). */
+/**
+ * Le texte propre d'un bloc (sans celui de ses blocs enfants) : son texte modifiable
+ * (`.bn-inline-content`, celui de chaque cellule pour un tableau) quand il en a ; sinon ce qu'il
+ * montre, mot à mot, sans ses boutons. Un callout donne son texte, sans son icône ; un signet, son
+ * hôte et son adresse, sans « Modifier » ; un lien de page, son titre (R654).
+ */
 export function blockText(element: Element): string {
-  return element.querySelector(OWN_CONTENT)?.textContent?.trim() ?? "";
+  const own = element.querySelector(OWN_CONTENT);
+  if (own === null) return "";
+  const inline = own.querySelectorAll(".bn-inline-content");
+  if (inline.length > 0) return [...inline].map((part) => part.textContent ?? "").join("").trim();
+  const words: string[] = [];
+  const walker = own.ownerDocument.createTreeWalker(own, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node.parentElement?.closest("button") == null) words.push(node.textContent ?? "");
+  }
+  return words.join(" ").replace(/\s+/g, " ").trim();
 }
 
 /**
