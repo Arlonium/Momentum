@@ -11,6 +11,7 @@ import {
   expectUnder,
   firstSpace,
   getMmd,
+  hideSyncClosures,
   newUser,
   NO_SESSION,
   openPage,
@@ -215,10 +216,20 @@ test("refused_restore_reads_the_page_again", async ({ browser }) => {
     expect((await api.post(`/api/v1/pages/${id}/trash`)).status()).toBe(200);
   }
 
-  // « Alpha », à la corbeille, est ouverte ; ailleurs, on la supprime pour de bon.
+  // L'onglet n'apprend ce qui change ailleurs que par ses propres gestes : son canal de l'espace
+  // est fermé (sinon l'arbre relu remet « Bravo », restaurée, telle que l'arbre la porte, sans
+  // bandeau), et la fermeture de ses connexions de synchro par le serveur ne lui arrive pas
+  // (sinon la reconnexion relit la page, et dit « Alpha » perdue ou « Bravo » restaurée). Chaque
+  // page est synchronisée avant le changement : la lecture faite avant la première connexion
+  // a répondu (R443).
   const p = await newUser(browser, alice);
+  await closeEventsChannel(p);
+  await hideSyncClosures(p);
+
+  // « Alpha », à la corbeille, est ouverte ; ailleurs, on la supprime pour de bon.
   await p.goto(`/p/${a.id}`);
   await expect(trashBanner(p)).toBeVisible();
+  await waitSynced(p);
   expect((await api.delete(`/api/v1/pages/${a.id}`)).status()).toBe(204);
   // « Restaurer » est refusé : la page est relue, et elle n'est plus là.
   await trashBanner(p).getByRole("button", { name: "Restaurer" }).click();
@@ -229,6 +240,7 @@ test("refused_restore_reads_the_page_again", async ({ browser }) => {
   // toujours là : « Restaurer » la montre telle qu'elle est, et sa ligne revient.
   await p.goto(`/p/${b.id}`);
   await expect(trashBanner(p)).toBeVisible();
+  await waitSynced(p);
   await expect(treeRow(p, b.id)).toHaveCount(0);
   expect((await api.post(`/api/v1/pages/${b.id}/restore`)).status()).toBe(200);
   await trashBanner(p).getByRole("button", { name: "Restaurer" }).click();

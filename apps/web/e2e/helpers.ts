@@ -576,6 +576,23 @@ export async function closeEventsChannel(p: Page): Promise<() => number> {
 }
 
 /**
+ * Ne dit pas à l'onglet que le serveur ferme ses connexions de synchro, à appeler avant `goto` :
+ * ce qui passe dans chacune passe encore, mais sa fermeture par le serveur n'arrive pas à
+ * l'onglet, qui ne se reconnecte donc pas. Le serveur les ferme quand une page est mise à la
+ * corbeille, restaurée (`subtree_rights_changed`) ou supprimée (`Hub::forget`), et chaque
+ * reconnexion relit la page avant de s'ouvrir (`usePageGate`) : pour un test d'un onglet qui ne
+ * doit pas apprendre par là ce qui change ailleurs. Avec `closeEventsChannel`, qui ferme l'autre
+ * voie, celle de la barre latérale.
+ */
+export async function hideSyncClosures(p: Page): Promise<void> {
+  await p.routeWebSocket(/\/sync\//, (ws) => {
+    const server = ws.connectToServer();
+    // Un gestionnaire de fermeture côté serveur remplace celui de Playwright, qui la transmet.
+    server.onClose(() => {});
+  });
+}
+
+/**
  * `below` est sous `above`, calé sur son bord gauche : le bouton « Réessayer » sous le message
  * de la lecture qu'il refait. Un seul dessin, de la corbeille au menu Partager.
  */
