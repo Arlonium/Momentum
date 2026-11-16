@@ -7,7 +7,7 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::raw::Raw;
 use common::*;
@@ -23,6 +23,12 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{Map, Text, Transact, Update, Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim};
 
+/// La convergence, sans chronomètre (Ruling R440). Le budget « frappe visible chez un autre
+/// < 150 ms » (§5.10) se mesure en release, une mesure à la fois, au p95 de vingt frappes sur
+/// une page de 10 000 blocs : `keystroke_that_cuts_a_version_of_10000_block_page_under_150ms`
+/// (`budgets.rs`, cas « sans version », job `budgets` de la CI). Une frappe unique chronométrée
+/// ici, en debug et pendant les autres tests du binaire, mesurait la charge du poste : 246 ms
+/// sur la CI sous Windows, 158 et 193 ms sur un poste chargé.
 #[tokio::test]
 async fn two_clients_converge() {
     let f = Fixture::new(SyncConfig::default()).await;
@@ -30,17 +36,10 @@ async fn two_clients_converge() {
     let a = f.client().await;
     let b = f.client().await;
 
-    // Chronomètre lancé juste avant l'envoi chez A, jamais avant la connexion.
-    let start = Instant::now();
     a.type_text(&id, "x");
     assert!(
         b.wait_until(WAIT, |b| text(&b.blocks()) == "x").await,
         "B n'a pas reçu la frappe de A"
-    );
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(150),
-        "frappe visible chez B en {elapsed:?} (budget : 150 ms)"
     );
     assert_eq!(text(&f.hub.read_blocks(f.page).await.unwrap()), "x");
 }
