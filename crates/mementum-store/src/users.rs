@@ -10,6 +10,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
+use crate::queue::Lane;
 use crate::{Store, StoreError, now_ms, parse_uuid};
 
 /// Un jour, en millisecondes : une session ne glisse qu'une fois par jour d'usage au plus.
@@ -185,7 +186,7 @@ impl Store {
     /// **Réservée aux tests** : elle n'applique ni le réglage des inscriptions, ni une
     /// invitation. Aucune route ne l'appelle.
     pub async fn create_user(&self, u: NewUser) -> Result<User, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let user = insert_user(&mut tx, u).await?;
         tx.commit().await?;
         Ok(user)
@@ -235,11 +236,11 @@ impl Store {
     /// [`Store::change_password`].
     pub async fn set_password(&self, user_id: Uuid, password_hash: &str) -> Result<(), StoreError> {
         let id = user_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let changed = sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
             .bind(password_hash)
             .bind(&id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected();
         if changed == 0 {
@@ -247,7 +248,7 @@ impl Store {
         }
         sqlx::query("DELETE FROM sessions WHERE user_id = ?")
             .bind(&id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         tx.commit().await?;
         Ok(())
@@ -273,13 +274,13 @@ impl Store {
         expires_at: i64,
     ) -> Result<bool, StoreError> {
         let id = user_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let changed =
             sqlx::query("UPDATE users SET password_hash = ? WHERE id = ? AND password_hash IS ?")
                 .bind(new_hash)
                 .bind(&id)
                 .bind(verified)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected();
         if changed == 0 {
@@ -287,7 +288,7 @@ impl Store {
         }
         sqlx::query("DELETE FROM sessions WHERE user_id = ?")
             .bind(&id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         sqlx::query(
             "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
@@ -296,7 +297,7 @@ impl Store {
         .bind(&id)
         .bind(now_ms())
         .bind(expires_at)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         tx.commit().await?;
         Ok(true)
@@ -327,7 +328,8 @@ impl Store {
         .bind(expires_at)
         .bind(user_id.to_string())
         .bind(verified)
-        .execute(&self.pool)
+        // Pas encore de session : la voie du compte qu'elle ouvre.
+        .execute(&mut *self.write_conn_in(Lane::Account(user_id)).await?)
         .await?
         .rows_affected();
         Ok(created == 1)
@@ -353,7 +355,7 @@ impl Store {
         .bind(user_id.to_string())
         .bind(now_ms())
         .bind(expires_at)
-        .execute(&self.pool)
+        .execute(&mut *self.write_conn().await?)
         .await
         .map_err(StoreError::from_fk)?;
         Ok(())
@@ -384,14 +386,16 @@ impl Store {
         if expires_at <= now {
             return Ok(None);
         }
+        let user = user_from_row(&row)?;
         if expires_at - now < ttl_ms - DAY_MS {
+            // La session lue est à ce compte : la voie de son compte, dans la file d'écriture.
             sqlx::query("UPDATE sessions SET expires_at = ? WHERE token_hash = ?")
                 .bind(now + ttl_ms)
                 .bind(&token_hash[..])
-                .execute(&self.pool)
+                .execute(&mut *self.write_conn_in(Lane::Account(user.id)).await?)
                 .await?;
         }
-        user_from_row(&row).map(Some)
+        Ok(Some(user))
     }
 
     /// La session vaut-elle encore : connue, et non échue (`expires_at > now`) ? Lecture seule :
@@ -417,7 +421,7 @@ impl Store {
     pub async fn delete_session(&self, token_hash: [u8; 32]) -> Result<Option<Uuid>, StoreError> {
         sqlx::query("DELETE FROM sessions WHERE token_hash = ? RETURNING user_id")
             .bind(&token_hash[..])
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *self.write_conn().await?)
             .await?
             .map(|row| parse_uuid(&row.get::<String, _>(0)))
             .transpose()
@@ -427,7 +431,7 @@ impl Store {
     pub async fn purge_sessions(&self, now: i64) -> Result<u64, StoreError> {
         Ok(sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
             .bind(now)
-            .execute(&self.pool)
+            .execute(&mut *self.write_conn().await?)
             .await?
             .rows_affected())
     }

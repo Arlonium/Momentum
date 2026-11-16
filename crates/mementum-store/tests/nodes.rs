@@ -1843,15 +1843,18 @@ async fn reopen_keeps_everything() {
 async fn pragmas_apply_to_every_connection() {
     let f = fresh().await;
     let store = &f.store;
-    // Quatre connexions du pool tenues à la fois, donc distinctes : chacune
-    // doit avoir les pragmas.
+    // Quatre connexions du pool des lectures tenues à la fois, donc distinctes, puis la
+    // connexion qui écrit : chacune doit avoir les pragmas. Les lectures sont en `query_only`
+    // (une écriture y échoue, au lieu de contourner la file d'écriture), la connexion qui écrit
+    // ne l'est pas.
     let all = store.pragmas(4).await.unwrap();
-    assert_eq!(all.len(), 4);
-    for (journal, sync, fk, busy) in all {
+    assert_eq!(all.len(), 5);
+    for (i, (journal, sync, fk, busy, query_only)) in all.into_iter().enumerate() {
         assert_eq!(journal, "wal");
         assert_eq!(sync, 2, "FULL");
         assert_eq!(fk, 1);
         assert_eq!(busy, 5000);
+        assert_eq!(query_only, i64::from(i < 4), "connexion {i}");
     }
 }
 

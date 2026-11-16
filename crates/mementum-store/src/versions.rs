@@ -32,6 +32,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::docs::append;
+use crate::queue::Lane;
 use crate::{Author, Store, StoreError, now_ms, parse_uuid, unreadable};
 
 /// Versions gardées par page : au-delà, les plus anciennes partent.
@@ -128,7 +129,7 @@ impl Store {
         );
         let (id, node) = (Uuid::now_v7(), node_id.to_string());
         // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui échouerait.
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write_in(Lane::Page(node_id)).await?;
         sqlx::query(
             "INSERT INTO doc_versions \
              (id, node_id, seq, covers_seq, state_blob, reason, authors, created_at) \
@@ -142,7 +143,7 @@ impl Store {
         .bind(reason.as_str())
         .bind(&authors)
         .bind(now_ms())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?;
         // Les `before_restore` au-delà des vingt plus récentes d'abord (Ruling R189), puis toutes
@@ -155,7 +156,7 @@ impl Store {
         .bind(&node)
         .bind(VersionReason::BeforeRestore.as_str())
         .bind(MAX_BEFORE_RESTORE as i64)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(
             "DELETE FROM doc_versions WHERE node_id = ?1 AND id NOT IN ( \
@@ -164,7 +165,7 @@ impl Store {
         )
         .bind(&node)
         .bind(MAX_VERSIONS as i64)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         tx.commit().await?;
         Ok(id)
@@ -261,14 +262,14 @@ impl Store {
     ) -> Result<i64, StoreError> {
         let (node, actor) = (node_id.to_string(), actor.map(|a| a.to_string()));
         // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui échouerait.
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let seq = append(&mut *tx, &node, update, actor.as_deref(), now_ms()).await?;
+        let mut tx = self.write_in(Lane::Page(node_id)).await?;
+        let seq = append(&mut **tx, &node, update, actor.as_deref(), now_ms()).await?;
         let bound =
             sqlx::query("UPDATE doc_versions SET covers_seq = ? WHERE id = ? AND node_id = ?")
                 .bind(seq)
                 .bind(version.to_string())
                 .bind(&node)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected();
         if bound == 0 {

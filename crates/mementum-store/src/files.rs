@@ -141,7 +141,7 @@ impl Store {
         new: NewAttachment<'_>,
         now: i64,
     ) -> Result<Attachment, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         sqlx::query(
             "INSERT INTO files (hash, size, mime, created_at) VALUES (?, ?, ?, ?) \
              ON CONFLICT (hash) DO NOTHING",
@@ -150,7 +150,7 @@ impl Store {
         .bind(new.size)
         .bind(new.mime)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         insert_attachment(
             &mut tx,
@@ -194,7 +194,7 @@ impl Store {
         by: Uuid,
         now: i64,
     ) -> Result<Option<Attachment>, StoreError> {
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let Some(source) = read_attachment(&mut tx, from_node, from_id).await? else {
             return Ok(None);
         };
@@ -247,7 +247,7 @@ impl Store {
              RETURNING hash",
         )
         .bind(list)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *self.write_conn().await?)
         .await?
         .into_iter()
         .map(|r| hash_from(r.get(0)))

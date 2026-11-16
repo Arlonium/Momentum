@@ -268,12 +268,12 @@ impl Store {
                 (Some(node_id.to_string()), None, Some(level.as_str()))
             }
         };
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         if let Some(node) = &node {
             sqlx::query("SELECT 1 FROM nodes WHERE id = ? AND space_id = ?")
                 .bind(node)
                 .bind(&space)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?
                 .ok_or(StoreError::NotFound)?;
         }
@@ -301,7 +301,7 @@ impl Store {
         .bind(invitation.created_at)
         .bind(invitation.expires_at)
         .bind(&i.token_hash[..])
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?;
         tx.commit().await?;
@@ -384,7 +384,7 @@ impl Store {
     pub async fn revoke_invitation(&self, id: Uuid) -> Result<(), StoreError> {
         let removed = sqlx::query("DELETE FROM invitations WHERE id = ? AND accepted_at IS NULL")
             .bind(id.to_string())
-            .execute(&self.pool)
+            .execute(&mut *self.write_conn().await?)
             .await?
             .rows_affected();
         if removed == 0 {

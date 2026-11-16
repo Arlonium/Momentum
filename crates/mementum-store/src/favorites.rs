@@ -58,7 +58,7 @@ impl Store {
             .bind(&user)
             .bind(&node)
             .bind(now)
-            .execute(&self.pool)
+            .execute(&mut *self.write_conn().await?)
             .await
             .map_err(StoreError::from_fk)?
             .rows_affected();
@@ -68,7 +68,7 @@ impl Store {
             let removed = sqlx::query("DELETE FROM favorites WHERE user_id = ? AND node_id = ?")
                 .bind(&user)
                 .bind(&node)
-                .execute(&self.pool)
+                .execute(&mut *self.write_conn().await?)
                 .await?
                 .rows_affected();
             if removed > 0 {

@@ -3,6 +3,7 @@
 use sqlx::{Row, SqliteExecutor};
 use uuid::Uuid;
 
+use crate::queue::Lane;
 use crate::{Store, StoreError, now_ms};
 
 /// État relisible d'une page : l'instantané (s'il existe) puis les mises à jour postérieures.
@@ -83,15 +84,19 @@ impl Store {
                 Ok(row.get(0))
             }
             // Une seule instruction est déjà atomique : le chemin de chaque frappe ne paie pas
-            // une transaction explicite.
-            [update] => append(&self.pool, &id, update, actor, now).await,
+            // une transaction explicite. La voie de la page, dans la file d'écriture : celle de
+            // son acteur, qui écrit chaque frappe.
+            [update] => {
+                let mut db = self.write_conn_in(Lane::Page(node_id)).await?;
+                append(&mut *db, &id, update, actor, now).await
+            }
             _ => {
                 // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui
                 // échouerait.
-                let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+                let mut tx = self.write_in(Lane::Page(node_id)).await?;
                 let mut seq = 0;
                 for update in updates {
-                    seq = append(&mut *tx, &id, update, actor, now).await?;
+                    seq = append(&mut **tx, &id, update, actor, now).await?;
                 }
                 tx.commit().await?;
                 Ok(seq)
@@ -134,7 +139,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         let id = node_id.to_string();
         // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui échouerait.
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write_in(Lane::Page(node_id)).await?;
         sqlx::query(
             "INSERT INTO doc_snapshots (node_id, seq, state_blob, created_at) VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT(node_id) DO UPDATE SET \
@@ -145,18 +150,18 @@ impl Store {
         .bind(seq)
         .bind(state)
         .bind(now_ms())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?;
         let kept: i64 = sqlx::query("SELECT seq FROM doc_snapshots WHERE node_id = ?")
             .bind(&id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?
             .get(0);
         sqlx::query("DELETE FROM doc_updates WHERE node_id = ? AND seq <= ?")
             .bind(&id)
             .bind(kept)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         tx.commit().await?;
         Ok(())

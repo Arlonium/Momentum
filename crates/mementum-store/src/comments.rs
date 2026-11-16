@@ -566,13 +566,13 @@ impl Store {
     ) -> Result<Thread, StoreError> {
         let (thread_id, now) = (Uuid::now_v7().to_string(), now_ms());
         let node = node_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         // Rulings R204, R350 et R351 : les plafonds se comptent dans la transaction qui écrit,
         // résolus compris ; ceux de la page avant la part du compte.
         let threads: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM comment_threads WHERE node_id = ?")
                 .bind(&node)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
         if threads >= i64::from(MAX_THREADS_PER_PAGE) {
             return Err(StoreError::CommentLimit(CommentLimit::Threads));
@@ -583,7 +583,7 @@ impl Store {
         )
         .bind(&node)
         .bind(author.to_string())
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         if own >= i64::from(MAX_THREADS_PER_ACCOUNT) {
             return Err(StoreError::CommentLimit(CommentLimit::OwnThreads));
@@ -597,7 +597,7 @@ impl Store {
         .bind(block_id)
         .bind(author.to_string())
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?;
         insert_comment(&mut tx, &thread_id, author, body, now).await?;
@@ -616,11 +616,11 @@ impl Store {
         body: &str,
     ) -> Result<Comment, StoreError> {
         let (thread_id, node) = (thread_id.to_string(), node_id.to_string());
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         thread_opener(&mut tx, &node, &thread_id).await?;
         let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comments WHERE thread_id = ?")
             .bind(&thread_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
         if messages >= i64::from(MAX_MESSAGES_PER_THREAD) {
             return Err(StoreError::CommentLimit(CommentLimit::Messages));
@@ -676,7 +676,7 @@ impl Store {
         body: &str,
     ) -> Result<(Comment, bool), StoreError> {
         let (comment_id, node) = (comment_id.to_string(), node_id.to_string());
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let written_by =
             comment_author(&mut tx, &node, &thread_id.to_string(), &comment_id).await?;
         allowed(Authorship::Of(author), written_by)?;
@@ -685,7 +685,7 @@ impl Store {
         let before: i64 =
             sqlx::query_scalar("SELECT octet_length(body) FROM comments WHERE id = ?")
                 .bind(&comment_id)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
         let grown = byte_len(body) - before;
         if grown > 0 {
@@ -699,7 +699,7 @@ impl Store {
         .bind(now_ms())
         .bind(&comment_id)
         .bind(body)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
         let comment = read_comment(&mut tx, &comment_id).await?;
@@ -718,13 +718,13 @@ impl Store {
         who: Authorship,
     ) -> Result<bool, StoreError> {
         let (thread_id, comment_id) = (thread_id.to_string(), comment_id.to_string());
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let written_by =
             comment_author(&mut tx, &node_id.to_string(), &thread_id, &comment_id).await?;
         allowed(who, written_by)?;
         sqlx::query("DELETE FROM comments WHERE id = ?")
             .bind(&comment_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         let emptied = sqlx::query(
             "DELETE FROM comment_threads WHERE id = ? \
@@ -732,7 +732,7 @@ impl Store {
         )
         .bind(&thread_id)
         .bind(&thread_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
         tx.commit().await?;
@@ -748,7 +748,7 @@ impl Store {
         let deleted = sqlx::query("DELETE FROM comment_threads WHERE id = ? AND node_id = ?")
             .bind(thread_id.to_string())
             .bind(node_id.to_string())
-            .execute(&self.pool)
+            .execute(&mut *self.write_conn().await?)
             .await?
             .rows_affected();
         if deleted == 0 {
@@ -769,7 +769,7 @@ impl Store {
         who: Authorship,
     ) -> Result<(Thread, bool), StoreError> {
         let thread_id = thread_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         let opened_by = thread_opener(&mut tx, &node_id.to_string(), &thread_id).await?;
         allowed(who, opened_by)?;
         let written = if resolved {
@@ -780,7 +780,7 @@ impl Store {
             .bind(now_ms())
             .bind(by.to_string())
             .bind(&thread_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(StoreError::from_fk)?
         } else {
@@ -789,7 +789,7 @@ impl Store {
                  WHERE id = ? AND resolved_at IS NOT NULL",
             )
             .bind(&thread_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
         };
         let changed = written.rows_affected() > 0;
@@ -810,7 +810,7 @@ impl Store {
         emoji: &str,
     ) -> Result<(Comment, bool), StoreError> {
         let comment_id = comment_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         comment_author(
             &mut tx,
             &node_id.to_string(),
@@ -835,13 +835,13 @@ impl Store {
         .bind(&user_id)
         .bind(emoji)
         .bind(&comment_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         if already == 0 {
             let (on_page, own_on_page): (i64, i64) = sqlx::query_as(PAGE_REACTIONS)
                 .bind(&user_id)
                 .bind(node_id.to_string())
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
             let refused = if present == 0 && distinct >= i64::from(MAX_REACTIONS_PER_MESSAGE) {
                 Some(CommentLimit::Reactions)
@@ -866,7 +866,7 @@ impl Store {
         .bind(&user_id)
         .bind(emoji)
         .bind(now_ms())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?
         .rows_affected();
@@ -887,7 +887,7 @@ impl Store {
         emoji: &str,
     ) -> Result<(Comment, bool), StoreError> {
         let comment_id = comment_id.to_string();
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.write().await?;
         comment_author(
             &mut tx,
             &node_id.to_string(),
@@ -901,7 +901,7 @@ impl Store {
         .bind(&comment_id)
         .bind(user.to_string())
         .bind(emoji)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
         let comment = read_comment(&mut tx, &comment_id).await?;

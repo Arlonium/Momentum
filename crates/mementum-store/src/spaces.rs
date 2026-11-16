@@ -8,6 +8,7 @@ use sqlx::{Row, Sqlite, Transaction};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::queue::{Lane, Turn, WriteConn};
 use crate::{Store, StoreError, now_ms, parse_uuid};
 
 /// Combien d'annonces le canal des changements ([`Store::changes`]) garde pour un récepteur qui
@@ -47,9 +48,11 @@ pub(crate) fn space_from_row(r: &SqliteRow) -> Result<Space, StoreError> {
     })
 }
 
-/// Une transaction d'écriture du store (`BEGIN IMMEDIATE`, [`Store::write`]), qui retient les
-/// espaces dont elle a avancé la version ([`bump_rev`], [`bump_lsn`]) et les annonce sur
-/// [`Store::changes`] en se validant ([`WriteTx::commit`]), après la validation.
+/// Une transaction d'écriture du store (`BEGIN IMMEDIATE`, [`Store::write`]), ouverte à son tour
+/// de la file d'écriture (`queue.rs`), qui retient les espaces dont elle a avancé la version
+/// ([`bump_rev`], [`bump_lsn`]) et les annonce sur [`Store::changes`] en se validant
+/// ([`WriteTx::commit`]), après la validation. Elle rend son tour en tombant, validée ou non :
+/// toute écriture du store, annoncée ou non, passe par elle ou par [`Store::write_conn`].
 ///
 /// L'annonce part ainsi d'un seul endroit, par construction (règle de `lsn`, en tête de la
 /// crate) :
@@ -70,10 +73,13 @@ pub(crate) fn space_from_row(r: &SqliteRow) -> Result<Space, StoreError> {
 /// prennent une `&mut Transaction`, `&mut **tx` pour une requête (`&mut ***tx` quand on ne tient
 /// qu'une `&mut WriteTx`).
 pub(crate) struct WriteTx {
+    // `tx` avant `turn` : la transaction tombe (annulée, sa connexion rendue) avant le tour.
     tx: Transaction<'static, Sqlite>,
     /// Les espaces dont la version a avancé, chacun une fois.
     advanced: Vec<Uuid>,
     changes: broadcast::Sender<Uuid>,
+    /// Le tour de la file, gardé jusqu'à la fin de la transaction.
+    turn: Turn,
 }
 
 impl WriteTx {
@@ -86,11 +92,16 @@ impl WriteTx {
     /// `select!`, un `timeout`). sqlx valide alors quand même la transaction, dès que la
     /// commande est partie, et ignore l'annulation qui suit : sans la garde, elle serait validée
     /// sans être annoncée (Ruling R151).
+    ///
+    /// Le tour de la file est rendu une fois la validation faite, ou quand l'appel est abandonné :
+    /// la connexion exécute ses commandes dans l'ordre, et l'écriture suivante passe après cette
+    /// validation (ou l'annulation de sqlx).
     pub(crate) async fn commit(self) -> Result<(), StoreError> {
         let WriteTx {
             tx,
             advanced,
             changes,
+            turn,
         } = self;
         let mut announce = Announce {
             spaces: advanced,
@@ -102,6 +113,7 @@ impl WriteTx {
         }
         // Après la validation : un lecteur qui relit la version à l'annonce voit la nouvelle.
         drop(announce);
+        drop(turn);
         Ok(())
     }
 
@@ -207,14 +219,34 @@ pub(crate) async fn insert_space(
 
 impl Store {
     /// Ouvre une transaction d'écriture (`BEGIN IMMEDIATE` : le verrou d'écriture est pris
-    /// d'emblée, sans montée de verrou qui échouerait), qui annoncera en se validant les espaces
-    /// dont elle aura avancé la version ([`WriteTx`]).
+    /// d'emblée, sans montée de verrou qui échouerait), au tour de la tâche dans la file
+    /// (`Lane::caller` : le compte qu'elle a nommé, sinon la voie commune), qui annoncera en se
+    /// validant les espaces dont elle aura avancé la version ([`WriteTx`]).
     pub(crate) async fn write(&self) -> Result<WriteTx, StoreError> {
+        self.write_in(Lane::caller()).await
+    }
+
+    /// [`Store::write`], au tour de la voie `lane`.
+    pub(crate) async fn write_in(&self, lane: Lane) -> Result<WriteTx, StoreError> {
+        let (tx, turn) = self.writer.begin(lane).await?;
         Ok(WriteTx {
-            tx: self.pool.begin_with("BEGIN IMMEDIATE").await?,
+            tx,
             advanced: Vec::new(),
             changes: self.changes.clone(),
+            turn,
         })
+    }
+
+    /// La connexion qui écrit, au tour de la tâche dans la file, pour une seule instruction (sa
+    /// propre transaction, sans `BEGIN`). Rien n'y est annoncé : ce qui avance une version passe
+    /// par [`Store::write`].
+    pub(crate) async fn write_conn(&self) -> Result<WriteConn, StoreError> {
+        self.writer.connection(Lane::caller()).await
+    }
+
+    /// [`Store::write_conn`], au tour de la voie `lane`.
+    pub(crate) async fn write_conn_in(&self, lane: Lane) -> Result<WriteConn, StoreError> {
+        self.writer.connection(lane).await
     }
 
     /// Crée un espace ; le nom est enregistré tel quel. `owner`, s'il est donné, en devient

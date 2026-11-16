@@ -3,7 +3,12 @@
 //! instantanés et versions.
 //!
 //! - [`Store`] ouvre la base (WAL, `synchronous=FULL`, clés étrangères, délai d'attente de 5 s,
-//!   appliqués à **chaque** connexion du pool) et lance les migrations.
+//!   appliqués à **chaque** connexion) et lance les migrations. Elle a deux pools : celui des
+//!   lectures, dont chaque connexion est en `query_only`, et celui de la seule connexion qui
+//!   écrit.
+//! - `queue.rs` : la file d'écriture ; une écriture n'a la connexion qui écrit qu'à son tour,
+//!   donné voie par voie (l'acteur d'une page, un compte nommé par le serveur, une voie
+//!   commune).
 //! - `backup.rs` : la copie de la base, à côté d'elle, avant toute migration en attente.
 //! - `users.rs` : les comptes et les sessions (le store ne voit que des hachages).
 //! - `spaces.rs` : les espaces, leur révision et leur version ; la transaction d'écriture qui
@@ -59,6 +64,7 @@ mod invitations;
 mod members;
 mod nodes;
 mod position;
+mod queue;
 mod signup;
 mod spaces;
 mod users;
@@ -91,6 +97,7 @@ pub use invitations::{Invitation, InvitationGrant, NewInvitation};
 pub use members::{Expected, Member};
 pub use nodes::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, Updated};
 pub use position::position_between;
+pub use queue::{attribute_writes_to, writer, writes_by};
 pub use signup::SignedUp;
 pub use spaces::Space;
 pub use users::{NewSession, NewUser, User};
@@ -218,10 +225,14 @@ impl Default for StoreOptions {
     }
 }
 
-/// La base de Mementum. Se clone à bas coût (le pool et le canal des changements sont partagés).
+/// La base de Mementum. Se clone à bas coût (les pools, la file d'écriture et le canal des
+/// changements sont partagés).
 #[derive(Clone)]
 pub struct Store {
+    /// Le pool des lectures : chaque connexion y est en `query_only`, une écriture y échoue.
     pool: SqlitePool,
+    /// La seule connexion qui écrit, et la file de ceux qui attendent leur tour (`queue.rs`).
+    writer: Arc<queue::Writer>,
     backup: Option<Arc<Backup>>,
     /// Les espaces dont la version vient d'avancer ([`Store::changes`]).
     changes: tokio::sync::broadcast::Sender<Uuid>,
@@ -253,20 +264,38 @@ impl Store {
             .synchronous(SqliteSynchronous::Full)
             .foreign_keys(true)
             .busy_timeout(settings.busy_timeout);
-        let pool = slow_disk(SqlitePoolOptions::new(), settings.write_delay)
-            .connect_with(options)
-            .await?;
-        match migrate(&pool, path).await {
-            Ok(backup) => Ok(Store {
-                pool,
-                backup: backup.map(Arc::new),
-                changes: tokio::sync::broadcast::channel(spaces::CHANGES_CAPACITY).0,
-            }),
+        // La connexion qui écrit d'abord : la copie et les migrations passent par elle, et la base
+        // est en WAL avant qu'une connexion en lecture seule ne s'ouvre.
+        let writes = slow_disk(
+            SqlitePoolOptions::new().max_connections(1),
+            settings.write_delay,
+        )
+        .connect_with(options.clone())
+        .await?;
+        let backup = match migrate(&writes, path).await {
+            Ok(backup) => backup,
             Err(e) => {
-                pool.close().await;
-                Err(e)
+                writes.close().await;
+                return Err(e);
             }
-        }
+        };
+        // `query_only` en dernier, après les autres pragmas de sqlx (`journal_mode` compris).
+        let reads = match SqlitePoolOptions::new()
+            .connect_with(options.pragma("query_only", "ON"))
+            .await
+        {
+            Ok(reads) => reads,
+            Err(e) => {
+                writes.close().await;
+                return Err(e.into());
+            }
+        };
+        Ok(Store {
+            pool: reads,
+            writer: Arc::new(queue::Writer::new(writes)),
+            backup: backup.map(Arc::new),
+            changes: tokio::sync::broadcast::channel(spaces::CHANGES_CAPACITY).0,
+        })
     }
 
     /// La copie qui porte l'état de la base juste avant les migrations de cette ouverture : celle
@@ -277,47 +306,81 @@ impl Store {
         self.backup.as_deref()
     }
 
-    /// Ferme le pool (attend la fin des requêtes en cours).
+    /// Ferme les deux pools (attend la fin des requêtes en cours).
     pub async fn close(&self) {
         self.pool.close().await;
+        self.writer.close().await;
     }
 
-    /// Valeurs des pragmas de `connections` connexions du pool, tenues toutes
-    /// à la fois (donc distinctes) : `(journal_mode, synchronous,
-    /// foreign_keys, busy_timeout)` pour chacune. Sert aux tests.
+    /// Valeurs des pragmas de `connections` connexions du pool des lectures, tenues toutes à la
+    /// fois (donc distinctes), puis de la connexion qui écrit, tenue avec un tour de la file :
+    /// `(journal_mode, synchronous, foreign_keys, busy_timeout, query_only)` pour chacune. Sert
+    /// aux tests.
     #[doc(hidden)]
     pub async fn pragmas(
         &self,
         connections: usize,
-    ) -> Result<Vec<(String, i64, i64, i64)>, StoreError> {
-        use sqlx::Row;
+    ) -> Result<Vec<(String, i64, i64, i64, i64)>, StoreError> {
         let mut held = Vec::with_capacity(connections);
         for _ in 0..connections {
             held.push(self.pool.acquire().await?);
         }
-        let mut all = Vec::with_capacity(connections);
+        let mut all = Vec::with_capacity(connections + 1);
         for conn in &mut held {
-            let mut out = (String::new(), 0, 0, 0);
-            out.0 = sqlx::query("PRAGMA journal_mode")
-                .fetch_one(&mut **conn)
-                .await?
-                .get(0);
-            out.1 = sqlx::query("PRAGMA synchronous")
-                .fetch_one(&mut **conn)
-                .await?
-                .get(0);
-            out.2 = sqlx::query("PRAGMA foreign_keys")
-                .fetch_one(&mut **conn)
-                .await?
-                .get(0);
-            out.3 = sqlx::query("PRAGMA busy_timeout")
-                .fetch_one(&mut **conn)
-                .await?
-                .get(0);
-            all.push(out);
+            all.push(pragmas_of(conn).await?);
         }
+        drop(held);
+        let mut writes = self.writer.held_connection().await?;
+        all.push(pragmas_of(&mut writes).await?);
         Ok(all)
     }
+
+    /// Les écritures qui attendent leur tour dans la file. Sert aux tests.
+    #[doc(hidden)]
+    pub fn queued_writes(&self) -> usize {
+        self.writer.queued()
+    }
+
+    /// Prend un tour de la file, dans la voie de la tâche, et le garde tant que la garde vit :
+    /// aucune autre écriture du store ne passe pendant ce temps. Sert aux tests, pour mettre
+    /// des écritures en file dans un ordre connu.
+    #[doc(hidden)]
+    pub async fn hold_writes(&self) -> WritesHeld {
+        WritesHeld(self.writer.turn(queue::Lane::caller()).await)
+    }
+}
+
+/// Un tour de la file tenu par un test ([`Store::hold_writes`]) : le lâcher le rend.
+#[doc(hidden)]
+pub struct WritesHeld(#[allow(dead_code)] queue::Turn);
+
+/// `(journal_mode, synchronous, foreign_keys, busy_timeout, query_only)` de la connexion.
+async fn pragmas_of(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<(String, i64, i64, i64, i64), StoreError> {
+    use sqlx::Row;
+    let mut out = (String::new(), 0, 0, 0, 0);
+    out.0 = sqlx::query("PRAGMA journal_mode")
+        .fetch_one(&mut *conn)
+        .await?
+        .get(0);
+    out.1 = sqlx::query("PRAGMA synchronous")
+        .fetch_one(&mut *conn)
+        .await?
+        .get(0);
+    out.2 = sqlx::query("PRAGMA foreign_keys")
+        .fetch_one(&mut *conn)
+        .await?
+        .get(0);
+    out.3 = sqlx::query("PRAGMA busy_timeout")
+        .fetch_one(&mut *conn)
+        .await?
+        .get(0);
+    out.4 = sqlx::query("PRAGMA query_only")
+        .fetch_one(&mut *conn)
+        .await?
+        .get(0);
+    Ok(out)
 }
 
 /// Pose sur chaque connexion du pool le disque lent de [`StoreOptions::write_delay`] : un crochet
