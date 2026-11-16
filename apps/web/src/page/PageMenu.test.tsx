@@ -8,6 +8,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { until } from "../test/hooks";
 import { page } from "../test/pages";
+import { loadHistory } from "../history/loadHistory";
 import { PageMenu } from "./PageMenu";
 
 const probe = vi.hoisted(() => ({ loaded: false, afterLogin: undefined as unknown }));
@@ -42,6 +43,11 @@ vi.mock("../history/HistoryDialog", () => {
     ),
   };
 });
+
+// Le chargement du code de la fenêtre, épié : il charge le module simulé ci-dessus.
+vi.mock("../history/loadHistory", () => ({
+  loadHistory: vi.fn(() => import("../history/HistoryDialog")),
+}));
 
 let host: HTMLDivElement;
 let root: Root;
@@ -398,4 +404,19 @@ test("an_open_menu_that_gains_an_entry_stays_open", async () => {
   // Elle en perd une ensuite : il se ferme, comme avant.
   await renderWithFavorite("read", favorite);
   expect(menu()).toBeNull();
+});
+
+test("a_reader_opening_the_menu_does_not_load_the_history", async () => {
+  // Le menu d'un lecteur n'a que le favori : le code de la fenêtre « Historique » n'est pas
+  // demandé à son ouverture (R135 : rien de plus à charger pour lui).
+  vi.mocked(loadHistory).mockClear();
+  await renderWithFavorite("read", { favorite: false, onFavorite: () => {} });
+  await click(menuButton());
+  expect(entries()).toEqual(["Ajouter aux favoris"]);
+  expect(loadHistory).not.toHaveBeenCalled();
+  // Témoin : à partir de « Peut modifier », il l'est dès l'ouverture du menu.
+  await click(menuButton());
+  await renderWithFavorite("edit", { favorite: false, onFavorite: () => {} });
+  await click(menuButton());
+  expect(loadHistory).toHaveBeenCalledTimes(1);
 });

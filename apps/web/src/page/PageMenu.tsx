@@ -36,11 +36,7 @@ import type { HistorySession } from "../history/HistoryDialog";
 import { HistoryIcon, MoreIcon, StarIcon, StarOffIcon } from "../icons";
 import { canEdit } from "../share/levels";
 import { RowMenu, type MenuAction } from "../sidebar/RowMenu";
-
-/** Charge le module de la fenêtre « Historique » (le navigateur ne le charge qu'une fois). */
-function loadHistory() {
-  return import("../history/HistoryDialog");
-}
+import { loadHistory } from "../history/loadHistory";
 
 const HistoryDialog = lazy(async () => ({ default: (await loadHistory()).HistoryDialog }));
 
