@@ -44,6 +44,7 @@ import {
   PARENTED,
   peer,
   repeatedIds,
+  settle,
   shiftTab,
   shown,
   stored,
@@ -978,17 +979,28 @@ describe.each(ORDERS)("l'état final de chaque scénario, rouvert ($label)", (or
 // une écriture à lui, que les éditeurs n'ont jamais faite. L'état final de quelques scènes, tel que
 // l'acteur l'écrit au journal, est gardé par `carried_final_states_are_kept_for_the_client`
 // (`crates/mementum-sync/tests/moves.rs`, `carried.bin`). Deux éditeurs neufs le rouvrent : ils
-// montrent la même page que le document, et n'écrivent rien en l'ouvrant.
+// montrent la même page que le document, et n'écrivent rien en l'ouvrant. Puis l'un tape à la fin
+// du bloc reporté : y-prosemirror n'écrit que la différence entre l'éditeur et le document, et une
+// forme que l'éditeur ne bâtit pas (deux textes dans un paragraphe…) serait récrite à la première
+// frappe, le texte du serveur supprimé (relecture de la Task 13b, N1).
 const REOPENED = [
-  { key: "s1", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »" },
-  { key: "s3", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X » [x1 « Enfant X1 de Tom »]" },
-  { key: "s9", page: "w « Bloc W » [x « Bloc X de Tom »] | y « Bloc Y »" },
-  { key: "bold", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »" },
-  { key: "child-added", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X » [x1 « Enfant de Tom »]" },
+  { key: "s1", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »", typed: "x" },
+  {
+    key: "s3",
+    page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X » [x1 « Enfant X1 de Tom »]",
+    typed: "x1",
+  },
+  { key: "s9", page: "w « Bloc W » [x « Bloc X de Tom »] | y « Bloc Y »", typed: "x" },
+  { key: "bold", page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »", typed: "x" },
+  {
+    key: "child-added",
+    page: "y « Bloc Y » | z « Bloc Z » | x « Bloc X » [x1 « Enfant de Tom »]",
+    typed: "x1",
+  },
 ] as const;
 
 describe.each(ORDERS)("l'état reporté par le serveur, rouvert ($label)", (order) => {
-  test.each(REOPENED)("$key : deux éditeurs le rouvrent sans rien écrire", async ({ key, page }) => {
+  test.each(REOPENED)("$key : deux éditeurs le rouvrent sans rien écrire", async ({ key, page, typed }) => {
     const fs = await nodeModule<Fs>("node:fs/promises");
     const path = await nodeModule<Path>("node:path");
     const file = path.join(await fixturesDir(), order.dir, key, "carried.bin");
@@ -1003,5 +1015,20 @@ describe.each(ORDERS)("l'état reporté par le serveur, rouvert ($label)", (orde
     expect(xml(second.doc)).toBe(xml(doc));
     expect(line(shown(first))).toBe(page);
     expect(line(shown(second))).toBe(page);
+
+    // Une frappe après la réouverture : une seule insertion, rien de supprimé.
+    typeAtEnd(first, typed, "!");
+    await settle();
+    const deleted: string[] = [];
+    let inserted = 0;
+    for (const write of first.writes) {
+      const decoded = Y.decodeUpdate(write);
+      inserted += decoded.structs.length;
+      decoded.ds.clients.forEach((ranges, client) => {
+        for (const r of ranges) deleted.push(`${client}:${r.clock}+${r.len}`);
+      });
+    }
+    expect(deleted, `la frappe ne supprime rien (${line(shown(first))})`).toEqual([]);
+    expect(inserted, "une seule insertion").toBe(1);
   });
 });
