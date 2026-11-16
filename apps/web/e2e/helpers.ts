@@ -576,13 +576,17 @@ export async function closeEventsChannel(p: Page): Promise<() => number> {
 }
 
 /**
- * Ne dit pas à l'onglet que le serveur ferme ses connexions de synchro, à appeler avant `goto` :
- * ce qui passe dans chacune passe encore, mais sa fermeture par le serveur n'arrive pas à
- * l'onglet, qui ne se reconnecte donc pas. Le serveur les ferme quand une page est mise à la
- * corbeille, restaurée (`subtree_rights_changed`) ou supprimée (`Hub::forget`), et chaque
- * reconnexion relit la page avant de s'ouvrir (`usePageGate`) : pour un test d'un onglet qui ne
- * doit pas apprendre par là ce qui change ailleurs. Avec `closeEventsChannel`, qui ferme l'autre
- * voie, celle de la barre latérale.
+ * Cache à l'onglet que le serveur ferme ses connexions de synchro, à appeler avant `goto` : ce
+ * qui passe dans chacune passe encore, mais **toute** fermeture venue du serveur (page mise à la
+ * corbeille, restaurée ou supprimée, accès changé, `kick`, `kick_user`, message refusé) n'arrive
+ * pas à l'onglet, qui se croit toujours connecté. Pas plus de 30 s : y-websocket ferme de
+ * lui-même une connexion qui n'a rien reçu depuis 30 s, puis se reconnecte par la même route, et
+ * la reconnexion relit la page avant de s'ouvrir (`usePageGate`). Ce que l'onglet écrit entre-
+ * temps n'arrive au serveur qu'après cette reconnexion, une trentaine de secondes plus tard.
+ * Pour un test d'un onglet qui ne doit pas apprendre par là ce qui change ailleurs, et qui
+ * n'écrit rien ; jamais pour juger ce que l'onglet montre après une fermeture par le serveur
+ * (il passerait à tort pendant ces 30 s). Avec `closeEventsChannel`, qui ferme l'autre voie,
+ * celle de la barre latérale (R443).
  */
 export async function hideSyncClosures(p: Page): Promise<void> {
   await p.routeWebSocket(/\/sync\//, (ws) => {
