@@ -18,65 +18,95 @@
 // la page est ouverte. Elle est celle de la page, pas de l'éditeur (`pageScope`, comme la fenêtre
 // d'un bloc, R471) : la page passée en lecture seule pendant qu'on cherche, elle reste, avec le focus
 // et la requête, le dit, et ne pose rien ; le droit revenu, le choix pose le lien.
-import { insertOrUpdateBlockForSlashMenu } from "@blocknote/core";
-import { createReactBlockSpec } from "@blocknote/react";
+//
+// La vue du lien est dessinée sans React (`richView.ts`, R627) ; le sélecteur, ouvert à la demande hors
+// du document, l'est par React.
+import { createBlockSpec, insertOrUpdateBlockForSlashMenu } from "@blocknote/core";
 import { useCallback, useState, useSyncExternalStore } from "react";
 import { blockElement, shorten } from "../../comments/dom";
-import { PageIcon } from "../../icons";
 import { pagePath } from "../../router";
-import { isPageId, usePageTitle, type FoundPage } from "../../space/pageDirectory";
+import { isPageId, pageTitle, watchPages, type FoundPage } from "../../space/pageDirectory";
 import type { MementumEditor } from "../debug";
 import { BlockPopover } from "./BlockPopover";
 import { focusEditor } from "./BlockWindowHost";
 import { pageScope } from "./blockWindows";
 import { PagePicker } from "./PagePicker";
 import { textProp } from "./props";
+import { element, followProps, iconElement, PAGE_ICON, stopEventsOutside } from "./richView";
 import { useEditable } from "./useEditable";
 
 /** Un titre de page a 500 caractères au plus ; un titre copié écrit par un autre chemin, peut-être plus. */
 const MAX_TITLE_SHOWN = 500;
 
-function PageLinkView({ block }: { block: { props: Readonly<Record<string, unknown>> } }) {
-  const pageId = textProp(block.props, "pageId");
-  const linked = isPageId(pageId);
-  // Le titre à jour, seulement pour une page de l'arbre ; jamais lu pour ce qui n'est pas un id.
-  const current = usePageTitle(linked ? pageId : "");
-  // Ce qui est lu n'est pris que pour un id de page : une page publiée sous un id vide ne prête pas son titre.
-  const title = shorten(
-    (linked ? current : null) ?? (textProp(block.props, "title") || "Sans titre"),
-    MAX_TITLE_SHOWN,
-  );
-  const text = (
-    <span className="mm-page-link-title" dir="auto">
-      {title}
-    </span>
-  );
-  return (
-    <div className="mm-frame mm-page-link" contentEditable={false}>
-      <span className="mm-frame-icon" aria-hidden="true">
-        <PageIcon />
-      </span>
-      <span className="mm-frame-body">
-        {linked ? (
-          <a className="mm-page-link-anchor" href={pagePath(pageId)}>
-            {text}
-          </a>
-        ) : (
-          text
-        )}
-      </span>
-    </div>
-  );
+const PAGE_LINK_PROPS = { pageId: { default: "" }, title: { default: "" } } as const;
+
+/**
+ * La vue d'un lien de page : son icône et le titre de la page, en lien si `pageId` est un id de page.
+ * `live` : la vue est celle de l'éditeur (ProseMirror la détruira), pas un rendu de copie ou d'export ;
+ * elle suit alors le titre de la page dans l'arbre (`watchPages`).
+ */
+function pageLinkView(block: { props: Readonly<Record<string, unknown>> }, live: boolean) {
+  let pageId = textProp(block.props, "pageId");
+  let copied = textProp(block.props, "title");
+  const dom = element("div", "mm-frame mm-page-link");
+  dom.contentEditable = "false";
+  const icon = element("span", "mm-frame-icon");
+  icon.setAttribute("aria-hidden", "true");
+  icon.append(iconElement(15, PAGE_ICON));
+  const body = element("span", "mm-frame-body");
+  const text = element("span", "mm-page-link-title");
+  text.dir = "auto";
+  let anchor: HTMLAnchorElement | null = null;
+  dom.append(icon, body);
+
+  /**
+   * Le lien tel qu'il doit être, changé en place : le titre à jour s'il est connu, sinon le titre
+   * copié ; le lien gardé tant que `pageId` est un id de page (celui qui a le focus le garde).
+   */
+  const draw = () => {
+    const linked = isPageId(pageId);
+    // Le titre à jour, seulement pour une page de l'arbre ; jamais lu pour ce qui n'est pas un id : une
+    // page publiée sous un id vide ne prête pas son titre (R615).
+    const current = linked ? pageTitle(pageId) : null;
+    const title = shorten(current ?? (copied || "Sans titre"), MAX_TITLE_SHOWN);
+    if (text.textContent !== title) text.textContent = title;
+    if (linked) {
+      if (anchor === null) {
+        anchor = element("a", "mm-page-link-anchor");
+        anchor.append(text);
+        body.replaceChildren(anchor);
+      }
+      const href = pagePath(pageId);
+      if (anchor.getAttribute("href") !== href) anchor.setAttribute("href", href);
+    } else if (anchor !== null || text.parentNode !== body) {
+      anchor = null;
+      body.replaceChildren(text);
+    }
+  };
+  draw();
+  if (!live) return { dom };
+  const stop = watchPages(draw);
+  return {
+    dom,
+    update(node: { type: { name: string }; attrs: Record<string, unknown> }) {
+      if (node.type.name !== "pageLink") return false;
+      pageId = textProp(node.attrs, "pageId");
+      copied = textProp(node.attrs, "title");
+      draw();
+      followProps(dom, node.attrs, PAGE_LINK_PROPS);
+      return true;
+    },
+    stopEvent: stopEventsOutside(dom),
+    destroy: stop,
+  };
 }
 
-export const PageLink = createReactBlockSpec(
+export const PageLink = createBlockSpec(
+  { type: "pageLink", propSchema: PAGE_LINK_PROPS, content: "none" },
   {
-    type: "pageLink",
-    propSchema: { pageId: { default: "" }, title: { default: "" } },
-    content: "none",
-  },
-  {
-    render: ({ block }) => <PageLinkView block={block} />,
+    render(block) {
+      return pageLinkView(block, "renderType" in this && this.renderType === "nodeView");
+    },
   },
 );
 

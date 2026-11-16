@@ -7,6 +7,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, test, vi } from "vitest";
 import { BookmarkIcon, InfoIcon, PageIcon } from "../../icons";
+import { watchersForTests } from "../../space/pageDirectory";
 import { blockOf, flush, mountEditor, type Mounted } from "../../test/richEditor";
 import { BOOKMARK_ICON, iconElement, INFO_ICON, PAGE_ICON, stopEventsOutside } from "./richView";
 
@@ -84,21 +85,26 @@ test("the_caret_stays_in_a_callout_drawn_anew_under_it", async () => {
   expect(m.editor.prosemirrorState.selection.$anchor.parentOffset).toBe("Attention".length);
 });
 
+const PLAN = "0190f5a0-0000-7000-8000-0000000000a1";
+const NOTES = "0190f5a0-0000-7000-8000-0000000000a2";
+
 /** Le bouton du bloc `id` qui ouvre sa fenêtre. */
 const anchorOf = (m: Mounted, id: string) => blockOf(m, id).querySelector<HTMLButtonElement>("[data-block-window-anchor]")!;
 
-test("a_rich_block_changed_elsewhere_keeps_the_focus_on_its_button", async () => {
+test("a_rich_block_changed_elsewhere_keeps_the_focus_on_its_button_or_link", async () => {
   const m = await mountEditor({
     blocks: [
       { id: "c", type: "callout", props: { icon: "⚠️", color: "blue" }, content: "Attention" },
       { id: "b", type: "bookmark", props: { url: "https://exemple.fr/" } },
+      { id: "l", type: "pageLink", props: { pageId: PLAN, title: "Plan" } },
     ],
   });
   for (const [id, change, shown] of [
     ["c", { icon: "📌", color: "red" }, "📌"],
     ["b", { url: "https://ailleurs.example/page" }, "https://ailleurs.example/page"],
+    ["l", { pageId: NOTES, title: "Notes" }, "Notes"],
   ] as const) {
-    const button = anchorOf(m, id);
+    const button = id === "l" ? blockOf(m, id).querySelector<HTMLElement>("a")! : anchorOf(m, id);
     button.focus();
     expect(document.activeElement).toBe(button);
     // Un autre change la prop : la vue suit, et le bouton qui avait le focus le garde.
@@ -106,8 +112,9 @@ test("a_rich_block_changed_elsewhere_keeps_the_focus_on_its_button", async () =>
     await flush();
     expect(blockOf(m, id).textContent, id).toContain(shown);
     expect(document.activeElement, id).toBe(button);
-    expect(anchorOf(m, id), id).toBe(button);
+    expect(id === "l" ? blockOf(m, id).querySelector("a") : anchorOf(m, id), id).toBe(button);
   }
+  expect(blockOf(m, "l").querySelector("a")!.getAttribute("href")).toBe(`/p/${NOTES}`);
   const callout = blockOf(m, "c");
   expect(callout.querySelector(".mm-callout")!.classList.contains("mm-callout-red")).toBe(true);
   expect(callout.querySelector(".mm-callout")!.classList.contains("mm-callout-blue")).toBe(false);
@@ -189,25 +196,30 @@ const editableListeners = (m: Mounted) => m.editor.getExtension(ReadOnlyExtensio
 test("a_rich_view_listens_only_while_it_is_shown", async () => {
   const m = await mountEditor({ blocks: [{ id: "p", type: "paragraph", content: "Seul" }] });
   const before = editableListeners(m);
+  const pagesBefore = watchersForTests();
   m.editor.insertBlocks(
     [
       { id: "c1", type: "callout", content: "Un" },
       { id: "c2", type: "callout", content: "Deux" },
       { id: "b1", type: "bookmark", props: { url: "https://exemple.fr/" } },
+      { id: "l1", type: "pageLink", props: { pageId: PLAN, title: "Plan" } },
     ],
     "p",
     "after",
   );
   await flush();
   expect(editableListeners(m)).toBe(before + 3);
+  expect(watchersForTests()).toBe(pagesBefore + 1);
   // Un rendu hors de l'éditeur (copie, export) n'écoute rien.
   await m.editor.blocksToFullHTML(m.editor.document);
   m.editor.blocksToHTMLLossy(m.editor.document);
   expect(editableListeners(m)).toBe(before + 3);
+  expect(watchersForTests()).toBe(pagesBefore + 1);
   // Les blocs partis, leurs vues n'écoutent plus.
-  m.editor.removeBlocks(["c1", "c2", "b1"]);
+  m.editor.removeBlocks(["c1", "c2", "b1", "l1"]);
   await flush();
   expect(editableListeners(m)).toBe(before);
+  expect(watchersForTests()).toBe(pagesBefore);
 });
 
 test("the_icons_drawn_without_react_are_those_of_the_interface", async () => {

@@ -90,6 +90,19 @@ export function usePageTitle(id: string): string | null {
   return useSyncExternalStore(subscribe, () => pageTitle(id));
 }
 
+/**
+ * `listener` à chaque arbre publié qui change les pages, jusqu'à l'appel de la fonction rendue : pour
+ * la vue d'un lien de page dessinée sans React (R627), qui relit alors son titre (`pageTitle`).
+ */
+export function watchPages(listener: () => void): () => void {
+  return subscribe(listener);
+}
+
+/** Combien d'abonnés suivent les pages (les tests : une vue partie ne suit plus rien). */
+export function watchersForTests(): number {
+  return listeners.size;
+}
+
 /** Les pages publiées, suivies : leur liste change quand l'arbre change (pour un sélecteur). */
 export function usePublishedPages(): readonly FoundPage[] {
   return useSyncExternalStore(subscribe, () => directory.pages);
