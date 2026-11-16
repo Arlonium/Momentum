@@ -39,9 +39,20 @@ const IDLE_RSS: u64 = 150 * 1_000_000;
 /// Les mesures se font l'une après l'autre.
 static SERIAL: Mutex<()> = Mutex::new(());
 
+/// Une mesure du démarrage faite en debug ne dit rien du binaire que les gens lancent.
+fn release_only() {
+    // Un `assert!` sur `cfg!` est refusé par clippy (`assertions_on_constants`).
+    if cfg!(debug_assertions) {
+        panic!(
+            "mesure sans valeur en debug : lancer `cargo test --release -p mementum-cli -- --ignored`"
+        );
+    }
+}
+
 #[test]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 fn cold_start_under_1s() {
+    release_only();
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let mut times = Vec::new();
     for _ in 0..LAUNCHES {
