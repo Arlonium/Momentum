@@ -133,7 +133,7 @@ export function SectionList({
   }, []);
   const closeMenu = useCallback(() => setMenu(null), []);
   /** Le menu ouvert, et ses entrées à son ouverture : il se ferme quand l'une d'elles part. */
-  const [opened, setOpened] = useState<{ menu: OpenMenu; entries: string } | null>(null);
+  const [opened, setOpened] = useState<{ menu: OpenMenu; entries: string[] } | null>(null);
   /** Le bouton du menu qui vient de se fermer de lui-même : le focus lui revient. */
   const [dropped, setDropped] = useState<HTMLElement | null>(null);
   useEffect(() => {
@@ -343,12 +343,15 @@ export function SectionList({
   }
   // Une entrée partie, menu ouvert (le niveau de sa page est tombé) : le menu se ferme, plutôt que
   // de laisser le focus tomber sur `body` avec l'entrée qui l'avait.
-  const entries = actions.map((action) => action.key).join(" ");
+  // Une entrée qui arrive (le niveau monte) s'ajoute au menu ouvert, qui reste.
+  const entries = actions.map((action) => action.key ?? action.label);
   if (menu !== null && opened?.menu !== menu) setOpened({ menu, entries });
-  else if (menu !== null && opened !== null && opened.entries !== entries) {
+  else if (menu !== null && opened !== null && opened.entries.some((key) => !entries.includes(key))) {
     setMenu(null);
     setOpened(null);
     setDropped(menu.anchor);
+  } else if (menu !== null && opened !== null && opened.entries.join(" ") !== entries.join(" ")) {
+    setOpened({ menu, entries });
   }
 
   return (

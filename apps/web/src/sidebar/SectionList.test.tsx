@@ -146,3 +146,16 @@ test("an_open_row_menu_that_loses_an_entry_closes_and_gives_the_focus_to_its_but
   await show([page("a", { level: "read" })], { favorites: ["a"], onFavorite });
   expect(entries()).toEqual(["Retirer des favoris"]);
 });
+
+test("an_open_row_menu_that_gains_an_entry_stays_open", async () => {
+  // Le niveau monte pendant que le menu d'un lecteur est ouvert : il gagne ses déplacements et la
+  // corbeille, et reste ouvert ; il se ferme quand il en perd une.
+  const onFavorite = () => {};
+  await show([page("a", { level: "read" })], { favorites: [], onFavorite });
+  await click(moreOf("A")!);
+  expect(entries()).toEqual(["Ajouter aux favoris"]);
+  await show([page("a", { level: "edit" })], { favorites: [], onFavorite });
+  expect(entries()).toEqual([...MOVES, "Ajouter aux favoris", "Mettre à la corbeille"]);
+  await show([page("a", { level: "read" })], { favorites: [], onFavorite });
+  expect(menu()).toBeNull();
+});

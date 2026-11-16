@@ -385,3 +385,17 @@ test("an_open_menu_that_loses_an_entry_closes_and_gives_the_focus_to_its_button"
   await renderWithFavorite("edit", favorite, { focusFallback: () => title.focus() });
   expect(menu()).toBeNull();
 });
+
+test("an_open_menu_that_gains_an_entry_stays_open", async () => {
+  // R417 ferme le menu qui perd une entrée, pas celui qui en gagne une : le niveau monte (« Peut
+  // modifier » donné ailleurs), ou la page sort de la corbeille, menu ouvert.
+  const favorite = { favorite: false, onFavorite: () => {} };
+  await renderWithFavorite("read", favorite);
+  await click(menuButton());
+  expect(entries()).toEqual(["Ajouter aux favoris"]);
+  await renderWithFavorite("edit", favorite);
+  expect(entries()).toEqual(["Ajouter aux favoris", "Historique"]);
+  // Elle en perd une ensuite : il se ferme, comme avant.
+  await renderWithFavorite("read", favorite);
+  expect(menu()).toBeNull();
+});

@@ -129,12 +129,17 @@ export function PageMenu({
       },
     });
   }
-  /** Les entrées proposées, par leur clé : le menu ouvert se ferme quand l'une d'elles part. */
-  const entries = actions.map((action) => action.key).join(" ");
+  /**
+   * Les entrées proposées, par leur clé : le menu ouvert se ferme quand l'une de celles qu'il
+   * montrait part ; une entrée qui arrive (le niveau monte, la page sort de la corbeille) s'ajoute.
+   */
+  const entries = actions.map((action) => action.key ?? action.label);
   const [opened, setOpened] = useState(entries);
-  if (anchor !== null && entries !== opened) {
+  if (anchor !== null && opened.some((key) => !entries.includes(key))) {
     setAnchor(null);
     setDropped(true);
+  } else if (anchor !== null && opened.join(" ") !== entries.join(" ")) {
+    setOpened(entries);
   }
   // L'entrée qui avait le focus est partie avec le menu : il revient à son bouton, ou à la page si
   // le bouton est parti aussi, plutôt que de tomber sur `body`.
