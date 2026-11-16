@@ -56,7 +56,7 @@ Les agents (Opus 5.5) ont atteint la limite d'usage hebdomadaire du compte, qui 
 |---|---|---|---|
 | `lot3-s-tour3` | implémenteur de la piste S (tours 5 à 7) | **rebasé sur `main` `21d04b5`**, le report de la 13b passe ses gardes (R536) ; vérification de fin faite par le contrôleur (1 013 tests Rust deux fois, mesures release vertes, Vitest 2 119, e2e de la synchro 39 verts) et doc commitée (`7d3e693`) | la **re-relecture du tour 7** (relecteur de la piste S, Opus) |
 | `lot3b-client` | relecteur de C2 (re-relecture ciblée de R551, le poids à deux niveaux) | rien de suivi modifié ; des sondes non suivies (`zz-probe-*`) | lui demander de finir ; puis C2 sur `main` |
-| `lot3b-s4b` | implémenteur de S4b | relancée le 2026-11-16 avec un agent **Sonnet 5.5** (la limite ne touchait que les agents Opus) | sa relecture, par un agent Opus, à la réouverture : rien n'entre sur `main` sans relecture du niveau des précédentes |
+| `lot3b-s4b` | implémenteur de S4b | un essai sur un agent Sonnet a été arrêté sans rien écrire ; Lenny demande de continuer avec Opus 5.5 : l'agent Opus d'origine est relancé | sa relecture |
 
 ## Reprise du 2026-11-16 (tenu à jour ; prime sur la section de la pause, qui suit)
 
