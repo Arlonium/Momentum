@@ -258,3 +258,31 @@ test("a_link_picked_once_its_block_is_gone_goes_after_the_selected_block_and_the
     if (after) expect(blocks[2].id).toBe("z");
   }
 });
+
+const pointerDown = (target: Element) =>
+  act(() => void target.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true })));
+
+test("a_click_anywhere_in_the_editor_closes_the_picker", async () => {
+  await publish("space", [page(PLAN, { title: "Plan" })]);
+  const m = await mountEditor({ blocks: PAGE });
+  // Témoin : un clic dans le sélecteur le laisse ouvert.
+  cursor(m, "e", 0);
+  pointerDown(openPicker(m));
+  expect(blockWindow(PICKER)).not.toBeNull();
+  // Un clic dans un autre bloc le ferme ; dans le bloc d'où on l'a ouvert aussi.
+  pointerDown(blockOf(m, "x").querySelector(".bn-inline-content")!);
+  expect(blockWindow(PICKER), "un autre bloc").toBeNull();
+  cursor(m, "e", 0);
+  openPicker(m);
+  pointerDown(blockOf(m, "e").querySelector(".bn-inline-content")!);
+  expect(blockWindow(PICKER), "le bloc d'origine").toBeNull();
+  // Ce bloc supprimé par un autre (la fenêtre se pose alors près de l'éditeur) : un clic dans
+  // l'éditeur la ferme encore.
+  cursor(m, "e", 0);
+  openPicker(m);
+  act(() => m.editor.removeBlocks(["e"]));
+  await flush();
+  expect(blockWindow(PICKER)).not.toBeNull();
+  pointerDown(blockOf(m, "x").querySelector(".bn-inline-content")!);
+  expect(blockWindow(PICKER), "le bloc parti").toBeNull();
+});

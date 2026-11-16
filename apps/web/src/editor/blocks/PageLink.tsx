@@ -138,6 +138,12 @@ function insertPageLink(editor: MementumEditor, at: string | null, page: FoundPa
   editor.setTextCursorPosition(text, "start");
 }
 
+/**
+ * Le sélecteur n'a pas de bouton qui l'ouvre et le ferme : il est posé près du bloc où était le
+ * curseur, ou de l'éditeur entier si ce bloc est parti, et un clic là le ferme comme ailleurs.
+ */
+const NO_OPENER = () => null;
+
 /** Le sélecteur du lien de page ouvert dans la page de `editor`, s'il l'est. */
 export function PageLinkHost({ editor }: { editor: MementumEditor }) {
   const listen = useCallback(
@@ -182,7 +188,7 @@ function PageLinkPicker({ editor, open }: { editor: MementumEditor; open: OpenPi
   };
 
   return (
-    <BlockPopover label={PICKER_LABEL} anchor={anchor} onClose={close}>
+    <BlockPopover label={PICKER_LABEL} anchor={anchor} opener={NO_OPENER} onClose={close}>
       {!editable && (
         <p className="mm-block-window-gone" role="status">
           {PICKER_READ_ONLY}

@@ -353,3 +353,24 @@ test("the_colours_of_the_toc_are_readable", () => {
   expect(contrast("#66655F", "#FFFFFF")).toBeGreaterThanOrEqual(4.5);
   expect(contrast("#2F2E2B", "#F4F3EF")).toBeGreaterThanOrEqual(4.5);
 });
+
+test("a_click_that_opens_elsewhere_is_left_to_the_browser", async () => {
+  const m = await mountEditor({ blocks: PAGE });
+  act(() => m.editor.setTextCursorPosition("z", "end"));
+  const hash = location.hash;
+  try {
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true, ...init });
+      act(() => void link(m, "Contexte").dispatchEvent(event));
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(false);
+      expect(m.editor.getTextCursorPosition().block.id, JSON.stringify(init)).toBe("z");
+    }
+    // Témoin : un clic simple n'est pas suivi, et mène au titre.
+    const plain = new MouseEvent("click", { bubbles: true, cancelable: true });
+    act(() => void link(m, "Contexte").dispatchEvent(plain));
+    expect(plain.defaultPrevented).toBe(true);
+    expect(m.editor.getTextCursorPosition().block.id).toBe("h2");
+  } finally {
+    history.replaceState(null, "", location.pathname + location.search + hash);
+  }
+});

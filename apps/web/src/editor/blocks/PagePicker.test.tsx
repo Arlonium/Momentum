@@ -111,6 +111,17 @@ test("page_picker_follows_the_tree", async () => {
   expect(p.titles()).toEqual(["Plan"]);
   await act(async () => publishPages("space", [page(ID(1), { title: "Plan 2027" }), page(ID(2), { title: "Notes" })]));
   expect(p.titles()).toEqual(["Plan 2027", "Notes"]);
+  // La page active est tenue par son id, pas par son rang : une page arrivée avant elle ne la change pas.
+  await act(async () => void press(p.field, "ArrowDown"));
+  expect(p.active()).toBe("Notes");
+  await act(async () =>
+    publishPages("space", [page(ID(3), { title: "Avant" }), page(ID(1), { title: "Plan 2027" }), page(ID(2), { title: "Notes" })]),
+  );
+  expect(p.titles()).toEqual(["Avant", "Plan 2027", "Notes"]);
+  expect(p.active()).toBe("Notes");
+  // La page active partie de l'arbre : la première le devient.
+  await act(async () => publishPages("space", [page(ID(3), { title: "Avant" }), page(ID(1), { title: "Plan 2027" })]));
+  expect(p.active()).toBe("Avant");
   // Quitter l'espace : plus rien.
   await act(async () => publishPages(null, null));
   expect(p.titles()).toEqual([]);
@@ -136,4 +147,61 @@ test("page_titles_are_shown_as_text", async () => {
   // Entier dans l'infobulle, entre U+2068 et U+2069.
   expect(p.options()[0].getAttribute("title")).toBe('⁨<img src=x onerror="alert(1)"> ‮Été⁩');
   expect(p.host.querySelector("[style]")).toBeNull();
+});
+
+test("the_active_page_stays_the_one_chosen_when_the_tree_changes", async () => {
+  publishPages("space", [page(ID(1), { title: "Plan" }), page(ID(2), { title: "Notes" }), page(ID(3), { title: "Planning" })]);
+  const p = await mountPicker({ query: "pl" });
+  expect(p.titles()).toEqual(["Plan", "Planning"]);
+  await act(async () => void press(p.field, "ArrowDown"));
+  expect(p.active()).toBe("Planning");
+  // Un autre renomme « Notes » en « Plateau », qui entre dans la liste avant « Planning ».
+  await act(async () =>
+    publishPages("space", [page(ID(1), { title: "Plan" }), page(ID(2), { title: "Plateau" }), page(ID(3), { title: "Planning" })]),
+  );
+  expect(p.active()).toBe("Planning");
+  await act(async () => void press(p.field, "Enter"));
+  expect(p.picked).toEqual([{ id: ID(3), title: "Planning" }]);
+});
+
+/** Le pointeur passe de `from` à `target` (React lit `pointerover` et `pointerout`). */
+const pointer = (from: Element, target: Element) =>
+  act(async () => {
+    from.dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: target }));
+    target.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: from }));
+  });
+
+test("the_list_holds_still_under_the_pointer_and_follows_once_it_leaves", async () => {
+  publishPages("space", [page(ID(1), { title: "Alpha" }), page(ID(2), { title: "Gamma" })]);
+  const p = await mountPicker();
+  await pointer(document.body, p.options()[1]);
+  // Une page créée par un autre avant « Gamma », et « Gamma » renommée : rien ne bouge sous le pointeur.
+  await act(async () =>
+    publishPages("space", [page(ID(1), { title: "Alpha" }), page(ID(9), { title: "Beta" }), page(ID(2), { title: "Gamma 2" })]),
+  );
+  expect(p.titles()).toEqual(["Alpha", "Gamma"]);
+  // Un clic prend la page visée, sous son titre à jour.
+  await act(async () => p.options()[1].click());
+  expect(p.picked).toEqual([{ id: ID(2), title: "Gamma 2" }]);
+  // Une page tenue qui a quitté l'arbre ne se choisit plus.
+  await act(async () => publishPages("space", [page(ID(9), { title: "Beta" }), page(ID(2), { title: "Gamma 2" })]));
+  await act(async () => p.options()[0].click());
+  expect(p.picked).toHaveLength(1);
+  // Ce qu'on tape change la liste, pointeur dessus ou non.
+  await act(async () => fill(p.field, "be"));
+  expect(p.titles()).toEqual(["Beta"]);
+  await act(async () => fill(p.field, ""));
+  // Le pointeur sorti, la liste suit l'arbre.
+  await pointer(p.host.querySelector('[role="listbox"]')!, document.body);
+  expect(p.titles()).toEqual(["Beta", "Gamma 2"]);
+});
+
+test("enter_that_ends_an_ime_composition_picks_nothing", async () => {
+  publishPages("space", [page(ID(1), { title: "Plan" })]);
+  const p = await mountPicker();
+  await act(async () => void press(p.field, "Enter", { isComposing: true }));
+  expect(p.picked).toEqual([]);
+  // Témoin : hors composition, Entrée choisit.
+  await act(async () => void press(p.field, "Enter"));
+  expect(p.picked).toHaveLength(1);
 });

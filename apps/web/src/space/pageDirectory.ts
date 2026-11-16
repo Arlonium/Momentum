@@ -10,7 +10,7 @@
 // Un magasin du module, lu par `useSyncExternalStore` : l'éditeur n'est pas rendu de nouveau quand
 // l'arbre change ; seule la vue d'un lien dont le titre a changé l'est (`usePageTitle`).
 import type { PageNode } from "@mementum/protocol";
-import { useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 /** Une page proposée par un sélecteur : son id et son titre, rien d'autre. */
 export type FoundPage = { id: string; title: string };
@@ -60,6 +60,16 @@ export function publishPages(spaceId: string | null, nodes: readonly PageNode[] 
           folded: pages.map((page) => fold(page.title)),
         };
   for (const listener of [...listeners]) listener();
+}
+
+/**
+ * Publie l'arbre de l'espace affiché tant que l'application est montée (`App`) : à chaque arbre lu,
+ * rien tant que l'espace n'a pas le sien, et plus rien quand elle part (une session fermée, un autre
+ * compte) : les titres d'un compte ne restent pas au suivant.
+ */
+export function usePublishedTree(spaceId: string | null, nodes: readonly PageNode[] | null): void {
+  useEffect(() => publishPages(spaceId, nodes), [spaceId, nodes]);
+  useEffect(() => () => publishPages(null, null), []);
 }
 
 function subscribe(listener: () => void): () => void {

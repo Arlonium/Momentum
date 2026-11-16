@@ -52,15 +52,21 @@ type Props = {
    * pendant que la fenêtre est ouverte. `null` (le bloc est parti) : elle garde sa place.
    */
   anchor: () => HTMLElement | null;
+  /**
+   * L'élément où un clic ne ferme pas la fenêtre, parce qu'il l'ouvre et la ferme lui-même : par
+   * défaut, `anchor` (le bouton d'un bloc). Une fenêtre sans bouton, posée près d'un bloc ou de
+   * l'éditeur entier (le sélecteur du lien de page), rend `null` : tout clic dehors la ferme.
+   */
+  opener?: () => HTMLElement | null;
   onClose: (how: "escape" | "outside") => void;
   children: ReactNode;
 };
 
-export function BlockPopover({ label, anchor, onClose, children }: Props) {
+export function BlockPopover({ label, anchor, opener = anchor, onClose, children }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [place, setPlace] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
-  const latest = useRef({ anchor, onClose });
-  latest.current = { anchor, onClose };
+  const latest = useRef({ anchor, opener, onClose });
+  latest.current = { anchor, opener, onClose };
 
   const position = () => {
     const element = ref.current;
@@ -91,7 +97,7 @@ export function BlockPopover({ label, anchor, onClose, children }: Props) {
       const target = event.target;
       if (!(target instanceof Node) || element.contains(target)) return;
       // Le bouton du bloc ouvre et ferme sa fenêtre lui-même.
-      if (latest.current.anchor()?.contains(target)) return;
+      if (latest.current.opener()?.contains(target)) return;
       latest.current.onClose("outside");
     };
     window.addEventListener("scroll", onMove, true);

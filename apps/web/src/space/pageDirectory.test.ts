@@ -4,7 +4,7 @@ import { act } from "react";
 import { afterEach, expect, test } from "vitest";
 import { renderHook } from "../test/hooks";
 import { page } from "../test/pages";
-import { findPages, isPageId, pageTitle, publishPages, usePageTitle } from "./pageDirectory";
+import { findPages, isPageId, pageTitle, publishPages, usePageTitle, usePublishedTree } from "./pageDirectory";
 
 const A = "0190f5a0-0000-7000-8000-00000000000a";
 const B = "0190f5a0-0000-7000-8000-00000000000b";
@@ -100,4 +100,24 @@ test("only_a_uuid_names_a_page", () => {
   for (const id of ["", "plan", `${A} `, `../${A}`, `${A}x`, "javascript:alert(1)", "0190f5a0000070008000000000000000a"]) {
     expect(isPageId(id), id).toBe(false);
   }
+});
+
+test("the_application_publishes_its_tree_and_takes_it_back_when_it_goes", async () => {
+  type Shown = { spaceId: string | null; nodes: ReturnType<typeof page>[] | null };
+  const app = await renderHook(({ spaceId, nodes }: Shown) => usePublishedTree(spaceId, nodes), {
+    spaceId: "space",
+    nodes: [page(A, { title: "Plan" })],
+  });
+  expect(pageTitle(A)).toBe("Plan");
+  // L'arbre relu, puis un autre espace dont l'arbre n'est pas encore lu.
+  await app.rerender({ spaceId: "space", nodes: [page(A, { title: "Plan 2" })] });
+  expect(pageTitle(A)).toBe("Plan 2");
+  await app.rerender({ spaceId: "other", nodes: null });
+  expect(pageTitle(A)).toBeNull();
+  await app.rerender({ spaceId: "space", nodes: [page(A, { title: "Plan 2" })] });
+  expect(pageTitle(A)).toBe("Plan 2");
+  // L'application démontée (session fermée, autre compte) : rien ne reste au suivant.
+  await app.unmount();
+  expect(pageTitle(A)).toBeNull();
+  expect(findPages("", 8)).toEqual([]);
 });

@@ -13,7 +13,7 @@
 //   ouverte devient quand ses droits changent ailleurs ;
 // - `useFavorites` : les favoris du compte dans l'espace affiché, lus après chaque lecture de
 //   l'arbre (R254) ;
-// - `publishPages` : les pages de l'arbre, pour l'éditeur (liens de page, sélecteur, R251).
+// - `usePublishedTree` : les pages de l'arbre, pour l'éditeur (liens de page, sélecteur, R251).
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
@@ -34,7 +34,7 @@ import { SpaceNotFound } from "./space/SpaceNotFound";
 import { visit } from "./space/recents";
 import { useCurrentSpace } from "./space/useCurrentSpace";
 import { useFavorites } from "./space/useFavorites";
-import { publishPages } from "./space/pageDirectory";
+import { usePublishedTree } from "./space/pageDirectory";
 import { usePageActions } from "./space/usePageActions";
 import { useSpaceEvents } from "./space/useSpaceEvents";
 import { useSpaceTree, useTreeCatchUp, useTreeReader } from "./space/useSpaceTree";
@@ -96,8 +96,7 @@ export function App() {
   // Les pages que le compte voit, pour l'éditeur : le titre à jour d'un lien de page, les pages du
   // sélecteur (R251). Celles de l'arbre affiché, déjà filtré par les droits ; rien quand on quitte
   // l'espace ou l'application (une session fermée, un autre compte).
-  useEffect(() => publishPages(spaceId, nodes), [spaceId, nodes]);
-  useEffect(() => () => publishPages(null, null), []);
+  usePublishedTree(spaceId, nodes);
   // La page ouverte, connue et hors corbeille, passe en tête des pages récentes du compte dans
   // son espace (R255), une fois par ouverture : gardées dans le navigateur, rien n'est écrit
   // sur le serveur.
