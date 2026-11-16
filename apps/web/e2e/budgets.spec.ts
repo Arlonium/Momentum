@@ -260,14 +260,14 @@ test("open_1000_block_page_under_300ms", async ({ browser }) => {
 });
 
 /**
- * Pages de blocs riches (Task C1b, R346) : une page « mêlée » de 1 000 blocs, dont 100 blocs riches
- * (un bloc sur dix : un callout, puis un signet), tient le budget des 1 000 blocs ; une page de
- * 1 000 callouts est mesurée et consignée, sans budget à elle (la relecture finale de la partie B
- * en décide).
+ * Pages de blocs riches (Task C1b, R346, R657) : une page « mêlée » de 1 000 blocs, dont 100 blocs
+ * riches (un bloc sur dix : un callout, puis un signet), et une page de 1 000 callouts tiennent le
+ * budget des 1 000 blocs, chacune sur cinq pages jamais vues. Sous le ralentissement ×1,7, la page de
+ * 1 000 callouts est à la limite (286 ms au pire, R657).
  */
 test.describe("blocs riches", () => {
   let mixed: Target[] = [];
-  let callouts: Target | null = null;
+  let callouts: Target[] = [];
 
   /** Une page de 1 000 blocs, dont le bloc `n` est `rich(n)` s'il en rend un, sinon un paragraphe. */
   async function richPage(request: APIRequestContext, rich: (n: number) => string | null): Promise<Target> {
@@ -294,9 +294,12 @@ test.describe("blocs riches", () => {
           ),
         );
       }
-      // Le premier bloc est un callout aussi : son texte est celui que l'ouverture attend.
-      const page = await richPage(request, (n) => `<callout icon="💡" color="default">\nCallout ${n}\n</callout>`);
-      callouts = { id: page.id, first: "Callout 1" };
+      callouts = [];
+      for (let i = 0; i < OPENINGS; i++) {
+        // Le premier bloc est un callout aussi : son texte est celui que l'ouverture attend.
+        const page = await richPage(request, (n) => `<callout icon="💡" color="default">\nCallout ${n}\n</callout>`);
+        callouts.push({ id: page.id, first: "Callout 1" });
+      }
     } finally {
       await request.dispose();
     }
@@ -307,12 +310,8 @@ test.describe("blocs riches", () => {
     expect(await openSmallPages(browser, " dont 100 blocs riches", mixed)).toBeLessThan(300);
   });
 
-  test("measure_open_1000_callout_page", async ({ browser }) => {
-    const { total, longestFrame } = await openFromTree(browser, callouts!);
-    console.log(
-      `MESURE ouverture d'une page jamais vue de 1 000 callouts : ${Math.round(total)} ms ` +
-        `(image la plus longue ${Math.round(longestFrame)} ms)`,
-    );
+  test("open_1000_callout_page_under_300ms", async ({ browser }) => {
+    expect(await openSmallPages(browser, ", tous des callouts", callouts)).toBeLessThan(300);
   });
 });
 
