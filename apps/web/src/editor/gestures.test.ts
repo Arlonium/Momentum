@@ -759,3 +759,79 @@ describe("changer la formule d'un contenu en ligne", () => {
     for (const [w, doc] of docs(s)) expect(changedElements(doc, before), w).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Poser une mention (C4)
+// ---------------------------------------------------------------------------
+
+// Une mention s'écrit `⟦@libellé⟧`. Ce que posent `@` et `[[` : la mention, suivie d'une espace.
+
+const PLAN = "0193a5b0-0000-7000-8000-000000000001";
+
+/** Mona pose une mention de page dans Y, à `offset` caractères du début, comme le menu `@`. */
+function insertMention(p: Peer, offset: number): void {
+  cursor(p, "y", offset);
+  p.editor.insertInlineContent([{ type: "mention", props: { kind: "page", id: PLAN, label: "Plan" } }, " "]);
+}
+
+/** Le texte de Y dans chacune des trois vues. */
+function textsOfY(s: Scene): [string, string][] {
+  const y = (page: Shown[]) => page.find((b) => b.id === "y")?.text ?? "(absent)";
+  return [
+    ["chez Mona", y(shownInline(s.mona))],
+    ["chez Tom", y(shownInline(s.tom))],
+    ["au serveur", y(storedInline(s.server))],
+  ];
+}
+
+describe("poser une mention", () => {
+  for (const { order, first, label } of PLAYS) {
+    test(`mention_inserted_at_the_end_keeps_what_another_types (${label})`, async () => {
+      const s = await scene(XYZ, order);
+      const before = elementIds(s.server);
+      insertMention(s.mona, "Bloc Y".length);
+      typeAtEnd(s.tom, "y", TYPED);
+      requireLocallyDoneInline(s, { mona: withY("Bloc Y⟦@Plan⟧ "), tom: withY(`Bloc Y${TYPED}`) });
+      // Ce que le geste écrit : l'élément de la mention et ses trois attributs ; aucun caractère supprimé.
+      expect(counts(pending(s.mona))).toMatchObject({
+        made: { "<mention>": 1, "@kind": 1, "@id": 1, "@label": 1 },
+        deleted: 0,
+      });
+      await send(s, first);
+      // La mention et la frappe sont au même point : la frappe reste dans le texte, la mention et
+      // son espace le suivent, dans les deux ordres.
+      expectEverywhereInline(s, withY("Bloc Y de Tom⟦@Plan⟧ "));
+      for (const [w, doc] of docs(s)) expect(changedElements(doc, before), w).toEqual([]);
+    });
+
+    // Exigé : la frappe de Tom n'est ni perdue ni doublée, le reste du texte non plus, et les trois
+    // documents sont identiques. Où elle atterrit est la limite, mesurée à part, juste après.
+    test(`mention_inserted_in_the_middle_keeps_what_another_types_after_it (${label})`, async () => {
+      const s = await scene(XYZ, order);
+      insertMention(s.mona, 3);
+      typeAtEnd(s.tom, "y", TYPED);
+      requireLocallyDoneInline(s, { mona: withY("Blo⟦@Plan⟧ c Y"), tom: withY(`Bloc Y${TYPED}`) });
+      await send(s, first);
+      for (const [where, text] of textsOfY(s)) {
+        expect(text.split(TYPED).length - 1, `${where} : la frappe de Tom, une fois (« ${text} »)`).toBe(1);
+        expect(text.replace(TYPED, ""), `${where} : le reste du texte`).toBe("Blo⟦@Plan⟧ c Y");
+      }
+      expect(xml(s.tom.doc)).toBe(xml(s.mona.doc));
+      expect(xml(s.server)).toBe(xml(s.mona.doc));
+    });
+
+    knownLimit(
+      `mention_inserted_in_the_middle_keeps_what_another_types_after_it, à sa place (${label})`,
+      "le texte d'après la mention est supprimé et recréé dans un texte neuf : la frappe d'un autre, ancrée au bout du texte supprimé, reste avant la mention",
+      { wanted: withY("Blo⟦@Plan⟧ c Y de Tom"), lost: withY("Blo de Tom⟦@Plan⟧ c Y") },
+      async () => {
+        const s = await scene(XYZ, order);
+        insertMention(s.mona, 3);
+        typeAtEnd(s.tom, "y", TYPED);
+        requireLocallyDoneInline(s, { mona: withY("Blo⟦@Plan⟧ c Y"), tom: withY(`Bloc Y${TYPED}`) });
+        await send(s, first);
+        expectEverywhereInline(s, withY("Blo⟦@Plan⟧ c Y de Tom"));
+      },
+    );
+  }
+});
