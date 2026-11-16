@@ -250,6 +250,9 @@ pub struct Store {
     backup: Option<Arc<Backup>>,
     /// Les espaces dont la version vient d'avancer ([`Store::changes`]).
     changes: tokio::sync::broadcast::Sender<Uuid>,
+    /// Les copies de pages à refuser, pour les tests (`Store::refuse_next_copies`).
+    #[cfg(feature = "test-hooks")]
+    copies_to_refuse: Arc<duplicate::CopiesToRefuse>,
 }
 
 impl Store {
@@ -309,6 +312,8 @@ impl Store {
             writer: Arc::new(queue::Writer::new(writes, settings.slow_write)),
             backup: backup.map(Arc::new),
             changes: tokio::sync::broadcast::channel(spaces::CHANGES_CAPACITY).0,
+            #[cfg(feature = "test-hooks")]
+            copies_to_refuse: Arc::default(),
         })
     }
 

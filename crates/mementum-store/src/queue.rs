@@ -65,6 +65,12 @@ pub(crate) enum Lane {
     /// passe en priorité, sans jamais prendre deux tours de suite quand d'autres attendent : le
     /// verrou du dépôt n'est tenu que le temps de l'écriture en cours, pas d'un tour de la file.
     Files,
+    /// Les copies de pages (`Store::duplicate_pages`, Ruling R607) : toutes dans une même voie,
+    /// quel que soit le compte, sans priorité. Une copie tient le tour le temps d'écrire tous ses
+    /// documents ; dans la voie de chaque compte, les copies de plusieurs comptes passeraient
+    /// l'une derrière l'autre devant la frappe d'une page, qui les attendrait toutes. Ici, la
+    /// file sert une écriture de chaque autre voie entre deux copies.
+    Copies,
     /// Les écritures dont personne n'est nommé : inscription, ménage, commandes, tests.
     Common,
 }

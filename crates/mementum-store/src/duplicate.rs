@@ -20,6 +20,7 @@ use crate::acl::{read_chain, write_grant};
 use crate::files::insert_attachment;
 use crate::members::role_of;
 use crate::nodes::{Node, NodeKind, Sibling, new_slot};
+use crate::queue::Lane;
 use crate::spaces::bump_rev;
 use crate::{Store, StoreError, position_between};
 
@@ -93,7 +94,37 @@ fn check_shape(pages: &[CopiedPage]) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Les copies que le store doit refuser, pour les tests ([`Store::refuse_next_copies`]).
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Default)]
+pub(crate) struct CopiesToRefuse(std::sync::Mutex<usize>);
+
+#[cfg(feature = "test-hooks")]
+impl CopiesToRefuse {
+    fn left(&self) -> std::sync::MutexGuard<'_, usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Vrai, et une de moins à refuser, s'il en reste.
+    fn take_one(&self) -> bool {
+        let mut left = self.left();
+        let any = *left > 0;
+        *left = left.saturating_sub(1);
+        any
+    }
+}
+
 impl Store {
+    /// Fait refuser les `count` prochaines copies (`NotFound`, à leur tour d'écriture, sans rien
+    /// écrire), comme si ce qu'elles visent venait de disparaître. Pour les tests seulement
+    /// (fonction `test-hooks`) : la reprise d'une route ne se prouve pas autrement sans course.
+    #[cfg(feature = "test-hooks")]
+    pub fn refuse_next_copies(&self, count: usize) {
+        *self.copies_to_refuse.left() = count;
+    }
+
     /// Écrit la copie d'un sous-arbre de pages : les nœuds, les accès de la racine, les documents
     /// (instantanés de `seq` 0) et les attaches, en une transaction, qui avance la révision et la
     /// version de l'espace une fois. Rend la racine de la copie. Tout est écrit, ou rien.
@@ -111,14 +142,20 @@ impl Store {
     /// Seule la page copiée est relue, pas ses sous-pages : ce qu'elles valaient quand l'appelant
     /// les a lues est écrit. Une liste de pages mal formée est une erreur.
     ///
-    /// Elle s'écrit dans la voie du compte de la tâche (`Store::write`), comme une création de
-    /// page : jamais dans celle du dépôt, qu'elle ne tient pas (Ruling R522).
+    /// Elle s'écrit dans la voie des copies (`Lane::Copies`, Ruling R607), commune à tous les
+    /// comptes : entre deux copies, la file sert une écriture de chaque autre voie qui attend,
+    /// si bien qu'une frappe n'attend jamais plus d'une copie. Jamais dans la voie du dépôt,
+    /// qu'elle ne tient pas (Ruling R522).
     pub async fn duplicate_pages(&self, copy: &NewCopy, now: i64) -> Result<Node, StoreError> {
         check_shape(&copy.pages)?;
         let space = copy.space_id.to_string();
         let author = copy.created_by.to_string();
         let parent = copy.parent_id.map(|p| p.to_string());
-        let mut tx = self.write().await?;
+        let mut tx = self.write_in(Lane::Copies).await?;
+        #[cfg(feature = "test-hooks")]
+        if self.copies_to_refuse.take_one() {
+            return Err(StoreError::NotFound);
+        }
         sqlx::query("SELECT 1 FROM spaces WHERE id = ?")
             .bind(&space)
             .fetch_optional(&mut **tx)
