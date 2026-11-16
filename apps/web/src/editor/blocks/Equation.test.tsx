@@ -172,6 +172,24 @@ test("a_formula_too_nested_for_its_place_is_text_and_a_shallower_one_is_typeset"
   expect(blockOf(m, "fine").querySelector(".katex")).not.toBeNull();
 });
 
+test("the_same_formula_is_typeset_at_the_top_and_text_deep_in_a_list", async () => {
+  // La part « profondeur de la page » de la garde (relecture de C2, I2) : sans elle, la formule du
+  // fond s'attacherait là où elle fait planter Chromium (e2e `a_formula_allowed_at_the_top_is_text_deep_in_a_list`).
+  const latex = "\\mathreflectbox{".repeat(18) + "x" + "}".repeat(18);
+  type Item = { id: string; type: "bulletListItem"; content: unknown; children?: Item[] };
+  let deepest: Item = { id: "l25", type: "bulletListItem", content: ["en ligne ", { type: "math", props: { latex } }] };
+  for (let level = 24; level >= 0; level -= 1) {
+    deepest = { id: `l${level}`, type: "bulletListItem", content: `niveau ${level}`, children: [deepest] };
+  }
+  const m = await mountEditor({
+    blocks: [{ id: "top", type: "equation", props: { latex } }, deepest] as NonNullable<Parameters<typeof mountEditor>[0]>["blocks"],
+  });
+  await formulasShown(m);
+  expect(blockOf(m, "top").querySelector(".katex")).not.toBeNull();
+  expect(blockOf(m, "l25").querySelector(".katex")).toBeNull();
+  expect(blockOf(m, "l25").querySelector(".mm-tex-why")?.textContent).toBe("Formule trop imbriquée pour être affichée ici.");
+});
+
 // ---------------------------------------------------------------------------
 // Rien sur le chemin de l'ouverture : seules les formules à l'écran, l'une après l'autre
 // ---------------------------------------------------------------------------

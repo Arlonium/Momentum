@@ -1,13 +1,18 @@
 // Ce que KaTeX produit d'une formule, mesuré avant d'être attaché à la page. Une formule vient
 // d'ailleurs (MMD, un agent, un autre client) : sans macro, une formule imbriquée faisait planter
-// l'onglet de quiconque ouvrait la page (la mise en page de Chromium déborde sa pile sur des tables
-// imbriquées) ; une définition (`\def`) faisait figer l'onglet. Les définitions sont refusées là où
-// elles se produisent, pendant l'analyse ; l'imbrication est comptée dans ce que KaTeX produit.
+// l'onglet de quiconque ouvrait la page (la mise en page de Chromium déborde sa pile sur des boîtes
+// imbriquées, tables ou non) ; une définition (`\def`) faisait figer l'onglet. Les définitions sont
+// refusées là où elles se produisent, pendant l'analyse ; la profondeur d'éléments est comptée dans
+// ce que KaTeX produit.
 import { expect, test } from "vitest";
-import { MAX_LATEX_CHARS, nestingAllowance, typeset } from "./tex";
+import { depthAllowance, MAX_LATEX_CHARS, MAX_TEX_NODES, typeset } from "./tex";
 
-const frac = (n: number) => "\\frac{1}{".repeat(n) + "x" + "}".repeat(n);
-const sqrt = (n: number) => "\\sqrt{".repeat(n) + "x" + "}".repeat(n);
+const B = String.fromCharCode(92);
+/** `@` pour la barre oblique inverse, plus lisible dans une chaîne de JavaScript. */
+const t = (s: string) => s.replace(/@/g, B);
+const wrap = (open: string, close: string, n: number, core = "x") => t(open).repeat(n) + t(core) + t(close).repeat(n);
+const frac = (n: number) => wrap("@frac{1}{", "}", n);
+const sqrt = (n: number) => wrap("@sqrt{", "}", n);
 
 test("a_formula_is_typeset_and_never_follows_a_link", () => {
   const plain = typeset("E = mc^2", false);
@@ -58,33 +63,94 @@ test("what_katex_defines_for_itself_is_not_a_definition", () => {
   }
 });
 
-test("nesting_is_counted_in_what_katex_produces", () => {
-  // Chaque fraction, racine ou exposant imbriqué ajoute une table de mise en page (`vlist-t`).
-  for (const n of [1, 5, 13]) {
-    for (const make of [frac, sqrt]) {
-      const outcome = typeset(make(n), true);
-      expect(outcome.kind).toBe("formula");
-      if (outcome.kind === "formula") expect(outcome.nesting, make(n).slice(0, 12)).toBe(n);
+/** La profondeur d'éléments du HTML, lue par l'analyseur de la page (jsdom). */
+function parsedDepth(html: string): number {
+  const box = document.createElement("div");
+  box.innerHTML = html;
+  let deepest = 0;
+  const stack: [Element, number][] = [...box.children].map((child) => [child, 1] as [Element, number]);
+  while (stack.length > 0) {
+    const [element, depth] = stack.pop()!;
+    deepest = Math.max(deepest, depth);
+    for (const child of element.children) stack.push([child, depth + 1]);
+  }
+  return deepest;
+}
+
+/**
+ * Des formes qui faisaient planter l'onglet en haut d'une page (une équation à 20 éléments du haut),
+ * sans aucune table pour la plupart : le plus petit nombre de niveaux qui plante, mesuré dans le
+ * Chromium de Playwright (registre, Task C2, tour de correction 1).
+ */
+const CRASHED_AT_THE_TOP: [string, string][] = [
+  ["mathllap", wrap("@mathllap{", "}", 13)],
+  ["llap", wrap("@llap{", "}", 13)],
+  ["reflectbox", wrap("@mathreflectbox{", "}", 30)],
+  ["vphantom", wrap("a@vphantom{", "}", 34)],
+  ["smash", wrap("a@smash{", "}", 93)],
+  ["color", wrap("@color{red}{a", "}", 131)],
+  ["group", wrap("{", "a}", 263)],
+  ["frac", frac(13)],
+  ["sqrt", sqrt(13)],
+];
+
+test("element_depth_is_counted_in_what_katex_produces", () => {
+  // La profondeur d'éléments de tout l'arbre (HTML et MathML), celle que l'analyseur de la page
+  // construit, pas seulement les tables (relecture de C2, C1).
+  for (const [name, latex] of [...CRASHED_AT_THE_TOP, ["simple", "a + b"], ["matrix", t("@begin{pmatrix} a @@ b @end{pmatrix}")]]) {
+    for (const display of [true, false]) {
+      const outcome = typeset(latex, display);
+      expect(outcome.kind, name).toBe("formula");
+      if (outcome.kind === "formula") expect(outcome.depth, `${name} ${display}`).toBe(parsedDepth(outcome.html));
     }
   }
-  const simple = typeset("a + b", true);
-  expect(simple.kind === "formula" && simple.nesting).toBe(0);
 });
 
-test("the_nesting_allowed_shrinks_with_the_depth_of_the_page_around_the_formula", () => {
-  // Mesuré dans Chromium (registre, R421) : l'onglet plante quand profondeur + 12 × tables dépasse
-  // 169 environ ; on garde une marge de trois tables.
-  expect(nestingAllowance(19)).toBe(10);
-  expect(nestingAllowance(49)).toBe(8);
-  expect(nestingAllowance(94)).toBe(4);
-  expect(nestingAllowance(139)).toBe(0);
-  expect(nestingAllowance(400)).toBe(0);
-  expect(nestingAllowance(0)).toBe(10);
+test("a_formula_that_crashed_the_tab_never_fits_at_the_top_of_a_page", () => {
+  for (const [name, latex] of CRASHED_AT_THE_TOP) {
+    const outcome = typeset(latex, true);
+    expect(outcome.kind === "formula" && outcome.depth > depthAllowance(20), name).toBe(true);
+  }
+});
+
+test("the_depth_allowed_shrinks_with_the_depth_of_the_page_around_the_formula", () => {
+  // Mesuré dans Chromium : l'onglet plante quand profondeur de la page + 2,64 × profondeur
+  // d'éléments de la formule dépasse 187 environ ; on compte 3 par élément et on s'arrête à 150.
+  expect(depthAllowance(0)).toBe(50);
+  expect(depthAllowance(20)).toBe(43);
+  expect(depthAllowance(49)).toBe(33);
+  expect(depthAllowance(94)).toBe(18);
+  expect(depthAllowance(150)).toBe(0);
+  expect(depthAllowance(400)).toBe(0);
+  // Les formules ordinaires tiennent en haut d'une page : la plus profonde mesurée, une fraction
+  // continue de quatre niveaux, a 35 éléments de profondeur.
+  for (const raw of [
+    "@frac{1}{1+@frac{1}{1+@frac{1}{1+@frac{1}{x}}}}",
+    "@sqrt{@frac{a^{2^{n}}}{b_{i_{j}}}}",
+    "x = @frac{-b @pm @sqrt{b^2-4ac}}{2a}",
+    "@begin{bmatrix} @frac{1}{2} & @sqrt{2} @@ @alpha & @beta @end{bmatrix}",
+  ]) {
+    const outcome = typeset(t(raw), true);
+    expect(outcome.kind === "formula" && outcome.depth <= depthAllowance(20), raw).toBe(true);
+  }
 });
 
 test("a_formula_too_long_is_refused_and_one_at_the_limit_is_not", () => {
   expect(typeset("x".repeat(MAX_LATEX_CHARS + 1), true)).toEqual({ kind: "refused", why: "length" });
   expect(typeset("x".repeat(MAX_LATEX_CHARS), true).kind).toBe("formula");
+});
+
+test("a_formula_too_big_is_refused", () => {
+  // Une matrice de 4 900 colonnes : 9 800 caractères, plus de 80 000 éléments.
+  const matrix = (columns: number) => `${t("@begin{matrix}")}${"a&".repeat(columns)}a${t("@end{matrix}")}`;
+  expect(typeset(matrix(4_900), true)).toEqual({ kind: "refused", why: "size" });
+  // Témoin : une matrice plus petite passe, et ses éléments sont comptés.
+  const small = typeset(matrix(100), true);
+  expect(small.kind).toBe("formula");
+  if (small.kind === "formula") {
+    expect(small.nodes).toBe(new DOMParser().parseFromString(small.html, "text/html").body.querySelectorAll("*").length);
+    expect(small.nodes).toBeLessThan(MAX_TEX_NODES);
+  }
 });
 
 test("an_invalid_formula_says_why", () => {

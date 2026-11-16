@@ -1,23 +1,22 @@
-// Ce que KaTeX produit d'une formule, mesuré **avant** d'être attaché à la page (R420, R421, R422).
-// Une formule vient d'ailleurs (MMD, un agent, un autre client) : tout ce qu'une formule peut faire
-// à l'onglet de qui ouvre la page se décide ici.
+// Ce que KaTeX produit d'une formule, mesuré **avant** d'être attaché à la page (R420, R421, R422,
+// R525 à R529). Une formule vient d'ailleurs (MMD, un agent, un autre client) : tout ce qu'une
+// formule peut faire à l'onglet de qui ouvre la page se décide ici.
 //
 // - **Les définitions sont refusées là où elles se produisent** (`\def`, `\gdef`, `\edef`, `\let`,
 //   `\newcommand`…) : KaTeX range chaque définition dans `settings.macros`, que voici sous la forme
 //   d'un objet qui refuse toute définition de la formule, au moment où l'analyse la fait. Rien ne
 //   relit les lexèmes : `\verb` ne cache rien (la relecture perdue de la Task C2 le contournait).
 //   Une définition récursive ou en cascade figeait l'onglet. KaTeX range aussi ses propres valeurs
-//   (`\cr` dans un tableau, `\current@color`, `|` sous `\middle`) : des chaînes, des fonctions, jamais
-//   une définition de la formule, qui est un objet porteur de `tokens`.
-// - **L'imbrication est comptée dans ce que KaTeX produit** : chaque fraction, racine, exposant ou
-//   tableau imbriqué ajoute une table de mise en page (`vlist-t`, en `display: inline-table`), et
-//   la mise en page de Chromium déborde sa pile sur des tables imbriquées : l'onglet plantait, sans
-//   macro, pour une formule de treize niveaux en haut d'une page, de sept dans une liste imbriquée
-//   de vingt-cinq niveaux (mesuré, registre, R421). La formule ne s'attache que si son imbrication
-//   tient dans ce que la profondeur de la page autour d'elle laisse (`nestingAllowance`) ; sinon,
-//   elle est montrée en texte, avec un message (`Formula`).
+//   (`\cr` dans un tableau, `\current@color`, `|` sous `\middle`) : des chaînes, des fonctions, jamais une
+//   définition de la formule, qui est un objet porteur de `tokens`.
+// - **La profondeur d'éléments est comptée dans ce que KaTeX produit** (HTML et MathML, balises
+//   comptées dans le HTML écrit) : la mise en page de Chromium déborde sa pile sur des boîtes
+//   imbriquées, tables ou non (`\frac`, `\mathllap`, `\mathreflectbox`, des accolades…), et l'onglet
+//   plantait d'autant plus tôt que la formule était profonde dans la page. La formule ne s'attache
+//   que si sa profondeur tient dans ce que la profondeur de la page autour d'elle laisse
+//   (`depthAllowance`) ; sinon, elle est montrée en texte, avec un message (`Formula`).
 // - Une formule de plus de `MAX_LATEX_CHARS` caractères, ou dont KaTeX produirait plus de
-//   `MAX_TEX_NODES` nœuds, n'est pas mise en forme.
+//   `MAX_TEX_NODES` éléments, n'est pas mise en forme.
 //
 // KaTeX reste à `trust: false` : ni lien, ni image, ni attribut. Le résultat est gardé, par formule,
 // dans un cache borné : une formule déjà vue s'affiche sans être recalculée.
@@ -26,44 +25,45 @@ import katex from "katex";
 /** Au-delà, une formule n'est pas mise en forme (le champ n'en accepte pas plus). */
 export const MAX_LATEX_CHARS = 10_000;
 
-/** Au-delà, ce que KaTeX produirait est trop grand pour la page (une formule de 10 000 caractères en fait 33 000). */
+/** Au-delà, ce que KaTeX produirait est trop grand pour la page (en éléments). */
 export const MAX_TEX_NODES = 60_000;
 
 /**
  * La mise en page de Chromium plante quand la profondeur de la page autour de la formule, plus
- * `TABLE_COST` fois son imbrication de tables, dépasse 169 environ (mesuré : registre, R421). On
- * s'arrête à `DEPTH_BUDGET`, trois tables plus tôt, et jamais au-delà de `MAX_TEX_NESTING`.
+ * 2,64 fois sa profondeur d'éléments (au pire des formes mesurées, `\mathreflectbox`), dépasse 187
+ * environ (mesuré : registre, R525). On compte `ELEMENT_COST` par élément, et on s'arrête à
+ * `DEPTH_BUDGET`.
  */
 const DEPTH_BUDGET = 150;
-const TABLE_COST = 12;
-export const MAX_TEX_NESTING = 10;
+const ELEMENT_COST = 3;
 
 /** Ce qu'une formule donne. */
 export type TexOutcome =
-  | { kind: "formula"; html: string; nesting: number; nodes: number }
+  | { kind: "formula"; html: string; depth: number; nodes: number }
   | { kind: "empty" }
   | { kind: "invalid"; message: string }
   | { kind: "refused"; why: "definition" | "length" | "size" };
 
 /**
- * L'imbrication de tables qu'une formule peut avoir, à `depth` éléments du haut du document : dix en
- * haut d'une page, moins dans une liste imbriquée, aucune au-delà de 138 (une page aussi profonde
- * plante déjà sans formule, vers 180 : registre).
+ * La profondeur d'éléments qu'une formule peut avoir, à `depth` éléments du haut du document : 43
+ * en haut d'une page (une équation y est à 20), moins dans une liste imbriquée, aucune au-delà de
+ * 147 (une page aussi profonde plante déjà sans formule, vers 180 : registre).
  */
-export function nestingAllowance(depth: number): number {
-  return Math.max(0, Math.min(MAX_TEX_NESTING, Math.floor((DEPTH_BUDGET - Math.max(0, depth)) / TABLE_COST)));
+export function depthAllowance(depth: number): number {
+  return Math.max(0, Math.floor((DEPTH_BUDGET - Math.max(0, depth)) / ELEMENT_COST));
 }
 
 /** Une définition de la formule, refusée pendant l'analyse. */
 class DefinitionRefused extends Error {}
 
-/** Ce que KaTeX range lui-même dans `macros` ; une définition de la formule y est un objet à `tokens`. */
+/** Ce que KaTeX range lui-même dans `macros` ; une définition y est un objet à `tokens`. */
 const isDefinition = (value: unknown) =>
   typeof value === "object" && value !== null && Array.isArray((value as { tokens?: unknown }).tokens);
 
+type Macros = NonNullable<katex.KatexOptions["macros"]>;
 /** Les macros de la formule : KaTeX y range toute définition, qui est refusée là. */
-function guardedMacros(): NonNullable<katex.KatexOptions["macros"]> {
-  return new Proxy<NonNullable<katex.KatexOptions["macros"]>>(
+function guardedMacros(): Macros {
+  return new Proxy<Macros>(
     {},
     {
       set(target, name, value) {
@@ -79,47 +79,55 @@ function guardedMacros(): NonNullable<katex.KatexOptions["macros"]> {
 }
 
 /** L'arbre que KaTeX construit avant d'en écrire le HTML (sans type public). */
-type TexNode = { classes?: string[]; children?: TexNode[]; toMarkup(): string };
+type TexNode = { toMarkup(): string };
 const renderToDomTree = (
   katex as unknown as { __renderToDomTree(latex: string, settings: katex.KatexOptions): TexNode }
 ).__renderToDomTree;
 
-/** L'imbrication de tables (`vlist-t`) et le nombre de nœuds de l'arbre, parcouru sans récursion. */
-function measure(tree: TexNode): { nesting: number; nodes: number } {
+/**
+ * La profondeur d'éléments et le nombre d'éléments du HTML de KaTeX, tels que l'analyseur de la page
+ * les construira : KaTeX échappe `<` et `>` dans le texte et les attributs, et ferme tout élément,
+ * sauf ceux qu'il écrit `<… />` (les chemins d'un SVG).
+ */
+function shape(html: string): { depth: number; nodes: number } {
+  let depth = 0;
+  let deepest = 0;
   let nodes = 0;
-  let nesting = 0;
-  const stack: [TexNode, number][] = [[tree, 0]];
-  while (stack.length > 0) {
-    const [node, above] = stack.pop()!;
+  for (let at = html.indexOf("<"); at !== -1; at = html.indexOf("<", at + 1)) {
+    if (html.charCodeAt(at + 1) === 47 /* "/" */) {
+      depth -= 1;
+      continue;
+    }
     nodes += 1;
-    const here = above + (node.classes?.includes("vlist-t") ? 1 : 0);
-    if (here > nesting) nesting = here;
-    for (const child of node.children ?? []) stack.push([child, here]);
+    depth += 1;
+    if (depth > deepest) deepest = depth;
+    const end = html.indexOf(">", at);
+    if (html.charCodeAt(end - 1) === 47) depth -= 1;
   }
-  return { nesting, nodes };
+  return { depth: deepest, nodes };
 }
 
 function compute(latex: string, display: boolean): TexOutcome {
   if (latex.trim() === "") return { kind: "empty" };
   if (latex.length > MAX_LATEX_CHARS) return { kind: "refused", why: "length" };
-  let tree: TexNode;
+  let html: string;
   try {
-    tree = renderToDomTree(latex, {
+    html = renderToDomTree(latex, {
       displayMode: display,
       throwOnError: true,
       trust: false,
       strict: "ignore",
       output: "htmlAndMathml",
       macros: guardedMacros(),
-    });
+    }).toMarkup();
   } catch (error) {
     if (error instanceof DefinitionRefused) return { kind: "refused", why: "definition" };
     if (error instanceof katex.ParseError) return { kind: "invalid", message: error.rawMessage ?? error.message };
     return { kind: "invalid", message: String(error) };
   }
-  const { nesting, nodes } = measure(tree);
+  const { depth, nodes } = shape(html);
   if (nodes > MAX_TEX_NODES) return { kind: "refused", why: "size" };
-  return { kind: "formula", html: tree.toMarkup(), nesting, nodes };
+  return { kind: "formula", html, depth, nodes };
 }
 
 /** Le cache : par formule et par mode, borné en entrées et en taille de HTML. */
@@ -159,11 +167,14 @@ export function isTypeset(latex: string, display: boolean): boolean {
 export function refusal(outcome: TexOutcome): string | null {
   switch (outcome.kind) {
     case "refused":
-      return outcome.why === "definition"
-        ? "Les définitions (\\def, \\newcommand…) ne sont pas permises dans une formule."
-        : outcome.why === "length"
-          ? `Formule trop longue : ${MAX_LATEX_CHARS.toLocaleString("fr-FR")} caractères au plus.`
-          : "Formule trop grande pour être affichée.";
+      switch (outcome.why) {
+        case "definition":
+          return "Les définitions (\\def, \\newcommand…) ne sont pas permises dans une formule.";
+        case "length":
+          return `Formule trop longue : ${MAX_LATEX_CHARS.toLocaleString("fr-FR")} caractères au plus.`;
+        default:
+          return "Formule trop grande pour être affichée.";
+      }
     case "invalid":
       return `Formule invalide : ${outcome.message}`;
     default:

@@ -5,14 +5,14 @@
 // formules de 10 000 caractères figeaient l'ouverture d'une page 22 s.
 //
 // Avant d'attacher le HTML de KaTeX, la profondeur de la page autour de la formule est mesurée, et
-// l'imbrication de la formule comparée à ce qu'elle laisse (`nestingAllowance`, R421) : trop
-// imbriquée pour sa place, la formule se montre en texte, avec un message, et l'onglet ne plante
+// la profondeur d'éléments de la formule comparée à ce qu'elle laisse (`depthAllowance`, R525) :
+// trop profonde pour sa place, la formule se montre en texte, avec un message, et l'onglet ne plante
 // pas. La profondeur se relit à chaque montage : un bloc déplacé ou imbriqué est recréé (R223).
 //
 // Une formule refusée ou invalide se montre en texte (`dir="ltr"`, jamais du HTML), avec ce qui
 // l'empêche (`refusal`).
 import { useLayoutEffect, useRef, useState } from "react";
-import { isTypeset, nestingAllowance, refusal, TOO_NESTED, typeset, type TexOutcome } from "./tex";
+import { depthAllowance, isTypeset, refusal, TOO_NESTED, typeset, type TexOutcome } from "./tex";
 
 /** Temps de mise en forme par image, au plus (ms) : au-delà, la suite attend l'image suivante. */
 const FRAME_BUDGET_MS = 8;
@@ -144,7 +144,7 @@ export function Formula({ latex, display, eager = false }: Props) {
     );
   }
   if (current.kind === "empty") return <span ref={ref} className="mm-tex-empty" />;
-  if (current.kind === "formula" && current.nesting <= nestingAllowance(depth)) {
+  if (current.kind === "formula" && current.depth <= depthAllowance(depth)) {
     // KaTeX à `trust: false` échappe ce qu'il reçoit : son HTML n'a ni lien, ni image, ni attribut
     // venu de la formule.
     return <span ref={ref} className="mm-tex" dangerouslySetInnerHTML={{ __html: current.html }} />;
