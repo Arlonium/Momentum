@@ -56,6 +56,20 @@ const isFavoritesRead = (url: string, spaceId: string) =>
 /** Loin de la barre latérale : « Favoris » n'y est plus gelé (R411). */
 const AWAY = { x: 900, y: 420 };
 
+/**
+ * Barrière : `id` est renommée par l'API, et l'onglet le montre dans son arbre. La lecture de
+ * l'arbre qui l'apporte part au moins 250 ms après le changement (le canal de l'espace) : tout ce
+ * que l'onglet avait reçu avant (une lecture des favoris) est alors rendu. C'est ce qui permet
+ * d'affirmer qu'une liste n'a **pas** changé, sans attente fixe.
+ */
+async function renamedInTree(p: Page, api: APIRequestContext, id: string): Promise<string> {
+  const title = `Barrière ${unique()}`;
+  const res = await api.patch(`/api/v1/pages/${id}`, { data: { title } });
+  expect(res.status(), await res.text()).toBe(200);
+  await expect(treeRow(p, id).getByRole("link")).toHaveText(title);
+  return title;
+}
+
 test("favorite_appears_in_the_other_tab_of_the_same_account_when_it_comes_back", async ({
   browser,
 }) => {
@@ -274,7 +288,10 @@ test("favorites_hold_still_under_the_pointer_until_it_leaves", async ({ browser 
   expect(res.status(), await res.text()).toBe(200);
   await expect(treeRow(p, first.id).getByRole("link")).toHaveText(renamed);
   expect(await (await reread).json()).toEqual({ pages: [first.id] });
-  // Sous le pointeur, rien n'a bougé.
+  // Sous le pointeur, rien n'a bougé, une fois cette lecture rendue.
+  const barrier = await createPage(api, { section: "private", title: `Témoin ${unique()}` });
+  await expect(treeRow(p, barrier.id)).toBeVisible();
+  await renamedInTree(p, api, barrier.id);
   await expect(favoritesOf(p)).toHaveCount(0);
   expect(await treeRow(p, second.id).boundingBox()).toEqual(before);
 
@@ -335,4 +352,113 @@ test("favorites_are_read_after_the_tree_on_a_cold_open", async ({ browser }) => 
   const list = `/api/v1/spaces/${space.id}/favorites`;
   expect(at(`<- ${tree}`), events.join(", ")).toBeLessThan(at(`-> ${list}`));
   expect(at(`-> /api/v1/pages/${page.id}`)).toBeLessThan(at(`-> ${list}`));
+});
+
+test("favorites_thaw_after_a_click_in_a_row_menu_over_the_content", async ({ browser }) => {
+  // I1 : le menu d'une ligne, posé dans `body`, déborde sur le contenu. On y clique une entrée là
+  // où elle déborde (le cas ordinaire : son milieu y est) ; le menu disparaît sous le pointeur, qui
+  // bouge ensuite sur le contenu. « Favoris » n'est plus gelé : la liste reçue se montre.
+  const account = await signUpAccount(`Menu ${unique()}`);
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const first = await createPage(api, { section: "private", title: `Première ${unique()}` });
+  const second = await createPage(api, { section: "private", title: `Seconde ${unique()}` });
+  const p = await newUser(browser, account);
+  const loaded = p.waitForResponse((r) => isFavoritesRead(r.url(), space.id));
+  await p.goto(`/s/${space.id}`);
+  await loaded;
+  const menu = await openRowMenu(p, second.id, second.title);
+  const item = menu.getByRole("menuitem", { name: "Ajouter aux favoris" });
+  const box = (await item.boundingBox())!;
+  const nav = (await sidebarOf(p).boundingBox())!;
+  const x = box.x + box.width - 8;
+  expect(x).toBeGreaterThan(nav.x + nav.width + 4);
+  await p.mouse.click(x, box.y + box.height / 2);
+  await expect.poll(() => favorites(p)).toEqual([second.title]);
+  await p.mouse.move(AWAY.x, AWAY.y, { steps: 5 });
+
+  // Ailleurs, un favori est posé ; un renommage fait relire l'arbre, puis les favoris.
+  expect((await api.put(`/api/v1/pages/${first.id}/favorite`)).status()).toBe(204);
+  const reread = p.waitForResponse((r) => isFavoritesRead(r.url(), space.id));
+  const renamed = `Renommée ${unique()}`;
+  expect((await api.patch(`/api/v1/pages/${first.id}`, { data: { title: renamed } })).status()).toBe(200);
+  expect(await (await reread).json()).toEqual({ pages: [second.id, first.id] });
+  await expect.poll(() => favorites(p)).toEqual([second.title, renamed]);
+});
+
+test("favorite_from_another_tab_shows_after_a_row_menu_was_used_here", async ({ browser }) => {
+  // I1, le cas de R254 : dans l'onglet B, une page est mise à la corbeille par le menu de sa ligne,
+  // à la souris ; dans l'onglet A, un favori est posé ; de retour sur B, le pointeur sur le contenu,
+  // le favori y paraît.
+  const account = await signUpAccount(`Retour ${unique()}`);
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const page = await createPage(api, { section: "private", title: `Favorite ${unique()}` });
+  const other = await createPage(api, { section: "private", title: `Autre ${unique()}` });
+  const junk = await createPage(api, { section: "private", title: `À jeter ${unique()}` });
+  const b = await newUser(browser, account);
+  await b.clock.install();
+  await b.goto(`/p/${other.id}`);
+  await expect(treeRow(b, junk.id)).toBeVisible();
+  const menu = await openRowMenu(b, junk.id, junk.title);
+  const item = menu.getByRole("menuitem", { name: "Mettre à la corbeille" });
+  const box = (await item.boundingBox())!;
+  await b.mouse.click(box.x + box.width - 8, box.y + box.height / 2);
+  await expect(treeRow(b, junk.id)).toHaveCount(0);
+  await b.mouse.move(AWAY.x, AWAY.y, { steps: 5 });
+
+  const a = await b.context().newPage();
+  await a.goto(`/p/${page.id}`);
+  await pageMenuButton(a).click();
+  await a.getByRole("menuitem", { name: "Ajouter aux favoris" }).click();
+  await expect.poll(() => favorites(a)).toEqual([page.title]);
+
+  await b.bringToFront();
+  await b.mouse.move(AWAY.x + 20, AWAY.y + 10, { steps: 3 });
+  const reread = b.waitForResponse((r) => isFavoritesRead(r.url(), space.id));
+  await b.clock.fastForward(5_500);
+  await b.evaluate(() => window.dispatchEvent(new Event("focus")));
+  expect(await (await reread).json()).toEqual({ pages: [page.id] });
+  await expect.poll(() => favorites(b)).toEqual([page.title]);
+});
+
+test("favorites_hold_still_during_a_drag_in_the_tree", async ({ browser }) => {
+  // I2 : au début d'un glisser HTML5, Chromium annule le pointeur (`pointercancel`, puis
+  // `pointerleave`). Pendant que le pointeur tient une page, rien ne bouge sous lui.
+  const account = await signUpAccount(`Glisse ${unique()}`);
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const alpha = await createPage(api, { section: "private", title: `Alpha ${unique()}` });
+  const beta = await createPage(api, { section: "private", title: `Bêta ${unique()}` });
+  const gamma = await createPage(api, { section: "private", title: `Gamma ${unique()}` });
+  const p = await newUser(browser, account);
+  const loaded = p.waitForResponse((r) => isFavoritesRead(r.url(), space.id));
+  await p.goto(`/s/${space.id}`);
+  await loaded;
+  const start = (await treeRow(p, gamma.id).boundingBox())!;
+  const target = (await treeRow(p, beta.id).boundingBox())!;
+  // « Gamma » est tenue au bout de la souris, au-dessus de « Bêta ».
+  await treeRow(p, gamma.id).hover();
+  await p.mouse.down();
+  await p.mouse.move(start.x + 20, start.y + 8, { steps: 3 });
+  await p.mouse.move(target.x + 20, target.y + 8, { steps: 5 });
+  await expect(treeRow(p, gamma.id)).toHaveClass(/is-dragging/);
+  const during = (await treeRow(p, beta.id).boundingBox())!;
+
+  // Pendant le glisser, un favori est posé ailleurs, et une page renommée.
+  expect((await api.put(`/api/v1/pages/${alpha.id}/favorite`)).status()).toBe(204);
+  const reread = p.waitForResponse((r) => isFavoritesRead(r.url(), space.id));
+  const renamed = `Renommée ${unique()}`;
+  expect((await api.patch(`/api/v1/pages/${alpha.id}`, { data: { title: renamed } })).status()).toBe(200);
+  expect(await (await reread).json()).toEqual({ pages: [alpha.id] });
+  // Cette lecture rendue, sous le pointeur qui tient une page, rien n'a bougé.
+  await renamedInTree(p, api, alpha.id);
+  await expect(favoritesOf(p)).toHaveCount(0);
+  expect(await treeRow(p, beta.id).boundingBox()).toEqual(during);
+
+  // Témoin : lâchée hors de la barre, la page n'est déposée nulle part, et la liste arrive.
+  await p.mouse.move(AWAY.x, AWAY.y, { steps: 5 });
+  await p.mouse.up();
+  await expect.poll(() => favorites(p)).toHaveLength(1);
+  await expect(treeRow(p, gamma.id)).not.toHaveClass(/is-dragging/);
 });
