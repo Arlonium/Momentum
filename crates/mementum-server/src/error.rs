@@ -563,6 +563,16 @@ impl ApiError {
         )
     }
 
+    /// `422 subtree_too_large` : la page à dupliquer et ses sous-pages sont trop nombreuses, ou
+    /// trop lourdes, pour une copie (Ruling R252) ; `message` dit lequel, et quoi faire.
+    pub fn subtree_too_large(message: impl Into<String>) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::SubtreeTooLarge,
+            message,
+        )
+    }
+
     /// `400 invalid_request` : le corps d'un envoi s'est interrompu avant sa fin.
     pub fn interrupted_upload() -> ApiError {
         ApiError::new(

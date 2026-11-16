@@ -978,7 +978,7 @@ async fn trashed_since(
 
 /// La page telle que la voit la personne de `access` : son niveau, sa section, et son parent
 /// seulement si elle le voit.
-fn page_node(node: &Node, access: &NodeAccess, trashed_at: Option<i64>) -> PageNode {
+pub(crate) fn page_node(node: &Node, access: &NodeAccess, trashed_at: Option<i64>) -> PageNode {
     PageNode {
         id: node.id.to_string(),
         space_id: node.space_id.to_string(),

@@ -227,6 +227,7 @@ pub mod types;
 mod routes {
     pub(crate) mod auth;
     pub(crate) mod comments;
+    pub(crate) mod duplicate;
     pub(crate) mod events;
     pub(crate) mod favorites;
     pub(crate) mod files;
@@ -262,6 +263,7 @@ pub use events::EVENTS_PING;
 // La copie d'avant migration, que `set_password` signale à qui l'appelle.
 pub use mementum_store::Backup;
 pub use page_writes::{MAX_ACCOUNT_WRITES, MAX_PAGE_WRITES};
+pub use routes::duplicate::MAX_DUPLICATED_PAGES;
 pub use routes::pages::{MAX_MMD_BLOCKS, MAX_TITLE_CHARS, MMD_WRITE_BUDGET, UNTITLED};
 pub use types::{Info, Me, PageNode, SignupMode, Tree};
 
@@ -583,6 +585,10 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/v1/pages/{id}/trash", post(pages::trash))
         .route("/api/v1/pages/{id}/restore", post(pages::restore))
+        .route(
+            "/api/v1/pages/{id}/duplicate",
+            post(routes::duplicate::duplicate),
+        )
         .route(
             "/api/v1/pages/{id}/favorite",
             put(routes::favorites::add).delete(routes::favorites::remove),

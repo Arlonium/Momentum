@@ -873,6 +873,10 @@ pub enum ErrorCode {
     /// lire : la même réponse pour une page qu'il ne voit pas, inconnue ou mal nommée, et pour un
     /// fichier qui n'est pas de cette page, inconnu ou mal nommé (Ruling R558). Statut 422.
     InvalidSource,
+    /// La page à dupliquer et ses sous-pages font plus de cent pages, ou leurs documents pèsent
+    /// trop pour une seule écriture (Ruling R252) ; le message dit lequel : rien n'est copié, et
+    /// l'on duplique par morceaux. Statut 422.
+    SubtreeTooLarge,
 }
 
 /// Corps de toute réponse d'erreur.

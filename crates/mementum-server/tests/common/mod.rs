@@ -780,6 +780,10 @@ pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
             "POST restore",
             bare(Method::POST, format!("{page}/restore")),
         ),
+        (
+            "POST duplicate",
+            bare(Method::POST, format!("{page}/duplicate")),
+        ),
         ("DELETE", bare(Method::DELETE, page.clone())),
         ("GET mmd", bare(Method::GET, format!("{page}/mmd"))),
         (
