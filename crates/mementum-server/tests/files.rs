@@ -9,6 +9,9 @@
 //! d'un envoi et d'une lecture, seule dans `tests/files_alloc.rs`.
 
 mod common;
+/// Une limite connue, affirmée par un test qu'on exécute (Ruling R340).
+#[path = "../../mementum-sync/tests/common/limit.rs"]
+mod limit;
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -2053,4 +2056,98 @@ async fn a_sweep_that_fails_is_logged_and_the_deletion_stands() {
     assert!(line.contains("ERROR"), "{line}");
     assert!(line.contains(&hash), "{line}");
     assert!(path.is_dir(), "ce qui était à sa place y reste");
+}
+
+/// Copie le dossier `from` dans `to`, à toute profondeur.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Les limites connues (Ruling R340) : ce que le test dit voulu n'est pas tenu, et il l'affirme.
+/// Le jour où la limite est levée, il échoue : le sortir de ce module, et lui faire affirmer le
+/// comportement voulu.
+mod known_limits {
+    use super::limit::known_limit;
+    use super::*;
+
+    /// Voulu (preuve 3 du plan, « une base revenue en arrière ») : le fichier est toujours là.
+    /// Aujourd'hui (Ruling R575) : une copie de **la base seule**, prise quand la page portait son
+    /// fichier (comme la copie d'avant migration), remise en place après la suppression définitive
+    /// de la page et son ménage, fait revenir la page, mais pas son fichier : le ménage l'a retiré
+    /// du disque, et la copie ne garde pas `files/`. Le dossier `files/` du serveur est gardé tel
+    /// quel, comme le ferait qui ne restaure que la base. (Sonde 4 de la relecture.)
+    #[tokio::test]
+    async fn a_database_restored_alone_after_a_sweep_lacks_the_files_removed_since() {
+        let t = open_app().await;
+        let team = Team::new(&t).await;
+        let mona = &team.mona.browser;
+        let page = team.page(None, "Album", &[members(Level::Full)]).await;
+        let file = uploaded(mona, page, "photo.png", PNG).await;
+        let url = file["url"].as_str().unwrap().to_string();
+        // Une copie cohérente de la base seule.
+        let restored = common::tmp::TestDir::new();
+        let data = restored.path().join("donnees");
+        std::fs::create_dir_all(&data).unwrap();
+        let copy = data.join(t.db_path().file_name().unwrap());
+        let url_db = format!("sqlite:{}", t.db_path().display());
+        let mut side = sqlx::SqliteConnection::connect(&url_db).await.unwrap();
+        sqlx::query("VACUUM INTO ?")
+            .bind(copy.display().to_string())
+            .execute(&mut side)
+            .await
+            .unwrap();
+        side.close().await.unwrap();
+        delete_for_good(mona, page).await;
+        assert!(!content_path(&t, PNG).exists(), "le ménage a eu lieu");
+
+        // La base seule remise en place, avec le dossier `files/` du serveur tel qu'il est.
+        copy_dir(&t.cfg.data_dir.join("files"), &data.join("files"));
+        let back = TestApp::with_config(|cfg| {
+            cfg.signup = SignupMode::Open;
+            cfg.data_dir = data.clone();
+        })
+        .await;
+        let browser = back.browser();
+        browser.set_session(mona.session().as_deref());
+        browser
+            .get(&format!("/api/v1/pages/{page}"))
+            .await
+            .assert_status(StatusCode::OK);
+
+        let served = read(&browser, &url, &[]).await;
+        let mut unmet = Vec::new();
+        if served.status != StatusCode::OK || served.body.as_ref() != PNG {
+            let said = if served.content_type.as_deref() == Some("application/json") {
+                served.json()["message"].as_str().unwrap_or("").to_string()
+            } else {
+                format!("{} octets", served.body.len())
+            };
+            unmet.push(format!(
+                "fichier de la page revenue : {} « {said} »",
+                served.status.as_u16()
+            ));
+        }
+        let loss = vec![
+            "fichier de la page revenue : 404 « fichier indisponible : son contenu n'est plus sur \
+             le serveur, ou plus entier ; il faut l'envoyer de nouveau »"
+                .to_string(),
+        ];
+        known_limit(
+            "R575 : le ménage retire du disque les contenus d'une page supprimée pour de bon ; une \
+             copie de la base seule, plus ancienne, fait revenir la page sans eux. La lever demande \
+             une purge différée (proposée au lot 7) ; d'ici là, une sauvegarde et une restauration \
+             portent sur le dossier des données entier",
+            &unmet,
+            &loss,
+        );
+    }
 }
