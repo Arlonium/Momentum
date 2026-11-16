@@ -249,6 +249,24 @@ Un relecteur neuf a re-relu le tour 2 dans un atelier à part. **La piste S n'es
 - **Mineurs** : R366 écarte trop (après une entrée écartée, une écriture complète légitime l'est aussi : la page revient à un ancien contenu ou ne se charge plus ; décision : n'écarter que les entrées dont les structures laissent un trou) ; l'assertion de `write_all` est une panique latente (une cellule à prop `colwidth` dans un tableau à largeurs ; non atteignable aujourd'hui, R41 la refuse ; décision : la prop est sautée, et une erreur remplace la panique) ; deux règles sans test (l'ordre « plafonds communs avant la part du compte » pour les messages ; le terme des lignes d'un tableau dans l'estimation).
 - **Dit, sans changement** : un fil se ferme à tous par un seul compte (500 messages par fil ; la part de 2 000 messages par page borne cela à quatre fils).
 
+**Le tour 3, refait le 2026-11-15 et 16, fondu avec le tour 4** (atelier `.claude/worktrees/lot3-s-tour3`, branche `lot3-s-tour3`, à partir de `8921417` ; le premier tour 3 est perdu avec l'ancien poste). Au registre : « Tour de correction 3 (refait le 2026-11-15) », R380 à R389 et R430. **La re-relecture entière des tours 3 et 4 reste à faire.**
+
+| Constat | Fait | Mesures |
+|---|---|---|
+| Critique : lecture d'un MMD plus que quadratique (liens au même `href`) | **fait**, R380 (`bac4a58`) : normalisation en une passe, test de propriétés contre l'ancienne | release : 200 Ko, 44 s puis 28 ms ; 2 Mio, plus de dix minutes puis 273 ms |
+| Critique (re-relecture du tour 3) : mémoire quadratique d'une couleur longue | **fait**, R381 (`875e99a`, `2bf5e42`) : couleur de plage bornée à 100 octets (refusée par `parse`, lue absente d'une page) ; la même recopie à la lecture d'une page de la synchro, prouvée et corrigée, avec celle de l'adresse d'un lien | 131 Ko de MMD : 4,5 Gio puis refusé en 9 ms ; debug, à huit fois la taille : pic de mémoire ×63 puis ×8 |
+| À éprouver : R385 exponentielle ? | **oui, exponentielle**, et corrigée, R385 (`b000585`) : une liste de colonnes jugée avant d'être lue, lue une fois, colonnes examinées une fois | release : 20 niveaux 2,2 s, 50 niveaux (le maximum) des jours ; puis 0,1 ms |
+| `linear.rs` peut passer à tort | les deux tests de linéarité sont écrits pour ne pas le pouvoir (taille de base, octets alloués et pic comptés fil par fil) ; **le premier jet ne pouvait pas échouer sur le temps** (rapport en secondes), corrigé (nanosecondes) | — |
+| Lecture et estimation sur le fil asynchrone ; file des quatre calculs sans borne ni part | **fait**, R383 (`2f6d730`) : hors des fils du serveur, quatre de front ; **la file reste sans borne ni part par compte**, écrit (une part essayée deux fois, retirée : voir R383) | 2 Mio de plages, le pire essayé : 1,4 s en release, sur le fil bloquant |
+| Important : R368, pire écriture acceptée 11 à 12 s | **fait**, R386 (`127c51e`) : une cellule vide compte 35 µs ; un test par terme ; le retrait d'une page énorme reste une limite chiffrée (R382 : 7,7 s pour un paragraphe sur 600 000 cellules, mesure de la re-relecture) | release, poste neuf partagé : pire écriture acceptée 7,2 s avant, 5,5 s après ; lignes de cellules vides acceptées jusqu'à 3 597 lignes avant, 2 160 après |
+| Important : R365 à cheval | **fait**, R384 (`360d35e`) : une seule attente de l'acteur, puis session et droits ; deux tests de route sur des conditions observées (`Hub::calls`, `Hub::calls_waiting`), trente passages verts à un, deux et tous les cœurs | — |
+| Mineur : R366 écarte trop | **fait**, R388 (`3ebea84`) : seules les entrées dont les blocs laissent un trou | — |
+| Mineur : panique latente de `write_all` | **fait**, R389 (`d5cb002`) : `colwidth` sautée, `HalfWritten` et rechargement au lieu de la panique | — |
+| Mineurs : deux règles sans test | **faits** : `page_message_cap_comes_before_the_account_part` (`9ad0c38`), `rows_of_a_table_cost_their_square` (R386) | — |
+| R387 : la sonde du vrai Yjs | **pas gardée en test**, dit pourquoi au registre (Node et paquets npm absents du job `rust` ; une proposition pour le job `web`) | — |
+
+**À éprouver en premier par la re-relecture** : `requests_cut_by_the_client_keep_the_lock_until_written` garde moins depuis R383 (R430 : sous sa mutation, rouge quatre fois sur cinq, contre cinq sur cinq sur `main`) ; la file des calculs de MMD, sans part par compte (R383) ; le poids de 35 µs d'une cellule vide, pris sur la mesure de la re-relecture (l'ancien poste), pas sur ce poste où une cellule coûte moins.
+
 ## Ce que la documentation doit dire (pour la Task 14)
 
 Pour les constats finis :
@@ -313,6 +331,12 @@ Fin du tour de correction 2 de la piste S (R367 à R369) :
 
 - `CLAUDE.md`, trois pièges : le ramasse-miettes de yrs coûte « retiré × écrit » dans une même transaction : l'écriture complète d'une page retire puis écrit en deux transactions, à garder (R367) ; toute liste neuve écrite par insertions successives entre dans `crates/mementum-crdt/src/cost.rs` (R368) ; yrs range les marques d'une plage à plusieurs marques dans l'ordre d'une `HashMap` : ne jamais comparer les octets de telles écritures.
 - README et conception (l'API `PUT /mmd`) : les deux bornes (12 000 blocs ; une écriture estimée à plus de 8 s) et le refus `422 too_long_to_write` ; une grande page se récrit et se restaure désormais en moins d'une seconde pour 10 000 blocs (ce qui attendait le propriétaire : « restaurer une page de 10 000 blocs occupe son acteur 5 secondes », n'est plus vrai).
+
+Tour de correction 3 de la piste S, refait (R380 à R389, R430) :
+
+- `CLAUDE.md` : section « Pièges rencontrés au tour 3 de la piste S » (faite dans ce tour).
+- README, limites connues : une couleur de plage de plus de 100 octets est refusée par `PUT /mmd` et lue absente d'une page (R381) ; la lecture d'un MMD se fait hors des fils du serveur, quatre de front, sans part par compte (R383) ; une page déjà énorme coûte son retrait à chaque récriture (R382).
+- Conception, §6.2 (MMD) : la borne des couleurs ; §5 (synchro) : une liste de colonnes jugée avant d'être lue (R385), l'ordre « une attente de l'acteur, puis les contrôles » pour un fil sur un bloc (R384), la relecture du journal après une entrée écartée (R388), `HalfWritten` (R389) ; l'API `PUT /mmd` : le poids d'une cellule vide dans l'estimation (R386).
 
 Pour chaque constat fini ensuite, ajouter ici ce que la documentation doit en dire : la Task 14 part de cette liste. Sont déjà sûrs de changer : le README et `CLAUDE.md` pour l'historique (« Peut lire » lit l'historique sans restaurer : faux après S5 et C7), la puce R181 de `CLAUDE.md` (S2), le canal de l'espace (S6, C6), `PUT /mmd` et les identifiants (S3), les plafonds des commentaires (S4).
 
