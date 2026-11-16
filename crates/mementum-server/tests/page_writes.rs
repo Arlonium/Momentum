@@ -874,7 +874,7 @@ async fn a_full_page_queue_refuses_at_once() {
         }
     }
     assert!(
-        written >= 1 && written <= mementum_server::MAX_PAGE_WRITES,
+        (1..=mementum_server::MAX_PAGE_WRITES).contains(&written),
         "{written} écritures"
     );
     assert_eq!(written + busy, BURST);
