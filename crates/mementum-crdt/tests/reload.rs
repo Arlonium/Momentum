@@ -14,6 +14,10 @@
 //! la racine. `children` de yrs s'arrête au premier enfant qui n'est pas un nœud XML : 25 octets en
 //! tête de la racine, et le serveur lisait la page vide ; un agent qui la relisait et la récrivait
 //! l'effaçait. La page lue a toujours autant d'enfants que de longueur.
+//!
+//! Et (Ruling R536) : une page dont le journal porte le report d'un bloc recréé (Task 13b : un
+//! client déplace un bloc sans avoir vu ce qu'un autre vient d'y taper, et le serveur reporte la
+//! frappe dans la copie) se relit comme la page vivante, et le report passe les mêmes gardes.
 
 use mementum_crdt::{FRAGMENT, PageDoc};
 use proptest::prelude::*;
@@ -22,8 +26,8 @@ use yrs::types::Attrs;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, ClientID, Doc, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
-    XmlFragment, XmlOut, XmlTextPrelim, XmlTextRef,
+    Any, ClientID, Doc, OffsetKind, Options, Out, ReadTxn, StateVector, Text, Transact, Update,
+    Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim, XmlTextRef,
 };
 
 fn var(out: &mut Vec<u8>, mut value: u64) {
@@ -137,6 +141,8 @@ fn texts(page: &PageDoc) -> Vec<String> {
 struct Served {
     page: PageDoc,
     journal: Vec<Vec<u8>>,
+    /// Les reports d'un bloc recréé écrits au journal (Task 13b).
+    carried: usize,
 }
 
 impl Served {
@@ -145,6 +151,7 @@ impl Served {
         Served {
             page,
             journal: vec![created],
+            carried: 0,
         }
     }
 
@@ -152,6 +159,7 @@ impl Served {
         match self.page.apply_client_update(update) {
             Ok(applied) => {
                 self.journal.push(applied.read);
+                self.carried += usize::from(applied.carried.is_some());
                 self.journal.extend(applied.carried);
                 self.journal.extend(self.page.dedupe_blocks());
                 true
@@ -356,6 +364,90 @@ fn a_mark_at_a_known_clock_deletes_nothing_on_reload() {
     served.assert_reload_is_live("une marque à une horloge connue");
 }
 
+/// Ce qu'écrit un client qui déplace le premier bloc, comme y-prosemirror (Ruling R220) : il le
+/// recrée au même `id` à la fin de la racine, avec le texte qu'il en voit (marques comprises), et
+/// supprime l'original. Une mise à jour vide si la page n'a plus de premier bloc à `id` dont le
+/// premier enfant est un élément, ou si son texte porte un contenu fait à la main.
+fn moved(doc: &Doc) -> Vec<u8> {
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let mut txn = doc.transact_mut();
+    let found = (|| {
+        let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+            return None;
+        };
+        let Some(XmlOut::Element(container)) = group.get(&txn, 0) else {
+            return None;
+        };
+        let Some(Out::Any(Any::String(id))) = container.get_attribute(&txn, "id") else {
+            return None;
+        };
+        let Some(XmlOut::Element(content)) = container.get(&txn, 0) else {
+            return None;
+        };
+        let runs = match content.get(&txn, 0) {
+            Some(XmlOut::Text(text)) => {
+                let mut shown = 0;
+                let mut runs = Vec::new();
+                for run in text.diff(&txn, yrs::types::text::YChange::identity) {
+                    let Out::Any(Any::String(s)) = run.insert else {
+                        return None;
+                    };
+                    shown += s.encode_utf16().count() as u32;
+                    let attrs: Attrs = run.attributes.map(|a| *a).unwrap_or_default();
+                    runs.push((s.to_string(), attrs));
+                }
+                if shown != text.len(&txn) {
+                    return None;
+                }
+                runs
+            }
+            None => Vec::new(),
+            Some(_) => return None,
+        };
+        Some((group, id.to_string(), content.tag().to_string(), runs))
+    })();
+    if let Some((group, id, tag, runs)) = found {
+        let len = group.len(&txn);
+        let copy = group.insert(&mut txn, len, XmlElementPrelim::empty("blockContainer"));
+        copy.insert_attribute(&mut txn, "id", id);
+        let content = copy.push_back(&mut txn, XmlElementPrelim::empty(tag.as_str()));
+        let text = content.push_back(&mut txn, XmlTextPrelim::new(""));
+        let mut at = 0;
+        for (run, attrs) in runs {
+            text.insert_with_attributes(&mut txn, at, &run, attrs);
+            at += run.encode_utf16().count() as u32;
+        }
+        group.remove_range(&mut txn, 0, 1);
+    }
+    txn.encode_update_v1()
+}
+
+/// Ruling R536 : Olga tape en gras dans un bloc que Mona déplace sans avoir vu la frappe. Le
+/// serveur reporte la frappe dans la copie de Mona ; le report, au journal avec la mise à jour,
+/// passe les gardes, et la page rechargée est la page vivante.
+#[test]
+fn a_page_with_a_carried_report_reloads_as_live() {
+    let mut served = Served::new();
+    let clients = [client(10, &served), client(20, &served)];
+    assert!(served.receive(&honest(&clients[0], |txn, t| t.insert(txn, 0, "abc"))));
+    for doc in &clients {
+        catch_up(doc, &served);
+    }
+    let typed = honest(&clients[0], |txn, t| {
+        let mut attrs = Attrs::new();
+        attrs.insert("bold".into(), Any::Map(Default::default()));
+        t.insert_with_attributes(txn, 1, "XY", attrs);
+    });
+    assert!(served.receive(&typed));
+    assert!(
+        served.receive(&moved(&clients[1])),
+        "le déplacement de Mona"
+    );
+    assert_eq!(served.carried, 1, "un report");
+    assert_eq!(texts(&served.page), ["aXYbc"]);
+    served.assert_reload_is_live("un report au journal");
+}
+
 /// Ruling R491 : ce que rend `apply_client_update`, que l'acteur écrit au journal et relaie, ne
 /// porte que ce que la page a intégré : ni la marque à une horloge connue (yrs l'ignore), ni rien
 /// d'autre que la suppression.
@@ -524,6 +616,13 @@ enum Op {
     Delete { who: usize, at: usize, len: usize },
     /// Le client `who` met en gras `len` caractères à partir de `at`.
     Bold { who: usize, at: usize, len: usize },
+    /// L'autre client tape `typed` à la position `at` du premier bloc ; `who`, qui ne l'a pas vu,
+    /// déplace ce bloc (Ruling R536 : le serveur reporte la frappe dans la copie).
+    Move {
+        who: usize,
+        at: usize,
+        typed: String,
+    },
     /// Une mise à jour faite à la main : `item` à l'horloge `clock` (ramenée sous le plancher si
     /// `below`) d'un client de la page, à la place `place` (la racine, en tête d'un type de la page,
     /// ou après un élément connu), et une suppression d'un élément connu.
@@ -550,6 +649,11 @@ fn op() -> impl Strategy<Value = Op> {
             len
         }),
         (0..2usize, any::<usize>(), 1..4usize).prop_map(|(who, at, len)| Op::Bold { who, at, len }),
+        (0..2usize, any::<usize>(), "[a-z]{1,3}").prop_map(|(who, at, typed)| Op::Move {
+            who,
+            at,
+            typed
+        }),
         (
             proptest::option::of((
                 any::<usize>(),
@@ -586,7 +690,8 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
     /// Ruling R490, R491 : après chaque mise à jour acceptée, la page rechargée de son journal est
-    /// la page vivante, quelles que soient les mises à jour faites à la main qui s'y mêlent.
+    /// la page vivante, quelles que soient les mises à jour faites à la main qui s'y mêlent ; des
+    /// déplacements faits sans avoir vu la dernière frappe y mêlent des reports (R536).
     #[test]
     fn a_reloaded_page_is_the_live_page(ops in prop::collection::vec(op(), 1..24)) {
         let mut served = Served::new();
@@ -620,6 +725,15 @@ proptest! {
                         t.format(txn, at, len, attrs);
                     }
                 }),
+                Op::Move { who, at, typed } => {
+                    let typing = honest(&clients[1 - *who], |txn, t| {
+                        let at = bounded(*at, t.len(txn) as usize);
+                        t.insert(txn, at, typed);
+                    });
+                    served.receive(&typing);
+                    served.assert_reload_is_live(&format!("étape {step} ({op:?}), la frappe"));
+                    moved(&clients[*who])
+                }
                 Op::Hostile { item, delete } => {
                     // Les clients de la page et leur horloge.
                     let state = StateVector::decode_v1(&served.page.state_vector()).unwrap();

@@ -326,8 +326,10 @@ impl PageDoc {
     /// cette écriture, s'il y a eu quelque chose à écrire, ou pourquoi rien ne l'a été.
     ///
     /// L'écriture est relue comme une entrée du journal avant d'être rendue (Ruling R452) : la
-    /// garde, la profondeur de ce qu'elle insère, sa taille. Si elle n'y passe pas, elle est déjà
-    /// dans la page : `CarryRefused`, et la page est à jeter.
+    /// garde, la profondeur de ce qu'elle insère, sa taille, et les gardes qu'une mise à jour de
+    /// client passe (Ruling R536) : ses marques (R431), ses contenus sans type (R496), ses listes
+    /// lues en entier (R497). Si elle n'y passe pas, elle est déjà dans la page : `CarryRefused`,
+    /// et la page est à jeter.
     fn carry(
         &self,
         recreated: &[Recreated],
@@ -340,6 +342,8 @@ impl PageDoc {
             Carried::Written(written, bound) => (written, bound),
         };
         let update = txn.encode_update_v1();
+        // yrs ne dresse la liste des types changés qu'à la validation (R497, `lists_are_whole`).
+        txn.commit();
         // Ruling R458 : l'estimation est une borne haute ; la dépasser est un défaut, que les
         // tests voient.
         debug_assert!(
@@ -699,9 +703,11 @@ impl PageDoc {
     }
 }
 
-/// Relit le report `update`, écrit dans `txn` sur une page dont le vecteur d'état était `before`,
-/// comme une entrée du journal (Ruling R452) : sa taille ([`MAX_CARRIED_BYTES`]), la garde, la
-/// profondeur de ce qu'il insère. `Err` dit ce qui ne passe pas.
+/// Relit le report `update`, écrit dans `txn` (validée) sur une page dont le vecteur d'état était
+/// `before`, comme une entrée du journal (Ruling R452) : sa taille ([`MAX_CARRIED_BYTES`]), la
+/// garde, la profondeur de ce qu'il insère ; et comme une mise à jour de client (Ruling R536) :
+/// ses marques de texte (R431), ses contenus sans type parmi les enfants d'un élément (R496), et
+/// chaque liste qu'il change, lue en entier (R497). `Err` dit ce qui ne passe pas.
 fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> Result<(), String> {
     if update.len() > MAX_CARRIED_BYTES {
         return Err(format!(
@@ -713,6 +719,16 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
     shape.check(before).map_err(|e| e.to_string())?;
     if shape.deeper_than_bound(txn) {
         return Err(CrdtError::TooDeep.to_string());
+    }
+    shape.check_marks(before).map_err(|e| e.to_string())?;
+    shape
+        .check_untyped(before, |(client, clock)| {
+            BranchID::get_nested(txn, &ID::new(ClientID::new(client), clock))
+                .map(|branch| matches!(branch.type_ref(), TypeRef::XmlText))
+        })
+        .map_err(|e| e.to_string())?;
+    if !lists_are_whole(txn, &shape) {
+        return Err(UNTYPED_CHILD.to_string());
     }
     Ok(())
 }
@@ -891,6 +907,7 @@ mod tests {
         let text = root.push_back(&mut txn, XmlTextPrelim::new(""));
         text.insert(&mut txn, 0, "texte");
         let update = txn.encode_update_v1();
+        txn.commit();
         assert_eq!(verify_carried(&update, &before, &txn), Ok(()));
         drop(txn);
 
@@ -899,6 +916,7 @@ mod tests {
         let before = txn.state_vector();
         text.insert(&mut txn, 0, &"x".repeat(MAX_CARRIED_BYTES + 1));
         let update = txn.encode_update_v1();
+        txn.commit();
         assert!(verify_carried(&update, &before, &txn).is_err());
         drop(txn);
 
@@ -908,6 +926,7 @@ mod tests {
         let before = txn.state_vector();
         other.push_back(&mut txn, XmlTextPrelim::new("hors de la page"));
         let update = txn.encode_update_v1();
+        txn.commit();
         assert!(verify_carried(&update, &before, &txn).is_err());
         drop(txn);
 
@@ -922,10 +941,110 @@ mod tests {
         let before = txn.state_vector();
         parent.push_back(&mut txn, XmlTextPrelim::new("trop profond"));
         let update = txn.encode_update_v1();
+        txn.commit();
         assert_eq!(
             verify_carried(&update, &before, &txn),
             Err(CrdtError::TooDeep.to_string())
         );
+    }
+
+    /// Ruling R536 : la relecture d'un report refuse aussi ce que la garde refuse d'un client :
+    /// une marque hors du schéma ou trop longue (R431), un contenu sans type dont le parent est
+    /// nommé (R496), ou posé par l'origine d'un voisin parmi les enfants d'un élément (R497) ; elle
+    /// laisse passer une marque du schéma.
+    #[test]
+    fn verify_carried_refuses_what_a_client_update_would_refuse() {
+        use yrs::{Text, XmlTextPrelim};
+
+        let page = page(7);
+        page.fill(&mut page.doc.transact_mut(), &[empty_paragraph()]);
+        let text = {
+            let mut txn = page.doc.transact_mut();
+            let root = page.root(&txn).unwrap();
+            let text = root.push_back(&mut txn, XmlTextPrelim::new(""));
+            text.insert(&mut txn, 0, "texte");
+            text
+        };
+        let format = |key: &str, value: Any| {
+            let mut txn = page.doc.transact_mut();
+            let before = txn.state_vector();
+            let mut attrs = yrs::types::Attrs::new();
+            attrs.insert(key.into(), value);
+            text.format(&mut txn, 0, 2, attrs);
+            let update = txn.encode_update_v1();
+            txn.commit();
+            verify_carried(&update, &before, &txn)
+        };
+        let href = |n: usize| {
+            Any::from(HashMap::from([(
+                "href".to_string(),
+                Any::from("a".repeat(n)),
+            )]))
+        };
+        assert_eq!(
+            format("bold", Any::from(HashMap::<String, Any>::new())),
+            Ok(())
+        );
+        assert_eq!(format("link", href(100)), Ok(()));
+        assert!(format("x", Any::Bool(true)).is_err(), "hors du schéma");
+        assert!(format("link", href(20_000)).is_err(), "trop longue");
+
+        // Une chaîne d'un client neuf, faite à la main : par l'origine (après le premier élément
+        // du fragment, la racine), ou parent nommé (en tête du fragment).
+        let untyped = |client: u64, origin: Option<(u64, u32)>| {
+            let mut bytes = vec![1, 1];
+            let var = |out: &mut Vec<u8>, mut v: u64| {
+                while v > 0x7F {
+                    out.push(0x80 | (v & 0x7F) as u8);
+                    v >>= 7;
+                }
+                out.push(v as u8);
+            };
+            var(&mut bytes, client);
+            var(&mut bytes, 0);
+            match origin {
+                None => {
+                    bytes.push(4);
+                    var(&mut bytes, 1);
+                    var(&mut bytes, FRAGMENT.len() as u64);
+                    bytes.extend_from_slice(FRAGMENT.as_bytes());
+                }
+                Some((client, clock)) => {
+                    bytes.push(4 | 0x80);
+                    var(&mut bytes, client);
+                    var(&mut bytes, clock as u64);
+                }
+            }
+            var(&mut bytes, 1);
+            bytes.push(b'x');
+            bytes.push(0);
+            let mut txn = page.doc.transact_mut();
+            let before = txn.state_vector();
+            txn.apply_update(Update::decode_v1(&bytes).unwrap())
+                .unwrap();
+            let update = txn.encode_update_v1();
+            txn.commit();
+            let verdict = verify_carried(&update, &before, &txn);
+            drop(txn);
+            verdict
+        };
+        let first = {
+            let txn = page.doc.transact();
+            let Some(XmlOut::Element(first)) = page.fragment.get(&txn, 0) else {
+                panic!("la racine");
+            };
+            let yrs::branch::BranchID::Nested(id) =
+                AsRef::<yrs::branch::Branch>::as_ref(&first).id()
+            else {
+                panic!("un élément");
+            };
+            (id.client.get(), id.clock)
+        };
+        assert!(
+            untyped(4242, Some(first)).is_err(),
+            "après la racine, par l'origine"
+        );
+        assert!(untyped(4243, None).is_err(), "en tête du fragment");
     }
 
     /// Ruling R389 : la prop `colwidth` d'une cellule, dans un tableau à largeurs, était posée
