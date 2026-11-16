@@ -844,6 +844,22 @@ export function setFavorite(pageId: string, on: boolean): Promise<void> {
   return call(on ? "PUT" : "DELETE", `${page(pageId)}/favorite`);
 }
 
+// Dupliquer une page (R252) : la page et ses sous-pages que le compte voit, hors corbeille, dans
+// des pages neuves. La copie va sous la page parente, juste après la page, si le compte peut y
+// créer ; sinon, pour un membre, à la racine de son « Privé ».
+
+/**
+ * `POST /api/v1/pages/{id}/duplicate`, sans corps : `201`, la page racine de la copie (son
+ * `parentId` et sa `section` disent où elle est). Refus, dans l'ordre : `404`, `403` (un invité
+ * qui ne peut pas créer à côté), `409 trashed`, `422 invalid_request` (un dossier), `429
+ * duplication_busy` (une duplication à la fois par compte, et un budget par minute : le message
+ * dit quand revenir ; personne ne le rejoue, R612), `422 subtree_too_large` (100 pages ou 16 Mio :
+ * dupliquer par morceaux), `409 page_moved`. La requête peut durer plusieurs secondes.
+ */
+export function duplicatePage(id: string): Promise<PageNode> {
+  return call("POST", `${page(id)}/duplicate`);
+}
+
 /** Longueur maximale d'un titre, en caractères Unicode (le serveur fait foi, R30). */
 export const MAX_TITLE_CHARS = 500;
 

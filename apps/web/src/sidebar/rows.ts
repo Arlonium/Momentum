@@ -2,7 +2,8 @@
 // celles de la fenêtre visible (Ruling R43). Chaque page affichée ajoutait environ 0,26 ms
 // à l'ouverture d'une page, parce que les recalculs de styles suivent le nombre de nœuds du
 // document.
-import type { PageNode } from "@mementum/protocol";
+import type { PageNode, Role } from "@mementum/protocol";
+import { canEdit } from "../share/levels";
 
 /** Une ligne de l'arbre : une page visible, à sa profondeur (0 : la racine). */
 export type Row = { node: PageNode; depth: number; hasChildren: boolean; open: boolean };
@@ -101,4 +102,23 @@ export function neighbourOf(
   const after = rows.slice(subtreeEnd(rows, at)).find((row) => stays(row.node.id));
   const before = rows.slice(0, at).findLast((row) => stays(row.node.id));
   return (after ?? before)?.node.id ?? null;
+}
+
+/** La page parente de `node` telle que l'arbre la montre ; `undefined` : à la racine, ou invisible. */
+export function parentOf(nodes: PageNode[], node: PageNode): PageNode | undefined {
+  return node.parentId === null ? undefined : nodes.find((other) => other.id === node.parentId);
+}
+
+/**
+ * Le serveur laisse-t-il dupliquer `node` (Ruling R252) ? Sa règle : la copie va sous la page
+ * parente si le compte la voit (`parent`, celle de l'arbre) et peut y créer (« Peut modifier ») ;
+ * sinon, pour un membre (ou plus), dans son « Privé » ; un invité, lui, n'a nulle part où la
+ * poser (`403`). Jamais à la corbeille (`409 trashed`), ni pour un dossier (R610). Le serveur fait
+ * foi : il rejuge tout au moment d'écrire.
+ */
+export function canDuplicate(node: PageNode, parent: PageNode | undefined, role: Role): boolean {
+  if (node.kind !== "page" || node.trashedAt !== null) return false;
+  if (parent?.trashedAt != null) return false;
+  if (role !== "guest") return true;
+  return parent !== undefined && canEdit(parent.level);
 }

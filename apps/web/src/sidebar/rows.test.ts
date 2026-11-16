@@ -1,8 +1,8 @@
 // L'arbre des pages, aplati en lignes (`flattenRows`) : c'est l'ordre et la profondeur des
 // lignes que la barre latérale affiche, une par page visible.
-import type { PageNode } from "@mementum/protocol";
+import type { Level, PageNode } from "@mementum/protocol";
 import { expect, test } from "vitest";
-import { flattenRows, neighbourOf, subtreeEnd, withoutSubtree } from "./rows";
+import { canDuplicate, flattenRows, neighbourOf, parentOf, subtreeEnd, withoutSubtree } from "./rows";
 
 function page(id: string, parentId: string | null, position: string): PageNode {
   return {
@@ -178,4 +178,54 @@ test("neighbour_of_a_row_that_left_is_one_that_stays", () => {
   // Ses sous-pages ne comptent pas, même si elles restent ailleurs dans l'arbre.
   expect(neighbourOf(rows, "b", stays("b1"))).toBeNull();
   expect(neighbourOf(rows, "b", stays())).toBeNull();
+});
+
+test("duplicate_is_offered_only_where_the_server_allows_it", () => {
+  // La règle du serveur (R252, R595) : la copie va sous la page parente si le compte la voit et
+  // peut y créer (« Peut modifier ») ; sinon, pour un membre, dans son « Privé » ; un invité, lui,
+  // n'a nulle part où la poser (`403`).
+  const at = (id: string, parentId: string | null, level: Level) => ({
+    ...page(id, parentId, "a0"),
+    level,
+  });
+  const top = at("top", null, "edit");
+  const readable = at("lue", null, "read");
+  const under = at("sous", "top", "edit");
+  const underReadable = at("sous-lue", "lue", "read");
+  const nodes = [top, readable, under, underReadable];
+
+  // Un membre (ou plus) : partout, à tout niveau, à la racine comme en sous-page, page parente
+  // visible ou non.
+  for (const role of ["owner", "admin", "member"] as const) {
+    expect(canDuplicate(top, parentOf(nodes, top), role)).toBe(true);
+    expect(canDuplicate(readable, parentOf(nodes, readable), role)).toBe(true);
+    expect(canDuplicate(underReadable, parentOf(nodes, underReadable), role)).toBe(true);
+    expect(canDuplicate(under, undefined, role)).toBe(true);
+  }
+  // Un invité : une page partagée à la racine, non ; une sous-page sous une page qu'il ne peut
+  // pas modifier, non ; sous une page parente qu'il ne voit pas, non ; sous une page parente
+  // modifiable et visible, oui.
+  expect(canDuplicate(top, parentOf(nodes, top), "guest")).toBe(false);
+  expect(canDuplicate(underReadable, parentOf(nodes, underReadable), "guest")).toBe(false);
+  expect(canDuplicate(under, undefined, "guest")).toBe(false);
+  expect(canDuplicate(under, parentOf(nodes, under), "guest")).toBe(true);
+  expect(canDuplicate(under, { ...top, level: "full" }, "guest")).toBe(true);
+  expect(canDuplicate(under, { ...top, level: "comment" }, "guest")).toBe(false);
+
+  // À la corbeille (elle-même, ou sa page parente), personne : le serveur répond `409 trashed`.
+  expect(canDuplicate({ ...top, trashedAt: 1 }, undefined, "owner")).toBe(false);
+  expect(canDuplicate(under, { ...top, trashedAt: 1 }, "guest")).toBe(false);
+  // Un dossier ne se duplique pas (R610).
+  expect(canDuplicate({ ...top, kind: "folder" }, undefined, "owner")).toBe(false);
+});
+
+test("parent_of_a_page_is_the_one_the_tree_shows", () => {
+  const top = page("top", null, "a0");
+  const under = page("sous", "top", "a0");
+  const orphan = page("orpheline", "invisible", "a1");
+  const nodes = [top, under, orphan];
+  expect(parentOf(nodes, under)).toBe(top);
+  // Une page de racine, ou dont la page parente n'est pas dans l'arbre (le compte ne la voit pas).
+  expect(parentOf(nodes, top)).toBeUndefined();
+  expect(parentOf(nodes, orphan)).toBeUndefined();
 });

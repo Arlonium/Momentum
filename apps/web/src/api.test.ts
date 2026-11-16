@@ -1317,3 +1317,29 @@ test("a_call_refused_for_another_account_reads_the_account_afresh", async () => 
   expect(others).toEqual(["bruno"]);
   expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
 });
+
+test("a_duplication_is_posted_without_a_body_and_its_refusal_is_never_sent_again", async () => {
+  // Dupliquer une page (R252) : `POST …/duplicate`, sans corps, au nom du compte de l'application ;
+  // le serveur rend la page racine de la copie.
+  await loadedAs("alice");
+  const copy = page("copie", { title: "Plan (copie)" });
+  const asked1 = api.duplicatePage("p1");
+  const first = await waiting("POST", "/api/v1/pages/p1/duplicate");
+  expect(first.body).toBeUndefined();
+  expect(first.account).toBe("alice");
+  first.answer(201, copy);
+  await expect(asked1).resolves.toEqual(copy);
+  // Le compte duplique déjà, ou a dépensé son budget : `429 duplication_busy` (R605, R606). Ni
+  // `api.ts` ni personne ne le rejoue (R612) : le refus est rendu tel quel, une fois, et ne dit
+  // rien de la session.
+  const busy = {
+    error: "duplication_busy",
+    message: "tu as déjà une duplication en cours : attends qu'elle finisse avant d'en demander une autre ; rien n'a été copié",
+  };
+  const asked2 = api.duplicatePage("p1");
+  (await waiting("POST", "/api/v1/pages/p1/duplicate")).answer(429, busy);
+  await expect(asked2).rejects.toMatchObject({ status: 429, code: "duplication_busy", message: busy.message });
+  await flush();
+  expect(count("POST", "/api/v1/pages/p1/duplicate")).toBe(2);
+  expect(asked).toBe(0);
+});

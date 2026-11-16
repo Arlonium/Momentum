@@ -1,7 +1,7 @@
 // Les actions sur les pages d'un espace, depuis la barre latérale et la page ouverte : créer,
-// renommer, mettre à la corbeille, restaurer, déplacer ; et ce que dit un favori refusé (R254 :
-// `useFavorites` le pose et le défait, le refus se dit ici). Le serveur fait foi. Une page ne
-// change à l'écran qu'une fois le serveur d'accord ; sur son refus, rien n'a bougé, et son
+// dupliquer, renommer, mettre à la corbeille, restaurer, déplacer ; et ce que dit un favori refusé
+// (R254 : `useFavorites` le pose et le défait, le refus se dit ici). Le serveur fait foi. Une page
+// ne change à l'écran qu'une fois le serveur d'accord ; sur son refus, rien n'a bougé, et son
 // message s'affiche en pied de barre latérale (`notice`), jusqu'à la navigation suivante.
 //
 // Un refus dit que l'écran n'est plus celui du serveur (une page jetée, supprimée ou déplacée
@@ -16,7 +16,15 @@
 // sa ligne le savent aussitôt, et la barre latérale est relue pour ses sous-pages.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, createPage, isSessionLost, restorePage, trashPage, updatePage } from "../api";
+import {
+  ApiError,
+  createPage,
+  duplicatePage,
+  isSessionLost,
+  restorePage,
+  trashPage,
+  updatePage,
+} from "../api";
 import type { OpenPage } from "../page/useOpenPage";
 import { navigate, pagePath } from "../router";
 import { messageOf } from "../session/forms";
@@ -63,6 +71,22 @@ function creationRefusal(error: unknown): string {
     : sentence(error);
 }
 
+/**
+ * La personne écrit-elle quelque part (un champ, un texte modifiable : le titre, l'éditeur, un
+ * commentaire) ? Une copie prête à ce moment-là ne s'ouvre pas : sa frappe irait dans le titre de
+ * la copie, qui prend le focus (R646).
+ */
+function typing(): boolean {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return false;
+  return (
+    active.isContentEditable ||
+    active instanceof HTMLInputElement ||
+    active instanceof HTMLTextAreaElement ||
+    active instanceof HTMLSelectElement
+  );
+}
+
 type Inputs = {
   tree: SpaceTree;
   page: OpenPage;
@@ -86,6 +110,14 @@ export type PageActions = {
   titleFocused: () => void;
   /** Crée une page (sous une page, ou à la racine d'une section) et l'ouvre. */
   create: (target: CreateTarget) => Promise<void>;
+  /**
+   * Duplique la page et ses sous-pages (R252), et ouvre la copie là où le serveur l'a mise : sous
+   * la page parente, ou dans « Privé ». Pas si la personne est partie ailleurs, ou écrit, pendant
+   * la requête (R646) : la copie paraît alors dans la barre latérale seulement.
+   */
+  duplicate: (id: string) => Promise<void>;
+  /** Une duplication est en route : les entrées « Dupliquer » sont inactives (R605). */
+  duplicating: boolean;
   /** Le titre d'une page a été enregistré. */
   saved: (node: PageNode) => void;
   /** Met la page à la corbeille, avec ses sous-pages. */
@@ -183,6 +215,48 @@ export function usePageActions({
       }
     },
     [spaceId, isStale, change, reload],
+  );
+
+  /**
+   * Une duplication est en route : « Dupliquer » n'en lance pas d'autre (le serveur la refuserait,
+   * `429`, R605). L'état dit aux menus de griser leur entrée ; la référence garde les appels qui se
+   * suivent dans le même rendu.
+   */
+  const duplicatingNow = useRef(false);
+  const [duplicating, setDuplicating] = useState(false);
+  const duplicate = useCallback(
+    async (id: string) => {
+      if (isStale() || duplicatingNow.current) return;
+      duplicatingNow.current = true;
+      setDuplicating(true);
+      setNotice(null);
+      // L'adresse au départ : partie ailleurs pendant la requête, la personne y reste (R646).
+      const from = location.pathname;
+      try {
+        const copy = await duplicatePage(id);
+        // Une relecture a pu l'apporter avant cette réponse : une seule ligne.
+        change((nodes, space) =>
+          space !== copy.spaceId || nodes.some((n) => n.id === copy.id) ? nodes : [...nodes, copy],
+        );
+        // Ses sous-pages ne sont pas dans la réponse : l'arbre est relu (le canal de l'espace le
+        // ferait aussi, mais il peut être tombé).
+        reload();
+        if (location.pathname !== from || typing()) return;
+        setCreated(copy.id);
+        navigate(pagePath(copy.id));
+      } catch (error) {
+        if (isSessionLost(error)) return;
+        setNotice(`La page n'a pas pu être dupliquée. ${sentence(error)}`);
+        // `429` : le compte duplique déjà, ou a dépensé son budget ; le message dit quand revenir,
+        // et rien ne le rejoue (R612). Il ne dit rien de la page : l'arbre n'a pas à être relu. Tout
+        // autre refus dit que l'écran n'est plus celui du serveur.
+        if (!(error instanceof ApiError && error.code === "duplication_busy")) reload();
+      } finally {
+        duplicatingNow.current = false;
+        setDuplicating(false);
+      }
+    },
+    [isStale, change, reload],
   );
 
   const saved = useCallback(
@@ -332,6 +406,8 @@ export function usePageActions({
     created,
     titleFocused,
     create,
+    duplicate,
+    duplicating,
     saved,
     trash,
     move,

@@ -5,6 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import {
   ApiError,
   createPage,
+  duplicatePage,
   getPage,
   getTree,
   restorePage,
@@ -22,6 +23,7 @@ vi.mock("../api", async (original) => ({
   getTree: vi.fn(),
   getPage: vi.fn(),
   createPage: vi.fn(),
+  duplicatePage: vi.fn(),
   trashPage: vi.fn(),
   restorePage: vi.fn(),
   updatePage: vi.fn(),
@@ -35,7 +37,9 @@ beforeEach(() => {
   history.replaceState(null, "", "/s/space");
   server = [];
   caughtUp.mockClear();
-  for (const mock of [createPage, trashPage, restorePage, updatePage]) vi.mocked(mock).mockReset();
+  for (const mock of [createPage, duplicatePage, trashPage, restorePage, updatePage]) {
+    vi.mocked(mock).mockReset();
+  }
   // Par défaut, le serveur ne répond pas encore à qui demande une page.
   vi.mocked(getPage).mockReset();
   vi.mocked(getPage).mockImplementation(() => new Promise(() => {}));
@@ -502,4 +506,178 @@ test("a_new_favorite_gesture_takes_the_last_refusal_away", async () => {
   await settle(() => app.current.actions.shareRefused("accès complet requis sur cette page"));
   await settle(() => app.current.actions.favoriteStarted());
   expect(app.current.actions.notice).toBeNull();
+});
+
+test("duplicate_opens_the_copy_and_lists_it", async () => {
+  // Une sous-page que le compte peut créer à côté : la copie est posée juste après elle, sous la
+  // même page parente (R252). Elle s'ouvre, son titre prendra le focus comme celui d'une page
+  // créée, et l'arbre est relu : ses sous-pages ne sont pas dans la réponse.
+  const parent = page("a");
+  const original = page("a1", { parentId: "a", position: "a0" });
+  const app = await withTree([parent, original, page("b", { position: "a1" })]);
+  const copy = page("c1", { parentId: "a", position: "a0V", title: "A1 (copie)" });
+  const copied = page("c1x", { parentId: "c1", title: "Sous-page" });
+  server = [parent, original, copy, copied, page("b", { position: "a1" })];
+  const reads = treeReads();
+  vi.mocked(duplicatePage).mockResolvedValue(copy);
+
+  await settle(() => app.current.actions.duplicate("a1"));
+  expect(duplicatePage).toHaveBeenCalledWith("a1");
+  expect(location.pathname).toBe("/p/c1");
+  expect(app.current.actions.created).toBe("c1");
+  expect(treeReads()).toBeGreaterThan(reads);
+  expect(ids(app.current.nodes)).toEqual(["a", "a1", "c1", "c1x", "b"]);
+  expect(app.current.actions.notice).toBeNull();
+
+  // Une page de racine : la copie est dans le « Privé » du compte. Elle s'ouvre là où le serveur
+  // l'a mise, sans que le client ait à le deviner.
+  const mine = page("c2", { section: "private", position: "zz", title: "B (copie)" });
+  vi.mocked(duplicatePage).mockResolvedValue(mine);
+  server = [...server, mine];
+  await settle(() => app.current.actions.duplicate("b"));
+  expect(location.pathname).toBe("/p/c2");
+  expect(app.current.nodes?.find((n) => n.id === "c2")).toEqual(mine);
+});
+
+test("the_copy_is_listed_at_once_before_the_tree_is_read_again", async () => {
+  // La copie paraît dans la barre latérale dès la réponse, sans attendre la relecture de l'arbre ;
+  // une relecture qui l'aurait déjà apportée ne la met pas deux fois.
+  const app = await withTree([page("a")]);
+  const reread = deferred<Tree>();
+  vi.mocked(getTree).mockImplementation(() => reread.promise);
+  const copy = page("c", { section: "private", title: "A (copie)" });
+  vi.mocked(duplicatePage).mockResolvedValue(copy);
+  await settle(() => app.current.actions.duplicate("a"));
+  expect(ids(app.current.nodes)).toEqual(["a", "c"]);
+  await settle(() => reread.resolve({ spaceId: "space", lsn: 1, nodes: [page("a"), copy] }));
+  expect(ids(app.current.nodes)).toEqual(["a", "c"]);
+});
+
+test("a_refused_duplicate_is_said_as_the_server_says_it", async () => {
+  const app = await withTree([page("a"), page("b")]);
+  // Chaque refus du serveur, en pied de barre latérale, tel qu'il le dit ; rien ne s'ouvre, rien
+  // n'est ajouté à l'arbre, qui est relu : ce qui a fait refuser a pu changer ailleurs.
+  const refusals = [
+    refusal("forbidden", "réservé aux membres de l'espace : un invité ne crée qu'où il peut modifier", 403),
+    refusal("trashed", "la page est à la corbeille : la restaurer d'abord"),
+    refusal("not_found", "page introuvable", 404),
+    refusal("invalid_request", "seule une page se duplique : ceci est un dossier", 422),
+    refusal(
+      "subtree_too_large",
+      "cette page et ses sous-pages font plus de 100 pages : duplique-les par morceaux, une sous-page à la fois",
+      422,
+    ),
+    refusal("page_moved", "la page a changé de place entre-temps : réessayer"),
+  ];
+  for (const error of refusals) {
+    const reads = treeReads();
+    vi.mocked(duplicatePage).mockRejectedValueOnce(error);
+    await settle(() => app.current.actions.duplicate("a"));
+    expect(app.current.actions.notice).toBe(
+      `La page n'a pas pu être dupliquée. ${error.message.charAt(0).toUpperCase()}${error.message.slice(1)}`,
+    );
+    expect(location.pathname).toBe("/s/space");
+    expect(ids(app.current.nodes)).toEqual(["a", "b"]);
+    expect(treeReads()).toBeGreaterThan(reads);
+  }
+  // `429 duplication_busy` (R605, R606) : le compte duplique déjà, ou a dépensé son budget ; le
+  // message dit quand revenir. Rien ne le rejoue (R612), et il ne dit rien de la page : l'arbre
+  // n'est pas relu.
+  const busy = refusal(
+    "duplication_busy",
+    "tu as dupliqué beaucoup de contenu en peu de temps : réessaie dans 42 s ; rien n'a été copié",
+    429,
+  );
+  const reads = treeReads();
+  vi.mocked(duplicatePage).mockRejectedValueOnce(busy);
+  await settle(() => app.current.actions.duplicate("a"));
+  expect(app.current.actions.notice).toBe(
+    "La page n'a pas pu être dupliquée. Tu as dupliqué beaucoup de contenu en peu de temps : réessaie dans 42 s ; rien n'a été copié",
+  );
+  await settle();
+  expect(treeReads()).toBe(reads);
+  expect(duplicatePage).toHaveBeenCalledTimes(refusals.length + 1);
+  // Le message part à la navigation suivante.
+  await app.rerender({ pathname: "/p/a" });
+  expect(app.current.actions.notice).toBeNull();
+  // Session perdue : la connexion est demandée par-dessus, sans message de plus.
+  vi.mocked(duplicatePage).mockRejectedValueOnce(unauthenticated());
+  await settle(() => app.current.actions.duplicate("a"));
+  expect(app.current.actions.notice).toBeNull();
+});
+
+test("duplicate_is_asked_once_on_a_double_click", async () => {
+  const app = await withTree([page("a")]);
+  const answer = deferred<PageNode>();
+  vi.mocked(duplicatePage).mockReturnValue(answer.promise);
+  // Deux demandes de suite (un double clic, ou les deux menus) : tant que la première n'a pas
+  // répondu, la seconde ne part pas, et les entrées « Dupliquer » sont inactives (le serveur
+  // refuserait la seconde, R605).
+  expect(app.current.actions.duplicating).toBe(false);
+  await settle(() => {
+    void app.current.actions.duplicate("a");
+    void app.current.actions.duplicate("a");
+  });
+  expect(duplicatePage).toHaveBeenCalledTimes(1);
+  expect(app.current.actions.duplicating).toBe(true);
+  await settle(() => app.current.actions.duplicate("a"));
+  expect(duplicatePage).toHaveBeenCalledTimes(1);
+  await settle(() => answer.resolve(page("c", { section: "private" })));
+  expect(app.current.actions.duplicating).toBe(false);
+  expect(location.pathname).toBe("/p/c");
+
+  // Elle a répondu, ou a été refusée : la suivante part.
+  vi.mocked(duplicatePage).mockRejectedValueOnce(notFound());
+  await settle(() => app.current.actions.duplicate("a"));
+  expect(app.current.actions.duplicating).toBe(false);
+  vi.mocked(duplicatePage).mockResolvedValue(page("d", { section: "private" }));
+  await settle(() => app.current.actions.duplicate("a"));
+  expect(duplicatePage).toHaveBeenCalledTimes(3);
+});
+
+test("a_copy_ready_after_the_person_moved_on_does_not_take_her_away", async () => {
+  // La requête peut durer des secondes (R592). Partie ailleurs entre-temps, la personne y reste :
+  // la copie paraît dans la barre latérale, sans s'ouvrir ni prendre le focus.
+  const app = await withTree([page("a"), page("b")]);
+  let answer = deferred<PageNode>();
+  vi.mocked(duplicatePage).mockImplementation(() => answer.promise);
+  await settle(() => void app.current.actions.duplicate("a"));
+  history.pushState(null, "", "/p/b");
+  await app.rerender({ pathname: "/p/b" });
+  server = [...server, page("c", { section: "private" })];
+  await settle(() => answer.resolve(page("c", { section: "private" })));
+  expect(location.pathname).toBe("/p/b");
+  expect(app.current.actions.created).toBeNull();
+  expect(ids(app.current.nodes)).toContain("c");
+
+  // Restée sur la page, mais en train d'écrire (un champ, un texte modifiable) : la copie ne
+  // s'ouvre pas sous ses doigts, où sa frappe irait dans le titre de la copie.
+  const field = document.createElement("input");
+  document.body.append(field);
+  try {
+    answer = deferred<PageNode>();
+    await settle(() => void app.current.actions.duplicate("b"));
+    field.focus();
+    server = [...server, page("d", { section: "private" })];
+    await settle(() => answer.resolve(page("d", { section: "private" })));
+    expect(location.pathname).toBe("/p/b");
+    expect(app.current.actions.created).toBeNull();
+    expect(ids(app.current.nodes)).toContain("d");
+    // Témoin : le focus rendu à ce qui a lancé la duplication, la copie s'ouvre.
+    field.blur();
+    answer = deferred<PageNode>();
+    await settle(() => void app.current.actions.duplicate("b"));
+    await settle(() => answer.resolve(page("e", { section: "private" })));
+    expect(location.pathname).toBe("/p/e");
+    expect(app.current.actions.created).toBe("e");
+  } finally {
+    field.remove();
+  }
+});
+
+test("nothing_is_duplicated_under_a_stale_schema", async () => {
+  // Le serveur n'a pas le schéma de ce client (R35) : aucune création, une copie pas plus.
+  const app = await withTree([page("a")], { stale: true });
+  await settle(() => app.current.actions.duplicate("a"));
+  expect(duplicatePage).not.toHaveBeenCalled();
 });
