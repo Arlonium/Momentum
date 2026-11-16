@@ -1217,11 +1217,11 @@ test("a_replay_that_meets_the_session_of_another_tab_is_refused_and_tells_the_ap
   const again = await waiting("POST", "/api/v1/pages/p1/trash");
   expect(again.account).toBe("alice");
   again.answer(409, ACCOUNT_CHANGED);
+  await expect(trashed).rejects.toMatchObject({ status: 409, code: "account_changed" });
   // Le compte est relu : c'est Bruno.
   const reading = await waiting("GET", "/api/v1/me");
   expect(reading.account).toBeUndefined();
   reading.answer(200, me("bruno"));
-  await expect(trashed).rejects.toMatchObject({ status: 409, code: "account_changed" });
   await flush();
   expect(others).toEqual(["bruno"]);
   expect(count("POST", "/api/v1/pages/p1/trash")).toBe(2);
@@ -1234,8 +1234,8 @@ test("a_call_refused_for_another_account_is_never_sent_again_and_tells_the_appli
   api.onOtherAccount((found) => others.push(found.user.id));
   const written = api.updatePage("p1", { title: "Notes" });
   (await waiting("PATCH", "/api/v1/pages/p1")).answer(409, ACCOUNT_CHANGED);
-  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
   const failure = await written.catch((e: unknown) => e);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
   expect(failure).toMatchObject({ status: 409, code: "account_changed" });
   expect(api.isSessionLost(failure)).toBe(false);
   await flush();
@@ -1252,8 +1252,8 @@ test("a_call_refused_for_another_account_whose_session_came_back_tells_nothing",
   api.onOtherAccount((found) => others.push(found.user.id));
   const written = api.updatePage("p1", { title: "Notes" });
   (await waiting("PATCH", "/api/v1/pages/p1")).answer(409, ACCOUNT_CHANGED);
-  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
   await expect(written).rejects.toMatchObject({ status: 409, code: "account_changed" });
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
   await flush();
   expect(others).toEqual([]);
   expect(asked).toBe(0);
@@ -1265,9 +1265,26 @@ test("a_call_refused_for_another_account_whose_session_is_gone_asks_to_log_in", 
   await loadedAs("alice");
   const written = api.updatePage("p1", { title: "Notes" });
   (await waiting("PATCH", "/api/v1/pages/p1")).answer(409, ACCOUNT_CHANGED);
-  (await waiting("GET", "/api/v1/me")).answer(401, UNAUTHENTICATED);
   await expect(written).rejects.toMatchObject({ status: 409, code: "account_changed" });
+  (await waiting("GET", "/api/v1/me")).answer(401, UNAUTHENTICATED);
   await flush();
   expect(asked).toBe(1);
   expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("a_password_change_refused_for_another_account_settles_at_once", async () => {
+  // Vu par l'essai au hasard (graine 14934 à 30 000 graines, la relecture attendue par le refus) :
+  // la relecture du compte faite après un `409 account_changed` partait de l'intérieur du
+  // changement de mot de passe, une session de l'onglet en route ; refusée sans session, elle
+  // attendait l'issue de ce changement, qui l'attendait elle : tout refus restait bloqué dix
+  // secondes. La relecture ne retient pas l'appel refusé.
+  await loadedAs("alice");
+  const change = api.changePassword(PASSWORDS);
+  (await waiting("POST", "/api/v1/auth/password")).answer(409, ACCOUNT_CHANGED);
+  await expect(change).rejects.toMatchObject({ status: 409, code: "account_changed" });
+  (await waiting("GET", "/api/v1/me")).answer(401, UNAUTHENTICATED);
+  await flush();
+  // L'autre compte s'est déconnecté : la session est perdue, et la connexion est demandée tout de
+  // suite.
+  expect(asked).toBe(1);
 });

@@ -428,8 +428,10 @@ async function send(
     );
     if (failure.code === "account_changed") {
       // La session est celle d'un autre compte : l'appel n'a rien fait, et ne repart jamais. Le
-      // compte est relu ; si c'est bien un autre, `onOtherAccount` le dit (R464, R543).
-      await readSessionAccount().catch(() => {});
+      // compte est relu ; si c'est bien un autre, `onOtherAccount` le dit (R464, R543). Sans
+      // l'attendre : l'appel peut être un changement de mot de passe, une session de l'onglet en
+      // route, et une relecture refusée sans session attend l'issue de ces sessions (R462).
+      void readSessionAccount().catch(() => {});
       throw failure;
     }
     if (!isSessionLost(failure)) throw failure;
