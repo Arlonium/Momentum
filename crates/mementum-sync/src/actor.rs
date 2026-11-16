@@ -33,7 +33,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
-use mementum_crdt::{Applied, Awaited, CrdtError, PageDoc};
+use mementum_crdt::{Applied, Awaited, CrdtError, PageDoc, Refused};
 use mementum_md::Block;
 use mementum_store::{DocState, Store, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
@@ -1108,14 +1108,26 @@ impl Actor {
         let changes = self.watch.changes();
         // Ce qui vient d'un client ne touche pas aux métadonnées de la page
         // (report M7 du lot 1) ; ce que `load` relit du store, si. Un report refusé
-        // (`CrdtError::CarryRefused`, Rulings R452, R459) suit le chemin de tout refus.
+        // (`CrdtError::CarryRefused`, Rulings R452, R459) suit le chemin de tout refus fait
+        // après l'application.
         let Applied {
             read,
             carried,
             withheld,
-        } = match self.page.apply_client_update(update) {
+        } = match self.page.try_client_update(update) {
             Ok(applied) => applied,
-            Err(error) => {
+            // Ruling R492 : refusée avant d'être appliquée (illisible, hors du schéma, une marque
+            // refusée…), le document est intact : la connexion est fermée, sans rien recharger.
+            // Un onglet qui renvoie la même mise à jour à chaque reconnexion ne coûte plus un
+            // rechargement de la page à chaque tour.
+            Err(Refused {
+                error,
+                intact: true,
+            }) => {
+                tracing::warn!(node_id = %self.id.node_id, conn, %error, "mise à jour refusée avant d'être appliquée : connexion fermée");
+                return Ok(false);
+            }
+            Err(Refused { error, .. }) => {
                 // Rulings R17 et R22 : ni écrite ni diffusée ; le document,
                 // peut-être entamé (yrs garde en attente une mise à jour à
                 // dépendance manquante), est rechargé depuis le store ; le
@@ -1470,6 +1482,9 @@ impl Actor {
     }
 
     async fn reload(&mut self) -> Result<(), Broken> {
+        if let Some(hub) = self.id.hub.upgrade() {
+            hub.count_reload();
+        }
         match load(&self.store, self.id.node_id).await {
             Ok(loaded) => {
                 self.install(loaded);

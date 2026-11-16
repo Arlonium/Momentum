@@ -399,6 +399,35 @@ async fn churning_actors_never_diverge() {
     assert_eq!(stored_page(&f.store, f.page).await.read_blocks(), live);
 }
 
+/// Ruling R492, constat N3 de la re-relecture du tour 5 : une mise à jour refusée avant d'être
+/// appliquée (ici, une marque hors du schéma) laisse le document intact : sa connexion est fermée,
+/// mais le document n'est pas rechargé. Avant, chaque refus rechargeait la page (70 ms au p95 pour
+/// 10 000 blocs), et un onglet qui renvoyait sans fin la même mise à jour refusée le faisait à
+/// chaque reconnexion. Une mise à jour refusée après son application recharge toujours la page.
+#[tokio::test]
+async fn an_update_refused_before_it_is_applied_does_not_reload_the_page() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let writer = f.client().await;
+    let doc = detached(&writer);
+    let paragraph = first_content(&doc);
+    let marked = {
+        let mut txn = doc.transact_mut();
+        let text = paragraph.insert(&mut txn, 0, XmlTextPrelim::new(""));
+        let mut attrs = yrs::types::Attrs::new();
+        attrs.insert("x".into(), yrs::Any::Bool(true));
+        text.insert_with_attributes(&mut txn, 0, "abc", attrs);
+        txn.encode_update_v1()
+    };
+    let before = f.hub.reloads();
+    let hostile = f.client().await;
+    hostile.send_update(&marked);
+    assert!(hostile.wait_until(WAIT, |c| c.is_closed()).await, "refusée");
+    // Une demande de plus à l'acteur : il a traité la mise à jour refusée avant elle.
+    f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(f.hub.reloads(), before, "le document a été rechargé");
+    assert!(!text(&f.hub.read_blocks(f.page).await.unwrap()).contains("abc"));
+}
+
 #[tokio::test]
 async fn refused_update_is_never_served() {
     let f = Fixture::new(SyncConfig::default()).await;
@@ -433,8 +462,15 @@ async fn refused_update_is_never_served() {
     // u2 seule : refusée après application (yrs l'a gardée en attente), le
     // client fautif est fermé et le document rechargé (Ruling R22).
     let hostile = f.client().await;
+    let reloads = f.hub.reloads();
     hostile.send_update(&u2);
     assert!(hostile.wait_until(WAIT, |c| c.is_closed()).await);
+    f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(
+        f.hub.reloads(),
+        reloads + 1,
+        "refusée après application : rechargée"
+    );
 
     // Un nouveau venu ne reçoit pas u2, même en attente.
     let newcomer = f.client().await;

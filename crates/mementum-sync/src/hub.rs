@@ -133,6 +133,8 @@ pub struct Hub {
     /// réponse ([`Hub::calls`], [`Hub::calls_waiting`]).
     calls: AtomicU64,
     calls_waiting: Arc<AtomicU64>,
+    /// Les documents rechargés par leur acteur depuis le démarrage ([`Hub::reloads`]).
+    reloads: AtomicU64,
     /// Le hub lui-même, sans le garder en vie : les acteurs s'en servent pour
     /// quitter le registre.
     me: Weak<Hub>,
@@ -154,6 +156,7 @@ impl Hub {
             block_reads: AtomicU64::new(0),
             calls: AtomicU64::new(0),
             calls_waiting: Arc::new(AtomicU64::new(0)),
+            reloads: AtomicU64::new(0),
             me: me.clone(),
         })
     }
@@ -213,6 +216,18 @@ impl Hub {
     /// derrière une demande longue (Ruling R384).
     pub fn calls_waiting(&self) -> u64 {
         self.calls_waiting.load(Ordering::Relaxed)
+    }
+
+    /// Combien de fois un acteur a rechargé son document depuis le store (une mise à jour refusée
+    /// après son application, une écriture impossible). Pour les tests : une mise à jour refusée
+    /// avant d'être appliquée ne recharge rien (Ruling R492).
+    pub fn reloads(&self) -> u64 {
+        self.reloads.load(Ordering::Relaxed)
+    }
+
+    /// Un document rechargé par son acteur.
+    pub(crate) fn count_reload(&self) {
+        self.reloads.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Vrai si un bloc de la page, à toute profondeur, porte l'identifiant `id` : ce que dirait
