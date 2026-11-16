@@ -337,9 +337,10 @@ pub(crate) const SWEEP_BATCH: usize = 64;
 ///
 /// Deux temps. Les candidats se lisent d'abord, sans verrou ni tour (`unattached_files`, une
 /// lecture de tous les contenus de l'instance, R270). Puis, paquet par paquet, sous le verrou du
-/// dépôt qui ordonne aussi « poser un contenu puis l'attacher » : la base retire ceux du paquet
-/// qu'aucune attache ne nomme **encore** (`forget_unattached`, dans la voie du dépôt, R522), et le
-/// disque, ceux-là. Un envoi qui a posé ou trouvé un contenu sous ce verrou l'a donc attaché avant
+/// dépôt qui ordonne aussi « poser un contenu puis l'attacher », le dépôt mène le paquet
+/// (`FileStore::forget_and_remove`, qui vérifie le garde, R576) : la base retire ceux du paquet
+/// qu'aucune attache ne nomme **encore** (dans la voie du dépôt, R522), et le disque, ceux-là. Un
+/// envoi qui a posé ou trouvé un contenu sous ce verrou l'a donc attaché avant
 /// que le ménage le regarde, ou le pose de nouveau après qu'il est parti : son fichier est
 /// toujours là (`upload_of_a_content_being_swept_keeps_its_file`).
 ///
