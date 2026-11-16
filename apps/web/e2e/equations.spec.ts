@@ -243,6 +243,21 @@ test("a_formula_allowed_at_the_top_is_text_deep_in_a_list", async ({ browser, re
   await opened.close();
 });
 
+test("six_nested_fractions_are_typeset_at_the_top_of_a_page", async ({ browser, request }) => {
+  // Les fractions coûtent moins que les boîtes de `\mathreflectbox` (R551) : six fractions
+  // imbriquées, qui s'affichaient avant la Task C2 (le plantage est à treize), s'affichent en haut
+  // d'une page, en bloc et en ligne.
+  const page = await createPage(request, { title: `Six fractions ${unique()}` });
+  await putMmd(request, page.id, `$$\n${frac(6)}\n$$\n\nEn ligne $${frac(6)}$ fin\n`);
+  const opened = await openWatchingCrash(browser, page.id);
+  const { p } = opened;
+  await expect(p.locator(".mm-editor .mm-equation .katex")).toBeVisible();
+  await expect(p.locator(".mm-editor .mm-math .katex")).toBeVisible();
+  await expect(p.locator(".mm-editor .mm-tex-why")).toHaveCount(0);
+  expect(opened.crashed()).toBe(false);
+  await opened.close();
+});
+
 test("formulas_never_shown_are_printed_typeset", async ({ browser, request }) => {
   // Une formule n'est mise en forme qu'à l'écran : à l'impression, celles qui n'y étaient jamais
   // venues s'imprimaient en texte source (re-relecture de C2, N3).
