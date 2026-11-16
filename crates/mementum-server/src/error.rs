@@ -144,6 +144,19 @@ impl ApiError {
         )
     }
 
+    /// `429 page_busy`, avec `Retry-After: 1` : la file des écritures de la page est pleine
+    /// (Ruling R435). Rien n'est écrit.
+    pub fn page_busy() -> ApiError {
+        let mut error = ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::PageBusy,
+            "trop d'écritures attendent déjà sur cette page : réessaie dans un instant ; rien \
+             n'a été écrit",
+        );
+        error.retry_after = Some(1);
+        error
+    }
+
     /// `429 too_many_attempts`, avec `Retry-After: <secondes>` : trop de connexions ratées
     /// pour une adresse.
     pub fn too_many_attempts(retry_after: u64) -> ApiError {

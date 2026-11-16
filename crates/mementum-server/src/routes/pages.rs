@@ -66,6 +66,7 @@ use uuid::Uuid;
 use crate::access::{at_least, permit};
 use crate::auth::{AuthUser, SessionUser};
 use crate::error::ApiError;
+use crate::page_writes::MAX_PAGE_WRITES;
 use crate::routes::spaces::space_id;
 use crate::types::{CreatePage, ErrorCode, PageNode, RootSection, Tree, UpdatePage};
 use crate::{AppState, to_completion};
@@ -610,6 +611,12 @@ pub(crate) async fn put_mmd(
     let id = page_id(path)?;
     // Premier contrôle : les refus, avant que le corps soit lu.
     state.node_access(&user, id, Action::Edit).await?;
+    // Ruling R435 : une place dans la file des écritures de la page, avant de lire le corps ;
+    // la file pleine, refus sur-le-champ.
+    let place = state
+        .page_writes
+        .reserve(id, MAX_PAGE_WRITES)
+        .ok_or_else(ApiError::page_busy)?;
     let body = body?;
     // Ruling R383 : la lecture et l'estimation, hors des fils du serveur, à leur tour, les
     // comptes tour à tour (Ruling R436).
@@ -620,7 +627,7 @@ pub(crate) async fn put_mmd(
     // Ruling R200 : une écriture du serveur à la fois par page, comme la restauration d'une
     // version. Le verrou se prend une fois le corps lu, et ce qui suit va au bout, verrou
     // tenu, même si le client coupe.
-    let write = state.page_writes.lock(id).await;
+    let write = place.lock().await;
     to_completion(async move {
         let _write = write;
         // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise

@@ -829,6 +829,9 @@ pub enum ErrorCode {
     /// bloc) ou trop d'éléments (Ruling R368) ; le message dit lequel : rien n'est écrit. Statut
     /// 422.
     TooLongToWrite,
+    /// `PUT /mmd` sur une page dont la file des écritures est pleine (Ruling R435) : réessayer
+    /// après le délai de l'en-tête `Retry-After` ; rien n'est écrit. Statut 429.
+    PageBusy,
     /// La page porte déjà 2 000 fils de commentaires, résolus compris (Ruling R204), ou ce
     /// compte y en a déjà ouvert 200, sa part (Ruling R351) ; le message dit lequel : rien n'est
     /// écrit. Statut 409.

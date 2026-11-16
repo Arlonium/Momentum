@@ -32,6 +32,11 @@ use uuid::Uuid;
 /// Requêtes envoyées d'un coup.
 const BURST: usize = 24;
 
+/// `PUT /mmd` envoyés d'un coup : autant que la file d'une page en admet (Ruling R435). Au-delà,
+/// les requêtes de trop sont refusées sur-le-champ (`429 page_busy`, voir
+/// `a_full_page_queue_refuses_at_once`).
+const MMD_BURST: usize = mementum_server::MAX_PAGE_WRITES;
+
 /// Paragraphes de chaque contenu : assez pour qu'une écriture prenne du temps dans l'acteur.
 const PARAGRAPHS: usize = 200;
 
@@ -216,7 +221,7 @@ async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
     witness(&t, page, team.tom.id).await;
     let contents = [paragraphs("Alpha"), paragraphs("Bêta")];
 
-    let requests = (0..BURST)
+    let requests = (0..MMD_BURST)
         .map(|i| {
             request(
                 &team.tom,
@@ -384,7 +389,8 @@ enum Ending {
 }
 
 /// Constat I1 de la relecture de la piste S (Ruling R209), avec l'attente inverse. Tom envoie
-/// d'un coup 24 `PUT /mmd`, ou 24 restaurations, puis sa session prend fin : déconnexion, ou
+/// d'un coup 8 `PUT /mmd` (ce que la file d'une page admet, R435), ou 24 restaurations, puis sa
+/// session prend fin : déconnexion, ou
 /// changement du mot de passe par la titulaire du compte. Chaque requête prenait le verrou à son
 /// tour, relisait des droits que le compte a toujours, et écrivait : 23 écritures sur 24 après la
 /// déconnexion. La session est relue sous le verrou : au plus une écriture sans elle, les autres
@@ -424,7 +430,7 @@ async fn writes_queued_before_the_session_ends_stop_with_it() {
                     .collect()
             } else {
                 let contents = [paragraphs("Alpha"), paragraphs("Bêta")];
-                (0..BURST)
+                (0..MMD_BURST)
                     .map(|i| {
                         request(
                             &team.tom,
@@ -804,4 +810,86 @@ async fn a_refused_mmd_answers_in_a_few_hundred_bytes() {
         "réponse de {} octets : {start}…",
         text.len()
     );
+}
+
+/// Constat I1 de la re-relecture du tour 4 (Ruling R435) : chaque `PUT /mmd` accepté gardait
+/// l'arbre lu de son MMD jusqu'à son tour au verrou de la page, sans borne du nombre d'attentes
+/// (64 requêtes vers une page : 2,2 Gio). La file d'une page admet `MAX_PAGE_WRITES` requêtes ; les
+/// suivantes répondent `429 page_busy` sur-le-champ, avec `Retry-After`, sans rien écrire, et la
+/// page reprend des écritures une fois la file vidée. L'ordre des refus : les droits d'abord (un
+/// compte sans accès reçoit `404`, même la file pleine).
+#[tokio::test]
+async fn a_full_page_queue_refuses_at_once() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Edit)];
+    let page = team.page(None, "File pleine", &grants).await;
+    witness(&t, page, team.tom.id).await;
+    // Des écritures longues, envoyées d'un coup : la file se remplit, puis déborde.
+    let long = many_paragraphs("Long", 4_000);
+    let requests: Vec<Request<Body>> = (0..BURST)
+        .map(|_| {
+            request(
+                &team.tom,
+                Request::put(format!("/api/v1/pages/{page}/mmd"))
+                    .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+                Body::from(long.clone()),
+            )
+        })
+        .collect();
+    let mut burst = JoinSet::new();
+    for req in requests {
+        let router = t.router.clone();
+        burst.spawn(async move {
+            let reply = router.oneshot(req).await.unwrap();
+            let retry = reply.headers().get(header::RETRY_AFTER).cloned();
+            let status = reply.status();
+            let body = axum::body::to_bytes(reply.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, retry, body)
+        });
+    }
+    // Pendant que la file est pleine, Mona, sans accès à la page, reçoit le refus des droits.
+    let (mut busy, mut written, mut mona_checked) = (0, 0, false);
+    while let Some(reply) = burst.join_next().await {
+        let (status, retry, body) = reply.unwrap();
+        match status {
+            StatusCode::NO_CONTENT => written += 1,
+            StatusCode::TOO_MANY_REQUESTS => {
+                busy += 1;
+                assert_eq!(retry.as_ref().map(|v| v.to_str().unwrap()), Some("1"));
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(body["error"], "page_busy", "{body}");
+                common::assert_french(&body, &["réessaie", "rien n'a été écrit"]);
+            }
+            other => panic!("statut inattendu : {other}"),
+        }
+        if busy > 0 && !mona_checked {
+            mona_checked = true;
+            team.mona
+                .put_mmd(&page.to_string(), "Mona\n")
+                .await
+                .assert_error(StatusCode::NOT_FOUND, "not_found");
+        }
+    }
+    assert!(
+        written >= 1 && written <= mementum_server::MAX_PAGE_WRITES,
+        "{written} écritures"
+    );
+    assert_eq!(written + busy, BURST);
+    assert!(
+        busy >= BURST - mementum_server::MAX_PAGE_WRITES,
+        "{busy} refus"
+    );
+    assert_eq!(
+        witnessed(&t, true).await,
+        written as i64,
+        "écritures au journal"
+    );
+    // La file vidée, la page reprend des écritures.
+    team.tom
+        .put_mmd(&page.to_string(), "Après\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
 }
