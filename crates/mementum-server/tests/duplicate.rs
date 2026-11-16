@@ -638,7 +638,8 @@ async fn urls(team: &Team<'_>, page: impl std::fmt::Display) -> Vec<String> {
 /// nomme la copie et une attache à elle (une seule pour deux blocs du même fichier) ; l'original
 /// supprimé pour de bon, et le ménage passé, le fichier de la copie se lit encore. Une adresse
 /// externe, celle d'un fichier d'une troisième page, celle d'un fichier que la page n'a pas, et
-/// celle d'un bloc qui n'est pas un bloc de fichier (un signet) sont restées telles quelles.
+/// celle d'un bloc qui n'est pas un bloc de fichier (un signet) sont restées telles quelles. Un
+/// lien vers un fichier de la page suit la règle des blocs.
 #[tokio::test]
 async fn duplicated_page_keeps_its_files_after_the_original_is_deleted() {
     let t = open_app().await;
@@ -660,7 +661,9 @@ async fn duplicated_page_keeps_its_files_after_the_original_is_deleted() {
     let content = format!(
         "![photo]({own_url})\n\n![ailleurs]({elsewhere_url})\n\n![externe]({external})\n\n\
          <file src=\"{own_url}\" name=\"photo.png\"/>\n\n![absent]({missing})\n\n\
-         <bookmark url=\"{own_url}\"/>\n"
+         <bookmark url=\"{own_url}\"/>\n\n\
+         Voir [le fichier]({own_url}), et [un autre]({elsewhere_url}).\n\n\
+         | [dans un tableau]({own_url}) | B |\n| --- | --- |\n| 1 | 2 |\n"
     );
     mona.put_mmd(&page.to_string(), content)
         .await
@@ -696,6 +699,14 @@ async fn duplicated_page_keeps_its_files_after_the_original_is_deleted() {
     );
     assert_eq!(count_of(&t, "attachments", "node_id", &copy.id).await, 1);
     assert_eq!(count_of(&t, "attachments", "node_id", page).await, 2);
+    // Constat M1 de la relecture : un lien vers un fichier de la page, dans un texte ou dans une
+    // cellule de tableau, est récrit comme l'adresse d'un bloc, vers la même attache ; un lien
+    // vers le fichier d'une autre page reste. Seul le signet nomme encore l'original.
+    let text = mmd(mona, &copy.id).await;
+    assert_eq!(text.matches(copied[0].as_str()).count(), 4, "{text}");
+    assert_eq!(text.matches(own_url).count(), 1, "{text}");
+    assert_eq!(text.matches(elsewhere_url).count(), 2, "{text}");
+    assert_eq!(mmd(mona, page).await.matches(own_url).count(), 5);
     assert_eq!(
         query_i64(&t.db_path(), "SELECT COUNT(*) FROM files").await,
         3

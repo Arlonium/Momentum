@@ -225,6 +225,7 @@
 mod access;
 pub mod auth;
 pub mod config;
+mod duplications;
 mod error;
 mod events;
 mod files;
@@ -268,6 +269,7 @@ use tokio::net::TcpListener;
 
 pub use auth::set_password;
 pub use config::Config;
+pub use duplications::{DUPLICATION_BUDGET, DUPLICATION_WINDOW};
 pub use error::ApiError;
 pub use events::EVENTS_PING;
 // La copie d'avant migration, que `set_password` signale à qui l'appelle.
@@ -331,6 +333,9 @@ pub(crate) struct AppState {
     /// Octets au plus, tous documents confondus, d'une copie de pages (`routes/duplicate.rs`,
     /// Ruling R592).
     max_duplicated_bytes: usize,
+    /// Le débit des duplications, par compte : une à la fois, et un budget d'octets bâtis par
+    /// minute (`duplications.rs`, Rulings R605, R606).
+    duplications: Arc<duplications::Duplications>,
 }
 
 /// Millisecondes Unix.
@@ -514,6 +519,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
         upload_idle: cfg.upload_idle,
         mmd_reads: Arc::default(),
         max_duplicated_bytes: cfg.max_duplicated_bytes,
+        duplications: Arc::default(),
     };
     Ok((router(state), store, hub))
 }

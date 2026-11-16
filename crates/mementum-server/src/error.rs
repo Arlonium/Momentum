@@ -563,6 +563,18 @@ impl ApiError {
         )
     }
 
+    /// `429 duplication_busy`, avec `Retry-After` : le compte duplique déjà, ou a dépensé son
+    /// budget de la minute (Rulings R605, R606) ; `message` dit lequel. Rien n'est copié.
+    pub fn duplication_busy(message: impl Into<String>, retry_after: u64) -> ApiError {
+        let mut error = ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::DuplicationBusy,
+            message,
+        );
+        error.retry_after = Some(retry_after);
+        error
+    }
+
     /// `422 subtree_too_large` : la page à dupliquer et ses sous-pages sont trop nombreuses, ou
     /// trop lourdes, pour une copie (Ruling R252) ; `message` dit lequel, et quoi faire.
     pub fn subtree_too_large(message: impl Into<String>) -> ApiError {

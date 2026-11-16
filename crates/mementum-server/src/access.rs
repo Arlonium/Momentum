@@ -466,6 +466,7 @@ pub(crate) mod tests {
             upload_idle: crate::config::UPLOAD_IDLE,
             mmd_reads: Arc::default(),
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
+            duplications: Arc::default(),
         }
     }
 

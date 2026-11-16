@@ -15,8 +15,16 @@
 //!
 //! **Refus**, dans l'ordre : `401` ; `404 not_found` pour une page qu'elle ne voit pas ; `403
 //! forbidden` pour une invitée qui n'a nulle part où poser la copie ; `409 trashed` pour une page
-//! à la corbeille (elle se lit, mais ne se copie pas) ; `422 subtree_too_large` au-delà de
-//! [`MAX_DUPLICATED_PAGES`] pages, ou de [`MAX_DUPLICATED_BYTES`] octets de documents.
+//! à la corbeille (elle se lit, mais ne se copie pas) ; `422 invalid_request` pour un dossier ;
+//! `429 duplication_busy`, avec `Retry-After`, si le compte duplique déjà ou a dépensé son budget
+//! de la minute ; `422 subtree_too_large` au-delà de [`MAX_DUPLICATED_PAGES`] pages, ou de
+//! [`MAX_DUPLICATED_BYTES`] octets de documents.
+//!
+//! **Débit** (`duplications.rs`, Rulings R605 à R607). Un compte ne mène qu'une duplication à la
+//! fois, et ne bâtit pas plus de 64 Mio de documents par minute, écrits ou non : au-delà, `429`,
+//! tout de suite, sans file d'attente. Une duplication ne tient donc jamais plus d'une place de
+//! calcul, et toutes les copies s'écrivent dans une même voie de la file d'écriture : une frappe
+//! n'attend jamais plus d'une copie, que la borne de poids tient courte.
 //!
 //! **Déroulé** (Ruling R89 : le contrôle qui compte vient après tout ce qui attend).
 //! 1. Premier contrôle : les refus, et les pages à copier.
@@ -46,30 +54,30 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use mementum_acl::{Action, Grant, Level, NodeAccess, Role, SpaceAccess, Subject};
 use mementum_crdt::{CrdtError, PageDoc};
-use mementum_md::{Block, PropValue};
-use mementum_store::{CopiedAttachment, CopiedPage, NewCopy, Node, Sibling, StoreError};
+use mementum_md::{Block, Content, Inline, PropValue};
+use mementum_store::{CopiedAttachment, CopiedPage, NewCopy, Node, NodeKind, Sibling, StoreError};
 use mementum_sync::SyncError;
 use uuid::Uuid;
 
 use crate::access::{at_least, permit, permit_level};
 use crate::auth::{AuthUser, SessionUser};
+use crate::duplications::Busy;
 use crate::error::ApiError;
 use crate::routes::pages::{MAX_TITLE_CHARS, page_id, page_node};
-use crate::types::PageNode;
+use crate::types::{ErrorCode, PageNode};
 use crate::{AppState, now_ms, to_completion};
 
 /// Pages d'une copie, racine comprise (Ruling R252) : au-delà, `422 subtree_too_large`, et l'on
 /// duplique par morceaux.
 pub const MAX_DUPLICATED_PAGES: usize = 100;
 
-/// Octets au plus, tous documents confondus, d'une copie (Ruling R592) : au-delà, `422
+/// Octets au plus, tous documents confondus, d'une copie (Rulings R592, R608) : au-delà, `422
 /// subtree_too_large`. La copie s'écrit en une transaction, et l'écriture de SQLite est unique
 /// pour l'instance : pendant elle, chaque frappe de chaque page attend. Mesuré en release : 6 ms
-/// par mébioctet (42 Mio, cent pages de 1 000 blocs ou dix de 10 000 : un quart de seconde ;
-/// cent pages de 10 000 blocs, 425 Mio, en demanderaient près de trois). La borne tient cette
-/// attente sous la demi-seconde sur le poste de mesure, et ce qu'une requête garde en mémoire
-/// sous ce poids.
-pub const MAX_DUPLICATED_BYTES: usize = 64 << 20;
+/// par mébioctet sur le poste de mesure. À 16 Mio, la frappe qui tombe pendant la transaction
+/// l'attend une centaine de millisecondes, sous son budget de 150 ms ; à 64 Mio, la première
+/// borne, elle attendait 0,25 à 0,47 s, et quatre à dix fois plus sur un disque lent.
+pub const MAX_DUPLICATED_BYTES: usize = 16 << 20;
 
 /// Ce qui suit le titre de la page dans celui de sa copie.
 const COPY_SUFFIX: &str = " (copie)";
@@ -135,6 +143,24 @@ fn too_heavy(max: usize) -> ApiError {
     ))
 }
 
+/// `429 duplication_busy` : pourquoi le compte ne duplique pas maintenant, et quand revenir.
+fn busy(why: Busy) -> ApiError {
+    match why {
+        Busy::Running => ApiError::duplication_busy(
+            "tu as déjà une duplication en cours : attends qu'elle finisse avant d'en demander \
+             une autre ; rien n'a été copié",
+            1,
+        ),
+        Busy::Spent { retry_after } => ApiError::duplication_busy(
+            format!(
+                "tu as dupliqué beaucoup de contenu en peu de temps : réessaie dans \
+                 {retry_after} s ; rien n'a été copié"
+            ),
+            retry_after,
+        ),
+    }
+}
+
 /// Ajoute au poids `total` d'une copie les `doc` octets d'un document de plus ; refuse dès que
 /// le poids dépasse `max` (un poids égal à la borne passe).
 fn weigh(total: &mut usize, doc: usize, max: usize) -> Result<(), ApiError> {
@@ -158,6 +184,15 @@ impl AppState {
         let destination = destination(&space, &access)?;
         if access.in_trash {
             return Err(ApiError::trashed());
+        }
+        // Aucune route ne crée encore de dossier ; le jour où il y en a, il ne se duplique pas
+        // comme une page, dont il n'a pas le document.
+        if node.kind != NodeKind::Page {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::InvalidRequest,
+                "seule une page se duplique : ceci est un dossier",
+            ));
         }
         Ok(Checked {
             node,
@@ -187,7 +222,7 @@ fn destination(space: &SpaceAccess, access: &NodeAccess) -> Result<Destination, 
 /// chaque page après sa page parente, les sœurs dans l'ordre de leurs positions. `nodes` est
 /// tout l'espace, trié par `(parent, position)` (`Store::list_nodes`). On ne descend que par les
 /// pages gardées : une page que la personne ne voit pas, ou à la corbeille, sort avec ses
-/// sous-pages. S'arrête dès que la liste dépasse `limit` : l'appelant refuse.
+/// sous-pages ; de même ce qui n'est pas une page (un dossier), qui n'a pas de document. S'arrête dès que la liste dépasse `limit` : l'appelant refuse.
 fn seen_subtree(space: &SpaceAccess, nodes: &[Node], root: Uuid, limit: usize) -> Vec<Seen> {
     let mut children: HashMap<Uuid, Vec<&Node>> = HashMap::new();
     let mut top = None;
@@ -214,7 +249,10 @@ fn seen_subtree(space: &SpaceAccess, nodes: &[Node], root: Uuid, limit: usize) -
         for child in children.get(&out[at].id).into_iter().flatten() {
             // La racine ne revient pas : un nœud n'a qu'un parent, et une page prise dans un
             // cycle n'est vue par personne.
-            if child.id != root && space.node(child.id).is_some_and(|access| !access.in_trash) {
+            if child.id != root
+                && child.kind == NodeKind::Page
+                && space.node(child.id).is_some_and(|access| !access.in_trash)
+            {
                 out.push(seen(child, Some(at)));
             }
         }
@@ -239,39 +277,62 @@ fn file_of(url: &str, page: Uuid) -> Option<Uuid> {
     Uuid::parse_str(file).ok()
 }
 
-/// L'adresse de fichier d'un bloc, s'il en porte une.
-fn file_url(block: &Block) -> Option<&str> {
-    if !FILE_BLOCKS.contains(&block.kind.as_str()) {
-        return None;
-    }
-    match block.props.get("url") {
-        Some(PropValue::Str(url)) => Some(url),
-        _ => None,
+/// Les adresses des liens de ce contenu en ligne.
+fn link_addresses(inlines: &mut [Inline], visit: &mut dyn FnMut(&mut String)) {
+    for inline in inlines {
+        if let Inline::Link { href, children } = inline {
+            visit(href);
+            link_addresses(children, visit);
+        }
     }
 }
 
-/// Les attaches de la page `page` que nomment ses blocs, chacune une fois, à toute profondeur.
-fn named_files(blocks: &[Block], page: Uuid) -> Vec<Uuid> {
-    let mut found = Vec::new();
-    let mut known = HashSet::new();
+/// Passe `visit` sur chaque adresse que portent ces blocs, à toute profondeur, dans l'ordre du
+/// document : la prop `url` d'un bloc de fichier ([`FILE_BLOCKS`]), et l'adresse de chaque lien
+/// d'un texte ou d'une cellule de tableau (Ruling R609). Rien d'autre : ni la prop `url` d'un
+/// signet, ni une mention.
+fn each_address(blocks: &mut [Block], visit: &mut dyn FnMut(&mut String)) {
     let mut stack = vec![blocks];
     while let Some(level) = stack.pop() {
-        for block in level {
-            if let Some(file) = file_url(block).and_then(|url| file_of(url, page))
-                && known.insert(file)
+        for block in level.iter_mut() {
+            if FILE_BLOCKS.contains(&block.kind.as_str())
+                && let Some(PropValue::Str(url)) = block.props.get_mut("url")
             {
-                found.push(file);
+                visit(url);
             }
-            stack.push(&block.children);
+            match &mut block.content {
+                Content::Inline(inlines) => link_addresses(inlines, visit),
+                Content::Table(table) => {
+                    for cell in table.rows.iter_mut().flatten() {
+                        link_addresses(&mut cell.content, visit);
+                    }
+                }
+                Content::None => {}
+            }
+            stack.push(&mut block.children);
         }
     }
+}
+
+/// Les attaches de la page `page` que nomment ses blocs, chacune une fois.
+fn named_files(blocks: &mut [Block], page: Uuid) -> Vec<Uuid> {
+    let mut found = Vec::new();
+    let mut known = HashSet::new();
+    each_address(blocks, &mut |address| {
+        if let Some(file) = file_of(address, page)
+            && known.insert(file)
+        {
+            found.push(file);
+        }
+    });
     found
 }
 
 /// Le document neuf de la copie de la page `from`, d'identifiant `to` : les blocs de l'original,
 /// **tous sans identifiant** (l'écriture en tire de neufs, à chaque profondeur), les adresses des
-/// fichiers de `from` que `files` recopie récrites vers leur attache neuve. Toute autre adresse
-/// reste telle quelle : externe, d'une autre page, ou d'un fichier que la page n'a pas.
+/// fichiers de `from` que `files` recopie récrites vers leur attache neuve, sur un bloc de fichier
+/// comme dans un lien. Toute autre adresse reste telle quelle : externe, d'une autre page, ou
+/// d'un fichier que la page n'a pas.
 fn copied_doc(
     mut blocks: Vec<Block>,
     from: Uuid,
@@ -282,16 +343,14 @@ fn copied_doc(
     while let Some(level) = stack.pop() {
         for block in level.iter_mut() {
             block.id.clear();
-            let copy = file_url(block)
-                .and_then(|url| file_of(url, from))
-                .and_then(|file| files.get(&file));
-            if let Some(copy) = copy {
-                let url = format!("/api/v1/pages/{to}/files/{copy}");
-                block.props.insert("url".to_string(), PropValue::Str(url));
-            }
             stack.push(&mut block.children);
         }
     }
+    each_address(&mut blocks, &mut |address| {
+        if let Some(copy) = file_of(address, from).and_then(|file| files.get(&file)) {
+            *address = format!("/api/v1/pages/{to}/files/{copy}");
+        }
+    });
     let page = PageDoc::new_page().0;
     page.write_blocks(&blocks)?;
     Ok(page.encode_state())
@@ -308,6 +367,10 @@ pub(crate) async fn duplicate(
     let id = page_id(path)?;
     // Premier contrôle : les refus, avant de lire quoi que ce soit d'une page.
     let first = state.duplication(&user, id).await?;
+    // Rulings R605, R606 : une duplication à la fois par compte, sous son budget de la minute ;
+    // sinon refusée tout de suite. La place est tenue jusqu'à la fin de l'écriture, et ce qui
+    // est bâti d'ici là est compté au budget, écrit ou non.
+    let mut running = state.duplications.begin(user.id).map_err(busy)?;
     let space_id = first.node.space_id;
     let nodes = state.store.list_nodes(space_id).await?;
     let sources = seen_subtree(&first.space, &nodes, id, MAX_DUPLICATED_PAGES);
@@ -320,7 +383,7 @@ pub(crate) async fn duplicate(
     let mut built = Vec::with_capacity(sources.len());
     let mut weight = 0;
     for source in &sources {
-        let blocks = match state.hub.read_blocks(source.id).await {
+        let mut blocks = match state.hub.read_blocks(source.id).await {
             Ok(blocks) => blocks,
             // Une sous-page supprimée depuis le contrôle : le second contrôle la sort de la copie.
             Err(SyncError::NotFound) if source.id != id => continue,
@@ -328,7 +391,7 @@ pub(crate) async fn duplicate(
         };
         let mut attachments = Vec::new();
         let mut files = HashMap::new();
-        for file in named_files(&blocks, source.id) {
+        for file in named_files(&mut blocks, source.id) {
             // Un fichier que la page n'a pas : son adresse reste telle quelle.
             if let Some(attachment) = state.store.attachment(source.id, file).await? {
                 let copy = Uuid::now_v7();
@@ -346,6 +409,7 @@ pub(crate) async fn duplicate(
             .run(user.id, move || copied_doc(blocks, from, to, &files))
             .await?
             .map_err(SyncError::Crdt)?;
+        running.built(doc.len());
         // Ruling R592 : refusée dès que le poids passe la borne, sans lire les pages suivantes.
         weigh(&mut weight, doc.len(), state.max_duplicated_bytes)?;
         built.push(Built {
@@ -358,6 +422,8 @@ pub(crate) async fn duplicate(
 
     let user_id = user.id;
     let (root, access, pages) = to_completion(async move {
+        // La place du compte est rendue quand cette tâche finit, client parti ou non.
+        let _running = running;
         let mut built = built;
         for _ in 0..DUPLICATE_RETRIES {
             // Second contrôle, juste avant d'écrire : la session, la page, la destination.
@@ -508,8 +574,15 @@ mod tests {
 
     impl Bench {
         async fn new() -> Bench {
+            Bench::with(|_| {}).await
+        }
+
+        /// Comme [`Bench::new`], sur un état retouché par `adjust` avant que le routeur soit
+        /// monté.
+        async fn with(adjust: impl FnOnce(&mut AppState)) -> Bench {
             let dir = tempfile::tempdir().unwrap();
-            let state = state(&dir).await;
+            let mut state = state(&dir).await;
+            adjust(&mut state);
             let router = crate::router(state.clone());
             let mut bench = Bench {
                 state,
@@ -938,7 +1011,7 @@ mod tests {
             .unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
         let message = body["message"].as_str().unwrap();
-        assert!(message.contains("plus de 64 Mio"), "{message}");
+        assert!(message.contains("plus de 16 Mio"), "{message}");
     }
 
     /// Le titre d'une copie : suivi de « (copie) », coupé au caractère, jamais au milieu d'un
@@ -956,13 +1029,142 @@ mod tests {
         assert!(cut.chars().count() <= MAX_TITLE_CHARS);
     }
 
-    /// Ruling R590 : une copie attend son tour d'écriture derrière les écritures que son compte a
-    /// en file ; ce qui change pendant cette attente, après le second contrôle de la route, est vu
-    /// par la transaction, qui n'écrit rien, et la route redécide. Le test tient un tour de la
-    /// file, y range une écriture de Mona (un favori), puis sa duplication, qui a passé son second
-    /// contrôle, puis, par une autre voie, le changement ; le tour rendu, la file sert le favori,
-    /// le changement, puis la copie. Page mise à la corbeille : `409 trashed`, aucune page créée ;
-    /// droit de créer sous la page parente retiré : la copie va dans le « Privé » de Mona.
+    impl Bench {
+        /// Une requête du compte de ce cookie : son statut, ses en-têtes et son corps.
+        async fn send(
+            &self,
+            cookie: &str,
+            request: axum::http::request::Builder,
+            body: Vec<u8>,
+        ) -> (StatusCode, axum::http::HeaderMap, Bytes) {
+            let request = request
+                .header(header::HOST, "localhost")
+                .header(header::COOKIE, cookie)
+                .body(Body::from(body))
+                .unwrap();
+            // Bornée : une demande qui attendrait à tort (une place de calcul, un tour d'écriture
+            // que le test tient) fait échouer le test, au lieu de le pendre.
+            let answer = self.router.clone().oneshot(request);
+            let response = tokio::time::timeout(std::time::Duration::from_secs(10), answer)
+                .await
+                .expect("une réponse en moins de dix secondes")
+                .unwrap();
+            let (status, headers) = (response.status(), response.headers().clone());
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, headers, body)
+        }
+
+        /// Une page sous `parent`, avec une sous-page, qui montre un fichier à elle par une image
+        /// et par un lien : `(page, sous-page, octets du fichier)`.
+        async fn illustrated(&self, parent: Uuid) -> (Uuid, Uuid, &'static [u8]) {
+            const FILE: &[u8] = b"le contenu du fichier";
+            let page = self.page(Some(parent), "Notes", &[]).await;
+            let child = self.page(Some(page), "Sous-page", &[]).await;
+            let cookie = &self.olga.1;
+            let upload = Request::post(format!("/api/v1/pages/{page}/files?name=photo.bin"));
+            let (status, _, body) = self.send(cookie, upload, FILE.to_vec()).await;
+            assert_eq!(status, StatusCode::CREATED);
+            let file: Value = serde_json::from_slice(&body).unwrap();
+            let url = file["url"].as_str().unwrap();
+            let mmd = format!("# Titre\n\n![photo]({url})\n\nVoir [le fichier]({url}).\n");
+            for (id, content) in [(page, mmd), (child, "Dans la sous-page.\n".to_string())] {
+                let put = Request::put(format!("/api/v1/pages/{id}/mmd"));
+                let (status, _, body) = self.send(cookie, put, content.into_bytes()).await;
+                assert_eq!(
+                    status,
+                    StatusCode::NO_CONTENT,
+                    "{}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
+            (page, child, FILE)
+        }
+
+        /// Les blocs de la page, sans identifiants, l'adresse de chacun de ses propres fichiers
+        /// remplacée par « fichier » : ce qu'une copie doit avoir de son original. Avec ces
+        /// adresses, dans l'ordre.
+        async fn content(&self, page: Uuid) -> (Vec<Block>, Vec<String>) {
+            let mut blocks = self.state.hub.read_blocks(page).await.unwrap();
+            let mut stack = vec![blocks.as_mut_slice()];
+            while let Some(level) = stack.pop() {
+                for block in level.iter_mut() {
+                    block.id.clear();
+                    stack.push(&mut block.children);
+                }
+            }
+            let mut files = Vec::new();
+            each_address(&mut blocks, &mut |address| {
+                if file_of(address, page).is_some() {
+                    files.push(std::mem::replace(address, "fichier".to_string()));
+                }
+            });
+            (blocks, files)
+        }
+
+        /// La copie `copy` de la page de [`Bench::illustrated`] est entière : son contenu et celui
+        /// de sa sous-page, et son fichier, attaché à elle, que ses deux adresses servent.
+        async fn assert_whole_copy(&self, copy: Uuid, of: (Uuid, Uuid, &'static [u8]), what: &str) {
+            let (page, child, file) = of;
+            let (original, _) = self.content(page).await;
+            let (copied, files) = self.content(copy).await;
+            assert!(original.len() >= 3, "{what} : précondition");
+            assert_eq!(copied, original, "{what} : le contenu de la copie");
+            assert_eq!(files.len(), 2, "{what} : l'image et le lien : {files:?}");
+            assert_eq!(files[0], files[1], "{what} : une seule attache");
+            let (status, _, body) = self
+                .send(&self.mona.1, Request::get(&files[0]), Vec::new())
+                .await;
+            assert_eq!(status, StatusCode::OK, "{what} : le fichier de la copie");
+            assert_eq!(body.as_ref(), file, "{what}");
+            let all = self.state.store.list_nodes(self.space).await.unwrap();
+            let under: Vec<Uuid> = all
+                .iter()
+                .filter(|node| node.parent_id == Some(copy))
+                .map(|node| node.id)
+                .collect();
+            assert_eq!(under.len(), 1, "{what} : la sous-page");
+            assert_eq!(
+                self.content(under[0]).await.0,
+                self.content(child).await.0,
+                "{what} : le contenu de la sous-page"
+            );
+        }
+
+        /// Nœuds, instantanés et attaches de la base.
+        async fn written(&self) -> (i64, i64, i64) {
+            let url = format!("sqlite:{}", self._dir.path().join("m.db").display());
+            let mut side = <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
+                .await
+                .unwrap();
+            let mut counts = [0i64; 3];
+            for (i, table) in ["nodes", "doc_snapshots", "attachments"].iter().enumerate() {
+                let sql = format!("SELECT COUNT(*) FROM {table}");
+                counts[i] = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                    .fetch_one(&mut side)
+                    .await
+                    .unwrap();
+            }
+            sqlx::Connection::close(side).await.unwrap();
+            (counts[0], counts[1], counts[2])
+        }
+    }
+
+    fn copy_id(body: &Bytes) -> Uuid {
+        let copy: Value = serde_json::from_slice(body).unwrap();
+        Uuid::parse_str(copy["id"].as_str().unwrap()).unwrap()
+    }
+
+    /// Ruling R590 : une copie attend son tour d'écriture ; ce qui change pendant cette attente,
+    /// après le second contrôle de la route, est vu par la transaction, qui n'écrit rien, et la
+    /// route redécide. Le test tient un tour de la file, y range le changement, puis la
+    /// duplication, dont le second contrôle lit donc encore l'état d'avant ; le tour rendu, la
+    /// file sert le changement, puis la copie. Page mise à la corbeille : `409 trashed`, rien
+    /// d'écrit ; droit de créer sous la page parente retiré (`Stale`) : la copie va dans le
+    /// « Privé » de Mona ; page passée sous une autre page (`NotFound` : elle n'est plus une sœur
+    /// à l'endroit visé) : la copie se pose à côté d'elle, là où elle est. Après une reprise, la
+    /// copie est entière : contenu, sous-page et fichier (constats I1 et I2 de la relecture).
     /// Témoin : sans changement, la copie se pose sous la page parente.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn what_changes_while_a_copy_waits_its_turn_is_seen_by_its_transaction() {
@@ -971,6 +1173,7 @@ mod tests {
             Nothing,
             Trashed,
             NoMoreCreation,
+            Moved,
         }
         let bench = Bench::new().await;
         let store = bench.state.store.clone();
@@ -980,24 +1183,20 @@ mod tests {
                 wait_until("les écritures sont en file", || store.queued_writes() == n).await;
             }
         };
-        for change in [Change::Nothing, Change::Trashed, Change::NoMoreCreation] {
+        for change in [
+            Change::Nothing,
+            Change::Trashed,
+            Change::NoMoreCreation,
+            Change::Moved,
+        ] {
             let what = format!("{change:?}");
             let parent = bench.page(None, "Projet", &[members(Level::Edit)]).await;
-            let page = bench.page(Some(parent), "Notes", &[]).await;
-            let before = bench.nodes().await;
+            let elsewhere = bench.page(None, "Ailleurs", &[members(Level::Edit)]).await;
+            let source = bench.illustrated(parent).await;
+            let page = source.0;
+            let before = bench.written().await;
 
             let held = store.hold_writes().await;
-            let favorite = Request::put(format!("/api/v1/pages/{page}/favorite"))
-                .header(header::HOST, "localhost")
-                .header(header::COOKIE, &bench.mona.1)
-                .body(Body::empty())
-                .unwrap();
-            let router = bench.router.clone();
-            let favorite = tokio::spawn(async move { router.oneshot(favorite).await.unwrap() });
-            queued(1).await;
-            let reply = bench.duplicate(&bench.mona.1, page);
-            // La copie est en file : son second contrôle est passé.
-            queued(2).await;
             let changed = {
                 let (store, olga) = (store.clone(), bench.olga.0);
                 tokio::spawn(async move {
@@ -1009,41 +1208,277 @@ mod tests {
                         Change::NoMoreCreation => {
                             store.set_grant(parent, members(Level::Read)).await.unwrap();
                         }
+                        Change::Moved => {
+                            store
+                                .move_node(page, Some(elsewhere), None, None)
+                                .await
+                                .unwrap();
+                        }
                     }
                 })
             };
-            if change != Change::Nothing {
-                queued(3).await;
-            }
+            let waiting = usize::from(change != Change::Nothing);
+            queued(waiting).await;
+            let reply = bench.duplicate(&bench.mona.1, page);
+            // La copie est en file derrière le changement : son second contrôle est passé.
+            queued(waiting + 1).await;
             drop(held);
             changed.await.unwrap();
-            assert_eq!(favorite.await.unwrap().status(), StatusCode::NO_CONTENT);
             let (status, body) = reply.await.unwrap();
             let text = String::from_utf8_lossy(&body).to_string();
+            if change == Change::Trashed {
+                assert_eq!(status, StatusCode::CONFLICT, "{what} : {text}");
+                assert_eq!(error_of(&body), "trashed", "{what}");
+                assert_eq!(bench.written().await, before, "{what} : rien d'écrit");
+                continue;
+            }
+            assert_eq!(status, StatusCode::CREATED, "{what} : {text}");
+            let after = bench.written().await;
+            assert_eq!(
+                after,
+                (before.0 + 2, before.1 + 2, before.2 + 1),
+                "{what} : deux pages, une attache"
+            );
+            let copy = copy_id(&body);
+            let stored = store.get_node(copy).await.unwrap().unwrap();
+            let own = store.node_grants(copy).await.unwrap();
             match change {
-                Change::Trashed => {
-                    assert_eq!(status, StatusCode::CONFLICT, "{what} : {text}");
-                    assert_eq!(error_of(&body), "trashed", "{what}");
-                    assert_eq!(bench.nodes().await, before, "{what} : aucune page créée");
+                Change::NoMoreCreation => {
+                    assert_eq!(stored.parent_id, None, "{what} : à la racine");
+                    assert_eq!(own, [named(bench.mona.0, Level::Full)], "{what}");
                 }
-                Change::Nothing | Change::NoMoreCreation => {
-                    assert_eq!(status, StatusCode::CREATED, "{what} : {text}");
-                    assert_eq!(bench.nodes().await, before + 1, "{what}");
-                    let copy: Value = serde_json::from_slice(&body).unwrap();
-                    let id = Uuid::parse_str(copy["id"].as_str().unwrap()).unwrap();
-                    let stored = store.get_node(id).await.unwrap().unwrap();
-                    let own = store.node_grants(id).await.unwrap();
-                    if change == Change::Nothing {
-                        assert_eq!(stored.parent_id, Some(parent), "{what}");
-                        assert!(own.is_empty(), "{what}");
-                    } else {
-                        assert_eq!(stored.parent_id, None, "{what} : à la racine");
-                        assert_eq!(own, [named(bench.mona.0, Level::Full)], "{what}");
-                        assert_eq!(copy["section"], "private", "{what}");
-                    }
+                Change::Moved => {
+                    assert_eq!(stored.parent_id, Some(elsewhere), "{what}");
+                    assert!(own.is_empty(), "{what}");
+                    let moved = store.get_node(page).await.unwrap().unwrap();
+                    assert!(moved.position < stored.position, "{what} : après la page");
+                }
+                _ => {
+                    assert_eq!(stored.parent_id, Some(parent), "{what}");
+                    assert!(own.is_empty(), "{what}");
                 }
             }
+            bench.assert_whole_copy(copy, source, &what).await;
         }
+        bench.finish().await;
+    }
+
+    /// Constat I2 de la relecture : une copie que le store refuse à son tour d'écriture est
+    /// reprise, et la troisième tentative l'écrit entière, documents, sous-page et fichier
+    /// compris ; refusée trois fois, elle répond `409 page_moved`, et rien n'est écrit. Le store
+    /// refuse ici par son crochet de test (`NotFound`, ce que dit une page qui vient de changer de
+    /// place, ou un contenu parti).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_copy_refused_at_its_turn_is_tried_three_times() {
+        let bench = Bench::new().await;
+        let store = bench.state.store.clone();
+        let parent = bench.page(None, "Projet", &[members(Level::Edit)]).await;
+        let source = bench.illustrated(parent).await;
+        let before = bench.written().await;
+
+        store.refuse_next_copies(DUPLICATE_RETRIES);
+        let (status, body) = bench.duplicate(&bench.mona.1, source.0).await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(error_of(&body), "page_moved");
+        assert_eq!(bench.written().await, before, "rien d'écrit");
+
+        store.refuse_next_copies(DUPLICATE_RETRIES - 1);
+        let (status, body) = bench.duplicate(&bench.mona.1, source.0).await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        let after = bench.written().await;
+        assert_eq!(after, (before.0 + 2, before.1 + 2, before.2 + 1));
+        bench
+            .assert_whole_copy(copy_id(&body), source, "refusée deux fois")
+            .await;
+        // Le crochet est épuisé : la suivante passe du premier coup.
+        let (status, _) = bench.duplicate(&bench.mona.1, source.0).await.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        bench.finish().await;
+    }
+
+    /// Ruling R605 : une duplication à la fois par compte. Pendant que la première de Mona attend
+    /// de bâtir, sa seconde est refusée tout de suite (`429 duplication_busy`, `Retry-After: 1`,
+    /// un message qui tutoie), sans rien écrire ni attendre ; celle d'un autre compte est admise.
+    /// La première finie, Mona duplique de nouveau.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_duplication_of_an_account_is_refused_at_once() {
+        let bench = Bench::new().await;
+        let grants = [members(Level::Edit), named(bench.gina.0, Level::Edit)];
+        let parent = bench.page(None, "Projet", &grants).await;
+        let page = bench.page(Some(parent), "Notes", &[]).await;
+        let other = bench.page(Some(parent), "Autres notes", &[]).await;
+        let before = bench.nodes().await;
+
+        let held = bench.hold_the_builds().await;
+        let first = bench.duplicate(&bench.mona.1, page);
+        bench.builds_waiting(1).await;
+        // La même page, puis une autre : c'est le compte qui est occupé, pas la page.
+        for target in [page, other] {
+            let post = Request::post(format!("/api/v1/pages/{target}/duplicate"));
+            let (status, headers, body) = bench.send(&bench.mona.1, post, Vec::new()).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(error_of(&body), "duplication_busy");
+            assert_eq!(headers[header::RETRY_AFTER], "1");
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            let message = body["message"].as_str().unwrap();
+            assert!(
+                message.contains("tu as déjà une duplication en cours"),
+                "{message}"
+            );
+        }
+        // Les refus de la page passent avant celui du débit : une page qu'elle ne voit pas.
+        let unseen = Request::post(format!("/api/v1/pages/{}/duplicate", Uuid::now_v7()));
+        let (status, _, _) = bench.send(&bench.mona.1, unseen, Vec::new()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Un autre compte n'attend pas Mona.
+        let second = bench.duplicate(&bench.gina.1, page);
+        bench.builds_waiting(2).await;
+        assert_eq!(bench.nodes().await, before, "rien d'écrit encore");
+        drop(held);
+        assert_eq!(first.await.unwrap().0, StatusCode::CREATED);
+        assert_eq!(second.await.unwrap().0, StatusCode::CREATED);
+        assert_eq!(bench.nodes().await, before + 2);
+        // La place est rendue.
+        let (status, _) = bench.duplicate(&bench.mona.1, page).await.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Elle est tenue jusqu'à la fin de l'écriture : pendant que la copie attend son tour dans
+        // la file, documents bâtis, le compte est encore occupé.
+        let store = bench.state.store.clone();
+        let held = store.hold_writes().await;
+        let writing = bench.duplicate(&bench.mona.1, page);
+        wait_until("la copie attend son tour d'écriture", || {
+            store.queued_writes() == 1
+        })
+        .await;
+        let post = Request::post(format!("/api/v1/pages/{other}/duplicate"));
+        let (status, _, body) = bench.send(&bench.mona.1, post, Vec::new()).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error_of(&body), "duplication_busy");
+        drop(held);
+        assert_eq!(writing.await.unwrap().0, StatusCode::CREATED);
+        bench.finish().await;
+    }
+
+    /// Ruling R606 : le budget d'un compte. Ici, dix octets par minute : la première duplication
+    /// de Mona est admise et bâtit plus ; la suivante est refusée (`429 duplication_busy`), avec
+    /// dans `Retry-After` et dans le message le délai au bout duquel la première sort de la
+    /// fenêtre, et rien n'est écrit. Le budget d'un autre compte est intact. Une copie refusée
+    /// pour son poids a coûté ce qu'elle a bâti : elle compte aussi.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_account_past_its_budget_is_told_when_to_come_back() {
+        use crate::duplications::Duplications;
+        let minute = std::time::Duration::from_secs(60);
+        let bench = Bench::with(|state| {
+            state.duplications = Arc::new(Duplications::new(10, minute));
+        })
+        .await;
+        let grants = [members(Level::Edit), named(bench.gina.0, Level::Edit)];
+        let parent = bench.page(None, "Projet", &grants).await;
+        let page = bench.page(Some(parent), "Notes", &[]).await;
+        let refused = async |cookie: &str, what: &str| {
+            let before = bench.nodes().await;
+            let post = Request::post(format!("/api/v1/pages/{page}/duplicate"));
+            let (status, headers, body) = bench.send(cookie, post, Vec::new()).await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{what}");
+            assert_eq!(error_of(&body), "duplication_busy", "{what}");
+            let wait: u64 = headers[header::RETRY_AFTER]
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((55..=60).contains(&wait), "{what} : {wait} s");
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            let message = body["message"].as_str().unwrap();
+            assert!(
+                message.contains(&format!("réessaie dans {wait} s")),
+                "{what} : {message}"
+            );
+            assert_eq!(bench.nodes().await, before, "{what} : rien d'écrit");
+        };
+        let (status, _) = bench.duplicate(&bench.mona.1, page).await.unwrap();
+        assert_eq!(status, StatusCode::CREATED, "sous le budget, admise");
+        refused(&bench.mona.1, "budget dépensé").await;
+        refused(&bench.mona.1, "un refus ne rend rien").await;
+        let (status, _) = bench.duplicate(&bench.gina.1, page).await.unwrap();
+        assert_eq!(status, StatusCode::CREATED, "le budget d'un autre compte");
+        bench.finish().await;
+
+        // Une copie refusée pour son poids compte ce qu'elle a bâti.
+        let bench = Bench::with(|state| {
+            state.duplications = Arc::new(Duplications::new(10, minute));
+            state.max_duplicated_bytes = 1;
+        })
+        .await;
+        let parent = bench.page(None, "Projet", &[members(Level::Edit)]).await;
+        let page = bench.page(Some(parent), "Notes", &[]).await;
+        let (status, body) = bench.duplicate(&bench.mona.1, page).await.unwrap();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error_of(&body), "subtree_too_large");
+        let (status, body) = bench.duplicate(&bench.mona.1, page).await.unwrap();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "bâtie, donc comptée");
+        assert_eq!(error_of(&body), "duplication_busy");
+        bench.finish().await;
+    }
+
+    /// Constat M2 de la relecture : seule une page se duplique. Un dossier répond `422
+    /// invalid_request`, sans rien écrire ; un dossier d'un sous-arbre n'entre pas dans la copie,
+    /// ni les pages qu'il porte.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_folder_is_not_duplicated() {
+        let bench = Bench::new().await;
+        let store = bench.state.store.clone();
+        let root = bench.page(None, "Projet", &[members(Level::Full)]).await;
+        let kept = bench.page(Some(root), "Page", &[]).await;
+        let folder = store
+            .create_node(NewNode {
+                space_id: bench.space,
+                parent_id: Some(root),
+                after: None,
+                kind: NodeKind::Folder,
+                title: "Dossier".to_string(),
+                created_by: Some(bench.olga.0),
+                grants: Vec::new(),
+                doc: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let _under = bench.page(Some(folder), "Dans le dossier", &[]).await;
+        let before = bench.nodes().await;
+
+        let (status, body) = bench.duplicate(&bench.mona.1, folder).await.unwrap();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error_of(&body), "invalid_request");
+        assert_eq!(bench.nodes().await, before, "rien d'écrit");
+
+        let (status, body) = bench.duplicate(&bench.mona.1, root).await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(bench.nodes().await, before + 2, "la racine et sa page");
+        let copy = copy_id(&body);
+        let all = store.list_nodes(bench.space).await.unwrap();
+        let under: Vec<_> = all
+            .iter()
+            .filter(|node| node.parent_id == Some(copy))
+            .map(|node| (node.title.as_str(), node.kind))
+            .collect();
+        assert_eq!(under, [("Page", NodeKind::Page)]);
+        let _ = kept;
         bench.finish().await;
     }
 }

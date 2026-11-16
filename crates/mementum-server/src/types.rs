@@ -877,6 +877,10 @@ pub enum ErrorCode {
     /// trop pour une seule écriture (Ruling R252) ; le message dit lequel : rien n'est copié, et
     /// l'on duplique par morceaux. Statut 422.
     SubtreeTooLarge,
+    /// Le compte a déjà une duplication en cours, ou a dupliqué trop de contenu dans la dernière
+    /// minute (Rulings R605, R606) ; le message dit lequel, et l'en-tête `Retry-After` quand
+    /// revenir : rien n'est copié, et la demande n'attend pas. Statut 429.
+    DuplicationBusy,
 }
 
 /// Corps de toute réponse d'erreur.
