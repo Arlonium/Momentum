@@ -35,7 +35,7 @@ import { messageOf } from "../session/forms";
 import { findPages, pageTitle } from "../space/pageDirectory";
 import { firstClick } from "../ui/firstClick";
 import { dateId, dateLabel, suggestDates } from "./dates";
-import { postNotice, replaceNotice } from "./notice";
+import { PAGE_LEFT, postNotice, settleNotice } from "./notice";
 import { loadPeople } from "./people";
 
 /** Ce que les menus savent de la page ouverte et de qui la lit. */
@@ -51,7 +51,10 @@ export type MentionContext = {
   canCreate: boolean;
   /** Le serveur a refusé une création : un droit, ou la page, ont changé ; elle est à relire. */
   onRefused?: () => void;
-  /** Tenue quand le compte revient après une session perdue (`useAfterLogin`) : la création repart. */
+  /**
+   * Tenue quand le compte revient après une session perdue (`useAfterLogin`) : la création repart.
+   * Rompue par `PAGE_LEFT` si la page est quittée avant (`PageView`) : rien ne sera créé.
+   */
   afterLogin?: () => Promise<void>;
 };
 
@@ -137,6 +140,8 @@ export function bracketItems(query: string, context: MentionContext): MentionIte
 export const createRefused = (title: string, message: string) => `La page « ${title} » n'a pas pu être créée. ${message}`;
 export const createWaits = (title: string) =>
   `La page « ${title} » n'est pas encore créée : ta session a pris fin. Elle sera créée et liée ici dès que tu te seras reconnecté.`;
+export const createNotMade = (title: string) =>
+  `La page « ${title} » n'a pas été créée : ta session a pris fin, et tu as quitté la page avant de te reconnecter.`;
 export const createdNotPlaced = (title: string) =>
   `La page « ${title} » est créée, mais sa mention n'a pas pu être posée : l'endroit où tu l'avais demandée n'est plus là, ou la page n'est plus modifiable.`;
 
@@ -264,13 +269,15 @@ async function createAndMention(editor: MementumEditor, context: MentionContext,
       node = await ask();
     }
     const placed = insertMentionAt(editor, place, { kind: "page", id: node.id, label: node.title });
-    const said = placed ? null : createdNotPlaced(node.title);
-    if (waiting !== null) replaceNotice(waiting, said);
-    else if (said !== null) postNotice(said);
+    // Le message d'attente a pu être fermé entre-temps : ce qui reste à dire est dit quand même.
+    settleNotice(waiting, placed ? null : createdNotPlaced(node.title));
   } catch (error) {
-    const said = createRefused(title, messageOf(error));
-    if (waiting !== null) replaceNotice(waiting, said);
-    else postNotice(said);
+    if (error === PAGE_LEFT) {
+      // La page a été quittée avant le retour du compte : rien ne sera créé, le message cesse de le promettre.
+      settleNotice(waiting, createNotMade(title));
+      return;
+    }
+    settleNotice(waiting, createRefused(title, messageOf(error)));
     // Un droit, ou la page, ont changé : elle est à relire. Pas pour une session perdue.
     if (!isSessionLost(error)) context.onRefused?.();
   }

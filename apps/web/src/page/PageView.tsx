@@ -34,7 +34,7 @@ import { TrashIcon } from "../icons";
 import { messageOf } from "../session/forms";
 import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
-import { MentionNotices } from "../mentions/notice";
+import { MentionNotices, PAGE_LEFT } from "../mentions/notice";
 import { canComment, canEdit, writesOutsideEditor } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
 import { Breadcrumb } from "./Breadcrumb";
@@ -192,9 +192,30 @@ export function PageView({
   // (un invité ne se voit proposer que qui a la page ouverte), et s'il peut y créer une sous-page.
   const role = me.spaces.find((space) => space.id === node.spaceId)?.role ?? "guest";
   const canCreate = editable && !trashed && !readOnly;
+  // Une création par `[[` qui attend le compte : l'attente est rompue quand la page est quittée
+  // (`useAfterLogin` ne tiendrait jamais sa promesse), pour que son message cesse de promettre.
+  const leaving = useRef(new Set<(why: unknown) => void>());
+  useEffect(() => {
+    const waiting = leaving.current;
+    return () => {
+      for (const give of [...waiting]) give(PAGE_LEFT);
+      waiting.clear();
+    };
+  }, []);
+  const whileHere = useCallback(
+    () =>
+      new Promise<void>((resume, give) => {
+        leaving.current.add(give);
+        void afterLogin().then(() => {
+          leaving.current.delete(give);
+          resume();
+        });
+      }),
+    [afterLogin],
+  );
   const mentions = useMemo(
-    () => ({ spaceId: node.spaceId, role, canCreate, onRefused: rereadPage, afterLogin }),
-    [node.spaceId, role, canCreate, rereadPage, afterLogin],
+    () => ({ spaceId: node.spaceId, role, canCreate, onRefused: rereadPage, afterLogin: whileHere }),
+    [node.spaceId, role, canCreate, rereadPage, whileHere],
   );
   /**
    * Un message de `[[` « Créer la page » fermé pendant qu'il avait le focus : il revient au texte de

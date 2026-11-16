@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getComments, getInfo, getPage } from "../api";
 import { useServerSchema } from "../editor/useServerSchema";
 import { CLIENT_SCHEMA_VERSION } from "../editor/version";
-import { clearNotices, postNotice } from "../mentions/notice";
+import { clearNotices, PAGE_LEFT, postNotice } from "../mentions/notice";
 import { SessionContext } from "../session/session";
 import { until } from "../test/hooks";
 import { page, space, unauthenticated } from "../test/pages";
@@ -372,4 +372,33 @@ test("page_view_shows_the_messages_of_a_page_creation_and_gives_the_focus_back",
   } finally {
     clearNotices();
   }
+});
+
+test("page_view_breaks_the_wait_for_the_account_of_a_page_creation_when_the_page_is_left", async () => {
+  // Une création par `[[` qui attend le compte ne repart pas une fois la page quittée : son attente
+  // est rompue, pour que son message cesse de promettre (C4, R632).
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  const me = account();
+  await show(node, me);
+  const mentioned = probe.mentions[probe.mentions.length - 1] as { afterLogin: () => Promise<void> };
+  const outcomes: unknown[] = [];
+  void mentioned.afterLogin().then(
+    () => outcomes.push("revenu"),
+    (why) => outcomes.push(why),
+  );
+  // Témoin : le compte revenu (un autre objet), l'attente est tenue.
+  const kept: unknown[] = [];
+  void mentioned.afterLogin().then(() => kept.push("revenu"));
+  await show(node, { ...me });
+  expect(kept).toEqual(["revenu"]);
+  expect(outcomes).toEqual(["revenu"]);
+  // La page quittée pendant une attente : rompue.
+  const left: unknown[] = [];
+  void mentioned.afterLogin().then(
+    () => left.push("revenu"),
+    (why) => left.push(why),
+  );
+  await act(async () => root.render(<div />));
+  expect(left).toEqual([PAGE_LEFT]);
 });

@@ -14,8 +14,8 @@ import { cursor, exchange, peer, shownInline, typeAt, typeAtEnd, type Seed } fro
 import { deferred, until } from "../test/hooks";
 import { page, unauthenticated } from "../test/pages";
 import { flush, mountEditor, press, type Mounted } from "../test/richEditor";
-import { createdNotPlaced, createRefused, createWaits, type MentionContext } from "./MentionMenu";
-import { clearNotices, MentionNotices } from "./notice";
+import { createdNotPlaced, createNotMade, createRefused, createWaits, type MentionContext } from "./MentionMenu";
+import { clearNotices, MentionNotices, PAGE_LEFT } from "./notice";
 import { forgetPeople } from "./people";
 
 vi.mock("../api", async (original) => ({
@@ -398,9 +398,13 @@ test("a_refused_creation_is_said_as_the_server_says_it_and_nothing_is_inserted",
   expect(textOfY(m)).toBe("Voir ");
   // La page est à relire : un droit a changé.
   expect(onRefused).toHaveBeenCalledTimes(1);
-  // Le focus est resté dans le texte ; Échap ferme le message.
+  // Le focus est resté dans le texte ; un Échap tapé là ne ferme pas le message (R632), son bouton si.
   expect(m.editor.prosemirrorView.dom.contains(document.activeElement)).toBe(true);
-  await key(m, "Escape");
+  await act(async () => {
+    press(m.editor.prosemirrorView.dom, "Escape");
+  });
+  expect(document.querySelector('[role="alert"]')?.textContent).toBe(createRefused("Compte rendu", refusal));
+  await click(document.querySelector('[role="alert"] button')!);
   expect(document.querySelector('[role="alert"]')).toBeNull();
 
   // Après un refus, on peut redemander.
@@ -502,20 +506,121 @@ test("escape_on_the_message_button_closes_it_and_gives_the_focus_back_to_the_tex
   await flush();
   expect(document.querySelector('[role="alert"]')).toBeNull();
   expect(m.editor.prosemirrorView.dom.contains(document.activeElement)).toBe(true);
-  // Témoin : Échap tapé ailleurs (le titre de la page) ferme le message sans déplacer le focus.
+});
+
+test("escape_typed_for_something_else_leaves_the_message_that_names_the_title", async () => {
+  await publish([page(pageId(1), { title: "Plan" })]);
+  const m = await mount();
+  creates.mockRejectedValue(new ApiError(403, "forbidden", "Non."));
   await type(m, "[[Compte rendu");
   await key(m, "Enter");
   await flush();
-  expect(alerts().length).toBe(1);
+  expect(alerts()).toEqual([createRefused("Compte rendu", "Non.")]);
+  // Échap pour fermer un menu `@` : le menu se ferme, le message reste.
+  await type(m, "@pl");
+  await key(m, "Escape");
+  expect(menu()).toBeNull();
+  expect(alerts()).toEqual([createRefused("Compte rendu", "Non.")]);
+  // Échap dans un autre champ (le titre de la page) : de même, et le focus n'a pas bougé.
   const elsewhere = document.createElement("input");
   document.body.append(elsewhere);
   elsewhere.focus();
   await act(async () => {
     press(elsewhere, "Escape");
   });
-  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(alerts()).toEqual([createRefused("Compte rendu", "Non.")]);
   expect(document.activeElement).toBe(elsewhere);
   elsewhere.remove();
+  // Témoin : le focus dans le message, Échap le ferme.
+  const close = document.querySelector<HTMLElement>('[role="alert"] button')!;
+  close.focus();
+  await act(async () => {
+    press(close, "Escape");
+  });
+  expect(alerts()).toEqual([]);
+});
+
+test("a_waiting_message_closed_does_not_silence_what_comes_of_the_second_try", async () => {
+  await publish([]);
+  // Refusée au second essai, le message d'attente fermé entre-temps : le refus est dit quand même.
+  const back = deferred<void>();
+  const m = await mount({ afterLogin: () => back.promise });
+  creates.mockRejectedValueOnce(unauthenticated());
+  creates.mockRejectedValueOnce(new ApiError(403, "forbidden", "Tu ne peux plus modifier cette page."));
+  await type(m, "[[Compte rendu");
+  await key(m, "Enter");
+  await flush();
+  expect(alerts()).toEqual([createWaits("Compte rendu")]);
+  await click(document.querySelector('[role="alert"] button')!);
+  expect(alerts()).toEqual([]);
+  await act(async () => back.resolve());
+  await flush();
+  expect(alerts()).toEqual([createRefused("Compte rendu", "Tu ne peux plus modifier cette page.")]);
+  // Créée au second essai, sa place partie : dit aussi.
+  act(() => clearNotices());
+  const again = deferred<void>();
+  await act(async () => m.root.render(pageOf(m.editor, { afterLogin: () => again.promise })));
+  creates.mockRejectedValueOnce(unauthenticated());
+  creates.mockResolvedValueOnce(page(pageId(9), { title: "Notes" }));
+  await type(m, "[[Notes");
+  await key(m, "Enter");
+  await flush();
+  expect(alerts()).toEqual([createWaits("Notes")]);
+  await click(document.querySelector('[role="alert"] button')!);
+  act(() => m.editor.removeBlocks(["y"]));
+  await act(async () => again.resolve());
+  await flush();
+  expect(alerts()).toEqual([createdNotPlaced("Notes")]);
+  expect(creates).toHaveBeenCalledTimes(4);
+});
+
+test("a_page_left_while_its_creation_waits_for_the_account_says_it_was_not_created", async () => {
+  await publish([]);
+  // L'attente du compte est celle de la page : quittée, elle est rompue (`PAGE_LEFT`).
+  const wait = deferred<void>();
+  const m = await mount({ afterLogin: () => wait.promise });
+  creates.mockRejectedValueOnce(unauthenticated());
+  creates.mockResolvedValue(page(pageId(9), { title: "Compte rendu" }));
+  await type(m, "[[Compte rendu");
+  await key(m, "Enter");
+  await flush();
+  expect(alerts()).toEqual([createWaits("Compte rendu")]);
+  await act(async () => wait.reject(PAGE_LEFT));
+  await flush();
+  // Rien n'est créé, et le message ne promet plus rien.
+  expect(creates).toHaveBeenCalledTimes(1);
+  expect(alerts()).toEqual([createNotMade("Compte rendu")]);
+  expect(mentions(m)).toEqual([]);
+});
+
+test("a_block_replaced_by_another_at_the_same_place_during_the_creation_gets_no_mention", async () => {
+  await publish([]);
+  const m = await mount();
+  const answer = deferred<PageNode>();
+  creates.mockReturnValue(answer.promise);
+  await type(m, "[[Notes");
+  await key(m, "Enter");
+  // Le bloc part, un autre prend sa place : la place suivie y retombe, au milieu d'un mot.
+  act(() => void m.editor.replaceBlocks(["y"], [{ id: "w", type: "paragraph", content: "Autre texte ici" }]));
+  await act(async () => answer.resolve(page(pageId(9), { title: "Notes" })));
+  await flush();
+  expect(shownInline(m).find((b) => b.id === "w")!.text).toBe("Autre texte ici");
+  expect(mentions(m)).toEqual([]);
+  expect(alerts()).toEqual([createdNotPlaced("Notes")]);
+});
+
+test("the_at_list_is_not_read_again_under_the_active_line_when_the_context_changes", async () => {
+  await publish([page(pageId(1), { title: "Plan A" }), page(pageId(2), { title: "Plan B" })]);
+  const m = await mount();
+  await type(m, "@Plan");
+  await key(m, "ArrowDown");
+  expect(active()).toBe("Plan B");
+  await publish([page(pageId(3), { title: "Plan 0" }), page(pageId(1), { title: "Plan A" }), page(pageId(2), { title: "Plan B" })]);
+  await act(async () => m.root.render(pageOf(m.editor, { role: "admin" })));
+  await flush();
+  expect(active()).toBe("Plan B");
+  await key(m, "Enter");
+  expect(mentions(m).map((x) => x.label)).toEqual(["Plan B"]);
 });
 
 test("a_page_created_once_its_editor_is_gone_is_said_by_the_page", async () => {

@@ -6,11 +6,19 @@
 // Ils vivent dans ce module, pas dans l'éditeur ni dans ses menus : la réponse du serveur peut
 // arriver après que la session de la page a été recréée, ou qu'une autre page a été ouverte, et le
 // message doit encore se dire. C'est la page qui les montre (`MentionNotices`, rendu par `PageView`),
-// hors du document, au bas de la fenêtre. Ils restent jusqu'à ce qu'on les ferme : le bouton, ou
-// Échap, où que soit le focus ; s'il était dans le message, il revient au texte (`focusBack`), jamais
-// à `body`. Rien d'autre que React et une icône n'est chargé ici : la page le rend sans l'éditeur.
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+// hors du document, au bas de la fenêtre. Ils restent jusqu'à ce qu'on les ferme : par le bouton, ou
+// par Échap **quand le focus est dans le message** ; le focus revient alors au texte (`focusBack`),
+// jamais à `body`. Un Échap tapé ailleurs (fermer un menu, un panneau, la fenêtre de connexion) ne les
+// ferme pas : le titre tapé ne serait plus nommé nulle part (R632). Rien d'autre que React et une
+// icône n'est chargé ici : la page le rend sans l'éditeur.
+import { useCallback, useRef, useSyncExternalStore } from "react";
 import { CloseIcon } from "../icons";
+
+/**
+ * Ce par quoi est rompue l'attente du compte d'une création quand sa page est quittée (`PageView`) :
+ * rien ne sera créé, et le message d'attente doit cesser de le promettre.
+ */
+export const PAGE_LEFT = Symbol("page quittée");
 
 type Notice = { readonly id: number; readonly text: string };
 
@@ -30,10 +38,23 @@ export function postNotice(text: string): number {
   return posted;
 }
 
-/** Remplace le message `id` par `text` (à sa place), ou le retire (`null`) ; sans effet s'il est déjà fermé. */
-export function replaceNotice(id: number, text: string | null): void {
-  if (!notices.some((notice) => notice.id === id)) return;
+/**
+ * Remplace le message `id` par `text` (à sa place), ou le retire (`null`). Rend faux, sans rien
+ * faire, s'il a été fermé entre-temps : à l'appelant de dire autrement ce qu'il avait à dire.
+ */
+export function replaceNotice(id: number, text: string | null): boolean {
+  if (!notices.some((notice) => notice.id === id)) return false;
   set(text === null ? notices.filter((n) => n.id !== id) : notices.map((n) => (n.id === id ? { id, text } : n)));
+  return true;
+}
+
+/**
+ * L'issue d'une demande : `text` prend la place du message `id` qui la faisait attendre (`null` :
+ * il n'y en avait pas), ou vient en message neuf si celui-là a été fermé ; `null` : plus rien à dire.
+ */
+export function settleNotice(id: number | null, text: string | null): void {
+  const replaced = id !== null && replaceNotice(id, text);
+  if (!replaced && text !== null) postNotice(text);
 }
 
 /** Ferme tous les messages. */
@@ -60,18 +81,17 @@ export function MentionNotices({ focusBack }: { focusBack: () => void }) {
     // Le bouton part avec le message : le focus revient au texte, pas à `body`.
     if (inside) focusBack();
   }, [focusBack]);
-  const open = shown.length > 0;
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, close]);
-  if (!open) return null;
+  if (shown.length === 0) return null;
   return (
-    <div ref={box} className="mm-mention-notice" role="alert">
+    // Échap n'est écouté que là : tapé ailleurs, il appartient à ce qu'il ferme.
+    <div
+      ref={box}
+      className="mm-mention-notice"
+      role="alert"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") close();
+      }}
+    >
       <div className="mm-mention-notice-texts">
         {shown.map((notice) => (
           <p key={notice.id} dir="auto">
