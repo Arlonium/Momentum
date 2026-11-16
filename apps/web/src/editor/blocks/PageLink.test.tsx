@@ -83,7 +83,7 @@ test("link_to_a_page_the_reader_cannot_see_shows_only_what_the_document_holds", 
 
 test("page_link_without_a_page_is_not_a_link", async () => {
   // Une page publiée sous un id qui n'en est pas un : jamais lue pour un lien.
-  await publish("space", [page("plan", { title: "Secret" }), page(PLAN, { title: "Plan" })]);
+  await publish("space", [page("plan", { title: "Secret" }), page("", { title: "Vide" }), page(PLAN, { title: "Plan" })]);
   for (const pageId of ["", "plan", `../${PLAN}`, `${PLAN}/x`, "javascript:alert(1)", { id: PLAN }, 42]) {
     const m = await mountEditor({ blocks: linkPage(pageId, "Copié") });
     expect(shownLink(m), JSON.stringify(pageId)).toEqual({ text: "Copié", href: null });

@@ -41,7 +41,11 @@ function PageLinkView({ block }: { block: { props: Readonly<Record<string, unkno
   const linked = isPageId(pageId);
   // Le titre à jour, seulement pour une page de l'arbre ; jamais lu pour ce qui n'est pas un id.
   const current = usePageTitle(linked ? pageId : "");
-  const title = shorten(current ?? (textProp(block.props, "title") || "Sans titre"), MAX_TITLE_SHOWN);
+  // Ce qui est lu n'est pris que pour un id de page : une page publiée sous un id vide ne prête pas son titre.
+  const title = shorten(
+    (linked ? current : null) ?? (textProp(block.props, "title") || "Sans titre"),
+    MAX_TITLE_SHOWN,
+  );
   const text = (
     <span className="mm-page-link-title" dir="auto">
       {title}
