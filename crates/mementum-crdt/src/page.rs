@@ -1,22 +1,25 @@
 //! Le document de page : création, mises à jour Yjs, lecture et écriture de
 //! l'arbre de blocs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use mementum_md::{Block, normalize};
 use mementum_schema::SCHEMA_VERSION;
 use yrs::any::Number;
+use yrs::branch::BranchID;
+use yrs::types::TypeRef;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, ClientID, Doc, Map, MapRef, OffsetKind, Options, Out, ReadTxn, StateVector, Transact,
-    TransactionMut, Update, XmlElementPrelim, XmlElementRef, XmlFragment, XmlFragmentRef, XmlOut,
+    Any, Assoc, ClientID, Doc, ID, IdSet, Map, MapRef, OffsetKind, Options, Out, ReadTxn,
+    StateVector, StickyIndex, Transact, TransactionMut, Update, XmlElementPrelim, XmlElementRef,
+    XmlFragment, XmlFragmentRef, XmlOut,
 };
 
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
-use crate::guard::{Pending, REPEATED_CLIENT, Shape, missing, touched};
+use crate::guard::{Pending, REPEATED_CLIENT, Shape, UNTYPED_CHILD, missing, touched};
 use crate::kept_ids::keep_ids;
 use crate::moves::{self, Carried, MAX_CARRIED_BYTES, Recreated};
 use crate::structure::{Slot, check_blocks};
@@ -173,24 +176,37 @@ impl PageDoc {
     /// dont l'horloge dépasse ce que la page avait de leur client avant elle. Une structure à une
     /// horloge que la page connaît déjà, yrs l'ignore ; supprimer son identifiant retirait
     /// l'élément que la page porte à cette horloge (une lettre d'un autre client).
+    ///
+    /// De même, un contenu qui n'est pas un nœud XML (une chaîne, une valeur `Any`…) parmi les
+    /// enfants de la racine ou d'un élément, que la garde refuse d'un client (Rulings R496, R497),
+    /// est supprimé s'il est au journal (Ruling R498) : `children` de yrs s'arrêtait au premier, et
+    /// le serveur lisait la page vide. Seulement ce que l'entrée a intégré (Ruling R490), et
+    /// seulement si une liste qu'elle change ne se lit plus en entier : le parent de chaque contenu
+    /// candidat n'est cherché qu'alors.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
+        let (shape, before) = {
+            let mut txn = self.doc.transact_mut();
+            let (shape, decoded) = self.read(&txn, update, false)?;
+            let before = txn.state_vector();
+            self.integrate(&mut txn, &shape, decoded)?;
+            delete(&mut txn, &shape.outside_marks(&before))?;
+            txn.commit();
+            if lists_are_whole(&txn, &shape) {
+                return Ok(());
+            }
+            (shape, before)
+        };
         let mut txn = self.doc.transact_mut();
-        let (shape, decoded) = self.read(&txn, update, false)?;
-        let before = txn.state_vector();
-        self.integrate(&mut txn, &shape, decoded)?;
-        let outside = shape.outside_marks(&before);
-        if !outside.is_empty() {
-            // Une mise à jour sans bloc, qui ne porte que ces suppressions : aucun client (`0`),
-            // puis le jeu de suppressions. Les marques sont dans la page (intégrées à l'instant,
-            // ou déjà là) : rien ne reste en attente.
-            let mut deletions = vec![0];
-            deletions.extend(outside.encode_v1());
-            let deletions =
-                Update::decode_v1(&deletions).map_err(|e| CrdtError::Decode(e.to_string()))?;
-            txn.apply_update(deletions)
-                .map_err(|e| CrdtError::Decode(e.to_string()))?;
+        let mut outside = IdSet::new();
+        for (id, len) in shape.untyped_items(&before) {
+            let parent = StickyIndex::from_id(id, Assoc::After)
+                .get_offset(&txn)
+                .map(|offset| offset.branch);
+            if parent.is_some_and(|branch| !matches!(branch.type_ref(), TypeRef::XmlText)) {
+                outside.insert(id, len);
+            }
         }
-        Ok(())
+        delete(&mut txn, &outside)
     }
 
     /// Intègre une mise à jour (v1) reçue d'un client : comme
@@ -286,6 +302,12 @@ impl PageDoc {
             return Err(applied(CrdtError::Structure(
                 "la mise à jour laisserait une suppression en attente".to_string(),
             )));
+        }
+        // Ruling R497 : une liste que la mise à jour change, ou un élément qu'elle insère, se lit
+        // en entier ; sinon elle y a posé un contenu qui n'est pas un nœud XML, par l'origine
+        // d'un voisin (la garde a refusé, avant d'appliquer, ce qui nomme son parent).
+        if !lists_are_whole(&txn, &shape) {
+            return Err(applied(CrdtError::Structure(UNTYPED_CHILD.to_string())));
         }
         drop(txn);
         let (carried, withheld) = if recreated.is_empty() {
@@ -438,6 +460,12 @@ impl PageDoc {
         if from_client {
             // Ruling R431 : une marque de texte hors du schéma, ou trop longue.
             shape.check_marks(&state)?;
+            // Ruling R496 : un contenu qui n'est pas un nœud XML parmi les enfants de la racine ou
+            // d'un élément nommé.
+            shape.check_untyped(&state, |(client, clock)| {
+                BranchID::get_nested(txn, &ID::new(ClientID::new(client), clock))
+                    .map(|branch| matches!(branch.type_ref(), TypeRef::XmlText))
+            })?;
         }
         Ok((shape, decoded))
     }
@@ -687,6 +715,44 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
         return Err(CrdtError::TooDeep.to_string());
     }
     Ok(())
+}
+
+/// Supprime de la page les éléments de `ids` (une mise à jour sans bloc, qui ne porte que ces
+/// suppressions : aucun client, puis le jeu de suppressions). Ils sont dans la page : rien ne reste
+/// en attente.
+fn delete(txn: &mut TransactionMut, ids: &IdSet) -> Result<(), CrdtError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut deletions = vec![0];
+    deletions.extend(ids.encode_v1());
+    let deletions = Update::decode_v1(&deletions).map_err(|e| CrdtError::Decode(e.to_string()))?;
+    txn.apply_update(deletions)
+        .map_err(|e| CrdtError::Decode(e.to_string()))
+}
+
+/// Vrai si chaque liste que la transaction (validée) a changée, et chaque élément que la mise à
+/// jour insère, se lit en entier : autant d'enfants (`children`, qui s'arrête au premier qui
+/// n'est pas un nœud XML) que de longueur (Ruling R497). Les types changés comprennent leurs
+/// ancêtres jusqu'à la racine : chaque frappe recompte les enfants du `blockGroup` racine.
+fn lists_are_whole(txn: &TransactionMut, shape: &Shape) -> bool {
+    let mut seen = HashSet::new();
+    txn.changed_parent_types()
+        .iter()
+        .copied()
+        .chain(shape.inserted_elements(txn))
+        .filter(|branch| seen.insert(*branch))
+        .all(|branch| match branch.type_ref() {
+            TypeRef::XmlElement(_) => {
+                let element = XmlElementRef::from(branch);
+                element.children(txn).count() as u32 == element.len(txn)
+            }
+            TypeRef::XmlFragment => {
+                let fragment = XmlFragmentRef::from(branch);
+                fragment.children(txn).count() as u32 == fragment.len(txn)
+            }
+            _ => true,
+        })
 }
 
 /// Les blocs que [`PageDoc::write_blocks`] écrit : normalisés, un paragraphe vide pour un

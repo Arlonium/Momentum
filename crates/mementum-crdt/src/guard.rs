@@ -171,7 +171,17 @@ struct Insert {
     block_id: Option<String>,
     /// Pour une marque de texte que la page ne garde pas (Ruling R431) : pourquoi.
     mark: Option<MarkRefusal>,
+    /// Un contenu compté qui n'est pas un type : une chaîne, une valeur `Any`, du JSON, du binaire,
+    /// un objet incorporé, un sous-document (Ruling R496). Il n'a sa place que dans un texte.
+    untyped: bool,
+    /// Une entrée de map (`parentSub`) : un attribut d'un élément, pas un enfant.
+    keyed: bool,
 }
+
+/// Le refus d'un contenu qui n'est pas un nœud XML parmi les enfants de la racine ou d'un élément
+/// (Ruling R496).
+pub(crate) const UNTYPED_CHILD: &str = "la mise à jour pose un contenu qui n'est pas un nœud XML \
+     parmi les enfants de la racine ou d'un élément (seul un texte porte des caractères)";
 
 /// Une marque de texte (`ItemContent::Format`) que la page ne garde pas (Ruling R431).
 pub(crate) enum MarkRefusal {
@@ -564,6 +574,69 @@ impl Shape {
         Ok(())
     }
 
+    /// Refuse (`Structure`), sans rien appliquer, une mise à jour de client qui pose un contenu
+    /// compté sans type (une chaîne, une valeur `Any`…) parmi les enfants de la racine ou d'un
+    /// élément (Ruling R496) : `children` de yrs s'arrête au premier enfant qui n'est pas un nœud
+    /// XML, et le serveur lisait la page vide. Jugé ici quand le parent est nommé : la racine, ou
+    /// un type par son identifiant, lu dans la mise à jour ou dans la page (`page_type_is_text`).
+    /// Un élément placé par son origine (un voisin) est jugé après l'intégration
+    /// (`PageDoc::try_client_update`, Ruling R497). Une entrée de map (un attribut) n'est pas un
+    /// enfant ; ce que la page connaît déjà (yrs l'ignore) n'y compte pas.
+    pub(crate) fn check_untyped(
+        &self,
+        state: &StateVector,
+        page_type_is_text: impl Fn(Id) -> Option<bool>,
+    ) -> Result<(), CrdtError> {
+        let types: HashMap<Id, u8> = self
+            .inserts()
+            .filter_map(|(s, i)| i.type_ref.map(|t| (s.id, t)))
+            .collect();
+        for (client, structs) in &self.clients {
+            let floor = state.get(&ClientID::new(*client));
+            for s in structs {
+                let Kind::Insert(insert) = &s.kind else {
+                    continue;
+                };
+                if !insert.untyped || insert.keyed || s.id.1 + s.len <= floor {
+                    continue;
+                }
+                let in_text = match &insert.parent {
+                    Parent::Named(root, _) => Some(root != FRAGMENT),
+                    Parent::Id(parent) => match types.get(parent) {
+                        Some(&t) => Some(t == TYPE_REFS_XML_TEXT),
+                        None => page_type_is_text(*parent),
+                    },
+                    Parent::Sibling(_) => None,
+                };
+                if in_text == Some(false) {
+                    return Err(CrdtError::Structure(UNTYPED_CHILD.to_string()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Les contenus comptés sans type que la mise à jour intègre (au-dessus de `floor`, comme
+    /// [`Shape::outside_marks`]), hors entrées de map : identifiant et longueur (Ruling R498).
+    pub(crate) fn untyped_items(&self, floor: &StateVector) -> Vec<(ID, u32)> {
+        self.inserts()
+            .filter(|(s, i)| i.untyped && !i.keyed && s.id.1 >= floor.get(&ClientID::new(s.id.0)))
+            .map(|(s, _)| (ID::new(ClientID::new(s.id.0), s.id.1), s.len))
+            .collect()
+    }
+
+    /// Les éléments XML que la mise à jour insère, retrouvés dans la page (déjà appliquée).
+    pub(crate) fn inserted_elements<'a, T: ReadTxn>(
+        &'a self,
+        txn: &'a T,
+    ) -> impl Iterator<Item = BranchPtr> + 'a {
+        self.inserts()
+            .filter(|(_, i)| i.type_ref == Some(TYPE_REFS_XML_ELEMENT))
+            .filter_map(move |(s, _)| {
+                BranchID::get_nested(txn, &ID::new(ClientID::new(s.id.0), s.id.1))
+            })
+    }
+
     /// Les marques de texte de la mise à jour que la page ne garde pas (Ruling R431) : relue du
     /// stockage, la page les supprime (`PageDoc::apply_update`). Seulement celles que la mise à
     /// jour intègre (Ruling R490) : au-dessus de `floor`, ce que la page avait de leur client
@@ -829,6 +902,16 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
             if content.len == 0 {
                 return Ok(None);
             }
+            let untyped = matches!(
+                info & 0b1111,
+                BLOCK_ITEM_STRING_REF_NUMBER
+                    | BLOCK_ITEM_ANY_REF_NUMBER
+                    | BLOCK_ITEM_JSON_REF_NUMBER
+                    | BLOCK_ITEM_BINARY_REF_NUMBER
+                    | BLOCK_ITEM_EMBED_REF_NUMBER
+                    | BLOCK_ITEM_DOC_REF_NUMBER
+            );
+            let keyed = cant_copy_parent && info & HAS_PARENT_SUB != 0;
             Ok(Some(Struct {
                 id,
                 len: content.len,
@@ -838,6 +921,8 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     tag: content.tag,
                     block_id: content.string,
                     mark: content.mark,
+                    untyped,
+                    keyed,
                 }),
             }))
         }

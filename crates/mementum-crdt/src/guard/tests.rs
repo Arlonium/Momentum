@@ -383,6 +383,8 @@ fn shape_of(entries: &[Entry], deleted: &[Deleted]) -> Shape {
                             tag: None,
                             block_id: None,
                             mark: None,
+                            untyped: false,
+                            keyed: false,
                         }),
                         1 => Kind::Gc,
                         _ => Kind::Skip,
