@@ -2253,11 +2253,15 @@ mod tests {
         store.close().await;
     }
 
-    /// Le dépôt est le seul à retirer des lignes `files` (Ruling R576) : dans les sources des
-    /// crates de l'atelier, hors du store qui la définit, `Store::forget_unattached` n'est appelée
-    /// qu'une fois, par `FileStore::forget_and_remove`, qui vérifie le garde du verrou du dépôt
-    /// avant. Un appelant neuf (un ménage périodique, une commande) fait rougir ce test : qu'il
-    /// passe par `forget_and_remove`, sous le verrou.
+    /// Le dépôt est le seul à retirer des lignes `files` (Ruling R576 ; durci au tour 2, mineur de
+    /// la re-relecture 1). Dans le code de tous les crates de l'atelier, store compris, lignes de
+    /// commentaire retirées, l'identifiant de `Store::forget_unattached` ne paraît qu'à trois
+    /// places, une liste fermée : sa définition ; `Store::sweep_files`, réservé aux tests
+    /// (fonction `test-hooks`) ; `FileStore::forget_and_remove`, qui vérifie le garde du verrou du
+    /// dépôt avant. Un appel sous une autre forme (qualifiée par le type, par une méthode neuve du
+    /// store) le fait paraître ailleurs. Et l'instruction qui retire des lignes de `files` ne
+    /// s'écrit qu'une fois, dans `forget_unattached`, même coupée sur plusieurs lignes. Un ménage
+    /// neuf (périodique, une commande) passe par `forget_and_remove`, sous le verrou.
     #[test]
     fn only_the_depot_forgets_files() {
         fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
@@ -2270,28 +2274,106 @@ mod tests {
                 }
             }
         }
-        let needle = [".forget_", "unattached("].concat();
+        /// Le nom de la fonction que déclare la ligne de code `code`, s'il y en a une.
+        fn declared(code: &str) -> Option<String> {
+            let at = code
+                .find("fn ")
+                .filter(|&at| at == 0 || code[..at].ends_with(' ') || code[..at].ends_with('('))?;
+            let name: String = code[at + 3..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        }
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        // Écrits en morceaux : ce test ne se compte pas lui-même.
+        let ident = ["forget_", "unattached"].concat();
+        let delete = ["delete from ", "files"].concat();
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let mut sources = Vec::new();
         for entry in std::fs::read_dir(crates).unwrap() {
             let dir = entry.unwrap().path();
-            if dir.file_name().is_some_and(|name| name == "mementum-store") {
-                continue;
-            }
             if dir.join("src").is_dir() {
                 walk(&dir.join("src"), &mut sources);
             }
         }
-        assert!(sources.len() > 20, "les sources de l'atelier : {sources:?}");
-        let mut calls = Vec::new();
-        for path in sources {
-            let text = std::fs::read_to_string(&path).unwrap();
-            for _ in text.matches(&needle) {
-                let relative = path.strip_prefix(crates).unwrap();
-                calls.push(relative.to_string_lossy().replace('\\', "/"));
+        assert!(sources.len() > 40, "les sources de l'atelier : {sources:?}");
+        let (mut uses, mut deletes, mut all_deletes) = (Vec::new(), Vec::new(), 0);
+        for path in &sources {
+            let relative = path.strip_prefix(crates).unwrap();
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let text = std::fs::read_to_string(path).unwrap();
+            let code: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect();
+            let mut function = String::new();
+            for line in &code {
+                if let Some(name) = declared(line.trim_start()) {
+                    function = name;
+                }
+                for (at, _) in line.match_indices(&ident) {
+                    let before = line[..at].chars().next_back();
+                    let after = line[at + ident.len()..].chars().next();
+                    if !before.is_some_and(is_ident) && !after.is_some_and(is_ident) {
+                        uses.push(format!("{relative} : {function}"));
+                    }
+                }
+                let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+                if flat.to_lowercase().contains(&delete) {
+                    deletes.push(format!("{relative} : {function}"));
+                }
             }
+            // Le texte entier, espaces et sauts de ligne réduits : une instruction coupée sur
+            // deux lignes compte aussi, la barre de fin de ligne d'une chaîne continuée ôtée.
+            let flat = code
+                .iter()
+                .map(|line| line.trim_end().trim_end_matches('\\'))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let lower = flat.to_lowercase();
+            all_deletes += lower
+                .match_indices(&delete)
+                .filter(|&(at, _)| {
+                    !lower[at + delete.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(is_ident)
+                })
+                .count();
         }
-        assert_eq!(calls, ["mementum-server/src/files.rs"]);
+        uses.sort();
+        let definition = format!("mementum-store/src/files.rs : {ident}");
+        assert_eq!(
+            uses,
+            [
+                "mementum-server/src/files.rs : forget_and_remove",
+                definition.as_str(),
+                "mementum-store/src/files.rs : sweep_files",
+            ]
+        );
+        assert_eq!(deletes, [definition]);
+        assert_eq!(
+            all_deletes, 1,
+            "une instruction qui retire des lignes de files"
+        );
+        // `sweep_files` reste réservé aux tests.
+        let store = std::fs::read_to_string(crates.join("mementum-store/src/files.rs")).unwrap();
+        let lines: Vec<&str> = store.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains("fn sweep_files("))
+            .expect("la définition de sweep_files");
+        assert!(
+            lines[at.saturating_sub(3)..at]
+                .iter()
+                .any(|line| line.trim() == "#[cfg(feature = \"test-hooks\")]"),
+            "sweep_files sans #[cfg(feature = \"test-hooks\")] : {:?}",
+            &lines[at.saturating_sub(3)..=at]
+        );
     }
 
     /// Retirer un contenu absent n'est pas une erreur (R275) : le ménage peut repasser.
