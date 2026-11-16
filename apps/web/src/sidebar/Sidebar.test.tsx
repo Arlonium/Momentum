@@ -49,11 +49,15 @@ async function show(
     onFavorite = () => {},
     loaded = true,
     toggles = new Map(),
+    notice = null,
+    info = null,
   }: {
     nodes?: PageNode[];
     onFavorite?: (id: string) => void;
     loaded?: boolean;
     toggles?: ReadonlyMap<string, number>;
+    notice?: string | null;
+    info?: string | null;
   } = {},
 ) {
   await act(async () =>
@@ -69,7 +73,8 @@ async function show(
           onCreate={() => {}}
           onTrash={() => {}}
           onMove={() => {}}
-          notice={null}
+          notice={notice}
+          info={info}
           readError={null}
           onRetry={() => {}}
           favorites={{ pages: favorites, loaded, toggles }}
@@ -272,4 +277,22 @@ test("a_gesture_made_before_the_hold_and_undone_during_it_shows_at_once", async 
   expect(shown()).toEqual(["A", "B"]);
   await show(["a"], { toggles: new Map([["b", 2]]) });
   expect(shown()).toEqual(["A"]);
+});
+
+test("a_ready_copy_is_said_in_the_footer_as_news_not_as_a_refusal", async () => {
+  // Une copie prête qui ne s'est pas ouverte (R646) : le pied de la barre le dit, comme les refus,
+  // mais en nouvelle (`role="status"`, couleur du texte secondaire), pas en alerte rouge.
+  const ready = "La copie « \u2068Plan (copie)\u2069 » est prête, dans « Privé ».";
+  await show([], { info: ready });
+  const footer = host.querySelector(".mm-side-footer")!;
+  const status = footer.querySelector('[role="status"]');
+  expect(status?.textContent).toBe(ready);
+  expect(status?.className).toBe("mm-side-note");
+  expect(footer.querySelector('[role="alert"]')).toBeNull();
+  // Témoin : un refus, lui, est une alerte.
+  await show([], { notice: "La page n'a pas pu être dupliquée. Page introuvable" });
+  expect(host.querySelector('.mm-side-footer [role="alert"]')?.textContent).toBe(
+    "La page n'a pas pu être dupliquée. Page introuvable",
+  );
+  expect(host.querySelector('.mm-side-footer [role="status"]')).toBeNull();
 });

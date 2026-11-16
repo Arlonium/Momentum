@@ -27,7 +27,7 @@ import { useAfterLogin } from "./session/useAfterLogin";
 import { useRetryAfterLogin } from "./session/useRetryAfterLogin";
 import { SpaceSettings } from "./settings/SpaceSettings";
 import type { Drop } from "./sidebar/drag";
-import { canDuplicate, parentOf } from "./sidebar/rows";
+import { duplicateOffered } from "./sidebar/rows";
 import type { CreateTarget } from "./sidebar/SectionList";
 import { Sidebar } from "./sidebar/Sidebar";
 import { CreateSpaceDialog } from "./sidebar/SpaceSwitcher";
@@ -163,13 +163,10 @@ export function App() {
 
   /** Créer une page à la racine : pas pour un invité, ni en lecture seule. */
   const mayCreate = !stale && space !== null && space.role !== "guest";
-  // Dupliquer la page ouverte (R252), là où le serveur le permet : sa page parente est lue dans
-  // l'arbre (celle que le compte voit) ; jamais en lecture seule (R35 : aucune création).
+  // Dupliquer la page ouverte (R252), là où le serveur le permet : la règle des menus, sa page
+  // parente lue dans l'arbre affiché (celle que le compte voit), jamais en lecture seule (R35).
   const duplicable =
-    active !== undefined &&
-    space !== null &&
-    !stale &&
-    canDuplicate(active, nodes === null ? undefined : parentOf(nodes, active), space.role);
+    active !== undefined && space !== null && duplicateOffered(active, nodes, space.role, stale);
   const [creatingSpace, setCreatingSpace] = useState(false);
   const { looked } = page;
 
@@ -310,6 +307,7 @@ export function App() {
         onTrash={trashFromTree}
         onMove={moveFromTree}
         notice={actions.notice}
+        info={actions.info}
         readError={treeError}
         onRetry={tree.reload}
         favorites={favorites}

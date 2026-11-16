@@ -630,49 +630,131 @@ test("duplicate_is_asked_once_on_a_double_click", async () => {
   vi.mocked(duplicatePage).mockRejectedValueOnce(notFound());
   await settle(() => app.current.actions.duplicate("a"));
   expect(app.current.actions.duplicating).toBe(false);
-  vi.mocked(duplicatePage).mockResolvedValue(page("d", { section: "private" }));
-  await settle(() => app.current.actions.duplicate("a"));
+  expect(app.current.actions.notice).not.toBeNull();
+  // Au départ de la suivante, le refus d'avant s'efface : sinon il resterait affiché après une
+  // copie réussie qui ne s'ouvre pas (R646), qu'aucune navigation n'efface.
+  const next = deferred<PageNode>();
+  vi.mocked(duplicatePage).mockReturnValueOnce(next.promise);
+  await settle(() => void app.current.actions.duplicate("a"));
+  expect(app.current.actions.notice).toBeNull();
+  await settle(() => next.resolve(page("d", { section: "private" })));
   expect(duplicatePage).toHaveBeenCalledTimes(3);
 });
 
 test("a_copy_ready_after_the_person_moved_on_does_not_take_her_away", async () => {
-  // La requête peut durer des secondes (R592). Partie ailleurs entre-temps, la personne y reste :
-  // la copie paraît dans la barre latérale, sans s'ouvrir ni prendre le focus.
+  // La requête peut durer des secondes (R592). La copie ne s'ouvre que si la personne n'a fait
+  // aucun geste depuis sa demande (R646 récrit) : partie ailleurs, ou un clic, une touche pendant
+  // la requête, elle reste où elle est (un brouillon, un menu ouvert, un texte qu'elle tape, sous
+  // une page que l'ouverture démonterait) ; la copie paraît dans la barre latérale, et un message
+  // dit qu'elle est prête, et où.
   const app = await withTree([page("a"), page("b")]);
   let answer = deferred<PageNode>();
   vi.mocked(duplicatePage).mockImplementation(() => answer.promise);
+  const ready = (title: string, where: string) =>
+    `La copie « \u2068${title}\u2069 » est prête, ${where}.`;
+  const copy = (id: string, overrides: Partial<PageNode> = {}) =>
+    page(id, { section: "private", title: `${id.toUpperCase()} (copie)`, ...overrides });
+
+  // Partie sur une autre page.
   await settle(() => void app.current.actions.duplicate("a"));
   history.pushState(null, "", "/p/b");
   await app.rerender({ pathname: "/p/b" });
-  server = [...server, page("c", { section: "private" })];
-  await settle(() => answer.resolve(page("c", { section: "private" })));
+  server = [...server, copy("c")];
+  await settle(() => answer.resolve(copy("c")));
   expect(location.pathname).toBe("/p/b");
   expect(app.current.actions.created).toBeNull();
   expect(ids(app.current.nodes)).toContain("c");
+  expect(app.current.actions.info).toBe(ready("C (copie)", "dans « Privé »"));
+  expect(app.current.actions.notice).toBeNull();
+  // Le message part à la navigation suivante, comme les autres.
+  history.pushState(null, "", "/p/a");
+  await app.rerender({ pathname: "/p/a" });
+  expect(app.current.actions.info).toBeNull();
 
-  // Restée sur la page, mais en train d'écrire (un champ, un texte modifiable) : la copie ne
-  // s'ouvre pas sous ses doigts, où sa frappe irait dans le titre de la copie.
-  const field = document.createElement("input");
-  document.body.append(field);
+  // Restée sur la page, un clic ailleurs, le focus nulle part dans un champ (le panneau des
+  // commentaires refermé sur un brouillon, un menu ouvert) : elle reste.
+  answer = deferred<PageNode>();
+  await settle(() => void app.current.actions.duplicate("b"));
+  document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+  server = [...server, copy("d", { parentId: "b", section: "space" })];
+  await settle(() => answer.resolve(copy("d", { parentId: "b", section: "space" })));
+  expect(location.pathname).toBe("/p/a");
+  expect(app.current.actions.created).toBeNull();
+  expect(app.current.actions.info).toBe(ready("D (copie)", "à côté de la page d'origine"));
+
+  // Une touche (Échap) : de même.
+  answer = deferred<PageNode>();
+  await settle(() => void app.current.actions.duplicate("b"));
+  document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  server = [...server, copy("e")];
+  await settle(() => answer.resolve(copy("e")));
+  expect(location.pathname).toBe("/p/a");
+  expect(app.current.actions.created).toBeNull();
+
+  // Témoin : le relâchement du clic ou de la touche qui a demandé la copie (`pointerup`, `keyup`),
+  // et la répétition d'une touche tenue depuis avant la demande, ne sont pas des gestes : la copie
+  // s'ouvre, son titre prendra le focus, et aucun message ne s'affiche.
+  answer = deferred<PageNode>();
+  await settle(() => void app.current.actions.duplicate("b"));
+  document.body.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+  document.body.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+  document.body.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true }),
+  );
+  server = [...server, copy("f")];
+  await settle(() => answer.resolve(copy("f")));
+  expect(location.pathname).toBe("/p/f");
+  expect(app.current.actions.created).toBe("f");
+  expect(app.current.actions.info).toBeNull();
+
+  // Un geste fait après la réponse ne compte plus : les écouteurs sont partis avec elle.
+  const added = vi.spyOn(document, "addEventListener");
+  const removed = vi.spyOn(document, "removeEventListener");
   try {
     answer = deferred<PageNode>();
     await settle(() => void app.current.actions.duplicate("b"));
-    field.focus();
-    server = [...server, page("d", { section: "private" })];
-    await settle(() => answer.resolve(page("d", { section: "private" })));
-    expect(location.pathname).toBe("/p/b");
-    expect(app.current.actions.created).toBeNull();
-    expect(ids(app.current.nodes)).toContain("d");
-    // Témoin : le focus rendu à ce qui a lancé la duplication, la copie s'ouvre.
-    field.blur();
-    answer = deferred<PageNode>();
-    await settle(() => void app.current.actions.duplicate("b"));
-    await settle(() => answer.resolve(page("e", { section: "private" })));
-    expect(location.pathname).toBe("/p/e");
-    expect(app.current.actions.created).toBe("e");
+    server = [...server, copy("g")];
+    await settle(() => answer.resolve(copy("g")));
+    const listened = added.mock.calls.filter(([type]) => type === "pointerdown" || type === "keydown");
+    const forgotten = removed.mock.calls.filter(
+      ([type]) => type === "pointerdown" || type === "keydown",
+    );
+    expect(listened).toHaveLength(2);
+    expect(forgotten.map(([type, listener, capture]) => [type, listener, capture])).toEqual(
+      listened.map(([type, listener, capture]) => [type, listener, capture]),
+    );
   } finally {
-    field.remove();
+    added.mockRestore();
+    removed.mockRestore();
   }
+});
+
+test("a_lost_answer_says_the_copy_may_have_been_made", async () => {
+  // La réponse s'est perdue en route (réseau coupé, mise en veille, mandataire) : le serveur mène
+  // la copie au bout même si la requête est abandonnée (S6). Ne pas dire qu'elle a échoué, ni
+  // inviter à réessayer comme pour un refus : la barre latérale est relue, et le message dit d'y
+  // regarder avant de réessayer.
+  const app = await withTree([page("a")]);
+  const may =
+    "La réponse du serveur n'est pas arrivée : la copie a peut-être été faite. Regarde dans la barre latérale avant de réessayer.";
+  for (const lost of [
+    new ApiError(0, null, "Le serveur Mementum ne répond pas. Vérifie qu'il est lancé, puis réessaie."),
+    new ApiError(504, null, "Le serveur Mementum ne répond pas. Vérifie qu'il est lancé, puis réessaie."),
+  ]) {
+    const reads = treeReads();
+    server = [page("a"), page("c", { section: "private", title: "A (copie)" })];
+    vi.mocked(duplicatePage).mockRejectedValueOnce(lost);
+    await settle(() => app.current.actions.duplicate("a"));
+    expect(app.current.actions.notice).toBe(may);
+    expect(treeReads()).toBeGreaterThan(reads);
+    expect(ids(app.current.nodes)).toEqual(["a", "c"]);
+    expect(location.pathname).toBe("/s/space");
+  }
+  // Témoin : un refus du serveur lui-même (une erreur de l'API, `500 internal` compris) se dit
+  // comme un refus.
+  vi.mocked(duplicatePage).mockRejectedValueOnce(new ApiError(500, "internal", "erreur interne du serveur"));
+  await settle(() => app.current.actions.duplicate("a"));
+  expect(app.current.actions.notice).toBe("La page n'a pas pu être dupliquée. Erreur interne du serveur");
 });
 
 test("nothing_is_duplicated_under_a_stale_schema", async () => {

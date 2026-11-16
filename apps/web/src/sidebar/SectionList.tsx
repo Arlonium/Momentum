@@ -48,7 +48,7 @@ import { firstClick } from "../ui/firstClick";
 import { nestTarget, stepTarget, unnestTarget, type Drop } from "./drag";
 import { PageTree, type DropAt, type TreeDrag } from "./PageTree";
 import { RowMenu, type MenuAction } from "./RowMenu";
-import { canDuplicate, flattenRows, neighbourOf, NONE, parentOf } from "./rows";
+import { duplicateOffered, flattenRows, neighbourOf, NONE } from "./rows";
 import {
   bySection,
   canCreateIn,
@@ -344,8 +344,7 @@ export function SectionList({
     menu !== null &&
     menuNode !== undefined &&
     onDuplicate !== undefined &&
-    !readOnly &&
-    canDuplicate(menuNode, parentOf(nodes, menuNode), role)
+    duplicateOffered(menuNode, nodes, role, readOnly)
   ) {
     const { id } = menuNode;
     // Après le favori, avant la corbeille (R412). Grisée, pas retirée, pendant une duplication :

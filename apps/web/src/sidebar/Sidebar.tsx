@@ -11,7 +11,9 @@
 // sans que rien n'annonce de sortie ; pendant un glisser, plus aucun événement de pointeur
 // n'arrive, et la page tenue garde la liste gelée. En pied, collés à son bord bas : le
 // message de la dernière action refusée (à défaut, celui d'une lecture des pages qui a échoué),
-// avec « Réessayer » tant que les pages n'ont pas pu être lues, et « Corbeille ».
+// avec « Réessayer » tant que les pages n'ont pas pu être lues ; une nouvelle de la dernière action
+// qui n'est pas un refus (une copie prête qui ne s'est pas ouverte, R646), en texte secondaire ; et
+// « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { ComposeIcon, TrashIcon } from "../icons";
@@ -45,6 +47,8 @@ type Props = {
   onMove: (id: string, drop: Drop) => void;
   /** Erreur de la dernière action (création, corbeille, déplacement), en français. */
   notice: string | null;
+  /** Nouvelle de la dernière action, qui n'est pas un refus (`PageActions.info`). */
+  info?: string | null;
   /** Les pages n'ont pas pu être lues, ou relues : le message du serveur, en français. */
   readError: string | null;
   /** Relit les pages de l'espace. */
@@ -74,6 +78,7 @@ export function Sidebar({
   onTrash,
   onMove,
   notice,
+  info = null,
   readError,
   onRetry,
   favorites,
@@ -241,6 +246,11 @@ export function Sidebar({
           {message && (
             <p className="mm-side-error" role="alert">
               {message}
+            </p>
+          )}
+          {info && (
+            <p className="mm-side-note" role="status">
+              {info}
             </p>
           )}
           {retryable && (

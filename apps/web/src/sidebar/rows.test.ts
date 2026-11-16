@@ -2,7 +2,15 @@
 // lignes que la barre latérale affiche, une par page visible.
 import type { Level, PageNode } from "@mementum/protocol";
 import { expect, test } from "vitest";
-import { canDuplicate, flattenRows, neighbourOf, parentOf, subtreeEnd, withoutSubtree } from "./rows";
+import {
+  canDuplicate,
+  duplicateOffered,
+  flattenRows,
+  neighbourOf,
+  parentOf,
+  subtreeEnd,
+  withoutSubtree,
+} from "./rows";
 
 function page(id: string, parentId: string | null, position: string): PageNode {
   return {
@@ -212,9 +220,11 @@ test("duplicate_is_offered_only_where_the_server_allows_it", () => {
   expect(canDuplicate(under, { ...top, level: "full" }, "guest")).toBe(true);
   expect(canDuplicate(under, { ...top, level: "comment" }, "guest")).toBe(false);
 
-  // À la corbeille (elle-même, ou sa page parente), personne : le serveur répond `409 trashed`.
+  // À la corbeille, personne : le serveur répond `409 trashed`. Une page qui y est par sa page
+  // parente porte elle-même `trashedAt` (le serveur le donne, et l'action « jeter » le pose à la
+  // page ouverte), et l'arbre ne porte aucune page à la corbeille (R643 complété).
   expect(canDuplicate({ ...top, trashedAt: 1 }, undefined, "owner")).toBe(false);
-  expect(canDuplicate(under, { ...top, trashedAt: 1 }, "guest")).toBe(false);
+  expect(canDuplicate({ ...under, trashedAt: 1 }, parentOf(nodes, under), "guest")).toBe(false);
   // Un dossier ne se duplique pas (R610).
   expect(canDuplicate({ ...top, kind: "folder" }, undefined, "owner")).toBe(false);
 });
@@ -228,4 +238,24 @@ test("parent_of_a_page_is_the_one_the_tree_shows", () => {
   // Une page de racine, ou dont la page parente n'est pas dans l'arbre (le compte ne la voit pas).
   expect(parentOf(nodes, top)).toBeUndefined();
   expect(parentOf(nodes, orphan)).toBeUndefined();
+});
+
+test("duplicate_is_offered_from_the_tree_the_menus_show", () => {
+  // Ce que les deux menus (celui d'une ligne, celui de la page) offrent : la règle du serveur
+  // (`canDuplicate`), la page parente lue dans l'arbre affiché, et jamais d'un onglet d'un autre
+  // schéma (R35 : aucune création). `App` et `SectionList` passent par elle, rien d'autre.
+  const top = { ...page("top", null, "a0"), level: "edit" as const };
+  const under = { ...page("sous", "top", "a0"), level: "edit" as const };
+  const nodes = [top, under];
+  expect(duplicateOffered(under, nodes, "guest", false)).toBe(true);
+  // L'invité : la page parente compte, et l'arbre pas encore lu ne la montre pas.
+  expect(duplicateOffered(under, null, "guest", false)).toBe(false);
+  expect(duplicateOffered(under, [under], "guest", false)).toBe(false);
+  expect(duplicateOffered(top, nodes, "guest", false)).toBe(false);
+  // Le rôle compte : un membre partout, arbre lu ou non.
+  expect(duplicateOffered(top, nodes, "member", false)).toBe(true);
+  expect(duplicateOffered(under, null, "member", false)).toBe(true);
+  // Un onglet d'un autre schéma : jamais.
+  expect(duplicateOffered(under, nodes, "owner", true)).toBe(false);
+  expect(duplicateOffered(under, nodes, "guest", true)).toBe(false);
 });

@@ -113,12 +113,28 @@ export function parentOf(nodes: PageNode[], node: PageNode): PageNode | undefine
  * Le serveur laisse-t-il dupliquer `node` (Ruling R252) ? Sa règle : la copie va sous la page
  * parente si le compte la voit (`parent`, celle de l'arbre) et peut y créer (« Peut modifier ») ;
  * sinon, pour un membre (ou plus), dans son « Privé » ; un invité, lui, n'a nulle part où la
- * poser (`403`). Jamais à la corbeille (`409 trashed`), ni pour un dossier (R610). Le serveur fait
- * foi : il rejuge tout au moment d'écrire.
+ * poser (`403`). Jamais à la corbeille (`409 trashed`), ni pour un dossier (R610). Une page à la
+ * corbeille par sa page parente porte elle-même `trashedAt` (le serveur le donne), et l'arbre ne
+ * porte aucune page à la corbeille : la page parente n'a pas à être regardée pour cela. Le serveur
+ * fait foi : il rejuge tout au moment d'écrire.
  */
 export function canDuplicate(node: PageNode, parent: PageNode | undefined, role: Role): boolean {
   if (node.kind !== "page" || node.trashedAt !== null) return false;
-  if (parent?.trashedAt != null) return false;
   if (role !== "guest") return true;
   return parent !== undefined && canEdit(parent.level);
+}
+
+/**
+ * Ce que les menus offrent (celui d'une ligne, celui de la page) : `canDuplicate`, la page parente
+ * lue dans `nodes`, l'arbre affiché (`null` : pas encore lu), et jamais depuis un onglet d'un autre
+ * schéma (`readOnly`, R35 : aucune création).
+ */
+export function duplicateOffered(
+  node: PageNode,
+  nodes: PageNode[] | null,
+  role: Role,
+  readOnly: boolean,
+): boolean {
+  if (readOnly) return false;
+  return canDuplicate(node, nodes === null ? undefined : parentOf(nodes, node), role);
 }

@@ -25,6 +25,7 @@ import {
   trashPage,
   updatePage,
 } from "../api";
+import { isolate } from "../comments/dom";
 import type { OpenPage } from "../page/useOpenPage";
 import { navigate, pagePath } from "../router";
 import { messageOf } from "../session/forms";
@@ -72,19 +73,45 @@ function creationRefusal(error: unknown): string {
 }
 
 /**
- * La personne écrit-elle quelque part (un champ, un texte modifiable : le titre, l'éditeur, un
- * commentaire) ? Une copie prête à ce moment-là ne s'ouvre pas : sa frappe irait dans le titre de
- * la copie, qui prend le focus (R646).
+ * Suit, à partir de maintenant, les gestes de la personne : un appui (`pointerdown`) ou une touche
+ * (`keydown`, hors de la répétition d'une touche déjà tenue), n'importe où dans le document, en
+ * capture. Le relâchement du clic ou de la touche qui vient de demander l'action (`pointerup`,
+ * `keyup`) n'en est pas un. `moved()` dit s'il y en a eu un ; `stop()` retire les écouteurs (R646).
  */
-function typing(): boolean {
-  const active = document.activeElement;
-  if (!(active instanceof HTMLElement)) return false;
-  return (
-    active.isContentEditable ||
-    active instanceof HTMLInputElement ||
-    active instanceof HTMLTextAreaElement ||
-    active instanceof HTMLSelectElement
-  );
+function watchGestures(): { moved: () => boolean; stop: () => void } {
+  let moved = false;
+  const gesture = (event: Event) => {
+    if (event instanceof KeyboardEvent && event.repeat) return;
+    moved = true;
+  };
+  document.addEventListener("pointerdown", gesture, true);
+  document.addEventListener("keydown", gesture, true);
+  return {
+    moved: () => moved,
+    stop: () => {
+      document.removeEventListener("pointerdown", gesture, true);
+      document.removeEventListener("keydown", gesture, true);
+    },
+  };
+}
+
+/**
+ * La réponse n'est pas celle du serveur : coupée en route (statut 0), ou une page d'erreur d'un
+ * mandataire, sans corps de l'API, au-delà de 500. Le serveur a pu aller au bout (R651).
+ */
+function answerLost(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false;
+  return error.status === 0 || (error.code === null && error.status >= 500);
+}
+
+/** Ce que dit une duplication dont la réponse s'est perdue (R651). */
+const ANSWER_LOST =
+  "La réponse du serveur n'est pas arrivée : la copie a peut-être été faite. " +
+  "Regarde dans la barre latérale avant de réessayer.";
+
+/** Où le serveur a mis la copie : à la racine, c'est dans « Privé » (R252). */
+function placeOf(copy: PageNode): string {
+  return copy.parentId === null ? "dans « Privé »" : "à côté de la page d'origine";
 }
 
 type Inputs = {
@@ -105,6 +132,11 @@ type Inputs = {
 export type PageActions = {
   /** Le refus de la dernière action, en français ; `null` : aucun. */
   notice: string | null;
+  /**
+   * Une nouvelle de la dernière action, qui n'est pas un refus : une copie prête qui ne s'est pas
+   * ouverte (R646). Elle part comme `notice`, à la navigation suivante ou à l'action suivante.
+   */
+  info: string | null;
   /** Page tout juste créée : son titre prendra le focus, à sa première ouverture seulement. */
   created: string | null;
   titleFocused: () => void;
@@ -112,8 +144,9 @@ export type PageActions = {
   create: (target: CreateTarget) => Promise<void>;
   /**
    * Duplique la page et ses sous-pages (R252), et ouvre la copie là où le serveur l'a mise : sous
-   * la page parente, ou dans « Privé ». Pas si la personne est partie ailleurs, ou écrit, pendant
-   * la requête (R646) : la copie paraît alors dans la barre latérale seulement.
+   * la page parente, ou dans « Privé ». Pas si la personne a fait un geste (un clic, une touche),
+   * ou changé de page, pendant la requête (R646) : la copie paraît alors dans la barre latérale,
+   * et `info` dit qu'elle est prête.
    */
   duplicate: (id: string) => Promise<void>;
   /** Une duplication est en route : les entrées « Dupliquer » sont inactives (R605). */
@@ -171,8 +204,16 @@ export function usePageActions({
   isStale,
   caughtUp,
 }: Inputs): PageActions {
-  const [notice, setNotice] = useState<string | null>(null);
-  useEffect(() => setNotice(null), [pathname]);
+  /** Le message du pied de la barre latérale : un refus (`error`), ou une nouvelle (`info`). */
+  const [message, setMessage] = useState<{ text: string; tone: "error" | "info" } | null>(null);
+  /** Pose un refus, ou efface le message (`null`), quel qu'il soit. */
+  const setNotice = useCallback(
+    (text: string | null) => setMessage(text === null ? null : { text, tone: "error" }),
+    [],
+  );
+  useEffect(() => setMessage(null), [pathname]);
+  const notice = message?.tone === "error" ? message.text : null;
+  const info = message?.tone === "info" ? message.text : null;
   const [created, setCreated] = useState<string | null>(null);
   const titleFocused = useCallback(() => setCreated(null), []);
   const open = useRef(activeId);
@@ -230,8 +271,10 @@ export function usePageActions({
       duplicatingNow.current = true;
       setDuplicating(true);
       setNotice(null);
-      // L'adresse au départ : partie ailleurs pendant la requête, la personne y reste (R646).
+      // L'adresse au départ, et les gestes faits depuis : la copie ne s'ouvre pas par-dessus ce que
+      // la personne fait pendant la requête (R646).
       const from = location.pathname;
+      const gestures = watchGestures();
       try {
         const copy = await duplicatePage(id);
         // Une relecture a pu l'apporter avant cette réponse : une seule ligne.
@@ -241,22 +284,37 @@ export function usePageActions({
         // Ses sous-pages ne sont pas dans la réponse : l'arbre est relu (le canal de l'espace le
         // ferait aussi, mais il peut être tombé).
         reload();
-        if (location.pathname !== from || typing()) return;
+        // Un geste depuis la demande (un brouillon tapé, un menu ouvert, un clic ailleurs) : ouvrir
+        // la copie démonterait la page, avec ses brouillons, ou prendrait le focus sous les doigts.
+        if (location.pathname !== from || gestures.moved()) {
+          const text = `La copie « ${isolate(copy.title)} » est prête, ${placeOf(copy)}.`;
+          setMessage({ text, tone: "info" });
+          return;
+        }
         setCreated(copy.id);
         navigate(pagePath(copy.id));
       } catch (error) {
         if (isSessionLost(error)) return;
+        if (answerLost(error)) {
+          // Le serveur mène la copie au bout même si la requête est abandonnée (S6) : elle a
+          // peut-être été faite. Ni refus, ni invitation à réessayer : la barre latérale, relue, le
+          // dira.
+          setNotice(ANSWER_LOST);
+          reload();
+          return;
+        }
         setNotice(`La page n'a pas pu être dupliquée. ${sentence(error)}`);
         // `429` : le compte duplique déjà, ou a dépensé son budget ; le message dit quand revenir,
         // et rien ne le rejoue (R612). Il ne dit rien de la page : l'arbre n'a pas à être relu. Tout
         // autre refus dit que l'écran n'est plus celui du serveur.
         if (!(error instanceof ApiError && error.code === "duplication_busy")) reload();
       } finally {
+        gestures.stop();
         duplicatingNow.current = false;
         setDuplicating(false);
       }
     },
-    [isStale, change, reload],
+    [isStale, setNotice, change, reload],
   );
 
   const saved = useCallback(
@@ -403,6 +461,7 @@ export function usePageActions({
 
   return {
     notice,
+    info,
     created,
     titleFocused,
     create,
