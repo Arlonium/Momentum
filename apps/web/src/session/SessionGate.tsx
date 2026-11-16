@@ -20,7 +20,8 @@
 // Le compte de la session n'est plus celui que l'application a chargé (Ruling R115) : un
 // autre s'est connecté par-dessus elle, ou dans un autre onglet du même navigateur, ce qu'elle
 // apprend en relisant le compte (au retour sur l'onglet, Ruling R126 ; à l'ouverture du menu
-// de l'espace ou de ses réglages). Elle ne reprend pas : elle est démontée aussitôt, et
+// de l'espace ou de ses réglages), ou par la relecture qu'`api.ts` fait avant de rejouer un appel
+// (`onOtherAccount`, R464). Elle ne reprend pas : elle est démontée aussitôt, et
 // l'onglet rechargé. Rien de ce que le premier avait ouvert ou tapé ne reste en mémoire, ni
 // ne part sous le nom du second. Un seul endroit en décide : `sameAccount`.
 //
@@ -36,7 +37,7 @@ import {
   type ReactNode,
 } from "react";
 import { flushSync } from "react-dom";
-import { getInfo, getMe, isSessionLost, onSessionLost } from "../api";
+import { getInfo, getMe, isSessionLost, onOtherAccount, onSessionLost } from "../api";
 import { navigate, pagePath, parseRoute, usePathname } from "../router";
 import { forgetOtherRecents } from "../space/recents";
 import { AuthScreen, messageOf } from "./forms";
@@ -236,6 +237,9 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
     },
     [reload],
   );
+
+  // La relecture du compte qu'`api.ts` fait avant un rejeu a trouvé la session à un autre compte.
+  useEffect(() => onOtherAccount((me) => void sameAccount(me)), [sameAccount]);
 
   const refresh = useCallback(async () => {
     const before = losses.current;

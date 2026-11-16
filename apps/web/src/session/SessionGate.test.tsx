@@ -8,7 +8,7 @@ import type { Info, Me, Tree } from "@mementum/protocol";
 import { act, useCallback, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { ApiError, getInfo, getMe, getTree, logIn, onSessionLost, signUp } from "../api";
+import { ApiError, getInfo, getMe, getTree, logIn, onOtherAccount, onSessionLost, signUp } from "../api";
 import { REFRESH_INTERVAL_MS, useSpaceTree, useTreeReader } from "../space/useSpaceTree";
 import { deferred } from "../test/hooks";
 import { space, unauthenticated, unreachable } from "../test/pages";
@@ -21,6 +21,7 @@ vi.mock("../api", async (original) => ({
   getMe: vi.fn(),
   getTree: vi.fn(),
   logIn: vi.fn(),
+  onOtherAccount: vi.fn(),
   onSessionLost: vi.fn(),
   signUp: vi.fn(),
 }));
@@ -40,6 +41,8 @@ let shownFor: Set<string>;
 let refresh: () => Promise<void>;
 /** Ce que `api.ts` appelle quand un appel répond `401 unauthenticated`. */
 let sessionLost: () => void;
+/** Ce que `api.ts` appelle quand sa relecture du compte trouve un autre compte (R464). */
+let otherAccount: (me: Me) => void;
 const reload = vi.fn(() => {
   events.push("rechargé");
 });
@@ -88,6 +91,11 @@ beforeEach(() => {
   vi.mocked(onSessionLost).mockReset();
   vi.mocked(onSessionLost).mockImplementation((listener) => {
     sessionLost = listener;
+    return () => {};
+  });
+  vi.mocked(onOtherAccount).mockReset();
+  vi.mocked(onOtherAccount).mockImplementation((listener) => {
+    otherAccount = listener;
     return () => {};
   });
   // jsdom n'ouvre pas les fenêtres `dialog`.
@@ -142,6 +150,16 @@ test("account_read_again_and_no_longer_the_same_reloads_the_tab", async () => {
   expect(events).toEqual(["montée", "démontée", "rechargé"]);
   expect([...shownFor]).toEqual(["Alice"]);
   expect(host.textContent).toBe("");
+  expect(reload).toHaveBeenCalledTimes(1);
+});
+
+test("another_account_found_by_the_api_before_a_replay_reloads_the_tab", async () => {
+  await opened();
+  // La relecture du compte qu'`api.ts` fait avant un rejeu trouve la session à Bruno (un autre
+  // onglet s'y est connecté) : l'application repart de zéro, sans attendre de relire (R464).
+  await act(async () => otherAccount(account("bruno", "Bruno")));
+  expect(events).toEqual(["montée", "démontée", "rechargé"]);
+  expect([...shownFor]).toEqual(["Alice"]);
   expect(reload).toHaveBeenCalledTimes(1);
 });
 

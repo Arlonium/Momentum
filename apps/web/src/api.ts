@@ -74,6 +74,7 @@ export class ApiError extends Error {
 const UNREACHABLE = "Le serveur Mementum ne répond pas. Vérifie qu'il est lancé, puis réessaie.";
 
 const sessionLost = new Set<() => void>();
+const otherAccount = new Set<(me: Me) => void>();
 
 /**
  * Appelle `listener` chaque fois qu'un appel parti sous la session en cours répond `401
@@ -84,6 +85,17 @@ const sessionLost = new Set<() => void>();
 export function onSessionLost(listener: () => void): () => void {
   sessionLost.add(listener);
   return () => sessionLost.delete(listener);
+}
+
+/**
+ * Appelle `listener` quand la relecture du compte qu'`api.ts` fait avant un rejeu trouve la
+ * session à un autre compte que celui de l'application : un autre onglet du navigateur s'y est
+ * connecté. L'application repart alors de zéro (R115, `SessionGate`), sans attendre de relire le
+ * compte elle-même (R464). Rend la fonction qui le retire.
+ */
+export function onOtherAccount(listener: (me: Me) => void): () => void {
+  otherAccount.add(listener);
+  return () => otherAccount.delete(listener);
 }
 
 /** L'erreur dit-elle que la session est perdue (et non, par exemple, un mot de passe faux) ? */
@@ -99,10 +111,19 @@ const PASSWORD = "/api/v1/auth/password";
 /** Les routes qui ouvrent ou ferment la session : jamais rejouées. */
 const SESSION_ROUTES: ReadonlySet<string> = new Set([SIGNUP, LOGIN, LOGOUT, PASSWORD]);
 
+/**
+ * Combien de temps un refus de session attend, au plus, l'issue d'une session qui s'ouvre ou se
+ * ferme (ms) : au-delà, il est jugé sans elle (R462).
+ */
+const SESSION_CHANGE_WAIT_MS = 10_000;
+
 /** La session de l'onglet au moment où un appel part (Ruling R347). */
 type Stamp = {
   generation: number;
-  /** `acting` : le compte pour lequel l'appel part, s'il est sûr ; sinon `null`. */
+  /**
+   * `acting` : le compte pour lequel l'appel part, s'il est sûr ; sinon `null` (pendant une
+   * déconnexion aussi, R461).
+   */
   account: string | null;
   epoch: number;
 };
@@ -113,10 +134,10 @@ type Stamp = {
  */
 let generation = 0;
 /**
- * Le compte de l'application : celui qu'elle a chargé (premier `GET /api/v1/me` qui répond),
- * ou celui de la session que l'onglet a ouverte ; `null` : aucun, ou déconnexion demandée. Une
- * relecture qui dit un autre compte ne le change pas : l'application va repartir de zéro (R115),
- * et elle agit jusque-là pour celui-ci.
+ * Le compte de l'application : celui qu'elle a chargé (premier `GET /api/v1/me` qui répond hors
+ * d'une déconnexion), ou celui de la session que l'onglet a ouverte ; `null` : aucun, ou
+ * déconnexion demandée. Une relecture qui dit un autre compte ne le change pas : l'application va
+ * repartir de zéro (R115), et elle agit jusque-là pour celui-ci.
  */
 let appAccount: string | null = null;
 /**
@@ -131,10 +152,22 @@ let sessionAccount: string | null = null;
 let acting: string | null = null;
 /** Avance chaque fois que `acting` change : un autre compte, ou la déconnexion. */
 let epoch = 0;
+/**
+ * Les déconnexions de l'onglet en route (R461). Tant qu'il y en a une, aucun appel n'est daté
+ * d'un compte, et une relecture du compte ne charge pas l'application : `appAccount` à `null` ne
+ * dit pas alors « pas encore chargée ».
+ */
+let loggingOut = 0;
 /** Les sessions qui s'ouvrent ou se ferment en ce moment : un refus de session attend leur issue. */
 const changing = new Set<Promise<void>>();
+/**
+ * La relecture du compte en route, et la génération où elle est partie : les refus de cette
+ * génération qui arrivent pendant qu'elle est en route la partagent (R463). Une relecture
+ * répondue ne sert plus : le cookie a pu changer depuis.
+ */
+let reading: { generation: number; account: Promise<string> } | null = null;
 
-const stamp = (): Stamp => ({ generation, account: acting, epoch });
+const stamp = (): Stamp => ({ generation, account: loggingOut > 0 ? null : acting, epoch });
 
 /** Recalcule `acting`, et avance `epoch` s'il change. */
 function settleAccounts() {
@@ -146,10 +179,11 @@ function settleAccounts() {
 
 /**
  * Le serveur vient de dire le compte de la session en cours. `loads` : c'est une lecture de
- * l'application (`getMe`), qui la charge sous ce compte si elle ne l'est pas encore.
+ * l'application (`getMe`), qui la charge sous ce compte si elle ne l'est pas encore, hors d'une
+ * déconnexion (R461).
  */
 function sessionIs(id: string, loads: boolean) {
-  if (loads && appAccount === null) appAccount = id;
+  if (loads && appAccount === null && loggingOut === 0) appAccount = id;
   sessionAccount = id;
   settleAccounts();
 }
@@ -178,43 +212,89 @@ async function changeSession<T>(run: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Ce que dit le `401 unauthenticated` d'un appel parti sous `sent` (Rulings R347, R348) :
+ * Attend que les sessions qui s'ouvrent ou se ferment en ce moment aient fini,
+ * `SESSION_CHANGE_WAIT_MS` au plus : `false` si la borne est passée avant (R462).
+ */
+async function sessionChangesSettle(): Promise<boolean> {
+  if (changing.size === 0) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<false>((done) => {
+    timer = setTimeout(() => done(false), SESSION_CHANGE_WAIT_MS);
+  });
+  try {
+    while (changing.size > 0) {
+      const settled = await Promise.race([Promise.all(changing).then(() => true as const), bound]);
+      if (!settled) return false;
+    }
+    return true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Ce que dit le `401 unauthenticated` d'un appel parti sous `sent` (Rulings R347, R348, R460 à
+ * R462) :
  * - `lost` : la session en cours est perdue, la connexion est demandée ;
  * - `stale` : le refus vise une session que l'onglet a remplacée ou fermée depuis, et ne dit
  *   rien de la session en cours ; l'appel ne repart pas ;
  * - `replay` : de même, et l'appel repart une fois sous la session en cours. Il faut qu'il ne
  *   soit pas déjà reparti, que ce ne soit pas une route de session, qu'il soit parti pour un
- *   compte sûr (`acting` : celui de l'application, quand la session était à lui), que ce compte
- *   n'ait pas changé depuis (ni un autre, ni la déconnexion), et que le compte relu à l'instant
- *   (`GET /api/v1/me`) soit le sien.
- * Un échec de cette relecture est levé à la place du refus : l'appel le dit (un refus de session
- * de la relecture a été jugé par elle, et a demandé la connexion s'il le fallait).
+ *   compte sûr (`acting` : celui de l'application, quand la session était à lui, hors d'une
+ *   déconnexion), que ce compte n'ait pas changé depuis (ni un autre, ni la déconnexion), et que
+ *   le compte relu à l'instant (`GET /api/v1/me`) soit le sien.
+ * Hors des routes de session, une session qui s'ouvre ou se ferme est attendue avant de juger, et
+ * encore après la relecture : sa réponse peut rendre le refus ancien, ou changer le compte de la
+ * session ; à la borne, le refus est jugé sans elle, et ne repart pas. Un échec de la relecture
+ * est levé à la place du refus : l'appel le dit (un refus de session de la relecture a été jugé
+ * par elle, et a demandé la connexion s'il le fallait).
  */
 async function judge(
   sent: Stamp,
   path: string,
   replays: number,
 ): Promise<"lost" | "stale" | "replay"> {
-  const sessionRoute = SESSION_ROUTES.has(path);
-  // Une session qui s'ouvre ou se ferme a pu causer ce refus : il attend de savoir. Pas une route
-  // de session, qui attendrait sa propre issue.
-  while (!sessionRoute && sent.generation === generation && changing.size > 0) {
-    await Promise.all(changing);
-  }
+  // Une route de session n'attend pas : elle attendrait sa propre issue.
+  if (SESSION_ROUTES.has(path)) return sent.generation === generation ? "lost" : "stale";
+  if (!(await sessionChangesSettle())) return sent.generation === generation ? "lost" : "stale";
   if (sent.generation === generation) return "lost";
-  if (sessionRoute || replays > 0 || sent.account === null || sent.epoch !== epoch) return "stale";
+  if (replays > 0 || sent.account === null || sent.epoch !== epoch) return "stale";
   const verified = await readSessionAccount();
-  // Le compte a pu changer pendant la relecture (une connexion de l'onglet sous un autre) : sa
-  // réponse, partie avant, ne dit plus rien.
+  // Une session de l'onglet qui s'ouvre pendant la relecture : le serveur a pu poser son cookie
+  // avant que la page lise sa réponse. On attend son issue, puis le compte dit si l'on repart.
+  if (!(await sessionChangesSettle())) return "stale";
   return verified === sent.account && sent.epoch === epoch ? "replay" : "stale";
 }
 
-/** Le compte de la session, relu, sans rejeu : celui que le navigateur porte à l'instant. */
-async function readSessionAccount(): Promise<string> {
+/**
+ * Le compte de la session, relu, sans rejeu : celui que le navigateur porte à l'instant. Une
+ * relecture déjà en route pour la génération en cours est partagée (R463). Si elle trouve un
+ * autre compte que celui de l'application, `onOtherAccount` le dit (R464).
+ */
+function readSessionAccount(): Promise<string> {
+  if (reading?.generation === generation) return reading.account;
   const at = generation;
-  const me = (await (await send("GET", ME, undefined, undefined, 1)).json()) as Me;
-  if (at === generation) sessionIs(me.user.id, false);
-  return me.user.id;
+  const account = (async () => {
+    const me = (await (await send("GET", ME, undefined, undefined, 1)).json()) as Me;
+    if (at === generation) {
+      sessionIs(me.user.id, false);
+      if (appAccount !== null && me.user.id !== appAccount) {
+        for (const listener of [...otherAccount]) listener(me);
+      }
+    }
+    return me.user.id;
+  })();
+  const entry = { generation: at, account };
+  reading = entry;
+  void account
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .then(() => {
+      if (reading === entry) reading = null;
+    });
+  return account;
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -227,7 +307,8 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
  * Une réponse réussie, sinon l'erreur du serveur (ou `UNREACHABLE`), levée en `ApiError`.
  * Une requête annulée par `signal` rejette avec l'erreur de l'annulation, telle quelle. Un
  * refus de session est jugé par `judge` ; `replays` : combien de fois l'appel est déjà reparti
- * (1 : il ne repartira pas).
+ * (1 : il ne repartira pas). Le corps est écrit une fois : un rejeu part tel que l'appel est
+ * parti, même si l'appelant a changé l'objet depuis.
  */
 async function send(
   method: string,
@@ -236,16 +317,13 @@ async function send(
   signal?: AbortSignal,
   replays = 0,
 ): Promise<Response> {
+  const headers = body === undefined ? undefined : { "content-type": "application/json" };
+  const payload = body === undefined ? undefined : JSON.stringify(body);
   for (; ; replays += 1) {
     const sent = stamp();
     let res: Response;
     try {
-      res = await fetch(path, {
-        method,
-        headers: body === undefined ? undefined : { "content-type": "application/json" },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal,
-      });
+      res = await fetch(path, { method, headers, body: payload, signal });
     } catch (e) {
       if (signal?.aborted) throw e;
       throw new ApiError(0, null, UNREACHABLE);
@@ -300,7 +378,8 @@ export function logIn(body: LogIn): Promise<Me> {
 /** `POST /api/v1/auth/logout` : supprime la session sur le serveur et efface le cookie. */
 export function logOut(): Promise<void> {
   // Rien de ce qui est parti avant, ou part pendant, ne sera rejoué : ni sous ce compte, même
-  // reconnecté, ni sous un autre.
+  // reconnecté, ni sous un autre (R460, R461).
+  loggingOut += 1;
   appAccount = null;
   sessionAccount = null;
   settleAccounts();
@@ -311,6 +390,7 @@ export function logOut(): Promise<void> {
       // Échouée, elle a pu fermer la session quand même (réponse perdue) : les refus de ce qui
       // était parti avant ne disent rien de plus.
       generation += 1;
+      loggingOut -= 1;
     }
   });
 }

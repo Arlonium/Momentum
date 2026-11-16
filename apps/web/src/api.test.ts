@@ -556,3 +556,291 @@ test("a_call_is_not_sent_again_when_the_session_is_lost_again_before_it", async 
   expect(count("GET", "/api/v1/pages/p1")).toBe(1);
   expect(asked).toBe(1);
 });
+
+// Tour de correction 1 (R461 à R464, R480).
+
+test("an_account_read_answered_during_a_failed_logout_does_not_rearm_the_replay", async () => {
+  // Sonde I1 de la relecture. Le menu de l'espace relit le compte ; on clique « Se déconnecter »
+  // aussitôt ; la relecture répond Alice pendant la déconnexion.
+  await loadedAs("alice");
+  const reading = api.getMe();
+  const read = await waiting("GET", "/api/v1/me");
+  const out = api.logOut();
+  const logout = await waiting("POST", "/api/v1/auth/logout");
+  read.answer(200, me("alice"));
+  await reading;
+  // L'application, toujours montée, écrit pendant la déconnexion.
+  const write = api.updatePage("p1", { title: "Pendant la déconnexion" });
+  write.catch(() => {});
+  const sent = await waiting("PATCH", "/api/v1/pages/p1");
+  // La réponse de la déconnexion se perd : l'application reste montée. Alice se reconnecte, et le
+  // refus de l'écriture revient : partie pendant une déconnexion, elle ne repart jamais.
+  logout.fail();
+  await expect(out).rejects.toMatchObject({ status: 0 });
+  await logIn("alice");
+  sent.answer(401, UNAUTHENTICATED);
+  await flush();
+  expect(count("GET", "/api/v1/me")).toBe(2);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+  expect(asked).toBe(0);
+});
+
+test("an_account_read_answered_during_a_logout_does_not_rearm_the_replay_under_another_tab_session", async () => {
+  await loadedAs("alice");
+  const reading = api.getMe();
+  const read = await waiting("GET", "/api/v1/me");
+  const out = api.logOut();
+  const logout = await waiting("POST", "/api/v1/auth/logout");
+  read.answer(200, me("alice"));
+  await reading;
+  const write = api.updatePage("p1", { title: "Pendant la déconnexion" });
+  write.catch(() => {});
+  const sent = await waiting("PATCH", "/api/v1/pages/p1");
+  logout.answer(204);
+  await out;
+  // Avant le rechargement de l'onglet, un autre onglet a reconnecté Alice ; le refus revient.
+  sent.answer(401, UNAUTHENTICATED);
+  await flush();
+  expect(count("GET", "/api/v1/me")).toBe(2);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+  expect(asked).toBe(0);
+});
+
+test("a_call_sent_during_a_logout_crossed_by_a_login_is_never_sent_again", async () => {
+  await loadedAs("alice");
+  const out = api.logOut();
+  const logout = await waiting("POST", "/api/v1/auth/logout");
+  // Une connexion de l'onglet aboutit pendant la déconnexion (deux formulaires) ; l'application
+  // écrit, la déconnexion toujours en route.
+  await logIn("alice");
+  const write = api.updatePage("p1", { title: "Pendant la déconnexion" });
+  write.catch(() => {});
+  const sent = await waiting("PATCH", "/api/v1/pages/p1");
+  logout.answer(204);
+  await out;
+  await logIn("alice");
+  sent.answer(401, UNAUTHENTICATED);
+  await flush();
+  expect(count("GET", "/api/v1/me")).toBe(1);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("a_replay_waits_for_a_login_of_the_tab_in_course_and_stops_if_it_is_another_account", async () => {
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  // Bruno se connecte dans l'onglet pendant la relecture ; le serveur a ouvert sa session (le
+  // navigateur porte peut-être déjà son cookie), la page ne le sait pas encore. La relecture,
+  // partie avant, répond Alice : le titre ne part pas avant de savoir.
+  const login = api.logIn({ email: "bruno@exemple.fr", password: "mot-de-passe" });
+  const opening = await waiting("POST", "/api/v1/auth/login");
+  reading.answer(200, me("alice"));
+  await flush();
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+  // C'est Bruno : le titre d'Alice ne part pas.
+  opening.answer(200, me("bruno"));
+  await login;
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  await flush();
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+  expect(asked).toBe(0);
+});
+
+test("a_replay_waits_for_a_login_of_the_tab_in_course_and_goes_if_it_is_the_same_account", async () => {
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  const login = api.logIn({ email: "alice@exemple.fr", password: "mot-de-passe" });
+  const opening = await waiting("POST", "/api/v1/auth/login");
+  reading.answer(200, me("alice"));
+  await flush();
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+  // C'est encore Alice : le titre part, sous la session qu'elle vient d'ouvrir.
+  opening.answer(200, me("alice"));
+  await login;
+  (await waiting("PATCH", "/api/v1/pages/p1")).answer(200, page("p1", { title: "Titre d'Alice" }));
+  await expect(write).resolves.toMatchObject({ title: "Titre d'Alice" });
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(2);
+});
+
+test("a_stale_refusal_waits_for_a_login_of_the_tab_in_course_before_reading_the_account", async () => {
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  const login = api.logIn({ email: "bruno@exemple.fr", password: "mot-de-passe" });
+  const opening = await waiting("POST", "/api/v1/auth/login");
+  first.answer(401, UNAUTHENTICATED);
+  await flush();
+  // Rien ne part tant que la connexion en route n'a pas dit son compte.
+  expect(count("GET", "/api/v1/me")).toBe(1);
+  opening.answer(200, me("bruno"));
+  await login;
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  await flush();
+  expect(count("GET", "/api/v1/me")).toBe(1);
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("the_replay_sends_the_body_as_it_was_first_sent", async () => {
+  // Sonde du mineur 2 : un objet changé par l'appelant après l'envoi ne change pas le rejeu.
+  await loadedAs("alice");
+  const body = { title: "Avant" };
+  const write = api.updatePage("p1", body);
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  body.title = "Changé par l'appelant après l'envoi";
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  const again = await waiting("PATCH", "/api/v1/pages/p1");
+  expect(again.body).toEqual({ title: "Avant" });
+});
+
+test("refusals_of_one_session_share_one_reading_of_the_account", async () => {
+  // Sonde du mineur 3 : cinq appels en route pendant un changement de mot de passe.
+  await loadedAs("alice");
+  const reads = [1, 2, 3, 4, 5].map((n) => api.getPage(`p${n}`));
+  const sent = await Promise.all([1, 2, 3, 4, 5].map((n) => waiting("GET", `/api/v1/pages/p${n}`)));
+  await changePassword();
+  for (const call of sent) call.answer(401, UNAUTHENTICATED);
+  await flush();
+  expect(count("GET", "/api/v1/me")).toBe(2);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  for (const n of [1, 2, 3, 4, 5]) (await waiting("GET", `/api/v1/pages/p${n}`)).answer(200, page(`p${n}`));
+  expect(await Promise.all(reads)).toEqual([1, 2, 3, 4, 5].map((n) => page(`p${n}`)));
+  expect(count("GET", "/api/v1/me")).toBe(2);
+});
+
+test("a_reading_of_the_account_is_not_shared_once_answered", async () => {
+  // Témoin du précédent : un refus revenu après la réponse de la relecture en refait une.
+  await loadedAs("alice");
+  const one = api.getPage("p1");
+  const two = api.getPage("p2");
+  const [first, second] = [await waiting("GET", "/api/v1/pages/p1"), await waiting("GET", "/api/v1/pages/p2")];
+  await changePassword();
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  (await waiting("GET", "/api/v1/pages/p1")).answer(200, page("p1"));
+  await one;
+  second.answer(401, UNAUTHENTICATED);
+  await flush();
+  expect(count("GET", "/api/v1/me")).toBe(3);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  (await waiting("GET", "/api/v1/pages/p2")).answer(200, page("p2"));
+  await expect(two).resolves.toEqual(page("p2"));
+});
+
+test("a_session_change_that_never_answers_holds_a_refusal_ten_seconds_at_most", async () => {
+  // Sonde du mineur 4 : un changement de mot de passe sans réponse retenait tout refus de la
+  // session en cours, sans fin.
+  await loadedAs("alice");
+  const read = api.getPage("p1");
+  let settled = false;
+  read.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  const first = await waiting("GET", "/api/v1/pages/p1");
+  void api.changePassword(PASSWORDS).catch(() => {});
+  await waiting("POST", "/api/v1/auth/password");
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    first.answer(401, UNAUTHENTICATED);
+    await vi.advanceTimersByTimeAsync(9_900);
+    expect(settled).toBe(false);
+    expect(asked).toBe(0);
+    // Au-delà de la borne, la session est tenue pour perdue : la connexion est demandée.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(settled).toBe(true);
+    expect(asked).toBe(1);
+    await expect(read).rejects.toMatchObject({ code: "unauthenticated" });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a_logout_refused_by_the_server_settles_at_once", async () => {
+  // Mineur 5 : la déconnexion est une route de session ; refusée (le serveur ne le fait pas
+  // aujourd'hui), elle n'attend pas sa propre issue.
+  await loadedAs("alice");
+  let settled = false;
+  const out = api.logOut();
+  out.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  (await waiting("POST", "/api/v1/auth/logout")).answer(401, UNAUTHENTICATED);
+  await flush();
+  expect(settled).toBe(true);
+  await expect(out).rejects.toMatchObject({ code: "unauthenticated" });
+});
+
+test("a_reading_of_the_account_that_finds_another_account_tells_the_application", async () => {
+  // Mineur 8 : la relecture d'avant un rejeu apprend qu'un autre onglet s'est connecté sous
+  // Bruno ; l'application en est prévenue (elle repart de zéro, R115), sans attendre de relire.
+  const told: string[] = [];
+  api.onOtherAccount((other) => told.push(other.user.id));
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(told).toEqual(["bruno"]);
+});
+
+test("a_reading_of_the_account_that_finds_the_same_account_tells_nothing", async () => {
+  const told: string[] = [];
+  api.onOtherAccount((other) => told.push(other.user.id));
+  await loadedAs("alice");
+  const read = api.getPage("p1");
+  const first = await waiting("GET", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  (await waiting("GET", "/api/v1/pages/p1")).answer(200, page("p1"));
+  await read;
+  expect(told).toEqual([]);
+});
+
+// Limite dite (R348, coût) : un rejeu peut passer après un geste plus récent sur le même réglage, et
+// l'écraser. Alice donne l'accès complet à Bruno ; l'appel reste en route pendant la reconnexion ;
+// reconnectée, elle le baisse à « Peut lire » (abouti) ; le refus du premier revient, il repart.
+// Le test échoue, comme attendu, par cette perte et elle seule ; le jour où elle est levée (un rejeu
+// qui cède à un appel plus récent au même réglage), il rougit : le sortir alors de `test.fails`.
+const OVERWRITTEN = ["full", "read", "full"];
+test.fails("a_replay_does_not_overwrite_a_newer_gesture_on_the_same_setting [limite : R348]", async () => {
+  await loadedAs("alice");
+  const grant = api.setUserLevel("p1", "bruno", "full");
+  grant.catch(() => {});
+  const first = await waiting("PUT", "/api/v1/pages/p1/access/users/bruno");
+  await logIn("alice");
+  const lower = api.setUserLevel("p1", "bruno", "read");
+  await flush();
+  received.filter((c) => c.method === "PUT")[1].answer(200, {});
+  await lower;
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  await flush();
+  const levels = received
+    .filter((c) => c.method === "PUT")
+    .map((c) => (c.body as { level: string }).level);
+  // Seule la perte dite compte pour l'échec attendu ; toute autre issue fait rougir le test.
+  if (JSON.stringify(levels) === JSON.stringify(OVERWRITTEN)) {
+    throw new Error(`perte dite : le rejeu écrase le geste plus récent (${levels.join(", ")})`);
+  }
+});
