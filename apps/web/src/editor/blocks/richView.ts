@@ -108,6 +108,19 @@ export function stopEventsOutside(dom: HTMLElement, contentDOM: HTMLElement | nu
 }
 
 /**
+ * Le bloc sélectionné en entier (une sélection de nœud : `selectNode`, `deselectNode`) : la classe que
+ * ProseMirror pose sur l'élément du bloc, et rien d'autre, comme la vue React de tiptap. Sans elles,
+ * ProseMirror posait aussi `draggable="true"` sur le bloc sélectionné (R655).
+ */
+export function nodeSelection(dom: HTMLElement) {
+  const root = () => dom.parentElement ?? dom;
+  return {
+    selectNode: () => root().classList.add("ProseMirror-selectednode"),
+    deselectNode: () => root().classList.remove("ProseMirror-selectednode"),
+  };
+}
+
+/**
  * Les changements de l'arbre que ProseMirror ignore dans une vue qui a du texte (`ignoreMutation`) :
  * tout ce qui est hors du texte (le bouton remplacé, son `aria-expanded`), comme tiptap ; dans le
  * texte, ProseMirror relit ce qui a changé.

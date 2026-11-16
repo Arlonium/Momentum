@@ -32,7 +32,7 @@ import { focusEditor } from "./BlockWindowHost";
 import { pageScope } from "./blockWindows";
 import { PagePicker } from "./PagePicker";
 import { textProp } from "./props";
-import { element, followProps, iconElement, PAGE_ICON, stopEventsOutside } from "./richView";
+import { element, followProps, iconElement, nodeSelection, PAGE_ICON, stopEventsOutside } from "./richView";
 import { useEditable } from "./useEditable";
 
 /** Un titre de page a 500 caractères au plus ; un titre copié écrit par un autre chemin, peut-être plus. */
@@ -49,7 +49,7 @@ function pageLinkView(block: { props: Readonly<Record<string, unknown>> }, live:
   let pageId = textProp(block.props, "pageId");
   let copied = textProp(block.props, "title");
   const dom = element("div", "mm-frame mm-page-link");
-  dom.contentEditable = "false";
+  dom.setAttribute("contenteditable", "false");
   const icon = element("span", "mm-frame-icon");
   icon.setAttribute("aria-hidden", "true");
   icon.append(iconElement(15, PAGE_ICON));
@@ -97,6 +97,7 @@ function pageLinkView(block: { props: Readonly<Record<string, unknown>> }, live:
       return true;
     },
     stopEvent: stopEventsOutside(dom),
+    ...nodeSelection(dom),
     destroy: stop,
   };
 }

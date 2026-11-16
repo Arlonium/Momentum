@@ -1,15 +1,23 @@
-// Les vues des blocs riches dessinées sans React (le callout, le signet ; R625, R626, `richView.ts`) :
-// ce qui les rendait lentes à l'ouverture d'une page ne revient pas, et ce que faisait la vue React
-// tient toujours (le focus d'un bouton gardé quand une prop change ailleurs, le curseur gardé, rien
-// d'écouté par une vue qui n'est plus affichée, les icônes de l'interface).
+// Les vues des blocs riches dessinées sans React (le callout, le signet, le lien de page ; R625 à R627,
+// R653 à R657, `richView.ts`) : ce qui les rendait lentes à l'ouverture d'une page ne revient pas, et
+// ce que faisait la vue React tient toujours (le focus d'un bouton gardé quand une prop change
+// ailleurs, une prop qui n'est pas du texte, le curseur gardé, les îlots non modifiables, la sélection
+// d'un bloc, rien d'écouté par une vue qui n'est plus affichée, la copie, les icônes de l'interface).
 import { ReadOnlyExtension } from "@blocknote/core/extensions";
+import { NodeSelection } from "prosemirror-state";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
+import * as Y from "yjs";
 import { BookmarkIcon, InfoIcon, PageIcon } from "../../icons";
-import { watchersForTests } from "../../space/pageDirectory";
-import { blockOf, flush, mountEditor, type Mounted } from "../../test/richEditor";
+import { publishPages, watchersForTests } from "../../space/pageDirectory";
+import { REMOTE, seedState } from "../../test/editors";
+import { page } from "../../test/pages";
+import { blockOf, flush, foreignStyles, mountEditor, type Mounted } from "../../test/richEditor";
+import { FRAGMENT } from "../collab";
 import { BOOKMARK_ICON, iconElement, INFO_ICON, PAGE_ICON, stopEventsOutside } from "./richView";
+
+afterEach(() => publishPages(null, null));
 
 /** Ce que tiptap ou Mementum lisent de la sélection du document. */
 const GETTERS = ["anchorNode", "anchorOffset", "focusNode", "focusOffset", "rangeCount", "type", "isCollapsed"] as const;
@@ -122,6 +130,8 @@ test("a_rich_block_changed_elsewhere_keeps_the_focus_on_its_button_or_link", asy
   expect(callout.querySelector(".bn-block-content")!.getAttribute("data-color")).toBe("red");
   expect(callout.querySelector(".bn-block-content")!.getAttribute("data-icon")).toBe("📌");
   expect(blockOf(m, "b").querySelector(".bn-block-content")!.getAttribute("data-url")).toBe("https://ailleurs.example/page");
+  expect(blockOf(m, "l").querySelector(".bn-block-content")!.getAttribute("data-page-id")).toBe(NOTES);
+  expect(blockOf(m, "l").querySelector(".bn-block-content")!.getAttribute("data-title")).toBe("Notes");
   // Le texte du callout n'a pas bougé.
   expect(callout.querySelector(".mm-callout-content")!.textContent).toBe("Attention");
 });
@@ -255,4 +265,158 @@ test("the_icons_drawn_without_react_are_those_of_the_interface", async () => {
     expect(drawn(iconElement(size, shapes))).toEqual(drawn(host.querySelector("svg")!));
     await act(async () => root.unmount());
   }
+});
+
+/** Un callout, un signet et un lien de page entre deux paragraphes. */
+const RICH = [
+  { id: "p", type: "paragraph" as const, content: "Avant" },
+  { id: "c", type: "callout" as const, props: { icon: "⚠️", color: "blue" }, content: "Attention" },
+  { id: "b", type: "bookmark" as const, props: { url: "https://exemple.fr/" } },
+  { id: "l", type: "pageLink" as const, props: { pageId: PLAN, title: "Plan" } },
+  { id: "z", type: "paragraph" as const, content: "Après" },
+];
+
+/** L'élément Yjs du contenu du bloc `id` dans `doc`. */
+function contentOf(doc: Y.Doc, id: string): Y.XmlElement {
+  const walk = (node: Y.XmlElement | Y.XmlFragment): Y.XmlElement | null => {
+    for (const child of node.toArray()) {
+      if (!(child instanceof Y.XmlElement)) continue;
+      if (child.nodeName === "blockContainer" && child.getAttribute("id") === id) return child.get(0) as Y.XmlElement;
+      const found = walk(child);
+      if (found) return found;
+    }
+    return null;
+  };
+  const found = walk(doc.getXmlFragment(FRAGMENT));
+  if (found === null) throw new Error(`le bloc ${id} n'est pas dans le document`);
+  return found;
+}
+
+/** Écrit dans le document de `m` comme un autre client. */
+function remote(m: Mounted, change: (doc: Y.Doc) => void): void {
+  const other = new Y.Doc();
+  Y.applyUpdate(other, Y.encodeStateAsUpdate(m.doc));
+  const before = Y.encodeStateVector(other);
+  other.transact(() => change(other));
+  Y.applyUpdate(m.doc, Y.encodeStateAsUpdate(other, before), REMOTE);
+  other.destroy();
+}
+
+test("a_prop_turned_by_another_into_something_else_than_text_breaks_nothing", async () => {
+  // Une vue sans React lit une prop changée ailleurs dans `update`, pas au rendu d'un composant :
+  // Yjs y garde toute valeur JSON, et une valeur lue sans `textProp` levait dans la mise à jour de la
+  // vue de ProseMirror (l'éditeur de tous ceux qui ont la page ouverte) ou s'affichait « [object
+  // Object] ».
+  await act(async () => publishPages("space", [page(PLAN, { title: "Plan 2027" })]));
+  const m = await mountEditor({ blocks: RICH });
+  const views = ["c", "b", "l"].map((id) => blockOf(m, id).querySelector(".bn-block-content")!.firstElementChild);
+  const odd: unknown[] = [{ a: 1 }, 42, true, ["x"], null, "<img src=x onerror=alert(1)>", "x".repeat(300_000)];
+  for (const value of odd) {
+    const label = JSON.stringify(value)?.slice(0, 30) ?? String(value);
+    await act(async () =>
+      remote(m, (doc) => {
+        for (const [id, name] of [["c", "icon"], ["c", "color"], ["b", "url"], ["l", "pageId"], ["l", "title"]]) {
+          contentOf(doc, id).setAttribute(name, value as string);
+        }
+      }),
+    );
+    await flush();
+    expect(m.errors, label).toEqual([]);
+    for (const id of ["c", "b", "l"]) {
+      const view = blockOf(m, id);
+      expect(view.querySelector("img"), `${label} ${id}`).toBeNull();
+      expect(foreignStyles(view), `${label} ${id}`).toEqual([]);
+      expect(view.querySelector('a[href^="javascript"]'), `${label} ${id}`).toBeNull();
+      expect(view.textContent, `${label} ${id}`).not.toContain("[object");
+    }
+    expect(blockOf(m, "c").querySelector(".mm-callout-content")!.textContent, label).toBe("Attention");
+    expect(blockOf(m, "c").querySelector(".mm-callout")!.className, label).toBe("mm-callout mm-callout-default");
+    // Le lien de page : pas un id, pas de lien ; un titre copié qui n'est pas du texte est « Sans titre ».
+    const title = typeof value === "string" ? value.slice(0, 500) : "Sans titre";
+    expect(blockOf(m, "l").querySelector(".mm-page-link-title")!.textContent!.startsWith(title), label).toBe(true);
+    // L'éditeur affiche encore ce qu'écrit un autre.
+    await act(async () =>
+      remote(m, (doc) => {
+        const text = contentOf(doc, "z").get(0) as Y.XmlText;
+        text.insert(text.length, "!");
+      }),
+    );
+    await flush();
+  }
+  expect(blockOf(m, "z").textContent).toBe(`Après${"!".repeat(odd.length)}`);
+  // Les vues n'ont pas été recréées.
+  expect(["c", "b", "l"].map((id) => blockOf(m, id).querySelector(".bn-block-content")!.firstElementChild)).toEqual(views);
+  // Une adresse `javascript:` n'est jamais un lien ; un titre au U+202E reste isolé.
+  await act(async () =>
+    remote(m, (doc) => {
+      contentOf(doc, "b").setAttribute("url", "javascript:alert(1)");
+      contentOf(doc, "l").setAttribute("pageId", "javascript:alert(1)");
+      contentOf(doc, "l").setAttribute("title", "‮gnp.exe");
+    }),
+  );
+  await flush();
+  expect(blockOf(m, "b").querySelector("a")).toBeNull();
+  expect(blockOf(m, "l").querySelector("a")).toBeNull();
+  expect(blockOf(m, "l").querySelector(".mm-page-link-title")!.getAttribute("dir")).toBe("auto");
+  // Un id connu revient : le titre à jour aussi ; une page que le compte ne voit pas : jamais lui.
+  await act(async () => remote(m, (doc) => contentOf(doc, "l").setAttribute("pageId", PLAN)));
+  await flush();
+  expect(blockOf(m, "l").querySelector(".mm-page-link-title")!.textContent).toBe("Plan 2027");
+  await act(async () => remote(m, (doc) => contentOf(doc, "l").setAttribute("pageId", NOTES)));
+  await flush();
+  expect(blockOf(m, "l").textContent).not.toContain("2027");
+});
+
+test("the_islands_of_a_rich_block_are_marked_not_editable", async () => {
+  // `contentEditable = "false"` (la propriété) ne pose pas l'attribut dans jsdom : rien ne le voyait.
+  const m = await mountEditor({ blocks: RICH });
+  expect(blockOf(m, "c").querySelector(".mm-callout-icon")!.getAttribute("contenteditable")).toBe("false");
+  expect(blockOf(m, "b").querySelector(".mm-bookmark")!.getAttribute("contenteditable")).toBe("false");
+  expect(blockOf(m, "l").querySelector(".mm-page-link")!.getAttribute("contenteditable")).toBe("false");
+  // Le texte du callout, lui, se modifie.
+  expect(blockOf(m, "c").querySelector(".mm-callout-content")!.closest('[contenteditable="false"]')).toBeNull();
+  // Pour un lecteur aussi.
+  const reader = await mountEditor({ blocks: RICH, editable: false });
+  expect(blockOf(reader, "c").querySelector(".mm-callout-icon")!.getAttribute("contenteditable")).toBe("false");
+});
+
+test("a_selected_rich_block_is_marked_like_a_react_view_marked_it", async () => {
+  // ProseMirror, sans `selectNode` dans la vue, posait `draggable="true"` sur le bloc sélectionné ;
+  // la vue React de tiptap ne posait que la classe.
+  const m = await mountEditor({ blocks: RICH });
+  const view = m.editor.prosemirrorView;
+  for (const id of ["c", "b", "l"]) {
+    const element = blockOf(m, id).querySelector<HTMLElement>(".bn-block-content")!;
+    let at = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (at < 0 && node.attrs.id === id) at = pos + 1;
+      return at < 0;
+    });
+    act(() => view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, at))));
+    expect(element.classList.contains("ProseMirror-selectednode"), id).toBe(true);
+    expect(element.hasAttribute("draggable"), id).toBe(false);
+    act(() => m.editor.setTextCursorPosition("p", "end"));
+    expect(element.classList.contains("ProseMirror-selectednode"), id).toBe(false);
+    expect(element.hasAttribute("draggable"), id).toBe(false);
+  }
+});
+
+test("a_copy_of_a_rich_block_carries_no_button", async () => {
+  // La copie et l'export passent par le rendu hors de l'éditeur : « Modifier », le bouton de l'icône
+  // n'ont rien à y faire.
+  const m = await mountEditor({ blocks: RICH });
+  const blocks = m.editor.document.slice(1, 4);
+  for (const html of [await m.editor.blocksToFullHTML(blocks), m.editor.blocksToHTMLLossy(blocks)]) {
+    expect(html).not.toContain("<button");
+    expect(html).not.toContain("Modifier");
+    expect(html).toContain("Attention");
+    expect(html).toContain("exemple.fr");
+  }
+});
+
+test("a_starting_page_leaves_no_editor_listening", async () => {
+  // Le banc écrit une page de départ par un éditeur à lui (`seedState`) : il ne reste pas monté.
+  const before = watchersForTests();
+  await seedState(RICH);
+  expect(watchersForTests()).toBe(before);
 });

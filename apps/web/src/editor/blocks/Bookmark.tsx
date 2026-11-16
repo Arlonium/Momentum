@@ -28,7 +28,7 @@ import {
   type BlockWindowProps,
 } from "./blockWindows";
 import { textProp } from "./props";
-import { BOOKMARK_ICON, element, followProps, iconElement, stopEventsOutside } from "./richView";
+import { BOOKMARK_ICON, element, followProps, iconElement, nodeSelection, stopEventsOutside } from "./richView";
 import { hostOf, webUrl } from "./urls";
 import { editableNow, watchEditable } from "./useEditable";
 
@@ -82,7 +82,7 @@ function bookmarkView(
   const id = block.id;
   let url = textProp(block.props, "url");
   const dom = element("div", "mm-frame mm-bookmark");
-  dom.contentEditable = "false";
+  dom.setAttribute("contenteditable", "false");
   const icon = element("span", "mm-frame-icon");
   icon.setAttribute("aria-hidden", "true");
   icon.append(iconElement(16, BOOKMARK_ICON));
@@ -122,10 +122,8 @@ function bookmarkView(
     if (button.getAttribute("aria-expanded") !== open) button.setAttribute("aria-expanded", open);
   };
 
-  if (!live) {
-    drawButton(editableNow(editor));
-    return { dom };
-  }
+  // Hors de l'éditeur (copie, export), le signet sans son bouton.
+  if (!live) return { dom };
   const editable = watchEditable(editor, (now) => drawButton(now));
   drawButton(editable.editable);
   const stopWindows = watchBlockWindows(editor, () => drawButton(editableNow(editor)));
@@ -144,6 +142,7 @@ function bookmarkView(
       return true;
     },
     stopEvent: stopEventsOutside(dom),
+    ...nodeSelection(dom),
     destroy() {
       editable.stop();
       stopWindows();

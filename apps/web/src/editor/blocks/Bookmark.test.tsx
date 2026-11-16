@@ -127,6 +127,27 @@ test("bookmark_has_no_modify_button_for_a_reader", async () => {
   expect(blockOf(writer, "s").querySelector(MODIFY)).not.toBeNull();
 });
 
+test("the_modify_button_says_whether_its_window_is_open", async () => {
+  // `aria-expanded` suit la fenêtre (R314), ouverte par le bouton, fermée par Échap, et ouverte pour un
+  // autre bloc.
+  const m = await mountEditor({
+    blocks: [...page("https://mementum.dev/"), { id: "t", type: "bookmark" as const, props: { url: "https://exemple.fr/" } }],
+  });
+  const expanded = (id: string) => blockOf(m, id).querySelector(MODIFY)!.getAttribute("aria-expanded");
+  expect(expanded("s")).toBe("false");
+  const field = await openWindow(m);
+  expect(expanded("s")).toBe("true");
+  expect(expanded("t")).toBe("false");
+  press(field, "Escape");
+  await flush();
+  expect(blockWindow(WINDOW)).toBeNull();
+  expect(expanded("s")).toBe("false");
+  blockOf(m, "t").querySelector<HTMLButtonElement>(MODIFY)!.click();
+  await flush();
+  expect(expanded("t")).toBe("true");
+  expect(expanded("s")).toBe("false");
+});
+
 test("the_button_that_closes_the_window_keeps_the_focus", async () => {
   // Un clic ne donne pas le focus à un bouton dans tous les navigateurs (Safari, jsdom) : la fenêtre
   // qui avait le focus partie, il tombait sur `body`.

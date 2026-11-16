@@ -17,8 +17,8 @@ import { isolate } from "../../comments/dom";
 import type { MementumEditor } from "../debug";
 import { openWindowOf, toggleBlockWindow, watchBlockWindows, type BlockWindowProps } from "./blockWindows";
 import { textProp } from "./props";
-import { element, followProps, iconElement, INFO_ICON, outsideContent, stopEventsOutside } from "./richView";
-import { editableNow, watchEditable } from "./useEditable";
+import { element, followProps, iconElement, INFO_ICON, nodeSelection, outsideContent, stopEventsOutside } from "./richView";
+import { watchEditable } from "./useEditable";
 
 /** Icône par défaut d'un callout (défaut du registre), affichée en icône vectorielle. */
 export const DEFAULT_CALLOUT_ICON = "💡";
@@ -176,13 +176,14 @@ function calloutView(
   };
   const iconHolder = (editable: boolean) => {
     const holder = editable ? button() : element("span", "mm-callout-icon");
-    holder.contentEditable = "false";
+    holder.setAttribute("contenteditable", "false");
     drawGlyph(holder, icon);
     return holder;
   };
 
+  // Hors de l'éditeur (copie, export), l'icône sans son bouton.
   if (!live) {
-    dom.append(iconHolder(editableNow(editor)), contentDOM);
+    dom.append(iconHolder(false), contentDOM);
     return { dom, contentDOM };
   }
   let holder: HTMLElement;
@@ -221,6 +222,7 @@ function calloutView(
     },
     ignoreMutation: outsideContent(contentDOM),
     stopEvent: stopEventsOutside(dom, contentDOM),
+    ...nodeSelection(dom),
     destroy() {
       editable.stop();
       stopWindows();
