@@ -119,12 +119,16 @@ export const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 /** Les éditeurs montés par le test en cours : démontés à sa fin, avec leur document. */
 const mounted: { peer: Peer; host: HTMLElement }[] = [];
+
+/** Démonte l'éditeur monté `entry` (ses vues de blocs se désabonnent) et détruit son document. */
+function unmount({ peer, host }: { peer: Peer; host: HTMLElement }): void {
+  peer.editor.unmount();
+  host.remove();
+  peer.doc.destroy();
+}
+
 afterEach(() => {
-  for (const { peer, host } of mounted.splice(0)) {
-    peer.editor.unmount();
-    host.remove();
-    peer.doc.destroy();
-  }
+  for (const entry of mounted.splice(0)) unmount(entry);
 });
 
 /**
@@ -172,7 +176,12 @@ export async function seedState(blocks: Seed): Promise<Uint8Array> {
   const writer = await peer("Départ", SEED);
   writer.editor.replaceBlocks(writer.editor.document, blocks);
   await settle();
-  return Y.encodeStateAsUpdate(writer.doc);
+  const state = Y.encodeStateAsUpdate(writer.doc);
+  // L'éditeur qui écrit la page de départ ne sert plus : démonté tout de suite, ses vues (un lien de
+  // page, un callout) n'écoutent plus rien pendant le reste du test.
+  const at = mounted.findIndex((entry) => entry.peer === writer);
+  unmount(mounted.splice(at, 1)[0]);
+  return state;
 }
 
 /**
