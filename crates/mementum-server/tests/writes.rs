@@ -301,3 +301,112 @@ async fn anonymous_requests_write_nothing() {
         );
     }
 }
+
+/// Boucles de favoris de Tom pendant les envois de fichiers.
+const FILE_LOOPS: usize = 16;
+
+/// Favoris de Tom validés, au plus, pendant l'envoi d'Olga : l'attache de Tom attend une écriture
+/// de Tom, le trajet de l'envoi d'Olga jusqu'au verrou du dépôt en laisse passer une ou deux, et
+/// son attache une de plus (vu : quatre). Quand l'attache attendait dans la voie de l'auteur, elle
+/// attendait toutes ses boucles (vu : dix-huit).
+const FILE_READER_WRITES_AT_MOST: i64 = 8;
+
+/// Le verrou du dépôt des fichiers, commun à l'instance, n'attend jamais la rafale d'un compte
+/// (Ruling R522) : Tom a seize boucles de favoris en file quand il envoie un fichier ; son envoi
+/// pose le contenu sous le verrou du dépôt, puis attend son tour pour l'attacher. Olga envoie
+/// ensuite un fichier : elle attend le verrou, donc l'attache de Tom. Si l'attache attendait
+/// dans la voie de Tom, derrière ses favoris en file, tous les envois de l'instance les
+/// attendraient ; dans la voie du dépôt, l'attache passe après une écriture de Tom. Le compte se
+/// lit dans la base : les favoris de Tom validés entre le départ de l'envoi d'Olga et son attache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_file_store_lock_never_waits_for_an_account_burst() {
+    use sha2::{Digest, Sha256};
+    let t = open_app_with(SLOW_DISK).await;
+    let team = common::Team::new(&t).await;
+    let grants = [user(&team.olga, Level::Edit), user(&team.tom, Level::Edit)];
+    let page = team.page(None, "Fichiers", &grants).await;
+    let mut favorites = Vec::new();
+    for i in 0..FILE_LOOPS {
+        let read = [user(&team.tom, Level::Read)];
+        favorites.push(team.page(None, &format!("Lue {i}"), &read).await);
+    }
+    exec_sql(
+        &t.db_path(),
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_favorite_in AFTER INSERT ON favorites \
+         BEGIN INSERT INTO witness (what) VALUES ('favori'); END; \
+         CREATE TRIGGER witness_favorite_out AFTER DELETE ON favorites \
+         BEGIN INSERT INTO witness (what) VALUES ('favori'); END; \
+         CREATE TRIGGER witness_attachment AFTER INSERT ON attachments \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.name); END;",
+    )
+    .await;
+    let reader = Loops::start(
+        &t,
+        &team.tom.browser,
+        FILE_LOOPS,
+        StatusCode::NO_CONTENT,
+        move |k, round| {
+            let method = if round % 2 == 0 {
+                Method::PUT
+            } else {
+                Method::DELETE
+            };
+            let uri = format!("/api/v1/pages/{}/favorite", favorites[k]);
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap()
+        },
+    );
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while reader.done() < 2 * FILE_LOOPS && !reader.failed() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "le lecteur n'écrit pas"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let upload = |name: &str, bytes: &'static [u8]| {
+        Request::post(common::upload_uri(page, name))
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(bytes))
+            .unwrap()
+    };
+    // L'envoi de Tom : son contenu posé dans le dépôt, il tient le verrou jusqu'à l'attache.
+    const TOM: &[u8] = b"le fichier de Tom";
+    let tom = {
+        let request = upload("tom.txt", TOM);
+        let tom = team.tom.browser.cookie().unwrap();
+        let t = &t;
+        async move { answer(t, request, Some(&tom)).await }
+    };
+    let hex: String = Sha256::digest(TOM)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let posed = t.cfg.data_dir.join("files").join(&hex[..2]).join(&hex[2..]);
+    let olga = async {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while !posed.is_file() {
+            assert!(tokio::time::Instant::now() < deadline, "le contenu de Tom");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let before = last_witnessed(&t).await;
+        let cookie = team.olga.browser.cookie().unwrap();
+        let status = answer(&t, upload("olga.txt", b"le fichier d'Olga"), Some(&cookie)).await;
+        (before, status)
+    };
+    let (tom, (before, olga)) = tokio::join!(tom, olga);
+    assert_eq!(tom, Some(StatusCode::CREATED));
+    assert_eq!(olga, Some(StatusCode::CREATED));
+    let waited = reader_writes_before(&t, before, "olga.txt").await;
+    let refused = reader.stop().await;
+    assert!(refused.is_empty(), "favoris refusés : {refused:?}");
+    assert!(
+        waited <= FILE_READER_WRITES_AT_MOST,
+        "favoris de Tom validés pendant l'envoi d'Olga : {waited} (au plus \
+         {FILE_READER_WRITES_AT_MOST})"
+    );
+}

@@ -28,6 +28,7 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqliteConnection};
 use uuid::Uuid;
 
+use crate::queue::Lane;
 use crate::{Store, StoreError, parse_uuid, unreadable};
 
 /// Une attache : la page qui porte le fichier, son contenu et son nom d'affichage.
@@ -136,12 +137,16 @@ impl Store {
     /// transaction. Un contenu déjà connu n'est pas récrit : l'attache rendue porte sa taille et
     /// son type gardés (R267). `NotFound` si la page ou le compte n'existe pas, et rien n'est
     /// écrit, pas même la ligne du contenu.
+    ///
+    /// Elle s'écrit dans la voie du dépôt, pas dans celle de l'auteur (Ruling R522) : l'envoi tient
+    /// le verrou du dépôt, commun à l'instance, jusqu'à l'attache écrite ; dans la voie de
+    /// l'auteur, elle attendrait toutes les écritures qu'il a en file, et tous les envois avec elle.
     pub async fn attach_file(
         &self,
         new: NewAttachment<'_>,
         now: i64,
     ) -> Result<Attachment, StoreError> {
-        let mut tx = self.write().await?;
+        let mut tx = self.write_in(Lane::Files).await?;
         sqlx::query(
             "INSERT INTO files (hash, size, mime, created_at) VALUES (?, ?, ?, ?) \
              ON CONFLICT (hash) DO NOTHING",
@@ -247,7 +252,8 @@ impl Store {
              RETURNING hash",
         )
         .bind(list)
-        .fetch_all(&mut *self.write_conn().await?)
+        // La voie du dépôt : le ménage se fait sous son verrou (Ruling R522).
+        .fetch_all(&mut *self.write_conn_in(Lane::Files).await?)
         .await?
         .into_iter()
         .map(|r| hash_from(r.get(0)))

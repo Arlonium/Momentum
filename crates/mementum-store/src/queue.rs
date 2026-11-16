@@ -59,6 +59,10 @@ pub(crate) enum Lane {
     Page(Uuid),
     /// Le compte que le serveur a nommé pour la tâche qui écrit.
     Account(Uuid),
+    /// Le dépôt des fichiers : les écritures faites sous son verrou, commun à toute l'instance
+    /// (l'attache d'un envoi, le ménage ; Ruling R522). Sous ce verrou, elles passent une à une :
+    /// la voie n'a jamais d'arriéré, et le verrou n'attend jamais la rafale d'un compte.
+    Files,
     /// Les écritures dont personne n'est nommé : inscription, ménage, commandes, tests.
     Common,
 }
