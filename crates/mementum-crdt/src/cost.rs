@@ -48,6 +48,14 @@ const ELEMENT_PS: u128 = 20_000_000;
 /// Picosecondes par élément d'un texte, chaîne ou marque (environ 2,8 µs mesurées, récriture de
 /// 10 000 paragraphes de 20 plages).
 const TEXT_ITEM_PS: u128 = 4_000_000;
+/// Picosecondes de plus par cellule vide de tableau, au-delà de son élément (Ruling R386) : une
+/// cellule écrit deux éléments (la cellule et son paragraphe) et toutes ses props, vide ou non.
+/// Comptée comme un seul élément (20 µs), une cellule vide en coûtait environ 32 à la re-relecture
+/// du tour 2, sur le poste où les poids ont été mesurés : 3 597 lignes de 100 cellules vides
+/// passaient le budget et occupaient l'acteur 11 à 12 s. Une cellule qui porte un texte compte
+/// déjà ce texte (un élément de plus et ses chaînes : 44 µs estimées, environ 37 mesurées) ; vide,
+/// elle compte 35 µs.
+const EMPTY_CELL_EXTRA_PS: u128 = 15_000_000;
 
 /// Une liste que l'écriture bâtit par insertions successives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +106,7 @@ pub fn write_cost(blocks: &[Block]) -> WriteCost {
     tally.siblings(blocks);
     let linear = (tally.elements as u128)
         .saturating_mul(ELEMENT_PS)
+        .saturating_add((tally.empty_cells as u128).saturating_mul(EMPTY_CELL_EXTRA_PS))
         .saturating_add((tally.text_items as u128).saturating_mul(TEXT_ITEM_PS));
     let lists = tally
         .kinds
@@ -141,6 +150,8 @@ struct Tally {
     /// Par sorte de liste, dans l'ordre de [`KINDS`].
     kinds: [KindTally; 4],
     elements: usize,
+    /// Les cellules vides de tableau, comptées aussi dans `elements`.
+    empty_cells: usize,
     text_items: usize,
 }
 
@@ -188,11 +199,18 @@ impl Tally {
         self.elements += n;
         if rows.is_empty() {
             self.elements += 1;
+            self.empty_cells += 1;
         }
         for row in rows {
             let cells = row.len().max(1);
             self.list(ListKind::Cells, cells, square(cells) * CELL_PAIR_PS);
             self.elements += cells;
+            // Une ligne sans cellule en reçoit une vide.
+            self.empty_cells += row
+                .iter()
+                .filter(|c| c.content.is_empty())
+                .count()
+                .max(cells - row.len());
             for cell in row {
                 self.inline(&cell.content);
             }

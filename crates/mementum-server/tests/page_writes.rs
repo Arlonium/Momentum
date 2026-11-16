@@ -526,6 +526,17 @@ fn table(rows: usize, cols: usize) -> String {
     mmd
 }
 
+/// Un tableau MMD de `rows` lignes sur `cols` colonnes de cellules vides, sans en-tête.
+fn empty_table(rows: usize, cols: usize) -> String {
+    let row = format!("|{}\n", "  |".repeat(cols));
+    let mut mmd = row.clone();
+    mmd.push_str(&format!("|{}\n", " --- |".repeat(cols)));
+    for _ in 1..rows {
+        mmd.push_str(&row);
+    }
+    mmd
+}
+
 /// Constat I3 de la re-relecture de la piste S (Ruling R368) : sous le plafond de blocs, un
 /// paragraphe de 20 000 plages en gras (120 Ko), un de 40 000 sauts de ligne (240 Ko) et un
 /// tableau de 100 lignes sur 4 000 colonnes (1,6 Mo) occupaient l'acteur 91 s, 112 à 145 s et
@@ -656,6 +667,14 @@ async fn measure_worst_accepted_writes() {
         ),
         ("cellules d'une ligne", Box::new(|n| table(1, n))),
         ("lignes de 100 cellules", Box::new(|n| table(n, 100))),
+        (
+            "lignes de 100 cellules vides",
+            Box::new(|n| empty_table(n, 100)),
+        ),
+        (
+            "cellules vides d'une ligne",
+            Box::new(|n| empty_table(1, n)),
+        ),
         (
             "paragraphes de six plages",
             Box::new(move |n| {

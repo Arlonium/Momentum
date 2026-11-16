@@ -157,6 +157,53 @@ fn many_cells_cost_their_volume() {
     );
 }
 
+/// Un tableau de `rows` lignes sur `cols` colonnes de cellules vides, sans en-tête.
+fn empty_table(rows: usize, cols: usize) -> String {
+    let row = format!("|{}\n", "  |".repeat(cols));
+    let mut mmd = row.clone();
+    mmd.push_str(&format!("|{}\n", " --- |".repeat(cols)));
+    for _ in 1..rows {
+        mmd.push_str(&row);
+    }
+    mmd
+}
+
+/// Ruling R386 : une cellule vide compte à son coût, 35 µs, et pas comme un simple élément ; une
+/// cellule qui porte un texte compte ce texte, comme avant (`many_cells_cost_their_volume`). Le
+/// tableau de la re-relecture (3 597 lignes de 100 cellules vides, 11 à 12 s d'acteur) passait
+/// le budget, estimé à 8 s ; il est estimé à plus de 12 s, nommé pour son volume.
+#[test]
+fn an_empty_cell_counts_at_its_cost() {
+    let cost = write_cost(&read(&empty_table(3_597, 100)));
+    assert!(cost.nanos > 12 * SECOND, "{cost:?}");
+    assert!(matches!(cost.cause, Cause::Volume { .. }), "{cost:?}");
+    // Le terme d'une cellule, seul : cent cellules de plus coûtent 3,5 ms, plus ce que la ligne
+    // plus large ajoute à sa liste de cellules.
+    let narrow = write_cost(&read(&empty_table(1, 100)));
+    let wide = write_cost(&read(&empty_table(1, 200)));
+    let added = wide.nanos - narrow.nanos;
+    let pairs = (200u64 * 200 - 100 * 100) * 15;
+    assert_eq!(added, 100 * 35_000 + pairs, "{narrow:?} {wide:?}");
+}
+
+/// Les lignes d'un tableau sont une liste de frères : leur coût croît comme le carré de leur
+/// nombre, et c'est le tableau qui est nommé quand elles pèsent le plus (le terme que la
+/// re-relecture du tour 2 trouvait sans test).
+#[test]
+fn rows_of_a_table_cost_their_square() {
+    let small = write_cost(&read(&table(40_000, 1)));
+    let large = write_cost(&read(&table(80_000, 1)));
+    let ratio = large.nanos as f64 / small.nanos as f64;
+    assert!((3.5..=4.0).contains(&ratio), "{small:?} {large:?}");
+    assert_eq!(
+        large.cause,
+        Cause::Lists {
+            kind: ListKind::Rows,
+            longest: 80_000
+        }
+    );
+}
+
 /// Un bloc de code s'écrit en une seule plage, quelle que soit la forme de son texte.
 #[test]
 fn code_block_is_a_single_run() {
