@@ -860,7 +860,8 @@ pub fn favorite_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
 
 /// Une requête sur chaque route des fichiers de la page `id`, celles qui nomment un fichier sur
 /// `file` : l'envoi (avec et sans nom, annoncé trop gros), la lecture (simple, d'une plage, une
-/// revalidation) et un fichier mal nommé : `(nom, requête)`.
+/// revalidation), un fichier mal nommé, et la recopie de `file` dans la page `id`, comme s'il
+/// était de cette page (corps valable, et illisible) : `(nom, requête)`.
 pub fn file_routes(id: &str, file: &str) -> Vec<(&'static str, Request<Body>)> {
     let files = format!("/api/v1/pages/{id}/files");
     let post = |uri: String| Request::post(uri).body(Body::from("abc")).unwrap();
@@ -894,6 +895,21 @@ pub fn file_routes(id: &str, file: &str) -> Vec<(&'static str, Request<Body>)> {
         (
             "GET fichier mal nommé",
             get(format!("{files}/pas-un-fichier"), None),
+        ),
+        (
+            "POST recopie",
+            json_request(
+                Method::POST,
+                &format!("{files}/copies"),
+                &json!({ "pageId": id, "fileId": file }),
+            ),
+        ),
+        (
+            "POST recopie illisible",
+            Request::post(format!("{files}/copies"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
         ),
     ]
 }

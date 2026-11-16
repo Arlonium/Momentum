@@ -6,6 +6,7 @@ export type { AccessEntry } from "./AccessEntry";
 export type { Author } from "./Author";
 export type { ChangePassword } from "./ChangePassword";
 export type { Comment } from "./Comment";
+export type { CopyFile } from "./CopyFile";
 export type { CreatePage } from "./CreatePage";
 export type { CreateSpace } from "./CreateSpace";
 export type { ErrorBody } from "./ErrorBody";

@@ -551,6 +551,18 @@ impl ApiError {
         )
     }
 
+    /// `422 invalid_source` : la source d'une recopie de fichier ne désigne pas un fichier d'une
+    /// page que la personne peut lire. La même réponse pour une page qu'elle ne voit pas,
+    /// inconnue ou mal nommée, et pour un fichier qui n'est pas de cette page, inconnu ou mal
+    /// nommé (Ruling R558) : rien ne dit qu'une page ou un fichier existe.
+    pub fn invalid_source() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidSource,
+            "pageId et fileId ne désignent pas un fichier d'une page que tu peux lire",
+        )
+    }
+
     /// `400 invalid_request` : le corps d'un envoi s'est interrompu avant sa fin.
     pub fn interrupted_upload() -> ApiError {
         ApiError::new(

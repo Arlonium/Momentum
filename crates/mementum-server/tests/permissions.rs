@@ -414,7 +414,8 @@ async fn permission_matrix() {
 /// Review Focus 3 : pour chaque route de page, une page d'un autre espace reçoit exactement la
 /// réponse d'un id inconnu (statut, type, corps), comme une page privée d'un autre dans son
 /// propre espace, une page à la corbeille qu'on ne voit pas, et un id mal formé. De même quand
-/// la page est nommée dans le corps (`parentId`, `afterId`), et pour un espace.
+/// la page est nommée dans le corps (`parentId`, `afterId`, la page d'origine d'une recopie de
+/// fichier), et pour un espace.
 #[tokio::test]
 async fn foreign_page_is_indistinguishable_from_missing() {
     let t = open_app().await;
@@ -647,6 +648,17 @@ async fn foreign_page_is_indistinguishable_from_missing() {
                 "PATCH à la racine, afterId",
                 "invalid_after",
                 patch(json!({ "parentId": null, "afterId": id })),
+            ),
+            // La page d'origine d'une recopie de fichier, dans une page de Zoé (ses vrais
+            // fichiers cachés sont essayés dans `tests/files.rs`).
+            (
+                "POST recopie, pageId",
+                "invalid_source",
+                json_request(
+                    Method::POST,
+                    &format!("{own_uri}/files/copies"),
+                    &json!({ "pageId": id, "fileId": Uuid::nil().to_string() }),
+                ),
             ),
         ]
     };

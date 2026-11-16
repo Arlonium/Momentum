@@ -1,13 +1,27 @@
-//! Routes des fichiers d'une page (Rulings R244 à R247, Task S4a) : envoyer un fichier dans une
-//! page, et le lire. Un fichier appartient à la page où il a été envoyé : son adresse la nomme
-//! (`/api/v1/pages/{id}/files/{fileId}`, l'identifiant d'une **attache** de la page), et ce sont
-//! les droits sur elle, au moment de chaque lecture, qui décident (Ruling R245).
+//! Routes des fichiers d'une page (Rulings R244 à R247, Tasks S4a et S4b) : envoyer un fichier
+//! dans une page, le lire, recopier son attache dans une autre page ; et le ménage, à la
+//! suppression définitive d'une page. Un fichier appartient à la page où il a été envoyé : son
+//! adresse la nomme (`/api/v1/pages/{id}/files/{fileId}`, l'identifiant d'une **attache** de la
+//! page), et ce sont les droits sur elle, au moment de chaque lecture, qui décident (Ruling R245).
 //!
 //! | Route | Il faut | Réponse |
 //! |---|---|---|
 //! | `GET /api/v1/files/limits` | une session | [`FileLimits`] |
 //! | `POST /api/v1/pages/{id}/files?name=…` | `edit` | `201`, [`FileInfo`] ; `409 trashed` ; `413 file_too_large` ; droits et session revérifiés une fois le corps reçu |
+//! | `POST /api/v1/pages/{id}/files/copies` | `edit` ici, `read` sur la page d'origine (à la corbeille aussi) | `201`, [`FileInfo`] d'une attache neuve de cette page, au même contenu et au même nom ; `409 trashed` ; `422 invalid_source` ; un `GET` à cette adresse répond `405`, pour toute page (Ruling R559) |
 //! | `GET /api/v1/pages/{id}/files/{fileId}` | `read` (à la corbeille aussi) | les octets, en téléchargement (en-têtes ci-dessous) ; `304`, `206`, `416` ; un fichier qui n'est pas de la page, inconnu ou mal nommé : la réponse d'une page introuvable |
+//!
+//! **Recopier** (Ruling R249) : un bloc collé dans une autre page garde l'adresse de sa première
+//! page ; le client fait recopier l'attache dans la page où il colle, puis récrit l'adresse. Rien
+//! n'est renvoyé : l'attache neuve nomme le même contenu, et vit autant que sa page à elle. Dans
+//! cet ordre : `401` (puis le `409 account_changed` d'un en-tête qui nomme un autre compte, R540)
+//! ; `404` pour une page qu'on ne voit pas ; `403` sous « Peut modifier » ; `409 trashed` ; puis
+//! le corps, [`CopyFile`] : `invalid_json` (`400` illisible, `422` d'une autre forme, un champ de
+//! plus compris), puis `422 invalid_source` pour une page d'origine qu'on ne voit pas, inconnue ou
+//! mal nommée, et pour un fichier qui n'est pas d'elle, inconnu ou mal nommé : **la même
+//! réponse**, jamais `403` ni `404` (Ruling R558). La source est relue dans la transaction qui
+//! écrit la copie, dans la voie du compte (Ruling R522) ; entre le contrôle de la source et
+//! l'écriture, quelques millisecondes : une fenêtre acceptée (conception §5.6).
 //!
 //! **Envoyer** (Ruling R247), dans cet ordre : `401` ; `409 account_changed` (ou `400`) pour un
 //! en-tête `X-Mementum-Account` qui ne nomme pas le compte de la session (Ruling R540) ; `404`
@@ -72,7 +86,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::rejection::{PathRejection, QueryRejection};
+use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -85,12 +99,13 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncSeekExt, ReadBuf};
 use uuid::Uuid;
 
+use crate::access::permit;
 use crate::auth::{AuthUser, SessionUser};
 use crate::error::ApiError;
 use crate::files;
 use crate::guard::FileResponse;
 use crate::routes::pages::page_id;
-use crate::types::{ErrorCode, FileInfo, FileLimits};
+use crate::types::{CopyFile, ErrorCode, FileInfo, FileLimits};
 use crate::{AppState, now_ms, to_completion};
 
 /// Octets lus sur le disque à chaque morceau d'un fichier servi.
@@ -270,6 +285,39 @@ pub(crate) async fn upload(
     })
     .await?;
     Ok((StatusCode::CREATED, Json(file_info(&attachment))).into_response())
+}
+
+/// `POST /api/v1/pages/{id}/files/copies` : recopie dans cette page l'attache d'un fichier d'une
+/// autre page (Ruling R249), sans renvoyer un octet.
+pub(crate) async fn copy(
+    State(state): State<AppState>,
+    user: AuthUser,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<CopyFile>, JsonRejection>,
+) -> Result<(StatusCode, Json<FileInfo>), ApiError> {
+    let id = page_id(path)?;
+    // Les refus de droits d'abord, avant le corps : `404`, `403`, `409 trashed`.
+    state.node_access(&user, id, Action::Edit).await?;
+    let Json(CopyFile { page_id, file_id }) = body?;
+    // Ruling R558 : une source qu'on ne voit pas reçoit la réponse d'une source inconnue, jamais
+    // `403` ni `404`. Une page à la corbeille se lit, donc se recopie.
+    let (Ok(from), Ok(file)) = (Uuid::parse_str(&page_id), Uuid::parse_str(&file_id)) else {
+        return Err(ApiError::invalid_source());
+    };
+    let Some((_, access, _)) = state.seen_node(&user, from).await? else {
+        return Err(ApiError::invalid_source());
+    };
+    permit(&access, Action::Read).map_err(|_| ApiError::invalid_source())?;
+    // Une seule transaction, dans la voie du compte (Ruling R522) : la source y est relue
+    // (`None` : le fichier n'est pas, ou plus, de cette page), et la page d'ici, partie entre le
+    // contrôle et l'écriture, rend `NotFound`, la réponse d'une page introuvable. Entre le
+    // contrôle de la source et l'écriture, quelques millisecondes : une fenêtre acceptée (R249).
+    let copied = state
+        .store
+        .copy_attachment(from, file, Uuid::now_v7(), id, user.id, now_ms())
+        .await?
+        .ok_or_else(ApiError::invalid_source)?;
+    Ok((StatusCode::CREATED, Json(file_info(&copied))))
 }
 
 /// `GET /api/v1/pages/{id}/files/{fileId}` : le fichier, en téléchargement.

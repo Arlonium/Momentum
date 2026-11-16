@@ -94,6 +94,20 @@ pub struct FileInfo {
     pub mime: String,
 }
 
+/// Corps de `POST /api/v1/pages/{id}/files/copies` (Ruling R249) : le fichier d'une autre page à
+/// recopier dans celle-ci, sans renvoyer un octet. Les deux identifiants sont des chaînes : un
+/// identifiant illisible reçoit la réponse d'une source qu'on ne voit pas (`422 invalid_source`),
+/// pas celle d'un corps illisible.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CopyFile {
+    /// La page d'origine, qu'il faut pouvoir lire (à la corbeille aussi).
+    pub page_id: String,
+    /// Le fichier de la page d'origine : l'identifiant de son attache, le dernier segment de son
+    /// adresse (`/api/v1/pages/<pageId>/files/<fileId>`).
+    pub file_id: String,
+}
+
 /// Les bornes d'un envoi de fichier (`GET /api/v1/files/limits`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -855,6 +869,10 @@ pub enum ErrorCode {
     /// Plage (`Range`) qui commence au-delà de la fin du fichier ; l'en-tête `Content-Range`
     /// donne sa taille (`bytes */<taille>`). Statut 416.
     RangeNotSatisfiable,
+    /// La source d'une recopie de fichier ne désigne pas un fichier d'une page que le compte peut
+    /// lire : la même réponse pour une page qu'il ne voit pas, inconnue ou mal nommée, et pour un
+    /// fichier qui n'est pas de cette page, inconnu ou mal nommé (Ruling R558). Statut 422.
+    InvalidSource,
 }
 
 /// Corps de toute réponse d'erreur.
@@ -906,6 +924,7 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<Author>(&cfg),
         file::<ChangePassword>(&cfg),
         file::<Comment>(&cfg),
+        file::<CopyFile>(&cfg),
         file::<CreatePage>(&cfg),
         file::<CreateSpace>(&cfg),
         file::<ErrorBody>(&cfg),

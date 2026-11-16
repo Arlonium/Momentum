@@ -1537,3 +1537,305 @@ async fn large_discards_are_logged() {
     assert!(line.contains(&page.to_string()), "{line}");
     assert!(line.contains("discarded=2097152"), "{line}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Recopier l'attache d'un fichier dans une autre page (Task S4b, Ruling R249).
+
+/// L'adresse de la recopie d'un fichier dans la page `page`.
+fn copies_uri(page: impl std::fmt::Display) -> String {
+    format!("/api/v1/pages/{page}/files/copies")
+}
+
+/// Recopie dans `page`, avec la session de `by`, le fichier `file` de la page `from`.
+async fn copy(by: &Browser<'_>, page: impl std::fmt::Display, from: &str, file: &str) -> Reply {
+    by.post(&copies_uri(page), json!({ "pageId": from, "fileId": file }))
+        .await
+}
+
+/// La recopie demande « Peut modifier » sur la page d'ici (`403` en dessous, qui le nomme), hors
+/// corbeille (`409 trashed`, après le refus de niveau), et « Peut lire » sur la page d'origine ;
+/// elle répond `201` et le `FileInfo` d'une attache neuve de la page d'ici, au même contenu et au
+/// même nom. Recopier **depuis** une page à la corbeille passe. Sans session : `401`.
+#[tokio::test]
+async fn copy_route_follows_the_levels() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let tom = &team.tom;
+    let source = team
+        .page(
+            None,
+            "Source",
+            &[user(&team.olga, Level::Full), user(tom, Level::Read)],
+        )
+        .await;
+    let original = uploaded(&team.olga.browser, source, "photo.png", PNG).await;
+    let original_id = original["id"].as_str().unwrap();
+    for trashed in [false, true] {
+        for level in LEVELS {
+            let what = format!("{level:?}, corbeille : {trashed}");
+            let grants = [user(&team.olga, Level::Full), user(tom, level)];
+            let page = team.page(None, &what, &grants).await;
+            if trashed {
+                team.trash(page).await;
+            }
+            let reply = copy(&tom.browser, page, &source.to_string(), original_id).await;
+            if level < Level::Edit {
+                let refusal = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+                let message = refusal["message"].as_str().unwrap();
+                assert!(message.contains("« Peut modifier »"), "{what} : {message}");
+            } else if trashed {
+                reply.assert_error(StatusCode::CONFLICT, "trashed");
+            } else {
+                reply.assert_status(StatusCode::CREATED);
+                let info = reply.json();
+                let id = info["id"].as_str().unwrap();
+                assert_ne!(id, original_id, "{what} : une attache neuve");
+                assert_eq!(info["url"], file_uri(page, id), "{what}");
+                assert_eq!(info["name"], "photo.png", "{what}");
+                assert_eq!(info["size"], PNG.len(), "{what}");
+                assert_eq!(info["mime"], "image/png", "{what}");
+                let mut keys: Vec<_> = info.as_object().unwrap().keys().cloned().collect();
+                keys.sort();
+                assert_eq!(keys, ["id", "mime", "name", "size", "url"], "{what}");
+                let served = read(&tom.browser, info["url"].as_str().unwrap(), &[]).await;
+                served.assert_status(StatusCode::OK);
+                assert_eq!(served.body.as_ref(), PNG, "{what}");
+            }
+            let expected = i64::from(level >= Level::Edit && !trashed);
+            let sql = format!("SELECT COUNT(*) FROM attachments WHERE node_id = '{page}'");
+            assert_eq!(query_i64(&t.db_path(), &sql).await, expected, "{what}");
+        }
+    }
+    // Depuis une page à la corbeille : elle se lit, la recopie passe.
+    team.trash(source).await;
+    let page = team
+        .page(None, "Après la corbeille", &[user(tom, Level::Edit)])
+        .await;
+    let reply = copy(&tom.browser, page, &source.to_string(), original_id).await;
+    reply.assert_status(StatusCode::CREATED);
+    let served = read(&tom.browser, reply.json()["url"].as_str().unwrap(), &[]).await;
+    served.assert_status(StatusCode::OK);
+    assert_eq!(served.body.as_ref(), PNG);
+    // Sans session.
+    copy(&t.browser(), page, &source.to_string(), original_id)
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
+}
+
+/// Preuve 3 du plan, pour un bloc collé ailleurs (R249) : le fichier recopié de A vers B a son
+/// attache à lui ; A supprimée pour de bon, il se lit encore par B, et son contenu reste sur le
+/// disque. L'adresse de A, elle, est devenue celle d'une page introuvable.
+#[tokio::test]
+async fn copy_gives_the_page_its_own_attachment() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona.browser;
+    let a = team.page(None, "A", &[members(Level::Full)]).await;
+    let b = team.page(None, "B", &[members(Level::Full)]).await;
+    let original = uploaded(mona, a, "plan.pdf", PDF).await;
+    let reply = copy(mona, b, &a.to_string(), original["id"].as_str().unwrap()).await;
+    reply.assert_status(StatusCode::CREATED);
+    let copied = reply.json();
+    assert_eq!(copied["url"], file_uri(b, copied["id"].as_str().unwrap()));
+
+    mona.post_empty(&format!("/api/v1/pages/{a}/trash"))
+        .await
+        .assert_status(StatusCode::OK);
+    mona.delete(&format!("/api/v1/pages/{a}"))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let served = read(mona, copied["url"].as_str().unwrap(), &[]).await;
+    served.assert_status(StatusCode::OK);
+    assert_eq!(served.body.as_ref(), PDF);
+    assert!(
+        content_path(&t, PDF).exists(),
+        "le contenu reste sur le disque"
+    );
+    let gone = read(mona, original["url"].as_str().unwrap(), &[]).await;
+    let body = gone.assert_error(StatusCode::NOT_FOUND, "not_found");
+    assert_eq!(body["message"], "page introuvable");
+}
+
+/// Un fichier qu'on ne peut pas lire n'est pas une source (Ruling R558) : la page d'origine qu'on
+/// ne voit pas (son vrai fichier nommé), inconnue ou mal nommée, une page d'un espace où l'on n'est
+/// rien, un fichier qui n'est pas d'elle, inconnu ou mal nommé, reçoivent tous **la même**
+/// réponse, `422 invalid_source` (statut, type, corps), jamais `403` ni `404`, et rien n'est
+/// attaché. Un corps illisible, ou qui porte un champ de plus, est `invalid_json`, avant.
+/// Témoin : un fichier d'une page qu'on lit se recopie.
+#[tokio::test]
+async fn copy_of_a_file_one_cannot_read_is_an_invalid_source() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, tom) = (&team.olga.browser, &team.tom.browser);
+    let here = team.page(None, "Ici", &[members(Level::Full)]).await;
+    let hidden = team
+        .page(None, "Cachée", &[user(&team.olga, Level::Full)])
+        .await;
+    let hidden_file = uploaded(olga, hidden, "secret.png", PNG).await;
+    let seen = team.page(None, "Lue", &[members(Level::Read)]).await;
+    let seen_file = uploaded(olga, seen, "lue.pdf", PDF).await;
+    let elsewhere = team.page(None, "Ailleurs", &[members(Level::Full)]).await;
+    let elsewhere_file = uploaded(olga, elsewhere, "ailleurs.png", PNG).await;
+    let zoe_page = team.zoe.create(json!({ "title": "À Zoé" })).await.id;
+    let zoe_file = uploaded(
+        &team.zoe.browser,
+        Uuid::parse_str(&zoe_page).unwrap(),
+        "zoe.png",
+        PNG,
+    )
+    .await;
+    let id = |file: &Value| file["id"].as_str().unwrap().to_string();
+    let (hidden, seen) = (hidden.to_string(), seen.to_string());
+    let unknown = Uuid::now_v7().to_string();
+    let malformed = "pas-une-page".to_string();
+    let cases = [
+        (
+            "page qu'il ne voit pas, son vrai fichier",
+            &hidden,
+            id(&hidden_file),
+        ),
+        ("page inconnue", &unknown, id(&seen_file)),
+        ("page mal nommée", &malformed, id(&seen_file)),
+        (
+            "page d'un espace où il n'est rien",
+            &zoe_page,
+            id(&zoe_file),
+        ),
+        ("fichier d'une autre page", &seen, id(&elsewhere_file)),
+        ("fichier inconnu", &seen, Uuid::now_v7().to_string()),
+        ("fichier mal nommé", &seen, "pas-un-fichier".to_string()),
+    ];
+    let first = copy(tom, here, cases[0].1, &cases[0].2).await;
+    first.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_source");
+    for (what, page, file) in &cases {
+        let reply = copy(tom, here, page, file).await;
+        assert_eq!(outcome(&reply), outcome(&first), "{what}");
+    }
+    // Le corps d'abord, `invalid_json` : illisible (`400`, comme sur toute route JSON), ou d'un
+    // champ de plus (`422`).
+    let unreadable = tom
+        .send(
+            Request::post(copies_uri(here))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        )
+        .await;
+    unreadable.assert_error(StatusCode::BAD_REQUEST, "invalid_json");
+    let extra = json!({ "pageId": hidden, "fileId": id(&hidden_file), "name": "x" });
+    tom.post(&copies_uri(here), extra)
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json");
+    let sql = format!("SELECT COUNT(*) FROM attachments WHERE node_id = '{here}'");
+    assert_eq!(query_i64(&t.db_path(), &sql).await, 0, "rien d'attaché");
+
+    // Témoin.
+    copy(tom, here, &seen, &id(&seen_file))
+        .await
+        .assert_status(StatusCode::CREATED);
+    assert_eq!(query_i64(&t.db_path(), &sql).await, 1);
+}
+
+/// Les refus de droits de la recopie viennent avant son corps : `401`, `404` pour une page qu'on
+/// ne voit pas, `403` sous « Peut modifier », `409 trashed`, quel que soit le corps (illisible,
+/// d'une source qu'on ne voit pas, ou valable).
+#[tokio::test]
+async fn copy_refusals_come_before_the_body() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let open = team.page(None, "Ouverte", &[members(Level::Full)]).await;
+    let file = uploaded(&team.mona.browser, open, "photo.png", PNG).await;
+    let file_id = file["id"].as_str().unwrap();
+    let read_only = team.page(None, "En lecture", &[members(Level::Read)]).await;
+    let binned = team.page(None, "Jetée", &[members(Level::Full)]).await;
+    team.trash(binned).await;
+    let hidden = team
+        .page(None, "Cachée", &[user(&team.olga, Level::Full)])
+        .await;
+    let nobody = t.browser();
+    let tom = &team.tom.browser;
+    let refusals = [
+        (
+            "sans session",
+            &nobody,
+            open,
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+        ),
+        (
+            "page qu'il ne voit pas",
+            tom,
+            hidden,
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            "page inconnue",
+            tom,
+            Uuid::now_v7(),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            "en lecture",
+            tom,
+            read_only,
+            StatusCode::FORBIDDEN,
+            "forbidden",
+        ),
+        (
+            "à la corbeille",
+            tom,
+            binned,
+            StatusCode::CONFLICT,
+            "trashed",
+        ),
+    ];
+    for (what, by, page, status, code) in refusals {
+        let bodies = [
+            ("illisible", "{".to_string()),
+            (
+                "source cachée",
+                json!({ "pageId": hidden.to_string(), "fileId": file_id }).to_string(),
+            ),
+            (
+                "valable",
+                json!({ "pageId": open.to_string(), "fileId": file_id }).to_string(),
+            ),
+        ];
+        for (body_name, body) in bodies {
+            let request = Request::post(copies_uri(page))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let reply = by.send(request).await;
+            assert_eq!(reply.status, status, "{what}, corps {body_name}");
+            reply.assert_error(status, code);
+        }
+    }
+    assert_eq!(attachments(&t).await, 1, "rien d'attaché");
+}
+
+/// Un `GET` sur l'adresse de la recopie répond `405`, la même réponse pour toute page, qu'on la
+/// voie ou non (Ruling R559) : la route de la recopie passe avant celle d'un fichier, et aucun
+/// fichier ne s'appelle `copies` (son identifiant est un UUID).
+#[tokio::test]
+async fn get_on_the_copy_address_is_the_same_405_for_every_page() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let open = team.page(None, "Ouverte", &[members(Level::Full)]).await;
+    let hidden = team
+        .page(None, "Cachée", &[user(&team.olga, Level::Full)])
+        .await;
+    let tom = &team.tom.browser;
+    let first = tom.get(&copies_uri(open)).await;
+    first.assert_error(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
+    for page in [
+        hidden.to_string(),
+        Uuid::now_v7().to_string(),
+        "pas-une-page".to_string(),
+    ] {
+        let reply = tom.get(&copies_uri(&page)).await;
+        assert_eq!(outcome(&reply), outcome(&first), "{page}");
+    }
+}
