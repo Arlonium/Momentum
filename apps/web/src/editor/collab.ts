@@ -2,6 +2,7 @@
 // `/sync/{id}` (protocole y-websocket), et le compte affiché près du curseur.
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
+import { expectedAccount } from "../api";
 import { gatedWebSocket, type ConnectionCheck } from "./schemaGate";
 import { CLIENT_SCHEMA_VERSION } from "./version";
 
@@ -72,9 +73,15 @@ export class CollabSession {
     this.user = user;
     const shared = new Y.Doc();
     // Sans `schema`, le serveur traiterait la connexion comme celle du schéma 0, en
-    // lecture seule (R30) : on la donne toujours.
+    // lecture seule (R30) : on la donne toujours. `account` : le compte de l'application ; le
+    // serveur refuse la connexion si la session est celle d'un autre compte, qu'un autre onglet
+    // vient de connecter (R541) : ce que cet onglet a tapé ne part jamais sous son nom.
+    const account = expectedAccount();
     this.provider = new WebsocketProvider(syncUrl(), pageId, shared, {
-      params: { schema: String(CLIENT_SCHEMA_VERSION) },
+      params: {
+        schema: String(CLIENT_SCHEMA_VERSION),
+        ...(account === null ? {} : { account }),
+      },
       // Rien ne passe d'un onglet à l'autre hors du serveur. Par défaut, y-websocket relie
       // par `BroadcastChannel` les onglets d'une même page : une frappe faite sans le droit
       // de modifier y passerait, puis reviendrait dans les documents neufs d'une session

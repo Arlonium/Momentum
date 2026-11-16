@@ -18,6 +18,8 @@ type Received = {
   method: string;
   path: string;
   body: unknown;
+  /** Le compte que l'appel nomme (`X-Mementum-Account`, R540) ; `undefined` : aucun. */
+  account: string | undefined;
   answered: boolean;
   answer(status: number, body?: unknown): void;
   /** Pas de réponse : le réseau est coupé. */
@@ -43,6 +45,10 @@ const UNAUTHENTICATED = {
   message: "session absente ou échue : se connecter",
 };
 const INVALID_CREDENTIALS = { error: "invalid_credentials", message: "Mot de passe incorrect." };
+const ACCOUNT_CHANGED = {
+  error: "account_changed",
+  message: "tu t'es connecté sous un autre compte dans un autre onglet ; rien n'a été fait",
+};
 const PASSWORDS = { current: "ancien-mot-de-passe", new: "nouveau-mot-de-passe" };
 const tree = (spaceId: string): Tree => ({ spaceId, lsn: 1, nodes: [] });
 
@@ -58,6 +64,7 @@ beforeEach(async () => {
           method: init.method ?? "GET",
           path,
           body: typeof init.body === "string" ? JSON.parse(init.body) : undefined,
+          account: new Headers(init.headers).get("x-mementum-account") ?? undefined,
           answered: false,
           answer(status, body) {
             call.answered = true;
@@ -1123,4 +1130,144 @@ test.fails("a_replay_does_not_overwrite_a_newer_gesture_on_the_same_setting [lim
   if (JSON.stringify(levels) === JSON.stringify(OVERWRITTEN)) {
     throw new Error(`perte dite : le rejeu écrase le geste plus récent (${levels.join(", ")})`);
   }
+});
+
+// Le compte attendu (Rulings R540, R543, R544) : chaque appel nomme le compte de l'application, et
+// le serveur refuse par `409 account_changed`, sans rien faire, celui qui part sous la session d'un
+// autre compte (un autre onglet s'y est connecté). Le faux serveur répond ce que le vrai répondrait.
+
+test("every_call_names_the_account_of_the_application_but_the_reading_of_the_account_and_the_session_routes", async () => {
+  // Avant que l'application ait un compte : rien à nommer.
+  const info = api.getInfo();
+  (await waiting("GET", "/api/v1/info")).answer(200, { version: "1", schemaVersion: 1 });
+  await info;
+  expect(api.expectedAccount()).toBeNull();
+  await loadedAs("alice");
+  void api.getPage("p1").catch(() => {});
+  void api.updatePage("p1", { title: "Notes" }).catch(() => {});
+  void api.trashPage("p1").catch(() => {});
+  void api.getVersionState("p1", "v1").catch(() => {});
+  void api.lookupInvitation("jeton").catch(() => {});
+  void api.changePassword(PASSWORDS).catch(() => {});
+  void api.getMe().catch(() => {});
+  void api.logIn({ email: "alice@exemple.fr", password: "mot-de-passe" }).catch(() => {});
+  void api
+    .signUp({ email: "chloe@exemple.fr", name: "Chloé", password: "mot-de-passe" })
+    .catch(() => {});
+  void api.logOut().catch(() => {});
+  await flush();
+  expect(received.map((c) => [`${c.method} ${c.path}`, c.account])).toEqual([
+    ["GET /api/v1/info", undefined],
+    ["GET /api/v1/me", undefined],
+    ["GET /api/v1/pages/p1", "alice"],
+    ["PATCH /api/v1/pages/p1", "alice"],
+    ["POST /api/v1/pages/p1/trash", "alice"],
+    ["GET /api/v1/pages/p1/versions/v1/state", "alice"],
+    ["POST /api/v1/invitations/lookup", "alice"],
+    ["POST /api/v1/auth/password", "alice"],
+    ["GET /api/v1/me", undefined],
+    ["POST /api/v1/auth/login", undefined],
+    ["POST /api/v1/auth/signup", undefined],
+    ["POST /api/v1/auth/logout", undefined],
+  ]);
+  expect(api.expectedAccount()).toBe("alice");
+});
+
+test("a_call_still_names_the_application_once_the_session_is_known_to_be_another_account", async () => {
+  await loadedAs("alice");
+  // Une relecture du compte trouve la session à Bruno (un autre onglet) : `acting` ne vaut plus
+  // rien, mais l'appel nomme toujours Alice, et le serveur le refusera sous la session de Bruno.
+  const read = api.getMe();
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
+  await read;
+  void api.updatePage("p1", { title: "Notes" }).catch(() => {});
+  expect((await waiting("PATCH", "/api/v1/pages/p1")).account).toBe("alice");
+  // Pendant une déconnexion aussi.
+  void api.logOut().catch(() => {});
+  void api.trashPage("p1").catch(() => {});
+  expect((await waiting("POST", "/api/v1/pages/p1/trash")).account).toBe("alice");
+});
+
+test("a_replay_names_the_account_of_its_first_send", async () => {
+  await loadedAs("alice");
+  const read = api.getPage("p1");
+  const first = await waiting("GET", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  const again = await waiting("GET", "/api/v1/pages/p1");
+  expect(first.account).toBe("alice");
+  expect(again.account).toBe("alice");
+  again.answer(200, page("p1"));
+  await expect(read).resolves.toEqual(page("p1"));
+});
+
+test("a_replay_that_meets_the_session_of_another_tab_is_refused_and_tells_the_application", async () => {
+  // La fenêtre de R460 : la relecture d'avant le rejeu dit Alice, puis un autre onglet se connecte
+  // sous Bruno avant que le rejeu parte. Le rejeu nomme Alice : le serveur le refuse, sans rien
+  // faire, et l'application l'apprend.
+  await loadedAs("alice");
+  const others: string[] = [];
+  api.onOtherAccount((found) => others.push(found.user.id));
+  const trashed = api.trashPage("p1");
+  const first = await waiting("POST", "/api/v1/pages/p1/trash");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  const again = await waiting("POST", "/api/v1/pages/p1/trash");
+  expect(again.account).toBe("alice");
+  again.answer(409, ACCOUNT_CHANGED);
+  // Le compte est relu : c'est Bruno.
+  const reading = await waiting("GET", "/api/v1/me");
+  expect(reading.account).toBeUndefined();
+  reading.answer(200, me("bruno"));
+  await expect(trashed).rejects.toMatchObject({ status: 409, code: "account_changed" });
+  await flush();
+  expect(others).toEqual(["bruno"]);
+  expect(count("POST", "/api/v1/pages/p1/trash")).toBe(2);
+  expect(asked).toBe(0);
+});
+
+test("a_call_refused_for_another_account_is_never_sent_again_and_tells_the_application", async () => {
+  await loadedAs("alice");
+  const others: string[] = [];
+  api.onOtherAccount((found) => others.push(found.user.id));
+  const written = api.updatePage("p1", { title: "Notes" });
+  (await waiting("PATCH", "/api/v1/pages/p1")).answer(409, ACCOUNT_CHANGED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
+  const failure = await written.catch((e: unknown) => e);
+  expect(failure).toMatchObject({ status: 409, code: "account_changed" });
+  expect(api.isSessionLost(failure)).toBe(false);
+  await flush();
+  expect(others).toEqual(["bruno"]);
+  expect(asked).toBe(0);
+  expect(log()).toEqual(["GET /api/v1/me", "PATCH /api/v1/pages/p1", "GET /api/v1/me"]);
+});
+
+test("a_call_refused_for_another_account_whose_session_came_back_tells_nothing", async () => {
+  // Le temps que le refus revienne, la session est revenue au compte de l'application : rien à
+  // dire, et l'appel n'est pas rejoué (il n'a rien fait ; la personne le refera).
+  await loadedAs("alice");
+  const others: string[] = [];
+  api.onOtherAccount((found) => others.push(found.user.id));
+  const written = api.updatePage("p1", { title: "Notes" });
+  (await waiting("PATCH", "/api/v1/pages/p1")).answer(409, ACCOUNT_CHANGED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  await expect(written).rejects.toMatchObject({ status: 409, code: "account_changed" });
+  await flush();
+  expect(others).toEqual([]);
+  expect(asked).toBe(0);
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("a_call_refused_for_another_account_whose_session_is_gone_asks_to_log_in", async () => {
+  // L'autre compte s'est déconnecté depuis : la relecture du compte est refusée sans session.
+  await loadedAs("alice");
+  const written = api.updatePage("p1", { title: "Notes" });
+  (await waiting("PATCH", "/api/v1/pages/p1")).answer(409, ACCOUNT_CHANGED);
+  (await waiting("GET", "/api/v1/me")).answer(401, UNAUTHENTICATED);
+  await expect(written).rejects.toMatchObject({ status: 409, code: "account_changed" });
+  await flush();
+  expect(asked).toBe(1);
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
 });

@@ -17,9 +17,19 @@
 // relu juste avant), jamais s'il est parti avant une déconnexion de l'onglet, ou pendant. Un `401
 // unauthenticated` est le premier refus du serveur, avant toute lecture ou écriture : l'appel
 // refusé n'a rien fait, et son rejeu le fait une fois. Un refus reçu pendant qu'une session
-// s'ouvre ou se ferme attend son issue. Ce que la page ne peut pas empêcher : un autre onglet du
-// navigateur qui se connecte sous un autre compte pendant la relecture du compte (le cookie est
-// commun) fait partir le rejeu sous ce compte (R460).
+// s'ouvre ou se ferme attend son issue.
+//
+// Le compte attendu (Rulings R540, R543). Le cookie est commun à tous les onglets du navigateur,
+// et la page ne le lit pas : un autre onglet qui se connecte sous un autre compte fait partir les
+// appels de celui-ci sous ce compte, un rejeu comme tout autre appel (R115, R460). Chaque appel
+// nomme donc le compte de l'application, tel qu'il était à son premier envoi, par l'en-tête
+// `X-Mementum-Account` (son rejeu aussi, jamais le compte du moment) ; le serveur refuse par `409
+// account_changed`, sans rien faire, un appel qui ne nomme pas le compte de la session. Pas
+// d'en-tête tant que l'application n'a pas de compte, ni pour `GET /api/v1/me`, qui sert à
+// l'apprendre, ni pour la connexion, l'inscription et la déconnexion. Reçu, ce refus ne repart
+// jamais : le compte de la session est relu, et s'il est un autre, l'application le sait
+// (`onOtherAccount`) et repart de zéro (R464). La relecture d'avant un rejeu reste : elle évite
+// d'envoyer ce que le serveur refuserait, et dit l'autre compte plus tôt (R544).
 import type {
   Accepted,
   ChangePassword,
@@ -111,6 +121,16 @@ const PASSWORD = "/api/v1/auth/password";
 /** Les routes qui ouvrent ou ferment la session : jamais rejouées. */
 const SESSION_ROUTES: ReadonlySet<string> = new Set([SIGNUP, LOGIN, LOGOUT, PASSWORD]);
 
+/** L'en-tête qui nomme le compte sous lequel l'appel part (R540). */
+export const ACCOUNT_HEADER = "x-mementum-account";
+/**
+ * Les routes qui ne nomment pas de compte : la relecture du compte (elle sert à l'apprendre), et
+ * celles qui ouvrent ou ferment une session sans en lire (le serveur n'y regarde pas l'en-tête ;
+ * se déconnecter ferme la session du navigateur, quel que soit son compte, R542). Le changement de
+ * mot de passe, lui, en nomme un : il vise le compte de la session.
+ */
+const UNNAMED_ROUTES: ReadonlySet<string> = new Set([ME, SIGNUP, LOGIN, LOGOUT]);
+
 /**
  * Combien de temps un refus de session attend, au plus, l'issue d'une session qui s'ouvre ou se
  * ferme (ms) : au-delà, il est jugé sans elle (R462).
@@ -168,6 +188,17 @@ const changing = new Set<Promise<void>>();
 let reading: { generation: number; account: Promise<string> } | null = null;
 
 const stamp = (): Stamp => ({ generation, account: loggingOut > 0 ? null : acting, epoch });
+
+/**
+ * Le compte que les appels de l'onglet nomment (R540, R541) : celui de l'application, `null` tant
+ * qu'elle n'en a pas. Pas `acting` : celui-ci ne vaut `null` que là où un rejeu est défendu
+ * (déconnexion en route, session connue d'un autre compte), et c'est justement là que le serveur
+ * doit refuser ce qui partirait sous un autre compte (R543). Les connexions de synchro et le canal
+ * de l'espace le donnent en paramètre d'adresse, faute d'en-tête.
+ */
+export function expectedAccount(): string | null {
+  return appAccount;
+}
 
 /** Recalcule `acting`, et avance `epoch` s'il change. */
 function settleAccounts() {
@@ -368,7 +399,11 @@ async function send(
   signal?: AbortSignal,
   replays = 0,
 ): Promise<Response> {
-  const headers = body === undefined ? undefined : { "content-type": "application/json" };
+  // Le compte nommé est celui du premier envoi : le rejeu le garde (R540, R543).
+  const account = UNNAMED_ROUTES.has(path) ? null : appAccount;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["content-type"] = "application/json";
+  if (account !== null) headers[ACCOUNT_HEADER] = account;
   const payload = body === undefined ? undefined : JSON.stringify(body);
   for (; ; replays += 1) {
     const sent = stamp();
@@ -391,6 +426,12 @@ async function send(
       error.error ?? null,
       error.message ?? (res.status >= 500 ? UNREACHABLE : `Erreur ${res.status} du serveur.`),
     );
+    if (failure.code === "account_changed") {
+      // La session est celle d'un autre compte : l'appel n'a rien fait, et ne repart jamais. Le
+      // compte est relu ; si c'est bien un autre, `onOtherAccount` le dit (R464, R543).
+      await readSessionAccount().catch(() => {});
+      throw failure;
+    }
     if (!isSessionLost(failure)) throw failure;
     const verdict = await judge(sent, path, replays);
     if (verdict === "replay") continue;

@@ -2,6 +2,7 @@
 // l'espace (`{"lsn":N}`), le client relit l'arbre quand elle dépasse celle de l'arbre affiché
 // (R141). La WebSocket est simulée ; le client n'y envoie jamais rien.
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { getMe } from "../api";
 import { renderHook, settle } from "../test/hooks";
 import {
   EVENTS_DEBOUNCE_MS,
@@ -358,4 +359,22 @@ test("coming_back_online_reopens_the_channel_at_once", async () => {
   await events.unmount();
   await settle(() => window.dispatchEvent(new Event("online")));
   expect(FakeSocket.instances).toHaveLength(5);
+});
+
+// En dernier : le compte de l'application, une fois chargé, reste dans le module d'`api.ts` pour
+// les tests qui suivraient.
+test("the_channel_names_the_account_of_the_application", async () => {
+  // Une WebSocket ne porte pas d'en-tête : le compte va dans l'adresse (R541), et le serveur
+  // refuse le canal s'il n'est pas celui de la session.
+  await renderHook(hook, { spaceId: "perso" });
+  expect(FakeSocket.instances[0].url).toMatch(/\/events\/perso$/);
+  vi.stubGlobal("fetch", async () =>
+    Response.json({
+      user: { id: "alice", email: "alice@exemple.fr", name: "Alice", instanceAdmin: false },
+      spaces: [],
+    }),
+  );
+  await getMe();
+  await renderHook(hook, { spaceId: "perso" });
+  expect(FakeSocket.instances[1].url).toMatch(/\/events\/perso\?account=alice$/);
 });

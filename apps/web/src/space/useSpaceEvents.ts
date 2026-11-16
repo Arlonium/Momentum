@@ -30,6 +30,7 @@
 // canal tout de suite, sans attendre le délai de reconnexion, et remplace celui qui était tenu
 // pour ouvert : il a pu mourir pendant la coupure.
 import { useEffect, useRef, useState } from "react";
+import { expectedAccount } from "../api";
 import { groupedDelay, REREAD_DEBOUNCE_MS, REREAD_MAX_WAIT_MS } from "../rereads";
 
 /** Plusieurs trames qui se suivent ne font qu'une relecture, cette durée après la dernière. */
@@ -52,9 +53,14 @@ export const RECONNECT_MAX_MS = 30_000;
  */
 export const EVENTS_SILENCE_MS = 45_000;
 
-/** `ws(s)://<hôte de la page>/events/<espace>` : le même hôte que l'API, par le mandataire. */
+/**
+ * `ws(s)://<hôte de la page>/events/<espace>` : le même hôte que l'API, par le mandataire. Avec le
+ * compte de l'application (`?account=`, R541), que le serveur compare à celui de la session.
+ */
 function eventsUrl(spaceId: string): string {
-  return `${location.origin.replace(/^http/, "ws")}/events/${encodeURIComponent(spaceId)}`;
+  const url = `${location.origin.replace(/^http/, "ws")}/events/${encodeURIComponent(spaceId)}`;
+  const account = expectedAccount();
+  return account === null ? url : `${url}?account=${encodeURIComponent(account)}`;
 }
 
 /** Le numéro d'une trame du serveur ; `null` pour tout ce qui n'a pas la forme attendue. */

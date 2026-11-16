@@ -6,6 +6,7 @@
 // en lecture seule, et le seul chemin d'un onglet à l'autre : le serveur.
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import * as Y from "yjs";
+import { getMe } from "../api";
 import { deferred } from "../test/hooks";
 import { CollabSession, FRAGMENT } from "./collab";
 import type { ConnectionCheck } from "./schemaGate";
@@ -471,5 +472,32 @@ describe("read_only_copy", () => {
     expect(observed).toBe(2);
     // La copie a reçu les deux : rien n'est perdu pour l'éditeur, qui montre ce qu'il peut.
     expect(session.doc.getXmlFragment(FRAGMENT).length).toBe(2);
+  });
+});
+
+// En dernier : le compte de l'application, une fois chargé, reste dans le module d'`api.ts` pour
+// les tests qui suivraient.
+describe("account_parameter", () => {
+  test("la connexion de synchro nomme le compte de l'application dans son adresse", async () => {
+    // Une WebSocket ne porte pas d'en-tête : le compte va dans l'adresse (R541), et le serveur
+    // refuse la connexion s'il n'est pas celui de la session, avant d'avoir rien reçu de l'onglet.
+    open(false);
+    const before = await connected();
+    expect(new URL(before.url).searchParams.get("account")).toBeNull();
+    for (const session of sessions) session.destroy();
+    sessions = [];
+    FakeSocket.instances = [];
+    vi.stubGlobal("fetch", async () =>
+      Response.json({
+        user: { id: "alice", email: "alice@exemple.fr", name: "Alice", instanceAdmin: false },
+        spaces: [],
+      }),
+    );
+    await getMe();
+    open(false);
+    const socket = await connected();
+    const url = new URL(socket.url);
+    expect(url.searchParams.get("account")).toBe("alice");
+    expect(url.searchParams.get("schema")).not.toBeNull();
   });
 });
