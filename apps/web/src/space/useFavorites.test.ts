@@ -363,3 +363,15 @@ test("an_undone_gesture_is_ranked_again_for_the_sidebar", async () => {
   expect(rendered.current.toggles.get("d")).toBe(accepted);
   expect(made).toBeLessThan(later);
 });
+
+test("pages_added_here_are_shown_in_the_order_of_their_last_gesture", async () => {
+  // X posé, Y posé, X retiré puis reposé, avant toute réponse : le serveur rangera X après Y (il
+  // le date de sa dernière pose) ; la liste montrée aussi, tout de suite.
+  const rendered = await loaded([]);
+  await settle(() => void rendered.current.toggle("x"));
+  await settle(() => void rendered.current.toggle("y"));
+  await settle(() => void rendered.current.toggle("x"));
+  expect(rendered.current.pages).toEqual(["y"]);
+  await settle(() => void rendered.current.toggle("x"));
+  expect(rendered.current.pages).toEqual(["y", "x"]);
+});
