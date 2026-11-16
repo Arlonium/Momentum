@@ -46,22 +46,20 @@ function withoutIds({ id: _id, children, ...rest }: Block): PartialBlock {
 
 /**
  * Insère, juste après le dernier des blocs `ids` (donnés dans l'ordre du document, comme les rend
- * `getSelection`), leurs copies dans le même ordre, sans aucun id de bloc ; pose le curseur à la fin
- * de la première copie (`setTextCursorPosition` : la fin de son texte ; pour une liste de colonnes, la
- * fin du dernier texte qu'elle porte ; une image est sélectionnée) ; rend les ids neufs des copies. Un id qui n'est plus dans le document (un autre
- * vient de supprimer le bloc) est passé, un id répété copié une fois. Une seule transaction : une
- * écriture, et Ctrl+Z la défait d'un coup.
+ * `getSelection`), leurs copies dans le même ordre, sans aucun id de bloc, en une insertion (une
+ * écriture, que Ctrl+Z défait d'un coup) ; pose le curseur à la fin de la première copie
+ * (`setTextCursorPosition` : la fin de son texte ; pour une liste de colonnes, la fin du dernier
+ * texte qu'elle porte ; une image est sélectionnée) ; rend les ids neufs des copies. Un id qui n'est
+ * plus dans le document (un autre vient de supprimer le bloc) est passé, un id répété copié une fois.
  */
 export function duplicateBlocks(editor: MementumEditor, ids: string[]): string[] {
   const blocks = [...new Set(ids)]
     .map((id) => editor.getBlock(id))
     .filter((found): found is Block => found !== undefined);
   if (blocks.length === 0) return [];
-  return editor.transact(() => {
-    const made = editor.insertBlocks(blocks.map(withoutIds), blocks[blocks.length - 1], "after");
-    editor.setTextCursorPosition(made[0], "end");
-    return made.map((copy) => copy.id);
-  });
+  const made = editor.insertBlocks(blocks.map(withoutIds), blocks[blocks.length - 1], "after");
+  editor.setTextCursorPosition(made[0], "end");
+  return made.map((copy) => copy.id);
 }
 
 /**
