@@ -560,7 +560,7 @@ async fn measure_page_duplication() {
     .enumerate()
     {
         let refused = pages * blocks > 40_000;
-        let alice = t.account(&format!("Compte {case}")).await;
+        let alice = t.account(&format!("Compte{case}")).await;
         let what = format!("{pages} pages de {blocks} blocs");
         let content = paragraphs(blocks);
         let root = alice.create(json!({ "title": what })).await.id;
@@ -758,7 +758,7 @@ async fn measure_one_account_duplicating_without_pause() {
     for (what, pages, content) in cases {
         for streams in [1usize, 4, 16] {
             attackers += 1;
-            let mallory = t.account(&format!("Mallory {attackers}")).await;
+            let mallory = t.account(&format!("Mallory{attackers}")).await;
             let root = mallory.create(json!({ "title": what })).await.id;
             let mut all = vec![root.clone()];
             for i in 1..pages {
