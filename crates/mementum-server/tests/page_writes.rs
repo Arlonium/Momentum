@@ -511,12 +511,21 @@ async fn measure_worst_accepted_writes() {
 }
 
 /// Ruling R383 : la lecture d'un MMD et l'estimation de son écriture se font hors des fils du
-/// serveur. Sur un seul fil (le moteur de ce test), un `PUT /mmd` long à lire (600 Ko de plages
+/// serveur. Sur un seul fil (le moteur de ce test), un `PUT /mmd` long à lire (1,8 Mo de plages
 /// alternées, refusé ensuite comme trop long à écrire) laissait toute autre requête attendre la
 /// fin de sa lecture. Les lectures de page faites pendant ce temps répondent maintenant chacune
 /// bien avant. Le test ne peut pas passer à tort : une lecture faite sur le fil du serveur
 /// arrêterait celle des pages en cours (le seul fil est pris, et la boucle n'a pas d'autre
 /// attente que ses requêtes) ; il vérifie que la lecture du MMD a assez duré pour le voir.
+///
+/// La taille du MMD et la borne ne sont pas libres (Ruling R585). Quand le fil du test partage un
+/// cœur avec un fil qui calcule (celui qui lit le MMD, ou un autre test), le système laisse ce
+/// dernier calculer par tranches de 120 à 350 ms, et une lecture de page attend la fin de la
+/// tranche, plusieurs quand les fils sont nombreux (un fil qui calcule sans rapport avec le
+/// serveur fait de même). Lue sur le fil du serveur, la lecture du MMD fait attendre une lecture
+/// de page toute sa durée (99,8 à 100 %, sur un, deux ou vingt-quatre cœurs). Lue à part, la pire
+/// attente est restée sous 35 % de sa durée avec 1,8 Mo, même à quatre tests sur deux cœurs ; avec
+/// 600 Ko et une borne au quart, le test échouait sur un cœur dix-neuf fois sur vingt.
 #[tokio::test]
 async fn mmd_is_read_off_the_server_threads() {
     let t = open_app().await;
@@ -524,7 +533,7 @@ async fn mmd_is_read_off_the_server_threads() {
     let page = team
         .page(None, "Lue à part", &[user(&team.olga, Level::Full)])
         .await;
-    let mmd = "a*b*".repeat(150_000) + "\n";
+    let mmd = "a*b*".repeat(450_000) + "\n";
     let put = request(
         &team.olga,
         Request::put(format!("/api/v1/pages/{page}/mmd"))
@@ -554,7 +563,7 @@ async fn mmd_is_read_off_the_server_threads() {
         "la lecture du MMD a pris {took:?} : trop peu pour rien prouver"
     );
     assert!(
-        worst < took / 4,
+        worst < took / 2,
         "une lecture de page a attendu {worst:?} pendant les {took:?} du PUT /mmd ({reads} \
          lectures)"
     );
