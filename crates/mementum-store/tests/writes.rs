@@ -1,4 +1,4 @@
-//! La file d'écriture du store (Rulings R510 à R519) : SQLite n'a qu'un écrivain à la fois, et
+//! La file d'écriture du store (Rulings R510 à R516) : SQLite n'a qu'un écrivain à la fois, et
 //! son verrou d'écriture n'est pas une file. Qui l'attend le redemande par intervalles, et
 //! échoue (`database is locked`) au bout du délai d'attente de sa connexion ; qui le rend puis
 //! le redemande aussitôt le reprend. Les écritures du store attendent donc leur tour dans une

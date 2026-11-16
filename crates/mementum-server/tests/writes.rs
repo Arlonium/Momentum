@@ -1,4 +1,4 @@
-//! La file d'écriture du store, vue des routes et de la synchro (Rulings R510 à R519) : un compte
+//! La file d'écriture du store, vue des routes et de la synchro (Rulings R510 à R516) : un compte
 //! qui écrit sans relâche ne fait échouer l'écriture de personne, et ne fait attendre la frappe
 //! d'un autre que le temps d'une ou deux de ses écritures, pas de toutes celles qu'il a en file.
 //!
