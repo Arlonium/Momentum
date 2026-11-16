@@ -134,10 +134,11 @@ type Stamp = {
  */
 let generation = 0;
 /**
- * Le compte de l'application : celui qu'elle a chargé (premier `GET /api/v1/me` qui répond hors
- * d'une déconnexion), ou celui de la session que l'onglet a ouverte ; `null` : aucun, ou
- * déconnexion demandée. Une relecture qui dit un autre compte ne le change pas : l'application va
- * repartir de zéro (R115), et elle agit jusque-là pour celui-ci.
+ * Le compte de l'application : celui qu'elle a chargé (premier `GET /api/v1/me` qui répond), ou
+ * celui de la session que l'onglet a ouverte ; `null` : pas encore chargée. Ni une relecture qui
+ * dit un autre compte, ni une déconnexion ne le changent : l'application va repartir de zéro
+ * (R115 ; rechargée après une déconnexion), et elle agit jusque-là pour celui-ci, après une
+ * déconnexion qui échoue aussi (R461).
  */
 let appAccount: string | null = null;
 /**
@@ -154,8 +155,7 @@ let acting: string | null = null;
 let epoch = 0;
 /**
  * Les déconnexions de l'onglet en route (R461). Tant qu'il y en a une, aucun appel n'est daté
- * d'un compte, et une relecture du compte ne charge pas l'application : `appAccount` à `null` ne
- * dit pas alors « pas encore chargée ».
+ * d'un compte : une relecture du compte répondue pendant elle ne le réarme pas.
  */
 let loggingOut = 0;
 /** Les sessions qui s'ouvrent ou se ferment en ce moment : un refus de session attend leur issue. */
@@ -179,11 +179,10 @@ function settleAccounts() {
 
 /**
  * Le serveur vient de dire le compte de la session en cours. `loads` : c'est une lecture de
- * l'application (`getMe`), qui la charge sous ce compte si elle ne l'est pas encore, hors d'une
- * déconnexion (R461).
+ * l'application (`getMe`), qui la charge sous ce compte si elle ne l'est pas encore.
  */
 function sessionIs(id: string, loads: boolean) {
-  if (loads && appAccount === null && loggingOut === 0) appAccount = id;
+  if (loads && appAccount === null) appAccount = id;
   sessionAccount = id;
   settleAccounts();
 }
@@ -410,9 +409,9 @@ export function logIn(body: LogIn): Promise<Me> {
 /** `POST /api/v1/auth/logout` : supprime la session sur le serveur et efface le cookie. */
 export function logOut(): Promise<void> {
   // Rien de ce qui est parti avant, ou part pendant, ne sera rejoué : ni sous ce compte, même
-  // reconnecté, ni sous un autre (R460, R461).
+  // reconnecté, ni sous un autre (R460, R461). La session n'a plus de compte sûr ; l'application
+  // garde le sien.
   loggingOut += 1;
-  appAccount = null;
   sessionAccount = null;
   settleAccounts();
   return changeSession(async () => {

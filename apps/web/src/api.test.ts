@@ -628,6 +628,86 @@ test("a_call_sent_during_a_logout_crossed_by_a_login_is_never_sent_again", async
   expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
 });
 
+test("after_a_failed_logout_the_application_is_still_the_one_it_was", async () => {
+  // La déconnexion échoue : l'application reste celle d'Alice. Une relecture du compte qui trouve
+  // alors Bruno (un autre onglet) ne la charge pas sous Bruno : ce qu'elle écrit n'est pas à lui.
+  await loadedAs("alice");
+  const out = api.logOut();
+  (await waiting("POST", "/api/v1/auth/logout")).fail();
+  await expect(out).rejects.toMatchObject({ status: 0 });
+  const reading = api.getMe();
+  (await waiting("GET", "/api/v1/me")).answer(200, me("bruno"));
+  await reading;
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const sent = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("bruno");
+  sent.answer(401, UNAUTHENTICATED);
+  await flush();
+  expect(count("GET", "/api/v1/me")).toBe(2);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("a_failed_logout_lets_the_replay_work_again_once_the_account_is_read", async () => {
+  // Garde : la déconnexion finie, même échouée, les appels sont de nouveau datés.
+  await loadedAs("alice");
+  const out = api.logOut();
+  (await waiting("POST", "/api/v1/auth/logout")).fail();
+  await expect(out).rejects.toMatchObject({ status: 0 });
+  await loadedAs("alice");
+  const read = api.getPage("p1");
+  const sent = await waiting("GET", "/api/v1/pages/p1");
+  await changePassword();
+  sent.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  (await waiting("GET", "/api/v1/pages/p1")).answer(200, page("p1"));
+  await expect(read).resolves.toEqual(page("p1"));
+});
+
+test("a_replay_gives_up_when_a_login_of_the_tab_crosses_the_second_reading_too", async () => {
+  // Garde : une session de l'onglet croise la relecture, puis une autre croise la seconde ; on ne
+  // relit pas sans fin, l'appel ne repart pas.
+  await loadedAs("alice");
+  const write = api.updatePage("p1", { title: "Titre d'Alice" });
+  write.catch(() => {});
+  const first = await waiting("PATCH", "/api/v1/pages/p1");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  const reading = await waiting("GET", "/api/v1/me");
+  const login = api.logIn({ email: "alice@exemple.fr", password: "mot-de-passe" });
+  const opening = await waiting("POST", "/api/v1/auth/login");
+  reading.answer(200, me("alice"));
+  opening.answer(200, me("alice"));
+  await login;
+  const second = await waiting("GET", "/api/v1/me");
+  const again = api.logIn({ email: "bruno@exemple.fr", password: "mot-de-passe" });
+  const reopening = await waiting("POST", "/api/v1/auth/login");
+  second.answer(200, me("alice"));
+  await flush();
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+  await expect(write).rejects.toMatchObject({ code: "unauthenticated" });
+  reopening.answer(200, me("bruno"));
+  await again;
+  expect(count("PATCH", "/api/v1/pages/p1")).toBe(1);
+});
+
+test("a_401_that_comes_back_after_a_login_without_answer_does_not_ask_to_log_in", async () => {
+  // Garde : une connexion sans réponse a pu fermer la session sous laquelle l'appel est parti
+  // (R73) ; son refus ne dit rien de sûr de la session en cours, et ne demande pas la connexion.
+  await loadedAs("alice");
+  const read = api.getPage("p1");
+  const sent = await waiting("GET", "/api/v1/pages/p1");
+  const login = api.logIn({ email: "alice@exemple.fr", password: "mot-de-passe" });
+  (await waiting("POST", "/api/v1/auth/login")).fail();
+  await expect(login).rejects.toMatchObject({ status: 0 });
+  sent.answer(401, UNAUTHENTICATED);
+  await expect(read).rejects.toMatchObject({ code: "unauthenticated" });
+  await flush();
+  expect(asked).toBe(0);
+  expect(count("GET", "/api/v1/pages/p1")).toBe(1);
+});
+
 test("a_replay_waits_for_a_login_of_the_tab_in_course_and_stops_if_it_is_another_account", async () => {
   await loadedAs("alice");
   const write = api.updatePage("p1", { title: "Titre d'Alice" });
