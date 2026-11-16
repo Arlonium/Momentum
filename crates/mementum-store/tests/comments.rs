@@ -1669,3 +1669,40 @@ async fn writes_side_by_side_at_an_account_part_let_one_through() {
     }
     assert_eq!(passed, 1);
 }
+
+/// Ruling R358, l'ordre des refus pour les messages (une règle que la re-relecture du tour 2
+/// trouvait sans test) : les plafonds communs passent avant la part du compte. Sur une page qui
+/// porte ses 10 000 messages, Alice, qui a aussi écrit toute sa part, reçoit le refus de la page,
+/// pas celui de sa part.
+#[tokio::test]
+async fn page_message_cap_comes_before_the_account_part() {
+    let f = fresh().await;
+    let store = &f.store;
+    let alice = account(store, "alice").await;
+    let bob = account(store, "bob").await;
+    let p = new_page(&f, "Pleine").await;
+    let hers = store
+        .create_thread(p, None, alice.id, "Alice")
+        .await
+        .unwrap();
+    fill_messages(&f, p, alice.id, 5, MAX_MESSAGES_PER_ACCOUNT - 1, "'x'").await;
+    // Le reste de la page, par Bob : `fill_messages` nomme ses fils d'après la page, et ne se
+    // rappelle pas deux fois sur la même.
+    let (bob_threads, bob_count) = (21, MAX_MESSAGES_PER_PAGE - MAX_MESSAGES_PER_ACCOUNT);
+    common::exec_sql(
+        &f.db,
+        &format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {bob_threads})              INSERT INTO comment_threads (id, node_id, created_by, created_at)              SELECT printf('bob-%05d', i), '{p}', '{bob}', i FROM n;              WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < {bob_count} - 1)              INSERT INTO comments (id, thread_id, author_id, body, created_at)              SELECT printf('bob-message-%06d', i), printf('bob-%05d', i % {bob_threads} + 1),                     '{bob}', 'y', i FROM n",
+            bob = bob.id
+        ),
+    )
+    .await;
+    assert!(limited(
+        store.reply_to_thread(p, hers.id, alice.id, "De trop").await,
+        CommentLimit::PageMessages
+    ));
+    assert!(limited(
+        store.create_thread(p, None, alice.id, "De trop").await,
+        CommentLimit::PageMessages
+    ));
+}
