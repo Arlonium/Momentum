@@ -243,6 +243,20 @@ test("a_formula_allowed_at_the_top_is_text_deep_in_a_list", async ({ browser, re
   await opened.close();
 });
 
+test("formulas_never_shown_are_printed_typeset", async ({ browser, request }) => {
+  // Une formule n'est mise en forme qu'à l'écran : à l'impression, celles qui n'y étaient jamais
+  // venues s'imprimaient en texte source (re-relecture de C2, N3).
+  const page = await createPage(request, { title: `Impression ${unique()}` });
+  const formulas = Array.from({ length: 40 }, (_, i) => `$$\n\\sum_{k=1}^{${i + 1}} k^2\n$$`);
+  await putMmd(request, page.id, `${formulas.join("\n\n")}\n`);
+  const p = await openPage(browser, page.id);
+  await expect(p.locator(".mm-editor .mm-equation .katex").first()).toBeVisible();
+  expect(await p.locator(".mm-editor .mm-tex-pending").count()).toBeGreaterThan(0);
+  await p.emulateMedia({ media: "print" });
+  await expect(p.locator(".mm-editor .mm-tex-pending")).toHaveCount(0);
+  await expect(p.locator(".mm-editor .mm-equation .katex")).toHaveCount(40);
+});
+
 test("a_formula_that_defines_never_freezes_the_tab", async ({ browser, request }) => {
   const page = await createPage(request, { title: `Définitions ${unique()}` });
   // Dix fois dix appels d'une macro qui tape 3 000 caractères : 300 000 lettres à mettre en page ; et
