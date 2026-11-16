@@ -503,3 +503,195 @@ async fn measure_keystrokes_during_a_100_mib_upload() {
         "frappe pendant l'envoi : p95 {p95:?} (budget {TYPING_BUDGET:?})"
     );
 }
+
+/// Le MMD d'une page de `blocks` paragraphes, chacun avec deux marques.
+fn paragraphs(blocks: usize) -> String {
+    (0..blocks)
+        .map(|i| format!("Bloc {i} : du texte **en gras** et *en italique*, pour peser.\n"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Task S6 (Ruling R252) : dupliquer une page de 10 000 blocs, puis 100 pages de 1 000 blocs, puis
+/// 10 pages de 10 000. Pour chaque cas : la durée de la requête ; le poids des documents copiés ;
+/// la durée de la transaction d'écriture seule (la même copie, récrite par le store, hors de la
+/// route) ; et, pendant la requête, les frappes d'un client dans une autre page, chacune
+/// chronométrée jusqu'à ce qu'un autre client de cette page l'ait reçue. L'écriture de SQLite est
+/// unique pour l'instance : pendant la transaction, le journal de chaque page ouverte attend.
+///
+/// Ces cas passent sous la borne de poids ([`mementum_server::MAX_DUPLICATED_BYTES`]) ou la
+/// dépassent : la ligne dit lequel, et la mesure de la transaction seule vaut dans les deux cas.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_page_duplication() {
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use common::sync::text;
+    use common::{sync_url, synced_as};
+    use mementum_store::{CopiedPage, NewCopy};
+    use tower::ServiceExt;
+
+    let t = TestApp::with_config(|cfg| cfg.signup = SignupMode::Open).await;
+    let addr = t.listen().await;
+    let alice = t.account("Alice").await;
+    let store = Store::open(&t.db_path()).await.unwrap();
+    let typed = alice.create(json!({ "title": "Frappes" })).await.id;
+    alice
+        .put_mmd(&typed, "Texte\n")
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let url = sync_url(addr, &typed);
+    let (author, other) = (
+        synced_as(&alice.browser, &url).await,
+        synced_as(&alice.browser, &url).await,
+    );
+    let block = author.blocks()[0].id.clone();
+
+    // Le dernier cas dépasse la borne de poids : la route le refuse, et seule sa transaction est
+    // mesurée.
+    for (pages, blocks) in [
+        (1usize, 10_000usize),
+        (100, 1_000),
+        (10, 10_000),
+        (14, 10_000),
+        (100, 10_000),
+    ] {
+        let refused = pages * blocks > 150_000;
+        let what = format!("{pages} pages de {blocks} blocs");
+        let content = paragraphs(blocks);
+        let root = alice.create(json!({ "title": what })).await.id;
+        let mut all = vec![root.clone()];
+        // Refusée, la copie n'a pas besoin de cent pages pleines : vingt suffisent à peser trop.
+        for i in 1..if refused { 20 } else { pages } {
+            let body = json!({ "title": format!("Sous-page {i}"), "parentId": root });
+            all.push(alice.create(body).await.id);
+        }
+        for page in &all {
+            alice
+                .put_mmd(page, content.clone())
+                .await
+                .assert_status(StatusCode::NO_CONTENT);
+        }
+
+        let request = Request::post(format!("/api/v1/pages/{root}/duplicate"))
+            .header(header::HOST, "localhost")
+            .header(header::COOKIE, alice.browser.cookie().unwrap())
+            .body(Body::empty())
+            .unwrap();
+        let router = t.router.clone();
+        let duplication = tokio::spawn(async move {
+            let start = Instant::now();
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body, start.elapsed())
+        });
+        let mut times = Vec::new();
+        while !duplication.is_finished() {
+            let start = Instant::now();
+            author.type_text(&block, "x");
+            let expected = text(&author);
+            assert!(
+                other
+                    .wait_until(Duration::from_secs(60), |c| text(c) == expected)
+                    .await,
+                "la frappe n'est pas arrivée"
+            );
+            times.push(start.elapsed());
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let (status, body, took) = duplication.await.unwrap();
+        println!(
+            "MESURE duplication de {what} : {status}, requête {:.0} ms",
+            took.as_secs_f64() * 1000.0
+        );
+        assert_eq!(status == StatusCode::CREATED, !refused, "{what}");
+        if !refused {
+            let mut sorted = times.clone();
+            sorted.sort();
+            let p95 = sorted[(sorted.len() * 95).div_ceil(100).max(1) - 1];
+            assert!(
+                p95 < TYPING_BUDGET,
+                "frappe pendant la duplication de {what} : p95 {p95:?} (budget {TYPING_BUDGET:?})"
+            );
+        }
+        report(
+            &format!("frappe vue par un autre pendant la duplication de {what}"),
+            times,
+        );
+
+        // La transaction seule : les documents d'une copie, récrits par le store.
+        let docs: Vec<Vec<u8>> = if status == StatusCode::CREATED {
+            let copy: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let copy = uuid::Uuid::parse_str(copy["id"].as_str().unwrap()).unwrap();
+            let nodes = store.list_nodes(alice.space).await.unwrap();
+            let mut docs = Vec::new();
+            for node in nodes
+                .iter()
+                .filter(|n| n.id == copy || n.parent_id == Some(copy))
+            {
+                let state = store.load_doc(node.id).await.unwrap();
+                docs.push(state.snapshot.expect("l'instantané de la copie").1);
+            }
+            docs
+        } else {
+            // Refusée pour son poids : des documents du même poids, bâtis ici.
+            println!("        refus : {}", String::from_utf8_lossy(&body));
+            let blocks = mementum_md::parse(&content).unwrap();
+            let page = mementum_crdt::PageDoc::new_page().0;
+            page.write_blocks(&blocks).unwrap();
+            vec![page.encode_state(); pages]
+        };
+        assert_eq!(docs.len(), pages);
+        let bytes: usize = docs.iter().map(Vec::len).sum();
+        let copy = NewCopy {
+            space_id: alice.space,
+            source: uuid::Uuid::parse_str(&root).unwrap(),
+            parent_id: None,
+            after: Some(Sibling::Last),
+            grants: vec![Grant {
+                subject: Subject::User(alice.id),
+                level: Level::Full,
+            }],
+            created_by: alice.id,
+            pages: docs
+                .into_iter()
+                .enumerate()
+                .map(|(i, doc)| CopiedPage {
+                    id: uuid::Uuid::now_v7(),
+                    parent: (i > 0).then_some(0),
+                    title: format!("Copie {i}"),
+                    position: (i > 0).then(|| format!("a{i:04}")),
+                    doc,
+                    attachments: Vec::new(),
+                })
+                .collect(),
+        };
+        let mut transactions = Vec::new();
+        for _ in 0..if refused { 1 } else { 3 } {
+            let start = Instant::now();
+            store
+                .duplicate_pages(&copy_with_fresh_ids(&copy), 1)
+                .await
+                .unwrap();
+            transactions.push(start.elapsed());
+        }
+        println!(
+            "MESURE transaction de la copie de {what} : {:.1} Mio de documents, {:?}",
+            bytes as f64 / (1 << 20) as f64,
+            transactions
+        );
+    }
+    store.close().await;
+}
+
+/// La même copie, sous des identifiants de pages neufs : pour l'écrire une fois de plus.
+fn copy_with_fresh_ids(copy: &mementum_store::NewCopy) -> mementum_store::NewCopy {
+    let mut again = copy.clone();
+    for page in &mut again.pages {
+        page.id = uuid::Uuid::now_v7();
+    }
+    again
+}

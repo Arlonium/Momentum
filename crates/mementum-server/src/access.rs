@@ -465,6 +465,7 @@ pub(crate) mod tests {
             max_file_bytes: crate::config::DEFAULT_MAX_FILE_MB << 20,
             upload_idle: crate::config::UPLOAD_IDLE,
             mmd_reads: Arc::default(),
+            max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
         }
     }
 

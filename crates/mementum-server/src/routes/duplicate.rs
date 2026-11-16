@@ -62,6 +62,15 @@ use crate::{AppState, now_ms, to_completion};
 /// duplique par morceaux.
 pub const MAX_DUPLICATED_PAGES: usize = 100;
 
+/// Octets au plus, tous documents confondus, d'une copie (Ruling R592) : au-delà, `422
+/// subtree_too_large`. La copie s'écrit en une transaction, et l'écriture de SQLite est unique
+/// pour l'instance : pendant elle, chaque frappe de chaque page attend. Mesuré en release : 6 ms
+/// par mébioctet (42 Mio, cent pages de 1 000 blocs ou dix de 10 000 : un quart de seconde ;
+/// cent pages de 10 000 blocs, 425 Mio, en demanderaient près de trois). La borne tient cette
+/// attente sous la demi-seconde sur le poste de mesure, et ce qu'une requête garde en mémoire
+/// sous ce poids.
+pub const MAX_DUPLICATED_BYTES: usize = 64 << 20;
+
 /// Ce qui suit le titre de la page dans celui de sa copie.
 const COPY_SUFFIX: &str = " (copie)";
 
@@ -112,6 +121,28 @@ fn too_many_pages() -> ApiError {
         "cette page et ses sous-pages font plus de {MAX_DUPLICATED_PAGES} pages : duplique-les \
          par morceaux, une sous-page à la fois"
     ))
+}
+
+/// `422 subtree_too_large` : trop d'octets, au-delà de `max`.
+fn too_heavy(max: usize) -> ApiError {
+    let bound = match max >> 20 {
+        0 => format!("{max} octets"),
+        mib => format!("{mib} Mio"),
+    };
+    ApiError::subtree_too_large(format!(
+        "le contenu de cette page et de ses sous-pages pèse plus de {bound} : duplique-les par \
+         morceaux, une sous-page à la fois"
+    ))
+}
+
+/// Ajoute au poids `total` d'une copie les `doc` octets d'un document de plus ; refuse dès que
+/// le poids dépasse `max` (un poids égal à la borne passe).
+fn weigh(total: &mut usize, doc: usize, max: usize) -> Result<(), ApiError> {
+    *total = total.saturating_add(doc);
+    if *total > max {
+        return Err(too_heavy(max));
+    }
+    Ok(())
 }
 
 impl AppState {
@@ -287,6 +318,7 @@ pub(crate) async fn duplicate(
 
     // Page par page : lire, puis bâtir, sans garder les blocs d'une page pendant la suivante.
     let mut built = Vec::with_capacity(sources.len());
+    let mut weight = 0;
     for source in &sources {
         let blocks = match state.hub.read_blocks(source.id).await {
             Ok(blocks) => blocks,
@@ -314,6 +346,8 @@ pub(crate) async fn duplicate(
             .run(user.id, move || copied_doc(blocks, from, to, &files))
             .await?
             .map_err(SyncError::Crdt)?;
+        // Ruling R592 : refusée dès que le poids passe la borne, sans lire les pages suivantes.
+        weigh(&mut weight, doc.len(), state.max_duplicated_bytes)?;
         built.push(Built {
             source: from,
             id: to,
@@ -873,6 +907,38 @@ mod tests {
         ] {
             assert_eq!(file_of(&other, page), None, "{other}");
         }
+    }
+
+    /// La borne de poids, à la borne : un poids égal passe, un octet de plus est refusé (`422
+    /// subtree_too_large`, qui dit la borne et quoi faire) ; le poids s'ajoute d'un document à
+    /// l'autre, sans déborder.
+    #[tokio::test]
+    async fn weight_is_refused_one_byte_past_the_bound() {
+        let mut total = 0;
+        assert!(weigh(&mut total, 60, 100).is_ok());
+        assert!(weigh(&mut total, 40, 100).is_ok());
+        assert_eq!(total, 100);
+        let refused = weigh(&mut total, 1, 100).expect_err("un octet de trop");
+        let mut huge = usize::MAX;
+        assert!(weigh(&mut huge, 5, 100).is_err());
+        let response = axum::response::IntoResponse::into_response(refused);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(error_of(&body), "subtree_too_large");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["message"].as_str().unwrap();
+        assert!(message.contains("plus de 100 octets"), "{message}");
+        assert!(message.contains("duplique-les par morceaux"), "{message}");
+        // La borne livrée se dit en mébioctets.
+        let response = axum::response::IntoResponse::into_response(too_heavy(MAX_DUPLICATED_BYTES));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let message = body["message"].as_str().unwrap();
+        assert!(message.contains("plus de 64 Mio"), "{message}");
     }
 
     /// Le titre d'une copie : suivi de « (copie) », coupé au caractère, jamais au milieu d'un

@@ -101,8 +101,7 @@ impl Store {
     /// Dans la transaction, avant d'écrire (Ruling R590), au nom de `created_by` :
     /// - `NotFound` si l'espace n'existe pas, si la page copiée ou la page parente visée n'en
     ///   est pas une page, si `after` n'est pas un frère à l'endroit visé (la page copiée a
-    ///   changé de parent), si le compte n'existe pas, ou si une attache nomme un contenu sans
-    ///   ligne `files` ;
+    ///   changé de parent), ou si une attache nomme un contenu sans ligne `files` ;
     /// - `Stale` si ce sur quoi l'appelant a décidé ne tient plus : il n'a plus de rôle dans
     ///   l'espace, ne lit plus la page copiée, elle est à la corbeille (elle-même ou par une page
     ///   parente), il ne peut plus créer sous la page parente visée (son niveau, ou la

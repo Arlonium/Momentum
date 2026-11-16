@@ -22,6 +22,7 @@
 //! | `POST …/trash`, `POST …/restore` | `Trash`, `Restore` |
 //! | `DELETE /api/v1/pages/{id}` | `Delete`, et que la page soit à la corbeille |
 //! | `PUT …/mmd` | `Edit` |
+//! | `POST …/duplicate` | `Read`, hors corbeille, et un endroit où poser la copie (`routes/duplicate.rs`) |
 //!
 //! **Positions** (Rulings R13 et R23). Le store place un nœud `after: None` en tête de ses
 //! frères ; les routes :

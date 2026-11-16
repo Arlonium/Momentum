@@ -12,12 +12,13 @@
 //! | taille la plus grande d'un fichier envoyé, en Mio (de 1 à 4 096) | `MEMENTUM_MAX_FILE_MB` | `--max-file-mb` | `100` |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
-//! l'emporte sur le défaut. Trois derniers réglages n'ont ni variable ni
+//! l'emporte sur le défaut. Quatre derniers réglages n'ont ni variable ni
 //! option : l'intervalle des pings du canal de l'espace
 //! ([`Config::events_ping`]) et le délai d'un envoi de fichier qui stagne
 //! ([`Config::upload_idle`]), que seuls les tests raccourcissent, et les
-//! réglages d'ouverture de la base ([`Config::store`]), que seuls les tests
-//! changent.
+//! réglages d'ouverture de la base ([`Config::store`]) et le poids le plus
+//! grand d'une copie de pages ([`Config::max_duplicated_bytes`]), que seuls
+//! les tests changent.
 //!
 //! Le serveur n'écoute jamais par défaut sur une autre interface que la
 //! boucle locale, et les inscriptions sont par défaut sur invitation (Ruling
@@ -117,6 +118,11 @@ pub struct Config {
     /// disque lent simulé), les défauts du store par défaut. Ni variable ni option : seuls les
     /// tests les changent.
     pub store: StoreOptions,
+    /// Octets au plus, tous documents confondus, d'une page dupliquée avec ses sous-pages
+    /// (Ruling R592) : [`MAX_DUPLICATED_BYTES`](crate::MAX_DUPLICATED_BYTES) par défaut. Ni
+    /// variable ni option : seuls les tests l'abaissent, pour ne pas bâtir des dizaines de
+    /// mégaoctets de pages.
+    pub max_duplicated_bytes: usize,
 }
 
 impl Default for Config {
@@ -131,6 +137,7 @@ impl Default for Config {
             max_file_bytes: DEFAULT_MAX_FILE_MB << 20,
             upload_idle: UPLOAD_IDLE,
             store: StoreOptions::default(),
+            max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
         }
     }
 }
@@ -232,6 +239,7 @@ impl Config {
             max_file_bytes: max_file_mb << 20,
             upload_idle: UPLOAD_IDLE,
             store: StoreOptions::default(),
+            max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
         })
     }
 

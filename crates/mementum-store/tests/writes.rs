@@ -541,3 +541,96 @@ async fn copies_wait_in_the_lane_of_their_account() {
     assert_eq!(order.len(), COPIES + 1, "{order:?}");
     assert_eq!(order[0], "envoi", "{order:?}");
 }
+
+/// La copie d'un sous-arbre de pages s'écrit dans la voie de son compte, comme une création de
+/// page, jamais dans celle du dépôt, bien qu'elle écrive des attaches (Rulings R522, R591) : elle
+/// ne se fait pas sous le verrou du dépôt, et dans sa voie, qui passe en priorité, les copies d'un
+/// compte passeraient devant toutes les autres voies, et devant les attaches des envois. Tom a dix
+/// copies en file quand une attache arrive : elle passe la première. Dans la voie du dépôt, elle
+/// attendrait les dix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn page_copies_wait_in_the_lane_of_their_account() {
+    use mementum_acl::{Grant, Level, Role, Subject};
+    use mementum_store::{CopiedPage, NewCopy, NewNode, Sibling};
+
+    const COPIES: usize = 10;
+    let f = fresh().await;
+    let tom = f.store.create_user(new_user("tom")).await.unwrap().id;
+    f.store
+        .add_member(f.space.id, tom, Role::Member)
+        .await
+        .unwrap();
+    let full = Grant {
+        subject: Subject::Members,
+        level: Level::Full,
+    };
+    let source = f
+        .store
+        .create_node(NewNode {
+            grants: vec![full],
+            ..page(&f.space, None, None, "Source")
+        })
+        .await
+        .unwrap()
+        .id;
+    exec_sql(
+        &f.db,
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_attachment AFTER INSERT ON attachments \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.name); END; \
+         CREATE TRIGGER witness_node AFTER INSERT ON nodes \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.title); END;",
+    )
+    .await;
+    let held = f.store.hold_writes().await;
+    let mut copies = Vec::new();
+    for i in 0..COPIES {
+        let store = f.store.clone();
+        let copy = NewCopy {
+            space_id: f.space.id,
+            source,
+            parent_id: None,
+            after: Some(Sibling::Last),
+            grants: Vec::new(),
+            created_by: tom,
+            pages: vec![CopiedPage {
+                id: Uuid::now_v7(),
+                parent: None,
+                title: "copie".to_string(),
+                position: None,
+                doc: vec![0],
+                attachments: Vec::new(),
+            }],
+        };
+        copies.push(tokio::spawn(writes_by(Some(tom), async move {
+            store.duplicate_pages(&copy, 1).await
+        })));
+        queued(&f.store, i + 1).await;
+    }
+    let attach = tokio::spawn(writes_by(Some(tom), {
+        let store = f.store.clone();
+        let new = mementum_store::NewAttachment {
+            id: Uuid::now_v7(),
+            node_id: source,
+            hash: [2; 32],
+            size: 1,
+            mime: "text/plain",
+            name: "envoi",
+            created_by: tom,
+        };
+        async move { store.attach_file(new, 1).await }
+    }));
+    queued(&f.store, COPIES + 1).await;
+    drop(held);
+    attach.await.unwrap().unwrap();
+    for copy in copies {
+        copy.await.unwrap().unwrap();
+    }
+    let order: Vec<String> = texts(&f.db, "SELECT what FROM witness ORDER BY n")
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(order.len(), COPIES + 1, "{order:?}");
+    assert_eq!(order[0], "envoi", "{order:?}");
+}

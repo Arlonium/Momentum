@@ -29,6 +29,7 @@
 //! | `PATCH /api/v1/pages/{id}` | titre, place sous le même parent : `edit` ; autre parent : `full`, et `edit` sur le nouveau parent (racine : `member`) | [`PageNode`] ; seule route qui lit son corps entre le `404` et le `403` : `422 invalid_json` et `title_too_long` passent avant tout refus de niveau, `422 invalid_parent` avant celui du déplacement, `invalid_after` après lui ; `409 trashed` pour une page à la corbeille, ou sous un nouveau parent à la corbeille ; `409 cycle` ; `409 page_moved` si la page a changé de place, ou ce qu'on peut en faire, à chacune des quatre tentatives : rien n'est écrit (Ruling R91). À la racine, la page garde son accès général et qui la déplace y a `full` (Rulings R82 et R94) |
 //! | `POST /api/v1/pages/{id}/trash` | `edit` | [`PageNode`] : la page et son sous-arbre sont à la corbeille ; `409 trashed` si elle y est déjà, elle-même ou par une page parente |
 //! | `POST /api/v1/pages/{id}/restore` | `edit` | [`PageNode`] : la page et son sous-arbre reviennent (sans effet hors corbeille) ; `409 parent_trashed` si une page parente y est |
+//! | `POST /api/v1/pages/{id}/duplicate` | `read`, hors corbeille ; et un endroit où poser la copie : `CreateChild` sur la page parente, sinon être membre de l'espace | `201`, [`PageNode`] : la racine de la copie de la page et de ses sous-pages que le compte voit, hors corbeille (Ruling R252). Contenus récrits dans des documents neufs, **sans aucun identifiant de bloc repris** ; fichiers que les blocs montrent attachés de nouveau à la copie, adresses récrites ; titre suivi de « (copie) » ; ni commentaires, ni versions, ni favoris, ni accès nommés. La copie va sous la page parente, juste après la page, sans accès propre, si le compte voit la page parente et peut y créer ; sinon, pour un membre, à la racine, en dernier, dans son « Privé » (`(user:<lui>, full)`) ; sinon `403 forbidden`. Puis `409 trashed` ; `422 subtree_too_large` au-delà de 100 pages, ou de 64 Mio de documents (Ruling R592). Les droits sont relus juste avant d'écrire, une fois les documents bâtis (Ruling R89), puis dans la transaction qui écrit (Ruling R590) : si la page ou la destination bouge pendant qu'elle attend son tour, la route redécide, trois fois au plus, puis `409 page_moved` |
 //! | `DELETE /api/v1/pages/{id}` | `full` | `204` : la page et son sous-arbre sont supprimés pour de bon, avec leurs attaches de fichiers ; puis, avant la réponse, le ménage retire du disque les contenus que plus aucune page n'attache, et eux seuls (Rulings R245, R557 ; une erreur du ménage est journalisée, sans changer la réponse) ; `409 not_trashed` si ni elle ni une page parente n'est à la corbeille (Ruling R65) |
 //! | `PUT`, `DELETE /api/v1/pages/{id}/favorite` | `read` (à la corbeille aussi) | `204` : la page devient, ou n'est plus, un favori du compte ; déjà dans cet état : `204`, rien n'est écrit ; un favori n'avance ni `spaces.rev` ni `spaces.lsn`, et rien n'est annoncé sur le canal de l'espace (Ruling R254) |
 //! | `GET /api/v1/pages/{id}/mmd` | `read` | `text/markdown; charset=utf-8` |
@@ -135,6 +136,15 @@
 //! qu'il ne voit plus, et rien n'y dit qu'elle existe encore. Poser ou retirer un favori
 //! n'avance ni `spaces.rev` ni `spaces.lsn` : il ne change ni les droits ni la barre latérale
 //! des autres, et le canal de l'espace n'en dit rien.
+//!
+//! **Dupliquer une page** (`routes/duplicate.rs`, Rulings R252, R590 à R599). La copie prend la
+//! page et ses sous-pages que la personne voit, hors corbeille : des pages neuves, écrites avec
+//! leurs documents en une transaction, comme `POST /api/v1/pages`, sans passer par un acteur ;
+//! aucun identifiant de bloc n'est repris, et les fichiers que les blocs montrent sont attachés
+//! de nouveau à la copie, sans jamais créer de ligne de contenu (Ruling R579). Elle va sous la
+//! page parente si la personne peut y créer, sinon dans le « Privé » d'un membre. Les droits sont
+//! relus juste avant d'écrire, une fois les documents bâtis, puis dans la transaction, qui
+//! attend son tour derrière les écritures en file du compte.
 //!
 //! **Fichiers** (`files.rs`, `routes/files.rs`, Rulings R244 à R247, R390 à R399). Un fichier
 //! appartient à la page où il a été envoyé : son adresse la nomme, et chaque lecture est jugée sur
@@ -263,7 +273,7 @@ pub use events::EVENTS_PING;
 // La copie d'avant migration, que `set_password` signale à qui l'appelle.
 pub use mementum_store::Backup;
 pub use page_writes::{MAX_ACCOUNT_WRITES, MAX_PAGE_WRITES};
-pub use routes::duplicate::MAX_DUPLICATED_PAGES;
+pub use routes::duplicate::{MAX_DUPLICATED_BYTES, MAX_DUPLICATED_PAGES};
 pub use routes::pages::{MAX_MMD_BLOCKS, MAX_TITLE_CHARS, MMD_WRITE_BUDGET, UNTITLED};
 pub use types::{Info, Me, PageNode, SignupMode, Tree};
 
@@ -318,6 +328,9 @@ pub(crate) struct AppState {
     /// La lecture d'un MMD reçu et l'estimation de son écriture, hors des fils du serveur,
     /// quatre de front (`mmd_reads.rs`, Ruling R383).
     mmd_reads: Arc<mmd_reads::MmdReads>,
+    /// Octets au plus, tous documents confondus, d'une copie de pages (`routes/duplicate.rs`,
+    /// Ruling R592).
+    max_duplicated_bytes: usize,
 }
 
 /// Millisecondes Unix.
@@ -500,6 +513,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
         max_file_bytes: cfg.max_file_bytes,
         upload_idle: cfg.upload_idle,
         mmd_reads: Arc::default(),
+        max_duplicated_bytes: cfg.max_duplicated_bytes,
     };
     Ok((router(state), store, hub))
 }

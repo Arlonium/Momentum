@@ -878,3 +878,59 @@ async fn long_title_is_cut_to_fit() {
     let short = team.page(None, "Court", &[members(Level::Full)]).await;
     assert_eq!(duplicated(&team.mona, short).await.title, "Court (copie)");
 }
+
+/// Une copie dont les documents pèsent plus que la borne de l'instance est refusée (`422
+/// subtree_too_large`, Ruling R592), et rien n'est écrit. La borne est ici celle d'une instance
+/// de test : la moitié de ce que pèse la copie des mêmes pages sur une instance ordinaire, qui,
+/// elle, la fait (témoin).
+#[tokio::test]
+async fn subtree_heavier_than_the_bound_is_refused() {
+    let content = (0..50)
+        .map(|i| format!("Paragraphe {i}, pour peser un peu.\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let build = async |team: &Team<'_>| {
+        let root = team.page(None, "Lourde", &[members(Level::Full)]).await;
+        let child = page_after(team, Some(root), None, "Sous-page").await;
+        for page in [root, child] {
+            team.mona
+                .put_mmd(&page.to_string(), content.clone())
+                .await
+                .assert_status(StatusCode::NO_CONTENT);
+        }
+        root
+    };
+    let weight = "SELECT SUM(LENGTH(state_blob)) FROM doc_snapshots";
+
+    // Témoin : sur une instance ordinaire, la copie se fait ; elle pèse `copied` octets.
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let root = build(&team).await;
+    let before = query_i64(&t.db_path(), weight).await;
+    duplicated(&team.mona, root).await;
+    let copied = query_i64(&t.db_path(), weight).await - before;
+    assert!(
+        copied > 4_000,
+        "deux documents de cinquante paragraphes : {copied}"
+    );
+
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        cfg.max_duplicated_bytes = (copied / 2) as usize;
+    })
+    .await;
+    let team = Team::new(&t).await;
+    let root = build(&team).await;
+    let written = async || (nodes(&t).await, query_i64(&t.db_path(), weight).await);
+    let before = written().await;
+    let refusal = duplicate(&team.mona.browser, root)
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "subtree_too_large");
+    let message = refusal["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("plus de {} octets", copied / 2)),
+        "{message}"
+    );
+    assert!(message.contains("duplique-les par morceaux"), "{message}");
+    assert_eq!(written().await, before, "rien d'écrit");
+}
