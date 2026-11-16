@@ -840,7 +840,7 @@ mod known_limits {
         )
         .unwrap();
         assert_eq!(alignment(&alone), str_of("center"), "la valeur neuve seule");
-        let entry = yrs::merge_updates_v1(&[
+        let entry = yrs::merge_updates_v1([
             overwrite.as_slice(),
             hand_made(Some((4242, 1, Place::Root, Item::Text("x"))), &[]).as_slice(),
         ])
