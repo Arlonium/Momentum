@@ -59,16 +59,40 @@ pub(crate) fn href_safe(href: &str) -> bool {
 }
 
 /// Vrai si `$latex$` se relit exactement en cette formule ; sinon (formule
-/// vide, blanc en bord, `$`, accolades déséquilibrées, saut de ligne…) elle
-/// s'écrit `<math latex="…"/>`. Le contexte n'y change rien : les accolades
-/// et les `$` du texte voisin sont échappés.
+/// vide, blanc en bord, `$` non échappé, accolades déséquilibrées, saut de
+/// ligne…) elle s'écrit `<math latex="…"/>`. Le contexte n'y change rien : les
+/// accolades et les `$` du texte voisin sont échappés.
+///
+/// Un `$` non échappé fait toujours la balise (§6.2), même quand pulldown-cmark
+/// relirait `$…$` : entre accolades, il ne ferme pas la formule
+/// (`$\text{$x$}$`), mais le repérage des listes `{…}` et des cellules de la
+/// ligne (`attrs::marks`) arrête la formule au premier `$` non échappé, et y
+/// voyait ensuite une accolade ou un `|` du texte (Ruling R658).
 pub(crate) fn math_fits(latex: &str) -> bool {
     !latex.is_empty()
         && !latex.contains(['\n', '\r'])
+        && !has_unescaped_dollar(latex)
         && matches!(
             parse_inline(&format!("${latex}$")).as_deref(),
             Ok([Inline::Math { latex: read }]) if read == latex
         )
+}
+
+/// Vrai si `latex` porte un `$` qui n'est pas précédé d'une barre oblique
+/// d'échappement : le parcours de `attrs::marks` (une barre saute le caractère
+/// qui la suit).
+fn has_unescaped_dollar(latex: &str) -> bool {
+    let mut chars = latex.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '$' => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 fn bounded_alnum(s: &str) -> bool {

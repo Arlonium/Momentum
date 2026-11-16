@@ -650,3 +650,55 @@ fn tag_mark_order() {
         "[**a**](x)\n",
     );
 }
+
+/// Task X2 (R658) : une formule qui porte un `$` non échappé s'écrit en balise, comme le dit le
+/// §6.2, même quand pulldown-cmark relirait `$…$` (un `$` entre accolades ne ferme pas la
+/// formule : `\text{$x$}`, la formule dans le texte d'une formule). Le MMD qui l'écrivait en
+/// `$…$` n'était pas relu par `parse` dès que la formule intérieure portait une accolade ou un
+/// `|` (la ligne y voyait une liste `{…}` ou une cellule) : `GET /mmd` rendait un texte que
+/// `PUT /mmd` refusait. Un `$` échappé (`\$5`) reste dans `$…$`.
+#[test]
+fn a_formula_with_an_unescaped_dollar_is_a_tag() {
+    let math = |latex: &str| Inline::Math {
+        latex: latex.into(),
+    };
+    same(
+        vec![para(vec![
+            math("\\text{aire $x^{2}$}"),
+            text(" et "),
+            math("\\text{$x$}"),
+        ])],
+        "<math latex=\"\\text{aire $x^{2}$}\"/> et <math latex=\"\\text{$x$}\"/>\n",
+    );
+    same(
+        vec![para(vec![
+            text("a"),
+            math("\\text{$\\text{$x$}$}"),
+            text("b "),
+            math("\\\\$"),
+        ])],
+        "a<math latex=\"\\text{$\\text{$x$}$}\"/>b <math latex=\"\\\\$\"/>\n",
+    );
+    same(
+        vec![blk(
+            "table",
+            Props::new(),
+            Content::Table(Table {
+                header_rows: 1,
+                header_cols: 0,
+                column_widths: vec![None],
+                rows: vec![vec![Cell {
+                    content: vec![math("\\text{$a|b$}")],
+                    props: Props::new(),
+                }]],
+            }),
+            vec![],
+        )],
+        "| <math latex=\"\\text{$a|b$}\"/> |\n| --- |\n",
+    );
+    // Témoin : sans `$` non échappé, la forme reste `$…$`.
+    same(
+        vec![para(vec![math("\\$5 + \\text{a}"), text(" "), math("{x}")])],
+        "$\\$5 + \\text{a}$ ${x}$\n",
+    );
+}

@@ -44,6 +44,9 @@ fn other_non_canonical_forms_are_rejected() {
     rejected("Texte\r\n", 1, "LF");
     // Formule sûre écrite en balise : la forme canonique est `$…$` (R8).
     rejected("<math latex=\"x\"/> y\n", 1, "$x$ y");
+    // Formule à `$` non échappé écrite en `$…$` : la forme canonique est la balise (R658),
+    // même quand pulldown-cmark la relit en une seule formule.
+    rejected("$\\text{$x$}$ y\n", 1, "<math latex=\"\\text{$x$}\"/> y");
 }
 
 /// `n` toggles imbriqués, le plus profond vide : `n` niveaux.

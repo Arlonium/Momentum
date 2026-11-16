@@ -431,7 +431,8 @@ fn href() -> BoxedStrategy<String> {
 
 /// LaTeX en ligne : surtout des formules sûres en `$…$`, et des formules qui
 /// imposent `<math latex="…"/>` (vide, blanc en bord, accolade seule, saut
-/// de ligne, `$`, `$$`, backtick, barre oblique finale).
+/// de ligne, `$`, `$$`, backtick, barre oblique finale, `$` entre accolades,
+/// R658).
 fn latex() -> BoxedStrategy<String> {
     prop_oneof![
         3 => prop::collection::vec(
@@ -454,6 +455,7 @@ fn latex() -> BoxedStrategy<String> {
         .prop_map(|parts| parts.join(" ")),
         1 => select(&[
             "", " x", "x ", "{", "}", "x\ny", "$", "$$", "a$$b", "a$b", "`", "a\\", "x}{",
+            "\\text{$x$}", "\\text{aire $x^{2}$}", "\\text{$a|b$}",
         ]),
     ]
     .boxed()
