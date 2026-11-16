@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use linear::{Form, grows_like_input};
+use linear::{Answer, Form, Limits, grows_like_input};
 use mementum_crdt::{FRAGMENT, PageDoc};
-use mementum_md::{MAX_COLOR_BYTES, RenderOpts, render};
+use mementum_md::{MAX_COLOR_BYTES, MAX_HREF_BYTES, RenderOpts, render};
 use yrs::types::{Attrs, Delta};
 use yrs::{
     Any, Doc, ReadTxn, Text, Transact, Xml, XmlElementPrelim, XmlElementRef, XmlFragment,
@@ -40,16 +40,20 @@ fn mark(key: &str, value: &str) -> Any {
     )])))
 }
 
-/// Un paragraphe de `runs` plages d'une lettre, en italique une sur deux, toutes sous la marque
-/// `name` (`textColor`, `link`…) de valeur `value`, que le document ne porte qu'une fois : le
-/// texte est écrit d'un tenant sous la marque, puis l'italique posé en une passe (`apply_delta`).
-/// Écrire plage par plage reparcourrait le texte à chaque plage, et répéterait la marque.
-fn alternating_runs(runs: usize, name: &str, key: &str, value: &str) -> PageDoc {
-    let mut marked = Attrs::new();
-    marked.insert(name.into(), mark(key, value));
-    let italic = || {
+/// Un bloc de la page fait d'un élément `tag` (`paragraph`, ou une balise inconnue : un nœud
+/// étranger) dont le texte compte `runs` lettres, toutes sous les marques `marked`, que le document
+/// ne porte qu'une fois, et la marque `toggled` une lettre sur deux.
+///
+/// Écrit en temps linéaire : chaque lettre est un élément à elle (insérée en tête, de la dernière à
+/// la première : yrs ne les fond pas), les marques communes sont posées sur tout le texte d'un coup,
+/// puis l'autre en une passe (`apply_delta`). Un texte écrit d'un tenant, puis marqué une lettre
+/// sur deux, faisait couper à yrs l'élément à chaque lettre, en recopiant la suite (1,7 s pour
+/// 80 000 lettres, en release) ; écrire plage par plage reparcourrait le texte à chaque plage, et
+/// répéterait les marques.
+fn marked_runs(tag: &str, runs: usize, marked: Attrs, toggled: &str) -> PageDoc {
+    let toggle = || {
         let mut attrs = Attrs::new();
-        attrs.insert("italic".into(), Any::Map(Arc::new(HashMap::new())));
+        attrs.insert(toggled.into(), Any::Map(Arc::new(HashMap::new())));
         Some(Box::new(attrs))
     };
     page_from(|doc| {
@@ -58,18 +62,25 @@ fn alternating_runs(runs: usize, name: &str, key: &str, value: &str) -> PageDoc 
         let group = fragment.insert(&mut txn, 0, XmlElementPrelim::empty("blockGroup"));
         let container = group.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
         container.insert_attribute(&mut txn, "id", "bloc");
-        let paragraph = container.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
-        let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
-        let letters = "ab".repeat(runs / 2) + if runs % 2 == 1 { "a" } else { "" };
-        text.apply_delta(
-            &mut txn,
-            [Delta::Inserted(Any::from(letters), Some(Box::new(marked)))],
-        );
+        let element = container.push_back(&mut txn, XmlElementPrelim::empty(tag));
+        let text = element.push_back(&mut txn, XmlTextPrelim::new(""));
+        for i in (0..runs).rev() {
+            text.insert(&mut txn, 0, if i % 2 == 0 { "a" } else { "b" });
+        }
+        text.format(&mut txn, 0, runs as u32, marked);
         let formats: Vec<Delta<Any>> = (0..runs)
-            .map(|i| Delta::Retain(1, if i % 2 == 1 { italic() } else { None }))
+            .map(|i| Delta::Retain(1, if i % 2 == 1 { toggle() } else { None }))
             .collect();
         text.apply_delta(&mut txn, formats);
     })
+}
+
+/// Un paragraphe de `runs` plages d'une lettre, en italique une sur deux, toutes sous la marque
+/// `name` (`textColor`, `link`…) de valeur `value`.
+fn alternating_runs(runs: usize, name: &str, key: &str, value: &str) -> PageDoc {
+    let mut marked = Attrs::new();
+    marked.insert(name.into(), mark(key, value));
+    marked_runs("paragraph", runs, marked, "italic")
 }
 
 fn size(page: &PageDoc) -> usize {
@@ -80,6 +91,14 @@ fn size(page: &PageDoc) -> usize {
 fn read(page: &PageDoc) -> String {
     render(&page.read_blocks(), RenderOpts::default()).markdown
 }
+
+/// Les bornes absolues de la lecture d'une page (Ruling R433), par octet de son état Yjs : 64
+/// octets de pic (au plus 22 relevés, pour un nœud étranger), et un MMD de 8 octets (au plus 2,7,
+/// pour des plages alternées sous une couleur de 100 octets, que le MMD récrit à chaque plage).
+const LIMITS: Limits = Limits {
+    peak_per_byte: 64,
+    answer: Answer::PerByte(8),
+};
 
 /// Ruling R381 : une couleur ou une adresse de lien longue, sur des plages alternées, était
 /// recopiée à chaque plage lue (et le MMD la récrivait à chaque plage) : le produit de sa
@@ -92,6 +111,10 @@ fn reading_a_page_grows_like_its_document() {
     let allowed_color =
         |n: usize| alternating_runs(n, "textColor", "stringValue", &"c".repeat(MAX_COLOR_BYTES));
     let long_link = |n: usize| alternating_runs(n, "link", "href", &"u".repeat(4 * n));
+    let allowed_link = |n: usize| alternating_runs(n, "link", "href", &"u".repeat(MAX_HREF_BYTES));
+    // Depuis le Ruling R431, une couleur de plus de 100 octets ou une adresse de plus de 16 Kio,
+    // relue du journal, est supprimée : les formes longues disent que cela garde la lecture
+    // linéaire ; celles à la borne, que la lecture d'une marque gardée l'est aussi.
     let forms = [
         Form {
             what: "couleur longue sur des plages alternées",
@@ -109,8 +132,61 @@ fn reading_a_page_grows_like_its_document() {
             what: "adresse de lien longue sur des plages alternées",
             build: &long_link,
         },
+        Form {
+            what: "adresse de lien à la borne sur des plages alternées",
+            build: &allowed_link,
+        },
     ];
-    let failures = grows_like_input(&forms, size, read);
+    let failures = grows_like_input(&forms, size, read, String::len, LIMITS);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Un paragraphe de `runs` lettres sous `keys` marques hors du schéma (`k0`, `k1`…), posées une
+/// fois sur tout le texte, le gras une lettre sur deux : la mise à jour qu'un client aurait pu
+/// écrire avant le Ruling R431, que la page relit de son journal.
+fn unknown_marks(keys: usize, runs: usize) -> PageDoc {
+    let mut attrs = Attrs::new();
+    for k in 0..keys {
+        attrs.insert(format!("k{k}").into(), Any::Bool(true));
+    }
+    marked_runs("paragraph", runs, attrs, "bold")
+}
+
+/// Un nœud étranger (balise inconnue dans un `blockContainer`) dont le texte de `runs` lettres
+/// porte la marque `name` de valeur `value` sur tout le texte, le gras une lettre sur deux.
+fn foreign_marked(runs: usize, name: &str, value: Any) -> PageDoc {
+    let mut marked = Attrs::new();
+    marked.insert(name.into(), value);
+    marked_runs("widget", runs, marked, "bold")
+}
+
+/// Constat critique C1 de la re-relecture du tour 4 (Rulings R431, R432) : des marques hors du
+/// schéma, nombreuses, sur des plages alternées, coûtaient leur nombre multiplié par celui des
+/// plages à chaque lecture (701 Ko envoyés, 5 Gio pour une lecture) ; dans un nœud étranger, une
+/// marque longue était récrite en JSON à chaque plage (188 Ko envoyés, 86 Mo de MMD). Relues du
+/// journal, les marques hors du schéma sont supprimées (R431) ; une marque du schéma n'est écrite
+/// dans le JSON d'un nœud étranger qu'à la plage où elle change (R432).
+#[test]
+fn reading_marks_grows_like_the_document() {
+    let unknown = |n: usize| unknown_marks(n, n);
+    let foreign_unknown = |n: usize| foreign_marked(n, "note", Any::from("n".repeat(4 * n)));
+    let foreign_link =
+        |n: usize| foreign_marked(n, "link", mark("href", &"u".repeat(MAX_HREF_BYTES)));
+    let forms = [
+        Form {
+            what: "marques hors du schéma, nombreuses, sur des plages alternées",
+            build: &unknown,
+        },
+        Form {
+            what: "nœud étranger, marque hors du schéma longue sur des plages alternées",
+            build: &foreign_unknown,
+        },
+        Form {
+            what: "nœud étranger, adresse à la borne sur des plages alternées",
+            build: &foreign_link,
+        },
+    ];
+    let failures = grows_like_input(&forms, size, read, String::len, LIMITS);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

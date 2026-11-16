@@ -5,7 +5,7 @@
 #[path = "common/linear.rs"]
 mod linear;
 
-use linear::{Form, grows_like_input};
+use linear::{Answer, Form, Limits, grows_like_input};
 use mementum_md::parse;
 
 /// Une forme : le MMD de taille `n`.
@@ -60,6 +60,25 @@ fn forms() -> Vec<(&'static str, Build)> {
                 "a*b*".repeat(n)
             )
         }),
+        // Constat critique de la re-relecture du tour 4 (C2) : 2 Mio de plages alternées sous
+        // deux couleurs permises, 1,2 Gio de pic, et un message d'erreur de 245 Mo.
+        (
+            "plages alternées sous une couleur et un surlignage permis",
+            |n| {
+                format!(
+                    "<span bg=\"{}\" color=\"{}\">{}</span>\n",
+                    "b".repeat(mementum_md::MAX_COLOR_BYTES),
+                    "c".repeat(mementum_md::MAX_COLOR_BYTES),
+                    "a*b*".repeat(n)
+                )
+            },
+        ),
+        // Non canonique : le message cite la ligne attendue.
+        ("plages soulignées et barrées", |n| {
+            "<u>a</u>~~b~~".repeat(n) + "\n"
+        }),
+        // La forme la plus lourde par octet d'entrée relevée à la re-relecture du tour 4.
+        ("titres", |n| "## a\n\n".repeat(n)),
         ("liens ouverts au-delà de la profondeur", |n| {
             format!("{}a{}\n", "<a href=\"u\">".repeat(n), "</a>".repeat(n))
         }),
@@ -95,6 +114,15 @@ fn forms() -> Vec<(&'static str, Build)> {
     ]
 }
 
+/// Les bornes absolues d'une lecture (Ruling R433) : 256 octets de pic par octet d'entrée (au
+/// plus 173 relevés, pour des colonnes imbriquées ; 606 pour les plages sous deux couleurs avant
+/// le Ruling R434), et un message d'erreur de 512 octets au plus (400 caractères au plus, dont des
+/// extraits de 60 ; 15 Mo pour les mêmes plages avant).
+const LIMITS: Limits = Limits {
+    peak_per_byte: 256,
+    answer: Answer::Absolute(512),
+};
+
 /// 99 éléments de liste imbriqués : le suivant, indenté de 99 niveaux, est au niveau 100.
 fn nested_bullets() -> String {
     (0..99).map(|depth| "  ".repeat(depth) + "- a\n").collect()
@@ -107,6 +135,12 @@ fn reading_grows_like_its_input() {
         .iter()
         .map(|(what, build)| Form { what, build })
         .collect();
-    let failures = grows_like_input(&forms, String::len, |mmd| parse(mmd));
+    let failures = grows_like_input(
+        &forms,
+        String::len,
+        |mmd| parse(mmd),
+        |read| read.as_ref().err().map_or(0, |e| e.message.len()),
+        LIMITS,
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
