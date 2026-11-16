@@ -1,7 +1,7 @@
 // Ce que les gestes de la partie B du lot 3 écrivent dans le document partagé, et ce que devient
 // une frappe faite au même instant par quelqu'un d'autre (plan de la partie B, « Global
 // Constraints », « Gestes de l'éditeur »). Toute tâche de la partie B qui ajoute un geste commence
-// ici, par le test qui le relit dans le document : insérer des blocs (C1a ; dupliquer, C5), changer
+// ici, par le test qui le relit dans le document : insérer des blocs (C1a ; dupliquer, C5, à la fin), changer
 // des props (C1a ; la formule d'une équation, C2 ; l'adresse d'un fichier, C8), changer le type
 // d'un bloc (C1a ; une image devenue fichier, un fichier déposé sur un paragraphe vide, C8), poser
 // un contenu en ligne (une formule, C2 ; une mention, C4). Chacune ajoute sa section, à la suite.
@@ -59,6 +59,7 @@ import {
   type Shown,
 } from "../test/editors";
 import { FRAGMENT } from "./collab";
+import { duplicateBlocks } from "./duplicate";
 
 /** Ce que Tom tape. */
 const TYPED = " de Tom";
@@ -834,4 +835,110 @@ describe("poser une mention", () => {
       },
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Dupliquer un bloc (C5)
+// ---------------------------------------------------------------------------
+
+// Ctrl+D et « Dupliquer » du menu de la poignée insèrent, après le bloc, sa copie sans aucun id
+// (`duplicateBlocks`, `duplicate.ts`) : BlockNote en tire de neufs, à chaque profondeur. La première
+// mesure joue le vrai geste. La seconde dit ce que porterait le document si la copie gardait les ids
+// de l'original, ce que `duplicateBlocks` ne doit jamais faire : la même chose avec ou sans le
+// correctif de la Task 13a, qui rend la main au code d'origine dès qu'un id se répète (R223).
+
+describe("dupliquer un bloc", () => {
+  test.each(PLAYS)("duplicating_touches_no_existing_element ($label)", async ({ order, first }) => {
+    const s = await scene(PARENTED, order);
+    const before = elementIds(s.server);
+    let ids: string[] = [];
+    const wrote = written(s.mona, () => {
+      ids = duplicateBlocks(s.mona.editor, ["x"]);
+    });
+    expect(ids, "une copie, de X").toHaveLength(1);
+    // Tom tape dans l'original (X, et son enfant X1) et dans le bloc d'après (Y).
+    typeAtEnd(s.tom, "x", TYPED);
+    typeAtEnd(s.tom, "x1", TYPED);
+    typeAtEnd(s.tom, "y", TYPED);
+    const [copy] = ids;
+    const child = s.mona.editor.getBlock(copy)?.children[0]?.id ?? "(aucun enfant)";
+    const copied = block(copy, "Bloc X", { children: [block(child, "Enfant X1")] });
+    requireLocallyDone(s, { mona: [X_AS_SEEDED, copied, Y_, Z], tom: [X_TYPED, Y_TYPED, Z] });
+
+    // Ce que le geste écrit : la copie et son enfant, des éléments neufs sous des ids neufs ; rien de
+    // supprimé, aucun id réattribué.
+    expect(wrote).toEqual({
+      deleted: [],
+      created: [
+        `blockContainer ${copy}`,
+        `paragraph de ${copy}`,
+        `blockGroup de ${copy}`,
+        `blockContainer ${child}`,
+        `paragraph de ${child}`,
+      ],
+      renamed: {},
+    });
+    expect(counts(pending(s.mona))).toMatchObject({ made: { "<blockContainer>": 2, "@id": 2 }, deleted: 0 });
+
+    await send(s, first);
+    // Rien de perdu : la frappe de Tom est dans l'original, pas dans la copie, qui porte ce que Mona
+    // a copié ; les trois documents sont égaux.
+    expectEverywhere(s, [X_TYPED, copied, Y_TYPED, Z]);
+    for (const [where, doc] of docs(s)) {
+      // Aucun bloc qui existait ne change d'élément ; la copie et son enfant, une fois chacun.
+      expect(changedElements(doc, before), where).toEqual([]);
+      expect(newIds(doc, before), where).toEqual([copy, child].sort());
+      expect([...elementIds(doc).values()].filter((v) => v.includes(" ; ")), where).toEqual([]);
+    }
+  });
+
+  test.each(ORDERS)("a_copy_that_kept_its_id_is_not_a_copy ($label)", async (order) => {
+    const s = await scene(PARENTED, order);
+    // La copie de X, son enfant compris, insérée après X avec les ids de l'original.
+    const wrote = written(s.mona, () =>
+      s.mona.editor.insertBlocks(
+        [
+          {
+            id: "x",
+            type: "paragraph",
+            content: "Bloc X",
+            children: [{ id: "x1", type: "paragraph", content: "Enfant X1" }],
+          },
+        ],
+        "x",
+        "after",
+      ),
+    );
+    // Rien n'est supprimé ni renommé : le document de Mona porte deux conteneurs x, et deux x1.
+    expect(wrote).toEqual({
+      deleted: [],
+      created: ["blockContainer x", "paragraph de x", "blockGroup de x", "blockContainer x1", "paragraph de x1"],
+      renamed: {},
+    });
+    expect(stored(s.mona.doc)).toEqual([X_AS_SEEDED, X_AS_SEEDED, Y_, Z]);
+    // Mona, qui l'a faite, voit deux X du même id.
+    expect(shown(s.mona)).toEqual([X_AS_SEEDED, X_AS_SEEDED, Y_, Z]);
+
+    await send(s, "mona");
+    // Partout, deux conteneurs de l'id x et deux de l'id x1 : le serveur de Mementum supprime le
+    // second de chaque, donc la copie (`dedupe_blocks`, `crates/mementum-crdt/src/dedupe.rs`). Le
+    // serveur du banc est un document sans dédoublonnage.
+    for (const [where, doc] of docs(s)) {
+      expect(stored(doc), where).toEqual([X_AS_SEEDED, X_AS_SEEDED, Y_, Z]);
+      expect(elementIds(doc).get("x")?.split(" ; "), where).toHaveLength(2);
+      expect(elementIds(doc).get("x1")?.split(" ; "), where).toHaveLength(2);
+    }
+    // Tom, qui la reçoit, montre les deux X sous des ids neufs, l'original compris, sans encore les
+    // écrire.
+    const seen = shown(s.tom);
+    expect(seen.map((b) => b.text)).toEqual(["Bloc X", "Bloc X", "Bloc Y", "Bloc Z"]);
+    expect(seen.slice(0, 2).map((b) => b.id)).not.toContain("x");
+    expect(s.tom.writes).toEqual([]);
+    // À sa première écriture (une frappe dans Y), Tom écrit ces ids neufs : l'original perd le sien,
+    // et ce qui le nommait (un fil de commentaires) s'en détache.
+    typeAtEnd(s.tom, "y", TYPED);
+    const rewritten = stored(s.tom.doc);
+    expect(rewritten.map((b) => b.id)).toEqual([...seen.slice(0, 2).map((b) => b.id), "y", "z"]);
+    expect(repeatedIds(rewritten)).toEqual([]);
+  });
 });

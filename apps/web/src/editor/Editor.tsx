@@ -2,12 +2,14 @@
 // de BlockNote 0.57, y-prosemirror 1.x). Chargé à la demande (`LazyEditor.tsx`), avec ses
 // styles.
 //
-// Le menu d'un bloc (sa poignée, à gauche) garde les entrées de BlockNote et gagne
-// « Commenter », qui ouvre le panneau des commentaires sur ce bloc ; au clavier, Ctrl+Alt+M
-// (Cmd+Option+M ; la lettre tapée, pas la position de la touche) commente le bloc où est le
-// curseur. Rien n'est écrit dans le document : le
-// commentaire part par l'API (R134). BlockNote ne montre pas la poignée d'un éditeur en
-// lecture seule : pour qui commente sans modifier, c'est la marge qui l'offre (`BlockMarks`).
+// Le menu d'un bloc (sa poignée, à gauche) est le nôtre : « Commenter » pour qui peut commenter, qui
+// ouvre le panneau des commentaires sur ce bloc, « Dupliquer », puis les entrées de BlockNote. Au
+// clavier (la lettre tapée, pas la position de la touche), Ctrl+Alt+M (Cmd+Option+M) commente le
+// bloc où est le curseur ; Ctrl+D (Cmd+D) duplique les blocs de la sélection, ou celui du curseur
+// (`duplicate.ts`, R253), le focus dans le texte d'un éditeur modifiable seulement : ailleurs, le
+// navigateur garde la touche. Commenter n'écrit rien dans le document : le commentaire part par
+// l'API (R134). BlockNote ne montre pas la poignée d'un éditeur en lecture seule : pour qui commente
+// sans modifier, c'est la marge qui l'offre (`BlockMarks`).
 //
 // Autour de la vue (`EditorView`) : le menu « / » et ses blocs riches (`slashItems.tsx`), la barre
 // de mise en forme (`Toolbar.tsx`), et la fenêtre de réglage d'un bloc riche, rendue hors du
@@ -66,6 +68,7 @@ import { focusMentionLink } from "../mentions/Mention";
 import { mentionMenuOpen, MentionMenus, type MentionContext } from "../mentions/MentionMenu";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
+import { duplicateBlocks, handleBlockIds, isDuplicateShortcut, selectedBlockIds } from "./duplicate";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
 import { linkBound } from "./linkBound";
@@ -247,14 +250,14 @@ export function EditorView({ editor, editable, onComment = null, mentions = null
   // « / » et « : » tapés dans un menu de mention ouvert (une date, un titre) lui appartiennent (R620).
   const noMentionMenu = useCallback(() => !mentionMenuOpen(editor), [editor]);
 
-  // Le menu de la poignée : celui de BlockNote, et « Commenter » pour qui peut commenter.
+  // Le menu de la poignée : le nôtre, « Commenter » pour qui peut commenter, et « Dupliquer ».
+  // BlockNote ne montre la poignée que d'un éditeur modifiable.
   const sideMenu = useMemo(() => {
-    if (onComment === null) return undefined;
-    function CommentingDragHandleMenu() {
-      return <BlockMenu onComment={onComment!} />;
+    function MementumDragHandleMenu() {
+      return <BlockMenu onComment={onComment} />;
     }
-    return function CommentingSideMenu(props: SideMenuProps) {
-      return <SideMenu {...props} dragHandleMenu={CommentingDragHandleMenu} />;
+    return function MementumSideMenu(props: SideMenuProps) {
+      return <SideMenu {...props} dragHandleMenu={MementumDragHandleMenu} />;
     };
   }, [onComment]);
 
@@ -262,8 +265,17 @@ export function EditorView({ editor, editable, onComment = null, mentions = null
    * Ctrl+Alt+M (Cmd+Option+M) : commenter le bloc où est le curseur. La lettre tapée fait foi,
    * et AltGr garde ses caractères (`isCommentShortcut`). Le bloc est lu dans la sélection du
    * document, que le navigateur pose dès le clic : celle de BlockNote peut la suivre d'un temps.
+   * Ctrl+D (Cmd+D) : dupliquer (`isDuplicateShortcut`) ; la touche n'est prise que le focus dans le
+   * texte d'un éditeur modifiable (pas dans un bouton ou un champ posé dans sa vue, R634).
    */
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (isDuplicateShortcut(event)) {
+      if (editor.isEditable && editor.isFocused()) {
+        event.preventDefault();
+        duplicateBlocks(editor, selectedBlockIds(editor));
+      }
+      return;
+    }
     // Ctrl+Alt+Entrée : régler la formule en ligne sélectionnée, ou le bloc riche où est le curseur
     // (`BlockWindowHost`) ; sur une table des matières ou un lien de page, aller à son premier lien
     // (`Toc.tsx`) ; sur une mention de page sélectionnée, à son lien (`mentions/Mention.tsx`).
@@ -296,7 +308,7 @@ export function EditorView({ editor, editable, onComment = null, mentions = null
         slashMenu={false}
         emojiPicker={false}
         formattingToolbar={false}
-        sideMenu={sideMenu === undefined}
+        sideMenu={false}
         onKeyDown={onKeyDown}
         {...attributes}
       >
@@ -308,7 +320,7 @@ export function EditorView({ editor, editable, onComment = null, mentions = null
         {/* Le sélecteur d'emoji de BlockNote, tel quel, sous la même règle. */}
         <EmojiPickerController triggerCharacter=":" shouldOpen={noMentionMenu} />
         <FormattingToolbarController formattingToolbar={MementumFormattingToolbar} />
-        {sideMenu && <SideMenuController sideMenu={sideMenu} />}
+        <SideMenuController sideMenu={sideMenu} />
         {mentions && <MentionMenus editor={editor} context={mentions} />}
       </BlockNoteView>
       <BlockWindowHost editor={editor} />
@@ -366,14 +378,16 @@ export function PreviewEditor({ doc }: { doc: Y.Doc }) {
 }
 
 /**
- * Le menu de la poignée d'un bloc : « Commenter », puis les entrées de BlockNote, dans son ordre
- * et avec ses libellés (supprimer, couleurs, en-têtes d'un tableau).
+ * Le menu de la poignée d'un bloc : « Commenter » (pour qui peut commenter), « Dupliquer », puis les
+ * entrées de BlockNote, dans son ordre et avec ses libellés (supprimer, couleurs, en-têtes d'un
+ * tableau).
  */
-function BlockMenu({ onComment }: { onComment: (blockId: string) => void }) {
+function BlockMenu({ onComment }: { onComment: ((blockId: string) => void) | null }) {
   const dictionary = useDictionary();
   return (
     <DragHandleMenu>
-      <CommentItem onComment={onComment} />
+      {onComment && <CommentItem onComment={onComment} />}
+      <DuplicateItem />
       <RemoveBlockItem>{dictionary.drag_handle.delete_menuitem}</RemoveBlockItem>
       <BlockColorsItem>{dictionary.drag_handle.colors_menuitem}</BlockColorsItem>
       <TableRowHeaderItem>{dictionary.drag_handle.header_row_menuitem}</TableRowHeaderItem>
@@ -382,14 +396,36 @@ function BlockMenu({ onComment }: { onComment: (blockId: string) => void }) {
   );
 }
 
+/** Le bloc dont la poignée a ouvert le menu (`undefined` : aucun). */
+function useHandleBlock() {
+  const editor = useBlockNoteEditor();
+  return useExtensionState(SideMenuExtension, { editor, selector: (state) => state?.block });
+}
+
+/**
+ * « Dupliquer » : les blocs de la sélection si elle contient celui de la poignée, sinon lui seul (la
+ * règle de « Supprimer » de BlockNote). Le curseur va dans la première copie ; BlockNote rend le
+ * focus à l'éditeur quand le menu se ferme (`unfreezeMenu`).
+ */
+function DuplicateItem() {
+  const Components = useComponentsContext()!;
+  const editor = useBlockNoteEditor() as unknown as MementumEditor;
+  const block = useHandleBlock();
+  if (block === undefined) return null;
+  return (
+    <Components.Generic.Menu.Item
+      className="bn-menu-item"
+      onClick={() => duplicateBlocks(editor, handleBlockIds(editor, block.id))}
+    >
+      Dupliquer
+    </Components.Generic.Menu.Item>
+  );
+}
+
 /** « Commenter » : le bloc dont la poignée a ouvert le menu. */
 function CommentItem({ onComment }: { onComment: (blockId: string) => void }) {
   const Components = useComponentsContext()!;
-  const editor = useBlockNoteEditor();
-  const block = useExtensionState(SideMenuExtension, {
-    editor,
-    selector: (state) => state?.block,
-  });
+  const block = useHandleBlock();
   if (block === undefined) return null;
   return (
     <Components.Generic.Menu.Item className="bn-menu-item" onClick={() => onComment(block.id)}>
