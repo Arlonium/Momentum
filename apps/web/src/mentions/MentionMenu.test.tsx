@@ -462,6 +462,30 @@ test("a_creation_that_fails_again_or_whose_account_never_returns_keeps_a_message
   expect(creates).toHaveBeenCalledTimes(3);
 });
 
+test("a_session_lost_again_at_the_second_try_is_said_without_reading_the_page_again", async () => {
+  await publish([]);
+  const back = deferred<void>();
+  const onRefused = vi.fn();
+  const m = await mount({ afterLogin: () => back.promise, onRefused });
+  creates.mockRejectedValue(unauthenticated());
+  await type(m, "[[Un");
+  await key(m, "Enter");
+  await flush();
+  await act(async () => back.resolve());
+  await flush();
+  // Une seule nouvelle demande ; le message nomme toujours le titre ; ce n'est pas un droit qui a
+  // changé : la page n'est pas relue.
+  expect(creates).toHaveBeenCalledTimes(2);
+  expect(alerts()).toEqual([createRefused("Un", "session absente ou échue : se connecter")]);
+  expect(onRefused).not.toHaveBeenCalled();
+  // Témoin : un refus du serveur, lui, fait relire la page.
+  creates.mockRejectedValue(new ApiError(403, "forbidden", "Non."));
+  await type(m, "[[Deux");
+  await key(m, "Enter");
+  await flush();
+  expect(onRefused).toHaveBeenCalledTimes(1);
+});
+
 test("escape_on_the_message_button_closes_it_and_gives_the_focus_back_to_the_text", async () => {
   await publish([]);
   const m = await mount();
