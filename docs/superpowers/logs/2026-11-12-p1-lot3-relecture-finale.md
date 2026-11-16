@@ -326,6 +326,18 @@ Le relecteur a re-relu le tour 6 (rapport `re-relecture-tour6.md`, sondes `sonde
 
 **Mise à niveau sur main** (au registre, « Mise à niveau sur main, après le tour 7 », R536) : la branche est rebasée sur `main` (Task 13b, S4a, compte attendu compris). Le report d'un bloc recréé de la 13b passe désormais les gardes de la piste S (marques, contenus sans type, listes lues en entier), et le test de propriétés « page rechargée = page vivante » mêle des reports. À éprouver aussi par la re-relecture : la composition de R491 (l'encodage de la transaction) avec le relevé des blocs recréés, fait avant l'intégration dans la même transaction.
 
+### Re-relecture du tour 7, et correctif E1 (2026-11-16)
+
+Le relecteur a re-relu le tour 7 sur l'état fusionné (rapport `re-relecture-tour7.md`, sonde `sondes/tour7/zz_probe_escaped.rs`). **Plus de critique : M1, M2 et la jointure avec la 13b sont levés.** Reste E1, important, au correctif court ; le relecteur propose de clore la piste S une fois E1 corrigé et vérifié par un test ciblé, sans nouvelle re-relecture entière. Au registre : « Constat E1 de la re-relecture du tour 7 » (R537 à R539).
+
+| Constat | Fait | Mesures |
+|---|---|---|
+| Important E1 : la garde mesurait une valeur de marque sur son JSON échappé, `parse` et l'éditeur sur la chaîne ; une marque acceptée par `PUT /mmd` disparaissait au rechargement | **fait**, R537 (`c33f905`, `84ccd69`) : la garde juge la chaîne désechappée, le JSON brut borné d'abord à six fois la borne plus la marge ; tests aux bornes, échappements compris, dans la garde, `parse` et l'éditeur ; la sonde devient un test | la sonde : lien et couleur présents après la relecture |
+| Mineur : un refus d'après l'application recharge la page à chaque envoi | **écrit**, R538 (`a38751f`) : limite connue, en test | trois rechargements pour trois envois |
+| Mineur : la relecture d'une entrée hostile d'avant le tour emporte la valeur neuve d'un attribut avec le contenu sans type | **écrit**, R539 (`a38751f`) : limite connue, en test | l'alignement relu absent |
+
+**Vérifications** : fmt et clippy propres ; `cargo test --workspace --no-fail-fast` : 1 019 verts, 20 ignorés, aucun échec ; typecheck du client propre ; Vitest : 2 120 verts et 41 échecs attendus. Mesures de `mementum-sync` en release, sans recul : frappe vue par un autre à 1,9 ms au p95 (4,8 ms pendant huit boucles d'écritures d'un lecteur), 36,8 ms avec la coupe d'une version ; chargements d'une page de 10 000 blocs à 78 et 79 ms au p95 ; récriture de 10 000 blocs, 0,69 s ; restauration, 0,77 à 0,89 s.
+
 ## Ce que la documentation doit dire (pour la Task 14)
 
 Pour les constats finis :
