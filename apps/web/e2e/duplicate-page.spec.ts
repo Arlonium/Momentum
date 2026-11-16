@@ -12,6 +12,7 @@ import {
   closeContexts,
   createPage,
   firstSpace,
+  getPage,
   getTree,
   guestOf,
   holdFirstResponse,
@@ -518,4 +519,78 @@ test("duplicate_is_offered_exactly_where_the_server_accepts_it", async ({ browse
   await stale.keyboard.press("Escape");
   const staleRow = await openRowMenu(stale, read.id, read.title);
   await expect(staleRow.getByRole("menuitem")).toHaveText(["Ajouter aux favoris"]);
+});
+
+/**
+ * Dépose `text` sur `target` comme depuis une autre application : un glisser que Chromium reçoit
+ * de l'extérieur (`Input.dispatchDragEvent`, par une session CDP), sans appui ni touche dans la page.
+ */
+async function dropFromAnotherApplication(p: Page, target: Locator, text: string): Promise<void> {
+  const box = (await target.boundingBox())!;
+  const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const cdp = await p.context().newCDPSession(p);
+  const data = { items: [{ mimeType: "text/plain", data: text }], dragOperationsMask: 1 };
+  for (const type of ["dragEnter", "dragOver", "drop"] as const) {
+    await cdp.send("Input.dispatchDragEvent", { type, ...at, data });
+  }
+  await cdp.detach();
+}
+
+test("a_title_dropped_from_another_application_during_the_copy_is_kept", async ({ browser }) => {
+  // Re-relecture, N1 : pendant la requête, un texte venu d'une autre application est déposé sur le
+  // titre de l'original. Ni appui ni touche : c'est le dépôt qui compte pour un geste (R646
+  // complété). La copie ne s'ouvre pas : le titre tapé n'est enregistré qu'à la sortie du champ, et
+  // l'ouverture le perdait (React n'appelle pas `onBlur` pour un élément qu'il retire, R339).
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const page = await createPage(aliceApi, {
+    spaceId: space.id,
+    section: "private",
+    title: `Titre ${unique()}`,
+  });
+  const a = await openPage(browser, page.id, alice);
+  const held = await holdFirstResponse(a, "POST", `/api/v1/pages/${page.id}/duplicate`);
+  await pageMenuButton(a).click();
+  await a.getByRole("menuitem", { name: "Dupliquer" }).click();
+  expect(await held.answered).toBe(201);
+  await dropFromAnotherApplication(a, titleOf(a), " déposé");
+  await expect(titleOf(a)).toHaveValue(/ déposé/);
+  held.release();
+  await expect(readyCopy(a, `${page.title} (copie)`, "dans « Privé »")).toBeVisible();
+  expect(pageIdOf(a)).toBe(page.id);
+  await expect(titleOf(a)).toHaveValue(/ déposé/);
+  // Le titre s'enregistre comme toujours, à la sortie du champ.
+  await titleOf(a).press("Enter");
+  await expect.poll(async () => (await getPage(aliceApi, page.id)).title).toContain("déposé");
+});
+
+test("a_comment_dropped_from_another_application_during_the_copy_is_kept", async ({ browser }) => {
+  // Re-relecture, N1 : le panneau des commentaires ouvert avant la demande, un texte venu d'une
+  // autre application est déposé dans « Commenter la page » pendant la requête. La copie ne
+  // s'ouvre pas, et le brouillon est là.
+  const alice = await signUpAccount(`Alice ${unique()}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const page = await createPage(aliceApi, {
+    spaceId: space.id,
+    section: "private",
+    title: `Commentaire ${unique()}`,
+  });
+  const a = await openPage(browser, page.id, alice);
+  await commentsButton(a).click();
+  const field = commentsPanel(a).getByRole("textbox", { name: "Commenter la page" });
+  await expect(field).toBeVisible();
+  const held = await holdFirstResponse(a, "POST", `/api/v1/pages/${page.id}/duplicate`);
+  await pageMenuButton(a).click();
+  await a.getByRole("menuitem", { name: "Dupliquer" }).click();
+  expect(await held.answered).toBe(201);
+  await dropFromAnotherApplication(a, field, "Texte déposé");
+  await expect(field).toHaveValue("Texte déposé");
+  held.release();
+  await expect(readyCopy(a, `${page.title} (copie)`, "dans « Privé »")).toBeVisible();
+  expect(pageIdOf(a)).toBe(page.id);
+  await expect(commentsPanel(a).getByRole("textbox", { name: "Commenter la page" })).toHaveValue(
+    "Texte déposé",
+  );
 });
