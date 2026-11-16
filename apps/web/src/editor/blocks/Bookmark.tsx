@@ -12,22 +12,25 @@
 // copié dans BlockNote (son HTML porte l'adresse telle quelle), MMD, un agent, un autre client. La
 // sûreté est donc dans la vue : ce qui n'est pas une adresse web se montre en texte, isolé, jamais
 // en lien ; une prop qui n'est pas une chaîne est une adresse vide.
-import { createReactBlockSpec } from "@blocknote/react";
+//
+// La vue du signet est dessinée sans React (`richView.ts`, R626) ; sa fenêtre, rendue à la demande
+// hors du document, l'est par React.
+import { createBlockSpec } from "@blocknote/core";
 import { useId, useRef, useState, type FormEvent } from "react";
 import { shorten } from "../../comments/dom";
-import { BookmarkIcon } from "../../icons";
 import type { MementumEditor } from "../debug";
 import {
   blockDraft,
+  openWindowOf,
   setBlockDraft,
   toggleBlockWindow,
-  useBlockWindow,
-  useHasBlockDraft,
+  watchBlockWindows,
   type BlockWindowProps,
 } from "./blockWindows";
 import { textProp } from "./props";
+import { BOOKMARK_ICON, element, followProps, iconElement, stopEventsOutside } from "./richView";
 import { hostOf, webUrl } from "./urls";
-import { useEditable } from "./useEditable";
+import { editableNow, watchEditable } from "./useEditable";
 
 /** Le message d'une adresse refusée. */
 export const ADDRESS_REFUSED = "Une adresse commence par http:// ou https://";
@@ -35,67 +38,126 @@ export const ADDRESS_REFUSED = "Une adresse commence par http:// ou https://";
 /** Une adresse qui n'est pas une adresse web n'est montrée qu'en partie. */
 const MAX_RAW_CHARS = 200;
 
-type ViewProps = {
-  block: { id: string; type: string; props: Readonly<Record<string, unknown>> };
-  editor: MementumEditor;
-};
-
-function BookmarkView({ block, editor }: ViewProps) {
-  const url = textProp(block.props, "url");
+/** Dessine dans `body` ce que montre un signet de l'adresse `url`. */
+function drawBody(body: HTMLElement, url: string): void {
   const href = webUrl(url);
-  const editable = useEditable(editor);
-  const open = useBlockWindow(editor, block.id);
-  // Un texte tapé avant de perdre le droit d'écrire reste atteignable (R472).
-  const unsaved = useHasBlockDraft(editor, block.id, "bookmark");
-  return (
-    <div className="mm-frame mm-bookmark" contentEditable={false}>
-      <span className="mm-frame-icon" aria-hidden="true">
-        <BookmarkIcon />
-      </span>
-      <span className="mm-frame-body mm-bookmark-body">
-        {href !== null ? (
-          <a className="mm-bookmark-link" href={href} target="_blank" rel="noopener noreferrer">
-            <span className="mm-bookmark-host" dir="auto">
-              {hostOf(href)}
-            </span>
-            <span className="mm-bookmark-url" dir="auto">
-              {href}
-            </span>
-          </a>
-        ) : url === "" ? (
-          <span className="mm-bookmark-empty">Signet sans adresse</span>
-        ) : (
-          <span className="mm-bookmark-raw" dir="auto">
-            {shorten(url, MAX_RAW_CHARS)}
-          </span>
-        )}
-      </span>
-      {(editable || unsaved) && (
-        <button
-          type="button"
-          className="mm-button mm-button-small mm-bookmark-edit"
-          aria-label={editable ? "Modifier le signet" : "Texte non enregistré du signet"}
-          aria-haspopup="dialog"
-          aria-expanded={open}
-          data-block-window-anchor=""
-          onClick={(event) => {
-            // Un clic ne donne pas le focus à un bouton partout (Safari) : la fenêtre qu'il ferme
-            // l'avait, il le garde.
-            event.currentTarget.focus();
-            toggleBlockWindow(editor, block);
-          }}
-        >
-          {editable ? "Modifier" : "Texte non enregistré"}
-        </button>
-      )}
-    </div>
-  );
+  if (href !== null) {
+    const link = element("a", "mm-bookmark-link");
+    link.href = href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    const host = element("span", "mm-bookmark-host");
+    host.dir = "auto";
+    host.textContent = hostOf(href);
+    const shown = element("span", "mm-bookmark-url");
+    shown.dir = "auto";
+    shown.textContent = href;
+    link.append(host, shown);
+    body.replaceChildren(link);
+  } else if (url === "") {
+    const empty = element("span", "mm-bookmark-empty");
+    empty.textContent = "Signet sans adresse";
+    body.replaceChildren(empty);
+  } else {
+    const raw = element("span", "mm-bookmark-raw");
+    raw.dir = "auto";
+    raw.textContent = shorten(url, MAX_RAW_CHARS);
+    body.replaceChildren(raw);
+  }
 }
 
-export const Bookmark = createReactBlockSpec(
-  { type: "bookmark", propSchema: { url: { default: "" } }, content: "none" },
+const BOOKMARK_PROPS = { url: { default: "" } } as const;
+
+/**
+ * La vue d'un signet : son icône, son adresse, et le bouton « Modifier » pour qui peut modifier (ou
+ * « Texte non enregistré » pour qui a tapé une adresse avant de perdre le droit d'écrire, R472).
+ * `live` : la vue est celle de l'éditeur (ProseMirror la détruira), pas un rendu de copie ou d'export ;
+ * elle suit alors l'éditeur, modifiable ou non, la fenêtre et son brouillon.
+ */
+function bookmarkView(
+  block: { id: string; props: Readonly<Record<string, unknown>> },
+  editor: MementumEditor,
+  live: boolean,
+) {
+  const id = block.id;
+  let url = textProp(block.props, "url");
+  const dom = element("div", "mm-frame mm-bookmark");
+  dom.contentEditable = "false";
+  const icon = element("span", "mm-frame-icon");
+  icon.setAttribute("aria-hidden", "true");
+  icon.append(iconElement(16, BOOKMARK_ICON));
+  const body = element("span", "mm-frame-body mm-bookmark-body");
+  drawBody(body, url);
+  dom.append(icon, body);
+
+  let button: HTMLButtonElement | null = null;
+  /** Le bouton tel qu'il doit être : là ou non, son nom, son texte, et la fenêtre ouverte ou non. */
+  const drawButton = (editable: boolean) => {
+    // Un texte tapé avant de perdre le droit d'écrire reste atteignable (R472).
+    const wanted = editable || blockDraft(editor, id, "bookmark") !== undefined;
+    if (!wanted) {
+      button?.remove();
+      button = null;
+      return;
+    }
+    if (button === null) {
+      const created = element("button", "mm-button mm-button-small mm-bookmark-edit");
+      created.type = "button";
+      created.setAttribute("aria-haspopup", "dialog");
+      created.setAttribute("data-block-window-anchor", "");
+      created.addEventListener("click", () => {
+        // Un clic ne donne pas le focus à un bouton partout (Safari) : la fenêtre qu'il ferme l'avait,
+        // il le garde.
+        created.focus();
+        toggleBlockWindow(editor, { id, type: "bookmark" });
+      });
+      dom.append(created);
+      button = created;
+    }
+    const label = editable ? "Modifier le signet" : "Texte non enregistré du signet";
+    if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
+    const text = editable ? "Modifier" : "Texte non enregistré";
+    if (button.textContent !== text) button.textContent = text;
+    const open = String(openWindowOf(editor)?.blockId === id);
+    if (button.getAttribute("aria-expanded") !== open) button.setAttribute("aria-expanded", open);
+  };
+
+  if (!live) {
+    drawButton(editableNow(editor));
+    return { dom };
+  }
+  const editable = watchEditable(editor, (now) => drawButton(now));
+  drawButton(editable.editable);
+  const stopWindows = watchBlockWindows(editor, () => drawButton(editableNow(editor)));
+  return {
+    dom,
+    // L'adresse changée (par un autre, par la fenêtre) : la vue suit en place, et le bouton qui avait
+    // le focus le garde.
+    update(node: { type: { name: string }; attrs: Record<string, unknown> }) {
+      if (node.type.name !== "bookmark") return false;
+      const next = textProp(node.attrs, "url");
+      if (next !== url) {
+        url = next;
+        drawBody(body, url);
+      }
+      followProps(dom, node.attrs, BOOKMARK_PROPS);
+      return true;
+    },
+    stopEvent: stopEventsOutside(dom),
+    destroy() {
+      editable.stop();
+      stopWindows();
+    },
+  };
+}
+
+export const Bookmark = createBlockSpec(
+  { type: "bookmark", propSchema: BOOKMARK_PROPS, content: "none" },
   {
-    render: ({ block, editor }) => <BookmarkView block={block} editor={editor as unknown as MementumEditor} />,
+    render(block, editor) {
+      const live = "renderType" in this && this.renderType === "nodeView";
+      return bookmarkView(block, editor as unknown as MementumEditor, live);
+    },
   },
 );
 

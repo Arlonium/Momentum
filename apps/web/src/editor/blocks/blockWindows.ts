@@ -154,6 +154,16 @@ function subscribe(editor: object, listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/**
+ * `listener` à chaque fenêtre ouverte ou fermée, et à chaque brouillon né ou parti, dans la page de
+ * `editor`, jusqu'à l'appel de la fonction rendue. Pour une vue de bloc sans React (`richView.ts`,
+ * R626), qui relit alors ce qui la concerne (`openWindowOf`, `blockDraft`), comme les crochets plus
+ * bas pour une vue rendue par React.
+ */
+export function watchBlockWindows(editor: object, listener: () => void): () => void {
+  return subscribe(editor, listener);
+}
+
 /** La fenêtre ouverte de l'éditeur, suivie (pour `BlockWindowHost`). */
 export function useOpenBlockWindow(editor: object): OpenWindow | null {
   const listen = useCallback((listener: () => void) => subscribe(editor, listener), [editor]);

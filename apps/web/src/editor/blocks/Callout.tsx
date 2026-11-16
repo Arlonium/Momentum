@@ -8,14 +8,17 @@
 // les voit, entière dans l'infobulle ; la couleur ne fait que choisir une classe d'une liste
 // fermée (`mm-callout-<couleur>`, fonds dans `theme.css`), jamais un attribut `style`. Une couleur
 // hors de la liste est celle par défaut.
-import { createReactBlockSpec } from "@blocknote/react";
+//
+// La vue du callout est dessinée sans React (`richView.ts`, R626) ; sa fenêtre, rendue à la demande
+// hors du document, l'est par React.
+import { createBlockSpec } from "@blocknote/core";
 import { useState, type KeyboardEvent, type ReactNode } from "react";
-import { InfoIcon } from "../../icons";
 import { isolate } from "../../comments/dom";
 import type { MementumEditor } from "../debug";
-import { toggleBlockWindow, useBlockWindow, type BlockWindowProps } from "./blockWindows";
+import { openWindowOf, toggleBlockWindow, watchBlockWindows, type BlockWindowProps } from "./blockWindows";
 import { textProp } from "./props";
-import { useEditable } from "./useEditable";
+import { element, followProps, iconElement, INFO_ICON, outsideContent, stopEventsOutside } from "./richView";
+import { editableNow, watchEditable } from "./useEditable";
 
 /** Icône par défaut d'un callout (défaut du registre), affichée en icône vectorielle. */
 export const DEFAULT_CALLOUT_ICON = "💡";
@@ -79,12 +82,18 @@ const MAX_ICON_GRAPHEMES = 3;
 
 let segmenter: Intl.Segmenter | null = null;
 
+/** Les icônes déjà découpées (une page porte souvent mille fois la même), 256 au plus. */
+const shownIcons = new Map<string, { text: string; cut: boolean }>();
+const MAX_SHOWN_ICONS = 256;
+
 /**
  * L'icône à afficher : ses trois premiers caractères visibles, suivis de « … » si elle est plus
  * longue. La découpe s'arrête au quatrième : une icône de MMD peut porter des centaines de milliers
- * de caractères.
+ * de caractères (une icône longue n'est pas gardée).
  */
 function shownIcon(icon: string): { text: string; cut: boolean } {
+  const known = shownIcons.get(icon);
+  if (known !== undefined) return known;
   // Un seul découpeur pour tous les callouts de la page (une page peut en porter mille).
   segmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
   const graphemes: string[] = [];
@@ -92,8 +101,15 @@ function shownIcon(icon: string): { text: string; cut: boolean } {
     graphemes.push(part.segment);
     if (graphemes.length > MAX_ICON_GRAPHEMES) break;
   }
-  if (graphemes.length <= MAX_ICON_GRAPHEMES) return { text: icon, cut: false };
-  return { text: `${graphemes.slice(0, MAX_ICON_GRAPHEMES).join("")}…`, cut: true };
+  const shown =
+    graphemes.length <= MAX_ICON_GRAPHEMES
+      ? { text: icon, cut: false }
+      : { text: `${graphemes.slice(0, MAX_ICON_GRAPHEMES).join("")}…`, cut: true };
+  if (icon.length <= 64) {
+    if (shownIcons.size >= MAX_SHOWN_ICONS) shownIcons.clear();
+    shownIcons.set(icon, shown);
+  }
+  return shown;
 }
 
 /**
@@ -102,73 +118,123 @@ function shownIcon(icon: string): { text: string; cut: boolean } {
  * combinantes seules, et la cellule Braille vide (U+2800). Une icône qui n'en a pas d'autres est
  * vide à l'œil (R476).
  */
-const INVISIBLE = /[\p{Z}\p{Cc}\p{Cf}\p{M}\p{Default_Ignorable_Code_Point}\u2800\s]/gu;
+const INVISIBLE = /[\p{Z}\p{Cc}\p{Cf}\p{M}\p{Default_Ignorable_Code_Point}⠀\s]/gu;
 
 /**
- * L'icône d'un callout : l'icône vectorielle pour celle par défaut, et pour une icône qui ne montre
- * rien (vide, faite d'espaces ou de caractères de format) ; sinon son texte.
+ * Dessine dans `holder` l'icône d'un callout : l'icône vectorielle pour celle par défaut, et pour une
+ * icône qui ne montre rien (vide, faite d'espaces ou de caractères de format) ; sinon son texte, un
+ * nœud de texte isolé, entier dans l'infobulle s'il est coupé.
  */
-function CalloutGlyph({ icon }: { icon: string }) {
-  if (icon === DEFAULT_CALLOUT_ICON || icon.replace(INVISIBLE, "") === "") return <InfoIcon />;
+function drawGlyph(holder: HTMLElement, icon: string): void {
+  if (icon === DEFAULT_CALLOUT_ICON || icon.replace(INVISIBLE, "") === "") {
+    holder.replaceChildren(iconElement(18, INFO_ICON));
+    return;
+  }
   const { text, cut } = shownIcon(icon);
-  return (
-    <span className="mm-callout-glyph" dir="auto" title={cut ? isolate(icon) : undefined}>
-      {text}
-    </span>
-  );
+  const glyph = element("span", "mm-callout-glyph");
+  glyph.dir = "auto";
+  glyph.textContent = text;
+  if (cut) glyph.title = isolate(icon);
+  holder.replaceChildren(glyph);
 }
 
-type ViewProps = {
-  block: { id: string; type: string; props: Readonly<Record<string, unknown>> };
-  editor: MementumEditor;
-  contentRef: (node: HTMLElement | null) => void;
-};
+/** Le nom du bouton de l'icône. */
+const ICON_BUTTON_LABEL = "Icône et couleur du callout";
 
-function CalloutView({ block, editor, contentRef }: ViewProps) {
-  const icon = textProp(block.props, "icon", DEFAULT_CALLOUT_ICON);
-  const color = calloutColor(textProp(block.props, "color", "default"));
-  const editable = useEditable(editor);
-  const open = useBlockWindow(editor, block.id);
-  return (
-    <div className={`mm-callout mm-callout-${color}`}>
-      {editable ? (
-        <button
-          type="button"
-          className="mm-callout-icon mm-callout-button"
-          contentEditable={false}
-          aria-label="Icône et couleur du callout"
-          aria-haspopup="dialog"
-          aria-expanded={open}
-          data-block-window-anchor=""
-          onClick={(event) => {
-            // Un clic ne donne pas le focus à un bouton partout (Safari) : la fenêtre qu'il ferme
-            // l'avait, il le garde.
-            event.currentTarget.focus();
-            toggleBlockWindow(editor, block);
-          }}
-        >
-          <CalloutGlyph icon={icon} />
-        </button>
-      ) : (
-        <span className="mm-callout-icon" contentEditable={false}>
-          <CalloutGlyph icon={icon} />
-        </span>
-      )}
-      <div className="mm-callout-content" ref={contentRef} />
-    </div>
-  );
+const CALLOUT_PROPS = { icon: { default: DEFAULT_CALLOUT_ICON }, color: { default: "default" } } as const;
+
+/**
+ * La vue d'un callout : l'encadré de sa couleur, son icône (un bouton pour qui peut modifier, qui
+ * ouvre sa fenêtre), puis son texte. `live` : la vue est celle de l'éditeur (ProseMirror la détruira),
+ * pas un rendu de copie ou d'export ; elle suit alors l'éditeur, modifiable ou non, et la fenêtre.
+ */
+function calloutView(
+  block: { id: string; props: Readonly<Record<string, unknown>> },
+  editor: MementumEditor,
+  live: boolean,
+) {
+  const id = block.id;
+  let icon = textProp(block.props, "icon", DEFAULT_CALLOUT_ICON);
+  let color = calloutColor(textProp(block.props, "color", "default"));
+  const dom = element("div", `mm-callout mm-callout-${color}`);
+  const contentDOM = element("div", "mm-callout-content");
+
+  const button = () => {
+    const created = element("button", "mm-callout-icon mm-callout-button");
+    created.type = "button";
+    created.setAttribute("aria-label", ICON_BUTTON_LABEL);
+    created.setAttribute("aria-haspopup", "dialog");
+    created.setAttribute("aria-expanded", String(openWindowOf(editor)?.blockId === id));
+    created.setAttribute("data-block-window-anchor", "");
+    created.addEventListener("click", () => {
+      // Un clic ne donne pas le focus à un bouton partout (Safari) : la fenêtre qu'il ferme l'avait, il
+      // le garde.
+      created.focus();
+      toggleBlockWindow(editor, { id, type: "callout" });
+    });
+    return created;
+  };
+  const iconHolder = (editable: boolean) => {
+    const holder = editable ? button() : element("span", "mm-callout-icon");
+    holder.contentEditable = "false";
+    drawGlyph(holder, icon);
+    return holder;
+  };
+
+  if (!live) {
+    dom.append(iconHolder(editableNow(editor)), contentDOM);
+    return { dom, contentDOM };
+  }
+  let holder: HTMLElement;
+  const editable = watchEditable(editor, (now) => {
+    const next = iconHolder(now);
+    holder.replaceWith(next);
+    holder = next;
+  });
+  holder = iconHolder(editable.editable);
+  dom.append(holder, contentDOM);
+  const stopWindows = watchBlockWindows(editor, () => {
+    const open = String(openWindowOf(editor)?.blockId === id);
+    if (holder instanceof HTMLButtonElement && holder.getAttribute("aria-expanded") !== open) {
+      holder.setAttribute("aria-expanded", open);
+    }
+  });
+  return {
+    dom,
+    contentDOM,
+    // Une prop changée (par un autre, par la fenêtre) : la vue suit en place, et le bouton qui avait le
+    // focus le garde. Le texte est celui que ProseMirror met à jour.
+    update(node: { type: { name: string }; attrs: Record<string, unknown> }) {
+      if (node.type.name !== "callout") return false;
+      const nextIcon = textProp(node.attrs, "icon", DEFAULT_CALLOUT_ICON);
+      const nextColor = calloutColor(textProp(node.attrs, "color", "default"));
+      if (nextColor !== color) {
+        dom.classList.replace(`mm-callout-${color}`, `mm-callout-${nextColor}`);
+        color = nextColor;
+      }
+      if (nextIcon !== icon) {
+        icon = nextIcon;
+        drawGlyph(holder, icon);
+      }
+      followProps(dom, node.attrs, CALLOUT_PROPS);
+      return true;
+    },
+    ignoreMutation: outsideContent(contentDOM),
+    stopEvent: stopEventsOutside(dom, contentDOM),
+    destroy() {
+      editable.stop();
+      stopWindows();
+    },
+  };
 }
 
-export const Callout = createReactBlockSpec(
+export const Callout = createBlockSpec(
+  { type: "callout", propSchema: CALLOUT_PROPS, content: "inline" },
   {
-    type: "callout",
-    propSchema: { icon: { default: DEFAULT_CALLOUT_ICON }, color: { default: "default" } },
-    content: "inline",
-  },
-  {
-    render: ({ block, editor, contentRef }) => (
-      <CalloutView block={block} editor={editor as unknown as MementumEditor} contentRef={contentRef} />
-    ),
+    render(block, editor) {
+      const live = "renderType" in this && this.renderType === "nodeView";
+      return calloutView(block, editor as unknown as MementumEditor, live);
+    },
   },
 );
 
