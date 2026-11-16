@@ -388,7 +388,7 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
         )
     })?;
     let db = cfg.db_path();
-    let store = Store::open(&db)
+    let store = Store::open_with(&db, cfg.store)
         .await
         .with_context(|| format!("impossible d'ouvrir la base {}", db.display()))?;
     // Le store n'a pas de journal : c'est ici qu'on dit qu'une migration a

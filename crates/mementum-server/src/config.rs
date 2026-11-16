@@ -12,10 +12,12 @@
 //! | taille la plus grande d'un fichier envoyé, en Mio (de 1 à 4 096) | `MEMENTUM_MAX_FILE_MB` | `--max-file-mb` | `100` |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
-//! l'emporte sur le défaut. Deux derniers réglages n'ont ni variable ni
+//! l'emporte sur le défaut. Trois derniers réglages n'ont ni variable ni
 //! option : l'intervalle des pings du canal de l'espace
 //! ([`Config::events_ping`]) et le délai d'un envoi de fichier qui stagne
-//! ([`Config::upload_idle`]), que seuls les tests raccourcissent.
+//! ([`Config::upload_idle`]), que seuls les tests raccourcissent, et les
+//! réglages d'ouverture de la base ([`Config::store`]), que seuls les tests
+//! changent.
 //!
 //! Le serveur n'écoute jamais par défaut sur une autre interface que la
 //! boucle locale, et les inscriptions sont par défaut sur invitation (Ruling
@@ -27,6 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::http::Uri;
+use mementum_store::StoreOptions;
 use mementum_sync::VERSION_EVERY;
 
 use crate::events::EVENTS_PING;
@@ -110,6 +113,10 @@ pub struct Config {
     /// connexion fermée sans réponse (Ruling R247) : [`UPLOAD_IDLE`] par défaut. Ni variable ni
     /// option : seuls les tests le raccourcissent.
     pub upload_idle: Duration,
+    /// Les réglages d'ouverture de la base ([`StoreOptions`] : délai d'attente sur un verrou,
+    /// disque lent simulé), les défauts du store par défaut. Ni variable ni option : seuls les
+    /// tests les changent.
+    pub store: StoreOptions,
 }
 
 impl Default for Config {
@@ -123,6 +130,7 @@ impl Default for Config {
             version_every: VERSION_EVERY,
             max_file_bytes: DEFAULT_MAX_FILE_MB << 20,
             upload_idle: UPLOAD_IDLE,
+            store: StoreOptions::default(),
         }
     }
 }
@@ -223,6 +231,7 @@ impl Config {
             version_every,
             max_file_bytes: max_file_mb << 20,
             upload_idle: UPLOAD_IDLE,
+            store: StoreOptions::default(),
         })
     }
 

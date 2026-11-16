@@ -192,6 +192,32 @@ impl StoreError {
 /// Les migrations du store, embarquées dans le binaire.
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// Le délai d'attente d'une connexion sur un verrou de SQLite, par défaut.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Les réglages d'ouverture du store ([`Store::open_with`]). Aucun n'a de variable ni d'option :
+/// [`Store::open`] prend les défauts, et seuls les tests en changent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreOptions {
+    /// Le délai d'attente de chaque connexion sur un verrou de SQLite ([`BUSY_TIMEOUT`] par
+    /// défaut) : au-delà, la requête échoue (`database is locked`).
+    pub busy_timeout: Duration,
+    /// Un disque lent, simulé : chaque validation d'une écriture dure ce temps de plus, verrou
+    /// d'écriture tenu (un crochet de validation de SQLite qui attend, sur le fil de la
+    /// connexion). Nul par défaut : seuls les tests le posent, pour rendre sûre une attente qui ne
+    /// se voyait que sur un disque lent (la CI sous Windows, Ruling R485).
+    pub write_delay: Duration,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        StoreOptions {
+            busy_timeout: BUSY_TIMEOUT,
+            write_delay: Duration::ZERO,
+        }
+    }
+}
+
 /// La base de Mementum. Se clone à bas coût (le pool et le canal des changements sont partagés).
 #[derive(Clone)]
 pub struct Store {
@@ -212,6 +238,11 @@ impl Store {
     /// copie échoue, l'ouverture échoue, avant toute migration. [`Store::backup`] dit ce qui a été
     /// fait.
     pub async fn open(path: &Path) -> Result<Store, StoreError> {
+        Store::open_with(path, StoreOptions::default()).await
+    }
+
+    /// [`Store::open`], avec ces réglages.
+    pub async fn open_with(path: &Path, settings: StoreOptions) -> Result<Store, StoreError> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| StoreError::Sqlx(sqlx::Error::Io(e)))?;
         }
@@ -221,8 +252,10 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
             .foreign_keys(true)
-            .busy_timeout(Duration::from_millis(5000));
-        let pool = SqlitePoolOptions::new().connect_with(options).await?;
+            .busy_timeout(settings.busy_timeout);
+        let pool = slow_disk(SqlitePoolOptions::new(), settings.write_delay)
+            .connect_with(options)
+            .await?;
         match migrate(&pool, path).await {
             Ok(backup) => Ok(Store {
                 pool,
@@ -285,6 +318,24 @@ impl Store {
         }
         Ok(all)
     }
+}
+
+/// Pose sur chaque connexion du pool le disque lent de [`StoreOptions::write_delay`] : un crochet
+/// de validation qui attend `delay` sur le fil de la connexion, verrou d'écriture tenu. SQLite ne
+/// l'appelle qu'à la validation d'une transaction qui écrit. Sans délai, rien n'est posé.
+fn slow_disk(pool: SqlitePoolOptions, delay: Duration) -> SqlitePoolOptions {
+    if delay.is_zero() {
+        return pool;
+    }
+    pool.after_connect(move |conn, _| {
+        Box::pin(async move {
+            conn.lock_handle().await?.set_commit_hook(move || {
+                std::thread::sleep(delay);
+                true
+            });
+            Ok(())
+        })
+    })
 }
 
 /// Copie la base si une migration est en attente, puis lance les migrations. Sans copie, rien ne
