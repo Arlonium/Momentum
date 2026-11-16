@@ -22,14 +22,19 @@
 //   `\\[…]`) sont bornées à `MAX_SIZE_EM` ; les expansions de macros, à `MAX_EXPAND`.
 //
 // KaTeX reste à `trust: false` : ni lien, ni image, ni attribut. Le résultat est gardé, par formule,
-// dans un cache borné : une formule déjà vue s'affiche sans être recalculée.
+// dans un cache borné : une formule déjà vue n'est pas recalculée (elle passe quand même par
+// l'écran et la file de `Formula` pour être attachée).
 import katex from "katex";
 
 /** Au-delà, une formule n'est pas mise en forme (le champ n'en accepte pas plus). */
 export const MAX_LATEX_CHARS = 10_000;
 
-/** Au-delà, ce que KaTeX produirait est trop grand pour la page (en éléments). */
-export const MAX_TEX_NODES = 60_000;
+/**
+ * Au-delà, ce que KaTeX produirait est trop grand pour la page (en éléments) : une formule
+ * s'attache d'un coup, et la mise en page de 12 000 éléments prend déjà 60 à 150 ms selon ce que la
+ * page porte (mesuré : registre, R526). Une formule de 10 000 lettres en fait 10 011.
+ */
+export const MAX_TEX_NODES = 12_000;
 
 /** Les tailles écrites dans une formule, au plus (en em) : `\rule{1em}{2000000em}` faisait 33 millions de pixels. */
 const MAX_SIZE_EM = 50;
@@ -203,7 +208,7 @@ export function typeset(latex: string, display: boolean): TexOutcome {
   return outcome;
 }
 
-/** La formule est-elle déjà mise en forme (son affichage ne coûte alors rien) ? */
+/** La formule est-elle déjà calculée (`typeset` la rend alors sans rien recalculer) ? */
 export function isTypeset(latex: string, display: boolean): boolean {
   return cache.has(`${display ? "B" : "L"}${latex}`);
 }

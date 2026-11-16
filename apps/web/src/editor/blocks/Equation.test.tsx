@@ -19,7 +19,8 @@ import {
   type Mounted,
 } from "../../test/richEditor";
 import { until } from "../../test/hooks";
-import { setClockForTests } from "./Formula";
+import { FRAME_NODES, resetQueueForTests, setClockForTests } from "./Formula";
+import { typeset } from "./tex";
 
 const MODIFY = 'button[aria-label="Modifier l\'équation"]';
 const WINDOW = "Formule de l'équation";
@@ -96,6 +97,7 @@ test("invalid_latex_is_shown_in_red_and_kept", async () => {
   finish().click();
   await flush();
   expect(storedProps(m.doc, "q").latex).toBe("\\frac{1}{");
+  await formulasShown(m);
   const shown = blockOf(m, "q");
   expect(shown.querySelector(".mm-tex-invalid .mm-tex-source")?.textContent).toBe("\\frac{1}{");
   expect(shown.querySelector(".katex")).toBeNull();
@@ -203,6 +205,7 @@ afterEach(() => {
   globalThis.IntersectionObserver = originalObserver;
   globalThis.requestAnimationFrame = originalFrame;
   setClockForTests(null);
+  resetQueueForTests();
   observed.length = 0;
 });
 
@@ -247,30 +250,106 @@ test("formulas_are_typeset_only_once_shown", async () => {
   expect(blockOf(m, "b").querySelector(".katex")).toBeNull();
 });
 
-test("formulas_are_typeset_a_few_milliseconds_per_frame", async () => {
-  // Une horloge qui avance de 10 ms à chaque lecture : une mise en forme dépasse le budget d'une
-  // image (8 ms), la suivante attend l'image suivante.
-  let t = 0;
-  setClockForTests(() => (t += 10));
+/** Remplace `requestAnimationFrame` : les images demandées attendent que le test les donne. */
+function stubFrames(): FrameRequestCallback[] {
   const frames: FrameRequestCallback[] = [];
   globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
     frames.push(callback);
     return frames.length;
   }) as typeof requestAnimationFrame;
+  return frames;
+}
+
+/** Donne l'image suivante, puis laisse React rendre. */
+async function nextFrame(frames: FrameRequestCallback[], what: string): Promise<void> {
+  const frame = frames.shift();
+  expect(frame, what).toBeDefined();
+  frame!(0);
+  await flush();
+}
+
+test("formulas_are_typeset_a_few_milliseconds_per_frame", async () => {
+  // Une horloge qui avance de 10 ms à chaque lecture : une attache dépasse le budget d'une image
+  // (8 ms), la suivante attend l'image suivante. Les formules sont déjà calculées : une formule du
+  // cache passe aussi par la file (relecture de C2, C2 : elles s'attachaient toutes au montage).
   const latex = ["\\alpha_{1}", "\\beta_{2}", "\\gamma_{3}"];
+  for (const l of latex) typeset(l, true);
+  let t = 0;
+  setClockForTests(() => (t += 10));
+  const frames = stubFrames();
   const m = await mountEditor({
     blocks: latex.map((l, i) => ({ id: `f${i}`, type: "equation" as const, props: { latex: l } })),
   });
   const typesetCount = () => latex.filter((_, i) => blockOf(m, `f${i}`).querySelector(".katex") !== null).length;
   expect(typesetCount()).toBe(0);
   for (const expected of [1, 2, 3]) {
-    const frame = frames.shift();
-    expect(frame, `une image demandée pour la formule ${expected}`).toBeDefined();
-    frame!(0);
-    await flush();
+    await nextFrame(frames, `une image demandée pour la formule ${expected}`);
     expect(typesetCount()).toBe(expected);
   }
   expect(frames).toHaveLength(0);
+});
+
+test("formulas_are_attached_a_few_thousand_elements_per_frame", async () => {
+  // Le coût d'une formule est sa mise en page : une image attache au plus `FRAME_NODES` éléments,
+  // et au moins une formule, même plus grande. L'horloge est arrêtée : seul le compte des éléments
+  // découpe les images.
+  setClockForTests(() => 0);
+  const nodes = (latex: string) => {
+    const outcome = typeset(latex, true);
+    return outcome.kind === "formula" ? outcome.nodes : -1;
+  };
+  const extra = nodes("x".repeat(100)) - 100;
+  const sized = (count: number) => "x".repeat(count - extra);
+  const latex = ["a", sized(0.6 * FRAME_NODES), sized(0.6 * FRAME_NODES - 1), "b", sized(1.2 * FRAME_NODES)];
+  expect(nodes(latex[1]!)).toBe(0.6 * FRAME_NODES);
+  const frames = stubFrames();
+  const m = await mountEditor({
+    blocks: latex.map((l, i) => ({ id: `f${i}`, type: "equation" as const, props: { latex: l } })),
+  });
+  const attached = () => latex.map((_, i) => blockOf(m, `f${i}`).querySelector(".katex") !== null);
+  expect(attached()).toEqual([false, false, false, false, false]);
+  await nextFrame(frames, "la première image");
+  expect(attached()).toEqual([true, true, false, false, false]);
+  await nextFrame(frames, "la deuxième image");
+  expect(attached()).toEqual([true, true, true, true, false]);
+  // Plus grande que le budget d'une image : seule dans la sienne.
+  await nextFrame(frames, "la troisième image");
+  expect(attached()).toEqual([true, true, true, true, true]);
+  expect(frames).toHaveLength(0);
+});
+
+test("a_formula_computed_past_the_time_of_a_frame_is_attached_at_the_next_one", async () => {
+  // Son calcul a pris le temps de l'image : sa mise en page ne s'y ajoute pas.
+  let t = 0;
+  setClockForTests(() => (t += 10));
+  const frames = stubFrames();
+  const m = await mountEditor({ blocks: [{ id: "f", type: "equation", props: { latex: "\\zeta_{41} + \\eta" } }] });
+  await nextFrame(frames, "l'image du calcul");
+  expect(blockOf(m, "f").querySelector(".katex")).toBeNull();
+  await nextFrame(frames, "l'image de l'attache");
+  expect(blockOf(m, "f").querySelector(".katex")).not.toBeNull();
+});
+
+test("a_formula_from_the_cache_waits_for_the_screen", async () => {
+  // Au retour sur une page, ses formules sont dans le cache : elles attendent l'écran comme les
+  // autres (relecture de C2 : 150 formules s'attachaient d'un coup, 28 s d'onglet figé).
+  stubObserver();
+  const latex = "\\sum_{k=0}^{9} k^2";
+  typeset(latex, true);
+  const m = await mountEditor({
+    blocks: [
+      { id: "a", type: "equation", props: { latex } },
+      { id: "b", type: "equation", props: { latex } },
+    ],
+  });
+  await flush();
+  for (const id of ["a", "b"]) {
+    expect(blockOf(m, id).querySelector(".katex"), id).toBeNull();
+    expect(blockOf(m, id).querySelector(".mm-tex-pending .mm-tex-source"), id).not.toBeNull();
+  }
+  show(blockOf(m, "a"));
+  await until(m.host, () => blockOf(m, "a").querySelector(".katex") !== null, "la formule à l'écran attachée");
+  expect(blockOf(m, "b").querySelector(".katex")).toBeNull();
 });
 
 // ---------------------------------------------------------------------------

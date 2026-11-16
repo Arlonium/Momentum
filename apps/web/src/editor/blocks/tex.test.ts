@@ -178,6 +178,12 @@ test("a_formula_too_big_is_refused", () => {
   // Une matrice de 4 900 colonnes : 9 800 caractères, plus de 80 000 éléments.
   const matrix = (columns: number) => `${t("@begin{matrix}")}${"a&".repeat(columns)}a${t("@end{matrix}")}`;
   expect(typeset(matrix(4_900), true)).toEqual({ kind: "refused", why: "size" });
+  // 400 fractions : 23 600 éléments, dont la mise en page prenait 120 à 450 ms d'un coup.
+  const fractions = (n: number) => Array.from({ length: n }, (_, k) => `${B}frac{a_{${k}}}{b^{2}}`).join(" + ");
+  expect(typeset(fractions(400), true)).toEqual({ kind: "refused", why: "size" });
+  // La plus grande des budgets du navigateur, 200 fractions, passe.
+  const largest = typeset(fractions(200), true);
+  expect(largest.kind === "formula" && largest.nodes).toBeLessThanOrEqual(MAX_TEX_NODES);
   // Témoin : une matrice plus petite passe, et ses éléments sont comptés.
   const small = typeset(matrix(100), true);
   expect(small.kind).toBe("formula");
