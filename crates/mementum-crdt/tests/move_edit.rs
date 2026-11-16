@@ -781,6 +781,36 @@ fn carried_text_is_never_written_beyond_the_depth_bound() {
     assert_reloads(&server, &journal);
 }
 
+/// C1 (Ruling R452) : une copie de X posée ailleurs que dans un groupe de blocs ou une colonne
+/// (ici dans le paragraphe de Y), où BlockNote n'en pose jamais, ne reçoit pas de report.
+#[test]
+fn a_copy_outside_a_group_or_a_column_receives_nothing() {
+    let (state, ids) = page_of(&[para("Bloc X", vec![]), para("Bloc Y", vec![])]);
+    let x = &ids[0];
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(x, 6, 0, " de Tom").unwrap();
+    let doc = raw::doc(&state);
+    let frag = raw::fragment(&doc);
+    let before = {
+        use yrs::{ReadTxn, Transact};
+        doc.transact().state_vector()
+    };
+    {
+        use yrs::{Transact, XmlFragment};
+        let mut txn = doc.transact_mut();
+        let (y, _) = raw::top_block(&frag, &txn, &ids[1]);
+        let paragraph = raw::element(y.get(&txn, 0));
+        let len = paragraph.len(&txn);
+        raw::container(&mut txn, &paragraph, len, x, "paragraph", "Bloc X");
+        raw::root(&frag, &txn).remove_range(&mut txn, 0, 1);
+    }
+    let moved = raw::update_with(&doc, &before, &[]);
+    let server = PageDoc::from_updates([state.as_slice()]).unwrap();
+    server.apply_client_update(&typed).unwrap();
+    let applied = server.apply_client_update(&moved).unwrap();
+    assert!(applied.carried.is_none());
+}
+
 /// I3 (M13) : la copie au fond de la page a la place de reporter son texte, pas celle d'un
 /// sous-bloc qu'un autre a mis sous l'original : le texte est reporté, le sous-bloc ne l'est pas,
 /// et la page se relit.
