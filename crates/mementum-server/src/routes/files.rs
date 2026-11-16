@@ -18,7 +18,7 @@
 //! sous la borne, ne part qu'une fois ce corps lu et jeté (au plus la
 //! borne, et jamais plus de `upload_idle` sans un octet) : sinon le serveur fermerait sur des
 //! octets non lus, le système couperait la connexion, et le navigateur, qui envoie son corps sans
-//! attendre, perdrait la réponse (Ruling R505). Le `401` (aucun compte) et le `413` sur
+//! attendre, perdrait la réponse (Rulings R505, R545). Le `401` (aucun compte) et le `413` sur
 //! `Content-Length` coupent sans lire : le client doit lire la borne avant d'envoyer, et tenir une
 //! erreur réseau pendant un envoi pour un refus qu'il n'a pas reçu. Sous `Expect: 100-continue`,
 //! rien n'est lu : le refus arrive seul. Tout compte de l'instance peut ainsi faire lire au serveur
@@ -129,7 +129,7 @@ pub(crate) async fn upload(
     mut body: Body,
 ) -> Result<Response, ApiError> {
     // Sans compte (`401`), la réponse part sans rien lire du corps (Ruling R505). Les autres
-    // refus de l'extracteur sont faits à un compte (un en-tête qui en nomme un autre, R540) : ils
+    // refus de l'extracteur sont faits à un compte (un en-tête qui en nomme un autre, R545) : ils
     // passent par le premier contrôle, comme les suivants.
     let caller = match caller {
         Err(refusal) if refusal.code() == ErrorCode::Unauthenticated => return Err(refusal),

@@ -66,8 +66,8 @@
 //! d'une version. La base SQLite est le fichier [`config::DB_FILE`] du dossier
 //! des données, et les fichiers envoyés sont dans son dossier `files/`.
 //!
-//! **Compte attendu** (`auth.rs`, Rulings R540 à R542). Une requête peut nommer le compte sous
-//! lequel elle part : l'en-tête `X-Mementum-Account: <id>`, ou, pour `/sync` et `/events`, à qui
+//! **Compte attendu** (`auth.rs`, Rulings R540 à R542, R545). Une requête peut nommer le compte
+//! sous lequel elle part : l'en-tête `X-Mementum-Account: <id>`, ou, pour `/sync` et `/events`, à qui
 //! un navigateur ne laisse poser aucun en-tête, le paramètre d'adresse `account=<id>`. Le client
 //! de l'application le pose sur ses appels, sauf `GET /api/v1/me` (qui sert à apprendre le
 //! compte), la connexion, l'inscription et la déconnexion : un autre onglet du même navigateur a pu
@@ -81,7 +81,7 @@
 //! outils, tests). La connexion, l'inscription et la déconnexion ne lisent pas de session :
 //! l'en-tête n'y change rien, et se déconnecter ferme toujours la session que porte le navigateur
 //! (Ruling R542). L'envoi d'un fichier lit et jette son corps avant ce refus, comme avant les
-//! autres refus faits à un compte (Ruling R505).
+//! autres refus faits à un compte (Rulings R505, R545).
 //!
 //! **Droits** (`access.rs`, le seul chemin par lequel les routes les calculent ;
 //! le store revérifie lui-même, dans ses transactions, ce qu'il écrit) :
