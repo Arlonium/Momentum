@@ -1,5 +1,5 @@
-// Les rejeux d'`api.ts` au hasard (Rulings R347, R348, R460 à R464, R480) : ce que les exemples
-// d'`api.test.ts` affirment un par un, éprouvé sur des suites d'événements tirées au hasard.
+// Les rejeux d'`api.ts` au hasard (Rulings R347, R348, R460 à R464, R480, R540, R543) : ce que les
+// exemples d'`api.test.ts` affirment un par un, éprouvé sur des suites d'événements tirées au hasard.
 //
 // Le modèle, rendu fidèle au tour de correction 1 (constat I2 de la relecture). L'onglet a chargé
 // l'application sous Alice ; il écrit, se connecte (sous Alice ou sous Bruno), change son mot de
@@ -30,11 +30,20 @@
 // - jamais une route de session ;
 // - jamais s'il est parti avant que l'onglet commence à se déconnecter, ni pendant ;
 // - chaque écriture de l'application nomme Alice, son compte, au premier envoi comme au rejeu ;
+// - les gardes du client tiennent toujours (R460 à R462, R480) : un rejeu ne part avec le cookie
+//   d'une session de Bruno que dans la fenêtre de R460, une session qu'un autre onglet a ouverte
+//   après le départ de la dernière relecture du compte lue (retirer R480 fait encore échouer 10
+//   graines sur 30 000 : « parti sous Alice, repart sous bruno ») ;
 // - aucune écriture n'est jamais faite sous un autre compte qu'Alice, rejeu ou non. Avant l'en-tête,
-//   un rejeu partait sous Bruno si un autre onglet s'y connectait pendant la relecture du compte qui
-//   le précède (la fenêtre de R460, que l'essai comptait à part), et tout appel parti avant que
+//   un rejeu partait sous Bruno dans cette fenêtre (que l'essai comptait à part, sans la
+//   reprocher), et tout appel parti avant que
 //   l'application apprenne l'autre compte était fait sous lui (R115) : le serveur les refuse
-//   désormais (comptés, `refusedByHeader` ; les rejeux parmi eux, `replaysRefusedByHeader`).
+//   désormais (comptés, `refusedByHeader` ; les rejeux parmi eux, `replaysRefusedByHeader`). La
+//   fenêtre de R460 est menée exprès : une relecture traitée sous Alice, hors d'une session de
+//   l'onglet en route, laisse un autre onglet se connecter sous Bruno avant que la page lise sa
+//   réponse (une fois sur deux dans les graines calmes, une sur quatre ailleurs ; `windowSteps`) ;
+//   sans cela, l'essai ne l'atteignait jamais. Si le rejeu perdait l'en-tête, 97 graines sur 1 000
+//   échoueraient (« wN fait sous bruno »).
 // Le modèle ne joue un événement qu'entre deux tours de la boucle (`flush`), comme le navigateur
 // entre deux réponses du réseau.
 //
@@ -43,7 +52,9 @@
 // relecture répondue pendant une déconnexion rechargeait le compte de l'application (relecture, I1 ;
 // R461) ; une connexion de Bruno dont la réponse se perdait après son cookie laissait repartir un
 // appel sous lui (R480, que la forme réelle de la perte, le corps après les en-têtes, met en défaut
-// sans la correction N1).
+// sans la correction N1) ; un changement de mot de passe refusé par `409 account_changed` attendait
+// la relecture du compte, qui attendait elle-même l'issue de ce changement : dix secondes de refus
+// bloqués (graine 14934 à 30 000 graines, par le minuteur d'une graine précédente ; R543).
 //
 // `MEMENTUM_FUZZ_SEEDS=30000` (et `MEMENTUM_FUZZ_STEPS`) élargit l'essai.
 import type { Me } from "@mementum/protocol";
@@ -94,7 +105,7 @@ function response(status: number, body?: unknown): Response {
 }
 
 /** Une session du serveur : son compte, si elle vaut encore, qui l'a ouverte, et quand. */
-type Session = { owner: string; alive: boolean; origin: "load" | "tab" | "other" };
+type Session = { owner: string; alive: boolean; origin: "load" | "tab" | "other"; openedAt: number };
 
 /** Un appel en route : parti avec le cookie `token`, il passe par les trois temps de l'en-tête. */
 type InFlight = {
@@ -125,6 +136,7 @@ const seen = {
   sessionCalls: 0,
   refusedByHeader: 0,
   replaysRefusedByHeader: 0,
+  windowSteps: 0,
   writesDuringLogout: 0,
   lostAnswers: 0,
   lostBodies: 0,
@@ -165,13 +177,15 @@ async function play(seed: number): Promise<void> {
 
   /** Le pas de l'essai. */
   let tick = 0;
+  /** Combien de fois sur une, une relecture traitée sous Alice ouvre la fenêtre de R460. */
+  const windowRate = seed % 2 === 0 ? 0.5 : 0.25;
   // Le serveur : les sessions (jeton → session), le cookie du navigateur.
   const sessions = new Map<number, Session>();
   let tokens = 0;
   let cookie: number | null = null;
   const open = (owner: string, origin: Session["origin"]) => {
     tokens += 1;
-    sessions.set(tokens, { owner, alive: true, origin });
+    sessions.set(tokens, { owner, alive: true, origin, openedAt: tick });
     journal.push(`⇢ serveur : session ${tokens} ouverte, ${owner} (${origin})`);
     return tokens;
   };
@@ -194,6 +208,8 @@ async function play(seed: number): Promise<void> {
   let changing = 0;
   /** L'essai relit lui-même le compte : l'appel qui part n'est pas une relecture d'`api.ts`. */
   let reading = false;
+  /** Le pas où est partie la dernière relecture d'`api.ts` dont la page a lu la réponse. */
+  let lastReadingSentAt: number | undefined;
   /** L'appel qui part maintenant perdra son corps après ses en-têtes. */
   let nextLosesBody = false;
 
@@ -217,6 +233,19 @@ async function play(seed: number): Promise<void> {
         if (write.sends > 2) breach(`${key} repart une deuxième fois`);
         if (logouts !== write.logoutsAtSend) breach(`${key}, parti avant une déconnexion, repart`);
         if (write.duringLogout) breach(`${key}, parti pendant une déconnexion, repart`);
+        // Les gardes du client (R460 à R462, R480) : un rejeu ne part avec le cookie d'une session
+        // de Bruno que dans la fenêtre, une session qu'un autre onglet a ouverte après le départ
+        // de la dernière relecture lue ; le serveur doit alors le refuser (plus bas, `process`).
+        const session = token === null ? null : sessions.get(token)!;
+        if (session && session.owner !== ALICE) {
+          const window =
+            session.origin === "other" &&
+            lastReadingSentAt !== undefined &&
+            session.openedAt > lastReadingSentAt;
+          if (!window) {
+            breach(`${key}, parti sous Alice, repart sous ${session.owner} (session ${token})`);
+          }
+        }
       }
     }
     const verification = method === "GET" && path === "/api/v1/me" && !reading;
@@ -267,6 +296,16 @@ async function play(seed: number): Promise<void> {
       const owner = ownerOf(token)!;
       if (call.verification && owner !== ALICE) seen.refusedOtherAccount += 1;
       call.outcome = { status: 200, body: me(owner) };
+      // La fenêtre de R460, menée exprès : une relecture d'`api.ts` vient d'être traitée sous la
+      // session d'Alice, et un autre onglet se connecte sous Bruno avant que la page lise la
+      // réponse. Le rejeu qu'elle permet part avec le cookie de Bruno ; le serveur le refuse
+      // (R540). Hors d'une session de l'onglet en route, qui ferait relire le compte (R462).
+      if (call.verification && owner === ALICE && changing === 0 && next() < windowRate) {
+        seen.windowSteps += 1;
+        journal.push("autre onglet : connexion de bruno, pendant la relecture");
+        close(cookie);
+        cookie = open(BRUNO, "other");
+      }
     } else {
       if (call.method === "PATCH" && ownerOf(token) !== ALICE) {
         breach(`${String(call.body?.title)} fait sous ${ownerOf(token)} (session ${token})`);
@@ -284,6 +323,7 @@ async function play(seed: number): Promise<void> {
   const deliver = (call: InFlight) => {
     inFlight.splice(inFlight.indexOf(call), 1);
     journal.push(`← ${call.method} ${call.path} (${call.outcome!.status})`);
+    if (call.verification) lastReadingSentAt = call.sentAt;
     call.resolve(response(call.outcome!.status, call.outcome!.body));
   };
   /** Mène l'appel d'un temps. */
@@ -558,4 +598,6 @@ test("the_random_runs_did_meet_what_they_test", () => {
   expect(seen.lostBodies).toBeGreaterThan(0);
   expect(seen.loginsDuringReading).toBeGreaterThan(0);
   expect(seen.refusedByHeader).toBeGreaterThan(0);
+  expect(seen.replaysRefusedByHeader).toBeGreaterThan(0);
+  expect(seen.windowSteps).toBeGreaterThan(0);
 });
