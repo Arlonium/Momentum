@@ -288,9 +288,10 @@ async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
         let (p50, p95) = (percentile(&times, 0.5), percentile(&times, 0.95));
         println!(
             "MESURE frappe vue par un autre client, page de {BLOCKS} blocs, {what} \
-             ({versions} versions coupées) : p50 {p50:?}, p95 {p95:?}, max {:?} \
-             ({KEYSTROKES} frappes)",
-            times.iter().max().unwrap()
+             ({versions} versions coupées) : p50 {p50:?}, p95 {p95:?}, max {:?}, \
+             première {:?} ({KEYSTROKES} frappes)",
+            times.iter().max().unwrap(),
+            times[0]
         );
         if every.is_zero() {
             assert_eq!(versions, KEYSTROKES, "une version avant chaque frappe");
@@ -298,6 +299,15 @@ async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
         if p95 >= TYPING_BUDGET {
             over.push(format!(
                 "frappe, {what} : p95 {p95:?} (budget {TYPING_BUDGET:?}), mesures {times:?}"
+            ));
+        }
+        // La première frappe est la seule qui suive la connexion, et le p95 au plus proche rang
+        // écarte toujours la plus lente des vingt : elle est jugée à part (Ruling R488). Sans
+        // version seulement : précédée d'une version, elle paie aussi le disque du coureur (R487).
+        if !every.is_zero() && times[0] >= TYPING_BUDGET {
+            over.push(format!(
+                "première frappe après la connexion, {what} : {:?} (budget {TYPING_BUDGET:?})",
+                times[0]
             ));
         }
     }
