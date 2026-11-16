@@ -1303,10 +1303,12 @@ fn an_escaped_mark_value_is_counted_in_the_bound() {
     );
 }
 
-/// Relecture du tour 2, T3 (mutation B4) : la copie de Mona porte trente marques sur tout son
+/// Relecture du tour 2, T3 (mutation B4) : la copie de Mona porte des marques lourdes sur tout son
 /// texte ; Tom avait tapé au milieu de X un texte sans marque. Le morceau reporté défait puis
-/// rétablit les trente marques de la copie autour de lui, et la borne haute le compte
-/// (l'assertion de débogage le vérifie).
+/// rétablit les marques de la copie autour de lui, et la borne haute le compte (l'assertion de
+/// débogage le vérifie). Depuis R431, ce sont les huit marques du schéma (un lien de 1 500 octets,
+/// deux couleurs de 90) : les trente marques `m0` à `m29` d'avant, hors du schéma, étaient
+/// refusées par la garde (Ruling R536, sens gardé).
 #[test]
 fn a_plain_piece_amid_the_copy_marks_is_counted_in_the_bound() {
     let (state, ids) = yrs_page();
@@ -1328,9 +1330,26 @@ fn a_plain_piece_amid_the_copy_marks_is_counted_in_the_bound() {
         yrs::Xml::insert_attribute(&copy, &mut txn, "id", x.clone());
         let paragraph = copy.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
         let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+        // Des marques du schéma, lourdes (Ruling R431 : la garde refuse toute autre marque d'un
+        // client) : un lien de 1 500 octets, deux couleurs de 90, et les cinq marques simples.
         let mut marks = yrs::types::Attrs::new();
-        for k in 0..30 {
-            marks.insert(format!("m{k}").into(), yrs::Any::from("v".repeat(50)));
+        let field = |key: &str, value: String| {
+            yrs::Any::from(std::collections::HashMap::from([(
+                key.to_string(),
+                yrs::Any::from(value),
+            )]))
+        };
+        marks.insert("link".into(), field("href", "h".repeat(1_500)));
+        marks.insert("textColor".into(), field("stringValue", "t".repeat(90)));
+        marks.insert(
+            "backgroundColor".into(),
+            field("stringValue", "b".repeat(90)),
+        );
+        for simple in ["bold", "italic", "underline", "strike", "code"] {
+            marks.insert(
+                simple.into(),
+                yrs::Any::from(std::collections::HashMap::<String, yrs::Any>::new()),
+            );
         }
         text.insert_with_attributes(&mut txn, 0, "Bloc X", marks);
         root.remove_range(&mut txn, 0, 1);
