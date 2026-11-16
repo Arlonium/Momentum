@@ -262,6 +262,39 @@ test.describe("blocs riches", () => {
   });
 });
 
+/**
+ * Une page de formules (Task C2, R423) : cinquante équations de 10 000 caractères, sans macro,
+ * après un paragraphe. Leur mise en forme figeait l'ouverture 22 s ; une formule n'est plus mise en
+ * forme qu'à l'écran, l'une après l'autre, quelques millisecondes par image : l'ouverture tient le
+ * budget des 1 000 blocs, et l'image la plus longue est consignée.
+ */
+test.describe("formules", () => {
+  let heavy: Target[] = [];
+
+  test.beforeAll(async ({ playwright }) => {
+    test.setTimeout(180_000);
+    const request = await playwright.request.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      heavy = [];
+      for (let i = 0; i < OPENINGS; i++) {
+        const tag = unique();
+        const { id } = await createPage(request, { title: `Mesure formules ${tag}` });
+        const formula = Array.from({ length: 400 }, (_, k) => `\\frac{a_{${k}}}{b^{2}}`).join(" + ");
+        const blocks = [blockText(tag, 1), ...Array.from({ length: 50 }, () => `$$\n${formula}\n$$`)];
+        await putMmd(request, id, `${blocks.join("\n\n")}\n`);
+        heavy.push({ id, first: blockText(tag, 1) });
+      }
+    } finally {
+      await request.dispose();
+    }
+    await new Promise((done) => setTimeout(done, SERVER_IDLE_CLOSE_MS + 2_000));
+  });
+
+  test("open_page_of_50_long_formulas_under_300ms", async ({ browser }) => {
+    expect(await openSmallPages(browser, " : cinquante formules de 10 000 caractères", heavy)).toBeLessThan(300);
+  });
+});
+
 test("open_10000_block_page_under_3s", async ({ browser }) => {
   const { total, longestFrame } = await openFromTree(browser, large!);
   console.log(

@@ -3,9 +3,10 @@
 // d'ailleurs (MMD, un agent, un autre client) : une définition, une imbrication qui ferait planter la
 // mise en page, une formule invalide se montrent en texte, avec ce qui les empêche ; KaTeX ne suit
 // jamais un lien.
+import { NodeSelection } from "prosemirror-state";
 import { afterEach, expect, test } from "vitest";
 import * as Y from "yjs";
-import { drag, exchange, peer, REMOTE, seedState, storedProps, stored, type Seed } from "../../test/editors";
+import { containerOf, drag, exchange, peer, REMOTE, seedState, storedProps, stored, type Seed } from "../../test/editors";
 import {
   blockOf,
   blockWindow,
@@ -14,6 +15,7 @@ import {
   formulasShown,
   mountEditor,
   press,
+  renewSession,
   type Mounted,
 } from "../../test/richEditor";
 import { until } from "../../test/hooks";
@@ -301,4 +303,33 @@ test("what_was_typed_stays_in_the_field_when_another_moves_or_changes_the_equati
   await flush();
   await exchange(server, [mona, tom]);
   expect(storedProps(server, "q").latex).toBe("\\int_0^1 f(x)");
+});
+
+test("ctrl_alt_enter_opens_the_window_of_a_selected_equation", async () => {
+  const m = await mountEditor({ blocks: page("x^2") });
+  m.editor.focus();
+  m.editor.transact((tr) => tr.setSelection(NodeSelection.create(tr.doc, containerOf(tr.doc, "q").pos + 1)));
+  const event = new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, altKey: true, bubbles: true, cancelable: true });
+  m.editor.prosemirrorView.dom.dispatchEvent(event);
+  await flush();
+  expect(event.defaultPrevented).toBe(true);
+  expect(blockWindow(WINDOW)?.querySelector("textarea")?.value).toBe("x^2");
+});
+
+test("a_formula_typed_before_losing_the_right_stays_within_reach", async () => {
+  // La page passe en lecture seule (une session neuve) : la formule tapée reste dans la fenêtre, en
+  // lecture seule, et, la fenêtre fermée, le bouton du bloc la rouvre (R472).
+  const m = await mountEditor({ blocks: page("x"), pageId: "page-eq" });
+  fill(await openWindow(m), "\beta");
+  await renewSession(m, { editable: false, pageId: "page-eq" });
+  const dialog = blockWindow(WINDOW)!;
+  expect(dialog.querySelector("textarea")!.readOnly).toBe(true);
+  expect(dialog.querySelector('[role="status"]')?.textContent).toContain("Tu ne peux pas modifier cette page");
+  press(dialog.querySelector("textarea")!, "Escape");
+  await flush();
+  const button = blockOf(m, "q").querySelector<HTMLButtonElement>('button[aria-label="Formule non enregistrée de l\'équation"]');
+  expect(document.activeElement).toBe(button);
+  button!.click();
+  await flush();
+  expect(blockWindow(WINDOW)!.querySelector("textarea")!.value).toBe("\beta");
 });
