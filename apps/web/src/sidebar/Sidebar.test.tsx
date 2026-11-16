@@ -221,6 +221,27 @@ test("favorites_thaw_once_the_pointer_leaves_the_window_from_the_sidebar", async
   expect(shown()).toEqual(["A", "B"]);
 });
 
+test("favorites_thaw_at_the_first_pointer_move_after_a_drag_that_says_no_end", async () => {
+  // N2 : la ligne tenue a quitté le document pendant le glisser (mise à la corbeille ailleurs) :
+  // `dragend` va à la ligne détachée, et rien n'arrive au document. Le premier `pointerover`
+  // d'après, sur le contenu, dit que le glisser est fini (R419).
+  await show(["a"]);
+  await pointer(true);
+  const title = host.querySelector(".mm-sections .mm-section-title")!;
+  await act(async () => {
+    title.dispatchEvent(new Event("dragstart", { bubbles: true }));
+    nav().dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: null }));
+  });
+  await show(["a", "b"]);
+  expect(shown()).toEqual(["A"]);
+  const content = document.createElement("main");
+  document.body.append(content);
+  await act(async () => {
+    content.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: null }));
+  });
+  expect(shown()).toEqual(["A", "B"]);
+});
+
 test("favorites_hold_still_while_a_page_is_dragged_in_the_tree", async () => {
   // I2 : au début d'un glisser HTML5, Chromium envoie `pointercancel`, puis `pointerout` et
   // `pointerleave` ; plus aucun événement de pointeur jusqu'à la fin du glisser. Le pointeur tient
