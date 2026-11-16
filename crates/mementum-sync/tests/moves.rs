@@ -476,7 +476,8 @@ const ID_ORDERS: [&str; 2] = ["mona-first", "tom-first"];
 
 /// Chaque scène des octets du navigateur où Tom tape (ou ajoute un sous-bloc) dans un bloc que
 /// Mona déplace, et la page voulue quand le déplacement arrive après : l'acteur la donne aux
-/// quatre endroits (Task 13b), dans les deux ordres des identifiants de client.
+/// quatre endroits (Task 13b), dans les deux ordres des identifiants de client. Pour
+/// `concurrent-delete`, la page voulue est celle où le serveur s'abstient (Ruling R450).
 const CARRIED_SCENES: [(&str, &str); 12] = [
     ("s1", "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »"),
     (
@@ -507,9 +508,10 @@ const CARRIED_SCENES: [(&str, &str); 12] = [
         "mover-typed-too",
         "y « Bloc Y » | z « Bloc Z » | x « Tom : Bloc X de Mona »",
     ),
+    // Le serveur s'abstient : la copie de Mona porte « oc », que Tom a effacé (Ruling R450).
     (
         "concurrent-delete",
-        "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »",
+        "y « Bloc Y » | z « Bloc Z » | x « Bloc X »",
     ),
 ];
 
@@ -592,6 +594,267 @@ async fn carried_final_states_are_kept_for_the_client() {
             );
         }
     }
+}
+
+/// Le texte du bloc `id` chez `client`, s'il y est.
+fn text_of(client: &Client, id: &str) -> Option<String> {
+    client.blocks().iter().find(|b| b.id == id).map(block_text)
+}
+
+/// Une page « Bloc X, Bloc Y, Bloc Z » où Tom a tapé « de Tom » à la fin de X (le serveur l'a), et
+/// le déplacement de X sous Z que Mona avait fait sans la voir, pas encore envoyé. Mona est
+/// connectée, et a reçu la frappe de Tom : pour jouer une Mona qui revient en ligne, le test passe
+/// par [`send_from_offline`].
+async fn edited_then_moved() -> (Fixture, Client, Client, Ids, Vec<u8>) {
+    let s = Scene::built().await;
+    s.tom.send_update(&s.edited);
+    processed(&s.tom).await;
+    let Scene {
+        f,
+        mona,
+        tom,
+        ids,
+        moved,
+        ..
+    } = s;
+    (f, mona, tom, ids, moved)
+}
+
+/// Le déplacement `moved`, fait par Mona hors ligne, envoyé tel quel au serveur, puis appliqué
+/// chez elle. Ce qu'elle renvoie en l'appliquant (la suppression de ce qu'elle a reçu de
+/// l'original entre-temps) ne change rien au serveur.
+fn send_from_offline(mona: &Client, moved: &[u8]) {
+    mona.send_update(moved);
+    mona.apply_local(moved);
+}
+
+/// X, juste sous Z, porte la frappe de Tom.
+fn carried(client: &Client, ids: &Ids) -> bool {
+    let blocks = client.blocks();
+    blocks
+        .last()
+        .is_some_and(|b| b.id == ids.x && block_text(b) == format!("Bloc X{TYPED}"))
+}
+
+/// Ruling R375 (« l'expéditeur compris », mutation M23 de la relecture) : Mona envoie son
+/// déplacement et ne fait rien d'autre ; le report de la frappe de Tom lui arrive par la
+/// diffusion, sans resynchronisation (les autres tests passent par `processed`, qui la sert
+/// de toute façon).
+#[tokio::test]
+async fn the_carry_reaches_the_sender_without_a_resync() {
+    let (_f, mona, tom, ids, moved) = edited_then_moved().await;
+    let resyncs = mona.step2_count();
+    send_from_offline(&mona, &moved);
+    assert!(
+        mona.wait_until(WAIT, |c| carried(c, &ids)).await,
+        "Mona n'a pas reçu le report : {}",
+        line(&mona.blocks())
+    );
+    assert_eq!(mona.step2_count(), resyncs, "aucune resynchronisation");
+    assert!(tom.wait_until(WAIT, |c| carried(c, &ids)).await);
+}
+
+/// Ruling R454 : un témoin, ni Mona ni Tom, reçoit le déplacement de Mona et le report du serveur
+/// **en un seul message** ; Mona reçoit le report en un seul message aussi. Barrière : une frappe
+/// de Tom diffusée après, que le témoin et Mona reçoivent derrière (la diffusion garde l'ordre).
+#[tokio::test]
+async fn a_witness_receives_the_move_and_its_carry_in_one_message() {
+    let (f, mona, tom, ids, moved) = edited_then_moved().await;
+    let witness = f.client().await;
+    let wanted = format!("Bloc X{TYPED}");
+    assert!(
+        witness
+            .wait_until(WAIT, |c| text_of(c, &ids.x).as_deref()
+                == Some(wanted.as_str()))
+            .await,
+        "le témoin a la frappe de Tom"
+    );
+    let (seen_by_witness, seen_by_mona) = (witness.updates_received(), mona.updates_received());
+    send_from_offline(&mona, &moved);
+    assert!(
+        tom.wait_until(WAIT, |c| c.blocks().last().is_some_and(|b| b.id == ids.x))
+            .await,
+        "Tom a reçu le déplacement"
+    );
+    tom.type_text(&ids.y, "!");
+    for (who, client, before) in [
+        ("le témoin", &witness, seen_by_witness),
+        ("Mona", &mona, seen_by_mona),
+    ] {
+        assert!(
+            client
+                .wait_until(WAIT, |c| text_of(c, &ids.y).as_deref() == Some("Bloc Y!"))
+                .await,
+            "{who} a reçu la barrière"
+        );
+        assert_eq!(
+            text_of(client, &ids.x).as_deref(),
+            Some(wanted.as_str()),
+            "{who}"
+        );
+        assert_eq!(
+            client.updates_received() - before,
+            2,
+            "{who} : un message pour ce que le serveur a fait du déplacement, un pour la barrière"
+        );
+    }
+}
+
+/// Ruling R454 : deux glissers du même bloc (S6, octets du navigateur) ; le témoin reçoit le
+/// second et le correctif du dédoublonnage en un seul message, et ne voit donc jamais deux
+/// exemplaires du bloc (BlockNote les renommerait).
+#[tokio::test]
+async fn a_witness_never_sees_two_copies_of_a_block_moved_twice() {
+    for order in ID_ORDERS {
+        let s = Scene::fixture(order, "s6").await;
+        s.mona.send_update(&s.moved);
+        processed(&s.mona).await;
+        let witness = s.f.client().await;
+        assert!(
+            witness
+                .wait_until(WAIT, |c| line(&c.blocks()) == line(&s.mona.blocks()))
+                .await
+        );
+        let before = witness.updates_received();
+        s.tom.send_update(&s.edited);
+        processed(&s.tom).await;
+        let fixed = line(&s.tom.blocks());
+        let mut seen = Vec::new();
+        assert!(
+            witness
+                .wait_until(WAIT, |c| {
+                    seen.push(line(&c.blocks()));
+                    line(&c.blocks()) == fixed
+                })
+                .await,
+            "{order} : le témoin a la page du serveur"
+        );
+        assert_eq!(witness.updates_received() - before, 1, "{order} : {seen:?}");
+        for page in &seen {
+            assert_eq!(page.matches("x «").count(), 1, "{order} : {page}");
+        }
+    }
+}
+
+/// C1 de la relecture : une mise à jour de quelques kilo-octets recrée X tout au fond de la page,
+/// le nœud de contenu de la copie à la profondeur `MAX_YJS_DEPTH`, et ne supprime de l'original
+/// que son élément et son nœud de contenu (son texte est « non vu »). Le serveur l'accepte, ne
+/// reporte rien au-delà de la borne, et la page se rouvre après l'arrêt de son acteur : par le
+/// journal relu, et par un `Hub` neuf.
+#[tokio::test]
+async fn a_recreation_beyond_the_depth_bound_leaves_a_page_that_reopens() {
+    use mementum_crdt::{FRAGMENT, MAX_YJS_DEPTH, PageDoc};
+    use yrs::branch::BranchID;
+    use yrs::updates::decoder::Decode;
+    use yrs::{
+        Doc, OffsetKind, Options, ReadTxn, Transact, Update, Xml, XmlElementPrelim, XmlElementRef,
+        XmlFragment, XmlOut,
+    };
+
+    fn element(out: Option<XmlOut>) -> XmlElementRef {
+        match out {
+            Some(XmlOut::Element(e)) => e,
+            other => panic!("pas un élément : {other:?}"),
+        }
+    }
+    fn id_of(e: &XmlElementRef) -> yrs::ID {
+        match AsRef::<yrs::branch::Branch>::as_ref(e).id() {
+            BranchID::Nested(id) => id,
+            BranchID::Root(_) => panic!("racine"),
+        }
+    }
+    fn var(out: &mut Vec<u8>, mut n: u64) {
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Bloc X\n\nBloc Y\n").await;
+    let x = f.ids().await[0].clone();
+    let hostile = f.client().await;
+    let state = hostile.page().unwrap().encode_state();
+    let doc = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(&state).unwrap())
+        .unwrap();
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let (container, content) = {
+        let txn = doc.transact();
+        let group = element(fragment.get(&txn, 0));
+        let c = element(group.get(&txn, 0));
+        let p = element(c.get(&txn, 0));
+        (c, p)
+    };
+    let before = doc.transact().state_vector();
+    {
+        let mut txn = doc.transact_mut();
+        let mut parent = element(fragment.get(&txn, 0));
+        for _ in 2..=(MAX_YJS_DEPTH - 2) {
+            parent = parent.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
+        }
+        let copy = parent.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+        copy.insert_attribute(&mut txn, "id", x.clone());
+        copy.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+    }
+    let inserted = doc.transact().encode_diff_v1(&before);
+    let (c, p) = (id_of(&container), id_of(&content));
+    let mut deleted = Vec::new();
+    var(&mut deleted, 0);
+    if c.client == p.client {
+        var(&mut deleted, 1);
+        var(&mut deleted, c.client.get());
+        var(&mut deleted, 2);
+        for id in [c, p] {
+            var(&mut deleted, u64::from(id.clock));
+            var(&mut deleted, 1);
+        }
+    } else {
+        var(&mut deleted, 2);
+        for id in [c, p] {
+            var(&mut deleted, id.client.get());
+            var(&mut deleted, 1);
+            var(&mut deleted, u64::from(id.clock));
+            var(&mut deleted, 1);
+        }
+    }
+    let update = yrs::merge_updates_v1([inserted.as_slice(), deleted.as_slice()]).unwrap();
+    hostile.send_update(&update);
+    processed(&hostile).await;
+    assert!(!hostile.is_closed(), "la mise à jour est acceptée");
+    drop(hostile);
+
+    // L'acteur s'arrête (arrêt du serveur, ou page vide depuis `idle_close`) ; un autre serveur
+    // rouvre la page sur la même base.
+    f.hub.shutdown().await;
+    let stored = f.store.load_doc(f.page).await.unwrap();
+    let updates = stored
+        .snapshot
+        .iter()
+        .map(|(_, s)| s.as_slice())
+        .chain(stored.updates.iter().map(|(_, u)| u.as_slice()));
+    let reread = PageDoc::from_updates(updates);
+    assert!(
+        reread.is_ok(),
+        "le journal ne se relit plus : {:?}",
+        reread.err()
+    );
+    let hub = Hub::new(f.store.clone(), SyncConfig::default());
+    let reopened = hub.read_blocks(f.page).await;
+    assert!(
+        reopened.is_ok(),
+        "la page ne se rouvre plus : {:?}",
+        reopened.err()
+    );
 }
 
 /// Les limites connues (Ruling R340) : ce que chaque test dit voulu n'est pas tenu, et il

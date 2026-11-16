@@ -45,6 +45,10 @@ pub enum CrdtError {
     /// Structure que le schéma de BlockNote refuse (Ruling R18), avec ce qui
     /// la casse.
     Structure(String),
+    /// Le report d'un bloc recréé, écrit dans la page, ne passe pas la relecture d'une entrée du
+    /// journal (Ruling R452) : la page est à jeter, et la mise à jour d'un client se reprend sans
+    /// report (`PageDoc::apply_client_update_alone`).
+    CarryRefused(String),
 }
 
 impl fmt::Display for CrdtError {
@@ -60,6 +64,7 @@ impl fmt::Display for CrdtError {
                 "arbre trop profond : {MAX_YJS_DEPTH} éléments imbriqués au plus"
             ),
             CrdtError::Structure(why) => write!(f, "structure refusée par BlockNote : {why}"),
+            CrdtError::CarryRefused(why) => write!(f, "report d'un bloc recréé refusé : {why}"),
         }
     }
 }

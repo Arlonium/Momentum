@@ -288,6 +288,8 @@ pub struct Client {
 struct Shared {
     /// Étapes 2 reçues du serveur.
     step2: AtomicU64,
+    /// Mises à jour du document reçues du serveur (messages `Update`, hors étapes 2).
+    updates: AtomicU64,
     /// Plus rien ne viendra du serveur (connexion fermée ou message illisible).
     closed: AtomicBool,
     /// Awareness locale et reçue.
@@ -353,6 +355,7 @@ impl Client {
         let (changes_tx, changes) = watch::channel(0);
         let shared = Arc::new(Shared {
             step2: AtomicU64::new(0),
+            updates: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             awareness: Mutex::new(Awareness::new(doc.clone())),
             page_events: Mutex::new(Vec::new()),
@@ -431,6 +434,12 @@ impl Client {
     /// Nombre d'étapes 2 reçues du serveur.
     pub fn step2_count(&self) -> u64 {
         self.shared.step2.load(Ordering::SeqCst)
+    }
+
+    /// Nombre de mises à jour du document reçues du serveur (messages `Update` y-websocket, hors
+    /// étapes 2).
+    pub fn updates_received(&self) -> u64 {
+        self.shared.updates.load(Ordering::SeqCst)
     }
 
     /// Le serveur a fermé la connexion (ou envoyé un message illisible).
@@ -631,6 +640,7 @@ fn receive(
                 if !apply(&update) {
                     return false;
                 }
+                shared.updates.fetch_add(1, Ordering::SeqCst);
             }
             Ok(Message::Awareness(update)) => {
                 if shared.awareness().apply_update(update).is_err() {

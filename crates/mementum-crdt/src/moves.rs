@@ -34,6 +34,7 @@
 //! après le déplacement (Ruling R222).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use yrs::types::Attrs;
 use yrs::types::text::{ChangeKind, YChange};
@@ -44,13 +45,33 @@ use yrs::{
 };
 
 use crate::MAX_YJS_DEPTH;
-use crate::blocknote::{BLOCK_CONTAINER, BLOCK_GROUP, attr_string, elements};
+use crate::blocknote::{BLOCK_CONTAINER, BLOCK_GROUP, COLUMN, attr_string, elements};
 use crate::guard::Shape;
 use crate::structure::depth_of;
 
 /// Au-delà de ce nombre d'horloges supprimées, les originaux se cherchent en parcourant la page
 /// plutôt que le jeu de suppressions (une étape 2 porte toutes les suppressions de son client).
 const MAX_SCANNED_CLOCKS: u64 = 1 << 16;
+
+/// Au plus ce que le report d'une mise à jour recopie de sous-blocs (Ruling R451) : au-delà, il
+/// n'écrit rien. Un client honnête ne fait reporter que ce que d'autres ont mis dans le bloc
+/// depuis qu'il l'a vu ; sans borne, une copie vide de quelques dizaines d'octets faisait
+/// recopier, écrire et diffuser tout un sous-arbre, autant de fois que voulu.
+pub(crate) const MAX_CARRIED_BLOCKS: usize = 64;
+
+/// Au plus ce que le report d'une mise à jour écrit, en octets (Ruling R451) : estimé avant
+/// d'écrire, puis mesuré sur la mise à jour encodée (`PageDoc::apply_client_update`).
+pub(crate) const MAX_CARRIED_BYTES: usize = 64 * 1024;
+
+/// Ce que [`carry`] a fait.
+pub(crate) enum Carried {
+    /// Rien à écrire.
+    Nothing,
+    /// Écrit dans ces copies : `(identifiant de bloc, élément de la copie)`.
+    Written(Vec<(String, ID)>),
+    /// Rien d'écrit : le report dépasserait ses bornes (Ruling R451). La raison, pour le journal.
+    Withheld(String),
+}
 
 /// Un bloc recréé par une mise à jour, et ce qu'il faut reporter sur sa copie.
 pub(crate) struct Recreated {
@@ -96,10 +117,13 @@ struct ChildCarry {
 /// `txn` est la transaction qui l'appliquera, encore intacte : la lecture du texte y découpe
 /// des blocs de yrs aux bornes du jeu de suppressions, une fois pour tous les blocs recréés
 /// ([`Items`]), ce que l'application ferait de toute façon, sans rien changer au contenu.
+///
+/// `walks` compte les parcours de la page faits pour trouver les originaux (pour les tests).
 pub(crate) fn capture(
     txn: &mut TransactionMut,
     fragment: &XmlFragmentRef,
     shape: &Shape,
+    walks: &AtomicU64,
 ) -> Vec<Recreated> {
     let state = txn.state_vector();
     let candidates = shape.inserted_blocks(&state);
@@ -117,6 +141,7 @@ pub(crate) fn capture(
     let originals = if clocks <= MAX_SCANNED_CLOCKS {
         originals_in_deletions(txn, shape, &state, &wanted)
     } else {
+        walks.fetch_add(1, Ordering::SeqCst);
         originals_in_page(txn, fragment, &deleted, &wanted)
     };
     let mut items = Items::new(state, &deleted);
@@ -153,22 +178,282 @@ pub(crate) fn capture(
     found
 }
 
-/// Écrit dans chaque copie, la mise à jour appliquée, ce que [`capture`] a relevé. Une copie
-/// absente, supprimée ou qui n'est plus ce qu'elle était ne reçoit rien.
-pub(crate) fn carry(txn: &mut TransactionMut, recreated: &[Recreated]) {
+/// Écrit dans chaque copie, la mise à jour appliquée, ce que [`capture`] a relevé, en trois
+/// temps : ce qui s'écrirait, copie par copie ; les règles qui portent sur tout le report ; puis
+/// l'écriture, ou rien.
+///
+/// - Une copie absente, supprimée, qui n'est plus ce qu'elle était, ou qui n'est pas posée dans
+///   un groupe de blocs ou une colonne (Ruling R452), ne reçoit rien.
+/// - Rien ne s'écrit au-delà de [`MAX_YJS_DEPTH`] : ni un texte neuf, ni un sous-bloc (R452).
+/// - Le texte d'une copie qui a plus de caractères que ce que l'auteur avait vu n'est reporté que
+///   si ces caractères en plus sont exactement ce qu'il a créé puis supprimé dans la même mise
+///   à jour (`created_and_deleted` : sa frappe dans l'original, partie avec lui), dans une seule
+///   copie. Sinon l'auteur a pu effacer un caractère vu, et en retaper un pareil ailleurs : la
+///   place se lirait sur lui, et le texte reporté tomberait ailleurs, chez tous (Ruling R450).
+/// - Au-delà de [`MAX_CARRIED_BLOCKS`] sous-blocs ou d'environ [`MAX_CARRIED_BYTES`] octets, rien
+///   ne s'écrit (Ruling R451).
+pub(crate) fn carry(
+    txn: &mut TransactionMut,
+    recreated: &[Recreated],
+    created_and_deleted: u64,
+) -> Carried {
+    let mut plans: Vec<Plan> = Vec::new();
     for r in recreated {
-        let Some(copy) = live_element(txn, &r.copy) else {
+        let Some(copy) = copy_of(txn, r) else {
             continue;
         };
-        if copy.tag().as_ref() != BLOCK_CONTAINER || attr_string(txn, &copy, "id") != r.block_id {
-            continue;
+        let text = r.text.as_ref().and_then(|text| plan_text(txn, &copy, text));
+        let children = plan_children(txn, &copy, r);
+        if text.is_some() || !children.trees.is_empty() {
+            plans.push(Plan {
+                recreated: r,
+                copy,
+                text,
+                children,
+            });
         }
-        if let Some(text) = &r.text {
-            carry_text(txn, &copy, text);
+    }
+    let grown: Vec<usize> = plans
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.text.as_ref().is_some_and(|t| t.extra > 0))
+        .map(|(i, _)| i)
+        .collect();
+    let insertions_only = match grown.as_slice() {
+        [] => true,
+        [one] => plans[*one]
+            .text
+            .as_ref()
+            .is_some_and(|t| t.extra == created_and_deleted),
+        _ => false,
+    };
+    if !insertions_only {
+        for i in grown {
+            plans[i].text = None;
         }
-        if !r.children.is_empty() {
-            carry_children(txn, &copy, r);
+    }
+    plans.retain(|p| p.text.is_some() || !p.children.trees.is_empty());
+    let blocks: usize = plans.iter().map(|p| p.children.blocks()).sum();
+    let bytes: usize = plans.iter().map(Plan::bytes).sum();
+    if blocks > MAX_CARRIED_BLOCKS || bytes > MAX_CARRIED_BYTES {
+        return Carried::Withheld(format!(
+            "report de {blocks} sous-blocs et d'environ {bytes} octets, au-delà de \
+             {MAX_CARRIED_BLOCKS} sous-blocs ou {MAX_CARRIED_BYTES} octets"
+        ));
+    }
+    let mut written = Vec::new();
+    for plan in plans {
+        let r = plan.recreated;
+        if plan.write(txn) {
+            written.push((r.block_id.clone(), r.copy));
         }
+    }
+    if written.is_empty() {
+        Carried::Nothing
+    } else {
+        Carried::Written(written)
+    }
+}
+
+/// La copie d'un bloc recréé, si elle reçoit un report : vivante, `blockContainer`, toujours à
+/// l'identifiant relevé, posée dans un groupe de blocs ou une colonne, comme BlockNote les pose
+/// (Ruling R452 : une copie posée ailleurs, au fond d'une chaîne d'éléments, ne reçoit rien).
+fn copy_of<T: ReadTxn>(txn: &T, r: &Recreated) -> Option<XmlElementRef> {
+    let copy = live_element(txn, &r.copy)?;
+    if copy.tag().as_ref() != BLOCK_CONTAINER || attr_string(txn, &copy, "id") != r.block_id {
+        return None;
+    }
+    match copy.parent() {
+        Some(XmlOut::Element(parent)) if matches!(parent.tag().as_ref(), BLOCK_GROUP | COLUMN) => {
+            Some(copy)
+        }
+        _ => None,
+    }
+}
+
+/// Ce qui s'écrirait dans une copie.
+struct Plan<'a> {
+    recreated: &'a Recreated,
+    copy: XmlElementRef,
+    text: Option<TextPlan>,
+    children: ChildrenPlan<'a>,
+}
+
+impl Plan<'_> {
+    /// Une estimation de ce que l'écriture pèse, en octets.
+    fn bytes(&self) -> usize {
+        let text: usize = self.text.as_ref().map_or(0, |t| {
+            t.inserts
+                .iter()
+                .map(|(_, piece)| piece.text.len() + attrs_bytes(&piece.attrs) + 16)
+                .sum()
+        });
+        text + self
+            .children
+            .trees
+            .iter()
+            .map(|c| c.tree.bytes)
+            .sum::<usize>()
+    }
+
+    /// L'écrit ; vrai si quelque chose l'a été.
+    fn write(self, txn: &mut TransactionMut) -> bool {
+        let mut wrote = false;
+        if let Some(text) = self.text {
+            let node = text
+                .node
+                .unwrap_or_else(|| text.content.insert(txn, 0, XmlTextPrelim::new("")));
+            // Du dernier au premier : les places relevées restent justes, et deux morceaux à la
+            // même place gardent leur ordre.
+            for (at, piece) in text.inserts.into_iter().rev() {
+                node.insert_with_attributes(txn, at, &piece.text, piece.attrs.clone());
+            }
+            wrote = true;
+        }
+        if !self.children.trees.is_empty() {
+            let group = match self.children.group {
+                Some(group) => group,
+                None => self
+                    .copy
+                    .push_back(txn, XmlElementPrelim::empty(BLOCK_GROUP)),
+            };
+            let seen = &self.recreated.seen_children;
+            let mut cursor: Option<(usize, u32)> = None;
+            for child in self.children.trees {
+                let index = match cursor {
+                    Some((after, index)) if after == child.after => index,
+                    _ => index_after(txn, &group, &seen[..child.after]),
+                };
+                child.tree.write(txn, &group, index);
+                cursor = Some((child.after, index + 1));
+            }
+            wrote = true;
+        }
+        wrote
+    }
+}
+
+/// Le texte qui s'écrirait dans une copie.
+struct TextPlan {
+    content: XmlElementRef,
+    /// Le texte de la copie ; `None` : il est à créer.
+    node: Option<XmlTextRef>,
+    /// Chaque morceau dont la place est sûre, à sa place en UTF-16.
+    inserts: Vec<(u32, Unseen)>,
+    /// Ce que la copie a de plus que ce que l'auteur avait vu, en UTF-16.
+    extra: u64,
+}
+
+/// Le texte non vu dont la place est sûre dans la copie, et ce qui s'écrirait. `None` si rien ne
+/// s'écrit : type changé, contenu à plusieurs textes, aucune place sûre, ou texte neuf au-delà de
+/// la borne de profondeur (Ruling R452).
+fn plan_text(txn: &TransactionMut, copy: &XmlElementRef, text: &TextCarry) -> Option<TextPlan> {
+    let content = elements(txn, copy)
+        .into_iter()
+        .find(|e| e.tag().as_ref() != BLOCK_GROUP)?;
+    // Le type a changé chez l'auteur du déplacement : pas le cas simple (Ruling R377).
+    if content.tag().as_ref() != text.tag {
+        return None;
+    }
+    let children: Vec<XmlOut> = content.children(txn).collect();
+    let (node, chars): (Option<XmlTextRef>, Vec<char>) = match children.as_slice() {
+        [] => (None, Vec::new()),
+        [XmlOut::Text(node)] => {
+            let mut chars = Vec::new();
+            for diff in node.diff(txn, YChange::identity) {
+                match diff.insert {
+                    Out::Any(Any::String(s)) => chars.extend(s.chars()),
+                    _ => return None,
+                }
+            }
+            (Some(node.clone()), chars)
+        }
+        _ => return None,
+    };
+    if node.is_none() && depth_of(&content) + 1 > MAX_YJS_DEPTH {
+        return None;
+    }
+    let places = Places::of(&text.seen, &chars)?;
+    let inserts: Vec<(u32, Unseen)> = text
+        .unseen
+        .iter()
+        .filter_map(|piece| {
+            let at = places.sure(piece.after)?;
+            let utf16 = chars[..at].iter().map(|c| c.len_utf16() as u32).sum();
+            Some((
+                utf16,
+                Unseen {
+                    after: piece.after,
+                    text: piece.text.clone(),
+                    attrs: piece.attrs.clone(),
+                },
+            ))
+        })
+        .collect();
+    if inserts.is_empty() {
+        return None;
+    }
+    let utf16 = |chars: &[char]| chars.iter().map(|c| c.len_utf16() as u64).sum::<u64>();
+    Some(TextPlan {
+        content,
+        node,
+        inserts,
+        extra: utf16(&chars).saturating_sub(utf16(&text.seen)),
+    })
+}
+
+/// Les sous-blocs qui s'écriraient sous une copie.
+struct ChildrenPlan<'a> {
+    /// Le groupe de sous-blocs de la copie ; `None` : il est à créer.
+    group: Option<XmlElementRef>,
+    trees: Vec<&'a ChildCarry>,
+}
+
+impl ChildrenPlan<'_> {
+    fn blocks(&self) -> usize {
+        self.trees.iter().map(|c| c.tree.blocks).sum()
+    }
+}
+
+/// Les sous-blocs non vus qui tiennent sous la borne de profondeur (Ruling R374).
+fn plan_children<'a>(
+    txn: &TransactionMut,
+    copy: &XmlElementRef,
+    r: &'a Recreated,
+) -> ChildrenPlan<'a> {
+    let group = elements(txn, copy)
+        .into_iter()
+        .find(|e| e.tag().as_ref() == BLOCK_GROUP);
+    let base = match &group {
+        Some(group) => depth_of(group),
+        None => depth_of(copy) + 1,
+    };
+    let trees = r
+        .children
+        .iter()
+        .filter(|child| base + child.tree.height <= MAX_YJS_DEPTH)
+        .collect();
+    ChildrenPlan { group, trees }
+}
+
+/// Une estimation du poids de marques, en octets.
+fn attrs_bytes(attrs: &Attrs) -> usize {
+    attrs.iter().map(|(k, v)| k.len() + any_bytes(v)).sum()
+}
+
+/// Une estimation du poids d'une valeur, en octets.
+fn any_bytes(value: &Any) -> usize {
+    match value {
+        Any::String(s) => s.len() + 2,
+        Any::Buffer(b) => b.len() + 2,
+        Any::Array(values) => values.iter().map(any_bytes).sum::<usize>() + 2,
+        Any::Map(map) => {
+            map.iter()
+                .map(|(k, v)| k.len() + any_bytes(v))
+                .sum::<usize>()
+                + 2
+        }
+        _ => 9,
     }
 }
 
@@ -384,89 +669,6 @@ fn capture_children(
     (seen, unseen)
 }
 
-/// Écrit dans la copie le texte non vu dont la place est sûre.
-fn carry_text(txn: &mut TransactionMut, copy: &XmlElementRef, text: &TextCarry) {
-    let Some(content) = elements(txn, copy)
-        .into_iter()
-        .find(|e| e.tag().as_ref() != BLOCK_GROUP)
-    else {
-        return;
-    };
-    // Le type a changé chez l'auteur du déplacement : pas le cas simple.
-    if content.tag().as_ref() != text.tag {
-        return;
-    }
-    let children: Vec<XmlOut> = content.children(txn).collect();
-    let (node, chars): (Option<XmlTextRef>, Vec<char>) = match children.as_slice() {
-        [] => (None, Vec::new()),
-        [XmlOut::Text(node)] => {
-            let mut chars = Vec::new();
-            for diff in node.diff(txn, YChange::identity) {
-                match diff.insert {
-                    Out::Any(Any::String(s)) => chars.extend(s.chars()),
-                    _ => return,
-                }
-            }
-            (Some(node.clone()), chars)
-        }
-        _ => return,
-    };
-    let Some(places) = Places::of(&text.seen, &chars) else {
-        return;
-    };
-    let inserts: Vec<(u32, &Unseen)> = text
-        .unseen
-        .iter()
-        .filter_map(|piece| {
-            let at = places.sure(piece.after)?;
-            let utf16 = chars[..at].iter().map(|c| c.len_utf16() as u32).sum();
-            Some((utf16, piece))
-        })
-        .collect();
-    if inserts.is_empty() {
-        return;
-    }
-    let node = node.unwrap_or_else(|| content.insert(txn, 0, XmlTextPrelim::new("")));
-    // Du dernier au premier : les places relevées restent justes, et deux morceaux à la même
-    // place gardent leur ordre.
-    for (at, piece) in inserts.into_iter().rev() {
-        node.insert_with_attributes(txn, at, &piece.text, piece.attrs.clone());
-    }
-}
-
-/// Écrit sous la copie les sous-blocs non vus : chacun après la copie du dernier sous-bloc vu
-/// qui le précédait et qu'elle porte, sinon en tête ; ceux qui se suivaient restent ensemble,
-/// dans leur ordre.
-fn carry_children(txn: &mut TransactionMut, copy: &XmlElementRef, r: &Recreated) {
-    let mut group = elements(txn, copy)
-        .into_iter()
-        .find(|e| e.tag().as_ref() == BLOCK_GROUP);
-    let mut cursor: Option<(usize, u32)> = None;
-    for child in &r.children {
-        let base = match &group {
-            Some(group) => depth_of(group),
-            None => depth_of(copy) + 1,
-        };
-        if base + child.tree.height > MAX_YJS_DEPTH {
-            continue;
-        }
-        let group = match &group {
-            Some(group) => group.clone(),
-            None => {
-                let created = copy.push_back(txn, XmlElementPrelim::empty(BLOCK_GROUP));
-                group = Some(created.clone());
-                created
-            }
-        };
-        let index = match cursor {
-            Some((after, index)) if after == child.after => index,
-            _ => index_after(txn, &group, &r.seen_children[..child.after]),
-        };
-        child.tree.write(txn, &group, index);
-        cursor = Some((child.after, index + 1));
-    }
-}
-
 /// La place juste après le dernier de `seen` que porte `group`, sinon la tête.
 fn index_after<T: ReadTxn>(txn: &T, group: &XmlElementRef, seen: &[String]) -> u32 {
     let children = elements(txn, group);
@@ -560,6 +762,10 @@ struct Tree {
     nodes: Vec<Node>,
     /// Sa hauteur en éléments Yjs, textes compris.
     height: usize,
+    /// Le nombre de blocs (`blockContainer`) qu'il porte.
+    blocks: usize,
+    /// Une estimation de son poids écrit, en octets.
+    bytes: usize,
 }
 
 struct Node {
@@ -624,7 +830,31 @@ impl Tree {
                 }
             }
         }
-        Tree { nodes, height }
+        let blocks = nodes.iter().filter(|n| n.tag == BLOCK_CONTAINER).count();
+        let bytes = nodes
+            .iter()
+            .map(|n| {
+                let attrs: usize = n.attrs.iter().map(|(k, v)| k.len() + any_bytes(v)).sum();
+                let parts: usize = n
+                    .parts
+                    .iter()
+                    .map(|part| match part {
+                        Part::Element(_) => 0,
+                        Part::Text(runs) => runs
+                            .iter()
+                            .map(|(value, attrs)| any_bytes(value) + attrs_bytes(attrs) + 16)
+                            .sum(),
+                    })
+                    .sum();
+                n.tag.len() + attrs + parts + 16
+            })
+            .sum();
+        Tree {
+            nodes,
+            height,
+            blocks,
+            bytes,
+        }
     }
 
     /// L'écrit à l'index `at` de `parent`, sans récursion.

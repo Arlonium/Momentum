@@ -1,6 +1,8 @@
 //! Le document de page : création, mises à jour Yjs, lecture et écriture de
 //! l'arbre de blocs.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use mementum_md::{Block, normalize};
@@ -16,7 +18,7 @@ use yrs::{
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
 use crate::guard::{Pending, REPEATED_CLIENT, Shape, missing, touched};
 use crate::kept_ids::keep_ids;
-use crate::moves::{self, Recreated};
+use crate::moves::{self, Carried, MAX_CARRIED_BYTES, Recreated};
 use crate::structure::{Slot, check_blocks};
 use crate::{CrdtError, FRAGMENT, META};
 
@@ -42,7 +44,14 @@ pub struct Applied {
     /// au journal avec `read`, dans la même écriture, puis à diffuser à toutes les connexions,
     /// l'expéditeur compris. `None` s'il n'y a rien à reporter.
     pub carried: Option<Vec<u8>>,
+    /// Pourquoi le report n'a pas été écrit, s'il a dépassé ses bornes (Ruling R451) : pour le
+    /// journal du serveur.
+    pub withheld: Option<String>,
 }
+
+/// Au plus tant de copies reportées dont la page se souvient pour le dédoublonnage (Ruling
+/// R453) ; au-delà, elle les oublie toutes.
+const MAX_REMEMBERED_COPIES: usize = 1_024;
 
 /// Document Yjs d'une page, au format de BlockNote.
 ///
@@ -58,6 +67,11 @@ pub struct PageDoc {
     pub(crate) inserted_elements: AtomicBool,
     /// Parcours de la page faits par le dédoublonnage (pour les tests).
     pub(crate) dedupe_scans: AtomicU64,
+    /// Parcours de la page faits pour trouver l'original d'un bloc recréé (pour les tests).
+    pub(crate) original_walks: AtomicU64,
+    /// Les copies qui ont reçu un report, par identifiant de bloc : le dédoublonnage garde
+    /// celle-là quand le bloc est en double (Ruling R453). Oubliées au rechargement.
+    pub(crate) carried_copies: Mutex<HashMap<String, yrs::ID>>,
 }
 
 // L'acteur de synchronisation garde le document d'une tâche tokio à l'autre.
@@ -86,6 +100,8 @@ impl PageDoc {
             meta,
             inserted_elements: AtomicBool::new(false),
             dedupe_scans: AtomicU64::new(0),
+            original_walks: AtomicU64::new(0),
+            carried_copies: Mutex::new(HashMap::new()),
         }
     }
 
@@ -174,7 +190,22 @@ impl PageDoc {
     /// `moves`) : relevé avant l'application, écrit après, dans une transaction du serveur, et
     /// rendu dans [`Applied::carried`]. Rien de cela ne s'exécute pour une mise à jour qui
     /// n'insère aucun élément : le chemin d'une frappe ne change pas.
+    ///
+    /// Le report écrit est relu comme une entrée du journal (la garde, la profondeur) et mesuré
+    /// (`MAX_CARRIED_BYTES`) avant d'être rendu (Ruling R452) : s'il n'y passe pas, l'erreur est
+    /// [`CrdtError::CarryRefused`], la page est à jeter, et l'appelant la recharge puis reprend
+    /// la mise à jour par [`PageDoc::apply_client_update_alone`], sans report.
     pub fn apply_client_update(&self, update: &[u8]) -> Result<Applied, CrdtError> {
+        self.apply_client(update, true)
+    }
+
+    /// [`PageDoc::apply_client_update`] sans report d'un bloc recréé : pour l'appelant dont le
+    /// report a été refusé ([`CrdtError::CarryRefused`]), sur la page rechargée.
+    pub fn apply_client_update_alone(&self, update: &[u8]) -> Result<Applied, CrdtError> {
+        self.apply_client(update, false)
+    }
+
+    fn apply_client(&self, update: &[u8], carry: bool) -> Result<Applied, CrdtError> {
         let mut txn = self.doc.transact_mut();
         let (shape, decoded) = self.read(&txn, update, true)?;
         // Ce que la page gardait en attente de suppression avant (d'ordinaire rien).
@@ -183,10 +214,16 @@ impl PageDoc {
         let read = decoded.encode_v1();
         // Avant l'application, qui supprime l'original de chaque bloc recréé et tout ce qu'il
         // porte.
-        let recreated = if shape.inserts_elements() {
-            moves::capture(&mut txn, &self.fragment, &shape)
+        let recreated = if carry && shape.inserts_elements() {
+            moves::capture(&mut txn, &self.fragment, &shape, &self.original_walks)
         } else {
             Vec::new()
+        };
+        // Ce que l'auteur a créé puis supprimé dans la même mise à jour (Ruling R450).
+        let created_and_deleted = if recreated.is_empty() {
+            0
+        } else {
+            shape.created_and_deleted(&txn.state_vector())
         };
         self.integrate(&mut txn, &shape, decoded)?;
         // yrs ne dresse la liste des types changés qu'à la validation.
@@ -205,20 +242,68 @@ impl PageDoc {
             ));
         }
         drop(txn);
-        let carried = if recreated.is_empty() {
-            None
+        let (carried, withheld) = if recreated.is_empty() {
+            (None, None)
         } else {
-            self.carry(&recreated)
+            self.carry(&recreated, created_and_deleted)?
         };
-        Ok(Applied { read, carried })
+        Ok(Applied {
+            read,
+            carried,
+            withheld,
+        })
     }
 
     /// Écrit dans les copies ce que [`moves::capture`] a relevé, et rend la mise à jour (v1) de
-    /// cette écriture, s'il y a eu quelque chose à écrire.
-    fn carry(&self, recreated: &[Recreated]) -> Option<Vec<u8>> {
+    /// cette écriture, s'il y a eu quelque chose à écrire, ou pourquoi rien ne l'a été.
+    ///
+    /// L'écriture est relue comme une entrée du journal avant d'être rendue (Ruling R452) : la
+    /// garde, la profondeur de ce qu'elle insère, sa taille. Si elle n'y passe pas, elle est déjà
+    /// dans la page : `CarryRefused`, et la page est à jeter.
+    fn carry(
+        &self,
+        recreated: &[Recreated],
+        created_and_deleted: u64,
+    ) -> Result<(Option<Vec<u8>>, Option<String>), CrdtError> {
         let mut txn = self.doc.transact_mut();
-        moves::carry(&mut txn, recreated);
-        (!txn.insert_set().is_empty()).then(|| txn.encode_update_v1())
+        let before = txn.state_vector();
+        let written = match moves::carry(&mut txn, recreated, created_and_deleted) {
+            Carried::Nothing => return Ok((None, None)),
+            Carried::Withheld(why) => return Ok((None, Some(why))),
+            Carried::Written(written) => written,
+        };
+        let update = txn.encode_update_v1();
+        let refused = |why: String| Err(CrdtError::CarryRefused(why));
+        if update.len() > MAX_CARRIED_BYTES {
+            return refused(format!(
+                "{} octets, au-delà de {MAX_CARRIED_BYTES}",
+                update.len()
+            ));
+        }
+        let shape = Shape::read(&update)?;
+        if let Err(error) = shape.check(&before) {
+            return refused(error.to_string());
+        }
+        if shape.deeper_than_bound(&txn) {
+            return refused(CrdtError::TooDeep.to_string());
+        }
+        drop(txn);
+        let mut copies = self
+            .carried_copies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if copies.len() + written.len() > MAX_REMEMBERED_COPIES {
+            copies.clear();
+        }
+        copies.extend(written);
+        Ok((Some(update), None))
+    }
+
+    /// Nombre de parcours de la page faits pour trouver l'original d'un bloc recréé, au-delà de
+    /// 65 536 horloges supprimées (Ruling R372). Sert aux tests.
+    #[doc(hidden)]
+    pub fn original_walks(&self) -> u64 {
+        self.original_walks.load(Ordering::SeqCst)
     }
 
     /// Vrai si la mise à jour (v1) est refusée parce qu'un client y paraît deux fois (Ruling

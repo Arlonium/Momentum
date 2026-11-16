@@ -3,16 +3,19 @@
 //! Avec Yjs, un déplacement vaut copie + suppression : deux personnes qui
 //! déplacent le même bloc en font deux exemplaires de même id. On garde le
 //! premier dans l'ordre du document ; le résultat est le même sur tous les
-//! clients, puisqu'ils ont convergé avant. Les éditions faites en même
-//! temps sur l'original restent perdues (voir `CLAUDE.md`).
+//! clients, puisqu'ils ont convergé avant. Sauf un exemplaire où le serveur a
+//! reporté ce qu'un autre avait tapé dans l'original (Task 13b) : c'est lui
+//! qu'on garde, pour ne pas perdre le report (Ruling R453). Les éditions faites
+//! en même temps sur l'original restent sinon perdues (voir `CLAUDE.md`).
 //!
 //! La réparation respecte le schéma des colonnes de BlockNote sans jamais
 //! déplacer de contenu (Ruling R18) : un déplacement côté serveur perdrait
 //! les éditions concurrentes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
+use yrs::branch::BranchID;
 use yrs::{
     ReadTxn, Transact, TransactionMut, Xml, XmlElementRef, XmlFragment, XmlFragmentRef, XmlOut,
 };
@@ -52,11 +55,12 @@ impl PageDoc {
             return None;
         }
         self.dedupe_scans.fetch_add(1, Ordering::SeqCst);
-        if plan(&self.doc.transact(), &self.fragment).is_empty() {
+        let prefer = self.preferred(&self.doc.transact());
+        if plan(&self.doc.transact(), &self.fragment, &prefer).is_empty() {
             return None;
         }
         let mut txn = self.doc.transact_mut();
-        let fixes = plan(&txn, &self.fragment);
+        let fixes = plan(&txn, &self.fragment, &prefer);
         if fixes.is_empty() {
             return None;
         }
@@ -80,6 +84,32 @@ impl PageDoc {
             repair(&mut txn, &parent, &mut ids);
         }
         Some(txn.encode_update_v1())
+    }
+
+    /// Les copies qui ont reçu un report et vivent encore, par identifiant de bloc (Ruling
+    /// R453). Celles qui ne vivent plus sont oubliées.
+    fn preferred<T: ReadTxn>(&self, txn: &T) -> HashMap<String, XmlElementRef> {
+        let mut copies = self
+            .carried_copies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut live = HashMap::new();
+        copies.retain(|block, id| {
+            let element = BranchID::get_nested(txn, id)
+                .filter(|branch| !branch.is_deleted())
+                .and_then(|branch| match XmlOut::try_from(branch) {
+                    Ok(XmlOut::Element(e)) => Some(e),
+                    _ => None,
+                });
+            match element {
+                Some(e) => {
+                    live.insert(block.clone(), e);
+                    true
+                }
+                None => false,
+            }
+        });
+        live
     }
 
     /// Nombre de parcours de la page faits par [`PageDoc::dedupe_blocks`].
@@ -106,7 +136,62 @@ fn repair(txn: &mut TransactionMut, parent: &XmlElementRef, ids: &mut Ids) {
 
 /// Doublons dans l'ordre du document, sans récursion. On ne descend pas dans
 /// un doublon supprimé : tout son sous-arbre part avec lui.
-fn plan<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef) -> Vec<Fix> {
+///
+/// Pour un identifiant de `prefer`, c'est l'exemplaire nommé qui reste, et les autres partent,
+/// avant comme après lui (Ruling R453). Si cet exemplaire partait lui-même avec un bloc qui le
+/// contient, l'identifiant suit la règle ordinaire (le premier reste) : sinon tous ses
+/// exemplaires partiraient.
+fn plan<T: ReadTxn>(
+    txn: &T,
+    fragment: &XmlFragmentRef,
+    prefer: &HashMap<String, XmlElementRef>,
+) -> Vec<Fix> {
+    let fixes = plan_with(txn, fragment, prefer);
+    if prefer.is_empty() {
+        return fixes;
+    }
+    let removed: Vec<XmlElementRef> = fixes
+        .iter()
+        .filter_map(|fix| match fix {
+            Fix::Remove(parent, index) => match parent.get(txn, *index) {
+                Some(XmlOut::Element(e)) => Some(e),
+                _ => None,
+            },
+            Fix::Rename(_) => None,
+        })
+        .collect();
+    let kept: HashMap<String, XmlElementRef> = prefer
+        .iter()
+        .filter(|(_, element)| !removed.iter().any(|r| inside(element, r)))
+        .map(|(id, element)| (id.clone(), element.clone()))
+        .collect();
+    if kept.len() == prefer.len() {
+        fixes
+    } else {
+        plan_with(txn, fragment, &kept)
+    }
+}
+
+/// Vrai si `element` est `ancestor` ou l'un de ses descendants.
+fn inside(element: &XmlElementRef, ancestor: &XmlElementRef) -> bool {
+    let mut current = Some(element.clone());
+    while let Some(e) = current {
+        if e == *ancestor {
+            return true;
+        }
+        current = match e.parent() {
+            Some(XmlOut::Element(p)) => Some(p),
+            _ => None,
+        };
+    }
+    false
+}
+
+fn plan_with<T: ReadTxn>(
+    txn: &T,
+    fragment: &XmlFragmentRef,
+    prefer: &HashMap<String, XmlElementRef>,
+) -> Vec<Fix> {
     let mut seen = HashSet::new();
     let mut fixes = Vec::new();
     // Colonnes déjà promises à la suppression, par liste.
@@ -124,7 +209,13 @@ fn plan<T: ReadTxn>(txn: &T, fragment: &XmlFragmentRef) -> Vec<Fix> {
             let parent = parent.clone();
             if is_block(&element) {
                 let id = attr_string(txn, &element, "id");
-                if !id.is_empty() && !seen.insert(id) {
+                if let Some(preferred) = prefer.get(&id) {
+                    if *preferred != element {
+                        fixes.push(Fix::Remove(parent, index));
+                        continue;
+                    }
+                    seen.insert(id);
+                } else if !id.is_empty() && !seen.insert(id) {
                     if Slot::of(&parent) == Slot::ColumnList && element.tag().as_ref() == COLUMN {
                         let gone = match removed_columns.iter().position(|(l, _)| *l == parent) {
                             Some(k) => k,

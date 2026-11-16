@@ -33,7 +33,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
-use mementum_crdt::{Applied, Awaited, PageDoc};
+use mementum_crdt::{Applied, Awaited, CrdtError, PageDoc};
 use mementum_md::Block;
 use mementum_store::{DocState, Store, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
@@ -1105,10 +1105,27 @@ impl Actor {
         update: &[u8],
     ) -> Result<bool, Broken> {
         self.version_if_due().await;
-        let changes = self.watch.changes();
+        let mut changes = self.watch.changes();
         // Ce qui vient d'un client ne touche pas aux métadonnées de la page
         // (report M7 du lot 1) ; ce que `load` relit du store, si.
-        let Applied { read, carried } = match self.page.apply_client_update(update) {
+        let applied = match self.page.apply_client_update(update) {
+            Ok(applied) => Ok(applied),
+            // Ruling R452 : le report d'un bloc recréé, déjà écrit dans le document, ne passe
+            // pas la relecture d'une entrée du journal. Rien n'en est écrit ni diffusé : le
+            // document est rechargé, et la mise à jour reprise sans report.
+            Err(CrdtError::CarryRefused(why)) => {
+                tracing::warn!(node_id = %self.id.node_id, conn, why, "report d'un bloc recréé refusé : document rechargé, mise à jour reprise sans report");
+                self.reload().await?;
+                changes = self.watch.changes();
+                self.page.apply_client_update_alone(update)
+            }
+            Err(error) => Err(error),
+        };
+        let Applied {
+            read,
+            carried,
+            withheld,
+        } = match applied {
             Ok(applied) => applied,
             Err(error) => {
                 // Rulings R17 et R22 : ni écrite ni diffusée ; le document,
@@ -1121,6 +1138,10 @@ impl Actor {
                 return Ok(false);
             }
         };
+        // Ruling R451 : un report au-delà de ses bornes n'est pas écrit.
+        if let Some(why) = withheld {
+            tracing::warn!(node_id = %self.id.node_id, conn, why, "report d'un bloc recréé retenu : rien d'écrit de plus que la mise à jour");
+        }
         // Après des déplacements concurrents, un bloc peut exister en double.
         let fix = self.page.dedupe_blocks();
         // Ruling R181 : une mise à jour qui ne change rien à la page (rien d'inséré, rien de
@@ -1146,17 +1167,39 @@ impl Actor {
             return Ok(false);
         }
         self.wrote(changes, actor);
-        self.broadcast(Some(conn), protocol::update(&read));
-        // Le report et le correctif, à toutes les connexions, l'expéditeur compris : il n'a ni
-        // l'un ni l'autre.
-        if let Some(carried) = carried {
-            self.broadcast(None, protocol::update(&carried));
-        }
-        if let Some(fix) = fix {
-            self.broadcast(None, protocol::update(&fix));
-        }
+        self.relay(conn, &read, carried.as_deref(), fix.as_deref());
         self.compact_if_due().await;
         Ok(true)
+    }
+
+    /// Diffuse la mise à jour lue d'un client, `read`, et ce que le serveur a écrit à sa suite :
+    /// le report d'un bloc recréé et le correctif du dédoublonnage, que l'expéditeur n'a pas non
+    /// plus. Ruling R454 : aux autres, les trois **en un seul message**, et à l'expéditeur les
+    /// deux siens en un seul : un client ne voit jamais l'état d'entre eux (deux exemplaires d'un
+    /// bloc, que BlockNote renomme et peut écrire sous des `id` neufs ; le texte reporté qui
+    /// disparaît un instant). Si la fusion échouait, chacun part dans son message, dans cet
+    /// ordre.
+    fn relay(&self, conn: ConnId, read: &[u8], carried: Option<&[u8]>, fix: Option<&[u8]>) {
+        let ours: Vec<&[u8]> = carried.into_iter().chain(fix).collect();
+        if ours.is_empty() {
+            self.broadcast(Some(conn), protocol::update(read));
+            return;
+        }
+        let all: Vec<&[u8]> = std::iter::once(read).chain(ours.iter().copied()).collect();
+        match (yrs::merge_updates_v1(&all), yrs::merge_updates_v1(&ours)) {
+            (Ok(to_others), Ok(to_sender)) => {
+                self.broadcast(Some(conn), protocol::update(&to_others));
+                self.send_to(conn, protocol::update(&to_sender));
+            }
+            (to_others, to_sender) => {
+                let error = to_others.err().or(to_sender.err()).map(|e| e.to_string());
+                tracing::warn!(node_id = %self.id.node_id, conn, ?error, "mises à jour impossibles à fusionner : diffusées une à une");
+                self.broadcast(Some(conn), protocol::update(read));
+                for update in ours {
+                    self.broadcast(None, protocol::update(update));
+                }
+            }
+        }
     }
 
     /// Message d'awareness d'une connexion : chaque entrée est gardée ou ignorée, **avant**

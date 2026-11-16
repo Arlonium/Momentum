@@ -373,22 +373,21 @@ fn the_same_move_received_twice_carries_once() {
     }
 }
 
-/// Tom efface « oc » dans X et tape à sa fin pendant que Mona glisse X. La suppression n'est
-/// pas reportée (Mona avait vu « oc » en place : sa copie le porte), et rien de ce que Tom a
-/// tapé n'est retiré.
+/// Tom efface « oc » dans X et tape à sa fin pendant que Mona glisse X. La copie de Mona porte
+/// encore « oc » : deux caractères de plus que ce que le serveur a de vivant, que Mona n'a pas
+/// tapés. Le serveur ne sait pas les distinguer d'un effacement de Mona retapé ailleurs : il
+/// s'abstient (Ruling R450). La suppression de Tom n'est pas reportée (« oc » revient), sa frappe
+/// part avec l'original, et rien n'est retiré par un report.
 #[test]
-fn concurrent_delete_is_not_carried_and_removes_nothing_typed() {
+fn concurrent_delete_is_not_carried_and_the_server_abstains() {
     controls(
         "concurrent-delete",
         YZX,
         "x « Bl X de Tom » | y « Bloc Y » | z « Bloc Z »",
     );
     for (order, played) in both_orders("concurrent-delete", MOVE_AFTER_EDIT) {
-        assert_eq!(
-            played.line(),
-            "y « Bloc Y » | z « Bloc Z » | x « Bloc X de Tom »",
-            "{order}"
-        );
+        assert!(played.carried.is_empty(), "{order}");
+        assert_eq!(played.line(), YZX, "{order}");
     }
 }
 
@@ -502,6 +501,707 @@ fn yrs_move_arriving_after_the_edit_keeps_the_edit() {
         ]
     );
     played.line();
+}
+
+/// Des mises à jour faites à la main, avec yrs : ce qu'un client peut envoyer sans être un
+/// éditeur BlockNote (Task 13b, tour de correction 1).
+mod raw {
+    use std::collections::BTreeMap;
+
+    use mementum_crdt::FRAGMENT;
+    use yrs::branch::{Branch, BranchID};
+    use yrs::updates::decoder::Decode;
+    use yrs::{
+        Doc, GetString, ID, OffsetKind, Options, ReadTxn, StateVector, Text, Transact,
+        TransactionMut, Update, Xml, XmlElementPrelim, XmlElementRef, XmlFragment, XmlFragmentRef,
+        XmlOut, XmlTextPrelim,
+    };
+
+    /// Un document de client, parti de `state`.
+    pub fn doc(state: &[u8]) -> Doc {
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(state).unwrap())
+            .unwrap();
+        doc
+    }
+
+    pub fn element(out: Option<XmlOut>) -> XmlElementRef {
+        match out {
+            Some(XmlOut::Element(e)) => e,
+            other => panic!("pas un élément : {other:?}"),
+        }
+    }
+
+    /// L'identifiant de l'élément Yjs d'un type.
+    pub fn id_of<B: AsRef<Branch>>(node: &B) -> ID {
+        match node.as_ref().id() {
+            BranchID::Nested(id) => id,
+            BranchID::Root(_) => panic!("racine"),
+        }
+    }
+
+    /// Le fragment de la page, pris **avant** toute transaction (avec la feature `sync` de yrs,
+    /// `get_or_insert_*` attend le verrou qu'une transaction ouverte détient).
+    pub fn fragment(doc: &Doc) -> XmlFragmentRef {
+        doc.get_or_insert_xml_fragment(FRAGMENT)
+    }
+
+    /// La racine `blockGroup` de la page.
+    pub fn root<T: ReadTxn>(fragment: &XmlFragmentRef, txn: &T) -> XmlElementRef {
+        element(fragment.get(txn, 0))
+    }
+
+    /// Le `blockContainer` de premier niveau dont l'attribut `id` vaut `id`, et son index.
+    pub fn top_block<T: ReadTxn>(
+        fragment: &XmlFragmentRef,
+        txn: &T,
+        id: &str,
+    ) -> (XmlElementRef, u32) {
+        let root = root(fragment, txn);
+        (0..root.len(txn))
+            .map(|i| (element(root.get(txn, i)), i))
+            .find(|(c, _)| {
+                c.get_attribute(txn, "id")
+                    .map(|v| v.to_string(txn))
+                    .as_deref()
+                    == Some(id)
+            })
+            .expect("bloc de premier niveau")
+    }
+
+    /// Écrit un `blockContainer` d'`id` donné, avec un nœud de contenu `tag` et son texte, à
+    /// l'index `at` de `parent`.
+    pub fn container(
+        txn: &mut TransactionMut,
+        parent: &XmlElementRef,
+        at: u32,
+        id: &str,
+        tag: &str,
+        text: &str,
+    ) -> XmlElementRef {
+        let c = parent.insert(txn, at, XmlElementPrelim::empty("blockContainer"));
+        c.insert_attribute(txn, "id", id.to_string());
+        let content = c.push_back(txn, XmlElementPrelim::empty(tag));
+        if !text.is_empty() {
+            let t = content.push_back(txn, XmlTextPrelim::new(""));
+            t.insert(txn, 0, text);
+        }
+        c
+    }
+
+    /// Une mise à jour v1 sans bloc, qui ne porte que ces suppressions `(client, horloge,
+    /// longueur)`.
+    pub fn deletions(ranges: &[ID]) -> Vec<u8> {
+        let mut by_client: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
+        for id in ranges {
+            by_client.entry(id.client.get()).or_default().push(id.clock);
+        }
+        let mut out = Vec::new();
+        var(&mut out, 0);
+        var(&mut out, by_client.len() as u64);
+        for (client, mut clocks) in by_client {
+            clocks.sort_unstable();
+            var(&mut out, client);
+            var(&mut out, clocks.len() as u64);
+            for clock in clocks {
+                var(&mut out, u64::from(clock));
+                var(&mut out, 1);
+            }
+        }
+        out
+    }
+
+    fn var(out: &mut Vec<u8>, mut n: u64) {
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    }
+
+    /// Le texte et le nombre de sous-blocs du `blockContainer` vivant d'identifiant `id`, où qu'il
+    /// soit dans la page (même hors des groupes que lit `read_blocks`).
+    pub fn block_summary(state: &[u8], id: &str) -> Option<(String, usize)> {
+        let doc = doc(state);
+        let fragment = fragment(&doc);
+        let txn = doc.transact();
+        let container = fragment.successors(&txn).find_map(|node| match node {
+            XmlOut::Element(e)
+                if e.tag().as_ref() == "blockContainer"
+                    && e.get_attribute(&txn, "id")
+                        .map(|v| v.to_string(&txn))
+                        .as_deref()
+                        == Some(id) =>
+            {
+                Some(e)
+            }
+            _ => None,
+        })?;
+        let mut text = String::new();
+        let mut children = 0;
+        for child in container.children(&txn) {
+            let XmlOut::Element(e) = child else { continue };
+            if e.tag().as_ref() == "blockGroup" {
+                children = e.len(&txn) as usize;
+            } else if let Some(XmlOut::Text(t)) = e.get(&txn, 0) {
+                text = t.get_string(&txn);
+            }
+        }
+        Some((text, children))
+    }
+
+    /// Ce que `doc` a écrit depuis `before`, et ces suppressions de plus, en une mise à jour.
+    pub fn update_with(doc: &Doc, before: &StateVector, deleted: &[ID]) -> Vec<u8> {
+        let inserted = doc.transact().encode_diff_v1(before);
+        if deleted.is_empty() {
+            return inserted;
+        }
+        yrs::merge_updates_v1([inserted.as_slice(), deletions(deleted).as_slice()]).unwrap()
+    }
+}
+
+/// Un paragraphe et ses sous-blocs, sans identifiant.
+fn para(text: &str, children: Vec<Block>) -> Block {
+    Block {
+        id: String::new(),
+        kind: "paragraph".to_string(),
+        props: Default::default(),
+        content: Content::Inline(if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Inline::Text {
+                text: text.to_string(),
+                styles: Default::default(),
+            }]
+        }),
+        children,
+    }
+}
+
+/// La page `blocks`, son état et les ids de ses blocs de premier niveau.
+fn page_of(blocks: &[Block]) -> (Vec<u8>, Vec<String>) {
+    let (base, _) = PageDoc::new_page();
+    base.write_blocks(blocks).unwrap();
+    let ids = base.read_blocks().into_iter().map(|b| b.id).collect();
+    (base.encode_state(), ids)
+}
+
+/// La page relue depuis `updates` (le journal), puis depuis l'état complet du serveur
+/// (l'instantané d'une compaction) : les deux se relisent.
+fn assert_reloads(server: &PageDoc, journal: &[&[u8]]) {
+    let reloaded = PageDoc::from_updates(journal.iter().copied());
+    assert!(
+        reloaded.is_ok(),
+        "le journal ne se relit plus : {:?}",
+        reloaded.err()
+    );
+    let snapshot = server.encode_state();
+    let reopened = PageDoc::from_updates([snapshot.as_slice()]);
+    assert!(
+        reopened.is_ok(),
+        "l'instantané ne se relit plus : {:?}",
+        reopened.err()
+    );
+}
+
+/// Ce qu'un client supprime de l'original en recréant X.
+enum Deleted {
+    /// Les premiers éléments de l'original, dans cet ordre : son `blockContainer`, son nœud de
+    /// contenu, son texte (l'élément du texte, pas ses caractères).
+    Parts(usize),
+    /// Tout l'original, comme le fait un éditeur.
+    All,
+}
+
+/// Une copie de X déposée tout au fond d'une chaîne de groupes, son nœud de contenu à la
+/// profondeur `content_depth`, avec le texte `text`, par un client qui supprime de l'original
+/// ce que dit `deleted`. Rend la mise à jour.
+fn deep_copy(state: &[u8], x: &str, content_depth: usize, text: &str, deleted: Deleted) -> Vec<u8> {
+    use yrs::{ReadTxn, Transact, XmlElementPrelim, XmlFragment, XmlOut};
+    let doc = raw::doc(state);
+    let frag = raw::fragment(&doc);
+    let (parts, index) = {
+        let txn = doc.transact();
+        let (c, index) = raw::top_block(&frag, &txn, x);
+        let content = raw::element(c.get(&txn, 0));
+        let mut parts = vec![raw::id_of(&c), raw::id_of(&content)];
+        if let Some(XmlOut::Text(t)) = content.get(&txn, 0) {
+            parts.push(raw::id_of(&t));
+        }
+        (parts, index)
+    };
+    let before = doc.transact().state_vector();
+    {
+        let mut txn = doc.transact_mut();
+        let root = raw::root(&frag, &txn);
+        let mut parent = root.clone();
+        // La racine est à la profondeur 1, le conteneur de la copie à `content_depth - 1`.
+        for _ in 2..content_depth - 1 {
+            parent = parent.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
+        }
+        raw::container(&mut txn, &parent, 0, x, "paragraph", text);
+        if matches!(deleted, Deleted::All) {
+            root.remove_range(&mut txn, index, 1);
+        }
+    }
+    match deleted {
+        Deleted::Parts(n) => raw::update_with(&doc, &before, &parts[..n.min(parts.len())]),
+        Deleted::All => raw::update_with(&doc, &before, &[]),
+    }
+}
+
+/// C1 : un client recrée X tout au fond de la page, le nœud de contenu de la copie à la
+/// profondeur `MAX_YJS_DEPTH` et sans texte, et ne supprime de l'original que son élément et
+/// son nœud de contenu (tout le texte est « non vu »). Le serveur n'écrit aucun texte au-delà de
+/// la borne : la page se relit, journal et instantané.
+#[test]
+fn carried_text_is_never_written_beyond_the_depth_bound() {
+    let (state, ids) = page_of(&[para("Bloc X", vec![]), para("Bloc Y", vec![])]);
+    let update = deep_copy(
+        &state,
+        &ids[0],
+        mementum_crdt::MAX_YJS_DEPTH,
+        "",
+        Deleted::Parts(2),
+    );
+    let server = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let applied = server
+        .apply_client_update(&update)
+        .expect("acceptée par la garde");
+    let mut journal = vec![state.as_slice(), applied.read.as_slice()];
+    journal.extend(applied.carried.as_deref());
+    assert_reloads(&server, &journal);
+}
+
+/// I3 (M13) : la copie au fond de la page a la place de reporter son texte, pas celle d'un
+/// sous-bloc qu'un autre a mis sous l'original : le texte est reporté, le sous-bloc ne l'est pas,
+/// et la page se relit.
+#[test]
+fn a_sub_block_too_deep_is_left_out_but_the_text_is_carried() {
+    let (state, ids) = page_of(&[para("Bloc X", vec![]), para("Bloc Y", vec![])]);
+    let x = &ids[0];
+    // Tom tape à la fin de X et lui met un sous-bloc.
+    let doc = raw::doc(&state);
+    let frag = raw::fragment(&doc);
+    let before = {
+        use yrs::{ReadTxn, Transact};
+        doc.transact().state_vector()
+    };
+    {
+        use yrs::{Text, Transact, XmlElementPrelim, XmlFragment, XmlOut};
+        let mut txn = doc.transact_mut();
+        let (c, _) = raw::top_block(&frag, &txn, x);
+        let content = raw::element(c.get(&txn, 0));
+        let Some(XmlOut::Text(text)) = content.get(&txn, 0) else {
+            panic!("le texte de X");
+        };
+        text.insert(&mut txn, 6, " de Tom");
+        let group = c.push_back(&mut txn, XmlElementPrelim::empty("blockGroup"));
+        raw::container(&mut txn, &group, 0, "enfant", "paragraph", "Enfant de Tom");
+    }
+    let typed = raw::update_with(&doc, &before, &[]);
+    // Le nœud de contenu de la copie à la profondeur MAX - 2 : son texte, déjà là, peut recevoir
+    // le report ; un groupe de sous-blocs sous la copie (MAX - 2), un sous-bloc (MAX - 1), son
+    // paragraphe (MAX), son texte (MAX + 1) : trop profond.
+    let moved = deep_copy(
+        &state,
+        x,
+        mementum_crdt::MAX_YJS_DEPTH - 2,
+        "Bloc X",
+        Deleted::All,
+    );
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    let summary = raw::block_summary(&played.server.encode_state(), x);
+    assert_eq!(summary, Some(("Bloc X de Tom".to_string(), 0)));
+    played.line();
+    assert_reloads(&played.server, &[played.server.encode_state().as_slice()]);
+}
+
+/// Un bloc à `n` sous-blocs, et une mise à jour de quelques dizaines d'octets : une copie vide
+/// au même id, qui ne supprime de l'original que son élément et son paragraphe (le groupe de
+/// sous-blocs est « non vu »).
+fn empty_copy_of_a_parent(n: usize) -> (PageDoc, Vec<u8>, String) {
+    let children: Vec<Block> = (0..n)
+        .map(|i| {
+            para(
+                &format!("Sous-bloc numéro {i} avec un peu de texte"),
+                vec![],
+            )
+        })
+        .collect();
+    let (state, ids) = page_of(&[para("Parent", children), para("Autre", vec![])]);
+    let x = ids[0].clone();
+    let doc = raw::doc(&state);
+    let frag = raw::fragment(&doc);
+    let (original, content) = {
+        use yrs::{Transact, XmlFragment};
+        let txn = doc.transact();
+        let (c, _) = raw::top_block(&frag, &txn, &x);
+        (raw::id_of(&c), raw::id_of(&raw::element(c.get(&txn, 0))))
+    };
+    let before = {
+        use yrs::{ReadTxn, Transact};
+        doc.transact().state_vector()
+    };
+    {
+        use yrs::{Transact, XmlFragment};
+        let mut txn = doc.transact_mut();
+        let root = raw::root(&frag, &txn);
+        let len = root.len(&txn);
+        raw::container(&mut txn, &root, len, &x, "paragraph", "");
+    }
+    let update = raw::update_with(&doc, &before, &[original, content]);
+    (
+        PageDoc::from_updates([state.as_slice()]).unwrap(),
+        update,
+        x,
+    )
+}
+
+/// C2 : 1 000 sous-blocs « non vus » d'un coup. Au-delà de la borne du report (64 sous-blocs,
+/// 64 Kio), le serveur n'écrit rien de plus que la mise à jour : aucun sous-bloc recopié.
+#[test]
+fn a_carry_beyond_the_bound_is_withheld() {
+    let (server, update, x) = empty_copy_of_a_parent(1_000);
+    let applied = server.apply_client_update(&update).expect("acceptée");
+    assert!(
+        applied.carried.is_none(),
+        "{} o reportés",
+        applied.carried.map_or(0, |c| c.len())
+    );
+    let blocks = server.read_blocks();
+    let copy = find(&blocks, &x).expect("la copie");
+    assert!(copy.children.is_empty());
+}
+
+/// Le témoin de C2 : 64 sous-blocs non vus, juste à la borne, sont recopiés.
+#[test]
+fn a_carry_at_the_bound_is_written() {
+    let (server, update, x) = empty_copy_of_a_parent(64);
+    let applied = server.apply_client_update(&update).expect("acceptée");
+    assert!(applied.carried.is_some());
+    let blocks = server.read_blocks();
+    assert_eq!(find(&blocks, &x).expect("la copie").children.len(), 64);
+}
+
+/// C2, en octets : un texte non vu de 80 Kio n'est pas reporté ; de 32 Kio, il l'est.
+#[test]
+fn a_carried_text_beyond_64_kib_is_withheld() {
+    for (size, carried) in [(32 * 1024, true), (80 * 1024, false)] {
+        let (state, ids) = page_of(&[para("Bloc X", vec![]), para("Bloc Y", vec![])]);
+        let x = &ids[0];
+        let typist = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let typed = typist.replace_text(x, 6, 0, &"t".repeat(size)).unwrap();
+        let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let moved = mona.move_block(x, Some(&ids[1])).unwrap();
+        let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+        assert_eq!(!played.carried.is_empty(), carried, "{size} o");
+        let text = block_text(find(&played.server.read_blocks(), x).unwrap());
+        assert_eq!(text.len(), if carried { 6 + size } else { 6 }, "{size} o");
+    }
+}
+
+/// I1 : Mona corrige « chatt » en « chat » et ajoute « est » avant « le chien », hors ligne, puis
+/// déplace X ; Tom tape « , pas » juste après « et ». La copie de Mona n'est pas le texte vu
+/// avec des insertions seulement (un caractère vu a été effacé) : le serveur s'abstient, plutôt
+/// que de mettre « , pas » après « est » (sonde de la relecture : « le chat et est, pas le
+/// chien »).
+#[test]
+fn a_typo_fixed_then_a_word_added_by_the_mover_carries_nothing() {
+    let (state, ids) = page_of(&[para("le chatt et le chien", vec![]), para("Bloc Y", vec![])]);
+    let x = &ids[0];
+    let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let before = PageDoc::from_updates([state.as_slice()]).unwrap();
+    mona.replace_text(x, 7, 1, "").unwrap();
+    mona.replace_text(x, 11, 0, "est ").unwrap();
+    mona.move_block(x, Some(&ids[1])).unwrap();
+    let moved = mona.encode_diff(&before.state_vector()).unwrap();
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(x, 11, 0, ", pas").unwrap();
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    assert!(played.carried.is_empty());
+    let text = block_text(find(&played.server.read_blocks(), x).unwrap());
+    assert_eq!(text, "le chat et est le chien");
+    played.line();
+}
+
+/// I1 : un effacement de Mona n'importe où dans le bloc (ici au début, la frappe de Tom à la
+/// fin) fait s'abstenir le serveur.
+#[test]
+fn a_deletion_by_the_mover_anywhere_in_the_block_carries_nothing() {
+    let (state, [x, _, z]) = yrs_page();
+    let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let before = PageDoc::from_updates([state.as_slice()]).unwrap();
+    mona.replace_text(&x, 0, 1, "").unwrap();
+    mona.move_block(&x, Some(&z)).unwrap();
+    let moved = mona.encode_diff(&before.state_vector()).unwrap();
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(&x, 6, 0, " de Tom").unwrap();
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    assert!(played.carried.is_empty());
+    assert_eq!(block_text(&played.server.read_blocks()[2]), "loc X");
+}
+
+/// I2 : Tom tape dans X ; Mona puis Léa déplacent X, sans rien voir des autres. La frappe est
+/// reportée dans la copie de Mona ; le dédoublonnage garde cette copie, quelle que soit la place
+/// des deux exemplaires.
+#[test]
+fn two_moves_after_an_edit_keep_the_edit() {
+    let (state, ids) = page_of(&[
+        para("Bloc W", vec![]),
+        para("Bloc X", vec![]),
+        para("Bloc Y", vec![]),
+        para("Bloc Z", vec![]),
+    ]);
+    let (w, x, z) = (&ids[0], &ids[1], &ids[3]);
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(x, 6, 0, " de Tom").unwrap();
+    let mut lost = Vec::new();
+    for (mona_after, lea_after) in [
+        (Some(z), Some(w)),
+        (Some(w), Some(z)),
+        (None, Some(z)),
+        (Some(z), None),
+    ] {
+        let fresh = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+        mona.move_block(x, mona_after.map(String::as_str)).unwrap();
+        let moved_m = mona.encode_diff(&fresh.state_vector()).unwrap();
+        let lea = PageDoc::from_updates([state.as_slice()]).unwrap();
+        lea.move_block(x, lea_after.map(String::as_str)).unwrap();
+        let moved_l = lea.encode_diff(&fresh.state_vector()).unwrap();
+        let server = PageDoc::from_updates([state.as_slice()]).unwrap();
+        for update in [&typed, &moved_m, &moved_l] {
+            server.apply_client_update(update).unwrap();
+            server.dedupe_blocks();
+        }
+        let blocks = server.read_blocks();
+        let xs: Vec<String> = blocks
+            .iter()
+            .filter(|b| &b.id == x)
+            .map(block_text)
+            .collect();
+        if xs != ["Bloc X de Tom"] {
+            lost.push(format!("{mona_after:?}/{lea_after:?} : {}", line(&blocks)));
+        }
+    }
+    assert!(lost.is_empty(), "{lost:?}");
+}
+
+/// I3 (M15) : X a deux sous-blocs vus, x1 et x2 ; Tom en ajoute un entre eux pendant que Mona
+/// déplace X. Le sous-bloc de Tom revient après la copie de x1, avant x2 (Ruling R374).
+#[test]
+fn an_unseen_sub_block_goes_after_the_seen_one_before_it() {
+    let (state, ids) = page_of(&[
+        para("Bloc X", vec![para("Un", vec![]), para("Deux", vec![])]),
+        para("Bloc Y", vec![]),
+    ]);
+    let x = &ids[0];
+    let base = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let children: Vec<String> = base.read_blocks()[0]
+        .children
+        .iter()
+        .map(|b| b.id.clone())
+        .collect();
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom
+        .insert_blocks_after(Some(&children[0]), &[para("De Tom", vec![])])
+        .unwrap();
+    let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let moved = mona.move_block(x, Some(&ids[1])).unwrap();
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    let blocks = played.server.read_blocks();
+    let texts: Vec<String> = find(&blocks, x)
+        .unwrap()
+        .children
+        .iter()
+        .map(block_text)
+        .collect();
+    assert_eq!(texts, ["Un", "De Tom", "Deux"]);
+    played.line();
+}
+
+/// Un double de X (même id), posé à la fin de la page par une mise à jour relue du stockage,
+/// sans dédoublonnage : rend la page avec le double.
+fn with_a_double_of_x(state: &[u8], x: &str) -> Vec<u8> {
+    use yrs::{ReadTxn, Transact, XmlFragment};
+    let doc = raw::doc(state);
+    let frag = raw::fragment(&doc);
+    {
+        let mut txn = doc.transact_mut();
+        let root = raw::root(&frag, &txn);
+        let len = root.len(&txn);
+        raw::container(&mut txn, &root, len, x, "paragraph", "Leurre");
+    }
+    doc.transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default())
+}
+
+/// I3 (M7) : deux originaux vivants de X, que la mise à jour de Mona supprime tous deux en
+/// recréant X : la correspondance n'est pas sûre, rien n'est reporté.
+#[test]
+fn two_originals_of_one_id_carry_nothing() {
+    let (state, ids) = page_of(&[para("Bloc X", vec![]), para("Bloc Y", vec![])]);
+    let x = &ids[0];
+    let state = with_a_double_of_x(&state, x);
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(x, 6, 0, " de Tom").unwrap();
+    let doc = raw::doc(&state);
+    let frag = raw::fragment(&doc);
+    let before = {
+        use yrs::{ReadTxn, Transact};
+        doc.transact().state_vector()
+    };
+    {
+        use yrs::{Transact, XmlFragment};
+        let mut txn = doc.transact_mut();
+        let root = raw::root(&frag, &txn);
+        // Les deux exemplaires de X sont aux index 0 et 2 ; la copie va à la fin.
+        let len = root.len(&txn);
+        raw::container(&mut txn, &root, len, x, "paragraph", "Bloc X");
+        root.remove_range(&mut txn, 2, 1);
+        root.remove_range(&mut txn, 0, 1);
+    }
+    let moved = raw::update_with(&doc, &before, &[]);
+    // La page telle qu'un serveur la charge, avec la frappe de Tom : aucun dédoublonnage n'est
+    // passé entre-temps, et la mise à jour de Mona est la première qui arrive.
+    let loaded = PageDoc::from_updates([state.as_slice(), typed.as_slice()]).unwrap();
+    let server = PageDoc::from_updates([loaded.encode_state().as_slice()]).unwrap();
+    let applied = server.apply_client_update(&moved).unwrap();
+    assert!(applied.carried.is_none());
+    server.dedupe_blocks();
+    assert!(!line(&server.read_blocks()).contains("Tom"));
+}
+
+/// I3 (M8, M9) : Ruling R372. Un jeu de suppressions de plus de 65 536 horloges (une étape 2, qui
+/// porte toutes les suppressions de son client, ici 70 000 lettres effacées dans Y) fait chercher
+/// l'original par un parcours de la page, et un seul ; un double de X que la mise à jour ne
+/// supprime pas n'en est pas un (l'original est celui que le jeu couvre), et la frappe de Tom est
+/// reportée. Un déplacement ordinaire ne parcourt pas la page.
+#[test]
+fn originals_are_found_by_a_page_walk_beyond_65536_deleted_clocks() {
+    let (state, ids) = page_of(&[
+        para("Bloc X", vec![]),
+        para("Bloc Y", vec![]),
+        para("Bloc Z", vec![]),
+    ]);
+    let (x, y, z) = (&ids[0], &ids[1], &ids[2]);
+    // Quelqu'un tape 70 000 lettres dans Y, puis les efface.
+    let page = PageDoc::from_updates([state.as_slice()]).unwrap();
+    page.replace_text(y, 6, 0, &"a".repeat(70_000)).unwrap();
+    page.replace_text(y, 6, 70_000, "").unwrap();
+    // Un double de X, à la fin de la page, que le serveur n'a pas encore dédoublonné.
+    let state = with_a_double_of_x(&page.encode_state(), x);
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(x, 6, 0, " de Tom").unwrap();
+    let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+    mona.move_block(x, Some(z)).unwrap();
+    // Mona revient en ligne : son étape 2 porte tout son jeu de suppressions.
+    let moved = mona.encode_state();
+    let server = PageDoc::from_updates([state.as_slice(), typed.as_slice()]).unwrap();
+    let applied = server.apply_client_update(&moved).unwrap();
+    assert_eq!(server.original_walks(), 1, "un parcours de la page");
+    assert!(applied.carried.is_some(), "la frappe de Tom est reportée");
+    let blocks = server.read_blocks();
+    let copy = blocks
+        .iter()
+        .filter(|b| &b.id == x)
+        .find(|b| block_text(b) != "Leurre");
+    assert_eq!(copy.map(block_text).as_deref(), Some("Bloc X de Tom"));
+
+    // Le même déplacement, sans les 70 000 horloges : pas de parcours.
+    let (state, ids) = page_of(&[
+        para("Bloc X", vec![]),
+        para("Bloc Y", vec![]),
+        para("Bloc Z", vec![]),
+    ]);
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(&ids[0], 6, 0, " de Tom").unwrap();
+    let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let moved = mona.move_block(&ids[0], Some(&ids[2])).unwrap();
+    let server = PageDoc::from_updates([state.as_slice(), typed.as_slice()]).unwrap();
+    assert!(
+        server
+            .apply_client_update(&moved)
+            .unwrap()
+            .carried
+            .is_some()
+    );
+    assert_eq!(server.original_walks(), 0, "aucun parcours");
+}
+
+/// I3 (M10) : X est vide ; Tom remplace son paragraphe par un autre, où il tape, pendant que
+/// Mona déplace X. Le nœud de contenu de l'original n'est pas celui que Mona avait vu : rien
+/// n'est reporté (Ruling R377).
+#[test]
+fn a_content_node_replaced_by_someone_else_is_left_alone() {
+    let (state, ids) = page_of(&[para("", vec![]), para("Bloc Y", vec![])]);
+    let x = &ids[0];
+    let doc = raw::doc(&state);
+    let frag = raw::fragment(&doc);
+    let before = {
+        use yrs::{ReadTxn, Transact};
+        doc.transact().state_vector()
+    };
+    {
+        use yrs::{Text, Transact, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+        let mut txn = doc.transact_mut();
+        let (c, _) = raw::top_block(&frag, &txn, x);
+        c.remove_range(&mut txn, 0, 1);
+        let p = c.insert(&mut txn, 0, XmlElementPrelim::empty("paragraph"));
+        let t = p.push_back(&mut txn, XmlTextPrelim::new(""));
+        t.insert(&mut txn, 0, "Tom");
+    }
+    let typed = raw::update_with(&doc, &before, &[]);
+    let mona = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let moved = mona.move_block(x, Some(&ids[1])).unwrap();
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    assert!(played.carried.is_empty());
+    assert_eq!(
+        block_text(find(&played.server.read_blocks(), x).unwrap()),
+        ""
+    );
+}
+
+/// I3 (M12) : Mona change X en titre et le déplace, hors ligne ; Tom tape à la fin de X. Le nœud
+/// de contenu de la copie n'a plus la balise de l'original : rien n'est reporté (Ruling R377).
+#[test]
+fn a_type_changed_by_the_mover_is_left_alone() {
+    let (state, ids) = page_of(&[para("Bloc X", vec![]), para("Bloc Y", vec![])]);
+    let x = &ids[0];
+    let tom = PageDoc::from_updates([state.as_slice()]).unwrap();
+    let typed = tom.replace_text(x, 6, 0, " de Tom").unwrap();
+    let doc = raw::doc(&state);
+    let frag = raw::fragment(&doc);
+    let before = {
+        use yrs::{ReadTxn, Transact};
+        doc.transact().state_vector()
+    };
+    {
+        use yrs::{Transact, XmlFragment};
+        let mut txn = doc.transact_mut();
+        let root = raw::root(&frag, &txn);
+        let len = root.len(&txn);
+        raw::container(&mut txn, &root, len, x, "heading", "Bloc X");
+        root.remove_range(&mut txn, 0, 1);
+    }
+    let moved = raw::update_with(&doc, &before, &[]);
+    let played = play_updates(&state, &moved, &typed, &[Who::Tom, Who::Mona]);
+    assert!(played.carried.is_empty());
+    let blocks = played.server.read_blocks();
+    let copy = find(&blocks, x).unwrap();
+    assert_eq!(
+        (copy.kind.as_str(), block_text(copy).as_str()),
+        ("heading", "Bloc X")
+    );
 }
 
 /// Les limites connues (Ruling R340) : ce que le test dit voulu n'est pas tenu, et il

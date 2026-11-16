@@ -169,6 +169,8 @@ struct Insert {
     /// La valeur d'une entrée `id` posée sur un type désigné par son id (l'attribut `id` d'un
     /// élément XML), quand c'est une seule chaîne : l'identifiant de bloc qu'il prend.
     block_id: Option<String>,
+    /// Le contenu est déjà supprimé (`ContentDeleted`) : l'élément a été créé, puis supprimé.
+    deleted: bool,
 }
 
 /// Ce que contient une mise à jour, lu sans l'appliquer.
@@ -378,6 +380,43 @@ impl Shape {
     pub(crate) fn inserts_elements(&self) -> bool {
         self.inserts()
             .any(|(_, i)| i.type_ref == Some(TYPE_REFS_XML_ELEMENT))
+    }
+
+    /// Combien d'horloges la mise à jour a créées puis supprimées elle-même, parmi celles que la
+    /// page n'a pas (`state`) : ses plages ramassées, ses éléments au contenu supprimé, et ses
+    /// éléments que son propre jeu de suppressions couvre. C'est, pour l'auteur d'un
+    /// déplacement, ce qu'il a tapé dans l'original avant de le déplacer (parti avec lui), et
+    /// tout ce qu'il a créé puis effacé d'autre (Task 13b, Ruling R450).
+    pub(crate) fn created_and_deleted(&self, state: &StateVector) -> u64 {
+        let mut total = 0u64;
+        for (client, structs) in &self.clients {
+            let floor = state.get(&ClientID::new(*client));
+            let own = self
+                .deletions
+                .iter()
+                .find(|(c, _)| c == client)
+                .map(|(_, ranges)| ranges.as_slice())
+                .unwrap_or(&[]);
+            for s in structs {
+                let (start, end) = (s.id.1.max(floor), s.id.1 + s.len);
+                if start >= end {
+                    continue;
+                }
+                let gone = match &s.kind {
+                    Kind::Gc => true,
+                    Kind::Insert(i) => i.deleted,
+                    Kind::Skip => continue,
+                };
+                total += if gone {
+                    u64::from(end - start)
+                } else {
+                    own.iter()
+                        .map(|&(a, b)| u64::from(b.min(end).saturating_sub(a.max(start))))
+                        .sum()
+                };
+            }
+        }
+        total
     }
 
     fn inserts(&self) -> impl Iterator<Item = (&Struct, &Insert)> {
@@ -672,6 +711,7 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     type_ref: content.type_ref,
                     tag: content.tag,
                     block_id: content.string,
+                    deleted: content.deleted,
                 }),
             }))
         }
@@ -737,6 +777,8 @@ struct Content {
     tag: Option<String>,
     /// Pour un contenu `Any` d'une seule chaîne, quand on l'a demandée.
     string: Option<String>,
+    /// Contenu déjà supprimé (`ContentDeleted`).
+    deleted: bool,
 }
 
 /// Contenu d'un élément, lu comme `ItemContent::decode` de yrs : sa longueur
@@ -753,9 +795,13 @@ fn read_content(
         type_ref: None,
         tag: None,
         string: None,
+        deleted: false,
     };
     content.len = match info & 0b1111 {
-        BLOCK_ITEM_DELETED_REF_NUMBER => c.read_var()?,
+        BLOCK_ITEM_DELETED_REF_NUMBER => {
+            content.deleted = true;
+            c.read_var()?
+        }
         BLOCK_ITEM_JSON_REF_NUMBER => {
             // yrs lit `len + 1` chaînes (et aucune si `len` dépasse i32).
             let remaining = c.read_var::<u32>()? as i32;
