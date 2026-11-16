@@ -48,6 +48,16 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 
 Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête poussée, **sans clone neuf**) : `cargo fmt` et `cargo clippy -D warnings` propres ; `cargo test --workspace` : **723 verts**, 15 ignorés (les mesures en release et les tests de la limite R39) ; client : **516 verts et 12 marqués `test.fails`** (les scénarios du bloc déplacé), typecheck propre ; licences npm propres au dernier relevé (aucun paquet ajouté sur `main`) ; e2e : suite entière relancée sur `main` à la pause, correctif du défaut critique compris : **159 verts**, 2 `fixme` voulus (bloc déplacé), et 1 échec, `space_without_a_role_is_not_found` : une course du test lui-même, qui comparait l'écran pendant que la barre latérale disait encore « Chargement… » (reproduite à coup sûr en retardant la lecture de l'arbre) ; le test attend maintenant la fin du chargement, et passe dix fois de suite ; la suite entière n'a pas été relancée après cette correction d'un seul test ; budgets du navigateur, mesurés dans l'atelier de la part e2e sur un poste occupé : 1 000 blocs à 160 ms au p95 (budget 300), 10 000 blocs en 1,38 s (budget 3 s) ; côté serveur, en release : frappe vue par un autre à 2,0 à 2,3 ms au p95, 42,8 ms quand elle déclenche la coupe d'une version (budget 150).
 
+## Limite d'usage hebdomadaire atteinte (2026-11-16) — c'est d'ici qu'on reprend
+
+Les agents (Opus 5.5) ont atteint la limite d'usage hebdomadaire du compte, qui se rouvre le **19 novembre à minuit (heure de Bruxelles)**. Trois agents ont été coupés ; leur travail est gardé (transcriptions et ateliers), et chacun reprend par un message :
+
+| Atelier (branche) | Agent coupé | État de l'atelier | À la reprise |
+|---|---|---|---|
+| `lot3-s-tour3` | implémenteur de la piste S (tours 5 à 7) | **rebasé sur `main` `21d04b5`** (45 commits au-dessus), le report de la 13b passe ses gardes (R536) ; **documentation non commitée** (`CLAUDE.md`, registre, relecture finale) | lui demander de finir sa vérification de fin (fmt, clippy, `cargo test --workspace` deux fois, mesures, Vitest, e2e) et de commiter la doc ; puis la **re-relecture du tour 7** (relecteur de la piste S) |
+| `lot3b-client` | relecteur de C2 (re-relecture ciblée de R551, le poids à deux niveaux) | rien de suivi modifié ; des sondes non suivies (`zz-probe-*`) | lui demander de finir ; puis C2 sur `main` |
+| `lot3b-s4b` | implémenteur de S4b | propre, aucun commit | lui demander de reprendre depuis le début de sa tâche |
+
 ## Reprise du 2026-11-16 (tenu à jour ; prime sur la section de la pause, qui suit)
 
 Le travail a repris le 2026-11-16 vers 5 h 30 ; Lenny a demandé d'avancer en autonomie complète jusqu'à sa prochaine demande de pause.
