@@ -37,6 +37,16 @@ const BURST: usize = 24;
 /// `a_full_page_queue_refuses_at_once`).
 const MMD_BURST: usize = mementum_server::MAX_PAGE_WRITES;
 
+/// Les deux contenus d'une rafale de `PUT /mmd`, en alternance : trois fois plus longs que ceux
+/// des restaurations, pour que la rafale de [`MMD_BURST`] requêtes occupe la page aussi longtemps
+/// que les [`BURST`] d'avant le Ruling R435 (sinon elle pouvait finir avant la fin de la session).
+fn mmd_burst_contents() -> [String; 2] {
+    [
+        many_paragraphs("Alpha", 3 * PARAGRAPHS),
+        many_paragraphs("Bêta", 3 * PARAGRAPHS),
+    ]
+}
+
 /// Paragraphes de chaque contenu : assez pour qu'une écriture prenne du temps dans l'acteur.
 const PARAGRAPHS: usize = 200;
 
@@ -219,7 +229,7 @@ async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
     let page = team.page(None, "Récritures", &grants).await;
     let busy = team.page(None, "Agitée", &[members(Level::Edit)]).await;
     witness(&t, page, team.tom.id).await;
-    let contents = [paragraphs("Alpha"), paragraphs("Bêta")];
+    let contents = mmd_burst_contents();
 
     let requests = (0..MMD_BURST)
         .map(|i| {
@@ -429,7 +439,7 @@ async fn writes_queued_before_the_session_ends_stop_with_it() {
                     })
                     .collect()
             } else {
-                let contents = [paragraphs("Alpha"), paragraphs("Bêta")];
+                let contents = mmd_burst_contents();
                 (0..MMD_BURST)
                     .map(|i| {
                         request(
