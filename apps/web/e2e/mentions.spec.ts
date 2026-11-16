@@ -275,3 +275,60 @@ test("at_sign_typed_with_altgr_opens_the_menu", async ({ browser }) => {
   await expect(atMenu(mona)).toBeHidden();
   await expect.poll(() => getMmd(aliceApi, page.id)).toBe("Voir @dem\n");
 });
+
+test("a_refused_creation_is_said_and_escape_on_its_button_gives_the_focus_back_to_the_text", async ({ browser }) => {
+  const { mona, aliceApi, page } = await duo(browser);
+  // Le serveur refuse la création (un droit retiré entre-temps).
+  await mona.route("**/api/v1/pages", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    await route.fulfill({
+      status: 403,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "forbidden", message: "Tu ne peux pas créer de page ici." }),
+    });
+  });
+  await typeInFirstBlock(mona, "Voir [[Refusée");
+  await expect(bracketMenu(mona).getByRole("option")).toHaveText(["Créer la page « Refusée »"]);
+  await mona.keyboard.press("Enter");
+  // Le message nomme le titre tapé, et dit le refus tel que le serveur le dit.
+  const notice = mona.getByRole("alert").filter({ hasText: "Refusée" });
+  await expect(notice).toHaveText("La page « Refusée » n'a pas pu être créée. Tu ne peux pas créer de page ici.");
+  await expect(mentionsOf(mona)).toHaveCount(0);
+  // Échap sur son bouton le ferme : le focus revient au texte, où la frappe reprend.
+  await notice.getByRole("button", { name: "Fermer le message" }).focus();
+  await mona.keyboard.press("Escape");
+  await expect(notice).toBeHidden();
+  await expect(mona.locator(".mm-editor .bn-editor")).toBeFocused();
+  await mona.keyboard.type("la suite");
+  await expect.poll(() => getMmd(aliceApi, page.id)).toBe("Voir la suite\n");
+});
+
+test("two_pages_asked_in_a_row_are_both_created_and_linked", async ({ browser }) => {
+  const { mona, aliceApi, space, page } = await duo(browser);
+  const tag = unique();
+  // Un réseau lent : la première création ne répond qu'une fois la seconde faite.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let posts = 0;
+  await mona.route("**/api/v1/pages", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    posts += 1;
+    if (posts === 1) await held;
+    await route.fallback();
+  });
+  await typeInFirstBlock(mona, `Voir [[Un ${tag}`);
+  await expect(bracketMenu(mona).getByRole("option")).toHaveText([`Créer la page « Un ${tag} »`]);
+  await mona.keyboard.press("Enter");
+  await mona.keyboard.type(`et [[Deux ${tag}`);
+  await expect(bracketMenu(mona).getByRole("option")).toHaveText([`Créer la page « Deux ${tag} »`]);
+  await mona.keyboard.press("Enter");
+  // La seconde est créée et liée pendant que la première attend encore.
+  await expect(mentionsOf(mona)).toHaveText([`@Deux ${tag}`]);
+  release();
+  await expect(mentionsOf(mona)).toHaveText([`@Un ${tag}`, `@Deux ${tag}`]);
+  expect(posts).toBe(2);
+  await expect(mona.getByRole("alert")).toHaveCount(0);
+  const titles = (await getTree(aliceApi, space.id)).nodes.filter((n) => n.parentId === page.id).map((n) => n.title);
+  expect(titles.sort()).toEqual([`Deux ${tag}`, `Un ${tag}`]);
+  await expect.poll(() => getMmd(aliceApi, page.id)).toMatch(/^Voir <mention [^>]*>Un [^<]*<\/mention> et <mention [^>]*>Deux [^<]*<\/mention>/);
+});
