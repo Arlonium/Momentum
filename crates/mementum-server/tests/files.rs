@@ -1384,3 +1384,108 @@ async fn client_gone_while_the_attachment_waits_still_attaches() {
     }
     assert!(content_path(&t, bytes).exists());
 }
+
+/// Constat N1 de la re-relecture du tour 1 : la lecture jetée d'un refus (Ruling R505) s'arrête à
+/// la borne. Un lecteur pousse un corps découpé de 64 Mio sur une borne de 1 Mio : le serveur
+/// cesse de lire, et le client ne peut pas tout pousser (la borne, plus les tampons du système).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discard_stops_at_the_bound() {
+    use tokio::io::AsyncWriteExt;
+    let t = small_app().await;
+    let team = Team::new(&t).await;
+    let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Read)];
+    let page = team.page(None, "Lue", &grants).await;
+    let addr = t.listen().await;
+    let cookie = team.tom.browser.cookie().unwrap();
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST {} HTTP/1.1\r\nHost: localhost\r\nCookie: {cookie}\r\n\
+         Transfer-Encoding: chunked\r\n\r\n",
+        upload_uri(page, "x.bin")
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let block = vec![3u8; 64 * 1024];
+    let total = 64usize << 20;
+    let mut sent = 0;
+    let pushing = async {
+        while sent < total {
+            let mut frame = format!("{:x}\r\n", block.len()).into_bytes();
+            frame.extend_from_slice(&block);
+            frame.extend_from_slice(b"\r\n");
+            if stream.write_all(&frame).await.is_err() {
+                return;
+            }
+            sent += block.len();
+        }
+    };
+    let _ = tokio::time::timeout(common::WAIT, pushing).await;
+    assert!(
+        sent < total,
+        "le serveur a lu tout le corps d'un refus, au-delà de la borne ({sent} octets)"
+    );
+}
+
+/// Constat N1 de la re-relecture du tour 1 : la lecture jetée d'un refus (Ruling R505) renonce
+/// après `upload_idle` sans octet : le refus part, la connexion n'est pas tenue.
+#[tokio::test]
+async fn discard_gives_up_after_idle() {
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        cfg.upload_idle = Duration::from_millis(500);
+    })
+    .await;
+    let team = Team::new(&t).await;
+    let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Read)];
+    let page = team.page(None, "Lue", &grants).await;
+    let addr = t.listen().await;
+    let mut raw =
+        RawUpload::start_with(addr, &team.tom.browser, page, "x.bin", Some(100_000), &[]).await;
+    raw.send(&[7u8; 10]).await;
+    let first = raw.interim().await;
+    let first = String::from_utf8_lossy(&first);
+    assert!(
+        first.starts_with("HTTP/1.1 403"),
+        "le refus n'est jamais parti : {first:?}"
+    );
+}
+
+/// Constat N2 de la re-relecture du tour 1 : une lecture jetée de plus de 1 Mio (Ruling R505) est
+/// journalisée en `info`, avec le compte, la page et les octets lus, pour qu'un exploitant voie
+/// qui fait travailler le serveur. Témoin : un refus de 512 Kio ne laisse pas de ligne.
+#[tokio::test]
+async fn large_discards_are_logged() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Read)];
+    let page = team.page(None, "Lue", &grants).await;
+    let addr = t.listen().await;
+    let logs = Logs::capture();
+    let small = push_then_read(
+        addr,
+        team.tom.browser.cookie(),
+        &upload_uri(page, "petit.bin"),
+        512 << 10,
+        "",
+    )
+    .await;
+    assert_eq!(status_line(&small), Some(403));
+    assert!(!logs.text().contains("lu et jeté"), "{}", logs.text());
+    let large = push_then_read(
+        addr,
+        team.tom.browser.cookie(),
+        &upload_uri(page, "gros.bin"),
+        2 << 20,
+        "",
+    )
+    .await;
+    assert_eq!(status_line(&large), Some(403));
+    let journal = logs.text();
+    let line = journal
+        .lines()
+        .find(|line| line.contains("lu et jeté"))
+        .unwrap_or_else(|| panic!("aucune ligne pour la lecture jetée : {journal}"));
+    assert!(line.contains("INFO"), "{line}");
+    assert!(line.contains(&team.tom.id.to_string()), "{line}");
+    assert!(line.contains(&page.to_string()), "{line}");
+    assert!(line.contains("discarded=2097152"), "{line}");
+}

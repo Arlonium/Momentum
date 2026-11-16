@@ -19,7 +19,9 @@
 //! attendre, perdrait la réponse (Ruling R505). Le `401` (aucun compte) et le `413` sur
 //! `Content-Length` coupent sans lire : le client doit lire la borne avant d'envoyer, et tenir une
 //! erreur réseau pendant un envoi pour un refus qu'il n'a pas reçu. Sous `Expect: 100-continue`,
-//! rien n'est lu : le refus arrive seul. Puis le corps, brut, lu trame par trame et écrit dans le
+//! rien n'est lu : le refus arrive seul. Tout compte de l'instance peut ainsi faire lire au serveur
+//! jusqu'à la borne par requête (débit au lot 7) : une lecture jetée de plus de 1 Mio est
+//! journalisée en `info`, avec le compte, la page et les octets. Puis le corps, brut, lu trame par trame et écrit dans le
 //! dépôt en calculant son hash, jamais gardé en mémoire : `413` dès qu'il dépasse la borne
 //! (`MEMENTUM_MAX_FILE_MB`, 100 Mio par défaut) ; un corps qui ne reçoit plus rien pendant
 //! `upload_idle` (30 s) est abandonné, la connexion fermée **sans réponse**, et c'est journalisé
@@ -92,6 +94,9 @@ use crate::{AppState, now_ms, to_completion};
 /// Octets lus sur le disque à chaque morceau d'un fichier servi.
 const CHUNK: usize = 64 * 1024;
 
+/// Une lecture jetée de plus de tant d'octets (Ruling R505) est journalisée.
+const LOGGED_DISCARD: u64 = 1 << 20;
+
 /// La politique de contenu de tout fichier servi : rien ne s'y charge ni ne s'y exécute, et un
 /// document ouvert l'est dans un bac à sable (Ruling R246).
 const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
@@ -124,6 +129,11 @@ pub(crate) async fn upload(
     let SessionUser { user, session } = caller;
     let max = state.max_file_bytes;
     let declared = declared_length(&headers);
+    // La page nommée, pour le journal d'une lecture jetée : `None` si le chemin ne se lit pas.
+    let named = path
+        .as_ref()
+        .ok()
+        .and_then(|Path(raw)| Uuid::parse_str(raw).ok());
     // Premier contrôle : les refus, avant de rien garder.
     let first = async {
         let id = page_id(path)?;
@@ -138,7 +148,17 @@ pub(crate) async fn upload(
             // un client qui pousse son corps que si ce corps est lu ; sinon le serveur ferme sur
             // des octets non lus, le système coupe, et la réponse est perdue.
             if declared.is_none_or(|length| length <= max) && !expects_continue(&headers) {
-                discard(&mut body, max, state.upload_idle).await;
+                let discarded = discard(&mut body, max, state.upload_idle).await;
+                // Tout compte de l'instance peut faire lire ainsi au serveur jusqu'à la borne,
+                // à chaque requête, avant les plafonds du lot 7 : l'exploitant le voit ici.
+                if discarded > LOGGED_DISCARD {
+                    tracing::info!(
+                        user = %user.id,
+                        page = ?named,
+                        discarded,
+                        "corps d'un envoi refusé lu et jeté, pour que le refus arrive au client"
+                    );
+                }
             }
             return Err(refusal);
         }
@@ -340,17 +360,19 @@ fn expects_continue(headers: &HeaderMap) -> bool {
 
 /// Lit et jette le corps d'un envoi refusé (Ruling R505), pour que la réponse arrive : au plus
 /// `max` octets, et jamais plus de `idle` sans en recevoir. Au-delà, ou sur une erreur, la
-/// lecture s'arrête, et le refus part quand même (il peut alors être perdu, comme avant).
-async fn discard(body: &mut Body, max: u64, idle: Duration) {
+/// lecture s'arrête, et le refus part quand même (il peut alors être perdu, comme avant). Rend les
+/// octets lus.
+async fn discard(body: &mut Body, max: u64, idle: Duration) -> u64 {
     let mut read = 0u64;
     while let Ok(Some(Ok(frame))) = tokio::time::timeout(idle, body.frame()).await {
         if let Ok(data) = frame.into_data() {
             read += data.len() as u64;
             if read > max {
-                return;
+                break;
             }
         }
     }
+    read
 }
 
 /// `413` sur `Content-Length` : la longueur annoncée, si elle se lit.
