@@ -290,6 +290,23 @@ Un relecteur neuf a re-relu les tours 3 et 4 (atelier `lot3-s-tour3`, tête `445
 
 **Restent, dits** : une version coupée avant ce tour qui porte des marques hors du schéma est rendue telle quelle à l'aperçu (`GET …/versions/{id}/state`) : un navigateur la lit en K × C ; R382 ; R387.
 
+### Re-relecture du tour 5, et tour de correction 6 (2026-11-16)
+
+Le relecteur a re-relu le tour 5 (rapport `re-relecture-tour5.md`, sondes `sondes/tour5/`, sous `.claude/worktrees/tmp-agents/relecture-s-tour3/`). **C1, C2, I1, I2 et I3 sont levés** (sondes rejouées, mutation de R437 rouge, 2 400 requêtes dont un tiers abandonnées dans la file équitable sans fuite de place, aller-retour à 20 000 cas vert). **Pas levé pour autant : la correction de C1 ouvre un critique neuf.** Le tour 6 le corrige, avec les autres constats (même atelier ; au registre, « Tour de correction 6 (2026-11-16) », R490 à R495) ; sa re-relecture reste à faire.
+
+| Constat | Fait | Mesures |
+|---|---|---|
+| Critique N1 : la suppression à la relecture (R431) retirait un élément qui n'était pas une marque (une lettre d'un autre client), et la page servie divergeait des onglets ouverts | **fait**, R490 et R491 (`ff515ed`) : la relecture ne supprime que les marques que l'entrée a intégrées (au-dessus du vecteur d'état d'avant elle), et le journal ne garde que ce que la page a intégré (la mise à jour de la transaction, plus la mise à jour lue réencodée) ; test de propriétés « page rechargée = page vivante », mises à jour faites à la main comprises | la sonde : « onjou » puis « Bonjou » partout |
+| Important N2 : un rédacteur tenait la file d'une page pleine de `PUT /mmd` refusés, sans rien écrire | **fait**, R494 (`6bcec27`) : la place se prend une fois le MMD lu et validé, deux au plus par compte ; les rafales `PUT /mmd` des tests de R200 et R209 deviennent des tests de route qui voient l'acteur | Mona, en 10 s : 4 écritures et 81 `429` avant, 29 écritures et aucun `429` après ; mémoire de I1 : +503 Mio au plus, stable |
+| Important N3 : un lien de plus de 16 Kio figeait un onglet en boucle de refus, et rechargeait l'acteur à chaque tour | **fait**, R492 (`0833082`) : un refus avant application ne recharge plus la page ; R495 (`b8c8f72`) : l'éditeur ne pose pas un tel lien, et le dit | un rechargement par tour avant, aucun après |
+| Mineur N4 : une restauration recréait un nœud étranger portant un lien que la garde refuse (R438 inexact) | **fait**, R493 (`000767b`) : la réécriture d'un nœud étranger juge chaque valeur comme la garde ; R438 récrit (trois chemins, tous gardés) | lien de 20 000 octets recréé avant, retiré après |
+
+**Sens changés, dits au registre** : `blocknote_state_is_returned_with_the_same_tree` (R491) ; les rafales `PUT /mmd` des tests de R200 et R209, passées en tests de route (R494).
+
+**À éprouver en premier par la re-relecture** : le test de propriétés de R491 (des formes de mises à jour faites à la main qu'il ne tire pas : un parent qui n'est pas la racine, une origine, plusieurs structures d'un client) ; l'encodage de la transaction contre tout ce que relaie l'acteur (`release_held`, le dédoublonnage) ; un refus « intact » (R492) qui laisserait pourtant quelque chose dans le document ; la part de deux places (R494) contre une rafale légitime d'un agent ; l'extension du client (R495) contre les chemins qui posent un lien sans `AddMarkStep` ni contenu inséré.
+
+**Vérifications du tour** : fmt et clippy propres ; `cargo test --workspace --no-fail-fast` : 895 verts, 15 ignorés ; Vitest : 937 verts ; e2e `fidelity`, `collab`, `relay-guard`, `offline`, `history` : 21 verts ; budgets de la synchro en release sans recul (frappe à 2,2 ms au p95, 41 ms avec la coupe d'une version).
+
 ## Ce que la documentation doit dire (pour la Task 14)
 
 Pour les constats finis :
