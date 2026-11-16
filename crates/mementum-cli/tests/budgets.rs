@@ -7,9 +7,15 @@
 //!
 //! Le démarrage mesuré est donc **à chaud** : un processus neuf sur un
 //! dossier de données neuf (base créée et migrée), mais un exécutable que le
-//! système a déjà en cache. La mesure est prudente sur le profil (binaire
-//! debug) et optimiste sur le cache ; un vrai démarrage à froid, après un
-//! redémarrage de la machine, n'est pas mesuré.
+//! système a déjà en cache. La mesure est optimiste sur le cache ; un vrai
+//! démarrage à froid, après un redémarrage de la machine, n'est pas mesuré.
+//!
+//! Le démarrage est une mesure (Ruling R486) : ignorée par défaut, à lancer en
+//! `--release`, sur le binaire que les gens lancent (job `budgets` de la CI :
+//! `cargo test --release -p mementum-sync -p mementum-cli -- --ignored`). En
+//! debug, à chaque passage, il mesurait la charge du coureur : 1,43 s au mieux
+//! sur la CI sous Linux, 1,49 s sur un poste chargé, 67 à 92 ms au calme. La
+//! mémoire au repos reste un test exécuté : elle ne dépend pas de la charge.
 
 mod common;
 
@@ -34,6 +40,7 @@ const IDLE_RSS: u64 = 150 * 1_000_000;
 static SERIAL: Mutex<()> = Mutex::new(());
 
 #[test]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 fn cold_start_under_1s() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let mut times = Vec::new();
