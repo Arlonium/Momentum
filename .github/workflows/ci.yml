@@ -33,8 +33,8 @@ jobs:
   # du navigateur tournent dans le job `web`, après les autres tests e2e, sur un build de
   # production et un serveur `--release` (Ruling R38).
   #
-  # Ce job lance tout ce qui est `#[ignore]` dans `mementum-sync` : la marque est réservée aux
-  # mesures (Ruling R340). Une limite connue s'écrit en test exécuté, qui l'affirme
+  # Ce job lance tout ce qui est `#[ignore]` dans `mementum-sync` et dans `mementum-cli` (le
+  # démarrage du binaire, Ruling R486) : la marque est réservée aux mesures (Ruling R340). Une limite connue s'écrit en test exécuté, qui l'affirme
   # (`known_limit`), et tourne dans le job `rust`. Les mesures passent une à la fois, par un
   # verrou dans `tests/budgets.rs` (Ruling R341). `--nocapture` : leurs lignes `MESURE` sont au
   # journal de chaque passage, vert ou rouge.
