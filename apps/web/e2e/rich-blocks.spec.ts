@@ -10,6 +10,7 @@ import {
   openPage,
   ownerAndMember,
   putMmd,
+  readerBanner,
   setPageLevel,
   unique,
 } from "./helpers";
@@ -93,11 +94,13 @@ test("bookmark_is_inserted_and_read_back", async ({ browser }) => {
   await field.fill("https://mementum.dev");
   await mona.keyboard.press("Enter");
   await expect(settings).toBeHidden();
-  await expect(mona.getByRole("button", { name: "Modifier le signet" })).toBeFocused();
-
-  // Un bloc sans texte posé par « / » est suivi d'un paragraphe vide, où passe le curseur (le geste
-  // de BlockNote, R308) : le MMD l'écrit `<p/>`.
-  await expect.poll(() => getMmd(aliceApi, page.id)).toBe('<bookmark url="https://mementum.dev/"/>\n\n<p/>\n');
+  // Posé depuis le texte, le signet y rend le focus (R474) : un bloc sans texte posé par « / » est
+  // suivi d'un paragraphe vide, où passe le curseur (R308), et la frappe y reprend.
+  await expect(mona.locator(".mm-editor .bn-editor")).toBeFocused();
+  await mona.keyboard.type("La suite");
+  await expect
+    .poll(() => getMmd(aliceApi, page.id))
+    .toBe('<bookmark url="https://mementum.dev/"/>\n\nLa suite\n');
   const card = tom.locator(".mm-editor .mm-bookmark");
   await expect(card.locator(".mm-bookmark-host")).toHaveText("mementum.dev");
   await expect(card.getByRole("link")).toHaveAttribute("href", "https://mementum.dev/");
@@ -205,4 +208,91 @@ test("block_window_stays_open_when_someone_else_moves_its_block", async ({ brows
   await expect.poll(() => getMmd(aliceApi, page.id)).toBe(
     'Avant\n\nAprès\n\n<bookmark url="https://mementum.dev/doc"/>\n',
   );
+});
+
+/** Ce qui a le focus dans l'onglet : `BODY`, ou l'élément et sa classe. */
+function focused(p: Page): Promise<string> {
+  return p.evaluate(() => {
+    const active = document.activeElement;
+    return active === null || active === document.body ? "BODY" : `${active.tagName}.${active.className}`;
+  });
+}
+
+test("block_window_and_its_text_survive_the_page_turning_read_only", async ({ browser }) => {
+  // Bruno remplit la fenêtre d'un signet ; Alice le baisse à « Peut lire » : la session de son onglet
+  // est recréée, avec un éditeur neuf. La fenêtre reste, avec son texte, en lecture seule ; le droit
+  // revenu, le texte s'enregistre (R471, R472).
+  const team = await ownerAndMember();
+  const page = await createPage(team.aliceApi, {
+    spaceId: team.space.id,
+    section: "private",
+    title: `Lecture seule ${unique()}`,
+  });
+  await putMmd(team.aliceApi, page.id, 'Avant\n\n<bookmark url="https://mementum.dev/"/>\n\nAprès\n');
+  await setPageLevel(team.aliceApi, page.id, team.brunoId, "edit");
+  const bruno = await openPage(browser, page.id, team.bruno);
+  await bruno.getByRole("button", { name: "Modifier le signet" }).click();
+  const settings = blockWindow(bruno, "Adresse du signet");
+  const field = settings.getByRole("textbox", { name: "Adresse de la page" });
+  await expect(field).toBeFocused();
+  await bruno.keyboard.press("End");
+  await bruno.keyboard.type("doc-en-cours");
+
+  await setPageLevel(team.aliceApi, page.id, team.brunoId, "read");
+  await expect(readerBanner(bruno)).toBeVisible();
+  await expect(settings).toBeVisible();
+  await expect(field).toHaveValue("https://mementum.dev/doc-en-cours");
+  await expect(field).toHaveAttribute("readonly", "");
+  await expect(settings.getByRole("status")).toHaveText(
+    "Tu ne peux pas modifier cette page pour l'instant : ton texte reste ici, à copier.",
+  );
+  await expect.poll(() => focused(bruno)).toContain("INPUT");
+  // Rien ne part : ni la frappe, ni Entrée.
+  await bruno.keyboard.type("xyz");
+  await bruno.keyboard.press("Enter");
+  await expect(field).toHaveValue("https://mementum.dev/doc-en-cours");
+  // Échap : le focus va à l'éditeur, en lecture seule, jamais à `body`.
+  await bruno.keyboard.press("Escape");
+  await expect(settings).toBeHidden();
+  expect(await focused(bruno)).toContain("bn-editor");
+  expect(await getMmd(team.aliceApi, page.id)).toBe('Avant\n\n<bookmark url="https://mementum.dev/"/>\n\nAprès\n');
+
+  // Le droit revient ; Bruno rouvre la page (le bandeau le lui offre) : la fenêtre rouverte retrouve
+  // le texte tapé, qui s'enregistre.
+  await setPageLevel(team.aliceApi, page.id, team.brunoId, "edit");
+  await bruno
+    .getByRole("status")
+    .filter({ hasText: "Tu peux maintenant modifier cette page" })
+    .getByRole("button", { name: "Rouvrir la page" })
+    .click();
+  const modify = bruno.getByRole("button", { name: "Modifier le signet" });
+  await expect(modify).toBeVisible();
+  await modify.click();
+  await expect(field).toHaveValue("https://mementum.dev/doc-en-cours");
+  await bruno.keyboard.press("Enter");
+  await expect
+    .poll(() => getMmd(team.aliceApi, page.id))
+    .toBe('Avant\n\n<bookmark url="https://mementum.dev/doc-en-cours"/>\n\nAprès\n');
+});
+
+test("escape_after_someone_else_changed_the_block_gives_the_focus_to_the_text", async ({ browser }) => {
+  const { mona, tom, aliceApi, page } = await duo(browser, "Changé");
+  await putMmd(aliceApi, page.id, 'Avant\n\n<bookmark url="https://mementum.dev/"/>\n\nAprès\n');
+  await expect(tom.locator(".mm-editor .mm-bookmark")).toBeVisible();
+  await mona.getByRole("button", { name: "Modifier le signet" }).click();
+  const settings = blockWindow(mona, "Adresse du signet");
+  await expect(settings.getByRole("textbox", { name: "Adresse de la page" })).toBeFocused();
+  // Tom change le signet en paragraphe : son bouton part.
+  await tom.evaluate(() => {
+    const editor = window.__mementum!.editor;
+    const bookmark = editor.document.find((b) => b.type === "bookmark")!;
+    editor.updateBlock(bookmark, { type: "paragraph" });
+  });
+  await expect(settings.getByRole("status")).toContainText("n'est plus dans la page");
+  await mona.keyboard.press("Escape");
+  await expect(settings).toBeHidden();
+  // Le focus est dans l'éditeur, et la frappe y va.
+  expect(await focused(mona)).toContain("bn-editor");
+  await mona.keyboard.type("repris");
+  await expect.poll(() => getMmd(aliceApi, page.id)).toContain("repris");
 });
