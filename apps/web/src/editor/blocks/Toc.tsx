@@ -19,6 +19,7 @@
 import { createReactBlockSpec } from "@blocknote/react";
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useRef,
   useState,
@@ -158,7 +159,6 @@ function TocView({ editor }: { editor: MementumEditor }) {
   const [held, setHeld] = useState<readonly Heading[] | null>(null);
   const inside = useRef({ pointer: false, focus: false });
   const nav = useRef<HTMLElement>(null);
-  const hold = () => setHeld((was) => was ?? headings);
   const release = () => {
     if (!inside.current.pointer && !inside.current.focus) setHeld(null);
   };
@@ -176,6 +176,11 @@ function TocView({ editor }: { editor: MementumEditor }) {
   }, [editor]);
 
   const shown = held ?? headings;
+  // Les entrées sont rendues après le reste de la page, au tour suivant de React : cinq cents liens
+  // coûtaient 200 ms de plus à l'ouverture d'une page de 10 000 blocs (`budgets.spec.ts`).
+  const listed = useDeferredValue<readonly Heading[] | null>(shown, null);
+  // Ce qu'elle montre : les entrées rendues (elles suivent les titres lus d'un tour de React).
+  const hold = () => setHeld((was) => was ?? listed ?? headings);
   const onFocus = () => {
     inside.current.focus = true;
     hold();
@@ -196,6 +201,7 @@ function TocView({ editor }: { editor: MementumEditor }) {
       ref={nav}
       className="mm-toc"
       aria-label="Table des matières"
+      aria-busy={listed === null}
       contentEditable={false}
       onFocus={onFocus}
       onBlur={onBlur}
@@ -208,11 +214,11 @@ function TocView({ editor }: { editor: MementumEditor }) {
         release();
       }}
     >
-      {shown.length === 0 ? (
+      {listed === null ? null : listed.length === 0 ? (
         <p className="mm-toc-empty">Aucun titre dans la page.</p>
       ) : (
         <ol className="mm-toc-list">
-          {shown.map((heading) => (
+          {listed.map((heading) => (
             <li key={heading.id} className={`mm-toc-entry mm-toc-level-${heading.level}`} data-level={heading.level}>
               <a className="mm-toc-link" href={`#${heading.id}`} dir="auto" onClick={(event) => follow(event, heading.id)}>
                 {shorten(heading.text, MAX_ENTRY_CHARS)}
