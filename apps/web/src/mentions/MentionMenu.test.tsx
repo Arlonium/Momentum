@@ -392,9 +392,13 @@ test("a_page_created_whose_place_is_gone_is_said_and_written_nowhere_else", asyn
   expect(mentions(m)).toEqual([]);
   expect(m.writes.length).toBe(before);
   expect(document.querySelector('[role="alert"]')?.textContent).toBe(createdNotPlaced("Compte rendu"));
-  // Le bouton du message le ferme.
-  await click(document.querySelector('[role="alert"] button')!);
+  // Le bouton du message le ferme, et rend le focus au texte : il ne tombe pas sur `body`.
+  const close = document.querySelector<HTMLElement>('[role="alert"] button')!;
+  close.focus();
+  expect(document.activeElement).toBe(close);
+  await click(close);
   expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(m.editor.prosemirrorView.dom.contains(document.activeElement)).toBe(true);
 });
 
 test("a_mention_takes_the_title_of_the_moment", async () => {
@@ -438,7 +442,8 @@ test("a_menu_line_is_text_isolated_and_a_click_keeps_the_focus_in_the_text", asy
   expect(offered()).toEqual({ Pages: [tag], Personnes: ["<b>Ève</b>"] });
   expect(menu()!.querySelector("img, b")).toBeNull();
   for (const title of menu()!.querySelectorAll(".mm-mention-option-title")) expect(title.getAttribute("dir")).toBe("auto");
-  // Un clic choisit sans prendre le focus au texte.
+  // Un clic choisit sans prendre le focus au texte : la fenêtre de BlockNote retient le `mousedown`
+  // (une garde : à revoir rouge si une montée de version le retire).
   const line = option("<b>Ève</b>")!;
   const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
   line.dispatchEvent(down);

@@ -23,6 +23,7 @@ import { SuggestionMenuController, type SuggestionMenuProps } from "@blocknote/r
 import type { Transaction } from "prosemirror-state";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPage, isSessionLost } from "../api";
+import { focusEditor } from "../editor/blocks/BlockWindowHost";
 import type { RosterUser } from "../editor/collab";
 import type { MementumEditor } from "../editor/debug";
 import { CloseIcon, PageIcon, PlusIcon } from "../icons";
@@ -267,7 +268,16 @@ export function MentionMenus({ editor, context }: Props) {
       {notice !== null && (
         <div className="mm-mention-notice" role="alert">
           <p dir="auto">{notice}</p>
-          <button type="button" className="mm-icon-button" aria-label="Fermer le message" onClick={() => setNotice(null)}>
+          <button
+            type="button"
+            className="mm-icon-button"
+            aria-label="Fermer le message"
+            onClick={() => {
+              setNotice(null);
+              // Le bouton part avec le message : le focus revient au texte, pas à `body`.
+              focusEditor(editor);
+            }}
+          >
             <CloseIcon />
           </button>
         </div>
@@ -282,7 +292,8 @@ const BracketMenu = (props: SuggestionMenuProps<MentionItem>) => <MentionMenu {.
 /**
  * La liste d'un menu : un `listbox` nommé, ses lignes rangées par groupe. Le focus reste dans le
  * texte ; la ligne active est celle que BlockNote tient par les flèches (`aria-activedescendant` du
- * texte la nomme par son id). Les lignes ne changent qu'à la frappe : rien ne bouge sous le pointeur.
+ * texte la nomme par son id) ; un clic choisit sans le prendre (la fenêtre de BlockNote retient le
+ * `mousedown`). Les lignes ne changent qu'à la frappe : rien ne bouge sous le pointeur.
  */
 function MentionMenu({ items, loadingState, selectedIndex, onItemClick, label }: SuggestionMenuProps<MentionItem> & { label: string }) {
   const active = useRef<HTMLLIElement | null>(null);
@@ -312,8 +323,6 @@ function MentionMenu({ items, loadingState, selectedIndex, onItemClick, label }:
               className="mm-mention-option"
               role="option"
               aria-selected={index === selectedIndex}
-              // Le focus reste dans le texte : le clic choisit sans le prendre.
-              onMouseDown={(event) => event.preventDefault()}
               onClick={firstClick(() => onItemClick?.(item))}
             >
               {"create" in item ? <PlusIcon /> : item.group === GROUP_PAGES ? <PageIcon /> : null}
