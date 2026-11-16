@@ -773,15 +773,20 @@ proptest! {
     }
 }
 
+/// L'affirmation d'une limite connue, partagée avec les tests de `mementum-sync`. Le module est
+/// déclaré ici, au niveau du fichier, et pas dans `known_limits` : un `#[path]` dans un module en
+/// ligne se lit depuis `tests/known_limits/`, un dossier qui n'existe pas, que Windows traverse et
+/// que Linux refuse.
+#[path = "../../mementum-sync/tests/common/limit.rs"]
+mod limit;
+
 /// Les limites connues (Ruling R340) : ce que le test dit voulu n'est pas tenu, et il l'affirme.
 /// Le jour où la perte est levée, il échoue : le sortir de ce module, et lui faire affirmer la page
 /// voulue.
 mod known_limits {
     use super::*;
 
-    #[path = "../../../mementum-sync/tests/common/limit.rs"]
-    mod limit;
-    use limit::known_limit;
+    use super::limit::known_limit;
 
     /// L'alignement du premier paragraphe, tel que la page le lit.
     fn alignment(page: &PageDoc) -> Option<String> {
