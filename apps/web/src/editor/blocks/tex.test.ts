@@ -5,7 +5,7 @@
 // refusées là où elles se produisent, pendant l'analyse ; la profondeur d'éléments est comptée dans
 // ce que KaTeX produit.
 import { expect, test } from "vitest";
-import { depthAllowance, MAX_LATEX_CHARS, MAX_TEX_NODES, typeset } from "./tex";
+import { depthAllowance, MAX_LATEX_CHARS, MAX_TEX_NODES, refusal, typeset } from "./tex";
 
 const B = String.fromCharCode(92);
 /** `@` pour la barre oblique inverse, plus lisible dans une chaîne de JavaScript. */
@@ -61,6 +61,35 @@ test("what_katex_defines_for_itself_is_not_a_definition", () => {
   ]) {
     expect(typeset(latex, true).kind, latex).toBe("formula");
   }
+});
+
+test("tags_and_unnumbered_lines_are_not_definitions", () => {
+  // KaTeX écrit `\tag` sous la forme `\gdef\df@tag{…}`, `\nonumber` et `\notag` sous la forme
+  // `\gdef\@eqnsw{0}` : ce sont ses définitions, pas celles de la formule (relecture de C2, I1).
+  for (const raw of [
+    "x @tag{1}",
+    "x @tag*{a}",
+    "@begin{equation} x @tag{2} @end{equation}",
+    "@begin{align} a &= b @tag{1} @@ c &= d @notag @end{align}",
+    "@begin{gather} a @@ b @nonumber @end{gather}",
+  ]) {
+    expect(typeset(t(raw), true).kind, raw).toBe("formula");
+  }
+});
+
+test("a_command_of_katex_with_an_at_sign_written_in_the_formula_is_refused", () => {
+  // Accepter `\df@tag` par son nom ne doit pas rouvrir la bombe : un `\tag` de 2 000 lettres, suivi
+  // de mille `\df@tag`, en ferait écrire deux millions. Une commande dont le nom porte `@` n'est
+  // écrite que par KaTeX : écrite dans la formule, elle est refusée.
+  const bomb = `${t("@tag{")}${"a".repeat(2_000)}}${`${B}df@tag`.repeat(1_000)}`;
+  for (const latex of [bomb, `${B}gdef${B}df@tag{x}`, `x ${B}df@tag`, `${B}@eqnsw`, `${B}current@color x`]) {
+    expect(typeset(latex, true), latex.slice(0, 40)).toEqual({ kind: "refused", why: "internal" });
+  }
+  expect(refusal({ kind: "refused", why: "internal" })).toBe(
+    "Les commandes internes de KaTeX (dont le nom contient @) ne sont pas permises dans une formule.",
+  );
+  // Témoin : un retour à la ligne suivi d'une arobase n'est pas une commande.
+  expect(typeset("a \\\\@ b", true).kind).toBe("formula");
 });
 
 /** La profondeur d'éléments du HTML, lue par l'analyseur de la page (jsdom). */

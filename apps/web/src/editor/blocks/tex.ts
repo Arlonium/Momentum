@@ -7,8 +7,10 @@
 //   d'un objet qui refuse toute définition de la formule, au moment où l'analyse la fait. Rien ne
 //   relit les lexèmes : `\verb` ne cache rien (la relecture perdue de la Task C2 le contournait).
 //   Une définition récursive ou en cascade figeait l'onglet. KaTeX range aussi ses propres valeurs
-//   (`\cr` dans un tableau, `\current@color`, `|` sous `\middle`) : des chaînes, des fonctions, jamais une
-//   définition de la formule, qui est un objet porteur de `tokens`.
+//   (`\cr` dans un tableau, `\current@color`, `|` sous `\middle`) : des chaînes, des fonctions ; et
+//   deux définitions à lui, `\df@tag` (`\tag`) et `\@eqnsw` (`\nonumber`, `\notag`), seules acceptées
+//   par leur nom. Une commande dont le nom porte `@` n'est écrite que par KaTeX : écrite dans la
+//   formule, elle est refusée (sinon mille `\df@tag` copieraient mille fois un `\tag`).
 // - **La profondeur d'éléments est comptée dans ce que KaTeX produit** (HTML et MathML, balises
 //   comptées dans le HTML écrit) : la mise en page de Chromium déborde sa pile sur des boîtes
 //   imbriquées, tables ou non (`\frac`, `\mathllap`, `\mathreflectbox`, des accolades…), et l'onglet
@@ -42,7 +44,7 @@ export type TexOutcome =
   | { kind: "formula"; html: string; depth: number; nodes: number }
   | { kind: "empty" }
   | { kind: "invalid"; message: string }
-  | { kind: "refused"; why: "definition" | "length" | "size" };
+  | { kind: "refused"; why: "definition" | "internal" | "length" | "size" };
 
 /**
  * La profondeur d'éléments qu'une formule peut avoir, à `depth` éléments du haut du document : 43
@@ -56,6 +58,9 @@ export function depthAllowance(depth: number): number {
 /** Une définition de la formule, refusée pendant l'analyse. */
 class DefinitionRefused extends Error {}
 
+/** Les définitions que KaTeX écrit lui-même : `\tag` et `\tag*`, puis `\nonumber` et `\notag`. */
+const OWN_DEFINITIONS = new Set(["\\df@tag", "\\@eqnsw"]);
+
 /** Ce que KaTeX range lui-même dans `macros` ; une définition y est un objet à `tokens`. */
 const isDefinition = (value: unknown) =>
   typeof value === "object" && value !== null && Array.isArray((value as { tokens?: unknown }).tokens);
@@ -67,7 +72,7 @@ function guardedMacros(): Macros {
     {},
     {
       set(target, name, value) {
-        if (isDefinition(value)) throw new DefinitionRefused(String(name));
+        if (isDefinition(value) && !OWN_DEFINITIONS.has(String(name))) throw new DefinitionRefused(String(name));
         target[name as string] = value as string;
         return true;
       },
@@ -76,6 +81,15 @@ function guardedMacros(): Macros {
       },
     },
   );
+}
+
+/**
+ * Une commande dont le nom porte `@` écrite dans la formule (le lexeur de KaTeX tient `@` pour une
+ * lettre dans un nom de commande ; `\\@`, un retour à la ligne suivi d'une arobase, n'en est pas une).
+ */
+function writesAnInternalCommand(latex: string): boolean {
+  for (const [command] of latex.matchAll(/\\(?:[A-Za-z@]+|[^])/g)) if (command.includes("@")) return true;
+  return false;
 }
 
 /** L'arbre que KaTeX construit avant d'en écrire le HTML (sans type public). */
@@ -110,6 +124,7 @@ function shape(html: string): { depth: number; nodes: number } {
 function compute(latex: string, display: boolean): TexOutcome {
   if (latex.trim() === "") return { kind: "empty" };
   if (latex.length > MAX_LATEX_CHARS) return { kind: "refused", why: "length" };
+  if (writesAnInternalCommand(latex)) return { kind: "refused", why: "internal" };
   let html: string;
   try {
     html = renderToDomTree(latex, {
@@ -170,6 +185,8 @@ export function refusal(outcome: TexOutcome): string | null {
       switch (outcome.why) {
         case "definition":
           return "Les définitions (\\def, \\newcommand…) ne sont pas permises dans une formule.";
+        case "internal":
+          return "Les commandes internes de KaTeX (dont le nom contient @) ne sont pas permises dans une formule.";
         case "length":
           return `Formule trop longue : ${MAX_LATEX_CHARS.toLocaleString("fr-FR")} caractères au plus.`;
         default:
