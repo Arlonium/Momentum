@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi) | [`Version`]`[]`, la plus récente d'abord ; cent au plus |
 //! | `GET …/versions/{versionId}/state` | `edit` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) tel qu'il a été gardé |
-//! | `POST …/versions/{versionId}/restore` | `edit` | `204` ; `409 trashed` |
+//! | `POST …/versions/{versionId}/restore` | `edit` | `204` ; `409 trashed` ; `429 page_busy` (Ruling R535) |
 //!
 //! **Refus**, dans l'ordre des commentaires (Rulings R168 et R186, écrit en tête de
 //! `access.rs`) : `401` sans session ; `404 not_found` pour une page que la personne ne voit pas ;
@@ -16,8 +16,10 @@
 //! voit pas la page n'apprend pas qu'une version existe, et qui la voit n'apprend rien des
 //! versions d'une autre.
 //!
-//! **Restaurer** suit l'ordre de `PUT /mmd` (Ruling R89) : premier contrôle, puis le verrou des
-//! écritures du serveur sur la page (Ruling R200, `page_writes.rs`), chargement de la page,
+//! **Restaurer** suit l'ordre de `PUT /mmd` (Ruling R89) : premier contrôle, puis une place dans
+//! la file des écritures du serveur sur la page, sur la part du compte (Rulings R200, R494, R535,
+//! `page_writes.rs` ; `429 page_busy` si la file de la page est pleine, ou si le compte y tient
+//! déjà deux places), le verrou de la page, chargement de la page,
 //! second contrôle des droits, puis la commande à l'acteur, qui coupe la version
 //! `before_restore` et écrit les blocs de la version sans rien laisser passer entre les deux
 //! (`Hub::restore_version`). L'écriture est celle d'un client ou de `PUT /mmd` : journal,
@@ -102,8 +104,14 @@ pub(crate) async fn restore(
     permit(&access, Action::Edit)?;
     // Ruling R200 : une écriture du serveur à la fois par page. Le verrou se prend après le
     // premier contrôle, et ce qui suit va au bout, verrou tenu, même si le client coupe : la
-    // requête suivante ne relit ses droits qu'une fois celle-ci écrite.
-    let write = state.page_writes.lock(id).await;
+    // requête suivante ne relit ses droits qu'une fois celle-ci écrite. Ruling R535 : la place
+    // dans la file est prise sur la part du compte, comme celle d'un `PUT /mmd` (R494).
+    let write = state
+        .page_writes
+        .reserve(id, user.id)
+        .ok_or_else(ApiError::page_busy)?
+        .lock()
+        .await;
     to_completion(async move {
         let _write = write;
         // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise

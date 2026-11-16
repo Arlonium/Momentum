@@ -481,3 +481,73 @@ async fn mmd_writes_queued_before_a_revocation_stop_with_it() {
 async fn mmd_writes_queued_before_the_session_ends_stop_with_it() {
     queued_writes_stop_with(Ending::SessionEnded).await;
 }
+
+/// Ruling R535, constat M2 de la re-relecture du tour 6 : une restauration prend sa place dans la
+/// file de la page sur la part du compte, comme un `PUT /mmd` (R494). Douze boucles de
+/// restaurations sans effet (R180) de Tom tenaient la file pleine : Mona, rédactrice, n'écrivait
+/// plus (aucune écriture et 93 `429` en dix secondes). Tom tient ses deux places (deux écritures
+/// en attente) : sa restauration est refusée sur-le-champ, `429 page_busy` ; celle de Mona passe,
+/// et son `PUT /mmd` aussi.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_takes_a_place_of_the_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(&dir).await;
+    let (page, _, users) = team(&state, &["tom", "mona"]).await;
+    let (tom, mona) = (&users[0], &users[1]);
+    let version = {
+        let (doc, _) = mementum_crdt::PageDoc::new_page();
+        doc.write_blocks(&mementum_md::parse("Version\n").unwrap())
+            .unwrap();
+        state
+            .store
+            .put_version(
+                page,
+                0,
+                &doc.encode_state(),
+                &[],
+                mementum_store::VersionReason::Closing,
+            )
+            .await
+            .unwrap()
+    };
+    let restore = |who: &SessionUser| {
+        let (state, who) = (
+            state.clone(),
+            SessionUser {
+                user: who.user.clone(),
+                session: who.session,
+            },
+        );
+        tokio::spawn(async move {
+            crate::routes::versions::restore(
+                State(state),
+                who,
+                Ok(Path((page.to_string(), version.to_string()))),
+            )
+            .await
+        })
+    };
+    // Les deux places de Tom, prises (deux de ses écritures en attente).
+    let held: Vec<_> = (0..2)
+        .map(|_| state.page_writes.reserve(page, tom.user.id).unwrap())
+        .collect();
+    let refused = status(restore(tom)).await;
+    assert_eq!(
+        refused,
+        StatusCode::TOO_MANY_REQUESTS,
+        "la restauration de Tom"
+    );
+    assert_eq!(
+        status(restore(mona)).await,
+        StatusCode::NO_CONTENT,
+        "celle de Mona"
+    );
+    let monas = status(put(&state, mona, page, "Mona\n".to_string())).await;
+    assert_eq!(monas, StatusCode::NO_CONTENT, "le PUT /mmd de Mona");
+    drop(held);
+    assert_eq!(
+        status(restore(tom)).await,
+        StatusCode::NO_CONTENT,
+        "Tom, ses places rendues"
+    );
+}
