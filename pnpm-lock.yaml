@@ -196,7 +196,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/protocol
       katex:
-        specifier: ^0.19.1
+        specifier: 0.19.1
         version: 0.19.1
       prosemirror-state:
         specifier: 1.4.4

@@ -19,7 +19,7 @@
 //   (`depthAllowance`) ; sinon, elle est montrée en texte, avec un message (`Formula`).
 // - Une formule de plus de `MAX_LATEX_CHARS` caractères, ou dont KaTeX produirait plus de
 //   `MAX_TEX_NODES` éléments, n'est pas mise en forme. Les tailles écrites (`\rule`, `\kern`,
-//   `\\[…]`) sont bornées à `MAX_SIZE_EM`.
+//   `\\[…]`) sont bornées à `MAX_SIZE_EM` ; les expansions de macros, à `MAX_EXPAND`.
 //
 // KaTeX reste à `trust: false` : ni lien, ni image, ni attribut. Le résultat est gardé, par formule,
 // dans un cache borné : une formule déjà vue s'affiche sans être recalculée.
@@ -33,6 +33,9 @@ export const MAX_TEX_NODES = 60_000;
 
 /** Les tailles écrites dans une formule, au plus (en em) : `\rule{1em}{2000000em}` faisait 33 millions de pixels. */
 const MAX_SIZE_EM = 50;
+
+/** Les expansions de macros d'une formule, au plus (la valeur par défaut de KaTeX, épinglée). */
+const MAX_EXPAND = 1_000;
 
 /**
  * La mise en page de Chromium plante quand la profondeur de la page autour de la formule, plus
@@ -70,10 +73,31 @@ const isDefinition = (value: unknown) =>
   typeof value === "object" && value !== null && Array.isArray((value as { tokens?: unknown }).tokens);
 
 type Macros = NonNullable<katex.KatexOptions["macros"]>;
+type MacroContext = { consumeArgs(count: number): unknown; popToken(): unknown };
+
+/**
+ * `\message`, `\errmessage` et `\show` sont des macros de KaTeX qui écrivent dans la console de
+ * chaque lecteur : elles prennent leur argument et n'écrivent rien.
+ */
+const SILENT: Macros = {
+  "\\message": (context: object) => {
+    (context as MacroContext).consumeArgs(1);
+    return "";
+  },
+  "\\errmessage": (context: object) => {
+    (context as MacroContext).consumeArgs(1);
+    return "";
+  },
+  "\\show": (context: object) => {
+    (context as MacroContext).popToken();
+    return "";
+  },
+};
+
 /** Les macros de la formule : KaTeX y range toute définition, qui est refusée là. */
 function guardedMacros(): Macros {
   return new Proxy<Macros>(
-    {},
+    { ...SILENT },
     {
       set(target, name, value) {
         if (isDefinition(value) && !OWN_DEFINITIONS.has(String(name))) throw new DefinitionRefused(String(name));
@@ -138,6 +162,7 @@ function compute(latex: string, display: boolean): TexOutcome {
       strict: "ignore",
       output: "htmlAndMathml",
       maxSize: MAX_SIZE_EM,
+      maxExpand: MAX_EXPAND,
       macros: guardedMacros(),
     }).toMarkup();
   } catch (error) {

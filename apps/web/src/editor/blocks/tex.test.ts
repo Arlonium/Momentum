@@ -4,7 +4,8 @@
 // imbriquées, tables ou non) ; une définition (`\def`) faisait figer l'onglet. Les définitions sont
 // refusées là où elles se produisent, pendant l'analyse ; la profondeur d'éléments est comptée dans
 // ce que KaTeX produit.
-import { expect, test } from "vitest";
+import katex from "katex";
+import { afterEach, expect, test, vi } from "vitest";
 import { depthAllowance, MAX_LATEX_CHARS, MAX_TEX_NODES, refusal, typeset } from "./tex";
 
 const B = String.fromCharCode(92);
@@ -13,6 +14,10 @@ const t = (s: string) => s.replace(/@/g, B);
 const wrap = (open: string, close: string, n: number, core = "x") => t(open).repeat(n) + t(core) + t(close).repeat(n);
 const frac = (n: number) => wrap("@frac{1}{", "}", n);
 const sqrt = (n: number) => wrap("@sqrt{", "}", n);
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 test("a_formula_is_typeset_and_never_follows_a_link", () => {
   const plain = typeset("E = mc^2", false);
@@ -195,6 +200,36 @@ test("sizes_written_in_a_formula_are_capped", () => {
     // 50 em, plus la hauteur d'une lettre au-dessus d'une boîte haussée de 50 em.
     expect(Math.max(...sizes), raw).toBeLessThanOrEqual(51);
   }
+});
+
+test("macro_expansions_are_capped_at_a_thousand", () => {
+  // Sans définition, la seule façon de faire grossir une formule est d'appeler des macros de KaTeX :
+  // mille expansions au plus (`maxExpand`).
+  expect(typeset(t("@bgroup}").repeat(1_000), true).kind).toBe("formula");
+  const over = typeset(t("@bgroup}").repeat(1_001), true);
+  expect(over.kind).toBe("invalid");
+  if (over.kind === "invalid") expect(over.message).toMatch(/Too many expansions/);
+});
+
+test("message_errmessage_and_show_write_nothing_to_the_console", () => {
+  // Ce sont des macros de KaTeX : elles écrivaient dans la console de chaque lecteur.
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  for (const raw of ["@message{bonjour} x", "@errmessage{bonjour} x", "@show@frac x"]) {
+    expect(typeset(t(raw), true).kind, raw).toBe("formula");
+  }
+  expect(log).not.toHaveBeenCalled();
+  expect(error).not.toHaveBeenCalled();
+});
+
+test("the_katex_measured_is_the_one_installed", () => {
+  // Les seuils de plantage sont mesurés avec la feuille de style de cette version, et `typeset`
+  // passe par une fonction interne de KaTeX : toute montée de version se refait mesurer.
+  expect(katex.version, "KaTeX a changé de version : refaire les mesures de plantage (registre, Task C2)").toBe("0.19.1");
+  expect(
+    typeof (katex as unknown as { __renderToDomTree?: unknown }).__renderToDomTree,
+    "KaTeX n'a plus `__renderToDomTree` : `typeset` ne peut plus mesurer une formule avant de l'attacher",
+  ).toBe("function");
 });
 
 test("an_invalid_formula_says_why", () => {
