@@ -21,7 +21,8 @@
 // liste montrée, ou en est retirée, avant la réponse. Les demandes partent l'une après l'autre,
 // dans l'ordre des gestes (le serveur les reçoit ainsi dans cet ordre). Le geste reste montré
 // jusqu'à ce qu'une lecture partie après sa réponse fasse foi : une lecture partie avant ne le
-// reprend pas. Refusé, il est défait (la page revient à sa place, ou repart), le refus se dit tel
+// reprend pas. Refusé, il est défait (la page revient à sa place, ou repart ; la défaite prend un
+// rang neuf dans `toggles`, que la barre ne gèle pas, R467), le refus se dit tel
 // que le serveur le dit (`error`, jusqu'au geste suivant ou à un autre espace) et part à
 // `onRefused` (la barre latérale est à relire : la page n'est plus visible, ou n'existe plus). Une
 // session perdue n'est pas un refus : le geste est défait sans message, la connexion est demandée
@@ -220,6 +221,8 @@ export function useFavorites(
       }
       if (!mounted.current || shownSpace.current !== space) return;
       const confirmed = refused === null ? ++writes.current : null;
+      // Défait, le geste change ce qu'on montre, d'ici : un rang neuf, que la barre ne gèle pas.
+      const undone = confirmed === null ? ++ranks.current : null;
       const told = refused !== null && !isSessionLost(refused);
       setState((s) => {
         if (s.spaceId !== space) return s;
@@ -227,9 +230,12 @@ export function useFavorites(
         // Un geste plus récent sur la même page la décide : celui-ci n'y change plus rien.
         if (gesture === undefined || gesture.rank !== rank) return s;
         const gestures = new Map(s.gestures);
-        if (confirmed === null) gestures.delete(pageId);
-        else gestures.set(pageId, { ...gesture, confirmed });
-        return { ...s, gestures, error: told ? messageOf(refused) : s.error };
+        let toggles = s.toggles;
+        if (undone !== null) {
+          gestures.delete(pageId);
+          toggles = new Map(s.toggles).set(pageId, undone);
+        } else gestures.set(pageId, { ...gesture, confirmed: confirmed ?? 0 });
+        return { ...s, gestures, toggles, error: told ? messageOf(refused) : s.error };
       });
       if (told) {
         const error =

@@ -241,3 +241,14 @@ test("favorites_hold_still_while_a_page_is_dragged_in_the_tree", async () => {
   });
   expect(shown()).toEqual(["A", "B"]);
 });
+
+test("a_gesture_made_before_the_hold_and_undone_during_it_shows_at_once", async () => {
+  // M3 : « b » est posé par le menu de la page, le pointeur hors de la barre ; il y entre avant la
+  // réponse, puis le serveur refuse. `useFavorites` défait le geste et lui redonne un rang : la
+  // barre le montre défait tout de suite, comme le geste lui-même.
+  await show(["a", "b"], { toggles: new Map([["b", 1]]) });
+  await pointer(true);
+  expect(shown()).toEqual(["A", "B"]);
+  await show(["a"], { toggles: new Map([["b", 2]]) });
+  expect(shown()).toEqual(["A"]);
+});

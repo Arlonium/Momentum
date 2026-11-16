@@ -343,3 +343,23 @@ test("every_gesture_made_here_is_ranked_for_the_sidebar", async () => {
   await rendered.rerender({ spaceId: "pro" });
   expect([...rendered.current.toggles]).toEqual([]);
 });
+
+test("an_undone_gesture_is_ranked_again_for_the_sidebar", async () => {
+  // Un geste défait (refusé, ou session perdue) change la liste montrée, d'ici : la barre ne doit
+  // pas le geler, même si le geste lui-même date d'avant le gel (M3). Son rang monte.
+  const rendered = await loaded(["a"]);
+  await settle(() => void rendered.current.toggle("b"));
+  const made = rendered.current.toggles.get("b")!;
+  await settle(() => void rendered.current.toggle("c"));
+  const later = rendered.current.toggles.get("c")!;
+  await settle(() => writes[0].answer.reject(notFound()));
+  expect(rendered.current.toggles.get("b")!).toBeGreaterThan(later);
+  await settle(() => writes[1].answer.reject(unauthenticated()));
+  expect(rendered.current.toggles.get("c")!).toBeGreaterThan(rendered.current.toggles.get("b")!);
+  // Un geste accepté ne change pas la liste montrée : son rang reste.
+  await settle(() => void rendered.current.toggle("d"));
+  const accepted = rendered.current.toggles.get("d")!;
+  await settle(() => writes[2].answer.resolve());
+  expect(rendered.current.toggles.get("d")).toBe(accepted);
+  expect(made).toBeLessThan(later);
+});
