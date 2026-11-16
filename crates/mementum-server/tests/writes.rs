@@ -410,3 +410,71 @@ async fn the_file_store_lock_never_waits_for_an_account_burst() {
          {FILE_READER_WRITES_AT_MOST})"
     );
 }
+
+/// Un `409 account_changed` (Ruling R540) ne prend pas même un tour de la file : une connexion
+/// annexe tient le verrou d'écriture de SQLite, et le délai d'attente du store est d'une minute ;
+/// une requête qui prendrait un tour, ou écrirait, ne répondrait pas. Une création de page, puis
+/// un favori, nommant un autre compte que celui de la session, répondent tous deux `409`, verrou
+/// tenu. La session, neuve, ne glisse pas (`session_user`, la seule écriture admise avant le
+/// contrôle). La même création, nommant le bon compte, aboutit une fois le verrou rendu.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn account_changed_takes_no_turn() {
+    let t = open_app_with(mementum_store::StoreOptions {
+        busy_timeout: std::time::Duration::from_secs(60),
+        ..Default::default()
+    })
+    .await;
+    let olga = t.account("Olga").await;
+    let page = olga
+        .create(serde_json::json!({ "spaceId": olga.space.to_string(), "title": "Lue" }))
+        .await
+        .id;
+    let cookie = olga.browser.cookie().unwrap();
+    let naming = |account: Uuid, mut request: Request<Body>| {
+        let value = account.to_string().parse().unwrap();
+        request.headers_mut().insert("x-mementum-account", value);
+        request
+    };
+    let create = || {
+        json_request(
+            Method::POST,
+            "/api/v1/pages",
+            &serde_json::json!({ "spaceId": olga.space.to_string(), "title": "Neuve" }),
+        )
+    };
+    let favorite = || {
+        Request::put(format!("/api/v1/pages/{page}/favorite"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", t.db_path().display()))
+        .await
+        .unwrap();
+    let mut lock = side.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let other = Uuid::now_v7();
+    let changed = [
+        answer(&t, naming(other, create()), Some(&cookie)).await,
+        answer(&t, naming(other, favorite()), Some(&cookie)).await,
+    ];
+    let witness = tokio::spawn({
+        let (router, cookie) = (t.router.clone(), cookie.clone());
+        let mut request = naming(olga.id, create());
+        request
+            .headers_mut()
+            .insert(header::HOST, "localhost".parse().unwrap());
+        request
+            .headers_mut()
+            .insert(header::COOKIE, cookie.parse().unwrap());
+        async move {
+            use tower::ServiceExt;
+            router.oneshot(request).await.unwrap().status()
+        }
+    });
+    sqlx::query("ROLLBACK").execute(&mut *lock).await.unwrap();
+    assert_eq!(changed, [Some(StatusCode::CONFLICT); 2]);
+    assert_eq!(witness.await.unwrap(), StatusCode::CREATED);
+}
