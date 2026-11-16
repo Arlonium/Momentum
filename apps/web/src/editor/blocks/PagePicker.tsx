@@ -40,11 +40,15 @@ export function PagePicker({ query, onQuery, onPick, disabled = false }: Props) 
   // Ce que la liste montrait quand le pointeur y est entré, pour cette requête : gardé tant qu'il y
   // est. Ce qu'on tape change la liste, pointeur dessus ou non, et c'est la liste neuve qui est tenue.
   const [held, setHeld] = useState<{ query: string; pages: FoundPage[] } | null>(null);
-  if (held !== null && held.query !== query) setHeld({ query, pages: found });
+  // Une requête sans résultat retire la liste sous le pointeur, sans `pointerleave` : plus rien n'est tenu.
+  if (held !== null && held.query !== query) setHeld(found.length === 0 ? null : { query, pages: found });
   const pages = held !== null && held.query === query ? held.pages : found;
-  // La page active, par son id ; une autre requête, ou la page partie : la première.
+  // La page active, par son id ; une autre requête, ou la page partie : la première. Elle est fixée
+  // dès qu'elle est montrée, flèche ou non : une page arrivée en tête ensuite ne prend pas sa place
+  // sous Entrée.
   const [chosen, setChosen] = useState<{ query: string; id: string | null }>({ query, id: null });
   const at = chosen.query === query ? pages.findIndex((page) => page.id === chosen.id) : -1;
+  if (at === -1 && pages.length > 0) setChosen({ query, id: pages[0].id });
   const index = Math.max(0, at);
   const active = pages[index];
   const optionId = (i: number) => `${id}-option-${i}`;

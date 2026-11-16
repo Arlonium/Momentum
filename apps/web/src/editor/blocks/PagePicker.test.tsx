@@ -205,3 +205,33 @@ test("enter_that_ends_an_ime_composition_picks_nothing", async () => {
   await act(async () => void press(p.field, "Enter"));
   expect(p.picked).toHaveLength(1);
 });
+
+test("the_page_shown_active_stays_the_one_enter_takes_without_any_arrow", async () => {
+  // Sans flèche ni pointeur : la page montrée active est la première, et c'est elle qu'Entrée prend.
+  publishPages("space", [page(ID(2), { title: "Notes" }), page(ID(1), { title: "Plan" }), page(ID(3), { title: "Planning" })]);
+  const p = await mountPicker({ query: "pl" });
+  expect(p.active()).toBe("Plan");
+  // Un autre renomme « Notes » (avant « Plan » dans l'arbre) en « Plateau », qui passe en tête.
+  await act(async () =>
+    publishPages("space", [page(ID(2), { title: "Plateau" }), page(ID(1), { title: "Plan" }), page(ID(3), { title: "Planning" })]),
+  );
+  expect(p.titles()).toEqual(["Plateau", "Plan", "Planning"]);
+  expect(p.active()).toBe("Plan");
+  await act(async () => void press(p.field, "Enter"));
+  expect(p.picked).toEqual([{ id: ID(1), title: "Plan" }]);
+});
+
+test("a_list_that_disappears_under_the_pointer_is_no_longer_held", async () => {
+  publishPages("space", [page(ID(1), { title: "Plan" }), page(ID(2), { title: "Notes" })]);
+  const p = await mountPicker();
+  await pointer(document.body, p.options()[0]);
+  // Une requête sans résultat : la liste disparaît sous le pointeur, sans `pointerleave`.
+  await act(async () => fill(p.field, "zzz"));
+  expect(p.host.querySelector('[role="listbox"]')).toBeNull();
+  // Une autre requête, puis l'arbre change : la liste, où le pointeur n'est pas rentré, le suit.
+  await act(async () => fill(p.field, "pl"));
+  await act(async () =>
+    publishPages("space", [page(ID(1), { title: "Plan" }), page(ID(2), { title: "Notes" }), page(ID(3), { title: "Plume" })]),
+  );
+  expect(p.titles()).toEqual(["Plan", "Plume"]);
+});
