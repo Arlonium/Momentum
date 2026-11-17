@@ -738,6 +738,130 @@ async fn duplicated_page_keeps_its_files_after_the_original_is_deleted() {
     assert_eq!(read(elsewhere_url).await.body.as_ref(), other);
 }
 
+/// Les blocs de ces blocs, à toute profondeur, dans l'ordre du document.
+fn flattened(blocks: &[Block]) -> Vec<&Block> {
+    let mut out = Vec::new();
+    for block in blocks {
+        out.push(block);
+        out.extend(flattened(&block.children));
+    }
+    out
+}
+
+/// La prop `name` d'un bloc, s'il en a une.
+fn name_of(block: &Block) -> Option<&str> {
+    match block.props.get("name") {
+        Some(mementum_md::PropValue::Str(name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// Constat M2 de la relecture finale de la partie B (Ruling R753) : un bloc de fichier sans
+/// adresse ne nomme aucun fichier ; le nom qu'il porte est celui d'un fichier du poste, posé par
+/// un envoi encore en route (Ruling R685), que l'envoi ou son échec ne retireront que de
+/// l'original. La copie le prend donc sans son nom : une image, une vidéo, un son et un fichier,
+/// au premier niveau, sous un élément de liste, sous un autre bloc de fichier (deux niveaux plus
+/// bas) et dans des colonnes. Leur légende reste. Témoins : un bloc qui montre un fichier de la
+/// page et un bloc à l'adresse externe gardent leur nom.
+#[tokio::test]
+async fn a_file_block_without_address_is_copied_without_its_name() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+    let page = team
+        .page(None, "Envoi en route", &[members(Level::Full)])
+        .await;
+    let own = uploaded(&mona.browser, page, "gardé.png", PNG).await;
+    let own_url = own["url"].as_str().unwrap();
+    let content = format!(
+        "![]({own_url}) {{name=\"gardé.png\"}}\n\n\
+         ![Légende]() {{name=\"poste.png\"}}\n\n\
+         <video src=\"\" caption=\"Démo\" name=\"poste.webm\"/>\n\n\
+         <audio src=\"\" name=\"poste.ogg\"/>\n\n\
+         <file src=\"\" name=\"poste.pdf\"/>\n\n\
+         - Liste\n  <file src=\"\" name=\"sous.pdf\" caption=\"Sous\"/>\n    \
+         ![]() {{name=\"plus-bas.png\"}}\n\n\
+         <columns>\n<column>\n<video src=\"\" name=\"colonne.webm\"/>\n</column>\n<column>\n\
+         <audio src=\"\" caption=\"Son\" name=\"colonne.ogg\"/>\n</column>\n</columns>\n\n\
+         <file src=\"https://exemple.fr/f.pdf\" name=\"externe.pdf\"/>\n"
+    );
+    mona.put_mmd(&page.to_string(), content)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let local = [
+        "poste.png",
+        "poste.webm",
+        "poste.ogg",
+        "poste.pdf",
+        "sous.pdf",
+        "plus-bas.png",
+        "colonne.webm",
+        "colonne.ogg",
+    ];
+    let kept = ["gardé.png", "externe.pdf"];
+    let original = stored_blocks(&team, page).await;
+    let names: Vec<&str> = flattened(&original)
+        .into_iter()
+        .filter_map(name_of)
+        .collect();
+    assert_eq!(
+        names.len(),
+        local.len() + kept.len(),
+        "précondition : {names:?}"
+    );
+    let original_mmd = mmd(mona, page).await;
+
+    let copy = duplicated(mona, page).await;
+    let copied = stored_blocks(&team, &copy.id).await;
+    let blocks = flattened(&copied);
+    let kinds: HashSet<&str> = blocks.iter().map(|block| block.kind.as_str()).collect();
+    for kind in ["image", "video", "audio", "file", "column"] {
+        assert!(kinds.contains(kind), "{kind} : {kinds:?}");
+    }
+    let names: Vec<&str> = blocks.iter().copied().filter_map(name_of).collect();
+    assert_eq!(
+        names, kept,
+        "seuls les blocs qui ont une adresse gardent leur nom"
+    );
+    let captions: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| match block.props.get("caption") {
+            Some(mementum_md::PropValue::Str(caption)) => Some(caption.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        captions,
+        ["Légende", "Démo", "Sous", "Son"],
+        "les légendes restent"
+    );
+    // Le reste de la copie est l'original : son MMD, sans les noms du poste (l'adresse du fichier
+    // de la page, récrite, mise à part).
+    let mut expected = original_mmd.replace(own_url, "ADRESSE");
+    for name in local {
+        assert!(expected.contains(name), "précondition : {name}");
+        // Le nom est dans la balise d'un fichier, même vide : `<file src="" name=""/>`.
+        let left = if name.ends_with(".pdf") {
+            " name=\"\""
+        } else {
+            ""
+        };
+        expected = expected
+            .replace(&format!(" {{name=\"{name}\"}}"), "")
+            .replace(&format!(" name=\"{name}\""), left);
+    }
+    let copied_mmd = mmd(mona, &copy.id).await;
+    let own_copy = format!("/api/v1/pages/{}/files/", copy.id);
+    let start = copied_mmd
+        .find(&own_copy)
+        .expect("le fichier de la page, récrit");
+    let end = start + own_copy.len() + 36;
+    let copied_mmd = format!("{}ADRESSE{}", &copied_mmd[..start], &copied_mmd[end..]);
+    assert_eq!(copied_mmd, expected);
+    // L'original n'a pas bougé.
+    assert_eq!(mmd(mona, page).await, original_mmd);
+}
+
 /// La copie ne reprend ni les fils de commentaires, ni les versions, ni les favoris, ni les accès
 /// nommés de l'original ; lui les garde tous.
 #[tokio::test]

@@ -330,11 +330,20 @@ fn named_files(blocks: &mut [Block], page: Uuid) -> Vec<Uuid> {
     found
 }
 
+/// Le bloc est-il un bloc de fichier ([`FILE_BLOCKS`]) sans adresse ? Il ne nomme alors aucun
+/// fichier : c'est celui qu'un envoi en route a posé (Ruling R685).
+fn file_block_without_address(block: &Block) -> bool {
+    FILE_BLOCKS.contains(&block.kind.as_str())
+        && !matches!(block.props.get("url"), Some(PropValue::Str(url)) if !url.is_empty())
+}
+
 /// Le document neuf de la copie de la page `from`, d'identifiant `to` : les blocs de l'original,
 /// **tous sans identifiant** (l'écriture en tire de neufs, à chaque profondeur), les adresses des
 /// fichiers de `from` que `files` recopie récrites vers leur attache neuve, sur un bloc de fichier
 /// comme dans un lien. Toute autre adresse reste telle quelle : externe, d'une autre page, ou
-/// d'un fichier que la page n'a pas.
+/// d'un fichier que la page n'a pas. Un bloc de fichier sans adresse perd sa prop `name` (Ruling
+/// R753) : pendant un envoi, le bloc de l'original porte le nom du fichier sur le poste, que
+/// l'envoi remplace, ou retire s'il échoue, dans l'original seul.
 fn copied_doc(
     mut blocks: Vec<Block>,
     from: Uuid,
@@ -345,6 +354,9 @@ fn copied_doc(
     while let Some(level) = stack.pop() {
         for block in level.iter_mut() {
             block.id.clear();
+            if file_block_without_address(block) {
+                block.props.remove("name");
+            }
             stack.push(&mut block.children);
         }
     }
@@ -991,6 +1003,46 @@ mod tests {
             String::new(),
         ] {
             assert_eq!(file_of(&other, page), None, "{other}");
+        }
+    }
+
+    /// Ruling R753 : un bloc de fichier (image, vidéo, son, fichier) sans adresse en est un dont
+    /// la prop `url` manque, est vide (un bloc pas encore normalisé) ou n'est pas du texte ; une
+    /// adresse quelconque, même une espace, en est une. Un autre bloc ne l'est jamais, même sans
+    /// `url` (un signet vide, un bloc étranger qui porterait un `name`).
+    #[test]
+    fn only_a_file_block_without_address_loses_its_name() {
+        let block = |kind: &str, url: Option<PropValue>| Block {
+            id: String::new(),
+            kind: kind.to_string(),
+            props: url
+                .map(|url| ("url".to_string(), url))
+                .into_iter()
+                .collect(),
+            content: Content::None,
+            children: Vec::new(),
+        };
+        let text = |url: &str| Some(PropValue::Str(url.to_string()));
+        for kind in FILE_BLOCKS {
+            for url in [None, text(""), Some(PropValue::Int(1))] {
+                assert!(
+                    file_block_without_address(&block(kind, url.clone())),
+                    "{kind} {url:?}"
+                );
+            }
+            for url in [
+                text(" "),
+                text("https://exemple.fr/a.png"),
+                text("photo.png"),
+            ] {
+                assert!(
+                    !file_block_without_address(&block(kind, url.clone())),
+                    "{kind} {url:?}"
+                );
+            }
+        }
+        for kind in ["bookmark", "paragraph", "unknown", "pageLink"] {
+            assert!(!file_block_without_address(&block(kind, None)), "{kind}");
         }
     }
 
