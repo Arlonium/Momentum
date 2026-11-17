@@ -111,6 +111,9 @@ function all(m: Mounted): Mounted["editor"]["document"] {
   return walk(m.editor.document);
 }
 
+/** Les erreurs de l'éditeur, hors l'avertissement de React pour une écriture qui suit une réponse du faux serveur. */
+const realErrors = (m: Mounted) => m.errors.filter((error) => !error.includes("not wrapped in act"));
+
 async function until(condition: () => boolean, what: string): Promise<void> {
   const end = performance.now() + 2_000;
   while (!condition()) {
@@ -165,7 +168,7 @@ test("a_pasted_file_of_another_page_is_copied_here_and_its_url_rewritten", async
     expect(block.props).toMatchObject({ name: "a.png", caption: "Vue du port" });
     expect(b.m.writes.length).toBe(before + 1);
     expect(b.said).toEqual([]);
-    expect(b.m.errors).toEqual([]);
+    expect(realErrors(b.m)).toEqual([]);
   }
 });
 
@@ -344,7 +347,7 @@ test("a_block_changed_or_gone_during_the_copy_is_left_alone", async () => {
   await act(async () => b.calls[0].answer());
   await until(() => (b.m.editor.getBlock(kept.id)!.props as { url: string }).url === pathOf(HERE, 901), "l'adresse récrite");
   expect(fileUrls(b.m).map(([, url]) => url)).toEqual(["https://exemple.fr/autre.png", pathOf(HERE, 901)]);
-  expect(b.m.errors).toEqual([]);
+  expect(realErrors(b.m)).toEqual([]);
 });
 
 test("nothing_is_copied_from_a_read_only_editor", async () => {
