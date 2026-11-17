@@ -525,6 +525,15 @@ fn replay(
                 tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : aucun client n'écrit ce qu'elle porte");
                 set_aside = true;
             }
+            // Rulings R723, R803, R806, R809 : ce que yrs a fait de l'entrée n'est pas ce qu'un client écrit
+            // (une entrée de map à origine droite, un élément rangé autrement que ses octets ne
+            // le disent, une entrée de map de plusieurs valeurs restée vivante), et cela ne se
+            // voit qu'une fois l'entrée appliquée. La page bâtie est à jeter, et la relecture
+            // reprend du début sans l'entrée ; ce qui dépend d'elle est écarté à son tour.
+            Err(error) if PageDoc::refused_made(&error) => {
+                tracing::error!(%node_id, seq, %error, set_aside = dependents.len() + 1, "entrée du journal écartée à la relecture, qui reprend du début : aucun client n'écrit ce qu'elle porte");
+                return Ok(Err(*seq));
+            }
             // En filet de R787 : une dépendance que la lecture n'a pas vue (un cycle entre deux
             // clients de la même entrée). La page est à jeter, et la relecture reprend sans elle.
             Err(error) if set_aside && PageDoc::lacks_a_dependency(&error) => {

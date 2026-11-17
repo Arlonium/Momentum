@@ -554,11 +554,23 @@ fn untyped_content_among_the_children_of_an_element_is_refused() {
                 .page
                 .try_client_update(&attack)
                 .expect_err(&format!("{item:?} dans {what} : accepté"));
+            // Ruling R802 : une valeur `Any` placée par un voisin ne se dit pas entrée de map ;
+            // la grammaire la refuse avant d'appliquer, où la lecture de la liste ne la voyait
+            // qu'après.
+            let flagless_value = matches!(item, Item::Any(_)) && !before;
             assert!(
-                refused.error.to_string().contains("n'est pas un nœud XML"),
+                refused.error.to_string().contains(if flagless_value {
+                    "ne se dit pas entrée de map"
+                } else {
+                    "n'est pas un nœud XML"
+                }),
                 "{item:?} dans {what} : {refused:?}"
             );
-            assert_eq!(refused.intact, before, "{item:?} dans {what} : {refused:?}");
+            assert_eq!(
+                refused.intact,
+                before || flagless_value,
+                "{item:?} dans {what} : {refused:?}"
+            );
             // Comme l'acteur : un refus après l'application fait recharger la page.
             if !refused.intact {
                 served.page = served.reloaded();

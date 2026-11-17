@@ -210,14 +210,32 @@ pub(crate) fn cut(
                 }
                 continue;
             }
-            let origin = info & HAS_ORIGIN != 0;
-            if origin {
-                read_id(&mut c).map_err(decode_error)?;
-            }
-            let right = (info & HAS_RIGHT_ORIGIN != 0)
+            let origin_id = (info & HAS_ORIGIN != 0)
                 .then(|| read_id(&mut c))
                 .transpose()
                 .map_err(decode_error)?;
+            let origin = origin_id.is_some();
+            let mut right = (info & HAS_RIGHT_ORIGIN != 0)
+                .then(|| read_id(&mut c))
+                .transpose()
+                .map_err(decode_error)?;
+            // Ruling R802 : un élément dont l'origine droite est son origine (Yjs en écrit : un
+            // rétablissement qui retrouve le même voisin des deux côtés). Yjs comme yrs le
+            // rangent selon que ce voisin est fondu ou non avec les siens ; la page vivante
+            // n'était plus son journal. L'origine droite est retirée : l'élément est rangé par
+            // son origine seule, partout pareil.
+            let mut info = info;
+            let mut same_origins = None;
+            if let Some((origin_client, origin_clock)) = origin_id
+                && right == origin_id
+            {
+                info &= !HAS_RIGHT_ORIGIN;
+                right = None;
+                let mut rewritten = vec![info];
+                var(&mut rewritten, origin_client);
+                var(&mut rewritten, u64::from(origin_clock));
+                same_origins = Some(rewritten);
+            }
             if !origin && right.is_none() {
                 if c.read_var::<u32>().map_err(decode_error)? == 1 {
                     c.read_string().map_err(decode_error)?;
@@ -233,14 +251,39 @@ pub(crate) fn cut(
             let end = clock
                 .checked_add(len)
                 .ok_or_else(|| decode_error("horloge hors limites"))?;
-            let parts = if len > 1 {
+            let mut parts = if len > 1 {
                 parts(known, holes, clock, end)
             } else {
                 Vec::new()
             };
+            // Ruling R801 : une entrée de map de plusieurs valeurs est récrite en autant
+            // d'entrées d'une valeur, chacune d'origine la précédente (ce que le client aurait
+            // envoyé sans les fondre) : yrs ne garde alors aucune entrée de map qui se coupe.
+            if len > 1
+                && info & 0b1111 == BLOCK_ITEM_ANY_REF_NUMBER
+                && info & yrs::block::HAS_PARENT_SUB != 0
+            {
+                parts = parts
+                    .into_iter()
+                    .flat_map(|(from, to, is_known)| {
+                        if is_known {
+                            vec![(from, to, true)]
+                        } else {
+                            (from..to).map(|unit| (unit, unit + 1, false)).collect()
+                        }
+                    })
+                    .collect();
+            }
             if parts.len() < 2 {
                 // Tout neuf, ou tout connu : yrs le prend ou l'ignore en entier.
-                structs.extend(&update[start..c.next]);
+                match &same_origins {
+                    Some(head) => {
+                        changed = true;
+                        structs.extend(head);
+                        structs.extend(&update[header..c.next]);
+                    }
+                    None => structs.extend(&update[start..c.next]),
+                }
                 clock = end;
                 continue;
             }
@@ -254,7 +297,10 @@ pub(crate) fn cut(
                     continue;
                 }
                 if from == clock {
-                    structs.extend(&update[start..header]);
+                    match &same_origins {
+                        Some(head) => structs.extend(head),
+                        None => structs.extend(&update[start..header]),
+                    }
                 } else {
                     // `Item.write(encoder, offset)` de Yjs : l'origine est l'unité d'avant, le
                     // parent et la clé ne sont pas écrits.

@@ -107,6 +107,9 @@ use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
 
 pub(crate) mod cut;
+mod grammar;
+
+pub(crate) use grammar::{MANY_VALUED, MANY_VALUED_MADE, NOT_AS_WRITTEN, RIGHT_ORIGIN_IS_ORIGIN};
 
 /// Le refus d'une mise à jour où un client paraît deux fois (Ruling R207) : reconnu à la
 /// relecture du journal, qui écarte l'entrée au lieu de refuser la page (Ruling R258).
@@ -202,6 +205,10 @@ struct Insert {
     /// clé ou non. Un client hostile la pose ou l'efface à son gré ; dans ce que yrs encode
     /// lui-même, elle dit si yrs tient l'élément pour une entrée de map (Ruling R723).
     sub_flag: bool,
+    /// Le genre de son contenu, tel que l'octet d'en-tête le dit (`BLOCK_ITEM_*_REF_NUMBER`).
+    content: u8,
+    /// Son origine droite est son origine (Ruling R802).
+    right_is_origin: bool,
 }
 
 /// Le refus d'un contenu qui n'est pas un nœud XML parmi les enfants de la racine ou d'un élément
@@ -375,6 +382,18 @@ pub(crate) const KEYED_NOT_A_VALUE: &str = "la mise à jour pose comme valeur d'
 pub(crate) const VALUE_OUTSIDE_ELEMENTS: &str = "la mise à jour pose une valeur d'attribut à la \
      suite d'un contenu de texte";
 
+/// La plus grande horloge qu'une page garde (Ruling R808) : yrs les compare en `i32`.
+const MAX_CLOCK: u32 = i32::MAX as u32;
+
+/// Le refus d'une mise à jour dont une horloge dépasse [`MAX_CLOCK`] (Ruling R808).
+pub(crate) const CLOCK_OUT_OF_BOUNDS: &str = "la mise à jour porte une horloge au-delà de 2^31, \
+     que la page ne sait pas ranger";
+
+/// Le refus d'un élément qui dépend d'une horloge que la page n'a pas, dans une page qui a un trou
+/// (Ruling R807).
+pub(crate) const DEPENDS_ON_A_HOLE: &str = "la mise à jour dépend d'une modification que la page \
+     n'a pas, chez un client dont elle garde un trou";
+
 /// Ce qu'est, dans la page, l'origine d'une valeur qui ne nomme ni son élément ni sa clé
 /// ([`Shape::attrs`]).
 pub(crate) enum PageItem {
@@ -502,6 +521,15 @@ impl Shape {
                 clock = clock
                     .checked_add(len)
                     .ok_or_else(|| decode_error("horloge hors limites"))?;
+                // Ruling R808 : yrs compare les horloges en entiers signés de 32 bits
+                // (`Update::integrate` : `local_clock as i32 - id.clock as i32`). Au-delà de
+                // 2^31, un bloc qui laisse un trou passe pour connu ou pour contigu : il est
+                // intégré sans le `Skip` qui dit le trou, le vecteur d'état le tient pour
+                // comblé, et une origine dans le trou fait paniquer yrs. Aucun client n'y
+                // arrive : deux milliards d'unités écrites par un onglet.
+                if clock > MAX_CLOCK {
+                    return Err(CrdtError::Structure(CLOCK_OUT_OF_BOUNDS.to_string()));
+                }
                 structs.push(s);
             }
             clients.push((client, structs));
@@ -798,50 +826,14 @@ impl Shape {
         Ok(())
     }
 
-    /// Refuse (`Structure`) ce que yrs a fait d'une mise à jour de client, lu dans l'encodage de
-    /// sa transaction (`self`), où la marque « entrée de map » de chaque élément est celle que yrs
-    /// lui a donnée :
-    /// - une entrée de map à origine droite ([`Shape::check_keyed`], Ruling R723) ;
-    /// - une entrée de map dont le contenu n'est ni une valeur `Any` ni un contenu supprimé
-    ///   (Rulings R702, R724) : une chaîne, un objet incorporé, des octets, un type, une marque.
-    ///   Seule une valeur `Any` est une valeur d'attribut ; les autres, yrs et Yjs ne les lisent
-    ///   pas pareil, ou n'y lisent rien (une marque), et la garde, qui relirait l'état servi, y
-    ///   verrait un attribut qu'elle refuse.
-    pub(crate) fn check_made(&self) -> Result<(), CrdtError> {
-        for (_, i) in self.inserts() {
-            if !i.sub_flag {
-                continue;
-            }
-            if i.right_origin {
-                return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN_MADE.to_string()));
-            }
-            if !i.any && i.value.is_some() {
-                return Err(CrdtError::Structure(KEYED_NOT_A_VALUE.to_string()));
-            }
-        }
-        Ok(())
-    }
-
-    /// Vrai si la mise à jour intègre (au-dessus de `floor`) un élément dont les octets ne disent
-    /// pas ce que yrs en fera : il porte une origine droite (une frappe au milieu d'un texte, un
-    /// bloc inséré entre deux autres), ou il est placé par un voisin sans être une valeur `Any`
-    /// (une frappe, un bloc ajouté à la suite). Seul un tel élément peut devenir une entrée de
-    /// map que [`Shape::check_made`] refuse ; une valeur `Any` placée par son origine est jugée
-    /// par [`Shape::attrs`].
-    pub(crate) fn placed_by_neighbours(&self, floor: &StateVector) -> bool {
+    /// Vrai si la mise à jour intègre (au-dessus de `floor`) un élément placé par un voisin (son
+    /// origine, à défaut son origine droite) : ses octets ne disent pas s'il sera une entrée de
+    /// map, yrs le décide d'après ce voisin (règle P1 de la grammaire, module `grammar`).
+    pub(crate) fn placed_by_siblings(&self, floor: &StateVector) -> bool {
         self.inserts().any(|(s, i)| {
-            (i.right_origin
-                || (!i.any && i.value.is_some() && matches!(i.parent, Parent::Sibling(_))))
+            matches!(i.parent, Parent::Sibling(_))
                 && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
         })
-    }
-
-    /// Vrai si la mise à jour intègre (au-dessus de `floor`) un élément qui porte une origine
-    /// droite : seul un tel élément peut devenir, pour yrs, une entrée de map à origine droite
-    /// (Ruling R723).
-    pub(crate) fn has_right_origins(&self, floor: &StateVector) -> bool {
-        self.inserts()
-            .any(|(s, i)| i.right_origin && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0)))
     }
 
     /// Les éléments que la mise à jour intègre (au-dessus de `floor`) et qui ne sont pas ce
@@ -1507,6 +1499,8 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     right_origin: right.is_some(),
                     right,
                     sub_flag: info & HAS_PARENT_SUB != 0,
+                    content: info & 0b1111,
+                    right_is_origin: origin.is_some() && origin == right,
                 }),
             }))
         }

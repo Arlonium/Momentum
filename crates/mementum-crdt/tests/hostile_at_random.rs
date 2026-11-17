@@ -89,6 +89,19 @@ fn reread(state: &[u8], pending_allowed: bool) -> Result<String, String> {
     Ok(fragment.get_string(&txn))
 }
 
+/// Écrit une mise à jour reçue à la suite du fichier `MEMENTUM_FUZZ_TRACE`, s'il est donné : la
+/// trace d'un cas, que `child_minimize` réduit et que [`replay`] rejoue.
+fn trace(update: &[u8]) {
+    if let Ok(path) = std::env::var("MEMENTUM_FUZZ_TRACE") {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "C {update:?}").unwrap();
+    }
+}
+
 /// Une page servie comme l'acteur la sert, et son journal.
 struct Served {
     page: PageDoc,
@@ -102,6 +115,7 @@ struct Served {
 impl Served {
     fn new(stored: bool) -> Served {
         let (page, created) = PageDoc::new_page();
+        trace(&created);
         Served {
             page,
             journal: vec![created],
@@ -140,6 +154,7 @@ impl Served {
     /// Reçoit une mise à jour comme l'acteur : `Ok(vrai)` si elle a écrit quelque chose. Après
     /// un refus, la page est rechargée de son journal.
     fn receive(&mut self, update: &[u8]) -> Result<bool, String> {
+        trace(update);
         if self.stored {
             return match self.page.apply_update(update) {
                 Ok(()) => {
@@ -664,6 +679,16 @@ fn message(panic: &(dyn std::any::Any + Send)) -> String {
         .replace('\n', " ")
 }
 
+/// Fait taire les paniques du fils (le parent en rend le message), sauf si
+/// `MEMENTUM_FUZZ_LOUD` est posé : pour lire la pile d'un cas, relancé seul
+/// (`MEMENTUM_HOSTILE_CHILD=journal:518:1 MEMENTUM_FUZZ_LOUD=1 RUST_BACKTRACE=1`, sur
+/// `child_cases --exact --nocapture`).
+fn quiet() {
+    if std::env::var("MEMENTUM_FUZZ_LOUD").is_err() {
+        std::panic::set_hook(Box::new(|_| {}));
+    }
+}
+
 /// Le processus fils : les cas demandés par le parent (`voie:premier:nombre`), un par ligne.
 /// Sans la variable (un passage ordinaire de la suite), il ne fait rien.
 #[test]
@@ -672,10 +697,18 @@ fn child_cases() {
         return;
     };
     let mut parts = order.split(':');
-    let stored = parts.next() == Some("journal");
-    let from: u64 = parts.next().unwrap().parse().unwrap();
-    let count: u64 = parts.next().unwrap().parse().unwrap();
-    std::panic::set_hook(Box::new(|_| {}));
+    let lane = parts.next();
+    if lane != Some("journal") && lane != Some("client") {
+        return;
+    }
+    let stored = lane == Some("journal");
+    let (Some(Ok(from)), Some(Ok(count))) = (
+        parts.next().map(str::parse::<u64>),
+        parts.next().map(str::parse::<u64>),
+    ) else {
+        return;
+    };
+    quiet();
     let out = std::io::stdout();
     // libtest a écrit « test child_cases ... » sans fin de ligne.
     writeln!(out.lock()).unwrap();
@@ -804,6 +837,49 @@ fn replay(name: &str, stored: bool) -> Vec<String> {
         env!("CARGO_MANIFEST_DIR")
     );
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path} : {e}"));
+    replay_text(&text, stored)
+}
+
+/// Réduit une trace (`MEMENTUM_HOSTILE_CHILD=minimize:<voie>:<fichier>`, sur
+/// `child_minimize --exact --nocapture`) : chaque ligne est retirée tour à tour, et le reste
+/// gardé s'il montre encore un écart (trois essais : une lecture de mémoire libérée ne se montre
+/// pas à chaque passage). Écrit `<fichier>.min`. Pour obtenir la trace d'une graine :
+/// `MEMENTUM_FUZZ_TRACE=<fichier> MEMENTUM_HOSTILE_CHILD=client:<graine>:1` sur `child_cases`.
+#[test]
+fn child_minimize() {
+    let Ok(order) = std::env::var(CHILD) else {
+        return;
+    };
+    let Some(rest) = order.strip_prefix("minimize:") else {
+        return;
+    };
+    let (lane, path) = rest.split_once(':').unwrap();
+    let stored = lane == "journal";
+    quiet();
+    let fails = |lines: &[&str]| {
+        let text = lines.join("\n");
+        (0..3).any(|_| {
+            catch_unwind(AssertUnwindSafe(|| replay_text(&text, stored)))
+                .map_or(true, |findings| !findings.is_empty())
+        })
+    };
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines: Vec<&str> = text.lines().collect();
+    assert!(fails(&lines), "la trace ne montre aucun écart");
+    let mut at = lines.len();
+    while at > 1 {
+        at -= 1;
+        let mut without = lines.clone();
+        without.remove(at);
+        if fails(&without) {
+            lines = without;
+        }
+    }
+    std::fs::write(format!("{path}.min"), lines.join("\n") + "\n").unwrap();
+    println!("\nréduite à {} lignes", lines.len());
+}
+
+fn replay_text(text: &str, stored: bool) -> Vec<String> {
     let mut served: Option<Served> = None;
     let mut findings = Vec::new();
     for (n, line) in text.lines().enumerate() {
@@ -886,10 +962,10 @@ fn child_trace() {
     let Some((lane, name)) = order.split_once(':') else {
         return;
     };
-    if name.chars().all(|c| c.is_ascii_digit() || c == ':') {
+    if lane == "minimize" || name.chars().all(|c| c.is_ascii_digit() || c == ':') {
         return;
     }
-    std::panic::set_hook(Box::new(|_| {}));
+    quiet();
     let out = std::io::stdout();
     writeln!(out.lock()).unwrap();
     for _ in 0..6 {
@@ -940,4 +1016,12 @@ fn an_item_whose_right_origin_is_its_origin_leaves_the_page_its_journal() {
 #[test]
 fn a_deleted_content_placed_by_its_right_origin_keeps_the_revision() {
     assert_eq!(replay_apart("min-8251", false), Ok(()));
+}
+
+/// Graine 3346 de l'essai (tour 4) : une chaîne de plusieurs unités posée comme attribut d'un
+/// texte, sa clé nommée ; une unité du milieu supprimée, puis le texte. La forme de C1, par un
+/// contenu qui n'est pas une valeur, sur un type dont la garde des attributs ne juge rien.
+#[test]
+fn a_string_set_as_an_attribute_of_a_text_then_cut_in_the_middle() {
+    assert_eq!(replay_apart("min-3346", false), Ok(()));
 }

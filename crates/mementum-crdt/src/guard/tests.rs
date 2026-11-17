@@ -401,6 +401,8 @@ fn shape_of(entries: &[Entry], deleted: &[Deleted]) -> Shape {
                             right_origin: false,
                             right: None,
                             sub_flag: false,
+                            content: 4,
+                            right_is_origin: false,
                         }),
                         1 => Kind::Gc,
                         _ => Kind::Skip,

@@ -399,8 +399,16 @@ fn a_content_that_is_not_a_value_placed_over_an_attribute_is_refused() {
     let string: &[u8] = &[0x84, 0, 0, 3, b'r', b'e', b'd'];
     let element: &[u8] = &[0x87, 0, 0, 3, 1, b'p'];
     let text: &[u8] = &[0x87, 0, 0, 6];
-    let deleted: &[u8] = &[0x81, 0, 0, 1];
+    // Un contenu supprimé posé sur un attribut porte la marque d'une entrée de map, comme Yjs
+    // l'écrit ; sans elle, la grammaire le refuse (règle P1, Ruling R803).
+    let deleted: &[u8] = &[0xA1, 0, 0, 1];
+    let unflagged: &[u8] = &[0x81, 0, 0, 1];
     for (what, piece, refused) in [
+        (
+            "un contenu supprimé sans la marque d'une entrée de map",
+            unflagged,
+            true,
+        ),
         ("une marque", mark, true),
         ("une chaîne", string, true),
         ("un élément", element, true),
@@ -630,7 +638,9 @@ fn fates() -> [Option<Option<&'static str>>; 4] {
         Some(None),
         // La seconde valeur, posée sur la couleur.
         Some(Some("blue")),
-        Some(None),
+        // Ses octets ne le disent pas entrée de map, et son origine en est une : refusé (règle P1
+        // de la grammaire, Ruling R803).
+        None,
         // Une chaîne n'est pas une valeur d'attribut (Ruling R724) : refusée, comme d'un client
         // qui l'enverrait coupée.
         None,

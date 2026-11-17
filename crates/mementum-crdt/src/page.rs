@@ -22,8 +22,9 @@ use yrs::{
 use crate::attrs::{self, Key, Value};
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
 use crate::guard::{
-    ASTRIDE, KEYED_RIGHT_ORIGIN, KEYED_RIGHT_ORIGIN_MADE, LEAVES_GAP, PageItem, Pending,
-    REPEATED_CLIENT, Shape, UNTYPED_CHILD, cut, missing, touched,
+    ASTRIDE, CLOCK_OUT_OF_BOUNDS, DEPENDS_ON_A_HOLE, KEYED_RIGHT_ORIGIN, KEYED_RIGHT_ORIGIN_MADE,
+    LEAVES_GAP, MANY_VALUED, MANY_VALUED_MADE, NOT_AS_WRITTEN, PageItem, Pending, REPEATED_CLIENT,
+    RIGHT_ORIGIN_IS_ORIGIN, Shape, UNTYPED_CHILD, cut, missing, touched,
 };
 use crate::kept_ids::keep_ids;
 use crate::moves::{self, Carried, MAX_CARRIED_BYTES, Recreated};
@@ -200,7 +201,10 @@ impl PageDoc {
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
         let (shape, before, whole, unsound) = {
             let mut txn = self.doc.transact_mut();
-            let (shape, decoded) = self.read(&txn, update, false)?;
+            // Ruling R805 : les entrées de map de plusieurs unités que l'entrée laisserait
+            // vivantes, d'après ses octets ; supprimées en entier une fois intégrées.
+            let mut many_valued = IdSet::new();
+            let (shape, decoded) = self.read(&txn, update, false, Some(&mut many_valued))?;
             let before = txn.state_vector();
             // Ruling R690 : les éléments à qui l'entrée pose un attribut que la page ne garde pas.
             let named = shape
@@ -211,12 +215,26 @@ impl PageDoc {
             // Ruling R723 : ce que yrs a fait d'un élément à origine droite ne se lit que dans
             // ce qu'il encode. Une page vide n'a rien qui serve d'origine : tout est dans
             // l'entrée (un état complet, encodé par yrs), et ses octets ont suffi.
-            if before.iter().next().is_some()
-                && shape.has_right_origins(&before)
-                && matches!(made(&txn.encode_update_v1()), Err(CrdtError::Structure(why)) if why == KEYED_RIGHT_ORIGIN_MADE)
-            {
-                return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN_MADE.to_string()));
+            //
+            // Rulings R803, R805 : de même ce qu'il a fait d'un élément placé par un voisin
+            // (entrée de map ou enfant de liste, règle P1 de la grammaire). Ruling R804 : jugé
+            // sur **tout** ce que l'entrée a intégré ; l'encodage de la transaction s'arrête au
+            // premier trou de chaque client, et ce qu'une entrée posait au-delà d'un trou
+            // n'était pas jugé.
+            if before.iter().next().is_some() && shape.placed_by_siblings(&before) {
+                let encoded = self.integrated(&txn, &shape, &before);
+                match shape.check_as_written(&encoded, &before, false, Some(&mut many_valued)) {
+                    // Ce que la garde ne relit pas de ce que yrs encode n'est pas jugé ici.
+                    Ok(()) | Err(CrdtError::Decode(_)) => {}
+                    Err(error) => return Err(error),
+                }
+                // Ruling R805 : une entrée de map de plusieurs unités restée vivante (un contenu
+                // placé par l'origine d'une entrée, écrit au journal avant la grammaire) est
+                // supprimée en entier, dans la même transaction : coupée plus tard, ses moitiés
+                // resteraient vivantes sans être l'entrée courante, et yrs lirait de la mémoire
+                // libérée une fois leur parent ramassé. La relecture le refait chaque fois.
             }
+            delete(&mut txn, &many_valued)?;
             delete(&mut txn, &shape.outside_marks(&before))?;
             txn.commit();
             let named = named.into_iter().filter_map(|(client, clock)| {
@@ -310,10 +328,12 @@ impl PageDoc {
             intact: false,
         };
         let mut txn = self.doc.transact_mut();
-        let (shape, decoded) = self.read(&txn, update, true).map_err(|error| Refused {
-            error,
-            intact: true,
-        })?;
+        let (shape, decoded) = self
+            .read(&txn, update, true, None)
+            .map_err(|error| Refused {
+                error,
+                intact: true,
+            })?;
         // Ce que la page gardait en attente de suppression avant (d'ordinaire rien).
         let pending_before = Pending::of(txn.store().pending_ds());
         let floor = txn.state_vector();
@@ -334,8 +354,14 @@ impl PageDoc {
         // un abandon : yrs valide la transaction quand elle est lâchée, ramasse-miettes compris.
         // Le refus tient parce que tout appelant jette alors la page (l'acteur la recharge du
         // journal, où rien de cela n'est écrit) et que rien ne l'encode entre-temps.
-        if shape.placed_by_neighbours(&floor) {
-            made(&read).map_err(applied)?;
+        //
+        // Ruling R803 : et un élément que yrs n'a pas rangé comme ses octets le disent (règle P1
+        // de la grammaire). Seul un élément placé par un voisin peut l'être ; une frappe en est
+        // un, et sa lecture ici est celle que la règle d'avant faisait déjà.
+        if shape.placed_by_siblings(&floor) {
+            shape
+                .check_as_written(&read, &floor, true, None)
+                .map_err(applied)?;
         }
         // yrs ne dresse la liste des types changés qu'à la validation.
         txn.commit();
@@ -478,7 +504,23 @@ impl PageDoc {
     /// de map à origine droite dans les octets (Ruling R723). La page est intacte : qui relit un journal écarte l'entrée et continue (Ruling
     /// R742). Le même défaut vu après l'application rend une autre erreur : la page est à jeter.
     pub fn refused_intact(error: &CrdtError) -> bool {
-        matches!(error, CrdtError::Structure(why) if why == ASTRIDE || why == KEYED_RIGHT_ORIGIN)
+        matches!(error, CrdtError::Structure(why) if why == ASTRIDE
+            || why == KEYED_RIGHT_ORIGIN
+            || why == MANY_VALUED
+            || why == DEPENDS_ON_A_HOLE
+            || why == CLOCK_OUT_OF_BOUNDS
+            || why == RIGHT_ORIGIN_IS_ORIGIN)
+    }
+
+    /// Vrai si `error`, rendue par [`PageDoc::apply_update`], est le refus de ce que yrs a fait
+    /// d'une entrée **après** l'avoir appliquée (Rulings R723, R803, R806) : une entrée de map à
+    /// origine droite, un élément rangé autrement que ses octets ne le disent, une entrée de map
+    /// de plusieurs valeurs restée vivante. Aucun client n'écrit ce qu'elle porte. La page n'est
+    /// plus saine : qui relit un journal la jette, et reprend sans l'entrée.
+    pub fn refused_made(error: &CrdtError) -> bool {
+        matches!(error, CrdtError::Structure(why) if why == KEYED_RIGHT_ORIGIN_MADE
+            || why == NOT_AS_WRITTEN
+            || why == MANY_VALUED_MADE)
     }
 
     /// Vrai si `error` est le refus d'une mise à jour qui dépend de modifications que la page n'a
@@ -541,9 +583,9 @@ impl PageDoc {
     /// appliquée ; `Err` si elle est refusée à la lecture.
     pub fn stored_update_lacks_dependency(&self, update: &[u8]) -> Result<bool, CrdtError> {
         let txn = self.doc.transact_mut();
-        let (shape, _) = self.read(&txn, update, false)?;
+        let (shape, _) = self.read(&txn, update, false, Some(&mut IdSet::new()))?;
         let state = txn.state_vector();
-        let beyond = self.known_beyond(&txn, &shape, &state)?;
+        let beyond = self.known_beyond(&txn, Some(&shape), &state)?;
         Ok(shape.lacks_dependency(&state, |client, clock| {
             clock < state.get(&ClientID::new(client))
                 || beyond.get(&client).is_some_and(|ranges| {
@@ -588,6 +630,7 @@ impl PageDoc {
         txn: &TransactionMut,
         update: &[u8],
         from_client: bool,
+        many_valued: Option<&mut IdSet>,
     ) -> Result<(Shape, Update), CrdtError> {
         let read = |bytes: &[u8]| {
             if from_client {
@@ -611,10 +654,14 @@ impl PageDoc {
         // Ruling R784 : un élément à cheval sur ce que la page connaît est coupé avant que la
         // garde et yrs le lisent ; ils n'en voient que la part neuve, placée par son origine.
         let mut cut = None;
-        if shape.astride(&state) || self.any_holed.load(Ordering::Relaxed) {
+        // Rulings R801, R802 : de même ce que Yjs écrit et que yrs ne range pas sûrement : une
+        // entrée de map de plusieurs valeurs (récrite en autant d'entrées d'une valeur), un
+        // élément dont l'origine droite est son origine (qui la perd).
+        let normalized = shape.normalized(&state);
+        if shape.astride(&state) || normalized || self.any_holed.load(Ordering::Relaxed) {
             // Ruling R785 : dans une page qui a un trou, ce qu'elle connaît au-delà aussi.
-            let beyond = self.known_beyond(txn, &shape, &state)?;
-            if (shape.astride(&state) || !beyond.is_empty())
+            let beyond = self.known_beyond(txn, Some(&shape), &state)?;
+            if (shape.astride(&state) || normalized || !beyond.is_empty())
                 && let Some(bytes) = cut::cut(update, &state, &beyond)?
             {
                 shape = read(&bytes)?;
@@ -624,8 +671,29 @@ impl PageDoc {
         let update = cut.as_deref().unwrap_or(update);
         let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
         shape.check(&state)?;
+        // Ruling R807 : dans une page qui a un trou, un élément qui dépend (origine, origine
+        // droite, parent) d'une horloge du trou. yrs croit la connaître (il compare à la fin de
+        // ce qu'il a du client), la cherche parmi ses blocs, et panique.
+        if self.any_holed.load(Ordering::Relaxed) {
+            let beyond = self.known_beyond(txn, None, &state)?;
+            if !beyond.is_empty()
+                && shape.lacks_dependency(&state, |client, clock| {
+                    clock < state.get(&ClientID::new(client))
+                        || beyond.get(&client).is_some_and(|ranges| {
+                            ranges
+                                .iter()
+                                .any(|range| range.0 <= clock && clock < range.1)
+                        })
+                })
+            {
+                return Err(CrdtError::Structure(DEPENDS_ON_A_HOLE.to_string()));
+            }
+        }
         // Ruling R723 : une entrée de map à origine droite, quand les octets le disent.
         shape.check_keyed(&state)?;
+        // Rulings R805, R806 (et les filets de R801 et R802) : la grammaire de ce qu'un client écrit, quand les octets
+        // suffisent à la juger.
+        shape.check_grammar(&state, from_client, many_valued)?;
         if from_client {
             // Ruling R431 : une marque de texte hors du schéma, ou trop longue.
             shape.check_marks(&state)?;
@@ -646,6 +714,8 @@ impl PageDoc {
             if let Some(refusal) = findings.refusal {
                 return Err(CrdtError::Structure(refusal));
             }
+            // Ruling R803 : une valeur `Any` qui ne se dit pas entrée de map.
+            shape.check_values_flagged(&state)?;
             // Ruling R786 : d'un client, des blocs qui laisseraient un trou. L'acteur retient une
             // telle mise à jour avant de l'appliquer (`PageDoc::awaits`, Ruling R131) ; refusée ici
             // aussi, pour que ce qui suit ne dépende pas de l'appelant : un trou fait que la page
@@ -658,14 +728,14 @@ impl PageDoc {
     }
 
     /// Ce que la page connaît **au-delà de son premier trou** des clients de `shape` qui en ont
-    /// un (`holed`) : lu dans ce que yrs encode pour un destinataire qui s'arrêterait une unité
+    /// un (`holed`), ou de tous les clients à trou sans `shape` : lu dans ce que yrs encode pour un destinataire qui s'arrêterait une unité
     /// avant le trou. yrs ne dit rien d'autre de ses trous ; le coût est celui d'un encodage de
     /// ce qui suit le trou et du jeu de suppressions, pour les seules mises à jour qui nomment un
     /// client à trou (un ancien onglet d'un journal d'avant le Ruling R131).
     fn known_beyond<T: ReadTxn>(
         &self,
         txn: &T,
-        shape: &Shape,
+        shape: Option<&Shape>,
         state: &StateVector,
     ) -> Result<cut::Beyond, CrdtError> {
         let mut beyond = cut::Beyond::new();
@@ -676,7 +746,14 @@ impl PageDoc {
             .holed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for client in shape.clients().filter(|client| holed.contains(client)) {
+        let wanted: Vec<u64> = match shape {
+            Some(shape) => shape
+                .clients()
+                .filter(|client| holed.contains(client))
+                .collect(),
+            None => holed.iter().copied().collect(),
+        };
+        for client in wanted {
             let id = ClientID::new(client);
             let floor = state.get(&id);
             let mut before: HashMap<ClientID, u32> =
@@ -701,6 +778,41 @@ impl PageDoc {
         }
         beyond.retain(|_, ranges| !ranges.is_empty());
         Ok(beyond)
+    }
+
+    /// Ce que yrs a intégré de l'entrée `shape`, encodé par lui (Ruling R804). L'encodage d'une
+    /// transaction part du vecteur d'état d'avant, qui s'arrête au premier trou de chaque
+    /// client : il ne porte rien de ce que l'entrée a posé au-delà. Pour les clients de l'entrée
+    /// chez qui la page a un trou (l'entrée vient d'en laisser un, ou la page en avait), on
+    /// encode donc depuis une unité avant leur plancher, comme [`PageDoc::known_beyond`] : tout
+    /// ce que la page porte d'eux au-delà y est, l'entrée comprise.
+    fn integrated(&self, txn: &TransactionMut, shape: &Shape, before: &StateVector) -> Vec<u8> {
+        if !self.any_holed.load(Ordering::Relaxed) {
+            return txn.encode_update_v1();
+        }
+        let holed = self
+            .holed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut from: HashMap<ClientID, u32> =
+            before.iter().map(|(c, clock)| (*c, *clock)).collect();
+        let mut lowered = false;
+        for client in shape.clients().filter(|client| holed.contains(client)) {
+            let id = ClientID::new(client);
+            match before.get(&id) {
+                0 => {
+                    from.remove(&id);
+                }
+                floor => {
+                    from.insert(id, floor - 1);
+                }
+            }
+            lowered = true;
+        }
+        if !lowered {
+            return txn.encode_update_v1();
+        }
+        txn.encode_diff_v1(&StateVector::new(from.into_iter().collect()))
     }
 
     /// Retient les clients chez qui l'entrée qu'on vient d'intégrer a laissé un trou
@@ -984,15 +1096,6 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
         return Err(attrs::refusal_in_page(tag, key));
     }
     Ok(())
-}
-
-/// Ce que la garde refuse de ce que yrs a fait d'une mise à jour (Rulings R723, R724,
-/// [`Shape::check_made`]), lu dans `encoded`, l'encodage par yrs de ce que la transaction a
-/// intégré : yrs y écrit la marque « entrée de map » de chaque élément d'après la clé qu'il lui a
-/// donnée, quoi que la mise à jour reçue ait dit. Refusé aussi si la garde ne relit pas
-/// l'encodage : dans le doute, la page ne le garde pas.
-fn made(encoded: &[u8]) -> Result<(), CrdtError> {
-    Shape::read(encoded)?.check_made()
 }
 
 /// La balise d'un type de la page, pour la garde des attributs : `Some(None)` s'il n'est pas un
