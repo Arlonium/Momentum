@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi) | [`Version`]`[]`, la plus récente d'abord ; cent au plus |
 //! | `GET …/versions/{versionId}/state` | `edit` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) tel qu'il a été gardé, sans les attributs de bloc que la garde refuse (Ruling R701) |
-//! | `POST …/versions/{versionId}/restore` | `edit` | `204` ; `409 trashed` ; `429 page_busy` (Ruling R535) |
+//! | `POST …/versions/{versionId}/restore` | `edit` | `204` ; `409 trashed` ; `429 page_busy` (Ruling R535) ; `409 restore_refused` (Ruling R832) |
 //!
 //! **Refus**, dans l'ordre des commentaires (Rulings R168 et R186, écrit en tête de
 //! `access.rs`) : `401` sans session ; `404 not_found` pour une page que la personne ne voit pas ;

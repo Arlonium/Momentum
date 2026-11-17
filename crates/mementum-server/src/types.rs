@@ -765,6 +765,10 @@ pub enum ErrorCode {
     InvalidRequest,
     /// Corps de requête trop gros.
     PayloadTooLarge,
+    /// La restauration d'une version est refusée, rien n'est changé : l'état de la version ne se
+    /// relit pas, ou celui de la page, qu'aucune version ne garderait (Rulings R816, R832). Le
+    /// message dit lequel. Statut 409.
+    RestoreRefused,
     /// La page ne répond pas pour l'instant ; réessayer.
     Unavailable,
     /// Erreur interne du serveur (détails dans ses journaux).

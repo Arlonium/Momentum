@@ -272,7 +272,20 @@ pub enum SyncError {
     /// L'acteur de la page s'est arrêté avant de répondre (document impossible
     /// à charger), plusieurs fois de suite.
     Closed,
+    /// La restauration d'une version est refusée, rien n'est changé (Ruling R832) : l'état de la
+    /// version ne se relit pas, ou celui de la page, que la version d'avant restauration garderait
+    /// (Ruling R816). Le message le dit, à qui a demandé la restauration.
+    RestoreRefused(&'static str),
 }
+
+/// [`SyncError::RestoreRefused`] : l'état gardé de la version ne se relit pas (Ruling R717).
+pub const VERSION_UNREADABLE: &str = "Cette version ne peut pas être restaurée : le serveur ne \
+     relit pas son contenu. Rien n'a été changé.";
+
+/// [`SyncError::RestoreRefused`] : l'état de la page ne se relit pas ; la restauration le
+/// remplacerait sans qu'aucune version le garde (Ruling R816).
+pub const PAGE_UNREADABLE: &str = "Cette version ne peut pas être restaurée : le contenu actuel \
+     de la page ne peut pas être gardé dans l'historique, et serait perdu. Rien n'a été changé.";
 
 impl fmt::Display for SyncError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -281,6 +294,7 @@ impl fmt::Display for SyncError {
             SyncError::Store(e) => write!(f, "{e}"),
             SyncError::Crdt(e) => write!(f, "{e}"),
             SyncError::Closed => write!(f, "la page n'a pas pu être ouverte"),
+            SyncError::RestoreRefused(why) => write!(f, "{why}"),
         }
     }
 }

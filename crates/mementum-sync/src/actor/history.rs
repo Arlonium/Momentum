@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mementum_crdt::{CrdtError, PageDoc};
+use mementum_crdt::PageDoc;
 use mementum_store::{Store, StoreError, VersionReason};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -331,8 +331,7 @@ impl Actor {
             Ok(kept) => kept.read_blocks(),
             Err(error) => {
                 tracing::error!(node_id = %self.id.node_id, version_id = %version, %error, "état d'une version illisible : restauration refusée, page intacte");
-                let unreadable = format!("état de la version {version} : {error}");
-                return Ok(Err(SyncError::Crdt(CrdtError::Decode(unreadable))));
+                return Ok(Err(SyncError::RestoreRefused(crate::VERSION_UNREADABLE)));
             }
         };
         if blocks == self.page.read_blocks() {
@@ -345,7 +344,12 @@ impl Actor {
             && let Err(error) = self.cut_version(VersionReason::BeforeRestore).await
         {
             tracing::warn!(node_id = %self.id.node_id, version_id = %version, %error, "version d'avant restauration impossible à écrire : rien n'est restauré");
-            return Ok(Err(error));
+            // Ruling R832 : un état que le serveur ne relit pas (Ruling R816) se dit comme tel ;
+            // une erreur du store reste une erreur du store.
+            return Ok(Err(match error {
+                SyncError::Crdt(_) => SyncError::RestoreRefused(crate::PAGE_UNREADABLE),
+                error => error,
+            }));
         }
         // Après la coupe : c'est elle qui peut avoir purgé la version, ou en avoir fait celle que
         // la prochaine version ordinaire ferait partir.

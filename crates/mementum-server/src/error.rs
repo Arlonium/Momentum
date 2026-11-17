@@ -698,6 +698,11 @@ impl From<SyncError> for ApiError {
                 ErrorCode::Unavailable,
                 "la page ne peut pas être ouverte pour l'instant ; réessayer",
             ),
+            // Ruling R832 : une restauration refusée se dit comme telle, pas comme des blocs
+            // refusés ni comme une erreur interne.
+            SyncError::RestoreRefused(why) => {
+                ApiError::new(StatusCode::CONFLICT, ErrorCode::RestoreRefused, why)
+            }
         }
     }
 }
@@ -1266,5 +1271,21 @@ mod tests {
         let error = ApiError::from(SyncError::Crdt(CrdtError::Decode("x".into())));
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(error.body.message, "erreur interne du serveur");
+    }
+
+    /// Ruling R832 : une restauration refusée (un état que le serveur ne relit pas) répond `409
+    /// restore_refused`, avec le message de l'acteur, qui parle d'une restauration.
+    #[test]
+    fn a_refused_restore_is_409_restore_refused() {
+        for why in [
+            mementum_sync::PAGE_UNREADABLE,
+            mementum_sync::VERSION_UNREADABLE,
+        ] {
+            let error = ApiError::from(SyncError::RestoreRefused(why));
+            assert_eq!(error.status, StatusCode::CONFLICT);
+            assert_eq!(error.body.error, ErrorCode::RestoreRefused);
+            assert_eq!(error.body.message, why);
+            assert!(why.contains("restaurée") && why.contains("Rien n'a été changé"));
+        }
     }
 }

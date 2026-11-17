@@ -667,7 +667,10 @@ async fn unreadable_version_is_refused_without_touching_the_page() {
     let rows = row_counts(&f.db).await;
 
     let refused = f.hub.restore_version(f.page, broken, Some(alice)).await;
-    assert!(matches!(refused, Err(SyncError::Crdt(_))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(SyncError::RestoreRefused(why)) if why == mementum_sync::VERSION_UNREADABLE),
+        "{refused:?}"
+    );
     assert_eq!(row_counts(&f.db).await, rows, "rien d'écrit");
     assert!(still_open(&observer).await, "l'acteur sert toujours");
     assert_eq!(live_text(&f).await, "Un et deux");

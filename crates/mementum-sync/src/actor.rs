@@ -1944,6 +1944,48 @@ mod tests {
         assert!(state.updates.is_empty());
     }
 
+    /// Ruling R832 : une restauration que le filet de R816 refuse (l'état de la page ne se relit
+    /// pas : aucune version ne garderait ce qu'elle remplace) le dit comme une restauration
+    /// refusée, et ne change rien ; de même pour une version dont l'état ne se relit pas.
+    #[tokio::test]
+    async fn a_restore_refused_by_an_unreadable_state_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _commands, _mailbox) = actor(&dir).await;
+        let node = actor.id.node_id;
+        let other = {
+            let (page, _) = PageDoc::new_page();
+            page.write_blocks(&mementum_md::parse("Autre contenu\n").unwrap())
+                .unwrap();
+            page.encode_state()
+        };
+        let version = actor
+            .store
+            .put_version(node, 0, &other, &[], VersionReason::Periodic)
+            .await
+            .unwrap();
+        spoil(&actor.page);
+        let journal = actor.store.load_doc(node).await.unwrap();
+        let refused = actor.restore(version, None).await.ok().unwrap();
+        assert!(
+            matches!(refused, Err(SyncError::RestoreRefused(why)) if why == crate::PAGE_UNREADABLE),
+            "{refused:?}"
+        );
+        assert_eq!(actor.store.load_doc(node).await.unwrap(), journal);
+        assert_eq!(actor.store.list_versions(node).await.unwrap().len(), 1);
+        // Une version dont l'état ne se relit pas.
+        let unreadable = actor
+            .store
+            .put_version(node, 0, &[1, 2, 3], &[], VersionReason::Periodic)
+            .await
+            .unwrap();
+        let refused = actor.restore(unreadable, None).await.ok().unwrap();
+        assert!(
+            matches!(refused, Err(SyncError::RestoreRefused(why)) if why == crate::VERSION_UNREADABLE),
+            "{refused:?}"
+        );
+        assert_eq!(actor.store.load_doc(node).await.unwrap(), journal);
+    }
+
     /// Une connexion du compte `account`, qui s'appelle `name` et peut écrire : inscrite, puis
     /// admise, comme le fait `Hub::serve_connection_if`.
     fn joined(actor: &mut Actor, account: Uuid, name: &str) -> Joined {
