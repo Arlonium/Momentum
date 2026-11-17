@@ -242,3 +242,77 @@ async fn journal_entry_with_a_keyed_item_with_a_right_origin_is_set_aside() {
         "une ligne `error` : {journal}"
     );
 }
+
+/// Ruling R743 (constat I2 de la re-relecture 3) : une page attaquée avant la garde, où l'on a
+/// continué d'écrire. L'entrée hostile est écartée (R723) ; la frappe suivante de l'attaquant,
+/// sous le même client, laisserait un trou (R366) ; et la frappe d'un autre, posée après cette
+/// lettre, dépend de ce qui vient d'être écarté : elle faisait refuser la page. Elle est écartée
+/// à son tour, et la page se charge avec le reste.
+#[tokio::test]
+async fn entries_that_depend_on_a_set_aside_entry_are_set_aside_too() {
+    let logs = Logs::capture();
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Journal", &[user(&team.olga, Level::Full)])
+        .await;
+    let (created, creation) = PageDoc::new_page();
+    let paragraph = created.read_blocks()[0].id.clone();
+    let a = PageDoc::from_updates([creation.as_slice()]).unwrap();
+    let one = a.replace_text(&paragraph, 0, 0, "Un").unwrap();
+    let c = PageDoc::from_updates([creation.as_slice(), one.as_slice()]).unwrap();
+    let def = c.replace_text(&paragraph, 0, 0, "def").unwrap();
+    // Le client de la racine : son élément 4 est l'entrée `backgroundColor` du paragraphe.
+    let state = created.state_vector();
+    let mut at = 0;
+    assert_eq!(read_var(&state, &mut at), 1);
+    let root = read_var(&state, &mut at);
+    // Le client de « Un » : son élément 0 est le texte du paragraphe.
+    let mut at = 0;
+    assert_eq!(read_var(&one, &mut at), 1, "un seul client");
+    let _structs = read_var(&one, &mut at);
+    let typist = read_var(&one, &mut at);
+    assert_eq!(read_var(&one, &mut at), 0, "à partir de l'horloge 0");
+    // Une chaîne (4) avec une origine (0x80), une origine droite (0x40) et la marque « entrée de
+    // map » (0x20) ; puis la suppression du texte et de ses deux lettres, que yrs a faite.
+    let mut hostile = vec![1, 1];
+    var(&mut hostile, 7_000);
+    hostile.extend([0, 0xE4]);
+    var(&mut hostile, typist);
+    hostile.push(0);
+    var(&mut hostile, root);
+    hostile.extend([4, 2, b'b', b'c', 1]);
+    var(&mut hostile, typist);
+    hostile.extend([1, 0, 3]);
+    // La frappe de l'attaquant, à la suite (son horloge 2), après la dernière lettre de « Un ».
+    let mut next = vec![1, 1];
+    var(&mut next, 7_000);
+    next.extend([2, 0x84]);
+    var(&mut next, typist);
+    next.extend([2, 1, b'X', 0]);
+    // La frappe d'un autre, après cette lettre.
+    let mut after = vec![1, 1];
+    var(&mut after, 9_000);
+    after.extend([0, 0x84]);
+    var(&mut after, 7_000);
+    after.extend([2, 1, b'Y', 0]);
+    team.store
+        .append_updates(
+            page,
+            &[&creation, &one, &hostile, &next, &after, &def],
+            None,
+        )
+        .await
+        .unwrap();
+
+    let read = team.olga.get_mmd(&page.to_string()).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.text(), "defUn\n");
+    let journal = logs.text();
+    assert!(
+        journal.matches("écartée").count() >= 3
+            && journal.contains("trou")
+            && journal.contains("dépend de ce qu'une entrée écartée portait"),
+        "trois lignes `error` : {journal}"
+    );
+}

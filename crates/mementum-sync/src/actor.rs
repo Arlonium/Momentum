@@ -442,10 +442,47 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
         .map_or(0, |(seq, _)| *seq);
     // Les suppressions sont comptées à partir du journal : celles de
     // l'instantané sont déjà nettoyées par le ramasse-miettes.
+    //
+    // Ruling R743 : une entrée qui dépend, par une origine ou un parent, de ce qu'une entrée
+    // écartée portait est refusée après avoir été appliquée (yrs la garde en attente) : la page
+    // est alors à jeter. Elle est écartée à son tour, et la relecture reprend du début sans
+    // elle ; une page attaquée avant la garde où l'on a continué d'écrire se charge avec le reste.
+    let mut dependents: HashSet<i64> = HashSet::new();
+    let (page, watch) = loop {
+        match replay(node_id, &snapshot, &updates, &dependents)? {
+            Ok(loaded) => break loaded,
+            Err(seq) => {
+                dependents.insert(seq);
+            }
+        }
+    };
+    Ok(Loaded {
+        page,
+        last_seq,
+        since_snapshot: updates.len() as u64,
+        watch,
+        created: false,
+    })
+}
+
+/// Rejoue l'instantané puis le journal d'une page, sans les entrées `dependents` (Ruling R743).
+/// `Ok(Err(seq))` : l'entrée `seq` dépend de ce qu'une entrée écartée portait ; la page bâtie est
+/// à jeter, et l'appelant reprend sans elle.
+#[allow(clippy::type_complexity)]
+fn replay(
+    node_id: Uuid,
+    snapshot: &Option<(i64, Vec<u8>)>,
+    updates: &[(i64, Vec<u8>)],
+    dependents: &HashSet<i64>,
+) -> Result<Result<(PageDoc, Watch), i64>, SyncError> {
     let page = PageDoc::from_updates(snapshot.iter().map(|(_, bytes)| bytes.as_slice()))?;
     let watch = Watch::on(&page);
     let mut set_aside = false;
-    for (seq, update) in &updates {
+    for (seq, update) in updates {
+        if dependents.contains(seq) {
+            set_aside = true;
+            continue;
+        }
         // Ruling R366 : après une entrée écartée, une entrée qui laisserait un trou (des blocs
         // qui suivent, chez leur client, ceux de l'entrée écartée) est écartée aussi. yrs
         // l'intégrerait en laissant le trou ; un navigateur la garde en attente (Ruling R131) :
@@ -474,16 +511,14 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
                 tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : aucun client n'écrit ce qu'elle porte");
                 set_aside = true;
             }
+            Err(error) if set_aside && PageDoc::lacks_a_dependency(&error) => {
+                tracing::error!(%node_id, seq, %error, set_aside = dependents.len() + 1, "entrée du journal écartée à la relecture : elle dépend de ce qu'une entrée écartée portait");
+                return Ok(Err(*seq));
+            }
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(Loaded {
-        page,
-        last_seq,
-        since_snapshot: updates.len() as u64,
-        watch,
-        created: false,
-    })
+    Ok(Ok((page, watch)))
 }
 
 struct Conn {
