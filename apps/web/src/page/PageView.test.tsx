@@ -517,8 +517,9 @@ test("page_view_shows_the_uploads_in_course_and_cancels_them_when_the_page_is_le
   });
   await until(host, () => host.querySelectorAll(".mm-file-uploads li").length === 2, "les deux envois");
   const rows = () =>
-    [...host.querySelectorAll(".mm-file-uploads li")].map((li) => li.querySelector('[role="status"]')!.textContent);
-  expect(rows()).toEqual(["Envoi de un.png…", "Envoi de deux.png…"]);
+    [...host.querySelectorAll(".mm-file-uploads li")].map((li) => li.querySelector('[role="status"]')?.textContent);
+  // Le plus récent en haut.
+  expect(rows()).toEqual(["Envoi de deux.png…", "Envoi de un.png…"]);
   // « Annuler » le premier : lui seul s'arrête, rien n'est dit, et le focus ne tombe pas sur `body`.
   const cancel = [...host.querySelectorAll<HTMLButtonElement>(".mm-file-uploads button")].find(
     (button) => button.getAttribute("aria-label") === "Annuler l'envoi de \u2068un.png\u2069",
@@ -577,4 +578,74 @@ test("page_view_rereads_the_page_for_an_upload_and_says_what_it_has_become", asy
     read = await filesProp().reread();
   });
   expect(read).toBeNull();
+});
+
+test("nothing_moves_in_the_box_of_uploads_under_the_pointer_or_the_focus", async () => {
+  // Tour de correction 1 (m1) : trois envois de front ; le premier finit pendant que le pointeur, puis
+  // le focus, est sur « Annuler » du deuxième. Sa ligne reste, sans bouton : aucun autre « Annuler » ne
+  // vient à la place de celui qu'on vise.
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  const ends: (() => void)[] = [];
+  const upload = uploader({
+    pageId: "x",
+    limits: async () => ({ maxFileBytes: 1024 }),
+    blockType: () => "image",
+    ...filesProp(),
+    signal: new AbortController().signal,
+    upload: (_page, file) =>
+      new Promise((done) => {
+        ends.push(() => done({ id: "f", url: "/api/v1/pages/x/files/f", name: file.name, size: 3, mime: "image/png" }));
+      }),
+  });
+  const start = (name: string) => void upload(new File(["abc"], name), "b").catch(() => {});
+  const lines = () => [...host.querySelectorAll(".mm-file-uploads li")].map((li) => li.textContent);
+  const box = () => host.querySelector<HTMLElement>(".mm-file-notices")!;
+  const over = (target: Element, type: "mouseover" | "mouseout", related: Element | null) =>
+    act(async () => {
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, relatedTarget: related }));
+    });
+  for (const way of ["pointeur", "focus"] as const) {
+    ends.length = 0;
+    await act(async () => {
+      start("un.png");
+      start("deux.png");
+      start("trois.png");
+    });
+    await until(host, () => ends.length === 3, "les trois envois");
+    // Le plus récent en haut : la boîte, au bas de la fenêtre, grandit vers le haut.
+    expect(lines(), way).toEqual(["Envoi de trois.png…Annuler", "Envoi de deux.png…Annuler", "Envoi de un.png…Annuler"]);
+    const second = [...box().querySelectorAll("button")].find((b) => b.getAttribute("aria-label")?.includes("deux.png"))!;
+    if (way === "pointeur") await over(second, "mouseover", document.body);
+    else await act(async () => second.focus());
+    // Le premier envoi finit.
+    await act(async () => ends[0]());
+    await until(host, () => lines().some((line) => line?.includes("n'est plus en cours")), "la ligne finie");
+    expect(lines(), way).toEqual([
+      "Envoi de trois.png…Annuler",
+      "Envoi de deux.png…Annuler",
+      "L'envoi de un.png n'est plus en cours.",
+    ]);
+    // Le bouton visé est le même élément, à la même place.
+    expect(box().contains(second), way).toBe(true);
+    // Un envoi de plus pendant ce temps se pose en haut, sans rien déplacer dessous.
+    await act(async () => start("quatre.png"));
+    await until(host, () => ends.length === 4, "le quatrième envoi");
+    expect(lines().slice(1), way).toEqual([
+      "Envoi de trois.png…Annuler",
+      "Envoi de deux.png…Annuler",
+      "L'envoi de un.png n'est plus en cours.",
+    ]);
+    // Le pointeur, ou le focus, sorti : la ligne finie part.
+    if (way === "pointeur") await over(box(), "mouseout", document.body);
+    else await act(async () => host.querySelector<HTMLElement>(".mm-title-input")!.focus());
+    expect(lines(), way).toEqual(["Envoi de quatre.png…Annuler", "Envoi de trois.png…Annuler", "Envoi de deux.png…Annuler"]);
+    // Tous finis, la boîte part ; elle ne se croit plus sous le pointeur à la série suivante.
+    await act(async () => ends.slice(1).forEach((end) => end()));
+    await until(host, () => lines().length === 0, "plus aucun envoi");
+    // (Le faux serveur de ce test ne rend pas un fichier de la page : ses refus se ferment.)
+    await click(box().querySelector('button[aria-label="Fermer"]')!);
+    await until(host, () => host.querySelector(".mm-file-notices") === null, "la boîte partie");
+  }
 });

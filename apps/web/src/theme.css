@@ -3613,21 +3613,21 @@ button.mm-reaction:hover {
   font-size: 14px;
 }
 
-/* Les envois en cours et les envois refusés d'une page, sous la barre du haut, par-dessus la page. */
+/* Les envois refusés et les envois en cours d'une page : dans le coin bas droit de la fenêtre, hors
+   du flux, loin du titre et du haut du texte ; la boîte grandit vers le haut (`FileNotices.tsx`). */
 .mm-file-notices {
   position: fixed;
   z-index: 90;
-  top: 56px;
-  left: 50%;
+  right: 16px;
+  bottom: 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   box-sizing: border-box;
   width: max-content;
-  max-width: min(560px, calc(100vw - 32px));
+  max-width: min(360px, calc(100vw - 32px));
   color: var(--mm-text);
   font-size: 14px;
-  transform: translateX(-50%);
 }
 
 .mm-file-uploads,
@@ -3658,6 +3658,13 @@ button.mm-reaction:hover {
 .mm-file-upload-text {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* Un envoi fini, resté à sa place tant que le pointeur ou le focus est dans la boîte : la hauteur
+   d'une ligne à bouton, pour que rien ne bouge dessous. */
+.mm-file-upload-ended {
+  min-height: 28px;
+  color: var(--mm-text-secondary);
 }
 
 .mm-file-refusals {
