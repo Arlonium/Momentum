@@ -190,7 +190,10 @@ fn a_keyed_content_that_is_not_a_value_is_refused_before_it_is_applied() {
         let refused = served.page.try_client_update(&u).expect_err(what);
         assert!(refused.intact, "{what} : {refused:?}");
         assert!(
-            refused.error.to_string().contains("contenu qui n'en est pas une"),
+            refused
+                .error
+                .to_string()
+                .contains("contenu qui n'en est pas une"),
             "{what} : {refused:?}"
         );
         assert!(served.page.encode_state() == before, "{what}");
