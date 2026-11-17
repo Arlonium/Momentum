@@ -336,6 +336,142 @@ pub(crate) fn cut(
     Ok(Some(out))
 }
 
+/// La mise à jour (v1) où chacun des éléments de `flagged` (l'identifiant de son début) perd son
+/// origine droite (règle N3, Ruling R825), comme N2 la retire à un élément dont l'origine droite
+/// est son origine. Chacun a une origine : ses octets ne nomment ni parent ni clé, avec ou sans
+/// l'origine droite. Le reste est recopié tel quel.
+pub(crate) fn unright(
+    update: &[u8],
+    flagged: &std::collections::HashSet<(u64, u32)>,
+) -> Result<Vec<u8>, CrdtError> {
+    let mut c = Cursor::new(update);
+    let mut out = Vec::with_capacity(update.len());
+    let n_clients: u32 = c.read_var().map_err(decode_error)?;
+    var(&mut out, u64::from(n_clients));
+    for _ in 0..n_clients {
+        let n_structs: u32 = c.read_var().map_err(decode_error)?;
+        let client: u64 = c.read_var().map_err(decode_error)?;
+        let first: u32 = c.read_var().map_err(decode_error)?;
+        var(&mut out, u64::from(n_structs));
+        var(&mut out, client);
+        var(&mut out, u64::from(first));
+        let mut clock = first;
+        for _ in 0..n_structs {
+            let start = c.next;
+            let info = c.read_u8().map_err(decode_error)?;
+            if matches!(info, BLOCK_SKIP_REF_NUMBER | BLOCK_GC_REF_NUMBER) {
+                let len: u32 = c.read_var().map_err(decode_error)?;
+                clock = clock
+                    .checked_add(len)
+                    .ok_or_else(|| decode_error("horloge hors limites"))?;
+                out.extend(&update[start..c.next]);
+                continue;
+            }
+            let origin = (info & HAS_ORIGIN != 0)
+                .then(|| read_id(&mut c))
+                .transpose()
+                .map_err(decode_error)?;
+            let after_origin = c.next;
+            let right = (info & HAS_RIGHT_ORIGIN != 0)
+                .then(|| read_id(&mut c))
+                .transpose()
+                .map_err(decode_error)?;
+            let after_right = c.next;
+            if origin.is_none() && right.is_none() {
+                if c.read_var::<u32>().map_err(decode_error)? == 1 {
+                    c.read_string().map_err(decode_error)?;
+                } else {
+                    read_id(&mut c).map_err(decode_error)?;
+                }
+                if info & yrs::block::HAS_PARENT_SUB != 0 {
+                    c.read_string().map_err(decode_error)?;
+                }
+            }
+            let len = read_content(&mut c, info, false, JsonCount::AsRead)
+                .map_err(decode_error)?
+                .len;
+            if origin.is_some() && right.is_some() && flagged.contains(&(client, clock)) {
+                out.push(info & !HAS_RIGHT_ORIGIN);
+                out.extend(&update[start + 1..after_origin]);
+                out.extend(&update[after_right..c.next]);
+            } else {
+                out.extend(&update[start..c.next]);
+            }
+            clock = clock
+                .checked_add(len)
+                .ok_or_else(|| decode_error("horloge hors limites"))?;
+        }
+    }
+    out.extend(&update[c.next..]);
+    Ok(out)
+}
+
+/// La mise à jour (v1) où chacun des éléments de `collected` (l'identifiant de son début) devient
+/// une plage ramassée de même longueur (règle G, Ruling R827) : ce que Yjs en fait
+/// (`Item.getMissing`, puis `Item.integrate` sans parent). Le reste est recopié tel quel.
+pub(crate) fn collect(
+    update: &[u8],
+    collected: &std::collections::HashSet<(u64, u32)>,
+) -> Result<Vec<u8>, CrdtError> {
+    let mut c = Cursor::new(update);
+    let mut out = Vec::with_capacity(update.len());
+    let n_clients: u32 = c.read_var().map_err(decode_error)?;
+    var(&mut out, u64::from(n_clients));
+    for _ in 0..n_clients {
+        let n_structs: u32 = c.read_var().map_err(decode_error)?;
+        let client: u64 = c.read_var().map_err(decode_error)?;
+        let first: u32 = c.read_var().map_err(decode_error)?;
+        var(&mut out, u64::from(n_structs));
+        var(&mut out, client);
+        var(&mut out, u64::from(first));
+        let mut clock = first;
+        for _ in 0..n_structs {
+            let start = c.next;
+            let info = c.read_u8().map_err(decode_error)?;
+            if matches!(info, BLOCK_SKIP_REF_NUMBER | BLOCK_GC_REF_NUMBER) {
+                let len: u32 = c.read_var().map_err(decode_error)?;
+                clock = clock
+                    .checked_add(len)
+                    .ok_or_else(|| decode_error("horloge hors limites"))?;
+                out.extend(&update[start..c.next]);
+                continue;
+            }
+            let origin = info & HAS_ORIGIN != 0;
+            let right = info & HAS_RIGHT_ORIGIN != 0;
+            if origin {
+                read_id(&mut c).map_err(decode_error)?;
+            }
+            if right {
+                read_id(&mut c).map_err(decode_error)?;
+            }
+            if !origin && !right {
+                if c.read_var::<u32>().map_err(decode_error)? == 1 {
+                    c.read_string().map_err(decode_error)?;
+                } else {
+                    read_id(&mut c).map_err(decode_error)?;
+                }
+                if info & yrs::block::HAS_PARENT_SUB != 0 {
+                    c.read_string().map_err(decode_error)?;
+                }
+            }
+            let len = read_content(&mut c, info, false, JsonCount::AsRead)
+                .map_err(decode_error)?
+                .len;
+            if len > 0 && collected.contains(&(client, clock)) {
+                out.push(BLOCK_GC_REF_NUMBER);
+                var(&mut out, u64::from(len));
+            } else {
+                out.extend(&update[start..c.next]);
+            }
+            clock = clock
+                .checked_add(len)
+                .ok_or_else(|| decode_error("horloge hors limites"))?;
+        }
+    }
+    out.extend(&update[c.next..]);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

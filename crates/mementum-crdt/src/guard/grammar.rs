@@ -26,11 +26,20 @@
 //! | N2 | l'origine droite d'un élément **peut être son origine** : l'origine droite est retirée | `redoItem` : `left` et `right` suivis par `redone` jusqu'au même élément |
 //! | E3 | (filet de N1, et règle du journal) aucune entrée de map de plusieurs unités ne reste vivante : refusée d'un client, supprimée en entier à la relecture ; jugée sur l'élément tel que la mise à jour l'a écrit, pas sur les morceaux que yrs en garde (R818) | ce que N1 laisse : une chaîne ou un autre contenu de plusieurs unités sous une clé, qu'aucun client n'écrit (E1) |
 //! | L1 | (filet de N2) l'origine droite d'un élément n'est pas son origine | ce que N2 laisse : rien |
+//! | N3 | l'origine droite d'un élément **peut** être du client de son origine, plus basse, dans une même suite de blocs (chaque unité de l'origine droite à l'origine a pour origine l'unité d'avant, toutes ont la même origine droite, et l'unité d'avant l'origine droite tient avec elles) : l'origine droite est retirée (Ruling R825, module [`super::runs`]) | `redoItem` : les deux voisins suivis par `redone` jusqu'au même élément X de plusieurs unités, origine `X.lastId`, origine droite `X.id` ; `Item.getMissing` (et `missing_dependency` de yrs) prend le voisin de gauche avant de couper le bloc pour trouver celui de droite |
+//! | I1 | un élément sans origine a pour origine droite une unité sans origine (la tête de la liste) ; sinon il est ramassé (Ruling R828) | `typeListInsertGenericsAfter` : sans voisin de gauche, le voisin de droite est `parent._start`, que rien ne précède |
+//! | G | un élément dont un voisin est une plage ramassée et l'autre un élément est ramassé, comme Yjs le fait ; yrs le rangeait par l'autre voisin (Ruling R827) | `Item.getMissing` : `parent = null` dès que le voisin de gauche ou de droite est un `GC` |
+//! | P2 | l'origine et l'origine droite d'un élément sont dans le même parent ; sinon il est ramassé (Ruling R829) | un client insère entre deux voisins d'une même liste |
 //!
 //! N1 et N2 ont été trouvées par l'essai au hasard côté Yjs (`yjsAtRandom.test.ts`) : la
 //! lecture du code de Yjs avait d'abord donné « une valeur par entrée » et « l'origine droite
-//! suit l'origine », que Yjs dément après une annulation. **Une règle neuve se prouve contre
-//! cet essai avant d'être posée.**
+//! suit l'origine », que Yjs dément après une annulation. N3 aussi, par le tirage penché vers
+//! les annulations (`UNDO_HEAVY`). **Une règle neuve se prouve contre cet essai avant d'être
+//! posée.** N3, I1, G et P2 tiennent un invariant que l'essai hostile vérifie depuis le tour de
+//! correction 6 : **la page relue de son propre état est la page vivante** (ce qu'écrit la
+//! compaction, ce que reçoit un onglet qui ouvre la page) ; chacune ferme une façon dont la place
+//! d'un élément dépendait du découpage des blocs ou de l'ordre d'arrivée, chez yrs **comme chez
+//! Yjs** (N3 et I1), ou chez yrs seul (G).
 //!
 //! Une forme neuve que le client écrirait (un `Y.Array`, une `Y.Map` imbriquée, un type comme
 //! valeur d'attribut) demande d'élargir cette grammaire : sinon l'onglet est refusé.

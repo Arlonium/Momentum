@@ -108,6 +108,7 @@ use crate::{CrdtError, FRAGMENT, META};
 
 pub(crate) mod cut;
 mod grammar;
+pub(crate) mod runs;
 
 pub(crate) use grammar::{
     MANY_VALUED, MANY_VALUED_MADE, NOT_AS_WRITTEN, RIGHT_ORIGIN_IS_ORIGIN, json_made,
@@ -203,6 +204,8 @@ struct Insert {
     /// Son origine droite, telle que les octets la disent (son origine, ou à défaut son origine
     /// droite, est dans `parent` quand il ne nomme pas son parent).
     right: Option<Id>,
+    /// Son origine, telle que les octets la disent (Ruling R825).
+    origin: Option<Id>,
     /// L'octet d'en-tête porte la marque « entrée de map » (`parentSub`), que l'élément nomme sa
     /// clé ou non. Un client hostile la pose ou l'efface à son gré ; dans ce que yrs encode
     /// lui-même, elle dit si yrs tient l'élément pour une entrée de map (Ruling R723).
@@ -1514,6 +1517,7 @@ fn read_struct(
                     json: info & 0b1111 == BLOCK_ITEM_JSON_REF_NUMBER,
                     right_origin: right.is_some(),
                     right,
+                    origin,
                     sub_flag: info & HAS_PARENT_SUB != 0,
                     content: info & 0b1111,
                     right_is_origin: origin.is_some() && origin == right,
