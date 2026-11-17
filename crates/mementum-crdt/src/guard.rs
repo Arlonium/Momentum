@@ -106,7 +106,6 @@ use crate::blocknote::BLOCK_CONTAINER;
 use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
 
-#[path = "cut.rs"]
 pub(crate) mod cut;
 
 /// Le refus d'une mise à jour où un client paraît deux fois (Ruling R207) : reconnu à la
@@ -196,8 +195,8 @@ struct Insert {
     /// L'élément porte une origine droite : une entrée de map écrite par un client n'en a pas
     /// (Ruling R703).
     right_origin: bool,
-    /// Son origine et son origine droite, telles que les octets les disent.
-    origin: Option<Id>,
+    /// Son origine droite, telle que les octets la disent (son origine, ou à défaut son origine
+    /// droite, est dans `parent` quand il ne nomme pas son parent).
     right: Option<Id>,
     /// L'octet d'en-tête porte la marque « entrée de map » (`parentSub`), que l'élément nomme sa
     /// clé ou non. Un client hostile la pose ou l'efface à son gré ; dans ce que yrs encode
@@ -749,11 +748,12 @@ impl Shape {
             if s.id.1 + s.len <= floor.get(&ClientID::new(s.id.0)) {
                 return false;
             }
-            let parent = match i.parent {
-                Parent::Id(parent) => Some(parent),
-                _ => None,
+            // Son parent, ou le voisin qui le lui donne (son origine, à défaut son origine droite).
+            let placed_by = match i.parent {
+                Parent::Id(id) | Parent::Sibling(id) => Some(id),
+                Parent::Named(..) => None,
             };
-            [i.origin, i.right, parent]
+            [placed_by, i.right]
                 .into_iter()
                 .flatten()
                 .any(|id| !has(id))
@@ -1505,7 +1505,6 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     any: info & 0b1111 == BLOCK_ITEM_ANY_REF_NUMBER,
                     json: info & 0b1111 == BLOCK_ITEM_JSON_REF_NUMBER,
                     right_origin: right.is_some(),
-                    origin,
                     right,
                     sub_flag: info & HAS_PARENT_SUB != 0,
                 }),
