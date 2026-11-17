@@ -935,7 +935,11 @@ fn unsound_attrs(
 ) -> Vec<(BranchPtr, Arc<str>, String)> {
     let mut seen = HashSet::new();
     let mut unsound = Vec::new();
-    let mut suspects: Option<Vec<LinkSource>> = None;
+    // Les suspects, par la forme écrite de leur lien (`LinkSource` n'a ni ordre ni empreinte, et
+    // yrs ne rend pas l'identifiant d'un lien) : les chercher un à un pour chaque attribut
+    // coûtait le produit des deux, et la relecture d'une entrée aux blocs fautifs nombreux
+    // croissait comme son carré (Ruling R744).
+    let mut suspects: Option<HashSet<String>> = None;
     for branch in changed_themselves(txn).chain(more) {
         let TypeRef::XmlElement(tag) = branch.type_ref() else {
             continue;
@@ -950,9 +954,12 @@ fn unsound_attrs(
                     .not_attribute_values(floor)
                     .into_iter()
                     .map(|id| {
-                        LinkSource::new(
-                            StickyIndex::from_id(id, Assoc::Before),
-                            StickyIndex::from_id(id, Assoc::After),
+                        format!(
+                            "{:?}",
+                            LinkSource::new(
+                                StickyIndex::from_id(id, Assoc::Before),
+                                StickyIndex::from_id(id, Assoc::After),
+                            )
                         )
                     })
                     .collect()
@@ -960,7 +967,7 @@ fn unsound_attrs(
             let suspect = !suspects.is_empty()
                 && map
                     .link(txn, key)
-                    .is_some_and(|link| suspects.iter().any(|s| **link.source() == *s));
+                    .is_some_and(|link| suspects.contains(&format!("{:?}", **link.source())));
             if suspect || !attrs::sound(tag, Key::of(key), Value::of_out(&value)) {
                 unsound.push((branch, tag.clone(), key.to_string()));
             }
