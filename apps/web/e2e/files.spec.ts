@@ -687,3 +687,173 @@ test("a_right_withdrawn_during_an_upload_is_said_without_inviting_to_try_again",
   await expect(uploads(tom)).toHaveCount(0);
   expect((await refusals(tom).allTextContents()).join(" ")).not.toContain("Réessaie");
 });
+
+// Un fichier venu d'une autre page (Task C9, R249) : un bloc collé garde l'adresse de sa première
+// page ; l'éditeur fait recopier l'attache dans la page où l'on colle, puis récrit l'adresse du bloc.
+
+/** Ce que la copie du bloc de fichier cliqué met dans le presse-papiers, par type. */
+async function copyClicked(p: Page, target: Locator): Promise<Record<string, string>> {
+  await target.click();
+  return p.evaluate(() => {
+    const data = new DataTransfer();
+    document
+      .querySelector(".mm-editor .bn-editor")!
+      .dispatchEvent(new ClipboardEvent("copy", { clipboardData: data, bubbles: true, cancelable: true }));
+    return Object.fromEntries([...data.types].map((type) => [type, data.getData(type)]));
+  });
+}
+
+/** Colle `data` (par type) là où est le curseur, comme le presse-papiers. */
+async function pasteData(p: Page, data: Record<string, string>): Promise<void> {
+  await p.locator(".mm-editor .bn-editor").evaluate((editor, given) => {
+    const clipboardData = new DataTransfer();
+    for (const [type, value] of Object.entries(given)) clipboardData.setData(type, value);
+    editor.dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
+  }, data);
+}
+
+/** Les recopies d'attache parties de l'onglet. */
+function watchCopies(p: Page): string[] {
+  const sent: string[] = [];
+  p.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/files/copies")) sent.push(request.postData() ?? "");
+  });
+  return sent;
+}
+
+/** Une page privée de Mona qui porte une image, et une page d'équipe, vide, que Tom modifie aussi. */
+async function twoPages() {
+  const team = await ownerAndMember();
+  const first = await createPage(team.aliceApi, {
+    spaceId: team.space.id,
+    section: "private",
+    title: `Privée ${unique()}`,
+  });
+  const src = await upload(team.aliceApi, first.id, "photo.png", PNG);
+  await putMmd(team.aliceApi, first.id, `![](${src}) {name="photo.png"}\n`);
+  const shared = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Équipe ${unique()}` });
+  return { ...team, first, src, shared };
+}
+
+test("pasted_image_is_seen_by_someone_who_cannot_read_its_first_page", async ({ browser }) => {
+  const { alice, bruno, aliceApi, first, src, shared } = await twoPages();
+  // Mona copie l'image de sa page privée.
+  const source = await openPage(browser, first.id, alice);
+  await expectShown(images(source));
+  const clipboard = await copyClicked(source, images(source));
+  expect(Object.values(clipboard).join("\n")).toContain(src);
+
+  // Elle la colle dans la page d'équipe ; la recopie est retenue le temps du témoin.
+  const mona = await newUser(browser, alice);
+  const copies = watchCopies(mona);
+  let release!: () => void;
+  const held = new Promise<void>((done) => (release = done));
+  await mona.route(/\/files\/copies$/, async (route) => {
+    await held;
+    await route.continue();
+  });
+  await mona.goto(`/p/${shared.id}`);
+  await waitSynced(mona);
+  // Rien à l'ouverture de la page.
+  expect(copies).toEqual([]);
+  await firstBlock(mona).click();
+  await pasteData(mona, clipboard);
+  await expectShown(images(mona));
+  await expect.poll(() => copies.length).toBe(1);
+  expect(JSON.parse(copies[0])).toEqual({ pageId: first.id, fileId: src.split("/").pop() });
+
+  // Témoin (preuve 2) : tant que le bloc nomme le fichier de la page privée, Tom, qui ne la voit pas,
+  // ne reçoit rien : c'est le serveur qui décide.
+  const tom = await openPage(browser, shared.id, bruno);
+  await expect(images(tom)).toHaveCount(1);
+  expect(await images(tom).getAttribute("src")).toBe(src);
+  expect(await tom.evaluate(async (url) => (await fetch(url)).status, src)).toBe(404);
+  await expect
+    .poll(() => images(tom).evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth === 0))
+    .toBe(true);
+
+  // La recopie aboutit : l'adresse du bloc devient celle d'un fichier de la page d'équipe, et Tom voit l'image.
+  release();
+  await expect.poll(() => images(tom).getAttribute("src")).toContain(`/pages/${shared.id}/files/`);
+  await expectShown(images(tom));
+  await expectShown(images(mona));
+  expect(await images(mona).getAttribute("src")).toBe(await images(tom).getAttribute("src"));
+  expect(copies).toHaveLength(1);
+  await expect(refusals(mona)).toHaveCount(0);
+  // Le document ne nomme plus la page privée ; la page privée, elle, n'a pas changé.
+  const mmd = await getMmd(aliceApi, shared.id);
+  expect(mmd).toContain(`/api/v1/pages/${shared.id}/files/`);
+  expect(mmd).not.toContain(first.id);
+  expect(await getMmd(aliceApi, first.id)).toBe(`![](${src}) {name="photo.png"}\n`);
+  // Tom ne lit toujours pas le fichier de la page privée.
+  expect(await tom.evaluate(async (url) => (await fetch(url)).status, src)).toBe(404);
+});
+
+test("pasted_image_survives_the_deletion_of_its_first_page", async ({ browser }) => {
+  const { alice, bruno, aliceApi, first, shared } = await twoPages();
+  const source = await openPage(browser, first.id, alice);
+  await expectShown(images(source));
+  const clipboard = await copyClicked(source, images(source));
+  const mona = await openPage(browser, shared.id, alice);
+  await firstBlock(mona).click();
+  await pasteData(mona, clipboard);
+  await expect.poll(() => images(mona).getAttribute("src")).toContain(`/pages/${shared.id}/files/`);
+  const here = (await images(mona).getAttribute("src"))!;
+
+  // La première page est supprimée pour de bon.
+  await source.close();
+  expect((await aliceApi.post(`/api/v1/pages/${first.id}/trash`)).ok()).toBe(true);
+  expect((await aliceApi.delete(`/api/v1/pages/${first.id}`)).status()).toBe(204);
+
+  // Le fichier de la page d'équipe est toujours servi, à une page rouverte, pour Tom aussi.
+  const tom = await openPage(browser, shared.id, bruno);
+  await expectShown(images(tom));
+  expect(await images(tom).getAttribute("src")).toBe(here);
+  const served = await tom.evaluate(async (url) => {
+    const response = await fetch(url);
+    return { status: response.status, bytes: (await response.arrayBuffer()).byteLength };
+  }, here);
+  expect(served).toEqual({ status: 200, bytes: PNG.length });
+});
+
+test("a_pasted_file_of_a_page_one_cannot_read_stays_as_it_is_and_is_never_served", async ({ browser }) => {
+  // Tom modifie la page d'équipe, et ne voit pas la page privée de Mona. Il colle un bloc qui nomme le
+  // fichier de cette page (le presse-papiers lui vient d'ailleurs) : la recopie est refusée, d'une seule
+  // réponse, et son bloc garde l'adresse, que le serveur ne lui sert pas.
+  const { alice, bruno, aliceApi, first, src, shared } = await twoPages();
+  const source = await openPage(browser, first.id, alice);
+  await expectShown(images(source));
+  const clipboard = await copyClicked(source, images(source));
+  const tom = await newUser(browser, bruno);
+  const copies = watchCopies(tom);
+  const answers: number[] = [];
+  tom.on("response", (response) => {
+    if (response.url().endsWith("/files/copies")) answers.push(response.status());
+  });
+  await tom.goto(`/p/${shared.id}`);
+  await waitSynced(tom);
+  await firstBlock(tom).click();
+  await pasteData(tom, clipboard);
+  await expect.poll(() => answers).toEqual([422]);
+  await expect(images(tom)).toHaveCount(1);
+  expect(await images(tom).getAttribute("src")).toBe(src);
+  await expect
+    .poll(() => images(tom).evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth === 0))
+    .toBe(true);
+  expect(await tom.evaluate(async (url) => (await fetch(url)).status, src)).toBe(404);
+  // Rien n'est dit de plus, et rien n'a été attaché à la page d'équipe.
+  await expect(refusals(tom)).toHaveCount(0);
+  expect(copies).toHaveLength(1);
+  expect(await getMmd(aliceApi, shared.id)).toContain(src);
+  expect(await getMmd(aliceApi, shared.id)).not.toContain(`/pages/${shared.id}/files/`);
+
+  // Rouvrir la page, ou la lire sans la modifier, ne recopie rien : la recopie ne part qu'au collage.
+  const again = await newUser(browser, alice);
+  const reopened = watchCopies(again);
+  await again.goto(`/p/${shared.id}`);
+  await waitSynced(again);
+  // Barrière : Mona, qui lit la page privée, voit l'image, par l'adresse de sa première page.
+  await expectShown(images(again));
+  expect(await images(again).getAttribute("src")).toBe(src);
+  expect(reopened).toEqual([]);
+});
