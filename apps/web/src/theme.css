@@ -3453,7 +3453,11 @@ button.mm-reaction:hover {
 }
 
 /* Table des matières (Task C3) : les titres de la page, chacun à sa profondeur, en liens. Leur texte
-   vient du document : isolé, coupé sur sa ligne s'il est long. */
+   vient du document : isolé, coupé sur sa ligne s'il est long.
+   Les entrées sont des `li`, et le texte d'une table vide un `p`, dans l'éditeur : la feuille de
+   BlockNote, chargée après celle-ci avec le code de l'éditeur, y pose `margin: 0; padding: 0`
+   (`.bn-default-styles li`, spécificité 0,1,1). Nos règles sur ces éléments passent donc par deux
+   classes (0,2,0), sans `!important` (R763 ; `e2e/rich-styles.spec.ts`). */
 
 .mm-toc {
   width: 100%;
@@ -3467,19 +3471,19 @@ button.mm-reaction:hover {
   list-style: none;
 }
 
-.mm-toc-entry {
+.mm-toc .mm-toc-entry {
   margin: 0;
 }
 
-.mm-toc-level-2 {
+.mm-toc .mm-toc-level-2 {
   padding-left: 18px;
 }
 
-.mm-toc-level-3 {
+.mm-toc .mm-toc-level-3 {
   padding-left: 36px;
 }
 
-.mm-toc-level-4 {
+.mm-toc .mm-toc-level-4 {
   padding-left: 54px;
 }
 
@@ -3502,7 +3506,7 @@ button.mm-reaction:hover {
   color: var(--mm-text);
 }
 
-.mm-toc-empty {
+.mm-toc .mm-toc-empty {
   margin: 0;
   padding: 3px 6px;
   color: var(--mm-text-secondary);
