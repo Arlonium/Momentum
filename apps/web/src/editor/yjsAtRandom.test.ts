@@ -38,7 +38,7 @@ function random(seed: number): () => number {
 
 type Tab = { doc: Y.Doc; undo: Y.UndoManager; online: boolean; seen: Uint8Array; sent: Uint8Array[] };
 
-type Counts = { keyed: number; manyValued: number; manyValuedAlive: number; sameOrigins: number; updates: number };
+type Counts = { keyed: number; manyValued: number; manyValuedAlive: number; sameOrigins: number; placedByBlocks: number; updates: number };
 
 const KEYS = ["backgroundColor", "textColor", "textAlignment"] as const;
 const VALUES: Record<(typeof KEYS)[number], string[]> = {
@@ -57,6 +57,38 @@ type Stored = {
   content?: { constructor: { name: string } };
 };
 
+type Id = { client: number; clock: number };
+
+const sameId = (a: Id | null | undefined, b: Id | null | undefined): boolean => {
+  const [x, y] = [a ?? null, b ?? null];
+  return x === null || y === null ? x === y : x.client === y.client && x.clock === y.clock;
+};
+
+/**
+ * N3 (Ruling R825) : l'origine droite `right` est du client de l'origine `origin`, plus basse, et
+ * une même suite de blocs peut porter l'unité d'avant l'origine droite et l'origine (chacune a pour
+ * origine l'unité d'avant, toutes ont la même origine droite) : Yjs range alors l'élément selon le
+ * découpage de ses blocs. Lu sur les éléments que garde un document de Yjs.
+ */
+function placedByBlocks(clients: Map<number, Stored[]>, origin: Id, right: Id): boolean {
+  if (origin.client !== right.client || right.clock >= origin.clock || right.clock === 0) return false;
+  const structs = clients.get(origin.client);
+  if (structs === undefined) return false;
+  const at = (clock: number): Stored | undefined => structs.find((s) => s.id.clock <= clock && clock < s.id.clock + s.length);
+  let clock = origin.clock;
+  let rightOrigin: Id | null | undefined;
+  for (let step = 0; step < 64; step += 1) {
+    const s = at(clock);
+    if (s === undefined || s.content === undefined) return false;
+    if (rightOrigin !== undefined && !sameId(s.rightOrigin, rightOrigin)) return false;
+    rightOrigin = s.rightOrigin ?? null;
+    if (s.id.clock <= right.clock - 1) return true;
+    if (!sameId(s.origin, { client: origin.client, clock: s.id.clock - 1 })) return false;
+    clock = s.id.clock - 1;
+  }
+  return true;
+}
+
 /** Les règles de la grammaire, sur les éléments que garde un document de Yjs. */
 function judge(doc: Y.Doc, counts: Counts, what: string): void {
   const clients = (doc as unknown as { store: { clients: Map<number, Stored[]> } }).store.clients;
@@ -64,6 +96,11 @@ function judge(doc: Y.Doc, counts: Counts, what: string): void {
     for (const s of structs) {
       if (s.content === undefined) continue;
       const kind = s.content.constructor.name;
+      // N3 : une origine droite du client de l'origine, plus basse, dans une même suite de blocs
+      // que l'origine. Yjs l'écrit-il ? Compté (la garde récrit l'élément sans son origine droite).
+      if (s.origin != null && s.rightOrigin != null && placedByBlocks(clients, s.origin, s.rightOrigin)) {
+        counts.placedByBlocks += 1;
+      }
       // N2 : `redoItem` peut retrouver le même voisin des deux côtés : un élément dont l'origine
       // droite est son origine. La garde ne le refuse donc pas : le serveur retire l'origine
       // droite.
@@ -92,7 +129,29 @@ function judge(doc: Y.Doc, counts: Counts, what: string): void {
   }
 }
 
-function scene(seed: number, base: Uint8Array, counts: Counts): { received: Uint8Array[]; server: Y.Doc } {
+/**
+ * Les seuils cumulés (sur 100) du tirage d'un geste : frappe, effacement, marque, attribut, bloc
+ * ajouté, bloc supprimé, annuler, rétablir ; au-delà, la capture est coupée.
+ */
+type Weights = [number, number, number, number, number, number, number, number];
+
+/** Le tirage ordinaire. */
+const ORDINARY: Weights = [28, 38, 46, 70, 80, 85, 92, 96];
+
+/**
+ * Un tirage penché vers les annulations : moins d'attributs, plus de blocs supprimés, d'annuler et
+ * de rétablir. C'est lui qui a montré la forme N3 (Ruling R825), que le tirage ordinaire ne
+ * montrait pas en 12 000 scènes.
+ */
+const UNDO_HEAVY: Weights = [28, 38, 46, 50, 60, 70, 82, 96];
+
+/**
+ * Le tirage de l'essai élargi (`MEMENTUM_FUZZ_SEEDS`) : `MEMENTUM_FUZZ_WEIGHTS=undo` le penche
+ * vers les annulations ; les 150 scènes du dépôt gardent le tirage ordinaire.
+ */
+const LARGE: Weights = import.meta.env.MEMENTUM_FUZZ_WEIGHTS === "undo" ? UNDO_HEAVY : ORDINARY;
+
+function scene(seed: number, base: Uint8Array, counts: Counts, weights: Weights = ORDINARY): { received: Uint8Array[]; server: Y.Doc } {
   const next = random(seed);
   const below = (n: number): number => Math.floor(next() * n);
   const chance = (percent: number): boolean => next() * 100 < percent;
@@ -137,21 +196,22 @@ function scene(seed: number, base: Uint8Array, counts: Counts): { received: Uint
     const paragraph = container?.get(0) as Y.XmlElement | undefined;
     const text = paragraph?.get(0) as Y.XmlText | undefined;
     const roll = below(100);
-    if (roll < 28 && text instanceof Y.XmlText) {
+    const [typing, erasing, marking, attributes, adding, dropping, undoing, redoing] = weights;
+    if (roll < typing && text instanceof Y.XmlText) {
       const at = below(text.length + 1);
       text.insert(at, chance(15) ? "😀" : "abcdefgh".slice(below(4), 4 + below(4)));
-    } else if (roll < 38 && text instanceof Y.XmlText && text.length > 0) {
+    } else if (roll < erasing && text instanceof Y.XmlText && text.length > 0) {
       const at = below(text.length);
       text.delete(at, 1 + below(Math.min(3, text.length - at)));
-    } else if (roll < 46 && text instanceof Y.XmlText && text.length > 0) {
+    } else if (roll < marking && text instanceof Y.XmlText && text.length > 0) {
       const at = below(text.length);
       const mark = chance(50) ? "bold" : "italic";
       text.format(at, 1 + below(text.length - at), { [mark]: chance(70) ? {} : null });
-    } else if (roll < 70 && paragraph !== undefined) {
+    } else if (roll < attributes && paragraph !== undefined) {
       const key = KEYS[below(KEYS.length)];
       if (chance(20)) paragraph.removeAttribute(key);
       else paragraph.setAttribute(key, VALUES[key][below(VALUES[key].length)]);
-    } else if (roll < 80) {
+    } else if (roll < adding) {
       blocks += 1;
       const added = new Y.XmlElement("blockContainer");
       added.setAttribute("id", `0196f0a0-0000-7000-8000-${String(seed * 1000 + blocks).padStart(12, "0")}`);
@@ -164,11 +224,11 @@ function scene(seed: number, base: Uint8Array, counts: Counts): { received: Uint
       added.insert(0, [p]);
       g.insert(below(containers.length + 1), [added]);
       t.insert(0, "bloc");
-    } else if (roll < 85 && containers.length > 1) {
+    } else if (roll < dropping && containers.length > 1) {
       g.delete(below(containers.length), 1);
-    } else if (roll < 92) {
+    } else if (roll < undoing) {
       tab.undo.undo();
-    } else if (roll < 96) {
+    } else if (roll < redoing) {
       tab.undo.redo();
     } else {
       tab.undo.stopCapturing();
@@ -220,7 +280,30 @@ const hex = (bytes: Uint8Array): string => [...bytes].map((b) => b.toString(16).
 // sont acceptées, et ce que la page relaie ramène un vrai Yjs à la même page.
 const REDO_SCENES = [3192, 3851, 8832];
 
+// Les scènes où un onglet rétablit un élément dont les deux voisins mènent, par `redone`, au même
+// élément X de plusieurs unités : `redoItem` écrit l'origine `X.lastId` et l'origine droite `X.id`,
+// et quand la première unité de X a pour origine l'unité d'avant (avec la même origine droite),
+// Yjs range l'élément selon le découpage de ses blocs (N3, Ruling R825). Trouvées par le tirage
+// penché vers les annulations (`UNDO_HEAVY`, 20 000 scènes : trois) ; le tirage ordinaire n'en
+// montrait aucune en 12 000. Gardées dans `redo-blocks.json`, que
+// `crates/mementum-crdt/tests/yjs_updates.rs` donne à une vraie page : elles sont acceptées (la
+// page récrit l'élément sans son origine droite), et la page relue de son état est la page
+// vivante.
+const REDO_BLOCK_SCENES = [4376, 8403, 12763];
+
 type MaybeId = { client: number; clock: number } | null;
+
+/** Les rangs des mises à jour qui portent un élément dont l'origine droite est du client de son
+ * origine, plus basse : les candidats de N3. */
+function backwardRightOrigins(received: Uint8Array[]): number[] {
+  const ranks: number[] = [];
+  received.forEach((update, n) => {
+    const { structs } = Y.decodeUpdate(update) as unknown as { structs: { origin?: MaybeId; rightOrigin?: MaybeId }[] };
+    const backward = (o: MaybeId, r: MaybeId): boolean => o !== null && r !== null && o.client === r.client && r.clock < o.clock;
+    if (structs.some((s) => backward(s.origin ?? null, s.rightOrigin ?? null))) ranks.push(n);
+  });
+  return ranks;
+}
 
 /** Les rangs des mises à jour qui portent un élément dont l'origine droite est son origine. */
 function sameOriginUpdates(received: Uint8Array[]): number[] {
@@ -240,22 +323,31 @@ test("ce que Yjs écrit au hasard suit la grammaire d'un client", async () => {
   const dir = path.join(path.dirname(url.fileURLToPath(import.meta.url)), "../../../..", "crates/mementum-crdt/tests/fixtures/yjs_updates");
   const base = Uint8Array.from(JSON.parse(new TextDecoder().decode(await fs.readFile(path.join(dir, "base.json")))) as number[]);
   const asked = Number(import.meta.env.MEMENTUM_FUZZ_SEEDS ?? 0);
-  const counts: Counts = { keyed: 0, manyValued: 0, manyValuedAlive: 0, sameOrigins: 0, updates: 0 };
+  const counts: Counts = { keyed: 0, manyValued: 0, manyValuedAlive: 0, sameOrigins: 0, placedByBlocks: 0, updates: 0 };
   const scenes: string[][] = [];
-  for (let seed = 1; seed <= Math.max(SCENES, asked); seed += 1) {
+  const blocksSeeds: number[] = [];
+  for (let seed = 1; seed <= SCENES; seed += 1) {
+    const before = counts.placedByBlocks;
     scenes.push(scene(seed, base, counts).received.map(hex));
-    if (seed === SCENES) {
-      // Ce que l'essai doit avoir vu pour valoir quelque chose.
-      expect(counts.keyed).toBeGreaterThan(2_000);
-      expect(counts.manyValued).toBeGreaterThan(5);
-    }
+    if (counts.placedByBlocks > before) blocksSeeds.push(seed);
   }
-  const written = `${JSON.stringify(scenes.slice(0, SCENES))}\n`;
+  // Ce que l'essai doit avoir vu pour valoir quelque chose.
+  expect(counts.keyed).toBeGreaterThan(2_000);
+  expect(counts.manyValued).toBeGreaterThan(5);
+  // L'essai élargi : les scènes du dépôt, puis les suivantes, ou toutes tirées de nouveau si son
+  // tirage n'est pas l'ordinaire.
+  const large: string[][] = LARGE === ORDINARY ? [...scenes] : [];
+  for (let seed = large.length + 1; seed <= asked; seed += 1) {
+    const before = counts.placedByBlocks;
+    large.push(scene(seed, base, counts, LARGE).received.map(hex));
+    if (counts.placedByBlocks > before) blocksSeeds.push(seed);
+  }
+  const written = `${JSON.stringify(scenes)}\n`;
   const file = path.join(dir, "random.json");
   if (import.meta.env.EXPORT_FIXTURES) await fs.writeFile(file, written);
   else expect(new TextDecoder().decode(await fs.readFile(file)) === written, `${file} (EXPORT_FIXTURES=1 le réécrit)`).toBe(true);
-  if (asked > SCENES) await fs.writeFile(path.join(dir, "random-large.json"), `${JSON.stringify(scenes)}\n`);
-  console.log(`ESSAI Yjs : ${scenes.length} scènes, ${counts.updates} mises à jour, ${counts.keyed} entrées de map dont ${counts.manyValued} de plusieurs valeurs (${counts.manyValuedAlive} vivantes), ${counts.sameOrigins} éléments d'origine droite leur origine`);
+  if (asked > SCENES) await fs.writeFile(path.join(dir, "random-large.json"), `${JSON.stringify(large)}\n`);
+  console.log(`ESSAI Yjs : ${Math.max(scenes.length, large.length)} scènes, ${counts.updates} mises à jour, ${counts.keyed} entrées de map dont ${counts.manyValued} de plusieurs valeurs (${counts.manyValuedAlive} vivantes), ${counts.sameOrigins} éléments d'origine droite leur origine, ${counts.placedByBlocks} rangés selon le découpage des blocs (N3, scènes ${blocksSeeds.slice(0, 20).join(", ")})`);
   // Les scènes d'un rétablissement qui écrit N2 : chacune, ses mises à jour, et les rangs de
   // celles qui portent la forme.
   const redo = REDO_SCENES.map((seed) => {
@@ -268,6 +360,18 @@ test("ce que Yjs écrit au hasard suit la grammaire d'un client", async () => {
   const redoFile = path.join(dir, "redo.json");
   if (import.meta.env.EXPORT_FIXTURES) await fs.writeFile(redoFile, redoWritten);
   else expect(new TextDecoder().decode(await fs.readFile(redoFile)) === redoWritten, `${redoFile} (EXPORT_FIXTURES=1 le réécrit)`).toBe(true);
+  // Les scènes d'un rétablissement qui écrit N3 : chacune, ses mises à jour, et les rangs de
+  // celles qui portent une origine droite du client de l'origine, plus basse.
+  const blocks = REDO_BLOCK_SCENES.map((seed) => {
+    const before = counts.placedByBlocks;
+    const { received } = scene(seed, base, counts, UNDO_HEAVY);
+    expect(counts.placedByBlocks, `scène ${seed} : plus d'élément rangé selon le découpage des blocs`).toBeGreaterThan(before);
+    return [seed, received.map(hex), backwardRightOrigins(received)];
+  });
+  const blocksWritten = `${JSON.stringify(blocks)}\n`;
+  const blocksFile = path.join(dir, "redo-blocks.json");
+  if (import.meta.env.EXPORT_FIXTURES) await fs.writeFile(blocksFile, blocksWritten);
+  else expect(new TextDecoder().decode(await fs.readFile(blocksFile)) === blocksWritten, `${blocksFile} (EXPORT_FIXTURES=1 le réécrit)`).toBe(true);
 }, 600_000);
 
 // Ce que la page relaie de ces scènes (`random-relayed.json`, écrit par
@@ -288,11 +392,14 @@ test("ce que la page relaie mène un vrai Yjs à la page que Yjs aurait lue", as
   const relayed = (await read(large ? "random-relayed-large.json" : "random-relayed.json")) as (string[] | null)[];
   expect(relayed.length).toBeGreaterThanOrEqual(SCENES);
   const unhex = (text: string): Uint8Array => Uint8Array.from(text.match(/../g) ?? [], (pair) => parseInt(pair, 16));
-  const counts: Counts = { keyed: 0, manyValued: 0, manyValuedAlive: 0, sameOrigins: 0, updates: 0 };
+  const counts: Counts = { keyed: 0, manyValued: 0, manyValuedAlive: 0, sameOrigins: 0, placedByBlocks: 0, updates: 0 };
   let compared = 0;
   const apart: number[] = [];
+  // Les scènes où le serveur Yjs vivant ne lit pas ce qu'un Yjs neuf lit de son état : Yjs lui-même
+  // range un élément de la forme N3 selon le découpage de ses blocs (Ruling R825).
+  const apartInYjs: number[] = [];
   relayed.forEach((entries, n) => {
-    const { server } = scene(n + 1, base, counts);
+    const { server } = scene(n + 1, base, counts, large ? LARGE : ORDINARY);
     if (entries === null) return;
     const browser = new Y.Doc();
     Y.applyUpdate(browser, base);
@@ -301,10 +408,17 @@ test("ce que la page relaie mène un vrai Yjs à la page que Yjs aurait lue", as
     expect(store.pendingStructs, `scène ${n + 1} : des éléments restent en attente`).toBe(null);
     expect(store.pendingDs, `scène ${n + 1} : des suppressions restent en attente`).toBe(null);
     compared += 1;
-    if (browser.getXmlFragment("document-store").toString() !== server.getXmlFragment("document-store").toString()) apart.push(n + 1);
+    const reading = (doc: Y.Doc): string => doc.getXmlFragment("document-store").toString();
+    if (reading(browser) === reading(server)) return;
+    // Le navigateur doit lire la page du serveur Yjs : celle de son état, si le serveur Yjs
+    // vivant ne la lit pas lui-même (N3).
+    const fresh = new Y.Doc();
+    Y.applyUpdate(fresh, Y.encodeStateAsUpdate(server));
+    if (reading(server) !== reading(fresh)) apartInYjs.push(n + 1);
+    if (reading(browser) !== reading(fresh)) apart.push(n + 1);
   });
   expect(compared).toBeGreaterThan(relayed.length / 2);
-  console.log(`ESSAI Yjs : ${compared} scènes relayées relues par un vrai Yjs, ${apart.length} écarts ; ${counts.manyValuedAlive} entrées de plusieurs valeurs vivantes, ${counts.sameOrigins} origines droites égales à l'origine`);
+  console.log(`ESSAI Yjs : ${compared} scènes relayées relues par un vrai Yjs, ${apart.length} écarts ; ${counts.manyValuedAlive} entrées de plusieurs valeurs vivantes, ${counts.sameOrigins} origines droites égales à l'origine ; ${apartInYjs.length} scènes où Yjs vivant ne lit pas son propre état (${apartInYjs.slice(0, 10).join(", ")})`);
   expect(apart, "scènes où le navigateur ne lit pas la page du serveur Yjs").toEqual([]);
   // Les scènes d'un rétablissement qui écrit N2 (`redo-relayed.json`, dans l'ordre de
   // `REDO_SCENES`) : chacune est relayée, et lue par un vrai Yjs comme le serveur Yjs la lit.
@@ -322,4 +436,31 @@ test("ce que la page relaie mène un vrai Yjs à la page que Yjs aurait lue", as
     expect(store.pendingDs, `scène ${seed} : des suppressions restent en attente`).toBe(null);
     expect(browser.getXmlFragment("document-store").toString(), `scène ${seed}`).toBe(server.getXmlFragment("document-store").toString());
   });
+  // Les scènes d'un rétablissement qui écrit N3 (`redo-blocks-relayed.json`, dans l'ordre de
+  // `REDO_BLOCK_SCENES`) : chacune est relayée, et lue par un vrai Yjs comme la lit un Yjs neuf qui
+  // ouvre la page du serveur Yjs (son état). Pas comme le serveur Yjs vivant : sur cette forme, Yjs
+  // lui-même ne lit pas pareil le document vivant et son état relu (scène 8403 : « bgc » vivant,
+  // « bcg » relu), et c'est l'écart que la page ferme (constat I-7.1, Ruling R825).
+  const blocksRelayed = (await read("redo-blocks-relayed.json")) as (string[] | null)[];
+  expect(blocksRelayed.length).toBe(REDO_BLOCK_SCENES.length);
+  const blocksApartInYjs: number[] = [];
+  REDO_BLOCK_SCENES.forEach((seed, n) => {
+    const { server } = scene(seed, base, counts, UNDO_HEAVY);
+    const entries = blocksRelayed[n];
+    expect(entries, `scène ${seed} : le serveur y a écrit lui-même`).not.toBe(null);
+    const browser = new Y.Doc();
+    Y.applyUpdate(browser, base);
+    for (const entry of entries ?? []) Y.applyUpdate(browser, unhex(entry));
+    const store = (browser as unknown as { store: { pendingStructs: unknown; pendingDs: unknown } }).store;
+    expect(store.pendingStructs, `scène ${seed} : des éléments restent en attente`).toBe(null);
+    expect(store.pendingDs, `scène ${seed} : des suppressions restent en attente`).toBe(null);
+    const fresh = new Y.Doc();
+    Y.applyUpdate(fresh, Y.encodeStateAsUpdate(server));
+    const reading = (doc: Y.Doc): string => doc.getXmlFragment("document-store").toString();
+    if (reading(server) !== reading(fresh)) blocksApartInYjs.push(seed);
+    expect(reading(browser), `scène ${seed}`).toBe(reading(fresh));
+  });
+  // Ce que la garde ferme : au moins une scène où le vrai Yjs ne relit pas son propre état comme
+  // il le vit.
+  expect(blocksApartInYjs, "plus de scène où Yjs vivant et Yjs relu divergent").not.toEqual([]);
 }, 600_000);
