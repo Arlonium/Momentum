@@ -24,7 +24,7 @@
 //! | P1 | yrs range l'élément comme ses octets le disent : entrée de map si, et seulement si, il en porte la marque | `Item.write` : `parentSub === null ? 0 : BIT6` |
 //! | N1 | une entrée de map `Any` **peut porter plusieurs valeurs**, vivante ou non : récrite en autant d'entrées d'une valeur, chacune d'origine la précédente | `Item.mergeWith` fond les entrées supprimées d'une clé que l'`UndoManager` garde (`keepItem`) ; `redoItem` (`structs/Item.js`) recopie le contenu fondu (`item.content.copy()`) dans une entrée vivante |
 //! | N2 | l'origine droite d'un élément **peut être son origine** : l'origine droite est retirée | `redoItem` : `left` et `right` suivis par `redone` jusqu'au même élément |
-//! | E3 | (filet de N1, et règle du journal) aucune entrée de map de plusieurs unités ne reste vivante : refusée d'un client, supprimée en entier à la relecture | ce que N1 laisse : une chaîne ou un autre contenu de plusieurs unités sous une clé, qu'aucun client n'écrit (E1) |
+//! | E3 | (filet de N1, et règle du journal) aucune entrée de map de plusieurs unités ne reste vivante : refusée d'un client, supprimée en entier à la relecture ; jugée sur l'élément tel que la mise à jour l'a écrit, pas sur les morceaux que yrs en garde (R818) | ce que N1 laisse : une chaîne ou un autre contenu de plusieurs unités sous une clé, qu'aucun client n'écrit (E1) |
 //! | L1 | (filet de N2) l'origine droite d'un élément n'est pas son origine | ce que N2 laisse : rien |
 //!
 //! N1 et N2 ont été trouvées par l'essai au hasard côté Yjs (`yjsAtRandom.test.ts`) : la

@@ -1209,6 +1209,28 @@ fn a_json_content_read_from_the_journal_leaves_a_readable_state() {
     assert_eq!(replay_apart("min-j72782", true), Ok(()));
 }
 
+/// Ruling R824 (le texte pour yrs, R813) : yrs 0.28.1 ne relit pas le contenu JSON qu'il écrit
+/// (`ItemContent::encode` : `len` chaînes ; `decode` : `len + 1`). Sur yrs seul : un texte racine,
+/// un contenu JSON d'une valeur écrit comme yrs le lit (`len` à 0), puis l'état encodé, illisible.
+/// Vert tant que le défaut est là ; rouge le jour où yrs le corrige : la suppression de R815 et la
+/// lecture `JsonCount` de la garde seront alors à revoir.
+#[test]
+fn yrs_does_not_read_back_the_json_it_writes() {
+    let doc = Doc::new();
+    doc.get_or_insert_text("t");
+    let written = [1, 1, 1, 0, 2, 1, 1, b't', 0, 3, b'"', b'a', b'"', 0];
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(&written).expect("yrs lit ce JSON"))
+        .expect("yrs l'intègre");
+    let state = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    assert!(
+        Update::decode_v1(&state).is_err(),
+        "yrs relit l'état qu'il encode : {state:?}"
+    );
+}
+
 /// Ruling R815 : le contenu JSON qu'une entrée du journal intègre est supprimé dans la transaction
 /// qui l'intègre (le ramasse-miettes en fait un contenu supprimé). L'état de la page se relit par
 /// un yrs neuf, la page se recharge de son propre état et de son journal, et la version qu'on en
