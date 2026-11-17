@@ -22,7 +22,9 @@ import {
   openPage,
   ownerAndMember,
   putMmd,
+  READ_ONLY_BANNER,
   readerBanner,
+  serverSchemaBumped,
   setPageLevel,
   sidebarOf,
   spaceSwitcher,
@@ -1230,4 +1232,33 @@ test("a_block_copied_before_a_logout_is_no_longer_attached_and_no_secret_outlive
   await expect(notes(mona)).toHaveCount(0);
   expect(await images(mona).getAttribute("src")).toBe(src);
   expect(await leakedTo(brunoApi, shared.id)).toBe(0);
+});
+
+test("an_upload_cut_by_a_new_version_of_the_server_says_to_reload_not_to_try_again", async ({ browser }) => {
+  // M1 (relecture finale de la partie B, R761) : le serveur est mis à jour pendant un envoi. L'onglet
+  // passe en lecture seule pour de bon (R35) : il n'a plus de quoi réessayer.
+  const api = await apiAs();
+  const page = await createPage(api, { title: `Schéma ${unique()}` });
+  const p = await openPage(browser, page.id);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let asked!: () => void;
+  const sent = new Promise<void>((resolve) => (asked = resolve));
+  await p.route(/\/files\?name=/, async (route) => {
+    asked();
+    await held;
+    await route.abort();
+  });
+  await drop(p, firstBlock(p), { name: "photo.png", bytes: PNG, type: "image/png" });
+  await sent;
+  await serverSchemaBumped(p);
+  // Une reconnexion : la vérification d'avant la connexion relit le schéma.
+  await p.evaluate(() => (window as unknown as { __mementum: { provider: { ws: WebSocket } } }).__mementum.provider.ws.close());
+  await expect(p.getByText(READ_ONLY_BANNER)).toBeVisible({ timeout: 20_000 });
+  release();
+  await expect(refusals(p)).toHaveText(
+    [/^.?photo\.png.? n'a pas été envoyé : Mementum a été mis à jour\. Recharge la page pour l'envoyer\.$/],
+    { timeout: 20_000 },
+  );
+  await expect(p.locator(".mm-editor")).toHaveAttribute("data-editable", "false");
 });
