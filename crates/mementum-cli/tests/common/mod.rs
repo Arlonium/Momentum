@@ -208,8 +208,9 @@ pub fn lot1_database(db: &Path) {
 /// Écrit dans `db` une base de la partie A du lot 3 telle qu'un binaire
 /// intermédiaire la laisse : les migrations `0001` à `0003` lancées par sqlx,
 /// mais la somme de la migration `modified` différente de celle de son fichier
-/// (le binaire en avait une autre version). Les connexions sont fermées au
-/// retour.
+/// (le binaire en avait une autre version). La base existait avant lui : il
+/// n'a appliqué que les migrations à partir de `modified`, trois jours après
+/// les autres. Les connexions sont fermées au retour.
 pub fn intermediate_database(db: &Path, modified: i64) {
     use sqlx::sqlite::{
         SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
@@ -252,6 +253,14 @@ pub fn intermediate_database(db: &Path, modified: i64) {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query(
+            "UPDATE _sqlx_migrations SET installed_on = \
+             CASE WHEN version < ? THEN '2026-11-10 09:00:00' ELSE '2026-11-13 08:00:00' END",
+        )
+        .bind(modified)
+        .execute(&pool)
+        .await
+        .unwrap();
         pool.close().await;
     });
 }

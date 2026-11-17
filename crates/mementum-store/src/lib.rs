@@ -143,10 +143,10 @@ pub enum StoreError {
     /// Un plafond des commentaires est atteint (Ruling R204), vérifié dans la transaction qui
     /// écrirait : rien n'est écrit.
     CommentLimit(CommentLimit),
-    /// À l'ouverture : la base porte une migration que ce binaire ne peut pas suivre (inconnue, ou
-    /// d'une autre version), refusée avant toute copie, toute migration et toute connexion qui
-    /// écrit (Rulings R840, R845). Rien n'a été écrit. Son affichage est tout le message, sans
-    /// source.
+    /// À l'ouverture : la base porte une migration que ce binaire ne peut pas suivre (inconnue,
+    /// d'une autre version, ou notée inachevée), refusée avant toute copie, toute migration et
+    /// toute connexion qui écrit (Rulings R840, R845, R846). Rien n'a été écrit. Son affichage est
+    /// tout le message, sans source.
     Migration(MigrationRefusal),
     /// Erreur de la base.
     Sqlx(sqlx::Error),
@@ -270,9 +270,9 @@ impl Store {
     /// copie déjà rangée n'est jamais écrasée : si l'une d'elles est identique à la nouvelle, elle
     /// suffit ; sinon, la nouvelle prend le nom sans date s'il est libre, ou un nom daté. Si la
     /// copie échoue, l'ouverture échoue, avant toute migration. [`Store::backup`] dit ce qui a été
-    /// fait. Une base qui porte déjà une migration que ce binaire ne connaît pas, ou d'une autre
-    /// version que la sienne, est refusée avant toute copie et avant toute connexion qui écrit
-    /// ([`StoreError::Migration`]).
+    /// fait. Une base qui porte déjà une migration que ce binaire ne connaît pas, d'une autre
+    /// version que la sienne, ou notée inachevée, est refusée avant toute copie et avant toute
+    /// connexion qui écrit ([`StoreError::Migration`]).
     pub async fn open(path: &Path) -> Result<Store, StoreError> {
         Store::open_with(path, StoreOptions::default()).await
     }

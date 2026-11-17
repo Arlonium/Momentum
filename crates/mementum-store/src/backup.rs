@@ -6,11 +6,12 @@
 //!
 //! Avant toute copie, et avant même la connexion qui écrit (Ruling R845 : elle pose le mode WAL,
 //! ce qui récrirait l'en-tête d'une copie remise en place), les migrations que la base porte déjà
-//! sont comparées à celles du binaire (Ruling R840) : une migration que le binaire ne connaît pas
-//! (une version plus récente a ouvert la base), ou dont la somme diffère (un binaire intermédiaire
-//! d'un lot l'a appliquée), fait refuser la base telle quelle, sans copie ([`MigrationRefusal`]) ;
-//! le refus nomme la copie à reprendre. `Migrator::run` la refuserait aussi, mais après la copie,
-//! qui porterait alors un état refusé, à côté de la bonne.
+//! sont comparées à celles du binaire (Rulings R840, R846) : une migration notée inachevée, une
+//! migration que le binaire ne connaît pas (une version plus récente a ouvert la base), ou dont la
+//! somme diffère (un binaire intermédiaire d'un lot l'a appliquée) fait refuser la base telle
+//! quelle, sans copie ([`MigrationRefusal`]) ; le refus nomme la copie à reprendre, ou dit qu'aucune
+//! ne s'ouvrira (une base créée par un binaire intermédiaire, Ruling R848). `Migrator::run` la
+//! refuserait aussi, mais après la copie, qui porterait alors un état refusé, à côté de la bonne.
 //!
 //! Tant qu'une migration est en attente, chaque ouverture écrit une copie fraîche sous un nom
 //! temporaire (`<copie>.partiel`), la force sur le disque, puis la range (Ruling R72) :
@@ -85,34 +86,42 @@ pub struct MigrationRefusal {
     /// Ce qui ne va pas avec cette migration.
     pub mismatch: MigrationMismatch,
     /// La version de la migration en cause : la première, dans l'ordre où `Migrator::run` les
-    /// vérifie (une migration inconnue d'abord, puis la première somme qui diffère).
+    /// vérifie (une migration notée inachevée d'abord, puis une migration inconnue, puis la
+    /// première somme qui diffère).
     pub version: i64,
-    /// La copie à reprendre, si une est à côté de la base.
+    /// La copie à reprendre, si une est à côté de la base ; jamais pour une base qu'un binaire
+    /// intermédiaire a créée (`Modified { created: true }`).
     pub resume: Option<ResumeCopy>,
 }
 
 /// Pourquoi une migration déjà appliquée ne peut pas être suivie.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrationMismatch {
+    /// Sa ligne de `_sqlx_migrations` la dit inachevée (`success` à faux) : sqlx ne l'écrit
+    /// jamais pour SQLite, un autre outil a touché à cette table (Ruling R846).
+    Unfinished,
     /// Sa somme, dans `_sqlx_migrations`, n'est pas celle du fichier de ce binaire : un autre
     /// binaire, qui en avait une autre version, l'a appliquée (un binaire intermédiaire d'un lot,
-    /// Rulings R53, R139, R243).
-    Modified,
+    /// Rulings R53, R139, R243). `created` : il a créé la base, en lui appliquant ensemble toutes
+    /// les migrations jusqu'à celle-ci (Ruling R848) ; aucune copie de cette base n'est d'avant lui.
+    Modified { created: bool },
     /// Ce binaire ne la connaît pas : une version plus récente l'a appliquée.
     Unknown,
 }
 
 /// La copie que nomme un refus : parmi les copies rangées d'avant la migration en cause, ou d'avant
-/// une migration plus ancienne, celles de la plus récente de ces migrations, et parmi elles la plus
-/// récemment écrite (date de modification du fichier). Une copie d'avant une migration plus
-/// récente porte la migration refusée : elle n'est jamais nommée.
+/// une migration plus ancienne, et que ce binaire ne refuserait pas elles-mêmes, celles de la plus
+/// récente de ces migrations, et parmi elles la plus récemment écrite (date de modification du
+/// fichier, puis, à date égale, ce que dit le nom, Ruling R847). Une copie d'avant une migration
+/// plus récente porte la migration refusée : elle n'est jamais nommée.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResumeCopy {
     /// Le fichier.
     pub path: PathBuf,
     /// La migration d'avant laquelle elle a été écrite.
     pub before: i64,
-    /// Le nombre de copies rangées d'avant cette migration, elle comprise.
+    /// Le nombre de copies rangées d'avant cette migration, elle comprise, hors de celles que ce
+    /// binaire refuserait.
     pub copies: usize,
 }
 
@@ -120,7 +129,13 @@ impl fmt::Display for MigrationRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let version = self.version;
         match self.mismatch {
-            MigrationMismatch::Modified => write!(
+            MigrationMismatch::Unfinished => write!(
+                f,
+                "la migration {version:04} de cette base est notée inachevée dans \
+                 `_sqlx_migrations` (`success` à faux), ce que Mementum n'écrit jamais : un \
+                 autre outil a touché à cette table."
+            )?,
+            MigrationMismatch::Modified { .. } => write!(
                 f,
                 "la migration {version:04} de cette base n'est pas celle de ce binaire : un \
                  binaire intermédiaire, qui en avait une autre version, l'a appliquée."
@@ -133,7 +148,18 @@ impl fmt::Display for MigrationRefusal {
         }
         f.write_str(" La base n'a pas été modifiée, et aucune copie n'a été écrite. ")?;
         match (self.mismatch, &self.resume) {
-            (MigrationMismatch::Modified, None) => f.write_str(
+            (MigrationMismatch::Modified { created: true }, _) => write!(
+                f,
+                "Ce binaire intermédiaire a créé la base, qui a reçu de lui toutes ses migrations \
+                 jusqu'à la {version:04} : aucune copie ni sauvegarde d'elle ne s'ouvrira avec ce \
+                 binaire-ci. Elle se rouvre avec le binaire qui l'a créée ; avec celui-ci, repars \
+                 d'une base neuve."
+            )?,
+            (MigrationMismatch::Unfinished, None) => f.write_str(
+                "Aucune copie d'avant cette migration, ni d'avant une plus ancienne, n'est à côté \
+                 de la base : reprends une sauvegarde faite avant que cette ligne soit écrite.",
+            )?,
+            (MigrationMismatch::Modified { created: false }, None) => f.write_str(
                 "Aucune copie d'avant cette migration, ni d'avant une plus ancienne, n'est à côté \
                  de la base : reprends une sauvegarde faite avant le passage du binaire \
                  intermédiaire.",
@@ -147,7 +173,7 @@ impl fmt::Display for MigrationRefusal {
                     MigrationMismatch::Unknown => {
                         "Lance cette version plus récente ; pour revenir à celle-ci, reprends "
                     }
-                    MigrationMismatch::Modified => "Reprends ",
+                    _ => "Reprends ",
                 })?;
                 if copy.copies > 1 {
                     write!(f, "la plus récente des {} copies", copy.copies)?;
@@ -172,10 +198,9 @@ impl fmt::Display for MigrationRefusal {
 /// l'état d'avant.
 ///
 /// Rien n'est copié pour une base neuve (sans table `_sqlx_migrations`), ni pour une base à jour.
-/// Une base qui porte une migration que `migrator` ne connaît pas, ou dont la somme diffère, est
-/// refusée avant toute copie : [`StoreError::Migration`] (Ruling R840). [`refuse_before_writing`]
-/// l'a déjà refusée avant que `pool` soit ouvert ; ce second jugement ne refuse qu'une base changée
-/// entre les deux.
+/// Une base qui porte une migration que `migrator` ne peut pas suivre est refusée avant toute
+/// copie : [`StoreError::Migration`] (Ruling R840). [`refuse_before_writing`] l'a déjà refusée
+/// avant que `pool` soit ouvert ; ce second jugement ne refuse qu'une base changée entre les deux.
 pub(crate) async fn before_migrations(
     pool: &SqlitePool,
     db: &Path,
@@ -567,19 +592,12 @@ pub(crate) async fn refuse_before_writing(
     checked
 }
 
-/// La version de la première migration de `migrator` que la base n'a pas encore, comme
-/// `Migrator::run` les voit (toute ligne de `_sqlx_migrations` compte pour appliquée).
-///
-/// Une base que `Migrator::run` refuserait pour une migration déjà appliquée est refusée ici,
-/// avant toute copie, dans le même ordre que lui (Ruling R840) : d'abord une migration que
-/// `migrator` ne connaît pas (`VersionMissing` de sqlx), puis, dans l'ordre des versions, une
-/// migration dont la somme diffère de celle de son fichier (`VersionMismatch`). Rien n'est écrit :
-/// cette fonction ne fait que lire.
-async fn first_pending(
-    pool: &SqlitePool,
-    db: &Path,
-    migrator: &Migrator,
-) -> Result<Option<i64>, StoreError> {
+/// Une ligne de `_sqlx_migrations` : la version, la somme, et si la migration est notée réussie.
+type Applied = (i64, Vec<u8>, bool);
+
+/// Les lignes de `_sqlx_migrations` de la base de `pool`, par version ; `None` si la base n'a pas
+/// cette table (une base neuve). Ne fait que lire.
+async fn applied(pool: &SqlitePool) -> Result<Option<Vec<Applied>>, sqlx::Error> {
     let tracked: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
     )
@@ -588,48 +606,120 @@ async fn first_pending(
     if !tracked {
         return Ok(None);
     }
-    let applied: Vec<(i64, Vec<u8>)> =
-        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
-            .fetch_all(pool)
-            .await?;
-    let refused = |mismatch, version| {
-        StoreError::Migration(MigrationRefusal {
+    sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version")
+        .fetch_all(pool)
+        .await
+        .map(Some)
+}
+
+/// Les migrations du binaire, hors des migrations de retour (`Migrator::run` les saute).
+fn ups(migrator: &Migrator) -> impl Iterator<Item = &sqlx::migrate::Migration> {
+    migrator
+        .iter()
+        .filter(|m| !m.migration_type.is_down_migration())
+}
+
+/// La première migration de `applied` que `migrator` ne peut pas suivre, dans l'ordre où
+/// `Migrator::run` les vérifie (`run_direct`, sqlx 0.9) : une ligne notée inachevée (`Dirty`), puis
+/// une version que `migrator` ne connaît pas (`VersionMissing`), puis, dans l'ordre des migrations
+/// du binaire, une somme qui diffère de celle de son fichier (`VersionMismatch`). `created` n'est
+/// pas jugé ici : faux.
+fn mismatch(applied: &[Applied], migrator: &Migrator) -> Option<(MigrationMismatch, i64)> {
+    if let Some((version, ..)) = applied.iter().find(|(.., success)| !success) {
+        return Some((MigrationMismatch::Unfinished, *version));
+    }
+    if let Some((version, ..)) = applied.iter().find(|(v, ..)| !migrator.version_exists(*v)) {
+        return Some((MigrationMismatch::Unknown, *version));
+    }
+    ups(migrator)
+        .find(|m| {
+            applied
+                .iter()
+                .any(|(v, checksum, _)| *v == m.version && checksum[..] != m.checksum[..])
+        })
+        .map(|m| (MigrationMismatch::Modified { created: false }, m.version))
+}
+
+/// La version de la première migration de `migrator` que la base n'a pas encore, comme
+/// `Migrator::run` les voit (toute ligne de `_sqlx_migrations` compte pour appliquée).
+///
+/// Une base que `Migrator::run` refuserait pour une migration déjà appliquée est refusée ici,
+/// avant toute copie, dans le même ordre que lui ([`mismatch`] ; Rulings R840, R846). Rien n'est
+/// écrit : cette fonction ne fait que lire.
+async fn first_pending(
+    pool: &SqlitePool,
+    db: &Path,
+    migrator: &Migrator,
+) -> Result<Option<i64>, StoreError> {
+    let Some(applied) = applied(pool).await? else {
+        return Ok(None);
+    };
+    if let Some((mut mismatch, version)) = mismatch(&applied, migrator) {
+        if let MigrationMismatch::Modified { created } = &mut mismatch {
+            *created = created_together(pool, version).await?;
+        }
+        let resume = match mismatch {
+            MigrationMismatch::Modified { created: true } => None,
+            _ => copy_to_resume(db, version, migrator).await,
+        };
+        return Err(StoreError::Migration(MigrationRefusal {
             mismatch,
             version,
-            resume: copy_to_resume(db, version),
-        })
-    };
-    if let Some((version, _)) = applied.iter().find(|(v, _)| !migrator.version_exists(*v)) {
-        return Err(refused(MigrationMismatch::Unknown, *version));
+            resume,
+        }));
     }
-    let ups = || {
-        migrator
-            .iter()
-            .filter(|m| !m.migration_type.is_down_migration())
-    };
-    if let Some(modified) = ups().find(|m| {
-        applied
-            .iter()
-            .any(|(v, checksum)| *v == m.version && checksum[..] != m.checksum[..])
-    }) {
-        return Err(refused(MigrationMismatch::Modified, modified.version));
-    }
-    let applied: HashSet<i64> = applied.into_iter().map(|(v, _)| v).collect();
-    Ok(ups()
+    let applied: HashSet<i64> = applied.into_iter().map(|(v, ..)| v).collect();
+    Ok(ups(migrator)
         .map(|m| m.version)
         .filter(|v| !applied.contains(v))
         .min())
 }
 
+/// La base a-t-elle reçu ensemble toutes ses migrations jusqu'à `version` (Ruling R848) ? Vrai
+/// quand leurs dates d'application (`installed_on`, que SQLite écrit à la seconde) tiennent dans une
+/// seconde : un seul binaire les a appliquées, d'un coup, et la base n'existait pas avant lui (la
+/// migration `0001` s'applique à la création). Une date illisible : faux.
+async fn created_together(pool: &SqlitePool, version: i64) -> Result<bool, StoreError> {
+    let spread: Option<i64> = sqlx::query_scalar(
+        "SELECT CAST(strftime('%s', MAX(installed_on)) AS INTEGER) \
+              - CAST(strftime('%s', MIN(installed_on)) AS INTEGER) \
+         FROM _sqlx_migrations WHERE version <= ?",
+    )
+    .bind(version)
+    .fetch_one(pool)
+    .await?;
+    Ok(spread.is_some_and(|seconds| seconds <= 1))
+}
+
+/// Le rang d'un nom de copie dans l'ordre d'écriture : daté ou non, horodatage, numéro de `-n`.
+type NameRank = (bool, String, u32);
+
+/// Ce que dit le nom d'une copie de son ordre d'écriture, pour départager des dates égales (Ruling
+/// R847) : le nom sans date d'abord, puis les noms datés par leur horodatage, `…Z.bak` avant
+/// `…Z-2.bak`. `rest` est ce qui suit `<base>.avant-<version>.` dans un nom de copie.
+fn name_rank(rest: &str) -> NameRank {
+    let Some(dated) = rest
+        .strip_suffix("bak")
+        .and_then(|rest| rest.strip_suffix('.'))
+    else {
+        return (false, String::new(), 0);
+    };
+    match dated.split_once('-') {
+        Some((stamp, n)) => (true, stamp.to_string(), n.parse().unwrap_or(u32::MAX)),
+        None => (true, dated.to_string(), 1),
+    }
+}
+
 /// La copie que nomme le refus de la migration `version` ([`ResumeCopy`]), ou `None` s'il n'y en a
 /// aucune à côté de `db`. Un dossier illisible compte comme sans copie : le refus ne dépend pas de
 /// cette lecture.
-fn copy_to_resume(db: &Path, version: i64) -> Option<ResumeCopy> {
+async fn copy_to_resume(db: &Path, version: i64, migrator: &Migrator) -> Option<ResumeCopy> {
     let parent = db.parent().filter(|p| !p.as_os_str().is_empty());
     let base = db.file_name()?.to_str()?;
     let prefix = format!("{base}.avant-");
-    // (migration, date d'écriture, chemin) de chaque copie rangée d'avant `version` ou avant.
-    let mut found: Vec<(i64, SystemTime, PathBuf)> = Vec::new();
+    // (migration, date d'écriture, rang du nom, chemin) de chaque copie rangée d'avant `version`
+    // ou avant.
+    let mut found: Vec<(i64, SystemTime, NameRank, PathBuf)> = Vec::new();
     for entry in fs::read_dir(parent.unwrap_or(Path::new("."))).ok()? {
         let Ok(entry) = entry else { continue };
         let name = entry.file_name();
@@ -644,7 +734,8 @@ fn copy_to_resume(db: &Path, version: i64) -> Option<ResumeCopy> {
         };
         // Le nom exact d'une copie (version sur quatre chiffres, puis `bak` ou un nom daté), un
         // fichier, pas un lien symbolique (`DirEntry::metadata` ne les suit pas).
-        if !is_copy_name(name, &format!("{prefix}{before:04}.")) {
+        let exact = format!("{prefix}{before:04}.");
+        if !is_copy_name(name, &exact) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
@@ -653,18 +744,54 @@ fn copy_to_resume(db: &Path, version: i64) -> Option<ResumeCopy> {
             found.push((
                 before,
                 written,
+                name_rank(&name[exact.len()..]),
                 parent.map_or(name.into(), |p| p.join(name)),
             ));
         }
     }
-    let before = found.iter().map(|(before, ..)| *before).max()?;
-    let copies = found.iter().filter(|(b, ..)| *b == before).count();
-    let (_, _, path) = found.into_iter().filter(|(b, ..)| *b == before).max()?;
-    Some(ResumeCopy {
-        path,
-        before,
-        copies,
-    })
+    // De la plus récente des migrations à la plus ancienne : la première qui garde une copie que
+    // ce binaire ne refuserait pas.
+    let mut befores: Vec<i64> = found.iter().map(|(before, ..)| *before).collect();
+    befores.sort_unstable_by(|a, b| b.cmp(a));
+    befores.dedup();
+    for before in befores {
+        let mut kept = Vec::new();
+        for copy in found.iter().filter(|(b, ..)| *b == before) {
+            if !refused_copy(&copy.3, migrator).await {
+                kept.push(copy);
+            }
+        }
+        if let Some((_, _, _, path)) = kept.iter().max_by(|a, b| (a.1, &a.2).cmp(&(b.1, &b.2))) {
+            return Some(ResumeCopy {
+                path: path.clone(),
+                before,
+                copies: kept.len(),
+            });
+        }
+    }
+    None
+}
+
+/// Ce binaire refuserait-il la copie `path` elle-même ([`mismatch`]) ? Elle est lue sans rien
+/// écrire, ni en elle ni à côté d'elle : en lecture seule et immuable (ni verrou, ni journal ;
+/// `VACUUM INTO` l'a écrite d'un seul fichier, en mode rollback). Une copie illisible (pas une base
+/// SQLite) n'est pas jugée : elle n'est pas refusée (Ruling R847).
+async fn refused_copy(path: &Path, migrator: &Migrator) -> bool {
+    let reading = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .immutable(true);
+    let Ok(pool) = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(reading)
+        .await
+    else {
+        return false;
+    };
+    let refused =
+        matches!(applied(&pool).await, Ok(Some(rows)) if mismatch(&rows, migrator).is_some());
+    pool.close().await;
+    refused
 }
 
 /// Supprime le nom `partial`, sans erreur : un `.partiel` qui resterait serait supprimé à la

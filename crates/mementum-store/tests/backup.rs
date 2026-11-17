@@ -771,10 +771,11 @@ async fn failed_backup_stops_before_migrating() {
     }
 }
 
-/// Une base de la partie A du lot 3 (`0001` à `0003`), dans `dir`, connexions fermées, dont la
-/// migration `version` a été appliquée par un autre binaire : sa somme, dans `_sqlx_migrations`,
-/// n'est pas celle du fichier de ce binaire.
-async fn applied_by_another_binary(dir: &Path, version: i64) -> PathBuf {
+/// Une base de la partie A du lot 3 (`0001` à `0003`), dans `dir`, connexions fermées, créée par
+/// un autre binaire, qui en avait une autre migration `version` : sa somme, dans
+/// `_sqlx_migrations`, n'est pas celle du fichier de ce binaire. Ses migrations ont été appliquées
+/// ensemble, à sa création.
+async fn created_by_another_binary(dir: &Path, version: i64) -> PathBuf {
     let db = dir.join("mementum.db");
     let pool = database_with(&db, LOT3A).await;
     sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = ?")
@@ -784,6 +785,28 @@ async fn applied_by_another_binary(dir: &Path, version: i64) -> PathBuf {
         .unwrap();
     pool.close().await;
     db
+}
+
+/// [`created_by_another_binary`], mais la base existait avant cet autre binaire : il n'a appliqué
+/// que les migrations à partir de `version`, trois jours après les autres.
+async fn applied_by_another_binary(dir: &Path, version: i64) -> PathBuf {
+    let db = created_by_another_binary(dir, version).await;
+    let pool = common::side_pool(&db).await;
+    sqlx::query(
+        "UPDATE _sqlx_migrations SET installed_on = \
+         CASE WHEN version < ? THEN '2026-11-10 09:00:00' ELSE '2026-11-13 08:00:00' END",
+    )
+    .bind(version)
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    db
+}
+
+/// La date de modification de `path`.
+fn modified_at(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path).unwrap().modified().unwrap()
 }
 
 /// Pose à côté de `db` un fichier au nom d'une copie d'avant migration, `<base>.avant-<suffix>`,
@@ -798,11 +821,6 @@ fn copy_at(db: &Path, suffix: &str, secs: u64) -> PathBuf {
         .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(secs))
         .unwrap();
     path
-}
-
-/// La date de modification de `path`.
-fn modified_at(path: &Path) -> std::time::SystemTime {
-    std::fs::metadata(path).unwrap().modified().unwrap()
 }
 
 /// L'ouverture de `db` est refusée : rend le message. La base n'a pas changé d'un octet, ni de
@@ -1047,4 +1065,179 @@ async fn a_refused_copy_put_back_stays_untouched() {
     // Une base en WAL refusée, de même (le mode du serveur).
     assert_eq!(std::fs::read(&source).unwrap()[18..20], [2, 2]);
     refused_untouched(&source).await;
+}
+
+/// Ruling R846 : une migration notée inachevée dans `_sqlx_migrations` (`success` à faux, ce que
+/// sqlx n'écrit jamais pour SQLite) est refusée avant toute copie, en français, et la première,
+/// comme `Migrator::run` (`Dirty`) : avant une migration inconnue ou d'une autre somme.
+#[tokio::test]
+async fn a_migration_noted_unfinished_is_refused_before_any_copy() {
+    let dir = TestDir::new();
+    let db = dir.path().join("mementum.db");
+    let pool = database_with(&db, LOT2).await;
+    sqlx::query("UPDATE _sqlx_migrations SET success = FALSE WHERE version = 2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let unfinished = "la migration 0002 de cette base est notée inachevée dans `_sqlx_migrations` \
+                      (`success` à faux), ce que Mementum n'écrit jamais : un autre outil a touché \
+                      à cette table. La base n'a pas été modifiée, et aucune copie n'a été écrite.";
+    assert_eq!(
+        refused_untouched(&db).await,
+        format!(
+            "{unfinished} Aucune copie d'avant cette migration, ni d'avant une plus ancienne, \
+             n'est à côté de la base : reprends une sauvegarde faite avant que cette ligne soit \
+             écrite. Voir « Copies avant migration » dans le README."
+        )
+    );
+
+    // Notée inachevée, et une migration plus récente d'une autre somme : l'inachevée d'abord.
+    let dir = TestDir::new();
+    let db = applied_by_another_binary(dir.path(), 3).await;
+    let pool = common::side_pool(&db).await;
+    sqlx::query("UPDATE _sqlx_migrations SET success = FALSE WHERE version = 2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let resume = copy_at(&db, "0002.bak", 1_763_000_000);
+    copy_at(&db, "0003.bak", 1_763_100_000);
+    assert_eq!(
+        refused_untouched(&db).await,
+        format!(
+            "{unfinished} Reprends la copie d'avant la migration 0002, {} ; ce qui a été écrit \
+             dans la base depuis cette copie est perdu. Voir « Copies avant migration » dans le \
+             README.",
+            resume.display()
+        )
+    );
+}
+
+/// Ruling R847 : à date égale (une archive à la seconde, un volume FAT), la copie nommée est celle
+/// que le nom dit la plus récente : un nom daté après le nom sans date, un horodatage plus tardif,
+/// `-2` après le nom sans suffixe.
+#[tokio::test]
+async fn copies_of_the_same_date_are_ranked_by_their_name() {
+    let dir = TestDir::new();
+    let db = applied_by_another_binary(dir.path(), 3).await;
+    let secs = 1_763_000_000;
+    copy_at(&db, "0003.bak", secs);
+    copy_at(&db, "0003.20261111T081500Z.bak", secs);
+    let last = copy_at(&db, "0003.20261112T081500Z-2.bak", secs);
+    copy_at(&db, "0003.20261112T081500Z.bak", secs);
+    assert_eq!(
+        refused_untouched(&db).await,
+        format!(
+            "la migration 0003 de cette base n'est pas celle de ce binaire : un binaire \
+             intermédiaire, qui en avait une autre version, l'a appliquée. La base n'a pas été \
+             modifiée, et aucune copie n'a été écrite. Reprends la plus récente des 4 copies \
+             d'avant la migration 0003, {} ; ce qui a été écrit dans la base depuis cette copie \
+             est perdu. Voir « Copies avant migration » dans le README.",
+            last.display()
+        )
+    );
+}
+
+/// Ruling R847 : une copie que ce binaire refuserait elle-même (une migration d'une autre somme
+/// dans son `_sqlx_migrations`) n'est jamais nommée, même la plus récente ; elle est lue sans rien
+/// écrire, ni elle ni à côté d'elle. Une copie illisible n'est pas jugée.
+#[tokio::test]
+async fn a_copy_that_would_be_refused_itself_is_never_named() {
+    // Une copie juste (une base du lot 2) et une copie d'une base du lot 2 dont la `0002` est
+    // d'une autre somme, plus récente.
+    let lineages = TestDir::new();
+    let lot2 = lineages.path().join("lot2.db");
+    database_with(&lot2, LOT2).await.close().await;
+    let other = lineages.path().join("autre.db");
+    let pool = database_with(&other, LOT2).await;
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let dir = TestDir::new();
+    let db = applied_by_another_binary(dir.path(), 3).await;
+    let good = vacuum_copy(&lot2, &sibling(&db, ".avant-0003.bak")).await;
+    let refused = vacuum_copy(&other, &sibling(&db, ".avant-0003.20261113T080000Z.bak")).await;
+    for (path, secs) in [(&good, 1_763_000_000), (&refused, 1_763_100_000)] {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+    let refused_bytes = std::fs::read(&refused).unwrap();
+    let message = refused_untouched(&db).await;
+    assert!(
+        message.contains(&format!(
+            "Reprends la copie d'avant la migration 0003, {} ;",
+            good.display()
+        )),
+        "{message}"
+    );
+    assert_eq!(std::fs::read(&refused).unwrap(), refused_bytes);
+
+    // Sans la copie juste : une copie illisible d'avant la `0002` est nommée, faute de mieux.
+    std::fs::remove_file(&good).unwrap();
+    let unreadable = copy_at(&db, "0002.bak", 1_762_000_000);
+    let message = refused_untouched(&db).await;
+    assert!(
+        message.contains(&format!(
+            "Reprends la copie d'avant la migration 0002, {} ;",
+            unreadable.display()
+        )),
+        "{message}"
+    );
+}
+
+/// Ruling R848 : une base qu'un binaire intermédiaire a créée (toutes ses migrations, jusqu'à celle
+/// qui diffère, appliquées ensemble) n'a ni copie ni sauvegarde que ce binaire-ci ouvrirait : le
+/// refus le dit, plutôt que de renvoyer à une copie qui serait celle d'une autre base.
+#[tokio::test]
+async fn a_database_created_by_an_intermediate_binary_is_told_so() {
+    let dir = TestDir::new();
+    let db = created_by_another_binary(dir.path(), 3).await;
+    copy_at(&db, "0003.bak", 1_763_000_000);
+    assert_eq!(
+        refused_untouched(&db).await,
+        "la migration 0003 de cette base n'est pas celle de ce binaire : un binaire \
+         intermédiaire, qui en avait une autre version, l'a appliquée. La base n'a pas été \
+         modifiée, et aucune copie n'a été écrite. Ce binaire intermédiaire a créé la base, qui a \
+         reçu de lui toutes ses migrations jusqu'à la 0003 : aucune copie ni sauvegarde d'elle ne \
+         s'ouvrira avec ce binaire-ci. Elle se rouvre avec le binaire qui l'a créée ; avec \
+         celui-ci, repars d'une base neuve. Voir « Copies avant migration » dans le README."
+    );
+}
+
+/// Ruling R849 (ce que dit le README) : une copie datée déplacée à la place de la base, le nom sans
+/// date pris par une autre copie, est recopiée au démarrage suivant sous un nom daté neuf ; l'autre
+/// copie n'est pas touchée.
+#[tokio::test]
+async fn a_moved_dated_copy_is_copied_again_under_a_new_dated_name() {
+    let dir = TestDir::new();
+    let db = dir.path().join("mementum.db");
+    database_with(&db, LOT2).await.close().await;
+    let moved = vacuum_copy(&db, &sibling(&db, ".avant-0003.20261110T081500Z.bak")).await;
+    let undated = sibling(&db, ".avant-0003.bak");
+    std::fs::write(&undated, b"une copie plus ancienne").unwrap();
+    std::fs::rename(&moved, &db).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(sibling(&db, suffix));
+    }
+    let store = Store::open(&db).await.unwrap();
+    let backup = store.backup().cloned().expect("une copie");
+    store.close().await;
+    assert!(!backup.kept, "{backup:?}");
+    assert_ne!(backup.path, moved);
+    assert_ne!(backup.path, undated);
+    let name = backup.path.file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with("mementum.db.avant-0003.2") && name.ends_with("Z.bak"),
+        "{name}"
+    );
+    assert_eq!(std::fs::read(&undated).unwrap(), b"une copie plus ancienne");
+    assert_eq!(entries(dir.path()).len(), 3);
 }
