@@ -28,6 +28,14 @@ function blockContent(p: Page, text: string) {
   return p.locator(".mm-editor .bn-block-content").filter({ hasText: text }).first();
 }
 
+/**
+ * L'élément qui a le focus dans le menu de la poignée (aucun tant que le focus n'y est pas) : Mantine
+ * le donne à un repère invisible du menu, pas à sa première entrée.
+ */
+function handleMenuFocus(p: Page) {
+  return p.locator(".bn-drag-handle-menu[role=menu]").locator(":focus");
+}
+
 /** Mona (propriétaire de l'espace) et Tom (membre), sur une page de « Espace » qui porte `mmd`. */
 async function duo(browser: Parameters<typeof openPage>[0], mmd: string) {
   const team = await ownerAndMember();
@@ -170,6 +178,10 @@ test("escape_on_the_handle_menu_gives_the_focus_back_to_the_text", async ({ brow
   await blockContent(mona, "Premier bloc").hover();
   await mona.getByRole("button", { name: "Ouvrir le menu du bloc" }).click();
   await expect(mona.getByRole("menuitem", { name: "Dupliquer" })).toBeVisible();
+  // Échap sur le menu, donc le focus dedans. Mantine pose le menu, encore transparent (son fondu
+  // commence à l'image suivante), puis y met le focus par un minuteur ; il n'écoute Échap que sur
+  // le menu. Envoyé avant, Échap tombe sur la poignée, et le menu reste ouvert (R796).
+  await expect(handleMenuFocus(mona)).toHaveCount(1);
   await mona.keyboard.press("Escape");
   await expect(mona.getByRole("menu")).toBeHidden();
   // Jamais sur `body` : au texte de l'éditeur, où la frappe reprend.
