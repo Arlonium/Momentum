@@ -170,3 +170,42 @@ test("a_page_whose_journal_already_holds_the_attribute_opens_corrected", async (
   await expect(editor).toContainText("Bonjour");
   expect(errors).toEqual([]);
 });
+
+test("a_version_kept_before_the_guard_is_previewed_in_the_history", async ({ browser }) => {
+  // Ruling R701 : une version coupée avant la garde, d'une page attaquée, porte encore la valeur.
+  // Son état est servi relu : l'aperçu de « Historique » se monte, et montre son texte.
+  const { alice: mona, aliceApi: monaApi, space } = await ownerAndMember();
+  const page = await createPage(monaApi, { spaceId: space.id, title: `Version ${unique()}` });
+  const db = new DatabaseSync(join(dirname(accountsDir()), "data", "mementum.db"));
+  try {
+    db.exec("PRAGMA busy_timeout = 10000");
+    const snapshot = db
+      .prepare("SELECT state_blob FROM doc_snapshots WHERE node_id = ?")
+      .get(page.id) as { state_blob: Uint8Array };
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, new Uint8Array(snapshot.state_blob));
+    const container = (doc.getXmlFragment("document-store").get(0) as Y.XmlElement).get(0) as Y.XmlElement;
+    const paragraph = container.get(0) as Y.XmlElement;
+    doc.transact(() => {
+      paragraph.insert(0, [new Y.XmlText("Ancien texte")]);
+      paragraph.setAttribute("backgroundColor", { toString: 1 } as unknown as string);
+    });
+    db.prepare(
+      "INSERT INTO doc_versions (id, node_id, seq, covers_seq, reason, authors, created_at, state_blob) " +
+        "VALUES (?, ?, 0, 0, 'periodic', '[]', ?, ?)",
+    ).run(crypto.randomUUID(), page.id, Date.now(), Y.encodeStateAsUpdate(doc));
+  } finally {
+    db.close();
+  }
+
+  const monaPage = await openPage(browser, page.id, mona);
+  const errors = pageErrors(monaPage);
+  await monaPage.getByRole("button", { name: "Actions de la page", exact: true }).click();
+  await monaPage.getByRole("menuitem", { name: "Historique" }).click();
+  const dialog = monaPage.getByRole("dialog", { name: "Historique" });
+  const versions = dialog.getByRole("list", { name: "Versions de la page" }).getByRole("listitem");
+  await expect(versions).toHaveCount(2);
+  await versions.nth(1).getByRole("button").first().click();
+  await expect(dialog.locator(".mm-preview-editor .bn-editor")).toContainText("Ancien texte");
+  expect(errors).toEqual([]);
+});
