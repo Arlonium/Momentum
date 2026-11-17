@@ -350,3 +350,59 @@ fn what_yjs_writes_at_random_follows_the_grammar() {
         "peu de scènes comparées au vieux journal : {compared}"
     );
 }
+
+/// N2 (Ruling R802) contre le vrai Yjs (constat I-6.4 de la re-relecture 6) : les scènes où un
+/// onglet envoie un élément dont l'origine droite est son origine, que `redoItem` écrit quand il
+/// retrouve le même voisin des deux côtés (`redo.json`, écrit par `yjsAtRandom.test.ts` : la
+/// scène, ses mises à jour, les rangs de celles qui portent la forme). Elles sont **acceptées**
+/// (la page récrit l'élément, sans origine droite ; le filet L1 ne refuse rien), la page vivante
+/// se relit et son journal la redonne ; ce qu'elle relaie (`redo-relayed.json`) ramène un vrai
+/// Yjs à la page du serveur Yjs (second test de `yjsAtRandom.test.ts`).
+#[test]
+fn what_yjs_writes_on_a_redo_with_the_same_neighbour_on_both_sides_is_accepted() {
+    let base: Vec<u8> =
+        serde_json::from_str(&std::fs::read_to_string(dir().join("base.json")).unwrap()).unwrap();
+    let scenes: Vec<(u64, Vec<String>, Vec<usize>)> =
+        serde_json::from_str(&std::fs::read_to_string(dir().join("redo.json")).unwrap()).unwrap();
+    assert!(!scenes.is_empty());
+    let mut relayed: Vec<Option<Vec<String>>> = Vec::new();
+    for (seed, updates, ranks) in &scenes {
+        let what = format!("scène {seed}");
+        assert!(!ranks.is_empty(), "{what} : aucune forme N2");
+        let mut served = Served {
+            page: PageDoc::from_updates([base.as_slice()]).expect("la base"),
+            journal: vec![base.clone()],
+            server: 0,
+        };
+        let mut plain = true;
+        for (step, update) in updates.iter().enumerate() {
+            let before = served.journal.len();
+            let received = served.receive(&unhex(update));
+            assert!(
+                received.is_ok(),
+                "{what}, mise à jour {step}{} : {received:?}",
+                if ranks.contains(&step) { " (N2)" } else { "" }
+            );
+            plain &= served.journal.len() == before + 1;
+        }
+        assert_sound(&served, &what);
+        relayed.push(plain.then(|| {
+            served.journal[1..]
+                .iter()
+                .map(|entry| entry.iter().map(|byte| format!("{byte:02x}")).collect())
+                .collect()
+        }));
+    }
+    let path = dir().join("redo-relayed.json");
+    let mut written = serde_json::to_string(&relayed).unwrap();
+    written.push(char::from(10));
+    if std::env::var_os("EXPORT_FIXTURES").is_some() {
+        std::fs::write(&path, &written).unwrap();
+    } else {
+        assert!(
+            std::fs::read_to_string(&path).is_ok_and(|kept| kept == written),
+            "{} n'est plus ce que la page relaie (EXPORT_FIXTURES=1 le réécrit)",
+            path.display()
+        );
+    }
+}

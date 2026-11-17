@@ -212,6 +212,27 @@ function scene(seed: number, base: Uint8Array, counts: Counts): { received: Uint
 
 const hex = (bytes: Uint8Array): string => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 
+// Les scènes où un onglet envoie un élément dont l'origine droite est son origine, que
+// `redoItem` écrit quand il retrouve le même voisin des deux côtés (N2, Ruling R802). Trouvées
+// en tirant 12 000 scènes (trois seulement) : les 150 du dépôt n'en portent aucune, et rien ne
+// gardait la récriture du serveur (constat I-6.4 de la re-relecture 6). Gardées dans
+// `redo.json`, que `crates/mementum-crdt/tests/yjs_updates.rs` donne à une vraie page : elles
+// sont acceptées, et ce que la page relaie ramène un vrai Yjs à la même page.
+const REDO_SCENES = [3192, 3851, 8832];
+
+type MaybeId = { client: number; clock: number } | null;
+
+/** Les rangs des mises à jour qui portent un élément dont l'origine droite est son origine. */
+function sameOriginUpdates(received: Uint8Array[]): number[] {
+  const same = (a: MaybeId, b: MaybeId): boolean => a !== null && b !== null && a.client === b.client && a.clock === b.clock;
+  const ranks: number[] = [];
+  received.forEach((update, n) => {
+    const { structs } = Y.decodeUpdate(update) as unknown as { structs: { origin?: MaybeId; rightOrigin?: MaybeId }[] };
+    if (structs.some((s) => same(s.origin ?? null, s.rightOrigin ?? null))) ranks.push(n);
+  });
+  return ranks;
+}
+
 test("ce que Yjs écrit au hasard suit la grammaire d'un client", async () => {
   const fs = await nodeModule<Fs>("node:fs/promises");
   const path = await nodeModule<Path>("node:path");
@@ -235,6 +256,18 @@ test("ce que Yjs écrit au hasard suit la grammaire d'un client", async () => {
   else expect(new TextDecoder().decode(await fs.readFile(file)) === written, `${file} (EXPORT_FIXTURES=1 le réécrit)`).toBe(true);
   if (asked > SCENES) await fs.writeFile(path.join(dir, "random-large.json"), `${JSON.stringify(scenes)}\n`);
   console.log(`ESSAI Yjs : ${scenes.length} scènes, ${counts.updates} mises à jour, ${counts.keyed} entrées de map dont ${counts.manyValued} de plusieurs valeurs (${counts.manyValuedAlive} vivantes), ${counts.sameOrigins} éléments d'origine droite leur origine`);
+  // Les scènes d'un rétablissement qui écrit N2 : chacune, ses mises à jour, et les rangs de
+  // celles qui portent la forme.
+  const redo = REDO_SCENES.map((seed) => {
+    const { received } = scene(seed, base, counts);
+    const ranks = sameOriginUpdates(received);
+    expect(ranks.length, `scène ${seed} : plus d'élément d'origine droite son origine`).toBeGreaterThan(0);
+    return [seed, received.map(hex), ranks];
+  });
+  const redoWritten = `${JSON.stringify(redo)}\n`;
+  const redoFile = path.join(dir, "redo.json");
+  if (import.meta.env.EXPORT_FIXTURES) await fs.writeFile(redoFile, redoWritten);
+  else expect(new TextDecoder().decode(await fs.readFile(redoFile)) === redoWritten, `${redoFile} (EXPORT_FIXTURES=1 le réécrit)`).toBe(true);
 }, 600_000);
 
 // Ce que la page relaie de ces scènes (`random-relayed.json`, écrit par
@@ -273,4 +306,20 @@ test("ce que la page relaie mène un vrai Yjs à la page que Yjs aurait lue", as
   expect(compared).toBeGreaterThan(relayed.length / 2);
   console.log(`ESSAI Yjs : ${compared} scènes relayées relues par un vrai Yjs, ${apart.length} écarts ; ${counts.manyValuedAlive} entrées de plusieurs valeurs vivantes, ${counts.sameOrigins} origines droites égales à l'origine`);
   expect(apart, "scènes où le navigateur ne lit pas la page du serveur Yjs").toEqual([]);
+  // Les scènes d'un rétablissement qui écrit N2 (`redo-relayed.json`, dans l'ordre de
+  // `REDO_SCENES`) : chacune est relayée, et lue par un vrai Yjs comme le serveur Yjs la lit.
+  const redoRelayed = (await read("redo-relayed.json")) as (string[] | null)[];
+  expect(redoRelayed.length).toBe(REDO_SCENES.length);
+  REDO_SCENES.forEach((seed, n) => {
+    const { server } = scene(seed, base, counts);
+    const entries = redoRelayed[n];
+    expect(entries, `scène ${seed} : le serveur y a écrit lui-même`).not.toBe(null);
+    const browser = new Y.Doc();
+    Y.applyUpdate(browser, base);
+    for (const entry of entries ?? []) Y.applyUpdate(browser, unhex(entry));
+    const store = (browser as unknown as { store: { pendingStructs: unknown; pendingDs: unknown } }).store;
+    expect(store.pendingStructs, `scène ${seed} : des éléments restent en attente`).toBe(null);
+    expect(store.pendingDs, `scène ${seed} : des suppressions restent en attente`).toBe(null);
+    expect(browser.getXmlFragment("document-store").toString(), `scène ${seed}`).toBe(server.getXmlFragment("document-store").toString());
+  });
 }, 600_000);
