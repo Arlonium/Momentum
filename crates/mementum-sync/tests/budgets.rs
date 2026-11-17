@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use mementum_md::parse;
 use mementum_store::{Store, VersionReason};
-use mementum_sync::SyncConfig;
+use mementum_sync::{ConnInfo, SyncConfig};
 use tokio::sync::{Mutex, MutexGuard};
 use yrs::ClientID;
 
@@ -380,6 +380,111 @@ async fn keystroke_during_write_loops_of_a_reader_under_150ms() {
         if p95 >= TYPING_BUDGET {
             over.push(format!(
                 "frappe, {loops} boucles : p95 {p95:?} (budget {TYPING_BUDGET:?}), mesures {times:?}"
+            ));
+        }
+    }
+    assert!(over.is_empty(), "{}", over.join("\n"));
+}
+
+/// Une mise à jour que la page refuse **après** l'avoir appliquée (elle écrit dans les
+/// métadonnées de la page) : le document est alors rechargé du store (Ruling R538).
+fn refused_after_it_is_applied(client: u64) -> Vec<u8> {
+    let mut update = vec![1, 1];
+    let mut id = client;
+    while id > 0x7F {
+        update.push(0x80 | (id & 0x7F) as u8);
+        id >>= 7;
+    }
+    update.push(id as u8);
+    // Horloge 0 ; une valeur `Any` (8), entrée de map (0x20) de la racine nommée « mementum ».
+    update.extend_from_slice(&[0, 0x28, 1, 8]);
+    update.extend_from_slice(b"mementum");
+    update.extend_from_slice(&[1, b'x', 1, 119, 1, b'y', 0]);
+    update
+}
+
+/// Le nombre de boucles d'un client refusé pendant la mesure de la frappe.
+const REFUSED_LOOPS: usize = 4;
+
+/// Budget du §5.10, « frappe visible chez un autre < 150 ms », pendant qu'un client envoie en
+/// boucle une mise à jour refusée après son application : chaque refus recharge la page de
+/// `BLOCKS` blocs (Ruling R538), et sans frein la boucle tient l'acteur occupé à recharger
+/// (constat de la relecture de la garde des attributs : 296 ms au p95 pour quatre boucles, sept
+/// rechargements par seconde et par boucle). Le frein (Ruling R725, module `brake`) : après
+/// quelques refus de ce genre, les mises à jour du compte ferment leur connexion sans être
+/// appliquées, pendant un temps qui double à chaque récidive. Mesuré une fois le frein mis ; ce
+/// qui reste est le coût des connexions que les boucles ouvrent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn keystroke_during_loops_of_refused_updates_under_150ms() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let _alone = alone().await;
+    let mmd = page_mmd();
+    let mut over = Vec::new();
+    for loops in [0, 1, REFUSED_LOOPS] {
+        let f = Fixture::new(SyncConfig::default()).await;
+        f.write_mmd(&mmd).await;
+        let hostile = new_user(&f.db).await;
+        let stop = Arc::new(AtomicBool::new(false));
+        let sent = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for n in 0..loops {
+            let conn = ConnInfo {
+                actor: Some(hostile),
+                ..writing_conn()
+            };
+            let url = f.url_for(conn);
+            let (stop, sent) = (stop.clone(), sent.clone());
+            tasks.push(tokio::spawn(async move {
+                let mut turn = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    turn += 1;
+                    let Ok(client) = Client::connect(&url).await else {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        continue;
+                    };
+                    client.send_update(&refused_after_it_is_applied(
+                        1_000_000 * (n as u64 + 1) + turn,
+                    ));
+                    client
+                        .wait_until(Duration::from_secs(60), |c| c.is_closed())
+                        .await;
+                    sent.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+        // Le frein est mis avant la première frappe : les refus gratuits du compte sont passés
+        // (chacun a rechargé la page, et retardé d'autant la frappe tombée pendant lui : c'est
+        // le coût borné du frein, dit au registre), et le suivant l'a freiné.
+        let engaged = mementum_sync::FREE_REFUSALS as u64 + 1;
+        while loops > 0 && f.hub.reloads() < engaged {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let start = Instant::now();
+        let (before, reloads) = (sent.load(Ordering::Relaxed), f.hub.reloads());
+        let times = keystrokes_seen_by_another(&f).await;
+        let (turns, reloads) = (
+            sent.load(Ordering::Relaxed) - before,
+            f.hub.reloads() - reloads,
+        );
+        let elapsed = start.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let (p50, p95) = (percentile(&times, 0.5), percentile(&times, 0.95));
+        println!(
+            "MESURE frappe vue par un autre client, page de {BLOCKS} blocs, pendant {loops} \
+             boucles de mises à jour refusées après application ({turns} tours, {reloads} \
+             rechargements en {elapsed:?}) : p50 {p50:?}, p95 {p95:?}, max {:?} ({KEYSTROKES} \
+             frappes)",
+            times.iter().max().unwrap()
+        );
+        if p95 >= TYPING_BUDGET {
+            over.push(format!(
+                "frappe, {loops} boucles refusées : p95 {p95:?} (budget {TYPING_BUDGET:?}), mesures {times:?}"
             ));
         }
     }

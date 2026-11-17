@@ -148,6 +148,7 @@
 //! au flux attendu par [`Hub::serve_connection`].
 
 mod actor;
+mod brake;
 mod hub;
 mod presence;
 mod protocol;
@@ -163,6 +164,7 @@ use mementum_crdt::CrdtError;
 use mementum_store::StoreError;
 use yrs::{Doc, OffsetKind, Options};
 
+pub use brake::{FREE_REFUSALS, MAX_BLOCK};
 pub use hub::{ConnInfo, Hub, PageEvent};
 pub use presence::{MAX_REMEMBERED_CLIENTS, display_name};
 pub use protocol::MESSAGE_PAGE_EVENT;
@@ -205,6 +207,9 @@ pub struct SyncConfig {
     /// plus, la première écriture non versionnée. Zéro : avant chaque écriture
     /// qui en suit une autre (mesures).
     pub version_every: Duration,
+    /// Le premier temps pendant lequel un compte est freiné après trop de mises à jour refusées
+    /// une fois appliquées (Ruling R725, module `brake`) ; il double à chaque refus qui suit.
+    pub refusal_block: Duration,
 }
 
 /// Intervalle par défaut des versions ([`SyncConfig::version_every`]) : dix
@@ -250,6 +255,7 @@ impl Default for SyncConfig {
             max_queue_bytes: 64 << 20,
             keepalive_after: KEEPALIVE_AFTER,
             version_every: VERSION_EVERY,
+            refusal_block: Duration::from_secs(2),
         }
     }
 }

@@ -1113,6 +1113,16 @@ impl Actor {
         actor: Option<Uuid>,
         update: &[u8],
     ) -> Result<bool, Broken> {
+        // Ruling R725 : un compte freiné pour ses mises à jour refusées après leur application
+        // n'écrit plus pendant un temps : sa connexion est fermée sans que rien soit appliqué,
+        // donc sans rien recharger. Son onglet se reconnecte, et renvoie ce qui manque.
+        let hub = self.id.hub.upgrade();
+        if let (Some(account), Some(hub)) = (actor, &hub)
+            && let Some(left) = hub.brake().blocked(account, tokio::time::Instant::now())
+        {
+            tracing::warn!(node_id = %self.id.node_id, conn, %account, ?left, "compte freiné après des mises à jour refusées : connexion fermée sans rien appliquer");
+            return Ok(false);
+        }
         self.version_if_due().await;
         let changes = self.watch.changes();
         // Ce qui vient d'un client ne touche pas aux métadonnées de la page
@@ -1143,6 +1153,13 @@ impl Actor {
                 // client fautif est fermé. Il se reconnecte, et sa synchro
                 // complète apporte ce qui manquait.
                 tracing::warn!(node_id = %self.id.node_id, conn, %error, "mise à jour refusée : document rechargé, connexion fermée");
+                // Ruling R725 : chaque refus de ce genre coûte un rechargement à tous ; au-delà
+                // de quelques-uns, le compte est freiné.
+                if let (Some(account), Some(hub)) = (actor, &hub)
+                    && let Some(block) = hub.brake().refused(account, tokio::time::Instant::now())
+                {
+                    tracing::warn!(node_id = %self.id.node_id, %account, ?block, "trop de mises à jour refusées après leur application : compte freiné");
+                }
                 self.reload().await?;
                 return Ok(false);
             }

@@ -135,6 +135,9 @@ pub struct Hub {
     calls_waiting: Arc<AtomicU64>,
     /// Les documents rechargés par leur acteur depuis le démarrage ([`Hub::reloads`]).
     reloads: AtomicU64,
+    /// Le frein des comptes dont les mises à jour sont refusées après leur application
+    /// (Ruling R725).
+    brake: crate::brake::Brake,
     /// Le hub lui-même, sans le garder en vie : les acteurs s'en servent pour
     /// quitter le registre.
     me: Weak<Hub>,
@@ -157,6 +160,7 @@ impl Hub {
             calls: AtomicU64::new(0),
             calls_waiting: Arc::new(AtomicU64::new(0)),
             reloads: AtomicU64::new(0),
+            brake: crate::brake::Brake::new(cfg.refusal_block),
             me: me.clone(),
         })
     }
@@ -223,6 +227,11 @@ impl Hub {
     /// avant d'être appliquée ne recharge rien (Ruling R492).
     pub fn reloads(&self) -> u64 {
         self.reloads.load(Ordering::Relaxed)
+    }
+
+    /// Le frein des refus d'après l'application (Ruling R725).
+    pub(crate) fn brake(&self) -> &crate::brake::Brake {
+        &self.brake
     }
 
     /// Un document rechargé par son acteur.

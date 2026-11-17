@@ -1568,6 +1568,94 @@ mod known_limits {
     }
 }
 
+/// Une mise à jour que la page refuse après l'avoir appliquée : elle écrit dans les métadonnées
+/// de la page, au nom d'un client neuf (un identifiant d'un octet : moins de 128).
+fn writes_the_metadata(client: u8) -> Vec<u8> {
+    let mut update = vec![1, 1, client, 0, 0x28, 1, 8];
+    update.extend_from_slice(b"mementum");
+    update.extend_from_slice(&[1, b'x', 1, 119, 1, b'y', 0]);
+    update
+}
+
+/// Ruling R725 : le frein des refus d'après l'application. Chacun recharge la page (R538), et
+/// un compte qui en envoie en boucle tenait l'acteur occupé à recharger : la frappe d'un autre
+/// sortait de son budget. Après `FREE_REFUSALS` refus de ce genre en une minute, le suivant vaut
+/// au compte un temps pendant lequel ses mises à jour ferment leur connexion sans être
+/// appliquées, sur toute page ; le temps double à chaque récidive. Les autres comptes écrivent
+/// toujours, et le compte freiné écrit de nouveau une fois le temps passé.
+#[tokio::test]
+async fn an_account_refused_after_application_again_and_again_is_slowed_down() {
+    let block = Duration::from_millis(1_500);
+    let f = Fixture::new(SyncConfig {
+        refusal_block: block,
+        ..SyncConfig::default()
+    })
+    .await;
+    f.write_mmd("Alpha\n").await;
+    let id = f.ids().await.remove(0);
+    let other = f.client().await;
+    let account = new_user(&f.db).await;
+    let url = f.url_for(ConnInfo {
+        actor: Some(account),
+        ..writing_conn()
+    });
+    let before = f.hub.reloads();
+    let free = mementum_sync::FREE_REFUSALS as u8;
+    let mut blocked_at = None;
+    for turn in 0..free + 6 {
+        let hostile = Client::connect_synced(&url).await;
+        hostile.send_update(&writes_the_metadata(100 + turn));
+        assert!(hostile.wait_until(WAIT, |c| c.is_closed()).await, "refusée");
+        f.hub.read_blocks(f.page).await.unwrap();
+        if turn == free {
+            blocked_at = Some(std::time::Instant::now());
+        }
+    }
+    assert_eq!(
+        f.hub.reloads() - before,
+        u64::from(free) + 1,
+        "un rechargement par refus, puis plus aucun une fois le compte freiné"
+    );
+    // Freiné, le compte n'écrit plus rien, même d'honnête ; un autre compte écrit.
+    let tab = Client::connect_synced(&url).await;
+    tab.type_text(&id, " du compte freiné");
+    assert!(tab.wait_until(WAIT, |c| c.is_closed()).await, "appliquée");
+    other.type_text(&id, " suite");
+    processed(&other).await;
+    assert!(!other.is_closed());
+    assert_eq!(
+        text(&f.hub.read_blocks(f.page).await.unwrap()),
+        "Alpha suite"
+    );
+    assert!(
+        blocked_at.unwrap().elapsed() < block,
+        "le test a duré plus que le frein : il ne prouve rien"
+    );
+    // Le temps passé, le compte écrit de nouveau.
+    tokio::time::sleep(block).await;
+    let tab = Client::connect_synced(&url).await;
+    tab.type_text(&id, " puis lui");
+    processed(&tab).await;
+    assert!(!tab.is_closed());
+    assert_eq!(
+        text(&f.hub.read_blocks(f.page).await.unwrap()),
+        "Alpha suite puis lui"
+    );
+    // Une récidive : freiné dès ce refus, pour deux fois plus longtemps.
+    let before = f.hub.reloads();
+    for turn in 0..3 {
+        let hostile = Client::connect_synced(&url).await;
+        hostile.send_update(&writes_the_metadata(50 + turn));
+        assert!(hostile.wait_until(WAIT, |c| c.is_closed()).await, "refusée");
+        f.hub.read_blocks(f.page).await.unwrap();
+    }
+    assert_eq!(
+        f.hub.reloads() - before,
+        1,
+        "un seul rechargement à la récidive"
+    );
+}
+
 /// `{"toString": 1}` : la valeur qui empêchait l'éditeur de se monter (garde des attributs).
 fn hostile_value() -> yrs::Any {
     yrs::Any::from(std::collections::HashMap::from([(
