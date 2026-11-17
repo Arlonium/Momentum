@@ -253,3 +253,72 @@ test("ctrl_alt_enter_on_a_file_block_goes_to_its_download_link", async () => {
   expect(m.writes.length).toBe(before);
   expect(m.editor.document.map((b) => b.id)).toEqual(["x", "f", "z"]);
 });
+
+// Tour de correction 1 (relecture de C8).
+
+/** Les adresses que porte le HTML du bloc `id` copié hors de l'éditeur (`href`, `src`). */
+function copiedAddresses(m: Mounted, id: string): { carried: (string | null)[]; text: string; html: string } {
+  const html = m.editor.blocksToHTMLLossy([m.editor.getBlock(id)!]);
+  const host = document.createElement("div");
+  host.innerHTML = html;
+  return {
+    carried: [...host.querySelectorAll("[href], [src]")].map((e) => e.getAttribute("href") ?? e.getAttribute("src")),
+    text: host.textContent ?? "",
+    html,
+  };
+}
+
+test("a_copied_image_video_sound_or_file_carries_only_a_permitted_address", async () => {
+  // Les quatre blocs de fichier, aperçu montré et masqué, avec et sans légende (autant de branches de
+  // BlockNote, qui écrivait l'adresse du document dans `src` ou `href`, I1).
+  const refused: unknown[] = [
+    "javascript:alert(document.domain)",
+    "data:text/html,<script>alert(1)</script>",
+    "/api/v1/auth/logout",
+    `${PATH}?x`,
+    { href: "javascript:alert(1)" },
+  ];
+  // Témoins : une adresse permise est portée, celle que rend `shownUrl`.
+  const permitted = [
+    [PATH, PATH],
+    [" https://EXEMPLE.fr/a.png", "https://exemple.fr/a.png"],
+  ];
+  for (const type of ["image", "video", "audio", "file"] as const) {
+    for (const showPreview of type === "file" ? [undefined] : [true, false]) {
+      for (const caption of ["", "Une légende"]) {
+        const block = (id: string, url: unknown) => ({
+          id,
+          type,
+          props: { url, name: "a.png", caption, ...(showPreview === undefined ? {} : { showPreview }) },
+        });
+        const where = `${type}, aperçu ${String(showPreview)}, légende « ${caption} »`;
+        const m = await mountEditor({
+          blocks: [
+            ...refused.map((url, i) => block(`r${i}`, url)),
+            ...permitted.map(([url], i) => block(`p${i}`, url)),
+          ] as unknown as Seed,
+          editable: true,
+        });
+        refused.forEach((url, i) => {
+          const copied = copiedAddresses(m, `r${i}`);
+          expect(copied.carried, `${where}, ${String(url)} : ${copied.html}`).toEqual([]);
+          // Le nom reste, en texte (une adresse qui n'est pas une chaîne vaut un bloc sans adresse).
+          if (typeof url === "string") expect(copied.text, `${where}, ${url}`).toContain("a.png");
+        });
+        permitted.forEach(([url, shown], i) => {
+          expect(copiedAddresses(m, `p${i}`).carried, `${where}, ${url}`).toEqual([shown]);
+        });
+      }
+    }
+  }
+}, 30_000);
+
+test("an_empty_file_block_loads_nothing", async () => {
+  // Un bloc sans adresse ne charge pas `about:blank` (une erreur de console par bloc vide, m4).
+  expect(await EDITOR_OPTIONS.resolveFileUrl("")).toBe("");
+  for (const type of ["image", "video", "audio"] as const) {
+    const m = await mountEditor({ blocks: media(type, ""), editable: true });
+    await flush();
+    expect(blockOf(m, "f").querySelector("[src], [href]"), type).toBeNull();
+  }
+});

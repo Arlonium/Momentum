@@ -283,3 +283,14 @@ export const DuplicatePageIcon = () => (
     <path d="M16 8V4.5A1.5 1.5 0 0 0 14.5 3h-9A1.5 1.5 0 0 0 4 4.5v11A1.5 1.5 0 0 0 5.5 17H8" />
   </Icon>
 );
+
+// Fichiers (Task C8).
+
+/** « Télécharger » : une flèche vers un plateau, dans la barre de mise en forme d'un bloc de fichier. */
+export const DownloadIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M12 4v11" />
+    <path d="M7.5 11 12 15.5 16.5 11" />
+    <path d="M5 19.5h14" />
+  </Icon>
+);

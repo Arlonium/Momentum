@@ -17,7 +17,7 @@
 //
 // L'image, la vidéo et le son eux-mêmes sont chargés par BlockNote depuis ce que rend
 // `resolveFileUrl`, que l'éditeur règle sur `shownUrl` (`Editor.tsx`) : jamais l'adresse du document
-// telle quelle. Copié hors de l'éditeur, un bloc fichier ne porte de même qu'une adresse permise.
+// telle quelle. Copiés hors de l'éditeur, les quatre blocs ne portent de même qu'une adresse permise.
 import { defaultBlockSpecs } from "@blocknote/core";
 import { BLANK, isFilePath, plainName, shownUrl } from "../files";
 import { element } from "./richView";
@@ -103,11 +103,42 @@ function fileView(render: Render, self: unknown, block: Block, editor: unknown, 
   };
 }
 
+/**
+ * Suit l'adresse `url` d'un fichier nommé `name`, comme le lien d'un bloc (`offer`) : un fichier de
+ * l'instance est téléchargé sans quitter la page ; une adresse web s'ouvre dans un autre onglet, sans
+ * son ouvreur ni son référent ; toute autre adresse ne fait rien. Rend vrai si quelque chose a été
+ * suivi. Pour « Télécharger » de la barre de mise en forme (`Toolbar.tsx`, R681).
+ */
+export function followFile(url: unknown, name: string): boolean {
+  const href = shownUrl(url);
+  if (href === BLANK) return false;
+  if (isFilePath(url)) {
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = name;
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+  } else {
+    window.open(href, "_blank", "noopener,noreferrer");
+  }
+  return true;
+}
+
 type Spec = (typeof defaultBlockSpecs)["file" | "image" | "video" | "audio"];
 
-/** Le bloc `spec` de BlockNote, sa vue passée par `fileView`. */
+/**
+ * Le bloc `spec` de BlockNote : sa vue passée par `fileView`, et ce qu'il devient copié hors de
+ * l'éditeur (`toExternalHTML` : le presse-papiers, un export) passé par les mêmes règles : props lues
+ * d'après le schéma, et l'adresse que rend `shownUrl`, jamais celle du document ; pour une adresse
+ * qui n'est pas permise, le nom du fichier seul, en texte (R682). BlockNote écrivait l'adresse du
+ * document dans le `src` d'une image, d'une vidéo, d'un son, et dans le `href` d'un lien quand
+ * l'aperçu est masqué.
+ */
 function guarded<S extends Spec>(spec: S): S {
   const render = spec.implementation.render as unknown as Render;
+  const external = spec.implementation.toExternalHTML as unknown as Render | undefined;
   const schema = spec.config.propSchema as PropSchema;
   return {
     ...spec,
@@ -115,6 +146,16 @@ function guarded<S extends Spec>(spec: S): S {
       ...spec.implementation,
       render(this: unknown, block: Block, editor: unknown) {
         return fileView(render, this, block, editor, schema);
+      },
+      toExternalHTML(this: unknown, block: Block, editor: unknown) {
+        const props = cleanProps(block.props, schema);
+        const href = props.url === "" ? "" : shownUrl(props.url);
+        if (href === BLANK) {
+          const text = document.createElement("p");
+          text.textContent = (props.name as string) || "fichier";
+          return { dom: text };
+        }
+        return external?.call(this, { ...block, props: { ...props, url: href } }, editor);
       },
     },
   } as unknown as S;
@@ -127,27 +168,6 @@ export const Audio = () => guarded(defaultBlockSpecs.audio);
 
 /**
  * Le bloc fichier : celui de BlockNote (mêmes props, même `fileBlockAccept`, même lecture d'un HTML
- * collé), avec son lien pour télécharger. Copié hors de l'éditeur (`toExternalHTML`), il est un lien
- * vers une adresse permise, sinon son nom seul.
+ * collé), avec son lien pour télécharger.
  */
-export function FileBlock(): (typeof defaultBlockSpecs)["file"] {
-  const spec = guarded(defaultBlockSpecs.file);
-  const external = spec.implementation.toExternalHTML as unknown as Render | undefined;
-  const schema = spec.config.propSchema as PropSchema;
-  return {
-    ...spec,
-    implementation: {
-      ...spec.implementation,
-      toExternalHTML(this: unknown, block: Block, editor: unknown) {
-        const props = cleanProps(block.props, schema);
-        const href = shownUrl(props.url);
-        if (props.url !== "" && href === BLANK) {
-          const text = document.createElement("p");
-          text.textContent = (props.name as string) || "fichier";
-          return { dom: text };
-        }
-        return external?.call(this, { ...block, props: { ...props, url: props.url === "" ? "" : href } }, editor);
-      },
-    },
-  } as unknown as (typeof defaultBlockSpecs)["file"];
-}
+export const FileBlock = () => guarded(defaultBlockSpecs.file);
