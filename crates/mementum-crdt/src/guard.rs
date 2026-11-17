@@ -84,6 +84,7 @@
 //! et une suppression ne nomme que des identifiants. [`touched`] demande donc
 //! à yrs, la transaction validée, quels types elle a changés.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -100,7 +101,7 @@ use yrs::encoding::read::{Cursor, Read};
 use yrs::types::{TYPE_REFS_XML_ELEMENT, TYPE_REFS_XML_TEXT};
 use yrs::{ID, IdSet, MapRef, ReadTxn, StateVector, TransactionMut, XmlOut};
 
-use crate::attrs::{self, Key, Value};
+use crate::attrs::{self, Expectations, Key, Value};
 use crate::blocknote::BLOCK_CONTAINER;
 use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
@@ -773,6 +774,8 @@ impl Shape {
             /// Ce qu'est cet élément de la page, son origine.
             Outside(Id),
         }
+        /// La balise d'un élément jugé, et ce que ses attributs doivent être.
+        type Judged<'a> = Option<(Cow<'a, str>, Expectations)>;
         let mut findings = AttrFindings::default();
         if !self
             .inserts()
@@ -796,63 +799,104 @@ impl Shape {
             let at = ranges.partition_point(|r| r.1 <= clock);
             ranges.get(at).filter(|r| r.0 <= clock).map(|&(_, _, k)| k)
         };
-        let tags: HashMap<Id, Option<&str>> = inserts
-            .iter()
-            .filter(|(_, i)| i.type_ref.is_some())
-            .map(|(s, i)| (s.id, i.tag.as_deref()))
-            .collect();
-        let mut judge = |tag: &str, key: Key, value: Value, parent: Option<Id>| {
-            if !attrs::sound(tag, key, value) {
-                findings
-                    .refusal
-                    .get_or_insert_with(|| attrs::refusal(tag, key));
-                findings.unsound.extend(parent);
-            }
+        let covers = |s: &Struct, (client, clock): Id| {
+            s.id.0 == client && s.id.1 <= clock && clock - s.id.1 < s.len
         };
+        // Ce que sont les éléments placés par une origine, une fois cherché ; le chemin d'une
+        // recherche, repris d'un élément à l'autre (une allocation par élément coûtait 5 ms au
+        // chargement d'une page de 10 000 blocs).
         let mut places: Vec<Option<Place>> = vec![None; inserts.len()];
+        let mut path: Vec<usize> = Vec::new();
+        // Le dernier élément nommé, sa balise et ce que ses attributs doivent être (`None` : pas
+        // jugé) : les attributs d'un élément se suivent dans une mise à jour.
+        let mut last: Option<(Id, Judged<'_>)> = None;
+        let mut floor_of: (u64, u32) = (u64::MAX, 0);
         let mut lookups = 0;
         for start in 0..inserts.len() {
             let (s, insert) = inserts[start];
             let Some(value) = insert.value else { continue };
-            if s.id.1 + s.len <= floor.get(&ClientID::new(s.id.0)) {
-                continue;
-            }
-            let mut path = Vec::new();
-            let mut k = start;
-            let place = loop {
-                if let Some(place) = places[k] {
-                    break place;
-                }
-                let (_, at) = inserts[k];
-                path.push(k);
-                match (&at.parent, at.attr) {
-                    (Parent::Id(parent), Some(key)) => break Place::Entry(*parent, key),
-                    (Parent::Named(..) | Parent::Id(_), _) => break Place::Child,
-                    (Parent::Sibling(origin), _) => match find(*origin) {
-                        // Une chaîne plus longue que la mise à jour boucle : mise à jour invalide.
-                        Some(next) if next != k && path.len() <= inserts.len() => k = next,
-                        Some(_) => break Place::Child,
-                        None => break Place::Outside(*origin),
-                    },
+            let place = match (&insert.parent, insert.attr) {
+                (Parent::Id(parent), Some(key)) => Place::Entry(*parent, key),
+                (Parent::Named(..) | Parent::Id(_), _) => continue,
+                (Parent::Sibling(_), _) => {
+                    path.clear();
+                    let mut k = start;
+                    let place = loop {
+                        if let Some(place) = places[k] {
+                            break place;
+                        }
+                        let (_, at) = inserts[k];
+                        match (&at.parent, at.attr) {
+                            (Parent::Id(parent), Some(key)) => break Place::Entry(*parent, key),
+                            (Parent::Named(..) | Parent::Id(_), _) => break Place::Child,
+                            (Parent::Sibling(origin), _) => {
+                                path.push(k);
+                                // L'origine est le plus souvent l'élément d'avant.
+                                let next = match k.checked_sub(1) {
+                                    Some(before) if covers(inserts[before].0, *origin) => {
+                                        Some(before)
+                                    }
+                                    _ => find(*origin),
+                                };
+                                match next {
+                                    // Une chaîne plus longue que la mise à jour boucle : mise à
+                                    // jour invalide.
+                                    Some(next) if next != k && path.len() <= inserts.len() => {
+                                        k = next
+                                    }
+                                    Some(_) => break Place::Child,
+                                    None => break Place::Outside(*origin),
+                                }
+                            }
+                        }
+                    };
+                    for &k in &path {
+                        places[k] = Some(place);
+                    }
+                    place
                 }
             };
-            for k in path {
-                places[k] = Some(place);
+            if matches!(place, Place::Child) {
+                continue;
+            }
+            if floor_of.0 != s.id.0 {
+                floor_of = (s.id.0, floor.get(&ClientID::new(s.id.0)));
+            }
+            if s.id.1 + s.len <= floor_of.1 {
+                continue;
             }
             match place {
-                Place::Entry(parent, key) => match tags.get(&parent) {
-                    Some(Some(tag)) => judge(tag, key, value, Some(parent)),
-                    Some(None) => {}
-                    None => {
-                        if let Some(Some(tag)) = page_tag(parent) {
-                            judge(&tag, key, value, Some(parent));
-                        }
+                Place::Entry(parent, key) => {
+                    if last.as_ref().map(|(id, _)| *id) != Some(parent) {
+                        let tag = match find(parent) {
+                            Some(at) if inserts[at].0.id == parent => {
+                                inserts[at].1.tag.as_deref().map(Cow::Borrowed)
+                            }
+                            Some(_) => None,
+                            None => page_tag(parent)
+                                .flatten()
+                                .map(|tag| Cow::Owned(tag.to_string())),
+                        };
+                        let judged = tag.and_then(|tag| Some((attrs::expectations(&tag)?, tag)));
+                        last = Some((parent, judged.map(|(expected, tag)| (tag, expected))));
                     }
-                },
+                    if let Some((_, Some((tag, expected)))) = &last
+                        && !attrs::admitted(expected, key, value)
+                    {
+                        findings
+                            .refusal
+                            .get_or_insert_with(|| attrs::refusal(tag, key));
+                        findings.unsound.push(parent);
+                    }
+                }
                 Place::Outside(origin) if insert.any && lookups < MAX_PAGE_LOOKUPS => {
                     lookups += 1;
-                    if let Some((tag, key)) = page_entry(origin) {
-                        judge(&tag, key, value, None);
+                    if let Some((tag, key)) = page_entry(origin)
+                        && !attrs::sound(&tag, key, value)
+                    {
+                        findings
+                            .refusal
+                            .get_or_insert_with(|| attrs::refusal(&tag, key));
                     }
                 }
                 Place::Outside(_) | Place::Child => {}

@@ -233,26 +233,38 @@ pub(crate) fn judged(tag: &str) -> bool {
     table().contains_key(tag)
 }
 
-/// Ce qu'un attribut `key` d'un élément `tag` doit être ; `None` si l'élément n'est pas jugé.
-fn expected(tag: &str, key: Key) -> Option<Expect> {
-    let attrs = table().get(tag)?;
-    Some(match key {
+/// Ce que les attributs d'un élément jugé doivent être, par nom.
+pub(crate) type Expectations = &'static [(&'static str, Expect)];
+
+/// Ce que les attributs d'un élément `tag` doivent être ; `None` si l'élément n'est pas jugé.
+pub(crate) fn expectations(tag: &str) -> Option<Expectations> {
+    table().get(tag).map(Vec::as_slice)
+}
+
+/// Ce qu'un attribut `key` doit être, parmi ceux d'un élément jugé.
+fn expected(attrs: Expectations, key: Key) -> Expect {
+    match key {
         Key::Listed(name) => attrs
             .iter()
-            .find(|(n, _)| *n == name)
+            .find(|(n, _)| std::ptr::eq(*n, name) || *n == name)
             .map_or(Expect::Scalar, |(_, expect)| *expect),
         Key::Unlisted => Expect::Scalar,
-    })
+    }
+}
+
+/// Vrai si un élément dont les attributs doivent être `attrs` garde `key` de valeur `value`.
+pub(crate) fn admitted(attrs: Expectations, key: Key, value: Value) -> bool {
+    expected(attrs, key).admits(value)
 }
 
 /// Vrai si la page garde l'attribut `key` de valeur `value` sur un élément `tag`.
 pub(crate) fn sound(tag: &str, key: Key, value: Value) -> bool {
-    expected(tag, key).is_none_or(|expect| expect.admits(value))
+    expectations(tag).is_none_or(|attrs| admitted(attrs, key, value))
 }
 
 /// Le refus d'un attribut que la page ne garde pas (Ruling R689).
 pub(crate) fn refusal(tag: &str, key: Key) -> String {
-    let wanted = expected(tag, key).map_or("d'un autre type", Expect::name);
+    let wanted = expectations(tag).map_or("d'un autre type", |attrs| expected(attrs, key).name());
     match key {
         Key::Listed(name) => format!(
             "la mise à jour pose sur un élément « {tag} » un attribut « {name} » qui n'est pas \
