@@ -78,12 +78,50 @@ const pages = new Map<string, PageFiles>();
 const listeners = new Set<() => void>();
 let counter = 0;
 
+function notify(): void {
+  for (const listener of [...listeners]) listener();
+}
+
 function set(pageId: string, change: (files: PageFiles) => PageFiles): void {
   const files = pages.get(pageId);
   // Une page qu'on ne regarde pas (quittée, ou jamais ouverte) ne garde rien.
   if (files === undefined) return;
   pages.set(pageId, change(files));
-  for (const listener of [...listeners]) listener();
+  notify();
+}
+
+// Ce que la page dit sans alerter : un fichier d'une autre page rattaché à celle-ci (Task C9, R713).
+// Un état, qui part de lui-même.
+
+/** Une nouvelle de la page : un texte, montré quelques secondes. */
+export type Note = { readonly id: number; readonly text: string };
+
+/** Combien de temps une nouvelle reste (ms). */
+export const NOTE_MS = 8_000;
+
+const NO_NOTES: readonly Note[] = [];
+const notes = new Map<string, { shown: readonly Note[]; timers: Set<ReturnType<typeof setTimeout>> }>();
+
+/** Les nouvelles de la page `pageId` ; le même objet tant que rien n'y change. */
+export function notesOf(pageId: string): readonly Note[] {
+  return notes.get(pageId)?.shown ?? NO_NOTES;
+}
+
+/** Dit `text` sur la page `pageId`, si elle est ouverte, pendant `ms` : un état, pas une alerte. */
+export function sayNote(pageId: string, text: string, ms = NOTE_MS): void {
+  if (!pages.has(pageId)) return;
+  counter += 1;
+  const id = counter;
+  const entry = notes.get(pageId) ?? { shown: NO_NOTES, timers: new Set() };
+  notes.set(pageId, entry);
+  entry.shown = [...entry.shown, { id, text }];
+  const timer = setTimeout(() => {
+    entry.timers.delete(timer);
+    entry.shown = entry.shown.filter((note) => note.id !== id);
+    notify();
+  }, ms);
+  entry.timers.add(timer);
+  notify();
 }
 
 /** Ce que la page `pageId` montre de ses fichiers ; le même objet tant que rien n'y change. */
@@ -110,8 +148,10 @@ export function leaveFiles(pageId: string): void {
   const files = pages.get(pageId);
   if (files === undefined) return;
   pages.delete(pageId);
+  for (const timer of notes.get(pageId)?.timers ?? []) clearTimeout(timer);
+  notes.delete(pageId);
   for (const upload of files.uploads) upload.cancel();
-  for (const listener of [...listeners]) listener();
+  notify();
 }
 
 /** Dit `text` sur la page `pageId`, à la suite de ses refus, si elle est ouverte. */

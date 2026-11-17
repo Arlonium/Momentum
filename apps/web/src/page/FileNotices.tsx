@@ -1,5 +1,6 @@
 // Ce que la page dit de ses fichiers (Task C8, `editor/files.ts`) : les envois refusés ou interrompus,
-// en alerte, jusqu'à ce qu'on les ferme, et les envois en cours, chacun avec « Annuler ».
+// en alerte, jusqu'à ce qu'on les ferme, les nouvelles (un fichier d'une autre page rattaché à celle-ci,
+// Task C9 : un état, qui part seul), et les envois en cours, chacun avec « Annuler ».
 //
 // Rendu par `PageView` dans une boîte posée par-dessus la fenêtre, dans son coin bas droit (R675,
 // R683) : hors du flux, rien de la page ne bouge quand un envoi commence ou finit, et ni son titre ni
@@ -17,7 +18,7 @@
 // message fermé) le rend au texte de la page (`focusBack`). Échap ne ferme les messages que si le
 // focus est dedans : tapé ailleurs, il appartient à ce qu'il ferme (R632).
 import { useCallback, useLayoutEffect, useReducer, useRef, useSyncExternalStore } from "react";
-import { closeRefusals, filesOf, watchFiles } from "../editor/files";
+import { closeRefusals, filesOf, notesOf, watchFiles, type Note } from "../editor/files";
 import { CloseIcon } from "../icons";
 
 type Props = {
@@ -34,6 +35,11 @@ export function FileNotices({ pageId, focusBack }: Props) {
     watchFiles,
     useCallback(() => filesOf(pageId), [pageId]),
   );
+  /** Les nouvelles de la page (un fichier d'une autre page rattaché à celle-ci) : un état, qui part seul. */
+  const notes = useSyncExternalStore(
+    watchFiles,
+    useCallback(() => notesOf(pageId), [pageId]),
+  );
   const [, again] = useReducer((n: number) => n + 1, 0);
   /** Le pointeur est dans la boîte. */
   const hovered = useRef(false);
@@ -41,6 +47,8 @@ export function FileNotices({ pageId, focusBack }: Props) {
   const held = useRef(false);
   /** Les lignes montrées au dernier rendu, de la plus ancienne à la plus récente. */
   const kept = useRef<readonly Row[]>([]);
+  /** Les nouvelles montrées au dernier rendu. */
+  const keptNotes = useRef<readonly Note[]>([]);
 
   // Les lignes : les envois en cours ; figées tant que le pointeur ou le focus est dans la boîte.
   let rows: readonly Row[] = files.uploads;
@@ -52,7 +60,13 @@ export function FileNotices({ pageId, focusBack }: Props) {
     ];
   }
   kept.current = rows;
-  const empty = rows.length === 0 && files.refusals.length === 0;
+  // Les nouvelles, de même : figées tant que le pointeur ou le focus est dans la boîte.
+  let said: readonly Note[] = notes;
+  if (hovered.current || held.current) {
+    said = [...keptNotes.current, ...notes.filter((note) => !keptNotes.current.some((shown) => shown.id === note.id))];
+  }
+  keptNotes.current = said;
+  const empty = rows.length === 0 && files.refusals.length === 0 && said.length === 0;
   // La boîte partie, le pointeur n'y est plus (aucun événement ne le dirait).
   if (empty) hovered.current = false;
 
@@ -108,6 +122,16 @@ export function FileNotices({ pageId, focusBack }: Props) {
           >
             <CloseIcon />
           </button>
+        </div>
+      )}
+      {said.length > 0 && (
+        <div className="mm-file-notes">
+          {/* La plus récente en haut, comme les envois ; un état : ni alerte, ni focus pris. */}
+          {[...said].reverse().map((note) => (
+            <p key={note.id} role="status" dir="auto">
+              {note.text}
+            </p>
+          ))}
         </div>
       )}
       {rows.length > 0 && (

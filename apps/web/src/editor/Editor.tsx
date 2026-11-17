@@ -77,7 +77,7 @@ import { linkBound } from "./linkBound";
 import { guardedAwareness } from "./presenceGuard";
 import { schema } from "./schema";
 import { slashMenuItems } from "./slashItems";
-import { sessionPaste, sessionUploader, type PageUploads } from "./uploads";
+import { sessionDrop, sessionPaste, sessionUploader, type PageUploads } from "./uploads";
 import { MementumFormattingToolbar } from "./Toolbar";
 
 type Props = {
@@ -133,6 +133,7 @@ export function Editor({ session, fixture = null, onComment = null, mentions = n
     stop: AbortController;
     send?: ReturnType<typeof sessionUploader>;
     paste?: ReturnType<typeof sessionPaste>;
+    drop?: ReturnType<typeof sessionDrop>;
   } | null>(null);
   if (uploads.current?.session !== session) {
     const stop = new AbortController();
@@ -140,15 +141,18 @@ export function Editor({ session, fixture = null, onComment = null, mentions = n
     const send = sessionUploader(session, () => latestFiles.current, () => created.current, stop.signal);
     // Après un collage, les fichiers d'autres pages des blocs collés sont rattachés à celle-ci (C9).
     const paste = sessionPaste(session, () => latestFiles.current, stop.signal);
-    uploads.current = { session, stop, send, paste };
+    // De même pour un bloc glissé depuis un autre onglet (R714).
+    const drop = sessionDrop(session, () => latestFiles.current, () => created.current, stop.signal);
+    uploads.current = { session, stop, send, paste, drop };
   }
-  const { stop, send: uploadFile, paste: pasteHandler } = uploads.current;
+  const { stop, send: uploadFile, paste: pasteHandler, drop } = uploads.current;
   useEffect(() => () => stop.abort(), [stop]);
   const editor = useCreateBlockNote(
     withCollaboration({
       ...EDITOR_OPTIONS,
       ...(uploadFile ? { uploadFile } : {}),
       ...(pasteHandler ? { pasteHandler } : {}),
+      ...(drop ? { extensions: [...EDITOR_OPTIONS.extensions, drop] } : {}),
       collaboration: {
         fragment: session.doc.getXmlFragment(FRAGMENT),
         user: session.user,

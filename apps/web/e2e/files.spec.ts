@@ -780,6 +780,10 @@ test("pasted_image_is_seen_by_someone_who_cannot_read_its_first_page", async ({ 
   expect(await images(mona).getAttribute("src")).toBe(await images(tom).getAttribute("src"));
   expect(copies).toHaveLength(1);
   await expect(refusals(mona)).toHaveCount(0);
+  // La page dit le rattachement : un état, pas une alerte (R713).
+  await expect(mona.locator('.mm-file-notes [role="status"]')).toHaveText([
+    "Un fichier d'une autre page a été rattaché à celle-ci : ceux qui lisent cette page le voient.",
+  ]);
   // Le document ne nomme plus la page privée ; la page privée, elle, n'a pas changé.
   const mmd = await getMmd(aliceApi, shared.id);
   expect(mmd).toContain(`/api/v1/pages/${shared.id}/files/`);
@@ -856,4 +860,101 @@ test("a_pasted_file_of_a_page_one_cannot_read_stays_as_it_is_and_is_never_served
   await expectShown(images(again));
   expect(await images(again).getAttribute("src")).toBe(src);
   expect(reopened).toEqual([]);
+});
+
+// Tour de correction 1 (relecture de C9).
+
+/** Ce que la page dit d'un fichier rattaché (un état, pas une alerte). */
+const notes = (p: Page) => p.locator('.mm-file-notes [role="status"]');
+
+test("a_text_or_an_html_from_elsewhere_naming_a_private_file_copies_nothing", async ({ browser }) => {
+  // I1 : Mona lit une page privée ; on lui fait coller, dans la page d'équipe, un texte ou un HTML venu
+  // d'ailleurs qui nomme un fichier de cette page. Rien n'est recopié : Tom ne reçoit pas le fichier.
+  const { alice, bruno, aliceApi, src, shared } = await twoPages();
+  await putMmd(aliceApi, shared.id, ["Un", "", "Deux", ""].join(String.fromCharCode(10)));
+  const mona = await newUser(browser, alice);
+  const copies = watchCopies(mona);
+  await mona.goto(`/p/${shared.id}`);
+  await waitSynced(mona);
+  const pastes: [where: string, data: Record<string, string>][] = [
+    ["Un", { "text/plain": `![x](${src})` }],
+    ["Deux", { "text/html": `<img src="${src}" alt="x">` }],
+  ];
+  for (const [where, data] of pastes) {
+    await mona.locator(".mm-editor .bn-block-content", { hasText: where }).click();
+    await pasteData(mona, data);
+  }
+  // Barrière et témoin : les deux collages ont posé leur bloc, que Mona, qui lit la page privée, voit.
+  await expect(images(mona)).toHaveCount(2);
+  await expectShown(images(mona).first());
+  await expectShown(images(mona).last());
+  expect(copies).toEqual([]);
+  await expect(notes(mona)).toHaveCount(0);
+  const mmd = await getMmd(aliceApi, shared.id);
+  expect(mmd).toContain(src);
+  expect(mmd).not.toContain(`/pages/${shared.id}/files/`);
+  // Tom, qui ne lit pas la page privée : rien ne lui est servi.
+  const tom = await openPage(browser, shared.id, bruno);
+  await expect(images(tom)).toHaveCount(2);
+  expect(await tom.evaluate(async (url) => (await fetch(url)).status, src)).toBe(404);
+  await expect
+    .poll(() => images(tom).first().evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth === 0))
+    .toBe(true);
+});
+
+test("a_block_dragged_from_another_tab_is_attached_to_the_page_it_is_dropped_in", async ({ browser }) => {
+  // I2 : le bloc image de la page privée, glissé dans la page d'équipe ouverte dans un autre onglet (un
+  // dépôt de confiance, par CDP, qui porte ce que BlockNote met dans un glisser).
+  const { alice, bruno, aliceApi, first, src, shared } = await twoPages();
+  const context = await browser.newContext({ storageState: alice.storageState });
+  try {
+    const source = await context.newPage();
+    await source.goto(`/p/${first.id}`);
+    await waitSynced(source);
+    await expectShown(images(source));
+    const dragged = await source.evaluate(() => {
+      const editor = (window as unknown as { __mementum: { editor: { document: unknown[]; blocksToFullHTML(b: unknown[]): string; blocksToHTMLLossy(b: unknown[]): string } } })
+        .__mementum.editor;
+      return { internal: editor.blocksToFullHTML(editor.document), external: editor.blocksToHTMLLossy(editor.document) };
+    });
+    expect(dragged.internal).toContain(src);
+    const mona = await context.newPage();
+    const copies = watchCopies(mona);
+    await mona.goto(`/p/${shared.id}`);
+    await waitSynced(mona);
+    await mona.bringToFront();
+    const box = (await firstBlock(mona).boundingBox())!;
+    const at = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
+    const cdp = await context.newCDPSession(mona);
+    const data = {
+      items: [
+        { mimeType: "blocknote/html", data: dragged.internal },
+        { mimeType: "text/html", data: dragged.external },
+      ],
+      dragOperationsMask: 1,
+    };
+    for (const type of ["dragEnter", "dragOver", "drop"] as const) {
+      await cdp.send("Input.dispatchDragEvent", { type, ...at, data });
+    }
+    // Le bloc déposé est rattaché à la page d'équipe, et la page le dit, sans alerte.
+    await expect.poll(() => images(mona).getAttribute("src"), { timeout: 10_000 }).toContain(`/pages/${shared.id}/files/`);
+    expect(copies).toHaveLength(1);
+    expect(JSON.parse(copies[0])).toEqual({ pageId: first.id, fileId: src.split("/").pop() });
+    await expect(notes(mona)).toHaveText([
+      "Un fichier d'une autre page a été rattaché à celle-ci : ceux qui lisent cette page le voient.",
+    ]);
+    await expect(refusals(mona)).toHaveCount(0);
+    // Tom, qui ne lit pas la page privée, voit l'image.
+    const tom = await openPage(browser, shared.id, bruno);
+    await expectShown(images(tom));
+    // Elle survit à la suppression de la première page.
+    await source.close();
+    expect((await aliceApi.post(`/api/v1/pages/${first.id}/trash`)).ok()).toBe(true);
+    expect((await aliceApi.delete(`/api/v1/pages/${first.id}`)).status()).toBe(204);
+    await mona.reload();
+    await waitSynced(mona);
+    await expectShown(images(mona));
+  } finally {
+    await context.close();
+  }
 });

@@ -6,10 +6,10 @@ import type { FileInfo, PageNode } from "@mementum/protocol";
 import { act } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 import { ApiError } from "../api";
-import type { Seed } from "../test/editors";
+import { duo, exchange, storedProps, typeAtEnd, xml, type Seed } from "../test/editors";
 import { page } from "../test/pages";
 import { mountEditor, type Mounted } from "../test/richEditor";
-import { adoptingPaste, foreignFiles, MAX_ADOPTED_FILES, type AdoptOptions } from "./adopt";
+import { adoptForeignFiles, adoptingPaste, carriedFiles, foreignFiles, MAX_ADOPTED_FILES, watchPosed, type AdoptOptions } from "./adopt";
 import * as scan from "./fileBlocks";
 
 vi.mock("./fileBlocks", async (original) => {
@@ -36,11 +36,14 @@ async function bench(blocks: Seed, { editable = true, reread = async (): Promise
   const m = await mountEditor({ blocks, editable });
   const calls: Call[] = [];
   const said: string[] = [];
+  /** Les recopies réussies, telles que la page les dit. */
+  const adopted: string[] = [];
   const state = { rereads: 0, made: 0 };
   const controller = new AbortController();
   const options: AdoptOptions = {
     pageId: HERE,
     signal: controller.signal,
+    onAdopted: (message) => adopted.push(message),
     onRefused: (message) => said.push(message),
     reread: () => {
       state.rereads += 1;
@@ -74,13 +77,13 @@ async function bench(blocks: Seed, { editable = true, reread = async (): Promise
         defaultPasteHandler: () => {
           if (data["blocknote/html"] !== undefined) m.editor.pasteHTML(data["blocknote/html"], true);
           else if (data["text/html"] !== undefined) m.editor.pasteHTML(data["text/html"]);
-          else m.editor.pasteText(data["text/plain"] ?? "");
+          else m.editor.pasteMarkdown(data["text/markdown"] ?? data["text/plain"] ?? "");
           return true;
         },
       });
     });
   };
-  return { m, calls, said, state, controller, paste, options };
+  return { m, calls, said, adopted, state, controller, paste, options };
 }
 
 const X: Seed = [{ id: "x", type: "paragraph", content: "Bloc X" }];
@@ -168,6 +171,7 @@ test("a_pasted_file_of_another_page_is_copied_here_and_its_url_rewritten", async
     expect(block.props).toMatchObject({ name: "a.png", caption: "Vue du port" });
     expect(b.m.writes.length).toBe(before + 1);
     expect(b.said).toEqual([]);
+    expect(b.adopted).toEqual(["Un fichier d'une autre page a été rattaché à celle-ci : ceux qui lisent cette page le voient."]);
     expect(realErrors(b.m)).toEqual([]);
   }
 });
@@ -367,7 +371,6 @@ test("nothing_is_copied_from_a_read_only_editor", async () => {
   await new Promise((done) => setTimeout(done, 20));
   expect(gone.m.writes.length).toBe(before);
   expect(gone.calls).toHaveLength(1);
-  expect(gone.said).toEqual([]);
 });
 
 test("a_paste_of_more_files_than_the_bound_copies_the_first_and_says_so", async () => {
@@ -388,3 +391,182 @@ test("a_paste_of_more_files_than_the_bound_copies_the_first_and_says_so", async 
   expect(urls.filter((url) => url.includes(HERE))).toHaveLength(MAX_ADOPTED_FILES);
   expect(urls.slice(-3)).toEqual([1100, 1101, 1102].map((n) => pathOf(THERE, n)));
 }, 30_000);
+
+// Tour de correction 1 (relecture de C9).
+
+const ADOPTED_ONE = "Un fichier d'une autre page a été rattaché à celle-ci : ceux qui lisent cette page le voient.";
+
+test("only_a_clipboard_written_by_mementum_makes_a_file_be_copied_and_it_is_said", async () => {
+  // I1 : un texte, un Markdown ou un HTML venus d'ailleurs (un message, une page web) qui nomment le
+  // fichier d'une page privée ne font rien recopier : le bloc garde l'adresse, que le serveur juge.
+  const elsewhere: Record<string, string>[] = [
+    { "text/plain": `![x](${FOREIGN})` },
+    { "text/html": `<img src="${FOREIGN}" alt="x">` },
+    { "text/html": `<img src="${FOREIGN}">`, "text/plain": FOREIGN },
+    { "text/markdown": `![x](${FOREIGN})`, "text/plain": `![x](${FOREIGN})` },
+  ];
+  for (const data of elsewhere) {
+    const b = await bench(X);
+    await b.paste(data);
+    const where = Object.keys(data).join(", ");
+    // Témoin : le collage a bien posé un bloc qui nomme ce fichier.
+    expect(fileUrls(b.m), where).toEqual([["image", FOREIGN]]);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(b.calls, where).toEqual([]);
+    expect(vi.mocked(scan.blocksNaming), where).not.toHaveBeenCalled();
+    expect([b.adopted, b.said], where).toEqual([[], []]);
+  }
+  // Un bloc de Mementum qui ne nomme aucun fichier, à côté d'un texte qui en nomme un : seul le type de
+  // Mementum est lu, la page n'est pas parcourue.
+  const mixed = await bench(X);
+  await mixed.paste({ ...(await copied([{ type: "paragraph", content: "Du texte" }])), "text/plain": FOREIGN, "text/html": `<img src="${FOREIGN}">` });
+  expect(vi.mocked(scan.blocksNaming)).not.toHaveBeenCalled();
+  // Le presse-papiers d'un bloc copié dans Mementum (`blocknote/html`) : recopié, et dit.
+  const b = await bench(X);
+  await b.paste({ ...(await copied([image(FOREIGN)])), "text/html": `<img src="${FOREIGN}">`, "text/plain": FOREIGN });
+  await until(() => b.calls.length === 1, "la recopie");
+  expect(b.adopted).toEqual([]);
+  await act(async () => b.calls[0].answer());
+  await until(() => b.adopted.length === 1, "le message");
+  expect(b.adopted).toEqual([ADOPTED_ONE]);
+  expect(b.said).toEqual([]);
+});
+
+test("several_files_attached_by_one_paste_are_said_once_with_their_count", async () => {
+  const b = await bench(X);
+  await b.paste(await copied([image(FOREIGN), image(FOREIGN), image(pathOf(THERE, 102)), image(pathOf(THERE, 103))]));
+  for (let i = 0; i < 3; i++) {
+    await until(() => b.calls.length === i + 1, `la recopie ${i + 1}`);
+    // La deuxième est refusée par `invalid_source` : elle ne compte pas, et rien n'en est dit.
+    await act(async () => (i === 1 ? b.calls[i].fail(new ApiError(422, "invalid_source", "introuvable")) : b.calls[i].answer()));
+  }
+  await until(() => b.adopted.length === 1, "le message");
+  expect(b.adopted).toEqual([
+    "2 fichiers d'autres pages ont été rattachés à celle-ci : ceux qui lisent cette page les voient.",
+  ]);
+  expect(b.said).toEqual([]);
+});
+
+test("ctrl_z_after_the_copy_takes_the_paste_away_at_once", async () => {
+  // m1 : la récriture de l'adresse est hors de l'historique : une annulation retire le collage, elle ne
+  // rend pas au bloc l'adresse de sa première page (que les autres ne liraient plus).
+  const b = await bench(X);
+  await b.paste(await copied([image(FOREIGN)]));
+  await until(() => b.calls.length === 1, "la recopie");
+  // Au-delà du délai de regroupement de l'annulation de Yjs (500 ms) : la récriture serait un pas à elle.
+  await new Promise((done) => setTimeout(done, 600));
+  await act(async () => b.calls[0].answer());
+  await until(() => fileUrls(b.m)[0][1] === pathOf(HERE, 901), "l'adresse récrite");
+  await act(async () => b.m.editor.undo());
+  expect(fileUrls(b.m)).toEqual([]);
+  expect(b.m.text()).toContain("Bloc X");
+  // Rétablir : le bloc revient avec l'adresse rattachée, pas celle de la première page.
+  await act(async () => b.m.editor.redo());
+  expect(fileUrls(b.m)).toEqual([["image", pathOf(HERE, 901)]]);
+});
+
+test("a_copy_stopped_because_the_editor_no_longer_writes_is_said", async () => {
+  // m2, m4 : la session recréée pendant la recopie (son signal), ou l'éditeur passé en lecture seule :
+  // plus rien n'est écrit, et la page dit que les fichiers restent ceux de leur première page.
+  const KEPT_TWO =
+    "2 fichiers collés n'ont pas pu être rattachés à cette page : ils restent ceux de leur page d'origine, et ne seront vus que de qui peut la lire.";
+  for (const way of ["signal", "lecture seule"] as const) {
+    const b = await bench(X);
+    await b.paste(await copied([image(FOREIGN), image(pathOf(THERE, 102))]));
+    await until(() => b.calls.length === 1, "la recopie");
+    const before = b.m.writes.length;
+    if (way === "signal") b.controller.abort();
+    else b.m.editor.isEditable = false;
+    await act(async () => b.calls[0].answer());
+    await until(() => b.said.length === 1, `le message (${way})`);
+    expect(b.said, way).toEqual([KEPT_TWO]);
+    expect(b.m.writes.length, way).toBe(before);
+    expect(b.calls, way).toHaveLength(1);
+    expect(b.adopted, way).toEqual([]);
+    expect(fileUrls(b.m).map(([, url]) => url), way).toEqual([FOREIGN, pathOf(THERE, 102)]);
+  }
+});
+
+test("blocks_dropped_from_another_tab_are_attached_like_pasted_ones", async () => {
+  // I2 : le dépôt d'un bloc glissé d'un autre onglet pose ses blocs après que le geste a été vu
+  // (`watchPosed`, que le greffon du dépôt appelle avant, puis après).
+  const b = await bench([...X, { id: "old", ...image(FOREIGN) }] as Seed);
+  const data = await copied([image(FOREIGN)]);
+  const transfer = { types: Object.keys(data), getData: (type: string) => data[type] ?? "" };
+  const posed = watchPosed(b.m.editor, carriedFiles(transfer, HERE), b.options);
+  await act(async () => {
+    b.m.editor.insertBlocks([{ id: "new", ...image(FOREIGN) }] as never, "x", "after");
+    posed();
+  });
+  await until(() => b.calls.length === 1, "la recopie");
+  await act(async () => b.calls[0].answer());
+  await until(() => b.adopted.length === 1, "le message");
+  // Le bloc déposé est rattaché ; celui qui était là garde son adresse.
+  expect(b.m.editor.getBlock("new")!.props).toMatchObject({ url: pathOf(HERE, 901) });
+  expect(b.m.editor.getBlock("old")!.props).toMatchObject({ url: FOREIGN });
+  // Un dépôt qui ne porte pas un bloc de Mementum, ou un fichier de cette page : rien.
+  expect(carriedFiles({ types: ["text/html"], getData: () => `<img src="${FOREIGN}">` }, HERE).size).toBe(0);
+  expect(carriedFiles({ types: ["blocknote/html"], getData: () => `<img data-url="${OWN}">` }, HERE).size).toBe(0);
+  expect(carriedFiles(null, HERE).size).toBe(0);
+});
+
+// À deux (banc `test/editors.ts`) : la récriture, écrite hors de l'historique de l'annulation, reste une
+// écriture d'attribut comme une autre pour les autres.
+
+function duoOptions(release: Promise<void>, said: string[]): AdoptOptions {
+  return {
+    pageId: HERE,
+    signal: new AbortController().signal,
+    onAdopted: () => {},
+    onRefused: (message) => said.push(message),
+    reread: async () => page(HERE),
+    copy: async () => {
+      await release;
+      return { id: uuid(901), url: pathOf(HERE, 901), name: "a.png", size: 3, mime: "image/png" };
+    },
+  };
+}
+const POSED: Seed = [
+  { id: "x", type: "paragraph", content: "Bloc X" },
+  { id: "f", type: "image", props: { url: FOREIGN, name: "a.png" } },
+  { id: "z", type: "paragraph", content: "Bloc Z" },
+] as Seed;
+
+test("the_rewrite_out_of_the_undo_history_changes_nothing_else_for_the_others", async () => {
+  for (const [monaId, tomId] of [[5, 9], [9, 5]] as const) {
+    const s = await duo(POSED, monaId, tomId);
+    let release!: () => void;
+    const done = adoptForeignFiles(s.mona.editor, new Map([["f", FOREIGN]]), duoOptions(new Promise((r) => (release = r)), []));
+    // Pendant la recopie, Tom pose une légende sur le bloc et tape à côté.
+    s.tom.editor.updateBlock("f", { props: { caption: "Vue du port" } } as never);
+    typeAtEnd(s.tom, "z", " tapé par Tom");
+    release();
+    expect(await done).toBe(1);
+    await exchange(s.server, [s.mona, s.tom]);
+    for (const doc of [s.server, s.mona.doc, s.tom.doc]) {
+      expect(storedProps(doc, "f"), `${monaId} ${tomId}`).toMatchObject({ url: pathOf(HERE, 901), caption: "Vue du port", name: "a.png" });
+      expect(xml(doc)).toBe(xml(s.server));
+      expect(xml(doc)).toContain("Bloc Z tapé par Tom");
+    }
+  }
+});
+
+test("of_an_address_another_sets_during_the_copy_and_the_rewrite_one_remains_everywhere", async () => {
+  // Limite écrite (R707) : Tom remplace le fichier du bloc pendant la recopie de Mona, qui ne l'a pas
+  // encore reçu. Deux écritures du même attribut : celle du plus grand identifiant de client reste,
+  // la même partout ; dans un ordre sur deux, l'adresse de Tom est donc récrite.
+  const kept: unknown[] = [];
+  for (const [monaId, tomId] of [[5, 9], [9, 5]] as const) {
+    const s = await duo(POSED, monaId, tomId);
+    let release!: () => void;
+    const done = adoptForeignFiles(s.mona.editor, new Map([["f", FOREIGN]]), duoOptions(new Promise((r) => (release = r)), []));
+    s.tom.editor.updateBlock("f", { props: { url: "https://exemple.fr/de-tom.png" } } as never);
+    release();
+    await done;
+    await exchange(s.server, [s.mona, s.tom]);
+    const url = storedProps(s.server, "f").url;
+    expect([storedProps(s.mona.doc, "f").url, storedProps(s.tom.doc, "f").url]).toEqual([url, url]);
+    kept.push(url);
+  }
+  expect(kept).toEqual(["https://exemple.fr/de-tom.png", pathOf(HERE, 901)]);
+});

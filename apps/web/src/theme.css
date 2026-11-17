@@ -3631,6 +3631,7 @@ button.mm-reaction:hover {
 }
 
 .mm-file-uploads,
+.mm-file-notes,
 .mm-file-refusals {
   box-sizing: border-box;
   margin: 0;
@@ -3682,6 +3683,19 @@ button.mm-reaction:hover {
 }
 
 .mm-file-refusal-texts p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Une nouvelle de la page (un fichier d'une autre page rattaché à celle-ci, Task C9) : un état. */
+.mm-file-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--mm-background);
+}
+
+.mm-file-notes p {
   margin: 0;
   overflow-wrap: anywhere;
 }

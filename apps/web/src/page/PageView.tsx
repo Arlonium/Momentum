@@ -30,7 +30,7 @@ import { CommentsPanel } from "../comments/CommentsPanel";
 import { useComments } from "../comments/useComments";
 import { useCommentsPanel } from "../comments/useCommentsPanel";
 import { CollabSession } from "../editor/collab";
-import { enterFiles, leaveFiles, sayRefusal } from "../editor/files";
+import { enterFiles, leaveFiles, sayNote, sayRefusal } from "../editor/files";
 import { requestedFixture } from "../editor/fixtures";
 import { LazyEditor } from "../editor/LazyEditor";
 import { ReaderBanner, ReadOnlyBanner } from "../editor/ReadOnlyBanner";
@@ -248,7 +248,12 @@ export function PageView({
   // De quoi envoyer, pour l'éditeur : ce que la page dit d'un envoi qui n'aboutit pas, et de quoi la
   // relire (un refus, ou une coupure, disent qu'un droit ou la page ont changé).
   const files = useMemo(
-    () => ({ onRefused: (message: string) => sayRefusal(id, message), reread }),
+    () => ({
+      onRefused: (message: string) => sayRefusal(id, message),
+      // Un fichier d'une autre page rattaché à celle-ci par un collage : un état, pas une alerte (C9).
+      onAdopted: (message: string) => sayNote(id, message),
+      reread,
+    }),
     [id, reread],
   );
   // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.

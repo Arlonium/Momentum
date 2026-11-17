@@ -667,3 +667,28 @@ test("sound_and_video_share_their_containers_and_the_server_type_picks_between_t
     expect(await done, `${block} ${mime}`).toEqual(expected === undefined ? { props } : { type: expected, props });
   }
 });
+
+test("a_note_of_a_page_is_shown_a_while_then_leaves_and_leaves_with_the_page", async () => {
+  // Task C9 : un fichier d'une autre page rattaché à celle-ci se dit par une nouvelle, qui part seule.
+  const { notesOf, sayNote } = await import("./files");
+  sayNote(PAGE, "avant l'ouverture");
+  expect(notesOf(PAGE)).toEqual([]);
+  enterFiles(PAGE);
+  let changes = 0;
+  const stop = watchFiles(() => (changes += 1));
+  sayNote(PAGE, "une", 30);
+  sayNote(PAGE, "deux", 60_000);
+  expect(notesOf(PAGE).map((note) => note.text)).toEqual(["une", "deux"]);
+  expect(notesOf(PAGE)).toBe(notesOf(PAGE));
+  // Ce n'est ni un refus, ni un envoi.
+  expect(filesOf(PAGE)).toEqual({ uploads: [], refusals: [] });
+  await until(() => notesOf(PAGE).length === 1, "la première nouvelle partie");
+  expect(notesOf(PAGE).map((note) => note.text)).toEqual(["deux"]);
+  expect(changes).toBe(3);
+  // La page quittée : plus rien, et le minuteur de la seconde ne dit plus rien.
+  leaveFiles(PAGE);
+  expect(notesOf(PAGE)).toEqual([]);
+  sayNote(PAGE, "après");
+  expect(notesOf(PAGE)).toEqual([]);
+  stop();
+});

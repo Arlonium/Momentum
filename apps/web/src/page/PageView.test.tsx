@@ -649,3 +649,37 @@ test("nothing_moves_in_the_box_of_uploads_under_the_pointer_or_the_focus", async
     await until(host, () => host.querySelector(".mm-file-notices") === null, "la boîte partie");
   }
 });
+
+test("page_view_says_a_file_attached_from_another_page_as_a_status_that_leaves_by_itself", async () => {
+  // Task C9 (R713) : une recopie réussie est dite, sans alerte et sans prendre le focus ; la boîte est
+  // figée sous le pointeur, comme pour les envois.
+  const { notesOf, sayNote } = await import("../editor/files");
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  const title = host.querySelector<HTMLElement>(".mm-title-input")!;
+  title.focus();
+  const files = probe.files[probe.files.length - 1] as { onAdopted: (message: string) => void };
+  await act(async () => files.onAdopted("Un fichier d'une autre page a été rattaché à celle-ci : ceux qui lisent cette page le voient."));
+  const notes = () => [...host.querySelectorAll('.mm-file-notes [role="status"]')].map((p) => p.textContent);
+  expect(notes()).toEqual(["Un fichier d'une autre page a été rattaché à celle-ci : ceux qui lisent cette page le voient."]);
+  expect(host.querySelector('.mm-file-notices [role="alert"]')).toBeNull();
+  expect(document.activeElement).toBe(title);
+  expect(notesOf("x")).toHaveLength(1);
+  // Elle part seule ; sous le pointeur, elle reste jusqu'à ce qu'il sorte.
+  await act(async () => sayNote("x", "une nouvelle courte", 30));
+  const box = host.querySelector<HTMLElement>(".mm-file-notices")!;
+  await act(async () => {
+    box.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }));
+  });
+  await until(host, () => notesOf("x").length === 1, "la nouvelle courte partie du magasin");
+  expect(notes()).toHaveLength(2);
+  await act(async () => {
+    box.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }));
+  });
+  expect(notes()).toHaveLength(1);
+  // Témoin : sans le pointeur, elle part de la page dès qu'elle part du magasin.
+  await act(async () => sayNote("x", "une autre", 30));
+  expect(notes()).toHaveLength(2);
+  await until(host, () => notes().length === 1, "la nouvelle partie de la page");
+});

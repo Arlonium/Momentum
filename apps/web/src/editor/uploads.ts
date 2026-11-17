@@ -3,13 +3,17 @@
 // fichier). L'envoi lui-même est dans
 // `files.ts`, qui ne sait rien de l'éditeur.
 import { copyFile } from "../api";
-import { adoptingPaste } from "./adopt";
+import { adoptingPaste, type AdoptOptions } from "./adopt";
+import { dropAdoption } from "./adoptDrop";
 import { textProp } from "./blocks/props";
 import type { MementumEditor } from "./debug";
 import { fileLimits, uploader, type UploaderOptions } from "./files";
 
 /** Ce que la page donne à l'éditeur pour envoyer : ce qu'elle dit d'un envoi, et de quoi la relire. */
-export type PageUploads = Pick<UploaderOptions, "onRefused" | "reread">;
+export type PageUploads = Pick<UploaderOptions, "onRefused" | "reread"> & {
+  /** Un fichier d'une autre page a été rattaché à celle-ci : ce que la page en dit (Task C9). */
+  onAdopted?: (message: string) => void;
+};
 
 /**
  * De quoi envoyer un fichier, pour l'éditeur de `session` (l'option `uploadFile` de BlockNote), ou
@@ -51,13 +55,33 @@ export function sessionPaste(
   signal: AbortSignal,
 ): ReturnType<typeof adoptingPaste> | undefined {
   if (session.readOnly || files() === null) return undefined;
-  return adoptingPaste({
-    pageId: session.pageId,
+  return adoptingPaste(adoption(session.pageId, files, signal));
+}
+
+/** De quoi rattacher à la page `pageId` les fichiers d'autres pages : la recopie, et ce que la page en dit. */
+function adoption(pageId: string, files: () => PageUploads | null, signal: AbortSignal): AdoptOptions {
+  return {
+    pageId,
     copy: copyFile,
     signal,
+    onAdopted: (message) => files()?.onAdopted?.(message),
     onRefused: (message) => files()?.onRefused(message),
     reread: () => files()?.reread() ?? Promise.resolve(undefined),
-  });
+  };
+}
+
+/**
+ * L'extension qui rattache à la page les fichiers des blocs **déposés** depuis un autre onglet
+ * (`adoptDrop.ts`, R714), ou `undefined` : comme le collage, jamais pour une session en lecture seule.
+ */
+export function sessionDrop(
+  session: { readOnly: boolean; pageId: string },
+  files: () => PageUploads | null,
+  editor: () => MementumEditor | null,
+  signal: AbortSignal,
+): ReturnType<typeof dropAdoption> | undefined {
+  if (session.readOnly || files() === null) return undefined;
+  return dropAdoption(editor, adoption(session.pageId, files, signal));
 }
 
 /**

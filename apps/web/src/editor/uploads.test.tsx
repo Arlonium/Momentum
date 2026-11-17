@@ -5,7 +5,7 @@ import { act } from "react";
 import { expect, test } from "vitest";
 import { duo, exchange, stored, storedProps, tab, typeAtEnd, xml, type Seed } from "../test/editors";
 import { mountEditor } from "../test/richEditor";
-import { forgetUploadName, sessionPaste, sessionUploader } from "./uploads";
+import { forgetUploadName, sessionDrop, sessionPaste, sessionUploader } from "./uploads";
 
 const PAGE = "0192f0c1-0000-7000-8000-000000000001";
 const PATH = `/api/v1/pages/${PAGE}/files/0192f0c1-0000-7000-8000-0000000000f1`;
@@ -30,7 +30,10 @@ test("a_read_only_session_pastes_as_blocknote_does_and_copies_no_file", () => {
   const signal = new AbortController().signal;
   expect(sessionPaste(session(true), () => files, signal)).toBeUndefined();
   expect(sessionPaste(session(false), () => null, signal)).toBeUndefined();
-  expect(typeof sessionPaste(session(false), () => files, signal)).toBe("function");
+  expect(typeof sessionPaste(session(false), () => files, signal)).toBe("function");  // De même pour le dépôt d'un bloc glissé d'un autre onglet (R714).
+  expect(sessionDrop(session(true), () => files, () => null, signal)).toBeUndefined();
+  expect(sessionDrop(session(false), () => null, () => null, signal)).toBeUndefined();
+  expect(sessionDrop(session(false), () => files, () => null, signal)).toBeDefined();
 });
 
 /** Le bloc qu'un dépôt de `photo.png` a posé, en attente de son envoi. */
