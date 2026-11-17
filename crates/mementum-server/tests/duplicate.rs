@@ -862,6 +862,89 @@ async fn a_file_block_without_address_is_copied_without_its_name() {
     assert_eq!(mmd(mona, page).await, original_mmd);
 }
 
+/// Constat M3 de la relecture finale de la partie B (Ruling R754) : la copie ne reconnaît
+/// l'adresse d'un fichier de la page que sous la forme que l'éditeur montre (`filePath` du client,
+/// table `spec/files/addresses.json`) : identifiants à tirets, sans casse, rien avant ni après.
+/// Sous une forme que la route du fichier sert pourtant (sans tirets, entre accolades, en
+/// `urn:uuid:`), ou avec un hôte, une requête, un fragment, un segment de plus, l'adresse reste
+/// telle quelle dans la copie, sans attache, comme une adresse externe ; dans un bloc comme dans
+/// un lien. La forme canonique, et la même en majuscules, sont récrites vers une seule attache de
+/// la copie. Les routes ne changent pas : elles servent encore ces formes.
+#[tokio::test]
+async fn only_an_address_the_editor_shows_is_carried_by_the_copy() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+    let page = team.page(None, "Adresses", &[members(Level::Full)]).await;
+    let own = uploaded(&mona.browser, page, "photo.png", PNG).await;
+    let file = Uuid::parse_str(own["id"].as_str().unwrap()).unwrap();
+    let canonical = own["url"].as_str().unwrap().to_string();
+    assert_eq!(canonical, format!("/api/v1/pages/{page}/files/{file}"));
+    let at = |page: &dyn std::fmt::Display, file: &dyn std::fmt::Display| {
+        format!("/api/v1/pages/{page}/files/{file}")
+    };
+    let upper = at(
+        &page.to_string().to_uppercase(),
+        &file.to_string().to_uppercase(),
+    );
+    let left = [
+        at(&page.simple(), &file),
+        at(&page, &file.simple()),
+        at(&page.braced(), &file),
+        at(&page, &file.braced()),
+        at(&page.urn(), &file),
+        at(&page, &file.urn()),
+        format!("https://exemple.fr{canonical}"),
+        format!("{canonical}?x=1"),
+        format!("{canonical}#a"),
+        format!("{canonical}/x"),
+    ];
+    // Les routes ne changent pas : la page et le fichier se lisent sous ces formes.
+    for served in [&upper, &left[0], &left[1], &left[4], &left[5]] {
+        let reply = mona.browser.get(served).await;
+        reply.assert_status(StatusCode::OK);
+        assert_eq!(reply.body.as_ref(), PNG, "{served}");
+    }
+    let mut content = String::new();
+    for url in [&canonical, &upper].into_iter().chain(&left) {
+        content.push_str(&format!("<file src=\"{url}\" name=\"photo.png\"/>\n\n"));
+    }
+    content.push_str(&format!("Voir [ici]({upper}) et [là]({}).\n", left[0]));
+    mona.put_mmd(&page.to_string(), content)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let original: Vec<String> = [&canonical, &upper]
+        .into_iter()
+        .chain(&left)
+        .cloned()
+        .collect();
+    assert_eq!(urls(&team, page).await, original, "précondition");
+
+    let copy = duplicated(mona, page).await;
+    let copied = urls(&team, &copy.id).await;
+    let prefix = format!("/api/v1/pages/{}/files/", copy.id);
+    let attached = copied[0]
+        .strip_prefix(&prefix)
+        .unwrap_or_else(|| panic!("la forme canonique est récrite : {}", copied[0]));
+    assert_ne!(attached, file.to_string(), "une attache de la copie");
+    assert_eq!(copied[1], copied[0], "en majuscules : la même attache");
+    assert_eq!(
+        &copied[2..],
+        &left,
+        "les autres formes restent telles quelles"
+    );
+    assert_eq!(count_of(&t, "attachments", "node_id", &copy.id).await, 1);
+    let text = mmd(mona, &copy.id).await;
+    assert!(
+        text.contains(&format!("[ici]({})", copied[0])),
+        "un lien suit la même règle : {text}"
+    );
+    assert!(text.contains(&format!("[là]({})", left[0])), "{text}");
+    let served = mona.browser.get(&copied[0]).await;
+    served.assert_status(StatusCode::OK);
+    assert_eq!(served.body.as_ref(), PNG);
+}
+
 /// La copie ne reprend ni les fils de commentaires, ni les versions, ni les favoris, ni les accès
 /// nommés de l'original ; lui les garde tous.
 #[tokio::test]

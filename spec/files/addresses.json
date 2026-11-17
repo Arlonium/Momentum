@@ -1,0 +1,190 @@
+{
+  "about": "L'adresse d'un fichier de l'instance, telle qu'un bloc ou un lien la porte dans un document (Rulings R668, R754) : le chemin exact /api/v1/pages/<uuid>/files/<uuid>, chaque identifiant écrit à tirets (8-4-4-4-12), en chiffres hexadécimaux sans casse ; rien avant, rien après. « names » : la page et le fichier qu'elle nomme, en minuscules ; null : ce n'est pas l'adresse d'un fichier. Une seule règle, lue par deux tests : filePath du client (apps/web/src/editor/fileAddresses.test.ts) et file_address du serveur (crates/mementum-server/src/routes/duplicate.rs, test file_address_follows_the_shared_cases). Écrit à la main ; un cas neuf vaut pour les deux.",
+  "cases": [
+    {
+      "why": "la forme canonique : à tirets, en minuscules",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": { "page": "0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d", "file": "0193b2c6-0a1b-7c2d-8e3f-405162738495" }
+    },
+    {
+      "why": "à tirets, en majuscules (R668 : sans casse)",
+      "address": "/api/v1/pages/0193B2C4-9E8F-7A6B-8C5D-4E3F2A1B0C9D/files/0193B2C6-0A1B-7C2D-8E3F-405162738495",
+      "names": { "page": "0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d", "file": "0193b2c6-0a1b-7c2d-8e3f-405162738495" }
+    },
+    {
+      "why": "à tirets, casse mêlée",
+      "address": "/api/v1/pages/0193b2C4-9e8F-7a6b-8C5d-4e3f2A1b0c9D/files/0193b2c6-0A1b-7c2d-8e3F-405162738495",
+      "names": { "page": "0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d", "file": "0193b2c6-0a1b-7c2d-8e3f-405162738495" }
+    },
+    {
+      "why": "la page sans tirets",
+      "address": "/api/v1/pages/0193b2c49e8f7a6b8c5d4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "le fichier sans tirets",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c60a1b7c2d8e3f405162738495",
+      "names": null
+    },
+    {
+      "why": "les deux sans tirets",
+      "address": "/api/v1/pages/0193b2c49e8f7a6b8c5d4e3f2a1b0c9d/files/0193b2c60a1b7c2d8e3f405162738495",
+      "names": null
+    },
+    {
+      "why": "la page entre accolades",
+      "address": "/api/v1/pages/{0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d}/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "le fichier entre accolades",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/{0193b2c6-0a1b-7c2d-8e3f-405162738495}",
+      "names": null
+    },
+    {
+      "why": "la page en urn:uuid:",
+      "address": "/api/v1/pages/urn:uuid:0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "le fichier en urn:uuid:",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/urn:uuid:0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "un tiret mal placé",
+      "address": "/api/v1/pages/0193b2c-49e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "un caractère qui n'est pas un chiffre hexadécimal",
+      "address": "/api/v1/pages/0193b2cg-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "un identifiant trop court",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-40516273849",
+      "names": null
+    },
+    {
+      "why": "un chiffre encodé en %",
+      "address": "/api/v1/pages/%30193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "un identifiant vide",
+      "address": "/api/v1/pages//files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "un hôte",
+      "address": "https://exemple.fr/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "l'hôte de l'instance",
+      "address": "http://localhost/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "un hôte sans schéma",
+      "address": "//exemple.fr/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "une requête",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495?x=1",
+      "names": null
+    },
+    {
+      "why": "une requête vide",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495?",
+      "names": null
+    },
+    {
+      "why": "un fragment",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495#a",
+      "names": null
+    },
+    {
+      "why": "un segment de plus après le fichier",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495/x",
+      "names": null
+    },
+    {
+      "why": "une barre oblique finale",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495/",
+      "names": null
+    },
+    {
+      "why": "un segment de plus avant /files/",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/x/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "deux fois /files/",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "un « .. »",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/../0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "une espace en tête",
+      "address": " /api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "une espace en fin",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495 ",
+      "names": null
+    },
+    {
+      "why": "un saut de ligne final",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495\n",
+      "names": null
+    },
+    {
+      "why": "une tabulation en tête",
+      "address": "\t/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "un chemin relatif",
+      "address": "api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "des barres obliques inverses",
+      "address": "\\api\\v1\\pages\\0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d\\files\\0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "le chemin en majuscules",
+      "address": "/API/V1/PAGES/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/FILES/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "une autre version de l'API",
+      "address": "/api/v2/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "une autre route de la page",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/versions/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "names": null
+    },
+    {
+      "why": "la route des recopies",
+      "address": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/copies",
+      "names": null
+    },
+    {
+      "why": "vide",
+      "address": "",
+      "names": null
+    }
+  ]
+}

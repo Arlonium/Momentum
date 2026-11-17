@@ -271,12 +271,29 @@ fn copy_title(title: &str) -> String {
     format!("{}{COPY_SUFFIX}", kept.trim_end())
 }
 
-/// L'attache que nomme `url`, si c'est exactement l'adresse d'un fichier de la page `page` :
-/// `/api/v1/pages/<page>/files/<attache>`, sans rien avant ni après.
+/// La page et l'attache que nomme `url`, si c'est exactement l'adresse d'un fichier, sous la
+/// forme que l'éditeur montre (Ruling R754) : `/api/v1/pages/<page>/files/<attache>`, sans rien
+/// avant ni après, chaque identifiant à tirets, en chiffres hexadécimaux sans casse. C'est la
+/// règle de `filePath` du client (`apps/web/src/editor/files.ts`) : les deux lisent la table de
+/// cas `spec/files/addresses.json`. Les routes lisent plus large (`Uuid::parse_str` : sans
+/// tirets, entre accolades, `urn:uuid:`) ; une adresse sous une de ces formes, que l'éditeur ne
+/// montre pas, n'est pas celle d'un fichier pour la copie.
+fn file_address(url: &str) -> Option<(Uuid, Uuid)> {
+    let (page, file) = url.strip_prefix("/api/v1/pages/")?.split_once("/files/")?;
+    Some((hyphenated(page)?, hyphenated(file)?))
+}
+
+/// L'identifiant `id`, s'il est écrit à tirets (8-4-4-4-12 chiffres hexadécimaux, sans casse) :
+/// de 36 octets, `Uuid::parse_str` ne lit que cette forme ; la table de cas le vérifie.
+fn hyphenated(id: &str) -> Option<Uuid> {
+    (id.len() == 36).then(|| Uuid::parse_str(id).ok())?
+}
+
+/// L'attache que nomme `url`, si c'est exactement l'adresse d'un fichier de la page `page`
+/// ([`file_address`]).
 fn file_of(url: &str, page: Uuid) -> Option<Uuid> {
-    let (of, file) = url.strip_prefix("/api/v1/pages/")?.split_once("/files/")?;
-    (Uuid::parse_str(of).ok()? == page).then_some(())?;
-    Uuid::parse_str(file).ok()
+    let (of, file) = file_address(url)?;
+    (of == page).then_some(file)
 }
 
 /// Les adresses des liens de ce contenu en ligne.
@@ -1003,6 +1020,26 @@ mod tests {
             String::new(),
         ] {
             assert_eq!(file_of(&other, page), None, "{other}");
+        }
+    }
+
+    /// Ruling R754 : la règle de l'adresse d'un fichier est celle de l'éditeur, cas par cas.
+    /// `file_address` et `filePath` (`apps/web/src/editor/files.ts`) lisent la même table de cas,
+    /// `spec/files/addresses.json` ; le test du client est `fileAddresses.test.ts`.
+    #[test]
+    fn file_address_follows_the_shared_cases() {
+        let table: Value =
+            serde_json::from_str(include_str!("../../../../spec/files/addresses.json")).unwrap();
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() > 30, "la table est lue");
+        for case in cases {
+            let why = case["why"].as_str().unwrap();
+            let address = case["address"].as_str().unwrap();
+            let read = file_address(address).map_or(
+                Value::Null,
+                |(page, file)| json!({ "page": page.to_string(), "file": file.to_string() }),
+            );
+            assert_eq!(read, case["names"], "{why} : {address:?}");
         }
     }
 
