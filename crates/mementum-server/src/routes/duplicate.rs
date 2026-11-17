@@ -384,7 +384,12 @@ fn copied_doc(
     });
     let page = PageDoc::new_page().0;
     page.write_blocks(&blocks)?;
-    Ok(page.encode_state())
+    let state = page.encode_state();
+    // Ruling R833 : le document d'une copie est la seule copie de ce qu'elle porte ; il est relu
+    // comme le chargement le relira, avant d'être écrit (la règle de R816). Ici, hors des fils du
+    // serveur (`mmd_reads.run`), au prix d'un chargement de plus par page copiée.
+    PageDoc::check_state(&state)?;
+    Ok(state)
 }
 
 /// `POST /api/v1/pages/{id}/duplicate` : `201`, la racine de la copie, telle que la personne la
