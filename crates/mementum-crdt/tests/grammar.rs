@@ -157,21 +157,44 @@ fn a_many_valued_entry_is_rewritten_into_entries_of_one_value() {
 /// E1 et E3 (Ruling R806) : sous une clé, un contenu qui n'est pas une valeur est refusé avant
 /// d'être appliqué, quand ses octets le disent entrée de map ; une chaîne de plusieurs unités
 /// s'y couperait comme une valeur.
+///
+/// La chaîne d'une seule unité, attribut d'un texte posé par la même mise à jour, n'est refusée
+/// que par E1 (constat M-6.5 de la re-relecture 6) : ni E3 (une unité), ni la garde des attributs
+/// (un texte n'est pas jugé), ni rien d'après l'application (son parent est nommé).
 #[test]
 fn a_keyed_content_that_is_not_a_value_is_refused_before_it_is_applied() {
     let served = Served::new();
     let before = served.page.encode_state();
-    let mut u = vec![1, 1];
-    var(&mut u, 7_000);
-    u.extend_from_slice(&[0, 0x24, 0]);
-    var(&mut u, served.server);
-    var(&mut u, PARAGRAPH);
-    string(&mut u, "backgroundColor");
-    string(&mut u, "red");
-    u.push(0);
-    let refused = served.page.try_client_update(&u).expect_err("accepté");
-    assert!(refused.intact, "{refused:?}");
-    assert!(served.page.encode_state() == before);
+    // Sur le paragraphe, une chaîne de trois unités.
+    let mut on_paragraph = vec![1, 1];
+    var(&mut on_paragraph, 7_000);
+    on_paragraph.extend_from_slice(&[0, 0x24, 0]);
+    var(&mut on_paragraph, served.server);
+    var(&mut on_paragraph, PARAGRAPH);
+    string(&mut on_paragraph, "backgroundColor");
+    string(&mut on_paragraph, "red");
+    on_paragraph.push(0);
+    // Un texte dans le paragraphe, puis, comme attribut du texte, une chaîne d'une unité.
+    let mut on_text = vec![1, 2];
+    var(&mut on_text, 7_000);
+    on_text.extend_from_slice(&[0, 7, 0]);
+    var(&mut on_text, served.server);
+    var(&mut on_text, PARAGRAPH);
+    on_text.extend_from_slice(&[6, 0x24, 0]);
+    var(&mut on_text, 7_000);
+    on_text.push(0);
+    string(&mut on_text, "k");
+    string(&mut on_text, "r");
+    on_text.push(0);
+    for (what, u) in [("le texte", on_text), ("le paragraphe", on_paragraph)] {
+        let refused = served.page.try_client_update(&u).expect_err(what);
+        assert!(refused.intact, "{what} : {refused:?}");
+        assert!(
+            refused.error.to_string().contains("contenu qui n'en est pas une"),
+            "{what} : {refused:?}"
+        );
+        assert!(served.page.encode_state() == before, "{what}");
+    }
 }
 
 /// E4 (Ruling R803) : une valeur `Any` qui ne porte pas la marque d'une entrée de map, placée
