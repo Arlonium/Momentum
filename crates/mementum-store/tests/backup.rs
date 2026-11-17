@@ -949,3 +949,46 @@ async fn a_database_from_a_newer_version_is_refused_in_french() {
         )
     );
 }
+
+/// Ruling R841 : une copie remise à la place de la base est reconnue au démarrage suivant. Sans
+/// rien de plus, `VACUUM INTO` avance d'un cran le compteur de schéma de l'en-tête (octets 40 à
+/// 43) : la copie fraîche de la copie remise en place en différait par ce seul compteur, et chaque
+/// remise en place laissait une copie datée de plus, de la taille de la base.
+#[tokio::test]
+async fn a_restored_copy_is_recognized_at_the_next_start() {
+    let dir = TestDir::new();
+    let db = dir.path().join("mementum.db");
+    lot1_with_a_page(&db).await;
+    Store::open(&db).await.unwrap().close().await;
+    let backup = backup_path(&db, 2);
+    let copy = std::fs::read(&backup).unwrap();
+
+    // Remise en place, comme le dit le README.
+    std::fs::copy(&backup, &db).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(sibling(&db, suffix));
+    }
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(
+        store.backup(),
+        Some(&Backup {
+            path: backup.clone(),
+            bytes: copy.len() as u64,
+            kept: true,
+            without_hard_link: false,
+        })
+    );
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await,
+        MIGRATIONS
+    );
+    store.close().await;
+    assert_eq!(std::fs::read(&backup).unwrap(), copy);
+    assert_eq!(
+        entries(dir.path()),
+        BTreeSet::from([
+            "mementum.db".to_string(),
+            "mementum.db.avant-0002.bak".to_string()
+        ])
+    );
+}

@@ -13,15 +13,19 @@
 //!
 //! Tant qu'une migration est en attente, chaque ouverture écrit une copie fraîche sous un nom
 //! temporaire (`<copie>.partiel`), la force sur le disque, puis la range (Ruling R72) :
-//! - elle est comparée, octet pour octet, à **toutes** les copies déjà rangées de cette version (le
-//!   nom sans date, [`backup_path`], et les noms datés), en ne lisant que celles qui ont sa taille :
-//!   si l'une est identique, la copie fraîche est supprimée, et celle-là suffit. Une boucle de
-//!   redémarrages sur une migration qui échoue n'empile donc pas les copies ;
+//! - elle est comparée, octet pour octet hors du compteur de schéma de l'en-tête (Ruling R841),
+//!   à **toutes** les copies déjà rangées de cette version (le nom sans date, [`backup_path`], et
+//!   les noms datés), en ne lisant que celles qui ont sa taille : si l'une est identique, la copie
+//!   fraîche est supprimée, et celle-là suffit. Une boucle de redémarrages sur une migration qui
+//!   échoue n'empile donc pas les copies, ni une copie remise à la place de la base ;
 //! - sinon, elle prend le nom sans date s'il est libre, ou le premier nom daté libre,
 //!   `<base>.avant-<version>.<AAAAMMJJ>T<HHMMSS>Z.bak` (heure UTC), puis `…Z-2.bak`, `…Z-3.bak`…
 //!
 //! Deux `VACUUM INTO` d'une même base donnent les mêmes octets (`tests/backup.rs`,
-//! `same_database_gives_the_same_copy`) : c'est ce qui rend la comparaison utile.
+//! `same_database_gives_the_same_copy`) : c'est ce qui rend la comparaison utile. `VACUUM INTO`
+//! écrit toutefois le compteur de schéma de la base plus un (octets 40 à 43 de l'en-tête) : la
+//! copie d'une copie remise en place n'en diffère que par lui. Ce compteur ne sert qu'à dire aux
+//! connexions ouvertes de relire le schéma ; le schéma lui-même est dans les pages, comparées.
 //!
 //! Une copie rangée n'est jamais écrasée ni supprimée. La copie fraîche prend son nom par
 //! `hard_link`, qui refuse de façon atomique un nom déjà pris. Sur un système de fichiers sans liens
@@ -36,6 +40,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -436,7 +441,18 @@ fn dated_path(db: &Path, first: i64, stamp: &str, n: u32) -> PathBuf {
     with_suffix(db, &format!(".avant-{first:04}.{stamp}{suffix}.bak"))
 }
 
-/// `a` et `b` ont-ils les mêmes octets ? La taille d'abord, puis le contenu, par morceaux.
+/// Le début de tout fichier de base SQLite (format 3).
+const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
+
+/// Le compteur de schéma, dans l'en-tête d'une base SQLite : un entier de 4 octets que SQLite
+/// avance à chaque changement du schéma, et que `VACUUM INTO` écrit plus un. Il ne sert qu'à dire
+/// aux connexions ouvertes de relire le schéma, qui est lui-même dans les pages (Ruling R841).
+const SCHEMA_COOKIE: Range<usize> = 40..44;
+
+/// `a` et `b` ont-ils le même contenu ? La taille d'abord, puis les octets, par morceaux. Deux
+/// bases SQLite (les deux commencent par [`SQLITE_MAGIC`]) qui ne diffèrent que par leur compteur
+/// de schéma ([`SCHEMA_COOKIE`]) ont le même contenu : mêmes pages, même schéma, mêmes lignes.
+/// Hors de ces quatre octets, et pour tout autre fichier, un octet qui diffère suffit.
 fn same_content(a: &Path, b: &Path) -> io::Result<bool> {
     const CHUNK: usize = 64 * 1024;
     let (mut fa, mut fb) = (File::open(a)?, File::open(b)?);
@@ -444,9 +460,22 @@ fn same_content(a: &Path, b: &Path) -> io::Result<bool> {
         return Ok(false);
     }
     let (mut ba, mut bb) = (vec![0; CHUNK], vec![0; CHUNK]);
+    let mut header = true;
     loop {
         let n = fill(&mut fa, &mut ba)?;
-        if fill(&mut fb, &mut bb)? != n || ba[..n] != bb[..n] {
+        if fill(&mut fb, &mut bb)? != n {
+            return Ok(false);
+        }
+        if header
+            && n >= SCHEMA_COOKIE.end
+            && ba.starts_with(SQLITE_MAGIC)
+            && bb.starts_with(SQLITE_MAGIC)
+        {
+            ba[SCHEMA_COOKIE].fill(0);
+            bb[SCHEMA_COOKIE].fill(0);
+        }
+        header = false;
+        if ba[..n] != bb[..n] {
             return Ok(false);
         }
         if n == 0 {
@@ -703,6 +732,63 @@ mod tests {
         fs::create_dir(name("bak")).unwrap();
         let (failed_on, _) = place_copy(&partial, &db, 2, AT, true, link).unwrap_err();
         assert_eq!(failed_on, name("bak"));
+    }
+
+    /// Ruling R841 : deux bases SQLite qui ne diffèrent que par leur compteur de schéma (octets 40
+    /// à 43) ont le même contenu ; un octet de plus, juste avant ou juste après, suffit à les
+    /// distinguer, et un fichier qui n'est pas une base SQLite se compare octet pour octet.
+    #[test]
+    fn only_the_schema_cookie_of_two_databases_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = |magic: &[u8], cookie: [u8; 4], around: (u8, u8)| {
+            let mut bytes = vec![7_u8; 70_000];
+            bytes[..magic.len()].copy_from_slice(magic);
+            bytes[39] = around.0;
+            bytes[40..44].copy_from_slice(&cookie);
+            bytes[44] = around.1;
+            bytes
+        };
+        let same = |a: Vec<u8>, b: Vec<u8>| {
+            let (pa, pb) = (dir.path().join("a"), dir.path().join("b"));
+            fs::write(&pa, a).unwrap();
+            fs::write(&pb, b).unwrap();
+            same_content(&pa, &pb).unwrap()
+        };
+        let sqlite = SQLITE_MAGIC;
+        assert!(same(
+            header(sqlite, [0, 0, 0, 30], (1, 1)),
+            header(sqlite, [0, 0, 0, 31], (1, 1))
+        ));
+        assert!(same(
+            header(sqlite, [0, 0, 0, 255], (1, 1)),
+            header(sqlite, [0, 0, 1, 0], (1, 1))
+        ));
+        assert!(!same(
+            header(sqlite, [0, 0, 0, 30], (1, 1)),
+            header(sqlite, [0, 0, 0, 30], (2, 1))
+        ));
+        assert!(!same(
+            header(sqlite, [0, 0, 0, 30], (1, 1)),
+            header(sqlite, [0, 0, 0, 30], (1, 2))
+        ));
+        // Le compteur n'est ignoré qu'en tête du fichier : plus loin, le même écart compte.
+        let mut far = header(sqlite, [0, 0, 0, 30], (1, 1));
+        far[65_576] = 9;
+        assert!(!same(header(sqlite, [0, 0, 0, 30], (1, 1)), far));
+        // Ni l'un ni l'autre, ou un seul, n'est une base SQLite : octet pour octet.
+        let other = b"pas une base SQLite\0";
+        assert!(!same(
+            header(other, [0, 0, 0, 30], (1, 1)),
+            header(other, [0, 0, 0, 31], (1, 1))
+        ));
+        assert!(!same(
+            header(sqlite, [0, 0, 0, 30], (1, 1)),
+            header(other, [0, 0, 0, 30], (1, 1))
+        ));
+        assert!(same(
+            header(other, [0, 0, 0, 30], (1, 1)),
+            header(other, [0, 0, 0, 30], (1, 1))
+        ));
     }
 
     #[test]
