@@ -1026,6 +1026,30 @@ fn a_string_set_as_an_attribute_of_a_text_then_cut_in_the_middle() {
     assert_eq!(replay_apart("min-3346", false), Ok(()));
 }
 
+/// Ruling R804, en test nommé (constat I-6.2 de la re-relecture 6 : l'essai ne la voyait qu'à
+/// partir de 2 171 cas). Graine 2171 de la voie du journal : jugé sur l'encodage de la seule
+/// transaction, ce que l'entrée posait au-delà d'un trou n'était pas vu, et l'état ne se relisait
+/// plus après la suppression d'un bloc (ou le processus s'arrêtait).
+#[test]
+fn what_a_stored_entry_puts_beyond_a_hole_is_judged() {
+    assert_eq!(replay_apart("min-j2171", true), Ok(()));
+}
+
+/// Ruling R808, en test nommé (l'essai ne la voyait qu'à partir de 5 401 cas). Graine 5401 de la
+/// voie du journal : une horloge au-delà de 2^31 ; yrs paniquait (`unwrap` sur `None`).
+#[test]
+fn a_stored_clock_beyond_two_to_the_31_leaves_a_sound_page() {
+    assert_eq!(replay_apart("min-j5401", true), Ok(()));
+}
+
+/// Ruling R802 sans son filet L1, en test nommé (l'essai ne voyait N2 et L1 retirées ensemble qu'à
+/// partir de 38 953 cas). Graine 38953 de la voie d'un client : un élément dont l'origine droite
+/// est son origine ; sans la récriture ni le refus, la page rechargée n'était plus la page vivante.
+#[test]
+fn an_item_whose_right_origin_is_its_origin_reloads_as_it_lives() {
+    assert_eq!(replay_apart("min-38953", false), Ok(()));
+}
+
 /// Les entrées d'une trace, telles quelles.
 fn entries(name: &str) -> Vec<Vec<u8>> {
     let path = format!(
