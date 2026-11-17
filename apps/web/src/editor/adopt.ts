@@ -29,6 +29,9 @@
 // - **Combien** : une recopie à la fois, une par fichier (des blocs qui nomment le même fichier
 //   partagent la même attache), `MAX_ADOPTED_FILES` au plus par geste ; au-delà, les blocs gardent
 //   leur adresse et la page le dit.
+// - **Un fichier posé que rien ne permet de rattacher** (aucune marque admise : un autre navigateur, une
+//   copie plus ancienne que la dernière, un texte venu d'ailleurs, un bloc planté) : la page le dit, une
+//   fois par geste (`onKept`, R778) ; la page est alors parcourue comme pour un rattachement.
 // - **Ce qui est dit** : toute recopie réussie (`onAdopted` : un fichier d'une autre page est
 //   désormais vu de ceux qui lisent celle-ci), une fois par geste. `422 invalid_source` (la première
 //   page ne se lit pas, ou le fichier n'en est plus) ne dit rien de plus que le serveur : le bloc garde
