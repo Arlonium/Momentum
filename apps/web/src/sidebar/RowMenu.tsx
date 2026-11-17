@@ -7,8 +7,17 @@
 //
 // Au clavier, c'est un menu (`role="menu"`) : ouvert, il prend le focus sur sa première
 // action ; les flèches passent de l'une à l'autre, Début et Fin vont aux extrémités ; Échap et
-// Tab le ferment et rendent le focus à son bouton. Un clic ailleurs, ou la barre latérale qui
-// défile, le ferment aussi.
+// Tab le ferment et rendent le focus à son bouton. Un clic ailleurs le ferme aussi.
+//
+// Un défilement (ou un redimensionnement) le ferme s'il déplace son bouton : la barre latérale qui
+// défile sous le menu d'une ligne, le document sous celui de la barre du haut. Le focus revient
+// alors au bouton, sans faire défiler jusqu'à lui ce que la personne vient de faire défiler. Tout
+// autre défilement le laisse ouvert (R764) : celui d'un autre conteneur (le document sous le menu
+// d'une ligne, la barre latérale étant collée au haut de la fenêtre), et celui qu'on a fait juste
+// avant de l'ouvrir, dont l'événement n'est distribué qu'à l'image suivante, une fois le menu
+// ouvert (un clic sur un bouton sorti de l'écran le ramène d'abord, un focus porté au clavier aussi,
+// un défilement à l'inertie finit après le clic). Il se fermait sur tout défilement, et le focus
+// tombait sur `body`.
 import {
   useEffect,
   useLayoutEffect,
@@ -62,11 +71,14 @@ export function RowMenu({ label, anchor, actions, onClose, inSidebar = false }: 
   const ref = useRef<HTMLDivElement>(null);
   /** Où poser le menu ; `null` : pas encore mesuré, il est rendu sans être montré. */
   const [place, setPlace] = useState<{ top: number; left: number } | null>(null);
+  /** Où était le bouton quand le menu s'est posé : un défilement qui le déplace ferme le menu. */
+  const anchorAt = useRef<DOMRect | null>(null);
 
   useLayoutEffect(() => {
     const menu = ref.current;
     if (!menu) return;
     const button = anchor.getBoundingClientRect();
+    anchorAt.current = button;
     const below = button.bottom + GAP;
     const fits = below + menu.offsetHeight <= window.innerHeight - MARGIN;
     setPlace({
@@ -93,8 +105,19 @@ export function RowMenu({ label, anchor, actions, onClose, inSidebar = false }: 
       // Un clic sur son bouton le ferme lui-même (il bascule).
       if (!ref.current?.contains(target) && !anchor.contains(target)) onClose();
     };
-    // Ce qui déplace le bouton laisserait le menu en l'air.
-    const onMove = () => onClose();
+    // Ce qui déplace le bouton laisserait le menu en l'air ; le reste ne le touche pas.
+    const onMove = () => {
+      const at = anchorAt.current;
+      const now = anchor.getBoundingClientRect();
+      const moved =
+        !anchor.isConnected || at === null || Math.abs(now.top - at.top) >= 1 || Math.abs(now.left - at.left) >= 1;
+      if (!moved) return;
+      // Le focus était dans le menu (ou nulle part) : il revient au bouton, pas sur `body`.
+      const active = document.activeElement;
+      const lost = active === null || active === document.body || (ref.current?.contains(active) ?? false);
+      onClose();
+      if (lost) focusAnchor();
+    };
     document.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("scroll", onMove, { capture: true, passive: true });
     window.addEventListener("resize", onMove);
@@ -105,10 +128,18 @@ export function RowMenu({ label, anchor, actions, onClose, inSidebar = false }: 
     };
   }, [anchor, onClose]);
 
-  /** Ferme, et rend le focus au bouton s'il est toujours là. */
+  /**
+   * Rend le focus au bouton s'il est toujours là, sans faire défiler jusqu'à lui : fermé par un
+   * défilement, le menu ne ramène pas ce que la personne vient de faire défiler.
+   */
+  function focusAnchor() {
+    if (anchor.isConnected) anchor.focus({ preventScroll: true });
+  }
+
+  /** Ferme, et rend le focus au bouton. */
   const dismiss = () => {
     onClose();
-    if (anchor.isConnected) anchor.focus();
+    focusAnchor();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
