@@ -15,50 +15,64 @@
 // dit. Ce qui arrive du document partagé (y-prosemirror) n'est jamais refusé : le serveur l'a
 // déjà jugé.
 //
-// La règle est celle du serveur, pour ce qu'un navigateur peut écrire : `TYPED` nomme les
-// attributs qui ne sont pas des chaînes (un test le compare au registre, `attrBound.test.ts`) ;
-// tout autre attribut est une chaîne, un booléen ou un nombre fini. `null` et `undefined` passent
+// La règle est celle du serveur : `TYPED` est bâtie du registre des blocs, comme sa table ; un
+// attribut hors du registre est une chaîne, un booléen ou un nombre fini ; une largeur `NaN` est
+// une largeur absente (ce que BlockNote écrit pour une cellule fusionnée collée, R705). `null` et `undefined` passent
 // partout : y-prosemirror n'écrit pas le premier, et le serveur garde le second.
 import { Plugin, PluginKey, type Transaction } from "prosemirror-state";
 import { ySyncPluginKey } from "y-prosemirror";
+import registry from "../../../../spec/schema/blocks.json";
 import { announce, dismissNotice } from "./editorNotice";
 
 /** Colonnes qu'une cellule fusionne au plus : `MAX_WIDTH_COLUMNS` du serveur, la borne du MMD. */
 export const MAX_COLSPAN = 100;
 
-/** Ce que l'éditeur dit d'un contenu refusé. */
+/** Ce que l'éditeur dit d'un contenu refusé pour une fusion de plus de cent colonnes. */
+export const SPAN_REFUSED =
+  "Une cellule fusionne 100 colonnes au plus : ce contenu n'a pas été inséré.";
+
+/** Ce que l'éditeur dit d'un contenu refusé pour une autre valeur. */
 export const ATTR_REFUSED =
-  "Ce contenu porte une valeur que Mementum ne garde pas (une fusion de cellules de plus de " +
-  "100 colonnes, par exemple) : il n'a pas été inséré.";
+  "Ce contenu porte une valeur que Mementum ne garde pas : il n'a pas été inséré.";
 
 /** La zone d'alerte du message (`editorNotice.ts`). */
 const ATTR_REFUSED_NOTICE = "mm-attr-refused";
 
-/** Ce qu'un attribut qui n'est pas une chaîne doit être. */
-export type Kind = "bool" | "int" | "float" | "colspan" | "rowspan" | "widths";
+/** Ce qu'un attribut du registre doit être. */
+export type Kind = "string" | "bool" | "int" | "float" | "colspan" | "rowspan" | "widths";
 
-const CELL: Record<string, Kind> = { colspan: "colspan", rowspan: "rowspan", colwidth: "widths" };
+const KINDS: Record<string, Kind> = { string: "string", bool: "bool", int: "int", float: "float" };
 
-/** Les attributs qui ne sont pas des chaînes, par nœud : ceux du registre des blocs
- * (`spec/schema/blocks.json`), et ceux d'une cellule de tableau. */
-export const TYPED: Record<string, Record<string, Kind>> = {
-  heading: { level: "int", isToggleable: "bool" },
-  numberedListItem: { start: "int" },
-  checkListItem: { checked: "bool" },
-  image: { showPreview: "bool", previewWidth: "float" },
-  video: { showPreview: "bool", previewWidth: "float" },
-  audio: { showPreview: "bool" },
-  column: { width: "float" },
-  unknown: { foreign: "bool" },
-  tableCell: CELL,
-  tableHeader: CELL,
-};
+/** Ce que doit être chaque attribut de chaque nœud, par nœud : la table du serveur
+ * (`crates/mementum-crdt/src/attrs.rs`), bâtie comme elle du registre des blocs, plus les
+ * attributs qu'il ne porte pas (`id`, `colwidth`, mention, formule en ligne). Un attribut qui
+ * n'y est pas est une chaîne, un booléen ou un nombre fini. */
+export const TYPED: Record<string, Record<string, Kind>> = (() => {
+  const table: Record<string, Record<string, Kind>> = {};
+  for (const block of registry.blocks) {
+    const attrs: Record<string, Kind> = {};
+    for (const prop of block.props) attrs[prop.name] = KINDS[prop.type];
+    table[block.name] = attrs;
+  }
+  for (const unwrapped of ["columnList", "column"]) table[unwrapped].id = "string";
+  table.blockContainer = { id: "string" };
+  const cell: Record<string, Kind> = {};
+  for (const prop of registry.tableCell.props) cell[prop.name] = KINDS[prop.type];
+  Object.assign(cell, { colspan: "colspan", rowspan: "rowspan", colwidth: "widths" });
+  table.tableCell = cell;
+  table.tableHeader = cell;
+  table.mention = { kind: "string", id: "string", label: "string" };
+  table.math = { latex: "string" };
+  return table;
+})();
 
 const finite = (value: unknown): boolean => typeof value === "number" && Number.isFinite(value);
 
 function admits(kind: Kind | undefined, value: unknown): boolean {
   if (value === null || value === undefined) return true;
   switch (kind) {
+    case "string":
+      return typeof value === "string";
     case "bool":
       return typeof value === "boolean";
     case "int":
@@ -70,10 +84,12 @@ function admits(kind: Kind | undefined, value: unknown): boolean {
     case "rowspan":
       return Number.isSafeInteger(value) && (value as number) >= 1;
     case "widths":
+      // `NaN` est une largeur absente : BlockNote l'écrit pour toute cellule fusionnée collée
+      // sans largeurs (Ruling R705).
       return (
         Array.isArray(value) &&
         value.length <= MAX_COLSPAN &&
-        value.every((width) => width === null || width === undefined || finite(width))
+        value.every((width) => width === null || width === undefined || finite(width) || Number.isNaN(width))
       );
     default:
       return typeof value === "string" || typeof value === "boolean" || finite(value);
@@ -91,16 +107,23 @@ type NodeLike = {
   descendants(f: (node: NodeLike) => boolean | void): void;
 };
 
-function unsound(node: NodeLike): boolean {
+/** Le premier attribut de `node` que le serveur refuserait, « nœud.attribut ». */
+function unsound(node: NodeLike): string | null {
   for (const name in node.attrs) {
-    if (!soundAttr(node.type.name, name, node.attrs[name])) return true;
+    if (!soundAttr(node.type.name, name, node.attrs[name])) return `${node.type.name}.${name}`;
   }
-  return false;
+  return null;
 }
 
 /** Vrai si une étape de la transaction pose un attribut que le serveur refuserait : un contenu
  * inséré (collage, remplacement, un nœud dont les attributs changent), ou un attribut posé seul. */
 export function addsUnsoundAttr(tr: Transaction): boolean {
+  return unsoundAttrOf(tr) !== null;
+}
+
+/** L'attribut (« nœud.attribut ») que pose une étape de la transaction et que le serveur
+ * refuserait, s'il y en a un. */
+export function unsoundAttrOf(tr: Transaction): string | null {
   const steps = tr.steps as unknown as {
     slice?: { content: NodeLike };
     attr?: string;
@@ -109,19 +132,21 @@ export function addsUnsoundAttr(tr: Transaction): boolean {
   }[];
   for (const [index, step] of steps.entries()) {
     if (step.slice !== undefined) {
-      let found = false;
+      let found: string | null = null;
       step.slice.content.descendants((node) => {
-        if (!found && unsound(node)) found = true;
-        return !found;
+        found ??= unsound(node);
+        return found === null;
       });
-      if (found) return true;
+      if (found !== null) return found;
     }
     if (typeof step.attr === "string" && typeof step.pos === "number") {
       const node = tr.docs[index]?.nodeAt(step.pos);
-      if (node && !soundAttr(node.type.name, step.attr, step.value)) return true;
+      if (node && !soundAttr(node.type.name, step.attr, step.value)) {
+        return `${node.type.name}.${step.attr}`;
+      }
     }
   }
-  return false;
+  return null;
 }
 
 /** Une transaction qui vient du document partagé (y-prosemirror) : déjà jugée par le serveur. */
@@ -137,8 +162,10 @@ export function attrBoundPlugin(): Plugin {
   return new Plugin({
     key: attrBoundKey,
     filterTransaction(tr) {
-      if (!tr.docChanged || fromDocument(tr) || !addsUnsoundAttr(tr)) return true;
-      announce(ATTR_REFUSED_NOTICE, ATTR_REFUSED);
+      if (!tr.docChanged || fromDocument(tr)) return true;
+      const refused = unsoundAttrOf(tr);
+      if (refused === null) return true;
+      announce(ATTR_REFUSED_NOTICE, refused.endsWith(".colspan") ? SPAN_REFUSED : ATTR_REFUSED);
       return false;
     },
     view: () => ({ destroy: () => dismissNotice(ATTR_REFUSED_NOTICE) }),

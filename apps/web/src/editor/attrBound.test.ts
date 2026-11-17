@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import * as Y from "yjs";
 import registry from "../../../../spec/schema/blocks.json";
 import { REMOTE, elements, peer, seedState, settle, type Peer, type Seed } from "../test/editors";
-import { ATTR_REFUSED, MAX_COLSPAN, TYPED, soundAttr, type Kind } from "./attrBound";
+import { ATTR_REFUSED, MAX_COLSPAN, SPAN_REFUSED, TYPED, soundAttr } from "./attrBound";
 import { linkBound } from "./linkBound";
 
 const extensions = [linkBound];
@@ -80,23 +80,16 @@ function storedAttr(doc: Y.Doc, node: string, name: string): unknown {
 }
 
 describe("attr_bound", () => {
-  test("la table des attributs typés est celle du registre des blocs", () => {
-    const kinds: Record<string, Kind> = { bool: "bool", int: "int", float: "float" };
-    const wanted: Record<string, Record<string, Kind>> = {};
+  test("la table porte chaque prop du registre, et les attributs qu'il ne porte pas", () => {
     for (const block of registry.blocks) {
       for (const prop of block.props) {
-        if (prop.type === "string") continue;
-        (wanted[block.name] ??= {})[prop.name] = kinds[prop.type];
+        expect(TYPED[block.name][prop.name], `${block.name}.${prop.name}`).toBe(prop.type);
       }
     }
-    const cell: Record<string, Kind> = { colspan: "colspan", rowspan: "rowspan", colwidth: "widths" };
-    expect(registry.tableCell.props.filter((p) => p.type !== "string").map((p) => p.name)).toEqual([
-      "colspan",
-      "rowspan",
-    ]);
-    wanted.tableCell = cell;
-    wanted.tableHeader = cell;
-    expect(TYPED).toEqual(wanted);
+    expect(TYPED.tableHeader).toEqual(TYPED.tableCell);
+    expect(TYPED.tableCell).toMatchObject({ colspan: "colspan", rowspan: "rowspan", colwidth: "widths" });
+    expect(TYPED.blockContainer).toEqual({ id: "string" });
+    expect(TYPED.column.id).toBe("string");
   });
 
   test("le jugement est celui du serveur, type par type", () => {
@@ -128,7 +121,13 @@ describe("attr_bound", () => {
       ["tableHeader", "rowspan", 250_000, true],
       ["tableHeader", "rowspan", 0, false],
       ["tableCell", "colwidth", [120, undefined, null], true],
-      ["tableCell", "colwidth", [Number.NaN], false],
+      ["tableCell", "colwidth", [Number.NaN, 120, Number.NaN], true],
+      ["tableCell", "colwidth", [Number.POSITIVE_INFINITY], false],
+      ["heading", "level", 2 ** 53, false],
+      ["paragraph", "backgroundColor", 7, false],
+      ["paragraph", "backgroundColor", true, false],
+      ["image", "url", 7, false],
+      ["mention", "label", 7, false],
       ["tableCell", "colwidth", ["120"], false],
       ["tableCell", "colwidth", Array.from({ length: MAX_COLSPAN + 1 }, () => 1), false],
       ["tableCell", "colwidth", 120, false],
@@ -149,7 +148,7 @@ describe("attr_bound", () => {
     await settle();
     expect(firstNode(mona, header).attrs.colspan).toBe(MAX_COLSPAN);
     expect(storedAttr(mona.doc, header, "colspan")).toBe(MAX_COLSPAN);
-    expect(alert()).toBe(ATTR_REFUSED);
+    expect(alert()).toBe(SPAN_REFUSED);
     expect(refusedByTheServer(mona.doc)).toEqual([]);
   });
 
@@ -160,8 +159,8 @@ describe("attr_bound", () => {
       ["heading", { level: 2.5 }],
       ["heading", { level: 1e21 }],
       ["heading", { backgroundColor: { toString: 1 } }],
-      [cellName(mona), { colwidth: [Number.NaN] }],
-      [cellName(mona), { colspan: "abc" }],
+      [cellName(mona), { colwidth: [Number.POSITIVE_INFINITY] }],
+      ["heading", { textAlignment: 7 }],
     ] as [string, Record<string, unknown>][]) {
       setAttrs(mona, node, attrs);
       await settle();
@@ -174,6 +173,18 @@ describe("attr_bound", () => {
     await settle();
     expect(storedAttr(mona.doc, "heading", "level")).toBe(2);
     expect(alert()).toBeNull();
+  });
+
+  // C2 de la relecture (R705) : BlockNote écrit `colwidth = [NaN, NaN, NaN]` pour toute cellule
+  // fusionnée collée sans largeurs ; refusée, la cellule ne se collait plus.
+  test("une cellule fusionnée sans largeurs est écrite", async () => {
+    const mona = await peer("Mona", 2, await seedState(TABLE), extensions);
+    const cell = cellName(mona);
+    setAttrs(mona, cell, { colspan: 2, colwidth: [Number.NaN, Number.NaN] });
+    await settle();
+    expect(storedAttr(mona.doc, cell, "colwidth")).toEqual([Number.NaN, Number.NaN]);
+    expect(alert()).toBeNull();
+    expect(refusedByTheServer(mona.doc)).toEqual([]);
   });
 
   test("ce qui arrive du document partagé n'est jamais refusé", async () => {
