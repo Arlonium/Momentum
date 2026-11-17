@@ -77,7 +77,7 @@ import { linkBound } from "./linkBound";
 import { guardedAwareness } from "./presenceGuard";
 import { schema } from "./schema";
 import { slashMenuItems } from "./slashItems";
-import { sessionUploader, type PageUploads } from "./uploads";
+import { sessionPaste, sessionUploader, type PageUploads } from "./uploads";
 import { MementumFormattingToolbar } from "./Toolbar";
 
 type Props = {
@@ -128,21 +128,27 @@ export function Editor({ session, fixture = null, onComment = null, mentions = n
   const latestFiles = useRef(files);
   latestFiles.current = files;
   const created = useRef<MementumEditor | null>(null);
-  const uploads = useRef<{ session: CollabSession; stop: AbortController; send?: ReturnType<typeof sessionUploader> } | null>(
-    null,
-  );
+  const uploads = useRef<{
+    session: CollabSession;
+    stop: AbortController;
+    send?: ReturnType<typeof sessionUploader>;
+    paste?: ReturnType<typeof sessionPaste>;
+  } | null>(null);
   if (uploads.current?.session !== session) {
     const stop = new AbortController();
     // Une session en lecture seule n'envoie rien : ni panneau d'envoi, ni dépôt, ni collage.
     const send = sessionUploader(session, () => latestFiles.current, () => created.current, stop.signal);
-    uploads.current = { session, stop, send };
+    // Après un collage, les fichiers d'autres pages des blocs collés sont rattachés à celle-ci (C9).
+    const paste = sessionPaste(session, () => latestFiles.current, stop.signal);
+    uploads.current = { session, stop, send, paste };
   }
-  const { stop, send: uploadFile } = uploads.current;
+  const { stop, send: uploadFile, paste: pasteHandler } = uploads.current;
   useEffect(() => () => stop.abort(), [stop]);
   const editor = useCreateBlockNote(
     withCollaboration({
       ...EDITOR_OPTIONS,
       ...(uploadFile ? { uploadFile } : {}),
+      ...(pasteHandler ? { pasteHandler } : {}),
       collaboration: {
         fragment: session.doc.getXmlFragment(FRAGMENT),
         user: session.user,

@@ -1414,3 +1414,22 @@ test("the_limits_of_files_are_read_from_their_route", async () => {
   (await waiting("GET", "/api/v1/files/limits")).answer(200, { maxFileBytes: 1048576 });
   await expect(limits).resolves.toEqual({ maxFileBytes: 1048576 });
 });
+
+test("a_copy_of_a_file_names_its_source_in_the_body_and_the_account_in_the_header", async () => {
+  await loadedAs("alice");
+  const copied = api.copyFile("p2", { pageId: "p1", fileId: "f1" });
+  const call = await waiting("POST", "/api/v1/pages/p2/files/copies");
+  expect(call.body).toEqual({ pageId: "p1", fileId: "f1" });
+  expect(call.type).toBe("application/json");
+  expect(call.account).toBe("alice");
+  call.answer(201, { ...FILE_INFO, id: "f2", url: "/api/v1/pages/p2/files/f2" });
+  await expect(copied).resolves.toMatchObject({ url: "/api/v1/pages/p2/files/f2" });
+  // Un refus est rendu tel que le serveur le dit.
+  const refused = api.copyFile("p2", { pageId: "p9", fileId: "f1" });
+  (await waiting("POST", "/api/v1/pages/p2/files/copies")).answer(422, {
+    error: "invalid_source",
+    message: "fichier d'origine introuvable",
+  });
+  await expect(refused).rejects.toMatchObject({ status: 422, code: "invalid_source" });
+  expect(asked).toBe(0);
+});

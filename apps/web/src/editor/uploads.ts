@@ -2,6 +2,8 @@
 // de quoi envoyer, et ce que devient le bloc d'un envoi qui n'a pas abouti (il reste, sans le nom du
 // fichier). L'envoi lui-même est dans
 // `files.ts`, qui ne sait rien de l'éditeur.
+import { copyFile } from "../api";
+import { adoptingPaste } from "./adopt";
 import { textProp } from "./blocks/props";
 import type { MementumEditor } from "./debug";
 import { fileLimits, uploader, type UploaderOptions } from "./files";
@@ -34,6 +36,27 @@ export function sessionUploader(
       if (current !== null) forgetUploadName(current, id, fileName);
     },
     signal,
+  });
+}
+
+/**
+ * Le collage de l'éditeur de `session` (l'option `pasteHandler` de BlockNote), ou `undefined` (le
+ * collage de BlockNote, tel quel) : après un collage, les fichiers d'autres pages que portent les blocs
+ * collés sont rattachés à cette page (`adopt.ts`, Task C9). Comme l'envoi : **jamais pour une session
+ * en lecture seule** (lecteur, corbeille, onglet d'un autre schéma), ni sans ce que la page donne.
+ */
+export function sessionPaste(
+  session: { readOnly: boolean; pageId: string },
+  files: () => PageUploads | null,
+  signal: AbortSignal,
+): ReturnType<typeof adoptingPaste> | undefined {
+  if (session.readOnly || files() === null) return undefined;
+  return adoptingPaste({
+    pageId: session.pageId,
+    copy: copyFile,
+    signal,
+    onRefused: (message) => files()?.onRefused(message),
+    reread: () => files()?.reread() ?? Promise.resolve(undefined),
   });
 }
 

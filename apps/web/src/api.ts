@@ -34,6 +34,7 @@ import type {
   Accepted,
   ChangePassword,
   Comment,
+  CopyFile,
   CreatePage,
   CreateSpace,
   ErrorBody,
@@ -885,6 +886,23 @@ export function getFileLimits(): Promise<FileLimits> {
  */
 export async function uploadFile(pageId: string, file: File, signal?: AbortSignal): Promise<FileInfo> {
   const res = await send("POST", `${page(pageId)}/files?name=${encodeURIComponent(file.name)}`, file, signal);
+  try {
+    return (await res.json()) as FileInfo;
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    throw new ApiError(0, null, UNREACHABLE);
+  }
+}
+
+/**
+ * `POST /api/v1/pages/{id}/files/copies` (R249) : recopie dans la page `pageId` l'attache d'un fichier
+ * d'une autre page, sans renvoyer un octet ; `201`, l'attache neuve, dont `url` remplace l'adresse du
+ * bloc collé. Il faut pouvoir modifier la page d'ici et lire celle d'origine. Refus : `404`, `403`,
+ * `409 trashed` pour la page d'ici ; `422 invalid_source`, une seule réponse, pour une page d'origine
+ * qu'on ne voit pas, inconnue ou mal nommée, ou un fichier qui n'est pas d'elle. `signal` annule.
+ */
+export async function copyFile(pageId: string, source: CopyFile, signal?: AbortSignal): Promise<FileInfo> {
+  const res = await send("POST", `${page(pageId)}/files/copies`, source, signal);
   try {
     return (await res.json()) as FileInfo;
   } catch (e) {
