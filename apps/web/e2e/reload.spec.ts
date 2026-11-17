@@ -62,13 +62,14 @@ test("failed_reload_keeps_the_open_page_and_what_was_typed", async ({ browser })
   await p.keyboard.press("End");
   await p.keyboard.type(", pendant la panne");
 
-  // « Déplacer vers le haut » échoue ; la barre latérale est relue, et cela échoue aussi.
+  // « Déplacer vers le haut » reste sans réponse (le doute est dit, R758) ; la barre latérale est relue,
+  // et cela échoue aussi.
   const reread = p.waitForEvent("requestfailed", (request) => request.url().endsWith("/tree"));
   await (await openRowMenu(p, b.id, "Bravo"))
     .getByRole("menuitem", { name: "Déplacer vers le haut" })
     .click();
   await reread;
-  await expect(sidebarOf(p).getByRole("alert")).toContainText("La page n'a pas pu être déplacée");
+  await expect(sidebarOf(p).getByRole("alert")).toContainText("la page a peut-être été déplacée");
 
   // Rien de ce qui est affiché ne se perd : ni la page, ni son éditeur (le même, avec ce qui
   // y a été tapé), ni la barre latérale.
@@ -583,7 +584,7 @@ test("sidebar_retry_is_only_under_the_failed_tree_read", async ({ browser }) => 
     .getByRole("menuitem", { name: "Déplacer vers le haut" })
     .click();
   await reread;
-  await expect(alert).toContainText("La page n'a pas pu être déplacée");
+  await expect(alert).toContainText("la page a peut-être été déplacée");
   await expect(alert).not.toContainText("La liste des pages");
   await expect(retry).toHaveCount(0);
 
