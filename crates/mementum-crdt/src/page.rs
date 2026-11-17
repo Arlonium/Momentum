@@ -399,6 +399,30 @@ impl PageDoc {
         self.original_walks.load(Ordering::SeqCst)
     }
 
+    /// L'état complet d'un document (v1) gardé ailleurs que dans le journal (une version de
+    /// l'historique), tel qu'on le sert à un éditeur (Ruling R701) : tel quel, octet pour octet,
+    /// s'il ne porte aucun attribut que la garde des attributs refuse ; sinon relu comme une
+    /// entrée du journal (l'attribut est retiré, Ruling R690) et réencodé. Un état illisible est
+    /// rendu tel quel : le refuser n'est pas l'affaire de cette lecture.
+    ///
+    /// Un état complet nomme tout ce qu'il porte : la garde y juge chaque attribut dans les
+    /// octets, sans page.
+    pub fn served_state(state: Vec<u8>) -> Vec<u8> {
+        let unsound = Shape::read(&state).is_ok_and(|shape| {
+            shape
+                .attrs(&StateVector::default(), |_| None, |_| None)
+                .refusal
+                .is_some()
+        });
+        if !unsound {
+            return state;
+        }
+        match PageDoc::from_updates([state.as_slice()]) {
+            Ok(page) => page.encode_state(),
+            Err(_) => state,
+        }
+    }
+
     /// Ce que la garde des attributs (Ruling R689) refuserait de cette mise à jour (v1) venue
     /// d'un client, lue sans être appliquée : `None` si elle n'y trouve rien. Sert aux tests,
     /// qui y passent tout ce que l'éditeur écrit.

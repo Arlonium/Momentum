@@ -748,3 +748,55 @@ fn an_attribute_the_page_already_knows_is_not_judged_again() {
     }
     assert!(page.encode_state() == state, "rien n'a changé");
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    /// Ruling R700 : ce que le serveur écrit d'un arbre de blocs quelconque (`PUT /mmd`, une
+    /// restauration, une duplication ; nœuds étrangers compris), un client l'enverrait sans
+    /// refus de la garde des attributs, et la relecture du journal n'en retire rien.
+    #[test]
+    fn whatever_the_server_writes_passes_the_attribute_guard(tree in mementum_md::arb::tree()) {
+        let (page, _) = PageDoc::new_page();
+        if page.write_blocks(&tree).is_err() {
+            return Ok(());
+        }
+        let state = page.encode_state();
+        let empty = PageDoc::from_updates(std::iter::empty::<&[u8]>()).unwrap();
+        proptest::prop_assert_eq!(empty.attribute_refusal(&state).unwrap(), None);
+        let reloaded = PageDoc::from_updates([state.as_slice()]).unwrap();
+        proptest::prop_assert_eq!(reloaded.read_blocks(), page.read_blocks());
+        proptest::prop_assert_eq!(reloaded.revision(), page.revision());
+    }
+}
+
+/// Ruling R701 : l'état d'une version de l'historique, coupée avant la garde, est servi sans les
+/// attributs que la garde refuse ; un état sain est servi tel quel, octet pour octet.
+#[test]
+fn a_kept_state_is_served_without_its_unsound_attributes() {
+    let (page, root_update) = PageDoc::new_page();
+    page.write_blocks(&parse("# Titre\n\nTexte\n").unwrap())
+        .unwrap();
+    let sound = page.encode_state();
+    assert!(PageDoc::served_state(sound.clone()) == sound, "tel quel");
+
+    let hostile = replica(&root_update);
+    written(&hostile, |txn| {
+        content(txn, 0).insert_attribute(txn, "backgroundColor", "red");
+        content(txn, 0).insert_attribute(txn, "backgroundColor", object());
+        push_block(txn, "h", "heading").insert_attribute(txn, "level", Any::from("1 2"));
+    });
+    let kept = hostile
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    let served = PageDoc::served_state(kept.clone());
+    assert!(served != kept, "corrigé");
+    assert_eq!(attr_of(&served, 0, "backgroundColor"), None);
+    assert_eq!(attr_of(&served, 1, "level"), None);
+    assert_eq!(
+        attr_of(&served, 0, "textColor"),
+        attr_of(&kept, 0, "textColor")
+    );
+    // Un état illisible est rendu tel quel.
+    assert_eq!(PageDoc::served_state(vec![9, 9, 9]), vec![9, 9, 9]);
+}

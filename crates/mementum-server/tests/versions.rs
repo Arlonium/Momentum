@@ -368,3 +368,50 @@ async fn a_reader_does_not_read_what_was_erased_before_sharing() {
         .await
         .assert_error(StatusCode::FORBIDDEN, "forbidden");
 }
+
+/// Garde des attributs (Ruling R701) : une version coupée avant la garde, dont l'état porte un
+/// attribut de bloc qui empêche un éditeur de se monter (`backgroundColor = {"toString": 1}`),
+/// est servie sans lui ; une version saine est servie telle qu'elle a été gardée, octet pour
+/// octet.
+#[tokio::test]
+async fn a_version_kept_before_the_attribute_guard_is_served_without_the_attribute() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let olga = &team.olga;
+    let page = team.page(None, "Historique", &[members(Level::Full)]).await;
+    let sound = state_of("Un\n");
+    // L'état sain, où la valeur « default » de la couleur de fond (une chaîne de lib0 : 119, sa
+    // longueur, ses octets) devient l'objet `{"toString": 1}` (118 : un objet d'une entrée ; 125 :
+    // un entier) : ce qu'un client à soi écrivait avant la garde.
+    let default: Vec<u8> = [&[119, 7][..], b"default"].concat();
+    let at = sound
+        .windows(default.len())
+        .position(|w| w == default)
+        .expect("la couleur de fond du paragraphe");
+    let object: Vec<u8> = [&[118, 1, 8][..], b"toString", &[125, 1]].concat();
+    let hostile = [&sound[..at], &object, &sound[at + default.len()..]].concat();
+    assert!(
+        hostile.windows(8).any(|w| w == b"toString"),
+        "l'état forgé porte la valeur"
+    );
+    let mut served = Vec::new();
+    for state in [&sound, &hostile] {
+        let version = team
+            .store
+            .put_version(page, 0, state, &[], VersionReason::Periodic)
+            .await
+            .unwrap();
+        let kept = olga.browser.get(&state_uri(page, version)).await;
+        kept.assert_status(StatusCode::OK);
+        served.push(kept.body.to_vec());
+    }
+    assert!(
+        served[0] == sound,
+        "une version saine est servie telle quelle"
+    );
+    assert!(
+        !served[1].windows(8).any(|w| w == b"toString"),
+        "la valeur est servie"
+    );
+    assert_eq!(blocks_of(&served[1]), blocks_of(&sound), "le reste est là");
+}

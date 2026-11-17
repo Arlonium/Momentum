@@ -5,7 +5,7 @@
 //! | Route | Il faut | Réponse |
 //! |---|---|---|
 //! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi) | [`Version`]`[]`, la plus récente d'abord ; cent au plus |
-//! | `GET …/versions/{versionId}/state` | `edit` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) tel qu'il a été gardé |
+//! | `GET …/versions/{versionId}/state` | `edit` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) tel qu'il a été gardé, sans les attributs de bloc que la garde refuse (Ruling R701) |
 //! | `POST …/versions/{versionId}/restore` | `edit` | `204` ; `409 trashed` ; `429 page_busy` (Ruling R535) |
 //!
 //! **Refus**, dans l'ordre des commentaires (Rulings R168 et R186, écrit en tête de
@@ -39,6 +39,7 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mementum_acl::Action;
+use mementum_crdt::PageDoc;
 use mementum_sync::display_name;
 use uuid::Uuid;
 
@@ -64,7 +65,8 @@ pub(crate) async fn list(
     Ok(Json(versions.iter().map(version).collect()))
 }
 
-/// `GET /api/v1/pages/{id}/versions/{versionId}/state` : l'état gardé de la version, tel quel.
+/// `GET /api/v1/pages/{id}/versions/{versionId}/state` : l'état gardé de la version, tel quel,
+/// hormis un attribut de bloc que la garde des attributs refuse (Ruling R701), retiré.
 pub(crate) async fn state(
     State(state): State<AppState>,
     user: AuthUser,
@@ -78,7 +80,14 @@ pub(crate) async fn state(
         .get_version(id, version)
         .await?
         .ok_or_else(ApiError::page_not_found)?;
-    Ok(([(header::CONTENT_TYPE, OCTET_STREAM)], kept).into_response())
+    // Ruling R701 : une version coupée avant la garde des attributs peut porter une valeur qui
+    // empêche un éditeur de se monter ; elle est servie sans elle. Lu hors des fils du serveur,
+    // au tour du compte (une version de 10 000 blocs pèse 3,2 Mo).
+    let served = state
+        .mmd_reads
+        .run(user.id, move || PageDoc::served_state(kept))
+        .await?;
+    Ok(([(header::CONTENT_TYPE, OCTET_STREAM)], served).into_response())
 }
 
 /// `POST /api/v1/pages/{id}/versions/{versionId}/restore` : écrit les blocs de la version
