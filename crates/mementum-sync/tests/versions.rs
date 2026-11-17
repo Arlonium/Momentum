@@ -720,6 +720,8 @@ async fn version_survives_compaction() {
     for typed in [" un", " deux", " trois"] {
         types(&b, typed).await;
     }
+    // La compaction se fait hors de l'acteur (Ruling R826) : on attend qu'elle ait fini.
+    f.hub.compacted(f.page).await.unwrap();
     let (journal, snapshot) = (
         actors(&f.db, f.page).await.len(),
         f.store.load_doc(f.page).await.unwrap().snapshot,

@@ -314,6 +314,113 @@ async fn keystroke_that_cuts_a_version_of_10000_block_page_under_150ms() {
     assert!(over.is_empty(), "{}", over.join("\n"));
 }
 
+/// Une frappe de `author` dans le bloc `id`, chronométrée jusqu'à ce que `other` l'ait reçue (son
+/// vecteur d'état atteint celui de l'auteur).
+async fn keystroke_seen(author: &Client, other: &Client, id: &str) -> Duration {
+    let start = Instant::now();
+    author.type_text(id, "x");
+    let client = ClientID::new(author.client_id());
+    let target = author.state_vector().get(&client);
+    assert!(
+        other
+            .wait_until(Duration::from_secs(60), |c| c.state_vector().get(&client)
+                >= target)
+            .await,
+        "la frappe n'est pas arrivée"
+    );
+    start.elapsed()
+}
+
+/// Écritures entre deux compactions, dans [`keystroke_that_triggers_a_compaction_of_10000_block_page_under_150ms`].
+const COMPACT_EVERY: u64 = 5;
+
+/// Compactions mesurées une à une.
+const COMPACTIONS: usize = 12;
+
+/// La part du serveur dans « frappe visible chez un autre < 150 ms » (§5.10) quand la frappe
+/// déclenche une compaction d'une page de 10 000 blocs, et pour la frappe qui la suit (Ruling
+/// R826 ; constat I-7.2 de la re-relecture 7). La compaction relit l'état (81 ms) avant de
+/// l'écrire (Ruling R816) : faite dans l'acteur, elle retardait la frappe qui la déclenche (92 à
+/// 103 ms sur ce poste, la tâche qui écrit sa connexion attendant que l'acteur rende la main) ou,
+/// l'acteur cédant la main d'abord, la suivante (106 à 141 ms). Hors de l'acteur, ni l'une ni
+/// l'autre ne l'attend.
+///
+/// Deux temps. (a) `COMPACTIONS` fois : des frappes jusqu'à celle qui déclenche la compaction,
+/// celle-là et la suivante chronométrées, puis la compaction attendue (pour que la suivante en
+/// déclenche une vraiment). (b) Des frappes à la suite, une compaction toutes les `COMPACT_EVERY`
+/// écritures (une seule à la fois : celle qui tombe pendant une autre attend l'écriture d'après),
+/// toutes chronométrées : certaines tombent pendant l'écriture de l'instantané, que l'écriture de
+/// la frappe attend dans la voie de la page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn keystroke_that_triggers_a_compaction_of_10000_block_page_under_150ms() {
+    let _alone = alone().await;
+    let f = Fixture::new(SyncConfig {
+        snapshot_every: COMPACT_EVERY,
+        ..SyncConfig::default()
+    })
+    .await;
+    f.write_mmd(&page_mmd()).await;
+    f.hub.compacted(f.page).await.unwrap();
+    let id = f.ids().await[0].clone();
+    let (author, other) = (f.client().await, f.client().await);
+    // Les écritures depuis la dernière compaction : l'écriture MMD en est une.
+    let mut since = 1;
+    let (mut triggering, mut following) = (Vec::new(), Vec::new());
+    for _ in 0..COMPACTIONS {
+        while since + 1 < COMPACT_EVERY {
+            keystroke_seen(&author, &other, &id).await;
+            since += 1;
+        }
+        let before = f
+            .store
+            .load_doc(f.page)
+            .await
+            .unwrap()
+            .snapshot
+            .map(|(seq, _)| seq);
+        triggering.push(keystroke_seen(&author, &other, &id).await);
+        following.push(keystroke_seen(&author, &other, &id).await);
+        f.hub.compacted(f.page).await.unwrap();
+        let after = f
+            .store
+            .load_doc(f.page)
+            .await
+            .unwrap()
+            .snapshot
+            .map(|(seq, _)| seq);
+        assert!(after > before, "la frappe n'a pas déclenché de compaction");
+        since = 1;
+    }
+    let mut stream = Vec::new();
+    for _ in 0..60 {
+        stream.push(keystroke_seen(&author, &other, &id).await);
+    }
+    let mut over = Vec::new();
+    for (what, times) in [
+        ("qui déclenche une compaction", &triggering),
+        ("qui suit celle qui déclenche une compaction", &following),
+        (
+            "à la suite, une compaction toutes les cinq écritures",
+            &stream,
+        ),
+    ] {
+        let (p50, p95) = (percentile(times, 0.5), percentile(times, 0.95));
+        println!(
+            "MESURE frappe vue par un autre client, page de {BLOCKS} blocs, {what} : p50 {p50:?}, \
+             p95 {p95:?}, max {:?} ({} frappes)",
+            times.iter().max().unwrap(),
+            times.len()
+        );
+        if p95 >= TYPING_BUDGET {
+            over.push(format!(
+                "frappe {what} : p95 {p95:?} (budget {TYPING_BUDGET:?}), mesures {times:?}"
+            ));
+        }
+    }
+    assert!(over.is_empty(), "{}", over.join("\n"));
+}
+
 /// Boucles d'écritures d'un simple lecteur, pendant les frappes de
 /// [`keystroke_during_write_loops_of_a_reader_under_150ms`].
 const READER_LOOPS: usize = 8;

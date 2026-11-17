@@ -70,6 +70,8 @@ async fn compaction_keeps_concurrent_updates() {
     assert_eq!(text(&live), expected);
     assert_eq!(stored_page(&f.store, f.page).await.read_blocks(), live);
 
+    // La compaction se fait hors de l'acteur (Ruling R826) : on attend qu'elle ait fini.
+    f.hub.compacted(f.page).await.unwrap();
     let state = f.store.load_doc(f.page).await.unwrap();
     let snapshot_seq = state.snapshot.as_ref().map_or(0, |(seq, _)| *seq);
     assert!(
@@ -208,6 +210,8 @@ async fn failed_compaction_keeps_the_journal_and_retries_later() {
     a.type_text(&id, " un");
     a.type_text(&id, " deux");
     processed(&a).await;
+    // La compaction se fait hors de l'acteur (Ruling R826) : on attend qu'elle ait fini.
+    f.hub.compacted(f.page).await.unwrap();
 
     // La compaction a échoué : l'instantané n'a pas bougé, et le journal est
     // entier. Rien n'est perdu, ni dans le store ni pour les clients, et
@@ -234,9 +238,11 @@ async fn failed_compaction_keeps_the_journal_and_retries_later() {
     a.type_text(&id, " trois");
     a.type_text(&id, " quatre");
     processed(&a).await;
+    f.hub.compacted(f.page).await.unwrap();
     assert_eq!(snapshot_and_journal(&f).await, (0, 5));
     a.type_text(&id, " cinq");
     processed(&a).await;
+    f.hub.compacted(f.page).await.unwrap();
     assert_eq!(
         snapshot_and_journal(&f).await,
         (6, 0),
@@ -295,6 +301,8 @@ fn paragraphs(n: usize, word: &str) -> String {
 async fn assert_compacted_and_identical(f: &Fixture, client: &Client) {
     let live = f.hub.read_blocks(f.page).await.unwrap();
     assert!(client.wait_until(WAIT, |c| c.blocks() == live).await);
+    // La compaction se fait hors de l'acteur (Ruling R826) : on attend qu'elle ait fini.
+    f.hub.compacted(f.page).await.unwrap();
     let state = f.store.load_doc(f.page).await.unwrap();
     assert!(
         state.updates.is_empty(),
@@ -372,6 +380,7 @@ async fn small_deletions_compact_once_their_sum_is_large() {
 
     erase_start(&client, 30);
     processed(&client).await;
+    f.hub.compacted(f.page).await.unwrap();
     assert_eq!(
         journal().await,
         0,
@@ -409,6 +418,8 @@ async fn journal_with_big_deletion_is_compacted_on_load() {
     drop(hub);
     let hub = Hub::new(store.clone(), SyncConfig::default());
     assert_eq!(hub.read_blocks(page).await.unwrap(), expected);
+    // La compaction se fait hors de l'acteur (Ruling R826) : on attend qu'elle ait fini.
+    hub.compacted(page).await.unwrap();
     assert!(store.load_doc(page).await.unwrap().updates.is_empty());
     assert_eq!(stored_page(&store, page).await.read_blocks(), expected);
     drop(dir);

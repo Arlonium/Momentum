@@ -229,6 +229,15 @@ impl Hub {
         self.reloads.load(Ordering::Relaxed)
     }
 
+    /// Attend la fin de la compaction en vol de la page, s'il y en a une : la compaction se fait
+    /// hors de l'acteur (Ruling R826). Pour les tests, qui lisent le store après une écriture qui
+    /// en déclenche une. Charge la page si son acteur n'est pas vivant.
+    #[doc(hidden)]
+    pub async fn compacted(&self, node_id: Uuid) -> Result<(), SyncError> {
+        self.call(node_id, |reply| Command::Compacted { reply })
+            .await
+    }
+
     /// Le frein des refus d'après l'application (Ruling R725).
     pub(crate) fn brake(&self) -> &crate::brake::Brake {
         &self.brake

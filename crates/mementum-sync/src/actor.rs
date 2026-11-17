@@ -38,6 +38,7 @@ use mementum_md::Block;
 use mementum_store::{DocState, Store, StoreError};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
 use yrs::ClientID;
 use yrs::sync::awareness::AwarenessUpdateEntry;
@@ -194,6 +195,9 @@ pub(crate) enum Command {
     /// `closing` est coupée s'il le faut, puis les connexions sont fermées. La
     /// réponse part quand il a quitté le registre.
     Shutdown { reply: oneshot::Sender<()> },
+    /// Attendre la fin de la compaction en vol, s'il y en a une (`Hub::compacted`, pour les
+    /// tests : la compaction se fait hors de l'acteur, Ruling R826).
+    Compacted { reply: oneshot::Sender<()> },
 }
 
 impl Command {
@@ -225,7 +229,8 @@ impl Command {
             | Command::Kick { .. }
             | Command::KickUser { .. }
             | Command::Forget { .. }
-            | Command::Shutdown { .. } => {}
+            | Command::Shutdown { .. }
+            | Command::Compacted { .. } => {}
         }
     }
 }
@@ -391,7 +396,7 @@ async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedRecei
             // Un journal qui porte une grosse suppression (écrite avant une
             // panne, ou avant ce réglage) est compacté dès le chargement : il
             // ne coûte qu'une fois.
-            actor.compact_if_due().await;
+            actor.compact_if_due();
             actor.serve(rx).await;
         }
         Err(error) => {
@@ -402,6 +407,29 @@ async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedRecei
                 first.fail(error);
             }
         }
+    }
+}
+
+/// La compaction d'une page hors de son acteur (Ruling R826) : `state`, l'état que l'acteur a
+/// encodé au `seq` donné, est relu par un `PageDoc` neuf sur un fil bloquant (Ruling R816), puis
+/// écrit comme instantané dans la voie de la page, qui retire le journal jusqu'à `seq` dans la
+/// même transaction. S'il ne se relit pas, rien n'est écrit et une ligne `error` le dit ; une
+/// écriture impossible (une panne, une page supprimée entre-temps) ne retire rien.
+async fn compact(store: Store, node_id: Uuid, seq: i64, state: Vec<u8>) {
+    let read = tokio::task::spawn_blocking(move || PageDoc::check_state(&state).map(|()| state));
+    let state = match read.await {
+        Ok(Ok(state)) => state,
+        Ok(Err(error)) => {
+            tracing::error!(%node_id, seq, %error, "compaction refusée : l'état de la page ne se relit pas, le journal est gardé");
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%node_id, seq, %error, "compaction interrompue pendant la relecture de l'état");
+            return;
+        }
+    };
+    if let Err(error) = store.put_snapshot(node_id, seq, &state).await {
+        tracing::warn!(%node_id, seq, %error, "compaction impossible : réessai plus tard");
     }
 }
 
@@ -702,6 +730,10 @@ struct Actor {
     /// La liste des présents que la page a diffusée en dernier ([`Actor::roster_changed`]) :
     /// celle que chaque connexion admise tient du serveur.
     roster: Vec<RosterLine>,
+    /// La compaction en vol (Ruling R826) : l'état encodé par l'acteur, relu puis écrit par une
+    /// tâche à part pendant que l'acteur sert la page. Une seule à la fois ; attendue avant que
+    /// l'acteur quitte le registre.
+    compaction: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Actor {
@@ -723,6 +755,7 @@ impl Actor {
             conns: HashMap::new(),
             next_conn: 0,
             roster: Vec::new(),
+            compaction: None,
         }
     }
 
@@ -750,6 +783,10 @@ impl Actor {
                 break stop;
             }
         };
+        // Ruling R826 : la compaction en vol va au bout avant que l'acteur quitte le registre ;
+        // un acteur neuf ne relit donc jamais la page pendant qu'elle s'écrit, et le serveur ne
+        // ferme pas la base sous elle (`Hub::shutdown`).
+        self.compaction_finished().await;
         // Ruling R135 : avant de disparaître, la version `closing` des écritures
         // pas encore versionnées. L'acteur est encore au registre : ce qui arrive
         // pendant ce temps attend dans sa boîte, puis repart vers un acteur neuf,
@@ -856,6 +893,10 @@ impl Actor {
             }
             Command::Forget { reply } => return Err(Stop::Forgotten(reply)),
             Command::Shutdown { reply } => return Err(Stop::Shutdown(reply)),
+            Command::Compacted { reply } => {
+                self.compaction_finished().await;
+                let _ = reply.send(());
+            }
         }
         Ok(())
     }
@@ -1272,7 +1313,7 @@ impl Actor {
         }
         self.wrote(changes, actor);
         self.relay(conn, &read, carried.as_deref(), fix.as_deref());
-        self.compact_if_due().await;
+        self.compact_if_due();
         Ok(true)
     }
 
@@ -1462,7 +1503,7 @@ impl Actor {
             History::Kept(_) => self.wrote_kept(),
         }
         self.broadcast(None, protocol::update(&update));
-        self.compact_if_due().await;
+        self.compact_if_due();
         Ok(Ok(()))
     }
 
@@ -1553,28 +1594,43 @@ impl Actor {
     /// relit pas.** L'instantané efface le journal qu'il couvre ; s'il ne se relisait pas, la page
     /// serait perdue au chargement suivant. L'état est donc relu par un `PageDoc` neuf avant
     /// d'être écrit ([`PageDoc::check_state`]) ; s'il ne se relit pas, rien n'est écrit, le
-    /// journal reste, et une ligne `error` le dit. La relecture coûte un chargement de l'état
-    /// (81 ms pour 10 000 blocs, en release), une fois par compaction, hors du chemin de la frappe
-    /// qui la déclenche (déjà relayée).
-    async fn compact_if_due(&mut self) {
+    /// journal reste, et une ligne `error` le dit.
+    ///
+    /// Ruling R826 : **la relecture et l'écriture se font hors de l'acteur.** L'acteur encode
+    /// l'état au `seq` courant (7 ms pour 10 000 blocs, en release) et le confie à une tâche à
+    /// part, qui le relit sur un fil bloquant (81 ms) puis l'écrit dans la voie de la page
+    /// ([`compact`]). Faites dans l'acteur, elles retardaient la frappe qui déclenchait la
+    /// compaction (la tâche qui écrit sa connexion attend que l'acteur rende la main) ou la
+    /// suivante, de 90 à 140 ms. L'instantané porte l'état au `seq` encodé, l'écriture ne retire
+    /// que le journal jusqu'à ce `seq` (pas ce que l'acteur a écrit depuis), et le store écarte un
+    /// instantané plus ancien que celui qu'il garde. Une seule compaction à la fois : celle qui
+    /// tombe pendant une autre attend l'écriture suivante.
+    fn compact_if_due(&mut self) {
         let many_updates = self.since_snapshot >= self.cfg.snapshot_every.max(1);
         let many_deletions = self.watch.deletions() >= self.cfg.compact_after_deletions.max(1);
         if !many_updates && !many_deletions {
             return;
         }
+        if self
+            .compaction
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
         self.since_snapshot = 0;
         self.watch.reset_deletions();
         let state = self.page.encode_state();
-        if let Err(error) = PageDoc::check_state(&state) {
-            tracing::error!(node_id = %self.id.node_id, seq = self.last_seq, %error, "compaction refusée : l'état de la page ne se relit pas, le journal est gardé");
-            return;
-        }
-        if let Err(error) = self
-            .store
-            .put_snapshot(self.id.node_id, self.last_seq, &state)
-            .await
+        let task = compact(self.store.clone(), self.id.node_id, self.last_seq, state);
+        self.compaction = Some(tokio::spawn(task.with_current_subscriber()));
+    }
+
+    /// Attend la fin de la compaction en vol, s'il y en a une (Ruling R826).
+    async fn compaction_finished(&mut self) {
+        if let Some(task) = self.compaction.take()
+            && let Err(error) = task.await
         {
-            tracing::warn!(node_id = %self.id.node_id, seq = self.last_seq, %error, "compaction impossible : réessai plus tard");
+            tracing::error!(node_id = %self.id.node_id, %error, "compaction interrompue");
         }
     }
 
@@ -1725,7 +1781,18 @@ mod tests {
         dir: &tempfile::TempDir,
         cfg: SyncConfig,
     ) -> (Actor, Commands, UnboundedReceiver<Command>) {
-        let store = Store::open(&dir.path().join("mementum.db")).await.unwrap();
+        actor_on(dir, cfg, mementum_store::StoreOptions::default()).await
+    }
+
+    /// [`actor_with`], sur une base ouverte avec `options` (un disque lent, par exemple).
+    async fn actor_on(
+        dir: &tempfile::TempDir,
+        cfg: SyncConfig,
+        options: mementum_store::StoreOptions,
+    ) -> (Actor, Commands, UnboundedReceiver<Command>) {
+        let store = Store::open_with(&dir.path().join("mementum.db"), options)
+            .await
+            .unwrap();
         let space = store.create_space("Essais", None).await.unwrap();
         let node_id = store
             .create_node(NewNode {
@@ -1797,7 +1864,8 @@ mod tests {
         let node = actor.id.node_id;
         // Saine : la compaction a lieu.
         actor.persist(&[&[0, 0]], None).await.unwrap();
-        actor.compact_if_due().await;
+        actor.compact_if_due();
+        actor.compaction_finished().await;
         let state = actor.store.load_doc(node).await.unwrap();
         assert_eq!(state.snapshot.as_ref().map(|(seq, _)| *seq), Some(1));
         assert!(state.updates.is_empty(), "le journal compacté reste");
@@ -1809,7 +1877,8 @@ mod tests {
             "l'état abîmé se relit"
         );
         actor.persist(&[&[0, 0]], None).await.unwrap();
-        actor.compact_if_due().await;
+        actor.compact_if_due();
+        actor.compaction_finished().await;
         let state = actor.store.load_doc(node).await.unwrap();
         assert_eq!(
             state.snapshot.as_ref().map(|(seq, _)| *seq),
@@ -1823,6 +1892,56 @@ mod tests {
             assert!(actor.cut_version(reason).await.is_err(), "{reason:?}");
         }
         assert!(actor.store.list_versions(node).await.unwrap().is_empty());
+    }
+
+    /// Ruling R826 : la compaction se fait hors de l'acteur, une à la fois. Sur un disque lent
+    /// (chaque écriture dure 300 ms de plus), celle qui tombe pendant une autre attend l'écriture
+    /// suivante, sans rien perdre de son compte ; et l'acteur qui s'arrête attend celle qui est en
+    /// vol avant de quitter le registre (sinon le serveur fermerait la base sous elle).
+    #[tokio::test]
+    async fn one_compaction_at_a_time_and_the_actor_waits_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SyncConfig {
+            snapshot_every: 1,
+            ..SyncConfig::default()
+        };
+        let slow = mementum_store::StoreOptions {
+            write_delay: std::time::Duration::from_millis(300),
+            ..mementum_store::StoreOptions::default()
+        };
+        let (mut actor, commands, mailbox) = actor_on(&dir, cfg, slow).await;
+        let node = actor.id.node_id;
+        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.compact_if_due();
+        assert!(actor.compaction.is_some(), "aucune compaction lancée");
+        // Une autre est due pendant que la première s'écrit : elle attend.
+        actor.since_snapshot = 5;
+        actor.compact_if_due();
+        assert_eq!(
+            actor.since_snapshot, 5,
+            "une seconde compaction a été lancée"
+        );
+        actor.compaction_finished().await;
+        let state = actor.store.load_doc(node).await.unwrap();
+        assert_eq!(state.snapshot.as_ref().map(|(seq, _)| *seq), Some(1));
+        // L'écriture suivante la lance ; l'acteur qui s'arrête l'attend.
+        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.compact_if_due();
+        assert_eq!(actor.since_snapshot, 0);
+        drop(commands);
+        actor.serve(mailbox).await;
+        let state = Store::open(&dir.path().join("mementum.db"))
+            .await
+            .unwrap()
+            .load_doc(node)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.snapshot.as_ref().map(|(seq, _)| *seq),
+            Some(2),
+            "l'acteur s'est arrêté avant la fin de la compaction"
+        );
+        assert!(state.updates.is_empty());
     }
 
     /// Une connexion du compte `account`, qui s'appelle `name` et peut écrire : inscrite, puis

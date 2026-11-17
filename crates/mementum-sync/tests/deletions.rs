@@ -253,6 +253,8 @@ async fn step_2_deleting_what_the_page_collected_is_not_held() {
     mona.apply_local(&erase);
     processed(&mona).await;
     assert!(tom.wait_until(WAIT, |c| text(&c.blocks()) == "Alpha").await);
+    // La compaction se fait hors de l'acteur (Ruling R826) : on attend qu'elle ait fini.
+    f.hub.compacted(f.page).await.unwrap();
     let stored = f.store.load_doc(f.page).await.unwrap();
     assert!(
         stored.snapshot.is_some() && stored.updates.is_empty(),
