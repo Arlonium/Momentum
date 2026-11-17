@@ -472,7 +472,7 @@ fn embed_over_the_background(root_update: &[u8]) -> Vec<u8> {
 
 /// Une valeur qui n'est pas une valeur `Any` (un objet incorporé), posée par l'origine d'une
 /// entrée de la page : rien ne la distingue, avant d'appliquer, d'un contenu de texte. Jugée dans
-/// la page : refusée après l'application (Ruling R691).
+/// la page, d'après ce que yrs en a fait : refusée après l'application (Rulings R691, R724).
 #[test]
 fn an_embedded_object_written_over_an_attribute_is_refused_in_the_page() {
     let (page, root_update) = PageDoc::new_page();
@@ -481,7 +481,7 @@ fn an_embedded_object_written_over_an_attribute_is_refused_in_the_page() {
         matches!(
             &result,
             Err(Refused { error: CrdtError::Structure(why), intact: false })
-                if why.contains("backgroundColor")
+                if why.contains("contenu qui n'en est pas une")
         ),
         "{result:?}"
     );
@@ -1029,8 +1029,7 @@ fn a_stored_content_that_is_not_a_value_loses_its_attribute() {
 /// entrée de map. yrs recopie la clé du voisin de droite : un attribut ; Yjs prend celle de
 /// gauche : un enfant sans type du groupe, et y-prosemirror lève chez les autres. Une valeur
 /// `Any` qui porte une origine droite est refusée avant d'être appliquée ; un autre contenu, dans
-/// la page ; relu du journal, l'élément est supprimé (chez yrs comme chez Yjs, par son
-/// identifiant).
+/// la page ; relu du journal, la page ne se charge pas avec lui (Ruling R723).
 #[test]
 fn an_item_between_a_child_and_a_map_entry_is_refused() {
     let (page, root_update) = PageDoc::new_page();
@@ -1064,25 +1063,14 @@ fn an_item_between_a_child_and_a_map_entry_is_refused() {
         matches!(&result, Err(Refused { intact: false, .. })),
         "{result:?}"
     );
-    // Relus du journal : la page se lit comme avant eux, et ne garde ni l'attribut ni l'enfant.
+    // Relus du journal (Ruling R723) : yrs en fait une entrée de map à origine droite, supprime
+    // le bloc de gauche, et rien ne le remet. La page ne se charge pas avec l'entrée ; qui relit
+    // le journal l'écarte quand ses octets le disent (`PageDoc::has_keyed_right_origin`).
     for update in [&any, &string] {
-        // (Le bloc de gauche, lui, est parti à l'intégration : yrs le tient pour écrasé.)
-        let (_, state) = loaded(&[&root_update, update]);
-        let doc = replica(&state);
-        let txn = doc.transact();
-        assert_eq!(
-            root(&txn).attributes(&txn).count(),
-            0,
-            "un attribut du groupe"
-        );
-        assert_eq!(
-            root(&txn).children(&txn).count() as u32,
-            root(&txn).len(&txn),
-            "un enfant sans type"
-        );
+        let result = PageDoc::from_updates([root_update.as_slice(), update.as_slice()]);
         assert!(
-            !state.windows(3).any(|w| w == b"red"),
-            "la valeur est servie"
+            matches!(&result, Err(CrdtError::Structure(why)) if why.contains("origine droite")),
+            "la page se charge avec l'entrée"
         );
     }
 }
@@ -1229,31 +1217,20 @@ fn an_item_astride_what_the_page_knows_is_judged_by_what_it_integrates() {
             };
             for (form, forged) in forms {
                 let journal = [root_update.as_slice(), &text, &forged];
-                let state = if stored {
-                    loaded(&journal).1
+                if stored {
+                    // Ruling R723 : yrs en a fait une entrée de map à origine droite, et l'ancienne
+                    // entrée n'est plus tenue par rien. La page ne se charge pas avec elle (la
+                    // retirer laissait un état qu'un client ne relit plus, le bloc supprimé).
+                    let result = PageDoc::from_updates(journal.iter().copied());
+                    assert!(
+                        matches!(&result, Err(CrdtError::Structure(why)) if why.contains("origine droite")),
+                        "{what}, {form} : la page se charge avec l'entrée"
+                    );
                 } else {
                     let (live, _) = loaded(&journal[..2]);
                     let result = live.try_client_update(&forged);
                     assert!(result.is_err(), "{what}, {form} : acceptée d'un client");
-                    continue;
-                };
-                // Relue du journal : ni attribut pour yrs, ni rien que la garde refuse dans les
-                // octets servis.
-                assert_eq!(
-                    attr_of(&state, 0, "backgroundColor"),
-                    None,
-                    "{what}, {form} : l'attribut est servi"
-                );
-                let empty = PageDoc::from_updates(std::iter::empty::<&[u8]>()).unwrap();
-                assert_eq!(
-                    empty.attribute_refusal(&state).unwrap(),
-                    None,
-                    "{what}, {form}"
-                );
-                assert_eq!(
-                    loaded(&journal).0.revision(),
-                    loaded(&[&state]).0.revision()
-                );
+                }
             }
         }
     }

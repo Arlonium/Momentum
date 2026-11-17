@@ -646,9 +646,17 @@ enum Op {
     /// Un client de passage écrase la couleur de fond du premier bloc par un contenu qui n'est
     /// pas une valeur `Any` (`other_content`) : reçu d'un client, ou déjà au journal (`stored`).
     Content { kind: usize, stored: bool },
-    /// Un client de passage écrit un texte vide, puis envoie à la même horloge une chaîne à
-    /// cheval sur ce que la page connaît (`astride`) : reçue d'un client, ou déjà au journal.
-    Astride { stored: bool },
+    /// Un client de passage écrit un texte vide, puis envoie un contenu (`kind`, voir `between`)
+    /// dont l'origine est ce texte et l'origine droite l'entrée courante d'un attribut, à cheval
+    /// ou non sur ce que la page connaît (`astride`), suivi ou non d'une valeur dont il est
+    /// l'origine (`followed`, le constat N1) : reçu d'un client, ou déjà au journal (`stored`).
+    /// yrs en ferait une entrée de map à origine droite (Rulings R721, R723).
+    Between {
+        kind: usize,
+        astride: bool,
+        followed: bool,
+        stored: bool,
+    },
 }
 
 /// La mise à jour honnête `honest` (un client de passage écrase `backgroundColor` par « x »),
@@ -695,11 +703,20 @@ fn empty_text(doc: &Doc) -> Vec<u8> {
     txn.encode_update_v1()
 }
 
-/// R-1 de la re-relecture (Ruling R721) : une chaîne de trois unités à l'horloge 0 du client
-/// `client`, que la page connaît déjà (son texte vide), d'origine cette horloge et d'origine
-/// droite l'entrée que `honest` écrase : yrs n'en intègre que la part au-dessus du plancher.
-/// `None` si `honest` n'a pas la forme attendue.
-fn astride(honest: &[u8], client: u64) -> Option<Vec<u8>> {
+/// R-1 de la re-relecture et le constat R722 (Rulings R721, R723) : un contenu du client
+/// `client`, d'origine son texte vide (l'horloge 0, que la page connaît : un enfant du
+/// paragraphe) et d'origine droite l'entrée que `honest` écrase. `kind` : une chaîne, une valeur
+/// `Any`, un objet incorporé, un contenu supprimé. `astride` : il part de l'horloge 0, et yrs
+/// n'en intègre que la part au-dessus du plancher (sans effet pour un objet incorporé, qui ne
+/// compte que pour un). `followed` : une valeur « ok » le suit, dont il est l'origine. `None` si
+/// `honest` n'a pas la forme attendue.
+fn between(
+    honest: &[u8],
+    client: u64,
+    kind: usize,
+    astride: bool,
+    followed: bool,
+) -> Option<Vec<u8>> {
     let value = [1, 119, 1, b'x'];
     let at = honest.windows(value.len()).position(|w| w == value)?;
     // Un client, un élément, l'identifiant du client, l'horloge 0, puis l'octet d'en-tête.
@@ -707,13 +724,38 @@ fn astride(honest: &[u8], client: u64) -> Option<Vec<u8>> {
     if honest[head] != 0xA8 {
         return None;
     }
-    let mut out = vec![1, 1];
+    let kind = kind % 4;
+    let astride = astride && kind != 2;
+    let clock = u8::from(!astride);
+    let len = if kind == 2 { 1 } else { 3 - clock };
+    let mut out = vec![1, 1 + u8::from(followed)];
     var(&mut out, client);
-    out.extend_from_slice(&[0, 0xC4]);
+    out.push(clock);
+    out.push(0xC0 | [4, 8, 5, 1][kind]);
     var(&mut out, client);
     out.push(0);
     out.extend_from_slice(&honest[head + 1..at]);
-    out.extend_from_slice(&[3, b'a', b'b', b'c', 0]);
+    match kind {
+        0 => {
+            out.push(len);
+            out.extend_from_slice(&b"abc"[..usize::from(len)]);
+        }
+        1 => {
+            out.push(len);
+            for _ in 0..len {
+                out.extend_from_slice(&[119, 1, b'a']);
+            }
+        }
+        2 => out.extend_from_slice(&[2, b'{', b'}']),
+        _ => out.push(len),
+    }
+    if followed {
+        out.push(0x88);
+        var(&mut out, client);
+        out.push(clock + len - 1);
+        out.extend_from_slice(&[1, 119, 2, b'o', b'k']);
+    }
+    out.push(0);
     Some(out)
 }
 
@@ -832,9 +874,14 @@ fn op() -> impl Strategy<Value = Op> {
                 stored,
             }),
         (0..3usize, any::<bool>()).prop_map(|(kind, stored)| Op::Content { kind, stored }),
-        // Au journal (`stored`), la scène rend un état qu'un client neuf ne relit pas : constat
-        // ouvert, dit au registre (R722) ; seule la forme reçue d'un client est mêlée ici.
-        Just(Op::Astride { stored: false }),
+        (0..4usize, any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+            |(kind, astride, followed, stored)| Op::Between {
+                kind,
+                astride,
+                followed,
+                stored
+            }
+        ),
     ]
 }
 
@@ -864,138 +911,162 @@ proptest! {
     /// déplacements faits sans avoir vu la dernière frappe y mêlent des reports (R536).
     #[test]
     fn a_reloaded_page_is_the_live_page(ops in prop::collection::vec(op(), 1..24)) {
-        let mut served = Served::new();
-        let clients = [client(10, &served), client(20, &served)];
-        let start = honest(&clients[0], |txn, text| text.insert(txn, 0, "abc"));
-        prop_assert!(served.receive(&start));
-        for (step, op) in ops.iter().enumerate() {
-            for doc in &clients {
-                catch_up(doc, &served);
-            }
-            let update = match op {
-                Op::Type { who, at, text } => honest(&clients[*who], |txn, t| {
-                    let at = bounded(*at, t.len(txn) as usize);
-                    t.insert(txn, at, text);
-                }),
-                Op::Delete { who, at, len } => honest(&clients[*who], |txn, t| {
-                    let total = t.len(txn);
-                    let at = bounded(*at, total as usize);
-                    let len = (*len as u32).min(total - at);
-                    if len > 0 {
-                        t.remove_range(txn, at, len);
-                    }
-                }),
-                Op::Bold { who, at, len } => honest(&clients[*who], |txn, t| {
-                    let total = t.len(txn);
-                    let at = bounded(*at, total as usize);
-                    let len = (*len as u32).min(total - at);
-                    if len > 0 {
-                        let mut attrs = Attrs::new();
-                        attrs.insert("bold".into(), Any::Map(Default::default()));
-                        t.format(txn, at, len, attrs);
-                    }
-                }),
-                Op::Move { who, at, typed } => {
-                    let typing = honest(&clients[1 - *who], |txn, t| {
-                        let at = bounded(*at, t.len(txn) as usize);
-                        t.insert(txn, at, typed);
-                    });
-                    served.receive(&typing);
-                    served.assert_reload_is_live(&format!("étape {step} ({op:?}), la frappe"));
-                    moved(&clients[*who])
-                }
-                Op::Hostile { item, delete } => {
-                    // Les clients de la page et leur horloge.
-                    let state = StateVector::decode_v1(&served.page.state_vector()).unwrap();
-                    let known: Vec<(u64, u32)> =
-                        state.iter().map(|(c, k)| (c.get(), *k)).filter(|(_, k)| *k > 0).collect();
-                    let pick = |n: usize| known[n % known.len()];
-                    let types = type_ids(&served.page);
-                    let item = item.as_ref().map(|(who, clock, below, kind, (place, at))| {
-                        let (client, floor) = pick(*who);
-                        let clock = if *below { clock % floor } else { floor };
-                        let place = match place {
-                            1 if !types.is_empty() => {
-                                let (c, k) = types[at % types.len()];
-                                Place::In(c, k)
-                            }
-                            0 | 1 => Place::Root,
-                            _ => {
-                                let (c, f) = pick(*at);
-                                Place::After(c, (*at as u32) % f)
-                            }
-                        };
-                        (client, clock, place, ITEMS[*kind].clone())
-                    });
-                    let deletions: Vec<(u64, u32, u32)> = delete
-                        .iter()
-                        .map(|(who, clock)| {
-                            let (client, floor) = pick(*who);
-                            (client, clock % floor, 1)
-                        })
-                        .collect();
-                    hand_made(item, &deletions)
-                }
-                Op::Attr { attr, on_container, raced, stored } => {
-                    let (key, value) = attrs().swap_remove(*attr);
-                    // Deux clients de passage partis du même état : le second ne voit pas ce
-                    // que le premier écrit.
-                    let passing = [
-                        client(1_000 + 2 * step as u64, &served),
-                        client(1_001 + 2 * step as u64, &served),
-                    ];
-                    if *raced {
-                        let honest = if key == "id" { "autre" } else { "blue" };
-                        let first = attribute(&passing[0], *on_container, key, Any::from(honest));
-                        served.receive(&first);
-                        served.assert_reload_is_live(&format!("étape {step} ({op:?}), la course"));
-                    }
-                    let update = attribute(&passing[1], *on_container, key, value);
-                    if *stored {
-                        served.journal.push(update);
-                        served.page = served.reloaded();
-                        vec![0, 0]
-                    } else {
-                        update
-                    }
-                }
-                Op::Astride { stored } => {
-                    let id = 7_000 + step as u64;
-                    let text = empty_text(&client(id, &served));
-                    served.receive(&text);
-                    served.assert_reload_is_live(&format!("étape {step} ({op:?}), le texte"));
-                    let other = client(8_000 + step as u64, &served);
-                    let honest = attribute(&other, false, "backgroundColor", Any::from("x"));
-                    let known = StateVector::decode_v1(&served.page.state_vector())
-                        .unwrap()
-                        .get(&ClientID::new(id));
-                    match astride(&honest, id).filter(|_| known == 1) {
-                        Some(update) if *stored => {
-                            served.journal.push(update);
-                            served.page = served.reloaded();
-                            vec![0, 0]
-                        }
-                        Some(update) => update,
-                        None => vec![0, 0],
-                    }
-                }
-                Op::Content { kind, stored } => {
-                    let passing = client(5_000 + step as u64, &served);
-                    let honest = attribute(&passing, false, "backgroundColor", Any::from("x"));
-                    let update = other_content(&honest, *kind);
-                    if *stored {
-                        served.journal.push(update);
-                        served.page = served.reloaded();
-                        vec![0, 0]
-                    } else {
-                        update
-                    }
-                }
-            };
-            served.receive(&update);
-            served.assert_reload_is_live(&format!("étape {step} ({op:?})"));
-            assert_attrs_are_sound(&served.page, &format!("étape {step} ({op:?})"));
+        scenario(&ops);
+    }
+}
+
+/// Le déroulé du test de propriétés, pour une suite d'opérations donnée.
+fn scenario(ops: &[Op]) {
+    let mut served = Served::new();
+    let clients = [client(10, &served), client(20, &served)];
+    let start = honest(&clients[0], |txn, text| text.insert(txn, 0, "abc"));
+    assert!(served.receive(&start));
+    for (step, op) in ops.iter().enumerate() {
+        for doc in &clients {
+            catch_up(doc, &served);
         }
+        let update = match op {
+            Op::Type { who, at, text } => honest(&clients[*who], |txn, t| {
+                let at = bounded(*at, t.len(txn) as usize);
+                t.insert(txn, at, text);
+            }),
+            Op::Delete { who, at, len } => honest(&clients[*who], |txn, t| {
+                let total = t.len(txn);
+                let at = bounded(*at, total as usize);
+                let len = (*len as u32).min(total - at);
+                if len > 0 {
+                    t.remove_range(txn, at, len);
+                }
+            }),
+            Op::Bold { who, at, len } => honest(&clients[*who], |txn, t| {
+                let total = t.len(txn);
+                let at = bounded(*at, total as usize);
+                let len = (*len as u32).min(total - at);
+                if len > 0 {
+                    let mut attrs = Attrs::new();
+                    attrs.insert("bold".into(), Any::Map(Default::default()));
+                    t.format(txn, at, len, attrs);
+                }
+            }),
+            Op::Move { who, at, typed } => {
+                let typing = honest(&clients[1 - *who], |txn, t| {
+                    let at = bounded(*at, t.len(txn) as usize);
+                    t.insert(txn, at, typed);
+                });
+                served.receive(&typing);
+                served.assert_reload_is_live(&format!("étape {step} ({op:?}), la frappe"));
+                moved(&clients[*who])
+            }
+            Op::Hostile { item, delete } => {
+                // Les clients de la page et leur horloge.
+                let state = StateVector::decode_v1(&served.page.state_vector()).unwrap();
+                let known: Vec<(u64, u32)> = state
+                    .iter()
+                    .map(|(c, k)| (c.get(), *k))
+                    .filter(|(_, k)| *k > 0)
+                    .collect();
+                let pick = |n: usize| known[n % known.len()];
+                let types = type_ids(&served.page);
+                let item = item.as_ref().map(|(who, clock, below, kind, (place, at))| {
+                    let (client, floor) = pick(*who);
+                    let clock = if *below { clock % floor } else { floor };
+                    let place = match place {
+                        1 if !types.is_empty() => {
+                            let (c, k) = types[at % types.len()];
+                            Place::In(c, k)
+                        }
+                        0 | 1 => Place::Root,
+                        _ => {
+                            let (c, f) = pick(*at);
+                            Place::After(c, (*at as u32) % f)
+                        }
+                    };
+                    (client, clock, place, ITEMS[*kind].clone())
+                });
+                let deletions: Vec<(u64, u32, u32)> = delete
+                    .iter()
+                    .map(|(who, clock)| {
+                        let (client, floor) = pick(*who);
+                        (client, clock % floor, 1)
+                    })
+                    .collect();
+                hand_made(item, &deletions)
+            }
+            Op::Attr {
+                attr,
+                on_container,
+                raced,
+                stored,
+            } => {
+                let (key, value) = attrs().swap_remove(*attr);
+                // Deux clients de passage partis du même état : le second ne voit pas ce
+                // que le premier écrit.
+                let passing = [
+                    client(1_000 + 2 * step as u64, &served),
+                    client(1_001 + 2 * step as u64, &served),
+                ];
+                if *raced {
+                    let honest = if key == "id" { "autre" } else { "blue" };
+                    let first = attribute(&passing[0], *on_container, key, Any::from(honest));
+                    served.receive(&first);
+                    served.assert_reload_is_live(&format!("étape {step} ({op:?}), la course"));
+                }
+                let update = attribute(&passing[1], *on_container, key, value);
+                if *stored {
+                    served.journal.push(update);
+                    served.page = served.reloaded();
+                    vec![0, 0]
+                } else {
+                    update
+                }
+            }
+            Op::Between {
+                kind,
+                astride,
+                followed,
+                stored,
+            } => {
+                let id = 7_000 + step as u64;
+                let text = empty_text(&client(id, &served));
+                served.receive(&text);
+                served.assert_reload_is_live(&format!("étape {step} ({op:?}), le texte"));
+                let other = client(8_000 + step as u64, &served);
+                let honest = attribute(&other, false, "backgroundColor", Any::from("x"));
+                let known = StateVector::decode_v1(&served.page.state_vector())
+                    .unwrap()
+                    .get(&ClientID::new(id));
+                match between(&honest, id, *kind, *astride, *followed).filter(|_| known == 1) {
+                    Some(update) if *stored => {
+                        // Comme l'acteur à la relecture : une entrée que la page refuse n'est
+                        // pas gardée (Ruling R723 : la page ne se charge pas avec elle).
+                        served.journal.push(update);
+                        if PageDoc::from_updates(served.journal.iter().map(Vec::as_slice)).is_err()
+                        {
+                            served.journal.pop();
+                        }
+                        served.page = served.reloaded();
+                        vec![0, 0]
+                    }
+                    Some(update) => update,
+                    None => vec![0, 0],
+                }
+            }
+            Op::Content { kind, stored } => {
+                let passing = client(5_000 + step as u64, &served);
+                let honest = attribute(&passing, false, "backgroundColor", Any::from("x"));
+                let update = other_content(&honest, *kind);
+                if *stored {
+                    served.journal.push(update);
+                    served.page = served.reloaded();
+                    vec![0, 0]
+                } else {
+                    update
+                }
+            }
+        };
+        served.receive(&update);
+        served.assert_reload_is_live(&format!("étape {step} ({op:?})"));
+        assert_attrs_are_sound(&served.page, &format!("étape {step} ({op:?})"));
     }
 }
 

@@ -21,7 +21,9 @@ use yrs::{
 
 use crate::attrs::{self, Key, Value};
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
-use crate::guard::{PageItem, Pending, REPEATED_CLIENT, Shape, UNTYPED_CHILD, missing, touched};
+use crate::guard::{
+    KEYED_RIGHT_ORIGIN, PageItem, Pending, REPEATED_CLIENT, Shape, UNTYPED_CHILD, missing, touched,
+};
 use crate::kept_ids::keep_ids;
 use crate::moves::{self, Carried, MAX_CARRIED_BYTES, Recreated};
 use crate::structure::{Slot, check_blocks};
@@ -195,6 +197,15 @@ impl PageDoc {
                 .attrs(&before, |id| tag_in_page(&txn, id), |_| PageItem::Unknown)
                 .unsound;
             self.integrate(&mut txn, &shape, decoded)?;
+            // Ruling R723 : ce que yrs a fait d'un élément à origine droite ne se lit que dans
+            // ce qu'il encode. Une page vide n'a rien qui serve d'origine : tout est dans
+            // l'entrée (un état complet, encodé par yrs), et ses octets ont suffi.
+            if before.iter().next().is_some()
+                && shape.has_right_origins(&before)
+                && matches!(made(&txn.encode_update_v1()), Err(CrdtError::Structure(why)) if why == KEYED_RIGHT_ORIGIN)
+            {
+                return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN.to_string()));
+            }
             delete(&mut txn, &shape.outside_marks(&before))?;
             txn.commit();
             let named = named.into_iter().filter_map(|(client, clock)| {
@@ -307,6 +318,12 @@ impl PageDoc {
         // Ce que la transaction a intégré, encodé avant sa validation (où passe le
         // ramasse-miettes).
         let read = txn.encode_update_v1();
+        // Rulings R723, R724 : une entrée de map à origine droite, ou dont le contenu n'est pas
+        // une valeur, d'après ce que yrs en a fait. Avant la validation, où le ramasse-miettes
+        // passerait sur ce qu'elle a défait.
+        if shape.placed_by_neighbours(&floor) {
+            made(&read).map_err(applied)?;
+        }
         // yrs ne dresse la liste des types changés qu'à la validation.
         txn.commit();
         if touched(&txn, &self.meta) {
@@ -433,6 +450,15 @@ impl PageDoc {
         Ok(findings.refusal)
     }
 
+    /// Vrai si un élément de la mise à jour (v1) porte, dans ses octets, la marque « entrée de
+    /// map » et une origine droite (Ruling R723) : une entrée du journal écrite par un serveur
+    /// d'avant cette garde, telle que yrs l'a encodée. [`PageDoc::apply_update`] la refuse avant
+    /// de l'appliquer (la page est intacte), et la relecture du journal l'écarte au lieu de
+    /// refuser la page, comme une entrée où un client paraît deux fois (Ruling R258).
+    pub fn has_keyed_right_origin(update: &[u8]) -> bool {
+        Shape::read(update).is_ok_and(|shape| shape.check_keyed(&StateVector::default()).is_err())
+    }
+
     /// Vrai si la mise à jour (v1) est refusée parce qu'un client y paraît deux fois (Ruling
     /// R207). Une telle mise à jour est refusée avant que yrs la lise : la page est intacte. La
     /// relecture du journal s'en sert pour écarter l'entrée au lieu de refuser la page (Ruling
@@ -521,6 +547,8 @@ impl PageDoc {
         let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
         let state = txn.state_vector();
         shape.check(&state)?;
+        // Ruling R723 : une entrée de map à origine droite, quand les octets le disent.
+        shape.check_keyed(&state)?;
         if from_client {
             // Ruling R431 : une marque de texte hors du schéma, ou trop longue.
             shape.check_marks(&state)?;
@@ -812,6 +840,15 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
         return Err(attrs::refusal_in_page(tag, key));
     }
     Ok(())
+}
+
+/// Ce que la garde refuse de ce que yrs a fait d'une mise à jour (Rulings R723, R724,
+/// [`Shape::check_made`]), lu dans `encoded`, l'encodage par yrs de ce que la transaction a
+/// intégré : yrs y écrit la marque « entrée de map » de chaque élément d'après la clé qu'il lui a
+/// donnée, quoi que la mise à jour reçue ait dit. Refusé aussi si la garde ne relit pas
+/// l'encodage : dans le doute, la page ne le garde pas.
+fn made(encoded: &[u8]) -> Result<(), CrdtError> {
+    Shape::read(encoded)?.check_made()
 }
 
 /// La balise d'un type de la page, pour la garde des attributs : `Some(None)` s'il n'est pas un

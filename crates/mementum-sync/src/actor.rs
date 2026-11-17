@@ -464,6 +464,15 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
                 tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : un client y paraît deux fois");
                 set_aside = true;
             }
+            // Ruling R723 : une entrée de map à origine droite, écrite par un serveur d'avant
+            // cette garde. Ses octets le disent (yrs l'a encodée) : elle est refusée avant d'être
+            // appliquée, la page est intacte, et se charge sans elle ni la suppression qu'elle
+            // portait. Appliquée, elle laisserait une entrée que plus rien ne tient, et un état
+            // illisible le jour où son bloc est supprimé.
+            Err(error) if PageDoc::has_keyed_right_origin(update) => {
+                tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : une entrée de map y porte une origine droite");
+                set_aside = true;
+            }
             Err(error) => return Err(error.into()),
         }
     }

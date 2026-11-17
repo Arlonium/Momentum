@@ -101,3 +101,34 @@ test("une largeur qui n'est pas un nombre voyage telle quelle", () => {
   Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
   expect((copy.getXmlFragment("f").get(0) as Y.XmlElement).getAttribute("colwidth")).toEqual([Number.NaN, 120, undefined]);
 });
+
+test("une chaîne à cheval à origine droite, puis une valeur qui la suit, sont deux enfants pour Yjs", () => {
+  // N1 de la re-relecture (Ruling R723). Le client 5 a écrit un texte vide dans le paragraphe
+  // (son horloge 0). Il envoie ensuite, à cette même horloge, la chaîne « ab » d'origine droite
+  // l'entrée de `k`, puis la valeur « ok » d'origine la fin de la chaîne. yrs n'intègre que « b »,
+  // en fait l'entrée courante de `k` (la clé de son voisin de droite), puis « ok » l'écrase : le
+  // serveur lisait `k = "ok"` et un paragraphe sans enfant. Yjs prend la clé du voisin de
+  // gauche, le texte, qui n'en a pas : deux enfants sans type, et `k` garde sa valeur.
+  const { state, entry } = base();
+  const writer = new Y.Doc();
+  writer.clientID = 5;
+  Y.applyUpdate(writer, state);
+  (writer.getXmlFragment("f").get(0) as Y.XmlElement).push([new Y.XmlText()]);
+  const withText = Y.encodeStateAsUpdate(writer);
+  const id = (at: Id): number[] => [...varUint(at.client), ...varUint(at.clock)];
+  const children = (update: number[]): { k: unknown; rest: unknown[] } => {
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, withText);
+    Y.applyUpdate(doc, Uint8Array.from(update));
+    const paragraph = doc.getXmlFragment("f").get(0) as Y.XmlElement;
+    return { k: paragraph.getAttribute("k"), rest: paragraph.toArray().filter((child) => !(child instanceof Y.XmlText)) };
+  };
+  // Tel que le client l'envoie : deux morceaux, la chaîne à cheval sur l'horloge 0.
+  const sent = [1, 2, 5, 0, 0xc4, 5, 0, ...id(entry), ...text("ab"), 0x88, 5, 1, 1, 119, ...text("ok"), 0];
+  expect(children(sent)).toEqual({ k: "x", rest: ["b", "ok"] });
+  // Tel que le serveur le relayait : ce que yrs a intégré (« b » avec la marque d'une entrée de
+  // map, que Yjs ne lit pas quand l'élément a une origine), et ce que yrs a supprimé : le texte,
+  // son voisin de gauche, et « b », écrasé par « ok ».
+  const relayed = [1, 2, 5, 1, 0xe4, 5, 0, ...id(entry), ...text("b"), 0xa8, 5, 1, 1, 119, ...text("ok"), 1, 5, 1, 0, 2];
+  expect(children(relayed)).toEqual({ k: "x", rest: ["ok"] });
+});

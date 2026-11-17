@@ -183,3 +183,62 @@ async fn full_write_after_a_set_aside_entry_is_kept() {
         "seule l'entrée hostile est écartée : {journal}"
     );
 }
+
+/// Ruling R723 : une entrée de map à origine droite, écrite au journal par un serveur d'avant
+/// cette garde, telle que yrs l'a encodée (la marque « entrée de map » y est). yrs en ferait
+/// l'entrée courante de la couleur du paragraphe, supprimerait le texte à sa gauche, et l'ancienne
+/// entrée, que plus rien ne tient, survivrait à son paragraphe avec un pointeur libéré. À la
+/// relecture, l'entrée est écartée et journalisée (`error`), avec la suppression qu'elle portait :
+/// la page se charge sans elle, son texte intact.
+#[tokio::test]
+async fn journal_entry_with_a_keyed_item_with_a_right_origin_is_set_aside() {
+    let logs = Logs::capture();
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Journal", &[user(&team.olga, Level::Full)])
+        .await;
+    let (created, creation) = PageDoc::new_page();
+    let paragraph = created.read_blocks()[0].id.clone();
+    let a = PageDoc::from_updates([creation.as_slice()]).unwrap();
+    let one = a.replace_text(&paragraph, 0, 0, "Un").unwrap();
+    let c = PageDoc::from_updates([creation.as_slice(), one.as_slice()]).unwrap();
+    let def = c.replace_text(&paragraph, 0, 0, "def").unwrap();
+    // Le client de la racine : son élément 4 est l'entrée `backgroundColor` du paragraphe.
+    let state = created.state_vector();
+    let mut at = 0;
+    assert_eq!(read_var(&state, &mut at), 1);
+    let root = read_var(&state, &mut at);
+    // Le client de « Un » : son élément 0 est le texte du paragraphe.
+    let mut at = 0;
+    assert_eq!(read_var(&one, &mut at), 1, "un seul client");
+    let _structs = read_var(&one, &mut at);
+    let typist = read_var(&one, &mut at);
+    assert_eq!(read_var(&one, &mut at), 0, "à partir de l'horloge 0");
+    // Une chaîne (4) avec une origine (0x80), une origine droite (0x40) et la marque « entrée de
+    // map » (0x20) ; puis la suppression du texte et de ses deux lettres, que yrs a faite.
+    let mut hostile = vec![1, 1];
+    var(&mut hostile, 7_000);
+    hostile.extend([0, 0xE4]);
+    var(&mut hostile, typist);
+    hostile.push(0);
+    var(&mut hostile, root);
+    hostile.extend([4, 2, b'b', b'c', 1]);
+    var(&mut hostile, typist);
+    hostile.extend([1, 0, 3]);
+    assert!(PageDoc::has_keyed_right_origin(&hostile));
+    assert!(!PageDoc::has_keyed_right_origin(&def));
+    team.store
+        .append_updates(page, &[&creation, &one, &hostile, &def], None)
+        .await
+        .unwrap();
+
+    let read = team.olga.get_mmd(&page.to_string()).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.text(), "defUn\n");
+    let journal = logs.text();
+    assert!(
+        journal.contains("écartée") && journal.contains("origine droite"),
+        "une ligne `error` : {journal}"
+    );
+}

@@ -193,6 +193,10 @@ struct Insert {
     /// L'élément porte une origine droite : une entrée de map écrite par un client n'en a pas
     /// (Ruling R703).
     right_origin: bool,
+    /// L'octet d'en-tête porte la marque « entrée de map » (`parentSub`), que l'élément nomme sa
+    /// clé ou non. Un client hostile la pose ou l'efface à son gré ; dans ce que yrs encode
+    /// lui-même, elle dit si yrs tient l'élément pour une entrée de map (Ruling R723).
+    sub_flag: bool,
 }
 
 /// Le refus d'un contenu qui n'est pas un nœud XML parmi les enfants de la racine ou d'un élément
@@ -338,6 +342,14 @@ pub(crate) const JSON_CONTENT: &str = "la mise à jour porte un contenu JSON, qu
 /// Le refus d'une valeur qui porte une origine droite (Ruling R703).
 pub(crate) const VALUE_WITH_RIGHT_ORIGIN: &str = "la mise à jour pose une valeur d'attribut qui \
      porte une origine droite : une entrée de map n'en a pas";
+
+/// Le refus d'une entrée de map qui porte une origine droite (Ruling R723).
+pub(crate) const KEYED_RIGHT_ORIGIN: &str = "la mise à jour pose une entrée de map qui porte une \
+     origine droite : aucun client n'en écrit, et le serveur ne la range pas comme les navigateurs";
+
+/// Le refus d'une entrée de map dont le contenu n'est pas une valeur (Rulings R702, R724).
+pub(crate) const KEYED_NOT_A_VALUE: &str = "la mise à jour pose comme valeur d'un attribut un \
+     contenu qui n'en est pas une (seule une valeur JSON en est une)";
 
 /// Le refus d'une valeur placée par une origine qui n'est pas dans un élément (Ruling R704).
 pub(crate) const VALUE_OUTSIDE_ELEMENTS: &str = "la mise à jour pose une valeur d'attribut à la \
@@ -652,6 +664,75 @@ impl Shape {
             ));
         }
         Ok(())
+    }
+
+    /// Refuse (`Structure`) une mise à jour où un élément intégré (au-dessus de `floor`) porte à la
+    /// fois la marque « entrée de map » et une origine droite (Ruling R723). yrs donne à un
+    /// élément la clé de son voisin de gauche et, s'il n'en a pas, celle de son voisin de
+    /// droite ; Yjs ne prend que celle de gauche. Entre un enfant d'une liste et une entrée de
+    /// map, l'élément devient pour yrs seul l'entrée courante de la clé : yrs supprime l'enfant
+    /// de gauche, et l'ancienne entrée n'est plus tenue par rien ; le parent supprimé puis
+    /// ramassé, elle garde un pointeur vers un parent libéré, et l'état encodé ensuite est fait
+    /// d'octets au hasard, ou le processus s'arrête (le constat R722). Un client n'écrit jamais
+    /// d'entrée de map à origine droite.
+    ///
+    /// La marque est celle des octets lus : d'un client, elle ne prouve rien (il l'efface) ; de
+    /// ce que yrs a encodé lui-même (l'encodage d'une transaction, un état, une entrée du journal
+    /// depuis R491), elle dit ce que yrs a fait de l'élément.
+    pub(crate) fn check_keyed(&self, floor: &StateVector) -> Result<(), CrdtError> {
+        let found = self.inserts().any(|(s, i)| {
+            i.sub_flag && i.right_origin && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
+        });
+        if found {
+            return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Refuse (`Structure`) ce que yrs a fait d'une mise à jour de client, lu dans l'encodage de
+    /// sa transaction (`self`), où la marque « entrée de map » de chaque élément est celle que yrs
+    /// lui a donnée :
+    /// - une entrée de map à origine droite ([`Shape::check_keyed`], Ruling R723) ;
+    /// - une entrée de map dont le contenu n'est ni une valeur `Any` ni un contenu supprimé
+    ///   (Rulings R702, R724) : une chaîne, un objet incorporé, des octets, un type, une marque.
+    ///   Seule une valeur `Any` est une valeur d'attribut ; les autres, yrs et Yjs ne les lisent
+    ///   pas pareil, ou n'y lisent rien (une marque), et la garde, qui relirait l'état servi, y
+    ///   verrait un attribut qu'elle refuse.
+    pub(crate) fn check_made(&self) -> Result<(), CrdtError> {
+        for (_, i) in self.inserts() {
+            if !i.sub_flag {
+                continue;
+            }
+            if i.right_origin {
+                return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN.to_string()));
+            }
+            if !i.any && i.value.is_some() {
+                return Err(CrdtError::Structure(KEYED_NOT_A_VALUE.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Vrai si la mise à jour intègre (au-dessus de `floor`) un élément dont les octets ne disent
+    /// pas ce que yrs en fera : il porte une origine droite (une frappe au milieu d'un texte, un
+    /// bloc inséré entre deux autres), ou il est placé par un voisin sans être une valeur `Any`
+    /// (une frappe, un bloc ajouté à la suite). Seul un tel élément peut devenir une entrée de
+    /// map que [`Shape::check_made`] refuse ; une valeur `Any` placée par son origine est jugée
+    /// par [`Shape::attrs`].
+    pub(crate) fn placed_by_neighbours(&self, floor: &StateVector) -> bool {
+        self.inserts().any(|(s, i)| {
+            (i.right_origin
+                || (!i.any && i.value.is_some() && matches!(i.parent, Parent::Sibling(_))))
+                && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
+        })
+    }
+
+    /// Vrai si la mise à jour intègre (au-dessus de `floor`) un élément qui porte une origine
+    /// droite : seul un tel élément peut devenir, pour yrs, une entrée de map à origine droite
+    /// (Ruling R723).
+    pub(crate) fn has_right_origins(&self, floor: &StateVector) -> bool {
+        self.inserts()
+            .any(|(s, i)| i.right_origin && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0)))
     }
 
     /// Les éléments que la mise à jour intègre (au-dessus de `floor`) et qui ne sont pas ce
@@ -1315,6 +1396,7 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     any: info & 0b1111 == BLOCK_ITEM_ANY_REF_NUMBER,
                     json: info & 0b1111 == BLOCK_ITEM_JSON_REF_NUMBER,
                     right_origin: right.is_some(),
+                    sub_flag: info & HAS_PARENT_SUB != 0,
                 }),
             }))
         }
