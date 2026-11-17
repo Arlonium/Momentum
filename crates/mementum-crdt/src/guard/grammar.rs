@@ -267,14 +267,20 @@ impl Shape {
                 {
                     return Err(CrdtError::Structure(KEYED_NOT_A_VALUE.to_string()));
                 }
-                let Some((w, _)) = written.and_then(|written| insert_at(written, (client, start)))
+                let Some((w, written_len)) =
+                    written.and_then(|written| insert_at(written, (client, start)))
                 else {
                     continue;
                 };
                 if from_client && w.sub_flag != sub {
                     return Err(CrdtError::Structure(NOT_AS_WRITTEN.to_string()));
                 }
-                if sub && content != BLOCK_ITEM_DELETED_REF_NUMBER && len > 1 {
+                // E3 juge l'élément tel que la mise à jour l'a écrit, pas le morceau que yrs en
+                // garde : un élément de la même mise à jour dont l'origine tombe au milieu d'un
+                // autre le coupe dans la transaction, et chaque morceau d'une entrée de map de
+                // plusieurs unités serait passé pour une entrée d'une unité (graine 776 de l'essai
+                // élargi, voie du journal : deux entrées vivantes pour une clé, Ruling R818).
+                if sub && content != BLOCK_ITEM_DELETED_REF_NUMBER && written_len > 1 {
                     let deleted = deleted.get_or_insert_with(|| self.deleted_ranges());
                     if !covers(deleted.get(&client), start, clock) {
                         match many_valued.as_deref_mut() {
