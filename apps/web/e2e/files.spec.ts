@@ -5,6 +5,7 @@
 //
 // Le serveur de cette suite n'admet qu'un Mio par fichier (`E2E_MAX_FILE_MB`).
 import { expect, test, type APIRequestContext, type Browser, type Locator, type Page } from "@playwright/test";
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
@@ -13,18 +14,23 @@ import {
   closeEventsChannel,
   createPage,
   forbidNativeDialogs,
+  getMe,
   getMmd,
   hideSyncClosures,
+  logInWith,
   newUser,
   openPage,
   ownerAndMember,
   putMmd,
   readerBanner,
   setPageLevel,
+  sidebarOf,
+  spaceSwitcher,
   treeRow,
   unique,
   versionsOf,
   waitSynced,
+  type Account,
 } from "./helpers";
 
 test.afterEach(closeContexts);
@@ -712,6 +718,72 @@ async function pasteData(p: Page, data: Record<string, string>): Promise<void> {
   }, data);
 }
 
+/** Le type de la marque de provenance que Mementum joint à un bloc copié ou glissé (`provenance.ts`). */
+const ORIGIN = "application/x-mementum-origin";
+
+/**
+ * Les onglets d'un même navigateur (un seul contexte, donc un seul `localStorage`) pour `account` :
+ * la marque de provenance d'un bloc copié ne vaut que dans le navigateur où il a été copié (R747).
+ */
+async function sameBrowser(browser: Browser, account: Account) {
+  const first = await newUser(browser, account);
+  let used = false;
+  const blank = async () => {
+    const p = used ? await first.context().newPage() : first;
+    used = true;
+    return p;
+  };
+  const open = async (pageId: string) => {
+    const p = await blank();
+    await p.goto(`/p/${pageId}`);
+    await waitSynced(p);
+    return p;
+  };
+  return { blank, open, context: first.context() };
+}
+
+/**
+ * Ce que le début d'un glisser du bloc `block` par sa poignée met dans le glisser, par type : le vrai
+ * `dragstart` de la poignée (BlockNote), puis ce que la page y joint.
+ */
+async function dragStarted(p: Page, block: Locator): Promise<Record<string, string>> {
+  await block.hover();
+  const handle = p.getByRole("button", { name: "Ouvrir le menu du bloc" });
+  await expect(handle).toBeVisible();
+  return handle.evaluate((button) => {
+    const data = new DataTransfer();
+    button.dispatchEvent(new DragEvent("dragstart", { dataTransfer: data, bubbles: true, cancelable: true }));
+    return Object.fromEntries([...data.types].map((type) => [type, data.getData(type)]));
+  });
+}
+
+/** Les fichiers de la page `pageId` que nomme le MMD. */
+function filesOf(mmd: string, pageId: string): string[] {
+  return [...mmd.matchAll(new RegExp(`/api/v1/pages/${pageId}/files/[0-9a-f-]{36}`, "g"))].map((m) => m[0]);
+}
+
+/** Combien de fichiers que la page `pageId` nomme rendent à `api` les octets de l'image. */
+async function leakedTo(api: APIRequestContext, pageId: string): Promise<number> {
+  let leaked = 0;
+  for (const url of filesOf(await getMmd(api, pageId), pageId)) {
+    const res = await api.get(url);
+    if (res.status() === 200 && (await res.body()).equals(PNG)) leaked += 1;
+  }
+  return leaked;
+}
+
+/**
+ * Barrière après un collage ou un dépôt : une recopie que le geste aurait demandée part dans sa tâche
+ * (une tâche plus tard pour un dépôt). Une lecture demandée ensuite par l'onglet, et sa réponse reçue :
+ * la requête de la recopie, si elle existe, a été vue avant.
+ */
+async function afterGesture(p: Page): Promise<void> {
+  await p.evaluate(async () => {
+    await new Promise((done) => setTimeout(done, 100));
+    await fetch("/api/v1/info");
+  });
+}
+
 /** Les recopies d'attache parties de l'onglet. */
 function watchCopies(p: Page): string[] {
   const sent: string[] = [];
@@ -738,13 +810,29 @@ async function twoPages() {
 test("pasted_image_is_seen_by_someone_who_cannot_read_its_first_page", async ({ browser }) => {
   const { alice, bruno, aliceApi, first, src, shared } = await twoPages();
   // Mona copie l'image de sa page privée.
-  const source = await openPage(browser, first.id, alice);
+  const tabs = await sameBrowser(browser, alice);
+  const source = await tabs.open(first.id);
   await expectShown(images(source));
   const clipboard = await copyClicked(source, images(source));
   expect(Object.values(clipboard).join("\n")).toContain(src);
+  // Ce que BlockNote écrit est toujours là, et la marque de provenance avec.
+  expect(Object.keys(clipboard).sort()).toEqual([ORIGIN, "blocknote/html", "text/html", "text/plain"]);
+  // La marque nomme la page, jamais le secret du navigateur.
+  const secrets = await source.evaluate(() =>
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith("mementum.clipboard."))
+      .map((key) => localStorage.getItem(key)!),
+  );
+  expect(secrets).toHaveLength(1);
+  // Le HMAC-SHA-256, sous ce secret, du compte, de la page et du fichier (recalculé ici par Node).
+  const { user } = await getMe(aliceApi);
+  const signed = ["mementum-origin-1", user.id, first.id, src].join("\n");
+  const mac = createHmac("sha256", secrets[0]).update(signed).digest("hex");
+  expect(JSON.parse(clipboard[ORIGIN])).toEqual({ v: 1, page: first.id, mac });
+  expect(Object.values(clipboard).join("\n")).not.toContain(secrets[0]);
 
-  // Elle la colle dans la page d'équipe ; la recopie est retenue le temps du témoin.
-  const mona = await newUser(browser, alice);
+  // Elle la colle dans la page d'équipe, dans un autre onglet ; la recopie est retenue le temps du témoin.
+  const mona = await tabs.blank();
   const copies = watchCopies(mona);
   let release!: () => void;
   const held = new Promise<void>((done) => (release = done));
@@ -795,10 +883,11 @@ test("pasted_image_is_seen_by_someone_who_cannot_read_its_first_page", async ({ 
 
 test("pasted_image_survives_the_deletion_of_its_first_page", async ({ browser }) => {
   const { alice, bruno, aliceApi, first, shared } = await twoPages();
-  const source = await openPage(browser, first.id, alice);
+  const tabs = await sameBrowser(browser, alice);
+  const source = await tabs.open(first.id);
   await expectShown(images(source));
   const clipboard = await copyClicked(source, images(source));
-  const mona = await openPage(browser, shared.id, alice);
+  const mona = await tabs.open(shared.id);
   await firstBlock(mona).click();
   await pasteData(mona, clipboard);
   await expect.poll(() => images(mona).getAttribute("src")).toContain(`/pages/${shared.id}/files/`);
@@ -822,8 +911,9 @@ test("pasted_image_survives_the_deletion_of_its_first_page", async ({ browser })
 
 test("a_pasted_file_of_a_page_one_cannot_read_stays_as_it_is_and_is_never_served", async ({ browser }) => {
   // Tom modifie la page d'équipe, et ne voit pas la page privée de Mona. Il colle un bloc qui nomme le
-  // fichier de cette page (le presse-papiers lui vient d'ailleurs) : la recopie est refusée, d'une seule
-  // réponse, et son bloc garde l'adresse, que le serveur ne lui sert pas.
+  // fichier de cette page (le presse-papiers lui vient du navigateur de Mona : la marque n'est pas celle
+  // du sien, R747) : aucune recopie n'est demandée, et son bloc garde l'adresse, que le serveur ne lui
+  // sert pas.
   const { alice, bruno, aliceApi, first, src, shared } = await twoPages();
   const source = await openPage(browser, first.id, alice);
   await expectShown(images(source));
@@ -838,7 +928,6 @@ test("a_pasted_file_of_a_page_one_cannot_read_stays_as_it_is_and_is_never_served
   await waitSynced(tom);
   await firstBlock(tom).click();
   await pasteData(tom, clipboard);
-  await expect.poll(() => answers).toEqual([422]);
   await expect(images(tom)).toHaveCount(1);
   expect(await images(tom).getAttribute("src")).toBe(src);
   await expect
@@ -847,7 +936,7 @@ test("a_pasted_file_of_a_page_one_cannot_read_stays_as_it_is_and_is_never_served
   expect(await tom.evaluate(async (url) => (await fetch(url)).status, src)).toBe(404);
   // Rien n'est dit de plus, et rien n'a été attaché à la page d'équipe.
   await expect(refusals(tom)).toHaveCount(0);
-  expect(copies).toHaveLength(1);
+  expect([copies, answers]).toEqual([[], []]);
   expect(await getMmd(aliceApi, shared.id)).toContain(src);
   expect(await getMmd(aliceApi, shared.id)).not.toContain(`/pages/${shared.id}/files/`);
 
@@ -912,12 +1001,10 @@ test("a_block_dragged_from_another_tab_is_attached_to_the_page_it_is_dropped_in"
     await source.goto(`/p/${first.id}`);
     await waitSynced(source);
     await expectShown(images(source));
-    const dragged = await source.evaluate(() => {
-      const editor = (window as unknown as { __mementum: { editor: { document: unknown[]; blocksToFullHTML(b: unknown[]): string; blocksToHTMLLossy(b: unknown[]): string } } })
-        .__mementum.editor;
-      return { internal: editor.blocksToFullHTML(editor.document), external: editor.blocksToHTMLLossy(editor.document) };
-    });
-    expect(dragged.internal).toContain(src);
+    // Le vrai début du glisser, par la poignée du bloc : ce que BlockNote y met, et la marque de provenance.
+    const dragged = await dragStarted(source, images(source));
+    expect(dragged["blocknote/html"]).toContain(src);
+    expect(Object.keys(dragged)).toEqual(expect.arrayContaining([ORIGIN, "blocknote/html", "text/html", "text/plain"]));
     const mona = await context.newPage();
     const copies = watchCopies(mona);
     await mona.goto(`/p/${shared.id}`);
@@ -927,10 +1014,7 @@ test("a_block_dragged_from_another_tab_is_attached_to_the_page_it_is_dropped_in"
     const at = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) };
     const cdp = await context.newCDPSession(mona);
     const data = {
-      items: [
-        { mimeType: "blocknote/html", data: dragged.internal },
-        { mimeType: "text/html", data: dragged.external },
-      ],
+      items: Object.entries(dragged).map(([mimeType, value]) => ({ mimeType, data: value })),
       dragOperationsMask: 1,
     };
     for (const type of ["dragEnter", "dragOver", "drop"] as const) {
@@ -957,4 +1041,190 @@ test("a_block_dragged_from_another_tab_is_attached_to_the_page_it_is_dropped_in"
   } finally {
     await context.close();
   }
+});
+
+// Relecture finale de la partie B, sécurité : la provenance d'un bloc collé (R746 à R752). Un fichier
+// n'est rattaché à la page où l'on pose un bloc que si ce bloc a été copié ou glissé, dans ce
+// navigateur et sous ce compte, depuis la page de ce fichier.
+
+test("a_block_planted_in_a_shared_page_and_copied_there_takes_no_private_file_out", async ({ browser }) => {
+  // Tom ne lit pas la page privée de Mona, mais connaît l'adresse d'un de ses fichiers. Il écrit, dans
+  // la page d'équipe, un bloc qui la nomme.
+  const { alice, brunoApi, aliceApi, first, src, shared, space } = await twoPages();
+  const other = await createPage(aliceApi, { spaceId: space.id, title: `Autre ${unique()}` });
+  expect((await brunoApi.get(src)).status()).toBe(404);
+  await putMmd(brunoApi, shared.id, `Regarde ce schéma :\n\n![](${src}) {name="schema.png"}\n`);
+
+  // Mona ouvre la page d'équipe : elle voit l'image, rien ne lui dit d'où elle vient. Elle copie ce
+  // bloc et le colle plus bas, dans la même page.
+  const tabs = await sameBrowser(browser, alice);
+  const mona = await tabs.open(shared.id);
+  const copies = watchCopies(mona);
+  await expectShown(images(mona));
+  const clipboard = await copyClicked(mona, images(mona));
+  // Ce bloc ne nomme aucun fichier de la page d'où il est copié : il part sans marque.
+  expect(Object.keys(clipboard).sort()).toEqual(["blocknote/html", "text/html", "text/plain"]);
+  await firstBlock(mona).click();
+  await pasteData(mona, clipboard);
+  await expect(images(mona)).toHaveCount(2);
+  await afterGesture(mona);
+  expect(copies).toEqual([]);
+  await expect(notes(mona)).toHaveCount(0);
+  expect(await leakedTo(brunoApi, shared.id)).toBe(0);
+  expect(filesOf(await getMmd(brunoApi, shared.id), first.id)).toHaveLength(2);
+
+  // Collé dans une autre page, dans un autre onglet : rien non plus.
+  const elsewhere = await tabs.open(other.id);
+  const others = watchCopies(elsewhere);
+  await firstBlock(elsewhere).click();
+  await pasteData(elsewhere, clipboard);
+  await expect(images(elsewhere)).toHaveCount(1);
+  await afterGesture(elsewhere);
+  expect(others).toEqual([]);
+  expect(await leakedTo(brunoApi, other.id)).toBe(0);
+  // La page privée n'a pas changé, et Tom n'en lit toujours rien.
+  expect(await getMmd(aliceApi, first.id)).toContain(src);
+  expect((await brunoApi.get(src)).status()).toBe(404);
+});
+
+test("a_clipboard_forged_by_another_site_takes_no_private_file_out", async ({ browser }) => {
+  const { alice, bruno, brunoApi, first, src, shared, space } = await twoPages();
+  // Tom fabrique le presse-papiers : il copie, dans une page à lui, un bloc qui nomme le fichier privé,
+  // et y joint une marque qui nomme la page privée (il ne connaît pas le secret du navigateur de Mona).
+  const own = await createPage(brunoApi, { spaceId: space.id, section: "private", title: `Atelier ${unique()}` });
+  await putMmd(brunoApi, own.id, `![](${src}) {name="photo.png"}\n`);
+  const tom = await openPage(browser, own.id, bruno);
+  await expect(images(tom)).toHaveCount(1);
+  const forged = await copyClicked(tom, images(tom));
+  expect(Object.keys(forged)).toContain("blocknote/html");
+  forged[ORIGIN] = JSON.stringify({ v: 1, page: first.id, mac: "0".repeat(64) });
+
+  // Son site, d'une autre origine, pose ce presse-papiers quand on y copie quoi que ce soit.
+  const tabs = await sameBrowser(browser, alice);
+  const evil = await tabs.blank();
+  await evil.route("http://site-tiers.test/**", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><p id="t">Copie ce texte</p><script>
+        const forged = ${JSON.stringify(forged).replaceAll("<", "\u003c")};
+        document.addEventListener("copy", (event) => {
+          for (const [type, value] of Object.entries(forged)) event.clipboardData.setData(type, value);
+          event.preventDefault();
+          document.title = "copie";
+        });
+      </script>`,
+    }),
+  );
+  await evil.goto("http://site-tiers.test/");
+  await evil.locator("#t").selectText();
+  await evil.keyboard.press("Control+c");
+  await expect(evil).toHaveTitle("copie");
+
+  // Mona colle dans la page d'équipe, au clavier.
+  const mona = await tabs.open(shared.id);
+  const copies = watchCopies(mona);
+  await mona.evaluate(() => {
+    document.addEventListener(
+      "paste",
+      (event) => ((window as unknown as { pasted: string[] }).pasted = [...event.clipboardData!.types]),
+      true,
+    );
+  });
+  await mona.bringToFront();
+  await firstBlock(mona).click();
+  await mona.keyboard.press("Control+v");
+  // Témoin : le presse-papiers forgé est bien arrivé, avec sa marque, et a posé son bloc.
+  await expect(images(mona)).toHaveCount(1);
+  expect(await mona.evaluate(() => (window as unknown as { pasted: string[] }).pasted)).toEqual(
+    expect.arrayContaining(["blocknote/html", ORIGIN]),
+  );
+  await afterGesture(mona);
+  expect(copies).toEqual([]);
+  await expect(notes(mona)).toHaveCount(0);
+  expect(await leakedTo(brunoApi, shared.id)).toBe(0);
+  expect((await brunoApi.get(src)).status()).toBe(404);
+});
+
+test("ctrl_c_in_a_tab_and_ctrl_v_in_another_attach_the_file_and_nothing_in_its_own_page", async ({ browser }) => {
+  // Le parcours honnête, au clavier, par le presse-papiers du navigateur : la marque passe d'un onglet à
+  // l'autre avec ce que BlockNote écrit.
+  const { alice, aliceApi, bruno, first, src, shared } = await twoPages();
+  await putMmd(aliceApi, first.id, `Texte\n\n![](${src}) {name="photo.png"}\n`);
+  const tabs = await sameBrowser(browser, alice);
+  const source = await tabs.open(first.id);
+  const own = watchCopies(source);
+  await expectShown(images(source));
+  await images(source).click();
+  await source.keyboard.press("Control+c");
+  // Collé dans sa propre page : un second bloc, aucune recopie.
+  await firstBlock(source).click();
+  await source.keyboard.press("Control+v");
+  await expect(images(source)).toHaveCount(2);
+  await afterGesture(source);
+
+  const mona = await tabs.open(shared.id);
+  const copies = watchCopies(mona);
+  await mona.evaluate(() => {
+    document.addEventListener(
+      "paste",
+      (event) => ((window as unknown as { pasted: string[] }).pasted = [...event.clipboardData!.types]),
+      true,
+    );
+  });
+  await mona.bringToFront();
+  await firstBlock(mona).click();
+  await mona.keyboard.press("Control+v");
+  await expect.poll(() => images(mona).getAttribute("src"), { timeout: 10_000 }).toContain(`/pages/${shared.id}/files/`);
+  // Le presse-papiers du navigateur a porté ce que BlockNote écrit, et la marque.
+  expect((await mona.evaluate(() => (window as unknown as { pasted: string[] }).pasted)).sort()).toEqual(
+    [ORIGIN, "blocknote/html", "text/html", "text/plain"],
+  );
+  expect(copies).toHaveLength(1);
+  expect(JSON.parse(copies[0])).toEqual({ pageId: first.id, fileId: src.split("/").pop() });
+  await expect(notes(mona)).toHaveText([
+    "Un fichier d'une autre page a été rattaché à celle-ci : ceux qui lisent cette page le voient.",
+  ]);
+  expect(own).toEqual([]);
+  // Tom, qui ne lit pas la page privée, voit l'image.
+  const tom = await openPage(browser, shared.id, bruno);
+  await expectShown(images(tom));
+});
+
+test("a_block_copied_before_a_logout_is_no_longer_attached_and_no_secret_outlives_its_account", async ({ browser }) => {
+  const { alice, aliceApi, brunoApi, first, src, shared } = await twoPages();
+  const { user } = await getMe(aliceApi);
+  const tabs = await sameBrowser(browser, alice);
+  const mona = await tabs.open(first.id);
+  await expectShown(images(mona));
+  const clipboard = await copyClicked(mona, images(mona));
+  expect(Object.keys(clipboard)).toContain(ORIGIN);
+  const secrets = () =>
+    mona.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("mementum.clipboard.")));
+  expect(await secrets()).toEqual([`mementum.clipboard.${user.id}`]);
+  // Le secret d'un autre compte, resté dans ce navigateur (sa session a pris fin ailleurs).
+  const stale = "mementum.clipboard.01a1d000-0000-7000-8000-000000000000";
+  await mona.evaluate((key) => localStorage.setItem(key, "ab".repeat(32)), stale);
+
+  // Mona se déconnecte : son secret quitte le navigateur.
+  await spaceSwitcher(mona).click();
+  await sidebarOf(mona).getByRole("button", { name: "Se déconnecter" }).click();
+  await expect(mona).toHaveURL(/\/login$/);
+  expect(await secrets()).toEqual([stale]);
+
+  // Elle revient : celui de l'autre compte part à son entrée, et le sien est neuf.
+  await logInWith(mona, alice.email, alice.password);
+  await expect(spaceSwitcher(mona)).toBeVisible();
+  await expect.poll(secrets).not.toContain(stale);
+  await mona.goto(`/p/${shared.id}`);
+  await waitSynced(mona);
+  const copies = watchCopies(mona);
+  await firstBlock(mona).click();
+  // Ce qu'elle avait copié avant n'est plus reconnu : le bloc est posé, rien n'est recopié.
+  await pasteData(mona, clipboard);
+  await expectShown(images(mona));
+  await afterGesture(mona);
+  expect(copies).toEqual([]);
+  await expect(notes(mona)).toHaveCount(0);
+  expect(await images(mona).getAttribute("src")).toBe(src);
+  expect(await leakedTo(brunoApi, shared.id)).toBe(0);
 });
