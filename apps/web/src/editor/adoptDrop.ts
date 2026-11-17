@@ -5,8 +5,10 @@
 //
 // Seulement pour un glisser venu d'ailleurs (`view.dragging` est nul : pas celui de cet éditeur, où
 // rien n'est à recopier et où un bloc déplacé est recréé au même id, R223), qui porte un bloc de
-// Mementum (`blocknote/html`), dans un éditeur qui écrit. Il ne retient jamais l'événement : le dépôt
-// reste celui de BlockNote et de ProseMirror.
+// Mementum (`blocknote/html`) et la marque de provenance de ce compte dans ce navigateur, pour des
+// fichiers de la page d'où il est glissé (`carriedFiles`, R746 : un bloc glissé depuis un autre site
+// n'a pas cette marque, et ne fait rien recopier), dans un éditeur qui écrit. Il ne retient jamais
+// l'événement : le dépôt reste celui de BlockNote et de ProseMirror.
 import { createExtension } from "@blocknote/core";
 import { Plugin, PluginKey } from "prosemirror-state";
 import { carriedFiles, watchPosed, type AdoptOptions } from "./adopt";
@@ -28,7 +30,7 @@ export function dropAdoption(editor: () => MementumEditor | null, options: Adopt
             drop(view, event) {
               const current = editor();
               if (current === null || !current.isEditable || view.dragging != null) return false;
-              const foreign = carriedFiles((event as DragEvent).dataTransfer, options.pageId);
+              const foreign = carriedFiles((event as DragEvent).dataTransfer, options.pageId, options.copier());
               if (foreign.size === 0) return false;
               const posed = watchPosed(current, foreign, options);
               // Une fois le dépôt traité par tous ses écouteurs (une tâche plus tard).

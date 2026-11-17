@@ -101,6 +101,15 @@ function removeKeys(doomed: (key: string) => boolean): void {
 }
 
 /**
+ * Cet onglet écrit-il dans le navigateur au nom du compte `userId` ? Vrai pour le compte entré dans
+ * l'onglet, tant qu'aucun onglet n'a dit que la session du navigateur n'est plus la sienne (R297).
+ * Toute donnée gardée dans le navigateur au nom d'un compte s'y fie (le secret de `provenance.ts`).
+ */
+export function writesFor(userId: string): boolean {
+  return writer === userId;
+}
+
+/**
  * Les pages récentes gardées, la plus récente d'abord ; `null` : le stockage est refusé (rien
  * n'y est gardé). Une valeur illisible n'en donne aucune.
  */

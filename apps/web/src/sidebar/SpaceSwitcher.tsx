@@ -20,6 +20,7 @@ import { Field, FormError, messageOf } from "../session/forms";
 import { PasswordDialog } from "../session/PasswordDialog";
 import { useSession } from "../session/session";
 import { ROLE_LABELS } from "../share/levels";
+import { forgetClipboardSecret } from "../editor/provenance";
 import { forgetRecents } from "../space/recents";
 import { Avatar } from "../ui/Avatar";
 
@@ -113,6 +114,8 @@ export function SpaceSwitcher({ space, settingsOpen }: Props) {
     }
     // Les pages récentes du compte qui part ne restent pas dans le navigateur (R255).
     forgetRecents(user.id);
+    // Ni le secret qui marque ce qu'il a copié : un bloc copié avant n'est plus rattaché (R747).
+    forgetClipboardSecret(user.id);
     // Un onglet neuf : plus rien du compte en mémoire, ni page, ni connexion de synchro. À la
     // place de l'entrée courante : Précédent ne revient pas sur l'application connectée (et
     // un document gardé par le cache arrière-avant se recharge, `main.tsx`).

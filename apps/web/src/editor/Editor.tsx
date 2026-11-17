@@ -78,7 +78,7 @@ import { guardedAwareness } from "./presenceGuard";
 import { redoKeys } from "./redoKeys";
 import { schema } from "./schema";
 import { slashMenuItems } from "./slashItems";
-import { sessionDrop, sessionPaste, sessionUploader, type PageUploads } from "./uploads";
+import { sessionDrop, sessionPaste, sessionStamps, sessionUploader, type PageUploads } from "./uploads";
 import { MementumFormattingToolbar } from "./Toolbar";
 
 type Props = {
@@ -149,6 +149,8 @@ export function Editor({ session, fixture = null, onComment = null, mentions = n
   }
   const { stop, send: uploadFile, paste: pasteHandler, drop } = uploads.current;
   useEffect(() => () => stop.abort(), [stop]);
+  // Ce qu'on copie ou glisse depuis cette page porte la marque de sa provenance (R746), en lecture seule aussi.
+  useEffect(() => sessionStamps(session.pageId), [session.pageId]);
   const editor = useCreateBlockNote(
     withCollaboration({
       ...EDITOR_OPTIONS,

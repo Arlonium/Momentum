@@ -2,12 +2,13 @@
 // de quoi envoyer, et ce que devient le bloc d'un envoi qui n'a pas abouti (il reste, sans le nom du
 // fichier). L'envoi lui-même est dans
 // `files.ts`, qui ne sait rien de l'éditeur.
-import { copyFile } from "../api";
-import { adoptingPaste, type AdoptOptions } from "./adopt";
+import { copyFile, expectedAccount } from "../api";
+import { adoptingPaste, stampGestures, type AdoptOptions } from "./adopt";
 import { dropAdoption } from "./adoptDrop";
 import { textProp } from "./blocks/props";
 import type { MementumEditor } from "./debug";
 import { fileLimits, uploader, type UploaderOptions } from "./files";
+import { copier } from "./provenance";
 
 /** Ce que la page donne à l'éditeur pour envoyer : ce qu'elle dit d'un envoi, et de quoi la relire. */
 export type PageUploads = Pick<UploaderOptions, "onRefused" | "reread"> & {
@@ -58,10 +59,20 @@ export function sessionPaste(
   return adoptingPaste(adoption(session.pageId, files, signal));
 }
 
+/**
+ * Tant que l'éditeur de la page `pageId` est là, **dans les deux modes** (qui ne fait que lire une page
+ * en copie aussi les blocs) : ce qu'on y copie, coupe ou commence à glisser porte la marque de sa
+ * provenance, au nom du compte de l'application (`provenance.ts`, R746). Rend de quoi arrêter.
+ */
+export function sessionStamps(pageId: string): () => void {
+  return stampGestures(pageId, () => copier(expectedAccount()));
+}
+
 /** De quoi rattacher à la page `pageId` les fichiers d'autres pages : la recopie, et ce que la page en dit. */
 function adoption(pageId: string, files: () => PageUploads | null, signal: AbortSignal): AdoptOptions {
   return {
     pageId,
+    copier: () => copier(expectedAccount()),
     copy: copyFile,
     signal,
     onAdopted: (message) => files()?.onAdopted?.(message),

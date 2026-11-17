@@ -23,6 +23,7 @@
     "@mantine/hooks": "^9.7.5",
     "@mementum/protocol": "workspace:*",
     "katex": "0.19.1",
+    "lib0": "~0.2.119",
     "prosemirror-state": "1.4.4",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

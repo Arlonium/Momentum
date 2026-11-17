@@ -9,7 +9,18 @@ import { ApiError } from "../api";
 import { duo, exchange, storedProps, typeAtEnd, xml, type Seed } from "../test/editors";
 import { page } from "../test/pages";
 import { mountEditor, type Mounted } from "../test/richEditor";
-import { adoptForeignFiles, adoptingPaste, carriedFiles, foreignFiles, MAX_ADOPTED_FILES, watchPosed, type AdoptOptions } from "./adopt";
+import {
+  adoptForeignFiles,
+  adoptingPaste,
+  carriedFiles,
+  foreignFiles,
+  MAX_ADOPTED_FILES,
+  stampGestures,
+  stampOrigin,
+  watchPosed,
+  type AdoptOptions,
+} from "./adopt";
+import { ORIGIN, originMark, type Copier } from "./provenance";
 import * as scan from "./fileBlocks";
 
 vi.mock("./fileBlocks", async (original) => {
@@ -28,6 +39,22 @@ const uuid = (n: number) => `0192f0c1-0000-7000-8000-${String(n).padStart(12, "0
 const pathOf = (pageId: string, n: number) => `/api/v1/pages/${pageId}/files/${uuid(n)}`;
 const FOREIGN = pathOf(THERE, 101);
 const OWN = pathOf(HERE, 201);
+/** Qui colle : le compte de l'onglet, et le secret de son navigateur. */
+const ME: Copier = { account: uuid(1), secret: "ab".repeat(32) };
+
+/** Un presse-papiers (ou un glisser) qui porte `data`, par type. */
+function transferOf(data: Record<string, string>) {
+  return {
+    get types() {
+      return Object.keys(data);
+    },
+    getData: (type: string) => data[type] ?? "",
+    setData: (type: string, value: string) => {
+      data[type] = value;
+    },
+    data,
+  };
+}
 
 type Call = { pageId: string; source: { pageId: string; fileId: string }; answer(info?: Partial<FileInfo>): void; fail(error: unknown): void };
 
@@ -42,6 +69,7 @@ async function bench(blocks: Seed, { editable = true, reread = async (): Promise
   const controller = new AbortController();
   const options: AdoptOptions = {
     pageId: HERE,
+    copier: () => ME,
     signal: controller.signal,
     onAdopted: (message) => adopted.push(message),
     onRefused: (message) => said.push(message),
@@ -87,10 +115,15 @@ async function bench(blocks: Seed, { editable = true, reread = async (): Promise
 }
 
 const X: Seed = [{ id: "x", type: "paragraph", content: "Bloc X" }];
-/** Ce que la copie de `blocks` met dans le presse-papiers (le HTML interne de BlockNote). */
-async function copied(blocks: unknown[]): Promise<Record<string, string>> {
+/**
+ * Ce que la copie de `blocks`, faite dans la page `from` par `by`, met dans le presse-papiers : le HTML
+ * interne de BlockNote, et la marque de provenance que la page y joint (`stampOrigin`).
+ */
+async function copied(blocks: unknown[], from = THERE, by: Copier | null = ME): Promise<Record<string, string>> {
   const source = await mountEditor({ blocks: blocks as Seed, editable: true });
-  return { "blocknote/html": source.editor.blocksToFullHTML(source.editor.document) };
+  const transfer = transferOf({ "blocknote/html": source.editor.blocksToFullHTML(source.editor.document) });
+  stampOrigin(transfer, from, by);
+  return transfer.data;
 }
 const image = (url: string, extra: Record<string, unknown> = {}) => ({ type: "image", props: { url, name: "a.png", ...extra } });
 
@@ -493,7 +526,7 @@ test("blocks_dropped_from_another_tab_are_attached_like_pasted_ones", async () =
   const b = await bench([...X, { id: "old", ...image(FOREIGN) }] as Seed);
   const data = await copied([image(FOREIGN)]);
   const transfer = { types: Object.keys(data), getData: (type: string) => data[type] ?? "" };
-  const posed = watchPosed(b.m.editor, carriedFiles(transfer, HERE), b.options);
+  const posed = watchPosed(b.m.editor, carriedFiles(transfer, HERE, ME), b.options);
   await act(async () => {
     b.m.editor.insertBlocks([{ id: "new", ...image(FOREIGN) }] as never, "x", "after");
     posed();
@@ -505,9 +538,9 @@ test("blocks_dropped_from_another_tab_are_attached_like_pasted_ones", async () =
   expect(b.m.editor.getBlock("new")!.props).toMatchObject({ url: pathOf(HERE, 901) });
   expect(b.m.editor.getBlock("old")!.props).toMatchObject({ url: FOREIGN });
   // Un dépôt qui ne porte pas un bloc de Mementum, ou un fichier de cette page : rien.
-  expect(carriedFiles({ types: ["text/html"], getData: () => `<img src="${FOREIGN}">` }, HERE).size).toBe(0);
-  expect(carriedFiles({ types: ["blocknote/html"], getData: () => `<img data-url="${OWN}">` }, HERE).size).toBe(0);
-  expect(carriedFiles(null, HERE).size).toBe(0);
+  expect(carriedFiles({ types: ["text/html"], getData: () => `<img src="${FOREIGN}">` }, HERE, ME).size).toBe(0);
+  expect(carriedFiles(transferOf(await copied([image(OWN)], HERE)), HERE, ME).size).toBe(0);
+  expect(carriedFiles(null, HERE, ME).size).toBe(0);
 });
 
 // À deux (banc `test/editors.ts`) : la récriture, écrite hors de l'historique de l'annulation, reste une
@@ -516,6 +549,7 @@ test("blocks_dropped_from_another_tab_are_attached_like_pasted_ones", async () =
 function duoOptions(release: Promise<void>, said: string[]): AdoptOptions {
   return {
     pageId: HERE,
+    copier: () => ME,
     signal: new AbortController().signal,
     onAdopted: () => {},
     onRefused: (message) => said.push(message),
@@ -569,4 +603,133 @@ test("of_an_address_another_sets_during_the_copy_and_the_rewrite_one_remains_eve
     kept.push(url);
   }
   expect(kept).toEqual(["https://exemple.fr/de-tom.png", pathOf(HERE, 901)]);
+});
+
+// Relecture finale de la partie B, sécurité : la provenance d'un bloc collé (R746 à R752).
+
+const OTHER = "0192f0c1-0000-7000-8000-000000000003";
+const html = (...urls: string[]) => urls.map((url) => `<img data-url="${url}">`).join("");
+
+test("the_mark_is_written_only_for_files_of_the_page_copied_from_and_never_carries_the_secret", () => {
+  // Un bloc de la page `THERE` qui nomme un de ses fichiers : la marque nomme la page.
+  const own = transferOf({ "blocknote/html": html(FOREIGN), "text/html": "<img>", "text/plain": "x" });
+  stampOrigin(own, THERE, ME);
+  expect(Object.keys(own.data)).toEqual(["blocknote/html", "text/html", "text/plain", ORIGIN]);
+  expect(JSON.parse(own.data[ORIGIN])).toEqual({ v: 1, page: THERE, mac: expect.stringMatching(/^[0-9a-f]{64}$/) });
+  // Ce que BlockNote a écrit n'a pas changé, et le secret n'est nulle part.
+  expect([own.data["blocknote/html"], own.data["text/html"], own.data["text/plain"]]).toEqual([html(FOREIGN), "<img>", "x"]);
+  expect(JSON.stringify(own.data)).not.toContain(ME.secret);
+  // Aucune marque : un bloc qui ne nomme que le fichier d'une autre page (planté là), un texte, une
+  // copie sans compte ni secret, un presse-papiers sans bloc de Mementum.
+  const none: [string, Record<string, string>, string, Copier | null][] = [
+    ["le fichier d'une autre page", { "blocknote/html": html(FOREIGN) }, OTHER, ME],
+    ["du texte", { "blocknote/html": "<p>Du texte</p>" }, THERE, ME],
+    ["sans secret", { "blocknote/html": html(FOREIGN) }, THERE, null],
+    ["sans bloc", { "text/html": html(FOREIGN), "text/plain": FOREIGN }, THERE, ME],
+  ];
+  for (const [what, data, from, by] of none) {
+    const transfer = transferOf({ ...data });
+    stampOrigin(transfer, from, by);
+    expect(transfer.data, what).toEqual(data);
+  }
+  stampOrigin(null, THERE, ME);
+});
+
+test("a_file_is_attached_only_if_its_block_was_copied_from_its_page_in_this_browser_by_this_account", async () => {
+  const genuine = await copied([image(FOREIGN)]);
+  const blocks = { "blocknote/html": genuine["blocknote/html"] };
+  const two = await copied([image(FOREIGN), image(pathOf(THERE, 102))]);
+  const refused: [string, Record<string, string>][] = [
+    ["sans marque", blocks],
+    ["une marque vide", { ...blocks, [ORIGIN]: "" }],
+    ["le secret d'un autre navigateur", await copied([image(FOREIGN)], THERE, { ...ME, secret: "cd".repeat(32) })],
+    ["un autre compte du même navigateur", await copied([image(FOREIGN)], THERE, { ...ME, account: uuid(2) })],
+    ["une marque forgée", { ...blocks, [ORIGIN]: JSON.stringify({ v: 1, page: THERE, mac: "0".repeat(64) }) }],
+    ["la marque d'une autre page", { ...blocks, [ORIGIN]: originMark(ME, OTHER, [FOREIGN]) }],
+    ["la marque de la page d'ici", { ...blocks, [ORIGIN]: originMark(ME, HERE, [FOREIGN]) }],
+    // Une marque vraie, rejouée avec d'autres fichiers de sa page : un de plus, un de moins, un autre.
+    ["un fichier de plus", { ...two, [ORIGIN]: genuine[ORIGIN] }],
+    ["un fichier de moins", { ...genuine, [ORIGIN]: two[ORIGIN] }],
+    ["un autre fichier", { ...(await copied([image(pathOf(THERE, 102))])), [ORIGIN]: genuine[ORIGIN] }],
+    ["une autre version", { ...blocks, [ORIGIN]: genuine[ORIGIN].replace('"v":1', '"v":2') }],
+    ["une marque illisible", { ...blocks, [ORIGIN]: "{" }],
+    ["une marque sans page", { ...blocks, [ORIGIN]: JSON.stringify({ v: 1, mac: JSON.parse(genuine[ORIGIN]).mac }) }],
+    ["une marque trop longue", { ...blocks, [ORIGIN]: genuine[ORIGIN].replace("{", `{"x":"${"y".repeat(600)}",`) }],
+  ];
+  for (const [what, data] of refused) {
+    const b = await bench(X);
+    await b.paste(data);
+    // Témoin : le collage a posé son bloc, qui garde l'adresse de sa première page.
+    expect(fileUrls(b.m).map(([, url]) => String(url).includes(THERE)), what).toContain(true);
+    expect(fileUrls(b.m).map(([, url]) => String(url).includes(HERE)), what).not.toContain(true);
+    await new Promise((done) => setTimeout(done, 20));
+    expect(b.calls, what).toEqual([]);
+    expect(vi.mocked(scan.blocksNaming), what).not.toHaveBeenCalled();
+    expect([b.adopted, b.said], what).toEqual([[], []]);
+  }
+  // Sans compte ni secret dans l'onglet (une session d'un autre onglet déconnectée) : rien non plus.
+  const nobody = await bench(X);
+  nobody.options.copier = () => null;
+  await nobody.paste(genuine);
+  await new Promise((done) => setTimeout(done, 20));
+  expect(nobody.calls).toEqual([]);
+  // Témoin : la marque vraie, dans une autre casse de la page et des fichiers, fait recopier.
+  const b = await bench(X);
+  await b.paste({ ...blocks, [ORIGIN]: originMark(ME, THERE.toUpperCase(), [FOREIGN.toUpperCase()]) });
+  await until(() => b.calls.length === 1, "la recopie");
+  expect(b.calls[0].source).toEqual({ pageId: THERE, fileId: uuid(101) });
+});
+
+test("a_block_planted_in_a_page_takes_with_it_only_the_files_of_the_page_it_is_copied_from", async () => {
+  // Dans la page `OTHER`, un bloc de cette page, et un bloc planté là qui nomme le fichier d'une page
+  // privée (`THERE`). Copiés ensemble puis collés ici : seul le fichier de `OTHER` est rattaché.
+  const b = await bench(X);
+  await b.paste(await copied([image(FOREIGN), image(pathOf(OTHER, 301))], OTHER));
+  await until(() => b.calls.length === 1, "la recopie");
+  expect(b.calls[0].source).toEqual({ pageId: OTHER, fileId: uuid(301) });
+  await act(async () => b.calls[0].answer());
+  await until(() => b.adopted.length === 1, "le message");
+  await new Promise((done) => setTimeout(done, 20));
+  expect(b.calls).toHaveLength(1);
+  expect(fileUrls(b.m).map(([, url]) => url)).toEqual([FOREIGN, pathOf(HERE, 901)]);
+  expect(b.adopted).toEqual([ADOPTED_ONE]);
+  expect(b.said).toEqual([]);
+});
+
+test("copy_cut_and_drag_start_get_the_mark_once_blocknote_has_written_and_nothing_else_does", () => {
+  const by = { current: ME as Copier | null };
+  const stop = stampGestures(THERE, () => by.current);
+  const target = document.createElement("div");
+  document.body.append(target);
+  /** Un geste dont un écouteur de la cible (BlockNote) écrit `written` ; rend ce que porte le geste ensuite. */
+  const gesture = (type: string, field: "clipboardData" | "dataTransfer", written: Record<string, string>) => {
+    const transfer = transferOf({});
+    const write = () => Object.assign(transfer.data, written);
+    target.addEventListener(type, write);
+    target.dispatchEvent(Object.assign(new Event(type, { bubbles: true }), { [field]: transfer }));
+    target.removeEventListener(type, write);
+    return transfer.data;
+  };
+  try {
+    const blocks = { "blocknote/html": html(FOREIGN), "text/html": "<img>", "text/plain": "x" };
+    for (const [type, field] of [["copy", "clipboardData"], ["cut", "clipboardData"], ["dragstart", "dataTransfer"]] as const) {
+      const data = gesture(type, field, blocks);
+      expect(Object.keys(data), type).toEqual(["blocknote/html", "text/html", "text/plain", ORIGIN]);
+      expect(carriedFiles(transferOf(data), HERE, ME).size, type).toBe(1);
+    }
+    // Un collage, un dépôt, un glisser qui passe : jamais marqués (la marque dit d'où l'on copie).
+    for (const [type, field] of [["paste", "clipboardData"], ["drop", "dataTransfer"], ["dragover", "dataTransfer"]] as const) {
+      expect(gesture(type, field, blocks), type).toEqual(blocks);
+    }
+    // Sans compte dans l'onglet : aucune marque.
+    by.current = null;
+    expect(gesture("copy", "clipboardData", blocks)).toEqual(blocks);
+    by.current = ME;
+    // L'éditeur parti : plus rien n'est écouté.
+    stop();
+    expect(gesture("copy", "clipboardData", blocks)).toEqual(blocks);
+  } finally {
+    stop();
+    target.remove();
+  }
 });

@@ -9,11 +9,17 @@
 //
 // - **Quand** : au collage (`adoptingPaste`, le `pasteHandler` de BlockNote) et au dépôt d'un bloc
 //   glissé d'un autre onglet (`adoptDrop.ts`), dans un éditeur qui écrit, et **seulement si le
-//   presse-papiers porte `blocknote/html`**, ce que Mementum écrit en copiant ou en glissant un bloc
-//   (`carriedFiles`). Un texte, un Markdown ou un HTML venu d'ailleurs (un message, une page web) qui
-//   nomme le fichier d'une page ne recopie rien : la personne partagerait sans le savoir un fichier
-//   d'une page privée. Rien à l'ouverture d'une page, rien à la frappe : la page n'est parcourue
-//   (`blocksNaming`) que pour un tel geste, une fois avant lui et une fois après.
+//   presse-papiers porte `blocknote/html`**, ce que Mementum écrit en copiant ou en glissant un bloc,
+//   **et la marque de provenance de ce compte dans ce navigateur** (`provenance.ts`, `carriedFiles`,
+//   R746 à R752) : seuls les fichiers **de la page d'où le bloc a été copié** sont recopiés. Un
+//   texte, un Markdown ou un HTML venu d'ailleurs (un message, une page web) qui nomme le fichier
+//   d'une page ne recopie rien, ni un presse-papiers forgé par un autre site, ni un bloc qui nommait
+//   déjà, dans la page où on le copie, le fichier d'une autre page (planté là par qui ne lit pas cette
+//   autre page) : la personne partagerait sans le savoir un fichier d'une page privée. Rien à
+//   l'ouverture d'une page, rien à la frappe : la page n'est parcourue (`blocksNaming`) que pour un
+//   tel geste, une fois avant lui et une fois après.
+// - **La marque** est écrite à la copie, à la coupe et au début d'un glisser (`stampGestures`), dans
+//   les deux modes de l'éditeur ; ce que BlockNote écrit n'est pas touché.
 // - **Quoi** : les blocs que ce geste a posés, et eux seuls. Un bloc qui nommait déjà ce fichier avant
 //   (écrit par MMD, par un agent, par un autre) garde son adresse : personne n'a demandé de le changer.
 //   Seule la prop `url` est récrite (une écriture d'attribut, qui ne perd rien de ce qu'un autre fait
@@ -39,6 +45,7 @@ import { canEdit } from "../share/levels";
 import type { MementumEditor } from "./debug";
 import { blocksNaming } from "./fileBlocks";
 import { filePath } from "./files";
+import { markedPage, ORIGIN, originMark, vouches, type Copier } from "./provenance";
 
 /** Le plus de fichiers d'autres pages qu'un collage ou un dépôt fait recopier. */
 export const MAX_ADOPTED_FILES = 100;
@@ -46,6 +53,8 @@ export const MAX_ADOPTED_FILES = 100;
 export type AdoptOptions = {
   /** La page où l'on colle. */
   pageId: string;
+  /** Qui colle : le compte de l'onglet et le secret de son navigateur (`provenance.ts`) ; `null` : personne. */
+  copier: () => Copier | null;
   /** La recopie d'une attache (`copyFile` d'`api.ts`). */
   copy: (pageId: string, source: CopyFile, signal?: AbortSignal) => Promise<FileInfo>;
   /** Annulé quand l'éditeur de la page part : plus rien n'est recopié ni écrit. */
@@ -64,32 +73,93 @@ const UUID = `${HEX}{8}-${HEX}{4}-${HEX}{4}-${HEX}{4}-${HEX}{12}`;
 const PATH_IN_TEXT = new RegExp(`(?<![\\w/.:%-])/api/v1/pages/${UUID}/files/${UUID}(?![\\w/?#.%-])`, "g");
 
 /**
- * Les fichiers d'une **autre** page que `pageId` que nomment `texts` : pour chaque chemin entier, sa
- * page et son fichier. Un chemin suivi d'une requête ou d'un segment, précédé d'un hôte, ou d'une
- * autre casse, n'en est pas un (`filePath`).
+ * Les fichiers que nomment `texts` dont la page est (`of`) ou n'est pas (`!of`) `pageId` : pour chaque
+ * chemin entier, sa page et son fichier. Un chemin suivi d'une requête ou d'un segment, précédé d'un
+ * hôte, ou d'une autre casse, n'en est pas un (`filePath`).
  */
-export function foreignFiles(texts: Iterable<string>, pageId: string): Map<string, CopyFile> {
+function namedFiles(texts: Iterable<string>, pageId: string, of: boolean): Map<string, CopyFile> {
   const found = new Map<string, CopyFile>();
-  const here = pageId.toLowerCase();
+  const page = pageId.toLowerCase();
   for (const text of texts) {
     for (const [path] of text.matchAll(PATH_IN_TEXT)) {
       const named = filePath(path);
-      if (named !== null && named.pageId.toLowerCase() !== here) found.set(path, named);
+      if (named !== null && (named.pageId.toLowerCase() === page) === of) found.set(path, named);
     }
   }
   return found;
+}
+
+/** Les fichiers d'une **autre** page que `pageId` que nomment `texts`. */
+export function foreignFiles(texts: Iterable<string>, pageId: string): Map<string, CopyFile> {
+  return namedFiles(texts, pageId, false);
+}
+
+/** Les fichiers **de** la page `pageId` que nomment `texts`. */
+export function filesOf(texts: Iterable<string>, pageId: string): Map<string, CopyFile> {
+  return namedFiles(texts, pageId, true);
 }
 
 /** Le type que Mementum (BlockNote) écrit dans le presse-papiers en copiant ou en glissant un bloc. */
 const BLOCKS = "blocknote/html";
 
 /**
- * Les fichiers d'une autre page que porte un presse-papiers **écrit par Mementum** (un bloc copié ou
- * glissé : le type `blocknote/html`). Un texte ou un HTML venus d'ailleurs ne portent rien (R713).
+ * Joint à ce que BlockNote vient d'écrire dans un presse-papiers ou un glisser (`blocknote/html`) la
+ * marque de provenance (`provenance.ts`), si ce bloc nomme des fichiers de la page `pageId` d'où `by`
+ * le copie. Rien d'autre n'est touché ; sans bloc de Mementum, sans fichier de cette page (un bloc qui
+ * nomme le fichier d'une autre page n'emporte pas ce fichier, R748) ou sans copieur, rien n'est écrit.
  */
-export function carriedFiles(data: Pick<DataTransfer, "types" | "getData"> | null, pageId: string): Map<string, CopyFile> {
-  if (data === null || !Array.from(data.types).includes(BLOCKS)) return new Map();
-  return foreignFiles([data.getData(BLOCKS)], pageId);
+export function stampOrigin(
+  data: Pick<DataTransfer, "types" | "getData" | "setData"> | null,
+  pageId: string,
+  by: Copier | null,
+): void {
+  if (data === null || by === null || !Array.from(data.types).includes(BLOCKS)) return;
+  const files = filesOf([data.getData(BLOCKS)], pageId);
+  if (files.size > 0) data.setData(ORIGIN, originMark(by, pageId, files.keys()));
+}
+
+/** Les gestes qui écrivent un presse-papiers ou un glisser. */
+const STAMPED = ["copy", "cut", "dragstart"] as const;
+
+/**
+ * Tant que l'éditeur de la page `pageId` est là : marque la provenance de ce que BlockNote écrit à une
+ * copie, une coupe ou au début d'un glisser (`stampOrigin`). Écouté sur le document, à la remontée :
+ * après ProseMirror et BlockNote (sur l'éditeur) et après la poignée d'un bloc (React, sur sa racine),
+ * dont le glisser part d'un bouton hors de la vue de l'éditeur. Un aperçu de version de la page copie
+ * des blocs de la même page. Rend de quoi ne plus écouter.
+ */
+export function stampGestures(pageId: string, by: () => Copier | null): () => void {
+  const stamp = (event: Event) => {
+    const data = (event as ClipboardEvent).clipboardData ?? (event as DragEvent).dataTransfer ?? null;
+    stampOrigin(data, pageId, by());
+  };
+  for (const type of STAMPED) document.addEventListener(type, stamp);
+  return () => {
+    for (const type of STAMPED) document.removeEventListener(type, stamp);
+  };
+}
+
+/**
+ * Les fichiers à rattacher à la page `pageId` que porte un presse-papiers ou un glisser : ceux **de la
+ * page d'où le bloc a été copié**, une autre que celle-ci, si la marque de provenance est celle de `by`
+ * (ce compte, dans ce navigateur) pour exactement ces fichiers-là (R746, R748). Sans bloc de Mementum
+ * (`blocknote/html`, R713), sans marque, sous une marque d'ailleurs, forgée ou rejouée avec d'autres
+ * fichiers : rien. Un fichier d'une autre page que celle de la marque n'est jamais rendu.
+ */
+export function carriedFiles(
+  data: Pick<DataTransfer, "types" | "getData"> | null,
+  pageId: string,
+  by: Copier | null,
+): Map<string, CopyFile> {
+  const none = new Map<string, CopyFile>();
+  if (data === null || by === null) return none;
+  const types = Array.from(data.types);
+  if (!types.includes(BLOCKS) || !types.includes(ORIGIN)) return none;
+  const mark = data.getData(ORIGIN);
+  const from = markedPage(mark);
+  if (from === null || from === pageId.toLowerCase()) return none;
+  const files = filesOf([data.getData(BLOCKS)], from);
+  return files.size > 0 && vouches(mark, by, files.keys()) ? files : none;
 }
 
 /**
@@ -118,13 +188,15 @@ type PasteContext = {
 
 /**
  * Le `pasteHandler` de l'éditeur d'une page qu'on modifie : le collage de BlockNote, puis, si le
- * presse-papiers était celui d'un bloc de Mementum et portait le chemin d'un fichier d'une autre
- * page, la recopie des fichiers des blocs que ce collage a posés.
+ * presse-papiers était celui d'un bloc copié par ce compte, dans ce navigateur, depuis une autre page
+ * dont il nomme des fichiers (`carriedFiles`), la recopie des fichiers des blocs que ce collage a posés.
  */
 export function adoptingPaste(options: AdoptOptions): (context: PasteContext) => boolean | undefined {
   return ({ event, editor: given, defaultPasteHandler }) => {
     const editor = given as MementumEditor;
-    const foreign = editor.isEditable ? carriedFiles(event.clipboardData, options.pageId) : new Map<string, CopyFile>();
+    const foreign = editor.isEditable
+      ? carriedFiles(event.clipboardData, options.pageId, options.copier())
+      : new Map<string, CopyFile>();
     if (foreign.size === 0) return defaultPasteHandler();
     const posed = watchPosed(editor, foreign, options);
     const handled = defaultPasteHandler();

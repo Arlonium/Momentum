@@ -39,6 +39,7 @@ import {
 import { flushSync } from "react-dom";
 import { getInfo, getMe, isSessionLost, onOtherAccount, onSessionLost } from "../api";
 import { navigate, pagePath, parseRoute, usePathname } from "../router";
+import { forgetOtherClipboardSecrets } from "../editor/provenance";
 import { forgetOtherRecents } from "../space/recents";
 import { AuthScreen, messageOf } from "./forms";
 import { invitationTarget, InvitePage, takeInvitationToken } from "./InvitePage";
@@ -115,9 +116,10 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
 
   // Toute entrée d'un compte passe ici (chargement, connexion, inscription, session rouverte) :
   // les pages récentes des autres comptes quittent le navigateur, et les siennes s'écrivent
-  // (R297).
+  // (R297). De même le secret qui marque ce qu'un compte copie (`provenance.ts`, R747).
   const enter = useCallback((me: Me) => {
     forgetOtherRecents(me.user.id);
+    forgetOtherClipboardSecrets(me.user.id);
     setState({ name: "signedIn", me, lost: false });
   }, []);
 
