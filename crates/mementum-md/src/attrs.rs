@@ -342,6 +342,56 @@ fn marks(s: &str) -> Vec<(usize, u8)> {
     out
 }
 
+/// Ce qu'un refus de la ligne ajoute quand elle porte une formule à `$` imbriqué
+/// ([`nested_dollar`]) : la forme qui la porte (Ruling R658, m2 de la relecture de X2).
+const NESTED_DOLLAR_HINT: &str =
+    " ; une formule qui contient un « $ » non échappé s'écrit « <math latex=\"…\"/> »";
+
+/// Vrai si `s` porte, dans une formule ouverte par un `$` hors accolades, un `$` entre
+/// accolades (`$\text{aire $x^{2}$}$`) : une forme que pulldown-cmark relit, mais que
+/// [`marks`] coupe au `$` intérieur, si bien que la ligne y voit une accolade ou un `|` du
+/// texte. Les échappements et les balises sont sautés comme dans [`marks`] ; une accolade
+/// hors formule ne compte pas (une liste `{…}` dont une valeur porte un `$`).
+fn nested_dollar(s: &str) -> bool {
+    let b = s.as_bytes();
+    let (mut open, mut depth, mut i) = (false, 0usize, 0);
+    while i < b.len() {
+        i = match b[i] {
+            b'\\' => i + 2,
+            b'<' if b
+                .get(i + 1)
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'/') =>
+            {
+                find_unquoted(b, i + 1, b'>').map_or(b.len(), |e| e + 1)
+            }
+            b'$' if depth == 0 => {
+                open = !open;
+                i + 1
+            }
+            b'$' if open => return true,
+            b'{' if open => {
+                depth += 1;
+                i + 1
+            }
+            b'}' if open => {
+                depth = depth.saturating_sub(1);
+                i + 1
+            }
+            _ => i + 1,
+        };
+    }
+    false
+}
+
+/// [`NESTED_DOLLAR_HINT`] si la ligne `s` porte une formule à `$` imbriqué, sinon rien.
+pub(crate) fn nested_dollar_hint(s: &str) -> &'static str {
+    if nested_dollar(s) {
+        NESTED_DOLLAR_HINT
+    } else {
+        ""
+    }
+}
+
 /// Sépare le contenu d'une ligne de la liste `{…}` qui la termine.
 pub(crate) fn split_props(s: &str) -> Result<(&str, Option<Vec<Attr>>), String> {
     let Some(&(pos, _)) = marks(s).iter().find(|(_, c)| *c == b'{') else {
@@ -351,9 +401,10 @@ pub(crate) fn split_props(s: &str) -> Result<(&str, Option<Vec<Attr>>), String> 
         0 => "",
         _ if s.as_bytes()[pos - 1] == b' ' => &s[..pos - 1],
         _ => {
-            return Err(
-                "accolade : dans le texte, écrire « \\{ » ; une liste {…} suit une espace".into(),
-            );
+            return Err(format!(
+                "accolade : dans le texte, écrire « \\{{ » ; une liste {{…}} suit une espace{}",
+                nested_dollar_hint(s)
+            ));
         }
     };
     let list = parse_list(&s[pos..]).map_err(|e| {

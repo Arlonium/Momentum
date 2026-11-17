@@ -12,7 +12,8 @@ use std::collections::BTreeMap;
 use mementum_schema::{BlockSpec, ContentKind, MmdForm, PropSpec, block, blocks, cell_props};
 
 use crate::attrs::{
-    Attr, Raw, parse_list, parse_tag, split_cells, split_props, typed, unescape_attr,
+    Attr, Raw, nested_dollar_hint, parse_list, parse_tag, split_cells, split_props, typed,
+    unescape_attr,
 };
 use crate::inline::{parse_image, parse_inline};
 use crate::model::{
@@ -770,11 +771,18 @@ fn read_image(lines: &[Line<'_>], i: usize, depth: usize) -> Result<(Block, usiz
     Ok((new_block("image", props, Content::None, children, id), next))
 }
 
-fn read_cell(seg: &str, line: usize) -> Result<Cell, MmdError> {
+/// Une cellule ; `hint` est ce que la ligne entière ajoute à un refus ([`nested_dollar_hint`]) :
+/// une formule à `$` imbriqué y est coupée entre deux cellules.
+fn read_cell(seg: &str, line: usize, hint: &str) -> Result<Cell, MmdError> {
     let inner = seg
         .strip_prefix(' ')
         .and_then(|s| s.strip_suffix(' '))
-        .ok_or_else(|| err(line, "cellule : une espace de chaque côté, « | texte | »"))?;
+        .ok_or_else(|| {
+            err(
+                line,
+                format!("cellule : une espace de chaque côté, « | texte | »{hint}"),
+            )
+        })?;
     let (src, list) = split_props(inner).map_err(|m| err(line, m))?;
     let mut props = Props::new();
     if let Some(list) = list {
@@ -787,15 +795,16 @@ fn read_cell(seg: &str, line: usize) -> Result<Cell, MmdError> {
 }
 
 fn read_row(line: &Line<'_>) -> Result<Vec<Cell>, MmdError> {
+    let hint = nested_dollar_hint(line.text);
     split_cells(line.text)
         .ok_or_else(|| {
             err(
                 line.no,
-                "ligne de tableau : écrire « | cellule | cellule | »",
+                format!("ligne de tableau : écrire « | cellule | cellule | »{hint}"),
             )
         })?
         .into_iter()
-        .map(|seg| read_cell(seg, line.no))
+        .map(|seg| read_cell(seg, line.no, hint))
         .collect()
 }
 

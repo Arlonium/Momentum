@@ -49,6 +49,40 @@ fn other_non_canonical_forms_are_rejected() {
     rejected("$\\text{$x$}$ y\n", 1, "<math latex=\"\\text{$x$}\"/> y");
 }
 
+/// m2 de la relecture de X2 (R658) : une formule à `$` imbriqué que la ligne coupe (une accolade
+/// ou un `|` de la formule intérieure vu dans le texte) reçoit, avec le refus de la ligne, la forme
+/// qui la porte : sans elle, « écrire « \{ » » menait à une autre formule (`x^\{2\}`).
+#[test]
+fn a_formula_with_a_nested_dollar_is_pointed_to_its_tag() {
+    const HINT: &str =
+        "une formule qui contient un « $ » non échappé s'écrit « <math latex=\"…\"/> »";
+    // La liste `{…}` vue dans le texte (`split_props`).
+    rejected("$\\text{aire $x^{2}$}$\n", 1, "accolade");
+    rejected("$\\text{aire $x^{2}$}$\n", 1, HINT);
+    // La cellule coupée en deux par le `|` de la formule intérieure (`read_cell`).
+    rejected(
+        "| $\\text{$a|b$}$ |\n| --- |\n",
+        1,
+        "une espace de chaque côté",
+    );
+    rejected("| $\\text{$a|b$}$ |\n| --- |\n", 1, HINT);
+    // La ligne de tableau dont l'accolade vue dans le texte avale la fin (`read_row`).
+    rejected("| $\\text{$a$} {b |\n| --- |\n", 1, "ligne de tableau");
+    rejected("| $\\text{$a$} {b |\n| --- |\n", 1, HINT);
+    // Témoins : une accolade ou une cellule fautive sans formule à `$` imbriqué ne parle pas
+    // de formule, une liste dont une valeur porte un `$` non plus.
+    for mmd in [
+        "Prix{x}\n",
+        "$a$ et Prix{x}\n",
+        "Texte{a=\"$\"}\n",
+        "| a|b |\n| --- |\n",
+        "| $a$ {b |\n| --- |\n",
+    ] {
+        let error = mementum_md::parse(mmd).expect_err(mmd);
+        assert!(!error.message.contains("math latex"), "{mmd:?} : {error}");
+    }
+}
+
 /// `n` toggles imbriqués, le plus profond vide : `n` niveaux.
 fn toggles(n: usize) -> String {
     "<toggle title=\"x\">\n".repeat(n) + &"</toggle>\n".repeat(n)
