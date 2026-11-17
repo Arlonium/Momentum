@@ -679,6 +679,28 @@ fn a_formula_with_an_unescaped_dollar_is_a_tag() {
         ])],
         "a<math latex=\"\\text{$\\text{$x$}$}\"/>b <math latex=\"\\\\$\"/>\n",
     );
+    // Témoin : sans `$` non échappé, la forme reste `$…$`.
+    same(
+        vec![para(vec![math("\\$5 + \\text{a}"), text(" "), math("{x}")])],
+        "$\\$5 + \\text{a}$ ${x}$\n",
+    );
+}
+
+/// Task X2 (R658), dans une cellule de tableau : écrite `$\text{$a|b$}$`, la formule était
+/// coupée en deux cellules par le `|` de la formule intérieure (« cellule : une espace de chaque
+/// côté »), et `$\text{$x^{2}$}$` y voyait une liste `{…}`. En balise, l'attribut garde le `|` et
+/// les accolades.
+#[test]
+fn a_formula_with_an_unescaped_dollar_in_a_table_cell_is_a_tag() {
+    let math = |latex: &str| Inline::Math {
+        latex: latex.into(),
+    };
+    let row = |content: Vec<Inline>| {
+        vec![Cell {
+            content,
+            props: Props::new(),
+        }]
+    };
     same(
         vec![blk(
             "table",
@@ -687,18 +709,14 @@ fn a_formula_with_an_unescaped_dollar_is_a_tag() {
                 header_rows: 1,
                 header_cols: 0,
                 column_widths: vec![None],
-                rows: vec![vec![Cell {
-                    content: vec![math("\\text{$a|b$}")],
-                    props: Props::new(),
-                }]],
+                rows: vec![
+                    row(vec![math("\\text{$a|b$}")]),
+                    row(vec![math("\\text{$x^{2}$}"), text(" et "), math("a|b")]),
+                ],
             }),
             vec![],
         )],
-        "| <math latex=\"\\text{$a|b$}\"/> |\n| --- |\n",
-    );
-    // Témoin : sans `$` non échappé, la forme reste `$…$`.
-    same(
-        vec![para(vec![math("\\$5 + \\text{a}"), text(" "), math("{x}")])],
-        "$\\$5 + \\text{a}$ ${x}$\n",
+        "| <math latex=\"\\text{$a|b$}\"/> |\n| --- |\n\
+         | <math latex=\"\\text{$x^{2}$}\"/> et $a|b$ |\n",
     );
 }
