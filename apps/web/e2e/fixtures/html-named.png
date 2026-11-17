@@ -1,0 +1,10 @@
+<!doctype html>
+<html>
+  <body>
+    <p>Un HTML nomm&eacute; photo.png.</p>
+    <script>
+      window.__ran = true;
+      alert('ex\u00e9cut\u00e9');
+    </script>
+  </body>
+</html>

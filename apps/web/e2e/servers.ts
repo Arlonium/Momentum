@@ -128,6 +128,12 @@ type WebServer = Exclude<NonNullable<PlaywrightTestConfig["webServer"]>, unknown
  */
 export const E2E_VERSION_EVERY_SECS = 1;
 
+/**
+ * La taille maximale d'un fichier sur le serveur de la suite ordinaire, en Mio (R247) : la plus
+ * petite que le serveur admette, pour qu'un e2e voie un fichier refusé sans en envoyer cent.
+ */
+export const E2E_MAX_FILE_MB = 1;
+
 type ApiServerOptions = {
   /** Compilé en release (les budgets, Ruling R38) plutôt qu'en debug. */
   release: boolean;
@@ -137,6 +143,11 @@ type ApiServerOptions = {
    * que les gens utiliseront (Ruling R144).
    */
   versionEverySecs?: number;
+  /**
+   * La taille maximale d'un fichier (`MEMENTUM_MAX_FILE_MB`, R247), en Mio. Absent : le réglage par
+   * défaut du serveur (100 Mio), celui des budgets.
+   */
+  maxFileMb?: number;
 };
 
 /**
@@ -144,7 +155,7 @@ type ApiServerOptions = {
  * debug pour la suite ordinaire, en release pour les budgets (`release`, Ruling R38).
  * Inscriptions ouvertes (`MEMENTUM_SIGNUP=open`) : chaque test crée ses comptes.
  */
-export function apiServer({ release, versionEverySecs }: ApiServerOptions): WebServer {
+export function apiServer({ release, versionEverySecs, maxFileMb }: ApiServerOptions): WebServer {
   const dataDir = join(prepareServers(), "data");
   return {
     // La première compilation (en release surtout) peut être longue : délai généreux.
@@ -161,6 +172,7 @@ export function apiServer({ release, versionEverySecs }: ApiServerOptions): WebS
       ...(versionEverySecs === undefined
         ? {}
         : { MEMENTUM_VERSION_EVERY_SECS: String(versionEverySecs) }),
+      ...(maxFileMb === undefined ? {} : { MEMENTUM_MAX_FILE_MB: String(maxFileMb) }),
     },
   };
 }
