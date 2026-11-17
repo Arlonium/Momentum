@@ -375,22 +375,22 @@ impl Shape {
             }
             k
         }
-        for k in 0..entries.len() {
-            if let Some(left) = entries[k].3.and_then(at) {
+        for (k, entry) in entries.iter().enumerate() {
+            if let Some(left) = entry.3.and_then(at) {
                 let (a, b) = (root(&mut chain, k), root(&mut chain, left));
                 chain[a] = b;
             }
         }
         let mut live_in: HashMap<usize, Id> = HashMap::new();
-        for k in 0..entries.len() {
-            if !entries[k].2 {
+        for (k, entry) in entries.iter().enumerate() {
+            if !entry.2 {
                 continue;
             }
             let r = root(&mut chain, k);
-            if let Some(other) = live_in.insert(r, entries[k].0) {
+            if let Some(other) = live_in.insert(r, entry.0) {
                 return Some(format!(
                     "deux entrées de map vivantes pour une même clé : {other:?} et {:?}",
-                    entries[k].0
+                    entry.0
                 ));
             }
         }

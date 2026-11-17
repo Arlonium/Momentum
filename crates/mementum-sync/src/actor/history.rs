@@ -345,7 +345,7 @@ impl Actor {
             && let Err(error) = self.cut_version(VersionReason::BeforeRestore).await
         {
             tracing::warn!(node_id = %self.id.node_id, version_id = %version, %error, "version d'avant restauration impossible à écrire : rien n'est restauré");
-            return Ok(Err(error.into()));
+            return Ok(Err(error));
         }
         // Après la coupe : c'est elle qui peut avoir purgé la version, ou en avoir fait celle que
         // la prochaine version ordinaire ferait partir.
