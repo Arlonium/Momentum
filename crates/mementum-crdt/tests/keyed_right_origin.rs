@@ -480,3 +480,160 @@ fn a_state_that_holds_one_is_refused_by_an_empty_page() {
     );
     assert!(PageDoc::served_state(&poisoned).is_none());
 }
+
+// ------------------------------------------------------------------ à cheval (Ruling R740)
+
+/// Le client 7 000 ajoute un second bloc : son `blockContainer` est son élément 0, l'`id` le 1,
+/// le paragraphe le 2, et sa couleur de fond « red » le 3.
+fn second_block(served: &mut Served) {
+    use yrs::{Xml, XmlElementPrelim};
+    let doc = served.client(7_000);
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let update = {
+        let mut txn = doc.transact_mut();
+        let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+            panic!("pas de groupe");
+        };
+        let container = group.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(&mut txn, "id", "0196f0a0-0000-7000-8000-000000000001");
+        let paragraph = container.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+        paragraph.insert_attribute(&mut txn, "backgroundColor", "red");
+        txn.encode_update_v1()
+    };
+    served.receive(&update).expect("le second bloc");
+}
+
+/// Un élément du client 7 000 à l'horloge 3, que la page connaît (la couleur du second bloc), de
+/// deux unités : parent nommé, le paragraphe du **premier** bloc, clé `backgroundColor`.
+fn keyed_astride(served: &Served, info: u8, content: &[u8]) -> Vec<u8> {
+    let mut u = vec![1, 1];
+    var(&mut u, 7_000);
+    u.extend_from_slice(&[3, info, 0]);
+    var(&mut u, served.server);
+    u.push(3);
+    let key = b"backgroundColor";
+    u.push(key.len() as u8);
+    u.extend_from_slice(key);
+    u.extend_from_slice(content);
+    u.push(0);
+    u
+}
+
+/// Ce qui bâtit une mise à jour pour une page servie.
+type Form = Box<dyn Fn(&Served) -> Vec<u8>>;
+
+/// Les formes du constat C1 : ce que le client 7 000 envoie à son horloge 3, déjà connue.
+fn astride_forms() -> Vec<(&'static str, Form)> {
+    let two_values: &[u8] = &[2, 119, 3, b'r', b'e', b'd', 119, 4, b'b', b'l', b'u', b'e'];
+    vec![
+        (
+            "un contenu supprimé, parent nommé ailleurs",
+            Box::new(|s| keyed_astride(s, 0x21, &[2])),
+        ),
+        (
+            "deux valeurs, parent nommé ailleurs",
+            Box::new(move |s| keyed_astride(s, 0x28, two_values)),
+        ),
+        (
+            "un contenu supprimé, d'origine une lettre du premier bloc",
+            Box::new(|_| vec![1, 1, 216, 54, 3, 0x81, 10, 3, 2, 0]),
+        ),
+        (
+            "une chaîne, parent nommé le texte du premier bloc",
+            Box::new(|_| vec![1, 1, 216, 54, 3, 0x04, 0, 10, 0, 2, b'a', b'b', 0]),
+        ),
+    ]
+}
+
+/// Constat C1 de la re-relecture 3 : un élément à cheval sur ce que la page connaît. yrs n'en
+/// intègre que la part au-dessus du plancher, lui donne pour voisin de gauche l'élément de la
+/// page à l'horloge d'avant sans regarder son parent, garde le parent des octets et prend la clé
+/// du voisin : la part intégrée devenait l'entrée courante de la couleur du premier bloc, avec
+/// un voisin de gauche d'un autre parent, et l'ancienne entrée n'était plus tenue par rien (28
+/// octets ; le premier bloc supprimé, le serveur s'arrêtait). Refusé avant d'être appliqué, sous
+/// toutes ses formes : la page est intacte.
+#[test]
+fn an_item_astride_what_the_page_knows_is_refused_before_it_is_applied() {
+    for (what, build) in astride_forms() {
+        let mut served = Served::new();
+        second_block(&mut served);
+        let (blocks, state) = (served.page.read_blocks(), served.page.encode_state());
+        let result = served.page.try_client_update(&build(&served));
+        assert!(
+            matches!(&result, Err(refused) if refused.intact),
+            "{what} : {:?}",
+            result
+                .map(|_| ())
+                .map_err(|r| (r.intact, r.error.to_string()))
+        );
+        assert_eq!(
+            served.page.read_blocks(),
+            blocks,
+            "{what} : la page a changé"
+        );
+        assert!(
+            served.page.encode_state() == state,
+            "{what} : l'état a changé"
+        );
+        // Le premier bloc supprimé et d'autres écritures faites, l'état se relit toujours.
+        let deleted = served.block_deleted();
+        let _ = served.receive(&deleted);
+        for n in 0..10 {
+            let mut typed = vec![1, 1, 100 + n, 0, 0x04, 0];
+            var(&mut typed, 7_000);
+            typed.extend_from_slice(&[2, 2, b'o', b'k', 0]);
+            let _ = served.receive(&typed);
+            assert_sound(&served, what);
+        }
+    }
+}
+
+/// À cheval sur un enfant d'une liste : le texte vide du client 7 000 (son horloge 0), renvoyé
+/// comme une chaîne de deux lettres dont le parent nommé est le texte du client 10.
+#[test]
+fn a_string_astride_a_list_child_of_another_parent_is_refused() {
+    let mut served = Served::new();
+    empty_text(&mut served, 7_000);
+    let before = served.page.read_blocks();
+    let hostile = vec![1, 1, 216, 54, 0, 0x04, 0, 10, 0, 2, b'a', b'b', 0];
+    let result = served.page.try_client_update(&hostile);
+    assert!(matches!(&result, Err(refused) if refused.intact));
+    assert_eq!(served.page.read_blocks(), before);
+    assert_sound(&served, "la chaîne refusée");
+}
+
+/// Ce que la page connaît déjà en entier n'est pas à cheval : yrs l'ignore, la mise à jour passe
+/// (un onglet qui renvoie ce que le serveur a déjà). Et ce qui part du plancher passe.
+#[test]
+fn what_the_page_already_knows_and_what_starts_at_its_floor_pass() {
+    let mut served = Served::new();
+    // Les lettres « abc » du client 10 (horloges 1 à 3), renvoyées telles quelles.
+    let known = vec![1, 1, 10, 1, 0x84, 10, 0, 3, b'a', b'b', b'c', 0];
+    served.receive(&known).expect("déjà connu");
+    // La suite, à l'horloge 4.
+    let next = vec![1, 1, 10, 4, 0x84, 10, 3, 1, b'd', 0];
+    served.receive(&next).expect("à partir du plancher");
+    assert_sound(&served, "la suite");
+    assert!(
+        reread(&served.page.encode_state())
+            .unwrap()
+            .contains("abcd")
+    );
+}
+
+/// Au journal (une base qui garderait les octets d'un client, avant R130) : l'entrée est refusée
+/// avant d'être appliquée, et qui relit le journal peut l'écarter.
+#[test]
+fn an_item_astride_already_in_the_journal_is_refused_before_it_is_applied() {
+    for (what, build) in astride_forms() {
+        let mut served = Served::new();
+        second_block(&mut served);
+        let page = served.reloaded();
+        let state = page.encode_state();
+        let error = page
+            .apply_update(&build(&served))
+            .expect_err("l'entrée est relue");
+        assert!(PageDoc::refused_intact(&error), "{what} : {error}");
+        assert!(page.encode_state() == state, "{what} : la page a changé");
+    }
+}

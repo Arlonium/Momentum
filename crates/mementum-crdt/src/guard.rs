@@ -347,6 +347,16 @@ pub(crate) const VALUE_WITH_RIGHT_ORIGIN: &str = "la mise à jour pose une valeu
 pub(crate) const KEYED_RIGHT_ORIGIN: &str = "la mise à jour pose une entrée de map qui porte une \
      origine droite : aucun client n'en écrit, et le serveur ne la range pas comme les navigateurs";
 
+/// Le même refus, fait après l'application, d'après ce que yrs a fait de l'élément : la page
+/// est alors à jeter, et qui relit un journal ne peut pas écarter l'entrée (Ruling R742).
+pub(crate) const KEYED_RIGHT_ORIGIN_MADE: &str = "la mise à jour pose, pour le serveur, une \
+     entrée de map qui porte une origine droite : aucun client n'en écrit";
+
+/// Le refus d'un élément à cheval sur ce que la page connaît (Ruling R740).
+pub(crate) const ASTRIDE: &str = "la mise à jour porte un élément à cheval sur ce que la page \
+     connaît de son client : aucun client n'en envoie, et le serveur rangerait la part qui \
+     dépasse d'après un voisin que la mise à jour ne nomme pas";
+
 /// Le refus d'une entrée de map dont le contenu n'est pas une valeur (Rulings R702, R724).
 pub(crate) const KEYED_NOT_A_VALUE: &str = "la mise à jour pose comme valeur d'un attribut un \
      contenu qui n'en est pas une (seule une valeur JSON en est une)";
@@ -666,6 +676,33 @@ impl Shape {
         Ok(())
     }
 
+    /// Refuse (`Structure`) une mise à jour qui porte un élément **à cheval** sur ce que la page
+    /// connaît (Ruling R740) : son horloge de départ est sous le plancher de son client, sa fin
+    /// le dépasse. yrs n'en intègre que la part au-dessus du plancher (`Item::trim`), et lui donne
+    /// pour voisin de gauche l'élément de la page à l'horloge d'avant, **sans regarder son
+    /// parent** ; il garde le parent que disent les octets, et prend la clé de map de ce voisin.
+    /// La part intégrée devient ainsi l'entrée courante d'une map d'un autre parent, l'ancienne
+    /// entrée n'est plus tenue par rien, et la page lit de la mémoire libérée une fois ce parent
+    /// supprimé (l'état de R723, sans origine droite). Yjs n'envoie jamais un tel élément : ce
+    /// qu'il encode pour un destinataire part de son vecteur d'état (`Item.write` avec un
+    /// décalage), et la mise à jour d'une transaction de l'état d'avant elle.
+    ///
+    /// Un élément tout entier sous le plancher n'en est pas un : yrs l'ignore (Ruling R490).
+    pub(crate) fn check_astride(&self, floor: &StateVector) -> Result<(), CrdtError> {
+        for (client, structs) in &self.clients {
+            let known = floor.get(&ClientID::new(*client));
+            if known == 0 {
+                continue;
+            }
+            for s in structs {
+                if matches!(s.kind, Kind::Insert(_)) && s.id.1 < known && s.id.1 + s.len > known {
+                    return Err(CrdtError::Structure(ASTRIDE.to_string()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Refuse (`Structure`) une mise à jour où un élément intégré (au-dessus de `floor`) porte à la
     /// fois la marque « entrée de map » et une origine droite (Ruling R723). yrs donne à un
     /// élément la clé de son voisin de gauche et, s'il n'en a pas, celle de son voisin de
@@ -704,7 +741,7 @@ impl Shape {
                 continue;
             }
             if i.right_origin {
-                return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN.to_string()));
+                return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN_MADE.to_string()));
             }
             if !i.any && i.value.is_some() {
                 return Err(CrdtError::Structure(KEYED_NOT_A_VALUE.to_string()));

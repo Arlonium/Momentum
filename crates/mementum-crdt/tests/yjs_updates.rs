@@ -1,0 +1,235 @@
+//! Ce que le vrai Yjs écrit passe la garde (Rulings R723, R740) : les mises à jour de
+//! `apps/web/src/editor/yjsUpdates.test.ts` (deux clients, dans les deux ordres d'identifiants :
+//! écritures concurrentes d'un attribut, annuler et rétablir, frappe au milieu d'un texte,
+//! session hors ligne ; dans l'ordre, l'autre d'abord, en étapes 2 depuis l'état de base),
+//! gardées dans `tests/fixtures/yjs_updates/scenarios.json`, sont données à une vraie page comme
+//! celles d'un client. Aucune n'est refusée : Yjs n'envoie ni entrée de map à origine droite, ni
+//! élément à cheval sur ce que le destinataire connaît.
+//!
+//! `EXPORT_FIXTURES=1 cargo test -p mementum-crdt --test yjs_updates` réécrit `base.json` (l'état
+//! de la page de départ ; l'identifiant du client du serveur y est tiré au hasard), puis Vitest
+//! réécrit les scénarios (voir son en-tête).
+#![allow(dead_code)]
+
+use mementum_crdt::{FRAGMENT, PageDoc};
+use yrs::updates::decoder::Decode;
+use yrs::{
+    ClientID, Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
+    XmlFragment, XmlOut, XmlTextPrelim,
+};
+
+fn var(out: &mut Vec<u8>, mut value: u64) {
+    while value > 0x7F {
+        out.push(0x80 | (value & 0x7F) as u8);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// Une page servie et son journal, comme les tient l'acteur.
+struct Served {
+    page: PageDoc,
+    journal: Vec<Vec<u8>>,
+    /// Le client du serveur, qui a écrit la page : `blockGroup` à l'horloge 0, `blockContainer`
+    /// à 1, son `id` à 2, `paragraph` à 3, `backgroundColor` à 4, `textColor` à 5,
+    /// `textAlignment` à 6.
+    server: u64,
+}
+
+const CONTAINER: u32 = 1;
+const BACKGROUND: u32 = 4;
+
+impl Served {
+    /// Une page neuve, où le client 10 a tapé « abc » : le texte est son élément 0, les lettres
+    /// ses horloges 1 à 3.
+    fn new() -> Served {
+        let (page, created) = PageDoc::new_page();
+        let state = StateVector::decode_v1(&page.state_vector()).unwrap();
+        let server = state.iter().next().unwrap().0.get();
+        let mut served = Served {
+            page,
+            journal: vec![created],
+            server,
+        };
+        let doc = served.client(10);
+        let typed = {
+            let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+            let mut txn = doc.transact_mut();
+            let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+                panic!("pas de groupe");
+            };
+            let Some(XmlOut::Element(container)) = group.get(&txn, 0) else {
+                panic!("pas de bloc");
+            };
+            let Some(XmlOut::Element(paragraph)) = container.get(&txn, 0) else {
+                panic!("pas de paragraphe");
+            };
+            let text = paragraph.insert(&mut txn, 0, XmlTextPrelim::new(""));
+            text.insert(&mut txn, 0, "abc");
+            txn.encode_update_v1()
+        };
+        served.receive(&typed).expect("la frappe de départ");
+        served
+    }
+
+    fn client(&self, id: u64) -> Doc {
+        let doc = Doc::with_options(Options {
+            client_id: ClientID::new(id),
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        doc.get_or_insert_xml_fragment(FRAGMENT);
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(&self.page.encode_state()).unwrap())
+            .unwrap();
+        doc
+    }
+
+    /// Comme l'acteur : acceptée, la mise à jour va au journal telle que la page la rend ;
+    /// refusée, la page est rechargée de son journal.
+    fn receive(&mut self, update: &[u8]) -> Result<(), String> {
+        match self.page.apply_client_update(update) {
+            Ok(applied) => {
+                self.journal.push(applied.read);
+                self.journal.extend(applied.carried);
+                self.journal.extend(self.page.dedupe_blocks());
+                Ok(())
+            }
+            Err(error) => {
+                self.page = self.reloaded();
+                Err(error.to_string())
+            }
+        }
+    }
+
+    fn reloaded(&self) -> PageDoc {
+        PageDoc::from_updates(self.journal.iter().map(Vec::as_slice)).expect("le journal se relit")
+    }
+
+    /// Une chaîne « bc » du client `client`, à l'horloge `clock`, d'origine `origin` et d'origine
+    /// droite `right` : pas de parent nommé, pas de clé. Sans son jeu de suppressions.
+    fn string_between(client: u64, clock: u32, origin: (u64, u32), right: (u64, u32)) -> Vec<u8> {
+        let mut u = vec![1, 1];
+        var(&mut u, client);
+        var(&mut u, u64::from(clock));
+        u.push(0xC4);
+        var(&mut u, origin.0);
+        var(&mut u, u64::from(origin.1));
+        var(&mut u, right.0);
+        var(&mut u, u64::from(right.1));
+        u.extend_from_slice(&[2, b'b', b'c']);
+        u
+    }
+
+    /// La suppression du bloc de la page (son `blockContainer`).
+    fn block_deleted(&self) -> Vec<u8> {
+        let mut u = vec![0, 1];
+        var(&mut u, self.server);
+        u.extend_from_slice(&[1, CONTAINER as u8, 1]);
+        u
+    }
+}
+
+/// Ce qu'un client neuf (yrs) lit d'un état : `Err` s'il ne le relit pas.
+fn reread(state: &[u8]) -> Result<String, String> {
+    let doc = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let update = Update::decode_v1(state).map_err(|e| format!("illisible : {e:?}"))?;
+    doc.transact_mut()
+        .apply_update(update)
+        .map_err(|e| format!("refusé : {e:?}"))?;
+    let txn = doc.transact();
+    if txn.store().pending_update().is_some() {
+        return Err("des éléments restent en attente".to_string());
+    }
+    Ok(fragment.get_string(&txn))
+}
+
+/// La page et son journal se relisent par un client neuf, et disent la même chose.
+fn assert_sound(served: &Served, what: &str) {
+    let live = reread(&served.page.encode_state());
+    assert!(live.is_ok(), "{what} : l'état de la page vivante, {live:?}");
+    let reloaded = served.reloaded();
+    let again = reread(&reloaded.encode_state());
+    assert!(
+        again.is_ok(),
+        "{what} : l'état de la page rechargée, {again:?}"
+    );
+    assert_eq!(
+        reloaded.read_blocks(),
+        served.page.read_blocks(),
+        "{what} : les blocs de la page rechargée"
+    );
+    assert_eq!(
+        reloaded.revision(),
+        served.page.revision(),
+        "{what} : la révision de la page rechargée"
+    );
+}
+
+fn dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/yjs_updates")
+}
+
+/// Écrit, sur demande, l'état d'une page servie (un paragraphe « abc »), pour Vitest.
+#[test]
+fn the_base_is_written_on_demand() {
+    if std::env::var_os("EXPORT_FIXTURES").is_none() {
+        return;
+    }
+    let served = Served::new();
+    let state = served.page.encode_state();
+    std::fs::create_dir_all(dir()).unwrap();
+    let mut json = serde_json::to_string(&state).unwrap();
+    json.push('\n');
+    std::fs::write(dir().join("base.json"), json).unwrap();
+}
+
+/// Rejoue ce que le vrai Yjs a écrit (scénarios de `yjsUpdates.test.ts`) : chaque mise à jour
+/// est donnée à la page comme celle d'un client, et doit passer.
+#[test]
+fn what_yjs_writes_passes_the_guard() {
+    let base: Vec<u8> =
+        serde_json::from_str(&std::fs::read_to_string(dir().join("base.json")).unwrap()).unwrap();
+    let scenarios: Vec<(String, Vec<Vec<u8>>)> =
+        serde_json::from_str(&std::fs::read_to_string(dir().join("scenarios.json")).unwrap())
+            .unwrap();
+    assert!(
+        scenarios.len() >= 8,
+        "peu de scénarios : {}",
+        scenarios.len()
+    );
+    let mut refused = Vec::new();
+    let mut steps = 0;
+    for (name, updates) in scenarios {
+        let page = PageDoc::from_updates([base.as_slice()]).expect("la base");
+        let mut journal = vec![base.clone()];
+        for (n, update) in updates.iter().enumerate() {
+            steps += 1;
+            match page.apply_client_update(update) {
+                Ok(applied) => {
+                    journal.push(applied.read);
+                    journal.extend(applied.carried);
+                }
+                Err(error) => {
+                    refused.push(format!("{name}, étape {n} : {error} ; {update:?}"));
+                    break;
+                }
+            }
+        }
+        if let Ok(reloaded) = PageDoc::from_updates(journal.iter().map(Vec::as_slice)) {
+            if reloaded.read_blocks() != page.read_blocks() {
+                refused.push(format!(
+                    "{name} : la page rechargée n'est pas la page vivante"
+                ));
+            }
+        } else {
+            refused.push(format!("{name} : le journal ne se relit pas"));
+        }
+    }
+    assert!(steps >= 150, "peu de mises à jour rejouées : {steps}");
+    assert!(refused.is_empty(), "{refused:#?}");
+}

@@ -22,7 +22,8 @@ use yrs::{
 use crate::attrs::{self, Key, Value};
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
 use crate::guard::{
-    KEYED_RIGHT_ORIGIN, PageItem, Pending, REPEATED_CLIENT, Shape, UNTYPED_CHILD, missing, touched,
+    ASTRIDE, KEYED_RIGHT_ORIGIN, KEYED_RIGHT_ORIGIN_MADE, PageItem, Pending, REPEATED_CLIENT,
+    Shape, UNTYPED_CHILD, missing, touched,
 };
 use crate::kept_ids::keep_ids;
 use crate::moves::{self, Carried, MAX_CARRIED_BYTES, Recreated};
@@ -202,9 +203,9 @@ impl PageDoc {
             // l'entrée (un état complet, encodé par yrs), et ses octets ont suffi.
             if before.iter().next().is_some()
                 && shape.has_right_origins(&before)
-                && matches!(made(&txn.encode_update_v1()), Err(CrdtError::Structure(why)) if why == KEYED_RIGHT_ORIGIN)
+                && matches!(made(&txn.encode_update_v1()), Err(CrdtError::Structure(why)) if why == KEYED_RIGHT_ORIGIN_MADE)
             {
-                return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN.to_string()));
+                return Err(CrdtError::Structure(KEYED_RIGHT_ORIGIN_MADE.to_string()));
             }
             delete(&mut txn, &shape.outside_marks(&before))?;
             txn.commit();
@@ -319,8 +320,10 @@ impl PageDoc {
         // ramasse-miettes).
         let read = txn.encode_update_v1();
         // Rulings R723, R724 : une entrée de map à origine droite, ou dont le contenu n'est pas
-        // une valeur, d'après ce que yrs en a fait. Avant la validation, où le ramasse-miettes
-        // passerait sur ce qu'elle a défait.
+        // une valeur, d'après ce que yrs en a fait. Jugé avant la validation, mais ce n'est pas
+        // un abandon : yrs valide la transaction quand elle est lâchée, ramasse-miettes compris.
+        // Le refus tient parce que tout appelant jette alors la page (l'acteur la recharge du
+        // journal, où rien de cela n'est écrit) et que rien ne l'encode entre-temps.
         if shape.placed_by_neighbours(&floor) {
             made(&read).map_err(applied)?;
         }
@@ -459,6 +462,22 @@ impl PageDoc {
         Shape::read(update).is_ok_and(|shape| shape.check_keyed(&StateVector::default()).is_err())
     }
 
+    /// Vrai si `error`, rendue par [`PageDoc::apply_update`], est un refus fait **avant**
+    /// d'appliquer une entrée qu'aucun client honnête n'écrit : un élément à cheval sur ce que la
+    /// page connaît (Ruling R740), une entrée de map à origine droite dans les octets (Ruling
+    /// R723). La page est intacte : qui relit un journal écarte l'entrée et continue (Ruling
+    /// R742). Le même défaut vu après l'application rend une autre erreur : la page est à jeter.
+    pub fn refused_intact(error: &CrdtError) -> bool {
+        matches!(error, CrdtError::Structure(why) if why == ASTRIDE || why == KEYED_RIGHT_ORIGIN)
+    }
+
+    /// Vrai si `error` est le refus d'une mise à jour qui dépend de modifications que la page n'a
+    /// pas (une origine, un parent absents). La page n'est plus intacte : yrs garde la mise à
+    /// jour en attente.
+    pub fn lacks_a_dependency(error: &CrdtError) -> bool {
+        matches!((error, missing()), (CrdtError::Decode(a), CrdtError::Decode(b)) if *a == b)
+    }
+
     /// Vrai si la mise à jour (v1) est refusée parce qu'un client y paraît deux fois (Ruling
     /// R207). Une telle mise à jour est refusée avant que yrs la lise : la page est intacte. La
     /// relecture du journal s'en sert pour écarter l'entrée au lieu de refuser la page (Ruling
@@ -547,6 +566,8 @@ impl PageDoc {
         let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
         let state = txn.state_vector();
         shape.check(&state)?;
+        // Ruling R740 : un élément à cheval sur ce que la page connaît.
+        shape.check_astride(&state)?;
         // Ruling R723 : une entrée de map à origine droite, quand les octets le disent.
         shape.check_keyed(&state)?;
         if from_client {

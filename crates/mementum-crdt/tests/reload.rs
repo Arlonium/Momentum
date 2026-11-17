@@ -195,6 +195,22 @@ impl Served {
             "{what} : plages et marques"
         );
         assert_children_are_their_length(&self.page, what);
+        // L'état de la page s'encode et se relit, plusieurs fois de suite : une structure que yrs
+        // a mal rangée ne se voit qu'à l'encodage, une fois de la mémoire libérée puis reprise
+        // (Rulings R723, R740 ; c'est cette boucle qui a montré le constat C1).
+        for _ in 0..4 {
+            let state = self.page.encode_state();
+            let doc = Doc::with_options(Options {
+                offset_kind: OffsetKind::Utf16,
+                ..Options::default()
+            });
+            doc.get_or_insert_xml_fragment(FRAGMENT);
+            let update = Update::decode_v1(&state)
+                .unwrap_or_else(|e| panic!("{what} : l'état ne se décode pas : {e:?}"));
+            doc.transact_mut()
+                .apply_update(update)
+                .unwrap_or_else(|e| panic!("{what} : l'état ne se relit pas : {e:?}"));
+        }
     }
 }
 
@@ -657,6 +673,16 @@ enum Op {
         followed: bool,
         stored: bool,
     },
+    /// Un élément à cheval sur ce que la page connaît d'un de ses clients (`who`) : il part de
+    /// sa dernière horloge connue et compte deux unités. Son parent ou son origine sont ailleurs
+    /// (`form`, voir `astride`) : un type de la page nommé avec une clé de map, ou un élément
+    /// connu quelconque (`at`). Reçu d'un client, ou déjà au journal (constat C1, Ruling R740).
+    Astride {
+        who: usize,
+        form: usize,
+        at: usize,
+        stored: bool,
+    },
 }
 
 /// La mise à jour honnête `honest` (un client de passage écrase `backgroundColor` par « x »),
@@ -757,6 +783,52 @@ fn between(
     }
     out.push(0);
     Some(out)
+}
+
+/// Constat C1 (Ruling R740) : un élément du client `client` à l'horloge `clock` (la dernière que
+/// la page connaît de lui), de deux unités. `form` : un contenu supprimé ou deux valeurs, entrée
+/// `backgroundColor` du type `parent` de la page ; un contenu supprimé d'origine `origin` ; une
+/// chaîne dont le parent nommé est `parent`.
+fn astride(
+    client: u64,
+    clock: u32,
+    form: usize,
+    parent: (u64, u32),
+    origin: (u64, u32),
+) -> Vec<u8> {
+    let mut out = vec![1, 1];
+    var(&mut out, client);
+    var(&mut out, u64::from(clock));
+    let named = |out: &mut Vec<u8>, info: u8, key: bool| {
+        out.extend_from_slice(&[info, 0]);
+        var(out, parent.0);
+        var(out, u64::from(parent.1));
+        if key {
+            string(out, "backgroundColor");
+        }
+    };
+    match form % 4 {
+        0 => {
+            named(&mut out, 0x21, true);
+            out.push(2);
+        }
+        1 => {
+            named(&mut out, 0x28, true);
+            out.extend_from_slice(&[2, 119, 1, b'a', 119, 1, b'b']);
+        }
+        2 => {
+            out.push(0x81);
+            var(&mut out, origin.0);
+            var(&mut out, u64::from(origin.1));
+            out.push(2);
+        }
+        _ => {
+            named(&mut out, 0x04, false);
+            out.extend_from_slice(&[2, b'a', b'b']);
+        }
+    }
+    out.push(0);
+    out
 }
 
 /// Les attributs posés par `Op::Attr` : du type du registre, ou non (un objet, une liste,
@@ -874,6 +946,14 @@ fn op() -> impl Strategy<Value = Op> {
                 stored,
             }),
         (0..3usize, any::<bool>()).prop_map(|(kind, stored)| Op::Content { kind, stored }),
+        (any::<usize>(), 0..4usize, any::<usize>(), any::<bool>()).prop_map(
+            |(who, form, at, stored)| Op::Astride {
+                who,
+                form,
+                at,
+                stored
+            }
+        ),
         (0..4usize, any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
             |(kind, astride, followed, stored)| Op::Between {
                 kind,
@@ -1049,6 +1129,45 @@ fn scenario(ops: &[Op]) {
                     }
                     Some(update) => update,
                     None => vec![0, 0],
+                }
+            }
+            Op::Astride {
+                who,
+                form,
+                at,
+                stored,
+            } => {
+                let state = StateVector::decode_v1(&served.page.state_vector()).unwrap();
+                let known: Vec<(u64, u32)> = state
+                    .iter()
+                    .map(|(c, k)| (c.get(), *k))
+                    .filter(|(_, k)| *k > 0)
+                    .collect();
+                let (client, floor) = known[who % known.len()];
+                let types = type_ids(&served.page);
+                let parent = types
+                    .get(at % types.len().max(1))
+                    .copied()
+                    .unwrap_or((client, 0));
+                let (other, clocks) = known[at % known.len()];
+                let update = astride(
+                    client,
+                    floor - 1,
+                    *form,
+                    parent,
+                    (other, *at as u32 % clocks),
+                );
+                if *stored {
+                    // Comme l'acteur à la relecture : une entrée que la page refuse n'est pas
+                    // gardée.
+                    served.journal.push(update);
+                    if PageDoc::from_updates(served.journal.iter().map(Vec::as_slice)).is_err() {
+                        served.journal.pop();
+                    }
+                    served.page = served.reloaded();
+                    vec![0, 0]
+                } else {
+                    update
                 }
             }
             Op::Content { kind, stored } => {

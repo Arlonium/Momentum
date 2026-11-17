@@ -1223,7 +1223,7 @@ fn an_item_astride_what_the_page_knows_is_judged_by_what_it_integrates() {
                     // retirer laissait un état qu'un client ne relit plus, le bloc supprimé).
                     let result = PageDoc::from_updates(journal.iter().copied());
                     assert!(
-                        matches!(&result, Err(CrdtError::Structure(why)) if why.contains("origine droite")),
+                        matches!(&result, Err(CrdtError::Structure(why)) if why.contains("origine droite") || why.contains("à cheval")),
                         "{what}, {form} : la page se charge avec l'entrée"
                     );
                 } else {

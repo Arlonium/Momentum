@@ -132,3 +132,38 @@ test("une chaîne à cheval à origine droite, puis une valeur qui la suit, sont
   const relayed = [1, 2, 5, 1, 0xe4, 5, 0, ...id(entry), ...text("b"), 0xa8, 5, 1, 1, 119, ...text("ok"), 1, 5, 1, 0, 2];
   expect(children(relayed)).toEqual({ k: "x", rest: ["ok"] });
 });
+
+test("Yjs n'envoie jamais un élément à cheval sur ce que le destinataire connaît", () => {
+  // Ruling R740 : le serveur refuse un élément dont l'horloge de départ est sous ce qu'il connaît
+  // de son client et dont la fin le dépasse. Yjs n'en écrit pas : ce qu'il encode pour un
+  // destinataire part de son vecteur d'état, même au milieu d'un élément fusionné (`Item.write`
+  // avec un décalage récrit l'origine), et la mise à jour d'une transaction part de l'état d'avant
+  // elle.
+  const doc = new Y.Doc();
+  doc.clientID = 5;
+  const text = doc.getText("t");
+  const updates: Uint8Array[] = [];
+  doc.on("update", (update: Uint8Array) => updates.push(update));
+  // Dix lettres tapées une à une : Yjs les fond en un seul élément (horloges 0 à 9).
+  for (let n = 0; n < 10; n += 1) text.insert(n, String.fromCharCode(97 + n));
+  const structs = (doc as unknown as { store: { clients: Map<number, { length: number }[]> } }).store.clients.get(5);
+  expect(structs?.length, "un seul élément fusionné").toBe(1);
+  /** Le client, l'horloge de départ et le nombre d'éléments de la première entrée d'une mise à jour. */
+  const first = (update: Uint8Array): { structs: number; client: number; clock: number } => {
+    expect(update[0]).toBe(1);
+    return { structs: update[1] ?? 0, client: update[2] ?? 0, clock: update[3] ?? 0 };
+  };
+  // Une étape 2 vers un serveur qui connaît les horloges 0 à `known - 1` : elle part de `known`.
+  for (let known = 0; known <= 9; known += 1) {
+    const serverState = Uint8Array.from([1, 5, known]);
+    const step2 = Y.encodeStateAsUpdate(doc, known === 0 ? Uint8Array.from([0]) : serverState);
+    expect(first(step2), `étape 2 depuis ${known}`).toEqual({ structs: 1, client: 5, clock: known });
+  }
+  // La mise à jour de chaque frappe part de l'horloge d'avant elle, et ne compte qu'une lettre.
+  updates.forEach((update, n) => {
+    expect(first(update), `frappe ${n}`).toEqual({ structs: 1, client: 5, clock: n });
+    const applied = new Y.Doc();
+    for (const earlier of updates.slice(0, n + 1)) Y.applyUpdate(applied, earlier);
+    expect(applied.getText("t").toString()).toHaveLength(n + 1);
+  });
+});
