@@ -144,8 +144,9 @@ pub enum StoreError {
     /// écrirait : rien n'est écrit.
     CommentLimit(CommentLimit),
     /// À l'ouverture : la base porte une migration que ce binaire ne peut pas suivre (inconnue, ou
-    /// d'une autre version), refusée avant toute copie et toute migration (Ruling R840). Rien n'a
-    /// été écrit. Son affichage est tout le message, sans source.
+    /// d'une autre version), refusée avant toute copie, toute migration et toute connexion qui
+    /// écrit (Rulings R840, R845). Rien n'a été écrit. Son affichage est tout le message, sans
+    /// source.
     Migration(MigrationRefusal),
     /// Erreur de la base.
     Sqlx(sqlx::Error),
@@ -270,7 +271,8 @@ impl Store {
     /// suffit ; sinon, la nouvelle prend le nom sans date s'il est libre, ou un nom daté. Si la
     /// copie échoue, l'ouverture échoue, avant toute migration. [`Store::backup`] dit ce qui a été
     /// fait. Une base qui porte déjà une migration que ce binaire ne connaît pas, ou d'une autre
-    /// version que la sienne, est refusée avant toute copie ([`StoreError::Migration`]).
+    /// version que la sienne, est refusée avant toute copie et avant toute connexion qui écrit
+    /// ([`StoreError::Migration`]).
     pub async fn open(path: &Path) -> Result<Store, StoreError> {
         Store::open_with(path, StoreOptions::default()).await
     }
@@ -280,6 +282,9 @@ impl Store {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir).map_err(|e| StoreError::Sqlx(sqlx::Error::Io(e)))?;
         }
+        // Avant la connexion qui écrit, qui pose le mode WAL : une base refusée reste telle quelle,
+        // même en mode rollback (une copie d'avant migration remise en place ; Ruling R845).
+        backup::refuse_before_writing(path, &MIGRATOR, settings.busy_timeout).await?;
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)

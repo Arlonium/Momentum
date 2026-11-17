@@ -4,12 +4,13 @@
 //! La copie est écrite par SQLite lui-même (`VACUUM INTO`) : elle contient aussi ce qui n'est encore
 //! que dans le fichier `-wal`, et se lit seule, sans `-wal` ni `-shm`.
 //!
-//! Avant toute copie, les migrations que la base porte déjà sont comparées à celles du binaire
-//! (Ruling R840) : une migration que le binaire ne connaît pas (une version plus récente a ouvert
-//! la base), ou dont la somme diffère (un binaire intermédiaire d'un lot l'a appliquée), fait
-//! refuser la base telle quelle, sans copie ([`MigrationRefusal`]) ; le refus nomme la copie à
-//! reprendre. `Migrator::run` la refuserait aussi, mais après la copie, qui porterait alors un
-//! état refusé, à côté de la bonne.
+//! Avant toute copie, et avant même la connexion qui écrit (Ruling R845 : elle pose le mode WAL,
+//! ce qui récrirait l'en-tête d'une copie remise en place), les migrations que la base porte déjà
+//! sont comparées à celles du binaire (Ruling R840) : une migration que le binaire ne connaît pas
+//! (une version plus récente a ouvert la base), ou dont la somme diffère (un binaire intermédiaire
+//! d'un lot l'a appliquée), fait refuser la base telle quelle, sans copie ([`MigrationRefusal`]) ;
+//! le refus nomme la copie à reprendre. `Migrator::run` la refuserait aussi, mais après la copie,
+//! qui porterait alors un état refusé, à côté de la bonne.
 //!
 //! Tant qu'une migration est en attente, chaque ouverture écrit une copie fraîche sous un nom
 //! temporaire (`<copie>.partiel`), la force sur le disque, puis la range (Ruling R72) :
@@ -46,6 +47,7 @@ use std::time::SystemTime;
 
 use sqlx::SqlitePool;
 use sqlx::migrate::Migrator;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 use crate::StoreError;
 
@@ -74,10 +76,10 @@ pub fn backup_path(db: &Path, first_pending: i64) -> PathBuf {
     with_suffix(db, &format!(".avant-{first_pending:04}.bak"))
 }
 
-/// Une base refusée à l'ouverture, avant toute copie et toute migration (Ruling R840) : une
-/// migration qu'elle porte déjà ne peut pas être suivie par ce binaire. Rien n'a été écrit, ni
-/// dans la base, ni à côté d'elle. Son affichage est le message, en français, que voit
-/// l'exploitant.
+/// Une base refusée à l'ouverture, avant toute copie et toute migration (Ruling R840), et avant
+/// toute connexion qui écrit (Ruling R845) : une migration qu'elle porte déjà ne peut pas être
+/// suivie par ce binaire. Rien n'a été écrit, ni dans la base, ni à côté d'elle. Son affichage est
+/// le message, en français, que voit l'exploitant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationRefusal {
     /// Ce qui ne va pas avec cette migration.
@@ -171,7 +173,9 @@ impl fmt::Display for MigrationRefusal {
 ///
 /// Rien n'est copié pour une base neuve (sans table `_sqlx_migrations`), ni pour une base à jour.
 /// Une base qui porte une migration que `migrator` ne connaît pas, ou dont la somme diffère, est
-/// refusée avant toute copie : [`StoreError::Migration`] (Ruling R840).
+/// refusée avant toute copie : [`StoreError::Migration`] (Ruling R840). [`refuse_before_writing`]
+/// l'a déjà refusée avant que `pool` soit ouvert ; ce second jugement ne refuse qu'une base changée
+/// entre les deux.
 pub(crate) async fn before_migrations(
     pool: &SqlitePool,
     db: &Path,
@@ -529,6 +533,38 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// Avant toute connexion qui écrit (Ruling R845) : refuse la base `db`, si elle existe, quand elle
+/// porte une migration que `migrator` ne peut pas suivre ([`first_pending`]). La lecture passe par
+/// une connexion à elle, ouverte sans aucun réglage qui écrive (sqlx ne pose ni mode de journal ni
+/// rien d'autre qu'on ne lui demande ; seulement les clés étrangères, propres à la connexion), et
+/// fermée avant de rendre la main. La connexion qui écrit pose le mode WAL dès son ouverture, ce
+/// qui récrit l'en-tête d'une base en mode rollback : c'est le cas de toute copie d'avant migration
+/// remise en place, que `VACUUM INTO` écrit dans ce mode.
+///
+/// Une base en WAL, lue ainsi, garde ses octets : SQLite crée son `-wal` et son `-shm`, et les
+/// retire à la fermeture. Seul un `-wal` laissé par un arrêt brutal y est reversé, comme à toute
+/// ouverture : le contenu ne change pas. Un fichier de base en lecture seule garde un `-wal` et un
+/// `-shm` vides, que SQLite ne peut pas retirer sans écrire (limite écrite au registre, R845).
+pub(crate) async fn refuse_before_writing(
+    db: &Path,
+    migrator: &Migrator,
+    busy_timeout: std::time::Duration,
+) -> Result<(), StoreError> {
+    if !db.is_file() {
+        return Ok(());
+    }
+    let reading = SqliteConnectOptions::new()
+        .filename(db)
+        .busy_timeout(busy_timeout);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(reading)
+        .await?;
+    let checked = first_pending(&pool, db, migrator).await.map(drop);
+    pool.close().await;
+    checked
 }
 
 /// La version de la première migration de `migrator` que la base n'a pas encore, comme

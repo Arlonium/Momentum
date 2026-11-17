@@ -800,16 +800,35 @@ fn copy_at(db: &Path, suffix: &str, secs: u64) -> PathBuf {
     path
 }
 
-/// L'ouverture de `db` est refusée : rend le message. La base n'a pas changé d'un octet, et rien
-/// n'a été posé à côté d'elle (ni copie, ni `.partiel`, ni `-wal`).
+/// La date de modification de `path`.
+fn modified_at(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path).unwrap().modified().unwrap()
+}
+
+/// L'ouverture de `db` est refusée : rend le message. La base n'a pas changé d'un octet, ni de
+/// date, et rien n'a été posé à côté d'elle (ni copie, ni `.partiel`, ni `-wal`).
 async fn refused_untouched(db: &Path) -> String {
     let dir = db.parent().unwrap();
-    let (bytes, before) = (std::fs::read(db).unwrap(), entries(dir));
+    let (bytes, when, before) = (std::fs::read(db).unwrap(), modified_at(db), entries(dir));
     let error = Store::open(db)
         .await
         .err()
         .expect("l'ouverture doit être refusée");
-    assert_eq!(std::fs::read(db).unwrap(), bytes, "la base a changé");
+    let changed: Vec<usize> = std::fs::read(db)
+        .unwrap()
+        .iter()
+        .zip(&bytes)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(changed.is_empty(), "octets changés : {changed:?} ; {error}");
+    assert_eq!(std::fs::read(db).unwrap().len(), bytes.len(), "{error}");
+    assert_eq!(
+        modified_at(db),
+        when,
+        "la date de la base a changé ; {error}"
+    );
     assert_eq!(entries(dir), before, "{error}");
     error.to_string()
 }
@@ -963,11 +982,13 @@ async fn a_restored_copy_is_recognized_at_the_next_start() {
     let backup = backup_path(&db, 2);
     let copy = std::fs::read(&backup).unwrap();
 
-    // Remise en place, comme le dit le README.
+    // Remise en place, comme le dit le README. `VACUUM INTO` écrit en mode rollback (octets 18
+    // et 19 de l'en-tête à 1) ; le store la passe en WAL, comme toute base qu'il accepte.
     std::fs::copy(&backup, &db).unwrap();
     for suffix in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(sibling(&db, suffix));
     }
+    assert_eq!(std::fs::read(&db).unwrap()[18..20], [1, 1]);
     let store = Store::open(&db).await.unwrap();
     assert_eq!(
         store.backup(),
@@ -983,6 +1004,11 @@ async fn a_restored_copy_is_recognized_at_the_next_start() {
         MIGRATIONS
     );
     store.close().await;
+    assert_eq!(
+        std::fs::read(&db).unwrap()[18..20],
+        [2, 2],
+        "base passée en WAL"
+    );
     assert_eq!(std::fs::read(&backup).unwrap(), copy);
     assert_eq!(
         entries(dir.path()),
@@ -991,4 +1017,34 @@ async fn a_restored_copy_is_recognized_at_the_next_start() {
             "mementum.db.avant-0002.bak".to_string()
         ])
     );
+}
+
+/// Une copie `VACUUM INTO` de `db`, écrite en `target`, en mode rollback ; rend `target`.
+async fn vacuum_copy(db: &Path, target: &Path) -> PathBuf {
+    let pool = common::side_pool(db).await;
+    vacuum_into(&pool, target).await;
+    pool.close().await;
+    target.to_path_buf()
+}
+
+/// Ruling R845 : une base refusée reste telle quelle, même hors du mode WAL, ce qu'est toute copie
+/// d'avant migration remise en place (`VACUUM INTO` écrit en mode rollback). La connexion qui
+/// écrit pose le mode WAL dès son ouverture : la vérification des migrations se fait avant elle,
+/// par une connexion qui ne pose rien. Ici, la `avant-0004.bak` qu'un binaire d'avant R840 écrivait
+/// pour une base refusée, remise en place par qui suivait l'ancien README.
+#[tokio::test]
+async fn a_refused_copy_put_back_stays_untouched() {
+    let refused = TestDir::new();
+    let source = applied_by_another_binary(refused.path(), 3).await;
+    let dir = TestDir::new();
+    let db = vacuum_copy(&source, &dir.path().join("mementum.db")).await;
+    assert_eq!(std::fs::read(&db).unwrap()[18..20], [1, 1]);
+    assert!(
+        refused_untouched(&db)
+            .await
+            .starts_with("la migration 0003 de cette base n'est pas celle de ce binaire")
+    );
+    // Une base en WAL refusée, de même (le mode du serveur).
+    assert_eq!(std::fs::read(&source).unwrap()[18..20], [2, 2]);
+    refused_untouched(&source).await;
 }
