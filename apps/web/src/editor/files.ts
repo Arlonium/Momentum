@@ -1,4 +1,4 @@
-// Les fichiers d'une page, côté client (Task C8, R245 à R248, R666 à R676).
+// Les fichiers d'une page, côté client (Task C8, R245 à R248, R666 à R688).
 //
 // **Quelles adresses l'éditeur charge.** Un bloc `image`, `video`, `audio` ou `file` porte l'adresse
 // de son fichier dans sa prop `url`, qui vient du document : d'un envoi fait ici, mais aussi de MMD,

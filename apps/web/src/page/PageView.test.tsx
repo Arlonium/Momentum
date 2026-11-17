@@ -444,7 +444,7 @@ type FilesProp = {
 const filesProp = () => probe.files[probe.files.length - 1] as FilesProp;
 const alerts = () => [...host.querySelectorAll('.mm-file-refusals[role="alert"] p')].map((p) => p.textContent);
 
-test("page_view_shows_a_refused_upload_under_the_top_bar_until_it_is_closed", async () => {
+test("page_view_shows_a_refused_upload_until_it_is_closed", async () => {
   const node = page("x", { level: "edit" });
   vi.mocked(getPage).mockResolvedValue(node);
   await show(node);
@@ -452,7 +452,7 @@ test("page_view_shows_a_refused_upload_under_the_top_bar_until_it_is_closed", as
   await act(async () => filesProp().onRefused("« photo.png » n'a pas été envoyé : la page est à la corbeille."));
   await act(async () => filesProp().onRefused("un second refus"));
   expect(alerts()).toEqual(["« photo.png » n'a pas été envoyé : la page est à la corbeille.", "un second refus"]);
-  // Juste sous la barre du haut, avant le corps de la page.
+  // Rendue par la page, hors de l'éditeur (elle est posée par la feuille de style au bas de la fenêtre).
   const box = host.querySelector(".mm-file-notices")!;
   expect(box.previousElementSibling?.matches("header.mm-topbar")).toBe(true);
   // Ce qu'on donne à l'éditeur ne change pas d'un rendu à l'autre (il ne serait pas rendu de nouveau).

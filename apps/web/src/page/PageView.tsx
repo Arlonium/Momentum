@@ -7,8 +7,8 @@
 // s'écrivent avec « Peut commenter », même quand l'éditeur est en lecture seule. Le panneau
 // rend le focus, en se fermant, à ce qui l'avait avant qu'il s'ouvre.
 //
-// Sous la barre du haut, ce que la page dit de ses fichiers (`FileNotices`) : les envois en cours et
-// les envois refusés. Ils sont à la page, pas à sa session : ils partent quand on la quitte, et ses
+// Dans le coin bas droit de la fenêtre, ce que la page dit de ses fichiers (`FileNotices`) : les
+// envois refusés et les envois en cours. Ils sont à la page, pas à sa session : ils partent quand on la quitte, et ses
 // envois sont alors annulés (Task C8).
 //
 // Rien ne s'écrit quand le schéma du serveur n'est plus celui de l'onglet (R35), quand la page
@@ -289,7 +289,7 @@ export function PageView({
           onRefused={rereadPage}
         />
       </header>
-      {/* Les envois de fichiers en cours et refusés, par-dessus la page : rien ne bouge sous le pointeur. */}
+      {/* Les envois de fichiers refusés et en cours, par-dessus la fenêtre, dans son coin bas droit. */}
       <FileNotices pageId={id} focusBack={focusText} />
       {/* Les messages d'une création par `[[` : ceux de la page, que la session soit recréée ou non. */}
       <MentionNotices focusBack={focusText} />
