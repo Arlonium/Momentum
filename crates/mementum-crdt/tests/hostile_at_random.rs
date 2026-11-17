@@ -1025,3 +1025,59 @@ fn a_deleted_content_placed_by_its_right_origin_keeps_the_revision() {
 fn a_string_set_as_an_attribute_of_a_text_then_cut_in_the_middle() {
     assert_eq!(replay_apart("min-3346", false), Ok(()));
 }
+
+/// Les entrées d'une trace, telles quelles.
+fn entries(name: &str) -> Vec<Vec<u8>> {
+    let path = format!(
+        "{}/tests/fixtures/hostile/{name}.txt",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{path} : {e}"))
+        .lines()
+        .filter_map(|line| line.strip_prefix("C "))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// Constat C-6.1 de la re-relecture 6 (graines 60530, 8618 et 72782 de l'essai élargi, voie du
+/// journal) : un contenu JSON relu du journal dans un texte. yrs 0.28.1 l'écrit en `len` chaînes et
+/// le relit en `len + 1` : l'état de la page ne se relisait plus, la compaction suivante l'écrivait
+/// comme instantané à la place du journal, et yrs paniquait dans `encode_state` quand la page
+/// gardait des suppressions en attente (72782).
+#[test]
+fn a_json_content_read_from_the_journal_leaves_a_readable_state() {
+    assert_eq!(replay_apart("min-j60530", true), Ok(()));
+    assert_eq!(replay_apart("min-j8618", true), Ok(()));
+    assert_eq!(replay_apart("min-j72782", true), Ok(()));
+}
+
+/// Ruling R815 : le contenu JSON qu'une entrée du journal intègre est supprimé dans la transaction
+/// qui l'intègre (le ramasse-miettes en fait un contenu supprimé). L'état de la page se relit par
+/// un yrs neuf, la page se recharge de son propre état et de son journal, et la version qu'on en
+/// couperait se sert ([`PageDoc::served_state`]), suppressions en attente comprises (72782).
+#[test]
+fn a_json_content_read_from_the_journal_is_deleted_with_its_entry() {
+    let mut pending = false;
+    for name in ["min-j60530", "min-j8618", "min-j72782"] {
+        let journal = entries(name);
+        let page = PageDoc::from_updates(journal.iter().map(Vec::as_slice))
+            .unwrap_or_else(|e| panic!("{name} : le journal ne se relit pas : {e}"));
+        pending |= page.has_pending_deletions();
+        let state = page.encode_state();
+        assert!(
+            Update::decode_v1(&state).is_ok(),
+            "{name} : l'état ne se relit pas"
+        );
+        let again = PageDoc::from_updates([state.as_slice()])
+            .unwrap_or_else(|e| panic!("{name} : la page ne se recharge pas de son état : {e}"));
+        assert_eq!(again.read_blocks(), page.read_blocks(), "{name}");
+        assert_eq!(again.revision(), page.revision(), "{name}");
+        assert!(
+            PageDoc::served_state(&state).is_some(),
+            "{name} : une version de cet état ne se servirait pas"
+        );
+        assert!(reread(&state, true).is_ok(), "{name}");
+    }
+    assert!(pending, "aucune trace ne garde de suppression en attente");
+}

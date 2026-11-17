@@ -279,6 +279,30 @@ fn already_in_the_journal_as_a_client_sent_it_the_page_is_not_loaded() {
     );
 }
 
+/// La même entrée, qui porte aussi un contenu JSON dans le texte, écrit comme yrs le lit (`len`
+/// suivi de `len + 1` chaînes). Ce que yrs a fait de l'entrée se lit dans ce qu'il en encode, où le
+/// JSON porte `len` chaînes (Ruling R815) : lu comme yrs lit, l'encodage était illisible pour la
+/// garde, et le refus d'après l'application ne jouait pas.
+#[test]
+fn already_in_the_journal_with_a_json_content_the_page_is_not_loaded() {
+    let served = Served::new();
+    // Deux éléments : le JSON, d'origine la lettre « a » (horloge 0), puis la chaîne « bc »
+    // (horloges 1 et 2), lue après lui.
+    let string = Served::string_between(7_000, 1, (10, 0), (served.server, BACKGROUND));
+    let mut stored = vec![1, 2];
+    var(&mut stored, 7_000);
+    stored.extend_from_slice(&[0, 0x82, 10, 1, 0, 3, b'"', b'x', b'"']);
+    let at = 3 + string[3..].iter().position(|byte| *byte == 0xC4).unwrap();
+    stored.extend_from_slice(&string[at..]);
+    stored.push(0);
+    let mut journal = served.journal.clone();
+    journal.push(stored);
+    assert!(
+        PageDoc::from_updates(journal.iter().map(Vec::as_slice)).is_err(),
+        "la page se charge avec l'entrée"
+    );
+}
+
 /// Ce que le serveur écrit lui-même se relit : l'état complet d'une page où l'on a tapé au
 /// milieu d'un texte et écrasé des attributs (des origines droites, des entrées de map) passe
 /// comme une entrée du journal.
