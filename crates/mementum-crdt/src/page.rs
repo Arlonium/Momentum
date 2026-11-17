@@ -500,6 +500,17 @@ impl PageDoc {
             .map(|page| page.encode_state())
     }
 
+    /// `Ok` si un `PageDoc` neuf relit `state`, un état complet que la page vient d'encoder, comme
+    /// le chargement relira un instantané (Ruling R816) : à vérifier avant d'écrire un état qui
+    /// deviendra la seule copie d'un contenu (l'instantané d'une compaction, qui efface le journal
+    /// qu'il remplace ; la version d'avant une restauration). Quelle que soit la cause (yrs 0.28.1
+    /// n'écrit pas toujours ce qu'il relit, R815), un état que le serveur ne relirait pas n'est
+    /// jamais écrit à la place de ce qui se relit. Le coût est celui d'un chargement de l'état :
+    /// 81 ms pour une page de 10 000 blocs (3,2 Mo), en release.
+    pub fn check_state(state: &[u8]) -> Result<(), CrdtError> {
+        PageDoc::from_updates([state]).map(|_| ())
+    }
+
     /// Ce que la garde des attributs (Ruling R689) refuserait de cette mise à jour (v1) venue
     /// d'un client, lue sans être appliquée : `None` si elle n'y trouve rien. Sert aux tests,
     /// qui y passent tout ce que l'éditeur écrit.

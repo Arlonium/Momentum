@@ -238,8 +238,25 @@ impl Actor {
     /// les comptes de la tranche. Une fois écrite, la tranche est vide, et les
     /// connexions de la page qui peuvent écrire reçoivent la trame `versions` (Rulings R136,
     /// R355).
-    async fn cut_version(&mut self, reason: VersionReason) -> Result<(), StoreError> {
+    ///
+    /// Ruling R816 : la version d'avant une restauration deviendra la seule copie de ce que la
+    /// restauration remplace, et la version de fin est coupée quand personne n'attend : leur état
+    /// est relu par un `PageDoc` neuf avant d'être écrit ([`PageDoc::check_state`]) ; s'il ne se
+    /// relit pas, rien n'est écrit, et l'erreur le dit (la restauration est alors refusée). Pas
+    /// une version périodique : elle est coupée sur le chemin d'une frappe, que la relecture
+    /// (81 ms pour 10 000 blocs) sortirait de son budget ; elle ne remplace rien (le contenu est
+    /// au journal, ou dans un instantané relu), et un état qu'on ne relit pas n'est pas servi
+    /// (Ruling R717).
+    pub(super) async fn cut_version(&mut self, reason: VersionReason) -> Result<(), SyncError> {
         let state = self.page.encode_state();
+        if matches!(
+            reason,
+            VersionReason::BeforeRestore | VersionReason::Closing
+        ) && let Err(error) = PageDoc::check_state(&state)
+        {
+            tracing::error!(node_id = %self.id.node_id, ?reason, %error, "version refusée : l'état de la page ne se relit pas");
+            return Err(error.into());
+        }
         let authors: Vec<Uuid> = self.slice.authors.iter().copied().collect();
         self.store
             .put_version(self.id.node_id, self.last_seq, &state, &authors, reason)

@@ -1548,6 +1548,14 @@ impl Actor {
     /// jusqu'à `last_seq`. Un échec ne perd rien (le journal reste) : il est
     /// journalisé, et la compaction se réessaie plus tard (après
     /// `snapshot_every` mises à jour ou autant de suppressions), pas à chacune.
+    ///
+    /// Ruling R816 : **une compaction ne remplace jamais le journal par un état que le serveur ne
+    /// relit pas.** L'instantané efface le journal qu'il couvre ; s'il ne se relisait pas, la page
+    /// serait perdue au chargement suivant. L'état est donc relu par un `PageDoc` neuf avant
+    /// d'être écrit ([`PageDoc::check_state`]) ; s'il ne se relit pas, rien n'est écrit, le
+    /// journal reste, et une ligne `error` le dit. La relecture coûte un chargement de l'état
+    /// (81 ms pour 10 000 blocs, en release), une fois par compaction, hors du chemin de la frappe
+    /// qui la déclenche (déjà relayée).
     async fn compact_if_due(&mut self) {
         let many_updates = self.since_snapshot >= self.cfg.snapshot_every.max(1);
         let many_deletions = self.watch.deletions() >= self.cfg.compact_after_deletions.max(1);
@@ -1557,6 +1565,10 @@ impl Actor {
         self.since_snapshot = 0;
         self.watch.reset_deletions();
         let state = self.page.encode_state();
+        if let Err(error) = PageDoc::check_state(&state) {
+            tracing::error!(node_id = %self.id.node_id, seq = self.last_seq, %error, "compaction refusée : l'état de la page ne se relit pas, le journal est gardé");
+            return;
+        }
         if let Err(error) = self
             .store
             .put_snapshot(self.id.node_id, self.last_seq, &state)
@@ -1694,15 +1706,25 @@ mod tests {
     //! vite pour qu'un arrivant tombe à coup sûr entre les deux. Ici, l'acteur est mené à la
     //! main, et le départ n'arrive que quand le test l'appelle.
 
-    use mementum_store::{NewNode, NodeKind};
+    use mementum_store::{NewNode, NodeKind, VersionReason};
+    use yrs::Transact;
     use yrs::encoding::read::{Cursor, Read};
     use yrs::sync::awareness::AwarenessUpdateEntry;
+    use yrs::updates::decoder::Decode;
 
     use super::*;
 
     /// Un acteur sur une page neuve d'une base temporaire, sans hub. La boîte aux lettres est
     /// rendue pour rester ouverte (`join` en a besoin) ; rien ne la lit.
     async fn actor(dir: &tempfile::TempDir) -> (Actor, Commands, UnboundedReceiver<Command>) {
+        actor_with(dir, SyncConfig::default()).await
+    }
+
+    /// [`actor`], réglé par `cfg`.
+    async fn actor_with(
+        dir: &tempfile::TempDir,
+        cfg: SyncConfig,
+    ) -> (Actor, Commands, UnboundedReceiver<Command>) {
         let store = Store::open(&dir.path().join("mementum.db")).await.unwrap();
         let space = store.create_space("Essais", None).await.unwrap();
         let node_id = store
@@ -1727,8 +1749,80 @@ mod tests {
             hub: Weak::new(),
             me: commands.downgrade(),
         };
-        let actor = Actor::new(id, store, SyncConfig::default(), loaded, Slice::default());
+        let actor = Actor::new(id, store, cfg, loaded, Slice::default());
         (actor, commands, rx)
+    }
+
+    /// Rend illisible l'état que la page encode, par yrs seul, sans la garde : un texte dans le
+    /// paragraphe, et dedans un contenu JSON écrit comme yrs le lit (`len`, puis `len + 1`
+    /// chaînes). yrs l'écrit ensuite en `len` chaînes, qu'il ne relit pas (Ruling R815).
+    fn spoil(page: &PageDoc) {
+        let state = yrs::StateVector::decode_v1(&page.state_vector()).unwrap();
+        let server = state.iter().next().unwrap().0.get();
+        let var = |out: &mut Vec<u8>, mut value: u64| {
+            while value > 0x7F {
+                out.push(0x80 | (value & 0x7F) as u8);
+                value >>= 7;
+            }
+            out.push(value as u8);
+        };
+        let mut u = vec![1, 2];
+        var(&mut u, 7_000);
+        // Le texte, dans le paragraphe (horloge 3 du client du serveur).
+        u.extend_from_slice(&[0, 7, 0]);
+        var(&mut u, server);
+        u.extend_from_slice(&[3, 6]);
+        // Le JSON, dans le texte.
+        u.extend_from_slice(&[2, 0]);
+        var(&mut u, 7_000);
+        u.extend_from_slice(&[0, 0, 3, b'"', b'x', b'"', 0]);
+        page.yrs_doc()
+            .transact_mut()
+            .apply_update(yrs::Update::decode_v1(&u).unwrap())
+            .unwrap();
+    }
+
+    /// Ruling R816 : une compaction ne remplace jamais le journal par un état que le serveur ne
+    /// relit pas. Sur une page saine, la compaction écrit l'instantané et efface le journal ; sur
+    /// une page dont l'état ne se relit plus, elle n'écrit rien et le journal reste. Et la version
+    /// d'avant une restauration, ou de fin, n'est pas écrite.
+    #[tokio::test]
+    async fn a_compaction_never_replaces_the_journal_with_an_unreadable_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SyncConfig {
+            snapshot_every: 1,
+            ..SyncConfig::default()
+        };
+        let (mut actor, _commands, _mailbox) = actor_with(&dir, cfg).await;
+        let node = actor.id.node_id;
+        // Saine : la compaction a lieu.
+        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.compact_if_due().await;
+        let state = actor.store.load_doc(node).await.unwrap();
+        assert_eq!(state.snapshot.as_ref().map(|(seq, _)| *seq), Some(1));
+        assert!(state.updates.is_empty(), "le journal compacté reste");
+
+        spoil(&actor.page);
+        let spoiled = actor.page.encode_state();
+        assert!(
+            PageDoc::check_state(&spoiled).is_err(),
+            "l'état abîmé se relit"
+        );
+        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.compact_if_due().await;
+        let state = actor.store.load_doc(node).await.unwrap();
+        assert_eq!(
+            state.snapshot.as_ref().map(|(seq, _)| *seq),
+            Some(1),
+            "l'instantané illisible a été écrit"
+        );
+        assert_eq!(state.updates.len(), 1, "le journal a été effacé");
+        assert!(PageDoc::check_state(&state.snapshot.unwrap().1).is_ok());
+
+        for reason in [VersionReason::BeforeRestore, VersionReason::Closing] {
+            assert!(actor.cut_version(reason).await.is_err(), "{reason:?}");
+        }
+        assert!(actor.store.list_versions(node).await.unwrap().is_empty());
     }
 
     /// Une connexion du compte `account`, qui s'appelle `name` et peut écrire : inscrite, puis
