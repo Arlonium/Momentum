@@ -234,3 +234,119 @@ fn what_yjs_writes_passes_the_guard() {
     assert!(steps >= 150, "peu de mises à jour rejouées : {steps}");
     assert!(refused.is_empty(), "{refused:#?}");
 }
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len() / 2)
+        .map(|n| u8::from_str_radix(&text[2 * n..2 * n + 2], 16).expect("de l'hexadécimal"))
+        .collect()
+}
+
+/// La grammaire d'un client (tour 4, Rulings R801 à R806) contre le vrai Yjs : les scènes tirées
+/// au hasard par `apps/web/src/editor/yjsAtRandom.test.ts` (deux ou trois onglets, annulations,
+/// hors ligne, étapes 2 depuis un état ancien, mises à jour fusionnées ou redites), données à une
+/// vraie page comme celles d'un client. **Aucune n'est refusée**, la page vivante se relit, et
+/// son journal relu la redonne. Les mêmes octets, relus comme un vieux journal (une base d'avant
+/// R130 gardait les octets reçus), donnent la même page.
+///
+/// `random-large.json` (hors du dépôt, écrit par `MEMENTUM_FUZZ_SEEDS=6000` côté Vitest) est lu
+/// à la place de `random.json` s'il est là.
+#[test]
+fn what_yjs_writes_at_random_follows_the_grammar() {
+    let base: Vec<u8> =
+        serde_json::from_str(&std::fs::read_to_string(dir().join("base.json")).unwrap()).unwrap();
+    let large = dir().join("random-large.json");
+    let file = if large.exists() {
+        large
+    } else {
+        dir().join("random.json")
+    };
+    let scenes: Vec<Vec<String>> =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert!(scenes.len() >= 100, "peu de scènes : {}", scenes.len());
+    let mut refused = Vec::new();
+    // Ce que la page relaie de chaque scène (son journal, la base exceptée), pour le rejouer
+    // dans un vrai Yjs (`yjsAtRandom.test.ts`) ; `None` quand le serveur y a écrit lui-même (un
+    // report, un dédoublonnage : sous un identifiant de client tiré au hasard).
+    let mut relayed: Vec<Option<Vec<String>>> = Vec::new();
+    let (mut updates, mut wrote, mut compared) = (0, 0, 0);
+    for (n, scene) in scenes.iter().enumerate() {
+        let what = format!("scène {}", n + 1);
+        let mut served = Served {
+            page: PageDoc::from_updates([base.as_slice()]).expect("la base"),
+            journal: vec![base.clone()],
+            server: 0,
+        };
+        let stored = PageDoc::from_updates([base.as_slice()]).expect("la base");
+        let mut plain = true;
+        for (step, update) in scene.iter().enumerate() {
+            let update = unhex(update);
+            updates += 1;
+            let before = served.journal.len();
+            match served.receive(&update) {
+                Ok(()) => {
+                    wrote += usize::from(served.journal[before] != [0, 0]);
+                    // Un report (un bloc recréé par une annulation) ou un dédoublonnage : une
+                    // écriture du serveur, que le vieux journal n'a pas.
+                    plain &= served.journal.len() == before + 1;
+                }
+                Err(error) => refused.push(format!("{what}, mise à jour {step} : {error}")),
+            }
+            if let Err(error) = stored.apply_update(&update) {
+                refused.push(format!("{what}, entrée {step} du vieux journal : {error}"));
+            }
+        }
+        if refused.is_empty() {
+            assert_sound(&served, &what);
+            compared += usize::from(plain);
+        }
+        relayed.push(plain.then(|| {
+            served.journal[1..]
+                .iter()
+                .map(|entry| entry.iter().map(|byte| format!("{byte:02x}")).collect())
+                .collect()
+        }));
+        if refused.is_empty() && plain {
+            assert_eq!(
+                stored.read_blocks(),
+                served.page.read_blocks(),
+                "{what} : les mêmes octets relus comme un vieux journal"
+            );
+        }
+    }
+    println!(
+        "ESSAI Yjs : {} scènes, {updates} mises à jour dont {wrote} ont écrit, {} refus",
+        scenes.len(),
+        refused.len()
+    );
+    assert!(
+        refused.is_empty(),
+        "{} refus de ce que Yjs écrit ; les premiers : {:#?}",
+        refused.len(),
+        refused.iter().take(5).collect::<Vec<_>>()
+    );
+    assert!(wrote > updates / 2, "peu de mises à jour ont écrit");
+    {
+        let large = file.ends_with("random-large.json");
+        let path = dir().join(if large {
+            "random-relayed-large.json"
+        } else {
+            "random-relayed.json"
+        });
+        let mut written = serde_json::to_string(&relayed).unwrap();
+        written.push(char::from(10));
+        // L'essai élargi est hors du dépôt : toujours récrit.
+        if large || std::env::var_os("EXPORT_FIXTURES").is_some() {
+            std::fs::write(&path, &written).unwrap();
+        } else {
+            assert!(
+                std::fs::read_to_string(&path).is_ok_and(|kept| kept == written),
+                "{} n'est plus ce que la page relaie (EXPORT_FIXTURES=1 le réécrit)",
+                path.display()
+            );
+        }
+    }
+    assert!(
+        compared > scenes.len() / 2,
+        "peu de scènes comparées au vieux journal : {compared}"
+    );
+}

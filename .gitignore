@@ -11,3 +11,6 @@ node_modules/
 /apps/web/playwright/.cache/
 # Ateliers jetables (git worktree) des essais.
 /.claude/worktrees/
+# Essai au hasard élargi de ce que Yjs écrit (`yjsAtRandom.test.ts`, `MEMENTUM_FUZZ_SEEDS`).
+/crates/mementum-crdt/tests/fixtures/yjs_updates/random-large.json
+/crates/mementum-crdt/tests/fixtures/yjs_updates/random-relayed-large.json
