@@ -800,3 +800,70 @@ fn a_kept_state_is_served_without_its_unsound_attributes() {
     // Un état illisible est rendu tel quel.
     assert_eq!(PageDoc::served_state(vec![9, 9, 9]), vec![9, 9, 9]);
 }
+
+/// Écrit un entier variable de lib0.
+fn var(out: &mut Vec<u8>, mut value: u64) {
+    while value > 0x7F {
+        out.push(0x80 | (value & 0x7F) as u8);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// La recherche de l'entrée de la page qu'une valeur écrase (`entry_in_page`, Ruling R697) suit
+/// une origine qu'un client choisit : un élément supprimé, ramassé avec son bloc, le milieu
+/// d'une chaîne, une horloge que la page n'a pas. Rien ne panique, et la page se lit toujours.
+#[test]
+fn a_value_placed_after_any_item_of_the_page_breaks_nothing() {
+    let (mut page, root_update) = PageDoc::new_page();
+    let mut journal = vec![root_update.clone()];
+    // Un client d'identifiant 31 écrit un bloc de texte, puis le retire : ses éléments sont
+    // supprimés, et ceux de dedans ramassés.
+    let writer = replica_as(31, &root_update);
+    let wrote = written(&writer, |txn| {
+        let paragraph = push_block(txn, "p", "paragraph");
+        paragraph.insert_attribute(txn, "backgroundColor", "red");
+        let text = paragraph.push_back(txn, yrs::XmlTextPrelim::new(""));
+        yrs::Text::insert(&text, txn, 0, "abcdef");
+    });
+    journal.push(page.try_client_update(&wrote).expect("le bloc").read);
+    let clocks = writer.transact().state_vector().get(&ClientID::new(31));
+    let removed = written(&writer, |txn| {
+        root(txn).remove_range(txn, 1, 1);
+    });
+    journal.push(page.try_client_update(&removed).expect("le retrait").read);
+    let before = page.read_blocks();
+    for (n, clock) in (0..clocks + 3).enumerate() {
+        // Un client, un élément à l'horloge 0 : une valeur `Any` (8), une origine (0x80), la
+        // marque d'une entrée de map (0x20) ; la valeur : l'objet `{"toString": 1}`.
+        let mut update = vec![1, 1];
+        var(&mut update, 900 + n as u64);
+        update.extend_from_slice(&[0, 0xA8]);
+        var(&mut update, 31);
+        var(&mut update, u64::from(clock));
+        update.extend_from_slice(&[1, 118, 1, 8]);
+        update.extend_from_slice(b"toString");
+        update.extend_from_slice(&[125, 1, 0]);
+        match page.try_client_update(&update) {
+            Ok(applied) => journal.push(applied.read),
+            Err(Refused { intact: true, .. }) => {}
+            // Refusée après l'application : la page est rechargée de son journal.
+            Err(_) => page = PageDoc::from_updates(journal.iter().map(Vec::as_slice)).unwrap(),
+        }
+        assert_eq!(page.read_blocks(), before, "origine à l'horloge {clock}");
+    }
+    let state = page.encode_state();
+    let doc = replica(&state);
+    let txn = doc.transact();
+    for node in txn.get_xml_fragment(FRAGMENT).unwrap().successors(&txn) {
+        if let XmlOut::Element(element) = node {
+            for (key, value) in element.attributes(&txn) {
+                assert!(
+                    !matches!(value, Out::Any(Any::Map(_))),
+                    "« {} » porte {key} = {value:?}",
+                    element.tag()
+                );
+            }
+        }
+    }
+}
