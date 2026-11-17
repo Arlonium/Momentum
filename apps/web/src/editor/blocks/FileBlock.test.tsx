@@ -322,3 +322,29 @@ test("an_empty_file_block_loads_nothing", async () => {
     expect(blockOf(m, "f").querySelector("[src], [href]"), type).toBeNull();
   }
 });
+
+test("a_copied_file_block_survives_props_that_are_not_text", async () => {
+  // À la copie aussi, les props sont lues d'après le schéma : un nom ou une légende écrits en objet par
+  // un autre client n'y deviennent ni « [object Object] », ni une erreur.
+  for (const type of ["image", "file"] as const) {
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, await seedState(media(type as "image", PATH)), REMOTE);
+    const m = await mountEditor({ doc, editable: true });
+    const content = (
+      (doc.getXmlFragment(FRAGMENT).get(0) as Y.XmlElement).toArray()[1] as Y.XmlElement
+    ).get(0) as Y.XmlElement;
+    await act(async () => {
+      doc.transact(() => {
+        content.setAttribute("name", { nom: "x" } as unknown as string);
+        content.setAttribute("caption", ["<b>"] as unknown as string);
+        if (type === "image") content.setAttribute("showPreview", "non" as unknown as string);
+      }, REMOTE);
+    });
+    await flush();
+    const copied = copiedAddresses(m, "f");
+    expect(copied.html, type).not.toContain("[object Object]");
+    expect(copied.html, type).not.toContain("&lt;b&gt;");
+    // Témoin : l'adresse, une chaîne permise, est bien copiée.
+    expect(copied.carried, type).toEqual([PATH]);
+  }
+});

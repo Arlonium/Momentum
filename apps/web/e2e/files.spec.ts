@@ -284,7 +284,7 @@ test("image_is_no_longer_served_once_access_is_withdrawn", async ({ browser }) =
 });
 
 test("too_large_file_is_refused_with_the_limit", async ({ browser }) => {
-  const { mona } = await duo(browser, "Trop gros");
+  const { mona, aliceApi, page } = await duo(browser, "Trop gros");
   const sent = watchUploads(mona);
   const limits: string[] = [];
   mona.on("request", (request) => {
@@ -302,8 +302,9 @@ test("too_large_file_is_refused_with_the_limit", async ({ browser }) => {
   expect(sent).toEqual([]);
   expect(limits).toHaveLength(1);
   await expect(uploads(mona)).toHaveCount(0);
-  // Le bloc du dépôt est retiré, avec le nom du fichier.
-  await expect(mona.locator(".mm-editor .bn-add-file-button")).toHaveCount(0);
+  // Le bloc du dépôt reste, vide ; le nom du fichier, lui, n'est plus dans le document (R685).
+  await expect(mona.locator(".mm-editor .bn-add-file-button")).toHaveCount(1);
+  await expect.poll(() => getMmd(aliceApi, page.id)).not.toContain("gros.bin");
 
   // « Fermer » : le message part, et le focus revient au texte de la page.
   await mona.getByRole("button", { name: "Fermer", exact: true }).click();
@@ -454,7 +455,8 @@ test("an_upload_in_course_is_shown_cancelled_and_leaves_with_the_page", async ({
   await expect(uploads(mona)).toHaveText([/Envoi de deux\.png…/, /un\.png n'est plus en cours/]);
   await mona.mouse.move(20, 300);
   await expect(uploads(mona)).toHaveText([/Envoi de deux\.png…/]);
-  // Le bloc que le dépôt avait posé est retiré : le nom du fichier n'est plus dans le document.
+  // Le bloc que le dépôt avait posé reste, vide ; le nom du fichier n'est plus dans le document (R685).
+  await expect(mona.locator(".mm-editor .bn-add-file-button")).toHaveCount(1);
   await expect.poll(() => getMmd(team.aliceApi, page.id)).not.toContain("un.png");
   await expect.poll(() => failed.length).toBe(1);
   await expect(refusals(mona)).toHaveCount(0);
@@ -604,7 +606,8 @@ test("the_answer_of_the_server_is_set_in_the_block_only_if_it_is_a_file_of_the_p
     /autre chose qu'un fichier de cette page/,
   ]);
   await expect(images(mona)).toHaveCount(0);
-  // Rien de ces adresses dans le document, ni le bloc de l'envoi, ni son nom.
+  // Rien de ces adresses dans le document, ni le nom du fichier : les blocs des dépôts restent, vides.
+  await expect(mona.locator(".mm-editor .bn-add-file-button")).toHaveCount(3);
   await expect.poll(() => getMmd(team.aliceApi, page.id)).not.toMatch(/files|forgee|javascript|photo\.png/);
 });
 

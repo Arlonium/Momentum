@@ -210,7 +210,7 @@ export type UploaderOptions = {
   reread: () => Promise<PageNode | null | undefined>;
   /**
    * L'envoi du fichier `fileName` vers le bloc `blockId` n'a pas abouti, et l'éditeur est encore là :
-   * à lui de retirer ce bloc s'il est resté tel que l'envoi l'a laissé (`uploads.ts`, R685). Jamais
+   * à lui de retirer du bloc le nom du fichier que l'envoi y avait mis (`uploads.ts`, R685). Jamais
    * appelé pour un envoi qui aboutit, ni quand l'éditeur est parti (il n'écrit plus pour personne).
    */
   discard?: (blockId: string, fileName: string) => void;

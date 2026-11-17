@@ -341,6 +341,8 @@ test("an_upload_is_cancelled_when_the_page_closes", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(filesOf(PAGE)).toEqual({ uploads: [], refusals: [] });
   expect(b.state.rereads).toBe(0);
+  // L'éditeur est parti : son bloc ne lui est pas rendu (il n'écrit plus pour personne).
+  expect(b.discarded).toEqual([]);
   expect((await settled(b.upload(png(), "b1"))).error).toBeDefined();
   expect(b.sent).toHaveLength(1);
   // Une réponse arrivée quand même ne pose rien.
