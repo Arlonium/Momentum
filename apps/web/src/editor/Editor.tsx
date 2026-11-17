@@ -75,6 +75,7 @@ import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
 import { linkBound } from "./linkBound";
 import { guardedAwareness } from "./presenceGuard";
+import { redoKeys } from "./redoKeys";
 import { schema } from "./schema";
 import { slashMenuItems } from "./slashItems";
 import { sessionDrop, sessionPaste, sessionUploader, type PageUploads } from "./uploads";
@@ -107,6 +108,7 @@ type Props = {
  * langue, les extensions. Un aperçu montre donc une version comme la page la montrerait.
  * `followBlock` : le curseur de l'onglet suit son bloc quand quelqu'un d'autre le déplace.
  * `linkBound` : un lien de plus de 16 Kio, que le serveur refuserait, n'est pas posé (R495).
+ * `redoKeys` : « rétablir » sans rien à rétablir ne retombe pas sur l'annulation (R731, R732).
  * `resolveFileUrl` : une image, une vidéo ou un son ne sont chargés que d'une adresse permise
  * (`shownUrl`, `files.ts`), jamais de l'adresse du document telle quelle ; un bloc sans adresse ne
  * charge rien (`about:blank` y écrivait une erreur de console par bloc vide). Rien pour envoyer : seul
@@ -117,7 +119,7 @@ export const EDITOR_OPTIONS = {
   resolveFileUrl: async (url: string) => (url === "" ? "" : shownUrl(url)),
   dictionary: { ...fr, multi_column: multiColumnLocales.fr },
   dropCursor: multiColumnDropCursor,
-  extensions: [syntaxHighlighter, followBlock, linkBound],
+  extensions: [syntaxHighlighter, followBlock, linkBound, redoKeys],
 };
 
 export function Editor({ session, fixture = null, onComment = null, mentions = null, files = null }: Props) {
