@@ -22,8 +22,8 @@ use yrs::{
 use crate::attrs::{self, Key, Value};
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
 use crate::guard::{
-    ASTRIDE, KEYED_RIGHT_ORIGIN, KEYED_RIGHT_ORIGIN_MADE, PageItem, Pending, REPEATED_CLIENT,
-    Shape, UNTYPED_CHILD, missing, touched,
+    ASTRIDE, KEYED_RIGHT_ORIGIN, KEYED_RIGHT_ORIGIN_MADE, LEAVES_GAP, PageItem, Pending,
+    REPEATED_CLIENT, Shape, UNTYPED_CHILD, cut, missing, touched,
 };
 use crate::kept_ids::keep_ids;
 use crate::moves::{self, Carried, MAX_CARRIED_BYTES, Recreated};
@@ -88,6 +88,13 @@ pub struct PageDoc {
     /// Les copies qui ont reçu un report, par identifiant de bloc : le dédoublonnage garde
     /// celle-là quand le bloc est en double (Ruling R453). Oubliées au rechargement.
     pub(crate) carried_copies: Mutex<HashMap<String, yrs::ID>>,
+    /// Les clients dont la page a pu garder un trou d'horloge : une entrée relue du stockage
+    /// y a laissé des blocs au-delà de ce que la page connaissait d'eux (un journal d'avant le
+    /// Ruling R131 ; d'un client, rien n'en laisse, Ruling R786). Pour eux seuls, ce que la page
+    /// connaît au-delà du trou est demandé à yrs ([`PageDoc::known_beyond`], Ruling R785).
+    holed: Mutex<HashSet<u64>>,
+    /// `holed` n'est pas vide : lu à chaque mise à jour, sans verrou.
+    any_holed: AtomicBool,
 }
 
 // L'acteur de synchronisation garde le document d'une tâche tokio à l'autre.
@@ -118,6 +125,8 @@ impl PageDoc {
             dedupe_scans: AtomicU64::new(0),
             original_walks: AtomicU64::new(0),
             carried_copies: Mutex::new(HashMap::new()),
+            holed: Mutex::new(HashSet::new()),
+            any_holed: AtomicBool::new(false),
         }
     }
 
@@ -198,6 +207,7 @@ impl PageDoc {
                 .attrs(&before, |id| tag_in_page(&txn, id), |_| PageItem::Unknown)
                 .unsound;
             self.integrate(&mut txn, &shape, decoded)?;
+            self.remember_holes(&shape, &before);
             // Ruling R723 : ce que yrs a fait d'un élément à origine droite ne se lit que dans
             // ce qu'il encode. Une page vide n'a rien qui serve d'origine : tout est dans
             // l'entrée (un état complet, encodé par yrs), et ses octets ont suffi.
@@ -463,9 +473,9 @@ impl PageDoc {
     }
 
     /// Vrai si `error`, rendue par [`PageDoc::apply_update`], est un refus fait **avant**
-    /// d'appliquer une entrée qu'aucun client honnête n'écrit : un élément à cheval sur ce que la
-    /// page connaît (Ruling R740), une entrée de map à origine droite dans les octets (Ruling
-    /// R723). La page est intacte : qui relit un journal écarte l'entrée et continue (Ruling
+    /// d'appliquer une entrée qu'aucun client honnête n'écrit : du JSON à cheval sur ce que la
+    /// page connaît (Ruling R784 : tout autre élément à cheval est coupé, pas refusé), une entrée
+    /// de map à origine droite dans les octets (Ruling R723). La page est intacte : qui relit un journal écarte l'entrée et continue (Ruling
     /// R742). Le même défaut vu après l'application rend une autre erreur : la page est à jeter.
     pub fn refused_intact(error: &CrdtError) -> bool {
         matches!(error, CrdtError::Structure(why) if why == ASTRIDE || why == KEYED_RIGHT_ORIGIN)
@@ -558,16 +568,41 @@ impl PageDoc {
         update: &[u8],
         from_client: bool,
     ) -> Result<(Shape, Update), CrdtError> {
-        let shape = if from_client {
-            Shape::read_from_client(update)?
-        } else {
-            Shape::read(update)?
+        let read = |bytes: &[u8]| {
+            if from_client {
+                Shape::read_from_client(bytes)
+            } else {
+                Shape::read(bytes)
+            }
         };
-        let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
+        let mut shape = read(update)?;
+        // Jugé sur les octets reçus : ce que la coupe y change (un trou de la mise à jour à la
+        // place d'une part connue) n'en est pas un.
+        let leaves_gap = from_client && {
+            let state = txn.state_vector();
+            shape.structs_leave_gap(&state)
+        };
+        // Le plancher de chaque client : ce que la page connaît de lui **sans trou**, donc le
+        // début de son premier trou si elle en a un (`get_state_vector` de yrs). Toutes les
+        // gardes « au-dessus du plancher » le lisent ainsi. Une page n'a de trou que relue d'un
+        // journal d'avant le Ruling R131 (`holed`) : d'un client, rien n'en laisse (plus bas).
         let state = txn.state_vector();
+        // Ruling R784 : un élément à cheval sur ce que la page connaît est coupé avant que la
+        // garde et yrs le lisent ; ils n'en voient que la part neuve, placée par son origine.
+        let mut cut = None;
+        if shape.astride(&state) || self.any_holed.load(Ordering::Relaxed) {
+            // Ruling R785 : dans une page qui a un trou, ce qu'elle connaît au-delà aussi.
+            let beyond = self.known_beyond(txn, &shape, &state)?;
+            if (shape.astride(&state) || !beyond.is_empty())
+                && let Some(bytes) = cut::cut(update, &state, &beyond)?
+            {
+                shape = read(&bytes)?;
+                cut = Some(bytes);
+            }
+        }
+        let update = cut.as_deref().unwrap_or(update);
+        let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
         shape.check(&state)?;
-        // Ruling R740 : un élément à cheval sur ce que la page connaît.
-        shape.check_astride(&state)?;
         // Ruling R723 : une entrée de map à origine droite, quand les octets le disent.
         shape.check_keyed(&state)?;
         if from_client {
@@ -590,8 +625,75 @@ impl PageDoc {
             if let Some(refusal) = findings.refusal {
                 return Err(CrdtError::Structure(refusal));
             }
+            // Ruling R786 : d'un client, des blocs qui laisseraient un trou. L'acteur retient une
+            // telle mise à jour avant de l'appliquer (`PageDoc::awaits`, Ruling R131) ; refusée ici
+            // aussi, pour que ce qui suit ne dépende pas de l'appelant : un trou fait que la page
+            // connaît des horloges au-delà du plancher, que les gardes ne regardent pas.
+            if leaves_gap {
+                return Err(CrdtError::Structure(LEAVES_GAP.to_string()));
+            }
         }
         Ok((shape, decoded))
+    }
+
+    /// Ce que la page connaît **au-delà de son premier trou** des clients de `shape` qui en ont
+    /// un (`holed`) : lu dans ce que yrs encode pour un destinataire qui s'arrêterait une unité
+    /// avant le trou. yrs ne dit rien d'autre de ses trous ; le coût est celui d'un encodage de
+    /// ce qui suit le trou et du jeu de suppressions, pour les seules mises à jour qui nomment un
+    /// client à trou (un ancien onglet d'un journal d'avant le Ruling R131).
+    fn known_beyond(
+        &self,
+        txn: &TransactionMut,
+        shape: &Shape,
+        state: &StateVector,
+    ) -> Result<cut::Beyond, CrdtError> {
+        let mut beyond = cut::Beyond::new();
+        if !self.any_holed.load(Ordering::Relaxed) {
+            return Ok(beyond);
+        }
+        let mut holed = self
+            .holed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for client in shape.clients().filter(|client| holed.contains(client)) {
+            let id = ClientID::new(client);
+            let floor = state.get(&id);
+            let mut before: HashMap<ClientID, u32> =
+                state.iter().map(|(c, clock)| (*c, *clock)).collect();
+            if floor == 0 {
+                before.remove(&id);
+            } else {
+                before.insert(id, floor - 1);
+            }
+            let encoded = txn.encode_diff_v1(&StateVector::new(before.into_iter().collect()));
+            let ranges: Vec<(u32, u32)> = Shape::read(&encoded)?
+                .ranges_of(client)
+                .into_iter()
+                .filter(|range| range.0 > floor)
+                .collect();
+            beyond.insert(client, ranges);
+        }
+        // Un trou comblé depuis : le client n'en a plus.
+        holed.retain(|client| beyond.get(client).is_none_or(|ranges| !ranges.is_empty()));
+        if holed.is_empty() {
+            self.any_holed.store(false, Ordering::Relaxed);
+        }
+        beyond.retain(|_, ranges| !ranges.is_empty());
+        Ok(beyond)
+    }
+
+    /// Retient les clients chez qui l'entrée qu'on vient d'intégrer a laissé un trou
+    /// ([`PageDoc::known_beyond`]).
+    fn remember_holes(&self, shape: &Shape, before: &StateVector) {
+        let gapped = shape.gapped_clients(before);
+        if gapped.is_empty() {
+            return;
+        }
+        self.holed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(gapped);
+        self.any_holed.store(true, Ordering::Relaxed);
     }
 
     /// Applique dans `txn` une mise à jour lue par [`PageDoc::read`], et

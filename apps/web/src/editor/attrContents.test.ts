@@ -133,12 +133,13 @@ test("une chaîne à cheval à origine droite, puis une valeur qui la suit, sont
   expect(children(relayed)).toEqual({ k: "x", rest: ["ok"] });
 });
 
-test("Yjs n'envoie jamais un élément à cheval sur ce que le destinataire connaît", () => {
-  // Ruling R740 : le serveur refuse un élément dont l'horloge de départ est sous ce qu'il connaît
-  // de son client et dont la fin le dépasse. Yjs n'en écrit pas : ce qu'il encode pour un
-  // destinataire part de son vecteur d'état, même au milieu d'un élément fusionné (`Item.write`
-  // avec un décalage récrit l'origine), et la mise à jour d'une transaction part de l'état d'avant
-  // elle.
+test("Yjs n'écrit pas d'élément à cheval sur l'état que le destinataire lui a annoncé", () => {
+  // Ce que Yjs encode pour un destinataire part du vecteur d'état reçu de lui, même au milieu
+  // d'un élément fusionné (`Item.write` avec un décalage récrit l'origine), et la mise à jour
+  // d'une transaction part de l'état d'avant elle. Un élément n'est donc à cheval sur ce que le
+  // serveur connaît que si le serveur en a appris davantage entre son annonce et la réponse :
+  // une frappe arrivée par l'ancienne connexion du même onglet (`astride.test.ts`, Ruling R784,
+  // qui corrige R741 : le serveur coupe alors l'élément comme Yjs l'aurait écrit).
   const doc = new Y.Doc();
   doc.clientID = 5;
   const text = doc.getText("t");

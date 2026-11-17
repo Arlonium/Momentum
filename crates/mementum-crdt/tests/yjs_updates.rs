@@ -1,10 +1,11 @@
-//! Ce que le vrai Yjs écrit passe la garde (Rulings R723, R740) : les mises à jour de
+//! Ce que le vrai Yjs écrit passe la garde (Rulings R723, R784) : les mises à jour de
 //! `apps/web/src/editor/yjsUpdates.test.ts` (deux clients, dans les deux ordres d'identifiants :
 //! écritures concurrentes d'un attribut, annuler et rétablir, frappe au milieu d'un texte,
 //! session hors ligne ; dans l'ordre, l'autre d'abord, en étapes 2 depuis l'état de base),
 //! gardées dans `tests/fixtures/yjs_updates/scenarios.json`, sont données à une vraie page comme
-//! celles d'un client. Aucune n'est refusée : Yjs n'envoie ni entrée de map à origine droite, ni
-//! élément à cheval sur ce que le destinataire connaît.
+//! celles d'un client. Aucune n'est refusée : Yjs n'envoie pas d'entrée de map à origine droite.
+//! (Un élément à cheval sur ce que la page connaît, qu'une frappe arrivée en retard fait écrire
+//! à Yjs, est coupé : `tests/astride.rs`.)
 //!
 //! `EXPORT_FIXTURES=1 cargo test -p mementum-crdt --test yjs_updates` réécrit `base.json` (l'état
 //! de la page de départ ; l'identifiant du client du serveur y est tiré au hasard), puis Vitest

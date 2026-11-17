@@ -1,4 +1,4 @@
-// Ce que le vrai Yjs écrit, rejoué dans la garde du serveur (Rulings R723, R740 ; sondes de la
+// Ce que le vrai Yjs écrit, rejoué dans la garde du serveur (Rulings R723, R784 ; sondes de la
 // re-relecture 3 de la garde des attributs, gardées).
 //
 // Deux clients (5 et 9, dans les deux ordres d'identifiants) écrivent une page servie : écritures
@@ -9,8 +9,8 @@
 // d'origine droite. Les mises à jour sont écrites dans
 // `crates/mementum-crdt/tests/fixtures/yjs_updates/scenarios.json`, que
 // `crates/mementum-crdt/tests/yjs_updates.rs` donne à une vraie page comme celles d'un client :
-// toutes passent (aucune n'est à cheval sur ce que la page connaît, aucune entrée de map à
-// origine droite), et le journal relu donne la page vivante.
+// toutes passent (aucune entrée de map à origine droite), et le journal relu donne la page
+// vivante. L'élément à cheval d'une frappe arrivée en retard est dans `astride.test.ts`.
 //
 // `EXPORT_FIXTURES=1 corepack pnpm -C apps/web exec vitest run src/editor/yjsUpdates.test.ts` les
 // réécrit (après `EXPORT_FIXTURES=1 cargo test -p mementum-crdt --test yjs_updates`, qui écrit

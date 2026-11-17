@@ -422,6 +422,56 @@ fn one_attribute_overwritten(n: usize) -> Sent {
     Sent { state, update }
 }
 
+/// Le texte du premier paragraphe d'une page neuve, écrit par le client 7 (son élément 0), puis
+/// `letters(client)` : une chaîne par client, sans origine, de parent ce texte.
+fn letters_of_many_clients(clients: usize, text: impl Fn(usize) -> String) -> Vec<u8> {
+    let mut update = Vec::new();
+    var(&mut update, clients as u64);
+    for client in 0..clients {
+        let text = text(client);
+        update.push(1);
+        var(&mut update, 1_000 + client as u64);
+        update.extend([0, 0x04, 0, 7, 0]);
+        var(&mut update, text.len() as u64);
+        update.extend(text.as_bytes());
+    }
+    update.push(0);
+    update
+}
+
+fn page_with_a_text() -> Vec<Vec<u8>> {
+    let (_, state) = PageDoc::new_page();
+    let doc = client_of(7, &state);
+    let mut txn = doc.transact_mut();
+    let paragraph = first_paragraph(&txn);
+    paragraph.push_back(&mut txn, yrs::XmlTextPrelim::new(""));
+    vec![state, txn.encode_update_v1()]
+}
+
+/// `n` clients ont chacun tapé une lettre ; chacun renvoie sa lettre et la suivante d'un tenant :
+/// `n` éléments à cheval sur ce que la page connaît, coupés un à un (Ruling R784).
+fn many_items_astride(n: usize) -> Sent {
+    let mut journal = page_with_a_text();
+    journal.push(letters_of_many_clients(n, |_| "a".to_string()));
+    let state = PageDoc::from_updates(journal.iter().map(Vec::as_slice))
+        .unwrap()
+        .encode_state();
+    let update = letters_of_many_clients(n, |_| "ab".to_string());
+    Sent { state, update }
+}
+
+/// Un client a tapé une lettre ; il la renvoie avec `n` autres d'un tenant, des paires de
+/// substitution comprises : un seul élément à cheval, long.
+fn one_long_item_astride(n: usize) -> Sent {
+    let mut journal = page_with_a_text();
+    journal.push(letters_of_many_clients(1, |_| "a".to_string()));
+    let state = PageDoc::from_updates(journal.iter().map(Vec::as_slice))
+        .unwrap()
+        .encode_state();
+    let update = letters_of_many_clients(1, |_| format!("a{}", "b😀".repeat(n)));
+    Sent { state, update }
+}
+
 /// Une page dont le paragraphe porte `n` lettres, chacune un élément Yjs, et une mise à jour
 /// faite à la main de `n` valeurs `Any`, chacune placée par l'origine d'une de ces lettres : la
 /// garde cherche, pour chacune, si son origine est une entrée de la page (la recherche suit les
@@ -559,7 +609,18 @@ fn judging_attributes_grows_like_the_update() {
             what: "valeurs placées par des origines de la page",
             build: &values_placed_after_page_items,
         },
+        Form {
+            what: "un long élément à cheval",
+            build: &one_long_item_astride,
+        },
     ];
+    // Un élément à cheval par client (Ruling R784) : la forme demande autant de clients que
+    // d'éléments, et c'est le client qui pèse dans yrs (83 octets de pic par octet d'entrée pour
+    // la même mise à jour sans rien à cheval, 106 avec, mesurés). Sa borne est à elle.
+    let per_client = [Form {
+        what: "éléments à cheval nombreux, un par client",
+        build: &many_items_astride,
+    }];
     let size = |sent: &Sent| sent.state.len() + sent.update.len();
     // D'un client (refusée, ou acceptée : des valeurs dans un texte), puis relue du journal.
     let judge = |sent: &Sent| {
@@ -576,5 +637,11 @@ fn judging_attributes_grows_like_the_update() {
         answer: Answer::PerByte(8),
     };
     let failures = grows_like_input(&forms, size, judge, |_| 0, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let limits = Limits {
+        peak_per_byte: 128,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&per_client, size, judge, |_| 0, limits);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -197,7 +197,7 @@ impl Served {
         assert_children_are_their_length(&self.page, what);
         // L'état de la page s'encode et se relit, plusieurs fois de suite : une structure que yrs
         // a mal rangée ne se voit qu'à l'encodage, une fois de la mémoire libérée puis reprise
-        // (Rulings R723, R740 ; c'est cette boucle qui a montré le constat C1).
+        // (Rulings R723, R784 ; c'est cette boucle qui a montré le constat C1).
         for _ in 0..4 {
             let state = self.page.encode_state();
             let doc = Doc::with_options(Options {
@@ -628,6 +628,15 @@ fn a_stored_untyped_child_is_deleted_on_reload() {
 enum Op {
     /// Le client `who` tape `text` à la position `at` (ramenée à la longueur du texte).
     Type { who: usize, at: usize, text: String },
+    /// Un onglet honnête de passage dont la première frappe (`text`) arrive seule, par son
+    /// ancienne connexion, avant son étape 2 calculée sans elle : la suite (`more`) y est fondue
+    /// avec elle en un élément à cheval sur ce que la page connaît (Ruling R784 ; constat C1 de la
+    /// re-relecture 4). Reçue d'un client, ou déjà au journal (`stored`).
+    Late {
+        text: String,
+        more: String,
+        stored: bool,
+    },
     /// Le client `who` supprime `len` caractères à partir de `at`.
     Delete { who: usize, at: usize, len: usize },
     /// Le client `who` met en gras `len` caractères à partir de `at`.
@@ -676,7 +685,8 @@ enum Op {
     /// Un élément à cheval sur ce que la page connaît d'un de ses clients (`who`) : il part de
     /// sa dernière horloge connue et compte deux unités. Son parent ou son origine sont ailleurs
     /// (`form`, voir `astride`) : un type de la page nommé avec une clé de map, ou un élément
-    /// connu quelconque (`at`). Reçu d'un client, ou déjà au journal (constat C1, Ruling R740).
+    /// connu quelconque (`at`). Reçu d'un client, ou déjà au journal (constat C1 ;
+    /// coupé, Ruling R784).
     Astride {
         who: usize,
         form: usize,
@@ -785,7 +795,7 @@ fn between(
     Some(out)
 }
 
-/// Constat C1 (Ruling R740) : un élément du client `client` à l'horloge `clock` (la dernière que
+/// Constat C1 (Rulings R740, R784) : un élément du client `client` à l'horloge `clock` (la dernière que
 /// la page connaît de lui), de deux unités. `form` : un contenu supprimé ou deux valeurs, entrée
 /// `backgroundColor` du type `parent` de la page ; un contenu supprimé d'origine `origin` ; une
 /// chaîne dont le parent nommé est `parent`.
@@ -946,6 +956,8 @@ fn op() -> impl Strategy<Value = Op> {
                 stored,
             }),
         (0..3usize, any::<bool>()).prop_map(|(kind, stored)| Op::Content { kind, stored }),
+        ("[a-zé😀]{1,3}", "[a-zé😀]{1,3}", any::<bool>())
+            .prop_map(|(text, more, stored)| Op::Late { text, more, stored }),
         (any::<usize>(), 0..4usize, any::<usize>(), any::<bool>()).prop_map(
             |(who, form, at, stored)| Op::Astride {
                 who,
@@ -1169,6 +1181,45 @@ fn scenario(ops: &[Op]) {
                 } else {
                     update
                 }
+            }
+            Op::Late { text, more, stored } => {
+                let tab = client(6_000 + step as u64, &served);
+                let before = tab.transact().state_vector();
+                let end = |txn: &mut yrs::TransactionMut, t: &XmlTextRef, typed: &str| {
+                    let at = t.len(txn);
+                    t.insert(txn, at, typed);
+                };
+                let first = honest(&tab, |txn, t| end(txn, t, text));
+                honest(&tab, |txn, t| end(txn, t, more));
+                // L'étape 2 de l'onglet, calculée depuis l'état que le serveur lui a annoncé,
+                // avant que sa première frappe arrive.
+                let step2 = tab.transact().encode_diff_v1(&before);
+                let what = format!("étape {step} ({op:?})");
+                if served.receive(&first) {
+                    if *stored {
+                        // Un journal d'avant R491 gardait la mise à jour lue, part connue comprise.
+                        served.journal.push(step2);
+                        served.page = served.reloaded();
+                    } else {
+                        assert!(
+                            served.receive(&step2),
+                            "{what} : l'étape 2 honnête est refusée"
+                        );
+                    }
+                    // La page a tout ce que l'onglet a, et lit ce qu'il lit.
+                    assert_eq!(
+                        StateVector::decode_v1(&served.page.state_vector()).unwrap(),
+                        tab.transact().state_vector(),
+                        "{what} : le vecteur d'état"
+                    );
+                    let state = tab
+                        .transact()
+                        .encode_state_as_update_v1(&StateVector::default());
+                    if let Ok(read) = PageDoc::from_updates([state.as_slice()]) {
+                        assert_eq!(texts(&served.page), texts(&read), "{what} : le texte");
+                    }
+                }
+                vec![0, 0]
             }
             Op::Content { kind, stored } => {
                 let passing = client(5_000 + step as u64, &served);

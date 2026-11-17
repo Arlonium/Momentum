@@ -106,6 +106,9 @@ use crate::blocknote::BLOCK_CONTAINER;
 use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
 
+#[path = "cut.rs"]
+pub(crate) mod cut;
+
 /// Le refus d'une mise à jour où un client paraît deux fois (Ruling R207) : reconnu à la
 /// relecture du journal, qui écarte l'entrée au lieu de refuser la page (Ruling R258).
 pub(crate) const REPEATED_CLIENT: &str = "un client paraît deux fois dans la mise à jour";
@@ -352,10 +355,15 @@ pub(crate) const KEYED_RIGHT_ORIGIN: &str = "la mise à jour pose une entrée de
 pub(crate) const KEYED_RIGHT_ORIGIN_MADE: &str = "la mise à jour pose, pour le serveur, une \
      entrée de map qui porte une origine droite : aucun client n'en écrit";
 
-/// Le refus d'un élément à cheval sur ce que la page connaît (Ruling R740).
-pub(crate) const ASTRIDE: &str = "la mise à jour porte un élément à cheval sur ce que la page \
-     connaît de son client : aucun client n'en envoie, et le serveur rangerait la part qui \
-     dépasse d'après un voisin que la mise à jour ne nomme pas";
+/// Le refus d'un élément à cheval sur ce que la page connaît, quand la page ne sait pas le couper
+/// (Ruling R784) : du JSON à plusieurs valeurs, qu'aucun client n'écrit.
+pub(crate) const ASTRIDE: &str = "la mise à jour porte un contenu JSON à cheval sur ce que la page \
+     connaît de son client : aucun client n'en écrit, et le serveur et les navigateurs ne le \
+     couperaient pas pareil";
+
+/// Le refus d'une mise à jour de client dont les blocs laisseraient un trou (Ruling R786).
+pub(crate) const LEAVES_GAP: &str = "la mise à jour laisserait un trou dans les horloges d'un \
+     client : elle attend des modifications que la page n'a pas reçues";
 
 /// Le refus d'une entrée de map dont le contenu n'est pas une valeur (Rulings R702, R724).
 pub(crate) const KEYED_NOT_A_VALUE: &str = "la mise à jour pose comme valeur d'un attribut un \
@@ -676,31 +684,57 @@ impl Shape {
         Ok(())
     }
 
-    /// Refuse (`Structure`) une mise à jour qui porte un élément **à cheval** sur ce que la page
-    /// connaît (Ruling R740) : son horloge de départ est sous le plancher de son client, sa fin
-    /// le dépasse. yrs n'en intègre que la part au-dessus du plancher (`Item::trim`), et lui donne
-    /// pour voisin de gauche l'élément de la page à l'horloge d'avant, **sans regarder son
-    /// parent** ; il garde le parent que disent les octets, et prend la clé de map de ce voisin.
-    /// La part intégrée devient ainsi l'entrée courante d'une map d'un autre parent, l'ancienne
-    /// entrée n'est plus tenue par rien, et la page lit de la mémoire libérée une fois ce parent
-    /// supprimé (l'état de R723, sans origine droite). Yjs n'envoie jamais un tel élément : ce
-    /// qu'il encode pour un destinataire part de son vecteur d'état (`Item.write` avec un
-    /// décalage), et la mise à jour d'une transaction de l'état d'avant elle.
+    /// Vrai si la mise à jour porte un élément **à cheval** sur ce que la page connaît : son
+    /// horloge de départ est sous le plancher de son client (`floor`, le vecteur d'état), sa fin
+    /// le dépasse. Un tel élément est récrit avant d'être lu par la garde et par yrs
+    /// ([`cut::cut`], Ruling R784), qui n'en voient que la part neuve, placée par son origine.
     ///
     /// Un élément tout entier sous le plancher n'en est pas un : yrs l'ignore (Ruling R490).
-    pub(crate) fn check_astride(&self, floor: &StateVector) -> Result<(), CrdtError> {
-        for (client, structs) in &self.clients {
+    pub(crate) fn astride(&self, floor: &StateVector) -> bool {
+        self.clients.iter().any(|(client, structs)| {
             let known = floor.get(&ClientID::new(*client));
-            if known == 0 {
-                continue;
+            known > 0
+                && structs.iter().any(|s| {
+                    matches!(s.kind, Kind::Insert(_)) && s.id.1 < known && s.id.1 + s.len > known
+                })
+        })
+    }
+
+    /// Les clients dont la mise à jour porte des blocs.
+    pub(crate) fn clients(&self) -> impl Iterator<Item = u64> + '_ {
+        self.clients.iter().map(|(client, _)| *client)
+    }
+
+    /// Les clients chez qui les blocs de la mise à jour laisseraient un trou
+    /// ([`Shape::structs_leave_gap`]).
+    pub(crate) fn gapped_clients(&self, state: &StateVector) -> Vec<u64> {
+        let mut gapped = Vec::new();
+        for (client, structs) in &self.clients {
+            let mut covered = state.get(&ClientID::new(*client));
+            for s in structs.iter().filter(|s| !matches!(s.kind, Kind::Skip)) {
+                if s.id.1 > covered {
+                    gapped.push(*client);
+                    break;
+                }
+                covered = covered.max(s.id.1 + s.len);
             }
-            for s in structs {
-                if matches!(s.kind, Kind::Insert(_)) && s.id.1 < known && s.id.1 + s.len > known {
-                    return Err(CrdtError::Structure(ASTRIDE.to_string()));
+        }
+        gapped
+    }
+
+    /// Les plages `[début, fin)` que couvrent les blocs de `client` (ses trous exceptés), triées
+    /// et fondues : lu dans ce que yrs encode d'une page, ce qu'elle connaît de ce client.
+    pub(crate) fn ranges_of(&self, client: u64) -> Vec<(u32, u32)> {
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        for (_, structs) in self.clients.iter().filter(|(c, _)| *c == client) {
+            for s in structs.iter().filter(|s| !matches!(s.kind, Kind::Skip)) {
+                match ranges.last_mut() {
+                    Some(last) if last.1 == s.id.1 => last.1 += s.len,
+                    _ => ranges.push((s.id.1, s.id.1 + s.len)),
                 }
             }
         }
-        Ok(())
+        ranges
     }
 
     /// Refuse (`Structure`) une mise à jour où un élément intégré (au-dessus de `floor`) porte à la
