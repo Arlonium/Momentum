@@ -35,6 +35,9 @@ use yrs::{
     Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
 };
 
+#[path = "common/live.rs"]
+mod live;
+
 struct Rng(u64);
 
 impl Rng {
@@ -114,6 +117,10 @@ struct Served {
     stored: bool,
     next_client: u64,
     next_block: u64,
+    /// Voie du journal : une entrée relue a laissé un trou d'horloge (un journal d'avant le
+    /// Ruling R131). La page relue de son état peut alors ne pas être la page vivante : limite
+    /// écrite (Ruling R830, `known_limits`), l'oracle ne la juge plus.
+    holed: bool,
 }
 
 impl Served {
@@ -126,6 +133,7 @@ impl Served {
             stored,
             next_client: 100,
             next_block: 1,
+            holed: false,
         }
     }
 
@@ -138,6 +146,7 @@ impl Served {
             stored,
             next_client: 100,
             next_block: 1,
+            holed: false,
         }
     }
 
@@ -160,6 +169,7 @@ impl Served {
     fn receive(&mut self, update: &[u8]) -> Result<bool, String> {
         trace(update);
         if self.stored {
+            self.holed |= self.page.stored_update_leaves_gap(update) == Ok(true);
             return match self.page.apply_update(update) {
                 Ok(()) => {
                     self.journal.push(update.to_vec());
@@ -289,9 +299,16 @@ impl Served {
     /// L'état encodé se relit, et ce qui manque à chaque vecteur d'état passé aussi : trois fois,
     /// pour qu'une lecture de mémoire libérée ait de quoi se montrer. Et l'invariant de la classe
     /// C1 tient (Ruling R817) : chaque entrée de map vivante est la seule vivante de sa clé, et n'a
-    /// qu'une unité ; vu dans l'état, avant que yrs ne lise de la mémoire libérée.
+    /// qu'une unité ; vu dans l'état, avant que yrs ne lise de la mémoire libérée. Et la page relue
+    /// de son propre état (ce qu'écrit la compaction, ce que reçoit un onglet à l'étape 2) est la
+    /// page vivante : blocs, arbre, révision (constat I-7.1, Ruling R825).
     fn hammer(&self, stages: &[Vec<u8>], what: &str) {
         if let Some(why) = self.page.unsound_map_entries() {
+            panic!("{what} : {why}");
+        }
+        if !self.holed
+            && let Some(why) = live::reloaded_from_state_differs(&self.page)
+        {
             panic!("{what} : {why}");
         }
         for _ in 0..3 {
@@ -1017,6 +1034,14 @@ fn replay_text(text: &str, stored: bool) -> Vec<String> {
             let why: String = why.chars().filter(|c| !c.is_ascii_digit()).collect();
             findings.push(format!("ligne {n} : {why}"));
         }
+        // Ruling R825 : la page relue de son propre état est la page vivante (hors d'une page à
+        // trou, limite écrite : Ruling R830).
+        if !served.holed
+            && let Some(why) = live::reloaded_from_state_differs(&served.page)
+        {
+            let why: String = why.chars().take(70).collect();
+            findings.push(format!("ligne {n} : {why}"));
+        }
         let sv = served.page.state_vector();
         let mut read = reread(&served.page.encode_state(), stored);
         for _ in 0..40 {
@@ -1183,6 +1208,69 @@ fn a_many_valued_entry_cut_by_an_item_of_the_same_entry_is_deleted_whole() {
     assert_eq!(replay_apart("min-j776", true), Ok(()));
 }
 
+/// Constat I-7.1 de la re-relecture 7 (Ruling R825), vu par l'oracle neuf de l'essai : la page
+/// relue de son propre état n'est pas la page vivante. Graine 1543 de la voie d'un client, réduite
+/// à la main : une mise à jour à cheval, que la coupe (R784) récrit en un élément « zy »
+/// d'origine « c » et d'origine droite « b », dans « abc » d'un tenant (un seul bloc de yrs). La
+/// page vivante lisait « azybc », la page relue de son état « abczy », sous la même révision.
+/// Graines 280, 1511 et 2657 de la voie du journal : la même forme.
+#[test]
+fn a_right_origin_left_of_the_origin_in_one_block_reloads_as_it_lives() {
+    assert_eq!(replay_apart("min-1543", false), Ok(()));
+    assert_eq!(replay_apart("min-j280", true), Ok(()));
+    assert_eq!(replay_apart("min-j1511", true), Ok(()));
+    assert_eq!(replay_apart("min-j2657", true), Ok(()));
+}
+
+/// Ruling R827 (règle G), vu par l'oracle de R825 : un élément dont un voisin est une plage
+/// ramassée et l'autre un élément. yrs le rangeait par l'autre voisin (Yjs le ramasse), et sa place
+/// dépendait de l'ordre d'arrivée : la page relue de son état ne le rangeait pas pareil. Graine
+/// 1550 de la voie du journal (une plage ramassée posée par l'entrée, puis un texte d'origine
+/// dedans et d'origine droite « c »), 15795 et 22948 de la voie d'un client (l'origine dans un
+/// bloc supprimé, ramassé, l'origine droite dans un texte vivant).
+#[test]
+fn an_item_with_one_collected_neighbour_is_collected() {
+    assert_eq!(replay_apart("min-j1550", true), Ok(()));
+    assert_eq!(replay_apart("min-15795", false), Ok(()));
+    assert_eq!(replay_apart("min-22948", false), Ok(()));
+}
+
+/// Ruling R828 (règle I1) : un élément sans origine dont l'origine droite en a une. Graine 14050
+/// de la voie du journal (un texte sans origine, d'origine droite une plage du milieu du texte) et
+/// 25235 de la voie d'un client (un sous-document sans origine, d'origine droite « z », au milieu).
+#[test]
+fn an_origin_less_item_before_a_placed_unit_is_collected() {
+    assert_eq!(replay_apart("min-j14050", true), Ok(()));
+    assert_eq!(replay_apart("min-25235", false), Ok(()));
+}
+
+/// Ruling R829 (règle P2) : un élément dont l'origine et l'origine droite sont dans deux parents ;
+/// la page le range dans le parent de gauche, et quand ce voisin est ramassé plus tard, la page
+/// relue de son état le rangeait dans l'autre. Graine 14050 de la voie du journal, réduite de
+/// nouveau une fois G et I1 posées.
+#[test]
+fn an_item_between_two_parents_is_collected() {
+    assert_eq!(replay_apart("min-j14050-b", true), Ok(()));
+}
+
+/// Ruling R834 (règle I3) : un élément d'origine « b » et d'origine droite « l », alors que
+/// l'origine de « l » est « n », plus loin que « b » dans la même suite (« bonjour ») : son auteur
+/// connaissait « n », entre ses deux voisins. Graine 28569 de la voie d'un client.
+#[test]
+fn an_item_between_neighbours_its_author_did_not_see_side_by_side_is_collected() {
+    assert_eq!(replay_apart("min-28569", false), Ok(()));
+}
+
+/// Ruling R834 : une règle juge pareil la mise à jour et l'état qui la contient. Graine 629 de la
+/// voie du journal : un « 😀 » d'origine « b » et d'origine droite la seconde moitié d'un emoji
+/// posé par la même entrée après « c ». Jugée dans la seule suite de l'origine (« abc », de la
+/// page), la règle I3 ne voyait pas la chaîne qui continue dans la mise à jour ; jugée dans l'état
+/// (une seule suite), elle la voyait, et la page relue de son état perdait l'emoji.
+#[test]
+fn a_rule_judges_an_update_and_the_state_holding_it_alike() {
+    assert_eq!(replay_apart("min-j629", true), Ok(()));
+}
+
 /// Les entrées d'une trace, telles quelles.
 fn entries(name: &str) -> Vec<Vec<u8>> {
     let path = format!(
@@ -1259,4 +1347,79 @@ fn a_json_content_read_from_the_journal_is_deleted_with_its_entry() {
         assert!(reread(&state, true).is_ok(), "{name}");
     }
     assert!(pending, "aucune trace ne garde de suppression en attente");
+}
+
+/// Ruling R831 (constat M-7.3 de la re-relecture 7) : un contenu JSON relu du journal n'est
+/// supprimé (R815) que si yrs l'intègre. Dans une page à trou d'horloge (un journal d'avant le
+/// Ruling R131), une entrée peut porter du JSON à des horloges que la page connaît déjà au-delà du
+/// trou : yrs l'ignore, et ces horloges sont celles d'un autre contenu de la page (ici « x »).
+/// Supprimer d'après les octets de l'entrée sans écarter ce que la page connaît au-delà du trou
+/// effaçait « x ».
+#[test]
+fn a_json_content_already_known_beyond_a_hole_deletes_nothing() {
+    let (page, created) = PageDoc::new_page();
+    let state = StateVector::decode_v1(&page.state_vector()).unwrap();
+    let server = state.iter().next().unwrap().0.get();
+    // Le client 9 000, à partir de l'horloge 5 (un trou de 0 à 5) : un texte dans le paragraphe
+    // du serveur (son horloge 3), et dedans « xy ».
+    let mut beyond = vec![1, 2];
+    var(&mut beyond, 9_000);
+    beyond.extend_from_slice(&[5, 7, 0]);
+    var(&mut beyond, server);
+    beyond.extend_from_slice(&[3, 6, 4, 0]);
+    var(&mut beyond, 9_000);
+    beyond.extend_from_slice(&[5, 2, b'x', b'y', 0]);
+    // Puis du JSON du même client à l'horloge 6, que la page connaît (« x ») : sous la racine,
+    // écrit comme yrs le lit (`len` à 0, puis une chaîne).
+    let mut json = vec![1, 1];
+    var(&mut json, 9_000);
+    json.push(6);
+    json.extend_from_slice(&[2, 1]);
+    string(&mut json, FRAGMENT);
+    json.extend_from_slice(&[0, 3, b'"', b'a', b'"', 0]);
+    let journal = [created, beyond, json];
+    let text = |page: &PageDoc| format!("{:?}", page.read_blocks()[0].content);
+    let page = PageDoc::from_updates([journal[0].as_slice()]).unwrap();
+    page.apply_update(&journal[1]).expect("le trou se relit");
+    let before = text(&page);
+    assert!(before.contains("xy"), "{before}");
+    page.apply_update(&journal[2]).expect("l'entrée se relit");
+    assert_eq!(
+        text(&page),
+        before,
+        "le contenu que la page connaît au-delà du trou"
+    );
+    let reloaded = PageDoc::from_updates(journal.iter().map(Vec::as_slice)).unwrap();
+    assert_eq!(text(&reloaded), before);
+}
+
+mod known_limits {
+    //! Ce que la garde ne tient pas encore, écrit en tests verts tant que la limite est là, rouges
+    //! le jour où elle est levée (sortir alors le test du module, et lui faire affirmer ce qui est
+    //! voulu).
+
+    use super::*;
+
+    /// Ruling R830 : une page à trou d'horloge (un journal d'avant le Ruling R131) dont une entrée
+    /// hostile comble le trou peut se lire autrement vivante et relue de son état. Graine 41449 de
+    /// la voie du journal, réduite : le client du serveur porte une entrée de map à l'horloge 10
+    /// (son trou va de 8 à 10), d'origine sa valeur de `schemaVersion` ; une entrée suivante comble
+    /// le trou par une entrée d'origine la même valeur, du même client, sans origine droite. yrs
+    /// comme Yjs départagent deux éléments de même origine et de même origine droite par leur
+    /// client : du même client, c'est l'ordre d'arrivée qui décide, et la relecture de l'état les
+    /// intègre dans l'ordre des horloges. Aucun client n'écrit de trou depuis R131 (R786), et deux
+    /// éléments d'un client de même origine et de même origine droite ne s'écrivent pas : le
+    /// second voit le premier.
+    #[test]
+    fn a_hole_filled_by_a_hostile_entry_reads_otherwise_from_the_state() {
+        let journal = entries("min-j41449");
+        let page = PageDoc::from_updates([journal[0].as_slice()]).unwrap();
+        for entry in &journal[1..] {
+            page.apply_update(entry).expect("l'entrée se relit");
+        }
+        assert!(
+            live::reloaded_from_state_differs(&page).is_some(),
+            "la limite est levée : la page à trou relue de son état est la page vivante"
+        );
+    }
 }

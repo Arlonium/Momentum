@@ -14,6 +14,9 @@
 
 use mementum_crdt::{FRAGMENT, PageDoc};
 use yrs::updates::decoder::Decode;
+
+#[path = "common/live.rs"]
+mod live;
 use yrs::{
     ClientID, Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
     XmlFragment, XmlOut, XmlTextPrelim,
@@ -149,8 +152,12 @@ fn reread(state: &[u8]) -> Result<String, String> {
     Ok(fragment.get_string(&txn))
 }
 
-/// La page et son journal se relisent par un client neuf, et disent la même chose.
+/// La page et son journal se relisent par un client neuf, et disent la même chose ; et la page
+/// relue de son propre état est la page vivante (Ruling R825).
 fn assert_sound(served: &Served, what: &str) {
+    if let Some(why) = live::reloaded_from_state_differs(&served.page) {
+        panic!("{what} : {why}");
+    }
     let live = reread(&served.page.encode_state());
     assert!(live.is_ok(), "{what} : l'état de la page vivante, {live:?}");
     let reloaded = served.reloaded();
@@ -214,6 +221,9 @@ fn what_yjs_writes_passes_the_guard() {
                 Ok(applied) => {
                     journal.push(applied.read);
                     journal.extend(applied.carried);
+                    if let Some(why) = live::reloaded_from_state_differs(&page) {
+                        refused.push(format!("{name}, étape {n} : {why}"));
+                    }
                 }
                 Err(error) => {
                     refused.push(format!("{name}, étape {n} : {error} ; {update:?}"));
@@ -284,6 +294,12 @@ fn what_yjs_writes_at_random_follows_the_grammar() {
             let before = served.journal.len();
             match served.receive(&update) {
                 Ok(()) => {
+                    // Ruling R825 : après chaque mise à jour acceptée, la page relue de son propre
+                    // état est la page vivante (ce que Yjs écrit n'est jamais rangé selon le
+                    // découpage des blocs).
+                    if let Some(why) = live::reloaded_from_state_differs(&served.page) {
+                        refused.push(format!("{what}, mise à jour {step} : {why}"));
+                    }
                     wrote += usize::from(served.journal[before] != [0, 0]);
                     // Un report (un bloc recréé par une annulation) ou un dédoublonnage : une
                     // écriture du serveur, que le vieux journal n'a pas.
@@ -351,24 +367,22 @@ fn what_yjs_writes_at_random_follows_the_grammar() {
     );
 }
 
-/// N2 (Ruling R802) contre le vrai Yjs (constat I-6.4 de la re-relecture 6) : les scènes où un
-/// onglet envoie un élément dont l'origine droite est son origine, que `redoItem` écrit quand il
-/// retrouve le même voisin des deux côtés (`redo.json`, écrit par `yjsAtRandom.test.ts` : la
-/// scène, ses mises à jour, les rangs de celles qui portent la forme). Elles sont **acceptées**
-/// (la page récrit l'élément, sans origine droite ; le filet L1 ne refuse rien), la page vivante
-/// se relit et son journal la redonne ; ce qu'elle relaie (`redo-relayed.json`) ramène un vrai
-/// Yjs à la page du serveur Yjs (second test de `yjsAtRandom.test.ts`).
-#[test]
-fn what_yjs_writes_on_a_redo_with_the_same_neighbour_on_both_sides_is_accepted() {
+/// Les scènes d'un rétablissement (`redo.json`, `redo-blocks.json`, écrits par
+/// `yjsAtRandom.test.ts` : la scène, ses mises à jour, les rangs de celles qui portent la forme),
+/// données à une vraie page comme celles d'un client : **toutes acceptées**, la page vivante se
+/// relit, son journal la redonne, et la page relue de son état est la page vivante. Ce qu'elle
+/// relaie est écrit dans `relayed_name`, que le second test de `yjsAtRandom.test.ts` rejoue dans un
+/// vrai Yjs.
+fn redo_scenes_are_accepted(name: &str, relayed_name: &str, form: &str) {
     let base: Vec<u8> =
         serde_json::from_str(&std::fs::read_to_string(dir().join("base.json")).unwrap()).unwrap();
     let scenes: Vec<(u64, Vec<String>, Vec<usize>)> =
-        serde_json::from_str(&std::fs::read_to_string(dir().join("redo.json")).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(dir().join(name)).unwrap()).unwrap();
     assert!(!scenes.is_empty());
     let mut relayed: Vec<Option<Vec<String>>> = Vec::new();
     for (seed, updates, ranks) in &scenes {
         let what = format!("scène {seed}");
-        assert!(!ranks.is_empty(), "{what} : aucune forme N2");
+        assert!(!ranks.is_empty(), "{what} : aucune forme {form}");
         let mut served = Served {
             page: PageDoc::from_updates([base.as_slice()]).expect("la base"),
             journal: vec![base.clone()],
@@ -381,8 +395,15 @@ fn what_yjs_writes_on_a_redo_with_the_same_neighbour_on_both_sides_is_accepted()
             assert!(
                 received.is_ok(),
                 "{what}, mise à jour {step}{} : {received:?}",
-                if ranks.contains(&step) { " (N2)" } else { "" }
+                if ranks.contains(&step) {
+                    format!(" ({form})")
+                } else {
+                    String::new()
+                }
             );
+            if let Some(why) = live::reloaded_from_state_differs(&served.page) {
+                panic!("{what}, mise à jour {step} : {why}");
+            }
             plain &= served.journal.len() == before + 1;
         }
         assert_sound(&served, &what);
@@ -393,7 +414,7 @@ fn what_yjs_writes_on_a_redo_with_the_same_neighbour_on_both_sides_is_accepted()
                 .collect()
         }));
     }
-    let path = dir().join("redo-relayed.json");
+    let path = dir().join(relayed_name);
     let mut written = serde_json::to_string(&relayed).unwrap();
     written.push(char::from(10));
     if std::env::var_os("EXPORT_FIXTURES").is_some() {
@@ -405,4 +426,26 @@ fn what_yjs_writes_on_a_redo_with_the_same_neighbour_on_both_sides_is_accepted()
             path.display()
         );
     }
+}
+
+/// N2 (Ruling R802) contre le vrai Yjs (constat I-6.4 de la re-relecture 6) : les scènes où un
+/// onglet envoie un élément dont l'origine droite est son origine, que `redoItem` écrit quand il
+/// retrouve le même voisin des deux côtés (`redo.json`). Elles sont **acceptées** (la page récrit
+/// l'élément, sans origine droite ; le filet L1 ne refuse rien), la page vivante se relit et son
+/// journal la redonne ; ce qu'elle relaie (`redo-relayed.json`) ramène un vrai Yjs à la page du
+/// serveur Yjs (second test de `yjsAtRandom.test.ts`).
+#[test]
+fn what_yjs_writes_on_a_redo_with_the_same_neighbour_on_both_sides_is_accepted() {
+    redo_scenes_are_accepted("redo.json", "redo-relayed.json", "N2");
+}
+
+/// N3 (Ruling R825) contre le vrai Yjs : les scènes où `redoItem` suit les deux voisins d'un
+/// élément jusqu'au même élément X de plusieurs unités, dont la première a pour origine l'unité
+/// d'avant (`redo-blocks.json`) : il écrit l'origine `X.lastId` et l'origine droite `X.id`, que Yjs
+/// comme yrs rangent selon le découpage de leurs blocs. Elles sont **acceptées** (la page récrit
+/// l'élément sans son origine droite), et la page relue de son état est la page vivante après
+/// chaque mise à jour.
+#[test]
+fn what_yjs_writes_on_a_redo_into_one_block_is_accepted() {
+    redo_scenes_are_accepted("redo-blocks.json", "redo-blocks-relayed.json", "N3");
 }

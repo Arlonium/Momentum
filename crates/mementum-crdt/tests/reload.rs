@@ -21,6 +21,9 @@
 
 use mementum_crdt::{FRAGMENT, PageDoc};
 use proptest::prelude::*;
+
+#[path = "common/live.rs"]
+mod live;
 use yrs::branch::{Branch, BranchID};
 use yrs::types::Attrs;
 use yrs::updates::decoder::Decode;
@@ -195,6 +198,11 @@ impl Served {
             "{what} : plages et marques"
         );
         assert_children_are_their_length(&self.page, what);
+        // Ruling R825 : la page relue de son propre état (l'instantané d'une compaction, l'étape 2
+        // d'un onglet qui ouvre la page) est la page vivante.
+        if let Some(why) = live::reloaded_from_state_differs(&self.page) {
+            panic!("{what} : {why}");
+        }
         // L'état de la page s'encode et se relit, plusieurs fois de suite : une structure que yrs
         // a mal rangée ne se voit qu'à l'encodage, une fois de la mémoire libérée puis reprise
         // (Rulings R723, R784 ; c'est cette boucle qui a montré le constat C1).
