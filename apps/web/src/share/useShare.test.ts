@@ -398,3 +398,20 @@ test("lost_session_says_nothing", async () => {
   expect(reads).toHaveLength(1);
   expect(onAccessLost).not.toHaveBeenCalled();
 });
+
+test("an_invitation_whose_answer_is_lost_reads_the_accesses_again", async () => {
+  // I1 (R757) : la réponse perdue, l'invitation existe peut-être. Le message le dit, et les accès
+  // relus la montrent parmi celles qui attendent : on ne l'envoie pas deux fois sans regarder.
+  const share = await opened();
+  const maybe = "La réponse du serveur n'est pas arrivée : ce que tu as demandé a peut-être été fait. Vérifie avant de réessayer.";
+  vi.mocked(inviteToPage).mockRejectedValue(new ApiError(502, null, maybe));
+  const before = reads.length;
+  let done: boolean | undefined;
+  void share.current.invite("lea@exemple.fr", "edit").then((ok) => (done = ok));
+  await settle();
+  expect(reads).toHaveLength(before + 1);
+  await settle(() => reads[before].resolve(access()));
+  expect(done).toBe(false);
+  expect(share.current.inviteError).toBe(maybe);
+  expect(share.current.created).toBeNull();
+});

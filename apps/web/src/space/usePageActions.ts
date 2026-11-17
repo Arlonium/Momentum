@@ -17,10 +17,12 @@
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  answerLost,
   ApiError,
   createPage,
   duplicatePage,
   isSessionLost,
+  lostAnswer,
   restorePage,
   trashPage,
   updatePage,
@@ -117,19 +119,11 @@ function typing(): boolean {
   );
 }
 
-/**
- * La réponse n'est pas celle du serveur : coupée en route (statut 0), ou une page d'erreur d'un
- * mandataire, sans corps de l'API, au-delà de 500. Le serveur a pu aller au bout (R651).
- */
-function answerLost(error: unknown): boolean {
-  if (!(error instanceof ApiError)) return false;
-  return error.status === 0 || (error.code === null && error.status >= 500);
-}
+/** Où regarder ce qu'une écriture de la barre latérale a fait, quand sa réponse s'est perdue. */
+const IN_SIDEBAR = "Regarde dans la barre latérale avant de réessayer.";
 
 /** Ce que dit une duplication dont la réponse s'est perdue (R651). */
-const ANSWER_LOST =
-  "La réponse du serveur n'est pas arrivée : la copie a peut-être été faite. " +
-  "Regarde dans la barre latérale avant de réessayer.";
+const ANSWER_LOST = lostAnswer("la copie a peut-être été faite", IN_SIDEBAR);
 
 /** Où le serveur a mis la copie : à la racine, c'est dans « Privé » (R252). */
 function placeOf(copy: PageNode): string {
@@ -273,7 +267,12 @@ export function usePageActions({
         navigate(pagePath(node.id));
       } catch (error) {
         if (isSessionLost(error)) return;
-        setNotice(`La page n'a pas pu être créée. ${creationRefusal(error)}`);
+        // Une réponse perdue : le serveur a pu créer la page (R758). La barre latérale, relue, le dira.
+        setNotice(
+          answerLost(error)
+            ? lostAnswer("la page a peut-être été créée", IN_SIDEBAR)
+            : `La page n'a pas pu être créée. ${creationRefusal(error)}`,
+        );
         reload();
       } finally {
         creating.current = false;
@@ -367,7 +366,11 @@ export function usePageActions({
         if (isSessionLost(error)) return;
         // Jetée ou supprimée ailleurs, peut-être : la barre latérale est relue, et la page
         // ouverte avec elle (sortie de l'arbre, elle est redemandée au serveur).
-        setNotice(`La page n'a pas pu être mise à la corbeille. ${sentence(error)}`);
+        setNotice(
+          answerLost(error)
+            ? lostAnswer("la page a peut-être été mise à la corbeille", IN_SIDEBAR)
+            : `La page n'a pas pu être mise à la corbeille. ${sentence(error)}`,
+        );
         reload();
       }
       setTrashChanges((n) => n + 1);
@@ -391,9 +394,13 @@ export function usePageActions({
         if (!sameParent) reload();
       } catch (error) {
         if (isSessionLost(error)) return;
-        // La page n'a pas bougé. Ce qui a fait refuser a pu changer ailleurs : la barre
-        // latérale est relue, telle que le serveur la voit.
-        setNotice(`La page n'a pas pu être déplacée. ${moveRefusal(error)}`);
+        // La page n'a pas bougé (ou, sa réponse perdue, a peut-être bougé, R758). Ce qui a fait
+        // refuser a pu changer ailleurs : la barre latérale est relue, telle que le serveur la voit.
+        setNotice(
+          answerLost(error)
+            ? lostAnswer("la page a peut-être été déplacée", IN_SIDEBAR)
+            : `La page n'a pas pu être déplacée. ${moveRefusal(error)}`,
+        );
         reload();
       }
     },
@@ -476,7 +483,15 @@ export function usePageActions({
 
   const favoriteRefused = useCallback(
     (error: unknown, _pageId: string, on: boolean) => {
-      setNotice(`Le favori n'a pas pu être ${on ? "ajouté" : "retiré"}. ${sentence(error)}`);
+      // Une réponse perdue que la liste relue n'a pas pu trancher (`useFavorites`, R759) : le doute.
+      setNotice(
+        answerLost(error)
+          ? lostAnswer(
+              `le favori a peut-être été ${on ? "ajouté" : "retiré"}`,
+              "Regarde dans « Favoris » avant de réessayer.",
+            )
+          : `Le favori n'a pas pu être ${on ? "ajouté" : "retiré"}. ${sentence(error)}`,
+      );
       reload();
     },
     [reload],

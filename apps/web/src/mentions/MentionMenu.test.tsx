@@ -5,7 +5,7 @@ import type { Member, PageNode } from "@mementum/protocol";
 import { act } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import * as Y from "yjs";
-import { ApiError, createPage, getMembers } from "../api";
+import { ApiError, createPage, getMembers, getTree } from "../api";
 import type { RosterUser } from "../editor/collab";
 import { focusEditor } from "../editor/blocks/BlockWindowHost";
 import { EditorView } from "../editor/Editor";
@@ -14,7 +14,7 @@ import { cursor, exchange, peer, shownInline, typeAt, typeAtEnd, type Seed } fro
 import { deferred, until } from "../test/hooks";
 import { page, unauthenticated } from "../test/pages";
 import { flush, mountEditor, press, type Mounted } from "../test/richEditor";
-import { createdNotPlaced, createNotMade, createRefused, createWaits, type MentionContext } from "./MentionMenu";
+import { createdNotPlaced, createLostAndSeen, createMaybeMade, createNotMade, createRefused, createWaits, type MentionContext } from "./MentionMenu";
 import { clearNotices, MentionNotices, PAGE_LEFT } from "./notice";
 import { forgetPeople } from "./people";
 
@@ -22,6 +22,7 @@ vi.mock("../api", async (original) => ({
   ...(await original<typeof import("../api")>()),
   getMembers: vi.fn(),
   createPage: vi.fn(),
+  getTree: vi.fn(),
 }));
 
 const members = vi.mocked(getMembers);
@@ -796,4 +797,45 @@ test("a_slash_a_colon_or_an_at_sign_typed_in_a_mention_menu_belongs_to_it", asyn
   await type(m, " /");
   expect(menu()).not.toBeNull();
   expect(menu()?.getAttribute("aria-label")).not.toBe("Lier une page");
+});
+
+test("a_creation_whose_answer_is_lost_reads_the_tree_and_says_what_it_shows_without_inserting", async () => {
+  // I1 (relecture finale de la partie B, R760) : la réponse perdue en route, le serveur a pu créer la
+  // page. Ni « n'a pas pu être créée », ni mention posée au hasard : l'arbre relu dit si une page de
+  // ce titre vient d'apparaître sous celle-ci.
+  const trees = vi.mocked(getTree);
+  const tree = (nodes: PageNode[]) => ({ spaceId: "space", lsn: 2, nodes });
+  // Une page du même titre était déjà là, sous cette page : ce n'est pas elle qui vient d'apparaître.
+  const old = page(pageId(1), { title: "Compte rendu", parentId: HERE });
+  const made = page(pageId(2), { title: "Compte rendu", parentId: HERE });
+  const elsewhere = page(pageId(3), { title: "Compte rendu", parentId: pageId(1) });
+  const cases: [string, () => void, string][] = [
+    ["la page a paru", () => trees.mockResolvedValueOnce(tree([old, made])), createLostAndSeen("Compte rendu")],
+    ["rien de neuf", () => trees.mockResolvedValueOnce(tree([old])), createMaybeMade("Compte rendu")],
+    ["ailleurs que sous la page", () => trees.mockResolvedValueOnce(tree([old, elsewhere])), createMaybeMade("Compte rendu")],
+    ["arbre illisible", () => trees.mockRejectedValueOnce(new ApiError(0, null, "coupé")), createMaybeMade("Compte rendu")],
+  ];
+  for (const lost of [new ApiError(0, null, "coupé"), new ApiError(502, null, "mandataire")]) {
+    for (const [what, answerTree, said] of cases) {
+      await publish([old]);
+      const onRefused = vi.fn();
+      const m = await mount({ onRefused });
+      trees.mockReset();
+      answerTree();
+      creates.mockReset();
+      creates.mockRejectedValueOnce(lost);
+      await type(m, "[[Compte rendu");
+      await click(option("Créer la page « Compte rendu »")!);
+      await flush();
+      expect(alerts(), what).toEqual([said]);
+      expect(trees, what).toHaveBeenCalledWith("space");
+      // Rien n'est posé : on ne devine pas laquelle lier.
+      expect(mentions(m), what).toEqual([]);
+      expect(creates, what).toHaveBeenCalledTimes(1);
+      expect(said).toContain("« Compte rendu »");
+      expect(said).not.toContain("n'a pas pu");
+      act(() => clearNotices());
+      await closed(m);
+    }
+  }
 });

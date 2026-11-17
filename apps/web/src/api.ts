@@ -86,6 +86,13 @@ export class ApiError extends Error {
 
 const UNREACHABLE = "Le serveur Mementum ne répond pas. Vérifie qu'il est lancé, puis réessaie.";
 
+/**
+ * Ce que dit une **écriture** dont la réponse n'est pas celle du serveur (`answerLost`) : il a pu
+ * l'écrire quand même. Ni refus, ni invitation à refaire le geste sans regarder (R757).
+ */
+const MAYBE_DONE =
+  "La réponse du serveur n'est pas arrivée : ce que tu as demandé a peut-être été fait. Vérifie avant de réessayer.";
+
 const sessionLost = new Set<() => void>();
 const otherAccount = new Set<(me: Me) => void>();
 
@@ -109,6 +116,26 @@ export function onSessionLost(listener: () => void): () => void {
 export function onOtherAccount(listener: (me: Me) => void): () => void {
   otherAccount.add(listener);
   return () => otherAccount.delete(listener);
+}
+
+/**
+ * La réponse n'est pas celle du serveur : coupée en route (statut 0), ou une page d'erreur d'un
+ * mandataire, sans corps de l'API, au-delà de 500. **Pour une écriture, le serveur a pu aller au
+ * bout** (R651, R757) : l'écran ne dit alors ni qu'elle a été refusée, ni de la refaire sans regarder ;
+ * il relit ce qui peut l'être (l'arbre, une liste), et dit le doute (`lostAnswer`, ou le message de
+ * l'erreur, qui le dit déjà).
+ */
+export function answerLost(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false;
+  return error.status === 0 || (error.code === null && error.status >= 500);
+}
+
+/**
+ * Ce que dit une écriture dont la réponse s'est perdue : `maybe`, ce qui a peut-être été fait (« la
+ * page a peut-être été créée »), et `look`, où regarder avant de réessayer.
+ */
+export function lostAnswer(maybe: string, look: string): string {
+  return `La réponse du serveur n'est pas arrivée : ${maybe}. ${look}`;
 }
 
 /** L'erreur dit-elle que la session est perdue (et non, par exemple, un mot de passe faux) ? */
@@ -412,6 +439,7 @@ async function send(
   if (body !== undefined) headers["content-type"] = raw ? "application/octet-stream" : "application/json";
   if (account !== null) headers[ACCOUNT_HEADER] = account;
   const payload = body === undefined ? undefined : raw ? (body as Blob) : JSON.stringify(body);
+  const silent = silence(method, path);
   for (; ; replays += 1) {
     const sent = stamp();
     let res: Response;
@@ -419,7 +447,7 @@ async function send(
       res = await fetch(path, { method, headers, body: payload, signal });
     } catch (e) {
       if (signal?.aborted) throw e;
-      throw new ApiError(0, null, UNREACHABLE);
+      throw new ApiError(0, null, silent);
     }
     if (res.ok) return res;
     let error: Partial<ErrorBody> = {};
@@ -431,7 +459,7 @@ async function send(
     const failure = new ApiError(
       res.status,
       error.error ?? null,
-      error.message ?? (res.status >= 500 ? UNREACHABLE : `Erreur ${res.status} du serveur.`),
+      error.message ?? (res.status >= 500 ? silent : `Erreur ${res.status} du serveur.`),
     );
     if (failure.code === "account_changed") {
       // La session est celle d'un autre compte : l'appel n'a rien fait, et ne repart jamais. Le
@@ -448,6 +476,15 @@ async function send(
     if (verdict === "lost") for (const listener of [...sessionLost]) listener();
     throw failure;
   }
+}
+
+/**
+ * Ce que dit un appel `method path` resté sans réponse du serveur : une lecture, que le serveur ne
+ * répond pas ; une écriture, qu'elle a peut-être été faite (R757). Se connecter et se déconnecter ne
+ * laissent rien qu'on referait à tort : le serveur ne répond pas.
+ */
+function silence(method: string, path: string): string {
+  return method === "GET" || path === LOGIN || path === LOGOUT ? UNREACHABLE : MAYBE_DONE;
 }
 
 /** `GET /api/v1/me` : le compte de la session et ses espaces ; sans session, `401`. */
@@ -890,7 +927,8 @@ export async function uploadFile(pageId: string, file: File, signal?: AbortSigna
     return (await res.json()) as FileInfo;
   } catch (e) {
     if (signal?.aborted) throw e;
-    throw new ApiError(0, null, UNREACHABLE);
+    // Le corps s'est perdu après un `201` : l'écriture est faite.
+    throw new ApiError(0, null, MAYBE_DONE);
   }
 }
 
@@ -907,7 +945,8 @@ export async function copyFile(pageId: string, source: CopyFile, signal?: AbortS
     return (await res.json()) as FileInfo;
   } catch (e) {
     if (signal?.aborted) throw e;
-    throw new ApiError(0, null, UNREACHABLE);
+    // Le corps s'est perdu après un `201` : l'écriture est faite.
+    throw new ApiError(0, null, MAYBE_DONE);
   }
 }
 

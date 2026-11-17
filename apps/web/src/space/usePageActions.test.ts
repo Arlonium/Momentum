@@ -841,3 +841,45 @@ test("nothing_is_duplicated_under_a_stale_schema", async () => {
   await settle(() => app.current.actions.duplicate("a"));
   expect(duplicatePage).not.toHaveBeenCalled();
 });
+
+test("a_lost_answer_to_a_creation_a_trash_a_move_or_a_favorite_says_it_may_have_been_done", async () => {
+  // I1 (relecture finale de la partie B, R758) : la réponse perdue en route (statut 0, page d'un
+  // mandataire), le serveur a pu écrire. Ni « n'a pas pu être … », ni invitation à refaire le geste
+  // sans regarder : la barre latérale est relue.
+  const lost = () => [new ApiError(0, null, "peu importe"), new ApiError(502, null, "peu importe")];
+  const said = (maybe: string, where = "dans la barre latérale") =>
+    `La réponse du serveur n'est pas arrivée : ${maybe}. Regarde ${where} avant de réessayer.`;
+  for (const error of lost()) {
+    const app = await withTree([page("a"), page("b", { position: "a1" })]);
+    let reads = treeReads();
+    server = [page("a"), page("b", { position: "a1" }), page("c", { position: "a2" })];
+    vi.mocked(createPage).mockRejectedValueOnce(error);
+    await settle(() => app.current.actions.create({ section: "space" }));
+    expect(app.current.actions.notice).toBe(said("la page a peut-être été créée"));
+    expect(treeReads()).toBeGreaterThan(reads);
+    expect(ids(app.current.nodes)).toEqual(["a", "b", "c"]);
+    expect(location.pathname).toBe("/s/space");
+
+    reads = treeReads();
+    server = [page("a"), page("b", { position: "a1" })];
+    vi.mocked(trashPage).mockRejectedValueOnce(error);
+    await settle(() => app.current.actions.trash("c"));
+    expect(app.current.actions.notice).toBe(said("la page a peut-être été mise à la corbeille"));
+    expect(treeReads()).toBeGreaterThan(reads);
+    expect(ids(app.current.nodes)).toEqual(["a", "b"]);
+
+    reads = treeReads();
+    vi.mocked(updatePage).mockRejectedValueOnce(error);
+    await settle(() => app.current.actions.move("b", { parentId: null, afterId: null }));
+    expect(app.current.actions.notice).toBe(said("la page a peut-être été déplacée"));
+    expect(treeReads()).toBeGreaterThan(reads);
+
+    reads = treeReads();
+    await settle(() => app.current.actions.favoriteRefused(error, "b", true));
+    expect(app.current.actions.notice).toBe(said("le favori a peut-être été ajouté", "dans « Favoris »"));
+    await settle(() => app.current.actions.favoriteRefused(error, "b", false));
+    expect(app.current.actions.notice).toBe(said("le favori a peut-être été retiré", "dans « Favoris »"));
+    expect(treeReads()).toBeGreaterThan(reads);
+    await app.unmount();
+  }
+});

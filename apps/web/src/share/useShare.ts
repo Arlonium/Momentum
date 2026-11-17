@@ -24,6 +24,7 @@
 import type { Level, PageAccess } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  answerLost,
   ApiError,
   getAccess,
   inviteToPage,
@@ -223,7 +224,9 @@ export function useShare(pageId: string, open: boolean, callbacks: Callbacks): S
         if (!isSessionLost(e)) {
           const refusal = messageOf(e);
           setInviteError(refusal);
-          if (isDenied(e)) await read(refusal);
+          // Refusée faute de droit, ou sa réponse perdue (elle existe peut-être, R757) : les accès
+          // relus disent ce qu'il en est.
+          if (isDenied(e) || answerLost(e)) await read(refusal);
         }
         end();
         return false;

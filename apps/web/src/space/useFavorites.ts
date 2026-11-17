@@ -27,9 +27,15 @@
 // `onRefused` (la barre latérale est à relire : la page n'est plus visible, ou n'existe plus). Une
 // session perdue n'est pas un refus : le geste est défait sans message, la connexion est demandée
 // par-dessus l'application, et rien ne repart seul au retour du compte.
+//
+// Une réponse perdue (`answerLost` : coupée en route, ou rendue par un mandataire) n'est pas un refus
+// non plus : le serveur a pu poser le favori (R759). La liste est relue avant de rien dire, dans la
+// file des gestes. Elle montre ce qui était demandé : le geste est confirmé, sans un mot. Elle montre
+// le contraire : il n'a pas été fait, et se dit comme un refus (`NOT_DONE`). Elle ne se lit pas : le
+// geste est défait (la dernière liste lue fait foi), et le refus garde son doute.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError, getFavorites, isSessionLost, setFavorite } from "../api";
+import { answerLost, ApiError, getFavorites, isSessionLost, setFavorite } from "../api";
 import { scheduleRereads, SESSION_LOST, waitForAccount } from "../rereads";
 import { messageOf } from "../session/forms";
 import type { SpaceTree } from "./useSpaceTree";
@@ -68,6 +74,9 @@ export type FavoriteList = {
   /** Le refus du dernier geste, tel que le serveur le dit ; `null` : aucun. */
   error: string | null;
 };
+
+/** Ce que dit une réponse perdue quand la liste relue montre que rien n'a changé. */
+const NOT_DONE = "le serveur n'a pas répondu, et le favori n'a pas changé. Réessaie.";
 
 /** Aucune page : toujours le même tableau. */
 const NONE: PageNode[] = [];
@@ -218,6 +227,15 @@ export function useFavorites(
         await setFavorite(pageId, on);
       } catch (e) {
         refused = e;
+      }
+      if (answerLost(refused)) {
+        // Le serveur a pu l'écrire : la liste le dit.
+        try {
+          const { pages: read } = await getFavorites(space);
+          refused = read.includes(pageId) === on ? null : new ApiError(409, null, NOT_DONE);
+        } catch {
+          // La liste ne se lit pas : le doute reste, et se dit.
+        }
       }
       if (!mounted.current || shownSpace.current !== space) return;
       const confirmed = refused === null ? ++writes.current : null;

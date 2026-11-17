@@ -13,7 +13,7 @@
 // rend le focus au bouton, comme les fenêtres qu'il ouvre.
 import type { SpaceInfo } from "@mementum/protocol";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { createSpace, isSessionLost, logOut } from "../api";
+import { answerLost, createSpace, isSessionLost, logOut } from "../api";
 import { CheckIcon, ChevronDownIcon, KeyIcon, LogOutIcon, PlusIcon, SettingsIcon } from "../icons";
 import { navigate, spacePath, spaceSettingsPath } from "../router";
 import { Field, FormError, messageOf } from "../session/forms";
@@ -255,6 +255,8 @@ export function CreateSpaceDialog({ onClose }: { onClose: () => void }) {
       // Session perdue : la connexion est demandée par-dessus ; le nom reste dans le champ.
       if (isSessionLost(e)) return;
       setError(messageOf(e));
+      // Sa réponse perdue, l'espace existe peut-être (R757) : la liste des espaces, relue, le dit.
+      if (answerLost(e)) void refresh().catch(() => {});
       fieldRef.current?.focus();
       fieldRef.current?.select();
     }

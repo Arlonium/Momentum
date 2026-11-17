@@ -4,7 +4,7 @@
 // serveur le refuse.
 import type { Favorites } from "@mementum/protocol";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { ApiError, getFavorites, setFavorite } from "../api";
+import { answerLost, ApiError, getFavorites, setFavorite } from "../api";
 import { deferred, renderHook, settle, type Deferred } from "../test/hooks";
 import { notFound, page, unauthenticated, unreachable } from "../test/pages";
 import { favoritePages, useFavorites, type FavoritesOptions } from "./useFavorites";
@@ -292,9 +292,11 @@ test("a_toggle_refused_by_a_lost_session_is_put_back_without_a_message", async (
   expect(rendered.current.pages).toEqual(["a"]);
   expect(rendered.current.error).toBeNull();
   expect(onRefused).not.toHaveBeenCalled();
-  // Un serveur injoignable, lui, se dit.
+  // Un serveur injoignable, lui, se dit, une fois la liste demandée sans réponse non plus (R759).
+  const asked = reads.length;
   await settle(() => void rendered.current.toggle("b"));
   await settle(() => writes[1].answer.reject(unreachable()));
+  await settle(() => reads[asked].answer.reject(unreachable()));
   expect(rendered.current.error).toBe("Le serveur Mementum ne répond pas.");
   expect(onRefused).toHaveBeenCalledTimes(1);
 });
@@ -374,4 +376,70 @@ test("pages_added_here_are_shown_in_the_order_of_their_last_gesture", async () =
   expect(rendered.current.pages).toEqual(["y"]);
   await settle(() => void rendered.current.toggle("x"));
   expect(rendered.current.pages).toEqual(["y", "x"]);
+});
+
+// Une réponse perdue (relecture finale de la partie B, I1, R759) : le serveur a peut-être posé le
+// favori. La liste est relue avant de rien dire.
+
+const lostAnswers = () => [new ApiError(0, null, "coupé"), new ApiError(502, null, "mandataire")];
+
+test("a_toggle_whose_answer_is_lost_reads_the_list_and_says_nothing_if_it_was_done", async () => {
+  for (const lost of lostAnswers()) {
+    const onRefused = vi.fn();
+    const rendered = await loaded(["a"], { onRefused });
+    const first = reads.length;
+    await settle(() => void rendered.current.toggle("b"));
+    await settle(() => writes[writes.length - 1].answer.reject(lost));
+    // Rien n'est encore défait ni dit : la liste est relue.
+    expect(rendered.current.pages).toEqual(["a", "b"]);
+    expect(reads).toHaveLength(first + 1);
+    await answer(first, ["a", "b"]);
+    // Le serveur l'avait fait : aucun refus, le favori reste.
+    expect(onRefused).not.toHaveBeenCalled();
+    expect(rendered.current.error).toBeNull();
+    expect(rendered.current.pages).toEqual(["a", "b"]);
+    // De même pour un retrait.
+    await advance(0);
+    for (let i = first + 1; i < reads.length; i += 1) await answer(i, ["a", "b"]);
+    const second = reads.length;
+    await settle(() => void rendered.current.toggle("a"));
+    await settle(() => writes[writes.length - 1].answer.reject(lost));
+    await answer(second, ["b"]);
+    expect(onRefused).not.toHaveBeenCalled();
+    expect(rendered.current.pages).toEqual(["b"]);
+    await rendered.unmount();
+  }
+});
+
+test("a_toggle_whose_answer_is_lost_and_was_not_done_is_put_back_and_said_as_a_refusal", async () => {
+  const onRefused = vi.fn();
+  const rendered = await loaded(["a"], { onRefused });
+  const first = reads.length;
+  await settle(() => void rendered.current.toggle("b"));
+  await settle(() => writes[0].answer.reject(lostAnswers()[1]));
+  await answer(first, ["a"]);
+  // La liste relue ne le porte pas : il n'a pas été posé. Défait, et dit comme un refus, ce qui est vrai.
+  expect(rendered.current.pages).toEqual(["a"]);
+  expect(onRefused).toHaveBeenCalledTimes(1);
+  const [error, pageId, on] = onRefused.mock.calls[0] as [ApiError, string, boolean];
+  expect([pageId, on]).toEqual(["b", true]);
+  expect(answerLost(error)).toBe(false);
+  expect(error.message).toBe("le serveur n'a pas répondu, et le favori n'a pas changé. Réessaie.");
+});
+
+test("a_toggle_whose_answer_is_lost_and_whose_list_cannot_be_read_says_it_may_have_been_done", async () => {
+  const onRefused = vi.fn();
+  const rendered = await loaded(["a"], { onRefused });
+  const first = reads.length;
+  await settle(() => void rendered.current.toggle("b"));
+  const lost = lostAnswers()[0];
+  await settle(() => writes[0].answer.reject(lost));
+  await settle(() => reads[first].answer.reject(unreachable()));
+  // On ne sait pas : le geste est défait (la dernière liste lue fait foi), et le message dit le doute.
+  expect(rendered.current.pages).toEqual(["a"]);
+  expect(onRefused).toHaveBeenCalledTimes(1);
+  expect(answerLost(onRefused.mock.calls[0][0])).toBe(true);
+  // Un geste suivant attendait derrière la relecture : il part ensuite.
+  await settle(() => void rendered.current.toggle("c"));
+  expect(writes).toHaveLength(2);
 });

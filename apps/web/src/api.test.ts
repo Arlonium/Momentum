@@ -1433,3 +1433,45 @@ test("a_copy_of_a_file_names_its_source_in_the_body_and_the_account_in_the_heade
   await expect(refused).rejects.toMatchObject({ status: 422, code: "invalid_source" });
   expect(asked).toBe(0);
 });
+
+// Une réponse perdue après que le serveur a peut-être écrit (relecture finale de la partie B, I1, R757).
+
+test("a_lost_answer_to_a_write_says_it_may_have_been_done_and_to_a_read_that_the_server_is_silent", async () => {
+  await loadedAs("alice");
+  const MAYBE =
+    "La réponse du serveur n'est pas arrivée : ce que tu as demandé a peut-être été fait. Vérifie avant de réessayer.";
+  const SILENT = "Le serveur Mementum ne répond pas. Vérifie qu'il est lancé, puis réessaie.";
+  const failed = async (call: Promise<unknown>) => call.then(() => null, (error: unknown) => error as InstanceType<typeof api.ApiError>);
+  // Une écriture : coupée en route, ou rendue par un mandataire sans corps de l'API.
+  const ways: ((call: Received) => void)[] = [(c) => c.fail(), (c) => c.answerLostBody(502), (c) => c.answerLostBody(504)];
+  for (const way of ways) {
+    const creating = failed(api.createPage({ spaceId: "s1", section: "space" }));
+    way(await waiting("POST", "/api/v1/pages"));
+    const error = (await creating)!;
+    expect(error.message).toBe(MAYBE);
+    expect(api.answerLost(error)).toBe(true);
+    const reading = failed(api.getTree("s1"));
+    way(await waiting("GET", "/api/v1/spaces/s1/tree"));
+    const silent = (await reading)!;
+    expect(silent.message).toBe(SILENT);
+    expect(api.answerLost(silent)).toBe(true);
+  }
+  // Une réponse dont le corps se perd après un `201` : l'écriture est faite, la réponse non lue.
+  const uploading = failed(api.copyFile("p1", { pageId: "p2", fileId: "f1" }));
+  (await waiting("POST", "/api/v1/pages/p1/files/copies")).answerLostBody(201);
+  expect((await uploading)!.message).toBe(MAYBE);
+  // Le serveur lui-même répond (une erreur de l'API, `500 internal` compris) : ce n'est pas une réponse perdue.
+  const refused = failed(api.createPage({ spaceId: "s1", section: "space" }));
+  (await waiting("POST", "/api/v1/pages")).answer(500, { error: "internal", message: "erreur interne du serveur" });
+  const internal = (await refused)!;
+  expect(internal.message).toBe("erreur interne du serveur");
+  expect(api.answerLost(internal)).toBe(false);
+  expect(api.answerLost(new Error("autre chose"))).toBe(false);
+  // Se connecter ou se déconnecter n'écrit rien qu'on puisse refaire à tort : le serveur ne répond pas.
+  const leaving = failed(api.logOut());
+  (await waiting("POST", "/api/v1/auth/logout")).fail();
+  expect((await leaving)!.message).toBe(SILENT);
+  expect(api.lostAnswer("la page a peut-être été créée", "Regarde dans la barre latérale avant de réessayer.")).toBe(
+    "La réponse du serveur n'est pas arrivée : la page a peut-être été créée. Regarde dans la barre latérale avant de réessayer.",
+  );
+});

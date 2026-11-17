@@ -27,12 +27,12 @@ import { SuggestionMenu } from "@blocknote/core/extensions";
 import { SuggestionMenuController, type SuggestionMenuProps } from "@blocknote/react";
 import type { Transaction } from "prosemirror-state";
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { createPage, isSessionLost } from "../api";
+import { answerLost, createPage, getTree, isSessionLost, lostAnswer } from "../api";
 import type { RosterUser } from "../editor/collab";
 import type { MementumEditor } from "../editor/debug";
 import { PageIcon, PlusIcon } from "../icons";
 import { messageOf } from "../session/forms";
-import { findPages, pageTitle } from "../space/pageDirectory";
+import { findPages, pageTitle, publishedTitles } from "../space/pageDirectory";
 import { firstClick } from "../ui/firstClick";
 import { dateId, dateLabel, suggestDates } from "./dates";
 import { PAGE_LEFT, postNotice, settleNotice } from "./notice";
@@ -138,6 +138,12 @@ export function bracketItems(query: string, context: MentionContext): MentionIte
  * mention n'a pas trouvé sa place. Chacun nomme le titre.
  */
 export const createRefused = (title: string, message: string) => `La page « ${title} » n'a pas pu être créée. ${message}`;
+/** La réponse d'une création s'est perdue, et l'arbre relu montre une page neuve de ce titre sous la page. */
+export const createLostAndSeen = (title: string) =>
+  `La réponse du serveur n'est pas arrivée, mais une page « ${title} » vient d'apparaître sous celle-ci : elle a sans doute été créée. Sa mention n'est pas posée : tape [[ pour la lier, sans la créer de nouveau.`;
+/** La réponse d'une création s'est perdue, et rien ne dit si la page a été créée. */
+export const createMaybeMade = (title: string) =>
+  lostAnswer(`la page « ${title} » a peut-être été créée`, "Regarde dans la barre latérale avant de réessayer.");
 export const createWaits = (title: string) =>
   `La page « ${title} » n'est pas encore créée : ta session a pris fin. Elle sera créée et liée ici dès que tu te seras reconnecté.`;
 export const createNotMade = (title: string) =>
@@ -247,6 +253,28 @@ function insertMentionAt(editor: MementumEditor, place: Place, mention: MentionP
   }
 }
 
+/** Un titre, sans ce que le serveur normalise : espaces de bord et suites d'espaces. */
+const plain = (title: string) => title.normalize("NFC").replace(/\s+/g, " ").trim();
+
+/**
+ * L'arbre de l'espace, relu, porte-t-il sous la page de `context` une page de titre `title` que
+ * `known` (les pages d'avant la demande) n'avait pas ? Faux aussi quand l'arbre ne se lit pas.
+ */
+async function appeared(context: MentionContext, title: string, known: ReadonlyMap<string, string>): Promise<boolean> {
+  try {
+    const { nodes } = await getTree(context.spaceId);
+    return nodes.some(
+      (node) =>
+        node.parentId === context.pageId &&
+        node.trashedAt === null &&
+        !known.has(node.id) &&
+        plain(node.title) === plain(title),
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Crée la sous-page `title` de la page de `context`, puis pose sa mention à `place` dans `editor`.
  * Tant que la mention n'est pas posée, un message nomme le titre (`notice.tsx`) : il ne dépend ni de
@@ -254,6 +282,8 @@ function insertMentionAt(editor: MementumEditor, place: Place, mention: MentionP
  */
 async function createAndMention(editor: MementumEditor, context: MentionContext, title: string, place: Place): Promise<void> {
   const ask = () => createPage({ parentId: context.pageId, title });
+  // Les pages que l'arbre porte avant la demande : pour reconnaître celle d'une réponse perdue.
+  const known = publishedTitles();
   /** Le message d'attente du compte, s'il est posé. */
   let waiting: number | null = null;
   try {
@@ -275,6 +305,14 @@ async function createAndMention(editor: MementumEditor, context: MentionContext,
     if (error === PAGE_LEFT) {
       // La page a été quittée avant le retour du compte : rien ne sera créé, le message cesse de le promettre.
       settleNotice(waiting, createNotMade(title));
+      return;
+    }
+    if (answerLost(error)) {
+      // Le serveur a pu créer la page (R760) : ni refus, ni mention posée au hasard. L'arbre relu dit
+      // si une page de ce titre vient d'apparaître sous celle-ci ; la barre latérale la reçoit par le
+      // canal de l'espace.
+      const seen = await appeared(context, title, known);
+      settleNotice(waiting, seen ? createLostAndSeen(title) : createMaybeMade(title));
       return;
     }
     settleNotice(waiting, createRefused(title, messageOf(error)));

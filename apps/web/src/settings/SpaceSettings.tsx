@@ -33,6 +33,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  answerLost,
   ApiError,
   inviteToSpace,
   isSessionLost,
@@ -511,7 +512,11 @@ function InvitationsSection({ spaceId, invitations, reload, onRefused }: Invitat
         // Plus le rôle qu'il faut : cette section va disparaître, le refus se dit en tête.
         onRefused(messageOf(e));
         await reload();
-      } else setError(messageOf(e));
+      } else {
+        setError(messageOf(e));
+        // Sa réponse perdue, l'invitation existe peut-être (R757) : la liste relue le dit.
+        if (answerLost(e)) await reload();
+      }
       return;
     }
     setCreated({ email: email.trim().toLowerCase(), role, link: invitationLink(token) });

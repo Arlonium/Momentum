@@ -77,6 +77,14 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/**
+ * Les pages que l'arbre affiché porte à cet instant, par id : une photo, qui ne change plus (chaque
+ * arbre publié en fait une neuve). Pour reconnaître plus tard une page qui vient d'apparaître.
+ */
+export function publishedTitles(): ReadonlyMap<string, string> {
+  return directory.titles;
+}
+
 /** Le titre à jour de la page `id` si le compte la voit dans l'espace affiché, sinon `null`. */
 export function pageTitle(id: string): string | null {
   return directory.titles.get(id) ?? null;
