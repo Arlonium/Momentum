@@ -8,7 +8,7 @@ import { dropAdoption } from "./adoptDrop";
 import { textProp } from "./blocks/props";
 import type { MementumEditor } from "./debug";
 import { fileLimits, uploader, type UploaderOptions } from "./files";
-import { copier } from "./provenance";
+import { copier, taking } from "./provenance";
 
 /** Ce que la page donne à l'éditeur pour envoyer : ce qu'elle dit d'un envoi, et de quoi la relire. */
 export type PageUploads = Pick<UploaderOptions, "onRefused" | "reread"> & {
@@ -68,17 +68,19 @@ export function sessionPaste(
  * provenance, au nom du compte de l'application (`provenance.ts`, R746). Rend de quoi arrêter.
  */
 export function sessionStamps(pageId: string): () => void {
-  return stampGestures(pageId, () => copier(expectedAccount()));
+  return stampGestures(pageId, (way) => taking(expectedAccount(), way));
 }
 
 /** De quoi rattacher à la page `pageId` les fichiers d'autres pages : la recopie, et ce que la page en dit. */
 function adoption(pageId: string, files: () => PageUploads | null, signal: AbortSignal): AdoptOptions {
   return {
     pageId,
-    copier: () => copier(expectedAccount()),
+    copier: (way) => copier(expectedAccount(), way),
     copy: copyFile,
     signal,
     onAdopted: (message) => files()?.onAdopted?.(message),
+    // Le même état, à la même place : un fichier posé qui reste celui de sa page d'origine (R778).
+    onKept: (message) => files()?.onAdopted?.(message),
     onRefused: (message) => files()?.onRefused(message),
     reread: () => files()?.reread() ?? Promise.resolve(undefined),
   };

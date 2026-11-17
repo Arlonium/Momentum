@@ -39,7 +39,7 @@ import {
 import { flushSync } from "react-dom";
 import { getInfo, getMe, isSessionLost, onOtherAccount, onSessionLost } from "../api";
 import { navigate, pagePath, parseRoute, usePathname } from "../router";
-import { forgetOtherClipboardSecrets } from "../editor/provenance";
+import { forgetOtherClipboardSecrets, renewClipboardSecret } from "../editor/provenance";
 import { forgetOtherRecents } from "../space/recents";
 import { AuthScreen, messageOf } from "./forms";
 import { invitationTarget, InvitePage, takeInvitationToken } from "./InvitePage";
@@ -123,6 +123,19 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
     setState({ name: "signedIn", me, lost: false });
   }, []);
 
+  /**
+   * L'onglet vient d'ouvrir la session par un formulaire (connexion, inscription, session rouverte
+   * par-dessus l'application) : le secret qui marque ce que le compte copie est tiré à neuf (R777),
+   * puis le compte entre.
+   */
+  const open = useCallback(
+    (me: Me) => {
+      renewClipboardSecret(me.user.id);
+      enter(me);
+    },
+    [enter],
+  );
+
   /** Où aller en quittant l'inscription, quand ce n'est pas l'accueil : la page de l'invitation. */
   const landing = useRef<string | null>(null);
 
@@ -133,9 +146,9 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
       const page = invited !== null && invited.pageTitle !== null ? await invitedPage(me) : null;
       landing.current = page === null ? null : pagePath(page);
       forgetInvitation();
-      enter(me);
+      open(me);
     },
-    [enter, forgetInvitation, invited],
+    [open, forgetInvitation, invited],
   );
 
   const load = useCallback(async () => {
@@ -261,9 +274,9 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
   /** La session est rouverte par-dessus l'application (`LoginDialog`) : elle reprend. */
   const resume = useCallback(
     (me: Me) => {
-      if (sameAccount(me)) enter(me);
+      if (sameAccount(me)) open(me);
     },
-    [enter, sameAccount],
+    [open, sameAccount],
   );
 
   const showSignup = useCallback(() => navigate("/signup"), []);
@@ -336,7 +349,7 @@ export function SessionGate({ children, reload = reloadTab }: Props) {
         notice={state.accountExists ? ACCOUNT_EXISTS : undefined}
         invitation={answering}
         onSignup={showSignup}
-        onLoggedIn={enter}
+        onLoggedIn={open}
       />
     );
   }

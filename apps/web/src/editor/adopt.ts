@@ -45,7 +45,7 @@ import { canEdit } from "../share/levels";
 import type { MementumEditor } from "./debug";
 import { blocksNaming } from "./fileBlocks";
 import { filePath } from "./files";
-import { markedPage, ORIGIN, originMark, vouches, type Copier } from "./provenance";
+import { markedPage, ORIGIN, originMark, vouches, type Copier, type Way } from "./provenance";
 
 /** Le plus de fichiers d'autres pages qu'un collage ou un dépôt fait recopier. */
 export const MAX_ADOPTED_FILES = 100;
@@ -53,14 +53,22 @@ export const MAX_ADOPTED_FILES = 100;
 export type AdoptOptions = {
   /** La page où l'on colle. */
   pageId: string;
-  /** Qui colle : le compte de l'onglet et le secret de son navigateur (`provenance.ts`) ; `null` : personne. */
-  copier: () => Copier | null;
+  /**
+   * Qui pose ce qui est venu par le presse-papiers ou par un glisser : le compte de l'onglet, le secret
+   * de son navigateur et le jeton de son dernier geste de cette sorte (`provenance.ts`) ; `null` : personne.
+   */
+  copier: (way: Way) => Copier | null;
   /** La recopie d'une attache (`copyFile` d'`api.ts`). */
   copy: (pageId: string, source: CopyFile, signal?: AbortSignal) => Promise<FileInfo>;
   /** Annulé quand l'éditeur de la page part : plus rien n'est recopié ni écrit. */
   signal: AbortSignal;
   /** Des fichiers d'autres pages ont été rattachés à celle-ci : ce que la page en dit (un état). */
   onAdopted: (message: string) => void;
+  /**
+   * Le geste a posé des blocs de fichier d'autres pages que rien ne permettait de rattacher (aucune
+   * marque admise) : ce que la page en dit (un état, R778).
+   */
+  onKept: (message: string) => void;
   /** Des fichiers posés n'ont pas pu être rattachés à la page : ce qu'elle en dit (une alerte). */
   onRefused: (message: string) => void;
   /** Relit la page (`usePageGate`), le compte revenu s'il le fallait. */
@@ -104,16 +112,20 @@ const BLOCKS = "blocknote/html";
 
 /**
  * Joint à ce que BlockNote vient d'écrire dans un presse-papiers ou un glisser (`blocknote/html`) la
- * marque de provenance (`provenance.ts`), si ce bloc nomme des fichiers de la page `pageId` d'où `by`
- * le copie. Rien d'autre n'est touché ; sans bloc de Mementum, sans fichier de cette page (un bloc qui
- * nomme le fichier d'une autre page n'emporte pas ce fichier, R748) ou sans copieur, rien n'est écrit.
+ * marque de provenance (`provenance.ts`), si ce bloc nomme des fichiers de la page `pageId` d'où on
+ * le copie. `take` est appelé dès que le geste porte des blocs de Mementum, qu'ils nomment un fichier ou
+ * non : il tire le jeton de ce geste, et ce qui avait été copié avant n'est plus reconnu (R776). Rien
+ * d'autre n'est touché ; sans bloc de Mementum, rien n'est fait ; sans fichier de cette page (un bloc
+ * qui nomme le fichier d'une autre page n'emporte pas ce fichier, R748) ou sans copieur, rien n'est écrit.
  */
 export function stampOrigin(
   data: Pick<DataTransfer, "types" | "getData" | "setData"> | null,
   pageId: string,
-  by: Copier | null,
+  take: () => Copier | null,
 ): void {
-  if (data === null || by === null || !Array.from(data.types).includes(BLOCKS)) return;
+  if (data === null || !Array.from(data.types).includes(BLOCKS)) return;
+  const by = take();
+  if (by === null) return;
   const files = filesOf([data.getData(BLOCKS)], pageId);
   if (files.size > 0) data.setData(ORIGIN, originMark(by, pageId, files.keys()));
 }
@@ -128,10 +140,10 @@ const STAMPED = ["copy", "cut", "dragstart"] as const;
  * dont le glisser part d'un bouton hors de la vue de l'éditeur. Un aperçu de version de la page copie
  * des blocs de la même page. Rend de quoi ne plus écouter.
  */
-export function stampGestures(pageId: string, by: () => Copier | null): () => void {
+export function stampGestures(pageId: string, take: (way: Way) => Copier | null): () => void {
   const stamp = (event: Event) => {
     const data = (event as ClipboardEvent).clipboardData ?? (event as DragEvent).dataTransfer ?? null;
-    stampOrigin(data, pageId, by());
+    stampOrigin(data, pageId, () => take(event.type === "dragstart" ? "drag" : "copy"));
   };
   for (const type of STAMPED) document.addEventListener(type, stamp);
   return () => {
@@ -163,18 +175,51 @@ export function carriedFiles(
 }
 
 /**
- * Juste avant un geste qui pose des blocs (un collage, un dépôt) : relève les blocs qui nomment déjà
- * les fichiers `foreign`, et rend ce qu'il faut appeler une fois les blocs posés : les blocs neufs
- * qui les nomment sont rattachés à la page (`adoptForeignFiles`), sans l'attendre.
+ * Les fichiers d'une autre page que `pageId` que nomme ce que porte un presse-papiers ou un glisser,
+ * sous n'importe lequel de ses types de texte, et que rien ne permet de rattacher (ils ne sont pas dans
+ * `adopted`) : un bloc copié dans un autre navigateur ou avant le dernier geste, un texte venu d'ailleurs
+ * (R713), un bloc qui nommait déjà le fichier d'une autre page que la sienne (R748).
  */
-export function watchPosed(editor: MementumEditor, foreign: ReadonlyMap<string, CopyFile>, options: AdoptOptions): () => void {
-  const urls = new Set(foreign.keys());
+export function unvouchedFiles(
+  data: Pick<DataTransfer, "types" | "getData"> | null,
+  pageId: string,
+  adopted: ReadonlyMap<string, CopyFile>,
+): Set<string> {
+  if (data === null) return new Set();
+  const texts = Array.from(data.types)
+    .filter((type) => type !== ORIGIN && type !== "Files")
+    .map((type) => data.getData(type));
+  return new Set([...foreignFiles(texts, pageId).keys()].filter((path) => !adopted.has(path)));
+}
+
+const keptAsIs = (n: number) =>
+  n === 1
+    ? "Ce fichier reste celui de sa page d'origine : seuls ceux qui la lisent le voient."
+    : `Ces ${n} fichiers restent ceux de leur page d'origine : seuls ceux qui la lisent les voient.`;
+
+/**
+ * Juste avant un geste qui pose des blocs (un collage, un dépôt) : relève les blocs qui nomment déjà
+ * les fichiers `foreign` (à rattacher) et `unvouched` (que rien ne permet de rattacher), et rend ce
+ * qu'il faut appeler une fois les blocs posés : les blocs neufs qui nomment les premiers sont rattachés
+ * à la page (`adoptForeignFiles`), sans l'attendre ; pour ceux qui nomment les seconds, la page dit, une
+ * fois par geste, que ces fichiers restent ceux de leur page d'origine (`onKept`, R778).
+ */
+export function watchPosed(
+  editor: MementumEditor,
+  foreign: ReadonlyMap<string, CopyFile>,
+  options: AdoptOptions,
+  unvouched: ReadonlySet<string> = new Set(),
+): () => void {
+  const urls = new Set([...foreign.keys(), ...unvouched]);
   const before = blocksNaming(editor, urls);
   return () => {
     if (options.signal.aborted || !editor.isEditable) return;
-    const posed = new Map([...blocksNaming(editor, urls)].filter(([id]) => !before.has(id)));
-    if (posed.size === 0) return;
-    void adoptForeignFiles(editor, posed, options).catch((error: unknown) => {
+    const posed = [...blocksNaming(editor, urls)].filter(([id]) => !before.has(id));
+    const left = new Set(posed.filter(([, url]) => !foreign.has(url)).map(([, url]) => url));
+    if (left.size > 0) options.onKept(keptAsIs(left.size));
+    const adopted = new Map(posed.filter(([, url]) => foreign.has(url)));
+    if (adopted.size === 0) return;
+    void adoptForeignFiles(editor, adopted, options).catch((error: unknown) => {
       console.error("Les fichiers posés n'ont pas pu être rattachés à la page :", error);
     });
   };
@@ -194,11 +239,11 @@ type PasteContext = {
 export function adoptingPaste(options: AdoptOptions): (context: PasteContext) => boolean | undefined {
   return ({ event, editor: given, defaultPasteHandler }) => {
     const editor = given as MementumEditor;
-    const foreign = editor.isEditable
-      ? carriedFiles(event.clipboardData, options.pageId, options.copier())
-      : new Map<string, CopyFile>();
-    if (foreign.size === 0) return defaultPasteHandler();
-    const posed = watchPosed(editor, foreign, options);
+    if (!editor.isEditable) return defaultPasteHandler();
+    const foreign = carriedFiles(event.clipboardData, options.pageId, options.copier("copy"));
+    const unvouched = unvouchedFiles(event.clipboardData, options.pageId, foreign);
+    if (foreign.size === 0 && unvouched.size === 0) return defaultPasteHandler();
+    const posed = watchPosed(editor, foreign, options, unvouched);
     const handled = defaultPasteHandler();
     posed();
     return handled;

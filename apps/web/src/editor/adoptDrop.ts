@@ -11,7 +11,7 @@
 // l'événement : le dépôt reste celui de BlockNote et de ProseMirror.
 import { createExtension } from "@blocknote/core";
 import { Plugin, PluginKey } from "prosemirror-state";
-import { carriedFiles, watchPosed, type AdoptOptions } from "./adopt";
+import { carriedFiles, unvouchedFiles, watchPosed, type AdoptOptions } from "./adopt";
 import type { MementumEditor } from "./debug";
 
 const adoptDropKey = new PluginKey("mementum-adopt-drop");
@@ -30,9 +30,11 @@ export function dropAdoption(editor: () => MementumEditor | null, options: Adopt
             drop(view, event) {
               const current = editor();
               if (current === null || !current.isEditable || view.dragging != null) return false;
-              const foreign = carriedFiles((event as DragEvent).dataTransfer, options.pageId, options.copier());
-              if (foreign.size === 0) return false;
-              const posed = watchPosed(current, foreign, options);
+              const data = (event as DragEvent).dataTransfer;
+              const foreign = carriedFiles(data, options.pageId, options.copier("drag"));
+              const unvouched = unvouchedFiles(data, options.pageId, foreign);
+              if (foreign.size === 0 && unvouched.size === 0) return false;
+              const posed = watchPosed(current, foreign, options, unvouched);
               // Une fois le dépôt traité par tous ses écouteurs (une tâche plus tard).
               setTimeout(posed, 0);
               return false;
