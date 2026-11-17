@@ -459,6 +459,87 @@ fn values_placed_after_page_items(n: usize) -> Sent {
     Sent { state, update }
 }
 
+/// I2 de la relecture (Ruling R704) : une rafale de mises à jour d'une valeur, chacune placée
+/// après la dernière lettre d'un texte de `n` lettres. La recherche de l'origine suit les voisins
+/// de gauche (tout le texte) ; chaque mise à jour est refusée à sa première recherche, avant
+/// d'être appliquée : la rafale coûte une recherche par mise à jour, jamais 64.
+fn burst_after_the_last_letter(n: usize) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let sent = values_placed_after_page_items(n);
+    // Les lettres sont insérées en tête : la dernière du texte est la première écrite.
+    let first = {
+        let doc = client_of(12, &sent.state);
+        let txn = doc.transact();
+        // Le texte est le dernier type écrit par le client 9 avant ses lettres.
+        txn.state_vector().get(&yrs::ClientID::new(9)) - n as u32
+    };
+    let updates = (0..BURST)
+        .map(|k| {
+            let mut update = Vec::new();
+            var(&mut update, 1);
+            var(&mut update, 64);
+            var(&mut update, 100 + k as u64);
+            var(&mut update, 0);
+            for j in 0..64u64 {
+                update.push(0x88);
+                var(&mut update, 9);
+                var(&mut update, u64::from(first) + j);
+                var(&mut update, 1);
+                update.extend_from_slice(&[119, 1, b'z']);
+            }
+            update.push(0);
+            update
+        })
+        .collect();
+    (sent.state, updates)
+}
+
+/// Mises à jour d'une rafale.
+const BURST: usize = 16;
+
+#[test]
+fn a_burst_of_values_placed_after_a_letter_costs_one_lookup_each() {
+    let forms = [Form {
+        what: "rafale de valeurs placées après la dernière lettre d'un texte",
+        build: &burst_after_the_last_letter,
+    }];
+    let size = |(state, updates): &(Vec<u8>, Vec<Vec<u8>>)| {
+        state.len() + updates.iter().map(Vec::len).sum::<usize>()
+    };
+    let judge = |(state, updates): &(Vec<u8>, Vec<Vec<u8>>)| {
+        let page = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let before = Instant::now();
+        let refused = updates
+            .iter()
+            .filter(|update| matches!(page.try_client_update(update), Err(r) if r.intact))
+            .count();
+        assert_eq!(
+            refused, BURST,
+            "chaque mise à jour est refusée avant d'être appliquée"
+        );
+        before.elapsed()
+    };
+    // Le pic est celui de la page chargée (un élément de yrs par lettre : 98 octets par octet
+    // d'état, relevé), pas celui de la garde ; c'est le temps que ce test borne.
+    let limits = Limits {
+        peak_per_byte: 128,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&forms, size, judge, |_| 0, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // La borne absolue : la rafale entière, sur un texte de 160 000 lettres, coûte moins que deux
+    // chargements de la page (une recherche par mise à jour, pas soixante-quatre).
+    let input = burst_after_the_last_letter(160_000);
+    let load = Instant::now();
+    let page = PageDoc::from_updates([input.0.as_slice()]).unwrap();
+    let load = load.elapsed();
+    drop(page);
+    let burst = judge(&input);
+    assert!(
+        burst < load * 2,
+        "rafale de {BURST} mises à jour : {burst:?}, pour un chargement de {load:?}"
+    );
+}
+
 /// Garde des attributs (Rulings R689 à R691) : juger une mise à jour, d'un client comme relue du
 /// journal, croît comme elle et comme la page. Trois formes : des blocs nombreux aux attributs
 /// fautifs, un attribut écrasé de nombreuses fois, et des valeurs placées par des origines de la

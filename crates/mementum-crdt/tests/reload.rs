@@ -643,6 +643,39 @@ enum Op {
         raced: bool,
         stored: bool,
     },
+    /// Un client de passage écrase la couleur de fond du premier bloc par un contenu qui n'est
+    /// pas une valeur `Any` (`other_content`) : reçu d'un client, ou déjà au journal (`stored`).
+    Content { kind: usize, stored: bool },
+}
+
+/// La mise à jour honnête `honest` (un client de passage écrase `backgroundColor` par « x »),
+/// récrite à la main pour porter, à la place de la valeur, un contenu qui n'est pas une valeur
+/// `Any` (Ruling R702) : du JSON, une chaîne, un objet incorporé. Telle quelle si elle n'a pas la
+/// forme attendue (le bloc n'est plus là).
+fn other_content(honest: &[u8], kind: usize) -> Vec<u8> {
+    const OBJECT: &[u8] = br#"{"toString":1}"#;
+    let (info, body): (u8, Vec<u8>) = match kind % 3 {
+        0 => (0x82, [&[0, OBJECT.len() as u8][..], OBJECT].concat()),
+        1 => (0x84, vec![3, b'r', b'e', b'd']),
+        _ => (0x85, [&[OBJECT.len() as u8][..], OBJECT].concat()),
+    };
+    let value = [1, 119, 1, b'x'];
+    // Un client, un élément, l'identifiant du client, l'horloge 0, puis l'octet d'en-tête.
+    let Some(at) = honest.windows(value.len()).position(|w| w == value) else {
+        return honest.to_vec();
+    };
+    let Some(head) = honest[..at].iter().position(|b| *b == 0xA8) else {
+        return honest.to_vec();
+    };
+    if honest[..2] != [1, 1] || honest[head - 1] != 0 {
+        return honest.to_vec();
+    }
+    let mut out = honest[..head].to_vec();
+    out.push(info);
+    out.extend_from_slice(&honest[head + 1..at]);
+    out.extend_from_slice(&body);
+    out.extend_from_slice(&honest[at + value.len()..]);
+    out
 }
 
 /// Les attributs posés par `Op::Attr` : du type du registre, ou non (un objet, une liste,
@@ -685,6 +718,15 @@ fn attribute(doc: &Doc, on_container: bool, key: &str, value: Any) -> Vec<u8> {
 /// Aucun élément de la page ne porte un attribut qu'aucun client du schéma n'écrit : un objet,
 /// une liste, des octets, `null` (les seules valeurs fautives que ces tests posent).
 fn assert_attrs_are_sound(page: &PageDoc, what: &str) {
+    // La lecture de contrôle ne se fie pas à ce que yrs rend d'une valeur (R702 : il rend la
+    // chaîne d'un contenu JSON, toute une chaîne là où Yjs lit un caractère) : l'état servi est
+    // relu dans ses octets, comme lib0 le lirait, par la garde elle-même.
+    let empty = PageDoc::from_updates(std::iter::empty::<&[u8]>()).unwrap();
+    assert_eq!(
+        empty.attribute_refusal(&page.encode_state()).unwrap(),
+        None,
+        "{what} : l'état servi, relu dans ses octets"
+    );
     let doc = page.yrs_doc();
     let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
     let txn = doc.transact();
@@ -750,6 +792,7 @@ fn op() -> impl Strategy<Value = Op> {
                 raced,
                 stored,
             }),
+        (0..3usize, any::<bool>()).prop_map(|(kind, stored)| Op::Content { kind, stored }),
     ]
 }
 
@@ -866,6 +909,18 @@ proptest! {
                         served.assert_reload_is_live(&format!("étape {step} ({op:?}), la course"));
                     }
                     let update = attribute(&passing[1], *on_container, key, value);
+                    if *stored {
+                        served.journal.push(update);
+                        served.page = served.reloaded();
+                        vec![0, 0]
+                    } else {
+                        update
+                    }
+                }
+                Op::Content { kind, stored } => {
+                    let passing = client(5_000 + step as u64, &served);
+                    let honest = attribute(&passing, false, "backgroundColor", Any::from("x"));
+                    let update = other_content(&honest, *kind);
                     if *stored {
                         served.journal.push(update);
                         served.page = served.reloaded();
