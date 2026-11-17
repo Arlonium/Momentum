@@ -942,3 +942,114 @@ describe("dupliquer un bloc", () => {
     expect(repeatedIds(rewritten)).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fichiers (C8) : poser l'adresse d'un envoi, une image devenue fichier, un fichier déposé sur un
+// paragraphe vide
+// ---------------------------------------------------------------------------
+
+// Ce que BlockNote fait d'un envoi (`uploadFile`, lu dans son code, 0.57) : le dépôt ou le collage
+// d'un fichier insère un bloc du type que dit le type du fichier, `props: { name }`, ou change en
+// ce bloc le paragraphe **vide** où il tombe (`updateBlock`) ; puis il pose sur ce bloc ce que rend
+// `uploadFile` : `{ props: { url, name } }`, ou `{ type: "file", props }` (`editor/files.ts`).
+
+const FILE_URL = "/api/v1/pages/0193a5b0-0000-7000-8000-000000000001/files/0193a5b0-0000-7000-8000-0000000000f1";
+
+/** Un bloc image en attente de son envoi, entre deux paragraphes. */
+const AWAITING: Seed = [
+  { id: "x", type: "paragraph", content: "Bloc X" },
+  { id: "i", type: "image", props: { name: "photo.png" } },
+  { id: "z", type: "paragraph", content: "Bloc Z" },
+];
+const image = (id: string) => block(id, "", { type: "image" });
+const file = (id: string) => block(id, "", { type: "file" });
+
+describe("fichiers", () => {
+  test.each(PLAYS)("upload_sets_url_and_name_on_the_same_element ($label)", async ({ order, first }) => {
+    const s = await scene(AWAITING, order);
+    const before = elementIds(s.server);
+    const wrote = written(s.mona, () =>
+      s.mona.editor.updateBlock("i", { props: { url: FILE_URL, name: "photo.png" } }),
+    );
+    // Tom tape dans le bloc d'avant pendant que l'envoi de Mona aboutit.
+    typeAtEnd(s.tom, "x", TYPED);
+    // Le geste n'écrit qu'un attribut du même élément, l'adresse (le nom ne change pas) : aucun
+    // élément créé ni supprimé ; deux valeurs supprimées (mesuré).
+    expect(wrote).toEqual({ deleted: [], created: [], renamed: {} });
+    expect(counts(pending(s.mona))).toMatchObject({ made: { "attribut récrit": 1 }, deleted: 2 });
+    await send(s, first);
+    const props = s.mona.editor.getBlock("i")!.props as Record<string, unknown>;
+    expect(props).toMatchObject({ url: FILE_URL, name: "photo.png" });
+    expectEverywhere(s, [block("x", `Bloc X${TYPED}`), image("i"), Z], { i: props });
+    for (const [where, doc] of docs(s)) {
+      expect(changedElements(doc, before), where).toEqual([]);
+      expect(newIds(doc, before), where).toEqual([]);
+    }
+  });
+
+  test.each(PLAYS)("image_turned_into_a_file_keeps_its_block_id ($label)", async ({ order, first }) => {
+    const s = await scene(AWAITING, order);
+    const before = elementIds(s.server);
+    // Le serveur a lu autre chose qu'une image dans les octets : le bloc devient un bloc fichier.
+    const wrote = written(s.mona, () =>
+      s.mona.editor.updateBlock("i", { type: "file", props: { url: FILE_URL, name: "photo.png" } }),
+    );
+    typeAtEnd(s.tom, "x", TYPED);
+    // Le conteneur reste, avec son id ; l'élément de contenu est supprimé et recréé (famille du
+    // changement de type).
+    expect(wrote).toEqual({ deleted: ["image de i"], created: ["file de i"], renamed: {} });
+    await send(s, first);
+    expectEverywhere(s, [block("x", `Bloc X${TYPED}`), file("i"), Z]);
+    for (const [where, doc] of docs(s)) {
+      expect(storedProps(doc, "i"), where).toMatchObject({ url: FILE_URL, name: "photo.png" });
+      const [was, now] = [before.get("i")!.split(" "), elementIds(doc).get("i")!.split(" ")];
+      expect(now[0], `${where} : le même conteneur`).toBe(was[0]);
+      expect(changedElements(doc, before).map((l) => l.split(" ")[0]), where).toEqual(["i"]);
+      expect(newIds(doc, before), where).toEqual([]);
+    }
+  });
+
+  test.each(ORDERS)("file_dropped_on_an_empty_paragraph_takes_its_place ($label)", async (order) => {
+    const s = await scene(EMPTY, order);
+    const before = elementIds(s.server);
+    // Le dépôt d'un fichier sur un paragraphe vide : BlockNote change son type, il garde son id.
+    const wrote = written(s.mona, () =>
+      s.mona.editor.updateBlock("e", { type: "image", props: { name: "photo.png" } }),
+    );
+    expect(wrote).toEqual({ deleted: ["paragraph de e"], created: ["image de e"], renamed: {} });
+    s.mona.editor.updateBlock("e", { props: { url: FILE_URL, name: "photo.png" } });
+    await send(s, "mona");
+    expectEverywhere(s, [X, image("e"), Z]);
+    for (const [where, doc] of docs(s)) {
+      expect(storedProps(doc, "e"), where).toMatchObject({ url: FILE_URL, name: "photo.png" });
+      expect(elementIds(doc).get("e")!.split(" ")[0], `${where} : le même conteneur`).toBe(
+        before.get("e")!.split(" ")[0],
+      );
+      expect(newIds(doc, before), where).toEqual([]);
+    }
+  });
+
+  // Limite (famille du changement de type, R39, portée à la tâche D) : ce qu'un autre tape au même
+  // instant dans le paragraphe vide est dans l'élément que le dépôt supprime. Le jour où ce test
+  // rougit, la frappe est gardée quelque part : le récrire pour dire où.
+  test.each(PLAYS)(
+    "what_another_types_in_the_empty_paragraph_a_file_is_dropped_on_is_lost ($label)",
+    async ({ order, first }) => {
+      const s = await scene(EMPTY, order);
+      s.mona.editor.updateBlock("e", { type: "image", props: { name: "photo.png" } });
+      typeAtEnd(s.tom, "e", TYPED);
+      requireLocallyDone(s, { mona: [X, image("e"), Z], tom: [X, block("e", TYPED), Z] });
+      await send(s, first);
+      expectEverywhere(s, [X, image("e"), Z]);
+      for (const [where, doc] of docs(s)) expect(xml(doc), where).not.toContain("de Tom");
+    },
+  );
+
+  test.each(ORDERS)("témoin : la frappe de Tom dans le paragraphe vide, seule, arrive partout ($label)", async (order) => {
+    const s = await scene(EMPTY, order);
+    typeAtEnd(s.tom, "e", TYPED);
+    await send(s, "tom");
+    expectEverywhere(s, [X, block("e", TYPED), Z]);
+    for (const [, doc] of docs(s)) expect(xml(doc)).toContain("de Tom");
+  });
+});
