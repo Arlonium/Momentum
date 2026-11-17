@@ -368,9 +368,20 @@ fn json_depth(nodes: &[Value]) -> usize {
     deepest
 }
 
+/// Les attributs d'un nœud recréé. Sur un élément que BlockNote connaît (un nœud de son schéma
+/// sous un nœud étranger), un attribut que la garde refuserait d'un client n'est pas écrit
+/// (Ruling R692, module `attrs`) ; un élément d'un autre nom garde tout.
 fn write_json_attrs(txn: &mut TransactionMut, element: &XmlElementRef, attrs: &Map<String, Value>) {
+    let tag = element.tag().clone();
     for (key, value) in attrs {
-        element.insert_attribute(txn, key.as_str(), json_any(value));
+        let value = json_any(value);
+        if crate::attrs::sound(
+            &tag,
+            crate::attrs::Key::of(key),
+            crate::attrs::Value::of(&value),
+        ) {
+            element.insert_attribute(txn, key.as_str(), value);
+        }
     }
 }
 

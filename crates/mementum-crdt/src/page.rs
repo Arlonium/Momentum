@@ -2,14 +2,15 @@
 //! l'arbre de blocs.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use mementum_md::{Block, normalize};
 use mementum_schema::SCHEMA_VERSION;
 use yrs::any::Number;
 use yrs::branch::{Branch, BranchID, BranchPtr};
 use yrs::types::TypeRef;
+use yrs::types::weak::LinkSource;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
@@ -18,6 +19,7 @@ use yrs::{
     XmlElementRef, XmlFragment, XmlFragmentRef, XmlOut,
 };
 
+use crate::attrs::{self, Key, Value};
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
 use crate::guard::{Pending, REPEATED_CLIENT, Shape, UNTYPED_CHILD, missing, touched};
 use crate::kept_ids::keep_ids;
@@ -184,19 +186,35 @@ impl PageDoc {
     /// seulement si une liste qu'elle change ne se lit plus en entier : le parent de chaque contenu
     /// candidat n'est cherché qu'alors.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
-        let (shape, before) = {
+        let (shape, before, whole, unsound) = {
             let mut txn = self.doc.transact_mut();
             let (shape, decoded) = self.read(&txn, update, false)?;
             let before = txn.state_vector();
+            // Ruling R690 : les éléments à qui l'entrée pose un attribut que la page ne garde pas.
+            let named = shape
+                .attrs(&before, |id| tag_in_page(&txn, id), |_| None)
+                .unsound;
             self.integrate(&mut txn, &shape, decoded)?;
             delete(&mut txn, &shape.outside_marks(&before))?;
             txn.commit();
-            if lists_are_whole(&txn, &shape) {
+            let named = named.into_iter().filter_map(|(client, clock)| {
+                BranchID::get_nested(&txn, &ID::new(ClientID::new(client), clock))
+            });
+            let unsound = unsound_attrs(&txn, named.collect::<Vec<_>>());
+            let whole = lists_are_whole(&txn, &shape);
+            if whole && unsound.is_empty() {
                 return Ok(());
             }
-            (shape, before)
+            (shape, before, whole, unsound)
         };
         let mut txn = self.doc.transact_mut();
+        // Ruling R690 : l'attribut fautif est retiré ; l'éditeur le lit alors à son défaut.
+        for (element, _, key) in unsound {
+            XmlElementRef::from(element).remove_attribute(&mut txn, &key);
+        }
+        if whole {
+            return Ok(());
+        }
         let mut outside = IdSet::new();
         for (id, len) in shape.untyped_items(&before) {
             let parent = StickyIndex::from_id(id, Assoc::After)
@@ -309,6 +327,14 @@ impl PageDoc {
         if !lists_are_whole(&txn, &shape) {
             return Err(applied(CrdtError::Structure(UNTYPED_CHILD.to_string())));
         }
+        // Ruling R691 : un attribut que la garde n'a pas pu juger avant d'appliquer (une valeur
+        // posée par l'origine d'une ancienne entrée, ou d'une forme qu'aucun client n'écrit), et
+        // que la page ne garde pas.
+        if let Some((_, tag, key)) = unsound_attrs(&txn, []).first() {
+            return Err(applied(CrdtError::Structure(attrs::refusal_in_page(
+                tag, key,
+            ))));
+        }
         drop(txn);
         let (carried, withheld) = if recreated.is_empty() {
             (None, None)
@@ -371,6 +397,21 @@ impl PageDoc {
     #[doc(hidden)]
     pub fn original_walks(&self) -> u64 {
         self.original_walks.load(Ordering::SeqCst)
+    }
+
+    /// Ce que la garde des attributs (Ruling R689) refuserait de cette mise à jour (v1) venue
+    /// d'un client, lue sans être appliquée : `None` si elle n'y trouve rien. Sert aux tests,
+    /// qui y passent tout ce que l'éditeur écrit.
+    #[doc(hidden)]
+    pub fn attribute_refusal(&self, update: &[u8]) -> Result<Option<String>, CrdtError> {
+        let shape = Shape::read_from_client(update)?;
+        let txn = self.doc.transact();
+        let findings = shape.attrs(
+            &txn.state_vector(),
+            |id| tag_in_page(&txn, id),
+            |origin| entry_in_page(&txn, origin),
+        );
+        Ok(findings.refusal)
     }
 
     /// Vrai si la mise à jour (v1) est refusée parce qu'un client y paraît deux fois (Ruling
@@ -470,6 +511,15 @@ impl PageDoc {
                 BranchID::get_nested(txn, &ID::new(ClientID::new(client), clock))
                     .map(|branch| matches!(branch.type_ref(), TypeRef::XmlText))
             })?;
+            // Ruling R689 : un attribut d'élément qui n'est pas du type que dit le registre.
+            let findings = shape.attrs(
+                &state,
+                |id| tag_in_page(txn, id),
+                |origin| entry_in_page(txn, origin),
+            );
+            if let Some(refusal) = findings.refusal {
+                return Err(CrdtError::Structure(refusal));
+            }
         }
         Ok((shape, decoded))
     }
@@ -730,7 +780,96 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
     if !lists_are_whole(txn, &shape) {
         return Err(UNTYPED_CHILD.to_string());
     }
+    // Ruling R692 : les attributs que le report pose passent la garde des attributs.
+    if let Some(refusal) = shape
+        .attrs(before, |id| tag_in_page(txn, id), |_| None)
+        .refusal
+    {
+        return Err(refusal);
+    }
+    if let Some((_, tag, key)) = unsound_attrs(txn, []).first() {
+        return Err(attrs::refusal_in_page(tag, key));
+    }
     Ok(())
+}
+
+/// La balise d'un type de la page, pour la garde des attributs : `Some(None)` s'il n'est pas un
+/// élément, `None` si la page n'a pas ce type.
+fn tag_in_page<T: ReadTxn>(txn: &T, (client, clock): (u64, u32)) -> Option<Option<Arc<str>>> {
+    BranchID::get_nested(txn, &ID::new(ClientID::new(client), clock)).map(|branch| {
+        match branch.type_ref() {
+            TypeRef::XmlElement(tag) => Some(tag.clone()),
+            _ => None,
+        }
+    })
+}
+
+/// L'attribut dont `origin`, un élément Yjs de la page, est l'entrée courante : la balise de son
+/// élément XML et sa clé (Ruling R689). Une entrée qui en écrase une autre ne nomme ni l'un ni
+/// l'autre : elle les tient de l'entrée écrasée, son origine. yrs ne rend public ni le parent ni
+/// la clé d'un élément Yjs ; le parent se lit par une position relative (`StickyIndex`), et
+/// l'entrée courante de chaque clé se compare par le lien faible que yrs en donne (`Map::link`,
+/// fonction `weak` de yrs : un lien n'est jamais écrit, seule sa source est comparée). `None` pour
+/// une ancienne entrée, un enfant d'une liste, ou un élément que la page n'a pas.
+fn entry_in_page<T: ReadTxn>(txn: &T, (client, clock): (u64, u32)) -> Option<(Arc<str>, Key)> {
+    let id = ID::new(ClientID::new(client), clock);
+    let branch = StickyIndex::from_id(id, Assoc::After)
+        .get_offset(txn)?
+        .branch;
+    let TypeRef::XmlElement(tag) = branch.type_ref() else {
+        return None;
+    };
+    let wanted = LinkSource::new(
+        StickyIndex::from_id(id, Assoc::Before),
+        StickyIndex::from_id(id, Assoc::After),
+    );
+    let map = MapRef::from(branch);
+    XmlElementRef::from(branch)
+        .attributes(txn)
+        .find(|(key, _)| {
+            map.link(txn, key)
+                .is_some_and(|link| **link.source() == wanted)
+        })
+        .map(|(key, _)| (tag.clone(), Key::of(key)))
+}
+
+/// Les attributs que la page ne garde pas (Ruling R689, module `attrs`) parmi ceux des éléments
+/// que la transaction (validée) a changés eux-mêmes, et de `more` : l'élément, sa balise, la clé.
+/// C'est le jugement de ce que les clients liront (Ruling R691) : la valeur courante de chaque
+/// attribut, quelle que soit la forme de l'entrée qui la porte. Une frappe change un texte, pas
+/// un élément : rien n'est lu pour elle.
+fn unsound_attrs(
+    txn: &TransactionMut,
+    more: impl IntoIterator<Item = BranchPtr>,
+) -> Vec<(BranchPtr, Arc<str>, String)> {
+    let mut seen = HashSet::new();
+    let mut unsound = Vec::new();
+    for branch in changed_themselves(txn).chain(more) {
+        let TypeRef::XmlElement(tag) = branch.type_ref() else {
+            continue;
+        };
+        if !attrs::judged(tag) || !seen.insert(branch) {
+            continue;
+        }
+        for (key, value) in XmlElementRef::from(branch).attributes(txn) {
+            if !attrs::sound(tag, Key::of(key), Value::of_out(&value)) {
+                unsound.push((branch, tag.clone(), key.to_string()));
+            }
+        }
+    }
+    unsound
+}
+
+/// Les types que la transaction (validée) a changés eux-mêmes : yrs donne les types changés
+/// suivis chacun de ses ancêtres jusqu'à la racine (`changed_parent_types`) ; un type est changé
+/// lui-même s'il n'est pas le parent de celui qui le précède.
+fn changed_themselves<'a>(txn: &'a TransactionMut) -> impl Iterator<Item = BranchPtr> + 'a {
+    let changed = txn.changed_parent_types();
+    changed
+        .iter()
+        .enumerate()
+        .filter(move |&(i, branch)| i == 0 || parent_of(changed[i - 1]) != Some(*branch))
+        .map(|(_, branch)| *branch)
 }
 
 /// Supprime de la page les éléments de `ids` (une mise à jour sans bloc, qui ne porte que ces
@@ -758,13 +897,8 @@ fn delete(txn: &mut TransactionMut, ids: &IdSet) -> Result<(), CrdtError> {
 /// relecture de 499 frappes à 216 ms). Une liste ne change que si un enfant y entre ou en sort :
 /// elle est alors elle-même changée.
 fn lists_are_whole(txn: &TransactionMut, shape: &Shape) -> bool {
-    let changed = txn.changed_parent_types();
     let mut seen = HashSet::new();
-    changed
-        .iter()
-        .enumerate()
-        .filter(|&(i, branch)| i == 0 || parent_of(changed[i - 1]) != Some(*branch))
-        .map(|(_, branch)| *branch)
+    changed_themselves(txn)
         .chain(
             (!shape.untyped_in_texts())
                 .then(|| shape.inserted_elements(txn))
@@ -1045,6 +1179,63 @@ mod tests {
             "après la racine, par l'origine"
         );
         assert!(untyped(4243, None).is_err(), "en tête du fragment");
+    }
+
+    /// Ruling R692 : la relecture d'un report refuse aussi un attribut que la garde des attributs
+    /// refuserait d'un client, sur un élément de la page (lu dans la page) comme sur un élément
+    /// que le report insère (lu dans la mise à jour) ; elle laisse passer un attribut du registre.
+    #[test]
+    fn verify_carried_refuses_an_attribute_of_another_type() {
+        let page = page(7);
+        page.fill(&mut page.doc.transact_mut(), &[empty_paragraph()]);
+        let object = || {
+            Any::from(HashMap::from([(
+                "toString".to_string(),
+                Any::Number(Number::Int(1)),
+            )]))
+        };
+        let paragraph = |txn: &TransactionMut| -> XmlElementRef {
+            let root = page.root(txn).unwrap();
+            let Some(XmlOut::Element(container)) = root.get(txn, 0) else {
+                panic!("un bloc");
+            };
+            let Some(XmlOut::Element(paragraph)) = container.get(txn, 0) else {
+                panic!("un paragraphe");
+            };
+            paragraph
+        };
+        let verdict = |write: &dyn Fn(&mut TransactionMut)| {
+            let mut txn = page.doc.transact_mut();
+            let before = txn.state_vector();
+            write(&mut txn);
+            let update = txn.encode_update_v1();
+            txn.commit();
+            verify_carried(&update, &before, &txn)
+        };
+        assert_eq!(
+            verdict(&|txn| {
+                paragraph(txn).insert_attribute(txn, "backgroundColor", "red");
+            }),
+            Ok(())
+        );
+        let over = verdict(&|txn| {
+            paragraph(txn).insert_attribute(txn, "backgroundColor", object());
+        });
+        assert!(
+            over.as_ref()
+                .is_err_and(|why| why.contains("backgroundColor")),
+            "{over:?}"
+        );
+        let fresh = verdict(&|txn| {
+            let root = page.root(txn).unwrap();
+            let container = root.push_back(txn, XmlElementPrelim::empty("blockContainer"));
+            let heading = container.push_back(txn, XmlElementPrelim::empty("heading"));
+            heading.insert_attribute(txn, "level", object());
+        });
+        assert!(
+            fresh.as_ref().is_err_and(|why| why.contains("level")),
+            "{fresh:?}"
+        );
     }
 
     /// Ruling R389 : la prop `colwidth` d'une cellule, dans un tableau à largeurs, était posée

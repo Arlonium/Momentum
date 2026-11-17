@@ -381,12 +381,13 @@ fn short_row_is_read_padded() {
 }
 
 /// Ruling R137 : un `colspan` qui sort de la grille est ramené à ce qui
-/// reste de la ligne, un `rowspan` au nombre de lignes restantes.
+/// reste de la ligne, un `rowspan` au nombre de lignes restantes. (Un `colspan`
+/// de plus de 100, lui, est retiré à la relecture du journal : Ruling R690.)
 #[test]
 fn span_beyond_the_grid_is_read_clamped() {
     let page = client_table(vec![
         vec![th("a"), th("b"), th("c")],
-        vec![td("d").with("rowspan", 200), td("e").with("colspan", 200)],
+        vec![td("d").with("rowspan", 200), td("e").with("colspan", 20)],
         vec![td("f"), td("g")],
     ]);
     assert_eq!(

@@ -85,6 +85,7 @@
 //! à yrs, la transaction validée, quels types elle a changés.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use mementum_md::{MAX_COLOR_BYTES, MAX_DEPTH, MAX_HREF_BYTES};
 use yrs::block::{
@@ -99,6 +100,7 @@ use yrs::encoding::read::{Cursor, Read};
 use yrs::types::{TYPE_REFS_XML_ELEMENT, TYPE_REFS_XML_TEXT};
 use yrs::{ID, IdSet, MapRef, ReadTxn, StateVector, TransactionMut, XmlOut};
 
+use crate::attrs::{self, Key, Value};
 use crate::blocknote::BLOCK_CONTAINER;
 use crate::structure::depth_in_page;
 use crate::{CrdtError, FRAGMENT, META};
@@ -176,6 +178,14 @@ struct Insert {
     untyped: bool,
     /// Une entrée de map (`parentSub`) : un attribut d'un élément, pas un enfant.
     keyed: bool,
+    /// Pour une entrée de map posée sur un type désigné par son id (un attribut d'élément) : sa
+    /// clé (Ruling R689).
+    attr: Option<Key>,
+    /// Ce que le contenu vaudrait comme valeur d'attribut (la dernière, s'il en porte
+    /// plusieurs) ; `None` pour un contenu supprimé.
+    value: Option<Value>,
+    /// Le contenu est une valeur `Any` : la seule forme qu'un client écrit pour un attribut.
+    any: bool,
 }
 
 /// Le refus d'un contenu qui n'est pas un nœud XML parmi les enfants de la racine ou d'un élément
@@ -306,6 +316,22 @@ pub(crate) fn value_refusal(
         bytes: carried,
         bound,
     })
+}
+
+/// Au plus tant d'entrées de la page cherchées, par mise à jour, pour l'origine d'une valeur qui
+/// ne nomme ni son élément ni sa clé ([`Shape::attrs`]) : la recherche suit les voisins de
+/// l'origine, et une mise à jour hostile en demanderait autant qu'elle porte d'éléments. Au-delà,
+/// l'attribut est jugé dans la page, après l'application.
+const MAX_PAGE_LOOKUPS: usize = 64;
+
+/// Ce que [`Shape::attrs`] dit d'une mise à jour (Ruling R689).
+#[derive(Default)]
+pub(crate) struct AttrFindings {
+    /// Le refus du premier attribut que la page ne garde pas.
+    pub(crate) refusal: Option<String>,
+    /// Les éléments, nommés par la mise à jour, qui reçoivent un tel attribut : relue du
+    /// stockage, la page le leur retire.
+    pub(crate) unsound: Vec<(u64, u32)>,
 }
 
 /// Ce que contient une mise à jour, lu sans l'appliquer.
@@ -713,6 +739,128 @@ impl Shape {
             })
     }
 
+    /// Ce que la garde des attributs dit de la mise à jour, lue seule (Ruling R689, module
+    /// `attrs`) : le refus du premier attribut qu'une page ne garde pas, et les éléments qui en
+    /// reçoivent un. Un attribut est une entrée de map posée sur un élément ; la mise à jour dit
+    /// lequel, et sous quelle clé, de trois façons :
+    /// - l'entrée nomme son élément et sa clé (la première valeur d'un attribut) : l'élément est
+    ///   dans la mise à jour, ou dans la page (`page_tag` rend sa balise, `None` pour un texte) ;
+    /// - l'entrée a pour origine une entrée de la mise à jour (elle l'écrase) : mêmes élément et
+    ///   clé ;
+    /// - l'entrée a pour origine un élément de la page, et ne nomme rien : `page_entry` le
+    ///   cherche (l'entrée courante d'un attribut d'un élément), pour une valeur `Any` seulement
+    ///   (la forme qu'un client écrit, et que rien d'autre ne pose par une origine : une frappe
+    ///   est une chaîne), et [`MAX_PAGE_LOOKUPS`] fois au plus par mise à jour.
+    ///
+    /// Ce qui n'est pas reconnu ici (l'origine est une ancienne entrée, un contenu d'une autre
+    /// forme placé par une origine de la page, au-delà du plafond) est jugé dans la page, après
+    /// l'application (`PageDoc`, Ruling R691). Ce que la page connaît déjà (yrs l'ignore) n'y
+    /// compte pas (Ruling R490). Rien n'est parcouru pour une mise à jour sans entrée de map ni
+    /// valeur `Any` placée par une origine : le chemin d'une frappe.
+    pub(crate) fn attrs(
+        &self,
+        floor: &StateVector,
+        page_tag: impl Fn(Id) -> Option<Option<Arc<str>>>,
+        mut page_entry: impl FnMut(Id) -> Option<(Arc<str>, Key)>,
+    ) -> AttrFindings {
+        /// Ce qu'un élément de la mise à jour est, d'après elle seule.
+        #[derive(Clone, Copy)]
+        enum Place {
+            /// Une entrée de map de cet élément, sous cette clé.
+            Entry(Id, Key),
+            /// Un enfant d'une liste, ou une entrée d'une racine.
+            Child,
+            /// Ce qu'est cet élément de la page, son origine.
+            Outside(Id),
+        }
+        let mut findings = AttrFindings::default();
+        if !self
+            .inserts()
+            .any(|(_, i)| i.attr.is_some() || (i.any && matches!(i.parent, Parent::Sibling(_))))
+        {
+            return findings;
+        }
+        let inserts: Vec<(&Struct, &Insert)> = self.inserts().collect();
+        let mut by_client: HashMap<u64, Vec<(u32, u32, usize)>> = HashMap::new();
+        for (k, (s, _)) in inserts.iter().enumerate() {
+            by_client
+                .entry(s.id.0)
+                .or_default()
+                .push((s.id.1, s.id.1 + s.len, k));
+        }
+        for ranges in by_client.values_mut() {
+            ranges.sort_unstable();
+        }
+        let find = |(client, clock): Id| -> Option<usize> {
+            let ranges = by_client.get(&client)?;
+            let at = ranges.partition_point(|r| r.1 <= clock);
+            ranges.get(at).filter(|r| r.0 <= clock).map(|&(_, _, k)| k)
+        };
+        let tags: HashMap<Id, Option<&str>> = inserts
+            .iter()
+            .filter(|(_, i)| i.type_ref.is_some())
+            .map(|(s, i)| (s.id, i.tag.as_deref()))
+            .collect();
+        let mut judge = |tag: &str, key: Key, value: Value, parent: Option<Id>| {
+            if !attrs::sound(tag, key, value) {
+                findings
+                    .refusal
+                    .get_or_insert_with(|| attrs::refusal(tag, key));
+                findings.unsound.extend(parent);
+            }
+        };
+        let mut places: Vec<Option<Place>> = vec![None; inserts.len()];
+        let mut lookups = 0;
+        for start in 0..inserts.len() {
+            let (s, insert) = inserts[start];
+            let Some(value) = insert.value else { continue };
+            if s.id.1 + s.len <= floor.get(&ClientID::new(s.id.0)) {
+                continue;
+            }
+            let mut path = Vec::new();
+            let mut k = start;
+            let place = loop {
+                if let Some(place) = places[k] {
+                    break place;
+                }
+                let (_, at) = inserts[k];
+                path.push(k);
+                match (&at.parent, at.attr) {
+                    (Parent::Id(parent), Some(key)) => break Place::Entry(*parent, key),
+                    (Parent::Named(..) | Parent::Id(_), _) => break Place::Child,
+                    (Parent::Sibling(origin), _) => match find(*origin) {
+                        // Une chaîne plus longue que la mise à jour boucle : mise à jour invalide.
+                        Some(next) if next != k && path.len() <= inserts.len() => k = next,
+                        Some(_) => break Place::Child,
+                        None => break Place::Outside(*origin),
+                    },
+                }
+            };
+            for k in path {
+                places[k] = Some(place);
+            }
+            match place {
+                Place::Entry(parent, key) => match tags.get(&parent) {
+                    Some(Some(tag)) => judge(tag, key, value, Some(parent)),
+                    Some(None) => {}
+                    None => {
+                        if let Some(Some(tag)) = page_tag(parent) {
+                            judge(&tag, key, value, Some(parent));
+                        }
+                    }
+                },
+                Place::Outside(origin) if insert.any && lookups < MAX_PAGE_LOOKUPS => {
+                    lookups += 1;
+                    if let Some((tag, key)) = page_entry(origin) {
+                        judge(&tag, key, value, None);
+                    }
+                }
+                Place::Outside(_) | Place::Child => {}
+            }
+        }
+        findings
+    }
+
     /// Les marques de texte de la mise à jour que la page ne garde pas (Ruling R431) : relue du
     /// stockage, la page les supprime (`PageDoc::apply_update`). Seulement celles que la mise à
     /// jour intègre (Ruling R490) : au-dessus de `floor`, ce que la page avait de leur client
@@ -955,6 +1103,7 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                 .transpose()?;
             // Une entrée `id` posée sur un type désigné par son id : l'attribut `id` d'un élément.
             let mut id_entry = false;
+            let mut attr = None;
             let parent = if cant_copy_parent {
                 let named = c.read_var::<u32>()? == 1;
                 if named {
@@ -967,7 +1116,9 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                 } else {
                     let p = read_id(c)?;
                     if info & HAS_PARENT_SUB != 0 {
-                        id_entry = c.read_string()? == "id";
+                        let key = c.read_string()?;
+                        id_entry = key == "id";
+                        attr = Some(Key::of(key));
                     }
                     Parent::Id(p)
                 }
@@ -999,6 +1150,9 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     mark: content.mark,
                     untyped,
                     keyed,
+                    attr,
+                    value: content.value,
+                    any: info & 0b1111 == BLOCK_ITEM_ANY_REF_NUMBER,
                 }),
             }))
         }
@@ -1066,6 +1220,9 @@ struct Content {
     string: Option<String>,
     /// Pour une marque de texte que la page ne garde pas, pourquoi (Ruling R431).
     mark: Option<MarkRefusal>,
+    /// Ce que le contenu vaudrait comme valeur d'attribut (Ruling R689) ; `None` s'il est
+    /// supprimé.
+    value: Option<Value>,
 }
 
 /// Contenu d'un élément, lu comme `ItemContent::decode` de yrs : sa longueur
@@ -1084,9 +1241,14 @@ fn read_content(
         tag: None,
         string: None,
         mark: None,
+        // Un type Yjs, du JSON, des octets, un objet incorporé : pas une valeur d'attribut.
+        value: Some(Value::Other),
     };
     content.len = match info & 0b1111 {
-        BLOCK_ITEM_DELETED_REF_NUMBER => c.read_var()?,
+        BLOCK_ITEM_DELETED_REF_NUMBER => {
+            content.value = None;
+            c.read_var()?
+        }
         BLOCK_ITEM_JSON_REF_NUMBER => {
             // yrs lit `len + 1` chaînes (et aucune si `len` dépasse i32).
             let remaining = c.read_var::<u32>()? as i32;
@@ -1104,7 +1266,11 @@ fn read_content(
             c.read_buf()?;
             1
         }
-        BLOCK_ITEM_STRING_REF_NUMBER => c.read_string()?.encode_utf16().count() as u32,
+        BLOCK_ITEM_STRING_REF_NUMBER => {
+            // Yjs comme yrs rendent le dernier caractère : une chaîne.
+            content.value = Some(Value::Str);
+            c.read_string()?.encode_utf16().count() as u32
+        }
         BLOCK_ITEM_EMBED_REF_NUMBER => {
             c.read_string()?;
             1
@@ -1137,9 +1303,13 @@ fn read_content(
             if want_string && len == 1 && c.buf.get(c.next) == Some(&119) {
                 c.read_u8()?;
                 content.string = Some(c.read_string()?.to_string());
+                content.value = Some(Value::Str);
             } else {
+                // La valeur d'une entrée de map est la dernière de son contenu.
                 for _ in 0..len {
+                    let start = c.next;
                     skip_any(c)?;
+                    content.value = Some(summary(&c.buf[start..c.next]));
                 }
             }
             len
@@ -1152,6 +1322,51 @@ fn read_content(
         _ => return Err(Error::UnexpectedValue),
     };
     Ok(content)
+}
+
+/// Ce que vaut, pour la garde des attributs (Ruling R689), une valeur `Any` que [`skip_any`] a
+/// lue : la nature d'un scalaire, son nombre, et, pour une liste, si c'est une liste de largeurs
+/// (`attrs::Value::Widths`). Rien n'est alloué, et une liste n'est lue qu'un niveau.
+fn summary(bytes: &[u8]) -> Value {
+    fn number(c: &mut Cursor, tag: u8) -> Option<Value> {
+        Some(match tag {
+            125 => Value::Int(c.read_var::<i64>().ok()?),
+            124 => Value::Float(f64::from(c.read_f32().ok()?)),
+            123 => Value::Float(c.read_f64().ok()?),
+            _ => Value::Int(c.read_i64().ok()?),
+        })
+    }
+    let mut c = Cursor::new(bytes);
+    let Ok(tag) = c.read_u8() else {
+        return Value::Other;
+    };
+    match tag {
+        127 => Value::Undefined,
+        126 => Value::Null,
+        122..=125 => number(&mut c, tag).unwrap_or(Value::Other),
+        120 | 121 => Value::Bool,
+        119 => Value::Str,
+        117 => {
+            let Ok(len) = c.read_var::<u64>() else {
+                return Value::Other;
+            };
+            if len > mementum_md::MAX_WIDTH_COLUMNS as u64 {
+                return Value::Other;
+            }
+            for _ in 0..len {
+                let width = match c.read_u8() {
+                    Ok(126 | 127) => true,
+                    Ok(tag @ 122..=125) => number(&mut c, tag).is_some_and(Value::is_finite),
+                    _ => false,
+                };
+                if !width {
+                    return Value::Other;
+                }
+            }
+            Value::Widths
+        }
+        _ => Value::Other,
+    }
 }
 
 /// Saute une valeur `Any` (encodage lib0) sans récursion.

@@ -61,7 +61,7 @@ uuid = { version = "1.29", features = ["v7"] }
 # Version épinglée : `crates/mementum-crdt/src/guard.rs` relit le format des mises à jour de
 # yrs 0.28.1 (`Update::decode`, `ItemContent::decode`) et sa façon d'intégrer (trous, attente) ;
 # toute montée de version doit le revérifier, test différentiel compris.
-yrs = { version = "=0.28.1", features = ["sync"] }
+yrs = { version = "=0.28.1", features = ["sync", "weak"] }
 
 # Argon2 optimisé même en développement : compilé en debug, une vérification de mot de passe
 # prend environ 430 ms (25 ms optimisée), que paient chaque inscription et chaque connexion,

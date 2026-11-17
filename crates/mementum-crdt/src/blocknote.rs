@@ -39,6 +39,7 @@ use yrs::{
     XmlFragmentRef, XmlOut, XmlTextPrelim, XmlTextRef,
 };
 
+use crate::attrs::{self, Key, Value};
 use crate::foreign::{Foreign, read_foreign};
 use crate::table::{read_table, write_table};
 
@@ -678,22 +679,34 @@ fn write_content(txn: &mut TransactionMut, container: &XmlElementRef, b: &Block)
 
 /// Chaque prop du registre (sa valeur, son défaut, ou `undefined` sans
 /// défaut, comme BlockNote), puis les props inconnues du registre.
+///
+/// Une valeur que la garde des attributs refuserait d'un client (Ruling R692, module `attrs` :
+/// une prop du registre d'un autre type que le sien, un nombre qui n'est pas fini) n'est pas
+/// écrite : la prop du registre prend son défaut, une prop inconnue est omise.
 pub(crate) fn write_props(
     txn: &mut TransactionMut,
     element: &XmlElementRef,
     props: &Props,
     specs: &[PropSpec],
 ) {
+    let tag = element.tag().clone();
+    let sound = |name: &str, value: &Any| attrs::sound(&tag, Key::of(name), Value::of(value));
     for spec in specs {
+        let default = || spec.default.map_or(Any::Undefined, default_any);
         let value = match props.get(spec.name) {
-            Some(v) => prop_any(v, Some(spec.ty)),
-            None => spec.default.map_or(Any::Undefined, default_any),
+            Some(v) => Some(prop_any(v, Some(spec.ty)))
+                .filter(|value| sound(spec.name, value))
+                .unwrap_or_else(default),
+            None => default(),
         };
         element.insert_attribute(txn, spec.name, value);
     }
     for (name, value) in props {
         if !specs.iter().any(|s| s.name == name) {
-            element.insert_attribute(txn, name.as_str(), prop_any(value, None));
+            let value = prop_any(value, None);
+            if sound(name, &value) {
+                element.insert_attribute(txn, name.as_str(), value);
+            }
         }
     }
 }

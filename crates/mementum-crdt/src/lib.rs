@@ -6,6 +6,7 @@
 //! dédoublonne les blocs après des déplacements concurrents et calcule une
 //! révision canonique.
 
+mod attrs;
 mod blocknote;
 mod cost;
 mod dedupe;

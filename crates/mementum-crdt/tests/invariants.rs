@@ -2,7 +2,7 @@
 //! en un arbre que `render` écrit en MMD relisible par `parse`.
 
 use mementum_crdt::{FRAGMENT, MAX_YJS_DEPTH, PageDoc};
-use mementum_md::{Block, Content, MAX_DEPTH, PropValue, RenderOpts, block_text, parse, render};
+use mementum_md::{Block, Content, MAX_DEPTH, RenderOpts, block_text, parse, render};
 use yrs::any::Number;
 use yrs::{
     Any, Doc, OffsetKind, Options, Transact, TransactionMut, Xml, XmlElementPrelim, XmlElementRef,
@@ -93,7 +93,9 @@ fn texts(blocks: &[Block], out: &mut Vec<String>) {
 fn ill_typed_props_and_empty_table() {
     let nan = || Any::Number(Number::Float(f64::NAN));
     let page = page_from(|txn, root| {
-        // `level` en chaîne : converti sans perte ; illisible : défaut.
+        // `level` en chaîne : retiré à la relecture du journal (Ruling R690, garde des
+        // attributs), donc au défaut, qu'elle soit lisible ou non. Avant la garde, « 2 » était
+        // converti sans perte ; l'éditeur, lui, recevait la chaîne.
         block(
             txn,
             root,
@@ -110,7 +112,7 @@ fn ill_typed_props_and_empty_table() {
             &[("level", Any::from("abc"))],
             Some("Un"),
         );
-        // Largeurs NaN : défaut (absente) ; largeur en chaîne : convertie.
+        // Largeurs NaN ou en chaîne : retirées de même, donc au défaut (absente).
         block(
             txn,
             root,
@@ -179,12 +181,12 @@ fn ill_typed_props_and_empty_table() {
             "quote"
         ]
     );
-    assert_eq!(blocks[0].props.get("level"), Some(&PropValue::Int(2)));
+    assert_eq!(blocks[0].props.get("level"), None);
     assert_eq!(blocks[1].props.get("level"), None);
     assert_eq!(blocks[2].props.get("previewWidth"), None);
     let columns = &blocks[3].children;
     assert_eq!(columns[0].props.get("width"), None);
-    assert_eq!(columns[1].props.get("width"), Some(&PropValue::Float(2.0)));
+    assert_eq!(columns[1].props.get("width"), None);
     let Content::Table(empty) = &blocks[4].content else {
         panic!("tableau attendu")
     };

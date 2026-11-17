@@ -425,7 +425,8 @@ fn merged_cell_widths_follow_the_grid() {
 /// Fusions bornées (Ruling R37) : un `colspan` démesuré est refusé dès le
 /// MMD ; au plus haut admis (`MAX_WIDTH_COLUMNS`), la cellule porte une
 /// largeur par colonne couverte. Un `colwidth` démesuré écrit par un client
-/// Yjs ne fait pas lire plus de `MAX_WIDTH_COLUMNS` largeurs.
+/// Yjs, au journal d'avant la garde des attributs, est retiré à la relecture
+/// (Ruling R690) : la colonne n'a plus de largeur.
 #[test]
 fn merged_cell_widths_are_bounded() {
     let max = mementum_md::MAX_WIDTH_COLUMNS;
@@ -476,7 +477,7 @@ fn merged_cell_widths_are_bounded() {
     };
     let page = PageDoc::from_updates([update.as_slice()]).unwrap();
     match &page.read_blocks()[0].content {
-        Content::Table(t) => assert_eq!(t.column_widths, [Some(0.0)]),
+        Content::Table(t) => assert_eq!(t.column_widths, [None]),
         other => panic!("tableau attendu, trouvé {other:?}"),
     }
 }
