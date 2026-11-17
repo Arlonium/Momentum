@@ -187,6 +187,12 @@ struct Insert {
     value: Option<Value>,
     /// Le contenu est une valeur `Any` : la seule forme qu'un client écrit pour un attribut.
     any: bool,
+    /// Le contenu est du JSON (`ContentJSON`) : yrs en rend la chaîne, Yjs `JSON.parse` de la
+    /// chaîne (Ruling R702).
+    json: bool,
+    /// L'élément porte une origine droite : une entrée de map écrite par un client n'en a pas
+    /// (Ruling R703).
+    right_origin: bool,
 }
 
 /// Le refus d'un contenu qui n'est pas un nœud XML parmi les enfants de la racine ou d'un élément
@@ -324,6 +330,30 @@ pub(crate) fn value_refusal(
 /// l'origine, et une mise à jour hostile en demanderait autant qu'elle porte d'éléments. Au-delà,
 /// l'attribut est jugé dans la page, après l'application.
 const MAX_PAGE_LOOKUPS: usize = 64;
+
+/// Le refus d'un contenu JSON (Ruling R702).
+pub(crate) const JSON_CONTENT: &str = "la mise à jour porte un contenu JSON, qu'aucun client \
+     n'écrit et que le serveur et les navigateurs ne lisent pas pareil";
+
+/// Le refus d'une valeur qui porte une origine droite (Ruling R703).
+pub(crate) const VALUE_WITH_RIGHT_ORIGIN: &str = "la mise à jour pose une valeur d'attribut qui \
+     porte une origine droite : une entrée de map n'en a pas";
+
+/// Le refus d'une valeur placée par une origine qui n'est pas dans un élément (Ruling R704).
+pub(crate) const VALUE_OUTSIDE_ELEMENTS: &str = "la mise à jour pose une valeur d'attribut à la \
+     suite d'un contenu de texte";
+
+/// Ce qu'est, dans la page, l'origine d'une valeur qui ne nomme ni son élément ni sa clé
+/// ([`Shape::attrs`]).
+pub(crate) enum PageItem {
+    /// L'entrée courante de cet attribut d'un élément de cette balise.
+    Entry(Arc<str>, Key),
+    /// Un contenu d'un texte ou de la racine : pas un attribut.
+    OutsideElements,
+    /// Dans un élément, sans être l'entrée courante d'un attribut (une ancienne entrée, un
+    /// enfant), ou inconnu de la page.
+    Unknown,
+}
 
 /// Ce que [`Shape::attrs`] dit d'une mise à jour (Ruling R689).
 #[derive(Default)]
@@ -594,6 +624,53 @@ impl Shape {
         Ok(())
     }
 
+    /// Refuse (`Structure`), sans rien appliquer, une mise à jour de client qui porte un contenu
+    /// que yrs et Yjs ne lisent pas pareil, où qu'il soit (Rulings R702, R703) :
+    /// - du JSON (`ContentJSON`) : comme valeur d'attribut, yrs en rend la chaîne et Yjs
+    ///   `JSON.parse` de la chaîne, un objet ; aucun client ne l'écrit (Yjs ne le produit plus
+    ///   depuis sa version 13, y-prosemirror jamais) ;
+    /// - une valeur `Any` qui porte une origine droite : yrs recopie la clé de map du voisin de
+    ///   droite quand celui de gauche n'en a pas, Yjs prend celle de gauche ; l'élément est alors
+    ///   un attribut pour yrs et un enfant sans type pour Yjs. Un client n'écrit de valeur `Any`
+    ///   que pour un attribut, et une entrée de map n'a jamais d'origine droite.
+    ///
+    /// Ce que la page connaît déjà (yrs l'ignore) n'y compte pas.
+    pub(crate) fn check_contents(&self, state: &StateVector) -> Result<(), CrdtError> {
+        for (s, insert) in self.inserts() {
+            if !(insert.json || (insert.any && insert.right_origin))
+                || s.id.1 + s.len <= state.get(&ClientID::new(s.id.0))
+            {
+                continue;
+            }
+            return Err(CrdtError::Structure(
+                if insert.json {
+                    JSON_CONTENT
+                } else {
+                    VALUE_WITH_RIGHT_ORIGIN
+                }
+                .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Les éléments que la mise à jour intègre (au-dessus de `floor`) et qui ne sont pas ce
+    /// qu'un client écrit pour un attribut : un contenu qui n'est pas une valeur `Any`, ou une
+    /// origine droite (Rulings R702, R703). S'il se trouve que l'un d'eux est l'entrée courante
+    /// d'un attribut, la page ne le garde pas : yrs et Yjs n'y lisent pas la même valeur, ou pas
+    /// à la même place. Une frappe en est un (une chaîne) : la page n'y regarde que pour un
+    /// élément changé qui porte des attributs.
+    pub(crate) fn not_attribute_values(&self, floor: &StateVector) -> Vec<ID> {
+        self.inserts()
+            .filter(|(s, i)| {
+                i.value.is_some()
+                    && (!i.any || i.right_origin)
+                    && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
+            })
+            .map(|(s, _)| ID::new(ClientID::new(s.id.0), s.id.1))
+            .collect()
+    }
+
     /// Refuse (`Structure`), sans rien appliquer, une mise à jour de client qui pose une marque de
     /// texte que la page ne garde pas (Ruling R431, voir [`MARKS`]). Une marque déjà connue de la
     /// page (yrs l'ignore) n'y compte pas.
@@ -762,7 +839,7 @@ impl Shape {
         &self,
         floor: &StateVector,
         page_tag: impl Fn(Id) -> Option<Option<Arc<str>>>,
-        mut page_entry: impl FnMut(Id) -> Option<(Arc<str>, Key)>,
+        mut page_entry: impl FnMut(Id) -> PageItem,
     ) -> AttrFindings {
         /// Ce qu'un élément de la mise à jour est, d'après elle seule.
         #[derive(Clone, Copy)]
@@ -812,6 +889,7 @@ impl Shape {
         let mut last: Option<(Id, Judged<'_>)> = None;
         let mut floor_of: (u64, u32) = (u64::MAX, 0);
         let mut lookups = 0;
+        let mut looked_up: HashSet<Id> = HashSet::new();
         for start in 0..inserts.len() {
             let (s, insert) = inserts[start];
             let Some(value) = insert.value else { continue };
@@ -889,14 +967,26 @@ impl Shape {
                         findings.unsound.push(parent);
                     }
                 }
-                Place::Outside(origin) if insert.any && lookups < MAX_PAGE_LOOKUPS => {
+                Place::Outside(origin)
+                    if insert.any
+                        && lookups < MAX_PAGE_LOOKUPS
+                        && findings.refusal.is_none()
+                        && looked_up.insert(origin) =>
+                {
                     lookups += 1;
-                    if let Some((tag, key)) = page_entry(origin)
-                        && !attrs::sound(&tag, key, value)
-                    {
-                        findings
-                            .refusal
-                            .get_or_insert_with(|| attrs::refusal(&tag, key));
+                    match page_entry(origin) {
+                        PageItem::Entry(tag, key) => {
+                            if !attrs::sound(&tag, key, value) {
+                                findings.refusal = Some(attrs::refusal(&tag, key));
+                            }
+                        }
+                        // Ruling R704 : aucun client n'écrit une valeur `Any` dans un texte ou
+                        // à la racine ; la chercher a suivi les voisins de son origine, et la
+                        // mise à jour est refusée à la première.
+                        PageItem::OutsideElements => {
+                            findings.refusal = Some(VALUE_OUTSIDE_ELEMENTS.to_string());
+                        }
+                        PageItem::Unknown => {}
                     }
                 }
                 Place::Outside(_) | Place::Child => {}
@@ -1197,6 +1287,8 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     attr,
                     value: content.value,
                     any: info & 0b1111 == BLOCK_ITEM_ANY_REF_NUMBER,
+                    json: info & 0b1111 == BLOCK_ITEM_JSON_REF_NUMBER,
+                    right_origin: right.is_some(),
                 }),
             }))
         }
@@ -1311,8 +1403,8 @@ fn read_content(
             1
         }
         BLOCK_ITEM_STRING_REF_NUMBER => {
-            // Yjs comme yrs rendent le dernier caractère : une chaîne.
-            content.value = Some(Value::Str);
+            // Comme valeur d'attribut, yrs rend toute la chaîne et Yjs son dernier caractère
+            // (Ruling R702) : pas une valeur.
             c.read_string()?.encode_utf16().count() as u32
         }
         BLOCK_ITEM_EMBED_REF_NUMBER => {
@@ -1400,7 +1492,7 @@ fn summary(bytes: &[u8]) -> Value {
             for _ in 0..len {
                 let width = match c.read_u8() {
                     Ok(126 | 127) => true,
-                    Ok(tag @ 122..=125) => number(&mut c, tag).is_some_and(Value::is_finite),
+                    Ok(tag @ 122..=125) => number(&mut c, tag).is_some_and(Value::is_width),
                     _ => false,
                 };
                 if !width {

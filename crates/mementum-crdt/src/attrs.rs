@@ -72,7 +72,7 @@ impl Value {
             Any::Array(values) if values.len() <= MAX_WIDTH_COLUMNS => {
                 let width = |v: &Any| match v {
                     Any::Undefined | Any::Null => true,
-                    Any::Number(_) => Value::of(v).is_finite(),
+                    Any::Number(_) => Value::of(v).is_width(),
                     _ => false,
                 };
                 if values.iter().all(width) {
@@ -91,6 +91,13 @@ impl Value {
             Out::Any(any) => Value::of(any),
             _ => Value::Other,
         }
+    }
+
+    /// Vrai pour un nombre d'une liste de largeurs : fini, ou `NaN` (Ruling R705 : BlockNote
+    /// écrit `[NaN, NaN]` pour toute cellule fusionnée collée sans largeurs ; le serveur et
+    /// l'éditeur le lisent « sans largeur »).
+    pub(crate) fn is_width(self) -> bool {
+        matches!(self, Value::Float(f) if f.is_nan()) || self.is_finite()
     }
 
     /// Faux pour un nombre que JavaScript n'écrit pas exactement ou qui n'est pas fini.
@@ -144,7 +151,11 @@ impl Expect {
             (Expect::Str, Value::Str) | (Expect::Bool, Value::Bool) => true,
             (Expect::Int(min, max), Value::Int(i)) => (min..=max).contains(&i),
             (Expect::Int(min, max), Value::Float(f)) => {
-                f.fract() == 0.0 && f >= min as f64 && f <= max as f64
+                // 2^53 n'est pas un entier sûr, et `MAX_SAFE_INT as f64` l'arrondit à lui.
+                f.fract() == 0.0
+                    && f >= min as f64
+                    && f <= max as f64
+                    && f.abs() < 9_007_199_254_740_992.0
             }
             (Expect::Float, Value::Int(_) | Value::Float(_)) => value.is_finite(),
             (Expect::Widths, Value::Widths) => true,
@@ -322,6 +333,17 @@ mod tests {
         assert!(!sound("heading", listed("level"), Value::Float(2.5)));
         assert!(!sound("heading", listed("level"), Value::Str));
         assert!(!sound("heading", listed("level"), Value::Int(i64::MAX)));
+        // 2^53 n'est pas un entier sûr (m3 de la relecture).
+        assert!(!sound(
+            "heading",
+            listed("level"),
+            Value::Float(9_007_199_254_740_992.0)
+        ));
+        assert!(sound(
+            "heading",
+            listed("level"),
+            Value::Float(9_007_199_254_740_991.0)
+        ));
         assert!(sound("image", listed("previewWidth"), Value::Float(1.5)));
         assert!(sound("image", listed("previewWidth"), Value::Int(320)));
         assert!(!sound(
@@ -354,8 +376,13 @@ mod tests {
         assert_eq!(list(vec![n(120), Any::Undefined, Any::Null]), Value::Widths);
         assert_eq!(list(vec![]), Value::Widths);
         assert_eq!(list(vec![Any::from("120")]), Value::Other);
+        // `NaN` est une largeur absente (R705) ; l'infini n'en est pas une.
         assert_eq!(
-            list(vec![Any::Number(Number::Float(f64::NAN))]),
+            list(vec![Any::Number(Number::Float(f64::NAN)), n(120)]),
+            Value::Widths
+        );
+        assert_eq!(
+            list(vec![Any::Number(Number::Float(f64::INFINITY))]),
             Value::Other
         );
         assert_eq!(list(vec![list_any(vec![n(1)])]), Value::Other);

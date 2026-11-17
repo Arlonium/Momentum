@@ -406,8 +406,8 @@ async fn a_version_kept_before_the_attribute_guard_is_served_without_the_attribu
         served.push(kept.body.to_vec());
     }
     assert!(
-        served[0] == sound,
-        "une version saine est servie telle quelle"
+        blocks_of(&served[0]) == blocks_of(&sound),
+        "une version saine est servie avec ses blocs"
     );
     assert!(
         !served[1].windows(8).any(|w| w == b"toString"),

@@ -85,8 +85,9 @@ pub(crate) async fn state(
     // au tour du compte (une version de 10 000 blocs pèse 3,2 Mo).
     let served = state
         .mmd_reads
-        .run(user.id, move || PageDoc::served_state(kept))
-        .await?;
+        .run(user.id, move || PageDoc::served_state(&kept))
+        .await?
+        .ok_or_else(ApiError::page_not_found)?;
     Ok(([(header::CONTENT_TYPE, OCTET_STREAM)], served).into_response())
 }
 

@@ -21,7 +21,7 @@ use yrs::{
 
 use crate::attrs::{self, Key, Value};
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
-use crate::guard::{Pending, REPEATED_CLIENT, Shape, UNTYPED_CHILD, missing, touched};
+use crate::guard::{PageItem, Pending, REPEATED_CLIENT, Shape, UNTYPED_CHILD, missing, touched};
 use crate::kept_ids::keep_ids;
 use crate::moves::{self, Carried, MAX_CARRIED_BYTES, Recreated};
 use crate::structure::{Slot, check_blocks};
@@ -192,7 +192,7 @@ impl PageDoc {
             let before = txn.state_vector();
             // Ruling R690 : les éléments à qui l'entrée pose un attribut que la page ne garde pas.
             let named = shape
-                .attrs(&before, |id| tag_in_page(&txn, id), |_| None)
+                .attrs(&before, |id| tag_in_page(&txn, id), |_| PageItem::Unknown)
                 .unsound;
             self.integrate(&mut txn, &shape, decoded)?;
             delete(&mut txn, &shape.outside_marks(&before))?;
@@ -200,7 +200,7 @@ impl PageDoc {
             let named = named.into_iter().filter_map(|(client, clock)| {
                 BranchID::get_nested(&txn, &ID::new(ClientID::new(client), clock))
             });
-            let unsound = unsound_attrs(&txn, named.collect::<Vec<_>>());
+            let unsound = unsound_attrs(&txn, named.collect::<Vec<_>>(), &shape, &before);
             let whole = lists_are_whole(&txn, &shape);
             if whole && unsound.is_empty() {
                 return Ok(());
@@ -294,6 +294,7 @@ impl PageDoc {
         })?;
         // Ce que la page gardait en attente de suppression avant (d'ordinaire rien).
         let pending_before = Pending::of(txn.store().pending_ds());
+        let floor = txn.state_vector();
         // Avant l'application, qui supprime l'original de chaque bloc recréé et tout ce qu'il
         // porte. La lecture du texte y découpe des blocs de yrs sans rien changer au contenu :
         // l'encodage de la transaction, plus bas, n'en porte rien.
@@ -330,7 +331,7 @@ impl PageDoc {
         // Ruling R691 : un attribut que la garde n'a pas pu juger avant d'appliquer (une valeur
         // posée par l'origine d'une ancienne entrée, ou d'une forme qu'aucun client n'écrit), et
         // que la page ne garde pas.
-        if let Some((_, tag, key)) = unsound_attrs(&txn, []).first() {
+        if let Some((_, tag, key)) = unsound_attrs(&txn, [], &shape, &floor).first() {
             return Err(applied(CrdtError::Structure(attrs::refusal_in_page(
                 tag, key,
             ))));
@@ -400,27 +401,18 @@ impl PageDoc {
     }
 
     /// L'état complet d'un document (v1) gardé ailleurs que dans le journal (une version de
-    /// l'historique), tel qu'on le sert à un éditeur (Ruling R701) : tel quel, octet pour octet,
-    /// s'il ne porte aucun attribut que la garde des attributs refuse ; sinon relu comme une
-    /// entrée du journal (l'attribut est retiré, Ruling R690) et réencodé. Un état illisible est
-    /// rendu tel quel : le refuser n'est pas l'affaire de cette lecture.
+    /// l'historique), tel qu'on le sert à un éditeur (Ruling R701) : relu comme une entrée du
+    /// journal (un attribut que la garde refuse est retiré, Rulings R690, R702, R703), puis
+    /// réencodé. `None` si le serveur ne sait pas le relire : il ne le sert pas.
     ///
-    /// Un état complet nomme tout ce qu'il porte : la garde y juge chaque attribut dans les
-    /// octets, sans page.
-    pub fn served_state(state: Vec<u8>) -> Vec<u8> {
-        let unsound = Shape::read(&state).is_ok_and(|shape| {
-            shape
-                .attrs(&StateVector::default(), |_| None, |_| None)
-                .refusal
-                .is_some()
-        });
-        if !unsound {
-            return state;
-        }
-        match PageDoc::from_updates([state.as_slice()]) {
-            Ok(page) => page.encode_state(),
-            Err(_) => state,
-        }
+    /// Toujours relu, jamais servi tel quel : ce qu'il faut retirer ne se voit pas tout dans les
+    /// octets (une entrée de map que yrs et Yjs ne placent pas pareil, R703), et yrs écrit un
+    /// contenu JSON sous une forme qu'il ne relit pas lui-même (un état qui en porte un est
+    /// illisible pour lui, lisible pour Yjs, qui y lit un objet).
+    pub fn served_state(state: &[u8]) -> Option<Vec<u8>> {
+        PageDoc::from_updates([state])
+            .ok()
+            .map(|page| page.encode_state())
     }
 
     /// Ce que la garde des attributs (Ruling R689) refuserait de cette mise à jour (v1) venue
@@ -435,6 +427,9 @@ impl PageDoc {
             |id| tag_in_page(&txn, id),
             |origin| entry_in_page(&txn, origin),
         );
+        if let Err(CrdtError::Structure(refusal)) = shape.check_contents(&txn.state_vector()) {
+            return Ok(Some(refusal));
+        }
         Ok(findings.refusal)
     }
 
@@ -535,6 +530,8 @@ impl PageDoc {
                 BranchID::get_nested(txn, &ID::new(ClientID::new(client), clock))
                     .map(|branch| matches!(branch.type_ref(), TypeRef::XmlText))
             })?;
+            // Rulings R702, R703 : un contenu que yrs et Yjs ne lisent pas pareil.
+            shape.check_contents(&state)?;
             // Ruling R689 : un attribut d'élément qui n'est pas du type que dit le registre.
             let findings = shape.attrs(
                 &state,
@@ -806,12 +803,12 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
     }
     // Ruling R692 : les attributs que le report pose passent la garde des attributs.
     if let Some(refusal) = shape
-        .attrs(before, |id| tag_in_page(txn, id), |_| None)
+        .attrs(before, |id| tag_in_page(txn, id), |_| PageItem::Unknown)
         .refusal
     {
         return Err(refusal);
     }
-    if let Some((_, tag, key)) = unsound_attrs(txn, []).first() {
+    if let Some((_, tag, key)) = unsound_attrs(txn, [], &shape, before).first() {
         return Err(attrs::refusal_in_page(tag, key));
     }
     Ok(())
@@ -835,13 +832,14 @@ fn tag_in_page<T: ReadTxn>(txn: &T, (client, clock): (u64, u32)) -> Option<Optio
 /// l'entrée courante de chaque clé se compare par le lien faible que yrs en donne (`Map::link`,
 /// fonction `weak` de yrs : un lien n'est jamais écrit, seule sa source est comparée). `None` pour
 /// une ancienne entrée, un enfant d'une liste, ou un élément que la page n'a pas.
-fn entry_in_page<T: ReadTxn>(txn: &T, (client, clock): (u64, u32)) -> Option<(Arc<str>, Key)> {
+fn entry_in_page<T: ReadTxn>(txn: &T, (client, clock): (u64, u32)) -> PageItem {
     let id = ID::new(ClientID::new(client), clock);
-    let branch = StickyIndex::from_id(id, Assoc::After)
-        .get_offset(txn)?
-        .branch;
+    let Some(offset) = StickyIndex::from_id(id, Assoc::After).get_offset(txn) else {
+        return PageItem::Unknown;
+    };
+    let branch = offset.branch;
     let TypeRef::XmlElement(tag) = branch.type_ref() else {
-        return None;
+        return PageItem::OutsideElements;
     };
     let wanted = LinkSource::new(
         StickyIndex::from_id(id, Assoc::Before),
@@ -854,7 +852,9 @@ fn entry_in_page<T: ReadTxn>(txn: &T, (client, clock): (u64, u32)) -> Option<(Ar
             map.link(txn, key)
                 .is_some_and(|link| **link.source() == wanted)
         })
-        .map(|(key, _)| (tag.clone(), Key::of(key)))
+        .map_or(PageItem::Unknown, |(key, _)| {
+            PageItem::Entry(tag.clone(), Key::of(key))
+        })
 }
 
 /// Les attributs que la page ne garde pas (Ruling R689, module `attrs`) parmi ceux des éléments
@@ -862,12 +862,22 @@ fn entry_in_page<T: ReadTxn>(txn: &T, (client, clock): (u64, u32)) -> Option<(Ar
 /// C'est le jugement de ce que les clients liront (Ruling R691) : la valeur courante de chaque
 /// attribut, quelle que soit la forme de l'entrée qui la porte. Une frappe change un texte, pas
 /// un élément : rien n'est lu pour elle.
+///
+/// Un attribut dont l'entrée courante est un élément de la mise à jour qui n'est pas ce qu'un
+/// client écrit pour un attribut (`Shape::not_attribute_values` : un contenu qui n'est pas une
+/// valeur `Any`, une origine droite) n'est pas gardé non plus, quoi que yrs y lise (Rulings R702,
+/// R703) : yrs rend une chaîne là où Yjs lit un objet, un caractère, ou un enfant. yrs ne dit
+/// pas quel élément porte un attribut : l'entrée courante de chaque clé est comparée par son
+/// lien faible (Ruling R697).
 fn unsound_attrs(
     txn: &TransactionMut,
     more: impl IntoIterator<Item = BranchPtr>,
+    shape: &Shape,
+    floor: &StateVector,
 ) -> Vec<(BranchPtr, Arc<str>, String)> {
     let mut seen = HashSet::new();
     let mut unsound = Vec::new();
+    let mut suspects: Option<Vec<LinkSource>> = None;
     for branch in changed_themselves(txn).chain(more) {
         let TypeRef::XmlElement(tag) = branch.type_ref() else {
             continue;
@@ -875,8 +885,25 @@ fn unsound_attrs(
         if !attrs::judged(tag) || !seen.insert(branch) {
             continue;
         }
+        let map = MapRef::from(branch);
         for (key, value) in XmlElementRef::from(branch).attributes(txn) {
-            if !attrs::sound(tag, Key::of(key), Value::of_out(&value)) {
+            let suspects = suspects.get_or_insert_with(|| {
+                shape
+                    .not_attribute_values(floor)
+                    .into_iter()
+                    .map(|id| {
+                        LinkSource::new(
+                            StickyIndex::from_id(id, Assoc::Before),
+                            StickyIndex::from_id(id, Assoc::After),
+                        )
+                    })
+                    .collect()
+            });
+            let suspect = !suspects.is_empty()
+                && map
+                    .link(txn, key)
+                    .is_some_and(|link| suspects.iter().any(|s| **link.source() == *s));
+            if suspect || !attrs::sound(tag, Key::of(key), Value::of_out(&value)) {
                 unsound.push((branch, tag.clone(), key.to_string()));
             }
         }

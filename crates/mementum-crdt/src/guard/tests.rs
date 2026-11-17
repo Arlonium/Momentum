@@ -397,6 +397,8 @@ fn shape_of(entries: &[Entry], deleted: &[Deleted]) -> Shape {
                             attr: None,
                             value: None,
                             any: false,
+                            json: false,
+                            right_origin: false,
                         }),
                         1 => Kind::Gc,
                         _ => Kind::Skip,

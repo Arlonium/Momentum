@@ -262,7 +262,7 @@ fn cell_spans_and_widths_are_bounded() {
         ("rowspan", object()),
         ("colwidth", list(vec![Any::from("120")])),
         ("colwidth", list(vec![object()])),
-        ("colwidth", list(vec![float(f64::NAN)])),
+        ("colwidth", list(vec![float(f64::INFINITY)])),
         ("colwidth", list(vec![int(1); 101])),
         ("colwidth", int(120)),
         ("colwidth", object()),
@@ -778,7 +778,9 @@ fn a_kept_state_is_served_without_its_unsound_attributes() {
     page.write_blocks(&parse("# Titre\n\nTexte\n").unwrap())
         .unwrap();
     let sound = page.encode_state();
-    assert!(PageDoc::served_state(sound.clone()) == sound, "tel quel");
+    let served = PageDoc::served_state(&sound).expect("un état sain");
+    assert_eq!(loaded(&[&served]).0.read_blocks(), page.read_blocks());
+    assert_eq!(loaded(&[&served]).0.revision(), page.revision());
 
     let hostile = replica(&root_update);
     written(&hostile, |txn| {
@@ -789,7 +791,7 @@ fn a_kept_state_is_served_without_its_unsound_attributes() {
     let kept = hostile
         .transact()
         .encode_state_as_update_v1(&yrs::StateVector::default());
-    let served = PageDoc::served_state(kept.clone());
+    let served = PageDoc::served_state(&kept).expect("un état lisible");
     assert!(served != kept, "corrigé");
     assert_eq!(attr_of(&served, 0, "backgroundColor"), None);
     assert_eq!(attr_of(&served, 1, "level"), None);
@@ -797,8 +799,8 @@ fn a_kept_state_is_served_without_its_unsound_attributes() {
         attr_of(&served, 0, "textColor"),
         attr_of(&kept, 0, "textColor")
     );
-    // Un état illisible est rendu tel quel.
-    assert_eq!(PageDoc::served_state(vec![9, 9, 9]), vec![9, 9, 9]);
+    // Un état illisible n'est pas servi.
+    assert_eq!(PageDoc::served_state(&[9, 9, 9]), None);
 }
 
 /// Écrit un entier variable de lib0.
@@ -866,4 +868,296 @@ fn a_value_placed_after_any_item_of_the_page_breaks_nothing() {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ tour de correction 1
+//
+// La règle (Ruling R702) : la garde ne juge jamais une valeur telle que yrs la lit quand Yjs la
+// lit autrement. Seule une valeur `Any` est une valeur d'attribut ; ce que Yjs lit de chaque
+// autre contenu est tenu, avec le vrai Yjs, par `apps/web/src/editor/attrContents.test.ts`.
+
+/// La mise à jour honnête qui écrase `key` du premier bloc par « x » (client 5, horloge 0),
+/// récrite à la main : l'octet d'en-tête `info`, le contenu `body` à la place de la valeur, et,
+/// avec `left`, cet élément pour origine et l'entrée écrasée pour origine droite.
+fn forged(
+    root_update: &[u8],
+    key: &str,
+    info: u8,
+    left: Option<(u64, u32)>,
+    body: &[u8],
+) -> Vec<u8> {
+    let client = replica_as(5, root_update);
+    let honest = written(&client, |txn| {
+        content(txn, 0).insert_attribute(txn, key, "x");
+    });
+    assert_eq!(honest[..5], [1, 1, 5, 0, 0xA8], "{honest:?}");
+    let value = [1, 119, 1, b'x'];
+    let at = honest
+        .windows(value.len())
+        .position(|w| w == value)
+        .expect("la valeur");
+    let mut out = vec![1, 1, 5, 0, info];
+    if let Some((client, clock)) = left {
+        var(&mut out, client);
+        var(&mut out, u64::from(clock));
+    }
+    out.extend_from_slice(&honest[5..at]);
+    out.extend_from_slice(body);
+    out.extend_from_slice(&honest[at + value.len()..]);
+    out
+}
+
+/// L'identifiant Yjs d'un élément XML.
+fn id_of(element: &XmlElementRef) -> (u64, u32) {
+    match AsRef::<yrs::branch::Branch>::as_ref(element).id() {
+        yrs::branch::BranchID::Nested(id) => (id.client.get(), id.clock),
+        other => panic!("un élément imbriqué, trouvé {other:?}"),
+    }
+}
+
+const JSON_OBJECT: &[u8] = br#"{"toString":1}"#;
+
+/// Un contenu JSON : `len - 1`, puis la chaîne.
+fn json_body() -> Vec<u8> {
+    [&[0, JSON_OBJECT.len() as u8][..], JSON_OBJECT].concat()
+}
+
+/// C1 de la relecture : un contenu JSON (`ContentJSON`) posé par l'origine de l'entrée courante.
+/// yrs en rend la chaîne (bonne pour une prop de texte), Yjs `JSON.parse` de la chaîne : un
+/// objet, et la page ne s'ouvre plus. Refusé d'un client où qu'il soit, avant d'être appliqué.
+#[test]
+fn json_content_is_refused_from_a_client_wherever_it_is() {
+    let (page, root_update) = PageDoc::new_page();
+    let before = page.encode_state();
+    for key in ["backgroundColor", "textColor", "textAlignment"] {
+        // Par l'origine de l'entrée courante (0x82), puis avec la marque d'entrée de map (0xA2).
+        for info in [0x82, 0xA2] {
+            let update = forged(&root_update, key, info, None, &json_body());
+            let result = page.try_client_update(&update);
+            assert!(
+                refused_before(&result, "JSON"),
+                "{key} {info:#x} : {result:?}"
+            );
+            assert!(page.encode_state() == before);
+        }
+    }
+    // En enfant de la racine du fragment, nommée : refusé aussi.
+    let mut child = vec![1, 1, 6, 0, 0x02, 1];
+    var(&mut child, FRAGMENT.len() as u64);
+    child.extend_from_slice(FRAGMENT.as_bytes());
+    child.extend_from_slice(&json_body());
+    child.push(0);
+    assert!(page.try_client_update(&child).is_err());
+    assert!(page.encode_state() == before);
+}
+
+/// Les contenus qui ne sont pas une valeur `Any`, posés par l'origine de l'entrée courante d'un
+/// attribut : une chaîne (yrs lit « red », Yjs « d » : m1 de la relecture), des octets, un objet
+/// incorporé. Rien ne les distingue, dans les octets, d'un contenu de texte : refusés dans la
+/// page, après l'application.
+#[test]
+fn a_content_that_is_not_a_value_is_refused_as_an_attribute() {
+    let cases: [(&str, u8, Vec<u8>); 3] = [
+        ("une chaîne", 0x84, vec![3, b'r', b'e', b'd']),
+        ("des octets", 0x83, vec![2, 1, 2]),
+        (
+            "un objet incorporé",
+            0x85,
+            [&[JSON_OBJECT.len() as u8][..], JSON_OBJECT].concat(),
+        ),
+    ];
+    for (what, info, body) in cases {
+        let (page, root_update) = PageDoc::new_page();
+        let update = forged(&root_update, "backgroundColor", info, None, &body);
+        let result = page.try_client_update(&update);
+        assert!(
+            matches!(
+                &result,
+                Err(Refused {
+                    error: CrdtError::Structure(_),
+                    intact: false
+                })
+            ),
+            "{what} : {result:?}"
+        );
+    }
+}
+
+/// Relus du journal (une base d'avant la garde), ou dans l'état d'une version : l'attribut que
+/// porte un tel contenu est retiré, JSON compris, et il ne revient pas à la relecture suivante.
+#[test]
+fn a_stored_content_that_is_not_a_value_loses_its_attribute() {
+    let (_, root_update) = PageDoc::new_page();
+    let cases: [(u8, Vec<u8>); 4] = [
+        (0x82, json_body()),
+        (0x84, vec![3, b'r', b'e', b'd']),
+        (0x83, vec![2, 1, 2]),
+        (0x85, [&[JSON_OBJECT.len() as u8][..], JSON_OBJECT].concat()),
+    ];
+    for (info, body) in cases {
+        let update = forged(&root_update, "backgroundColor", info, None, &body);
+        let (page, state) = loaded(&[&root_update, &update]);
+        assert_eq!(attr_of(&state, 0, "backgroundColor"), None, "{info:#x}");
+        assert!(
+            !state.windows(8).any(|w| w == b"toString"),
+            "{info:#x} : l'état servi porte encore l'objet"
+        );
+        let (again, _) = loaded(&[&root_update, &update]);
+        assert_eq!(again.revision(), page.revision());
+        // L'état d'une version (R701) : tout le document en une mise à jour.
+        let kept = {
+            let raw = replica(&root_update);
+            raw.transact_mut()
+                .apply_update(Update::decode_v1(&update).unwrap())
+                .unwrap();
+            raw.transact()
+                .encode_state_as_update_v1(&yrs::StateVector::default())
+        };
+        // yrs écrit un contenu JSON sous une forme qu'il ne relit pas : l'état n'est pas servi.
+        let Some(served) = PageDoc::served_state(&kept) else {
+            assert_eq!(info, 0x82, "seul un état à contenu JSON est illisible");
+            continue;
+        };
+        assert_ne!(info, 0x82, "un état à contenu JSON est servi");
+        assert!(served != kept, "{info:#x} : servi tel quel");
+        assert_eq!(attr_of(&served, 0, "backgroundColor"), None, "{info:#x}");
+        assert!(!served.windows(8).any(|w| w == b"toString"), "{info:#x}");
+    }
+}
+
+/// I1 de la relecture : un élément dont l'origine est un enfant (le bloc) et l'origine droite une
+/// entrée de map. yrs recopie la clé du voisin de droite : un attribut ; Yjs prend celle de
+/// gauche : un enfant sans type du groupe, et y-prosemirror lève chez les autres. Une valeur
+/// `Any` qui porte une origine droite est refusée avant d'être appliquée ; un autre contenu, dans
+/// la page ; relu du journal, l'élément est supprimé (chez yrs comme chez Yjs, par son
+/// identifiant).
+#[test]
+fn an_item_between_a_child_and_a_map_entry_is_refused() {
+    let (page, root_update) = PageDoc::new_page();
+    let before = page.encode_state();
+    let block = {
+        let doc = replica(&root_update);
+        let txn = doc.transact();
+        id_of(&container(&txn, 0))
+    };
+    // Une valeur `Any` (8), une origine (0x80), une origine droite (0x40).
+    let any = forged(
+        &root_update,
+        "backgroundColor",
+        0xC8,
+        Some(block),
+        &[1, 119, 3, b'r', b'e', b'd'],
+    );
+    let result = page.try_client_update(&any);
+    assert!(refused_before(&result, "origine droite"), "{result:?}");
+    assert!(page.encode_state() == before);
+    // Une chaîne (4) : jugée dans la page.
+    let string = forged(
+        &root_update,
+        "backgroundColor",
+        0xC4,
+        Some(block),
+        &[3, b'r', b'e', b'd'],
+    );
+    let result = page.try_client_update(&string);
+    assert!(
+        matches!(&result, Err(Refused { intact: false, .. })),
+        "{result:?}"
+    );
+    // Relus du journal : la page se lit comme avant eux, et ne garde ni l'attribut ni l'enfant.
+    for update in [&any, &string] {
+        // (Le bloc de gauche, lui, est parti à l'intégration : yrs le tient pour écrasé.)
+        let (_, state) = loaded(&[&root_update, update]);
+        let doc = replica(&state);
+        let txn = doc.transact();
+        assert_eq!(
+            root(&txn).attributes(&txn).count(),
+            0,
+            "un attribut du groupe"
+        );
+        assert_eq!(
+            root(&txn).children(&txn).count() as u32,
+            root(&txn).len(&txn),
+            "un enfant sans type"
+        );
+        assert!(
+            !state.windows(3).any(|w| w == b"red"),
+            "la valeur est servie"
+        );
+    }
+}
+
+/// I2 de la relecture : une valeur `Any` placée par l'origine d'une lettre d'un texte. Aucun
+/// client n'en écrit ; la chercher suit les voisins de son origine (tout le texte) : la mise à
+/// jour est refusée à la première, avant d'être appliquée.
+#[test]
+fn a_value_placed_after_a_letter_is_refused_before_it_is_applied() {
+    let (page, root_update) = PageDoc::new_page();
+    let writer = replica_as(31, &root_update);
+    let first = writer.transact().state_vector().get(&ClientID::new(31));
+    let typed = written(&writer, |txn| {
+        let text = content(txn, 0).push_back(txn, yrs::XmlTextPrelim::new(""));
+        yrs::Text::insert(&text, txn, 0, "abcdef");
+    });
+    page.try_client_update(&typed).expect("le texte");
+    let before = page.encode_state();
+    // Le texte est à l'horloge `first`, ses lettres à la suivante.
+    let mut update = vec![1, 2, 7, 0];
+    for letter in [first + 1, first + 3] {
+        update.push(0x88);
+        var(&mut update, 31);
+        var(&mut update, u64::from(letter));
+        update.extend_from_slice(&[1, 119, 1, b'z']);
+    }
+    update.push(0);
+    let result = page.try_client_update(&update);
+    assert!(refused_before(&result, "contenu de texte"), "{result:?}");
+    assert!(page.encode_state() == before);
+}
+
+/// C2 de la relecture : BlockNote 0.57 écrit `colwidth = [NaN, NaN, NaN]` pour toute cellule
+/// fusionnée collée sans largeurs. `NaN` est une largeur absente (Ruling R705) : accepté d'un
+/// client, gardé à la relecture avec la largeur réelle voisine, lu « sans largeur ».
+#[test]
+fn a_width_that_is_not_a_number_is_an_absent_width() {
+    let nan = || float(f64::NAN);
+    let (page, root_update) = PageDoc::new_page();
+    let client = replica(&root_update);
+    let update = written(&client, |txn| {
+        let cell = push_cell(txn);
+        cell.insert_attribute(txn, "colspan", int(3));
+        cell.insert_attribute(txn, "colwidth", list(vec![nan(), int(120), nan()]));
+    });
+    page.try_client_update(&update)
+        .expect("le collage d'une cellule fusionnée");
+    let widths = |state: &[u8]| {
+        let doc = replica(state);
+        let txn = doc.transact();
+        let cell = child(&txn, &child(&txn, &content(&txn, 1), 0), 0);
+        match cell.get_attribute(&txn, "colwidth") {
+            Some(Out::Any(Any::Array(values))) => values
+                .iter()
+                .map(|v| match v {
+                    Any::Number(Number::Float(f)) if f.is_nan() => "NaN".to_string(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("une liste attendue, trouvé {other:?}"),
+        }
+    };
+    let state = page.encode_state();
+    assert_eq!(widths(&state), ["NaN", "Number(Int(120))", "NaN"]);
+    // Relue du journal : rien n'est retiré.
+    let (reloaded, again) = loaded(&[&state]);
+    assert_eq!(widths(&again), ["NaN", "Number(Int(120))", "NaN"]);
+    let Content::Table(table) = &reloaded.read_blocks()[1].content else {
+        panic!("un tableau");
+    };
+    assert_eq!(table.column_widths, [None, Some(120.0), None]);
+    // Une largeur infinie reste refusée.
+    let update = written(&client, |txn| {
+        let cell = child(txn, &child(txn, &content(txn, 1), 0), 0);
+        cell.insert_attribute(txn, "colwidth", list(vec![float(f64::INFINITY)]));
+    });
+    assert!(refused_before(&page.try_client_update(&update), "colwidth"));
 }
