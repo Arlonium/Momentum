@@ -68,7 +68,8 @@ import { focusMentionLink } from "../mentions/Mention";
 import { mentionMenuOpen, MentionMenus, type MentionContext } from "../mentions/MentionMenu";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
-import { duplicateFromGesture, handleBlockIds, isDuplicateShortcut, selectedBlockIds } from "./duplicate";
+import { COPY_REFUSED, duplicateFromGesture, handleBlockIds, isDuplicateShortcut, selectedBlockIds } from "./duplicate";
+import { dismissNotice } from "./editorNotice";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
 import { linkBound } from "./linkBound";
@@ -246,6 +247,8 @@ type ViewProps = {
 export function EditorView({ editor, editable, onComment = null, mentions = null, pageId, ...attributes }: ViewProps) {
   // Avant tout enfant : la fenêtre d'un bloc et ses brouillons sont ceux de la page (R471).
   useBlockWindowPage(editor, pageId);
+  // Le message d'une copie refusée dit un geste de cette page : il part avec son éditeur (R641).
+  useEffect(() => () => dismissNotice(COPY_REFUSED), [editor]);
   const slashItems = useMemo(() => slashMenuItems(editor), [editor]);
   // « / » et « : » tapés dans un menu de mention ouvert (une date, un titre) lui appartiennent (R620).
   const noMentionMenu = useCallback(() => !mentionMenuOpen(editor), [editor]);

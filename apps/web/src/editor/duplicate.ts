@@ -33,8 +33,11 @@ export const MAX_DUPLICATED_BLOCKS = 1_000;
 export const TOO_MANY_BLOCKS =
   "Trop de blocs à dupliquer : 1 000 au plus d'un coup, sous-blocs compris. Rien n'a été copié.";
 
-/** La zone d'alerte de ce message (`editorNotice.ts`). */
-const COPY_REFUSED = "mm-copy-refused";
+/**
+ * La zone d'alerte de ce message (`editorNotice.ts`). Il dit un geste de la page : il part avec
+ * l'éditeur (`EditorView`), à la page quittée comme à la session recréée.
+ */
+export const COPY_REFUSED = "mm-copy-refused";
 
 /** Ce que la reconnaissance lit d'un événement clavier (du DOM, ou de React). */
 export type DuplicateKey = {
