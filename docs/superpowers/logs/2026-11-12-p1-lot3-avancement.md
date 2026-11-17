@@ -51,7 +51,7 @@ Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête 
 ## Reprise du 2026-11-17 (tenu à jour ; prime sur la section de la pause, qui suit)
 
 - **Task C5 (dupliquer un bloc) : close, sur `main`** (`f94271c`). Relue, corrigée (R640 à R642), re-relue sans constat neuf ; à la reprise : un e2e de l'alerte du lien trop long, le message d'une copie refusée part avec la page. 2 359 tests du client, suite e2e entière 266 verts, budgets 13 sur 13. **Dix-sept tâches de la partie B sur vingt et une.**
-- **Task X2** : finie par son implémenteur (`lot3b-x2`, tête `8b700ac`, dans l'atelier `lot3b-c10` ; R658 à R661), **en relecture**.
+- **Task X2 (fidélité MMD des blocs riches) : close, sur `main`** (`226163c`). Un défaut trouvé et corrigé (R658, accepté par le contrôleur : une formule en ligne à `$` non échappé s'écrit `<math latex="…"/>` ; `$	ext{$x$}$`, toléré depuis le lot 1, est refusé avec la forme à écrire), fixture `rich-blocks` ; relue « prête » (20 000 formules au hasard, linéarité, MMD attendu ligne à ligne contre le §6.2), deux mineurs corrigés (R662). 1 080 tests Rust, 2 359 tests du client, `fidelity.spec.ts` 11 sur 11. **Dix-huit tâches de la partie B sur vingt et une.** Restent C8 (en cours), C9, D, puis la relecture finale.
 - **Task C8** (fichiers côté client) : lancée dans `lot3b-client`.
 - Les onze ateliers fusionnés sont supprimés (342 Go rendus). CI : le job Windows du commit `53a44a7` est tombé sur une panne de l'éditeur de liens du coureur (`link.exe`, code 1201), relancé.
 
