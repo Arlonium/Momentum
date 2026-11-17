@@ -302,6 +302,8 @@ test("too_large_file_is_refused_with_the_limit", async ({ browser }) => {
   expect(sent).toEqual([]);
   expect(limits).toHaveLength(1);
   await expect(uploads(mona)).toHaveCount(0);
+  // Le bloc du dépôt est retiré, avec le nom du fichier.
+  await expect(mona.locator(".mm-editor .bn-add-file-button")).toHaveCount(0);
 
   // « Fermer » : le message part, et le focus revient au texte de la page.
   await mona.getByRole("button", { name: "Fermer", exact: true }).click();
@@ -437,15 +439,23 @@ test("an_upload_in_course_is_shown_cancelled_and_leaves_with_the_page", async ({
   await drop(mona, firstBlock(mona), { name: "un.png", bytes: PNG, type: "image/png" });
   await drop(mona, mona.locator(".mm-editor .bn-block-content").last(), { name: "deux.png", bytes: PNG, type: "image/png" });
   // Deux envois de front, chacun dit, chacun avec de quoi l'annuler ; le bloc dit « Envoi… ».
-  await expect(uploads(mona)).toHaveText([/Envoi de un\.png…/, /Envoi de deux\.png…/]);
+  // Le plus récent en haut.
+  await expect(uploads(mona)).toHaveText([/Envoi de deux\.png…/, /Envoi de un\.png…/]);
   await expect.poll(() => held.length).toBe(2);
+  // Limite écrite (R685) : pendant l'envoi, le bloc en attente porte le nom du fichier, lu par tous.
+  await expect.poll(() => getMmd(team.aliceApi, page.id)).toContain('name="un.png"');
   const waiting = mona.locator(".mm-editor .bn-file-loading-preview").first();
   await expect(waiting).toBeVisible();
   expect(await waiting.evaluate((e) => getComputedStyle(e, "::after").content)).toBe('"Envoi…"');
 
   // « Annuler » le premier : sa requête est coupée, rien n'est dit, le second continue.
   await mona.getByRole("button", { name: /^Annuler l'envoi de .*un\.png/ }).click();
+  // Sa ligne reste, sans bouton, tant que le pointeur est dans la boîte ; puis elle part.
+  await expect(uploads(mona)).toHaveText([/Envoi de deux\.png…/, /un\.png n'est plus en cours/]);
+  await mona.mouse.move(20, 300);
   await expect(uploads(mona)).toHaveText([/Envoi de deux\.png…/]);
+  // Le bloc que le dépôt avait posé est retiré : le nom du fichier n'est plus dans le document.
+  await expect.poll(() => getMmd(team.aliceApi, page.id)).not.toContain("un.png");
   await expect.poll(() => failed.length).toBe(1);
   await expect(refusals(mona)).toHaveCount(0);
   // Le focus n'est pas tombé sur `body`.
@@ -469,4 +479,208 @@ test("an_upload_in_course_is_shown_cancelled_and_leaves_with_the_page", async ({
   expect(stored).not.toMatch(/png|files/);
   // Une seule image est attachée à la première page.
   expect((await getMmd(await apiAs(team.alice), page.id)).match(/\/files\//g)).toHaveLength(1);
+});
+
+// Tour de correction 1 (relecture de C8).
+
+test("a_copied_file_block_puts_only_a_permitted_address_in_the_clipboard", async ({ browser }) => {
+  // Un bloc image à l'aperçu masqué, dont l'adresse n'est pas permise, écrit par MMD (un agent, un
+  // autre client) : copié, il ne met dans le presse-papiers ni `href` ni `src` vers elle (I1).
+  const team = await ownerAndMember();
+  const page = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Copie ${unique()}` });
+  const src = await upload(team.aliceApi, page.id, "bonne.png", PNG);
+  await putMmd(
+    team.aliceApi,
+    page.id,
+    `![]() {name="a.png" preview=false url="javascript:alert(document.domain)"}\n\n![](${src}) {name="bonne.png" preview=false}\n`,
+  );
+  const mona = await openPage(browser, page.id, team.alice);
+  /** Ce que la copie du bloc cliqué met dans le presse-papiers : ses liens et ses sources. */
+  const copied = async (name: string) => {
+    await mona.locator(".mm-editor .bn-file-name", { hasText: name }).click();
+    return mona.evaluate(() => {
+      const data = new DataTransfer();
+      document
+        .querySelector(".mm-editor .bn-editor")!
+        .dispatchEvent(new ClipboardEvent("copy", { clipboardData: data, bubbles: true, cancelable: true }));
+      const host = document.createElement("div");
+      host.innerHTML = data.getData("text/html");
+      return {
+        carried: [...host.querySelectorAll("[href], [src]")].map((e) => e.getAttribute("href") ?? e.getAttribute("src")),
+        text: host.textContent ?? "",
+      };
+    });
+  };
+  const bad = await copied("a.png");
+  expect(bad.carried).toEqual([]);
+  expect(bad.text).toContain("a.png");
+  // Témoin : un fichier de la page est copié avec son adresse.
+  expect((await copied("bonne.png")).carried).toEqual([src]);
+});
+
+test("download_in_the_toolbar_does_not_hand_the_tab_to_the_site_it_opens", async ({ browser }) => {
+  // Un bloc fichier à une adresse web, dont la page renvoie son ouvreur chez elle (I2).
+  const team = await ownerAndMember();
+  const page = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Ouvreur ${unique()}` });
+  await putMmd(team.aliceApi, page.id, '<file src="https://ailleurs.example/rapport.pdf" name="rapport.pdf"/>\n');
+  const mona = await newUser(browser, team.alice);
+  await mona.context().route("https://ailleurs.example/**", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: route.request().url().includes("ailleurs.example/pris")
+        ? "<title>pris</title>"
+        : "<script>window.__had = !!window.opener; if (window.opener) window.opener.location = 'https://ailleurs.example/pris';</script>",
+    }),
+  );
+  await mona.goto(`/p/${page.id}`);
+  await waitSynced(mona);
+  const here = mona.url();
+  /** Ouvre le site par `click`, et dit s'il a eu un ouvreur et où est resté l'onglet de Mementum. */
+  const opened = async (click: () => Promise<void>) => {
+    const [site] = await Promise.all([mona.context().waitForEvent("page"), click()]);
+    await site.waitForLoadState();
+    const had = await site.evaluate(() => (window as Window & { __had?: boolean }).__had);
+    // Le site a eu le temps d'agir : son script est passé (`__had` est posé).
+    expect(had).toBeDefined();
+    await site.close();
+    return { had, tab: mona.url() };
+  };
+  // Par le lien du bloc, puis par « Télécharger » de la barre de mise en forme : jamais d'ouvreur.
+  const link = mona.locator(".mm-editor a.mm-file-download");
+  await expect(link).toHaveText("Ouvrir");
+  expect(await opened(() => link.click())).toEqual({ had: false, tab: here });
+  await mona.locator(".mm-editor .bn-file-name").click();
+  const button = mona.getByRole("button", { name: /^Télécharger/ });
+  await expect(button).toBeVisible();
+  expect(await opened(() => button.click())).toEqual({ had: false, tab: here });
+});
+
+test("an_address_that_is_not_permitted_is_never_loaded", async ({ browser }) => {
+  // Une adresse du document qui n'est ni un fichier de l'instance ni une adresse web : une autre route
+  // de l'API. L'éditeur ne la met dans aucun `src`, et l'onglet ne la demande jamais.
+  const team = await ownerAndMember();
+  const page = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Refusée ${unique()}` });
+  const src = await upload(team.aliceApi, page.id, "bonne.png", PNG);
+  const forged = "/api/v1/files/limits?forgee";
+  await putMmd(team.aliceApi, page.id, `![](${forged})\n\n![](${src}) {name="bonne.png"}\n\n<video src="${forged}"/>\n`);
+  const mona = await newUser(browser, team.alice);
+  const asked: string[] = [];
+  mona.on("request", (request) => asked.push(new URL(request.url()).pathname + new URL(request.url()).search));
+  await mona.goto(`/p/${page.id}`);
+  await waitSynced(mona);
+  // Barrière et témoin : l'image permise est demandée et affichée.
+  await expectShown(mona.locator(`.mm-editor img[src="${src}"]`));
+  expect(asked).toContain(src);
+  await expect(images(mona)).toHaveCount(2);
+  expect(await images(mona).first().getAttribute("src")).toBe("about:blank");
+  expect(await mona.locator(".mm-editor video.bn-visual-media").getAttribute("src")).toBe("about:blank");
+  expect(asked.filter((url) => url.includes("forgee"))).toEqual([]);
+});
+
+test("the_answer_of_the_server_is_set_in_the_block_only_if_it_is_a_file_of_the_page", async ({ browser }) => {
+  // Un mandataire, ou un serveur d'une autre version, répond autre chose à l'envoi : rien n'est posé.
+  const team = await ownerAndMember();
+  const page = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Réponse ${unique()}` });
+  const other = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Autre ${unique()}` });
+  const elsewhere = await upload(team.aliceApi, other.id, "ailleurs.png", PNG);
+  const mona = await newUser(browser, team.alice);
+  const answers = [elsewhere, "/api/v1/files/limits?forgee", "javascript:alert(1)"];
+  await mona.route(/\/api\/v1\/pages\/[^/]+\/files\?/, (route) =>
+    route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({ id: "x", url: answers.shift(), name: "photo.png", size: PNG.length, mime: "image/png" }),
+    }),
+  );
+  await mona.goto(`/p/${page.id}`);
+  await waitSynced(mona);
+  for (let n = 1; n <= 3; n++) {
+    await drop(mona, mona.locator(".mm-editor .bn-block-content").last(), { name: "photo.png", bytes: PNG, type: "image/png" });
+    await expect(refusals(mona)).toHaveCount(n);
+  }
+  await expect(refusals(mona)).toHaveText([
+    /photo\.png.* n'a pas été envoyé : le serveur a répondu autre chose qu'un fichier de cette page\./,
+    /autre chose qu'un fichier de cette page/,
+    /autre chose qu'un fichier de cette page/,
+  ]);
+  await expect(images(mona)).toHaveCount(0);
+  // Rien de ces adresses dans le document, ni le bloc de l'envoi, ni son nom.
+  await expect.poll(() => getMmd(team.aliceApi, page.id)).not.toMatch(/files|forgee|javascript|photo\.png/);
+});
+
+test("nothing_moves_under_the_pointer_in_the_box_of_uploads_and_it_covers_neither_the_title_nor_the_text", async ({
+  browser,
+}) => {
+  const team = await ownerAndMember();
+  const page = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Pointeur ${unique()}` });
+  await putMmd(team.aliceApi, page.id, "Première ligne de la page.\n\nSeconde ligne.\n");
+  const mona = await newUser(browser, team.alice);
+  const errors: string[] = [];
+  mona.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  const held: (() => Promise<void>)[] = [];
+  await mona.route(/\/api\/v1\/pages\/[^/]+\/files\?/, (route) => {
+    held.push(() => route.continue());
+  });
+  await mona.goto(`/p/${page.id}`);
+  await waitSynced(mona);
+  for (const name of ["un.png", "deux.png", "trois.png"]) {
+    await drop(mona, mona.locator(".mm-editor .bn-block-content").last(), { name, bytes: PNG, type: "image/png" });
+  }
+  await expect(uploads(mona)).toHaveCount(3);
+  await expect.poll(() => held.length).toBe(3);
+
+  // La boîte ne recouvre ni le titre, ni le texte, ni les blocs en attente (R675, R683).
+  const covered = await mona.evaluate(() => {
+    const box = document.querySelector(".mm-file-notices")!.getBoundingClientRect();
+    const hit = (element: Element) => {
+      const r = element.getBoundingClientRect();
+      return r.left < box.right && box.left < r.right && r.top < box.bottom && box.top < r.bottom;
+    };
+    return [...document.querySelectorAll(".mm-title, .mm-topbar, .mm-editor .bn-block-content")].filter(hit).length;
+  });
+  expect(covered).toBe(0);
+
+  // Le pointeur, immobile, sur « Annuler » du deuxième envoi ; le premier finit.
+  const second = mona.getByRole("button", { name: /^Annuler l'envoi de .*deux\.png/ });
+  await second.hover();
+  const box = (await second.boundingBox())!;
+  const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const under = () =>
+    mona.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute("aria-label") ?? "(rien)", at);
+  expect(await under()).toMatch(/deux\.png/);
+  await held[0]();
+  await expectShown(images(mona));
+  // Sa ligne reste, sans bouton, et sous le pointeur c'est toujours le même bouton.
+  await expect(uploads(mona)).toHaveText([/Envoi de trois\.png…/, /Envoi de deux\.png…/, /un\.png n'est plus en cours/]);
+  expect(await under()).toMatch(/deux\.png/);
+  expect(await second.boundingBox()).toEqual(box);
+  // Le pointeur sorti de la boîte, la ligne finie part.
+  await mona.mouse.move(20, 300);
+  await expect(uploads(mona)).toHaveText([/Envoi de trois\.png…/, /Envoi de deux\.png…/]);
+  // Témoin de la mutation : sans le pointeur, une ligne finie part tout de suite.
+  await held[1]();
+  await expect(uploads(mona)).toHaveText([/Envoi de trois\.png…/]);
+  await held[2]();
+  await expect(uploads(mona)).toHaveCount(0);
+  // Un bloc en attente de son fichier ne charge rien : aucune erreur de console (m4).
+  expect(errors).toEqual([]);
+});
+
+test("a_right_withdrawn_during_an_upload_is_said_without_inviting_to_try_again", async ({ browser }) => {
+  // Le droit de Tom baisse pendant son envoi : son onglet l'apprend (sa synchro est fermée), sa session
+  // est recréée en lecture, et l'envoi s'arrête. Le message dit ce que la page est devenue (m6).
+  const { aliceApi, bruno, brunoId, page } = await sharedPrivate("edit", "Baisse");
+  const tom = await newUser(browser, bruno);
+  await tom.route(/\/api\/v1\/pages\/[^/]+\/files\?/, () => {});
+  await tom.goto(`/p/${page.id}`);
+  await waitSynced(tom);
+  await drop(tom, firstBlock(tom), { name: "photo.png", bytes: PNG, type: "image/png" });
+  await expect(uploads(tom)).toHaveCount(1);
+  await setPageLevel(aliceApi, page.id, brunoId, "read");
+  await expect(readerBanner(tom)).toBeVisible({ timeout: 15_000 });
+  await expect(refusals(tom)).toHaveText([/photo\.png.* n'a pas été envoyé : tu ne peux plus modifier cette page\./]);
+  await expect(uploads(tom)).toHaveCount(0);
+  expect((await refusals(tom).allTextContents()).join(" ")).not.toContain("Réessaie");
 });
