@@ -630,6 +630,79 @@ enum Op {
         item: Option<HostileItem>,
         delete: Option<(usize, u32)>,
     },
+    /// Un client de passage pose l'attribut `ATTRS[attr]` sur le premier bloc (`on_container`)
+    /// ou sur son contenu ; si `raced`, un autre client de passage, parti du même état, a posé
+    /// juste avant une valeur honnête sous la même clé : la valeur a alors pour origine une
+    /// entrée qui n'est plus l'entrée courante (garde des attributs, Rulings R689 à R691).
+    ///
+    /// `stored` : la mise à jour n'est pas reçue d'un client mais déjà au journal, écrite avant
+    /// la garde (Ruling R690) ; la page est rechargée.
+    Attr {
+        attr: usize,
+        on_container: bool,
+        raced: bool,
+        stored: bool,
+    },
+}
+
+/// Les attributs posés par `Op::Attr` : du type du registre, ou non (un objet, une liste,
+/// `null`, un nombre pour une chaîne).
+fn attrs() -> Vec<(&'static str, Any)> {
+    let object = Any::Map(std::sync::Arc::new(std::collections::HashMap::from([(
+        "toString".to_string(),
+        Any::Number(yrs::any::Number::Int(1)),
+    )])));
+    vec![
+        ("backgroundColor", Any::from("red")),
+        ("backgroundColor", object.clone()),
+        ("textAlignment", Any::Null),
+        ("textAlignment", Any::from("center")),
+        ("textColor", Any::Array(vec![Any::from("a")].into())),
+        ("id", Any::Number(yrs::any::Number::Int(7))),
+        ("id", object.clone()),
+        ("mienne", object),
+        ("mienne", Any::from("x")),
+    ]
+}
+
+/// Ce qu'écrit un client de passage, qui a reçu la page : `key = value` sur le premier bloc ou
+/// sur son contenu (vide s'il n'y est plus).
+fn attribute(doc: &Doc, on_container: bool, key: &str, value: Any) -> Vec<u8> {
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let mut txn = doc.transact_mut();
+    if let Some(XmlOut::Element(group)) = fragment.get(&txn, 0)
+        && let Some(XmlOut::Element(container)) = group.get(&txn, 0)
+    {
+        if on_container {
+            container.insert_attribute(&mut txn, key, value);
+        } else if let Some(XmlOut::Element(content)) = container.get(&txn, 0) {
+            content.insert_attribute(&mut txn, key, value);
+        }
+    }
+    txn.encode_update_v1()
+}
+
+/// Aucun élément de la page ne porte un attribut qu'aucun client du schéma n'écrit : un objet,
+/// une liste, des octets, `null` (les seules valeurs fautives que ces tests posent).
+fn assert_attrs_are_sound(page: &PageDoc, what: &str) {
+    let doc = page.yrs_doc();
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let txn = doc.transact();
+    for node in fragment.successors(&txn) {
+        let XmlOut::Element(element) = node else {
+            continue;
+        };
+        for (key, value) in element.attributes(&txn) {
+            assert!(
+                !matches!(
+                    value,
+                    Out::Any(Any::Map(_) | Any::Array(_) | Any::Buffer(_) | Any::Null)
+                ),
+                "{what} : « {} » porte {key} = {value:?}",
+                element.tag()
+            );
+        }
+    }
 }
 
 /// L'élément d'une mise à jour faite à la main : le client, l'horloge, vrai pour la ramener sous
@@ -665,6 +738,18 @@ fn op() -> impl Strategy<Value = Op> {
             proptest::option::of((any::<usize>(), any::<u32>()))
         )
             .prop_map(|(item, delete)| Op::Hostile { item, delete }),
+        (
+            0..attrs().len(),
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>()
+        )
+            .prop_map(|(attr, on_container, raced, stored)| Op::Attr {
+                attr,
+                on_container,
+                raced,
+                stored,
+            }),
     ]
 }
 
@@ -766,9 +851,33 @@ proptest! {
                         .collect();
                     hand_made(item, &deletions)
                 }
+                Op::Attr { attr, on_container, raced, stored } => {
+                    let (key, value) = attrs().swap_remove(*attr);
+                    // Deux clients de passage partis du même état : le second ne voit pas ce
+                    // que le premier écrit.
+                    let passing = [
+                        client(1_000 + 2 * step as u64, &served),
+                        client(1_001 + 2 * step as u64, &served),
+                    ];
+                    if *raced {
+                        let honest = if key == "id" { "autre" } else { "blue" };
+                        let first = attribute(&passing[0], *on_container, key, Any::from(honest));
+                        served.receive(&first);
+                        served.assert_reload_is_live(&format!("étape {step} ({op:?}), la course"));
+                    }
+                    let update = attribute(&passing[1], *on_container, key, value);
+                    if *stored {
+                        served.journal.push(update);
+                        served.page = served.reloaded();
+                        vec![0, 0]
+                    } else {
+                        update
+                    }
+                }
             };
             served.receive(&update);
             served.assert_reload_is_live(&format!("étape {step} ({op:?})"));
+            assert_attrs_are_sound(&served.page, &format!("étape {step} ({op:?})"));
         }
     }
 }

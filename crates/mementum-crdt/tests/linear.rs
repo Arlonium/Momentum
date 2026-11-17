@@ -319,3 +319,181 @@ fn wrapped_columns_are_examined_once() {
         );
     }
 }
+
+// ------------------------------------------------------------ garde des attributs (R689)
+
+/// Écrit un entier variable de lib0.
+fn var(out: &mut Vec<u8>, mut value: u64) {
+    while value > 0x7F {
+        out.push(0x80 | (value & 0x7F) as u8);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// `{"toString": 1}`.
+fn object() -> Any {
+    Any::Map(Arc::new(HashMap::from([(
+        "toString".to_string(),
+        Any::Number(yrs::any::Number::Int(1)),
+    )])))
+}
+
+/// Un client d'identifiant fixé, qui a reçu `state`.
+fn client_of(id: u64, state: &[u8]) -> Doc {
+    use yrs::updates::decoder::Decode;
+    let doc = Doc::with_options(yrs::Options {
+        client_id: yrs::ClientID::new(id),
+        offset_kind: yrs::OffsetKind::Utf16,
+        ..yrs::Options::default()
+    });
+    doc.get_or_insert_xml_fragment(FRAGMENT);
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(state).unwrap())
+        .unwrap();
+    doc
+}
+
+/// Le paragraphe d'une page neuve.
+fn first_paragraph<T: ReadTxn>(txn: &T) -> XmlElementRef {
+    let fragment = txn.get_xml_fragment(FRAGMENT).unwrap();
+    let mut element = match fragment.get(txn, 0) {
+        Some(yrs::XmlOut::Element(e)) => e,
+        _ => panic!("la racine"),
+    };
+    for _ in 0..2 {
+        element = match element.get(txn, 0) {
+            Some(yrs::XmlOut::Element(e)) => e,
+            _ => panic!("un élément"),
+        };
+    }
+    element
+}
+
+/// Une page et la mise à jour qu'un client lui envoie, ou que son journal porte.
+struct Sent {
+    state: Vec<u8>,
+    update: Vec<u8>,
+}
+
+/// `n` blocs neufs, chacun avec un attribut d'un autre type que le sien, une liste de largeurs
+/// démesurée et une valeur imbriquée.
+fn many_unsound_blocks(n: usize) -> Sent {
+    let (_, state) = PageDoc::new_page();
+    let doc = client_of(7, &state);
+    let mut txn = doc.transact_mut();
+    let fragment = txn.get_xml_fragment(FRAGMENT).unwrap();
+    let Some(yrs::XmlOut::Element(root)) = fragment.get(&txn, 0) else {
+        panic!("la racine");
+    };
+    let nested = (0..8).fold(object(), |inner, _| Any::Array(vec![inner].into()));
+    for i in 0..n {
+        let container = root.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(&mut txn, "id", format!("b{i}"));
+        let heading = container.push_back(&mut txn, XmlElementPrelim::empty("heading"));
+        heading.insert_attribute(&mut txn, "level", object());
+        heading.insert_attribute(&mut txn, "backgroundColor", nested.clone());
+        heading.insert_attribute(&mut txn, "textAlignment", "center");
+        heading.insert_attribute(
+            &mut txn,
+            "colwidth",
+            Any::Array(vec![Any::Number(yrs::any::Number::Int(120)); 200].into()),
+        );
+    }
+    let update = txn.encode_update_v1();
+    Sent { state, update }
+}
+
+/// Un attribut du paragraphe écrasé `n` fois dans la même mise à jour : une chaîne d'origines.
+fn one_attribute_overwritten(n: usize) -> Sent {
+    let (_, state) = PageDoc::new_page();
+    let doc = client_of(7, &state);
+    let mut txn = doc.transact_mut();
+    let paragraph = first_paragraph(&txn);
+    for i in 0..n {
+        let value = if i % 2 == 0 {
+            object()
+        } else {
+            Any::from("red")
+        };
+        paragraph.insert_attribute(&mut txn, "backgroundColor", value);
+    }
+    let update = txn.encode_update_v1();
+    Sent { state, update }
+}
+
+/// Une page dont le paragraphe porte `n` lettres, chacune un élément Yjs, et une mise à jour
+/// faite à la main de `n` valeurs `Any`, chacune placée par l'origine d'une de ces lettres : la
+/// garde cherche, pour chacune, si son origine est une entrée de la page (la recherche suit les
+/// voisins de l'origine ; sans plafond, `n` recherches de `n` pas).
+fn values_placed_after_page_items(n: usize) -> Sent {
+    let (_, root) = PageDoc::new_page();
+    let doc = client_of(9, &root);
+    let first = {
+        let mut txn = doc.transact_mut();
+        let paragraph = first_paragraph(&txn);
+        let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+        let first = txn.state_vector().get(&yrs::ClientID::new(9));
+        for _ in 0..n {
+            text.insert(&mut txn, 0, "a");
+        }
+        first
+    };
+    let state = doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    // Un client, `n` éléments à partir de l'horloge 0 : contenu `Any` (8) et une origine (0x80).
+    let mut update = Vec::new();
+    var(&mut update, 1);
+    var(&mut update, n as u64);
+    var(&mut update, 11);
+    var(&mut update, 0);
+    for i in 0..n {
+        update.push(0x88);
+        var(&mut update, 9);
+        var(&mut update, u64::from(first) + i as u64);
+        var(&mut update, 1);
+        update.extend_from_slice(&[119, 1, b'z']);
+    }
+    update.push(0);
+    Sent { state, update }
+}
+
+/// Garde des attributs (Rulings R689 à R691) : juger une mise à jour, d'un client comme relue du
+/// journal, croît comme elle et comme la page. Trois formes : des blocs nombreux aux attributs
+/// fautifs, un attribut écrasé de nombreuses fois, et des valeurs placées par des origines de la
+/// page (le plafond des recherches, `MAX_PAGE_LOOKUPS`).
+#[test]
+fn judging_attributes_grows_like_the_update() {
+    let forms = [
+        Form {
+            what: "blocs nombreux, chacun aux attributs fautifs",
+            build: &many_unsound_blocks,
+        },
+        Form {
+            what: "un attribut écrasé de nombreuses fois",
+            build: &one_attribute_overwritten,
+        },
+        Form {
+            what: "valeurs placées par des origines de la page",
+            build: &values_placed_after_page_items,
+        },
+    ];
+    let size = |sent: &Sent| sent.state.len() + sent.update.len();
+    // D'un client (refusée, ou acceptée : des valeurs dans un texte), puis relue du journal.
+    let judge = |sent: &Sent| {
+        let from_client = {
+            let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
+            page.try_client_update(&sent.update).is_ok()
+        };
+        let stored =
+            PageDoc::from_updates([sent.state.as_slice(), sent.update.as_slice()]).unwrap();
+        (from_client, stored.encode_state().len())
+    };
+    let limits = Limits {
+        peak_per_byte: 64,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&forms, size, judge, |_| 0, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
