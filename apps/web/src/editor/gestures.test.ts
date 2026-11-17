@@ -1053,3 +1053,39 @@ describe("fichiers", () => {
     for (const [, doc] of docs(s)) expect(xml(doc)).toContain("de Tom");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Un fichier venu d'une autre page (C9) : l'adresse du bloc collé, récrite après la recopie
+// ---------------------------------------------------------------------------
+
+const ELSEWHERE_URL = "/api/v1/pages/0193a5b0-0000-7000-8000-000000000002/files/0193a5b0-0000-7000-8000-0000000000f2";
+
+/** Un bloc image collé d'une autre page : il porte encore l'adresse de sa première page. */
+const PASTED: Seed = [
+  { id: "x", type: "paragraph", content: "Bloc X" },
+  { id: "i", type: "image", props: { url: ELSEWHERE_URL, name: "photo.png" } },
+  { id: "z", type: "paragraph", content: "Bloc Z" },
+];
+
+describe("un fichier venu d'une autre page", () => {
+  test.each(PLAYS)("adopting_a_pasted_file_rewrites_only_its_url ($label)", async ({ order, first }) => {
+    const s = await scene(PASTED, order);
+    const before = elementIds(s.server);
+    // La recopie aboutie, Mona récrit l'adresse ; au même instant Tom pose une légende sur ce bloc et
+    // tape dans le bloc d'avant.
+    const wrote = written(s.mona, () => s.mona.editor.updateBlock("i", { props: { url: FILE_URL } }));
+    s.tom.editor.updateBlock("i", { props: { caption: "Vue du port" } });
+    typeAtEnd(s.tom, "x", TYPED);
+    // Un attribut du même élément, récrit : aucun élément créé ni supprimé.
+    expect(wrote).toEqual({ deleted: [], created: [], renamed: {} });
+    expect(counts(pending(s.mona))).toMatchObject({ made: { "attribut récrit": 1 } });
+    await send(s, first);
+    // L'adresse de Mona, la légende et la frappe de Tom : rien n'est perdu.
+    expectEverywhere(s, [block("x", `Bloc X${TYPED}`), image("i"), Z]);
+    for (const [where, doc] of docs(s)) {
+      expect(storedProps(doc, "i"), where).toMatchObject({ url: FILE_URL, caption: "Vue du port", name: "photo.png" });
+      expect(changedElements(doc, before), where).toEqual([]);
+      expect(newIds(doc, before), where).toEqual([]);
+    }
+  });
+});
