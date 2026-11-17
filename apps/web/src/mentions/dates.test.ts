@@ -141,13 +141,13 @@ test("the menu keeps a date on offer while its digits are typed", () => {
     ["2026-12-01"],
     ["2027-12-01"],
   ]);
-  // AAAA-MM-JJ : le mois seul vaut son premier jour.
+  // AAAA-MM-JJ : l'année seule vaut son premier jour, le mois seul aussi (R768).
   expect(["2", "20", "202", "2026", "2026-", "2026-1", "2026-12", "2026-12-", "2026-12-0", "2026-12-01"].map((q) => offered(q))).toEqual([
     ["2026-11-02"],
     ["2026-11-20"],
     [],
-    [],
-    [],
+    ["2026-01-01"],
+    ["2026-01-01"],
     ["2026-01-01"],
     ["2026-12-01"],
     ["2026-12-01"],
@@ -156,6 +156,86 @@ test("the menu keeps a date on offer while its digits are typed", () => {
   ]);
   // Une date impossible n'est jamais proposée.
   expect(offered("31/02")).toEqual([]);
-  expect(offered("31", day(2026, 11, 16))).toEqual([]);
   expect(offered("31/02/2026")).toEqual([]);
+  expect(offered("32")).toEqual([]);
+  expect(offered("00")).toEqual([]);
+});
+
+test("a day this month does not have is offered in the next month that has it", () => {
+  // `@31` le 15 de chaque mois de 2026 : le 31 de ce mois, ou du prochain qui en a un (R768). Il ne
+  // proposait rien un mois de trente jours, ni le 29 ou le 30 en février.
+  const thirtyFirst = Array.from({ length: 12 }, (_, m) => offered("31", day(2026, m + 1, 15))[0]);
+  expect(thirtyFirst).toEqual([
+    "2026-01-31",
+    "2026-03-31",
+    "2026-03-31",
+    "2026-05-31",
+    "2026-05-31",
+    "2026-07-31",
+    "2026-07-31",
+    "2026-08-31",
+    "2026-10-31",
+    "2026-10-31",
+    "2026-12-31",
+    "2026-12-31",
+  ]);
+  expect(offered("31/", day(2026, 11, 30))).toEqual(["2026-12-31"]);
+  expect(offered("30", day(2026, 2, 3))).toEqual(["2026-03-30"]);
+  expect(offered("29", day(2026, 2, 3))).toEqual(["2026-03-29"]);
+  expect(offered("29", day(2028, 2, 3))).toEqual(["2028-02-29"]);
+  // Le 31 décembre, `@31` est le jour même ; en décembre, le prochain 31 est en janvier.
+  expect(offered("31", day(2026, 12, 31))).toEqual(["2026-12-31"]);
+  // Le 29 février d'une année qui ne l'a pas : la prochaine année qui l'a, tant que l'année se tape.
+  expect(["29/02", "29/02/", "29/02/2", "29/02/20", "29/02/202", "29/02/2028"].map((q) => offered(q))).toEqual(
+    Array.from({ length: 6 }, () => ["2028-02-29"]),
+  );
+  // L'année seule, ou suivie du début de son mois, vaut son premier jour.
+  expect(["2026", "2026-", "2026-0", "2026-01", "2026-01-1", "2026-01-15"].map((q) => offered(q))).toEqual([
+    ["2026-01-01"],
+    ["2026-01-01"],
+    ["2026-01-01"],
+    ["2026-01-01"],
+    ["2026-01-01"],
+    ["2026-01-15"],
+  ]);
+});
+
+/**
+ * La règle de BlockNote (`useCloseSuggestionMenuNoItems`) : le menu se ferme quand la requête a plus
+ * de trois caractères de plus que la dernière qui proposait quelque chose. Rend la première requête
+ * qui le fermerait, ou `null`.
+ */
+function closesAt(typed: string, today: Date): string | null {
+  let useful = 0;
+  for (let length = 1; length <= typed.length; length++) {
+    const query = typed.slice(0, length);
+    if (suggestDates(query, today).length > 0) useful = length;
+    else if (length - useful > 3) return query;
+  }
+  return null;
+}
+
+test("a date typed in digits keeps the menu open on every day of every month", () => {
+  // Chaque jour de 2027 et de 2028 (bissextile), tapé de six façons, frappe après frappe, un jour de
+  // chaque mois de 2027 (le premier et le dernier) : le menu ne se ferme jamais avant la fin, et la
+  // date entière, avec son année, est celle qu'on a tapée.
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const todays = Array.from({ length: 12 }, (_, m) => [day(2027, m + 1, 1), new Date(2027, m + 1, 0)]).flat();
+  const failures: string[] = [];
+  for (let at = day(2027, 1, 1); at <= day(2028, 12, 31); at = new Date(at.getFullYear(), at.getMonth(), at.getDate() + 1)) {
+    const [y, m, d] = [at.getFullYear(), at.getMonth() + 1, at.getDate()];
+    const withYear = [`${pad(d)}/${pad(m)}/${y}`, `${d}/${m}/${y}`, `${y}-${pad(m)}-${pad(d)}`, `${y}-${m}-${d}`];
+    const withoutYear = [`${pad(d)}/${pad(m)}`, `${d}/${m}`];
+    for (const today of todays) {
+      for (const typed of [...withYear, ...withoutYear]) {
+        const closed = closesAt(typed, today);
+        if (closed !== null) failures.push(`${typed} le ${dateId(today)} : fermé à « ${closed} »`);
+      }
+      for (const typed of withYear) {
+        const last = suggestDates(typed, today);
+        if (last.length !== 1 || dateId(last[0].date) !== dateId(at)) failures.push(`${typed} le ${dateId(today)} : ${offered(typed, today)}`);
+      }
+    }
+  }
+  expect(failures.slice(0, 10)).toEqual([]);
 });

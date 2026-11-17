@@ -84,6 +84,29 @@ export function dateOfId(id: string): Date | null {
   return match === null ? null : dayOf(Number(match[1]), Number(match[2]), Number(match[3]));
 }
 
+/** Le jour `day` de ce mois (celui de `today`) s'il y existe, sinon du prochain mois qui l'a. */
+function nextMonthWith(today: Date, day: number): Date | null {
+  // Un jour de 1 à 31 est dans l'un des deux mois qui suivent (le 31 après un mois de trente jours,
+  // le 29 ou le 30 après février).
+  for (let ahead = 0; ahead <= 2; ahead++) {
+    const month = new Date(2000, 0, 1);
+    month.setFullYear(today.getFullYear(), today.getMonth() + ahead, 1);
+    const date = dayOf(month.getFullYear(), month.getMonth() + 1, day);
+    if (date !== null) return date;
+  }
+  return null;
+}
+
+/** Le jour `day` du mois `month` cette année (celle de `today`) s'il y existe, sinon la prochaine année qui l'a. */
+function nextYearWith(today: Date, month: number, day: number): Date | null {
+  // Le 29 février revient au plus tard en huit ans (1896, puis 1904).
+  for (let ahead = 0; ahead <= 8; ahead++) {
+    const date = dayOf(today.getFullYear() + ahead, month, day);
+    if (date !== null) return date;
+  }
+  return null;
+}
+
 /** Une date que le menu propose, et le mot qui la dit (« Demain », « Lundi ») s'il y en a un. */
 export type DateSuggestion = { date: Date; said: string | null };
 
@@ -91,8 +114,12 @@ export type DateSuggestion = { date: Date; said: string | null };
  * Les dates que le menu `@` propose pour `query`, un jour `today`. Rien de tapé : aujourd'hui et
  * demain. Un mot en cours de frappe : les mots qui commencent ainsi. Des chiffres : la date qu'ils
  * disent déjà (`12` : le 12 de ce mois ; `01/12/20` : le 1ᵉʳ décembre de cette année, en attendant
- * l'année ; `2026-12` : le premier du mois). Le menu de BlockNote se ferme après quatre frappes de
- * suite sans rien à proposer : une date qu'on tape en garde donc une tout du long.
+ * l'année ; `2026` et `2026-0` : le premier de l'année ; `2026-12` : le premier du mois). Un jour que
+ * ce mois n'a pas est celui du prochain mois qui l'a (`31` en novembre : le 31 décembre), un jour
+ * que cette année n'a pas celui de la prochaine année qui l'a (`29/02` : le prochain 29 février,
+ * R768). Le menu de BlockNote se ferme quand la requête a plus de trois caractères de plus que la
+ * dernière qui proposait quelque chose : une date qu'on tape en chiffres, sous l'une des formes que
+ * lit `parseDate`, en garde donc une tout du long.
  */
 export function suggestDates(query: string, today: Date): DateSuggestion[] {
   const said = fold(query);
@@ -103,9 +130,11 @@ export function suggestDates(query: string, today: Date): DateSuggestion[] {
   const exact = parseDate(said, today);
   if (exact !== null) return one(exact);
   let match = /^(\d{1,2})\/?$/.exec(said);
-  if (match !== null) return one(dayOf(today.getFullYear(), today.getMonth() + 1, Number(match[1])));
-  match = /^(\d{1,2})\/(\d{1,2})\/\d{0,3}$/.exec(said);
-  if (match !== null) return one(dayOf(today.getFullYear(), Number(match[2]), Number(match[1])));
+  if (match !== null) return one(nextMonthWith(today, Number(match[1])));
+  match = /^(\d{1,2})\/(\d{1,2})(?:\/\d{0,3})?$/.exec(said);
+  if (match !== null) return one(nextYearWith(today, Number(match[2]), Number(match[1])));
+  match = /^(\d{4})(?:-0?)?$/.exec(said);
+  if (match !== null) return one(dayOf(Number(match[1]), 1, 1));
   match = /^(\d{4})-(\d{1,2})-?$/.exec(said);
   if (match !== null) return one(dayOf(Number(match[1]), Number(match[2]), 1));
   return [];
