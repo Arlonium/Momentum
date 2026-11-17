@@ -21,8 +21,8 @@ import * as Y from "yjs";
 
 import { nodeModule, type Fs, type Path, type Url } from "../test/node";
 
-let BASE = new Uint8Array();
-let BASE_SV = new Uint8Array();
+let BASE: Uint8Array = new Uint8Array();
+let BASE_SV: Uint8Array = new Uint8Array();
 
 type Logged = { client: number; update: Uint8Array };
 type Bench = {
