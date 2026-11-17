@@ -91,6 +91,40 @@ test("une valeur entre un enfant et une entrée de map est un enfant pour Yjs, p
   expect(fragment.toArray()[1]).toBe("red");
 });
 
+test("la marque d'une entrée de map ne change rien à ce que Yjs lit d'un élément placé par un voisin", () => {
+  // Ruling R822 (règles P1 et E4 de la grammaire) : `readItem` ne lit la clé que d'un élément
+  // sans origine ni origine droite, et `Item.getMissing` copie celle du voisin. Avec ou sans la
+  // marque (BIT6), une valeur placée par l'origine de l'entrée de `k` est la nouvelle valeur de `k`
+  // pour Yjs, comme pour yrs : P1 et E4 ne gardent pas une lecture différente, mais l'accord de la
+  // garde avec ce que yrs range.
+  const { state, entry } = base();
+  for (const info of [0x88, 0xa8]) {
+    const doc = after(state, info, [entry], [1, 119, ...text("red")]);
+    const paragraph = doc.getXmlFragment("f").get(0) as Y.XmlElement;
+    expect(paragraph.getAttribute("k"), `octet d'en-tête ${info}`).toBe("red");
+    expect(paragraph.length, `octet d'en-tête ${info}`).toBe(0);
+  }
+  // Enfant d'un texte, une valeur `Any` ne se montre pas (yrs l'ignore aussi, `DiffAssembler`),
+  // mais compte dans la longueur.
+  const writer = new Y.Doc();
+  writer.clientID = 5;
+  Y.applyUpdate(writer, state);
+  const paragraph = writer.getXmlFragment("f").get(0) as Y.XmlElement;
+  const typed = new Y.XmlText();
+  paragraph.insert(0, [typed]);
+  typed.insert(0, "ab");
+  const internals = typed as unknown as { _item: { id: Id } };
+  const withText = Y.encodeStateAsUpdate(writer);
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, withText);
+  // Le client 9 pose la valeur « red » d'origine la lettre « a » (horloge 1 du client 5).
+  const update = [1, 1, 9, 0, 0x88, ...varUint(internals._item.id.client), ...varUint(internals._item.id.clock + 1), 1, 119, ...text("red"), 0];
+  Y.applyUpdate(doc, Uint8Array.from(update));
+  const read = (doc.getXmlFragment("f").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+  expect(read.toDelta()).toEqual([{ insert: "ab" }]);
+  expect(read.length).toBe(3);
+});
+
 test("une largeur qui n'est pas un nombre voyage telle quelle", () => {
   // C2 de la relecture (Ruling R705) : lib0 écrit `NaN` en flottant, et le relit `NaN`.
   const doc = new Y.Doc();
