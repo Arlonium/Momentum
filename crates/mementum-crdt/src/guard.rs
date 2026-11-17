@@ -196,6 +196,9 @@ struct Insert {
     /// L'élément porte une origine droite : une entrée de map écrite par un client n'en a pas
     /// (Ruling R703).
     right_origin: bool,
+    /// Son origine et son origine droite, telles que les octets les disent.
+    origin: Option<Id>,
+    right: Option<Id>,
     /// L'octet d'en-tête porte la marque « entrée de map » (`parentSub`), que l'élément nomme sa
     /// clé ou non. Un client hostile la pose ou l'efface à son gré ; dans ce que yrs encode
     /// lui-même, elle dit si yrs tient l'élément pour une entrée de map (Ruling R723).
@@ -720,6 +723,41 @@ impl Shape {
             }
         }
         gapped
+    }
+
+    /// Vrai si un élément que la mise à jour intègre (au-dessus de `floor`) dépend, par son
+    /// origine, son origine droite ou son parent, d'un élément que ni la page (`known`) ni la
+    /// mise à jour elle-même ne portent (Ruling R787) : yrs le garderait en attente
+    /// (`missing_dependency`, `update.rs`), et la page serait à jeter.
+    pub(crate) fn lacks_dependency(
+        &self,
+        floor: &StateVector,
+        known: impl Fn(u64, u32) -> bool,
+    ) -> bool {
+        let brought: HashMap<u64, Vec<(u32, u32)>> = self
+            .clients()
+            .map(|client| (client, self.ranges_of(client)))
+            .collect();
+        let has = |(client, clock): Id| {
+            known(client, clock)
+                || brought.get(&client).is_some_and(|ranges| {
+                    let at = ranges.partition_point(|range| range.1 <= clock);
+                    ranges.get(at).is_some_and(|range| range.0 <= clock)
+                })
+        };
+        self.inserts().any(|(s, i)| {
+            if s.id.1 + s.len <= floor.get(&ClientID::new(s.id.0)) {
+                return false;
+            }
+            let parent = match i.parent {
+                Parent::Id(parent) => Some(parent),
+                _ => None,
+            };
+            [i.origin, i.right, parent]
+                .into_iter()
+                .flatten()
+                .any(|id| !has(id))
+        })
     }
 
     /// Les plages `[début, fin)` que couvrent les blocs de `client` (ses trous exceptés), triées
@@ -1467,6 +1505,8 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
                     any: info & 0b1111 == BLOCK_ITEM_ANY_REF_NUMBER,
                     json: info & 0b1111 == BLOCK_ITEM_JSON_REF_NUMBER,
                     right_origin: right.is_some(),
+                    origin,
+                    right,
                     sub_flag: info & HAS_PARENT_SUB != 0,
                 }),
             }))

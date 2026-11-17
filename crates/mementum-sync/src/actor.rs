@@ -444,9 +444,11 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     // l'instantané sont déjà nettoyées par le ramasse-miettes.
     //
     // Ruling R743 : une entrée qui dépend, par une origine ou un parent, de ce qu'une entrée
-    // écartée portait est refusée après avoir été appliquée (yrs la garde en attente) : la page
-    // est alors à jeter. Elle est écartée à son tour, et la relecture reprend du début sans
-    // elle ; une page attaquée avant la garde où l'on a continué d'écrire se charge avec le reste.
+    // écartée portait est écartée à son tour ; une page attaquée avant la garde où l'on a
+    // continué d'écrire se charge avec le reste. Ruling R787 : `replay` le voit avant de
+    // l'appliquer, en une passe. La boucle ne reste qu'en filet : une dépendance vue seulement
+    // après l'application (yrs garde l'entrée en attente, la page est à jeter) fait reprendre la
+    // relecture du début sans elle.
     let mut dependents: HashSet<i64> = HashSet::new();
     let (page, watch) = loop {
         match replay(node_id, &snapshot, &updates, &dependents)? {
@@ -491,6 +493,14 @@ fn replay(
             tracing::error!(%node_id, seq, "entrée du journal écartée à la relecture : elle suit une entrée écartée et laisserait un trou");
             continue;
         }
+        // Ruling R787 : après une entrée écartée, une entrée qui dépend, par une origine ou un
+        // parent, de ce que la page n'a pas est écartée **avant** d'être appliquée : la page
+        // reste bonne, et le journal se relit en une passe, quel que soit le nombre de ces
+        // entrées (une relecture entière par entrée, avant).
+        if set_aside && matches!(page.stored_update_lacks_dependency(update), Ok(true)) {
+            tracing::error!(%node_id, seq, "entrée du journal écartée à la relecture : elle dépend de ce qu'une entrée écartée portait");
+            continue;
+        }
         match page.apply_update(update) {
             Ok(()) => {}
             // Ruling R258 : une entrée où un client paraît deux fois (une base d'avant R130
@@ -501,9 +511,10 @@ fn replay(
                 tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : un client y paraît deux fois");
                 set_aside = true;
             }
-            // Rulings R723, R740 : une entrée de map à origine droite, écrite par un serveur
-            // d'avant cette garde (ses octets le disent : yrs l'a encodée), ou un élément à cheval
-            // sur ce que la page connaît. Elle est refusée avant d'être appliquée (c'est l'erreur
+            // Rulings R723, R784 : une entrée de map à origine droite, écrite par un serveur
+            // d'avant cette garde (ses octets le disent : yrs l'a encodée), ou du JSON à cheval
+            // sur ce que la page connaît (tout autre élément à cheval est coupé, pas refusé).
+            // Elle est refusée avant d'être appliquée (c'est l'erreur
             // qui le dit, Ruling R742), la page est intacte, et se charge sans elle ni la
             // suppression qu'elle portait. Appliquée, elle laisserait une entrée que plus rien ne tient, et un état
             // illisible le jour où son bloc est supprimé.
@@ -511,8 +522,10 @@ fn replay(
                 tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : aucun client n'écrit ce qu'elle porte");
                 set_aside = true;
             }
+            // En filet de R787 : une dépendance que la lecture n'a pas vue (un cycle entre deux
+            // clients de la même entrée). La page est à jeter, et la relecture reprend sans elle.
             Err(error) if set_aside && PageDoc::lacks_a_dependency(&error) => {
-                tracing::error!(%node_id, seq, %error, set_aside = dependents.len() + 1, "entrée du journal écartée à la relecture : elle dépend de ce qu'une entrée écartée portait");
+                tracing::error!(%node_id, seq, %error, set_aside = dependents.len() + 1, "entrée du journal écartée à la relecture, qui reprend du début : elle dépend de ce qu'une entrée écartée portait");
                 return Ok(Err(*seq));
             }
             Err(error) => return Err(error.into()),

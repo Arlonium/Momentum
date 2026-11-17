@@ -316,3 +316,121 @@ async fn entries_that_depend_on_a_set_aside_entry_are_set_aside_too() {
         "trois lignes `error` : {journal}"
     );
 }
+
+/// Une chaîne du client `client` à l'horloge `clock`, d'origine `origin`.
+fn typed(client: u64, clock: u64, origin: (u64, u64), text: &str) -> Vec<u8> {
+    let mut u = vec![1, 1];
+    var(&mut u, client);
+    var(&mut u, clock);
+    u.push(0x84);
+    var(&mut u, origin.0);
+    var(&mut u, origin.1);
+    var(&mut u, text.len() as u64);
+    u.extend(text.as_bytes());
+    u.push(0);
+    u
+}
+
+/// Ruling R784 (constat C1 de la re-relecture 4, côté journal). Un journal d'avant R491 gardait la
+/// mise à jour lue, part connue comprise. La course d'une frappe livrée en retard y a eu lieu : la
+/// frappe « a » de l'onglet (client 5), puis son étape 2 honnête, « ab » d'un tenant, à cheval sur
+/// ce que la page connaît ; puis la suite de sa frappe (« c ») et la frappe d'un autre (« Z »)
+/// posée dessus. Refusée depuis R740, l'entrée honnête était écartée, et ce qui en dépend avec
+/// elle : la page lisait « Una ». Elle est coupée comme Yjs l'aurait écrite, et rien n'est écarté.
+#[tokio::test]
+async fn an_old_journal_with_an_honest_astride_entry_keeps_what_was_typed() {
+    let logs = Logs::capture();
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Journal", &[user(&team.olga, Level::Full)])
+        .await;
+    let (created, creation) = PageDoc::new_page();
+    let paragraph = created.read_blocks()[0].id.clone();
+    let a = PageDoc::from_updates([creation.as_slice()]).unwrap();
+    let one = a.replace_text(&paragraph, 0, 0, "Un").unwrap();
+    let mut at = 0;
+    assert_eq!(read_var(&one, &mut at), 1, "un seul client");
+    let _structs = read_var(&one, &mut at);
+    let typist = read_var(&one, &mut at);
+    // Le texte est l'élément 0 du client, « U » le 1, « n » le 2.
+    let late = typed(5, 0, (typist, 2), "a");
+    let step2 = typed(5, 0, (typist, 2), "ab");
+    let more = typed(5, 2, (5, 1), "c");
+    let other = typed(9, 0, (5, 2), "Z");
+    team.store
+        .append_updates(page, &[&creation, &one, &late, &step2, &more, &other], None)
+        .await
+        .unwrap();
+    let read = team.olga.get_mmd(&page.to_string()).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.text(), "UnabcZ\n");
+    assert!(!logs.text().contains("écartée"), "{}", logs.text());
+}
+
+/// Ruling R787 (constat m2 de la re-relecture 4) : le journal se relit en une passe, quel que soit
+/// le nombre d'entrées qui dépendent d'une entrée écartée. Chacune est jugée avant d'être
+/// appliquée (ses origines et son parent, que la page n'a pas), et écartée sans que la page soit
+/// à jeter. Avant, chaque entrée dépendante faisait reprendre la relecture du début, et récrire
+/// toutes les lignes d'avant elle : 60 dépendantes, 1 830 lignes.
+#[tokio::test]
+async fn entries_that_depend_on_a_set_aside_entry_are_set_aside_in_one_pass() {
+    const DEPENDENTS: usize = 60;
+    let logs = Logs::capture();
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Journal", &[user(&team.olga, Level::Full)])
+        .await;
+    let (created, creation) = PageDoc::new_page();
+    let paragraph = created.read_blocks()[0].id.clone();
+    let doc = PageDoc::from_updates([creation.as_slice()]).unwrap();
+    let one = doc.replace_text(&paragraph, 0, 0, "Un").unwrap();
+    let state = created.state_vector();
+    let mut at = 0;
+    assert_eq!(read_var(&state, &mut at), 1);
+    let root = read_var(&state, &mut at);
+    let mut at = 0;
+    assert_eq!(read_var(&one, &mut at), 1);
+    let _structs = read_var(&one, &mut at);
+    let typist = read_var(&one, &mut at);
+    // L'entrée hostile de `entries_that_depend_on_a_set_aside_entry_are_set_aside_too`.
+    let mut hostile = vec![1, 1];
+    var(&mut hostile, 7_000);
+    hostile.extend([0, 0xE4]);
+    var(&mut hostile, typist);
+    hostile.push(0);
+    var(&mut hostile, root);
+    hostile.extend([4, 2, b'b', b'c', 0]);
+    let mut journal = vec![creation.clone(), one, hostile];
+    for n in 0..DEPENDENTS {
+        // Une frappe posée sur ce que l'entrée écartée portait ; une sur deux, sur la frappe
+        // d'avant elle, écartée elle aussi.
+        let origin = if n % 2 == 0 {
+            (7_000, 0)
+        } else {
+            (9_000 + n as u64 - 1, 0)
+        };
+        journal.push(typed(9_000 + n as u64, 0, origin, "Y"));
+        // Et une frappe honnête, qui ne dépend de rien d'écarté.
+        journal.push(typed(20_000 + n as u64, 0, (typist, 2), "x"));
+    }
+    let refs: Vec<&[u8]> = journal.iter().map(Vec::as_slice).collect();
+    team.store.append_updates(page, &refs, None).await.unwrap();
+    let read = team.olga.get_mmd(&page.to_string()).await;
+    read.assert_status(StatusCode::OK);
+    assert_eq!(read.text(), format!("Un{}\n", "x".repeat(DEPENDENTS)));
+    let journal = logs.text();
+    assert_eq!(
+        journal
+            .matches("dépend de ce qu'une entrée écartée portait")
+            .count(),
+        DEPENDENTS,
+        "une ligne par entrée dépendante"
+    );
+    assert_eq!(
+        journal.matches("écartée à la relecture").count(),
+        DEPENDENTS + 1,
+        "chaque ligne `error` est écrite une fois"
+    );
+}

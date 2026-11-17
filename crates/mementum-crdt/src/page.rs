@@ -533,6 +533,27 @@ impl PageDoc {
         Ok(shape.structs_leave_gap(&txn.state_vector()))
     }
 
+    /// Vrai si une entrée relue du stockage dépend, par une origine ou un parent, d'un élément
+    /// que ni la page ni elle-même ne portent (Ruling R787) : appliquée, yrs la garderait en
+    /// attente, et la page serait à jeter. La relecture du journal s'en sert après une entrée
+    /// écartée, pour écarter sans rien appliquer ce qui dépendait d'elle (Ruling R743). L'entrée
+    /// est lue comme [`PageDoc::apply_update`] la lit (coupée, Ruling R784), sans être
+    /// appliquée ; `Err` si elle est refusée à la lecture.
+    pub fn stored_update_lacks_dependency(&self, update: &[u8]) -> Result<bool, CrdtError> {
+        let txn = self.doc.transact_mut();
+        let (shape, _) = self.read(&txn, update, false)?;
+        let state = txn.state_vector();
+        let beyond = self.known_beyond(&txn, &shape, &state)?;
+        Ok(shape.lacks_dependency(&state, |client, clock| {
+            clock < state.get(&ClientID::new(client))
+                || beyond.get(&client).is_some_and(|ranges| {
+                    ranges
+                        .iter()
+                        .any(|range| range.0 <= clock && clock < range.1)
+                })
+        }))
+    }
+
     /// Ce qu'une mise à jour (v1) reçue d'un client attend encore de la page
     /// pour ne plus laisser de trou : `None` si elle n'en laisserait aucun
     /// ([`PageDoc::leaves_gap`]). Ce qui est rendu se compare ensuite à la
@@ -641,9 +662,9 @@ impl PageDoc {
     /// avant le trou. yrs ne dit rien d'autre de ses trous ; le coût est celui d'un encodage de
     /// ce qui suit le trou et du jeu de suppressions, pour les seules mises à jour qui nomment un
     /// client à trou (un ancien onglet d'un journal d'avant le Ruling R131).
-    fn known_beyond(
+    fn known_beyond<T: ReadTxn>(
         &self,
-        txn: &TransactionMut,
+        txn: &T,
         shape: &Shape,
         state: &StateVector,
     ) -> Result<cut::Beyond, CrdtError> {
