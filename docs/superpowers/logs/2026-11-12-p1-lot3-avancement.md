@@ -48,6 +48,13 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 
 Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête poussée, **sans clone neuf**) : `cargo fmt` et `cargo clippy -D warnings` propres ; `cargo test --workspace` : **723 verts**, 15 ignorés (les mesures en release et les tests de la limite R39) ; client : **516 verts et 12 marqués `test.fails`** (les scénarios du bloc déplacé), typecheck propre ; licences npm propres au dernier relevé (aucun paquet ajouté sur `main`) ; e2e : suite entière relancée sur `main` à la pause, correctif du défaut critique compris : **159 verts**, 2 `fixme` voulus (bloc déplacé), et 1 échec, `space_without_a_role_is_not_found` : une course du test lui-même, qui comparait l'écran pendant que la barre latérale disait encore « Chargement… » (reproduite à coup sûr en retardant la lecture de l'arbre) ; le test attend maintenant la fin du chargement, et passe dix fois de suite ; la suite entière n'a pas été relancée après cette correction d'un seul test ; budgets du navigateur, mesurés dans l'atelier de la part e2e sur un poste occupé : 1 000 blocs à 160 ms au p95 (budget 300), 10 000 blocs en 1,38 s (budget 3 s) ; côté serveur, en release : frappe vue par un autre à 2,0 à 2,3 ms au p95, 42,8 ms quand elle déclenche la coupe d'une version (budget 150).
 
+## Reprise du 2026-11-17 (tenu à jour ; prime sur la section de la pause, qui suit)
+
+- **Task C5 (dupliquer un bloc) : close, sur `main`** (`f94271c`). Relue, corrigée (R640 à R642), re-relue sans constat neuf ; à la reprise : un e2e de l'alerte du lien trop long, le message d'une copie refusée part avec la page. 2 359 tests du client, suite e2e entière 266 verts, budgets 13 sur 13. **Dix-sept tâches de la partie B sur vingt et une.**
+- **Task X2** : finie par son implémenteur (`lot3b-x2`, tête `8b700ac`, dans l'atelier `lot3b-c10` ; R658 à R661), **en relecture**.
+- **Task C8** (fichiers côté client) : lancée dans `lot3b-client`.
+- Les onze ateliers fusionnés sont supprimés (342 Go rendus). CI : le job Windows du commit `53a44a7` est tombé sur une panne de l'éditeur de liens du coureur (`link.exe`, code 1201), relancé.
+
 ## Pause du 2026-11-16 (soir) — c'est d'ici qu'on reprend ; prime sur tout ce qui suit
 
 Pause demandée par Lenny. Plus aucun agent ne tourne. `main` est poussé ; les ateliers restent locaux (jamais poussés : un clone neuf ne les a pas).
