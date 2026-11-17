@@ -42,7 +42,7 @@ use yrs::block::{
 };
 use yrs::encoding::read::{Cursor, Read};
 
-use super::{ASTRIDE, MAX_CLIENT, decode_error, read_content, read_id, skip_any};
+use super::{ASTRIDE, JsonCount, MAX_CLIENT, decode_error, read_content, read_id, skip_any};
 use crate::CrdtError;
 
 /// Par client, les plages `[début, fin)` que la page connaît **au-delà de son premier trou**,
@@ -247,7 +247,9 @@ pub(crate) fn cut(
                 }
             }
             let header = c.next;
-            let len = read_content(&mut c, info, false).map_err(decode_error)?.len;
+            let len = read_content(&mut c, info, false, JsonCount::AsRead)
+                .map_err(decode_error)?
+                .len;
             let end = clock
                 .checked_add(len)
                 .ok_or_else(|| decode_error("horloge hors limites"))?;

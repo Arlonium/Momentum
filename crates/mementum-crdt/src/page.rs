@@ -24,7 +24,7 @@ use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_p
 use crate::guard::{
     ASTRIDE, CLOCK_OUT_OF_BOUNDS, DEPENDS_ON_A_HOLE, KEYED_RIGHT_ORIGIN, KEYED_RIGHT_ORIGIN_MADE,
     LEAVES_GAP, MANY_VALUED, MANY_VALUED_MADE, NOT_AS_WRITTEN, PageItem, Pending, REPEATED_CLIENT,
-    RIGHT_ORIGIN_IS_ORIGIN, Shape, UNTYPED_CHILD, cut, missing, touched,
+    RIGHT_ORIGIN_IS_ORIGIN, Shape, UNTYPED_CHILD, cut, json_made, missing, touched,
 };
 use crate::kept_ids::keep_ids;
 use crate::moves::{self, Carried, MAX_CARRIED_BYTES, Recreated};
@@ -198,6 +198,13 @@ impl PageDoc {
     /// le serveur lisait la page vide. Seulement ce que l'entrée a intégré (Ruling R490), et
     /// seulement si une liste qu'elle change ne se lit plus en entier : le parent de chaque contenu
     /// candidat n'est cherché qu'alors.
+    ///
+    /// De même encore, un contenu JSON que l'entrée intègre, où qu'il soit (Ruling R815) : d'un
+    /// client, la garde le refuse (R702) ; au journal (une entrée d'avant cette règle), il est
+    /// supprimé dans la transaction qui l'intègre, et le ramasse-miettes de la validation en fait
+    /// un contenu supprimé. yrs 0.28.1 écrit un contenu JSON en `len` chaînes et le relit en
+    /// `len + 1` : resté vivant, il rendait illisible tout état que la page encode, et la
+    /// compaction suivante remplaçait le journal par un tel état.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
         let (shape, before, whole, unsound) = {
             let mut txn = self.doc.transact_mut();
@@ -221,20 +228,40 @@ impl PageDoc {
             // sur **tout** ce que l'entrée a intégré ; l'encodage de la transaction s'arrête au
             // premier trou de chaque client, et ce qu'une entrée posait au-delà d'un trou
             // n'était pas jugé.
-            if before.iter().next().is_some() && shape.placed_by_siblings(&before) {
+            let siblings = before.iter().next().is_some() && shape.placed_by_siblings(&before);
+            // Ruling R815 : un contenu JSON que l'entrée intègre (d'un client, il est refusé
+            // avant d'être appliqué, Ruling R702).
+            let json = shape.carries_json(&before);
+            let mut json_items = IdSet::new();
+            if siblings || json {
                 let encoded = self.integrated(&txn, &shape, &before);
-                match shape.check_as_written(&encoded, &before, false, Some(&mut many_valued)) {
-                    // Ce que la garde ne relit pas de ce que yrs encode n'est pas jugé ici.
-                    Ok(()) | Err(CrdtError::Decode(_)) => {}
-                    Err(error) => return Err(error),
+                if siblings {
+                    match shape.check_as_written(&encoded, &before, false, Some(&mut many_valued)) {
+                        // Ce que la garde ne relit pas de ce que yrs encode n'est pas jugé ici.
+                        Ok(()) | Err(CrdtError::Decode(_)) => {}
+                        Err(error) => return Err(error),
+                    }
                 }
                 // Ruling R805 : une entrée de map de plusieurs unités restée vivante (un contenu
                 // placé par l'origine d'une entrée, écrit au journal avant la grammaire) est
                 // supprimée en entier, dans la même transaction : coupée plus tard, ses moitiés
                 // resteraient vivantes sans être l'entrée courante, et yrs lirait de la mémoire
                 // libérée une fois leur parent ramassé. La relecture le refait chaque fois.
+                //
+                // Ruling R815 : de même un contenu JSON, où qu'il soit (un texte, une entrée de
+                // map). yrs 0.28.1 l'écrit en `len` chaînes et le relit en `len + 1` : resté
+                // vivant, il rendait illisible tout état que la page encode (instantané, version,
+                // réponse d'étape 1), et la compaction remplaçait le journal par un tel état. Le
+                // ramasse-miettes de la validation en fait un contenu supprimé, que yrs relit.
+                // Seul ce que yrs a intégré comme du JSON est supprimé, lu dans ce qu'il encode ;
+                // à défaut, d'après les octets de l'entrée.
+                if json {
+                    json_items =
+                        json_made(&encoded, &before).unwrap_or_else(|_| shape.json_items(&before));
+                }
             }
             delete(&mut txn, &many_valued)?;
+            delete(&mut txn, &json_items)?;
             delete(&mut txn, &shape.outside_marks(&before))?;
             txn.commit();
             let named = named.into_iter().filter_map(|(client, clock)| {
@@ -464,7 +491,9 @@ impl PageDoc {
     /// Toujours relu, jamais servi tel quel : ce qu'il faut retirer ne se voit pas tout dans les
     /// octets (une entrée de map que yrs et Yjs ne placent pas pareil, R703), et yrs écrit un
     /// contenu JSON sous une forme qu'il ne relit pas lui-même (un état qui en porte un est
-    /// illisible pour lui, lisible pour Yjs, qui y lit un objet).
+    /// illisible pour lui, lisible pour Yjs, qui y lit un objet). Depuis le Ruling R815, une page
+    /// n'en garde plus de vivant : seul un état coupé avant cette règle en porte, et il n'est pas
+    /// servi.
     pub fn served_state(state: &[u8]) -> Option<Vec<u8>> {
         PageDoc::from_updates([state])
             .ok()

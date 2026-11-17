@@ -39,14 +39,15 @@ use std::collections::HashMap;
 
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER,
-    BLOCK_SKIP_REF_NUMBER, ClientID, HAS_ORIGIN, HAS_PARENT_SUB, HAS_RIGHT_ORIGIN,
+    BLOCK_ITEM_JSON_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID, HAS_ORIGIN, HAS_PARENT_SUB,
+    HAS_RIGHT_ORIGIN,
 };
 use yrs::encoding::read::{Cursor, Read};
 use yrs::{ID, IdSet, StateVector};
 
 use super::{
-    Id, Insert, KEYED_NOT_A_VALUE, KEYED_RIGHT_ORIGIN_MADE, Kind, Shape, Struct, decode_error,
-    read_content, read_id,
+    Id, Insert, JsonCount, KEYED_NOT_A_VALUE, KEYED_RIGHT_ORIGIN_MADE, Kind, Shape, Struct,
+    decode_error, read_content, read_id,
 };
 use crate::CrdtError;
 
@@ -244,7 +245,10 @@ impl Shape {
                         c.read_string().map_err(decode_error)?;
                     }
                 }
-                let len = read_content(&mut c, info, false).map_err(decode_error)?.len;
+                // Ce que yrs a encodé : un contenu JSON y porte `len` chaînes (Ruling R815).
+                let len = read_content(&mut c, info, false, JsonCount::AsWritten)
+                    .map_err(decode_error)?
+                    .len;
                 let start = clock;
                 clock = clock
                     .checked_add(len)
@@ -287,6 +291,87 @@ impl Shape {
         }
         Ok(())
     }
+}
+
+impl Shape {
+    /// Vrai si la mise à jour intègre (au-dessus de `floor`) un contenu JSON (Ruling R815).
+    pub(crate) fn carries_json(&self, floor: &StateVector) -> bool {
+        self.inserts()
+            .any(|(s, i)| i.json && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0)))
+    }
+
+    /// Les contenus JSON que la mise à jour intègre, d'après ses octets : pour chacun, sa part
+    /// au-dessus de `floor` (Ruling R815). Dans une page qui a un trou, une part que la page
+    /// connaît au-delà du trou y est aussi : [`json_made`], qui lit ce que yrs a intégré, est la
+    /// lecture exacte ; celle-ci ne sert que si la garde ne relit pas ce que yrs a encodé.
+    pub(crate) fn json_items(&self, floor: &StateVector) -> IdSet {
+        let mut found = IdSet::new();
+        for (s, i) in self.inserts() {
+            let client = ClientID::new(s.id.0);
+            let from = s.id.1.max(floor.get(&client));
+            if i.json && s.id.1 + s.len > from {
+                found.insert(ID::new(client, from), s.id.1 + s.len - from);
+            }
+        }
+        found
+    }
+}
+
+/// Les contenus JSON que yrs a intégrés, lus dans `made`, ce qu'il en a encodé (l'encodage de la
+/// transaction, `PageDoc::integrated`), au-dessus de `floor` (Ruling R815). yrs 0.28.1 écrit un tel
+/// contenu en `len` chaînes et le relit en `len + 1` : resté vivant dans une page, il rend illisible
+/// tout état qu'elle encode. Seuls les éléments que yrs garde comme du JSON y sont : un contenu
+/// qu'il a rangé parmi les plages ramassées (un parent inconnu ou ramassé) n'en est plus un.
+pub(crate) fn json_made(made: &[u8], floor: &StateVector) -> Result<IdSet, CrdtError> {
+    let mut found = IdSet::new();
+    let mut c = Cursor::new(made);
+    let n_clients: u32 = c.read_var().map_err(decode_error)?;
+    for _ in 0..n_clients {
+        let n_structs: u32 = c.read_var().map_err(decode_error)?;
+        let client: u64 = c.read_var().map_err(decode_error)?;
+        let mut clock: u32 = c.read_var().map_err(decode_error)?;
+        let known = floor.get(&ClientID::new(client));
+        for _ in 0..n_structs {
+            let info = c.read_u8().map_err(decode_error)?;
+            if matches!(info, BLOCK_SKIP_REF_NUMBER | BLOCK_GC_REF_NUMBER) {
+                let len: u32 = c.read_var().map_err(decode_error)?;
+                clock = clock
+                    .checked_add(len)
+                    .ok_or_else(|| decode_error("horloge"))?;
+                continue;
+            }
+            let origin = info & HAS_ORIGIN != 0;
+            let right = info & HAS_RIGHT_ORIGIN != 0;
+            if origin {
+                read_id(&mut c).map_err(decode_error)?;
+            }
+            if right {
+                read_id(&mut c).map_err(decode_error)?;
+            }
+            if !origin && !right {
+                if c.read_var::<u32>().map_err(decode_error)? == 1 {
+                    c.read_string().map_err(decode_error)?;
+                } else {
+                    read_id(&mut c).map_err(decode_error)?;
+                }
+                if info & HAS_PARENT_SUB != 0 {
+                    c.read_string().map_err(decode_error)?;
+                }
+            }
+            let len = read_content(&mut c, info, false, JsonCount::AsWritten)
+                .map_err(decode_error)?
+                .len;
+            let start = clock;
+            clock = clock
+                .checked_add(len)
+                .ok_or_else(|| decode_error("horloge"))?;
+            if info & 0b1111 == BLOCK_ITEM_JSON_REF_NUMBER && clock > known {
+                let from = start.max(known);
+                found.insert(ID::new(ClientID::new(client), from), clock - from);
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// L'élément de `structs` (ceux d'un client, dans l'ordre de leurs horloges) qui couvre `id`.

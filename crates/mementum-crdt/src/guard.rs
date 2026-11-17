@@ -109,7 +109,9 @@ use crate::{CrdtError, FRAGMENT, META};
 pub(crate) mod cut;
 mod grammar;
 
-pub(crate) use grammar::{MANY_VALUED, MANY_VALUED_MADE, NOT_AS_WRITTEN, RIGHT_ORIGIN_IS_ORIGIN};
+pub(crate) use grammar::{
+    MANY_VALUED, MANY_VALUED_MADE, NOT_AS_WRITTEN, RIGHT_ORIGIN_IS_ORIGIN, json_made,
+};
 
 /// Le refus d'une mise à jour où un client paraît deux fois (Ruling R207) : reconnu à la
 /// relecture du journal, qui écarte l'entrée au lieu de refuser la page (Ruling R258).
@@ -1467,7 +1469,7 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
             } else {
                 Parent::Sibling(origin.or(right).ok_or(Error::UnexpectedValue)?)
             };
-            let content = read_content(c, info, id_entry)?;
+            let content = read_content(c, info, id_entry, JsonCount::AsRead)?;
             if content.len == 0 {
                 return Ok(None);
             }
@@ -1556,6 +1558,18 @@ fn read_id(c: &mut Cursor) -> Result<Id, yrs::encoding::read::Error> {
     Ok((client, c.read_var()?))
 }
 
+/// Combien de chaînes lire d'un contenu JSON (`ContentJSON`) dont l'en-tête dit `len` (Ruling
+/// R815). yrs 0.28.1 n'écrit pas ce qu'il lit : `ItemContent::encode` écrit `len` chaînes, comme
+/// Yjs, et `ItemContent::decode` en lit `len + 1`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonCount {
+    /// Comme yrs lit une mise à jour : `len + 1` chaînes. Pour ce qu'on donne à yrs, qui
+    /// l'intégrera ainsi.
+    AsRead,
+    /// Comme yrs (et Yjs) l'écrit : `len` chaînes. Pour ce que yrs vient d'encoder lui-même.
+    AsWritten,
+}
+
 /// Ce que [`read_content`] retient d'un contenu.
 struct Content {
     /// Longueur Yjs.
@@ -1576,11 +1590,13 @@ struct Content {
 /// Contenu d'un élément, lu comme `ItemContent::decode` de yrs : sa longueur
 /// Yjs et, pour un type, sa référence (et sa balise pour un élément XML). Avec
 /// `want_string`, un contenu `Any` fait d'une seule chaîne est rendu aussi. Pour une marque de
-/// texte que la page ne garde pas, pourquoi (Ruling R431).
+/// texte que la page ne garde pas, pourquoi (Ruling R431). Un contenu JSON est lu comme `json`
+/// le dit : comme yrs le lit, ou comme il l'écrit (Ruling R815).
 fn read_content(
     c: &mut Cursor,
     info: u8,
     want_string: bool,
+    json: JsonCount,
 ) -> Result<Content, yrs::encoding::read::Error> {
     use yrs::encoding::read::Error;
     let mut content = Content {
@@ -1598,12 +1614,12 @@ fn read_content(
             c.read_var()?
         }
         BLOCK_ITEM_JSON_REF_NUMBER => {
-            // yrs lit `len + 1` chaînes (et aucune si `len` dépasse i32).
+            // yrs lit `len + 1` chaînes (et aucune si `len` dépasse i32) ; il en écrit `len`.
             let remaining = c.read_var::<u32>()? as i32;
-            let count = if remaining >= 0 {
-                remaining as u32 + 1
-            } else {
-                0
+            let count = match json {
+                _ if remaining < 0 => 0,
+                JsonCount::AsRead => remaining as u32 + 1,
+                JsonCount::AsWritten => remaining as u32,
             };
             for _ in 0..count {
                 c.read_string()?;
