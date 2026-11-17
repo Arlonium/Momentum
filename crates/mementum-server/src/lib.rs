@@ -64,8 +64,8 @@
 //! de l'envoi d'un fichier, qui a sa borne), une route inconnue `404
 //! not_found`, une méthode inconnue `405 method_not_allowed`. Une page dont
 //! l'acteur ne répond plus reçoit `503 unavailable`, sur `GET` et `PUT …/mmd`
-//! (Ruling R26), sur `POST …/comments` avec un `blockId`, et sur la restauration
-//! d'une version. La base SQLite est le fichier [`config::DB_FILE`] du dossier
+//! (Ruling R26), sur `POST …/comments` avec un `blockId`, sur la restauration
+//! d'une version, et sur `POST …/duplicate` (qui lit les blocs des pages copiées). La base SQLite est le fichier [`config::DB_FILE`] du dossier
 //! des données, et les fichiers envoyés sont dans son dossier `files/`.
 //!
 //! **Compte attendu** (`auth.rs`, Rulings R540 à R542, R545). Une requête peut nommer le compte
