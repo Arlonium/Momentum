@@ -646,6 +646,9 @@ enum Op {
     /// Un client de passage écrase la couleur de fond du premier bloc par un contenu qui n'est
     /// pas une valeur `Any` (`other_content`) : reçu d'un client, ou déjà au journal (`stored`).
     Content { kind: usize, stored: bool },
+    /// Un client de passage écrit un texte vide, puis envoie à la même horloge une chaîne à
+    /// cheval sur ce que la page connaît (`astride`) : reçue d'un client, ou déjà au journal.
+    Astride { stored: bool },
 }
 
 /// La mise à jour honnête `honest` (un client de passage écrase `backgroundColor` par « x »),
@@ -664,10 +667,10 @@ fn other_content(honest: &[u8], kind: usize) -> Vec<u8> {
     let Some(at) = honest.windows(value.len()).position(|w| w == value) else {
         return honest.to_vec();
     };
-    let Some(head) = honest[..at].iter().position(|b| *b == 0xA8) else {
+    let Some(head) = honest[2..].iter().position(|b| *b < 0x80).map(|i| i + 4) else {
         return honest.to_vec();
     };
-    if honest[..2] != [1, 1] || honest[head - 1] != 0 {
+    if honest[..2] != [1, 1] || head >= at || honest[head] != 0xA8 || honest[head - 1] != 0 {
         return honest.to_vec();
     }
     let mut out = honest[..head].to_vec();
@@ -676,6 +679,42 @@ fn other_content(honest: &[u8], kind: usize) -> Vec<u8> {
     out.extend_from_slice(&body);
     out.extend_from_slice(&honest[at + value.len()..]);
     out
+}
+
+/// Ce qu'écrit un client de passage : un texte vide à la fin du contenu du premier bloc (vide si
+/// le bloc n'y est plus). C'est son premier élément, à l'horloge 0.
+fn empty_text(doc: &Doc) -> Vec<u8> {
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let mut txn = doc.transact_mut();
+    if let Some(XmlOut::Element(group)) = fragment.get(&txn, 0)
+        && let Some(XmlOut::Element(container)) = group.get(&txn, 0)
+        && let Some(XmlOut::Element(content)) = container.get(&txn, 0)
+    {
+        content.push_back(&mut txn, XmlTextPrelim::new(""));
+    }
+    txn.encode_update_v1()
+}
+
+/// R-1 de la re-relecture (Ruling R721) : une chaîne de trois unités à l'horloge 0 du client
+/// `client`, que la page connaît déjà (son texte vide), d'origine cette horloge et d'origine
+/// droite l'entrée que `honest` écrase : yrs n'en intègre que la part au-dessus du plancher.
+/// `None` si `honest` n'a pas la forme attendue.
+fn astride(honest: &[u8], client: u64) -> Option<Vec<u8>> {
+    let value = [1, 119, 1, b'x'];
+    let at = honest.windows(value.len()).position(|w| w == value)?;
+    // Un client, un élément, l'identifiant du client, l'horloge 0, puis l'octet d'en-tête.
+    let head = 2 + honest[2..].iter().position(|b| *b < 0x80)? + 2;
+    if honest[head] != 0xA8 {
+        return None;
+    }
+    let mut out = vec![1, 1];
+    var(&mut out, client);
+    out.extend_from_slice(&[0, 0xC4]);
+    var(&mut out, client);
+    out.push(0);
+    out.extend_from_slice(&honest[head + 1..at]);
+    out.extend_from_slice(&[3, b'a', b'b', b'c', 0]);
+    Some(out)
 }
 
 /// Les attributs posés par `Op::Attr` : du type du registre, ou non (un objet, une liste,
@@ -793,6 +832,9 @@ fn op() -> impl Strategy<Value = Op> {
                 stored,
             }),
         (0..3usize, any::<bool>()).prop_map(|(kind, stored)| Op::Content { kind, stored }),
+        // Au journal (`stored`), la scène rend un état qu'un client neuf ne relit pas : constat
+        // ouvert, dit au registre (R722) ; seule la forme reçue d'un client est mêlée ici.
+        Just(Op::Astride { stored: false }),
     ]
 }
 
@@ -915,6 +957,26 @@ proptest! {
                         vec![0, 0]
                     } else {
                         update
+                    }
+                }
+                Op::Astride { stored } => {
+                    let id = 7_000 + step as u64;
+                    let text = empty_text(&client(id, &served));
+                    served.receive(&text);
+                    served.assert_reload_is_live(&format!("étape {step} ({op:?}), le texte"));
+                    let other = client(8_000 + step as u64, &served);
+                    let honest = attribute(&other, false, "backgroundColor", Any::from("x"));
+                    let known = StateVector::decode_v1(&served.page.state_vector())
+                        .unwrap()
+                        .get(&ClientID::new(id));
+                    match astride(&honest, id).filter(|_| known == 1) {
+                        Some(update) if *stored => {
+                            served.journal.push(update);
+                            served.page = served.reloaded();
+                            vec![0, 0]
+                        }
+                        Some(update) => update,
+                        None => vec![0, 0],
                     }
                 }
                 Op::Content { kind, stored } => {

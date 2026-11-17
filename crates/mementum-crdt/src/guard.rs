@@ -667,7 +667,12 @@ impl Shape {
                     && (!i.any || i.right_origin)
                     && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
             })
-            .map(|(s, _)| ID::new(ClientID::new(s.id.0), s.id.1))
+            // Ruling R721 : un élément à cheval sur le plancher n'est intégré que pour sa part
+            // au-dessus, et c'est elle que la page porte, à l'horloge du plancher.
+            .map(|(s, _)| {
+                let client = ClientID::new(s.id.0);
+                ID::new(client, s.id.1.max(floor.get(&client)))
+            })
             .collect()
     }
 
@@ -737,8 +742,15 @@ impl Shape {
     /// [`Shape::outside_marks`]), hors entrées de map : identifiant et longueur (Ruling R498).
     pub(crate) fn untyped_items(&self, floor: &StateVector) -> Vec<(ID, u32)> {
         self.inserts()
-            .filter(|(s, i)| i.untyped && !i.keyed && s.id.1 >= floor.get(&ClientID::new(s.id.0)))
-            .map(|(s, _)| (ID::new(ClientID::new(s.id.0), s.id.1), s.len))
+            .filter(|(s, i)| {
+                i.untyped && !i.keyed && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
+            })
+            // Ruling R721 : la part intégrée d'un élément à cheval sur le plancher, et elle seule.
+            .map(|(s, _)| {
+                let client = ClientID::new(s.id.0);
+                let from = s.id.1.max(floor.get(&client));
+                (ID::new(client, from), s.id.1 + s.len - from)
+            })
             .collect()
     }
 
@@ -893,7 +905,17 @@ impl Shape {
         for start in 0..inserts.len() {
             let (s, insert) = inserts[start];
             let Some(value) = insert.value else { continue };
+            if floor_of.0 != s.id.0 {
+                floor_of = (s.id.0, floor.get(&ClientID::new(s.id.0)));
+            }
+            if s.id.1 + s.len <= floor_of.1 {
+                continue;
+            }
             let place = match (&insert.parent, insert.attr) {
+                // Ruling R721 : à cheval sur le plancher, l'élément n'est intégré que pour sa
+                // part au-dessus, qui a pour origine ce que la page porte juste avant elle, quoi
+                // que la mise à jour dise de son parent ou de son origine.
+                _ if s.id.1 < floor_of.1 => Place::Outside((s.id.0, floor_of.1 - 1)),
                 (Parent::Id(parent), Some(key)) => Place::Entry(*parent, key),
                 (Parent::Named(..) | Parent::Id(_), _) => continue,
                 (Parent::Sibling(_), _) => {
@@ -903,12 +925,22 @@ impl Shape {
                         if let Some(place) = places[k] {
                             break place;
                         }
-                        let (_, at) = inserts[k];
+                        let (through, at) = inserts[k];
+                        let under = floor.get(&ClientID::new(through.id.0));
+                        if through.id.1 < under {
+                            // Une origine dans un élément à cheval sur le plancher, ou sous lui.
+                            break Place::Outside((through.id.0, under - 1));
+                        }
                         match (&at.parent, at.attr) {
                             (Parent::Id(parent), Some(key)) => break Place::Entry(*parent, key),
                             (Parent::Named(..) | Parent::Id(_), _) => break Place::Child,
                             (Parent::Sibling(origin), _) => {
                                 path.push(k);
+                                // Une origine que la page connaît déjà : c'est son élément, quoi
+                                // que la mise à jour porte à cette horloge (R490, R721).
+                                if origin.1 < floor.get(&ClientID::new(origin.0)) {
+                                    break Place::Outside(*origin);
+                                }
                                 // L'origine est le plus souvent l'élément d'avant.
                                 let next = match k.checked_sub(1) {
                                     Some(before) if covers(inserts[before].0, *origin) => {
@@ -935,12 +967,6 @@ impl Shape {
                 }
             };
             if matches!(place, Place::Child) {
-                continue;
-            }
-            if floor_of.0 != s.id.0 {
-                floor_of = (s.id.0, floor.get(&ClientID::new(s.id.0)));
-            }
-            if s.id.1 + s.len <= floor_of.1 {
                 continue;
             }
             match place {

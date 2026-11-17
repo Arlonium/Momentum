@@ -1161,3 +1161,100 @@ fn a_width_that_is_not_a_number_is_an_absent_width() {
     });
     assert!(refused_before(&page.try_client_update(&update), "colwidth"));
 }
+
+// ------------------------------------------------------------------ tour de correction 2
+
+/// L'identifiant de l'entrée courante de `key` du premier bloc, tel qu'une mise à jour l'écrit
+/// (ses octets), pris dans l'origine d'une mise à jour honnête qui l'écrase.
+fn entry_bytes(state: &[u8], key: &str) -> Vec<u8> {
+    let honest = written(&replica_as(6, state), |txn| {
+        content(txn, 0).insert_attribute(txn, key, "x");
+    });
+    assert_eq!(honest[..5], [1, 1, 6, 0, 0xA8], "{honest:?}");
+    let at = honest
+        .windows(4)
+        .position(|w| w == [1, 119, 1, b'x'])
+        .expect("la valeur");
+    honest[5..at].to_vec()
+}
+
+/// R-1 de la re-relecture (Ruling R721) : un élément à cheval sur le plancher. Le client 5 a
+/// écrit un texte vide à l'horloge 0 ; il envoie ensuite, à cette même horloge, un contenu de
+/// trois unités dont l'origine droite est l'entrée courante de `backgroundColor`. yrs n'intègre
+/// que la part au-dessus du plancher (horloges 1 et 2), d'origine le texte : un attribut pour yrs
+/// (`backgroundColor = "bc"`), du texte dans le paragraphe pour Yjs. La garde nommait l'élément
+/// par l'horloge de départ du bloc lu (0), pas par celle de la part intégrée (1) : accepté.
+/// Chaque contenu qui n'est pas une valeur, d'un client et au journal ; et, en témoin, la même
+/// forme sans chevauchement.
+#[test]
+fn an_item_astride_what_the_page_knows_is_judged_by_what_it_integrates() {
+    // Une chaîne, et un objet incorporé répété (une unité par élément : trois éléments).
+    let embed = [&[14u8][..], JSON_OBJECT].concat();
+    let cases: [(&str, u8, Vec<u8>, Vec<u8>); 2] = [
+        (
+            "une chaîne",
+            0xC4,
+            vec![3, b'a', b'b', b'c'],
+            vec![2, b'b', b'c'],
+        ),
+        ("des objets incorporés", 0xC5, embed.clone(), embed),
+    ];
+    for (what, info, astride, alone) in cases {
+        for stored in [false, true] {
+            let (page, root_update) = PageDoc::new_page();
+            let attacker = replica_as(5, &root_update);
+            let text = written(&attacker, |txn| {
+                content(txn, 0).push_back(txn, yrs::XmlTextPrelim::new(""));
+            });
+            assert_eq!(text[..4], [1, 1, 5, 0], "{text:?}");
+            let text = page.try_client_update(&text).expect("le texte vide").read;
+            let entry = entry_bytes(&page.encode_state(), "backgroundColor");
+            // À cheval : l'élément (5,0), d'origine (5,0) ; en témoin : l'élément (5,1).
+            let update = |clock: u8, body: &[u8]| {
+                let mut update = vec![1, 1, 5, clock, info, 5, 0];
+                update.extend_from_slice(&entry);
+                update.extend_from_slice(body);
+                update.push(0);
+                update
+            };
+            let is_string = info == 0xC4;
+            let forms = if is_string {
+                vec![
+                    ("à cheval", update(0, &astride)),
+                    ("témoin", update(1, &alone)),
+                ]
+            } else {
+                // Un objet incorporé compte pour une unité : pas de chevauchement possible.
+                vec![("témoin", update(1, &alone))]
+            };
+            for (form, forged) in forms {
+                let journal = [root_update.as_slice(), &text, &forged];
+                let state = if stored {
+                    loaded(&journal).1
+                } else {
+                    let (live, _) = loaded(&journal[..2]);
+                    let result = live.try_client_update(&forged);
+                    assert!(result.is_err(), "{what}, {form} : acceptée d'un client");
+                    continue;
+                };
+                // Relue du journal : ni attribut pour yrs, ni rien que la garde refuse dans les
+                // octets servis.
+                assert_eq!(
+                    attr_of(&state, 0, "backgroundColor"),
+                    None,
+                    "{what}, {form} : l'attribut est servi"
+                );
+                let empty = PageDoc::from_updates(std::iter::empty::<&[u8]>()).unwrap();
+                assert_eq!(
+                    empty.attribute_refusal(&state).unwrap(),
+                    None,
+                    "{what}, {form}"
+                );
+                assert_eq!(
+                    loaded(&journal).0.revision(),
+                    loaded(&[&state]).0.revision()
+                );
+            }
+        }
+    }
+}
