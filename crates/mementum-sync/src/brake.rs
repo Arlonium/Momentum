@@ -6,7 +6,10 @@
 //! connexion, et la frappe d'un autre sortait de son budget (296 ms au p95 pour quatre boucles,
 //! contre 150 ; mesure `keystroke_during_loops_of_refused_updates_under_150ms`).
 //!
-//! Le frein compte ces refus par compte, pour toutes les pages du hub. Les [`FREE_REFUSALS`]
+//! Le frein compte ces refus par compte **et par page** (Ruling R745) : un compte n'est freiné
+//! que sur la page où ses mises à jour ont été refusées. Compté pour toutes ses pages, un autre
+//! compte pouvait le faire freiner partout, en écrivant sous son identifiant de client Yjs de
+//! quoi faire refuser sa frappe suivante (constat I1 de la re-relecture 3). Les [`FREE_REFUSALS`]
 //! premiers d'une minute ne coûtent rien de plus (un onglet honnête n'en reçoit pas ; une
 //! course rare en donnerait un). Le suivant freine le compte : pendant un temps, ses mises à
 //! jour ferment leur connexion sans être appliquées, donc sans rien recharger. Le temps part de
@@ -52,7 +55,7 @@ struct Account {
 /// Le frein d'un hub.
 pub(crate) struct Brake {
     first_block: Duration,
-    accounts: Mutex<HashMap<Uuid, Account>>,
+    accounts: Mutex<HashMap<(Uuid, Uuid), Account>>,
 }
 
 impl Brake {
@@ -63,23 +66,24 @@ impl Brake {
         }
     }
 
-    fn accounts(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Account>> {
+    fn accounts(&self) -> std::sync::MutexGuard<'_, HashMap<(Uuid, Uuid), Account>> {
         self.accounts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Le temps pendant lequel le compte est encore freiné, s'il l'est.
-    pub(crate) fn blocked(&self, account: Uuid, now: Instant) -> Option<Duration> {
+    /// Le temps pendant lequel le compte est encore freiné sur cette page, s'il l'est.
+    pub(crate) fn blocked(&self, account: Uuid, page: Uuid, now: Instant) -> Option<Duration> {
         let accounts = self.accounts();
-        let until = accounts.get(&account)?.until?;
+        let until = accounts.get(&(account, page))?.until?;
         (until > now).then(|| until - now)
     }
 
     /// Un refus d'après l'application de plus pour ce compte. Rend le temps pendant lequel il
     /// est freiné, si ce refus le freine.
-    pub(crate) fn refused(&self, account: Uuid, now: Instant) -> Option<Duration> {
+    pub(crate) fn refused(&self, account: Uuid, page: Uuid, now: Instant) -> Option<Duration> {
         let mut accounts = self.accounts();
+        let account = (account, page);
         if accounts.len() >= MAX_ACCOUNTS && !accounts.contains_key(&account) {
             accounts.retain(|_, a| a.until.is_some_and(|until| until > now));
             if accounts.len() >= MAX_ACCOUNTS {
@@ -119,6 +123,7 @@ mod tests {
     use super::*;
 
     const FIRST: Duration = Duration::from_secs(2);
+    const PAGE: Uuid = Uuid::nil();
 
     #[tokio::test]
     async fn the_first_refusals_of_a_minute_are_free_then_each_one_doubles_the_block() {
@@ -127,20 +132,23 @@ mod tests {
         let start = Instant::now();
         for n in 0..FREE_REFUSALS {
             assert_eq!(
-                brake.refused(account, start + Duration::from_secs(n as u64)),
+                brake.refused(account, PAGE, start + Duration::from_secs(n as u64)),
                 None
             );
         }
-        assert_eq!(brake.blocked(account, start + Duration::from_secs(3)), None);
-        let at = start + Duration::from_secs(4);
-        assert_eq!(brake.refused(account, at), Some(FIRST));
         assert_eq!(
-            brake.blocked(account, at + Duration::from_secs(1)),
+            brake.blocked(account, PAGE, start + Duration::from_secs(3)),
+            None
+        );
+        let at = start + Duration::from_secs(4);
+        assert_eq!(brake.refused(account, PAGE, at), Some(FIRST));
+        assert_eq!(
+            brake.blocked(account, PAGE, at + Duration::from_secs(1)),
             Some(Duration::from_secs(1))
         );
-        assert_eq!(brake.blocked(account, at + FIRST), None);
+        assert_eq!(brake.blocked(account, PAGE, at + FIRST), None);
         assert_eq!(
-            brake.blocked(other, at),
+            brake.blocked(other, PAGE, at),
             None,
             "un autre compte n'est pas freiné"
         );
@@ -148,11 +156,14 @@ mod tests {
         let mut at = at + FIRST;
         let mut expected = FIRST * 2;
         for _ in 0..12 {
-            assert_eq!(brake.refused(account, at), Some(expected.min(MAX_BLOCK)));
+            assert_eq!(
+                brake.refused(account, PAGE, at),
+                Some(expected.min(MAX_BLOCK))
+            );
             at += expected.min(MAX_BLOCK);
             expected = (expected * 2).min(MAX_BLOCK * 2);
         }
-        assert_eq!(brake.refused(account, at), Some(MAX_BLOCK));
+        assert_eq!(brake.refused(account, PAGE, at), Some(MAX_BLOCK));
     }
 
     #[tokio::test]
@@ -162,7 +173,7 @@ mod tests {
         let start = Instant::now();
         for n in 0..20u64 {
             let at = start + Duration::from_secs(n * 25);
-            assert_eq!(brake.refused(account, at), None, "refus {n}");
+            assert_eq!(brake.refused(account, PAGE, at), None, "refus {n}");
         }
     }
 
@@ -172,18 +183,18 @@ mod tests {
         let account = Uuid::now_v7();
         let start = Instant::now();
         for _ in 0..FREE_REFUSALS {
-            assert_eq!(brake.refused(account, start), None);
+            assert_eq!(brake.refused(account, PAGE, start), None);
         }
-        assert_eq!(brake.refused(account, start), Some(FIRST));
+        assert_eq!(brake.refused(account, PAGE, start), Some(FIRST));
         // Avant l'oubli : freiné dès le premier refus, deux fois plus.
         let later = start + FORGET_AFTER - Duration::from_secs(1);
-        assert_eq!(brake.refused(account, later), Some(FIRST * 2));
+        assert_eq!(brake.refused(account, PAGE, later), Some(FIRST * 2));
         // Après : il repart de zéro.
         let forgotten = later + FORGET_AFTER;
         for _ in 0..FREE_REFUSALS {
-            assert_eq!(brake.refused(account, forgotten), None);
+            assert_eq!(brake.refused(account, PAGE, forgotten), None);
         }
-        assert_eq!(brake.refused(account, forgotten), Some(FIRST));
+        assert_eq!(brake.refused(account, PAGE, forgotten), Some(FIRST));
     }
 
     #[tokio::test]
@@ -191,7 +202,7 @@ mod tests {
         let brake = Brake::new(FIRST);
         let now = Instant::now();
         for _ in 0..MAX_ACCOUNTS + 10 {
-            brake.refused(Uuid::now_v7(), now);
+            brake.refused(Uuid::now_v7(), PAGE, now);
         }
         assert!(brake.accounts().len() <= MAX_ACCOUNTS);
     }

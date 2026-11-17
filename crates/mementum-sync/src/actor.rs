@@ -1154,7 +1154,9 @@ impl Actor {
         // donc sans rien recharger. Son onglet se reconnecte, et renvoie ce qui manque.
         let hub = self.id.hub.upgrade();
         if let (Some(account), Some(hub)) = (actor, &hub)
-            && let Some(left) = hub.brake().blocked(account, tokio::time::Instant::now())
+            && let Some(left) =
+                hub.brake()
+                    .blocked(account, self.id.node_id, tokio::time::Instant::now())
         {
             tracing::warn!(node_id = %self.id.node_id, conn, %account, ?left, "compte freiné après des mises à jour refusées : connexion fermée sans rien appliquer");
             return Ok(false);
@@ -1192,7 +1194,9 @@ impl Actor {
                 // Ruling R725 : chaque refus de ce genre coûte un rechargement à tous ; au-delà
                 // de quelques-uns, le compte est freiné.
                 if let (Some(account), Some(hub)) = (actor, &hub)
-                    && let Some(block) = hub.brake().refused(account, tokio::time::Instant::now())
+                    && let Some(block) =
+                        hub.brake()
+                            .refused(account, self.id.node_id, tokio::time::Instant::now())
                 {
                     tracing::warn!(node_id = %self.id.node_id, %account, ?block, "trop de mises à jour refusées après leur application : compte freiné");
                 }

@@ -1581,7 +1581,7 @@ fn writes_the_metadata(client: u8) -> Vec<u8> {
 /// un compte qui en envoie en boucle tenait l'acteur occupé à recharger : la frappe d'un autre
 /// sortait de son budget. Après `FREE_REFUSALS` refus de ce genre en une minute, le suivant vaut
 /// au compte un temps pendant lequel ses mises à jour ferment leur connexion sans être
-/// appliquées, sur toute page ; le temps double à chaque récidive. Les autres comptes écrivent
+/// appliquées, sur cette page seulement (R745) ; le temps double à chaque récidive. Les autres comptes écrivent
 /// toujours, et le compte freiné écrit de nouveau une fois le temps passé.
 #[tokio::test]
 async fn an_account_refused_after_application_again_and_again_is_slowed_down() {
@@ -1626,6 +1626,25 @@ async fn an_account_refused_after_application_again_and_again_is_slowed_down() {
     assert_eq!(
         text(&f.hub.read_blocks(f.page).await.unwrap()),
         "Alpha suite"
+    );
+    // Ruling R745 : le frein vaut pour la page où les refus ont eu lieu ; sur une autre, le
+    // compte écrit toujours.
+    let elsewhere = new_page(&f.store).await;
+    let there = Client::connect_synced(&f.server.url_for(
+        elsewhere,
+        ConnInfo {
+            actor: Some(account),
+            ..writing_conn()
+        },
+    ))
+    .await;
+    let block_there = there.blocks()[0].id.clone();
+    there.type_text(&block_there, "ailleurs");
+    processed(&there).await;
+    assert!(!there.is_closed(), "freiné sur une autre page");
+    assert_eq!(
+        text(&f.hub.read_blocks(elsewhere).await.unwrap()),
+        "ailleurs"
     );
     assert!(
         blocked_at.unwrap().elapsed() < block,
