@@ -111,15 +111,22 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Le message d'une erreur suivi de ceux de ses causes, séparés par « : », chaque texte une fois :
-/// une cause dont le texte termine déjà le message n'est pas répétée (Ruling R842). Une erreur
-/// du store (`StoreError::Sqlx`) et celles de sqlx recopient le message de leur source et la
-/// rendent aussi comme cause : `{:#}` d'anyhow écrivait ainsi le même texte jusqu'à trois fois.
+/// Le message d'une erreur suivi de ceux de ses causes, séparés par « : », chaque texte une fois
+/// (Ruling R842) : une cause que le message recopie déjà (le message lui est égal, ou finit par un
+/// deux-points, précédé ou non d'une espace, puis une espace et elle) n'est pas répétée, et une
+/// cause vide n'est pas écrite (Ruling R852).
+/// Une erreur du store (`StoreError::Sqlx`) et celles de sqlx recopient le message de leur source
+/// après un deux-points, et la rendent aussi comme cause : `{:#}` d'anyhow écrivait ainsi le même
+/// texte jusqu'à trois fois.
 fn report(error: &anyhow::Error) -> String {
     let mut message = String::new();
     for cause in error.chain() {
         let text = cause.to_string();
-        if message.ends_with(&text) {
+        let copied = message == text
+            || message
+                .strip_suffix(text.as_str())
+                .is_some_and(|before| before.ends_with(": "));
+        if text.is_empty() || copied {
             continue;
         }
         if !message.is_empty() {
@@ -256,5 +263,43 @@ mod tests {
         let error = anyhow::Error::new(Copying(None, "cause")).context("contexte");
         assert_eq!(report(&error), "contexte : cause");
         assert_eq!(report(&anyhow::anyhow!("seule")), "seule");
+    }
+
+    /// Une erreur qui ne recopie pas sa source : son texte seul.
+    #[derive(Debug)]
+    struct Link(&'static str, Option<Box<Link>>);
+
+    impl fmt::Display for Link {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Link {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|e| e as _)
+        }
+    }
+
+    /// Ruling R852 : une cause n'est tue que si le message lui est égal ou se termine par elle
+    /// après un deux-points ; une cause dont le texte termine le message au milieu d'un mot est
+    /// écrite, et une cause vide, qui n'est pas écrite, ne fait rien taire.
+    #[test]
+    fn a_cause_is_dropped_only_after_a_colon() {
+        let error =
+            anyhow::Error::new(Link("valide", None)).context("le jeton de session est invalide");
+        assert_eq!(report(&error), "le jeton de session est invalide : valide");
+        let error = anyhow::Error::new(Link("base", None)).context("erreur de base");
+        assert_eq!(report(&error), "erreur de base : base");
+        // Après un deux-points, avec ou sans espace avant lui : la cause recopiée est tue.
+        let error = anyhow::Error::new(Link("c", None)).context("b: c");
+        assert_eq!(report(&error), "b: c");
+        let error = anyhow::Error::new(Link("contexte", None)).context("contexte");
+        assert_eq!(report(&error), "contexte");
+        // Une cause vide n'est pas écrite, et la suivante l'est.
+        let error = anyhow::Error::new(Link("", Some(Box::new(Link("c", None))))).context("a");
+        assert_eq!(report(&error), "a : c");
+        let error = anyhow::Error::new(Link("", None)).context("contexte");
+        assert_eq!(report(&error), "contexte");
     }
 }
