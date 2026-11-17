@@ -91,6 +91,37 @@
       { "type": "text", "text": " finit par une barre oblique.", "styles": {} }
     ]
   },
+  {
+    "type": "table",
+    "content": {
+      "type": "tableContent",
+      "headerRows": 1,
+      "rows": [
+        { "cells": ["Formule dans une cellule", "Mention dans une cellule"] },
+        {
+          "cells": [
+            {
+              "type": "tableCell",
+              "content": [
+                { "type": "math", "props": { "latex": "\\text{$a|b$}" } },
+                { "type": "text", "text": " et ", "styles": {} },
+                { "type": "math", "props": { "latex": "\\frac{1}{2}" } }
+              ]
+            },
+            {
+              "type": "tableCell",
+              "content": [
+                {
+                  "type": "mention",
+                  "props": { "kind": "date", "id": "2026-12-01", "label": "1 déc. 2026" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
   { "type": "heading", "props": { "level": 2 }, "content": "Liens et mentions" },
   { "type": "bookmark", "props": { "url": "https://exemple.org/recherche?q=blocs&tri=date#resultats" } },
   { "type": "toc" },
