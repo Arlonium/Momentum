@@ -41,7 +41,7 @@ $env:MEMENTUM_E2E_WEB_PORT = "5174"; $env:MEMENTUM_E2E_API_PORT = "8081"; corepa
 
 Puis ouvre `http://localhost:5174`. Le port du serveur sert aussi en K3.
 
-**Ce que tu verras aussi.** La version que tu lances contient déjà une part de la partie B (favoris, récents, fil d'Ariane dans la barre du haut, menu « / » et ses blocs riches, équations). Elle aura sa propre recette : ne la juge pas ici.
+**Ce que tu verras aussi.** La version que tu lances contient déjà une part de la partie B (favoris, récents, fil d'Ariane dans la barre du haut, menu « / » et ses blocs riches, équations). Elle a sa propre recette, [`2026-11-12-p1-lot3b-recette.md`](2026-11-12-p1-lot3b-recette.md) : ne la juge pas ici.
 
 ## Ce que cette partie contient, et ne contient pas
 
