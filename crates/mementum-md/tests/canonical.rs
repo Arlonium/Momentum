@@ -712,11 +712,18 @@ fn a_formula_with_an_unescaped_dollar_in_a_table_cell_is_a_tag() {
                 rows: vec![
                     row(vec![math("\\text{$a|b$}")]),
                     row(vec![math("\\text{$x^{2}$}"), text(" et "), math("a|b")]),
+                    // Un `$` qui suit aussitôt un échappement (`\a`, `\ `) reste non échappé.
+                    row(vec![
+                        math("{\\a$|}"),
+                        text(" et "),
+                        math("\\text{\\ $x^{2}}"),
+                    ]),
                 ],
             }),
             vec![],
         )],
         "| <math latex=\"\\text{$a|b$}\"/> |\n| --- |\n\
-         | <math latex=\"\\text{$x^{2}$}\"/> et $a|b$ |\n",
+         | <math latex=\"\\text{$x^{2}$}\"/> et $a|b$ |\n\
+         | <math latex=\"{\\a$|}\"/> et <math latex=\"\\text{\\ $x^{2}}\"/> |\n",
     );
 }
