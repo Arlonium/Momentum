@@ -7,7 +7,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::{LOT2, database_with, int, texts};
+use common::tmp::TestDir;
+use common::{LOT2, LOT3A, database_with, int, texts};
 use mementum_store::{Backup, Store, backup_path};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -768,4 +769,183 @@ async fn failed_backup_stops_before_migrating() {
             "{obstacle}"
         );
     }
+}
+
+/// Une base de la partie A du lot 3 (`0001` à `0003`), dans `dir`, connexions fermées, dont la
+/// migration `version` a été appliquée par un autre binaire : sa somme, dans `_sqlx_migrations`,
+/// n'est pas celle du fichier de ce binaire.
+async fn applied_by_another_binary(dir: &Path, version: i64) -> PathBuf {
+    let db = dir.join("mementum.db");
+    let pool = database_with(&db, LOT3A).await;
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = ?")
+        .bind(version)
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    db
+}
+
+/// Pose à côté de `db` un fichier au nom d'une copie d'avant migration, `<base>.avant-<suffix>`,
+/// écrit à l'instant `secs` (secondes Unix), et rend son chemin.
+fn copy_at(db: &Path, suffix: &str, secs: u64) -> PathBuf {
+    let path = sibling(db, &format!(".avant-{suffix}"));
+    std::fs::write(&path, suffix.as_bytes()).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(secs))
+        .unwrap();
+    path
+}
+
+/// L'ouverture de `db` est refusée : rend le message. La base n'a pas changé d'un octet, et rien
+/// n'a été posé à côté d'elle (ni copie, ni `.partiel`, ni `-wal`).
+async fn refused_untouched(db: &Path) -> String {
+    let dir = db.parent().unwrap();
+    let (bytes, before) = (std::fs::read(db).unwrap(), entries(dir));
+    let error = Store::open(db)
+        .await
+        .err()
+        .expect("l'ouverture doit être refusée");
+    assert_eq!(std::fs::read(db).unwrap(), bytes, "la base a changé");
+    assert_eq!(entries(dir), before, "{error}");
+    error.to_string()
+}
+
+/// Ruling R840 : une base dont une migration déjà appliquée diffère de celle de ce binaire (un
+/// binaire intermédiaire d'un lot l'a ouverte) est refusée **avant** toute copie : aucune
+/// `avant-0004.bak` ne vient porter l'état refusé à côté de la copie à reprendre, la base reste
+/// telle quelle, et le message dit quelle copie reprendre.
+#[tokio::test]
+async fn a_database_whose_applied_migration_differs_is_refused_before_any_copy() {
+    let dir = TestDir::new();
+    let db = applied_by_another_binary(dir.path(), 3).await;
+    // La copie que le binaire intermédiaire a écrite avant d'appliquer sa `0003`.
+    let resume = copy_at(&db, "0003.bak", 1_763_000_000);
+    let message = refused_untouched(&db).await;
+    assert_eq!(
+        message,
+        format!(
+            "la migration 0003 de cette base n'est pas celle de ce binaire : un binaire \
+             intermédiaire, qui en avait une autre version, l'a appliquée. La base n'a pas été \
+             modifiée, et aucune copie n'a été écrite. Reprends la copie d'avant la migration \
+             0003, {} ; ce qui a été écrit dans la base depuis cette copie est perdu. Voir \
+             « Copies avant migration » dans le README.",
+            resume.display()
+        )
+    );
+    assert_eq!(
+        entries(dir.path()),
+        BTreeSet::from([
+            "mementum.db".to_string(),
+            "mementum.db.avant-0003.bak".to_string()
+        ])
+    );
+    // Refusée de nouveau, de même : rien ne s'empile.
+    assert_eq!(refused_untouched(&db).await, message);
+}
+
+/// La copie que nomme le refus : parmi les copies d'avant la migration qui diffère, ou d'avant une
+/// migration plus ancienne, celles de la plus récente de ces migrations, et parmi elles la plus
+/// récemment écrite. Jamais une copie d'avant une migration plus récente, qui porte l'état refusé.
+#[tokio::test]
+async fn the_refusal_names_the_latest_copy_from_before_the_migration_that_differs() {
+    // Plusieurs copies d'avant la `0003` (une migration ratée, puis la base changée) ; une
+    // d'avant la `0002`, plus récente, mais d'avant une migration plus ancienne ; une d'avant la
+    // `0004`, celle d'un refus d'avant R840.
+    let dir = TestDir::new();
+    let db = applied_by_another_binary(dir.path(), 3).await;
+    copy_at(&db, "0002.bak", 1_763_500_000);
+    copy_at(&db, "0003.bak", 1_763_000_000);
+    let latest = copy_at(&db, "0003.20261112T081500Z.bak", 1_763_100_000);
+    copy_at(&db, "0003.20261111T081500Z.bak", 1_763_050_000);
+    copy_at(&db, "0004.bak", 1_763_600_000);
+    assert_eq!(
+        refused_untouched(&db).await,
+        format!(
+            "la migration 0003 de cette base n'est pas celle de ce binaire : un binaire \
+             intermédiaire, qui en avait une autre version, l'a appliquée. La base n'a pas été \
+             modifiée, et aucune copie n'a été écrite. Reprends la plus récente des 3 copies \
+             d'avant la migration 0003, {} ; ce qui a été écrit dans la base depuis cette copie \
+             est perdu. Voir « Copies avant migration » dans le README.",
+            latest.display()
+        )
+    );
+
+    // La migration `0002` diffère : la copie d'avant la `0002` convient, pas celle d'avant la
+    // `0003`, plus récente, qui porte la `0002` refusée ; ni un `.partiel`, ni un autre nom.
+    let dir = TestDir::new();
+    let db = applied_by_another_binary(dir.path(), 2).await;
+    let older = copy_at(&db, "0002.bak", 1_763_000_000);
+    copy_at(&db, "0003.bak", 1_763_100_000);
+    copy_at(&db, "0002.bak.partiel", 1_763_200_000);
+    copy_at(&db, "0002.copie.bak", 1_763_200_000);
+    assert_eq!(
+        refused_untouched(&db).await,
+        format!(
+            "la migration 0002 de cette base n'est pas celle de ce binaire : un binaire \
+             intermédiaire, qui en avait une autre version, l'a appliquée. La base n'a pas été \
+             modifiée, et aucune copie n'a été écrite. Reprends la copie d'avant la migration \
+             0002, {} ; ce qui a été écrit dans la base depuis cette copie est perdu. Voir \
+             « Copies avant migration » dans le README.",
+            older.display()
+        )
+    );
+
+    // Aucune copie qui convienne : le refus le dit.
+    let dir = TestDir::new();
+    let db = applied_by_another_binary(dir.path(), 3).await;
+    copy_at(&db, "0004.bak", 1_763_600_000);
+    assert_eq!(
+        refused_untouched(&db).await,
+        "la migration 0003 de cette base n'est pas celle de ce binaire : un binaire \
+         intermédiaire, qui en avait une autre version, l'a appliquée. La base n'a pas été \
+         modifiée, et aucune copie n'a été écrite. Aucune copie d'avant cette migration, ni \
+         d'avant une plus ancienne, n'est à côté de la base : reprends une sauvegarde faite avant \
+         le passage du binaire intermédiaire. Voir « Copies avant migration » dans le README."
+    );
+}
+
+/// Une base qu'une version plus récente de Mementum a migrée (une migration que ce binaire ne
+/// connaît pas) : refusée de même, en le disant, avant toute copie.
+#[tokio::test]
+async fn a_database_from_a_newer_version_is_refused_in_french() {
+    let dir = TestDir::new();
+    let db = dir.path().join("mementum.db");
+    Store::open(&db).await.unwrap().close().await;
+    let pool = common::side_pool(&db).await;
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations \
+             (version, description, installed_on, success, checksum, execution_time) \
+         VALUES (5, 'plus tard', '2026-12-01 00:00:00', TRUE, X'00', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    let unknown = "la base porte la migration 0005, que ce binaire ne connaît pas : une version \
+                   plus récente de Mementum l'a appliquée. La base n'a pas été modifiée, et aucune \
+                   copie n'a été écrite.";
+    assert_eq!(
+        refused_untouched(&db).await,
+        format!(
+            "{unknown} Lance cette version plus récente : aucune copie d'avant cette migration, \
+             ni d'avant une plus ancienne, n'est à côté de la base pour revenir à celle-ci. Voir \
+             « Copies avant migration » dans le README."
+        )
+    );
+
+    // La version plus récente a écrit sa copie avant d'appliquer la `0005`.
+    let resume = copy_at(&db, "0005.bak", 1_763_000_000);
+    assert_eq!(
+        refused_untouched(&db).await,
+        format!(
+            "{unknown} Lance cette version plus récente ; pour revenir à celle-ci, reprends la \
+             copie d'avant la migration 0005, {} ; ce qui a été écrit dans la base depuis cette \
+             copie est perdu. Voir « Copies avant migration » dans le README.",
+            resume.display()
+        )
+    );
 }

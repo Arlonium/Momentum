@@ -85,7 +85,7 @@ use uuid::Uuid;
 
 pub use access_inputs::AccessInputs;
 pub use acl::{AccessChange, AccessWritten, ShareRefusal};
-pub use backup::{Backup, backup_path};
+pub use backup::{Backup, MigrationMismatch, MigrationRefusal, ResumeCopy, backup_path};
 pub use comments::{
     Author, Authorship, Comment, CommentLimit, MAX_MESSAGES_PER_ACCOUNT, MAX_MESSAGES_PER_PAGE,
     MAX_MESSAGES_PER_THREAD, MAX_PAGE_REACTIONS_PER_ACCOUNT, MAX_REACTIONS_PER_ACCOUNT,
@@ -143,6 +143,10 @@ pub enum StoreError {
     /// Un plafond des commentaires est atteint (Ruling R204), vérifié dans la transaction qui
     /// écrirait : rien n'est écrit.
     CommentLimit(CommentLimit),
+    /// À l'ouverture : la base porte une migration que ce binaire ne peut pas suivre (inconnue, ou
+    /// d'une autre version), refusée avant toute copie et toute migration (Ruling R840). Rien n'a
+    /// été écrit. Son affichage est tout le message, sans source.
+    Migration(MigrationRefusal),
     /// Erreur de la base.
     Sqlx(sqlx::Error),
 }
@@ -167,6 +171,7 @@ impl fmt::Display for StoreError {
             StoreError::Trashed => write!(f, "la page est à la corbeille"),
             StoreError::NotAuthor => write!(f, "ce message, ou ce fil, est d'un autre compte"),
             StoreError::CommentLimit(limit) => write!(f, "plafond des commentaires : {limit}"),
+            StoreError::Migration(refusal) => write!(f, "{refusal}"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),
         }
     }
@@ -264,7 +269,8 @@ impl Store {
     /// copie déjà rangée n'est jamais écrasée : si l'une d'elles est identique à la nouvelle, elle
     /// suffit ; sinon, la nouvelle prend le nom sans date s'il est libre, ou un nom daté. Si la
     /// copie échoue, l'ouverture échoue, avant toute migration. [`Store::backup`] dit ce qui a été
-    /// fait.
+    /// fait. Une base qui porte déjà une migration que ce binaire ne connaît pas, ou d'une autre
+    /// version que la sienne, est refusée avant toute copie ([`StoreError::Migration`]).
     pub async fn open(path: &Path) -> Result<Store, StoreError> {
         Store::open_with(path, StoreOptions::default()).await
     }

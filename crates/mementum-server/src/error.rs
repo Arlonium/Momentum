@@ -674,7 +674,8 @@ impl From<StoreError> for ApiError {
                 "ce message, ou ce fil, n'est pas le tien : rien n'a été modifié",
             ),
             StoreError::CommentLimit(limit) => ApiError::comment_limit(limit),
-            e @ StoreError::Sqlx(_) => ApiError::internal(&e),
+            // Un refus de migration n'arrive qu'à l'ouverture de la base, jamais à une route.
+            e @ (StoreError::Migration(_) | StoreError::Sqlx(_)) => ApiError::internal(&e),
         }
     }
 }
