@@ -105,10 +105,29 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("mementum : {e:#}");
+            eprintln!("mementum : {}", report(&e));
             ExitCode::FAILURE
         }
     }
+}
+
+/// Le message d'une erreur suivi de ceux de ses causes, séparés par « : », chaque texte une fois :
+/// une cause dont le texte termine déjà le message n'est pas répétée (Ruling R842). Une erreur
+/// du store (`StoreError::Sqlx`) et celles de sqlx recopient le message de leur source et la
+/// rendent aussi comme cause : `{:#}` d'anyhow écrivait ainsi le même texte jusqu'à trois fois.
+fn report(error: &anyhow::Error) -> String {
+    let mut message = String::new();
+    for cause in error.chain() {
+        let text = cause.to_string();
+        if message.ends_with(&text) {
+            continue;
+        }
+        if !message.is_empty() {
+            message.push_str(" : ");
+        }
+        message.push_str(&text);
+    }
+    message
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -197,4 +216,45 @@ fn init_tracing() {
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt;
+
+    use super::report;
+
+    /// Une erreur qui recopie le message de sa source, et la rend comme cause, à la manière de
+    /// `StoreError::Sqlx`.
+    #[derive(Debug)]
+    struct Copying(Option<Box<Copying>>, &'static str);
+
+    impl fmt::Display for Copying {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match &self.0 {
+                Some(source) => write!(f, "{} : {source}", self.1),
+                None => f.write_str(self.1),
+            }
+        }
+    }
+
+    impl std::error::Error for Copying {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.0.as_deref().map(|e| e as _)
+        }
+    }
+
+    #[test]
+    fn each_text_of_the_chain_is_written_once() {
+        let copying = Copying(
+            Some(Box::new(Copying(Some(Box::new(Copying(None, "c"))), "b"))),
+            "a",
+        );
+        let error = anyhow::Error::new(copying).context("contexte");
+        assert_eq!(report(&error), "contexte : a : b : c");
+        // Une cause qui ne recopie rien est écrite, à la suite.
+        let error = anyhow::Error::new(Copying(None, "cause")).context("contexte");
+        assert_eq!(report(&error), "contexte : cause");
+        assert_eq!(report(&anyhow::anyhow!("seule")), "seule");
+    }
 }

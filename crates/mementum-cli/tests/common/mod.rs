@@ -205,6 +205,57 @@ pub fn lot1_database(db: &Path) {
     });
 }
 
+/// Écrit dans `db` une base de la partie A du lot 3 telle qu'un binaire
+/// intermédiaire la laisse : les migrations `0001` à `0003` lancées par sqlx,
+/// mais la somme de la migration `modified` différente de celle de son fichier
+/// (le binaire en avait une autre version). Les connexions sont fermées au
+/// retour.
+pub fn intermediate_database(db: &Path, modified: i64) {
+    use sqlx::sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+    };
+    let migrations = tempfile::tempdir().unwrap();
+    for file in [
+        "0001_init.sql",
+        "0002_spaces_accounts.sql",
+        "0003_collaboration.sql",
+    ] {
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../mementum-store/migrations")
+                .join(file),
+            migrations.path().join(file),
+        )
+        .unwrap();
+    }
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let options = SqliteConnectOptions::new()
+            .filename(db)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Full)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_millis(5000));
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(migrations.path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = ?")
+            .bind(modified)
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    });
+}
+
 /// La réponse d'une requête HTTP.
 pub struct Response {
     pub status: u16,

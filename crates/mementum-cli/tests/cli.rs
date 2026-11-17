@@ -389,6 +389,82 @@ fn cli_set_password_names_the_backup_it_made() {
     assert!(!stderr.contains(".bak"), "{stderr}");
 }
 
+/// Les noms des entrées de `dir`, triés.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Ruling R840 : une base qu'un binaire intermédiaire d'un lot a migrée (sa
+/// migration `0003` n'est pas celle de ce binaire) est refusée au démarrage,
+/// avant toute copie, par un message en français, dit une fois, qui nomme la
+/// copie à reprendre. La base n'a pas changé d'un octet, et rien n'est posé à
+/// côté d'elle.
+#[test]
+fn a_database_migrated_by_an_intermediate_binary_is_refused_once_in_french() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("donnees");
+    std::fs::create_dir_all(&data).unwrap();
+    let db = data.join("mementum.db");
+    common::intermediate_database(&db, 3);
+    // La copie que le binaire intermédiaire a écrite avant sa `0003`.
+    let resume = data.join("mementum.db.avant-0003.bak");
+    std::fs::write(&resume, b"copie d'avant la 0003").unwrap();
+    let bytes = std::fs::read(&db).unwrap();
+
+    let stderr = refused_start(&data, &[], &[("RUST_LOG", "info")]);
+    assert_eq!(
+        stderr,
+        format!(
+            "mementum : impossible d'ouvrir la base {} : la migration 0003 de cette base n'est \
+             pas celle de ce binaire : un binaire intermédiaire, qui en avait une autre version, \
+             l'a appliquée. La base n'a pas été modifiée, et aucune copie n'a été écrite. \
+             Reprends la copie d'avant la migration 0003, {} ; ce qui a été écrit dans la base \
+             depuis cette copie est perdu. Voir « Copies avant migration » dans le README.\n",
+            db.display(),
+            resume.display()
+        )
+    );
+    assert_eq!(std::fs::read(&db).unwrap(), bytes, "la base a changé");
+    assert_eq!(
+        entries(&data),
+        ["mementum.db", "mementum.db.avant-0003.bak"]
+    );
+}
+
+/// Ruling R842 : une erreur du démarrage qui recopie le message de sa source
+/// (la copie d'avant migration impossible, ici) n'est écrite qu'une fois.
+#[test]
+fn a_startup_error_is_written_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("donnees");
+    std::fs::create_dir_all(&data).unwrap();
+    common::lot1_database(&data.join("mementum.db"));
+    // Un dossier au nom temporaire de la copie : elle ne peut pas s'écrire.
+    std::fs::create_dir(data.join("mementum.db.avant-0002.bak.partiel")).unwrap();
+
+    let stderr = refused_start(&data, &[], &[("RUST_LOG", "info")]);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("impossible d'écrire la copie de la base")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr.starts_with(&format!(
+            "mementum : impossible d'ouvrir la base {} : erreur de base de données : ",
+            data.join("mementum.db").display()
+        )),
+        "{stderr}"
+    );
+}
+
 /// `--signup` et `--public-url` règlent le serveur, et l'emportent sur les
 /// variables.
 #[test]
