@@ -3606,13 +3606,9 @@ button.mm-reaction:hover {
   font-size: 13px;
 }
 
-/* L'attente d'un envoi : BlockNote y écrit « Loading... » en dur ; masqué, et dit en français. */
+/* L'attente d'un envoi : « Envoi en cours… », mis à la place du « Loading... » de BlockNote
+   (`blocks/FileBlock.tsx`, R767). */
 .bn-file-loading-preview {
-  font-size: 0;
-}
-
-.bn-file-loading-preview::after {
-  content: "Envoi…";
   color: var(--mm-text-secondary);
   font-size: 14px;
 }

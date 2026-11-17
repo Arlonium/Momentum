@@ -445,7 +445,9 @@ test("an_upload_in_course_is_shown_cancelled_and_leaves_with_the_page", async ({
   // après l'autre : BlockNote attend chacun).
   await drop(mona, firstBlock(mona), { name: "un.png", bytes: PNG, type: "image/png" });
   await drop(mona, mona.locator(".mm-editor .bn-block-content").last(), { name: "deux.png", bytes: PNG, type: "image/png" });
-  // Deux envois de front, chacun dit, chacun avec de quoi l'annuler ; le bloc dit « Envoi… ».
+  // Deux envois de front, chacun dit, chacun avec de quoi l'annuler ; le bloc dit « Envoi en cours… »
+  // (R767 : le texte même du bloc, pas un texte posé par la feuille de style par-dessus le
+  // « Loading... » de BlockNote).
   // Le plus récent en haut.
   await expect(uploads(mona)).toHaveText([/Envoi de deux\.png…/, /Envoi de un\.png…/]);
   await expect.poll(() => held.length).toBe(2);
@@ -453,7 +455,8 @@ test("an_upload_in_course_is_shown_cancelled_and_leaves_with_the_page", async ({
   await expect.poll(() => getMmd(team.aliceApi, page.id)).toContain('name="un.png"');
   const waiting = mona.locator(".mm-editor .bn-file-loading-preview").first();
   await expect(waiting).toBeVisible();
-  expect(await waiting.evaluate((e) => getComputedStyle(e, "::after").content)).toBe('"Envoi…"');
+  await expect(waiting).toHaveText("Envoi en cours…");
+  expect(await waiting.evaluate((e) => getComputedStyle(e, "::after").content)).toBe("none");
 
   // « Annuler » le premier : sa requête est coupée, rien n'est dit, le second continue.
   await mona.getByRole("button", { name: /^Annuler l'envoi de .*un\.png/ }).click();

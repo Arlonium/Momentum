@@ -14,6 +14,9 @@
 //   téléchargement, R246) ; pour une adresse web, il s'ouvre dans un autre onglet, sans son
 //   ouvreur ; pour toute autre adresse, pas de lien, et le bloc le dit.
 // - **Le nom et la légende sont du texte isolé** (`dir="auto"`, `unicode-bidi: isolate`).
+// - **L'attente d'un envoi se dit en français** : BlockNote écrit « Loading... » en dur dans le bloc
+//   dont l'envoi commence (son dictionnaire n'y est pour rien) ; le texte devient « Envoi en cours… »,
+//   celui que voit l'œil et que lit un lecteur d'écran (R767).
 //
 // L'image, la vidéo et le son eux-mêmes sont chargés par BlockNote depuis ce que rend
 // `resolveFileUrl`, que l'éditeur règle sur `shownUrl` (`Editor.tsx`) : jamais l'adresse du document
@@ -81,10 +84,42 @@ function offer(row: HTMLElement, url: string, name: string): HTMLAnchorElement |
   return link;
 }
 
+/** Ce que dit un bloc dont l'envoi est en cours, à la place du « Loading... » de BlockNote. */
+export const UPLOAD_WAITING = "Envoi en cours…";
+
+/**
+ * Quand l'envoi du bloc `id` commence, met `UPLOAD_WAITING` dans l'élément d'attente que BlockNote
+ * vient de poser dans `dom`. BlockNote s'abonne dans son rendu, avant nous : son élément est donc là
+ * quand on est appelé. Rend de quoi se désabonner.
+ */
+function sayUploadWaiting(editor: unknown, id: string, dom: HTMLElement): (() => void) | null {
+  const events = editor as { onUploadStart?: (callback: (blockId?: string) => void) => () => void };
+  if (typeof events.onUploadStart !== "function") return null;
+  return events.onUploadStart((blockId) => {
+    if (blockId !== id) return;
+    const waiting = dom.querySelector(".bn-file-loading-preview");
+    if (waiting !== null) waiting.textContent = UPLOAD_WAITING;
+  });
+}
+
 /** La vue de BlockNote pour `block`, ses props lues comme du texte, avec de quoi télécharger. */
 function fileView(render: Render, self: unknown, block: Block, editor: unknown, schema: PropSchema): View {
   const props = cleanProps(block.props, schema);
-  const view = render.call(self, { ...block, props }, editor);
+  const rendered = render.call(self, { ...block, props }, editor);
+  // Seul un bloc sans adresse attend un envoi, et seule la vue de l'éditeur s'abonne : un rendu de
+  // copie ou d'export n'est détruit par personne.
+  const live = typeof self === "object" && self !== null && "renderType" in self && self.renderType === "nodeView";
+  const stop = live && props.url === "" ? sayUploadWaiting(editor, block.id, rendered.dom) : null;
+  const view: View =
+    stop === null
+      ? rendered
+      : {
+          ...rendered,
+          destroy: () => {
+            stop();
+            (rendered.destroy as (() => void) | undefined)?.();
+          },
+        };
   for (const text of view.dom.querySelectorAll<HTMLElement>(".bn-file-name, figcaption")) text.dir = "auto";
   const row = view.dom.querySelector<HTMLElement>(".bn-file-name-with-icon");
   if (row === null) return view;

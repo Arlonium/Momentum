@@ -151,6 +151,31 @@ test("the_file_panel_still_opens_on_a_file_block", async () => {
   expect(document.querySelector('.bn-panel input[type="file"], .bn-panel [data-test="upload-input"]')).not.toBeNull();
 });
 
+test("a_block_being_uploaded_says_so_in_french", async () => {
+  // BlockNote écrit « Loading... » en dur dans le bloc dont l'envoi commence : le texte, lu par un
+  // lecteur d'écran, est le nôtre (R767), pour une image comme pour un fichier.
+  for (const type of ["file", "image"] as const) {
+    let finish = (_url: string) => {};
+    const m = await mountEditor({
+      blocks: [{ id: "x", type: "paragraph", content: "Bloc X" }, { id: "f", type, props: {} } as Seed[number]],
+      editable: true,
+      uploadFile: () => new Promise<string>((resolve) => (finish = resolve)),
+    });
+    let sent: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      sent = m.editor.uploadFile!(new File(["x"], "a.png", { type: "image/png" }), "f");
+    });
+    const waiting = () => blockOf(m, "f").querySelector(".bn-file-loading-preview");
+    expect(waiting()?.textContent, type).toBe("Envoi en cours…");
+    await act(async () => {
+      finish(PATH);
+      await sent;
+    });
+    expect(waiting(), type).toBeNull();
+    expect(m.errors).toEqual([]);
+  }
+});
+
 test("a_copied_file_block_carries_only_a_permitted_address", async () => {
   const toHtml = EDITOR_OPTIONS.schema.blockSpecs.file.implementation.toExternalHTML!;
   const html = (url: string) => {
