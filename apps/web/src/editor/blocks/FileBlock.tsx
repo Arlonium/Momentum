@@ -65,7 +65,7 @@ function offer(row: HTMLElement, url: string, name: string): HTMLAnchorElement |
   link.setAttribute("contenteditable", "false");
   link.draggable = false;
   // Dans l'attribut, le nom est isolé (U+2068, U+2069), sans ses propres marques de direction.
-  const named = `⁨${plainName(name)}⁩`;
+  const named = `\u2068${plainName(name)}\u2069`;
   if (isFilePath(url)) {
     link.download = name;
     link.textContent = "Télécharger";

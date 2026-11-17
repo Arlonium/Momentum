@@ -184,7 +184,7 @@ function settled<T>(promise: Promise<T>): Promise<{ value?: T; error?: unknown }
 
 test("an_upload_gives_the_address_and_the_name_the_server_says", async () => {
   const b = bench({ types: { b1: "image" } });
-  const done = b.upload(png("  photo‮.png"), "b1");
+  const done = b.upload(png("  photo\u202E.png"), "b1");
   await until(() => b.sent.length === 1, "l'envoi");
   expect(b.sent[0].pageId).toBe(PAGE);
   // Le nom du bloc est celui que le serveur a nettoyé, pas celui du fichier.
@@ -221,11 +221,11 @@ test("a_file_larger_than_the_limit_is_refused_before_any_request", async () => {
   const b = bench({ max: 2 * MIB, types: { b1: "image" } });
   // Rien n'est lu avant le premier envoi.
   expect(b.state.limitsRead).toBe(0);
-  const big = await settled(b.upload(png("gros ⁨fichier.png", 2 * MIB + 1), "b1"));
+  const big = await settled(b.upload(png("gros \u2068fichier.png", 2 * MIB + 1), "b1"));
   expect(big.error).toBeDefined();
   expect(b.sent).toEqual([]);
   expect(b.refused).toEqual([
-    "⁨gros fichier.png⁩ est trop gros : 2 Mio au plus par fichier sur cette instance. Rien n'a été envoyé.",
+    "\u2068gros fichier.png\u2069 est trop gros : 2 Mio au plus par fichier sur cette instance. Rien n'a été envoyé.",
   ]);
   expect(filesOf(PAGE).uploads).toEqual([]);
   // À la limite juste, il part ; et les limites ne sont lues qu'une fois.
@@ -259,7 +259,7 @@ test("limits_that_cannot_be_read_refuse_the_upload_and_are_read_again_at_the_nex
   });
   expect((await settled(upload(png(), "b1"))).error).toBeDefined();
   expect(sent).toEqual([]);
-  expect(refused).toEqual(["⁨photo.png⁩ n'a pas été envoyé : Le serveur Mementum ne répond pas."]);
+  expect(refused).toEqual(["\u2068photo.png\u2069 n'a pas été envoyé : Le serveur Mementum ne répond pas."]);
   fail = false;
   expect(await upload(png(), "b1")).toEqual({ props: { url: PATH, name: "photo.png" } });
 });
@@ -277,7 +277,7 @@ test("an_upload_refused_by_the_server_is_said_as_it_says_it", async () => {
     await until(() => b.sent.length === 1, "l'envoi");
     b.sent[0].fail(new ApiError(status, code, message));
     expect((await done).error, String(status)).toBeInstanceOf(ApiError);
-    expect(b.refused, String(status)).toEqual([`⁨photo.png⁩ n'a pas été envoyé : ${message}`]);
+    expect(b.refused, String(status)).toEqual([`\u2068photo.png\u2069 n'a pas été envoyé : ${message}`]);
     // La page est relue : un droit, ou la page, ont changé.
     expect(b.state.rereads, String(status)).toBe(1);
     expect(filesOf(PAGE).uploads).toEqual([]);
@@ -300,12 +300,12 @@ test("a_413_makes_the_next_upload_read_the_limits_again", async () => {
 
 test("a_cut_upload_reads_the_page_again_and_says_what_it_has_become", async () => {
   const cases: [what: PageNode | null | undefined, message: string][] = [
-    [undefined, "⁨photo.png⁩ n'a pas été envoyé : le serveur ne répond pas. Vérifie ta connexion, puis réessaie."],
-    [null, "⁨photo.png⁩ n'a pas été envoyé : tu n'as plus accès à cette page."],
-    [page(PAGE, { level: "comment" }), "⁨photo.png⁩ n'a pas été envoyé : tu ne peux plus modifier cette page."],
-    [page(PAGE, { level: "read" }), "⁨photo.png⁩ n'a pas été envoyé : tu ne peux plus modifier cette page."],
-    [page(PAGE, { trashedAt: 1 }), "⁨photo.png⁩ n'a pas été envoyé : la page est à la corbeille."],
-    [page(PAGE), "L'envoi de ⁨photo.png⁩ a été interrompu. Réessaie."],
+    [undefined, "\u2068photo.png\u2069 n'a pas été envoyé : le serveur ne répond pas. Vérifie ta connexion, puis réessaie."],
+    [null, "\u2068photo.png\u2069 n'a pas été envoyé : tu n'as plus accès à cette page."],
+    [page(PAGE, { level: "comment" }), "\u2068photo.png\u2069 n'a pas été envoyé : tu ne peux plus modifier cette page."],
+    [page(PAGE, { level: "read" }), "\u2068photo.png\u2069 n'a pas été envoyé : tu ne peux plus modifier cette page."],
+    [page(PAGE, { trashedAt: 1 }), "\u2068photo.png\u2069 n'a pas été envoyé : la page est à la corbeille."],
+    [page(PAGE), "L'envoi de \u2068photo.png\u2069 a été interrompu. Réessaie."],
   ];
   // Une coupure du réseau, ou un refus de session : le serveur a pu répondre sans lire le corps,
   // et le navigateur n'en voit qu'une coupure (R505).
@@ -368,7 +368,7 @@ test("an_upload_stopped_because_the_session_of_the_page_is_made_again_is_said", 
   // L'éditeur est remplacé (droits baissés, corbeille), la page reste ouverte.
   b.controller.abort();
   expect((await done).error).toBeDefined();
-  expect(said).toEqual(["L'envoi de ⁨photo.png⁩ a été interrompu. Réessaie."]);
+  expect(said).toEqual(["L'envoi de \u2068photo.png\u2069 a été interrompu. Réessaie."]);
   expect(filesOf(PAGE).uploads).toEqual([]);
 });
 
@@ -400,7 +400,7 @@ test("a_block_removed_during_the_upload_is_said_and_nothing_is_set", async () =>
   b.sent[0].answer({});
   expect((await done).error).toBeDefined();
   expect(b.refused).toEqual([
-    "⁨photo.png⁩ a été envoyé, mais son bloc a été supprimé entre-temps : il n'est pas dans la page.",
+    "\u2068photo.png\u2069 a été envoyé, mais son bloc a été supprimé entre-temps : il n'est pas dans la page.",
   ]);
 });
 
@@ -419,18 +419,18 @@ test("an_answer_that_is_not_a_file_of_this_page_sets_nothing", async () => {
     await until(() => b.sent.length === 1, "l'envoi");
     b.sent[0].answer(answer);
     expect((await done).error, JSON.stringify(answer)).toBeDefined();
-    expect(b.refused).toEqual(["⁨photo.png⁩ n'a pas été envoyé : le serveur a répondu autre chose qu'un fichier de cette page."]);
+    expect(b.refused).toEqual(["\u2068photo.png\u2069 n'a pas été envoyé : le serveur a répondu autre chose qu'un fichier de cette page."]);
   }
 });
 
 test("a_long_or_misleading_file_name_is_cut_and_isolated_in_a_message", async () => {
   const b = bench({ max: 1, types: { b1: "image" } });
-  await settled(b.upload(png(`${"a".repeat(300)}‮gnp.exe⁩⁩`, 2), "b1"));
+  await settled(b.upload(png(`${"a".repeat(300)}\u202Egnp.exe\u2069\u2069`, 2), "b1"));
   const [message] = b.refused;
   // Isolé : ni marque de direction du nom, ni isolement fermé par lui.
-  expect(message.startsWith(`⁨${"a".repeat(80)}…⁩ est trop gros`)).toBe(true);
-  expect([...message].filter((c) => c === "⁩")).toHaveLength(1);
-  expect(message).not.toContain("‮");
+  expect(message.startsWith(`\u2068${"a".repeat(80)}…\u2069 est trop gros`)).toBe(true);
+  expect([...message].filter((c) => c === "\u2069")).toHaveLength(1);
+  expect(message).not.toContain("\u202E");
 });
 
 test("the_messages_and_uploads_of_a_page_are_its_own_and_leave_with_it", () => {

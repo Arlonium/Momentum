@@ -55,7 +55,7 @@ export function FileNotices({ pageId, focusBack }: Props) {
               <button
                 type="button"
                 className="mm-button mm-button-small"
-                aria-label={`Annuler l'envoi de ⁨${upload.name}⁩`}
+                aria-label={`Annuler l'envoi de \u2068${upload.name}\u2069`}
                 onClick={upload.cancel}
               >
                 Annuler

@@ -167,7 +167,7 @@ export function forgetFileLimits(): void {
 /** Un nom de fichier dans un message : au plus tant de caractères. */
 const MAX_NAME_CHARS = 80;
 /** Caractères de contrôle et de direction : jamais dans un nom montré (la règle du serveur, R247). */
-const UNSHOWN = /[\u0000-\u001F\u007F-\u009F؜‎‏‪-‮⁦-⁩]/g;
+const UNSHOWN = /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 
 /** Le nom d'un fichier tel qu'un envoi en cours le montre : sans caractère de contrôle ni de direction, coupé. */
 export function plainName(name: string): string {
@@ -177,7 +177,7 @@ export function plainName(name: string): string {
 }
 
 /** Ce nom dans une phrase : isolé (U+2068, U+2069), pour que son sens d'écriture ne déplace pas le reste. */
-const quoted = (name: string) => `⁨${plainName(name)}⁩`;
+const quoted = (name: string) => `\u2068${plainName(name)}\u2069`;
 
 const MIB = 1024 * 1024;
 

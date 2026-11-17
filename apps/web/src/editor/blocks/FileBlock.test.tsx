@@ -34,7 +34,7 @@ test("file_block_offers_download_to_a_reader", async () => {
     expect(link!.hasAttribute("target")).toBe(false);
     expect(link!.textContent).toBe("Télécharger");
     // Nommé avec le nom du fichier, isolé dans l'attribut.
-    expect(link!.getAttribute("aria-label")).toBe("Télécharger ⁨rapport final.pdf⁩");
+    expect(link!.getAttribute("aria-label")).toBe("Télécharger \u2068rapport final.pdf\u2069");
     // Un îlot : ni ProseMirror ni l'interception des liens de l'application ne le prennent.
     expect(link!.getAttribute("contenteditable")).toBe("false");
     expect(m.errors).toEqual([]);
@@ -53,6 +53,12 @@ test("a_file_at_a_web_address_opens_in_another_tab_without_its_opener", async ()
   // `download` ne vaut pas d'une origine à l'autre : le lien dit ce qu'il fait.
   expect(link.hasAttribute("download")).toBe(false);
   expect(link.textContent).toBe("Ouvrir");
+  // Le lien porte l'adresse telle que `shownUrl` la rend, pas celle du document.
+  const loose = await mountEditor({
+    blocks: fileBlock({ url: "  https://EXEMPLE.fr/a b.pdf ", name: "a b.pdf" }),
+    editable: false,
+  });
+  expect(download(loose)!.getAttribute("href")).toBe("https://exemple.fr/a%20b.pdf");
 });
 
 test("file_block_offers_nothing_when_its_address_is_not_permitted", async () => {
@@ -78,7 +84,7 @@ test("file_block_offers_nothing_when_its_address_is_not_permitted", async () => 
 });
 
 test("file_name_is_isolated_text", async () => {
-  const name = '<img src=x onerror="window.__ran = 1">‮gnp.exe';
+  const name = '<img src=x onerror="window.__ran = 1">\u202Egnp.exe';
   const m = await mountEditor({ blocks: fileBlock({ url: PATH, name }), editable: false });
   const block = blockOf(m, "f");
   const shown = block.querySelector<HTMLElement>(".bn-file-name")!;
@@ -91,9 +97,9 @@ test("file_name_is_isolated_text", async () => {
   expect(foreignStyles(block)).toEqual([]);
   // Dans l'attribut, le nom ne ferme pas son isolement et ne retourne pas le reste.
   const label = download(m)!.getAttribute("aria-label")!;
-  expect(label.startsWith("Télécharger ⁨<img")).toBe(true);
-  expect(label).not.toContain("‮");
-  expect([...label].filter((c) => c === "⁩")).toHaveLength(1);
+  expect(label.startsWith("Télécharger \u2068<img")).toBe(true);
+  expect(label).not.toContain("\u202E");
+  expect([...label].filter((c) => c === "\u2069")).toHaveLength(1);
 });
 
 test("a_file_block_survives_props_that_are_not_text", async () => {

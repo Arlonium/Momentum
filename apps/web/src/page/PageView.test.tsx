@@ -521,7 +521,7 @@ test("page_view_shows_the_uploads_in_course_and_cancels_them_when_the_page_is_le
   expect(rows()).toEqual(["Envoi de un.png…", "Envoi de deux.png…"]);
   // « Annuler » le premier : lui seul s'arrête, rien n'est dit, et le focus ne tombe pas sur `body`.
   const cancel = [...host.querySelectorAll<HTMLButtonElement>(".mm-file-uploads button")].find(
-    (button) => button.getAttribute("aria-label") === "Annuler l'envoi de ⁨un.png⁩",
+    (button) => button.getAttribute("aria-label") === "Annuler l'envoi de \u2068un.png\u2069",
   )!;
   cancel.focus();
   await click(cancel);
