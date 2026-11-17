@@ -245,6 +245,9 @@ export function PageView({
     enterFiles(id);
     return () => leaveFiles(id);
   }, [id]);
+  /** L'onglet est celui d'un autre schéma (R35), au dernier rendu. */
+  const staleNow = useRef(readOnly);
+  staleNow.current = readOnly;
   // De quoi envoyer, pour l'éditeur : ce que la page dit d'un envoi qui n'aboutit pas, et de quoi la
   // relire (un refus, ou une coupure, disent qu'un droit ou la page ont changé).
   const files = useMemo(
@@ -253,6 +256,8 @@ export function PageView({
       // Un fichier d'une autre page rattaché à celle-ci par un collage : un état, pas une alerte (C9).
       onAdopted: (message: string) => sayNote(id, message),
       reread,
+      // Lu à l'instant où un envoi coupé choisit son message (R761).
+      stale: () => staleNow.current,
     }),
     [id, reread],
   );

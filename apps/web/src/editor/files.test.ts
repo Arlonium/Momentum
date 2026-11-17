@@ -127,6 +127,7 @@ function bench({
   max = MIB,
   types = {} as Record<string, string>,
   reread = async (): Promise<PageNode | null | undefined> => page(PAGE),
+  stale = false,
 } = {}) {
   const sent: Sent[] = [];
   const refused: string[] = [];
@@ -148,6 +149,7 @@ function bench({
       return reread();
     },
     discard: (id, name) => discarded.push(`${id}:${name}`),
+    stale: () => stale,
     signal: controller.signal,
     upload: (pageId, file, signal) =>
       new Promise<FileInfo>((answer, fail) => {
@@ -691,4 +693,29 @@ test("a_note_of_a_page_is_shown_a_while_then_leaves_and_leaves_with_the_page", a
   sayNote(PAGE, "après");
   expect(notesOf(PAGE)).toEqual([]);
   stop();
+});
+
+test("an_upload_cut_in_a_tab_of_another_schema_says_to_reload_not_to_try_again", async () => {
+  // M1 (relecture finale de la partie B, R761) : le serveur a été mis à jour pendant l'envoi ; l'onglet
+  // est en lecture seule pour de bon (R35), il n'a plus de quoi réessayer.
+  const RELOAD = "⁨photo.png⁩ n'a pas été envoyé : Mementum a été mis à jour. Recharge la page pour l'envoyer.";
+  const cases: [what: PageNode | null | undefined, message: string][] = [
+    [page(PAGE), RELOAD],
+    // Le serveur ne répond pas (il redémarre) : réessayer d'ici ne servira pas davantage.
+    [undefined, RELOAD],
+    // Ce que la page est devenue passe d'abord : recharger n'y changerait rien.
+    [null, "⁨photo.png⁩ n'a pas été envoyé : tu n'as plus accès à cette page."],
+    [page(PAGE, { level: "read" }), "⁨photo.png⁩ n'a pas été envoyé : tu ne peux plus modifier cette page."],
+    [page(PAGE, { trashedAt: 1 }), "⁨photo.png⁩ n'a pas été envoyé : la page est à la corbeille."],
+  ];
+  for (const [what, message] of cases) {
+    const b = bench({ types: { b1: "image" }, reread: async () => what, stale: true });
+    const done = settled(b.upload(png(), "b1"));
+    await until(() => b.sent.length === 1, "l'envoi");
+    const cut = new ApiError(0, null, "coupé");
+    b.sent[0].fail(cut);
+    expect((await done).error).toBe(cut);
+    await until(() => b.refused.length === 1, `le message (${message})`);
+    expect(b.refused).toEqual([message]);
+  }
 });

@@ -254,6 +254,11 @@ export type UploaderOptions = {
    * appelé pour un envoi qui aboutit, ni quand l'éditeur est parti (il n'écrit plus pour personne).
    */
   discard?: (blockId: string, fileName: string) => void;
+  /**
+   * L'onglet est-il, à l'instant, celui d'un autre schéma que le serveur (R35) ? Il est alors en
+   * lecture seule pour de bon : un envoi coupé ne s'y refait pas, il faut recharger (R761).
+   */
+  stale?: () => boolean;
   /** Annulé quand l'éditeur de la page part (page quittée, session recréée) : tous ses envois s'arrêtent. */
   signal: AbortSignal;
   /** L'envoi lui-même (`uploadFile` d'`api.ts`) ; les tests en donnent un autre. */
@@ -313,12 +318,14 @@ export function uploader(options: UploaderOptions): (file: File, blockId?: strin
     } catch {
       node = undefined;
     }
-    if (node === undefined) {
+    if (node === null) onRefused(notSent(file, "tu n'as plus accès à cette page."));
+    else if (node !== undefined && node.trashedAt !== null) onRefused(notSent(file, "la page est à la corbeille."));
+    else if (node !== undefined && !canEdit(node.level)) onRefused(notSent(file, "tu ne peux plus modifier cette page."));
+    // Le serveur a été mis à jour pendant l'envoi : cet onglet n'écrit plus, réessayer n'y ferait rien.
+    else if (options.stale?.()) onRefused(notSent(file, "Mementum a été mis à jour. Recharge la page pour l'envoyer."));
+    else if (node === undefined) {
       onRefused(notSent(file, "le serveur ne répond pas. Vérifie ta connexion, puis réessaie."));
-    } else if (node === null) onRefused(notSent(file, "tu n'as plus accès à cette page."));
-    else if (node.trashedAt !== null) onRefused(notSent(file, "la page est à la corbeille."));
-    else if (!canEdit(node.level)) onRefused(notSent(file, "tu ne peux plus modifier cette page."));
-    else onRefused(interrupted(file));
+    } else onRefused(interrupted(file));
   };
 
   return async (file, blockId) => {

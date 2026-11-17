@@ -14,6 +14,8 @@ import { copier } from "./provenance";
 export type PageUploads = Pick<UploaderOptions, "onRefused" | "reread"> & {
   /** Un fichier d'une autre page a été rattaché à celle-ci : ce que la page en dit (Task C9). */
   onAdopted?: (message: string) => void;
+  /** L'onglet est-il celui d'un autre schéma que le serveur (R35), à l'instant ? (R761) */
+  stale?: () => boolean;
 };
 
 /**
@@ -36,6 +38,7 @@ export function sessionUploader(
     blockType: (id) => editor()?.getBlock(id)?.type,
     onRefused: (message) => files()?.onRefused(message),
     reread: () => files()?.reread() ?? Promise.resolve(undefined),
+    stale: () => files()?.stale?.() ?? false,
     discard: (id, fileName) => {
       const current = editor();
       if (current !== null) forgetUploadName(current, id, fileName);
