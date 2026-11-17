@@ -501,3 +501,48 @@ describe("account_parameter", () => {
     expect(url.searchParams.get("schema")).not.toBeNull();
   });
 });
+
+describe("blocked_frame", () => {
+  // R788 : le serveur ferme la connexion d'un compte freiné sur la page (trop de mises à jour
+  // refusées après leur application, R725), après lui avoir dit pourquoi. L'onglet renverrait la
+  // même chose à chaque retour : il cesse de revenir, et la session le dit à la page.
+  test("a_blocked_frame_stops_the_session_from_coming_back", async () => {
+    const session = open(false);
+    const socket = await connected();
+    let told = 0;
+    session.subscribe(() => {
+      told += 1;
+    });
+    expect(session.blocked).toBe(false);
+    const before = told;
+    socket.receive(pageFrame({ type: "blocked", seconds: 120 }));
+    expect(session.blocked).toBe(true);
+    expect(told).toBeGreaterThan(before);
+    // Le serveur ferme : l'onglet ne rouvre rien (y-websocket reviendrait après 100 ms).
+    expect(session.provider.shouldConnect).toBe(false);
+    socket.readyState = 3;
+    socket.onclose?.({ code: 1005 } as CloseEvent);
+    await new Promise((done) => setTimeout(done, 400));
+    expect(FakeSocket.instances).toHaveLength(1);
+    // Et le reste : une trame de plus n'y change rien.
+    expect(session.blocked).toBe(true);
+  });
+
+  test("a_blocked_frame_never_reaches_y_websocket", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    open(false);
+    const socket = await connected();
+    socket.receive(pageFrame({ type: "blocked", seconds: 1 }));
+    await flush();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  test("a_read_only_session_is_never_blocked", async () => {
+    // Une session en lecture seule n'envoie rien que le serveur puisse refuser.
+    const session = open(true);
+    const socket = await connected();
+    socket.receive(pageFrame({ type: "blocked", seconds: 120 }));
+    expect(session.blocked).toBe(false);
+    expect(session.provider.shouldConnect).toBe(true);
+  });
+});

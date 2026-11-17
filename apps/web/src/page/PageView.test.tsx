@@ -41,14 +41,21 @@ vi.mock("../editor/collab", async () => {
     synced = true;
     status = "connected";
     roster = [];
+    blocked = false;
     destroyed = false;
+    readonly listeners = new Set<() => void>();
     constructor(_pageId: string, mode: { readOnly: boolean; check: () => Promise<boolean> }) {
       this.readOnly = mode.readOnly;
       this.check = mode.check;
       probe.sessions.push(this);
     }
-    subscribe() {
-      return () => {};
+    subscribe(listener: () => void) {
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    /** Ce que le test change à la session est dit à qui l'écoute. */
+    emit() {
+      for (const listener of [...this.listeners]) listener();
     }
     onPageEvent() {
       return () => {};
@@ -682,4 +689,25 @@ test("page_view_says_a_file_attached_from_another_page_as_a_status_that_leaves_b
   await act(async () => sayNote("x", "une autre", 30));
   expect(notes()).toHaveLength(2);
   await until(host, () => notes().length === 1, "la nouvelle partie de la page");
+});
+
+test("a_blocked_session_says_that_nothing_is_saved_any_more", async () => {
+  // R788 : le serveur a dit à la session que le compte est freiné sur cette page. Rien de ce
+  // qui se tape ici ne s'enregistre plus : la page le dit en alerte, et ne dit pas que les
+  // modifications partiront au retour du réseau.
+  const node = page("x", { level: "full" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  expect(host.querySelector(".mm-banner-blocked")).toBeNull();
+  await act(async () => {
+    Object.assign(session(), { blocked: true, status: "disconnected" });
+    (session() as unknown as { emit: () => void }).emit();
+  });
+  const banner = host.querySelector(".mm-banner-blocked");
+  expect(banner?.getAttribute("role")).toBe("alert");
+  expect(banner?.textContent).toContain("Tes dernières modifications sur cette page ne s'enregistrent plus.");
+  expect(banner?.textContent).toContain("Copie ce que tu viens d'écrire, puis recharge la page.");
+  expect(banner?.querySelector("button")?.textContent).toBe("Recharger");
+  await new Promise((done) => setTimeout(done, 1_700));
+  expect(host.querySelector(".mm-topbar-status")?.textContent).toBe("");
 });

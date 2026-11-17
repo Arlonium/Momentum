@@ -24,6 +24,32 @@ export function ReadOnlyBanner() {
   );
 }
 
+/**
+ * `BlockedBanner` : le serveur a refusé plusieurs fois de suite ce que cet onglet lui envoie,
+ * et n'enregistre plus rien du compte sur cette page pendant quelques minutes (R725, R788).
+ * L'onglet garde ce qui a été refusé et le renverrait à chaque retour : seul un rechargement
+ * le remet d'accord avec le serveur, et ce qui a été tapé depuis le refus n'y sera plus. En
+ * alerte : c'est une perte, si la personne ferme l'onglet sans copier.
+ */
+export const BLOCKED_MESSAGE =
+  "Tes dernières modifications sur cette page ne s'enregistrent plus. Copie ce que tu viens d'écrire, puis recharge la page.";
+export const BLOCKED_HINT = "Si ce message revient, attends quelques minutes avant d'écrire ici.";
+
+export function BlockedBanner() {
+  return (
+    <div className="mm-banner mm-banner-blocked" role="alert">
+      <InfoIcon />
+      <div className="mm-banner-text">
+        <p>{BLOCKED_MESSAGE}</p>
+        <p>{BLOCKED_HINT}</p>
+      </div>
+      <button type="button" className="mm-button" onClick={() => location.reload()}>
+        Recharger
+      </button>
+    </div>
+  );
+}
+
 type ReaderProps = {
   /**
    * Le niveau est remonté depuis l'ouverture de la page : rouvre la page, qui se modifiera.

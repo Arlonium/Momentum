@@ -62,6 +62,15 @@ export class CollabSession {
    * suivante en apporte une neuve.
    */
   roster: RosterUser[] = [];
+  /**
+   * Le serveur a dit, avant de fermer la connexion, que le compte est freiné sur cette page
+   * (trame `blocked`, R788) : ses mises à jour y ont été refusées après leur application
+   * plusieurs fois de suite (R725), et plus rien de ce que l'onglet envoie n'y est enregistré
+   * pendant quelques minutes. L'onglet renverrait la même chose à chaque retour : la session
+   * cesse de se reconnecter, pour de bon, et la page le dit (`BlockedBanner`). Jamais en
+   * lecture seule : une telle session n'envoie rien.
+   */
+  blocked = false;
   private readonly pageListeners = new Set<(event: PageEvent) => void>();
   private readonly listeners = new Set<() => void>();
   private readonly serverStateListeners = new Set<() => void>();
@@ -240,6 +249,11 @@ export class CollabSession {
       this.emit();
     } else if (type === "comments" || type === "versions") {
       for (const listener of [...this.pageListeners]) listener(type);
+    } else if (type === "blocked" && !this.readOnly && !this.blocked) {
+      this.blocked = true;
+      // Plus de retour : y-websocket rouvrirait une connexion, que le serveur refermerait.
+      this.provider.disconnect();
+      this.emit();
     }
   }
 }

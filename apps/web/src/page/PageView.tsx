@@ -33,7 +33,7 @@ import { CollabSession } from "../editor/collab";
 import { enterFiles, leaveFiles, sayNote, sayRefusal } from "../editor/files";
 import { requestedFixture } from "../editor/fixtures";
 import { LazyEditor } from "../editor/LazyEditor";
-import { ReaderBanner, ReadOnlyBanner } from "../editor/ReadOnlyBanner";
+import { BlockedBanner, ReaderBanner, ReadOnlyBanner } from "../editor/ReadOnlyBanner";
 import type { SchemaCheck } from "../editor/schemaGate";
 import { TrashIcon } from "../icons";
 import { messageOf } from "../session/forms";
@@ -306,6 +306,7 @@ export function PageView({
       <div className="mm-page-body">
         <article ref={article} className="mm-page">
           {readOnly && <ReadOnlyBanner />}
+          {session && <Blocked session={session} />}
           {reader && !readOnly && !trashed && (
             <ReaderBanner reopen={editable ? () => setReader(false) : null} />
           )}
@@ -403,11 +404,21 @@ function TrashBanner({ restore }: { restore: (() => Promise<void>) | null }) {
  */
 const CUT_NOTICE_MS = 1_500;
 
+/** Le bandeau d'un compte freiné sur la page (R788), dès que la session l'apprend. */
+function Blocked({ session }: { session: CollabSession }) {
+  const subscribe = useCallback((onChange: () => void) => session.subscribe(onChange), [session]);
+  const blocked = useSyncExternalStore(subscribe, () => session.blocked === true);
+  return blocked ? <BlockedBanner /> : null;
+}
+
 /** État de la connexion, quand il mérite d'être dit. */
 function SyncState({ session }: { session: CollabSession }) {
   const subscribe = useCallback((onChange: () => void) => session.subscribe(onChange), [session]);
-  const state = useSyncExternalStore(subscribe, () => `${session.status}:${session.synced}`);
-  const [status, synced] = state.split(":");
+  const state = useSyncExternalStore(
+    subscribe,
+    () => `${session.status}:${session.synced}:${session.blocked === true}`,
+  );
+  const [status, synced, blocked] = state.split(":");
   /** La synchro a été faite, et la connexion n'est plus là (coupée, ou en train de revenir). */
   const cut = synced === "true" && status !== "connected";
   /** La coupure dure. */
@@ -422,7 +433,10 @@ function SyncState({ session }: { session: CollabSession }) {
   }, [cut, session]);
 
   let text = "";
-  if (synced !== "true") {
+  if (blocked === "true") {
+    // La session ne reviendra pas, et rien ne partira : le bandeau de la page le dit.
+    text = "";
+  } else if (synced !== "true") {
     text = status === "disconnected" ? "Hors ligne" : "Connexion…";
   } else if (cut && lasting) {
     // En lecture seule, rien ne partira au retour du réseau.

@@ -177,11 +177,15 @@ export function Editor({ session, fixture = null, onComment = null, mentions = n
 
   const subscribe = useCallback((onChange: () => void) => session.subscribe(onChange), [session]);
   const synced = useSyncExternalStore(subscribe, () => session.synced);
+  // Le compte est freiné sur cette page (R788) : plus rien de ce qui s'y tape ne s'enregistre.
+  // L'éditeur se verrouille, sans changer de document : ce qui vient d'être écrit reste à
+  // l'écran, à copier.
+  const blocked = useSyncExternalStore(subscribe, () => session.blocked === true);
   // Verrouillé jusqu'à la première synchro : la racine de la page est alors toujours celle
   // du serveur (sinon deux clients créent chacun la leur, et ProseMirror en supprime une
   // avec son texte). Une coupure réseau ensuite ne verrouille pas : les éditions faites
   // hors ligne fusionnent au retour.
-  const editable = synced && !session.readOnly;
+  const editable = synced && !session.readOnly && !blocked;
   // BlockNote 0.57 démonte puis remonte toute la vue ProseMirror quand la prop `editable`
   // de `BlockNoteView` change : la page entière était reconstruite juste après la première
   // synchro (1 s sur 10 000 blocs). La prop ne sert donc qu'au montage de la vue de chaque

@@ -1128,6 +1128,15 @@ button.tree-toggle:hover {
   margin-top: 0;
 }
 
+/* Ce qui se tape ne s'enregistre plus (compte freiné sur la page, R788) : une alerte. */
+.mm-banner-blocked {
+  background: var(--mm-danger-soft);
+}
+
+.mm-banner-blocked svg {
+  color: var(--mm-danger);
+}
+
 /* Page à la corbeille : le bandeau le dit sans crier, et la restaure. */
 .mm-banner-trash {
   align-items: center;
