@@ -570,8 +570,8 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 ///
 /// Une base en WAL, lue ainsi, garde ses octets : SQLite crée son `-wal` et son `-shm`, et les
 /// retire à la fermeture. Seul un `-wal` laissé par un arrêt brutal y est reversé, comme à toute
-/// ouverture : le contenu ne change pas. Un fichier de base en lecture seule garde un `-wal` et un
-/// `-shm` vides, que SQLite ne peut pas retirer sans écrire (limite écrite au registre, R845).
+/// ouverture : le contenu ne change pas. Un fichier de base en lecture seule garde un `-wal` vide et un
+/// `-shm`, que SQLite ne peut pas retirer sans écrire (limite écrite au registre, R845).
 pub(crate) async fn refuse_before_writing(
     db: &Path,
     migrator: &Migrator,
