@@ -1577,6 +1577,16 @@ fn writes_the_metadata(client: u8) -> Vec<u8> {
     update
 }
 
+/// Les trames de page `blocked` (Ruling R788) qu'une connexion a reçues.
+fn blocked_frames(client: &Client) -> Vec<serde_json::Value> {
+    client
+        .page_events()
+        .iter()
+        .map(|frame| serde_json::from_str::<serde_json::Value>(frame).unwrap())
+        .filter(|frame| frame["type"] == "blocked")
+        .collect()
+}
+
 /// Ruling R725 : le frein des refus d'après l'application. Chacun recharge la page (R538), et
 /// un compte qui en envoie en boucle tenait l'acteur occupé à recharger : la frappe d'un autre
 /// sortait de son budget. Après `FREE_REFUSALS` refus de ce genre en une minute, le suivant vaut
@@ -1610,6 +1620,14 @@ async fn an_account_refused_after_application_again_and_again_is_slowed_down() {
         if turn == free {
             blocked_at = Some(std::time::Instant::now());
         }
+        // Ruling R788 : une connexion fermée parce que son compte est freiné reçoit d'abord la
+        // trame de page qui le dit ; un refus qui recharge la page, non (l'onglet revient, et
+        // sa synchro complète apporte ce qui manquait).
+        assert_eq!(
+            blocked_frames(&hostile).len(),
+            usize::from(turn > free),
+            "tour {turn}"
+        );
     }
     assert_eq!(
         f.hub.reloads() - before,
@@ -1620,6 +1638,14 @@ async fn an_account_refused_after_application_again_and_again_is_slowed_down() {
     let tab = Client::connect_synced(&url).await;
     tab.type_text(&id, " du compte freiné");
     assert!(tab.wait_until(WAIT, |c| c.is_closed()).await, "appliquée");
+    let frames = blocked_frames(&tab);
+    assert_eq!(frames.len(), 1, "la trame qui dit le frein : {frames:?}");
+    let seconds = frames[0]["seconds"].as_u64().expect("le temps qui reste");
+    assert!(
+        (1..=2).contains(&seconds),
+        "{seconds} s pour un frein de 1,5 s"
+    );
+    assert!(blocked_frames(&other).is_empty(), "dit à un autre compte");
     other.type_text(&id, " suite");
     processed(&other).await;
     assert!(!other.is_closed());

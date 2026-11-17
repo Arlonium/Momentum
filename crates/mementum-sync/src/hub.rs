@@ -888,6 +888,8 @@ where
         outbox.push(Outgoing::Own(message));
     }
 
+    // Le dernier message à envoyer avant de fermer, s'il y en a un ([`Outcome::CloseAfter`]).
+    let farewell: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
     let writer = async {
         let mut silence = std::pin::pin!(tokio::time::sleep_until(keepalive_at(cfg)));
         loop {
@@ -973,7 +975,7 @@ where
                     if messages.is_empty() {
                         continue;
                     }
-                    if let Some(end) = exchange(&commands, conn, messages, &outbox).await {
+                    if let Some(end) = exchange(&commands, conn, messages, &outbox, &farewell).await {
                         return end;
                     }
                 }
@@ -985,6 +987,15 @@ where
         end = reader => end,
     };
     drop(membership);
+    // Ruling R788 : le dernier message que l'acteur a demandé d'envoyer avant de fermer.
+    let last = farewell
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(last) = last {
+        let _ =
+            tokio::time::timeout(CLOSE_GRACE, sink.send(Outgoing::Own(last).into_bytes())).await;
+    }
     let _ = tokio::time::timeout(CLOSE_GRACE, sink.close()).await;
     end
 }
@@ -1007,6 +1018,7 @@ async fn exchange(
     conn: actor::ConnId,
     messages: Vec<protocol::ClientMessage>,
     outbox: &Outbox,
+    farewell: &std::sync::Mutex<Option<Vec<u8>>>,
 ) -> Option<End> {
     let (reply, answer) = oneshot::channel();
     let command = Command::Messages {
@@ -1026,6 +1038,12 @@ async fn exchange(
             }
         }
         Ok(Outcome::Close) => Some(End::Refused),
+        Ok(Outcome::CloseAfter(last)) => {
+            *farewell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(last);
+            Some(End::Refused)
+        }
         Err(_) => Some(End::ActorGone),
     }
 }

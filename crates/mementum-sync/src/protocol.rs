@@ -422,6 +422,14 @@ pub(crate) fn page_event(event: PageEvent) -> Vec<u8> {
     page_frame(&json!({ "type": kind }))
 }
 
+/// La trame qui dit à une connexion, juste avant de la fermer, que son compte est freiné sur
+/// cette page (Rulings R725, R788) : rien de ce que l'onglet envoie n'y est enregistré pendant
+/// encore `left`, arrondi à la seconde du dessus. Elle ne part qu'à cette connexion.
+pub(crate) fn blocked(left: std::time::Duration) -> Vec<u8> {
+    let seconds = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    page_frame(&json!({ "type": "blocked", "seconds": seconds.max(1) }))
+}
+
 /// Une trame de page ([`MESSAGE_PAGE_EVENT`]) qui porte `json`.
 fn page_frame(json: &serde_json::Value) -> Vec<u8> {
     let json = json.to_string();

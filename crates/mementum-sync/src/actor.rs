@@ -270,6 +270,9 @@ pub(crate) enum Outcome {
     Reply(Vec<Vec<u8>>),
     /// Fermer la connexion.
     Close,
+    /// Fermer la connexion, après lui avoir envoyé ce dernier message (Ruling R788 : la trame
+    /// qui dit que son compte est freiné).
+    CloseAfter(Vec<u8>),
 }
 
 /// Réponses à un même message, bornées en octets comme la file de la
@@ -547,6 +550,9 @@ struct Conn {
     /// Elle a passé les contrôles de son inscription ([`Command::Admit`]) : elle compte dans la
     /// liste des présents, jusqu'à son départ.
     listed: bool,
+    /// Son compte est freiné sur cette page, pour ce temps encore (Rulings R725, R788) : posé
+    /// quand une de ses mises à jour est écartée pour cela, lu à sa fermeture.
+    blocked: Option<std::time::Duration>,
     /// La connexion doit se fermer (panne du store, Ruling R21, fermeture à
     /// la demande, ou l'un de ses messages refusé) : ses messages ne sont plus
     /// traités. Posé par [`Conn::close`].
@@ -570,6 +576,7 @@ impl Conn {
             actor,
             name: name.map(|name| presence::display_name(name).into()),
             listed: false,
+            blocked: None,
             closing: false,
             clients: HashSet::new(),
             held: VecDeque::new(),
@@ -778,8 +785,12 @@ impl Actor {
                 messages,
                 reply,
             } => {
-                let outcome = self.messages(conn, messages).await?;
+                let mut outcome = self.messages(conn, messages).await?;
                 if let (Outcome::Close, Some(c)) = (&outcome, self.conns.get_mut(&conn)) {
+                    // Ruling R788 : fermée parce que son compte est freiné, elle l'apprend.
+                    if let Some(left) = c.blocked.take() {
+                        outcome = Outcome::CloseAfter(protocol::blocked(left));
+                    }
                     // Le hub la ferme : rien de ce qu'elle retenait ne passera après elle, et
                     // elle n'est plus nommée.
                     c.close();
@@ -1172,6 +1183,11 @@ impl Actor {
                     .blocked(account, self.id.node_id, tokio::time::Instant::now())
         {
             tracing::warn!(node_id = %self.id.node_id, conn, %account, ?left, "compte freiné après des mises à jour refusées : connexion fermée sans rien appliquer");
+            // Ruling R788 : la connexion l'apprend avant d'être fermée, pour que l'onglet cesse
+            // de revenir en boucle et dise que ce qui s'y tape ne s'enregistre plus.
+            if let Some(c) = self.conns.get_mut(&conn) {
+                c.blocked = Some(left);
+            }
             return Ok(false);
         }
         self.version_if_due().await;
