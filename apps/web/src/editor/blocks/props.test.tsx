@@ -68,6 +68,11 @@ const CASES: { type: string; props: string[]; inline?: boolean; text?: boolean }
   { type: "databaseRef", props: ["databaseId", "view"] },
   { type: "syncedBlock", props: ["ref"] },
   { type: "unknown", props: ["originalType", "data"] },
+  // Les blocs de fichier de BlockNote, dont la vue passe par `blocks/FileBlock.tsx` (Task C8).
+  { type: "file", props: ["url", "name", "caption"] },
+  { type: "image", props: ["url", "name", "caption", "showPreview", "previewWidth"] },
+  { type: "video", props: ["url", "name", "caption", "showPreview", "previewWidth"] },
+  { type: "audio", props: ["url", "name", "caption", "showPreview"] },
   { type: "mention", props: ["kind", "id", "label"], inline: true },
   { type: "math", props: ["latex"], inline: true },
 ];

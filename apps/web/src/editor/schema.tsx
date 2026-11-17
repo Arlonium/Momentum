@@ -15,6 +15,7 @@ import { Mention } from "../mentions/Mention";
 import { Bookmark } from "./blocks/Bookmark";
 import { Callout } from "./blocks/Callout";
 import { Equation } from "./blocks/Equation";
+import { Audio, FileBlock, Image, Video } from "./blocks/FileBlock";
 import { MathInline } from "./blocks/InlineMath";
 import { PageLink } from "./blocks/PageLink";
 import { Toc } from "./blocks/Toc";
@@ -151,6 +152,12 @@ export const schema = withMultiColumn(
       // Ses options choisissent `javascript` par défaut : on garde celle du registre et de
       // BlockNote (`text`), sinon un bloc sans langue changerait de langue au rendu MMD.
       codeBlock: codeBlockSpec(),
+      // Les blocs de fichier de BlockNote, props lues comme du texte ; le bloc fichier offre de quoi
+      // télécharger, même en lecture seule (`blocks/FileBlock.tsx`, Task C8).
+      image: Image(),
+      video: Video(),
+      audio: Audio(),
+      file: FileBlock(),
       callout: Callout(),
       equation: Equation(),
       bookmark: Bookmark(),

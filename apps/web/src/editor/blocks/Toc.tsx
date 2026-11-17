@@ -257,9 +257,12 @@ export const Toc = createReactBlockSpec(
  * Dans le texte de l'éditeur, Tab imbrique les blocs : sans cela, aucun chemin au clavier n'y
  * menait pour qui modifie. Rend vrai si le focus y est allé.
  */
+/** Les blocs qui portent un lien hors de leur texte : la table, le lien de page, un fichier à télécharger. */
+const LINKED_BLOCKS: ReadonlySet<string> = new Set(["toc", "pageLink", "file", "image", "video", "audio"]);
+
 export function focusBlockLinks(editor: MementumEditor): boolean {
   const block = editor.getTextCursorPosition().block;
-  if (block.type !== "toc" && block.type !== "pageLink") return false;
+  if (!LINKED_BLOCKS.has(block.type)) return false;
   const root = editor.domElement;
   // Dans son propre contenu, jamais dans celui d'un bloc enfant.
   const first = root
