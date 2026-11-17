@@ -268,6 +268,14 @@ async function mmdBlocks(api: APIRequestContext, id: string): Promise<string[]> 
   return (await getMmd(api, id)).trimEnd().split("\n\n");
 }
 
+/** Un PNG d'un pixel, que `width` étire : de quoi cliquer. */
+const PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+/** Dans le contenu donné à `opened` : l'adresse de ce pixel, envoyé dans la page. */
+const PIXEL = "/pixel-de-la-page";
+
 /** Une page de contenu `mmd` que Mona possède et où Tom écrit, ouverte chez les deux. */
 async function opened(browser: Browser, mmd: string) {
   const {
@@ -279,6 +287,16 @@ async function opened(browser: Browser, mmd: string) {
   } = await ownerAndMember();
   const page = await createPage(monaApi, { spaceId: space.id, title: `Bloc déplacé ${unique()}` });
   await setPageLevel(monaApi, page.id, tomId, "edit");
+  // `PIXEL` dans le contenu : un fichier de la page, envoyé d'abord (l'éditeur ne charge une image
+  // que d'un fichier de l'instance ou d'une adresse web, jamais d'une adresse `data:`, Task C8).
+  if (mmd.includes(PIXEL)) {
+    const sent = await monaApi.post(`/api/v1/pages/${page.id}/files?name=pixel.png`, {
+      data: PIXEL_PNG,
+      headers: { "content-type": "application/octet-stream" },
+    });
+    expect(sent.status(), await sent.text()).toBe(201);
+    mmd = mmd.replaceAll(PIXEL, ((await sent.json()) as { url: string }).url);
+  }
   await putMmd(monaApi, page.id, mmd);
   const monaPage = await openPage(browser, page.id, mona);
   const tomPage = await openPage(browser, page.id, tom);
@@ -605,9 +623,6 @@ test("typing_in_the_blocks_a_dragged_group_crosses_stays_in_place", async ({ bro
   await expectPageEverywhere(s, [a, b, x, y, z, c]);
 });
 
-/** Un PNG d'un pixel, que `width` étire : de quoi cliquer. */
-const PIXEL =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 /**
  * Ce que désigne la sélection de l'éditeur de `p` : pour une sélection de nœud, le type du nœud
