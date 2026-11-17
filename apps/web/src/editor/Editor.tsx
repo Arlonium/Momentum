@@ -70,13 +70,14 @@ import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
 import { COPY_REFUSED, duplicateFromGesture, handleBlockIds, isDuplicateShortcut, selectedBlockIds } from "./duplicate";
 import { dismissNotice } from "./editorNotice";
-import { fileLimits, shownUrl, uploader, type UploaderOptions } from "./files";
+import { shownUrl } from "./files";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
 import { linkBound } from "./linkBound";
 import { guardedAwareness } from "./presenceGuard";
 import { schema } from "./schema";
 import { slashMenuItems } from "./slashItems";
+import { sessionUploader, type PageUploads } from "./uploads";
 import { MementumFormattingToolbar } from "./Toolbar";
 
 type Props = {
@@ -98,7 +99,7 @@ type Props = {
    * pas, et de quoi la relire. `null` : rien ne s'envoie (un test). Une session en lecture seule
    * n'envoie jamais rien, qu'il soit donné ou non.
    */
-  files?: Pick<UploaderOptions, "onRefused" | "reread"> | null;
+  files?: PageUploads | null;
 };
 
 /**
@@ -107,12 +108,13 @@ type Props = {
  * `followBlock` : le curseur de l'onglet suit son bloc quand quelqu'un d'autre le déplace.
  * `linkBound` : un lien de plus de 16 Kio, que le serveur refuserait, n'est pas posé (R495).
  * `resolveFileUrl` : une image, une vidéo ou un son ne sont chargés que d'une adresse permise
- * (`shownUrl`, `files.ts`), jamais de l'adresse du document telle quelle. Rien pour envoyer : seul
+ * (`shownUrl`, `files.ts`), jamais de l'adresse du document telle quelle ; un bloc sans adresse ne
+ * charge rien (`about:blank` y écrivait une erreur de console par bloc vide). Rien pour envoyer : seul
  * l'éditeur d'une page qu'on modifie en reçoit de quoi (`Editor`), jamais un aperçu.
  */
 export const EDITOR_OPTIONS = {
   schema,
-  resolveFileUrl: async (url: string) => shownUrl(url),
+  resolveFileUrl: async (url: string) => (url === "" ? "" : shownUrl(url)),
   dictionary: { ...fr, multi_column: multiColumnLocales.fr },
   dropCursor: multiColumnDropCursor,
   extensions: [syntaxHighlighter, followBlock, linkBound],
@@ -126,27 +128,14 @@ export function Editor({ session, fixture = null, onComment = null, mentions = n
   const latestFiles = useRef(files);
   latestFiles.current = files;
   const created = useRef<MementumEditor | null>(null);
-  const uploads = useRef<{ session: CollabSession; stop: AbortController; send?: ReturnType<typeof uploader> } | null>(
+  const uploads = useRef<{ session: CollabSession; stop: AbortController; send?: ReturnType<typeof sessionUploader> } | null>(
     null,
   );
   if (uploads.current?.session !== session) {
     const stop = new AbortController();
-    uploads.current = {
-      session,
-      stop,
-      // Une session en lecture seule n'envoie rien : ni panneau d'envoi, ni dépôt, ni collage.
-      send:
-        session.readOnly || files === null
-          ? undefined
-          : uploader({
-              pageId: session.pageId,
-              limits: fileLimits,
-              blockType: (id) => created.current?.getBlock(id)?.type,
-              onRefused: (message) => latestFiles.current?.onRefused(message),
-              reread: () => latestFiles.current?.reread() ?? Promise.resolve(undefined),
-              signal: stop.signal,
-            }),
-    };
+    // Une session en lecture seule n'envoie rien : ni panneau d'envoi, ni dépôt, ni collage.
+    const send = sessionUploader(session, () => latestFiles.current, () => created.current, stop.signal);
+    uploads.current = { session, stop, send };
   }
   const { stop, send: uploadFile } = uploads.current;
   useEffect(() => () => stop.abort(), [stop]);

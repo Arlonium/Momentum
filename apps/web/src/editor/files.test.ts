@@ -130,6 +130,8 @@ function bench({
 } = {}) {
   const sent: Sent[] = [];
   const refused: string[] = [];
+  /** Les blocs rendus par un envoi qui n'a pas abouti : `id:nom du fichier`. */
+  const discarded: string[] = [];
   const state = { limitsRead: 0, rereads: 0, max };
   const controller = new AbortController();
   const upload = uploader({
@@ -145,6 +147,7 @@ function bench({
       state.rereads += 1;
       return reread();
     },
+    discard: (id, name) => discarded.push(`${id}:${name}`),
     signal: controller.signal,
     upload: (pageId, file, signal) =>
       new Promise<FileInfo>((answer, fail) => {
@@ -160,7 +163,7 @@ function bench({
         });
       }),
   });
-  return { upload, sent, refused, state, controller, types };
+  return { upload, sent, refused, discarded, state, controller, types };
 }
 
 const png = (name = "photo.png", size = 3) => new File([new Uint8Array(size)], name, { type: "image/png" });
@@ -198,12 +201,11 @@ test("a_file_that_is_not_an_image_becomes_a_file_block", async () => {
     ["image", "image/png", "same"],
     ["image", "application/octet-stream", "file"],
     ["image", "video/webm", "file"],
+    ["image", "audio/mpeg", "file"],
     ["image", "application/pdf", "file"],
     ["image", "imagery/png", "file"],
     ["video", "video/webm", "same"],
-    ["video", "audio/ogg", "file"],
     ["audio", "audio/mpeg", "same"],
-    ["audio", "video/mp4", "file"],
     ["file", "image/png", "same"],
     ["file", "application/octet-stream", "same"],
   ];
@@ -346,32 +348,6 @@ test("an_upload_is_cancelled_when_the_page_closes", async () => {
   expect(filesOf(PAGE)).toEqual({ uploads: [], refusals: [] });
 });
 
-test("an_upload_stopped_because_the_session_of_the_page_is_made_again_is_said", async () => {
-  const b = bench({ types: { b1: "image" } });
-  enterFiles(PAGE);
-  const said: string[] = [];
-  const done = settled(
-    uploader({
-      pageId: PAGE,
-      limits: async () => ({ maxFileBytes: MIB }),
-      blockType: () => "image",
-      onRefused: (message) => said.push(message),
-      reread: async () => page(PAGE),
-      signal: b.controller.signal,
-      upload: (_page, _file, signal) =>
-        new Promise<FileInfo>((_answer, fail) => {
-          signal?.addEventListener("abort", () => fail(new DOMException("annulé", "AbortError")));
-        }),
-    })(png(), "b1"),
-  );
-  await until(() => filesOf(PAGE).uploads.length === 1, "l'envoi en cours");
-  // L'éditeur est remplacé (droits baissés, corbeille), la page reste ouverte.
-  b.controller.abort();
-  expect((await done).error).toBeDefined();
-  expect(said).toEqual(["L'envoi de \u2068photo.png\u2069 a été interrompu. Réessaie."]);
-  expect(filesOf(PAGE).uploads).toEqual([]);
-});
-
 test("an_upload_cancelled_by_the_person_says_nothing_and_leaves_the_others", async () => {
   const b = bench({ types: { b1: "image", b2: "image" } });
   enterFiles(PAGE);
@@ -400,7 +376,7 @@ test("a_block_removed_during_the_upload_is_said_and_nothing_is_set", async () =>
   b.sent[0].answer({});
   expect((await done).error).toBeDefined();
   expect(b.refused).toEqual([
-    "\u2068photo.png\u2069 a été envoyé, mais son bloc a été supprimé entre-temps : il n'est pas dans la page.",
+    "\u2068photo.png\u2069 a été envoyé, mais son bloc a été supprimé ou changé entre-temps : il n'est pas dans la page.",
   ]);
 });
 
@@ -472,4 +448,220 @@ test("nothing_of_a_file_is_kept_in_the_storage_of_the_browser", async () => {
   sayRefusal(PAGE, "un refus");
   expect(localStorage.length).toBe(0);
   expect(sessionStorage.length).toBe(0);
+});
+
+// Tour de correction 1 (relecture de C8).
+
+/** Un nom tel qu'un message le cite : isolé (U+2068, U+2069). */
+const cited = (name: string) => `${String.fromCharCode(0x2068)}${name}${String.fromCharCode(0x2069)}`;
+
+test("a_block_that_is_no_longer_a_file_block_is_said_and_nothing_is_set", async () => {
+  // Un autre a changé le bloc en paragraphe (ou en autre chose) pendant l'envoi : ce que l'envoi
+  // rendrait n'y serait pas posé, et le fichier resterait attaché sans que rien le dise (m3).
+  for (const type of ["paragraph", "heading", "callout", "bookmark"]) {
+    const b = bench({ types: { b1: "image" } });
+    const done = settled(b.upload(png(), "b1"));
+    await until(() => b.sent.length === 1, "l'envoi");
+    b.types.b1 = type;
+    b.sent[0].answer({});
+    expect((await done).error, type).toBeDefined();
+    expect(b.refused, type).toEqual([
+      `${cited("photo.png")} a été envoyé, mais son bloc a été supprimé ou changé entre-temps : il n'est pas dans la page.`,
+    ]);
+    // Le bloc n'est plus celui de l'envoi : il n'y touche pas.
+    expect(b.discarded, type).toEqual([]);
+  }
+});
+
+test("a_cut_or_a_server_error_makes_the_next_upload_read_the_limits_again", async () => {
+  // Le `413` d'un fichier trop gros n'arrive pas à un navigateur (R505) : il n'en voit qu'une coupure,
+  // ou l'erreur d'un mandataire. Une limite périmée serait sinon gardée sans fin (m5).
+  const failures = [
+    new ApiError(0, null, "Le serveur Mementum ne répond pas."),
+    new ApiError(502, null, "Le serveur Mementum ne répond pas."),
+    new ApiError(500, "internal", "erreur interne"),
+    new TypeError("Failed to fetch"),
+  ];
+  for (const failure of failures) {
+    forgetFileLimits();
+    const b = bench({ max: 100 * MIB, types: { b1: "image" } });
+    const first = settled(b.upload(png("gros.png", 2 * MIB), "b1"));
+    await until(() => b.sent.length === 1, "l'envoi");
+    b.state.max = MIB;
+    b.sent[0].fail(failure);
+    await first;
+    await until(() => b.refused.length === 1, "le message de la coupure");
+    // L'essai suivant relit la limite, et dit la vraie, sans rien envoyer.
+    expect((await settled(b.upload(png("gros.png", 2 * MIB), "b1"))).error).toBeDefined();
+    expect(b.state.limitsRead, String(failure)).toBe(2);
+    expect(b.sent, String(failure)).toHaveLength(1);
+    expect(b.refused[1], String(failure)).toContain("1 Mio au plus par fichier");
+  }
+  // Témoin : un refus fait au compte (`403`) garde la limite lue.
+  forgetFileLimits();
+  const b = bench({ types: { b1: "image" } });
+  const refused = settled(b.upload(png(), "b1"));
+  await until(() => b.sent.length === 1, "l'envoi");
+  b.sent[0].fail(new ApiError(403, "forbidden", "il te faut « Peut modifier »"));
+  await refused;
+  const again = b.upload(png(), "b1");
+  await until(() => b.sent.length === 2, "le second envoi");
+  b.sent[1].answer({});
+  await again;
+  expect(b.state.limitsRead).toBe(1);
+});
+
+test("an_upload_stopped_because_the_session_of_the_page_is_made_again_says_what_the_page_has_become", async () => {
+  // L'éditeur est remplacé pendant l'envoi (droits baissés, corbeille, schéma), la page reste
+  // ouverte : c'est la page relue qui dit pourquoi, jamais « Réessaie » à qui ne peut plus écrire (m6).
+  const cases: [what: PageNode | null | undefined, message: string][] = [
+    [page(PAGE, { level: "read" }), `${cited("photo.png")} n'a pas été envoyé : tu ne peux plus modifier cette page.`],
+    [page(PAGE, { trashedAt: 1 }), `${cited("photo.png")} n'a pas été envoyé : la page est à la corbeille.`],
+    [null, `${cited("photo.png")} n'a pas été envoyé : tu n'as plus accès à cette page.`],
+    [page(PAGE), `L'envoi de ${cited("photo.png")} a été interrompu. Réessaie.`],
+  ];
+  for (const [what, message] of cases) {
+    const b = bench({ types: { b1: "image" }, reread: async () => what });
+    enterFiles(PAGE);
+    const done = settled(b.upload(png(), "b1"));
+    await until(() => b.sent.length === 1, "l'envoi");
+    b.controller.abort();
+    expect((await done).error).toBeDefined();
+    expect(b.sent[0].signal.aborted).toBe(true);
+    await until(() => b.refused.length === 1, `le message (${message})`);
+    expect(b.refused).toEqual([message]);
+    expect(filesOf(PAGE).uploads).toEqual([]);
+    leaveFiles(PAGE);
+  }
+  // De même quand la réponse du serveur arrive après le départ de l'éditeur : rien n'est posé.
+  const late = bench({ types: { b1: "image" }, reread: async () => page(PAGE, { level: "comment" }) });
+  let answer!: (info: FileInfo) => void;
+  const upload = uploader({
+    pageId: PAGE,
+    limits: async () => ({ maxFileBytes: MIB }),
+    blockType: () => "image",
+    onRefused: (message) => late.refused.push(message),
+    reread: async () => page(PAGE, { level: "comment" }),
+    signal: late.controller.signal,
+    upload: () => new Promise<FileInfo>((done) => (answer = done)),
+  });
+  const done = settled(upload(png(), "b1"));
+  await until(() => answer !== undefined, "l'envoi");
+  late.controller.abort();
+  answer({ id: FILE, url: PATH, name: "photo.png", size: 3, mime: "image/png" });
+  expect((await done).error).toBeDefined();
+  await until(() => late.refused.length === 1, "le message");
+  expect(late.refused).toEqual([`${cited("photo.png")} n'a pas été envoyé : tu ne peux plus modifier cette page.`]);
+});
+
+test("an_upload_that_does_not_end_well_gives_its_block_back_and_one_that_does_keeps_it", async () => {
+  // Le bloc qu'un dépôt a posé porte le nom local du fichier, lu par tous : un envoi qui n'aboutit pas
+  // le rend (`discard`), pour qu'il soit retiré s'il est encore tel que l'envoi l'a laissé (m7).
+  const failing: [what: string, run: (b: ReturnType<typeof bench>) => Promise<unknown>][] = [
+    ["trop gros", (b) => settled(b.upload(png("photo.png", MIB + 1), "b1"))],
+    [
+      "refusé par le serveur",
+      async (b) => {
+        const done = settled(b.upload(png(), "b1"));
+        await until(() => b.sent.length === 1, "l'envoi");
+        b.sent[0].fail(new ApiError(403, "forbidden", "non"));
+        return done;
+      },
+    ],
+    [
+      "coupé",
+      async (b) => {
+        const done = settled(b.upload(png(), "b1"));
+        await until(() => b.sent.length === 1, "l'envoi");
+        b.sent[0].fail(new ApiError(0, null, "coupé"));
+        return done;
+      },
+    ],
+    [
+      "annulé",
+      async (b) => {
+        enterFiles(PAGE);
+        const done = settled(b.upload(png(), "b1"));
+        await until(() => filesOf(PAGE).uploads.length === 1, "l'envoi en cours");
+        filesOf(PAGE).uploads[0].cancel();
+        return done;
+      },
+    ],
+    [
+      "une réponse qui n'est pas un fichier de la page",
+      async (b) => {
+        const done = settled(b.upload(png(), "b1"));
+        await until(() => b.sent.length === 1, "l'envoi");
+        b.sent[0].answer({ url: "javascript:alert(1)" });
+        return done;
+      },
+    ],
+  ];
+  for (const [what, run] of failing) {
+    const b = bench({ types: { b1: "image" } });
+    await run(b);
+    expect(b.discarded, what).toEqual(["b1:photo.png"]);
+    leaveFiles(PAGE);
+  }
+  // La limite illisible : le bloc est rendu aussi.
+  const unread: string[] = [];
+  const upload = uploader({
+    pageId: PAGE,
+    limits: async () => {
+      throw new ApiError(0, null, "coupé");
+    },
+    blockType: () => "image",
+    onRefused: () => {},
+    reread: async () => page(PAGE),
+    discard: (id, name) => unread.push(`${id}:${name}`),
+    signal: new AbortController().signal,
+  });
+  await settled(upload(png(), "b1"));
+  expect(unread).toEqual(["b1:photo.png"]);
+  // Témoin : un envoi qui aboutit garde son bloc.
+  const b = bench({ types: { b1: "image" } });
+  const done = b.upload(png(), "b1");
+  await until(() => b.sent.length === 1, "l'envoi");
+  b.sent[0].answer({});
+  await done;
+  expect(b.discarded).toEqual([]);
+  // L'éditeur parti (page quittée, session recréée) : il n'écrit plus, rien ne lui est rendu.
+  const gone = bench({ types: { b1: "image" } });
+  const stopped = settled(gone.upload(png(), "b1"));
+  await until(() => gone.sent.length === 1, "l'envoi");
+  gone.controller.abort();
+  await stopped;
+  await until(() => gone.refused.length === 1, "le message");
+  expect(gone.discarded).toEqual([]);
+});
+
+test("sound_and_video_share_their_containers_and_the_server_type_picks_between_their_blocks", async () => {
+  // Le serveur lit `video/webm` d'un son WebM et `audio/ogg` d'une vidéo Ogg (un seul conteneur) :
+  // le bloc choisi par l'éditeur reste. Ailleurs, son type choisit entre le bloc son et le bloc vidéo,
+  // sans tomber sur un bloc fichier (m9).
+  const cases: [block: string, mime: string, expected: string | undefined][] = [
+    ["audio", "video/webm", undefined],
+    ["video", "audio/ogg", undefined],
+    ["video", "video/webm", undefined],
+    ["audio", "audio/ogg", undefined],
+    ["video", "audio/mpeg", "audio"],
+    ["video", "audio/mp4", "audio"],
+    ["video", "audio/wav", "audio"],
+    ["audio", "video/mp4", "video"],
+    // Une image n'est ni l'un ni l'autre, et inversement.
+    ["image", "video/webm", "file"],
+    ["image", "audio/ogg", "file"],
+    ["video", "image/png", "file"],
+    ["audio", "image/png", "file"],
+    ["video", "application/octet-stream", "file"],
+    ["audio", "application/pdf", "file"],
+  ];
+  for (const [block, mime, expected] of cases) {
+    const b = bench({ types: { b1: block } });
+    const done = b.upload(png(), "b1");
+    await until(() => b.sent.length === 1, "l'envoi");
+    b.sent[0].answer({ mime });
+    const props = { url: PATH, name: "photo.png" };
+    expect(await done, `${block} ${mime}`).toEqual(expected === undefined ? { props } : { type: expected, props });
+  }
 });

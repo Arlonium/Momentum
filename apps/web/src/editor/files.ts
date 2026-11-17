@@ -208,25 +208,52 @@ export type UploaderOptions = {
    * elle n'est plus là pour ce compte ; `undefined` : le serveur ne répond pas.
    */
   reread: () => Promise<PageNode | null | undefined>;
+  /**
+   * L'envoi du fichier `fileName` vers le bloc `blockId` n'a pas abouti, et l'éditeur est encore là :
+   * à lui de retirer ce bloc s'il est resté tel que l'envoi l'a laissé (`uploads.ts`, R685). Jamais
+   * appelé pour un envoi qui aboutit, ni quand l'éditeur est parti (il n'écrit plus pour personne).
+   */
+  discard?: (blockId: string, fileName: string) => void;
   /** Annulé quand l'éditeur de la page part (page quittée, session recréée) : tous ses envois s'arrêtent. */
   signal: AbortSignal;
   /** L'envoi lui-même (`uploadFile` d'`api.ts`) ; les tests en donnent un autre. */
   upload?: typeof uploadFile;
 };
 
-/** La famille de type (`image/`, `video/`, `audio/`) que montre un bloc ; un bloc fichier les prend tous. */
-const FAMILIES: Readonly<Record<string, string>> = { image: "image/", video: "video/", audio: "audio/" };
+/** Les blocs qui portent un fichier : un envoi ne pose rien dans un autre. */
+export const FILE_BLOCKS: ReadonlySet<string> = new Set(["image", "video", "audio", "file"]);
+
+/**
+ * Les types que le serveur lit d'un conteneur commun au son et à la vidéo (R246 : `video/webm` pour
+ * tout WebM, `audio/ogg` pour tout Ogg) : ils ne disent pas lequel des deux le fichier porte.
+ */
+const SHARED_CONTAINERS: ReadonlySet<string> = new Set(["video/webm", "audio/ogg"]);
+
+/**
+ * Le bloc qui montre un fichier de type `mime` (celui que le serveur a lu dans les octets), posé dans
+ * un bloc `block` : `undefined` s'il reste ce bloc. Une image n'est montrée que par un bloc image ;
+ * un son et une vidéo partagent leurs conteneurs : dans un conteneur commun, le bloc choisi d'après le
+ * fichier reste, sinon le type du serveur choisit entre le bloc son et le bloc vidéo ; tout le reste
+ * va dans un bloc fichier, qui prend tout (R673, R686).
+ */
+function blockFor(block: string, mime: string): "file" | "audio" | "video" | undefined {
+  if (block === "file") return undefined;
+  if (block === "image") return mime.startsWith("image/") ? undefined : "file";
+  const kind = mime.startsWith("audio/") ? "audio" : mime.startsWith("video/") ? "video" : null;
+  if (kind === null) return "file";
+  return kind === block || SHARED_CONTAINERS.has(mime) ? undefined : kind;
+}
 
 /** Ce qu'un envoi pose dans son bloc (`updateBlock`). */
-export type Uploaded = { type?: "file"; props: { url: string; name: string } };
+export type Uploaded = { type?: "file" | "audio" | "video"; props: { url: string; name: string } };
 
 /**
  * De quoi envoyer un fichier dans la page, pour BlockNote (`uploadFile`). Rend ce qu'il pose dans le
- * bloc : `{ props: { url, name } }`, l'adresse et le nom que dit le serveur, ou `{ type: "file", … }`
- * quand le type que le serveur a lu dans les octets n'est pas de la famille du bloc (un HTML nommé
- * `photo.png` dans un bloc image : il devient un bloc fichier, à télécharger). Rejette quand rien
- * n'est à poser ; ce qu'il y a à en dire est alors passé par `onRefused`, sauf pour un envoi annulé
- * par la personne.
+ * bloc : `{ props: { url, name } }`, l'adresse et le nom que dit le serveur, avec le `type` du bloc
+ * qui montre ce fichier quand ce n'est pas le sien (`blockFor` : un HTML nommé `photo.png` dans un
+ * bloc image devient un bloc fichier, à télécharger). Rejette quand rien n'est à poser ; ce qu'il y a
+ * à en dire est alors passé par `onRefused`, sauf pour un envoi annulé par la personne, et le bloc
+ * est rendu à l'éditeur (`discard`).
  */
 export function uploader(options: UploaderOptions): (file: File, blockId?: string) => Promise<Uploaded> {
   const { pageId, signal, onRefused } = options;
@@ -234,7 +261,11 @@ export function uploader(options: UploaderOptions): (file: File, blockId?: strin
   const interrupted = (file: File) => `L'envoi de ${quoted(file.name)} a été interrompu. Réessaie.`;
   const notSent = (file: File, why: string) => `${quoted(file.name)} n'a pas été envoyé : ${why}`;
 
-  /** Après une coupure : la page relue dit pourquoi, une fois le compte revenu s'il le fallait. */
+  /**
+   * Après une coupure, ou quand l'éditeur est parti pendant l'envoi : la page relue dit pourquoi, une
+   * fois le compte revenu s'il le fallait. Une page quittée entre-temps ne montre plus rien
+   * (`sayRefusal` y est sans effet).
+   */
   const afterCut = async (file: File) => {
     let node: PageNode | null | undefined;
     try {
@@ -242,7 +273,6 @@ export function uploader(options: UploaderOptions): (file: File, blockId?: strin
     } catch {
       node = undefined;
     }
-    if (signal.aborted) return;
     if (node === undefined) {
       onRefused(notSent(file, "le serveur ne répond pas. Vérifie ta connexion, puis réessaie."));
     } else if (node === null) onRefused(notSent(file, "tu n'as plus accès à cette page."));
@@ -253,6 +283,10 @@ export function uploader(options: UploaderOptions): (file: File, blockId?: strin
 
   return async (file, blockId) => {
     if (signal.aborted) throw new UploadStopped("éditeur parti");
+    /** L'envoi n'aboutit pas : son bloc est rendu à l'éditeur, s'il est encore là. */
+    const giveBack = () => {
+      if (blockId !== undefined && !signal.aborted) options.discard?.(blockId, file.name);
+    };
     let max: number;
     try {
       max = (await options.limits()).maxFileBytes;
@@ -260,6 +294,7 @@ export function uploader(options: UploaderOptions): (file: File, blockId?: strin
       if (signal.aborted) throw new UploadStopped("éditeur parti");
       // Une session perdue demande la connexion par-dessus la page (`api.ts`) ; le message reste.
       onRefused(notSent(file, error instanceof Error ? error.message : "le serveur ne répond pas."));
+      giveBack();
       throw error;
     }
     if (signal.aborted) throw new UploadStopped("éditeur parti");
@@ -267,6 +302,7 @@ export function uploader(options: UploaderOptions): (file: File, blockId?: strin
       onRefused(
         `${quoted(file.name)} est trop gros : ${bound(max)} au plus par fichier sur cette instance. Rien n'a été envoyé.`,
       );
+      giveBack();
       throw new UploadStopped("fichier trop gros");
     }
 
@@ -284,43 +320,55 @@ export function uploader(options: UploaderOptions): (file: File, blockId?: strin
       info = await send(pageId, file, own.signal);
     } catch (error) {
       // Annulé par la personne, ou la page quittée (elle a déjà retiré l'envoi) : rien à dire.
-      if (cancelled) throw new UploadStopped("envoi annulé");
-      // L'éditeur est parti, la page reste (session recréée) : ce qu'il aurait posé ne le serait plus.
+      if (cancelled) {
+        giveBack();
+        throw new UploadStopped("envoi annulé");
+      }
+      // L'éditeur est parti, la page reste (session recréée : droits baissés, corbeille, schéma) : ce
+      // qu'il aurait posé ne le serait plus, et c'est la page relue qui dit pourquoi (R684).
       if (own.signal.aborted) {
-        onRefused(interrupted(file));
+        void afterCut(file);
         throw new UploadStopped("éditeur parti");
       }
-      if (!(error instanceof ApiError) || error.status === 0 || isSessionLost(error)) void afterCut(file);
-      else {
+      if (!(error instanceof ApiError) || error.status === 0 || error.status >= 500 || isSessionLost(error)) {
+        // Une coupure, ou l'erreur d'un mandataire : c'est aussi ce qu'un navigateur voit d'un `413`
+        // que le serveur rend sans lire le corps (R505). La limite gardée est peut-être périmée.
+        if (!isSessionLost(error)) forgetFileLimits();
+        void afterCut(file);
+      } else {
         if (error.code === "file_too_large") forgetFileLimits();
         onRefused(notSent(file, error.message));
         // Un droit, ou la page, ont changé : la page relue le montre.
         void options.reread().catch(() => undefined);
       }
+      giveBack();
       throw error;
     } finally {
       signal.removeEventListener("abort", stop);
       end(pageId, id);
     }
     if (signal.aborted) {
-      onRefused(interrupted(file));
+      void afterCut(file);
       throw new UploadStopped("éditeur parti");
     }
     // Ce que dit le serveur n'est posé que si c'est un fichier de cette page.
     if (filePath(info.url)?.pageId !== pageId || typeof info.name !== "string" || typeof info.mime !== "string") {
       onRefused(notSent(file, "le serveur a répondu autre chose qu'un fichier de cette page."));
+      giveBack();
       throw new UploadStopped("réponse inattendue");
     }
     const props = { url: info.url, name: info.name };
     if (blockId === undefined) return { props };
-    const type = options.blockType(blockId);
-    if (type === undefined) {
+    const block = options.blockType(blockId);
+    // Le bloc n'est plus là, ou un autre en a fait autre chose qu'un bloc de fichier : `updateBlock` n'y
+    // poserait rien, et le fichier, attaché à la page, n'y serait montré nulle part (R677).
+    if (block === undefined || !FILE_BLOCKS.has(block)) {
       onRefused(
-        `${quoted(file.name)} a été envoyé, mais son bloc a été supprimé entre-temps : il n'est pas dans la page.`,
+        `${quoted(file.name)} a été envoyé, mais son bloc a été supprimé ou changé entre-temps : il n'est pas dans la page.`,
       );
       throw new UploadStopped("bloc parti");
     }
-    const family = FAMILIES[type];
-    return family === undefined || info.mime.startsWith(family) ? { props } : { type: "file", props };
+    const type = blockFor(block, info.mime);
+    return type === undefined ? { props } : { type, props };
   };
 }
