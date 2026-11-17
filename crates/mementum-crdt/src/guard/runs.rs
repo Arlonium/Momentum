@@ -377,13 +377,18 @@ impl<T: ReadTxn> Judge<'_, T> {
 
     /// Règle I3 (Ruling R834) : vrai si un élément d'origine `origin` et d'origine droite `right`
     /// se dit posé entre deux voisins que son auteur ne voyait pas côte à côte. Son auteur connaît
-    /// `right`, donc l'origine de `right` ; et `origin`, donc l'origine droite d'`origin`. L'origine
-    /// de `right` doit être `origin` ou à sa gauche, l'origine droite d'`origin` être `right` ou à
-    /// sa droite. Deux unités d'une même suite sont rangées dans l'ordre de leurs horloges (chacune
-    /// a pour origine celle d'avant) : l'origine de `right` dans la suite d'`origin`, plus loin
-    /// qu'elle, est à sa droite ; l'origine droite d'`origin` dans la suite de `right`, avant elle,
-    /// est à sa gauche. Aucun client ne l'écrit en tapant, et yrs comme Yjs rangent un tel élément
-    /// selon l'ordre où arrivent ceux qui sont entre ses voisins.
+    /// `right`, donc l'origine de `right`, qui doit être `origin` ou à sa gauche. Deux unités d'une
+    /// même chaîne sont rangées dans l'ordre de leurs horloges (chacune a pour origine celle
+    /// d'avant, et un élément est toujours à droite de son origine) : l'origine de `right` dans la
+    /// chaîne d'`origin`, plus loin qu'elle, est à sa droite, et `right` plus à droite encore.
+    /// Aucun client ne l'écrit, et yrs comme Yjs rangent un tel élément selon l'ordre où arrivent
+    /// ceux qui sont entre ses voisins.
+    ///
+    /// La forme inverse (l'origine droite d'`origin` dans la chaîne de `right`, avant elle) n'est
+    /// pas une règle : l'origine droite d'une unité n'est pas toujours à sa droite. `redoItem` écrit
+    /// une origine droite qui est, dans la suite de l'origine, avant elle (N3 ne la récrit que si
+    /// ces unités peuvent tenir en un bloc), et un élément posé ensuite juste après une telle unité
+    /// est honnête (scènes 8172 et 13429 du tirage penché vers les annulations, `redo-crossing.json`).
     pub(crate) fn crosses_what_it_knows(
         &mut self,
         origin: Id,
@@ -397,16 +402,9 @@ impl<T: ReadTxn> Judge<'_, T> {
         if at_origin.gc || at_right.gc {
             return Ok(false);
         }
-        if let Some(before) = at_right.origin_of(right.0, right.1)
-            && before.0 == origin.0
-            && origin.1 < before.1
-            && self.chained(origin.0, origin.1, before.1)?
-        {
-            return Ok(true);
-        }
-        match at_origin.right {
-            Some(after) if after.0 == right.0 && after.1 < right.1 => {
-                self.chained(right.0, after.1, right.1)
+        match at_right.origin_of(right.0, right.1) {
+            Some(before) if before.0 == origin.0 && origin.1 < before.1 => {
+                self.chained(origin.0, origin.1, before.1)
             }
             _ => Ok(false),
         }

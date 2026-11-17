@@ -30,6 +30,7 @@
 //! | I1 | un élément sans origine a pour origine droite une unité sans origine (la tête de la liste) ; sinon il est ramassé (Ruling R828) | `typeListInsertGenericsAfter` : sans voisin de gauche, le voisin de droite est `parent._start`, que rien ne précède |
 //! | G | un élément dont un voisin est une plage ramassée et l'autre un élément est ramassé, comme Yjs le fait ; yrs le rangeait par l'autre voisin (Ruling R827) | `Item.getMissing` : `parent = null` dès que le voisin de gauche ou de droite est un `GC` |
 //! | P2 | l'origine et l'origine droite d'un élément sont dans le même parent ; sinon il est ramassé (Ruling R829) | un client insère entre deux voisins d'une même liste |
+//! | I3 | l'origine de l'origine droite n'est pas, dans la chaîne de l'origine, plus loin qu'elle ; sinon l'élément est ramassé (Ruling R834). La chaîne se lit d'une suite à l'autre : la mise à jour et l'état qui la contient se jugent pareil | un client insère entre deux voisins qu'il voit côte à côte. Deux formes voisines ne sont pas des règles, `redoItem` les écrivant : une origine droite nulle quand l'origine en a une (I2), et l'origine droite de l'origine avant l'origine droite dans sa chaîne (l'origine droite d'une unité rétablie peut être à sa gauche) |
 //!
 //! N1 et N2 ont été trouvées par l'essai au hasard côté Yjs (`yjsAtRandom.test.ts`) : la
 //! lecture du code de Yjs avait d'abord donné « une valeur par entrée » et « l'origine droite

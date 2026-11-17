@@ -291,6 +291,15 @@ const REDO_SCENES = [3192, 3851, 8832];
 // vivante.
 const REDO_BLOCK_SCENES = [4376, 8403, 12763];
 
+// Les scènes où un onglet rétablit un élément O dont l'origine droite est une unité de la suite de
+// son origine, avant elle (O est donc à droite de son origine droite), puis où un onglet pose un
+// élément entre O et l'unité qui le suit. Une forme de la règle I3 tenait l'origine droite d'O pour
+// à sa droite, et ramassait cet élément honnête (Ruling R834). Trouvées par le tirage penché vers
+// les annulations (`UNDO_HEAVY`, 20 000 scènes : deux). Gardées dans `redo-crossing.json`, que
+// `crates/mementum-crdt/tests/yjs_updates.rs` donne à une vraie page : elles sont acceptées, et
+// ce que la page relaie ramène un vrai Yjs à la page du serveur Yjs.
+const REDO_CROSSING_SCENES = [8172, 13429];
+
 type MaybeId = { client: number; clock: number } | null;
 
 /** Les rangs des mises à jour qui portent un élément dont l'origine droite est du client de son
@@ -372,6 +381,19 @@ test("ce que Yjs écrit au hasard suit la grammaire d'un client", async () => {
   const blocksFile = path.join(dir, "redo-blocks.json");
   if (import.meta.env.EXPORT_FIXTURES) await fs.writeFile(blocksFile, blocksWritten);
   else expect(new TextDecoder().decode(await fs.readFile(blocksFile)) === blocksWritten, `${blocksFile} (EXPORT_FIXTURES=1 le réécrit)`).toBe(true);
+  // Les scènes d'un rétablissement dont un voisin pose un élément juste après lui : chacune, ses
+  // mises à jour, et les rangs de celles qui portent une origine droite du client de l'origine,
+  // plus basse.
+  const crossing = REDO_CROSSING_SCENES.map((seed) => {
+    const { received } = scene(seed, base, counts, UNDO_HEAVY);
+    const ranks = backwardRightOrigins(received);
+    expect(ranks.length, `scène ${seed} : plus d'origine droite du client de l'origine, plus basse`).toBeGreaterThan(0);
+    return [seed, received.map(hex), ranks];
+  });
+  const crossingWritten = `${JSON.stringify(crossing)}\n`;
+  const crossingFile = path.join(dir, "redo-crossing.json");
+  if (import.meta.env.EXPORT_FIXTURES) await fs.writeFile(crossingFile, crossingWritten);
+  else expect(new TextDecoder().decode(await fs.readFile(crossingFile)) === crossingWritten, `${crossingFile} (EXPORT_FIXTURES=1 le réécrit)`).toBe(true);
 }, 600_000);
 
 // Ce que la page relaie de ces scènes (`random-relayed.json`, écrit par
@@ -463,4 +485,21 @@ test("ce que la page relaie mène un vrai Yjs à la page que Yjs aurait lue", as
   // Ce que la garde ferme : au moins une scène où le vrai Yjs ne relit pas son propre état comme
   // il le vit.
   expect(blocksApartInYjs, "plus de scène où Yjs vivant et Yjs relu divergent").not.toEqual([]);
+  // Les scènes d'un rétablissement dont un voisin pose un élément juste après lui
+  // (`redo-crossing-relayed.json`, dans l'ordre de `REDO_CROSSING_SCENES`) : chacune est relayée,
+  // sans rien ramasser de ce que Yjs a écrit, et lue par un vrai Yjs comme le serveur Yjs la lit.
+  const crossingRelayed = (await read("redo-crossing-relayed.json")) as (string[] | null)[];
+  expect(crossingRelayed.length).toBe(REDO_CROSSING_SCENES.length);
+  REDO_CROSSING_SCENES.forEach((seed, n) => {
+    const { server } = scene(seed, base, counts, UNDO_HEAVY);
+    const entries = crossingRelayed[n];
+    expect(entries, `scène ${seed} : le serveur y a écrit lui-même`).not.toBe(null);
+    const browser = new Y.Doc();
+    Y.applyUpdate(browser, base);
+    for (const entry of entries ?? []) Y.applyUpdate(browser, unhex(entry));
+    const store = (browser as unknown as { store: { pendingStructs: unknown; pendingDs: unknown } }).store;
+    expect(store.pendingStructs, `scène ${seed} : des éléments restent en attente`).toBe(null);
+    expect(store.pendingDs, `scène ${seed} : des suppressions restent en attente`).toBe(null);
+    expect(browser.getXmlFragment("document-store").toString(), `scène ${seed}`).toBe(server.getXmlFragment("document-store").toString());
+  });
 }, 600_000);

@@ -736,9 +736,9 @@ impl PageDoc {
         // Ruling R828 (règle I1) : un élément sans origine dont l'origine droite en a une (il se dit
         // en tête de la liste, devant une unité qui ne l'est pas). Aucun client ne l'écrit, et sa
         // place dépend de l'ordre d'arrivée : il devient une plage ramassée.
-        // Ruling R834 (règle I3) : de même un élément dont l'origine de l'origine droite est à
-        // droite de son origine, ou l'origine droite de l'origine à gauche de son origine droite,
-        // dans une même suite : son auteur ne voyait pas ses deux voisins côte à côte.
+        // Ruling R834 (règle I3) : de même un élément dont l'origine de l'origine droite est, dans
+        // la chaîne de son origine, plus loin qu'elle : son auteur ne voyait pas ses deux voisins
+        // côte à côte.
         let mut origin_less = HashSet::new();
         let candidates = shape.origin_less_with_right(&state);
         let between = shape.between_two(&state);
