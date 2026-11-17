@@ -161,6 +161,9 @@ struct Struct {
     kind: Kind,
 }
 
+// Presque tous les blocs d'une mise à jour sont des insertions : les mettre en boîte ajouterait
+// une allocation par bloc, pour n'alléger que les plages ramassées et les trous.
+#[allow(clippy::large_enum_variant)]
 enum Kind {
     Insert(Insert),
     /// Plage déjà ramassée (GC) : connue, sans contenu.

@@ -695,7 +695,7 @@ impl PageDoc {
         update: &[u8],
         from_client: bool,
         many_valued: Option<&mut IdSet>,
-    ) -> Result<(Shape, Update, Vec<(u64, Run)>), CrdtError> {
+    ) -> Result<Read, CrdtError> {
         let read = |bytes: &[u8]| {
             if from_client {
                 Shape::read_from_client(bytes)
@@ -1257,6 +1257,10 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
     }
     Ok(())
 }
+
+/// Ce que rend [`PageDoc::read`] : la forme de la mise à jour, la mise à jour que yrs intégrera, et
+/// les suites d'unités qu'elle pose (règle N3, Ruling R825).
+type Read = (Shape, Update, Vec<(u64, Run)>);
 
 /// Au plus tant d'unités de la page dont les règles G et P2 demandent ce qu'elles sont, pour une
 /// mise à jour (Rulings R827, R829) : chaque demande parcourt la liste de l'unité vers la gauche.
