@@ -18,6 +18,7 @@
 import { createExtension } from "@blocknote/core";
 import { Plugin, PluginKey, type Transaction } from "prosemirror-state";
 import { ySyncPluginKey } from "y-prosemirror";
+import { attrBoundPlugin } from "./attrBound";
 import { announce, dismissNotice } from "./editorNotice";
 
 /** Longueur maximale, en octets, de l'adresse d'un lien : `MAX_HREF_BYTES` du serveur. */
@@ -68,10 +69,13 @@ function fromDocument(tr: Transaction): boolean {
 
 const linkBoundKey = new PluginKey("mementum-link-bound");
 
-/** L'extension de l'éditeur de la page. */
+/** L'extension de l'éditeur de la page : les bornes de la garde du serveur qu'un navigateur peut
+ * atteindre, un lien trop long (R495) et un attribut d'un autre type que le sien (`attrBound.ts`,
+ * R695). */
 export const linkBound = createExtension({
   key: "linkBound",
   prosemirrorPlugins: [
+    attrBoundPlugin(),
     new Plugin({
       key: linkBoundKey,
       filterTransaction(tr) {
