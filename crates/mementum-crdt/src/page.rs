@@ -511,6 +511,18 @@ impl PageDoc {
         PageDoc::from_updates([state]).map(|_| ())
     }
 
+    /// Ce qui manque, dans l'état que la page encode, à l'invariant de la classe C1 (Ruling R817) :
+    /// chaque entrée de map vivante est la seule vivante de sa clé, et n'a qu'une unité. `None`
+    /// si l'état le tient. Sert aux essais au hasard, qui le vérifient après chaque mise à jour
+    /// plutôt que d'attendre que yrs lise de la mémoire libérée.
+    #[doc(hidden)]
+    pub fn unsound_map_entries(&self) -> Option<String> {
+        match Shape::read_written(&self.encode_state()) {
+            Ok(shape) => shape.unsound_map_entries(),
+            Err(error) => Some(format!("l'état ne se relit pas : {error}")),
+        }
+    }
+
     /// Ce que la garde des attributs (Ruling R689) refuserait de cette mise à jour (v1) venue
     /// d'un client, lue sans être appliquée : `None` si elle n'y trouve rien. Sert aux tests,
     /// qui y passent tout ce que l'éditeur écrit.

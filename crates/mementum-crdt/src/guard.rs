@@ -496,6 +496,16 @@ impl Shape {
     /// Lit les blocs d'une mise à jour v1 comme `Update::decode` de yrs, mais
     /// sans récursion (une valeur `Any` trop imbriquée est refusée).
     pub(crate) fn read(update: &[u8]) -> Result<Shape, CrdtError> {
+        Shape::read_as(update, JsonCount::AsRead)
+    }
+
+    /// [`Shape::read`], pour ce que yrs vient d'encoder lui-même (un état) : un contenu JSON y
+    /// porte `len` chaînes (Ruling R815).
+    pub(crate) fn read_written(update: &[u8]) -> Result<Shape, CrdtError> {
+        Shape::read_as(update, JsonCount::AsWritten)
+    }
+
+    fn read_as(update: &[u8], json: JsonCount) -> Result<Shape, CrdtError> {
         let mut c = Cursor::new(update);
         let n_clients: u32 = c.read_var().map_err(decode_error)?;
         let mut clients = Vec::new();
@@ -516,7 +526,7 @@ impl Shape {
             let mut structs = Vec::new();
             for _ in 0..n_structs {
                 let id = (client, clock);
-                let Some(s) = read_struct(&mut c, id).map_err(decode_error)? else {
+                let Some(s) = read_struct(&mut c, id, json).map_err(decode_error)? else {
                     continue;
                 };
                 let len = s.len;
@@ -1423,7 +1433,11 @@ pub(crate) fn missing() -> CrdtError {
 
 /// Un bloc, lu comme `decode_block` de yrs ; `None` pour un élément vide
 /// (yrs l'ignore, sans avancer l'horloge).
-fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::read::Error> {
+fn read_struct(
+    c: &mut Cursor,
+    id: Id,
+    json: JsonCount,
+) -> Result<Option<Struct>, yrs::encoding::read::Error> {
     use yrs::encoding::read::Error;
     let info = c.read_u8()?;
     match info {
@@ -1469,7 +1483,7 @@ fn read_struct(c: &mut Cursor, id: Id) -> Result<Option<Struct>, yrs::encoding::
             } else {
                 Parent::Sibling(origin.or(right).ok_or(Error::UnexpectedValue)?)
             };
-            let content = read_content(c, info, id_entry, JsonCount::AsRead)?;
+            let content = read_content(c, info, id_entry, json)?;
             if content.len == 0 {
                 return Ok(None);
             }

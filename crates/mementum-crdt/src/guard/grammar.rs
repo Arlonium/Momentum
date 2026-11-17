@@ -267,7 +267,7 @@ impl Shape {
                 {
                     return Err(CrdtError::Structure(KEYED_NOT_A_VALUE.to_string()));
                 }
-                let Some(w) = written.and_then(|written| insert_at(written, (client, start)))
+                let Some((w, _)) = written.and_then(|written| insert_at(written, (client, start)))
                 else {
                     continue;
                 };
@@ -314,6 +314,81 @@ impl Shape {
             }
         }
         found
+    }
+}
+
+impl Shape {
+    /// Ce qui manque, dans un état que yrs a encodé (`self`, lu par [`Shape::read_written`]), à
+    /// l'invariant de la classe C1 (Ruling R817) : **chaque entrée de map vivante est la seule
+    /// vivante de sa clé, et n'a qu'une unité.** yrs, comme Yjs, supprime l'entrée de gauche quand
+    /// une entrée devient la courante de sa clé ; une entrée de plusieurs unités coupée laissait
+    /// sa moitié gauche vivante hors de la map (C1), et la page lisait plus tard de la mémoire
+    /// libérée. `None` si l'état le tient.
+    ///
+    /// Les entrées d'une même clé se trouvent sans lire leur clé : chacune, hors la première, a
+    /// pour origine la précédente (`typeMapSet`), et une entrée supprimée garde la sienne. Une
+    /// entrée dont l'origine est ramassée (son parent l'est) n'est rattachée à rien.
+    pub(crate) fn unsound_map_entries(&self) -> Option<String> {
+        let deleted = self.deleted_ranges();
+        // Les entrées de map, par client, dans l'ordre de leurs horloges : (début, fin, vivante,
+        // origine).
+        let mut entries: Vec<(Id, u32, bool, Option<Id>)> = Vec::new();
+        for (s, i) in self.inserts() {
+            if !i.sub_flag {
+                continue;
+            }
+            let end = s.id.1 + s.len;
+            let live = i.content != BLOCK_ITEM_DELETED_REF_NUMBER
+                && !covers(deleted.get(&s.id.0), s.id.1, end);
+            if live && s.len > 1 {
+                return Some(format!(
+                    "une entrée de map vivante de {} unités ({}, {})",
+                    s.len, s.id.0, s.id.1
+                ));
+            }
+            let origin = match i.parent {
+                super::Parent::Sibling(id) => Some(id),
+                _ => None,
+            };
+            entries.push((s.id, end, live, origin));
+        }
+        entries.sort_unstable_by_key(|e| e.0);
+        let at = |(client, clock): Id| {
+            let first = entries.partition_point(|e| (e.0.0, e.1) <= (client, clock));
+            entries
+                .get(first)
+                .filter(|e| e.0.0 == client && e.0.1 <= clock)
+                .map(|_| first)
+        };
+        // Chaque entrée rattachée à celle d'avant elle dans sa clé : une forêt, une clé par arbre.
+        let mut chain: Vec<usize> = (0..entries.len()).collect();
+        fn root(chain: &mut [usize], mut k: usize) -> usize {
+            while chain[k] != k {
+                chain[k] = chain[chain[k]];
+                k = chain[k];
+            }
+            k
+        }
+        for k in 0..entries.len() {
+            if let Some(left) = entries[k].3.and_then(at) {
+                let (a, b) = (root(&mut chain, k), root(&mut chain, left));
+                chain[a] = b;
+            }
+        }
+        let mut live_in: HashMap<usize, Id> = HashMap::new();
+        for k in 0..entries.len() {
+            if !entries[k].2 {
+                continue;
+            }
+            let r = root(&mut chain, k);
+            if let Some(other) = live_in.insert(r, entries[k].0) {
+                return Some(format!(
+                    "deux entrées de map vivantes pour une même clé : {other:?} et {:?}",
+                    entries[k].0
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -374,15 +449,16 @@ pub(crate) fn json_made(made: &[u8], floor: &StateVector) -> Result<IdSet, CrdtE
     Ok(found)
 }
 
-/// L'élément de `structs` (ceux d'un client, dans l'ordre de leurs horloges) qui couvre `id`.
-fn insert_at(structs: &[Struct], id: Id) -> Option<&Insert> {
+/// L'élément de `structs` (ceux d'un client, dans l'ordre de leurs horloges) qui couvre `id`, et
+/// sa longueur telle que la mise à jour l'écrit.
+fn insert_at(structs: &[Struct], id: Id) -> Option<(&Insert, u32)> {
     let at = structs.partition_point(|s| s.id.1 + s.len <= id.1);
     match structs.get(at) {
         Some(Struct {
             id: start,
+            len,
             kind: Kind::Insert(insert),
-            ..
-        }) if start.1 <= id.1 => Some(insert),
+        }) if start.1 <= id.1 => Some((insert, *len)),
         _ => None,
     }
 }

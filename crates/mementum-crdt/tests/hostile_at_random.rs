@@ -2,14 +2,18 @@
 //!
 //! yrs 0.28.1 n'est pas sûr en mémoire devant une mise à jour hostile : la sûreté du serveur
 //! repose sur la garde, et la garde sur cet essai. Des mises à jour tirées au hasard (tous
-//! contenus, parents, origines, origines droites, clés, longueurs, éléments à cheval sur ce que
-//! la page connaît, `Skip`, plages ramassées, deux clients, suppressions, octets abîmés), mêlées
-//! d'écritures honnêtes, arrivent à une page vivante par le chemin de l'acteur : d'un client
-//! (`apply_client_update`, ce qu'il rend va au journal) ou relues comme un vieux journal
-//! (`apply_update`, les octets tels quels, une entrée refusée étant écartée). Après chaque pas :
-//! l'état encodé se relit par un yrs neuf, ce qui manque à chaque vecteur d'état passé aussi ; à
-//! la fin, puis après avoir supprimé les blocs un à un (de la mémoire est libérée) : la page
-//! rechargée du journal est la page vivante (blocs, révision).
+//! contenus, du JSON écrit comme Yjs l'écrit ou comme yrs le lit, des octets, des sous-documents,
+//! un déplacement de yrs, toutes les références de type ; parents, entrées posées dans le type que
+//! la mise à jour vient de poser, origines, origines droites, clés, longueurs, éléments à cheval
+//! sur ce que la page connaît, `Skip`, plages ramassées, deux clients, suppressions de plusieurs
+//! clients et plusieurs plages, octets abîmés), mêlées d'écritures honnêtes, arrivent à une page
+//! vivante par le chemin de l'acteur : d'un client (`apply_client_update`, ce qu'il rend va au
+//! journal) ou relues comme un vieux journal (`apply_update`, les octets tels quels, une entrée
+//! refusée étant écartée). Après chaque pas : l'invariant de la classe C1 tient dans l'état
+//! (chaque entrée de map vivante est la seule vivante de sa clé, et n'a qu'une unité : Ruling
+//! R817), l'état encodé se relit par un yrs neuf, ce qui manque à chaque vecteur d'état passé
+//! aussi ; à la fin, puis après avoir supprimé les blocs un à un (de la mémoire est libérée) : la
+//! page rechargée du journal est la page vivante (blocs, révision).
 //!
 //! Déterministe par graine. `MEMENTUM_FUZZ_SEEDS` règle le nombre de cas de chaque voie,
 //! `MEMENTUM_FUZZ_FROM` le premier. Les cas tournent dans un **processus fils** (ce binaire,
@@ -283,8 +287,13 @@ impl Served {
     }
 
     /// L'état encodé se relit, et ce qui manque à chaque vecteur d'état passé aussi : trois fois,
-    /// pour qu'une lecture de mémoire libérée ait de quoi se montrer.
+    /// pour qu'une lecture de mémoire libérée ait de quoi se montrer. Et l'invariant de la classe
+    /// C1 tient (Ruling R817) : chaque entrée de map vivante est la seule vivante de sa clé, et n'a
+    /// qu'une unité ; vu dans l'état, avant que yrs ne lise de la mémoire libérée.
     fn hammer(&self, stages: &[Vec<u8>], what: &str) {
+        if let Some(why) = self.page.unsound_map_entries() {
+            panic!("{what} : {why}");
+        }
         for _ in 0..3 {
             let state = self.page.encode_state();
             let read = reread(&state, self.stored);
@@ -344,7 +353,7 @@ fn any_id(rng: &mut Rng, sv: &[(u64, u32)], me: (u64, u32)) -> (u64, u32) {
 }
 
 /// Un contenu de `len` unités si le genre le permet ; rend la longueur écrite.
-fn content(rng: &mut Rng, out: &mut Vec<u8>, kind: u8, len: u32) -> u32 {
+fn content(rng: &mut Rng, out: &mut Vec<u8>, kind: u8, len: u32, wide: bool) -> u32 {
     match kind {
         // Supprimé.
         1 => {
@@ -389,9 +398,11 @@ fn content(rng: &mut Rng, out: &mut Vec<u8>, kind: u8, len: u32) -> u32 {
             }
             len
         }
-        // JSON.
+        // JSON : écrit comme Yjs l'écrit (`len` chaînes), que yrs lit avec une chaîne de trop, ou
+        // comme yrs le lit (`len - 1`, puis `len` chaînes), qu'il intègre (constat C-6.1 de la
+        // re-relecture 6 : l'essai ne tirait jamais un JSON que yrs intègre).
         2 => {
-            var(out, u64::from(len));
+            var(out, u64::from(if rng.chance(50) { len - 1 } else { len }));
             for _ in 0..len {
                 string(out, "\"red\"");
             }
@@ -403,14 +414,67 @@ fn content(rng: &mut Rng, out: &mut Vec<u8>, kind: u8, len: u32) -> u32 {
             string(out, "{}");
             1
         }
-        // Type.
+        // Type : un texte ou un paragraphe ; au large, toutes les références que la garde lit
+        // (constat I-6.2 de la re-relecture 6).
         7 => {
-            if rng.chance(50) {
-                out.push(6);
-            } else {
-                out.push(3);
-                string(out, "paragraph");
+            if !wide {
+                if rng.chance(50) {
+                    out.push(6);
+                } else {
+                    out.push(3);
+                    string(out, "paragraph");
+                }
+                return 1;
             }
+            match rng.below(12) {
+                0..=3 => out.push(6),
+                4..=6 => {
+                    out.push(3);
+                    let tag =
+                        ["paragraph", "blockContainer", "blockGroup", "x"][rng.below(4) as usize];
+                    string(out, tag);
+                }
+                7 => out.push(0),
+                8 => out.push(1),
+                9 => out.push(2),
+                10 => out.push(4),
+                _ => out.push([5u8, 9, 15, 7][rng.below(4) as usize]),
+            }
+            1
+        }
+        // Octets.
+        3 => {
+            let n = rng.below(5);
+            var(out, n);
+            for _ in 0..n {
+                out.push(rng.below(256) as u8);
+            }
+            1
+        }
+        // Sous-document : un guid, puis ses options (une valeur `Any`).
+        9 => {
+            let guid = ["g", "0196f0a0-0000-7000-8000-000000000001", ""][rng.below(3) as usize];
+            string(out, guid);
+            match rng.below(3) {
+                0 => out.push(127),
+                1 => {
+                    out.push(118);
+                    var(out, 1);
+                    string(out, "gc");
+                    out.push(120);
+                }
+                _ => {
+                    out.push(119);
+                    string(out, "x");
+                }
+            }
+            1
+        }
+        // Déplacement de yrs : la garde le refuse à la lecture.
+        11 => {
+            var(out, 0);
+            var(out, 1);
+            var(out, 1);
             1
         }
         // Objet incorporé.
@@ -421,8 +485,14 @@ fn content(rng: &mut Rng, out: &mut Vec<u8>, kind: u8, len: u32) -> u32 {
     }
 }
 
-/// Une mise à jour hostile, d'après ce que la page connaît (`sv`).
+/// Une mise à jour hostile, d'après ce que la page connaît (`sv`). Une sur deux est tirée **au
+/// large** (constat I-6.2 de la re-relecture 6) : jusqu'à cinq éléments par client, des octets,
+/// des sous-documents, un déplacement de yrs, toutes les références de type, des entrées posées
+/// dans le type que la mise à jour vient de poser, des suppressions de plusieurs clients et
+/// plusieurs plages. Ces formes sont presque toutes refusées : tirées seules, elles divisaient
+/// par deux le nombre de mises à jour acceptées, donc ce que l'essai éprouve après la lecture.
 fn hostile(rng: &mut Rng, sv: &[(u64, u32)], astride_bias: u64) -> Vec<u8> {
+    let wide = rng.chance(50);
     let mut u = Vec::new();
     let n_clients = if rng.chance(15) { 2 } else { 1 };
     var(&mut u, n_clients);
@@ -451,10 +521,12 @@ fn hostile(rng: &mut Rng, sv: &[(u64, u32)], astride_bias: u64) -> Vec<u8> {
                 _ => floor,
             }
         };
-        let n_structs = 1 + rng.below(3);
+        let n_structs = 1 + rng.below(if wide { 5 } else { 3 });
         let mut body = Vec::new();
         let mut clock = start;
         let mut written = 0u64;
+        // Le dernier type que la mise à jour pose : une entrée suivante peut s'y poser.
+        let mut last_type: Option<(u64, u32)> = None;
         for n in 0..n_structs {
             let first_astride = astride && n == 0;
             let roll = rng.below(100);
@@ -487,13 +559,26 @@ fn hostile(rng: &mut Rng, sv: &[(u64, u32)], astride_bias: u64) -> Vec<u8> {
                     70..=94 => 8,
                     _ => 2,
                 }
+            } else if wide {
+                match rng.below(100) {
+                    0..=19 => 1,
+                    20..=37 => 4,
+                    38..=52 => 8,
+                    53..=57 => 2,
+                    58..=64 => 6,
+                    65..=79 => 7,
+                    80..=85 => 5,
+                    86..=91 => 3,
+                    92..=97 => 9,
+                    _ => 11,
+                }
             } else {
                 match rng.below(100) {
                     0..=29 => 1,
                     30..=54 => 4,
                     55..=74 => 8,
-                    75..=77 => 2,
-                    78..=85 => 6,
+                    75..=78 => 2,
+                    79..=85 => 6,
                     86..=93 => 7,
                     _ => 5,
                 }
@@ -509,7 +594,12 @@ fn hostile(rng: &mut Rng, sv: &[(u64, u32)], astride_bias: u64) -> Vec<u8> {
             match rng.below(10) {
                 // Parent nommé.
                 0..=3 => {
-                    if rng.chance(20) {
+                    if let Some(t) = last_type.filter(|_| wide && rng.chance(60)) {
+                        // Dans le type que la mise à jour vient de poser.
+                        head.push(0);
+                        var(&mut head, t.0);
+                        var(&mut head, u64::from(t.1));
+                    } else if rng.chance(20) {
                         head.push(1);
                         string(&mut head, FRAGMENT);
                     } else {
@@ -557,7 +647,10 @@ fn hostile(rng: &mut Rng, sv: &[(u64, u32)], astride_bias: u64) -> Vec<u8> {
             }
             body.push(info);
             body.extend(head);
-            clock += content(rng, &mut body, kind, len);
+            if kind == 7 {
+                last_type = Some((client, clock));
+            }
+            clock += content(rng, &mut body, kind, len, wide);
             written += 1;
         }
         var(&mut u, written);
@@ -565,8 +658,9 @@ fn hostile(rng: &mut Rng, sv: &[(u64, u32)], astride_bias: u64) -> Vec<u8> {
         var(&mut u, u64::from(start));
         u.extend(body);
     }
-    // Le jeu de suppressions.
-    if rng.chance(15) {
+    // Le jeu de suppressions : une plage d'un client ; au large, un ou deux clients, une à trois
+    // plages chacun, parfois au-delà de ce que la page a.
+    if !wide && rng.chance(15) {
         let (c, k) = sv[rng.below(sv.len() as u64) as usize];
         if k > 0 {
             u.push(1);
@@ -575,6 +669,31 @@ fn hostile(rng: &mut Rng, sv: &[(u64, u32)], astride_bias: u64) -> Vec<u8> {
             let at = rng.below(u64::from(k)) as u32;
             var(&mut u, u64::from(at));
             var(&mut u, 1 + rng.below(u64::from(k - at)));
+            return u;
+        }
+    }
+    if wide && rng.chance(25) {
+        let mut picked: Vec<(u64, u32)> = Vec::new();
+        for _ in 0..(1 + rng.below(2)) {
+            let p = sv[rng.below(sv.len() as u64) as usize];
+            if p.1 > 0 && !picked.iter().any(|q| q.0 == p.0) {
+                picked.push(p);
+            }
+        }
+        if !picked.is_empty() {
+            var(&mut u, picked.len() as u64);
+            for (c, k) in picked {
+                var(&mut u, c);
+                let n = 1 + rng.below(3);
+                var(&mut u, n);
+                let mut at = 0u32;
+                for _ in 0..n {
+                    at += rng.below(u64::from(k)) as u32;
+                    let len = 1 + rng.below(u64::from(k + 2)) as u32;
+                    var(&mut u, u64::from(at.min(k + 1)));
+                    var(&mut u, u64::from(len));
+                }
+            }
             return u;
         }
     }
@@ -894,6 +1013,10 @@ fn replay_text(text: &str, stored: bool) -> Vec<String> {
             continue;
         };
         let _ = served.receive(&bytes);
+        if let Some(why) = served.page.unsound_map_entries() {
+            let why: String = why.chars().filter(|c| !c.is_ascii_digit()).collect();
+            findings.push(format!("ligne {n} : {why}"));
+        }
         let sv = served.page.state_vector();
         let mut read = reread(&served.page.encode_state(), stored);
         for _ in 0..40 {
@@ -1048,6 +1171,16 @@ fn a_stored_clock_beyond_two_to_the_31_leaves_a_sound_page() {
 #[test]
 fn an_item_whose_right_origin_is_its_origin_reloads_as_it_lives() {
     assert_eq!(replay_apart("min-38953", false), Ok(()));
+}
+
+/// Ruling R818 : graine 776 de l'essai élargi, voie du journal, vue par l'invariant de la classe
+/// C1 (R817). Une valeur `Any` de deux valeurs, sans la marque d'une entrée de map, placée par
+/// l'origine de l'attribut `id` d'un bloc : yrs en fait une entrée de map. Un second élément de la
+/// même entrée a pour origine sa première valeur : yrs la coupe dans la transaction, et chaque
+/// morceau passait pour une entrée d'une unité. Les deux restaient vivants pour une même clé.
+#[test]
+fn a_many_valued_entry_cut_by_an_item_of_the_same_entry_is_deleted_whole() {
+    assert_eq!(replay_apart("min-j776", true), Ok(()));
 }
 
 /// Les entrées d'une trace, telles quelles.
