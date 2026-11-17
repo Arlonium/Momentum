@@ -1567,3 +1567,99 @@ mod known_limits {
         );
     }
 }
+
+/// `{"toString": 1}` : la valeur qui empêchait l'éditeur de se monter (garde des attributs).
+fn hostile_value() -> yrs::Any {
+    yrs::Any::from(std::collections::HashMap::from([(
+        "toString".to_string(),
+        yrs::Any::Number(yrs::any::Number::Int(1)),
+    )]))
+}
+
+/// La valeur de `backgroundColor` du premier bloc, telle qu'un client la reçoit.
+fn background(client: &Client) -> Option<yrs::Out> {
+    let doc = detached(client);
+    let paragraph = first_content(&doc);
+    let txn = doc.transact();
+    paragraph.get_attribute(&txn, "backgroundColor")
+}
+
+/// Garde des attributs (Rulings R689, R492) : un client à soi écrit `backgroundColor =
+/// {"toString": 1}` par-dessus la valeur d'un bloc (la sonde `V7` de la relecture de C8). La mise
+/// à jour est refusée avant d'être appliquée : sa connexion est fermée, le document n'est pas
+/// rechargé, rien n'est écrit au journal ni relayé, et les autres continuent d'écrire.
+#[tokio::test]
+async fn a_hostile_attribute_closes_its_connection_without_reloading_the_page() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Alpha\n").await;
+    let id = f.ids().await.remove(0);
+    let other = f.client().await;
+    let hostile = f.client().await;
+    let doc = detached(&hostile);
+    let paragraph = first_content(&doc);
+    let update = {
+        let mut txn = doc.transact_mut();
+        paragraph.insert_attribute(&mut txn, "backgroundColor", hostile_value());
+        txn.encode_update_v1()
+    };
+    let before = f.hub.reloads();
+    let stored = f.store.load_doc(f.page).await.unwrap().updates.len();
+    hostile.send_update(&update);
+    assert!(hostile.wait_until(WAIT, |c| c.is_closed()).await, "refusée");
+    f.hub.read_blocks(f.page).await.unwrap();
+    assert_eq!(f.hub.reloads(), before, "le document a été rechargé");
+    assert_eq!(
+        f.store.load_doc(f.page).await.unwrap().updates.len(),
+        stored,
+        "rien au journal"
+    );
+    // L'autre écrit encore, et n'a rien reçu de la valeur.
+    other.type_text(&id, " suite");
+    processed(&other).await;
+    assert!(!other.is_closed());
+    assert_eq!(
+        text(&f.hub.read_blocks(f.page).await.unwrap()),
+        "Alpha suite"
+    );
+    assert!(
+        matches!(background(&other), Some(yrs::Out::Any(yrs::Any::String(s))) if s.as_ref() == "default"),
+        "{:?}",
+        background(&other)
+    );
+}
+
+/// Garde des attributs (Ruling R690) : une page dont le journal porte déjà la valeur (écrite
+/// avant la garde) se charge, et les clients la reçoivent sans elle ; ils y écrivent ensuite.
+#[tokio::test]
+async fn a_hostile_attribute_already_stored_is_served_removed() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd("Alpha\n").await;
+    let id = f.ids().await.remove(0);
+    let update = {
+        let writer = f.client().await;
+        let doc = detached(&writer);
+        let paragraph = first_content(&doc);
+        let mut txn = doc.transact_mut();
+        paragraph.insert_attribute(&mut txn, "backgroundColor", hostile_value());
+        txn.encode_update_v1()
+    };
+    f.store
+        .append_updates(f.page, &[&update], None)
+        .await
+        .unwrap();
+    f.hub.forget(&[f.page]).await;
+    let tab = f.client().await;
+    assert!(background(&tab).is_none(), "{:?}", background(&tab));
+    tab.type_text(&id, " suite");
+    processed(&tab).await;
+    assert!(!tab.is_closed());
+    assert_eq!(
+        text(&f.hub.read_blocks(f.page).await.unwrap()),
+        "Alpha suite"
+    );
+    // Rechargée encore (le journal porte toujours l'entrée), elle se relit de même.
+    f.hub.forget(&[f.page]).await;
+    let again = f.client().await;
+    assert!(background(&again).is_none());
+    assert_eq!(text(&again.blocks()), "Alpha suite");
+}
