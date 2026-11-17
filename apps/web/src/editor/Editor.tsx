@@ -24,7 +24,6 @@ import "katex/dist/katex.min.css";
 import { syntaxHighlighter } from "@blocknote/code-block";
 import { filterSuggestionItems } from "@blocknote/core";
 import { SideMenuExtension } from "@blocknote/core/extensions";
-import { fr } from "@blocknote/core/locales";
 import { withCollaboration } from "@blocknote/core/yjs";
 import { BlockNoteView } from "@blocknote/mantine";
 import {
@@ -45,7 +44,7 @@ import {
   useExtensionState,
   type SideMenuProps,
 } from "@blocknote/react";
-import { locales as multiColumnLocales, multiColumnDropCursor } from "@blocknote/xl-multi-column";
+import { multiColumnDropCursor } from "@blocknote/xl-multi-column";
 import {
   useCallback,
   useEffect,
@@ -68,6 +67,7 @@ import { focusMentionLink } from "../mentions/Mention";
 import { mentionMenuOpen, MentionMenus, type MentionContext } from "../mentions/MentionMenu";
 import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
+import { DICTIONARY } from "./dictionary";
 import { COPY_REFUSED, duplicateFromGesture, handleBlockIds, isDuplicateShortcut, selectedBlockIds } from "./duplicate";
 import { dismissNotice } from "./editorNotice";
 import { shownUrl } from "./files";
@@ -105,7 +105,8 @@ type Props = {
 
 /**
  * Ce que partagent l'éditeur de la page et celui d'un aperçu de version : le schéma des blocs, la
- * langue, les extensions. Un aperçu montre donc une version comme la page la montrerait.
+ * langue (`dictionary.ts`, R766), les extensions. Un aperçu montre donc une version comme la page la
+ * montrerait.
  * `followBlock` : le curseur de l'onglet suit son bloc quand quelqu'un d'autre le déplace.
  * `linkBound` : un lien de plus de 16 Kio, que le serveur refuserait, n'est pas posé (R495).
  * `redoKeys` : « rétablir » sans rien à rétablir ne retombe pas sur l'annulation (R731, R732).
@@ -117,7 +118,7 @@ type Props = {
 export const EDITOR_OPTIONS = {
   schema,
   resolveFileUrl: async (url: string) => (url === "" ? "" : shownUrl(url)),
-  dictionary: { ...fr, multi_column: multiColumnLocales.fr },
+  dictionary: DICTIONARY,
   dropCursor: multiColumnDropCursor,
   extensions: [syntaxHighlighter, followBlock, linkBound, redoKeys],
 };

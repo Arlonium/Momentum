@@ -23,6 +23,8 @@ test("slash_menu_offers_the_rich_blocks_in_order", async () => {
   // Le groupe vient après ceux de BlockNote, d'un seul tenant.
   const groups = [...new Set(all.map((item) => item.group))];
   expect(groups[groups.length - 1]).toBe(RICH_GROUP);
+  // Les blocs de fichier, dans un seul groupe (R766 : « Médias » et « Média » de BlockNote).
+  expect(groups.filter((group) => group?.startsWith("Média"))).toEqual(["Médias"]);
   const first = all.findIndex((item) => item.group === RICH_GROUP);
   expect(all.slice(first).every((item) => item.group === RICH_GROUP)).toBe(true);
   // Des noms en français et en anglais : chacun retrouve son bloc.
