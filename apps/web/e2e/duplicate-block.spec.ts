@@ -4,7 +4,7 @@
 // deux blocs, vus par l'autre personne de la page, et les garder pendant qu'on écrit dans l'un et
 // dans l'autre. Hors du texte de l'éditeur, Ctrl+D reste au navigateur (le favori).
 import { expect, test, type Page } from "@playwright/test";
-import { closeContexts, createPage, getMmd, openPage, ownerAndMember, putMmd, titleOf, unique } from "./helpers";
+import { closeContexts, createPage, getMmd, openPage, ownerAndMember, putMmd, titleOf, treeRow, unique, waitSynced } from "./helpers";
 
 test.afterEach(closeContexts);
 
@@ -175,4 +175,30 @@ test("escape_on_the_handle_menu_gives_the_focus_back_to_the_text", async ({ brow
   // Jamais sur `body` : au texte de l'éditeur, où la frappe reprend.
   await expect(mona.locator(".mm-editor .bn-editor")).toBeFocused();
   await expect.poll(() => textsOf(mona)).toEqual(["Premier bloc", "Deuxième bloc"]);
+});
+
+test("a_refused_copy_message_leaves_with_the_page", async ({ browser }) => {
+  // Une page de 1 001 blocs : Ctrl+A deux fois puis Ctrl+D en copierait plus de 1 000.
+  const team = await ownerAndMember();
+  const big = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Grande ${unique()}` });
+  const other = await createPage(team.aliceApi, { spaceId: team.space.id, title: `Autre ${unique()}` });
+  const mmd = `${Array.from({ length: 1_001 }, (_, i) => `Bloc ${i + 1}`).join("\n\n")}\n`;
+  await putMmd(team.aliceApi, big.id, mmd);
+  const mona = await openPage(browser, big.id, team.alice);
+  await blockContent(mona, "Bloc 1").click();
+  await mona.keyboard.press("Control+a");
+  await mona.keyboard.press("Control+a");
+  await mona.keyboard.press("Control+d");
+  const refused = mona.locator(".mm-copy-refused[role=alert]");
+  await expect(refused).toHaveText(
+    "Trop de blocs à dupliquer : 1 000 au plus d'un coup, sous-blocs compris. Rien n'a été copié.",
+  );
+  // Le message dit un geste de cette page : il part avec elle, sans attendre ses six secondes.
+  await treeRow(mona, other.id).getByRole("link").click();
+  await expect(titleOf(mona)).toHaveValue(other.title);
+  await waitSynced(mona);
+  // Lu une fois, sans attendre : une attente de cinq secondes laisserait au message le temps de partir
+  // de lui-même (six secondes après la touche), et le test passerait à tort.
+  expect(await refused.count()).toBe(0);
+  expect(await getMmd(team.aliceApi, big.id)).toBe(mmd);
 });
