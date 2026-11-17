@@ -18,6 +18,10 @@ type Received = {
   method: string;
   path: string;
   body: unknown;
+  /** Le corps tel qu'il part, quand ce n'est pas du JSON (un fichier). */
+  raw: unknown;
+  /** Le type que l'appel déclare pour son corps. */
+  type: string | undefined;
   /** Le compte que l'appel nomme (`X-Mementum-Account`, R540) ; `undefined` : aucun. */
   account: string | undefined;
   answered: boolean;
@@ -64,6 +68,8 @@ beforeEach(async () => {
           method: init.method ?? "GET",
           path,
           body: typeof init.body === "string" ? JSON.parse(init.body) : undefined,
+          raw: typeof init.body === "string" ? undefined : init.body,
+          type: new Headers(init.headers).get("content-type") ?? undefined,
           account: new Headers(init.headers).get("x-mementum-account") ?? undefined,
           answered: false,
           answer(status, body) {
@@ -1342,4 +1348,69 @@ test("a_duplication_is_posted_without_a_body_and_its_refusal_is_never_sent_again
   await flush();
   expect(count("POST", "/api/v1/pages/p1/duplicate")).toBe(2);
   expect(asked).toBe(0);
+});
+
+// Fichiers (Task C8) : un envoi est un appel comme un autre. Il part par `send`, nomme le compte de
+// l'application (R540), et son refus de session tardif repart une fois, avec le même fichier (R666).
+
+const FILE_INFO = {
+  id: "f1",
+  url: "/api/v1/pages/p1/files/f1",
+  name: "été 2026.png",
+  size: 3,
+  mime: "image/png",
+};
+
+test("an_upload_sends_the_file_as_it_is_with_its_name_in_the_address_and_names_the_account", async () => {
+  await loadedAs("alice");
+  const file = new File([new Uint8Array([1, 2, 3])], "été 2026 & co?.png", { type: "text/html" });
+  const sent = api.uploadFile("p1", file);
+  const path = "/api/v1/pages/p1/files?name=%C3%A9t%C3%A9%202026%20%26%20co%3F.png";
+  const call = await waiting("POST", path);
+  // Le fichier lui-même, pas une copie ni du JSON ; le type déclaré n'est jamais celui du fichier.
+  expect(call.raw).toBe(file);
+  expect(call.type).toBe("application/octet-stream");
+  expect(call.account).toBe("alice");
+  call.answer(201, FILE_INFO);
+  await expect(sent).resolves.toEqual(FILE_INFO);
+});
+
+test("an_upload_refused_before_a_login_is_sent_again_once_with_the_same_file", async () => {
+  await loadedAs("alice");
+  const file = new File(["abc"], "a.png");
+  const sent = api.uploadFile("p1", file);
+  const path = "/api/v1/pages/p1/files?name=a.png";
+  const first = await waiting("POST", path);
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  const again = await waiting("POST", path);
+  expect(again.raw).toBe(file);
+  expect(again.account).toBe("alice");
+  again.answer(201, FILE_INFO);
+  await expect(sent).resolves.toEqual(FILE_INFO);
+  expect(count("POST", path)).toBe(2);
+  expect(asked).toBe(0);
+});
+
+test("a_cancelled_upload_rejects_with_the_cancellation_and_a_cut_one_with_an_unreachable_server", async () => {
+  await loadedAs("alice");
+  const controller = new AbortController();
+  const cancelled = api.uploadFile("p1", new File(["abc"], "a.png"), controller.signal);
+  const first = await waiting("POST", "/api/v1/pages/p1/files?name=a.png");
+  controller.abort();
+  first.fail();
+  await expect(cancelled).rejects.toBeInstanceOf(TypeError);
+  // Coupé sans annulation : pas de réponse du serveur (statut 0), ce que l'appelant relit.
+  const cut = api.uploadFile("p1", new File(["abc"], "b.png"));
+  (await waiting("POST", "/api/v1/pages/p1/files?name=b.png")).fail();
+  await expect(cut).rejects.toMatchObject({ status: 0, code: null });
+  expect(asked).toBe(0);
+});
+
+test("the_limits_of_files_are_read_from_their_route", async () => {
+  await loadedAs("alice");
+  const limits = api.getFileLimits();
+  (await waiting("GET", "/api/v1/files/limits")).answer(200, { maxFileBytes: 1048576 });
+  await expect(limits).resolves.toEqual({ maxFileBytes: 1048576 });
 });

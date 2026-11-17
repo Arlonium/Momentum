@@ -68,6 +68,8 @@ type Options = {
   editable?: boolean;
   /** La page de l'éditeur, comme `Editor` la donne à sa vue (`session.pageId`). */
   pageId?: string;
+  /** De quoi envoyer un fichier, comme `Editor` le donne à l'éditeur d'une page qu'on modifie. */
+  uploadFile?: (file: File, blockId?: string) => Promise<string | Record<string, unknown>>;
   /** Ce que React rend : par défaut, la vue de l'éditeur de la page. */
   view?: (editor: MementumEditor) => ReactElement;
 };
@@ -80,6 +82,7 @@ export async function mountEditor({
   clientID = 7,
   editable = true,
   pageId,
+  uploadFile,
   view = (editor) => <EditorView editor={editor} editable={editable} pageId={pageId} />,
 }: Options = {}): Promise<Mounted> {
   stubMatchMedia();
@@ -101,7 +104,7 @@ export async function mountEditor({
   doc.on("update", (update: Uint8Array, origin: unknown) => {
     if (origin !== REMOTE) writes.push(update);
   });
-  const editor = createEditor(doc);
+  const editor = createEditor(doc, uploadFile);
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
@@ -176,10 +179,11 @@ export function blockWindow(label: string): HTMLElement | null {
 }
 
 /** Un éditeur de la page, lié à `doc`, sans fournisseur. */
-function createEditor(doc: Y.Doc): MementumEditor {
+function createEditor(doc: Y.Doc, uploadFile?: Options["uploadFile"]): MementumEditor {
   return BlockNoteEditor.create(
     withCollaboration({
       ...EDITOR_OPTIONS,
+      ...(uploadFile ? { uploadFile } : {}),
       collaboration: {
         fragment: doc.getXmlFragment(FRAGMENT),
         user: { name: "Mona", color: "#66655f" },

@@ -3562,3 +3562,119 @@ button.mm-reaction:hover {
   margin: 0;
   color: var(--mm-text-secondary);
 }
+
+/* Fichiers (Task C8). Le nom et la légende d'un fichier viennent du document : du texte isolé. */
+
+.bn-file-name,
+.bn-file-block-content-wrapper figcaption {
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+}
+
+/* De quoi avoir le fichier, à côté de son nom ; offert aussi à qui ne fait que lire. */
+.mm-file-download {
+  flex: none;
+  margin-inline-start: 10px;
+  padding: 1px 8px;
+  border: 1px solid var(--mm-border);
+  border-radius: 6px;
+  background: var(--mm-background);
+  color: var(--mm-accent);
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.mm-file-download:hover {
+  color: var(--mm-accent-hover);
+  text-decoration: underline;
+}
+
+.mm-file-download:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: 1px;
+}
+
+.mm-file-unavailable {
+  flex: none;
+  margin-inline-start: 10px;
+  color: var(--mm-text-secondary);
+  font-size: 13px;
+}
+
+/* L'attente d'un envoi : BlockNote y écrit « Loading... » en dur ; masqué, et dit en français. */
+.bn-file-loading-preview {
+  font-size: 0;
+}
+
+.bn-file-loading-preview::after {
+  content: "Envoi…";
+  color: var(--mm-text-secondary);
+  font-size: 14px;
+}
+
+/* Les envois en cours et les envois refusés d'une page, sous la barre du haut, par-dessus la page. */
+.mm-file-notices {
+  position: fixed;
+  z-index: 90;
+  top: 56px;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(560px, calc(100vw - 32px));
+  color: var(--mm-text);
+  font-size: 14px;
+  transform: translateX(-50%);
+}
+
+.mm-file-uploads,
+.mm-file-refusals {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--mm-popover-border);
+  border-radius: 8px;
+  box-shadow: var(--mm-popover-shadow);
+}
+
+.mm-file-uploads {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--mm-background);
+  list-style: none;
+}
+
+.mm-file-uploads li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mm-file-upload-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mm-file-refusals {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--mm-danger-soft);
+}
+
+.mm-file-refusal-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mm-file-refusal-texts p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

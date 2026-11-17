@@ -10,10 +10,11 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getComments, getInfo, getPage } from "../api";
 import { useServerSchema } from "../editor/useServerSchema";
 import { CLIENT_SCHEMA_VERSION } from "../editor/version";
+import { filesOf, uploader } from "../editor/files";
 import { clearNotices, PAGE_LEFT, postNotice } from "../mentions/notice";
 import { SessionContext } from "../session/session";
 import { until } from "../test/hooks";
-import { page, space, unauthenticated } from "../test/pages";
+import { notFound, page, space, unauthenticated, unreachable } from "../test/pages";
 import { PageView } from "./PageView";
 
 /** Les sessions de synchro créées par la page, et ce que la fenêtre « Historique » a reçu. */
@@ -26,6 +27,8 @@ const probe = vi.hoisted(() => ({
   history: null as null | { afterLogin?: () => Promise<void>; onClose: () => void },
   /** Ce que l'éditeur a reçu pour mentionner, à chacun de ses rendus. */
   mentions: [] as unknown[],
+  /** Ce que l'éditeur a reçu pour envoyer des fichiers, à chacun de ses rendus. */
+  files: [] as unknown[],
 }));
 
 vi.mock("../editor/collab", async () => {
@@ -61,8 +64,9 @@ vi.mock("../editor/collab", async () => {
 });
 
 vi.mock("../editor/LazyEditor", () => ({
-  LazyEditor: (props: { mentions?: unknown }) => {
+  LazyEditor: (props: { mentions?: unknown; files?: unknown }) => {
     probe.mentions.push(props.mentions);
+    probe.files.push(props.files);
     return <div className="mm-editor" />;
   },
 }));
@@ -99,6 +103,7 @@ beforeEach(() => {
   probe.sessions = [];
   probe.history = null;
   probe.mentions = [];
+  probe.files = [];
   checkSchema.mockClear();
   vi.mocked(getPage).mockReset();
   vi.mocked(getComments).mockReset();
@@ -428,4 +433,148 @@ test("page_view_breaks_the_wait_for_the_account_of_a_page_creation_when_the_page
   );
   await act(async () => root.render(<div />));
   expect(left).toEqual([PAGE_LEFT]);
+});
+
+// Fichiers (Task C8) : ce que la page donne à l'éditeur pour envoyer, et ce qu'elle montre d'un envoi.
+
+type FilesProp = {
+  onRefused: (message: string) => void;
+  reread: () => Promise<PageNode | null | undefined>;
+};
+const filesProp = () => probe.files[probe.files.length - 1] as FilesProp;
+const alerts = () => [...host.querySelectorAll('.mm-file-refusals[role="alert"] p')].map((p) => p.textContent);
+
+test("page_view_shows_a_refused_upload_under_the_top_bar_until_it_is_closed", async () => {
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  expect(alerts()).toEqual([]);
+  await act(async () => filesProp().onRefused("« photo.png » n'a pas été envoyé : la page est à la corbeille."));
+  await act(async () => filesProp().onRefused("un second refus"));
+  expect(alerts()).toEqual(["« photo.png » n'a pas été envoyé : la page est à la corbeille.", "un second refus"]);
+  // Juste sous la barre du haut, avant le corps de la page.
+  const box = host.querySelector(".mm-file-notices")!;
+  expect(box.previousElementSibling?.matches("header.mm-topbar")).toBe(true);
+  // Ce qu'on donne à l'éditeur ne change pas d'un rendu à l'autre (il ne serait pas rendu de nouveau).
+  expect(probe.files.length).toBeGreaterThan(0);
+  expect(probe.files.every((files) => files === probe.files[0])).toBe(true);
+  // « Fermer » : le message part, et le focus, qui était sur le bouton, va au titre, pas à `body`.
+  const close = box.querySelector<HTMLButtonElement>('button[aria-label="Fermer"]')!;
+  close.focus();
+  await click(close);
+  expect(alerts()).toEqual([]);
+  expect(host.querySelector(".mm-file-notices")).toBeNull();
+  expect(document.activeElement).toBe(host.querySelector(".mm-title-input"));
+});
+
+test("escape_closes_the_refusals_of_uploads_only_from_inside_them", async () => {
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  await act(async () => filesProp().onRefused("un refus"));
+  const press = (target: Element) =>
+    act(async () => {
+      target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+  // Tapé ailleurs (fermer un menu, un panneau) : le message reste.
+  await press(host.querySelector(".mm-title-input")!);
+  await press(document.body);
+  expect(alerts()).toEqual(["un refus"]);
+  const close = host.querySelector<HTMLButtonElement>('.mm-file-notices button[aria-label="Fermer"]')!;
+  close.focus();
+  await press(close);
+  expect(alerts()).toEqual([]);
+  expect(document.activeElement).toBe(host.querySelector(".mm-title-input"));
+});
+
+test("page_view_shows_the_uploads_in_course_and_cancels_them_when_the_page_is_left", async () => {
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  const signals: AbortSignal[] = [];
+  const files = filesProp();
+  const upload = uploader({
+    pageId: "x",
+    limits: async () => ({ maxFileBytes: 1024 }),
+    blockType: () => "image",
+    ...files,
+    signal: new AbortController().signal,
+    upload: (_page, _file, signal) =>
+      new Promise((_done, fail) => {
+        signals.push(signal!);
+        signal!.addEventListener("abort", () => fail(new DOMException("annulé", "AbortError")));
+      }),
+  });
+  const outcomes: string[] = [];
+  const start = (name: string) =>
+    void upload(new File(["abc"], name), "b").then(
+      () => outcomes.push(`${name} posé`),
+      () => outcomes.push(`${name} arrêté`),
+    );
+  await act(async () => {
+    start("un.png");
+    start("deux.png");
+  });
+  await until(host, () => host.querySelectorAll(".mm-file-uploads li").length === 2, "les deux envois");
+  const rows = () =>
+    [...host.querySelectorAll(".mm-file-uploads li")].map((li) => li.querySelector('[role="status"]')!.textContent);
+  expect(rows()).toEqual(["Envoi de un.png…", "Envoi de deux.png…"]);
+  // « Annuler » le premier : lui seul s'arrête, rien n'est dit, et le focus ne tombe pas sur `body`.
+  const cancel = [...host.querySelectorAll<HTMLButtonElement>(".mm-file-uploads button")].find(
+    (button) => button.getAttribute("aria-label") === "Annuler l'envoi de ⁨un.png⁩",
+  )!;
+  cancel.focus();
+  await click(cancel);
+  await until(host, () => rows().length === 1, "l'envoi annulé parti");
+  expect(rows()).toEqual(["Envoi de deux.png…"]);
+  expect(signals.map((s) => s.aborted)).toEqual([true, false]);
+  expect(alerts()).toEqual([]);
+  expect(document.activeElement).toBe(host.querySelector(".mm-title-input"));
+  // La page est quittée : l'autre envoi est annulé, et plus rien ne se dit ni ne se garde.
+  await act(async () => root.render(<div />));
+  expect(signals.map((s) => s.aborted)).toEqual([true, true]);
+  await until(host, () => outcomes.length === 2, "les deux envois arrêtés");
+  expect(outcomes).toEqual(["un.png arrêté", "deux.png arrêté"]);
+  expect(filesOf("x")).toEqual({ uploads: [], refusals: [] });
+  files.onRefused("après la page");
+  expect(filesOf("x")).toEqual({ uploads: [], refusals: [] });
+});
+
+test("the_refusals_of_uploads_of_a_page_are_not_shown_on_the_next", async () => {
+  const first = page("x", { level: "edit" });
+  const second = page("y", { level: "edit" });
+  vi.mocked(getPage).mockImplementation(async (id) => (id === "x" ? first : second));
+  await show(first);
+  await act(async () => filesProp().onRefused("un refus de la page x"));
+  expect(alerts()).toEqual(["un refus de la page x"]);
+  await show(second);
+  expect(alerts()).toEqual([]);
+  // Témoin : la page suivante dit les siens.
+  await act(async () => filesProp().onRefused("un refus de la page y"));
+  expect(alerts()).toEqual(["un refus de la page y"]);
+});
+
+test("page_view_rereads_the_page_for_an_upload_and_says_what_it_has_become", async () => {
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  const lowered = page("x", { level: "read" });
+  vi.mocked(getPage).mockResolvedValue(lowered);
+  let read: PageNode | null | undefined;
+  await act(async () => {
+    read = await filesProp().reread();
+  });
+  expect(read).toEqual(lowered);
+  // Le serveur injoignable : rien de su.
+  vi.mocked(getPage).mockRejectedValue(unreachable());
+  await act(async () => {
+    read = await filesProp().reread();
+  });
+  expect(read).toBeUndefined();
+  // La page n'est plus là pour ce compte.
+  vi.mocked(getPage).mockRejectedValue(notFound());
+  await act(async () => {
+    read = await filesProp().reread();
+  });
+  expect(read).toBeNull();
 });

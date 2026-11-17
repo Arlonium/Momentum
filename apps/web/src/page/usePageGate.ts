@@ -60,9 +60,11 @@ export type PageGate = {
   check: ConnectionCheck;
   /**
    * Relit la page hors d'une connexion : ce qu'elle est devenue (`onPage`, `onGone`). Un
-   * serveur injoignable ne dit rien : la prochaine connexion de synchro la relira.
+   * serveur injoignable ne dit rien : la prochaine connexion de synchro la relira. Rend ce qu'on
+   * sait alors de la page : elle-même, `null` si elle n'est plus là pour ce compte, `undefined` si
+   * le serveur ne répond pas (un envoi de fichier coupé y lit pourquoi, `editor/files.ts`).
    */
-  reread: () => Promise<void>;
+  reread: () => Promise<PageNode | null | undefined>;
 };
 
 export function usePageGate(inputs: Inputs): PageGate {
@@ -133,9 +135,10 @@ export function usePageGate(inputs: Inputs): PageGate {
 
   const reread = useCallback(async () => {
     try {
-      await read();
+      return await read();
     } catch {
       // serveur injoignable : rien à dire ici
+      return undefined;
     }
   }, [read]);
 

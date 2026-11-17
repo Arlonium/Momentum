@@ -7,6 +7,10 @@
 // s'écrivent avec « Peut commenter », même quand l'éditeur est en lecture seule. Le panneau
 // rend le focus, en se fermant, à ce qui l'avait avant qu'il s'ouvre.
 //
+// Sous la barre du haut, ce que la page dit de ses fichiers (`FileNotices`) : les envois en cours et
+// les envois refusés. Ils sont à la page, pas à sa session : ils partent quand on la quitte, et ses
+// envois sont alors annulés (Task C8).
+//
 // Rien ne s'écrit quand le schéma du serveur n'est plus celui de l'onglet (R35), quand la page
 // est à la corbeille, ou quand le niveau du compte ne permet que de la lire : le titre et
 // l'éditeur sont verrouillés, et un bandeau dit pourquoi. Ce que le compte peut faire de la
@@ -26,6 +30,7 @@ import { CommentsPanel } from "../comments/CommentsPanel";
 import { useComments } from "../comments/useComments";
 import { useCommentsPanel } from "../comments/useCommentsPanel";
 import { CollabSession } from "../editor/collab";
+import { enterFiles, leaveFiles, sayRefusal } from "../editor/files";
 import { requestedFixture } from "../editor/fixtures";
 import { LazyEditor } from "../editor/LazyEditor";
 import { ReaderBanner, ReadOnlyBanner } from "../editor/ReadOnlyBanner";
@@ -38,6 +43,7 @@ import { MentionNotices, PAGE_LEFT } from "../mentions/notice";
 import { canComment, canEdit, writesOutsideEditor } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
 import { Breadcrumb } from "./Breadcrumb";
+import { FileNotices } from "./FileNotices";
 import { PageMenu } from "./PageMenu";
 import { Presence } from "./Presence";
 import { TitleInput } from "./TitleInput";
@@ -233,11 +239,25 @@ export function PageView({
     if (text) text.focus();
     else focusTitle();
   }, [focusTitle]);
+  // Les fichiers de la page (`editor/files.ts`) : ses envois en cours et ses refus se montrent tant
+  // qu'elle est ouverte ; quittée, ses envois sont annulés et plus rien ne s'y dit.
+  useEffect(() => {
+    enterFiles(id);
+    return () => leaveFiles(id);
+  }, [id]);
+  // De quoi envoyer, pour l'éditeur : ce que la page dit d'un envoi qui n'aboutit pas, et de quoi la
+  // relire (un refus, ou une coupure, disent qu'un droit ou la page ont changé).
+  const files = useMemo(
+    () => ({ onRefused: (message: string) => sayRefusal(id, message), reread }),
+    [id, reread],
+  );
   // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.
   const editor = useMemo(
     () =>
-      session && <LazyEditor session={session} fixture={fixture} onComment={menuComment} mentions={mentions} />,
-    [session, fixture, menuComment, mentions],
+      session && (
+        <LazyEditor session={session} fixture={fixture} onComment={menuComment} mentions={mentions} files={files} />
+      ),
+    [session, fixture, menuComment, mentions, files],
   );
 
   return (
@@ -269,6 +289,8 @@ export function PageView({
           onRefused={rereadPage}
         />
       </header>
+      {/* Les envois de fichiers en cours et refusés, par-dessus la page : rien ne bouge sous le pointeur. */}
+      <FileNotices pageId={id} focusBack={focusText} />
       {/* Les messages d'une création par `[[` : ceux de la page, que la session soit recréée ou non. */}
       <MentionNotices focusBack={focusText} />
       <div className="mm-page-body">

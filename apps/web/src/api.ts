@@ -39,6 +39,8 @@ import type {
   ErrorBody,
   ErrorCode,
   Favorites,
+  FileInfo,
+  FileLimits,
   Info,
   InvitationCreated,
   InvitationInfo,
@@ -404,9 +406,11 @@ async function send(
   // Le compte nommé est celui du premier envoi : le rejeu le garde (R540, R543).
   const account = UNNAMED_ROUTES.has(path) ? null : appAccount;
   const headers: Record<string, string> = {};
-  if (body !== undefined) headers["content-type"] = "application/json";
+  // Un fichier part tel quel (`uploadFile`) : ses octets, sous un type que le serveur ne lit pas.
+  const raw = typeof Blob !== "undefined" && body instanceof Blob;
+  if (body !== undefined) headers["content-type"] = raw ? "application/octet-stream" : "application/json";
   if (account !== null) headers[ACCOUNT_HEADER] = account;
-  const payload = body === undefined ? undefined : JSON.stringify(body);
+  const payload = body === undefined ? undefined : raw ? (body as Blob) : JSON.stringify(body);
   for (; ; replays += 1) {
     const sent = stamp();
     let res: Response;
@@ -858,6 +862,35 @@ export function setFavorite(pageId: string, on: boolean): Promise<void> {
  */
 export function duplicatePage(id: string): Promise<PageNode> {
   return call("POST", `${page(id)}/duplicate`);
+}
+
+// Fichiers (R245 à R248) : un fichier appartient à la page où il a été envoyé ; le lire demande de
+// lire la page, l'envoyer de pouvoir la modifier. Il se lit par son adresse (`FileInfo.url`), que
+// porte la prop `url` de son bloc ; `editor/files.ts` dit quelles adresses l'éditeur charge.
+
+/** `GET /api/v1/files/limits` : la taille maximale d'un fichier sur cette instance. */
+export function getFileLimits(): Promise<FileLimits> {
+  return call("GET", "/api/v1/files/limits");
+}
+
+/**
+ * `POST /api/v1/pages/{id}/files?name=<nom>` : le corps est le fichier, tel quel ; `201`, son
+ * attache (`url` va dans le bloc, `mime` est le type que le serveur a lu dans ses octets). Refus :
+ * `404`, `403` sous « Peut modifier », `409 trashed`, `413 file_too_large`, dits une fois le corps
+ * reçu. Un fichier plus gros que la limite, ou une session perdue, n'arrivent le plus souvent au
+ * navigateur que comme une coupure (le serveur répond sans lire le corps, R505) : l'appelant lit la
+ * limite avant d'envoyer, et relit la page après une coupure. `signal` annule l'envoi. Comme tout
+ * appel, il nomme le compte de l'application (R540) et repart une fois après un refus de session
+ * tardif (R347) : le fichier ne change pas, et un `401` n'a rien écrit (R666).
+ */
+export async function uploadFile(pageId: string, file: File, signal?: AbortSignal): Promise<FileInfo> {
+  const res = await send("POST", `${page(pageId)}/files?name=${encodeURIComponent(file.name)}`, file, signal);
+  try {
+    return (await res.json()) as FileInfo;
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    throw new ApiError(0, null, UNREACHABLE);
+  }
 }
 
 /** Longueur maximale d'un titre, en caractères Unicode (le serveur fait foi, R30). */

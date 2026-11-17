@@ -70,6 +70,7 @@ import { FRAGMENT, type CollabSession } from "./collab";
 import type { MementumDebug, MementumEditor } from "./debug";
 import { COPY_REFUSED, duplicateFromGesture, handleBlockIds, isDuplicateShortcut, selectedBlockIds } from "./duplicate";
 import { dismissNotice } from "./editorNotice";
+import { fileLimits, shownUrl, uploader, type UploaderOptions } from "./files";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
 import { linkBound } from "./linkBound";
@@ -92,6 +93,12 @@ type Props = {
    * créer une sous-page. `null` : pas de menus (un test, une page qu'on ne modifie pas).
    */
   mentions?: Omit<MentionContext, "pageId" | "roster"> | null;
+  /**
+   * De quoi envoyer un fichier dans la page (`files.ts`) : ce que la page dit d'un envoi qui n'aboutit
+   * pas, et de quoi la relire. `null` : rien ne s'envoie (un test). Une session en lecture seule
+   * n'envoie jamais rien, qu'il soit donné ou non.
+   */
+  files?: Pick<UploaderOptions, "onRefused" | "reread"> | null;
 };
 
 /**
@@ -99,18 +106,54 @@ type Props = {
  * langue, les extensions. Un aperçu montre donc une version comme la page la montrerait.
  * `followBlock` : le curseur de l'onglet suit son bloc quand quelqu'un d'autre le déplace.
  * `linkBound` : un lien de plus de 16 Kio, que le serveur refuserait, n'est pas posé (R495).
+ * `resolveFileUrl` : une image, une vidéo ou un son ne sont chargés que d'une adresse permise
+ * (`shownUrl`, `files.ts`), jamais de l'adresse du document telle quelle. Rien pour envoyer : seul
+ * l'éditeur d'une page qu'on modifie en reçoit de quoi (`Editor`), jamais un aperçu.
  */
 export const EDITOR_OPTIONS = {
   schema,
+  resolveFileUrl: async (url: string) => shownUrl(url),
   dictionary: { ...fr, multi_column: multiColumnLocales.fr },
   dropCursor: multiColumnDropCursor,
   extensions: [syntaxHighlighter, followBlock, linkBound],
 };
 
-export function Editor({ session, fixture = null, onComment = null, mentions = null }: Props) {
+export function Editor({ session, fixture = null, onComment = null, mentions = null, files = null }: Props) {
+  // Les envois de fichiers de cet éditeur (`files.ts`) : arrêtés quand il part (page quittée,
+  // session recréée), ce qu'ils auraient posé ne le serait plus pour personne. Faits une fois par
+  // session, comme l'éditeur ; ce que la page donne (`files`) est lu à chaque envoi dans une
+  // référence, et en changer ne recrée rien.
+  const latestFiles = useRef(files);
+  latestFiles.current = files;
+  const created = useRef<MementumEditor | null>(null);
+  const uploads = useRef<{ session: CollabSession; stop: AbortController; send?: ReturnType<typeof uploader> } | null>(
+    null,
+  );
+  if (uploads.current?.session !== session) {
+    const stop = new AbortController();
+    uploads.current = {
+      session,
+      stop,
+      // Une session en lecture seule n'envoie rien : ni panneau d'envoi, ni dépôt, ni collage.
+      send:
+        session.readOnly || files === null
+          ? undefined
+          : uploader({
+              pageId: session.pageId,
+              limits: fileLimits,
+              blockType: (id) => created.current?.getBlock(id)?.type,
+              onRefused: (message) => latestFiles.current?.onRefused(message),
+              reread: () => latestFiles.current?.reread() ?? Promise.resolve(undefined),
+              signal: stop.signal,
+            }),
+    };
+  }
+  const { stop, send: uploadFile } = uploads.current;
+  useEffect(() => () => stop.abort(), [stop]);
   const editor = useCreateBlockNote(
     withCollaboration({
       ...EDITOR_OPTIONS,
+      ...(uploadFile ? { uploadFile } : {}),
       collaboration: {
         fragment: session.doc.getXmlFragment(FRAGMENT),
         user: session.user,
@@ -126,6 +169,7 @@ export function Editor({ session, fixture = null, onComment = null, mentions = n
     }),
     [session],
   );
+  created.current = editor as unknown as MementumEditor;
 
   const subscribe = useCallback((onChange: () => void) => session.subscribe(onChange), [session]);
   const synced = useSyncExternalStore(subscribe, () => session.synced);
