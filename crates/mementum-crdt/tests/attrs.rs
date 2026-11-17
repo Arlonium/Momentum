@@ -1,4 +1,4 @@
-//! La garde des attributs de bloc (Rulings R689 à R700, module `attrs`).
+//! La garde des attributs de bloc (Rulings R689 à R701, module `attrs`).
 //!
 //! Le constat (relecture de la Task C8, sondes `V7` et `V9`) : Yjs garde toute valeur JSON dans
 //! un attribut d'élément, y-prosemirror la passe telle quelle au nœud, et BlockNote écrit

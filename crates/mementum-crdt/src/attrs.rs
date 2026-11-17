@@ -1,4 +1,4 @@
-//! Garde des attributs de bloc (Rulings R689 à R700).
+//! Garde des attributs de bloc (Rulings R689 à R701).
 //!
 //! Yjs garde toute valeur JSON dans un attribut d'élément, y-prosemirror la passe telle quelle au
 //! nœud de l'éditeur, et BlockNote écrit `String(valeur)` de chaque prop dans un attribut
