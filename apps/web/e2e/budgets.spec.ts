@@ -25,6 +25,8 @@
 // avec 1 000 pages de plus dans l'arbre (Ruling R43) : l'ouverture ne doit pas suivre le
 // nombre de pages de la barre latérale.
 import { expect, test, type APIRequestContext, type Browser, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   closeContexts,
   createPage,
@@ -312,6 +314,87 @@ test.describe("blocs riches", () => {
 
   test("open_1000_callout_page_under_300ms", async ({ browser }) => {
     expect(await openSmallPages(browser, ", tous des callouts", callouts)).toBeLessThan(300);
+  });
+});
+
+/**
+ * Une page d'images (Task C8) : 1 000 blocs dont 50 images, un bloc sur vingt, chacune un fichier de
+ * la page, envoyé par l'API avant la mesure. Elle tient le budget des 1 000 blocs par la mesure
+ * commune (le premier bloc affiché dans l'éditeur synchronisé) : les requêtes des images ne retardent
+ * pas la synchro. Le temps jusqu'à la dernière image chargée est consigné, sans budget à lui.
+ */
+test.describe("images", () => {
+  const PNG = readFileSync(fileURLToPath(new URL("./fixtures/photo.png", import.meta.url)));
+  const IMAGES = 50;
+  let pages: Target[] = [];
+
+  test.beforeAll(async ({ playwright }) => {
+    test.setTimeout(180_000);
+    const request = await playwright.request.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      pages = [];
+      for (let i = 0; i < OPENINGS; i++) {
+        const tag = unique();
+        const { id } = await createPage(request, { title: `Mesure images ${tag}` });
+        const blocks: string[] = [];
+        for (let n = 1; n <= 1_000; n++) {
+          if (n % 20 !== 0) {
+            blocks.push(blockText(tag, n));
+            continue;
+          }
+          const sent = await request.post(`/api/v1/pages/${id}/files?name=photo-${n}.png`, {
+            data: PNG,
+            headers: { "content-type": "application/octet-stream" },
+          });
+          expect(sent.status(), await sent.text()).toBe(201);
+          blocks.push(`![](${((await sent.json()) as { url: string }).url}) {name="photo-${n}.png"}`);
+        }
+        await putMmd(request, id, `${blocks.join("\n\n")}\n`);
+        pages.push({ id, first: blockText(tag, 1) });
+      }
+    } finally {
+      await request.dispose();
+    }
+    await new Promise((done) => setTimeout(done, SERVER_IDLE_CLOSE_MS + 2_000));
+  });
+
+  test("open_1000_block_page_with_50_images_under_300ms", async ({ browser }) => {
+    const totals: number[] = [];
+    const lastImages: number[] = [];
+    for (const target of pages) {
+      const { total, longestFrame, page } = await openFromTree(browser, target);
+      // Depuis la fin de l'ouverture : quand la dernière des cinquante images est chargée.
+      const images = await page.evaluate(
+        (count) =>
+          new Promise<{ after: number; shown: number }>((done) => {
+            const start = performance.now();
+            const check = () => {
+              const all = [...document.querySelectorAll<HTMLImageElement>(".mm-editor img.bn-visual-media")];
+              const shown = all.filter((img) => img.complete && img.naturalWidth > 0).length;
+              if (shown >= count || performance.now() - start > 20_000) done({ after: performance.now() - start, shown });
+              else requestAnimationFrame(check);
+            };
+            check();
+          }),
+        IMAGES,
+      );
+      expect(images.shown).toBe(IMAGES);
+      console.log(
+        `  ouverture 1 000 blocs dont ${IMAGES} images : ${Math.round(total)} ms (image la plus longue ` +
+          `${Math.round(longestFrame)} ms) ; dernière image chargée ${Math.round(images.after)} ms après l'ouverture`,
+      );
+      totals.push(total);
+      lastImages.push(total + images.after);
+      await closeContexts();
+    }
+    const p95 = percentile(totals, 0.95);
+    console.log(
+      `MESURE ouverture d'une page jamais vue de 1 000 blocs dont ${IMAGES} images : p50 ` +
+        `${Math.round(percentile(totals, 0.5))} ms, p95 ${Math.round(p95)} ms (${totals.map(Math.round).join(", ")}) ; ` +
+        `du clic à la dernière image chargée : ${lastImages.map(Math.round).join(", ")} ms (consigné, sans budget)`,
+    );
+    expect(totals).toHaveLength(OPENINGS);
+    expect(p95).toBeLessThan(300);
   });
 });
 
