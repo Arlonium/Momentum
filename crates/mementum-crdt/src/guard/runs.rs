@@ -608,9 +608,7 @@ impl<T: ReadTxn> Judge<'_, T> {
     /// côté d'une telle unité n'est jamais récrit : yrs lui en donne la clé, et il est refusé
     /// d'après ce que yrs en fait (Ruling R723).
     pub(crate) fn keyed(&mut self, id: Id) -> Result<bool, CrdtError> {
-        let place = self.place(id)?;
-        // Une entrée ramassée ne donne plus de clé à personne : yrs n'y voit pas de voisin.
-        Ok(place.keyed && self.lives(place.home))
+        Ok(self.place(id)?.keyed)
     }
 
     /// Faux si rien ne peut vivre dans `home` : une plage ramassée, un type de la page qui n'en
@@ -797,23 +795,9 @@ impl<T: ReadTxn> Judge<'_, T> {
         &mut self,
         right: Id,
     ) -> Result<bool, CrdtError> {
-        if self.collected(right)? {
-            return Ok(false);
-        }
         Ok(self
             .at(right.0, right.1)?
             .is_some_and(|run| run.origin_of(right.0, right.1).is_some()))
-    }
-
-    /// Vrai si l'unité `id` est une plage ramassée. Une unité de la page se juge par ce qu'elle est
-    /// aujourd'hui, jamais par ce que sa suite a été posée : la page vivante, qui se souvient d'un
-    /// élément, et la page relue de son état, qui n'y lit qu'une plage ramassée, jugent ainsi pareil
-    /// (Ruling R858).
-    fn collected(&mut self, id: Id) -> Result<bool, CrdtError> {
-        if self.in_page(id.0, id.1) {
-            return Ok(self.page_unit(id)? == Unit::Collected);
-        }
-        Ok(self.update.at(id.0, id.1).is_some_and(|run| run.gc()))
     }
 
     /// Règles N3 et V (Rulings R825, R856) : les éléments de la mise à jour qui perdent leur origine
@@ -890,9 +874,6 @@ impl<T: ReadTxn> Judge<'_, T> {
     /// il sera rangé par son origine seule, partout pareil. La règle N3 (Ruling R825) ou la règle V
     /// (Ruling R856) le demandent, sauf à côté d'une entrée de map, où le refus de R723 répond.
     fn loses_its_right_origin(&mut self, origin: Id, right: Id) -> Result<bool, CrdtError> {
-        if self.collected(origin)? || self.collected(right)? {
-            return Ok(false);
-        }
         let placed = origin.0 == right.0
             && right.1 < origin.1
             && right.1 > 0
@@ -990,8 +971,10 @@ impl<T: ReadTxn> Judge<'_, T> {
         Ok(runs.climbs.get(&head).copied())
     }
 
-    /// Retient la place d'une suite. Pour une suite de la page, seulement ce qu'on sait : un voisin
-    /// qui manque peut arriver, quand un trou d'horloge se comble.
+    /// Retient la place d'une suite. Pour une suite de la page, seulement ce qu'on sait : **dans une
+    /// page à trou d'horloge** (relue d'un journal d'avant le Ruling R131), une origine qui manque
+    /// peut arriver quand le trou se comble (Ruling R866). Ailleurs, l'origine d'une unité que yrs a
+    /// intégrée est toujours connue.
     fn remember_climb(&mut self, head: Id, climb: Option<Climb>) {
         if !self.in_page(head.0, head.1) {
             self.update.climbs.insert(head, climb);
