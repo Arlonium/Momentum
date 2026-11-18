@@ -48,7 +48,42 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 
 Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête poussée, **sans clone neuf**) : `cargo fmt` et `cargo clippy -D warnings` propres ; `cargo test --workspace` : **723 verts**, 15 ignorés (les mesures en release et les tests de la limite R39) ; client : **516 verts et 12 marqués `test.fails`** (les scénarios du bloc déplacé), typecheck propre ; licences npm propres au dernier relevé (aucun paquet ajouté sur `main`) ; e2e : suite entière relancée sur `main` à la pause, correctif du défaut critique compris : **159 verts**, 2 `fixme` voulus (bloc déplacé), et 1 échec, `space_without_a_role_is_not_found` : une course du test lui-même, qui comparait l'écran pendant que la barre latérale disait encore « Chargement… » (reproduite à coup sûr en retardant la lecture de l'arbre) ; le test attend maintenant la fin du chargement, et passe dix fois de suite ; la suite entière n'a pas été relancée après cette correction d'un seul test ; budgets du navigateur, mesurés dans l'atelier de la part e2e sur un poste occupé : 1 000 blocs à 160 ms au p95 (budget 300), 10 000 blocs en 1,38 s (budget 3 s) ; côté serveur, en release : frappe vue par un autre à 2,0 à 2,3 ms au p95, 42,8 ms quand elle déclenche la coupe d'une version (budget 150).
 
-## Pause du 2026-11-17 (soir) — c'est d'ici qu'on reprend ; prime sur tout ce qui suit
+## Pause du 2026-11-18 (après-midi) — c'est d'ici qu'on reprend ; prime sur tout ce qui suit
+
+Pause demandée par Lenny. Plus aucun agent ni essai ne tourne.
+
+**Sur `main`, poussé** : le code n'a pas changé depuis la pause d'hier (`e751e2f`, CI verte). Seule cette note s'y ajoute.
+
+**Hors de `main` : un atelier local, jamais poussé** : `.claude/worktrees/lot3-attributs`, branche `lot3-attributs`, tête `41d2284`, 31 commits sur `main`, arbre propre. **Le dernier commit est un « wip », à ne pas fusionner tel quel.** Un second atelier, `.claude/worktrees/relecture-8` (détaché à `d9f1401`), ne porte que les sondes non suivies des relectures (`zz_r8_*`, `zz_r9_*`) : à garder jusqu'à la fusion. `tmp-agents/relecture-attributs/tour-6-etat.md` est périmé.
+
+| Tour de la garde | Commits | État |
+|---|---|---|
+| 5 (R815 à R824) | jusqu'à `3c8a92d` | fini, relu |
+| 6 (R825 à R839, R853) | `b10b5a2` à `bf7290b` | fini ; la re-relecture 8 y a trouvé C1 à C5 |
+| 7 (R854 à R860) | `e1e9603` à `d9f1401` | fini, suites vertes, e2e 328 verts ; la re-relecture 9 y a trouvé D1 à D3 |
+| 8 (à partir de R861) | `41d2284` (wip) | **code écrit, vérifications à faire** |
+
+Rapports : `tmp-agents/relecture-attributs/re-relecture-8.md` et `re-relecture-9.md`. Les constats D1 et D2 ont été rejoués par le contrôleur avant le tour 8.
+
+**Ce que porte le wip du tour 8**, vert sur ses tests ciblés seulement :
+
+- **D1** (N3 et V jugés sur la mise à jour d'avant leurs récritures : un vrai Yjs lisait `abqcdefp` quand la page disait `abcdefpq`) : une passe unique, sur les suites déjà récrites.
+- **D2** (le calcul de yrs retenait les fils du moteur tokio : `/health` à 9,6 s avec 4 pages attaquées sur 4 fils) : `off_the_engine`, `crates/mementum-sync/src/long_work.rs` ; `/health` à 1 ms dans la même scène. La page attaquée reste occupée : le débit par compte reste au lot 7. R860 est à récrire : sa phrase « les autres pages restent servies tant qu'il reste des fils » est fausse.
+- **D3**, la fenêtre de `tail_check`, l'oracle sans garde (`apps/web/src/editor/servedStates.test.ts`, `tests/fixtures/hostile/served.json`), le retrait du code équivalent.
+
+**Ce qui reste, dans l'ordre** :
+
+1. **Décider de R867, constat neuf, non rejoué par le contrôleur** : 80 000 lettres enchaînées (543 Ko) coûteraient 4,8 Go à yrs seul. Un compte qui peut modifier une page pourrait épuiser la mémoire du serveur (extrapolé). Le mesurer d'abord, puis borner ou reporter au lot 7.
+2. Finir les mutations : `python -X utf8 mutate8.py` depuis `tmp-agents/correction-8`, en reprenant après `v-ancetre-de-travers` (12 sur 42 environ, toutes rouges 3 fois sur 3).
+3. Registre, `CLAUDE.md`, README, conception : brouillons dans `tmp-agents/correction-8/` (`ledger8.md`, `docs8.py`).
+4. Essais sur le code final, aucun n'est fait : essai hostile 45 000 cas par voie (3 000 seulement depuis le retrait du code équivalent), essai dense 6 000 graines par voie, vrai Yjs 12 000 + 20 000, boucle fermée `apps/web/zz_r9_loop.mjs` (atelier `relecture-8`), fmt, clippy `-D warnings`, `cargo test --workspace`, typecheck, Vitest, mesures de `mementum-sync` en release, e2e.
+5. Remplacer le wip par des commits propres.
+6. **Re-relecture ciblée indépendante** du tour 8, puis tours de correction si besoin.
+7. Rebase sur `main` (conflits attendus dans le registre, `CLAUDE.md`, README, conception : garder les deux côtés, vérifier qu'aucune puce de `CLAUDE.md` n'est en double), suites entières, avance rapide de `main`, poussée, lecture de la CI ; retirer les deux ateliers, leur branche et leur `target/`.
+
+**Puis, pour clore le lot 3** : ce que dit le dernier paragraphe de la section suivante (clone neuf, signalement à yrs, recettes, clôture).
+
+## Pause du 2026-11-17 (soir) — dépassée par la pause du 2026-11-18
 
 Pause demandée par Lenny. Plus rien ne tourne : aucun agent, aucun essai.
 
