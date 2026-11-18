@@ -675,6 +675,77 @@ fn letters_naming_the_end_of_a_long_chain(n: usize) -> Sent {
     Sent { state, update }
 }
 
+/// Une page, puis une chaîne d'origines de `n` suites de huit lettres (deux clients qui s'y
+/// relaient) : une lettre du client 7 à côté de la fin de chaque suite de sa première moitié, et, si
+/// `leaves`, une lettre du client 6 à côté de la fin de chaque suite de rang pair. L'état, la dernière
+/// unité de la suite de rang `i`, et le nombre de suites.
+fn long_chain(n: usize, leaves: bool) -> (Vec<u8>, impl Fn(u32) -> (u64, u32), u32) {
+    let (state, first) = page_of_letters(0);
+    let chain = n.max(2) as u32 / 2 * 2;
+    let unit = move |i: u32| -> (u64, u32) {
+        if i.is_multiple_of(2) {
+            (9, first + 8 * (i / 2) + 7)
+        } else {
+            (8, 8 * (i / 2) + 7)
+        }
+    };
+    let mut update = Vec::new();
+    var(&mut update, if leaves { 4 } else { 3 });
+    for client in [9u64, 8] {
+        var(&mut update, u64::from(chain / 2));
+        var(&mut update, client);
+        var(&mut update, u64::from(if client == 9 { first } else { 0 }));
+        for i in (0..chain).filter(|i| (i % 2 == 0) == (client == 9)) {
+            if i == 0 {
+                update.push(0x04);
+                update.push(0);
+                var(&mut update, 9);
+                var(&mut update, u64::from(first - 1));
+            } else {
+                update.push(0x84);
+                var(&mut update, unit(i - 1).0);
+                var(&mut update, u64::from(unit(i - 1).1));
+            }
+            update.push(8);
+            update.extend_from_slice(b"aaaaaaaa");
+        }
+    }
+    let beside = |update: &mut Vec<u8>, client: u64, at: &dyn Fn(u32) -> u32| {
+        var(update, u64::from(chain / 2));
+        var(update, client);
+        update.push(0);
+        for k in 0..chain / 2 {
+            update.push(0x84);
+            var(update, unit(at(k)).0);
+            var(update, u64::from(unit(at(k)).1));
+            update.extend_from_slice(&[1, b'r']);
+        }
+    };
+    beside(&mut update, 7, &|k| k);
+    if leaves {
+        beside(&mut update, 6, &|k| 2 * k);
+    }
+    update.push(0);
+    let state = PageDoc::from_updates([state.as_slice(), update.as_slice()])
+        .unwrap()
+        .encode_state();
+    (state, unit, chain)
+}
+
+/// Règle V (Ruling R856) : `n / 2` éléments dont l'origine est une feuille posée à côté de l'unité
+/// `2k` d'une longue chaîne, et l'origine droite la lettre posée à côté de l'unité `k`, loin
+/// au-dessus. Remonter la chaîne pas à pas coûterait `n / 2` remontées de `k` pas. L'origine étant
+/// une feuille, yrs les range sans parcourir la chaîne (voir `known_limits`).
+fn letters_whose_right_is_far_up_the_chain(n: usize) -> Sent {
+    let (state, _, chain) = long_chain(n, true);
+    let mut update = letters_header(chain as usize / 2);
+    for k in 0..chain / 2 {
+        push_letter_between(&mut update, (6, k), (7, k));
+    }
+    update.push(0);
+    Sent { state, update }
+}
+
 /// Règles G et P2 (Ruling R853) : juger les voisins des éléments d'une mise à jour croît comme
 /// elle et comme la page, quelle que soit la place de ces voisins dans la liste où ils vivent.
 #[test]
@@ -695,6 +766,10 @@ fn judging_the_neighbours_of_items_grows_like_the_update() {
         Form {
             what: "lettres qui nomment le bout d'une longue chaîne",
             build: &letters_naming_the_end_of_a_long_chain,
+        },
+        Form {
+            what: "lettres dont la voisine de droite est loin au-dessus dans la chaîne",
+            build: &letters_whose_right_is_far_up_the_chain,
         },
     ];
     let size = |sent: &Sent| sent.state.len() + sent.update.len();
@@ -955,4 +1030,84 @@ fn judging_attributes_grows_like_the_update() {
     };
     let failures = grows_like_input(&per_client, size, judge, |_| 0, limits);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Règle V (Ruling R856) : un ancêtre se trouve en un nombre de pas logarithmique, quelle que soit la
+/// distance. Se compte, sans minutage : remonter la chaîne pas à pas ne se verrait qu'au temps.
+#[test]
+fn an_ancestor_is_found_in_a_logarithmic_number_of_steps() {
+    for n in [2_000u32, 32_000] {
+        let sent = letters_whose_right_is_far_up_the_chain(n as usize);
+        let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
+        let before = PageDoc::ancestor_steps_on_this_thread();
+        page.try_client_update(&sent.update).expect("acceptée");
+        let steps = PageDoc::ancestor_steps_on_this_thread() - before;
+        let queries = u64::from(n / 2);
+        let bound = queries * 4 * u64::from(n.ilog2() + 1);
+        assert!(steps >= queries, "{steps} pas pour {queries} recherches");
+        assert!(
+            steps <= bound,
+            "{steps} pas pour {queries} recherches, borne {bound}"
+        );
+    }
+}
+
+/// Ce que la garde ne borne pas.
+mod known_limits {
+    use super::linear::once;
+    use super::*;
+    use yrs::updates::decoder::Decode;
+    use yrs::{OffsetKind, Options, Update};
+
+    /// `n / 2` éléments dont l'origine est une unité d'une longue chaîne où deux clients se relaient.
+    fn letters_inside_a_long_chain(n: usize, with_right: bool) -> Sent {
+        let (state, unit, chain) = long_chain(n, false);
+        let mut update = letters_header(chain as usize / 2);
+        for k in 0..chain / 2 {
+            if with_right {
+                push_letter_between(&mut update, unit(2 * k), (7, k));
+            } else {
+                update.push(0x84);
+                var(&mut update, unit(2 * k).0);
+                var(&mut update, u64::from(unit(2 * k).1));
+                update.extend_from_slice(&[1, b'r']);
+            }
+        }
+        update.push(0);
+        Sent { state, update }
+    }
+
+    /// Ce qu'alloue yrs seul, sans la garde, pour intégrer la mise à jour.
+    fn allocated_by_yrs(sent: &Sent) -> usize {
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(&sent.state).unwrap())
+            .unwrap();
+        once(|| {
+            doc.transact_mut()
+                .apply_update(Update::decode_v1(&sent.update).unwrap())
+                .unwrap();
+        })
+        .allocated
+    }
+
+    /// yrs range un élément en parcourant ce qui suit son origine, tant que cela descend d'elle :
+    /// dans une chaîne où deux clients se relaient, chaque élément parcourt toute la fin de la
+    /// chaîne, avec ou sans origine droite. Sur une chaîne de 32 000 suites (552 Ko), une mise à jour
+    /// de 110 Ko tient l'acteur de sa page 49 s, autant que yrs seul : aucune règle de la garde ne
+    /// l'ajoute, et aucune ne le borne (Ruling R860). Rouge le jour où ce coût est levé.
+    #[test]
+    fn yrs_walks_the_end_of_a_long_chain_for_each_item() {
+        for with_right in [true, false] {
+            let small = allocated_by_yrs(&letters_inside_a_long_chain(500, with_right));
+            let large = allocated_by_yrs(&letters_inside_a_long_chain(2_000, with_right));
+            assert!(
+                large > 10 * small,
+                "origine droite {with_right} : {small} puis {large} octets alloués, pour une entrée                  quatre fois plus grande : la limite est levée"
+            );
+        }
+    }
 }

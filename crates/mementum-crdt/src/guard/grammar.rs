@@ -30,13 +30,13 @@
 //! | I1 | un élément sans origine a pour origine droite une unité sans origine (la tête de la liste) ; sinon il est ramassé (Ruling R828) | `typeListInsertGenericsAfter` : sans voisin de gauche, le voisin de droite est `parent._start`, que rien ne précède |
 //! | G | un élément dont un voisin est une plage ramassée et l'autre un élément est ramassé, comme Yjs le fait ; yrs le rangeait par l'autre voisin (Ruling R827) | `Item.getMissing` : `parent = null` dès que le voisin de gauche ou de droite est un `GC` |
 //! | P2 | l'origine et l'origine droite d'un élément sont dans le même parent ; sinon il est ramassé (Ruling R829) | un client insère entre deux voisins d'une même liste |
-//! | I3 | l'origine de l'origine droite n'est pas, dans la chaîne de l'origine, plus loin qu'elle ; sinon l'élément est ramassé (Ruling R834). La chaîne se lit d'une suite à l'autre : la mise à jour et l'état qui la contient se jugent pareil | un client insère entre deux voisins qu'il voit côte à côte. Deux formes voisines ne sont pas des règles, `redoItem` les écrivant : une origine droite nulle quand l'origine en a une (I2), et l'origine droite de l'origine avant l'origine droite dans sa chaîne (l'origine droite d'une unité rétablie peut être à sa gauche) |
+//! | V | l'origine de l'origine droite **est** l'origine ou un de ses ancêtres dans l'arbre des origines ; sinon l'origine droite est retirée (Ruling R856, qui remplace I3). La réponse ne dépend que des unités, pas de leur découpage en suites | une liste se lit comme l'arbre de ses origines parcouru en profondeur : ce qui suit une unité est son premier enfant, ou le prochain enfant d'un de ses ancêtres. `redoItem` écrit le contraire quand il suit séparément les deux voisins d'un élément rétabli : l'élément est gardé. Ne sont pas des règles : une origine droite nulle quand l'origine en a une (I2), et l'origine droite de l'origine avant l'origine droite dans sa chaîne |
 //!
 //! N1 et N2 ont été trouvées par l'essai au hasard côté Yjs (`yjsAtRandom.test.ts`) : la
 //! lecture du code de Yjs avait d'abord donné « une valeur par entrée » et « l'origine droite
 //! suit l'origine », que Yjs dément après une annulation. N3 aussi, par le tirage penché vers
 //! les annulations (`UNDO_HEAVY`). **Une règle neuve se prouve contre cet essai avant d'être
-//! posée.** N3, I1, G et P2 tiennent un invariant que l'essai hostile vérifie depuis le tour de
+//! posée.** N3, V, I1, G et P2 tiennent un invariant que l'essai hostile vérifie depuis le tour de
 //! correction 6 : **la page relue de son propre état est la page vivante** (ce qu'écrit la
 //! compaction, ce que reçoit un onglet qui ouvre la page) ; chacune ferme une façon dont la place
 //! d'un élément dépendait du découpage des blocs ou de l'ordre d'arrivée, chez yrs **comme chez

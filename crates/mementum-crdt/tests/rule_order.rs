@@ -1,5 +1,5 @@
-//! Ce qui passe avant les règles qui récrivent une mise à jour (N3, G, I1, I3, P2 ; Rulings R825,
-//! R827 à R829, R834 ; Ruling R839). Une règle récrit un élément qu'aucune garde ne refuse : ce que
+//! Ce qui passe avant les règles qui récrivent une mise à jour (N3, G, I1, V, P2 ; Rulings R825,
+//! R827 à R829, R856 ; Ruling R839). Une règle récrit un élément qu'aucune garde ne refuse : ce que
 //! les gardes refusaient avant elle reste refusé, avec le même motif, et un élément posé à côté
 //! d'une entrée de map reste jugé d'après ce que yrs en fait (Ruling R723).
 
@@ -251,21 +251,21 @@ fn the_guards_pass_before_rule_i1() {
     );
 }
 
-/// I3 : une valeur entre « a » et une lettre posée après « c ».
+/// V : une valeur entre « a » et une lettre posée après « c ».
 #[test]
-fn the_guards_pass_before_rule_i3() {
+fn the_guards_pass_before_rule_v() {
     let (scene, a) = with_abc();
     let after = scene.typed(0, "d");
     // « d » a pour origine « c », deux unités plus loin que « a » dans sa chaîne.
     value_is_refused_and_letters_pass(
         &scene,
         |what| item(900, 0, Some((TAB, a)), Some((TAB, after)), what),
-        "I3",
+        "V",
     );
     assert_eq!(
         page_text(&scene.page, 0),
-        "abcd",
-        "I3 : les lettres sont ramassées"
+        "abcdz",
+        "V : les lettres perdent leur origine droite, et restent"
     );
 }
 
@@ -343,9 +343,9 @@ fn rule_i1_leaves_an_item_beside_a_map_entry_to_r723() {
     beside_a_map_entry_is_refused_for_what_yrs_makes(&scene, &update, "I1");
 }
 
-/// I3 : entre deux entrées d'une même clé, dont la seconde suit la troisième d'un autre.
+/// V : entre deux entrées d'une même clé, dont la seconde suit la troisième d'un autre.
 #[test]
-fn rule_i3_leaves_an_item_beside_a_map_entry_to_r723() {
+fn rule_v_leaves_an_item_beside_a_map_entry_to_r723() {
     let (scene, _) = with_abc();
     let first = scene.attribute("textColor", "red");
     scene.attribute("textColor", "blue");
@@ -362,7 +362,7 @@ fn rule_i3_leaves_an_item_beside_a_map_entry_to_r723() {
     scene.page.try_client_update(&written).expect("accepté");
     assert_eq!(third, first + 2);
     let update = item(900, 0, Some((TAB, first)), Some((60, 0)), Content::Letters);
-    beside_a_map_entry_is_refused_for_what_yrs_makes(&scene, &update, "I3");
+    beside_a_map_entry_is_refused_for_what_yrs_makes(&scene, &update, "V");
 }
 
 /// N3 : l'origine et l'origine droite sont deux entrées d'une même clé, d'un même client.
@@ -380,4 +380,179 @@ fn rule_n3_leaves_an_item_beside_a_map_entry_to_r723() {
         Content::Letters,
     );
     beside_a_map_entry_is_refused_for_what_yrs_makes(&scene, &update, "N3");
+}
+
+/// Une mise à jour faite à la main, d'octets écrits en hexadécimal.
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len() / 2)
+        .map(|n| u8::from_str_radix(&text[2 * n..2 * n + 2], 16).unwrap())
+        .collect()
+}
+
+/// La page et le premier texte, « abcdef », écrit par le client 10 : le texte à l'horloge 0, les
+/// lettres de 1 à 6.
+fn with_abcdef() -> PageDoc {
+    let (page, created) = PageDoc::new_page();
+    let tab = replica(10, &created);
+    let typed = {
+        let mut txn = tab.transact_mut();
+        let paragraph = paragraph_of(&tab, &txn, 0);
+        let text = paragraph.insert(&mut txn, 0, XmlTextPrelim::new(""));
+        text.insert(&mut txn, 0, "abcdef");
+        txn.encode_update_v1()
+    };
+    page.try_client_update(&typed).expect("la frappe");
+    page
+}
+
+/// La règle V (Ruling R856) : ce qui suit une origine a pour origine cette origine ou un de ses
+/// ancêtres. L'élément (23,0) se dit posé entre « c » et (20,0), dont l'origine (10,8) descend de
+/// « c » par une chaîne qui passe par trois suites : son auteur ne voyait pas ses voisins côte à
+/// côte. La page vivante lisait « abcdeppppfp », la page relue de son état « abcdepppppf », sous la
+/// même révision (constat C3 de la re-relecture 8).
+#[test]
+fn a_right_origin_that_cannot_follow_the_origin_is_dropped() {
+    let page = with_abcdef();
+    for update in [
+        // (22,0) : origine « e », origine droite « b ».
+        "01011600c40a050a02017000",
+        // (10,7) : mêmes voisins ; (10,8) : origine (10,7).
+        "01020a07c40a050a020170840a07017000",
+        // (20,0) : origine (10,8), origine droite (10,7).
+        "01011400c40a080a07017000",
+        // (23,0) : origine « c », origine droite (20,0).
+        "01011700c40a031400017000",
+    ] {
+        page.try_client_update(&unhex(update)).expect("acceptée");
+    }
+    let again = PageDoc::from_updates([page.encode_state().as_slice()]).unwrap();
+    assert_eq!(page_text(&page, 0), page_text(&again, 0));
+    assert_eq!(page.revision(), again.revision());
+}
+
+/// La règle V nomme une unité, pas son client : (30,0) et (30,1) sont deux enfants de « c », écrits
+/// par un même client, à la même profondeur. Ce qui descend de (30,1) peut être suivi d'un autre
+/// enfant de (30,1), pas d'un enfant de (30,0), qui n'est pas son ancêtre.
+#[test]
+fn a_right_of_a_sibling_of_the_same_client_is_dropped() {
+    let page = with_abcdef();
+    let c = (10, 2);
+    let letter = |id: Id, origin: Id, right: Id| {
+        item(id.0, id.1, Some(origin), Some(right), Content::Letters)
+    };
+    for update in [
+        letter((30, 0), c, (10, 3)),
+        letter((30, 1), c, (30, 0)),
+        letter((31, 0), (30, 1), (30, 0)),
+        letter((37, 0), (30, 1), (30, 0)),
+        letter((32, 0), (30, 0), (10, 3)),
+    ] {
+        let read = page.try_client_update(&update).expect("honnête").read;
+        assert_eq!(read, update, "un élément honnête est récrit");
+    }
+    let beside_the_sibling = letter((33, 0), (31, 0), (32, 0));
+    let read = page
+        .try_client_update(&beside_the_sibling)
+        .expect("acceptée")
+        .read;
+    assert_eq!(
+        read,
+        item(33, 0, Some((31, 0)), None, Content::Letters),
+        "(32,0) a pour origine (30,0), qui n'est pas un ancêtre de (31,0)"
+    );
+    let beside_its_own = letter((34, 0), (31, 0), (37, 0));
+    let read = page
+        .try_client_update(&beside_its_own)
+        .expect("acceptée")
+        .read;
+    assert_eq!(
+        read, beside_its_own,
+        "(37,0) a pour origine (30,1), un ancêtre de (31,0)"
+    );
+    let again = PageDoc::from_updates([page.encode_state().as_slice()]).unwrap();
+    assert_eq!(page_text(&page, 0), page_text(&again, 0));
+    assert_eq!(page.revision(), again.revision());
+}
+
+/// Une frappe honnête au milieu d'un texte n'est pas touchée : l'origine de ce qui suit est
+/// l'origine de la frappe, ou un de ses ancêtres.
+#[test]
+fn a_right_origin_that_follows_the_origin_is_kept() {
+    let page = with_abcdef();
+    for (at, what) in [(3, "x"), (4, "y"), (3, "z"), (6, "w")] {
+        let tab = replica(77, &page.encode_state());
+        let keystroke = {
+            let mut txn = tab.transact_mut();
+            let text = text_of(&tab, &txn, 0);
+            text.insert(&mut txn, at, what);
+            txn.encode_update_v1()
+        };
+        let read = page.try_client_update(&keystroke).expect("la frappe").read;
+        assert_eq!(read, keystroke, "la frappe {what} est récrite");
+        let seen = {
+            let txn = tab.transact();
+            text_of(&tab, &txn, 0).get_string(&txn)
+        };
+        assert_eq!(page_text(&page, 0), seen);
+    }
+}
+
+/// Une chaîne d'origines de `length` suites, qui se casse à sa quatrième unité, et un élément entre
+/// son début et ce qui suit sa fin : rien de ce que la règle décide ne dépend de la longueur.
+fn beside_a_chain(length: u32) -> (bool, bool) {
+    let page = with_abcdef();
+    let letter = |u: &mut Vec<u8>, origin: Id, right: Id, content: u8| {
+        u.push(0xC4);
+        for id in [origin, right] {
+            var(u, id.0);
+            var(u, u64::from(id.1));
+        }
+        u.extend_from_slice(&[1, content]);
+    };
+    // Une suite par unité : l'origine droite change à chaque lettre.
+    let mut chain = vec![1];
+    var(&mut chain, u64::from(length));
+    var(&mut chain, 30);
+    chain.push(0);
+    for i in 0..length {
+        let origin = match i {
+            0 => (10, 6),
+            3 => (10, 5),
+            _ => (30, i - 1),
+        };
+        letter(&mut chain, origin, (10, 2 + (i % 2)), b'u');
+    }
+    chain.push(0);
+    page.try_client_update(&chain).expect("la chaîne");
+    let mut right = vec![1, 1];
+    var(&mut right, 31);
+    right.push(0);
+    right.push(0x84);
+    var(&mut right, 30);
+    var(&mut right, u64::from(length - 1));
+    right.extend_from_slice(&[1, b'r']);
+    right.push(0);
+    page.try_client_update(&right)
+        .expect("ce qui suit la chaîne");
+    let mut x = vec![1, 1];
+    var(&mut x, 32);
+    x.push(0);
+    letter(&mut x, (30, 0), (31, 0), b'x');
+    x.push(0);
+    page.try_client_update(&x).expect("l'élément");
+    let again = PageDoc::from_updates([page.encode_state().as_slice()]).unwrap();
+    (
+        page_text(&page, 0).contains('x'),
+        page_text(&page, 0) == page_text(&again, 0),
+    )
+}
+
+/// La règle V ne s'arrête à aucune longueur : à 40, 90 ou 400 suites, l'élément garde sa place et
+/// la page relue de son état est la page vivante. La règle I3 qu'elle remplace tenait une chaîne de
+/// plus de 64 suites pour enchaînée, et ramassait l'élément (Ruling R857).
+#[test]
+fn the_length_of_a_chain_decides_nothing() {
+    for length in [40, 90, 400] {
+        assert_eq!(beside_a_chain(length), (true, true), "{length} suites");
+    }
 }

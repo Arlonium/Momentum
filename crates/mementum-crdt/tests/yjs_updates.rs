@@ -450,10 +450,10 @@ fn what_yjs_writes_on_a_redo_into_one_block_is_accepted() {
     redo_scenes_are_accepted("redo-blocks.json", "redo-blocks-relayed.json", "N3");
 }
 
-/// I3 (Ruling R834) contre le vrai Yjs : les scènes où un onglet rétablit un élément O dont
+/// Ruling R834, contre le vrai Yjs : les scènes où un onglet rétablit un élément O dont
 /// l'origine droite est, dans la suite de son origine, avant elle (`redo-crossing.json`), puis où
 /// un onglet pose un élément entre O et l'unité qui le suit. Cet élément est honnête : O est à
-/// droite de son origine droite, et la règle ne doit pas le ramasser. Ce que la page relaie est
+/// droite de son origine droite, et aucune règle ne doit le ramasser. Ce que la page relaie est
 /// comparé à ce qu'elle relayait (`redo-crossing-relayed.json`), que le second test de
 /// `yjsAtRandom.test.ts` rejoue dans un vrai Yjs : un élément ramassé l'y change.
 #[test]

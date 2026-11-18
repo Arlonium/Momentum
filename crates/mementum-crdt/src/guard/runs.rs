@@ -42,6 +42,12 @@ use super::cut::Beyond;
 use super::{Id, Kind, META, Parent, Shape};
 use crate::{CrdtError, FRAGMENT};
 
+thread_local! {
+    /// Les pas faits par [`Judge::descends_from`] sur ce fil : ce qui prouve, sans minutage, qu'un
+    /// ancêtre se trouve en un nombre de pas logarithmique (Ruling R856).
+    pub(crate) static ANCESTOR_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Le type où vit une unité (règles G et P2, Rulings R827, R829).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Home {
@@ -229,6 +235,25 @@ impl Run {
 #[derive(Default)]
 pub(crate) struct Runs {
     clients: HashMap<u64, Vec<Run>>,
+    /// Ce qu'on a lu de la place des suites dans l'arbre des origines, par première unité : rempli
+    /// à la demande ([`Judge::climb`]). `None` : ses origines bouclent, ou manquent.
+    climbs: HashMap<Id, Option<Climb>>,
+}
+
+/// La place d'une suite dans l'arbre des origines : le parent d'une unité est son origine. Avec un
+/// saut vers un ancêtre (Myers, 1983), on trouve un ancêtre à une profondeur donnée en un nombre de
+/// pas logarithmique, quelle que soit la façon dont les unités se découpent en suites.
+#[derive(Clone, Copy)]
+struct Climb {
+    /// Le nombre d'unités de la racine à la première unité de la suite, elle comprise.
+    depth: u32,
+    /// Le nombre de suites de la racine à celle-ci, elle comprise.
+    level: u32,
+    /// Un ancêtre de la première unité (elle-même à la racine), sa profondeur, et le niveau de sa
+    /// suite.
+    jump: Id,
+    jump_depth: u32,
+    jump_level: u32,
 }
 
 impl Runs {
@@ -251,6 +276,7 @@ impl Runs {
     /// Prend les suites d'une mise à jour que la page vient d'intégrer. Celles d'un client que la
     /// page ne connaissait pas passent telles quelles : une relecture ne les range pas deux fois.
     pub(crate) fn absorb(&mut self, other: Runs) {
+        self.climbs.extend(other.climbs);
         for (client, mut list) in other.clients {
             match self.clients.entry(client) {
                 Entry::Vacant(known) => {
@@ -378,34 +404,13 @@ impl Shape {
     }
 
     /// Les éléments que la mise à jour intègre (au-dessus de `floor`) qui ont une origine et une
-    /// origine droite, hors des entrées de map : les candidats de la règle I3 (Ruling R834). Leur
-    /// identifiant, leur origine et leur origine droite.
+    /// origine droite, hors des entrées de map : les candidats des règles N3 et V (Rulings R825,
+    /// R856). Leur identifiant, leur origine et leur origine droite.
     pub(crate) fn between_two(&self, floor: &StateVector) -> Vec<(Id, Id, Id)> {
         self.inserts()
             .filter(|(s, i)| !i.sub_flag && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0)))
             .filter_map(|(s, i)| Some((s.id, i.origin?, i.right?)))
             .collect()
-    }
-
-    /// Les éléments que la mise à jour intègre (au-dessus de `floor`) dont l'origine droite est
-    /// du client de leur origine, à une horloge plus basse (l'égalité est la forme N2, récrite à
-    /// part), et pas la toute première unité du client : les candidats de la règle N3. Leur
-    /// identifiant, leur origine et leur origine droite.
-    pub(crate) fn backward_right_origins(&self, floor: &StateVector) -> Vec<(Id, Id, Id)> {
-        let mut found = Vec::new();
-        for (s, i) in self.inserts() {
-            if s.id.1 + s.len <= floor.get(&ClientID::new(s.id.0)) {
-                continue;
-            }
-            if let (Some(origin), Some(right)) = (i.origin, i.right)
-                && origin.0 == right.0
-                && right.1 < origin.1
-                && right.1 > 0
-            {
-                found.push((s.id, origin, right));
-            }
-        }
-        found
     }
 }
 
@@ -443,11 +448,6 @@ impl Shape {
         out
     }
 }
-
-/// Au plus tant de suites parcourues pour juger un élément ; au-delà, il est tenu pour dangereux
-/// (récrit). Les suites d'une même source sont fondues dès qu'elles se prolongent : un élément
-/// n'en traverse d'ordinaire que deux (la page, puis la mise à jour).
-const MAX_STEPS: usize = 64;
 
 /// Une unité dont les voisins manquent.
 const UNKNOWN: Place = Place {
@@ -547,11 +547,13 @@ impl<T: ReadTxn> Judge<'_, T> {
                 None => break UNKNOWN,
             }
         };
+        // Une unité de la page dont un voisin manque ne le restera pas : un trou d'horloge peut se
+        // combler. Seul ce qu'on sait se retient pour elle.
         for (client, start) in path {
-            if self.in_page(client, start) {
-                self.page.settle(client, start, place);
-            } else {
+            if !self.in_page(client, start) {
                 self.update.settle(client, start, place);
+            } else if place.home != Home::Unknown {
+                self.page.settle(client, start, place);
             }
         }
         Ok(place)
@@ -611,7 +613,7 @@ impl<T: ReadTxn> Judge<'_, T> {
     ///
     /// Seuls les éléments à deux voisins sont jugés, avec ce qu'ils nomment dans la mise à jour : un
     /// élément qui n'a qu'un voisin suit le sort de ce voisin chez yrs comme chez Yjs. `already` :
-    /// les éléments déjà jugés à ramasser (règles I1 et I3), rendus avec les autres, et ramassés
+    /// les éléments déjà jugés à ramasser (règle I1), rendus avec les autres, et ramassés
     /// pour ceux qui les nomment.
     pub(crate) fn collected_neighbours(
         &mut self,
@@ -750,79 +752,225 @@ impl<T: ReadTxn> Judge<'_, T> {
         &mut self,
         right: Id,
     ) -> Result<bool, CrdtError> {
+        if self.collected(right)? {
+            return Ok(false);
+        }
         Ok(self
             .at(right.0, right.1)?
-            .is_some_and(|run| !run.gc() && run.origin_of(right.0, right.1).is_some()))
+            .is_some_and(|run| run.origin_of(right.0, right.1).is_some()))
     }
 
-    /// Règle I3 (Ruling R834) : vrai si un élément d'origine `origin` et d'origine droite `right`
-    /// se dit posé entre deux voisins que son auteur ne voyait pas côte à côte. Son auteur connaît
-    /// `right`, donc l'origine de `right`, qui doit être `origin` ou à sa gauche. Deux unités d'une
-    /// même chaîne sont rangées dans l'ordre de leurs horloges (chacune a pour origine celle
-    /// d'avant, et un élément est toujours à droite de son origine) : l'origine de `right` dans la
-    /// chaîne d'`origin`, plus loin qu'elle, est à sa droite, et `right` plus à droite encore.
-    /// Aucun client ne l'écrit, et yrs comme Yjs rangent un tel élément selon l'ordre où arrivent
-    /// ceux qui sont entre ses voisins.
-    ///
-    /// La forme inverse (l'origine droite d'`origin` dans la chaîne de `right`, avant elle) n'est
-    /// pas une règle : l'origine droite d'une unité n'est pas toujours à sa droite. `redoItem` écrit
-    /// une origine droite qui est, dans la suite de l'origine, avant elle (N3 ne la récrit que si
-    /// ces unités peuvent tenir en un bloc), et un élément posé ensuite juste après une telle unité
-    /// est honnête (scènes 8172 et 13429 du tirage penché vers les annulations, `redo-crossing.json`).
-    pub(crate) fn crosses_what_it_knows(
+    /// Vrai si l'unité `id` est une plage ramassée. Une unité de la page se juge par ce qu'elle est
+    /// aujourd'hui, jamais par ce que sa suite a été posée : la page vivante, qui se souvient d'un
+    /// élément, et la page relue de son état, qui n'y lit qu'une plage ramassée, jugent ainsi pareil
+    /// (Ruling R858).
+    fn collected(&mut self, id: Id) -> Result<bool, CrdtError> {
+        if self.in_page(id.0, id.1) {
+            return Ok(self.page_unit(id)? == Unit::Collected);
+        }
+        Ok(self.update.at(id.0, id.1).is_some_and(|run| run.gc()))
+    }
+
+    /// Vrai si un élément d'origine `origin` et d'origine droite `right` perd son origine droite :
+    /// il sera rangé par son origine seule, partout pareil. La règle N3 (Ruling R825) ou la règle V
+    /// (Ruling R856) le demandent, sauf à côté d'une entrée de map, où le refus de R723 répond.
+    pub(crate) fn loses_its_right_origin(
         &mut self,
         origin: Id,
         right: Id,
     ) -> Result<bool, CrdtError> {
-        let (Some(at_origin), Some(at_right)) =
-            (self.at(origin.0, origin.1)?, self.at(right.0, right.1)?)
-        else {
-            return Ok(false);
-        };
-        if at_origin.gc() || at_right.gc() {
+        if self.collected(origin)? || self.collected(right)? {
             return Ok(false);
         }
-        match at_right.origin_of(right.0, right.1) {
-            Some(before) if before.0 == origin.0 && origin.1 < before.1 => {
-                self.chained(origin.0, origin.1, before.1)
-            }
-            _ => Ok(false),
+        let placed = origin.0 == right.0
+            && right.1 < origin.1
+            && right.1 > 0
+            && self.placed_by_blocks(origin, right)?;
+        Ok((placed || self.right_does_not_follow(origin, right)?)
+            && !self.keyed(origin)?
+            && !self.keyed(right)?)
+    }
+
+    /// Règle V (Ruling R856) : vrai si `right` ne peut pas être ce qui suit `origin` dans la liste
+    /// que voyait l'auteur de l'élément. Une liste se lit comme l'arbre de ses origines, parcouru en
+    /// profondeur : une unité est suivie de son premier enfant, ou, si elle n'en a pas, du prochain
+    /// enfant d'un de ses ancêtres. Ce qui suit `origin` a donc pour origine `origin` lui-même ou un
+    /// de ses ancêtres ; sinon, l'auteur ne voyait pas ces deux voisins côte à côte, et yrs comme
+    /// Yjs rangent l'élément selon l'ordre où arrivent ceux qui sont entre eux.
+    ///
+    /// L'origine droite est retirée, l'élément gardé : `redoItem` écrit cette forme quand il suit
+    /// séparément les deux voisins d'un élément rétabli (trois scènes sur 20 000 du tirage penché
+    /// vers les annulations), et ramasser l'élément y perdrait le texte rétabli.
+    fn right_does_not_follow(&mut self, origin: Id, right: Id) -> Result<bool, CrdtError> {
+        let Some(run) = self.at(right.0, right.1)? else {
+            return Ok(false);
+        };
+        match run.origin_of(right.0, right.1) {
+            None => Ok(false),
+            Some(parent) if parent == origin => Ok(false),
+            Some(parent) => Ok(!self.descends_from(origin, parent)?),
         }
     }
 
-    /// Vrai si chaque unité de `client` dans `]from, to]` a pour origine l'unité d'avant : elles
-    /// sont rangées dans l'ordre de leurs horloges, `to` à droite de `from`. Lu d'une suite à l'autre
-    /// (la page, la mise à jour), si bien que la réponse ne dépend pas de leur découpage : la page
-    /// vivante et la page relue de son état jugent pareil.
-    fn chained(&mut self, client: u64, from: u32, to: u32) -> Result<bool, CrdtError> {
-        let mut clock = to;
-        for _ in 0..MAX_STEPS {
-            let Some(run) = self.at(client, clock)? else {
+    /// Vrai si `ancestor` est `id` ou un de ses ancêtres dans l'arbre des origines. Ce qui est
+    /// répondu ne dépend que des unités, pas de leur découpage en suites : la page vivante et la
+    /// page relue de son état répondent pareil.
+    fn descends_from(&mut self, id: Id, ancestor: Id) -> Result<bool, CrdtError> {
+        let Some(wanted) = self.depth(ancestor)? else {
+            return Ok(false);
+        };
+        let mut at = id;
+        loop {
+            ANCESTOR_STEPS.with(|steps| steps.set(steps.get() + 1));
+            let Some(run) = self.at(at.0, at.1)? else {
                 return Ok(false);
             };
-            if run.gc() {
+            let head = (at.0, run.start);
+            let Some(climb) = self.climb(head)? else {
+                return Ok(false);
+            };
+            if climb.depth + (at.1 - run.start) < wanted {
                 return Ok(false);
             }
-            if run.start <= from {
-                return Ok(true);
+            if climb.depth <= wanted {
+                return Ok(ancestor == (at.0, run.start + (wanted - climb.depth)));
             }
-            if !run.head(client) {
-                return Ok(false);
-            }
-            clock = run.start - 1;
+            at = if climb.jump != head && climb.jump_depth >= wanted {
+                climb.jump
+            } else {
+                match run.origin() {
+                    Some(parent) if !run.gc() => parent,
+                    _ => return Ok(false),
+                }
+            };
         }
-        // Au-delà, tenu pour enchaîné : l'élément est ramassé, forme que la relecture de l'état
-        // retrouve telle quelle (une réponse « non » au-delà de la borne ne serait pas celle de la
-        // relecture, qui parcourt moins de suites).
-        Ok(true)
+    }
+
+    /// La profondeur de l'unité `id` dans l'arbre des origines ; `None` si ses origines bouclent.
+    fn depth(&mut self, id: Id) -> Result<Option<u32>, CrdtError> {
+        let Some(run) = self.at(id.0, id.1)? else {
+            return Ok(None);
+        };
+        let climb = self.climb((id.0, run.start))?;
+        Ok(climb.map(|climb| climb.depth + (id.1 - run.start)))
+    }
+
+    /// Ce qu'on sait de la suite qui commence à `head`, de la page ou de la mise à jour. Une suite
+    /// sans origine est à la racine : rien n'est retenu pour elle (une page peut en porter une par
+    /// lettre).
+    fn climbed(&mut self, head: Id) -> Result<Option<Option<Climb>>, CrdtError> {
+        let Some(run) = self.at(head.0, head.1)? else {
+            return Ok(Some(None));
+        };
+        if run.gc() || run.origin_of(head.0, head.1).is_none() {
+            return Ok(Some(Some(Climb {
+                depth: 1,
+                level: 1,
+                jump: head,
+                jump_depth: 1,
+                jump_level: 1,
+            })));
+        }
+        let runs = if self.in_page(head.0, head.1) {
+            &*self.page
+        } else {
+            &*self.update
+        };
+        Ok(runs.climbs.get(&head).copied())
+    }
+
+    /// Retient la place d'une suite. Pour une suite de la page, seulement ce qu'on sait : un voisin
+    /// qui manque peut arriver, quand un trou d'horloge se comble.
+    fn remember_climb(&mut self, head: Id, climb: Option<Climb>) {
+        if !self.in_page(head.0, head.1) {
+            self.update.climbs.insert(head, climb);
+        } else if climb.is_some() {
+            self.page.climbs.insert(head, climb);
+        }
+    }
+
+    /// La place de la suite qui commence à `head` dans l'arbre des origines, lue une fois, en
+    /// remontant ses origines sans récursion. Des origines qui bouclent n'ont pas de place : yrs
+    /// gardera la mise à jour en attente.
+    fn climb(&mut self, head: Id) -> Result<Option<Climb>, CrdtError> {
+        if let Some(known) = self.climbed(head)? {
+            return Ok(known);
+        }
+        let mut stack = vec![head];
+        let mut walked: HashSet<Id> = HashSet::from([head]);
+        while let Some(&at) = stack.last() {
+            if self.climbed(at)?.is_some() {
+                stack.pop();
+                continue;
+            }
+            // `climbed` a répondu pour une suite sans origine : celle-ci en a une.
+            let parent = self
+                .at(at.0, at.1)?
+                .and_then(|run| run.origin_of(at.0, at.1));
+            let Some((parent, parent_run)) = (match parent {
+                Some(parent) => self.at(parent.0, parent.1)?.map(|run| (parent, run)),
+                None => None,
+            }) else {
+                self.remember_climb(at, None);
+                stack.pop();
+                continue;
+            };
+            let parent_head = (parent.0, parent_run.start);
+            match self.climbed(parent_head)? {
+                None if walked.insert(parent_head) => {
+                    stack.push(parent_head);
+                    continue;
+                }
+                // Revue sans réponse : les origines bouclent.
+                None | Some(None) => self.remember_climb(at, None),
+                Some(Some(above)) => {
+                    let climb = self.climb_under(parent, parent_run.start, above)?;
+                    self.remember_climb(at, Some(climb));
+                }
+            }
+            stack.pop();
+        }
+        Ok(self.climbed(head)?.flatten())
+    }
+
+    /// La place d'une suite dont l'origine est `parent`, dans la suite qui commence à `start` et
+    /// dont la place est `above` : un saut à double portée quand les deux sauts d'au-dessus sont de
+    /// même longueur, sinon l'origine elle-même.
+    fn climb_under(&mut self, parent: Id, start: u32, above: Climb) -> Result<Climb, CrdtError> {
+        let depth = above.depth + (parent.1 - start) + 1;
+        let level = above.level + 1;
+        let far = match self.at(above.jump.0, above.jump.1)? {
+            Some(run) => self.climbed((above.jump.0, run.start))?.flatten(),
+            None => None,
+        };
+        Ok(match far {
+            Some(far) if above.level - above.jump_level == above.jump_level - far.jump_level => {
+                Climb {
+                    depth,
+                    level,
+                    jump: far.jump,
+                    jump_depth: far.jump_depth,
+                    jump_level: far.jump_level,
+                }
+            }
+            _ => Climb {
+                depth,
+                level,
+                jump: parent,
+                jump_depth: depth - 1,
+                jump_level: above.level,
+            },
+        })
     }
 
     /// Vrai si un élément d'origine `(A, o)` et d'origine droite `(A, r)`, `0 < r < o`, est rangé
     /// selon le découpage des blocs : une même suite peut porter les unités `r - 1` à `o`.
-    pub(crate) fn placed_by_blocks(&mut self, origin: Id, right: Id) -> Result<bool, CrdtError> {
+    fn placed_by_blocks(&mut self, origin: Id, right: Id) -> Result<bool, CrdtError> {
         let (client, wanted) = (origin.0, right.1 - 1);
         let mut clock = origin.1;
-        for _ in 0..MAX_STEPS {
+        // Deux suites qui se prolongent sont fondues : au plus une par source (la page, puis la
+        // mise à jour), et ce parcours ne descend qu'une fois d'une horloge à une plus basse.
+        loop {
             let Some(run) = self.at(client, clock)? else {
                 return Ok(false);
             };
@@ -843,7 +991,6 @@ impl<T: ReadTxn> Judge<'_, T> {
             }
             clock = run.start - 1;
         }
-        Ok(true)
     }
 }
 

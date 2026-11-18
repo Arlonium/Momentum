@@ -520,6 +520,12 @@ impl PageDoc {
         PageDoc::from_updates([state]).map(|_| ())
     }
 
+    /// Les pas de la recherche d'un ancêtre faits sur le fil appelant (règle V, Ruling R856).
+    #[doc(hidden)]
+    pub fn ancestor_steps_on_this_thread() -> u64 {
+        crate::guard::runs::ANCESTOR_STEPS.with(std::cell::Cell::get)
+    }
+
     /// Ce que la page tient pour vrai d'une unité et que yrs ne garde pas (Ruling R853) : le type où
     /// elle vit, ou qu'elle est ramassée, comparé à ce que `StickyIndex::get_offset` en dit. `None`
     /// si tout concorde. Sert aux essais au hasard : la garde ne fait plus cette demande, qui
@@ -806,9 +812,6 @@ impl PageDoc {
         // Ruling R828 (règle I1) : un élément sans origine dont l'origine droite en a une (il se dit
         // en tête de la liste, devant une unité qui ne l'est pas). Aucun client ne l'écrit, et sa
         // place dépend de l'ordre d'arrivée : il devient une plage ramassée.
-        // Ruling R834 (règle I3) : de même un élément dont l'origine de l'origine droite est, dans
-        // la chaîne de son origine, plus loin qu'elle : son auteur ne voyait pas ses deux voisins
-        // côte à côte.
         // À côté d'une entrée de map, rien n'est récrit : c'est la règle de R723 qui décide.
         let candidates = shape.origin_less_with_right(&state);
         let between = shape.between_two(&state);
@@ -828,14 +831,6 @@ impl PageDoc {
             let mut origin_less = HashSet::new();
             for (id, right) in candidates {
                 if judge.origin_less_before_a_placed_unit(right)? && !judge.keyed(right)? {
-                    origin_less.insert(id);
-                }
-            }
-            for (id, origin, right) in between {
-                if judge.crosses_what_it_knows(origin, right)?
-                    && !judge.keyed(origin)?
-                    && !judge.keyed(right)?
-                {
                     origin_less.insert(id);
                 }
             }
@@ -860,8 +855,9 @@ impl PageDoc {
         // Ruling R825 (règle N3) : un élément que yrs et Yjs rangeraient selon le découpage de
         // leurs blocs (son origine droite est du client de son origine, à une horloge plus basse,
         // et une même suite peut porter l'unité d'avant l'origine droite et l'origine) perd son
-        // origine droite, comme N2. Jugé après la coupe, sur ce que yrs intègre (Ruling R721).
-        let candidates = shape.backward_right_origins(&state);
+        // origine droite, comme N2. Ruling R856 (règle V) : de même un élément dont l'origine droite
+        // ne peut pas suivre son origine. Jugé après la coupe, sur ce que yrs intègre (Ruling R721).
+        let candidates = shape.between_two(&state);
         if !candidates.is_empty() {
             let mut page = self
                 .runs
@@ -876,10 +872,7 @@ impl PageDoc {
             };
             let mut flagged = HashSet::new();
             for (id, origin, right) in candidates {
-                if judge.placed_by_blocks(origin, right)?
-                    && !judge.keyed(origin)?
-                    && !judge.keyed(right)?
-                {
+                if judge.loses_its_right_origin(origin, right)? {
                     flagged.insert(id);
                 }
             }
