@@ -1944,6 +1944,32 @@ mod tests {
         assert!(state.updates.is_empty());
     }
 
+    /// Ruling R859 : la relecture de l'état d'une compaction (81 ms pour 10 000 blocs) ne se fait
+    /// jamais sur le fil de l'acteur : la frappe qui la déclenche, et celles qui suivent, l'y
+    /// attendraient. Le compte est celui du fil qui lance la compaction ; la relecture a bien lieu,
+    /// ailleurs, puisque l'instantané s'écrit.
+    #[tokio::test]
+    async fn the_state_of_a_compaction_is_read_again_off_the_thread_of_the_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SyncConfig {
+            snapshot_every: 1,
+            ..SyncConfig::default()
+        };
+        let (mut actor, _commands, _mailbox) =
+            actor_on(&dir, cfg, mementum_store::StoreOptions::default()).await;
+        actor.persist(&[&[0, 0]], None).await.unwrap();
+        let before = PageDoc::state_checks_on_this_thread();
+        actor.compact_if_due();
+        actor.compaction_finished().await;
+        assert_eq!(
+            PageDoc::state_checks_on_this_thread(),
+            before,
+            "l'état a été relu sur le fil de l'acteur"
+        );
+        let state = actor.store.load_doc(actor.id.node_id).await.unwrap();
+        assert_eq!(state.snapshot.as_ref().map(|(seq, _)| *seq), Some(1));
+    }
+
     /// Ruling R832 : une restauration que le filet de R816 refuse (l'état de la page ne se relit
     /// pas : aucune version ne garderait ce qu'elle remplace) le dit comme une restauration
     /// refusée, et ne change rien ; de même pour une version dont l'état ne se relit pas.

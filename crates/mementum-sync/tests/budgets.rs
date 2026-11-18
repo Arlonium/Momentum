@@ -337,6 +337,13 @@ const COMPACT_EVERY: u64 = 5;
 /// Compactions mesurées une à une.
 const COMPACTIONS: usize = 12;
 
+/// Frappes à la suite du second temps de la mesure : assez pour que plusieurs instantanés s'écrivent
+/// pendant qu'on tape (une compaction dure plus de 100 ms, soixante frappes à peine autant).
+const STREAM: usize = 1_500;
+
+/// Instantanés qui doivent s'être écrits pendant ces frappes.
+const SNAPSHOTS_DURING_THE_STREAM: usize = 10;
+
 /// La part du serveur dans « frappe visible chez un autre < 150 ms » (§5.10) quand la frappe
 /// déclenche une compaction d'une page de 10 000 blocs, et pour la frappe qui la suit (Ruling
 /// R826 ; constat I-7.2 de la re-relecture 7). La compaction relit l'état (81 ms) avant de
@@ -347,10 +354,11 @@ const COMPACTIONS: usize = 12;
 ///
 /// Deux temps. (a) `COMPACTIONS` fois : des frappes jusqu'à celle qui déclenche la compaction,
 /// celle-là et la suivante chronométrées, puis la compaction attendue (pour que la suivante en
-/// déclenche une vraiment). (b) Des frappes à la suite, une compaction toutes les `COMPACT_EVERY`
-/// écritures (une seule à la fois : celle qui tombe pendant une autre attend l'écriture d'après),
-/// toutes chronométrées : certaines tombent pendant l'écriture de l'instantané, que l'écriture de
-/// la frappe attend dans la voie de la page.
+/// déclenche une vraiment). (b) `STREAM` frappes à la suite, une compaction toutes les
+/// `COMPACT_EVERY` écritures (une seule à la fois : celle qui tombe pendant une autre attend
+/// l'écriture d'après), toutes chronométrées : il s'y écrit au moins `SNAPSHOTS_DURING_THE_STREAM`
+/// instantanés, vérifiés en relisant celui que garde la base, et les frappes qui tombent pendant
+/// leur écriture l'attendent dans la voie de la page (Ruling R859).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 async fn keystroke_that_triggers_a_compaction_of_10000_block_page_under_150ms() {
@@ -393,9 +401,19 @@ async fn keystroke_that_triggers_a_compaction_of_10000_block_page_under_150ms() 
         since = 1;
     }
     let mut stream = Vec::new();
-    for _ in 0..60 {
+    let mut snapshots = std::collections::HashSet::new();
+    for n in 0..STREAM {
         stream.push(keystroke_seen(&author, &other, &id).await);
+        if n % 25 == 0 {
+            let kept = f.store.load_doc(f.page).await.unwrap().snapshot;
+            snapshots.extend(kept.map(|(seq, _)| seq));
+        }
     }
+    assert!(
+        snapshots.len() >= SNAPSHOTS_DURING_THE_STREAM,
+        "{} instantanés seulement pendant les frappes",
+        snapshots.len()
+    );
     let mut over = Vec::new();
     for (what, times) in [
         ("qui déclenche une compaction", &triggering),

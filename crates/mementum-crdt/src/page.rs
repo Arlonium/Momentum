@@ -517,6 +517,7 @@ impl PageDoc {
     /// jamais écrit à la place de ce qui se relit. Le coût est celui d'un chargement de l'état :
     /// 81 ms pour une page de 10 000 blocs (3,2 Mo), en release.
     pub fn check_state(state: &[u8]) -> Result<(), CrdtError> {
+        STATE_CHECKS.with(|checks| checks.set(checks.get() + 1));
         PageDoc::from_updates([state]).map(|_| ())
     }
 
@@ -524,6 +525,13 @@ impl PageDoc {
     #[doc(hidden)]
     pub fn ancestor_steps_on_this_thread() -> u64 {
         crate::guard::runs::ANCESTOR_STEPS.with(std::cell::Cell::get)
+    }
+
+    /// Le nombre de [`PageDoc::check_state`] faits sur le fil appelant. Sert à prouver, sans
+    /// minutage, qu'une relecture ne se fait pas sur le fil de l'acteur d'une page (Ruling R859).
+    #[doc(hidden)]
+    pub fn state_checks_on_this_thread() -> u64 {
+        STATE_CHECKS.with(std::cell::Cell::get)
     }
 
     /// Ce que la page tient pour vrai d'une unité et que yrs ne garde pas (Ruling R853) : le type où
@@ -1344,6 +1352,11 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
         return Err(attrs::refusal_in_page(tag, key));
     }
     Ok(())
+}
+
+thread_local! {
+    /// Voir [`PageDoc::state_checks_on_this_thread`].
+    static STATE_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Ce que rend [`PageDoc::read`] : la forme de la mise à jour, la mise à jour que yrs intégrera, et
