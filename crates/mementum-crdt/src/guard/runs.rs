@@ -585,6 +585,15 @@ impl<T: ReadTxn> Judge<'_, T> {
         Ok(place)
     }
 
+    /// Vrai si yrs tient l'unité `id` pour une entrée de map. Un élément à origine droite posé à
+    /// côté d'une telle unité n'est jamais récrit : yrs lui en donne la clé, et il est refusé
+    /// d'après ce que yrs en fait (Ruling R723).
+    pub(crate) fn keyed(&mut self, id: Id) -> Result<bool, CrdtError> {
+        let place = self.place(id)?;
+        // Une entrée ramassée ne donne plus de clé à personne : yrs n'y voit pas de voisin.
+        Ok(place.keyed && self.lives(place.home))
+    }
+
     /// Faux si rien ne peut vivre dans `home` : une plage ramassée, un type de la page qui n'en
     /// est plus un (supprimé, le ramasse-miettes a ramassé tout ce qu'il portait).
     fn lives(&self, home: Home) -> bool {
@@ -734,8 +743,21 @@ impl<T: ReadTxn> Judge<'_, T> {
                                 Unit::Unknown
                             }
                             (Some(a), Some(b)) if a != b => {
-                                flagged.insert(posed[k].id);
-                                Unit::Collected
+                                // Deux voisins qui ne vivent pas au même endroit. À côté d'une
+                                // entrée de map, c'est la règle de R723 qui décide.
+                                let keyed = match (p.origin, p.right) {
+                                    (Some(o), Some(r)) => {
+                                        (matches!(a, Unit::In(_)) && self.place(o)?.keyed)
+                                            || (matches!(b, Unit::In(_)) && self.place(r)?.keyed)
+                                    }
+                                    _ => false,
+                                };
+                                if keyed {
+                                    a
+                                } else {
+                                    flagged.insert(posed[k].id);
+                                    Unit::Collected
+                                }
                             }
                             (Some(unit), _) | (None, Some(unit)) => unit,
                         }

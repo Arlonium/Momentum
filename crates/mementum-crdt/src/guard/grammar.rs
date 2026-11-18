@@ -42,6 +42,12 @@
 //! d'un élément dépendait du découpage des blocs ou de l'ordre d'arrivée, chez yrs **comme chez
 //! Yjs** (N3 et I1), ou chez yrs seul (G).
 //!
+//! **Les gardes passent avant ces règles** (Ruling R839) : ce qu'elles refusent reste refusé, et
+//! une règle ne récrit jamais un élément posé à côté d'une entrée de map vivante, dont yrs lui
+//! donnerait la clé : il est refusé d'après ce que yrs en fait (Ruling R723). Ce qu'une règle lit
+//! d'une unité de la page se lit dans les suites (`runs.rs`), sans parcourir la liste où elle vit,
+//! et aucune mise à jour n'est refusée pour le nombre d'unités qu'elle nomme (Ruling R853).
+//!
 //! Une forme neuve que le client écrirait (un `Y.Array`, une `Y.Map` imbriquée, un type comme
 //! valeur d'attribut) demande d'élargir cette grammaire : sinon l'onglet est refusé.
 

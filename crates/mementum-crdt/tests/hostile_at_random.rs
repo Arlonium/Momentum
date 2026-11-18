@@ -1271,6 +1271,15 @@ fn an_item_between_neighbours_its_author_did_not_see_side_by_side_is_collected()
     assert_eq!(replay_apart("min-28569", false), Ok(()));
 }
 
+/// Ruling R853 : une entrée de map dont le parent nommé n'est pas un type ne donne de clé à
+/// personne. Graine 1854 de la voie du journal : `level` posé sur une valeur, ramassé par yrs, puis
+/// une valeur entre cette entrée et une lettre. Tenue pour voisine d'une entrée de map, elle
+/// échappait à la règle G, et yrs la rangeait dans le texte.
+#[test]
+fn an_entry_yrs_collects_gives_its_key_to_no_neighbour() {
+    assert_eq!(replay_apart("min-j1854", true), Ok(()));
+}
+
 /// Ruling R853 : ce que la mise à jour range dans un de ses éléments qui n'est pas un type, yrs le
 /// ramasse. Tenu pour vivant, un élément posé à côté de lui échappait à la règle G : la garde ne
 /// disait plus ce que yrs garde, la page relue de son état n'était plus la page vivante, et le
@@ -1281,6 +1290,31 @@ fn what_an_update_files_under_something_that_is_no_type_is_collected() {
     assert_eq!(replay_apart("min-j37708", true), Ok(()));
     assert_eq!(replay_apart("min-j42716", true), Ok(()));
     assert_eq!(replay_apart("min-27404", false), Ok(()));
+}
+
+/// Ruling R839 : une entrée de map ramassée ne donne sa clé à personne. La page que le serveur vient
+/// d'écrire lit dans yrs une entrée déjà ramassée ; relue de son journal, elle se souvient d'une
+/// entrée vivante : les deux doivent juger pareil le voisin qui la nomme, sans quoi le journal ne
+/// se relit plus. Graines 5102 et 12253 de la voie du journal, rejouées telles quelles : leur trace
+/// ne montre rien sur une page relue de sa création.
+#[test]
+fn a_collected_map_entry_gives_no_key_on_a_page_the_server_wrote() {
+    for seed in [5102, 12253] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["child_cases", "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, format!("journal:{seed}:1"))
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .expect("le processus fils se lance");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let failed: Vec<&str> = text.lines().filter(|l| l.starts_with("F ")).collect();
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(
+            text.lines().any(|l| l.starts_with("T ")),
+            "le cas ne va pas au bout : {seed}"
+        );
+    }
 }
 
 /// Ruling R834 : une règle juge pareil la mise à jour et l'état qui la contient. Graine 629 de la

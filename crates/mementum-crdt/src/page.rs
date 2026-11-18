@@ -749,7 +749,7 @@ impl PageDoc {
         txn: &TransactionMut,
         update: &[u8],
         from_client: bool,
-        many_valued: Option<&mut IdSet>,
+        mut many_valued: Option<&mut IdSet>,
     ) -> Result<Read, CrdtError> {
         let read = |bytes: &[u8]| {
             if from_client {
@@ -787,22 +787,29 @@ impl PageDoc {
                 cut = Some(bytes);
             }
         }
+        // Ruling R839 : les gardes d'abord. Ce qu'elles refusent reste refusé, quoi que les règles
+        // qui suivent auraient récrit ; elles repassent sur ce qui a été récrit.
+        let mut decoded = Update::decode_v1(cut.as_deref().unwrap_or(update))
+            .map_err(|e| CrdtError::Decode(e.to_string()))?;
         let verdict = Verdict {
             txn,
             state: &state,
             from_client,
             leaves_gap,
         };
+        self.judge(&verdict, &shape, many_valued.as_deref_mut())?;
         let beyond = self.known_beyond(txn, Some(&shape), &state)?;
         // Les suites que la mise à jour pose, lues une fois, et de nouveau quand une règle la
         // récrit.
         let mut runs = shape.runs(&state, &beyond);
+        let mut rewritten = false;
         // Ruling R828 (règle I1) : un élément sans origine dont l'origine droite en a une (il se dit
         // en tête de la liste, devant une unité qui ne l'est pas). Aucun client ne l'écrit, et sa
         // place dépend de l'ordre d'arrivée : il devient une plage ramassée.
         // Ruling R834 (règle I3) : de même un élément dont l'origine de l'origine droite est, dans
         // la chaîne de son origine, plus loin qu'elle : son auteur ne voyait pas ses deux voisins
         // côte à côte.
+        // À côté d'une entrée de map, rien n'est récrit : c'est la règle de R723 qui décide.
         let candidates = shape.origin_less_with_right(&state);
         let between = shape.between_two(&state);
         if !candidates.is_empty() || !between.is_empty() {
@@ -820,12 +827,15 @@ impl PageDoc {
             let two_neighbours = !between.is_empty();
             let mut origin_less = HashSet::new();
             for (id, right) in candidates {
-                if judge.origin_less_before_a_placed_unit(right)? {
+                if judge.origin_less_before_a_placed_unit(right)? && !judge.keyed(right)? {
                     origin_less.insert(id);
                 }
             }
             for (id, origin, right) in between {
-                if judge.crosses_what_it_knows(origin, right)? {
+                if judge.crosses_what_it_knows(origin, right)?
+                    && !judge.keyed(origin)?
+                    && !judge.keyed(right)?
+                {
                     origin_less.insert(id);
                 }
             }
@@ -844,6 +854,7 @@ impl PageDoc {
                 shape = read(&bytes)?;
                 cut = Some(bytes);
                 runs = shape.runs(&state, &beyond);
+                rewritten = true;
             }
         }
         // Ruling R825 (règle N3) : un élément que yrs et Yjs rangeraient selon le découpage de
@@ -865,7 +876,10 @@ impl PageDoc {
             };
             let mut flagged = HashSet::new();
             for (id, origin, right) in candidates {
-                if judge.placed_by_blocks(origin, right)? {
+                if judge.placed_by_blocks(origin, right)?
+                    && !judge.keyed(origin)?
+                    && !judge.keyed(right)?
+                {
                     flagged.insert(id);
                 }
             }
@@ -875,11 +889,17 @@ impl PageDoc {
                 shape = read(&bytes)?;
                 cut = Some(bytes);
                 runs = shape.runs(&state, &beyond);
+                rewritten = true;
             }
         }
-        let decoded = Update::decode_v1(cut.as_deref().unwrap_or(update))
-            .map_err(|e| CrdtError::Decode(e.to_string()))?;
-        self.judge(&verdict, &shape, many_valued)?;
+        if rewritten {
+            decoded = Update::decode_v1(cut.as_deref().unwrap_or(update))
+                .map_err(|e| CrdtError::Decode(e.to_string()))?;
+            if let Some(found) = many_valued.as_deref_mut() {
+                *found = IdSet::new();
+            }
+            self.judge(&verdict, &shape, many_valued)?;
+        }
         Ok((shape, decoded, runs))
     }
 
