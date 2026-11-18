@@ -51,19 +51,19 @@
 //! Une forme neuve que le client écrirait (un `Y.Array`, une `Y.Map` imbriquée, un type comme
 //! valeur d'attribut) demande d'élargir cette grammaire : sinon l'onglet est refusé.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER,
-    BLOCK_ITEM_JSON_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID, HAS_ORIGIN, HAS_PARENT_SUB,
-    HAS_RIGHT_ORIGIN,
+    BLOCK_ITEM_JSON_REF_NUMBER, BLOCK_ITEM_STRING_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID,
+    HAS_ORIGIN, HAS_PARENT_SUB, HAS_RIGHT_ORIGIN,
 };
 use yrs::encoding::read::{Cursor, Read};
 use yrs::{ID, IdSet, StateVector};
 
 use super::{
-    Id, Insert, JsonCount, KEYED_NOT_A_VALUE, KEYED_RIGHT_ORIGIN_MADE, Kind, Shape, Struct,
-    decode_error, read_content, read_id,
+    Id, Insert, JsonCount, KEYED_NOT_A_VALUE, KEYED_RIGHT_ORIGIN_MADE, Kind, MAX_COPIED_UNITS,
+    Shape, Struct, decode_error, read_content, read_id,
 };
 use crate::CrdtError;
 
@@ -90,6 +90,10 @@ pub(crate) const NOT_AS_WRITTEN: &str = "la mise à jour pose un élément que l
 
 /// Les plages `[début, fin)` d'un client, triées et fondues.
 type Ranges = HashMap<u64, Vec<(u32, u32)>>;
+
+/// Ruling R867 : voir [`Shape::check_copies`].
+const COPIES_TOO_MUCH: &str =
+    "la mise à jour ferait recopier trop de texte au serveur : des lettres écrites une à une";
 
 impl Shape {
     /// Refuse (`Structure`), sans rien appliquer, ce que les octets d'une mise à jour disent hors
@@ -174,6 +178,74 @@ impl Shape {
     }
 
     /// Les plages que la mise à jour supprime, par client, triées et fondues.
+    /// Ruling R867 : refuse d'un client une mise à jour dont yrs recopierait plus de
+    /// [`MAX_COPIED_UNITS`] unités en fondant ses lettres à la validation. yrs fond une suite
+    /// d'éléments du dernier au premier, et chacun garde sa copie de ce qui a été fondu jusqu'à la
+    /// fin de la suite : `n` lettres envoyées une à une lui demandent une mémoire en `n²`.
+    ///
+    /// Le compte par les seuls octets peut compter trop : d'abord lui, qui n'alloue rien pour une
+    /// mise à jour ordinaire ; au-delà de la borne, le compte exact écarte ce que yrs ne fond pas.
+    pub(crate) fn check_copies(&self, floor: &StateVector) -> Result<(), CrdtError> {
+        if self.copied_units(floor, None) <= MAX_COPIED_UNITS {
+            return Ok(());
+        }
+        let deleted = self.deleted_ranges();
+        let between: HashSet<(Id, Id)> = self
+            .inserts()
+            .filter(|(_, i)| !i.sub_flag)
+            .filter_map(|(_, i)| Some((i.origin?, i.right?)))
+            .collect();
+        if self.copied_units(floor, Some((&deleted, &between))) > MAX_COPIED_UNITS {
+            return Err(CrdtError::Structure(COPIES_TOO_MUCH.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Ce que yrs recopie en fondant les lettres de la mise à jour : dans une suite, le deuxième
+    /// élément une fois, le troisième deux fois… Le premier ne l'est jamais. Une suite s'arrête où
+    /// yrs ne fond pas : un élément qui ne prolonge pas le précédent (`try_squash`) ; et, avec
+    /// `apart`, un élément du jeu de suppressions (le ramasse-miettes retire son texte avant que yrs
+    /// fonde), ou un élément posé entre les deux, qui a pour voisins exactement ces deux unités.
+    fn copied_units(
+        &self,
+        floor: &StateVector,
+        apart: Option<(&Ranges, &HashSet<(Id, Id)>)>,
+    ) -> u64 {
+        let mut total = 0u64;
+        for (client, structs) in &self.clients {
+            let known = floor.get(&ClientID::new(*client));
+            let mut before: Option<(&Struct, &Insert)> = None;
+            let mut rank = 0u64;
+            for s in structs {
+                let letters = match &s.kind {
+                    Kind::Insert(i)
+                        if i.content == BLOCK_ITEM_STRING_REF_NUMBER && s.id.1 + s.len > known =>
+                    {
+                        i
+                    }
+                    _ => {
+                        before = None;
+                        continue;
+                    }
+                };
+                let last = (*client, s.id.1.wrapping_sub(1));
+                let follows = before.is_some_and(|(b, i)| {
+                    b.id.1 + b.len == s.id.1
+                        && letters.origin == Some(last)
+                        && letters.right == i.right
+                        && apart.is_none_or(|(deleted, between)| {
+                            !touches(deleted.get(client), b.id.1, b.id.1 + b.len)
+                                && !between.contains(&(last, (*client, s.id.1)))
+                        })
+                });
+                rank = if follows { rank + 1 } else { 0 };
+                total = total.saturating_add(rank.saturating_mul(u64::from(s.len)));
+                before = Some((s, letters));
+            }
+        }
+        total
+    }
+
     fn deleted_ranges(&self) -> Ranges {
         let mut all = Ranges::new();
         for (client, ranges) in self.deletions() {
@@ -486,6 +558,14 @@ fn insert_at(structs: &[Struct], id: Id) -> Option<(&Insert, u32)> {
 }
 
 /// Vrai si `ranges` (triées, fondues) couvrent `[start, end)`.
+/// Vrai si une des plages `ranges` (triées, disjointes) touche `[start, end)`.
+fn touches(ranges: Option<&Vec<(u32, u32)>>, start: u32, end: u32) -> bool {
+    ranges.is_some_and(|ranges| {
+        let at = ranges.partition_point(|range| range.1 <= start);
+        ranges.get(at).is_some_and(|range| range.0 < end)
+    })
+}
+
 fn covers(ranges: Option<&Vec<(u32, u32)>>, start: u32, end: u32) -> bool {
     ranges.is_some_and(|ranges| {
         let at = ranges.partition_point(|range| range.1 <= start);

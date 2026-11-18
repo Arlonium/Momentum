@@ -1135,6 +1135,48 @@ fn an_ancestor_is_found_in_a_logarithmic_number_of_steps() {
     }
 }
 
+/// Ruling R867 : au plus près de la borne, le pic de mémoire d'une mise à jour reste de l'ordre de
+/// quelques dizaines de mégaoctets, en lettres d'un octet comme de trois.
+#[test]
+fn the_bound_on_copied_letters_bounds_the_memory() {
+    let _alone = linear::ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut count = 2u64;
+    while (count + 1) * count / 2 <= mementum_crdt::MAX_COPIED_UNITS {
+        count += 1;
+    }
+    for letter in ["x", "€"] {
+        let (state, first) = page_of_letters(0);
+        let mut update = Vec::new();
+        var(&mut update, 1);
+        var(&mut update, count);
+        var(&mut update, 9);
+        var(&mut update, u64::from(first));
+        for k in 0..count as u32 {
+            if k == 0 {
+                update.extend_from_slice(&[0x04, 0, 9]);
+                var(&mut update, u64::from(first - 1));
+            } else {
+                update.extend_from_slice(&[0x84, 9]);
+                var(&mut update, u64::from(first + k - 1));
+            }
+            var(&mut update, letter.len() as u64);
+            update.extend_from_slice(letter.as_bytes());
+        }
+        update.push(0);
+        let page = PageDoc::from_updates([state.as_slice()]).unwrap();
+        let cost = linear::once(|| page.try_client_update(&update).is_ok());
+        println!(
+            "MESURE « {letter} », {count} éléments : pic de {} octets",
+            cost.peak
+        );
+        assert!(
+            cost.peak < 64 << 20,
+            "« {letter} » : pic de {} octets",
+            cost.peak
+        );
+    }
+}
+
 /// Ce que la garde ne borne pas.
 mod known_limits {
     use super::linear::once;
@@ -1175,6 +1217,47 @@ mod known_limits {
                 .unwrap();
         })
         .allocated
+    }
+
+    /// `n` lettres d'un client, chacune un élément qui a pour origine la lettre d'avant.
+    fn letters_one_after_the_other(n: u32) -> Sent {
+        let (state, first) = page_of_letters(0);
+        let mut update = Vec::new();
+        var(&mut update, 1);
+        var(&mut update, u64::from(n));
+        var(&mut update, 9);
+        var(&mut update, u64::from(first));
+        for k in 0..n {
+            if k == 0 {
+                update.extend_from_slice(&[0x04, 0, 9]);
+                var(&mut update, u64::from(first - 1));
+            } else {
+                update.extend_from_slice(&[0x84, 9]);
+                var(&mut update, u64::from(first + k - 1));
+            }
+            update.extend_from_slice(&[1, b'x']);
+        }
+        update.push(0);
+        Sent { state, update }
+    }
+
+    /// yrs fond à la validation les éléments qui se suivent, du dernier au premier, et chacun garde
+    /// sa copie de ce qui a été fondu jusqu'à la fin de la suite : des lettres envoyées une à une lui
+    /// coûtent leur nombre au carré, **en mémoire**, 4,5 Gio pour 80 000 lettres (543 Ko), mesuré sur
+    /// yrs seul. C'est pourquoi la page borne ce qu'une mise à jour d'un client fait recopier
+    /// (`MAX_COPIED_UNITS`, Ruling R867). Rouge le jour où yrs ne le fait plus : la borne peut partir.
+    #[test]
+    fn yrs_copies_what_it_has_merged_for_each_letter_of_a_chain() {
+        let _alone = super::linear::ALONE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let small = allocated_by_yrs(&letters_one_after_the_other(1_000));
+        let large = allocated_by_yrs(&letters_one_after_the_other(4_000));
+        assert!(
+            large > 10 * small,
+            "{small} puis {large} octets alloués, pour une entrée quatre fois plus grande : la \
+             limite est levée"
+        );
     }
 
     /// yrs range un élément en parcourant ce qui suit son origine, tant que cela descend d'elle :
