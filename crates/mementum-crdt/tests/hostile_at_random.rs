@@ -121,6 +121,9 @@ struct Served {
     /// Ruling R131). La page relue de son état peut alors ne pas être la page vivante : limite
     /// écrite (Ruling R830, `known_limits`), l'oracle ne la juge plus.
     holed: bool,
+    /// La longueur du journal et l'état de la page à chaque pas : ce que relirait une page compactée
+    /// à ce pas ([`Served::tail_check`]).
+    marks: Vec<(usize, Vec<u8>)>,
 }
 
 impl Served {
@@ -134,6 +137,7 @@ impl Served {
             next_client: 100,
             next_block: 1,
             holed: false,
+            marks: Vec::new(),
         }
     }
 
@@ -147,6 +151,7 @@ impl Served {
             next_client: 100,
             next_block: 1,
             holed: false,
+            marks: Vec::new(),
         }
     }
 
@@ -294,6 +299,36 @@ impl Served {
         }
         group.remove_range(&mut txn, 0, 1);
         Some(txn.encode_update_v1())
+    }
+
+    /// Ce que relit le chargement d'une page compactée à l'un des derniers pas : l'instantané, puis
+    /// la fin du journal. Elle se charge, et elle est la page vivante (constat C5 de la re-relecture
+    /// 8, Ruling R858).
+    fn tail_check(&mut self, what: &str) {
+        if self.holed {
+            return;
+        }
+        self.marks
+            .push((self.journal.len(), self.page.encode_state()));
+        let n = self.marks.len();
+        for (len, state) in &self.marks[n.saturating_sub(8)..] {
+            let tail = &self.journal[*len..];
+            let again = PageDoc::from_updates(
+                std::iter::once(state.as_slice()).chain(tail.iter().map(Vec::as_slice)),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{what} : l'instantané de l'entrée {len} et les {} suivantes ne se chargent pas : {error}",
+                    tail.len()
+                )
+            });
+            assert!(
+                live::tree(self.page.yrs_doc()) == live::tree(again.yrs_doc())
+                    && self.page.revision() == again.revision(),
+                "{what} : l'instantané de l'entrée {len} et les {} suivantes ne relisent pas la page vivante",
+                tail.len()
+            );
+        }
     }
 
     /// L'état encodé se relit, et ce qui manque à chaque vecteur d'état passé aussi : trois fois,
@@ -779,6 +814,7 @@ fn case(seed: u64, stored: bool, tally: &mut Tally) {
             *tally.honest_refused.entry(key).or_default() += 1;
         }
         served.hammer(&stages, &what);
+        served.tail_check(&what);
         if stages.len() < 4 || rng.chance(20) {
             stages.push(served.page.state_vector());
             if stages.len() > 5 {
@@ -798,6 +834,7 @@ fn case(seed: u64, stored: bool, tally: &mut Tally) {
             let _ = served.receive(&update);
         }
         served.hammer(&stages, &what);
+        served.tail_check(&what);
     }
     served.assert_sound(&format!("graine {seed}, après les suppressions"));
 }
@@ -1035,6 +1072,7 @@ fn replay_text(text: &str, stored: bool) -> Vec<String> {
             continue;
         };
         let _ = served.receive(&bytes);
+        served.tail_check(&format!("ligne {n}"));
         if let Some(why) = served.page.unsound_map_entries() {
             let why: String = why.chars().filter(|c| !c.is_ascii_digit()).collect();
             findings.push(format!("ligne {n} : {why}"));
@@ -1263,21 +1301,25 @@ fn an_item_between_two_parents_is_collected() {
     assert_eq!(replay_apart("min-j14050-b", true), Ok(()));
 }
 
-/// Ruling R834 (règle I3) : un élément d'origine « b » et d'origine droite « l », alors que
-/// l'origine de « l » est « n », plus loin que « b » dans la même suite (« bonjour ») : son auteur
-/// connaissait « n », entre ses deux voisins. Graine 28569 de la voie d'un client.
+/// Ruling R856 (règle V, qui remplace la règle I3 de R834) : un élément d'origine « b » et d'origine
+/// droite « l », alors que l'origine de « l » est « n », plus loin que « b » dans la même suite
+/// (« bonjour ») : son auteur connaissait « n », entre ses deux voisins. Il perd son origine droite.
+/// Graine 28569 de la voie d'un client.
 #[test]
-fn an_item_between_neighbours_its_author_did_not_see_side_by_side_is_collected() {
+fn an_item_between_neighbours_its_author_did_not_see_side_by_side_loses_its_right_origin() {
     assert_eq!(replay_apart("min-28569", false), Ok(()));
 }
 
 /// Ruling R853 : une entrée de map dont le parent nommé n'est pas un type ne donne de clé à
 /// personne. Graine 1854 de la voie du journal : `level` posé sur une valeur, ramassé par yrs, puis
 /// une valeur entre cette entrée et une lettre. Tenue pour voisine d'une entrée de map, elle
-/// échappait à la règle G, et yrs la rangeait dans le texte.
+/// échappait à la règle G, et yrs la rangeait dans le texte. Graine 577 : un élément entre une entrée
+/// de map ramassée et un élément vivant ; c'est elle qui rougit quand la clé d'un voisin ramassé
+/// compte, la trace de 1854 ne le montrant plus depuis le tour 7.
 #[test]
 fn an_entry_yrs_collects_gives_its_key_to_no_neighbour() {
     assert_eq!(replay_apart("min-j1854", true), Ok(()));
+    assert_eq!(replay_apart("min-j577", true), Ok(()));
 }
 
 /// Ruling R853 : ce que la mise à jour range dans un de ses éléments qui n'est pas un type, yrs le
@@ -1317,11 +1359,29 @@ fn a_collected_map_entry_gives_no_key_on_a_page_the_server_wrote() {
     }
 }
 
+/// Ruling R853 : ce qu'on ne sait pas d'une unité de la page ne se retient pas. Son voisin était
+/// au-delà d'un trou d'horloge ; le trou comblé, la garde la tenait encore pour inconnue (graine 4445
+/// de la voie du journal).
+#[test]
+fn a_neighbour_beyond_a_hole_is_read_again_once_the_hole_is_filled() {
+    assert_eq!(replay_apart("min-j4445", true), Ok(()));
+}
+
+/// Ruling R858 : une unité se juge par ce qu'elle est aujourd'hui. La page vivante se souvenait
+/// d'un élément que son état ne porte plus qu'en plage ramassée, et récrivait une entrée que
+/// l'instantané suivi de la fin du journal ne récrivait pas : la page ne se chargeait plus (constat
+/// C5 de la re-relecture 8, graine 5240 de la voie du journal).
+#[test]
+fn a_snapshot_and_the_end_of_the_journal_judge_a_collected_unit_alike() {
+    assert_eq!(replay_apart("min-j5240", true), Ok(()));
+}
+
 /// Ruling R834 : une règle juge pareil la mise à jour et l'état qui la contient. Graine 629 de la
 /// voie du journal : un « 😀 » d'origine « b » et d'origine droite la seconde moitié d'un emoji
 /// posé par la même entrée après « c ». Jugée dans la seule suite de l'origine (« abc », de la
-/// page), la règle I3 ne voyait pas la chaîne qui continue dans la mise à jour ; jugée dans l'état
-/// (une seule suite), elle la voyait, et la page relue de son état perdait l'emoji.
+/// page), la règle I3 (retirée depuis, R856) ne voyait pas la chaîne qui continue dans la mise à
+/// jour ; jugée dans l'état (une seule suite), elle la voyait, et la page relue de son état perdait
+/// l'emoji.
 #[test]
 fn a_rule_judges_an_update_and_the_state_holding_it_alike() {
     assert_eq!(replay_apart("min-j629", true), Ok(()));
