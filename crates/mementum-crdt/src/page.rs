@@ -822,8 +822,8 @@ impl PageDoc {
         // place dépend de l'ordre d'arrivée : il devient une plage ramassée.
         // À côté d'une entrée de map, rien n'est récrit : c'est la règle de R723 qui décide.
         let candidates = shape.origin_less_with_right(&state);
-        let between = shape.between_two(&state);
-        if !candidates.is_empty() || !between.is_empty() {
+        let two_neighbours = shape.has_item_between_two(&state);
+        if !candidates.is_empty() || two_neighbours {
             let mut page = self
                 .runs
                 .lock()
@@ -835,7 +835,6 @@ impl PageDoc {
                 page: &mut page,
                 update: &mut runs,
             };
-            let two_neighbours = !between.is_empty();
             let mut origin_less = HashSet::new();
             for (id, right) in candidates {
                 if judge.origin_less_before_a_placed_unit(right)? && !judge.keyed(right)? {
@@ -864,9 +863,9 @@ impl PageDoc {
         // leurs blocs (son origine droite est du client de son origine, à une horloge plus basse,
         // et une même suite peut porter l'unité d'avant l'origine droite et l'origine) perd son
         // origine droite, comme N2. Ruling R856 (règle V) : de même un élément dont l'origine droite
-        // ne peut pas suivre son origine. Jugé après la coupe, sur ce que yrs intègre (Ruling R721).
-        let candidates = shape.between_two(&state);
-        if !candidates.is_empty() {
+        // ne peut pas suivre son origine. Jugé après la coupe, sur ce que yrs intègre (Ruling R721),
+        // en une passe, sur ce qui a déjà été récrit (Ruling R861).
+        if shape.has_item_between_two(&state) {
             let mut page = self
                 .runs
                 .lock()
@@ -878,12 +877,7 @@ impl PageDoc {
                 page: &mut page,
                 update: &mut runs,
             };
-            let mut flagged = HashSet::new();
-            for (id, origin, right) in candidates {
-                if judge.loses_its_right_origin(origin, right)? {
-                    flagged.insert(id);
-                }
-            }
+            let flagged = judge.rights_to_drop(&shape)?;
             drop(page);
             if !flagged.is_empty() {
                 let bytes = cut::unright(cut.as_deref().unwrap_or(update), &flagged)?;

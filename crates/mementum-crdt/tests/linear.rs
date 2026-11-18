@@ -15,8 +15,8 @@ use mementum_crdt::{FRAGMENT, PageDoc};
 use mementum_md::{MAX_COLOR_BYTES, MAX_HREF_BYTES, RenderOpts, render};
 use yrs::types::{Attrs, Delta};
 use yrs::{
-    Any, Doc, ReadTxn, Text, Transact, Xml, XmlElementPrelim, XmlElementRef, XmlFragment,
-    XmlTextPrelim,
+    Any, Doc, GetString, ReadTxn, Text, Transact, Xml, XmlElementPrelim, XmlElementRef,
+    XmlFragment, XmlOut, XmlTextPrelim,
 };
 
 /// Une page dont le fragment porte `build` (des éléments posés à la main, comme un client
@@ -566,13 +566,18 @@ fn letters_header(n: usize) -> Vec<u8> {
 /// Une page dont le paragraphe porte `n` lettres insérées en tête, chacune un élément et une
 /// suite à elle : l'état, et l'horloge de la première.
 fn page_of_letters(n: usize) -> (Vec<u8>, u32) {
+    page_of_letters_by(9, n)
+}
+
+/// [`page_of_letters`], écrite par le client `client`.
+fn page_of_letters_by(client: u64, n: usize) -> (Vec<u8>, u32) {
     let (_, root) = PageDoc::new_page();
-    let doc = client_of(9, &root);
+    let doc = client_of(client, &root);
     let first = {
         let mut txn = doc.transact_mut();
         let paragraph = first_paragraph(&txn);
         let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
-        let first = txn.state_vector().get(&yrs::ClientID::new(9));
+        let first = txn.state_vector().get(&yrs::ClientID::new(client));
         for _ in 0..n {
             text.insert(&mut txn, 0, "a");
         }
@@ -597,11 +602,11 @@ fn letters_between_letters_of_the_page(n: usize) -> Sent {
 }
 
 /// De même dans des textes que le serveur a écrits : la garde ne connaît ses unités qu'en les
-/// lisant dans ce que yrs garde, une fois pour toutes. Des paragraphes courts : yrs seul met un
-/// temps quadratique à couper un long texte en `n` morceaux (936 ms pour 32 000 lettres, en
-/// release, sans aucune garde).
+/// lisant dans ce que yrs garde, une fois pour toutes. Ni de longs textes (yrs seul met un temps
+/// quadratique à couper un long texte en `n` morceaux : 936 ms pour 32 000 lettres, en release, sans
+/// aucune garde), ni beaucoup de petits : chaque coupe décale les blocs du serveur qui suivent.
 fn letters_between_letters_the_server_wrote(n: usize) -> Sent {
-    const LETTERS: usize = 32;
+    const LETTERS: usize = 128;
     let paragraph = "a".repeat(LETTERS);
     let paragraphs = n.div_ceil(LETTERS - 1);
     let page = PageDoc::new_page().0;
@@ -746,6 +751,52 @@ fn letters_whose_right_is_far_up_the_chain(n: usize) -> Sent {
     Sent { state, update }
 }
 
+/// Ruling R861 : une cascade. Le premier élément a la forme N3 ; une fois récrit, il tient en une
+/// suite avec ce qui précède, et le suivant a la forme N3 à son tour, jusqu'au dernier. Rejuger toute
+/// la mise à jour après chaque récriture coûterait un tour par élément. Si `letters`, ses éléments
+/// sont des lettres ; sinon des contenus supprimés, que yrs fond sans les recopier (voir
+/// `known_limits`) : c'est alors la garde que l'on mesure.
+fn cascade_of_rewrites(n: usize, letters: bool) -> Sent {
+    // Un identifiant de client comme Yjs les tire : chaque voisin nommé l'écrit en entier.
+    const CLIENT: u64 = 1 << 44;
+    let (state, first) = page_of_letters_by(CLIENT, 0);
+    let doc = client_of(CLIENT, &state);
+    {
+        let mut txn = doc.transact_mut();
+        let paragraph = first_paragraph(&txn);
+        let Some(XmlOut::Text(text)) = paragraph.get(&txn, 0) else {
+            panic!("le texte");
+        };
+        text.insert(&mut txn, 0, "abcdef");
+    }
+    let state = doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    let mut update = Vec::new();
+    var(&mut update, 1);
+    var(&mut update, n.max(1) as u64);
+    var(&mut update, CLIENT);
+    var(&mut update, u64::from(first + 6));
+    for k in 0..n.max(1) as u32 {
+        let (origin, right) = (
+            (CLIENT, first + 5 + k),
+            (CLIENT, first + if k == 0 { 4 } else { 2 }),
+        );
+        if letters {
+            push_letter_between(&mut update, origin, right);
+        } else {
+            update.push(0xC1);
+            for id in [origin, right] {
+                var(&mut update, id.0);
+                var(&mut update, u64::from(id.1));
+            }
+            update.push(1);
+        }
+    }
+    update.push(0);
+    Sent { state, update }
+}
+
 /// Règles G et P2 (Ruling R853) : juger les voisins des éléments d'une mise à jour croît comme
 /// elle et comme la page, quelle que soit la place de ces voisins dans la liste où ils vivent.
 #[test]
@@ -770,6 +821,10 @@ fn judging_the_neighbours_of_items_grows_like_the_update() {
         Form {
             what: "lettres dont la voisine de droite est loin au-dessus dans la chaîne",
             build: &letters_whose_right_is_far_up_the_chain,
+        },
+        Form {
+            what: "éléments dont chaque récriture rend le suivant dangereux",
+            build: &|n| cascade_of_rewrites(n, false),
         },
     ];
     let size = |sent: &Sent| sent.state.len() + sent.update.len();
@@ -1028,14 +1083,42 @@ fn judging_attributes_grows_like_the_update() {
         peak_per_byte: 128,
         answer: Answer::PerByte(8),
     };
-    let failures = grows_like_input(&per_client, size, judge, |_| 0, limits);
+    // Jugée deux fois : une seule frôle le temps minimal de la mesure de base, qui passait alors une
+    // fois sur deux à la taille au-dessus, où le temps par élément monte (19 fois le temps pour 8
+    // fois l'entrée, relevé) sans que la garde y soit pour rien : d'un passage à l'autre, ce test
+    // ne mesurait pas la même chose.
+    let twice = |sent: &Sent| (judge(sent), judge(sent));
+    let failures = grows_like_input(&per_client, size, twice, |_| 0, limits);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Ruling R861 : la cascade est jugée jusqu'au bout. Un lecteur sans garde lit l'état servi comme
+/// la page.
+#[test]
+fn a_cascade_of_rewrites_is_judged_to_its_end() {
+    let _alone = linear::ALONE.lock().unwrap_or_else(|e| e.into_inner());
+    let sent = cascade_of_rewrites(300, true);
+    let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
+    page.try_client_update(&sent.update).expect("acceptée");
+    let text = |doc: &Doc| {
+        let txn = doc.transact();
+        let paragraph = first_paragraph(&txn);
+        let Some(XmlOut::Text(text)) = paragraph.get(&txn, 0) else {
+            panic!("le texte");
+        };
+        text.get_string(&txn)
+    };
+    let bare = client_of(98, &page.encode_state());
+    let live = text(page.yrs_doc());
+    assert_eq!(text(&bare), live);
+    assert_eq!(live, format!("abcdef{}", "x".repeat(300)));
 }
 
 /// Règle V (Ruling R856) : un ancêtre se trouve en un nombre de pas logarithmique, quelle que soit la
 /// distance. Se compte, sans minutage : remonter la chaîne pas à pas ne se verrait qu'au temps.
 #[test]
 fn an_ancestor_is_found_in_a_logarithmic_number_of_steps() {
+    let _alone = linear::ALONE.lock().unwrap_or_else(|e| e.into_inner());
     for n in [2_000u32, 32_000] {
         let sent = letters_whose_right_is_far_up_the_chain(n as usize);
         let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
@@ -1101,6 +1184,9 @@ mod known_limits {
     /// l'ajoute, et aucune ne le borne (Ruling R860). Rouge le jour où ce coût est levé.
     #[test]
     fn yrs_walks_the_end_of_a_long_chain_for_each_item() {
+        let _alone = super::linear::ALONE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for with_right in [true, false] {
             let small = allocated_by_yrs(&letters_inside_a_long_chain(500, with_right));
             let large = allocated_by_yrs(&letters_inside_a_long_chain(2_000, with_right));

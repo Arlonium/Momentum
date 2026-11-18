@@ -288,6 +288,18 @@ impl Runs {
         }
     }
 
+    /// Pose `run` après les suites de `client`, fondue avec la dernière si elle la prolonge. Une
+    /// suite qui ne vient pas après elles (des origines qui bouclent : yrs gardera la mise à jour en
+    /// attente) n'est pas posée : les suites restent triées.
+    fn pose(&mut self, client: u64, run: Run) {
+        let list = self.clients.entry(client).or_default();
+        match list.last_mut() {
+            Some(last) if last.end > run.start => {}
+            Some(last) if last.joins(client, &run) => last.end = run.end,
+            _ => list.push(run),
+        }
+    }
+
     /// Retient où vit la suite qui commence à `start`.
     fn settle(&mut self, client: u64, start: u32, place: Place) {
         if let Some(runs) = self.clients.get_mut(&client) {
@@ -361,21 +373,9 @@ impl Shape {
             let known = floor.get(&ClientID::new(*client));
             let holes = beyond.get(client);
             let mut list: Vec<Run> = Vec::new();
-            for s in structs {
-                let end = s.id.1 + s.len;
-                if end <= known
-                    || holes
-                        .is_some_and(|ranges| ranges.iter().any(|r| r.0 <= s.id.1 && s.id.1 < r.1))
-                {
+            for s in structs.iter().filter(|s| s.is_posed(known, holes)) {
+                let Some(run) = s.run(known, s.right()) else {
                     continue;
-                }
-                // Une plage ramassée à cheval sur le plancher n'est pas coupée (Ruling R784 ne coupe
-                // que les éléments) : sa part connue n'est pas ramassée pour autant.
-                let span = (s.id.1.max(known), end);
-                let run = match &s.kind {
-                    Kind::Insert(i) => Run::new(span, i.right, i.origin, false, i.place()),
-                    Kind::Gc => Run::new(span, None, None, true, Some(GONE)),
-                    Kind::Skip => continue,
                 };
                 match list.last_mut() {
                     Some(last) if last.joins(*client, &run) => last.end = run.end,
@@ -383,7 +383,8 @@ impl Shape {
                 }
             }
             if !list.is_empty() {
-                out.clients.entry(*client).or_default().extend(list);
+                list.shrink_to_fit();
+                out.clients.insert(*client, list);
             }
         }
         out
@@ -403,14 +404,63 @@ impl Shape {
             .collect()
     }
 
-    /// Les éléments que la mise à jour intègre (au-dessus de `floor`) qui ont une origine et une
-    /// origine droite, hors des entrées de map : les candidats des règles N3 et V (Rulings R825,
-    /// R856). Leur identifiant, leur origine et leur origine droite.
-    pub(crate) fn between_two(&self, floor: &StateVector) -> Vec<(Id, Id, Id)> {
-        self.inserts()
-            .filter(|(s, i)| !i.sub_flag && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0)))
-            .filter_map(|(s, i)| Some((s.id, i.origin?, i.right?)))
-            .collect()
+    /// Vrai si la mise à jour intègre (au-dessus de `floor`) un élément qui a une origine et une
+    /// origine droite, hors des entrées de map : les règles G, P2, N3 et V n'ont à juger que ceux-là.
+    pub(crate) fn has_item_between_two(&self, floor: &StateVector) -> bool {
+        self.inserts().any(|(s, i)| {
+            !i.sub_flag
+                && i.origin.is_some()
+                && i.right.is_some()
+                && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
+        })
+    }
+}
+
+impl super::Struct {
+    /// Vrai si la page intégrera ce bloc : au-dessus du plancher `known` de son client, hors de ce
+    /// qu'elle connaît au-delà d'un trou (`holes`).
+    fn is_posed(&self, known: u32, holes: Option<&Vec<(u32, u32)>>) -> bool {
+        self.id.1 + self.len > known
+            && !matches!(self.kind, Kind::Skip)
+            && !holes
+                .is_some_and(|ranges| ranges.iter().any(|r| r.0 <= self.id.1 && self.id.1 < r.1))
+    }
+
+    /// L'origine droite de l'élément, s'il en est un.
+    fn right(&self) -> Option<Id> {
+        match &self.kind {
+            Kind::Insert(i) => i.right,
+            _ => None,
+        }
+    }
+
+    /// Les voisins que nomme l'élément : il dépend d'eux, et de ce dont ils dépendent.
+    fn neighbours(&self) -> [Option<Id>; 2] {
+        match &self.kind {
+            Kind::Insert(i) => [i.origin, i.right],
+            _ => [None, None],
+        }
+    }
+
+    /// Le voisin de gauche et le voisin de droite d'un élément qui a les deux, hors des entrées de
+    /// map : les candidats des règles N3 et V (Rulings R825, R856).
+    fn between(&self) -> Option<(Id, Id)> {
+        match &self.kind {
+            Kind::Insert(i) if !i.sub_flag => Some((i.origin?, i.right?)),
+            _ => None,
+        }
+    }
+
+    /// La suite que pose ce bloc au-dessus du plancher `known` de son client, avec `right` pour
+    /// origine droite. Une plage ramassée à cheval sur le plancher n'est pas coupée (Ruling R784 ne
+    /// coupe que les éléments) : sa part connue n'est pas ramassée pour autant.
+    fn run(&self, known: u32, right: Option<Id>) -> Option<Run> {
+        let span = (self.id.1.max(known), self.id.1 + self.len);
+        match &self.kind {
+            Kind::Insert(i) => Some(Run::new(span, right, i.origin, false, i.place())),
+            Kind::Gc => Some(Run::new(span, None, None, true, Some(GONE))),
+            Kind::Skip => None,
+        }
     }
 }
 
@@ -430,20 +480,15 @@ impl super::Insert {
 }
 
 impl Shape {
-    /// Ce que la mise à jour pose et que la page intégrera (comme [`Shape::runs`]) : les éléments
-    /// et les plages ramassées au-dessus du plancher de leur client, hors de ce que la page connaît
-    /// au-delà d'un trou. Par client, dans l'ordre des horloges.
+    /// Ce que la mise à jour pose et que la page intégrera : les éléments et les plages ramassées
+    /// au-dessus du plancher de leur client, hors de ce que la page connaît au-delà d'un trou. Par
+    /// client, dans l'ordre des horloges.
     fn posed(&self, floor: &StateVector, beyond: &Beyond) -> Vec<&super::Struct> {
         let mut out = Vec::new();
         for (client, structs) in &self.clients {
             let known = floor.get(&ClientID::new(*client));
             let holes = beyond.get(client);
-            out.extend(structs.iter().filter(|s| {
-                s.id.1 + s.len > known
-                    && !matches!(s.kind, Kind::Skip)
-                    && !holes
-                        .is_some_and(|ranges| ranges.iter().any(|r| r.0 <= s.id.1 && s.id.1 < r.1))
-            }));
+            out.extend(structs.iter().filter(|s| s.is_posed(known, holes)));
         }
         out
     }
@@ -771,14 +816,80 @@ impl<T: ReadTxn> Judge<'_, T> {
         Ok(self.update.at(id.0, id.1).is_some_and(|run| run.gc()))
     }
 
+    /// Règles N3 et V (Rulings R825, R856) : les éléments de la mise à jour qui perdent leur origine
+    /// droite, jugés **une fois chacun**, dans l'ordre où yrs les intègre, sur ce qui a déjà été
+    /// récrit (Ruling R861). Un élément qui perd son origine droite peut tenir en une suite avec ce
+    /// qui le précède, et un élément qui le nomme a alors la forme N3 : le juger sur la mise à jour
+    /// reçue le laissait rangé selon le découpage des blocs. Ce qu'un élément nomme (l'unité d'avant
+    /// de son client, son origine, son origine droite) est jugé avant lui, d'un client à l'autre ;
+    /// rien de ce qui vient après ne change un verdict, et il n'y a donc pas de point fixe à chercher.
+    ///
+    /// Les suites de la mise à jour (`update`) sont refaites au fil de la passe, telles que yrs les
+    /// intégrera.
+    pub(crate) fn rights_to_drop(&mut self, shape: &Shape) -> Result<HashSet<Id>, CrdtError> {
+        let posed = shape.posed(self.floor, self.beyond);
+        let mut spans: HashMap<u64, (usize, usize)> = HashMap::new();
+        for (k, s) in posed.iter().enumerate() {
+            spans.entry(s.id.0).or_insert((k, k)).1 = k + 1;
+        }
+        let rank = |id: Id| {
+            let &(from, to) = spans.get(&id.0)?;
+            let list = &posed[from..to];
+            let at = list.partition_point(|s| s.id.1 + s.len <= id.1);
+            list.get(at).filter(|s| s.id.1 <= id.1).map(|_| from + at)
+        };
+        *self.update = Runs::default();
+        let mut flagged = HashSet::new();
+        let mut waiting = vec![true; posed.len()];
+        let mut stack = Vec::new();
+        for root in 0..posed.len() {
+            if !waiting[root] {
+                continue;
+            }
+            waiting[root] = false;
+            stack.push(root);
+            // En profondeur, sans récursion. Une boucle (ce qu'on attend attend déjà) n'attend
+            // personne : yrs gardera la mise à jour en attente, et la page la refusera.
+            while let Some(&k) = stack.last() {
+                let s = posed[k];
+                let before = k.checked_sub(1).filter(|&j| posed[j].id.0 == s.id.0);
+                let named = s.neighbours();
+                let next = before
+                    .into_iter()
+                    .chain(
+                        named
+                            .into_iter()
+                            .flatten()
+                            .filter(|id| !self.in_page(id.0, id.1))
+                            .filter_map(rank),
+                    )
+                    .find(|&j| waiting[j]);
+                if let Some(j) = next {
+                    waiting[j] = false;
+                    stack.push(j);
+                    continue;
+                }
+                stack.pop();
+                let mut right = s.right();
+                if let Some((origin, neighbour)) = s.between()
+                    && self.loses_its_right_origin(origin, neighbour)?
+                {
+                    flagged.insert(s.id);
+                    right = None;
+                }
+                let known = self.floor.get(&ClientID::new(s.id.0));
+                if let Some(run) = s.run(known, right) {
+                    self.update.pose(s.id.0, run);
+                }
+            }
+        }
+        Ok(flagged)
+    }
+
     /// Vrai si un élément d'origine `origin` et d'origine droite `right` perd son origine droite :
     /// il sera rangé par son origine seule, partout pareil. La règle N3 (Ruling R825) ou la règle V
     /// (Ruling R856) le demandent, sauf à côté d'une entrée de map, où le refus de R723 répond.
-    pub(crate) fn loses_its_right_origin(
-        &mut self,
-        origin: Id,
-        right: Id,
-    ) -> Result<bool, CrdtError> {
+    fn loses_its_right_origin(&mut self, origin: Id, right: Id) -> Result<bool, CrdtError> {
         if self.collected(origin)? || self.collected(right)? {
             return Ok(false);
         }

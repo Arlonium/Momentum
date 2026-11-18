@@ -474,6 +474,204 @@ fn a_right_of_a_sibling_of_the_same_client_is_dropped() {
     assert_eq!(page.revision(), again.revision());
 }
 
+/// Le texte que lit un lecteur sans garde : un yrs neuf, à qui la page sert son état. Relue par une
+/// autre page, la mise à jour repasserait par les règles, et l'écart ne se verrait pas.
+fn read_without_the_guard(page: &PageDoc, at: u32) -> String {
+    let bare = replica(99, &page.encode_state());
+    let txn = bare.transact();
+    text_of(&bare, &txn, at).get_string(&txn)
+}
+
+/// Le corps d'un élément fait par [`item`], sans ses en-têtes de mise à jour.
+fn body(update: &[u8], client: u64, clock: u32) -> Vec<u8> {
+    let mut head = vec![1, 1];
+    var(&mut head, client);
+    var(&mut head, u64::from(clock));
+    update[head.len()..update.len() - 1].to_vec()
+}
+
+/// Ruling R861 : N3 et V se jugent dans l'ordre où les éléments s'intègrent, sur ce qui a déjà été
+/// récrit. (10,7) a la forme N3 et perd son origine droite ; (10,6) et (10,7) tiennent alors en une
+/// suite, et (10,8) a la forme N3 à son tour. Jugée sur la mise à jour reçue, (10,8) gardait son
+/// origine droite : la page lisait « abcdefpq », un vrai Yjs qui ouvre l'état servi « abqcdefp ».
+#[test]
+fn rule_n3_after_rule_n3_in_the_same_update() {
+    let page = with_abcdef();
+    let read = page
+        .try_client_update(&unhex("01020a07c40a060a050170c40a070a03017100"))
+        .expect("acceptée")
+        .read;
+    assert_eq!(
+        read,
+        unhex("01020a07840a060170840a07017100"),
+        "les deux éléments perdent leur origine droite"
+    );
+    assert_eq!(page_text(&page, 0), "abcdefpq");
+    assert_eq!(read_without_the_guard(&page, 0), "abcdefpq");
+}
+
+/// Ruling R861 : de même après la règle V. (20,1) perd son origine droite par V ; (20,0) à (20,2)
+/// tiennent alors en une suite, où (20,3) a la forme N3.
+#[test]
+fn rule_n3_after_rule_v_in_the_same_update() {
+    let page = with_abcdef();
+    let mut update = vec![1, 4, 20, 0];
+    for (clock, origin, right) in [
+        (0, (10, 2), None),
+        (1, (20, 0), Some((10, 5))),
+        (2, (20, 1), None),
+        (3, (20, 2), Some((20, 1))),
+    ] {
+        let one = item(20, clock, Some(origin), right, Content::Letters);
+        update.extend(body(&one, 20, clock));
+    }
+    update.push(0);
+    let read = page.try_client_update(&update).expect("acceptée").read;
+    assert_eq!(read_without_the_guard(&page, 0), page_text(&page, 0));
+    let rewritten = with_abcdef();
+    let mut expected = vec![1, 4, 20, 0];
+    for (clock, origin) in [(0, (10, 2)), (1, (20, 0)), (2, (20, 1)), (3, (20, 2))] {
+        let one = item(20, clock, Some(origin), None, Content::Letters);
+        expected.extend(body(&one, 20, clock));
+    }
+    expected.push(0);
+    assert_eq!(
+        read,
+        rewritten
+            .try_client_update(&expected)
+            .expect("acceptée")
+            .read,
+        "(20,1) et (20,3) perdent leur origine droite"
+    );
+}
+
+/// Ruling R861 : ce que nomme un élément d'un autre client est jugé avant lui, quel que soit l'ordre
+/// des clients dans la mise à jour. Le client 30 vient d'abord dans les octets ; son élément nomme
+/// l'unité (10,7), que N3 récrit dans la même mise à jour.
+#[test]
+fn rule_n3_waits_for_the_units_of_another_client_it_names() {
+    let page = with_abcdef();
+    let mut update = vec![2, 1, 30, 0];
+    let other = item(30, 0, Some((10, 7)), Some((10, 3)), Content::Letters);
+    update.extend(body(&other, 30, 0));
+    update.extend_from_slice(&[1, 10, 7]);
+    let first = item(10, 7, Some((10, 6)), Some((10, 5)), Content::Letters);
+    update.extend(body(&first, 10, 7));
+    update.push(0);
+    let read = page.try_client_update(&update).expect("acceptée").read;
+    assert_eq!(read_without_the_guard(&page, 0), page_text(&page, 0));
+    assert!(
+        !read.windows(2).any(|w| w == [10, 3]),
+        "(30,0) perd son origine droite : {read:?}"
+    );
+}
+
+/// Ruling R861 : tout ce qui précède, chez le client d'une unité nommée, est jugé avant elle. Le
+/// client 30 nomme (10,8) ; c'est (10,7), juste avant elle, qui perd son origine droite, et qui fait
+/// tenir (10,6) à (10,8) en une suite.
+#[test]
+fn rule_n3_judges_what_comes_before_the_unit_it_names() {
+    let page = with_abcdef();
+    let mut update = vec![2, 1, 30, 0];
+    let other = item(30, 0, Some((10, 8)), Some((10, 3)), Content::Letters);
+    update.extend(body(&other, 30, 0));
+    update.extend_from_slice(&[2, 10, 7]);
+    for (clock, origin, right) in [(7, (10, 6), Some((10, 5))), (8, (10, 7), None)] {
+        let one = item(10, clock, Some(origin), right, Content::Letters);
+        update.extend(body(&one, 10, clock));
+    }
+    update.push(0);
+    let read = page.try_client_update(&update).expect("acceptée").read;
+    assert_eq!(read_without_the_guard(&page, 0), page_text(&page, 0));
+    assert!(
+        !read.windows(2).any(|w| w == [10, 3]),
+        "(30,0) perd son origine droite : {read:?}"
+    );
+}
+
+/// Ruling R861 : tout ce dont dépend un élément est jugé avant lui, jusqu'au bout de ses origines,
+/// quel que soit l'ordre des clients dans les octets. (30,0) est posé entre (40,0) et (60,0), qui ont
+/// la même origine (50,0) : il est honnête, et garde son origine droite. Jugé avant que (50,0) soit
+/// connu, il se disait sans ancêtre commun avec son voisin de droite, et la règle V la lui retirait.
+#[test]
+fn a_right_origin_is_kept_when_the_origins_it_depends_on_come_later_in_the_update() {
+    let page = with_abcdef();
+    let mut update = vec![4];
+    for (client, origin, right) in [
+        (60, (50, 0), None),
+        (30, (40, 0), Some((60, 0))),
+        (40, (50, 0), None),
+        (50, (10, 6), None),
+    ] {
+        update.extend_from_slice(&[1, client, 0]);
+        let one = item(u64::from(client), 0, Some(origin), right, Content::Letters);
+        update.extend(body(&one, u64::from(client), 0));
+    }
+    update.push(0);
+    let read = page.try_client_update(&update).expect("acceptée").read;
+    assert!(
+        read.windows(5).any(|w| w == [0xC4, 40, 0, 60, 0]),
+        "(30,0) garde son origine droite : {read:?}"
+    );
+    assert_eq!(read_without_the_guard(&page, 0), page_text(&page, 0));
+}
+
+/// Ruling R861 : de même pour l'unité d'avant d'un client : (30,0) nomme (10,8), dont l'origine est
+/// (10,7), écrite juste avant par le même client.
+#[test]
+fn a_right_origin_is_kept_when_the_unit_before_the_one_it_names_comes_later() {
+    let page = with_abcdef();
+    let mut update = vec![3];
+    let right = item(20, 0, Some((10, 7)), None, Content::Letters);
+    let other = item(30, 0, Some((10, 8)), Some((20, 0)), Content::Letters);
+    update.extend_from_slice(&[1, 30, 0]);
+    update.extend(body(&other, 30, 0));
+    update.extend_from_slice(&[1, 20, 0]);
+    update.extend(body(&right, 20, 0));
+    update.extend_from_slice(&[2, 10, 7]);
+    for (clock, origin) in [(7, (10, 6)), (8, (10, 7))] {
+        let one = item(10, clock, Some(origin), None, Content::Letters);
+        update.extend(body(&one, 10, clock));
+    }
+    update.push(0);
+    let read = page.try_client_update(&update).expect("acceptée").read;
+    assert!(
+        read.windows(5).any(|w| w == [0xC4, 10, 8, 20, 0]),
+        "(30,0) garde son origine droite : {read:?}"
+    );
+    assert_eq!(read_without_the_guard(&page, 0), page_text(&page, 0));
+}
+
+/// Ruling R861 : les unités d'un client sont jugées dans l'ordre de ses horloges, même quand un
+/// élément nomme d'abord la plus haute : (30,0) nomme (10,8), dont rien ne dépend de (10,7). Jugée
+/// après elle, (10,7) n'aurait plus sa place parmi les suites, et (20,0), posée juste après (10,7),
+/// se dirait sans ancêtre commun avec son voisin de droite.
+#[test]
+fn the_units_of_a_client_are_judged_in_the_order_of_their_clocks() {
+    let page = with_abcdef();
+    let mut update = vec![4];
+    for (client, origin, right) in [
+        (30, (10, 8), None),
+        (20, (10, 7), Some((40, 0))),
+        (40, (10, 6), None),
+    ] {
+        update.extend_from_slice(&[1, client, 0]);
+        let one = item(u64::from(client), 0, Some(origin), right, Content::Letters);
+        update.extend(body(&one, u64::from(client), 0));
+    }
+    update.extend_from_slice(&[2, 10, 7]);
+    for clock in [7, 8] {
+        let one = item(10, clock, Some((10, 6)), None, Content::Letters);
+        update.extend(body(&one, 10, clock));
+    }
+    update.push(0);
+    let read = page.try_client_update(&update).expect("acceptée").read;
+    assert!(
+        read.windows(5).any(|w| w == [0xC4, 10, 7, 40, 0]),
+        "(20,0) garde son origine droite : {read:?}"
+    );
+}
+
 /// Une frappe honnête au milieu d'un texte n'est pas touchée : l'origine de ce qui suit est
 /// l'origine de la frappe, ou un de ses ancêtres.
 #[test]
