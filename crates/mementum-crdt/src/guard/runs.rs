@@ -266,11 +266,6 @@ impl Runs {
         }
     }
 
-    /// Le nombre de suites connues.
-    fn len(&self) -> usize {
-        self.clients.values().map(Vec::len).sum()
-    }
-
     /// Retient où vit la suite qui commence à `start`.
     fn settle(&mut self, client: u64, start: u32, place: Place) {
         if let Some(runs) = self.clients.get_mut(&client) {
@@ -553,9 +548,11 @@ impl<T: ReadTxn> Judge<'_, T> {
     /// son parent chez son origine, sinon chez son origine droite : on remonte ces voisins, et ce
     /// qu'on trouve est retenu pour chaque suite traversée. Chaque suite n'est donc remontée
     /// qu'une fois, sans parcourir la liste où vit l'unité (`StickyIndex::get_offset` le faisait,
-    /// pour chaque unité nommée).
+    /// pour chaque unité nommée). Un élément intégré ne dépend que de ce qui l'a été avant lui ; une
+    /// mise à jour hostile peut boucler sur elle-même : le parcours s'arrête à la première suite
+    /// revue (Ruling R854), et yrs gardera la mise à jour en attente.
     fn place(&mut self, id: Id) -> Result<Place, CrdtError> {
-        let mut path: Vec<Id> = Vec::new();
+        let mut path: HashSet<Id> = HashSet::new();
         let mut at = id;
         let place = loop {
             let Some(run) = self.at(at.0, at.1)? else {
@@ -564,12 +561,9 @@ impl<T: ReadTxn> Judge<'_, T> {
             if let Some(place) = run.place() {
                 break place;
             }
-            // Un élément intégré ne dépend que de ce qui l'a été avant lui ; une mise à jour
-            // hostile peut boucler sur elle-même, et yrs la gardera en attente.
-            if path.len() % 4096 == 4095 && path.len() > self.page.len() + self.update.len() {
+            if !path.insert((at.0, run.start)) {
                 break UNKNOWN;
             }
-            path.push((at.0, run.start));
             match run.origin().or(run.right()) {
                 Some(next) => at = next,
                 None => break UNKNOWN,

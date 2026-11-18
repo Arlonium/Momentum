@@ -979,6 +979,9 @@ impl Shape {
         };
         // Pour chaque élément de la mise à jour : dans un texte, d'après elle seule ?
         let mut known: Vec<Option<bool>> = vec![None; inserts.len()];
+        // Ruling R854 : le départ du parcours qui a vu chaque élément ; une boucle s'arrête au
+        // premier élément revu.
+        let mut walked = vec![usize::MAX; inserts.len()];
         for start in 0..inserts.len() {
             let (_, insert) = inserts[start];
             if !insert.untyped || insert.keyed {
@@ -991,9 +994,10 @@ impl Shape {
                     break answer;
                 }
                 let (_, insert) = inserts[k];
-                if insert.type_ref.is_some() || path.len() > inserts.len() {
+                if insert.type_ref.is_some() || walked[k] == start {
                     break false;
                 }
+                walked[k] = start;
                 path.push(k);
                 match &insert.parent {
                     Parent::Named(..) => break false,
@@ -1096,6 +1100,8 @@ impl Shape {
         // chargement d'une page de 10 000 blocs).
         let mut places: Vec<Option<Place>> = vec![None; inserts.len()];
         let mut path: Vec<usize> = Vec::new();
+        // Ruling R854 : le départ du parcours qui a vu chaque élément.
+        let mut walked = vec![usize::MAX; inserts.len()];
         // Le dernier élément nommé, sa balise et ce que ses attributs doivent être (`None` : pas
         // jugé) : les attributs d'un élément se suivent dans une mise à jour.
         let mut last: Option<(Id, Judged<'_>)> = None;
@@ -1148,12 +1154,10 @@ impl Shape {
                                     }
                                     _ => find(*origin),
                                 };
+                                walked[k] = start;
                                 match next {
-                                    // Une chaîne plus longue que la mise à jour boucle : mise à
-                                    // jour invalide.
-                                    Some(next) if next != k && path.len() <= inserts.len() => {
-                                        k = next
-                                    }
+                                    // Un élément revu : la chaîne boucle, mise à jour invalide.
+                                    Some(next) if walked[next] != start => k = next,
                                     Some(_) => break Place::Child,
                                     None => break Place::Outside(*origin),
                                 }
@@ -1378,6 +1382,8 @@ impl Shape {
         // Parent (index d'un type de la mise à jour) de chaque élément, résolu
         // le long des voisins sans récursion.
         let mut parent: Vec<Option<Option<usize>>> = vec![None; inserts.len()];
+        // Ruling R854 : le départ du parcours qui a vu chaque élément.
+        let mut walked = vec![usize::MAX; inserts.len()];
         for start in 0..inserts.len() {
             let mut path = Vec::new();
             let mut k = start;
@@ -1388,14 +1394,17 @@ impl Shape {
                 match inserts[k].1.parent {
                     Parent::Named(..) => break None,
                     Parent::Id(id) => break find(id).filter(|&p| inserts[p].1.type_ref.is_some()),
-                    // Une chaîne plus longue que la mise à jour boucle : mise à jour invalide.
-                    Parent::Sibling(id) => match find(id) {
-                        Some(s) if s != k && path.len() < inserts.len() => {
-                            path.push(k);
-                            k = s;
+                    // Un élément revu : la chaîne boucle, mise à jour invalide.
+                    Parent::Sibling(id) => {
+                        walked[k] = start;
+                        match find(id) {
+                            Some(s) if walked[s] != start => {
+                                path.push(k);
+                                k = s;
+                            }
+                            _ => break None,
                         }
-                        _ => break None,
-                    },
+                    }
                 }
             };
             parent[k] = Some(resolved);
@@ -1406,15 +1415,26 @@ impl Shape {
         // Profondeur de chaque type, le long de ses parents, sans récursion.
         let mut depth: Vec<Option<usize>> = vec![None; inserts.len()];
         let mut deepest = 0;
+        let mut walked = vec![usize::MAX; inserts.len()];
         for start in 0..inserts.len() {
             if inserts[start].1.type_ref.is_none() {
                 continue;
             }
             let mut path = vec![start];
+            walked[start] = start;
             let mut base = 0;
             while let Some(&k) = path.last() {
                 match parent[k].flatten() {
-                    Some(p) if depth[p].is_none() && path.len() <= inserts.len() => path.push(p),
+                    // Des types qui se nomment en boucle n'ont pas de fond : plus profonds que
+                    // tout ce que la mise à jour pourrait imbriquer.
+                    Some(p) if walked[p] == start => {
+                        deepest = deepest.max(inserts.len() + 1);
+                        break;
+                    }
+                    Some(p) if depth[p].is_none() => {
+                        walked[p] = start;
+                        path.push(p);
+                    }
                     Some(p) => {
                         base = depth[p].unwrap_or(0);
                         break;

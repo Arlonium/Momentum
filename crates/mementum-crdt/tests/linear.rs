@@ -715,6 +715,145 @@ fn judging_the_neighbours_of_items_grows_like_the_update() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// `count` boucles de trois clients : Y(i), trois lettres, a pour origine Z(i), qui a pour origine
+/// la première lettre de Y(i) ; X(i) a l'origine et l'origine droite de la forme N3 dans Y(i), ce
+/// qui fait chercher où vit Y(i). yrs gardera tout en attente : le calcul se fait avant.
+fn loops_of_origins(count: usize) -> Vec<u8> {
+    let (a, b, c) = (9_001u64, 9_002u64, 9_003u64);
+    let mut u = Vec::new();
+    var(&mut u, 3);
+    var(&mut u, count as u64);
+    var(&mut u, a);
+    u.push(0);
+    for i in 0..count as u64 {
+        u.push(0x84);
+        var(&mut u, b);
+        var(&mut u, i);
+        u.extend_from_slice(&[3, b'y', b'y', b'y']);
+    }
+    var(&mut u, count as u64);
+    var(&mut u, b);
+    u.push(0);
+    for i in 0..count as u64 {
+        u.push(0x84);
+        var(&mut u, a);
+        var(&mut u, 3 * i);
+        u.extend_from_slice(&[1, b'z']);
+    }
+    var(&mut u, count as u64);
+    var(&mut u, c);
+    u.push(0);
+    for i in 0..count as u64 {
+        u.push(0xC4);
+        var(&mut u, a);
+        var(&mut u, 3 * i + 2);
+        var(&mut u, a);
+        var(&mut u, 3 * i + 1);
+        u.extend_from_slice(&[1, b'x']);
+    }
+    u.push(0);
+    u
+}
+
+/// `count` boucles de deux valeurs `Any` placées l'une par l'origine de l'autre.
+fn loops_of_values(count: usize) -> Vec<u8> {
+    let mut u = Vec::new();
+    var(&mut u, 2);
+    for (me, other) in [(9_001u64, 9_002u64), (9_002, 9_001)] {
+        var(&mut u, count as u64);
+        var(&mut u, me);
+        u.push(0);
+        for i in 0..count as u64 {
+            u.push(0x88);
+            var(&mut u, other);
+            var(&mut u, i);
+            u.extend_from_slice(&[1, 119, 1, b'v']);
+        }
+    }
+    u.push(0);
+    u
+}
+
+/// `count` boucles de deux éléments XML, chacun placé par l'origine (`by_origin`) de l'autre, ou
+/// nommant l'autre pour parent.
+fn loops_of_elements(count: usize, by_origin: bool) -> Vec<u8> {
+    let mut u = Vec::new();
+    var(&mut u, 2);
+    for (me, other) in [(9_001u64, 9_002u64), (9_002, 9_001)] {
+        var(&mut u, count as u64);
+        var(&mut u, me);
+        u.push(0);
+        for i in 0..count as u64 {
+            if by_origin {
+                u.push(0x87);
+                var(&mut u, other);
+                var(&mut u, i);
+            } else {
+                u.push(0x07);
+                u.push(0);
+                var(&mut u, other);
+                var(&mut u, i);
+            }
+            u.extend_from_slice(&[3, 1, b'p']);
+        }
+    }
+    u.push(0);
+    u
+}
+
+/// Une boucle ne se parcourt qu'une fois : au premier élément revu, le parcours s'arrête. Il allait
+/// jusqu'au nombre d'éléments de la mise à jour et de la page, pour chaque boucle (constat C1 de la
+/// re-relecture 8, Ruling R854).
+#[test]
+fn judging_loops_of_neighbours_grows_like_the_update() {
+    let forms = [
+        Form {
+            what: "boucles d'origines entre des lettres",
+            build: &loops_of_origins as &dyn Fn(usize) -> Vec<u8>,
+        },
+        Form {
+            what: "boucles d'origines entre des valeurs",
+            build: &loops_of_values,
+        },
+        Form {
+            what: "boucles d'origines entre des éléments",
+            build: &|n| loops_of_elements(n, true),
+        },
+        Form {
+            what: "boucles de parents entre des éléments",
+            build: &|n| loops_of_elements(n, false),
+        },
+    ];
+    let created = PageDoc::new_page().1;
+    let judge = |update: &Vec<u8>| {
+        let page = PageDoc::from_updates([created.as_slice()]).unwrap();
+        let from_client = page.try_client_update(update).is_ok();
+        let stored = PageDoc::from_updates([created.as_slice(), update.as_slice()]);
+        (from_client, stored.is_ok())
+    };
+    let limits = Limits {
+        peak_per_byte: 256,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&forms, Vec::len, judge, |_| 0, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// À mise à jour égale, juger des boucles ne dépend pas de ce que la page porte par ailleurs.
+#[test]
+fn judging_loops_of_neighbours_does_not_grow_with_the_page() {
+    let update = loops_of_origins(100);
+    let allocated = |letters: usize| {
+        let page = PageDoc::from_updates([page_of_letters(letters).0.as_slice()]).unwrap();
+        linear::once(|| page.try_client_update(&update).is_ok()).allocated
+    };
+    let (small, large) = (allocated(1_000), allocated(32_000));
+    assert!(
+        large < small * 2,
+        "une page de 32 000 suites alloue {large} octets, une de 1 000 en alloue {small}"
+    );
+}
+
 /// Mises à jour d'une rafale.
 const BURST: usize = 16;
 
