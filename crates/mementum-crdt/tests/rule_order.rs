@@ -474,6 +474,25 @@ fn a_right_of_a_sibling_of_the_same_client_is_dropped() {
     assert_eq!(page.revision(), again.revision());
 }
 
+/// Ruling R864 : des unités que la page connaît déjà, et que yrs ignore, peuvent boucler dans les
+/// octets d'une mise à jour sans que rien reste en attente : (10,1) se dit posée après (10,2), et
+/// (10,2) après (10,1). Le parcours qui cherche si des valeurs sont dans un texte
+/// (`Shape::untyped_in_texts`) s'arrête au premier élément revu.
+#[test]
+fn known_units_whose_bytes_loop_stop_the_walk_of_the_texts() {
+    let (done, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let page = with_abcdef();
+        let read = page.try_client_update(&unhex("01030a01840a020161840a010162840a02016300"));
+        done.send((read.is_ok(), page_text(&page, 0))).unwrap();
+    });
+    let (accepted, text) = answer
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("le parcours ne finit pas");
+    assert!(accepted, "rien de neuf n'est refusé");
+    assert_eq!(text, "abcdef");
+}
+
 /// Le texte que lit un lecteur sans garde : un yrs neuf, à qui la page sert son état. Relue par une
 /// autre page, la mise à jour repasserait par les règles, et l'écart ne se verrait pas.
 fn read_without_the_guard(page: &PageDoc, at: u32) -> String {
