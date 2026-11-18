@@ -13,7 +13,11 @@ use std::collections::BTreeMap;
 use mementum_crdt::{FRAGMENT, META, PageDoc};
 use yrs::any::Number;
 use yrs::types::text::YChange;
-use yrs::{Any, Doc, Map, Out, ReadTxn, Text, Transact, Xml, XmlElementRef, XmlFragment, XmlOut};
+use yrs::updates::decoder::Decode;
+use yrs::{
+    Any, Doc, Map, OffsetKind, Options, Out, ReadTxn, Text, Transact, Update, Xml, XmlElementRef,
+    XmlFragment, XmlOut,
+};
 
 /// Une valeur écrite de façon stable (clés triées, type des nombres visible).
 fn canonical(value: &Any) -> String {
@@ -132,4 +136,71 @@ pub fn reloaded_from_state_differs(page: &PageDoc) -> Option<String> {
         );
     }
     None
+}
+
+/// `None` si **un lecteur sans garde**, un yrs neuf à qui la page sert son état, lit l'arbre de la
+/// page vivante ; sinon, ce qui diffère (Ruling R862). La page relue de son état
+/// ([`reloaded_from_state_differs`]) repasse par les règles de la garde : elle récrit à la relecture
+/// ce qui a été mal récrit à l'arrivée, et ne voit pas l'écart que voit un navigateur.
+#[allow(dead_code)]
+pub fn bare_reader_differs(page: &PageDoc) -> Option<String> {
+    let bare = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    let update = match Update::decode_v1(&page.encode_state()) {
+        Ok(update) => update,
+        Err(error) => return Some(format!("l'état servi ne se lit pas : {error}")),
+    };
+    if let Err(error) = bare.transact_mut().apply_update(update) {
+        return Some(format!("l'état servi ne s'intègre pas : {error}"));
+    }
+    if bare.transact().store().pending_update().is_some() {
+        return Some("l'état servi laisse des éléments en attente".to_string());
+    }
+    let (live, read) = (tree(page.yrs_doc()), tree(&bare));
+    if live == read {
+        return None;
+    }
+    let at = live.iter().zip(&read).position(|(a, b)| a != b);
+    Some(format!(
+        "un yrs sans garde ne lit pas l'arbre de la page vivante (première ligne qui diffère : \
+         {at:?} ; vivante {:?}, sans garde {:?})",
+        at.and_then(|n| live.get(n)),
+        at.and_then(|n| read.get(n))
+    ))
+}
+
+/// Le plan d'un document : ses balises et le texte brut de ses textes, ce que yrs et Yjs écrivent
+/// pareil (`apps/web/src/editor/servedStates.test.ts` fait le même relevé dans un vrai Yjs).
+#[allow(dead_code)]
+pub fn outline(doc: &Doc) -> Vec<String> {
+    fn walk<T: ReadTxn>(txn: &T, nodes: impl Iterator<Item = XmlOut>, out: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                XmlOut::Element(element) => {
+                    out.push(format!("<{}>", element.tag()));
+                    walk(txn, element.children(txn), out);
+                    out.push(format!("</{}>", element.tag()));
+                }
+                XmlOut::Text(text) => {
+                    let runs = text.diff(txn, YChange::identity);
+                    let letters: String = runs
+                        .iter()
+                        .map(|run| match &run.insert {
+                            Out::Any(Any::String(letters)) => letters.to_string(),
+                            _ => "?".to_string(),
+                        })
+                        .collect();
+                    out.push(format!("texte {letters}"));
+                }
+                XmlOut::Fragment(_) => out.push("fragment".to_string()),
+            }
+        }
+    }
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let txn = doc.transact();
+    let mut out = Vec::new();
+    walk(&txn, fragment.children(&txn), &mut out);
+    out
 }

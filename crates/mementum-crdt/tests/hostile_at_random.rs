@@ -301,17 +301,16 @@ impl Served {
         Some(txn.encode_update_v1())
     }
 
-    /// Ce que relit le chargement d'une page compactée à l'un des derniers pas : l'instantané, puis
-    /// la fin du journal. Elle se charge, et elle est la page vivante (constat C5 de la re-relecture
-    /// 8, Ruling R858).
+    /// Ce que relit le chargement d'une page compactée à un point quelconque de la scène :
+    /// l'instantané, puis la fin du journal. Elle se charge, et elle est la page vivante (constat C5
+    /// de la re-relecture 8, Rulings R858, R865).
     fn tail_check(&mut self, what: &str) {
         if self.holed {
             return;
         }
         self.marks
             .push((self.journal.len(), self.page.encode_state()));
-        let n = self.marks.len();
-        for (len, state) in &self.marks[n.saturating_sub(8)..] {
+        for (len, state) in &self.marks {
             let tail = &self.journal[*len..];
             let again = PageDoc::from_updates(
                 std::iter::once(state.as_slice()).chain(tail.iter().map(Vec::as_slice)),
@@ -351,6 +350,12 @@ impl Served {
         {
             panic!("{what} : {why}");
         }
+        // Ruling R862 : la page relue repasse par les règles ; un lecteur sans garde, non.
+        if !self.holed
+            && let Some(why) = live::bare_reader_differs(&self.page)
+        {
+            panic!("{what} : {why}");
+        }
         for _ in 0..3 {
             let state = self.page.encode_state();
             let read = reread(&state, self.stored);
@@ -364,6 +369,36 @@ impl Served {
                     .unwrap_or_else(|e| panic!("{what} : ce qui manque est illisible : {e:?}"));
             }
         }
+    }
+
+    /// Écrit la page servie à la suite du fichier `MEMENTUM_FUZZ_SERVED`, s'il est donné : le vrai
+    /// Yjs la relit (`apps/web/src/editor/servedStates.test.ts`, Ruling R862). Pas une page à trou
+    /// d'horloge (Ruling R830).
+    fn export(&self, seed: u64) {
+        let Some(path) = std::env::var_os("MEMENTUM_FUZZ_SERVED") else {
+            return;
+        };
+        if self.holed {
+            return;
+        }
+        let state: String = self
+            .page
+            .encode_state()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let line = serde_json::json!({
+            "seed": seed,
+            "stored": self.stored,
+            "state": state,
+            "outline": live::outline(self.page.yrs_doc()),
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{line}").unwrap();
     }
 
     /// La page rechargée de son journal est la page vivante (Ruling R491).
@@ -837,6 +872,7 @@ fn case(seed: u64, stored: bool, tally: &mut Tally) {
         served.tail_check(&what);
     }
     served.assert_sound(&format!("graine {seed}, après les suppressions"));
+    served.export(seed);
 }
 
 const CHILD: &str = "MEMENTUM_HOSTILE_CHILD";
