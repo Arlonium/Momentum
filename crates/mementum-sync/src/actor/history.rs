@@ -19,6 +19,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::{Actor, Broken, Ids};
+use crate::long_work::off_the_engine;
 use crate::{PageEvent, SyncError};
 
 /// Ce que l'acteur compte des transactions validées dans son document, d'après
@@ -252,7 +253,7 @@ impl Actor {
         if matches!(
             reason,
             VersionReason::BeforeRestore | VersionReason::Closing
-        ) && let Err(error) = PageDoc::check_state(&state)
+        ) && let Err(error) = off_the_engine(|| PageDoc::check_state(&state))
         {
             tracing::error!(node_id = %self.id.node_id, ?reason, %error, "version refusée : l'état de la page ne se relit pas");
             return Err(error.into());
@@ -327,8 +328,11 @@ impl Actor {
             Ok(None) => return Ok(Err(SyncError::NotFound)),
             Err(error) => return Ok(Err(error.into())),
         };
-        let blocks = match PageDoc::from_updates([state.as_slice()]) {
-            Ok(kept) => kept.read_blocks(),
+        let kept = off_the_engine(|| {
+            PageDoc::from_updates([state.as_slice()]).map(|kept| kept.read_blocks())
+        });
+        let blocks = match kept {
+            Ok(blocks) => blocks,
             Err(error) => {
                 tracing::error!(node_id = %self.id.node_id, version_id = %version, %error, "état d'une version illisible : restauration refusée, page intacte");
                 return Ok(Err(SyncError::RestoreRefused(crate::VERSION_UNREADABLE)));

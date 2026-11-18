@@ -46,6 +46,7 @@ use yrs::sync::{Awareness, AwarenessUpdate};
 use yrs::updates::encoder::Encode;
 
 use crate::hub::Hub;
+use crate::long_work::off_the_engine;
 use crate::presence::{Holders, Holding};
 use crate::protocol::{self, ClientMessage, EMPTY_UPDATE, RosterLine};
 use crate::{PageEvent, SyncConfig, SyncError, presence};
@@ -482,7 +483,8 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     // relecture du début sans elle.
     let mut dependents: HashSet<i64> = HashSet::new();
     let (page, watch) = loop {
-        match replay(node_id, &snapshot, &updates, &dependents)? {
+        // Ruling R863 : relire un journal intègre ce que des clients ont écrit.
+        match off_the_engine(|| replay(node_id, &snapshot, &updates, &dependents))? {
             Ok(loaded) => break loaded,
             Err(seq) => {
                 dependents.insert(seq);
@@ -1245,12 +1247,18 @@ impl Actor {
         // Ce qui vient d'un client ne touche pas aux métadonnées de la page
         // (report M7 du lot 1) ; ce que `load` relit du store, si. Un report refusé
         // (`CrdtError::CarryRefused`, Rulings R452, R459) suit le chemin de tout refus fait
-        // après l'application.
+        // après l'application. Ruling R863 : ce calcul dépend de ce que le client a écrit, et le
+        // dédoublonnage de toute la page.
+        let (applied, fix) = off_the_engine(|| {
+            let applied = self.page.try_client_update(update);
+            let fix = applied.is_ok().then(|| self.page.dedupe_blocks()).flatten();
+            (applied, fix)
+        });
         let Applied {
             read,
             carried,
             withheld,
-        } = match self.page.try_client_update(update) {
+        } = match applied {
             Ok(applied) => applied,
             // Ruling R492 : refusée avant d'être appliquée (illisible, hors du schéma, une marque
             // refusée…), le document est intact : la connexion est fermée, sans rien recharger.
@@ -1287,8 +1295,6 @@ impl Actor {
         if let Some(why) = withheld {
             tracing::warn!(node_id = %self.id.node_id, conn, why, "report d'un bloc recréé retenu : rien d'écrit de plus que la mise à jour");
         }
-        // Après des déplacements concurrents, un bloc peut exister en double.
-        let fix = self.page.dedupe_blocks();
         // Ruling R181 : une mise à jour qui ne change rien à la page (rien d'inséré, rien de
         // supprimé) n'est ni écrite ni relayée. Tout ce qu'elle porte est déjà dans le document,
         // donc déjà au journal et chez les autres : c'est l'étape 2 d'un onglet qui revient sans
@@ -1476,10 +1482,10 @@ impl Actor {
         self.version_if_due().await;
         let changes = self.watch.changes();
         // Refusée sans rien écrire : le document reste intact.
-        let written = match ids {
+        let written = off_the_engine(|| match ids {
             Ids::Matched => self.page.rewrite_blocks(&blocks),
             Ids::AsGiven => self.page.write_blocks(&blocks),
-        };
+        });
         let update = match written {
             Ok(update) => update,
             // Ruling R389 : le retrait est fait dans le document vivant, pas au journal.
@@ -2010,6 +2016,183 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(actor.store.load_doc(node).await.unwrap(), journal);
+    }
+
+    /// Ce qu'un test voit des calculs longs de son moteur.
+    #[derive(Default)]
+    struct LongWork {
+        armed: std::sync::atomic::AtomicBool,
+        seen: std::sync::atomic::AtomicUsize,
+    }
+
+    impl LongWork {
+        /// Les calculs longs comptent à partir d'ici.
+        fn arm(&self) {
+            self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn seen(&self) -> usize {
+            self.seen.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Mène `scene` sur un moteur tokio à **un seul fil**. Au début de chaque calcul long, une tâche
+    /// neuve est lancée sur ce moteur, et le calcul n'avance pas tant qu'elle n'a pas tourné : un
+    /// calcul qui retient son fil ne la voit jamais, et le test échoue au bout du délai. Aucun
+    /// minutage ne peut le faire passer à tort (Ruling R863).
+    fn engine_stays_free<F>(case: &str, scene: impl FnOnce(Arc<LongWork>) -> F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        use std::sync::atomic::Ordering;
+        let thread = format!("travail-long-{case}");
+        let watch = Arc::new(LongWork::default());
+        let (ran, wait) = std::sync::mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
+        let seen = watch.clone();
+        crate::long_work::testing::on_long_work(
+            &thread,
+            Arc::new(move || {
+                if !seen.armed.load(Ordering::SeqCst) {
+                    return;
+                }
+                seen.seen.fetch_add(1, Ordering::SeqCst);
+                let ran = ran.clone();
+                tokio::runtime::Handle::current().spawn(async move {
+                    let _ = ran.send(());
+                });
+                wait.lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(20))
+                    .expect("le calcul long retient le fil du moteur");
+            }),
+        );
+        let engine = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name(thread)
+            .enable_all()
+            .build()
+            .unwrap();
+        let scene = scene(watch);
+        engine.block_on(async { tokio::spawn(scene).await.unwrap() });
+    }
+
+    /// Deux frappes de l'onglet `client`, la seconde à la suite de la première.
+    fn two_keystrokes(page: &PageDoc, client: u64) -> (Vec<u8>, Vec<u8>) {
+        use yrs::{Text, XmlFragment, XmlOut, XmlTextPrelim};
+        let tab = yrs::Doc::with_options(yrs::Options {
+            client_id: ClientID::new(client),
+            offset_kind: yrs::OffsetKind::Utf16,
+            ..yrs::Options::default()
+        });
+        let fragment = tab.get_or_insert_xml_fragment(mementum_crdt::FRAGMENT);
+        tab.transact_mut()
+            .apply_update(yrs::Update::decode_v1(&page.encode_state()).unwrap())
+            .unwrap();
+        let (first, text) = {
+            let mut txn = tab.transact_mut();
+            let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+                panic!("le groupe");
+            };
+            let Some(XmlOut::Element(container)) = group.get(&txn, 0) else {
+                panic!("le bloc");
+            };
+            let Some(XmlOut::Element(paragraph)) = container.get(&txn, 0) else {
+                panic!("le paragraphe");
+            };
+            let text = paragraph.insert(&mut txn, 0, XmlTextPrelim::new("a"));
+            (txn.encode_update_v1(), text)
+        };
+        let mut txn = tab.transact_mut();
+        text.insert(&mut txn, 1, "b");
+        (first, txn.encode_update_v1())
+    }
+
+    /// Ruling R863 : la mise à jour d'un client, avec le report d'un bloc recréé et le dédoublonnage
+    /// qui la suivent, en un seul calcul.
+    #[test]
+    fn a_client_update_leaves_the_engine_free() {
+        engine_stays_free("client", |watch| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, _commands, _mailbox) = actor(&dir).await;
+            let (keystroke, _) = two_keystrokes(&actor.page, 77);
+            watch.arm();
+            assert!(actor.client_update(1, None, &keystroke).await.is_ok());
+            assert_eq!(watch.seen(), 1);
+        });
+    }
+
+    /// Ruling R863 : ce qu'une connexion retenait passe par le même chemin.
+    #[test]
+    fn updates_a_connection_held_leave_the_engine_free() {
+        engine_stays_free("retenue", |watch| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, _commands, _mailbox) = actor(&dir).await;
+            let (reply, mut answer) = oneshot::channel();
+            actor.join(true, None, None, reply);
+            let tab = answer.try_recv().unwrap().unwrap();
+            let conn = tab.membership.conn();
+            let (first, second) = two_keystrokes(&actor.page, 77);
+            let answer = actor.receive_update(conn, None, second).await;
+            assert!(matches!(answer, Ok(true)), "la seconde frappe est retenue");
+            watch.arm();
+            let answer = actor.receive_update(conn, None, first).await;
+            assert!(matches!(answer, Ok(true)));
+            assert_eq!(watch.seen(), 2, "la frappe, puis celle qui attendait");
+        });
+    }
+
+    /// Ruling R863 : recharger une page relit son journal.
+    #[test]
+    fn reloading_a_page_leaves_the_engine_free() {
+        engine_stays_free("rechargement", |watch| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, _commands, _mailbox) = actor(&dir).await;
+            watch.arm();
+            assert!(actor.reload().await.is_ok());
+            assert_eq!(watch.seen(), 1);
+        });
+    }
+
+    /// Ruling R863 : une restauration relit l'état de la version, relit celui de la page avant de
+    /// le garder, et écrit le contenu.
+    #[test]
+    fn a_restore_leaves_the_engine_free() {
+        engine_stays_free("restauration", |watch| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, _commands, _mailbox) = actor(&dir).await;
+            let other = {
+                let (page, _) = PageDoc::new_page();
+                page.write_blocks(&mementum_md::parse("Autre contenu\n").unwrap())
+                    .unwrap();
+                page.encode_state()
+            };
+            let version = actor
+                .store
+                .put_version(actor.id.node_id, 0, &other, &[], VersionReason::Periodic)
+                .await
+                .unwrap();
+            watch.arm();
+            let restored = actor.restore(version, None).await.ok().unwrap();
+            assert!(restored.is_ok(), "{restored:?}");
+            assert_eq!(watch.seen(), 3);
+        });
+    }
+
+    /// Ruling R863 : une écriture du serveur (`PUT /mmd`), avec ou sans les identifiants gardés.
+    #[test]
+    fn a_write_of_the_server_leaves_the_engine_free() {
+        engine_stays_free("ecriture", |watch| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, _commands, _mailbox) = actor(&dir).await;
+            watch.arm();
+            for (text, ids) in [("Un\n", Ids::AsGiven), ("Deux\n", Ids::Matched)] {
+                let blocks = mementum_md::parse(text).unwrap();
+                let written = actor.server_write(blocks, None, History::Slice, ids).await;
+                assert!(written.ok().unwrap().is_ok());
+            }
+            assert_eq!(watch.seen(), 2);
+        });
     }
 
     /// Une connexion du compte `account`, qui s'appelle `name` et peut écrire : inscrite, puis

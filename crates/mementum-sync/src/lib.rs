@@ -150,6 +150,7 @@
 mod actor;
 mod brake;
 mod hub;
+mod long_work;
 mod presence;
 mod protocol;
 #[cfg(feature = "testkit")]
