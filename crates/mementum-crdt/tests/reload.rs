@@ -203,6 +203,10 @@ impl Served {
         if let Some(why) = live::reloaded_from_state_differs(&self.page) {
             panic!("{what} : {why}");
         }
+        // Ruling R853 : ce que la garde tient pour vrai de chaque unité est ce que yrs en garde.
+        if let Some(why) = self.page.misjudged_units() {
+            panic!("{what} : {why}");
+        }
         // L'état de la page s'encode et se relit, plusieurs fois de suite : une structure que yrs
         // a mal rangée ne se voit qu'à l'encodage, une fois de la mémoire libérée puis reprise
         // (Rulings R723, R784 ; c'est cette boucle qui a montré le constat C1).

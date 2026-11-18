@@ -21,7 +21,7 @@ use yrs::{
 
 use crate::attrs::{self, Key, Value};
 use crate::blocknote::{BLOCK_GROUP, Ids, empty_paragraph, page_has_block, read_page, write_nodes};
-use crate::guard::runs::{Judge, Named, Run, Runs};
+use crate::guard::runs::{Home, Judge, Runs, Unit};
 use crate::guard::{
     ASTRIDE, CLOCK_OUT_OF_BOUNDS, DEPENDS_ON_A_HOLE, KEYED_RIGHT_ORIGIN, KEYED_RIGHT_ORIGIN_MADE,
     LEAVES_GAP, MANY_VALUED, MANY_VALUED_MADE, NOT_AS_WRITTEN, PageItem, Pending, REPEATED_CLIENT,
@@ -520,6 +520,61 @@ impl PageDoc {
         PageDoc::from_updates([state]).map(|_| ())
     }
 
+    /// Ce que la page tient pour vrai d'une unité et que yrs ne garde pas (Ruling R853) : le type où
+    /// elle vit, ou qu'elle est ramassée, comparé à ce que `StickyIndex::get_offset` en dit. `None`
+    /// si tout concorde. Sert aux essais au hasard : la garde ne fait plus cette demande, qui
+    /// parcourt la liste de l'unité.
+    #[doc(hidden)]
+    pub fn misjudged_units(&self) -> Option<String> {
+        /// Au plus tant d'unités relues : chaque demande à yrs parcourt la liste de l'unité.
+        const MAX_UNITS: usize = 4096;
+        if self.any_holed.load(Ordering::Relaxed) {
+            return None;
+        }
+        let txn = self.doc.transact();
+        let state = txn.state_vector();
+        let beyond = cut::Beyond::new();
+        let mut page = self
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut update = Runs::default();
+        let mut judge = Judge {
+            txn: &txn,
+            floor: &state,
+            beyond: &beyond,
+            page: &mut page,
+            update: &mut update,
+        };
+        let units = state
+            .iter()
+            .flat_map(|(client, known)| (0..*known).map(move |clock| (*client, clock)));
+        for (client, clock) in units.take(MAX_UNITS) {
+            let said = match judge.page_unit((client.get(), clock)) {
+                Ok(unit) => unit,
+                Err(error) => return Some(format!("({client}, {clock}) : {error}")),
+            };
+            let held = StickyIndex::from_id(ID::new(client, clock), Assoc::After)
+                .get_offset(&txn)
+                .map(|offset| offset.branch.id());
+            let alike = match (said, &held) {
+                (Unit::Collected, None) => true,
+                (Unit::In(Home::Fragment), Some(BranchID::Root(name))) => &**name == FRAGMENT,
+                (Unit::In(Home::Meta), Some(BranchID::Root(name))) => &**name == META,
+                (Unit::In(Home::In(parent)), Some(BranchID::Nested(id))) => {
+                    (id.client.get(), id.clock) == parent
+                }
+                _ => false,
+            };
+            if !alike {
+                return Some(format!(
+                    "l'unité ({client}, {clock}) est tenue pour {said:?}, yrs la garde dans {held:?}"
+                ));
+            }
+        }
+        None
+    }
+
     /// Ce qui manque, dans l'état que la page encode, à l'invariant de la classe C1 (Ruling R817) :
     /// chaque entrée de map vivante est la seule vivante de sa clé, et n'a qu'une unité. `None`
     /// si l'état le tient. Sert aux essais au hasard, qui le vérifient après chaque mise à jour
@@ -732,21 +787,25 @@ impl PageDoc {
                 cut = Some(bytes);
             }
         }
+        let verdict = Verdict {
+            txn,
+            state: &state,
+            from_client,
+            leaves_gap,
+        };
         let beyond = self.known_beyond(txn, Some(&shape), &state)?;
+        // Les suites que la mise à jour pose, lues une fois, et de nouveau quand une règle la
+        // récrit.
+        let mut runs = shape.runs(&state, &beyond);
         // Ruling R828 (règle I1) : un élément sans origine dont l'origine droite en a une (il se dit
         // en tête de la liste, devant une unité qui ne l'est pas). Aucun client ne l'écrit, et sa
         // place dépend de l'ordre d'arrivée : il devient une plage ramassée.
         // Ruling R834 (règle I3) : de même un élément dont l'origine de l'origine droite est, dans
         // la chaîne de son origine, plus loin qu'elle : son auteur ne voyait pas ses deux voisins
         // côte à côte.
-        let mut origin_less = HashSet::new();
         let candidates = shape.origin_less_with_right(&state);
         let between = shape.between_two(&state);
         if !candidates.is_empty() || !between.is_empty() {
-            let mut posed = Runs::default();
-            for (client, run) in shape.runs(&state, &beyond) {
-                posed.insert(client, run);
-            }
             let mut page = self
                 .runs
                 .lock()
@@ -756,8 +815,10 @@ impl PageDoc {
                 floor: &state,
                 beyond: &beyond,
                 page: &mut page,
-                update: &posed,
+                update: &mut runs,
             };
+            let two_neighbours = !between.is_empty();
+            let mut origin_less = HashSet::new();
             for (id, right) in candidates {
                 if judge.origin_less_before_a_placed_unit(right)? {
                     origin_less.insert(id);
@@ -768,15 +829,22 @@ impl PageDoc {
                     origin_less.insert(id);
                 }
             }
-        }
-        // Ruling R827 (règle G) : un élément dont l'un des voisins (origine, origine droite) est
-        // une plage ramassée et l'autre un élément devient une plage ramassée, comme Yjs le fait ;
-        // yrs, lui, le rangeait par l'autre voisin, et sa place dépendait de l'ordre d'arrivée.
-        let collected = collected_neighbours(txn, &shape, &state, &beyond, origin_less)?;
-        if !collected.is_empty() {
-            let bytes = cut::collect(cut.as_deref().unwrap_or(update), &collected)?;
-            shape = read(&bytes)?;
-            cut = Some(bytes);
+            // Ruling R827 (règle G) : un élément dont l'un des voisins (origine, origine droite)
+            // est une plage ramassée et l'autre un élément devient une plage ramassée, comme Yjs
+            // le fait ; yrs, lui, le rangeait par l'autre voisin, et sa place dépendait de l'ordre
+            // d'arrivée. Ruling R829 (règle P2) : de même deux voisins de deux parents.
+            let collected = if two_neighbours {
+                judge.collected_neighbours(&shape, origin_less)?
+            } else {
+                origin_less
+            };
+            drop(page);
+            if !collected.is_empty() {
+                let bytes = cut::collect(cut.as_deref().unwrap_or(update), &collected)?;
+                shape = read(&bytes)?;
+                cut = Some(bytes);
+                runs = shape.runs(&state, &beyond);
+            }
         }
         // Ruling R825 (règle N3) : un élément que yrs et Yjs rangeraient selon le découpage de
         // leurs blocs (son origine droite est du client de son origine, à une horloge plus basse,
@@ -784,10 +852,6 @@ impl PageDoc {
         // origine droite, comme N2. Jugé après la coupe, sur ce que yrs intègre (Ruling R721).
         let candidates = shape.backward_right_origins(&state);
         if !candidates.is_empty() {
-            let mut posed = Runs::default();
-            for (client, run) in shape.runs(&state, &beyond) {
-                posed.insert(client, run);
-            }
             let mut page = self
                 .runs
                 .lock()
@@ -797,7 +861,7 @@ impl PageDoc {
                 floor: &state,
                 beyond: &beyond,
                 page: &mut page,
-                update: &posed,
+                update: &mut runs,
             };
             let mut flagged = HashSet::new();
             for (id, origin, right) in candidates {
@@ -810,19 +874,36 @@ impl PageDoc {
                 let bytes = cut::unright(cut.as_deref().unwrap_or(update), &flagged)?;
                 shape = read(&bytes)?;
                 cut = Some(bytes);
+                runs = shape.runs(&state, &beyond);
             }
         }
-        let runs = shape.runs(&state, &beyond);
-        let update = cut.as_deref().unwrap_or(update);
-        let decoded = Update::decode_v1(update).map_err(|e| CrdtError::Decode(e.to_string()))?;
-        shape.check(&state)?;
+        let decoded = Update::decode_v1(cut.as_deref().unwrap_or(update))
+            .map_err(|e| CrdtError::Decode(e.to_string()))?;
+        self.judge(&verdict, &shape, many_valued)?;
+        Ok((shape, decoded, runs))
+    }
+
+    /// Les gardes d'une mise à jour lue, sans rien appliquer : ce qui les passe peut être intégré.
+    fn judge(
+        &self,
+        verdict: &Verdict<'_>,
+        shape: &Shape,
+        many_valued: Option<&mut IdSet>,
+    ) -> Result<(), CrdtError> {
+        let Verdict {
+            txn,
+            state,
+            from_client,
+            leaves_gap,
+        } = *verdict;
+        shape.check(state)?;
         // Ruling R807 : dans une page qui a un trou, un élément qui dépend (origine, origine
         // droite, parent) d'une horloge du trou. yrs croit la connaître (il compare à la fin de
         // ce qu'il a du client), la cherche parmi ses blocs, et panique.
         if self.any_holed.load(Ordering::Relaxed) {
-            let beyond = self.known_beyond(txn, None, &state)?;
+            let beyond = self.known_beyond(txn, None, state)?;
             if !beyond.is_empty()
-                && shape.lacks_dependency(&state, |client, clock| {
+                && shape.lacks_dependency(state, |client, clock| {
                     clock < state.get(&ClientID::new(client))
                         || beyond.get(&client).is_some_and(|ranges| {
                             ranges
@@ -835,24 +916,24 @@ impl PageDoc {
             }
         }
         // Ruling R723 : une entrée de map à origine droite, quand les octets le disent.
-        shape.check_keyed(&state)?;
+        shape.check_keyed(state)?;
         // Rulings R805, R806 (et les filets de R801 et R802) : la grammaire de ce qu'un client écrit, quand les octets
         // suffisent à la juger.
-        shape.check_grammar(&state, from_client, many_valued)?;
+        shape.check_grammar(state, from_client, many_valued)?;
         if from_client {
             // Ruling R431 : une marque de texte hors du schéma, ou trop longue.
-            shape.check_marks(&state)?;
+            shape.check_marks(state)?;
             // Ruling R496 : un contenu qui n'est pas un nœud XML parmi les enfants de la racine ou
             // d'un élément nommé.
-            shape.check_untyped(&state, |(client, clock)| {
+            shape.check_untyped(state, |(client, clock)| {
                 BranchID::get_nested(txn, &ID::new(ClientID::new(client), clock))
                     .map(|branch| matches!(branch.type_ref(), TypeRef::XmlText))
             })?;
             // Rulings R702, R703 : un contenu que yrs et Yjs ne lisent pas pareil.
-            shape.check_contents(&state)?;
+            shape.check_contents(state)?;
             // Ruling R689 : un attribut d'élément qui n'est pas du type que dit le registre.
             let findings = shape.attrs(
-                &state,
+                state,
                 |id| tag_in_page(txn, id),
                 |origin| entry_in_page(txn, origin),
             );
@@ -860,7 +941,7 @@ impl PageDoc {
                 return Err(CrdtError::Structure(refusal));
             }
             // Ruling R803 : une valeur `Any` qui ne se dit pas entrée de map.
-            shape.check_values_flagged(&state)?;
+            shape.check_values_flagged(state)?;
             // Ruling R786 : d'un client, des blocs qui laisseraient un trou. L'acteur retient une
             // telle mise à jour avant de l'appliquer (`PageDoc::awaits`, Ruling R131) ; refusée ici
             // aussi, pour que ce qui suit ne dépende pas de l'appelant : un trou fait que la page
@@ -869,22 +950,16 @@ impl PageDoc {
                 return Err(CrdtError::Structure(LEAVES_GAP.to_string()));
             }
         }
-        Ok((shape, decoded, runs))
+        Ok(())
     }
 
     /// Retient les suites d'unités qu'une mise à jour lue par [`PageDoc::read`] vient de poser
     /// (Ruling R825).
-    fn remember_runs(&self, runs: Vec<(u64, Run)>) {
-        if runs.is_empty() {
-            return;
-        }
-        let mut page = self
-            .runs
+    fn remember_runs(&self, runs: Runs) {
+        self.runs
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (client, run) in runs {
-            page.insert(client, run);
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .absorb(runs);
     }
 
     /// Ce que la page connaît **au-delà de son premier trou** des clients de `shape` qui en ont
@@ -1260,173 +1335,14 @@ fn verify_carried(update: &[u8], before: &StateVector, txn: &TransactionMut) -> 
 
 /// Ce que rend [`PageDoc::read`] : la forme de la mise à jour, la mise à jour que yrs intégrera, et
 /// les suites d'unités qu'elle pose (règle N3, Ruling R825).
-type Read = (Shape, Update, Vec<(u64, Run)>);
+type Read = (Shape, Update, Runs);
 
-/// Au plus tant d'unités de la page dont les règles G et P2 demandent ce qu'elles sont, pour une
-/// mise à jour (Rulings R827, R829) : chaque demande parcourt la liste de l'unité vers la gauche.
-const MAX_NEIGHBOUR_LOOKUPS: usize = 16_384;
-
-/// Ce qu'est une unité, pour les règles G et P2.
-#[derive(Clone, PartialEq)]
-enum Unit {
-    /// Une plage ramassée.
-    Collected,
-    /// Un élément, dans ce parent.
-    In(BranchID),
-    /// Ni la page ni la mise à jour ne la portent : yrs la tiendra pour une dépendance absente.
-    Unknown,
-}
-
-/// Règles G et P2 (Rulings R827, R829) : les éléments de la mise à jour (au-dessus du plancher,
-/// après la coupe) que la page ramasse au lieu de les ranger, rendus pour être récrits en plages
-/// ramassées ([`cut::collect`]).
-///
-/// - **G** : un voisin (origine, origine droite) est une plage ramassée, l'autre un élément. Yjs
-///   en fait une plage ramassée (`Item.getMissing` met le parent à `null` dès que le voisin de
-///   gauche ou de droite est un `GC`, et `Item.integrate` intègre alors un `GC`) ; yrs ne voit pas
-///   de voisin du tout là où l'unité est ramassée, prend le parent de l'autre voisin, et range
-///   l'élément : la page vivante et la page relue de son état ne le rangeaient pas pareil (l'ordre
-///   d'intégration décide), ni le serveur et un navigateur.
-/// - **P2** : les deux voisins sont des éléments de deux parents différents. yrs comme Yjs le
-///   rangent dans le parent de gauche ; mais si ce voisin est ramassé plus tard (son parent
-///   supprimé), la page relue de son état le range dans le parent de droite (yrs) ou le ramasse
-///   (Yjs) : la page vivante n'était plus sa relecture.
-///
-/// Aucun client honnête n'écrit ni l'un ni l'autre : l'origine et l'origine droite d'un élément
-/// sont dans le même parent, et une page ramasse tous les enfants d'un parent supprimé à la fois.
-///
-/// Un élément dont les deux voisins sont ramassés, ou le seul qu'il a, ou dont le parent nommé
-/// l'est, est ramassé par yrs comme par Yjs : il n'est pas rendu, mais compte comme ramassé pour
-/// ceux qui le nomment dans la mise à jour. `already` : les éléments déjà jugés à ramasser (règle
-/// I1, Ruling R828), rendus avec les autres, et ramassés pour ceux qui les nomment.
-///
-/// Ce qu'est une unité de la page se lit par `StickyIndex::get_offset`, qui rend son parent, ou
-/// `None` si yrs n'y trouve pas d'élément (yrs ne rend pas public ce qu'il garde d'une unité). Au-delà
-/// de [`MAX_NEIGHBOUR_LOOKUPS`] demandes, la mise à jour est refusée.
-fn collected_neighbours<T: ReadTxn>(
-    txn: &T,
-    shape: &Shape,
-    floor: &StateVector,
-    beyond: &cut::Beyond,
-    already: HashSet<(u64, u32)>,
-) -> Result<HashSet<(u64, u32)>, CrdtError> {
-    let posed = shape.posed(floor, beyond);
-    if already.is_empty()
-        && posed
-            .iter()
-            .all(|p| p.gc || (p.origin.is_none() && p.right.is_none()))
-    {
-        return Ok(HashSet::new());
-    }
-    // Ce qu'est chaque élément posé, au fil des passes ; `None` tant qu'on ne le sait pas.
-    let mut known: Vec<Option<Unit>> = posed
-        .iter()
-        .map(|p| (p.gc || already.contains(&p.id)).then_some(Unit::Collected))
-        .collect();
-    // Les unités de la mise à jour, par client, dans l'ordre : (début, fin, rang dans `posed`).
-    let mut units: HashMap<u64, Vec<(u32, u32, usize)>> = HashMap::new();
-    for (k, p) in posed.iter().enumerate() {
-        units
-            .entry(p.id.0)
-            .or_default()
-            .push((p.id.1, p.id.1 + p.len, k));
-    }
-    let in_page = |(client, clock): (u64, u32)| {
-        clock < floor.get(&ClientID::new(client))
-            || beyond
-                .get(&client)
-                .is_some_and(|ranges| ranges.iter().any(|r| r.0 <= clock && clock < r.1))
-    };
-    let mut page: HashMap<(u64, u32), Unit> = HashMap::new();
-    let mut flagged = already;
-    // Ce qu'est l'unité `id` ; `None` : un élément de la mise à jour qu'on ne sait pas encore.
-    let mut resolve = |id: (u64, u32), known: &[Option<Unit>]| -> Result<Option<Unit>, CrdtError> {
-        if in_page(id) {
-            if let Some(unit) = page.get(&id) {
-                return Ok(Some(unit.clone()));
-            }
-            if page.len() >= MAX_NEIGHBOUR_LOOKUPS {
-                return Err(CrdtError::Structure(
-                    "la mise à jour nomme trop de voisins dans la page pour être jugée".to_string(),
-                ));
-            }
-            let unit = match StickyIndex::from_id(ID::new(ClientID::new(id.0), id.1), Assoc::After)
-                .get_offset(txn)
-            {
-                Some(offset) => Unit::In(offset.branch.id()),
-                None => Unit::Collected,
-            };
-            page.insert(id, unit.clone());
-            return Ok(Some(unit));
-        }
-        Ok(
-            match units.get(&id.0).and_then(|list| {
-                let at = list.partition_point(|unit| unit.1 <= id.1);
-                list.get(at)
-                    .filter(|unit| unit.0 <= id.1)
-                    .map(|unit| unit.2)
-            }) {
-                Some(k) => known[k].clone(),
-                None => Some(Unit::Unknown),
-            },
-        )
-    };
-    // Jusqu'à ce que rien ne change : ce qu'est un élément vaut pour ceux qui le nomment.
-    for _ in 0..64 {
-        let mut changed = false;
-        for (k, p) in posed.iter().enumerate() {
-            if known[k].is_some() {
-                continue;
-            }
-            let unit = match &p.parent {
-                Named::Root(name) => Some(Unit::In(BranchID::Root(name.as_str().into()))),
-                Named::Id(id) => match resolve(*id, &known)? {
-                    Some(Unit::Collected) => Some(Unit::Collected),
-                    Some(Unit::In(_)) => Some(Unit::In(BranchID::Nested(ID::new(
-                        ClientID::new(id.0),
-                        id.1,
-                    )))),
-                    Some(Unit::Unknown) => Some(Unit::Unknown),
-                    None => None,
-                },
-                Named::None => {
-                    // Absent (`None`), pas encore su (`Some(None)`), su.
-                    let origin = p.origin.map(|id| resolve(id, &known)).transpose()?;
-                    let right = p.right.map(|id| resolve(id, &known)).transpose()?;
-                    if matches!(origin, Some(None)) || matches!(right, Some(None)) {
-                        None
-                    } else {
-                        Some(match (origin.flatten(), right.flatten()) {
-                            (Some(Unit::Unknown), _) | (_, Some(Unit::Unknown)) | (None, None) => {
-                                Unit::Unknown
-                            }
-                            (Some(Unit::Collected), Some(Unit::In(_)))
-                            | (Some(Unit::In(_)), Some(Unit::Collected)) => {
-                                flagged.insert(p.id);
-                                Unit::Collected
-                            }
-                            (Some(Unit::In(a)), Some(Unit::In(b))) if a != b => {
-                                flagged.insert(p.id);
-                                Unit::Collected
-                            }
-                            (Some(Unit::In(a)), _) | (None, Some(Unit::In(a))) => Unit::In(a),
-                            (Some(Unit::Collected), _) | (None, Some(Unit::Collected)) => {
-                                Unit::Collected
-                            }
-                        })
-                    }
-                }
-            };
-            if unit.is_some() {
-                known[k] = unit;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    Ok(flagged)
+/// Ce que les gardes d'une mise à jour lisent de la page ([`PageDoc::judge`]).
+struct Verdict<'a> {
+    txn: &'a TransactionMut<'a>,
+    state: &'a StateVector,
+    from_client: bool,
+    leaves_gap: bool,
 }
 
 /// La balise d'un type de la page, pour la garde des attributs : `Some(None)` s'il n'est pas un

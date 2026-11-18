@@ -301,9 +301,14 @@ impl Served {
     /// C1 tient (Ruling R817) : chaque entrée de map vivante est la seule vivante de sa clé, et n'a
     /// qu'une unité ; vu dans l'état, avant que yrs ne lise de la mémoire libérée. Et la page relue
     /// de son propre état (ce qu'écrit la compaction, ce que reçoit un onglet à l'étape 2) est la
-    /// page vivante : blocs, arbre, révision (constat I-7.1, Ruling R825).
+    /// page vivante : blocs, arbre, révision (constat I-7.1, Ruling R825). Et ce que la garde tient
+    /// pour vrai de chaque unité (son type, ou qu'elle est ramassée) est ce que yrs en garde (Ruling
+    /// R853).
     fn hammer(&self, stages: &[Vec<u8>], what: &str) {
         if let Some(why) = self.page.unsound_map_entries() {
+            panic!("{what} : {why}");
+        }
+        if let Some(why) = self.page.misjudged_units() {
             panic!("{what} : {why}");
         }
         if !self.holed
@@ -1034,6 +1039,11 @@ fn replay_text(text: &str, stored: bool) -> Vec<String> {
             let why: String = why.chars().filter(|c| !c.is_ascii_digit()).collect();
             findings.push(format!("ligne {n} : {why}"));
         }
+        // Ruling R853 : ce que la garde tient pour vrai de chaque unité est ce que yrs en garde.
+        if let Some(why) = served.page.misjudged_units() {
+            let why: String = why.chars().filter(|c| !c.is_ascii_digit()).collect();
+            findings.push(format!("ligne {n} : {why}"));
+        }
         // Ruling R825 : la page relue de son propre état est la page vivante (hors d'une page à
         // trou, limite écrite : Ruling R830).
         if !served.holed
@@ -1259,6 +1269,18 @@ fn an_item_between_two_parents_is_collected() {
 #[test]
 fn an_item_between_neighbours_its_author_did_not_see_side_by_side_is_collected() {
     assert_eq!(replay_apart("min-28569", false), Ok(()));
+}
+
+/// Ruling R853 : ce que la mise à jour range dans un de ses éléments qui n'est pas un type, yrs le
+/// ramasse. Tenu pour vivant, un élément posé à côté de lui échappait à la règle G : la garde ne
+/// disait plus ce que yrs garde, la page relue de son état n'était plus la page vivante, et le
+/// journal ne se relisait plus (graines 5102, 12253, 37708 et 42716 de la voie du journal, 27404 de
+/// celle d'un client).
+#[test]
+fn what_an_update_files_under_something_that_is_no_type_is_collected() {
+    assert_eq!(replay_apart("min-j37708", true), Ok(()));
+    assert_eq!(replay_apart("min-j42716", true), Ok(()));
+    assert_eq!(replay_apart("min-27404", false), Ok(()));
 }
 
 /// Ruling R834 : une règle juge pareil la mise à jour et l'état qui la contient. Graine 629 de la

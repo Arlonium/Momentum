@@ -543,6 +543,178 @@ fn burst_after_the_last_letter(n: usize) -> (Vec<u8>, Vec<Vec<u8>>) {
     (sent.state, updates)
 }
 
+/// Une lettre `x` de `client`, à la suite de la mise à jour `update`, entre deux voisins.
+fn push_letter_between(update: &mut Vec<u8>, origin: (u64, u32), right: (u64, u32)) {
+    update.push(0xC4);
+    for id in [origin, right] {
+        var(update, id.0);
+        var(update, u64::from(id.1));
+    }
+    update.extend_from_slice(&[1, b'x']);
+}
+
+/// L'en-tête d'une mise à jour de `n` éléments du client 77, à partir de l'horloge 0.
+fn letters_header(n: usize) -> Vec<u8> {
+    let mut update = Vec::new();
+    var(&mut update, 1);
+    var(&mut update, n as u64);
+    var(&mut update, 77);
+    var(&mut update, 0);
+    update
+}
+
+/// Une page dont le paragraphe porte `n` lettres insérées en tête, chacune un élément et une
+/// suite à elle : l'état, et l'horloge de la première.
+fn page_of_letters(n: usize) -> (Vec<u8>, u32) {
+    let (_, root) = PageDoc::new_page();
+    let doc = client_of(9, &root);
+    let first = {
+        let mut txn = doc.transact_mut();
+        let paragraph = first_paragraph(&txn);
+        let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+        let first = txn.state_vector().get(&yrs::ClientID::new(9));
+        for _ in 0..n {
+            text.insert(&mut txn, 0, "a");
+        }
+        first
+    };
+    let state = doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    (state, first)
+}
+
+/// Règles G et P2 (Ruling R853) : `n` lettres, chacune entre deux lettres d'un texte de la page.
+/// Demander à yrs où vit chaque voisin parcourt le texte : `n` demandes de `n` pas.
+fn letters_between_letters_of_the_page(n: usize) -> Sent {
+    let (state, first) = page_of_letters(n + 1);
+    let mut update = letters_header(n);
+    for i in (0..n as u32).rev() {
+        push_letter_between(&mut update, (9, first + i + 1), (9, first + i));
+    }
+    update.push(0);
+    Sent { state, update }
+}
+
+/// De même dans des textes que le serveur a écrits : la garde ne connaît ses unités qu'en les
+/// lisant dans ce que yrs garde, une fois pour toutes. Des paragraphes courts : yrs seul met un
+/// temps quadratique à couper un long texte en `n` morceaux (936 ms pour 32 000 lettres, en
+/// release, sans aucune garde).
+fn letters_between_letters_the_server_wrote(n: usize) -> Sent {
+    const LETTERS: usize = 32;
+    let paragraph = "a".repeat(LETTERS);
+    let paragraphs = n.div_ceil(LETTERS - 1);
+    let page = PageDoc::new_page().0;
+    let mmd = vec![paragraph; paragraphs].join("\n\n") + "\n";
+    page.write_blocks(&mementum_md::parse(&mmd).unwrap())
+        .unwrap();
+    let state = page.encode_state();
+    let doc = client_of(77, &state);
+    let before = doc.transact().state_vector();
+    let texts: Vec<_> = {
+        let txn = doc.transact();
+        let fragment = txn.get_xml_fragment(FRAGMENT).unwrap();
+        let Some(yrs::XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+            panic!("la racine");
+        };
+        group
+            .children(&txn)
+            .map(|container| {
+                let yrs::XmlOut::Element(container) = container else {
+                    panic!("un bloc");
+                };
+                let Some(yrs::XmlOut::Element(paragraph)) = container.get(&txn, 0) else {
+                    panic!("un paragraphe");
+                };
+                match paragraph.get(&txn, 0) {
+                    Some(yrs::XmlOut::Text(text)) => text,
+                    _ => panic!("un texte"),
+                }
+            })
+            .collect()
+    };
+    {
+        let mut txn = doc.transact_mut();
+        for text in &texts {
+            for at in (1..LETTERS as u32).rev() {
+                text.insert(&mut txn, at, "x");
+            }
+        }
+    }
+    let update = doc.transact().encode_diff_v1(&before);
+    Sent { state, update }
+}
+
+/// `n` éléments dont chacun a pour origine droite le suivant de la mise à jour : le jugement de
+/// l'un attend celui de l'autre, sur toute la longueur.
+fn letters_that_wait_for_each_other(n: usize) -> Sent {
+    let (state, first) = page_of_letters(n + 1);
+    let mut update = letters_header(n);
+    for i in 0..n as u32 {
+        let right = if i + 1 == n as u32 {
+            (9, first)
+        } else {
+            (77, i + 1)
+        };
+        push_letter_between(&mut update, (9, first + i + 1), right);
+    }
+    update.push(0);
+    Sent { state, update }
+}
+
+/// `n` lettres qui nomment toutes la dernière d'une chaîne de `n` lettres posées l'une devant
+/// l'autre : où vit cette lettre se lit en remontant la chaîne, une seule fois.
+fn letters_naming_the_end_of_a_long_chain(n: usize) -> Sent {
+    let (state, first) = page_of_letters(n + 1);
+    let last = first + n as u32;
+    let mut update = letters_header(n);
+    for _ in 0..n {
+        push_letter_between(&mut update, (9, last), (9, last - 1));
+    }
+    update.push(0);
+    Sent { state, update }
+}
+
+/// Règles G et P2 (Ruling R853) : juger les voisins des éléments d'une mise à jour croît comme
+/// elle et comme la page, quelle que soit la place de ces voisins dans la liste où ils vivent.
+#[test]
+fn judging_the_neighbours_of_items_grows_like_the_update() {
+    let forms = [
+        Form {
+            what: "lettres entre deux lettres de la page",
+            build: &letters_between_letters_of_the_page,
+        },
+        Form {
+            what: "lettres entre deux lettres écrites par le serveur",
+            build: &letters_between_letters_the_server_wrote,
+        },
+        Form {
+            what: "lettres qui attendent chacune la suivante",
+            build: &letters_that_wait_for_each_other,
+        },
+        Form {
+            what: "lettres qui nomment le bout d'une longue chaîne",
+            build: &letters_naming_the_end_of_a_long_chain,
+        },
+    ];
+    let size = |sent: &Sent| sent.state.len() + sent.update.len();
+    let judge = |sent: &Sent| {
+        let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
+        let from_client = page.try_client_update(&sent.update).is_ok();
+        let stored = PageDoc::from_updates([sent.state.as_slice(), sent.update.as_slice()]);
+        (
+            from_client,
+            stored.map_or(0, |page| page.encode_state().len()),
+        )
+    };
+    let limits = Limits {
+        peak_per_byte: 96,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&forms, size, judge, |_| 0, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Mises à jour d'une rafale.
 const BURST: usize = 16;
 

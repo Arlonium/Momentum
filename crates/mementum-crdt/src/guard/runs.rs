@@ -31,41 +31,182 @@
 //! qu'une unité). La page récrit donc l'élément, sans son origine droite, comme N2 : il est rangé
 //! par son origine seule, partout pareil.
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
-use yrs::block::ClientID;
+use yrs::block::{ClientID, ID};
+use yrs::branch::BranchID;
 use yrs::{ReadTxn, StateVector};
 
 use super::cut::Beyond;
-use super::{Id, Kind, Shape};
-use crate::CrdtError;
+use super::{Id, Kind, META, Parent, Shape};
+use crate::{CrdtError, FRAGMENT};
+
+/// Le type où vit une unité (règles G et P2, Rulings R827, R829).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Home {
+    /// La racine du document.
+    Fragment,
+    /// La racine des métadonnées.
+    Meta,
+    /// Une autre racine : la garde la refuse.
+    OtherRoot,
+    /// Le type que porte cet élément.
+    In(Id),
+    /// Une plage ramassée : elle ne vit nulle part.
+    Gone,
+    /// Ses voisins manquent : yrs la tiendra pour une dépendance absente.
+    Unknown,
+}
+
+/// Où une unité a été rangée : son type, et si elle y est une entrée de map (`parentSub`). Une
+/// unité qui ne nomme pas son parent le tient de son origine, sinon de son origine droite.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Place {
+    pub(crate) home: Home,
+    pub(crate) keyed: bool,
+}
+
+/// Ce qu'est une unité au moment de juger une mise à jour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unit {
+    /// Une plage ramassée.
+    Collected,
+    /// Un élément, dans ce type.
+    In(Home),
+    /// Ni la page ni la mise à jour ne la portent : yrs la tiendra pour une dépendance absente.
+    Unknown,
+}
+
+/// Un identifiant sur douze octets, ou rien. Une horloge s'arrête à 2^31 - 1 (`Shape::read`, Ruling
+/// R808) : la dernière dit qu'il n'y a pas d'identifiant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C, packed(4))]
+struct Slot {
+    client: u64,
+    clock: u32,
+}
+
+impl Slot {
+    const NONE: Slot = Slot {
+        client: 0,
+        clock: u32::MAX,
+    };
+
+    fn of(id: Option<Id>) -> Slot {
+        id.map_or(Slot::NONE, |(client, clock)| Slot { client, clock })
+    }
+
+    fn get(self) -> Option<Id> {
+        (self.clock != u32::MAX).then_some((self.client, self.clock))
+    }
+}
 
 /// Une suite d'unités d'un client qui peuvent tenir en un seul bloc de yrs ou de Yjs : elles se
 /// suivent par leurs horloges, chacune après la première a pour origine l'unité d'avant, et toutes
-/// ont la même origine droite.
+/// ont la même origine droite. Une page en garde une par course de frappe, et, au pire, une par
+/// unité : elle tient sur 48 octets (les bornes de mémoire de `tests/linear.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Run {
     pub(crate) start: u32,
     /// Exclue.
     pub(crate) end: u32,
-    pub(crate) right: Option<Id>,
+    right: Slot,
     /// L'origine de sa première unité (celle des suivantes est l'unité d'avant).
-    pub(crate) origin: Option<Id>,
-    /// Une plage ramassée : ni origine ni voisins, elle ne tient avec rien.
-    pub(crate) gc: bool,
+    origin: Slot,
+    /// Le type qui la porte, pour [`Home::In`].
+    parent: Slot,
+    /// [`GC`], [`KEYED`], et le genre de [`Home`] au-delà (`HOME_SHIFT`) ; 0 : pas encore lu.
+    marks: u32,
 }
 
+const _: () = assert!(std::mem::size_of::<Run>() == 48);
+
+/// Une plage ramassée : ni origine ni voisins, elle ne tient avec rien.
+const GC: u32 = 1;
+/// Une entrée de map.
+const KEYED: u32 = 2;
+const HOME_SHIFT: u32 = 2;
+
 impl Run {
+    fn new(
+        (start, end): (u32, u32),
+        right: Option<Id>,
+        origin: Option<Id>,
+        gc: bool,
+        place: Option<Place>,
+    ) -> Run {
+        let mut run = Run {
+            start,
+            end,
+            right: Slot::of(right),
+            origin: Slot::of(origin),
+            parent: Slot::NONE,
+            marks: if gc { GC } else { 0 },
+        };
+        if let Some(place) = place {
+            run.set_place(place);
+        }
+        run
+    }
+
+    pub(crate) fn right(&self) -> Option<Id> {
+        self.right.get()
+    }
+
+    pub(crate) fn origin(&self) -> Option<Id> {
+        self.origin.get()
+    }
+
+    /// Une plage ramassée quand elle a été posée.
+    pub(crate) fn gc(&self) -> bool {
+        self.marks & GC != 0
+    }
+
+    /// Où vit la suite : écrit dans ses octets si sa première unité nomme son parent, sinon lu une
+    /// fois chez ses voisins ([`Judge::place`]). Les unités d'une suite ont le même parent : chacune
+    /// après la première a pour origine l'unité d'avant.
+    fn place(&self) -> Option<Place> {
+        let home = match self.marks >> HOME_SHIFT {
+            0 => return None,
+            1 => Home::Fragment,
+            2 => Home::Meta,
+            3 => Home::OtherRoot,
+            4 => Home::In(self.parent.get()?),
+            5 => Home::Gone,
+            _ => Home::Unknown,
+        };
+        Some(Place {
+            home,
+            keyed: self.marks & KEYED != 0,
+        })
+    }
+
+    fn set_place(&mut self, place: Place) {
+        let kind = match place.home {
+            Home::Fragment => 1,
+            Home::Meta => 2,
+            Home::OtherRoot => 3,
+            Home::In(parent) => {
+                self.parent = Slot::of(Some(parent));
+                4
+            }
+            Home::Gone => 5,
+            Home::Unknown => 6,
+        };
+        self.marks = (self.marks & GC) | (u32::from(place.keyed) * KEYED) | (kind << HOME_SHIFT);
+    }
+
     /// L'origine de sa première unité est l'unité d'avant du même client (`client`).
     fn head(&self, client: u64) -> bool {
-        self.start > 0 && self.origin == Some((client, self.start - 1))
+        self.start > 0 && self.origin() == Some((client, self.start - 1))
     }
 
     /// Vrai si `next` prolonge `self` (les deux de `client`) : ils tiennent en une suite.
     fn joins(&self, client: u64, next: &Run) -> bool {
         self.end == next.start
-            && !self.gc
-            && !next.gc
+            && !self.gc()
+            && !next.gc()
             && next.head(client)
             && self.right == next.right
     }
@@ -73,7 +214,7 @@ impl Run {
     /// L'origine de l'unité `clock` de la suite (de `client`).
     fn origin_of(&self, client: u64, clock: u32) -> Option<Id> {
         if clock == self.start {
-            self.origin
+            self.origin()
         } else {
             Some((client, clock - 1))
         }
@@ -107,14 +248,80 @@ impl Runs {
         })
     }
 
+    /// Prend les suites d'une mise à jour que la page vient d'intégrer. Celles d'un client que la
+    /// page ne connaissait pas passent telles quelles : une relecture ne les range pas deux fois.
+    pub(crate) fn absorb(&mut self, other: Runs) {
+        for (client, mut list) in other.clients {
+            match self.clients.entry(client) {
+                Entry::Vacant(known) => {
+                    list.shrink_to_fit();
+                    known.insert(list);
+                }
+                Entry::Occupied(mut known) => {
+                    for run in list {
+                        Self::insert_into(known.get_mut(), client, run);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Le nombre de suites connues.
+    fn len(&self) -> usize {
+        self.clients.values().map(Vec::len).sum()
+    }
+
+    /// Retient où vit la suite qui commence à `start`.
+    fn settle(&mut self, client: u64, start: u32, place: Place) {
+        if let Some(runs) = self.clients.get_mut(&client) {
+            let at = runs.partition_point(|run| run.start < start);
+            if let Some(run) = runs.get_mut(at).filter(|run| run.start == start) {
+                run.set_place(place);
+            }
+        }
+    }
+
     /// Ajoute une suite. Une suite qui en chevauche une connue n'est pas ajoutée : ce qu'on sait
     /// d'une unité ne change pas, et ce qui est connu vient de ce que la page a intégré.
-    pub(crate) fn insert(&mut self, client: u64, run: Run) {
+    #[cfg(test)]
+    fn insert(&mut self, client: u64, run: Run) {
+        Self::insert_into(self.clients.entry(client).or_default(), client, run);
+    }
+
+    /// Ajoute ce que `run`, lu dans yrs, porte et que les suites connues ne couvrent pas : yrs fond
+    /// des blocs que la page a vus arriver séparément (une plage ramassée à cheval sur le plancher,
+    /// la part neuve d'un élément coupé et l'unité d'avant).
+    fn insert_missing(&mut self, client: u64, run: Run) {
+        let runs = self.clients.entry(client).or_default();
+        let mut from = run.start;
+        while from < run.end {
+            let at = runs.partition_point(|known| known.end <= from);
+            match runs.get(at) {
+                Some(known) if known.start <= from => from = known.end,
+                next => {
+                    let to = next.map_or(run.end, |known| known.start.min(run.end));
+                    let piece = Run {
+                        start: from,
+                        end: to,
+                        origin: Slot::of(run.origin_of(client, from)),
+                        ..run
+                    };
+                    Self::insert_into(runs, client, piece);
+                    from = to;
+                }
+            }
+        }
+    }
+
+    fn insert_into(runs: &mut Vec<Run>, client: u64, run: Run) {
         if run.start >= run.end {
             return;
         }
-        let runs = self.clients.entry(client).or_default();
-        let at = runs.partition_point(|r| r.start < run.start);
+        let at = if runs.last().is_none_or(|last| last.start < run.start) {
+            runs.len()
+        } else {
+            runs.partition_point(|r| r.start < run.start)
+        };
         if at > 0 && runs[at - 1].end > run.start {
             return;
         }
@@ -128,6 +335,8 @@ impl Runs {
             run = Run {
                 start: before.start,
                 origin: before.origin,
+                parent: before.parent,
+                marks: before.marks,
                 ..run
             };
             at -= 1;
@@ -146,11 +355,12 @@ impl Shape {
     /// au-delà d'un trou (`beyond`). Après la coupe (Ruling R784), aucun élément n'est à cheval :
     /// chacun est connu en entier, ou neuf en entier. Par client, dans l'ordre des horloges, fondues
     /// dès qu'elles se prolongent.
-    pub(crate) fn runs(&self, floor: &StateVector, beyond: &Beyond) -> Vec<(u64, Run)> {
-        let mut out: Vec<(u64, Run)> = Vec::new();
+    pub(crate) fn runs(&self, floor: &StateVector, beyond: &Beyond) -> Runs {
+        let mut out = Runs::default();
         for (client, structs) in &self.clients {
             let known = floor.get(&ClientID::new(*client));
             let holes = beyond.get(client);
+            let mut list: Vec<Run> = Vec::new();
             for s in structs {
                 let end = s.id.1 + s.len;
                 if end <= known
@@ -159,29 +369,21 @@ impl Shape {
                 {
                     continue;
                 }
+                // Une plage ramassée à cheval sur le plancher n'est pas coupée (Ruling R784 ne coupe
+                // que les éléments) : sa part connue n'est pas ramassée pour autant.
+                let span = (s.id.1.max(known), end);
                 let run = match &s.kind {
-                    Kind::Insert(i) => Run {
-                        start: s.id.1,
-                        end,
-                        right: i.right,
-                        origin: i.origin,
-                        gc: false,
-                    },
-                    Kind::Gc => Run {
-                        start: s.id.1,
-                        end,
-                        right: None,
-                        origin: None,
-                        gc: true,
-                    },
+                    Kind::Insert(i) => Run::new(span, i.right, i.origin, false, i.place()),
+                    Kind::Gc => Run::new(span, None, None, true, Some(GONE)),
                     Kind::Skip => continue,
                 };
-                match out.last_mut() {
-                    Some((c, last)) if *c == *client && last.joins(*client, &run) => {
-                        last.end = run.end;
-                    }
-                    _ => out.push((*client, run)),
+                match list.last_mut() {
+                    Some(last) if last.joins(*client, &run) => last.end = run.end,
+                    _ => list.push(run),
                 }
+            }
+            if !list.is_empty() {
+                out.clients.entry(*client).or_default().extend(list);
             }
         }
         out
@@ -233,69 +435,36 @@ impl Shape {
     }
 }
 
-/// Le parent qu'un élément nomme dans ses octets.
-pub(crate) enum Named {
-    /// Une racine, par son nom.
-    Root(String),
-    /// Un type, par l'identifiant de son élément.
-    Id(Id),
-    /// Aucun : ses voisins le lui donnent.
-    None,
-}
-
-/// Un élément ou une plage ramassée que la mise à jour pose et que la page intégrera, avec ce qui
-/// le place : son origine, son origine droite, le parent qu'il nomme (règles G et P2, Rulings
-/// R827, R829).
-pub(crate) struct Posed {
-    pub(crate) id: Id,
-    pub(crate) len: u32,
-    /// Une plage ramassée (`GC`).
-    pub(crate) gc: bool,
-    pub(crate) origin: Option<Id>,
-    pub(crate) right: Option<Id>,
-    pub(crate) parent: Named,
+impl super::Insert {
+    /// Où l'élément se dit rangé, s'il nomme son parent.
+    fn place(&self) -> Option<Place> {
+        let home = match &self.parent {
+            Parent::Named(root, _) if root == FRAGMENT => Home::Fragment,
+            Parent::Named(root, _) if root == META => Home::Meta,
+            Parent::Named(..) => Home::OtherRoot,
+            Parent::Id(id) => Home::In(*id),
+            Parent::Sibling(_) => return None,
+        };
+        let keyed = self.keyed || matches!(self.parent, Parent::Named(_, true));
+        Some(Place { home, keyed })
+    }
 }
 
 impl Shape {
     /// Ce que la mise à jour pose et que la page intégrera (comme [`Shape::runs`]) : les éléments
     /// et les plages ramassées au-dessus du plancher de leur client, hors de ce que la page connaît
     /// au-delà d'un trou. Par client, dans l'ordre des horloges.
-    pub(crate) fn posed(&self, floor: &StateVector, beyond: &Beyond) -> Vec<Posed> {
+    fn posed(&self, floor: &StateVector, beyond: &Beyond) -> Vec<&super::Struct> {
         let mut out = Vec::new();
         for (client, structs) in &self.clients {
             let known = floor.get(&ClientID::new(*client));
             let holes = beyond.get(client);
-            for s in structs {
-                if s.id.1 + s.len <= known
-                    || holes
+            out.extend(structs.iter().filter(|s| {
+                s.id.1 + s.len > known
+                    && !matches!(s.kind, Kind::Skip)
+                    && !holes
                         .is_some_and(|ranges| ranges.iter().any(|r| r.0 <= s.id.1 && s.id.1 < r.1))
-                {
-                    continue;
-                }
-                match &s.kind {
-                    Kind::Insert(i) => out.push(Posed {
-                        id: s.id,
-                        len: s.len,
-                        gc: false,
-                        origin: i.origin,
-                        right: i.right,
-                        parent: match &i.parent {
-                            super::Parent::Id(p) => Named::Id(*p),
-                            super::Parent::Named(root, _) => Named::Root(root.clone()),
-                            super::Parent::Sibling(_) => Named::None,
-                        },
-                    }),
-                    Kind::Gc => out.push(Posed {
-                        id: s.id,
-                        len: s.len,
-                        gc: true,
-                        origin: None,
-                        right: None,
-                        parent: Named::None,
-                    }),
-                    Kind::Skip => {}
-                }
-            }
+            }));
         }
         out
     }
@@ -306,6 +475,18 @@ impl Shape {
 /// n'en traverse d'ordinaire que deux (la page, puis la mise à jour).
 const MAX_STEPS: usize = 64;
 
+/// Une unité dont les voisins manquent.
+const UNKNOWN: Place = Place {
+    home: Home::Unknown,
+    keyed: false,
+};
+
+/// Une plage ramassée.
+const GONE: Place = Place {
+    home: Home::Gone,
+    keyed: false,
+};
+
 /// Ce qu'on sait des unités d'un client, pour juger les candidats d'une mise à jour : les suites
 /// de la page (`page`), qu'on complète d'après yrs pour ce qu'elles ne connaissent pas encore (une
 /// écriture du serveur), et celles que la mise à jour pose (`update`).
@@ -314,7 +495,15 @@ pub(crate) struct Judge<'a, T: ReadTxn> {
     pub(crate) floor: &'a StateVector,
     pub(crate) beyond: &'a Beyond,
     pub(crate) page: &'a mut Runs,
-    pub(crate) update: &'a Runs,
+    pub(crate) update: &'a mut Runs,
+}
+
+/// Où en est le jugement d'un élément posé par la mise à jour ([`Judge::collected_neighbours`]).
+#[derive(Clone, Copy)]
+enum Seen {
+    New,
+    Visiting,
+    Done(Unit),
 }
 
 impl<T: ReadTxn> Judge<'_, T> {
@@ -353,12 +542,209 @@ impl<T: ReadTxn> Judge<'_, T> {
             .txn
             .encode_diff_v1(&StateVector::new(since.into_iter().collect()));
         let shape = Shape::read_written(&encoded)?;
-        for (c, run) in shape.runs(&StateVector::default(), &Beyond::new()) {
-            if c == client {
-                self.page.insert(c, run);
-            }
+        let mut read = shape.runs(&StateVector::default(), &Beyond::new());
+        for run in read.clients.remove(&client).unwrap_or_default() {
+            self.page.insert_missing(client, run);
         }
         Ok(self.page.at(client, clock))
+    }
+
+    /// Où vit l'unité `id`, de la page ou de la mise à jour. yrs range un élément qui ne nomme pas
+    /// son parent chez son origine, sinon chez son origine droite : on remonte ces voisins, et ce
+    /// qu'on trouve est retenu pour chaque suite traversée. Chaque suite n'est donc remontée
+    /// qu'une fois, sans parcourir la liste où vit l'unité (`StickyIndex::get_offset` le faisait,
+    /// pour chaque unité nommée).
+    fn place(&mut self, id: Id) -> Result<Place, CrdtError> {
+        let mut path: Vec<Id> = Vec::new();
+        let mut at = id;
+        let place = loop {
+            let Some(run) = self.at(at.0, at.1)? else {
+                break UNKNOWN;
+            };
+            if let Some(place) = run.place() {
+                break place;
+            }
+            // Un élément intégré ne dépend que de ce qui l'a été avant lui ; une mise à jour
+            // hostile peut boucler sur elle-même, et yrs la gardera en attente.
+            if path.len() % 4096 == 4095 && path.len() > self.page.len() + self.update.len() {
+                break UNKNOWN;
+            }
+            path.push((at.0, run.start));
+            match run.origin().or(run.right()) {
+                Some(next) => at = next,
+                None => break UNKNOWN,
+            }
+        };
+        for (client, start) in path {
+            if self.in_page(client, start) {
+                self.page.settle(client, start, place);
+            } else {
+                self.update.settle(client, start, place);
+            }
+        }
+        Ok(place)
+    }
+
+    /// Faux si rien ne peut vivre dans `home` : une plage ramassée, un type de la page qui n'en
+    /// est plus un (supprimé, le ramasse-miettes a ramassé tout ce qu'il portait).
+    fn lives(&self, home: Home) -> bool {
+        match home {
+            Home::Gone | Home::Unknown => false,
+            Home::In(parent) => {
+                !self.in_page(parent.0, parent.1)
+                    || BranchID::get_nested(self.txn, &ID::new(ClientID::new(parent.0), parent.1))
+                        .is_some()
+            }
+            _ => true,
+        }
+    }
+
+    /// Ce qu'est l'unité `id` de la page : une plage ramassée si sa suite l'est, ou si le type où
+    /// elle vit n'en est plus un (supprimé, le ramasse-miettes a ramassé tout ce qu'il portait).
+    pub(crate) fn page_unit(&mut self, id: Id) -> Result<Unit, CrdtError> {
+        let home = self.place(id)?.home;
+        Ok(match home {
+            Home::Unknown => Unit::Unknown,
+            home if self.lives(home) => Unit::In(home),
+            _ => Unit::Collected,
+        })
+    }
+
+    /// Règles G et P2 (Rulings R827, R829) : les éléments de la mise à jour (au-dessus du plancher,
+    /// après la coupe) que la page ramasse au lieu de les ranger, rendus pour être récrits en
+    /// plages ramassées ([`super::cut::collect`]).
+    ///
+    /// - **G** : un voisin (origine, origine droite) est une plage ramassée, l'autre un élément. Yjs
+    ///   en fait une plage ramassée (`Item.getMissing` met le parent à `null` dès que le voisin de
+    ///   gauche ou de droite est un `GC`, et `Item.integrate` intègre alors un `GC`) ; yrs ne voit
+    ///   pas de voisin du tout là où l'unité est ramassée, prend le parent de l'autre voisin, et
+    ///   range l'élément : la page vivante et la page relue de son état ne le rangeaient pas pareil
+    ///   (l'ordre d'intégration décide), ni le serveur et un navigateur.
+    /// - **P2** : les deux voisins sont des éléments de deux parents différents. yrs comme Yjs le
+    ///   rangent dans le parent de gauche ; mais si ce voisin est ramassé plus tard (son parent
+    ///   supprimé), la page relue de son état le range dans le parent de droite (yrs) ou le ramasse
+    ///   (Yjs) : la page vivante n'était plus sa relecture.
+    ///
+    /// Aucun client honnête n'écrit ni l'un ni l'autre : l'origine et l'origine droite d'un élément
+    /// sont dans le même parent, et une page ramasse tous les enfants d'un parent supprimé à la fois.
+    ///
+    /// Seuls les éléments à deux voisins sont jugés, avec ce qu'ils nomment dans la mise à jour : un
+    /// élément qui n'a qu'un voisin suit le sort de ce voisin chez yrs comme chez Yjs. `already` :
+    /// les éléments déjà jugés à ramasser (règles I1 et I3), rendus avec les autres, et ramassés
+    /// pour ceux qui les nomment.
+    pub(crate) fn collected_neighbours(
+        &mut self,
+        shape: &Shape,
+        already: HashSet<Id>,
+    ) -> Result<HashSet<Id>, CrdtError> {
+        let posed = shape.posed(self.floor, self.beyond);
+        let mut flagged = already;
+        // Où commencent et finissent, dans `posed`, les unités de chaque client.
+        let mut spans: HashMap<u64, (usize, usize)> = HashMap::new();
+        for (k, s) in posed.iter().enumerate() {
+            spans.entry(s.id.0).or_insert((k, k)).1 = k + 1;
+        }
+        let rank = |id: Id| {
+            let &(from, to) = spans.get(&id.0)?;
+            let list = &posed[from..to];
+            let at = list.partition_point(|s| s.id.1 + s.len <= id.1);
+            list.get(at).filter(|s| s.id.1 <= id.1).map(|_| from + at)
+        };
+        let mut seen: Vec<Seen> = posed
+            .iter()
+            .map(|s| {
+                if matches!(s.kind, Kind::Gc) || flagged.contains(&s.id) {
+                    Seen::Done(Unit::Collected)
+                } else {
+                    Seen::New
+                }
+            })
+            .collect();
+        // En profondeur, sans récursion : un élément est jugé une fois ses voisins jugés.
+        let mut stack = Vec::new();
+        for root in 0..posed.len() {
+            let two = matches!(&posed[root].kind, Kind::Insert(i) if i.origin.is_some() && i.right.is_some());
+            if !two || !matches!(seen[root], Seen::New) {
+                continue;
+            }
+            stack.push(root);
+            while let Some(&k) = stack.last() {
+                seen[k] = Seen::Visiting;
+                let Kind::Insert(p) = &posed[k].kind else {
+                    stack.pop();
+                    continue;
+                };
+                let place = p.place();
+                let named = match place {
+                    Some(Place {
+                        home: Home::In(parent),
+                        ..
+                    }) => [Some(parent), None],
+                    Some(_) => [None, None],
+                    None => [p.origin, p.right],
+                };
+                let waits = named
+                    .into_iter()
+                    .flatten()
+                    .filter(|id| !self.in_page(id.0, id.1))
+                    .filter_map(rank)
+                    .find(|j| matches!(seen[*j], Seen::New));
+                if let Some(j) = waits {
+                    stack.push(j);
+                    continue;
+                }
+                stack.pop();
+                let unit_of = |judge: &mut Self, id: Id| -> Result<Unit, CrdtError> {
+                    if judge.in_page(id.0, id.1) {
+                        return judge.page_unit(id);
+                    }
+                    Ok(match rank(id).map(|j| seen[j]) {
+                        Some(Seen::Done(unit)) => unit,
+                        _ => Unit::Unknown,
+                    })
+                };
+                let unit = match place {
+                    Some(Place {
+                        home: Home::In(parent),
+                        ..
+                    }) if self.in_page(parent.0, parent.1) => {
+                        if self.lives(Home::In(parent)) {
+                            Unit::In(Home::In(parent))
+                        } else {
+                            Unit::Collected
+                        }
+                    }
+                    Some(Place {
+                        home: Home::In(parent),
+                        ..
+                    }) => match (unit_of(self, parent)?, rank(parent).map(|j| &posed[j].kind)) {
+                        // yrs ne range rien dans ce qui n'est pas un type.
+                        (Unit::In(_), Some(Kind::Insert(named))) if named.type_ref.is_some() => {
+                            Unit::In(Home::In(parent))
+                        }
+                        (Unit::Unknown, _) => Unit::Unknown,
+                        _ => Unit::Collected,
+                    },
+                    Some(place) => Unit::In(place.home),
+                    None => {
+                        let origin = p.origin.map(|id| unit_of(self, id)).transpose()?;
+                        let right = p.right.map(|id| unit_of(self, id)).transpose()?;
+                        match (origin, right) {
+                            (Some(Unit::Unknown), _) | (_, Some(Unit::Unknown)) | (None, None) => {
+                                Unit::Unknown
+                            }
+                            (Some(a), Some(b)) if a != b => {
+                                flagged.insert(posed[k].id);
+                                Unit::Collected
+                            }
+                            (Some(unit), _) | (None, Some(unit)) => unit,
+                        }
+                    }
+                };
+                seen[k] = Seen::Done(unit);
+            }
+        }
+        Ok(flagged)
     }
 
     /// Règle I1 (Ruling R828) : vrai si l'unité `right`, l'origine droite d'un élément qui n'a pas
@@ -372,7 +758,7 @@ impl<T: ReadTxn> Judge<'_, T> {
     ) -> Result<bool, CrdtError> {
         Ok(self
             .at(right.0, right.1)?
-            .is_some_and(|run| !run.gc && run.origin_of(right.0, right.1).is_some()))
+            .is_some_and(|run| !run.gc() && run.origin_of(right.0, right.1).is_some()))
     }
 
     /// Règle I3 (Ruling R834) : vrai si un élément d'origine `origin` et d'origine droite `right`
@@ -399,7 +785,7 @@ impl<T: ReadTxn> Judge<'_, T> {
         else {
             return Ok(false);
         };
-        if at_origin.gc || at_right.gc {
+        if at_origin.gc() || at_right.gc() {
             return Ok(false);
         }
         match at_right.origin_of(right.0, right.1) {
@@ -420,7 +806,7 @@ impl<T: ReadTxn> Judge<'_, T> {
             let Some(run) = self.at(client, clock)? else {
                 return Ok(false);
             };
-            if run.gc {
+            if run.gc() {
                 return Ok(false);
             }
             if run.start <= from {
@@ -446,7 +832,7 @@ impl<T: ReadTxn> Judge<'_, T> {
             let Some(run) = self.at(client, clock)? else {
                 return Ok(false);
             };
-            if run.gc {
+            if run.gc() {
                 return Ok(false);
             }
             if run.start <= wanted {
@@ -458,7 +844,7 @@ impl<T: ReadTxn> Judge<'_, T> {
             let Some(before) = self.at(client, run.start - 1)? else {
                 return Ok(false);
             };
-            if before.gc || before.right != run.right {
+            if before.gc() || before.right() != run.right() {
                 return Ok(false);
             }
             clock = run.start - 1;
@@ -472,17 +858,8 @@ mod tests {
     use super::*;
 
     fn run(start: u32, end: u32, right: Option<Id>, head: bool) -> Run {
-        Run {
-            start,
-            end,
-            right,
-            origin: if head {
-                Some((7, start.wrapping_sub(1)))
-            } else {
-                None
-            },
-            gc: false,
-        }
+        let origin = head.then(|| (7, start.wrapping_sub(1)));
+        Run::new((start, end), right, origin, false, None)
     }
 
     #[test]
