@@ -1,6 +1,8 @@
 //! Aucune mise à jour n'est refusée pour le nombre d'unités de la page qu'elle nomme (Ruling
 //! R853) : ce qu'est une unité se lit dans les suites de la garde, sans plafond.
 
+use std::time::{Duration, Instant};
+
 use mementum_crdt::{FRAGMENT, PageDoc};
 use yrs::updates::decoder::Decode;
 use yrs::{
@@ -201,4 +203,61 @@ fn a_collected_range_across_what_the_page_knows_collects_only_what_is_new() {
     update.extend_from_slice(&[0, 2, 0]);
     page.apply_update(&update).expect("une entrée du journal");
     assert_eq!(page.misjudged_units(), None);
+}
+
+/// Une page que le serveur a écrite, où un client a posé `letters` lettres à la suite des unités du
+/// serveur : le temps d'une frappe honnête au milieu d'un texte du serveur, qui fait lire ces unités.
+fn keystroke_after_letters(blocks: usize, letters: u32) -> Duration {
+    let (page, _) = PageDoc::new_page();
+    let mmd: String = (0..blocks).map(|n| format!("Paragraphe {n}\n\n")).collect();
+    page.write_blocks(&mementum_md::parse(&(mmd.trim_end().to_string() + "\n")).unwrap())
+        .unwrap();
+    let state = StateVector::decode_v1(&page.state_vector()).unwrap();
+    let (server, clock) = state
+        .iter()
+        .max_by_key(|(_, clock)| **clock)
+        .map(|(client, clock)| (client.get(), *clock))
+        .unwrap();
+    // Chaque lettre a pour origine la dernière unité du serveur : autant de suites.
+    let mut update = vec![1];
+    var(&mut update, u64::from(letters));
+    var(&mut update, server);
+    var(&mut update, u64::from(clock));
+    for _ in 0..letters {
+        update.push(0x84);
+        var(&mut update, server);
+        var(&mut update, u64::from(clock - 1));
+        update.extend_from_slice(&[1, b'k']);
+    }
+    update.push(0);
+    page.try_client_update(&update).expect("les lettres");
+    let tab = replica(TAB, &page.encode_state());
+    let keystroke = {
+        let mut txn = tab.transact_mut();
+        let text = text_of(&txn);
+        text.insert(&mut txn, 3, "!");
+        txn.encode_update_v1()
+    };
+    let start = Instant::now();
+    page.try_client_update(&keystroke).expect("la frappe");
+    start.elapsed()
+}
+
+/// Lire ce que le serveur a écrit se fait en une passe, quoi que la garde connaisse plus loin chez
+/// le même client (constat C2 de la re-relecture 8, Ruling R855) : pour une page quatre fois plus
+/// grande, une frappe coûtait seize fois plus.
+#[test]
+fn a_keystroke_on_what_the_server_wrote_grows_like_the_page() {
+    let floor = Duration::from_millis(5);
+    let ratio = (0..3)
+        .map(|_| {
+            let small = keystroke_after_letters(200, 4_000).max(floor);
+            let large = keystroke_after_letters(800, 16_000);
+            large.as_secs_f64() / small.as_secs_f64()
+        })
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        ratio < 8.0,
+        "une page quatre fois plus grande : {ratio:.1} fois plus lent"
+    );
 }

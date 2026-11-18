@@ -257,11 +257,7 @@ impl Runs {
                     list.shrink_to_fit();
                     known.insert(list);
                 }
-                Entry::Occupied(mut known) => {
-                    for run in list {
-                        Self::insert_into(known.get_mut(), client, run);
-                    }
-                }
+                Entry::Occupied(mut known) => Self::merge(known.get_mut(), client, list),
             }
         }
     }
@@ -276,71 +272,54 @@ impl Runs {
         }
     }
 
-    /// Ajoute une suite. Une suite qui en chevauche une connue n'est pas ajoutée : ce qu'on sait
-    /// d'une unité ne change pas, et ce qui est connu vient de ce que la page a intégré.
-    #[cfg(test)]
-    fn insert(&mut self, client: u64, run: Run) {
-        Self::insert_into(self.clients.entry(client).or_default(), client, run);
-    }
-
-    /// Ajoute ce que `run`, lu dans yrs, porte et que les suites connues ne couvrent pas : yrs fond
-    /// des blocs que la page a vus arriver séparément (une plage ramassée à cheval sur le plancher,
-    /// la part neuve d'un élément coupé et l'unité d'avant).
-    fn insert_missing(&mut self, client: u64, run: Run) {
-        let runs = self.clients.entry(client).or_default();
-        let mut from = run.start;
-        while from < run.end {
-            let at = runs.partition_point(|known| known.end <= from);
-            match runs.get(at) {
-                Some(known) if known.start <= from => from = known.end,
-                next => {
-                    let to = next.map_or(run.end, |known| known.start.min(run.end));
-                    let piece = Run {
-                        start: from,
-                        end: to,
-                        origin: Slot::of(run.origin_of(client, from)),
-                        ..run
-                    };
-                    Self::insert_into(runs, client, piece);
-                    from = to;
+    /// Range `incoming`, par horloges croissantes, parmi les suites connues d'un client, en une
+    /// passe (Ruling R855) : ce qu'on sait d'une unité ne change pas, seul ce que les suites connues
+    /// ne couvrent pas est ajouté. yrs fond des blocs que la page a vus arriver séparément (une
+    /// plage ramassée à cheval sur le plancher, la part neuve d'un élément coupé et l'unité d'avant) :
+    /// une suite lue dans yrs peut chevaucher ce qui est connu.
+    fn merge(known: &mut Vec<Run>, client: u64, incoming: Vec<Run>) {
+        let push = |out: &mut Vec<Run>, run: Run| match out.last_mut() {
+            Some(last) if last.joins(client, &run) => last.end = run.end,
+            _ => out.push(run),
+        };
+        // Le cas ordinaire : tout arrive après ce qui est connu.
+        if incoming
+            .first()
+            .is_none_or(|first| known.last().is_none_or(|last| last.end <= first.start))
+        {
+            for run in incoming {
+                push(known, run);
+            }
+            return;
+        }
+        let mut out = Vec::with_capacity(known.len() + incoming.len());
+        let mut old = std::mem::take(known).into_iter().peekable();
+        for run in incoming {
+            let mut from = run.start;
+            while from < run.end {
+                while let Some(before) = old.next_if(|before| before.end <= from) {
+                    push(&mut out, before);
+                }
+                match old.peek() {
+                    Some(covering) if covering.start <= from => from = covering.end,
+                    next => {
+                        let to = next.map_or(run.end, |next| next.start.min(run.end));
+                        let piece = Run {
+                            start: from,
+                            end: to,
+                            origin: Slot::of(run.origin_of(client, from)),
+                            ..run
+                        };
+                        push(&mut out, piece);
+                        from = to;
+                    }
                 }
             }
         }
-    }
-
-    fn insert_into(runs: &mut Vec<Run>, client: u64, run: Run) {
-        if run.start >= run.end {
-            return;
+        for after in old {
+            push(&mut out, after);
         }
-        let at = if runs.last().is_none_or(|last| last.start < run.start) {
-            runs.len()
-        } else {
-            runs.partition_point(|r| r.start < run.start)
-        };
-        if at > 0 && runs[at - 1].end > run.start {
-            return;
-        }
-        if runs.get(at).is_some_and(|next| next.start < run.end) {
-            return;
-        }
-        let mut run = run;
-        let mut at = at;
-        if at > 0 && runs[at - 1].joins(client, &run) {
-            let before = runs.remove(at - 1);
-            run = Run {
-                start: before.start,
-                origin: before.origin,
-                parent: before.parent,
-                marks: before.marks,
-                ..run
-            };
-            at -= 1;
-        }
-        if runs.get(at).is_some_and(|next| run.joins(client, next)) {
-            let next = runs.remove(at);
-            run.end = next.end;
-        }
-        runs.insert(at, run);
+        *known = out;
     }
 }
 
@@ -538,9 +517,8 @@ impl<T: ReadTxn> Judge<'_, T> {
             .encode_diff_v1(&StateVector::new(since.into_iter().collect()));
         let shape = Shape::read_written(&encoded)?;
         let mut read = shape.runs(&StateVector::default(), &Beyond::new());
-        for run in read.clients.remove(&client).unwrap_or_default() {
-            self.page.insert_missing(client, run);
-        }
+        let list = read.clients.remove(&client).unwrap_or_default();
+        Runs::merge(self.page.clients.entry(client).or_default(), client, list);
         Ok(self.page.at(client, clock))
     }
 
@@ -881,18 +859,26 @@ mod tests {
     #[test]
     fn runs_join_when_they_follow_on_with_the_same_right_origin() {
         let mut runs = Runs::default();
-        runs.insert(7, run(3, 5, Some((1, 0)), true));
-        runs.insert(7, run(0, 3, Some((1, 0)), false));
-        runs.insert(7, run(5, 6, Some((1, 0)), true));
+        let insert = |runs: &mut Runs, run: Run| {
+            Runs::merge(runs.clients.entry(7).or_default(), 7, vec![run]);
+        };
+        insert(&mut runs, run(3, 5, Some((1, 0)), true));
+        insert(&mut runs, run(0, 3, Some((1, 0)), false));
+        insert(&mut runs, run(5, 6, Some((1, 0)), true));
         assert_eq!(runs.at(7, 4), Some(run(0, 6, Some((1, 0)), false)));
         // Une autre origine droite, ou une origine qui n'est pas l'unité d'avant : une autre suite.
-        runs.insert(7, run(6, 8, Some((1, 1)), true));
-        runs.insert(7, run(8, 9, Some((1, 1)), false));
+        insert(&mut runs, run(6, 8, Some((1, 1)), true));
+        insert(&mut runs, run(8, 9, Some((1, 1)), false));
         assert_eq!(runs.at(7, 6), Some(run(6, 8, Some((1, 1)), true)));
         assert_eq!(runs.at(7, 8), Some(run(8, 9, Some((1, 1)), false)));
-        // Ce qui chevauche une suite connue n'est pas ajouté.
-        runs.insert(7, run(4, 12, None, false));
-        assert_eq!(runs.at(7, 10), None);
+        // De ce qui chevauche une suite connue, seule la part qu'elle ne couvre pas est ajoutée.
+        insert(&mut runs, run(4, 12, None, false));
+        assert_eq!(runs.at(7, 4), Some(run(0, 6, Some((1, 0)), false)));
+        assert_eq!(
+            runs.at(7, 10).map(|run| (run.start, run.end)),
+            Some((9, 12))
+        );
+        assert_eq!(runs.at(7, 10).and_then(|run| run.origin()), Some((7, 8)));
         assert_eq!(runs.unknown_from(7, 10), 9);
         assert_eq!(runs.unknown_from(8, 10), 0);
     }
