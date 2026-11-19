@@ -1175,13 +1175,15 @@ name = "mementum-crdt"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "mementum-crdt",
  "mementum-md",
  "mementum-schema",
  "proptest",
  "serde_json",
  "sha2 0.10.9",
  "uuid",
- "yrs",
+ "yrs 0.28.1",
+ "yrs 0.28.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -1269,7 +1271,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "uuid",
- "yrs",
+ "yrs 0.28.1",
 ]
 
 [[package]]
@@ -2732,6 +2734,24 @@ dependencies = [
 [[package]]
 name = "yrs"
 version = "0.28.1"
+dependencies = [
+ "arc-swap",
+ "async-lock",
+ "async-trait",
+ "dashmap",
+ "fastrand",
+ "serde",
+ "serde_json",
+ "smallstr",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
+name = "yrs"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7716b4846f9fab489af2ed7ab31c4554f5fe6965ede2392b9cdfed0e5087ff"
 dependencies = [
  "arc-swap",
  "async-lock",

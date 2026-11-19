@@ -19,6 +19,8 @@
 
 #[path = "common/live.rs"]
 mod live;
+#[path = "common/twins.rs"]
+mod twins;
 
 use std::io::Write;
 
@@ -122,6 +124,9 @@ struct Bench {
     trace: Vec<Vec<u8>>,
     /// Un onglet sans garde : l'état de départ, puis ce que la page a relayé (voie d'un client).
     tab: Doc,
+    /// Les mises à jour gardées sur lesquelles le yrs du serveur et celui de crates.io ont été
+    /// comparés (`common/twins.rs`, Ruling R875).
+    compared: twins::Compared,
 }
 
 impl Bench {
@@ -186,6 +191,7 @@ impl Bench {
             stored,
             trace: Vec::new(),
             tab,
+            compared: twins::Compared::default(),
         }
     }
 
@@ -199,7 +205,10 @@ impl Bench {
     fn receive(&mut self, update: &[u8]) -> bool {
         self.trace.push(update.to_vec());
         if self.stored {
-            match self.page.apply_update(update) {
+            let answer = twins::watching("une entrée relue", &mut self.compared, || {
+                self.page.apply_update(update)
+            });
+            match answer {
                 Ok(()) => {
                     self.journal.push(update.to_vec());
                     true
@@ -210,7 +219,10 @@ impl Bench {
                 }
             }
         } else {
-            match self.page.try_client_update(update) {
+            let answer = twins::watching("une mise à jour reçue", &mut self.compared, || {
+                self.page.try_client_update(update)
+            });
+            match answer {
                 Ok(applied) => {
                     let mut relayed = vec![applied.read];
                     relayed.extend(applied.carried);
@@ -592,19 +604,32 @@ fn placements_at_random() {
     let mut sink = std::env::var_os("MEMENTUM_FUZZ_SERVED")
         .map(|path| std::io::BufWriter::new(std::fs::File::create(path).unwrap()));
     let (mut accepted, mut refused) = (0, 0);
+    let mut compared = twins::Compared::default();
     for seed in from..from + seeds {
         for stored in [false, true] {
             let played = scene(seed, stored, None, None);
             accepted += played.accepted;
             refused += played.refused;
+            if let Some(bench) = &played.served {
+                compared.updates += bench.compared.updates;
+                compared.retried += bench.compared.retried;
+            }
             if let (Some(sink), Some(bench)) = (&mut sink, &played.served) {
                 writeln!(sink, "{}", served(seed, stored, &bench.page)).unwrap();
             }
         }
     }
     println!(
-        "ESSAI {seeds} graines par voie : {accepted} mises à jour acceptées, {refused} refusées ; échecs {:?}",
+        "ESSAI {seeds} graines par voie : {accepted} mises à jour acceptées, {refused} refusées ; \
+         {} mises à jour gardées, comparées dans les deux yrs (dont {} où yrs ne fait pas deux \
+         fois la même chose) ; échecs {:?}",
+        compared.updates,
+        compared.retried,
         FAILS.lock().unwrap()
+    );
+    assert!(
+        compared.updates > seeds,
+        "les deux yrs n'ont pas été comparés"
     );
     if let Some((size, trace, why, stored)) = BEST.lock().unwrap().as_ref() {
         let trace: Vec<String> = trace.iter().map(|update| hex(update)).collect();

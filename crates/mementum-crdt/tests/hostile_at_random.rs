@@ -15,6 +15,10 @@
 //! aussi ; à la fin, puis après avoir supprimé les blocs un à un (de la mémoire est libérée) : la
 //! page rechargée du journal est la page vivante (blocs, révision).
 //!
+//! Chaque mise à jour que la page a gardée est aussi donnée, telle que yrs l'a reçue, au yrs du
+//! serveur et à celui de crates.io, à la suite de l'état de la page d'avant : ils doivent en faire
+//! la même chose (`common/twins.rs`, Ruling R875).
+//!
 //! Déterministe par graine. `MEMENTUM_FUZZ_SEEDS` règle le nombre de cas de chaque voie,
 //! `MEMENTUM_FUZZ_FROM` le premier. Les cas tournent dans un **processus fils** (ce binaire,
 //! relancé sur `child_cases`) : une violation d'accès arrête le fils, pas le rapport ; le parent
@@ -37,6 +41,8 @@ use yrs::{
 
 #[path = "common/live.rs"]
 mod live;
+#[path = "common/twins.rs"]
+mod twins;
 
 struct Rng(u64);
 
@@ -124,6 +130,8 @@ struct Served {
     /// La longueur du journal et l'état de la page à chaque pas : ce que relirait une page compactée
     /// à ce pas ([`Served::tail_check`]).
     marks: Vec<(usize, Vec<u8>)>,
+    /// Les mises à jour gardées sur lesquelles les deux yrs ont été comparés.
+    compared: twins::Compared,
 }
 
 impl Served {
@@ -138,6 +146,7 @@ impl Served {
             next_block: 1,
             holed: false,
             marks: Vec::new(),
+            compared: twins::Compared::default(),
         }
     }
 
@@ -152,6 +161,7 @@ impl Served {
             next_block: 1,
             holed: false,
             marks: Vec::new(),
+            compared: twins::Compared::default(),
         }
     }
 
@@ -175,7 +185,10 @@ impl Served {
         trace(update);
         if self.stored {
             self.holed |= self.page.stored_update_leaves_gap(update) == Ok(true);
-            return match self.page.apply_update(update) {
+            let answer = twins::watching("une entrée relue", &mut self.compared, || {
+                self.page.apply_update(update)
+            });
+            return match answer {
                 Ok(()) => {
                     self.journal.push(update.to_vec());
                     Ok(true)
@@ -186,7 +199,10 @@ impl Served {
                 }
             };
         }
-        match self.page.apply_client_update(update) {
+        let answer = twins::watching("une mise à jour reçue", &mut self.compared, || {
+            self.page.apply_client_update(update)
+        });
+        match answer {
             Ok(applied) => {
                 let wrote = applied.read != [0, 0];
                 self.journal.push(applied.read);
@@ -799,6 +815,8 @@ struct Tally {
     wrote: u64,
     refused: BTreeMap<String, u64>,
     honest_refused: BTreeMap<String, u64>,
+    /// Les mises à jour gardées sur lesquelles les deux yrs ont été comparés.
+    compared: twins::Compared,
 }
 
 fn case(seed: u64, stored: bool, tally: &mut Tally) {
@@ -872,6 +890,8 @@ fn case(seed: u64, stored: bool, tally: &mut Tally) {
         served.tail_check(&what);
     }
     served.assert_sound(&format!("graine {seed}, après les suppressions"));
+    tally.compared.updates += served.compared.updates;
+    tally.compared.retried += served.compared.retried;
     served.export(seed);
 }
 
@@ -935,7 +955,15 @@ fn child_cases() {
             writeln!(out.lock(), "F graine {seed} : {why}").unwrap();
         }
     }
-    writeln!(out.lock(), "T {} {}", tally.accepted, tally.wrote).unwrap();
+    writeln!(
+        out.lock(),
+        "T {} {} {} {}",
+        tally.accepted,
+        tally.wrote,
+        tally.compared.updates,
+        tally.compared.retried
+    )
+    .unwrap();
     for (why, n) in &tally.refused {
         writeln!(out.lock(), "R {n} {why}").unwrap();
     }
@@ -951,6 +979,7 @@ fn run(stored: bool, default_seeds: u64) {
     let first = number("MEMENTUM_FUZZ_FROM", 1);
     let lane = if stored { "journal" } else { "client" };
     let (mut accepted, mut wrote, mut crashes) = (0u64, 0u64, 0u64);
+    let (mut compared, mut retried) = (0u64, 0u64);
     let mut refused: BTreeMap<String, u64> = BTreeMap::new();
     let mut honest_refused: BTreeMap<String, u64> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
@@ -976,6 +1005,8 @@ fn run(stored: bool, default_seeds: u64) {
                     let mut numbers = rest.split(' ').map(|n| n.parse::<u64>().unwrap_or(0));
                     accepted += numbers.next().unwrap_or(0);
                     wrote += numbers.next().unwrap_or(0);
+                    compared += numbers.next().unwrap_or(0);
+                    retried += numbers.next().unwrap_or(0);
                     finished = true;
                 }
                 "R" | "H" => {
@@ -1008,7 +1039,9 @@ fn run(stored: bool, default_seeds: u64) {
     }
     println!(
         "ESSAI voie {lane} : {seeds} cas à partir de {first} ; hostiles acceptées {accepted} \
-         (dont {wrote} ont écrit) ; échecs {} dont {crashes} arrêts du processus",
+         (dont {wrote} ont écrit) ; {compared} mises à jour gardées, comparées dans les deux yrs (dont {retried} \
+         où yrs ne fait pas deux fois la même chose) ; \
+         échecs {} dont {crashes} arrêts du processus",
         failures.len()
     );
     for (why, n) in &refused {
@@ -1030,6 +1063,7 @@ fn run(stored: bool, default_seeds: u64) {
         honest_refused.is_empty(),
         "une écriture honnête refusée : {honest_refused:?}"
     );
+    assert!(compared > seeds, "les deux yrs n'ont pas été comparés");
 }
 
 #[test]

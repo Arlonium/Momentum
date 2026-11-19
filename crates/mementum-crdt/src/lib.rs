@@ -13,6 +13,8 @@ mod dedupe;
 mod edit;
 mod foreign;
 mod guard;
+#[cfg(feature = "test-hooks")]
+pub mod hooks;
 mod kept_ids;
 mod moves;
 mod page;

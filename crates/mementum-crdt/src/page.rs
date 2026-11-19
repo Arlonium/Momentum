@@ -213,6 +213,14 @@ impl PageDoc {
     /// `len + 1` : resté vivant, il rendait illisible tout état que la page encode, et la
     /// compaction suivante remplaçait le journal par un tel état.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), CrdtError> {
+        let applied = self.apply_stored(update);
+        #[cfg(feature = "test-hooks")]
+        crate::hooks::settle(applied.is_ok());
+        applied
+    }
+
+    /// Le corps de [`PageDoc::apply_update`].
+    fn apply_stored(&self, update: &[u8]) -> Result<(), CrdtError> {
         let (shape, before, whole, unsound) = {
             let mut txn = self.doc.transact_mut();
             // Ruling R805 : les entrées de map de plusieurs unités que l'entrée laisserait
@@ -358,6 +366,14 @@ impl PageDoc {
     /// métadonnées touchées, une suppression laissée en attente, un report refusé), il est à
     /// jeter.
     pub fn try_client_update(&self, update: &[u8]) -> Result<Applied, Refused> {
+        let applied = self.client_update(update);
+        #[cfg(feature = "test-hooks")]
+        crate::hooks::settle(applied.is_ok());
+        applied
+    }
+
+    /// Le corps de [`PageDoc::try_client_update`].
+    fn client_update(&self, update: &[u8]) -> Result<Applied, Refused> {
         let applied = |error| Refused {
             error,
             intact: false,
@@ -895,6 +911,8 @@ impl PageDoc {
             }
             self.judge(&verdict, &shape, many_valued)?;
         }
+        #[cfg(feature = "test-hooks")]
+        crate::hooks::handed(txn, cut.as_deref().unwrap_or(update));
         Ok((shape, decoded, runs))
     }
 

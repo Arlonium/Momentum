@@ -17,7 +17,16 @@ sha2.workspace = true
 uuid.workspace = true
 yrs.workspace = true
 
+[features]
+# Pour les tests seulement : relever ce qu'une page donne à yrs (`hooks`, Ruling R875).
+test-hooks = []
+
 [dev-dependencies]
+# Les essais comparent le yrs du serveur à celui de crates.io sur ce que les pages lui donnent.
+mementum-crdt = { path = ".", features = ["test-hooks"] }
+# Le yrs d'origine, tel que crates.io le publie : le témoin du yrs corrigé de `vendor/yrs`
+# (`tests/squash_equivalence.rs`, Ruling R875). Jamais dans le serveur.
+yrs-upstream = { package = "yrs", version = "=0.28.1", features = ["sync", "weak"] }
 # Le proptest d'aller-retour utilise le générateur de la feature `arbitrary`.
 mementum-md = { workspace = true, features = ["arbitrary"] }
 proptest.workspace = true
