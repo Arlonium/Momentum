@@ -190,6 +190,15 @@ export function PageView({
     () => article.current?.querySelector<HTMLElement>(".mm-title-input")?.focus(),
     [],
   );
+  /**
+   * « Rouvrir la page » : le bouton part avec son bandeau, et le focus tomberait sur `body` (R339).
+   * Il va au titre, juste sous le bandeau, qui se modifie dès ce rendu ; l'éditeur, recréé sur une
+   * session neuve, ne se modifie qu'après sa première synchro.
+   */
+  const reopen = useCallback(() => {
+    focusTitle();
+    setReader(false);
+  }, [focusTitle]);
   const favoriteThis = useMemo(() => onFavorite && (() => onFavorite(id)), [onFavorite, id]);
   const duplicateThis = useMemo(() => onDuplicate && (() => onDuplicate(id)), [onDuplicate, id]);
   const wiring = useCommentsPanel(comments, frame);
@@ -308,7 +317,7 @@ export function PageView({
           {readOnly && <ReadOnlyBanner />}
           {session && <Blocked session={session} />}
           {reader && !readOnly && !trashed && (
-            <ReaderBanner reopen={editable ? () => setReader(false) : null} />
+            <ReaderBanner reopen={editable ? reopen : null} />
           )}
           {trashed && (
             <TrashBanner

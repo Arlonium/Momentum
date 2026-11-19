@@ -241,6 +241,22 @@ test("page_view_gives_the_focus_to_the_title_when_the_history_closes_without_its
   expect(document.activeElement).toBe(host.querySelector(".mm-title-input"));
 });
 
+test("page_view_gives_the_focus_to_the_title_when_the_page_is_reopened", async () => {
+  // Ouverte en lecture, puis le niveau monte : le bandeau propose de rouvrir la page.
+  await show(page("x", { level: "read" }));
+  await show(page("x", { level: "edit" }));
+  const reopen = [...host.querySelectorAll("button")].find((b) => b.textContent === "Rouvrir la page");
+  expect(reopen).toBeDefined();
+  // Un clic ne donne pas le focus à un bouton dans jsdom : le test le lui donne, comme Chromium.
+  reopen!.focus();
+  await click(reopen!);
+  // Le bouton part avec le bandeau : le focus va au titre, qui se modifie, pas sur `body`.
+  expect(reopen!.isConnected).toBe(false);
+  const title = host.querySelector<HTMLTextAreaElement>(".mm-title-input")!;
+  expect(document.activeElement).toBe(title);
+  expect(title.readOnly).toBe(false);
+});
+
 test("page_view_shows_the_breadcrumb_of_its_ancestors_and_follows_them", async () => {
   // Le fil d'Ariane de la barre du haut (R256) : les pages parentes que donne `App`, puis la page.
   const [a, b] = [page("a"), page("b", { parentId: "a" })];

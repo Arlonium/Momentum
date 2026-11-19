@@ -504,13 +504,15 @@ test("upgrade_to_edit_takes_effect_when_the_page_is_reopened", async ({ browser 
   await typeAtEnd(b, ", puis par Bruno");
   await expect.poll(() => getMmd(aliceApi, shared.id)).toBe("Écrit par Alice, puis par Bruno\n");
 
-  // Baissée puis remontée pendant qu'elle est ouverte : le bouton du bandeau la rouvre.
+  // Baissée puis remontée pendant qu'elle est ouverte : le bouton du bandeau la rouvre. Il part
+  // avec le bandeau, et le focus va au titre, pas sur `body`.
   await levelOf(menu, bruno).selectOption("read");
   await expect(readerBanner(b)).toBeVisible({ timeout: 5_000 });
   await levelOf(menu, bruno).selectOption("edit");
   await expect(raisedBanner(b)).toBeVisible({ timeout: 5_000 });
   await raisedBanner(b).getByRole("button", { name: "Rouvrir la page" }).click();
   await expect(raisedBanner(b)).toHaveCount(0);
+  await expect(titleOf(b)).toBeFocused();
   await waitSynced(b);
   await expect(editor).toHaveAttribute("contenteditable", "true");
   await typeAtEnd(b, ", deux fois");
