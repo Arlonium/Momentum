@@ -193,6 +193,55 @@ test("version_is_listed_and_previewed", async ({ browser, request, baseURL }) =>
   expect(await p.evaluate(() => (window as unknown as { updatesDuringHistory: number }).updatesDuringHistory)).toBeGreaterThan(0);
 });
 
+/** Le contour que Chromium dessine autour de `target`. */
+function outlineOf(target: Locator) {
+  return target.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      style: style.outlineStyle,
+      width: style.outlineWidth,
+      color: style.outlineColor,
+      offset: style.outlineOffset,
+    };
+  });
+}
+
+test("the_preview_shows_its_focus_like_every_other_stop", async ({ browser, request }) => {
+  // L'aperçu est un arrêt de Tab : BlockNote pose `tabindex="0"` sur son éditeur, même en lecture
+  // seule, et on y défile au clavier. Mais sa feuille, chargée après `theme.css`, retire le
+  // contour du focus de `.bn-editor` : rien ne montrait que le focus y était.
+  const { id } = await createPage(request, { title: `Focus ${unique()}` });
+  await putMmd(request, id, `${OLD}\n`);
+  await writeAfterTheInterval(request, id, `${NEW}\n`);
+  const p = await openPage(browser, id);
+  const dialog = await openHistory(p);
+  const chosen = versionItems(dialog).nth(1).getByRole("button");
+  await chosen.click();
+  await expect(preview(dialog)).toContainText(OLD);
+  await expect(chosen).toBeFocused();
+
+  // Tab au-delà de la liste : l'arrêt suivant est l'aperçu.
+  const stops = await versionItems(dialog).count();
+  const previewFocused = () => preview(dialog).evaluate((element) => element === document.activeElement);
+  for (let i = 0; i < stops && !(await previewFocused()); i++) await p.keyboard.press("Tab");
+  await expect(preview(dialog)).toBeFocused();
+  const onPreview = await outlineOf(preview(dialog));
+
+  // L'arrêt d'avant, la dernière ligne de la liste, atteint au clavier lui aussi : le même contour.
+  await p.keyboard.press("Shift+Tab");
+  const lastItem = versionList(dialog).getByRole("button").last();
+  await expect(lastItem).toBeFocused();
+  const onItem = await outlineOf(lastItem);
+  expect(onItem.style).toBe("solid");
+  expect({ style: onPreview.style, width: onPreview.width, color: onPreview.color }).toEqual({
+    style: onItem.style,
+    width: onItem.width,
+    color: onItem.color,
+  });
+  // Tracé en dedans : l'aperçu défile dans un cadre qui couperait un contour posé au-dehors.
+  expect(parseFloat(onPreview.offset) + parseFloat(onPreview.width)).toBeLessThanOrEqual(0);
+});
+
 test("restore_brings_the_old_content_back_for_everyone", async ({ browser }) => {
   const { alice, aliceApi, bruno, brunoId, space } = await ownerAndMember();
   const page = await createPage(aliceApi, {

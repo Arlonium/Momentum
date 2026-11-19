@@ -2853,6 +2853,15 @@ button.mm-reaction:hover {
   padding-inline: var(--mm-page-inset);
 }
 
+/* L'aperçu d'une version est un arrêt de Tab, pour y défiler au clavier : BlockNote pose
+   `tabindex="0"` sur son éditeur, même en lecture seule. Sa feuille, chargée après celle-ci, retire
+   le contour du focus (`.bn-editor { outline: none }`, une classe, devant `:focus-visible`) : deux
+   classes le rendent. Tracé en dedans : le cadre qui défile couperait un contour posé au-dehors. */
+.mm-preview-editor .bn-editor:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: -2px;
+}
+
 /* Blocs custom */
 
 .mm-frame,
