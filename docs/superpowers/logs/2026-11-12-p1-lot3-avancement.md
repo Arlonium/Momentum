@@ -48,7 +48,35 @@ Règles tenues pendant toute l'exécution, à tenir encore : commits au nom du d
 
 Dernières mesures (poste de Lenny, 2026-11-13 entre 3 h 30 et 5 h, à la tête poussée, **sans clone neuf**) : `cargo fmt` et `cargo clippy -D warnings` propres ; `cargo test --workspace` : **723 verts**, 15 ignorés (les mesures en release et les tests de la limite R39) ; client : **516 verts et 12 marqués `test.fails`** (les scénarios du bloc déplacé), typecheck propre ; licences npm propres au dernier relevé (aucun paquet ajouté sur `main`) ; e2e : suite entière relancée sur `main` à la pause, correctif du défaut critique compris : **159 verts**, 2 `fixme` voulus (bloc déplacé), et 1 échec, `space_without_a_role_is_not_found` : une course du test lui-même, qui comparait l'écran pendant que la barre latérale disait encore « Chargement… » (reproduite à coup sûr en retardant la lecture de l'arbre) ; le test attend maintenant la fin du chargement, et passe dix fois de suite ; la suite entière n'a pas été relancée après cette correction d'un seul test ; budgets du navigateur, mesurés dans l'atelier de la part e2e sur un poste occupé : 1 000 blocs à 160 ms au p95 (budget 300), 10 000 blocs en 1,38 s (budget 3 s) ; côté serveur, en release : frappe vue par un autre à 2,0 à 2,3 ms au p95, 42,8 ms quand elle déclenche la coupe d'une version (budget 150).
 
-## Pause du 2026-11-18 (après-midi) — c'est d'ici qu'on reprend ; prime sur tout ce qui suit
+## Pause du 2026-11-19 (nuit) — c'est d'ici qu'on reprend ; prime sur tout ce qui suit
+
+Pause demandée par Lenny. Plus aucun agent ni essai ne tourne.
+
+**Sur `main`, poussé** : le code n'a pas changé depuis `e751e2f` (CI verte sur `eddbecb`). Seules les notes de pause s'y ajoutent.
+
+**Hors de `main` : l'atelier local `lot3-attributs`**, jamais poussé, tête `a6bd3c5`, 42 commits sur `main`, arbre propre, **plus aucun commit « wip »**. L'atelier `relecture-8` (détaché à `6f1492d`) ne porte que les sondes non suivies des relectures (`zz_r8_*`, `zz_r9_*`, `zz_r10_*`) : à garder jusqu'à la fusion.
+
+| Tour de la garde | Commits | État |
+|---|---|---|
+| 5 à 7 (R815 à R860) | jusqu'à `d9f1401` | finis, relus |
+| 8 (R861 à R868) | `4276ea2` à `6f1492d` | fini, e2e 328 verts ; la re-relecture 10 y a trouvé C1 (critique : la borne mémoire R867 se contournait, 4,6 Gio de pic pour 1,39 Mo) et C2 à C5 |
+| 9 (R869 à R873) | `d764c83` à `a6bd3c5` | **fini par l'agent, suites vertes d'après son rapport ; ni e2e ni relecture indépendante** |
+
+Rapports : `tmp-agents/relecture-attributs/re-relecture-8.md`, `-9.md`, `-10.md`.
+
+Le tour 9, d'après le rapport de son agent (non rejoué par le contrôleur) : C1 corrigé (seul ce que yrs intègre sépare deux lettres dans le compte de la borne ; une forme voisine trouvée et corrigée, `Shape::integrates_whole`, R871) ; C2 corrigé (frappe concurrente d'un client plus petit reconnue, R870) ; textes de C3 à C5 corrigés ; 28 mutations rouges ; `cargo test --workspace` 1 285 verts ; Vitest 2 516 verts et 53 échecs attendus ; essai hostile 45 000 cas par voie, dense 6 000 graines par voie, vrai Yjs 12 000 + 20 000, boucle fermée : 0 échec. Doutes dits par l'agent : un processus fils de l'essai hostile arrêté une fois avant son premier cas, pas revu ; `integrates_whole` recopie l'ordre d'intégration de yrs 0.28.1, à relire à chaque montée de yrs.
+
+**Ce qui reste, dans l'ordre** :
+
+1. Suite e2e sur `a6bd3c5` (ports 5181 et 8181, `CARGO_TARGET_DIR=target/e2e`).
+2. **Re-relecture ciblée indépendante** du tour 9 (en Fable) : la borne R867 et ses séparateurs, `integrates_whole` contre yrs réel, aucun client honnête refusé. Rejouer d'abord `zz_r10_bypass` et `zz_r10_honest`. Tours de correction si besoin.
+3. Rebase sur `main` (conflits attendus dans le registre, `CLAUDE.md`, README, conception : garder les deux côtés, vérifier qu'aucune puce de `CLAUDE.md` n'est en double), suites entières, avance rapide de `main`, poussée, lecture de la CI ; retirer les deux ateliers, leur branche et leur `target/`.
+
+**Limites reportées au lot 7**, écrites au registre : R860 (la page attaquée reste occupée ; `/health` dégradé à 400 pages attaquées), R830 (page à trou), le journal non borné par R867.
+
+**Puis, pour clore le lot 3** : clone neuf, signalement à yrs, recettes, clôture (dernier paragraphe de la section du 2026-11-17).
+
+## Pause du 2026-11-18 (après-midi) — dépassée par la pause du 2026-11-19
 
 Pause demandée par Lenny. Plus aucun agent ni essai ne tourne.
 
