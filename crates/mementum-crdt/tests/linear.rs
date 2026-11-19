@@ -754,8 +754,8 @@ fn letters_whose_right_is_far_up_the_chain(n: usize) -> Sent {
 /// Ruling R861 : une cascade. Le premier élément a la forme N3 ; une fois récrit, il tient en une
 /// suite avec ce qui précède, et le suivant a la forme N3 à son tour, jusqu'au dernier. Rejuger toute
 /// la mise à jour après chaque récriture coûterait un tour par élément. Si `letters`, ses éléments
-/// sont des lettres ; sinon des contenus supprimés, que yrs fond sans les recopier (voir
-/// `known_limits`) : c'est alors la garde que l'on mesure.
+/// sont des lettres ; sinon des contenus supprimés, que yrs fond sans rien recopier : c'est alors la
+/// garde que l'on mesure.
 fn cascade_of_rewrites(n: usize, letters: bool) -> Sent {
     // Un identifiant de client comme Yjs les tire : chaque voisin nommé l'écrit en entier.
     const CLIENT: u64 = 1 << 44;
@@ -1135,15 +1135,12 @@ fn an_ancestor_is_found_in_a_logarithmic_number_of_steps() {
     }
 }
 
-/// Ruling R867 : au plus près de la borne, le pic de mémoire d'une mise à jour reste de l'ordre de
-/// quelques dizaines de mégaoctets, en lettres d'un octet comme de trois.
+/// Ruling R876 : vingt mille lettres envoyées une à une, d'un octet comme de trois, sont acceptées
+/// pour quelques dizaines de mégaoctets (le yrs d'origine en demandait 290 : `squash_memory.rs`).
 #[test]
-fn the_bound_on_copied_letters_bounds_the_memory() {
+fn letters_sent_one_by_one_cost_what_they_weigh_whatever_their_width() {
     let _alone = linear::ALONE.lock().unwrap_or_else(|e| e.into_inner());
-    let mut count = 2u64;
-    while (count + 1) * count / 2 <= mementum_crdt::MAX_COPIED_UNITS {
-        count += 1;
-    }
+    let count = 20_000u64;
     for letter in ["x", "€"] {
         let (state, first) = page_of_letters(0);
         let mut update = Vec::new();
@@ -1164,7 +1161,9 @@ fn the_bound_on_copied_letters_bounds_the_memory() {
         }
         update.push(0);
         let page = PageDoc::from_updates([state.as_slice()]).unwrap();
-        let cost = linear::once(|| page.try_client_update(&update).is_ok());
+        let cost = linear::once(|| {
+            page.try_client_update(&update).expect("acceptée");
+        });
         println!(
             "MESURE « {letter} », {count} éléments : pic de {} octets",
             cost.peak
@@ -1175,78 +1174,6 @@ fn the_bound_on_copied_letters_bounds_the_memory() {
             cost.peak
         );
     }
-}
-
-/// Une suite de lettres au-delà de la borne, et `clients` clients qui s'attendent à la file, le
-/// dernier attendant `last`.
-fn clients_waiting_in_line(clients: usize, last: Option<(u64, u32)>) -> Sent {
-    const LETTERS: u32 = 5_000;
-    const FIRST_CLIENT: u64 = 1_000;
-    let (state, first) = page_of_letters(0);
-    let last = last.unwrap_or((9, first));
-    let mut update = Vec::new();
-    var(&mut update, clients as u64 + 1);
-    for k in 0..clients as u64 {
-        var(&mut update, 1);
-        var(&mut update, FIRST_CLIENT + k);
-        var(&mut update, 0);
-        let waits_for = if k + 1 == clients as u64 {
-            last
-        } else {
-            (FIRST_CLIENT + k + 1, 0)
-        };
-        update.push(0x84);
-        var(&mut update, waits_for.0);
-        var(&mut update, u64::from(waits_for.1));
-        update.extend_from_slice(&[1, b'x']);
-    }
-    var(&mut update, u64::from(LETTERS));
-    var(&mut update, 9);
-    var(&mut update, u64::from(first));
-    for k in 0..LETTERS {
-        if k == 0 {
-            update.extend_from_slice(&[0x04, 0, 9]);
-            var(&mut update, u64::from(first - 1));
-        } else {
-            update.extend_from_slice(&[0x84, 9]);
-            var(&mut update, u64::from(first + k - 1));
-        }
-        update.extend_from_slice(&[1, b'x']);
-    }
-    update.push(0);
-    Sent { state, update }
-}
-
-/// Ruling R871 : savoir si yrs intégrera toute une mise à jour au-delà de la borne se fait en une
-/// passe, si longue que soit la file des clients qui s'attendent.
-#[test]
-fn knowing_what_yrs_will_integrate_grows_like_the_update() {
-    let forms = [
-        Form {
-            what: "clients à la file, derrière ce que personne n'apporte",
-            build: &|n| clients_waiting_in_line(n, Some((77, 5))),
-        },
-        Form {
-            what: "clients à la file, derrière une lettre du message",
-            build: &|n| clients_waiting_in_line(n, None),
-        },
-    ];
-    let size = |sent: &Sent| sent.state.len() + sent.update.len();
-    let judge = |sent: &Sent| {
-        let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
-        let refused = page
-            .try_client_update(&sent.update)
-            .map(|_| ())
-            .unwrap_err();
-        assert!(refused.intact, "refusée avant d'être appliquée");
-    };
-    // Un client d'un seul élément : la lecture de la mise à jour pèse 142 octets par octet reçu.
-    let limits = Limits {
-        peak_per_byte: 192,
-        answer: Answer::PerByte(8),
-    };
-    let failures = grows_like_input(&forms, size, judge, |_| 0, limits);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Ce que la garde ne borne pas.
@@ -1289,47 +1216,6 @@ mod known_limits {
                 .unwrap();
         })
         .allocated
-    }
-
-    /// `n` lettres d'un client, chacune un élément qui a pour origine la lettre d'avant.
-    fn letters_one_after_the_other(n: u32) -> Sent {
-        let (state, first) = page_of_letters(0);
-        let mut update = Vec::new();
-        var(&mut update, 1);
-        var(&mut update, u64::from(n));
-        var(&mut update, 9);
-        var(&mut update, u64::from(first));
-        for k in 0..n {
-            if k == 0 {
-                update.extend_from_slice(&[0x04, 0, 9]);
-                var(&mut update, u64::from(first - 1));
-            } else {
-                update.extend_from_slice(&[0x84, 9]);
-                var(&mut update, u64::from(first + k - 1));
-            }
-            update.extend_from_slice(&[1, b'x']);
-        }
-        update.push(0);
-        Sent { state, update }
-    }
-
-    /// yrs fond à la validation les éléments qui se suivent, du dernier au premier, et chacun garde
-    /// sa copie de ce qui a été fondu jusqu'à la fin de la suite : des lettres envoyées une à une lui
-    /// coûtent leur nombre au carré, **en mémoire**, 4,5 Gio pour 80 000 lettres (543 Ko), mesuré sur
-    /// yrs seul. C'est pourquoi la page borne ce qu'une mise à jour d'un client fait recopier
-    /// (`MAX_COPIED_UNITS`, Ruling R867). Rouge le jour où yrs ne le fait plus : la borne peut partir.
-    #[test]
-    fn yrs_copies_what_it_has_merged_for_each_letter_of_a_chain() {
-        let _alone = super::linear::ALONE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let small = allocated_by_yrs(&letters_one_after_the_other(1_000));
-        let large = allocated_by_yrs(&letters_one_after_the_other(4_000));
-        assert!(
-            large > 10 * small,
-            "{small} puis {large} octets alloués, pour une entrée quatre fois plus grande : la \
-             limite est levée"
-        );
     }
 
     /// yrs range un élément en parcourant ce qui suit son origine, tant que cela descend d'elle :

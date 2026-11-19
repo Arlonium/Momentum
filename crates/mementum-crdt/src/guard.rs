@@ -130,11 +130,6 @@ pub(crate) const REPEATED_CLIENT: &str = "un client paraît deux fois dans la mi
 /// une pile de 2 Mio, même en debug.
 pub const MAX_YJS_DEPTH: usize = 2 * MAX_DEPTH + 16;
 
-/// Ce qu'une mise à jour d'un client peut faire recopier à yrs quand il fond ses lettres, en unités
-/// de texte (Ruling R867) : quatre mille lettres envoyées une à une, de quoi garder le pic de mémoire
-/// sous quelques dizaines de mégaoctets. Une mise à jour d'un vrai client n'en fait rien recopier.
-pub const MAX_COPIED_UNITS: u64 = 8 << 20;
-
 /// Imbrication maximale d'une valeur `Any` lue (yrs la décode par récursion).
 const MAX_ANY_NESTING: usize = 64;
 

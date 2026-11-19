@@ -1,14 +1,21 @@
-//! Des lettres envoyées une à une (Ruling R867). yrs fond à la validation les éléments qui se suivent,
-//! du dernier au premier, et chaque élément garde sa copie de ce qui a été fondu jusqu'à la fin de
-//! la suite (`ClientBlockList::squash_left`) : 80 000 lettres (543 Ko) lui demandent 4,5 Gio. Un
-//! client n'en envoie pas : Yjs fond ses lettres avant de les écrire. La page refuse d'un client ce
-//! qui ferait recopier trop de texte, et relit tout ce que son journal porte déjà.
+//! Des lettres envoyées une à une (Rulings R874, R876). yrs fond à la validation les éléments qui
+//! se suivent. Celui de crates.io le faisait du dernier au premier, chaque élément gardant sa copie
+//! de ce qui était fondu jusqu'à la fin de la suite (`ClientBlockList::squash_left`) : 80 000
+//! lettres (543 Ko) lui demandaient 4,5 Gio. Le serveur compile un yrs corrigé (`vendor/yrs`), et
+//! la page ne refuse plus rien pour cela : la borne des tours 8 et 9 (`MAX_COPIED_UNITS`, Rulings
+//! R867, R869 à R871) est partie.
+//!
+//! Les formes d'ici sont celles qui trompaient son compte : ce qui sépare ou non deux lettres
+//! (un élément connu, à cheval, en attente, supprimé, une entrée de map, une plage ramassée, la
+//! frappe concurrente d'un autre client). Chacune reste sous un pic de mémoire que le yrs
+//! d'origine dépassait dès qu'il fondait ses lettres, quel que soit le verdict de la page ; les
+//! plafonds par octet reçu, à deux tailles, sont dans `squash_memory.rs`.
 
 #[allow(dead_code)]
 #[path = "../../mementum-md/tests/common/linear.rs"]
 mod linear;
 
-use mementum_crdt::{FRAGMENT, MAX_COPIED_UNITS, PageDoc};
+use mementum_crdt::{FRAGMENT, PageDoc};
 use yrs::updates::decoder::Decode;
 use yrs::{
     ClientID, Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
@@ -116,50 +123,18 @@ fn chain(count: u32, letters: u32) -> Vec<u8> {
     update
 }
 
-/// Ce que yrs recopie pour `count` éléments de `letters` lettres en une suite : le deuxième une fois,
-/// le troisième deux fois…
-fn copied(count: u64, letters: u64) -> u64 {
-    letters * count * (count - 1) / 2
-}
+/// De quoi demander 287 Mio au yrs d'origine, en lettres seules.
+const MANY: u32 = 20_000;
 
-/// Le plus grand nombre d'éléments de `letters` lettres que la borne admet en une suite.
-fn most(letters: u64) -> u32 {
-    let mut count = 2;
-    while copied(count + 1, letters) <= MAX_COPIED_UNITS {
-        count += 1;
+/// Une suite de lettres est prise, si longue soit-elle, en lettres seules comme en éléments de cent
+/// lettres.
+#[test]
+fn a_chain_of_letters_is_taken_whatever_its_length() {
+    for (count, letters) in [(MANY, 1), (MANY / 10, 100)] {
+        let page = page();
+        accepted_within_the_peak(&page, &chain(count, letters));
+        assert_eq!(text(&page).len(), (count * letters) as usize);
     }
-    count as u32
-}
-
-fn refused_before_being_applied(page: &PageDoc, update: &[u8]) {
-    let before = page.revision();
-    let Err(refused) = page.try_client_update(update) else {
-        panic!("acceptée");
-    };
-    assert!(refused.intact, "{}", refused.error);
-    assert_eq!(page.revision(), before);
-}
-
-#[test]
-fn a_chain_of_letters_is_taken_up_to_the_bound_and_refused_beyond() {
-    let count = most(1);
-    let page_one = page();
-    page_one
-        .try_client_update(&chain(count, 1))
-        .expect("la borne admet ce qu'elle dit");
-    assert_eq!(text(&page_one).len(), count as usize);
-    refused_before_being_applied(&page(), &chain(count + 1, 1));
-}
-
-/// Le coût est celui du texte recopié, pas du nombre d'éléments.
-#[test]
-fn the_bound_counts_the_letters_that_are_copied() {
-    let count = most(100);
-    assert!(count < most(1) / 9);
-    page()
-        .try_client_update(&chain(count, 100))
-        .expect("la borne admet ce qu'elle dit");
-    refused_before_being_applied(&page(), &chain(count + 1, 100));
 }
 
 /// Un seul élément, si long soit-il, n'est recopié par personne.
@@ -170,34 +145,23 @@ fn one_long_item_copies_nothing() {
     assert_eq!(text(&page).len(), 200_000);
 }
 
-/// La borne vaut pour toute la mise à jour : plusieurs suites ne la contournent pas.
-#[test]
-fn the_bound_holds_for_the_whole_update() {
-    let half = most(1) * 3 / 4;
-    let mut update = vec![1];
-    structs(&mut update, 2 * half, 1, Some(half));
-    update.push(0);
-    refused_before_being_applied(&page(), &update);
-}
-
-/// Une lettre qui ne prolonge pas la précédente commence une autre suite : deux suites coûtent
-/// moins qu'une seule de leur longueur réunie.
+/// Une lettre qui ne prolonge pas la précédente commence une autre suite.
 #[test]
 fn a_letter_that_does_not_follow_the_one_before_starts_another_run() {
-    let half = most(1) * 2 / 3;
-    assert!(copied(u64::from(2 * half), 1) > MAX_COPIED_UNITS);
-    assert!(2 * copied(u64::from(half), 1) <= MAX_COPIED_UNITS);
+    let half = MANY / 2;
     let mut update = vec![1];
     structs(&mut update, 2 * half, 1, Some(half));
     update.push(0);
-    page().try_client_update(&update).expect("accepté");
+    let page = page();
+    accepted_within_the_peak(&page, &update);
+    assert_eq!(text(&page).len(), 2 * half as usize);
 }
 
 /// Un élément posé entre deux lettres les sépare pour de bon : yrs ne les fond pas. C'est ce que
 /// laisse derrière elle une mise en forme faite hors ligne sur des lettres qu'on vient de taper.
 #[test]
 fn letters_kept_apart_by_what_is_written_between_them_are_not_copied() {
-    let count = most(1) + 1_000;
+    let count = MANY;
     let mut update = vec![2];
     var(&mut update, u64::from(count - 1));
     var(&mut update, 20);
@@ -218,9 +182,10 @@ fn letters_kept_apart_by_what_is_written_between_them_are_not_copied() {
 }
 
 /// Un voisin seulement nommé ne sépare rien : posé après la suite, il laisse les lettres se fondre.
+/// (D'un client plus grand : c'est la frappe concurrente de quelqu'un qui n'a pas vu la suite.)
 #[test]
 fn an_item_that_names_one_neighbour_keeps_nothing_apart() {
-    let count = most(1) + 1_000;
+    let count = MANY;
     let mut update = vec![2];
     var(&mut update, u64::from(count - 1));
     var(&mut update, 900);
@@ -233,7 +198,9 @@ fn an_item_that_names_one_neighbour_keeps_nothing_apart() {
     }
     structs(&mut update, count, 1, None);
     update.push(0);
-    refused_before_being_applied(&page(), &update);
+    let page = page();
+    accepted_within_the_peak(&page, &update);
+    assert_eq!(text(&page).len(), 2 * count as usize - 1);
 }
 
 /// Une lettre effacée dans la même mise à jour ne se fond pas avec ses voisines (le ramasse-miettes
@@ -242,7 +209,7 @@ fn an_item_that_names_one_neighbour_keeps_nothing_apart() {
 fn letters_deleted_one_in_two_are_not_copied() {
     // Une lettre sur deux, ou la dernière de chaque élément de deux lettres.
     for letters in [1u32, 2] {
-        let count = most(u64::from(letters)) + 1_000;
+        let count = MANY / letters;
         let mut update = vec![1];
         structs(&mut update, count, letters, None);
         let ranges: Vec<u32> = (0..count)
@@ -283,7 +250,7 @@ fn what_the_journal_already_holds_is_read_again() {
         txn.encode_update_v1()
     };
     drop(written);
-    let count = most(1) + 1;
+    let count = MANY;
     let page = PageDoc::from_updates([
         created.as_slice(),
         first.as_slice(),
@@ -325,8 +292,9 @@ fn a_long_text_typed_letter_by_letter_passes_online_and_offline() {
     assert_eq!(text(&offline).len(), typed as usize);
 }
 
-// Ce qui peut tromper le compte (Rulings R867, R869). Chaque forme porte assez de lettres pour que
-// yrs demande 287 Mio s'il les fondait toutes : le plafond de mémoire rougit si le compte se trompe.
+// Ce qui trompait le compte de la borne (Rulings R867, R869 à R871). Chaque forme porte assez de
+// lettres pour que le yrs d'origine demande 287 Mio dès qu'il les fond toutes : le plafond de
+// mémoire tient désormais que la page les accepte ou les refuse pour une autre raison.
 
 type Id = (u64, u32);
 
@@ -408,10 +376,10 @@ fn judged(page: &PageDoc, update: &[u8]) -> (Result<(), bool>, usize) {
     (answer.get(), cost.peak)
 }
 
-fn refused_within_the_peak(page: &PageDoc, update: &[u8]) {
-    let (answer, peak) = judged(page, update);
+/// Ce que la borne refusait. Le verdict n'est plus affirmé : acceptée, ou refusée pour autre chose.
+fn within_the_peak(page: &PageDoc, update: &[u8]) {
+    let (_, peak) = judged(page, update);
     assert!(peak < PEAK, "pic de {peak} octets");
-    assert_eq!(answer, Err(true), "refusée avant d'être appliquée");
 }
 
 fn accepted_within_the_peak(page: &PageDoc, update: &[u8]) {
@@ -421,8 +389,8 @@ fn accepted_within_the_peak(page: &PageDoc, update: &[u8]) {
 }
 
 /// Un élément que la page connaît déjà, yrs l'ignore : il ne sépare rien. Constat C1 de la
-/// re-relecture 10 : 80 000 lettres passaient ainsi, pour 4,6 Gio. En lettres seules comme en
-/// éléments de plusieurs lettres.
+/// re-relecture 10 : 80 000 lettres passaient ainsi la borne, pour 4,6 Gio. En lettres seules comme
+/// en éléments de plusieurs lettres.
 #[test]
 fn items_the_page_already_has_separate_nothing() {
     for (count, letters) in [(LETTERS, 1), (LETTERS / 3, 10)] {
@@ -436,7 +404,7 @@ fn items_the_page_already_has_separate_nothing() {
             })
             .collect();
         let update = written(&[(30, 0, shields), (AUTHOR, 1, links(count, letters))], &[]);
-        refused_within_the_peak(&page, &update);
+        within_the_peak(&page, &update);
     }
 }
 
@@ -444,7 +412,7 @@ fn items_the_page_already_has_separate_nothing() {
 /// sa part connue, loin des deux lettres qu'il nomme.
 #[test]
 fn items_astride_what_the_page_knows_separate_nothing() {
-    let count = most(1) + 2_000;
+    let count = MANY / 2;
     let page = page();
     let clients: Vec<(u64, u32, Vec<Vec<u8>>)> = (1..count)
         .map(|k| (u64::from(1_000 + k), 0, vec![head(1)]))
@@ -458,7 +426,7 @@ fn items_astride_what_the_page_knows_separate_nothing() {
         })
         .collect();
     sent.push((AUTHOR, 1, links(count, 1)));
-    refused_within_the_peak(&page, &written(&sent, &[]));
+    within_the_peak(&page, &written(&sent, &[]));
 }
 
 /// La borne juge la mise à jour telle que yrs la lira : des origines droites que la règle V retire
@@ -483,7 +451,7 @@ fn letters_whose_right_origins_the_rules_remove_are_one_chain() {
             element(origin, Some(rights[k as usize % 2]), 1)
         })
         .collect();
-    refused_within_the_peak(&page, &written(&[(77, 0, items)], &[]));
+    within_the_peak(&page, &written(&[(77, 0, items)], &[]));
 }
 
 /// Un élément supprimé par la mise à jour qui le pose reste à sa place, entre ses deux voisins.
@@ -520,7 +488,7 @@ fn letters_deleted_by_their_own_update_cost_no_copy() {
 fn collected_ranges_separate_nothing() {
     let ranges: Vec<Vec<u8>> = (1..LETTERS).map(|_| vec![0, 1]).collect();
     let update = written(&[(30, 0, ranges), (AUTHOR, 1, links(LETTERS, 1))], &[]);
-    refused_within_the_peak(&page(), &update);
+    within_the_peak(&page(), &update);
 }
 
 /// Un trou entre deux lettres : rien ne se fond par-dessus, et un client n'en laisse pas.
@@ -529,7 +497,7 @@ fn a_hole_between_letters_is_refused() {
     let mut items = links(LETTERS / 2, 1);
     items.push(vec![10, 1]);
     items.extend((0..LETTERS / 2).map(|k| element((AUTHOR, LETTERS / 2 + 1 + k), None, 1)));
-    refused_within_the_peak(&page(), &written(&[(AUTHOR, 1, items)], &[]));
+    within_the_peak(&page(), &written(&[(AUTHOR, 1, items)], &[]));
 }
 
 /// Une entrée de map n'est pas un élément de la liste : ni posée entre les deux lettres, ni voisine
@@ -550,12 +518,13 @@ fn map_entries_separate_nothing() {
             })
             .collect();
         let update = written(&[(5, 0, entries), (AUTHOR, 1, links(LETTERS, 1))], &[]);
-        refused_within_the_peak(&page(), &update);
+        within_the_peak(&page(), &update);
     }
 }
 
 /// Ce que yrs laisse en attente n'est pas posé (Ruling R871). Il fond les lettres qu'il a intégrées
-/// avant que la mise à jour soit dite incomplète : 291 Mio pour 20 000 lettres, payés avant le refus.
+/// avant que la mise à jour soit dite incomplète : le yrs d'origine y demandait 291 Mio pour 20 000
+/// lettres, payés avant le refus.
 #[test]
 fn items_yrs_leaves_waiting_separate_nothing() {
     let unknown = (99, 1_000);
@@ -588,7 +557,7 @@ fn items_yrs_leaves_waiting_separate_nothing() {
             }));
             let mut clients = vec![(5, 0, shields), (AUTHOR, 1, links(LETTERS, 1))];
             clients.extend(other.iter().map(|item| (6, 0, vec![item.clone()])));
-            refused_within_the_peak(&page(), &written(&clients, &[]));
+            within_the_peak(&page(), &written(&clients, &[]));
         }
     }
 }
@@ -655,10 +624,10 @@ fn a_chain_deleted_whole_by_its_own_update_costs_no_copy() {
     assert_eq!(text(&page), "");
 }
 
-/// Plusieurs clients dans un message : la borne vaut pour leur somme.
+/// Plusieurs clients dans un message, chacun sa suite.
 #[test]
-fn the_bound_holds_for_several_clients_in_one_message() {
-    let count = most(1) * 3 / 4;
+fn several_clients_in_one_message() {
+    let count = MANY / 2;
     let second: Vec<Vec<u8>> = (0..count)
         .map(|k| match k {
             0 => element((AUTHOR, count), None, 1),
@@ -666,7 +635,7 @@ fn the_bound_holds_for_several_clients_in_one_message() {
         })
         .collect();
     let update = written(&[(AUTHOR, 1, links(count, 1)), (11, 0, second)], &[]);
-    refused_within_the_peak(&page(), &update);
+    within_the_peak(&page(), &update);
 }
 
 /// Deux clients qui se relaient ne se fondent pas : yrs ne fond que les lettres d'un même client.
@@ -692,7 +661,7 @@ fn clients_taking_turns_are_not_copied() {
 #[test]
 fn several_messages_cost_what_each_one_costs() {
     let page = page();
-    let size = most(1);
+    let size = 4_096;
     let mut journal = vec![page.encode_state()];
     let cost = linear::once(|| {
         for message in 0..16 {
@@ -737,7 +706,7 @@ fn a_concurrent_letter_of_a_smaller_client_keeps_two_letters_apart() {
 
 #[test]
 fn a_concurrent_letter_of_a_larger_client_comes_after_and_separates_nothing() {
-    refused_within_the_peak(&page(), &concurrent(900, LETTERS, None));
+    within_the_peak(&page(), &concurrent(900, LETTERS, None));
 }
 
 #[test]
@@ -745,19 +714,5 @@ fn a_concurrent_letter_the_page_already_has_separates_nothing() {
     let page = page();
     let known = written(&[(5, 0, vec![head(LETTERS)])], &[]);
     page.try_client_update(&known).expect("le client 5 écrit");
-    refused_within_the_peak(&page, &concurrent(5, LETTERS, None));
-}
-
-/// Deux éléments d'origines droites différentes ne se rangent pas par leur client.
-#[test]
-fn a_concurrent_letter_with_another_right_origin_is_not_counted() {
-    let page = page();
-    let before = written(&[(50, 0, vec![head(1)])], &[]);
-    page.try_client_update(&before)
-        .expect("la lettre de droite");
-    let others: Vec<Vec<u8>> = (1..LETTERS)
-        .map(|k| element(seam(k, 1).0, Some((50, 0)), 1))
-        .collect();
-    let update = written(&[(5, 0, others), (AUTHOR, 1, links(LETTERS, 1))], &[]);
-    refused_within_the_peak(&page, &update);
+    within_the_peak(&page, &concurrent(5, LETTERS, None));
 }

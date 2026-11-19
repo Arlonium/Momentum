@@ -55,15 +55,15 @@ use std::collections::HashMap;
 
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER,
-    BLOCK_ITEM_JSON_REF_NUMBER, BLOCK_ITEM_STRING_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID,
-    HAS_ORIGIN, HAS_PARENT_SUB, HAS_RIGHT_ORIGIN,
+    BLOCK_ITEM_JSON_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID, HAS_ORIGIN, HAS_PARENT_SUB,
+    HAS_RIGHT_ORIGIN,
 };
 use yrs::encoding::read::{Cursor, Read};
 use yrs::{ID, IdSet, StateVector};
 
 use super::{
-    Id, Insert, JsonCount, KEYED_NOT_A_VALUE, KEYED_RIGHT_ORIGIN_MADE, Kind, MAX_COPIED_UNITS,
-    Shape, Struct, decode_error, read_content, read_id,
+    Id, Insert, JsonCount, KEYED_NOT_A_VALUE, KEYED_RIGHT_ORIGIN_MADE, Kind, Shape, Struct,
+    decode_error, read_content, read_id,
 };
 use crate::CrdtError;
 
@@ -90,14 +90,6 @@ pub(crate) const NOT_AS_WRITTEN: &str = "la mise à jour pose un élément que l
 
 /// Les plages `[début, fin)` d'un client, triées et fondues.
 type Ranges = HashMap<u64, Vec<(u32, u32)>>;
-
-/// Les éléments que yrs intégrera dans une liste : par voisins (origine, origine droite), le plus
-/// petit de leurs clients.
-type Placed = HashMap<(Id, Option<Id>), u64>;
-
-/// Ruling R867 : voir [`Shape::check_copies`].
-const COPIES_TOO_MUCH: &str =
-    "la mise à jour ferait recopier trop de texte au serveur : des lettres écrites une à une";
 
 impl Shape {
     /// Refuse (`Structure`), sans rien appliquer, ce que les octets d'une mise à jour disent hors
@@ -179,157 +171,6 @@ impl Shape {
             return Err(CrdtError::Structure(VALUE_WITHOUT_FLAG.to_string()));
         }
         Ok(())
-    }
-
-    /// Ruling R867 : refuse d'un client une mise à jour dont yrs recopierait plus de
-    /// [`MAX_COPIED_UNITS`] unités en fondant ses lettres à la validation. yrs fond une suite
-    /// d'éléments du dernier au premier, et chacun garde sa copie de ce qui a été fondu jusqu'à la
-    /// fin de la suite : `n` lettres envoyées une à une lui demandent une mémoire en `n²`.
-    ///
-    /// Le compte par les seuls octets peut compter trop : d'abord lui, qui n'alloue rien pour une
-    /// mise à jour ordinaire ; au-delà de la borne, le compte exact écarte ce que yrs ne fond pas.
-    /// Jugé sur la mise à jour telle que yrs la lira : la garde repasse après les règles qui la
-    /// récrivent.
-    pub(crate) fn check_copies(&self, floor: &StateVector) -> Result<(), CrdtError> {
-        if self.copied_units(floor, None) <= MAX_COPIED_UNITS {
-            return Ok(());
-        }
-        // Ruling R871 : yrs fond ce qu'il a intégré avant qu'on apprenne que le reste attend. Rien
-        // de ce qui attend ne sépare des lettres, et une telle mise à jour serait refusée de toute
-        // façon.
-        if !self.integrates_whole(floor) {
-            return Err(CrdtError::Structure(COPIES_TOO_MUCH.to_string()));
-        }
-        let deleted = self.deleted_ranges();
-        // Ruling R869 : seul ce que yrs intègre sépare des lettres. Il ignore un élément sous le
-        // plancher de son client ; une entrée de map n'est pas dans la liste.
-        let mut placed: Placed = HashMap::new();
-        for (s, i) in self.inserts() {
-            if let Some(origin) = i.origin
-                && !i.sub_flag
-                && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
-            {
-                let client = placed.entry((origin, i.right)).or_insert(s.id.0);
-                *client = s.id.0.min(*client);
-            }
-        }
-        if self.copied_units(floor, Some((&deleted, &placed))) > MAX_COPIED_UNITS {
-            return Err(CrdtError::Structure(COPIES_TOO_MUCH.to_string()));
-        }
-        Ok(())
-    }
-
-    /// Vrai si yrs intégrera toute la mise à jour (Ruling R871). Il mène les blocs de chaque client
-    /// dans l'ordre de leurs horloges, et passe au client dont un bloc dépend (origine, origine
-    /// droite, parent) le temps de l'atteindre (`Update::integrate`). Un bloc attend pour de bon ce
-    /// que ni la page ni la mise à jour n'apportent, et ce qui l'attend lui-même.
-    fn integrates_whole(&self, floor: &StateVector) -> bool {
-        let rank: HashMap<u64, usize> = self
-            .clients
-            .iter()
-            .enumerate()
-            .map(|(rank, (client, _))| (*client, rank))
-            .collect();
-        let mut reached: Vec<u32> = self
-            .clients
-            .iter()
-            .map(|(client, _)| floor.get(&ClientID::new(*client)))
-            .collect();
-        let mut next = vec![0; self.clients.len()];
-        let mut walking = vec![false; self.clients.len()];
-        for start in 0..self.clients.len() {
-            walking[start] = true;
-            let mut stack: Vec<(usize, Option<u32>)> = vec![(start, None)];
-            'walk: while let Some(&(at, until)) = stack.last() {
-                let structs = &self.clients[at].1;
-                if until.is_some_and(|clock| clock < reached[at]) || next[at] == structs.len() {
-                    if until.is_some_and(|clock| clock >= reached[at]) {
-                        return false;
-                    }
-                    walking[at] = false;
-                    stack.pop();
-                    continue;
-                }
-                let s = &structs[next[at]];
-                next[at] += 1;
-                if s.id.1 + s.len <= floor.get(&ClientID::new(s.id.0)) {
-                    continue;
-                }
-                if let Kind::Insert(i) = &s.kind {
-                    let parent = match i.parent {
-                        super::Parent::Id(id) | super::Parent::Sibling(id) => Some(id),
-                        super::Parent::Named(..) => None,
-                    };
-                    for (client, clock) in [parent, i.right].into_iter().flatten() {
-                        let Some(&other) = rank.get(&client) else {
-                            if clock < floor.get(&ClientID::new(client)) {
-                                continue;
-                            }
-                            return false;
-                        };
-                        if clock < reached[other] {
-                            continue;
-                        }
-                        if walking[other] {
-                            return false;
-                        }
-                        // Ce bloc sera repris quand l'autre client aura avancé.
-                        next[at] -= 1;
-                        walking[other] = true;
-                        stack.push((other, Some(clock)));
-                        continue 'walk;
-                    }
-                }
-                reached[at] = reached[at].max(s.id.1 + s.len);
-            }
-        }
-        true
-    }
-
-    /// Ce que yrs recopie en fondant les lettres de la mise à jour : dans une suite, le deuxième
-    /// élément une fois, le troisième deux fois… Le premier ne l'est jamais. Une suite s'arrête où
-    /// yrs ne fond pas : un élément qui ne prolonge pas le précédent (`try_squash`) ; et, avec
-    /// `apart`, un élément du jeu de suppressions (le ramasse-miettes retire son texte avant que yrs
-    /// fonde), ou un élément que yrs pose entre les deux : il a pour voisins exactement ces deux
-    /// unités, ou (Ruling R870) les mêmes voisins que la seconde et un client plus petit, que yrs
-    /// range avant elle (`resolve_conflict`).
-    fn copied_units(&self, floor: &StateVector, apart: Option<(&Ranges, &Placed)>) -> u64 {
-        let mut total = 0u64;
-        for (client, structs) in &self.clients {
-            let known = floor.get(&ClientID::new(*client));
-            let mut before: Option<(&Struct, &Insert)> = None;
-            let mut rank = 0u64;
-            for s in structs {
-                let letters = match &s.kind {
-                    Kind::Insert(i)
-                        if i.content == BLOCK_ITEM_STRING_REF_NUMBER && s.id.1 + s.len > known =>
-                    {
-                        i
-                    }
-                    _ => {
-                        before = None;
-                        continue;
-                    }
-                };
-                let last = (*client, s.id.1.wrapping_sub(1));
-                let follows = before.is_some_and(|(b, i)| {
-                    b.id.1 + b.len == s.id.1
-                        && letters.origin == Some(last)
-                        && letters.right == i.right
-                        && apart.is_none_or(|(deleted, placed)| {
-                            !touches(deleted.get(client), b.id.1, b.id.1 + b.len)
-                                && !placed.contains_key(&(last, Some((*client, s.id.1))))
-                                && placed
-                                    .get(&(last, letters.right))
-                                    .is_none_or(|smallest| smallest >= client)
-                        })
-                });
-                rank = if follows { rank + 1 } else { 0 };
-                total = total.saturating_add(rank.saturating_mul(u64::from(s.len)));
-                before = Some((s, letters));
-            }
-        }
-        total
     }
 
     /// Les plages que la mise à jour supprime, par client, triées et fondues.
@@ -642,14 +483,6 @@ fn insert_at(structs: &[Struct], id: Id) -> Option<(&Insert, u32)> {
         }) if start.1 <= id.1 => Some((insert, *len)),
         _ => None,
     }
-}
-
-/// Vrai si une des plages `ranges` (triées, disjointes) touche `[start, end)`.
-fn touches(ranges: Option<&Vec<(u32, u32)>>, start: u32, end: u32) -> bool {
-    ranges.is_some_and(|ranges| {
-        let at = ranges.partition_point(|range| range.1 <= start);
-        ranges.get(at).is_some_and(|range| range.0 < end)
-    })
 }
 
 /// Vrai si `ranges` (triées, fondues) couvrent `[start, end)`.

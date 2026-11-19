@@ -954,8 +954,6 @@ impl PageDoc {
         // suffisent à la juger.
         shape.check_grammar(state, from_client, many_valued)?;
         if from_client {
-            // Ruling R867 : des lettres que yrs recopierait à les fondre.
-            shape.check_copies(state)?;
             // Ruling R431 : une marque de texte hors du schéma, ou trop longue.
             shape.check_marks(state)?;
             // Ruling R496 : un contenu qui n'est pas un nœud XML parmi les enfants de la racine ou
