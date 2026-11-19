@@ -10,12 +10,21 @@
 //! - des scènes tirées au hasard par l'API de yrs (frappe, listes, maps, liens, annulations,
 //!   transactions reçues avant d'être fondues, échanges d'états, avec et sans ramasse-miettes) ;
 //! - des mises à jour faites à la main, une par condition que yrs pose à une fusion, de un à
-//!   trente-trois éléments : chacune a sa forme qui se fond et sa forme qui ne se fond pas.
+//!   trente-trois éléments : chacune a sa forme qui se fond et sa forme qui ne se fond pas ;
+//! - la remise des entrées de map après une fusion (Ruling R880) : trois onglets honnêtes qui
+//!   écrivent le même attribut, par une page, et des entrées sciées faites à la main, sur les deux
+//!   yrs nus, la mémoire libérée récrite avant chaque lecture.
 //!
 //! Ce que les pages donnent à yrs (essais hostiles, vrai Yjs, BlockNote, déplacements) est
 //! comparé dans les suites qui le produisent, par `common/twins.rs`.
 //!
-//! `MEMENTUM_FUZZ_SEEDS` règle le nombre de scènes tirées, `MEMENTUM_FUZZ_FROM` la première.
+//! `MEMENTUM_FUZZ_SEEDS` règle le nombre de scènes tirées, `MEMENTUM_FUZZ_FROM` la première (pour
+//! les entrées de map tirées au hasard : `MEMENTUM_MAP_SEEDS`).
+//!
+//! **Ce que la comparaison ne voit pas** : un pointeur qui pend vers un bloc que yrs a libéré lit ce
+//! bloc tel qu'il était, tant que la mémoire n'a pas été récrite, et la lecture ressemble alors à la
+//! bonne. Les scènes des entrées de map récrivent la mémoire libérée avant de lire
+//! (`twins::rewritten_alike`) ; les autres non.
 //!
 //! **À une montée de yrs**, c'est ce binaire qui dit si le correctif porté est juste, avec les
 //! pics de `squash_memory.rs` ; le témoin est alors la nouvelle version de crates.io.
@@ -25,8 +34,15 @@ mod twins;
 
 use std::path::{Path, PathBuf};
 
-use mementum_crdt::PageDoc;
-use twins::{Compared, difference, fixed, replayed_alike, upstream, watching};
+use mementum_crdt::{FRAGMENT, PageDoc};
+use twins::{
+    Compared, PAGE, difference, fixed, replayed_alike, rewritten_alike, upstream, watching,
+};
+use yrs::updates::decoder::Decode;
+use yrs::{
+    Any, ClientID, Doc, OffsetKind, Options, Out, ReadTxn, Transact, Update, Xml, XmlElementRef,
+    XmlFragment, XmlOut,
+};
 
 fn number(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -757,4 +773,359 @@ fn what_blocknote_and_a_browser_wrote_is_squashed_alike() {
         compared.updates, compared.retried
     );
     assert!(compared.updates > 200, "{} comparaisons", compared.updates);
+}
+
+// La remise des entrées de map (Ruling R880). Quand le chemin neuf de `squash_left` fond une suite
+// de trois blocs ou plus, l'entrée de map qui nommait le dernier bloc de la suite est remise au
+// premier, bloc par bloc du dernier au premier (`vendor/yrs/src/block_store.rs`, la boucle qui suit
+// la fusion). Deux portes : des entrées supprimées d'une clé, refondues sans être l'entrée courante
+// (la comparaison doit dire faux : trois onglets honnêtes, par une page) ; une entrée qui nomme un
+// bloc de la suite et doit être remise (des formes faites à la main, sur les deux yrs nus : la
+// page refuse une valeur d'attribut à origine droite avant de l'appliquer, E2).
+
+/// Un onglet de client `client` qui a reçu la page `created`.
+fn tab(client: u64, created: &[u8]) -> Doc {
+    let doc = Doc::with_options(Options {
+        client_id: ClientID::new(client),
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    doc.get_or_insert_xml_fragment(FRAGMENT);
+    give(&doc, created);
+    doc
+}
+
+fn give(doc: &Doc, update: &[u8]) {
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(update).unwrap())
+        .unwrap();
+}
+
+/// Le premier paragraphe d'une page.
+fn first_paragraph<T: ReadTxn>(txn: &T) -> XmlElementRef {
+    let fragment = txn.get_xml_fragment(FRAGMENT).expect("le fragment");
+    let Some(XmlOut::Element(group)) = fragment.get(txn, 0) else {
+        panic!("le groupe");
+    };
+    let Some(XmlOut::Element(container)) = group.get(txn, 0) else {
+        panic!("le bloc");
+    };
+    let Some(XmlOut::Element(paragraph)) = container.get(txn, 0) else {
+        panic!("le paragraphe");
+    };
+    paragraph
+}
+
+/// L'onglet `tab` écrit `value` sous l'attribut `k` du premier paragraphe : la mise à jour de sa
+/// transaction.
+fn write_k(tab: &Doc, value: &str) -> Vec<u8> {
+    let mut txn = tab.transact_mut();
+    first_paragraph(&txn).insert_attribute(&mut txn, "k", value);
+    txn.encode_update_v1()
+}
+
+/// Trois onglets écrivent l'attribut `k` du premier paragraphe (constat B1 de la re-relecture
+/// 12) : A (client 10) l'écrit quatre fois ; B (20), qui n'a reçu que la première écriture, et C
+/// (30), qui a reçu les deux premières, l'écrivent ; A, sans avoir rien reçu d'eux, l'écrit une
+/// cinquième fois. B et C ont séparé les entrées supprimées de A ; la validation de la cinquième
+/// écriture les refond, trois blocs par le chemin neuf, et l'entrée courante de `k` n'est aucune
+/// d'elles : elle ne doit pas leur être remise. Rend la page créée, puis ce que la page reçoit :
+/// chaque écriture telle quelle, l'une après l'autre (`at_once` faux), ou les quatre premières de
+/// A, puis tout le reste d'un coup, l'étape 2 d'un relais qui a tout reçu.
+fn three_tabs_write_one_attribute(at_once: bool) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let (_, created) = PageDoc::new_page();
+    let (a, b, c, relay) = (
+        tab(10, &created),
+        tab(20, &created),
+        tab(30, &created),
+        tab(40, &created),
+    );
+    let mut sent = Vec::new();
+    for i in 0..4 {
+        let update = write_k(&a, &format!("a{i}"));
+        if i < 1 {
+            give(&b, &update);
+        }
+        if i < 2 {
+            give(&c, &update);
+        }
+        give(&relay, &update);
+        sent.push(update);
+    }
+    let late = [write_k(&b, "b"), write_k(&c, "c"), write_k(&a, "a4")];
+    if at_once {
+        let known = tab(50, &created);
+        for update in &sent {
+            give(&known, update);
+        }
+        for update in &late {
+            give(&relay, update);
+        }
+        let vector = known.transact().state_vector();
+        sent.push(relay.transact().encode_diff_v1(&vector));
+    } else {
+        sent.extend(late);
+    }
+    (created, sent)
+}
+
+/// La valeur lue de l'attribut `k` du premier paragraphe d'une page, la mémoire libérée récrite
+/// avant la lecture.
+fn attribute_k(page: &PageDoc) -> String {
+    let held = fixed::fill_freed_memory();
+    let txn = page.yrs_doc().transact();
+    let value = first_paragraph(&txn).get_attribute(&txn, "k");
+    drop(held);
+    match value {
+        Some(Out::Any(Any::String(value))) => value.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// La scène honnête de [`three_tabs_write_one_attribute`], par le chemin d'un client et par celui
+/// du journal : la page lit `k = "b"`, et les deux yrs nus, menés par la même suite, lisent la même
+/// chose. C'est la **valeur lue** qui le dit : remettre l'entrée à tort (la comparaison toujours
+/// vraie) laisse l'état encodé identique, octet pour octet, et lit `k` absent.
+#[test]
+fn three_tabs_writing_one_attribute_leave_its_entry_where_it_is() {
+    let mut compared = Compared::default();
+    for at_once in [false, true] {
+        let (created, sent) = three_tabs_write_one_attribute(at_once);
+        let all: Vec<Vec<u8>> = std::iter::once(created.clone())
+            .chain(sent.iter().cloned())
+            .collect();
+        for stored in [false, true] {
+            let what = format!(
+                "trois onglets, {}, {}",
+                if at_once {
+                    "le reste d'un coup"
+                } else {
+                    "une écriture après l'autre"
+                },
+                if stored { "au journal" } else { "d'un client" }
+            );
+            let page = watching(&what, &mut compared, || {
+                if stored {
+                    PageDoc::from_updates(all.iter().map(Vec::as_slice)).expect("la page se charge")
+                } else {
+                    let page = PageDoc::from_updates([created.as_slice()]).unwrap();
+                    for update in &sent {
+                        page.try_client_update(update).expect("acceptée");
+                    }
+                    page
+                }
+            });
+            assert_eq!(attribute_k(&page), "b", "{what}");
+        }
+        match replayed_alike(false, &PAGE, &all) {
+            Ok(steady) => assert!(steady, "trois onglets ({at_once}) : à la reprise"),
+            Err(why) => panic!("trois onglets ({at_once}) : {why}"),
+        }
+        let theirs = upstream::replay(1, false, &PAGE, &all);
+        let reading = &theirs.last().unwrap().1.3;
+        assert!(
+            reading.contains(r#""k":String("b")"#),
+            "le témoin ne lit pas k = b : {reading}"
+        );
+    }
+    assert!(compared.updates >= 12, "{} comparaisons", compared.updates);
+}
+
+/// Une entrée vivante de la clé `k` de la map racine `m`, de `n` valeurs d'un tenant (1 à `n`),
+/// client 10, horloge 0 : ce qu'aucun Yjs n'écrit, et que yrs garde.
+fn live_entry(n: u32) -> Vec<u8> {
+    let mut out = vec![0x28, 1, 1, b'm', 1, b'k'];
+    var(&mut out, u64::from(n));
+    for i in 0..n {
+        out.extend_from_slice(&[125, i as u8 + 1]);
+    }
+    out
+}
+
+/// Un élément du client 5 qui porte `true`, sans origine, d'origine droite `(10, clock)` : yrs le
+/// pose juste avant cette unité, coupe là le bloc qui la porte, et lui donne sa clé.
+fn cut_before(clock: u32) -> Vec<u8> {
+    let mut out = vec![0x48];
+    var(&mut out, 10);
+    var(&mut out, u64::from(clock));
+    out.extend_from_slice(&[1, 120]);
+    out
+}
+
+/// Un élément du client 20 qui porte `7`, d'origine `(10, clock)` : il devient l'entrée de la clé.
+fn written_after(clock: u32) -> Vec<u8> {
+    let mut out = vec![0xA8];
+    var(&mut out, 10);
+    var(&mut out, u64::from(clock));
+    out.extend_from_slice(&[1, 125, 7]);
+    out
+}
+
+/// Un contenu supprimé d'une unité du client 10, d'origine `(10, clock - 1)` : sa validation fait
+/// refondre les blocs du client 10.
+fn deleted_after(clock: u32) -> Vec<u8> {
+    let mut out = vec![0x81];
+    var(&mut out, 10);
+    var(&mut out, u64::from(clock - 1));
+    out.push(1);
+    out
+}
+
+/// L'entrée de `n` unités du client 10, sciée avant chacune de ses unités sauf la première, de la
+/// dernière à la première (`backwards`) ou dans l'ordre : `n` blocs voisins, que la validation
+/// refond par le chemin neuf. `live` : une entrée vivante de `n` valeurs, sciée dans la mise à jour
+/// qui la pose ; sinon les `n` entrées supprimées d'un auteur qui a écrit la clé `n` fois puis l'a
+/// retirée, fondues en un bloc, sciées par une mise à jour qui porte aussi un contenu supprimé de
+/// plus de l'auteur.
+fn sawn_entry(n: u32, live: bool, backwards: bool, skip_gc: bool) -> Vec<Vec<u8>> {
+    let mut clocks: Vec<u32> = (1..n).collect();
+    if backwards {
+        clocks.reverse();
+    }
+    let cuts: Vec<Vec<u8>> = clocks.into_iter().map(cut_before).collect();
+    if live {
+        vec![update(&[(10, 0, vec![live_entry(n)]), (5, 0, cuts)], &[])]
+    } else {
+        vec![
+            fixed::entry_written_again_and_again(n, true, skip_gc),
+            update(&[(10, n, vec![deleted_after(n)]), (5, 0, cuts)], &[]),
+        ]
+    }
+}
+
+/// Les entrées sciées de [`sawn_entry`], sur les deux yrs nus, la mémoire libérée récrite avant
+/// chaque lecture, puis la clé écrite de nouveau (`twins::rewritten_alike`) : l'entrée remise au
+/// mauvais bloc, ou pas remise, pend vers un bloc que la validation a retiré, se lit autrement, ou
+/// arrête le processus (`Segmentation fault`, `STATUS_ACCESS_VIOLATION`).
+#[test]
+fn sawn_map_entries_are_rewired_alike() {
+    let map = [("m", 'm')];
+    for n in [3, 4, 5, 8, 33] {
+        for backwards in [true, false] {
+            for (live, skip_gc) in [(true, false), (false, false), (false, true)] {
+                let updates = sawn_entry(n, live, backwards, skip_gc);
+                let what = format!(
+                    "entrée {} de {n} unités, sciée {}{}",
+                    if live { "vivante" } else { "supprimée" },
+                    if backwards {
+                        "à rebours"
+                    } else {
+                        "dans l'ordre"
+                    },
+                    if skip_gc {
+                        ", sans ramasse-miettes"
+                    } else {
+                        ""
+                    }
+                );
+                match rewritten_alike(skip_gc, &map, &updates) {
+                    Ok(steady) => assert!(steady, "{what} : à la reprise"),
+                    Err(why) => panic!("{what} : {why}"),
+                }
+                // Ce que le témoin lit : la dernière valeur de l'entrée vivante, rien pour
+                // l'entrée retirée ; puis la valeur écrite.
+                let theirs = upstream::replay_rewriting_memory(1, skip_gc, &map, &updates);
+                for (answer, _) in &theirs[..updates.len()] {
+                    assert_eq!(answer, "appliquée", "{what}");
+                }
+                let read = &theirs[updates.len() - 1].1.3;
+                let expected = if live {
+                    format!("map{{\"k\":{:?}}}", Any::from(i64::from(n)))
+                } else {
+                    "map{}".to_string()
+                };
+                assert!(read.contains(&expected), "{what} : {read}");
+                let written = &theirs.last().unwrap().1.3;
+                let expected = format!("map{{\"k\":{:?}}}", Any::from(7.0));
+                assert!(written.contains(&expected), "{what} : {written}");
+            }
+        }
+    }
+}
+
+/// Un tirage, sans dépendance.
+struct Draw(u64);
+
+impl Draw {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (z ^ (z >> 31)) % n
+    }
+}
+
+/// Des entrées de map sciées, tirées au hasard, sur les deux yrs nus (la scène de la sonde de la
+/// re-relecture 12) : une entrée de 2 à 9 unités du client 10, vivante d'un tenant ou faite des
+/// entrées supprimées d'un auteur (retirées ou non) ; des scies d'origine droite (client 5) dans un
+/// ordre tiré, qui la coupent ; des entrées d'origine (client 20) qui la suivent et deviennent
+/// l'entrée de la clé ; parfois un élément de plus du client 10, qui fait refondre ses blocs ; tout
+/// en une mise à jour, ou en deux. Jamais de `NaN` (Ruling R881 : un défaut de l'amont, dans les
+/// deux yrs). `MEMENTUM_MAP_SEEDS` règle le nombre de scènes.
+#[test]
+fn map_entries_at_random() {
+    let first = number("MEMENTUM_FUZZ_FROM", 1);
+    let seeds = number("MEMENTUM_MAP_SEEDS", 400);
+    let map = [("m", 'm')];
+    let mut applied = 0;
+    for seed in first..first + seeds {
+        let mut draw = Draw(seed);
+        let n = 2 + draw.below(8) as u32;
+        let live = draw.below(2) == 0;
+        let skip_gc = draw.below(4) == 0;
+        let mut updates = Vec::new();
+        let mut entry: Vec<(u64, u32, Vec<Vec<u8>>)> = Vec::new();
+        if live {
+            entry.push((10, 0, vec![live_entry(n)]));
+        } else {
+            updates.push(fixed::entry_written_again_and_again(
+                n,
+                draw.below(3) > 0,
+                skip_gc,
+            ));
+        }
+        let mut rights: Vec<u32> = (1..n).filter(|_| draw.below(3) > 0).collect();
+        for i in (1..rights.len()).rev() {
+            rights.swap(i, draw.below(i as u64 + 1) as usize);
+        }
+        let lefts: Vec<Vec<u8>> = (0..n)
+            .filter(|_| draw.below(5) == 0)
+            .map(written_after)
+            .collect();
+        let mut others = Vec::new();
+        match draw.below(3) {
+            0 => {}
+            1 => others.push((10, n, vec![deleted_after(n)])),
+            _ => others.push((10, n, vec![written_after(n - 1)])),
+        }
+        if !rights.is_empty() {
+            others.push((5, 0, rights.into_iter().map(cut_before).collect()));
+        }
+        if !lefts.is_empty() {
+            others.push((20, 0, lefts));
+        }
+        if live && draw.below(2) == 0 {
+            entry.extend(others);
+            updates.push(update(&entry, &[]));
+        } else {
+            if live {
+                updates.push(update(&entry, &[]));
+            }
+            if !others.is_empty() {
+                updates.push(update(&others, &[]));
+            }
+        }
+        if let Err(why) = rewritten_alike(skip_gc, &map, &updates) {
+            panic!("graine {seed} : {why} ; {updates:?}");
+        }
+        let theirs = upstream::replay(1, skip_gc, &map, &updates);
+        applied += u64::from(theirs.iter().all(|(answer, _)| answer == "appliquée"));
+    }
+    println!(
+        "ESSAI des entrées de map : {seeds} scènes pareilles dans les deux yrs, dont {applied} où \
+         yrs a appliqué chaque mise à jour"
+    );
+    // Le test ne passe pas à vide : yrs applique chaque mise à jour de chaque scène.
+    assert!(applied > seeds * 9 / 10, "{applied} scènes appliquées");
 }

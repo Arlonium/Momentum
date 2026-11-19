@@ -190,6 +190,67 @@ pub fn replay(
         .collect()
 }
 
+/// Récrit la mémoire que yrs vient de libérer : trente-huit mille blocs de 16 à 768 octets, gardés
+/// par l'appelant jusqu'à sa lecture. Un pointeur qui pend vers un bloc retiré lit sinon le bloc tel
+/// qu'il était avant sa libération, et la lecture ressemble à la bonne (Ruling R880).
+pub fn fill_freed_memory() -> Vec<Vec<u8>> {
+    let mut held = Vec::with_capacity(38_000);
+    for size in (16..=768).step_by(8) {
+        for _ in 0..400 {
+            held.push(vec![0xAA; size]);
+        }
+    }
+    held
+}
+
+/// Comme [`replay`], la mémoire libérée récrite ([`fill_freed_memory`]) entre chaque mise à jour et
+/// sa lecture ; puis une valeur écrite sous la clé `k` de la map racine `m` : la nouvelle entrée a
+/// pour origine l'entrée courante, que yrs lit et supprime. Une entrée de map qui pend vers un bloc
+/// retiré se voit ainsi à la lecture, ou arrête le processus.
+pub fn replay_rewriting_memory(
+    client: u64,
+    skip_gc: bool,
+    roots: &[(&str, char)],
+    updates: &[Vec<u8>],
+) -> Vec<(String, Seen)> {
+    let doc = doc(client, skip_gc);
+    for (name, kind) in roots {
+        match kind {
+            't' => drop(doc.get_or_insert_text(*name)),
+            'x' => drop(doc.get_or_insert_xml_fragment(*name)),
+            _ => drop(doc.get_or_insert_map(*name)),
+        }
+    }
+    let map = doc.get_or_insert_map("m");
+    let mut out = Vec::new();
+    for update in updates {
+        let answer = apply(&doc, update);
+        let held = fill_freed_memory();
+        out.push((answer, seen(&doc)));
+        drop(held);
+    }
+    let held = fill_freed_memory();
+    map.insert(&mut doc.transact_mut(), "k", Any::from(7.0));
+    out.push(("k écrite".to_string(), seen(&doc)));
+    drop(held);
+    out
+}
+
+/// L'état d'un auteur (client 10) qui écrit `sets` fois la clé `k` de la map racine `m`, une
+/// transaction par écriture, puis, si `remove`, la retire : ses entrées supprimées voisines, que
+/// la validation fond en un bloc.
+pub fn entry_written_again_and_again(sets: u32, remove: bool, skip_gc: bool) -> Vec<u8> {
+    let author = doc(10, skip_gc);
+    let map = author.get_or_insert_map("m");
+    for i in 0..sets {
+        map.insert(&mut author.transact_mut(), "k", Any::from(f64::from(i)));
+    }
+    if remove {
+        map.remove(&mut author.transact_mut(), "k");
+    }
+    author.transact().encode_diff_v1(&StateVector::default())
+}
+
 struct Rng(u64);
 
 impl Rng {

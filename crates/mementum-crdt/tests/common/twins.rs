@@ -63,11 +63,26 @@ pub fn difference(fixed: &Seen, upstream: &Seen) -> Option<String> {
     None
 }
 
-/// Les deux yrs reçoivent `updates` une à une dans un document neuf, de types racines `roots`.
-/// Rend la première différence.
-fn replayed_once(skip_gc: bool, roots: &[(&str, char)], updates: &[Vec<u8>]) -> Result<(), String> {
-    let fixed = fixed::replay(1, skip_gc, roots, updates);
-    let upstream = upstream::replay(1, skip_gc, roots, updates);
+/// Les deux yrs reçoivent `updates` une à une dans un document neuf, de types racines `roots`
+/// (si `rewriting`, la mémoire libérée récrite avant chaque lecture, puis la clé `k` de `m` écrite :
+/// `replay_rewriting_memory`). Rend la première différence.
+fn replayed_once(
+    skip_gc: bool,
+    roots: &[(&str, char)],
+    updates: &[Vec<u8>],
+    rewriting: bool,
+) -> Result<(), String> {
+    let (fixed, upstream) = if rewriting {
+        (
+            fixed::replay_rewriting_memory(1, skip_gc, roots, updates),
+            upstream::replay_rewriting_memory(1, skip_gc, roots, updates),
+        )
+    } else {
+        (
+            fixed::replay(1, skip_gc, roots, updates),
+            upstream::replay(1, skip_gc, roots, updates),
+        )
+    };
     for (at, ((answer, seen), (their_answer, their_seen))) in
         fixed.into_iter().zip(upstream).enumerate()
     {
@@ -100,11 +115,33 @@ pub fn replayed_alike(
     roots: &[(&str, char)],
     updates: &[Vec<u8>],
 ) -> Result<bool, String> {
-    let Err(why) = replayed_once(skip_gc, roots, updates) else {
+    alike(skip_gc, roots, updates, false)
+}
+
+/// Comme [`replayed_alike`], la mémoire que yrs libère récrite avant chaque lecture, puis la clé
+/// `k` de la map racine `m` écrite (Ruling R880) : une entrée de map qui pendrait vers un bloc
+/// retiré se lit alors autrement que dans le témoin, ou arrête le processus. Sans cela, la lecture
+/// d'un bloc libéré mais pas encore récrit ressemble à la bonne.
+#[allow(dead_code)] // seul `squash_equivalence.rs` s'en sert
+pub fn rewritten_alike(
+    skip_gc: bool,
+    roots: &[(&str, char)],
+    updates: &[Vec<u8>],
+) -> Result<bool, String> {
+    alike(skip_gc, roots, updates, true)
+}
+
+fn alike(
+    skip_gc: bool,
+    roots: &[(&str, char)],
+    updates: &[Vec<u8>],
+    rewriting: bool,
+) -> Result<bool, String> {
+    let Err(why) = replayed_once(skip_gc, roots, updates, rewriting) else {
         return Ok(true);
     };
     for _ in 1..TRIES {
-        if replayed_once(skip_gc, roots, updates).is_ok() {
+        if replayed_once(skip_gc, roots, updates, rewriting).is_ok() {
             return Ok(false);
         }
     }
@@ -112,7 +149,7 @@ pub fn replayed_alike(
 }
 
 /// Les types racines d'une page.
-const PAGE: [(&str, char); 2] = [(mementum_crdt::FRAGMENT, 'x'), (mementum_crdt::META, 'm')];
+pub const PAGE: [(&str, char); 2] = [(mementum_crdt::FRAGMENT, 'x'), (mementum_crdt::META, 'm')];
 
 /// Ce que les pages ont gardé : l'état d'avant, et la mise à jour telle que yrs l'a reçue.
 type Handed = Vec<(Vec<u8>, Vec<u8>)>;
