@@ -779,10 +779,7 @@ impl Shape {
         floor: &StateVector,
         known: impl Fn(u64, u32) -> bool,
     ) -> bool {
-        let brought: HashMap<u64, Vec<(u32, u32)>> = self
-            .clients()
-            .map(|client| (client, self.ranges_of(client)))
-            .collect();
+        let brought = self.ranges_by_client();
         let has = |(client, clock): Id| {
             known(client, clock)
                 || brought.get(&client).is_some_and(|ranges| {
@@ -804,6 +801,23 @@ impl Shape {
                 .flatten()
                 .any(|id| !has(id))
         })
+    }
+
+    /// [`Shape::ranges_of`] de chaque client, en une passe : demandées client par client, elles
+    /// parcouraient tous les clients pour chacun, le carré d'une file de clients d'un élément
+    /// chacun (Ruling R885).
+    fn ranges_by_client(&self) -> HashMap<u64, Vec<(u32, u32)>> {
+        let mut all: HashMap<u64, Vec<(u32, u32)>> = HashMap::new();
+        for (client, structs) in &self.clients {
+            let ranges = all.entry(*client).or_default();
+            for s in structs.iter().filter(|s| !matches!(s.kind, Kind::Skip)) {
+                match ranges.last_mut() {
+                    Some(last) if last.1 == s.id.1 => last.1 += s.len,
+                    _ => ranges.push((s.id.1, s.id.1 + s.len)),
+                }
+            }
+        }
+        all
     }
 
     /// Les plages `[début, fin)` que couvrent les blocs de `client` (ses trous exceptés), triées

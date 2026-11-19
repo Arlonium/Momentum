@@ -1231,6 +1231,29 @@ fn reading_what_yrs_made_grows_like_the_update() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Ruling R885 : savoir si une entrée du journal dépend de ce que la page n'a pas (ce que la
+/// relecture demande après une entrée écartée, Ruling R787) croît comme elle, si nombreux qu'en
+/// soient les clients. Chaque client y relevait ses plages en parcourant tous ceux de l'entrée.
+#[test]
+fn knowing_what_an_entry_lacks_grows_like_it() {
+    let forms = [Form {
+        what: "des clients d'un élément chacun, à la file",
+        build: &clients_in_line,
+    }];
+    let size = |sent: &Sent| sent.state.len() + sent.update.len();
+    let judge = |sent: &Sent| {
+        let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
+        let lacks = page.stored_update_lacks_dependency(&sent.update);
+        assert!(matches!(lacks, Ok(false)), "{lacks:?}");
+    };
+    let limits = Limits {
+        peak_per_byte: 256,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&forms, size, judge, |_| 0, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Ce que la garde ne borne pas.
 mod known_limits {
     use super::linear::once;
