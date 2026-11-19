@@ -3,9 +3,9 @@
 //! yrs fond à la validation d'une transaction les blocs qui se suivent. Celui de crates.io
 //! (0.28.1) les fondait du dernier au premier, en recopiant à chaque pas tout ce qui était déjà
 //! fondu, chaque bloc gardant sa copie jusqu'à la fin de la suite : `n` lettres envoyées une à
-//! une lui demandaient une mémoire en `n²` (40 000 lettres, 300 Ko : 1,2 Gio ; 10 000 valeurs,
-//! 60 Ko : 1,1 Gio). Le serveur compile un yrs corrigé (`vendor/yrs`), qui recopie chaque contenu
-//! une fois.
+//! une lui demandaient une mémoire en `n²` (40 000 lettres, 263 Ko : 1 142 Mio ; 10 000 valeurs,
+//! 60 Ko : 1 147 Mio). Le serveur compile un yrs corrigé (`vendor/yrs`), qui recopie chaque
+//! contenu une fois.
 //!
 //! Chaque forme par laquelle un compte obtenait ce carré est ici, à deux tailles, par le chemin
 //! d'une vraie page (un message d'un client, une entrée du journal, un état relu), avec un
@@ -13,6 +13,11 @@
 //! yrs corrigé qui tient le plafond, et chaque test rougit sur le yrs d'origine (aux deux
 //! tailles : de 2 à 70 fois le plafond). Les pics ne dépendent pas du poste : ils sont comptés
 //! par l'allocateur du binaire, pour le fil du test.
+//!
+//! Deux formes de plus, que le yrs d'origine fondait déjà sans rien recopier, tiennent un plafond
+//! à elles (Ruling R884) : des plages ramassées d'une unité, et des clients d'une plage chacun.
+//! Deux octets reçus y font un bloc de yrs : ce sont les formes qui pèsent le plus par octet reçu
+//! (jusqu'à 258), au-delà du plafond des autres.
 //!
 //! **À une montée de yrs**, ces tests disent si le correctif est encore là et suffit.
 
@@ -159,11 +164,27 @@ fn whole(n: u32) -> Vec<u8> {
     update(&[(LETTERS, 0, vec![letters(None, None, n)])])
 }
 
+/// Octets de pic par octet reçu pour une plage ramassée d'une unité (Ruling R884) : deux octets dans
+/// une mise à jour, un bloc entier une fois lue. Mesurés : 259 pour des plages d'un client, 255
+/// pour des clients d'une plage chacun.
+const PEAK_PER_BYTE_OF_RANGES: usize = 320;
+
 /// Le pic de mémoire de `read`, tenu sous le plafond pour `received` octets reçus.
 fn within<R>(what: &str, n: u32, received: usize, read: impl FnOnce() -> R) -> R {
+    within_bound(what, n, received, PEAK_PER_BYTE, read)
+}
+
+/// [`within`], sous `per_byte` octets de pic par octet reçu.
+fn within_bound<R>(
+    what: &str,
+    n: u32,
+    received: usize,
+    per_byte: usize,
+    read: impl FnOnce() -> R,
+) -> R {
     let mut answer = None;
     let cost = linear::once(|| answer = Some(read()));
-    let bound = PEAK_PER_BYTE * received;
+    let bound = per_byte * received;
     println!(
         "MESURE {what}, {n} éléments : {received} octets reçus, pic de {} octets ({} par octet)",
         cost.peak,
@@ -171,7 +192,7 @@ fn within<R>(what: &str, n: u32, received: usize, read: impl FnOnce() -> R) -> R
     );
     assert!(
         cost.peak <= bound,
-        "{what}, {n} éléments : pic de {} octets pour {received} octets reçus, plus de {PEAK_PER_BYTE} par octet",
+        "{what}, {n} éléments : pic de {} octets pour {received} octets reçus, plus de {per_byte} par octet",
         cost.peak
     );
     answer.unwrap()
@@ -453,6 +474,105 @@ fn json_contents_chained_read_by_yrs_alone() {
                 .unwrap();
         });
     }
+}
+
+/// Des plages ramassées d'une unité, à la suite (constat M2 de la re-relecture 12) : yrs les fond
+/// en une plage, sans rien recopier, mais chacune pèse deux octets dans la mise à jour et un bloc
+/// une fois lue. C'est la forme qui pèse le plus par octet reçu ; d'où son plafond à elle.
+#[test]
+fn ranges_of_one_unit() {
+    for n in SIZES {
+        let page = page();
+        let before = page.encode_state();
+        let sent = update(&[(LETTERS, 0, (0..n).map(|_| vec![0, 1]).collect())]);
+        let applied = within_bound(
+            "des plages ramassées d'une unité",
+            n,
+            sent.len(),
+            PEAK_PER_BYTE_OF_RANGES,
+            || page.try_client_update(&sent),
+        )
+        .expect("acceptée");
+        let received = before.len() + applied.read.len();
+        within_bound(
+            "des plages ramassées d'une unité, relues du journal",
+            n,
+            received,
+            PEAK_PER_BYTE_OF_RANGES,
+            || PageDoc::from_updates([before.as_slice(), applied.read.as_slice()]),
+        )
+        .expect("la page se charge");
+    }
+}
+
+/// Autant de clients que de plages ramassées d'une unité : rien ne se fond, et chaque client pèse
+/// sa liste de blocs.
+#[test]
+fn clients_of_one_range_each() {
+    for n in SIZES {
+        let page = page();
+        let before = page.encode_state();
+        let clients: Vec<(u64, u32, Vec<Vec<u8>>)> = (0..u64::from(n))
+            .map(|k| (1_000 + k, 0, vec![vec![0, 1]]))
+            .collect();
+        let sent = update(&clients);
+        let applied = within_bound(
+            "des clients d'une plage ramassée chacun",
+            n,
+            sent.len(),
+            PEAK_PER_BYTE_OF_RANGES,
+            || page.try_client_update(&sent),
+        )
+        .expect("acceptée");
+        let received = before.len() + applied.read.len();
+        within_bound(
+            "des clients d'une plage ramassée chacun, relus du journal",
+            n,
+            received,
+            PEAK_PER_BYTE_OF_RANGES,
+            || PageDoc::from_updates([before.as_slice(), applied.read.as_slice()]),
+        )
+        .expect("la page se charge");
+    }
+}
+
+/// Les fichiers `.rs` sous `dir`, à toute profondeur.
+fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Aucun document du serveur n'est créé sans ramasse-miettes (Ruling R882). yrs fond alors aussi
+/// les contenus supprimés que nomme un jeu de suppressions (`squash_left_range_compaction`, que le
+/// correctif ne touche pas) du dernier au premier, en recopiant à chaque pas ce qui est déjà
+/// fondu : 20 000 lettres supprimées par leur propre mise à jour demandent 288 Mio, avec le yrs
+/// d'origine comme avec le corrigé. Le ramasse-miettes en retire le texte avant, et rien n'est
+/// recopié. Le mot ne paraît donc dans aucune source des crates de l'atelier (`src/`, tests
+/// exclus).
+#[test]
+fn no_document_of_the_server_skips_the_garbage_collector() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(crates).unwrap() {
+        let src = entry.unwrap().path().join("src");
+        if src.is_dir() {
+            rust_files(&src, &mut files);
+        }
+    }
+    assert!(files.len() > 60, "{} sources lues", files.len());
+    let found: Vec<_> = files
+        .iter()
+        .filter(|path| std::fs::read_to_string(path).unwrap().contains("skip_gc"))
+        .collect();
+    assert!(found.is_empty(), "`skip_gc` dans {found:?}");
 }
 
 /// Ce que `vendor/yrs` corrige, tenu sur le yrs de crates.io.
