@@ -2,17 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **État de ce plan (2026-11-19)** : écrit d'après la conception et le code de `main` à `5e7514a`, **pas encore relu par un relecteur indépendant, ni par le propriétaire**. Rien n'a été compilé ni lancé pour l'écrire : ce qui est dit du code a été lu (« Ce qui a été vérifié avant d'écrire »), ce qui est supposé est dit supposé. Il ne s'exécute pas avant : (1) la clôture du lot 3 (la migration `0004` figée, R243) ; (2) la relecture du plan ; (3) les réponses de Lenny aux « Décisions à prendre par Lenny », ou son accord pour avancer sur ce que le plan suppose en attendant.
+> **État de ce plan (2026-11-19)** : écrit d'après la conception et le code de `main` à `5e7514a`, **pas encore relu par le propriétaire**. Rien n'a été compilé ni lancé pour l'écrire : ce qui est dit du code a été lu (« Ce qui a été vérifié avant d'écrire »), ce qui est supposé est dit supposé. Il ne s'exécute pas avant : (1) la clôture du lot 3 (la migration `0004` figée, R243) ; (2) une re-relecture de ce tour de correction ; (3) les réponses de Lenny aux « Décisions à prendre par Lenny », ou son accord pour avancer sur ce que le plan suppose en attendant.
+
+> **Relu le 2026-11-19 par un relecteur indépendant, avant exécution** (« corriger d'abord ») : 3 constats bloquants, 9 importants et des mineurs, tous vérifiés dans le code puis reportés dans ce texte (tour de correction 1). Ce qui a changé : la cohérence entre la base et l'index plein texte passe par une **intention** écrite d'abord (R909 récrit) ; les résultats sont **groupés par page dans l'index**, avant toute pagination (R902 récrit) ; la note d'un résultat ne lit **aucune statistique d'ensemble** (R916) ; la recherche est un `POST` (R917) ; les titres, les créations et les suppressions ont un **marqueur durable**, écrit dans leur transaction (R918) ; seuls les blocs changés passent à l'index plein texte (R919) ; la Task S4 est scindée en trois ; cinq choix pris en silence sont portés à Lenny (L15 à L19), et L12 est retirée.
 
 **Goal :** dans un espace, on tape quelques mots et on retrouve les pages qu'on a le droit de lire, par leur titre ou par leur texte, avec un extrait, et on arrive sur le bloc trouvé ; sous une page, on lit quelles pages mènent à elle. Personne ne trouve, ne devine ni ne compte une page qu'il ne voit pas.
 
-**Le lot s'exécute en 14 tâches** : piste serveur S0 à S7 (8), piste client C1 à C3 (3), transverses X1, X2 et D (3).
+**Le lot s'exécute en 16 tâches** : piste serveur S0, S1, S2, S3, S4a, S4b, S4c, S5, S6, S7 (10), piste client C1 à C3 (3), transverses X1, X2 et D (3).
 
 **Architecture (en bref ; le détail est plus bas) :**
 - `mementum-store` : une migration `0005_search.sql` crée `blocks_index` (la projection du document, conception §5.3), `page_links` (les rétroliens), `search_state` et `search_outbox` (où en est l'indexation) ; une voie neuve de la file d'écriture, `Lane::Index`.
 - `mementum-search` (crate neuve, conception §8) : la projection d'une page en lignes d'index (pure), la lecture bornée d'une requête, et l'index plein texte Tantivy (conception §5.2, §5.7), derrière une interface étroite.
 - `mementum-sync` : le hub dit quelles pages ont été écrites (un ensemble, sans attente) ; une lecture seule d'une page gardée, hors de son acteur.
-- `mementum-server` : l'indexeur (une tâche de fond, jamais sur le chemin d'une frappe), deux routes (`GET /api/v1/spaces/{id}/search`, `GET /api/v1/pages/{id}/backlinks`), un débit par compte.
+- `mementum-server` : l'indexeur (une tâche de fond, jamais sur le chemin d'une frappe), deux routes (`POST /api/v1/spaces/{id}/search`, `GET /api/v1/pages/{id}/backlinks`), un débit par compte.
 - `mementum-cli` : `mementum reindex`.
 - `apps/web` : la fenêtre de recherche, l'arrivée sur un bloc, les rétroliens sous la page.
 
@@ -28,7 +30,7 @@ Ce que la conception met dans ce lot, et ce que ce plan en livre :
 | Rétroliens | §4.2 (« Page : […] rétroliens »), §4.5 (« rétroliens au lot 4 ») | les pages que le lecteur voit et qui mènent à la page ouverte | vue graphe : P3 (§4.5) ; `[[Page#Titre]]` : dans aucun lot (décision L11) |
 | Entrée dans la barre latérale | §4.2 : « sélecteur d'espace, recherche, Accueil… » | l'entrée « Rechercher » et son raccourci | Accueil, Boîte de réception, Agents, Modèles : autres lots |
 | Palette de commandes | §4.2 : « Palette de commandes (Ctrl+K) : navigation, actions, et questions à l'IA avec citations » | la navigation par la recherche seulement | les actions : dans aucun lot ; les questions à l'IA : P4 (écart E5) |
-| Outil `search` des agents | §6.5, outil 1 : « Recherche hybride. Filtres : espace, type, date, auteur » ; §9 : MCP v1 en P1 | la route REST que l'outil appellera | l'outil MCP, les jetons, les filtres : lot 5 (écart E1, décision L7) |
+| Outil `search` des agents | §6.5, outil 1 : « Recherche hybride. Filtres : espace, type, date, auteur » ; §9 : MCP v1 en P1 | la route de l'API que l'outil appellera | l'outil MCP, les jetons, les filtres : lot 5 (écart E1, décision L7) |
 
 **Hors de ce plan :** la recherche dans les commentaires, dans le contenu des fichiers (PDF), dans l'historique et dans la corbeille (décisions L3, L4) ; la recherche à l'intérieur d'une base (§4.2, P2) ; les `#tags` (§4.6, lot 6 et P2) ; la tolérance aux fautes de frappe ; le surlignage des mots dans la page ouverte ; les plafonds généraux par compte et par adresse IP (lot 7 : ce plan ne pose que le débit de ses propres routes) ; un quota de disque pour l'index (lot 7, comme R247).
 
@@ -40,8 +42,8 @@ Ce que la conception met dans ce lot, et ce que ce plan en livre :
 
 - Migrations : `crates/mementum-store/migrations/0001` à `0004`. `nodes` a `kind IN ('folder','page')`, `title`, `updated_at`, `trashed_at` ; `doc_updates(node_id, seq, update_blob, created_at, actor_id)`, `doc_snapshots(node_id, seq, state_blob, created_at)`. Aucune table d'index.
 - `nodes.updated_at` n'est écrit qu'à la création et par `update_node` (titre, place : `nodes.rs`, l'`UPDATE` de la ligne 750) : **il ne bouge pas quand le contenu change**. Il ne peut donc servir ni de date de modification, ni de signe qu'une page est à réindexer.
-- File d'écriture : `crates/mementum-store/src/queue.rs`, `enum Lane { Page(Uuid), Account(Uuid), Files, Copies, Common }` ; `Store::write_in(Lane)` et `write_conn_in(Lane)` (`docs.rs`). Le journal d'une page s'écrit par `Store::append_updates` (voie de la page), l'instantané par `put_snapshot`, qui retire le journal qu'il couvre.
-- Le contenu d'une page ne change que par : l'acteur (`crates/mementum-sync/src/actor.rs` : `client_update`, `write`, `server_write`, qui passent par `Actor::persist` et `Actor::persist_restore`) ; la création (`Hub::create_page_doc`, qui charge la page, et `load`, qui écrit l'instantané de `seq` 0 d'une page sans document) ; la duplication (`Store::duplicate_pages`, `crates/mementum-store/src/duplicate.rs`, sans acteur) ; la suppression (`Store::delete_node`, qui retire à la main les lignes des tables liées).
+- File d'écriture : `crates/mementum-store/src/queue.rs`, `enum Lane { Page(Uuid), Account(Uuid), Files, Copies, Common }` ; `Store::write_in(Lane)` et `write_conn_in(Lane)` (définies dans `spaces.rs`, `pub(crate)`). Le journal d'une page s'écrit par `Store::append_updates` (voie de la page), l'instantané par `put_snapshot`, qui retire le journal qu'il couvre.
+- Le contenu d'une page ne change que par : l'acteur (`crates/mementum-sync/src/actor.rs` : `client_update`, `write`, `server_write`, qui passent par `Actor::persist` et `Actor::persist_restore`) ; la création (`Store::create_node`, `nodes.rs`, écrit l'instantané de `seq` 0 du document donné dans la transaction qui crée le nœud : c'est le chemin de `POST /api/v1/pages` ; `load`, dans l'acteur, n'écrit celui d'une page restée sans document qu'en filet, R28 ; `Hub::create_page_doc` n'est appelé par aucune route, seulement par des tests) ; la duplication (`Store::duplicate_pages`, `crates/mementum-store/src/duplicate.rs`, sans acteur) ; la suppression (`Store::delete_node`, qui retire à la main les lignes des tables liées).
 - La compaction se fait hors de l'acteur (`compact`, `actor.rs`), sur un fil bloquant, puis dans la voie de la page (R826).
 - `load` et `replay` (`actor.rs`) relisent une page gardée en écartant des entrées du journal, avec une ligne `error` par entrée écartée ; ils sont privés au module, et `load` **écrit** (l'instantané d'une page sans document).
 - `Hub` (`crates/mementum-sync/src/hub.rs`) : `read_blocks` (par l'acteur), `load_page`, `forget`, `shutdown`, `live_pages`. Rien n'y dit aujourd'hui qu'une page vient d'être écrite.
@@ -51,7 +53,12 @@ Ce que la conception met dans ce lot, et ce que ce plan en livre :
 - `serve` (`crates/mementum-server/src/lib.rs`) finit par `hub.shutdown()` puis `store.close()` ; `to_completion` garde la portée `writes_by`.
 - La CLI (`crates/mementum-cli/src/main.rs`) a `serve` et `user set-password`, pas de `reindex`.
 - Le modèle lu d'une page : `mementum_md::Block { id, kind, props, content, children }`, `Inline::{Text, Link { href }, Mention { kind, id, label }, Math { latex }, HardBreak }` (`crates/mementum-md/src/model.rs`). Le registre (`spec/schema/blocks.json`) : 24 types de blocs ; portent du texte en ligne `paragraph`, `heading`, les quatre listes, `quote`, `codeBlock`, `callout` ; `table` ; portent du texte dans des props `image`, `video`, `audio`, `file` (`caption`, `name`), `bookmark` (`url`), `equation` (`latex`), `pageLink` (`pageId`, `title`).
-- Client : `apps/web/src/space/pageDirectory.ts` (`findPages`, les titres de l'arbre publié), `editor/blocks/PagePicker.tsx`, `sidebar/Sidebar.tsx` (un `nav` : `SpaceSwitcher`, `ShortList`, `SectionList`), `router.ts` (`/p/:id`, sans fragment de bloc), `editor/blocks/Toc.tsx` (`goToHeading` : mener à un bloc, éditeur en lecture seule compris). Aucun raccourci Ctrl+K dans `apps/web/src`.
+- Client : `apps/web/src/space/pageDirectory.ts` (`findPages`, les titres de l'arbre publié), `editor/blocks/PagePicker.tsx`, `sidebar/Sidebar.tsx` (un `nav` : `SpaceSwitcher`, `ShortList`, `SectionList`), `editor/blocks/Toc.tsx` (`goToHeading` : mener à un bloc, éditeur en lecture seule compris). Aucun raccourci Ctrl+K dans `apps/web/src`.
+- `apps/web/src/router.ts` **jette tout fragment** : `navigate` ne fait rien quand `location.pathname + location.search` est déjà le chemin demandé, `useLinkInterception` navigue vers `url.pathname + url.search`, et `usePathname` ne suit que `location.pathname`. Un lien `/p/<id>#b=<bloc>` suivi dans l'application perdrait donc son bloc, et un lien vers un autre bloc de la page ouverte ne ferait rien (C2).
+- `apps/web/src/api.ts`, `silence(method, path)` : tout appel qui n'est pas un `GET` (hors connexion et déconnexion) resté sans réponse est dit « a peut-être été fait » (R757). Un `POST` qui ne fait que lire doit y être nommé comme une lecture (C1).
+- Une route d'API lit la session par l'extracteur `AuthUser` (`routes/favorites.rs`, par exemple) ; `caller` (`routes/sync.rs`) ne sert qu'aux WebSockets.
+- `StoppedClock` est privé à `crates/mementum-sync/tests/versions.rs`, et la fonction `test-util` de tokio n'est dev-dépendance que de `mementum-sync` (son `Cargo.toml`).
+- Le test des migrations du store est `crates/mementum-store/tests/migration.rs`.
 - SQLite : `libsqlite3-sys` 0.37.0, tel que compilé par sqlx, pose `-DSQLITE_ENABLE_FTS5` (son `build.rs`, lu dans le registre de cargo du poste) : FTS5 est disponible sans dépendance de plus (utile à la décision L1).
 - `spike/RESULTS.md` **ne dit rien de la recherche** : la phase 0 n'a mesuré ni Tantivy ni FTS5 (écart E4).
 - Le dernier Ruling du lot 3 est R889.
@@ -59,7 +66,7 @@ Ce que la conception met dans ce lot, et ce que ce plan en livre :
 **Supposé, sans l'avoir lu ni essayé** (chaque point est repris par la tâche qui le vérifie) :
 
 - Tantivy : sa version courante, sa licence (MIT) et celles de ses dépendances contre `deny.toml`, sa mémoire au repos, son temps d'ouverture, le coût d'un filtre sur des dizaines de milliers d'identifiants, la charge utile d'une validation (`payload`), le verrou de son écrivain, ses tokeniseurs (pliage des accents, racinisation française). Tout cela est l'objet de **S0**, avant toute autre tâche.
-- BlockNote 0.57 prend Ctrl+K pour créer un lien : cherché dans `apps/web/src` (absent) et dans le `dist` de `@blocknote/core` (rien trouvé sous la forme `Mod-k`), sans conclure. C1 le vérifie dans Chromium.
+- BlockNote 0.57 prend Ctrl+K pour créer un lien. D'après la relecture du plan : par un écouteur de `@blocknote/react` posé sur l'élément de l'éditeur modifiable, qui appelle `preventDefault` sans arrêter la propagation. Je ne l'ai pas retrouvé par mes recherches dans son `dist` (code réduit) : C1 le prouve dans Chromium, par `defaultPrevented` et par la sélection de l'éditeur, sans supposer la forme de l'écouteur.
 - La sorte d'une mention de page s'écrit `page` dans `Inline::Mention::kind` : à lire dans `mementum-schema` en S2.
 
 ---
@@ -70,9 +77,9 @@ Celles des plans du lot 3 restent valables telles quelles (langue, commits sans 
 
 **Droits**
 - Les droits passent par `access.rs`, et nulle part ailleurs. L'index ne porte **aucun** droit, aucun niveau, aucune liste de lecteurs, et pas l'état de corbeille : ce qui est permis est calculé à chaque requête, pour le compte qui demande, sur `SpaceAccess`.
-- **Rien d'une page que `access.rs` ne montre pas ne sort** : ni résultat, ni titre, ni extrait, ni identifiant, ni fil d'Ariane, ni nombre de résultats, ni suggestion. La corbeille ne sort jamais. Le temps de réponse ne doit pas dépendre de ce que portent les pages non vues plus que ne le fait déjà une lecture de l'arbre (voir « La requête et les droits »).
+- **Rien d'une page que `access.rs` ne montre pas ne sort** : ni résultat, ni titre, ni extrait, ni identifiant, ni fil d'Ariane, ni nombre de résultats, ni suggestion, **ni l'ordre des résultats** (R916 : la note ne lit aucune statistique de l'index). La corbeille ne sort jamais. Reste le temps de réponse, qui dépend du nombre d'entrées de l'instance qui portent un terme : S0 le mesure, et c'est une limite écrite (L-b), pas une promesse.
 - Ordre des refus : `401`, `409 account_changed`, `404` d'un espace où l'on n'a aucun rôle (la réponse d'un espace inconnu) ou d'une page qu'on ne voit pas (**exactement** la réponse d'une page inconnue), puis `422`, puis `429`. Les routes neuves entrent dans `space_routes_by_role` (`tests/spaces.rs`) et `foreign_page_is_indistinguishable_from_missing` (`tests/permissions.rs`, par `page_routes`), et dans la matrice de `tests/expected_account.rs`.
-- Un message de refus tutoie. La requête d'une personne n'est **jamais journalisée**, à aucun niveau, ni recopiée entière dans un message d'erreur (`mementum_md::excerpt`, R434).
+- Un message de refus tutoie. La requête d'une personne n'est **jamais journalisée**, à aucun niveau, ni recopiée entière dans un message d'erreur (`mementum_md::excerpt`, R434), et **ne voyage jamais dans une adresse** (le journal d'accès d'un mandataire la garderait) : elle est dans le corps d'un `POST` (R917).
 
 **Indexation**
 - **Aucun travail d'indexation sur le chemin d'une frappe** : l'acteur d'une page ne fait qu'ajouter son identifiant à un ensemble en mémoire, sans attente ni allocation proportionnelle à la page. Il ne lit pas ses blocs pour l'index, n'encode rien pour lui, n'attend aucun tour d'écriture pour lui.
@@ -92,18 +99,18 @@ Celles des plans du lot 3 restent valables telles quelles (langue, commits sans 
 - **Dépendances** : Tantivy et ce qu'il tire, rien d'autre ; `cargo deny check licenses bans` et `node tools/check-npm-licenses.mjs` restent verts. Aucune dépendance npm neuve.
 - **Migration** : une pour le lot, `0005_search.sql` ; elle peut changer jusqu'à la clôture du lot (R139, R243) : aucun binaire du lot 4 n'ouvre une instance que quelqu'un regarde avant la clôture. Après l'avoir ajoutée, toucher `crates/mementum-store/src/lib.rs` (R269).
 - **Ports des e2e** : piste C, `MEMENTUM_E2E_WEB_PORT=5177` et `MEMENTUM_E2E_API_PORT=8084` ; piste S et transverses, `5178` et `8085`. Jamais 5173, 5175, 8080, 8090.
-- **Pousser** : l'accord de Lenny valait pour le lot 3 seulement (`docs/REPRISE.md`). Rien ne se pousse au lot 4 sans une demande neuve (décision L12).
-- **Registre** : `docs/superpowers/logs/2026-11-19-p1-lot4-ledger.md`, forme `Ruling RNN: <décision> — <pourquoi> — <coût si faux>`. **Le lot 4 numérote à partir de R900** : R890 à R899 restent à la clôture du lot 3. Les décisions de ce plan sont R900 à R915 ; l'exécution suit.
+- **Pousser** : selon la consigne durable du propriétaire, se pousse sur `main` ce qui est relu et vert (format, clippy, tests) ; jamais de poussée forcée, jamais la branche d'un atelier. La tâche D met `docs/REPRISE.md` d'accord avec elle.
+- **Registre** : `docs/superpowers/logs/2026-11-19-p1-lot4-ledger.md`, forme `Ruling RNN: <décision> — <pourquoi> — <coût si faux>`. **Le lot 4 numérote à partir de R900** : R890 à R899 restent à la clôture du lot 3. Si elle en prend davantage, le lot 4 décale ses numéros d'autant, et son registre le dit en tête avec la table de correspondance de ce plan. Les décisions de ce plan sont R900 à R919 ; l'exécution suit.
 - **Mémoire et disque du poste** : une compilation à la fois, `CARGO_INCREMENTAL=0`, `TMP` et `TEMP` sur un dossier de la tâche, le `target/` d'un atelier supprimé dès qu'il a rendu. Tantivy allonge la compilation en release : le mesurer en S0.
 
 ## Review Focus
 
-1. **Une page qu'on ne voit pas ne se trouve ni ne se devine.** Un invité, un membre devant une page privée d'un autre, un compte d'un autre espace : aucun résultat, aucun titre dans un fil d'Ariane, aucun rétrolien, et la même réponse (corps et forme) qu'on cherche un mot qui n'existe nulle part ou un mot que seule une page non vue porte. Tests : S5, `a_word_only_an_unseen_page_holds_answers_like_a_word_nobody_wrote` ; S6, `a_backlink_from_an_unseen_page_is_not_listed` ; X1, e2e à trois comptes.
+1. **Une page qu'on ne voit pas ne se trouve, ne se devine ni ne se compte.** Un invité, un membre devant une page privée d'un autre, un compte d'un autre espace : aucun résultat, aucun titre dans un fil d'Ariane, aucun rétrolien, la même réponse (corps et forme) qu'on cherche un mot qui n'existe nulle part ou un mot que seule une page non vue porte, et **le même ordre** des résultats vus quoi que portent les pages non vues, les autres espaces et la corbeille (un compte qui écrit deux blocs dosés ne doit rien lire dans leur ordre). Tests : S3, `what_unseen_pages_hold_changes_no_order` ; S5, `a_word_only_an_unseen_page_holds_answers_like_a_word_nobody_wrote` ; S6, `a_backlink_from_an_unseen_page_is_not_listed`, `unseen_sources_never_hide_seen_ones` ; X1, e2e à trois comptes.
 2. **Un droit retiré vaut à la requête suivante**, sans attendre l'indexeur : accès retiré, page fermée aux membres, page mise à la corbeille, compte sorti de l'espace. Test : S5, `withdrawn_access_hides_the_page_at_the_next_query` (l'indexeur arrêté pendant le test).
-3. **L'indexeur ne retarde aucune frappe**, ni par l'acteur, ni par la file d'écriture, ni par le processeur. Tests : S4, `the_actor_only_names_the_page_it_wrote` (compteur, sans minutage) ; X2, la mesure de la frappe pendant l'indexation d'un espace entier.
-4. **Une entrée hostile** : une requête faite pour coûter (longue, mille termes, opérateurs, préfixe d'une lettre), une page faite pour coûter à l'index (un bloc de plusieurs Mio, cent mille liens, une écriture en boucle), une boucle de recherches d'un compte. Tests : S2, linéarité ; S5, `a_burst_of_searches_of_one_account_does_not_delay_another`.
-5. **Un index qui n'est pas celui de la base** (base restaurée, dossier recopié d'ailleurs, arrêt brutal entre deux validations) : aucun extrait d'un texte que la base n'a pas. Tests : S3, S7.
-6. **Ce qui a été effacé ne reste pas trouvable** au-delà du délai d'indexation, et ce que seule une version de l'historique garde n'est jamais trouvable (l'historique demande « Peut modifier », R203 ; la recherche, « Peut lire »). Test : S4, `erased_text_leaves_the_index`.
+3. **L'indexeur ne retarde aucune frappe**, ni par l'acteur, ni par la file d'écriture, ni par le processeur. Tests : S4a, `the_actor_only_names_the_page_it_wrote` (compteur, sans minutage) ; X2, la mesure de la frappe pendant l'indexation d'un espace entier, et pendant qu'une grande page est récrite en boucle.
+4. **Une entrée hostile** : une requête faite pour coûter (longue, mille termes, opérateurs, préfixe d'une lettre), une page faite pour coûter à l'index ou pour évincer les autres des résultats (un bloc de plusieurs Mio, cent mille liens, dix mille blocs sous un titre courant, une écriture ou un renommage en boucle), une boucle de recherches d'un compte, des centaines de liens posés vers la page d'un autre. Tests : S2, linéarité ; S3, `a_title_word_of_a_10000_block_page_does_not_hide_other_pages` ; S5, `a_burst_of_searches_of_one_account_does_not_delay_another` ; S6, `unseen_sources_never_hide_seen_ones`.
+5. **Un index qui n'est pas celui de la base** (base restaurée après une seule validation comme après cent, dossier recopié d'ailleurs, arrêt brutal entre deux validations) : aucun extrait d'un texte que la base n'a pas. Tests : S3, S4c (`a_copy_then_one_commit_then_the_copy_put_back_rebuilds`), S7.
+6. **Ce qui a été effacé ne reste pas trouvable** au-delà du délai d'indexation, et ce que seule une version de l'historique garde n'est jamais trouvable (l'historique demande « Peut modifier », R203 ; la recherche, « Peut lire »). Test : S4b, `erased_text_leaves_the_index`.
 
 ---
 
@@ -113,20 +120,24 @@ Prises pour écrire le plan ; celles qui sont des choix de produit sont reprises
 
 - **R900** : le moteur est **Tantivy**, comme le dit la conception (§5.2, §5.7, §12 « Mes choix » n° 7), derrière une interface étroite de `mementum-search` (`SearchIndex`) ; S0 le mesure d'abord, et s'arrête si un budget du §5.10 ne tient pas (décision L1).
 - **R901** : `blocks_index` vit dans SQLite, clé `(node_id, block_id)` ; la colonne `path` de la conception n'est pas créée (écart E3). Tantivy est nourri **depuis `blocks_index`**, jamais depuis les documents : la base reste la source, l'index plein texte une copie qu'on refait.
-- **R902** : l'unité de l'index plein texte est le **bloc**, et chaque bloc y porte aussi le titre de sa page, dans un champ à part, mieux noté ; une page a en plus une entrée pour son titre seul. Une requête de plusieurs mots les veut tous, dans le titre ou dans un même bloc. Ce qu'on perd : deux mots écrits dans deux blocs différents d'une page ne la trouvent pas (limite écrite ; la P4 la lève par la recherche hybride).
+- **R902** (récrit au tour de correction 1) : l'unité de l'index plein texte est le **bloc**, et chaque bloc y porte aussi le titre de sa page, dans un champ à part, mieux noté ; une page a en plus une entrée pour son titre seul. Une requête de plusieurs mots les veut tous, dans le titre ou dans un même bloc. **Les entrées sont groupées par page dans l'index, avant toute pagination** : un collecteur garde la meilleure entrée de chaque `node_id`, et `skip` et `limit` comptent des pages, jamais des entrées. Sans cela, un mot du titre d'une page de 10 000 blocs rendait 10 001 entrées de cette page, et les cent résultats qu'une personne peut lire n'étaient qu'elle : une page faite pour cela évinçait les autres pour tout l'espace. S0 mesure le coût de ce collecteur sur un million d'entrées ; s'il ne tient pas, le repli est de ne plus recopier le titre sur chaque bloc (une entrée de titre par page), au prix de la limite L-c élargie. Ce qu'on perd dans les deux cas : deux mots écrits dans deux blocs différents d'une page ne la trouvent pas (la P4 le lève par la recherche hybride). Ce que coûte le titre recopié : un renommage récrit toutes les entrées de la page dans l'index plein texte (borné par R906 : une fois toutes les 15 s au plus par page ; mesuré en S4c).
 - **R903** : le fil d'Ariane d'un résultat est **calculé à la requête**, d'après ce que le compte voit (`visible_parent`), jamais lu dans l'index, et les titres des pages parentes ne sont pas un texte cherché (écart E2).
 - **R904** : le titre d'un résultat est lu dans `nodes` à la requête, jamais dans l'index.
 - **R905** : la réponse ne porte **aucun total**, seulement « il y en a d'autres ».
 - **R906** : une page est réindexée 2 s après sa dernière écriture, 15 s au plus après la première écriture non indexée (`Config::index_after`, `index_at_most`, réglables pour les tests ; décision L9).
 - **R907** : l'indexeur lit ce que le store garde, par une lecture seule neuve de `mementum-sync`, pas par l'acteur de la page.
 - **R908** : les écritures de l'index dans SQLite ont leur voie, `Lane::Index`, sans priorité, comme `Lane::Copies` (R607) : une frappe n'attend jamais plus d'une transaction de l'index.
-- **R909** : la cohérence entre la base et Tantivy tient à une **époque** : un identifiant tiré une fois par base et un compteur, gardés dans la base et dans la charge utile de chaque validation de Tantivy ; au démarrage, un écart autre que « une validation d'avance » fait tout reconstruire.
+- **R909** (récrit au tour de correction 1) : la cohérence entre la base et Tantivy tient à un **jeton par validation**, écrit d'abord dans la base comme une intention (« L'intention, la validation, la clôture », plus bas). Un compteur ne suffisait pas : « l'index a une validation d'avance » se lisait pareil après un arrêt brutal et après une base restaurée une validation plus tôt, dont l'outbox ne nomme pas les pages de la validation perdue.
 - **R910** : débit de la recherche, par compte, en mémoire : un calcul en cours et une requête en attente au plus ; une requête neuve prend la place de celle qui attendait, qui reçoit `429 search_busy` ; quatre calculs de front pour l'instance, les comptes tour à tour.
-- **R911** : bornes d'une requête : 200 caractères, 8 termes, pas de syntaxe (ni opérateur, ni joker, ni expression rationnelle : la requête est bâtie par programme, jamais donnée à un analyseur de requêtes) ; préfixe sur le dernier terme seulement, à partir de 2 caractères ; 20 résultats par réponse, 5 réponses à la suite au plus.
+- **R911** : bornes d'une requête : 200 caractères, 8 termes, pas de syntaxe (ni opérateur, ni joker, ni expression rationnelle : la requête est bâtie par programme, jamais donnée à un analyseur de requêtes) ; préfixe sur le dernier terme seulement, à partir de 2 caractères ; 20 pages par réponse, 5 réponses à la suite au plus, donc cent pages trouvées par requête (décisions L15, L16).
 - **R912** : bornes de la projection (valeurs de départ, à mesurer en S2) : 64 Kio de texte par bloc et 8 Mio par page, coupés entre deux caractères, la page notée `truncated` ; 10 000 liens par page.
 - **R913** : `mementum reindex` tourne **serveur arrêté** ; serveur lancé, il refuse en le disant (écart E7).
 - **R914** : la recherche porte sur un espace, celui qu'on affiche (décision L2).
 - **R915** : une instance existante est indexée d'elle-même, en fond, après son premier démarrage sous ce lot ; la réponse d'une recherche dit tant que l'espace n'est pas à jour (décision L13).
+- **R916** (tour de correction 1) : **la note d'un résultat ne lit aucune statistique de l'index** (ni nombre d'entrées, ni fréquence d'un terme dans l'ensemble, ni longueur moyenne). L'index est un pour l'instance, filtré par `space_id` : une note à la BM25 y lirait les autres espaces, la corbeille, les pages non vues et les entrées supprimées pas encore fusionnées, et un compte qui écrit deux blocs dosés lirait dans leur ordre la fréquence d'un mot chez les autres, puis compterait leurs blocs par dichotomie. La note ne dépend que de l'entrée elle-même (le champ touché, le nombre de termes trouvés, leur fréquence dans l'entrée, sa longueur) et de la requête, ou de statistiques constantes données par programme. De même, **le préfixe ne parcourt pas le dictionnaire de l'index** (son coût et ses termes dépendraient du vocabulaire des autres) : les débuts de mot sont indexés dans un champ à eux, et un préfixe est un terme exact. C'est une exigence de S0 et de S3 ; si Tantivy ne le permet pas simplement, S0 rend `BLOCKED` et la question revient à Lenny, avec la limite écrite telle qu'elle est.
+- **R917** (tour de correction 1) : la recherche est un `POST` dont le corps porte la requête (`{ "q": …, "after": … }`), jamais un `GET` avec la requête dans l'adresse.
+- **R918** (tour de correction 1) : ce qui change l'index sans passer par un acteur laisse un **marqueur durable dans sa propre transaction** : un titre changé, une page supprimée (une ligne de `search_outbox`) ; une page créée ou dupliquée (une ligne de `search_state` à `indexed_seq = -1`). `Store::changes()` ne sert plus qu'à réveiller l'indexeur, qui lit ces marqueurs : rien ne tient à sa mémoire, et aucune annonce ne fait comparer toutes les pages d'un espace.
+- **R919** (tour de correction 1) : seuls les blocs dont l'empreinte a changé passent à l'index plein texte ; `search_outbox` nomme des blocs, et la page entière seulement pour un titre, une suppression ou une reconstruction.
 
 ---
 
@@ -134,7 +145,7 @@ Prises pour écrire le plan ; celles qui sont des choix de produit sont reprises
 
 ### Quoi indexer
 
-Une ligne de `blocks_index` par bloc qui porte du texte, pour chaque page (`kind = 'page'`) hors des pages supprimées. La corbeille **est** indexée (une page restaurée se retrouve sans attendre), et n'est jamais rendue.
+Une ligne de `blocks_index` par bloc qui porte du texte, pour chaque page (`kind = 'page'`) hors des pages supprimées. La corbeille **est** indexée (une page restaurée se retrouve sans attendre), et n'est jamais rendue : son texte reste donc dans l'index tant que la page n'est pas supprimée pour de bon (décision L4).
 
 | Bloc | Texte indexé |
 |---|---|
@@ -144,11 +155,12 @@ Une ligne de `blocks_index` par bloc qui porte du texte, pour chaque page (`kind
 | `bookmark` | `url` |
 | `equation` | `latex` |
 | `pageLink` | `title` (le titre copié, R251) |
-| `divider`, `toc`, `columnList`, `column`, `databaseRef`, `syncedBlock`, `unknown` | rien (leurs enfants sont parcourus) |
+| `divider`, `toc`, `columnList`, `column`, `databaseRef`, `syncedBlock` | rien (leurs enfants sont parcourus) |
+| `unknown` (un bloc d'un autre schéma, ou étranger, gardé en JSON dans `data`) | rien : son texte n'est pas trouvable (décision L17) ; ses enfants sont parcourus |
 
 Les enfants d'un bloc ont chacun leur ligne. Un bloc sans `id`, ou dont l'`id` paraît deux fois dans la page lue, est indexé sous une clé de remplacement (`#<rang>`), que la réponse ne donne pas comme bloc à atteindre. Le titre de la page n'est pas dans `blocks_index` : il est dans `nodes`.
 
-`page_links(node_id, block_id, target_id)` : une ligne par bloc et par page visée, pour un bloc `pageLink` (`pageId`), une mention de page, et un lien dont l'adresse est le chemin exact d'une page de l'instance (`/p/<uuid>`, avec ou sans l'origine publique du serveur). `target_id` est un UUID lu, sans clé étrangère : la page visée peut être d'un autre espace, ou ne plus exister.
+`page_links(node_id, block_id, target_id)` : une ligne par bloc et par page visée, pour un bloc `pageLink` (`pageId`), une mention de page, et un lien dont l'adresse est le chemin exact d'une page de l'instance (`/p/<uuid>`, avec ou sans l'origine publique du serveur, avec ou sans fragment de bloc). `target_id` est un UUID lu, sans clé étrangère : la page visée peut être d'un autre espace, ou ne plus exister.
 
 ### Où
 
@@ -169,24 +181,37 @@ CREATE TABLE page_links (
     target_id TEXT NOT NULL,
     PRIMARY KEY (node_id, block_id, target_id)
 ) WITHOUT ROWID;
-CREATE INDEX page_links_by_target ON page_links (target_id, node_id);
+CREATE INDEX page_links_by_target ON page_links (target_id, node_id, block_id);
 
 CREATE TABLE search_state (
     node_id     TEXT PRIMARY KEY NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-    indexed_seq INTEGER NOT NULL,    -- le `seq` de la page que blocks_index reflète
+    indexed_seq INTEGER NOT NULL,    -- le `seq` de la page que blocks_index reflète ; -1 : jamais indexée (R918)
     failed_seq  INTEGER,             -- le `seq` où la lecture a échoué : pas de nouvel essai avant qu'il change
     truncated   INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX search_state_never ON search_state (node_id) WHERE indexed_seq = -1;
 
-CREATE TABLE search_outbox (         -- pages dont blocks_index ou le titre a changé, pas encore validées dans Tantivy
-    node_id TEXT PRIMARY KEY NOT NULL,
-    gen     INTEGER NOT NULL         -- avance à chaque changement : une ligne n'est retirée que si elle n'a pas bougé
-);
+-- Ce que l'index plein texte n'a pas encore validé (R919). `block_id = ''` : la page entière
+-- (son titre a changé, elle est supprimée, ou tout est à reconstruire).
+CREATE TABLE search_outbox (
+    node_id  TEXT NOT NULL,          -- sans clé étrangère : la ligne survit à la page supprimée
+    block_id TEXT NOT NULL,
+    gen      INTEGER NOT NULL,       -- avance à chaque changement : une ligne n'est close que si elle n'a pas bougé
+    token    TEXT,                   -- le jeton de l'intention qui l'a prise (R909) ; NULL : pas encore prise
+    PRIMARY KEY (node_id, block_id)
+) WITHOUT ROWID;
 ```
 
-L'époque (R909) va dans `instance_settings`. Les trois premières tables partent avec leur page par la cascade, comme `favorites` (`0004`) ; S1 vérifie que `Store::delete_node`, qui retire les autres tables à la main, n'a rien à y ajouter, et met la page supprimée dans `search_outbox` dans sa transaction.
+`instance_settings` garde deux jetons (R909) : `search.committed`, celui de la dernière validation close, et `search.intent`, celui d'une validation annoncée et pas encore close. Les trois premières tables partent avec leur page par la cascade, comme `favorites` (`0004`) ; S1 vérifie que `Store::delete_node`, qui retire les autres tables à la main, n'a rien à y ajouter.
 
-L'index Tantivy vit dans `<données>/search/`, à côté de `files/`. Champs : `space_id`, `node_id` (termes exacts, pour filtrer et supprimer), `block_id` (gardé), `title` et `text` (cherchés, gardés pour l'extrait). Un seul écrivain, tenu par l'indexeur.
+**Les marqueurs durables (R918)**, écrits dans la transaction de l'écriture qui les cause, par le store lui-même :
+- `Store::create_node` (avec un document) et `Store::duplicate_pages` : une ligne `search_state` à `indexed_seq = -1` par page née, et sa ligne d'outbox de page entière (son titre) ;
+- `Store::rename_node` et `Store::update_node` quand le titre change : la ligne d'outbox de page entière ;
+- `Store::delete_node` : la ligne d'outbox de page entière de chaque page supprimée (les lignes de bloc de ces pages sont retirées de l'outbox).
+
+Un test lit les sources du store (sur le modèle de `only_the_depot_forgets_files`) : `UPDATE nodes SET` qui touche `title`, `INSERT INTO nodes` et `DELETE FROM nodes` n'y paraissent qu'aux places d'une liste fermée, chacune suivie de son marqueur ; une écriture neuve du titre est une place de plus, donc un test rouge.
+
+L'index Tantivy vit dans `<données>/search/`, à côté de `files/`. Champs : `space_id` et `node_id` (termes exacts, pour filtrer), `entry` (`<node_id>/<block_id>`, terme exact, pour remplacer une entrée), `block_id` (gardé), `title` et `text` (cherchés, gardés pour l'extrait), `title_starts` et `text_starts` (les débuts de mot, pour le préfixe, R916). Un seul écrivain, tenu par l'indexeur.
 
 ### Quand
 
@@ -199,57 +224,90 @@ indexeur (une tâche de fond du serveur, une page à la fois, les pages tour à 
   2. relit la page gardée, hors acteur, sur le fil bloquant                   R907
   3. la projette en lignes (pur)                                              S2
   4. écrit la différence dans blocks_index / page_links / search_state,
-     et la page dans search_outbox : une transaction, voie Lane::Index        R908
-  5. par lots : pour chaque page de l'outbox, retire ses entrées de Tantivy
-     et récrit celles de blocks_index ; valide Tantivy (époque + 1) ;
-     puis, dans la base, retire de l'outbox les lignes restées au même `gen`
-     et avance l'époque                                                       R909
+     et une ligne d'outbox par bloc changé ou parti :
+     une transaction bornée, voie Lane::Index                                 R908, R919
+  5. par lots, l'intention, la validation, la clôture                         R909
 ```
 
-Ce qui met une page à l'ordre du jour, sans que personne puisse l'oublier :
-- **le contenu** : `Actor::persist` et `persist_restore`, les deux seuls points par où l'acteur écrit, nomment la page au hub après une écriture réussie ;
-- **le titre, la création, la duplication, la restauration, la suppression** : l'indexeur est abonné à `Store::changes()` ; à chaque annonce d'un espace (groupées, 250 ms), il compare les pages de l'espace à `search_state` et à ce qu'il sait des titres ; une route neuve qui change un titre n'a donc rien à appeler ;
-- **le démarrage** : un rattrapage compare, pour toutes les pages, le dernier `seq` gardé (instantané ou journal) à `search_state.indexed_seq`. C'est lui qui indexe une instance existante (toutes ses pages sont en retard), qui rattrape un arrêt brutal, et une écriture faite par un autre `Store` (les tests, la CLI). Il tourne en fond, après que le serveur écoute : le démarrage à froid ne l'attend pas.
+Ce qui met une page à l'ordre du jour :
+- **le contenu écrit par un acteur** : `Actor::persist` et `persist_restore`, les deux seuls points par où l'acteur écrit, nomment la page au hub après une écriture réussie. C'est le seul signal gardé en mémoire ; perdu dans un arrêt brutal, il est rattrapé au démarrage ;
+- **le titre, la création, la duplication, la suppression** : les marqueurs durables ci-dessus. L'indexeur, abonné à `Store::changes()` (toutes ces écritures avancent `rev` ou `lsn`), s'en sert comme d'un réveil, et lit alors `search_state` à `-1` (par son index partiel) et l'outbox : jamais toutes les pages d'un espace ;
+- **le démarrage** : un rattrapage compare, pour toutes les pages, par lots, le dernier `seq` gardé (instantané ou journal) à `search_state.indexed_seq`. C'est lui qui indexe une instance existante (aucune de ses pages n'a de ligne), et qui rattrape un arrêt brutal ou une écriture de contenu faite par un autre `Store` (les tests, la CLI). Il tourne en fond, après que le serveur écoute : le démarrage à froid ne l'attend pas.
 
-Une page dont la lecture échoue est notée (`failed_seq`), journalisée une fois, et n'est pas réessayée tant que son `seq` n'a pas changé. Une transaction de l'index porte au plus `MAX_INDEX_TX_BYTES` de lignes changées (valeur de départ : 4 Mio ; la duplication écrit 6 ms par Mio en release, R608) ; au-delà, la page s'écrit en plusieurs transactions, et seule la dernière pose `indexed_seq` et l'outbox.
+Une page dont la lecture échoue est notée (`failed_seq`), journalisée une fois, et n'est pas réessayée tant que son `seq` n'a pas changé ; **ses lignes d'index sont retirées** dans la même transaction (elle n'est plus trouvable par un texte qu'on ne sait plus relire, et ses rétroliens partent), plutôt que gardées sans limite de temps.
 
-À l'arrêt : `hub.shutdown()`, puis l'indexeur finit sa transaction en cours et valide Tantivy, puis `store.close()`. Ce qui restait à indexer l'est au démarrage suivant.
+Une transaction de l'index porte au plus `MAX_INDEX_TX_BYTES` de lignes changées. **Valeur de départ : 256 Kio.** Le point de contrôle automatique du WAL tombe toutes les 1 000 pages, soit environ 4 Mio : une transaction de cette taille en déclencherait un à chaque fois, sur le tour d'écriture, devant la frappe des autres (R447). La valeur est arrêtée par `measure_the_write_turn_held_by_an_index_transaction`, **préalable de S4b**, pas par ce plan. Au-delà de la borne, la page s'écrit en plusieurs transactions, et seule la dernière pose `indexed_seq` ; pendant ce temps, `blocks_index` et `page_links` portent un état partiel de la page (limite L-i).
+
+À l'arrêt : `hub.shutdown()`, puis l'indexeur finit sa transaction en cours et clôt sa validation, puis `store.close()`. Ce qui restait à indexer l'est au démarrage suivant.
+
+### L'intention, la validation, la clôture (R909)
+
+Passer un lot de l'outbox à l'index plein texte se fait en trois temps, deux dans la base et un dans Tantivy :
+
+1. **L'intention** (une transaction, `Lane::Index`) : un jeton `T` est tiré au hasard ; les lignes du lot le reçoivent (`token = T`) ; `search.intent = T`. Rien n'est encore écrit dans Tantivy.
+2. **La validation** (fil bloquant) : pour chaque ligne du lot, l'entrée est retirée de Tantivy (`entry`, ou toutes celles du `node_id` pour une page entière) et récrite d'après `blocks_index` et `nodes` si elle existe encore ; Tantivy valide avec `T` pour charge utile.
+3. **La clôture** (une transaction) : les lignes qui portent `T` **et dont `gen` n'a pas bougé** sont retirées ; celles qui ont bougé perdent leur jeton et restent ; `search.committed = T`, `search.intent` vidé.
+
+Au démarrage, la charge utile `P` de l'index est comparée aux deux jetons de la base :
+
+| Cas | Ce que c'est | Ce qui est fait |
+|---|---|---|
+| `P = search.committed` | en ordre ; une intention restée posée n'a jamais été validée | l'intention est défaite (les jetons des lignes retirés), rien d'autre |
+| `P = search.intent` | arrêt entre la validation et la clôture, **ou** une copie de la base prise entre l'intention et la clôture puis remise en place | les lignes de l'intention **sont rejouées** depuis `blocks_index` (jamais tenues pour faites : la base remise en place peut porter un autre texte que celui validé), puis closes |
+| tout autre `P`, dossier absent, illisible, d'un autre schéma d'index | base restaurée (une validation plus tôt comme cent), copie d'avant migration remise en place, dossier d'une autre instance | le dossier est vidé, toutes les pages passent dans l'outbox, tout est reconstruit |
+
+Pourquoi le jeton ferme le trou du compteur : une base restaurée d'avant la validation `T` ne connaît `T` ni comme `committed` ni comme `intent`, quel que soit le nombre de validations faites depuis sa copie.
+
+Vider `search/` ne suit aucun lien (`symlink_metadata`, la règle du dépôt des fichiers, R272) : un lien posé dans le dossier est retiré lui-même, jamais ce qu'il vise.
 
 ### La requête et les droits
 
-`GET /api/v1/spaces/{id}/search?q=…&after=…`, pour qui a un rôle dans l'espace, invité compris.
+`POST /api/v1/spaces/{id}/search`, corps `{ "q": "…", "after": N }` (R917), pour qui a un rôle dans l'espace, invité compris.
 
-1. `caller`, puis `space_access` : `404` sans rôle, avant toute lecture de l'index.
+1. L'extracteur `AuthUser` (`401`, `409 account_changed`), puis `space_access` : `404` sans rôle, avant toute lecture du corps au-delà de sa borne (4 Kio) et de l'index. `space_access` est lu dans son cache par `rev` : ce premier pas ne coûte pas un calcul par frappe.
 2. La requête est lue et bornée (R911). Vide une fois normalisée : `200`, aucun résultat, sans calcul.
-3. L'ensemble permis est bâti de `SpaceAccess::visible()` : les pages vues, **hors corbeille** (`in_trash` faux). Il est donné à l'index comme un **filtre de la requête** (les seules entrées de ces `node_id`), pas appliqué après coup : ce que les pages non vues contiennent ne change ni les résultats, ni leur ordre, ni le nombre de pages lues pour remplir une réponse.
-4. Le calcul part sur le fil bloquant, sous le débit du compte (R910). La garde suit le calcul, pas la requête (R630).
-5. Chaque résultat est **revérifié** contre `SpaceAccess` (filet : une entrée d'une page hors de l'ensemble ferait une ligne `error` et serait jetée), groupé par page (le meilleur bloc de chaque page), puis reçoit son titre (`nodes`), son fil d'Ariane (les ancêtres **vus**), son extrait.
-6. Réponse : `SearchResults { results: SearchHit[], more: bool, indexing: bool }`, `SearchHit { pageId, title, path: { id, title }[], blockId: string | null, excerpt: string, marks: [number, number][] }`. Les plages de `marks` comptent en unités UTF-16, comme une chaîne JavaScript. `excerpt` fait 240 caractères au plus. `indexing` : l'indexeur sait une page **vue par ce compte** en retard dans cet espace (jamais un nombre).
+3. La requête prend sa place dans le débit du compte (R910). **Tout ce qui suit est fait sous cette garde, sur le fil bloquant**, bâtir l'ensemble permis compris : rien de proportionnel à l'espace ne tourne sur un fil du moteur, ni avant le débit.
+4. L'ensemble permis est bâti de `SpaceAccess::visible()` : les pages vues, **hors corbeille** (`in_trash` faux). Il est donné à l'index comme un **filtre de la requête** (les seules entrées de ces `node_id`), pas appliqué après coup.
+5. L'index rend des **pages** : la meilleure entrée de chaque page, groupées avant `skip` et `limit` (R902), notées sans statistique d'ensemble (R916). `after` compte des pages ; deux réponses qui se suivent ne rendent jamais la même page (à index inchangé entre les deux).
+6. Chaque page rendue est **revérifiée** contre `SpaceAccess` (filet : une entrée d'une page hors de l'ensemble ferait une ligne `error` et serait jetée), puis reçoit son titre (`nodes`), son fil d'Ariane (les ancêtres **vus**), son extrait.
+7. Réponse : `SearchResults { results: SearchHit[], more: bool, indexing: bool }`, `SearchHit { pageId, title, path: { id, title }[], blockId: string | null, excerpt: string, marks: [number, number][] }`. Les plages de `marks` comptent en unités UTF-16, comme une chaîne JavaScript. `excerpt` fait 240 caractères au plus. `indexing` : l'indexeur sait une page **vue par ce compte** en retard dans cet espace (jamais un nombre).
 
-Ce que le filtre laisse dépendre des pages non vues : la note de pertinence (les statistiques de l'index portent sur tout l'espace, donc l'ordre de deux résultats vus peut bouger selon ce qu'écrivent les autres). C'est écrit comme limite (L-b, plus bas) ; S0 mesure s'il est simple de noter sans statistiques globales.
+Ce qui dépend encore de ce que la personne ne voit pas : **le temps de réponse**. Lire les entrées d'un terme coûte en proportion du nombre d'entrées de l'instance qui le portent, avant le filtre. S0 le chiffre (un terme porté par aucune entrée non vue, puis par cent mille) ; c'est la limite L-b, et une décision de Lenny (L19) si l'écart se mesure à travers le réseau.
 
-`GET /api/v1/pages/{id}/backlinks`, pour qui lit la page (`read`, à la corbeille aussi : la route ne rend alors rien de plus qu'ailleurs). Les sources sont lues dans `page_links` par `target_id`, puis **triées par `space_access` de l'espace de la page** : seules les pages vues, hors corbeille, de cet espace (une source d'un autre espace n'est pas rendue au lot 4, comme le lien inverse garde son titre copié, R574). Réponse : `Backlinks { pages: { pageId, title, blockId, excerpt }[] }`, 200 au plus, sans total.
+`GET /api/v1/pages/{id}/backlinks`, pour qui lit la page (`read`, à la corbeille aussi). Une personne ne doit ni perdre un vrai rétrolien derrière des sources qu'elle ne voit pas, ni apprendre leur nombre : `target_id` n'a pas de clé étrangère, et tout compte peut écrire, dans une page à lui, des centaines de liens vers l'UUID d'une page d'un autre. La lecture est donc faite ainsi :
+
+- les sources sont les `node_id` **distincts** de `page_links` pour ce `target_id`, **restreints à l'espace de la page visée** par une jointure sur `nodes` (une source d'un autre espace n'est pas rendue au lot 4, comme le lien inverse garde son titre copié, R574), hors la page elle-même, dans l'ordre des identifiants ;
+- elles sont lues **par lots** (500), chaque lot trié par `space_access` (vues, hors corbeille), jusqu'à **200 sources vues** ou jusqu'à un plafond de **20 000 sources parcourues** ; la réponse ne dit ni combien ont été parcourues, ni s'il en reste ;
+- pour chaque source gardée, son premier bloc qui lie, et l'extrait de ce bloc **coupé dans la requête** (`substr`), jamais un texte de 64 Kio ramené pour en garder 240 caractères.
+
+Réponse : `Backlinks { pages: { pageId, blockId, excerpt }[] }`. Au-delà du plafond de parcours, des sources vues peuvent manquer : c'est la limite L-j, à laquelle un compte hostile n'arrive qu'en créant vingt mille pages dans l'espace.
 
 ### Bornes devant une entrée hostile
 
 | Ce qu'un compte peut faire | Borne | Où |
 |---|---|---|
 | Une requête longue, à beaucoup de termes, à opérateurs | 200 caractères, 8 termes, aucune syntaxe ; au-delà `422 invalid_query` | S2, S5 |
-| Un préfixe d'une lettre sur tout l'espace | préfixe à partir de 2 caractères, sur le dernier terme seulement | S2, S3 |
+| Un préfixe d'une lettre sur tout l'espace | préfixe à partir de 2 caractères, sur le dernier terme seulement, par un terme exact du champ des débuts de mot (R916) | S2, S3 |
 | Une boucle de recherches | un calcul et une attente par compte, quatre calculs pour l'instance, les comptes tour à tour ; `429 search_busy` | S5 |
-| Paginer sans fin | 20 résultats par réponse, 5 réponses à la suite | S5 |
+| Paginer sans fin | 20 pages par réponse, 5 réponses à la suite | S5 |
+| Une page de dix mille blocs sous un titre courant, pour occuper tous les résultats | une page n'a qu'un résultat : groupement par page dans l'index, avant la pagination (R902) | S3 |
+| Deux blocs dosés pour lire dans leur ordre ce qu'écrivent les autres | la note ne lit aucune statistique d'ensemble (R916) | S0, S3 |
 | Une page d'un bloc de plusieurs Mio, ou de cent mille liens | 64 Kio par bloc, 8 Mio par page, 10 000 liens ; le reste n'est pas indexé | S2 |
-| Écrire sans relâche dans une page pour occuper l'indexeur | une indexation par page toutes les 15 s au plus, une page à la fois, les pages tour à tour ; rien n'est récrit de ce qui n'a pas changé | S4 |
-| Écrire sans relâche dans N pages | l'indexeur prend du retard (dit par `indexing`), sans coût pour la frappe des autres : une seule voie, une transaction bornée à la fois | S4, X2 |
+| Écrire sans relâche dans une grande page | une indexation de la page toutes les 15 s au plus ; elle la relit et la projette en entier (81 ms pour 10 000 blocs en release, sur le fil bloquant), mais **seuls les blocs changés** sont écrits, dans SQLite comme dans l'index plein texte (R919) | S4b, S4c, X2 |
+| Renommer sans relâche une grande page | une fois toutes les 15 s au plus ; chaque fois, toutes les entrées de la page sont récrites dans l'index plein texte (R902), rien dans `blocks_index` | S4c, X2 |
+| Écrire sans relâche dans N pages | l'indexeur prend du retard (dit par `indexing`), sans coût pour la frappe des autres : une seule voie, une transaction bornée à la fois | S4b, X2 |
+| Poser des centaines de liens vers la page d'un autre | sources distinctes, de l'espace de la cible, triées par droits avant d'être comptées, plafond de parcours | S6 |
 | Remplir le disque par l'index | rien avant le lot 7 (l'index pèse en proportion des pages, que R247 ne borne pas non plus) | limite écrite |
-| Demander les rétroliens en boucle | lecture indexée, 200 lignes au plus ; pas de débit propre (une lecture de la base, comme les favoris) | S6 |
+| Demander les rétroliens en boucle | lecture indexée et bornée (200 vues, 20 000 parcourues), extraits coupés en SQL ; pas de débit propre au lot 4 (mesurée en S6 ; un débit s'ajoute si elle dépasse celle des commentaires d'une page pleine) | S6 |
 
 ### Reconstruction, sauvegardes
 
 - `<données>/search/` ne fait pas partie d'une sauvegarde : il se refait. La documentation le dit (§7.4, README).
-- Au démarrage, l'époque de Tantivy est comparée à celle de la base : égale, rien ; en avance d'une validation, l'outbox est rejouée ; tout autre écart (base restaurée, copie d'avant migration remise en place, dossier d'une autre instance, dossier absent ou illisible, version du schéma de l'index différente), le dossier est vidé et toutes les pages passent dans l'outbox. Tant que cette reconstruction dure, **la recherche ne rend que ce qui est déjà reconstruit**, et le dit (`indexing`).
+- Au démarrage, le jeton de l'index est comparé à ceux de la base (table plus haut). Tant qu'une reconstruction dure, **la recherche ne rend que ce qui est déjà reconstruit**, et le dit (`indexing`).
 - `mementum reindex` (serveur arrêté) refait tout : `blocks_index` et `page_links` depuis les documents, puis Tantivy depuis `blocks_index`. `mementum reindex --text-only` ne refait que Tantivy.
 - La migration `0005` ne remplit rien : elle crée des tables vides, et reste rapide sur une grande base.
+- **Le texte d'une page est gardé trois fois** : dans son document Yjs, dans `blocks_index`, dans l'index plein texte (qui le garde pour l'extrait). S0 chiffre la taille des deux copies neuves ; S4c mesure la base et le dossier avant et après l'indexation d'un espace (décision L18).
+- Un texte effacé quitte `blocks_index` et les résultats à la réindexation de sa page, mais **reste dans les fichiers de l'index plein texte jusqu'à la fusion de son segment**, comme il reste dans les pages libres de SQLite : limite L-k, pour qui lit le disque du serveur.
 
 ---
 
@@ -259,10 +317,10 @@ Ce que le filtre laisse dépendre des pages non vues : la note de pertinence (le
 
 | Budget | Ce que le lot risque | Mesure |
 |---|---|---|
-| Frappe vue chez un autre < 150 ms | l'indexeur dans la file d'écriture, sur le processeur, les fusions de segments de Tantivy | X2 : la mesure existante de `crates/mementum-sync/tests/budgets.rs`, rejouée pendant qu'un espace de 10 000 pages est indexé |
+| Frappe vue chez un autre < 150 ms | l'indexeur dans la file d'écriture, sur le processeur, les fusions de segments de Tantivy | S4b puis X2 : la frappe d'un autre pendant la première indexation d'un espace de 10 000 pages, et pendant qu'une page de 10 000 blocs est récrite puis renommée en boucle |
 | Ouvrir une page jamais vue < 300 ms (1 000 blocs), < 3 s (10 000) | les rétroliens, le code de la recherche dans le lot de départ | `e2e/budgets.spec.ts` inchangé et vert ; un e2e compte les requêtes d'une ouverture (aucune vers `/search` ni `/backlinks` avant la première synchro) |
 | Charger une page de 10 000 blocs < 300 ms (serveur) | l'indexeur qui relit la même page au même moment | X2 |
-| Mémoire du serveur au repos < 150 Mo | l'écrivain de Tantivy (tampon), l'index ouvert | S0 puis X2 : la mesure existante de `mementum-cli`, avec un index de 10 000 pages |
+| Mémoire du serveur au repos < 150 Mo | l'écrivain de Tantivy (tampon), l'index ouvert | S0 puis X2 : la mesure existante de `mementum-cli`, avec un index de 10 000 pages, **prise une fois le rattrapage fini** (c'est cela, « au repos ») ; la pointe pendant le rattrapage et pendant une reconstruction est relevée à part, sans budget de la conception, et dite au registre |
 | Démarrage à froid < 1 s | l'ouverture de l'index, le rattrapage | S0 puis X2 : la mesure existante de `mementum-cli`, avec le même index ; le rattrapage n'est pas attendu |
 | Pi 4 : ~25 personnes ; VPS 2 vCPU : ~200 | les fils de Tantivy | non mesuré par ce lot (les mesures ARM sont repoussées avant la P2) ; un seul fil d'indexation, un seul de fusion |
 
@@ -281,10 +339,10 @@ Toute mesure neuve suit les règles de la CI : `#[ignore]` ne marque que des mes
 | Fichier | Rôle | Tâche |
 |---|---|---|
 | `crates/mementum-store/migrations/0005_search.sql` | tables de l'index | S1 |
-| `crates/mementum-store/src/search.rs` (neuf), `queue.rs`, `nodes.rs`, `lib.rs` | écritures et lectures de l'index, `Lane::Index` | S1 |
+| `crates/mementum-store/src/search.rs` (neuf), `queue.rs`, `nodes.rs`, `duplicate.rs`, `lib.rs` | écritures et lectures de l'index, marqueurs durables, `Lane::Index` | S1 |
 | `crates/mementum-search/` (crate neuve) : `src/project.rs`, `query.rs`, `index.rs`, `lib.rs` | projection, requête, Tantivy | S2, S3 |
-| `crates/mementum-sync/src/hub.rs`, `actor.rs`, `lib.rs` | pages écrites, lecture seule d'une page gardée | S4 |
-| `crates/mementum-server/src/indexer.rs` (neuf), `searches.rs` (neuf), `routes/search.rs` (neuf), `routes/backlinks.rs` (neuf), `lib.rs`, `types.rs`, `config.rs` | indexeur, débit, routes | S4 à S6 |
+| `crates/mementum-sync/src/hub.rs`, `actor.rs`, `lib.rs`, `tests/common/clock.rs` | pages écrites, lecture seule d'une page gardée, `StoppedClock` partagé | S4a |
+| `crates/mementum-server/src/indexer.rs` (neuf), `searches.rs` (neuf), `routes/search.rs` (neuf), `routes/backlinks.rs` (neuf), `lib.rs`, `types.rs`, `config.rs` | indexeur, débit, routes | S4b à S6 |
 | `crates/mementum-cli/src/main.rs` | `reindex` | S7 |
 | `packages/protocol/src/generated/` | `SearchResults`, `SearchHit`, `Backlinks` (régénérés) | S5, S6 |
 | `apps/web/src/search/` (neuf) : `SearchDialog.tsx`, `useSearch.ts`, `shortcut.ts`, `marks.ts` | fenêtre de recherche | C1 |
@@ -296,41 +354,47 @@ Toute mesure neuve suit les règles de la CI : `#[ignore]` ne marque que des mes
 
 ## Piste S
 
+Ordre : S0 et S2 d'abord (sans dépendance), puis S1, S4a, S3, S4b, S4c, S5, S6, S7.
+
 ### Task S0 : mesurer le moteur avant de bâtir dessus
 
 **Dépend de :** rien. **Livrable :** une section du registre, des chiffres, et un verdict ; aucun code du produit. Le banc est jetable, hors du dépôt (un dossier de la tâche), sur le modèle des essais de la phase 0.
 
-Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesuré (`spike/RESULTS.md` n'en dit rien), et deux budgets du §5.10 (mémoire au repos, démarrage à froid) en dépendent.
+Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesuré (`spike/RESULTS.md` n'en dit rien), deux budgets du §5.10 (mémoire au repos, démarrage à froid) en dépendent, et trois exigences de ce plan (R902, R909, R916) supposent des fonctions du moteur que personne n'a essayées.
 
 - [ ] **Step 1 : épingler.** La version courante de Tantivy, sa licence et celles de tout ce qu'elle tire, contre `deny.toml` (`cargo deny check licenses bans` sur un `Cargo.toml` d'essai) ; la version de Rust qu'elle demande contre `rust-version = "1.96"` ; ce qu'elle ajoute à la taille du binaire et à la durée d'une compilation en release.
-- [ ] **Step 2 : mesurer**, en release, sur un corpus fait par programme (10 000 pages, un million de blocs, en français, accents compris) : mémoire d'un processus qui tient l'index ouvert et un écrivain au repos, avec le plus petit tampon admis, un fil d'indexation, un fil de fusion ; temps d'ouverture de l'index ; débit d'indexation ; durée et coût d'une validation ; latence d'une requête de un, trois et huit termes, avec préfixe, filtrée par 10, 10 000 puis 100 000 identifiants de page ; taille de l'index sur le disque.
-- [ ] **Step 3 : répondre à cinq questions**, chacune par un essai : (a) le filtre par un ensemble de pages se pose-t-il dans la requête, et à quel coût quand l'ensemble est grand ; (b) une validation porte-t-elle une charge utile relue à l'ouverture (l'époque, R909) ; (c) quel tokeniseur plie la casse et les accents (« élève » trouvé par « eleve »), et que fait-il d'un mot de plus de 40 octets, du chinois, d'un identifiant `snake_case` ; (d) la racinisation française : ce qu'elle trouve en plus, ce qu'elle trouve à tort dans un texte anglais (décision L6) ; (e) noter sans statistiques d'ensemble est-il possible simplement (limite L-b).
-- [ ] **Step 4 : la même mesure avec FTS5** (disponible : `-DSQLITE_ENABLE_FTS5`), sur le même corpus, table `fts5` à contenu externe sur `blocks_index`, tokeniseur `unicode61 remove_diacritics 2` : latence, taille, et **durée d'une écriture d'index dans le tour d'écriture de SQLite**, qui est ce que FTS5 coûterait à la frappe des autres. C'est la matière de la décision L1, pas un changement de plan.
-- [ ] **Step 5 : verdict au registre.** Si la mémoire au repos ou le démarrage à froid ne tiennent pas avec Tantivy, ou si une licence est refusée : la tâche rend `BLOCKED`, avec ses chiffres, et la décision revient à Lenny. Sinon, la version est épinglée et S3 part.
+- [ ] **Step 2 : mesurer**, en release, sur un corpus fait par programme (10 000 pages, un million de blocs, en français, accents compris) : mémoire d'un processus qui tient l'index ouvert et un écrivain au repos, avec le plus petit tampon admis, un fil d'indexation, un fil de fusion ; temps d'ouverture de l'index ; débit d'indexation ; durée et coût d'une validation ; latence d'une requête de un, trois et huit termes, avec préfixe, filtrée par 10, 10 000 puis 100 000 identifiants de page ; taille de l'index sur le disque, avec et sans le champ des débuts de mot, et taille de `blocks_index` pour le même corpus (décision L18).
+- [ ] **Step 3 : trois exigences, chacune prouvée par un essai, ou la tâche rend `BLOCKED`** :
+  - **(R916) une note sans statistique d'ensemble.** Deux index qui ne diffèrent que par des entrées hors du filtre (un autre espace, des pages non permises, des entrées supprimées et pas encore fusionnées) rendent les mêmes pages **dans le même ordre**, pour des requêtes dosées (deux blocs qui portent `t1` et `t2` en proportions inverses). Dire comment : une note calculée par programme sur l'entrée seule, ou des statistiques constantes données au moteur. Et un préfixe servi par un terme exact du champ des débuts de mot, sans parcours du dictionnaire.
+  - **(R902) le groupement par page avant la pagination.** Un collecteur qui garde la meilleure entrée par `node_id` : sa latence et sa mémoire quand un terme touche un million d'entrées de dix mille pages, et quand il touche dix mille entrées d'une seule page. S'il ne tient pas le budget proposé (L10), mesurer le repli (pas de titre recopié sur les blocs).
+  - **(R909) la charge utile d'une validation**, relue à l'ouverture de l'index, et ce qu'on lit d'un index dont la dernière validation a été coupée.
+- [ ] **Step 4 : quatre questions**, chacune par un essai : (a) le filtre par un ensemble de pages se pose-t-il dans la requête, et à quel coût quand l'ensemble est grand ; (b) quel tokeniseur plie la casse et les accents (« élève » trouvé par « eleve »), et que fait-il d'un mot de plus de 40 octets, du chinois, d'un identifiant `snake_case` ; (c) la racinisation française : ce qu'elle trouve en plus, ce qu'elle trouve à tort dans un texte anglais (décision L6) ; (d) **le temps de réponse comme canal** : la même requête, le même ensemble permis, quand le terme est porté par zéro puis par cent mille entrées non permises ; l'écart, et s'il se distingue du bruit d'un appel par le réseau local (limite L-b, décision L19).
+- [ ] **Step 5 : la même mesure avec FTS5** (disponible : `-DSQLITE_ENABLE_FTS5`), sur le même corpus, table `fts5` à contenu externe sur `blocks_index`, tokeniseur `unicode61 remove_diacritics 2` : latence, taille, et **durée d'une écriture d'index dans le tour d'écriture de SQLite**, qui est ce que FTS5 coûterait à la frappe des autres ; et ce que deviennent chez lui les trois exigences du Step 3. C'est la matière de la décision L1, pas un changement de plan.
+- [ ] **Step 6 : verdict au registre.** Si la mémoire au repos ou le démarrage à froid ne tiennent pas avec Tantivy, si une licence est refusée, ou si une exigence du Step 3 ne se tient pas simplement : la tâche rend `BLOCKED`, avec ses chiffres, et la décision revient à Lenny. Sinon, la version est épinglée et S3 part.
 
 **Pièges de `CLAUDE.md` :** un budget de temps ne s'affirme que dans une mesure, en release, une à la fois (R341) ; la CI est plus lente que le poste ; `TMP`/`TEMP` de la tâche, à supprimer en partant (les mesures en release sont ce qui pèse le plus, R344).
 
 ### Task S1 : store, les tables de l'index
 
-**Dépend de :** la clôture du lot 3 (`0004` figée). **Livrable :** la migration, la voie, les fonctions du store ; rien ne les appelle encore.
+**Dépend de :** la clôture du lot 3 (`0004` figée). **Livrable :** la migration, la voie, les fonctions du store, les marqueurs durables ; rien ne lit encore l'index.
 
 **Files:**
 - Create: `crates/mementum-store/migrations/0005_search.sql`, `crates/mementum-store/src/search.rs`, `crates/mementum-store/tests/search.rs`
-- Modify: `crates/mementum-store/src/queue.rs` (`Lane::Index`), `lib.rs`, `nodes.rs` (`delete_node`), `backup.rs` si la liste des migrations y est nommée
-- Test: `crates/mementum-store/tests/writes.rs`, `tests/migrations.rs` (ou son équivalent, à lire)
+- Modify: `crates/mementum-store/src/queue.rs` (`Lane::Index`), `lib.rs`, `nodes.rs` (`create_node`, `rename_node`, `update_node`, `delete_node` : R918), `duplicate.rs` (`duplicate_pages` : R918), `backup.rs` si la liste des migrations y est nommée
+- Test: `crates/mementum-store/tests/writes.rs`, `tests/migration.rs`
 
 **Interfaces (produites) :**
-- `Store::index_page(node_id, seq, rows: &[IndexedBlock], truncated) -> Result<Indexed, StoreError>` : écrit la différence, dans `Lane::Index` ; `Indexed { changed: usize }` ; ne fait rien si `seq < indexed_seq`.
-- `Store::index_failed(node_id, seq)`, `Store::stale_pages(after, limit)` (les pages dont le dernier `seq` gardé dépasse `indexed_seq`, par lots, lue sans tour d'écriture), `Store::stale_in_space(space_id)`.
-- `Store::outbox(limit)`, `Store::outbox_done(&[(node_id, gen)], epoch)`, `Store::outbox_all()` (tout reconstruire), `Store::indexed_blocks(node_id)`, `Store::search_epoch()`.
-- `Store::backlinks(target_id, limit) -> Vec<Backlink { node_id, block_id }>`.
+- `Store::index_page(node_id, seq, rows: &[IndexedBlock], truncated) -> Result<Indexed, StoreError>` : écrit la différence et une ligne d'outbox par bloc changé ou parti, dans `Lane::Index`, par tranches de `MAX_INDEX_TX_BYTES` ; `Indexed { changed: usize }` ; ne fait rien si `seq < indexed_seq`.
+- `Store::index_failed(node_id, seq)` (retire aussi les lignes d'index de la page), `Store::never_indexed(limit)` (les lignes à `-1`, par l'index partiel), `Store::stale_pages(after, limit)` (le rattrapage : les pages dont le dernier `seq` gardé dépasse `indexed_seq`, par lots, lue sans tour d'écriture), `Store::behind_in_space(space_id, limit)`.
+- `Store::begin_feed(limit) -> Feed { token, lines }`, `Store::finish_feed(token)`, `Store::undo_feed()`, `Store::feed_tokens() -> { committed, intent }`, `Store::outbox_everything()` (tout reconstruire), `Store::indexed_block(node_id, block_id)`, `Store::indexed_blocks(node_id)`.
+- `Store::backlink_sources(target_id, space_id, after: Option<Uuid>, limit) -> Vec<Uuid>` (sources distinctes, de l'espace, hors la cible, dans l'ordre des identifiants), `Store::backlink_excerpts(target_id, sources: &[Uuid], chars) -> Vec<Backlink { node_id, block_id, excerpt }>` (le premier bloc de chaque source, l'extrait coupé par `substr`).
 
-- [ ] **Step 1 : tests, vus rouges.** `index_page_writes_only_what_changed` (un déclencheur témoin compte les lignes écrites : une frappe dans un bloc d'une page de 1 000 blocs en écrit une) ; `index_page_removes_the_blocks_that_left` ; `an_older_read_never_overwrites_a_newer_index` ; `the_index_leaves_with_its_page` (suppression définitive : plus aucune ligne des trois tables, et la page dans l'outbox) ; `index_writes_share_one_lane` (sur le modèle de `page_copies_share_one_lane_whoever_asks` : tour tenu par `hold_writes`, ordre des validations lu dans la base) ; `indexing_bumps_neither_rev_nor_lsn_and_announces_nothing` (témoin : un renommage qui suit est annoncé) ; `stale_pages_names_a_page_written_by_another_store`, `…a_duplicated_page`, `…a_page_never_indexed` ; `stale_pages_takes_no_write_turn` (tour tenu, la lecture rend) ; `outbox_done_keeps_a_page_changed_meanwhile` ; `backlinks_are_read_from_the_index` (`EXPLAIN QUERY PLAN` : `page_links_by_target`) ; `a_lot_3_database_migrates_and_starts_with_everything_stale`.
-- [ ] **Step 2 : écrire**, toucher `lib.rs` (R269), relancer. Commit `store : tables de l'index et voie de l'indexation (R901, R908)`.
+- [ ] **Step 1 : tests, vus rouges.** Différence : `index_page_writes_only_what_changed` (un déclencheur témoin compte les lignes écrites : une frappe dans un bloc d'une page de 1 000 blocs en écrit une, et **une** ligne d'outbox) ; `index_page_removes_the_blocks_that_left` (et les nomme à l'outbox) ; `an_older_read_never_overwrites_a_newer_index` ; `a_page_over_the_transaction_bound_is_written_in_slices_and_marked_at_the_last`. Marqueurs (R918) : `a_created_page_is_born_never_indexed`, `a_duplicated_page_and_its_subpages_are_born_never_indexed`, `a_rename_puts_the_page_in_the_outbox_in_its_transaction` (transaction abandonnée : aucune ligne ; témoin : validée, une ligne), `a_move_without_a_new_title_marks_nothing`, `the_index_leaves_with_its_page` (suppression définitive : plus aucune ligne des trois tables, les lignes de bloc de l'outbox parties, la ligne de page entière posée), `only_listed_places_write_a_title_or_a_node` (lit les sources du store, liste fermée). Voie : `index_writes_share_one_lane` (sur le modèle de `page_copies_share_one_lane_whoever_asks` : tour tenu par `hold_writes`, ordre des validations lu dans la base) ; `indexing_bumps_neither_rev_nor_lsn_and_announces_nothing` (témoin : un renommage qui suit est annoncé) ; `stale_pages_takes_no_write_turn` (tour tenu, la lecture rend) ; `stale_pages_names_a_page_written_by_another_store`. Intention : `finish_feed_keeps_a_line_changed_meanwhile` ; `undo_feed_gives_the_lines_back` ; `a_second_feed_cannot_begin_before_the_first_is_finished_or_undone`. Rétroliens : `backlink_sources_are_distinct_of_the_space_and_ordered` ; `backlink_sources_are_read_from_the_index` (`EXPLAIN QUERY PLAN` : `page_links_by_target`, aucun parcours de table) ; `backlink_excerpts_are_cut_by_the_database` (un bloc de 64 Kio : la ligne rendue fait la longueur demandée). Migration : `a_lot_3_database_migrates_and_starts_with_nothing_indexed`.
+- [ ] **Step 2 : écrire**, toucher `lib.rs` (R269), relancer. Commit `store : tables de l'index, marqueurs et voie de l'indexation (R901, R908, R918, R919)`.
 
-**Preuves (mutations) :** écrire toutes les lignes au lieu de la différence ; oublier la comparaison de `seq` ; `Lane::Common` à la place de `Lane::Index` ; retirer de l'outbox sans comparer `gen` ; `bump_lsn` ajouté par mégarde.
+**Preuves (mutations) :** écrire toutes les lignes au lieu de la différence ; une ligne d'outbox de page entière à chaque indexation ; oublier la comparaison de `seq` ; `Lane::Common` à la place de `Lane::Index` ; clore une ligne sans comparer `gen` ; le marqueur du renommage écrit après la validation ; `bump_lsn` ajouté par mégarde ; `LIMIT` posé avant `DISTINCT` dans les sources d'un rétrolien.
 
-**Pièges :** une migration neuve n'entre dans le binaire qu'à la recompilation du store (R269) ; une requête reprend l'expression exacte de son index ; une écriture qui parcourt une grande table lit d'abord sans tour, et ne prend le tour que pour écrire (R270) ; `TestDir`, pas `tempfile::tempdir()` (R344) ; pour prouver un ordre de service, tenir un tour et lire l'ordre dans la base, jamais à l'horloge ; SQL dynamique sous `AssertSqlSafe`, valeurs liées.
+**Pièges :** une migration neuve n'entre dans le binaire qu'à la recompilation du store (R269) ; une requête reprend l'expression exacte de son index ; une écriture qui parcourt une grande table lit d'abord sans tour, et ne prend le tour que pour écrire (R270) ; une transaction qui écrit n'en ouvre pas une seconde (les marqueurs s'écrivent **dans** la `WriteTx` de l'écriture qui les cause, pas par un second appel au store) ; `TestDir`, pas `tempfile::tempdir()` (R344) ; pour prouver un ordre de service, tenir un tour et lire l'ordre dans la base, jamais à l'horloge ; SQL dynamique sous `AssertSqlSafe`, valeurs liées ; une chaîne SQL à `\` de fin de ligne s'écrit par l'outil d'édition.
 
 ### Task S2 : `mementum-search`, la projection et la requête (sans moteur)
 
@@ -345,7 +409,7 @@ Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesur
 - `project(blocks: &[Block], origin: Option<&str>) -> Projection { rows: Vec<IndexedBlock>, truncated: bool }`, `IndexedBlock { block_id, kind, text, hash, links: Vec<Uuid> }`.
 - `read_query(raw: &str) -> Result<Query, QueryRefusal>`, `Query { terms: Vec<String>, prefix: Option<String> }`.
 
-- [ ] **Step 1 : tests, vus rouges.** `every_block_of_the_registry_has_its_rule` (échoue si `spec/schema/blocks.json` gagne un type que la table ne connaît pas) ; `the_fixtures_project_as_written` (`all-blocks`, `non-default`, `rich-blocks` de `spec/mmd/fixtures/` : le texte attendu est écrit à la main, jamais recopié de la sortie) ; `marks_are_dropped_and_text_is_kept` ; `a_mention_is_read_by_its_label_and_linked_by_its_id` ; `a_link_to_a_page_of_the_instance_is_a_link_and_an_outside_address_is_not` (table de cas : `/p/<uuid>`, la même sous l'origine publique, un autre hôte, `/p/<uuid>/x`, un UUID sans tirets) ; `a_block_without_id_or_with_a_repeated_id_gets_a_stand_in_key` ; `a_block_over_the_bound_is_cut_between_characters`, `a_page_over_the_bound_is_marked_truncated` ; `the_hash_changes_with_the_text_the_type_and_the_links_and_with_nothing_else` ; requête : `a_query_is_folded_and_split`, `operators_are_only_characters` (`AND`, `"`, `*`, `-`, `title:`, `~`), `a_query_over_the_bounds_is_refused`, `a_prefix_under_two_characters_is_dropped`, `an_empty_query_reads_empty`. Linéarité : chaque forme (un long texte, mille plages marquées, un tableau large, des listes imbriquées, cent mille mentions, une requête longue) à une taille et à huit fois cette taille, sous les bornes de R433.
+- [ ] **Step 1 : tests, vus rouges.** `every_block_of_the_registry_has_its_rule` (échoue si `spec/schema/blocks.json` gagne un type que la table ne connaît pas) ; `the_fixtures_project_as_written` (`all-blocks`, `non-default`, `rich-blocks` de `spec/mmd/fixtures/` : le texte attendu est écrit à la main, jamais recopié de la sortie) ; `marks_are_dropped_and_text_is_kept` ; `a_mention_is_read_by_its_label_and_linked_by_its_id` ; `a_link_to_a_page_of_the_instance_is_a_link_and_an_outside_address_is_not` (table de cas : `/p/<uuid>`, la même sous l'origine publique, avec un fragment `#b=…`, un autre hôte, `/p/<uuid>/x`, un UUID sans tirets) ; `a_block_without_id_or_with_a_repeated_id_gets_a_stand_in_key` ; `an_unknown_block_is_not_indexed_and_its_children_are` (décision L17) ; `a_block_over_the_bound_is_cut_between_characters`, `a_page_over_the_bound_is_marked_truncated` ; `the_hash_changes_with_the_text_the_type_and_the_links_and_with_nothing_else` ; requête : `a_query_is_folded_and_split`, `operators_are_only_characters` (`AND`, `"`, `*`, `-`, `title:`, `~`), `a_query_over_the_bounds_is_refused`, `a_prefix_under_two_characters_is_dropped`, `an_empty_query_reads_empty`. Linéarité : chaque forme (un long texte, mille plages marquées, un tableau large, des listes imbriquées, cent mille mentions, une requête longue) à une taille et à huit fois cette taille, sous les bornes de R433.
 - [ ] **Step 2 : écrire**, relancer. Commit `recherche : projection d'une page et lecture d'une requête (R911, R912)`.
 
 **Preuves (mutations) :** indexer l'adresse d'un lien ; oublier les enfants d'un bloc sans texte (`column`) ; couper au milieu d'un caractère ; laisser passer un `*` ; reconnaître une page par `Uuid::parse_str` seul (les formes sans tirets, la leçon de R754).
@@ -361,41 +425,75 @@ Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesur
 - Modify: `Cargo.toml` (racine : `tantivy`, version de S0), `deny.toml` si une licence déjà compatible manque à la liste (sinon `BLOCKED`)
 
 **Interfaces (produites) :**
-- `SearchIndex::open(dir, expected: Epoch) -> Opened { index, state: InStep | OneAhead | Rebuilt }`
-- `put_page(space_id, node_id, title, rows)`, `remove_page(node_id)`, `commit(epoch)` : synchrones, pour le fil bloquant.
-- `search(space_id, query: &Query, allowed: &PageSet, skip, limit) -> Found { hits: Vec<Hit { node_id, block_id, excerpt, marks }>, more }`.
+- `SearchIndex::open(dir) -> Opened { index, token: Option<String> }` : le jeton de la dernière validation, ou `None` pour un index neuf ; `SearchIndex::reset(dir)` : vide le dossier sans suivre de lien, et rouvre.
+- `put_entry(space_id, node_id, block_id, title, text)`, `remove_entry(node_id, block_id)`, `remove_page(node_id)`, `commit(token)` : synchrones, pour le fil bloquant.
+- `search(space_id, query: &Query, allowed: &PageSet, skip, limit) -> Found { pages: Vec<Hit { node_id, block_id, excerpt, marks }>, more }` : **une ligne par page**, `skip` et `limit` en pages.
 
-- [ ] **Step 1 : tests, vus rouges.** `a_word_of_a_block_finds_its_page_and_its_block` ; `accents_and_case_do_not_matter` ; `every_term_is_wanted` ; `the_last_term_matches_as_a_prefix` ; `a_title_outranks_a_block` ; `only_allowed_pages_are_found` et son témoin (la même requête, l'ensemble élargi, trouve) ; `what_unseen_pages_hold_changes_neither_the_hits_nor_more` (deux index : l'un avec mille pages non permises qui portent le mot, l'autre sans ; mêmes résultats, même `more`) ; `another_space_is_never_found` ; `a_removed_page_is_no_longer_found` ; `putting_a_page_again_replaces_it` ; `the_excerpt_is_text_with_utf16_marks` (un emoji avant le mot : les plages tombent juste dans une chaîne JavaScript ; aucune balise dans `excerpt`) ; `the_excerpt_is_bounded` ; époque : `an_index_one_commit_ahead_is_kept`, `an_index_of_another_database_is_rebuilt`, `a_missing_or_unreadable_directory_is_rebuilt`, `an_index_of_another_schema_is_rebuilt` ; `a_second_writer_is_refused_with_a_message` (le verrou, pour `mementum reindex`). Linéarité : `search` sur un index d'une taille et de huit fois cette taille.
-- [ ] **Step 2 : écrire**, relancer. Commit `recherche : index plein texte (R900, R902, R909)`.
+- [ ] **Step 1 : tests, vus rouges.** Trouver : `a_word_of_a_block_finds_its_page_and_its_block` ; `accents_and_case_do_not_matter` ; `every_term_is_wanted` ; `the_last_term_matches_as_a_prefix` ; `a_title_outranks_a_block`. Pages (R902) : `a_page_is_found_once_whatever_its_blocks` ; `a_title_word_of_a_10000_block_page_does_not_hide_other_pages` (une page de 10 000 blocs et trente pages d'un bloc sous le même mot de titre : les trente et une sortent, en deux réponses) ; `paging_never_repeats_a_page` et `paging_counts_pages` (toute réponse d'avant la dernière porte `limit` pages) ; `more_is_true_only_when_another_page_follows`. Droits : `only_allowed_pages_are_found` et son témoin (la même requête, l'ensemble élargi, trouve) ; `another_space_is_never_found` ; `what_unseen_pages_hold_changes_neither_the_hits_nor_more` ; **`what_unseen_pages_hold_changes_no_order`** (R916 : deux blocs permis dosés en `t1` et `t2` ; l'index reçoit tour à tour dix mille entrées non permises qui portent `t1`, puis `t2`, dans l'espace, dans un autre espace, puis supprimées sans fusion : même ordre à chaque fois ; son témoin : une note à statistiques d'ensemble, posée le temps de la preuve, inverse l'ordre) ; `a_prefix_costs_one_term_whatever_the_dictionary_holds` (le nombre de termes lus, compté, ne change pas quand cent mille mots d'un autre espace commencent pareil). Écrire : `a_removed_entry_is_no_longer_found` ; `putting_an_entry_again_replaces_it` ; `removing_a_page_removes_all_its_entries`. Extrait : `the_excerpt_is_text_with_utf16_marks` (un emoji avant le mot : les plages tombent juste dans une chaîne JavaScript ; aucune balise dans `excerpt`) ; `the_excerpt_is_bounded`. Jeton : `the_token_of_the_last_commit_is_read_back` ; `a_commit_cut_short_reads_the_token_before_it` ; `a_missing_unreadable_or_other_schema_directory_reads_no_token` ; `reset_removes_a_link_without_following_it` (une jonction sous Windows, un lien sous Unix : ce qu'elle vise reste) ; `a_second_writer_is_refused_with_a_message` (le verrou, pour `mementum reindex`). Linéarité : `search` sur un index d'une taille et de huit fois cette taille.
+- [ ] **Step 2 : écrire**, relancer. Commit `recherche : index plein texte (R900, R902, R916)`.
 
-**Preuves (mutations) :** appliquer le filtre après la recherche (le test des mille pages rougit sur `more`) ; oublier `space_id` ; compter les plages en octets ; rendre le HTML d'extrait du moteur ; garder un index d'une autre époque.
+**Preuves (mutations) :** grouper par page après `skip` et `limit` (le test des 10 000 blocs rougit) ; appliquer le filtre après la recherche ; oublier `space_id` ; rendre la note du moteur telle quelle (le test de l'ordre rougit) ; servir le préfixe par le dictionnaire ; compter les plages en octets ; rendre le HTML d'extrait du moteur ; suivre un lien en vidant le dossier.
 
-**Pièges :** jamais d'analyseur de requêtes du moteur sur le texte d'une personne ; un test qui affirme une absence a son témoin ; sous Windows, un fichier ouvert ne se supprime pas (vider le dossier demande d'avoir lâché l'index : `TestDir`) ; un dossier temporaire par tâche.
+**Pièges :** jamais d'analyseur de requêtes du moteur sur le texte d'une personne ; un test qui affirme une absence a son témoin ; sous Windows, un fichier ouvert ne se supprime pas (vider le dossier demande d'avoir lâché l'index : `TestDir`), un lien symbolique demande un privilège que le poste n'a pas (une jonction, `link_dir`), et un nom qui ne diffère que par la casse est le même fichier ; un dossier temporaire par tâche.
 
-### Task S4 : l'indexeur
+### Task S4a : `mementum-sync`, les pages écrites et la lecture seule d'une page gardée
 
-**Dépend de :** S1, S2, S3. **Livrable :** une page écrite devient trouvable, sans que la frappe le paie.
+**Dépend de :** rien dans ce plan (peut partir après S1, pour ne pas croiser ses fichiers). **Livrable :** deux fonctions de `mementum-sync` ; rien ne les appelle encore.
+
+**Files:**
+- Modify: `crates/mementum-sync/src/hub.rs` (`Hub::touched`, `Hub::take_touched`, `Hub::touched_changed`), `actor.rs` (`persist`, `persist_restore` ; `stored_page`, bâtie sur `replay`), `lib.rs`
+- Create: `crates/mementum-sync/tests/stored_page.rs`, `tests/touched.rs` ; `crates/mementum-sync/tests/common/clock.rs` (**`StoppedClock`, déplacé de `tests/versions.rs`**, où il est privé aujourd'hui, pour que les tests du serveur l'incluent par son chemin, comme `TestDir`)
+- Modify: `crates/mementum-sync/tests/versions.rs` (prend l'aide commune)
+
+**Interfaces (produites) :**
+- `Hub::take_touched() -> Vec<Uuid>` et une notification sans contenu quand l'ensemble passe de vide à non vide.
+- `mementum_sync::stored_page(store, node_id) -> Result<Option<(PageDoc, i64)>, SyncError>` : la page que le store garde et son dernier `seq`, relue comme `load` la relit (mêmes entrées écartées), **sans rien écrire** (`None` pour une page sans document), sans ligne `error` (niveau `debug` : l'acteur a déjà dit ces entrées). Synchrone dans sa partie qui calcule : l'appelant la mène sur le fil bloquant.
+
+- [ ] **Step 1 : tests, vus rouges.** `the_actor_only_names_the_page_it_wrote` (après mille frappes, l'ensemble porte un identifiant ; `Hub::block_reads` n'a pas bougé ; aucun encodage de plus, compté) ; `a_write_of_the_server_and_a_restore_name_the_page` ; `a_refused_update_names_nothing`, `an_update_that_changes_nothing_names_nothing` (R181) ; `the_set_is_bounded_by_the_pages_not_by_the_keystrokes` ; `stored_page_reads_what_the_actor_serves` (propriété : après chaque étape d'un scénario de `tests/reload.rs`, mêmes blocs que `Hub::read_blocks`) ; `stored_page_writes_nothing` (une page sans document reste sans instantané ; aucun tour d'écriture pris, tour tenu par `hold_writes`) ; `stored_page_sets_aside_what_load_sets_aside` ; `stored_page_logs_no_error` (`Logs::capture`, avec son témoin : `load` en écrit une) ; les tests de `versions.rs` restent verts avec l'aide déplacée.
+- [ ] **Step 2 : écrire**, relancer la suite de `mementum-sync`. Commit `sync : pages écrites et lecture seule d'une page gardée (R907)`.
+
+**Preuves (mutations) :** nommer la page avant l'écriture au journal ; nommer à chaque message reçu, écrit ou non ; `stored_page` qui écrit l'instantané d'une page sans document ; `stored_page` qui garde une entrée que `load` écarte.
+
+**Pièges :** yrs, `get_or_insert_*` avant d'ouvrir une transaction ; une mise à jour de client qui ne change rien n'est ni écrite ni relayée (R181) ; test qui lit le journal : `Logs::capture` ; toute lecture neuve d'une mise à jour passe par `PageDoc::read` (R784) : `stored_page` réutilise `replay`, il n'en refait rien ; un test qui lit le store après une compaction l'attend (`Hub::compacted`).
+
+### Task S4b : l'indexeur, jusqu'à `blocks_index`
+
+**Dépend de :** S1, S2, S4a. **Livrable :** une page écrite a sa projection à jour dans la base, sans que la frappe le paie. L'index plein texte n'est pas encore nourri.
 
 **Files:**
 - Create: `crates/mementum-server/src/indexer.rs`, `crates/mementum-server/tests/indexer.rs`
-- Modify: `crates/mementum-sync/src/hub.rs` (`Hub::touched`, `Hub::take_touched`), `actor.rs` (`persist`, `persist_restore` ; `stored_page`), `lib.rs` ; `crates/mementum-server/src/lib.rs` (`build`, `serve`, `AppState`), `config.rs` (`index_after`, `index_at_most`, `MEMENTUM_INDEX_AFTER_MS` pour les e2e)
-- Test: `crates/mementum-sync/tests/` (un fichier neuf), `crates/mementum-server/tests/journal.rs`
+- Modify: `crates/mementum-server/src/lib.rs` (`build`, `serve`, `AppState`), `config.rs` (`index_after`, `index_at_most`, `MEMENTUM_INDEX_AFTER_MS` pour les e2e), `crates/mementum-server/Cargo.toml` (**dev-dépendance `tokio` avec `test-util`**, que seul `mementum-sync` a aujourd'hui), `tests/common/mod.rs` (inclut `clock.rs` par son chemin), `tests/journal.rs`
 
-**Interfaces :**
-- Consumes : S1, S2, S3 ; `Store::changes()`.
-- Produces : `mementum_sync::stored_page(store, node_id) -> Result<Option<(PageDoc, i64)>, SyncError>` : la page que le store garde et son dernier `seq`, relue comme `load` la relit (mêmes entrées écartées), **sans rien écrire** (`None` pour une page sans document), sans ligne `error` (niveau `debug` : l'acteur a déjà dit ces entrées) ; `Indexer::spawn(state) -> IndexerHandle`, `IndexerHandle::behind(space_id, seen: &PageSet) -> bool`, `IndexerHandle::settled()` (pour les tests), `stop()`.
+**Interfaces (produites) :** `Indexer::spawn(state) -> IndexerHandle`, `IndexerHandle::behind(space_id, seen: &PageSet) -> bool`, `IndexerHandle::settled()` (pour les tests : plus rien à projeter), `stop()`.
 
-- [ ] **Step 1 : tests, vus rouges.** Dans `mementum-sync` : `the_actor_only_names_the_page_it_wrote` (après mille frappes, l'ensemble porte un identifiant ; `Hub::block_reads` n'a pas bougé ; aucun encodage de plus, compté) ; `a_write_of_the_server_and_a_restore_name_the_page` ; `a_refused_update_names_nothing` ; `stored_page_reads_what_the_actor_serves` (propriété : après chaque étape d'un scénario de `tests/reload.rs`, mêmes blocs) ; `stored_page_writes_nothing` (une page sans document reste sans instantané) ; `stored_page_sets_aside_what_load_sets_aside`. Dans `mementum-server` : `a_typed_word_becomes_findable` ; `erased_text_leaves_the_index` ; `a_page_written_by_put_mmd_is_indexed`, `…restored…`, `…duplicated…` (avec ses sous-pages), `…renamed…` (trouvée par son nouveau titre, plus par l'ancien) ; `a_deleted_page_leaves_the_index` ; `a_trashed_page_stays_indexed` (restaurée, elle est trouvée sans nouvelle indexation : compteur) ; `an_existing_instance_is_indexed_after_startup` (base du lot 3 remplie par un autre `Store`) ; `a_crash_between_the_two_commits_is_caught_up` (l'indexeur arrêté après la validation de Tantivy, avant celle de la base) ; `a_page_that_cannot_be_read_is_tried_once` (compte des lectures) ; `a_page_written_without_pause_is_indexed_at_most_every_bound` (horloge de tokio arrêtée, `StoppedClock`) ; `pages_take_turns` (une page écrite sans relâche n'empêche pas une autre d'être indexée) ; `indexing_leaves_the_engine_free` (sur le modèle d'`engine_stays_free`) ; `the_indexer_stops_before_the_store_closes` ; `entries_set_aside_are_logged_once` (le test de `journal.rs` qui compte les lignes `error` garde son compte avec l'indexeur lancé).
-- [ ] **Step 2 : écrire**, relancer les suites de `mementum-sync` et de `mementum-server`. Commit `serveur : indexeur des pages (R906, R907)`.
-- [ ] **Step 3 : mesures** (`#[ignore]`, release, `alone`) : `measure_indexing_a_10000_block_page` (lecture, projection, transaction, Tantivy) ; `measure_the_write_turn_held_by_an_index_transaction` (p95, pour arrêter `MAX_INDEX_TX_BYTES`) ; `measure_first_indexing_of_10000_pages`.
+- [ ] **Step 0 : la mesure d'abord** (`#[ignore]`, release, `alone`) : `measure_the_write_turn_held_by_an_index_transaction`, sur `Store::index_page` seul, à 64 Kio, 256 Kio, 1 Mio et 4 Mio de lignes changées : le tour tenu au p95, et le nombre de points de contrôle du WAL déclenchés. Elle arrête `MAX_INDEX_TX_BYTES` (départ : 256 Kio) avant que l'indexeur soit écrit ; sa ligne `MESURE` va au registre.
+- [ ] **Step 1 : tests, vus rouges.** `a_typed_word_reaches_the_index_tables` ; `erased_text_leaves_the_index` ; `a_page_written_by_put_mmd_is_indexed`, `…restored…` ; `a_created_page_and_a_duplicated_page_are_indexed_without_any_actor` (par les lignes à `-1`, R918 ; `Hub::calls` n'a pas bougé) ; `a_trashed_page_stays_indexed` ; `an_existing_instance_is_indexed_after_startup` (base du lot 3 remplie par un autre `Store`) ; `a_page_that_cannot_be_read_is_tried_once_and_leaves_the_index` (compte des lectures ; ses lignes d'avant sont retirées) ; `a_page_written_without_pause_is_indexed_at_most_every_bound` (`StoppedClock`) ; `a_keystroke_in_a_10000_block_page_writes_one_row` (déclencheur témoin) ; `pages_take_turns` (une page écrite sans relâche n'empêche pas une autre d'être indexée) ; `indexing_leaves_the_engine_free` (sur le modèle d'`engine_stays_free`) ; `the_indexer_never_asks_an_actor` (`Hub::calls`) ; `the_indexer_stops_before_the_store_closes` ; `entries_set_aside_are_logged_once` (le test de `journal.rs` qui compte les lignes `error` garde son compte avec l'indexeur lancé).
+- [ ] **Step 2 : écrire**, relancer les suites de `mementum-server`. Commit `serveur : indexeur des pages, jusqu'aux tables (R906, R907)`.
+- [ ] **Step 3 : mesures** (`#[ignore]`, release, `alone`) : `measure_indexing_a_10000_block_page` (lecture, projection, transactions) ; `measure_first_indexing_of_10000_pages` ; `keystroke_seen_while_10000_pages_are_first_indexed` (la frappe d'un autre, p95, pendant la première indexation : c'est la mesure que X2 porte dans la CI).
 
-**Preuves (mutations) :** nommer la page avant l'écriture au journal ; lire les blocs par l'acteur (`Hub::read_blocks`) ; indexer sans attendre le calme ; poser `indexed_seq` au `seq` courant plutôt qu'au `seq` lu ; oublier `Store::changes()` (le renommage) ; oublier le rattrapage (l'instance existante).
+**Preuves (mutations) :** lire les blocs par l'acteur (`Hub::read_blocks`) ; indexer sans attendre le calme ; poser `indexed_seq` au `seq` courant plutôt qu'au `seq` lu ; oublier les lignes à `-1` (la page dupliquée) ; oublier le rattrapage (l'instance existante) ; garder les lignes d'une page devenue illisible.
 
-**Pièges :** une tâche lancée par `tokio::spawn` perd la portée `writes_by` (l'indexeur écrit dans `Lane::Index`, nommée par le store, pas par la portée) ; ne jamais mener deux écritures du store ensemble dans une tâche (R518) ; un calcul long rend son fil au moteur, et `block_in_place` panique sur un moteur à un fil (R863) ; `Store::changes()` : s'abonner avant de lire, relire après `Lagged`, une annonce de trop est possible ; une écriture faite par un autre `Store` n'est pas annoncée (R133) ; test qui lit le journal : `Logs::capture` ; test qui suppose la durée d'une écriture : tenir le tour (`hold_writes`), ne pas supposer (R886) ; `StoppedClock` et ses règles (R179) ; un test qui lit le store après une compaction l'attend (`Hub::compacted`) ; une rafale d'écritures prend le temps du disque (R441).
+**Pièges :** une tâche lancée par `tokio::spawn` perd la portée `writes_by` (l'indexeur écrit dans `Lane::Index`, nommée par le store, pas par la portée) ; ne jamais mener deux écritures du store ensemble dans une tâche (R518) ; un calcul long rend son fil au moteur, et `block_in_place` panique sur un moteur à un fil (R863) ; `Store::changes()` : s'abonner avant de lire, relire après `Lagged`, une annonce de trop est possible, une écriture faite par un autre `Store` n'est pas annoncée (R133) ; test qui suppose la durée d'une écriture : tenir le tour (`hold_writes`), ne pas supposer (R886) ; `StoppedClock` et ses règles (R179 : `test-util`, n'avancer l'horloge qu'une fois le serveur au repos, borner les attentes en temps réel) ; une rafale d'écritures prend le temps du disque (R441) ; le point de contrôle du WAL tombe sur l'écriture qui le déclenche (R447).
+
+### Task S4c : l'indexeur, l'index plein texte et le démarrage
+
+**Dépend de :** S3, S4b. **Livrable :** ce que la base a projeté devient trouvable ; l'index et la base ne se séparent jamais sans que le démarrage le voie.
+
+**Files:**
+- Modify: `crates/mementum-server/src/indexer.rs`, `lib.rs` (`build` : ouverture de l'index, comparaison des jetons), `tests/indexer.rs`
+- Create: `crates/mementum-server/tests/index_recovery.rs`
+
+- [ ] **Step 1 : tests, vus rouges.** Nourrir : `a_typed_word_becomes_findable` ; `a_keystroke_in_a_10000_block_page_rewrites_one_entry` (R919 : les appels à `put_entry` sont comptés) ; `a_rename_is_found_by_the_new_title_and_no_longer_by_the_old` ; `a_deleted_page_leaves_the_text_index` ; `a_line_changed_during_a_commit_is_fed_again`. Arrêts (l'indexeur arrêté à un point nommé, par une fonction `test-hooks`, jamais par un minutage) : `a_stop_before_the_commit_undoes_the_intent` ; `a_stop_between_the_commit_and_the_close_replays_the_intent` ; **`a_rename_before_a_crash_is_caught_up`** (renommage validé, serveur arrêté avant toute validation de l'index, relancé : l'ancien titre ne trouve plus la page, sans aucune écriture de plus) ; `a_keystroke_before_a_crash_is_caught_up`. Base et index séparés : **`a_copy_then_one_commit_then_the_copy_put_back_rebuilds`** (copie de la base ; un mot écrit et **une seule** validation ; la copie remise en place, `search/` gardé : au démarrage tout est reconstruit, et le mot n'est dans aucun extrait ; témoin avant la remise : il est trouvé) ; le même avec cent validations ; `a_copy_taken_between_the_intent_and_the_close_replays_from_the_database` (le texte de la base remise en place, pas celui validé) ; `a_directory_of_another_instance_is_rebuilt` ; `a_backup_put_back_before_0005_rebuilds_after_migrating_again` ; `searching_during_a_rebuild_finds_only_what_is_rebuilt`.
+- [ ] **Step 2 : écrire**, relancer. Commit `serveur : index plein texte nourri par intention, validation, clôture (R909, R919)`.
+- [ ] **Step 3 : mesures** (`#[ignore]`, release, `alone`) : `measure_a_feed_of_one_block_and_of_a_renamed_10000_block_page` ; `measure_database_and_index_size_for_10000_pages` (la base avant et après, le dossier `search/` : décision L18) ; `measure_startup_with_an_index_of_10000_pages` (les jetons comparés, rien d'attendu d'autre).
+
+**Preuves (mutations) :** tenir pour faites les lignes d'une intention retrouvée validée ; garder l'index quand son jeton n'est aucun des deux de la base ; valider Tantivy avant d'écrire l'intention ; clore sans comparer `gen` ; récrire toute la page à chaque frappe.
+
+**Pièges :** on ne restaure ni ne récrit une base sous un serveur qui tourne : ces tests arrêtent le serveur, ferment le store (`Store::close`), puis copient ; une copie remise en place est reconnue au compteur de schéma près, et toute comparaison de copies passe par `same_content` (R841) ; un test qui fait tomber un événement « pendant » une écriture en suppose la durée (R886) : un point d'arrêt nommé ; démarrage à froid < 1 s : ni la reconstruction ni le rattrapage ne sont attendus par `serve`.
 
 ### Task S5 : la route de recherche
 
-**Dépend de :** S3, S4. **Livrable :** `GET /api/v1/spaces/{id}/search`.
+**Dépend de :** S3, S4c. **Livrable :** `POST /api/v1/spaces/{id}/search`.
 
 **Files:**
 - Create: `crates/mementum-server/src/routes/search.rs`, `src/searches.rs`, `tests/search.rs`
@@ -403,45 +501,48 @@ Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesur
 
 | Route | Il faut | Réponse |
 |---|---|---|
-| `GET /api/v1/spaces/{id}/search?q=…&after=N` | un rôle | `SearchResults` ; `422 invalid_query` ; `429 search_busy` (`Retry-After: 1`) |
+| `POST /api/v1/spaces/{id}/search`, corps `SearchRequest { q: string, after?: number }` | un rôle | `SearchResults` ; `400` ou `422 invalid_json` (comme toute route JSON) ; `422 invalid_query` ; `429 search_busy` (`Retry-After: 1`) |
 
-- [ ] **Step 1 : tests, vus rouges.** Droits : `a_word_only_an_unseen_page_holds_answers_like_a_word_nobody_wrote` (corps égaux, octet pour octet, `indexing` compris) ; `a_guest_finds_only_the_pages_he_was_invited_on` ; `a_private_page_is_found_by_its_owner_only` ; `withdrawn_access_hides_the_page_at_the_next_query`, `a_page_closed_to_members…`, `a_member_removed_from_the_space_gets_404` (l'indexeur arrêté : c'est la requête qui juge) ; `a_trashed_page_is_not_found_and_comes_back_restored` ; `a_subpage_of_a_trashed_page_is_not_found` ; `the_breadcrumb_names_only_seen_ancestors` (un invité sur une sous-page : le fil commence à elle) ; `the_title_is_the_current_one` (renommée, indexeur arrêté) ; `indexing_says_nothing_of_unseen_pages` (une page non vue en retard : `indexing` faux pour l'invité, vrai pour le membre) ; `space_routes_by_role` gagne la route ; la matrice du compte attendu aussi. Bornes : `a_query_over_the_bounds_is_422`, `an_empty_query_answers_empty_without_computing` (compteur de calculs) ; `paging_stops_at_the_bound` ; `the_query_is_never_logged` (`all_logs`, la requête porte un mot témoin ; son témoin : un autre point de journal de la requête est vu). Débit : `a_newer_search_takes_the_place_of_the_one_waiting` ; `a_burst_of_searches_of_one_account_does_not_delay_another` (une place sur quatre laissée libre, l'ordre de service lu, sans minutage) ; `an_abandoned_search_keeps_its_place_until_its_computation_ends` (R630). En-têtes : `no-store`, `nosniff`.
-- [ ] **Step 2 : écrire**, régénérer les types (`packages/protocol`), relancer. Commit `serveur : recherche dans un espace (R903 à R905, R910, R914)`. En-tête de `lib.rs`, registre.
-- [ ] **Step 3 : mesure** (`#[ignore]`, release) : `measure_search_on_10000_pages` (membre qui voit tout, invité qui voit dix pages ; un, trois, huit termes ; p95), ligne `MESURE`.
+La route n'écrit rien : c'est un `POST` pour que la requête ne soit dans aucune adresse (R917). Elle ne passe pas par `to_completion` (rien à mener au bout), mais son calcul, lancé, va au bout sur son fil et garde sa place au débit jusque-là.
 
-**Preuves (mutations) :** filtrer sans `in_trash` ; bâtir le fil d'Ariane de `parent_id` au lieu de `visible_parent` ; lire le titre dans l'index ; calculer `indexing` sur tout l'espace ; rendre la garde du débit à l'abandon de la requête ; appeler l'index avant `space_access`.
+- [ ] **Step 1 : tests, vus rouges.** Droits : `a_word_only_an_unseen_page_holds_answers_like_a_word_nobody_wrote` (corps égaux, octet pour octet, `indexing` compris) ; `a_guest_finds_only_the_pages_he_was_invited_on` ; `a_private_page_is_found_by_its_owner_only` ; `withdrawn_access_hides_the_page_at_the_next_query`, `a_page_closed_to_members…`, `a_member_removed_from_the_space_gets_404` (l'indexeur arrêté : c'est la requête qui juge) ; `a_trashed_page_is_not_found_and_comes_back_restored` ; `a_subpage_of_a_trashed_page_is_not_found` ; `the_breadcrumb_names_only_seen_ancestors` (un invité sur une sous-page : le fil commence à elle) ; `the_title_is_the_current_one` (renommée, indexeur arrêté) ; `indexing_says_nothing_of_unseen_pages` (une page non vue en retard : `indexing` faux pour l'invité, vrai pour le membre) ; `two_dosed_blocks_keep_their_order_whatever_others_write` (par la route, à deux comptes : la preuve de R916 de bout en bout) ; `space_routes_by_role` gagne la route ; la matrice du compte attendu aussi. Bornes : `a_query_over_the_bounds_is_422`, `a_body_over_its_bound_is_refused_without_being_read_whole` ; `an_empty_query_answers_empty_without_computing` (compteur de calculs) ; `paging_stops_at_the_bound`, `paging_never_repeats_a_page` ; `the_query_is_never_logged_and_never_in_an_address` (`all_logs`, la requête porte un mot témoin ; son témoin : un autre point de journal de la requête est vu ; un `GET` sur la route répond `405`). Débit : `a_newer_search_takes_the_place_of_the_one_waiting` ; `a_burst_of_searches_of_one_account_does_not_delay_another` (une place sur quatre laissée libre, l'ordre de service lu, sans minutage) ; `an_abandoned_search_keeps_its_place_until_its_computation_ends` (R630) ; **`the_allowed_set_is_built_under_the_guard_off_the_engine`** (I7 : les quatre places tenues, mille requêtes d'un compte arrivent ; aucun ensemble n'est bâti, compté ; et un moteur à un fil reste libre pendant qu'un ensemble de 100 000 pages se bâtit, sur le modèle d'`engine_stays_free`). En-têtes : `no-store`, `nosniff`.
+- [ ] **Step 2 : écrire**, régénérer les types (`packages/protocol`), relancer. Commit `serveur : recherche dans un espace (R903 à R905, R910, R914, R917)`. En-tête de `lib.rs`, registre.
+- [ ] **Step 3 : mesure** (`#[ignore]`, release) : `measure_search_on_10000_pages` (membre qui voit tout, invité qui voit dix pages ; un, trois, huit termes ; p95 ; la part de l'ensemble permis à part), ligne `MESURE`.
 
-**Pièges :** les droits par `access.rs` seulement ; qui n'a aucun rôle reçoit sa réponse sans que l'espace soit lu (R99) ; toute garde de débit suit le travail qu'elle borne (R630) ; un test de débit abandonne la requête pendant un calcul qui tourne ; compter les requêtes SQL d'une route demande un binaire à lui (R266) ; messages du serveur affichés tels quels, ils tutoient ; `StoreError::Stale` n'a pas de traduction générique (aucune écriture ici : ne pas en introduire) ; un seuil « N pendant M » finit par échouer : attendre une condition.
+**Preuves (mutations) :** filtrer sans `in_trash` ; bâtir le fil d'Ariane de `parent_id` au lieu de `visible_parent` ; lire le titre dans l'index ; calculer `indexing` sur tout l'espace ; rendre la garde du débit à l'abandon de la requête ; bâtir l'ensemble permis avant de prendre sa place ; appeler l'index avant `space_access` ; accepter `q` dans l'adresse.
+
+**Pièges :** les droits par `access.rs` seulement ; la session par l'extracteur `AuthUser` ; qui n'a aucun rôle reçoit sa réponse sans que l'espace soit lu (R99) ; toute garde de débit suit le travail qu'elle borne (R630) ; un test de débit abandonne la requête pendant un calcul qui tourne ; un refus rendu avant de lire un corps se perd chez un client qui envoie sans attendre (R505) : le corps est petit et borné, le lire avant de refuser un compte ; compter les requêtes SQL d'une route demande un binaire à lui (R266) ; messages du serveur affichés tels quels, ils tutoient ; aucune écriture ici : ne pas introduire de `StoreError::Stale` ; un seuil « N pendant M » finit par échouer : attendre une condition.
 
 ### Task S6 : la route des rétroliens
 
-**Dépend de :** S1, S4. **Livrable :** `GET /api/v1/pages/{id}/backlinks`.
+**Dépend de :** S1, S4b. **Livrable :** `GET /api/v1/pages/{id}/backlinks`.
 
 **Files:**
 - Create: `crates/mementum-server/src/routes/backlinks.rs`, `tests/backlinks.rs`
 - Modify: `lib.rs`, `types.rs`, `tests/common/mod.rs` (`page_routes`), `tests/permissions.rs`
 
-- [ ] **Step 1 : tests, vus rouges.** `a_page_link_a_mention_and_a_link_in_a_text_are_backlinks` ; `a_backlink_from_an_unseen_page_is_not_listed` et son témoin (l'accès donné, elle paraît) ; `a_backlink_from_a_trashed_page_is_not_listed` ; `a_backlink_from_another_space_is_not_listed` ; `a_page_linking_twice_is_listed_once` (le premier bloc) ; `a_link_removed_leaves_the_backlinks` ; `a_page_does_not_backlink_itself` ; `backlinks_are_bounded` (201 sources : 200 rendues, rien ne dit qu'il en reste d'autres que la personne ne voit pas) ; `the_excerpt_is_the_block_as_indexed_and_bounded` ; `foreign_page_is_indistinguishable_from_missing` gagne la route ; `a_reader_gets_the_backlinks`, `…in_the_trash_too`.
+- [ ] **Step 1 : tests, vus rouges.** `a_page_link_a_mention_and_a_link_in_a_text_are_backlinks` ; `a_backlink_from_an_unseen_page_is_not_listed` et son témoin (l'accès donné, elle paraît) ; `a_backlink_from_a_trashed_page_is_not_listed` ; `a_backlink_from_another_space_is_not_listed` ; `a_page_linking_twice_is_listed_once` (le premier bloc) ; `a_link_removed_leaves_the_backlinks` ; `a_page_does_not_backlink_itself` ; **`unseen_sources_never_hide_seen_ones`** (300 sources non vues dont les identifiants passent avant ceux de 3 sources vues : les 3 sortent ; c'est le test qui distingue « borner puis trier » de « trier puis borner ») ; `the_answer_is_the_same_whatever_unseen_sources_exist` (les 3 vues seules, puis avec les 300 : corps égaux) ; `two_hundred_seen_sources_at_most` ; `the_walk_stops_at_its_bound` (plafond réglé bas pour le test : la lecture s'arrête, compte des lots) ; `sources_of_another_space_are_not_even_read` (compte des lignes ramenées) ; `the_excerpt_is_bounded_by_the_database` ; `foreign_page_is_indistinguishable_from_missing` gagne la route ; `a_reader_gets_the_backlinks`, `…in_the_trash_too`.
 - [ ] **Step 2 : écrire**, régénérer les types, relancer. Commit `serveur : rétroliens d'une page`. En-tête de `lib.rs`.
+- [ ] **Step 3 : mesure** (`#[ignore]`, release) : `measure_backlinks_at_the_walk_bound` (20 000 sources non vues, puis 200 vues) : elle dit si la route demande un débit à elle.
 
-**Preuves (mutations) :** rendre les sources sans les trier par `space_access` ; trier par l'accès à la page visée seulement ; compter avant de trier (une borne qui dit combien de sources existent).
+**Preuves (mutations) :** rendre les sources sans les trier par `space_access` ; trier par l'accès à la page visée seulement ; borner avant de trier ; dire dans la réponse que le parcours s'est arrêté ; ramener le texte entier du bloc.
 
-**Pièges :** « ne jamais lister sans ce tri » (la leçon des favoris, R280) ; un id qu'on ne voit pas ne sort par aucune route neuve ; l'extrait vient de l'index, qui peut porter un titre copié (R251) : c'est le texte de la page source, que le lecteur lit déjà.
+**Pièges :** « ne jamais lister sans ce tri » (la leçon des favoris, R280) ; un id qu'on ne voit pas ne sort par aucune route neuve ; l'extrait vient de l'index, qui peut porter un titre copié (R251) : c'est le texte de la page source, que le lecteur lit déjà ; une requête reprend l'expression exacte de son index.
 
-### Task S7 : `mementum reindex`, et la reconstruction au démarrage
+### Task S7 : `mementum reindex`
 
-**Dépend de :** S4. **Livrable :** la commande de la conception (§5.7), et un serveur qui se répare seul.
+**Dépend de :** S4c. **Livrable :** la commande de la conception (§5.7).
 
 **Files:**
-- Modify: `crates/mementum-cli/src/main.rs`, `crates/mementum-server/src/lib.rs` (`build`), `indexer.rs`
-- Test: `crates/mementum-cli/tests/` (un fichier neuf), `crates/mementum-server/tests/indexer.rs`
+- Modify: `crates/mementum-cli/src/main.rs`
+- Test: `crates/mementum-cli/tests/` (un fichier neuf)
 
-- [ ] **Step 1 : tests, vus rouges.** `reindex_rebuilds_everything_from_the_documents` (tables vidées à la main, dossier supprimé : après la commande, mêmes résultats qu'avant) ; `reindex_text_only_rebuilds_the_text_index_from_the_tables` ; `reindex_refuses_while_a_server_holds_the_index` (message en français, base et index intacts) ; `reindex_never_opens_a_database_it_would_have_to_migrate_without_the_backup_rule` (la commande passe par `Store::open`, donc par `backup.rs`) ; au démarrage du serveur : `a_restored_database_rebuilds_its_text_index` (copie de la base d'avant des écritures remise en place, dossier `search/` gardé : aucun extrait d'un texte que la base n'a pas, témoin avant) ; `a_backup_put_back_before_0005_rebuilds_after_migrating_again` ; `searching_during_a_rebuild_says_indexing`.
+- [ ] **Step 1 : tests, vus rouges.** `reindex_rebuilds_everything_from_the_documents` (tables vidées à la main, dossier supprimé : après la commande, mêmes résultats qu'avant) ; `reindex_text_only_rebuilds_the_text_index_from_the_tables` ; `reindex_refuses_while_a_server_holds_the_index` (message en français, base et index intacts) ; `reindex_opens_the_database_by_the_backup_rule` (la commande passe par `Store::open`, donc par `backup.rs` : une base à migrer est copiée d'abord, une base refusée reste intacte) ; `a_server_started_after_reindex_rebuilds_nothing` (les jetons concordent).
 - [ ] **Step 2 : écrire**, relancer. Commit `cli : mementum reindex (R913)`.
 
-**Preuves (mutations) :** garder le dossier quand l'époque diffère ; reconstruire depuis les documents quand `--text-only` ; ouvrir un second écrivain.
+**Preuves (mutations) :** reconstruire depuis les documents quand `--text-only` ; ouvrir un second écrivain ; laisser les jetons de la base sans celui de l'index reconstruit.
 
-**Pièges :** toute lecture neuve d'une base avant de l'accepter passe par une connexion sans réglage qui écrive (R840, R845) : passer par `Store::open` ; une commande dans un autre processus dispute le verrou de SQLite par `busy_timeout` ; démarrage à froid < 1 s : la reconstruction n'est jamais attendue par `serve`.
+**Pièges :** toute lecture neuve d'une base avant de l'accepter passe par une connexion sans réglage qui écrive (R840, R845) : passer par `Store::open` ; une commande dans un autre processus dispute le verrou de SQLite par `busy_timeout` ; un `mementum` lancé depuis `target/` empêche la recompilation sous Windows.
 
 ---
 
@@ -453,34 +554,37 @@ Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesur
 
 **Files:**
 - Create: `apps/web/src/search/SearchDialog.tsx`, `useSearch.ts`, `shortcut.ts`, `marks.ts`, leurs tests ; `apps/web/e2e/search.spec.ts`
-- Modify: `apps/web/src/api.ts` (`searchSpace`), `App.tsx`, `sidebar/Sidebar.tsx`, `theme.css`, `e2e/helpers.ts` (`waitFindable`), `e2e/servers.ts` (`MEMENTUM_INDEX_AFTER_MS`)
+- Modify: `apps/web/src/api.ts` (`searchSpace` ; `silence` : une liste des `POST` qui ne font que lire), `api.test.ts`, `App.tsx`, `sidebar/Sidebar.tsx`, `theme.css`, `e2e/helpers.ts` (`waitFindable`), `e2e/servers.ts` (`MEMENTUM_INDEX_AFTER_MS`)
 
 Comportement :
 - Une entrée « Rechercher » sous le sélecteur d'espace, avec son raccourci écrit ; le raccourci l'ouvre de partout (décision L5 ; le plan suppose Ctrl+K, laissé à l'éditeur quand sa sélection n'est pas vide).
+- `searchSpace` est un `POST` (R917) qui ne fait que lire : `silence` (`api.ts`) le nomme parmi les lectures, pour qu'une réponse perdue dise « le serveur ne répond pas », jamais « ce que tu as demandé a peut-être été fait » (R757) ; il passe par `send` comme tout appel, et un `401` tardif le rejoue comme une lecture.
 - La fenêtre (`<dialog>`) est chargée à la demande. Champ vide : les pages récentes (ce que la barre montre déjà). Dès la frappe : d'abord les pages de l'arbre dont le titre contient la requête (`findPages`, sans réseau), puis, 150 ms après la dernière frappe, les résultats du serveur ; une réponse d'une requête qui n'est plus la courante est jetée, une requête en route est abandonnée (`AbortSignal`).
 - Une page trouvée des deux côtés n'a qu'une ligne. La ligne active est tenue par l'identifiant de la page ; l'arrivée des résultats du serveur ne la change pas, et ne déplace rien sous le pointeur (les lignes déjà montrées gardent leur rang, les autres s'ajoutent dessous).
 - Chaque ligne : le titre, le fil d'Ariane, l'extrait avec ses mots surlignés (`<mark>` autour de nœuds de texte, d'après `marks`). Flèches, Entrée (ouvre), Ctrl+Entrée (nouvel onglet : chaque ligne est un vrai `<a href>`), Échap (ferme, le focus revient d'où il venait).
 - États dits : « Aucun résultat », « L'indexation est en cours : des pages peuvent manquer » (`indexing`), un refus du serveur tel qu'il le dit, la session perdue (la connexion est demandée, la requête repart au retour du compte).
 
-- [ ] **Step 1 : tests, vus rouges.** Vitest : `titles_of_the_tree_come_first_and_at_once` ; `a_late_answer_of_an_older_query_is_dropped` ; `the_active_line_is_held_by_its_id_when_results_arrive` ; `nothing_moves_under_the_pointer_when_results_arrive` ; `a_page_found_twice_has_one_line` ; `marks_wrap_text_nodes_only` (un extrait `<img onerror=…>` s'affiche en texte ; une plage hors du texte ou qui coupe une paire UTF-16 est ignorée) ; `escape_closes_and_gives_the_focus_back`, `escape_in_the_window_closes_nothing_under_it` (`event.target === event.currentTarget`) ; `the_shortcut_is_read_from_the_key_typed` (AZERTY, AltGr, sous une autre `dialog`, dans un champ) ; `search_busy_is_not_shown_for_a_replaced_query` ; `a_lost_session_asks_to_log_in_and_searches_again`. E2e : `typed_word_is_found_and_opened` ; `searching_at_the_keyboard_only` ; `the_shortcut_in_the_editor_with_a_selection_is_left_to_the_editor` (témoin : sans sélection, la fenêtre s'ouvre) ; `opening_the_application_asks_nothing_of_search` (compte des requêtes).
+- [ ] **Step 1 : tests, vus rouges.** Vitest : `titles_of_the_tree_come_first_and_at_once` ; `a_late_answer_of_an_older_query_is_dropped` ; `the_active_line_is_held_by_its_id_when_results_arrive` ; `nothing_moves_under_the_pointer_when_results_arrive` ; `a_page_found_twice_has_one_line` ; `marks_wrap_text_nodes_only` (un extrait `<img onerror=…>` s'affiche en texte ; une plage hors du texte ou qui coupe une paire UTF-16 est ignorée) ; `escape_closes_and_gives_the_focus_back`, `escape_in_the_window_closes_nothing_under_it` (`event.target === event.currentTarget`) ; `the_shortcut_is_read_from_the_key_typed` (AZERTY, AltGr, sous une autre `dialog`, dans un champ) ; `search_busy_is_not_shown_for_a_replaced_query` ; `a_lost_answer_of_a_search_is_said_as_a_reading` (`api.test.ts` : statut 0 et `502` sans corps, le message est celui d'une lecture, et `answerLost` ne fait rien dire d'une écriture) ; `the_query_is_never_put_in_an_address` (l'adresse appelée ne porte que l'espace) ; `a_lost_session_asks_to_log_in_and_searches_again`. E2e : `typed_word_is_found_and_opened` ; `searching_at_the_keyboard_only` ; `the_shortcut_in_the_editor_with_a_selection_is_left_to_the_editor` (du texte sélectionné : la barre de lien de BlockNote s'ouvre, pas la fenêtre ; témoin : sans sélection, la fenêtre s'ouvre, et aucun lien n'est créé ni proposé ; la preuve lit la sélection de l'éditeur et `defaultPrevented` par un écouteur posé sur `window`, sans rien supposer de l'écouteur de BlockNote, dont l'ordre avec le nôtre est justement ce qu'on éprouve) ; `opening_the_application_asks_nothing_of_search` (compte des requêtes).
 - [ ] **Step 2 : écrire**, relancer Vitest, types, e2e (ports de la piste C). Commit `client : fenêtre de recherche`.
 
 **Preuves (mutations) :** garder la ligne active par son rang ; afficher l'extrait par `innerHTML` ; reconnaître le raccourci par `event.code` ; ne pas jeter la réponse en retard ; charger la fenêtre au démarrage.
 
-**Pièges :** `onCancel` et `onClose` d'un `<dialog>` remontent dans l'arbre de React ; le focus ne tombe jamais sur `body` (un élément retiré sous le focus, R339) ; une liste qui suit le réseau tient sa ligne par l'id (R572) ; rien ne bouge sous le pointeur (R296, R411 : le suivre au niveau du document) ; un raccourci se lit à `event.key`, se tait sous une `dialog` ouverte, ne prend jamais un caractère tapé avec AltGr (R176, R214) ; un raccourci qui double celui de l'éditeur ou du navigateur (R634) ; toute fonction neuve d'`api.ts` passe par `send` ; une liste qui trouve la session perdue rend `SESSION_LOST` et prend `afterLogin` (R212) ; clés React à soi dans la barre (R290) ; un e2e qui cherche une ligne de la barre prend un compte neuf ; les pages d'un e2e se créent avant d'ouvrir les onglets ; un e2e attend que la page soit trouvable par une condition (`waitFindable`), pas par une durée ; l'outil d'écriture change `⁨` en caractère réel (`String.fromCharCode`) ; ne pas éditer `apps/web/src` pendant une suite e2e.
+**Pièges :** `onCancel` et `onClose` d'un `<dialog>` remontent dans l'arbre de React ; le focus ne tombe jamais sur `body` (un élément retiré sous le focus, R339) ; une liste qui suit le réseau tient sa ligne par l'id (R572) ; rien ne bouge sous le pointeur (R296, R411 : le suivre au niveau du document) ; un raccourci se lit à `event.key`, se tait sous une `dialog` ouverte, ne prend jamais un caractère tapé avec AltGr (R176, R214) ; un raccourci qui double celui de l'éditeur ou du navigateur (R634) : BlockNote traite Ctrl+K sur l'élément de l'éditeur sans arrêter la propagation, si bien qu'un écouteur du document le reçoit **après** lui, déjà annulé ou non : décider d'après la sélection de l'éditeur, pas d'après l'ordre des écouteurs ; toute fonction neuve d'`api.ts` passe par `send` ; une liste qui trouve la session perdue rend `SESSION_LOST` et prend `afterLogin` (R212) ; clés React à soi dans la barre (R290) ; un e2e qui cherche une ligne de la barre prend un compte neuf ; les pages d'un e2e se créent avant d'ouvrir les onglets ; un e2e attend que la page soit trouvable par une condition (`waitFindable`), pas par une durée ; l'outil d'écriture change `⁨` en caractère réel (`String.fromCharCode`) ; ne pas éditer `apps/web/src` pendant une suite e2e.
 
 ### Task C2 : arriver sur le bloc trouvé
 
 **Dépend de :** C1. **Livrable :** ouvrir un résultat mène au bloc, pour qui modifie comme pour qui lit.
 
 **Files:**
-- Modify: `apps/web/src/router.ts` (un fragment `#b=<id>` sur `/p/:id`), `page/PageView.tsx`, `editor/Editor.tsx` ou un module neuf `editor/goToBlock.ts` (tiré de `goToHeading`, `Toc.tsx`), `search/SearchDialog.tsx`
+- Modify: `apps/web/src/router.ts` (un fragment `#b=<id>` sur `/p/:id` : `navigate`, `useLinkInterception`, et un `useBlockTarget` à côté de `usePathname`), `App.tsx`, `page/PageView.tsx`, `editor/Editor.tsx` ou un module neuf `editor/goToBlock.ts` (tiré de `goToHeading`, `Toc.tsx`), `search/SearchDialog.tsx`
 - Test: `router.test.ts`, `page/PageView.test.tsx`, `e2e/search.spec.ts`
 
-- [ ] **Step 1 : tests, vus rouges.** `a_block_fragment_is_parsed_and_kept_out_of_the_page_id` ; `the_block_is_reached_after_the_first_sync_only` (jamais sur un document encore vide) ; `a_block_that_left_opens_the_page_at_its_top_and_says_nothing` ; `a_reader_is_taken_to_the_block_too` (éditeur en lecture seule : la sélection du document, comme `goToHeading`) ; `the_fragment_is_followed_once` (une relecture, une session recréée ne ramènent pas au bloc) ; `typing_after_arriving_is_not_lost` ; e2e `a_result_opens_on_its_block_in_a_long_page` (page de 1 000 blocs, le bloc trouvé est à l'écran) ; budgets : `open_1000_block_page_under_300ms` reste vert.
+Le routeur d'aujourd'hui jette le fragment à trois endroits (lu dans `router.ts`) : `navigate` ne fait rien quand le chemin et la requête sont déjà ceux de l'adresse, `useLinkInterception` ne passe que `pathname + search`, et `usePathname` ne rend que `location.pathname`. C2 les change tous les trois : `navigate` compare aussi le fragment ; l'interception le garde pour une page (elle laisse toujours au navigateur un lien d'invitation, dont le jeton est dans le fragment) ; `useBlockTarget` rend le bloc visé et suit `popstate`, `hashchange` et l'événement de `navigate`, sans faire rendre de nouveau ce qui ne lit que le chemin.
+
+- [ ] **Step 1 : tests, vus rouges.** `a_block_fragment_is_parsed_and_kept_out_of_the_page_id` ; `an_intercepted_link_keeps_its_fragment` ; `navigating_to_another_block_of_the_open_page_is_followed` (même page, autre bloc : l'adresse change, le bloc est atteint, la page n'est pas remontée) ; `navigating_to_the_same_block_again_does_nothing` ; `an_invitation_link_is_still_left_to_the_browser` ; `back_returns_to_the_block_before` ; `a_fragment_that_is_not_a_block_is_ignored` ; `the_block_is_reached_after_the_first_sync_only` (jamais sur un document encore vide) ; `a_block_that_left_opens_the_page_at_its_top_and_says_nothing` ; `a_reader_is_taken_to_the_block_too` (éditeur en lecture seule : la sélection du document, comme `goToHeading`) ; `the_fragment_is_followed_once` (une relecture, une session recréée ne ramènent pas au bloc) ; `typing_after_arriving_is_not_lost` ; e2e `a_result_opens_on_its_block_in_a_long_page` (page de 1 000 blocs, le bloc trouvé est à l'écran) ; e2e `a_result_of_the_open_page_goes_to_its_block` (la page est déjà ouverte : sans la correction du routeur, rien ne se passe) ; budgets : `open_1000_block_page_under_300ms` reste vert.
 - [ ] **Step 2 : écrire**, relancer. Commit `client : un résultat mène à son bloc`.
 
-**Preuves (mutations) :** mener au bloc avant la première synchro ; le refaire à chaque rendu ; `editor.focus()` seul dans un éditeur en lecture seule.
+**Preuves (mutations) :** mener au bloc avant la première synchro ; le refaire à chaque rendu ; `editor.focus()` seul dans un éditeur en lecture seule ; `navigate` qui compare sans le fragment ; l'interception qui le jette ; un changement de bloc qui remonte `PageView` (le brouillon d'un commentaire en partirait).
 
 **Pièges :** `setTextCursorPosition` ne tient pas dans un éditeur en lecture seule qui prend le focus ; `editor.focus()` n'y fait rien (R470) ; ne jamais relire des blocs un par un dans une boucle (R641) ; tout branchement neuf de `PageView` prend son test dans `PageView.test.tsx` ; `PageView` est rendu sous la clé de la page ; même id n'est pas même élément (R220).
 
@@ -497,7 +601,7 @@ Comportement : rien n'est lu avant la première synchro de la page ; la section 
 - [ ] **Step 1 : tests, vus rouges.** Vitest : `backlinks_are_read_after_the_first_sync_only` ; `no_section_without_a_backlink` ; `the_list_is_held_under_the_pointer_and_the_focus` ; `a_refusal_is_said_and_the_page_is_read_again` (`404` : la page n'est plus vue) ; `a_lost_session_reads_again_after_login` ; `the_section_is_a_list_of_links` (`nav`, `ul`, `li`, nom accessible). E2e : `a_mention_makes_a_backlink` (à deux onglets : l'un mentionne, l'autre revient sur l'onglet de la page visée) ; `a_guest_sees_only_the_backlinks_of_pages_he_sees` ; `opening_a_page_asks_for_backlinks_after_its_first_sync` (ordre des requêtes).
 - [ ] **Step 2 : écrire**, relancer, e2e, budgets du navigateur (les 14, plus un : une page visée par 200 pages s'ouvre sous son budget). Commit `client : rétroliens d'une page`.
 
-**Preuves (mutations) :** lire au montage ; relire à chaque frappe ; prendre le titre de la réponse plutôt que de l'arbre.
+**Preuves (mutations) :** lire au montage ; relire à chaque frappe ; montrer un titre gardé à la lecture plutôt que celui de l'arbre (la réponse n'en porte pas).
 
 **Pièges :** un titre de page montré vient de l'arbre, et de lui seul (R570) ; la feuille de BlockNote passe après `theme.css` (deux classes, R763), et la preuve est dans Chromium (`e2e/rich-styles.spec.ts`) ; `data-page-id` est réservé aux lignes de l'arbre ; un e2e qui compte les requêtes voit passer celles du canal et des favoris ; un e2e qui change des droits les pose avant d'ouvrir les pages.
 
@@ -518,11 +622,11 @@ Comportement : rien n'est lu avant la première synchro de la page ; la section 
 
 ### Task X2 : budgets
 
-**Dépend de :** S4, S5, C1. **Livrable :** les budgets du §5.10 mesurés avec l'indexeur, dans la CI.
+**Dépend de :** S4c, S5, C1. **Livrable :** les budgets du §5.10 mesurés avec l'indexeur, dans la CI.
 
 **Files:** `crates/mementum-sync/tests/budgets.rs` ou `crates/mementum-server/tests/measure.rs`, `crates/mementum-cli/tests/` (mesures existantes), `apps/web/e2e/budgets.spec.ts`, `.github/workflows/ci.yml`
 
-- [ ] **Step 1 : mesures** (`#[ignore]`, release, `alone`, lignes `MESURE`) : `keystroke_seen_under_150ms_while_a_space_is_being_indexed` (10 000 pages en retard, p95 au plus proche rang, la première frappe jugée à part, R488) ; `loading_a_10000_block_page_under_300ms_while_it_is_being_indexed` ; la mémoire au repos et le démarrage à froid de `mementum-cli`, sur un dossier de données qui porte un index de 10 000 pages ; `measure_search_on_10000_pages` (S5) ; côté navigateur, `results_shown_after_the_last_keystroke` (mesure, sous ×1 et ×1,5).
+- [ ] **Step 1 : mesures** (`#[ignore]`, release, `alone`, lignes `MESURE`) : `keystroke_seen_under_150ms_while_a_space_is_being_indexed` (10 000 pages en retard, p95 au plus proche rang, la première frappe jugée à part, R488) ; `keystroke_seen_under_150ms_while_a_large_page_is_rewritten_in_a_loop` (une page de 10 000 blocs récrite par `PUT /mmd` puis renommée, sans relâche, par un compte ; la frappe d'un autre dans une autre page) ; `loading_a_10000_block_page_under_300ms_while_it_is_being_indexed` ; la mémoire au repos (prise une fois le rattrapage fini ; la pointe pendant lui relevée à part) et le démarrage à froid de `mementum-cli`, sur un dossier de données qui porte un index de 10 000 pages ; `measure_search_on_10000_pages` (S5) ; côté navigateur, `results_shown_after_the_last_keystroke` (mesure, sous ×1 et ×1,5).
 - [ ] **Step 2 : la CI** : si les mesures de `mementum-server` y entrent (elles n'y sont pas aujourd'hui), le dire au registre ; sinon, la mesure de la frappe pendant l'indexation va dans `mementum-sync` ou `mementum-cli`, que le job `budgets` lance déjà. Commit `budgets : la frappe, la mémoire et le démarrage avec l'index`.
 
 **Pièges :** ne jamais relâcher un budget, sa statistique ni sa définition ; les mesures d'un binaire passent une à la fois (R341) ; le disque de la CI varie du simple au quintuple (R487) ; le point de contrôle du WAL tombe sur l'écriture qui le déclenche (R447) : les transactions de l'index en déclenchent, le lire dans la liste des frappes ; un fil qui partage un cœur attend par tranches (R585) ; mesurer le coût d'un ajout à binaire égal (interrupteur d'environnement le temps de la mesure, jamais commité).
@@ -532,7 +636,7 @@ Comportement : rien n'est lu avant la première synchro de la page ; la section 
 **Dépend de :** toutes.
 
 **Files:**
-- Modify: `README.md`, `CLAUDE.md` (« Pièges rencontrés au lot 4 »), `docs/REPRISE.md`, `docs/specs/2026-11-09-mementum-design.md` (§4.2, §5.3, §5.7, §5.10, §6.5, §7.4, §9 : les écarts E1 à E9, tels que Lenny les aura tranchés), l'en-tête de `crates/mementum-server/src/lib.rs`
+- Modify: `README.md`, `CLAUDE.md` (« Pièges rencontrés au lot 4 », et le point 4 d'« Avant de commencer » : le registre du lot 4 et ses numéros, à la suite de ceux du lot 3), `docs/REPRISE.md`, `docs/specs/2026-11-09-mementum-design.md` (§4.2, §5.3, §5.7, §5.10, §6.5, §7.4, §9 : les écarts E1 à E9, tels que Lenny les aura tranchés), l'en-tête de `crates/mementum-server/src/lib.rs`
 - Create: `docs/recette/2026-11-19-p1-lot4-recette.md`
 
 - [ ] **Step 1 : relire chaque document contre le code final**, pas contre ce plan : les routes ; les réglages ; `mementum reindex` ; ce qui est indexé et ce qui ne l'est pas ; les sauvegardes (`search/` ne se sauvegarde pas) ; les limites, telles que mesurées.
@@ -546,13 +650,19 @@ Comportement : rien n'est lu avant la première synchro de la page ; la section 
 À porter au README et au registre telles que mesurées ; chacune a son test `known_limits` quand elle se prouve.
 
 - **L-a** : un texte effacé reste trouvable, et lisible dans un extrait, jusqu'à la réindexation de sa page (2 à 15 s, davantage si l'indexeur est en retard), par toute personne qui lit la page à ce moment, y compris quelqu'un à qui l'accès vient d'être donné. L'historique, lui, demande « Peut modifier » (R203).
-- **L-b** : l'ordre de deux résultats peut dépendre de ce qu'écrivent des pages que la personne ne voit pas (les statistiques de pertinence portent sur l'espace) ; leur présence, non.
+- **L-b** : ni la présence ni l'ordre des résultats ne dépendent de ce que la personne ne voit pas (R916). **Le temps de réponse, si** : il croît avec le nombre d'entrées de toute l'instance (autres espaces, corbeille, pages non vues) qui portent un terme cherché. Qui mesure finement ses propres recherches peut donc estimer si un mot est courant chez les autres. S0 chiffre l'écart ; le débit de R910 borne le nombre de mesures par seconde, sans fermer le canal (décision L19).
 - **L-c** : deux mots écrits dans deux blocs différents d'une page ne la trouvent pas, sauf si l'un est dans le titre (R902).
 - **L-d** : un titre copié par une mention ou un lien de page (R251) est un texte de la page qui le porte : on trouve cette page en cherchant le titre de la page mentionnée, même sans voir celle-ci. Rien de neuf n'est montré (la personne lit déjà ce titre dans la page), mais la recherche le rend plus facile à trouver.
 - **L-e** : les rétroliens ne viennent que du même espace ; un lien vers une page inconnue ou d'un autre espace est gardé dans `page_links` et ne se voit nulle part.
 - **L-f** : pendant la première indexation d'une instance existante, ou une reconstruction, la recherche est incomplète, et le dit.
 - **L-g** : rien ne borne la place de l'index sur le disque ; un compte qui peut écrire fait grossir l'index comme il fait grossir la base (lot 7).
 - **L-h** : au-delà de 64 Kio par bloc et de 8 Mio par page, le texte n'est pas indexé.
+- **L-i** : une page écrite à l'index en plusieurs transactions (plus de `MAX_INDEX_TX_BYTES` de changements d'un coup : une première indexation, une réécriture) montre un instant un état partiel aux rétroliens (un lien déjà là, un autre pas encore) ; la recherche, elle, n'est nourrie que des blocs dont la ligne est écrite.
+- **L-j** : au-delà de 20 000 pages sources d'un même espace vers une même page, des rétroliens que la personne voit peuvent manquer, sans que rien le dise.
+- **L-k** : un texte effacé reste dans les fichiers de l'index plein texte jusqu'à la fusion de son segment (et dans ceux de SQLite jusqu'à leur réemploi) : il n'est plus trouvable, mais qui lit le disque du serveur le lit. La corbeille, elle, reste indexée en clair jusqu'à la suppression définitive.
+- **L-l** : une page que le serveur ne sait plus relire quitte l'index (ses résultats, ses rétroliens) jusqu'à ce qu'elle se relise.
+- **L-m** : le texte d'un bloc `unknown` n'est pas trouvable.
+- **L-n** : cent pages au plus par recherche ; au-delà, il faut préciser la requête.
 
 ## Écarts et contradictions trouvés dans la conception
 
@@ -576,7 +686,7 @@ Rien de ceci ne se décide à sa place. Pour chacune : la question, la recommand
 - **L1 — Le moteur : Tantivy, ou FTS5 de SQLite ?** La conception dit Tantivy (§5.2, §12 « Mes choix (à relire) » n° 7), sans mesure (E4). Tantivy : meilleur classement, racinisation, base de la recherche hybride de la P4, indépendant de SQLite et de Postgres ; coûte une dépendance lourde, un second stockage et sa cohérence. FTS5 : déjà là, dans la même transaction que `blocks_index`, rien à tenir cohérent ni à reconstruire à part ; mais ses écritures passent par le tour d'écriture unique (donc devant la frappe des autres), pas de racinisation française, et il faudrait autre chose le jour de Postgres. **Recommandation : garder Tantivy, comme la conception, si S0 tient les budgets ; sinon FTS5.** *Le plan suppose* Tantivy ; seules S0, S3 et S7 changeraient.
 - **L2 — Chercher dans l'espace affiché, ou dans tous ses espaces ?** **Recommandation : l'espace affiché**, comme Notion ; tous les espaces demanderait un calcul d'accès par espace à chaque frappe. *Le plan suppose* un espace.
 - **L3 — Ce qui est cherché.** *Le plan suppose* : les titres des pages, le texte des blocs, les légendes et noms de fichiers, l'adresse d'un signet, le LaTeX. Pas les commentaires, pas le contenu des fichiers (PDF), pas les versions de l'historique, pas les dossiers. **Recommandation : tel quel** ; les commentaires seraient le premier ajout (ils ont leurs droits à eux, R134).
-- **L4 — La corbeille.** **Recommandation : jamais dans les résultats** ; chercher dans la corbeille serait une fonction de l'écran de la corbeille, plus tard. *Le plan suppose* cela.
+- **L4 — La corbeille.** Deux questions. Les résultats : **recommandation : jamais** ; chercher dans la corbeille serait une fonction de l'écran de la corbeille, plus tard. L'index : *le plan suppose* qu'une page à la corbeille **reste indexée** (son texte reste dans les tables et les fichiers de l'index jusqu'à la suppression définitive), pour qu'une page restaurée se retrouve aussitôt ; l'autre choix la retire de l'index à la mise à la corbeille et la réindexe à la restauration. **Recommandation : la garder indexée** (le texte est de toute façon dans la base tant que la page est à la corbeille).
 - **L5 — Le raccourci et la forme.** La conception annonce une palette Ctrl+K (navigation, actions, IA). **Recommandation : au lot 4, une fenêtre de recherche**, ouverte par « Rechercher » dans la barre latérale et par Ctrl+K (Cmd+K sur Mac), sauf quand du texte est sélectionné dans l'éditeur, où Ctrl+K reste « créer un lien », comme dans Notion ; les actions et l'IA plus tard, dans la même fenêtre. *Le plan suppose* cela ; changer de touche est un changement d'une ligne.
 - **L6 — Tolérance de la recherche.** *Le plan suppose* : sans casse ni accents, tous les mots voulus, le dernier complété (« proj » trouve « projet »), **sans racinisation** (« pages » ne trouve pas « page ») et sans tolérance aux fautes. **Recommandation : tel quel au lot 4** : une racinisation française fausse les textes anglais d'un même espace ; S0 chiffre ce qu'elle apporterait.
 - **L7 — Filtres et tri.** L'outil `search` des agents annonce des filtres (type, date, auteur). **Recommandation : aucun filtre à l'écran au lot 4, tri par pertinence seul ; les filtres au lot 5**, avec l'outil, une fois décidé ce qu'est la date de modification d'une page (E10). *Le plan suppose* cela.
@@ -584,15 +694,21 @@ Rien de ceci ne se décide à sa place. Pour chacune : la question, la recommand
 - **L9 — Le délai d'indexation, et ce qu'il laisse voir.** Une page est trouvable 2 s après la dernière frappe (15 s pendant une frappe continue). Pendant ce délai, un texte effacé reste trouvable par qui lit la page (L-a). **Recommandation : accepter**, c'est le prix de ne rien mettre sur le chemin d'une frappe. *Le plan suppose* cela.
 - **L10 — Les budgets de la recherche.** La conception n'en a pas (E8). Proposés : réponse du serveur < 100 ms au p95 sur 10 000 pages ; résultats affichés < 300 ms après la dernière frappe ; page trouvable < 5 s après la dernière frappe. **Recommandation : les adopter au §5.10 après S0**, aux chiffres mesurés s'ils sont meilleurs. *En attendant*, ce sont des mesures, pas des critères de refus.
 - **L11 — `[[Page#Titre]]`** (lien vers un titre d'une page). Dans aucun lot (E6). **Recommandation : pas au lot 4** ; il demande un choix de schéma (une prop ou une mention neuve, donc une version de schéma), à faire avec le lot 5 ou le lot 6 (l'import d'Obsidian en a besoin). *Le plan suppose* qu'il n'y est pas.
-- **L12 — Pousser.** L'accord de pousser au fil du travail valait pour le lot 3. **Recommandation : le redonner pour le lot 4**, aux mêmes conditions. *En attendant*, rien n'est poussé.
+- **L12** — retirée au tour de correction 1 : ce n'est pas une question ouverte (la consigne durable du propriétaire, « Global Constraints », « Pousser »). Le numéro n'est pas réemployé.
 - **L13 — Indexer une instance existante.** **Recommandation : toute seule, en fond, au premier démarrage**, la recherche disant qu'elle est incomplète tant que ce n'est pas fini ; l'autre choix est une commande à lancer par l'exploitant. *Le plan suppose* l'indexation automatique.
 - **L14 — Un titre mentionné devient trouvable** (L-d). Conséquence de R251, que Lenny doit encore confirmer : qui cherche le titre d'une page privée trouve les pages qui la mentionnent. **Recommandation : l'accepter avec R251** ; si R251 est défait, la projection suit sans autre travail. *Le plan suppose* R251.
+
+- **L15 — Cent pages au plus par recherche** (20 par réponse, 5 réponses ; R911). Au-delà, la personne précise sa requête ; rien ne dit combien il en reste (R905). **Recommandation : tel quel** : c'est aussi ce qui borne le coût d'une requête et ce qu'un compte peut aspirer d'un espace en une recherche. *Le plan suppose* cela.
+- **L16 — Une requête de 200 caractères et de 8 mots au plus**, sans opérateur (ni guillemets pour une expression exacte, ni « sauf ») ; au-delà, un refus qui le dit. **Recommandation : tel quel au lot 4** ; l'expression exacte entre guillemets serait le premier ajout. *Le plan suppose* cela.
+- **L17 — Un bloc que cette version ne connaît pas (`unknown`) n'est pas cherché** : son texte est gardé en JSON, d'une forme que le serveur ne lit pas. **Recommandation : tel quel** (L-m). *Le plan suppose* cela.
+- **L18 — Le texte gardé trois fois** : dans le document, dans `blocks_index`, dans l'index plein texte. C'est le prix de la conception (une projection dans la base, un index à côté), en place sur le disque et en sauvegarde pour la seconde copie. S0 et S4c le chiffrent sur 10 000 pages. **Recommandation : l'accepter si l'ensemble reste sous le double de la base d'aujourd'hui** ; sinon ne plus garder le texte dans l'index plein texte et bâtir l'extrait depuis `blocks_index` (une lecture de plus par résultat). *Le plan suppose* les trois copies.
+- **L19 — Le temps de réponse comme indice** (L-b). L'index est un pour l'instance : le temps d'une recherche croît avec le nombre d'entrées, tous espaces confondus, qui portent le mot. **Recommandation : l'accepter au lot 4 si S0 ne le distingue pas du bruit d'un appel par le réseau** ; sinon un index par espace (plus de mémoire, à mesurer) ou un temps de réponse plancher. *Le plan suppose* un index pour l'instance, et attend le chiffre de S0.
 
 Restent à lui, sans rapport direct avec ce plan mais à ne pas perdre : les lignes de la P1 du §4.5 sans lot, dont « Modifié il y a… » (E10).
 
 ## Ébauche de la checklist de recette
 
-Sur ce qu'un test ne juge pas ; la tâche D l'écrit d'après le code final, et rappelle en tête les décisions L1 à L14 telles qu'elles auront été prises ou supposées.
+Sur ce qu'un test ne juge pas ; la tâche D l'écrit d'après le code final, et rappelle en tête les décisions L1 à L19 telles qu'elles auront été prises ou supposées.
 
 **Chercher**
 - [ ] Taper un mot d'un titre, puis un mot du milieu d'une longue page : les résultats viennent-ils assez vite pour qu'on continue de taper sans y penser ?
@@ -618,6 +734,7 @@ Sur ce qu'un test ne juge pas ; la tâche D l'écrit d'après le code final, et 
 **Exploitation**
 - [ ] Mettre à jour une instance qui a déjà des pages : la recherche se remplit-elle seule, et le dit-elle pendant ce temps ?
 - [ ] Arrêter le serveur, supprimer `search/`, relancer : tout revient.
+- [ ] Regarder la taille du dossier des données avant et après l'indexation (décision L18).
 - [ ] `mementum reindex`, serveur arrêté ; puis serveur lancé (il refuse, et le dit clairement).
 - [ ] Pendant qu'un grand espace s'indexe, taper à deux dans une page : rien ne se sent.
 
@@ -627,5 +744,5 @@ Sur ce qu'un test ne juge pas ; la tâche D l'écrit d'après le code final, et 
 
 1. **Relecture finale** de tout ce qui a changé, en trois passes, chaque constat prouvé par un test jetable : **sécurité** (chaque route relue comme une attaque : ce qui sort d'une page non vue par les résultats, l'ordre, `more`, `indexing`, le temps de réponse, les rétroliens, les messages d'erreur, le journal ; puis l'indexeur comme cible : ce qu'un compte qui écrit peut lui faire coûter) ; **intégration client et serveur** ; **documentation contre le code**. Vague de correction, re-relectures ciblées.
 2. **Sur un clone neuf**, étape par étape comme la CI, avec les mesures de `mementum-server` en plus.
-3. **Essai de migration** sur des copies (jamais `data/instance`) : une base du lot 3 passe `0005`, avec sa copie `avant-0005.bak` ; elle s'indexe seule ; la copie remise en place, le serveur redémarre, migre de nouveau et reconstruit ; `search/` supprimé, il reconstruit.
-4. **Registre** : mesures de clôture ; reports (lot 5 : l'outil `search`, les filtres, les ancres ; lot 7 : place de l'index sur le disque, débits généraux ; P4 : hybride) ; ce qui attend le propriétaire (L1 à L14, les écarts E1 à E10). `docs/REPRISE.md` à jour ; les ateliers retirés, leur `target/` supprimé.
+3. **Essai de migration** sur des copies (jamais `data/instance`) : une base du lot 3 passe `0005`, avec sa copie `avant-0005.bak` ; elle s'indexe seule ; la copie remise en place, le serveur redémarre, migre de nouveau et reconstruit ; `search/` supprimé, il reconstruit ; une copie de la base prise serveur arrêté, puis **une seule** écriture indexée, puis la copie remise en place : il reconstruit, et le texte écrit entre-temps n'est dans aucun extrait.
+4. **Registre** : mesures de clôture ; reports (lot 5 : l'outil `search`, les filtres, les ancres ; lot 7 : place de l'index sur le disque, débits généraux ; P4 : hybride) ; ce qui attend le propriétaire (L1 à L19, les écarts E1 à E10). `docs/REPRISE.md` à jour ; les ateliers retirés, leur `target/` supprimé.
