@@ -717,3 +717,47 @@ fn several_messages_cost_what_each_one_costs() {
     });
     assert!(reload.peak < PEAK, "pic de {} octets", reload.peak);
 }
+
+/// Les lettres concurrentes d'un client plus petit (Ruling R870). yrs range deux éléments de mêmes
+/// voisins par leur client, le plus petit d'abord : celui-ci se pose entre la lettre et celle qui
+/// la prolonge. C'est ce qu'écrivent deux personnes qui tapent à la fin d'un même paragraphe.
+fn concurrent(client: u64, count: u32, right: Option<Id>) -> Vec<u8> {
+    let others: Vec<Vec<u8>> = (1..count)
+        .map(|k| element(seam(k, 1).0, right, 1))
+        .collect();
+    written(&[(client, 0, others), (AUTHOR, 1, links(count, 1))], &[])
+}
+
+#[test]
+fn a_concurrent_letter_of_a_smaller_client_keeps_two_letters_apart() {
+    let page = page();
+    accepted_within_the_peak(&page, &concurrent(5, LETTERS, None));
+    assert_eq!(text(&page).len(), 2 * LETTERS as usize - 1);
+}
+
+#[test]
+fn a_concurrent_letter_of_a_larger_client_comes_after_and_separates_nothing() {
+    refused_within_the_peak(&page(), &concurrent(900, LETTERS, None));
+}
+
+#[test]
+fn a_concurrent_letter_the_page_already_has_separates_nothing() {
+    let page = page();
+    let known = written(&[(5, 0, vec![head(LETTERS)])], &[]);
+    page.try_client_update(&known).expect("le client 5 écrit");
+    refused_within_the_peak(&page, &concurrent(5, LETTERS, None));
+}
+
+/// Deux éléments d'origines droites différentes ne se rangent pas par leur client.
+#[test]
+fn a_concurrent_letter_with_another_right_origin_is_not_counted() {
+    let page = page();
+    let before = written(&[(50, 0, vec![head(1)])], &[]);
+    page.try_client_update(&before)
+        .expect("la lettre de droite");
+    let others: Vec<Vec<u8>> = (1..LETTERS)
+        .map(|k| element(seam(k, 1).0, Some((50, 0)), 1))
+        .collect();
+    let update = written(&[(5, 0, others), (AUTHOR, 1, links(LETTERS, 1))], &[]);
+    refused_within_the_peak(&page, &update);
+}

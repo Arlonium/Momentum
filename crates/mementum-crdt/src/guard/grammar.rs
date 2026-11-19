@@ -51,7 +51,7 @@
 //! Une forme neuve que le client écrirait (un `Y.Array`, une `Y.Map` imbriquée, un type comme
 //! valeur d'attribut) demande d'élargir cette grammaire : sinon l'onglet est refusé.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER,
@@ -90,6 +90,10 @@ pub(crate) const NOT_AS_WRITTEN: &str = "la mise à jour pose un élément que l
 
 /// Les plages `[début, fin)` d'un client, triées et fondues.
 type Ranges = HashMap<u64, Vec<(u32, u32)>>;
+
+/// Les éléments que yrs intégrera dans une liste : par voisins (origine, origine droite), le plus
+/// petit de leurs clients.
+type Placed = HashMap<(Id, Option<Id>), u64>;
 
 /// Ruling R867 : voir [`Shape::check_copies`].
 const COPIES_TOO_MUCH: &str =
@@ -199,12 +203,17 @@ impl Shape {
         let deleted = self.deleted_ranges();
         // Ruling R869 : seul ce que yrs intègre sépare des lettres. Il ignore un élément sous le
         // plancher de son client ; une entrée de map n'est pas dans la liste.
-        let between: HashSet<(Id, Id)> = self
-            .inserts()
-            .filter(|(s, i)| !i.sub_flag && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0)))
-            .filter_map(|(_, i)| Some((i.origin?, i.right?)))
-            .collect();
-        if self.copied_units(floor, Some((&deleted, &between))) > MAX_COPIED_UNITS {
+        let mut placed: Placed = HashMap::new();
+        for (s, i) in self.inserts() {
+            if let Some(origin) = i.origin
+                && !i.sub_flag
+                && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0))
+            {
+                let client = placed.entry((origin, i.right)).or_insert(s.id.0);
+                *client = s.id.0.min(*client);
+            }
+        }
+        if self.copied_units(floor, Some((&deleted, &placed))) > MAX_COPIED_UNITS {
             return Err(CrdtError::Structure(COPIES_TOO_MUCH.to_string()));
         }
         Ok(())
@@ -281,12 +290,10 @@ impl Shape {
     /// élément une fois, le troisième deux fois… Le premier ne l'est jamais. Une suite s'arrête où
     /// yrs ne fond pas : un élément qui ne prolonge pas le précédent (`try_squash`) ; et, avec
     /// `apart`, un élément du jeu de suppressions (le ramasse-miettes retire son texte avant que yrs
-    /// fonde), ou un élément posé entre les deux, qui a pour voisins exactement ces deux unités.
-    fn copied_units(
-        &self,
-        floor: &StateVector,
-        apart: Option<(&Ranges, &HashSet<(Id, Id)>)>,
-    ) -> u64 {
+    /// fonde), ou un élément que yrs pose entre les deux : il a pour voisins exactement ces deux
+    /// unités, ou (Ruling R870) les mêmes voisins que la seconde et un client plus petit, que yrs
+    /// range avant elle (`resolve_conflict`).
+    fn copied_units(&self, floor: &StateVector, apart: Option<(&Ranges, &Placed)>) -> u64 {
         let mut total = 0u64;
         for (client, structs) in &self.clients {
             let known = floor.get(&ClientID::new(*client));
@@ -309,9 +316,12 @@ impl Shape {
                     b.id.1 + b.len == s.id.1
                         && letters.origin == Some(last)
                         && letters.right == i.right
-                        && apart.is_none_or(|(deleted, between)| {
+                        && apart.is_none_or(|(deleted, placed)| {
                             !touches(deleted.get(client), b.id.1, b.id.1 + b.len)
-                                && !between.contains(&(last, (*client, s.id.1)))
+                                && !placed.contains_key(&(last, Some((*client, s.id.1))))
+                                && placed
+                                    .get(&(last, letters.right))
+                                    .is_none_or(|smallest| smallest >= client)
                         })
                 });
                 rank = if follows { rank + 1 } else { 0 };
