@@ -184,20 +184,97 @@ impl Shape {
     ///
     /// Le compte par les seuls octets peut compter trop : d'abord lui, qui n'alloue rien pour une
     /// mise à jour ordinaire ; au-delà de la borne, le compte exact écarte ce que yrs ne fond pas.
+    /// Jugé sur la mise à jour telle que yrs la lira : la garde repasse après les règles qui la
+    /// récrivent.
     pub(crate) fn check_copies(&self, floor: &StateVector) -> Result<(), CrdtError> {
         if self.copied_units(floor, None) <= MAX_COPIED_UNITS {
             return Ok(());
         }
+        // Ruling R871 : yrs fond ce qu'il a intégré avant qu'on apprenne que le reste attend. Rien
+        // de ce qui attend ne sépare des lettres, et une telle mise à jour serait refusée de toute
+        // façon.
+        if !self.integrates_whole(floor) {
+            return Err(CrdtError::Structure(COPIES_TOO_MUCH.to_string()));
+        }
         let deleted = self.deleted_ranges();
+        // Ruling R869 : seul ce que yrs intègre sépare des lettres. Il ignore un élément sous le
+        // plancher de son client ; une entrée de map n'est pas dans la liste.
         let between: HashSet<(Id, Id)> = self
             .inserts()
-            .filter(|(_, i)| !i.sub_flag)
+            .filter(|(s, i)| !i.sub_flag && s.id.1 + s.len > floor.get(&ClientID::new(s.id.0)))
             .filter_map(|(_, i)| Some((i.origin?, i.right?)))
             .collect();
         if self.copied_units(floor, Some((&deleted, &between))) > MAX_COPIED_UNITS {
             return Err(CrdtError::Structure(COPIES_TOO_MUCH.to_string()));
         }
         Ok(())
+    }
+
+    /// Vrai si yrs intégrera toute la mise à jour (Ruling R871). Il mène les blocs de chaque client
+    /// dans l'ordre de leurs horloges, et passe au client dont un bloc dépend (origine, origine
+    /// droite, parent) le temps de l'atteindre (`Update::integrate`). Un bloc attend pour de bon ce
+    /// que ni la page ni la mise à jour n'apportent, et ce qui l'attend lui-même.
+    fn integrates_whole(&self, floor: &StateVector) -> bool {
+        let rank: HashMap<u64, usize> = self
+            .clients
+            .iter()
+            .enumerate()
+            .map(|(rank, (client, _))| (*client, rank))
+            .collect();
+        let mut reached: Vec<u32> = self
+            .clients
+            .iter()
+            .map(|(client, _)| floor.get(&ClientID::new(*client)))
+            .collect();
+        let mut next = vec![0; self.clients.len()];
+        let mut walking = vec![false; self.clients.len()];
+        for start in 0..self.clients.len() {
+            walking[start] = true;
+            let mut stack: Vec<(usize, Option<u32>)> = vec![(start, None)];
+            'walk: while let Some(&(at, until)) = stack.last() {
+                let structs = &self.clients[at].1;
+                if until.is_some_and(|clock| clock < reached[at]) || next[at] == structs.len() {
+                    if until.is_some_and(|clock| clock >= reached[at]) {
+                        return false;
+                    }
+                    walking[at] = false;
+                    stack.pop();
+                    continue;
+                }
+                let s = &structs[next[at]];
+                next[at] += 1;
+                if s.id.1 + s.len <= floor.get(&ClientID::new(s.id.0)) {
+                    continue;
+                }
+                if let Kind::Insert(i) = &s.kind {
+                    let parent = match i.parent {
+                        super::Parent::Id(id) | super::Parent::Sibling(id) => Some(id),
+                        super::Parent::Named(..) => None,
+                    };
+                    for (client, clock) in [parent, i.right].into_iter().flatten() {
+                        let Some(&other) = rank.get(&client) else {
+                            if clock < floor.get(&ClientID::new(client)) {
+                                continue;
+                            }
+                            return false;
+                        };
+                        if clock < reached[other] {
+                            continue;
+                        }
+                        if walking[other] {
+                            return false;
+                        }
+                        // Ce bloc sera repris quand l'autre client aura avancé.
+                        next[at] -= 1;
+                        walking[other] = true;
+                        stack.push((other, Some(clock)));
+                        continue 'walk;
+                    }
+                }
+                reached[at] = reached[at].max(s.id.1 + s.len);
+            }
+        }
+        true
     }
 
     /// Ce que yrs recopie en fondant les lettres de la mise à jour : dans une suite, le deuxième

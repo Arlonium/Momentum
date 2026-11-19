@@ -1177,6 +1177,78 @@ fn the_bound_on_copied_letters_bounds_the_memory() {
     }
 }
 
+/// Une suite de lettres au-delà de la borne, et `clients` clients qui s'attendent à la file, le
+/// dernier attendant `last`.
+fn clients_waiting_in_line(clients: usize, last: Option<(u64, u32)>) -> Sent {
+    const LETTERS: u32 = 5_000;
+    const FIRST_CLIENT: u64 = 1_000;
+    let (state, first) = page_of_letters(0);
+    let last = last.unwrap_or((9, first));
+    let mut update = Vec::new();
+    var(&mut update, clients as u64 + 1);
+    for k in 0..clients as u64 {
+        var(&mut update, 1);
+        var(&mut update, FIRST_CLIENT + k);
+        var(&mut update, 0);
+        let waits_for = if k + 1 == clients as u64 {
+            last
+        } else {
+            (FIRST_CLIENT + k + 1, 0)
+        };
+        update.push(0x84);
+        var(&mut update, waits_for.0);
+        var(&mut update, u64::from(waits_for.1));
+        update.extend_from_slice(&[1, b'x']);
+    }
+    var(&mut update, u64::from(LETTERS));
+    var(&mut update, 9);
+    var(&mut update, u64::from(first));
+    for k in 0..LETTERS {
+        if k == 0 {
+            update.extend_from_slice(&[0x04, 0, 9]);
+            var(&mut update, u64::from(first - 1));
+        } else {
+            update.extend_from_slice(&[0x84, 9]);
+            var(&mut update, u64::from(first + k - 1));
+        }
+        update.extend_from_slice(&[1, b'x']);
+    }
+    update.push(0);
+    Sent { state, update }
+}
+
+/// Ruling R871 : savoir si yrs intégrera toute une mise à jour au-delà de la borne se fait en une
+/// passe, si longue que soit la file des clients qui s'attendent.
+#[test]
+fn knowing_what_yrs_will_integrate_grows_like_the_update() {
+    let forms = [
+        Form {
+            what: "clients à la file, derrière ce que personne n'apporte",
+            build: &|n| clients_waiting_in_line(n, Some((77, 5))),
+        },
+        Form {
+            what: "clients à la file, derrière une lettre du message",
+            build: &|n| clients_waiting_in_line(n, None),
+        },
+    ];
+    let size = |sent: &Sent| sent.state.len() + sent.update.len();
+    let judge = |sent: &Sent| {
+        let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
+        let refused = page
+            .try_client_update(&sent.update)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(refused.intact, "refusée avant d'être appliquée");
+    };
+    // Un client d'un seul élément : la lecture de la mise à jour pèse 142 octets par octet reçu.
+    let limits = Limits {
+        peak_per_byte: 192,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&forms, size, judge, |_| 0, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Ce que la garde ne borne pas.
 mod known_limits {
     use super::linear::once;
