@@ -177,7 +177,6 @@ impl Shape {
         Ok(())
     }
 
-    /// Les plages que la mise à jour supprime, par client, triées et fondues.
     /// Ruling R867 : refuse d'un client une mise à jour dont yrs recopierait plus de
     /// [`MAX_COPIED_UNITS`] unités en fondant ses lettres à la validation. yrs fond une suite
     /// d'éléments du dernier au premier, et chacun garde sa copie de ce qui a été fondu jusqu'à la
@@ -246,6 +245,7 @@ impl Shape {
         total
     }
 
+    /// Les plages que la mise à jour supprime, par client, triées et fondues.
     fn deleted_ranges(&self) -> Ranges {
         let mut all = Ranges::new();
         for (client, ranges) in self.deletions() {
@@ -557,7 +557,6 @@ fn insert_at(structs: &[Struct], id: Id) -> Option<(&Insert, u32)> {
     }
 }
 
-/// Vrai si `ranges` (triées, fondues) couvrent `[start, end)`.
 /// Vrai si une des plages `ranges` (triées, disjointes) touche `[start, end)`.
 fn touches(ranges: Option<&Vec<(u32, u32)>>, start: u32, end: u32) -> bool {
     ranges.is_some_and(|ranges| {
@@ -566,6 +565,7 @@ fn touches(ranges: Option<&Vec<(u32, u32)>>, start: u32, end: u32) -> bool {
     })
 }
 
+/// Vrai si `ranges` (triées, fondues) couvrent `[start, end)`.
 fn covers(ranges: Option<&Vec<(u32, u32)>>, start: u32, end: u32) -> bool {
     ranges.is_some_and(|ranges| {
         let at = ranges.partition_point(|range| range.1 <= start);
