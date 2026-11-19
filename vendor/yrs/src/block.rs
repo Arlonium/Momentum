@@ -340,6 +340,35 @@ impl Block {
         }
     }
 
+    // mementum:squash:begin
+    /// Whether `ClientBlockList::squash_left` would squash `other`, the next block of the same
+    /// client, into this one: the conditions it checks before `Block::try_squash`, and those of
+    /// `ItemPtr::try_squash` and `ItemContent::try_squash`, without changing either block.
+    pub(crate) fn can_squash(&self, other: &Block) -> bool {
+        match (self, other) {
+            (Block::Item(a), Block::Item(b)) => {
+                a.id.client == b.id.client
+                    && a.id.clock + a.len() == b.id.clock
+                    && b.origin == Some(a.last_id())
+                    && a.right_origin == b.right_origin
+                    && a.right == Some(ItemPtr::from(b.as_ref()))
+                    && a.is_deleted() == b.is_deleted()
+                    && (a.redone.is_none() && b.redone.is_none())
+                    && (!a.info.is_linked() && !b.info.is_linked())
+                    && matches!(
+                        (&a.content, &b.content),
+                        (ItemContent::Any(_), ItemContent::Any(_))
+                            | (ItemContent::Deleted(_), ItemContent::Deleted(_))
+                            | (ItemContent::JSON(_), ItemContent::JSON(_))
+                            | (ItemContent::String(_), ItemContent::String(_))
+                    )
+            }
+            (Block::Skip(_), Block::Skip(_)) | (Block::GC(_), Block::GC(_)) => true,
+            _ => false,
+        }
+    }
+    // mementum:squash:end
+
     pub(crate) fn splice(&self, offset: u32) -> Option<Self> {
         match self {
             Block::Item(x) => {

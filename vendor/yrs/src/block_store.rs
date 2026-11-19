@@ -220,6 +220,60 @@ impl ClientBlockList {
     /// later on rewire left/right neighbor changes that may have occurred as a result of squashing
     /// and block removal.
     pub(crate) fn squash_left(&mut self, pos: usize) -> usize {
+        // mementum:squash:begin
+        // The loop below folds a run of squashable blocks from its last block to its first:
+        // every step copies all that has been folded so far into the next block on the left,
+        // and each block keeps its copy until the final `drain`. For a run of k blocks, that is
+        // k² in time and in memory (40 000 one-letter items: 1.1 GiB).
+        //
+        // A run of three blocks or more is folded here instead, from its first block to its
+        // last, each content copied once. The run is found first, without touching anything
+        // (`Block::can_squash` holds the conditions of `Block::try_squash`, and none of what
+        // they read is changed by a squash further right). The outcome is the one of the loop
+        // below: same surviving block, same content, same neighbours, same map entries, same
+        // blocks drained, same count returned. Shorter runs are left to that loop.
+        let mut first = pos;
+        while first > 0 {
+            let left = unsafe { &*self.inner[first - 1].get() };
+            let right = unsafe { &*self.inner[first].get() };
+            if !left.can_squash(right) {
+                break;
+            }
+            first -= 1;
+        }
+        if pos - first > 1 {
+            let mut last = first;
+            {
+                let (head, tail) = self.inner.split_at_mut(first + 1);
+                let into = unsafe { &mut *head[first].get() };
+                for cell in &tail[..pos - first] {
+                    if !into.try_squash(unsafe { &*cell.get() }) {
+                        // Never taken while `can_squash` says what `try_squash` does. If they
+                        // ever part, what is not squashed is kept, not drained.
+                        break;
+                    }
+                    last += 1;
+                }
+            }
+            // update parents' map entries, block by block from the last one, as the loop below
+            for i in (first + 1..=last).rev() {
+                let left = unsafe { &*self.inner[i - 1].get() };
+                let right = unsafe { &*self.inner[i].get() };
+                if let Block::Item(right) = right {
+                    if let Some(parent_sub) = &right.parent_sub {
+                        if let Some(mut parent) = right.parent.as_branch().copied() {
+                            let e = parent.map.get_mut(parent_sub).unwrap();
+                            if &**e == &**right {
+                                *e = left.as_item().unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+            self.inner.drain(first + 1..=last);
+            return last - first;
+        }
+        // mementum:squash:end
         let mut right = unsafe { &mut *self.inner[pos].get() };
         let mut i = pos;
         while i > 0 {
