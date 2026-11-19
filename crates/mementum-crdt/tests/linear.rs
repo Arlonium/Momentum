@@ -1176,6 +1176,61 @@ fn letters_sent_one_by_one_cost_what_they_weigh_whatever_their_width() {
     }
 }
 
+/// `n` clients d'un élément chacun, à la file : l'élément de chacun a pour origine droite celui du
+/// suivant, et le dernier est posé dans le texte du paragraphe. yrs les intègre en une passe ; la
+/// page est acceptée.
+fn clients_in_line(n: usize) -> Sent {
+    const FIRST_CLIENT: u64 = 1_000;
+    let (state, first) = page_of_letters(0);
+    let mut update = Vec::new();
+    var(&mut update, n as u64);
+    for k in 0..n as u64 {
+        var(&mut update, 1);
+        var(&mut update, FIRST_CLIENT + k);
+        var(&mut update, 0);
+        if k + 1 == n as u64 {
+            update.extend_from_slice(&[0x04, 0, 9]);
+            var(&mut update, u64::from(first - 1));
+        } else {
+            update.push(0x44);
+            var(&mut update, FIRST_CLIENT + k + 1);
+            var(&mut update, 0);
+        }
+        update.extend_from_slice(&[1, b'q']);
+    }
+    update.push(0);
+    Sent { state, update }
+}
+
+/// Ruling R883 (constat F de la re-relecture 12) : lire ce que yrs a fait d'une mise à jour
+/// (`Shape::check_as_written`) croît comme elle, si nombreux qu'en soient les clients. Chaque
+/// client de ce que yrs a encodé était cherché dans la liste des clients de la mise à jour reçue :
+/// `n` recherches de `n` pas (2,3 s pour 80 000 clients, en release).
+#[test]
+fn reading_what_yrs_made_grows_like_the_update() {
+    let forms = [Form {
+        what: "des clients d'un élément chacun, à la file",
+        build: &clients_in_line,
+    }];
+    let size = |sent: &Sent| sent.state.len() + sent.update.len();
+    // D'un client, puis relue du journal : acceptée, sans quoi `check_as_written` ne lit rien.
+    let judge = |sent: &Sent| {
+        let page = PageDoc::from_updates([sent.state.as_slice()]).unwrap();
+        page.try_client_update(&sent.update).expect("acceptée");
+        let stored =
+            PageDoc::from_updates([sent.state.as_slice(), sent.update.as_slice()]).unwrap();
+        stored.encode_state().len()
+    };
+    // Un client d'un seul élément pèse dans yrs (sa liste de blocs, son entrée du vecteur d'état)
+    // et dans la garde : de 195 à 215 octets de pic par octet reçu, mesurés.
+    let limits = Limits {
+        peak_per_byte: 256,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&forms, size, judge, |_| 0, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Ce que la garde ne borne pas.
 mod known_limits {
     use super::linear::once;

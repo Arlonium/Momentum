@@ -221,6 +221,16 @@ impl Shape {
         mut many_valued: Option<&mut IdSet>,
     ) -> Result<(), CrdtError> {
         let mut deleted: Option<Ranges> = None;
+        // Les éléments écrits, par client, rangés une fois : chercher chaque client de `made` dans
+        // la liste de ceux de la mise à jour coûtait `n` recherches de `n` pas pour une file de
+        // clients d'un élément chacun (Ruling R883). À rebours : pour un client répété, le premier
+        // reste, comme le rendait la recherche.
+        let written_by: HashMap<u64, &[Struct]> = self
+            .clients
+            .iter()
+            .rev()
+            .map(|(client, structs)| (*client, structs.as_slice()))
+            .collect();
         let mut c = Cursor::new(made);
         let n_clients: u32 = c.read_var().map_err(decode_error)?;
         for _ in 0..n_clients {
@@ -228,11 +238,7 @@ impl Shape {
             let client: u64 = c.read_var().map_err(decode_error)?;
             let mut clock: u32 = c.read_var().map_err(decode_error)?;
             let known = floor.get(&ClientID::new(client));
-            let written = self
-                .clients
-                .iter()
-                .find(|(c, _)| *c == client)
-                .map(|(_, structs)| structs.as_slice());
+            let written = written_by.get(&client).copied();
             for _ in 0..n_structs {
                 let info = c.read_u8().map_err(decode_error)?;
                 if matches!(info, BLOCK_SKIP_REF_NUMBER | BLOCK_GC_REF_NUMBER) {
