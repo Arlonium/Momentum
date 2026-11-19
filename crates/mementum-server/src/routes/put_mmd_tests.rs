@@ -370,6 +370,28 @@ async fn status(request: JoinHandle<Result<StatusCode, ApiError>>) -> StatusCode
     }
 }
 
+/// `request` est refusée par `429 page_busy` sans prendre de place dans la file de `page`. La
+/// file est tenue pendant ce temps (une écriture retenue à son tour dans le store) : une requête
+/// qui y prendrait une place attendrait sans fin, et c'est sa place qui la dénonce.
+async fn refused_at_once(
+    state: &AppState,
+    page: Uuid,
+    request: JoinHandle<Result<StatusCode, ApiError>>,
+    what: &str,
+) {
+    let before = state.page_writes.places(page);
+    until(what, async || {
+        request.is_finished() || state.page_writes.places(page) > before
+    })
+    .await;
+    assert_eq!(state.page_writes.places(page), before, "{what} : une place");
+    assert_eq!(
+        status(request).await,
+        StatusCode::TOO_MANY_REQUESTS,
+        "{what}"
+    );
+}
+
 /// Ruling R494, constat N2 de la re-relecture du tour 5 : un `PUT /mmd` refusé à sa lecture ne
 /// tient jamais de place dans la file de la page. Quatre rédacteurs envoient chacun deux `PUT
 /// /mmd` lents à lire, puis refusés (trop longs à écrire) ; pendant qu'ils sont lus ou attendent de
@@ -410,9 +432,16 @@ async fn one_account_holds_at_most_two_places_on_a_page() {
     let (tom, mona) = (&users[0], &users[1]);
     state.hub.load_page(page).await.unwrap();
     let base = state.hub.calls();
+    // Ruling R886 : la première écriture attend son tour d'écriture dans le store, que le test
+    // tient jusqu'à ce que Mona ait sa place ; sa durée ne décide de rien.
+    let held = state.store.hold_writes().await;
     let first = put(&state, tom, page, paragraphs("Alpha", 4_000));
     until("l'écriture longue n'arrive pas à l'acteur", async || {
         state.hub.calls() >= base + 2
+    })
+    .await;
+    until("l'écriture longue n'attend pas son tour", async || {
+        state.store.queued_writes() == 1
     })
     .await;
     let second = put(&state, tom, page, paragraphs("Bêta", 10));
@@ -420,13 +449,14 @@ async fn one_account_holds_at_most_two_places_on_a_page() {
         state.page_writes.places(page) == 2
     })
     .await;
-    let third = status(put(&state, tom, page, "Tom\n".to_string())).await;
-    assert_eq!(third, StatusCode::TOO_MANY_REQUESTS, "la troisième de Tom");
+    let third = put(&state, tom, page, "Tom\n".to_string());
+    refused_at_once(&state, page, third, "la troisième de Tom").await;
     let monas = put(&state, mona, page, "Mona\n".to_string());
     until("Mona n'a pas de place", async || {
-        state.page_writes.places(page) == 3 || monas.is_finished()
+        state.page_writes.places(page) == 3
     })
     .await;
+    drop(held);
     for request in [first, second, monas] {
         assert_eq!(status(request).await, StatusCode::NO_CONTENT);
     }
@@ -456,6 +486,10 @@ enum Kind {
 /// réduit à une requête qui attend (pour `PUT /mmd` depuis R494, pour la restauration depuis
 /// R535) : sans voir l'acteur, ils ne savaient plus faire tomber le retrait pendant qu'elle
 /// attend.
+///
+/// Sans minutage (Ruling R886) : le test tient le tour d'écriture du store, si bien que la
+/// première reste dans l'acteur, verrou de la page tenu, tant que la fin n'est pas posée ; la fin
+/// s'écrit par une connexion à part, hors de la file.
 async fn queued_writes_stop_with(kind: Kind, ending: Ending) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("m.db");
@@ -487,9 +521,17 @@ async fn queued_writes_stop_with(kind: Kind, ending: Ending) {
     };
     state.hub.load_page(page).await.unwrap();
     let base = state.hub.calls();
+    // Ruling R886 : la première écriture est retenue à son tour d'écriture dans le store, que le
+    // test tient, jusqu'à ce que la fin soit posée. Sa durée ne décide donc de rien : avant,
+    // elle devait durer plus que tout ce que le test fait jusqu'au retrait.
+    let held = state.store.hold_writes().await;
     let first = send(true, paragraphs("Alpha", 4_000));
     until("l'écriture longue n'arrive pas à l'acteur", async || {
         state.hub.calls() >= base + 2
+    })
+    .await;
+    until("l'écriture longue n'attend pas son tour", async || {
+        state.store.queued_writes() == 1
     })
     .await;
     let second = send(false, "Tom 1\n".to_string());
@@ -498,12 +540,9 @@ async fn queued_writes_stop_with(kind: Kind, ending: Ending) {
     })
     .await;
     for i in 0..6 {
-        let extra = status(send(false, format!("Tom {}\n", i + 2))).await;
-        assert_eq!(
-            extra,
-            StatusCode::TOO_MANY_REQUESTS,
-            "{kind:?}, {ending:?} : la requête {i} de trop"
-        );
+        let extra = send(false, format!("Tom {}\n", i + 2));
+        let what = format!("{kind:?}, {ending:?} : la requête {i} de trop");
+        refused_at_once(&state, page, extra, &what).await;
     }
     match ending {
         Ending::Revoked => {
@@ -516,10 +555,28 @@ async fn queued_writes_stop_with(kind: Kind, ending: Ending) {
             )
             .await;
         }
+        // Par la base, comme `mementum user set-password` d'un autre processus : la file du
+        // store, dont le test tient le tour, ferait attendre `Store::delete_session`.
         Ending::SessionEnded => {
-            state.store.delete_session(tom.session).await.unwrap();
+            let gone = sql(
+                &db,
+                &format!("DELETE FROM sessions WHERE user_id = '{tom_id}' RETURNING 1"),
+            )
+            .await;
+            assert_eq!(gone, 1, "{kind:?} : la session de Tom n'est pas partie");
         }
     }
+    // La fin est posée, et rien de Tom n'est encore au journal : la première tient toujours le
+    // verrou de la page, la deuxième n'a pas pu relire ses droits.
+    assert_eq!(
+        (
+            sql(&db, "SELECT COUNT(*) FROM witness").await,
+            state.page_writes.places(page)
+        ),
+        (0, 2),
+        "{kind:?}, {ending:?} : la première a écrit avant la fin"
+    );
+    drop(held);
     assert_eq!(
         status(first).await,
         StatusCode::NO_CONTENT,
