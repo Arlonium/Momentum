@@ -1,3 +1,8 @@
+// mementum:vendored:begin
+// A crate of the registry is compiled with its lints capped; a copy in the tree is not, and its
+// 45 warnings would come with every build of the server.
+#![allow(warnings)]
+// mementum:vendored:end
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/y-crdt/y-crdt/main/logo-yrs.svg",
     html_favicon_url = "https://raw.githubusercontent.com/y-crdt/y-crdt/main/logo-yrs.svg"
