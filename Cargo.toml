@@ -1,7 +1,8 @@
 [workspace]
 members = ["crates/*"]
-# Le prototype jetable de la phase 0 a son propre workspace.
-exclude = ["spike"]
+# Le prototype jetable de la phase 0 a son propre workspace. `vendor/` porte des crates tierces
+# recopiées (yrs), qui ne sont pas des membres : ni `cargo fmt`, ni clippy, ni leurs tests.
+exclude = ["spike", "vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -61,7 +62,9 @@ uuid = { version = "1.29", features = ["v7"] }
 # Version épinglée : `crates/mementum-crdt/src/guard.rs` relit le format des mises à jour de
 # yrs 0.28.1 (`Update::decode`, `ItemContent::decode`) et sa façon d'intégrer (trous, attente) ;
 # toute montée de version doit le revérifier, test différentiel compris.
-yrs = { version = "=0.28.1", features = ["sync", "weak"] }
+# Les sources sont celles de crates.io, recopiées dans `vendor/yrs` (Ruling R874) : le serveur
+# compile cette copie, pas la crate du registre.
+yrs = { path = "vendor/yrs", version = "=0.28.1", features = ["sync", "weak"] }
 
 # Argon2 optimisé même en développement : compilé en debug, une vérification de mot de passe
 # prend environ 430 ms (25 ms optimisée), que paient chaque inscription et chaque connexion,
