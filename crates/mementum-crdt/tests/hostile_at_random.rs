@@ -17,7 +17,8 @@
 //!
 //! Chaque mise à jour que la page a gardée est aussi donnée, telle que yrs l'a reçue, au yrs du
 //! serveur et à celui de crates.io, à la suite de l'état de la page d'avant : ils doivent en faire
-//! la même chose (`common/twins.rs`, Ruling R875).
+//! la même chose (`common/twins.rs`, Ruling R875). Dans le passage ordinaire de la suite, pour un
+//! cas sur quatre ; dans un essai élargi, pour tous.
 //!
 //! Déterministe par graine. `MEMENTUM_FUZZ_SEEDS` règle le nombre de cas de chaque voie,
 //! `MEMENTUM_FUZZ_FROM` le premier. Les cas tournent dans un **processus fils** (ce binaire,
@@ -132,6 +133,8 @@ struct Served {
     marks: Vec<(usize, Vec<u8>)>,
     /// Les mises à jour gardées sur lesquelles les deux yrs ont été comparés.
     compared: twins::Compared,
+    /// Faux pour ne pas les comparer dans ce cas (voir [`case`]).
+    watched: bool,
 }
 
 impl Served {
@@ -147,6 +150,7 @@ impl Served {
             holed: false,
             marks: Vec::new(),
             compared: twins::Compared::default(),
+            watched: true,
         }
     }
 
@@ -162,6 +166,7 @@ impl Served {
             holed: false,
             marks: Vec::new(),
             compared: twins::Compared::default(),
+            watched: true,
         }
     }
 
@@ -185,9 +190,13 @@ impl Served {
         trace(update);
         if self.stored {
             self.holed |= self.page.stored_update_leaves_gap(update) == Ok(true);
-            let answer = twins::watching("une entrée relue", &mut self.compared, || {
+            let answer = if self.watched {
+                twins::watching("une entrée relue", &mut self.compared, || {
+                    self.page.apply_update(update)
+                })
+            } else {
                 self.page.apply_update(update)
-            });
+            };
             return match answer {
                 Ok(()) => {
                     self.journal.push(update.to_vec());
@@ -199,9 +208,13 @@ impl Served {
                 }
             };
         }
-        let answer = twins::watching("une mise à jour reçue", &mut self.compared, || {
+        let answer = if self.watched {
+            twins::watching("une mise à jour reçue", &mut self.compared, || {
+                self.page.apply_client_update(update)
+            })
+        } else {
             self.page.apply_client_update(update)
-        });
+        };
         match answer {
             Ok(applied) => {
                 let wrote = applied.read != [0, 0];
@@ -822,6 +835,9 @@ struct Tally {
 fn case(seed: u64, stored: bool, tally: &mut Tally) {
     let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ u64::from(stored));
     let mut served = Served::new(stored);
+    // Comparer les deux yrs coûte quatre fois le cas lui-même : dans le passage ordinaire de la
+    // suite, un cas sur quatre ; dans un essai élargi (`MEMENTUM_FUZZ_SEEDS`), tous.
+    served.watched = std::env::var_os("MEMENTUM_FUZZ_SEEDS").is_some() || seed.is_multiple_of(4);
     let mut stages: Vec<Vec<u8>> = vec![served.page.state_vector()];
     // Un peu de page : des blocs, du texte, des attributs.
     for _ in 0..(3 + rng.below(5)) {
