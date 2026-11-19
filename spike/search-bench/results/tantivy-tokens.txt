@@ -1,0 +1,74 @@
+(b) SimpleTokenizer + RemoveLongFilter(41) + LowerCaser + AsciiFoldingFilter :
+  « L'élève Éléonore a mangé à l'école, aujourd'hui. »
+    -> ["l", "eleve", "eleonore", "a", "mange", "a", "l", "ecole", "aujourd", "hui"]
+  « Cœur, œuvre, Æther, naïve, façade, GARÇON, straße »
+    -> ["coeur", "oeuvre", "aether", "naive", "facade", "garcon", "strasse"]
+  « user_account_id snake_case camelCase kebab-case e-mail C++ 3.14 v2.0.1 »
+    -> ["user", "account", "id", "snake", "case", "camelcase", "kebab", "case", "e", "mail", "c", "3", "14", "v2", "0", "1"]
+  « 中文搜索引擎测试 日本語のテキスト 한국어 »
+    -> ["中文搜索引擎测试", "日本語のテキスト", "한국어"]
+  « anticonstitutionnellementanticonstitutionnellement court (50 octets) »
+    -> ["court", "50", "octets"]
+  « qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (40 puis 41 octets) »
+    -> ["qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq", "40", "puis", "41", "octets"]
+  « élève (accents combinants) »
+    -> ["e", "le", "ve", "accents", "combinants"]
+  « https://exemple.fr/chemin/page?x=1 jean.dupont@exemple.fr »
+    -> ["https", "exemple", "fr", "chemin", "page", "x", "1", "jean", "dupont", "exemple", "fr"]
+  « élève » trouvé par « eleve » : true
+  « ÉLÈVE » trouvé par « élève » : true
+  « snake_case » trouvé par « snake » : true
+  « 中文搜索引擎测试 » trouvé par « 搜索 » : false
+(c) avec Stemmer(French) en plus :
+  fr  cheval / chevaux : ["cheval"] / ["cheval"] -> réunis
+  fr  journal / journaux : ["journal"] / ["journal"] -> réunis
+  fr  page / pages : ["pag"] / ["pag"] -> réunis
+  fr  manger / mangé : ["mang"] / ["mang"] -> réunis
+  fr  manger / mangeons : ["mang"] / ["mangeon"] -> séparés
+  fr  national / nationale : ["national"] / ["national"] -> réunis
+  fr  national / nationaux : ["national"] / ["national"] -> réunis
+  fr  recherche / rechercher : ["recherch"] / ["recherch"] -> réunis
+  fr  recherche / recherches : ["recherch"] / ["recherch"] -> réunis
+  fr  décision / décisions : ["decis"] / ["decis"] -> réunis
+  fr  décider / décision : ["decid"] / ["decis"] -> séparés
+  fr  nouveau / nouvelle : ["nouveau"] / ["nouvel"] -> séparés
+  fr  œil / yeux : ["oeil"] / ["yeux"] -> séparés
+  fr  créer / créée : ["cre"] / ["cree"] -> séparés
+  fr  travail / travaux : ["travail"] / ["traval"] -> séparés
+  fr  réunion / réunions : ["reunion"] / ["reunion"] -> réunis
+  fr  petit / petite : ["pet"] / ["petit"] -> séparés
+  fr  aller / vais : ["aller"] / ["vais"] -> séparés
+  fr  être / sont : ["etre"] / ["sont"] -> séparés
+  fr  écrire / écrit : ["ecrir"] / ["ecrit"] -> séparés
+  français : 10 paires sur 20 réunies par la racinisation (aucune ne l'est sans elle)
+  en  universe / university : ["univers"] / ["university"] -> séparés
+  en  general / generous : ["general"] / ["generous"] -> séparés
+  en  police / policy : ["polic"] / ["policy"] -> séparés
+  en  organ / organization : ["organ"] / ["organiz"] -> séparés
+  en  import / important : ["import"] / ["import"] -> réunis (À TORT)
+  en  port / portion : ["port"] / ["portion"] -> séparés
+  en  action / active : ["action"] / ["activ"] -> séparés
+  en  station / static : ["station"] / ["static"] -> séparés
+  en  message / messy : ["messag"] / ["messy"] -> séparés
+  en  mine / minor : ["min"] / ["minor"] -> séparés
+  en  pages / pager : ["pag"] / ["pag"] -> réunis (À TORT)
+  en  sale / sales : ["sal"] / ["sal"] -> réunis
+  en  change / changer : ["chang"] / ["chang"] -> réunis (À TORT)
+  en  content / contents : ["content"] / ["content"] -> réunis
+  en  test / tester : ["test"] / ["test"] -> réunis
+  en  tests / testing : ["test"] / ["testing"] -> séparés
+  en  server / serve : ["serv"] / ["serv"] -> réunis (À TORT)
+  en  serving / serve : ["serving"] / ["serv"] -> séparés
+  en  running / run : ["running"] / ["run"] -> séparés
+  en  files / file : ["fil"] / ["fil"] -> réunis
+  en  user / use : ["user"] / ["use"] -> séparés
+  en  users / user : ["user"] / ["user"] -> réunis
+  en  document / documents : ["docu"] / ["docu"] -> réunis
+  en  documentation / document : ["document"] / ["docu"] -> séparés
+  en  marine / marin : ["marin"] / ["marin"] -> réunis (À TORT)
+  en  author / authority : ["author"] / ["authority"] -> séparés
+  en  commit / committee : ["comm"] / ["committe"] -> séparés
+  en  relation / relative : ["relat"] / ["relat"] -> réunis (À TORT)
+  en  nation / native : ["nation"] / ["nativ"] -> séparés
+  en  fortune / fort : ["fortun"] / ["fort"] -> séparés
+  anglais : 6 paires de sens différent réunies à tort, 3 formes d'un même mot laissées séparées, sur 30

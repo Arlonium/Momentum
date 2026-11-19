@@ -1,0 +1,52 @@
+index : 1290901 entrées, 6 segments ; mots : rang 0 « de », 5 « des », 20 « sur », 60 « créée », 300 « moutrue », 2000 « plûjôgament », 20000 « plûdroipriner »
+MESURE requête | 1 terme rare (rang 20000) | 10 pages | filtre dans le collecteur | 0 pages, 130 entrées vues | p50 0.11 ms | p95 0.11 ms | max 0.19 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête | 1 terme rare (rang 20000) | 10 000 pages | filtre dans le collecteur | 108 pages, 130 entrées vues | p50 0.14 ms | p95 0.17 ms | max 0.36 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête | 1 terme rare (rang 20000) | 100 000 pages | filtre dans le collecteur | 117 pages, 130 entrées vues | p50 0.14 ms | p95 0.16 ms | max 0.28 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête | 1 terme moyen (rang 300) | 10 pages | filtre dans le collecteur | 3 pages, 9567 entrées vues | p50 0.42 ms | p95 0.65 ms | max 1.04 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête | 1 terme moyen (rang 300) | 10 000 pages | filtre dans le collecteur | 5134 pages, 9567 entrées vues | p50 1.39 ms | p95 1.84 ms | max 2.15 ms | pic du tas 0.76 Mo | 100 passages
+MESURE requête | 1 terme moyen (rang 300) | 100 000 pages | filtre dans le collecteur | 5802 pages, 9567 entrées vues | p50 1.35 ms | p95 1.73 ms | max 2.79 ms | pic du tas 0.86 Mo | 100 passages
+MESURE requête | 1 terme très courant (rang 0) | 10 pages | filtre dans le collecteur | 10 pages, 695569 entrées vues | p50 14.10 ms | p95 14.75 ms | max 17.03 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête | 1 terme très courant (rang 0) | 10 000 pages | filtre dans le collecteur | 10000 pages, 695569 entrées vues | p50 21.16 ms | p95 23.02 ms | max 24.39 ms | pic du tas 1.41 Mo | 100 passages
+MESURE requête | 1 terme très courant (rang 0) | 100 000 pages | filtre dans le collecteur | 60879 pages, 695569 entrées vues | p50 32.96 ms | p95 34.48 ms | max 38.03 ms | pic du tas 10.64 Mo | 100 passages
+MESURE requête | titre « projet » (toutes les entrées des grandes pages) | 10 pages | filtre dans le collecteur | 10 pages, 1110901 entrées vues | p50 18.26 ms | p95 19.03 ms | max 20.67 ms | pic du tas 0.10 Mo | 100 passages
+MESURE requête | titre « projet » (toutes les entrées des grandes pages) | 10 000 pages | filtre dans le collecteur | 10000 pages, 1110901 entrées vues | p50 27.51 ms | p95 29.58 ms | max 31.32 ms | pic du tas 1.41 Mo | 100 passages
+MESURE requête | titre « projet » (toutes les entrées des grandes pages) | 100 000 pages | filtre dans le collecteur | 10000 pages, 1110901 entrées vues | p50 27.55 ms | p95 29.52 ms | max 30.53 ms | pic du tas 1.41 Mo | 100 passages
+MESURE requête | titre « mastodonte » (10 001 entrées d'une page) | 10 pages | filtre dans le collecteur | 0 pages, 10001 entrées vues | p50 0.27 ms | p95 0.30 ms | max 0.66 ms | pic du tas 0.10 Mo | 100 passages
+MESURE requête | titre « mastodonte » (10 001 entrées d'une page) | 10 000 pages | filtre dans le collecteur | 1 pages, 10001 entrées vues | p50 0.35 ms | p95 0.36 ms | max 0.41 ms | pic du tas 0.10 Mo | 100 passages
+MESURE requête | titre « mastodonte » (10 001 entrées d'une page) | 100 000 pages | filtre dans le collecteur | 1 pages, 10001 entrées vues | p50 0.36 ms | p95 0.36 ms | max 0.57 ms | pic du tas 0.10 Mo | 100 passages
+MESURE requête | 3 termes (rangs 5, 20, 60) | 10 pages | filtre dans le collecteur | 0 pages, 2435 entrées vues | p50 5.58 ms | p95 6.09 ms | max 6.59 ms | pic du tas 0.22 Mo | 100 passages
+MESURE requête | 3 termes (rangs 5, 20, 60) | 10 000 pages | filtre dans le collecteur | 1695 pages, 2435 entrées vues | p50 5.86 ms | p95 6.91 ms | max 7.69 ms | pic du tas 0.31 Mo | 100 passages
+MESURE requête | 3 termes (rangs 5, 20, 60) | 100 000 pages | filtre dans le collecteur | 1889 pages, 2435 entrées vues | p50 5.91 ms | p95 6.46 ms | max 7.96 ms | pic du tas 0.32 Mo | 100 passages
+MESURE requête | 3 termes dont un préfixe « pr » | 10 pages | filtre dans le collecteur | 10 pages, 50503 entrées vues | p50 17.23 ms | p95 18.44 ms | max 20.00 ms | pic du tas 0.22 Mo | 100 passages
+MESURE requête | 3 termes dont un préfixe « pr » | 10 000 pages | filtre dans le collecteur | 9769 pages, 50503 entrées vues | p50 19.92 ms | p95 20.88 ms | max 23.92 ms | pic du tas 1.42 Mo | 100 passages
+MESURE requête | 3 termes dont un préfixe « pr » | 100 000 pages | filtre dans le collecteur | 11745 pages, 50503 entrées vues | p50 20.05 ms | p95 21.80 ms | max 22.75 ms | pic du tas 1.62 Mo | 100 passages
+MESURE requête | 8 termes (rangs 0 à 7) | 10 pages | filtre dans le collecteur | 1 pages, 821 entrées vues | p50 27.11 ms | p95 29.58 ms | max 43.29 ms | pic du tas 0.51 Mo | 100 passages
+MESURE requête | 8 termes (rangs 0 à 7) | 10 000 pages | filtre dans le collecteur | 663 pages, 821 entrées vues | p50 27.29 ms | p95 28.77 ms | max 30.64 ms | pic du tas 0.55 Mo | 100 passages
+MESURE requête | 8 termes (rangs 0 à 7) | 100 000 pages | filtre dans le collecteur | 711 pages, 821 entrées vues | p50 27.42 ms | p95 28.63 ms | max 30.84 ms | pic du tas 0.55 Mo | 100 passages
+MESURE requête | 8 termes dont un préfixe « pro » | 10 pages | filtre dans le collecteur | 5 pages, 2738 entrées vues | p50 32.74 ms | p95 34.28 ms | max 35.04 ms | pic du tas 0.51 Mo | 100 passages
+MESURE requête | 8 termes dont un préfixe « pro » | 10 000 pages | filtre dans le collecteur | 2101 pages, 2738 entrées vues | p50 32.98 ms | p95 35.09 ms | max 36.75 ms | pic du tas 0.67 Mo | 100 passages
+MESURE requête | 8 termes dont un préfixe « pro » | 100 000 pages | filtre dans le collecteur | 2141 pages, 2738 entrées vues | p50 33.32 ms | p95 35.10 ms | max 36.83 ms | pic du tas 0.67 Mo | 100 passages
+MESURE requête | préfixe seul « pr » | 10 pages | filtre dans le collecteur | 10 pages, 1156705 entrées vues | p50 24.00 ms | p95 25.61 ms | max 26.23 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête | préfixe seul « pr » | 10 000 pages | filtre dans le collecteur | 10000 pages, 1156705 entrées vues | p50 33.08 ms | p95 34.88 ms | max 36.13 ms | pic du tas 1.41 Mo | 100 passages
+MESURE requête | préfixe seul « pr » | 100 000 pages | filtre dans le collecteur | 51206 pages, 1156705 entrées vues | p50 40.28 ms | p95 42.63 ms | max 45.86 ms | pic du tas 5.67 Mo | 100 passages
+MESURE requête | préfixe seul de 10 caractères | 10 pages | filtre dans le collecteur | 0 pages, 130 entrées vues | p50 0.11 ms | p95 0.13 ms | max 0.32 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête | préfixe seul de 10 caractères | 10 000 pages | filtre dans le collecteur | 108 pages, 130 entrées vues | p50 0.14 ms | p95 0.17 ms | max 0.31 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête | préfixe seul de 10 caractères | 100 000 pages | filtre dans le collecteur | 117 pages, 130 entrées vues | p50 0.15 ms | p95 0.17 ms | max 0.36 ms | pic du tas 0.11 Mo | 100 passages
+MESURE requête : pire p95, filtre dans le collecteur : 42.63 ms
+MESURE requête | 1 terme moyen (rang 300) | 10 pages | filtre dans la requête (TermSetQuery) | 3 pages, 4 entrées vues | p50 0.51 ms | p95 0.94 ms | max 0.99 ms | pic du tas 1.01 Mo | 30 passages
+MESURE requête | 1 terme moyen (rang 300) | 10 000 pages | filtre dans la requête (TermSetQuery) | 5134 pages, 8138 entrées vues | p50 65.85 ms | p95 68.10 ms | max 68.30 ms | pic du tas 4.49 Mo | 30 passages
+MESURE requête | 1 terme moyen (rang 300) | 100 000 pages | filtre dans la requête (TermSetQuery) | 5802 pages, 8863 entrées vues | p50 543.49 ms | p95 559.54 ms | max 564.92 ms | pic du tas 16.56 Mo | 30 passages
+MESURE requête | titre « projet » (toutes les entrées des grandes pages) | 10 pages | filtre dans la requête (TermSetQuery) | 10 pages, 1000 entrées vues | p50 0.52 ms | p95 0.76 ms | max 1.11 ms | pic du tas 1.01 Mo | 30 passages
+MESURE requête | titre « projet » (toutes les entrées des grandes pages) | 10 000 pages | filtre dans la requête (TermSetQuery) | 10000 pages, 1009901 entrées vues | p50 98.18 ms | p95 102.62 ms | max 112.92 ms | pic du tas 4.49 Mo | 30 passages
+MESURE requête | titre « projet » (toutes les entrées des grandes pages) | 100 000 pages | filtre dans la requête (TermSetQuery) | 10000 pages, 1009901 entrées vues | p50 574.16 ms | p95 582.07 ms | max 582.79 ms | pic du tas 16.56 Mo | 30 passages
+MESURE requête | 3 termes (rangs 5, 20, 60) | 10 pages | filtre dans la requête (TermSetQuery) | 0 pages, 0 entrées vues | p50 0.60 ms | p95 0.75 ms | max 0.91 ms | pic du tas 1.02 Mo | 30 passages
+MESURE requête | 3 termes (rangs 5, 20, 60) | 10 000 pages | filtre dans la requête (TermSetQuery) | 1695 pages, 2039 entrées vues | p50 67.54 ms | p95 70.70 ms | max 70.71 ms | pic du tas 4.50 Mo | 30 passages
+MESURE requête | 3 termes (rangs 5, 20, 60) | 100 000 pages | filtre dans la requête (TermSetQuery) | 1889 pages, 2233 entrées vues | p50 541.02 ms | p95 547.83 ms | max 552.64 ms | pic du tas 16.56 Mo | 30 passages
+MESURE requête | 1 terme moyen (rang 300) | 10 000 pages | collecteur + terme d'espace exigé | 5134 pages, 8863 entrées vues | p50 1.47 ms | p95 1.81 ms | max 2.17 ms | pic du tas 0.76 Mo | 100 passages
+MESURE requête | titre « projet » (toutes les entrées des grandes pages) | 10 000 pages | collecteur + terme d'espace exigé | 10000 pages, 1009901 entrées vues | p50 30.50 ms | p95 31.83 ms | max 32.99 ms | pic du tas 1.41 Mo | 100 passages
+R902 « projet » : 1110901 entrées vues, 10000 pages rendues, 10000 distinctes (attendu 10000) ; la page de 10 000 blocs y paraît 1 fois
+R902 « mastodonte » : 10001 entrées vues, 1 page rendue
+filtre : « canalcent » rend 10 pages permises (attendu 10), aucune de l'espace B
+MESURE R920 : relire et vérifier le texte gardé de 2000 entrées de pages différentes : p50 17.5 ms, max 29.1 ms
+MESURE canal | 10 pages | 0 entrée non permise (10 vues) : p50 0.115 ms, moyenne 0.122 ms, écart type 0.032 ms | 100 000 non permises (100010 vues) : p50 1.721 ms, moyenne 1.782 ms, écart type 0.185 ms | écart des p50 1.606 ms
+MESURE canal | 10 000 pages | 0 entrée non permise (10 vues) : p50 0.115 ms, moyenne 0.123 ms, écart type 0.033 ms | 100 000 non permises (100010 vues) : p50 1.713 ms, moyenne 1.775 ms, écart type 0.156 ms | écart des p50 1.598 ms

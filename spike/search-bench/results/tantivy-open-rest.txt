@@ -1,0 +1,47 @@
+MESURE ouverture : index 0.4 ms, lecteur 1.3 ms, charge utile 0.07 ms (Some("jeton-final")), écrivain 1.0 ms, total 2.8 ms ; première requête 11.0 ms (11891 pages) ; 5 segments, 1290901 entrées ; mémoire de travail 6.7 -> 36.0 Mo
+MESURE ouverture : index 0.4 ms, lecteur 1.3 ms, charge utile 0.07 ms (Some("jeton-final")), écrivain 0.8 ms, total 2.5 ms ; première requête 10.2 ms (11891 pages) ; 5 segments, 1290901 entrées ; mémoire de travail 6.7 -> 36.2 Mo
+MESURE ouverture : index 0.4 ms, lecteur 1.3 ms, charge utile 0.07 ms (Some("jeton-final")), écrivain 0.8 ms, total 2.5 ms ; première requête 10.8 ms (11891 pages) ; 5 segments, 1290901 entrées ; mémoire de travail 6.7 -> 36.0 Mo
+MESURE ouverture : index 0.4 ms, lecteur 1.3 ms, charge utile 0.07 ms (Some("jeton-final")), écrivain 0.8 ms, total 2.5 ms ; première requête 11.2 ms (11891 pages) ; 5 segments, 1290901 entrées ; mémoire de travail 6.7 -> 36.0 Mo
+MESURE ouverture : index 0.4 ms, lecteur 1.3 ms, charge utile 0.05 ms (Some("jeton-final")), écrivain 0.7 ms, total 2.4 ms ; première requête 10.9 ms (11891 pages) ; 5 segments, 1290901 entrées ; mémoire de travail 6.7 -> 35.9 Mo
+MESURE ouverture : index 0.4 ms, lecteur 1.3 ms, charge utile 0.07 ms (Some("jeton-final")), écrivain 0.8 ms, total 2.5 ms ; première requête 11.2 ms (11891 pages) ; 5 segments, 1290901 entrées ; mémoire de travail 6.7 -> 36.1 Mo
+MESURE repos processus nu : mémoire de travail 6.7 Mo, mémoire privée 1.7 Mo, tas de Rust 0.0 Mo
+MESURE repos index ouvert, lecteur prêt : mémoire de travail 7.7 Mo, mémoire privée 3.4 Mo, tas de Rust 0.0 Mo
+MESURE repos écrivain au repos (tampon 15 Mo, un fil, un fil de fusion) : mémoire de travail 10.5 Mo, mémoire privée 6.0 Mo, tas de Rust 2.6 Mo
+MESURE repos après 2 s : mémoire de travail 10.6 Mo, mémoire privée 6.0 Mo, tas de Rust 2.6 Mo
+MESURE repos vocabulaire du banc chargé (hors mesure : à retrancher) : mémoire de travail 16.3 Mo, mémoire privée 11.8 Mo, tas de Rust 5.5 Mo
+MESURE repos après 500 requêtes mêlées : mémoire de travail 188.3 Mo, mémoire privée 22.4 Mo, tas de Rust 13.9 Mo
+MESURE repos 2 s plus tard : mémoire de travail 188.3 Mo, mémoire privée 22.4 Mo, tas de Rust 13.9 Mo
+MESURE repos après une validation d'une entrée, 2 s plus tard : mémoire de travail 180.3 Mo, mémoire privée 13.8 Mo, tas de Rust 5.7 Mo
+MESURE repos processus nu : mémoire de travail 6.8 Mo, mémoire privée 1.8 Mo, tas de Rust 0.0 Mo
+MESURE repos index ouvert, lecteur prêt : mémoire de travail 7.9 Mo, mémoire privée 3.4 Mo, tas de Rust 0.1 Mo
+MESURE repos écrivain au repos (tampon 15 Mo, un fil, un fil de fusion) : mémoire de travail 7.9 Mo, mémoire privée 3.4 Mo, tas de Rust 0.1 Mo
+MESURE repos après 2 s : mémoire de travail 7.9 Mo, mémoire privée 3.4 Mo, tas de Rust 0.1 Mo
+MESURE repos vocabulaire du banc chargé (hors mesure : à retrancher) : mémoire de travail 13.7 Mo, mémoire privée 9.2 Mo, tas de Rust 3.0 Mo
+MESURE repos après 500 requêtes mêlées : mémoire de travail 185.5 Mo, mémoire privée 19.8 Mo, tas de Rust 11.4 Mo
+MESURE repos 2 s plus tard : mémoire de travail 185.5 Mo, mémoire privée 19.8 Mo, tas de Rust 11.4 Mo
+MESURE repos processus nu : mémoire de travail 6.8 Mo, mémoire privée 1.8 Mo, tas de Rust 0.0 Mo
+MESURE repos index ouvert, lecteur prêt : mémoire de travail 7.8 Mo, mémoire privée 3.4 Mo, tas de Rust 0.1 Mo
+MESURE repos écrivain au repos (tampon 15 Mo, un fil, un fil de fusion) : mémoire de travail 10.6 Mo, mémoire privée 6.1 Mo, tas de Rust 2.6 Mo
+MESURE repos après 2 s : mémoire de travail 10.7 Mo, mémoire privée 6.1 Mo, tas de Rust 2.6 Mo
+MESURE repos vocabulaire du banc chargé (hors mesure : à retrancher) : mémoire de travail 16.4 Mo, mémoire privée 11.8 Mo, tas de Rust 5.5 Mo
+MESURE repos après 500 requêtes mêlées : mémoire de travail 190.2 Mo, mémoire privée 24.4 Mo, tas de Rust 13.9 Mo
+MESURE repos 2 s plus tard : mémoire de travail 190.2 Mo, mémoire privée 24.4 Mo, tas de Rust 13.9 Mo
+MESURE repos après une validation d'une entrée, 2 s plus tard : mémoire de travail 180.3 Mo, mémoire privée 13.5 Mo, tas de Rust 5.7 Mo
+MESURE repos processus nu : mémoire de travail 6.8 Mo, mémoire privée 1.8 Mo, tas de Rust 0.0 Mo
+MESURE repos index ouvert, lecteur prêt : mémoire de travail 8.0 Mo, mémoire privée 3.5 Mo, tas de Rust 0.1 Mo
+MESURE repos écrivain au repos (tampon 15 Mo, un fil, un fil de fusion) : mémoire de travail 10.8 Mo, mémoire privée 6.1 Mo, tas de Rust 2.6 Mo
+MESURE repos après 2 s : mémoire de travail 10.8 Mo, mémoire privée 6.1 Mo, tas de Rust 2.6 Mo
+MESURE repos 2 s plus tard : mémoire de travail 16.8 Mo, mémoire privée 12.2 Mo, tas de Rust 5.8 Mo
+MESURE repos après une validation d'une entrée, 2 s plus tard : mémoire de travail 18.1 Mo, mémoire privée 12.8 Mo, tas de Rust 5.8 Mo
+MESURE repos processus nu : mémoire de travail 6.8 Mo, mémoire privée 1.8 Mo, tas de Rust 0.0 Mo
+MESURE repos index ouvert, lecteur prêt : mémoire de travail 8.0 Mo, mémoire privée 3.4 Mo, tas de Rust 0.1 Mo
+MESURE repos écrivain au repos (tampon 15 Mo, un fil, un fil de fusion) : mémoire de travail 10.8 Mo, mémoire privée 6.1 Mo, tas de Rust 2.6 Mo
+MESURE repos après 2 s : mémoire de travail 10.8 Mo, mémoire privée 6.1 Mo, tas de Rust 2.6 Mo
+MESURE repos 2 s plus tard : mémoire de travail 16.9 Mo, mémoire privée 12.2 Mo, tas de Rust 5.8 Mo
+MESURE repos après une validation d'une entrée, 2 s plus tard : mémoire de travail 18.1 Mo, mémoire privée 12.8 Mo, tas de Rust 5.8 Mo
+MESURE repos processus nu : mémoire de travail 6.8 Mo, mémoire privée 1.8 Mo, tas de Rust 0.0 Mo
+MESURE repos index ouvert, lecteur prêt : mémoire de travail 8.0 Mo, mémoire privée 3.5 Mo, tas de Rust 0.1 Mo
+MESURE repos écrivain au repos (tampon 15 Mo, un fil, un fil de fusion) : mémoire de travail 10.8 Mo, mémoire privée 6.1 Mo, tas de Rust 2.6 Mo
+MESURE repos après 2 s : mémoire de travail 10.8 Mo, mémoire privée 6.1 Mo, tas de Rust 2.6 Mo
+MESURE repos 2 s plus tard : mémoire de travail 16.9 Mo, mémoire privée 12.3 Mo, tas de Rust 5.8 Mo
+MESURE repos après une validation d'une entrée, 2 s plus tard : mémoire de travail 18.1 Mo, mémoire privée 12.9 Mo, tas de Rust 5.8 Mo

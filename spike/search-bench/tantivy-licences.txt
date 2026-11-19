@@ -1,0 +1,145 @@
+aho-corasick v1.1.5|Unlicense OR MIT
+arc-swap v1.9.5|MIT OR Apache-2.0
+async-trait v0.1.92 (proc-macro)|MIT OR Apache-2.0
+autocfg v1.5.1|Apache-2.0 OR MIT
+base64 v0.23.1|MIT OR Apache-2.0
+bitflags v2.13.2|MIT OR Apache-2.0
+bitpacking v0.9.3|MIT
+bon v3.10.3|MIT OR Apache-2.0
+bon-macros v3.10.3 (proc-macro)|MIT OR Apache-2.0
+byteorder v1.5.0|Unlicense OR MIT
+cc v1.11.2|MIT OR Apache-2.0
+census v0.4.2|MIT
+cfg-if v1.0.5|MIT OR Apache-2.0
+crc32fast v1.5.5|MIT OR Apache-2.0
+crossbeam-channel v0.5.17|MIT OR Apache-2.0
+crossbeam-deque v0.8.8|MIT OR Apache-2.0
+crossbeam-epoch v0.9.21|MIT OR Apache-2.0
+crossbeam-utils v0.8.23|MIT OR Apache-2.0
+crunchy v0.2.4|MIT
+darling v0.24.1|MIT
+darling_core v0.24.1|MIT
+darling_macro v0.24.1 (proc-macro)|MIT
+datasketches v0.5.0|Apache-2.0
+deranged v0.5.9|MIT OR Apache-2.0
+downcast-rs v2.0.2|MIT OR Apache-2.0
+either v1.19.0|MIT OR Apache-2.0
+erased-serde v0.4.11|MIT OR Apache-2.0
+errno v0.3.15|MIT OR Apache-2.0
+fastdivide v0.4.2|zlib-acknowledgement OR MIT
+fastrand v2.5.0|Apache-2.0 OR MIT
+find-msvc-tools v0.1.15|MIT OR Apache-2.0
+fnv v1.0.7|Apache-2.0 / MIT
+foldhash v0.2.0|Zlib
+frostem v1.20260821.8|BSD-3-Clause
+fs4 v0.13.1|MIT OR Apache-2.0
+futures-core v0.3.34|MIT OR Apache-2.0
+futures-io v0.3.34|MIT OR Apache-2.0
+futures-macro v0.3.34 (proc-macro)|MIT OR Apache-2.0
+futures-sink v0.3.34|MIT OR Apache-2.0
+futures-task v0.3.34|MIT OR Apache-2.0
+futures-util v0.3.34|MIT OR Apache-2.0
+getrandom v0.3.4|MIT OR Apache-2.0
+getrandom v0.4.3|MIT OR Apache-2.0
+hashbrown v0.17.1|MIT OR Apache-2.0
+htmlescape v0.3.1|Apache-2.0 / MIT / MPL-2.0
+ident_case v1.0.1|MIT/Apache-2.0
+inventory v0.3.25|MIT OR Apache-2.0
+itertools v0.14.0|MIT OR Apache-2.0
+itoa v1.0.19|MIT OR Apache-2.0
+jobserver v0.1.35|MIT OR Apache-2.0
+levenshtein_automata v0.2.1|MIT
+libc v0.2.191|MIT OR Apache-2.0
+linux-raw-sys v0.12.1|Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+log v0.4.35|MIT OR Apache-2.0
+lru v0.18.5|MIT
+lz4_flex v0.14.2|MIT
+measure_time v0.9.0|MIT
+memchr v2.8.3|Unlicense OR MIT
+memmap2 v0.9.12|MIT OR Apache-2.0
+minimal-lexical v0.2.1|MIT/Apache-2.0
+murmurhash32 v0.4.0|MIT
+nom v7.1.3|MIT
+num-conv v0.2.2|MIT OR Apache-2.0
+num-traits v0.2.19|MIT OR Apache-2.0
+once_cell v1.21.4|MIT OR Apache-2.0
+oneshot v0.1.13|MIT OR Apache-2.0
+ordered-float v5.5.1|MIT
+ownedbytes v0.9.0|MIT
+pin-project-lite v0.2.18|Apache-2.0 OR MIT
+pkg-config v0.3.34|MIT OR Apache-2.0
+powerfmt v0.2.1|MIT OR Apache-2.0
+ppv-lite86 v0.2.21|MIT OR Apache-2.0
+prettyplease v0.3.0|MIT OR Apache-2.0
+proc-macro2 v1.0.107|MIT OR Apache-2.0
+quote v1.0.47|MIT OR Apache-2.0
+r-efi v5.3.0|MIT OR Apache-2.0 OR LGPL-2.1-or-later
+r-efi v6.0.0|MIT OR Apache-2.0 OR LGPL-2.1-or-later
+rand v0.9.5|MIT OR Apache-2.0
+rand_chacha v0.9.0|MIT OR Apache-2.0
+rand_core v0.9.5|MIT OR Apache-2.0
+rayon v1.12.0|MIT OR Apache-2.0
+rayon-core v1.13.0|MIT OR Apache-2.0
+regex v1.13.2|MIT OR Apache-2.0
+regex-automata v0.4.19|MIT OR Apache-2.0
+regex-syntax v0.8.12|MIT OR Apache-2.0
+rustc-hash v2.1.3|Apache-2.0 OR MIT
+rustix v1.1.6|Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+rustversion v1.0.23 (proc-macro)|MIT OR Apache-2.0
+serde v1.0.229|MIT OR Apache-2.0
+serde-tuple-vec-map v1.0.1|MIT
+serde_core v1.0.229|MIT OR Apache-2.0
+serde_derive v1.0.229 (proc-macro)|MIT OR Apache-2.0
+serde_json v1.0.154|MIT OR Apache-2.0
+shlex v2.0.1|MIT OR Apache-2.0
+sketches-ddsketch v0.4.2|Apache-2.0
+slab v0.4.12|MIT
+smallvec v1.16.6|MIT OR Apache-2.0
+stable_deref_trait v1.2.1|MIT OR Apache-2.0
+strsim v0.11.1|MIT
+syn v2.0.119|MIT OR Apache-2.0
+syn v3.0.10|MIT OR Apache-2.0
+tantivy v0.27.0|MIT
+tantivy-bitpacker v0.27.0|MIT
+tantivy-columnar v0.27.0|MIT
+tantivy-common v0.27.0|MIT
+tantivy-fst v0.5.0|Unlicense/MIT
+tantivy-query-grammar v0.27.0|MIT
+tantivy-sstable v0.27.0|MIT
+tantivy-stacker v0.27.0|MIT
+tantivy-tokenizer-api v0.7.0|MIT
+tempfile v3.27.0|MIT OR Apache-2.0
+thiserror v2.0.21|MIT OR Apache-2.0
+thiserror-impl v2.0.21 (proc-macro)|MIT OR Apache-2.0
+time v0.3.55|MIT OR Apache-2.0
+time-core v0.1.9|MIT OR Apache-2.0
+typeid v1.0.3|MIT OR Apache-2.0
+typetag v0.2.23|MIT OR Apache-2.0
+typetag-impl v0.2.23 (proc-macro)|MIT OR Apache-2.0
+unicode-ident v1.0.27|(MIT OR Apache-2.0) AND Unicode-3.0
+unwrap-infallible v1.0.0|MIT OR Apache-2.0
+utf8-ranges v1.0.5|Unlicense/MIT
+uuid v1.29.3|Apache-2.0 OR MIT
+wasip2 v1.0.4+wasi-0.2.12|Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+winapi v0.3.9|MIT/Apache-2.0
+winapi-i686-pc-windows-gnu v0.4.0|MIT/Apache-2.0
+winapi-x86_64-pc-windows-gnu v0.4.0|MIT/Apache-2.0
+windows-link v0.2.1|MIT OR Apache-2.0
+windows-sys v0.59.0|MIT OR Apache-2.0
+windows-sys v0.61.2|MIT OR Apache-2.0
+windows-targets v0.52.6|MIT OR Apache-2.0
+windows_aarch64_gnullvm v0.52.6|MIT OR Apache-2.0
+windows_aarch64_msvc v0.52.6|MIT OR Apache-2.0
+windows_i686_gnu v0.52.6|MIT OR Apache-2.0
+windows_i686_gnullvm v0.52.6|MIT OR Apache-2.0
+windows_i686_msvc v0.52.6|MIT OR Apache-2.0
+windows_x86_64_gnu v0.52.6|MIT OR Apache-2.0
+windows_x86_64_gnullvm v0.52.6|MIT OR Apache-2.0
+windows_x86_64_msvc v0.52.6|MIT OR Apache-2.0
+wit-bindgen v0.57.1|Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
+zerocopy v0.8.63|BSD-2-Clause OR Apache-2.0 OR MIT
+zerocopy-derive v0.8.63 (proc-macro)|BSD-2-Clause OR Apache-2.0 OR MIT
+zmij v1.0.23|MIT
+zstd v0.14.4|BSD-3-Clause
+zstd-safe v8.3.0|BSD-3-Clause
+zstd-sys v2.1.3+zstd.1.5.7|BSD-3-Clause AND BSD-2-Clause

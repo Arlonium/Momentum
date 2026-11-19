@@ -1,0 +1,24 @@
+MESURE validation | 1 blocs remplacés | écriture p50 0.08 ms, max 0.18 ms | validation p50 81.1 ms, max 232.1 ms | 20 passages
+MESURE validation | 100 blocs remplacés | écriture p50 4.39 ms, max 8.93 ms | validation p50 77.7 ms, max 201.6 ms | 10 passages
+MESURE validation | 1000 blocs remplacés | écriture p50 46.94 ms, max 47.63 ms | validation p50 222.3 ms, max 338.0 ms | 5 passages
+MESURE validation | renommage d'une page de 99 blocs (toutes ses entrées récrites, validation comprise) | p50 79.1 ms, max 155.9 ms | 10 passages
+MESURE validation | renommage d'une page de 10 000 blocs (toutes ses entrées récrites, validation comprise) | p50 2836.2 ms, max 2874.6 ms | 3 passages
+MESURE validation | vide (le jeton seul) | p50 4.1 ms, max 4.5 ms
+MESURE validation | après 58 validations : 16 segments, dossier 651.4 Mo -> 661.3 Mo ; fusions restantes 0.6 s ; pointe de mémoire de travail 177 Mo ; charge utile relue Some("jeton-58")
+
+MESURE validation | 1 blocs remplacés | écriture p50 0.08 ms, max 0.18 ms | validation p50 80.8 ms, max 221.4 ms | 20 passages
+MESURE validation | 100 blocs remplacés | écriture p50 4.97 ms, max 6.59 ms | validation p50 87.5 ms, max 268.2 ms | 10 passages
+MESURE validation | 1000 blocs remplacés | écriture p50 47.14 ms, max 48.05 ms | validation p50 230.4 ms, max 783.0 ms | 5 passages
+MESURE validation | renommage d'une page de 99 blocs (toutes ses entrées récrites, validation comprise) | p50 81.9 ms, max 169.2 ms | 10 passages
+MESURE validation | renommage d'une page de 10 000 blocs (toutes ses entrées récrites, validation comprise) | p50 3591.2 ms, max 3783.0 ms | 3 passages
+MESURE validation | vide (le jeton seul) | p50 4.3 ms, max 8.4 ms
+MESURE validation | après 58 validations : 19 segments, dossier 661.3 Mo -> 667.6 Mo ; fusions restantes 0.4 s ; pointe de mémoire de travail 171 Mo ; charge utile relue Some("jeton-58")
+
+MESURE validation | 1 blocs remplacés | écriture p50 0.07 ms, max 0.11 ms | validation p50 90.1 ms, max 270.0 ms | 20 passages
+MESURE validation | 100 blocs remplacés | écriture p50 4.18 ms, max 6.16 ms | validation p50 100.0 ms, max 837.0 ms | 10 passages
+MESURE validation | 1000 blocs remplacés | écriture p50 45.32 ms, max 47.42 ms | validation p50 260.8 ms, max 364.4 ms | 5 passages
+MESURE validation | renommage d'une page de 99 blocs (toutes ses entrées récrites, validation comprise) | p50 78.9 ms, max 166.8 ms | 10 passages
+MESURE validation | renommage d'une page de 10 000 blocs (toutes ses entrées récrites, validation comprise) | p50 2867.2 ms, max 3582.9 ms | 3 passages
+MESURE validation | vide (le jeton seul) | p50 6.3 ms, max 157.7 ms
+MESURE validation | après 58 validations : 9 segments, dossier 667.6 Mo -> 666.7 Mo ; fusions restantes 0.1 s ; pointe de mémoire de travail 190 Mo ; charge utile relue Some("jeton-58")
+

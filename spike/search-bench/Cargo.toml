@@ -1,0 +1,20 @@
+# Banc jetable de la Task S0 du lot 4 : Tantivy contre FTS5. Hors des deux ateliers Cargo.
+[package]
+name = "search-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+[workspace]
+
+[dependencies]
+tantivy = "*"
+rusqlite = { version = "0.39", features = ["bundled"] }
+libsqlite3-sys = "=0.37.0"
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+tokio = { version = "1", features = ["rt"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
+
+[profile.release]
+debug = false

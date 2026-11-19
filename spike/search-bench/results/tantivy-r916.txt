@@ -1,0 +1,19 @@
+variante « un autre espace (3 000 entrées) » : 3040 entrées vivantes, 0 supprimées encore dans les segments
+R916 | un autre espace (3 000 entrées) | « dosea » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | un autre espace (3 000 entrées) | « doseb » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | un autre espace (3 000 entrées) | « dosea doseb » | 35 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | un autre espace (3 000 entrées) | « dos* » | 39 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = true, mêmes notes = false
+R916 | un autre espace (3 000 entrées) | « doseb dos* » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+variante « des pages non permises du même espace (3 000 entrées) » : 3040 entrées vivantes, 0 supprimées encore dans les segments
+R916 | des pages non permises du même espace (3 000 entrées) | « dosea » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | des pages non permises du même espace (3 000 entrées) | « doseb » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | des pages non permises du même espace (3 000 entrées) | « dosea doseb » | 35 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | des pages non permises du même espace (3 000 entrées) | « dos* » | 39 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = true, mêmes notes = false
+R916 | des pages non permises du même espace (3 000 entrées) | « doseb dos* » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+variante « 3 000 entrées supprimées, pas encore fusionnées » : 40 entrées vivantes, 660 supprimées encore dans les segments
+R916 | 3 000 entrées supprimées, pas encore fusionnées | « dosea » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | 3 000 entrées supprimées, pas encore fusionnées | « doseb » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | 3 000 entrées supprimées, pas encore fusionnées | « dosea doseb » | 35 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 | 3 000 entrées supprimées, pas encore fusionnées | « dos* » | 39 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = true, mêmes notes = false
+R916 | 3 000 entrées supprimées, pas encore fusionnées | « doseb dos* » | 37 pages | statistiques constantes : mêmes pages, même ordre, mêmes notes au bit près = true | BM25 de l'index (témoin) : même ordre = false, mêmes notes = false
+R916 verdict : statistiques constantes, tout identique = true ; le témoin (BM25 de l'index) change d'ordre dans 12 cas sur 15

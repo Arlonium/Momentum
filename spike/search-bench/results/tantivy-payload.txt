@@ -1,0 +1,28 @@
+R909 index neuf : charge utile None
+R909 après une validation préparée puis abandonnée : charge utile Some("0"), plus grand marqueur lisible 0
+R909 essai 0 : le processus tué avait dit 8 ; charge utile relue 8 (en 0.26 ms), plus grand marqueur lisible 8, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 1 : le processus tué avait dit 15 ; charge utile relue 15 (en 0.23 ms), plus grand marqueur lisible 15, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 2 : le processus tué avait dit 21 ; charge utile relue 21 (en 0.28 ms), plus grand marqueur lisible 21, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 3 : le processus tué avait dit 22 ; charge utile relue 22 (en 0.29 ms), plus grand marqueur lisible 22, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 4 : le processus tué avait dit 35 ; charge utile relue 35 (en 0.25 ms), plus grand marqueur lisible 35, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 5 : le processus tué avait dit 43 ; charge utile relue 43 (en 0.28 ms), plus grand marqueur lisible 43, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 6 : le processus tué avait dit 49 ; charge utile relue 49 (en 0.27 ms), plus grand marqueur lisible 49, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 7 : le processus tué avait dit 50 ; charge utile relue 50 (en 0.42 ms), plus grand marqueur lisible 50, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 8 : le processus tué avait dit 54 ; charge utile relue 54 (en 0.27 ms), plus grand marqueur lisible 54, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 9 : le processus tué avait dit 60 ; charge utile relue 60 (en 0.26 ms), plus grand marqueur lisible 60, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 10 : le processus tué avait dit 72 ; charge utile relue 72 (en 0.28 ms), plus grand marqueur lisible 72, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 11 : le processus tué avait dit 79 ; charge utile relue 79 (en 0.26 ms), plus grand marqueur lisible 79, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 12 : le processus tué avait dit 84 ; charge utile relue 84 (en 0.36 ms), plus grand marqueur lisible 84, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 13 : le processus tué avait dit 92 ; charge utile relue 92 (en 0.29 ms), plus grand marqueur lisible 92, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 14 : le processus tué avait dit 94 ; charge utile relue 94 (en 0.49 ms), plus grand marqueur lisible 94, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 15 : le processus tué avait dit 96 ; charge utile relue 96 (en 0.27 ms), plus grand marqueur lisible 96, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 16 : le processus tué avait dit 101 ; charge utile relue 101 (en 0.38 ms), plus grand marqueur lisible 101, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 17 : le processus tué avait dit 104 ; charge utile relue 104 (en 0.27 ms), plus grand marqueur lisible 104, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 18 : le processus tué avait dit 108 ; charge utile relue 108 (en 0.30 ms), plus grand marqueur lisible 108, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 19 : le processus tué avait dit 109 ; charge utile relue 109 (en 0.80 ms), plus grand marqueur lisible 109, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 20 : le processus tué avait dit 110 ; charge utile relue 111 (en 0.32 ms), plus grand marqueur lisible 111, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 21 : le processus tué avait dit 114 ; charge utile relue 114 (en 0.33 ms), plus grand marqueur lisible 114, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 22 : le processus tué avait dit 116 ; charge utile relue 116 (en 0.26 ms), plus grand marqueur lisible 116, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 23 : le processus tué avait dit 126 ; charge utile relue 126 (en 0.27 ms), plus grand marqueur lisible 126, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 essai 24 : le processus tué avait dit 133 ; charge utile relue 133 (en 0.27 ms), plus grand marqueur lisible 133, fichiers abîmés 0, écrivain repris = true -> cohérent
+R909 verdict : 25 arrêts brutaux, 24 fois la charge utile est celle de la dernière validation dite, 1 fois celle d'une validation faite et pas encore dite, 0 incohérence(s)
