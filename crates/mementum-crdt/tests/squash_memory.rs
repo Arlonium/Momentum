@@ -421,6 +421,40 @@ fn letters_between_items_the_page_already_has() {
     }
 }
 
+/// Des contenus JSON enchaînés (l'ancien format de Yjs), lus par yrs seul : la garde les refuse
+/// d'un client et les supprime d'un journal, mais yrs les fond comme des lettres. Le yrs d'origine
+/// y demandait 1,1 Gio pour 10 000 éléments.
+#[test]
+fn json_contents_chained_read_by_yrs_alone() {
+    for n in SIZES {
+        let items: Vec<Vec<u8>> = (0..n)
+            .map(|k| {
+                let mut item = match k {
+                    0 => vec![0x02, 1, 1, b't'],
+                    _ => {
+                        let mut item = vec![0x82];
+                        id(&mut item, (LETTERS, k - 1));
+                        item
+                    }
+                };
+                // yrs lit une chaîne de plus que le compte écrit.
+                item.extend_from_slice(&[0, 4, b't', b'r', b'u', b'e']);
+                item
+            })
+            .collect();
+        let sent = update(&[(LETTERS, 0, items)]);
+        let bare = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        within("des contenus JSON enchaînés", n, sent.len(), || {
+            bare.transact_mut()
+                .apply_update(Update::decode_v1(&sent).unwrap())
+                .unwrap();
+        });
+    }
+}
+
 /// Ce que `vendor/yrs` corrige, tenu sur le yrs de crates.io.
 mod known_limits {
     use super::*;

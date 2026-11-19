@@ -55,30 +55,39 @@ fn parting(
     None
 }
 
-/// Le yrs d'origine ne refait pas toujours deux fois la même scène : en annulant, il rétablit
-/// les éléments d'un pas dans l'ordre d'une table de hachage (`UndoManager::try_process`), et une
-/// suppression retenue peut emporter une marque devenue inutile, donc deux éléments. Le témoin
-/// est mené deux fois : une scène n'est comparée que jusqu'au pas où il se sépare de lui-même.
+/// Les passages du témoin, pour savoir jusqu'où il refait la même scène.
+const WITNESSES: usize = 4;
+/// Ce qu'on redonne au yrs corrigé avant de le dire différent du témoin.
+const TRIES: usize = 48;
+
+/// Aucun des deux yrs ne refait toujours deux fois la même scène : en annulant, yrs rétablit les
+/// éléments d'un pas dans l'ordre d'une table de hachage (`UndoManager::try_process`), et il fond
+/// les plages ramassées voisines dans l'ordre d'une autre (`TransactionMut::delete`). Le témoin
+/// est donc mené [`WITNESSES`] fois, et une scène n'est comparée que jusqu'au pas où il se sépare
+/// de lui-même ; s'il a tiré quatre fois le même ordre, le yrs corrigé, qui tire le sien, est
+/// mené jusqu'à [`TRIES`] fois : ce que le correctif changerait différerait à chaque passage.
 #[test]
 fn scenes_at_random_by_the_api_are_alike() {
     let first = number("MEMENTUM_FUZZ_FROM", 1);
     let seeds = number("MEMENTUM_FUZZ_SEEDS", 250);
     let (mut received, mut undone, mut redone, mut linked) = (0u64, 0u64, 0u64, 0u64);
-    let (mut compared, mut unsteady) = (0u64, 0u64);
+    let (mut compared, mut unsteady, mut retried) = (0u64, 0u64, 0u64);
     for seed in first..first + seeds {
-        let ours = fixed::scene(seed, STEPS);
         let theirs = upstream::scene(seed, STEPS);
-        let again = upstream::scene(seed, STEPS);
-        let steady = match parting(&theirs, &again) {
-            None => STEPS,
-            Some((step, _)) => {
-                unsteady += 1;
-                step
-            }
-        };
-        if let Some((step, why)) = parting(&ours[..steady], &theirs[..steady]) {
-            panic!("graine {seed}, pas {step} {why}");
+        let steady = (1..WITNESSES)
+            .filter_map(|_| parting(&theirs, &upstream::scene(seed, STEPS)))
+            .map(|(step, _)| step)
+            .min()
+            .unwrap_or(STEPS);
+        unsteady += u64::from(steady < STEPS);
+        let mut ours = fixed::scene(seed, STEPS);
+        let mut tries = 1;
+        while let Some((step, why)) = parting(&ours[..steady], &theirs[..steady]) {
+            assert!(tries < TRIES, "graine {seed}, pas {step} {why}");
+            tries += 1;
+            ours = fixed::scene(seed, STEPS);
         }
+        retried += u64::from(tries > 1);
         compared += steady as u64;
         for (what, docs) in &ours[..steady] {
             received += u64::from(what == "reçu : appliquée");
@@ -89,8 +98,9 @@ fn scenes_at_random_by_the_api_are_alike() {
     }
     println!(
         "ESSAI des deux yrs : {seeds} scènes, {compared} pas comparés ({unsteady} scènes où le \
-         témoin se sépare de lui-même) ; {received} transactions reçues, {undone} annulations, \
-         {redone} rétablissements, {linked} vues d'un document à lien"
+         témoin se sépare de lui-même, {retried} où le yrs corrigé a été mené plus d'une fois) ; \
+         {received} transactions reçues, {undone} annulations, {redone} rétablissements, {linked} \
+         vues d'un document à lien"
     );
     // Le test ne passe pas à vide.
     assert!(compared > seeds * STEPS as u64 * 9 / 10, "{compared} pas");
@@ -213,6 +223,8 @@ fn forms(n: u32) -> Vec<Form> {
     let whole = || update(&[(WRITER, 0, vec![item(4, None, None, false, n)])], &[]);
     let letters = || chain(4, n, 1, false, none);
     let one = |items: Vec<Vec<u8>>| vec![update(&[(WRITER, 0, items)], &[])];
+    // La jointure du milieu.
+    let half = n / 2;
     vec![
         // Ce qui se fond : toutes les sortes de contenu que yrs fond.
         ("lettres", false, one(letters()), 1),
@@ -446,6 +458,119 @@ fn forms(n: u32) -> Vec<Form> {
                 })
                 .collect()),
             33,
+        ),
+        // Les mêmes conditions, manquées à une seule jointure, au milieu : de part et d'autre, deux
+        // suites qui se fondent. yrs fond celle de droite, s'arrête à la jointure, puis fond celle
+        // de gauche.
+        (
+            "un trou au milieu des lettres",
+            false,
+            one((0..n)
+                .flat_map(|k| {
+                    let clock = if k < half { k } else { k + 2 };
+                    let hole = (k == half && k > 0).then(|| vec![10, 2]);
+                    let letter = item(
+                        4,
+                        (k > 0).then(|| (WRITER, clock - 1 - if k == half { 2 } else { 0 })),
+                        None,
+                        false,
+                        1,
+                    );
+                    hole.into_iter().chain([letter])
+                })
+                .collect()),
+            2,
+        ),
+        (
+            "une origine droite pour la seconde moitié",
+            false,
+            vec![
+                update(&[(95, 0, vec![item(4, None, None, false, 1)])], &[]),
+                update(
+                    &[(
+                        WRITER,
+                        0,
+                        chain(4, n, 1, false, |k| (k >= half).then_some((95, 0))),
+                    )],
+                    &[],
+                ),
+            ],
+            2,
+        ),
+        (
+            "la lettre d'un client plus petit au milieu",
+            false,
+            vec![update(
+                &[
+                    (WRITER, 0, letters()),
+                    (
+                        50,
+                        0,
+                        (half > 0)
+                            .then(|| item(4, Some((WRITER, half - 1)), None, false, 1))
+                            .into_iter()
+                            .collect(),
+                    ),
+                ],
+                &[],
+            )],
+            2,
+        ),
+        (
+            "une autre origine au milieu",
+            false,
+            vec![
+                update(&[(10, 0, vec![item(4, None, None, false, 1)])], &[]),
+                update(
+                    &[
+                        (20, 0, vec![item(4, Some((10, 0)), None, false, 1)]),
+                        (
+                            WRITER,
+                            0,
+                            (0..n)
+                                .map(|k| {
+                                    let origin = match k {
+                                        0 => (20, 0),
+                                        k if k == half => (10, 0),
+                                        k => (WRITER, k - 1),
+                                    };
+                                    item(4, Some(origin), None, false, 1)
+                                })
+                                .collect(),
+                        ),
+                    ],
+                    &[],
+                ),
+            ],
+            2,
+        ),
+        (
+            "la première moitié supprimée, sans ramasse-miettes",
+            true,
+            vec![update(
+                &[(WRITER, 0, letters())],
+                &[(WRITER, if half > 0 { vec![(0, half)] } else { vec![] })],
+            )],
+            2,
+        ),
+        (
+            "des lettres puis des valeurs",
+            false,
+            one((0..n)
+                .map(|k| {
+                    let kind = if k < half { 4 } else { 8 };
+                    item(kind, (k > 0).then(|| (WRITER, k - 1)), None, false, 1)
+                })
+                .collect()),
+            2,
+        ),
+        (
+            "une plage ramassée puis des lettres",
+            false,
+            one(std::iter::once(vec![0, 2])
+                .chain((0..n).map(|k| item(4, (k > 0).then(|| (WRITER, k + 1)), None, false, 1)))
+                .collect()),
+            2,
         ),
     ]
 }
