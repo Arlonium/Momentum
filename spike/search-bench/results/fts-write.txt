@@ -1,0 +1,18 @@
+MESURE FTS5 écriture | 1 blocs dans une transaction | avec FTS5 : p50 2.67 ms, p95 7.90 ms, max 27.73 ms | blocks_index seul : p50 2.79 ms, p95 3.38 ms, max 3.58 ms | 40 passages chacun
+MESURE FTS5 écriture | 100 blocs dans une transaction | avec FTS5 : p50 3.95 ms, p95 15.73 ms, max 28.82 ms | blocks_index seul : p50 2.51 ms, p95 14.51 ms, max 17.05 ms | 20 passages chacun
+MESURE FTS5 écriture | 1000 blocs dans une transaction | avec FTS5 : p50 18.72 ms, p95 64.84 ms, max 64.84 ms | blocks_index seul : p50 4.36 ms, p95 6.70 ms, max 6.70 ms | 10 passages chacun
+MESURE FTS5 écriture | 10000 blocs dans une transaction | avec FTS5 : p50 321.66 ms, p95 404.18 ms, max 404.18 ms | blocks_index seul : p50 25.50 ms, p95 26.27 ms, max 26.27 ms | 3 passages chacun
+MESURE FTS5 écriture : fichier 676.3 Mo -> 686.6 Mo
+
+MESURE FTS5 écriture | 1 blocs dans une transaction | avec FTS5 : p50 1.66 ms, p95 2.54 ms, max 7.80 ms | blocks_index seul : p50 1.06 ms, p95 1.18 ms, max 1.61 ms | 40 passages chacun
+MESURE FTS5 écriture | 100 blocs dans une transaction | avec FTS5 : p50 3.46 ms, p95 17.04 ms, max 29.52 ms | blocks_index seul : p50 1.18 ms, p95 2.72 ms, max 11.71 ms | 20 passages chacun
+MESURE FTS5 écriture | 1000 blocs dans une transaction | avec FTS5 : p50 20.60 ms, p95 34.49 ms, max 34.49 ms | blocks_index seul : p50 2.95 ms, p95 16.20 ms, max 16.20 ms | 10 passages chacun
+MESURE FTS5 écriture | 10000 blocs dans une transaction | avec FTS5 : p50 312.73 ms, p95 332.50 ms, max 332.50 ms | blocks_index seul : p50 21.61 ms, p95 22.51 ms, max 22.51 ms | 3 passages chacun
+MESURE FTS5 écriture : fichier 686.6 Mo -> 696.0 Mo
+
+MESURE FTS5 écriture | 1 blocs dans une transaction | avec FTS5 : p50 1.80 ms, p95 2.79 ms, max 4.73 ms | blocks_index seul : p50 1.11 ms, p95 1.39 ms, max 1.49 ms | 40 passages chacun
+MESURE FTS5 écriture | 100 blocs dans une transaction | avec FTS5 : p50 3.26 ms, p95 28.79 ms, max 41.41 ms | blocks_index seul : p50 1.72 ms, p95 2.62 ms, max 2.82 ms | 20 passages chacun
+MESURE FTS5 écriture | 1000 blocs dans une transaction | avec FTS5 : p50 51.34 ms, p95 93.51 ms, max 93.51 ms | blocks_index seul : p50 4.27 ms, p95 4.84 ms, max 4.84 ms | 10 passages chacun
+MESURE FTS5 écriture | 10000 blocs dans une transaction | avec FTS5 : p50 481.76 ms, p95 573.55 ms, max 573.55 ms | blocks_index seul : p50 23.16 ms, p95 24.65 ms, max 24.65 ms | 3 passages chacun
+MESURE FTS5 écriture : fichier 696.0 Mo -> 700.1 Mo
+

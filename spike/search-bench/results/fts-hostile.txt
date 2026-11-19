@@ -1,0 +1,1 @@
+MESURE FTS5 hostile préfixes=None : 1000 blocs de 64 Kio, 65.5 Mo reçus, écrits en 6.0 s (un bloc par transaction, la pire 37 ms) ; fichier 139.5 Mo, soit 2.13 fois les octets reçus (le texte y est une fois, dans la table)

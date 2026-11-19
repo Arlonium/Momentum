@@ -42,6 +42,12 @@ fn connect(path: &Path) -> Connection {
     // Les réglages du store : WAL, `synchronous=FULL`.
     c.pragma_update(None, "journal_mode", "WAL").unwrap();
     c.pragma_update(None, "synchronous", "FULL").unwrap();
+    // Par défaut le cache de SQLite (2 Mo par connexion), comme le serveur ; `MEMENTUM_BENCH_CACHE_MB`
+    // pour voir ce qu'un plus grand cache change.
+    if let Ok(v) = std::env::var("MEMENTUM_BENCH_CACHE_MB") {
+        let kib: i64 = v.parse::<i64>().expect("MEMENTUM_BENCH_CACHE_MB") * 1024;
+        c.pragma_update(None, "cache_size", -kib).unwrap();
+    }
     c
 }
 
@@ -326,7 +332,8 @@ pub fn write(args: &Args) {
     let path = PathBuf::from(args.pos(0)).join("fts.db");
     let c = connect(&path);
     let vocab = Vocab::new(60_000);
-    let mut rng = Rng(77);
+    // Une graine neuve à chaque passage : récrire le même texte ne changerait aucune page.
+    let mut rng = Rng(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64);
     let max: i64 = c.query_row("SELECT max(id) FROM bi", [], |r| r.get(0)).unwrap();
     let before = file_size(&path);
     let sentence = |rng: &mut Rng| {

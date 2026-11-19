@@ -1,0 +1,9 @@
+R916 FTS5 | un autre espace (3 000 entrées) | « dosea » | note bm25 de FTS5 : même ordre = false
+R916 FTS5 | un autre espace (3 000 entrées) | « doseb » | note bm25 de FTS5 : même ordre = false
+R916 FTS5 | un autre espace (3 000 entrées) | « dosea doseb » | note bm25 de FTS5 : même ordre = false
+R916 FTS5 | un autre espace (3 000 entrées) | « dos* » | note bm25 de FTS5 : même ordre = false
+R916 FTS5 | des pages non permises du même espace (3 000 entrées) | « dosea » | note bm25 de FTS5 : même ordre = false
+R916 FTS5 | des pages non permises du même espace (3 000 entrées) | « doseb » | note bm25 de FTS5 : même ordre = false
+R916 FTS5 | des pages non permises du même espace (3 000 entrées) | « dosea doseb » | note bm25 de FTS5 : même ordre = false
+R916 FTS5 | des pages non permises du même espace (3 000 entrées) | « dos* » | note bm25 de FTS5 : même ordre = false
+R916 FTS5 verdict : la note bm25 de FTS5 change l'ordre des pages permises dans 8 cas sur 8

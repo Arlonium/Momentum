@@ -1,0 +1,15 @@
+MESURE hostile débuts=true : 10000 blocs de 64 Kio, 655.2 Mo reçus, indexés en 616.9 s (1.06 Mo/s), fusions comprises 1221.2 s ; pointe de mémoire de travail 802 Mo ; dossier 2164.8 Mo, soit 3.30 fois les octets reçus
+MESURE tailles (Mo) : champ | dictionnaire | listes | normes | colonnes | somme
+MESURE tailles : blk | 0.0 | 0.0 | 0.0 | 0.0 | 0.0
+MESURE tailles : entry | 0.4 | 0.0 | 0.0 | 0.0 | 0.4
+MESURE tailles : marker | 0.0 | 0.0 | 0.0 | 0.0 | 0.0
+MESURE tailles : node | 0.0 | 0.0 | 0.0 | 0.0 | 0.0
+MESURE tailles : page_hi | 0.0 | 0.0 | 0.0 | 0.1 | 0.1
+MESURE tailles : page_lo | 0.0 | 0.0 | 0.0 | 0.1 | 0.1
+MESURE tailles : space | 0.0 | 0.0 | 0.0 | 0.0 | 0.0
+MESURE tailles : text | 691.4 | 46.5 | 0.0 | 0.0 | 738.0
+MESURE tailles : text_starts | 544.2 | 223.5 | 0.0 | 0.0 | 767.7
+MESURE tailles : title | 0.0 | 0.0 | 0.0 | 0.0 | 0.0
+MESURE tailles : title_starts | 0.0 | 0.0 | 0.0 | 0.0 | 0.0
+MESURE tailles : textes gardés 658.4 Mo, suppressions 0.0 Mo, total des segments 2164.8 Mo, dossier 2164.8 Mo ; champs des débuts de mot 767.7 Mo (sans eux : 1397.1 Mo)
+fini

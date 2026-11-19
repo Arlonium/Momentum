@@ -1,0 +1,38 @@
+MESURE FTS5 requête | 1 terme rare (rang 20000) | 10 pages | groupé par page, note bm25 | 0 pages, 129 lignes touchées | p50 0.07 ms | p95 0.08 ms | max 0.09 ms
+MESURE FTS5 requête | 1 terme rare (rang 20000) | 10 000 pages | groupé par page, note bm25 | 20 pages, 129 lignes touchées | p50 0.35 ms | p95 0.36 ms | max 0.38 ms
+MESURE FTS5 requête | 1 terme rare (rang 20000) | 100 000 pages | groupé par page, note bm25 | 20 pages, 129 lignes touchées | p50 0.38 ms | p95 0.74 ms | max 1.07 ms
+MESURE FTS5 requête | 1 terme rare (rang 20000) | 10 000 pages | groupé par page, sans note | 129 lignes touchées | p50 0.26 ms | p95 0.51 ms | max 1.03 ms
+MESURE FTS5 requête | 1 terme moyen (rang 300) | 10 pages | groupé par page, note bm25 | 3 pages, 8626 lignes touchées | p50 29.57 ms | p95 31.12 ms | max 31.56 ms
+MESURE FTS5 requête | 1 terme moyen (rang 300) | 10 000 pages | groupé par page, note bm25 | 20 pages, 8626 lignes touchées | p50 49.20 ms | p95 51.78 ms | max 52.39 ms
+MESURE FTS5 requête | 1 terme moyen (rang 300) | 100 000 pages | groupé par page, note bm25 | 20 pages, 8626 lignes touchées | p50 71.53 ms | p95 75.35 ms | max 76.83 ms
+MESURE FTS5 requête | 1 terme moyen (rang 300) | 10 000 pages | groupé par page, sans note | 8626 lignes touchées | p50 36.18 ms | p95 39.28 ms | max 39.69 ms
+MESURE FTS5 requête | 1 terme très courant (rang 0) | 10 pages | groupé par page, note bm25 | 10 pages, 639881 lignes touchées | p50 440.04 ms | p95 446.90 ms | max 448.22 ms
+MESURE FTS5 requête | 1 terme très courant (rang 0) | 10 000 pages | groupé par page, note bm25 | 20 pages, 639881 lignes touchées | p50 1152.03 ms | p95 1168.66 ms | max 1168.66 ms
+MESURE FTS5 requête | 1 terme très courant (rang 0) | 100 000 pages | groupé par page, note bm25 | 20 pages, 639881 lignes touchées | p50 1346.52 ms | p95 1359.13 ms | max 1359.13 ms
+MESURE FTS5 requête | 1 terme très courant (rang 0) | 10 000 pages | groupé par page, sans note | 639881 lignes touchées | p50 822.63 ms | p95 838.02 ms | max 853.76 ms
+MESURE FTS5 requête | titre « projet » (lignes de titre seulement) | 10 pages | groupé par page, note bm25 | 10 pages, 11000 lignes touchées | p50 36.50 ms | p95 40.69 ms | max 40.85 ms
+MESURE FTS5 requête | titre « projet » (lignes de titre seulement) | 10 000 pages | groupé par page, note bm25 | 20 pages, 11000 lignes touchées | p50 61.38 ms | p95 64.22 ms | max 65.18 ms
+MESURE FTS5 requête | titre « projet » (lignes de titre seulement) | 100 000 pages | groupé par page, note bm25 | 20 pages, 11000 lignes touchées | p50 84.03 ms | p95 86.38 ms | max 87.24 ms
+MESURE FTS5 requête | titre « projet » (lignes de titre seulement) | 10 000 pages | groupé par page, sans note | 11000 lignes touchées | p50 45.67 ms | p95 47.40 ms | max 47.42 ms
+MESURE FTS5 requête | 3 termes (rangs 5, 20, 60) | 10 pages | groupé par page, note bm25 | 0 pages, 1958 lignes touchées | p50 16.38 ms | p95 17.50 ms | max 18.11 ms
+MESURE FTS5 requête | 3 termes (rangs 5, 20, 60) | 10 000 pages | groupé par page, note bm25 | 20 pages, 1958 lignes touchées | p50 36.53 ms | p95 38.19 ms | max 38.90 ms
+MESURE FTS5 requête | 3 termes (rangs 5, 20, 60) | 100 000 pages | groupé par page, note bm25 | 20 pages, 1958 lignes touchées | p50 43.20 ms | p95 45.58 ms | max 45.72 ms
+MESURE FTS5 requête | 3 termes (rangs 5, 20, 60) | 10 000 pages | groupé par page, sans note | 1958 lignes touchées | p50 18.23 ms | p95 19.82 ms | max 20.85 ms
+MESURE FTS5 requête | 3 termes dont un préfixe « pr » | 10 pages | groupé par page, note bm25 | 10 pages, 22709 lignes touchées | p50 291.67 ms | p95 298.85 ms | max 301.35 ms
+MESURE FTS5 requête | 3 termes dont un préfixe « pr » | 10 000 pages | groupé par page, note bm25 | 20 pages, 22709 lignes touchées | p50 335.22 ms | p95 344.76 ms | max 345.59 ms
+MESURE FTS5 requête | 3 termes dont un préfixe « pr » | 100 000 pages | groupé par page, note bm25 | 20 pages, 22709 lignes touchées | p50 375.92 ms | p95 384.72 ms | max 385.88 ms
+MESURE FTS5 requête | 3 termes dont un préfixe « pr » | 10 000 pages | groupé par page, sans note | 22709 lignes touchées | p50 193.98 ms | p95 197.69 ms | max 199.63 ms
+MESURE FTS5 requête | 8 termes (rangs 0 à 7) | 10 pages | groupé par page, note bm25 | 1 pages, 462 lignes touchées | p50 125.82 ms | p95 128.60 ms | max 129.21 ms
+MESURE FTS5 requête | 8 termes (rangs 0 à 7) | 10 000 pages | groupé par page, note bm25 | 20 pages, 462 lignes touchées | p50 128.68 ms | p95 132.34 ms | max 132.35 ms
+MESURE FTS5 requête | 8 termes (rangs 0 à 7) | 100 000 pages | groupé par page, note bm25 | 20 pages, 462 lignes touchées | p50 129.20 ms | p95 133.28 ms | max 134.78 ms
+MESURE FTS5 requête | 8 termes (rangs 0 à 7) | 10 000 pages | groupé par page, sans note | 462 lignes touchées | p50 50.11 ms | p95 52.67 ms | max 53.18 ms
+MESURE FTS5 requête | 8 termes dont un préfixe « pro » | 10 pages | groupé par page, note bm25 | 0 pages, 314 lignes touchées | p50 65.18 ms | p95 70.14 ms | max 71.88 ms
+MESURE FTS5 requête | 8 termes dont un préfixe « pro » | 10 000 pages | groupé par page, note bm25 | 20 pages, 314 lignes touchées | p50 162.49 ms | p95 166.33 ms | max 179.12 ms
+MESURE FTS5 requête | 8 termes dont un préfixe « pro » | 100 000 pages | groupé par page, note bm25 | 20 pages, 314 lignes touchées | p50 164.93 ms | p95 167.98 ms | max 168.53 ms
+MESURE FTS5 requête | 8 termes dont un préfixe « pro » | 10 000 pages | groupé par page, sans note | 314 lignes touchées | p50 66.84 ms | p95 69.59 ms | max 69.94 ms
+MESURE FTS5 requête | préfixe seul « pr » | 10 pages | groupé par page, note bm25 | 10 pages, 526536 lignes touchées | p50 595.05 ms | p95 604.11 ms | max 604.94 ms
+MESURE FTS5 requête | préfixe seul « pr » | 10 000 pages | groupé par page, note bm25 | 20 pages, 526536 lignes touchées | p50 1152.13 ms | p95 1174.89 ms | max 1174.89 ms
+MESURE FTS5 requête | préfixe seul « pr » | 100 000 pages | groupé par page, note bm25 | 20 pages, 526536 lignes touchées | p50 1356.77 ms | p95 1377.54 ms | max 1377.54 ms
+MESURE FTS5 requête | préfixe seul « pr » | 10 000 pages | groupé par page, sans note | 526536 lignes touchées | p50 790.08 ms | p95 798.67 ms | max 800.39 ms
+MESURE FTS5 canal | 10 000 pages | 0 ligne non permise : p50 0.310 ms, écart type 0.058 ms | 100 000 non permises : p50 53.256 ms, écart type 1.163 ms | écart des p50 52.947 ms
+fini

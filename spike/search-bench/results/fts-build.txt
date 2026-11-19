@@ -1,0 +1,3 @@
+MESURE blocks_index (table du plan, WITHOUT ROWID) : 1189901 blocs, 259.7 Mo de texte, écrits en 19.1 s ; fichier 498.7 Mo, soit 1.92 fois le texte
+MESURE FTS5 construction préfixes=None : 1290901 entrées, 262.2 Mo de texte ; table seule 549.3 Mo en 16.5 s ; index FTS5 114.4 Mo de plus en 17.4 s (74366 entrées/s ; une tranche de 20 000 lignes : p50 250 ms, max 478 ms) ; fichier 663.8 Mo, soit 2.53 fois le texte
+fini

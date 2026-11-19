@@ -43,10 +43,10 @@ $B open $D/full                    # ouverture, dans un processus neuf
 $B rest $D/full                    # mémoire au repos (--no-writer : sans écrivain)
 $B query $D/full                   # latences, R902, R920, canal par le temps
 $B commits $D/full                 # durée d'une validation (modifie l'index : en dernier)
-$B hostile $D/hostile --blocks 1000
+$B hostile $D/hostile --blocks 1000    # 10000 : vingt minutes, 2,2 Go, pointe de 800 Mo
 
 $B fts-build $D/fts                # blocks_index du plan (taille), puis table + FTS5
-$B fts-query $D/fts
+$B fts-query $D/fts                # MEMENTUM_BENCH_CACHE_MB=1024 : avec un grand cache
 $B fts-write $D/fts                # durée d'une transaction d'index dans le tour d'écriture
 $B fts-r916 $D/fts-r916
 $B fts-hostile $D/fts-hostile --blocks 1000

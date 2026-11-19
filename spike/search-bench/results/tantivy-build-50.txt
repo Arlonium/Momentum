@@ -1,0 +1,19 @@
+MESURE build repos : 2 s après la fin de l'indexation et des fusions, écrivain lâché : mémoire de travail 34 Mo, privée 42 Mo, tas 3 Mo
+MESURE build débuts=true titre_sur_blocs=true tampon=50 Mo : 1290901 entrées, 262.2 Mo de texte reçu, indexées en 114.4 s (11286 entrées/s, 2.29 Mo/s), fusions attendues ensuite 6.3 s
+MESURE build validations (toutes les 100000 entrées, 13 en tout) : p50 1155 ms, max 1326 ms
+MESURE build mémoire : pointe de mémoire de travail 394 Mo, pointe du tas 212 Mo
+MESURE build disque : 668.8 Mo avant la fin des fusions, 652.4 Mo après, 7 segments ; rapport au texte reçu 2.49
+MESURE tailles (Mo) : champ | dictionnaire | listes | normes | colonnes | somme
+MESURE tailles : blk | 0.0 | 0.0 | 0.0 | 1.0 | 1.0
+MESURE tailles : entry | 53.3 | 3.8 | 1.3 | 0.0 | 58.3
+MESURE tailles : marker | 0.0 | 0.0 | 0.0 | 0.0 | 0.0
+MESURE tailles : node | 3.7 | 1.5 | 1.3 | 0.0 | 6.4
+MESURE tailles : page_hi | 0.0 | 0.0 | 0.0 | 10.3 | 10.3
+MESURE tailles : page_lo | 0.0 | 0.0 | 0.0 | 10.3 | 10.3
+MESURE tailles : space | 0.0 | 0.1 | 1.3 | 0.0 | 1.3
+MESURE tailles : text | 4.6 | 46.4 | 1.3 | 0.0 | 52.3
+MESURE tailles : text_starts | 9.1 | 207.0 | 0.0 | 0.0 | 216.1
+MESURE tailles : title | 0.7 | 6.8 | 1.3 | 0.0 | 8.8
+MESURE tailles : title_starts | 1.5 | 30.5 | 0.0 | 0.0 | 32.0
+MESURE tailles : textes gardés 255.6 Mo, suppressions 0.0 Mo, total des segments 652.4 Mo, dossier 652.4 Mo ; champs des débuts de mot 248.1 Mo (sans eux : 404.3 Mo)
+fini
