@@ -337,12 +337,20 @@ const COMPACT_EVERY: u64 = 5;
 /// Compactions mesurées une à une.
 const COMPACTIONS: usize = 12;
 
-/// Frappes à la suite du second temps de la mesure : assez pour que plusieurs instantanés s'écrivent
-/// pendant qu'on tape (une compaction dure plus de 100 ms, soixante frappes à peine autant).
+/// Frappes à la suite du second temps de la mesure, au moins : on tape encore tant que
+/// [`SNAPSHOTS_DURING_THE_STREAM`] instantanés ne se sont pas écrits (Ruling R887).
 const STREAM: usize = 1_500;
 
-/// Instantanés qui doivent s'être écrits pendant ces frappes.
+/// Instantanés qui doivent s'être écrits pendant ces frappes. C'est la condition d'arrêt du
+/// second temps, pas un compte fait après un nombre fixe de frappes : le nombre d'instantanés
+/// écrits en 1 500 frappes est la durée des frappes divisée par celle d'une compaction (plus de
+/// 100 ms), et un coureur dont le disque valide une frappe en 0,6 ms n'en voyait que six.
 const SNAPSHOTS_DURING_THE_STREAM: usize = 10;
+
+/// Ce que le second temps peut durer avant d'être tenu pour un échec : les compactions ne se font
+/// plus pendant qu'on tape. La borne peut faire échouer la mesure à tort sur un poste très
+/// chargé, jamais la faire passer.
+const STREAM_BOUND: Duration = Duration::from_secs(120);
 
 /// La part du serveur dans « frappe visible chez un autre < 150 ms » (§5.10) quand la frappe
 /// déclenche une compaction d'une page de 10 000 blocs, et pour la frappe qui la suit (Ruling
@@ -354,11 +362,12 @@ const SNAPSHOTS_DURING_THE_STREAM: usize = 10;
 ///
 /// Deux temps. (a) `COMPACTIONS` fois : des frappes jusqu'à celle qui déclenche la compaction,
 /// celle-là et la suivante chronométrées, puis la compaction attendue (pour que la suivante en
-/// déclenche une vraiment). (b) `STREAM` frappes à la suite, une compaction toutes les
+/// déclenche une vraiment). (b) Au moins `STREAM` frappes à la suite, une compaction toutes les
 /// `COMPACT_EVERY` écritures (une seule à la fois : celle qui tombe pendant une autre attend
-/// l'écriture d'après), toutes chronométrées : il s'y écrit au moins `SNAPSHOTS_DURING_THE_STREAM`
-/// instantanés, vérifiés en relisant celui que garde la base, et les frappes qui tombent pendant
-/// leur écriture l'attendent dans la voie de la page (Ruling R859).
+/// l'écriture d'après), toutes chronométrées, jusqu'à ce qu'il s'y soit écrit
+/// `SNAPSHOTS_DURING_THE_STREAM` instantanés, comptés en relisant celui que garde la base : les
+/// frappes qui tombent pendant leur écriture l'attendent dans la voie de la page (Rulings R859,
+/// R887).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 async fn keystroke_that_triggers_a_compaction_of_10000_block_page_under_150ms() {
@@ -402,17 +411,25 @@ async fn keystroke_that_triggers_a_compaction_of_10000_block_page_under_150ms() 
     }
     let mut stream = Vec::new();
     let mut snapshots = std::collections::HashSet::new();
-    for n in 0..STREAM {
+    let started = Instant::now();
+    while stream.len() < STREAM || snapshots.len() < SNAPSHOTS_DURING_THE_STREAM {
+        assert!(
+            started.elapsed() < STREAM_BOUND,
+            "{} instantanés seulement pendant {} frappes à la suite ({STREAM_BOUND:?})",
+            snapshots.len(),
+            stream.len()
+        );
         stream.push(keystroke_seen(&author, &other, &id).await);
-        if n % 25 == 0 {
+        if stream.len() % 25 == 1 {
             let kept = f.store.load_doc(f.page).await.unwrap().snapshot;
             snapshots.extend(kept.map(|(seq, _)| seq));
         }
     }
-    assert!(
-        snapshots.len() >= SNAPSHOTS_DURING_THE_STREAM,
-        "{} instantanés seulement pendant les frappes",
-        snapshots.len()
+    println!(
+        "MESURE {} instantanés écrits pendant {} frappes à la suite, en {:?}",
+        snapshots.len(),
+        stream.len(),
+        started.elapsed()
     );
     let mut over = Vec::new();
     for (what, times) in [
