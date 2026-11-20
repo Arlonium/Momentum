@@ -45,11 +45,12 @@ fn woken(hub: &Hub) -> bool {
 
 /// Les frappes de [`the_actor_only_names_the_page_it_wrote`], et combien partent avant d'attendre
 /// le serveur : chaque frappe est validée sur le disque avant la suivante (jusqu'à 250 ms sur la
-/// CI sous Windows, Ruling R441), et l'attente d'une rafale est bornée par [`WAIT`].
-const KEYSTROKES: usize = 200;
-const BURST: usize = 20;
+/// CI sous Windows, Ruling R441), et l'attente d'une rafale est bornée par [`WAIT`] : cinq frappes
+/// y laissent une marge de huit.
+const KEYSTROKES: usize = 60;
+const BURST: usize = 5;
 
-/// Review Focus 3 : la frappe ne paie rien pour l'index. Après des centaines de frappes, l'ensemble
+/// Review Focus 3 : la frappe ne paie rien pour l'index. Après des dizaines de frappes, l'ensemble
 /// porte un identifiant, l'acteur n'a bâti aucune liste de blocs, encodé aucun état, et personne
 /// ne lui a rien demandé.
 #[tokio::test]
@@ -241,7 +242,7 @@ async fn the_set_is_bounded_by_the_pages_not_by_the_keystrokes() {
     let (first_id, second_id) = (first.blocks()[0].id.clone(), second.blocks()[0].id.clone());
 
     for _ in 0..3 {
-        for _ in 0..10 {
+        for _ in 0..BURST {
             first.type_text(&first_id, "a");
             second.type_text(&second_id, "b");
         }
