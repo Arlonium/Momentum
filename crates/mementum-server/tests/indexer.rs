@@ -1581,16 +1581,49 @@ async fn measure_indexing_a_10000_block_page() {
     store.close().await;
 }
 
-/// Step 3 : la première indexation d'une instance existante par l'indexeur du serveur, et la
-/// frappe d'un autre pendant ce temps (vue par un second onglet), comparée à la même frappe une
-/// fois l'indexeur au repos. L'échelle est dite par la ligne `MESURE`.
+/// Quatre lettres pour un rang : un mot sans chiffre (un chiffre couperait peut-être le mot).
+fn letters(mut rank: usize) -> String {
+    let mut word = [b'a'; 4];
+    for letter in word.iter_mut().rev() {
+        *letter = b'a' + (rank % 26) as u8;
+        rank /= 26;
+    }
+    String::from_utf8(word.to_vec()).unwrap()
+}
+
+/// « Frappe vue chez un autre < 150 ms » (§5.10), au p95 au plus proche rang.
+const KEYSTROKE_BUDGET: Duration = Duration::from_millis(150);
+
+/// « Un texte tapé est trouvable en moins de 5 s après la dernière frappe » (§5.10, lot 4).
+const FINDABLE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Ce qu'une série de frappes dit : p50, p95, la pire, et combien dépassent le budget.
+fn said(times: &mut [Duration]) -> String {
+    let over = times.iter().filter(|t| **t > KEYSTROKE_BUDGET).count();
+    format!(
+        "{} frappes, p50 {:?}, p95 {:?}, la pire {:?}, {over} au-dessus de {KEYSTROKE_BUDGET:?}",
+        times.len(),
+        rank(times, 50),
+        rank(times, 95),
+        rank(times, 100),
+    )
+}
+
+/// Lot 4, Task X2 (Ruling R1161) : la frappe d'un autre, vue par un second onglet, **pendant
+/// toute la première indexation** d'une instance existante de 10 000 pages de dix blocs : les
+/// pages relues et projetées, leurs lignes écrites dans la voie de l'index, puis les passages
+/// vers l'index plein texte, dos à dos tant que l'outbox déborde, chacun validé par le moteur
+/// (R1029). Une frappe toutes les cinq millisecondes, jusqu'à ce que l'indexeur soit au repos ;
+/// la première, qui suit la connexion, est jugée à part (R488). Puis la même frappe, l'indexeur
+/// au repos ; puis le délai avant qu'un mot tapé soit trouvable par la recherche, cinq fois.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "mesure, en release"]
-async fn keystroke_seen_while_10000_pages_are_first_indexed() {
+async fn keystroke_seen_under_150ms_while_a_space_is_first_indexed() {
     let _alone = ALONE.lock().await;
     const PAGES: usize = 10_000;
     const BLOCKS: usize = 10;
     const KEYSTROKES: usize = 200;
+    const PACE: Duration = Duration::from_millis(5);
     // Une instance avec un compte, arrêtée, puis remplie par un autre `Store`.
     let t = default_app().await;
     let olga = t.account("Olga").await;
@@ -1619,19 +1652,131 @@ async fn keystroke_seen_while_10000_pages_are_first_indexed() {
     let writer = synced_as(&browser, &sync_url(addr, typed)).await;
     let reader = synced_as(&browser, &sync_url(addr, typed)).await;
     let block = writer.blocks()[0].id.clone();
-    let settling = tokio::spawn({
-        let indexer = t.indexer.clone();
-        async move {
-            indexer.settled().await;
-            started.elapsed()
-        }
-    });
     let mut typed_so_far = 0;
-    let mut keystrokes = async |count: usize| {
+    // Une frappe, vue par l'autre onglet, puis la pause.
+    let mut keystroke = async || {
+        typed_so_far += 1;
+        let expected = typed_so_far;
+        let start = std::time::Instant::now();
+        writer.type_text(&block, "x");
+        assert!(
+            reader
+                .wait_until(common::WAIT, |c| {
+                    mementum_md::block_text(&c.blocks()[0]).len() == expected
+                })
+                .await,
+            "la frappe n'est pas arrivée chez l'autre onglet"
+        );
+        let seen = start.elapsed();
+        tokio::time::sleep(PACE).await;
+        seen
+    };
+    // Tant qu'une autre page que la page tapée est en retard (elle, tapée sans relâche, n'a
+    // jamais son calme : `settled()` ne rendrait pas).
+    let mut during = Vec::new();
+    while during.len() < KEYSTROKES || t.indexer.behind(space, |page| page != typed).await.unwrap()
+    {
+        during.push(keystroke().await);
+    }
+    let indexed_in = started.elapsed();
+    let first = during.remove(0);
+    // L'indexeur a fini son rattrapage ; la page tapée attend encore son calme.
+    t.indexer.settled().await;
+    let mut after = Vec::new();
+    for _ in 0..KEYSTROKES {
+        after.push(keystroke().await);
+    }
+    t.indexer.settled().await;
+    let reads = t.indexer.reads();
+    println!(
+        "MESURE première indexation de {PAGES} pages de {BLOCKS} blocs par le serveur, index \
+         plein texte compris : {indexed_in:?} ({reads} pages relues) ; frappe vue par un autre \
+         onglet pendant toute l'indexation : la première {first:?}, puis {} ; indexeur au repos : \
+         {}",
+        said(&mut during),
+        said(&mut after),
+    );
+
+    // Le délai avant qu'un mot tapé soit trouvable : de la frappe au premier résultat.
+    let mut delays = Vec::new();
+    for round in 0..5 {
+        let word = format!("trouvable{}", letters(round));
+        let start = std::time::Instant::now();
+        writer.type_text(&block, &format!(" {word} "));
+        while found(&t, &word, &[typed]).is_empty() {
+            assert!(
+                start.elapsed() < 4 * FINDABLE_BUDGET,
+                "le mot tapé n'est jamais trouvé"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        delays.push(start.elapsed());
+    }
+    println!(
+        "MESURE un mot tapé est trouvable après (instance de {PAGES} pages, indexeur au repos) : \
+         {delays:?}"
+    );
+
+    let p95 = rank(&mut during, 95);
+    assert!(
+        p95 < KEYSTROKE_BUDGET,
+        "frappe pendant la première indexation : p95 {p95:?} (budget {KEYSTROKE_BUDGET:?})"
+    );
+    let slowest = *delays.iter().max().unwrap();
+    assert!(
+        slowest < FINDABLE_BUDGET,
+        "un mot tapé est trouvable en {slowest:?} au pire (budget {FINDABLE_BUDGET:?})"
+    );
+}
+
+/// Lot 4, Task X2 (Ruling R1162) : la frappe d'un autre, dans une autre page, pendant qu'un
+/// compte récrit sans relâche une page de 10 000 blocs par `PUT /mmd` (tous ses blocs changent)
+/// puis la renomme. L'indexeur la reprend toutes les quinze secondes au plus (R906) : il la relit,
+/// la projette, écrit ses dix mille lignes, et l'index plein texte récrit ses dix mille entrées
+/// (R902). La mesure dure assez pour deux de ces tours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure, en release"]
+async fn keystroke_seen_under_150ms_while_a_large_page_is_rewritten_and_renamed_in_a_loop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _alone = ALONE.lock().await;
+    const BLOCKS: usize = 10_000;
+    const SPAN: Duration = Duration::from_secs(40);
+    const PACE: Duration = Duration::from_millis(5);
+    let t = default_app().await;
+    let olga = t.account("Olga").await;
+    let rita = t.account("Rita").await;
+    let typed = new_page(&olga, "Tapée").await;
+    let large = new_page(&rita, "Grande").await;
+    t.indexer.settled().await;
+    let addr = t.listen().await;
+    let writer = synced_as(&olga.browser, &sync_url(addr, typed)).await;
+    let reader = synced_as(&olga.browser, &sync_url(addr, typed)).await;
+    let block = writer.blocks()[0].id.clone();
+    let reads = t.indexer.reads();
+
+    let stop = AtomicBool::new(false);
+    let rewriting = async {
+        let (mut rounds, mut writes) = (0usize, Vec::new());
+        while !stop.load(Ordering::Relaxed) {
+            let word = if rounds % 2 == 0 { "plan" } else { "projet" };
+            let start = std::time::Instant::now();
+            write(&rita, large, &paragraphs(BLOCKS, word)).await;
+            writes.push(start.elapsed());
+            rita.patch(
+                &large.to_string(),
+                json!({ "title": format!("Grande {}", letters(rounds)) }),
+            )
+            .await
+            .assert_status(StatusCode::OK);
+            rounds += 1;
+        }
+        (rounds, writes)
+    };
+    let typing = async {
+        let started = std::time::Instant::now();
         let mut seen = Vec::new();
-        for _ in 0..count {
-            typed_so_far += 1;
-            let expected = typed_so_far;
+        while started.elapsed() < SPAN {
+            let expected = seen.len() + 1;
             let start = std::time::Instant::now();
             writer.type_text(&block, "x");
             assert!(
@@ -1643,27 +1788,28 @@ async fn keystroke_seen_while_10000_pages_are_first_indexed() {
                 "la frappe n'est pas arrivée chez l'autre onglet"
             );
             seen.push(start.elapsed());
+            tokio::time::sleep(PACE).await;
         }
+        stop.store(true, Ordering::Relaxed);
         seen
     };
-    let mut during = keystrokes(KEYSTROKES).await;
-    let still_indexing = !settling.is_finished();
-    let indexed_in = settling.await.unwrap();
-    // L'indexeur a fini son rattrapage ; la page tapée attend encore son calme.
-    t.indexer.settled().await;
-    let mut after = keystrokes(KEYSTROKES).await;
-    let reads = t.indexer.reads();
+    let ((rounds, mut writes), mut seen) = tokio::join!(rewriting, typing);
+    let first = seen.remove(0);
     println!(
-        "MESURE première indexation de {PAGES} pages de {BLOCKS} blocs par le serveur : {indexed_in:?} \
-         ({reads} pages relues) ; frappe vue par un autre onglet pendant ({KEYSTROKES} frappes, \
-         indexation encore en cours à la dernière : {still_indexing}) p50 {:?}, p95 {:?}, max {:?} ; \
-         indexeur au repos p50 {:?}, p95 {:?}, max {:?}",
-        rank(&mut during, 50),
-        rank(&mut during, 95),
-        rank(&mut during, 100),
-        rank(&mut after, 50),
-        rank(&mut after, 95),
-        rank(&mut after, 100),
+        "MESURE une page de {BLOCKS} blocs récrite puis renommée {rounds} fois en {SPAN:?} \
+         (PUT /mmd : p50 {:?}, le pire {:?} ; {} relectures par l'indexeur, dernier passage vers \
+         l'index plein texte {:?}) ; frappe d'un autre dans une autre page : la première \
+         {first:?}, puis {}",
+        rank(&mut writes, 50),
+        rank(&mut writes, 100),
+        t.indexer.reads() - reads,
+        t.indexer.last_feed(),
+        said(&mut seen),
+    );
+    let p95 = rank(&mut seen, 95);
+    assert!(
+        p95 < KEYSTROKE_BUDGET,
+        "frappe pendant la récriture d'une grande page : p95 {p95:?} (budget {KEYSTROKE_BUDGET:?})"
     );
 }
 
