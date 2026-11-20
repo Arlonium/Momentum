@@ -22,8 +22,9 @@ mod query;
 
 pub use fold::{MAX_WORD_BYTES, Word, fold, indexed_words, nfc, words};
 pub use index::{
-    Found, Hit, IndexError, MAX_EXCERPT_CHARS, MAX_START_CHARS, MAX_VERIFIED_BYTES,
-    MAX_VERIFIED_ENTRIES, MAX_VERIFIED_PER_PAGE, Opened, PageSet, SearchIndex, WRITER_BUFFER_BYTES,
+    Found, Hit, IndexError, MAX_EXCERPT_CHARS, MAX_KEPT_CANDIDATES, MAX_START_CHARS,
+    MAX_VERIFIED_BYTES, MAX_VERIFIED_ENTRIES, MAX_VERIFIED_PER_PAGE, Opened, PageSet, SearchIndex,
+    WRITER_BUFFER_BYTES,
 };
 #[cfg(feature = "test-hooks")]
 pub use index::{Options, Trace, Witness};

@@ -562,6 +562,14 @@ fn no_search_path_reads_the_statistics_of_the_index() {
         ".total_num_tokens(",
         "search_with_executor",
         "QueryParser",
+        // Ce qui parcourt le dictionnaire de l'index, donc le vocabulaire des autres (R916,
+        // R920), ou coûte selon le nombre de pages (R921).
+        "PrefixQuery",
+        "RegexQuery",
+        "PhrasePrefixQuery",
+        "FuzzyTermQuery",
+        "TermSetQuery",
+        "RangeQuery",
     ] {
         let found: Vec<_> = code().filter(|line| line.contains(forbidden)).collect();
         assert!(found.is_empty(), "« {forbidden} » dans src/ : {found:?}");
@@ -573,6 +581,24 @@ fn no_search_path_reads_the_statistics_of_the_index() {
     assert_eq!(
         imports,
         ["use tantivy::collector::{Collector, SegmentCollector};"]
+    );
+    // Du module des requêtes, une liste fermée : des termes exacts, des clauses, une note
+    // constante, et ce qu'il faut pour envelopper un terme. Une requête neuve du moteur est une
+    // ligne de plus ici, donc un test rouge.
+    let joined = code().collect::<Vec<_>>().join(" ");
+    let queries: Vec<&str> = joined
+        .match_indices("tantivy::query")
+        .map(|(at, _)| {
+            let rest = &joined[at..];
+            &rest[..rest.find(';').expect("la fin d'un import") + 1]
+        })
+        .collect();
+    assert_eq!(
+        queries,
+        [
+            "tantivy::query::{ Bm25StatisticsProvider, BooleanQuery, ConstScoreQuery, \
+          EnableScoring, Explanation, Occur, Query as EngineQuery, Scorer, TermQuery, Weight, };"
+        ]
     );
     // `Searcher::search` prend les statistiques de l'index : une liste fermée d'une seule
     // place, le témoin de `what_unseen_pages_hold_changes_no_order`, qui n'est pas compilé dans
@@ -1271,6 +1297,136 @@ fn reset_removes_a_link_without_following_it() {
         .unwrap();
     opened.index.commit("neuf").unwrap();
     assert_eq!(finds(&opened.index, "mot", &pages([1, 2])), 1);
+}
+
+/// Un dossier qui n'est pas un index : celui des données d'une instance, par un chemin mal joint.
+fn data_directory() -> TestDir {
+    let dir = TestDir::new();
+    std::fs::write(dir.path().join("mementum.db"), b"la base").unwrap();
+    std::fs::create_dir_all(dir.path().join("files").join("ab")).unwrap();
+    std::fs::write(
+        dir.path().join("files").join("ab").join("contenu"),
+        b"un fichier",
+    )
+    .unwrap();
+    dir
+}
+
+/// Tout ce qu'un dossier porte, à toute profondeur, avec les octets des fichiers.
+fn listing(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+    let mut all = Vec::new();
+    let mut left = vec![dir.to_path_buf()];
+    while let Some(next) = left.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path
+                .strip_prefix(dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if path.is_dir() {
+                all.push((name, None));
+                left.push(path);
+            } else {
+                all.push((name, Some(std::fs::read(&path).unwrap())));
+            }
+        }
+    }
+    all.sort();
+    all
+}
+
+fn refused_as_foreign(opened: Result<mementum_search::Opened, IndexError>, dir: &Path) {
+    let error = opened
+        .err()
+        .expect("un dossier qui n'est pas un index est refusé");
+    assert!(matches!(error, IndexError::NotAnIndex), "{error:?}");
+    let message = error.to_string();
+    assert!(message.contains("n'est pas un index"), "{message}");
+    assert!(!message.contains(&*dir.to_string_lossy()));
+}
+
+#[test]
+fn open_never_empties_a_directory_that_is_not_an_index() {
+    let dir = data_directory();
+    let before = listing(dir.path());
+    assert_eq!(before.len(), 4);
+    refused_as_foreign(SearchIndex::open(dir.path()), dir.path());
+    // Rien de touché, rien d'ajouté : pas même un fichier de verrou.
+    assert_eq!(listing(dir.path()), before);
+    // Le témoin : un dossier qui ne porte que des fichiers du moteur est le sien, et s'ouvre.
+    let engine = TestDir::new();
+    std::fs::write(engine.path().join(".managed.json"), b"[]").unwrap();
+    std::fs::write(engine.path().join(".tantivy-writer.lock"), b"").unwrap();
+    assert_eq!(open(engine.path()).1, None);
+}
+
+#[test]
+fn reset_never_empties_a_directory_that_is_not_an_index() {
+    let dir = data_directory();
+    let before = listing(dir.path());
+    refused_as_foreign(SearchIndex::reset(dir.path()), dir.path());
+    assert_eq!(listing(dir.path()), before);
+    // Un fichier étranger à côté d'un index sans `meta.json` (jamais créé jusqu'au bout) : refusé
+    // aussi ; avec son `meta.json`, c'est un index, et tout ce qu'il porte part.
+    std::fs::write(dir.path().join("meta.json"), b"{ illisible").unwrap();
+    let opened = SearchIndex::reset(dir.path()).expect("un dossier qui porte un meta.json");
+    assert_eq!(opened.token, None);
+    assert!(!dir.path().join("mementum.db").exists());
+    assert!(!dir.path().join("files").exists());
+}
+
+#[test]
+fn the_candidates_kept_for_a_long_prefix_are_bounded() {
+    let b = Bench::new();
+    // Onze entrées de même note par page : dix de plus que la meilleure, quarante mille en tout.
+    let blocks: Vec<String> = (0..11).map(|k| format!("b{k}")).collect();
+    for n in 1..=4_000 {
+        for block in &blocks {
+            b.block(n, block, "Notes", "agir internationalement");
+        }
+    }
+    b.commit();
+    let (found, trace) = b.traced("internationalem", &pages(1..=4_000), None);
+    assert_eq!(trace.grouped, 44_000);
+    // La meilleure de chaque page, et un nombre borné d'autres.
+    assert!(
+        trace.kept <= 4_000 + mementum_search::MAX_KEPT_CANDIDATES,
+        "{} candidates gardées",
+        trace.kept
+    );
+    // Ce que la borne écarte n'aurait pas été vérifié : les entrées relues sont les mêmes que
+    // sans elle, les onze des premières pages, dans l'ordre de leur clé.
+    let mut by_key: Vec<&str> = blocks.iter().map(String::as_str).collect();
+    by_key.sort_by_key(|block| tie_key(block));
+    let wanted: Vec<(Uuid, Option<String>)> = (1..)
+        .flat_map(|n| {
+            by_key
+                .iter()
+                .map(move |block| (page(n), Some(block.to_string())))
+        })
+        .take(MAX_VERIFIED_ENTRIES)
+        .collect();
+    assert_eq!(trace.verified, wanted);
+    assert_eq!(numbers(&found.pages), (1..=100).collect::<Vec<_>>());
+}
+
+#[test]
+fn closing_waits_for_the_merges_and_leaves_the_directory_free() {
+    let dir = TestDir::new();
+    let (index, _) = open(dir.path());
+    // Assez de petits segments pour qu'une fusion parte.
+    for n in 0..12 {
+        index
+            .put_entry(page(n), Some("b1"), "Notes", "un mot")
+            .unwrap();
+        index.commit("jeton").unwrap();
+    }
+    index.close().expect("fermer");
+    // Plus rien n'est tenu : le dossier se vide tout de suite, et se rouvre.
+    let opened = SearchIndex::reset(dir.path()).expect("vider et rouvrir");
+    assert_eq!(opened.token, None);
+    assert_eq!(finds(&opened.index, "mot", &pages(0..12)), 0);
 }
 
 #[test]

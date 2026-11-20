@@ -50,7 +50,7 @@ sysinfo = { version = "0.40.1", default-features = false, features = ["system"] 
 # vides du moteur : le découpage et le pliage sont les nôtres (Ruling R942).
 tantivy = { version = "0.27.0", default-features = false, features = ["mmap", "lz4-compression"] }
 tempfile = "3"
-tokio ={ version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Même version que celle d'axum 0.8 (une seule version de tungstenite dans l'arbre).
 tokio-tungstenite = "0.29.0"
 tower = { version = "0.5.3", default-features = false }

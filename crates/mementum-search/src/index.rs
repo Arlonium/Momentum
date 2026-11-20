@@ -69,10 +69,21 @@ pub const MAX_VERIFIED_PER_PAGE: usize = 20;
 /// Octets de titres et de textes gardés relus au plus pour vérifier un préfixe long, par requête
 /// (Ruling R967) : l'entrée qui passe la borne est la dernière vérifiée.
 pub const MAX_VERIFIED_BYTES: usize = 4 << 20;
+/// Entrées gardées au plus par le collecteur, pour un préfixe long, en plus de la meilleure de
+/// chaque page permise (Ruling R991) : huit fois ce qu'une requête vérifie. Les moins bien
+/// rangées sortent ; aucune d'elles n'aurait été vérifiée.
+pub const MAX_KEPT_CANDIDATES: usize = 8 * MAX_VERIFIED_ENTRIES;
 /// Longueur maximale d'un extrait, en caractères, points de suspension compris.
 pub const MAX_EXCERPT_CHARS: usize = 240;
 /// Tampon de l'écrivain (Ruling R925).
 pub const WRITER_BUFFER_BYTES: usize = 50_000_000;
+
+/// Blocs de textes gardés que le lecteur tient décompressés, par segment (le moteur en tient 100
+/// par défaut). Un bloc fait 16 Kio, ou une entrée entière si elle est plus longue (64 Kio au
+/// plus) ; une recherche relit vingt entrées, ou deux mille pour un préfixe long, dans un ordre
+/// qui n'est pas celui du disque, si bien qu'un grand cache ne sert guère qu'à la même requête
+/// rejouée. Huit blocs bornent ce que le cache tient à un demi-Mio par segment.
+const STORE_CACHE_BLOCKS: usize = 8;
 
 /// La forme de l'index, écrite en tête de la charge utile de chaque validation : un dossier
 /// validé sous une autre forme est vidé à l'ouverture, comme un dossier d'un autre schéma. Avance
@@ -171,6 +182,8 @@ impl PageSet {
 pub enum IndexError {
     /// Un autre écrivain tient l'index : un serveur qui tourne, ou `mementum reindex`.
     Busy,
+    /// Le dossier donné porte autre chose qu'un index : rien n'y est touché.
+    NotAnIndex,
     /// Le moteur a refusé.
     Engine(String),
     /// Le dossier n'a pas pu être lu, créé ou vidé.
@@ -184,6 +197,11 @@ impl fmt::Display for IndexError {
                 f,
                 "l'index de recherche est déjà ouvert par un autre processus (un serveur qui \
                  tourne, ou une réindexation en cours)"
+            ),
+            IndexError::NotAnIndex => write!(
+                f,
+                "le dossier de l'index de recherche n'est pas un index : il porte d'autres \
+                 fichiers, et rien n'y a été touché"
             ),
             IndexError::Engine(error) => write!(f, "index de recherche : {error}"),
             IndexError::Io(error) => write!(f, "dossier de l'index de recherche : {error}"),
@@ -241,6 +259,8 @@ pub struct Trace {
     pub collected: u64,
     /// Celles d'une page permise, les seules à atteindre le groupement par page.
     pub grouped: u64,
+    /// Les entrées que le collecteur a gardées en tout.
+    pub kept: usize,
     /// Les termes exacts que la requête lit.
     pub terms: usize,
     /// Les entrées relues pour vérifier un préfixe long, dans l'ordre.
@@ -679,27 +699,69 @@ struct Top {
 }
 
 impl Top {
-    fn offer(&mut self, mut candidate: Candidate, keep: usize, ranking: Ranking) {
+    /// Propose une entrée ; rend vrai si la page en garde une de plus.
+    fn offer(&mut self, mut candidate: Candidate, keep: usize, ranking: Ranking) -> bool {
         if ranking.in_page(&candidate, &self.best) == Ordering::Less {
             std::mem::swap(&mut candidate, &mut self.best);
         }
-        if keep > 1 {
-            let at = self
-                .rest
-                .partition_point(|kept| ranking.in_page(kept, &candidate) != Ordering::Greater);
-            if at < keep - 1 {
-                self.rest.insert(at, candidate);
-                self.rest.truncate(keep - 1);
-            }
+        if keep <= 1 {
+            return false;
         }
+        let at = self
+            .rest
+            .partition_point(|kept| ranking.in_page(kept, &candidate) != Ordering::Greater);
+        if at >= keep - 1 {
+            return false;
+        }
+        // La dernière sort avant l'insertion : le tableau ne grandit jamais au-delà de ce
+        // qu'une page garde.
+        let grows = self.rest.len() < keep - 1;
+        if !grows {
+            self.rest.pop();
+        }
+        self.rest.insert(at, candidate);
+        grows
     }
 }
 
 #[derive(Default)]
 struct Groups {
     pages: HashMap<u128, Top, Mixing>,
+    /// Les entrées gardées en plus de la meilleure de chaque page.
+    extras: usize,
     collected: u64,
     grouped: u64,
+}
+
+impl Groups {
+    /// Tient les entrées gardées en plus sous [`MAX_KEPT_CANDIDATES`] (Ruling R991) : passé le
+    /// double, seules restent les mieux rangées, dans l'ordre (note, page, clé). Une entrée
+    /// écartée est derrière [`MAX_KEPT_CANDIDATES`] autres, qui ne sont remplacées que par de
+    /// mieux rangées : ce qui reste à la fin ne dépend pas de l'ordre d'arrivée, donc pas de
+    /// l'index.
+    fn bound(&mut self, ranking: Ranking, slack: usize) {
+        if self.extras <= MAX_KEPT_CANDIDATES + slack {
+            return;
+        }
+        let mut all: Vec<(u128, Candidate)> = Vec::with_capacity(self.extras);
+        for (page, top) in &self.pages {
+            all.extend(top.rest.iter().map(|candidate| (*page, *candidate)));
+        }
+        let (_, last, _) =
+            all.select_nth_unstable_by(MAX_KEPT_CANDIDATES - 1, |a, b| ranking.across(a, b));
+        let last = *last;
+        let mut extras = 0;
+        for (page, top) in &mut self.pages {
+            // Dans une page, l'ordre de `rest` est celui de `across`.
+            let kept = top.rest.partition_point(|candidate| {
+                ranking.across(&(*page, *candidate), &last) != Ordering::Greater
+            });
+            top.rest.truncate(kept);
+            top.rest.shrink_to_fit();
+            extras += kept;
+        }
+        self.extras = extras;
+    }
 }
 
 struct ByPage {
@@ -761,18 +823,22 @@ impl Collector for ByPage {
             for (page, top) in groups.pages {
                 match all.pages.entry(page) {
                     Entry::Vacant(vacant) => {
+                        all.extras += top.rest.len();
                         vacant.insert(top);
                     }
                     Entry::Occupied(mut occupied) => {
                         let kept = occupied.get_mut();
-                        kept.offer(top.best, self.keep, self.ranking);
-                        for candidate in top.rest {
-                            kept.offer(candidate, self.keep, self.ranking);
+                        for candidate in std::iter::once(top.best).chain(top.rest) {
+                            if kept.offer(candidate, self.keep, self.ranking) {
+                                all.extras += 1;
+                            }
                         }
                     }
                 }
             }
+            all.bound(self.ranking, MAX_KEPT_CANDIDATES);
         }
+        all.bound(self.ranking, 0);
         Ok(all)
     }
 }
@@ -790,13 +856,14 @@ impl SegmentCollector for ByPageSegment {
         }
         self.groups.grouped += 1;
         let address = DocAddress::new(self.segment, doc);
-        match self.groups.pages.entry(page) {
+        let one_more = match self.groups.pages.entry(page) {
             Entry::Vacant(vacant) => {
                 let key = wide(&self.blk_hi, &self.blk_lo, doc);
                 vacant.insert(Top {
                     best: Candidate { note, key, address },
                     rest: Vec::new(),
                 });
+                false
             }
             Entry::Occupied(mut occupied) => {
                 let top = occupied.get_mut();
@@ -805,8 +872,12 @@ impl SegmentCollector for ByPageSegment {
                     return;
                 }
                 let key = wide(&self.blk_hi, &self.blk_lo, doc);
-                top.offer(Candidate { note, key, address }, self.keep, self.ranking);
+                top.offer(Candidate { note, key, address }, self.keep, self.ranking)
             }
+        };
+        if one_more {
+            self.groups.extras += 1;
+            self.groups.bound(self.ranking, MAX_KEPT_CANDIDATES);
         }
     }
 
@@ -970,9 +1041,13 @@ fn tie_key(block_id: Option<&str>) -> (u64, u64) {
 
 /// Vide un dossier sans suivre aucun lien (la règle du dépôt des fichiers, Ruling R272) : un lien
 /// posé dedans est retiré lui-même, jamais ce qu'il vise.
-fn empty_dir(dir: &Path) -> std::io::Result<()> {
+fn empty_dir(dir: &Path, spare: Option<&Path>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
+        let entry = entry?;
+        if spare.is_some_and(|spared| entry.file_name() == spared.as_os_str()) {
+            continue;
+        }
+        let path = entry.path();
         let meta = std::fs::symlink_metadata(&path)?;
         if is_link(&meta) {
             // Un lien vers un dossier se retire comme un dossier sous Windows, comme un fichier
@@ -981,13 +1056,31 @@ fn empty_dir(dir: &Path) -> std::io::Result<()> {
                 std::fs::remove_dir(&path)?;
             }
         } else if meta.is_dir() {
-            empty_dir(&path)?;
+            empty_dir(&path, None)?;
             std::fs::remove_dir(&path)?;
         } else {
             std::fs::remove_file(&path)?;
         }
     }
     Ok(())
+}
+
+/// Vrai si ce dossier peut être celui d'un index, donc vidé (Ruling R990) : vide, ou porteur d'un
+/// `meta.json`, ou porteur des seuls fichiers que le moteur pose avant ses métadonnées. Tout
+/// autre dossier (celui des données, par un chemin mal joint) n'est jamais touché.
+fn may_hold_an_index(dir: &Path) -> std::io::Result<bool> {
+    let mut only_engine_files = true;
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name == "meta.json" {
+            return Ok(true);
+        }
+        let of_the_engine =
+            name == ".managed.json" || (name.starts_with(".tantivy-") && name.ends_with(".lock"));
+        only_engine_files &= of_the_engine;
+    }
+    Ok(only_engine_files)
 }
 
 fn is_link(meta: &std::fs::Metadata) -> bool {
@@ -1008,31 +1101,38 @@ impl SearchIndex {
     /// n'est pas le sien (illisible, d'un autre schéma, d'une autre forme) est **vidé** et
     /// refait : l'index est dérivé, et l'appelant, qui reçoit `token: None`, reconstruit tout.
     /// [`IndexError::Busy`] si un autre écrivain le tient : rien n'est alors vidé.
+    /// [`IndexError::NotAnIndex`] si le dossier porte autre chose qu'un index (ni vide, ni
+    /// `meta.json`, ni les seuls fichiers du moteur) : rien n'y est touché (Ruling R990).
     pub fn open(dir: &Path) -> Result<Opened, IndexError> {
         SearchIndex::open_as(dir, Options::default(), false)
     }
 
-    /// Vide le dossier, sans suivre de lien, et rouvre un index neuf. L'index d'avant doit avoir
-    /// été lâché : sous Windows, un fichier ouvert ne se supprime pas.
+    /// Vide le dossier, sans suivre de lien, et rouvre un index neuf ; mêmes refus que
+    /// [`SearchIndex::open`], dont celui d'un dossier qui n'est pas un index. L'index d'avant
+    /// doit avoir été fermé ([`SearchIndex::close`]) : sous Windows, un fichier ouvert ne se
+    /// supprime pas.
     pub fn reset(dir: &Path) -> Result<Opened, IndexError> {
         SearchIndex::open_as(dir, Options::default(), true)
     }
 
     fn open_as(dir: &Path, options: Options, wipe: bool) -> Result<Opened, IndexError> {
         std::fs::create_dir_all(dir)?;
+        // Avant tout, et sans rien y poser : un dossier qui porte autre chose qu'un index.
+        if !may_hold_an_index(dir)? {
+            return Err(IndexError::NotAnIndex);
+        }
         let (schema, fields) = schema(options);
+        // Le verrou de l'écrivain ensuite : on ne juge ni ne vide un dossier qu'un autre tient.
+        // Il est tenu pendant qu'on vide, et rendu juste avant de prendre l'écrivain.
+        let directory = MmapDirectory::open(dir).map_err(|e| IndexError::Engine(e.to_string()))?;
+        let lock = directory
+            .acquire_lock(&INDEX_WRITER_LOCK)
+            .map_err(|error| match error {
+                LockError::LockBusy => IndexError::Busy,
+                LockError::IoError(error) => IndexError::Engine(error.to_string()),
+            })?;
         let mut kept = None;
         {
-            // Le verrou de l'écrivain d'abord : on ne juge ni ne vide un dossier qu'un autre
-            // tient.
-            let directory =
-                MmapDirectory::open(dir).map_err(|e| IndexError::Engine(e.to_string()))?;
-            let lock = directory
-                .acquire_lock(&INDEX_WRITER_LOCK)
-                .map_err(|error| match error {
-                    LockError::LockBusy => IndexError::Busy,
-                    LockError::IoError(error) => IndexError::Engine(error.to_string()),
-                })?;
             if !wipe && let Ok(index) = Index::open(directory) {
                 let token = match index.load_metas().map(|metas| metas.payload) {
                     // Jamais validé : un index neuf, s'il est du bon schéma.
@@ -1047,17 +1147,18 @@ impl SearchIndex {
                     kept = Some((index, token));
                 }
             }
-            drop(lock);
         }
         let (index, token) = match kept {
             Some(kept) => kept,
             None => {
-                empty_dir(dir)?;
+                // Tout sauf le fichier du verrou, qu'on tient.
+                empty_dir(dir, Some(&INDEX_WRITER_LOCK.filepath))?;
                 (Index::create_in_dir(dir, schema)?, None)
             }
         };
         index.tokenizers().register(WORDS, Words);
         index.tokenizers().register(STARTS, Starts);
+        drop(lock);
         // Un fil d'indexation, un fil de fusion (Ruling R925).
         let writer: IndexWriter = index.writer_with_options(
             IndexWriterOptions::builder()
@@ -1075,6 +1176,7 @@ impl SearchIndex {
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
+            .doc_store_cache_num_blocks(STORE_CACHE_BLOCKS)
             .try_into()?;
         let index = SearchIndex {
             index,
@@ -1084,6 +1186,20 @@ impl SearchIndex {
             options,
         };
         Ok(Opened { index, token })
+    }
+
+    /// Ferme l'index en attendant la fin des fusions en cours : après elle, plus aucun fichier
+    /// du dossier n'est tenu par ce processus. À appeler avant un [`SearchIndex::reset`] fait
+    /// dans le même processus (sous Windows, un fichier qu'une fusion tient ne se supprime pas).
+    /// Peut durer le temps d'une fusion ; à l'arrêt du serveur, lâcher l'index suffit.
+    pub fn close(self) -> Result<(), IndexError> {
+        let SearchIndex { reader, writer, .. } = self;
+        drop(reader);
+        writer
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner())
+            .wait_merging_threads()?;
+        Ok(())
     }
 
     fn writer(&self) -> MutexGuard<'_, IndexWriter> {
@@ -1148,8 +1264,13 @@ impl SearchIndex {
     }
 
     /// Valide ce qui a été écrit et retiré depuis la dernière validation, avec `token` pour
-    /// charge utile (Ruling R909) : c'est lui que [`SearchIndex::open`] rendra. Une validation
-    /// qui n'aboutit pas laisse le jeton d'avant.
+    /// charge utile (Ruling R909) : c'est lui que [`SearchIndex::open`] rendra.
+    ///
+    /// **Sur `Err`, rien n'est dit de ce que le disque porte** : la validation a pu échouer
+    /// avant d'être durable (le jeton d'avant reste), ou être durable et n'avoir échoué qu'au
+    /// rechargement du lecteur (le jeton neuf est écrit, les recherches lisent encore l'état
+    /// d'avant). L'appelant ne réessaie pas sur cet index : il le lâche, le rouvre, et relit le
+    /// jeton rendu par [`SearchIndex::open`], qui seul dit laquelle des deux a eu lieu.
     pub fn commit(&self, token: &str) -> Result<(), IndexError> {
         let mut writer = self.writer();
         let mut prepared = writer.prepare_commit()?;
@@ -1213,6 +1334,7 @@ impl SearchIndex {
         trace.terms = terms;
         trace.collected = groups.collected;
         trace.grouped = groups.grouped;
+        trace.kept = groups.pages.values().map(|top| 1 + top.rest.len()).sum();
 
         // La meilleure entrée de chaque page.
         let mut pages: Vec<(u128, Candidate)> = match long {
