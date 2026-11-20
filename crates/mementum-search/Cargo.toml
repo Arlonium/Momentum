@@ -1,0 +1,19 @@
+[package]
+name = "mementum-search"
+description = "Recherche de Mementum : projection d'une page en lignes d'index, lecture d'une requête"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mementum-md.workspace = true
+# Empreinte d'une ligne d'index : ce qui n'a pas changé n'est pas récrit (Ruling R919).
+sha2.workspace = true
+unicode-normalization.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# Les tables de cas de `spec/search/` et le registre des blocs.
+serde_json.workspace = true

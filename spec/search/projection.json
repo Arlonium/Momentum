@@ -1,0 +1,393 @@
+{
+  "about": "La projection d'une page en lignes d'index (plan du lot 4, « Quoi indexer » ; crates/mementum-search/src/project.rs). « blocks » : un MMD, et les lignes attendues dans l'ordre du document (le type du bloc, son texte, les pages qu'il vise) ; un bloc sans texte ni lien n'a pas de ligne. « links » : une adresse de lien, l'origine publique de l'instance (null : aucune), et la page de l'instance qu'elle vise (null : ce n'est pas un lien vers une page). L'adresse d'une page est le chemin exact /p/<uuid>, l'identifiant écrit à tirets (8-4-4-4-12), en chiffres hexadécimaux sans casse, précédé ou non de l'origine publique, suivi ou non d'un fragment ; rien d'autre. Écrit à la main, jamais recopié de la sortie ; lu par crates/mementum-search/tests/project.rs.",
+  "blocks": [
+    {
+      "why": "les marques partent, le texte reste",
+      "mmd": "Du **gras**, de l’*italique*, du ~~barré~~, du `code`, du <u>souligné</u> et de la <span color=\"red\">couleur</span>.\n",
+      "rows": [
+        { "kind": "paragraph", "text": "Du gras, de l’italique, du barré, du code, du souligné et de la couleur.", "links": [] }
+      ]
+    },
+    {
+      "why": "un lien vers ailleurs : son texte, pas son adresse, et aucune page visée",
+      "mmd": "Un [lien](https://mementum.dev/doc) ici.\n",
+      "rows": [{ "kind": "paragraph", "text": "Un lien ici.", "links": [] }]
+    },
+    {
+      "why": "un lien vers une page de l'instance : son texte, et la page visée",
+      "mmd": "Voir [le plan](/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b).\n",
+      "rows": [
+        { "kind": "paragraph", "text": "Voir le plan.", "links": ["0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"] }
+      ]
+    },
+    {
+      "why": "des mentions : leur libellé ; seule la mention d'une page vise une page",
+      "mmd": "<mention type=\"page\" id=\"0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b\">Plan</mention> est relu par <mention type=\"user\" id=\"0193a7e1-2b3c-7d4e-8f50-61728394a5b6\">Léa Martin</mention> avant le <mention type=\"date\" id=\"2026-12-01\">1 déc. 2026</mention>.\n",
+      "rows": [
+        {
+          "kind": "paragraph",
+          "text": "Plan est relu par Léa Martin avant le 1 déc. 2026.",
+          "links": ["0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"]
+        }
+      ]
+    },
+    {
+      "why": "deux fois la même page dans un bloc : visée une fois",
+      "mmd": "<mention type=\"page\" id=\"0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b\">Plan</mention> et [encore](/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b#b=abc)\n",
+      "rows": [
+        { "kind": "paragraph", "text": "Plan et encore", "links": ["0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"] }
+      ]
+    },
+    {
+      "why": "une formule en ligne : son LaTeX",
+      "mmd": "$a^2 + b^2$ en tête\n",
+      "rows": [{ "kind": "paragraph", "text": "a^2 + b^2 en tête", "links": [] }]
+    },
+    {
+      "why": "un saut de ligne sépare deux mots",
+      "mmd": "Avant<br/>après\n",
+      "rows": [{ "kind": "paragraph", "text": "Avant après", "links": [] }]
+    },
+    {
+      "why": "un titre et une liste : chaque bloc sa ligne, les enfants compris",
+      "mmd": "## Titre\n\n- Premier point\n  - Point imbriqué\n",
+      "rows": [
+        { "kind": "heading", "text": "Titre", "links": [] },
+        { "kind": "bulletListItem", "text": "Premier point", "links": [] },
+        { "kind": "bulletListItem", "text": "Point imbriqué", "links": [] }
+      ]
+    },
+    {
+      "why": "un tableau : ses cellules, une espace entre deux",
+      "mmd": "| Nom | Statut |\n| --- | --- |\n| Prototype | En cours |\n",
+      "rows": [{ "kind": "table", "text": "Nom Statut Prototype En cours", "links": [] }]
+    },
+    {
+      "why": "une image : sa légende puis son nom, pas son adresse",
+      "mmd": "![Logo sans aperçu](https://mementum.dev/logo.png) {name=\"logo.png\" preview=false width=320}\n",
+      "rows": [{ "kind": "image", "text": "Logo sans aperçu logo.png", "links": [] }]
+    },
+    {
+      "why": "un fichier : sa légende puis son nom",
+      "mmd": "<file src=\"https://mementum.dev/spec.pdf\" name=\"spec.pdf\" bg=\"gray\" caption=\"Le fichier\"/>\n",
+      "rows": [{ "kind": "file", "text": "Le fichier spec.pdf", "links": [] }]
+    },
+    {
+      "why": "une vidéo sans légende ni nom : aucune ligne",
+      "mmd": "<video src=\"https://mementum.dev/demo.mp4\"/>\n",
+      "rows": []
+    },
+    {
+      "why": "un signet : son adresse",
+      "mmd": "<bookmark url=\"https://mementum.dev\"/>\n",
+      "rows": [{ "kind": "bookmark", "text": "https://mementum.dev", "links": [] }]
+    },
+    {
+      "why": "une équation : son LaTeX",
+      "mmd": "$$\nx^2\n$$\n",
+      "rows": [{ "kind": "equation", "text": "x^2", "links": [] }]
+    },
+    {
+      "why": "un lien de page : le titre copié, et la page visée",
+      "mmd": "<page id=\"0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b\">Plan &amp; budget</page>\n",
+      "rows": [
+        { "kind": "pageLink", "text": "Plan & budget", "links": ["0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"] }
+      ]
+    },
+    {
+      "why": "un lien de page dont l'identifiant n'en est pas un : le titre, aucune page visée",
+      "mmd": "<page id=\"pg_child01\">Sous-page</page>\n",
+      "rows": [{ "kind": "pageLink", "text": "Sous-page", "links": [] }]
+    },
+    {
+      "why": "un séparateur et une table des matières : rien",
+      "mmd": "---\n\n<toc/>\n",
+      "rows": []
+    },
+    {
+      "why": "un bloc inconnu : rien (décision L17)",
+      "mmd": "<block type=\"future_widget\" id=\"b_unknown01\" data=\"eyJ4IjoxfQ==\"/>\n",
+      "rows": []
+    },
+    {
+      "why": "des colonnes : rien pour elles, leurs enfants parcourus",
+      "mmd": "<columns>\n<column>\nColonne de gauche.\n</column>\n<column>\nColonne de droite.\n</column>\n</columns>\n",
+      "rows": [
+        { "kind": "paragraph", "text": "Colonne de gauche.", "links": [] },
+        { "kind": "paragraph", "text": "Colonne de droite.", "links": [] }
+      ]
+    },
+    {
+      "why": "un callout : son texte, pas son icône ; son enfant a sa ligne",
+      "mmd": "<callout icon=\"💡\" color=\"default\">\nUne idée.\nEnfant du callout.\n</callout>\n",
+      "rows": [
+        { "kind": "callout", "text": "Une idée.", "links": [] },
+        { "kind": "paragraph", "text": "Enfant du callout.", "links": [] }
+      ]
+    },
+    {
+      "why": "un bloc de code : son texte, pas sa langue",
+      "mmd": "```rust\nlet x = 1;\n```\n",
+      "rows": [{ "kind": "codeBlock", "text": "let x = 1;", "links": [] }]
+    },
+    {
+      "why": "un bloc synchronisé et une base : rien pour eux, les enfants parcourus",
+      "mmd": "<database id=\"db_tasks\" view=\"Tableau\"/>\n\n<synced ref=\"b_origin01\">\nContenu synchronisé.\n</synced>\n",
+      "rows": [{ "kind": "paragraph", "text": "Contenu synchronisé.", "links": [] }]
+    }
+  ],
+  "links": [
+    {
+      "why": "le chemin d'une page",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "le chemin d'une page, l'instance ayant une origine publique",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "la même sous l'origine publique",
+      "href": "https://notes.exemple.fr/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "sous l'origine publique, schéma et hôte sans casse",
+      "href": "HTTPS://Notes.Exemple.FR/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "l'origine publique donnée avec sa barre oblique finale",
+      "href": "https://notes.exemple.fr/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr/",
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "sous un hôte, quand l'instance n'a pas d'origine publique",
+      "href": "https://notes.exemple.fr/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "avec un fragment de bloc",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b#b=3f1c0a52",
+      "origin": null,
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "sous l'origine publique, avec un fragment de bloc",
+      "href": "https://notes.exemple.fr/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b#b=3f1c0a52",
+      "origin": "https://notes.exemple.fr",
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "avec un fragment vide",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b#",
+      "origin": null,
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "avec un fragment qui porte une barre oblique",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b#b=a/b",
+      "origin": null,
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "l'identifiant en majuscules (sans casse), rendu en minuscules",
+      "href": "/p/0193B2C4-5D6E-7F80-9A1B-2C3D4E5F6A7B",
+      "origin": null,
+      "page": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b"
+    },
+    {
+      "why": "un autre hôte",
+      "href": "https://ailleurs.example/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    },
+    {
+      "why": "un hôte qui commence comme l'origine publique",
+      "href": "https://notes.exemple.fr.ailleurs.example/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    },
+    {
+      "why": "l'hôte de l'instance sous un autre port",
+      "href": "https://notes.exemple.fr:8443/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    },
+    {
+      "why": "l'hôte de l'instance sous un autre schéma",
+      "href": "http://notes.exemple.fr/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    },
+    {
+      "why": "des identifiants devant l'hôte de l'instance",
+      "href": "https://quelquun@notes.exemple.fr/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    },
+    {
+      "why": "un hôte sans schéma",
+      "href": "//notes.exemple.fr/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    },
+    {
+      "why": "deux fois l'origine publique",
+      "href": "https://notes.exemple.frhttps://notes.exemple.fr/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    },
+    {
+      "why": "un segment de plus après la page",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b/x",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "une barre oblique finale",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b/",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "une requête",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b?fixture=all-blocks",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un identifiant sans tirets",
+      "href": "/p/0193b2c45d6e7f809a1b2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un identifiant entre accolades",
+      "href": "/p/{0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b}",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un identifiant en urn:uuid:",
+      "href": "/p/urn:uuid:0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un tiret mal placé",
+      "href": "/p/0193b2c-45d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un caractère qui n'est pas un chiffre hexadécimal",
+      "href": "/p/0193b2cg-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un identifiant trop court",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un chiffre encodé en %",
+      "href": "/p/%30193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un identifiant vide",
+      "href": "/p/",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un identifiant vide et un fragment",
+      "href": "/p/#b=3f1c0a52",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un chemin relatif",
+      "href": "p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "une espace en tête",
+      "href": " /p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "une espace en fin",
+      "href": "/p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b ",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "le chemin en majuscules",
+      "href": "/P/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "des barres obliques inverses",
+      "href": "\\p\\0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "un « .. »",
+      "href": "/p/../p/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "la route de l'API d'une page",
+      "href": "/api/v1/pages/0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "l'adresse d'un fichier d'une page",
+      "href": "/api/v1/pages/0193b2c4-9e8f-7a6b-8c5d-4e3f2a1b0c9d/files/0193b2c6-0a1b-7c2d-8e3f-405162738495",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "l'identifiant seul",
+      "href": "0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "vide",
+      "href": "",
+      "origin": null,
+      "page": null
+    },
+    {
+      "why": "vide, l'instance ayant une origine publique",
+      "href": "",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    },
+    {
+      "why": "l'origine publique seule",
+      "href": "https://notes.exemple.fr",
+      "origin": "https://notes.exemple.fr",
+      "page": null
+    }
+  ]
+}

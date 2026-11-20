@@ -1206,6 +1206,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mementum-search"
+version = "0.1.0"
+dependencies = [
+ "mementum-md",
+ "serde_json",
+ "sha2 0.10.9",
+ "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
 name = "mementum-server"
 version = "0.1.0"
 dependencies = [

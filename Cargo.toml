@@ -57,6 +57,8 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 # chaque attribut serde qu'il ne lit pas, dont `deserialize_with` (absent ou `null` dans `PATCH`),
 # sans effet sur le type TypeScript.
 ts-rs = { version = "12.0.1", features = ["no-serde-warnings"] }
+# Forme NFC d'un texte avant de l'indexer et de le chercher (`mementum-search`, Ruling R926).
+unicode-normalization = "0.1.26"
 uuid = { version = "1.29", features = ["v7"] }
 # `sync` : `Awareness` et les observateurs doivent pouvoir passer d'une tâche tokio à l'autre.
 # Version épinglée : `crates/mementum-crdt/src/guard.rs` relit le format des mises à jour de
