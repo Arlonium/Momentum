@@ -777,7 +777,9 @@ Comportement : rien n'est lu avant la première synchro de la page ; la section 
 
 ## Tâches transverses
 
-### Task X1 : les droits de la recherche, de bout en bout
+### Task X1 : les droits de la recherche, de bout en bout — faite (2026-11-20)
+
+> **Fait (2026-11-20, R1140 à R1148)** : `apps/web/e2e/search-rights.spec.ts` (les six tests du Step 1, et neuf autres pour les notes ci-dessous : deux espaces, compte sorti de l'espace, ligne dont l'accès vient d'être retiré, lecteur d'une page vivante devant un bloc en paragraphe, en colonne, en tableau et sous un repli, arrivée à froid pendant une frappe dans le titre, anonyme puis connexion, Ctrl+K pendant les menus « / », `@` et `[[`), `apps/web/e2e/backlinks-rights.spec.ts` (source qui part, `404` à l'écran, lecteur jusqu'au bloc, rétrolien sans bloc, deux espaces), et la limite L-a en `known_limits` dans `crates/mementum-server/tests/search.rs`. Aucun défaut de droits trouvé. Un défaut du client antérieur au lot, en `test.fixme` (R1143) : Échap dans le texte de l'éditeur laisse le focus sur `body`. Écarts : deux fichiers au lieu d'un (R1140) ; aucun test vu rouge par une sonde du serveur, les mutations étant jouées à la fin du lot (R1141) : y jouer `allowed_pages` sans le filtre des droits, sans celui de la corbeille, bâti sur un autre espace, et les rétroliens sans `space_access`.
 
 > **De la relecture de C2 (2026-11-20)**, à couvrir ici, dans Chromium : (1) un lecteur « Peut lire » d'une page **vivante** ouvre un résultat à son bloc (C2 ne l'a éprouvé que par une page à la corbeille, R1112) ; (2) un bloc trouvé dans une colonne, dans un tableau, dans un repli fermé (limite écrite : le repli n'est pas ouvert) ; (3) une arrivée à froid (`/p/x#b=…` ouverte par son adresse) pendant une frappe dans le titre : le bloc est montré, la frappe reste au titre (R1114, prouvé en Vitest seulement) ; (4) un anonyme sur `/p/x#b=…`, puis sa connexion : le fragment est-il gardé jusqu'à la page (rien n'en est éprouvé ; `SessionGate` navigue en `replace` après la connexion).
 

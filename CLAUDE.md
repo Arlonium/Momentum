@@ -519,6 +519,20 @@ Décisions au registre du lot 4, « Task C3 » (R1115 à R1129) et sa relecture 
 - **Le budget des rétroliens réutilise les pages de la première mesure** (`e2e/budgets.spec.ts`, R1122) : `openFromTree` clique une ligne de l'arbre, qui n'est rendue que près de l'écran ; une page de mesure créée après les 1 000 pages de l'arbre n'y est pas. Un budget neuf qui a besoin de pages à lui les crée dans le `beforeAll` du fichier, ou réutilise `small`.
 - **Un script passé en « heredoc » à l'outil Bash échoue dès que le texte porte une apostrophe mal appariée** (« unexpected EOF while looking for matching `'` », vu en ajoutant au registre) : écrire le texte dans un fichier par l'outil d'écriture, puis l'ajouter (`cat fichier >> registre`).
 
+### Task X1 : les droits de la recherche et des rétroliens, de bout en bout (`apps/web/e2e/search-rights.spec.ts`, `backlinks-rights.spec.ts`)
+
+Décisions au registre du lot 4, « Task X1 » (R1140 à R1147).
+
+- **La barrière d'une absence dans la fenêtre de recherche est la réponse du serveur à cette recherche-là** (`ask`, `search-rights.spec.ts` : `waitForResponse` sur le `POST …/search` dont le corps porte exactement ce qui vient d'être tapé, posé avant `fill`), puis ce que l'écran en dit (« Aucun résultat. », `nothingFound`). Elle rend le statut et le corps : « répond comme un mot que personne n'a écrit » se compare octet pour octet au corps d'une recherche d'un `word()` neuf, faite par le même onglet. Les lignes se lisent avec leur provenance (`shown` : `server:<id>`, `tree:<id>`). Un mot témoin n'est porté que par le texte ; un mot de titre ne juge que l'arbre de l'onglet.
+- **Un changement de droit que la fenêtre ouverte ne doit pas apprendre** : pour un accès retiré sur une page, rien à cacher (la fenêtre ne suit pas l'arbre, R1081). Pour un compte sorti de l'espace, `closeEventsChannel` et `hideSyncClosures` avant `goto`, sinon l'application quitte l'espace avant que la route soit jugée.
+- **Connecter un autre compte « dans un autre onglet »** : `p.context().request.post("/api/v1/auth/login", …)` remplace le cookie du contexte, et ferme la session que portait l'onglet (R90) : l'API du premier compte (`apiAs`, même `storageState`) répond ensuite `401`. Tout ce que le test doit lire par l'API au nom du premier se lit avant.
+- **Échap dans le texte de l'éditeur, sans menu ouvert, laisse le focus sur `body`** (défaut antérieur au lot 4, `test.fixme` `escape_in_the_text_of_the_editor_keeps_the_focus_off_body`, R1143). Un e2e qui « ferme un menu de BlockNote par précaution » avec Échap perd donc le focus quand le menu était déjà fermé : la frappe suivante ne va nulle part, sans erreur. Vérifier que le menu est ouvert avant Échap.
+- **Ctrl+K ferme le menu « / », `@` ou `[[` de BlockNote ouvert** (il se ferme quand l'éditeur perd le focus, et ne se rouvre pas au retour) : ce qui était tapé reste dans le texte, la frappe reprend à sa suite, aucune ligne du menu n'est choisie.
+- **Une ligne de résultat ou de rétrolien dont l'accès vient d'être retiré mène à « Tu n'as plus accès à cette page »** (vu dans Chromium), pas à « Page introuvable », la fenêtre fermée et le focus hors de `body`.
+- **Un rétrolien sans bloc se fabrique par un client Yjs nu** (`editRawDoc`, `e2e/helpers.ts` : `removeAttribute("id")` sur les `blockContainer` de la source ; la route rend alors `blockId: null`, attendu par une condition). L'éditeur qui ouvre ensuite la source lui redonne des `id` : le test juge le lien avant d'ouvrir la source.
+- **Retenir l'arbre après l'ouverture** : `holdTreeReads` posé une fois la page ouverte ne retient que les relectures (le retour sur l'onglet en fait une) ; c'est ce qui prouve que le `404` des rétroliens fait relire la page, et que ce n'est pas l'arbre qui la dit perdue.
+- **`word`, `mention`, `backlinksOf` et `waitLinked` sont dans `e2e/helpers.ts`** : un fichier de test n'en importe pas un autre (Playwright le refuse).
+
 ## Tester
 
 Structure du dépôt (conception, §8) :
