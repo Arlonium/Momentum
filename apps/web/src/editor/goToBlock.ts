@@ -8,7 +8,7 @@
 // quelconque. Il n'est comparé qu'à l'attribut `data-id` des blocs affichés (`blockElement`, qui
 // l'échappe), et un bloc introuvable ne fait rien : ni erreur, ni message, ni défilement.
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
-import { blockElement } from "../comments/dom";
+import { blockElement, OWN_CONTENT } from "../comments/dom";
 import { focusEditor } from "./blocks/BlockWindowHost";
 import type { MementumEditor } from "./debug";
 
@@ -42,7 +42,9 @@ export function goToBlock(editor: MementumEditor, id: string, { block = "center"
       if (text !== null) document.getSelection()?.collapse(text, 0);
     }
   }
-  element.scrollIntoView({ block });
+  // Le contenu propre du bloc, pas le bloc entier, qui porte aussi ses sous-blocs : centré sur son
+  // sous-arbre, un bloc dont les sous-blocs dépassent la fenêtre n'y aurait pas son texte.
+  (element.querySelector(OWN_CONTENT) ?? element).scrollIntoView({ block });
   return true;
 }
 
@@ -63,7 +65,10 @@ function busyElsewhere(editor: MementumEditor): boolean {
   return (
     active instanceof HTMLInputElement ||
     active instanceof HTMLTextAreaElement ||
-    active.closest('[contenteditable="true"]') !== null
+    active instanceof HTMLSelectElement ||
+    // Un texte modifiable, ou un menu ouvert (celui d'une ligne de la barre latérale est posé dans
+    // `body`, marqué `data-sidebar-menu`) : le focus parti, Échap et les flèches n'y iraient plus.
+    active.closest('[contenteditable="true"], [role="menu"], [data-sidebar-menu]') !== null
   );
 }
 
@@ -73,9 +78,10 @@ function busyElsewhere(editor: MementumEditor): boolean {
  * (y-prosemirror y rend le document en la créant), puis le dit par `onDone`, bloc trouvé ou non. Qui
  * donne la visée la retire alors : une session recréée, donc un éditeur neuf, ne ramène pas au bloc.
  *
- * Donnée à un éditeur prêt, la visée est suivie dans le rendu du geste qui l'a posée, et prend le
- * focus (la fenêtre de recherche vient de le rendre à ce qui l'avait). Suivie plus tard (la page
- * s'ouvrait), elle montre le bloc, et ne prend pas le focus à qui écrit ailleurs entre-temps.
+ * Donnée à un éditeur déjà monté et prêt, la visée est suivie dans le rendu du geste qui l'a posée,
+ * et prend le focus (la fenêtre de recherche vient de le rendre à ce qui l'avait). Suivie plus tard
+ * (la page s'ouvrait : la synchro, la vue ou le code de l'éditeur manquaient), elle montre le bloc,
+ * et ne prend pas le focus à qui écrit ailleurs entre-temps (`busyElsewhere`).
  */
 export function useArrival<T extends Arrival>(
   editor: MementumEditor,
@@ -89,8 +95,14 @@ export function useArrival<T extends Arrival>(
   done.current = onDone;
   /** La visée en cours, et si elle a dû attendre la page. */
   const pending = useRef<{ target: T | null; waited: boolean }>({ target: null, waited: false });
+  /** L'éditeur de la page était déjà là quand la visée est arrivée. */
+  const mounted = useRef(false);
   useEffect(() => {
-    if (pending.current.target !== target) pending.current = { target, waited: false };
+    // N'est « dans le geste » qu'une visée reçue par un éditeur déjà monté : celle qui est là à son
+    // premier passage a attendu son code, même si tout est prêt (la synchro faite avant lui), et
+    // la personne a pu se mettre à écrire dans le titre.
+    if (pending.current.target !== target) pending.current = { target, waited: !mounted.current };
+    mounted.current = true;
     if (target === null) return;
     const state = pending.current;
     const arrive = () => {

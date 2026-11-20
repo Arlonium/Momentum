@@ -109,7 +109,9 @@ test("toc_lists_headings_1_to_4_in_order_with_their_depth", async () => {
     { level: "2", text: "Colonne" },
   ]);
   const hrefs = [...toc!.querySelectorAll("li > a")].map((a) => a.getAttribute("href"));
-  expect(hrefs).toEqual(["#h1", "#h2", "#h3", "#h4", "#hc"]);
+  // L'adresse du titre dans la page (`#b=<bloc>`, celle que suit l'application) : un lien ouvert
+  // dans un autre onglet y mène.
+  expect(hrefs).toEqual(["#b=h1", "#b=h2", "#b=h3", "#b=h4", "#b=hc"]);
 });
 
 test("toc_follows_the_page_without_reading_it_at_each_keystroke", async () => {
@@ -202,7 +204,10 @@ test("toc_entry_scrolls_to_its_heading_and_focuses_it", async () => {
       const hash = location.hash;
       act(() => link(m, "Contexte").click());
       await flush();
-      expect(scrolled.map((s) => s.element), editable ? "modifiable" : "lecture").toEqual([blockOf(m, "h2")]);
+      // Le titre lui-même, pas son bloc entier (qui porte aussi ses sous-blocs).
+      expect(scrolled.map((s) => s.element), editable ? "modifiable" : "lecture").toEqual([
+        blockOf(m, "h2").querySelector(":scope > .bn-block > .bn-block-content"),
+      ]);
       expect(scrolled[0].options).toMatchObject({ block: "start" });
       // Le curseur est au début du titre, et l'éditeur a le focus.
       expect(m.editor.getTextCursorPosition().block.id, editable ? "modifiable" : "lecture").toBe("h2");

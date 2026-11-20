@@ -76,16 +76,29 @@ const BLOCK_PREFIX = "#b=";
  * adresse (un résultat de recherche, un rétrolien).
  */
 export function blockPath(pageId: string, blockId: string | null): string {
-  const path = pagePath(pageId);
-  return blockId === null || blockId === "" ? path : `${path}${BLOCK_PREFIX}${encodeURIComponent(blockId)}`;
+  return `${pagePath(pageId)}${blockFragment(blockId)}`;
 }
 
 /**
+ * Le fragment qui vise le bloc `blockId` dans la page où l'on est (`#b=<bloc>`), pour un lien de la
+ * page vers un de ses blocs (la table des matières) ; vide sans bloc.
+ */
+export function blockFragment(blockId: string | null): string {
+  return blockId === null || blockId === "" ? "" : `${BLOCK_PREFIX}${encodeURIComponent(blockId)}`;
+}
+
+/**
+ * Le plus long fragment lu (caractères, `#` compris). Un identifiant de bloc fait cent octets au
+ * plus, trois cents caractères une fois échappé : au-delà d'un Kio, ce n'est pas un bloc.
+ */
+const MAX_FRAGMENT_CHARS = 1_024;
+
+/**
  * Le bloc que vise le fragment `hash` (`location.hash`, `#` compris) : `null` s'il n'en vise aucun
- * (pas de fragment, un fragment d'une autre forme, un bloc vide ou mal échappé).
+ * (pas de fragment, un fragment d'une autre forme ou trop long, un bloc vide ou mal échappé).
  */
 export function parseBlockTarget(hash: string): string | null {
-  if (!hash.startsWith(BLOCK_PREFIX)) return null;
+  if (hash.length > MAX_FRAGMENT_CHARS || !hash.startsWith(BLOCK_PREFIX)) return null;
   const blockId = segment(hash.slice(BLOCK_PREFIX.length));
   return blockId === null || blockId === "" ? null : blockId;
 }
@@ -99,8 +112,14 @@ export type BlockTarget = { readonly pageId: string; readonly blockId: string };
 
 /** La visée de l'adresse courante, gardée tant que l'adresse vise le même bloc de la même page. */
 let aimed: BlockTarget | null = null;
+/** L'adresse (chemin et fragment) dont `aimed` a été lu : elle n'est décodée qu'une fois. */
+let aimedAt: string | null = null;
 
 function blockTarget(): BlockTarget | null {
+  // Le magasin est relu à chaque rendu de qui le suit : rien n'est décodé tant que l'adresse tient.
+  const address = `${location.pathname}${location.hash}`;
+  if (address === aimedAt) return aimed;
+  aimedAt = address;
   const route = parseRoute(location.pathname);
   const blockId = route.name === "page" ? parseBlockTarget(location.hash) : null;
   if (route.name !== "page" || blockId === null) aimed = null;

@@ -30,6 +30,7 @@ import {
 } from "react";
 import { blockElement, shorten } from "../../comments/dom";
 import { groupedDelay } from "../../rereads";
+import { blockFragment } from "../../router";
 import type { MementumEditor } from "../debug";
 import { goToBlock } from "../goToBlock";
 import { focusEditor } from "./BlockWindowHost";
@@ -219,7 +220,7 @@ function TocView({ editor }: { editor: MementumEditor }) {
         <ol className="mm-toc-list">
           {(count < total ? listed.slice(0, count) : listed).map((heading) => (
             <li key={heading.id} className={`mm-toc-entry mm-toc-level-${heading.level}`} data-level={heading.level}>
-              <a className="mm-toc-link" href={`#${heading.id}`} dir="auto" onClick={(event) => follow(event, heading.id)}>
+              <a className="mm-toc-link" href={blockFragment(heading.id)} dir="auto" onClick={(event) => follow(event, heading.id)}>
                 {shorten(heading.text, MAX_ENTRY_CHARS)}
               </a>
             </li>

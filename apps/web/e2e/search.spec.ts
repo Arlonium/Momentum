@@ -66,8 +66,10 @@ const shown = (p: Page) =>
     .locator("[data-search-page]")
     .evaluateAll((rows) => rows.map((r) => (r as HTMLElement).dataset.searchPage));
 const focusOnBody = (p: Page) => p.evaluate(() => document.activeElement === document.body);
-/** L'adresse de la page `id`, à un bloc ou non (un résultat trouvé par un bloc y mène, Task C2). */
-const pageUrl = (id: string) => new RegExp(`/p/${id}(#b=.+)?$`);
+/** L'adresse de la page `id`, sans bloc : une page trouvée par son titre, une ligne de l'arbre. */
+const pageUrl = (id: string) => new RegExp(`/p/${id}$`);
+/** L'adresse de la page `id`, à un bloc : un résultat trouvé par un bloc y mène (Task C2). */
+const blockUrl = (id: string) => new RegExp(`/p/${id}#b=.+$`);
 
 test("typed_word_is_found_and_opened", async ({ browser }) => {
   const { p, secret, recipes, home } = await opened(browser);
@@ -93,7 +95,7 @@ test("typed_word_is_found_and_opened", async ({ browser }) => {
   await expect(found).toHaveAttribute("href", new RegExp(`^/p/${recipes.id}#b=.+$`));
 
   await found.click();
-  await expect(p).toHaveURL(pageUrl(recipes.id));
+  await expect(p).toHaveURL(blockUrl(recipes.id));
   await expect(win(p)).toHaveCount(0);
   await expect(titleOf(p)).toHaveValue(recipes.title);
   await waitSynced(p);
@@ -148,7 +150,7 @@ test("searching_at_the_keyboard_only", async ({ browser }) => {
   await p.keyboard.press("ArrowDown");
   await p.keyboard.press("ArrowDown");
   await p.keyboard.press("Enter");
-  await expect(p).toHaveURL(pageUrl(notebook.id));
+  await expect(p).toHaveURL(blockUrl(notebook.id));
   await expect(win(p)).toHaveCount(0);
   await expect(titleOf(p)).toHaveValue("Carnet");
   expect(await focusOnBody(p)).toBe(false);
@@ -159,7 +161,7 @@ test("searching_at_the_keyboard_only", async ({ browser }) => {
   await p.keyboard.type(secret);
   await expect(row(p, recipes.id)).toHaveAttribute("aria-selected", "true");
   await p.keyboard.press("Enter");
-  await expect(p).toHaveURL(pageUrl(recipes.id));
+  await expect(p).toHaveURL(blockUrl(recipes.id));
   expect(await focusOnBody(p)).toBe(false);
 });
 
@@ -388,7 +390,7 @@ const cursorAt = (p: Page) =>
   });
 /** Attend que l'adresse soit celle de la page `id` à un bloc ; rend l'identifiant du bloc, décodé. */
 async function blockOfUrl(p: Page, id: string): Promise<string> {
-  await expect(p).toHaveURL(new RegExp(`/p/${id}#b=.+$`));
+  await expect(p).toHaveURL(blockUrl(id));
   return decodeURIComponent(new URL(p.url()).hash.slice("#b=".length));
 }
 /** Cherche `query` par Ctrl+K, et ouvre par Entrée la page `id`, que le serveur a trouvée. */
@@ -500,4 +502,34 @@ test("a_result_of_the_open_page_goes_to_its_block", async ({ browser }) => {
   expect(await blockOfUrl(p, long.id)).toBe(farId);
   expect(await kept()).toEqual([true, true]);
   await expect(p.locator('[role="alert"]')).toHaveCount(0);
+});
+
+test("a_found_block_with_many_sub_blocks_shows_its_own_text", async ({ browser }) => {
+  // Un bloc dont les sous-blocs dépassent la hauteur de la fenêtre : centré sur son sous-arbre, son
+  // texte (ce que la recherche a trouvé) serait au-dessus de l'écran.
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const parent = word();
+  const filler = (from: number) => Array.from({ length: 40 }, (_, i) => `Ligne ${from + i} du remplissage.`).join("\n\n");
+  const children = Array.from({ length: 120 }, (_, i) => `  - Sous-bloc ${i}`).join("\n");
+  const page = await createPage(api, { title: "Page à sous-blocs" });
+  await putMmd(api, page.id, `${filler(0)}\n\n- Le ${parent} a des sous-blocs.\n${children}\n\n${filler(100)}\n`);
+  const home = await createPage(api, { title: "Accueil" });
+  await putMmd(api, home.id, "Rien ici\n");
+  await waitFindable(api, space.id, parent, page.id);
+
+  const p = await openPage(browser, home.id, account);
+  await searchAndEnter(p, parent, page.id);
+  const blockId = await blockOfUrl(p, page.id);
+  await waitSynced(p);
+  const found = p.locator(`.mm-editor [data-node-type="blockOuter"][data-id="${blockId}"]`);
+  const own = found.locator(":scope > .bn-block > .bn-block-content");
+  await expect(own).toHaveText(`Le ${parent} a des sous-blocs.`);
+  // Le bloc entier est plus haut que la fenêtre (sans quoi le test ne prouverait rien)…
+  const height = (await found.boundingBox())!.height;
+  expect(height).toBeGreaterThan(p.viewportSize()!.height);
+  // … et c'est son texte qui est à l'écran, entier.
+  await expect(own).toBeInViewport({ ratio: 1 });
+  await expect.poll(() => cursorAt(p)).toEqual({ inEditor: true, block: blockId });
 });

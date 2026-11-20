@@ -38,7 +38,7 @@ export function blockOfSelection(root: Element, selection: Selection | null): st
  * Le contenu propre d'un bloc : sous son conteneur, ou, pour un bloc repliable, dans le cadre du
  * repli (`.bn-toggle-frame > .bn-toggle-slot`, où sont aussi ses enfants).
  */
-const OWN_CONTENT =
+export const OWN_CONTENT =
   ":scope > .bn-block > .bn-block-content, " +
   ":scope > .bn-block > .bn-toggle-frame > .bn-toggle-slot > .bn-block-content";
 

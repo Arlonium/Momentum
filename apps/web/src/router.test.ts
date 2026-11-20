@@ -1,7 +1,7 @@
 // Les adresses de l'application : un espace, sa corbeille, ses réglages, une page, et le bloc visé
 // d'une page (`/p/<id>#b=<bloc>`, lot 4).
 import { act } from "react";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { renderHook } from "./test/hooks";
 import {
   blockPath,
@@ -195,6 +195,33 @@ test("back_returns_to_the_block_before", async () => {
   });
   expect(location.hash).toBe("#b=un");
   expect(target.current).toEqual({ pageId: "x", blockId: "un" });
+});
+
+test("a_fragment_too_long_is_ignored_and_the_address_is_decoded_once", async () => {
+  // Un identifiant de bloc fait cent octets au plus (trois cents caractères échappés) : au-delà
+  // d'un Kio, le fragment n'en est pas un.
+  expect(parseBlockTarget(`#b=${"a".repeat(1_021)}`)).toBe("a".repeat(1_021));
+  expect(parseBlockTarget(`#b=${"a".repeat(1_022)}`)).toBeNull();
+  expect(parseBlockTarget(`#b=${"%C3%A9".repeat(400)}`)).toBeNull();
+  history.replaceState(null, "", `/p/x#b=${"a".repeat(5_000)}`);
+  const long = await renderHook(useBlockTarget, "x");
+  expect(long.current).toBeNull();
+  // L'adresse n'est décodée qu'une fois, pas à chaque lecture du magasin (chaque rendu le relit).
+  await act(async () => navigate(blockPath("la page", "un bloc")));
+  const target = await renderHook(useBlockTarget, "la page");
+  expect(target.current).toEqual({ pageId: "la page", blockId: "un bloc" });
+  const decode = vi.spyOn(globalThis, "decodeURIComponent");
+  try {
+    for (let i = 0; i < 3; i++) await target.rerender("la page");
+    expect(target.current).toEqual({ pageId: "la page", blockId: "un bloc" });
+    expect(decode).not.toHaveBeenCalled();
+    // Témoin : une autre adresse est décodée.
+    await act(async () => navigate(blockPath("la page", "un autre")));
+    expect(target.current?.blockId).toBe("un autre");
+    expect(decode).toHaveBeenCalled();
+  } finally {
+    decode.mockRestore();
+  }
 });
 
 test("a_fragment_changed_by_hand_is_followed", async () => {
