@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::Server;
-use mementum_search::{Found, PROJECTION_VERSION, SearchIndex, read_query};
+use mementum_search::{Found, IndexError, Opened, PROJECTION_VERSION, SearchIndex, read_query};
 use serde_json::{Value, json};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, Row, SqliteConnection};
@@ -254,10 +254,29 @@ fn setting(db: &Path, key: &str) -> Option<String> {
     })
 }
 
+/// Ouvre l'index plein texte de `data`, en réessayant deux secondes s'il est dit tenu par un
+/// autre (Ruling R1200). Sous Unix, le verrou de l'écrivain est un `flock`, qui appartient à la
+/// description de fichier ouverte : les tests de ce binaire tournent en fils et lancent des
+/// processus (`mementum serve`, `mementum reindex`), et un processus fils garde, de son `fork`
+/// à son `exec`, une copie du verrou qu'un autre fil tenait et vient de fermer. L'ouverture qui
+/// suit une fermeture le trouve alors pris, un instant. Aucun test ne s'en sert pour affirmer
+/// un refus : celui d'un index tenu se lit dans la sortie de la commande.
+fn open_index(data: &Path) -> Opened {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match SearchIndex::open(&data.join("search")) {
+            Err(IndexError::Busy) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            opened => return opened.unwrap(),
+        }
+    }
+}
+
 /// Ce que l'index plein texte rend pour chacun de ces mots, parmi `pages`. L'index est fermé au
 /// retour, ses fusions attendues : la commande suivante le vide sans trouver de fichier tenu.
 fn searches(data: &Path, words: &[&str], pages: &[Uuid]) -> Vec<Found> {
-    let opened = SearchIndex::open(&data.join("search")).unwrap();
+    let opened = open_index(data);
     let allowed = pages.iter().copied().collect();
     let found = words
         .iter()
@@ -281,7 +300,7 @@ fn found_pages(data: &Path, words: &str, pages: &[Uuid]) -> Vec<Uuid> {
 
 /// Le jeton de la dernière validation de l'index plein texte.
 fn index_token(data: &Path) -> Option<String> {
-    let opened = SearchIndex::open(&data.join("search")).unwrap();
+    let opened = open_index(data);
     let token = opened.token.clone();
     opened.index.close().unwrap();
     token
@@ -502,7 +521,7 @@ fn reindex_refuses_while_a_server_holds_the_index() {
     let db = data.join("mementum.db");
     common::lot1_database(&db);
     let home: Uuid = "01890000-0000-7000-8000-000000000003".parse().unwrap();
-    let held = SearchIndex::open(&data.join("search")).unwrap();
+    let held = open_index(&data);
     held.index.put_entry(home, None, "Accueil", "").unwrap();
     held.index.commit("jeton-temoin").unwrap();
     let bytes = std::fs::read(&db).unwrap();

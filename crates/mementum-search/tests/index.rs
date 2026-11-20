@@ -9,10 +9,11 @@ mod tmp;
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use mementum_search::{
     Found, Hit, IndexError, MAX_EXCERPT_CHARS, MAX_VERIFIED_BYTES, MAX_VERIFIED_ENTRIES,
-    MAX_VERIFIED_PER_PAGE, PageSet, Query, SearchIndex, Trace, Witness, read_query,
+    MAX_VERIFIED_PER_PAGE, Options, PageSet, Query, SearchIndex, Trace, Witness, read_query,
 };
 use sha2::{Digest, Sha256};
 use tmp::TestDir;
@@ -1526,12 +1527,20 @@ fn a_second_writer_is_refused_with_a_message() {
         .put_entry(page(1), Some("b1"), "Notes", "un mot")
         .unwrap();
     index.commit("jeton").unwrap();
-    for refused in [
-        SearchIndex::open(dir.path()),
-        SearchIndex::reset(dir.path()),
-    ] {
-        let error = refused.err().expect("un second écrivain est refusé");
+    for refuse in [SearchIndex::open as fn(&Path) -> _, SearchIndex::reset] {
+        let asked = Instant::now();
+        let error = refuse(dir.path())
+            .err()
+            .expect("un second écrivain est refusé");
         assert!(matches!(error, IndexError::Busy), "{error:?}");
+        // Sur-le-champ : l'attente de R1200 ne vaut qu'une fois le verrou tenu puis rendu.
+        // (La borne peut échouer à tort sur un poste très chargé, jamais passer à tort : avec
+        // l'attente, le refus prendrait deux secondes.)
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "le refus a attendu {:?}",
+            asked.elapsed()
+        );
         let message = error.to_string();
         assert!(message.contains("déjà ouvert"), "{message}");
         // Aucun chemin du serveur dans le message.
@@ -1544,6 +1553,79 @@ fn a_second_writer_is_refused_with_a_message() {
     let (index, token) = open(dir.path());
     assert_eq!(token.as_deref(), Some("jeton"));
     assert_eq!(finds(&index, "mot", &pages([1])), 1);
+}
+
+/// Ruling R1200. L'ouverture tient le verrou de l'écrivain, le rend, puis laisse le moteur le
+/// reprendre. Repris entre les deux par un autre, pour un instant, il ne fait pas échouer
+/// l'ouverture : elle l'attend. Le témoin (`writer_lock_taken_for`) le prend à cet endroit.
+#[test]
+fn opening_waits_for_a_writer_lock_taken_right_after_its_own() {
+    let dir = TestDir::new();
+    let options = Options {
+        writer_lock_taken_for: Some(Duration::from_millis(300)),
+        ..Options::default()
+    };
+    let asked = Instant::now();
+    let index = SearchIndex::open_with(dir.path(), options)
+        .expect("ouvrir malgré le verrou repris un instant")
+        .index;
+    // Le témoin a mordu : l'ouverture a attendu que le verrou soit rendu.
+    assert!(asked.elapsed() >= Duration::from_millis(300));
+    index
+        .put_entry(page(1), Some("b1"), "Notes", "un mot")
+        .unwrap();
+    index.commit("jeton").unwrap();
+    assert_eq!(finds(&index, "mot", &pages([1])), 1);
+}
+
+/// Ruling R1200, la scène d'origine (le rouge de la CI sous Linux dans `reindex.rs`) : le
+/// verrou de l'écrivain est un `flock`, qui appartient à la description de fichier ouverte ;
+/// un processus fils qu'un autre fil lance en garde une copie de son `fork` à son `exec`, et le
+/// verrou que l'ouverture vient de rendre vit encore quand le moteur le reprend. Chaque
+/// ouverture se fait dans un dossier neuf : seule cette fenêtre-là est éprouvée, pas celle
+/// d'une réouverture qui suit une fermeture, où le premier verrou refuse sur-le-champ, à
+/// dessein. Ne tourne que sous Unix : sous Windows, le verrou n'est pas hérité.
+#[cfg(unix)]
+#[test]
+fn opening_survives_a_writer_lock_inherited_by_a_child_process() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = TestDir::new();
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawner = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut spawned = 0_u32;
+            while !stop.load(Ordering::Relaxed) {
+                std::process::Command::new("true")
+                    .status()
+                    .expect("lancer « true »");
+                spawned += 1;
+            }
+            spawned
+        })
+    };
+    let mut refused = None;
+    for n in 0..2_000 {
+        let at = dir.path().join(format!("index-{n}"));
+        match SearchIndex::open(&at) {
+            Ok(opened) => {
+                opened.index.close().expect("fermer");
+                std::fs::remove_dir_all(&at).expect("retirer le dossier");
+            }
+            Err(error) => {
+                refused = Some((n, error));
+                break;
+            }
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let spawned = spawner.join().expect("le fil qui lance des processus");
+    assert!(spawned > 0, "aucun processus lancé pendant les ouvertures");
+    if let Some((n, error)) = refused {
+        panic!("ouverture {n} refusée ({spawned} processus lancés) : {error:?}");
+    }
 }
 
 #[test]

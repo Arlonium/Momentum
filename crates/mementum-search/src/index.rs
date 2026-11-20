@@ -32,6 +32,7 @@ use std::fmt;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tantivy::collector::{Collector, SegmentCollector};
@@ -90,6 +91,11 @@ const STORE_CACHE_BLOCKS: usize = 8;
 /// à tout changement de ce qu'une entrée porte sans que le schéma change (la longueur des débuts
 /// de mot, la clé de départage).
 const INDEX_FORM: &str = "mementum-search/1";
+
+/// À l'ouverture, le temps pendant lequel on attend le verrou de l'écrivain qu'on vient de
+/// rendre pour que le moteur le reprenne, et la pause entre deux essais (Ruling R1200).
+const WRITER_LOCK_WAIT: Duration = Duration::from_secs(2);
+const WRITER_LOCK_PAUSE: Duration = Duration::from_millis(5);
 
 /// Ce que le titre pèse de plus que le texte dans une note.
 const TITLE_BOOST: Score = 3.0;
@@ -287,6 +293,10 @@ pub struct Options {
     pub max_docs_before_merge: Option<usize>,
     pub keep_title: bool,
     pub keep_text: bool,
+    /// Témoin de R1200 : à l'ouverture, le verrou de l'écrivain est repris par un autre, pour
+    /// cette durée, dès que l'ouverture l'a rendu et avant que le moteur le reprenne (ce que
+    /// fait, sous Unix, le processus fils qu'un autre fil lance à cet instant).
+    pub writer_lock_taken_for: Option<Duration>,
 }
 
 impl Default for Options {
@@ -296,6 +306,7 @@ impl Default for Options {
             max_docs_before_merge: None,
             keep_title: true,
             keep_text: true,
+            writer_lock_taken_for: None,
         }
     }
 }
@@ -1202,14 +1213,37 @@ impl SearchIndex {
         index.tokenizers().register(WORDS, Words);
         index.tokenizers().register(STARTS, Starts);
         drop(lock);
-        // Un fil d'indexation, un fil de fusion (Ruling R925).
-        let writer: IndexWriter = index.writer_with_options(
-            IndexWriterOptions::builder()
-                .memory_budget_per_thread(options.buffer_bytes)
-                .num_worker_threads(1)
-                .num_merge_threads(1)
-                .build(),
-        )?;
+        if let Some(taken_for) = options.writer_lock_taken_for {
+            let taken = MmapDirectory::open(dir)
+                .map_err(|e| IndexError::Engine(e.to_string()))?
+                .acquire_lock(&INDEX_WRITER_LOCK)
+                .map_err(|e| IndexError::Engine(e.to_string()))?;
+            std::thread::spawn(move || {
+                std::thread::sleep(taken_for);
+                drop(taken);
+            });
+        }
+        // Un fil d'indexation, un fil de fusion (Ruling R925). Le verrou, qu'on tenait l'instant
+        // d'avant, peut ne pas être libre tout de suite (Ruling R1200) : sous Unix c'est un
+        // `flock`, qu'un processus fils lancé par un autre fil garde de son `fork` à son
+        // `exec`. On l'attend donc, un temps borné ; le premier verrou, plus haut, garde le
+        // refus immédiat devant un autre écrivain.
+        let deadline = Instant::now() + WRITER_LOCK_WAIT;
+        let writer: IndexWriter = loop {
+            let taken = index.writer_with_options(
+                IndexWriterOptions::builder()
+                    .memory_budget_per_thread(options.buffer_bytes)
+                    .num_worker_threads(1)
+                    .num_merge_threads(1)
+                    .build(),
+            );
+            match taken {
+                Err(TantivyError::LockFailure(..)) if Instant::now() < deadline => {
+                    std::thread::sleep(WRITER_LOCK_PAUSE);
+                }
+                taken => break taken?,
+            }
+        };
         if let Some(max_docs) = options.max_docs_before_merge {
             let mut policy = LogMergePolicy::default();
             policy.set_max_docs_before_merge(max_docs);
