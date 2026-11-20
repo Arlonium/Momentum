@@ -18,8 +18,13 @@
 //! Et (Ruling R536) : une page dont le journal porte le report d'un bloc recréé (Task 13b : un
 //! client déplace un bloc sans avoir vu ce qu'un autre vient d'y taper, et le serveur reporte la
 //! frappe dans la copie) se relit comme la page vivante, et le report passe les mêmes gardes.
+//!
+//! Et (Task S2 du lot 5, R1227) : une page que le serveur récrit par différence
+//! (`PageDoc::write_diff`, `Op::DiffWrite`), entre les frappes des clients, se relit comme la page
+//! vivante.
 
 use mementum_crdt::{FRAGMENT, PageDoc};
+use mementum_md::{Block, Content, Inline, Styles};
 use proptest::prelude::*;
 
 #[path = "common/live.rs"]
@@ -717,6 +722,88 @@ enum Op {
         at: usize,
         stored: bool,
     },
+    /// Le serveur récrit la page par différence (Task S2, R1227) : les blocs qu'il en lit,
+    /// retouchés (`edit`, voir `retouch`) ; la mise à jour va au journal, comme l'écrirait
+    /// l'acteur.
+    DiffWrite {
+        edit: usize,
+        at: usize,
+        text: String,
+    },
+}
+
+/// Retouche les blocs d'une page : un texte inséré, le gras d'une plage basculé, un paragraphe
+/// ajouté, un bloc retiré, un bloc remonté en tête, une mention en tête d'un contenu (qui le fait
+/// récrire en entier).
+fn retouch(blocks: &mut Vec<Block>, edit: usize, at: usize, text: &str) {
+    fn first_text(blocks: &mut [Block]) -> Option<&mut Vec<Inline>> {
+        blocks.iter_mut().find_map(|b| match &mut b.content {
+            Content::Inline(content) => Some(content),
+            _ => None,
+        })
+    }
+    let n = blocks.len();
+    match edit % 6 {
+        0 => {
+            if let Some(content) = first_text(blocks) {
+                match content.iter_mut().find_map(|i| match i {
+                    Inline::Text { text, .. } => Some(text),
+                    _ => None,
+                }) {
+                    Some(t) => {
+                        let chars: Vec<char> = t.chars().collect();
+                        let cut = at % (chars.len() + 1);
+                        *t = chars[..cut]
+                            .iter()
+                            .chain(text.chars().collect::<Vec<_>>().iter())
+                            .chain(&chars[cut..])
+                            .collect();
+                    }
+                    None => content.push(Inline::Text {
+                        text: text.to_string(),
+                        styles: Styles::default(),
+                    }),
+                }
+            }
+        }
+        1 => {
+            if let Some(Inline::Text { styles, .. }) = first_text(blocks)
+                .and_then(|c| c.iter_mut().find(|i| matches!(i, Inline::Text { .. })))
+            {
+                styles.bold = !styles.bold;
+            }
+        }
+        2 => blocks.push(Block {
+            id: String::new(),
+            kind: "paragraph".into(),
+            props: Default::default(),
+            content: Content::Inline(vec![Inline::Text {
+                text: text.to_string(),
+                styles: Styles::default(),
+            }]),
+            children: vec![],
+        }),
+        3 if n > 1 => {
+            blocks.remove(at % n);
+        }
+        4 if n > 1 => {
+            let moved = blocks.remove(at % n);
+            blocks.insert(0, moved);
+        }
+        5 => {
+            if let Some(content) = first_text(blocks) {
+                content.insert(
+                    0,
+                    Inline::Mention {
+                        kind: "page".into(),
+                        id: "pg_x".into(),
+                        label: text.to_string(),
+                    },
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 /// La mise à jour honnête `honest` (un client de passage écrase `backgroundColor` par « x »),
@@ -998,6 +1085,11 @@ fn op() -> impl Strategy<Value = Op> {
                 stored
             }
         ),
+        (0..6usize, any::<usize>(), "[a-zé]{1,4}").prop_map(|(edit, at, text)| Op::DiffWrite {
+            edit,
+            at,
+            text
+        }),
     ]
 }
 
@@ -1242,6 +1334,16 @@ fn scenario(ops: &[Op]) {
                     if let Ok(read) = PageDoc::from_updates([state.as_slice()]) {
                         assert_eq!(texts(&served.page), texts(&read), "{what} : le texte");
                     }
+                }
+                vec![0, 0]
+            }
+            Op::DiffWrite { edit, at, text } => {
+                let mut blocks = served.page.read_blocks();
+                retouch(&mut blocks, *edit, *at, text);
+                match served.page.write_diff(&blocks) {
+                    Ok(written) => served.journal.push(written.update),
+                    // Comme l'acteur : après une erreur, la page est rechargée de son journal.
+                    Err(_) => served.page = served.reloaded(),
                 }
                 vec![0, 0]
             }
