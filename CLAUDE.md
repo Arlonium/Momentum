@@ -492,7 +492,7 @@ Décisions au registre du lot 4, « Task C1 » (R1080 à R1093, et R1094 à R109
 
 ### Task C2 : arriver sur le bloc trouvé (`apps/web/src/router.ts`, `editor/goToBlock.ts`)
 
-Décisions au registre du lot 4, « Task C2 » (R1100 à R1112).
+Décisions au registre du lot 4, « Task C2 » (R1100 à R1114) et sa relecture (R1130 à R1133).
 
 - **Un bloc n'entre dans une adresse que par `blockPath(page, bloc)`, et n'en sort que par `parseBlockTarget`** (`router.ts`, R1100) : `/p/<page>#b=<bloc échappé>`. L'identifiant vient d'ailleurs (cent octets quelconques) : jamais concaténé à la main dans une adresse, un sélecteur ou du HTML ; dans la page, il n'est comparé qu'à `data-id` (`blockElement`, qui l'échappe). Un lien neuf vers un bloc (les rétroliens) est un `<a href={blockPath(…)}>` ordinaire : l'interception le suit.
 - **Le fragment compte dans `navigate`** (R1101, R1102). Une autre adresse pour un autre bloc de la même page ; la même adresse qui vise un bloc ne touche pas l'historique mais vise le bloc de nouveau ; `navigate(pagePath(x))` depuis `/p/x#b=…` pousse une entrée. Un appel neuf de `navigate` dans un effet, sur la page ouverte, retirerait donc le bloc de l'adresse à l'ouverture : y passer `location.hash`, ou ne pas naviguer.
@@ -502,6 +502,10 @@ Décisions au registre du lot 4, « Task C2 » (R1100 à R1112).
 - **Dans le geste, l'arrivée prend le focus ; plus tard, elle ne le prend pas à qui écrit** (R1107). La fenêtre de recherche rend le focus du nettoyage d'un effet passif, et l'effet de `useArrival` passe après lui dans le même rendu : c'est ce qui laisse le focus sur le bloc. Un effet de plus qui donnerait le focus après une navigation passerait après l'arrivée.
 - **`goToBlock` sert aussi la table des matières** (`goToHeading`, `Toc.tsx`) : `setTextCursorPosition`, puis `focusEditor`, puis, en lecture seule, la sélection du document posée au début du texte, puis `scrollIntoView`. L'appeler dans un test Vitest sous `act` (la sélection qui change fait rendre la barre de mise en forme, et React écrit « not wrapped in act » dans `m.errors`).
 - **E2e** : dans un même onglet, `goto` vers la même page avec un autre fragment ne recharge rien (un `hashchange`) : pour éprouver l'ouverture par une adresse, un onglet neuf. Une page à la corbeille ouverte par son adresse donne un éditeur en lecture seule sans second compte. « Pas remontée » se prouve par une propriété posée sur l'élément (`element.witness = true`), relue après le geste.
+- **C'est le contenu propre d'un bloc qu'on amène à l'écran, jamais `blockOuter`** (R1113) : `blockOuter` contient ses sous-blocs, et un `scrollIntoView` centré sur lui laisse hors de la fenêtre le texte d'un bloc à longs sous-blocs. `OWN_CONTENT` (`comments/dom.ts`) le désigne, repli compris. La preuve est de la géométrie, dans Chromium (`a_found_block_with_many_sub_blocks_shows_its_own_text` : le bloc d'abord affirmé plus haut que la fenêtre).
+- **« Tout est prêt » ne veut pas dire « dans le geste »** (R1114). Un effet qui trouve sa cible à son premier passage a attendu le code de l'éditeur, même si la synchro est déjà faite : seule une cible reçue par un composant déjà monté vient d'un geste. Une arrivée tardive laisse le focus à un champ, un texte modifiable, une liste déroulante, un menu ouvert, et sous une `dialog` (`busyElsewhere`, R1131) : un élément neuf où l'on « est en train de faire quelque chose » s'y ajoute.
+- **Un fragment de plus de 1 Kio ne vise rien, et l'adresse n'est décodée qu'une fois** (R1132) : ce que lit `useSyncExternalStore` est relu à chaque rendu ; ne jamais y décoder ou analyser une entrée venue d'ailleurs sans garder le résultat. Un lien de la page vers un de ses blocs prend `blockFragment(id)` (la table des matières, R1130).
+- **E2e** : deux expressions d'adresse, `pageUrl(id)` (exacte, sans bloc : une ligne de l'arbre, une page trouvée par son titre) et `blockUrl(id)` (R1133) ; ne pas les refondre en une.
 
 ## Tester
 
