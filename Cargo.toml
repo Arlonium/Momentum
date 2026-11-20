@@ -38,6 +38,8 @@ mementum-store = { path = "crates/mementum-store" }
 mementum-sync = { path = "crates/mementum-sync" }
 proptest = "1.12"
 pulldown-cmark = { version = "0.13.6", default-features = false }
+# Schémas d'entrée des outils MCP, dérivés des types Rust (`mementum-mcp`, Ruling R1238).
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # L'erreur que l'extracteur `Json` d'axum garde : le serveur en tire des messages en français.

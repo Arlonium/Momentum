@@ -1,0 +1,813 @@
+{
+  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0, ou la spécification seule (resources/read, Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, et une sortie de plus de 25 000 jetons ne l'ont été par aucun client : M2 et X1 les éprouvent).",
+  "statuses": "Statut HTTP d'une erreur JSON-RPC (Rulings R1406, R1407) : 400 pour ce qui empêche de lire la requête ou d'en savoir l'ère (-32700 JSON illisible ; -32600 lot, corps qui n'est pas un objet, jsonrpc, method ou id mal formés, requête sans id, params qui ne sont pas un objet, réponse envoyée au serveur ; -32020 en-tête absent, répété, aux caractères non permis ou qui ne dit pas le corps, requête qui n'est d'aucune des deux révisions ; -32022 version nommée mais non servie, au _meta, ou par l'en-tête seul quand il a la forme AAAA-MM-JJ ; -32602 champ exigé du _meta qui manque ou n'a pas sa forme) ; 404 pour une méthode inconnue en 2026-07-28 (-32601) ; 200 pour une erreur des params d'une méthode servie (-32602 outil inconnu, arguments qui ne sont pas un objet, tools/call sans nom, ressource inconnue en 2026-07-28, curseur de liste, initialize sans protocolVersion ; -32002 ressource inconnue en 2025-11-25) et pour toute méthode inconnue en 2025-11-25 (-32601). Des arguments refusés ne sont pas une erreur JSON-RPC : un résultat isError, 200. -32021 (MissingRequiredClientCapability) existe dans la 2026-07-28 et n'a pas d'usage ici : aucun outil n'exige une capacité du client.",
+  "cases": [
+    {
+      "name": "2026 : server/discover",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, une requête de même forme)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover" },
+      "body": { "jsonrpc": "2.0", "id": "d1", "method": "server/discover", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "jsonrpc": "2.0", "id": "d1", "result": { "resultType": "complete", "supportedVersions": ["2026-07-28", "2025-11-25"], "capabilities": { "tools": {}, "resources": {} }, "instructions": "<any>", "ttlMs": 300000, "cacheScope": "private", "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "mementum", "version": "<any>" } } } },
+      "absent": ["/error", "/result/capabilities/tools/listChanged", "/result/capabilities/resources/subscribe", "/result/capabilities/resources/listChanged"]
+    },
+    {
+      "name": "2026 : tools/list rend les six outils dans leur ordre",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, une requête de même forme)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 1, "result": { "resultType": "complete", "tools": [{ "name": "search" }, { "name": "fetch" }, { "name": "create_pages" }, { "name": "update_page" }, { "name": "manage_pages" }, { "name": "workspace_info" }], "ttlMs": 300000, "cacheScope": "private", "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "mementum" } } } },
+      "absent": ["/result/nextCursor"]
+    },
+    {
+      "name": "2026 : tools/list sur /mcp/readonly rend les trois outils de lecture",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "endpoint": "readonly",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "result": { "tools": [{ "name": "search" }, { "name": "fetch" }, { "name": "workspace_info" }] } }
+    },
+    {
+      "name": "2026 : tools/call d'un outil servi",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, une requête de même forme)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
+      "body": { "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 7, "result": { "resultType": "complete", "content": [{ "type": "text", "text": "<any>" }], "isError": false, "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "mementum" } } } },
+      "absent": ["/result/ttlMs", "/result/cacheScope", "/result/structuredContent", "/error"],
+      "called": true
+    },
+    {
+      "name": "2026 : tools/call sans arguments vaut des arguments vides",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
+      "body": { "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": { "name": "workspace_info", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 8, "result": { "isError": false } },
+      "called": true
+    },
+    {
+      "name": "2026 : tools/call, Mcp-Name en =?base64?…?=",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?d29ya3NwYWNlX2luZm8=?=" },
+      "body": { "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 9, "result": { "isError": false } },
+      "called": true
+    },
+    {
+      "name": "2026 : resources/list",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, une requête de même forme)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/list" },
+      "body": { "jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "result": { "resultType": "complete", "resources": [{ "uri": "mementum://spec/mmd", "name": "<any>", "mimeType": "text/markdown" }], "ttlMs": 300000, "cacheScope": "private" } }
+    },
+    {
+      "name": "2026 : resources/read",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/read", "Mcp-Name": "mementum://spec/mmd" },
+      "body": { "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": "mementum://spec/mmd", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "result": { "resultType": "complete", "contents": [{ "uri": "mementum://spec/mmd", "mimeType": "text/markdown", "text": "<any>" }], "ttlMs": 300000, "cacheScope": "private" } }
+    },
+    {
+      "name": "2026 : resources/read, Mcp-Name en =?base64?…?=",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/read", "Mcp-Name": "=?base64?bWVtZW50dW06Ly9zcGVjL21tZA==?=" },
+      "body": { "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": "mementum://spec/mmd", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "result": { "contents": [{ "uri": "mementum://spec/mmd" }] } }
+    },
+    {
+      "name": "2026 : un lot JSON-RPC",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": [{ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } }],
+      "status": 400,
+      "expect": { "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "<any>" } },
+      "absent": ["/result"]
+    },
+    {
+      "name": "2026 : un JSON illisible",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "raw": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": ",
+      "status": 400,
+      "expect": { "jsonrpc": "2.0", "id": null, "error": { "code": -32700 } }
+    },
+    {
+      "name": "2026 : un corps vide",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "raw": "",
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32700 } }
+    },
+    {
+      "name": "2026 : un corps qui n'est pas un objet",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "raw": "\"tools/list\"",
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : une méthode inconnue",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "prompts/list" },
+      "body": { "jsonrpc": "2.0", "id": 4, "method": "prompts/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 404,
+      "expect": { "id": 4, "error": { "code": -32601, "message": "<any>" } }
+    },
+    {
+      "name": "2026 : initialize sous la 2026-07-28",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "initialize" },
+      "body": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2026-07-28", "capabilities": {}, "clientInfo": { "name": "x", "version": "1" }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 404,
+      "expect": { "id": 0, "error": { "code": -32601 } }
+    },
+    {
+      "name": "2026 : ping n'existe plus",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "ping" },
+      "body": { "jsonrpc": "2.0", "id": 5, "method": "ping", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 404,
+      "expect": { "id": 5, "error": { "code": -32601 } }
+    },
+    {
+      "name": "2026 : subscriptions/listen n'est pas servi",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "subscriptions/listen" },
+      "body": { "jsonrpc": "2.0", "id": 6, "method": "subscriptions/listen", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 404,
+      "expect": { "id": 6, "error": { "code": -32601 } }
+    },
+    {
+      "name": "2026 : une version inconnue",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "1900-01-01", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "1900-01-01", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32022, "message": "<any>", "data": { "supported": ["2026-07-28", "2025-11-25"], "requested": "1900-01-01" } } }
+    },
+    {
+      "name": "2026 : un _meta qui demande la 2025-11-25, servie seulement par initialize",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-11-25", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32022, "data": { "supported": ["2026-07-28", "2025-11-25"], "requested": "2025-11-25" } } }
+    },
+    {
+      "name": "2026 : une version du _meta qui n'est pas un texte est un champ exigé qui manque",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": 2026, "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32602 } }
+    },
+    {
+      "name": "2026 : un MCP-Protocol-Version qui ne dit pas le _meta",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020, "message": "<any>" } }
+    },
+    {
+      "name": "2026 : un MCP-Protocol-Version absent",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    },
+    {
+      "name": "2026 : un MCP-Protocol-Version répété",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": ["2026-07-28", "2026-07-28"], "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    },
+    {
+      "name": "2026 : un Mcp-Method faux",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    },
+    {
+      "name": "2026 : un Mcp-Method absent",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    },
+    {
+      "name": "2026 : un Mcp-Method aux caractères non permis",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/listé" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/listé", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    },
+    {
+      "name": "2026 : un Mcp-Name faux",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, essai 8 : un -32020 sur tools/call, lu au modèle) ; la requête de ce cas : la spécification seule",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "search" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } },
+      "called": false
+    },
+    {
+      "name": "2026 : un Mcp-Name absent sur tools/call",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } },
+      "called": false
+    },
+    {
+      "name": "2026 : un Mcp-Name en base64 illisible",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?***?=" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } },
+      "called": false
+    },
+    {
+      "name": "2026 : un Mcp-Name en base64 d'un autre nom",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?c2VhcmNo?=" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } },
+      "called": false
+    },
+    {
+      "name": "2026 : un nom qui ressemble à la forme =?base64?…?=, envoyé sans être encodé, ne dit pas le corps",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?d29ya3NwYWNlX2luZm8=?=" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "=?base64?d29ya3NwYWNlX2luZm8=?=", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } },
+      "called": false
+    },
+    {
+      "name": "2026 : un nom qui ressemble à la forme =?base64?…?=, encodé, dit le corps (puis l'outil est inconnu)",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?PT9iYXNlNjQ/ZDI5eWEzTndZV05sWDJsdVptOD0/PQ==?=" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "=?base64?d29ya3NwYWNlX2luZm8=?=", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 1, "error": { "code": -32602 } },
+      "called": false
+    },
+    {
+      "name": "2026 : un Mcp-Name faux sur resources/read",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/read", "Mcp-Name": "mementum://spec/sql" },
+      "body": { "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": "mementum://spec/mmd", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 3, "error": { "code": -32020 } }
+    },
+    {
+      "name": "2026 : un _meta sans clientCapabilities",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32602, "message": "<any>" } }
+    },
+    {
+      "name": "2026 : des clientCapabilities qui ne sont pas un objet",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": true } } },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32602 } }
+    },
+    {
+      "name": "2026 : un _meta aux clés inconnues, ignorées",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, une requête de même forme)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
+      "body": { "jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {}, "io.modelcontextprotocol/clientInfo": { "name": "x", "version": "1" }, "progressToken": 10, "claudecode/toolUseId": "toolu_x" } } },
+      "status": 200,
+      "expect": { "id": 10, "result": { "isError": false } },
+      "called": true
+    },
+    {
+      "name": "2026 : une requête sans id n'est jamais faite",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
+      "body": { "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32600 } },
+      "called": false
+    },
+    {
+      "name": "2026 : une notification est acceptée sans effet",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "notifications/cancelled" },
+      "body": { "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 3, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 202,
+      "expect": null
+    },
+    {
+      "name": "2026 : un id null",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": null, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : un id booléen",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": true, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : un id trop long, jamais recopié",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : un outil inconnu",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "query_database" },
+      "body": { "jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": { "name": "query_database", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 11, "error": { "code": -32602, "message": "<any>" } },
+      "absent": ["/result"],
+      "called": false
+    },
+    {
+      "name": "2026 : un outil d'écriture sur /mcp/readonly est un outil inconnu",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "endpoint": "readonly",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "update_page" },
+      "body": { "jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": { "name": "update_page", "arguments": { "page": "p", "operations": [{ "op": "str_replace", "old": "a", "new": "b" }] }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 12, "error": { "code": -32602 } },
+      "called": false
+    },
+    {
+      "name": "2026 : des arguments d'un autre type sont un échec de l'outil",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
+      "body": { "jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": { "name": "workspace_info", "arguments": { "space": 3 }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 13, "result": { "resultType": "complete", "content": [{ "type": "text", "text": "<any>" }], "isError": true, "structuredContent": { "code": "invalid_arguments", "message": "<any>" } } },
+      "absent": ["/error"],
+      "called": false
+    },
+    {
+      "name": "2026 : un refus de l'outil est un résultat isError, pas une erreur JSON-RPC",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "fetch" },
+      "body": { "jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": "0193a1b2-0000-7000-8000-000000000009" }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 22, "result": { "resultType": "complete", "content": [{ "type": "text", "text": "<any>" }], "isError": true, "structuredContent": { "code": "not_found", "message": "<any>" } } },
+      "absent": ["/error"],
+      "called": true
+    },
+    {
+      "name": "2026 : des arguments qui ne sont pas un objet",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
+      "body": { "jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": { "name": "workspace_info", "arguments": [], "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 14, "error": { "code": -32602 } },
+      "called": false
+    },
+    {
+      "name": "2026 : un tools/call sans nom",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call" },
+      "body": { "jsonrpc": "2.0", "id": 15, "method": "tools/call", "params": { "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 15, "error": { "code": -32602 } },
+      "called": false
+    },
+    {
+      "name": "2026 : une ressource inconnue",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/read", "Mcp-Name": "mementum://spec/sql" },
+      "body": { "jsonrpc": "2.0", "id": 16, "method": "resources/read", "params": { "uri": "mementum://spec/sql", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 16, "error": { "code": -32602, "data": { "uri": "mementum://spec/sql" } } }
+    },
+    {
+      "name": "2026 : un curseur de liste, que le serveur ne donne jamais",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 17, "method": "tools/list", "params": { "cursor": "page-2", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 17, "error": { "code": -32602 } }
+    },
+    {
+      "name": "2026 : jsonrpc absent",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "id": 18, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 18, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : méthode absente",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28" },
+      "body": { "jsonrpc": "2.0", "id": 19, "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": 19, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : des params qui ne sont pas un objet",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 20, "method": "tools/list", "params": ["2026-07-28"] },
+      "status": 400,
+      "expect": { "id": 20, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : une réponse JSON-RPC envoyée au serveur",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28" },
+      "body": { "jsonrpc": "2.0", "id": 21, "result": {} },
+      "status": 400,
+      "expect": { "id": 21, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : Claude Code 2.1.329, server/discover (relevé par S0)",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-method": "server/discover", "mcp-protocol-version": "2026-07-28" },
+      "body": { "jsonrpc": "2.0", "id": "server-discover-probe-1", "method": "server/discover", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "2.1.329", "description": "Anthropic's agentic coding tool", "websiteUrl": "https://claude.com/claude-code" }, "io.modelcontextprotocol/clientCapabilities": { "roots": { "listChanged": true }, "elicitation": { "form": {}, "url": {} }, "extensions": { "io.modelcontextprotocol/tasks": {} } } } } },
+      "status": 200,
+      "expect": { "id": "server-discover-probe-1", "result": { "resultType": "complete", "supportedVersions": ["2026-07-28", "2025-11-25"], "ttlMs": 300000, "cacheScope": "private" } }
+    },
+    {
+      "name": "2026 : Claude Code 2.1.329, resources/list (relevé par S0)",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-method": "resources/list", "mcp-protocol-version": "2026-07-28" },
+      "body": { "method": "resources/list", "jsonrpc": "2.0", "id": 0, "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "2.1.329", "description": "Anthropic's agentic coding tool", "websiteUrl": "https://claude.com/claude-code" }, "io.modelcontextprotocol/clientCapabilities": { "roots": { "listChanged": true }, "elicitation": { "form": {}, "url": {} }, "extensions": { "io.modelcontextprotocol/tasks": {} } } } } },
+      "status": 200,
+      "expect": { "id": 0, "result": { "resultType": "complete", "resources": [{ "uri": "mementum://spec/mmd" }] } }
+    },
+    {
+      "name": "2026 : Claude Code 2.1.329, tools/list (relevé par S0)",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-method": "tools/list", "mcp-protocol-version": "2026-07-28" },
+      "body": { "method": "tools/list", "jsonrpc": "2.0", "id": 1, "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "2.1.329", "description": "Anthropic's agentic coding tool", "websiteUrl": "https://claude.com/claude-code" }, "io.modelcontextprotocol/clientCapabilities": { "roots": { "listChanged": true }, "elicitation": { "form": {}, "url": {} }, "extensions": { "io.modelcontextprotocol/tasks": {} } } } } },
+      "status": 200,
+      "expect": { "id": 1, "result": { "resultType": "complete", "tools": [{ "name": "search" }, { "name": "fetch" }, { "name": "create_pages" }, { "name": "update_page" }, { "name": "manage_pages" }, { "name": "workspace_info" }] } }
+    },
+    {
+      "name": "2026 : Claude Code 2.1.329, tools/call de l'outil du banc, inconnu ici (relevé par S0)",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-method": "tools/call", "mcp-name": "echo", "mcp-protocol-version": "2026-07-28" },
+      "body": { "method": "tools/call", "params": { "name": "echo", "arguments": { "text": "bonjour" }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "2.1.329", "description": "Anthropic's agentic coding tool", "websiteUrl": "https://claude.com/claude-code" }, "io.modelcontextprotocol/clientCapabilities": { "roots": { "listChanged": true }, "elicitation": { "form": {}, "url": {} } }, "claudecode/toolUseId": "toolu_0118FPgpLt1gPcVAQrYXiNm1", "progressToken": 2 } }, "jsonrpc": "2.0", "id": 2 },
+      "status": 200,
+      "expect": { "id": 2, "error": { "code": -32602 } },
+      "called": false
+    },
+    {
+      "name": "2026 : Claude Code 2.1.329, tools/call d'un outil servi (relevé par S0, le nom de l'outil changé)",
+      "era": "2026-07-28",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-method": "tools/call", "mcp-name": "workspace_info", "mcp-protocol-version": "2026-07-28" },
+      "body": { "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "2.1.329", "description": "Anthropic's agentic coding tool", "websiteUrl": "https://claude.com/claude-code" }, "io.modelcontextprotocol/clientCapabilities": { "roots": { "listChanged": true }, "elicitation": { "form": {}, "url": {} } }, "claudecode/toolUseId": "toolu_0118FPgpLt1gPcVAQrYXiNm1", "progressToken": 2 } }, "jsonrpc": "2.0", "id": 2 },
+      "status": 200,
+      "expect": { "id": 2, "result": { "resultType": "complete", "isError": false } },
+      "called": true
+    },
+    {
+      "name": "2025 : Claude Code 2.1.329, initialize (relevé par S0)",
+      "era": "2025-11-25",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)" },
+      "body": { "method": "initialize", "params": { "protocolVersion": "2025-11-25", "capabilities": { "roots": { "listChanged": true }, "elicitation": { "form": {}, "url": {} } }, "clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "2.1.329", "description": "Anthropic's agentic coding tool", "websiteUrl": "https://claude.com/claude-code" } }, "jsonrpc": "2.0", "id": 0 },
+      "status": 200,
+      "expect": { "jsonrpc": "2.0", "id": 0, "result": { "protocolVersion": "2025-11-25", "capabilities": { "tools": {}, "resources": {} }, "serverInfo": { "name": "mementum", "version": "<any>" }, "instructions": "<any>" } },
+      "absent": ["/result/resultType", "/result/_meta", "/result/ttlMs", "/result/cacheScope", "/result/capabilities/tools/listChanged"]
+    },
+    {
+      "name": "2025 : Claude Code 2.1.329, notifications/initialized (relevé par S0)",
+      "era": "2025-11-25",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-protocol-version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "method": "notifications/initialized" },
+      "status": 202,
+      "expect": null
+    },
+    {
+      "name": "2025 : Claude Code 2.1.329, tools/list (relevé par S0)",
+      "era": "2025-11-25",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-protocol-version": "2025-11-25" },
+      "body": { "method": "tools/list", "jsonrpc": "2.0", "id": 1 },
+      "status": 200,
+      "expect": { "id": 1, "result": { "tools": [{ "name": "search" }, { "name": "fetch" }, { "name": "create_pages" }, { "name": "update_page" }, { "name": "manage_pages" }, { "name": "workspace_info" }] } },
+      "absent": ["/result/resultType", "/result/ttlMs", "/result/cacheScope", "/result/_meta"]
+    },
+    {
+      "name": "2025 : Claude Code 2.1.329, resources/list (relevé par S0)",
+      "era": "2025-11-25",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-protocol-version": "2025-11-25" },
+      "body": { "method": "resources/list", "jsonrpc": "2.0", "id": 2 },
+      "status": 200,
+      "expect": { "id": 2, "result": { "resources": [{ "uri": "mementum://spec/mmd", "mimeType": "text/markdown" }] } },
+      "absent": ["/result/resultType", "/result/ttlMs", "/result/cacheScope"]
+    },
+    {
+      "name": "2025 : Claude Code 2.1.329, tools/call de l'outil du banc, inconnu ici (relevé par S0)",
+      "era": "2025-11-25",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-protocol-version": "2025-11-25" },
+      "body": { "method": "tools/call", "params": { "name": "echo", "arguments": { "text": "bonjour" }, "_meta": { "claudecode/toolUseId": "toolu_01N6iFZGME3Qmc7BZXUVkcxA", "progressToken": 3 } }, "jsonrpc": "2.0", "id": 3 },
+      "status": 200,
+      "expect": { "id": 3, "error": { "code": -32602 } },
+      "called": false
+    },
+    {
+      "name": "2025 : Claude Code 2.1.329, tools/call d'un outil servi (relevé par S0, le nom de l'outil changé)",
+      "era": "2025-11-25",
+      "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-protocol-version": "2025-11-25" },
+      "body": { "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "claudecode/toolUseId": "toolu_01N6iFZGME3Qmc7BZXUVkcxA", "progressToken": 3 } }, "jsonrpc": "2.0", "id": 3 },
+      "status": 200,
+      "expect": { "id": 3, "result": { "content": [{ "type": "text", "text": "<any>" }], "isError": false } },
+      "absent": ["/result/resultType", "/result/_meta"],
+      "called": true
+    },
+    {
+      "name": "2025 : initialize qui demande une autre version reçoit la 2025-11-25",
+      "era": "2025-11-25",
+      "proven_by": "Claude Code 2.1.329 (S0, une requête de même forme)",
+      "body": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "x", "version": "1" } } },
+      "status": 200,
+      "expect": { "id": 0, "result": { "protocolVersion": "2025-11-25" } }
+    },
+    {
+      "name": "2025 : initialize sans protocolVersion",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "body": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "capabilities": {} } },
+      "status": 200,
+      "expect": { "id": 0, "error": { "code": -32602 } }
+    },
+    {
+      "name": "2025 : ping",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 4, "method": "ping" },
+      "status": 200,
+      "expect": { "id": 4, "result": {} },
+      "absent": ["/result/resultType", "/error"]
+    },
+    {
+      "name": "2025 : server/discover sous la 2025-11-25",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 5, "method": "server/discover" },
+      "status": 200,
+      "expect": { "id": 5, "error": { "code": -32601 } }
+    },
+    {
+      "name": "2025 : une méthode inconnue",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 6, "method": "prompts/list" },
+      "status": 200,
+      "expect": { "id": 6, "error": { "code": -32601 } }
+    },
+    {
+      "name": "2025 : resources/read",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 7, "method": "resources/read", "params": { "uri": "mementum://spec/mmd" } },
+      "status": 200,
+      "expect": { "id": 7, "result": { "contents": [{ "uri": "mementum://spec/mmd", "mimeType": "text/markdown", "text": "<any>" }] } },
+      "absent": ["/result/resultType", "/result/ttlMs"]
+    },
+    {
+      "name": "2025 : une ressource inconnue",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 8, "method": "resources/read", "params": { "uri": "mementum://spec/sql" } },
+      "status": 200,
+      "expect": { "id": 8, "error": { "code": -32002, "data": { "uri": "mementum://spec/sql" } } }
+    },
+    {
+      "name": "2025 : tools/list sur /mcp/readonly",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "endpoint": "readonly",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 9, "method": "tools/list" },
+      "status": 200,
+      "expect": { "id": 9, "result": { "tools": [{ "name": "search" }, { "name": "fetch" }, { "name": "workspace_info" }] } }
+    },
+    {
+      "name": "2025 : un outil d'écriture sur /mcp/readonly est un outil inconnu",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "endpoint": "readonly",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": { "name": "create_pages", "arguments": { "pages": [{ "title": "x" }] } } },
+      "status": 200,
+      "expect": { "id": 10, "error": { "code": -32602 } },
+      "called": false
+    },
+    {
+      "name": "2025 : des arguments d'un autre type sont un échec de l'outil",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": ["p"] } } },
+      "status": 200,
+      "expect": { "id": 11, "result": { "isError": true, "structuredContent": { "code": "invalid_arguments" } } },
+      "absent": ["/result/resultType"],
+      "called": false
+    },
+    {
+      "name": "2025 : un refus de l'outil est un résultat isError, pas une erreur JSON-RPC",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": "0193a1b2-0000-7000-8000-000000000009" } } },
+      "status": 200,
+      "expect": { "id": 13, "result": { "content": [{ "type": "text", "text": "<any>" }], "isError": true, "structuredContent": { "code": "not_found" } } },
+      "absent": ["/error", "/result/resultType"],
+      "called": true
+    },
+    {
+      "name": "2025 : les en-têtes Mcp-Method et Mcp-Name ne sont pas jugés",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "autre/chose", "Mcp-Name": "autre" },
+      "body": { "jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": { "name": "workspace_info" } },
+      "status": 200,
+      "expect": { "id": 12, "result": { "isError": false } },
+      "called": true
+    },
+    {
+      "name": "2025 : une requête sans id n'est jamais faite",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "workspace_info" } },
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32600 } },
+      "called": false
+    },
+    {
+      "name": "2025 : un lot JSON-RPC",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": [{ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }, { "jsonrpc": "2.0", "id": 2, "method": "resources/list" }],
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2025 : un JSON illisible",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "raw": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"",
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32700 } }
+    },
+    {
+      "name": "aucune : une requête sans version ni en-tête échoue à la validation des en-têtes",
+      "era": "aucune",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020, "message": "<any>" } },
+      "absent": ["/error/data"]
+    },
+    {
+      "name": "aucune : un MCP-Protocol-Version répété, sans _meta",
+      "era": "aucune",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": ["2025-11-25", "2025-11-25"] },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    },
+    {
+      "name": "aucune : un MCP-Protocol-Version aux caractères non permis, sans _meta",
+      "era": "aucune",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25\u0001" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    },
+    {
+      "name": "aucune : l'en-tête d'une version non servie, sans _meta",
+      "era": "aucune",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-06-18" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32022, "data": { "supported": ["2026-07-28", "2025-11-25"], "requested": "2025-06-18" } } }
+    },
+    {
+      "name": "aucune : un MCP-Protocol-Version qui n'a pas la forme d'une version, sans _meta",
+      "era": "aucune",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "latest" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    },
+    {
+      "name": "aucune : l'en-tête de la 2026-07-28 sans _meta ne dit pas le corps",
+      "era": "aucune",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+      "status": 400,
+      "expect": { "id": 1, "error": { "code": -32020 } }
+    }
+  ]
+}

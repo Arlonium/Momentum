@@ -1,0 +1,25 @@
+[package]
+name = "mementum-mcp"
+description = "Serveur MCP de Mementum, sans réseau : protocole sans état en deux révisions, descripteurs des six outils, mise en texte bornée"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Le nom d'un en-tête `Mcp-Name` écrit en `=?base64?…?=` (Ruling R1236).
+base64.workspace = true
+# Le nombre des lignes de borne d'une sortie, tiré à chaque appel (Ruling R1239).
+getrandom.workspace = true
+# `excerpt` : un message ne recopie jamais une longue part de l'entrée (Ruling R434).
+mementum-md.workspace = true
+# Le schéma d'entrée de chaque outil, dérivé de son type (Ruling R1238).
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Le champ en cause d'arguments refusés, nommé en français (comme `error.rs` du serveur).
+serde_path_to_error.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,684 @@
+{
+  "description": "Les outils du serveur MCP de Mementum, tels que tools/list les rend sur /mcp ; /mcp/readonly ne sert que ceux de « readonly ». Généré par mementum_mcp::tools::catalog : ne pas modifier à la main ; UPDATE_TOOLS=1 cargo test -p mementum-mcp --test protocol tool_schemas_are_the_committed_ones le récrit.",
+  "readonly": [
+    "search",
+    "fetch",
+    "workspace_info"
+  ],
+  "tools": [
+    {
+      "name": "search",
+      "title": "Chercher des pages",
+      "description": "Cherche des pages par leur texte, dans un espace que ton jeton ouvre. Rend, pour chaque page trouvée, son titre, son fil d'Ariane, un extrait et l'alias du bloc trouvé (lis la page ensuite par fetch). 20 pages par réponse ; `more` donne la suite (`after`). Filtres : created_by, edited_after, edited_before.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Les mots cherchés : 200 caractères au plus, 8 mots au plus comptent.",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "space": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "L'espace où chercher, par son nom ou son identifiant. Facultatif si le jeton n'ouvre qu'un espace ; exigé sinon (`workspace_info` les nomme).",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Seulement les pages créées par cette personne (son nom, tel que `workspace_info` le donne, ou l'identifiant de son compte).",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "edited_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Seulement les pages dont le contenu a changé depuis cette date (`AAAA-MM-JJ`, ou date et heure RFC 3339).",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "edited_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Seulement les pages dont le contenu n'a pas changé depuis cette date.",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "La suite d'une recherche : le curseur `more` d'une réponse précédente.",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "description": "`search` : chercher des pages par leur texte."
+      },
+      "annotations": {
+        "title": "Chercher des pages",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "fetch",
+      "title": "Lire une page",
+      "description": "Lit une page en MMD, avec sa révision, ou le plan d'un espace. Le format est décrit par la ressource mementum://spec/mmd. Une page longue est rendue par tranches : reprends avec `from` (l'alias `next`) et `since` (la révision de la première tranche) ; une tranche dit alors quels blocs déjà lus ont changé depuis (relis-les avant de les modifier). Donne la révision de la dernière tranche à update_page. `anchors: true` écrit l'alias de chaque bloc (`^bk7qa`), pour viser un bloc.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Ce qu'on lit : l'identifiant ou l'adresse d'une page, ou le nom ou l'identifiant d'un espace (son plan).",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "anchors": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Écrire l'alias de chaque bloc en ancre (`^bk7qa`), pour viser un bloc dans `update_page`."
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reprendre une lecture coupée : l'alias `next` de la tranche précédente.",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Avec `from` : la révision de la première tranche, pour savoir ce qui a changé depuis.",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 1,
+            "description": "Octets de MMD rendus au plus : 24 576 par défaut, 65 536 au plus.",
+            "maximum": 65536
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "description": "`fetch` : lire une page, ou le plan d'un espace."
+      },
+      "annotations": {
+        "title": "Lire une page",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "create_pages",
+      "title": "Créer des pages",
+      "description": "Crée des pages (20 au plus), leur contenu en MMD, sous une page ou à la racine d'un espace (section `private` par défaut, ou `space`). Toutes sont créées, ou aucune. Les images, vidéos et sons du web ne sont pas admis. Si la réponse ne t'arrive pas, cherche les pages (search) avant de réessayer : elles existent peut-être déjà.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "space": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "L'espace, par son nom ou son identifiant, pour créer à sa racine. Facultatif si le jeton n'ouvre qu'un espace, ou si `parent` est donné.",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "La page sous laquelle créer, par son identifiant ou son adresse.",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "section": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "const": "private",
+                    "description": "« Privé » : la page n'est vue que par toi."
+                  },
+                  {
+                    "type": "string",
+                    "const": "space",
+                    "description": "« Espace » : la page est vue par les membres de l'espace."
+                  }
+                ],
+                "description": "La section d'une page créée à la racine d'un espace."
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "À la racine : `private` (par défaut) ou `space`."
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "description": "Une page à créer.",
+              "type": "object",
+              "properties": {
+                "title": {
+                  "description": "Son titre : 500 caractères au plus (vide : « Sans titre »).",
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "markdown": {
+                  "description": "Son contenu, en MMD (voir la ressource `mementum://spec/mmd`).",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "title"
+              ]
+            },
+            "description": "Les pages, 20 au plus, créées toutes ou aucune.",
+            "minItems": 1,
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "pages"
+        ],
+        "description": "`create_pages` : créer des pages, sous une page ou à la racine d'un espace."
+      },
+      "annotations": {
+        "title": "Créer des pages",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "update_page",
+      "title": "Modifier une page",
+      "description": "Change le contenu d'une page par une liste d'opérations (100 au plus), appliquées toutes ou aucune : str_replace (remplacer un texte, l'opération à préférer), insert, replace_block, delete_block, move_block, replace_page (page neuve ou petite seulement) et set_properties (le titre). Donne `base_revision`, la révision de ta dernière lecture : si les blocs que tu touches ont changé depuis, l'appel est refusé (revision_conflict), avec les blocs à jour. `mode` vaut `direct`, le seul servi aujourd'hui : ce que tu écris est écrit tout de suite, et l'historique de la page le garde.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "type": "string",
+            "description": "La page, par son identifiant ou son adresse.",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "base_revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "La révision de la dernière lecture (`fetch`). Exigée par `replace_page`, `replace_block` et `delete_block`.",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "on_conflict": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "const": "rebase",
+                    "description": "Écrire si les blocs touchés n'ont pas changé (par défaut)."
+                  },
+                  {
+                    "type": "string",
+                    "const": "fail",
+                    "description": "Refuser dès que la page a changé."
+                  }
+                ],
+                "description": "Que faire quand la page a changé depuis `base_revision`."
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`rebase` (par défaut) ou `fail`."
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "const": "direct",
+                    "description": "Écrire tout de suite (le seul mode servi aujourd'hui, et le défaut)."
+                  },
+                  {
+                    "type": "string",
+                    "const": "suggest",
+                    "description": "Proposer sans écrire : pas encore servi."
+                  },
+                  {
+                    "type": "string",
+                    "const": "branch",
+                    "description": "Écrire dans une branche : pas encore servi."
+                  }
+                ],
+                "description": "Le mode d'écriture."
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`direct` (par défaut, le seul servi aujourd'hui)."
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "description": "Une opération d'`update_page` (§6.3). Les ancres sont les alias rendus par `fetch` avec `anchors` (`bk7qa`), ou l'identifiant entier d'un bloc.",
+              "oneOf": [
+                {
+                  "description": "Remplacer un texte par un autre, dans le texte brut d'un bloc (jamais à cheval sur deux blocs). `old` doit se trouver une seule fois dans la page, ou dans le bloc `anchor`, sauf `replace_all`. `new` est du texte brut, qui prend la mise en forme du premier caractère remplacé.",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string",
+                      "const": "str_replace"
+                    },
+                    "old": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "new": {
+                      "type": "string"
+                    },
+                    "replace_all": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "anchor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "maxLength": 120
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "op",
+                    "old",
+                    "new"
+                  ]
+                },
+                {
+                  "description": "Insérer des blocs (MMD) après ou avant un bloc, ou au début ou à la fin de la page : un seul de `after`, `before`, `position`.",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string",
+                      "const": "insert"
+                    },
+                    "after": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "before": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "position": {
+                      "description": "Une place dans la page, au début ou à la fin.",
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "start",
+                        "end",
+                        null
+                      ]
+                    },
+                    "markdown": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "op",
+                    "markdown"
+                  ]
+                },
+                {
+                  "description": "Remplacer un bloc et ses sous-blocs par des blocs (MMD). Demande `base_revision`.",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string",
+                      "const": "replace_block"
+                    },
+                    "anchor": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "markdown": {
+                      "type": "string"
+                    },
+                    "allow_deleting_content": {
+                      "description": "Permettre de retirer un lien de sous-page, une base, un bloc synchronisé ou un bloc inconnu.",
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "op",
+                    "anchor",
+                    "markdown"
+                  ]
+                },
+                {
+                  "description": "Retirer un bloc et ses sous-blocs. Demande `base_revision`.",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string",
+                      "const": "delete_block"
+                    },
+                    "anchor": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "allow_deleting_content": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "op",
+                    "anchor"
+                  ]
+                },
+                {
+                  "description": "Déplacer un bloc parmi les blocs de la page : un seul de `after`, `before`, `position`.",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string",
+                      "const": "move_block"
+                    },
+                    "anchor": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "after": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "before": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "position": {
+                      "description": "Une place dans la page, au début ou à la fin.",
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "start",
+                        "end",
+                        null
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "op",
+                    "anchor"
+                  ]
+                },
+                {
+                  "description": "Récrire toute la page (MMD) : seulement pour une page neuve ou petite. Demande `base_revision` ; refusé tant que quelqu'un écrit dans la page.",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string",
+                      "const": "replace_page"
+                    },
+                    "markdown": {
+                      "type": "string"
+                    },
+                    "allow_deleting_content": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "op",
+                    "markdown"
+                  ]
+                },
+                {
+                  "description": "Changer les propriétés de la page : le titre seul aujourd'hui.",
+                  "type": "object",
+                  "properties": {
+                    "op": {
+                      "type": "string",
+                      "const": "set_properties"
+                    },
+                    "properties": {
+                      "description": "Les propriétés d'une page qu'on peut changer : le titre seul aujourd'hui.",
+                      "type": "object",
+                      "properties": {
+                        "title": {
+                          "description": "Le nouveau titre : 500 caractères au plus.",
+                          "type": "string",
+                          "maxLength": 500
+                        }
+                      },
+                      "additionalProperties": false,
+                      "required": [
+                        "title"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "op",
+                    "properties"
+                  ]
+                }
+              ]
+            },
+            "description": "Les opérations, 100 au plus : toutes s'appliquent, ou aucune.",
+            "minItems": 1,
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "page",
+          "operations"
+        ],
+        "description": "`update_page` : changer le contenu d'une page, par une liste d'opérations atomique."
+      },
+      "annotations": {
+        "title": "Modifier une page",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "manage_pages",
+      "title": "Ranger une page",
+      "description": "Déplace une page parmi ses pages sœurs (jamais sous une autre page), la renomme, la duplique avec ses sous-pages, la met à la corbeille (si ton jeton le permet) ou l'en sort. Une page par appel.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "move",
+                "description": "Changer de place parmi les pages sœurs (jamais sous une autre page)."
+              },
+              {
+                "type": "string",
+                "const": "rename",
+                "description": "Changer le titre (`title`)."
+              },
+              {
+                "type": "string",
+                "const": "duplicate",
+                "description": "Dupliquer la page et ses sous-pages."
+              },
+              {
+                "type": "string",
+                "const": "trash",
+                "description": "Mettre à la corbeille (si le jeton le permet)."
+              },
+              {
+                "type": "string",
+                "const": "restore",
+                "description": "Sortir de la corbeille."
+              }
+            ],
+            "description": "Le geste de `manage_pages`."
+          },
+          "page": {
+            "type": "string",
+            "description": "La page, par son identifiant ou son adresse.",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pour `move` : la page sœur après laquelle la placer ; sans `after`, elle passe en premier.",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pour `rename` : le nouveau titre, 500 caractères au plus.",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "action",
+          "page"
+        ],
+        "description": "`manage_pages` : déplacer, renommer, dupliquer, mettre à la corbeille, restaurer une page."
+      },
+      "annotations": {
+        "title": "Ranger une page",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "workspace_info",
+      "title": "Qui suis-je",
+      "description": "Dit qui tu es, ce que ton jeton permet (niveau, portée, échéance) et les espaces qu'il ouvre ; avec `space`, les membres de cet espace (nom et rôle) et ses pages de premier niveau. Commence par lui pour trouver le nom ou l'identifiant d'un espace.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "space": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Un espace, par son nom ou son identifiant : ses membres et ses pages de premier niveau.",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "description": "`workspace_info` : qui je suis, ce que mon jeton ouvre."
+      },
+      "annotations": {
+        "title": "Qui suis-je",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    }
+  ]
+}
