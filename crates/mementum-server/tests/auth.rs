@@ -1183,7 +1183,10 @@ async fn secrets_never_leave() {
         1,
         "la base garde le SHA-256 du jeton"
     );
-    let files = common::data_bytes(&t.cfg.data_dir);
+    // L'application arrêtée d'abord : tant qu'elle vit, l'index plein texte tient son fichier de
+    // verrou (illisible sous Windows), et retire des fichiers en fusionnant (Ruling R1011).
+    let (_dir, cfg) = t.stop().await;
+    let files = common::data_bytes(&cfg.data_dir);
     assert!(!files.is_empty());
     for secret in [PASSWORD, NEW_PASSWORD, value.as_str(), last.as_str()] {
         assert!(

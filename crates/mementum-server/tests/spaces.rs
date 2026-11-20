@@ -1302,7 +1302,10 @@ async fn invitation_token_is_shown_once() {
         .await,
         1
     );
-    let files = common::data_bytes(&t.cfg.data_dir);
+    // L'application arrêtée d'abord : tant qu'elle vit, l'index plein texte tient son fichier de
+    // verrou (illisible sous Windows), et retire des fichiers en fusionnant (Ruling R1011).
+    let (_dir, cfg) = t.stop().await;
+    let files = common::data_bytes(&cfg.data_dir);
     assert!(
         !files
             .windows(token.len())

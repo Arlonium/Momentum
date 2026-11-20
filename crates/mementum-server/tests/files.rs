@@ -464,7 +464,8 @@ async fn upload_is_kept_under_its_hash_and_never_under_its_name() {
         .filter(|name| !name.starts_with("mementum.db"))
         .collect();
     top.sort();
-    assert_eq!(top, ["files"]);
+    // Avec le dépôt, le dossier de l'index plein texte (lot 4), et rien d'autre.
+    assert_eq!(top, ["files", "search"]);
 }
 
 /// `name` fait `len` caractères hexadécimaux en minuscules.
