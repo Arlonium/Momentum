@@ -26,7 +26,9 @@ pub mod spec;
 pub mod text;
 pub mod tools;
 
-pub use protocol::{Answer, Endpoint, Era, Headers, Id, Incoming, Reply, Request};
+pub use protocol::{
+    Answer, CallOutcome, Endpoint, Era, Headers, Id, Incoming, Refused, Reply, Request,
+};
 pub use text::ToolOutput;
 pub use tools::ToolCall;
 
@@ -40,8 +42,19 @@ pub trait Host {
     fn call(&self, call: ToolCall) -> impl Future<Output = ToolOutput> + Send;
 }
 
+/// Ce que [`serve`] rend : la réponse, et l'issue d'un `tools/call` (aucune pour une autre
+/// méthode), que la route écrit au journal d'activité (Rulings R1244, R1560).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Served {
+    pub reply: Reply,
+    pub call: Option<CallOutcome>,
+}
+
 /// Répond à une requête de bout en bout : la lit ([`protocol::read`]), fait l'appel d'outil par
-/// `host`, et met la réponse en forme pour l'ère de la requête ([`protocol::write`]).
+/// `host`, et met la réponse en forme pour l'ère de la requête ([`protocol::write`]). Rend aussi
+/// l'issue de chaque `tools/call` : réussi, refusé par l'outil, refusé par [`tools::parse`], ou
+/// refusé par le protocole avant (outil inconnu ou d'écriture sur `/mcp/readonly`, en-tête qui ne
+/// dit pas le corps, requête sans `id`…).
 ///
 /// `headers` porte les valeurs reçues de `MCP-Protocol-Version`, `Mcp-Method` et `Mcp-Name` ;
 /// `body`, le corps du `POST` ; `endpoint`, l'adresse appelée (`/mcp` ou `/mcp/readonly`). La
@@ -52,27 +65,50 @@ pub async fn serve<H: Host + Sync>(
     body: &[u8],
     endpoint: Endpoint,
     host: &H,
-) -> Reply {
+) -> Served {
     let incoming = match protocol::read(headers, body, endpoint) {
         Ok(incoming) => incoming,
-        Err(reply) => return reply,
+        Err(refused) => {
+            let Refused { reply, call } = *refused;
+            return Served { reply, call };
+        }
     };
     let Some(id) = incoming.id else {
-        return Reply::accepted();
+        return Served {
+            reply: Reply::accepted(),
+            call: None,
+        };
     };
+    let mut call = None;
     let answer = match incoming.request {
-        Request::Discover => Answer::Discover,
-        Request::Initialize => Answer::Initialize,
+        Request::Discover => Answer::Discover(endpoint),
+        Request::Initialize => Answer::Initialize(endpoint),
         Request::Ping => Answer::Ping,
         Request::ToolsList => Answer::ToolsList(endpoint),
-        Request::ToolsCall { name, arguments } => match tools::parse(&name, arguments) {
-            Ok(call) => Answer::ToolResult(host.call(call).await),
-            Err(refused) => Answer::ToolResult(refused),
-        },
+        Request::ToolsCall { name, arguments } => {
+            let output = match tools::parse(&name, arguments) {
+                Ok(tool_call) => host.call(tool_call).await,
+                Err(refused) => refused,
+            };
+            call = Some(CallOutcome {
+                tool: name,
+                code: output.code().map(str::to_string),
+            });
+            Answer::ToolResult(output)
+        }
         Request::ResourcesList => Answer::ResourcesList,
+        Request::ResourceTemplatesList => Answer::ResourceTemplatesList,
         Request::ResourcesRead { uri } => Answer::ResourceRead(uri),
         // Une notification n'a pas d'`id` : traitée plus haut.
-        Request::Initialized | Request::Notification => return Reply::accepted(),
+        Request::Initialized | Request::Notification => {
+            return Served {
+                reply: Reply::accepted(),
+                call: None,
+            };
+        }
     };
-    protocol::write(incoming.era, &id, answer)
+    Served {
+        reply: protocol::write(incoming.era, &id, answer),
+        call,
+    }
 }

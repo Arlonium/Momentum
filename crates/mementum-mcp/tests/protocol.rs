@@ -16,7 +16,7 @@ use mementum_mcp::protocol::{
 };
 use mementum_mcp::text::{self, SpaceLine, TokenLine, Workspace};
 use mementum_mcp::tools::{self, ToolCall};
-use mementum_mcp::{Host, Reply, ToolOutput, serve, spec};
+use mementum_mcp::{Host, Reply, Served, ToolOutput, serve, spec};
 use serde_json::{Value, json};
 
 /// Mène un futur qui ne s'endort jamais (les hôtes de ces tests répondent tout de suite).
@@ -136,7 +136,7 @@ impl Call {
         }
     }
 
-    fn serve(&self, host: &FakeHost) -> Reply {
+    fn served(&self, host: &FakeHost) -> Served {
         let version: Vec<&[u8]> = self.version.iter().map(Vec::as_slice).collect();
         let method: Vec<&[u8]> = self.method.iter().map(Vec::as_slice).collect();
         let name: Vec<&[u8]> = self.name.iter().map(Vec::as_slice).collect();
@@ -146,6 +146,10 @@ impl Call {
             name: &name,
         };
         block_on(serve(&headers, &self.body, self.endpoint, host))
+    }
+
+    fn serve(&self, host: &FakeHost) -> Reply {
+        self.served(host).reply
     }
 }
 
@@ -198,7 +202,25 @@ fn the_message_table_holds_in_both_eras() {
             "{name} : « proven_by » manque"
         );
         let host = FakeHost::default();
-        let reply = Call::from_case(case).serve(&host);
+        let served = Call::from_case(case).served(&host);
+        let reply = &served.reply;
+        // L'issue d'un `tools/call`, que le serveur écrit à son journal d'activité (R1244).
+        let is_call = case.pointer("/body/method").and_then(Value::as_str) == Some("tools/call");
+        match (case.get("outcome"), &served.call) {
+            (Some(Value::Null), _) => failures.push(format!("{name} : « outcome » null")),
+            (Some(expected), Some(found)) => {
+                let found = json!({ "tool": found.tool, "code": found.code });
+                if &found != expected {
+                    failures.push(format!("{name} : issue {found} au lieu de {expected}"));
+                }
+            }
+            (Some(_), None) => failures.push(format!("{name} : aucune issue rendue")),
+            (None, Some(found)) if !is_call => {
+                failures.push(format!("{name} : issue {found:?} pour une autre méthode"));
+            }
+            (None, None) if is_call => failures.push(format!("{name} : aucune issue rendue")),
+            (None, _) => {}
+        }
         let status = case["status"].as_u64().unwrap() as u16;
         if reply.status != status {
             failures.push(format!(
@@ -262,13 +284,15 @@ fn every_2026_result_carries_its_result_type() {
     .id
     .unwrap();
     let answers = [
-        Answer::Discover,
-        Answer::Initialize,
+        Answer::Discover(Endpoint::Full),
+        Answer::Discover(Endpoint::ReadOnly),
+        Answer::Initialize(Endpoint::Full),
         Answer::Ping,
         Answer::ToolsList(Endpoint::Full),
         Answer::ToolsList(Endpoint::ReadOnly),
         Answer::ToolResult(text::error("not_found", "Introuvable.", None)),
         Answer::ResourcesList,
+        Answer::ResourceTemplatesList,
         Answer::ResourceRead(spec::MMD_URI.to_string()),
     ];
     for answer in answers {
@@ -375,7 +399,8 @@ fn malformed_messages_get_an_error_and_cost_nothing() {
     };
     let unterminated =
         |n: usize| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{}"#, "a".repeat(n));
-    let deep = |n: usize| "[".repeat(n);
+    // Des objets imbriqués (un `[` en tête serait refusé comme un lot sans être lu).
+    let deep = |n: usize| r#"{"a":"#.repeat(n);
     let long_method = move |n: usize| {
         format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"{}","params":{{{meta}}}}}"#,
@@ -430,7 +455,7 @@ fn malformed_messages_get_an_error_and_cost_nothing() {
     let builds: Vec<(&str, Build)> = vec![
         ("un lot", Box::new(batch)),
         ("un JSON coupé", Box::new(unterminated)),
-        ("des crochets imbriqués", Box::new(deep)),
+        ("des objets imbriqués", Box::new(deep)),
         ("une méthode inconnue et longue", Box::new(long_method)),
         ("une version longue", Box::new(long_version)),
         ("un id long", Box::new(long_id)),
@@ -732,10 +757,26 @@ fn refused_arguments_name_the_field_and_show_an_example() {
             json!({ "action": "trash", "page": "p", "after": "q" }),
             "after",
         ),
+        (
+            "update_page",
+            json!({ "page": "p", "operations": [{ "op": "move_block", "anchor": "b" }] }),
+            "after",
+        ),
+        (
+            "update_page",
+            json!({ "page": "p", "operations": [{ "op": "move_block", "anchor": "b", "before": "c", "position": "end" }] }),
+            "position",
+        ),
+        (
+            "update_page",
+            json!({ "page": "p", "operations": [{ "op": "set_properties", "properties": { "title": "t".repeat(501) } }] }),
+            "title",
+        ),
     ];
     for (tool, arguments, field) in cases {
         let refused = tools::parse(tool, arguments.as_object().unwrap().clone()).unwrap_err();
         assert!(refused.is_error(), "{tool} {arguments}");
+        assert_eq!(refused.code(), Some("invalid_arguments"));
         let text = refused.text();
         assert!(
             text.contains("invalid_arguments"),
@@ -747,9 +788,205 @@ fn refused_arguments_name_the_field_and_show_an_example() {
         );
         assert!(text.contains("Exemple"), "{tool} : {text}");
         assert!(text.len() < 2_048, "{tool} : {} octets", text.len());
-        let structured = refused.structured().unwrap();
-        assert_eq!(structured["code"], "invalid_arguments");
     }
+}
+
+/// Une valeur refusée ne se glisse pas dans la liste des valeurs attendues : « attendu » se lit
+/// sur la dernière occurrence de la tournure de serde, pas sur une que l'entrée écrirait.
+#[test]
+fn a_refused_value_cannot_slip_into_the_expected_list() {
+    let value = format!("{}, expected PIRATE", "a".repeat(70));
+    let refused = tools::parse(
+        "manage_pages",
+        json!({ "action": value, "page": "p" })
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap_err();
+    assert!(!refused.text().contains("PIRATE"), "{}", refused.text());
+    assert!(refused.text().contains("rename"), "{}", refused.text());
+}
+
+/// Aucun résultat d'outil ne porte `structuredContent`, refus compris (Ruling R1412) : Claude
+/// Code ne passerait au modèle que lui, et le texte porte tout.
+#[test]
+fn no_tool_result_carries_structured_content() {
+    let id = protocol::read(
+        &Headers::default(),
+        br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+        Endpoint::Full,
+    )
+    .unwrap()
+    .id
+    .unwrap();
+    let outputs = [
+        text::error("token_busy", "Trop d'appels.", Some(12)),
+        text::refusal(&text::Refusal {
+            code: "operation_failed".into(),
+            message: "Introuvable.".into(),
+            operation: Some((0, "no_match".into())),
+            candidates: vec![text::Candidate {
+                alias: "bk7qa".into(),
+                text: "Proche.".into(),
+            }],
+            conflict: Some(("r_0123456789abcdef".into(), "Bloc.\n".into())),
+            ..text::Refusal::default()
+        }),
+        tools::parse("fetch", serde_json::Map::new()).unwrap_err(),
+        text::created(&[]),
+    ];
+    for output in outputs {
+        for era in [Era::V2026_07_28, Era::V2025_11_25] {
+            let body = protocol::write(era, &id, Answer::ToolResult(output.clone()))
+                .body
+                .unwrap();
+            assert!(body["result"].get("structuredContent").is_none(), "{body}");
+        }
+    }
+    // Ce que portait `structuredContent` est dans le texte.
+    let busy = text::error("token_busy", "Trop d'appels.", Some(12));
+    assert!(busy.text().contains("token_busy") && busy.text().contains("retry_after_seconds: 12"));
+    assert_eq!(busy.code(), Some("token_busy"));
+    assert_eq!(text::created(&[]).code(), None);
+}
+
+/// La ressource suffit pour écrire un MMD canonique : elle porte les règles de base (marques,
+/// espaces de bord, échappements, débuts de ligne, clôtures), et la règle des alias (R1224).
+#[test]
+fn the_spec_resource_carries_the_base_rules_and_the_alias_rule() {
+    for mark in [
+        "&#32;",
+        "&lt;",
+        "&amp;",
+        "`\\#`",
+        "`1\\.`",
+        "<strong>",
+        "backticks",
+        "ambiguous_anchor",
+        "s'allonge",
+    ] {
+        assert!(
+            spec::MMD.contains(mark),
+            "« {mark} » manque à spec/mmd/SPEC.md"
+        );
+    }
+}
+
+/// Les bornes d'une lecture (Ruling R1225, révisé à la relecture de M1) : 24 Kio de MMD par
+/// défaut, 48 Kio au plus, et une sortie entière sous 56 Kio ; le schéma de `fetch` dit la même
+/// borne.
+#[test]
+fn the_read_bounds_follow_r1225() {
+    assert_eq!(tools::DEFAULT_LIMIT, 24 * 1024);
+    assert_eq!(tools::MAX_LIMIT, 48 * 1024);
+    assert_eq!(text::MAX_CONTENT_BYTES, 48 * 1024);
+    assert_eq!(text::MAX_OUTPUT_BYTES, 56 * 1024);
+    let fetch = tools::find("fetch", Endpoint::Full).unwrap();
+    assert_eq!(
+        fetch.input_schema["properties"]["limit"]["maximum"],
+        json!(tools::MAX_LIMIT)
+    );
+}
+
+/// Les plafonds des schémas sont les constantes que juge `tools::parse`.
+#[test]
+fn schema_bounds_are_the_constants() {
+    let schema = |tool: &str| tools::find(tool, Endpoint::Full).unwrap().input_schema;
+    let search = schema("search");
+    assert_eq!(
+        search["properties"]["query"]["maxLength"],
+        json!(tools::MAX_QUERY_CHARS)
+    );
+    assert_eq!(
+        search["properties"]["space"]["maxLength"],
+        json!(tools::MAX_NAME_CHARS)
+    );
+    assert_eq!(
+        schema("fetch")["properties"]["id"]["maxLength"],
+        json!(tools::MAX_PAGE_REF_CHARS)
+    );
+    let create = schema("create_pages");
+    assert_eq!(
+        create["properties"]["pages"]["maxItems"],
+        json!(tools::MAX_PAGES)
+    );
+    assert_eq!(
+        create["properties"]["pages"]["items"]["properties"]["title"]["maxLength"],
+        json!(tools::MAX_TITLE_CHARS)
+    );
+    let update = schema("update_page");
+    assert_eq!(
+        update["properties"]["operations"]["maxItems"],
+        json!(tools::MAX_OPERATIONS)
+    );
+    let catalog = serde_json::to_string(&update).unwrap();
+    assert!(catalog.contains(&format!("\"maxLength\":{}", tools::MAX_OLD_CHARS)));
+    assert!(catalog.contains(&format!("\"maxLength\":{}", tools::MAX_ANCHOR_CHARS)));
+}
+
+/// Seul `Mcp-Name` se dit en `=?base64?…?=` : le refus d'un autre en-tête aux caractères non
+/// permis ne le propose pas.
+#[test]
+fn only_mcp_name_is_told_to_use_base64() {
+    let mut call = Call::modern("tools/list", None, json!({}));
+    call.method = vec!["tools/listé".as_bytes().to_vec()];
+    let reply = call.serve(&FakeHost::default());
+    let message = reply.body.unwrap()["error"]["message"].to_string();
+    assert!(!message.contains("base64"), "{message}");
+    let mut call = Call::modern(
+        "tools/call",
+        Some("x"),
+        json!({ "name": "workspace_info", "arguments": {} }),
+    );
+    call.name = vec!["workspace_infoé".as_bytes().to_vec()];
+    let message = call.serve(&FakeHost::default()).body.unwrap()["error"]["message"].to_string();
+    assert!(message.contains("base64"), "{message}");
+}
+
+/// `/mcp/readonly` a ses propres instructions : elles ne parlent pas d'écrire.
+#[test]
+fn the_readonly_endpoint_has_its_own_instructions() {
+    let mut call = Call::modern("server/discover", None, json!({}));
+    let full = call.serve(&FakeHost::default()).body.unwrap();
+    call.endpoint = Endpoint::ReadOnly;
+    let readonly = call.serve(&FakeHost::default()).body.unwrap();
+    let (full, readonly) = (
+        full["result"]["instructions"].as_str().unwrap().to_string(),
+        readonly["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    );
+    assert!(full.contains("update_page"));
+    for write in ["create_pages", "update_page", "manage_pages"] {
+        assert!(!readonly.contains(write), "{write} : {readonly}");
+    }
+    assert!(readonly.contains("search") && readonly.contains("fetch"));
+    let legacy = protocol::write(
+        Era::V2025_11_25,
+        &protocol::read(
+            &Headers::default(),
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}"#,
+            Endpoint::ReadOnly,
+        )
+        .unwrap()
+        .id
+        .unwrap(),
+        Answer::Initialize(Endpoint::ReadOnly),
+    );
+    assert_eq!(legacy.body.unwrap()["result"]["instructions"], readonly);
+}
+
+/// La description d'`update_page` dit que le défaut de `mode` pourra devenir `suggest` (R1211).
+#[test]
+fn the_update_page_description_says_the_default_mode_may_become_suggest() {
+    let update = tools::find("update_page", Endpoint::Full).unwrap();
+    assert!(
+        update.description.contains("suggest"),
+        "{}",
+        update.description
+    );
 }
 
 /// Une requête que le protocole refuse n'appelle jamais l'outil ; une requête sans `id` non plus

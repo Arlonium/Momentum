@@ -35,37 +35,37 @@ pub const MAX_PAGES: usize = 20;
 pub const MAX_OPERATIONS: usize = 100;
 /// Octets de MMD d'une lecture : par défaut, et au plus (Ruling R1225).
 pub const DEFAULT_LIMIT: u32 = 24 * 1024;
-pub const MAX_LIMIT: u32 = 64 * 1024;
+pub const MAX_LIMIT: u32 = 48 * 1024;
 
 /// `search` : chercher des pages par leur texte.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchInput {
     /// Les mots cherchés : 200 caractères au plus, 8 mots au plus comptent.
-    #[schemars(length(min = 1, max = 200))]
+    #[schemars(length(min = 1, max = MAX_QUERY_CHARS))]
     pub query: String,
     /// L'espace où chercher, par son nom ou son identifiant. Facultatif si le jeton n'ouvre qu'un
     /// espace ; exigé sinon (`workspace_info` les nomme).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 200))]
+    #[schemars(length(min = 1, max = MAX_NAME_CHARS))]
     pub space: Option<String>,
     /// Seulement les pages créées par cette personne (son nom, tel que `workspace_info` le
     /// donne, ou l'identifiant de son compte).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 200))]
+    #[schemars(length(min = 1, max = MAX_NAME_CHARS))]
     pub created_by: Option<String>,
     /// Seulement les pages dont le contenu a changé depuis cette date (`AAAA-MM-JJ`, ou date et
     /// heure RFC 3339).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 120))]
+    #[schemars(length(min = 1, max = MAX_TOKEN_CHARS))]
     pub edited_after: Option<String>,
     /// Seulement les pages dont le contenu n'a pas changé depuis cette date.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 120))]
+    #[schemars(length(min = 1, max = MAX_TOKEN_CHARS))]
     pub edited_before: Option<String>,
     /// La suite d'une recherche : le curseur `more` d'une réponse précédente.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 120))]
+    #[schemars(length(min = 1, max = MAX_TOKEN_CHARS))]
     pub after: Option<String>,
 }
 
@@ -75,22 +75,22 @@ pub struct SearchInput {
 pub struct FetchInput {
     /// Ce qu'on lit : l'identifiant ou l'adresse d'une page, ou le nom ou l'identifiant d'un
     /// espace (son plan).
-    #[schemars(length(min = 1, max = 2048))]
+    #[schemars(length(min = 1, max = MAX_PAGE_REF_CHARS))]
     pub id: String,
     /// Écrire l'alias de chaque bloc en ancre (`^bk7qa`), pour viser un bloc dans `update_page`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchors: Option<bool>,
     /// Reprendre une lecture coupée : l'alias `next` de la tranche précédente.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 120))]
+    #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
     pub from: Option<String>,
     /// Avec `from` : la révision de la première tranche, pour savoir ce qui a changé depuis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 120))]
+    #[schemars(length(min = 1, max = MAX_TOKEN_CHARS))]
     pub since: Option<String>,
-    /// Octets de MMD rendus au plus : 24 576 par défaut, 65 536 au plus.
+    /// Octets de MMD rendus au plus : 24 576 par défaut, 49 152 au plus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 65536))]
+    #[schemars(range(min = 1, max = MAX_LIMIT))]
     pub limit: Option<u32>,
 }
 
@@ -109,7 +109,7 @@ pub enum Section {
 #[serde(deny_unknown_fields)]
 pub struct NewPage {
     /// Son titre : 500 caractères au plus (vide : « Sans titre »).
-    #[schemars(length(max = 500))]
+    #[schemars(length(max = MAX_TITLE_CHARS))]
     pub title: String,
     /// Son contenu, en MMD (voir la ressource `mementum://spec/mmd`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,17 +123,17 @@ pub struct CreatePagesInput {
     /// L'espace, par son nom ou son identifiant, pour créer à sa racine. Facultatif si le jeton
     /// n'ouvre qu'un espace, ou si `parent` est donné.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 200))]
+    #[schemars(length(min = 1, max = MAX_NAME_CHARS))]
     pub space: Option<String>,
     /// La page sous laquelle créer, par son identifiant ou son adresse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 2048))]
+    #[schemars(length(min = 1, max = MAX_PAGE_REF_CHARS))]
     pub parent: Option<String>,
     /// À la racine : `private` (par défaut) ou `space`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section: Option<Section>,
     /// Les pages, 20 au plus, créées toutes ou aucune.
-    #[schemars(length(min = 1, max = 20))]
+    #[schemars(length(min = 1, max = MAX_PAGES))]
     pub pages: Vec<NewPage>,
 }
 
@@ -172,7 +172,7 @@ pub enum Position {
 #[serde(deny_unknown_fields)]
 pub struct Properties {
     /// Le nouveau titre : 500 caractères au plus.
-    #[schemars(length(max = 500))]
+    #[schemars(length(max = MAX_TITLE_CHARS))]
     pub title: String,
 }
 
@@ -186,23 +186,23 @@ pub enum Operation {
     /// `replace_all`. `new` est du texte brut, qui prend la mise en forme du premier caractère
     /// remplacé.
     StrReplace {
-        #[schemars(length(min = 1, max = 2000))]
+        #[schemars(length(min = 1, max = MAX_OLD_CHARS))]
         old: String,
         new: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replace_all: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schemars(length(min = 1, max = 120))]
+        #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         anchor: Option<String>,
     },
     /// Insérer des blocs (MMD) après ou avant un bloc, ou au début ou à la fin de la page : un
     /// seul de `after`, `before`, `position`.
     Insert {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schemars(length(min = 1, max = 120))]
+        #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         after: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schemars(length(min = 1, max = 120))]
+        #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         before: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<Position>,
@@ -210,7 +210,7 @@ pub enum Operation {
     },
     /// Remplacer un bloc et ses sous-blocs par des blocs (MMD). Demande `base_revision`.
     ReplaceBlock {
-        #[schemars(length(min = 1, max = 120))]
+        #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         anchor: String,
         markdown: String,
         /// Permettre de retirer un lien de sous-page, une base, un bloc synchronisé ou un bloc
@@ -220,20 +220,20 @@ pub enum Operation {
     },
     /// Retirer un bloc et ses sous-blocs. Demande `base_revision`.
     DeleteBlock {
-        #[schemars(length(min = 1, max = 120))]
+        #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         anchor: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_deleting_content: Option<bool>,
     },
     /// Déplacer un bloc parmi les blocs de la page : un seul de `after`, `before`, `position`.
     MoveBlock {
-        #[schemars(length(min = 1, max = 120))]
+        #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         anchor: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schemars(length(min = 1, max = 120))]
+        #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         after: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schemars(length(min = 1, max = 120))]
+        #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         before: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<Position>,
@@ -254,12 +254,12 @@ pub enum Operation {
 #[serde(deny_unknown_fields)]
 pub struct UpdatePageInput {
     /// La page, par son identifiant ou son adresse.
-    #[schemars(length(min = 1, max = 2048))]
+    #[schemars(length(min = 1, max = MAX_PAGE_REF_CHARS))]
     pub page: String,
     /// La révision de la dernière lecture (`fetch`). Exigée par `replace_page`, `replace_block`
     /// et `delete_block`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 120))]
+    #[schemars(length(min = 1, max = MAX_TOKEN_CHARS))]
     pub base_revision: Option<String>,
     /// `rebase` (par défaut) ou `fail`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -268,7 +268,7 @@ pub struct UpdatePageInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<Mode>,
     /// Les opérations, 100 au plus : toutes s'appliquent, ou aucune.
-    #[schemars(length(min = 1, max = 100))]
+    #[schemars(length(min = 1, max = MAX_OPERATIONS))]
     pub operations: Vec<Operation>,
 }
 
@@ -294,15 +294,15 @@ pub enum PageAction {
 pub struct ManagePagesInput {
     pub action: PageAction,
     /// La page, par son identifiant ou son adresse.
-    #[schemars(length(min = 1, max = 2048))]
+    #[schemars(length(min = 1, max = MAX_PAGE_REF_CHARS))]
     pub page: String,
     /// Pour `move` : la page sœur après laquelle la placer ; sans `after`, elle passe en premier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 2048))]
+    #[schemars(length(min = 1, max = MAX_PAGE_REF_CHARS))]
     pub after: Option<String>,
     /// Pour `rename` : le nouveau titre, 500 caractères au plus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 500))]
+    #[schemars(length(max = MAX_TITLE_CHARS))]
     pub title: Option<String>,
 }
 
@@ -312,7 +312,7 @@ pub struct ManagePagesInput {
 pub struct WorkspaceInfoInput {
     /// Un espace, par son nom ou son identifiant : ses membres et ses pages de premier niveau.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(min = 1, max = 200))]
+    #[schemars(length(min = 1, max = MAX_NAME_CHARS))]
     pub space: Option<String>,
 }
 
@@ -463,8 +463,10 @@ const SPECS: [Spec; 6] = [
                       (page neuve ou petite seulement) et set_properties (le titre). Donne \
                       `base_revision`, la révision de ta dernière lecture : si les blocs que tu \
                       touches ont changé depuis, l'appel est refusé (revision_conflict), avec les \
-                      blocs à jour. `mode` vaut `direct`, le seul servi aujourd'hui : ce que tu \
-                      écris est écrit tout de suite, et l'historique de la page le garde.",
+                      blocs à jour. Le seul mode servi aujourd'hui est `direct` : ce que tu écris \
+                      est écrit tout de suite, et l'historique de la page le garde. Le défaut de \
+                      `mode` deviendra `suggest` quand les suggestions seront servies : envoie \
+                      `mode: \"direct\"` si tu tiens à écrire tout de suite.",
         read_only: false,
         destructive: true,
         schema: schema::<UpdatePageInput>,
@@ -609,8 +611,10 @@ fn describe(error: &serde_json::Error, path: &str) -> String {
             .and_then(|rest| rest.split_once('`'))
             .map(|(name, _)| mementum_md::excerpt(name))
     };
+    // Ce que serde attendait suit la **dernière** tournure « , expected » : une valeur refusée
+    // qui l'écrirait elle-même ne s'y glisse pas.
     let expected = text
-        .split_once(", expected ")
+        .rsplit_once(", expected ")
         .map(|(_, expected)| expected.split(" at line ").next().unwrap_or(expected));
     if let Some(name) = quoted("unknown field `") {
         format!("champ inconnu : « {name} »{at}")

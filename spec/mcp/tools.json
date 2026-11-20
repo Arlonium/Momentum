@@ -125,8 +125,8 @@
             ],
             "format": "uint32",
             "minimum": 1,
-            "description": "Octets de MMD rendus au plus : 24 576 par défaut, 65 536 au plus.",
-            "maximum": 65536
+            "description": "Octets de MMD rendus au plus : 24 576 par défaut, 49 152 au plus.",
+            "maximum": 49152
           }
         },
         "required": [
@@ -236,7 +236,7 @@
     {
       "name": "update_page",
       "title": "Modifier une page",
-      "description": "Change le contenu d'une page par une liste d'opérations (100 au plus), appliquées toutes ou aucune : str_replace (remplacer un texte, l'opération à préférer), insert, replace_block, delete_block, move_block, replace_page (page neuve ou petite seulement) et set_properties (le titre). Donne `base_revision`, la révision de ta dernière lecture : si les blocs que tu touches ont changé depuis, l'appel est refusé (revision_conflict), avec les blocs à jour. `mode` vaut `direct`, le seul servi aujourd'hui : ce que tu écris est écrit tout de suite, et l'historique de la page le garde.",
+      "description": "Change le contenu d'une page par une liste d'opérations (100 au plus), appliquées toutes ou aucune : str_replace (remplacer un texte, l'opération à préférer), insert, replace_block, delete_block, move_block, replace_page (page neuve ou petite seulement) et set_properties (le titre). Donne `base_revision`, la révision de ta dernière lecture : si les blocs que tu touches ont changé depuis, l'appel est refusé (revision_conflict), avec les blocs à jour. Le seul mode servi aujourd'hui est `direct` : ce que tu écris est écrit tout de suite, et l'historique de la page le garde. Le défaut de `mode` deviendra `suggest` quand les suggestions seront servies : envoie `mode: \"direct\"` si tu tiens à écrire tout de suite.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

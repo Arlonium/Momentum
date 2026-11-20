@@ -401,6 +401,7 @@ fn an_error_says_what_to_do() {
         "ambiguous_space",
         "space_required",
         "stale_anchor",
+        "ambiguous_anchor",
         "subtree_too_large",
         "page_moved",
         "invalid_parent",
@@ -425,10 +426,9 @@ fn an_error_says_what_to_do() {
             assert!(text.contains("Exemple") && text.contains(tool), "{text}");
             assert!(text.contains(example), "{text}");
         }
-        let structured = output.structured().unwrap();
-        assert_eq!(structured["code"], code);
-        assert_eq!(structured["message"], "Le message du serveur.");
-        assert!(structured.get("retry_after_seconds").is_none());
+        assert_eq!(output.code(), Some(code));
+        // Sans délai, pas de ligne de délai (le conseil de `token_busy` nomme le champ).
+        assert!(!text.contains("retry_after_seconds:"), "{text}");
     }
     // Au moins les refus qui se corrigent en changeant l'appel ont un exemple.
     for code in [
@@ -439,6 +439,7 @@ fn an_error_says_what_to_do() {
         "ambiguous_space",
         "space_required",
         "stale_anchor",
+        "ambiguous_anchor",
         "too_many_operations",
     ] {
         let hint = hints.iter().find(|(c, _)| *c == code).unwrap().1;
@@ -450,7 +451,6 @@ fn an_error_says_what_to_do() {
         "{}",
         busy.text()
     );
-    assert_eq!(busy.structured().unwrap()["retry_after_seconds"], 12);
     // Un code inconnu garde le message du serveur, sans conseil inventé.
     let other = text::error("autre_chose", "Message.", None);
     assert!(other.text().contains("autre_chose") && other.text().contains("Message."));
@@ -489,16 +489,17 @@ fn a_refusal_shows_page_text_only_inside_the_boundary() {
     assert!(nonce(&text::error("not_found", "Introuvable.", None)).is_none());
 }
 
-/// Une sortie réussie ne porte pas de données structurées (le contenu des pages reste dans le
-/// texte borné, Ruling R1239) et ne dit pas d'échec.
+/// Une sortie réussie ne dit pas d'échec et n'a pas de code ; un refus a son code (que le
+/// serveur écrit au journal d'activité).
 #[test]
-fn a_success_is_text_only() {
+fn a_success_has_no_code_and_a_refusal_has_its_code() {
     let outputs = all_outputs("Bonjour", "Salut", 2);
     for output in &outputs[..8] {
         assert!(!output.is_error());
-        assert!(output.structured().is_none());
+        assert_eq!(output.code(), None);
     }
     for output in &outputs[8..] {
         assert!(output.is_error());
+        assert_eq!(output.code(), Some("Bonjour"));
     }
 }

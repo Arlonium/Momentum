@@ -1,5 +1,5 @@
 {
-  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0, ou la spécification seule (resources/read, Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, et une sortie de plus de 25 000 jetons ne l'ont été par aucun client : M2 et X1 les éprouvent).",
+  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. « outcome » est l'issue que serve rend d'un tools/call pour le journal d'activité (l'outil nommé et le code du refus, null pour une réussite) ; sans « outcome », un tools/call doit en rendre une, et toute autre requête aucune. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0, ou la spécification seule (resources/read, Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, et une sortie de plus de 25 000 jetons ne l'ont été par aucun client : M2 et X1 les éprouvent).",
   "statuses": "Statut HTTP d'une erreur JSON-RPC (Rulings R1406, R1407) : 400 pour ce qui empêche de lire la requête ou d'en savoir l'ère (-32700 JSON illisible ; -32600 lot, corps qui n'est pas un objet, jsonrpc, method ou id mal formés, requête sans id, params qui ne sont pas un objet, réponse envoyée au serveur ; -32020 en-tête absent, répété, aux caractères non permis ou qui ne dit pas le corps, requête qui n'est d'aucune des deux révisions ; -32022 version nommée mais non servie, au _meta, ou par l'en-tête seul quand il a la forme AAAA-MM-JJ ; -32602 champ exigé du _meta qui manque ou n'a pas sa forme) ; 404 pour une méthode inconnue en 2026-07-28 (-32601) ; 200 pour une erreur des params d'une méthode servie (-32602 outil inconnu, arguments qui ne sont pas un objet, tools/call sans nom, ressource inconnue en 2026-07-28, curseur de liste, initialize sans protocolVersion ; -32002 ressource inconnue en 2025-11-25) et pour toute méthode inconnue en 2025-11-25 (-32601). Des arguments refusés ne sont pas une erreur JSON-RPC : un résultat isError, 200. -32021 (MissingRequiredClientCapability) existe dans la 2026-07-28 et n'a pas d'usage ici : aucun outil n'exige une capacité du client.",
   "cases": [
     {
@@ -34,6 +34,7 @@
     },
     {
       "name": "2026 : tools/call d'un outil servi",
+      "outcome": { "tool": "workspace_info", "code": null },
       "era": "2026-07-28",
       "proven_by": "Claude Code 2.1.329 (S0, une requête de même forme)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
@@ -245,6 +246,7 @@
     },
     {
       "name": "2026 : un Mcp-Name faux",
+      "outcome": { "tool": "workspace_info", "code": "header_mismatch" },
       "era": "2026-07-28",
       "proven_by": "Claude Code 2.1.329 (S0, essai 8 : un -32020 sur tools/call, lu au modèle) ; la requête de ce cas : la spécification seule",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "search" },
@@ -342,6 +344,7 @@
     },
     {
       "name": "2026 : une requête sans id n'est jamais faite",
+      "outcome": { "tool": "workspace_info", "code": "invalid_request" },
       "era": "2026-07-28",
       "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
@@ -388,6 +391,7 @@
     },
     {
       "name": "2026 : un outil inconnu",
+      "outcome": { "tool": "query_database", "code": "unknown_tool" },
       "era": "2026-07-28",
       "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "query_database" },
@@ -399,6 +403,7 @@
     },
     {
       "name": "2026 : un outil d'écriture sur /mcp/readonly est un outil inconnu",
+      "outcome": { "tool": "update_page", "code": "unknown_tool" },
       "era": "2026-07-28",
       "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
       "endpoint": "readonly",
@@ -415,9 +420,10 @@
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
       "body": { "jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": { "name": "workspace_info", "arguments": { "space": 3 }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
-      "expect": { "id": 13, "result": { "resultType": "complete", "content": [{ "type": "text", "text": "<any>" }], "isError": true, "structuredContent": { "code": "invalid_arguments", "message": "<any>" } } },
-      "absent": ["/error"],
-      "called": false
+      "expect": { "id": 13, "result": { "resultType": "complete", "content": [{ "type": "text", "text": "<any>" }], "isError": true } },
+      "absent": ["/error", "/result/structuredContent"],
+      "called": false,
+      "outcome": { "tool": "workspace_info", "code": "invalid_arguments" }
     },
     {
       "name": "2026 : un refus de l'outil est un résultat isError, pas une erreur JSON-RPC",
@@ -426,12 +432,14 @@
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "fetch" },
       "body": { "jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": "0193a1b2-0000-7000-8000-000000000009" }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
-      "expect": { "id": 22, "result": { "resultType": "complete", "content": [{ "type": "text", "text": "<any>" }], "isError": true, "structuredContent": { "code": "not_found", "message": "<any>" } } },
-      "absent": ["/error"],
-      "called": true
+      "expect": { "id": 22, "result": { "resultType": "complete", "content": [{ "type": "text", "text": "<any>" }], "isError": true } },
+      "absent": ["/error", "/result/structuredContent"],
+      "called": true,
+      "outcome": { "tool": "fetch", "code": "not_found" }
     },
     {
       "name": "2026 : des arguments qui ne sont pas un objet",
+      "outcome": { "tool": "workspace_info", "code": "invalid_params" },
       "era": "2026-07-28",
       "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
@@ -592,6 +600,7 @@
     },
     {
       "name": "2025 : Claude Code 2.1.329, tools/call de l'outil du banc, inconnu ici (relevé par S0)",
+      "outcome": { "tool": "echo", "code": "unknown_tool" },
       "era": "2025-11-25",
       "proven_by": "Claude Code 2.1.329 (S0, requête relevée telle quelle)",
       "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.329 (sdk-cli)", "mcp-protocol-version": "2025-11-25" },
@@ -702,9 +711,10 @@
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": ["p"] } } },
       "status": 200,
-      "expect": { "id": 11, "result": { "isError": true, "structuredContent": { "code": "invalid_arguments" } } },
-      "absent": ["/result/resultType"],
-      "called": false
+      "expect": { "id": 11, "result": { "isError": true } },
+      "absent": ["/result/resultType", "/result/structuredContent"],
+      "called": false,
+      "outcome": { "tool": "fetch", "code": "invalid_arguments" }
     },
     {
       "name": "2025 : un refus de l'outil est un résultat isError, pas une erreur JSON-RPC",
@@ -713,9 +723,10 @@
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": "0193a1b2-0000-7000-8000-000000000009" } } },
       "status": 200,
-      "expect": { "id": 13, "result": { "content": [{ "type": "text", "text": "<any>" }], "isError": true, "structuredContent": { "code": "not_found" } } },
-      "absent": ["/error", "/result/resultType"],
-      "called": true
+      "expect": { "id": 13, "result": { "content": [{ "type": "text", "text": "<any>" }], "isError": true } },
+      "absent": ["/error", "/result/resultType", "/result/structuredContent"],
+      "called": true,
+      "outcome": { "tool": "fetch", "code": "not_found" }
     },
     {
       "name": "2025 : les en-têtes Mcp-Method et Mcp-Name ne sont pas jugés",
@@ -754,6 +765,44 @@
       "raw": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"",
       "status": 400,
       "expect": { "id": null, "error": { "code": -32700 } }
+    },
+    {
+      "name": "2026 : une notification sans _meta est acceptée sans effet",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "notifications/cancelled" },
+      "body": { "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 3 } },
+      "status": 202,
+      "expect": null
+    },
+    {
+      "name": "2026 : un id numérique qui n'est pas entier",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "body": { "jsonrpc": "2.0", "id": 1.5, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 400,
+      "expect": { "id": null, "error": { "code": -32600 } }
+    },
+    {
+      "name": "2026 : resources/templates/list rend une liste vide",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/templates/list" },
+      "body": { "jsonrpc": "2.0", "id": 23, "method": "resources/templates/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "status": 200,
+      "expect": { "id": 23, "result": { "resultType": "complete", "resourceTemplates": [], "ttlMs": 300000, "cacheScope": "private" } },
+      "absent": ["/error"]
+    },
+    {
+      "name": "2025 : resources/templates/list rend une liste vide",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "body": { "jsonrpc": "2.0", "id": 14, "method": "resources/templates/list" },
+      "status": 200,
+      "expect": { "id": 14, "result": { "resourceTemplates": [] } },
+      "absent": ["/error", "/result/resultType", "/result/ttlMs"]
     },
     {
       "name": "aucune : une requête sans version ni en-tête échoue à la validation des en-têtes",
