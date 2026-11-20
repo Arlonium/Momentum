@@ -1,6 +1,7 @@
 // Routeur minimal (History API) : `/` (le dernier espace ouvert, sinon le premier),
 // `/s/:spaceId` (un espace), `/s/:spaceId/trash` (sa corbeille), `/s/:spaceId/settings` (ses
-// réglages), `/p/:id` (une page : l'espace affiché est le sien), `/login` et `/signup`
+// réglages), `/p/:id` (une page : l'espace affiché est le sien ; `/p/:id#b=<bloc>` : la page, à
+// ce bloc, pour un résultat de recherche ou un rétrolien), `/login` et `/signup`
 // (connexion et inscription, montrées par `SessionGate` sans session), `/invite` (un lien
 // d'invitation, `/invite#<jeton>`, avec ou sans session). Les liens internes restent de vrais
 // `<a href>` (nouvel onglet, copie du lien) ; un clic simple est intercepté pour changer de
@@ -65,10 +66,62 @@ export function spaceSettingsPath(spaceId: string): string {
   return `/s/${encodeURIComponent(spaceId)}/settings`;
 }
 
-/** Va à `path` ; `replace` : à la place de l'entrée courante de l'historique. */
+/** Ce qui précède, dans le fragment d'une adresse de page, l'identifiant du bloc visé. */
+const BLOCK_PREFIX = "#b=";
+
+/**
+ * L'adresse de la page `pageId`, à son bloc `blockId` (`/p/<page>#b=<bloc>`) ; sans bloc (`null`),
+ * celle de la page. L'identifiant d'un bloc est un texte écrit par un client, pas forcément un
+ * UUID : il est toujours échappé. C'est ici, et nulle part ailleurs, qu'un bloc entre dans une
+ * adresse (un résultat de recherche, un rétrolien).
+ */
+export function blockPath(pageId: string, blockId: string | null): string {
+  const path = pagePath(pageId);
+  return blockId === null || blockId === "" ? path : `${path}${BLOCK_PREFIX}${encodeURIComponent(blockId)}`;
+}
+
+/**
+ * Le bloc que vise le fragment `hash` (`location.hash`, `#` compris) : `null` s'il n'en vise aucun
+ * (pas de fragment, un fragment d'une autre forme, un bloc vide ou mal échappé).
+ */
+export function parseBlockTarget(hash: string): string | null {
+  if (!hash.startsWith(BLOCK_PREFIX)) return null;
+  const blockId = segment(hash.slice(BLOCK_PREFIX.length));
+  return blockId === null || blockId === "" ? null : blockId;
+}
+
+/**
+ * Le bloc visé par l'adresse. Un objet neuf à chaque fois que l'adresse vise un bloc : une
+ * navigation vers un bloc, la même refaite comprise (`navigate`). Qui le suit le fait une fois par
+ * objet.
+ */
+export type BlockTarget = { readonly pageId: string; readonly blockId: string };
+
+/** La visée de l'adresse courante, gardée tant que l'adresse vise le même bloc de la même page. */
+let aimed: BlockTarget | null = null;
+
+function blockTarget(): BlockTarget | null {
+  const route = parseRoute(location.pathname);
+  const blockId = route.name === "page" ? parseBlockTarget(location.hash) : null;
+  if (route.name !== "page" || blockId === null) aimed = null;
+  else if (aimed === null || aimed.pageId !== route.id || aimed.blockId !== blockId) {
+    aimed = { pageId: route.id, blockId };
+  }
+  return aimed;
+}
+
+/**
+ * Va à `path` ; `replace` : à la place de l'entrée courante de l'historique. Le fragment compte :
+ * un autre bloc de la page ouverte est une autre adresse. Déjà à cette adresse, rien n'entre dans
+ * l'historique ; si elle vise un bloc, il est visé de nouveau (la personne a pu faire défiler la
+ * page depuis), sinon rien ne se passe.
+ */
 export function navigate(path: string, { replace = false }: { replace?: boolean } = {}): void {
-  if (path === location.pathname + location.search) return;
-  if (replace) history.replaceState(null, "", path);
+  if (path === location.pathname + location.search + location.hash) {
+    const again = blockTarget();
+    if (again === null) return;
+    aimed = { ...again };
+  } else if (replace) history.replaceState(null, "", path);
   else history.pushState(null, "", path);
   window.dispatchEvent(new Event(CHANGE));
 }
@@ -87,6 +140,26 @@ export function usePathname(): string {
   return useSyncExternalStore(subscribe, () => location.pathname);
 }
 
+function subscribeToFragment(onChange: () => void): () => void {
+  const stop = subscribe(onChange);
+  // Un fragment changé à la main dans la barre d'adresse, ou par un lien que rien n'intercepte.
+  window.addEventListener("hashchange", onChange);
+  return () => {
+    stop();
+    window.removeEventListener("hashchange", onChange);
+  };
+}
+
+/**
+ * Le bloc de la page `pageId` que vise l'adresse (`#b=<bloc>`), ou `null`. Suit les navigations, le
+ * retour en arrière et un fragment changé à la main ; ce qui ne lit que le chemin (`usePathname`)
+ * n'est pas rendu de nouveau quand seul le bloc change : la page ouverte n'est pas remontée.
+ */
+export function useBlockTarget(pageId: string): BlockTarget | null {
+  const target = useSyncExternalStore(subscribeToFragment, blockTarget);
+  return target !== null && target.pageId === pageId ? target : null;
+}
+
 /** Intercepte les clics simples sur les liens internes de la page. */
 export function useLinkInterception(): void {
   useEffect(() => {
@@ -102,12 +175,12 @@ export function useLinkInterception(): void {
       if (anchor.closest("[contenteditable]")?.getAttribute("contenteditable") === "true") return;
       const url = new URL(anchor.href);
       if (url.origin !== location.origin) return;
-      // Un lien d'invitation porte son jeton dans le fragment, que `navigate` ne garde pas :
-      // il se suit en chargeant la page, qui lit le jeton.
+      // Un lien d'invitation porte son jeton dans le fragment : il se suit en chargeant la page,
+      // qui lit le jeton. Le fragment d'une page (le bloc visé, `#b=`) est gardé.
       const target = parseRoute(url.pathname).name;
       if (target === "notFound" || target === "invite") return;
       event.preventDefault();
-      navigate(url.pathname + url.search);
+      navigate(url.pathname + url.search + url.hash);
     };
     document.addEventListener("click", onClick);
     return () => document.removeEventListener("click", onClick);
