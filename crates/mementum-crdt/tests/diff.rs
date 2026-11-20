@@ -843,3 +843,765 @@ fn retouched(mut blocks: Vec<Block>, other: &[Block], edits: &[(usize, usize)]) 
     }
     blocks
 }
+
+// ------------------------------------------------------------------ octets du vrai Yjs
+
+// Les frappes concurrentes viennent du vrai Yjs (celui du client) : chaque scène part d'une page
+// écrite par le serveur (`base`), que l'écriture par différence récrit (`target`) ; une frappe
+// (« Z ») est faite par un onglet qui n'a que la page de départ, à une place nommée. Deux passes
+// écrivent les octets :
+//
+// 1. `EXPORT_FIXTURES=1 cargo test -p mementum-crdt --test diff the_scenes_are_written_on_demand`
+//    écrit `tests/fixtures/diff/scenes.json` : l'état de départ, l'écriture du serveur (sous un
+//    identifiant de client tiré au hasard : ses octets changent à chaque passe, ne la réécrire que
+//    si une scène change), et la place de chaque frappe ;
+// 2. `EXPORT_FIXTURES=1 corepack pnpm -C apps/web exec vitest run src/editor/diffWrites.test.ts`
+//    écrit `tests/fixtures/diff/keys.json` : les octets de chaque frappe, et, pour chacun des deux
+//    onglets qui reçoivent ensuite ce qui leur manque (celui qui a tapé reçoit l'écriture ; un autre
+//    a l'écriture et reçoit la frappe), le nettoyage des marques que Yjs écrit de lui-même
+//    (`cleanupYTextAfterTransaction`, une transaction locale qu'un navigateur renvoie au serveur)
+//    et ce que l'onglet lit.
+//
+// Sans la variable, chaque passe compare ses octets à ceux du dépôt. Les verdicts « gardée » et
+// « perdue » se jugent sur une écriture par différence faite à neuf par ce code (pas sur celle du
+// fichier) ; l'accord de Yjs et de yrs, sur l'écriture du fichier, celle que Yjs a reçue.
+
+/// Ce qu'une frappe doit devenir.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Fate {
+    Kept,
+    Lost,
+}
+
+/// Une frappe : son nom, sa place (le chemin des blocs depuis la racine, le rang de l'enfant du
+/// nœud de contenu, la place UTF-16 dans ce texte) et ce qu'elle doit devenir.
+struct Key {
+    name: &'static str,
+    path: Vec<usize>,
+    child: usize,
+    at: u32,
+    fate: Fate,
+}
+
+/// Comment la scène se joue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// La frappe arrive au serveur après l'écriture : elle est concurrente.
+    Concurrent,
+    /// La frappe arrive au serveur avant l'écriture, que l'auteur du MMD a calculée sans l'avoir
+    /// lue (cas 1 de R1227).
+    TypedBefore,
+}
+
+struct Scene {
+    name: &'static str,
+    base: PageDoc,
+    target: String,
+    keys: Vec<Key>,
+    flow: Flow,
+}
+
+const SECOND: &str = "Second paragraphe intact.";
+
+/// Une scène de contenu en ligne : un paragraphe changé (`base` puis `target`), suivi de
+/// [`SECOND`] ; le milieu que l'écriture remplace est à `edit` (enfant, place, longueur) ; les
+/// frappes au début, à la fin, dans le paragraphe intact, juste avant et juste après le milieu
+/// remplacé sont gardées, à leur place ; dans le milieu aussi, poussée au bord du texte écrit
+/// (Ruling R1283).
+fn inline_scene(name: &'static str, base: &str, target: &str, edit: (usize, u32, u32)) -> Scene {
+    let page = page_with(&format!("{base}\n\n{SECOND}\n"));
+    let (child, at, len) = edit;
+    let (last, last_len) = last_child(&page, &[0]);
+    let mut keys = vec![
+        key("début", &[0], 0, 1, Fate::Kept),
+        key("fin", &[0], last, last_len - 1, Fate::Kept),
+        key("paragraphe intact", &[1], 0, 3, Fate::Kept),
+        key("juste avant", &[0], child, at, Fate::Kept),
+        key("juste après", &[0], child, at + len, Fate::Kept),
+    ];
+    if len >= 2 {
+        keys.push(key("dans le milieu", &[0], child, at + 1, Fate::Kept));
+    }
+    Scene {
+        name,
+        base: page,
+        target: format!("{target}\n\n{SECOND}\n"),
+        keys,
+        flow: Flow::Concurrent,
+    }
+}
+
+fn key(name: &'static str, path: &[usize], child: usize, at: u32, fate: Fate) -> Key {
+    Key {
+        name,
+        path: path.to_vec(),
+        child,
+        at,
+        fate,
+    }
+}
+
+/// Le rang du dernier enfant du nœud de contenu du bloc au bout de `path`, et sa longueur.
+fn last_child(page: &PageDoc, path: &[usize]) -> (usize, u32) {
+    let doc = page.yrs_doc();
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let txn = doc.transact();
+    let Some(XmlOut::Element(mut list)) = fragment.get(&txn, 0) else {
+        panic!("la racine");
+    };
+    let mut container = None;
+    for &at in path {
+        if let Some(c) = container.take() {
+            list = group_of(&txn, &c);
+        }
+        let Some(XmlOut::Element(c)) = list.get(&txn, at as u32) else {
+            panic!("le bloc {path:?}");
+        };
+        container = Some(c);
+    }
+    let Some(XmlOut::Element(content)) = container.unwrap().get(&txn, 0) else {
+        panic!("le contenu");
+    };
+    let last = content.len(&txn) - 1;
+    let len = match content.get(&txn, last) {
+        Some(XmlOut::Text(t)) => yrs::Text::len(&t, &txn),
+        _ => panic!("le dernier enfant est un texte"),
+    };
+    (last as usize, len)
+}
+
+fn group_of<T: ReadTxn>(txn: &T, container: &XmlElementRef) -> XmlElementRef {
+    container
+        .children(txn)
+        .find_map(|c| match c {
+            XmlOut::Element(e) if e.tag().as_ref() == "blockGroup" => Some(e),
+            _ => None,
+        })
+        .expect("un groupe d'enfants")
+}
+
+const MENTION_A: &str = "<mention type=\"page\" id=\"pg_a\">A</mention>";
+
+/// Les scènes. Celles de contenu en ligne reprennent les neuf de la Task S0 (R1255), et une dont
+/// le milieu remplacé est long.
+fn scenes() -> Vec<Scene> {
+    let mut out = vec![
+        inline_scene(
+            "gras",
+            "Du **gras** au milieu.",
+            "Du **gros** au milieu.",
+            (0, 5, 1),
+        ),
+        inline_scene(
+            "frontière d'une marque",
+            "Du **gras** au milieu.",
+            "Du **gras**e au milieu.",
+            (0, 7, 0),
+        ),
+        inline_scene(
+            "lien",
+            "Un [lien](https://a.example) et la fin.",
+            "Un [lieu](https://a.example) et la fin.",
+            (0, 6, 1),
+        ),
+        inline_scene(
+            "après une mention",
+            &format!("Avant {MENTION_A} la fin."),
+            &format!("Avant {MENTION_A} la finale."),
+            (2, 7, 0),
+        ),
+        inline_scene(
+            "marques seules",
+            "Un mot ici.",
+            "Un **mot** ici.",
+            (0, 3, 3),
+        ),
+        inline_scene(
+            "à cheval sur deux marques",
+            "**gras** et *ital* fin.",
+            "**gra** *tal* fin.",
+            (0, 3, 6),
+        ),
+        inline_scene(
+            "en tête",
+            "Début du texte.",
+            "Le début du texte.",
+            (0, 0, 1),
+        ),
+        inline_scene(
+            "lien posé",
+            "Un mot ici.",
+            "Un [mot](https://b.example) ici.",
+            (0, 3, 3),
+        ),
+        inline_scene(
+            "lien retiré",
+            "Un [mot](https://b.example) ici.",
+            "Un mot ici.",
+            (0, 3, 3),
+        ),
+        inline_scene(
+            "milieu long",
+            "Un texte à remplacer ici.",
+            "Un mot neuf ici.",
+            (0, 3, 17),
+        ),
+    ];
+    // Une mention dans le milieu changé : tout le contenu est récrit (R1255).
+    let base = page_with(&format!("Avant le texte et la fin.\n\n{SECOND}\n"));
+    out.push(Scene {
+        name: "mention dans le milieu",
+        base,
+        target: format!("Avant le {MENTION_A} et la fin.\n\n{SECOND}\n"),
+        keys: vec![
+            key("début", &[0], 0, 1, Fate::Lost),
+            key("fin", &[0], 0, 24, Fate::Lost),
+            key("paragraphe intact", &[1], 0, 3, Fate::Kept),
+        ],
+        flow: Flow::Concurrent,
+    });
+    out.push(Scene {
+        name: "déplacé sous un autre parent",
+        base: page_with(&format!("- Parent\n- Mobile\n\n{SECOND}\n")),
+        target: format!("- Parent\n  - Mobile\n\n{SECOND}\n"),
+        keys: vec![
+            key("dans le bloc déplacé", &[1], 0, 2, Fate::Lost),
+            key("dans le nouveau parent", &[0], 0, 2, Fate::Kept),
+            key("paragraphe intact", &[2], 0, 3, Fate::Kept),
+        ],
+        flow: Flow::Concurrent,
+    });
+    out.push(Scene {
+        name: "déplacé parmi ses frères",
+        base: page_with("Un\n\nDeux\n\nTrois\n\nQuatre\n"),
+        target: "Un\n\nTrois\n\nQuatre\n\nDeux\n".to_string(),
+        keys: vec![
+            key("dans le bloc déplacé", &[1], 0, 2, Fate::Lost),
+            key("dans un frère resté", &[2], 0, 2, Fate::Kept),
+        ],
+        flow: Flow::Concurrent,
+    });
+    let normalized = page_built(|txn, fragment| {
+        let first = fragment.insert(txn, 0, XmlElementPrelim::empty("blockGroup"));
+        push_paragraph(txn, &first, "a", "Premier bloc");
+        push_paragraph(txn, &first, "b", "Second bloc");
+        let second = fragment.insert(txn, 1, XmlElementPrelim::empty("blockGroup"));
+        push_paragraph(txn, &second, "c", "Seconde racine");
+    });
+    out.push(Scene {
+        name: "page que la lecture normalise",
+        target: mmd_of(&normalized).replace("Premier bloc", "Premier bloc changé"),
+        base: normalized,
+        keys: vec![
+            key("dans le bloc changé", &[0], 0, 2, Fate::Lost),
+            key("dans un bloc intact", &[1], 0, 2, Fate::Lost),
+        ],
+        flow: Flow::Concurrent,
+    });
+    out.push(Scene {
+        name: "tapé avant l'écriture",
+        base: page_with(&format!("Un texte.\n\n{SECOND}\n")),
+        target: format!("Un texte modifié.\n\n{SECOND}\n"),
+        keys: vec![key("tapé avant, non lu", &[0], 0, 2, Fate::Lost)],
+        flow: Flow::TypedBefore,
+    });
+    out
+}
+
+fn fixtures() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/diff")
+}
+
+fn read_json(name: &str) -> serde_json::Value {
+    let path = fixtures().join(name);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} : {e} (voir l'en-tête de cette partie)", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
+fn bytes(value: &serde_json::Value) -> Vec<u8> {
+    serde_json::from_value(value.clone()).expect("des octets")
+}
+
+/// Les scènes, et ce que les fichiers en portent : l'écriture du serveur que Yjs a reçue, et,
+/// par frappe, ce que Vitest a écrit (`keys.json`).
+struct Played {
+    scene: Scene,
+    write: Vec<u8>,
+    keys: Vec<(Key, serde_json::Value)>,
+}
+
+fn played() -> Vec<Played> {
+    let scenes_json = read_json("scenes.json");
+    let keys_json = read_json("keys.json");
+    scenes()
+        .into_iter()
+        .map(|mut scene| {
+            let stored = &scenes_json[scene.name];
+            assert!(
+                stored.is_object(),
+                "{} : absente de scenes.json",
+                scene.name
+            );
+            // La page de départ du fichier est celle de la scène (lue pareil), et l'écriture du
+            // fichier la mène au MMD voulu.
+            let base = PageDoc::from_updates([bytes(&stored["base"]).as_slice()]).unwrap();
+            assert_eq!(mmd_of(&base), mmd_of(&scene.base), "{}", scene.name);
+            scene.base = base;
+            let write = bytes(&stored["write"]);
+            if scene.flow == Flow::Concurrent {
+                let written =
+                    PageDoc::from_updates([scene.base.encode_state().as_slice(), write.as_slice()])
+                        .unwrap();
+                assert_eq!(
+                    mmd_of(&written),
+                    scene.target,
+                    "{} : l'écriture du fichier",
+                    scene.name
+                );
+            }
+            let keys = std::mem::take(&mut scene.keys)
+                .into_iter()
+                .map(|key| {
+                    let from_vitest = keys_json[scene.name][key.name].clone();
+                    assert!(
+                        from_vitest.is_object(),
+                        "{} / {} : absente de keys.json",
+                        scene.name,
+                        key.name
+                    );
+                    (key, from_vitest)
+                })
+                .collect();
+            Played { scene, write, keys }
+        })
+        .collect()
+}
+
+/// Ce que la place d'une frappe dit à Vitest.
+fn key_json(key: &Key) -> serde_json::Value {
+    serde_json::json!({ "path": key.path, "child": key.child, "at": key.at })
+}
+
+/// Passe 1 : écrit `scenes.json` sous `EXPORT_FIXTURES=1` ; sinon, vérifie que le fichier porte
+/// les scènes de ce code (même page de départ, même MMD écrit, mêmes places de frappe).
+#[test]
+fn the_scenes_are_written_on_demand() {
+    let path = fixtures().join("scenes.json");
+    if std::env::var_os("EXPORT_FIXTURES").is_some() {
+        let mut out = serde_json::Map::new();
+        for scene in scenes() {
+            let base = scene.base.encode_state();
+            let write = scene
+                .base
+                .write_diff(&parse(&scene.target).unwrap())
+                .unwrap()
+                .update;
+            let keys: serde_json::Map<String, serde_json::Value> = scene
+                .keys
+                .iter()
+                .map(|k| (k.name.to_string(), key_json(k)))
+                .collect();
+            out.insert(
+                scene.name.to_string(),
+                serde_json::json!({ "base": base, "write": write, "keys": keys }),
+            );
+        }
+        std::fs::create_dir_all(fixtures()).unwrap();
+        std::fs::write(&path, format!("{}\n", serde_json::Value::Object(out))).unwrap();
+        return;
+    }
+    let stored = read_json("scenes.json");
+    for scene in scenes() {
+        for k in &scene.keys {
+            assert_eq!(
+                stored[scene.name]["keys"][k.name],
+                key_json(k),
+                "{} / {} : la place de la frappe a changé (EXPORT_FIXTURES=1 réécrit le fichier)",
+                scene.name,
+                k.name
+            );
+        }
+    }
+    // `played` vérifie la page de départ et l'écriture de chaque scène.
+    assert_eq!(played().len(), scenes().len());
+}
+
+/// Les blocs, la frappe « Z » retirée de tous leurs textes, sans identifiants, en MMD ; et le
+/// nombre de « Z » retirés. Un lien qui ne portait que la frappe part avec elle (avant le
+/// nettoyage de Yjs, yrs lit sous le lien une frappe tapée juste après lui : scène « lien
+/// retiré »).
+fn without_z(blocks: &[Block]) -> (String, usize) {
+    fn strip(content: &mut Vec<Inline>, count: &mut usize) {
+        for inline in content.iter_mut() {
+            match inline {
+                Inline::Text { text, .. } => {
+                    *count += text.matches('Z').count();
+                    *text = text.replace('Z', "");
+                }
+                Inline::Link { children, .. } => strip(children, count),
+                _ => {}
+            }
+        }
+        content.retain(|inline| match inline {
+            Inline::Text { text, .. } => !text.is_empty(),
+            Inline::Link { children, .. } => !children.is_empty(),
+            _ => true,
+        });
+    }
+    fn walk(blocks: &mut [Block], count: &mut usize) {
+        for b in blocks {
+            match &mut b.content {
+                Content::Inline(content) => strip(content, count),
+                Content::Table(table) => {
+                    for cell in table.rows.iter_mut().flatten() {
+                        strip(&mut cell.content, count);
+                    }
+                }
+                Content::None => {}
+            }
+            walk(&mut b.children, count);
+        }
+    }
+    let mut blocks = blocks.to_vec();
+    let mut count = 0;
+    walk(&mut blocks, &mut count);
+    (shown(&mementum_md::normalize(blocks)), count)
+}
+
+/// Joue la frappe sur une écriture faite à neuf : `Ok` si la frappe est gardée, une fois, et que
+/// le reste de la page est ce que l'écriture a écrit ; sinon ce qui manque.
+fn fate(played: &Played, key: &Key, keystroke: &[u8]) -> Result<(), String> {
+    let scene = &played.scene;
+    let page = PageDoc::from_updates([scene.base.encode_state().as_slice()]).unwrap();
+    let target = parse(&scene.target).unwrap();
+    let expected = match scene.flow {
+        Flow::Concurrent => {
+            page.write_diff(&target).unwrap();
+            let expected = page.read_blocks();
+            page.try_client_update(keystroke).unwrap_or_else(|r| {
+                panic!(
+                    "{} / {} : frappe refusée : {}",
+                    scene.name, key.name, r.error
+                )
+            });
+            expected
+        }
+        Flow::TypedBefore => {
+            page.try_client_update(keystroke).unwrap_or_else(|r| {
+                panic!(
+                    "{} / {} : frappe refusée : {}",
+                    scene.name, key.name, r.error
+                )
+            });
+            page.write_diff(&target).unwrap();
+            let replica = PageDoc::from_updates([scene.base.encode_state().as_slice()]).unwrap();
+            replica.write_diff(&target).unwrap();
+            replica.read_blocks()
+        }
+    };
+    let (now, typed) = without_z(&page.read_blocks());
+    let (wanted, _) = without_z(&expected);
+    match (typed, now == wanted) {
+        (1, true) => Ok(()),
+        (0, true) => Err(format!("{} / {} : frappe perdue", scene.name, key.name)),
+        (_, true) => Err(format!("{} / {} : frappe en double", scene.name, key.name)),
+        (_, false) => Err(format!("{} / {} : écriture altérée", scene.name, key.name)),
+    }
+}
+
+/// Ce qu'un document lit, de la même forme que `read` de `diffWrites.test.ts` : chaque élément
+/// (sa balise, ses attributs sans `null` ni `undefined`, ses enfants), chaque texte en plages
+/// (texte et marques sans `null`), les plages voisines de mêmes marques fondues.
+fn reading(page: &PageDoc) -> serde_json::Value {
+    fn any(value: &yrs::Any) -> Option<serde_json::Value> {
+        use yrs::Any;
+        Some(match value {
+            Any::Null | Any::Undefined => return None,
+            Any::Bool(b) => serde_json::json!(b),
+            Any::Number(n) => match n {
+                yrs::any::Number::Int(i) => serde_json::json!(i),
+                yrs::any::Number::Float(f) => serde_json::json!(f),
+            },
+            Any::String(s) => serde_json::json!(s.as_ref()),
+            Any::Array(a) => serde_json::Value::Array(
+                a.iter()
+                    .map(|v| any(v).unwrap_or(serde_json::Value::Null))
+                    .collect(),
+            ),
+            Any::Map(m) => serde_json::Value::Object(
+                m.iter()
+                    .filter_map(|(k, v)| any(v).map(|v| (k.clone(), v)))
+                    .collect(),
+            ),
+            other => serde_json::json!(format!("{other:?}")),
+        })
+    }
+    fn nodes<T: ReadTxn>(txn: &T, children: impl Iterator<Item = XmlOut>) -> serde_json::Value {
+        let mut out = Vec::new();
+        for child in children {
+            match child {
+                XmlOut::Element(e) => {
+                    let attrs: serde_json::Map<String, serde_json::Value> = e
+                        .attributes(txn)
+                        .filter_map(|(k, v)| match v {
+                            yrs::Out::Any(a) => any(&a).map(|a| (k.to_string(), a)),
+                            _ => None,
+                        })
+                        .collect();
+                    out.push(serde_json::json!({
+                        "el": e.tag().as_ref(),
+                        "attrs": attrs,
+                        "children": nodes(txn, e.children(txn)),
+                    }));
+                }
+                XmlOut::Text(t) => {
+                    let mut runs: Vec<(String, serde_json::Value)> = Vec::new();
+                    for run in yrs::Text::diff(&t, txn, yrs::types::text::YChange::identity) {
+                        let yrs::Out::Any(yrs::Any::String(s)) = &run.insert else {
+                            continue;
+                        };
+                        if s.is_empty() {
+                            continue;
+                        }
+                        let marks: serde_json::Map<String, serde_json::Value> = run
+                            .attributes
+                            .iter()
+                            .flat_map(|a| a.iter())
+                            .filter_map(|(k, v)| any(v).map(|v| (k.to_string(), v)))
+                            .collect();
+                        let marks = serde_json::Value::Object(marks);
+                        match runs.last_mut() {
+                            Some((text, m)) if *m == marks => text.push_str(s.as_ref()),
+                            _ => runs.push((s.to_string(), marks)),
+                        }
+                    }
+                    out.push(serde_json::json!({ "text": runs }));
+                }
+                XmlOut::Fragment(_) => {}
+            }
+        }
+        serde_json::Value::Array(out)
+    }
+    let doc = page.yrs_doc();
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let txn = doc.transact();
+    nodes(&txn, fragment.children(&txn))
+}
+
+/// La page du serveur, à qui l'onglet `tab` (« typist » : celui qui a tapé ; « observer » : un
+/// autre) a renvoyé ce qu'il écrit : l'écriture du fichier, la frappe, puis le nettoyage de cet
+/// onglet, chacun par la garde d'une mise à jour de client ; et ce que cet onglet lit.
+fn server_after(
+    played: &Played,
+    from_vitest: &serde_json::Value,
+    tab: &str,
+) -> (PageDoc, serde_json::Value) {
+    let what = format!("{} / {tab}", played.scene.name);
+    let page = PageDoc::from_updates([
+        played.scene.base.encode_state().as_slice(),
+        played.write.as_slice(),
+    ])
+    .unwrap();
+    page.try_client_update(&bytes(&from_vitest["update"]))
+        .unwrap_or_else(|r| panic!("{what} : frappe refusée : {}", r.error));
+    if let Some(cleanup) = from_vitest[tab]["cleanup"].as_array() {
+        let cleanup: Vec<u8> = cleanup.iter().map(|b| b.as_u64().unwrap() as u8).collect();
+        page.try_client_update(&cleanup)
+            .unwrap_or_else(|r| panic!("{what} : nettoyage refusé : {}", r.error));
+    }
+    (page, from_vitest[tab]["read"].clone())
+}
+
+/// Pour chaque scène, chaque frappe et chaque onglet : le serveur, qui a reçu l'écriture, la
+/// frappe et le nettoyage de l'onglet, lit ce que lit l'onglet (le vrai Yjs).
+fn assert_yjs_reads_as_yrs(played: &Played, key: &Key, from_vitest: &serde_json::Value) {
+    if played.scene.flow != Flow::Concurrent {
+        return;
+    }
+    for tab in ["typist", "observer"] {
+        let (page, yjs) = server_after(played, from_vitest, tab);
+        assert_eq!(
+            reading(&page),
+            yjs,
+            "{} / {} / {tab} : Yjs ne lit pas comme yrs",
+            played.scene.name,
+            key.name
+        );
+    }
+}
+
+/// Le sort de chaque frappe d'un sort donné, et l'accord de Yjs et de yrs sur chacune.
+fn fates(wanted: Fate, only: impl Fn(&Scene, &Key) -> bool) -> (usize, Vec<String>) {
+    let mut seen = 0;
+    let mut unmet = Vec::new();
+    for played in played() {
+        for (key, from_vitest) in &played.keys {
+            if key.fate != wanted || !only(&played.scene, key) {
+                continue;
+            }
+            seen += 1;
+            assert_yjs_reads_as_yrs(&played, key, from_vitest);
+            if let Err(why) = fate(&played, key, &bytes(&from_vitest["update"])) {
+                unmet.push(why);
+            }
+        }
+    }
+    (seen, unmet)
+}
+
+/// Une frappe concurrente dans un bloc que l'écriture ne touche pas est gardée, quoi que
+/// l'écriture fasse ailleurs (un texte remplacé, un bloc déplacé, un bloc qui change de parent).
+#[test]
+fn typing_in_an_untouched_block_survives_a_diff_write() {
+    let (seen, unmet) = fates(Fate::Kept, |_, key| {
+        matches!(
+            key.name,
+            "paragraphe intact" | "dans un frère resté" | "dans le nouveau parent"
+        )
+    });
+    assert!(seen >= 13, "{seen} frappes");
+    assert!(unmet.is_empty(), "{unmet:#?}");
+}
+
+/// Une frappe concurrente dans un bloc changé, hors du texte que l'écriture y remplace, est
+/// gardée (R1255) : au début, à la fin, après une mention, contre les deux bornes du milieu
+/// remplacé, dans les deux ordres (l'onglet qui a tapé reçoit l'écriture ; un autre, qui a
+/// l'écriture, reçoit la frappe).
+#[test]
+fn typing_outside_the_replaced_text_of_a_changed_block_survives() {
+    let (seen, unmet) = fates(Fate::Kept, |_, key| {
+        matches!(key.name, "début" | "fin" | "juste avant" | "juste après")
+    });
+    assert_eq!(seen, 40, "dix scènes, quatre frappes chacune");
+    assert!(unmet.is_empty(), "{unmet:#?}");
+}
+
+/// Une frappe concurrente dans le texte que l'écriture remplace par préfixe et suffixe est
+/// gardée : Yjs ne supprime pas ce qu'un autre a inséré entre deux unités qu'il supprime ; elle
+/// paraît au bord du texte écrit (Ruling R1283). Seul un contenu récrit en entier la perd
+/// (`known_limits`).
+#[test]
+fn typing_in_the_replaced_text_survives_beside_the_new_text() {
+    let (seen, unmet) = fates(Fate::Kept, |_, key| key.name == "dans le milieu");
+    assert_eq!(seen, 5);
+    assert!(unmet.is_empty(), "{unmet:#?}");
+}
+
+/// Un lien retiré, une frappe juste après : Yjs nettoie de lui-même les marques devenues inutiles
+/// (une transaction locale que l'onglet renvoie) ; le serveur reçoit ce nettoyage par la garde
+/// d'une mise à jour de client, après la frappe, et lit alors ce que lit l'onglet (R1255).
+#[test]
+fn a_marks_change_next_to_a_keystroke_converges_once_yjs_cleanup_is_received() {
+    let played = played()
+        .into_iter()
+        .find(|p| p.scene.name == "lien retiré")
+        .unwrap();
+    let (key, from_vitest) = played
+        .keys
+        .iter()
+        .find(|(k, _)| k.name == "juste après")
+        .unwrap();
+    let cleaned: Vec<&str> = ["typist", "observer"]
+        .into_iter()
+        .filter(|tab| from_vitest[*tab]["cleanup"].is_array())
+        .collect();
+    assert!(!cleaned.is_empty(), "aucun onglet n'a nettoyé de marques");
+    for tab in cleaned {
+        let (page, yjs) = server_after(&played, from_vitest, tab);
+        assert_eq!(reading(&page), yjs, "{tab} : nettoyage reçu");
+        let (_, typed) = without_z(&page.read_blocks());
+        assert_eq!(typed, 1, "{tab} : la frappe est gardée");
+    }
+    assert_eq!(fate(&played, key, &bytes(&from_vitest["update"])), Ok(()));
+}
+
+/// L'affirmation d'une limite connue, partagée avec les tests de `mementum-sync` (déclarée au
+/// niveau du fichier : voir `reload.rs`).
+#[path = "../../mementum-sync/tests/common/limit.rs"]
+mod limit;
+
+/// Les limites connues de l'écriture par différence (limite LA-a du plan du lot 5, R1227), mot
+/// pour mot : chaque test rougit le jour où la perte est levée.
+mod known_limits {
+    use super::limit::known_limit;
+    use super::*;
+
+    /// Une frappe concurrente dans un contenu récrit en entier (ici, une mention dans le milieu
+    /// changé) est perdue : son texte est supprimé avec elle, où qu'elle soit dans le bloc.
+    #[test]
+    fn typing_in_a_content_rewritten_whole_is_lost() {
+        let (seen, unmet) = fates(Fate::Lost, |scene, _| {
+            scene.name == "mention dans le milieu"
+        });
+        assert_eq!(seen, 2);
+        known_limit(
+            "LA-a : un contenu récrit en entier (un élément en ligne dans le milieu changé, un \
+             tableau, un type changé) supprime ses textes, et une frappe faite dedans, pas encore \
+             reçue, part avec eux",
+            &unmet,
+            &[
+                "mention dans le milieu / début : frappe perdue".to_string(),
+                "mention dans le milieu / fin : frappe perdue".to_string(),
+            ],
+        );
+    }
+
+    /// Une frappe concurrente dans un bloc qui change de parent est perdue : `keep_ids` ne le
+    /// suit pas, il est retiré puis écrit à neuf.
+    #[test]
+    fn typing_in_a_block_moved_under_another_parent_is_lost() {
+        let (_, unmet) = fates(Fate::Lost, |scene, _| {
+            scene.name == "déplacé sous un autre parent"
+        });
+        known_limit(
+            "LA-a, cas 3 de R1227 : un bloc qui change de parent est retiré et écrit à neuf",
+            &unmet,
+            &["déplacé sous un autre parent / dans le bloc déplacé : frappe perdue".to_string()],
+        );
+    }
+
+    /// Une frappe concurrente dans un bloc recréé parce qu'il change de place parmi ses frères est
+    /// perdue : Yjs n'a pas de déplacement, et le report de la Task 13b ne vaut que pour une mise
+    /// à jour de client (R222). Pour deux blocs échangés, lequel est recréé est arbitraire.
+    #[test]
+    fn typing_in_a_block_moved_among_its_siblings_is_lost() {
+        let (_, unmet) = fates(Fate::Lost, |scene, _| {
+            scene.name == "déplacé parmi ses frères"
+        });
+        known_limit(
+            "LA-a : un bloc déplacé parmi ses frères est supprimé et recréé au même identifiant",
+            &unmet,
+            &["déplacé parmi ses frères / dans le bloc déplacé : frappe perdue".to_string()],
+        );
+    }
+
+    /// Ce qu'un humain a tapé avant l'écriture, que l'auteur du MMD n'avait pas lu, est ramené au
+    /// texte écrit (cas 1 de R1227 : seule la précondition de R1231 l'empêche).
+    #[test]
+    fn typing_typed_before_the_write_and_unread_by_its_author_is_overwritten() {
+        let (_, unmet) = fates(Fate::Lost, |scene, _| scene.name == "tapé avant l'écriture");
+        known_limit(
+            "LA-a, cas 1 de R1227 : la différence se calcule contre la page courante",
+            &unmet,
+            &["tapé avant l'écriture / tapé avant, non lu : frappe perdue".to_string()],
+        );
+    }
+
+    /// Sur une page que `read_blocks` normalise, l'écriture retombe sur la récriture complète, et
+    /// toute frappe concurrente est perdue, même dans un bloc que l'écriture ne change pas.
+    #[test]
+    fn every_concurrent_keystroke_is_lost_on_a_page_that_falls_back() {
+        let (_, unmet) = fates(Fate::Lost, |scene, _| {
+            scene.name == "page que la lecture normalise"
+        });
+        known_limit(
+            "LA-a, cas 4 de R1227 : la récriture complète remplace tout le contenu",
+            &unmet,
+            &[
+                "page que la lecture normalise / dans le bloc changé : frappe perdue".to_string(),
+                "page que la lecture normalise / dans un bloc intact : frappe perdue".to_string(),
+            ],
+        );
+    }
+}
