@@ -404,6 +404,18 @@ Décisions au registre du lot 4, « Task S3 » (R965 à R973, et R990 à R992 à
 - **`PUT /mmd` et la restauration d'une version répondent `204`**, la duplication `201`.
 - **Une variable d'environnement neuve du serveur** entre dans `Config::resolve`, avec son test dans `config.rs` et sa ligne dans le tableau de l'en-tête ; `Config` se construit toujours par `..Config::default()` dans les tests.
 
+### Task S6 : la route des rétroliens (`crates/mementum-server/src/routes/backlinks.rs`)
+
+Décisions au registre du lot 4, « Task S6 » (R1015 à R1021).
+
+- **Les sources d'un rétrolien se trient par `access.rs` avant d'être comptées** (`seen_sources`) : par lots de `BATCH` (500), chaque lot gardé par `SpaceAccess::node`, hors corbeille, puis compté contre `SHOWN` (200) ; le parcours s'arrête à `WALKED` (20 000) sources lues, sans le dire. Borner d'abord laissait trois cents pages non vues cacher les vraies (`unseen_sources_never_hide_seen_ones`). Les bornes se règlent dans les tests par le paramètre `Bounds` de `backlinks`, sur `access::tests::state` (pas d'indexeur : les lignes s'écrivent par `Store::index_page`), jamais par la configuration.
+- **`page_links` porte l'espace de la page qui mène** (`space_id`, R1015), et `page_links_by_target` le met juste après la cible : toute écriture neuve de `page_links` le donne (`write_slice` le reçoit d'`index_page`, qui le lit dans `nodes`). Une page ne change jamais d'espace ; une écriture qui en changerait devrait récrire ses liens.
+- **Une source se lit une fois, quel que soit le nombre de ses liens** (R1016) : `BACKLINK_SOURCES` saute d'une source à la suivante dans l'index (une récursion, un `SELECT … ORDER BY node_id LIMIT 1` par pas), `BACKLINK_EXCERPTS` lit le premier bloc de chaque source par la même clé. Un `DISTINCT` ou un `GROUP BY … MIN` lisait chaque lien. La documentation de SQLite interdit la table récursive dans le `FROM` d'une sous-requête de la partie récursive (« may not appear within any subquery », lu, pas éprouvé) : une sous-requête scalaire de la liste du `SELECT` qui nomme une de ses colonnes passe (c'est la forme de `BACKLINK_SOURCES`).
+- **Ce que SQLite lit se compte en pas de sa machine virtuelle** (`Store::backlink_read_steps`, fonction `test-hooks`, R1017) : un gestionnaire de progression appelé à chaque pas, sur une connexion où les requêtes ont été préparées d'abord. On compare deux états d'un même binaire, jamais à une constante. Une recherche qui finit sur une entrée hors de la plage, et non au bout de l'index, coûte un pas de plus, une fois : l'état de départ porte déjà une entrée hors de la plage (`sources_of_another_space_are_not_even_read`).
+- **Le plan des requêtes de l'index juge les alias de `TABLES`** (`src/search.rs`, `check_plans`) : `s` y est `search_state`, si bien qu'un `json_each(…) s` passait pour le parcours d'une table. Nommer un alias neuf hors de cette liste (`j`).
+- **`serde_json` garde l'ordre d'écriture des clés** dans ce dépôt (fonction `preserve_order`) : un test qui affirme les champs d'un objet les trie avant de comparer.
+- **Écrire des milliers de pages pour une mesure** : par une connexion à côté, en une transaction (`nodes`, `blocks_index`, `page_links`), puis `spaces.rev` et `spaces.lsn` avancés dans la même transaction, avant toute lecture des droits (le cache des accès est rangé sous `rev`) ; vingt mille `create_node` prendraient des minutes.
+
 ## Tester
 
 Structure du dépôt (conception, §8) :
