@@ -99,6 +99,50 @@ test("a_mention_makes_a_backlink", async ({ browser }) => {
   await expect(tom.locator(".mm-editor .mm-mention")).toHaveText([`@Cible ${tag}`]);
 });
 
+test("a_backlink_opens_the_source_page_at_the_block_that_links", async ({ browser }) => {
+  const tag = unique();
+  const account = await signUpAccount(`Alice ${unique()}`);
+  const api = await apiAs(account);
+  const target = await createPage(api, { title: `Cible ${tag}` });
+  // Une longue page source : le bloc qui mentionne la page visée est loin sous la fenêtre.
+  const source = await createPage(api, { title: `Source ${tag}` });
+  const lines = Array.from({ length: 120 }, (_, i) => `Paragraphe ${i + 1} de la source.`);
+  lines[99] = `Le lien est ici ${mention(target.id, target.title)}`;
+  await putMmd(api, source.id, `${lines.join("\n\n")}\n`);
+  await waitLinked(api, target.id, [source.id]);
+
+  const p = await openPage(browser, target.id, account);
+  // La ligne est un vrai lien vers la page source, à son bloc.
+  await expect(row(p, source.id)).toHaveAttribute("href", new RegExp(`^/p/${source.id}#b=.+$`));
+  await p.evaluate(() => ((window as unknown as { kept: boolean }).kept = true));
+  await row(p, source.id).click();
+  await expect(p).toHaveURL(new RegExp(`/p/${source.id}#b=.+$`));
+  await waitSynced(p);
+  expect(await p.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBe(true);
+  // Le bloc qui mène à la page visée est à l'écran, et c'est celui de l'adresse.
+  const blockId = decodeURIComponent(new URL(p.url()).hash.slice("#b=".length));
+  const block = p.locator('.mm-editor [data-node-type="blockOuter"]').filter({ hasText: "Le lien est ici" });
+  await expect(block).toBeInViewport();
+  await expect(block).toHaveAttribute("data-id", blockId);
+  // Le focus est dans l'éditeur, le curseur dans ce bloc ; pas sur le fil d'Ariane, ni sur `body`.
+  await expect
+    .poll(() =>
+      p.evaluate(() => {
+        const node = document.getSelection()?.anchorNode ?? null;
+        const element = node instanceof Element ? node : (node?.parentElement ?? null);
+        return {
+          inEditor: document.activeElement?.closest(".mm-editor") != null,
+          block: element?.closest('[data-node-type="blockOuter"]')?.getAttribute("data-id") ?? null,
+        };
+      }),
+    )
+    .toEqual({ inEditor: true, block: blockId });
+  // « Précédent » revient à la page visée, et sa liste est relue après la synchro.
+  await p.goBack();
+  await expect(p).toHaveURL(new RegExp(`/p/${target.id}$`));
+  await expect(row(p, source.id)).toBeVisible();
+});
+
 test("a_guest_sees_only_the_backlinks_of_pages_he_sees", async ({ browser }) => {
   const tag = unique();
   const alice = await signUpAccount(`Alice ${unique()}`);
