@@ -1233,6 +1233,57 @@ async fn outbox_everything_goes_by_slices() {
     assert_eq!(outbox(&f.db).await, all);
 }
 
+/// Ruling R980 (Task S4b) : tout reprojeter passe par tranches de pages. Chaque page, et elles
+/// seules (pas un dossier), redevient jamais indexée, un échec de lecture oublié, et reçoit sa
+/// ligne d'outbox de page entière ; ses lignes d'index restent (la page reste trouvable sous
+/// l'ancienne forme), et rien n'est annoncé. L'appelant reprend à l'identifiant rendu, jusqu'à
+/// `None`.
+#[tokio::test]
+async fn reprojecting_everything_goes_by_slices_and_marks_every_page_never_indexed() {
+    let f = fresh().await;
+    let mut pages = Vec::new();
+    for i in 0..5 {
+        pages.push(new_page(&f, &format!("Page {i}")).await);
+    }
+    let folder = f
+        .store
+        .create_node(NewNode {
+            kind: NodeKind::Folder,
+            ..page(&f.space, None, None, "Dossier")
+        })
+        .await
+        .unwrap()
+        .id;
+    for node in &pages[..4] {
+        assert_eq!(index(&f.store, *node, 3, &[row("b", "texte")]).await, 1);
+    }
+    f.store.index_failed(pages[4], 2).await.unwrap();
+    clear_outbox(&f.db).await;
+    assert_eq!(f.store.never_indexed(10).await.unwrap(), Vec::<Uuid>::new());
+    let mut changes = f.store.changes();
+
+    let (mut after, mut slices) = (None::<Uuid>, 0);
+    loop {
+        slices += 1;
+        match f.store.reproject_everything(after, 2).await.unwrap() {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(slices, 3, "deux tranches pleines, puis la fin");
+    let mut sorted = pages.clone();
+    sorted.sort();
+    assert_eq!(f.store.never_indexed(10).await.unwrap(), sorted);
+    for node in &pages {
+        assert_eq!(state(&f.db, *node).await, Some((-1, None, 0)));
+    }
+    assert_eq!(state(&f.db, folder).await, None);
+    let all: Vec<_> = sorted.iter().map(|p| waiting(*p, "")).collect();
+    assert_eq!(outbox(&f.db).await, all);
+    assert_eq!(indexed(&f.db, pages[0]).await.len(), 1);
+    assert_eq!(changes.try_recv(), Err(TryRecvError::Empty));
+}
+
 /// Ruling R909, R939 : la clôture retire les lignes de son intention, sauf celle qui a bougé
 /// depuis (un bloc changé de nouveau : il a perdu son jeton), qui reste pour la suivante. Le
 /// jeton devient celui de la dernière validation close.

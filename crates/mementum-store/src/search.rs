@@ -1017,6 +1017,55 @@ impl Store {
         Ok(uuids(&rows)?.into_iter().max())
     }
 
+    /// Tout reprojeter, une tranche (Ruling R980) : les `limit` pages qui suivent `after` dans
+    /// l'ordre des identifiants (corbeille comprise, pas un dossier) redeviennent jamais indexées
+    /// (`indexed_seq = -1`, un échec de lecture oublié), et reçoivent leur ligne d'outbox de page
+    /// entière, sans jeton, en une transaction (voie de l'index). Rend où reprendre (la dernière
+    /// page de la tranche), `None` une fois toutes les pages passées. C'est ce que l'indexeur fait
+    /// au démarrage quand la version de la projection gardée ([`Store::projection_version`]) n'est
+    /// pas la sienne : chaque page est relue et reprojetée, et ses entrées de l'index plein texte
+    /// sont récrites, même celles dont l'empreinte n'a pas changé (un mot plié autrement).
+    ///
+    /// Les lignes de `blocks_index` et de `page_links` restent : la page reste trouvable sous
+    /// l'ancienne forme tant qu'elle n'est pas reprojetée, et [`Store::index_page`] n'en récrit
+    /// que ce qui change. Le verrou de l'indexeur est tenu le temps de la tranche (R975) ;
+    /// n'avance ni `rev` ni `lsn`.
+    pub async fn reproject_everything(
+        &self,
+        after: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Option<Uuid>, StoreError> {
+        let limit = limit.max(1);
+        let _indexing = self.index_lock().await;
+        let mut tx = self.write_in(Lane::Index).await?;
+        let rows = sqlx::query(
+            "INSERT INTO search_state (node_id, indexed_seq, failed_seq, truncated) \
+             SELECT id, -1, NULL, 0 FROM ( \
+                 SELECT id FROM nodes WHERE kind = 'page' AND id > ?1 ORDER BY id LIMIT ?2) \
+             WHERE true \
+             ON CONFLICT (node_id) DO UPDATE SET indexed_seq = -1, failed_seq = NULL \
+             RETURNING node_id",
+        )
+        .bind(after.map(|id| id.to_string()).unwrap_or_default())
+        .bind(sql_limit(limit))
+        .fetch_all(&mut **tx)
+        .await?;
+        let pages = uuids(&rows)?;
+        sqlx::query(
+            "INSERT INTO search_outbox (node_id, block_id, token) \
+             SELECT value, '', NULL FROM json_each(?) WHERE true \
+             ON CONFLICT (node_id, block_id) DO UPDATE SET token = NULL",
+        )
+        .bind(json_ids(&pages))
+        .execute(&mut **tx)
+        .await?;
+        tx.commit().await?;
+        if pages.len() < limit {
+            return Ok(None);
+        }
+        Ok(pages.into_iter().max())
+    }
+
     /// Un bloc que garde `blocks_index` pour la page ; `None` s'il n'y est pas.
     pub async fn indexed_block(
         &self,
