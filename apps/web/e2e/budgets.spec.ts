@@ -30,11 +30,13 @@ import { fileURLToPath } from "node:url";
 import {
   closeContexts,
   createPage,
+  firstSpace,
   getTree,
   newUser,
   percentile,
   putMmd,
   unique,
+  waitFindable,
   waitSynced,
 } from "./helpers";
 
@@ -745,7 +747,7 @@ test.describe("arbre de 1 000 pages", () => {
 /**
  * Les rétroliens (lot 4, Task C3) : les pages de 1 000 blocs de la première mesure, chacune visée
  * par 200 pages (la borne de la réponse). La liste est demandée après la première synchro, et sa
- * réponse prend au moins 75 ms chez le serveur (R1022) : l'ouverture ne doit pas la payer. En
+ * réponse prend au moins 150 ms chez le serveur (R1022) : l'ouverture ne doit pas la payer. En
  * dernier : ces 200 pages de plus dans l'arbre, et ces liens, ne touchent aucune autre mesure.
  */
 test.describe("rétroliens", () => {
@@ -805,5 +807,84 @@ test.describe("rétroliens", () => {
     const p95 = percentile(totals, 0.95);
     console.log(`MESURE ouverture 1 000 blocs visée par 200 pages, p95 : ${Math.round(p95)} ms (budget : 300 ms)`);
     expect(p95).toBeLessThan(300);
+  });
+});
+
+// Lot 4, Task X2 (Ruling R1165) : du dernier caractère tapé dans la fenêtre de recherche au
+// résultat du serveur affiché. Trois temps s'y ajoutent : l'anti-rebond (150 ms,
+// `SEARCH_DEBOUNCE_MS`), le temps de réponse plancher du serveur (`SEARCH_FLOOR`), le rendu.
+// Pendant ce temps la liste ne montre que les lignes de l'arbre (R1082). Les mots cherchés ne
+// sont que dans le texte des pages, jamais dans un titre : seule la réponse du serveur les montre.
+test.describe("recherche", () => {
+  const ROUNDS = 10;
+  /** Budget du §5.10 : « du dernier caractère tapé aux résultats affichés, moins de 400 ms ». */
+  const SHOWN_MS = 400;
+  let found: { id: string; word: string }[] = [];
+
+  test.beforeAll(async ({ playwright }) => {
+    test.setTimeout(180_000);
+    const request = await playwright.request.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      const space = (await firstSpace(request)).id;
+      found = [];
+      for (let i = 0; i < ROUNDS; i++) {
+        // Des lettres seules : un chiffre couperait peut-être le mot.
+        const word = `zorglub${unique().replace(/[^a-z]/gi, "").toLowerCase()}${"abcdefghij"[i]}`;
+        const { id } = await createPage(request, { title: `Trouvée ${unique()}` });
+        await putMmd(request, id, `Un paragraphe qui porte ${word} en son milieu.\n`);
+        found.push({ id, word });
+      }
+      for (const { id, word } of found) await waitFindable(request, space, word, id);
+    } finally {
+      await request.dispose();
+    }
+  });
+
+  test(`results_shown_after_the_last_keystroke_under_${SHOWN_MS}ms`, async ({ browser }) => {
+    const p = await budgetTab(browser);
+    await p.goto(`/p/${landing}`);
+    await waitSynced(p);
+    const delays: number[] = [];
+    for (const { id, word } of found) {
+      await p.keyboard.press("Control+k");
+      const field = p.getByRole("combobox", { name: "Rechercher dans l'espace" });
+      await expect(field).toBeFocused();
+      // Dans la page : l'heure de la dernière touche, puis celle de la fin de l'image où la
+      // ligne du serveur paraît.
+      await p.evaluate((pageId) => {
+        const w = window as unknown as { lastKey: number; shown: Promise<number> };
+        w.lastKey = 0;
+        const onKey = () => {
+          w.lastKey = performance.now();
+        };
+        document.addEventListener("keydown", onKey, true);
+        w.shown = new Promise((settle) => {
+          const look = () => {
+            if (document.querySelector(`[data-search-page="${pageId}"][data-from="server"]`) === null) return;
+            observer.disconnect();
+            document.removeEventListener("keydown", onKey, true);
+            requestAnimationFrame(() => {
+              const channel = new MessageChannel();
+              channel.port1.onmessage = () => settle(performance.now() - w.lastKey);
+              channel.port2.postMessage(null);
+            });
+          };
+          const observer = new MutationObserver(look);
+          observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+        });
+      }, id);
+      await p.keyboard.type(word, { delay: 40 });
+      delays.push(await p.evaluate(() => (window as unknown as { shown: Promise<number> }).shown));
+      await p.keyboard.press("Escape");
+      await expect(field).toHaveCount(0);
+    }
+    const sorted = [...delays].sort((a, b) => a - b);
+    const p95 = percentile(delays, 0.95);
+    console.log(
+      `MESURE de la dernière touche au résultat du serveur affiché (${ROUNDS} recherches) : p50 ${Math.round(
+        percentile(delays, 0.5),
+      )} ms, p95 ${Math.round(p95)} ms, le pire ${Math.round(sorted[sorted.length - 1])} ms (budget : ${SHOWN_MS} ms)`,
+    );
+    expect(p95).toBeLessThan(SHOWN_MS);
   });
 });
