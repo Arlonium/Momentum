@@ -33,6 +33,13 @@ export type SearchKeyEvent = {
 /** La touche du raccourci, telle que le clavier la nomme : « ⌘ » sur un Mac, « Ctrl » ailleurs. */
 export const MOD = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "") ? "⌘" : "Ctrl";
 
+/**
+ * La longueur du champ de recherche, au plus : la borne de la route (200 caractères, L16). Le champ
+ * compte en unités UTF-16, la route en caractères : il n'en laisse jamais taper plus qu'elle n'en
+ * prend.
+ */
+export const MAX_QUERY_LENGTH = 200;
+
 /** Le code de touche de « K ». */
 const KEY_K = 75;
 

@@ -59,3 +59,31 @@ test("a_window_whose_code_cannot_be_loaded_says_so_and_leaves_the_application", 
   expect(host.querySelector("dialog")).toBeNull();
   expect(host.textContent).toContain("le reste de l'application");
 });
+
+test("the_failed_window_gives_the_focus_back_when_it_closes", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const opener = document.createElement("button");
+  const entry = document.createElement("button");
+  entry.setAttribute("data-search-entry", "");
+  document.body.append(opener, entry);
+  const closeIt = async () => {
+    const close = [...host.querySelectorAll("button")].find((b) => b.textContent === "Fermer")!;
+    await act(async () => close.click());
+    expect(host.querySelector("dialog")).toBeNull();
+  };
+  await act(async () => root.render(<Probe />));
+  // À ce qui avait le focus quand la recherche a été demandée.
+  opener.focus();
+  await act(async () => current.open());
+  await closeIt();
+  expect(document.activeElement).toBe(opener);
+  // Parti entre-temps, ou rien n'avait le focus : à l'entrée de la barre latérale, jamais à `body`.
+  await act(async () => current.open());
+  opener.remove();
+  await closeIt();
+  expect(document.activeElement).toBe(entry);
+  entry.blur();
+  await act(async () => current.open());
+  await closeIt();
+  expect(document.activeElement).toBe(entry);
+});

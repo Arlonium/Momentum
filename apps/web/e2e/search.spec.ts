@@ -177,13 +177,22 @@ test("the_shortcut_in_the_editor_with_a_selection_is_left_to_the_editor", async 
   });
   const seen = () => p.evaluate(() => (window as unknown as { ctrlK: Seen[] }).ctrlK);
 
-  // « lien » sélectionné dans « Un lien ici », au clavier.
+  // « lien » sélectionné dans « Un lien ici », le focus dans l'éditeur. La sélection est posée d'un
+  // tenant, et reposée tant que l'éditeur ne la tient pas : huit touches de suite (quatre flèches,
+  // quatre avec Maj) n'ont laissé que « n » sélectionné une fois sur onze, sans cause trouvée (R1099).
   await p.locator(".mm-editor .bn-block-content").first().click();
-  await p.keyboard.press("End");
-  for (let i = 0; i < " ici".length; i += 1) await p.keyboard.press("ArrowLeft");
-  for (let i = 0; i < "lien".length; i += 1) await p.keyboard.press("Shift+ArrowLeft");
-  // BlockNote n'écoute Ctrl+K que sa barre de mise en forme montrée (elle suit la sélection de peu).
-  await expect(p.getByRole("button", { name: "Créer un lien" })).toBeVisible();
+  await expect(async () => {
+    await p.evaluate(() => {
+      const selection = document.getSelection()!;
+      if (String(selection) === "lien") return;
+      const block = document.querySelector(".mm-editor .bn-block-content")!;
+      const text = document.createTreeWalker(block, NodeFilter.SHOW_TEXT).nextNode()!;
+      selection.setBaseAndExtent(text, "Un ".length, text, "Un lien".length);
+    });
+    // BlockNote n'écoute Ctrl+K que sa barre de mise en forme montrée (elle suit la sélection de peu).
+    await expect(p.getByRole("button", { name: "Créer un lien" })).toBeVisible({ timeout: 2_000 });
+    expect(await p.evaluate(() => String(document.getSelection()))).toBe("lien");
+  }).toPass({ timeout: 20_000 });
   await p.keyboard.press("Control+k");
   // L'éditeur en fait un lien à créer : son champ d'adresse s'ouvre, pas la fenêtre de recherche.
   const linkField = p.getByPlaceholder("Modifier l'URL");
@@ -241,6 +250,59 @@ test("opening_the_application_asks_nothing_of_search", async ({ browser }) => {
   expect(asked(ROUTE).length).toBeGreaterThan(0);
   // La recherche ne voyage dans aucune adresse.
   expect(urls.filter((url) => url.includes(secret))).toEqual([]);
+});
+
+test("more_results_arrive_without_moving_their_button_under_the_pointer", async ({ browser }) => {
+  // Quarante-cinq pages dont le texte seul porte le mot : trois réponses du serveur (20, 20, 5).
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const secret = word();
+  const home = await createPage(api, { title: "Accueil" });
+  for (let i = 0; i < 45; i += 1) {
+    const page = await createPage(api, { title: `Note ${i}` });
+    await putMmd(api, page.id, `La note ${i} parle du ${secret}, comme les autres.\n`);
+  }
+  // Toutes trouvables : la troisième réponse porte ses cinq pages.
+  await expect
+    .poll(
+      async () => {
+        const res = await api.post(`/api/v1/spaces/${space.id}/search`, { data: { q: secret, after: 40 } });
+        return res.status() === 200 ? ((await res.json()) as { results: unknown[] }).results.length : -1;
+      },
+      { timeout: 60_000 },
+    )
+    .toBe(5);
+  const p = await openPage(browser, home.id, account);
+
+  // Un double clic sur « Rechercher » : le second clic tombe sur le voile de la fenêtre que le premier
+  // vient d'ouvrir, et ne la ferme pas.
+  await entry(p).dblclick();
+  await expect(field(p)).toBeFocused();
+  await field(p).fill(secret);
+  const lines = win(p).locator("[data-search-page]");
+  await expect(lines).toHaveCount(20);
+  const more = win(p).getByRole("button", { name: "Afficher plus de résultats" });
+  const before = (await more.boundingBox())!;
+  const first = (await lines.first().boundingBox())!;
+
+  await more.click();
+  await expect(lines).toHaveCount(40);
+  // Le bouton est où il était, sous le pointeur resté là : un second clic ne tombe sur aucune ligne.
+  expect(await more.boundingBox()).toEqual(before);
+  const under = await p.evaluate(
+    ([x, y]) => document.elementFromPoint(x, y)?.textContent,
+    [before.x + before.width / 2, before.y + before.height / 2],
+  );
+  expect(under).toBe("Afficher plus de résultats");
+  // Les lignes déjà montrées n'ont pas bougé non plus.
+  expect(await lines.first().boundingBox()).toEqual(first);
+
+  // La dernière réponse retire le bouton : le champ reprend le focus, jamais `body`.
+  await more.click();
+  await expect(lines).toHaveCount(45);
+  await expect(more).toHaveCount(0);
+  await expect(field(p)).toBeFocused();
 });
 
 test("a_line_shown_does_not_move_when_results_arrive", async ({ browser }) => {

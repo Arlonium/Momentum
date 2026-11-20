@@ -48,6 +48,10 @@ beforeEach(() => {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
+  // jsdom n'ouvre pas les fenêtres `dialog` (la coquille en ouvre une, le temps que le code arrive).
+  HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
 });
 
 afterEach(async () => {

@@ -3925,8 +3925,12 @@ button.mm-reaction:hover {
   font-weight: 600;
 }
 
-.mm-search .mm-search-more {
-  margin: 6px 10px 4px;
+/* « Afficher plus de résultats » : sous la zone qui défile, pas dedans. Les lignes de la suite
+   s'ajoutent dans la liste sans que le bouton descende sous le pointeur. */
+.mm-search-foot {
+  flex: none;
+  padding: 8px 18px;
+  border-top: 1px solid var(--mm-popover-divider);
 }
 
 .mm-search-more[aria-disabled="true"] {

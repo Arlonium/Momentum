@@ -89,6 +89,8 @@ export function useSearch(
     let answers = 0;
     /** Une requête est en route, ou attend le compte. */
     let asking = false;
+    /** Le serveur a dit qu'une suite existe, à sa dernière réponse. */
+    let more = false;
 
     const ask = async () => {
       const after = answers * ANSWER_PAGES;
@@ -103,10 +105,11 @@ export function useSearch(
         if (stopped) return;
         asking = false;
         answers += 1;
+        more = answer.more && answers * ANSWER_PAGES < MAX_FOUND_PAGES;
         setState((s) => ({
           ...s,
           hits: after === 0 ? answer.results : [...s.hits, ...answer.results],
-          more: answer.more && answers * ANSWER_PAGES < MAX_FOUND_PAGES,
+          more,
           indexing: answer.indexing,
           pending: false,
           loadingMore: false,
@@ -134,9 +137,10 @@ export function useSearch(
 
     const timer = setTimeout(() => void ask(), SEARCH_DEBOUNCE_MS);
     further.current = () => {
-      // Pas avant la première réponse, pas deux à la fois, pas au-delà de la centième page.
-      if (stopped || asking || answers === 0 || answers * ANSWER_PAGES >= MAX_FOUND_PAGES) return;
-      setState((s) => (s.more ? { ...s, loadingMore: true, error: null } : s));
+      // Seulement si le serveur a dit qu'une suite existe (jamais avant la première réponse, ni
+      // au-delà de la centième page), et pas deux à la fois.
+      if (stopped || asking || !more) return;
+      setState((s) => ({ ...s, loadingMore: true, error: null }));
       void ask();
     };
     return () => {

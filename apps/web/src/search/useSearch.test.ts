@@ -207,6 +207,40 @@ test("more_results_are_asked_twenty_pages_further_and_added_below", async () => 
   expect(asked).toHaveLength(5);
 });
 
+test("nothing_more_is_asked_when_the_server_said_there_is_nothing_more", async () => {
+  const hook = await renderHook(search, { spaceId: "s1", query: "chat" });
+  await pass(SEARCH_DEBOUNCE_MS);
+  await settle(() => asked[0].answer.resolve(found(["a", "b"])));
+  expect(hook.current.more).toBe(false);
+  await settle(() => hook.current.loadMore());
+  expect(asked).toHaveLength(1);
+  expect(hook.current.loadingMore).toBe(false);
+  // Témoin : la même demande part quand il y a une suite, et plus après une réponse qui la clôt.
+  await hook.rerender({ spaceId: "s1", query: "chien" });
+  await pass(SEARCH_DEBOUNCE_MS);
+  await settle(() => asked[1].answer.resolve(found(["c"], { more: true })));
+  await settle(() => hook.current.loadMore());
+  expect(asked).toHaveLength(3);
+  await settle(() => asked[2].answer.resolve(found(["d"])));
+  await settle(() => hook.current.loadMore());
+  expect(asked).toHaveLength(3);
+});
+
+test("a_413_and_a_422_are_read_as_the_server_says_them", async () => {
+  const hook = await renderHook(search, { spaceId: "s1", query: "chat" });
+  await pass(SEARCH_DEBOUNCE_MS);
+  await settle(() =>
+    asked[0].answer.reject(new ApiError(413, "payload_too_large", "Ta recherche est trop longue pour être reçue.")),
+  );
+  expect(hook.current.error).toBe("Ta recherche est trop longue pour être reçue.");
+  await hook.rerender({ spaceId: "s1", query: "chats" });
+  await pass(SEARCH_DEBOUNCE_MS);
+  await settle(() =>
+    asked[1].answer.reject(new ApiError(422, "invalid_query", "Ta recherche fait plus de 200 caractères.")),
+  );
+  expect(hook.current.error).toBe("Ta recherche fait plus de 200 caractères.");
+});
+
 test("a_failed_request_for_more_keeps_what_is_shown_and_can_be_asked_again", async () => {
   const hook = await renderHook(search, { spaceId: "s1", query: "chat" });
   await pass(SEARCH_DEBOUNCE_MS);

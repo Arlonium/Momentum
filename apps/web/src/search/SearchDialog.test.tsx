@@ -505,21 +505,107 @@ test("what_was_typed_is_given_back_selected_when_the_window_opens_again", async 
   expect(asked.map((a) => a.body)).toEqual([{ q: "chats" }]);
 });
 
+/**
+ * Un appui puis un clic de la souris, chacun sur son élément. jsdom donne au cadre de la fenêtre une
+ * boîte nulle en (0, 0) : (500, 500) est sur le voile, (0, 0) dans le cadre.
+ */
+async function mouse(down: Element, up: Element, at: number, detail = 1) {
+  const init = { bubbles: true, cancelable: true, clientX: at, clientY: at, detail };
+  await act(async () => {
+    down.dispatchEvent(new MouseEvent("mousedown", init));
+    up.dispatchEvent(new MouseEvent("click", init));
+  });
+}
+
 test("a_click_on_the_backdrop_closes_and_a_click_in_the_window_does_not", async () => {
   await show();
-  // jsdom donne au cadre une boîte nulle en (0, 0) : (500, 500) est sur le voile.
-  await act(async () => {
-    dialog().dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 0, clientY: 0 }));
-  });
+  await mouse(dialog(), dialog(), 0);
   expect(onClose).not.toHaveBeenCalled();
-  await act(async () => {
-    field().dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 500, clientY: 500 }));
-  });
+  await mouse(field(), field(), 500);
   expect(onClose).not.toHaveBeenCalled();
+  await mouse(dialog(), dialog(), 500);
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
+
+test("a_selection_started_in_the_field_and_released_on_the_backdrop_does_not_close", async () => {
+  await show({ start: "un texte tapé" });
+  // On sélectionne le texte du champ en glissant, et la souris est relâchée hors du cadre : le
+  // navigateur envoie le clic à la fenêtre elle-même.
+  await mouse(field(), dialog(), 500);
+  expect(onClose).not.toHaveBeenCalled();
+  // Un appui dans le cadre, hors de tout élément, relâché sur le voile : de même.
   await act(async () => {
+    dialog().dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 0, clientY: 0 }));
     dialog().dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 500, clientY: 500 }));
   });
+  expect(onClose).not.toHaveBeenCalled();
+  // L'appui d'avant ne vaut pas pour le clic d'après.
+  await mouse(dialog(), dialog(), 500);
+  await mouse(field(), dialog(), 500);
   expect(onClose).toHaveBeenCalledTimes(1);
+});
+
+test("the_second_click_of_a_double_click_on_the_backdrop_does_not_close", async () => {
+  // Un double clic sur « Rechercher » : le premier ouvre la fenêtre, le second tombe sur son voile.
+  await show();
+  await mouse(dialog(), dialog(), 500, 2);
+  await mouse(dialog(), dialog(), 500, 3);
+  expect(onClose).not.toHaveBeenCalled();
+  await mouse(dialog(), dialog(), 500, 1);
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
+
+test("the_second_click_of_a_double_click_opens_no_line", async () => {
+  // Un double clic sur « Afficher plus de résultats » : le second clic tombe sur une ligne arrivée
+  // sous le pointeur. Il n'ouvre rien, et le navigateur ne suit pas le lien non plus.
+  await show();
+  await type("cha");
+  for (const detail of [2, 3]) {
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, detail });
+    await act(async () => {
+      row("chatons").dispatchEvent(click);
+    });
+    expect(click.defaultPrevented).toBe(true);
+  }
+  expect(location.pathname).toBe("/");
+  expect(onClose).not.toHaveBeenCalled();
+  expect(field().value).toBe("cha");
+});
+
+test("the_field_takes_no_more_than_the_route_does", async () => {
+  await show();
+  expect(field().maxLength).toBe(200);
+});
+
+test("opened_after_its_shell_the_window_takes_what_its_host_noted", async () => {
+  // L'hôte a relevé, à l'ouverture, ce qui avait le focus ; la coquille a tenu le champ le temps que
+  // le code arrive, et dit où était son curseur.
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  elsewhere.focus();
+  await act(async () =>
+    root.render(
+      <SessionContext.Provider value={{ me: alice(), refresh: async () => {} }}>
+        <SearchDialog
+          space={space("space")}
+          nodes={NODES}
+          query="chats"
+          onQuery={() => {}}
+          onClose={onClose}
+          before={{ opener, range: null }}
+          caret={{ current: { start: 2, end: 2 } }}
+        />
+      </SessionContext.Provider>,
+    ),
+  );
+  // Le curseur là où il était, pas tout le texte sélectionné.
+  expect(document.activeElement).toBe(field());
+  expect([field().selectionStart, field().selectionEnd]).toEqual([2, 2]);
+  // Fermée, elle rend le focus à ce que l'hôte a relevé, pas à ce qui l'avait à son montage.
+  await act(async () => root.render(null));
+  expect(document.activeElement).toBe(opener);
 });
 
 test("the_states_are_said_under_the_list", async () => {
