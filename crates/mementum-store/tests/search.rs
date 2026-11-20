@@ -1068,6 +1068,59 @@ async fn a_failed_read_leaves_the_index_until_its_seq_changes() {
     assert_eq!(state(&f.db, node).await, Some((3, None, 0)));
 }
 
+/// Task S4c : le titre que l'index plein texte porte pour une page ([`Store::indexed_title`]).
+/// Celui d'une page, jamais indexée comprise ; aucun pour une page dont la lecture a échoué (plus
+/// aucune de ses entrées ne reste), pour un dossier, pour une page supprimée ou inconnue. Une page
+/// échouée qu'on relit de nouveau reçoit sa ligne de page entière (Ruling R1002) : sans elle, son
+/// entrée de titre, partie avec l'échec, ne reviendrait qu'à son prochain renommage.
+#[tokio::test]
+async fn the_title_to_index_is_that_of_a_readable_page_only() {
+    let f = fresh().await;
+    let node = new_page(&f, "Titre à chercher").await;
+    let title = async |id: Uuid| f.store.indexed_title(id).await.unwrap();
+    assert_eq!(title(node).await.as_deref(), Some("Titre à chercher"));
+    f.store
+        .append_updates(node, &[b"un", b"deux"], None)
+        .await
+        .unwrap();
+    index(&f.store, node, 1, &[row("a", "texte")]).await;
+    assert_eq!(title(node).await.as_deref(), Some("Titre à chercher"));
+
+    f.store.index_failed(node, 2).await.unwrap();
+    assert_eq!(title(node).await, None, "une page échouée");
+    clear_outbox(&f.db).await;
+    f.store
+        .append_updates(node, &[b"trois"], None)
+        .await
+        .unwrap();
+    index(&f.store, node, 3, &[row("a", "relu")]).await;
+    assert_eq!(title(node).await.as_deref(), Some("Titre à chercher"));
+    assert_eq!(
+        outbox(&f.db).await,
+        [waiting(node, ""), waiting(node, "a")],
+        "la page relue reçoit sa ligne de page entière"
+    );
+    // Témoin : une indexation ordinaire ne pose que les lignes de ses blocs.
+    clear_outbox(&f.db).await;
+    index(&f.store, node, 3, &[row("a", "relu encore")]).await;
+    assert_eq!(outbox(&f.db).await, [waiting(node, "a")]);
+
+    let mut folder = page(&f.space, None, None, "Dossier");
+    folder.kind = mementum_store::NodeKind::Folder;
+    let folder = f.store.create_node(folder).await.unwrap().id;
+    assert_eq!(title(folder).await, None, "un dossier");
+    assert_eq!(title(Uuid::now_v7()).await, None, "une page inconnue");
+    let by = account(&f.store, "olga").await.id;
+    f.store.trash_node(node, by).await.unwrap();
+    assert_eq!(
+        title(node).await.as_deref(),
+        Some("Titre à chercher"),
+        "la corbeille reste indexée"
+    );
+    f.store.delete_node(node).await.unwrap();
+    assert_eq!(title(node).await, None, "une page supprimée");
+}
+
 /// Ce que l'index a de retard dans un espace : une page jamais indexée (à `-1` : créée, dupliquée,
 /// ou d'une instance d'avant ce lot, que la migration note ainsi, R964), une page qui a une ligne
 /// d'outbox (un titre changé, un bloc pas encore validé). Pas une page à jour, pas un dossier, pas

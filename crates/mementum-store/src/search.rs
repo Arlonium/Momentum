@@ -771,6 +771,11 @@ impl Store {
             }
             write_slice(&mut tx, &id, &space, slice).await?;
             if i + 1 == slices.len() {
+                // Une page dont la lecture avait échoué n'a plus aucune entrée dans l'index plein
+                // texte, pas même celle de son titre : relue, elle y revient en entier (R1002).
+                if now.is_some_and(|now| now.failed_seq.is_some()) {
+                    put_outbox(&mut tx, &id, &[""]).await?;
+                }
                 write_state(&mut tx, &id, done).await?;
             }
             tx.commit().await?;
@@ -1097,6 +1102,21 @@ impl Store {
             return Ok(None);
         }
         Ok(pages.into_iter().max())
+    }
+
+    /// Le titre que l'index plein texte porte pour la page, sur chacune de ses entrées (Ruling
+    /// R902) ; `None` quand aucune entrée d'elle ne doit y rester : une page supprimée ou
+    /// inconnue, un dossier, une page dont la lecture a échoué ([`Store::index_failed`]). Le titre
+    /// est rendu tel que `nodes` le garde, sans normalisation.
+    pub async fn indexed_title(&self, node_id: Uuid) -> Result<Option<String>, StoreError> {
+        Ok(sqlx::query(
+            "SELECT n.title FROM nodes n LEFT JOIN search_state s ON s.node_id = n.id \
+             WHERE n.id = ? AND n.kind = 'page' AND s.failed_seq IS NULL",
+        )
+        .bind(node_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|r| r.get(0)))
     }
 
     /// Un bloc que garde `blocks_index` pour la page ; `None` s'il n'y est pas.
