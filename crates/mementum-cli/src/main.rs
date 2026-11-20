@@ -14,20 +14,31 @@
 //!   oublié, faute de SMTP. Le mot de passe est la première ligne de l'entrée
 //!   standard ; il n'est jamais affiché (la commande dit sa longueur), et un
 //!   caractère de contrôle le fait refuser.
+//! - `mementum reindex [--text-only] [--data-dir <dossier>] [--public-url <url>]`
+//!   reconstruit l'index de recherche, **serveur arrêté** : la projection de
+//!   chaque page relue depuis son document, puis l'index plein texte
+//!   (`<données>/search/`) depuis la projection ; `--text-only` ne refait que
+//!   l'index plein texte. Un serveur qui tourne sur ces données la fait
+//!   refuser, sans rien modifier. `--public-url` (ou `MEMENTUM_PUBLIC_URL`) est
+//!   l'adresse publique du serveur, la même que pour `serve` (module
+//!   `reindex`).
 //!
 //! Les journaux vont sur la sortie d'erreur, au niveau `info` par défaut,
 //! réglable par `RUST_LOG` (par exemple `RUST_LOG=mementum_sync=debug`). La
 //! sortie standard de `serve` ne porte que la ligne `mementum écoute sur
 //! http://…`.
 
+mod reindex;
+
 use std::io::{BufRead, IsTerminal};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use mementum_server::{Config, SignupMode};
+use mementum_server::{Backup, Config, SignupMode, config};
 use tracing_subscriber::EnvFilter;
 
 /// Mementum : un espace de travail façon Notion, auto-hébergeable.
@@ -77,6 +88,23 @@ enum Command {
     User {
         #[command(subcommand)]
         command: UserCommand,
+    },
+    /// Reconstruit l'index de recherche, serveur arrêté : la projection de chaque page relue
+    /// depuis son document, puis l'index plein texte depuis la projection. Refuse de tourner
+    /// pendant qu'un serveur tient ces données, sans rien avoir modifié.
+    Reindex {
+        /// Ne refait que l'index plein texte (`<données>/search/`), depuis la projection que la
+        /// base garde, sans relire aucun document.
+        #[arg(long)]
+        text_only: bool,
+        /// Dossier des données du serveur (défaut : MEMENTUM_DATA_DIR, sinon ./data).
+        #[arg(long, value_name = "DOSSIER")]
+        data_dir: Option<PathBuf>,
+        /// Adresse publique du serveur, la même que `serve --public-url` (défaut :
+        /// MEMENTUM_PUBLIC_URL) : un lien qui la porte et mène à une page compte comme un
+        /// lien vers elle.
+        #[arg(long, value_name = "URL", conflicts_with = "text_only")]
+        public_url: Option<String>,
     },
 }
 
@@ -161,26 +189,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::User {
             command: UserCommand::SetPassword { email, data_dir },
         } => {
-            let data_dir = mementum_server::config::data_dir(data_dir);
+            let data_dir = config::data_dir(data_dir);
             let password = read_password()?;
-            let account = mementum_server::set_password(&data_dir, &email, &password, |backup| {
-                // La commande vient de migrer la base : dire où est celle
-                // d'avant, quel que soit le niveau des journaux.
-                eprintln!(
-                    "mementum : base migrée ; la copie d'avant migration est {} ({} octets{})",
-                    backup.path.display(),
-                    backup.bytes,
-                    if backup.kept {
-                        " ; une copie identique, d'une tentative précédente, y était déjà"
-                    } else {
-                        ""
-                    }
-                );
-                if let Some(warning) = mementum_server::backup_warning(backup) {
-                    eprintln!("mementum : attention : {warning}");
-                }
-            })
-            .await?;
+            let account =
+                mementum_server::set_password(&data_dir, &email, &password, announce_backup)
+                    .await?;
             // La longueur, jamais le mot de passe : de quoi voir qu'une ligne
             // tronquée ou un caractère en trop s'est glissé dans la saisie.
             println!(
@@ -190,7 +203,83 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Reindex {
+            text_only,
+            data_dir,
+            public_url,
+        } => {
+            let data_dir = config::data_dir(data_dir);
+            // Avant de toucher au disque. Sous `--text-only`, aucune page n'est projetée : la
+            // variable n'est pas lue.
+            let origin = if text_only {
+                None
+            } else {
+                public_origin(public_url)?
+            };
+            let report = reindex::reindex(&data_dir, text_only, origin, announce_backup).await?;
+            let written = format!(
+                "{} entrées écrites dans l'index de recherche ({} validations)",
+                report.entries, report.commits
+            );
+            match report.pages {
+                Some((projected, 0)) => println!(
+                    "réindexation finie : {projected} pages relues depuis leur document et \
+                     projetées, {written}"
+                ),
+                Some((projected, unreadable)) => println!(
+                    "réindexation finie : {} pages relues depuis leur document, {written} ; \
+                     {unreadable} d'entre elles ne se relisent pas : elles sortent de l'index, \
+                     et le journal les nomme",
+                    projected + unreadable
+                ),
+                None => println!(
+                    "index de recherche refait depuis les tables, sans relire aucun document : \
+                     {written}"
+                ),
+            }
+            Ok(())
+        }
     }
+}
+
+/// La commande vient de migrer la base : dire où est celle d'avant, sur la sortie d'erreur,
+/// quel que soit le niveau des journaux.
+fn announce_backup(backup: &Backup) {
+    eprintln!(
+        "mementum : base migrée ; la copie d'avant migration est {} ({} octets{})",
+        backup.path.display(),
+        backup.bytes,
+        if backup.kept {
+            " ; une copie identique, d'une tentative précédente, y était déjà"
+        } else {
+            ""
+        }
+    );
+    if let Some(warning) = mementum_server::backup_warning(backup) {
+        eprintln!("mementum : attention : {warning}");
+    }
+}
+
+/// L'origine publique du serveur, pour `mementum reindex` : l'option, sinon
+/// `MEMENTUM_PUBLIC_URL` (vide ou blanche : absente), relue par `config::public_origin`, la règle
+/// du serveur (Ruling R998). Une autre variable du serveur, même invalide, n'arrête pas la
+/// commande.
+fn public_origin(option: Option<String>) -> anyhow::Result<Option<Arc<str>>> {
+    let url = match option {
+        Some(url) => Some(url),
+        None => match std::env::var(config::PUBLIC_URL_VAR) {
+            Ok(url) => Some(url).filter(|url| !url.trim().is_empty()),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(raw)) => anyhow::bail!(
+                "{} invalide (« {} ») : attendu une adresse en UTF-8, comme \
+                 https://notes.exemple.fr",
+                config::PUBLIC_URL_VAR,
+                raw.to_string_lossy()
+            ),
+        },
+    };
+    url.map(|url| config::public_origin(&url).map(Arc::from))
+        .transpose()
 }
 
 /// Le mot de passe : la première ligne de l'entrée standard, sans sa fin de

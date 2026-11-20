@@ -14,9 +14,16 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# `mementum reindex` (lot 4, Task S7) : l'index plein texte, vidé puis nourri par la commande.
+mementum-search.workspace = true
 mementum-server.workspace = true
+# `mementum reindex` : la base, ouverte par `Store::open` (la règle des copies d'avant
+# migration), ses tables de l'index, ses intentions et ses clôtures.
+mementum-store.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 mementum-md.workspace = true

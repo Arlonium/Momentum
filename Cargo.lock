@@ -1386,14 +1386,18 @@ dependencies = [
  "anyhow",
  "clap",
  "mementum-md",
+ "mementum-search",
  "mementum-server",
+ "mementum-store",
  "mementum-sync",
  "serde_json",
  "sqlx",
  "sysinfo",
  "tempfile",
  "tokio",
+ "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
