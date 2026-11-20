@@ -5,11 +5,15 @@
 import type { Backlink } from "@mementum/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { blockPath } from "../router";
 import { publishPages } from "../space/pageDirectory";
 import "../test/hooks";
 import { page } from "../test/pages";
 import { backlinkHref, Backlinks } from "./Backlinks";
+import { arriveAt } from "./Breadcrumb";
+
+vi.mock("./Breadcrumb", () => ({ arriveAt: vi.fn() }));
 
 const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -22,6 +26,7 @@ beforeEach(() => {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
+  vi.mocked(arriveAt).mockClear();
 });
 
 afterEach(async () => {
@@ -94,9 +99,35 @@ test("the_section_is_a_list_of_links", async () => {
 });
 
 test("backlink_href_is_the_address_of_the_page", () => {
-  // Le seul endroit où un rétrolien devient une adresse. Le fragment du bloc s'y branchera (C2).
+  // Le seul endroit où un rétrolien devient une adresse : celle de la page, à son bloc (`blockPath`,
+  // C2). L'identifiant d'un bloc est un texte venu d'ailleurs : toujours échappé.
   expect(backlinkHref(A, null)).toBe(`/p/${A}`);
-  expect(backlinkHref(A, "un bloc/#?")).toMatch(new RegExp(`^/p/${A}`));
+  expect(backlinkHref(A, "bloc-1")).toBe(`/p/${A}#b=bloc-1`);
+  expect(backlinkHref(A, "un bloc/#?&é")).toBe(blockPath(A, "un bloc/#?&é"));
+  expect(backlinkHref(A, "un bloc/#?&é")).toBe(`/p/${A}#b=un%20bloc%2F%23%3F%26%C3%A9`);
+});
+
+test("only_a_backlink_without_a_block_notes_its_arrival_for_the_breadcrumb", async () => {
+  // Le lien suivi part avec la page quittée. Sans bloc, rien d'autre ne prendrait le focus : le fil
+  // d'Ariane de la page d'arrivée le prend (`arriveAt`). Avec un bloc, c'est l'arrivée sur le bloc
+  // (C2) qui le prend : le fil ne doit pas s'en mêler. Un clic que le routeur ne suit pas ne note rien.
+  await tree({ [A]: "Alpha", [B]: "Bêta" });
+  await show([link(A, "", "bloc-1"), link(B)]);
+  // jsdom ne navigue pas : le clic s'arrête ici, après le lien.
+  host.addEventListener("click", (event) => event.preventDefault());
+  const [withBlock, withoutBlock] = rows();
+  const click = (row: HTMLElement, init: MouseEventInit = {}) =>
+    act(async () => {
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ...init }));
+    });
+  await click(withBlock);
+  expect(arriveAt).not.toHaveBeenCalled();
+  await click(withoutBlock, { ctrlKey: true });
+  await click(withoutBlock, { button: 1 });
+  expect(arriveAt).not.toHaveBeenCalled();
+  await click(withoutBlock);
+  expect(arriveAt).toHaveBeenCalledTimes(1);
+  expect(arriveAt).toHaveBeenCalledWith(B);
 });
 
 test("an_excerpt_is_shown_as_text_never_as_markup", async () => {

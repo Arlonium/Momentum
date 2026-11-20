@@ -11,22 +11,24 @@
 // elle garde les lignes qu'elle montrait, à leur place. Une ligne tenue dont la page quitte l'arbre
 // reste, sous un libellé neutre et sans son extrait ; un titre renommé, lui, se met à jour en place.
 //
-// Chaque ligne est un vrai lien, que le routeur suit (`useLinkInterception`) ; Ctrl+clic et le clic
-// du milieu restent au navigateur. Le lien suivi part avec la page quittée : le focus est rendu à
-// l'arrivée par le fil d'Ariane de la page ouverte (`arriveAt`, R292).
+// Chaque ligne est un vrai lien, vers la page source à son bloc (`blockPath`), que le routeur suit
+// avec son fragment (`useLinkInterception`) ; Ctrl+clic et le clic du milieu restent au navigateur.
+// Le lien suivi part avec la page quittée. Avec un bloc, l'éditeur de la page d'arrivée y va et y
+// met le focus (`useArrival`). Sans bloc, rien ne le prendrait : le fil d'Ariane de la page ouverte
+// le prend (`arriveAt`, R292), et lui seul dans ce cas, pour que les deux ne se disputent rien.
 import type { Backlink } from "@mementum/protocol";
 import { useId, useRef, useState, useSyncExternalStore, type FocusEvent, type MouseEvent } from "react";
-import { pagePath } from "../router";
+import { blockPath } from "../router";
 import { publishedTitles, watchPages } from "../space/pageDirectory";
 import { arriveAt } from "./Breadcrumb";
 
 /**
  * L'adresse d'un rétrolien : **le seul endroit** où une page source et son bloc deviennent une
- * adresse. Aujourd'hui celle de la page ; le fragment du bloc (`blockId`, un texte venu d'ailleurs,
- * `null` : la page sans bloc) s'y branche avec la Task C2, jamais bâti à la main ici.
+ * adresse. Celle de la page, à son bloc (`blockPath`, qui échappe `blockId`, un texte venu
+ * d'ailleurs) ; `null` : la page, sans bloc. Jamais de fragment bâti à la main ici.
  */
-export function backlinkHref(pageId: string, _blockId: string | null): string {
-  return pagePath(pageId);
+export function backlinkHref(pageId: string, blockId: string | null): string {
+  return blockPath(pageId, blockId);
 }
 
 /** La borne du serveur pour un extrait, en points de code : il coupe sans marque. */
@@ -105,7 +107,8 @@ export function Backlinks({ pages, error }: Props) {
                   href={backlinkHref(link.pageId, link.blockId)}
                   data-backlink-page={link.pageId}
                   onClick={(event) => {
-                    if (followed(event)) arriveAt(link.pageId);
+                    // Avec un bloc, c'est l'arrivée sur le bloc qui prend le focus (`useArrival`).
+                    if (link.blockId === null && followed(event)) arriveAt(link.pageId);
                   }}
                 >
                   <span className="mm-backlink-name" dir="auto">
