@@ -164,7 +164,7 @@ Ce que les lots faits ont appris, et qui ne se devine pas :
 Elles sont détaillées dans le README. Les plus utiles :
 
 ```
-cargo fmt --all -- --check
+cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
 cargo test --release -p mementum-sync -- --ignored
@@ -177,6 +177,7 @@ corepack pnpm -C apps/web exec playwright test -c playwright.budgets.config.ts
 node tools/check-npm-licenses.mjs
 ```
 
+- `cargo fmt --check` est la commande de la CI, et pas `cargo fmt --all -- --check` : `--all` formate aussi les dépendances locales, donc `vendor/yrs`, qu'on ne formate jamais (yrs recopié de crates.io, hors de l'atelier Cargo : dix-neuf écarts qui ne sont pas les nôtres) ; et dans un atelier posé sous `.claude/worktrees/`, cargo le refuse (« current package believes it's in a workspace when it's not »).
 - `pnpm` n'est pas dans le PATH du poste d'Alex : passer par `corepack pnpm`.
 - Les parcours de bout en bout lancent leurs propres serveurs. Pour ne pas gêner une instance qui tourne, leur donner d'autres ports : `MEMENTUM_E2E_WEB_PORT` et `MEMENTUM_E2E_API_PORT`.
 - `cargo deny check advisories` signale deux avis connus (R44) : c'est attendu tant que `sqlx` et `yrs` n'ont pas de version qui les lève.
