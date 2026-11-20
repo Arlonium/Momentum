@@ -4,7 +4,7 @@
 //!
 //! | Route | Il faut | Réponse |
 //! |---|---|---|
-//! | `GET /api/v1/pages/{id}/backlinks` | `read` (à la corbeille aussi) | [`Backlinks`] : les pages qui y mènent, que le compte voit, de l'espace de la page, hors corbeille, dans l'ordre de leurs identifiants, deux cents au plus ; jamais avant 75 ms ([`BACKLINKS_FLOOR`]) |
+//! | `GET /api/v1/pages/{id}/backlinks` | `read` (à la corbeille aussi) | [`Backlinks`] : les pages qui y mènent, que le compte voit, de l'espace de la page, hors corbeille, dans l'ordre de leurs identifiants, deux cents au plus ; jamais avant 150 ms ([`BACKLINKS_FLOOR`]) |
 //!
 //! **Refus**, dans l'ordre des pages : `401` sans session ; `409 account_changed` pour un autre
 //! compte nommé ; `404 not_found` pour une page que la personne ne voit pas, exactement la réponse

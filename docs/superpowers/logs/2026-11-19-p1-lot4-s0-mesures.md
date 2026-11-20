@@ -89,8 +89,10 @@ Refaire : `spike/search-bench/README.md`.
 
 Le Step 1 n'a aucune sortie brute dans `results/`, hors `tantivy-licences.txt` (relecture,
 m1) : la durée de compilation, la taille du binaire et le compte des 65 crates ne se recoupent
-pas. La CI lance `cargo deny check` entier ; S0 n'a passé que `licenses bans`. C'est à refaire
-sur l'atelier du serveur quand S3 y ajoute Tantivy.
+pas. S0 n'a passé que `cargo deny check licenses bans`, et c'est aussi tout ce que lance la CI
+(`.github/workflows/ci.yml`, R44 ; ce compte rendu écrivait à tort qu'elle lançait
+`cargo deny check` entier : corrigé à la fin du lot). C'était à refaire sur l'atelier du serveur
+quand S3 y ajoutait Tantivy : fait par S3 (registre, « Task S3 »).
 
 ## Step 2 : mesures, Tantivy
 
