@@ -23,7 +23,7 @@ Le 20 novembre, Lenny a répondu « oui » pour pousser au fil du travail (L12),
 7. **L7, ni filtre ni tri à l'écran** : tri par pertinence seul ; les filtres (type, date, auteur) viennent au lot 5 avec l'outil `search` des agents.
 8. **L8, les rétroliens : « Pages qui mènent ici », sous le texte de la page**, absente quand il n'y en a pas ; y comptent une mention de page, un lien vers une page, un lien du texte vers une page de l'instance ; seules les pages que tu vois, du même espace. Autre place possible : un compteur dans la barre du haut qui ouvre un panneau (section D).
 9. **L9, le délai d'indexation : 2 s après la dernière frappe, 15 s au plus pendant une frappe continue** ; un texte effacé reste trouvable ce temps-là, par qui lit la page. C'est le prix de ne rien mettre sur le chemin d'une frappe. Y revenir : un délai plus court se règle (`MEMENTUM_INDEX_AFTER_MS`), au prix de plus d'indexations (section F).
-10. **L10, les budgets de la recherche**, adoptés au §5.10 de la conception tels que mesurés à la Task X2 (R1163, R1165, R1173) : la réponse du serveur sous 100 ms au p95, temps plancher compris, sur un espace de 10 000 pages et 100 000 blocs ; de la dernière touche au résultat affiché sous 400 ms au p95 (224 ms mesurés, 299 ms sous un processeur ralenti de moitié : les 300 ms que proposait le plan ne tenaient pas avec une marge) ; un mot tapé trouvable en moins de 5 s. Ils ne valent pas sur un million de blocs pour des mots que toutes les pages portent (choix 23, plus bas).
+10. **L10, les budgets de la recherche**, adoptés au §5.10 de la conception tels que mesurés à la Task X2 (R1163, R1165, R1173) : la réponse du serveur sous 100 ms au p95, temps plancher compris, sur un espace de 10 000 pages et 100 000 blocs ; de la dernière touche au résultat affiché sous 400 ms au p95 (224 ms mesurés, 299 ms sous un processeur ralenti 1,5 fois : les 300 ms que proposait le plan ne tenaient pas avec une marge) ; un mot tapé trouvable en moins de 5 s. Ils ne valent pas sur un million de blocs pour des mots que toutes les pages portent (choix 23, plus bas).
 11. **L11, `[[Page#Titre]]` (lien vers un titre d'une page) : dans aucun lot pour l'instant.** Il demande un choix de schéma, à faire avec le lot 5 ou le lot 6 (l'import d'Obsidian en a besoin).
 12. **L12, pousser : oui, au fil du travail, pour tous les lots** (ta réponse du 20 novembre, R934). Rappelé pour mémoire.
 13. **L13, une instance qui a déjà des pages est indexée seule, en fond, au premier démarrage**, et la recherche dit qu'elle est incomplète tant que ce n'est pas fini. L'autre choix : une commande à lancer par l'exploitant (étape G6, facultative).
@@ -53,6 +53,10 @@ Le 20 novembre, Lenny a répondu « oui » pour pousser au fil du travail (L12),
 34. **Un lien du texte écrit avec l'adresse entière de l'instance (`https://…/p/…`) ne compte comme rétrolien que si le serveur connaît son adresse publique** (`--public-url`, R998) ; et changer d'adresse publique ne réindexe rien de soi-même : il faut `mementum reindex` (étape G2).
 35. **Ctrl+K ouvre la recherche de partout, champs compris** (R1087) : dans un champ de texte, il perd le sens que le navigateur lui donne ; sur Mac, Ctrl+K l'ouvre aussi, comme Cmd+K. Tapé pendant qu'un menu « / », `@` ou `[[` est ouvert, il ferme ce menu, qui ne se rouvre pas au retour ; le texte tapé reste (R1144).
 36. **Les titres trouvés ne sont pas surlignés**, seuls les mots de l'extrait le sont ; un extrait peut commencer ou finir au milieu d'un caractère composé (un emoji à plusieurs parties) (R969, limites écrites de la Task C1).
+
+**Une question laissée ouverte, à trancher** (rien n'a été choisi pour toi) :
+
+37. **Échap dans le texte d'une page, sans menu ouvert : que doit-il faire ?** Aujourd'hui, et depuis avant ce lot, il fait sortir le curseur du texte : le focus n'est plus nulle part, et ce que tu tapes ensuite ne va nulle part tant que tu n'as pas recliqué (R1143 ; vu de nouveau à la passe de fin du lot 4, défaut D10, pas corrigé). Deux choix : **(a) Échap ne fait rien dans le texte** (le curseur reste où il est, comme dans Notion), ou **(b) Échap sort du texte exprès**, pour atteindre le reste de la page au clavier, et le focus va alors à un endroit dit (le titre de la page, par exemple) au lieu de se perdre. Dans les deux cas, le défaut d'aujourd'hui (le focus perdu) part ; un test l'attend déjà (`e2e/search-rights.spec.ts`, en `test.fixme`, écrit pour le choix (a)). Tu le vois à l'étape C3 ou n'importe où : clique dans un paragraphe, tape Échap, puis une lettre.
 
 ## Avant de commencer
 
@@ -102,7 +106,7 @@ Puis ouvre `http://localhost:5174`.
 
 **Pas encore** (ne le signale pas comme un défaut) : chercher dans les commentaires, les fichiers, la corbeille ou l'historique ; les filtres ; tous les espaces à la fois ; les fautes de frappe ; l'expression exacte entre guillemets ; la palette de commandes (actions, IA) ; la vue graphe ; `[[Page#Titre]]` ; les mots surlignés dans la page ouverte ; un compteur de résultats.
 
-**Déjà connu, d'avant ce lot** : Échap tapé dans le texte d'une page, sans menu ouvert, fait perdre le focus à l'éditeur, et la frappe suivante ne va nulle part (R1143) ; il est noté pour la fin du lot. Clique dans le texte pour reprendre.
+**Déjà connu, d'avant ce lot** : Échap tapé dans le texte d'une page, sans menu ouvert, fait perdre le focus à l'éditeur, et la frappe suivante ne va nulle part (R1143). Ce n'est pas corrigé : ce qu'Échap doit faire là est un choix de produit, qui t'est demandé plus haut (question 37). Clique dans le texte pour reprendre.
 
 ## A. Préparer l'espace (8 minutes)
 
@@ -193,4 +197,4 @@ Remarques :
 
 ## À la fin
 
-Arrête le serveur et Vite. Le dossier `data/recette-lot4` peut être supprimé. Envoie, avec tes remarques : les choix que tu gardes et ceux que tu veux autrement, et les numéros des cases qui ne vont pas.
+Arrête le serveur et Vite. Le dossier `data/recette-lot4` peut être supprimé. Envoie, avec tes remarques : les choix que tu gardes et ceux que tu veux autrement, ta réponse à la question 37 (Échap dans le texte), et les numéros des cases qui ne vont pas.
