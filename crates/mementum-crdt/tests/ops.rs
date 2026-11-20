@@ -974,7 +974,7 @@ fn operations_touching_unchanged_blocks_pass_a_rebase() {
     let ops = [
         str_replace("Un", "Premier"),
         Operation::Insert {
-            at: Place::After(anchors.alias("p4").unwrap().into()),
+            at: Place::After(anchors.alias("p4").unwrap()),
             blocks: md("Après quatre\n"),
         },
         Operation::DeleteBlock {
