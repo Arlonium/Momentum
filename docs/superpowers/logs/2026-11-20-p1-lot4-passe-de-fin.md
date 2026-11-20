@@ -2,6 +2,8 @@
 
 Méthode de R935 : tout ce que les tâches du lot n'ont pas lancé, lancé une fois, sur `main` à `6f5ae38` (atelier `lot4-fin`, poste de développement sous Windows, une commande lourde à la fois). **Rien n'est corrigé ici** : ce document est la liste des défauts, pour la correction groupée. Les sondes (mutations, un fichier de test jetable) ont été retirées, l'atelier vérifié propre après chacune.
 
+**Suite** : la correction groupée et sa passe de contrôle sont au [registre](2026-11-19-p1-lot4-ledger.md), « Correction de fin de lot » (R1200 à R1209) : D1 à D4, D7 à D9 et D11 levés, D5, D6, D12 et D13 reportés, D10 laissé au choix de Lenny. Ce document reste tel que la passe l'a écrit.
+
 En bref : toutes les suites sont vertes sur ce poste sauf un test de bout en bout du lot 4, instable (D3) ; seize des dix-sept mutations de sécurité sont tuées, une survit (D2) ; le rouge de la CI sous Linux dans `reindex.rs` est un défaut des tests, établi par lecture, pas reproduit (D1). Aucun défaut bloquant.
 
 ## Étapes
