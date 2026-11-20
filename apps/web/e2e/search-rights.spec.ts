@@ -10,7 +10,10 @@
 // - une absence se juge derrière la réponse du serveur à cette recherche (`ask`), et ce que l'écran
 //   en dit (« Aucun résultat. ») ;
 // - l'index suit une écriture après un temps de calme : `waitFindable` avant d'ouvrir les onglets, et
-//   jamais une recherche par l'API pendant que l'onglet du même compte cherche.
+//   jamais une recherche par l'API pendant que l'onglet du même compte cherche ;
+// - une réponse prise pour référence (« un mot que personne n'a écrit »), puis comparée octet pour
+//   octet, se prend derrière `waitIndexed`, après la dernière écriture : `indexing` reste vrai une
+//   seconde après une indexation, et passerait à faux entre la référence et les réponses comparées.
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import type { SearchResults } from "@mementum/protocol";
 import {
@@ -43,6 +46,7 @@ import {
   unique,
   UNKNOWN_ID,
   waitFindable,
+  waitIndexed,
   waitSynced,
   word,
 } from "./helpers";
@@ -148,6 +152,7 @@ test("a_guest_never_finds_a_page_he_does_not_see", async ({ browser }) => {
   expect(await found(brunoApi, space.id, w.priv)).toEqual([]);
   // L'invité : ses pages, et rien d'autre.
   expect(await found(guestApi, space.id, all)).toEqual(sorted([invited.id, sub.id, deep.id]));
+  await waitIndexed(guestApi, space.id);
   const nobody = JSON.stringify(await searchIn(guestApi, space.id, word()));
   for (const unseen of [w.open, w.priv, w.trash, hiddenTitle]) {
     // Un mot que seule une page non vue porte répond comme un mot que personne n'a écrit.
@@ -170,6 +175,7 @@ test("a_guest_never_finds_a_page_he_does_not_see", async ({ browser }) => {
   await expect(row(p, sub.id).locator(".mm-search-ancestor")).toHaveText([invited.title]);
   await expect(row(p, deep.id).locator(".mm-search-ancestor")).toHaveCount(0);
   await expect(win(p)).not.toContainText(hiddenTitle);
+  await waitIndexed(guestApi, space.id);
   for (const unseen of [w.open, w.priv, w.trash, hiddenTitle]) {
     const answer = await ask(p, unseen);
     expect(answer.text, unseen).toBe(nobody);
@@ -202,6 +208,7 @@ test("a_private_page_is_found_by_its_owner_only", async ({ browser }) => {
 
   const p = await openPage(browser, home.id, bruno);
   await openWindow(p);
+  await waitIndexed(brunoApi, space.id);
   const nobody = (await ask(p, word())).text;
   for (const query of [secret, titled]) {
     const answer = await ask(p, query);
@@ -244,6 +251,7 @@ test("access_withdrawn_while_the_window_is_open", async ({ browser }) => {
   // La ligne reste tant que ce qui est tapé ne change pas (R1081) ; la recherche suivante ne la
   // rend plus, et le dit comme pour un mot que personne n'a écrit.
   await expect(row(p, shared.id)).toBeVisible();
+  await waitIndexed(brunoApi, space.id);
   const nobody = (await ask(p, word())).text;
   await expect(nothingFound(p)).toBeVisible();
   const again = await ask(p, secret);
@@ -341,6 +349,7 @@ test("a_trashed_page_leaves_the_results_and_comes_back", async ({ browser }) => 
   expect((await ask(p, under)).pages).toEqual([child.id]);
 
   expect((await api.post(`/api/v1/pages/${thrown.id}/trash`)).status()).toBe(200);
+  await waitIndexed(api, space.id);
   const nobody = (await ask(p, word())).text;
   for (const query of [own, under]) {
     expect((await ask(p, query)).text, query).toBe(nobody);
@@ -359,7 +368,7 @@ test("a_trashed_page_leaves_the_results_and_comes_back", async ({ browser }) => 
 
 test("another_account_logging_in_in_another_tab_gets_no_result_of_the_first", async ({ browser }) => {
   const tag = unique();
-  const { alice, aliceApi, space, bruno } = await ownerAndMember();
+  const { alice, aliceApi, space, bruno, brunoApi } = await ownerAndMember();
   const [first, second] = [word(), word()];
   const one = await createPage(aliceApi, { title: `Journal un ${tag}`, section: "private" });
   const two = await createPage(aliceApi, { title: `Journal deux ${tag}`, section: "private" });
@@ -395,6 +404,7 @@ test("another_account_logging_in_in_another_tab_gets_no_result_of_the_first", as
   // Sous Bruno, ni l'une ni l'autre ne se trouve.
   await waitSynced(p);
   await openWindow(p);
+  await waitIndexed(brunoApi, space.id);
   const nobody = (await ask(p, word())).text;
   for (const query of [first, second]) {
     expect((await ask(p, query)).text, query).toBe(nobody);
@@ -431,6 +441,7 @@ test("erased_text_is_no_longer_found", async ({ browser }) => {
     .toEqual({ pages: 0, indexing: false });
 
   await openWindow(p);
+  await waitIndexed(api, space.id);
   const nobody = (await ask(p, word())).text;
   const answer = await ask(p, erased);
   expect(answer.text).toBe(nobody);

@@ -120,6 +120,25 @@ export async function waitFindable(
 }
 
 /**
+ * Barrière avant toute réponse de recherche prise pour référence, puis comparée octet pour octet
+ * à d'autres (Ruling R1202) : cherche un mot neuf au nom du compte de `api` jusqu'à lire
+ * `indexing: false`. Une page dont l'indexation vient de finir reste dite en retard une seconde
+ * (R1055) : prise pendant cette seconde, la référence dit `indexing: true`, et les réponses
+ * comparées, quelques dizaines de millisecondes plus tard, `false`. À appeler après la dernière
+ * écriture du test, avec le compte dont les réponses sont comparées (`indexing` ne juge que les
+ * pages qu'il voit). Ne jamais retirer `indexing` de la comparaison à la place : c'est elle qui
+ * prouve qu'il ne dit rien des pages non vues.
+ */
+export async function waitIndexed(api: APIRequestContext, spaceId: string): Promise<void> {
+  await expect
+    .poll(async () => (await searchIn(api, spaceId, word())).indexing, {
+      message: "l'index est toujours dit en retard",
+      timeout: 30_000,
+    })
+    .toBe(false);
+}
+
+/**
  * Un mot neuf à chercher, fait de lettres seules : un seul mot pour l'index, que rien d'autre ne
  * porte (`unique()` mêle lettres et chiffres, que rien ne promet indexés comme un seul mot).
  */
