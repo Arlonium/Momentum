@@ -419,6 +419,7 @@ Décisions au registre du lot 4, « Task S6 » (R1015 à R1023).
 - **Le plan des requêtes de l'index juge les alias de `TABLES`** (`src/search.rs`, `check_plans`) : `s` y est `search_state`, si bien qu'un `json_each(…) s` passait pour le parcours d'une table. Nommer un alias neuf hors de cette liste (`j`).
 - **`serde_json` garde l'ordre d'écriture des clés** dans ce dépôt (fonction `preserve_order`) : un test qui affirme les champs d'un objet les trie avant de comparer.
 - **Écrire des milliers de pages pour une mesure** : par une connexion à côté, en une transaction (`nodes`, `blocks_index`, `page_links`), puis `spaces.rev` et `spaces.lsn` avancés dans la même transaction, avant toute lecture des droits (le cache des accès est rangé sous `rev`) ; vingt mille `create_node` prendraient des minutes.
+- **Un `#[path]` dans un module en ligne part d'un dossier qui n'existe pas** (vu sur la CI, rouge sous Linux seulement, deux poussées de suite). Dans `mod tests { #[path = "…"] mod clock; }` de `src/routes/backlinks.rs`, le chemin part de `src/routes/backlinks/tests/` ; Windows remonte ce dossier inexistant par `..` sans rien dire, Linux refuse (« couldn't find file »). Déclarer le module inclus au niveau du fichier (`#[cfg(test)] #[path = …] mod clock;`), où le chemin part du dossier du fichier. Un chemin d'inclusion neuf ne se prouve pas sur ce poste : lire la CI sous Linux après la poussée.
 
 ### Task S4c : l'index plein texte et le démarrage (`crates/mementum-server/src/indexer.rs`)
 
