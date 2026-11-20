@@ -558,8 +558,17 @@ Le client ouvre **une seule WebSocket**, multiplexée, encodée en MessagePack :
 | Base de 100 000 lignes : changer un filtre ou un tri | < 300 ms |
 | Mémoire du serveur au repos | < 150 Mo |
 | Démarrage à froid du binaire | < 1 s |
+| Recherche : réponse du serveur, route entière (10 000 pages, 100 000 blocs) | < 100 ms au p95 |
+| Recherche : de la dernière touche au résultat affiché | < 400 ms au p95 |
+| Un texte tapé est trouvable par la recherche (indexeur au repos) | < 5 s après la dernière frappe |
 | Raspberry Pi 4 (4 Go) | ~25 utilisateurs actifs en simultané |
 | VPS 2 vCPU / 4 Go | ~200 utilisateurs actifs en simultané |
+
+**Recherche** *(lot 4 de la P1 ; budgets proposés par le plan du lot, décision L10, adoptés tels que mesurés le 20 novembre 2026 : Rulings R1160 à R1174 ; Lenny peut y revenir)* :
+- « Réponse du serveur < 100 ms » vaut par la route entière, **temps de réponse plancher compris** (50 ms : aucune recherche ne répond plus vite, pour que sa durée ne dise rien des pages qu'on ne voit pas, §5.7), sur un espace de 10 000 pages et 100 000 blocs, quels que soient les mots : 63 ms au p95 au pire. **Elle ne vaut pas sur un million de blocs pour des mots très courants** : 62 ms pour une recherche qui porte un mot rare, 87 ms pour un mot que toutes les entrées portent, 274 ms pour huit tels mots (447 ms pendant que l'index est reconstruit) ; le calcul croît avec le nombre d'entrées de l'instance qui portent tous les mots cherchés (0,25 s par million pour huit mots), et rien ne le borne avant le lot 7.
+- « De la dernière touche au résultat affiché » compte l'anti-rebond du client (150 ms), le plancher du serveur et le rendu, dans un build de production : 224 ms au p95 mesurés, 299 ms sous un processeur ralenti de moitié (les 300 ms que le plan proposait ne tiennent donc pas avec une marge : le budget est à 400 ms). Pendant ce délai, la liste ne montre que les pages trouvées par leur titre dans l'arbre déjà chargé.
+- « Trouvable en moins de 5 s » : 2,1 à 2,2 s mesurés (deux secondes de calme après la dernière frappe, puis l'index) ; pendant une frappe continue, quinze secondes au plus ; pendant la première indexation d'une instance, davantage (10 000 pages de dix blocs s'indexent en 48 s).
+- Les budgets d'avant tiennent avec l'index : démarrage 24 ms et 18 Mo au repos sur un dossier qui porte un index à jour d'un million de blocs ou de cent mille ; la mémoire que le processus tient en propre reste sous 30 Mo après 500 recherches. **Hors du repos**, une reconstruction de l'index d'un million de blocs prend jusqu'à 190 Mo en propre le temps qu'elle dure, et la mémoire que le système compte au serveur grandit avec les fichiers de l'index qu'il lit (ils sont projetés en mémoire, et repris par le système sous pression). La frappe d'un autre reste vue en 6 ms au p95 pendant toute une première indexation, et pendant qu'une page de 10 000 blocs est récrite et renommée en boucle.
 
 **Taille des pages** *(décision validée par Alex le 9 novembre 2026, lot 1 de la P1)* :
 - « Ouvrir une page jamais vue < 300 ms » vaut pour les pages **jusqu'à 1 000 blocs** ;
