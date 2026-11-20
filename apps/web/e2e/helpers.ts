@@ -17,6 +17,7 @@ import {
 } from "@playwright/test";
 import type {
   Accepted,
+  Backlinks,
   CreatePage,
   InvitationCreated,
   InviteRole,
@@ -117,6 +118,34 @@ export async function waitFindable(
     })
     .toBe(true);
 }
+
+/**
+ * Un mot neuf à chercher, fait de lettres seules : un seul mot pour l'index, que rien d'autre ne
+ * porte (`unique()` mêle lettres et chiffres, que rien ne promet indexés comme un seul mot).
+ */
+export function word(): string {
+  return `zor${Array.from(unique(), (c) => String.fromCharCode(97 + (c.charCodeAt(0) % 26))).join("")}`;
+}
+
+/** Les pages sources que le serveur rend pour les rétroliens de la page, pour la session de `api`. */
+export async function backlinksOf(api: APIRequestContext, pageId: string): Promise<string[]> {
+  const res = await api.get(`/api/v1/pages/${pageId}/backlinks`);
+  expect(res.status(), await res.text()).toBe(200);
+  return ((await res.json()) as Backlinks).pages.map((link) => link.pageId);
+}
+
+/** Attend que le serveur rende ces sources (triées) : l'index suit une écriture après un temps de calme. */
+export async function waitLinked(api: APIRequestContext, pageId: string, sources: string[]): Promise<void> {
+  await expect
+    .poll(async () => (await backlinksOf(api, pageId)).sort(), {
+      message: `les rétroliens de ${pageId} ne sont toujours pas ceux attendus`,
+      timeout: 30_000,
+    })
+    .toEqual([...sources].sort());
+}
+
+/** Une mention de page, en MMD. */
+export const mention = (pageId: string, label: string) => `<mention type="page" id="${pageId}">${label}</mention>`;
 
 /** Les versions de la page, la plus récente d'abord (`GET …/versions`). */
 export async function versionsOf(api: APIRequestContext, pageId: string): Promise<Version[]> {
@@ -841,6 +870,37 @@ export async function injectForeignBlock(
     container.insert(0, [widget]);
     group.insert(group.length, [container]);
     await expect.poll(() => getMmd(request, id)).toContain('type="futureWidget"');
+  } finally {
+    provider.destroy();
+    doc.destroy();
+  }
+}
+
+/**
+ * Change la page par un client Yjs nu (sans éditeur, au schéma courant), avec la session de
+ * `request` : `edit` reçoit le groupe racine du document une fois la première synchro faite, et le
+ * client reste connecté jusqu'à ce que `landed` dise vrai (ce que le serveur en a fait, lu par ses
+ * routes). Pour une forme que ni l'éditeur ni `PUT /mmd` n'écrivent (un bloc sans `id`).
+ */
+export async function editRawDoc(
+  request: APIRequestContext,
+  id: string,
+  edit: (root: Y.XmlElement) => void,
+  landed: () => Promise<boolean>,
+): Promise<void> {
+  const doc = new Y.Doc();
+  const provider = new WebsocketProvider(`${BASE_URL.replace(/^http/, "ws")}/sync`, id, doc, {
+    params: { schema: String(REGISTRY_VERSION) },
+    disableBc: true,
+    WebSocketPolyfill: await webSocketWithSession(request),
+    connect: false,
+  });
+  provider.messageHandlers[MESSAGE_PAGE_EVENT] = () => {};
+  provider.connect();
+  try {
+    await expect.poll(() => provider.synced, { timeout: 10_000 }).toBe(true);
+    edit(doc.getXmlFragment("document-store").get(0) as Y.XmlElement);
+    await expect.poll(landed, { timeout: 30_000 }).toBe(true);
   } finally {
     provider.destroy();
     doc.destroy();

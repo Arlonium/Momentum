@@ -17,17 +17,12 @@ import {
   putMmd,
   signUpAccount,
   titleOf,
-  unique,
   waitFindable,
   waitSynced,
+  word,
 } from "./helpers";
 
 test.afterEach(closeContexts);
-
-/** Un mot neuf, fait de lettres seules : un seul mot pour l'index, que rien d'autre ne porte. */
-function word(): string {
-  return `zor${Array.from(unique(), (c) => String.fromCharCode(97 + (c.charCodeAt(0) % 26))).join("")}`;
-}
 
 /**
  * Un compte neuf et trois pages de son espace : « Recettes <tag> », dont un paragraphe porte

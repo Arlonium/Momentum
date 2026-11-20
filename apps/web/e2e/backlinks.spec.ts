@@ -2,13 +2,14 @@
 // que le compte voit et qui portent un lien vers elle. Rien ne pousse un changement de rétroliens :
 // un lien posé ailleurs paraît à la lecture suivante (le retour sur l'onglet), une fois sa page
 // indexée. La liste n'est jamais demandée avant la première synchro de la page.
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import type { Backlinks } from "@mementum/protocol";
 import {
   apiAs,
   closeContexts,
   createPage,
   guestOf,
+  mention,
   newUser,
   openPage,
   ownerAndMember,
@@ -16,6 +17,7 @@ import {
   signUpAccount,
   treeRow,
   unique,
+  waitLinked,
   waitSynced,
 } from "./helpers";
 
@@ -24,25 +26,6 @@ test.afterEach(closeContexts);
 const section = (p: Page) => p.getByRole("navigation", { name: "Pages qui mènent ici" });
 const row = (p: Page, id: string) => section(p).locator(`[data-backlink-page="${id}"]`);
 const BACKLINKS = /\/api\/v1\/pages\/[^/]+\/backlinks$/;
-
-/** Ce que le serveur rend des rétroliens de la page, pour la session de `api`. */
-async function backlinksOf(api: APIRequestContext, pageId: string): Promise<string[]> {
-  const res = await api.get(`/api/v1/pages/${pageId}/backlinks`);
-  expect(res.status(), await res.text()).toBe(200);
-  return ((await res.json()) as Backlinks).pages.map((link) => link.pageId);
-}
-
-/** Attend que le serveur rende ces sources (triées) : l'index suit une écriture après un temps de calme. */
-async function waitLinked(api: APIRequestContext, pageId: string, sources: string[]): Promise<void> {
-  await expect
-    .poll(async () => (await backlinksOf(api, pageId)).sort(), {
-      message: `les rétroliens de ${pageId} ne sont toujours pas ceux attendus`,
-      timeout: 30_000,
-    })
-    .toEqual([...sources].sort());
-}
-
-const mention = (pageId: string, label: string) => `<mention type="page" id="${pageId}">${label}</mention>`;
 
 test("a_mention_makes_a_backlink", async ({ browser }) => {
   const tag = unique();
