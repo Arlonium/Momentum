@@ -5,7 +5,7 @@
 //! Le chemin entier : les pages sont écrites par `PUT /mmd`, l'indexeur les projette dans
 //! `page_links`, la route les lit. Les pages et les rôles de départ sont posés par le store
 //! (`Team`) ; ce qu'on teste (accès donnés, corbeille, liens retirés) passe par les routes. Les
-//! bornes (deux cents pages vues, vingt mille parcourues) et ce que des sources non vues ne doivent
+//! bornes (deux cents pages vues, dix mille parcourues) et ce que des sources non vues ne doivent
 //! jamais cacher se prouvent sur la route elle-même, dans `src/routes/backlinks.rs`, où elles se
 //! règlent ; que les liens d'un autre espace ne sont même pas lus, dans le store
 //! (`sources_of_another_space_are_not_even_read`, `crates/mementum-store/tests/search.rs`). Le
@@ -31,7 +31,7 @@ use uuid::Uuid;
 const QUICK: Duration = Duration::from_millis(20);
 
 /// Le temps de réponse plancher d'une lecture qui passe (`BACKLINKS_FLOOR`, Ruling R1022).
-const FLOOR: Duration = Duration::from_millis(75);
+const FLOOR: Duration = Duration::from_millis(150);
 
 /// Une application aux inscriptions ouvertes, dont l'indexeur n'attend que [`QUICK`] de calme.
 async fn quick_app() -> TestApp {
@@ -373,7 +373,7 @@ async fn a_reader_gets_the_backlinks() {
     let started = Instant::now();
     let reply = backlinks(&team.mona.browser, target).await;
     // Le plancher de la route (Ruling R1022) : une borne basse, que la lenteur du poste ne peut
-    // pas faire tenir à tort tant que la lecture, sans lui, prend moins de 75 ms ; la preuve sans
+    // pas faire tenir à tort tant que la lecture, sans lui, prend moins de 150 ms ; la preuve sans
     // minutage est dans `src/routes/backlinks.rs` (`an_answer_never_leaves_before_the_floor`).
     assert!(started.elapsed() >= FLOOR, "{:?}", started.elapsed());
     reply.assert_status(StatusCode::OK);

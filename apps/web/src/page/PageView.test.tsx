@@ -863,7 +863,7 @@ const backlinks = () => host.querySelector('nav[aria-labelledby]:not(.mm-breadcr
 
 test("page_view_reads_the_backlinks_after_the_first_sync_and_shows_them_under_the_text", async () => {
   // Lot 4, C3 : rien n'est lu des rétroliens tant que la première synchro n'est pas faite (la
-  // lecture prend au moins 75 ms chez le serveur) ; ensuite, la section est sous l'éditeur.
+  // lecture prend au moins 150 ms chez le serveur) ; ensuite, la section est sous l'éditeur.
   publishPages("space", [page(SOURCE, { title: "Source" }), page(OTHER, { title: "Autre" })]);
   vi.mocked(getBacklinks).mockResolvedValue({
     pages: [{ pageId: SOURCE, blockId: "b1", excerpt: "vers X" }],

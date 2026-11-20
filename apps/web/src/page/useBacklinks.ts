@@ -2,7 +2,7 @@
 // les rend (`GET /api/v1/pages/{id}/backlinks`), pour « Pages qui mènent ici » sous le texte.
 //
 // Quand les lire. **Jamais sur le chemin de l'ouverture de la page** : la réponse prend au moins
-// 75 ms chez le serveur (son plancher, R1022). La première lecture attend la première synchro de la
+// 150 ms chez le serveur (son plancher, R1022). La première lecture attend la première synchro de la
 // session de la page, et aucun rendu ne l'attend. Rien ne pousse un changement de rétroliens (un
 // lien posé dans une autre page n'avance ni le canal de l'espace ni une trame de la page) : ils sont
 // relus

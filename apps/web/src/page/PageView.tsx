@@ -185,7 +185,7 @@ export function PageView({
   // boutons du panneau.
   const comments = useComments(id, session, { onRefused: rereadPage, afterLogin });
   // Les pages qui mènent ici (lot 4) : lues après la première synchro de la session, jamais sur le
-  // chemin de l'ouverture (leur lecture prend au moins 75 ms chez le serveur), à tout niveau et à
+  // chemin de l'ouverture (leur lecture prend au moins 150 ms chez le serveur), à tout niveau et à
   // la corbeille aussi. Un `404` dit que la page n'est plus vue : elle est relue.
   const backlinks = useBacklinks(id, session, { onRefused: rereadPage, afterLogin });
   /** Autour de l'éditeur : les pastilles s'y placent, les blocs y sont cherchés. */

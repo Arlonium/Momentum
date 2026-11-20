@@ -887,7 +887,7 @@ export function restoreVersion(pageId: string, versionId: string): Promise<void>
 /**
  * `GET /api/v1/pages/{id}/backlinks` : les pages qui mènent à celle-ci (lot 4), parmi celles que
  * le compte voit dans le même espace, hors corbeille ; deux cents au plus, sans total ni titre (le
- * titre se lit dans l'arbre). La réponse prend au moins 75 ms (R1022) : jamais sur le chemin de
+ * titre se lit dans l'arbre). La réponse prend au moins 150 ms (R1022, R1167) : jamais sur le chemin de
  * l'ouverture d'une page.
  */
 export function getBacklinks(pageId: string): Promise<Backlinks> {

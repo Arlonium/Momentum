@@ -22,16 +22,20 @@
 //! borne du parcours, `the_walk_stops_at_its_bound`) **et dans son temps, tant que le calcul tient
 //! sous le plancher** (Ruling R1022) : lire une source non vue coûte quelques microsecondes
 //! (2,7 µs, mesure du Step 3), si bien que la durée d'une lecture comptait les sources qu'on ne voit
-//! pas ; la réponse d'une lecture qui passe ne part donc jamais avant [`BACKLINKS_FLOOR`] (75 ms)
+//! pas ; la réponse d'une lecture qui passe ne part donc jamais avant [`BACKLINKS_FLOOR`] (150 ms)
 //! après le début du traitement (`an_answer_never_leaves_before_the_floor`). Un refus (`401`,
-//! `409`, `404`) ne lit aucune source et ne l'attend pas. **Limite** : un parcours à la borne a
-//! coûté 64,8 ms au p95 sur le poste de développement ; sur un poste plus lent, il peut dépasser le
-//! plancher, et sa durée redit alors le nombre de sources lues (à relever en X2).
+//! `409`, `404`) ne lit aucune source et ne l'attend pas. **Le plancher et la borne du
+//! parcours sont arrêtés ensemble** (Task X2, Ruling R1167) : au pire, sur le poste de mesure,
+//! dix mille sources non vues se lisent en 24 ms au p95, et deux cents sources vues dont le bloc
+//! qui mène fait 64 Kio (qu'un compte peut poser lui-même, pour pousser la lecture près du
+//! plancher) en 62 ms : 86 ms ensemble, sous le plancher jusque sur un poste 1,7 fois plus lent.
+//! **Limite** : sur un poste plus lent encore, une telle lecture dépasse le plancher, et sa durée
+//! redit alors le nombre de sources lues.
 //!
 //! **Le parcours est borné** : les sources se lisent par lots de [`BATCH`], dans l'ordre de leurs
 //! identifiants, chaque lot trié par droits, jusqu'à [`SHOWN`] sources vues ou [`WALKED`] sources
 //! lues. Au-delà de la borne, des sources vues peuvent manquer sans que rien le dise (limite L-j du
-//! plan, qu'on n'atteint qu'en créant vingt mille pages dans l'espace de la page : le store ne lit
+//! plan, qu'on n'atteint qu'en créant dix mille pages dans l'espace de la page : le store ne lit
 //! pas les liens d'un autre espace, R1015). Chaque source coûte une entrée de l'index, quel que
 //! soit le nombre de ses liens (R1016), et l'extrait est coupé par la base : une lecture au pire
 //! coûte ce que mesure `measure_backlinks_at_the_walk_bound` (R1019), sans débit propre.
@@ -61,7 +65,7 @@ use crate::types::{Backlink, Backlinks};
 pub(crate) const SHOWN: usize = 200;
 
 /// Sources lues au plus, vues ou non : au-delà, le parcours s'arrête (limite L-j).
-pub(crate) const WALKED: usize = 20_000;
+pub(crate) const WALKED: usize = 10_000;
 
 /// Sources lues par lot, chaque lot trié par droits avant le suivant.
 pub(crate) const BATCH: usize = 500;
@@ -85,7 +89,7 @@ const BOUNDS: Bounds = Bounds {
 
 /// Le temps de réponse plancher d'une lecture qui passe (Ruling R1022) : sa réponse ne part
 /// jamais avant ce délai, compté du début du traitement, que le parcours ait été long ou court.
-pub(crate) const BACKLINKS_FLOOR: Duration = Duration::from_millis(75);
+pub(crate) const BACKLINKS_FLOOR: Duration = Duration::from_millis(150);
 
 /// `GET /api/v1/pages/{id}/backlinks` : les pages qui mènent à la page, que le compte voit.
 pub(crate) async fn list(
@@ -404,7 +408,7 @@ mod tests {
             found.push(read.await.unwrap().pages.len());
         }
         assert_eq!(found, [1, 0]);
-        assert_eq!(BACKLINKS_FLOOR, Duration::from_millis(75));
+        assert_eq!(BACKLINKS_FLOOR, Duration::from_millis(150));
         drop(clock);
         bench.finish().await;
     }
@@ -520,7 +524,7 @@ mod tests {
         assert_eq!(nothing.pages, []);
         assert_eq!(bench.sources(bounded(11)).await, [seen]);
         assert_eq!(bench.sources(bounded(WALKED)).await, [seen]);
-        assert_eq!((WALKED, BATCH), (20_000, 500));
+        assert_eq!((WALKED, BATCH), (10_000, 500));
         bench.finish().await;
     }
 
@@ -585,12 +589,12 @@ mod tests {
     }
 
     /// Mesure (Task S6, Step 3 ; release, `--ignored`) : une lecture au pire, la borne du
-    /// parcours atteinte (vingt mille sources que Mona ne voit pas, aucune rendue), puis deux
+    /// parcours atteinte (dix mille sources que Mona ne voit pas, aucune rendue), puis deux
     /// cents sources vues (leurs extraits de 240 caractères). Elle dit si la route demande un
     /// débit à elle : un en faut un si elle coûte plus que la lecture des commentaires d'une page
     /// pleine (p50 356 ms, p95 378 ms, registre du lot 3). Les pages sont écrites d'un coup par une
-    /// connexion à côté (vingt mille transactions du store prendraient des minutes) ; le calcul
-    /// des accès de l'espace (20 402 pages) est fait une fois avant les tours mesurés, et dit à
+    /// connexion à côté (des milliers de transactions du store prendraient des minutes) ; le calcul
+    /// des accès de l'espace (10 402 pages) est fait une fois avant les tours mesurés, et dit à
     /// part.
     #[tokio::test]
     #[ignore = "mesure, en release : cargo test --release -p mementum-server --lib \
@@ -607,14 +611,23 @@ mod tests {
         let seen: Vec<Uuid> = (1..=SHOWN as u128)
             .map(|i| Uuid::from_u128((1 << 64) + i))
             .collect();
-        let text = "é".repeat(2_000);
+        // Le bloc qui mène d'une source vue : 4 Ko, ou `MEMENTUM_MEASURE_BLOCK_BYTES` octets
+        // (65 536 : la borne d'un bloc, Task X2).
+        let seen_bytes = std::env::var("MEMENTUM_MEASURE_BLOCK_BYTES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4_000);
+        let (short, long) = ("é".repeat(2_000), "é".repeat(seen_bytes / 2));
         let db = bench.dir.path().join("m.db");
         let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", db.display()))
             .await
             .unwrap();
         let mut tx = side.begin().await.unwrap();
         let space = bench.space.to_string();
-        for (sources, parent, target) in [(&unseen, hidden, bench.target), (&seen, open, busy)] {
+        for (sources, parent, target, text) in [
+            (&unseen, hidden, bench.target, &short),
+            (&seen, open, busy, &long),
+        ] {
             for chunk in sources.chunks(200) {
                 for (table, row, width) in [
                     (
@@ -666,7 +679,7 @@ mod tests {
         let first = started.elapsed();
         let mut rounds = Vec::new();
         for (name, target, expected) in [
-            ("20 000 sources non vues", bench.target, 0),
+            ("sources non vues, à la borne du parcours", bench.target, 0),
             ("200 sources vues", busy, SHOWN),
         ] {
             let mut times = Vec::with_capacity(ROUNDS);
@@ -688,8 +701,9 @@ mod tests {
             ));
         }
         println!(
-            "MESURE measure_backlinks_at_the_walk_bound : {} ; première lecture (accès de \
-             l'espace calculés) {:.1} ms",
+            "MESURE measure_backlinks_at_the_walk_bound ({WALKED} sources non vues, bloc d'une \
+             source vue de {seen_bytes} octets) : {} ; première lecture (accès de l'espace \
+             calculés) {:.1} ms",
             rounds.join(" ; "),
             first.as_secs_f64() * 1e3
         );

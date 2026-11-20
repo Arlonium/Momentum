@@ -86,7 +86,7 @@ async function loaded(pages = [link("a", "vers ici")]) {
 
 test("backlinks_are_read_after_the_first_sync_only", async () => {
   // Sans session, puis avec une session qui n'a pas fini sa première synchro : rien ne part, quel
-  // que soit le temps passé (la lecture prend au moins 75 ms chez le serveur, R1022).
+  // que soit le temps passé (la lecture prend au moins 150 ms chez le serveur, R1022).
   const session = fakeSession({ synced: false, status: "connecting" });
   const rendered = await renderHook(hook, { pageId: "p", session: null });
   await advance(60_000);
