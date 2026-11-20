@@ -2,7 +2,7 @@
 //! porte (l'état et les comptes qui ont écrit depuis la version d'avant), la restauration, et ce
 //! que la compaction et un redémarrage n'en perdent pas.
 //!
-//! **L'horloge de tokio est arrêtée** ([`StoppedClock`]) : elle n'avance que quand le test
+//! **L'horloge de tokio est arrêtée** ([`StoppedClock`], `common/clock.rs`) : elle n'avance que quand le test
 //! l'avance (`tokio::time::advance`), si bien que « dix minutes plus tard » ne dépend pas de la
 //! vitesse du poste. Une horloge simplement en pause (`tokio::time::pause`) ne suffit pas : dès
 //! que plus aucune tâche n'a de travail, tokio l'avance de lui-même jusqu'au prochain délai, et
@@ -16,12 +16,12 @@ mod common;
 
 use std::time::Duration;
 
+use common::clock::StoppedClock;
 use common::*;
 use mementum_crdt::PageDoc;
 use mementum_md::{Block, parse};
 use mementum_store::{MAX_BEFORE_RESTORE, MAX_VERSIONS, Version, VersionReason};
 use mementum_sync::{ConnInfo, SyncConfig, SyncError};
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 use yrs::{Text, Transact, XmlFragment, XmlOut};
 
@@ -30,26 +30,6 @@ const INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// Attente maximale d'une condition, en temps réel.
 const REAL_WAIT: Duration = Duration::from_secs(30);
-
-/// L'horloge de tokio arrêtée, tant qu'elle vit (voir l'en-tête du fichier).
-struct StoppedClock(JoinHandle<()>);
-
-impl StoppedClock {
-    fn start() -> StoppedClock {
-        tokio::time::pause();
-        StoppedClock(tokio::spawn(async {
-            loop {
-                tokio::task::yield_now().await;
-            }
-        }))
-    }
-}
-
-impl Drop for StoppedClock {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
 
 fn config() -> SyncConfig {
     SyncConfig {

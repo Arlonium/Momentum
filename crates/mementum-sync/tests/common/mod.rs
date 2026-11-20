@@ -2,6 +2,8 @@
 //! connexion lue octet par octet (`raw`), et l'affirmation d'une limite connue (`limit`).
 #![allow(dead_code)]
 
+/// L'horloge de tokio arrêtée (Ruling R179).
+pub mod clock;
 pub mod limit;
 pub mod raw;
 /// Le dossier temporaire d'un test, supprimé après lui : l'aide des tests de `mementum-store`.
