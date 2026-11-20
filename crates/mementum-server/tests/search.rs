@@ -10,6 +10,8 @@
 //! ([`StoppedClock`]), les attentes bornées en temps réel ([`until`]).
 
 mod common;
+#[path = "../../mementum-sync/tests/common/limit.rs"]
+mod limit;
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -1478,4 +1480,72 @@ async fn an_empty_query_and_a_refusal_do_not_wait_for_the_floor() {
     pass_the_floor().await;
     assert_eq!(third.await.unwrap().0, StatusCode::OK);
     drop(clock);
+}
+
+/// Les limites connues de la recherche devant les droits (Task X1). Chaque test relève les
+/// exigences manquées et les donne à `known_limit` avec la perte dite : vert tant que cette perte
+/// se produit, rouge le jour où elle est levée (le sortir alors de ce module, et lui faire
+/// affirmer le comportement voulu) et pour toute autre issue.
+mod known_limits {
+    use super::limit::known_limit;
+    use super::*;
+
+    /// Voulu : un texte retiré d'une page avant d'y inviter quelqu'un n'est jamais trouvé par ce
+    /// nouveau lecteur. Aujourd'hui (limite L-a du plan, R906) : l'index suit l'écriture après un
+    /// temps de calme (2 à 15 s) ; d'ici là, la recherche du nouveau lecteur rend la page pour le
+    /// mot retiré, avec l'extrait qui le porte. L'indexeur est figé pour tenir cette fenêtre
+    /// ouverte ; `erased_text_leaves_the_index` (S4b) prouve qu'elle se referme.
+    #[tokio::test]
+    async fn a_text_removed_just_before_inviting_is_found_by_the_new_reader() {
+        let t = app().await;
+        let team = Team::new(&t).await;
+        let page = team
+            .page(None, "Dossier", &[user(&team.olga, Level::Full)])
+            .await;
+        write(&team.olga, page, "Le tatou reste entre nous.\n").await;
+        t.indexer.settled().await;
+        // Préconditions : sa propriétaire la trouve, Mona non.
+        assert_eq!(pages_found(&team.olga, team.space, "tatou").await, [page]);
+        assert_eq!(found(&team.mona, team.space, "tatou").await, nothing());
+
+        t.indexer.freeze();
+        write(&team.olga, page, "Un texte pour tous.\n").await;
+        team.olga
+            .browser
+            .put(
+                &format!("/api/v1/pages/{page}/access/users/{}", team.mona.id),
+                json!({ "level": "read" }),
+            )
+            .await
+            .assert_status(StatusCode::OK);
+        // Ce que Mona lit de la page ne porte plus le mot.
+        let read = team
+            .mona
+            .browser
+            .get(&format!("/api/v1/pages/{page}/mmd"))
+            .await;
+        read.assert_status(StatusCode::OK);
+        assert_eq!(read.text(), "Un texte pour tous.\n");
+
+        let answer = found(&team.mona, team.space, "tatou").await;
+        let mut unmet = Vec::new();
+        if pages(&answer) == [page] {
+            unmet.push("la page est trouvée par le mot retiré".to_string());
+        }
+        if answer.to_string().contains("tatou reste entre nous") {
+            unmet.push("l'extrait porte le texte retiré".to_string());
+        }
+        let loss = vec![
+            "la page est trouvée par le mot retiré".to_string(),
+            "l'extrait porte le texte retiré".to_string(),
+        ];
+        known_limit(
+            "L-a : l'index suit une écriture après un temps de calme, et les droits sont jugés \
+             à la requête sur la page, pas sur le texte indexé. La lever demande de réindexer \
+             une page avant qu'un accès neuf y soit servi, ou de vérifier un extrait contre le \
+             document courant",
+            &unmet,
+            &loss,
+        );
+    }
 }
