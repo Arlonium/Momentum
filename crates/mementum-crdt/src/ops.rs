@@ -36,7 +36,10 @@ use mementum_md::{Block, Content, Inline, Styles, block_text, excerpt, normalize
 use mementum_schema::{MmdForm, block as spec_of};
 use uuid::Uuid;
 
-use crate::anchors::{AnchorError, Anchors, BlockHashes, HashKey, hashes, id_key, three_way};
+use crate::anchors::{
+    AnchorError, Anchors, BlockHashes, HashKey, alias_floor, content_hash, hashes, id_key,
+    is_alias, key_matches_alias, place_hash, three_way, with_ids,
+};
 use crate::blocknote::{COLUMN, COLUMN_LIST};
 use crate::foreign::Foreign;
 use crate::kept_ids::keep_ids;
@@ -119,8 +122,15 @@ pub struct PlanContext<'a> {
     pub base: Base<'a>,
     /// La clé des empreintes du processus.
     pub key: &'a HashKey,
+    /// La révision de la page dont les blocs donnés au plan sont la lecture (`PageDoc::revision`,
+    /// lue dans la même commande) : [`PageDoc::apply`] refuse d'écrire si la page n'y est plus.
+    pub revision: &'a str,
     /// Une écriture par jeton : aucun média du web que la page ne portait pas (R1235).
     pub forbid_external_media: bool,
+    /// Les identifiants des blocs qui portent un fil de commentaires : un contenu protégé, qu'une
+    /// opération ne retire que sous `allow_deleting_content` (R1232 ; le crate ne connaît pas les
+    /// fils, la route les donne).
+    pub commented: Option<&'a HashSet<String>>,
 }
 
 /// La raison d'un refus.
@@ -138,9 +148,54 @@ pub enum Reason {
     RevisionConflict,
     /// Ce que l'appel écrirait par `str_replace` dépasse [`MAX_REPLACED_BYTES`].
     TooLong,
+    /// Une opération mal formée que le schéma de l'outil laisserait passer (un `old` vide, une
+    /// ancre nommée deux fois par un `replace_page`).
+    InvalidRequest,
 }
 
 impl Reason {
+    /// Ce qu'il faut faire, pour l'agent (le conseil d'un `operation_failed`).
+    pub fn hint(self) -> &'static str {
+        match self {
+            Reason::NoMatch => {
+                "Relis la page (fetch avec anchors), puis vise le bloc par son ancre, ou cherche un \
+                 texte qui s'y trouve tel quel, sans mise en forme."
+            }
+            Reason::AmbiguousMatch => {
+                "Vise le bloc par son ancre, allonge le texte cherché, ou pose replace_all."
+            }
+            Reason::StaleAnchor | Reason::AmbiguousAnchor => {
+                "Relis la page avec ses ancres (fetch avec anchors), puis vise le bloc par l'alias \
+                 qu'elle donne."
+            }
+            Reason::InvalidMarkdown => {
+                "Corrige le MMD à la ligne dite ; le format est décrit par la ressource \
+                 mementum://spec/mmd."
+            }
+            Reason::InvalidStructure => {
+                "Une colonne n'existe que dans une liste de colonnes, n'est jamais vide, et une \
+                 liste en a deux au moins : choisis une autre place ou un autre contenu."
+            }
+            Reason::InvalidMove => "Choisis une destination hors du bloc que tu déplaces.",
+            Reason::ProtectedContent => {
+                "Garde ces blocs (lien de sous-page, base, bloc synchronisé, contenu inconnu, bloc \
+                 commenté) dans ce que tu écris, ou pose allow_deleting_content si la personne l'a \
+                 demandé."
+            }
+            Reason::ExternalMedia => {
+                "Retire les images, vidéos et sons dont l'adresse est sur le web ; un lien \
+                 ([texte](adresse)) passe."
+            }
+            Reason::RevisionConflict => {
+                "Relis les blocs en cause, puis réécris avec la révision courante."
+            }
+            Reason::TooLong => {
+                "Remplace moins d'occurrences par appel, ou par un texte plus court."
+            }
+            Reason::InvalidRequest => "Corrige l'opération comme le message le dit.",
+        }
+    }
+
     /// Le code du refus, tel que l'API le rend.
     pub fn code(self) -> &'static str {
         match self {
@@ -155,9 +210,14 @@ impl Reason {
             Reason::ExternalMedia => "external_media",
             Reason::RevisionConflict => "revision_conflict",
             Reason::TooLong => "too_long_to_write",
+            Reason::InvalidRequest => "invalid_request",
         }
     }
 }
+
+/// Les blocs qu'un refus nomme, au plus (`OpRefusal::blocks`) : autant d'alias qu'une sortie
+/// d'outil en liste (M1).
+pub const MAX_REFUSAL_BLOCKS: usize = 30;
 
 /// Un bloc proposé par un refus : son alias et 120 caractères de son texte (R1230).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +236,8 @@ pub struct OpRefusal {
     pub message: String,
     /// Pour `no_match` (trois au plus) et `ambiguous_match` (cinq au plus) : du texte de la page.
     pub candidates: Vec<Candidate>,
-    /// Les identifiants des blocs de la page en cause (un conflit, un contenu protégé).
+    /// Les identifiants des blocs de la page en cause (un conflit, un contenu protégé), dans
+    /// l'ordre de la page, [`MAX_REFUSAL_BLOCKS`] au plus ; à traduire en alias pour un agent.
     pub blocks: Vec<String>,
 }
 
@@ -184,6 +245,7 @@ pub struct OpRefusal {
 #[derive(Debug, Clone)]
 pub struct Plan<'a> {
     current: &'a [Block],
+    revision: String,
     blocks: Vec<Block>,
     touched: Vec<String>,
 }
@@ -199,12 +261,37 @@ impl Plan<'_> {
     pub fn touched(&self) -> &[String] {
         &self.touched
     }
+
+    /// Les blocs de [`Plan::touched`] qui ne sont plus ce qu'ils étaient dans un état d'avant
+    /// (`encoded`, ses empreintes sous `key`) : contenu ou place changés, partis, ou arrivés depuis.
+    /// La seconde commande d'une opération destructrice (R1234) refait le plan **avec la base de
+    /// l'agent**, puis juge ainsi ses blocs touchés contre l'état encodé pour la version.
+    pub fn changed_since(&self, encoded: &BlockHashes, key: &HashKey) -> Vec<String> {
+        let then = Judge::index(encoded);
+        let now = Judge::index(&hashes(self.current, key));
+        self.touched
+            .iter()
+            .filter(|id| {
+                let k = id_key(id);
+                match (then.get(&k), now.get(&k)) {
+                    (Some(Some(a)), Some(Some(b))) => a != b,
+                    _ => true,
+                }
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 impl PageDoc {
-    /// Écrit un plan, par différence avec les blocs sur lesquels il a été fait (que la page doit
-    /// encore porter : l'acteur fait le plan et l'écriture dans la même commande).
+    /// Écrit un plan, par différence avec les blocs sur lesquels il a été fait ; `StalePlan`, sans
+    /// rien écrire, si la page n'est plus à la révision de ces blocs (`PlanContext::revision`) :
+    /// l'écriture par différence ne compare que la forme des listes, et récrirait sinon des blocs
+    /// d'après une lecture périmée (relecture de S3, I3).
     pub fn apply(&self, plan: &Plan<'_>) -> Result<DiffWritten, CrdtError> {
+        if self.revision() != plan.revision {
+            return Err(CrdtError::StalePlan);
+        }
         self.write_diff_over(plan.current, &plan.blocks)
     }
 }
@@ -265,7 +352,7 @@ pub fn plan<'a>(
         planner.index = index;
         planner.operation(op)?;
         if !planner.conflicts.is_empty() {
-            let blocks = std::mem::take(&mut planner.conflicts);
+            let blocks = bounded(std::mem::take(&mut planner.conflicts));
             return Err(OpRefusal {
                 blocks,
                 ..refusal(
@@ -288,6 +375,7 @@ pub fn plan<'a>(
         current,
         blocks,
         touched: planner.touched,
+        revision: ctx.revision.to_string(),
     })
 }
 
@@ -528,9 +616,123 @@ impl Work {
 struct Judge {
     base: HashMap<u64, Option<(u64, u64)>>,
     now: HashMap<u64, Option<(u64, u64)>>,
+    /// Le bloc de la lecture à chaque place (empreinte de place → empreinte d'identifiant ;
+    /// `None` : plusieurs) : de quoi remonter les enfants qu'un bloc avait à la lecture.
+    base_places: HashMap<u64, Option<u64>>,
+    /// Les empreintes d'identifiant de la lecture, rangées : de quoi reconnaître un alias servi.
+    base_keys: Vec<(u64, usize)>,
+    /// Les blocs d'aujourd'hui : identifiant et parent (empreintes ; `None` : plusieurs).
+    today: HashMap<u64, Option<(String, Option<u64>)>>,
 }
 
 impl Judge {
+    fn new(base: &BlockHashes, current: &[Block], key: &HashKey) -> Judge {
+        fn walk(
+            blocks: &[Block],
+            parent: Option<u64>,
+            out: &mut HashMap<u64, Option<(String, Option<u64>)>>,
+        ) {
+            for b in blocks {
+                let k = id_key(&b.id);
+                out.entry(k)
+                    .and_modify(|seen| *seen = None)
+                    .or_insert(Some((b.id.clone(), parent)));
+                walk(&b.children, Some(k), out);
+            }
+        }
+        let mut base_places: HashMap<u64, Option<u64>> = HashMap::with_capacity(base.len());
+        for h in base.as_slice() {
+            base_places
+                .entry(h.place)
+                .and_modify(|seen| *seen = None)
+                .or_insert(Some(h.id));
+        }
+        let mut base_keys: Vec<(u64, usize)> = base
+            .as_slice()
+            .iter()
+            .enumerate()
+            .map(|(rank, h)| (h.id, rank))
+            .collect();
+        base_keys.sort_unstable();
+        let mut today = HashMap::new();
+        walk(current, None, &mut today);
+        Judge {
+            base: Judge::index(base),
+            now: Judge::index(&hashes(current, key)),
+            base_places,
+            base_keys,
+            today,
+        }
+    }
+
+    /// Les sous-blocs que le bloc `root` avait à la lecture (de proche en proche par les empreintes
+    /// de place, les identifiants pris dans la page d'aujourd'hui) qui ne sont plus sous lui
+    /// aujourd'hui : un sous-bloc sorti du bloc se nomme ; un sous-bloc parti nomme son parent
+    /// (relecture de S3, I1).
+    fn lost_children(&self, root: &str, key: &HashKey) -> Vec<String> {
+        let root_key = id_key(root);
+        let mut lost = Vec::new();
+        let mut stack = vec![root.to_string()];
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(parent) = stack.pop() {
+            if !seen.insert(parent.clone()) {
+                continue;
+            }
+            let mut previous: Option<String> = None;
+            // Une chaîne ne compte pas plus de pas que la lecture n'a de blocs.
+            for _ in 0..=self.base_keys.len() {
+                let place = place_hash(Some(&parent), previous.as_deref(), key);
+                let Some(child) = self.base_places.get(&place) else {
+                    break;
+                };
+                match child.and_then(|k| self.today.get(&k).cloned().flatten()) {
+                    Some((id, _)) => {
+                        if !self.under(id_key(&id), root_key) {
+                            lost.push(id.clone());
+                        }
+                        stack.push(id.clone());
+                        previous = Some(id);
+                    }
+                    None => {
+                        lost.push(parent.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        lost
+    }
+
+    /// Vrai si le bloc d'aujourd'hui `key` est sous le bloc `root`.
+    fn under(&self, mut key: u64, root: u64) -> bool {
+        for _ in 0..=self.today.len() {
+            match self.today.get(&key) {
+                Some(Some((_, Some(parent)))) if *parent == root => return true,
+                Some(Some((_, Some(parent)))) => key = *parent,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Le bloc de la lecture que nomme un alias servi, s'il n'y en a qu'un : son empreinte de
+    /// contenu ; `Err(n)` : `n` blocs (aucun, ou plusieurs).
+    fn served(&self, alias: &str, base: &BlockHashes) -> Result<u64, usize> {
+        let floor = alias_floor(alias);
+        let found: Vec<usize> = self
+            .base_keys
+            .iter()
+            .skip(self.base_keys.partition_point(|(k, _)| *k < floor))
+            .take_while(|(k, _)| key_matches_alias(*k, alias))
+            .map(|(_, rank)| *rank)
+            .take(2)
+            .collect();
+        match found.as_slice() {
+            [rank] => Ok(base.as_slice()[*rank].content),
+            other => Err(other.len()),
+        }
+    }
+
     fn index(hashes: &BlockHashes) -> HashMap<u64, Option<(u64, u64)>> {
         let mut out: HashMap<u64, Option<(u64, u64)>> = HashMap::with_capacity(hashes.len());
         for h in hashes.as_slice() {
@@ -579,6 +781,7 @@ struct Planner<'a, 'c> {
     touched: Vec<String>,
     seen: HashSet<String>,
     conflicts: Vec<String>,
+    in_conflict: HashSet<String>,
     /// Les octets que les `str_replace` de l'appel ont écrits jusqu'ici.
     replaced: usize,
 }
@@ -600,10 +803,7 @@ impl<'a, 'c> Planner<'a, 'c> {
         walk(current, &mut page_ids, &mut page_media);
         let judge = match ctx.base {
             Base::Current => None,
-            Base::Changed(base) => Some(Judge {
-                base: Judge::index(base),
-                now: Judge::index(&hashes(current, ctx.key)),
-            }),
+            Base::Changed(base) => Some(Judge::new(base, current, ctx.key)),
         };
         Planner {
             work: Work::of(current.to_vec()),
@@ -618,6 +818,7 @@ impl<'a, 'c> Planner<'a, 'c> {
             touched: Vec::new(),
             seen: HashSet::new(),
             conflicts: Vec::new(),
+            in_conflict: HashSet::new(),
             replaced: 0,
         }
     }
@@ -665,7 +866,10 @@ impl<'a, 'c> Planner<'a, 'c> {
         let nodes = match self.anchors().resolve(anchor) {
             Ok(id) => self.work.alive_with(id),
             Err(AnchorError::Ambiguous) => return Err(self.ambiguous_anchor(anchor)),
-            Err(AnchorError::Stale) => self.work.alive_with(anchor),
+            // Une ancre qui a la forme d'un alias ne désigne jamais un bloc par son identifiant
+            // (M4).
+            Err(AnchorError::Stale) if !is_alias(anchor) => self.work.alive_with(anchor),
+            Err(AnchorError::Stale) => Vec::new(),
         };
         match nodes.as_slice() {
             [node] => Ok(*node),
@@ -701,11 +905,16 @@ impl<'a, 'c> Planner<'a, 'c> {
         }
         if let Some(judge) = &self.judge
             && judge.changed(&id, whole)
-            && !self.conflicts.contains(&id)
         {
-            self.conflicts.push(id.clone());
+            self.conflict(id.clone());
         }
         self.record(id);
+    }
+
+    fn conflict(&mut self, id: String) {
+        if self.in_conflict.insert(id.clone()) {
+            self.conflicts.push(id);
+        }
     }
 
     /// Note que l'appel touche le bloc de la page `id`, sans le juger.
@@ -715,9 +924,19 @@ impl<'a, 'c> Planner<'a, 'c> {
         }
     }
 
+    /// Le bloc et ses sous-blocs d'aujourd'hui, et, en `rebase`, ceux qu'il avait à la lecture :
+    /// un sous-bloc retiré ou sorti depuis est un conflit (I1).
     fn touch_subtree(&mut self, node: usize) {
         for n in self.work.subtree(node) {
             self.touch(n, true);
+        }
+        let id = self.work.nodes[node].block.id.clone();
+        if self.page_ids.contains(&id)
+            && let Some(judge) = &self.judge
+        {
+            for lost in judge.lost_children(&id, self.ctx.key) {
+                self.conflict(lost);
+            }
         }
     }
 
@@ -728,26 +947,31 @@ impl<'a, 'c> Planner<'a, 'c> {
         if allow {
             return Ok(());
         }
+        let commented = self.ctx.commented;
         let gone: Vec<&Block> = nodes
             .iter()
             .map(|&n| &self.work.nodes[n].block)
-            .filter(|b| PROTECTED.contains(&b.kind.as_str()))
+            .filter(|b| {
+                PROTECTED.contains(&b.kind.as_str())
+                    || commented.is_some_and(|ids| ids.contains(&b.id))
+            })
             .collect();
         if gone.is_empty() {
             return Ok(());
         }
         Err(OpRefusal {
-            blocks: gone
-                .iter()
-                .filter(|b| !b.id.is_empty())
-                .map(|b| b.id.clone())
-                .collect(),
+            blocks: bounded(
+                gone.iter()
+                    .filter(|b| !b.id.is_empty())
+                    .map(|b| b.id.clone())
+                    .collect(),
+            ),
             ..self.refuse(
                 Reason::ProtectedContent,
                 format!(
                     "l'opération retirerait {} bloc(s) qui montrent une sous-page, une base, un bloc \
-                     synchronisé ou un contenu inconnu : garde-les dans ce que tu écris, ou pose \
-                     allow_deleting_content.",
+                     synchronisé, un contenu inconnu ou un fil de commentaires : garde-les dans ce \
+                     que tu écris, ou pose allow_deleting_content.",
                     gone.len()
                 ),
             )
@@ -833,6 +1057,12 @@ impl<'a, 'c> Planner<'a, 'c> {
         anchor: Option<&str>,
         replace_all: bool,
     ) -> Result<(), OpRefusal> {
+        if old.is_empty() {
+            return Err(self.refuse(
+                Reason::InvalidRequest,
+                "old est vide : écris le texte à remplacer, tel qu'il est dans le bloc.".into(),
+            ));
+        }
         let scope = match anchor {
             Some(anchor) => vec![self.resolve(anchor)?],
             None => self.work.preorder(),
@@ -872,10 +1102,41 @@ impl<'a, 'c> Planner<'a, 'c> {
                 )
             });
         }
+        // Seul ce qui change entre `old` et `new` se remplace (M6) : leur début et leur fin communs
+        // restent, avec leurs marques (une faute corrigée dans un lien garde le lien).
+        let (old_chars, new_chars): (Vec<char>, Vec<char>) =
+            (old.chars().collect(), new.chars().collect());
+        let head = old_chars
+            .iter()
+            .zip(&new_chars)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let room = old_chars.len().min(new_chars.len()) - head;
+        let tail = old_chars
+            .iter()
+            .rev()
+            .zip(new_chars.iter().rev())
+            .take(room)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if head == old_chars.len() && head == new_chars.len() {
+            return Ok(()); // `old` égal à `new` : rien ne change
+        }
+        let middle: String = new_chars[head..new_chars.len() - tail].iter().collect();
+        let hits: Vec<(usize, Vec<(usize, usize)>)> = hits
+            .into_iter()
+            .map(|(node, ranges)| {
+                let ranges = ranges
+                    .into_iter()
+                    .map(|(start, end)| (start + head, end - tail))
+                    .collect();
+                (node, ranges)
+            })
+            .collect();
         // Avant de bâtir le moindre texte : ce que l'appel aura écrit par `str_replace`.
         self.replaced = self
             .replaced
-            .saturating_add(total.saturating_mul(new.len()));
+            .saturating_add(total.saturating_mul(middle.len()));
         if self.replaced > MAX_REPLACED_BYTES {
             return Err(self.refuse(
                 Reason::TooLong,
@@ -892,7 +1153,7 @@ impl<'a, 'c> Planner<'a, 'c> {
             let Content::Inline(content) = &b.content else {
                 continue;
             };
-            let replaced = replace_ranges(content, &ranges, new, plain);
+            let replaced = replace_ranges(content, &ranges, &middle, plain);
             self.work.set_content(node, replaced);
             self.touch(node, true);
         }
@@ -1023,6 +1284,13 @@ impl<'a, 'c> Planner<'a, 'c> {
         };
         let mut fresh = fresh_ids(blocks);
         let heir = fresh.iter().position(|b| b.kind == kind);
+        // Un bloc protégé n'est gardé par son héritier que si celui-ci est le même bloc (M1) : un
+        // bloc inconnu d'un autre `data`, un lien vers une autre page le retirent.
+        let kept = heir.is_some_and(|k| {
+            let (old, new) = (&self.work.nodes[node].block, &fresh[k]);
+            !PROTECTED.contains(&kind.as_str())
+                || (old.props == new.props && old.content == new.content)
+        });
         if let Some(k) = heir {
             fresh[k].id = id;
         }
@@ -1030,7 +1298,7 @@ impl<'a, 'c> Planner<'a, 'c> {
             .work
             .subtree(node)
             .into_iter()
-            .filter(|&n| n != node || heir.is_none())
+            .filter(|&n| n != node || !kept)
             .collect();
         self.check_protected(&gone, allow)?;
         self.check_media(&fresh)?;
@@ -1084,18 +1352,17 @@ impl<'a, 'c> Planner<'a, 'c> {
     }
 
     fn replace_page(&mut self, blocks: &[Block], allow: bool) -> Result<(), OpRefusal> {
-        let mut written = blocks.to_vec();
-        self.resolve_written(&mut written)?;
+        let mut written = self.resolve_written(blocks.to_vec(), &mut HashSet::new())?;
         let now = self.work.blocks();
         keep_ids(&now, &mut written);
-        let written = crate::anchors::with_ids(&written);
+        let written = with_ids(&written);
         let target = match self.ctx.base {
             Base::Current => written,
             Base::Changed(base) => match three_way(base, &written, &now, self.ctx.key) {
                 Ok(merged) => merged,
                 Err(conflict) => {
                     return Err(OpRefusal {
-                        blocks: conflict.blocks,
+                        blocks: bounded(conflict.blocks),
                         ..self.refuse(
                             Reason::RevisionConflict,
                             "la page a changé depuis ta lecture, dans des blocs que ce que tu \
@@ -1140,29 +1407,79 @@ impl<'a, 'c> Planner<'a, 'c> {
     }
 
     /// Les ancres d'un MMD de `replace_page` : un alias ou un identifiant de la page lue désigne
-    /// son bloc ; un alias périmé ou ambigu est refusé ; un autre identifiant est oublié (le bloc
-    /// est neuf).
-    fn resolve_written(&self, blocks: &mut [Block]) -> Result<(), OpRefusal> {
-        for b in blocks {
+    /// son bloc, une fois au plus (M2) ; un alias ambigu est refusé ; un alias périmé l'est aussi,
+    /// sauf en `rebase` s'il nomme un bloc de la lecture qu'un autre a retiré depuis (I2) : laissé
+    /// tel quel par l'agent, le bloc est jeté ; changé, c'est un conflit ; un autre identifiant est
+    /// oublié (le bloc est neuf).
+    fn resolve_written(
+        &self,
+        blocks: Vec<Block>,
+        named: &mut HashSet<String>,
+    ) -> Result<Vec<Block>, OpRefusal> {
+        let mut out = Vec::with_capacity(blocks.len());
+        for mut b in blocks {
             if !b.id.is_empty() {
                 match self.resolve(&b.id) {
-                    Ok(node) => b.id = self.work.nodes[node].block.id.clone(),
-                    Err(refusal)
-                        if refusal.reason == Reason::StaleAnchor
-                            && !crate::anchors::is_alias(&b.id) =>
-                    {
-                        b.id.clear();
+                    Ok(node) => {
+                        let id = self.work.nodes[node].block.id.clone();
+                        if !named.insert(id.clone()) {
+                            return Err(self.refuse(
+                                Reason::InvalidRequest,
+                                format!(
+                                    "l'ancre « {} » est nommée deux fois dans le MMD : un bloc ne \
+                                     s'écrit qu'une fois ; retire l'une des deux, ou écris le bloc \
+                                     copié sans ancre.",
+                                    excerpt(&b.id)
+                                ),
+                            ));
+                        }
+                        b.id = id;
                     }
+                    Err(refusal) if refusal.reason == Reason::StaleAnchor && is_alias(&b.id) => {
+                        let (Base::Changed(base), Some(judge)) = (self.ctx.base, &self.judge)
+                        else {
+                            return Err(refusal);
+                        };
+                        match judge.served(&b.id, base) {
+                            Ok(content) if content == content_hash(&b, self.ctx.key) => {
+                                if !b.children.is_empty() {
+                                    return Err(self.gone_conflict());
+                                }
+                                continue; // retiré par un autre, laissé tel quel : jeté
+                            }
+                            Ok(_) => return Err(self.gone_conflict()),
+                            Err(0) => return Err(refusal),
+                            Err(_) => return Err(self.ambiguous_anchor(&b.id)),
+                        }
+                    }
+                    Err(refusal) if refusal.reason == Reason::StaleAnchor => b.id.clear(),
                     Err(refusal) => return Err(refusal),
                 }
             }
-            self.resolve_written(&mut b.children)?;
+            b.children = self.resolve_written(std::mem::take(&mut b.children), named)?;
+            out.push(b);
         }
-        Ok(())
+        Ok(out)
+    }
+
+    /// Le conflit d'un bloc qu'un autre a retiré depuis la lecture, et que l'agent change.
+    fn gone_conflict(&self) -> OpRefusal {
+        self.refuse(
+            Reason::RevisionConflict,
+            "un bloc que ce que tu écris change a été retiré de la page depuis ta lecture : relis la \
+             page, puis réécris avec la révision courante."
+                .into(),
+        )
     }
 }
 
 // ===================================================================================== aides
+
+/// Les blocs qu'un refus nomme, [`MAX_REFUSAL_BLOCKS`] au plus.
+fn bounded(mut blocks: Vec<String>) -> Vec<String> {
+    blocks.truncate(MAX_REFUSAL_BLOCKS);
+    blocks
+}
 
 fn collect_ids<'b>(blocks: &'b [Block], into: &mut HashSet<&'b str>) {
     for b in blocks {
@@ -1310,8 +1627,15 @@ fn replace_ranges(
             *next += 1;
         }
         if !*inside && *next < ranges.len() && ranges[*next].0 == pos {
-            push_new(out, here.or_else(|| previous.clone()));
-            *inside = true;
+            if ranges[*next].1 == pos {
+                // Une insertion (rien de remplacé, M6) : les marques du caractère d'avant, comme
+                // une frappe qui continue sa plage, à défaut celles du caractère suivant.
+                push_new(out, previous.clone().or(here));
+                *next += 1;
+            } else {
+                push_new(out, here.or_else(|| previous.clone()));
+                *inside = true;
+            }
         }
     };
     for atom in atoms {

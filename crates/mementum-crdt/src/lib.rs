@@ -60,6 +60,9 @@ pub enum CrdtError {
     /// Une écriture complète faite à moitié (Ruling R389) : le retrait du contenu est fait, et
     /// l'écriture du nouveau a touché à la part du retrait. Le document est à recharger.
     HalfWritten,
+    /// Un plan d'opérations fait sur une autre révision de la page que celle d'aujourd'hui (relecture
+    /// de S3 du lot 5, I3) : rien n'est écrit, le plan est à refaire sur la page relue.
+    StalePlan,
 }
 
 impl fmt::Display for CrdtError {
@@ -80,6 +83,10 @@ impl fmt::Display for CrdtError {
                 f,
                 "écriture complète faite à moitié : l'écriture a touché à la part du retrait ; \
                  le document est à recharger"
+            ),
+            CrdtError::StalePlan => write!(
+                f,
+                "plan fait sur une autre révision de la page : rien n'est écrit, il est à refaire"
             ),
         }
     }

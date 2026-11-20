@@ -21,7 +21,7 @@ use mementum_crdt::anchors::{
 use mementum_crdt::ops::{
     self, Base, OpRefusal, Operation, Place, PlanContext, Reason, read_markdown,
 };
-use mementum_crdt::{DiffWritten, FRAGMENT, PageDoc};
+use mementum_crdt::{CrdtError, DiffWritten, FRAGMENT, PageDoc};
 use mementum_md::{Block, RenderOpts, parse, render};
 use sha2::{Digest, Sha256};
 use yrs::branch::Branch;
@@ -50,6 +50,8 @@ fn current(key: &HashKey) -> PlanContext<'_> {
         base: Base::Current,
         key,
         forbid_external_media: false,
+        revision: "",
+        commented: None,
     }
 }
 
@@ -61,7 +63,12 @@ fn run_in(
 ) -> Result<DiffWritten, OpRefusal> {
     let before = page.encode_state();
     let blocks = page.read_blocks();
-    let plan = ops::plan(&blocks, ops, ctx)?;
+    let revision = page.revision();
+    let ctx = PlanContext {
+        revision: &revision,
+        ..*ctx
+    };
+    let plan = ops::plan(&blocks, ops, &ctx)?;
     let written = page.apply(&plan).expect("l'écriture d'un plan vérifié");
     // Le plan appliqué est le plan vérifié, identifiants compris (une page vide s'écrit en un
     // paragraphe vide).
@@ -90,7 +97,12 @@ fn run(page: &PageDoc, ops: &[Operation]) -> Result<DiffWritten, OpRefusal> {
 fn refused(page: &PageDoc, ops: &[Operation], ctx: &PlanContext<'_>) -> OpRefusal {
     let state = page.encode_state();
     let blocks = page.read_blocks();
-    let refusal = match ops::plan(&blocks, ops, ctx) {
+    let revision = page.revision();
+    let ctx = PlanContext {
+        revision: &revision,
+        ..*ctx
+    };
+    let refusal = match ops::plan(&blocks, ops, &ctx) {
         Ok(plan) => panic!("plan accepté : {:?}", plan.blocks()),
         Err(refusal) => refusal,
     };
@@ -236,6 +248,20 @@ fn base32_digest(id: &str) -> String {
         .collect()
 }
 
+/// Un identifiant dont le hachage commence par les `chars` premiers caractères base32 de celui
+/// de `id` (2^20 essais en moyenne pour quatre caractères).
+fn colliding_with(id: &str, chars: usize) -> String {
+    let head = |s: &str| {
+        let d = Sha256::digest(s.as_bytes());
+        u32::from_be_bytes([d[0], d[1], d[2], d[3]]) >> (32 - 5 * chars)
+    };
+    let wanted = head(id);
+    (0..)
+        .map(|n| format!("y{n}"))
+        .find(|candidate| head(candidate) == wanted)
+        .unwrap()
+}
+
 /// Deux identifiants dont les hachages partagent leurs `chars` premiers caractères base32.
 fn colliding_ids(chars: usize) -> (String, String) {
     let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -307,17 +333,15 @@ fn an_alias_grows_until_it_is_alone() {
     }
     assert_eq!(anchors.alias("p3").unwrap().len(), 5);
 
-    // Un bloc dont l'identifiant est l'alias court d'un autre : l'alias de l'autre s'allonge, et
-    // cet identifiant, qui commence aussi le hachage de l'autre, les désigne tous deux (un bloc
-    // posé sous l'identifiant d'un alias déjà servi ne prend pas la place du bloc de l'alias).
+    // Un bloc dont l'identifiant a la forme de l'alias d'un autre ne le capte pas : une ancre qui a
+    // la forme d'un alias ne se résout que comme alias (relecture de S3, M4) ; ce bloc se désigne
+    // par son propre alias.
     let p1_short = format!("b{}", &base32_digest("p1")[..4]);
     let page = page_with(&format!("Un ^p1\n\nPiège ^{p1_short}\n"));
     let anchors = Anchors::of(&page.read_blocks());
     let alias = anchors.alias("p1").unwrap();
-    assert_ne!(alias, p1_short);
-    assert_eq!(alias.len(), 6);
-    assert_eq!(anchors.resolve(&alias), Ok("p1"));
-    assert_eq!(anchors.resolve(&p1_short), Err(AnchorError::Ambiguous));
+    assert_eq!(alias, p1_short);
+    assert_eq!(anchors.resolve(&p1_short), Ok("p1"));
     let trap = anchors.alias(&p1_short).unwrap();
     assert_eq!(
         anchors.resolve(&trap),
@@ -392,11 +416,12 @@ fn str_replace_counts_on_plain_text_after_marks_and_a_mention() {
     .unwrap();
     assert!(mmd_of(&page).starts_with("Du **gros**, un [lieu](https://a.example), "));
 
-    // À cheval sur le gras et le texte : les marques du premier caractère (gras).
+    // À cheval sur le gras et le texte : ce qui change (« as, » devient « os et ») prend les
+    // marques de son premier caractère (gras) ; la fin commune (« un ») garde les siennes (M6).
     let page = page_with(MARKED);
     run(&page, &[str_replace("as, un", "os et un")]).unwrap();
     assert!(
-        mmd_of(&page).starts_with("Du **gros et un** [lien]"),
+        mmd_of(&page).starts_with("Du **gros et** un [lien]"),
         "{}",
         mmd_of(&page)
     );
@@ -828,6 +853,8 @@ fn a_token_write_cannot_add_external_media() {
         base: Base::Current,
         key: &key,
         forbid_external_media: true,
+        revision: "",
+        commented: None,
     };
     let insert = |mmd: &str| Operation::Insert {
         at: Place::End,
@@ -969,6 +996,8 @@ fn operations_touching_unchanged_blocks_pass_a_rebase() {
         base: Base::Changed(&base),
         key: &key,
         forbid_external_media: false,
+        revision: "",
+        commented: None,
     };
     let anchors = Anchors::of(&page.read_blocks());
     let ops = [
@@ -1009,6 +1038,8 @@ fn a_changed_block_refuses_it() {
         base: Base::Changed(&base),
         key: &key,
         forbid_external_media: false,
+        revision: "",
+        commented: None,
     };
     let cases: Vec<(Operation, Vec<&str>)> = vec![
         (str_replace("Trois", "3"), vec!["p3"]),
@@ -1065,6 +1096,8 @@ fn replace_page_writes_only_what_the_agent_changed_and_keeps_what_others_changed
         base: Base::Changed(&base),
         key: &key,
         forbid_external_media: false,
+        revision: "",
+        commented: None,
     };
     // L'agent récrit la page qu'il a lue (alias de sa lecture) : p3 changé, p4 retiré (p5 change
     // donc de place), un bloc neuf après p1 (p2 change donc de place, et l'humain a changé son
@@ -1136,8 +1169,10 @@ fn replace_page_conflicts_when_both_changed_one_block() {
         ),
         (
             "Un ^p1\n\nDeux ^p2\n  Enfant ^c2\n\nDe l'humain\n\nTrois ^p3\n\nQuatre ^p4\n\nCinq ^p5\n",
+            // `keep_ids` donne au bloc de l'agent l'identifiant du bloc de l'humain (même type, même
+            // place) : le conflit nomme ce bloc, sous un identifiant neuf.
             base_mmd("Deux", "De l'agent\n\n"),
-            vec!["p3"],
+            vec![],
         ),
         // Un bloc arrivé après un bloc que l'agent retire : la fusion ne se bâtit pas.
         (
@@ -1159,6 +1194,8 @@ fn replace_page_conflicts_when_both_changed_one_block() {
             base: Base::Changed(&base),
             key: &key,
             forbid_external_media: false,
+            revision: "",
+            commented: None,
         };
         let refusal = refused(
             &page,
@@ -1173,6 +1210,7 @@ fn replace_page_conflicts_when_both_changed_one_block() {
             (0, Reason::RevisionConflict),
             "{human}"
         );
+        assert!(!refusal.blocks.is_empty(), "{human}");
         for id in &blocks {
             assert!(
                 refusal.blocks.contains(&id.to_string()),
@@ -1214,15 +1252,21 @@ fn changed_tells_changed_gone_and_arrived_blocks() {
     assert!(!none.any);
     assert!(none.blocks.is_empty());
 
+    // Le bloc arrivé partage le début du hachage de c2 : l'alias de c2 s'allonge aujourd'hui, et
+    // `changed` le nomme par l'alias servi (relecture de S3, M5).
+    let twin = colliding_with("c2", 4);
     page.write_diff(
-        &parse("Un ^p1\n\nDeux ^p2\n  Enfant changé ^c2\n\nTrois ^p3\n\nArrivé\n\nQuatre ^p4\n")
-            .unwrap(),
+        &parse(&format!(
+            "Un ^p1\n\nDeux ^p2\n  Enfant changé ^c2\n\nTrois ^p3\n\nArrivé ^{twin}\n\nQuatre ^p4\n"
+        ))
+        .unwrap(),
     )
     .unwrap();
     let now = page.read_blocks();
     let report = changed(&before, &now, &hashes(&now, &key));
     assert!(report.any);
-    let anchors = Anchors::of(&now);
+    assert_ne!(Anchors::of(&now).alias("c2"), alias_before.alias("c2"));
+    let anchors = &alias_before;
     let seen: Vec<(String, Option<usize>, Why)> = report
         .blocks
         .iter()
@@ -1280,7 +1324,12 @@ fn str_replace_writes_the_diff_write_proven_against_yjs() {
         let page = PageDoc::from_updates_for(2, [base.as_slice()]).unwrap();
         let blocks = page.read_blocks();
         let key = HashKey::new();
-        let plan = ops::plan(&blocks, &[str_replace(old, new)], &current(&key)).unwrap();
+        let revision = page.revision();
+        let ctx = PlanContext {
+            revision: &revision,
+            ..current(&key)
+        };
+        let plan = ops::plan(&blocks, &[str_replace(old, new)], &ctx).unwrap();
         let written = page.apply(&plan).unwrap();
         assert_eq!(written.update, write, "{scene}");
     }
@@ -1436,6 +1485,8 @@ fn measure_hashes_and_one_operation_on_10000_blocks() {
         base: Base::Changed(&base),
         key: &key,
         forbid_external_media: true,
+        revision: "",
+        commented: None,
     };
     let lines = [
         ("lecture des blocs", timed(5, || page.read_blocks())),
@@ -1460,7 +1511,12 @@ fn measure_hashes_and_one_operation_on_10000_blocks() {
             timed(5, || {
                 let page = PageDoc::from_updates([state.as_slice()]).unwrap();
                 let read = page.read_blocks();
-                let plan = ops::plan(&read, &anchored, &current(&key)).unwrap();
+                let revision = page.revision();
+                let ctx = PlanContext {
+                    revision: &revision,
+                    ..current(&key)
+                };
+                let plan = ops::plan(&read, &anchored, &ctx).unwrap();
                 page.apply(&plan).unwrap().update.len()
             }),
         ),
@@ -1571,6 +1627,8 @@ fn the_operations_table_holds() {
             base: Base::Current,
             key: &key,
             forbid_external_media: case["media_guard"].as_bool().unwrap_or(false),
+            revision: "",
+            commented: None,
         };
         let operations: Result<Vec<Operation>, OpRefusal> = case["operations"]
             .as_array()
@@ -1606,5 +1664,549 @@ fn the_operations_table_holds() {
             }
             (_, _, outcome) => panic!("{name} : {outcome:?}"),
         }
+    }
+}
+
+// ------------------------------------------------------------------- relecture de S3
+
+fn rebase_on<'a>(base: &'a BlockHashes, key: &'a HashKey) -> PlanContext<'a> {
+    PlanContext {
+        base: Base::Changed(base),
+        key,
+        revision: "",
+        forbid_external_media: false,
+        commented: None,
+    }
+}
+
+/// La page `base`, ses empreintes à la lecture de l'agent, puis l'écriture d'un autre (`human`).
+fn changed_by(base: &str, human: &str) -> (PageDoc, BlockHashes, HashKey) {
+    let page = page_with(base);
+    let key = HashKey::new();
+    let hashes = hashes(&page.read_blocks(), &key);
+    page.write_diff(&parse(human).unwrap()).unwrap();
+    (page, hashes, key)
+}
+
+/// I1 : en `rebase`, un remplacement, un retrait ou un déplacement juge aussi les sous-blocs que le
+/// bloc avait à la lecture : un sous-bloc retiré, ou sorti du bloc, depuis, est un conflit (sinon
+/// « Enfant » revenait, ou paraissait deux fois).
+#[test]
+fn replace_block_in_rebase_sees_a_sub_block_removed_or_moved_out() {
+    let base = "Deux ^p2\n  Enfant ^c2\n\nTrois ^p3\n";
+    for human in [
+        "Deux ^p2\n\nTrois ^p3\n",
+        "Deux ^p2\n\nEnfant ^c2\n\nTrois ^p3\n",
+    ] {
+        let ops = [
+            Operation::ReplaceBlock {
+                anchor: "p2".into(),
+                blocks: md("Deux remplacé\n  Enfant\n"),
+                allow_deleting_content: false,
+            },
+            Operation::DeleteBlock {
+                anchor: "p2".into(),
+                allow_deleting_content: false,
+            },
+            Operation::MoveBlock {
+                anchor: "p2".into(),
+                to: Place::End,
+            },
+        ];
+        for op in ops {
+            let (page, hashes, key) = changed_by(base, human);
+            let refusal = refused(&page, std::slice::from_ref(&op), &rebase_on(&hashes, &key));
+            assert_eq!(refusal.reason, Reason::RevisionConflict, "{human} : {op:?}");
+        }
+    }
+}
+
+/// I2 : `replace_page` en `rebase` garde la suppression d'un autre : un alias de la lecture dont le
+/// bloc est parti depuis désigne ce bloc de la base (laissé tel quel par l'agent : jeté ; changé :
+/// conflit) ; sans ancres, un bloc neuf de l'agent dont le contenu est celui d'un bloc qu'un autre a
+/// retiré est un conflit (il ressuscitait).
+#[test]
+fn replace_page_in_rebase_keeps_a_deletion_made_by_another() {
+    let mmd = "Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n\nQuatre ^p4\n";
+    let human = "Un ^p1\n\nDeux ^p2\n\nQuatre ^p4\n";
+    let read = Anchors::of(&page_with(mmd).read_blocks());
+    let alias = |id: &str| read.alias(id).unwrap();
+    let written = |p1: &str, p3: &str| {
+        format!(
+            "{p1} ^{}\n\nDeux ^{}\n\n{p3} ^{}\n\nQuatre ^{}\n",
+            alias("p1"),
+            alias("p2"),
+            alias("p3"),
+            alias("p4")
+        )
+    };
+    let replace = |mmd: &str| Operation::ReplacePage {
+        blocks: md(mmd),
+        allow_deleting_content: false,
+    };
+    let (page, hashes, key) = changed_by(mmd, human);
+    run_in(
+        &page,
+        &[replace(&written("Un modifié", "Trois"))],
+        &rebase_on(&hashes, &key),
+    )
+    .unwrap();
+    assert_eq!(mmd_of(&page), "Un modifié\n\nDeux\n\nQuatre\n");
+
+    let (page, hashes, key) = changed_by(mmd, human);
+    let refusal = refused(
+        &page,
+        &[replace(&written("Un", "Trois de l'agent"))],
+        &rebase_on(&hashes, &key),
+    );
+    assert_eq!(refusal.reason, Reason::RevisionConflict);
+
+    let (page, hashes, key) =
+        changed_by("Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n", "Un ^p1\n\nDeux ^p2\n");
+    let refusal = refused(
+        &page,
+        &[replace("Un modifié\n\nDeux\n\nTrois\n")],
+        &rebase_on(&hashes, &key),
+    );
+    assert_eq!(refusal.reason, Reason::RevisionConflict);
+    assert_eq!(mmd_of(&page), "Un\n\nDeux\n");
+}
+
+/// I3 : la seconde commande d'une opération destructrice refait le plan avec la base de l'agent
+/// (refaite avec l'état encodé, la fusion ramenait le bloc changé par l'humain à son texte d'avant),
+/// et juge à part ses blocs touchés contre l'état encodé (`Plan::changed_since`).
+#[test]
+fn the_second_command_judges_the_touched_blocks_against_the_encoded_state() {
+    let page = page_with("Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n");
+    let key = HashKey::new();
+    let read = page.read_blocks();
+    let base = hashes(&read, &key);
+    let anchors = Anchors::of(&read);
+    page.write_diff(&parse("Un ^p1\n\nDeux de l'humain ^p2\n\nTrois ^p3\n").unwrap())
+        .unwrap();
+    let op = [Operation::ReplacePage {
+        blocks: md(&format!(
+            "Un ^{}\n\nDeux ^{}\n\nTrois de l'agent ^{}\n",
+            anchors.alias("p1").unwrap(),
+            anchors.alias("p2").unwrap(),
+            anchors.alias("p3").unwrap()
+        )),
+        allow_deleting_content: false,
+    }];
+    // Première commande : le plan, et l'état encodé pour la version.
+    let first = page.read_blocks();
+    let encoded = hashes(&first, &key);
+    let revision = page.revision();
+    let ctx = PlanContext {
+        revision: &revision,
+        ..rebase_on(&base, &key)
+    };
+    let plan = ops::plan(&first, &op, &ctx).unwrap();
+    assert_eq!(plan.touched(), ["p3"]);
+    // Seconde commande, rien n'a changé entre les deux : le plan refait avec la même base.
+    let second = page.read_blocks();
+    let plan = ops::plan(&second, &op, &ctx).unwrap();
+    assert!(plan.changed_since(&encoded, &key).is_empty());
+    page.apply(&plan).unwrap();
+    assert_eq!(
+        mmd_of(&page),
+        "Un\n\nDeux de l'humain\n\nTrois de l'agent\n"
+    );
+
+    // Un bloc touché qui a changé depuis l'état encodé est dit.
+    let page = page_with("Un ^p1\n\nDeux ^p2\n");
+    let encoded = hashes(&page.read_blocks(), &key);
+    page.write_diff(&parse("Un ^p1\n\nDeux changé ^p2\n").unwrap())
+        .unwrap();
+    let blocks = page.read_blocks();
+    let revision = page.revision();
+    let ctx = PlanContext {
+        revision: &revision,
+        ..current(&key)
+    };
+    let replace = [Operation::ReplaceBlock {
+        anchor: "p2".into(),
+        blocks: md("Deux remplacé\n"),
+        allow_deleting_content: false,
+    }];
+    let plan = ops::plan(&blocks, &replace, &ctx).unwrap();
+    assert_eq!(plan.changed_since(&encoded, &key), ["p2"]);
+}
+
+/// I3 : un plan ne s'écrit que sur la révision dont il a lu les blocs.
+#[test]
+fn apply_refuses_a_plan_made_on_another_revision() {
+    let page = page_with("Un ^p1\n\nDeux ^p2\n");
+    let key = HashKey::new();
+    let blocks = page.read_blocks();
+    let revision = page.revision();
+    let ctx = PlanContext {
+        revision: &revision,
+        ..current(&key)
+    };
+    let plan = ops::plan(&blocks, &[str_replace("Deux", "Second")], &ctx).unwrap();
+    page.write_diff(&parse("Un ^p1\n\nDeux et plus ^p2\n").unwrap())
+        .unwrap();
+    let state = page.encode_state();
+    assert_eq!(page.apply(&plan), Err(CrdtError::StalePlan));
+    assert_eq!(page.encode_state(), state, "rien n'est écrit");
+}
+
+/// I4 : un `old` vide est refusé (sinon `replace_all` effaçait le texte de tous les blocs).
+#[test]
+fn an_empty_old_is_refused() {
+    let key = HashKey::new();
+    for replace_all in [true, false] {
+        let op = Operation::StrReplace {
+            old: String::new(),
+            new: "-".into(),
+            anchor: None,
+            replace_all,
+        };
+        let refusal = refused(&page_with("abc ^p1\n"), &[op], &current(&key));
+        assert_eq!(refusal.reason, Reason::InvalidRequest);
+    }
+}
+
+/// M1 : un bloc protégé ne se remplace qu'avec l'option, ou par un bloc identique : l'héritier de
+/// son identifiant ne suffit pas.
+#[test]
+fn a_protected_block_is_replaced_only_by_an_identical_one() {
+    let mmd = "Avant ^p1\n\n<block type=\"future_widget\" id=\"u1\" data=\"eyJ4IjoxfQ==\"/>\n\n<page id=\"pg_child01\" anchor=\"l1\">Sous-page</page>\n";
+    let key = HashKey::new();
+    let replace = |anchor: &str, mmd: &str, allow: bool| Operation::ReplaceBlock {
+        anchor: anchor.into(),
+        blocks: md(mmd),
+        allow_deleting_content: allow,
+    };
+    for (anchor, other, same) in [
+        (
+            "u1",
+            "<block type=\"other_widget\" id=\"x\" data=\"e30=\"/>\n",
+            "<block type=\"future_widget\" id=\"x\" data=\"eyJ4IjoxfQ==\"/>\n",
+        ),
+        (
+            "l1",
+            "<page id=\"pg_other\">Autre</page>\n",
+            "<page id=\"pg_child01\">Sous-page</page>\n",
+        ),
+    ] {
+        let refusal = refused(
+            &page_with(mmd),
+            &[replace(anchor, other, false)],
+            &current(&key),
+        );
+        assert_eq!(refusal.reason, Reason::ProtectedContent, "{anchor}");
+        assert_eq!(refusal.blocks, [anchor]);
+        run(&page_with(mmd), &[replace(anchor, other, true)]).unwrap();
+        let page = page_with(mmd);
+        let written = run(&page, &[replace(anchor, same, false)]).unwrap();
+        assert_eq!(written.update, [0, 0], "{anchor} : identique");
+    }
+}
+
+/// M2 : un `replace_page` qui nomme deux fois la même ancre est refusé dès la lecture des ancres.
+#[test]
+fn replace_page_naming_one_anchor_twice_is_refused() {
+    let page = page_with("Un ^p1\n\nDeux ^p2\n");
+    let anchors = Anchors::of(&page.read_blocks());
+    let p1 = anchors.alias("p1").unwrap();
+    let key = HashKey::new();
+    for written in [
+        format!(
+            "Un ^{p1}\n\nDeux ^{}\n\nUn ^{p1}\n",
+            anchors.alias("p2").unwrap()
+        ),
+        "Un ^p1\n\nDeux ^p1\n".to_string(),
+    ] {
+        let refusal = refused(
+            &page,
+            &[Operation::ReplacePage {
+                blocks: md(&written),
+                allow_deleting_content: false,
+            }],
+            &current(&key),
+        );
+        assert_eq!(refusal.reason, Reason::InvalidRequest, "{written}");
+        assert!(refusal.message.contains("deux fois"), "{}", refusal.message);
+    }
+}
+
+/// M3 : le même changement fait des deux côtés n'est pas un conflit : le même retrait, le même
+/// texte, et un agent qui rejoue son écriture après une réponse perdue (rien ne s'écrit).
+#[test]
+fn the_same_change_on_both_sides_is_no_conflict() {
+    let mmd = "Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n";
+    let read = Anchors::of(&page_with(mmd).read_blocks());
+    let alias = |id: &str| read.alias(id).unwrap();
+    let cases = [
+        (
+            "Un ^p1\n\nTrois ^p3\n",
+            format!("Un ^{}\n\nTrois ^{}\n", alias("p1"), alias("p3")),
+            "Un\n\nTrois\n",
+        ),
+        (
+            "Un ^p1\n\nDeux bis ^p2\n\nTrois ^p3\n",
+            format!(
+                "Un ^{}\n\nDeux bis ^{}\n\nTrois ^{}\n",
+                alias("p1"),
+                alias("p2"),
+                alias("p3")
+            ),
+            "Un\n\nDeux bis\n\nTrois\n",
+        ),
+    ];
+    for (human, written, result) in cases {
+        let (page, hashes, key) = changed_by(mmd, human);
+        let written = run_in(
+            &page,
+            &[Operation::ReplacePage {
+                blocks: md(&written),
+                allow_deleting_content: false,
+            }],
+            &rebase_on(&hashes, &key),
+        )
+        .unwrap();
+        assert_eq!(mmd_of(&page), result);
+        assert_eq!(written.update, [0, 0], "{human}");
+    }
+}
+
+/// M4 : une ancre qui a la forme d'un alias ne désigne jamais un bloc par son identifiant.
+#[test]
+fn an_anchor_shaped_like_an_alias_never_names_a_block_by_its_id() {
+    let page = page_with("Un ^baaaa\n\nDeux ^p2\n");
+    let anchors = Anchors::of(&page.read_blocks());
+    assert_ne!(anchors.resolve("baaaa"), Ok("baaaa"));
+    let own = anchors.alias("baaaa").unwrap();
+    assert_eq!(anchors.resolve(&own), Ok("baaaa"));
+    assert_eq!(
+        anchors.resolve("p2"),
+        Ok("p2"),
+        "un identifiant d'une autre forme"
+    );
+}
+
+/// M6 : `str_replace` ne remplace que ce qui change entre `old` et `new` : une faute corrigée dans
+/// une phrase à lien garde son lien ; `old` égal à `new` n'écrit rien.
+#[test]
+fn str_replace_replaces_only_what_changes() {
+    let page = page_with("Voir [la spécificaton](https://a.example) avant. ^p1\n");
+    run(
+        &page,
+        &[str_replace("Voir la spécificaton", "Voir la spécification")],
+    )
+    .unwrap();
+    assert_eq!(
+        mmd_of(&page),
+        "Voir [la spécification](https://a.example) avant.\n"
+    );
+    let written = run(&page, &[str_replace("avant", "avant")]).unwrap();
+    assert_eq!(written.update, [0, 0]);
+}
+
+/// M7 : un refus nomme au plus `MAX_REFUSAL_BLOCKS` blocs ; chaque raison a son conseil.
+#[test]
+fn refusals_name_at_most_thirty_blocks_and_every_reason_has_a_hint() {
+    let lines = |suffix: &str| {
+        (0..40)
+            .map(|i| format!("  Enfant {i}{suffix} ^c{i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+            + "\n"
+    };
+    let (children, changed) = (lines(""), lines(" changé"));
+    let (page, hashes, key) = changed_by(
+        &format!("Parent ^p0\n{children}"),
+        &format!("Parent ^p0\n{changed}"),
+    );
+    let refusal = refused(
+        &page,
+        &[Operation::DeleteBlock {
+            anchor: "p0".into(),
+            allow_deleting_content: false,
+        }],
+        &rebase_on(&hashes, &key),
+    );
+    assert_eq!(refusal.reason, Reason::RevisionConflict);
+    assert_eq!(refusal.blocks.len(), ops::MAX_REFUSAL_BLOCKS);
+    for reason in [
+        Reason::NoMatch,
+        Reason::AmbiguousMatch,
+        Reason::StaleAnchor,
+        Reason::AmbiguousAnchor,
+        Reason::InvalidMarkdown,
+        Reason::InvalidStructure,
+        Reason::InvalidMove,
+        Reason::ProtectedContent,
+        Reason::ExternalMedia,
+        Reason::RevisionConflict,
+        Reason::TooLong,
+        Reason::InvalidRequest,
+    ] {
+        assert!(reason.hint().len() > 20, "{reason:?}");
+    }
+}
+
+/// M8 : un déplacement juge la place du bloc d'ancrage de sa destination (R1305), une insertion la
+/// place seule de son ancre.
+#[test]
+fn move_and_insert_judge_the_place_of_their_anchor() {
+    let base = "Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n\nQuatre ^p4\n";
+    let move_after = |anchor: &str| Operation::MoveBlock {
+        anchor: "p1".into(),
+        to: Place::After(anchor.into()),
+    };
+    let insert_after = |anchor: &str| Operation::Insert {
+        at: Place::After(anchor.into()),
+        blocks: md("Neuf\n"),
+    };
+    // Un bloc arrivé avant p4 change sa place ; le texte de p3 change, pas sa place.
+    let human = "Un ^p1\n\nDeux ^p2\n\nTrois changé ^p3\n\nArrivé\n\nQuatre ^p4\n";
+    for op in [move_after("p4"), insert_after("p4")] {
+        let (page, hashes, key) = changed_by(base, human);
+        let refusal = refused(&page, std::slice::from_ref(&op), &rebase_on(&hashes, &key));
+        assert_eq!(refusal.reason, Reason::RevisionConflict, "{op:?}");
+        assert_eq!(refusal.blocks, ["p4"], "{op:?}");
+    }
+    let (page, hashes, key) = changed_by(base, human);
+    run_in(&page, &[insert_after("p3")], &rebase_on(&hashes, &key)).unwrap();
+    let (page, hashes, key) = changed_by(base, human);
+    run_in(&page, &[move_after("p3")], &rebase_on(&hashes, &key)).unwrap();
+    assert_eq!(
+        mmd_of(&page),
+        "Deux\n\nTrois changé\n\nUn\n\nArrivé\n\nQuatre\n"
+    );
+}
+
+/// M8 : `Plan::touched` et `Operation::destructive`.
+#[test]
+fn touched_and_destructive_say_what_the_call_touches() {
+    let page = page_with("Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n  Enfant ^c3\n");
+    let key = HashKey::new();
+    let blocks = page.read_blocks();
+    let ops = [
+        str_replace("Un", "1"),
+        Operation::Insert {
+            at: Place::After("p2".into()),
+            blocks: md("Neuf\n"),
+        },
+        Operation::DeleteBlock {
+            anchor: "p3".into(),
+            allow_deleting_content: false,
+        },
+    ];
+    let plan = ops::plan(&blocks, &ops, &current(&key)).unwrap();
+    assert_eq!(plan.touched(), ["p1", "p2", "p3", "c3"]);
+    let destructive: Vec<bool> = ops.iter().map(Operation::destructive).collect();
+    assert_eq!(destructive, [false, false, true]);
+    assert!(
+        Operation::ReplacePage {
+            blocks: vec![],
+            allow_deleting_content: false
+        }
+        .destructive()
+    );
+}
+
+/// M8 : un déplacement qui viderait une colonne est refusé.
+#[test]
+fn a_move_that_empties_a_column_is_refused() {
+    let page = page_with(
+        "<columns>\n<column id=\"col1\">\nGauche ^g1\n</column>\n<column id=\"col2\">\nDroite ^d1\n</column>\n</columns>\n\nFin ^p9\n",
+    );
+    let key = HashKey::new();
+    let refusal = refused(
+        &page,
+        &[Operation::MoveBlock {
+            anchor: "g1".into(),
+            to: Place::End,
+        }],
+        &current(&key),
+    );
+    assert_eq!(refusal.reason, Reason::InvalidStructure);
+}
+
+/// M8 : un `str_replace` sans ancre qui ne se trouve plus qu'une fois (l'autre a retiré l'autre
+/// occurrence) juge le bloc où il tombe.
+#[test]
+fn str_replace_without_anchor_in_rebase_judges_the_block_it_finds() {
+    let base = "Un mot ^p1\n\nUn mot ici ^p2\n";
+    let (page, hashes, key) = changed_by(base, "Un truc ^p1\n\nUn mot là ^p2\n");
+    let refusal = refused(
+        &page,
+        &[str_replace("mot", "terme")],
+        &rebase_on(&hashes, &key),
+    );
+    assert_eq!(refusal.reason, Reason::RevisionConflict);
+    assert_eq!(refusal.blocks, ["p2"]);
+    let (page, hashes, key) = changed_by(base, "Un truc ^p1\n\nUn mot ici ^p2\n");
+    run_in(
+        &page,
+        &[str_replace("mot", "terme")],
+        &rebase_on(&hashes, &key),
+    )
+    .unwrap();
+    assert_eq!(mmd_of(&page), "Un truc\n\nUn terme ici\n");
+}
+
+/// Un bloc qui porte un fil de commentaires est un contenu protégé (R1232, décision du coordinateur
+/// à la relecture de S3) : il ne part que sous l'option ; le remplacer en gardant son identifiant
+/// garde son fil, et passe.
+#[test]
+fn a_commented_block_is_protected() {
+    let mmd = "Un ^p1\n\nDeux ^p2\n";
+    let key = HashKey::new();
+    let commented: HashSet<String> = ["p2".to_string()].into();
+    let ctx = PlanContext {
+        commented: Some(&commented),
+        ..current(&key)
+    };
+    let delete = |allow: bool| Operation::DeleteBlock {
+        anchor: "p2".into(),
+        allow_deleting_content: allow,
+    };
+    let refusal = refused(&page_with(mmd), &[delete(false)], &ctx);
+    assert_eq!(
+        (refusal.reason, refusal.blocks.clone()),
+        (Reason::ProtectedContent, vec!["p2".to_string()])
+    );
+    let refusal = refused(
+        &page_with(mmd),
+        &[Operation::ReplacePage {
+            blocks: md("Un\n"),
+            allow_deleting_content: false,
+        }],
+        &ctx,
+    );
+    assert_eq!(refusal.reason, Reason::ProtectedContent);
+    run_in(&page_with(mmd), &[delete(true)], &ctx).unwrap();
+    let page = page_with(mmd);
+    run_in(
+        &page,
+        &[Operation::ReplaceBlock {
+            anchor: "p2".into(),
+            blocks: md("Deux remplacé\n"),
+            allow_deleting_content: false,
+        }],
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(ids_of(&page), ["p1", "p2"]);
+}
+
+/// Limite écrite (relecture de S3, M4) : des blocs qui partagent un identifiant (ou sans
+/// identifiant) font refuser la fusion à trois.
+mod known_limits {
+    use super::*;
+
+    #[test]
+    fn blocks_sharing_an_id_make_a_three_way_merge_refuse() {
+        let key = HashKey::new();
+        let base_blocks = md("Un ^p1\n\nDeux ^p2\n");
+        let base = hashes(&base_blocks, &key);
+        let mut now = base_blocks.clone();
+        now.push(now[1].clone());
+        assert!(three_way(&base, &base_blocks, &now, &key).is_err());
     }
 }

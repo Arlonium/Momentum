@@ -180,14 +180,6 @@ impl Anchors {
         start..end
     }
 
-    /// Le nombre de blocs qui portent l'identifiant `id`.
-    fn count(&self, id: &str) -> usize {
-        self.sorted[self.equal(&digest(id))]
-            .iter()
-            .filter(|(_, i)| i == id)
-            .count()
-    }
-
     /// L'alias du bloc d'identifiant `id`, s'il est dans la page et que son identifiant n'est pas
     /// vide : autant de caractères qu'il en faut pour être seul, quatre au moins, et jamais
     /// l'identifiant d'un autre bloc.
@@ -208,35 +200,22 @@ impl Anchors {
             .sorted
             .get(range.end)
             .map_or(0, |(e, _)| common_chars(e, &d));
-        let mut chars = if range.len() > 1 {
+        let chars = if range.len() > 1 {
             DIGEST_CHARS
         } else {
             (before.max(after) + 1).clamp(MIN_ALIAS_CHARS, DIGEST_CHARS)
         };
-        let text = base32(&d, DIGEST_CHARS);
-        // Jamais l'identifiant d'un autre bloc : il le désignerait aussi.
-        while chars < DIGEST_CHARS {
-            let alias = format!("b{}", &text[..chars]);
-            if alias != id && self.count(&alias) > 0 {
-                chars += 1;
-            } else {
-                break;
-            }
-        }
-        Some(format!("b{}", &text[..chars]))
+        Some(format!("b{}", base32(&d, chars)))
     }
 
-    /// L'identifiant du bloc que désigne `anchor` : les blocs qui portent cet identifiant, et ceux
-    /// dont le hachage commence par l'alias ; un seul, ou le refus qui dit pourquoi.
+    /// L'identifiant du bloc que désigne `anchor` : une ancre qui a la forme d'un alias
+    /// ([`is_alias`]) désigne le bloc dont le hachage commence ainsi, **jamais** un bloc par son
+    /// identifiant (relecture de S3, M4 : un client qui choisit ses identifiants ne capte pas
+    /// l'alias d'un autre bloc) ; toute autre ancre, le bloc qui porte cet identifiant. Un seul,
+    /// ou le refus qui dit pourquoi.
     pub fn resolve(&self, anchor: &str) -> Result<&str, AnchorError> {
         let mut found: Option<&str> = None;
         let mut count = 0;
-        for (_, id) in &self.sorted[self.equal(&digest(anchor))] {
-            if id == anchor {
-                found = Some(id.as_str());
-                count += 1;
-            }
-        }
         if is_alias(anchor) {
             let prefix: Vec<u8> = anchor[1..].bytes().map(value_of).collect();
             let start = self
@@ -246,8 +225,12 @@ impl Anchors {
                 if !cmp_prefix(d, &prefix).is_eq() || count > 1 {
                     break;
                 }
-                // Le bloc qui porte l'ancre pour identifiant est déjà compté.
-                if id != anchor {
+                found = Some(id.as_str());
+                count += 1;
+            }
+        } else {
+            for (_, id) in &self.sorted[self.equal(&digest(anchor))] {
+                if id == anchor {
                     found = Some(id.as_str());
                     count += 1;
                 }
@@ -259,6 +242,26 @@ impl Anchors {
             _ => Err(AnchorError::Ambiguous),
         }
     }
+}
+
+/// Vrai si l'empreinte d'identifiant `key` ([`id_key`]) commence par l'alias `alias` (ses douze
+/// premiers caractères au plus : les 64 bits n'en portent pas plus).
+pub(crate) fn key_matches_alias(key: u64, alias: &str) -> bool {
+    let mut d = [0u8; 32];
+    d[..8].copy_from_slice(&key.to_be_bytes());
+    let prefix: Vec<u8> = alias[1..].bytes().take(KEY_CHARS).map(value_of).collect();
+    cmp_prefix(&d, &prefix).is_eq()
+}
+
+/// La plus petite empreinte d'identifiant ([`id_key`]) qui commence par l'alias `alias` (ses douze
+/// premiers caractères au plus).
+pub(crate) fn alias_floor(alias: &str) -> u64 {
+    let (mut value, mut bits) = (0u64, 0u32);
+    for c in alias[1..].bytes().take(KEY_CHARS) {
+        value = (value << 5) | u64::from(value_of(c));
+        bits += 5;
+    }
+    value << (64 - bits)
 }
 
 /// Vrai si `anchor` a la forme d'un alias : `b`, puis de 4 à 52 caractères base32 minuscules.
@@ -447,7 +450,7 @@ fn feed_table(h: &mut impl Hasher, t: &Table) {
 }
 
 /// L'empreinte du contenu d'un bloc : type, props, contenu, sans les enfants.
-fn content_hash(b: &Block, key: &HashKey) -> u64 {
+pub(crate) fn content_hash(b: &Block, key: &HashKey) -> u64 {
     let mut h = key.hasher(b'C');
     feed_str(&mut h, &b.kind);
     feed_props(&mut h, &b.props);
@@ -467,7 +470,7 @@ fn content_hash(b: &Block, key: &HashKey) -> u64 {
 
 /// L'empreinte de la place d'un bloc : son parent (aucun : la racine) et son frère d'avant
 /// (aucun : le premier).
-fn place_hash(parent: Option<&str>, previous: Option<&str>, key: &HashKey) -> u64 {
+pub(crate) fn place_hash(parent: Option<&str>, previous: Option<&str>, key: &HashKey) -> u64 {
     let mut h = key.hasher(b'P');
     feed_opt(&mut h, &parent.map(str::to_string));
     feed_opt(&mut h, &previous.map(str::to_string));
@@ -533,7 +536,8 @@ pub fn changed(before: &BlockHashes, now: &[Block], now_hashes: &BlockHashes) ->
         before_ids: HashMap<u64, Option<usize>>,
         now_ids: HashMap<u64, Option<usize>>,
         hashes: &'b [BlockHash],
-        anchors: Anchors,
+        /// Les empreintes d'identifiant d'avant, rangées : l'alias servi se calcule parmi elles.
+        keys: Vec<u64>,
         next: usize,
         out: Changed,
     }
@@ -541,11 +545,14 @@ pub fn changed(before: &BlockHashes, now: &[Block], now_hashes: &BlockHashes) ->
         fn rank(&self, id: &str) -> Option<usize> {
             self.before_ids.get(&id_key(id)).copied().flatten()
         }
+        /// Le bloc se nomme par l'alias **servi** (relecture de S3, M5), calculé parmi les blocs
+        /// d'avant : un bloc qui n'y était pas, ou que deux blocs nommaient, n'a pas été servi.
         fn say(&mut self, block: &Block, rank: Option<usize>, why: Why) {
             self.out.any = true;
-            if let Some(alias) = self.anchors.alias(&block.id) {
+            let key = id_key(&block.id);
+            if !block.id.is_empty() && matches!(self.before_ids.get(&key), Some(Some(_))) {
                 self.out.blocks.push(ChangedBlock {
-                    alias: alias.to_string(),
+                    alias: alias_of_key(key, &self.keys),
                     rank,
                     why,
                 });
@@ -582,23 +589,23 @@ pub fn changed(before: &BlockHashes, now: &[Block], now_hashes: &BlockHashes) ->
             }
         }
     }
+    let mut keys: Vec<u64> = before.blocks.iter().map(|h| h.id).collect();
+    keys.sort_unstable();
     let mut walk = Walk {
         before,
         before_ids: before.by_id(),
         now_ids: now_hashes.by_id(),
         hashes: now_hashes.as_slice(),
-        anchors: Anchors::of(now),
+        keys,
         next: 0,
         out: Changed::default(),
     };
     walk.list(now, None);
-    let mut keys: Vec<u64> = before.blocks.iter().map(|h| h.id).collect();
-    keys.sort_unstable();
     for (rank, h) in before.blocks.iter().enumerate() {
         if !walk.now_ids.contains_key(&h.id) {
             walk.out.any = true;
             walk.out.blocks.push(ChangedBlock {
-                alias: alias_of_key(h.id, &keys),
+                alias: alias_of_key(h.id, &walk.keys),
                 rank: Some(rank),
                 why: Why::Gone,
             });
@@ -673,6 +680,10 @@ struct Change {
     place: bool,
     new: bool,
     removed: bool,
+    /// Les empreintes que ce côté donne au bloc : deux côtés qui font le même changement ne se
+    /// heurtent pas (relecture de S3, M3).
+    now_content: u64,
+    now_place: u64,
 }
 
 /// Ce qu'un côté (les blocs de l'agent, ou la page d'aujourd'hui) a changé depuis `base`.
@@ -681,7 +692,8 @@ struct Side<'b> {
     /// Rang de chaque identifiant ; `None` : plusieurs blocs le portent.
     at: HashMap<u64, Option<usize>>,
     changes: HashMap<u64, Change>,
-    slots: HashSet<Slot>,
+    /// Les places où ce côté pose un bloc (déplacé ou neuf), et le bloc qu'il y pose.
+    slots: HashMap<Slot, u64>,
 }
 
 impl<'b> Side<'b> {
@@ -697,7 +709,7 @@ impl<'b> Side<'b> {
             flat,
             at,
             changes: HashMap::new(),
-            slots: HashSet::new(),
+            slots: HashMap::new(),
         }
     }
 
@@ -711,7 +723,7 @@ impl<'b> Side<'b> {
     /// Relève ce que ce côté a changé depuis `base` (ses empreintes par identifiant).
     fn judge(&mut self, base: &BlockHashes, base_at: &HashMap<u64, Option<usize>>) {
         for f in &self.flat {
-            let change = match base_at.get(&f.key) {
+            let mut change = match base_at.get(&f.key) {
                 Some(Some(rank)) => {
                     let was = base.blocks[*rank];
                     Change {
@@ -731,11 +743,13 @@ impl<'b> Side<'b> {
                     ..Change::default()
                 },
             };
+            change.now_content = f.content;
+            change.now_place = f.place;
             if change.content || change.place || change.new {
                 self.changes.insert(f.key, change);
             }
             if change.place || change.new {
-                self.slots.insert(self.slot_of(f));
+                self.slots.insert(self.slot_of(f), f.key);
             }
         }
         for (key, rank) in base_at {
@@ -756,11 +770,14 @@ impl<'b> Side<'b> {
     }
 }
 
-/// Deux changements d'un même bloc qui ne se fondent pas.
+/// Deux changements d'un même bloc qui ne se fondent pas : le même changement fait des deux côtés
+/// (le même texte, la même place, le même retrait ; un agent qui rejoue son écriture) se fond.
 fn clash(a: Change, h: Change) -> bool {
-    (a.content && h.content)
-        || (a.place && h.place)
-        || (a.new && h.new)
+    let content = a.now_content != h.now_content;
+    let place = a.now_place != h.now_place;
+    (a.content && h.content && content)
+        || (a.place && h.place && place)
+        || (a.new && h.new && (content || place))
         || (a.removed && (h.content || h.place))
         || (h.removed && (a.content || a.place))
 }
@@ -809,8 +826,24 @@ pub fn three_way(
             clashes.insert(*key);
         }
     }
-    let slot_clashes: Vec<Slot> = agent.slots.intersection(&others.slots).copied().collect();
-    if !clashes.is_empty() || !slot_clashes.is_empty() {
+    // Un bloc neuf de l'agent qui porte le contenu d'un bloc qu'un autre a retiré : le bloc lu,
+    // récrit sans ancre, qui ressusciterait (relecture de S3, I2).
+    let removed_by_others: HashSet<u64> = base_at
+        .iter()
+        .filter(|(key, rank)| rank.is_some() && !others.at.contains_key(*key))
+        .filter_map(|(_, rank)| rank.map(|r| base.blocks[r].content))
+        .collect();
+    let resurrected = agent.flat.iter().any(|f| {
+        agent.changes.get(&f.key).is_some_and(|c| c.new) && removed_by_others.contains(&f.content)
+    });
+    // Deux côtés qui posent deux blocs différents au même endroit.
+    let slot_clashes: HashSet<Slot> = agent
+        .slots
+        .iter()
+        .filter(|(slot, claim)| others.slots.get(*slot).is_some_and(|other| other != *claim))
+        .map(|(slot, _)| *slot)
+        .collect();
+    if !clashes.is_empty() || !slot_clashes.is_empty() || resurrected {
         return Err(conflict_on(&others, |f| {
             clashes.contains(&f.key)
                 || slot_clashes.contains(&Slot::After(f.key))
@@ -872,20 +905,20 @@ pub fn three_way(
 
     // L'arbre : chaque place n'a qu'un bloc, et tout bloc s'atteint depuis la racine.
     let mut claims: HashMap<(Option<u64>, Option<u64>), u64> = HashMap::new();
-    let mut doubled: Vec<u64> = Vec::new();
+    let mut doubled: HashSet<u64> = HashSet::new();
     for (key, m) in &merged {
         if let Some(other) = claims.insert((m.parent, m.previous), *key) {
             doubled.extend([*key, other]);
         }
     }
-    let unbuilt = |keys: &[u64]| conflict_on(&others, |f| keys.contains(&f.key));
+    let unbuilt = |keys: &HashSet<u64>| conflict_on(&others, |f| keys.contains(&f.key));
     if !doubled.is_empty() {
         return Err(unbuilt(&doubled));
     }
     let mut seen: HashSet<u64> = HashSet::with_capacity(merged.len());
     let tree = build(None, &merged, &claims, &mut seen);
     if seen.len() != merged.len() {
-        let lost: Vec<u64> = merged
+        let lost: HashSet<u64> = merged
             .iter()
             .filter(|(key, _)| !seen.contains(key))
             .flat_map(|(key, m)| [Some(*key), m.parent, m.previous])

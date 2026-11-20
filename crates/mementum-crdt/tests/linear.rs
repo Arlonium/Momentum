@@ -604,6 +604,8 @@ fn plan_case(case: &OpsCase) -> Result<usize, ops::OpRefusal> {
         base: ops::Base::Current,
         key: &key,
         forbid_external_media: true,
+        revision: "",
+        commented: None,
     };
     ops::plan(&case.blocks, &case.ops, &ctx).map(|plan| plan.blocks().len())
 }
@@ -850,6 +852,119 @@ fn a_three_way_merge_grows_like_the_page() {
                 .len()
         },
         |_| 0,
+        limits,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Relecture de S3, I5 : un refus croît comme la page : un conflit de places sur `n` blocs (la
+/// fusion à trois), un retrait en `rebase` d'un bloc dont les `n` enfants ont changé (le plan).
+#[test]
+fn refusals_grow_like_the_page() {
+    let places = |n: usize| {
+        let base_blocks = paragraph_blocks(n);
+        let key = HashKey::new();
+        let base = hashes(&base_blocks, &key);
+        // Les deux côtés insèrent un bloc après chaque bloc pair : autant de places disputées.
+        let inserted = |side: &str| {
+            let mut out = Vec::new();
+            for (i, b) in base_blocks.iter().enumerate() {
+                out.push(b.clone());
+                if i % 2 == 0 {
+                    let mut new = b.clone();
+                    new.id = format!("{side}{i}");
+                    set_text(&mut new, side);
+                    out.push(new);
+                }
+            }
+            out
+        };
+        let (now, written) = (inserted("h"), inserted("a"));
+        let size = render(&now, RenderOpts::default()).markdown.len()
+            + render(&written, RenderOpts::default()).markdown.len();
+        MergeCase {
+            base,
+            written,
+            now,
+            key,
+            size,
+        }
+    };
+    let forms = [Form {
+        what: "refus : un conflit de places sur la moitié des blocs",
+        build: &places as &dyn Fn(usize) -> MergeCase,
+    }];
+    let limits = Limits {
+        peak_per_byte: 96,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(
+        &forms,
+        |case: &MergeCase| case.size,
+        |case: &MergeCase| {
+            three_way(&case.base, &case.written, &case.now, &case.key)
+                .expect_err("des places disputées")
+                .blocks
+                .len()
+        },
+        |_| 0,
+        limits,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+    // Un bloc dont les `n` enfants ont changé depuis la lecture, retiré en `rebase`.
+    struct Rebased {
+        blocks: Vec<mementum_md::Block>,
+        base: BlockHashes,
+        key: HashKey,
+        size: usize,
+    }
+    let children = |n: usize| {
+        let lines = (0..n)
+            .map(|i| format!("  Enfant {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+            + "\n";
+        let (page, _) = PageDoc::new_page();
+        page.write_blocks(&mementum_md::parse(&format!("Parent\n{lines}")).unwrap())
+            .unwrap();
+        let read = page.read_blocks();
+        let key = HashKey::new();
+        let base = hashes(&read, &key);
+        let mut blocks = read;
+        blocks[0].children.iter_mut().for_each(retouched_text);
+        Rebased {
+            // L'entrée du plan : la page lue, et les empreintes de la lecture de l'agent.
+            size: render(&blocks, RenderOpts::default()).markdown.len() + base.bytes(),
+            blocks,
+            base,
+            key,
+        }
+    };
+    let forms = [Form {
+        what: "refus : un retrait en rebase d'un bloc dont tous les enfants ont changé",
+        build: &children as &dyn Fn(usize) -> Rebased,
+    }];
+    let failures = grows_like_input(
+        &forms,
+        |case: &Rebased| case.size,
+        |case: &Rebased| {
+            let ctx = ops::PlanContext {
+                base: ops::Base::Changed(&case.base),
+                key: &case.key,
+                revision: "",
+                forbid_external_media: false,
+                commented: None,
+            };
+            let op = [ops::Operation::DeleteBlock {
+                anchor: case.blocks[0].id.clone(),
+                allow_deleting_content: false,
+            }];
+            let planned = ops::plan(&case.blocks, &op, &ctx).map(|plan| plan.blocks().len());
+            assert!(planned.is_err());
+            planned
+        },
+        refusal_bytes,
         limits,
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
