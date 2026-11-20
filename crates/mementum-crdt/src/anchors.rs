@@ -98,9 +98,41 @@ fn base32(bytes: &[u8], chars: usize) -> String {
     out
 }
 
-/// Caractères base32 communs en tête de deux chaînes base32.
-fn common_chars(a: &str, b: &str) -> usize {
-    a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
+/// Le `j`-ième caractère base32 d'un hachage, en valeur (0 à 31) : ses bits `5j` à `5j + 4`,
+/// depuis le bit de poids fort, le dernier complété de zéros.
+fn group(d: &[u8; 32], j: usize) -> u8 {
+    let bit = j * 5;
+    let (byte, offset) = (bit / 8, bit % 8);
+    let high = u16::from(d[byte]) << 8;
+    let low = d.get(byte + 1).map_or(0, |&b| u16::from(b));
+    (((high | low) >> (11 - offset)) & 31) as u8
+}
+
+/// Caractères base32 communs en tête de deux hachages.
+fn common_chars(a: &[u8; 32], b: &[u8; 32]) -> usize {
+    match a.iter().zip(b).position(|(x, y)| x != y) {
+        None => DIGEST_CHARS,
+        Some(i) => (i * 8 + (a[i] ^ b[i]).leading_zeros() as usize) / 5,
+    }
+}
+
+/// La valeur d'un caractère base32.
+fn value_of(c: u8) -> u8 {
+    match c {
+        b'a'..=b'z' => c - b'a',
+        _ => c - b'2' + 26,
+    }
+}
+
+/// Le début d'un hachage comparé à des caractères base32 (en valeurs).
+fn cmp_prefix(d: &[u8; 32], prefix: &[u8]) -> std::cmp::Ordering {
+    for (j, &p) in prefix.iter().enumerate() {
+        match group(d, j).cmp(&p) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
 }
 
 /// Ce qu'une ancre ne désigne pas.
@@ -112,65 +144,86 @@ pub enum AnchorError {
     Ambiguous,
 }
 
-/// L'index des ancres d'une page : l'alias de chaque bloc, et la résolution d'une ancre (un
-/// alias, ou l'identifiant entier d'un bloc). Bâti une fois, sur les blocs lus.
+/// L'index des ancres d'une page : l'alias d'un bloc, et la résolution d'une ancre (un alias, ou
+/// l'identifiant entier d'un bloc). Bâti une fois, sur les blocs lus : le hachage de chaque
+/// identifiant, rangé ; un alias se calcule à la demande, d'après ses deux voisins de hachage
+/// (mesure de la Task S3 : bâtir les 10 000 alias d'une page d'un coup coûtait 9 ms).
 #[derive(Debug, Clone, Default)]
 pub struct Anchors {
-    /// Le hachage en base32 de l'identifiant de chaque bloc qui en a un, et l'identifiant, rangés
-    /// par hachage.
-    sorted: Vec<(String, String)>,
-    /// Le nombre de blocs qui portent chaque identifiant.
-    ids: HashMap<String, usize>,
-    /// L'alias de chaque identifiant.
-    aliases: HashMap<String, String>,
+    /// Le SHA-256 de l'identifiant de chaque bloc qui en a un, et l'identifiant, rangés par
+    /// hachage : deux blocs du même identifiant sont voisins.
+    sorted: Vec<([u8; 32], String)>,
 }
 
 impl Anchors {
     /// L'index des blocs `blocks`, à toute profondeur. Un bloc sans identifiant n'a pas d'alias ;
     /// deux blocs du même identifiant ont le hachage entier, qui les désigne tous deux.
     pub fn of(blocks: &[Block]) -> Anchors {
-        fn walk(blocks: &[Block], into: &mut Anchors) {
+        fn walk(blocks: &[Block], into: &mut Vec<([u8; 32], String)>) {
             for b in blocks {
                 if !b.id.is_empty() {
-                    into.sorted
-                        .push((base32(&digest(&b.id), DIGEST_CHARS), b.id.clone()));
-                    *into.ids.entry(b.id.clone()).or_default() += 1;
+                    into.push((digest(&b.id), b.id.clone()));
                 }
                 walk(&b.children, into);
             }
         }
-        let mut anchors = Anchors::default();
-        walk(blocks, &mut anchors);
-        anchors.sorted.sort_unstable();
-        let sorted = &anchors.sorted;
-        let mut aliases = HashMap::with_capacity(sorted.len());
-        for (i, (hash, id)) in sorted.iter().enumerate() {
-            let before = i
-                .checked_sub(1)
-                .map_or(0, |p| common_chars(&sorted[p].0, hash));
-            let after = sorted
-                .get(i + 1)
-                .map_or(0, |(next, _)| common_chars(next, hash));
-            let mut chars = (before.max(after) + 1).clamp(MIN_ALIAS_CHARS, DIGEST_CHARS);
-            // Jamais l'identifiant d'un autre bloc : il le désignerait aussi.
-            while chars < DIGEST_CHARS {
-                let alias = format!("b{}", &hash[..chars]);
-                if alias != *id && anchors.ids.contains_key(&alias) {
-                    chars += 1;
-                } else {
-                    break;
-                }
-            }
-            aliases.insert(id.clone(), format!("b{}", &hash[..chars]));
-        }
-        anchors.aliases = aliases;
-        anchors
+        let mut sorted = Vec::new();
+        walk(blocks, &mut sorted);
+        sorted.sort_unstable();
+        Anchors { sorted }
+    }
+
+    /// Les rangs des blocs dont le hachage est `d`.
+    fn equal(&self, d: &[u8; 32]) -> std::ops::Range<usize> {
+        let start = self.sorted.partition_point(|(e, _)| e < d);
+        let end = start + self.sorted[start..].partition_point(|(e, _)| e == d);
+        start..end
+    }
+
+    /// Le nombre de blocs qui portent l'identifiant `id`.
+    fn count(&self, id: &str) -> usize {
+        self.sorted[self.equal(&digest(id))]
+            .iter()
+            .filter(|(_, i)| i == id)
+            .count()
     }
 
     /// L'alias du bloc d'identifiant `id`, s'il est dans la page et que son identifiant n'est pas
-    /// vide.
-    pub fn alias(&self, id: &str) -> Option<&str> {
-        self.aliases.get(id).map(String::as_str)
+    /// vide : autant de caractères qu'il en faut pour être seul, quatre au moins, et jamais
+    /// l'identifiant d'un autre bloc.
+    pub fn alias(&self, id: &str) -> Option<String> {
+        if id.is_empty() {
+            return None;
+        }
+        let d = digest(id);
+        let range = self.equal(&d);
+        if !self.sorted[range.clone()].iter().any(|(_, i)| i == id) {
+            return None;
+        }
+        let before = range
+            .start
+            .checked_sub(1)
+            .map_or(0, |p| common_chars(&self.sorted[p].0, &d));
+        let after = self
+            .sorted
+            .get(range.end)
+            .map_or(0, |(e, _)| common_chars(e, &d));
+        let mut chars = if range.len() > 1 {
+            DIGEST_CHARS
+        } else {
+            (before.max(after) + 1).clamp(MIN_ALIAS_CHARS, DIGEST_CHARS)
+        };
+        let text = base32(&d, DIGEST_CHARS);
+        // Jamais l'identifiant d'un autre bloc : il le désignerait aussi.
+        while chars < DIGEST_CHARS {
+            let alias = format!("b{}", &text[..chars]);
+            if alias != id && self.count(&alias) > 0 {
+                chars += 1;
+            } else {
+                break;
+            }
+        }
+        Some(format!("b{}", &text[..chars]))
     }
 
     /// L'identifiant du bloc que désigne `anchor` : les blocs qui portent cet identifiant, et ceux
@@ -178,17 +231,19 @@ impl Anchors {
     pub fn resolve(&self, anchor: &str) -> Result<&str, AnchorError> {
         let mut found: Option<&str> = None;
         let mut count = 0;
-        if let Some((id, n)) = self.ids.get_key_value(anchor) {
-            found = Some(id.as_str());
-            count += n;
+        for (_, id) in &self.sorted[self.equal(&digest(anchor))] {
+            if id == anchor {
+                found = Some(id.as_str());
+                count += 1;
+            }
         }
         if is_alias(anchor) {
-            let prefix = &anchor[1..];
+            let prefix: Vec<u8> = anchor[1..].bytes().map(value_of).collect();
             let start = self
                 .sorted
-                .partition_point(|(hash, _)| hash.as_str() < prefix);
-            for (hash, id) in &self.sorted[start..] {
-                if !hash.starts_with(prefix) || count > 1 {
+                .partition_point(|(d, _)| cmp_prefix(d, &prefix).is_lt());
+            for (d, id) in &self.sorted[start..] {
+                if !cmp_prefix(d, &prefix).is_eq() || count > 1 {
                     break;
                 }
                 // Le bloc qui porte l'ancre pour identifiant est déjà compté.
@@ -282,6 +337,8 @@ pub fn hashes(blocks: &[Block], key: &HashKey) -> BlockHashes {
     }
     let mut out = Vec::new();
     walk(blocks, None, key, &mut out);
+    // Gardées dans un cache borné en octets (S7) : 24 octets par bloc, pas la marge du vecteur.
+    out.shrink_to_fit();
     BlockHashes { blocks: out }
 }
 

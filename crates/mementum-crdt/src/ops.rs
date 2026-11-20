@@ -29,6 +29,7 @@
 //! identifiants et le texte brut de chaque bloc gardés (R641 : jamais une relecture de la page par
 //! bloc cherché).
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 use mementum_md::{Block, Content, Inline, Styles, block_text, excerpt, normalize, parse};
@@ -561,9 +562,12 @@ impl Judge {
     }
 }
 
-struct Planner<'c> {
+struct Planner<'a, 'c> {
     work: Work,
-    anchors: Anchors,
+    /// Les blocs lus, dont l'index des ancres n'est bâti qu'à la première ancre ou au premier
+    /// candidat (un `str_replace` sans ancre qui passe n'en a pas besoin).
+    current: &'a [Block],
+    anchors: OnceCell<Anchors>,
     ctx: PlanContext<'c>,
     /// Les identifiants des blocs de la page lue.
     page_ids: HashSet<String>,
@@ -579,8 +583,8 @@ struct Planner<'c> {
     replaced: usize,
 }
 
-impl<'c> Planner<'c> {
-    fn new(current: &[Block], ctx: &PlanContext<'c>) -> Planner<'c> {
+impl<'a, 'c> Planner<'a, 'c> {
+    fn new(current: &'a [Block], ctx: &PlanContext<'c>) -> Planner<'a, 'c> {
         fn walk(blocks: &[Block], ids: &mut HashSet<String>, media: &mut HashSet<String>) {
             for b in blocks {
                 if !b.id.is_empty() {
@@ -603,7 +607,8 @@ impl<'c> Planner<'c> {
         };
         Planner {
             work: Work::of(current.to_vec()),
-            anchors: Anchors::of(current),
+            current,
+            anchors: OnceCell::new(),
             ctx: *ctx,
             page_ids,
             page_media,
@@ -649,10 +654,15 @@ impl<'c> Planner<'c> {
 
     // ------------------------------------------------------------------- ancres, jugement
 
+    /// L'index des ancres de la page lue, bâti à la première demande.
+    fn anchors(&self) -> &Anchors {
+        self.anchors.get_or_init(|| Anchors::of(self.current))
+    }
+
     /// Le bloc vivant que désigne une ancre : l'alias ou l'identifiant d'un bloc de la page lue,
     /// encore dans l'arbre de travail.
     fn resolve(&self, anchor: &str) -> Result<usize, OpRefusal> {
-        let nodes = match self.anchors.resolve(anchor) {
+        let nodes = match self.anchors().resolve(anchor) {
             Ok(id) => self.work.alive_with(id),
             Err(AnchorError::Ambiguous) => return Err(self.ambiguous_anchor(anchor)),
             Err(AnchorError::Stale) => self.work.alive_with(anchor),
@@ -903,7 +913,7 @@ impl<'c> Planner<'c> {
         let mut found: Vec<(usize, usize, usize, usize)> = Vec::new(); // (début, ordre, bloc, place)
         for (order, node) in self.work.preorder().into_iter().enumerate() {
             let id = &self.work.nodes[node].block.id;
-            if !self.page_ids.contains(id) || self.anchors.alias(id).is_none() {
+            if id.is_empty() || !self.page_ids.contains(id) {
                 continue;
             }
             self.work.ensure_text(node);
@@ -952,13 +962,13 @@ impl<'c> Planner<'c> {
     /// Un candidat : l'alias du bloc, et 120 caractères de son texte autour de `at`.
     fn candidate(&self, node: usize, at: usize) -> Option<Candidate> {
         let id = &self.work.nodes[node].block.id;
-        let alias = self.anchors.alias(id)?;
         if !self.page_ids.contains(id) {
             return None;
         }
+        let alias = self.anchors().alias(id)?;
         let text = self.work.text(node);
         Some(Candidate {
-            alias: alias.to_string(),
+            alias,
             text: text
                 .chars()
                 .skip(at.saturating_sub(CANDIDATE_LEAD))

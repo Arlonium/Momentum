@@ -260,7 +260,7 @@ fn aliases_are_stable_when_blocks_are_inserted_above() {
     let before = Anchors::of(&page.read_blocks());
     for id in ["p1", "p2", "p3"] {
         let alias = before.alias(id).unwrap();
-        assert!(is_alias(alias), "{alias}");
+        assert!(is_alias(&alias), "{alias}");
         assert_eq!(&alias[..1], "b");
         assert_eq!(alias.len(), 5, "seul dès quatre caractères : {alias}");
         assert!(base32_digest(id).starts_with(&alias[1..]), "{id} : {alias}");
@@ -277,7 +277,7 @@ fn aliases_are_stable_when_blocks_are_inserted_above() {
     let after = Anchors::of(&page.read_blocks());
     for id in ["p1", "p2", "p3"] {
         assert_eq!(after.alias(id), before.alias(id), "{id}");
-        assert_eq!(after.resolve(before.alias(id).unwrap()), Ok(id));
+        assert_eq!(after.resolve(&before.alias(id).unwrap()), Ok(id));
     }
 }
 
@@ -297,7 +297,7 @@ fn an_alias_grows_until_it_is_alone() {
     for id in [&a, &b] {
         let alias = anchors.alias(id).unwrap();
         assert_eq!(alias.len(), 1 + shared + 1, "{id} : {alias}");
-        assert_eq!(anchors.resolve(alias), Ok(id.as_str()));
+        assert_eq!(anchors.resolve(&alias), Ok(id.as_str()));
         // Un caractère de moins désigne les deux blocs.
         assert_eq!(
             anchors.resolve(&alias[..alias.len() - 1]),
@@ -316,11 +316,11 @@ fn an_alias_grows_until_it_is_alone() {
     let alias = anchors.alias("p1").unwrap();
     assert_ne!(alias, p1_short);
     assert_eq!(alias.len(), 6);
-    assert_eq!(anchors.resolve(alias), Ok("p1"));
+    assert_eq!(anchors.resolve(&alias), Ok("p1"));
     assert_eq!(anchors.resolve(&p1_short), Err(AnchorError::Ambiguous));
     let trap = anchors.alias(&p1_short).unwrap();
     assert_eq!(
-        anchors.resolve(trap),
+        anchors.resolve(&trap),
         Ok(p1_short.as_str()),
         "son alias le désigne"
     );
@@ -359,7 +359,7 @@ fn a_stale_alias_and_an_ambiguous_alias_are_told_apart() {
         (0, Reason::AmbiguousAnchor)
     );
     // L'alias allongé, ou l'identifiant entier, désigne le bloc.
-    run(&page, &[delete(now.alias(&a).unwrap())]).unwrap();
+    run(&page, &[delete(&now.alias(&a).unwrap())]).unwrap();
     assert_eq!(mmd_of(&page), "Garde\n\nArrivé\n");
 }
 
@@ -1386,6 +1386,98 @@ fn is_under(blocks: &[Block], id: &str, owned: &HashSet<String>) -> bool {
         None
     }
     walk(blocks, id, owned, false).unwrap_or(false)
+}
+
+// ------------------------------------------------------------------------------- mesure
+
+/// p50 et pire de `runs` passages, en millisecondes.
+fn timed<R>(runs: usize, mut f: impl FnMut() -> R) -> (f64, f64) {
+    let mut ms: Vec<f64> = (0..runs)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            std::hint::black_box(f());
+            start.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    ms.sort_by(f64::total_cmp);
+    (ms[ms.len() / 2], ms[ms.len() - 1])
+}
+
+/// Mesure (Task S3 ; release, une fois : `cargo test --release -p mementum-crdt --test ops
+/// measure_hashes_and_one_operation_on_10000_blocks -- --ignored --nocapture`) : sur la page de
+/// 10 000 paragraphes des budgets, les empreintes (R1226, ce que S4 calcule à chaque lecture
+/// servie), l'index des ancres, le plan d'une opération (avec et sans ancre, en `rebase`), son
+/// écriture, et la fusion à trois d'une page inchangée.
+#[test]
+#[ignore]
+fn measure_hashes_and_one_operation_on_10000_blocks() {
+    let mmd = (0..10_000)
+        .map(|i| format!("Paragraphe numéro {i}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        + "\n";
+    let page = page_with(&mmd);
+    let state = page.encode_state();
+    let blocks = page.read_blocks();
+    let key = HashKey::new();
+    let base = hashes(&blocks, &key);
+    let alias = Anchors::of(&blocks)
+        .alias(&blocks[5_000].id)
+        .unwrap()
+        .to_string();
+    let anchored = [Operation::StrReplace {
+        old: "numéro".into(),
+        new: "n°".into(),
+        anchor: Some(alias.clone()),
+        replace_all: false,
+    }];
+    let unanchored = [str_replace("Paragraphe numéro 5000", "Paragraphe n° 5000")];
+    let rebase = PlanContext {
+        base: Base::Changed(&base),
+        key: &key,
+        forbid_external_media: true,
+    };
+    let lines = [
+        ("lecture des blocs", timed(5, || page.read_blocks())),
+        ("empreintes", timed(9, || hashes(&blocks, &key))),
+        ("index des ancres", timed(9, || Anchors::of(&blocks))),
+        (
+            "plan d'un str_replace à une ancre",
+            timed(9, || ops::plan(&blocks, &anchored, &current(&key)).is_ok()),
+        ),
+        (
+            "plan d'un str_replace sans ancre",
+            timed(9, || {
+                ops::plan(&blocks, &unanchored, &current(&key)).is_ok()
+            }),
+        ),
+        (
+            "plan d'un str_replace à une ancre, en rebase",
+            timed(9, || ops::plan(&blocks, &anchored, &rebase).is_ok()),
+        ),
+        (
+            "page rechargée de son état, lue, plan et écriture d'un str_replace à une ancre",
+            timed(5, || {
+                let page = PageDoc::from_updates([state.as_slice()]).unwrap();
+                let read = page.read_blocks();
+                let plan = ops::plan(&read, &anchored, &current(&key)).unwrap();
+                page.apply(&plan).unwrap().update.len()
+            }),
+        ),
+        (
+            "fusion à trois d'une page inchangée",
+            timed(5, || three_way(&base, &blocks, &blocks, &key).is_ok()),
+        ),
+    ];
+    for (what, (p50, worst)) in lines {
+        println!(
+            "MESURE opérations des agents, 10 000 paragraphes, {what} : p50 {p50:.1} ms, pire {worst:.1}"
+        );
+    }
+    println!(
+        "MESURE empreintes de 10 000 paragraphes : {} octets",
+        base.bytes()
+    );
 }
 
 // ---------------------------------------------------------------------- la table de cas
