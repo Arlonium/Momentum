@@ -54,8 +54,13 @@ pub const MAX_INDEX_TX_BYTES: usize = 256 * 1024;
 /// enregistrements) : une page de blocs minuscules ne fait pas une transaction sans fin.
 const ROW_OVERHEAD: usize = 64;
 
-/// Ce qu'un identifiant de page visée compte, en octets.
-const LINK_BYTES: usize = 36;
+/// Ce qu'un lien écrit, en octets, hors de la clé de son bloc (relecture de S6, M2) : sa ligne de
+/// `page_links` et son entrée dans `page_links_by_target` portent chacune trois identifiants de
+/// 36 octets (la page, la cible, l'espace, R1015) et environ 7 octets d'en-têtes (taille de la
+/// charge, en-tête de l'enregistrement, un octet par colonne) : 2 × (108 + 7). La clé du bloc,
+/// écrite deux fois aussi, se compte à part ([`Change::bytes`]) : 302 octets par lien pour une
+/// clé de 36.
+const LINK_BYTES: usize = 230;
 
 /// Lignes écrites par instruction : une instruction par paquet, pas par ligne, pour que le tour
 /// d'écriture tienne au travail de SQLite et non aux allers et retours vers son fil (au plus
@@ -370,7 +375,7 @@ impl Change<'_, '_> {
                         + row.kind.len()
                         + row.text.len()
                         + row.hash.len()
-                        + LINK_BYTES * row.links.len()
+                        + (LINK_BYTES + 2 * row.block_id.len()) * row.links.len()
                 }
                 Change::Remove(block) => block.len(),
             }
@@ -1256,6 +1261,28 @@ async fn read_excerpts<'e>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ce qu'un bloc compte contre la borne d'une transaction de l'index : ses octets, plus, pour
+    /// chaque lien, ce que le lien écrit vraiment (relecture de S6, M2) : sa ligne de `page_links`
+    /// et son entrée dans `page_links_by_target`, chacune trois identifiants de 36 octets (la page,
+    /// la cible, l'espace) et la clé du bloc, plus leurs en-têtes.
+    #[test]
+    fn a_link_weighs_what_it_writes() {
+        let (block, links) = ("0193b2c4-5d6e-7f80-9a1b-2c3d4e5f6a7b", [Uuid::nil(); 2]);
+        let row = IndexedBlock {
+            block_id: block,
+            kind: "paragraph",
+            text: "x",
+            hash: &[0; 8],
+            links: &links,
+        };
+        let per_link = 2 * (3 * 36 + block.len() + 7);
+        assert_eq!(per_link, 302);
+        assert_eq!(
+            Change::Put(&row).bytes(),
+            ROW_OVERHEAD + block.len() + "paragraph".len() + 1 + 8 + 2 * per_link
+        );
+    }
 
     /// Le plan d'une requête : une ligne par étape, son texte en quatrième colonne.
     async fn plan(store: &Store, sql: &str, binds: usize) -> Vec<String> {
