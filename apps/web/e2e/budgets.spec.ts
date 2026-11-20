@@ -149,6 +149,25 @@ async function openFromTree(browser: Browser, target: Target): Promise<Opening &
   const p = await budgetTab(browser);
   await p.goto(`/p/${landing}`);
   await waitSynced(p);
+  // La barre latérale ne rend que les lignes proches de l'écran (R43), et les pages de cette suite
+  // s'ajoutent en fin d'arbre : la ligne visée peut être hors de ce qui est rendu (vu sur la CI le
+  // jour où l'entrée « Rechercher » a pris une ligne en tête de la barre). On l'amène donc à
+  // l'écran avant la mesure, en faisant défiler la barre écran par écran.
+  await p.evaluate(async (id) => {
+    const row = () => document.querySelector(`[data-page-id="${id}"] .tree-link`);
+    const any = document.querySelector("[data-page-id]");
+    let scroller: Element | null = any;
+    while (scroller && scroller.scrollHeight <= scroller.clientHeight) scroller = scroller.parentElement;
+    const frame = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    for (let i = 0; scroller && !row() && i < 200; i++) {
+      const before = scroller.scrollTop;
+      scroller.scrollTop = before + scroller.clientHeight;
+      await frame();
+      if (scroller.scrollTop === before) break;
+    }
+    row()?.scrollIntoView({ block: "center" });
+    await frame();
+  }, target.id);
   // Application chargée et au repos : seule l'ouverture de la page est mesurée.
   await p.evaluate(() => new Promise((done) => requestIdleCallback(done, { timeout: 2_000 })));
   const opening = await p.evaluate(
