@@ -528,6 +528,8 @@ Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesur
 
 **Preuves (mutations, jouées une fois, à la fin du lot : R935) :** grouper par page après `skip` et `limit` (le test des 10 000 blocs rougit) ; appliquer le filtre après le groupement ; départager par l'adresse d'une entrée ; départager par le rang du bloc ; vérifier un préfixe long dans l'ordre de l'index ; ne vérifier que `text` ; oublier la normalisation NFC ; rendre la note du moteur telle quelle (le test de l'ordre rougit) ; servir le préfixe par le dictionnaire ; indexer tous les débuts d'un mot ; rendre sans vérifier une entrée trouvée par les 10 premiers caractères d'un préfixe plus long ; vérifier avant le filtre ; compter les plages en octets ; rendre le HTML d'extrait du moteur ; suivre un lien en vidant le dossier.
 
+> **De la Task S2 et de sa relecture (2026-11-20, R942, R943, R947)** : l'analyseur de l'index se pose sur `mementum_search::indexed_words` (les mots de 40 octets au plus tels qu'écrits, pliés, jamais vides), pas sur les filtres de Tantivy nommés plus haut ; **un mot plié peut dépasser 40 octets** (« Ⱥ », deux octets, se plie en trois : 60 octets pour un mot de 40), et les débuts de mot se comptent en caractères du mot plié ; les termes d'une `Query` sont déjà pliés, sans répétition et jamais vides, et se donnent tels quels ; un titre lu dans `nodes` passe par `nfc` avant `put_entry` ; une ligne de `blocks_index` au texte vide (des liens seuls, R944) n'a pas d'entrée.
+
 **Pièges :** trouvés par S0 en lisant les sources de Tantivy 0.27 : `SnippetGenerator` lit la fréquence des termes dans l'index, `Searcher::search` prend les statistiques de l'index, `TermSetQuery` sur des milliers de pages coûte des dizaines à des centaines de millisecondes, `RemoveLongFilter::limit(n)` écarte un mot de `n` octets, le tampon de l'écrivain a un minimum de 15 Mo ; jamais d'analyseur de requêtes du moteur sur le texte d'une personne ; un test qui affirme une absence a son témoin ; sous Windows, un fichier ouvert ne se supprime pas (vider le dossier demande d'avoir lâché l'index : `TestDir`), un lien symbolique demande un privilège que le poste n'a pas (une jonction, `link_dir`), et un nom qui ne diffère que par la casse est le même fichier ; un dossier temporaire par tâche.
 
 ### Task S4a : `mementum-sync`, les pages écrites et la lecture seule d'une page gardée
@@ -557,6 +559,8 @@ Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesur
 **Files:**
 - Create: `crates/mementum-server/src/indexer.rs`, `crates/mementum-server/tests/indexer.rs`
 - Modify: `crates/mementum-server/src/lib.rs` (`build`, `serve`, `AppState`), `config.rs` (`index_after`, `index_at_most`, `MEMENTUM_INDEX_AFTER_MS` pour les e2e), `crates/mementum-server/Cargo.toml` (**dev-dépendance `tokio` avec `test-util`**, que seul `mementum-sync` a aujourd'hui), `tests/common/mod.rs` (inclut `clock.rs` par son chemin), `tests/journal.rs`
+
+> **De la relecture de S2 (2026-11-20, R960)** : `mementum_search::PROJECTION_VERSION` (1 aujourd'hui) avance à tout changement de la projection ou du pliage des mots. S4b la garde avec ce qu'il a indexé (dans `search_state` ou `instance_settings`, à arrêter avec S1) et, au démarrage, quand la version gardée n'est pas celle du binaire, remet toutes les pages à `indexed_seq = -1` et tout à l'outbox : sans cela, les lignes dont l'empreinte n'a pas changé gardent l'ancienne forme. Test à écrire ici : `a_database_indexed_under_another_projection_version_is_indexed_again`. Le `kind` d'une ligne relue de `blocks_index` se refait par `mementum_search::kind_named` (`None` : une ligne d'une autre version, à reprojeter) ; `mementum-search` est à inscrire à `[workspace.dependencies]` (R946).
 
 **Interfaces (produites) :** `Indexer::spawn(state) -> IndexerHandle`, `IndexerHandle::behind(space_id, seen: &PageSet) -> bool`, `IndexerHandle::settled()` (pour les tests : plus rien à projeter), `stop()`.
 
@@ -605,6 +609,8 @@ La route n'écrit rien : c'est un `POST` pour que la requête ne soit dans aucun
 
 **Preuves (mutations, jouées une fois, à la fin du lot : R935) :** filtrer sans `in_trash` ; bâtir le fil d'Ariane de `parent_id` au lieu de `visible_parent` ; lire le titre dans l'index ; calculer `indexing` sur tout l'espace ; rendre la garde du débit à l'abandon de la requête ; bâtir l'ensemble permis avant de prendre sa place ; répondre avant le plancher ; rendre la place du compte à la fin du calcul ; attendre le plancher sur le fil bloquant ; appeler l'index avant `space_access` ; accepter `q` dans l'adresse.
 
+> **De la relecture de S2 (2026-11-20, R941, R960)** : `blockId` est un texte venu d'ailleurs, cent octets quelconques choisis par un client (pas forcément un UUID : espaces, guillemets, caractères de contrôle ou de direction) ; la route le rend tel quel en JSON, ne le met dans aucun journal ni aucun chemin, et rend `null` pour une clé de remplacement (`mementum_search::is_stand_in`).
+
 **Pièges :** les droits par `access.rs` seulement ; la session par l'extracteur `AuthUser` ; qui n'a aucun rôle reçoit sa réponse sans que l'espace soit lu (R99) ; toute garde de débit suit le travail qu'elle borne (R630) ; un test de débit abandonne la requête pendant un calcul qui tourne ; un refus rendu avant de lire un corps se perd chez un client qui envoie sans attendre (R505) : le corps est petit et borné, il est reçu avant de refuser un compte, et jugé après les droits (`Result<Json<…>, JsonRejection>`) ; compter les requêtes SQL d'une route demande un binaire à lui (R266) ; messages du serveur affichés tels quels, ils tutoient ; aucune écriture ici : ne pas introduire de `StoreError::Stale` ; un seuil « N pendant M » finit par échouer : attendre une condition.
 
 ### Task S6 : la route des rétroliens
@@ -630,6 +636,8 @@ La route n'écrit rien : c'est un `POST` pour que la requête ne soit dans aucun
 **Files:**
 - Modify: `crates/mementum-cli/src/main.rs`
 - Test: `crates/mementum-cli/tests/` (un fichier neuf)
+
+> **De la relecture de S2 (2026-11-20, R960)** : `mementum reindex` écrit `PROJECTION_VERSION` avec ce qu'il a reconstruit, comme l'indexeur (S4b) ; `a_server_started_after_reindex_rebuilds_nothing` le couvre (une version gardée qui manquerait ferait tout reconstruire au démarrage).
 
 - [ ] **Step 1 : tests, vus rouges.** `reindex_rebuilds_everything_from_the_documents` (tables vidées à la main, dossier supprimé : après la commande, mêmes résultats qu'avant) ; `reindex_text_only_rebuilds_the_text_index_from_the_tables` ; `reindex_refuses_while_a_server_holds_the_index` (message en français, base et index intacts) ; `reindex_opens_the_database_by_the_backup_rule` (la commande passe par `Store::open`, donc par `backup.rs` : une base à migrer est copiée d'abord, une base refusée reste intacte) ; `a_server_started_after_reindex_rebuilds_nothing` (les jetons concordent).
 - [ ] **Step 2 : écrire**, relancer. Commit `cli : mementum reindex (R913)`.
@@ -679,6 +687,8 @@ Le routeur d'aujourd'hui jette le fragment à trois endroits (lu dans `router.ts
 - [ ] **Step 2 : écrire**, relancer `router.test.ts`, `PageView.test.tsx`, `e2e/search.spec.ts` et le seul budget `open_1000_block_page_under_300ms`. Commit `client : un résultat mène à son bloc`.
 
 **Preuves (mutations, jouées une fois, à la fin du lot : R935) :** mener au bloc avant la première synchro ; le refaire à chaque rendu ; `editor.focus()` seul dans un éditeur en lecture seule ; `navigate` qui compare sans le fragment ; l'interception qui le jette ; un changement de bloc qui remonte `PageView` (le brouillon d'un commentaire en partirait).
+
+> **De la relecture de S2 (2026-11-20, R941, R960)** : `blockId` est un texte venu d'ailleurs, cent octets quelconques (pas forcément un UUID) : il s'encode dans le fragment (`encodeURIComponent`) et se décode au retour, ne va jamais tel quel dans un sélecteur CSS (`CSS.escape`, ou une comparaison d'attribut faite en JavaScript), et un bloc introuvable ouvre la page en haut sans erreur. Si le client reconnaît les adresses de page, sa table de cas est `spec/search/projection.json`, « links » (R945).
 
 **Pièges :** `setTextCursorPosition` ne tient pas dans un éditeur en lecture seule qui prend le focus ; `editor.focus()` n'y fait rien (R470) ; ne jamais relire des blocs un par un dans une boucle (R641) ; tout branchement neuf de `PageView` prend son test dans `PageView.test.tsx` ; `PageView` est rendu sous la clé de la page ; même id n'est pas même élément (R220).
 
