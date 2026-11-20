@@ -131,8 +131,11 @@ async fn upload_and_download_never_hold_the_file_in_memory() {
     // Un premier tour, petit, hors de la mesure : ce que le serveur alloue une fois pour toutes
     // (requêtes préparées, fils bloquants, dossier du dépôt) ne compte pas.
     round_trip(&t, &cookie, page, 2).await;
-    // L'indexeur (lot 4) alloue en fond pour indexer la page créée : il a fini avant la mesure.
+    // L'indexeur (lot 4) alloue en fond pour indexer la page créée, et le moteur de l'index plein
+    // texte pour valider et fusionner : il a fini, puis il est arrêté et l'index lâché, avant la
+    // mesure.
     t.indexer.settled().await;
+    t.indexer.stop().await;
 
     let chunks = 32 * MEGABYTE / CHUNK.len();
     let before = LIVE.load(Ordering::Relaxed);

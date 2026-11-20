@@ -851,7 +851,8 @@ async fn behind_says_late_at_its_bound_whoever_looks() {
     let t = quick_app().await;
     let olga = t.account("Olga").await;
     t.indexer.settled().await;
-    t.indexer.stop().await;
+    // Figé, pas arrêté : un indexeur arrêté a lâché l'index, et dit tout en retard (R1025).
+    t.indexer.freeze();
     let other = Store::open(&t.db_path()).await.unwrap();
     for i in 0..999 {
         stored(&other, olga.space, &format!("Page {i}"), None).await;
@@ -1150,6 +1151,202 @@ async fn a_frozen_indexer_starts_nothing_and_searches_still_answer() {
     assert!(outbox(&t).await > 0, "le renommage attend");
     assert!(!settling.is_finished());
     settling.abort();
+}
+
+/// Relecture de S4c, I1 et I2 (Rulings R1027, R1028). Des validations refusées de suite : une
+/// intention et une ligne `error` par essai, et le délai du nouvel essai double à chaque refus
+/// (1 s, 2 s, 4 s), au lieu de repartir d'une seconde. Pendant ce temps la recherche répond
+/// sur la dernière validation close : l'index, lâché après chaque refus, est rouvert et comparé
+/// dans le même passage. Sous l'horloge arrêtée : c'est le test qui fait passer les délais.
+#[tokio::test]
+async fn refused_commits_in_a_row_wait_twice_as_long_each_time_and_searches_still_answer() {
+    let logs = Logs::capture();
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Titre validé").await;
+    t.indexer.settled().await;
+    let intents = t.indexer.intents();
+
+    let _clock = StoppedClock::start();
+    t.indexer.refuse_commits(3);
+    t.store.rename_node(page, "Titre neuf", None).await.unwrap();
+    // L'intervalle depuis l'intention d'avant.
+    tokio::time::advance(Duration::from_millis(1_002)).await;
+    for (refusals, secs) in [(1, 1), (2, 2), (3, 4)] {
+        until("la validation n'a pas été refusée", async || {
+            t.indexer.commit_refusals() == refusals
+                && t.indexer.retry_delay() == Some(Duration::from_secs(secs))
+        })
+        .await;
+        assert_eq!(
+            t.indexer.intents(),
+            intents + refusals,
+            "une intention par essai"
+        );
+        assert_eq!(
+            found(&t, "validé", &[page]).len(),
+            1,
+            "ce qui était validé reste cherché après le refus {refusals}"
+        );
+        assert!(found(&t, "neuf", &[page]).is_empty());
+        tokio::time::advance(Duration::from_millis(secs * 1_000 + 2)).await;
+    }
+    until("le renommage n'est jamais validé", async || {
+        found(&t, "neuf", &[page]).len() == 1 && t.indexer.retry_delay().is_none()
+    })
+    .await;
+    assert!(found(&t, "validé", &[page]).is_empty());
+    assert_eq!(t.indexer.intents(), intents + 4);
+    assert_eq!(t.indexer.commit_refusals(), 3);
+    assert_eq!(t.indexer.rebuilds(), 0);
+    let journal = logs.text();
+    let said = journal
+        .lines()
+        .filter(|line| line.contains("ERROR") && line.contains("index de recherche"))
+        .count();
+    assert_eq!(said, 3, "une ligne par essai refusé : {journal}");
+}
+
+/// Relecture de S4c, I3 (Ruling R1029) : deux intentions sont séparées d'une seconde au moins.
+/// Un renommage qui suit de près une intention close ne lance aucun passage (les travaux
+/// commencés sont comptés, la boucle ayant tourné après lui) ; l'intervalle passé, une seule
+/// intention prend ce qui s'est accumulé.
+#[tokio::test]
+async fn two_intents_are_at_least_a_second_apart() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Titre de départ").await;
+    t.indexer.settled().await;
+    let intents = t.indexer.intents();
+
+    let _clock = StoppedClock::start();
+    tokio::time::advance(Duration::from_millis(1_002)).await;
+    t.store
+        .rename_node(page, "Premier renommage", None)
+        .await
+        .unwrap();
+    until("le premier renommage n'est pas validé", async || {
+        found(&t, "premier", &[page]).len() == 1 && outbox(&t).await == 0
+    })
+    .await;
+    assert_eq!(t.indexer.intents(), intents + 1);
+
+    let started = t.indexer.jobs_started();
+    for title in ["Deuxième renommage", "Troisième renommage"] {
+        let rounds = t.indexer.rounds();
+        t.store.rename_node(page, title, None).await.unwrap();
+        until(
+            "la boucle n'a pas tourné depuis le renommage",
+            async || t.indexer.rounds() > rounds,
+        )
+        .await;
+    }
+    assert_eq!(
+        t.indexer.jobs_started(),
+        started,
+        "aucun passage avant l'intervalle"
+    );
+    assert_eq!(found(&t, "premier", &[page]).len(), 1);
+
+    tokio::time::advance(Duration::from_millis(1_002)).await;
+    until("les renommages suivants ne sont pas validés", async || {
+        found(&t, "troisième", &[page]).len() == 1
+    })
+    .await;
+    assert_eq!(
+        t.indexer.intents(),
+        intents + 2,
+        "une seule intention pour ce qui s'est accumulé"
+    );
+}
+
+/// Relecture de S4c, M4 : un passage qui échoue après avoir écrit ses entrées, avant de les
+/// valider. L'index est lâché avec ces écritures, rouvert, et rien d'elles n'y paraît : la
+/// recherche répond sur la dernière validation close. Au nouvel essai, une intention neuve les
+/// valide.
+#[tokio::test]
+async fn a_refused_write_of_entries_leaves_nothing_of_them_in_the_index() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Titre validé").await;
+    t.indexer.settled().await;
+    let intents = t.indexer.intents();
+
+    let _clock = StoppedClock::start();
+    t.indexer.refuse_writes(1);
+    t.store.rename_node(page, "Titre neuf", None).await.unwrap();
+    tokio::time::advance(Duration::from_millis(1_002)).await;
+    until(
+        "l'écriture des entrées n'a pas été refusée",
+        async || t.indexer.write_refusals() == 1 && t.indexer.retry_delay().is_some(),
+    )
+    .await;
+    assert_eq!(found(&t, "validé", &[page]).len(), 1);
+    assert!(
+        found(&t, "neuf", &[page]).is_empty(),
+        "une écriture pas validée"
+    );
+    assert!(
+        t.store.feed_tokens().await.unwrap().intent.is_some(),
+        "l'intention reste posée jusqu'au nouvel essai, qui la défait"
+    );
+
+    tokio::time::advance(Duration::from_millis(1_002)).await;
+    until("le renommage n'est jamais validé", async || {
+        found(&t, "neuf", &[page]).len() == 1
+    })
+    .await;
+    assert!(found(&t, "validé", &[page]).is_empty());
+    assert_eq!(t.indexer.intents(), intents + 2);
+    assert_eq!(t.indexer.rebuilds(), 0);
+}
+
+/// Relecture de S4c, M4 (Ruling R1002) : une page dont la lecture a échoué, puis qui se relit,
+/// retrouve toutes ses entrées : elle est trouvée par son texte neuf et par son titre.
+#[tokio::test]
+async fn a_page_read_again_after_a_failure_is_found_by_its_title_and_its_text() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Convalescente").await;
+    write(&olga, page, "Avant la panne\n").await;
+    t.indexer.settled().await;
+    drop(olga);
+    let (dir, cfg) = t.stop().await;
+    let seq = {
+        let sql = format!(
+            "SELECT MAX(COALESCE((SELECT MAX(seq) FROM doc_updates WHERE node_id = '{page}'), 0), \
+                        COALESCE((SELECT seq FROM doc_snapshots WHERE node_id = '{page}'), 0))"
+        );
+        query_i64(&cfg.db_path(), &sql).await + 1
+    };
+    let snapshot = |seq: i64, hex: &str| {
+        format!(
+            "DELETE FROM doc_updates WHERE node_id = '{page}'; \
+             INSERT OR REPLACE INTO doc_snapshots (node_id, seq, state_blob, created_at) \
+             VALUES ('{page}', {seq}, x'{hex}', 0)"
+        )
+    };
+    exec_sql(&cfg.db_path(), &snapshot(seq, "FFFFFFFFFFFFFFFFFFFF")).await;
+    let t = TestApp::on(dir, cfg).await;
+    t.indexer.settled().await;
+    assert_eq!(state(&t, page).await, Some((seq, Some(seq))), "témoin");
+    assert!(found(&t, "convalescente", &[page]).is_empty(), "témoin");
+    let (dir, cfg) = t.stop().await;
+
+    // Un état lisible, à un `seq` plus récent.
+    let healed: String = state_of("Guérie depuis\n")
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect();
+    exec_sql(&cfg.db_path(), &snapshot(seq + 1, &healed)).await;
+    let t = TestApp::on(dir, cfg).await;
+    t.indexer.settled().await;
+    assert_eq!(state(&t, page).await, Some((seq + 1, None)));
+    assert_eq!(found(&t, "guérie", &[page]).len(), 1);
+    assert_eq!(found(&t, "convalescente", &[page]).len(), 1);
+    assert_eq!(found(&t, "convalescente guérie", &[page]).len(), 1);
+    assert!(found(&t, "panne", &[page]).is_empty());
+    assert_eq!(outbox(&t).await, 0);
 }
 
 // ---------------------------------------------------------------------------------------------

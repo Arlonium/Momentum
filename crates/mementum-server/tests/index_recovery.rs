@@ -150,6 +150,11 @@ async fn a_stop_before_the_commit_undoes_the_intent() {
     assert!(posed.intent.is_some(), "l'intention est posée");
     drop(olga);
     let (dir, cfg) = t.stop().await;
+    // L'index, rouvert à la main : rien n'y a été validé sous le jeton de l'intention.
+    let opened = mementum_search::SearchIndex::open(&cfg.data_dir.join("search")).unwrap();
+    assert_eq!(opened.token, posed.committed);
+    assert_ne!(opened.token, posed.intent);
+    opened.index.close().unwrap();
 
     let t = TestApp::on(dir, cfg).await;
     t.indexer.settled().await;
@@ -273,6 +278,11 @@ async fn a_rename_before_a_crash_is_caught_up() {
 
     // L'index plein texte ne valide plus rien : comme un serveur tué juste après le renommage.
     t.indexer.stop().await;
+    assert!(
+        t.indexer.behind(olga.space, |_| false).await.unwrap(),
+        "un indexeur arrêté a lâché l'index : tout est dit en retard"
+    );
+    assert!(found(&t, "original", &[page]).is_empty());
     olga.patched(&page.to_string(), json!({ "title": "Titre retouché" }))
         .await;
     drop(olga);

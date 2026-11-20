@@ -246,6 +246,9 @@ async fn anonymous_requests_write_nothing() {
     })
     .await;
     let _olga = t.signed_up("olga@exemple.fr", "Olga").await;
+    // L'indexeur a fini d'écrire (sa page, l'index plein texte) avant que le verrou soit pris :
+    // ses écritures attendraient le verrou, et ce test compte celles qui attendent.
+    t.indexer.settled().await;
     let bogus = format!(
         "{}={}",
         common::SESSION_COOKIE,
@@ -430,6 +433,8 @@ async fn account_changed_takes_no_turn() {
         .await
         .id;
     let cookie = olga.browser.cookie().unwrap();
+    // L'indexeur a fini d'écrire avant que le verrou de SQLite soit pris (voir plus haut).
+    t.indexer.settled().await;
     let naming = |account: Uuid, mut request: Request<Body>| {
         let value = account.to_string().parse().unwrap();
         request.headers_mut().insert("x-mementum-account", value);

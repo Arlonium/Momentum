@@ -122,6 +122,12 @@ const FEED_LINES: usize = 1_000;
 /// d'une instance ne valide pas l'index à chaque page, et ne le laisse pas vide jusqu'à sa fin.
 const FEED_AT_MOST: Duration = Duration::from_secs(1);
 
+/// L'intervalle le plus court entre une intention close et la suivante (Ruling R1029) : une
+/// validation du moteur écrit un segment et le vide sur le disque, et sans intervalle un compte
+/// qui tape ou renomme sans relâche en déclenchait une par passage, dos à dos. Il ne vaut pas
+/// tant que l'outbox déborde (une intention pleine), ni pour qui attend `settled()`.
+const FEED_EVERY: Duration = Duration::from_secs(1);
+
 /// Ce qu'un index lâché attend au plus des recherches en cours qui le tiennent encore.
 const RELEASE_WAIT: Duration = Duration::from_secs(5);
 
@@ -154,6 +160,15 @@ pub(crate) async fn open_text(data_dir: &Path) -> anyhow::Result<Text> {
             Ok(opened) => return Ok(Text { dir, opened }),
             Err(IndexError::Busy) if std::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // Au démarrage, sur la sortie d'erreur de l'exploitant : jamais dans une réponse.
+            Err(IndexError::NotAnIndex) => {
+                return Err(anyhow::Error::new(IndexError::NotAnIndex).context(format!(
+                    "impossible d'ouvrir l'index de recherche {} ; l'index se refait de \
+                     lui-même : supprimer ce dossier suffit, après avoir vérifié qu'il ne porte \
+                     rien d'autre à garder",
+                    dir.display()
+                )));
             }
             Err(error) => {
                 return Err(anyhow::Error::new(error).context(format!(
@@ -390,6 +405,11 @@ struct Shared {
     frozen: AtomicBool,
     /// Les travaux commencés par la boucle (indexations, passages), pour les tests.
     started: AtomicU64,
+    /// Les écritures d'entrées à refuser, celles qui l'ont été, et le délai du nouvel essai en
+    /// cours, pour les tests.
+    refuse_writes: AtomicU32,
+    write_refusals: AtomicU64,
+    retry_delay: Mutex<Option<Duration>>,
 }
 
 impl Shared {
@@ -408,9 +428,15 @@ impl Shared {
     /// L'index plein texte ne dit pas encore ce que la base porte : il n'est pas comparé, pas
     /// rejoué, ou sa reconstruction n'a pas encore nommé toutes les pages.
     fn text_unsure(&self) -> bool {
-        let has_text = self.text().dir.is_some();
+        let (has_text, open) = {
+            let text = self.text();
+            (text.dir.is_some(), text.index.is_some())
+        };
+        // Un index absent (lâché après une erreur, ou à l'arrêt) ne répond à aucune recherche.
         has_text
-            && (self.rebuilding.load(Ordering::SeqCst) || !self.searchable.load(Ordering::SeqCst))
+            && (!open
+                || self.rebuilding.load(Ordering::SeqCst)
+                || !self.searchable.load(Ordering::SeqCst))
     }
 
     /// Vrai si l'indexeur doit s'arrêter ici, à la demande d'un test.
@@ -494,6 +520,9 @@ fn with_text(store: Store, hub: Arc<Hub>, cfg: IndexerConfig, text: Option<Text>
         halted: AtomicBool::new(false),
         frozen: AtomicBool::new(false),
         started: AtomicU64::new(0),
+        refuse_writes: AtomicU32::new(0),
+        write_refusals: AtomicU64::new(0),
+        retry_delay: Mutex::default(),
         store,
         hub,
         cfg,
@@ -641,6 +670,7 @@ impl IndexerHandle {
 
     /// La relecture de cette page paniquera, comme un défaut de yrs devant un journal hostile.
     /// Pour les tests : rien d'autre ne fait paniquer une relecture à la demande.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn panic_reading(&self, page: Uuid) {
         self.shared
@@ -694,12 +724,14 @@ impl IndexerHandle {
 
     /// Les `n` prochaines validations de l'index plein texte sont refusées, sans être tentées.
     /// Pour les tests : rien d'autre ne fait refuser une validation à la demande.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn refuse_commits(&self, n: u32) {
         self.shared.refuse_commits.store(n, Ordering::SeqCst);
     }
 
     /// Les `n` prochaines clôtures sont refusées, sans être tentées. Pour les tests.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn refuse_closes(&self, n: u32) {
         self.shared.refuse_closes.store(n, Ordering::SeqCst);
@@ -707,6 +739,7 @@ impl IndexerHandle {
 
     /// L'indexeur s'arrêtera, comme un processus tué là, entre l'intention et la validation de
     /// son prochain passage : rien n'est validé dans l'index plein texte. Pour les tests.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn halt_before_the_commit(&self) {
         self.shared.halt.store(HALT_BEFORE_COMMIT, Ordering::SeqCst);
@@ -714,6 +747,7 @@ impl IndexerHandle {
 
     /// L'indexeur s'arrêtera, comme un processus tué là, entre la validation et la clôture de
     /// son prochain passage. Pour les tests.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn halt_before_the_close(&self) {
         self.shared.halt.store(HALT_BEFORE_CLOSE, Ordering::SeqCst);
@@ -730,9 +764,35 @@ impl IndexerHandle {
     /// est, ce que [`IndexerHandle::stop`] ne permet pas (il lâche l'index). Tant qu'il reste du
     /// travail, [`IndexerHandle::settled`] ne rend plus. Pour les tests : ce qu'une requête doit
     /// tenir sans attendre l'indexeur (un droit retiré) se prouve ainsi.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn freeze(&self) {
         self.shared.frozen.store(true, Ordering::SeqCst);
+    }
+
+    /// Le prochain passage échouera après avoir écrit ses entrées, avant de les valider, `n`
+    /// fois : l'index est lâché avec des écritures pas validées. Pour les tests.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn refuse_writes(&self, n: u32) {
+        self.shared.refuse_writes.store(n, Ordering::SeqCst);
+    }
+
+    /// Passages refusés à l'écriture de leurs entrées depuis le lancement. Pour les tests.
+    #[doc(hidden)]
+    pub fn write_refusals(&self) -> u64 {
+        self.shared.write_refusals.load(Ordering::SeqCst)
+    }
+
+    /// Le délai du nouvel essai en cours après un passage refusé ; `None` quand le dernier
+    /// passage n'a pas été refusé. Pour les tests.
+    #[doc(hidden)]
+    pub fn retry_delay(&self) -> Option<Duration> {
+        *self
+            .shared
+            .retry_delay
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Les tours de la boucle depuis le lancement. Pour les tests : une barrière (la boucle a
@@ -885,8 +945,9 @@ async fn unreadable(
 enum Fed {
     /// Rien n'attend l'index plein texte, et aucune intention n'est posée.
     Nothing,
-    /// Une intention a été close, ou défaite : il peut rester des lignes.
-    Again,
+    /// Une intention a été close. `more` : elle a pris autant de lignes qu'elle pouvait, l'outbox
+    /// déborde sans doute, et le passage suivant n'attend pas ([`FEED_EVERY`]).
+    Closed { more: bool },
     /// Refusé (la base, l'index) : nouvel essai plus tard, l'intention restée telle quelle.
     Retry,
     /// Arrêté au point nommé par un test.
@@ -927,8 +988,8 @@ async fn release(shared: &Shared) {
     let_go(shared).await;
 }
 
-/// Lâche l'index sans rien dire de ce qu'il valait : à l'arrêt, [`IndexerHandle::behind`] répond
-/// encore d'après la base, et plus rien n'est cherché faute d'index.
+/// Lâche l'index : plus rien n'est cherché faute d'index, et [`IndexerHandle::behind`] répond
+/// « en retard » ([`Shared::text_unsure`]), à l'arrêt comme après une erreur.
 async fn let_go(shared: &Shared) {
     let held = {
         let mut text = shared.text();
@@ -1120,8 +1181,9 @@ async fn feed_once(shared: Arc<Shared>) -> Fed {
         Err(error) => {
             tracing::error!(
                 error = %format!("{error:#}"),
-                "index de recherche : passage refusé, nouvel essai plus tard ; la recherche \
-                 répond sur ce qui est déjà validé"
+                "index de recherche : passage refusé, nouvel essai plus tard (le délai double à \
+                 chaque refus) ; la recherche répond sur la dernière validation close, sauf \
+                 mention contraire dans l'erreur"
             );
             Fed::Retry
         }
@@ -1133,33 +1195,50 @@ async fn feed(shared: &Shared) -> anyhow::Result<Fed> {
     let index = ready_index(shared).await?;
     let started = std::time::Instant::now();
     let limit = shared.feed_lines.load(Ordering::SeqCst);
-    let feed = match shared.store.begin_feed(limit).await? {
-        FeedStart::Nothing => return Ok(Fed::Nothing),
-        FeedStart::Begun(feed) => {
-            shared.intents.fetch_add(1, Ordering::SeqCst);
-            feed
-        }
-        // Une intention est posée. L'index l'a validée (une clôture refusée, un arrêt entre la
-        // validation et la clôture) : ses lignes sont rejouées depuis la base, jamais tenues pour
-        // faites. Sinon elle n'a jamais été validée : elle est défaite.
-        FeedStart::Pending(token) => {
-            if shared.text().token.as_deref() != Some(token.as_str()) {
-                shared.store.undo_feed().await?;
-                return Ok(Fed::Again);
+    let (feed, replayed) = loop {
+        match shared.store.begin_feed(limit).await? {
+            FeedStart::Nothing => return Ok(Fed::Nothing),
+            FeedStart::Begun(feed) => {
+                shared.intents.fetch_add(1, Ordering::SeqCst);
+                break (feed, false);
             }
-            match shared.store.intent_lines().await? {
-                Some(feed) if feed.token == token => feed,
-                _ => return Ok(Fed::Again),
+            // Une intention est posée. L'index l'a validée (une clôture refusée, un arrêt entre
+            // la validation et la clôture) : ses lignes sont rejouées depuis la base, jamais
+            // tenues pour faites. Sinon elle n'a jamais été validée : elle est défaite, et ses
+            // lignes sont reprises par une intention neuve, dans ce même passage (un refus qui
+            // dure ne coûte ainsi qu'un passage par essai, dont le délai double : Ruling R1027).
+            FeedStart::Pending(token) => {
+                if shared.text().token.as_deref() != Some(token.as_str()) {
+                    shared.store.undo_feed().await?;
+                    continue;
+                }
+                if let Some(feed) = shared.store.intent_lines().await?
+                    && feed.token == token
+                {
+                    break (feed, true);
+                }
             }
         }
     };
-    let written = match write_lines(&shared.store, &index, &feed.lines).await {
+    // Une intention rejouée ne dit rien de ce qui attend à côté d'elle : le passage suivant
+    // regarde.
+    let more = replayed || feed.lines.len() >= limit;
+    let written = write_lines(&shared.store, &index, &feed.lines).await;
+    let written = if take_refusal(&shared.refuse_writes) {
+        written.and(Err(anyhow::anyhow!(
+            "écriture refusée à la demande d'un test"
+        )))
+    } else {
+        written
+    };
+    let written = match written {
         Ok(written) => written,
         Err(error) => {
             // Des écritures pas validées restent dans l'écrivain : l'index ne se réutilise pas.
             drop(index);
-            release(shared).await;
-            return Err(error.context("écriture des entrées"));
+            let error = reopened(shared, error.context("écriture des entrées")).await;
+            shared.write_refusals.fetch_add(1, Ordering::SeqCst);
+            return Err(error);
         }
     };
     shared.puts.fetch_add(written, Ordering::SeqCst);
@@ -1177,9 +1256,9 @@ async fn feed(shared: &Shared) -> anyhow::Result<Fed> {
         // Rien n'est dit de ce que le disque porte (Ruling R992) : l'index est lâché, et c'est le
         // jeton relu à sa réouverture qui dira si la validation a eu lieu (elle est alors
         // rejouée) ou non (l'intention est défaite).
+        let error = reopened(shared, error.context("validation de l'index")).await;
         shared.commit_refusals.fetch_add(1, Ordering::SeqCst);
-        release(shared).await;
-        return Err(error.context("validation de l'index"));
+        return Err(error);
     }
     shared.text().token = Some(feed.token.clone());
     if shared.halts_at(HALT_BEFORE_CLOSE) {
@@ -1207,7 +1286,23 @@ async fn feed(shared: &Shared) -> anyhow::Result<Fed> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner) =
         Some((feed.lines.len(), written, started.elapsed()));
-    Ok(Fed::Again)
+    Ok(Fed::Closed { more })
+}
+
+/// Après une écriture ou une validation refusée : l'index est lâché (il ne se réutilise pas,
+/// Ruling R992), puis rouvert et comparé à la base **tout de suite** (Ruling R1028). Le jeton
+/// relu est celui de la dernière validation close : ce qui était validé reste cherché pendant
+/// que le passage attend son nouvel essai. S'il est celui de l'intention (la validation a eu
+/// lieu malgré l'erreur), rien n'est cherché avant qu'elle soit rejouée. Rend l'erreur du
+/// passage, complétée si la réouverture échoue à son tour : une seule ligne au journal.
+async fn reopened(shared: &Shared, error: anyhow::Error) -> anyhow::Error {
+    release(shared).await;
+    match ready_index(shared).await {
+        Ok(_) => error,
+        Err(again) => error.context(format!(
+            "et l'index n'a pas pu être rouvert ({again:#}) : rien n'est cherché d'ici là"
+        )),
+    }
 }
 
 /// Avant d'indexer : si la base a été indexée sous une autre version de la projection, toutes
@@ -1309,6 +1404,10 @@ async fn run(shared: Arc<Shared>) {
     // Depuis quand un passage est voulu, et quand le réessayer après un refus.
     let mut feed_since: Option<Instant> = None;
     let mut feed_retry: Option<(Instant, Duration)> = None;
+    // Pas d'intention neuve avant cet instant ([`FEED_EVERY`] après la dernière close), sauf si
+    // l'outbox déborde, ou si `settled` attend (`feed_hurry`, jusqu'à ce que plus rien n'attende).
+    let mut feed_not_before: Option<Instant> = None;
+    let mut feed_hurry = false;
     let mut round = 0u64;
     while !shared.stopping() {
         let now = Instant::now();
@@ -1337,8 +1436,10 @@ async fn run(shared: Arc<Shared>) {
             sources_after = None;
             feed_wanted = true;
             feed_asks += 1;
-            // Qui attend l'indexeur n'attend pas le délai d'un nouvel essai.
+            // Qui attend l'indexeur n'attend ni le délai d'un nouvel essai (qui garde sa durée),
+            // ni l'intervalle entre deux intentions.
             feed_retry = feed_retry.map(|(_, delay)| (now, delay));
+            feed_hurry = true;
         }
         if sources_after.is_some_and(|at| at <= now) {
             sources_after = None;
@@ -1392,7 +1493,9 @@ async fn run(shared: Arc<Shared>) {
         // à indexer, [`FEED_AT_MOST`] au plus depuis qu'il est voulu (Ruling R1003).
         if !busy && !shared.stopping() && !shared.frozen.load(Ordering::SeqCst) {
             let now = Instant::now();
-            let feed_due = feed_wanted && feed_retry.is_none_or(|(at, _)| at <= now);
+            let feed_due = feed_wanted
+                && feed_retry.is_none_or(|(at, _)| at <= now)
+                && (feed_hurry || feed_not_before.is_none_or(|at| at <= now));
             let overdue = feed_due && now >= *feed_since.get_or_insert(now) + FEED_AT_MOST;
             let next = if overdue {
                 None
@@ -1430,8 +1533,15 @@ async fn run(shared: Arc<Shared>) {
             None
         } else {
             let due = shared.queues().next_wake(&shared.cfg);
-            let retry = feed_retry.filter(|_| feed_wanted).map(|(at, _)| at);
-            [due, sources_after, retry].into_iter().flatten().min()
+            // Le passage voulu part quand son nouvel essai et son intervalle sont tous deux passés.
+            let retry = feed_retry.map(|(at, _)| at);
+            let every = feed_not_before.filter(|_| !feed_hurry);
+            let feed_at = match (retry, every) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            }
+            .filter(|_| feed_wanted);
+            [due, sources_after, feed_at].into_iter().flatten().min()
         };
         tokio::select! {
             () = shared.wake.notified() => {}
@@ -1459,10 +1569,20 @@ async fn run(shared: Arc<Shared>) {
                         feed_since = None;
                         feed_retry = None;
                     }
-                    // Il peut rester des lignes : un autre passage, sans attendre.
-                    Ok(Fed::Again) => {
+                    // L'outbox déborde : un autre passage, sans attendre.
+                    Ok(Fed::Closed { more: true }) => {
                         feed_since = None;
                         feed_retry = None;
+                        feed_not_before = None;
+                    }
+                    // L'intention a pris tout ce qui attendait : rien d'autre n'attend, sauf
+                    // demande arrivée depuis son départ ; et pas d'intention neuve avant
+                    // [`FEED_EVERY`] (une validation du moteur par seconde au plus, R1029).
+                    Ok(Fed::Closed { more: false }) => {
+                        feed_wanted = feed_asks != feed_asks_at_start;
+                        feed_since = None;
+                        feed_retry = None;
+                        feed_not_before = Some(Instant::now() + FEED_EVERY);
                     }
                     // Comme un processus tué là : plus rien n'est fait.
                     Ok(Fed::Halted) => shared.stopping.store(true, Ordering::SeqCst),
@@ -1477,6 +1597,13 @@ async fn run(shared: Arc<Shared>) {
                         feed_retry = Some((Instant::now() + delay, delay));
                     }
                 }
+                if !feed_wanted {
+                    feed_hurry = false;
+                }
+                *shared
+                    .retry_delay
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = feed_retry.map(|(_, delay)| delay);
             }
             () = async { tokio::time::sleep_until(wake_at.expect("un réveil")).await }, if wake_at.is_some() => {}
         }
@@ -1873,7 +2000,7 @@ mod tests {
         b.handle.shared.halt.store(0, Ordering::SeqCst);
         assert_eq!(
             b.feed().await,
-            Fed::Again,
+            Fed::Closed { more: true },
             "l'intention rejouée, puis close"
         );
         let closed = b.store.feed_tokens().await.unwrap();
@@ -1921,7 +2048,7 @@ mod tests {
         assert!(b.behind(first).await, "rien n'est sûr avant la comparaison");
 
         b.handle.shared.feed_lines.store(1, Ordering::SeqCst);
-        assert_eq!(b.feed().await, Fed::Again);
+        assert_eq!(b.feed().await, Fed::Closed { more: true });
         assert_eq!(b.handle.rebuilds(), 1);
         assert_eq!(
             b.found("commun", &pages),
@@ -1934,6 +2061,61 @@ mod tests {
         b.drain().await;
         assert_eq!(b.found("commun", &pages), pages);
         assert!(!b.behind(second).await);
+        b.close().await;
+    }
+
+    /// Ferme l'index que tient la poignée, ses fusions finies : comme un processus qui s'arrête.
+    fn shut(handle: &IndexerHandle) {
+        let index = {
+            let mut text = handle.shared.text();
+            text.token = None;
+            text.reconciled = false;
+            text.index.take()
+        };
+        if let Some(index) = index {
+            Arc::try_unwrap(index).ok().unwrap().close().unwrap();
+        }
+    }
+
+    /// Une reconstruction coupée par un arrêt n'a rien validé : l'index reste sans jeton, et le
+    /// démarrage suivant la refait en entier (Ruling R1001). Ici l'index a perdu son dossier ;
+    /// l'arrêt est demandé avant que les pages soient nommées ; puis une poignée neuve, comme un
+    /// processus relancé, rouvre l'index, le trouve sans jeton, et reconstruit.
+    #[tokio::test]
+    async fn a_rebuild_cut_by_a_stop_is_done_again_at_the_next_start() {
+        let b = Bench::new().await;
+        let mut pages = [
+            b.page("Première", "un texte commun").await,
+            b.page("Seconde", "un texte commun").await,
+        ];
+        pages.sort();
+        b.drain().await;
+        let intents = b.handle.intents();
+        shut(&b.handle);
+        std::fs::remove_dir_all(b.dir.path().join(SEARCH_DIR)).unwrap();
+
+        b.handle.shared.stopping.store(true, Ordering::SeqCst);
+        let cut = feed(&b.handle.shared).await;
+        assert!(cut.is_err(), "la reconstruction n'a pas été coupée");
+        assert!(b.behind(pages[0]).await, "rien n'est dit à jour");
+        assert_eq!(b.handle.intents(), intents, "aucun passage pendant elle");
+        shut(&b.handle);
+
+        let text = open_text(b.dir.path()).await.unwrap();
+        assert_eq!(text.opened.token, None, "rien n'a été validé");
+        let hub = Hub::new(b.store.clone(), SyncConfig::default());
+        let again = with_text(b.store.clone(), hub, config(), Some(text));
+        for _ in 0..100 {
+            if feed(&again.shared).await.unwrap() == Fed::Nothing {
+                break;
+            }
+        }
+        assert_eq!(again.rebuilds(), 1);
+        let query = mementum_search::read_query("commun").unwrap();
+        let allowed: PageSet = pages.iter().copied().collect();
+        let found = again.search(&query, &allowed, 0, 20).unwrap();
+        assert_eq!(found.pages.len(), 2, "tout est reconstruit");
+        shut(&again);
         b.close().await;
     }
 }

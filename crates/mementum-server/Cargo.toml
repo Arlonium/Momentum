@@ -49,7 +49,16 @@ tracing.workspace = true
 ts-rs.workspace = true
 uuid.workspace = true
 
+[features]
+# Pour les tests seulement : ce qui fige ou arrête l'indexeur, fait refuser ses validations et
+# ses clôtures, ou fait paniquer une relecture (`IndexerHandle::freeze`, `halt_before_the_commit`,
+# `halt_before_the_close`, `refuse_commits`, `refuse_closes`, `refuse_writes`, `panic_reading`).
+# Le binaire livré ne les porte pas (Ruling R1014).
+test-hooks = []
+
 [dev-dependencies]
+# Les tests arrêtent l'indexeur à un point nommé (fonction `test-hooks`).
+mementum-server = { path = ".", features = ["test-hooks"] }
 # Tenir un tour de la file d'écriture du store (`Store::hold_writes`).
 mementum-store = { workspace = true, features = ["test-hooks"] }
 # Client Yjs de test (Ruling R6) pour la route `/sync/{id}`.

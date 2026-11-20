@@ -1408,7 +1408,7 @@ fn a_directory_left_without_its_meta_by_a_crash_still_opens() {
 
     for foreign in [
         format!("{id}.db"),
-        format!("{id}"),
+        id.to_string(),
         format!("{id}.x.del"),
         format!("{id}..del"),
         format!("{}.idx", &id[..16]),
