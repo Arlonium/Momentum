@@ -49,7 +49,8 @@ donne les chiffres.
    direct de `narrowed` coûte 2,2 ms (p95 2,5) sur 10 000 pages et 30 ms (p95 31) sur
    100 000, presque autant que le calcul du compte (2,7 et 37 ms), quelle que soit la portée ;
    le `404` d'une page hors portée coûte donc 2 à 30 ms de plus que celui d'une page inconnue
-   (rien). Remonter les parents visibles de la page jugée coûte 10 à 20 µs aux deux tailles.
+   (rien). Remonter les parents visibles de la page jugée coûte 10 à 20 µs aux deux tailles
+   *(à lire « au plus 20 µs », pour des chaînes d'une centaine de pages : R1575)*.
    Avec le rang du parent visible gardé dans le calcul du compte, la restriction entière tombe à
    0,15 ms (p95 0,35) et 2 ms (p95 2,4).
 5. **Version d'avant un agent (R1234) : hors de l'acteur dès S4.** Pour la page de 10 000
@@ -158,7 +159,9 @@ modèle : il dit son propre message (essais 6 et 7).
 - **La commande prête à coller** : `${MEMENTUM_TOKEN}` est développé à chaque lancement quand une
   configuration le porte (essai 9). Ce que `claude mcp add` écrit d'un en-tête entre
   apostrophes n'a pas été essayé (la tâche l'interdisait) : la fin du lot le vérifie avec le cas
-  d'Alex (R1253).
+  d'Alex (R1253). *(Récrit par R1576 : « entre apostrophes » ne vaut que pour bash, zsh et
+  PowerShell, cmd demandant les guillemets ; l'écran donne une commande par shell, et X1 vérifie
+  `claude mcp add` avec Alex.)*
 
 ## Step 2 : l'écriture par différence
 
@@ -317,11 +320,17 @@ les pages vues.
   visibles jusqu'à une racine de la portée (10 à 20 µs), puis ramène le niveau sous celui du
   jeton et pose l'interdit. Le `404` d'une page hors portée coûte alors 10 à 20 µs de plus que
   celui d'une page inconnue, au lieu de 2 à 30 ms : l'écart de temps que R1217 ajoutait à D12
-  du lot 4 tombe d'un facteur cent à mille.
+  du lot 4 tombe d'un facteur cent à mille. *(Relecture : « au plus 20 µs », pour les chaînes
+  d'une centaine de pages de ce générateur ; la remontée croît avec la profondeur, et S5 la fait
+  par les rangs et la mesure sur une chaîne profonde, R1575 ; la portée suit les parents visibles,
+  R1574.)*
 - **Une route de tout l'espace** (l'arbre, l'ensemble des pages permises de la recherche,
   `workspace_info`) restreint tout : avec le rang du parent visible gardé dans `SpaceAccess`
   (4 octets par page, calculés avec le compte et gardés en cache avec lui), 0,35 ms au p95 sur
-  10 000 pages, sous le seuil de 1 ms de R1217 : pas de cache de la restriction.
+  10 000 pages, sous le seuil de 1 ms de R1217 : pas de cache de la restriction. *(R1217 ne pose
+  aucun seuil, et 2,4 ms au p95 sur 100 000 pages en dépasserait un d'1 ms : la règle « pas de
+  cache » est récrite par R1573, pour les trois routes de tout l'espace, aux deux tailles
+  mesurées, sans seuil posé d'avance.)*
 - Sans portée de pages, la restriction n'est qu'un plafond de niveau et un interdit : S5 peut les
   lire au passage plutôt que de recopier la liste.
 - `SpaceAccess::compute` coûte 37 ms sur 100 000 pages ; les rangs lui ajouteraient 12 ms tels
@@ -396,3 +405,15 @@ exacte et la prouve par la mesure de la frappe qui tombe pendant
 - « Ce que la personne voit » et la Task C1 : ce que S0 sait de `${MEMENTUM_TOKEN}`, et ce qui
   reste à vérifier à la fin du lot (R1253).
 - L'encadré d'état, « Ce qui reste à mesurer », « Supposé » : S0 faite.
+
+## Ce que la relecture de ces mesures a corrigé
+
+La relecture (« prêt sous réserve ») a été portée par S2 (R1280, R1281, R1284, R1288), par M1
+(R1407), par S3 (R1562), puis, pour le reste, par R1572 à R1576 au
+[registre du lot](2026-11-20-p1-lot5-ledger.md) : une écriture d'agent en une commande de
+l'acteur sans `before_agent`, en deux avec (R1572) ; aucun seuil de cache posé d'avance (R1573) ;
+la portée qui suit les parents visibles (R1574) ; « au plus 20 µs », la remontée par les rangs et
+sa mesure sur une chaîne profonde (R1575) ; une commande prête à coller par shell (R1576). Le
+verdict du Step 2 (« au plus `rewrite_blocks` plus la lecture et le plan ») est faux pour des
+paires échangées et des milliers de blocs retirés (R1284, R1294) ; les chiffres de la frappe
+pendant une écriture d'agent sont ceux de S2.
