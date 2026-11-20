@@ -351,6 +351,19 @@ Plan : [`docs/superpowers/plans/2026-11-19-p1-lot4-recherche.md`](docs/superpowe
 - **Une coupe en octets d'un texte en accents combinants peut tomber entre une lettre et son accent** : c'est une frontière de caractère. Un test de borne sur un tel texte ne compare pas le dernier caractère gardé.
 - **Une crate inscrite à `[workspace.dependencies]` que personne n'utilise encore fait avertir cargo à chaque commande** (« unused workspace dependency ») : l'inscrire avec sa première dépendante.
 
+### Task S4a : les pages écrites et la lecture seule d'une page gardée (`crates/mementum-sync`)
+
+- **`Actor::persist` et `persist_restore` sont les deux seuls points par où un acteur écrit un contenu, et ils nomment la page au hub après l'écriture** (`name_written_page`, R907). Toute écriture neuve de contenu par l'acteur passe par eux : sinon la page n'est pas réindexée avant le redémarrage. Ni le document de `seq` 0 d'une page sans document, ni une compaction, ni une version ne nomment la page ; une création, une duplication, un titre et une suppression non plus (marqueurs durables, R918).
+- **Une page prise par `Hub::take_touched` n'a plus de trace dans le hub** : l'ensemble est vidé, et ne vit qu'en mémoire. L'indexeur garde ses pages en attente dans son propre ensemble, et y laisse une page dont l'indexation a échoué pour la réessayer. Une page de l'ensemble peut avoir été supprimée depuis.
+- **`Hub::touched_changed` est un jeton** (R954) : un seul lecteur à la fois, un réveil de trop est possible (ensemble vide), aucun ne manque. **Rien ne le réveille à l'arrêt** (`Hub::shutdown` n'y touche pas) : qui l'attend met son propre signal d'arrêt dans le même `select!`. Un test qui lit l'absence d'un réveil prend d'abord celui des écritures d'avant : `take_touched` ne le prend pas.
+- **`stored_page` rend `Ok(None)` pour une page inconnue comme pour une page sans document** (R955) : `Store::load_doc` ne les distingue pas. L'indexeur sort quand même la page de `indexed_seq = -1`, sans quoi elle serait relue à chaque réveil. Le `seq` rendu est le dernier de la base, entrées écartées comprises. Les entrées écartées sont dites en `debug` (l'acteur les dit en `error`), et l'erreur d'une page qui ne se relit pas est rendue sans être journalisée : c'est l'appelant qui la note et la journalise une fois.
+- **`stored_page` gèle sa tâche le temps du calcul** (R950) : `off_the_engine` rend le fil au moteur, pas la tâche, si bien que les autres branches d'un `select!` ou d'un `join!` de la même tâche ne tournent pas pendant la relecture (un signal d'arrêt, un réveil). L'appeler dans une tâche à elle.
+- **Tout état complet encodé par l'acteur passe par `Actor::whole_state`** (R953), qui avance `Hub::state_encodings` : un `self.page.encode_state()` écrit directement échappe au compte que `the_actor_only_names_the_page_it_wrote` affirme.
+- **Écrire `schemaVersion` par-dessus la valeur courante est refusé avant d'être appliqué** (R691) : `Hub::reloads` ne bouge pas. Un test qui veut un refus d'après l'application fait écrire deux clients partis du même état.
+- **Une rafale de frappes attendue par `processed` reste à cinq frappes** : `WAIT` (10 s) borne toute la rafale, et une frappe a valu 250 ms sur la CI sous Windows (R441, R952).
+- **`assert_eq!(pages, [])` ne compile pas pour des `Uuid`** (la crate a deux `PartialEq` pour `Uuid`) : une constante typée (`const NONE: [Uuid; 0]`). Et un fichier de test qui fait `use common::*` ne peut pas importer `mementum_sync::stored_page` : `tests/common/mod.rs` a déjà une aide de ce nom, qui relit sans rien écarter.
+- **`StoppedClock` est dans `crates/mementum-sync/tests/common/clock.rs`**, qui ne dépend que de tokio (`test-util`) : une autre crate l'inclut par son chemin, comme `TestDir` ; ses règles sont en tête du fichier (R179).
+
 ## Tester
 
 Structure du dépôt (conception, §8) :
