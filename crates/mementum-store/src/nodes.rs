@@ -520,7 +520,7 @@ impl Store {
             write_grant(&mut tx, &id_s, *grant).await?;
         }
         // Ruling R918 : une page naît jamais indexée, document ou non (son titre est cherché,
-        // R940) ; un dossier ne l'est pas.
+        // R961) ; un dossier ne l'est pas.
         if n.kind == NodeKind::Page {
             mark_born(&mut tx, &id_s).await?;
         }

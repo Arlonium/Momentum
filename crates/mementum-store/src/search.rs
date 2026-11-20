@@ -25,9 +25,15 @@
 //! d'abord (Ruling R270). Les lectures (le rattrapage, les rétroliens, ce qui nourrit l'index plein
 //! texte) ne prennent aucun tour.
 //!
-//! Un seul indexeur écrit la projection d'une page à la fois : ce que [`Store::index_page`] lit
-//! avant de prendre son tour (les empreintes gardées) n'est pas relu dans la transaction, seul le
-//! `seq` l'est.
+//! **Le verrou de l'indexeur** (Ruling R975) : [`Store::index_page`] lit les empreintes gardées
+//! avant de prendre son tour d'écriture, et ne les relit pas dans ses transactions (seul le `seq`
+//! l'est). Deux indexations de front sur une page laissaient donc un index faux noté à jour : la
+//! seconde lisait les empreintes d'avant la première, tenait pour inchangé un bloc que la
+//! première venait de retirer, et notait son `seq`. `index_page` et [`Store::index_failed`]
+//! prennent donc un verrou du `Store`, propre à l'index, avant de lire, et le gardent jusqu'à leur
+//! dernière transaction validée : une projection écrite à la fois, toutes pages confondues (il n'y
+//! a qu'un indexeur). Il est toujours pris avant le tour d'écriture, jamais en le tenant, et rien
+//! d'autre que l'indexeur ne le prend : aucune écriture d'un compte ne l'attend.
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,7 +41,7 @@ use sqlx::{Row, Sqlite, SqliteExecutor, Transaction};
 use uuid::Uuid;
 
 use crate::queue::Lane;
-use crate::{Store, StoreError, parse_uuid};
+use crate::{Store, StoreError, parse_uuid, unreadable};
 
 /// Ce qu'une transaction de l'index porte au plus de lignes changées, en octets
 /// ([`Store::index_page`]) : au-delà, la page s'écrit en plusieurs transactions. Valeur de départ
@@ -61,6 +67,10 @@ const COMMITTED: &str = "search.committed";
 
 /// La clé, dans `instance_settings`, du jeton de l'intention posée et pas encore close.
 const INTENT: &str = "search.intent";
+
+/// La clé, dans `instance_settings`, de la version de la projection que l'index reflète
+/// ([`Store::projection_version`], Ruling R977).
+const PROJECTION: &str = "search.projection";
 
 /// Un bloc projeté, à écrire dans `blocks_index` ([`Store::index_page`]). Le store ne le calcule
 /// pas : l'indexeur le tire de la projection d'une page (`mementum-search`, qui ne dépend pas du
@@ -256,6 +266,12 @@ fn repeated(head: &str, group: &str, count: usize, tail: &str) -> String {
 /// Une ligne de l'outbox pour chacun de ces blocs de la page (`''` : la page entière), sans jeton :
 /// une ligne déjà prise par une intention perd le sien, si bien que la clôture de cette intention
 /// la laisse pour la suivante (Ruling R939).
+///
+/// L'outbox n'a pas de clé étrangère : des lignes de bloc orphelines restent possibles quand une
+/// page est supprimée pendant que sa projection s'écrit (une tranche qui ne fait que retirer des
+/// blocs ne touche aucune table liée à `nodes`, et passe après `mark_deleted`). Elles sont sans
+/// effet : l'entrée qu'elles nomment n'a plus de ligne dans `blocks_index`, et la ligne de page
+/// entière que la suppression a posée retire de toute façon toutes les entrées de la page.
 async fn put_outbox(
     tx: &mut Transaction<'_, Sqlite>,
     node_id: &str,
@@ -526,7 +542,88 @@ const BACKLINK_EXCERPTS: &str = "SELECT f.node_id, f.block_id, substr(b.text, 1,
      JOIN blocks_index b ON b.node_id = f.node_id AND b.block_id = f.block_id \
      ORDER BY f.node_id";
 
+/// Le retard d'un espace ([`Store::behind_in_space`]), lu à partir des deux petits ensembles : les
+/// pages jamais indexées (l'index partiel `search_state_never` ; aucune page n'est sans ligne,
+/// R964) et les pages de l'outbox ; chacune est cherchée dans `nodes` par sa clé, pour son espace.
+/// `CROSS JOIN` impose cet ordre à SQLite, quelles que soient ses statistiques : sans lui, il
+/// parcourait les pages de l'espace (`nodes_by_parent`), voire de l'instance après `ANALYZE`
+/// (88 ms pour 100 000 pages à jour, relecture de S1, I2). Le `+` devant `n.space_id` et `n.kind`
+/// lui interdit de chercher un nœud par eux : sans lui, il cherchait chaque page en retard par
+/// `nodes_by_parent (space_id=?)`, c'est-à-dire en relisant les pages de l'espace pour chacune.
+/// L'outbox se lit en entier : petite, sauf pendant une reconstruction, où tout est en retard de
+/// toute façon.
+const BEHIND_IN_SPACE: &str = "SELECT behind.id FROM ( \
+         SELECT node_id AS id FROM search_state WHERE indexed_seq = -1 \
+         UNION \
+         SELECT node_id FROM search_outbox \
+     ) behind CROSS JOIN nodes n ON n.id = behind.id \
+     WHERE +n.space_id = ?1 AND +n.kind = 'page' \
+     ORDER BY behind.id LIMIT ?2";
+
+/// Une écriture de l'index qui attend le verrou de l'indexeur, comptée pour les tests
+/// ([`Store::index_waits`]) ; elle sort du compte en tombant, verrou pris ou abandonnée.
+#[cfg(feature = "test-hooks")]
+struct IndexWait<'s>(&'s std::sync::atomic::AtomicUsize);
+
+#[cfg(feature = "test-hooks")]
+impl<'s> IndexWait<'s> {
+    fn enter(count: &'s std::sync::atomic::AtomicUsize) -> IndexWait<'s> {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        IndexWait(count)
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl Drop for IndexWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl Store {
+    /// Le verrou de l'indexeur (Ruling R975, en tête du module) : à prendre avant de lire ce
+    /// qu'on écrira, avant tout tour d'écriture, et à garder jusqu'à la dernière transaction.
+    async fn index_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        #[cfg(feature = "test-hooks")]
+        let _waiting = IndexWait::enter(&self.index_waits);
+        self.index_lock.lock().await
+    }
+
+    /// Les écritures de l'index qui attendent le verrou de l'indexeur. Pour les tests seulement
+    /// (fonction `test-hooks`) : une indexation qui attend ce verrou n'est pas en file d'écriture.
+    #[cfg(feature = "test-hooks")]
+    pub fn index_waits(&self) -> usize {
+        self.index_waits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// La version de la projection que l'index reflète (Ruling R977) : `PROJECTION_VERSION` de
+    /// `mementum-search` (R960), telle que l'indexeur l'a écrite ([`Store::set_projection_version`]) ;
+    /// `None` tant qu'aucune ne l'est (une instance neuve, ou d'avant ce lot). Quand elle diffère de
+    /// la sienne, l'indexeur reprojette tout. Le store garde l'entier qu'on lui donne, sans en
+    /// connaître le sens. Une valeur illisible est une erreur. Lue sans tour.
+    pub async fn projection_version(&self) -> Result<Option<u32>, StoreError> {
+        read_setting(&self.pool, PROJECTION)
+            .await?
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| unreadable("version de la projection", &value))
+            })
+            .transpose()
+    }
+
+    /// Écrit la version de la projection que l'index reflète (voie de l'index ; ni `rev` ni `lsn`).
+    /// Déjà celle-là, rien n'est écrit, sans tour ; une valeur illisible est remplacée.
+    pub async fn set_projection_version(&self, version: u32) -> Result<(), StoreError> {
+        let value = version.to_string();
+        if read_setting(&self.pool, PROJECTION).await?.as_deref() == Some(value.as_str()) {
+            return Ok(());
+        }
+        let mut tx = self.write_in(Lane::Index).await?;
+        write_setting(&mut tx, PROJECTION, Some(&value)).await?;
+        tx.commit().await
+    }
+
     /// Écrit la projection de la page au `seq` lu (`rows` : ses blocs, `truncated` : la projection
     /// a été coupée à ses bornes), **par différence** (Ruling R919) : les blocs dont l'empreinte
     /// a changé, et les neufs, sont récrits avec leurs liens ; les blocs partis sont retirés avec
@@ -538,8 +635,12 @@ impl Store {
     ///
     /// Rien n'est écrit, et aucun tour n'est pris, si la page reflète déjà un `seq` plus récent
     /// (une lecture plus ancienne n'écrase jamais l'index), ou si rien n'a changé ni dans les
-    /// blocs ni dans son état. Le `seq` est relu dans chaque transaction : une page indexée plus
-    /// loin entre-temps arrête l'écriture.
+    /// blocs ni dans son état. Le `seq` est relu dans chaque transaction : un `seq` plus récent
+    /// posé entre-temps arrête l'écriture.
+    ///
+    /// Elle prend le verrou de l'indexeur avant de lire les empreintes gardées, et le garde
+    /// jusqu'à sa dernière transaction (Ruling R975) : deux appels de front, même sur une page,
+    /// passent l'un après l'autre. Ne pas l'appeler en tenant un tour d'écriture.
     ///
     /// `NotFound` si la page n'existe pas (ou plus). Une clé vide ou répétée est une erreur, sans
     /// rien écrire. Voie de l'index (Ruling R908) ; n'avance ni `rev` ni `lsn`.
@@ -587,6 +688,8 @@ impl Store {
             }
         }
         let id = node_id.to_string();
+        // Le verrou de l'indexeur, avant de lire, gardé jusqu'à la dernière tranche (R975).
+        let _indexing = self.index_lock().await;
         // Lu sans tour, dans une vue cohérente : ce qu'il y a à écrire.
         let mut read = self.pool.begin().await?;
         let state = read_state(&mut *read, &id).await?;
@@ -646,10 +749,15 @@ impl Store {
     /// La lecture de la page au `seq` donné a échoué (un journal qu'on ne sait plus relire) : elle
     /// quitte l'index. Ses lignes de `blocks_index` et de `page_links` sont retirées, ses lignes
     /// de bloc quittent l'outbox, et sa ligne de page entière y est posée, pour que ses entrées
-    /// quittent l'index plein texte ; la page est notée à ce `seq`, comme échouée (Ruling R941) :
+    /// quittent l'index plein texte ; la page est notée à ce `seq`, comme échouée (Ruling R962) :
     /// ni [`Store::never_indexed`] ni [`Store::stale_pages`] ne la rendent avant que son `seq`
     /// change. Rien n'est écrit, sans tour, si la page reflète un `seq` plus récent, ou si cet
-    /// échec est déjà noté. `NotFound` si la page n'existe pas.
+    /// échec est déjà noté. `NotFound` si la page n'existe pas. Le verrou de l'indexeur est tenu
+    /// de la lecture à la validation (R975).
+    ///
+    /// Toutes les lignes de la page partent en une transaction, sans la borne de
+    /// [`MAX_INDEX_TX_BYTES`] (Ruling R976) : une suppression par la clé ne récrit rien, et coûte
+    /// peu au tour d'écriture, même pour une page de dix mille blocs.
     pub async fn index_failed(&self, node_id: Uuid, seq: i64) -> Result<(), StoreError> {
         let id = node_id.to_string();
         let failed = PageState {
@@ -657,6 +765,7 @@ impl Store {
             failed_seq: Some(seq),
             truncated: false,
         };
+        let _indexing = self.index_lock().await;
         let state = read_state(&self.pool, &id).await?;
         if state.is_some_and(|state| seq < state.indexed_seq || state == failed) {
             return Ok(());
@@ -678,8 +787,11 @@ impl Store {
         tx.commit().await
     }
 
-    /// Les pages jamais indexées (`indexed_seq = -1` : créées ou dupliquées, Ruling R918), par
-    /// identifiant, au plus `limit`, lues par l'index partiel `search_state_never`.
+    /// Les pages jamais indexées (`indexed_seq = -1` : créées ou dupliquées, Ruling R918, et
+    /// chaque page d'une instance d'avant ce lot, que la migration `0005` note ainsi, R964), par
+    /// identifiant, au plus `limit`, lues par l'index partiel `search_state_never`. Une page en
+    /// sort quand elle est indexée, ou que sa lecture échoue ([`Store::index_failed`]) : une page
+    /// sans document s'indexe sans blocs (`index_page(id, 0, &[], false)`), sans quoi elle y reste.
     pub async fn never_indexed(&self, limit: usize) -> Result<Vec<Uuid>, StoreError> {
         let rows = sqlx::query(
             "SELECT node_id FROM search_state WHERE indexed_seq = -1 ORDER BY node_id LIMIT ?",
@@ -692,10 +804,11 @@ impl Store {
 
     /// Le rattrapage du démarrage : parmi les `limit` pages qui suivent `after` dans l'ordre des
     /// identifiants (corbeille comprise, pas un dossier), celles dont le dernier `seq` gardé
-    /// (journal ou instantané, 0 sans document) dépasse ce que l'index reflète (`-1` pour une page
-    /// sans ligne : une instance d'avant ce lot). Elle trouve aussi ce qu'un autre `Store` a écrit
-    /// (une commande, un test), qui n'est annoncé à personne. Lue sans tour d'écriture ; chaque
-    /// appel lit au plus `limit` pages.
+    /// (journal ou instantané, 0 sans document) dépasse ce que l'index reflète : une page jamais
+    /// indexée (`-1`), et ce qu'un autre `Store` a écrit (une commande, un test), qui n'est annoncé
+    /// à personne, ou ce qu'un arrêt brutal a laissé. Une page sans ligne compte pour `-1` : aucune
+    /// ne l'est depuis la migration `0005` (R964), le filet reste pour une ligne écrite à la main.
+    /// Lue sans tour d'écriture ; chaque appel lit au plus `limit` pages.
     pub async fn stale_pages(
         &self,
         after: Option<Uuid>,
@@ -729,27 +842,21 @@ impl Store {
     }
 
     /// Les pages de l'espace dont l'index sait le retard, par identifiant, au plus `limit` : une
-    /// page jamais indexée (à `-1`, ou sans ligne : une instance d'avant ce lot), ou qui a une ligne
-    /// d'outbox (ce que l'index plein texte n'a pas encore validé). Une page dont seul le contenu
-    /// a été écrit depuis sa dernière indexation n'y est pas : c'est à l'indexeur de le savoir.
-    /// Lue sans tour d'écriture.
+    /// page jamais indexée (à `-1` : créée, dupliquée, ou d'une instance d'avant ce lot, R964), ou
+    /// qui a une ligne d'outbox (ce que l'index plein texte n'a pas encore validé). Une page dont
+    /// seul le contenu a été écrit depuis sa dernière indexation n'y est pas : c'est à l'indexeur
+    /// de le savoir. Lue sans tour d'écriture, à partir de ces deux ensembles, jamais en
+    /// parcourant les pages de l'espace (`BEHIND_IN_SPACE`).
     pub async fn behind_in_space(
         &self,
         space_id: Uuid,
         limit: usize,
     ) -> Result<Vec<Uuid>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT n.id FROM nodes n \
-             WHERE n.space_id = ?1 AND n.kind = 'page' AND ( \
-                 NOT EXISTS (SELECT 1 FROM search_state s \
-                             WHERE s.node_id = n.id AND s.indexed_seq >= 0) \
-                 OR EXISTS (SELECT 1 FROM search_outbox o WHERE o.node_id = n.id)) \
-             ORDER BY n.id LIMIT ?2",
-        )
-        .bind(space_id.to_string())
-        .bind(sql_limit(limit))
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(BEHIND_IN_SPACE)
+            .bind(space_id.to_string())
+            .bind(sql_limit(limit))
+            .fetch_all(&self.pool)
+            .await?;
         uuids(&rows)
     }
 
@@ -879,6 +986,11 @@ impl Store {
     /// tranche), `None` une fois toutes les pages passées. Jamais une transaction en proportion
     /// de l'instance : l'appelant enchaîne les tranches, et entre deux, la file sert les autres
     /// voies.
+    ///
+    /// Elle ne touche pas à une intention posée : les lignes de page qu'elle récrit perdent leur
+    /// jeton (R939), mais l'intention reste, et ses lignes de bloc aussi. Qui reconstruit (S4c,
+    /// un index vidé) défait d'abord l'intention ([`Store::undo_feed`]) : l'index plein texte
+    /// qu'elle visait n'est plus là (Ruling R978).
     pub async fn outbox_everything(
         &self,
         after: Option<Uuid>,
@@ -957,7 +1069,7 @@ impl Store {
     }
 
     /// Pour chacune de ces sources qui mène à `target_id`, le premier de ses blocs qui y mène,
-    /// dans l'ordre des clés (Ruling R942), et son texte coupé par la base à `chars` caractères :
+    /// dans l'ordre des clés (Ruling R963), et son texte coupé par la base à `chars` caractères :
     /// jamais un texte de 64 Kio ramené pour en garder quelques-uns. Une source qui n'y mène pas
     /// n'est pas rendue. Par identifiant de page, sans tour.
     pub async fn backlink_excerpts(
@@ -1006,46 +1118,68 @@ mod tests {
             .collect()
     }
 
-    /// Les sources d'un rétrolien se lisent dans l'index `page_links_by_target` (la cible, puis les
-    /// sources dans l'ordre) et les nœuds par leur clé, sans parcourir de table : des centaines de
-    /// liens posés ailleurs ne coûtent rien à la lecture d'une page. De même la clôture d'une
-    /// intention lit ses lignes par l'index partiel `search_outbox_taken`, pas toute l'outbox, et
-    /// les pages jamais indexées par `search_state_never`. Seuls se parcourent la liste des
-    /// sources donnée (`json_each`), la sous-requête qui en sort (`f`) et un index partiel.
-    #[tokio::test]
-    async fn backlink_sources_are_read_from_the_index() {
-        // Les tables et leurs alias dans ces requêtes.
-        const TABLES: [&str; 8] = [
-            "page_links",
-            "l",
-            "nodes",
-            "n",
-            "blocks_index",
-            "b",
-            "search_outbox",
-            "search_state",
-        ];
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("m.db")).await.unwrap();
-        for (sql, binds, wanted) in [
-            (BACKLINK_SOURCES, 4, "page_links_by_target"),
-            (BACKLINK_EXCERPTS, 3, "page_links_by_target"),
-            (
-                "DELETE FROM search_outbox WHERE token = ?",
-                1,
-                "search_outbox_taken",
-            ),
-            (
-                "SELECT node_id FROM search_state WHERE indexed_seq = -1 ORDER BY node_id LIMIT ?",
-                1,
-                "search_state_never",
-            ),
-        ] {
-            let steps = plan(&store, sql, binds).await;
-            assert!(
-                steps.iter().any(|s| s.contains(wanted)),
-                "{wanted} : {steps:?}"
-            );
+    /// Les requêtes de l'index et ce qu'elles doivent lire : `(SQL, nombre de paramètres, étapes
+    /// voulues (chacune : des morceaux qu'une même étape du plan porte tous), tables dont un
+    /// parcours est voulu)`.
+    type Expected = (
+        &'static str,
+        usize,
+        &'static [&'static [&'static str]],
+        &'static [&'static str],
+    );
+
+    const QUERIES: [Expected; 5] = [
+        (BACKLINK_SOURCES, 4, &[&["page_links_by_target"]], &[]),
+        (BACKLINK_EXCERPTS, 3, &[&["page_links_by_target"]], &[]),
+        (
+            "DELETE FROM search_outbox WHERE token = ?",
+            1,
+            &[&["search_outbox_taken"]],
+            &[],
+        ),
+        (
+            "SELECT node_id FROM search_state WHERE indexed_seq = -1 ORDER BY node_id LIMIT ?",
+            1,
+            &[&["search_state_never"]],
+            &[],
+        ),
+        // Le retard d'un espace part des deux petits ensembles (les pages jamais indexées, par
+        // l'index partiel ; les pages de l'outbox, qu'il lit en entier), puis lit chaque nœud par
+        // sa clé : jamais toutes les pages de l'espace (relecture de S1, I2).
+        (
+            BEHIND_IN_SPACE,
+            2,
+            &[&["search_state_never"], &["SEARCH n ", "(id=?)"]],
+            &["search_outbox", "o"],
+        ),
+    ];
+
+    /// Les tables et leurs alias dans ces requêtes.
+    const TABLES: [&str; 10] = [
+        "page_links",
+        "l",
+        "nodes",
+        "n",
+        "blocks_index",
+        "b",
+        "search_outbox",
+        "o",
+        "search_state",
+        "s",
+    ];
+
+    /// Vérifie le plan de chaque requête de [`QUERIES`] sur `store`.
+    async fn check_plans(store: &Store) {
+        for (sql, binds, wanted, scans) in QUERIES {
+            let steps = plan(store, sql, binds).await;
+            for parts in wanted {
+                assert!(
+                    steps
+                        .iter()
+                        .any(|step| parts.iter().all(|part| step.contains(part))),
+                    "{parts:?} : {steps:?}"
+                );
+            }
             // Parcourir un index partiel, c'est lire les seules lignes qu'il garde.
             let partial = |step: &String| {
                 ["search_state_never", "search_outbox_taken"]
@@ -1054,16 +1188,54 @@ mod tests {
             };
             let scanned = |step: &String| {
                 !partial(step)
-                    && TABLES.iter().any(|table| {
-                        let scan = format!("SCAN {table}");
-                        *step == scan || step.starts_with(&format!("{scan} "))
-                    })
+                    && TABLES
+                        .iter()
+                        .filter(|table| !scans.contains(table))
+                        .any(|table| {
+                            let scan = format!("SCAN {table}");
+                            *step == scan || step.starts_with(&format!("{scan} "))
+                        })
             };
             assert!(
                 !steps.iter().any(scanned),
                 "un parcours de table : {steps:?}"
             );
         }
+    }
+
+    /// Les sources d'un rétrolien se lisent dans l'index `page_links_by_target` (la cible, puis les
+    /// sources dans l'ordre) et les nœuds par leur clé, sans parcourir de table : des centaines de
+    /// liens posés ailleurs ne coûtent rien à la lecture d'une page. De même la clôture d'une
+    /// intention lit ses lignes par l'index partiel `search_outbox_taken`, pas toute l'outbox, les
+    /// pages jamais indexées par `search_state_never`, et le retard d'un espace part de ses deux
+    /// petits ensembles. Seuls se parcourent la liste des sources donnée (`json_each`), la
+    /// sous-requête qui en sort (`f`), un index partiel, et l'outbox pour le retard d'un espace.
+    /// Le plan est le même quand les statistiques de `ANALYZE` font croire un espace minuscule et
+    /// les pages jamais indexées innombrables : le retard d'un espace a son ordre imposé.
+    #[tokio::test]
+    async fn backlink_sources_are_read_from_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.db");
+        let store = Store::open(&path).await.unwrap();
+        check_plans(&store).await;
+        store.close().await;
+
+        let side = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display()))
+            .await
+            .unwrap();
+        for sql in [
+            "ANALYZE",
+            "DELETE FROM sqlite_stat1",
+            "INSERT INTO sqlite_stat1 (tbl, idx, stat) VALUES \
+             ('nodes', 'nodes_by_parent', '100000 1 1 1'), \
+             ('search_state', 'search_state_never', '100000 1'), \
+             ('search_outbox', 'search_outbox', '100000 1 1')",
+        ] {
+            sqlx::query(sql).execute(&side).await.unwrap();
+        }
+        side.close().await;
+        let store = Store::open(&path).await.unwrap();
+        check_plans(&store).await;
         store.close().await;
     }
 }

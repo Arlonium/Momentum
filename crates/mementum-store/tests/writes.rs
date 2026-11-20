@@ -641,10 +641,12 @@ async fn page_copies_share_one_lane_whoever_asks() {
 
 /// Les écritures de l'index de recherche ont une voie à elles (Ruling R908), sans priorité, quel
 /// que soit le compte de la tâche qui les mène : entre deux transactions de l'index, la file sert
-/// une écriture de chaque autre voie qui attend. Trois indexations (chacune au nom d'un autre
-/// compte), puis une écriture de la voie commune, puis trois d'Olga : l'ordre est index, commune,
-/// Olga, index, Olga, index, Olga. Dans la voie de chaque compte, les trois indexations
-/// passeraient d'affilée ; dans la voie commune, l'écriture commune les attendrait toutes.
+/// une écriture de chaque autre voie qui attend. Trois transactions de l'index (une indexation de
+/// page, puis deux tranches d'une reconstruction ; deux indexations ne sont jamais en file
+/// ensemble, elles passent une à une par le verrou de l'indexeur, R975), chacune au nom d'un autre
+/// compte, puis une écriture de la voie commune, puis trois d'Olga : l'ordre est index, commune,
+/// Olga, index, Olga, index, Olga. Dans la voie de chaque compte, les trois passeraient d'affilée ;
+/// dans la voie commune, l'écriture commune les attendrait toutes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn index_writes_share_one_lane() {
     use mementum_store::IndexedBlock;
@@ -657,10 +659,14 @@ async fn index_writes_share_one_lane() {
         let node = page(&f.space, None, None, &format!("P{i}"));
         pages.push(f.store.create_node(node).await.unwrap().id);
     }
+    // Les lignes d'outbox des pages créées : les tranches de la reconstruction les récrivent.
     exec_sql(
         &f.db,
-        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+        "DELETE FROM search_outbox; \
+         CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
          CREATE TRIGGER witness_index AFTER INSERT ON blocks_index \
+         BEGIN INSERT INTO witness (what) VALUES ('index'); END; \
+         CREATE TRIGGER witness_rebuild AFTER INSERT ON search_outbox WHEN NEW.block_id = '' \
          BEGIN INSERT INTO witness (what) VALUES ('index'); END; \
          CREATE TRIGGER witness_space AFTER INSERT ON spaces \
          BEGIN INSERT INTO witness (what) VALUES (NEW.name); END;",
@@ -668,9 +674,10 @@ async fn index_writes_share_one_lane() {
     .await;
     let held = f.store.hold_writes().await;
     let mut writes = Vec::new();
-    for (i, node) in pages.iter().copied().enumerate() {
+    writes.push(tokio::spawn(writes_by(Some(Uuid::now_v7()), {
         let store = f.store.clone();
-        writes.push(tokio::spawn(writes_by(Some(Uuid::now_v7()), async move {
+        let node = pages[0];
+        async move {
             let links: [Uuid; 0] = [];
             let row = IndexedBlock {
                 block_id: "a",
@@ -680,8 +687,15 @@ async fn index_writes_share_one_lane() {
                 links: &links,
             };
             store.index_page(node, 1, &[row], false).await.map(|_| ())
+        }
+    })));
+    queued(&f.store, 1).await;
+    for (i, after) in [None, Some(pages[0])].into_iter().enumerate() {
+        let store = f.store.clone();
+        writes.push(tokio::spawn(writes_by(Some(Uuid::now_v7()), async move {
+            store.outbox_everything(after, 1).await.map(|_| ())
         })));
-        queued(&f.store, i + 1).await;
+        queued(&f.store, i + 2).await;
     }
     writes.push(tokio::spawn({
         let store = f.store.clone();

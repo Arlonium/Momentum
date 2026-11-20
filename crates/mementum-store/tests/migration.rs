@@ -124,13 +124,33 @@ const ALL_TABLES: [&str; 22] = [
 /// Les tables des fichiers et des favoris, que la migration `0004` crée (Ruling R243).
 const FILES_AND_FAVORITES_TABLES: [&str; 3] = ["files", "attachments", "favorites"];
 
-/// Les tables de l'index de recherche, que la migration `0005` crée vides (lot 4, Task S1).
+/// Les tables de l'index de recherche, que la migration `0005` crée (lot 4, Task S1) : vides, sauf
+/// `search_state`, où chaque page existante est notée jamais indexée (Ruling R964).
 const SEARCH_TABLES: [&str; 4] = [
     "blocks_index",
     "page_links",
     "search_state",
     "search_outbox",
 ];
+
+/// Les tables de l'index de recherche que la migration `0005` laisse vides.
+const EMPTY_SEARCH_TABLES: [&str; 3] = ["blocks_index", "page_links", "search_outbox"];
+
+/// Ruling R964 : après la migration `0005`, chaque page a sa ligne de `search_state`, à `-1`
+/// (jamais indexée), et rien d'autre n'y est (ni un dossier, ni un autre état).
+async fn every_page_is_never_indexed(db: &Path) {
+    let pages = int(db, "SELECT COUNT(*) FROM nodes WHERE kind = 'page'").await;
+    assert!(pages > 0);
+    let never = int(
+        db,
+        "SELECT COUNT(*) FROM search_state s JOIN nodes n ON n.id = s.node_id \
+         WHERE n.kind = 'page' AND s.indexed_seq = -1 AND s.failed_seq IS NULL \
+         AND s.truncated = 0",
+    )
+    .await;
+    assert_eq!(never, pages);
+    assert_eq!(int(db, "SELECT COUNT(*) FROM search_state").await, pages);
+}
 
 /// Les tables de la collaboration, que la migration `0003` crée et que les tâches suivantes du
 /// lot remplissent.
@@ -789,7 +809,8 @@ async fn lot2_database_gains_the_collaboration_tables() {
     assert_eq!(store.space_lsn(Uuid::now_v7()).await.unwrap(), None);
 
     // Les cinq tables de la collaboration, les trois des fichiers et des favoris et les quatre de
-    // l'index de recherche, vides, et rien d'autre de neuf.
+    // l'index de recherche, vides (chaque page notée jamais indexée mise à part), et rien d'autre
+    // de neuf.
     assert_eq!(table_names(&db).await, ALL_TABLES);
     for table in COLLABORATION_TABLES
         .into_iter()
@@ -797,12 +818,19 @@ async fn lot2_database_gains_the_collaboration_tables() {
         .chain(SEARCH_TABLES)
     {
         assert!(!lot2_tables.iter().any(|t| t == table), "{table}");
+    }
+    for table in COLLABORATION_TABLES
+        .into_iter()
+        .chain(FILES_AND_FAVORITES_TABLES)
+        .chain(EMPTY_SEARCH_TABLES)
+    {
         assert_eq!(
             int(&db, &format!("SELECT COUNT(*) FROM {table}")).await,
             0,
             "{table}"
         );
     }
+    every_page_is_never_indexed(&db).await;
     assert_eq!(
         foreign_tables(&db, "comment_threads").await,
         set(&["nodes", "users"])
@@ -937,11 +965,17 @@ async fn lot3a_database_gains_files_and_favorites() {
     assert_eq!(store.space_lsn(team).await.unwrap(), Some(12));
     assert_eq!(store.space_rev(team).await.unwrap(), Some(7));
 
-    // Les trois tables neuves, et les quatre de l'index de recherche, vides, et rien d'autre de
-    // neuf.
+    // Les trois tables neuves, et les quatre de l'index de recherche, vides (chaque page notée
+    // jamais indexée mise à part), et rien d'autre de neuf.
     assert_eq!(table_names(&db).await, ALL_TABLES);
     for table in FILES_AND_FAVORITES_TABLES.into_iter().chain(SEARCH_TABLES) {
         assert!(!lot3a_tables.iter().any(|t| t == table), "{table}");
+    }
+    every_page_is_never_indexed(&db).await;
+    for table in FILES_AND_FAVORITES_TABLES
+        .into_iter()
+        .chain(EMPTY_SEARCH_TABLES)
+    {
         assert_eq!(
             int(&db, &format!("SELECT COUNT(*) FROM {table}")).await,
             0,
@@ -994,11 +1028,11 @@ async fn lot3a_database_gains_files_and_favorites() {
 }
 
 /// La migration `0005` sur une base du lot 3 (lot 4, Task S1) : tout ce qui y était reste à
-/// l'identique, valeur pour valeur ; les quatre tables de l'index de recherche existent, vides
-/// (la migration ne remplit rien), et leurs clés étrangères visent ce qu'il faut ; rien n'est
-/// indexé, aucune intention n'est posée, et le rattrapage du démarrage trouve toutes les pages de
-/// l'instance, corbeille comprise, et elles seules (pas un dossier) ; la copie d'avant migration
-/// porte le nom de `0005` ; une seconde ouverture ne migre plus rien.
+/// l'identique, valeur pour valeur ; les quatre tables de l'index de recherche existent, et leurs
+/// clés étrangères visent ce qu'il faut ; chaque page de l'instance, corbeille comprise, et elles
+/// seules (pas un dossier) est notée jamais indexée (Ruling R964) : `never_indexed`, le rattrapage
+/// et le retard d'un espace la trouvent ; rien d'autre n'est écrit, aucune intention n'est posée ;
+/// la copie d'avant migration porte le nom de `0005` ; une seconde ouverture ne migre plus rien.
 #[tokio::test]
 async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
     let dir = tempfile::tempdir().unwrap();
@@ -1050,12 +1084,15 @@ async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
     assert_eq!(table_names(&db).await, ALL_TABLES);
     for table in SEARCH_TABLES {
         assert!(!lot3_tables.iter().any(|t| t == table), "{table}");
+    }
+    for table in EMPTY_SEARCH_TABLES {
         assert_eq!(
             int(&db, &format!("SELECT COUNT(*) FROM {table}")).await,
             0,
             "{table}"
         );
     }
+    every_page_is_never_indexed(&db).await;
     for table in ["blocks_index", "page_links", "search_state"] {
         assert_eq!(foreign_tables(&db, table).await, set(&["nodes"]), "{table}");
     }
@@ -1070,10 +1107,11 @@ async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
         assert!(refused_by_foreign_key(&db, faulty).await, "{faulty}");
     }
 
-    // Rien d'indexé, aucune intention ; le rattrapage trouve les pages, pas le dossier.
-    assert!(store.never_indexed(100).await.unwrap().is_empty());
+    // Rien d'indexé, aucune intention ; chaque page est jamais indexée, le rattrapage la trouve
+    // aussi, et pas le dossier.
     let tokens = store.feed_tokens().await.unwrap();
     assert_eq!((tokens.committed, tokens.intent), (None, None));
+    assert_eq!(store.projection_version().await.unwrap(), None);
     let pages: Vec<Uuid> = texts(&db, "SELECT id FROM nodes WHERE kind = 'page' ORDER BY id")
         .await
         .into_iter()
@@ -1084,10 +1122,11 @@ async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
         3,
         "deux pages de l'équipe, dont une jetée, et une à soi"
     );
+    assert_eq!(store.never_indexed(100).await.unwrap(), pages);
     let stale = store.stale_pages(None, 100).await.unwrap();
     assert_eq!(stale.pages, pages);
     assert_eq!(stale.next, None);
-    // Une page sans ligne n'a jamais été indexée : l'espace est en retard tant qu'elle l'est.
+    // Une page jamais indexée : l'espace est en retard tant qu'elle l'est.
     let own_pages: Vec<Uuid> = texts(
         &db,
         &format!("SELECT id FROM nodes WHERE space_id = '{own}' AND kind = 'page'"),

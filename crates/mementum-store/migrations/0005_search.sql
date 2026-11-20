@@ -1,10 +1,18 @@
 -- Lot 4 : l'index de recherche (plan du lot 4, Rulings R901, R909, R918, R919 ; Task S1, R936 à
--- R942).
+-- R939, R961 à R964, R977).
 --
 -- Une migration pour le lot (Ruling R139, amendé par R243) : `0004` est figée depuis le
 -- 2026-11-20 (R936). Celle-ci peut changer jusqu'à la clôture du lot 4 : aucun binaire du lot
--- n'ouvre d'ici là les données d'une instance que quelqu'un regarde. Elle ne remplit rien : ses
--- tables naissent vides, et une instance existante est indexée par le serveur, en fond (R915).
+-- n'ouvre d'ici là les données d'une instance que quelqu'un regarde. Elle ne remplit qu'une chose :
+-- chaque page existante est notée jamais indexée (`search_state`, `-1` ; R964), une instruction,
+-- une ligne courte par page. Une page créée ou dupliquée l'est de même dans sa transaction
+-- (R918) : aucune page n'est sans ligne, et le retard d'un espace se lit dans l'index partiel des
+-- pages jamais indexées, sans parcourir ses pages. Le reste naît vide ; une instance existante est
+-- indexée par le serveur, en fond (R915).
+--
+-- `instance_settings` garde, sous `search.committed` et `search.intent`, les deux jetons de
+-- l'index plein texte (R909), et sous `search.projection`, la version de la projection que
+-- l'index reflète (`PROJECTION_VERSION` de `mementum-search`, R960, R977).
 --
 -- `blocks_index` est la projection du document d'une page (conception §5.3) : une ligne par bloc
 -- qui porte du texte, sous sa clé `(node_id, block_id)`, sans la colonne `path` de la conception
@@ -18,8 +26,8 @@
 --
 -- `search_state` dit où en est la projection de chaque page : le `seq` de la page que
 -- `blocks_index` reflète, `-1` pour une page jamais indexée (le marqueur d'une page créée ou
--- dupliquée, R918), le `seq` où sa lecture a échoué. Une page sans ligne n'a jamais été indexée
--- (une instance d'avant ce lot) : c'est le rattrapage du démarrage qui la trouve.
+-- dupliquée, R918, et chaque page d'une instance d'avant ce lot, R964), le `seq` où sa lecture a
+-- échoué.
 --
 -- `search_outbox` dit ce que l'index plein texte n'a pas encore validé (R919) : un bloc changé ou
 -- parti, ou la page entière (`block_id = ''` : son titre a changé, elle est supprimée, ou tout est
@@ -56,8 +64,11 @@ CREATE TABLE search_state (
     failed_seq  INTEGER,
     truncated   INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
--- Les pages jamais indexées (`Store::never_indexed`), sans parcourir toutes les pages.
+-- Les pages jamais indexées (`Store::never_indexed`, `Store::behind_in_space`), sans parcourir
+-- toutes les pages.
 CREATE INDEX search_state_never ON search_state (node_id) WHERE indexed_seq = -1;
+-- Chaque page existante : jamais indexée (R964).
+INSERT INTO search_state (node_id, indexed_seq) SELECT id, -1 FROM nodes WHERE kind = 'page';
 
 CREATE TABLE search_outbox (
     node_id  TEXT NOT NULL,

@@ -306,42 +306,88 @@ async fn an_older_read_takes_no_write_turn() {
     assert_eq!(indexed(&f.db, node).await["x"], "neuf");
 }
 
-/// Le `seq` est relu dans la transaction : une indexation plus récente, validée pendant qu'une
+/// Le `seq` est relu dans la transaction : un `seq` plus récent, posé pendant qu'une indexation
 /// plus ancienne attendait son tour (elle avait lu l'état d'avant), l'emporte, pour les blocs
-/// comme pour un échec.
+/// comme pour un échec. (Le verrou de l'indexeur, R975, fait qu'aucune autre indexation ne le
+/// pose en vrai : la garde reste, en filet, contre ce qu'une autre connexion écrit.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_newer_index_written_while_waiting_its_turn_wins() {
     let f = fresh().await;
     let node = new_page(&f, "Page").await;
     index(&f.store, node, 1, &[row("x", "un")]).await;
+    // Ce qu'une indexation plus récente aurait validé entre-temps (par une autre connexion : le
+    // tour de la file tenu ne tient pas le verrou de SQLite).
+    let newer = |seq: i64| {
+        format!(
+            "UPDATE blocks_index SET text = 'récent' WHERE node_id = '{node}'; \
+             UPDATE search_state SET indexed_seq = {seq} WHERE node_id = '{node}';"
+        )
+    };
+
     let held = f.store.hold_writes().await;
     let older = tokio::spawn({
         let store = f.store.clone();
         async move { index(&store, node, 3, &[row("x", "trois"), row("y", "trois")]).await }
     });
-    let failed = tokio::spawn({
-        let store = f.store.clone();
-        async move { store.index_failed(node, 4).await }
-    });
-    queued(&f.store, 2).await;
-    // Ce qu'une indexation plus récente aurait validé entre-temps (par une autre connexion : le
-    // tour de la file tenu ne tient pas le verrou de SQLite).
-    exec_sql(
-        &f.db,
-        &format!(
-            "UPDATE blocks_index SET text = 'cinq' WHERE node_id = '{node}'; \
-             UPDATE search_state SET indexed_seq = 5 WHERE node_id = '{node}';"
-        ),
-    )
-    .await;
+    queued(&f.store, 1).await;
+    exec_sql(&f.db, &newer(5)).await;
     drop(held);
     assert_eq!(older.await.unwrap(), 0);
+
+    let held = f.store.hold_writes().await;
+    let failed = tokio::spawn({
+        let store = f.store.clone();
+        async move { store.index_failed(node, 6).await }
+    });
+    queued(&f.store, 1).await;
+    exec_sql(&f.db, &newer(7)).await;
+    drop(held);
     failed.await.unwrap().unwrap();
     assert_eq!(
         indexed(&f.db, node).await,
-        BTreeMap::from([("x".to_string(), "cinq".to_string())])
+        BTreeMap::from([("x".to_string(), "récent".to_string())])
     );
-    assert_eq!(state(&f.db, node).await, Some((5, None, 0)));
+    assert_eq!(state(&f.db, node).await, Some((7, None, 0)));
+}
+
+/// Ruling R975 (relecture de S1, I1) : deux indexations de front sur une page ne laissent pas un
+/// index faux noté à jour. A (au `seq` 5) retire `y` ; B (au `seq` 7, où `y` est revenu, de même
+/// empreinte) a demandé à écrire pendant que A attendait son tour. Sans le verrou de l'indexeur,
+/// B lisait les empreintes d'avant A, tenait `y` pour inchangé, et notait la page à 7 sans `y`.
+/// Avec lui, B attend la fin de A, sans tour d'écriture, puis lit ce que A a laissé.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_indexings_of_a_page_at_once_leave_it_right() {
+    let f = fresh().await;
+    let node = new_page(&f, "Page").await;
+    let both = [row("x", "un"), row("y", "deux")];
+    index(&f.store, node, 1, &both).await;
+    let held = f.store.hold_writes().await;
+    let first = tokio::spawn({
+        let store = f.store.clone();
+        async move { index(&store, node, 5, &[row("x", "un")]).await }
+    });
+    queued(&f.store, 1).await;
+    let second = tokio::spawn({
+        let store = f.store.clone();
+        async move { index(&store, node, 7, &both).await }
+    });
+    // B attend : en file d'écriture (sans le verrou), ou au verrou de l'indexeur.
+    let deadline = std::time::Instant::now() + WAIT;
+    while f.store.queued_writes() != 2 && f.store.index_waits() != 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "la seconde n'attend nulle part"
+        );
+        tokio::task::yield_now().await;
+    }
+    let queued_then = f.store.queued_writes();
+    drop(held);
+    assert_eq!(first.await.unwrap(), 1);
+    second.await.unwrap();
+    let kept: Vec<String> = indexed(&f.db, node).await.into_keys().collect();
+    assert_eq!(kept, ["x", "y"]);
+    assert_eq!(state(&f.db, node).await, Some((7, None, 0)));
+    assert_eq!(queued_then, 1, "la seconde attendait le verrou, sans tour");
 }
 
 /// Une page plus grande que la borne d'une transaction s'écrit en plusieurs, dans la voie de
@@ -395,6 +441,47 @@ async fn a_page_over_the_transaction_bound_is_written_in_slices_and_marked_at_th
     assert_eq!(state(&f.db, node).await, Some((7, None, 0)));
 }
 
+/// Le `seq` est relu dans **chaque** tranche, pas seulement la première (relecture de S1, I3 b) :
+/// un `seq` plus récent posé entre deux tranches (par une écriture d'une autre voie, servie entre
+/// elles) arrête l'écriture ; les tranches d'après ne s'écrivent pas, et le `seq` posé reste.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_newer_seq_set_between_two_slices_stops_the_writing() {
+    let f = fresh().await;
+    let node = new_page(&f, "Page").await;
+    exec_sql(
+        &f.db,
+        &format!(
+            "CREATE TRIGGER newer AFTER INSERT ON spaces BEGIN \
+             UPDATE search_state SET indexed_seq = 9 WHERE node_id = '{node}'; END;"
+        ),
+    )
+    .await;
+    // Quatre blocs de 100 octets, deux par tranche sous une borne de 400 octets.
+    let rows: Vec<Row> = (0..4)
+        .map(|i| row(&format!("b{i}"), &"t".repeat(100)))
+        .collect();
+    let held = f.store.hold_writes().await;
+    let indexing = tokio::spawn({
+        let store = f.store.clone();
+        async move {
+            let views: Vec<IndexedBlock<'_>> = rows.iter().map(Row::view).collect();
+            store.index_page_bounded(node, 7, &views, false, 400).await
+        }
+    });
+    queued(&f.store, 1).await;
+    let probe = tokio::spawn({
+        let store = f.store.clone();
+        async move { store.create_space("Sonde", None).await }
+    });
+    queued(&f.store, 2).await;
+    drop(held);
+    assert_eq!(indexing.await.unwrap().unwrap().changed, 2);
+    probe.await.unwrap().unwrap();
+    let kept: Vec<String> = indexed(&f.db, node).await.into_keys().collect();
+    assert_eq!(kept, ["b0", "b1"]);
+    assert_eq!(state(&f.db, node).await, Some((9, None, 0)));
+}
+
 /// Une page plus grande que la borne, quand c'est par une suppression : les blocs partis
 /// comptent, et la dernière tranche note le `seq`.
 #[tokio::test]
@@ -436,7 +523,7 @@ async fn rows_with_an_empty_or_repeated_key_are_refused() {
 
 /// Ruling R918 : une page créée naît jamais indexée (`indexed_seq = -1`), avec sa ligne d'outbox
 /// de page entière (son titre), dans la transaction qui la crée, qu'elle ait un document ou non
-/// (R940) ; un dossier n'est pas cherché, et ne laisse rien. [`Store::never_indexed`] les lit.
+/// (R961) ; un dossier n'est pas cherché, et ne laisse rien. [`Store::never_indexed`] les lit.
 #[tokio::test]
 async fn a_created_page_is_born_never_indexed() {
     let f = fresh().await;
@@ -870,7 +957,8 @@ async fn stale_pages_takes_no_write_turn() {
 
 /// Le rattrapage du démarrage : une page dont le dernier `seq` gardé (journal ou instantané)
 /// dépasse ce que l'index reflète, même écrite par un autre `Store` (une commande, un test), qui
-/// n'annonce rien à celui-ci ; une page sans ligne (une instance d'avant ce lot). Pas un dossier,
+/// n'annonce rien à celui-ci ; une page sans ligne (aucune ne l'est depuis la migration `0005`,
+/// R964 : le filet reste, pour une ligne écrite à la main). Pas un dossier,
 /// pas une page à jour, pas une page dont la lecture a échoué à son dernier `seq`. Par lots,
 /// dans l'ordre des identifiants, au plus `limit` pages lues par appel.
 #[tokio::test]
@@ -940,7 +1028,7 @@ async fn stale_pages_names_a_page_written_by_another_store() {
 /// Une page dont la lecture échoue quitte l'index : ses lignes de `blocks_index` et de
 /// `page_links` sont retirées, ses lignes de bloc quittent l'outbox, sa ligne de page entière y est
 /// posée, et elle est notée à ce `seq` : ni jamais indexée, ni à rattraper, tant que son `seq` ne
-/// change pas (R941). Indexée de nouveau, l'échec est oublié.
+/// change pas (R962). Indexée de nouveau, l'échec est oublié.
 #[tokio::test]
 async fn a_failed_read_leaves_the_index_until_its_seq_changes() {
     let f = fresh().await;
@@ -977,10 +1065,10 @@ async fn a_failed_read_leaves_the_index_until_its_seq_changes() {
     assert_eq!(state(&f.db, node).await, Some((3, None, 0)));
 }
 
-/// Ce que l'index a de retard dans un espace : une page jamais indexée (à `-1`, ou sans ligne :
-/// une instance d'avant ce lot), une page qui a une ligne d'outbox (un titre changé, un bloc pas
-/// encore validé). Pas une page à jour, pas un dossier, pas une page d'un autre espace. Dans
-/// l'ordre des identifiants, au plus `limit`.
+/// Ce que l'index a de retard dans un espace : une page jamais indexée (à `-1` : créée, dupliquée,
+/// ou d'une instance d'avant ce lot, que la migration note ainsi, R964), une page qui a une ligne
+/// d'outbox (un titre changé, un bloc pas encore validé). Pas une page à jour, pas un dossier, pas
+/// une page d'un autre espace. Dans l'ordre des identifiants, au plus `limit`.
 #[tokio::test]
 async fn behind_in_space_names_unindexed_and_pending_pages_of_the_space() {
     let f = fresh().await;
@@ -1006,9 +1094,10 @@ async fn behind_in_space_names_unindexed_and_pending_pages_of_the_space() {
         index(&f.store, node, 0, &[row("a", "texte")]).await;
     }
     clear_outbox(&f.db).await;
+    // Ce que la migration `0005` pose pour une page d'avant ce lot.
     exec_sql(
         &f.db,
-        &format!("DELETE FROM search_state WHERE node_id = '{old}'"),
+        &format!("UPDATE search_state SET indexed_seq = -1 WHERE node_id = '{old}'"),
     )
     .await;
     f.store
@@ -1048,6 +1137,38 @@ async fn indexed_blocks_read_back() {
         Some(expected("b", "deux"))
     );
     assert_eq!(f.store.indexed_block(node, "z").await.unwrap(), None);
+}
+
+/// Ruling R977 : la version de la projection (`PROJECTION_VERSION` de `mementum-search`, R960)
+/// est gardée dans la base, à côté des jetons : l'indexeur reprojette tout quand elle diffère de
+/// la sienne. `None` tant qu'aucune n'est écrite (une instance neuve, ou d'avant ce lot). L'écrire
+/// ne touche pas aux jetons, n'avance ni `rev` ni `lsn`, et ne prend pas de tour si elle est déjà
+/// celle-là ; une valeur illisible est une erreur, jamais une version prise pour une autre.
+#[tokio::test]
+async fn the_projection_version_is_kept_in_the_base() {
+    let f = fresh().await;
+    assert_eq!(f.store.projection_version().await.unwrap(), None);
+    let mut changes = f.store.changes();
+    f.store.set_projection_version(1).await.unwrap();
+    assert_eq!(f.store.projection_version().await.unwrap(), Some(1));
+    f.store.set_projection_version(u32::MAX).await.unwrap();
+    assert_eq!(f.store.projection_version().await.unwrap(), Some(u32::MAX));
+    assert_eq!(changes.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(f.store.feed_tokens().await.unwrap(), FeedTokens::default());
+
+    let held = f.store.hold_writes().await;
+    tokio::time::timeout(WAIT, f.store.set_projection_version(u32::MAX))
+        .await
+        .expect("la même version a attendu un tour d'écriture")
+        .unwrap();
+    drop(held);
+
+    exec_sql(
+        &f.db,
+        "UPDATE instance_settings SET value = 'deux' WHERE key = 'search.projection'",
+    )
+    .await;
+    assert!(f.store.projection_version().await.is_err());
 }
 
 /// Tout reconstruire passe par tranches de pages, chacune sa transaction dans la voie de l'index :
@@ -1161,6 +1282,41 @@ async fn finish_feed_keeps_a_line_changed_meanwhile() {
         Err(StoreError::Stale)
     ));
     assert_eq!(outbox(&f.db).await, [waiting(node, "x")]);
+}
+
+/// Ruling R939 (relecture de S1, I3 a) : une suppression pendant une intention posée retire le
+/// jeton de la ligne de page entière qu'elle prend : la clôture la laisse, sans jeton, pour que les
+/// entrées de la page quittent l'index plein texte à l'intention suivante. Les lignes de bloc de la
+/// page, prises elles aussi, partent avec la suppression.
+#[tokio::test]
+async fn a_deletion_during_an_intent_keeps_its_line_past_the_closing() {
+    let f = fresh().await;
+    let by = account(&f.store, "olga").await.id;
+    let node = new_page(&f, "Supprimée").await;
+    index(&f.store, node, 1, &[row("x", "un")]).await;
+    let FeedStart::Begun(feed) = f.store.begin_feed(10).await.unwrap() else {
+        panic!("une intention");
+    };
+    assert_eq!(feed.lines.len(), 2, "la page entière et son bloc");
+    f.store.trash_node(node, by).await.unwrap();
+    f.store.delete_node(node).await.unwrap();
+    f.store.finish_feed(&feed.token).await.unwrap();
+    assert_eq!(outbox(&f.db).await, [waiting(node, "")]);
+}
+
+/// Ruling R939 (relecture de S1, I3 a) : une reconstruction pendant une intention posée retire le
+/// jeton de chaque ligne de page entière qu'elle récrit : la clôture les laisse, sans jeton.
+#[tokio::test]
+async fn a_rebuild_during_an_intent_keeps_its_lines_past_the_closing() {
+    let f = fresh().await;
+    let node = new_page(&f, "Page").await;
+    let FeedStart::Begun(feed) = f.store.begin_feed(10).await.unwrap() else {
+        panic!("une intention");
+    };
+    assert_eq!(feed.lines.len(), 1);
+    assert_eq!(f.store.outbox_everything(None, 10).await.unwrap(), None);
+    f.store.finish_feed(&feed.token).await.unwrap();
+    assert_eq!(outbox(&f.db).await, [waiting(node, "")]);
 }
 
 /// Défaire une intention rend ses lignes, sans jeton, et retire l'intention ; le jeton de la
@@ -1285,7 +1441,7 @@ async fn backlink_sources_are_distinct_of_the_space_and_ordered() {
 
 /// L'extrait d'un rétrolien est coupé par la base, entre deux caractères : un bloc de 64 Kio
 /// rend la longueur demandée, pas son texte entier. Pour chaque source, le premier bloc qui mène à
-/// la cible, dans l'ordre des clés (R942) ; une source qui n'y mène pas n'est pas rendue.
+/// la cible, dans l'ordre des clés (R963) ; une source qui n'y mène pas n'est pas rendue.
 #[tokio::test]
 async fn backlink_excerpts_are_cut_by_the_database() {
     let f = fresh().await;

@@ -267,6 +267,12 @@ pub struct Store {
     /// Les copies de pages à refuser, pour les tests (`Store::refuse_next_copies`).
     #[cfg(feature = "test-hooks")]
     copies_to_refuse: Arc<duplicate::CopiesToRefuse>,
+    /// Le verrou de l'indexeur (`search.rs`, Ruling R975) : une projection de page écrite à la
+    /// fois, de la lecture de ses empreintes à sa dernière tranche.
+    index_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Les écritures de l'index qui attendent ce verrou, pour les tests (`Store::index_waits`).
+    #[cfg(feature = "test-hooks")]
+    index_waits: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Store {
@@ -333,6 +339,9 @@ impl Store {
             changes: tokio::sync::broadcast::channel(spaces::CHANGES_CAPACITY).0,
             #[cfg(feature = "test-hooks")]
             copies_to_refuse: Arc::default(),
+            index_lock: Arc::default(),
+            #[cfg(feature = "test-hooks")]
+            index_waits: Arc::default(),
         })
     }
 
