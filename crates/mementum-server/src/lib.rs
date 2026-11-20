@@ -168,6 +168,14 @@
 //! prennent aussi les envois, entre la pose et l'attache), la base retire ceux qu'aucune attache ne
 //! nomme encore, et le disque ceux-là ; un contenu que la base ne connaît pas n'est jamais regardé.
 //!
+//! **Index de recherche** (`indexer.rs`, lot 4, Rulings R906, R907). Une tâche de fond tient à
+//! jour, dans la base, la projection de chaque page (`blocks_index`, `page_links`) : elle relit
+//! ce que le store garde, jamais l'acteur d'une page, deux secondes après la dernière écriture
+//! (quinze au plus), et tout de suite pour une page créée ou dupliquée. Au démarrage, elle
+//! rattrape ce qui n'est pas indexé, sans que le serveur l'attende. Elle n'écrit que la
+//! différence, dans sa voie de la file d'écriture. L'index plein texte et les routes de
+//! recherche viennent ensuite (Tasks S4c, S5, S6).
+//!
 //! **Historique** (`routes/versions.rs`, Ruling R135). L'acteur de chaque page coupe ses
 //! versions (`mementum-sync`) : l'état complet de la page, avec les comptes qui l'ont modifiée
 //! depuis la version d'avant, avant l'écriture qui suit de `MEMENTUM_VERSION_EVERY_SECS` (dix

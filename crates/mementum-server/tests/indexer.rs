@@ -706,3 +706,310 @@ async fn the_indexer_stops_before_the_store_closes() {
     assert_eq!(texts(&after, page).await, ["À écrire avant de fermer"]);
     after.close().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Mesures (`#[ignore]`, en release, une à la fois : `cargo test --release -p mementum-server
+// --test indexer -- --ignored --nocapture --test-threads=1`). Aucune n'est un critère de refus :
+// leurs lignes `MESURE` vont au registre.
+// ---------------------------------------------------------------------------------------------
+
+/// Les mesures de ce binaire passent une à la fois (Ruling R341).
+static ALONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Le rang `p` (de 0 à 100) d'une série, au plus proche rang.
+fn rank(values: &mut [Duration], p: usize) -> Duration {
+    values.sort();
+    let at = (values.len() * p).div_ceil(100).max(1) - 1;
+    values[at.min(values.len() - 1)]
+}
+
+/// Une page de l'espace, écrite par ce store, avec ce document.
+async fn stored(store: &Store, space: Uuid, title: &str, doc: Option<Vec<u8>>) -> Uuid {
+    store
+        .create_node(NewNode {
+            space_id: space,
+            parent_id: None,
+            after: None,
+            kind: NodeKind::Page,
+            title: title.to_string(),
+            created_by: None,
+            grants: Vec::new(),
+            doc,
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+/// Le premier sel de l'en-tête du WAL : il change à chaque fois que le journal repart du début,
+/// c'est-à-dire après un point de contrôle complet.
+fn wal_salt(db: &std::path::Path) -> Option<[u8; 4]> {
+    use std::io::Read;
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    let mut header = [0u8; 20];
+    std::fs::File::open(wal)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    Some([header[16], header[17], header[18], header[19]])
+}
+
+/// Step 0 de la Task S4b : le tour d'écriture que tient une transaction de l'index, sur
+/// `Store::index_page` seul, selon le poids de ses lignes changées, et ce que la frappe d'une
+/// autre page (une écriture de son journal, validée sur le disque) attend pendant ce temps. Le
+/// nombre de fois où le WAL est reparti du début dit les points de contrôle déclenchés.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure, en release"]
+async fn measure_the_write_turn_held_by_an_index_transaction() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _alone = ALONE.lock().await;
+    const ROW_TEXT: usize = 900;
+    // Une frappe : deux octets au journal de sa page, validés sur le disque.
+    const KEYSTROKE: &[u8] = &[0, 0];
+    for size in [64usize << 10, 256 << 10, 1 << 20, 4 << 20] {
+        let dir = common::tmp::TestDir::new();
+        let db = dir.path().join("m.db");
+        let store = Store::open(&db).await.unwrap();
+        let space = store.create_space("Espace", None).await.unwrap().id;
+        let page = stored(&store, space, "Indexée", None).await;
+        let typed = stored(&store, space, "Tapée", None).await;
+        let rows = size / 1024;
+        let rounds = ((32usize << 20) / size).clamp(16, 128);
+
+        // La frappe seule, d'abord.
+        let mut alone = Vec::new();
+        for _ in 0..100 {
+            let start = std::time::Instant::now();
+            store
+                .append_updates(typed, &[KEYSTROKE], None)
+                .await
+                .unwrap();
+            alone.push(start.elapsed());
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let typing = tokio::spawn({
+            let (store, stop) = (store.clone(), stop.clone());
+            async move {
+                let mut waits = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    let start = std::time::Instant::now();
+                    store
+                        .append_updates(typed, &[KEYSTROKE], None)
+                        .await
+                        .unwrap();
+                    waits.push(start.elapsed());
+                }
+                waits
+            }
+        });
+        let (mut held, mut restarts, mut salt) = (Vec::new(), 0, wal_salt(&db));
+        for round in 0..rounds {
+            let texts: Vec<(String, String, [u8; 8])> = (0..rows)
+                .map(|i| {
+                    let text = format!("{round:06} {i:06} {}", "x".repeat(ROW_TEXT));
+                    (format!("bloc-{i:06}"), text, (round as u64).to_le_bytes())
+                })
+                .collect();
+            let views: Vec<mementum_store::IndexedBlock<'_>> = texts
+                .iter()
+                .map(|(block_id, text, hash)| mementum_store::IndexedBlock {
+                    block_id,
+                    kind: "paragraph",
+                    text,
+                    hash,
+                    links: &[],
+                })
+                .collect();
+            let start = std::time::Instant::now();
+            let written = store
+                .index_page_bounded(page, round as i64 + 1, &views, false, usize::MAX)
+                .await
+                .unwrap();
+            held.push(start.elapsed());
+            assert_eq!(written.changed, rows);
+            let now = wal_salt(&db);
+            if now != salt {
+                restarts += 1;
+                salt = now;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        let mut during = typing.await.unwrap();
+        println!(
+            "MESURE transaction de l'index de {} Kio ({rows} lignes de {ROW_TEXT} octets, {rounds} \
+             transactions) : tenue p50 {:?}, p95 {:?}, max {:?} ; frappe d'une autre page seule \
+             p95 {:?}, pendant ({} frappes) p50 {:?}, p95 {:?}, max {:?} ; le WAL est reparti du \
+             début {restarts} fois",
+            size >> 10,
+            rank(&mut held, 50),
+            rank(&mut held, 95),
+            rank(&mut held, 100),
+            rank(&mut alone, 95),
+            during.len(),
+            rank(&mut during, 50),
+            rank(&mut during, 95),
+            rank(&mut during, 100),
+        );
+        store.close().await;
+    }
+}
+
+/// Un MMD de `blocks` paragraphes d'une phrase.
+fn paragraphs(blocks: usize, word: &str) -> String {
+    let lines: Vec<String> = (0..blocks)
+        .map(|i| format!("Ligne {i:05} du {word}, une phrase ordinaire d'une page."))
+        .collect();
+    format!("{}\n", lines.join("\n\n"))
+}
+
+/// Step 3 : indexer une page de 10 000 blocs, phase par phase (les appels mêmes de l'indexeur) :
+/// relire la page gardée, lire ses blocs et les projeter, écrire les tables ; puis la même page
+/// après une frappe (un bloc changé).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure, en release"]
+async fn measure_indexing_a_10000_block_page() {
+    let _alone = ALONE.lock().await;
+    const BLOCKS: usize = 10_000;
+    let dir = common::tmp::TestDir::new();
+    let store = Store::open(&dir.path().join("m.db")).await.unwrap();
+    let space = store.create_space("Espace", None).await.unwrap().id;
+    let page = stored(
+        &store,
+        space,
+        "Grande",
+        Some(state_of(&paragraphs(BLOCKS, "plan"))),
+    )
+    .await;
+
+    for pass in ["première indexation", "après une frappe"] {
+        let start = std::time::Instant::now();
+        let (doc, seq) = mementum_sync::stored_page(&store, page)
+            .await
+            .unwrap()
+            .unwrap();
+        let read = start.elapsed();
+        let start = std::time::Instant::now();
+        let (projection, doc) = tokio::task::spawn_blocking(move || {
+            (mementum_search::project(&doc.read_blocks(), None), doc)
+        })
+        .await
+        .unwrap();
+        let projected = start.elapsed();
+        let rows: Vec<mementum_store::IndexedBlock<'_>> = projection
+            .rows
+            .iter()
+            .map(|row| mementum_store::IndexedBlock {
+                block_id: &row.block_id,
+                kind: row.kind,
+                text: &row.text,
+                hash: &row.hash,
+                links: &row.links,
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let written = store
+            .index_page(page, seq, &rows, projection.truncated)
+            .await
+            .unwrap();
+        println!(
+            "MESURE indexer une page de {BLOCKS} blocs, {pass} : relire {read:?}, lire les blocs \
+             et projeter {projected:?}, écrire {:?} ({} lignes écrites, {} lignes projetées)",
+            start.elapsed(),
+            written.changed,
+            rows.len(),
+        );
+        // La frappe : un mot dans le premier bloc, écrit au journal.
+        let first = doc.read_blocks()[0].id.clone();
+        let update = doc.replace_text(&first, 0, 0, "Mot ").unwrap();
+        store.append_updates(page, &[&update], None).await.unwrap();
+    }
+    store.close().await;
+}
+
+/// Step 3 : la première indexation d'une instance existante par l'indexeur du serveur, et la
+/// frappe d'un autre pendant ce temps (vue par un second onglet), comparée à la même frappe une
+/// fois l'indexeur au repos. L'échelle est dite par la ligne `MESURE`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure, en release"]
+async fn keystroke_seen_while_10000_pages_are_first_indexed() {
+    let _alone = ALONE.lock().await;
+    const PAGES: usize = 10_000;
+    const BLOCKS: usize = 10;
+    const KEYSTROKES: usize = 200;
+    // Une instance avec un compte, arrêtée, puis remplie par un autre `Store`.
+    let t = default_app().await;
+    let olga = t.account("Olga").await;
+    let typed = new_page(&olga, "Tapée").await;
+    let (space, session) = (olga.space, olga.browser.session());
+    t.indexer.settled().await;
+    drop(olga);
+    let (dir, cfg) = t.stop().await;
+    let other = Store::open(&cfg.db_path()).await.unwrap();
+    let doc = state_of(&paragraphs(BLOCKS, "rattrapage"));
+    let filling = std::time::Instant::now();
+    for i in 0..PAGES {
+        stored(&other, space, &format!("Page {i}"), Some(doc.clone())).await;
+    }
+    other.close().await;
+    println!(
+        "MESURE {PAGES} pages de {BLOCKS} blocs créées en {:?}",
+        filling.elapsed()
+    );
+
+    let t = TestApp::on(dir, cfg).await;
+    let started = std::time::Instant::now();
+    let browser = t.browser();
+    browser.set_session(session.as_deref());
+    let addr = t.listen().await;
+    let writer = synced_as(&browser, &sync_url(addr, typed)).await;
+    let reader = synced_as(&browser, &sync_url(addr, typed)).await;
+    let block = writer.blocks()[0].id.clone();
+    let settling = tokio::spawn({
+        let indexer = t.indexer.clone();
+        async move {
+            indexer.settled().await;
+            started.elapsed()
+        }
+    });
+    let mut typed_so_far = 0;
+    let mut keystrokes = async |count: usize| {
+        let mut seen = Vec::new();
+        for _ in 0..count {
+            typed_so_far += 1;
+            let expected = typed_so_far;
+            let start = std::time::Instant::now();
+            writer.type_text(&block, "x");
+            assert!(
+                reader
+                    .wait_until(common::WAIT, |c| {
+                        mementum_md::block_text(&c.blocks()[0]).len() == expected
+                    })
+                    .await,
+                "la frappe n'est pas arrivée chez l'autre onglet"
+            );
+            seen.push(start.elapsed());
+        }
+        seen
+    };
+    let mut during = keystrokes(KEYSTROKES).await;
+    let still_indexing = !settling.is_finished();
+    let indexed_in = settling.await.unwrap();
+    // L'indexeur a fini son rattrapage ; la page tapée attend encore son calme.
+    t.indexer.settled().await;
+    let mut after = keystrokes(KEYSTROKES).await;
+    let reads = t.indexer.reads();
+    println!(
+        "MESURE première indexation de {PAGES} pages de {BLOCKS} blocs par le serveur : {indexed_in:?} \
+         ({reads} pages relues) ; frappe vue par un autre onglet pendant ({KEYSTROKES} frappes, \
+         indexation encore en cours à la dernière : {still_indexing}) p50 {:?}, p95 {:?}, max {:?} ; \
+         indexeur au repos p50 {:?}, p95 {:?}, max {:?}",
+        rank(&mut during, 50),
+        rank(&mut during, 95),
+        rank(&mut during, 100),
+        rank(&mut after, 50),
+        rank(&mut after, 95),
+        rank(&mut after, 100),
+    );
+}

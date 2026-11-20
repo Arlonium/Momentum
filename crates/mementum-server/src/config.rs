@@ -13,13 +13,14 @@
 //! | calme attendu sur une page avant de l'indexer, en millisecondes (de 0 à 600 000) | `MEMENTUM_INDEX_AFTER_MS` | aucune | `2000` |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
-//! l'emporte sur le défaut. Quatre derniers réglages n'ont ni variable ni
+//! l'emporte sur le défaut. Cinq derniers réglages n'ont ni variable ni
 //! option : l'intervalle des pings du canal de l'espace
 //! ([`Config::events_ping`]) et le délai d'un envoi de fichier qui stagne
 //! ([`Config::upload_idle`]), que seuls les tests raccourcissent, et les
-//! réglages d'ouverture de la base ([`Config::store`]) et le poids le plus
-//! grand d'une copie de pages ([`Config::max_duplicated_bytes`]), que seuls
-//! les tests changent.
+//! réglages d'ouverture de la base ([`Config::store`]), le poids le plus
+//! grand d'une copie de pages ([`Config::max_duplicated_bytes`]) et le plus
+//! long délai avant d'indexer une page écrite sans relâche
+//! ([`Config::index_at_most`]), que seuls les tests changent.
 //!
 //! Le serveur n'écoute jamais par défaut sur une autre interface que la
 //! boucle locale, et les inscriptions sont par défaut sur invitation (Ruling
