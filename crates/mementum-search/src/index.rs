@@ -12,9 +12,10 @@
 //! voit pas. Quatre règles tiennent cela, chacune avec son test (`tests/index.rs`) :
 //! - la note d'un mot est la BM25 du moteur sous des statistiques constantes ([`Constants`]),
 //!   jamais celles de l'index (Ruling R923) ;
-//! - **chaque note de mot est posée sur une grille** ([`on_grid`]) avant d'être additionnée : le
-//!   moteur additionne les notes des mots d'une requête dans un ordre qui tient aux fréquences
-//!   des mots dans le segment, donc aux autres, et une somme de flottants dépend de son ordre ;
+//! - **chaque note de mot est posée sur une grille** ([`on_grid`]) avant d'être additionnée
+//!   (Ruling R965) : le moteur range les mots voulus d'une requête par leur fréquence dans le
+//!   segment (`intersect_scorers` de Tantivy 0.27), donc d'après les autres, puis additionne
+//!   leurs notes dans cet ordre, et une somme de trois flottants ou plus dépend de son ordre ;
 //!   sur la grille, les sommes sont exactes, donc les mêmes dans tout ordre ;
 //! - deux notes égales se départagent par une valeur tirée de l'entrée seule, jamais par son
 //!   adresse dans l'index ni par le rang de son bloc (Ruling R922) ;
@@ -487,9 +488,10 @@ impl Bm25StatisticsProvider for Constants {
     }
 }
 
-/// Pose une note de mot sur la grille, sans jamais la rendre nulle.
+/// Pose une note de mot sur la grille, au plus proche, sans jamais la rendre nulle. Par une
+/// conversion en entier : c'est le chemin de chaque entrée trouvée.
 fn on_grid(note: Score) -> Score {
-    (note * GRID).round().max(1.0) / GRID
+    ((note * GRID + 0.5) as u32).max(1) as Score / GRID
 }
 
 /// Un mot entier dans un champ : le terme exact du moteur, sa note multipliée par `boost` puis

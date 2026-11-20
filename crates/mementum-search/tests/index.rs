@@ -1028,6 +1028,15 @@ fn removing_a_page_removes_all_its_entries() {
     assert_eq!(b.numbers("mot", &all), [2]);
     assert!(b.hits("partie", &all).is_empty());
     assert_eq!(b.traced("mot", &all, None).1.collected, 1);
+    // Une page renommée : retirée puis récrite dans la même validation, elle n'est trouvée que
+    // par ce qui est écrit après le retrait.
+    b.index.remove_page(page(2)).expect("retirer");
+    b.page(2, "Renommée", &[("b1", "un mot")]);
+    b.commit();
+    assert_eq!(b.numbers("mot", &all), [2]);
+    assert_eq!(b.traced("mot", &all, None).1.collected, 1);
+    assert_eq!(b.numbers("renommée", &all), [2]);
+    assert!(b.hits("restée", &all).is_empty());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1302,4 +1311,27 @@ fn the_page_set_holds_what_it_was_given() {
     let seen: HashSet<Uuid> = [page(1)].into();
     let set: PageSet = seen.iter().copied().collect();
     assert!(set.contains(&page(1)));
+}
+
+#[test]
+fn the_index_is_shared_between_the_indexer_and_the_searches() {
+    // L'indexeur écrit et valide sur un fil, les recherches lisent sur d'autres.
+    let b = std::sync::Arc::new(Bench::new());
+    b.page(1, "Notes", &[("b0", "un mot")]);
+    b.commit();
+    let writer = {
+        let b = b.clone();
+        std::thread::spawn(move || {
+            for i in 1..=50 {
+                b.block(1, &format!("b{i}"), "Notes", "un mot de plus");
+                b.commit();
+            }
+        })
+    };
+    let all = pages([1]);
+    while !writer.is_finished() {
+        assert_eq!(b.numbers("mot", &all), [1]);
+    }
+    writer.join().expect("le fil qui écrit");
+    assert_eq!(b.traced("plus", &all, None).1.collected, 50);
 }
