@@ -111,7 +111,7 @@ pub const STOP_WAIT: Duration = Duration::from_secs(10);
 
 /// Le dossier de l'index plein texte, dans le dossier des données, à côté de `files/`. Il ne
 /// porte rien d'autre que l'index (Ruling R990).
-pub(crate) const SEARCH_DIR: &str = "search";
+pub const SEARCH_DIR: &str = "search";
 
 /// Lignes de l'outbox prises par une intention, au plus (Ruling R1003). Une ligne de page entière
 /// récrit toutes les entrées de sa page : un passage n'est pas borné en entrées.
@@ -853,11 +853,45 @@ async fn index_one(shared: Arc<Shared>, page: Uuid) -> Outcome {
         .unwrap_or_else(PoisonError::into_inner)
         .contains(&page);
     assert!(!panics, "relecture de la page {page} : panique demandée");
-    let written = match stored_page(&shared.store, page).await {
+    match index_stored(&shared.store, shared.cfg.origin.clone(), page).await {
+        Ok(_) => Outcome::Done,
+        // Supprimée entre-temps : ses lignes sont parties avec elle.
+        Err(StoreError::NotFound) => Outcome::Done,
+        Err(error) => refused(page, &error),
+    }
+}
+
+/// Ce qu'une indexation a fait d'une page ([`index_stored`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reindexed {
+    /// Sa projection est écrite dans la base (sans blocs pour une page sans document).
+    Projected,
+    /// Elle ne se relit pas, ou sa projection a paniqué : elle quitte l'index, notée à son `seq`
+    /// ([`Store::index_failed`]), et c'est dit une fois au journal.
+    Unreadable,
+}
+
+/// Indexe une page : relit ce que le store garde ([`stored_page`], jamais l'acteur : Ruling
+/// R907), la projette sur le fil bloquant (Ruling R863), sous l'origine publique `origin`, puis
+/// écrit la différence ([`Store::index_page`]). Une page sans document sort de `-1` sans blocs ;
+/// une page qui ne se relit pas quitte l'index ([`index_unreadable`]). C'est le travail de chaque
+/// indexation de l'indexeur (`index_one`), et de `mementum reindex` pour chaque page.
+///
+/// `NotFound` : la page n'existe pas ou plus. Une autre erreur de la base est rendue, sans rien
+/// noter : c'est à l'appelant de réessayer. Une relecture qui panique panique ici : l'appelant
+/// mène l'indexation dans une tâche à elle, et en fait une page illisible.
+pub async fn index_stored(
+    store: &Store,
+    origin: Option<Arc<str>>,
+    page: Uuid,
+) -> Result<Reindexed, StoreError> {
+    match stored_page(store, page).await {
         // Une page sans document, ou supprimée entre-temps : elle sort quand même de `-1`.
-        Ok(None) => shared.store.index_page(page, 0, &[], false).await,
+        Ok(None) => store
+            .index_page(page, 0, &[], false)
+            .await
+            .map(|_| Reindexed::Projected),
         Ok(Some((doc, seq))) => {
-            let origin = shared.cfg.origin.clone();
             // Lire les blocs et les projeter dépend du contenu : hors des fils du moteur (R863).
             let projected = tokio::task::spawn_blocking(move || {
                 #[cfg(test)]
@@ -878,10 +912,10 @@ async fn index_one(shared: Arc<Shared>, page: Uuid) -> Outcome {
                             links: &row.links,
                         })
                         .collect();
-                    shared
-                        .store
+                    store
                         .index_page(page, seq, &rows, projection.truncated)
                         .await
+                        .map(|_| Reindexed::Projected)
                 }
                 Err(error) => {
                     tracing::error!(
@@ -889,39 +923,36 @@ async fn index_one(shared: Arc<Shared>, page: Uuid) -> Outcome {
                         "page impossible à projeter : elle quitte l'index de recherche jusqu'à \
                          sa prochaine écriture"
                     );
-                    shared
-                        .store
+                    store
                         .index_failed(page, seq)
                         .await
-                        .map(|()| mementum_store::Indexed { changed: 0 })
+                        .map(|()| Reindexed::Unreadable)
                 }
             }
         }
         Err(SyncError::Store(error)) => Err(error),
-        Err(error) => unreadable(&shared.store, page, error.to_string()).await,
-    };
-    match written {
-        Ok(_) => Outcome::Done,
-        // Supprimée entre-temps : ses lignes sont parties avec elle.
-        Err(StoreError::NotFound) => Outcome::Done,
-        Err(error) => refused(page, &error),
+        Err(error) => index_unreadable(store, page, &error.to_string())
+            .await
+            .map(|_| Reindexed::Unreadable),
     }
 }
 
 /// Renonce à indexer la page à ce `seq` (sa relecture a paniqué, ou la base a refusé son
 /// indexation [`MAX_TRIES`] fois) : elle quitte l'index comme une page illisible (Ruling R995).
 async fn give_up(shared: Arc<Shared>, page: Uuid, why: &'static str) -> Outcome {
-    match unreadable(&shared.store, page, why.to_string()).await {
+    match index_unreadable(&shared.store, page, why).await {
         Ok(_) | Err(StoreError::NotFound) => Outcome::Done,
         Err(error) => refused(page, &error),
     }
 }
 
-/// La page ne se relit pas : elle quitte l'index, notée à son `seq`, et c'est dit une fois.
-async fn unreadable(
+/// La page ne se relit pas (`error` dit pourquoi) : elle quitte l'index, notée à son dernier
+/// `seq` ([`Store::index_failed`]), et c'est dit une fois au journal. C'est aussi ce que devient
+/// une page dont l'indexation a paniqué, pour l'indexeur comme pour `mementum reindex`.
+pub async fn index_unreadable(
     store: &Store,
     page: Uuid,
-    error: String,
+    error: &str,
 ) -> Result<mementum_store::Indexed, StoreError> {
     let doc = store.load_doc(page).await?;
     let seq = doc
@@ -1116,8 +1147,9 @@ async fn rebuild(shared: &Shared, wipe: bool) -> anyhow::Result<()> {
 /// projection, qui les borne : rien d'autre n'est donné à [`SearchIndex::put_entry`].
 ///
 /// `lines` est rangé par page, la ligne de page entière en tête ([`Store::begin_feed`]). Une page
-/// à la fois : ses lignes lues, écrites sur le fil bloquant, puis lâchées.
-pub(crate) async fn write_lines(
+/// à la fois : ses lignes lues, écrites sur le fil bloquant, puis lâchées. C'est ce que fait un
+/// passage de l'indexeur, et `mementum reindex` pour chacune de ses intentions.
+pub async fn write_lines(
     store: &Store,
     index: &Arc<SearchIndex>,
     lines: &[FeedLine],

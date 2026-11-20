@@ -290,6 +290,8 @@ pub use duplications::{DUPLICATION_BUDGET, DUPLICATION_WINDOW};
 pub use error::ApiError;
 pub use events::EVENTS_PING;
 pub use indexer::{INDEX_AFTER, INDEX_AT_MOST, IndexerHandle};
+// Ce que `mementum reindex` fait comme l'indexeur, plutôt qu'à sa façon (Task S7).
+pub use indexer::{Reindexed, SEARCH_DIR, index_stored, index_unreadable, write_lines};
 // La copie d'avant migration, que `set_password` signale à qui l'appelle.
 pub use mementum_store::Backup;
 pub use page_writes::{MAX_ACCOUNT_WRITES, MAX_PAGE_WRITES};
