@@ -1,5 +1,7 @@
 # Lot 4, Task S0 : relecture indépendante (partielle, arrêtée par la pause du 2026-11-19)
 
+> **Portée le 2026-11-20**, sans nouvelle mesure : ses constats I1 à I6 et m1 à m7 sont repris dans le [compte rendu](2026-11-19-p1-lot4-s0-mesures.md) (ses mesures y sont citées comme telles, « mesuré par la relecture, non rejoué »), dans le [plan](../plans/2026-11-19-p1-lot4-recherche.md) et au [registre du lot 4](2026-11-19-p1-lot4-ledger.md) (R921 à R933). La phrase « rien n'en est encore porté », ci-dessous, date de la pause. Ce texte reste tel qu'il a été rendu ; ses deux ajouts au banc (`fts-alt`, `--word-len`) n'ont pas été refaits.
+
 Relecture du compte rendu [`2026-11-19-p1-lot4-s0-mesures.md`](2026-11-19-p1-lot4-s0-mesures.md) et du banc `spike/search-bench/`, à `e179419`. Le relecteur a été arrêté par la pause : ce qui suit est son rapport partiel. Rien n'en est encore porté au compte rendu, au banc ni au plan.
 
 **Verdict provisoire : « prêt sous réserve ».** « Tantivy tient, la tâche ne rend pas `BLOCKED` » est porté par le banc. La matière donnée à Lenny pour L1 ne l'est pas tout à fait : FTS5 est mesuré dans une forme défavorable, et la forme hostile du plan n'est pas le pire cas. La règle de L1 (« Tantivy si S0 tient les budgets ») donne le même choix, mais l'arbitrage est plus serré que ce que dit le compte rendu.
