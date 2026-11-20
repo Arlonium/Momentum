@@ -583,6 +583,8 @@ Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesur
 
 ### Task S4c : l'indexeur, l'index plein texte et le démarrage
 
+> **De la Task S3 et de sa relecture (2026-11-20, R965 à R973, R990 à R992)** : `SearchIndex::put_entry` ne borne ni la clé du bloc ni le texte : ne lui donner que les clés et les textes de `project` (100 octets, 64 Kio), jamais une chaîne venue d'ailleurs. Le titre est recopié sur chaque entrée : **un titre changé récrit toutes les entrées de la page** (`remove_page`, puis `put_entry` du titre et de chaque ligne de `blocks_index`, dans la même validation ; l'ordre des appels fait foi). **Après une erreur de `commit` ou de `put_entry`, l'index ne se réutilise pas** : on le lâche, on le rouvre, et c'est le jeton rendu par `open` qui dit si la validation a eu lieu. **Avant un `reset` fait dans le processus, fermer l'index par `SearchIndex::close`**, qui attend la fin des fusions (sous Windows, un fichier qu'une fusion tient ne se supprime pas) ; à l'arrêt du serveur, le lâcher suffit. `open` et `reset` refusent (`IndexError::NotAnIndex`, rien de touché) un dossier qui porte autre chose qu'un index : `<données>/search/` ne doit rien porter d'autre. `open` vide de lui-même un index illisible, d'un autre schéma ou d'une autre forme, et rend alors `token: None`.
+
 **Dépend de :** S3, S4b. **Livrable :** ce que la base a projeté devient trouvable ; l'index et la base ne se séparent jamais sans que le démarrage le voie.
 
 **Files:**
@@ -600,6 +602,8 @@ Pourquoi : la conception choisit Tantivy (§5.2) sans que la phase 0 l'ait mesur
 **Pièges :** on ne restaure ni ne récrit une base sous un serveur qui tourne : ces tests arrêtent le serveur, ferment le store (`Store::close`), puis copient ; une copie remise en place est reconnue au compteur de schéma près, et toute comparaison de copies passe par `same_content` (R841) ; un test qui fait tomber un événement « pendant » une écriture en suppose la durée (R886) : un point d'arrêt nommé ; démarrage à froid < 1 s : ni la reconstruction ni le rattrapage ne sont attendus par `serve`.
 
 ### Task S5 : la route de recherche
+
+> **De la Task S3 et de sa relecture (2026-11-20, R965 à R973, R990 à R992)** : **`PageSet` porte toute la séparation** des espaces, des pages non vues et de la corbeille : l'index n'a ni champ d'espace ni droit, et rend toute page de l'ensemble donné. `IndexError` porte des chemins du serveur (hors `Busy` et `NotAnIndex`) : au journal seulement, jamais dans une réponse. **`skip` et `limit` ne sont pas bornés par l'index** : c'est la route qui tient les 20 pages et les 5 réponses de R911. **`more` est calculé par l'index avant tout filet de la route** : une page que le filet du point 6 jetterait laisse `more` tel quel. Une page trouvée par son titre a un extrait vide et `block_id` absent. **À mesurer ici** : la mémoire et le temps d'une recherche à préfixe long (plus de 10 caractères) pour un compte qui voit 10 000 puis 100 000 pages, dont beaucoup portent le début (le collecteur garde la meilleure entrée de chaque page permise, plus `MAX_KEPT_CANDIDATES`, 16 000, soit de l'ordre de 2 Mio au-delà d'une entrée par page : calculé, pas mesuré, R991) ; et le coût d'une entrée lue, que l'enveloppe de R965 porte à 38 ns (S3, 200 000 entrées), pour arrêter `SEARCH_FLOOR` avec X2.
 
 **Dépend de :** S3, S4c. **Livrable :** `POST /api/v1/spaces/{id}/search`.
 
@@ -663,6 +667,8 @@ La route n'écrit rien : c'est un `POST` pour que la requête ne soit dans aucun
 ## Piste C
 
 ### Task C1 : la fenêtre de recherche
+
+> **De la relecture de S3 (2026-11-20, R969)** : l'extrait est coupé entre deux caractères, pas entre deux graphèmes : il peut commencer ou finir au milieu d'un graphème (une lettre et un accent qui ne se compose pas, un emoji à liant sans chasse). Les plages de `marks` restent justes en unités UTF-16. Une page trouvée par son titre a un extrait vide, sans plage : c'est à la fenêtre de surligner le titre si elle le veut.
 
 **Dépend de :** S5. **Livrable :** on ouvre la recherche, on tape, on choisit au clavier, on arrive sur la page.
 
@@ -737,6 +743,8 @@ Comportement : rien n'est lu avant la première synchro de la page ; la section 
 **Pièges :** e2e qui change des droits ; e2e d'un onglet qui ne doit pas encore savoir (`closeEventsChannel`, `hideSyncClosures`) ; un e2e qui affirme une absence le fait derrière une barrière (une lecture demandée après le geste, et sa réponse reçue), jamais par `toHaveCount(0)` seul ; comptes neufs (`signUpAccount`), `section: "private"` pour un lecteur membre.
 
 ### Task X2 : budgets
+
+> **De la Task S3 et de sa relecture (2026-11-20, R972, R992)** : à relever ici, en plus : la mémoire que tient le cache des textes gardés du lecteur (`STORE_CACHE_BLOCKS`, 8 blocs par segment, choisi sans mesure) après 500 recherches, et ce que 8 plutôt que 100 coûte à la latence ; la pointe pendant les fusions, tas et mémoire de travail à part (RO-1 : S3 n'a vu monter que la seconde, à petite échelle) ; `SEARCH_FLOOR` contre les 38 ns par entrée lue.
 
 **Dépend de :** S4c, S5, C1. **Livrable :** les budgets du §5.10 mesurés avec l'indexeur, dans la CI.
 
