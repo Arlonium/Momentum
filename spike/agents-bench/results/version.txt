@@ -1,0 +1,15 @@
+=== 1 000 paragraphes : état 316201 octets
+  encodage (encode_state) : p50 0.75 ms / p95 0.78 ms / pire 0.78 ms (n=11)
+  relecture (PageDoc::check_state) : p50 9.41 ms / p95 9.87 ms / pire 9.87 ms (n=11)
+  écriture (Store::put_version, before_restore) : p50 3.93 ms / p95 13.8 ms / pire 13.8 ms (n=11)
+  les trois, de suite (ce que l'acteur tiendrait) : p50 14.0 ms / p95 23.9 ms / pire 23.9 ms (n=11)
+=== 10 000 paragraphes (page des budgets) : état 3187203 octets
+  encodage (encode_state) : p50 7.66 ms / p95 7.95 ms / pire 7.95 ms (n=11)
+  relecture (PageDoc::check_state) : p50 112 ms / p95 114 ms / pire 114 ms (n=11)
+  écriture (Store::put_version, before_restore) : p50 29.1 ms / p95 38.8 ms / pire 38.8 ms (n=11)
+  les trois, de suite (ce que l'acteur tiendrait) : p50 147 ms / p95 160 ms / pire 160 ms (n=11)
+=== 10 000 paragraphes de six plages : état 4965537 octets
+  encodage (encode_state) : p50 19.1 ms / p95 20.3 ms / pire 20.3 ms (n=11)
+  relecture (PageDoc::check_state) : p50 249 ms / p95 255 ms / pire 255 ms (n=11)
+  écriture (Store::put_version, before_restore) : p50 37.5 ms / p95 41.4 ms / pire 41.4 ms (n=11)
+  les trois, de suite (ce que l'acteur tiendrait) : p50 306 ms / p95 313 ms / pire 313 ms (n=11)

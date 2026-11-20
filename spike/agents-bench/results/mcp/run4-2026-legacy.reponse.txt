@@ -1,0 +1,1 @@
+Je ne trouve aucun outil `echo` du serveur MCP `banc` dans les outils disponibles pour cette session, donc je ne peux pas l'appeler. Il faudrait que le serveur `banc` soit connecté et que son outil apparaisse dans la liste. Si vous le connectez ou me confirmez son nom exact, je relance l'appel avec `bonjour`.

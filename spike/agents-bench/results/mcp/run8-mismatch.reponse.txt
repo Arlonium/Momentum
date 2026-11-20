@@ -1,0 +1,1 @@
+Erreur renvoyée par l'outil echo du serveur banc : « Header mismatch: Mcp-Name header value does not match body value ».

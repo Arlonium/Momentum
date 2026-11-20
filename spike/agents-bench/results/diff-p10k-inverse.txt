@@ -1,0 +1,11 @@
+page de 10000 paragraphes : état 3187203 octets ; mesures en release, 7 passages (rewrite_blocks : 3) ; MMD sans ancres (keep_ids donne les identifiants)
+--- p10k-inverse (1 txn)
+  différence : p50 640 ms / p95 647 ms / pire 647 ms (n=3) ; 3186850 octets en 1 mise(s) à jour ; 758821 unités Yjs écrites ; keep_ids 15.0 ms
+  phases (dernier passage) : lecture des blocs 23.9 ms ; keep_ids 15.5 ms ; plan 8.31 ms ; écriture 594 ms
+  blocs : 10000 courants ; recréés 9999 ; insérés 0 ; retirés 0 ; props 0 ; en ligne entier 0 ; en ligne par préfixe 0 ; tableaux 0 ; blocs dont l'identité Yjs a changé : 9999
+  rewrite_blocks : p50 654 ms / p95 665 ms / pire 665 ms (n=3) ; 3187166 octets ; 758894 unités Yjs ; rapport des médianes 1.0
+--- p10k-inverse (2 txn)
+  différence : p50 666 ms / p95 668 ms / pire 668 ms (n=3) ; 3186852 octets en 2 mise(s) à jour ; 758821 unités Yjs écrites ; keep_ids 15.6 ms
+  phases (dernier passage) : lecture des blocs 24.0 ms ; keep_ids 15.2 ms ; plan 7.76 ms ; écriture 615 ms
+  blocs : 10000 courants ; recréés 9999 ; insérés 0 ; retirés 0 ; props 0 ; en ligne entier 0 ; en ligne par préfixe 0 ; tableaux 0 ; blocs dont l'identité Yjs a changé : 9999
+  rewrite_blocks : p50 646 ms / p95 650 ms / pire 650 ms (n=3) ; 3187166 octets ; 758894 unités Yjs ; rapport des médianes 1.0

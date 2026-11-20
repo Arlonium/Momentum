@@ -1,0 +1,25 @@
+page de 10000 paragraphes : état 3187203 octets ; mesures en release, 7 passages (rewrite_blocks : 3) ; MMD sans ancres (keep_ids donne les identifiants)
+--- même client, 10k simples, moitié changée (1 txn) : p50 63.7 ms / p95 64.6 ms / pire 64.6 ms (n=3) ; 549252 octets ; écriture 11.0 ms
+--- même client, 10k simples, moitié changée (2 txn) : p50 66.0 ms / p95 66.2 ms / pire 66.2 ms (n=3) ; 549254 octets ; écriture 13.5 ms
+--- même client, 10k simples, moitié changée (préfixe, 2 txn) : p50 182 ms / p95 190 ms / pire 190 ms (n=3) ; 169799 octets ; écriture 105 ms
+    rewrite_blocks, même client : p50 633 ms / p95 664 ms / pire 664 ms (n=3)
+--- même client, 10k simples, tout changé (1 txn) : p50 75.5 ms / p95 76.8 ms / pire 76.8 ms (n=3) ; 1098476 octets ; écriture 22.3 ms
+--- même client, 10k simples, tout changé (2 txn) : p50 77.2 ms / p95 78.3 ms / pire 78.3 ms (n=3) ; 1078476 octets ; écriture 26.2 ms
+--- même client, 10k simples, tout changé (préfixe, 2 txn) : p50 323 ms / p95 323 ms / pire 323 ms (n=3) ; 339577 octets ; écriture 223 ms
+    rewrite_blocks, même client : p50 643 ms / p95 651 ms / pire 651 ms (n=3)
+--- même client, 10k simples, inverse (1 txn) : p50 2333 ms / p95 2347 ms / pire 2347 ms (n=3) ; 3188596 octets ; écriture 2297 ms
+--- même client, 10k simples, inverse (2 txn) : p50 652 ms / p95 661 ms / pire 661 ms (n=3) ; 3188598 octets ; écriture 602 ms
+--- même client, 10k simples, inverse (préfixe, 2 txn) : p50 656 ms / p95 657 ms / pire 657 ms (n=3) ; 3188598 octets ; écriture 599 ms
+    rewrite_blocks, même client : p50 634 ms / p95 638 ms / pire 638 ms (n=3)
+--- même client, 10k de six plages, moitié changée (1 txn) : p50 515 ms / p95 522 ms / pire 522 ms (n=3) ; 1653781 octets ; écriture 418 ms
+--- même client, 10k de six plages, moitié changée (2 txn) : p50 411 ms / p95 416 ms / pire 416 ms (n=3) ; 1653783 octets ; écriture 313 ms
+--- même client, 10k de six plages, moitié changée (préfixe, 2 txn) : p50 419 ms / p95 420 ms / pire 420 ms (n=3) ; 1653789 octets ; écriture 316 ms
+    rewrite_blocks, même client : p50 798 ms / p95 825 ms / pire 825 ms (n=3)
+--- même client, 10k de six plages, tout changé (1 txn) : p50 950 ms / p95 960 ms / pire 960 ms (n=3) ; 1098440 octets ; écriture 865 ms
+--- même client, 10k de six plages, tout changé (2 txn) : p50 534 ms / p95 534 ms / pire 534 ms (n=3) ; 1098442 octets ; écriture 437 ms
+--- même client, 10k de six plages, tout changé (préfixe, 2 txn) : p50 211 ms / p95 213 ms / pire 213 ms (n=3) ; 1157248 octets ; écriture 48.6 ms
+    rewrite_blocks, même client : p50 701 ms / p95 707 ms / pire 707 ms (n=3)
+--- même client, 10k de six plages, inverse (1 txn) : p50 112 ms / p95 114 ms / pire 114 ms (n=3) ; 2 octets ; écriture 0.01 ms
+--- même client, 10k de six plages, inverse (2 txn) : p50 110 ms / p95 115 ms / pire 115 ms (n=3) ; 4 octets ; écriture 0.01 ms
+--- même client, 10k de six plages, inverse (préfixe, 2 txn) : p50 111 ms / p95 112 ms / pire 112 ms (n=3) ; 4 octets ; écriture 0.01 ms
+    rewrite_blocks, même client : p50 877 ms / p95 898 ms / pire 898 ms (n=3)

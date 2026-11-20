@@ -1,0 +1,3 @@
+Je ne peux pas appeler l'outil `echo` du serveur MCP `banc` : aucun outil de ce nom n'est disponible dans cette session. Je n'ai donc rien à rapporter de sa réponse.
+
+Si le serveur `banc` est configuré, il faut peut-être le redémarrer ou relancer la session pour que ses outils soient chargés. Dites-moi si vous voulez que je fasse autre chose en attendant.

@@ -1,0 +1,220 @@
+dans-le-gras affix : 44 octets ; préfixe 1 ; entier 0
+dans-le-gras whole : 357 octets ; préfixe 0 ; entier 1
+a-la-frontiere affix : 33 octets ; préfixe 1 ; entier 0
+a-la-frontiere whole : 358 octets ; préfixe 0 ; entier 1
+dans-le-lien affix : 33 octets ; préfixe 1 ; entier 0
+dans-le-lien whole : 358 octets ; préfixe 0 ; entier 1
+apres-la-mention affix : 46 octets ; préfixe 1 ; entier 0
+apres-la-mention whole : 371 octets ; préfixe 0 ; entier 1
+marques-seules affix : 109 octets ; préfixe 1 ; entier 0
+marques-seules whole : 421 octets ; préfixe 0 ; entier 1
+a-cheval affix : 15 octets ; préfixe 1 ; entier 0
+a-cheval whole : 350 octets ; préfixe 0 ; entier 1
+en-tete affix : 28 octets ; préfixe 1 ; entier 0
+en-tete whole : 362 octets ; préfixe 0 ; entier 1
+lien-pose affix : 135 octets ; préfixe 1 ; entier 0
+lien-pose whole : 447 octets ; préfixe 0 ; entier 1
+lien-retire affix : 47 octets ; préfixe 1 ; entier 0
+lien-retire whole : 269 octets ; préfixe 0 ; entier 1
+a-cheval          affix affix.bin                        Yjs = yrs ; écriture lue comme voulu
+a-cheval          affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+a-cheval          affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+a-cheval          affix affix.bin puis key-after.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+a-cheval          whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-cheval          whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-cheval          whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-cheval          whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-cheval          whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-cheval          whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-cheval          whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-cheval          whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+a-cheval          whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+a-la-frontiere    affix affix.bin                        Yjs = yrs ; écriture lue comme voulu
+a-la-frontiere    affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-la-frontiere    affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-la-frontiere    affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-la-frontiere    affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-la-frontiere    affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-la-frontiere    affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-la-frontiere    affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+a-la-frontiere    affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+a-la-frontiere    affix affix.bin puis key-after.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+a-la-frontiere    affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+a-la-frontiere    whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+a-la-frontiere    whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-la-frontiere    whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-la-frontiere    whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-la-frontiere    whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-la-frontiere    whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-la-frontiere    whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+a-la-frontiere    whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-la-frontiere    whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+a-la-frontiere    whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+a-la-frontiere    whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+apres-la-mention  affix affix.bin                        Yjs = yrs ; écriture lue comme voulu
+apres-la-mention  affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix affix.bin puis key-after.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+apres-la-mention  whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+apres-la-mention  whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+apres-la-mention  whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+apres-la-mention  whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+apres-la-mention  whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+apres-la-mention  whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+apres-la-mention  whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+apres-la-mention  whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+apres-la-mention  whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-gras      affix affix.bin                        Yjs = yrs ; écriture lue comme voulu
+dans-le-gras      affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-gras      affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-gras      affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-gras      affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-gras      affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-gras      affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-gras      affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+dans-le-gras      affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+dans-le-gras      affix affix.bin puis key-after.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+dans-le-gras      affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"bold":{}}
+dans-le-gras      whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+dans-le-gras      whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-gras      whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-gras      whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-gras      whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-gras      whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-gras      whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-gras      whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-gras      whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-gras      whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-gras      whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-lien      affix affix.bin                        Yjs = yrs ; écriture lue comme voulu
+dans-le-lien      affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-lien      affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-lien      affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-lien      affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-lien      affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-lien      affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-lien      affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"link":{"href":"https://exemple.org"}}
+dans-le-lien      affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"link":{"href":"https://exemple.org"}}
+dans-le-lien      affix affix.bin puis key-after.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"link":{"href":"https://exemple.org"}}
+dans-le-lien      affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"link":{"href":"https://exemple.org"}}
+dans-le-lien      whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+dans-le-lien      whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-lien      whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-lien      whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-lien      whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-lien      whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-lien      whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+dans-le-lien      whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-lien      whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-lien      whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+dans-le-lien      whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+en-tete           affix affix.bin                        Yjs = yrs ; écriture lue comme voulu
+en-tete           affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix affix.bin puis key-after.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+en-tete           whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+en-tete           whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+en-tete           whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+en-tete           whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+en-tete           whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+en-tete           whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+en-tete           whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+en-tete           whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+en-tete           whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-pose         affix affix.bin                        Yjs = yrs ; écriture lue comme voulu
+lien-pose         affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix affix.bin puis key-after.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+lien-pose         whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-pose         whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-pose         whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-pose         whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-pose         whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-pose         whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-pose         whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-pose         whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-pose         whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-retire       affix affix.bin                        Yjs = yrs ; écriture lue comme voulu ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix affix.bin puis key-after.bin     Yjs ≠ yrs ; frappe gardée ; écriture entière ; marques de la frappe {} ; Yjs a nettoyé des marques (transaction locale) ; yrs, nettoyage reçu, = Yjs
+lien-retire       affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {"link":{"href":"https://exemple.org"}}
+lien-retire       whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+lien-retire       whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-retire       whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-retire       whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-retire       whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-retire       whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-retire       whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+lien-retire       whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-retire       whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-retire       whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+lien-retire       whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+marques-seules    affix affix.bin                        Yjs = yrs ; écriture lue comme voulu
+marques-seules    affix affix.bin puis key-prefix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix key-prefix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix affix.bin puis key-suffix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix key-suffix.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix affix.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix key-untouched.bin puis affix.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix affix.bin puis key-before.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix key-before.bin puis affix.bin    Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix affix.bin puis key-after.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    affix key-after.bin puis affix.bin     Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    whole whole.bin                        Yjs = yrs ; écriture lue comme voulu
+marques-seules    whole whole.bin puis key-prefix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+marques-seules    whole key-prefix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+marques-seules    whole whole.bin puis key-suffix.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+marques-seules    whole key-suffix.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+marques-seules    whole whole.bin puis key-untouched.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    whole key-untouched.bin puis whole.bin Yjs = yrs ; frappe gardée ; écriture entière ; marques de la frappe {}
+marques-seules    whole whole.bin puis key-before.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+marques-seules    whole key-before.bin puis whole.bin    Yjs = yrs ; frappe PERDUE ; écriture entière
+marques-seules    whole whole.bin puis key-after.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+marques-seules    whole key-after.bin puis whole.bin     Yjs = yrs ; frappe PERDUE ; écriture entière
+
+198 combinaisons, 1 où le vrai Yjs ne lit pas comme yrs
+Yjs : {"type":"paragraph","children":[{"text":[{"insert":"Du ","attributes":{}},{"insert":"gras","attributes":{"bold":{}}},{"insert":" au milieu, un lienZ et ","attributes":{}}]},{"el":"mention","attrs":{"id":"pg_1","kind":"page","label":"Page"}},{"text":[{"insert":" fin.","attributes":{}}]}]}
+yrs : {"type":"paragraph","children":[{"text":[{"insert":"Du ","attributes":{}},{"insert":"gras","attributes":{"bold":{}}},{"insert":" au milieu, un lien","attributes":{}},{"insert":"Z","attributes":{"link":{"href":"https://exemple.org"}}},{"insert":" et ","attributes":{}}]},{"el":"mention","attrs":{"id":"pg_1","kind":"page","label":"Page"}},{"text":[{"insert":" fin.","attributes":{}}]}]}

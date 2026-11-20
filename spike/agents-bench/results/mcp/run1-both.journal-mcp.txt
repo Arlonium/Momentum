@@ -1,0 +1,17 @@
+[DEBUG] mcp runtime arm: v2 (source: default)
+[DEBUG] MCP server "banc": Initializing HTTP transport to http://127.0.0.1:8103/mcp
+[DEBUG] MCP server "banc": HTTP transport options: {"url":"http://127.0.0.1:8103/mcp","headers":{"User-Agent":"claude-code/2.1.329 (sdk-cli)","Accept-Encoding":"identity","Authorization":"[REDACTED]"},"hasAuthProvider":false,"timeoutMs":60000}
+[DEBUG] MCP server "banc": HTTP transport created successfully
+[DEBUG] MCP server "banc": Starting connection with timeout of 30000ms
+[DEBUG] MCP server "banc": Testing basic HTTP connectivity to http://127.0.0.1:8103/mcp
+[DEBUG] MCP server "banc": Parsed URL: host=127.0.0.1, port=8103, protocol=http:
+[DEBUG] MCP server "banc": Using loopback address: 127.0.0.1
+[DEBUG] MCP server "banc": Successfully connected (transport: http) in 30ms
+[DEBUG] MCP server "banc": no auto-opened subscriptions/listen on a modern connection; running the listen open through the reopen machinery (no-op if the server advertises no listChanged capability)
+[DEBUG] MCP server "banc": Connection established with capabilities: {"hasTools":true,"hasPrompts":false,"hasResources":true,"hasResourceSubscribe":false,"serverVersion":{"name":"agents-bench","version":"0.0.0"},"protocolEra":"modern","negotiatedProtocolVersion":"2026-07-28"}
+[DEBUG] [claudeai-mcp] Fetching from https://api.anthropic.com/v1/mcp_servers?limit=1000&include_additional_installs=true
+[DEBUG] [claudeai-mcp] Fetched 3 servers
+[DEBUG] MCP server "banc": Calling MCP tool: echo
+[DEBUG] MCP server "banc": Tool 'echo' completed successfully in 9ms
+[DEBUG] MCP server "banc": HTTP connection closed after 1s (cleanly)
+[DEBUG] MCP server "banc": Cleared connection cache for reconnection

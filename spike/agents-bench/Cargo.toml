@@ -1,0 +1,32 @@
+# Banc jetable de la Task S0 du lot 5 : transport MCP, écriture par différence, contenu en
+# ligne, restriction des droits d'un jeton, version d'avant un agent. Hors des deux ateliers
+# Cargo ; rien n'en est repris que les chiffres.
+[package]
+name = "agents-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "AGPL-3.0-only"
+
+[workspace]
+
+[dependencies]
+mementum-acl = { path = "../../crates/mementum-acl" }
+mementum-crdt = { path = "../../crates/mementum-crdt" }
+mementum-md = { path = "../../crates/mementum-md" }
+mementum-schema = { path = "../../crates/mementum-schema" }
+mementum-store = { path = "../../crates/mementum-store" }
+# Le yrs du serveur (sources recopiées, avec leur correctif) : le même paquet que celui de
+# `mementum-crdt`, pour que ses `Doc` et ses types soient ceux du banc.
+yrs = { path = "../../vendor/yrs", version = "=0.28.1", features = ["sync", "weak"] }
+# Ce que demandent les modules de `mementum-crdt` inclus par chemin (`src/main.rs`).
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+uuid = { version = "1.29", features = ["v7"] }
+# Le `/mcp` du banc.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+
+[profile.release]
+debug = false

@@ -1,0 +1,14 @@
+[DEBUG] mcp runtime arm: v2 (source: default)
+[DEBUG] MCP server "banc": Initializing HTTP transport to http://127.0.0.1:8103/mcp
+[DEBUG] MCP server "banc": HTTP transport options: {"url":"http://127.0.0.1:8103/mcp","headers":{"User-Agent":"claude-code/2.1.329 (sdk-cli)","Accept-Encoding":"identity","Authorization":"[REDACTED]"},"hasAuthProvider":false,"timeoutMs":60000}
+[DEBUG] MCP server "banc": HTTP transport created successfully
+[DEBUG] MCP server "banc": Starting connection with timeout of 30000ms
+[DEBUG] MCP server "banc": Testing basic HTTP connectivity to http://127.0.0.1:8103/mcp
+[DEBUG] MCP server "banc": Parsed URL: host=127.0.0.1, port=8103, protocol=http:
+[DEBUG] MCP server "banc": Using loopback address: 127.0.0.1
+[DEBUG] [claudeai-mcp] Fetching from https://api.anthropic.com/v1/mcp_servers?limit=1000&include_additional_installs=true
+[DEBUG] MCP server "banc": HTTP Connection failed after 44ms: Error POSTing to endpoint: {"jsonrpc":"2.0","id":0,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":["2026-07-28"],"requested":"2025-11-25"}}} (code: CLIENT_HTTP_NOT_IMPLEMENTED, errno: none)
+[ERROR] MCP server "banc" SdkHttpError: Error POSTing to endpoint: {"jsonrpc":"2.0","id":0,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":["2026-07-28"],"requested":"2025-11-25"}}}
+[DEBUG] MCP server "banc": Connection failed after 46ms, 47ms of it awake (400): Error POSTing to endpoint: {"jsonrpc":"2.0","id":0,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":["2026-07-28"],"requested":"2025-11-25"}}}
+[ERROR] MCP server "banc" Connection failed (400): Error POSTing to endpoint: {"jsonrpc":"2.0","id":0,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":["2026-07-28"],"requested":"2025-11-25"}}}
+[DEBUG] [claudeai-mcp] Fetched 3 servers

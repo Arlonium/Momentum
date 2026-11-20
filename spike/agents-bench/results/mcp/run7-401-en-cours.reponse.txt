@@ -1,0 +1,5 @@
+Le serveur MCP `banc` a renvoyé cette erreur, sans écho :
+
+`MCP server "banc" rejected the Authorization header in its config (update it, then run /mcp to reconnect)`
+
+L'outil n'est donc pas utilisable tant que l'en-tête d'autorisation de `banc` n'est pas mis à jour. Cela se fait via `/mcp` dans une session interactive.
