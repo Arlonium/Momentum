@@ -66,6 +66,8 @@ mementum-sync = { workspace = true, features = ["testkit"] }
 serde_json.workspace = true
 # Pannes simulées dans la base (déclencheur SQLite), comme dans `mementum-sync`.
 sqlx.workspace = true
+# La mémoire de travail du processus, dans les mesures de la recherche (`tests/search_measure.rs`).
+sysinfo.workspace = true
 tempfile.workspace = true
 # `test-util` : l'horloge de tokio arrêtée des tests de l'indexeur (`tests/indexer.rs`, Ruling R179).
 tokio = { workspace = true, features = ["test-util"] }
