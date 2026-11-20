@@ -7,12 +7,13 @@ import type { Me, PageNode } from "@mementum/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { getComments, getInfo, getPage } from "../api";
+import { getBacklinks, getComments, getInfo, getPage } from "../api";
 import { useServerSchema } from "../editor/useServerSchema";
 import { CLIENT_SCHEMA_VERSION } from "../editor/version";
 import { filesOf, uploader } from "../editor/files";
 import { clearNotices, PAGE_LEFT, postNotice } from "../mentions/notice";
 import { SessionContext } from "../session/session";
+import { publishPages } from "../space/pageDirectory";
 import { until } from "../test/hooks";
 import { notFound, page, space, unauthenticated, unreachable } from "../test/pages";
 import { blockPath, navigate, pagePath } from "../router";
@@ -32,6 +33,8 @@ const probe = vi.hoisted(() => ({
   files: [] as unknown[],
   /** Le bloc visé que l'éditeur a reçu, à chacun de ses rendus, et de quoi dire qu'il l'a suivi. */
   arrivals: [] as { goTo: unknown; onReached?: (target: never) => void }[],
+  /** La session créée a déjà fait sa première synchro. */
+  startSynced: true,
 }));
 
 vi.mock("../editor/collab", async () => {
@@ -41,7 +44,7 @@ vi.mock("../editor/collab", async () => {
     readonly check: () => Promise<boolean>;
     readonly doc = new Y.Doc();
     readonly provider = { doc: this.doc };
-    synced = true;
+    synced = probe.startSynced;
     status = "connected";
     roster = [];
     blocked = false;
@@ -104,6 +107,7 @@ vi.mock("../api", async (original) => ({
   ...(await original<typeof import("../api")>()),
   getPage: vi.fn(),
   getComments: vi.fn(),
+  getBacklinks: vi.fn(),
   getInfo: vi.fn(),
 }));
 
@@ -122,10 +126,13 @@ beforeEach(() => {
   probe.files = [];
   probe.arrivals = [];
   history.replaceState(null, "", "/");
+  probe.startSynced = true;
   checkSchema.mockClear();
   vi.mocked(getPage).mockReset();
   vi.mocked(getComments).mockReset();
   vi.mocked(getComments).mockResolvedValue([]);
+  vi.mocked(getBacklinks).mockReset();
+  vi.mocked(getBacklinks).mockResolvedValue({ pages: [] });
   vi.mocked(getInfo).mockReset();
 });
 
@@ -133,6 +140,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
   document.body.replaceChildren();
+  publishPages(null, null);
 });
 
 const account = (): Me => ({
@@ -818,4 +826,84 @@ test("an_address_without_a_block_or_of_another_page_gives_the_editor_nothing_to_
     expect(probe.arrivals.every((given) => given.goTo === null), address).toBe(true);
     await act(async () => root.render(null));
   }
+});
+
+/** Deux pages de l'arbre publié, qui mènent à la page ouverte. */
+const SOURCE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const backlinks = () => host.querySelector('nav[aria-labelledby]:not(.mm-breadcrumb)');
+
+test("page_view_reads_the_backlinks_after_the_first_sync_and_shows_them_under_the_text", async () => {
+  // Lot 4, C3 : rien n'est lu des rétroliens tant que la première synchro n'est pas faite (la
+  // lecture prend au moins 75 ms chez le serveur) ; ensuite, la section est sous l'éditeur.
+  publishPages("space", [page(SOURCE, { title: "Source" }), page(OTHER, { title: "Autre" })]);
+  vi.mocked(getBacklinks).mockResolvedValue({
+    pages: [{ pageId: SOURCE, blockId: "b1", excerpt: "vers X" }],
+  });
+  probe.startSynced = false;
+  const node = page("x", { level: "read" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 50));
+  });
+  expect(getBacklinks).not.toHaveBeenCalled();
+  expect(backlinks()).toBeNull();
+
+  await act(async () => {
+    Object.assign(session(), { synced: true });
+    (session() as unknown as { emit: () => void }).emit();
+  });
+  await until(host, () => backlinks() !== null, "la section des rétroliens");
+  expect(getBacklinks).toHaveBeenCalledTimes(1);
+  expect(getBacklinks).toHaveBeenCalledWith("x");
+  const nav = backlinks()!;
+  expect(nav.textContent).toContain("Pages qui mènent ici");
+  expect(nav.querySelector(`[data-backlink-page="${SOURCE}"]`)?.textContent).toContain("Source");
+  // Dans la page, sous l'éditeur, hors de son cadre (les pastilles des commentaires s'y placent).
+  const frame = host.querySelector(".mm-editor-frame")!;
+  expect(nav.closest(".mm-page")).not.toBeNull();
+  expect(frame.contains(nav)).toBe(false);
+  expect(frame.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test("page_view_shows_the_backlinks_to_a_reader_of_a_trashed_page", async () => {
+  // Une page à la corbeille a ses rétroliens (jamais `409 trashed`).
+  publishPages("space", [page(SOURCE, { title: "Source" })]);
+  vi.mocked(getBacklinks).mockResolvedValue({
+    pages: [{ pageId: SOURCE, blockId: null, excerpt: "" }],
+  });
+  const node = page("x", { level: "read", trashedAt: 1 });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  await until(host, () => backlinks() !== null, "la section des rétroliens");
+});
+
+test("page_view_rereads_the_page_when_the_backlinks_are_refused", async () => {
+  // `404` : la page n'est plus vue. C'est la relecture de la page qui le dira à l'écran.
+  vi.mocked(getBacklinks).mockRejectedValue(notFound());
+  const node = page("x", { level: "read" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  await until(host, () => vi.mocked(getBacklinks).mock.calls.length === 1, "la lecture refusée");
+  await until(host, () => vi.mocked(getPage).mock.calls.length === 1, "la page relue");
+  expect(vi.mocked(getPage).mock.calls[0][0]).toBe("x");
+});
+
+test("page_view_rereads_the_backlinks_once_the_account_is_back", async () => {
+  publishPages("space", [page(SOURCE, { title: "Source" })]);
+  vi.mocked(getBacklinks)
+    .mockRejectedValueOnce(unauthenticated())
+    .mockResolvedValue({ pages: [{ pageId: SOURCE, blockId: null, excerpt: "" }] });
+  const node = page("x", { level: "read" });
+  await show(node);
+  await until(host, () => vi.mocked(getBacklinks).mock.calls.length === 1, "la première lecture");
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 50));
+  });
+  expect(getBacklinks).toHaveBeenCalledTimes(1);
+  expect(backlinks()).toBeNull();
+  await show(node, account());
+  await until(host, () => backlinks() !== null, "les rétroliens relus au retour du compte");
+  expect(getBacklinks).toHaveBeenCalledTimes(2);
 });

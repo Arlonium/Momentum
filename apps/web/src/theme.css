@@ -1104,6 +1104,75 @@ button.tree-toggle:hover {
   position: relative;
 }
 
+/* « Pages qui mènent ici », sous le texte de la page et hors de l'éditeur (lot 4, C3) : aucune
+   règle de BlockNote ne l'atteint. Les titres et les extraits viennent d'autres comptes : du texte
+   isolé, coupé plutôt que débordant. */
+.mm-backlinks {
+  margin: 40px var(--mm-page-inset) 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--mm-border);
+}
+
+.mm-backlinks-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mm-text-secondary);
+}
+
+.mm-backlinks-list {
+  margin: 0 -10px;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-backlink-link {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--mm-text);
+  text-decoration: none;
+}
+
+.mm-backlink-link:hover {
+  background: var(--mm-surface);
+  color: var(--mm-text);
+}
+
+.mm-backlink-name,
+.mm-backlink-excerpt {
+  unicode-bidi: isolate;
+  min-width: 0;
+}
+
+.mm-backlink-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 500;
+  color: var(--mm-text-strong);
+}
+
+/* Deux lignes au plus : un extrait fait jusqu'à 240 caractères. */
+.mm-backlink-excerpt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--mm-text-secondary);
+}
+
+.mm-backlinks-error {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
 .mm-title {
   padding: 0 var(--mm-page-inset);
   margin-bottom: 14px;

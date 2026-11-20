@@ -32,6 +32,7 @@
 // d'envoyer ce que le serveur refuserait, et dit l'autre compte plus tôt (R544).
 import type {
   Accepted,
+  Backlinks,
   ChangePassword,
   Comment,
   CopyFile,
@@ -882,6 +883,16 @@ export function restoreVersion(pageId: string, versionId: string): Promise<void>
 // Favoris (R254) : à chaque compte les siens, par espace. Poser ou retirer un favori demande de
 // voir la page (`read`, à la corbeille aussi), et n'avance pas la version de l'espace : la barre
 // latérale des autres n'en sait rien, et l'onglet qui le pose relit sa liste lui-même.
+
+/**
+ * `GET /api/v1/pages/{id}/backlinks` : les pages qui mènent à celle-ci (lot 4), parmi celles que
+ * le compte voit dans le même espace, hors corbeille ; deux cents au plus, sans total ni titre (le
+ * titre se lit dans l'arbre). La réponse prend au moins 75 ms (R1022) : jamais sur le chemin de
+ * l'ouverture d'une page.
+ */
+export function getBacklinks(pageId: string): Promise<Backlinks> {
+  return call("GET", `${page(pageId)}/backlinks`);
+}
 
 /**
  * `GET /api/v1/spaces/{id}/favorites` : les pages favorites du compte dans l'espace, dans l'ordre

@@ -43,11 +43,13 @@ import { useAfterLogin } from "../session/useAfterLogin";
 import { MentionNotices, PAGE_LEFT } from "../mentions/notice";
 import { canComment, canEdit, writesOutsideEditor } from "../share/levels";
 import { ShareMenu } from "../share/ShareMenu";
+import { Backlinks } from "./Backlinks";
 import { Breadcrumb } from "./Breadcrumb";
 import { FileNotices } from "./FileNotices";
 import { PageMenu } from "./PageMenu";
 import { Presence } from "./Presence";
 import { TitleInput } from "./TitleInput";
+import { useBacklinks } from "./useBacklinks";
 import { usePageGate } from "./usePageGate";
 
 type Props = {
@@ -182,6 +184,10 @@ export function PageView({
   // changé entre-temps) fait aussi relire la page : son niveau et la corbeille décident des
   // boutons du panneau.
   const comments = useComments(id, session, { onRefused: rereadPage, afterLogin });
+  // Les pages qui mènent ici (lot 4) : lues après la première synchro de la session, jamais sur le
+  // chemin de l'ouverture (leur lecture prend au moins 75 ms chez le serveur), à tout niveau et à
+  // la corbeille aussi. Un `404` dit que la page n'est plus vue : elle est relue.
+  const backlinks = useBacklinks(id, session, { onRefused: rereadPage, afterLogin });
   /** Autour de l'éditeur : les pastilles s'y placent, les blocs y sont cherchés. */
   const frame = useRef<HTMLDivElement>(null);
   /** La page (bandeaux, titre, éditeur). */
@@ -359,6 +365,8 @@ export function PageView({
               onComment={hoverComment}
             />
           </div>
+          {/* Sous le texte, hors du cadre de l'éditeur : « Pages qui mènent ici », s'il y en a. */}
+          <Backlinks pages={backlinks.pages} error={backlinks.error} />
         </article>
         {wiring.panel && (
           <CommentsPanel

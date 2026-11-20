@@ -42,6 +42,14 @@ type Props = {
  */
 let arriving: string | null = null;
 
+/**
+ * Un lien de la page quittée mène à la page `id` (un rétrolien, `Backlinks.tsx`) : il part avec
+ * elle, et le focus tomberait sur `body` ; le fil de la page d'arrivée le prendra (R292).
+ */
+export function arriveAt(id: string): void {
+  arriving = id;
+}
+
 /** Un clic que le routeur suivra (`useLinkInterception`) : bouton principal, sans touche. */
 function followed(event: MouseEvent): boolean {
   return (
