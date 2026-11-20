@@ -104,34 +104,42 @@ pub struct WriteCost {
 pub fn write_cost(blocks: &[Block]) -> WriteCost {
     let mut tally = Tally::default();
     tally.siblings(blocks);
-    let linear = (tally.elements as u128)
-        .saturating_mul(ELEMENT_PS)
-        .saturating_add((tally.empty_cells as u128).saturating_mul(EMPTY_CELL_EXTRA_PS))
-        .saturating_add((tally.text_items as u128).saturating_mul(TEXT_ITEM_PS));
-    let lists = tally
-        .kinds
-        .iter()
-        .fold(0u128, |sum, k| sum.saturating_add(k.ps));
-    let (heaviest, kind) = KINDS
-        .iter()
-        .zip(&tally.kinds)
-        .max_by_key(|(_, k)| k.ps)
-        .map(|(kind, k)| (k, *kind))
-        .expect("quatre sortes de listes");
-    let cause = if heaviest.ps >= linear {
-        Cause::Lists {
-            kind,
-            longest: heaviest.longest,
-        }
-    } else {
-        Cause::Volume {
-            elements: tally.elements,
-        }
-    };
-    WriteCost {
-        nanos: u64::try_from(lists.saturating_add(linear) / 1_000).unwrap_or(u64::MAX),
-        cause,
-    }
+    tally.finish(0)
+}
+
+/// Picosecondes, par bloc de la page et par bloc écrit, de ce que l'écriture par différence fait
+/// avant d'écrire : la lecture des blocs de la page, `keep_ids` et le plan (Task S0 du lot 5 :
+/// 47 ms pour une page de 10 000 paragraphes récrite d'un MMD de 10 000 blocs, environ 2,4 µs
+/// par bloc ; arrondi vers le haut, Ruling R1282).
+const DIFF_BLOCK_PS: u128 = 4_000_000;
+
+/// Coût estimé de l'écriture par différence (`PageDoc::write_diff`) de `written` sur une page
+/// dont `read_blocks` rend `current`, avant de l'écrire, en nanosecondes d'acteur en release
+/// (Rulings R1254, R1282). Les blocs se répondent comme dans l'écriture (`keep_ids`, puis les
+/// blocs qui restent à leur place, liste par liste), et l'estimation compte :
+/// - la lecture de la page, `keep_ids` et le plan, par bloc des deux côtés ;
+/// - chaque bloc écrit (neuf, recréé parce qu'il a changé de place, ou enfant d'un bloc qui n'en
+///   avait pas) comme [`write_cost`] le compte, plus le parcours de sa liste jusqu'à sa place :
+///   yrs retrouve la place d'une insertion en reparcourant la liste depuis son début, si bien que
+///   des blocs insérés un sur deux dans une longue liste coûtent le carré de sa longueur ;
+/// - chaque bloc retiré, et le contenu remplacé d'un bloc gardé, par ses éléments (les retraits se
+///   font par identifiant, sans parcours de liste, Ruling R1281) ;
+/// - le contenu changé d'un bloc gardé comme s'il était récrit en entier (le préfixe et le suffixe
+///   communs coûtent moins, sauf à récrire toute une page à six plages, où S0 a mesuré 35 µs par
+///   bloc, sous les 48 µs comptés ici), et chaque prop changée pour un élément.
+///
+/// Les poids sont ceux de [`write_cost`] ; seul celui de la lecture est propre à la différence.
+pub fn diff_cost(current: &[Block], written: &[Block]) -> WriteCost {
+    let mut target = crate::diff::prepared(written);
+    crate::kept_ids::keep_ids(current, &mut target);
+    let mut tally = Tally::default();
+    tally.diff_lists(current, &target);
+    let read = ((blocks_in(current) + blocks_in(&target)) as u128).saturating_mul(DIFF_BLOCK_PS);
+    tally.finish(read)
+}
+
+fn blocks_in(blocks: &[Block]) -> usize {
+    blocks.iter().map(|b| 1 + blocks_in(&b.children)).sum()
 }
 
 fn square(n: usize) -> u128 {
@@ -164,6 +172,39 @@ impl Tally {
         tally.longest = tally.longest.max(len);
     }
 
+    /// Le coût estimé : les listes, le terme linéaire, et `extra` picosecondes de plus, linéaires.
+    fn finish(&self, extra: u128) -> WriteCost {
+        let linear = (self.elements as u128)
+            .saturating_mul(ELEMENT_PS)
+            .saturating_add((self.empty_cells as u128).saturating_mul(EMPTY_CELL_EXTRA_PS))
+            .saturating_add((self.text_items as u128).saturating_mul(TEXT_ITEM_PS))
+            .saturating_add(extra);
+        let lists = self
+            .kinds
+            .iter()
+            .fold(0u128, |sum, k| sum.saturating_add(k.ps));
+        let (heaviest, kind) = KINDS
+            .iter()
+            .zip(&self.kinds)
+            .max_by_key(|(_, k)| k.ps)
+            .map(|(kind, k)| (k, *kind))
+            .expect("quatre sortes de listes");
+        let cause = if heaviest.ps >= linear {
+            Cause::Lists {
+                kind,
+                longest: heaviest.longest,
+            }
+        } else {
+            Cause::Volume {
+                elements: self.elements,
+            }
+        };
+        WriteCost {
+            nanos: u64::try_from(lists.saturating_add(linear) / 1_000).unwrap_or(u64::MAX),
+            cause,
+        }
+    }
+
     /// Des frères, et sous chacun ce qu'il porte, comme `write_nodes` (sans récursion).
     fn siblings(&mut self, blocks: &[Block]) {
         let mut stack = vec![blocks];
@@ -175,18 +216,81 @@ impl Tally {
             self.list(ListKind::Siblings, n, square(n) * SIBLING_PAIR_PS);
             self.elements += n;
             for b in blocks {
-                // Un type hors registre s'écrit en bloc `unknown`, comme dans `write_content`.
-                let content = block(&b.kind)
-                    .or_else(|| block("unknown"))
-                    .map(|spec| spec.content);
-                match (content, &b.content) {
-                    (Some(ContentKind::Inline), Content::Inline(content)) => self.inline(content),
-                    (Some(ContentKind::Table), Content::Table(table)) => self.table(Some(table)),
-                    (Some(ContentKind::Table), _) => self.table(None),
-                    _ => {}
-                }
+                self.content(b);
                 stack.push(&b.children);
             }
+        }
+    }
+
+    /// Le contenu d'un bloc, comme `write_content` l'écrit.
+    fn content(&mut self, b: &Block) {
+        // Un type hors registre s'écrit en bloc `unknown`, comme dans `write_content`.
+        let content = block(&b.kind)
+            .or_else(|| block("unknown"))
+            .map(|spec| spec.content);
+        match (content, &b.content) {
+            (Some(ContentKind::Inline), Content::Inline(content)) => self.inline(content),
+            (Some(ContentKind::Table), Content::Table(table)) => self.table(Some(table)),
+            (Some(ContentKind::Table), _) => self.table(None),
+            _ => {}
+        }
+    }
+
+    /// Ce que coûte de retirer ce qu'une autre estimation compterait : ses seuls termes
+    /// linéaires (un retrait ne parcourt aucune liste).
+    fn removing(&mut self, count: impl FnOnce(&mut Tally)) {
+        let mut other = Tally::default();
+        count(&mut other);
+        self.elements += other.elements;
+        self.empty_cells += other.empty_cells;
+        self.text_items += other.text_items;
+    }
+
+    /// Deux listes de frères, comme `PageDoc::write_diff` les écrit (voir [`diff_cost`]).
+    fn diff_lists(&mut self, current: &[Block], target: &[Block]) {
+        let stay = crate::diff::stays(current, target);
+        let mut staying = vec![false; current.len()];
+        let mut kept = vec![false; target.len()];
+        for &(j, i) in &stay {
+            staying[i] = true;
+            kept[j] = true;
+        }
+        for (b, _) in current.iter().zip(&staying).filter(|(_, s)| !**s) {
+            self.removing(|t| t.siblings(std::slice::from_ref(b)));
+        }
+        let mut walks = 0u128;
+        for (j, b) in target.iter().enumerate().filter(|(j, _)| !kept[*j]) {
+            walks = walks.saturating_add((j as u128).saturating_mul(SIBLING_PAIR_PS));
+            self.siblings(std::slice::from_ref(b));
+        }
+        if walks > 0 {
+            self.list(ListKind::Siblings, target.len(), walks);
+        }
+        for (j, i) in stay {
+            self.diff_block(&current[i], &target[j]);
+        }
+    }
+
+    /// Un bloc gardé à sa place.
+    fn diff_block(&mut self, current: &Block, target: &Block) {
+        use crate::diff::{Sort, sort_of};
+        if current.props != target.props {
+            self.elements += 1;
+        }
+        if sort_of(&target.kind) != Sort::Container {
+            self.diff_lists(&current.children, &target.children);
+            return;
+        }
+        if current.kind != target.kind || current.content != target.content {
+            self.content(target);
+            self.removing(|t| t.content(current));
+            self.elements += 1;
+        }
+        match (current.children.is_empty(), target.children.is_empty()) {
+            (true, false) => self.siblings(&target.children),
+            (false, true) => self.removing(|t| t.siblings(&current.children)),
+            (false, false) => self.diff_lists(&current.children, &target.children),
+            (true, true) => {}
         }
     }
 

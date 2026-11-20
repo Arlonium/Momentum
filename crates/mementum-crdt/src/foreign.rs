@@ -319,11 +319,11 @@ impl Foreign {
         ids: &mut Ids,
     ) -> u32 {
         if self.unwrapped {
-            let own = match self.attrs.get("id") {
-                Some(Value::String(id)) => id.clone(),
-                _ => String::new(),
+            let wanted = if b.id.is_empty() {
+                self.own_id()
+            } else {
+                b.id.clone()
             };
-            let wanted = if b.id.is_empty() { own } else { b.id.clone() };
             if !wanted.is_empty() {
                 self.attrs
                     .insert("id".into(), Value::String(ids.take(&wanted)));
@@ -350,6 +350,15 @@ impl Foreign {
 
     pub(crate) fn unwrapped(&self) -> bool {
         self.unwrapped
+    }
+
+    /// L'identifiant que le nœud porte dans ses attributs : celui que [`Foreign::write`] lui
+    /// garde, hors enveloppe, quand le bloc n'en donne pas.
+    pub(crate) fn own_id(&self) -> String {
+        match self.attrs.get("id") {
+            Some(Value::String(id)) => id.clone(),
+            _ => String::new(),
+        }
     }
 }
 

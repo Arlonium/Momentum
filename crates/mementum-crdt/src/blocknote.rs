@@ -528,7 +528,9 @@ fn read_runs<T: ReadTxn>(txn: &T, text: &XmlTextRef, out: &mut Vec<Inline>) {
     }
 }
 
-fn styles_of(attrs: Option<&Attrs>) -> (Styles, Option<&str>) {
+/// Les styles et le lien d'une plage, tels que la lecture les montre (une couleur ou une adresse
+/// au-delà de leur borne est lue absente).
+pub(crate) fn styles_of(attrs: Option<&Attrs>) -> (Styles, Option<&str>) {
     let mut styles = Styles::default();
     let mut link = None;
     let color = |value| map_str(value, "stringValue").filter(|c| c.len() <= MAX_COLOR_BYTES);
@@ -636,7 +638,7 @@ fn write_node(
     }
     let container = parent.insert(txn, at, XmlElementPrelim::empty(BLOCK_CONTAINER));
     container.insert_attribute(txn, "id", ids.take(&b.id));
-    write_content(txn, &container, b);
+    write_content(txn, &container, 0, b);
     write_children(txn, &container, &b.children, ids);
     1
 }
@@ -654,9 +656,16 @@ pub(crate) fn write_children(
     }
 }
 
-/// Nœud de contenu d'un bloc. Un type hors registre s'écrit en bloc
-/// `unknown` dont `originalType` est le type, comme le fait `render`.
-fn write_content(txn: &mut TransactionMut, container: &XmlElementRef, b: &Block) {
+/// Nœud de contenu d'un bloc, à l'index `at` du conteneur (0 : le nœud de contenu précède le
+/// groupe des enfants, ce que demande le schéma de BlockNote ; l'écriture par différence y remet
+/// le nœud d'un bloc dont le type change). Un type hors registre s'écrit en bloc `unknown` dont
+/// `originalType` est le type, comme le fait `render`.
+pub(crate) fn write_content(
+    txn: &mut TransactionMut,
+    container: &XmlElementRef,
+    at: u32,
+    b: &Block,
+) {
     let (spec, props) = match block(&b.kind) {
         Some(spec) => (spec, b.props.clone()),
         None => {
@@ -667,7 +676,7 @@ fn write_content(txn: &mut TransactionMut, container: &XmlElementRef, b: &Block)
             (block("unknown").expect("unknown dans le registre"), props)
         }
     };
-    let node = container.push_back(txn, XmlElementPrelim::empty(spec.name));
+    let node = container.insert(txn, at, XmlElementPrelim::empty(spec.name));
     write_props(txn, &node, &props, spec.props);
     match (spec.content, &b.content) {
         (ContentKind::Inline, Content::Inline(content)) => write_inline(txn, &node, content),
@@ -690,24 +699,43 @@ pub(crate) fn write_props(
     specs: &[PropSpec],
 ) {
     let tag = element.tag().clone();
-    let sound = |name: &str, value: &Any| attrs::sound(&tag, Key::of(name), Value::of(value));
     for spec in specs {
-        let default = || spec.default.map_or(Any::Undefined, default_any);
-        let value = match props.get(spec.name) {
-            Some(v) => Some(prop_any(v, Some(spec.ty)))
-                .filter(|value| sound(spec.name, value))
-                .unwrap_or_else(default),
-            None => default(),
-        };
-        element.insert_attribute(txn, spec.name, value);
+        if let Some(value) = prop_attribute(&tag, spec.name, props.get(spec.name), specs) {
+            element.insert_attribute(txn, spec.name, value);
+        }
     }
     for (name, value) in props {
-        if !specs.iter().any(|s| s.name == name) {
-            let value = prop_any(value, None);
-            if sound(name, &value) {
-                element.insert_attribute(txn, name.as_str(), value);
-            }
+        if !specs.iter().any(|s| s.name == name)
+            && let Some(value) = prop_attribute(&tag, name, Some(value), specs)
+        {
+            element.insert_attribute(txn, name.as_str(), value);
         }
+    }
+}
+
+/// Ce que [`write_props`] écrit sous `name` sur un élément `tag` : pour une prop du registre, sa
+/// valeur, ou son défaut (`undefined` sans défaut) si elle manque ou si la garde des attributs la
+/// refuserait ; pour une prop inconnue du registre, sa valeur, ou `None` (rien n'est écrit) si
+/// elle manque ou serait refusée. L'écriture par différence (`crate::diff`) écrit ainsi une prop
+/// changée comme l'écriture complète l'aurait écrite.
+pub(crate) fn prop_attribute(
+    tag: &str,
+    name: &str,
+    value: Option<&PropValue>,
+    specs: &[PropSpec],
+) -> Option<Any> {
+    let sound = |value: &Any| attrs::sound(tag, Key::of(name), Value::of(value));
+    match specs.iter().find(|s| s.name == name) {
+        Some(spec) => {
+            let default = || spec.default.map_or(Any::Undefined, default_any);
+            Some(match value {
+                Some(v) => Some(prop_any(v, Some(spec.ty)))
+                    .filter(sound)
+                    .unwrap_or_else(default),
+                None => default(),
+            })
+        }
+        None => value.map(|v| prop_any(v, None)).filter(sound),
     }
 }
 
@@ -796,7 +824,9 @@ fn write_inline_item(
     }
 }
 
-fn marks(styles: &Styles, link: Option<&str>) -> Attrs {
+/// Les marques explicites d'une plage, comme les écrit [`write_inline`] (toutes, même aucune :
+/// le texte n'hérite pas des marques voisines).
+pub(crate) fn marks(styles: &Styles, link: Option<&str>) -> Attrs {
     let one = |key: &str, value: &str| {
         Any::Map(Arc::new(HashMap::from([(
             key.to_string(),

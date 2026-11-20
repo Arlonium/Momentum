@@ -10,6 +10,7 @@ mod attrs;
 mod blocknote;
 mod cost;
 mod dedupe;
+mod diff;
 mod edit;
 mod foreign;
 mod guard;
@@ -24,7 +25,8 @@ mod table;
 
 use std::fmt;
 
-pub use cost::{Cause, ListKind, WriteCost, write_cost};
+pub use cost::{Cause, ListKind, WriteCost, diff_cost, write_cost};
+pub use diff::DiffWritten;
 pub use guard::MAX_YJS_DEPTH;
 pub use page::{Applied, Awaited, PageDoc, Refused};
 

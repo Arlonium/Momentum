@@ -1232,7 +1232,7 @@ impl PageDoc {
     /// est fait, le document est à recharger. Aucune écriture du serveur n'en fait aujourd'hui
     /// (la prop `colwidth` d'une cellule, que l'écriture posait deux fois, est sautée) ; c'était
     /// une assertion, qui arrêtait l'acteur.
-    fn write_all(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
+    pub(crate) fn write_all(&self, blocks: &[Block]) -> Result<Vec<u8>, CrdtError> {
         let (cleared, wrote_nothing) = {
             let mut txn = self.doc.transact_mut();
             self.clear(&mut txn);
@@ -1559,7 +1559,7 @@ fn parent_of(branch: BranchPtr) -> Option<BranchPtr> {
 
 /// Les blocs que [`PageDoc::write_blocks`] écrit : normalisés, un paragraphe vide pour un
 /// arbre vide (Ruling R16), et refusés si BlockNote les refuserait (`Structure`, `TooDeep`).
-fn writable(blocks: &[Block]) -> Result<Vec<Block>, CrdtError> {
+pub(crate) fn writable(blocks: &[Block]) -> Result<Vec<Block>, CrdtError> {
     let blocks = match normalize(blocks.to_vec()) {
         b if b.is_empty() => vec![empty_paragraph()],
         b => b,
