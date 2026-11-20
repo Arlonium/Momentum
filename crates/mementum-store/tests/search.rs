@@ -1540,7 +1540,13 @@ async fn new_pages(f: &Fixture, space: &mementum_store::Space, n: usize) -> Vec<
 /// Chacune de ces pages mène à `target` par un bloc.
 async fn link_to(f: &Fixture, sources: &[Uuid], target: Uuid) {
     for &source in sources {
-        index(&f.store, source, 1, &[linking("a", "vers la cible", &[target])]).await;
+        index(
+            &f.store,
+            source,
+            1,
+            &[linking("a", "vers la cible", &[target])],
+        )
+        .await;
     }
 }
 
@@ -1623,5 +1629,8 @@ async fn a_source_linking_many_times_is_read_once() {
     assert_eq!(sources, [source]);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].block_id, "a");
-    assert_eq!(many, once, "les liens d'une même source ont été lus un à un");
+    assert_eq!(
+        many, once,
+        "les liens d'une même source ont été lus un à un"
+    );
 }
