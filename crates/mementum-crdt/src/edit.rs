@@ -1,4 +1,10 @@
-//! Éditions d'agent : remplacer du texte, insérer et déplacer des blocs.
+//! Éditions directes du document, écrites au lot 1 : remplacer du texte, insérer et déplacer des
+//! blocs.
+//!
+//! Les opérations des agents n'y passent pas (Task S3 du lot 5, Ruling R1300) : elles se résolvent
+//! sur les blocs lus et s'écrivent par différence (`ops.rs`, `PageDoc::write_diff_over`). Ces trois
+//! fonctions restent, éditions d'un client dans les tests des autres crates ; le dédoublonnage
+//! se sert de [`remove_if_empty_group`].
 //!
 //! Les positions de [`PageDoc::replace_text`] se comptent en caractères de
 //! `mementum_md::block_text` (une mention, une formule ou un saut de ligne
@@ -285,6 +291,13 @@ pub(crate) fn find_block<T: ReadTxn>(
 }
 
 /// Parent d'un élément et son index parmi les enfants.
+///
+/// Le rang se compte par `children()`, qui s'arrête au premier enfant qui n'est pas un nœud XML
+/// (piège R496) : juste sur une page servie, où la garde refuse un tel enfant d'un client et le
+/// retire d'une entrée du journal (`a_stored_untyped_child_is_deleted_on_reload`,
+/// `assert_children_are_their_length`, `tests/reload.rs`) ; faux sur un document que la garde n'a
+/// pas relu (le rang d'un élément placé après un tel enfant n'est pas trouvé). Les opérations des
+/// agents ne passent pas par lui (R1300) ; le dédoublonnage, sur des pages servies, si.
 pub(crate) fn position<T: ReadTxn>(
     txn: &T,
     element: &XmlElementRef,
