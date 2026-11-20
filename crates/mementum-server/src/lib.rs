@@ -236,6 +236,7 @@ mod error;
 mod events;
 mod files;
 mod guard;
+mod indexer;
 mod inputs_cache;
 mod mmd_reads;
 mod page_writes;
@@ -278,6 +279,7 @@ pub use config::Config;
 pub use duplications::{DUPLICATION_BUDGET, DUPLICATION_WINDOW};
 pub use error::ApiError;
 pub use events::EVENTS_PING;
+pub use indexer::{INDEX_AFTER, INDEX_AT_MOST, IndexerHandle};
 // La copie d'avant migration, que `set_password` signale à qui l'appelle.
 pub use mementum_store::Backup;
 pub use page_writes::{MAX_ACCOUNT_WRITES, MAX_PAGE_WRITES};
@@ -342,6 +344,9 @@ pub(crate) struct AppState {
     /// Le débit des duplications, par compte : une à la fois, et un budget d'octets bâtis par
     /// minute (`duplications.rs`, Rulings R605, R606).
     duplications: Arc<duplications::Duplications>,
+    /// L'indexeur de la recherche (`indexer.rs`, lot 4) : ce qu'il sait en retard.
+    #[allow(dead_code)] // Lu par la route de recherche (Task S5).
+    indexer: IndexerHandle,
 }
 
 /// Millisecondes Unix.
@@ -382,7 +387,47 @@ pub fn backup_warning(backup: &Backup) -> Option<&'static str> {
 /// L'application : ouvre (et crée au besoin) le dossier des données et la
 /// base, puis monte les routes.
 pub async fn app(cfg: &Config) -> anyhow::Result<Router> {
-    Ok(build(cfg).await?.0)
+    Ok(start(cfg).await?.router)
+}
+
+/// L'application démarrée : ses routes, et ce qui tourne derrière elles.
+pub struct Started {
+    /// Les routes. Elles tiennent une poignée de l'indexeur : il tourne tant qu'elles vivent.
+    pub router: Router,
+    /// L'indexeur de la recherche, lancé en fond.
+    pub indexer: IndexerHandle,
+    store: Store,
+    hub: Arc<Hub>,
+}
+
+impl Started {
+    /// La base de l'application. Pour les tests.
+    #[doc(hidden)]
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Le hub de l'application. Pour les tests.
+    #[doc(hidden)]
+    pub fn hub(&self) -> &Arc<Hub> {
+        &self.hub
+    }
+
+    /// L'arrêt, dans l'ordre : chaque page ouverte coupe sa version `closing` s'il lui reste des
+    /// écritures non versionnées (Ruling R135) et ferme ses connexions ; l'indexeur finit
+    /// l'indexation en cours ; puis la base ferme. Ce qui restait à indexer l'est au démarrage
+    /// suivant.
+    pub async fn shutdown(self) {
+        self.hub.shutdown().await;
+        self.indexer.stop().await;
+        self.store.close().await;
+    }
+}
+
+/// Ouvre (et crée au besoin) le dossier des données et la base, monte les routes et lance
+/// l'indexeur : ce que [`app`] et [`serve`] font tous deux.
+pub async fn start(cfg: &Config) -> anyhow::Result<Started> {
+    build(cfg).await
 }
 
 /// Lance le serveur sur `cfg.bind`, écrit sur la sortie standard la ligne
@@ -390,7 +435,7 @@ pub async fn app(cfg: &Config) -> anyhow::Result<Router> {
 /// (ou `SIGTERM`). À l'arrêt, les pages ouvertes gardent leur dernière version
 /// avant que la base ferme ([`Hub::shutdown`]).
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
-    let (router, store, hub) = build(&cfg).await?;
+    let started = start(&cfg).await?;
     let (listener, addr) = listen(cfg.bind).await?;
     // Une sortie standard fermée n'arrête pas le serveur : l'adresse est
     // aussi dans le journal « serveur prêt ».
@@ -402,14 +447,12 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         tracing::warn!(%error, "ligne d'écoute impossible à écrire sur la sortie standard ; le serveur continue");
     }
     tracing::info!(%addr, data_dir = %cfg.data_dir.display(), "serveur prêt");
-    let served = axum::serve(listener, router)
+    let served = axum::serve(listener, started.router.clone())
         .with_graceful_shutdown(shutdown_signal())
         .await;
-    // Plus aucune requête : chaque page ouverte coupe sa version `closing` s'il lui reste des
-    // écritures non versionnées (Ruling R135), et ferme ses connexions, avant que la base ferme.
+    // Plus aucune requête : les pages ouvertes, l'indexeur, puis la base ([`Started::shutdown`]).
     // Aussi quand le serveur HTTP s'est arrêté sur une erreur, rendue ensuite.
-    hub.shutdown().await;
-    store.close().await;
+    started.shutdown().await;
     served.context("serveur HTTP")
 }
 
@@ -444,7 +487,7 @@ pub fn without_nagle(
     })
 }
 
-async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
+async fn build(cfg: &Config) -> anyhow::Result<Started> {
     // Avant de toucher au disque : une adresse publique invalide arrête tout.
     let public_origin = cfg
         .public_url
@@ -503,6 +546,17 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
              soit le réglage des inscriptions ; le créer avant d'exposer le serveur"
         );
     }
+    // L'indexeur de la recherche, en fond : son rattrapage n'est pas attendu (le démarrage à
+    // froid ne le paie pas).
+    let indexer = indexer::spawn(
+        store.clone(),
+        hub.clone(),
+        indexer::IndexerConfig {
+            after: cfg.index_after,
+            at_most: cfg.index_at_most,
+            origin: public_origin.as_deref().map(Arc::from),
+        },
+    );
     let state = AppState {
         store: store.clone(),
         hub: hub.clone(),
@@ -526,8 +580,14 @@ async fn build(cfg: &Config) -> anyhow::Result<(Router, Store, Arc<Hub>)> {
         mmd_reads: Arc::default(),
         max_duplicated_bytes: cfg.max_duplicated_bytes,
         duplications: Arc::default(),
+        indexer: indexer.clone(),
     };
-    Ok((router(state), store, hub))
+    Ok(Started {
+        router: router(state),
+        indexer,
+        store,
+        hub,
+    })
 }
 
 /// Ouvre le dépôt des fichiers du dossier des données, ce que seul le démarrage du serveur fait :

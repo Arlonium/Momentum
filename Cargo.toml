@@ -32,6 +32,7 @@ mementum-acl = { path = "crates/mementum-acl" }
 mementum-crdt = { path = "crates/mementum-crdt" }
 mementum-md = { path = "crates/mementum-md" }
 mementum-schema = { path = "crates/mementum-schema" }
+mementum-search = { path = "crates/mementum-search" }
 mementum-server = { path = "crates/mementum-server" }
 mementum-store = { path = "crates/mementum-store" }
 mementum-sync = { path = "crates/mementum-sync" }

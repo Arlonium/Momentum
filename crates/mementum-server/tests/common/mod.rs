@@ -17,6 +17,9 @@
 //!   plus bavard (fils de SQLite et des calculs bloquants compris).
 #![allow(dead_code)]
 
+/// L'horloge de tokio arrêtée (Ruling R179) : l'aide des tests de `mementum-sync`.
+#[path = "../../../mementum-sync/tests/common/clock.rs"]
+pub mod clock;
 pub mod sync;
 /// Le dossier temporaire d'un test, supprimé après lui : l'aide des tests de `mementum-store`.
 #[path = "../../../mementum-store/tests/common/tmp.rs"]
@@ -52,6 +55,14 @@ pub struct TestApp {
     _dir: TestDir,
     pub cfg: Config,
     pub router: Router,
+    /// L'indexeur de l'application, lancé avec elle (lot 4). Un test qui relit toute la base
+    /// attend d'abord qu'il n'ait plus rien à écrire ([`mementum_server::IndexerHandle::settled`]).
+    pub indexer: mementum_server::IndexerHandle,
+    /// La base de l'application elle-même (pas un second `Store` sur le même fichier, comme
+    /// [`Team::store`]) : sa file d'écriture, ses lectures.
+    pub store: Store,
+    /// Le hub de l'application.
+    pub hub: Arc<mementum_sync::Hub>,
 }
 
 pub struct Reply {
@@ -149,12 +160,30 @@ impl TestApp {
             ..Config::default()
         };
         adjust(&mut cfg);
-        let router = mementum_server::app(&cfg).await.unwrap();
+        TestApp::on(dir, cfg).await
+    }
+
+    /// Une application démarrée sur ce dossier, avec cette configuration : un dossier neuf, ou
+    /// celui d'une application arrêtée ([`TestApp::stop`]).
+    pub async fn on(dir: TestDir, cfg: Config) -> TestApp {
+        let started = mementum_server::start(&cfg).await.unwrap();
         TestApp {
             _dir: dir,
+            store: started.store().clone(),
+            hub: started.hub().clone(),
+            indexer: started.indexer.clone(),
+            router: started.router,
             cfg,
-            router,
         }
+    }
+
+    /// Arrête l'application comme `serve` : les pages ouvertes, l'indexeur, puis la base. Rend
+    /// son dossier et sa configuration, pour la relancer ([`TestApp::on`]) ou lire sa base.
+    pub async fn stop(self) -> (TestDir, Config) {
+        self.hub.shutdown().await;
+        self.indexer.stop().await;
+        self.store.close().await;
+        (self._dir, self.cfg)
     }
 
     /// Une application démarrée sur une base du lot 1 ([`lot1_database`]),
@@ -168,13 +197,7 @@ impl TestApp {
         };
         std::fs::create_dir_all(&cfg.data_dir).unwrap();
         let lot1 = lot1_database(&cfg.db_path()).await;
-        let router = mementum_server::app(&cfg).await.unwrap();
-        let app = TestApp {
-            _dir: dir,
-            cfg,
-            router,
-        };
-        (app, lot1)
+        (TestApp::on(dir, cfg).await, lot1)
     }
 
     /// Envoie la requête avec `Host: localhost` si elle n'en a pas (comme un

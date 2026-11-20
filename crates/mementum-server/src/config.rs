@@ -10,6 +10,7 @@
 //! | adresse publique | `MEMENTUM_PUBLIC_URL` | `--public-url` | aucune |
 //! | intervalle des versions d'une page, en secondes (1 au moins) | `MEMENTUM_VERSION_EVERY_SECS` | `--version-every-secs` | `600` |
 //! | taille la plus grande d'un fichier envoyé, en Mio (de 1 à 4 096) | `MEMENTUM_MAX_FILE_MB` | `--max-file-mb` | `100` |
+//! | calme attendu sur une page avant de l'indexer, en millisecondes (de 0 à 600 000) | `MEMENTUM_INDEX_AFTER_MS` | aucune | `2000` |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
 //! l'emporte sur le défaut. Quatre derniers réglages n'ont ni variable ni
@@ -75,6 +76,14 @@ pub const DEFAULT_MAX_FILE_MB: u64 = 100;
 /// La plus haute borne qu'on peut donner à un fichier, en Mio (Ruling R247).
 pub const MAX_MAX_FILE_MB: u64 = 4096;
 
+/// Variable d'environnement du calme attendu sur une page avant de l'indexer, en millisecondes
+/// (Ruling R906). Sans option de ligne de commande : elle sert aux suites de bout en bout, qui ne
+/// peuvent pas attendre deux secondes après chaque frappe.
+pub const INDEX_AFTER_MS_VAR: &str = "MEMENTUM_INDEX_AFTER_MS";
+
+/// Le plus long calme qu'on peut demander avant d'indexer une page, en millisecondes.
+pub const MAX_INDEX_AFTER_MS: u64 = 600_000;
+
 /// Le délai au-delà duquel un envoi qui ne reçoit plus rien est abandonné (Ruling R247).
 pub const UPLOAD_IDLE: Duration = Duration::from_secs(30);
 
@@ -123,6 +132,13 @@ pub struct Config {
     /// variable ni option : seuls les tests l'abaissent, pour ne pas bâtir des dizaines de
     /// mégaoctets de pages.
     pub max_duplicated_bytes: usize,
+    /// Le calme attendu sur une page, après sa dernière écriture, avant de l'indexer (Ruling
+    /// R906) : [`INDEX_AFTER`](crate::INDEX_AFTER) par défaut, deux secondes.
+    pub index_after: Duration,
+    /// Le plus long délai entre la première écriture non indexée d'une page et son indexation,
+    /// même écrite sans relâche (Ruling R906) : [`INDEX_AT_MOST`](crate::INDEX_AT_MOST) par
+    /// défaut, quinze secondes. Ni variable ni option : seuls les tests le changent.
+    pub index_at_most: Duration,
 }
 
 impl Default for Config {
@@ -138,6 +154,8 @@ impl Default for Config {
             upload_idle: UPLOAD_IDLE,
             store: StoreOptions::default(),
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
+            index_after: crate::INDEX_AFTER,
+            index_at_most: crate::INDEX_AT_MOST,
         }
     }
 }
@@ -229,6 +247,10 @@ impl Config {
                 None => DEFAULT_MAX_FILE_MB,
             },
         };
+        let index_after = match set(&var, INDEX_AFTER_MS_VAR) {
+            Some(raw) => parse_index_after(&raw)?,
+            None => crate::INDEX_AFTER,
+        };
         Ok(Config {
             bind,
             data_dir: resolve_data_dir(data_dir, &var),
@@ -240,6 +262,8 @@ impl Config {
             upload_idle: UPLOAD_IDLE,
             store: StoreOptions::default(),
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
+            index_after,
+            index_at_most: crate::INDEX_AT_MOST,
         })
     }
 
@@ -316,6 +340,23 @@ fn parse_version_every(raw: &OsStr, name: &str) -> anyhow::Result<Duration> {
             anyhow::anyhow!(
                 "{name} invalide (« {} ») : attendu un nombre entier de secondes, 1 au moins \
                  (600 par défaut : une version toutes les dix minutes de frappe)",
+                raw.to_string_lossy()
+            )
+        })
+}
+
+/// `MEMENTUM_INDEX_AFTER_MS` : un nombre entier de millisecondes, espaces de bord admises, de 0 à
+/// [`MAX_INDEX_AFTER_MS`].
+fn parse_index_after(raw: &OsStr) -> anyhow::Result<Duration> {
+    raw.to_str()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|ms| *ms <= MAX_INDEX_AFTER_MS)
+        .map(Duration::from_millis)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{INDEX_AFTER_MS_VAR} invalide (« {} ») : attendu un nombre entier de \
+                 millisecondes, de 0 à {MAX_INDEX_AFTER_MS} (2000 par défaut : une page est \
+                 indexée deux secondes après sa dernière écriture)",
                 raw.to_string_lossy()
             )
         })
@@ -522,6 +563,30 @@ mod tests {
         let option = Some("1".to_string());
         let cfg = Config::resolve(None, None, None, None, option, None, vars(&pairs)).unwrap();
         assert_eq!(cfg.version_every, Duration::from_secs(1));
+    }
+
+    /// Le calme attendu avant d'indexer une page (Ruling R906) : deux secondes par défaut, quinze
+    /// au plus sous une écriture sans relâche ; la variable le règle en millisecondes, et une
+    /// valeur qui n'en est pas une arrête le démarrage en la nommant.
+    #[test]
+    fn index_delay_comes_from_its_variable() {
+        let none = Config::resolve(None, None, None, None, None, None, vars(&[])).unwrap();
+        assert_eq!(none.index_after, Duration::from_secs(2));
+        assert_eq!(none.index_at_most, Duration::from_secs(15));
+        let pairs = [("MEMENTUM_INDEX_AFTER_MS", " 50 ")];
+        let variable = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
+        assert_eq!(variable.index_after, Duration::from_millis(50));
+        assert_eq!(variable.index_at_most, Duration::from_secs(15));
+        for raw in ["bientôt", "-1", "600001", "1.5"] {
+            let pairs = [("MEMENTUM_INDEX_AFTER_MS", raw)];
+            let error = Config::resolve(None, None, None, None, None, None, vars(&pairs))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("MEMENTUM_INDEX_AFTER_MS") && error.contains(raw),
+                "{error}"
+            );
+        }
     }
 
     /// Une valeur qui n'est pas un nombre entier de secondes, une au moins, arrête le démarrage

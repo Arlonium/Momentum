@@ -240,6 +240,9 @@ async fn the_password_change_checks_the_named_account_and_the_other_session_rout
     let alice = t.account("Alice").await;
     let bruno = t.account("Bruno").await;
     let body = json!({ "current": PASSWORD, "new": "un-tout-nouveau-mot-de-passe" });
+    // L'indexeur (lot 4) écrit en fond ce que la création des comptes lui a laissé : la base
+    // n'est relue qu'une fois qu'il n'a plus rien à écrire.
+    t.indexer.settled().await;
     for (what, values, expected) in cases(alice.id, bruno.id) {
         if expected == Expected::Passes {
             continue;
@@ -360,6 +363,9 @@ async fn the_account_refusal_comes_right_after_the_401_and_writes_nothing() {
 
     // Puis `409`, avant tout le reste, et sans rien écrire.
     let mona = &team.mona.browser;
+    // Les pages créées plus haut sont indexées en fond (lot 4) : la base n'est relue qu'une fois
+    // l'indexeur sans rien à écrire.
+    t.indexer.settled().await;
     let before = dump(&t.db_path()).await;
     let first = mona
         .send(naming(

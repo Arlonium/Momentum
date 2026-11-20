@@ -176,12 +176,75 @@ async fn full_write_after_a_set_aside_entry_is_kept() {
     let read = team.olga.get_mmd(&page.to_string()).await;
     read.assert_status(StatusCode::OK);
     assert_eq!(read.text(), "Nouveau\n");
-    let journal = logs.text();
+    let journal = errors(&logs);
     assert_eq!(
         journal.matches("écartée").count(),
         1,
         "seule l'entrée hostile est écartée : {journal}"
     );
+}
+
+/// Les lignes `error` du journal. L'indexeur (lot 4) relit aussi les pages gardées, et dit en
+/// `debug` les entrées qu'il écarte ([`mementum_sync::stored_page`]) : un compte de lignes ne
+/// porte que sur celles de l'acteur.
+fn errors(logs: &Logs) -> String {
+    logs.text()
+        .lines()
+        .filter(|line| line.contains("ERROR"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Task S4b : une entrée écartée est dite une fois en `error`, par l'acteur qui charge la page,
+/// même quand l'indexeur a relu la page avant lui. Témoin : l'indexeur l'a bien relue, et a dit
+/// l'entrée écartée en `debug`.
+#[tokio::test]
+async fn entries_set_aside_are_logged_once() {
+    let logs = Logs::capture();
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Journal", &[user(&team.olga, Level::Full)])
+        .await;
+    let (created, creation) = PageDoc::new_page();
+    let paragraph = created.read_blocks()[0].id.clone();
+    let first = PageDoc::from_updates([creation.as_slice()]).unwrap();
+    let one = first.replace_text(&paragraph, 0, 0, "Un").unwrap();
+    // L'entrée hostile de `journal_entry_with_a_repeated_client_is_set_aside`.
+    let state = created.state_vector();
+    let mut at = 0;
+    assert_eq!(read_var(&state, &mut at), 1);
+    let root = read_var(&state, &mut at);
+    let clock = read_var(&state, &mut at);
+    let mut hostile = vec![2, 1];
+    var(&mut hostile, root);
+    var(&mut hostile, clock);
+    hostile.extend([10, 1, 1]);
+    var(&mut hostile, root);
+    hostile.extend([0, 0, 1, 0]);
+    team.store
+        .append_updates(page, &[&creation, &one, &hostile], None)
+        .await
+        .unwrap();
+
+    // L'indexeur relit la page (née par un autre `Store`, à `-1`) avant tout acteur.
+    t.indexer.settled().await;
+    let rows = t.store.indexed_blocks(page).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].text, "Un");
+    let read = logs.text();
+    assert!(
+        read.lines()
+            .any(|line| line.contains("DEBUG") && line.contains("écartée")),
+        "témoin : l'indexeur a écarté l'entrée, en `debug` : {read}"
+    );
+    assert_eq!(errors(&logs), "", "l'indexeur ne dit rien en `error`");
+
+    let loaded = team.olga.get_mmd(&page.to_string()).await;
+    loaded.assert_status(StatusCode::OK);
+    assert_eq!(loaded.text(), "Un\n");
+    let journal = errors(&logs);
+    assert_eq!(journal.matches("écartée").count(), 1, "{journal}");
 }
 
 /// Ruling R723 : une entrée de map à origine droite, écrite au journal par un serveur d'avant
@@ -420,7 +483,7 @@ async fn entries_that_depend_on_a_set_aside_entry_are_set_aside_in_one_pass() {
     let read = team.olga.get_mmd(&page.to_string()).await;
     read.assert_status(StatusCode::OK);
     assert_eq!(read.text(), format!("Un{}\n", "x".repeat(DEPENDENTS)));
-    let journal = logs.text();
+    let journal = errors(&logs);
     assert_eq!(
         journal
             .matches("dépend de ce qu'une entrée écartée portait")

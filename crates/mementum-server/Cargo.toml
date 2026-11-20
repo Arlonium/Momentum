@@ -29,6 +29,8 @@ mementum-acl.workspace = true
 mementum-crdt.workspace = true
 mementum-md.workspace = true
 mementum-schema.workspace = true
+# La projection d'une page en lignes d'index, que l'indexeur écrit dans la base (lot 4).
+mementum-search.workspace = true
 mementum-store.workspace = true
 # `ws::WsBytes` : la WebSocket d'axum vue comme le flux qu'attend `Hub::serve_connection`.
 mementum-sync = { workspace = true, features = ["axum"] }
@@ -56,7 +58,8 @@ serde_json.workspace = true
 # Pannes simulées dans la base (déclencheur SQLite), comme dans `mementum-sync`.
 sqlx.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+# `test-util` : l'horloge de tokio arrêtée des tests de l'indexeur (`tests/indexer.rs`, Ruling R179).
+tokio = { workspace = true, features = ["test-util"] }
 # Poignée de main WebSocket avec une en-tête `Origin` (Ruling R31).
 tokio-tungstenite.workspace = true
 tower = { workspace = true, features = ["util"] }

@@ -448,7 +448,18 @@ pub(crate) mod tests {
     pub(crate) async fn state(dir: &tempfile::TempDir) -> AppState {
         let store = Store::open(&dir.path().join("m.db")).await.unwrap();
         let hub = Hub::new(store.clone(), SyncConfig::default());
+        // Sans indexeur lancé : ces tests comptent les écritures en file.
+        let indexer = crate::indexer::not_running(
+            store.clone(),
+            hub.clone(),
+            crate::indexer::IndexerConfig {
+                after: crate::INDEX_AFTER,
+                at_most: crate::INDEX_AT_MOST,
+                origin: None,
+            },
+        );
         AppState {
+            indexer,
             hub,
             store,
             check_host: true,
