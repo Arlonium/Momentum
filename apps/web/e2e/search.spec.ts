@@ -66,7 +66,8 @@ const shown = (p: Page) =>
     .locator("[data-search-page]")
     .evaluateAll((rows) => rows.map((r) => (r as HTMLElement).dataset.searchPage));
 const focusOnBody = (p: Page) => p.evaluate(() => document.activeElement === document.body);
-const pageUrl = (id: string) => new RegExp(`/p/${id}$`);
+/** L'adresse de la page `id`, à un bloc ou non (un résultat trouvé par un bloc y mène, Task C2). */
+const pageUrl = (id: string) => new RegExp(`/p/${id}(#b=.+)?$`);
 
 test("typed_word_is_found_and_opened", async ({ browser }) => {
   const { p, secret, recipes, home } = await opened(browser);
@@ -88,8 +89,8 @@ test("typed_word_is_found_and_opened", async ({ browser }) => {
   await expect(found.locator(".mm-search-excerpt")).toContainText(`Le ${secret} se cache ici`);
   await expect(found.locator("mark")).toHaveText([secret]);
   expect(await shown(p)).toEqual([recipes.id]);
-  // Chaque ligne est un vrai lien.
-  await expect(found).toHaveAttribute("href", `/p/${recipes.id}`);
+  // Chaque ligne est un vrai lien, vers la page et le bloc trouvé.
+  await expect(found).toHaveAttribute("href", new RegExp(`^/p/${recipes.id}#b=.+$`));
 
   await found.click();
   await expect(p).toHaveURL(pageUrl(recipes.id));
@@ -339,4 +340,164 @@ test("a_line_shown_does_not_move_when_results_arrive", async ({ browser }) => {
   // La ligne ajoutée est dessous.
   const added = (await row(p, notebook.id).boundingBox())!;
   expect(added.y).toBeGreaterThanOrEqual(before[2]!.y + before[2]!.height);
+});
+
+// Arriver sur le bloc trouvé (Task C2) : un résultat ouvre la page à son bloc, `/p/<page>#b=<bloc>`.
+
+/** Les paragraphes de la longue page, et les rangs des deux qui portent un mot à chercher. */
+const LONG = 1_000;
+const FAR = 850;
+const MIDDLE = 400;
+
+/**
+ * Un compte neuf, une page de mille paragraphes dont deux portent chacun un mot neuf (au rang `FAR`
+ * et au rang `MIDDLE`, loin du haut de la page et loin l'un de l'autre), et une page d'accueil. Tout
+ * est trouvable avant qu'un onglet s'ouvre.
+ */
+async function longScene() {
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const far = word();
+  const middle = word();
+  const lines = Array.from({ length: LONG }, (_, i) =>
+    i === FAR ? `Le ${far} est loin en bas.` : i === MIDDLE ? `Le ${middle} est au milieu.` : `Ligne ${i} du remplissage.`,
+  );
+  const long = await createPage(api, { title: "Longue page" });
+  await putMmd(api, long.id, `${lines.join("\n\n")}\n`);
+  const home = await createPage(api, { title: "Accueil" });
+  await putMmd(api, home.id, "Rien ici\n");
+  await waitFindable(api, space.id, far, long.id);
+  await waitFindable(api, space.id, middle, long.id);
+  return { account, api, space, far, middle, long, home };
+}
+
+const blocks = (p: Page) => p.locator('.mm-editor [data-node-type="blockOuter"]');
+/** Le bloc de la page affichée qui porte `text`. */
+const blockWith = (p: Page, text: string) => blocks(p).filter({ hasText: text });
+const firstBlock = (p: Page) => blocks(p).first();
+/** Où sont le focus et la sélection du document : dans l'éditeur ? dans quel bloc ? */
+const cursorAt = (p: Page) =>
+  p.evaluate(() => {
+    const node = document.getSelection()?.anchorNode ?? null;
+    const element = node instanceof Element ? node : (node?.parentElement ?? null);
+    return {
+      inEditor: document.activeElement?.closest(".mm-editor") != null,
+      block: element?.closest('[data-node-type="blockOuter"]')?.getAttribute("data-id") ?? null,
+    };
+  });
+/** Attend que l'adresse soit celle de la page `id` à un bloc ; rend l'identifiant du bloc, décodé. */
+async function blockOfUrl(p: Page, id: string): Promise<string> {
+  await expect(p).toHaveURL(new RegExp(`/p/${id}#b=.+$`));
+  return decodeURIComponent(new URL(p.url()).hash.slice("#b=".length));
+}
+/** Cherche `query` par Ctrl+K, et ouvre par Entrée la page `id`, que le serveur a trouvée. */
+async function searchAndEnter(p: Page, query: string, id: string) {
+  await p.keyboard.press("Control+k");
+  await expect(field(p)).toBeFocused();
+  await p.keyboard.type(query);
+  await expect(row(p, id)).toHaveAttribute("data-from", "server");
+  await expect(row(p, id)).toHaveAttribute("aria-selected", "true");
+  await p.keyboard.press("Enter");
+  await expect(win(p)).toHaveCount(0);
+}
+
+test("a_result_opens_on_its_block_in_a_long_page", async ({ browser }) => {
+  const { api, far, long, home, account } = await longScene();
+  const p = await openPage(browser, home.id, account);
+  await entry(p).click();
+  await field(p).fill(far);
+  // La ligne est un lien vers la page, à son bloc.
+  await expect(row(p, long.id)).toHaveAttribute("href", new RegExp(`^/p/${long.id}#b=.+$`));
+  await p.keyboard.press("Enter");
+  const blockId = await blockOfUrl(p, long.id);
+  await waitSynced(p);
+  // Le bloc trouvé est à l'écran, loin du haut de la page, qui n'y est plus.
+  const found = blockWith(p, far);
+  await expect(found).toHaveAttribute("data-id", blockId);
+  await expect(found).toBeInViewport();
+  await expect(firstBlock(p)).not.toBeInViewport();
+  // Le focus et le curseur y sont : ce qu'on tape y va, et arrive au serveur.
+  await expect.poll(() => cursorAt(p)).toEqual({ inEditor: true, block: blockId });
+  await p.keyboard.type("Ici : ");
+  await expect(found).toHaveText(`Ici : Le ${far} est loin en bas.`);
+  await expect.poll(() => getMmd(api, long.id)).toContain(`Ici : Le ${far} est loin en bas.`);
+  // Rien n'est dit, rien n'est en erreur.
+  await expect(p.locator('[role="alert"]')).toHaveCount(0);
+
+  // L'adresse seule y mène aussi (un lien copié, l'onglet rechargé), pour qui ne fait que lire :
+  // la page à la corbeille s'ouvre en lecture seule, à son bloc.
+  expect((await api.post(`/api/v1/pages/${long.id}/trash`)).status()).toBe(200);
+  const reader = await newUser(browser, account);
+  await reader.goto(`/p/${long.id}#b=${encodeURIComponent(blockId)}`);
+  await waitSynced(reader);
+  await expect(reader.locator(".mm-editor")).toHaveAttribute("data-editable", "false");
+  await expect(blockWith(reader, far)).toBeInViewport();
+  await expect.poll(() => cursorAt(reader)).toEqual({ inEditor: true, block: blockId });
+  // Un bloc qui n'existe pas (ou plus), dans un onglet neuf (dans le même, seul le fragment
+  // changerait, sans recharger la page) : la page, en haut, sans rien dire.
+  const lost = await newUser(browser, account);
+  await lost.goto(`/p/${long.id}#b=${encodeURIComponent('parti "]')}`);
+  await waitSynced(lost);
+  await expect(lost.locator(".mm-editor")).toContainText(far);
+  await expect(firstBlock(lost)).toBeInViewport();
+  await expect(blockWith(lost, far)).not.toBeInViewport();
+  await expect(lost.locator('[role="alert"]')).toHaveCount(0);
+  expect(await lost.evaluate(() => document.activeElement?.closest(".mm-editor") != null)).toBe(false);
+});
+
+test("a_result_of_the_open_page_goes_to_its_block", async ({ browser }) => {
+  const { far, middle, long, account } = await longScene();
+  const p = await openPage(browser, long.id, account);
+  // Témoins : l'éditeur et le titre de la page, qui ne doivent pas être remontés.
+  const WITNESSES = [".mm-editor", ".mm-title-input"];
+  await p.evaluate((selectors) => {
+    for (const selector of selectors) {
+      (document.querySelector(selector) as unknown as { witness: boolean }).witness = true;
+    }
+  }, WITNESSES);
+  const kept = () =>
+    p.evaluate(
+      (selectors) =>
+        selectors.map(
+          (selector) => (document.querySelector(selector) as unknown as { witness?: boolean }).witness === true,
+        ),
+      WITNESSES,
+    );
+  await firstBlock(p).locator(".bn-block-content").click();
+  await expect(blockWith(p, far)).not.toBeInViewport();
+
+  // La page est déjà ouverte : sans le fragment gardé par le routeur, rien ne se passerait.
+  await searchAndEnter(p, far, long.id);
+  const farId = await blockOfUrl(p, long.id);
+  await expect(blockWith(p, far)).toBeInViewport();
+  await expect.poll(() => cursorAt(p)).toEqual({ inEditor: true, block: farId });
+  expect(await kept()).toEqual([true, true]);
+
+  // Un autre bloc de la même page : l'adresse change, le bloc est atteint, la page n'est pas remontée.
+  await searchAndEnter(p, middle, long.id);
+  const middleId = await blockOfUrl(p, long.id);
+  expect(middleId).not.toBe(farId);
+  await expect(blockWith(p, middle)).toBeInViewport();
+  await expect(blockWith(p, far)).not.toBeInViewport();
+  await expect.poll(() => cursorAt(p)).toEqual({ inEditor: true, block: middleId });
+  expect(await kept()).toEqual([true, true]);
+
+  // Retour : le bloc d'avant.
+  await p.goBack();
+  expect(await blockOfUrl(p, long.id)).toBe(farId);
+  await expect(blockWith(p, far)).toBeInViewport();
+  expect(await kept()).toEqual([true, true]);
+
+  // Le même résultat choisi de nouveau, la page défilée entre-temps : on y revient, sans entrée de
+  // plus dans l'historique.
+  await firstBlock(p).scrollIntoViewIfNeeded();
+  await expect(blockWith(p, far)).not.toBeInViewport();
+  const length = await p.evaluate(() => history.length);
+  await searchAndEnter(p, far, long.id);
+  await expect(blockWith(p, far)).toBeInViewport();
+  expect(await p.evaluate(() => history.length)).toBe(length);
+  expect(await blockOfUrl(p, long.id)).toBe(farId);
+  expect(await kept()).toEqual([true, true]);
+  await expect(p.locator('[role="alert"]')).toHaveCount(0);
 });
