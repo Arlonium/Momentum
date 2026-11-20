@@ -5,7 +5,7 @@
 ## Où en est le lot
 
 - **Le code est fini sur `main`** : seize tâches (S0 à S7, C1 à C3, X1, X2, et D pour la documentation), de `97d3847` (le plan, le 19 novembre) à `6f5ae38` (la Task X2, le 20 novembre à 11 h 08). Chaque tâche a eu une relecture, une seule, et ses constats ont été corrigés une fois (méthode de R935, plus bas). Tout a été poussé au fil du travail (R934).
-- **La passe complète de fin de lot est en cours** (un autre agent, sur ce poste, le 20 novembre) : toutes les suites sur un clone neuf, étape par étape comme la CI, les mesures, les mutations que chaque tâche a listées, la relecture finale en trois passes (sécurité, intégration, documentation contre le code) et l'essai de migration d'une base du lot 3. Elle ne corrige rien : elle remplit une liste de défauts au registre. Viennent ensuite la correction groupée, une passe de contrôle, puis la recette du propriétaire. **Rien de ce document ne dit que la passe est faite.**
+- **La passe complète de fin de lot, la correction groupée et la passe de contrôle sont faites** (le 20 novembre ; section « Passe de fin et correction groupée », plus bas). La passe n'a trouvé aucun défaut bloquant ; la correction en lève huit (D1 à D4, D7 à D9, D11), en reporte quatre (D5, D6, D12, D13), et en laisse un à Lenny, D10 (ce qu'Échap doit faire dans le texte). Restent : l'essai de migration d'une base du lot 3, que ni l'une ni l'autre n'ont fait, la recette du propriétaire, puis la clôture, qui fige `0005`. **Le reste de ce document est tel que la Task D l'a écrit avant la passe** : là où il dit « pour la fin du lot » ou « la passe en cours », lire la section du bas.
 - **Les dix-neuf décisions du plan** (L1 à L19) sont retenues par défaut depuis le 20 novembre (Lenny : « tu es autonome »), sauf L12 (pousser : sa réponse, R934) et L1 (Tantivy, retenu sur les mesures de S0, R933). Elles sont listées, avec les choix pris en route, en tête de la recette.
 - **La migration `0005`** peut changer jusqu'à la clôture du lot. Elle a changé trois fois (`8600ad9`, `6f093e8`, `865338c`) : aucun binaire du lot n'ouvre une instance que quelqu'un regarde.
 
@@ -122,6 +122,36 @@ Chaque relecture a conclu « prêt après corrections ». Aucune n'a trouvé de 
 - une forme plus courte de `blocks_index` (R1170).
 
 **Non mesuré** : Linux et les quatre cœurs de la CI ; `RssAnon` ; ARM ; le chargement d'une page de 10 000 blocs pendant que l'indexeur la relit ; une vraie reconstruction depuis un index vidé (mesurée à la place : l'index récrit en entier) ; la durée de `mementum reindex` ; un coureur 1,5 à 1,7 fois plus lent (calculé) (R1174, S7).
+
+## Passe de fin et correction groupée
+
+Écrite le 20 novembre, après la Task D. Compte rendu de la passe : [`2026-11-20-p1-lot4-passe-de-fin.md`](2026-11-20-p1-lot4-passe-de-fin.md) ; décisions de la correction : registre, « Correction de fin de lot » (R1200 à R1209).
+
+**La passe complète** (atelier `lot4-fin`, sur `6f5ae38`, rien corrigé) a lancé une fois tout ce que les tâches n'avaient pas lancé : `cargo test --workspace` (126 binaires, 1 578 tests, aucun rouge), Vitest (2 651 passés), la suite de bout en bout entière (364 parcours, un rouge instable), les seize budgets du navigateur, les deux lignes de mesures du job `budgets`, et dix-sept mutations de sécurité (seize tuées). Elle a listé treize défauts, aucun bloquant.
+
+**La correction groupée** (atelier `lot4-corr`) :
+
+| Défaut | Ce qui est fait | Ruling |
+|---|---|---|
+| D1, `reindex.rs` rouge sous Linux (`Busy`) | l'ouverture de l'index attend le verrou de l'écrivain qu'elle vient de rendre (le `flock` hérité par un processus fils) ; les aides du test réessaient deux secondes ; un témoin qui tourne partout, et un test sous Unix seulement | R1200 |
+| D2, une mutation qui survit (l'extrait d'une source non vue lu avant les droits) | un test compte, dans le store, les sources dont un extrait est demandé, avec et sans mille sources non vues ; la mutation y est rouge | R1201 |
+| D3, `search-rights.spec.ts` instable | une barrière (`waitIndexed`) avant les sept réponses de référence ; `indexing` reste comparé | R1202 |
+| D4, `equations.spec.ts`, la formule à 54 px de ne jamais être mise en forme | le dernier bloc de la page est amené à l'écran d'abord | R1203 |
+| D9, `invitations/lookup` hors des lectures | dans `READING_POSTS`, avec son test | R1204 |
+| D11, l'avis RUSTSEC-2026-0459 | `sqlx` 0.9.1 et `libsqlite3-sys` 0.40.0, dans un commit à part : l'avis est levé, `cargo deny check` entier est vert | R1205 |
+| D7, D8, et les écarts de documents relevés par la Task D | les documents mis d'accord avec le code (REPRISE, `CLAUDE.md`, le plan, la conception, le registre, le compte rendu de S0) | R1208 |
+| D10, Échap dans le texte de l'éditeur | **pas corrigé** : un choix de produit, demandé à Lenny dans la recette (question 37) | R1206 |
+| D5, D6, D12, D13, `undo-redo.spec.ts`, les mutations des listes du plan non jouées | **reportés**, avec ce que la passe a mesuré (D5 : le budget n'est pas relâché ; D6 : R447, lot 7 ; D12 : lot 7) | R1207 |
+
+**La passe de contrôle** (une fois, une commande lourde à la fois, sur l'atelier corrigé, `sqlx` 0.9.1 compris) : tout est vert. `cargo fmt --check` ; clippy sans avertissement ; `cargo test --workspace` : 126 binaires, 1 580 passés, aucun rouge, 40 ignorés ; fichiers générés à jour ; types ; Vitest : 2 652 passés et 53 échecs attendus ; licences npm ; la suite de bout en bout entière : 362 passés, 2 en attente (`fixme`), aucun rouge ; les seize budgets du navigateur ; les deux lignes de mesures en release ; `cargo deny check` en entier. Les chiffres sont au registre (R1209).
+
+**Ce qui reste ouvert après elle** :
+
+- **rien n'a tourné sous Linux** : le test Unix de R1200 n'a jamais tourné sous Unix, le SQLite neuf de R1205 non plus : la CI de la poussée est à lire (tests, puis les lignes `MESURE` du job `budgets`) ;
+- l'essai de migration du plan (« Fin du lot », point 3) et la relecture finale en trois passes ne sont pas faits ;
+- les mutations des listes « Preuves » hors des dix-sept de sécurité ne sont pas jouées ;
+- deux rouges rares de la CI restent possibles et sont dits : le budget des cinquante images (D5) et la frappe qui coupe une version (D6) ;
+- la question d'Échap (D10) attend Lenny.
 
 ## La méthode suivie, et ce qu'elle a donné
 

@@ -29,7 +29,7 @@ Le lot 1 a livré le vrai code (`crates/mementum-*`, `apps/web`, `packages/proto
 - une édition faite sur un bloc pendant qu'un autre client le déplace était perdue (Ruling R39) : **levé en partie au lot 3** ; ce qui reste perdu est dit plus bas, dans les limites de la partie A ;
 - la réécriture complète d'une page par `PUT /mmd` remplace tout son contenu : une frappe faite au même instant sur le contenu remplacé est perdue (Ruling R40, remède prévu au lot 5 : l'écriture par différence). Depuis le lot 3, elle garde l'identifiant des blocs inchangés (Ruling R201), et occupe la page moins d'une seconde pour 10 000 paragraphes courts, au lieu de 5 s (Ruling R369, mesuré en release ; le lot 1 mesurait 2,5 à 4 s sur sa page de test) ; une page plus grande ou plus riche reste plus longue à récrire (voir les limites de la partie A) ;
 - `PUT /mmd` refuse une prop hors du registre des blocs, parce qu'un navigateur l'effacerait ensuite sans bruit (Ruling R41) ;
-- deux avis de sécurité RustSec sont ouverts sans mise à jour possible, sur `libsqlite3-sys` et `smallstr` ; le premier ne touche qu'un serveur qui ouvrirait une base écrite par un tiers, ce que Mementum ne fait pas (Ruling R44).
+- deux avis de sécurité RustSec étaient ouverts sans mise à jour possible, sur `libsqlite3-sys` et `smallstr` (Ruling R44) : **le premier est levé à la fin du lot 4** (`sqlx` 0.9.1 et `libsqlite3-sys` 0.40.0, Ruling R1205), et `cargo deny check` passe en entier ; `smallstr`, non maintenu, reste tiré par `yrs`, sans que cargo-deny le signale.
 
 Un « Ruling » est une décision prise en cours de route, numérotée (R1, R2…) et expliquée dans le registre de son lot.
 
