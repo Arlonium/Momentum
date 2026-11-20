@@ -41,7 +41,7 @@ import {
   type SyntheticEvent,
 } from "react";
 import { PageIcon, SearchIcon } from "../icons";
-import { navigate, pagePath } from "../router";
+import { blockPath, navigate } from "../router";
 import { useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
 import { findPages } from "../space/pageDirectory";
@@ -78,11 +78,12 @@ type Props = {
 };
 
 /**
- * L'adresse qu'ouvre une ligne. La Task C2 y ajoutera le bloc trouvé (`row.blockId`, échappé, en
- * fragment) : c'est ici, et nulle part ailleurs, qu'une ligne devient une adresse.
+ * L'adresse qu'ouvre une ligne : sa page, au bloc trouvé quand il y en a un (`blockPath`, qui
+ * l'échappe dans le fragment ; Task C2). C'est ici, et nulle part ailleurs, qu'une ligne devient une
+ * adresse. Une page trouvée par son titre, et une ligne venue de l'arbre (R1080), n'ont pas de bloc.
  */
 export function hrefOf(row: Row): string {
-  return pagePath(row.id);
+  return blockPath(row.id, row.blockId);
 }
 
 /** L'extrait d'une ligne : des nœuds de texte, les mots trouvés dans des `<mark>`. */

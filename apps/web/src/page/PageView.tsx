@@ -36,6 +36,7 @@ import { LazyEditor } from "../editor/LazyEditor";
 import { BlockedBanner, ReaderBanner, ReadOnlyBanner } from "../editor/ReadOnlyBanner";
 import type { SchemaCheck } from "../editor/schemaGate";
 import { TrashIcon } from "../icons";
+import { useBlockTarget, type BlockTarget } from "../router";
 import { messageOf } from "../session/forms";
 import { colorOf, useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
@@ -270,13 +271,29 @@ export function PageView({
     }),
     [id, reread],
   );
+  // Le bloc que vise l'adresse (`/p/<page>#b=<bloc>`, lot 4 : un résultat de recherche, un
+  // rétrolien). L'éditeur y va une fois, après la première synchro, et le dit : la visée n'est alors
+  // plus donnée, si bien qu'une session recréée (un éditeur neuf) ne ramène pas au bloc. Un autre
+  // bloc de la page, ou le même visé de nouveau, est une visée neuve, sans que la page soit remontée :
+  // seul le fragment de l'adresse a changé, et `App` ne lit que son chemin.
+  const aimed = useBlockTarget(id);
+  const [followed, setFollowed] = useState<BlockTarget | null>(null);
+  const goTo = aimed !== null && aimed !== followed ? aimed : null;
   // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.
   const editor = useMemo(
     () =>
       session && (
-        <LazyEditor session={session} fixture={fixture} onComment={menuComment} mentions={mentions} files={files} />
+        <LazyEditor
+          session={session}
+          fixture={fixture}
+          onComment={menuComment}
+          mentions={mentions}
+          files={files}
+          goTo={goTo}
+          onReached={setFollowed}
+        />
       ),
-    [session, fixture, menuComment, mentions, files],
+    [session, fixture, menuComment, mentions, files, goTo],
   );
 
   return (

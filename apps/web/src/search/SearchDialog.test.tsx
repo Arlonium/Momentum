@@ -373,6 +373,34 @@ test("each_line_is_a_real_link_to_its_page", async () => {
   expect(onClose).toHaveBeenCalledTimes(1);
 });
 
+test("a_line_found_by_a_block_is_a_link_to_that_block", async () => {
+  // Task C2 : l'identifiant d'un bloc est un texte venu d'ailleurs, échappé dans le fragment ; il
+  // n'entre ni dans le chemin ni dans du HTML.
+  const odd = 'a"b <img onerror=x>#b=é/?&';
+  const opened = vi.spyOn(window, "open").mockReturnValue(null);
+  await show();
+  await type("cha");
+  await debounced();
+  await settle(() =>
+    asked[0].answer.resolve(found([hit("ailleurs", { blockId: odd }), hit("titre", { blockId: null }), hit("chats")])),
+  );
+  const href = `/p/ailleurs#b=${encodeURIComponent(odd)}`;
+  expect(row("ailleurs").getAttribute("href")).toBe(href);
+  expect(dialog().querySelector("img")).toBeNull();
+  // Une page trouvée par son titre, et une ligne venue de l'arbre (R1080) : la page, sans bloc.
+  expect(row("titre").getAttribute("href")).toBe("/p/titre");
+  expect(row("chats").getAttribute("href")).toBe("/p/chats");
+  // Ctrl+Entrée ouvre la même adresse ; Entrée y mène dans l'onglet, bloc compris.
+  await press("ArrowDown");
+  await press("ArrowDown");
+  expect(active()).toBe("ailleurs");
+  await press("Enter", { ctrlKey: true });
+  expect(opened).toHaveBeenCalledWith(href, "_blank", "noopener");
+  await press("Enter");
+  expect(location.pathname + location.hash).toBe(href);
+  expect(onClose).toHaveBeenCalledTimes(1);
+});
+
 test("a_click_with_a_modifier_is_left_to_the_browser_and_the_window_stays", async () => {
   await show();
   await type("cha");

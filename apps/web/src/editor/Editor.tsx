@@ -73,6 +73,8 @@ import { dismissNotice } from "./editorNotice";
 import { shownUrl } from "./files";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { followBlock } from "./followBlock";
+import { useArrival } from "./goToBlock";
+import type { BlockTarget } from "../router";
 import { linkBound } from "./linkBound";
 import { guardedAwareness } from "./presenceGuard";
 import { redoKeys } from "./redoKeys";
@@ -101,6 +103,13 @@ type Props = {
    * n'envoie jamais rien, qu'il soit donné ou non.
    */
   files?: PageUploads | null;
+  /**
+   * Le bloc que vise l'adresse de la page (`#b=<bloc>`, lot 4) et que l'éditeur n'a pas encore suivi :
+   * il y va une fois la page synchronisée (`goToBlock.ts`), puis le dit par `onReached`, bloc trouvé
+   * ou non ; la page ne le donne alors plus. `null` : rien à suivre.
+   */
+  goTo?: BlockTarget | null;
+  onReached?: (target: BlockTarget) => void;
 };
 
 /**
@@ -123,7 +132,15 @@ export const EDITOR_OPTIONS = {
   extensions: [syntaxHighlighter, followBlock, linkBound, redoKeys],
 };
 
-export function Editor({ session, fixture = null, onComment = null, mentions = null, files = null }: Props) {
+export function Editor({
+  session,
+  fixture = null,
+  onComment = null,
+  mentions = null,
+  files = null,
+  goTo = null,
+  onReached,
+}: Props) {
   // Les envois de fichiers de cet éditeur (`files.ts`) : arrêtés quand il part (page quittée,
   // session recréée), ce qu'ils auraient posé ne le serait plus pour personne. Faits une fois par
   // session, comme l'éditeur ; ce que la page donne (`files`) est lu à chaque envoi dans une
@@ -174,6 +191,8 @@ export function Editor({ session, fixture = null, onComment = null, mentions = n
     [session],
   );
   created.current = editor as unknown as MementumEditor;
+  // Le bloc visé par l'adresse : atteint après la première synchro, jamais sur un document vide.
+  useArrival(created.current, session, goTo, onReached);
 
   const subscribe = useCallback((onChange: () => void) => session.subscribe(onChange), [session]);
   const synced = useSyncExternalStore(subscribe, () => session.synced);

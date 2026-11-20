@@ -15,6 +15,7 @@ import { clearNotices, PAGE_LEFT, postNotice } from "../mentions/notice";
 import { SessionContext } from "../session/session";
 import { until } from "../test/hooks";
 import { notFound, page, space, unauthenticated, unreachable } from "../test/pages";
+import { blockPath, navigate, pagePath } from "../router";
 import { PageView } from "./PageView";
 
 /** Les sessions de synchro créées par la page, et ce que la fenêtre « Historique » a reçu. */
@@ -29,6 +30,8 @@ const probe = vi.hoisted(() => ({
   mentions: [] as unknown[],
   /** Ce que l'éditeur a reçu pour envoyer des fichiers, à chacun de ses rendus. */
   files: [] as unknown[],
+  /** Le bloc visé que l'éditeur a reçu, à chacun de ses rendus, et de quoi dire qu'il l'a suivi. */
+  arrivals: [] as { goTo: unknown; onReached?: (target: never) => void }[],
 }));
 
 vi.mock("../editor/collab", async () => {
@@ -71,9 +74,15 @@ vi.mock("../editor/collab", async () => {
 });
 
 vi.mock("../editor/LazyEditor", () => ({
-  LazyEditor: (props: { mentions?: unknown; files?: unknown }) => {
+  LazyEditor: (props: {
+    mentions?: unknown;
+    files?: unknown;
+    goTo?: unknown;
+    onReached?: (target: never) => void;
+  }) => {
     probe.mentions.push(props.mentions);
     probe.files.push(props.files);
+    probe.arrivals.push({ goTo: props.goTo ?? null, onReached: props.onReached });
     return <div className="mm-editor" />;
   },
 }));
@@ -111,6 +120,8 @@ beforeEach(() => {
   probe.history = null;
   probe.mentions = [];
   probe.files = [];
+  probe.arrivals = [];
+  history.replaceState(null, "", "/");
   checkSchema.mockClear();
   vi.mocked(getPage).mockReset();
   vi.mocked(getComments).mockReset();
@@ -726,4 +737,85 @@ test("a_blocked_session_says_that_nothing_is_saved_any_more", async () => {
   expect(banner?.querySelector("button")?.textContent).toBe("Recharger");
   await new Promise((done) => setTimeout(done, 1_700));
   expect(host.querySelector(".mm-topbar-status")?.textContent).toBe("");
+});
+
+/** Le bloc visé que l'éditeur a reçu à son dernier rendu, et de quoi dire qu'il y est allé. */
+const arrival = () => probe.arrivals[probe.arrivals.length - 1];
+const reached = () =>
+  act(async () => {
+    const { goTo, onReached } = arrival();
+    onReached!(goTo as never);
+  });
+
+test("the_block_of_the_address_is_given_to_the_editor_and_followed_once", async () => {
+  // Un résultat de recherche ou un rétrolien : `/p/<page>#b=<bloc>` (lot 4, Task C2).
+  history.replaceState(null, "", blockPath("x", 'un "bloc"'));
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  expect(arrival().goTo).toEqual({ pageId: "x", blockId: 'un "bloc"' });
+  // Tant que l'éditeur n'y est pas allé (la page se synchronise), la visée reste, d'un rendu à
+  // l'autre et d'une session à l'autre.
+  const first = arrival().goTo;
+  await show(page("x", { level: "edit", title: "Renommée" }));
+  expect(arrival().goTo).toBe(first);
+  // L'éditeur y est allé : la visée n'est plus donnée, ni à un rendu de plus…
+  await reached();
+  expect(arrival().goTo).toBeNull();
+  await show(page("x", { level: "edit", title: "Renommée encore" }));
+  expect(arrival().goTo).toBeNull();
+  // … ni à une session recréée (la page jetée ailleurs : lecture seule, sur un document neuf).
+  const sessions = probe.sessions.length;
+  await show(page("x", { level: "edit", trashedAt: 1 }));
+  expect(probe.sessions.length).toBe(sessions + 1);
+  expect(arrival().goTo).toBeNull();
+  // L'adresse n'a pas bougé.
+  expect(location.pathname + location.hash).toBe(blockPath("x", 'un "bloc"'));
+});
+
+test("navigating_to_another_block_of_the_open_page_is_followed_without_remounting_the_page", async () => {
+  history.replaceState(null, "", blockPath("x", "un"));
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  await reached();
+  const sessions = probe.sessions.length;
+  const live = session();
+  const title = host.querySelector(".mm-title-input");
+  const frame = host.querySelector(".mm-editor-frame");
+  // Un autre résultat de la même page : l'adresse change, la visée est donnée à l'éditeur.
+  await act(async () => navigate(blockPath("x", "deux")));
+  expect(location.hash).toBe("#b=deux");
+  expect(arrival().goTo).toEqual({ pageId: "x", blockId: "deux" });
+  // La page n'est pas remontée : la même session, les mêmes éléments (le brouillon d'un
+  // commentaire, un titre en cours de frappe en partiraient).
+  expect(probe.sessions.length).toBe(sessions);
+  expect(live.destroyed).toBe(false);
+  expect(host.querySelector(".mm-title-input")).toBe(title);
+  expect(host.querySelector(".mm-editor-frame")).toBe(frame);
+  await reached();
+  expect(arrival().goTo).toBeNull();
+  // Le même résultat choisi de nouveau : rien n'entre dans l'historique, le bloc est visé de nouveau.
+  const length = history.length;
+  await act(async () => navigate(blockPath("x", "deux")));
+  expect(history.length).toBe(length);
+  expect(arrival().goTo).toEqual({ pageId: "x", blockId: "deux" });
+  expect(probe.sessions.length).toBe(sessions);
+  // La page sans bloc : plus rien n'est visé.
+  await reached();
+  await act(async () => navigate(pagePath("x")));
+  expect(arrival().goTo).toBeNull();
+});
+
+test("an_address_without_a_block_or_of_another_page_gives_the_editor_nothing_to_follow", async () => {
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  for (const address of ["/p/x", "/p/x#titre", "/p/x#b=", blockPath("y", "bloc")]) {
+    history.replaceState(null, "", address);
+    probe.arrivals = [];
+    await show(node);
+    expect(probe.arrivals.length, address).toBeGreaterThan(0);
+    expect(probe.arrivals.every((given) => given.goTo === null), address).toBe(true);
+    await act(async () => root.render(null));
+  }
 });
