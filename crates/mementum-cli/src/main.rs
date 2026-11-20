@@ -216,6 +216,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             } else {
                 public_origin(public_url)?
             };
+            // Dite au résumé : sans elle, les liens écrits avec l'adresse entière de l'instance ne
+            // sont plus des rétroliens (relecture de S7, I1).
+            let without_origin = !text_only && origin.is_none();
+            let address = match &origin {
+                Some(origin) => format!("adresse publique : {origin}"),
+                None => "sans adresse publique".to_string(),
+            };
             let report = reindex::reindex(&data_dir, text_only, origin, announce_backup).await?;
             let written = format!(
                 "{} entrées écrites dans l'index de recherche ({} validations)",
@@ -223,19 +230,28 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             );
             match report.pages {
                 Some((projected, 0)) => println!(
-                    "réindexation finie : {projected} pages relues depuis leur document et \
-                     projetées, {written}"
+                    "réindexation finie ({address}) : {projected} pages relues depuis leur \
+                     document et projetées, {written}"
                 ),
                 Some((projected, unreadable)) => println!(
-                    "réindexation finie : {} pages relues depuis leur document, {written} ; \
-                     {unreadable} d'entre elles ne se relisent pas : elles sortent de l'index, \
-                     et le journal les nomme",
+                    "réindexation finie ({address}) : {} pages relues depuis leur document, \
+                     {written} ; {unreadable} d'entre elles ne se relisent pas : elles sortent \
+                     de l'index, et le journal les nomme",
                     projected + unreadable
                 ),
                 None => println!(
                     "index de recherche refait depuis les tables, sans relire aucun document : \
                      {written}"
                 ),
+            }
+            if without_origin {
+                // Sur la sortie d'erreur, quel que soit le niveau des journaux, après le résumé.
+                eprintln!(
+                    "mementum : attention : aucune adresse publique (ni --public-url, ni \
+                     MEMENTUM_PUBLIC_URL) : un lien écrit avec l'adresse entière de l'instance \
+                     (https://…/p/…) ne comptera pas comme rétrolien de sa page ; si le serveur a \
+                     une adresse publique, relance la commande avec --public-url"
+                );
             }
             Ok(())
         }

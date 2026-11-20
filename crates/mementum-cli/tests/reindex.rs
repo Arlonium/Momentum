@@ -33,6 +33,9 @@ const ORIGIN: &str = "https://notes.exemple.fr";
 /// Ce que dit la commande refusée pendant qu'un autre processus tient l'index.
 const BUSY: &str = "l'index de recherche est déjà ouvert par un autre processus";
 
+/// L'avertissement de la commande menée sans adresse publique (relecture de S7, I1).
+const NO_ORIGIN: &str = "aucune adresse publique";
+
 /// Ce que le serveur écrit au journal quand il reconstruit l'index plein texte, ou reprojette
 /// toutes les pages, au démarrage.
 const REBUILT: &str = "n'est pas celui de cette base";
@@ -307,8 +310,17 @@ fn reindex_rebuilds_everything_from_the_documents() {
     let pages = filled.pages();
     let with_origin = ["--public-url", ORIGIN];
 
-    let stdout = succeeded(&reindex(&data, &with_origin, &[]));
+    let output = reindex(&data, &with_origin, &[]);
+    let stdout = succeeded(&output);
     assert!(stdout.contains("réindexation finie"), "{stdout}");
+    // L'adresse retenue est dite, au résumé et au journal ; rien n'avertit qu'elle manque.
+    assert!(
+        stdout.contains(&format!("adresse publique : {ORIGIN}")),
+        "{stdout}"
+    );
+    let (_, stderr) = text(&output);
+    assert!(stderr.contains(ORIGIN), "{stderr}");
+    assert!(!stderr.contains(NO_ORIGIN), "{stderr}");
     let (rows, kept_links, kept_states) = (blocks(&db), links(&db), states(&db));
     let found = searches(&data, &WORDS, &pages);
     // Ce que la commande a fait, lu en clair : les blocs des deux pages, leurs rétroliens (le lien
@@ -392,11 +404,20 @@ fn reindex_rebuilds_everything_from_the_documents() {
     assert_eq!(setting(&db, "search.intent"), None);
     assert_eq!(outbox(&db), 0);
 
-    // Sans adresse publique, le lien qui la porte n'est plus un rétrolien ; la variable du
-    // serveur la donne, comme à lui.
-    succeeded(&reindex(&data, &[], &[]));
+    // Sans adresse publique, le lien qui la porte n'est plus un rétrolien, et la commande le dit
+    // sur la sortie d'erreur, quel que soit le niveau des journaux (relecture de S7, I1) ; la
+    // variable du serveur la donne, comme à lui.
+    let output = reindex(&data, &[], &[("RUST_LOG", "off")]);
+    let stdout = succeeded(&output);
+    assert!(stdout.contains("sans adresse publique"), "{stdout}");
+    let (_, stderr) = text(&output);
+    assert!(stderr.contains(NO_ORIGIN), "{stderr}");
+    assert!(stderr.contains("ne comptera pas"), "{stderr}");
+    assert!(stderr.contains("--public-url"), "{stderr}");
     assert_eq!(links(&db).len(), 1, "{:?}", links(&db));
-    succeeded(&reindex(&data, &[], &[("MEMENTUM_PUBLIC_URL", ORIGIN)]));
+    let output = reindex(&data, &[], &[("MEMENTUM_PUBLIC_URL", ORIGIN)]);
+    succeeded(&output);
+    assert!(!text(&output).1.contains(NO_ORIGIN));
     assert_eq!(links(&db), kept_links);
 }
 
@@ -429,8 +450,11 @@ fn reindex_text_only_rebuilds_the_text_index_from_the_tables() {
     });
     std::fs::remove_dir_all(data.join("search")).unwrap();
 
-    let stdout = succeeded(&reindex(&data, &["--text-only"], &[]));
+    let output = reindex(&data, &["--text-only"], &[]);
+    let stdout = succeeded(&output);
     assert!(stdout.contains("index de recherche refait"), "{stdout}");
+    // Aucune page n'est projetée : l'adresse publique ne sert à rien, et rien n'en avertit.
+    assert!(!text(&output).1.contains(NO_ORIGIN));
     assert_eq!(found_pages(&data, "pommes", &pages), Vec::<Uuid>::new());
     assert_eq!(found_pages(&data, "courge", &pages), [filled.recipes]);
     assert_eq!(found_pages(&data, "tomates", &pages), [filled.garden]);
@@ -472,11 +496,15 @@ fn reindex_refuses_while_a_server_holds_the_index() {
     // Serveur arrêté, elle passe : c'est bien lui qui la refusait.
     succeeded(&reindex(&data, &[], &[]));
 
+    // L'index tenu porte une entrée, validée sous un jeton : relus tous deux après le refus.
     let data = dir.path().join("verrou");
     std::fs::create_dir_all(&data).unwrap();
     let db = data.join("mementum.db");
     common::lot1_database(&db);
+    let home: Uuid = "01890000-0000-7000-8000-000000000003".parse().unwrap();
     let held = SearchIndex::open(&data.join("search")).unwrap();
+    held.index.put_entry(home, None, "Accueil", "").unwrap();
+    held.index.commit("jeton-temoin").unwrap();
     let bytes = std::fs::read(&db).unwrap();
     let before = entries(&data);
     let stderr = failed(&reindex(&data, &[], &[]));
@@ -488,6 +516,70 @@ fn reindex_refuses_while_a_server_holds_the_index() {
         "une copie, ou un fichier, posé à côté"
     );
     held.index.close().unwrap();
+    assert_eq!(index_token(&data).as_deref(), Some("jeton-temoin"));
+    assert_eq!(found_pages(&data, "accueil", &[home]), [home]);
+}
+
+/// Un dossier `search/` qui porte autre chose qu'un index (Ruling R990) : la commande refuse en
+/// le disant, sans y toucher, et sans ouvrir la base.
+#[test]
+fn reindex_refuses_a_search_directory_that_is_not_an_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("donnees");
+    std::fs::create_dir_all(data.join("search")).unwrap();
+    let db = data.join("mementum.db");
+    common::lot1_database(&db);
+    let foreign = data.join("search").join("notes.txt");
+    std::fs::write(&foreign, "à garder").unwrap();
+    let bytes = std::fs::read(&db).unwrap();
+    let stderr = failed(&reindex(&data, &[], &[]));
+    assert!(stderr.contains("n'est pas un index"), "{stderr}");
+    assert!(stderr.contains("supprime ce dossier"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "à garder");
+    assert_eq!(entries(&data.join("search")), ["notes.txt"]);
+    assert_eq!(std::fs::read(&db).unwrap(), bytes, "la base a changé");
+    assert_eq!(entries(&data), ["mementum.db", "search"]);
+}
+
+/// Une intention restée posée (un arrêt entre l'intention et la clôture) : la commande la défait
+/// avant tout, puis va au bout, dans les deux modes (relecture de S7, I2).
+#[test]
+fn an_intent_left_posed_is_undone_and_the_command_goes_to_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("donnees");
+    let filled = filled(&data);
+    let db = data.join("mementum.db");
+    succeeded(&reindex(&data, &[], &[]));
+    for args in [&[][..], &["--text-only"]] {
+        // Serveur arrêté : l'intention et une ligne qu'elle a prise, posées à la main.
+        with_db(&db, false, async |conn| {
+            sqlx::query(
+                "INSERT INTO instance_settings (key, value) VALUES ('search.intent', 'laisse') \
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            )
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO search_outbox (node_id, block_id, token) VALUES (?, '', 'laisse') \
+                 ON CONFLICT (node_id, block_id) DO UPDATE SET token = excluded.token",
+            )
+            .bind(filled.recipes.to_string())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        });
+        assert_eq!(setting(&db, "search.intent").as_deref(), Some("laisse"));
+        succeeded(&reindex(&data, args, &[]));
+        assert_eq!(setting(&db, "search.intent"), None, "{args:?}");
+        assert_eq!(outbox(&db), 0, "{args:?}");
+        assert_eq!(index_token(&data), setting(&db, "search.committed"));
+        assert_ne!(setting(&db, "search.committed").as_deref(), Some("laisse"));
+        assert_eq!(
+            found_pages(&data, "pommes", &filled.pages()),
+            [filled.recipes]
+        );
+    }
 }
 
 /// La commande ouvre la base par `Store::open`, donc par `backup.rs` : une base à migrer est
@@ -558,6 +650,12 @@ fn reindex_opens_the_database_by_the_backup_rule() {
         stderr.contains("la migration 0003 de cette base n'est pas celle de ce binaire"),
         "{stderr}"
     );
+    // L'index a déjà été vidé : la commande le dit, et que le serveur le refait (R1060).
+    assert!(
+        stderr.contains("l'index de recherche a été vidé"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("le serveur le refait"), "{stderr}");
     assert_eq!(std::fs::read(&db).unwrap(), bytes, "la base a changé");
     // Le verrou de l'index est pris avant la base : son dossier peut naître, rien d'autre.
     assert_eq!(

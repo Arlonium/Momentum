@@ -77,8 +77,12 @@ pub(crate) async fn reindex(
     let store = match Store::open(&db).await {
         Ok(store) => store,
         Err(error) => {
-            let opened = anyhow::Error::new(error)
-                .context(format!("impossible d'ouvrir la base {}", db.display()));
+            // L'index est déjà vidé (Ruling R1060) : le dire, avec ce qui le refait.
+            let opened = anyhow::Error::new(error).context(format!(
+                "impossible d'ouvrir la base {} ; l'index de recherche a été vidé, et le serveur \
+                 le refait à son démarrage",
+                db.display()
+            ));
             close(index).await;
             return Err(opened);
         }
@@ -90,8 +94,8 @@ pub(crate) async fn reindex(
     store.close().await;
     close(index).await;
     done.context(
-        "réindexation interrompue ; relance la commande, serveur arrêté (ce qui est fait reste \
-         fait, et un serveur lancé entre-temps reprend l'index de lui-même)",
+        "réindexation interrompue ; relancée, la commande reprend du début (serveur arrêté), et \
+         un serveur lancé à la place finit le travail de lui-même",
     )
 }
 
@@ -159,16 +163,7 @@ async fn rebuild(
     } else {
         Some(reproject(store, origin).await?)
     };
-    tracing::info!("réindexation : toutes les pages passent à l'index plein texte");
-    let mut after = None;
-    while let Some(next) = store
-        .outbox_everything(after, BATCH)
-        .await
-        .context("les pages n'ont pas pu être nommées pour l'index plein texte")?
-    {
-        after = Some(next);
-    }
-    let (entries, commits) = feed(store, index).await?;
+    let (entries, commits) = fill_text(store, index, FILL).await?;
     Ok(Report {
         pages,
         entries,
@@ -176,10 +171,53 @@ async fn rebuild(
     })
 }
 
+/// Les bornes d'un remplissage de l'index plein texte ([`fill_text`]).
+#[derive(Debug, Clone, Copy)]
+struct Fill {
+    /// Pages nommées dans l'outbox par tranche.
+    slice: usize,
+    /// Lignes de l'outbox prises par intention.
+    lines: usize,
+    /// Passages au plus ; `None` : jusqu'à ce que l'outbox soit vide. Une borne ne sert qu'aux
+    /// tests : elle arrête la commande comme un arrêt brutal après ce passage.
+    passes: Option<usize>,
+}
+
+/// Les bornes de la commande.
+const FILL: Fill = Fill {
+    slice: BATCH,
+    lines: FEED_LINES,
+    passes: None,
+};
+
+/// Remplit l'index plein texte (vidé) depuis la base : **toutes** les pages nommées dans l'outbox,
+/// puis, et seulement ensuite, les passages (Ruling R1001). Aucune validation ne précède la
+/// dernière tranche : après tout arrêt, une page qui n'est pas dans l'index a sa ligne d'outbox,
+/// et le serveur l'y met. Rend les entrées écrites et les validations.
+async fn fill_text(
+    store: &Store,
+    index: &Arc<SearchIndex>,
+    fill: Fill,
+) -> anyhow::Result<(u64, u64)> {
+    tracing::info!("réindexation : toutes les pages passent à l'index plein texte");
+    let mut after = None;
+    while let Some(next) = store
+        .outbox_everything(after, fill.slice)
+        .await
+        .context("les pages n'ont pas pu être nommées pour l'index plein texte")?
+    {
+        after = Some(next);
+    }
+    feed(store, index, fill.lines, fill.passes).await
+}
+
 /// Chaque page relue depuis son document, projetée et écrite dans `blocks_index` et
 /// `page_links` ; rend les pages projetées et les pages illisibles.
 async fn reproject(store: &Store, origin: Option<Arc<str>>) -> anyhow::Result<(u64, u64)> {
-    tracing::info!("réindexation : chaque page est relue depuis son document");
+    tracing::info!(
+        origin = origin.as_deref().unwrap_or("aucune"),
+        "réindexation : chaque page est relue depuis son document ; adresse publique retenue"
+    );
     let mut after = None;
     while let Some(next) = store
         .reproject_everything(after, BATCH)
@@ -246,18 +284,24 @@ async fn index_page(
     }
 }
 
-/// Les passages de l'outbox à l'index plein texte, jusqu'à ce qu'elle soit vide (Ruling R909) ;
-/// rend les entrées écrites et les validations. Une erreur arrête tout : l'intention reste posée,
-/// et le serveur la rejoue ou la défait à son démarrage, selon le jeton que l'index a validé.
-async fn feed(store: &Store, index: &Arc<SearchIndex>) -> anyhow::Result<(u64, u64)> {
+/// Les passages de l'outbox à l'index plein texte, de `lines` lignes au plus, jusqu'à ce qu'elle
+/// soit vide, ou `passes` passages (Ruling R909) ; rend les entrées écrites et les validations.
+/// Une erreur arrête tout : l'intention reste posée, et le serveur la rejoue ou la défait à son
+/// démarrage, selon le jeton que l'index a validé.
+async fn feed(
+    store: &Store,
+    index: &Arc<SearchIndex>,
+    lines: usize,
+    passes: Option<usize>,
+) -> anyhow::Result<(u64, u64)> {
     let (mut entries, mut commits) = (0, 0);
-    loop {
+    while passes.is_none_or(|passes| commits < passes as u64) {
         let feed = match store
-            .begin_feed(FEED_LINES)
+            .begin_feed(lines)
             .await
             .context("intention de l'index refusée par la base")?
         {
-            FeedStart::Nothing => return Ok((entries, commits)),
+            FeedStart::Nothing => break,
             FeedStart::Begun(feed) => feed,
             // Défaite au début, et le verrou de l'index tenu ici : un autre processus écrit dans
             // la base à côté de la commande.
@@ -279,5 +323,91 @@ async fn feed(store: &Store, index: &Arc<SearchIndex>) -> anyhow::Result<(u64, u
             .await
             .context("clôture de l'intention de l'index refusée par la base")?;
         commits += 1;
+    }
+    Ok((entries, commits))
+}
+
+#[cfg(test)]
+mod tests {
+    use mementum_search::{PageSet, read_query};
+    use mementum_store::{NewNode, NodeKind};
+    use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::{Connection, SqliteConnection};
+
+    use super::*;
+
+    /// Les pages qui ont une ligne d'outbox, lues par une connexion à côté.
+    async fn in_outbox(db: &Path) -> Vec<Uuid> {
+        let options = SqliteConnectOptions::new().filename(db).read_only(true);
+        let mut conn = SqliteConnection::connect_with(&options).await.unwrap();
+        let pages: Vec<String> = sqlx::query_scalar("SELECT DISTINCT node_id FROM search_outbox")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+        pages.iter().map(|page| page.parse().unwrap()).collect()
+    }
+
+    /// Ruling R1001, relecture de S7 (I3) : toutes les pages sont nommées dans l'outbox avant la
+    /// première validation. Trois pages qui n'y ont aucune ligne (une instance d'avant le lot 4,
+    /// R964), nommées une par tranche, puis un seul passage d'une ligne, comme un arrêt brutal
+    /// juste après : toute page absente de l'index a sa ligne d'outbox, que le serveur reprend.
+    /// Des tranches nommées entre les passages laisseraient les deux dernières hors de tout.
+    #[tokio::test]
+    async fn every_page_is_named_before_the_first_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mementum.db");
+        let store = Store::open(&db).await.unwrap();
+        let space = store.create_space("Espace", None).await.unwrap().id;
+        let mut pages = Vec::new();
+        for title in ["Alpha", "Bravo", "Charlie"] {
+            let node = NewNode {
+                space_id: space,
+                parent_id: None,
+                after: None,
+                kind: NodeKind::Page,
+                title: title.to_string(),
+                created_by: None,
+                grants: Vec::new(),
+                doc: None,
+            };
+            pages.push((title, store.create_node(node).await.unwrap().id));
+        }
+        // Leurs lignes de naissance closes sans rien écrire : aucune n'a plus de ligne d'outbox.
+        let FeedStart::Begun(born) = store.begin_feed(100).await.unwrap() else {
+            panic!("les lignes de naissance des pages");
+        };
+        store.finish_feed(&born.token).await.unwrap();
+        assert_eq!(in_outbox(&db).await, Vec::<Uuid>::new());
+
+        let index = Arc::new(SearchIndex::open(&dir.path().join("search")).unwrap().index);
+        let one_pass = Fill {
+            slice: 1,
+            lines: 1,
+            passes: Some(1),
+        };
+        assert_eq!(fill_text(&store, &index, one_pass).await.unwrap(), (1, 1));
+        let allowed: PageSet = pages.iter().map(|(_, page)| *page).collect();
+        let named = in_outbox(&db).await;
+        let mut found = 0;
+        for (title, page) in &pages {
+            let query = read_query(title).unwrap();
+            let hits = index.search(&query, &allowed, 0, 20).unwrap().pages;
+            if hits.iter().any(|hit| hit.node_id == *page) {
+                found += 1;
+            } else {
+                assert!(
+                    named.contains(page),
+                    "« {title} » : ni dans l'index ni nommée"
+                );
+            }
+        }
+        assert_eq!(found, 1, "un passage d'une ligne : une page dans l'index");
+
+        // Témoin : la suite des passages met les deux autres dans l'index, et vide l'outbox.
+        assert_eq!(feed(&store, &index, 1, None).await.unwrap(), (2, 2));
+        assert_eq!(in_outbox(&db).await, Vec::<Uuid>::new());
+        close(index).await;
+        store.close().await;
     }
 }
