@@ -113,14 +113,21 @@ pub fn write_cost(blocks: &[Block]) -> WriteCost {
 /// par bloc ; arrondi vers le haut, Ruling R1282).
 const DIFF_BLOCK_PS: u128 = 4_000_000;
 
-/// Picosecondes par élément retiré à part (une suite de blocs retirés d'une liste, un contenu
-/// vidé, un nœud de contenu remplacé) et par bloc de la page : à la validation de la transaction
-/// des suppressions, yrs remplace le contenu de chaque élément retiré par une plage ramassée puis
-/// fond ces plages dans la liste des blocs de son client, en décalant ce qui les suit
-/// (`squash_left_range_compaction`). Mesuré (Ruling R1284) : un paragraphe sur deux retiré coûte
-/// 0,1 s sur 10 000 paragraphes, 0,8 s sur 20 000, 3,8 s sur 40 000, soit de 3 à 4,5 ns par paire
-/// (élément retiré, bloc de la page) ; arrondi vers le haut.
-const REMOVED_RUN_PS: u128 = 8_000;
+/// Picosecondes par unité de fusion et par élément Yjs de la page (Rulings R1284, R1294). Une
+/// unité de fusion est un geste qui décale le vecteur des blocs d'un client de yrs : un bloc
+/// retiré (yrs remplace son sous-arbre par une plage ramassée, puis la fond dans le vecteur à la
+/// validation, un `drain` par sous-arbre, pas par suite), un contenu vidé ou un nœud de contenu
+/// remplacé. Le vecteur est compté par les éléments et les morceaux de texte de la page (`Tally`
+/// de ses blocs). Mesuré en release (`measure_diff_cost_bounds_the_write`, `tests/diff.rs`) : la
+/// première moitié de 40 000 paragraphes retirée d'un tenant, 7,2 s, soit 3 ns par paire ; un
+/// paragraphe sur deux retiré devant un tableau de 4 000 × 5, 2,2 s, 4,3 ns ; arrondi vers le haut.
+const MERGE_PS: u128 = 6_000;
+
+/// Picosecondes par coupe d'un texte existant et par élément Yjs de la page (R1294) : un élément
+/// de texte coupé en deux par le préfixe et le suffixe est un `Vec::insert` dans le vecteur des
+/// blocs de son client. Mesuré : une lettre changée au milieu de chaque paragraphe (deux coupes),
+/// 0,46 / 2,3 / 10 s sur 10 000 / 20 000 / 40 000 paragraphes, de 0,8 à 1 ns par paire ; doublé.
+const CUT_PS: u128 = 2_000;
 
 /// Coût estimé de l'écriture par différence (`PageDoc::write_diff`) de `written` sur une page
 /// dont `read_blocks` rend `current`, avant de l'écrire, en nanosecondes d'acteur en release
@@ -133,27 +140,40 @@ const REMOVED_RUN_PS: u128 = 8_000;
 ///   des blocs insérés un sur deux dans une longue liste coûtent le carré de sa longueur ;
 /// - chaque bloc retiré, et le contenu remplacé d'un bloc gardé, par ses éléments (les retraits se
 ///   font par identifiant, sans parcours de liste, Ruling R1281) ;
-/// - chaque élément retiré à part (une suite de blocs retirés, un contenu récrit en entier, un nœud
-///   de contenu remplacé, un groupe d'enfants retiré) par la taille de la page : la validation des
-///   suppressions fond leurs plages ramassées dans la liste des blocs de yrs, en décalant ce qui
-///   suit (Ruling R1284) ; un bloc sur deux retiré coûte ainsi le carré de la page ;
-/// - le contenu changé d'un bloc gardé comme s'il était récrit en entier (le préfixe et le suffixe
-///   communs coûtent moins, sauf à récrire toute une page à six plages, où S0 a mesuré 35 µs par
-///   bloc, sous les 48 µs comptés ici), et chaque prop changée pour un élément.
+/// - chaque unité de fusion ([`MERGE_PS`] : un bloc retiré, à toute profondeur ; un contenu vidé
+///   ou remplacé) et chaque coupe d'un texte existant par le préfixe et le suffixe ([`CUT_PS`]),
+///   par le nombre d'éléments Yjs de la page : yrs décale le vecteur des blocs de leur client ;
+///   des milliers de blocs retirés, ou une lettre changée au milieu de chaque paragraphe, coûtent
+///   ainsi le carré de la page (Rulings R1284, R1294) ;
+/// - le contenu changé d'un bloc gardé comme s'il était récrit en entier, et chaque prop changée
+///   pour un élément.
 ///
-/// Les poids sont ceux de [`write_cost`] ; ceux de la lecture et des retraits sont propres à la
+/// **Ce qu'elle ne voit pas** : les blocs supprimés restés dans une liste (des blocs que des
+/// clients ont retirés), que `read_blocks` ne rend pas, mais que yrs parcourt à chaque insertion et
+/// décale à chaque fusion. Sur une page qui en garde beaucoup, l'estimation est basse (R1294 :
+/// 5 000 paragraphes vivants parmi 15 000 conteneurs supprimés, des paires échangées 583 ms pour
+/// 455 estimés). Une borne haute de la longueur réelle des vecteurs serait la somme des horloges
+/// du vecteur d'état de la page, qui compte aussi ce qui est supprimé, mais chaque lettre pour
+/// une unité : non faite (à S4 de dire si sa mesure la demande).
+///
+/// Les poids sont ceux de [`write_cost`] ; ceux de la lecture et des fusions sont propres à la
 /// différence.
 pub fn diff_cost(current: &[Block], written: &[Block]) -> WriteCost {
     let mut target = crate::diff::prepared(written);
     crate::kept_ids::keep_ids(current, &mut target);
     let mut tally = Tally::default();
     tally.diff_lists(current, &target);
-    let page = blocks_in(current);
-    let read = ((page + blocks_in(&target)) as u128).saturating_mul(DIFF_BLOCK_PS);
-    let removed = (tally.removed_runs as u128)
-        .saturating_mul(page as u128)
-        .saturating_mul(REMOVED_RUN_PS);
-    tally.finish(read.saturating_add(removed))
+    let mut page = Tally::default();
+    page.siblings(current);
+    let read = ((blocks_in(current) + blocks_in(&target)) as u128).saturating_mul(DIFF_BLOCK_PS);
+    let items = (page.elements + page.text_items) as u128;
+    let merges = (tally.merges as u128)
+        .saturating_mul(items)
+        .saturating_mul(MERGE_PS);
+    let cuts = (tally.cuts as u128)
+        .saturating_mul(items)
+        .saturating_mul(CUT_PS);
+    tally.finish(read.saturating_add(merges).saturating_add(cuts))
 }
 
 fn blocks_in(blocks: &[Block]) -> usize {
@@ -179,8 +199,10 @@ struct Tally {
     /// Les cellules vides de tableau, comptées aussi dans `elements`.
     empty_cells: usize,
     text_items: usize,
-    /// Pour `diff_cost` : les éléments que l'écriture par différence retire à part.
-    removed_runs: usize,
+    /// Pour `diff_cost` : les unités de fusion de l'écriture par différence ([`MERGE_PS`]).
+    merges: usize,
+    /// Pour `diff_cost` : les coupes d'un texte existant ([`CUT_PS`]).
+    cuts: usize,
 }
 
 impl Tally {
@@ -277,11 +299,9 @@ impl Tally {
         }
         for (b, _) in current.iter().zip(&staying).filter(|(_, s)| !**s) {
             self.removing(|t| t.siblings(std::slice::from_ref(b)));
+            // Une fusion par bloc retiré, à toute profondeur (R1294).
+            self.merges += blocks_in(std::slice::from_ref(b));
         }
-        // Une suite par bloc retiré qui suit un bloc gardé (ou ouvre la liste).
-        self.removed_runs += (0..current.len())
-            .filter(|&i| !staying[i] && (i == 0 || staying[i - 1]))
-            .count();
         let mut walks = 0u128;
         for (j, b) in target.iter().enumerate().filter(|(j, _)| !kept[*j]) {
             walks = walks.saturating_add((j as u128).saturating_mul(SIBLING_PAIR_PS));
@@ -309,20 +329,24 @@ impl Tally {
             self.content(target);
             self.removing(|t| t.content(current));
             self.elements += 1;
-            let by_affix = current.kind == target.kind
-                && matches!(
-                    (&current.content, &target.content),
-                    (Content::Inline(a), Content::Inline(b)) if crate::diff::affix_fits(a, b)
-                );
-            if !by_affix {
-                self.removed_runs += 1;
+            // Par préfixe et suffixe : ses coupes d'un texte existant ; sinon le contenu est vidé
+            // ou remplacé, une fusion.
+            let cuts = match (&current.content, &target.content) {
+                (Content::Inline(a), Content::Inline(b)) if current.kind == target.kind => {
+                    crate::diff::affix_cuts(a, b)
+                }
+                _ => None,
+            };
+            match cuts {
+                Some(cuts) => self.cuts += cuts,
+                None => self.merges += 1,
             }
         }
         match (current.children.is_empty(), target.children.is_empty()) {
             (true, false) => self.siblings(&target.children),
             (false, true) => {
                 self.removing(|t| t.siblings(&current.children));
-                self.removed_runs += 1;
+                self.merges += blocks_in(&current.children);
             }
             (false, false) => self.diff_lists(&current.children, &target.children),
             (true, true) => {}

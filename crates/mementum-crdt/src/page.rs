@@ -143,7 +143,39 @@ impl PageDoc {
     /// contient tout cela : c'est le serveur qui écrit la racine, jamais deux
     /// clients chacun la leur.
     pub fn new_page() -> (PageDoc, Vec<u8>) {
-        let page = PageDoc::empty();
+        PageDoc::new_page_in(PageDoc::empty())
+    }
+
+    /// Pour les tests : une page neuve dont le client Yjs est `client`, pour des octets qui se
+    /// réécrivent à l'identique (relecture de S2 du lot 5, M5).
+    #[cfg(feature = "test-hooks")]
+    pub fn new_page_for(client: u64) -> (PageDoc, Vec<u8>) {
+        PageDoc::new_page_in(PageDoc::for_client(client))
+    }
+
+    /// Pour les tests : comme [`PageDoc::from_updates`], le client Yjs fixé à `client`.
+    #[cfg(feature = "test-hooks")]
+    pub fn from_updates_for<'a>(
+        client: u64,
+        updates: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<PageDoc, CrdtError> {
+        let page = PageDoc::for_client(client);
+        for update in updates {
+            page.apply_update(update)?;
+        }
+        Ok(page)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn for_client(client: u64) -> PageDoc {
+        PageDoc::with_options(Options {
+            client_id: ClientID::new(client),
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        })
+    }
+
+    fn new_page_in(page: PageDoc) -> (PageDoc, Vec<u8>) {
         let update = {
             let mut txn = page.doc.transact_mut();
             page.fill(&mut txn, &[empty_paragraph()]);

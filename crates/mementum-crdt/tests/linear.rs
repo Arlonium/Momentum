@@ -429,6 +429,28 @@ fn a_diff_write_grows_like_the_page() {
             *blocks = kept;
         })
     };
+    let head_removed = |n: usize| {
+        diff_case(&paragraphs_mmd(n), |blocks| {
+            blocks.drain(..n / 2);
+        })
+    };
+    let letter_in_the_middle = |n: usize| {
+        diff_case(&paragraphs_mmd(n), |blocks| {
+            for block in blocks.iter_mut() {
+                if let mementum_md::Content::Inline(content) = &mut block.content
+                    && let Some(mementum_md::Inline::Text { text, .. }) = content.first_mut()
+                {
+                    let chars: Vec<char> = text.chars().collect();
+                    let middle = chars.len() / 2;
+                    *text = chars
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| if i == middle { 'x' } else { *c })
+                        .collect();
+                }
+            }
+        })
+    };
     let nested = |n: usize| {
         let items: Vec<String> = (0..n)
             .map(|i| format!("- Élément {i}\n  - Enfant {i}\n    - Petit-enfant {i}"))
@@ -491,6 +513,14 @@ fn a_diff_write_grows_like_the_page() {
         Form {
             what: "dix paragraphes sur onze retirés",
             build: &ten_of_eleven,
+        },
+        Form {
+            what: "la première moitié retirée d'un tenant",
+            build: &head_removed,
+        },
+        Form {
+            what: "une lettre changée au milieu de chaque paragraphe",
+            build: &letter_in_the_middle,
         },
         Form {
             what: "un petit-enfant d'une liste imbriquée",

@@ -127,10 +127,15 @@ test("chaque frappe du vrai Yjs, et ce que deux onglets en lisent après l'écri
       const typist = docOf(TYPIST, base);
       const before = Y.encodeStateVector(typist);
       const content = blockAt(typist, place.path).get(0) as Y.XmlElement;
-      const target = content.get(place.child);
-      expect(target instanceof Y.XmlText, what).toBe(true);
-      // Sans marques données : Yjs prend celles de la place, comme une frappe dans l'éditeur.
-      (target as Y.XmlText).insert(place.at, "Z");
+      if (place.child >= content.length) {
+        // Un paragraphe vide n'a pas de texte : la frappe pose le sien, comme y-prosemirror.
+        content.insert(content.length, [new Y.XmlText("Z")]);
+      } else {
+        const target = content.get(place.child);
+        expect(target instanceof Y.XmlText, what).toBe(true);
+        // Sans marques données : Yjs prend celles de la place, comme une frappe dans l'éditeur.
+        (target as Y.XmlText).insert(place.at, "Z");
+      }
       const update = Y.encodeStateAsUpdate(typist, before);
       expect(Y.decodeUpdate(update).structs.length, what).toBeGreaterThan(0);
 

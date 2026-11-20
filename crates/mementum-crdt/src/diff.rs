@@ -90,17 +90,30 @@ impl PageDoc {
     /// Refusé sans rien écrire comme `write_blocks` (`Structure`, `TooDeep`). Après
     /// `HalfWritten`, la page est à recharger.
     pub fn write_diff(&self, blocks: &[Block]) -> Result<DiffWritten, CrdtError> {
-        let mut target = writable(&prepared(blocks))?;
         // Avant toute transaction d'écriture : `read_blocks` en ouvre une de lecture.
         let current = self.read_blocks();
-        keep_ids(&current, &mut target);
+        self.write_diff_over(&current, blocks)
+    }
+
+    /// Comme [`PageDoc::write_diff`], sur les blocs que [`PageDoc::read_blocks`] vient de rendre
+    /// (`current`), sans les relire : l'acteur, qui lit déjà la page pour une opération ou pour
+    /// `diff_cost`, ne la lit qu'une fois (relecture de S2). `current` doit être la lecture de la
+    /// page telle qu'elle est, sans écriture entre les deux : un bloc dont `current` dirait le
+    /// contenu inchangé ne serait pas écrit.
+    pub fn write_diff_over(
+        &self,
+        current: &[Block],
+        blocks: &[Block],
+    ) -> Result<DiffWritten, CrdtError> {
+        let mut target = writable(&prepared(blocks))?;
+        keep_ids(current, &mut target);
         let plan = {
             let txn = self.doc.transact();
-            plan_page(&txn, &self.fragment, &current, &target)
+            plan_page(&txn, &self.fragment, current, &target)
         };
         match plan {
             Some(plan) => self.write_plan(plan),
-            None => self.fall_back(&current, target),
+            None => self.fall_back(current, target),
         }
     }
 
@@ -893,14 +906,17 @@ fn middle(
 
 /// Le contenu en ligne `current`, tel que `write_inline` l'écrit, se récrirait-il en `target` par
 /// préfixe et suffixe communs ? Ce que [`affix`] déciderait sur la page, d'après les blocs seuls
-/// (pour `diff_cost`).
-pub(crate) fn affix_fits(current: &[Inline], target: &[Inline]) -> bool {
+/// (pour `diff_cost`) : `None` sinon ; s'il le fait, le nombre de coupes d'un texte existant (le
+/// début du milieu retiré et sa fin, ou la place d'une insertion, quand elles tombent à
+/// l'intérieur de leur texte et non à un de ses bords), de 0 à 2.
+pub(crate) fn affix_cuts(current: &[Inline], target: &[Inline]) -> Option<usize> {
     let mut names = Interner::default();
     let (mut old, mut new) = (Vec::new(), Vec::new());
     target_units(current, None, &mut names, &mut old);
     target_units(target, None, &mut names, &mut new);
-    // Un texte par suite de plages, un enfant par élément en ligne.
+    // Un texte par suite de plages, un enfant par élément en ligne ; et la longueur de chaque texte.
     let mut places = Vec::with_capacity(old.len());
+    let mut lengths: HashMap<usize, u32> = HashMap::new();
     let (mut child, mut offset, mut in_text) = (0usize, 0u32, false);
     for piece in &old {
         match piece {
@@ -908,6 +924,7 @@ pub(crate) fn affix_fits(current: &[Inline], target: &[Inline]) -> bool {
                 in_text = true;
                 places.push((child, offset));
                 offset += c.len_utf16() as u32;
+                lengths.insert(child, offset);
             }
             Piece::Element(_) => {
                 if in_text {
@@ -918,7 +935,10 @@ pub(crate) fn affix_fits(current: &[Inline], target: &[Inline]) -> bool {
             }
         }
     }
-    middle(&old, &places, &new).is_some()
+    let (child, at, removed, _) = middle(&old, &places, &new)?;
+    let len = lengths.get(&child).copied().unwrap_or(0);
+    let inside = |at: u32| at > 0 && at < len;
+    Some(usize::from(inside(at)) + usize::from(removed > 0 && inside(at + removed)))
 }
 
 /// Une écriture par préfixe et suffixe communs.
@@ -973,8 +993,10 @@ fn delete(txn: &mut TransactionMut, plan: &Plan) -> Result<(), CrdtError> {
         let mut bytes = vec![0];
         bytes.extend(plan.removed.encode_v1());
         let update = Update::decode_v1(&bytes).map_err(|e| CrdtError::Decode(e.to_string()))?;
+        // Une erreur de yrs ici peut laisser la transaction à moitié faite : la page est à
+        // recharger (relecture de S2, M3).
         txn.apply_update(update)
-            .map_err(|e| CrdtError::Decode(e.to_string()))?;
+            .map_err(|_| CrdtError::HalfWritten)?;
     }
     for (element, name) in &plan.unset {
         element.remove_attribute(txn, &name.as_str());
