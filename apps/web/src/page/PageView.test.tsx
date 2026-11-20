@@ -828,6 +828,34 @@ test("an_address_without_a_block_or_of_another_page_gives_the_editor_nothing_to_
   }
 });
 
+test("an_arrival_that_leaves_the_focus_on_the_body_gives_it_to_the_breadcrumb", async () => {
+  // Un rétrolien vers un bloc qui n'existe plus : le lien suivi est parti avec la page quittée, et
+  // l'éditeur dit la visée suivie sans rien focaliser. Le focus ne reste pas sur `body` : il va à
+  // la page, dans le fil d'Ariane (relecture de C3, m1).
+  history.replaceState(null, "", blockPath("x", "parti"));
+  const node = page("x", { level: "read" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  (document.activeElement as HTMLElement | null)?.blur();
+  expect(document.activeElement).toBe(document.body);
+  await reached();
+  const crumb = host.querySelector('.mm-breadcrumb [aria-current="page"]');
+  expect(crumb).not.toBeNull();
+  expect(document.activeElement).toBe(crumb);
+});
+
+test("an_arrival_that_put_the_focus_somewhere_leaves_it_there", async () => {
+  // Le bloc existe : l'éditeur a pris le focus (ou l'a laissé à qui écrit ailleurs), et lui seul.
+  history.replaceState(null, "", blockPath("x", "là"));
+  const node = page("x", { level: "edit" });
+  vi.mocked(getPage).mockResolvedValue(node);
+  await show(node);
+  const title = host.querySelector<HTMLElement>(".mm-title-input")!;
+  title.focus();
+  await reached();
+  expect(document.activeElement).toBe(title);
+});
+
 /** Deux pages de l'arbre publié, qui mènent à la page ouverte. */
 const SOURCE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";

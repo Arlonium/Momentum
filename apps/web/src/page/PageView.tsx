@@ -192,6 +192,8 @@ export function PageView({
   const frame = useRef<HTMLDivElement>(null);
   /** La page (bandeaux, titre, éditeur). */
   const article = useRef<HTMLElement>(null);
+  /** La barre du haut : le fil d'Ariane y est. */
+  const topbar = useRef<HTMLElement>(null);
   /** Le menu « … » n'est plus là quand sa fenêtre se ferme : le focus va au titre de la page. */
   const focusTitle = useCallback(
     () => article.current?.querySelector<HTMLElement>(".mm-title-input")?.focus(),
@@ -285,6 +287,22 @@ export function PageView({
   const aimed = useBlockTarget(id);
   const [followed, setFollowed] = useState<BlockTarget | null>(null);
   const goTo = aimed !== null && aimed !== followed ? aimed : null;
+  /**
+   * L'éditeur a suivi la visée, bloc trouvé ou non. Trouvé, il a pris le focus, ou l'a laissé à qui
+   * écrit ailleurs : un seul preneur. Introuvable (un rétrolien vers un bloc parti), rien ne l'a
+   * pris, et le lien suivi est parti avec la page quittée : le focus resté sur `body` va à la page,
+   * dans le fil d'Ariane, à défaut au titre.
+   */
+  const reached = useCallback(
+    (target: BlockTarget) => {
+      setFollowed(target);
+      if (document.activeElement !== document.body) return;
+      const crumb = topbar.current?.querySelector<HTMLElement>('.mm-breadcrumb [aria-current="page"]');
+      if (crumb) crumb.focus();
+      else focusTitle();
+    },
+    [focusTitle],
+  );
   // L'éditeur ne se rend pas de nouveau quand les fils, le panneau ou les pastilles changent.
   const editor = useMemo(
     () =>
@@ -296,15 +314,15 @@ export function PageView({
           mentions={mentions}
           files={files}
           goTo={goTo}
-          onReached={setFollowed}
+          onReached={reached}
         />
       ),
-    [session, fixture, menuComment, mentions, files, goTo],
+    [session, fixture, menuComment, mentions, files, goTo, reached],
   );
 
   return (
     <>
-      <header className="mm-topbar">
+      <header ref={topbar} className="mm-topbar">
         <Breadcrumb node={node} ancestors={ancestors} />
         {session && <SyncState session={session} />}
         {session && <Presence session={session} selfId={userId} />}

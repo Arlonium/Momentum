@@ -17,7 +17,15 @@
 // met le focus (`useArrival`). Sans bloc, rien ne le prendrait : le fil d'Ariane de la page ouverte
 // le prend (`arriveAt`, R292), et lui seul dans ce cas, pour que les deux ne se disputent rien.
 import type { Backlink } from "@mementum/protocol";
-import { useId, useRef, useState, useSyncExternalStore, type FocusEvent, type MouseEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type FocusEvent,
+  type MouseEvent,
+} from "react";
 import { blockPath } from "../router";
 import { publishedTitles, watchPages } from "../space/pageDirectory";
 import { arriveAt } from "./Breadcrumb";
@@ -62,15 +70,46 @@ export function Backlinks({ pages, error }: Props) {
   /** Ce que la dernière lecture et l'arbre donnent à montrer. */
   const seen = (pages ?? []).filter((link) => titles.has(link.pageId));
   const shown = held ?? seen;
-  const hold = () => setHeld((was) => was ?? shown);
+  /** Ce qui est montré au dernier rendu : ce que le gel garde. */
+  const latest = useRef(shown);
+  latest.current = shown;
+  const hold = () => setHeld((was) => was ?? latest.current);
   const release = () => {
     if (!inside.current.pointer && !inside.current.focus) setHeld(null);
   };
   const onBlur = (event: FocusEvent) => {
     if (event.relatedTarget instanceof Node && nav.current?.contains(event.relatedTarget)) return;
+    // La fenêtre du navigateur a perdu le focus : le lien reste l'élément actif du document, et
+    // reprendra le focus avec elle. Sa ligne ne part pas sous lui.
+    if (nav.current?.contains(document.activeElement)) return;
     inside.current.focus = false;
     release();
   };
+
+  // Le pointeur se suit sur le document, jamais par « enter » et « leave » de la section (R419) :
+  // une fenêtre qui disparaît sous le pointeur ne fait envoyer que `pointerover` à ce qui est
+  // dessous, et React n'en tire aucun « enter » ; le gel ne s'armerait pas.
+  useEffect(() => {
+    const over = (event: PointerEvent) => {
+      const within = event.target instanceof Node && nav.current?.contains(event.target) === true;
+      if (within === inside.current.pointer) return;
+      inside.current.pointer = within;
+      if (within) setHeld((was) => was ?? latest.current);
+      else if (!inside.current.focus) setHeld(null);
+    };
+    // Sans élément d'arrivée : le pointeur a quitté la fenêtre.
+    const out = (event: PointerEvent) => {
+      if (event.relatedTarget !== null || !inside.current.pointer) return;
+      inside.current.pointer = false;
+      if (!inside.current.focus) setHeld(null);
+    };
+    document.addEventListener("pointerover", over, true);
+    document.addEventListener("pointerout", out, true);
+    return () => {
+      document.removeEventListener("pointerover", over, true);
+      document.removeEventListener("pointerout", out, true);
+    };
+  }, []);
 
   if (shown.length === 0 && error === null) return null;
 
@@ -84,14 +123,6 @@ export function Backlinks({ pages, error }: Props) {
         hold();
       }}
       onBlur={onBlur}
-      onPointerEnter={() => {
-        inside.current.pointer = true;
-        hold();
-      }}
-      onPointerLeave={() => {
-        inside.current.pointer = false;
-        release();
-      }}
     >
       <h2 id={headingId} className="mm-backlinks-title">
         Pages qui mènent ici

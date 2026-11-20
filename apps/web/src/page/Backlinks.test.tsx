@@ -181,18 +181,19 @@ test("the_list_is_held_under_the_pointer_and_the_focus", async () => {
   await tree({ [A]: "Alpha", [B]: "Bêta", [C]: "Gamma" });
   await show([link(B), link(C)]);
   const nav = section()!;
-  const over = (type: "pointerover" | "pointerout") =>
+  // Le pointeur passe sur un élément : le navigateur lui envoie `pointerover` (suivi sur le document).
+  const over = (element: Element) =>
     act(async () => {
-      nav.dispatchEvent(new MouseEvent(type, { bubbles: true, relatedTarget: document.body }));
+      element.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: null }));
     });
 
   // Sous le pointeur : une relecture qui ajoute une page en tête et en retire une ne change rien.
-  await over("pointerover");
+  await over(nav);
   await show([link(A), link(C)]);
   expect(names()).toEqual(["Bêta", "Gamma"]);
   // Le focus y entre, le pointeur en sort : toujours tenue.
   await act(async () => rows()[1].focus());
-  await over("pointerout");
+  await over(document.body);
   await show([link(A)]);
   expect(names()).toEqual(["Bêta", "Gamma"]);
   expect(document.activeElement).toBe(rows()[1]);
@@ -202,6 +203,73 @@ test("the_list_is_held_under_the_pointer_and_the_focus", async () => {
   // Le focus en sort : la liste suit enfin ce qui a été lu.
   await act(async () => (document.activeElement as HTMLElement).blur());
   expect(names()).toEqual(["Alpha"]);
+});
+
+test("the_list_is_held_under_a_pointer_that_never_entered_it", async () => {
+  // Une fenêtre qui disparaît sous le pointeur (la recherche fermée, un menu) : le navigateur
+  // n'envoie que `pointerover` à ce qui est dessous, venu d'un élément de l'application, et React
+  // n'en tire aucun « enter » (R419). Le pointeur est suivi sur le document.
+  await tree({ [A]: "Alpha", [B]: "Bêta" });
+  await act(async () =>
+    root.render(
+      <>
+        <button type="button" id="ailleurs">
+          Ailleurs
+        </button>
+        <Backlinks pages={[link(B)]} error={null} />
+      </>,
+    ),
+  );
+  const elsewhere = host.querySelector("#ailleurs")!;
+  const rerender = (pages: Backlink[]) =>
+    act(async () =>
+      root.render(
+        <>
+          <button type="button" id="ailleurs">
+            Ailleurs
+          </button>
+          <Backlinks pages={pages} error={null} />
+        </>,
+      ),
+    );
+  await act(async () => {
+    rows()[0].dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: elsewhere }));
+  });
+  await rerender([link(A), link(B)]);
+  expect(names()).toEqual(["Bêta"]);
+  // Le pointeur passe ailleurs dans l'application : la liste suit.
+  await act(async () => {
+    elsewhere.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: rows()[0] }));
+  });
+  expect(names()).toEqual(["Alpha", "Bêta"]);
+  // Il y revient, puis quitte la fenêtre du navigateur (aucun élément d'arrivée) : relâchée aussi.
+  await act(async () => {
+    rows()[0].dispatchEvent(new MouseEvent("pointerover", { bubbles: true, relatedTarget: elsewhere }));
+  });
+  await rerender([link(A)]);
+  expect(names()).toEqual(["Alpha", "Bêta"]);
+  await act(async () => {
+    rows()[0].dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: null }));
+  });
+  expect(names()).toEqual(["Alpha"]);
+});
+
+test("the_list_stays_held_when_the_window_loses_the_focus", async () => {
+  // La fenêtre du navigateur passe à l'arrière-plan : le lien reçoit `blur` sans que rien d'autre
+  // prenne le focus, et reste l'élément actif du document. Sa ligne ne part pas sous lui.
+  await tree({ [A]: "Alpha", [B]: "Bêta" });
+  await show([link(A), link(B)]);
+  await act(async () => rows()[0].focus());
+  await act(async () => {
+    rows()[0].dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
+  });
+  expect(document.activeElement).toBe(rows()[0]);
+  await show([link(B)]);
+  expect(names()).toEqual(["Alpha", "Bêta"]);
+  expect(document.activeElement).toBe(rows()[0]);
+  // Le focus part pour de bon : la liste suit.
+  await act(async () => (document.activeElement as HTMLElement).blur());
+  expect(names()).toEqual(["Bêta"]);
 });
 
 test("a_list_emptied_while_held_stays_until_released", async () => {
