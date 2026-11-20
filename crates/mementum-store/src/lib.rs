@@ -26,6 +26,9 @@
 //! - `duplicate.rs` : la copie d'un sous-arbre de pages, en une transaction.
 //! - `docs.rs` : le journal des mises à jour Yjs et les instantanés, qui ne reculent jamais.
 //! - `versions.rs` : les versions d'une page (état Yjs complet et auteurs), cent par page.
+//! - `search.rs` : l'index de recherche, côté base (lot 4) : la projection des pages, écrite par
+//!   différence, les rétroliens, ce que l'index plein texte n'a pas encore validé, et les
+//!   marqueurs que posent les écritures d'ici qui le changent ; une voie à lui dans la file.
 //! - `position.rs` : l'index fractionnaire.
 //!
 //! Les horodatages sont en millisecondes Unix. Les identifiants sont des UUIDv7 stockés en
@@ -67,6 +70,7 @@ mod members;
 mod nodes;
 mod position;
 mod queue;
+mod search;
 mod signup;
 mod spaces;
 mod users;
@@ -101,6 +105,10 @@ pub use members::{Expected, Member};
 pub use nodes::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, Updated};
 pub use position::position_between;
 pub use queue::{attribute_writes_to, writer, writes_by};
+pub use search::{
+    Backlink, Feed, FeedLine, FeedStart, FeedTokens, IndexRow, Indexed, IndexedBlock,
+    MAX_INDEX_TX_BYTES, StalePages,
+};
 pub use signup::SignedUp;
 pub use spaces::Space;
 pub use users::{NewSession, NewUser, User};

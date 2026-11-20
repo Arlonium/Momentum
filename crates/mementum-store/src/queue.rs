@@ -71,6 +71,12 @@ pub(crate) enum Lane {
     /// l'une derrière l'autre devant la frappe d'une page, qui les attendrait toutes. Ici, la
     /// file sert une écriture de chaque autre voie entre deux copies.
     Copies,
+    /// L'index de recherche (Ruling R908) : toutes les écritures de l'indexeur (la projection
+    /// d'une page, l'intention, la clôture, une reconstruction), dans une même voie, quel que soit
+    /// le compte de la tâche, sans priorité, comme les copies. Chacune est une transaction bornée
+    /// (`MAX_INDEX_TX_BYTES`) : entre deux, la file sert une écriture de chaque autre voie qui
+    /// attend, si bien qu'une frappe n'attend jamais plus d'une transaction de l'index.
+    Index,
     /// Les écritures dont personne n'est nommé : inscription, ménage, commandes, tests.
     Common,
 }

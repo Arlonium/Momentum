@@ -638,3 +638,79 @@ async fn page_copies_share_one_lane_whoever_asks() {
         "{order:?}"
     );
 }
+
+/// Les écritures de l'index de recherche ont une voie à elles (Ruling R908), sans priorité, quel
+/// que soit le compte de la tâche qui les mène : entre deux transactions de l'index, la file sert
+/// une écriture de chaque autre voie qui attend. Trois indexations (chacune au nom d'un autre
+/// compte), puis une écriture de la voie commune, puis trois d'Olga : l'ordre est index, commune,
+/// Olga, index, Olga, index, Olga. Dans la voie de chaque compte, les trois indexations
+/// passeraient d'affilée ; dans la voie commune, l'écriture commune les attendrait toutes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn index_writes_share_one_lane() {
+    use mementum_store::IndexedBlock;
+
+    const PAGES: usize = 3;
+    let f = fresh().await;
+    let olga = Uuid::now_v7();
+    let mut pages = Vec::new();
+    for i in 0..PAGES {
+        let node = page(&f.space, None, None, &format!("P{i}"));
+        pages.push(f.store.create_node(node).await.unwrap().id);
+    }
+    exec_sql(
+        &f.db,
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_index AFTER INSERT ON blocks_index \
+         BEGIN INSERT INTO witness (what) VALUES ('index'); END; \
+         CREATE TRIGGER witness_space AFTER INSERT ON spaces \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.name); END;",
+    )
+    .await;
+    let held = f.store.hold_writes().await;
+    let mut writes = Vec::new();
+    for (i, node) in pages.iter().copied().enumerate() {
+        let store = f.store.clone();
+        writes.push(tokio::spawn(writes_by(Some(Uuid::now_v7()), async move {
+            let links: [Uuid; 0] = [];
+            let row = IndexedBlock {
+                block_id: "a",
+                kind: "paragraph",
+                text: "texte",
+                hash: &[1],
+                links: &links,
+            };
+            store.index_page(node, 1, &[row], false).await.map(|_| ())
+        })));
+        queued(&f.store, i + 1).await;
+    }
+    writes.push(tokio::spawn({
+        let store = f.store.clone();
+        writes_by(None, async move {
+            store.create_space("commune", None).await.map(|_| ())
+        })
+    }));
+    queued(&f.store, PAGES + 1).await;
+    for i in 0..3 {
+        writes.push(tokio::spawn({
+            let store = f.store.clone();
+            writes_by(Some(olga), async move {
+                store.create_space("olga", None).await.map(|_| ())
+            })
+        }));
+        queued(&f.store, PAGES + i + 2).await;
+    }
+    drop(held);
+    for write in writes {
+        write.await.unwrap().unwrap();
+    }
+    let order: Vec<String> = texts(&f.db, "SELECT what FROM witness ORDER BY n")
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(
+        order,
+        ["index", "commune", "olga", "index", "olga", "index", "olga"],
+        "{order:?}"
+    );
+}

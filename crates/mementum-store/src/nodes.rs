@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::acl::{Chain, read_chain, write_grant};
 use crate::members::role_of;
+use crate::search::{mark_born, mark_deleted, mark_renamed};
 use crate::spaces::{bump_lsn, bump_rev};
 use crate::{Store, StoreError, now_ms, parse_uuid, position_between, unreadable};
 
@@ -518,6 +519,11 @@ impl Store {
         for grant in &n.grants {
             write_grant(&mut tx, &id_s, *grant).await?;
         }
+        // Ruling R918 : une page naît jamais indexée, document ou non (son titre est cherché,
+        // R940) ; un dossier ne l'est pas.
+        if n.kind == NodeKind::Page {
+            mark_born(&mut tx, &id_s).await?;
+        }
         bump_rev(&mut tx, &space).await?;
         tx.commit().await?;
         Ok(Node {
@@ -765,6 +771,12 @@ impl Store {
         .await
         .map_err(StoreError::from_fk)?;
         let node = node_from_row(&row)?;
+        // Ruling R918 : un titre de page changé met la page entière dans l'outbox, dans cette
+        // transaction (le titre est sur chacune de ses entrées de l'index plein texte). Un titre
+        // récrit à l'identique, un déplacement, un dossier : rien.
+        if node.kind == NodeKind::Page && node.title != before.title {
+            mark_renamed(&mut tx, &id_s).await?;
+        }
         if changes_parent {
             // Un nœud qui arrive à la racine change de parent : sa place y est toujours neuve.
             if let Some(arrival) = &arrival {
@@ -843,10 +855,11 @@ impl Store {
 
     /// Supprime définitivement un nœud et tout son sous-arbre, avec leurs documents, leurs
     /// accès, leurs invitations, leurs fils de commentaires, leurs versions, leurs
-    /// déplacements de blocs, leurs attaches et les favoris qui les nomment, et rend les ids
-    /// supprimés (le nœud compris). Les contenus attachés restent (`files`) : c'est au ménage
-    /// ([`Store::forget_unattached`], que mène le dépôt du serveur) de retirer ceux qu'aucune page
-    /// n'attache plus (Ruling R245).
+    /// déplacements de blocs, leurs attaches, les favoris qui les nomment et leurs lignes de
+    /// l'index de recherche, et rend les ids supprimés (le nœud compris). Chaque page supprimée
+    /// laisse sa ligne d'outbox de page entière (Ruling R918). Les contenus attachés restent
+    /// (`files`) : c'est au ménage ([`Store::forget_unattached`], que mène le dépôt du serveur) de
+    /// retirer ceux qu'aucune page n'attache plus (Ruling R245).
     /// `NotTrashed` (sans rien écrire) si le nœud n'est pas à la corbeille, lui-même ou par un
     /// ancêtre.
     pub async fn delete_node(&self, id: Uuid) -> Result<Vec<Uuid>, StoreError> {
@@ -868,16 +881,23 @@ impl Store {
         );
         // Les documents d'abord (`nodes` est leur table mère) ; `acl`, `invitations`, les fils de
         // commentaires (avec leurs messages et leurs réactions), les versions, les
-        // déplacements de blocs (migration `0003`), les attaches et les favoris (`0004`)
-        // suivent les nœuds (`ON DELETE CASCADE`). Les nœuds partent en une instruction : la
-        // clé `parent_id` n'est vérifiée qu'à la fin, quand parents et enfants sont tous partis.
+        // déplacements de blocs (migration `0003`), les attaches et les favoris (`0004`),
+        // `blocks_index`, `page_links` et `search_state` (`0005`) suivent les nœuds
+        // (`ON DELETE CASCADE`). Les nœuds partent en une instruction : la clé `parent_id` n'est
+        // vérifiée qu'à la fin, quand parents et enfants sont tous partis.
         for sql in [
             "DELETE FROM doc_updates WHERE node_id IN (SELECT value FROM json_each(?))",
             "DELETE FROM doc_snapshots WHERE node_id IN (SELECT value FROM json_each(?))",
-            "DELETE FROM nodes WHERE id IN (SELECT value FROM json_each(?))",
         ] {
             sqlx::query(sql).bind(&list).execute(&mut **tx).await?;
         }
+        // Ruling R918 : avant les nœuds, dont il lit le genre. L'outbox n'a pas de clé étrangère :
+        // la ligne de chaque page lui survit, pour que ses entrées quittent l'index plein texte.
+        mark_deleted(&mut tx, &list).await?;
+        sqlx::query("DELETE FROM nodes WHERE id IN (SELECT value FROM json_each(?))")
+            .bind(&list)
+            .execute(&mut **tx)
+            .await?;
         bump_rev(&mut tx, &node.space_id.to_string()).await?;
         tx.commit().await?;
         Ok(ids)

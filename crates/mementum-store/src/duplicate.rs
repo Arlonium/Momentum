@@ -21,6 +21,7 @@ use crate::files::insert_attachment;
 use crate::members::role_of;
 use crate::nodes::{Node, NodeKind, Sibling, new_slot};
 use crate::queue::Lane;
+use crate::search::mark_born;
 use crate::spaces::bump_rev;
 use crate::{Store, StoreError, position_between};
 
@@ -232,6 +233,8 @@ impl Store {
             .bind(now)
             .execute(&mut **tx)
             .await?;
+            // Ruling R918 : chaque page de la copie naît jamais indexée, dans cette transaction.
+            mark_born(&mut tx, &id).await?;
             if i == 0 {
                 for grant in &copy.grants {
                     write_grant(&mut tx, &id, *grant).await?;

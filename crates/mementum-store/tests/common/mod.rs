@@ -25,10 +25,19 @@ pub const LOT3A: &[&str] = &[
     "0003_collaboration.sql",
 ];
 
+/// Les migrations d'une base du lot 3 (partie B comprise : `0004` est figée depuis le 2026-11-20,
+/// Ruling R936 ; le lot 4 a la sienne, `0005`).
+pub const LOT3: &[&str] = &[
+    "0001_init.sql",
+    "0002_spaces_accounts.sql",
+    "0003_collaboration.sql",
+    "0004_files_favorites.sql",
+];
+
 /// Une base telle que le code d'un lot plus ancien la produit : les options de connexion de
 /// `Store::open`, et les seules migrations `files` du store, lancées par sqlx (qui écrit donc
 /// `_sqlx_migrations`, sommes de contrôle comprises). Avec [`LOT2`], une base du lot 2 ; avec
-/// [`LOT3A`], une base de la partie A du lot 3.
+/// [`LOT3A`], une base de la partie A du lot 3 ; avec [`LOT3`], une base du lot 3.
 pub async fn database_with(db: &Path, files: &[&str]) -> SqlitePool {
     let migrations = tempfile::tempdir().unwrap();
     for file in files {

@@ -1,6 +1,7 @@
-//! Migrations `0002` à `0004` : une base du lot 1 garde ses pages, une base du lot 2 gagne les
+//! Migrations `0002` à `0005` : une base du lot 1 garde ses pages, une base du lot 2 gagne les
 //! tables de la collaboration sans rien perdre, une base de la partie A du lot 3 gagne celles des
-//! fichiers et des favoris sans rien perdre, une base neuve n'a pas d'espace.
+//! fichiers et des favoris sans rien perdre, une base du lot 3 gagne celles de l'index de
+//! recherche, vides, sans rien perdre, une base neuve n'a pas d'espace.
 
 mod common;
 
@@ -8,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{LOT2, LOT3A, database_with, int, side_pool, texts};
+use common::{LOT2, LOT3, LOT3A, database_with, int, side_pool, texts};
 use mementum_acl::{Grant, Level, Subject};
 use mementum_store::{NodeKind, Store, StoreError, backup_path};
 use sqlx::migrate::Migrator;
@@ -95,10 +96,11 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 }
 
 /// Les tables d'une base à jour, par nom.
-const ALL_TABLES: [&str; 18] = [
+const ALL_TABLES: [&str; 22] = [
     "_sqlx_migrations",
     "acl",
     "attachments",
+    "blocks_index",
     "comment_reactions",
     "comment_threads",
     "comments",
@@ -111,6 +113,9 @@ const ALL_TABLES: [&str; 18] = [
     "invitations",
     "members",
     "nodes",
+    "page_links",
+    "search_outbox",
+    "search_state",
     "sessions",
     "spaces",
     "users",
@@ -118,6 +123,14 @@ const ALL_TABLES: [&str; 18] = [
 
 /// Les tables des fichiers et des favoris, que la migration `0004` crée (Ruling R243).
 const FILES_AND_FAVORITES_TABLES: [&str; 3] = ["files", "attachments", "favorites"];
+
+/// Les tables de l'index de recherche, que la migration `0005` crée vides (lot 4, Task S1).
+const SEARCH_TABLES: [&str; 4] = [
+    "blocks_index",
+    "page_links",
+    "search_state",
+    "search_outbox",
+];
 
 /// Les tables de la collaboration, que la migration `0003` crée et que les tâches suivantes du
 /// lot remplissent.
@@ -127,6 +140,18 @@ const COLLABORATION_TABLES: [&str; 4] = [
     "comment_reactions",
     "doc_versions",
 ];
+
+/// Les versions des migrations que la base porte, notées réussies, dans l'ordre.
+async fn applied(db: &Path) -> Vec<String> {
+    texts(
+        db,
+        "SELECT CAST(version AS TEXT) FROM _sqlx_migrations WHERE success ORDER BY version",
+    )
+    .await
+    .into_iter()
+    .flatten()
+    .collect()
+}
 
 /// Les noms des tables de la base, hors tables internes de SQLite.
 async fn table_names(db: &Path) -> Vec<String> {
@@ -250,21 +275,9 @@ async fn migration_keeps_lot1_pages() {
     pool.close().await;
 
     // Le code d'aujourd'hui ouvre cette base : `0001` est reconnue (même somme de contrôle),
-    // `0002` à `0004` sont appliquées.
+    // `0002` à `0005` sont appliquées.
     let store = Store::open(&db).await.unwrap();
-    assert_eq!(
-        texts(
-            &db,
-            "SELECT CAST(version AS TEXT) FROM _sqlx_migrations WHERE success ORDER BY version"
-        )
-        .await,
-        [
-            Some("1".to_string()),
-            Some("2".to_string()),
-            Some("3".to_string()),
-            Some("4".to_string())
-        ]
-    );
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5"]);
 
     // Le coffre est devenu un espace de même id, sans membre.
     assert_eq!(int(&db, "SELECT COUNT(*) FROM spaces").await, 1);
@@ -363,8 +376,8 @@ async fn migration_keeps_lot1_pages() {
     .collect();
     assert_eq!(tables, ALL_TABLES);
     // Les index : celui de l'arbre, ceux des clés que suit la suppression d'un nœud, ceux des
-    // tables de la collaboration, et ceux des fichiers et des favoris ; l'index de passage de la
-    // migration `0002` est parti avec l'ancienne table.
+    // tables de la collaboration, ceux des fichiers et des favoris, et ceux de l'index de
+    // recherche ; l'index de passage de la migration `0002` est parti avec l'ancienne table.
     let indexes: Vec<String> = texts(
         &db,
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name",
@@ -384,7 +397,10 @@ async fn migration_keeps_lot1_pages() {
             "favorites_by_node",
             "invitations_node_key",
             "nodes_by_parent",
-            "nodes_parent_key"
+            "nodes_parent_key",
+            "page_links_by_target",
+            "search_outbox_taken",
+            "search_state_never"
         ]
     );
     for (index, columns) in [
@@ -400,6 +416,12 @@ async fn migration_keeps_lot1_pages() {
         ("invitations_node_key", &["node_id"]),
         ("nodes_by_parent", &["space_id", "parent_id", "position"]),
         ("nodes_parent_key", &["parent_id"]),
+        (
+            "page_links_by_target",
+            &["target_id", "node_id", "block_id"],
+        ),
+        ("search_outbox_taken", &["token"]),
+        ("search_state_never", &["node_id"]),
     ] {
         let found: Vec<String> = texts(
             &db,
@@ -706,10 +728,12 @@ async fn lot2_data(pool: &SqlitePool) -> (Uuid, Uuid) {
     (team, own)
 }
 
-/// Les migrations `0003` et `0004` sur une base du lot 2 : tout ce qui y était reste à
+/// Les migrations `0003` à `0005` sur une base du lot 2 : tout ce qui y était reste à
 /// l'identique, valeur pour valeur ; chaque espace gagne sa version, à 0 ; les cinq tables de la
-/// collaboration et les trois des fichiers et des favoris existent, vides, et les clés étrangères
-/// des premières visent ce qu'il faut (celles des secondes : `lot3a_database_gains_files_and_favorites`).
+/// collaboration, les trois des fichiers et des favoris et les quatre de l'index de recherche
+/// existent, vides, et les clés étrangères des premières visent ce qu'il faut (celles des
+/// secondes : `lot3a_database_gains_files_and_favorites` ; des dernières :
+/// `a_lot_3_database_migrates_and_starts_with_nothing_indexed`).
 #[tokio::test]
 async fn lot2_database_gains_the_collaboration_tables() {
     let dir = tempfile::tempdir().unwrap();
@@ -728,22 +752,10 @@ async fn lot2_database_gains_the_collaboration_tables() {
     }
 
     let store = Store::open(&db).await.unwrap();
-    assert_eq!(
-        texts(
-            &db,
-            "SELECT CAST(version AS TEXT) FROM _sqlx_migrations WHERE success ORDER BY version"
-        )
-        .await,
-        [
-            Some("1".to_string()),
-            Some("2".to_string()),
-            Some("3".to_string()),
-            Some("4".to_string())
-        ]
-    );
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5"]);
 
     // Rien n'a changé dans ce qui était là, `_sqlx_migrations` mise à part (elle gagne les lignes
-    // de `0003` et `0004`) ; `spaces` gagne une colonne, et ses autres colonnes n'ont pas bougé.
+    // de `0003` à `0005`) ; `spaces` gagne une colonne, et ses autres colonnes n'ont pas bougé.
     for (table, columns_before, rows_before) in &before {
         if table == "_sqlx_migrations" {
             continue;
@@ -776,12 +788,13 @@ async fn lot2_database_gains_the_collaboration_tables() {
     }
     assert_eq!(store.space_lsn(Uuid::now_v7()).await.unwrap(), None);
 
-    // Les cinq tables de la collaboration et les trois des fichiers et des favoris, vides, et
-    // rien d'autre de neuf.
+    // Les cinq tables de la collaboration, les trois des fichiers et des favoris et les quatre de
+    // l'index de recherche, vides, et rien d'autre de neuf.
     assert_eq!(table_names(&db).await, ALL_TABLES);
     for table in COLLABORATION_TABLES
         .into_iter()
         .chain(FILES_AND_FAVORITES_TABLES)
+        .chain(SEARCH_TABLES)
     {
         assert!(!lot2_tables.iter().any(|t| t == table), "{table}");
         assert_eq!(
@@ -812,7 +825,7 @@ async fn lot2_database_gains_the_collaboration_tables() {
     // Une seconde ouverture ne migre plus rien.
     let store = Store::open(&db).await.unwrap();
     assert_eq!(store.backup(), None);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 4);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 5);
     store.close().await;
 }
 
@@ -864,11 +877,11 @@ async fn lot3a_data(pool: &SqlitePool, space: Uuid) {
     .await;
 }
 
-/// La migration `0004` sur une base de la partie A du lot 3 (Ruling R243) : tout ce qui y était
-/// reste à l'identique, valeur pour valeur, fils de commentaires et versions compris ; les trois
-/// tables des fichiers et des favoris existent, vides, et leurs clés étrangères visent ce qu'il
-/// faut ; la copie d'avant migration porte le nom de `0004` ; une seconde ouverture ne migre plus
-/// rien.
+/// Les migrations `0004` et `0005` sur une base de la partie A du lot 3 (Ruling R243) : tout ce qui
+/// y était reste à l'identique, valeur pour valeur, fils de commentaires et versions compris ; les
+/// trois tables des fichiers et des favoris existent, vides, et leurs clés étrangères visent ce
+/// qu'il faut ; la copie d'avant migration porte le nom de `0004`, la première en attente ; une
+/// seconde ouverture ne migre plus rien.
 #[tokio::test]
 async fn lot3a_database_gains_files_and_favorites() {
     let dir = tempfile::tempdir().unwrap();
@@ -901,27 +914,15 @@ async fn lot3a_database_gains_files_and_favorites() {
     }
 
     let store = Store::open(&db).await.unwrap();
-    assert_eq!(
-        texts(
-            &db,
-            "SELECT CAST(version AS TEXT) FROM _sqlx_migrations WHERE success ORDER BY version"
-        )
-        .await,
-        [
-            Some("1".to_string()),
-            Some("2".to_string()),
-            Some("3".to_string()),
-            Some("4".to_string())
-        ]
-    );
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5"]);
     // La copie d'avant migration : la base de la partie A, sous le nom de `0004`.
     let backup = store.backup().expect("une copie avant la migration");
     assert_eq!(backup.path, backup_path(&db, 4));
     assert_eq!(backup.path, dir.path().join("mementum.db.avant-0004.bak"));
     assert!(backup.path.is_file());
 
-    // Rien n'a changé dans ce qui était là, `_sqlx_migrations` mise à part (elle gagne la ligne
-    // de `0004`) : ni une colonne, ni une valeur.
+    // Rien n'a changé dans ce qui était là, `_sqlx_migrations` mise à part (elle gagne les lignes
+    // de `0004` et `0005`) : ni une colonne, ni une valeur.
     for (table, columns_before, rows_before) in &before {
         if table == "_sqlx_migrations" {
             continue;
@@ -936,9 +937,10 @@ async fn lot3a_database_gains_files_and_favorites() {
     assert_eq!(store.space_lsn(team).await.unwrap(), Some(12));
     assert_eq!(store.space_rev(team).await.unwrap(), Some(7));
 
-    // Les trois tables neuves, vides, et rien d'autre de neuf.
+    // Les trois tables neuves, et les quatre de l'index de recherche, vides, et rien d'autre de
+    // neuf.
     assert_eq!(table_names(&db).await, ALL_TABLES);
-    for table in FILES_AND_FAVORITES_TABLES {
+    for table in FILES_AND_FAVORITES_TABLES.into_iter().chain(SEARCH_TABLES) {
         assert!(!lot3a_tables.iter().any(|t| t == table), "{table}");
         assert_eq!(
             int(&db, &format!("SELECT COUNT(*) FROM {table}")).await,
@@ -987,7 +989,120 @@ async fn lot3a_database_gains_files_and_favorites() {
     // Une seconde ouverture ne migre plus rien.
     let store = Store::open(&db).await.unwrap();
     assert_eq!(store.backup(), None);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 4);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 5);
+    store.close().await;
+}
+
+/// La migration `0005` sur une base du lot 3 (lot 4, Task S1) : tout ce qui y était reste à
+/// l'identique, valeur pour valeur ; les quatre tables de l'index de recherche existent, vides
+/// (la migration ne remplit rien), et leurs clés étrangères visent ce qu'il faut ; rien n'est
+/// indexé, aucune intention n'est posée, et le rattrapage du démarrage trouve toutes les pages de
+/// l'instance, corbeille comprise, et elles seules (pas un dossier) ; la copie d'avant migration
+/// porte le nom de `0005` ; une seconde ouverture ne migre plus rien.
+#[tokio::test]
+async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mementum.db");
+    let pool = database_with(&db, LOT3).await;
+    let (team, own) = lot2_data(&pool).await;
+    lot3a_data(&pool, team).await;
+    exec(
+        &pool,
+        "INSERT INTO favorites (user_id, node_id, created_at) \
+         SELECT u.id, n.id, 4300 FROM users u, nodes n \
+         WHERE u.email = 'olga@exemple.test' AND n.title = 'Accueil'",
+        &[],
+    )
+    .await;
+    pool.close().await;
+
+    let lot3_tables = table_names(&db).await;
+    let mut before = Vec::new();
+    for table in &lot3_tables {
+        let columns = columns(&db, table).await;
+        let rows = rows(&db, table, &columns).await;
+        before.push((table.clone(), columns, rows));
+    }
+
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5"]);
+    let backup = store.backup().expect("une copie avant la migration");
+    assert_eq!(backup.path, dir.path().join("mementum.db.avant-0005.bak"));
+    assert!(backup.path.is_file());
+
+    for (table, columns_before, rows_before) in &before {
+        if table == "_sqlx_migrations" {
+            continue;
+        }
+        assert_eq!(&columns(&db, table).await, columns_before, "{table}");
+        assert_eq!(
+            &rows(&db, table, columns_before).await,
+            rows_before,
+            "{table}"
+        );
+    }
+    assert!(
+        before
+            .iter()
+            .any(|(table, _, rows)| table == "favorites" && rows.len() == 1)
+    );
+
+    assert_eq!(table_names(&db).await, ALL_TABLES);
+    for table in SEARCH_TABLES {
+        assert!(!lot3_tables.iter().any(|t| t == table), "{table}");
+        assert_eq!(
+            int(&db, &format!("SELECT COUNT(*) FROM {table}")).await,
+            0,
+            "{table}"
+        );
+    }
+    for table in ["blocks_index", "page_links", "search_state"] {
+        assert_eq!(foreign_tables(&db, table).await, set(&["nodes"]), "{table}");
+    }
+    assert_eq!(foreign_tables(&db, "search_outbox").await, set(&[]));
+    for faulty in [
+        "INSERT INTO blocks_index (node_id, block_id, type, text, hash) \
+         VALUES ('nœud-inconnu', 'b', 'paragraph', 'x', x'00')",
+        "INSERT INTO page_links (node_id, block_id, target_id) \
+         VALUES ('nœud-inconnu', 'b', 'cible')",
+        "INSERT INTO search_state (node_id, indexed_seq) VALUES ('nœud-inconnu', -1)",
+    ] {
+        assert!(refused_by_foreign_key(&db, faulty).await, "{faulty}");
+    }
+
+    // Rien d'indexé, aucune intention ; le rattrapage trouve les pages, pas le dossier.
+    assert!(store.never_indexed(100).await.unwrap().is_empty());
+    let tokens = store.feed_tokens().await.unwrap();
+    assert_eq!((tokens.committed, tokens.intent), (None, None));
+    let pages: Vec<Uuid> = texts(&db, "SELECT id FROM nodes WHERE kind = 'page' ORDER BY id")
+        .await
+        .into_iter()
+        .map(|id| id.unwrap().parse().unwrap())
+        .collect();
+    assert_eq!(
+        pages.len(),
+        3,
+        "deux pages de l'équipe, dont une jetée, et une à soi"
+    );
+    let stale = store.stale_pages(None, 100).await.unwrap();
+    assert_eq!(stale.pages, pages);
+    assert_eq!(stale.next, None);
+    // Une page sans ligne n'a jamais été indexée : l'espace est en retard tant qu'elle l'est.
+    let own_pages: Vec<Uuid> = texts(
+        &db,
+        &format!("SELECT id FROM nodes WHERE space_id = '{own}' AND kind = 'page'"),
+    )
+    .await
+    .into_iter()
+    .map(|id| id.unwrap().parse().unwrap())
+    .collect();
+    assert_eq!(own_pages.len(), 1);
+    assert_eq!(store.behind_in_space(own, 100).await.unwrap(), own_pages);
+    store.close().await;
+
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(store.backup(), None);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 5);
     store.close().await;
 }
 
