@@ -1175,7 +1175,20 @@ impl Store {
         sources: &[Uuid],
         chars: usize,
     ) -> Result<Vec<Backlink>, StoreError> {
+        #[cfg(feature = "test-hooks")]
+        self.excerpts_asked
+            .fetch_add(sources.len(), std::sync::atomic::Ordering::SeqCst);
         read_excerpts(&self.pool, target_id, space_id, sources, chars).await
+    }
+
+    /// Le nombre de sources dont un extrait a été demandé à ce store depuis son ouverture
+    /// ([`Store::backlink_excerpts`], tous appels confondus). Pour les tests seulement (fonction
+    /// `test-hooks`, Ruling R1201) : une route ne demande l'extrait que des sources qu'elle a
+    /// jugées par les droits.
+    #[cfg(feature = "test-hooks")]
+    pub fn backlink_excerpts_asked(&self) -> usize {
+        self.excerpts_asked
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Les deux lectures d'un rétrolien ([`Store::backlink_sources`] depuis le début, au plus

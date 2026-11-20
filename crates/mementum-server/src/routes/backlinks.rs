@@ -481,6 +481,34 @@ mod tests {
         bench.finish().await;
     }
 
+    /// Ruling R1201 (défaut D2 de la passe de fin) : l'extrait n'est demandé à la base que pour
+    /// les sources que les droits ont gardées. Le store compte les sources dont on lui demande un
+    /// extrait : trois pour trois sources vues, et trois encore quand mille sources que Mona ne
+    /// voit pas mènent aussi à la cible. Lu avant le tri, l'extrait de chacune serait un texte
+    /// d'une page non vue ramené de la base, et la durée de la lecture redirait leur nombre.
+    #[tokio::test]
+    async fn excerpts_are_asked_only_for_the_sources_the_rights_keep() {
+        let bench = Bench::new().await;
+        let seen = bench.pages(3, true).await;
+        bench.link_all(&seen).await;
+        let asked = || bench.state.store.backlink_excerpts_asked();
+        let before = asked();
+        assert_eq!(bench.sources(BOUNDS).await, seen);
+        let alone = asked() - before;
+        assert_eq!(alone, 3, "témoin : le compte voit les extraits demandés");
+
+        let unseen = bench.pages(1_000, false).await;
+        bench.link_all(&unseen).await;
+        let before = asked();
+        assert_eq!(bench.sources(BOUNDS).await, seen);
+        assert_eq!(
+            asked() - before,
+            alone,
+            "des extraits demandés pour des sources non vues"
+        );
+        bench.finish().await;
+    }
+
     /// Deux cents sources vues au plus, les premières par identifiant. Témoin : la deux cent
     /// unième, que Mona voit, n'y est pas.
     #[tokio::test]

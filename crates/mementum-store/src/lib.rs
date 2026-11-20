@@ -275,6 +275,10 @@ pub struct Store {
     /// Les écritures de l'index qui attendent ce verrou, pour les tests (`Store::index_waits`).
     #[cfg(feature = "test-hooks")]
     index_waits: Arc<std::sync::atomic::AtomicUsize>,
+    /// Les sources dont un extrait a été demandé, pour les tests
+    /// (`Store::backlink_excerpts_asked`).
+    #[cfg(feature = "test-hooks")]
+    excerpts_asked: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Store {
@@ -344,6 +348,8 @@ impl Store {
             index_lock: Arc::default(),
             #[cfg(feature = "test-hooks")]
             index_waits: Arc::default(),
+            #[cfg(feature = "test-hooks")]
+            excerpts_asked: Arc::default(),
         })
     }
 
